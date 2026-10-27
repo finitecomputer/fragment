@@ -30,7 +30,7 @@ const FILES_MAX = 8;
 const FILE_MAX_BYTES = 25 * 1024 * 1024;
 // A connection dropped on a file's upload is tried again, as `fragment.blob` does.
 const UPLOAD_TRIES = 3;
-// The input grows with a long prompt to this, then scrolls.
+// The input grows with a long prompt to this, then scrolls; one line at rest.
 const INPUT_MAX_PX = 200;
 // The search API's hint: eight words, 256 bytes at most.
 const HINT_WORDS = 8;
@@ -314,7 +314,8 @@ export function createLauncher(shell) {
     }
     // The middle column is the launch's until the person gives it another
     // view (a chat, settings, Back): from then on what it does late changes
-    // nothing on screen, and its message is still sent.
+    // nothing on screen, and its message is still sent. A view the launch
+    // gives it itself is its own (`view`, taken again).
     let view = shell.views();
     const ours = () => view === shell.views();
     // A chat's frame let go, to load again: never one whose page holds what
@@ -348,10 +349,16 @@ export function createLauncher(shell) {
     } catch (e) {
       // the chat stays, its start shown again (unless it holds a draft, or
       // the person opened it since), for the same message tried again
-      const mine = ours();
-      if (name && (mine || state.current !== name || state.page)) unload(name);
-      if (mine && state.current && !state.page) openChat(state.current, false);
+      const stayed = ours();
+      if (name && (stayed || state.current !== name || state.page)) unload(name);
+      if (stayed && state.current && !state.page) {
+        openChat(state.current, false);
+        view = shell.views();
+      }
+      // a view the person gives the middle column while the launcher still
+      // closes (Back) is theirs too
       await closed;
+      const mine = ours();
       launching = false;
       // a connection that dropped is fetch's TypeError, in each browser's words
       const unreached = e instanceof TypeError && /fetch|load failed|network/i.test(e.message);
@@ -366,9 +373,11 @@ export function createLauncher(shell) {
     }
   }
 
-  // The input grows with a long prompt.
+  // One line at rest, whatever its placeholder; a long prompt grows it.
   function fitSearch() {
     if (!input.offsetParent) return;
+    input.style.height = "";
+    if (!input.value) return;
     input.style.height = "auto";
     input.style.height = `${Math.min(input.scrollHeight, INPUT_MAX_PX)}px`;
   }
@@ -410,9 +419,12 @@ export function createLauncher(shell) {
   });
   dialog.addEventListener("cancel", (e) => { e.preventDefault(); closeSearch(); });
   dialog.addEventListener("close", () => {
-    // files are a draft of this opening's, as its words are (a send's, kept
-    // until it is sent)
-    if (!launching && !pendingLaunch) clearFiles();
+    // files are a draft of this opening's, as its words are, and what was
+    // said of them (a send's, kept until it is sent)
+    if (!launching && !pendingLaunch) {
+      clearFiles();
+      launchError = "";
+    }
     ++asked;
     clearTimeout(typing);
     searchTrigger?.setAttribute("aria-expanded", "false");

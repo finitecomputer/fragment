@@ -3083,7 +3083,8 @@ launcher's next opening. The launcher wakes the person's computer as it opens
 their agent runs (its first run, or their computer not read yet), Enter
 (the first row, "Say it in <chat>") opens their first chat (the first
 run's, else their agent's own) with the words in its composer, to send
-there, as the dock's prompts do (`compose`, above). The input grows with
+there, as the dock's prompts do (`compose`, above). The input is one
+line at rest (its placeholder too, cut short on a phone) and grows with
 a long prompt (to 200 px, then scrolls); Shift+Enter is a new line.
 Files dropped on it or pasted into it (for a person whose agent runs; at
 most 8, 25 MiB each, as chips under the words, each removable) go with

@@ -334,9 +334,10 @@ button:focus-visible, .rename-agent input:focus-visible { outline: 2px solid var
 @keyframes search-panel-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
 @media (prefers-reduced-motion: reduce) { .search-dialog[open], .search-dialog[open] .search-panel { animation: none; } }
 .search-input-wrap { display: flex; flex: none; align-items: flex-end; gap: 8px; padding: 10px 12px 10px 22px; background: transparent; }
-/* one line, growing with a long prompt to INPUT_MAX_PX (launcher.js), then scrolling */
+/* one line at rest, growing with a long prompt to INPUT_MAX_PX (launcher.js), then scrolling */
 #workspace-search { display: block; flex: 1; min-width: 0; width: 100%; height: 44px; max-height: 200px; padding: 10px 0; overflow-y: auto; resize: none; border: 0; border-radius: 0; background: transparent; color: inherit; font: inherit; font-size: 17px; line-height: 24px; box-shadow: none; }
-#workspace-search::placeholder { color: var(--text-secondary); opacity: 1; }
+/* on one line too, cut short on a phone (a textarea's would wrap to a second) */
+#workspace-search::placeholder { color: var(--text-secondary); opacity: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 #workspace-search:focus-visible { outline: none; }
 /* centred on the input's last line (its 24px line, 10px padding) */
 .search-send { flex: none; width: 36px; height: 36px; margin-bottom: 4px; border-radius: 50%; background: var(--primary); color: var(--primary-foreground); }
