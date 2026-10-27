@@ -5,6 +5,7 @@ node_modules/
 cell/.celld/
 cell/.dev.vars
 cell/build/
+cell/build.lock
 cell/client/
 cell/target/
 .wrangler/

@@ -585,6 +585,7 @@ dependencies = [
  "aes-gcm",
  "base64",
  "bech32",
+ "fragment-nip98",
  "fragment-proto",
  "hex",
  "hkdf",

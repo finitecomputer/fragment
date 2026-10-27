@@ -114,15 +114,19 @@ fragment ask fred "draft the reply" --chat team-chat         # asks in that chat
 ```
 
 The question goes to a chat of the two agents and their owner
-(`<a>-<b>`, made the first time), or to `--chat`; whichever of the two
+(`<a>-<b>`, made the first time, titled "New chat" as the shell titles
+one: never by its agents' names, which a rename would leave behind), or
+to `--chat`; whichever of the two
 is not in that chat is added as an editor (the owner's to do, so its
 agent may, on the owner's chats). It is a message whose `to` names the
 asked agent; its turn's replies come in that chat, where it can @name
 you back. `--wait [secs]` (150 by default, at most 1800) follows the
 chat for that turn and prints its replies once it ends, or says none
-came. `--json`: `{chat, asked: {fragment, identity, name}, record,
+came, calling the agent by its name (its title), else its label.
+`--json`: `{chat, asked: {fragment, identity, name, title?}, record,
 replayed, created, added, answer?: {turn, outcome, error?, replies:
-[{seq, text, attachments}]}}`. A person asks one of their own agents the
+[{seq, text, attachments}]}}` (`name` its label, which @mentions it;
+`title` its name, when the signer's list says one). A person asks one of their own agents the
 same way, in their direct chat with it (`<agent>-chat`). The answering
 agent's computer counts the hand-offs: three in a row without a person
 stop, and a chat allows its agents 20 turns of each other in 5 minutes
@@ -139,15 +143,17 @@ agent's own fragment unless another is named, and `--routine` builds the
 routine record:
 
 ```
-fragment schedule add --routine "Check the shelf; tell me once it is in stock" --chat chat--k3x9 --cron "0 * * * *"
+fragment schedule add --routine "Check the shelf; tell me once it is in stock" --cron "0 * * * *"
 fragment schedule list
 fragment schedule pause 3        # it fires no more until resumed
 fragment schedule resume 3       # from its next minute, none it missed
 fragment schedule rm 3
 ```
 
-At each minute `--cron` names, the agent is asked the text in `--chat`
-(a chat it is in) as its owner, who pays for the turn. What should run
+At each minute `--cron` names, the agent is asked the text, as its owner,
+who pays for the turn: in their home (where it reaches them: its own chat,
+or their SimpleX chat when they chose it), or in `--chat` (a chat it is
+in). Leave `--chat` out for a reminder or anything to tell them. What should run
 without the agent (a frequent mechanical check, or a job for other
 people) is an app with a cron trigger and a job instead.
 
@@ -835,7 +841,8 @@ own files (Hermes' `profile.yaml`) are written from its name: never edit
 them to rename it.
 
 An agent's routines are what it does on a schedule, each in a chat it is
-in, asked as you: scheduled records on its agent fragment's `tasks`
+in, or with no `--chat` in your home (where it reaches you: its own chat,
+or your SimpleX chat with it, as Settings says), asked as you: scheduled records on its agent fragment's `tasks`
 (Scheduled records, below), so no restart or sleep of its computer loses
 one. Ask your agent in its chat ("every morning at 8, …"), or add one
 yourself; its page lists them:
@@ -941,7 +948,7 @@ fragment ask <agent> <text> [--chat C] [--wait [S]] [--id ID]
 fragment mcp <name> [--write]            # its described operations as an MCP server's tools, over stdio
 fragment agent [<agent>] [--name N] [--picture FILE | --no-picture]
 fragment schedule add [<name>] --cron "<m h dom mon dow>" --channel C --record JSON
-fragment schedule add [<name>] --cron "<m h dom mon dow>" --routine TEXT --chat C   # an agent's routine, on its tasks
+fragment schedule add [<name>] --cron "<m h dom mon dow>" --routine TEXT [--chat C]   # an agent's routine, on its tasks; no --chat: its owner's home
 fragment schedule list [<name>]          fragment schedule pause|resume|rm [<name>] <id>
 fragment operator key <file>
 fragment operator wipe <email|npub> [--dry-run | --yes] [--key-file F]

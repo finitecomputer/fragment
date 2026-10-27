@@ -1310,6 +1310,7 @@ impl PrincipalCell {
                     unread: 0,
                     sharing: None,
                     archived: false,
+                    dock: true,
                     owned: false,
                     listed: vec![],
                 })

@@ -44,9 +44,13 @@ pub struct ComputerAgent {
     pub fragment: String,
     /// The agent's identity (its fragment's npub): it acts as this.
     pub identity: String,
-    /// What it is called: its fragment's label (`juniper` of
-    /// `juniper.paul`), how people @mention it.
-    pub name: String,
+    /// Its fragment's label (`juniper` of `juniper--k3x9`): how people
+    /// `@mention` it, and its runtime's profile. Never its name, which is
+    /// its agent fragment's title (docs/api.md, "An agent's name and
+    /// picture"), and which no computer view carries: on the wire `name`,
+    /// as it always was, and `label` here, so no code shows it for one.
+    #[serde(rename = "name")]
+    pub label: String,
     /// Its owner, a person.
     pub owner: String,
     /// The providers of the deployment's catalog (its connections, the
@@ -72,6 +76,11 @@ pub struct ComputerAgent {
     /// the account's id. None named: the default, the oldest connected.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub accounts: std::collections::BTreeMap<String, String>,
+    /// The guest's view only: its identity's key (64 hex), the one its
+    /// fragment signs as, which a door's ticket is checked with
+    /// (fragment_core::door).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
 }
 
 /// The model route's models' ids by the route's names
@@ -81,6 +90,32 @@ pub struct ComputerAgent {
 pub struct ModelIds {
     pub cheap: String,
     pub medium: String,
+    pub fallback: String,
+    pub vision: String,
+    /// Each tier's route, as Settings offers it (2026-10-24; add-only: a
+    /// reader that does not know it offers the tiers by their names, and
+    /// an agent's runtime names `fallback` and `vision` as before).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routes: Option<TierRoutes>,
+}
+
+/// The two tiers' routes (`ModelIds::routes`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TierRoutes {
+    pub cheap: TierRoute,
+    pub medium: TierRoute,
+}
+
+/// A tier's route: what Settings names it (the deployment's `label` for
+/// it; none, it is offered by its tier's name alone, as before), whether
+/// it is private (every model its agents reach is), and the ids of its
+/// fallback and its vision model.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TierRoute {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub private: bool,
     pub fallback: String,
     pub vision: String,
 }
@@ -360,6 +395,24 @@ pub struct ComputerView {
     /// unless they let it sleep (docs/billing.md).
     #[serde(default)]
     pub always_on: bool,
+    /// The image it is on does SimpleX: its bridge said so
+    /// (`fragment_core::computer::does_simplex`), and its owner's Settings
+    /// offer SimpleX only then. Absent for an image that never said so.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub simplex: bool,
+    /// The guest's view only: what its XFTP relay carries
+    /// (`fragment_core::relay`; `GET /api/computer/relay`), so its bridge
+    /// sends its SimpleX core's files through it. Absent from a platform
+    /// without one, and the core then reaches no file server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay: Option<RelayOffer>,
+}
+
+/// The hosts and the port a computer's XFTP relay carries.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RelayOffer {
+    pub hosts: Vec<String>,
+    pub port: u16,
 }
 
 /// One save of a computer's `/data`, as its view shows it.
@@ -611,14 +664,16 @@ mod tests {
         assert_eq!(all.connections, None);
         let narrowed: AgentConnections = serde_json::from_str(r#"{"connections":["github"]}"#).unwrap();
         assert_eq!(narrowed.connections, Some(vec!["github".to_string()]));
-        let agent = ComputerAgent { fragment: "juniper.paul".into(), identity: "id:a".into(), name: "juniper".into(), owner: "id:p".into(), connections: None, model_providers: vec![], credentials: vec![], accounts: Default::default() };
+        let agent = ComputerAgent { fragment: "juniper--k3x9".into(), identity: "id:a".into(), label: "juniper".into(), owner: "id:p".into(), connections: None, model_providers: vec![], credentials: vec![], accounts: Default::default(), key: None };
         let v = serde_json::to_value(&agent).unwrap();
         assert_eq!(v["connections"], serde_json::Value::Null, "the default is named, as null");
         assert!(v.get("credentials").is_none(), "the owner's view names no placeholder");
         assert!(v.get("modelProviders").is_none(), "none whose models it may run, left out");
+        assert_eq!((v["name"].as_str(), v.get("label")), (Some("juniper"), None), "its label, on the wire as `name`, as it always was");
         let own = ComputerAgent { model_providers: vec!["openrouter".into()], ..agent };
         assert_eq!(serde_json::to_value(&own).unwrap()["modelProviders"], serde_json::json!(["openrouter"]));
-        let older: ComputerAgent = serde_json::from_str(r#"{"fragment":"juniper.paul","identity":"id:a","name":"juniper","owner":"id:p"}"#).unwrap();
+        let older: ComputerAgent = serde_json::from_str(r#"{"fragment":"juniper--k3x9","identity":"id:a","name":"juniper","owner":"id:p"}"#).unwrap();
+        assert_eq!(older.label, "juniper");
         assert_eq!(older.connections, None);
         assert!(older.credentials.is_empty() && older.model_providers.is_empty());
     }

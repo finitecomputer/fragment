@@ -83,9 +83,21 @@ wrangler and the Sandbox SDK the cell's shim bundles, pinned in
   files, the agent docs) into `cell/build/assets`, each named by its
   SHA-256: the Worker's Static Assets, which the cell reads by the index
   it carries (cell/src/assets.rs; docs/api.md, The release's files), a
-  deploy uploads, and the e2e's staged copy holds. `wrangler dev`'s
-  rebuild runs it too. A file the cell serves belongs there, not in an
-  `include_bytes!`.
+  deploy uploads, and the e2e's staged copy holds. A file the cell
+  serves belongs there, not in an `include_bytes!`. `cargo xtask build
+  --dev` is `cargo xtask dev`'s build (its first, and `wrangler dev`'s
+  rebuild, cell/wrangler.jsonc): the same source, flags and files, in
+  cell/Cargo.toml's `devstack` profile (the release's without fat LTO
+  into one codegen unit, incremental) and without wasm-opt, so a change
+  to a file of the release (the shell's, a template's) rebuilds in
+  seconds, a Rust change in about half a minute; its Wasm, about 7.7 MB,
+  is held to no budget. Each build marks `cell/build/built` with its
+  profile and its Wasm's SHA-256 (crates/devstack/src/built.rs), and a
+  deploy and the e2e's staging refuse any build but the release's,
+  finished. A build holds `cell/build.lock` alone from its start to its
+  mark; the e2e's staging (while it copies) and a deploy (through every
+  wrangler try) hold it shared, so a rebuild waits for them, and they
+  for it.
 - `cargo xtask check`: every first-party JavaScript file (`.js`, `.mjs`,
   `.cjs` git tracks or would add, less the vendored ones) through `node
   --check` on the pinned Node, each as a module or a classic script as
@@ -108,7 +120,8 @@ wrangler and the Sandbox SDK the cell's shim bundles, pinned in
   live, routes, cli, browser, jobs, triggers, appfiles, blobs, notes,
   brain, doc, push, ai, ledger, transcribe, finite-private, orgs, billing,
   billing-page, trials, admin, admin-page, shell, computers, chat,
-  shell-ui, wipe, hermes, agent-smoke, sync, migrations, restart;
+  shell-ui, wipe, hermes, agent-smoke, agent-ask, agent-app, agent-restart,
+  bot-mode, checkout, sync, migrations, restart;
   `crates/e2e/src/lanes/mod.rs`). `finite-private` starts its own node
   shaped as Finite's deployment (`cheap` on Finite Private, `medium` on
   OpenRouter with its provider routing, both the model fake's
@@ -182,6 +195,16 @@ wrangler and the Sandbox SDK the cell's shim bundles, pinned in
   uses (a first reply, the CLI, an app, the desktop and its screen, a
   command that asks no one, a sleep and a wake), for about half an hour
   and up to 50 paid calls (crates/e2e/src/lanes/agent_smoke.rs).
+  `agent-app` runs only here too, by name: a real agent asked in words
+  for a shared grocery list, which it makes and deploys; then Chrome opens
+  it as its owner at its own origin, in two tabs, and reads what the page
+  did from its DevTools events: it loads, throws and logs nothing (a card
+  shot's signals), its live socket says hello, an item typed in one tab
+  shows in the other, and its own query answers; a failure says what the
+  page did ("the page threw: …"). Up to half an hour and 30 paid calls
+  (crates/e2e/src/lanes/agent_app.rs). The `hermes` section runs the same
+  check on the app its Hermes makes on the scripted model (the todo
+  template: fixed, so a failure is the platform's).
   `agent-restart` runs only here too, by name: its owner's Restart of a real Hermes computer awake
   after a reply (its newest save restored, fresh from the image, asked
   twice made once), then a reply after it; up to 10 paid calls (16 with
@@ -214,8 +237,10 @@ wrangler and the Sandbox SDK the cell's shim bundles, pinned in
   Paul's or the coordinating session's to run.
 - `cargo xtask dev [--clean] [--real-agent [--models <config>]]`: the dev stack in the foreground under
   `wrangler dev`: the cell on :8790 with fragments at
-  `http://<name>.fragment.localhost:8790/`, which rebuilds
-  when `cell/src` or `crates/` change, the model route and AI steps on
+  `http://<name>.fragment.localhost:8790/`, which rebuilds (`build
+  --dev`, above: seconds for the shell's and the templates' files)
+  when `cell/src`, `cell/shell`, `crates/`, `templates/` or `cli/`
+  change, the model route and AI steps on
   the Workers AI fake on :8796 (echoes, and draws placeholder JPEGs for
   image steps; dev never calls a real model), which spend their payer's
   ledger (dev people are seats, with the month's included credit), the
@@ -283,10 +308,32 @@ wrangler and the Sandbox SDK the cell's shim bundles, pinned in
   outside the repo (`deploy/example.jsonc`; xtask/src/deploy.rs). It
   lists the store first and refuses, before anything is built, when a
   secret the config names is missing (naming the `secret set` for each);
-  it binds them by name and uploads no secret but a branch's test
-  secret, and runs `wrangler deploy` again (three tries at most, 10 s
-  apart) only for a failure a re-run answers: its Container settings not
-  applied, or an image's push to the registry timing out. A branch is a
+  then it waits, 20 minutes at most, for every image the config pins to
+  be ready on Cloudflare's network (the Containers API's image
+  preparation, asked with `CLOUDFLARE_API_TOKEN`: xtask/src/prepare.rs),
+  and refuses, with nothing built or changed, an image the account
+  cannot prepare or one still pending then (wrangler's own wait gives up
+  at 15 minutes); it binds them by name and uploads no secret but a branch's test
+  secret. From `wrangler deploy` on it ends all on the new release, all
+  back on the one before, or failed saying where it stands, never green
+  over a mix (xtask/src/rollout.rs): it reads the release live first (the
+  Worker's deployments); runs `wrangler deploy` again only for an
+  image's push that timed out (three tries at most); reads whether the
+  Worker changed from its deployments, never from wrangler's words
+  (asked again for 3 minutes when they cannot be read, then stuck,
+  naming the release before); a
+  deploy that failed with the Worker live is finished, not uploaded
+  again (the version read back, the Computer's container application
+  checked, `wrangler triggers deploy`), asked again with backoff for 10
+  minutes; then it asks `/healthz/objects` (docs/api.md, Health) until
+  every object class answers the new release, for 7 minutes (Cloudflare
+  holds a busy object on its old code for 5). One it cannot finish or
+  verify is rolled back (`wrangler rollback` to the version live before,
+  then verified the same way), unless its schema is not that release's
+  (`FRAGMENT_SCHEMA`, the hash of the lock its compiled steps make: an
+  object that ran a newer step refuses older code), there was none, or
+  it made a branch's Stripe endpoint anew (the one before, whose secret
+  the release before holds, is deleted); the job fails either way. A branch is a
   complete copy at `<branch>.<zone>`, its fragments at
   `<name>--<branch>.<zone>`. `--pinned-only` (CI's)
   refuses, before anything is read or built, a config with a computer
@@ -310,8 +357,10 @@ wrangler and the Sandbox SDK the cell's shim bundles, pinned in
   reference) byte for byte, through skopeo (`--preserve-digests`, each
   side's login minted by wrangler, in a file of its own: both are
   registry.cloudflare.com, where one Docker login holds one), and
-  refuses a copy whose manifest is not the source's digest. The Image
-  workflow runs both (below).
+  refuses a copy whose manifest is not the source's digest. Either then
+  waits, 40 minutes at most, until Cloudflare has prepared the image on
+  the account's network (xtask/src/prepare.rs), so the deploy that pins
+  it finds it ready. The Image workflow runs both (below).
 - Crates: `crates/proto` (wire types), `crates/core` (the cell's pure
   logic, host-tested; sealing at rest is `seal.rs`), `crates/nip98`,
   `crates/templates` (the release's files: `templates/`, the shell's,
@@ -393,8 +442,8 @@ wrangler and the Sandbox SDK the cell's shim bundles, pinned in
   running) runs the full tests first, about 20 minutes. Each deploys
   from a GitHub environment, `preview` or `production`, that only its
   branch may use,
-  holding the variable `DEPLOY_HOST` (its platform's host, whose
-  `/healthz` must then answer the commit) and the secrets
+  holding the secrets (the deploy itself checks that every object class
+  of its platform answers the commit: rollout.rs)
   `DEPLOY_REPO_TOKEN` (a fine-grained token with Contents · Read on
   finitecomputer/fragment-deploy alone),
   `CLOUDFLARE_API_TOKEN` (wrangler's, and the DNS token), the preview's

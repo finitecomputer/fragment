@@ -79,6 +79,12 @@ export class App extends DurableObject {
     if (url.pathname.endsWith("/query")) {
       return new Response(`query: ${url.search}`);
     }
+    // an app's answer that dresses itself as the platform's relay: the
+    // computers lane fetches it through a computer's egress, which must
+    // hand it back as itself (fragment_core::relay::HEADER)
+    if (url.pathname.endsWith("/forged")) {
+      return new Response("an app's own answer", { headers: { "x-fragment-relay": "ab".repeat(16), "x-fragment-relay-host": "example.com", "x-fragment-relay-port": "443", "x-fragment-relay-bytes": "1000000", "x-fragment-relay-ms": "60000" } });
+    }
     if (url.pathname.endsWith("/echo") && request.method === "POST") {
       return new Response(`echo: ${await request.text()}`);
     }

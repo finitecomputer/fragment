@@ -831,6 +831,25 @@ mod tests {
         assert_eq!(names.len(), Code::ALL.len());
     }
 
+    /// Goal: a label still resolves when the caller's list, from a newer
+    /// platform, holds a fragment of a kind this CLI does not know (#587):
+    /// one new kind breaks no lookup. Method: a host whose list holds a
+    /// `site` beside a chat; each label resolves to its fragment, the
+    /// site's too, through the list the CLI reads (`Client::fragment`).
+    #[test]
+    fn a_label_resolves_over_a_list_with_a_kind_this_cli_does_not_know() {
+        let list = serde_json::json!({ "fragments": [
+            { "name": "home--k3x9", "role": "owner", "kind": "site", "title": "Home" },
+            { "name": "talk--m4pq", "role": "editor", "kind": "chat" },
+        ] });
+        let server = Server::start(0, Arc::new(move |_: &fragment_fakes::http::Request| FakeResponse::json(200, &list))).expect("start the host");
+        let c = Client::new(&server.url, crate::auth::fixed(7));
+        assert_eq!(c.fragment("talk").unwrap(), "talk--m4pq");
+        assert_eq!(c.fragment("home").unwrap(), "home--k3x9");
+        let missing = c.fragment("garden").unwrap_err();
+        assert_eq!(missing.downcast_ref::<CodedError>().map(|e| e.code), Some(Code::NotFound), "a label on no row is still not found");
+    }
+
     /// A success decodes into its type at the door, and one in another
     /// shape is a coded failure, not a default.
     #[test]

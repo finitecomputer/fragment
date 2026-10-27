@@ -50,7 +50,7 @@ use std::collections::BTreeMap;
 
 use fragment_core::catalog::{self, Kind};
 use fragment_core::computer::{
-    alive, image_running, notices, valid_version, version_running, Action, Alive, Event, Images, Lifecycle, Phase, Plan as Restore, Rules, Save, SaveNote, Saves, Saving, Socket, Step, Wake, ALIVE_MS, HOLD_DEADLINE_MS, HOLD_WAIT_MS, SAVE_DEADLINE_MS,
+    alive, does_simplex, image_running, notices, valid_version, version_running, Action, Alive, Event, Images, Lifecycle, Phase, Plan as Restore, Rules, Save, SaveNote, Saves, Saving, Socket, Step, Wake, ALIVE_MS, HOLD_DEADLINE_MS, HOLD_WAIT_MS, SAVE_DEADLINE_MS,
     SLEEP_DEADLINE_MS, START_DEADLINE_MS,
 };
 use fragment_core::ledger::{Meter, MeterRow, Month, Spend};
@@ -268,6 +268,12 @@ enum MetaKey {
     /// (`fragment_core::computer::Images`): the reference its pinned name
     /// stood for as it last looked, and the version its owner put off.
     Images,
+    /// The version whose bridge last said it does SimpleX (`GET
+    /// /api/computer?simplex=1`: `fragment_core::computer::does_simplex`).
+    Simplex,
+    /// What its XFTP relays carried on their UTC day (`fragment_core::relay`):
+    /// `<day> <bytes>`.
+    RelayDay,
 }
 
 impl MetaKey {
@@ -286,6 +292,8 @@ impl MetaKey {
             MetaKey::AliveCheck => "alive_check",
             MetaKey::WorkosUser => "workos_user",
             MetaKey::Images => "images",
+            MetaKey::Simplex => "simplex",
+            MetaKey::RelayDay => "relay_day",
         }
     }
 }
@@ -355,6 +363,9 @@ pub struct ComputerCell {
     /// The start this isolate judged dead and destroys: its exit is that
     /// start's own failure, which it reports (`exit_of`).
     dead: std::cell::Cell<Option<u64>>,
+    /// Its XFTP relays open now (`fragment_core::relay::Leases`). In memory
+    /// only: a restart forgets them, and they lapse on their own bounds.
+    relays: RefCell<fragment_core::relay::Leases>,
     /// Its schema as it started (schema.rs): ready, or refused.
     schema: crate::schema::Schema,
 }
@@ -379,6 +390,7 @@ impl DurableObject for ComputerCell {
             wiped: std::cell::Cell::new(wiped),
             heard_ms: std::cell::Cell::new(None),
             dead: std::cell::Cell::new(None),
+            relays: RefCell::default(),
             schema,
         }
     }
@@ -386,6 +398,9 @@ impl DurableObject for ComputerCell {
     async fn fetch(&self, req: Request) -> Result<Response> {
         if let Some(refused) = crate::routed::refused(&req, crate::routed::Own::of(self.cfg), &self.raw)? {
             return Ok(refused);
+        }
+        if let Some(probed) = crate::routed::probed(&req, &self.schema)? {
+            return Ok(probed);
         }
         match self.route(req).await {
             Ok(r) => Ok(r),
@@ -611,6 +626,26 @@ struct Redeem {
 #[derive(Deserialize)]
 struct Exited {
     generation: u64,
+}
+
+/// `computer/guest`'s body: its bridge said its image does SimpleX.
+#[derive(Deserialize)]
+struct GuestAsk {
+    #[serde(default)]
+    simplex: bool,
+}
+
+/// `computer/relay-open`'s body: the host it is for (for its log).
+#[derive(Deserialize)]
+struct RelayAsk {
+    host: String,
+}
+
+/// `computer/relay-close`'s body: the relay's lease, and what it carried.
+#[derive(Deserialize)]
+struct RelayClosed {
+    lease: String,
+    bytes: u64,
 }
 
 /// `computer/test`'s body (a test fleet's: `POST /api/test/computer`):
@@ -1554,7 +1589,7 @@ impl ComputerCell {
         }
         for r in rows {
             let fragment = r["fragment"].as_str().unwrap_or_default().to_string();
-            let name = fragment_proto::split_fragment_name(&fragment).map(|(label, _)| label.to_string()).unwrap_or_default();
+            let label = fragment_proto::split_fragment_name(&fragment).map(|(label, _)| label.to_string()).unwrap_or_default();
             // a stored value that does not read is a host fault, never "all"
             let connections = stored_connections(r["connections"].as_str().unwrap_or_default(), &fragment)?;
             agents.push(ComputerAgent {
@@ -1563,12 +1598,29 @@ impl ComputerCell {
                 model_providers: self.cfg.providers.model_providers(&own, connections.as_deref()),
                 accounts: picks.remove(&fragment).unwrap_or_default(),
                 fragment,
-                name,
+                label,
                 connections,
                 credentials: vec![],
+                key: None,
             });
         }
         Ok(agents)
+    }
+
+    /// Its bridge said its image does SimpleX: of the image its running
+    /// start came up on (`version_running`), kept until another's says so,
+    /// and its owner's open pages told when that is news (their Settings
+    /// offer SimpleX from then). While it starts, its word is not taken: the
+    /// image its next start runs may already be another (a pin, a deploy),
+    /// and the bridge says so again at its next read, once it is up (Alex's
+    /// review). It says so at each read, so this writes only for news.
+    async fn said_simplex(&self) -> CellResult<()> {
+        let Some(version) = version_running(&self.lifecycle()?, &self.saves()?) else { return Ok(()) };
+        if self.meta(MetaKey::Simplex)?.as_deref() != Some(version.as_str()) {
+            self.set_meta(MetaKey::Simplex, &version)?;
+            self.tell_owner().await;
+        }
+        Ok(())
     }
 
     /// The guest's own view (`GET /api/computer`): its agents, each with
@@ -1579,6 +1631,12 @@ impl ComputerCell {
         let mut view = self.view()?;
         // what its owner is told is theirs (its guest reads `restored`)
         view.notices = vec![];
+        // what its XFTP relay carries: its bridge sends its core's files through it
+        view.relay = Some(fragment_proto::computer::RelayOffer { hosts: fragment_core::relay::HOSTS.iter().map(|h| h.to_string()).collect(), port: fragment_core::relay::PORT });
+        // the key each agent's fragment signs as: a door's ticket is checked with it
+        for agent in &mut view.agents {
+            agent.key = fragment_core::npub::parse(&agent.identity);
+        }
         let catalog = &self.cfg.providers;
         view.credential_env = catalog.env_names();
         if catalog.is_empty() || view.agents.is_empty() {
@@ -1837,6 +1895,8 @@ impl ComputerCell {
             rollbacks: saves.rollbacks(),
             saves: saves.views(),
             always_on: life.always_on(),
+            simplex: does_simplex(self.meta(MetaKey::Simplex)?.as_deref(), &life, &saves, &images),
+            relay: None,
         })
     }
 
@@ -2000,6 +2060,21 @@ impl ComputerCell {
                 let pending = self.rows("SELECT COUNT(*) AS n FROM own_signins", vec![])?.first().and_then(|r| r["n"].as_u64()).unwrap_or(0);
                 Ok(json!({ "computer": id, "expiredSignIns": pending }))
             }
+            "simplex" => {
+                // its bridge's word that its image does SimpleX (`said_simplex`), or its forgetting
+                let on = b.on.ok_or_else(|| CellError::invalid("simplex names on: true or false"))?;
+                if on {
+                    if version_running(&self.lifecycle()?, &self.saves()?).is_none() {
+                        return Err(CellError::invalid("it is not running: wake it first"));
+                    }
+                    self.said_simplex().await?;
+                } else {
+                    self.delete_meta(MetaKey::Simplex)?;
+                    self.tell_owner().await;
+                }
+                let view = self.view()?;
+                Ok(json!({ "computer": id, "simplex": view.simplex }))
+            }
             "always-on" => {
                 let on = b.on.ok_or_else(|| CellError::invalid("always-on names on: true or false"))?;
                 self.drive(Event::AlwaysOn { on }).await?;
@@ -2157,6 +2232,9 @@ impl ComputerCell {
                 self.must(MetaKey::Id)?;
                 if self.lifecycle()?.always_on() != b.on {
                     self.drive(Event::AlwaysOn { on: b.on }).await?;
+                    // its owner's open pages read it again (Settings' SimpleX
+                    // says what always on means for it)
+                    self.tell_owner().await;
                 }
                 json_response(&self.view()?)
             }
@@ -2355,7 +2433,48 @@ impl ComputerCell {
             "computer/guest" => {
                 // its guest is alive: what a start that waits for it waits for
                 self.heard_ms.set(Some(js::now_ms()));
+                let b: GuestAsk = body_json(&mut req).await?;
+                if b.simplex {
+                    self.said_simplex().await?;
+                }
                 json_response(&self.guest_view().await?)
+            }
+            "computer/relay-open" => {
+                // a place for one more XFTP relay (fragment_core::relay), or why not
+                self.must(MetaKey::Id)?;
+                let b: RelayAsk = body_json(&mut req).await?;
+                let lease = js::random_hex::<16>();
+                let spent = fragment_core::relay::parse_spent(self.meta(MetaKey::RelayDay)?.as_deref());
+                let (open, kept) = {
+                    let mut leases = self.relays.borrow_mut();
+                    (leases.open(&lease, js::now_ms(), spent), leases.spent())
+                };
+                // a lapsed lease counted as it lapsed
+                if kept != spent {
+                    self.set_meta(MetaKey::RelayDay, &fragment_core::relay::format_spent(kept))?;
+                }
+                let allowance = match open {
+                    Ok(a) => a,
+                    Err(refusal) => {
+                        console_log!("{}", json!({ "computer": self.meta(MetaKey::Id)?, "relay": "refused", "host": b.host, "why": refusal.message() }));
+                        return Err(CellError::new(ErrorCode::RateLimited, refusal.message()));
+                    }
+                };
+                // what it may carry: reserved against the day's budget (Alex's review)
+                json_response(&json!({ "lease": lease, "bytesMax": allowance, "msMax": fragment_core::relay::MS_MAX }))
+            }
+            "computer/relay-close" => {
+                let b: RelayClosed = body_json(&mut req).await?;
+                let spent = fragment_core::relay::parse_spent(self.meta(MetaKey::RelayDay)?.as_deref());
+                let kept = {
+                    let mut leases = self.relays.borrow_mut();
+                    leases.close(&b.lease, b.bytes, js::now_ms(), spent);
+                    leases.spent()
+                };
+                if kept != spent {
+                    self.set_meta(MetaKey::RelayDay, &fragment_core::relay::format_spent(kept))?;
+                }
+                json_response(&json!({ "ok": true }))
             }
             "computer/exited" => {
                 let b: Exited = body_json(&mut req).await?;
@@ -2769,6 +2888,14 @@ pub(crate) async fn route(env: &Env, who: &str, kind: IdentityKind, method: Meth
             let set = json!({ "fragment": fragment, "provider": provider, "account": b.account });
             json_response(&view_of(ask(env, id, "computer/account", &set).await?)?)
         }
+        (Method::Post, [id, "agents", fragment, "door"]) => {
+            // a ticket to link or unlink the agent's door, its owner's alone
+            // (fragment_core::door): the agent fragment makes and signs it
+            owned(env, who, id).await?;
+            let v: Value = serde_json::from_slice(body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+            let asked = json!({ "computer": id, "owner": who, "door": v["door"], "act": v["act"] });
+            json_response(&crate::fragment::ask(env, fragment, "computer/door-ticket", &asked).await?)
+        }
         (Method::Get, [id, "uses"]) => {
             owned(env, who, id).await?;
             json_response(&ask(env, id, "computer/uses", &json!({ "month": null })).await?)
@@ -2925,8 +3052,37 @@ async fn host_answer(req: Request, env: &Env, url: &Url, id: &str, signer: Optio
 #[wasm_bindgen(wasm_bindgen = worker::wasm_bindgen)]
 pub struct ComputerEgress;
 
+/// `resp` with no header of the relay's family (`fragment_core::relay::
+/// is_relay_header`): an answer the relay route did not make, which may be
+/// another's passed through (a fragment's, an app's). Headers are copied
+/// whole into a new set, since a fetched answer's own cannot be changed.
+fn unrelayed(resp: Response, computer: &str, route: &str, path: &str) -> Response {
+    let forged: Vec<String> = resp.headers().keys().filter(|k| fragment_core::relay::is_relay_header(k)).collect();
+    if forged.is_empty() {
+        return resp;
+    }
+    console_log!("{}", json!({ "egress": route, "computer": computer, "path": path, "dropped": forged }));
+    let headers = Headers::new();
+    for (k, v) in resp.headers().entries() {
+        if !fragment_core::relay::is_relay_header(&k) {
+            let _ = headers.append(&k, &v);
+        }
+    }
+    resp.with_headers(headers)
+}
+
 #[wasm_bindgen]
 impl ComputerEgress {
+    /// An XFTP relay of `computer`'s ended, having carried `bytes`: its
+    /// place freed and its bytes counted (fragment_core::relay). Logged on
+    /// failure, never failed: its lease lapses on its own.
+    pub async fn relay_closed(env: Env, computer: String, lease: String, bytes: f64) {
+        let bytes = if bytes.is_finite() && bytes > 0.0 { bytes as u64 } else { 0 };
+        if let Err(e) = ask(&env, &computer, "computer/relay-close", &json!({ "lease": lease, "bytes": bytes })).await {
+            console_error!("{}", json!({ "computer": computer, "relay": "close unheard", "error": e.message }));
+        }
+    }
+
     pub async fn handle(request: worker_sys::web_sys::Request, env: Env, ctx: worker_sys::Context, computer: String, route: String) -> worker_sys::web_sys::Response {
         let req = Request::from(request);
         let ctx = Context::new(ctx);
@@ -2948,6 +3104,11 @@ impl ComputerEgress {
             }
         }
         let resp = answered.or_else(|e| e.response().map_err(CellError::from)).unwrap_or_else(|_| Response::error("egress failed", 500).expect("a plain response"));
+        // only the relay route's own answer may tell the shim to pipe
+        // (fragment_core::relay::HEADER): any other, a fragment's or an
+        // app's passed through among them, is stripped of the family
+        let relay_route = route == "api" && path == fragment_core::relay::ROUTE;
+        let resp = if relay_route { resp } else { unrelayed(resp, &computer, &route, &path) };
         resp.into()
     }
 }
@@ -2964,7 +3125,39 @@ async fn egress_api(mut req: Request, env: &Env, ctx: &Context, computer: &str) 
     let url = req.url()?;
     let path = url.path().to_string();
     match path.as_str() {
-        "/api/computer" => return json_response(&ask(env, computer, "computer/guest", &json!({})).await?),
+        "/api/computer" => {
+            // its bridge says whether its image does SimpleX (docs/computers.md, "SimpleX")
+            let simplex = url.query_pairs().any(|(k, v)| k == "simplex" && v == "1");
+            return json_response(&ask(env, computer, "computer/guest", &json!({ "simplex": simplex })).await?);
+        }
+        // a link's ticket redeemed with its door's public key, at the agent
+        // fragment it names, for this computer alone (fragment_core::door)
+        "/api/computer/door" if req.method() == Method::Post => {
+            let v: Value = serde_json::from_slice(&crate::read_body(&mut req, 4_096).await?).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+            let agent = v["agent"].as_str().filter(|a| fragment_proto::valid_fragment_name(a)).ok_or_else(|| CellError::invalid("name the agent fragment (agent)"))?;
+            let asked = json!({ "computer": computer, "door": v["door"], "nonce": v["nonce"], "key": v["key"] });
+            return json_response(&crate::fragment::ask(env, agent, "computer/door-key", &asked).await?);
+        }
+        // an XFTP relay (fragment_core::relay): its host and port allowed and
+        // a place held at its computer, the shim's `ComputerEgress` pipes it
+        // (entry.mjs `relay`), told how by these headers, which it alone reads
+        p if p == fragment_core::relay::ROUTE => {
+            let q: BTreeMap<String, String> = url.query_pairs().into_owned().collect();
+            let (host, port) = fragment_core::relay::target(q.get("host").map_or("", String::as_str), q.get("port").map_or("", String::as_str)).map_err(|r| CellError::new(ErrorCode::Forbidden, r.message()))?;
+            if !req.headers().get("upgrade")?.is_some_and(|u| u.eq_ignore_ascii_case("websocket")) {
+                return Err(CellError::invalid("a relay is a WebSocket"));
+            }
+            let held = ask(env, computer, "computer/relay-open", &json!({ "host": host })).await?;
+            let lease = held["lease"].as_str().filter(|l| l.len() == 32).ok_or_else(|| CellError::host("a relay's lease"))?;
+            let allowance = held["bytesMax"].as_u64().filter(|b| (fragment_core::relay::ALLOWANCE_MIN..=fragment_core::relay::BYTES_MAX).contains(b)).ok_or_else(|| CellError::host("a relay's allowance"))?;
+            let headers = Headers::new();
+            headers.set(fragment_core::relay::HEADER, lease)?;
+            headers.set("x-fragment-relay-host", host)?;
+            headers.set("x-fragment-relay-port", &port.to_string())?;
+            headers.set("x-fragment-relay-bytes", &allowance.to_string())?;
+            headers.set("x-fragment-relay-ms", &fragment_core::relay::MS_MAX.to_string())?;
+            return Ok(Response::empty()?.with_headers(headers));
+        }
         "/api/computer/keepalive" => {
             let headers = Headers::new();
             headers.set(KIND_HEADER, "keepalive")?;

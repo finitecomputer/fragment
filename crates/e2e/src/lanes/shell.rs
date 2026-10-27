@@ -225,6 +225,7 @@ pub fn shell_platform(s: &mut Suite, api: &Api) -> Result<()> {
     let r = shell(api, &session, "POST", "/api/fragments", Some(&json!({ "label": "lab", "template": "nope" })), &[])?;
     s.ok("a template that is none is refused, naming the blessed ones", r.status == 400 && r.text.contains("agent"), &r);
     search_and_archive(s, api, &session)?;
+    dock_choice(s, api, &session)?;
     search_follows_reading(s, api)?;
     unread_and_seen(s, api, &session)?;
     list_watch(s, api, &session, &id)
@@ -416,6 +417,9 @@ fn list_watch(s: &mut Suite, api: &Api, session: &str, id: &str) -> Result<()> {
     let r = shell(api, session, "PUT", &format!("/api/fragments/{made}/archived"), Some(&json!({ "archived": true })), &[])?;
     let (one, two) = (told(&mut tab), told(&mut second));
     s.ok("an archive in one tab is told to every tab", r.status == 200 && one == changed && two == changed, json!([r.status, one, two]));
+    let r = shell(api, session, "PUT", &format!("/api/fragments/{made}/dock"), Some(&json!({ "dock": false })), &[])?;
+    let (one, two) = (told(&mut tab), told(&mut second));
+    s.ok("and an app taken off the dock in one tab", r.status == 200 && one == changed && two == changed, json!([r.status, one, two]));
     let r = api.signed(&other, "DELETE", &format!("/api/f/{theirs}/members/{id}"), None)?;
     let removed = told(&mut tab);
     s.ok("their removal from someone else's is told", r.status == 200 && removed == changed, json!([r.status, removed]));
@@ -693,6 +697,81 @@ fn search_and_archive(s: &mut Suite, api: &Api, session: &str) -> Result<()> {
     Ok(())
 }
 
+/// The dock, the person's own choice (#587; docs/api.md, `PUT
+/// /api/fragments/{name}/dock`): every fragment is on it until they take
+/// it off, for themselves alone (a member's list keeps its own), twice the
+/// same as once, and only one of theirs; archiving is a choice of its own;
+/// it goes when they leave (back in, it is on it). Valid, invalid and
+/// replay here; a restart keeps it (the restart section).
+fn dock_choice(s: &mut Suite, api: &Api, session: &str) -> Result<()> {
+    let r = shell(api, session, "POST", "/api/fragments", Some(&json!({ "label": "docked" })), &[])?;
+    let app = r.body["name"].as_str().unwrap_or("").to_string();
+    anyhow::ensure!(r.status == 200 && label_of(&app) == "docked", "making the app: {r}");
+    let member = api.person()?;
+    let member_id = api.identity(&member)?;
+    let r = api.share(&app, &member_id, "viewer")?;
+    anyhow::ensure!(r.status == 200, "adding the member: {r}");
+    let row = |r: &Reply| r.body["fragments"].as_array().and_then(|l| l.iter().find(|f| f["name"] == app.as_str()).cloned());
+    // on the dock, a row leaves `dock` out; off it, it says `false`
+    let on = |r: &Reply| row(r).is_some_and(|f| f.get("dock").is_none());
+    let off = |r: &Reply| row(r).is_some_and(|f| f["dock"] == false);
+    let mine = || shell(api, session, "GET", "/api/fragments", None, &[]);
+    let theirs = || api.signed(&member, "GET", "/api/fragments", None);
+    let dock = |name: &str, body: Value| shell(api, session, "PUT", &format!("/api/fragments/{name}/dock"), Some(&body), &[]);
+    let listed = s.eventually(SEARCH_WAIT, || theirs().is_ok_and(|r| row(&r).is_some()));
+    let (m, t) = (mine()?, theirs()?);
+    s.ok("a new app is on its owner's dock and on a member's: their rows leave `dock` out", listed && on(&m) && on(&t), json!([row(&m), row(&t)]));
+
+    let r = dock(&app, json!({ "dock": false }))?;
+    s.ok("the person takes an app of theirs off their dock", r.status == 200 && r.body == json!({ "name": app, "dock": false }), &r);
+    let again = dock(&app, json!({ "dock": false }))?;
+    s.ok("taking it off again is the same", again.status == 200 && again.body == r.body, &again);
+    let (m, t) = (mine()?, theirs()?);
+    s.ok("their list says it is off their dock, and not archived; a member's has it on theirs still", off(&m) && row(&m).is_some_and(|f| f.get("archived").is_none()) && on(&t), json!([row(&m), row(&t)]));
+    let r = api.signed(&member, "PUT", &format!("/api/fragments/{app}/dock"), Some(&json!({ "dock": false })))?;
+    let back = dock(&app, json!({ "dock": true }))?;
+    let (m, t) = (mine()?, theirs()?);
+    s.ok(
+        "the member, a viewer, takes it off their own dock (with their key); the person puts it back on theirs, and each list keeps its own",
+        r.status == 200 && back.status == 200 && back.body == json!({ "name": app, "dock": true }) && on(&m) && off(&t),
+        json!([row(&m), row(&t)]),
+    );
+    // archiving is a choice of its own: neither changes the other
+    let archive = |on: bool| shell(api, session, "PUT", &format!("/api/fragments/{app}/archived"), Some(&json!({ "archived": on })), &[]);
+    let (a, d, u) = (archive(true)?, dock(&app, json!({ "dock": false }))?, archive(false)?);
+    let m = mine()?;
+    s.ok("archived, taken off, then unarchived, it is off their dock still", a.status == 200 && d.status == 200 && u.status == 200 && off(&m), json!(row(&m)));
+
+    let other = api.person()?;
+    let theirs_only = s.named(api, &other, "not-docked")?;
+    let r = api.create(&other, &theirs_only)?;
+    anyhow::ensure!(r.status == 200, "someone else's app: {r}");
+    let r = dock(&theirs_only, json!({ "dock": false }))?;
+    s.ok("a fragment they are not in is none of theirs to take off (404)", r.status == 404, &r);
+    let r = dock("nothing-here--k3x9", json!({ "dock": false }))?;
+    s.ok("nor one that does not exist (404)", r.status == 404, &r);
+    let r = dock("docked", json!({ "dock": false }))?;
+    s.ok("a bare label names nothing here (404): a fragment is named in full", r.status == 404 && r.message().contains("in full"), &r);
+    let r = dock("Not A Name", json!({ "dock": false }))?;
+    s.ok("a name that is none is refused (400)", r.status == 400, &r);
+    let (r, r2) = (dock(&app, json!({}))?, dock(&app, json!({ "dock": "no" }))?);
+    s.ok("a body without `dock`, or not a boolean, is refused (400)", r.status == 400 && r2.status == 400, format!("{r} {r2}"));
+    let r = api.unsigned("PUT", &format!("/api/fragments/{app}/dock"), Some(&json!({ "dock": true })))?;
+    let m = mine()?;
+    s.ok("no one chooses anyone's dock (401), and theirs is as it was", r.status == 401 && off(&m), &r);
+
+    // removed, their choice goes with their row; back in, it is on their dock
+    let r = shell(api, session, "DELETE", &format!("/api/f/{app}/members/{member_id}"), None, &[])?;
+    let gone = s.eventually(SEARCH_WAIT, || theirs().is_ok_and(|r| r.status == 200 && row(&r).is_none()));
+    let r2 = api.signed(&member, "PUT", &format!("/api/fragments/{app}/dock"), Some(&json!({ "dock": false })))?;
+    s.ok("a removed member's list has it no more, nor may they choose its place (404)", r.status == 200 && gone && r2.status == 404, &r2);
+    let r = api.share(&app, &member_id, "viewer")?;
+    let back = s.eventually(SEARCH_WAIT, || theirs().is_ok_and(|r| row(&r).is_some()));
+    let t = theirs()?;
+    s.ok("back in, it is on their dock again", r.status == 200 && back && on(&t), json!(row(&t)));
+    Ok(())
+}
+
 /// Search follows who may read (#156, problem 5): a deploy that makes a
 /// channel the editors' takes its messages from every list (only channels
 /// every member reads are searched), and a member who joins after never
@@ -768,16 +847,21 @@ fn release_assets(s: &mut Suite, api: &Api, session: &str, agent: &str) -> Resul
     // the release that answers: every answer of the platform's host names
     // it, and the page's meta, which the shell's script compares with them
     let release = api.unsigned("HEAD", "/healthz", None)?.header("x-fragment-deploy");
-    let filled = fragment_templates::shell_page(std::str::from_utf8(index.bytes)?, &release);
+    // and when it was deployed (`FRAGMENT_DEPLOYED_AT`: the node's start
+    // here, the deploy's second hosted), which Settings shows beside it
+    let deployed = page.text.split_once(r#"<meta name="fragment-release-deployed" content=""#).and_then(|(_, rest)| rest.split_once('"')).map(|(v, _)| v.to_string());
+    let at = deployed.as_deref().and_then(fragment_core::release::deployed);
+    let filled = fragment_templates::shell_page(std::str::from_utf8(index.bytes)?, &release, at);
     s.ok(
-        "the shell's page is the release's, its meta naming the release that answered, under the platform's policy",
+        "the shell's page is the release's, its metas naming the release that answered and when it was deployed, under the platform's policy",
         page.status == 200
             && page.text == filled
             && page.text.contains(&format!(r#"<meta name="fragment-release" content="{release}">"#))
+            && at.is_some_and(|t| t > 0 && t as i64 <= crate::api::now_s() + 60)
             && page.header("content-security-policy").contains("frame-ancestors 'none'")
             && page.header("x-frame-options") == "DENY"
             && page.header("cache-control") == "no-store",
-        format!("{} {} bytes (the release's filled: {}), release {release}; {}", page.status, page.bytes.len(), page.text == filled, page.header("content-security-policy")),
+        format!("{} {} bytes (the release's filled: {}), release {release}, deployed {deployed:?}; {}", page.status, page.bytes.len(), page.text == filled, page.header("content-security-policy")),
     );
     let me = shell(api, session, "GET", "/api/identities/me", None, &[])?;
     let refused = shell(api, session, "GET", "/api/identities/me", None, &[("x-fragment-shell", String::new())])?;
@@ -1166,6 +1250,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     let _ = b.screenshot(&page, &shots.join("desktop-app.png"));
     compose_elsewhere_ui(s, api, &mut b, &page, &session, &asked_in, &groceries)?;
     open_beside_ui(s, api, &mut b, &page, &me, &groceries, &shots)?;
+    app_policy_ui(s, api, &mut b, &page, &groceries)?;
     sidebar_live(s, api, &mut b, &page, &session, &shots)?;
     held_list_socket(s, api, &mut b, &page, &session)?;
 
@@ -1193,6 +1278,53 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
             && has("#settings-page form[method=post][action='/auth/logout'] button"),
         &text[..text.len().min(600)],
     );
+    // SimpleX only on an image that does it: the stub's bridge never says so
+    let computers = shell(api, &session, "GET", "/api/computers", None, &[])?;
+    let said = computers.body["computers"][0].get("simplex").cloned();
+    let simplex_id = computers.body["computers"][0]["computer"].as_str().unwrap_or("").to_string();
+    s.ok(
+        "settings offer no SimpleX on a computer whose image does not do it (the stub's, as production's before SimpleX): the section and its link hidden, no Set up, and its view says nothing of it",
+        computers.status == 200 && said.is_none() && !has("#settings-simplex:not([hidden])") && !has(".settings-nav-link[data-section=settings-simplex]:not([hidden])") && !text.contains("SimpleX"),
+        json!({ "simplex": said, "settings": &text[..text.len().min(600)] }),
+    );
+    // its bridge says its image does (the lever, as `?simplex=1` would), and
+    // then no more: the open settings follow each, through the list's
+    // socket, with what was typed elsewhere on them kept (Alex's review)
+    b.eval(&page, "(document.getElementById('build-prompt').value += 'kept as typed', true)")?;
+    let on = super::computers::lever_with(api, &simplex_id, json!({ "op": "simplex", "on": true }))?;
+    let shown = b.until(&page, "(() => { const s = document.querySelector('#settings-simplex:not([hidden])'); return !!s && /always-on plan/.test(s.innerText) && !!document.querySelector('.settings-nav-link[data-section=settings-simplex]:not([hidden])'); })()", wait);
+    let kept = b.eval(&page, "location.pathname === '/settings' && document.getElementById('build-prompt').value.endsWith('kept as typed')")?;
+    let off = super::computers::lever_with(api, &simplex_id, json!({ "op": "simplex", "on": false }))?;
+    let hidden = b.until(&page, "!!document.querySelector('#settings-simplex[hidden]') && !document.querySelector('.settings-nav-link[data-section=settings-simplex]:not([hidden])')", wait);
+    s.ok(
+        "settings left open follow the computer's SimpleX: shown once its bridge says its image does it (not always on: it says the plan does), hidden once it no longer does, with nothing else redrawn",
+        on.status == 200 && on.body["simplex"] == true && shown && kept == json!(true) && off.status == 200 && off.body["simplex"] == false && hidden,
+        json!({ "on": on.body, "off": off.body, "shown": shown, "kept": kept, "hidden": hidden }),
+    );
+    b.eval(&page, "(document.getElementById('build-prompt').value = document.getElementById('build-prompt').value.replace('kept as typed', ''), true)")?;
+    // a $200 seat's holder who lets their computer sleep is told how to take
+    // it back, as they tick Billing's box, with Settings left open (#609's
+    // review: the line read the seat as Settings first did)
+    let op_session = api.sign_in("operator@e2e.test")?;
+    let _ = api.approve(&op_session, &s.operator);
+    super::computers::lever_with(api, &simplex_id, json!({ "op": "simplex", "on": true }))?;
+    let comped = api.signed(&s.operator, "POST", "/api/admin/seats", Some(&json!({ "email": email, "kind": "seat_always_on" })))?;
+    b.eval(&page, "(document.getElementById('settings').click(), true)")?;
+    let box_ = "[...document.querySelectorAll('#settings-page label')].find((l) => l.textContent.includes('Let my computer sleep'))?.querySelector('input')";
+    let set_up = "!!document.querySelector('#settings-simplex:not([hidden]) button.row')";
+    let ready = b.until(&page, &format!("!!({box_}) && {set_up}"), std::time::Duration::from_secs(30));
+    b.eval(&page, &format!("({box_}).click(), true"))?;
+    let told = b.until(&page, "(() => { const t = document.getElementById('settings-simplex')?.innerText ?? ''; return t.includes('Untick') && t.includes('Let my computer sleep'); })()", std::time::Duration::from_secs(30));
+    b.eval(&page, &format!("({box_}).click(), true"))?;
+    let back = b.until(&page, set_up, std::time::Duration::from_secs(30));
+    s.ok(
+        "a $200 seat's holder who ticks Billing's sleep box, Settings left open, is told in SimpleX to untick it; unticked, SimpleX offers Set up again",
+        comped.status == 200 && ready && told && back,
+        json!({ "comped": comped.status, "ready": ready, "told": told, "back": back, "simplex": b.eval(&page, "document.getElementById('settings-simplex')?.innerText ?? ''")? }),
+    );
+    // as it was for what follows: its computer let sleep, no SimpleX
+    shell(api, &session, "PUT", "/api/seat", Some(&json!({ "sleeps": true })), &[])?;
+    super::computers::lever_with(api, &simplex_id, json!({ "op": "simplex", "on": false }))?;
     let account = b.eval(&page, ACCOUNT_SEEN)?;
     s.ok(
         "settings' Account says who is signed in, the email in bold, beside Sign out and Use another account (back to settings); a seat's holder is told nothing a guest is",
@@ -1205,6 +1337,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
         legal == json!({ "last": true, "links": [["Privacy", "/privacy", "_blank"], ["Terms", "/terms", "_blank"]], "text": "Privacy · Terms" }),
         &legal,
     );
+    release_line_ui(s, api, &mut b, &page)?;
     // a prompt for Claude Code or Codex naming this platform's own llms.txt,
     // copied whole; the CLI's install folded below it
     let prompt = format!("Read {}/llms.txt and help me build: ", api.base);
@@ -1280,6 +1413,8 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     settings_race_ui(s, api, &mut b, &page, &session)?;
     notice_ui(s, &mut b, &page, &chat, &shots)?;
     reasoning_ui(s, api, &mut b, &page, &session, &shots)?;
+    home_ui(s, api, &mut b, &page, &me, &shots)?;
+    one_route_ui(s, api, &mut b, &session)?;
     models_ui(s, api, &mut b, &page, &session, &chat, &shots)?;
     left_and_back_ui(s, api, &mut b, &page, &session, &chat)?;
     computer_ui(s, api, &mut b, &page, &session, &chat, &shots)?;
@@ -1478,6 +1613,69 @@ const COPY_SEEN: &str = "(() => { const p = document.getElementById('build-promp
 /// their links (text, href, target) and words.
 const LEGAL_LINKS_IN_ACCOUNT: &str = "(() => { const s = [...document.querySelectorAll('#settings-page .settings-section')].find((s) => s.querySelector(':scope > h2')?.textContent === 'Account'); \
     const p = s?.querySelector('.legal-links'); return { last: !!p && s.lastElementChild === p, links: [...(p?.querySelectorAll('a') ?? [])].map((a) => [a.textContent, a.getAttribute('href'), a.target]), text: p?.textContent ?? null }; })()";
+
+/// Settings' last line (shell.js `releaseLine`): the release it names, its
+/// words, its link (href, target), its time (seconds, from `datetime`) and
+/// the page's deployed meta, whether it ends Settings, and the Computer
+/// section's Version.
+const RELEASE_LINE: &str = "(() => { const p = document.querySelector('#settings-page .settings-release'); const a = p?.querySelector('a'); const t = p?.querySelector('time'); \
+    const v = [...document.querySelectorAll('#settings-page .settings-line')].find((l) => l.querySelector('.settings-key')?.textContent === 'Version'); \
+    return p && { release: p.dataset.release, text: p.textContent, link: a && [a.textContent, a.getAttribute('href'), a.target], at: t && Date.parse(t.dateTime) / 1000, said: t?.textContent ?? null, \
+      meta: document.querySelector('meta[name=fragment-release-deployed]')?.content ?? null, last: p.parentElement.lastElementChild === p, version: v?.querySelector('.settings-value')?.textContent ?? null }; })()";
+
+/// Settings end with the release this page is, as the node reports it
+/// (`x-fragment-deploy`), when it was deployed and the version its
+/// computer runs (shell.js `releaseLine`), small and muted. Valid: the
+/// node's own release (`dev` here, no commit: no link) and its time;
+/// a commit's id (the release cookie naming one, as a deploy would) links
+/// to that commit on GitHub, in a tab of its own. The browser goes back to
+/// the node's own release, settings loaded, whatever happened.
+fn release_line_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    let own = api.unsigned("HEAD", "/healthz", None)?.header("x-fragment-deploy");
+    let checked = release_line_steps(s, api, b, page, &own, wait);
+    b.set_cookie(&format!("{}/", api.base), RELEASE_COOKIE, "")?;
+    b.reload(page)?;
+    let back = b.until(page, &format!("document.querySelector('#settings-page .settings-release')?.dataset.release === {}", js(&own)), wait);
+    anyhow::ensure!(back, "settings, back on the node's own release ({own}): {}", b.eval(page, RELEASE_LINE)?);
+    checked
+}
+
+fn release_line_steps(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, own: &str, wait: std::time::Duration) -> Result<()> {
+    let shown = |b: &mut Browser, id: &str| -> Result<Value> {
+        b.until(page, &format!("document.querySelector('#settings-page .settings-release')?.dataset.release === {}", js(id)), wait);
+        b.eval(page, RELEASE_LINE)
+    };
+    let line = shown(b, own)?;
+    let is_commit = (7..=40).contains(&own.len()) && own.bytes().all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c));
+    let link = if is_commit { json!([own, format!("https://github.com/finitecomputer/fragment/commit/{own}"), "_blank"]) } else { Value::Null };
+    let version = line["version"].as_str().unwrap_or("");
+    let said = line["said"].as_str().unwrap_or("");
+    s.ok(
+        "Settings end with the release the node reports, when it was deployed, and the version its computer runs: one small line, its commit (none here) a link",
+        line["release"] == own
+            && line["link"] == link
+            && line["last"] == true
+            && line["meta"].as_str().and_then(|m| m.parse::<f64>().ok()).is_some_and(|m| line["at"].as_f64() == Some(m))
+            && !said.is_empty()
+            && !version.is_empty()
+            && line["text"] == format!("Release {own} · {said} · Computer {version}").as_str(),
+        &line,
+    );
+    // a deploy's commit, to this browser: its id links to it
+    let commit = "0377c876abcd";
+    b.set_cookie(&format!("{}/", api.base), RELEASE_COOKIE, commit)?;
+    b.reload(page)?;
+    let line = shown(b, commit)?;
+    s.ok(
+        "a release that is a commit links to it on GitHub, in a tab of its own",
+        line["release"] == commit
+            && line["link"] == json!([commit, format!("https://github.com/finitecomputer/fragment/commit/{commit}"), "_blank"])
+            && line["text"].as_str().is_some_and(|t| t.starts_with(&format!("Release {commit} · "))),
+        &line,
+    );
+    Ok(())
+}
 
 /// The chat's composer, ready for the person: its page has its hello.
 const COMPOSER_READY: &str = "(() => { const t = document.getElementById('text'); return !!t && !t.disabled && document.getElementById('say')?.dataset.ready === '1'; })()";
@@ -2079,18 +2277,14 @@ fn faces_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person,
     // renamed elsewhere, as `fragment agent --name` does (its files, then a
     // deploy): the sidebar and the chat's page follow; the chat's own title
     // is the chat's, and stays
-    let mut manifest = shell(api, me.session, "GET", &format!("/api/f/{agent}/manifest"), None, &[])?.body;
-    manifest["meta"]["title"] = json!("Frankie");
-    let files = json!({ "message": "rename", "files": [{ "path": "fragment.json", "text": format!("{}\n", serde_json::to_string_pretty(&manifest)?) }] });
-    let wrote = shell(api, me.session, "POST", &format!("/api/f/{agent}/files"), Some(&files), &[])?;
-    let deployed = shell(api, me.session, "POST", &format!("/api/f/{agent}/deploy"), Some(&json!({})), &[])?;
+    let wrote = rename_elsewhere(api, me.session, &agent, "Frankie")?;
     let followed = b.until(page, "document.querySelector('#sidebar-agent .title')?.textContent === 'Frankie'", wait);
     let in_frame = s.eventually(wait, || b.eval_in_frame(page, chat, "document.getElementById('head-label')?.textContent === 'Frankie'").ok() == Some(Value::Bool(true)));
     let kept = b.eval(page, &format!("({{ row: document.querySelector({own_row})?.textContent ?? null, header: document.getElementById('chat-title').textContent }})"))?;
     let listed = own_row_of(api, me.session, chat);
     s.ok(
         "renamed elsewhere (its files and a deploy, as the CLI does), the sidebar and the chat's page follow with no reload, and its first chat keeps its own title: its row, its header and its fragment's",
-        wrote.status == 200 && deployed.status == 200 && followed && in_frame && kept["row"] == FIRST_CHAT && kept["header"] == FIRST_CHAT && listed["title"] == FIRST_CHAT,
+        wrote && followed && in_frame && kept["row"] == FIRST_CHAT && kept["header"] == FIRST_CHAT && listed["title"] == FIRST_CHAT,
         json!({ "shown": kept, "chat": listed }),
     );
     let renamed = screen_named(s, b, "Frankie");
@@ -2120,6 +2314,43 @@ fn faces_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person,
         named && seen["title"] == "Frankie" && !text.contains(me.first_title) && !seen["soul"].as_str().unwrap_or("").contains("Frank") && !cheap.is_empty() && cheap != "cheap" && !text.contains("cheap model"),
         json!({ "was": me.first_title, "seen": seen, "cheap": cheap }),
     );
+    // Every surface follows a rename (Paul, 2026-10-26: "be systematic about
+    // referring to the user's chosen name"): with Settings drawn (Agents,
+    // Computer, Skills, Sharing, …) and its page, its files and its screen
+    // open, renamed elsewhere; then nothing the shell draws, nor any page it
+    // frames, says a name it had, in its text, its labels or its titles. A
+    // surface that copies a name once fails here, wherever it is.
+    b.eval(page, &format!("(document.querySelector({})?.click(), true)", js(&format!("#stack .pane[data-key={}] button[aria-label=Files]", js(&format!("app:{agent}"))))))?;
+    let files_open = b.until(page, &format!("!!document.querySelector({})", js(&format!("#stack .pane[data-key={}]", js(&format!("tree:{agent}"))))), wait);
+    b.click(page, "#sidebar-agent")?;
+    let screen_open = menu_item(b, page, "Its screen")? && screen_named(s, b, "Frankie");
+    b.click(page, "#settings")?;
+    let drawn = b.until(page, &format!("location.pathname === '/settings' && document.querySelector({face})?.textContent === 'Frankie' && !!document.querySelector('#settings-page .access-list')"), wait);
+    let wrote = rename_elsewhere(api, me.session, &agent, "Rosalind")?;
+    let followed = b.until(page, &format!("document.querySelector({face})?.textContent === 'Rosalind'"), wait)
+        && screen_named(s, b, "Rosalind")
+        && s.eventually(wait, || b.eval_in_frame(page, &its_page, "document.getElementById('name')?.textContent").ok() == Some(json!("Rosalind")));
+    let swept = |b: &mut Browser, frame: Option<&str>| -> Value {
+        let expr = format!("({OLD_NAME_SWEEP})({})", js("Frank"));
+        match frame {
+            None => b.eval(page, &expr),
+            Some(f) => b.eval_in_frame(page, f, &expr),
+        }
+        .unwrap_or_else(|e| json!([format!("unswept: {e}")]))
+    };
+    let mut hits = json!({ "shell": swept(b, None), "page": swept(b, Some(&its_page)), "screen": swept(b, Some(&screen_at)) });
+    let _ = b.screenshot(page, &shots.join("settings-renamed.png"));
+    // its chat, hidden under Settings (its page draws as it is shown), seen again
+    b.eval(page, &format!("(document.querySelector({screen_pane})?.closest('.pane')?.querySelector('button[aria-label=Close]')?.click(), true)"))?;
+    open_row(b, page, chat, wait)?;
+    let in_chat = s.eventually(wait, || b.eval_in_frame(page, chat, "document.getElementById('head-label')?.textContent").ok() == Some(json!("Rosalind")));
+    hits["chat"] = swept(b, Some(chat));
+    let clean = hits.as_object().is_some_and(|o| o.values().all(|v| v.as_array().is_some_and(Vec::is_empty)));
+    s.ok(
+        "renamed elsewhere with Settings drawn and its page, its files and its screen open: Settings, its windows and every page the shell frames follow, and nothing anywhere says a name it had (text, labels, titles)",
+        files_open && screen_open && drawn && wrote && followed && in_chat && clean,
+        json!({ "files": files_open, "screen": screen_open, "drawn": drawn, "followed": followed, "chat": in_chat, "hits": hits }),
+    );
     // Rename asks for what it renames: the chat's name in the chat's ⋯, the
     // agent's in its menu, each alone
     let asked_for = |b: &mut Browser, open: &str| -> Result<Value> {
@@ -2135,8 +2366,37 @@ fn faces_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person,
     let agents_own = asked_for(b, "#sidebar-agent")?;
     s.ok(
         "Rename… in the first chat's ⋯ names the chat (\"Name this chat\", its own title), and in the agent's menu the agent (\"Name your agent\", its name)",
-        chats_own == json!({ "title": "Name this chat", "value": FIRST_CHAT }) && agents_own == json!({ "title": "Name your agent", "value": "Frankie" }),
+        chats_own == json!({ "title": "Name this chat", "value": FIRST_CHAT }) && agents_own == json!({ "title": "Name your agent", "value": "Rosalind" }),
         json!({ "chat": chats_own, "agent": agents_own }),
+    );
+    // its page in a tab of its own (Open in a new tab: no shell tells it its
+    // name), as every reader shows it (Alex's review of #630): a padded
+    // title trimmed, one of only spaces or none its label, and one that is
+    // its fragment's name in full shown as it is; on a computer, and fresh,
+    // on none yet
+    let fresh = shell(api, me.session, "POST", "/api/fragments", Some(&json!({ "label": "standalone", "template": "agent" })), &[])?;
+    let fresh = fresh.body["name"].as_str().unwrap_or("").to_string();
+    let mut said = vec![];
+    for one in [agent.clone(), fresh.clone()] {
+        let label = label_of(&one).to_string();
+        let standalone = format!("{}/auth/fragment?name={one}&return=/", api.base);
+        for (title, shown) in [(Some("  Rosalind  "), "Rosalind"), (Some("   "), label.as_str()), (None, label.as_str()), (Some(one.as_str()), one.as_str())] {
+            let wrote = retitle(api, me.session, &one, title)?;
+            let row = s.eventually(wait, || own_row_of(api, me.session, &one)["title"] == json!(title.map(str::trim).filter(|t| !t.is_empty())));
+            let tab = b.open(&standalone)?;
+            let named = b.until(&tab, &format!("document.getElementById('name')?.textContent === {shown:?} && document.title === {shown:?}"), wait);
+            said.push(json!({ "agent": one, "title": title, "wrote": wrote, "row": row, "named": named, "page": b.eval(&tab, "({ name: document.getElementById('name')?.textContent ?? null, title: document.title })").ok() }));
+            b.close(tab)?;
+        }
+    }
+    retitle(api, me.session, &agent, Some("Rosalind"))?;
+    // the fresh one goes, so the person's agents are as the rest expects
+    let gone = shell(api, me.session, "DELETE", &format!("/api/f/{fresh}"), None, &[])?;
+    anyhow::ensure!(gone.status == 200, "the fresh agent's fragment deleted: {gone}");
+    s.ok(
+        "its page alone, opened in a tab of its own, names it as every reader does: a padded title trimmed, a blank one or none its label, its fragment's name in full as it is; on its computer, and fresh on none",
+        !fresh.is_empty() && said.len() == 8 && said.iter().all(|c| c["wrote"] == true && c["row"] == true && c["named"] == true),
+        json!(said),
     );
     // Remove: gone everywhere
     b.click(page, "#settings")?;
@@ -2223,6 +2483,50 @@ fn settings_loading(b: &mut Browser, page: &Page, open: &str, wait: std::time::D
 
 /// Opens `chat` from its row in the sidebar, as a person picks it (a
 /// reload, or /, opens the newest chat: maybe another).
+/// An agent renamed as `fragment agent --name` does it: its `fragment.json`'s
+/// `meta.title` written, then deployed (docs/api.md, "An agent's name and
+/// picture"); whether both answered.
+fn rename_elsewhere(api: &Api, session: &str, agent: &str, title: &str) -> Result<bool> {
+    retitle(api, session, agent, Some(title))
+}
+
+/// `rename_elsewhere`, or with no title (`None`: `meta.title` left out).
+fn retitle(api: &Api, session: &str, agent: &str, title: Option<&str>) -> Result<bool> {
+    let mut manifest = shell(api, session, "GET", &format!("/api/f/{agent}/manifest"), None, &[])?.body;
+    match title {
+        Some(t) => manifest["meta"]["title"] = json!(t),
+        None => {
+            if let Some(meta) = manifest["meta"].as_object_mut() {
+                meta.remove("title");
+            }
+        }
+    }
+    let files = json!({ "message": "rename", "files": [{ "path": "fragment.json", "text": format!("{}\n", serde_json::to_string_pretty(&manifest)?) }] });
+    let wrote = shell(api, session, "POST", &format!("/api/f/{agent}/files"), Some(&files), &[])?;
+    let deployed = shell(api, session, "POST", &format!("/api/f/{agent}/deploy"), Some(&json!({})), &[])?;
+    Ok(wrote.status == 200 && deployed.status == 200)
+}
+
+/// Where a document says `old` (a name an agent had), as a person or a
+/// screen reader meets it: its text (but scripts' and styles'), the labels,
+/// titles, alt texts and placeholders of its elements, and its own title.
+/// None: it says it nowhere.
+const OLD_NAME_SWEEP: &str = r#"(old) => {
+  const hits = [];
+  const walk = document.createTreeWalker(document.documentElement, NodeFilter.SHOW_TEXT);
+  while (walk.nextNode()) {
+    const n = walk.currentNode;
+    if (n.nodeValue.includes(old) && !n.parentElement?.closest("script, style")) hits.push(`text: ${(n.parentElement?.outerHTML ?? n.nodeValue).slice(0, 200)}`);
+  }
+  for (const e of document.querySelectorAll("*")) {
+    for (const a of ["aria-label", "title", "alt", "placeholder", "aria-description"]) {
+      if (e.getAttribute(a)?.includes(old)) hits.push(`${a}: ${e.outerHTML.slice(0, 200)}`);
+    }
+  }
+  if (document.title.includes(old)) hits.push(`document.title: ${document.title}`);
+  return hits;
+}"#;
+
 fn open_row(b: &mut Browser, page: &Page, chat: &str, wait: std::time::Duration) -> Result<()> {
     let row = format!("document.querySelector({})", js(&format!("#chats [data-key={}]", js(&format!("chat:{chat}")))));
     let open = format!("location.pathname === '/' && [...document.querySelectorAll('#frames iframe')].find((f) => !f.hidden)?.dataset.fragment === {}", js(chat));
@@ -3385,6 +3689,89 @@ fn notice_late_ui(s: &mut Suite, b: &mut Browser, page: &Page, chat: &str) -> Re
 /// default again takes it away. Invalid: a pick whose read of agent.json
 /// fails writes nothing and says so (Alex's review of #506: it wrote a
 /// fresh file, losing the model); none there (404) is written fresh.
+/// The shell at Settings, its computers' view with the tiers' labels named
+/// in `drop` taken away from its first document: a deployment that labels
+/// fewer routes than the node's two.
+fn open_with_fewer_labels(b: &mut Browser, api: &Api, drop: &[&str]) -> Result<Page> {
+    let script = format!(
+        "(() => {{ if (window !== window.top) return true; const real = window.fetch.bind(window); const drop = {}; \
+         window.fetch = async (url, o) => {{ const r = await real(url, o); if (url !== '/api/computers' || o?.method !== 'GET' || !r.ok) return r; \
+           const v = await r.clone().json(); for (const c of v.computers ?? []) for (const t of drop) if (c.models?.routes?.[t]) delete c.models.routes[t].label; \
+           return new Response(JSON.stringify(v), {{ status: r.status, headers: {{ 'content-type': 'application/json' }} }}); }}; return true; }})()",
+        serde_json::to_string(drop).expect("names")
+    );
+    let page = b.open_with_script(&format!("{}/settings", api.base), &script)?;
+    b.viewport(&page, 1280, 800, false)?;
+    Ok(page)
+}
+
+/// Alex's review of #586 (P2): with a single labelled route and no provider
+/// connected, an agent on the other tier still has a choice, its own tier
+/// or the route, so Settings offers it; one on the labelled route's own
+/// tier has none, and no pick is shown; none labelled, none, as before.
+fn one_route_ui(s: &mut Suite, api: &Api, b: &mut Browser, session: &str) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    let ready = "document.querySelector('[data-reasoning-for]')?.dataset.read === '1'";
+    let lead_of = "document.querySelector('[data-reasoning-for]')?.dataset.reasoningFor ?? ''";
+    // what Settings shows of the lead's model pick: none, hidden, or its options and its value
+    let shown = |b: &mut Browser, page: &Page, lead: &str| -> Result<Value> {
+        b.until(page, &format!("!document.querySelector('[data-model-for={lead:?}]') || document.querySelector('[data-model-for={lead:?}]').dataset.read === '1'"), wait);
+        b.eval(page, &format!("(() => {{ const p = document.querySelector('[data-model-for={lead:?}]'); if (!p) return null; if (p.parentElement.hidden) return 'hidden'; return {{ value: p.value, options: [...p.options].map((o) => [o.value, o.textContent]) }}; }})()"))
+    };
+    let probe = open_with_fewer_labels(b, api, &["medium"])?;
+    b.until(&probe, ready, wait);
+    let lead = b.eval(&probe, lead_of)?.as_str().unwrap_or("").to_string();
+    let file = format!("/api/f/{lead}/file?path=agent.json");
+    let agent_json = || shell(api, session, "GET", &file, None, &[]).map(|r| r.body).unwrap_or(Value::Null);
+    let write_tier = |tier: &str| shell(api, session, "POST", &format!("/api/f/{lead}/files"), Some(&json!({ "message": "the e2e's tier", "files": [{ "path": "agent.json", "text": format!("{:#}\n", json!({ "tier": tier })) }] })), &[]).map(|r| r.status);
+    let view = shell(api, session, "GET", "/api/computers", None, &[])?.body["computers"][0]["models"].clone();
+    let (cheap, medium) = (view["cheap"].as_str().unwrap_or("").to_string(), view["medium"].as_str().unwrap_or("").to_string());
+    let pick = |b: &mut Browser, page: &Page, value: &str| -> Result<bool> {
+        b.eval(page, &format!("(() => {{ const p = document.querySelector('[data-model-for={lead:?}]'); p.value = {value:?}; p.dispatchEvent(new Event('change')); return true; }})()"))?;
+        Ok(b.until(page, &format!("document.querySelector('[data-model-for={lead:?}]')?.dataset.saved === {value:?}"), wait))
+    };
+    // only the cheap tier labelled: an agent on it has no choice
+    let wrote = write_tier("cheap")?;
+    b.reload(&probe)?;
+    b.until(&probe, ready, wait);
+    let on_it = shown(b, &probe, &lead)?;
+    // one on the medium tier may pick the labelled route, its own tier shown as it is
+    let moved = write_tier("medium")?;
+    b.reload(&probe)?;
+    b.until(&probe, ready, wait);
+    let off_it = shown(b, &probe, &lead)?;
+    let took = pick(b, &probe, "route:cheap")? && agent_json()["tier"] == "cheap";
+    s.ok(
+        "one labelled route, no provider: an agent on its tier has no choice and no pick; one on the other tier is offered the route and its own tier, and picks the route",
+        wrote == 200 && moved == 200
+            && on_it == "hidden"
+            && off_it == json!({ "value": "route:medium", "options": [["route:cheap", format!("{} · {cheap}", crate::RECOMMENDED_LABEL)], ["route:medium", format!("Medium ({medium})")]] })
+            && took,
+        json!({ "onIt": on_it, "offIt": off_it, "took": took }),
+    );
+    b.close(probe)?;
+    // only the medium tier labelled: an agent on the cheap tier may pick it
+    let probe = open_with_fewer_labels(b, api, &["cheap"])?;
+    b.until(&probe, ready, wait);
+    let offered = shown(b, &probe, &lead)?;
+    let took = pick(b, &probe, "route:medium")? && agent_json()["tier"] == "medium";
+    s.ok(
+        "only the other route labelled: an agent on the cheap tier is offered it and its own tier, and picks it",
+        offered == json!({ "value": "route:cheap", "options": [["route:medium", format!("{} · {medium}", crate::STANDARD_LABEL)], ["route:cheap", format!("Cheap ({cheap})")]] }) && took,
+        json!({ "offered": offered, "took": took }),
+    );
+    b.close(probe)?;
+    // none labelled: no pick without a provider, as before
+    let probe = open_with_fewer_labels(b, api, &["cheap", "medium"])?;
+    b.until(&probe, ready, wait);
+    let none = shown(b, &probe, &lead)?;
+    s.ok("no route labelled, no provider: no model pick, as before", none.is_null(), &none);
+    b.close(probe)?;
+    let back = write_tier("cheap")?;
+    anyhow::ensure!(back == 200, "the agent back on the cheap tier: {back}");
+    Ok(())
+}
+
 fn reasoning_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &str, shots: &std::path::Path) -> Result<()> {
     let wait = std::time::Duration::from_secs(30);
     b.reload(page)?;
@@ -3393,11 +3780,11 @@ fn reasoning_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session:
     let pick_of = format!("document.querySelector('[data-reasoning-for={lead:?}]')");
     let options = b.eval(page, &format!("[...({pick_of}?.options ?? [])].map((o) => [o.value, o.textContent])"))?;
     let shown = b.eval(page, &format!("{pick_of}?.value ?? null"))?;
-    let every = b.eval(page, "document.querySelectorAll('.agent-setting').length > 0 && document.querySelectorAll('.agent-setting').length === document.querySelectorAll('.agent-setting [data-reasoning-for]').length && document.querySelectorAll('[data-model-for]').length === 0")?;
+    let every = b.eval(page, "document.querySelectorAll('.agent-setting').length > 0 && document.querySelectorAll('.agent-setting').length === document.querySelectorAll('.agent-setting [data-reasoning-for]').length && document.querySelectorAll('.agent-setting').length === document.querySelectorAll('.agent-setting [data-model-for]').length")?;
     let agent_json = || shell(api, session, "GET", &format!("/api/f/{lead}/file?path=agent.json"), None, &[]).map(|r| r.body).unwrap_or(Value::Null);
     let before = agent_json();
     s.ok(
-        "every agent offers how hard it thinks, with no provider connected too: Default (High), Low and High, the default shown while its agent.json names none",
+        "every agent offers how hard it thinks, with no provider connected too: Default (High), Low and High, the default shown while its agent.json names none (and its route, the deployment labelling two)",
         read && !lead.is_empty() && options == json!([["", "Default (High)"], ["low", "Low"], ["high", "High"]]) && shown == "" && every == true && before["tier"] == "cheap" && before.get("reasoning").is_none(),
         json!({ "options": options, "shown": shown, "every": every, "agentJson": before }),
     );
@@ -3455,6 +3842,214 @@ fn reasoning_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session:
     Ok(())
 }
 
+/// An agent's home (docs/api.md, "An agent's home"): Settings' Agents says
+/// where each agent reaches its person ("Reaches you in"), its own chat by
+/// default, with nothing else to pick until it has a SimpleX chat, and the
+/// sidebar marks that chat. Its SimpleX chat (made here by its owner, as its
+/// computer's bridge makes one as SimpleX links: the stub runs no SimpleX)
+/// lists as "<agent> · SimpleX"; picked, it is the agent's `agent.json`
+/// `home`, the rest kept, and the mark moves to it; picked back, its own
+/// chat is its home again.
+fn home_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person, shots: &std::path::Path) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    let agent = own_named(api, me.session, me.first)?;
+    let own_chat = own_named(api, me.session, &format!("{}-chat", me.first))?;
+    let id = agent_ids(api, me.session, &[me.first])?.remove(0);
+    let pick_of = format!("document.querySelector('[data-home-for={agent:?}]')");
+    let said_of = format!("document.querySelector('.agent-setting[data-agent={agent:?}] .agent-model-said')?.textContent");
+    let seen = format!(
+        "({{ options: [...({pick_of}?.options ?? [])].map((o) => [o.value, o.textContent]), value: {pick_of}?.value ?? null, disabled: {pick_of}?.disabled ?? null, label: {pick_of}?.closest('label')?.querySelector('.settings-key')?.textContent ?? null, every: document.querySelectorAll('.agent-setting').length > 0 && document.querySelectorAll('.agent-setting').length === document.querySelectorAll('.agent-setting [data-home-for]').length, marks: [...document.querySelectorAll('#chats .home-mark')].map((m) => [m.closest('[data-key]').dataset.key, m.getAttribute('aria-label')]) }})"
+    );
+    let marked = |v: &Value, chat: &str| v["marks"].as_array().is_some_and(|m| m.iter().any(|x| x[0] == format!("chat:{chat}").as_str() && x[1] == format!("{} reaches you here", me.first_title).as_str()));
+    let agent_json = || shell(api, me.session, "GET", &format!("/api/f/{agent}/file?path=agent.json"), None, &[]).map(|r| r.body).unwrap_or(Value::Null);
+    let before = agent_json();
+    b.reload(page)?;
+    let read = b.until(page, &format!("{pick_of}?.dataset.read === '1' && {seen}.marks.some((x) => x[0] === {})", js(&format!("chat:{own_chat}"))), wait);
+    let first = b.eval(page, &seen)?;
+    s.ok(
+        "every agent says where it reaches its person (\"Reaches you in\"): its own chat, the only choice before it has a SimpleX chat, and the sidebar marks that chat",
+        read && first["label"] == "Reaches you in" && first["options"].as_array().map(Vec::len) == Some(1) && first["value"] == "" && first["disabled"] == false && first["every"] == true && marked(&first, &own_chat) && before.get("home").is_none(),
+        json!({ "seen": first, "agentJson": before }),
+    );
+    // its SimpleX chat, as its computer's bridge makes one for its person
+    let made = shell(api, me.session, "POST", "/api/fragments", Some(&json!({ "label": format!("{}-simplex", me.first), "template": "chat", "title": "SimpleX" })), &[])?;
+    anyhow::ensure!(made.status == 200, "its SimpleX chat: {made}");
+    let sx = made.body["name"].as_str().unwrap_or("").to_string();
+    let joined = shell(api, me.session, "PUT", &format!("/api/f/{sx}/members/{id}"), Some(&json!({ "role": "editor" })), &[])?;
+    anyhow::ensure!(joined.status == 200, "its agent in it: {joined}");
+    let row = format!("document.querySelector({})?.textContent", js(&format!("#chats [data-key={}] .label", js(&format!("chat:{sx}")))));
+    let listed = b.until(page, &format!("{row} === {}", js(&format!("{} · SimpleX", me.first_title))), wait);
+    b.reload(page)?;
+    let offered = b.until(page, &format!("{pick_of}?.dataset.read === '1' && {pick_of}.options.length === 2 && !{pick_of}.disabled"), wait);
+    let pick = |b: &mut Browser, value: &str| -> Result<bool> {
+        b.eval(page, &format!("(() => {{ const p = {pick_of}; p.value = {value:?}; p.dispatchEvent(new Event('change')); return true; }})()"))?;
+        Ok(b.until(page, &format!("{pick_of}?.dataset.saved === {value:?} && {said_of} === 'Saved.'"), wait))
+    };
+    let saved = pick(b, "simplex")?;
+    let moved = b.until(page, &format!("(() => {{ const m = {seen}.marks.map((x) => x[0]); return m.includes({}) && !m.includes({}); }})()", js(&format!("chat:{sx}")), js(&format!("chat:{own_chat}"))), wait);
+    let after = agent_json();
+    let mut home = before.clone();
+    home["home"] = json!("simplex");
+    let picked = b.eval(page, &seen)?;
+    b.eval(page, &format!("({pick_of}?.scrollIntoView({{ block: 'center' }}), true)"))?;
+    let _ = b.screenshot(page, &shots.join("desktop-agent-home.png"));
+    s.ok(
+        "its SimpleX chat lists as \"<agent> · SimpleX\"; Settings then offer it, and picked it is the agent's agent.json `home` (the rest kept), said as saved, and the sidebar's mark moves to it",
+        listed && offered && saved && moved && after == home && picked["options"].as_array().map(Vec::len) == Some(2) && picked["options"][1] == json!(["simplex", "SimpleX"]) && marked(&picked, &sx),
+        json!({ "seen": picked, "agentJson": after }),
+    );
+    // shown again as picked; picked back, its own chat is its home again
+    b.reload(page)?;
+    let again = b.until(page, &format!("{pick_of}?.dataset.read === '1' && {pick_of}.value === 'simplex'"), wait);
+    let back = pick(b, "")?;
+    let returned = b.until(page, &format!("(() => {{ const m = {seen}.marks.map((x) => x[0]); return m.includes({}) && !m.includes({}); }})()", js(&format!("chat:{own_chat}")), js(&format!("chat:{sx}"))), wait);
+    let gone = agent_json();
+    s.ok("settings show it again as picked; picked back, its own chat is its home again: no `home` in agent.json, the mark back on its chat", again && back && returned && gone == before, &gone);
+    // Alex's review of #619: one home a page, whatever comes in what order.
+    // A pane of its link page stands in a frame (`data-simplex`), and its
+    // asks are its messages (the shell takes a message only from such a
+    // frame, of its origin); the computer says its image does SimpleX
+    let computer = shell(api, me.session, "GET", "/api/computers", None, &[])?.body["computers"][0]["computer"].as_str().unwrap_or("").to_string();
+    super::computers::lever_with(api, &computer, json!({ "op": "simplex", "on": true }))?;
+    let write_home = |home: Option<&str>| {
+        let text = match home {
+            Some(h) => format!("{{\n  \"tier\": \"cheap\",\n  \"home\": {h:?}\n}}\n"),
+            None => "{\n  \"tier\": \"cheap\"\n}\n".to_string(),
+        };
+        shell(api, me.session, "POST", &format!("/api/f/{agent}/files"), Some(&json!({ "message": "the e2e's home", "files": [{ "path": "agent.json", "text": text }] })), &[]).map(|r| r.status)
+    };
+    let ask = |b: &mut Browser, p: &Page, want: &str, home: Option<bool>| {
+        let data = json!({ "fragment": "simplex", "agent": agent, "want": want, "home": home });
+        b.eval(p, &format!("(() => {{ if (!window.__pane) {{ const f = document.createElement('iframe'); f.dataset.simplex = {a}; f.dataset.src = location.origin + '/'; f.srcdoc = 'pane'; f.hidden = true; document.body.append(f); window.__pane = f; }} dispatchEvent(new MessageEvent('message', {{ data: {data}, origin: location.origin, source: window.__pane.contentWindow }})); return true; }})()", a = js(&agent)))
+    };
+    let shows = |b: &mut Browser, p: &Page, home: &str| {
+        let (chat, value) = if home == "simplex" { (&sx, "simplex") } else { (&own_chat, "") };
+        b.until(p, &format!("(() => {{ const v = {seen}; return v.value === {value:?} && v.marks.map((x) => x[0]).includes({}); }})()", js(&format!("chat:{chat}"))), wait)
+    };
+    let home_now = || agent_json().get("home").cloned();
+    let settled = |b: &mut Browser, p: &Page, home: &str| {
+        let ok = shows(b, p, home);
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        ok && shows(b, p, home)
+    };
+    // a link's ticked box, then an unlink, with Settings open: the home, the bell and the pick follow
+    b.until(page, "!!document.querySelector('#settings-simplex:not([hidden])')", wait);
+    ask(b, page, "link", Some(true))?;
+    let linked = shows(b, page, "simplex") && home_now() == Some(json!("simplex"));
+    ask(b, page, "unlink", None)?;
+    let unlinked = shows(b, page, "") && home_now().is_none();
+    s.ok("with Settings open, a link's ticked box makes its SimpleX chat its home and an unlink its own chat again: agent.json, the bell and the pick each time", linked && unlinked, json!({ "seen": b.eval(page, &seen)?, "agentJson": agent_json() }));
+    // an unlink while a pick of SimpleX is still saving: queued after it, so its own chat is the home
+    b.eval(page, &format!("(() => {{ const real = window.fetch; window.fetch = (u, o) => {{ if (o?.method === 'POST' && String(u).endsWith({})) {{ window.fetch = real; return new Promise((done) => {{ window.__save = () => done(real(u, o)); }}); }} return real(u, o); }}; return true; }})()", js(&format!("/api/f/{agent}/files"))))?;
+    b.eval(page, &format!("(() => {{ const p = {pick_of}; p.value = 'simplex'; p.dispatchEvent(new Event('change')); return true; }})()"))?;
+    let held = b.until(page, "typeof window.__save === 'function'", wait);
+    ask(b, page, "unlink", None)?;
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    b.eval(page, "(window.__save(), true)")?;
+    s.ok("an unlink while a pick of SimpleX is still saving is written after it: its own chat is the home, and the bell and the pick say so", held && settled(b, page, "") && home_now().is_none(), json!({ "seen": b.eval(page, &seen)?, "agentJson": agent_json() }));
+    // a read of the home asked before a write, answered after it, is let go:
+    // its old answer (or a 404) never undoes the write, as a link sets it
+    // (Settings open in a page whose first read of agent.json is held)
+    let hold = |as404: bool| {
+        let answer = if as404 { "new Response(JSON.stringify({ error: 'not_found', message: 'no such file' }), { status: 404, headers: { 'content-type': 'application/json' } })" } else { "answer" };
+        format!("(() => {{ const real = window.fetch; let held = false; window.fetch = (u, o) => {{ if (!held && (o?.method ?? 'GET') === 'GET' && String(u).endsWith({})) {{ held = true; const answer = real(u, o); return new Promise((done) => {{ window.__read = () => done({answer}); }}); }} return real(u, o); }}; }})();", js(&format!("/api/f/{agent}/file?path=agent.json")))
+    };
+    let mut stale = vec![];
+    for (as404, before, want, after) in [(false, None, Some(true), "simplex"), (true, None, Some(true), "simplex"), (false, Some("simplex"), None, "")] {
+        anyhow::ensure!(write_home(before)? == 200, "agent.json as the case starts");
+        let p = b.open_with_script(&format!("{}/settings", api.base), &hold(as404))?;
+        let read = b.until(&p, "typeof window.__read === 'function' && !!document.querySelector('#settings-simplex:not([hidden])')", wait);
+        ask(b, &p, if want.is_some() { "link" } else { "unlink" }, want)?;
+        let written = shows(b, &p, after);
+        b.eval(&p, "(window.__read(), true)")?;
+        let kept = settled(b, &p, after) && home_now() == (after == "simplex").then(|| json!("simplex"));
+        stale.push(json!({ "as404": as404, "before": before, "read": read, "written": written, "kept": kept, "seen": b.eval(&p, &seen)? }));
+        b.close(p)?;
+    }
+    s.ok(
+        "a home read asked before a write and answered after it is let go: its old answer, or a 404, never moves the bell back after a link, nor an unlink before the first read is in",
+        stale.iter().all(|c| c["read"] == true && c["written"] == true && c["kept"] == true),
+        json!(stale),
+    );
+    // Alex's second review of #619: a home read that fails (a 503, as a
+    // deploy answers) leaves it unknown, never stuck. Its agent.json's reads
+    // refused while `__refuse` is not false
+    let refusing = format!(
+        "(() => {{ const real = window.fetch; window.__refused = 0; window.fetch = (u, o) => {{ if (window.__refuse !== false && (o?.method ?? 'GET') === 'GET' && String(u).endsWith({})) {{ window.__refused++; \
+         return Promise.resolve(new Response(JSON.stringify({{ error: 'unavailable', message: 'refused for the test' }}), {{ status: 503, headers: {{ 'content-type': 'application/json' }} }})); }} return real(u, o); }}; }})();",
+        js(&format!("/api/f/{agent}/file?path=agent.json"))
+    );
+    let unread_of = format!("document.querySelector('[data-home-unread={agent:?}]')");
+    let painted = format!("(() => {{ const v = {seen}; return {pick_of}?.dataset.read === '1' && v.value === '' && !v.disabled && v.options.length === 2 && !{unread_of}?.checkVisibility(); }})()");
+    // its first read refused, then Settings opened once reads answer: read again there
+    let p = b.open_with_script(&format!("{}/", api.base), &refusing)?;
+    let refused = b.until(&p, "window.__refused > 0 && location.pathname === '/'", wait);
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    b.eval(&p, "(window.__refuse = false, true)")?;
+    // (Settings' button pressed as the page has it: its sidebar may be folded)
+    b.eval(&p, "(document.getElementById('settings').click(), true)")?;
+    let reopened = b.until(&p, &painted, wait);
+    let first = json!({ "refused": refused, "seen": b.eval(&p, &seen)? });
+    b.close(p)?;
+    s.ok("a home whose first read fails (a 503) is read again when Settings open, and the pick shows it", refused && reopened, first);
+    // its read refused with Settings open: said under the pick, which waits; Try again reads it
+    let p = b.open_with_script(&format!("{}/settings", api.base), &refusing)?;
+    let said = b.until(&p, &format!("{unread_of}?.checkVisibility() === true && {pick_of}.disabled && {pick_of}.options.length === 0"), wait);
+    let line = b.eval(&p, &format!("{unread_of}?.innerText ?? null"))?;
+    b.eval(&p, &format!("({unread_of}?.scrollIntoView({{ block: 'center' }}), true)"))?;
+    let _ = b.screenshot(&p, &shots.join("desktop-agent-home-unread.png"));
+    b.eval(&p, "(window.__refuse = false, true)")?;
+    if said {
+        b.click(&p, &format!("[data-home-unread={agent:?}] button"))?;
+    }
+    let retried = said && b.until(&p, &painted, wait);
+    let second = json!({ "line": line, "seen": b.eval(&p, &seen)? });
+    b.close(p)?;
+    s.ok(
+        "a home read that fails with Settings open says so under its pick in one line, with Try again, which reads it again and shows it",
+        said && line.as_str().is_some_and(|l| l.contains("Couldn't read where it reaches you.") && l.contains("Try again")) && retried,
+        second,
+    );
+    // Alex's third review of #619: a home answered while Settings are still
+    // being built (their skills' read held, so nothing is in the page yet)
+    // is shown once they are: the home, or a failed read's line. Its
+    // agent.json's reads held until the case answers them
+    let skills = own_skills(api, me.session)?.into_iter().next().context("the person's skills fragment")?;
+    let holding = format!(
+        "(() => {{ const real = window.fetch; window.__homes = []; window.__homeMode = 'hold'; let held = false; \
+         const refusal = () => new Response(JSON.stringify({{ error: 'unavailable', message: 'refused for the test' }}), {{ status: 503, headers: {{ 'content-type': 'application/json' }} }}); \
+         window.fetch = (u, o) => {{ const url = String(u); const get = (o?.method ?? 'GET') === 'GET'; \
+           if (get && url.endsWith({home})) {{ if (window.__homeMode === 'hold') return new Promise((done) => window.__homes.push(() => done(window.__homeMode === 'pass' ? real(u, o) : refusal()))); \
+             if (window.__homeMode === 'refuse') return Promise.resolve(refusal()); }} \
+           if (get && !held && url.endsWith({files})) {{ held = true; return new Promise((done) => {{ window.__skills = () => done(real(u, o)); }}); }} \
+           return real(u, o); }}; }})();",
+        home = js(&format!("/api/f/{agent}/file?path=agent.json")),
+        files = js(&format!("/api/f/{skills}/files")),
+    );
+    let mut built = vec![];
+    for (mode, shown) in [("pass", painted.clone()), ("refuse", format!("{unread_of}?.checkVisibility() === true && {pick_of}.disabled"))] {
+        let p = b.open_with_script(&format!("{}/settings", api.base), &holding)?;
+        let held = b.until(&p, "typeof window.__skills === 'function' && window.__homes.length > 0 && !document.querySelector('[data-home-for]')", wait);
+        b.eval(&p, &format!("(window.__homeMode = {}, window.__homes.splice(0).forEach((answer) => answer()), true)", js(mode)))?;
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        b.eval(&p, "(window.__skills(), true)")?;
+        let ok = held && b.until(&p, &shown, wait);
+        built.push(json!({ "answer": mode, "held": held, "ok": ok, "seen": b.eval(&p, &seen)?, "line": b.eval(&p, &format!("{unread_of}?.checkVisibility() ?? null"))? }));
+        b.close(p)?;
+    }
+    s.ok(
+        "a home answered while Settings are still being built is shown once they are: its home in the pick, or, its read failed, the line with Try again",
+        built.iter().all(|c| c["ok"] == true),
+        json!(built),
+    );
+    super::computers::lever_with(api, &computer, json!({ "op": "simplex", "on": false }))?;
+    anyhow::ensure!(write_home(None)? == 200, "agent.json as it was");
+    // as the lanes after it expect it: no SimpleX chat
+    let deleted = shell(api, me.session, "DELETE", &format!("/api/f/{sx}"), None, &[])?;
+    anyhow::ensure!(deleted.status == 200, "its SimpleX chat deleted: {deleted}");
+    Ok(())
+}
+
 /// What settings says when the read of agent.json a pick is written onto
 /// fails (cell/shell/shell.js, `UNREAD_SETTINGS`).
 const UNREAD_SETTINGS: &str = "Couldn't read this agent's settings, so nothing was changed. Try again.";
@@ -3476,8 +4071,8 @@ fn models_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
     let offered = b.until(page, &format!("document.querySelector('{row}')?.dataset.state === 'not_set' && !!document.querySelector('{row} [data-action=sign-in]')"), wait);
     let pasted = b.eval(page, &format!("!!document.querySelector('{row} input')"))?;
     s.ok(
-        "an own key with a sign-in is connected from its row with a press, never pasted: no key field, and no agent offers its models yet",
-        offered && pasted == false && b.eval(page, "document.querySelectorAll('[data-model-for]').length")? == 0,
+        "an own key with a sign-in is connected from its row with a press, never pasted: no key field, and no agent offers its models yet (only the deployment's routes)",
+        offered && pasted == false && b.eval(page, "[...document.querySelectorAll('[data-model-for] option')].every((o) => o.value.startsWith('route:'))")? == true,
         b.eval(page, &format!("document.querySelector('{row}')?.innerText"))?,
     );
     // its window opens in the press itself, before the authorize call (one
@@ -3535,8 +4130,8 @@ fn models_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
         came_back && said.0 && set && s.openrouter.keys().len() == keys_before + 1 && manage == "https://openrouter.ai/settings/keys",
         json!({ "popup": said.1, "manage": manage }),
     );
-    // each agent offers the provider's models beside its tier's, by the
-    // tier's name and its model's id, as their computer's view names it
+    // each agent offers the provider's models after the deployment's routes,
+    // each by its label and its model's id, as their computer's view names them
     let lead = b.eval(page, "document.querySelector('[data-model-for]')?.dataset.modelFor ?? ''")?.as_str().unwrap_or("").to_string();
     let read = b.until(page, &format!("document.querySelector('[data-model-for={lead:?}]')?.dataset.read === '1'"), wait);
     let options = b.eval(page, &format!("[...(document.querySelector('[data-model-for={lead:?}]')?.options ?? [])].map((o) => [o.value, o.textContent])"))?;
@@ -3547,14 +4142,18 @@ fn models_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
     let runs_on = |v: &Value| v["agents"].as_array().and_then(|l| l.iter().find(|a| a["fragment"] == lead.as_str())).map(|a| a["modelProviders"].clone()).unwrap_or(Value::Null);
     let connected = view();
     let cheap = connected["models"]["cheap"].as_str().unwrap_or("").to_string();
+    let medium = connected["models"]["medium"].as_str().unwrap_or("").to_string();
     let vendor = b.eval(page, "document.getElementById('settings-page').innerText.includes('Workers AI') || [...document.querySelectorAll('[data-model-for] option')].some((o) => o.textContent.includes('Workers AI'))")?;
+    let labels = [crate::RECOMMENDED_LABEL, crate::STANDARD_LABEL];
     s.ok(
-        "then each agent offers the provider's models, after its tier's, which it runs on now, named by its tier and its model's id as their computer's view names it (Cheap (<id>), never \"cheap\") and no vendor: no Workers AI anywhere in settings; the view names it among the providers whose models the agent may run",
+        "then each agent offers the deployment's routes, each by its label and its model's id as their computer's view names it (the one it runs on now picked), then the provider's models, and no vendor: no Workers AI anywhere in settings; the view names each route and the providers whose models the agent may run",
         read && !lead.is_empty()
             && before["tier"] == "cheap"
             && !cheap.is_empty() && cheap != "cheap"
             && ["medium", "fallback", "vision"].iter().all(|n| connected["models"][n].as_str().is_some_and(|id| !id.is_empty()))
-            && options.first().is_some_and(|o| o[0] == "" && o[1] == format!("Cheap ({cheap})").as_str())
+            && connected["models"]["routes"]["cheap"]["label"] == labels[0] && connected["models"]["routes"]["medium"]["label"] == labels[1]
+            && options.first().is_some_and(|o| o[0] == "route:cheap" && o[1] == format!("{} · {cheap}", labels[0]).as_str())
+            && options.get(1).is_some_and(|o| o[0] == "route:medium" && o[1] == format!("{} · {medium}", labels[1]).as_str())
             && options.iter().any(|o| o[0] == "openrouter anthropic/claude-sonnet-5.5" && o[1] == "Claude Sonnet 5.5")
             && vendor == false
             && runs_on(&connected) == json!([crate::SWAP_ROUTER]),
@@ -3599,9 +4198,19 @@ fn models_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
     b.until(page, &format!("location.pathname === '/settings' && !!document.querySelector('[data-model-for={lead:?}]')"), wait);
     b.reload(page)?;
     let shown = b.until(page, &format!("document.querySelector('[data-model-for={lead:?}]')?.dataset.read === '1' && document.querySelector('[data-model-for={lead:?}]').value === 'openrouter anthropic/claude-sonnet-5.5'"), wait);
-    let back = pick(b, "")?;
+    let back = pick(b, "route:cheap")?;
     let gone = agent_json();
-    s.ok("settings shows it again as picked; its tier again takes the model away, its tier kept", shown && back && gone.get("model").is_none() && gone["tier"] == before["tier"], &gone);
+    s.ok("settings shows it again as picked; its route again takes the model away, its tier kept", shown && back && gone.get("model").is_none() && gone["tier"] == before["tier"], &gone);
+    // the other route: the agent's tier, and back (Paul, 2026-10-24: Standard is one pick away)
+    let standard = pick(b, "route:medium")?;
+    let on_standard = agent_json();
+    let private = pick(b, "route:cheap")?;
+    let on_private = agent_json();
+    s.ok(
+        "picked, the other route is the agent's tier (medium), no model of its own; picked back, the first again",
+        standard && on_standard["tier"] == "medium" && on_standard.get("model").is_none() && private && on_private["tier"] == "cheap",
+        json!({ "standard": on_standard, "private": on_private }),
+    );
     // a Disconnect that does not go through (#439): settings reload, its row
     // still connected, saying so, with Disconnect to try again
     let said = format!("document.querySelector('{row} .provider-said')");
@@ -3619,10 +4228,10 @@ fn models_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
     );
     // disconnected: the key goes, and no agent offers its models
     b.click(page, &format!("{row} [data-action=disconnect]"))?;
-    let off = b.until(page, &format!("document.querySelector('{row}')?.dataset.state === 'not_set' && !{said}?.textContent && document.querySelectorAll('[data-model-for]').length === 0"), wait);
+    let off = b.until(page, &format!("document.querySelector('{row}')?.dataset.state === 'not_set' && !{said}?.textContent && [...document.querySelectorAll('[data-model-for] option')].every((o) => o.value.startsWith('route:'))"), wait);
     let left = runs_on(&view());
     s.ok(
-        "pressed again, Disconnect takes the key away, the failure no longer said, and no agent offers its models, nor may run them",
+        "pressed again, Disconnect takes the key away, the failure no longer said, and no agent offers its models (only the routes), nor may run them",
         off && left.is_null(),
         json!({ "row": b.eval(page, &format!("document.querySelector('{row}')?.innerText"))?, "modelProviders": left }),
     );
@@ -3885,7 +4494,7 @@ fn sidebar_live(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session:
 /// page closes it once it has waited past any healthy open
 /// (`LIST_OPEN_WAIT_MS`), opens another, and is live again: an app
 /// archived elsewhere leaves its dock, and comes back unarchived, with no
-/// reload.
+/// reload; so does one taken off the dock, and put back (#587).
 fn held_list_socket(s: &mut Suite, api: &Api, b: &mut Browser, main: &Page, session: &str) -> Result<()> {
     // the open wait and its first wait, jittered
     let wait = std::time::Duration::from_secs(30);
@@ -3908,6 +4517,13 @@ fn held_list_socket(s: &mut Suite, api: &Api, b: &mut Browser, main: &Page, sess
         shown && closed && r.status == 200 && r2.status == 200 && left && back,
         json!({ "app": name, "held": b.eval(&page, "[window.__heldSockets, window.__heldClosed]")?, "left": left, "back": back }),
     );
+    // the person's own dock (#587): taken off elsewhere, put back
+    let dock = |on: bool| shell(api, session, "PUT", &format!("/api/fragments/{name}/dock"), Some(&json!({ "dock": on })), &[]);
+    let r = dock(false)?;
+    let left = b.until(&page, &format!("!{row}"), live);
+    let r2 = dock(true)?;
+    let back = b.until(&page, &format!("!!{row}"), live);
+    s.ok("and an app taken off the dock elsewhere leaves it, and comes back put on it, with no reload", r.status == 200 && r2.status == 200 && left && back, json!({ "app": name, "left": left, "back": back }));
     b.close(page)?;
     // the person's own tab, on screen again
     b.front(main)?;
@@ -4312,7 +4928,8 @@ fn unread_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person
 /// titles it (48 characters at most) and the agent answers there. Nothing
 /// typed starts nothing. New chat, from the agent's menu, opens an empty
 /// chat with it; asked again before anything is said there, that one, not
-/// another. The agent's own chat keeps its label (`fragment ask`, after,
+/// another; so does the New chat row below the agent, in the sidebar
+/// (screenshots light and dark). The agent's own chat keeps its label (`fragment ask`, after,
 /// finds it).
 fn new_chat_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person, reader_chat: &str, shots: &std::path::Path) -> Result<()> {
     let wait = std::time::Duration::from_secs(30);
@@ -4387,10 +5004,75 @@ fn new_chat_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Pers
         picked && blank && empty && again && open_chat(b, page) == third && made.len() == before.len() + 2,
         json!({ "chats": made }),
     );
+    // New chat, the row below their agent: the menu's, one click from the top
+    b.click(page, &format!("#chats [data-key={}]", js(&format!("chat:{reader_chat}"))))?;
+    b.until(page, "document.getElementById('chat-title').textContent === 'Reader'", wait);
+    let row_shown = b.eval(page, "(() => { const r = document.getElementById('sidebar-start-chat'); const top = document.getElementById('primary-agent').getBoundingClientRect(); const at = r.getBoundingClientRect(); return !r.hidden && at.height > 0 && at.top >= top.bottom && r.textContent === 'New chat'; })()")?;
+    for scheme in ["light", "dark"] {
+        b.color_scheme(page, scheme)?;
+        let _ = b.screenshot(page, &shots.join(format!("desktop-new-chat-row-{scheme}.png")));
+    }
+    b.color_scheme(page, "light")?;
+    b.click(page, "#sidebar-start-chat")?;
+    let row_opened = b.until(page, "document.getElementById('chat-title').textContent === 'New chat'", wait);
+    let made = chats_with(&own_chat);
+    s.ok(
+        "New chat, the row below their agent, does as its menu's: from the Reader's chat it opens that empty chat again, not another",
+        row_shown == true && row_opened && open_chat(b, page) == third && made.len() == before.len() + 2,
+        json!({ "shown": row_shown, "chats": made }),
+    );
     let own = own_named(api, me.session, &own_chat)?;
     s.ok("the agent's own chat keeps its label, apart from the new ones", label_of(&own) == own_chat && label_of(&fresh) == format!("{own_chat}-2"), json!([own, fresh]));
     b.click(page, &format!("#chats [data-key={}]", js(&format!("chat:{reader_chat}"))))?;
     b.until(page, "document.getElementById('chat-title').textContent === 'Reader'", wait);
+    Ok(())
+}
+
+/// An app's window asked to load again before the shell knows its origin
+/// (Alex's review of PR 582). A fragment's frame names its origin in its
+/// policy (`allow="… microphone <origin>"`) before it navigates (a policy
+/// is read as a navigation starts), and the origin is its status's: a
+/// Reload pressed while that was still asked navigated at once under the
+/// bare policy, which names only the mint's origin, and the page stayed
+/// refused the microphone. Valid: in a shell of its own (no origin known),
+/// the app's status held, its window opened and its Reload pressed, the
+/// frame waits (no `src` yet); its status let through, it loads once,
+/// under the policy that names its origin, and its page may use the
+/// microphone (Chrome's fake, allowed).
+fn app_policy_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, app: &str) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    let pane = format!("document.querySelector({})", js(&format!("#stack .pane[data-key=\"app:{app}\"]")));
+    // the app's window elsewhere closed: its page here is the only one
+    b.eval(page, &format!("({pane}?.querySelector('button[aria-label=Close]')?.click(), true)"))?;
+    b.until(page, &format!("!{pane}"), wait);
+    // its status held until let through, from the page's start
+    let hold = format!(
+        "(() => {{ const real = window.fetch; let go; window.__let = new Promise((r) => {{ go = r; }}); window.__letGo = () => go(); window.__holding = false; window.fetch = async (url, o) => {{ if (window.__holding && String(url).includes({})) await window.__let; return real(url, o); }}; }})();",
+        js(&format!("/api/f/{app}/status"))
+    );
+    let shell = b.open_with_script(&format!("{}/", api.base), &hold)?;
+    b.viewport(&shell, 1280, 860, false)?;
+    let icon = format!("document.querySelector({})", js(&format!("#apps [data-key=\"app:{app}\"]")));
+    let up = b.until(&shell, &format!("!document.getElementById('layout').hidden && !!{icon}"), wait);
+    b.eval(&shell, &format!("(window.__holding = true, {icon}.click(), true)"))?;
+    let opened = b.until(&shell, &format!("!!{pane}?.querySelector('iframe') && !!{pane}.querySelector('button[aria-label=Reload]')"), wait);
+    b.eval(&shell, &format!("({pane}.querySelector('button[aria-label=Reload]').click(), true)"))?;
+    let waited = b.eval(&shell, &format!("!{pane}.querySelector('iframe').hasAttribute('src')"))?;
+    b.eval(&shell, "(window.__letGo(), true)")?;
+    let named = b.until(&shell, &format!("/microphone https?:/.test({pane}?.querySelector('iframe')?.allow ?? '') && {pane}.querySelector('iframe').hasAttribute('src')"), wait);
+    let allow = b.eval(&shell, &format!("{pane}?.querySelector('iframe')?.allow ?? null"))?;
+    let told = s.eventually(wait, || {
+        let Ok(frame) = b.frame(app) else { return false };
+        let state = b.eval(&frame, "navigator.permissions.query({ name: 'microphone' }).then((p) => p.state)");
+        let _ = b.detach(frame);
+        state.ok() == Some(json!("granted"))
+    });
+    s.ok(
+        "an app's window opened and reloaded while the shell still asks for its origin waits for it, then loads under the policy that names it: its page may use the microphone",
+        up && opened && waited == true && named && told,
+        json!({ "up": up, "opened": opened, "waited": waited, "allow": allow, "told": told }),
+    );
+    b.close(shell)?;
     Ok(())
 }
 
@@ -4664,7 +5346,7 @@ fn roster_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person
 
 /// A CLI home in the run's scratch (`name`), its key approved for the
 /// person `session` signs in, as `fragment login` leaves one.
-fn cli_home(s: &mut Suite, api: &Api, session: &str, name: &str) -> Result<std::path::PathBuf> {
+pub(super) fn cli_home(s: &mut Suite, api: &Api, session: &str, name: &str) -> Result<std::path::PathBuf> {
     let home = s.dir(name);
     let keys = fragment_nip98::Keys::generate();
     api.approve(session, &keys)?;
@@ -4863,6 +5545,13 @@ fn ask_cli(s: &mut Suite, api: &Api, me: &Person) -> Result<()> {
         "fragment ask, as a person: their direct chat with the agent, the question to it, its answer waited for",
         r["chat"] == own_named(api, me.session, "reader-chat")?.as_str() && r["asked"]["identity"] == reader.as_str() && r["record"]["body"]["to"] == json!([reader]) && r["answer"]["outcome"] == "idle" && answer(&r).contains(said) && answer(&r).starts_with("echo:"),
         &r,
+    );
+    let reader_row = own_row_of(api, me.session, r["asked"]["fragment"].as_str().unwrap_or(""));
+    let chat_row = own_row_of(api, me.session, r["chat"].as_str().unwrap_or(""));
+    s.ok(
+        "it calls the agent by its name (its fragment's title), its JSON keeping its label as `name`; the chat is never titled by the agent's name",
+        reader_row["title"].is_string() && r["asked"]["title"] == reader_row["title"] && r["asked"]["name"] == "reader" && (r["created"] != true || chat_row["title"] != reader_row["title"]),
+        json!({ "asked": r["asked"], "agent": reader_row, "chat": chat_row }),
     );
     let again = s.cli_json(api, &home, &args)?;
     s.ok(

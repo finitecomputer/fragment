@@ -95,9 +95,20 @@ pub fn orgs(s: &mut Suite, api: &Api) -> Result<()> {
             && mine.body["org"]["id"] == alice_org.as_str(),
         &mine,
     );
+    // an operator's view of them says which they chose: why a good
+    // always-on seat's computer is not always on
+    let seen = |api: &Api| api.signed(&operator, "GET", &format!("/api/admin/people/{alice_id}"), None).map(|r| r.body["person"]["seat"].clone()).unwrap_or(Value::Null);
+    let before = seen(api);
     let slept = api.signed(&alice, "PUT", "/api/seat", Some(&json!({ "sleeps": true })))?;
+    let seen_slept = seen(api);
     let woke = api.signed(&alice, "PUT", "/api/seat", Some(&json!({ "sleeps": false })))?;
+    let seen_woke = seen(api);
     s.ok("they let its computer sleep, and take it back", slept.status == 200 && slept.body["seat"]["sleeps"] == true && woke.body["seat"]["sleeps"] == false, json!([slept.body, woke.body]));
+    s.ok(
+        "an operator's view of them says whether they let it sleep, as they chose it",
+        before["sleeps"] == false && seen_slept["sleeps"] == true && seen_slept["id"] == alice_seat.as_str() && seen_woke["sleeps"] == false,
+        json!([before, seen_slept, seen_woke]),
+    );
 
     // ---- an email no one has signed in with: the seat is offered it
     let bob_email = email("bob");

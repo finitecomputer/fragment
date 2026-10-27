@@ -1,0 +1,1 @@
+{"corrId":"5","resp":{"chatError":{"agentConnId":"","agentError":{"cmdErr":{"type":"PROHIBITED"},"errContext":"synchronizeRatchet: not allowed","type":"CMD"},"type":"errorAgent"},"type":"chatCmdError"}}
