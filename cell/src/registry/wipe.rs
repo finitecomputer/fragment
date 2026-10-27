@@ -157,6 +157,7 @@ impl RegistryCell {
                     keys: 0,
                     sessions: 0,
                     pictures: vec![],
+                    feedback: 0,
                     done: Some(p.done()),
                     orgs: vec![],
                 }),
@@ -207,6 +208,7 @@ impl RegistryCell {
             keys: held("keys")?,
             sessions: held("sessions")?,
             pictures,
+            feedback: self.count("SELECT COUNT(*) AS n FROM feedback WHERE person = ?", vec![identity.into()])?,
             done: progress.map(Progress::done),
             orgs: self.orgs_found(identity)?,
         })
@@ -304,6 +306,7 @@ impl RegistryCell {
         self.exec("DELETE FROM connection_disconnects WHERE (issuer, subject) IN (SELECT issuer, subject FROM subjects WHERE identity = ?)", vec![identity.into()])?;
         self.exec("DELETE FROM subjects WHERE identity = ?", vec![identity.into()])?;
         self.exec("DELETE FROM pictures WHERE identity = ?", vec![identity.into()])?;
+        self.exec("DELETE FROM feedback WHERE person = ?", vec![identity.into()])?;
         self.exec("DELETE FROM invite_mails WHERE sharer = ?", vec![identity.into()])?;
         self.wipe_orgs(identity)?;
         self.exec("DELETE FROM wiped_orgs WHERE identity = ?", vec![identity.into()])?;

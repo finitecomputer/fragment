@@ -48,6 +48,7 @@ pub(crate) mod admin;
 pub(crate) mod billing;
 pub(crate) mod calls;
 mod addresses;
+pub(crate) mod feedback;
 pub(crate) mod invites;
 pub(crate) mod offers;
 pub(crate) mod orgs;
@@ -827,6 +828,9 @@ impl RegistryCell {
             return answer;
         }
         if let Some(answer) = self.admin_route(&path, &bytes) {
+            return answer;
+        }
+        if let Some(answer) = self.feedback_route(&path, &bytes) {
             return answer;
         }
         match path.as_str() {

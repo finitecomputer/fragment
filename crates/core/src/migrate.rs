@@ -128,6 +128,7 @@ pub const REGISTRY: Class = Class {
         step!("invites_answered", "registry/0005_invites_answered.sql"),
         step!("connection_accounts", "registry/0006_connection_accounts.sql"),
         step!("public_addresses", "registry/0007_public_addresses.sql"),
+        step!("feedback", "registry/0008_feedback.sql"),
     ],
     variants: &[],
     kept: &[],

@@ -21,6 +21,7 @@ mod credentials;
 mod connections;
 mod delegation;
 mod export;
+mod feedback;
 mod faces;
 mod deliver;
 mod doc;
@@ -124,6 +125,7 @@ const LANES: &[Lane] = &[
     trials::trials,
     admin::admin,
     admin::admin_page,
+    feedback::feedback,
     shell::shell_platform,
     computers::computers,
     export::export,
@@ -164,7 +166,7 @@ pub const SHARDS: [&[&str]; 4] = [
     &["facet-cap", "app-lockdown", "site", "watch", "icons", "schemas", "channels", "live", "routes", "cli", "browser", "jobs", "triggers", "finite-private", "chat"],
     &[
         "auth", "create", "lockdown", "keys", "members", "identities", "signin", "levers", "secrets", "delegation", "files", "deploy", "templates", "share", "faces", "isolation", "frames",
-        "ops", "public", "effects", "appfiles", "blobs", "notes", "brain", "doc", "push", "ai", "ledger", "transcribe", "orgs", "billing", "billing-page", "trials", "admin", "admin-page",
+        "ops", "public", "effects", "appfiles", "blobs", "notes", "brain", "doc", "push", "ai", "ledger", "transcribe", "orgs", "billing", "billing-page", "trials", "admin", "admin-page", "feedback",
     ],
 ];
 

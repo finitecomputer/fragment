@@ -317,6 +317,8 @@ pub struct Fleet {
     /// it comes from (`FRAGMENT_MAIL_FROM`).
     pub mail_url: Option<String>,
     pub mail_from: Option<String>,
+    /// Where the operators are mailed each feedback (`FRAGMENT_FEEDBACK_TO`).
+    pub feedback_to: Option<String>,
     /// A new person's plan (`FRAGMENT_DEFAULT_PLAN`; `None`: the cell's, guest).
     pub default_plan: Option<String>,
     /// The wait before a delivery is retried, every time (`None`: the
@@ -468,6 +470,9 @@ impl Fleet {
         }
         if let Some(f) = &self.mail_from {
             vars.push(("FRAGMENT_MAIL_FROM", f.as_str()));
+        }
+        if let Some(to) = &self.feedback_to {
+            vars.push(("FRAGMENT_FEEDBACK_TO", to.as_str()));
         }
         if let Some(u) = &self.ai_url {
             vars.push(("FRAGMENT_AI_URL", u.as_str()));

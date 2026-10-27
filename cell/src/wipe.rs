@@ -290,7 +290,13 @@ async fn run_step(env: &Env, facts: &WipeFacts, step: Step, deadline: i64) -> Ce
             if !keys.is_empty() {
                 js::blob_delete(env, &keys).await?;
             }
-            Ok(Did::finished(keys.len() as u64))
+            // and the screenshots of the feedback they sent (its rows go with the registry's)
+            let (shots, more) = js::blob_delete_under(env, &fragment_core::feedback::person_prefix(person), 1).await?;
+            let deleted = keys.len() as u64 + shots;
+            match more {
+                true => Ok(Did::going(deleted, "their feedback's screenshots hold more: the next call deletes on".into())),
+                false => Ok(Did::finished(deleted)),
+            }
         }
         // their org: their place taken in one registry turn, then what each
         // org it settled asks of Stripe (a cancel, or its seats' count)
@@ -409,6 +415,7 @@ async fn survey(env: &Env, facts: &WipeFacts, state: WipeState) -> CellResult<Fo
         keys: facts.keys,
         sessions: facts.sessions,
         pictures: facts.pictures.len() as u64,
+        feedback: facts.feedback,
         // a wiped person's agents are gone; their lists were read above
         agents: if state == WipeState::Wiped { vec![] } else { facts.agents.clone() },
         fragments: rules::listed(fragments),

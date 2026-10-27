@@ -195,6 +195,8 @@ pub const STRIPE_WEBHOOK: &str = "whsec_fragment_e2e";
 pub const STRIPE_PORTAL: &str = "bpc_fragment_e2e";
 /// Where the platform's mail says it comes from on the e2e's node.
 pub const MAIL_FROM: &str = "fragment <mail@fragment.localhost>";
+/// Where the node mails the operators each feedback (the mail fake keeps it).
+pub const FEEDBACK_TO: &str = "feedback@fragment.localhost";
 /// The branch a rehearsal of the hosted lane shapes the local node as.
 pub const REHEARSAL_BRANCH: &str = "rh";
 /// What the fleet's computers may swap in (docs/computers.md): the
@@ -698,6 +700,7 @@ impl Suite {
             },
             mail_url: Some(self.mail.node().url.clone()),
             mail_from: Some(MAIL_FROM.into()),
+            feedback_to: Some(FEEDBACK_TO.into()),
             default_plan: Some(DEFAULT_PLAN.into()),
             delivery_retry_s: Some(1),
             workos: Some(devstack::WorkOsVars {

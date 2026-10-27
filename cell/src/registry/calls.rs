@@ -383,6 +383,9 @@ pub(crate) struct WipeFacts {
     pub keys: u64,
     pub sessions: u64,
     pub pictures: Vec<WipePicture>,
+    /// The feedback they sent (its screenshots go with their pictures).
+    #[serde(default)]
+    pub feedback: u64,
     pub done: Option<u32>,
     /// The orgs its `billing` step settles (their own, and any whose
     /// subscription their card pays), and what it does to each.
