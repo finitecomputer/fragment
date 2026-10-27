@@ -273,8 +273,12 @@ impl RegistryCell {
             return Err(conflict(format!("the code changed since revision {} (it is at {}): read it again", c.revision, r.revision)));
         }
         if let Some(cap) = c.capacity {
-            if cap < r.capacity as u64 || cap > TRIAL_CAPACITY_MAX {
-                return Err(CellError::invalid(format!("a code's places only grow, to {TRIAL_CAPACITY_MAX} at most")));
+            let (subscribed, open) = self.places_taken(&r.id, None)?;
+            let floor = org::trial_capacity_floor(subscribed, open);
+            if !(floor..=TRIAL_CAPACITY_MAX).contains(&cap) {
+                return Err(CellError::invalid(format!(
+                    "this code may have {floor} to {TRIAL_CAPACITY_MAX} places: {subscribed} bought and {open} held by an open Checkout are taken"
+                )));
             }
         }
         if c.expires_at.is_some_and(|at| at <= js::now_ms()) {
