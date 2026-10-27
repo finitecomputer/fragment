@@ -468,6 +468,8 @@ iframe[data-blocked] { display: none; }
 .settings-nav-link:hover, .settings-nav-link:focus-visible { background: var(--bg-hover); color: var(--text-primary); }
 .settings-nav-link[aria-current="location"] { background: var(--bg-active); color: var(--text-primary); font-weight: 600; }
 .settings-content { min-width: 0; }
+/* room for the last section's heading to reach the scroll handler's line */
+.settings-content:has(.settings-section) { padding-bottom: calc(100vh - 250px); }
 .settings-intro { padding: 2px 0 8px; }
 .settings-intro h1 { margin: 0 0 6px; font-size: clamp(26px, 2.5vw, 32px); font-weight: 600; line-height: 1.2; letter-spacing: -.035em; text-wrap: balance; }
 .settings-intro p { margin: 0; color: var(--text-secondary); font-size: 14px; }
@@ -517,11 +519,11 @@ iframe[data-blocked] { display: none; }
 @container settings (max-width: 880px) {
   .settings-layout { display: block; max-width: 760px; padding: 22px 24px 72px; }
   /* as tall before its links come (settings loading) as with them: a link's 36px, padded */
-  .settings-nav { position: sticky; z-index: 4; top: 0; flex-direction: row; gap: 4px; min-height: 61px; margin: -22px -24px 24px; padding: 12px 24px; border-bottom: 1px solid var(--border); background: var(--bg-sidebar); overflow-x: auto; scrollbar-width: none; }
-  .settings-nav::-webkit-scrollbar { display: none; }
+  .settings-nav { position: sticky; z-index: 4; top: 0; flex-direction: row; gap: 4px; min-height: 61px; margin: -22px -24px 24px; padding: 12px 24px; border-bottom: 1px solid var(--border); background: var(--bg-sidebar); overflow-x: auto; scrollbar-width: thin; }
+  .settings-nav::-webkit-scrollbar { display: block; height: 6px; }
   .settings-nav-title { display: none; }
   .settings-nav-link { flex: none; white-space: nowrap; }
-  .settings-section { scroll-margin-top: 118px; }
+  .settings-section { scroll-margin-top: 109px; }
 }
 @container settings (max-width: 620px) {
   .settings-layout { padding: 16px 20px 60px; }
@@ -537,6 +539,10 @@ iframe[data-blocked] { display: none; }
   .settings-stack .settings-actions { justify-content: flex-start; }
   .settings-intro { padding-bottom: 4px; }
   .settings-section { margin-top: 60px; padding: 6px 16px 12px; border-radius: 16px; }
+}
+@media (pointer: coarse) {
+  .settings-nav { scrollbar-width: none; }
+  .settings-nav::-webkit-scrollbar { display: none; }
 }
 /* settings' connections: one block per provider (shell.js connectionsSection) */
 .provider { width: 100%; display: flex; flex-direction: column; gap: 8px; padding: 16px 2px; border-bottom: 1px solid var(--border-strong); }
