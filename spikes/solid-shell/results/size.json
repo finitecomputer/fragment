@@ -1,0 +1,25 @@
+{
+  "vanillaApps": {
+    "raw": 21255,
+    "gzip": 7930,
+    "files": [
+      "assets/vanillaApps-feAh0HSy.js"
+    ]
+  },
+  "vanillaShell": {
+    "raw": 161686,
+    "gzip": 55820,
+    "files": [
+      "assets/vanillaShell-Dda4UwwY.js",
+      "assets/vanillaApps-feAh0HSy.js"
+    ]
+  },
+  "solid": {
+    "raw": 50909,
+    "gzip": 20043,
+    "files": [
+      "assets/solid-qXqoafuH.js",
+      "assets/Apps-DFE2irnW.js"
+    ]
+  }
+}

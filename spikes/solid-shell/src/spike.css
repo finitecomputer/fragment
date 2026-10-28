@@ -1,0 +1,76 @@
+.solid-shell {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  grid-template-columns: 260px 1fr;
+  background: var(--bg-window);
+  color: var(--text-primary);
+  font: 15px system-ui;
+}
+.solid-shell aside {
+  display: flex;
+  flex-direction: column;
+  padding: 28px 20px;
+  border-right: 1px solid var(--border);
+}
+.solid-shell aside h2 {
+  font-size: 19px;
+  margin: 0 0 8px;
+}
+.solid-shell aside small {
+  color: var(--text-secondary);
+}
+.solid-shell nav {
+  display: grid;
+  gap: 8px;
+  margin-top: 32px;
+}
+.solid-shell nav button,
+.solid-shell footer button,
+.solid-shell footer a {
+  text-align: left;
+  padding: 9px;
+  background: none;
+  border: 0;
+  color: inherit;
+  text-decoration: none;
+}
+.solid-shell footer {
+  margin-top: auto;
+  display: grid;
+}
+.solid-shell main {
+  overflow: auto;
+  container: settings / inline-size;
+}
+.solid-fragment {
+  width: 100%;
+  height: 100%;
+  border: 0;
+}
+.solid-glyph {
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 11px;
+  background: #7593ad;
+  color: white;
+  font-size: 30px;
+}
+.solid-upload {
+  display: block;
+  margin-top: 12px;
+  font-size: 12px;
+}
+.solid-upload input {
+  max-width: 220px;
+}
+@media (max-width: 700px) {
+  .solid-shell {
+    grid-template-columns: 1fr;
+  }
+  .solid-shell aside {
+    display: none;
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "fixture": {
+    "rows": 100,
+    "warmup": 20,
+    "measured": 50,
+    "change": "one dock flag",
+    "network": "controlled immediately resolved responses",
+    "scope": "client row updates, not end-to-end latency; markup and feature coverage differ"
+  },
+  "vanilla": {
+    "medianMs": 27.900000005960464,
+    "p95Ms": 30.399999991059303,
+    "samples": 50
+  },
+  "solid": {
+    "medianMs": 0,
+    "p95Ms": 0.10000000894069672,
+    "samples": 50
+  },
+  "errors": []
+}
