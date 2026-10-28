@@ -77,7 +77,9 @@ used in the normal app. `benchmark.html` alone is synthetic.
 The prototype loaded the three real local sample apps, including the
 claimed private address, without script exceptions or desktop overflow.
 The build passes strict TypeScript checking. The package is isolated;
-there is no production dependency or worker routing change.
+there is no production dependency or worker routing change. The repo's
+source inventory explicitly classifies this directory as a local
+experiment in `xtask/src/eval_sinks.rs`.
 
 ## Run locally
 

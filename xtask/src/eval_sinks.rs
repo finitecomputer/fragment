@@ -78,7 +78,7 @@ pub const RUNTIME: [(&str, &str); 8] = [
 ];
 
 /// The repo's other directories, each with why its code is not runtime code.
-pub const NOT_RUNTIME: [(&str, &str); 8] = [
+pub const NOT_RUNTIME: [(&str, &str); 9] = [
     ("crates/e2e/", "the e2e, which drives Chrome by Runtime.evaluate (crates/e2e/src/browser.rs)"),
     ("crates/fakes/", "the vendors' fakes, for dev and the e2e"),
     ("crates/devstack/", "the dev stack, for dev and the e2e"),
@@ -87,6 +87,7 @@ pub const NOT_RUNTIME: [(&str, &str); 8] = [
     ("deploy/", "a deployment's example config"),
     (".github/", "CI's workflows"),
     (".cargo/", "cargo's config"),
+    ("spikes/solid-shell/", "an isolated local Solid prototype and rendering benchmark, never included in a release"),
 ];
 
 /// What runs a string as script, each with what it does: the name a failure
