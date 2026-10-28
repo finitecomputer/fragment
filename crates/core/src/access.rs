@@ -182,6 +182,7 @@ pub fn reserved(method: &str, rest: &[&str]) -> Option<Reserved> {
         ("DELETE", [] | [""]) => Some(Reserved::OwnerOnly),
         // a fragment's cap is its owner's money (docs/ledger.md)
         ("PUT", ["cap"]) => Some(Reserved::OwnerOnly),
+        ("PUT", ["address"]) => Some(Reserved::OwnerOnly),
         ("PUT", ["members", _]) => Some(Reserved::Sharing),
         ("DELETE", ["members", "me"]) => None,
         ("DELETE", ["members", _]) => Some(Reserved::Sharing),

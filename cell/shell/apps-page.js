@@ -7,14 +7,18 @@
 // - New preview: its card shot again (`POST /api/f/{name}/card`), an
 //   editor's; "Taking a new preview…" until the shot's report comes
 //   (status's `page.at`), then the card read again.
-// - Icon…: the icon sheet (app-icon.js), an editor's.
-// - Who has access (`GET /api/access`, the owner's), and Share… (the
-//   owner's) or People… (a member's), the platform's share sheet.
+// - Appearance: the inline icon editor (app-icon.js) and preview controls.
+// - Who has access (`GET /api/access`, the owner's), and inline Sharing
+//   (the owner's) or People (a member's), the platform's sharing view.
+// - A display name edited inline, and the owner's optional public address.
 // Archived ones are folded at the end, each with Unarchive.
 //
 // The shell owns the page's place and its helpers (`h`): `api`, `el`,
 // `icon`, `named`, `titleOf`, `art` (an app's icon, as the dock draws it),
-// `share`, `iconSheet`, `reload` (the list again) and `state`.
+// `retitle`, `originOf`, `openApp`, `reload` (the list again) and `state`.
+
+import { activity } from "./activity.js";
+import { createIconEditor } from "./app-icon.js";
 
 const KIND = { brain: "Brain", other: "Other" };
 const ROLE = { viewer: "Viewer", editor: "Editor", owner: "Owner" };
@@ -26,7 +30,7 @@ const owns = (f) => f.role === "owner";
 const edits = (f) => f.role === "owner" || f.role === "editor";
 const seg = (s) => encodeURIComponent(s).replace(/%3A/gi, ":");
 const SHELL = { "x-fragment-shell": "1" };
-// how long a preview is waited for here, asked every few seconds
+// how long a preview is waited for here, asked every second
 const SHOT_WAIT_MS = 180_000;
 // a card being generated is read at most this often per row and visit
 const CARD_READS_MAX = 6;
@@ -44,6 +48,13 @@ export function createAppsPage(page, h) {
   const cardRows = new Map();
   const cardsLoad = { wait: 0, timer: null, batch: 0 };
   const shots = new Map();
+  const addresses = new Map();
+  const addressInfo = new Map();
+  const addressEditors = new Map();
+  const expanded = new Map();
+  const editing = new Map();
+  const iconEditors = new Map();
+  const sharingFrames = new Map();
   let access = null;
   let accessed = "";
   let accessRead = 0;
@@ -57,12 +68,34 @@ export function createAppsPage(page, h) {
   };
   const beginBusy = (name, kind) => {
     const token = ++operation;
-    busy.set(name, { kind, token });
+    busy.set(name, { kind, token, started: Date.now() });
     return token;
   };
   const endBusy = (name, token) => {
     if (busy.get(name)?.token === token) busy.delete(name);
   };
+
+  async function loadAddresses(force = false) {
+    const mine = visit;
+    const rows = h.state.fragments.filter(listed);
+    // The server supplies the actual scheme, suffix and preview mark.
+    // Eight at a time, rather than one request per app all at once.
+    for (let offset = 0; offset < rows.length; offset += 8) {
+      await Promise.all(rows.slice(offset, offset + 8).map(async (f) => {
+        if (!force && addressInfo.has(f.name)) return;
+        const [origin, info] = await Promise.all([
+          h.originOf(f.name).catch(() => null),
+          h.api("GET", `/api/f/${seg(f.name)}/address`).catch((error) => ({ error: error.message })),
+        ]);
+        if (mine !== visit) return;
+        if (origin) addresses.set(f.name, info.address?.url ?? origin);
+        addressInfo.set(f.name, info);
+        addressEditors.delete(f.name);
+      }));
+      if (mine !== visit) return;
+      render();
+    }
+  }
 
   // its card, read with this page's session as the dock's are; "new",
   // "same", "none" or "stale" (a newer read or visit owns the row)
@@ -163,63 +196,261 @@ export function createAppsPage(page, h) {
     return b;
   }
 
+  function toggle(name, section) {
+    if (expanded.get(name) === section) expanded.delete(name);
+    else expanded.set(name, section);
+    render();
+  }
+
+  function titleEditor(f) {
+    const name = f.name;
+    const edit = editing.get(name);
+    const wrap = h.el("div", "app-title-line");
+    if (!edit) {
+      const title = button("", "open", () => h.openApp(name));
+      title.className = "app-row-title";
+      h.named(title, name);
+      wrap.append(title);
+      if (edits(f)) {
+        const rename = button("", "rename", () => {
+          editing.set(name, { draft: h.titleOf(name), saving: false });
+          render();
+          const input = page.querySelector(`[data-fragment="${CSS.escape(name)}"] .app-name-input`);
+          input?.focus();
+          input?.select();
+        });
+        rename.className = "app-title-edit";
+        rename.setAttribute("aria-label", `Rename ${h.titleOf(name)}`);
+        rename.append(h.icon("rename"));
+        wrap.append(rename);
+      }
+      return wrap;
+    }
+    const form = h.el("form", "app-name-form");
+    const input = h.el("input", "app-name-input");
+    input.value = edit.draft;
+    input.maxLength = 120;
+    input.required = true;
+    input.setAttribute("aria-label", "App name");
+    input.disabled = edit.saving;
+    input.oninput = () => { edit.draft = input.value; };
+    const cancel = button("Cancel", "rename-cancel", () => { editing.delete(name); render(); }, edit.saving);
+    const save = button(edit.saving ? "Saving…" : "Save", "rename-save", null, edit.saving);
+    save.type = "submit";
+    form.append(input, save, cancel);
+    form.onsubmit = async (event) => {
+      event.preventDefault();
+      if (!edit.draft.trim() || edit.saving) return;
+      edit.saving = true;
+      say(name, "");
+      render();
+      try {
+        await h.retitle(name, edit.draft.trim(), "rename app");
+        editing.delete(name);
+        await h.reload();
+      } catch (error) { say(name, error.message); }
+      finally { edit.saving = false; render(); }
+    };
+    input.onkeydown = (event) => {
+      if (event.key === "Escape" && !edit.saving) { event.preventDefault(); editing.delete(name); render(); }
+    };
+    wrap.append(form);
+    return wrap;
+  }
+
   function row(f) {
     const name = f.name;
     const doing = busy.get(name)?.kind;
+    const section = expanded.get(name);
     const item = h.el("article", "app-row");
     item.dataset.key = name;
     item.dataset.fragment = name;
-    const art = h.el("span", "app-row-art");
+    const art = button("", "open", () => h.openApp(name));
+    art.className = "app-row-art";
+    art.setAttribute("aria-label", `Open ${h.titleOf(name)}`);
     art.append(h.art(name));
     const text = h.el("div", "app-row-text");
-    const title = h.named(h.el("strong", "app-row-title"), name);
+    text.append(titleEditor(f));
+    const address = addresses.get(name);
+    if (address) {
+      const url = h.el("a", "app-row-url");
+      url.append(h.el("span", null, new URL(address).host), h.icon("external"));
+      url.href = address;
+      url.target = "_blank";
+      url.rel = "noopener";
+      text.append(url);
+    }
     const about = [KIND[f.kind] ?? (f.kind === "app" ? "" : KIND.other), owns(f) ? "" : `Shared with you · ${ROLE[f.role] ?? f.role}`].filter(Boolean).join(" · ");
-    text.append(title);
     if (about) text.append(h.el("span", "app-row-meta", about));
     if (owns(f)) text.append(whoLine(f));
     const head = h.el("div", "app-row-head");
     head.append(art, text);
     const card = cards.get(name);
     if (card) {
+      const preview = button("", "open", () => h.openApp(name));
+      preview.className = "app-preview-open";
+      preview.setAttribute("aria-label", `Open ${h.titleOf(name)}`);
       const img = h.el("img", "app-row-card");
       img.alt = "";
       img.src = card.url;
-      head.append(img);
+      preview.append(img);
+      head.append(preview);
     }
-    const controls = h.el("div", "app-row-controls");
-    if (f.archived) {
-      controls.append(button(doing === "archive" ? "Unarchiving…" : "Unarchive", "unarchive", () => unarchive(name), !!doing));
-    } else if (dockable(f)) {
-      const on = f.dock !== false;
+    if (f.archived) head.append(button(doing === "archive" ? "Unarchiving…" : "Unarchive", "unarchive", () => unarchive(name), !!doing));
+    else if (dockable(f)) {
       const dock = h.el("button", "app-dock");
       dock.type = "button";
       dock.dataset.action = "dock";
       dock.setAttribute("role", "switch");
-      dock.setAttribute("aria-checked", String(on));
+      dock.setAttribute("aria-label", `Show ${h.titleOf(name)} in dock`);
+      dock.setAttribute("aria-checked", String(f.dock !== false));
       dock.disabled = !!doing;
       if (doing === "dock") dock.setAttribute("aria-busy", "true");
-      dock.append(h.el("span", "app-dock-track"), "Dock");
-      dock.onclick = () => setDock(name, !on);
-      controls.append(dock);
+      dock.append(h.el("span", "app-dock-track"), h.el("span", null, "Dock"));
+      dock.onclick = () => setDock(name, f.dock === false);
+      head.append(dock);
     }
-    if (!f.archived && dockable(f) && edits(f) && !(owns(f) && f.sharing?.visibility === "members")) {
-      const taking = shots.has(name);
-      controls.append(button(doing === "card" ? "Asking…" : taking ? "Taking a new preview…" : "New preview", "card", () => newPreview(name), !!doing || taking));
+    item.append(head);
+    const tools = h.el("div", "app-row-tools");
+    const tab = (label, kind) => {
+      const b = button(label, kind, () => toggle(name, kind));
+      b.setAttribute("aria-expanded", String(section === kind));
+      return b;
+    };
+    if (!f.archived && edits(f)) tools.append(tab("Appearance", "appearance"));
+    tools.append(tab(owns(f) ? "Sharing" : "People", "sharing"));
+    if (owns(f) && !f.archived) tools.append(tab("Address", "address"));
+    item.append(tools);
+    if (section) {
+      const panel = h.el("div", "app-row-panel");
+      if (section === "appearance") {
+        const editor = h.el("div");
+        editor.dataset.iconEditor = name;
+        panel.append(editor);
+        if (dockable(f) && !(owns(f) && f.sharing?.visibility === "members")) {
+          const preview = h.el("section", "app-preview-editor");
+          preview.append(h.el("h2", null, "Preview"));
+          if (card) { const img = h.el("img", "app-preview-image"); img.alt = ""; img.src = card.url; preview.append(img); }
+          preview.append(button(doing === "card" ? "Asking…" : shots.has(name) ? "Taking a new preview…" : "New preview", "card", () => newPreview(name), !!doing || shots.has(name)));
+          panel.append(preview);
+        }
+      } else if (section === "sharing") {
+        panel.dataset.shareEditor = name;
+      } else if (section === "address") {
+        panel.dataset.addressEditor = name;
+        panel.append(h.el("p", "muted", "Loading address…"));
+      }
+      item.append(panel);
     }
-    if (!f.archived && edits(f)) controls.append(button("Icon…", "icon", () => h.iconSheet(name), !!doing));
-    controls.append(button(owns(f) ? "Share…" : "People…", "share", () => h.share(name)));
-    item.append(head, controls);
+    const shot = shots.get(name);
+    if (shot || doing === "card") {
+      const progress = h.el("div", "app-row-progress");
+      progress.append(activity(shot ? "Taking a new preview…" : "Requesting preview…", shot?.started ?? busy.get(name).started));
+      item.append(progress);
+      item.setAttribute("aria-busy", "true");
+    }
     const words = said.get(name);
-    if (words) {
-      const p = h.el("p", "app-row-said", words);
-      p.setAttribute("role", "status");
-      item.append(p);
-    }
-    // what it shows, to keep the element (its focus) while that is the same
-    item.dataset.shows = JSON.stringify([f, doing ?? null, words ?? null, card?.url ?? null, shots.has(name), item.querySelector(".app-row-access")?.textContent ?? null]);
+    if (words) { const p = h.el("p", "app-row-said", words); p.setAttribute("role", "status"); item.append(p); }
+    const edit = editing.get(name);
+    item.dataset.shows = JSON.stringify([f, doing ?? null, words ?? null, card?.url ?? null, address ?? null, shots.has(name), section ?? null, edit ? [true, edit.saving] : null, item.querySelector(".app-row-access")?.textContent ?? null]);
     item.dataset.art = artReadiness(item);
     return item;
   }
+
+  function mountEditors() {
+    for (const host of page.querySelectorAll("[data-icon-editor]")) {
+      const name = host.dataset.iconEditor;
+      if (!iconEditors.has(name)) iconEditors.set(name, createIconEditor(h, name, h.titleOf(name), h.state.fragments.find((f) => f.name === name), true));
+      const editor = iconEditors.get(name).element;
+      if (editor.parentElement !== host) host.replaceChildren(editor);
+    }
+    for (const host of page.querySelectorAll("[data-share-editor]")) {
+      const name = host.dataset.shareEditor;
+      if (!sharingFrames.has(name)) {
+        const frame = h.el("iframe", "app-sharing-frame");
+        frame.title = `Sharing ${h.titleOf(name)}`;
+        frame.allow = "clipboard-write";
+        frame.src = `/share/${encodeURIComponent(name)}`;
+        sharingFrames.set(name, frame);
+      }
+      const frame = sharingFrames.get(name);
+      if (frame.parentElement !== host) host.replaceChildren(frame);
+    }
+    for (const host of page.querySelectorAll("[data-address-editor]")) {
+      const name = host.dataset.addressEditor;
+      if (!addressEditors.has(name)) addressEditors.set(name, addressEditor(name));
+      const editor = addressEditors.get(name);
+      if (editor.parentElement !== host) host.replaceChildren(editor);
+    }
+  }
+
+  function addressEditor(name) {
+    const info = addressInfo.get(name);
+    const box = h.el("div", "app-address-editor");
+    box.append(h.el("h2", null, "Public address"));
+    if (!info || info.error) {
+      box.append(h.el("p", "muted", info?.error ?? "Loading address…"));
+      return box;
+    }
+    if (info.address) {
+      const link = h.el("a", "app-address-kept", new URL(info.address.url).host);
+      link.href = info.address.url;
+      link.target = "_blank";
+      link.rel = "noopener";
+      box.append(link);
+      return box;
+    }
+    const form = h.el("form", "app-address-form");
+    const field = h.el("label", "app-address-field");
+    const input = h.el("input");
+    input.setAttribute("aria-label", "Public address");
+    input.autocomplete = "off";
+    input.spellcheck = false;
+    input.pattern = "[a-z0-9]+(?:-[a-z0-9]+)*";
+    input.maxLength = info.maxLength;
+    input.required = true;
+    input.value = h.titleOf(name).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, info.maxLength);
+    field.append(input, h.el("span", null, info.suffix));
+    const claim = button("Claim address", "claim-address", null);
+    claim.type = "submit";
+    const message = h.el("p", "app-address-said");
+    message.setAttribute("role", "status");
+    form.append(field, claim);
+    box.append(form, h.el("p", "muted app-address-note", "First come, first served. This address stays with this app."), message);
+    form.onsubmit = async (event) => {
+      event.preventDefault();
+      if (claim.disabled) return;
+      claim.disabled = true;
+      input.disabled = true;
+      message.replaceChildren(activity("Claiming address…"));
+      try {
+        const out = await h.api("PUT", `/api/f/${seg(name)}/address`, { label: input.value });
+        addressInfo.set(name, out);
+        addresses.set(name, out.address.url);
+        addressEditors.delete(name);
+        render();
+      } catch (error) {
+        message.textContent = error.message;
+        claim.disabled = false;
+        input.disabled = false;
+      }
+    };
+    return box;
+  }
+
+  addEventListener("message", (event) => {
+    if (event.origin !== location.origin) return;
+    for (const [name, frame] of sharingFrames) {
+      if (event.source !== frame.contentWindow) continue;
+      if (Number.isFinite(event.data?.height)) frame.style.height = `${Math.max(160, Math.min(1600, event.data.height))}px`;
+      if (event.data?.share === "done") {
+        expanded.delete(name);
+        sharingFrames.delete(name);
+        render();
+        h.reload().then(() => loadAccess()).then(() => render()).catch(() => {});
+      }
+    }
+  });
 
   function artReadiness(item) {
     const picture = item.querySelector(".app-row-art .app-picture");
@@ -261,6 +492,7 @@ export function createAppsPage(page, h) {
     folded.hidden = !archived.length;
     folded.querySelector("summary").textContent = `Archived (${archived.length})`;
     place(folded.querySelector(".apps-list"), archived.map(row));
+    mountEditors();
   }
 
   async function setDock(name, dock) {
@@ -311,19 +543,17 @@ export function createAppsPage(page, h) {
       if (mine === visit) render();
     }
     if (mine !== visit) return;
-    shots.set(name, asked.since);
+    shots.set(name, { since: asked.since, started: Date.now() });
     render();
     const until = Date.now() + SHOT_WAIT_MS;
-    let wait = 2_000;
+    let done = false;
     // bounded: until the report comes, the page closes, or SHOT_WAIT_MS
     while (shown && mine === visit && Date.now() < until) {
-      await new Promise((r) => setTimeout(r, wait));
-      wait = Math.min(wait * 1.5, 10_000);
       const status = await h.api("GET", `/api/f/${seg(name)}/status`).catch(() => null);
-      if (status?.page && status.page.at >= asked.since) break;
+      if (status?.page && status.page.at >= asked.since) { done = true; break; }
+      await new Promise((r) => setTimeout(r, 1_000));
     }
     if (mine !== visit) return;
-    const done = shown && Date.now() < until;
     shots.delete(name);
     await loadCard(name, mine).catch(() => "same");
     if (mine !== visit) return;
@@ -344,8 +574,10 @@ export function createAppsPage(page, h) {
       cardsLoad.wait = 0;
       render();
       const reading = loadCards(true).catch(() => {});
+      const urls = loadAddresses(true);
       if (await loadAccess()) render();
       await reading;
+      await urls;
     },
     close() {
       shown = false;
@@ -353,6 +585,11 @@ export function createAppsPage(page, h) {
       ++cardsLoad.batch;
       clearTimeout(cardsLoad.timer);
       shots.clear();
+      for (const editor of iconEditors.values()) editor.dispose();
+      iconEditors.clear();
+      sharingFrames.clear();
+      addressEditors.clear();
+      editing.clear();
     },
     // the list changed: drawn again, who has access asked again when the
     // list says that changed, and new or changed apps' cards read
@@ -360,6 +597,7 @@ export function createAppsPage(page, h) {
       if (!shown) return;
       render();
       loadCards().catch(() => {});
+      loadAddresses().catch(() => {});
       if (sharingOf() !== accessed && await loadAccess()) render();
     },
     // a share sheet closed: who has access, and any changed cards, asked again

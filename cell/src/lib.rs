@@ -28,6 +28,7 @@
 //! to the platform.
 
 mod ai;
+mod address;
 mod assets;
 mod auth;
 mod billing;
@@ -899,8 +900,8 @@ fn unmarked(resp: Response) -> CellResult<Response> {
 /// app, a socket's upgrade, a refusal, an error), with the origin's own
 /// headers (`fragment_origin`). An error is answered here, not at `fetch`,
 /// so its JSON carries them too.
-async fn serve(req: Request, env: &Env, cfg: &Config, url: &Url, name: &str, rest: &str) -> CellResult<Response> {
-    let resp = match served(req, env, cfg, url, name, rest).await {
+async fn serve(req: Request, env: &Env, cfg: &Config, url: &Url, name: &str, rest: &str, identity: Option<&str>) -> CellResult<Response> {
+    let resp = match served(req, env, cfg, url, name, rest, identity).await {
         Ok(resp) => resp,
         Err(e) => e.response()?,
     };
@@ -932,18 +933,18 @@ fn fragment_origin(resp: Response) -> CellResult<Response> {
 
 /// `serve`'s answer: a refusal a browser navigated to is answered as a
 /// page, the router's own here, the fragment's in `site`.
-async fn served(req: Request, env: &Env, cfg: &Config, url: &Url, name: &str, rest: &str) -> CellResult<Response> {
+async fn served(req: Request, env: &Env, cfg: &Config, url: &Url, name: &str, rest: &str, identity: Option<&str>) -> CellResult<Response> {
     check_name(name)?;
     let fetched = fetched(&req)?;
     let page = shows_page(&req, fetched)?;
-    match site(req, env, cfg, url, name, rest, fetched, page).await {
+    match site(req, env, cfg, url, name, rest, fetched, page, identity).await {
         Err(e) if page && auth::is_refusal(e.code) => auth::refused(cfg, url, name, rest, fetched.framed, &e),
         answered => answered,
     }
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn site(mut req: Request, env: &Env, cfg: &Config, url: &Url, name: &str, rest: &str, fetched: Fetched, page: bool) -> CellResult<Response> {
+async fn site(mut req: Request, env: &Env, cfg: &Config, url: &Url, name: &str, rest: &str, fetched: Fetched, page: bool, identity: Option<&str>) -> CellResult<Response> {
     // the platform's notices on this origin link their look from it
     // (share.rs `sheet_html`): the release's, whoever asks
     if shell::is_fragment_sheet(rest) && matches!(req.method(), Method::Get | Method::Head) {
@@ -1002,7 +1003,8 @@ async fn site(mut req: Request, env: &Env, cfg: &Config, url: &Url, name: &str, 
         Some(_) => req.inner().body().map(worker::wasm_bindgen::JsValue::from),
         None => bytes_body(body),
     };
-    let mut resp = forward(env, &req, body, Forward { routed, inner: format!("/serve/{rest}"), extra: vec![] }).await?;
+    let extra = identity.map(|id| vec![(address::IDENTITY_HEADER, id.to_string())]).unwrap_or_default();
+    let mut resp = forward(env, &req, body, Forward { routed, inner: format!("/serve/{rest}"), extra }).await?;
     // the fragment's own refusal, never its app's answer
     if resp.headers().has(serve::REFUSAL)? {
         resp = match page {
@@ -1055,7 +1057,7 @@ pub(crate) async fn route(req: Request, env: &Env, ctx: &Context) -> CellResult<
     // routes there); the platform API answers on the platform's host.
     if let Some(name) = host.and_then(|h| cfg.fragment_of_host(h)) {
         let rest = path.trim_start_matches('/').to_string();
-        return serve(req, env, cfg, &url, &name, &rest).await;
+        return serve(req, env, cfg, &url, &name, &rest, None).await;
     }
     // a computer's own origin: its ports, for its owner (computer.rs)
     if let Some(id) = host.and_then(|h| cfg.computer_of_host(h)) {
@@ -1064,6 +1066,12 @@ pub(crate) async fn route(req: Request, env: &Env, ctx: &Context) -> CellResult<
             None => None,
         };
         return computer::serve_host(req, env, &url, &id, signer).await;
+    }
+    if let Some(label) = host.and_then(|h| cfg.address_of_host(h)) {
+        let address = ask_registry(env, &crate::registry::calls::AddressOf::Label { label }).await?
+            .ok_or_else(|| CellError::new(ErrorCode::NotFound, "no app has claimed this address"))?;
+        let rest = path.trim_start_matches('/').to_string();
+        return serve(req, env, cfg, &url, &address.fragment, &rest, Some(&address.npub)).await;
     }
     // everything else is the platform's own answer, an error's included,
     // with the platform's headers (`platform_origin`)
@@ -1350,7 +1358,7 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
             check_name(name)?;
             let rest = rest.join("/");
             if rest == "__watch" || rest == "__live" {
-                return serve(req, env, cfg, &url, name, &rest).await;
+                return serve(req, env, cfg, &url, name, &rest, None).await;
             }
             if !matches!(method, Method::Get | Method::Head) {
                 return Err(CellError::new(ErrorCode::NotFound, "fragments are served from their own origin"));
