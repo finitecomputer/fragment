@@ -485,8 +485,8 @@ fn build_bridge_image() {
 /// asked); stopped under a hold before the bridge answers it, its databases
 /// whole, and started again after; stopped while the computer is not always
 /// on, and started again when it is; through a planned restart, as it was;
-/// and after a rollback of its `/data`, its forced sync heals the link, the
-/// owner is told a message may be lost, and both directions work.
+/// and after a rollback of its `/data`, its forced sync heals the link
+/// without sending a chat announcement, and both directions work.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs Docker; run by hand"]
 async fn the_bridge_runs_a_linked_core() {
@@ -595,8 +595,12 @@ async fn the_bridge_runs_a_linked_core() {
     });
     let t0 = Instant::now();
     let c = Computer::start(&lab, &fake, &data);
-    let told = received(&mut person, Duration::from_secs(60), |got| got.iter().any(|t| t.contains("may have missed a message"))).await;
-    println!("after a rollback, the owner told {} ms after the start: {told:?}", t0.elapsed().as_millis());
+    // Synchronization is observable in diagnostics; it sends no user message.
+    while !c.events("simplex.told").iter().any(|e| e["notice"] == "Resynced") {
+        assert!(t0.elapsed() < Duration::from_secs(60), "the rollback's encryption recovered");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    println!("after a rollback, encryption recovered {} ms after the start", t0.elapsed().as_millis());
     assert!(c.events("simplex.core_up").iter().any(|e| e["rollback"] == true), "its start forced a sync");
     let before = c.events("simplex.forward").len();
     say(&mut person, at_person, "after the rollback").await;
