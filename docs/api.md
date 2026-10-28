@@ -469,8 +469,8 @@ address bar; the generated name, repository, memberships and old address
 stay as they are. It changes no visibility or permissions.
 
 `GET /api/f/{name}/address` (viewer) answers `{address, suffix, maxLength}`:
-`address` is null, or `{label, url}`. `PUT` (the owner themselves, not an
-agent) takes `{label}` and claims it first-come, first-served; retrying
+`address` is null, or `{label, url}`. `PUT` (the owner, or their agent
+acting for them with sharing authority) takes `{label}` and claims it first-come, first-served; retrying
 the same claim answers the same binding. Names use lowercase letters,
 digits and single dashes, fit one 63-byte DNS label with the branch mark,
 and cannot collide with generated names or computer hosts (double dashes)

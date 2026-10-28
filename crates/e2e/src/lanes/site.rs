@@ -452,7 +452,19 @@ fn public_addresses(s: &mut Suite, api: &Api) -> Result<()> {
         let refused = api.signed(&owner, "PUT", &route, Some(&json!({ "label": bad })))?;
         s.ok("an invalid public hostname is refused", refused.status == 400, &refused);
     }
-    let claimed = api.signed(&owner, "PUT", &route, Some(&body))?;
+    let agent = fragment_nip98::Keys::generate();
+    let registered = api.signed(&owner, "POST", "/api/identities", Some(&json!({ "kind": "agent", "proof": api.proof(&agent, "POST", "/api/identities", &owner) })))?;
+    s.ok("the address owner's agent is registered", registered.status == 200, &registered);
+    let owner_id = api.identity(&owner)?;
+    let by_itself = api.signed(&agent, "PUT", &route, Some(&body))?;
+    s.ok("an agent claims only acting for its owner", by_itself.status == 403, &by_itself);
+    let agent_id = registered.body["id"].as_str().expect("the registered agent has an identity");
+    let hold = format!("/api/identities/{agent_id}/held");
+    api.signed(&owner, "PUT", &hold, Some(&json!({ "held": "viewer" })))?;
+    let held = api.signed(&agent, "PUT", &format!("{route}?for={owner_id}"), Some(&body))?;
+    s.ok("a held agent cannot claim an address above its owner's hold", held.status == 403, &held);
+    api.signed(&owner, "PUT", &hold, Some(&json!({ "held": null })))?;
+    let claimed = api.signed(&agent, "PUT", &format!("{route}?for={owner_id}"), Some(&body))?;
     let replay = api.signed(&owner, "PUT", &route, Some(&body))?;
     let collision = api.signed(&owner, "PUT", &format!("/api/f/{other}/address"), Some(&body))?;
     s.ok("the first address claim wins, retrying it is idempotent, and a competing app is refused", claimed.status == 200 && replay.body == claimed.body && collision.status == 409, json!({ "claim": claimed.body, "replay": replay.body, "collision": collision.body }));

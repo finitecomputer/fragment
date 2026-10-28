@@ -23,7 +23,10 @@ impl FragmentCell {
     }
 
     pub(crate) async fn claim_address(&self, caller: &Caller, body: Value) -> CellResult<Response> {
-        self.require(caller, false, Role::Owner)?;
+        self.require(caller, false, Role::Viewer)?;
+        if !self.shares(caller) {
+            return Err(CellError::new(ErrorCode::Forbidden, "only the owner or their agent acting for them claims an address"));
+        }
         self.writable().await?;
         if matches!(self.kind()?, FragmentKind::Chat | FragmentKind::Agent | FragmentKind::Skills) {
             return Err(CellError::invalid("a public address is for an app or a brain"));
