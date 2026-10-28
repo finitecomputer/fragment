@@ -1,0 +1,639 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Organization · Finite.Computer (mockup)</title>
+<style>
+@font-face { font-family: "Funnel Sans"; src: url(../../../cell/shell/funnel-sans-400.ttf); font-weight: 400; }
+@font-face { font-family: "Funnel Sans"; src: url(../../../cell/shell/funnel-sans-500.ttf); font-weight: 500; }
+@font-face { font-family: "Funnel Sans"; src: url(../../../cell/shell/funnel-sans-600.ttf); font-weight: 600; }
+@font-face { font-family: "Funnel Sans"; src: url(../../../cell/shell/funnel-sans-700.ttf); font-weight: 700; }
+
+:root {
+  --bg-window:#212121; --bg-sidebar:#181818; --bg-hover:rgba(255,255,255,.055); --bg-active:#2f2f2f;
+  --bg-card:#171615; --surface-subtle:#262625; --surface-muted:#2b2b2a;
+  --text-primary:#ececec; --text-secondary:#a6a19d; --text-tertiary:#706d69; --text-icon:#bfbfbf;
+  --success:#39d98a; --warn:#f2bf3a; --over:#f08a7e;
+  --border:rgba(255,255,255,.085); --border-strong:rgba(255,255,255,.16);
+  --danger-text:#f3b3b3; --track:rgba(255,255,255,.08);
+  --primary:var(--text-primary); --primary-foreground:var(--bg-window);
+  --scrim:rgba(0,0,0,.45);
+  --font-sans:"Funnel Sans", ui-sans-serif, system-ui, -apple-system, sans-serif;
+  color-scheme: dark;
+}
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg-window:#f7f6f3; --bg-sidebar:#ebe9e5; --bg-hover:rgba(20,20,20,.055); --bg-active:#e3e0db;
+    --bg-card:#fffdfa; --surface-subtle:#f0eee9; --surface-muted:#e9e6df;
+    --text-primary:#171717; --text-secondary:#66615b; --text-tertiary:#918a82; --text-icon:#5d5954;
+    --success:#2fbf78; --warn:#efb41f; --over:#d9574a;
+    --border:rgba(20,20,20,.105); --border-strong:rgba(20,20,20,.18);
+    --danger-text:#81112f; --track:rgba(20,20,20,.07);
+    --scrim:rgba(240,238,233,.6);
+    color-scheme: light;
+  }
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body { font: 15px/1.45 var(--font-sans); color: var(--text-primary); background: var(--bg-window); display: grid; grid-template-columns: 256px 1fr; padding: 8px 0 8px 8px; gap: 0; }
+button, input, select { font: inherit; color: inherit; }
+svg { flex-shrink: 0; }
+
+/* ---- sidebar (the shell's, simplified) */
+aside { background: var(--bg-sidebar); border-radius: 14px; padding: 12px; display: flex; flex-direction: column; gap: 4px; height: calc(100vh - 16px); }
+.brand { font-weight: 600; font-size: 16px; padding: 6px 8px 12px; }
+.agent { display: flex; align-items: center; gap: 10px; padding: 10px; border-radius: 999px; background: var(--bg-hover); font-weight: 600; margin-bottom: 8px; }
+.agent i { width: 26px; height: 26px; border-radius: 8px; background: linear-gradient(135deg,#e7a3c9,#c56fb0); }
+.nav { display: flex; align-items: center; gap: 10px; padding: 7px 10px; border-radius: 9px; color: var(--text-secondary); cursor: pointer; border: 0; background: none; text-align: left; width: 100%; }
+.nav:hover { background: var(--bg-hover); }
+.nav.on { background: var(--bg-active); color: var(--text-primary); }
+.spacer { flex: 1; }
+.chats { color: var(--text-tertiary); font-size: 13.5px; padding: 4px 10px; }
+
+/* ---- page */
+main { overflow: auto; height: calc(100vh - 16px); padding: 0 40px 64px; scrollbar-gutter: stable; scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent; }
+main::-webkit-scrollbar { width: 8px; }
+main::-webkit-scrollbar-track { background: transparent; }
+main::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 999px; }
+main::-webkit-scrollbar-thumb:hover { background: var(--text-tertiary); }
+header.page { padding: 44px 0 0; }
+h1 { font-size: 34px; font-weight: 600; letter-spacing: -.01em; margin: 0; }
+.summary { display: flex; gap: 18px; flex-wrap: wrap; color: var(--text-secondary); font-size: 14px; margin-top: 8px; }
+.summary span { display: inline-flex; align-items: center; gap: 6px; }
+
+.bar { display: flex; align-items: center; gap: 12px; margin-top: 16px; padding: 12px 0 14px; flex-wrap: wrap; position: sticky; top: 0; z-index: 2; background: var(--bg-window); }
+.tabs { display: flex; gap: 4px; }
+.tab { border: 0; background: none; padding: 9px 15px; border-radius: 999px; color: var(--text-secondary); cursor: pointer; font-weight: 500; }
+.tab:hover { color: var(--text-primary); }
+.tab.on { background: var(--bg-active); color: var(--text-primary); font-weight: 600; }
+.tab .n { color: var(--text-tertiary); font-weight: 500; margin-left: 4px; }
+.grow { flex: 1; }
+.search { display: flex; align-items: center; gap: 7px; height: 36px; width: 220px; font-size: 14px; max-width: 100%; padding: 0 12px; border: 1px solid var(--border-strong); border-radius: 999px; background: var(--bg-card); color: var(--text-tertiary); }
+.search input { border: 0; outline: 0; background: none; flex: 1; min-width: 0; color: var(--text-primary); }
+.search:focus-within { border-color: var(--text-tertiary); }
+.btn { height: 40px; padding: 0 16px; border-radius: 999px; border: 1px solid var(--border-strong); background: var(--bg-card); cursor: pointer; display: inline-flex; align-items: center; gap: 7px; font-weight: 500; font-size: 14px; white-space: nowrap; }
+.btn:hover { background: var(--surface-subtle); }
+.btn.primary { background: var(--primary); color: var(--primary-foreground); border-color: transparent; }
+.btn.primary:hover { opacity: .9; }
+.btn.danger { color: var(--danger-text); }
+.btn:disabled { opacity: .45; cursor: default; }
+.btn.link { height: auto; padding: 0; border: 0; background: none; border-radius: 4px; color: var(--text-primary); text-decoration: underline; text-decoration-color: var(--border-strong); text-underline-offset: 3px; gap: 5px; }
+.btn.link:hover { background: none; text-decoration-color: currentColor; }
+.btn.link svg { color: var(--text-secondary); }
+
+/* ---- table */
+.table-wrap { position: relative; }
+table { width: 100%; border-collapse: collapse; font-size: 14.5px; }
+table.fixed { table-layout: fixed; }
+table.fixed td { overflow: hidden; text-overflow: ellipsis; }
+table.fixed td.who b, table.fixed td.who small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; }
+thead th { position: sticky; top: var(--bar-h, 66px); z-index: 1; background: var(--bg-window); text-align: left; font-weight: 500; font-size: 13.5px; color: var(--text-secondary); padding: 0; border-bottom: 1px solid var(--border-strong); white-space: nowrap; }
+thead th button { border: 0; background: none; cursor: pointer; padding: 14px 12px; display: inline-flex; align-items: center; gap: 6px; color: inherit; font-weight: inherit; width: 100%; }
+thead th button:hover { color: var(--text-primary); }
+thead th[aria-sort] button { color: var(--text-primary); }
+thead th.num button { justify-content: flex-end; }
+tbody tr { cursor: pointer; border-bottom: 1px solid var(--border); }
+tbody tr:hover { background: var(--bg-hover); }
+tbody tr:focus-visible { outline: 2px solid var(--text-tertiary); outline-offset: -2px; }
+td { padding: 16px 12px; vertical-align: top; white-space: nowrap; }
+td.who { white-space: normal; min-width: 200px; }
+#invites td { vertical-align: middle; padding-top: 12px; padding-bottom: 12px; }
+td.num { text-align: right; font-variant-numeric: tabular-nums; }
+.who b { font-weight: 500; display: block; }
+.who small { color: var(--text-secondary); font-size: 13px; }
+.muted { color: var(--text-secondary); }
+.faint { color: var(--text-tertiary); }
+.tag { display: inline-flex; align-items: center; gap: 4px; border: 1px solid var(--border-strong); border-radius: 999px; padding: 1px 8px; font-size: 12px; color: var(--text-secondary); margin-left: 6px; vertical-align: 1px; white-space: nowrap; }
+.tag.dashed { border-style: dashed; }
+.dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--success); margin-right: 7px; vertical-align: 1px; }
+.dot.idle { background: var(--text-tertiary); }
+.dot.wait { background: transparent; border: 1.5px dashed var(--text-tertiary); width: 8px; height: 8px; }
+
+.usage { min-width: 190px; max-width: 260px; }
+.usage b { font-size: 12.5px; font-weight: 600; }
+.usage small { display: block; font-size: 12.5px; color: var(--text-secondary); margin: 2px 0 7px; font-variant-numeric: tabular-nums; }
+.track { height: 8px; border-radius: 999px; background: var(--track); box-shadow: inset 0 0 0 1px var(--border); overflow: hidden; }
+.track i { display: block; height: 100%; border-radius: 999px; background: var(--success); }
+.track i.warn { background: var(--warn); }
+.track i.over { background: var(--over); }
+
+.empty { padding: 56px 12px; text-align: center; color: var(--text-secondary); }
+.foot { display: flex; justify-content: space-between; align-items: center; padding: 14px 12px; color: var(--text-secondary); font-size: 13.5px; }
+.row-actions { display: inline-flex; gap: 6px; }
+.copy-field { display: flex; align-items: center; gap: 8px; border: 1px solid var(--border-strong); border-radius: 12px; padding: 4px 4px 4px 12px; background: var(--bg-window); }
+.copy-field code { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 13px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.pager { display: flex; align-items: center; gap: 10px; }
+.pager select { -webkit-appearance: none; appearance: none; height: 34px; border: 1px solid var(--border-strong); border-radius: 999px; padding: 0 34px 0 14px; margin-left: 8px; cursor: pointer; background: var(--bg-card) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%23918a82' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E") no-repeat right 13px center; }
+.btn.icon { width: 34px; height: 34px; padding: 0; justify-content: center; }
+
+/* ---- cards (billing) */
+.cards { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(min(340px, 100%), 1fr)); max-width: 1160px; align-items: start; }
+.card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 16px; padding: 22px 24px; }
+.card h2 { font-size: 17px; font-weight: 600; margin: 0 0 4px; }
+.card p.lede { margin: 0 0 16px; color: var(--text-secondary); font-size: 14px; }
+.line { display: flex; justify-content: space-between; gap: 16px; padding: 11px 0; border-top: 1px solid var(--border); font-size: 14.5px; }
+.line span:first-child { color: var(--text-secondary); }
+.line span:last-child { text-align: right; font-variant-numeric: tabular-nums; }
+.card .actions { display: flex; gap: 8px; margin-top: 16px; flex-wrap: wrap; }
+.contact { margin: 16px 0 0; color: var(--text-secondary); font-size: 14px; }
+.contact a { color: var(--text-primary); text-decoration: underline; text-decoration-color: var(--border-strong); text-underline-offset: 3px; }
+.contact a:hover { text-decoration-color: currentColor; }
+.contact + .actions { margin-top: 10px; }
+.price { margin: 6px 0 14px; color: var(--text-secondary); font-size: 15px; }
+.price b { font-size: 32px; font-weight: 600; color: var(--text-primary); letter-spacing: -.01em; font-variant-numeric: tabular-nums; margin-right: 4px; }
+.price small { display: block; font-size: 13.5px; margin-top: 2px; }
+.metrics { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 14px; }
+.metric { background: var(--surface-subtle); border-radius: 12px; padding: 12px 14px; }
+.metric b { display: block; font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.metric small { display: block; color: var(--text-secondary); font-size: 12.5px; line-height: 1.3; margin-top: 2px; }
+
+/* ---- dialog */
+dialog { border: 0; padding: 0; border-radius: 22px; background: var(--bg-card); color: var(--text-primary); width: min(1080px, calc(100vw - 48px)); max-height: calc(100vh - 48px); box-shadow: 0 30px 80px rgba(0,0,0,.25), 0 0 0 1px var(--border); overflow: hidden; }
+dialog.small { width: min(480px, calc(100vw - 48px)); }
+dialog::backdrop { background: var(--scrim); backdrop-filter: blur(3px); }
+dialog[open] { display: flex; flex-direction: column; }
+.d-head { padding: 26px 28px 20px; border-bottom: 1px solid var(--border); position: relative; }
+.d-head h2 { font-size: 28px; font-weight: 600; margin: 0; letter-spacing: -.01em; }
+.d-head .sub { color: var(--text-secondary); margin-top: 4px; }
+.d-head .meta { display: flex; gap: 18px; flex-wrap: wrap; color: var(--text-secondary); font-size: 13.5px; margin-top: 12px; }
+.d-head .meta span { display: inline-flex; align-items: center; gap: 6px; }
+.x { position: absolute; top: 20px; right: 20px; width: 36px; height: 36px; border-radius: 50%; border: 0; background: none; cursor: pointer; display: grid; place-items: center; color: var(--text-icon); }
+.x:hover { background: var(--bg-hover); }
+.d-body { display: grid; grid-template-columns: 1fr 300px; overflow: auto; min-height: 0; }
+.d-main { padding: 6px 28px 24px; }
+.d-rail { background: var(--surface-subtle); padding: 26px 24px; border-left: 1px solid var(--border); }
+.d-rail h3, .d-sec h3 { font-size: 16.5px; font-weight: 600; margin: 0 0 4px; }
+.d-rail p.lede, .d-sec p.lede { color: var(--text-secondary); font-size: 14px; margin: 0 0 14px; }
+.d-sec { padding: 20px 0; border-bottom: 1px solid var(--border); }
+.d-sec:last-child { border-bottom: 0; }
+.d-sec .row { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+.d-sec .usage { max-width: none; flex: 1; min-width: 260px; }
+.d-sec .usage .top { display: flex; justify-content: space-between; margin-bottom: 7px; }
+.d-sec .usage .top small { margin: 0; }
+.kv { margin-bottom: 16px; }
+.kv small { display: block; font-size: 12.5px; color: var(--text-secondary); margin-bottom: 3px; }
+.kv div { font-size: 14px; word-break: break-word; }
+.kv code { font: 13px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.d-small { padding: 24px 26px; }
+.d-small h2 { font-size: 22px; margin: 0 0 4px; font-weight: 600; }
+.d-small p { color: var(--text-secondary); font-size: 14px; margin: 0 0 18px; }
+.field { display: grid; gap: 6px; font-size: 14px; font-weight: 500; margin-bottom: 14px; }
+.field input[type=email] { height: 40px; border: 1px solid var(--border-strong); border-radius: 10px; padding: 0 12px; background: var(--bg-window); font-weight: 400; }
+.option { display: flex; gap: 16px; align-items: center; justify-content: space-between; padding: 14px 16px; border: 1px solid var(--border-strong); border-radius: 14px; background: var(--bg-window); font-size: 14px; margin-bottom: 18px; cursor: pointer; }
+.option b { display: block; font-weight: 500; }
+.option small { display: block; color: var(--text-secondary); margin-top: 2px; line-height: 1.35; }
+.switch { -webkit-appearance: none; appearance: none; flex-shrink: 0; width: 40px; height: 24px; margin: 0; border-radius: 999px; background: var(--border-strong); position: relative; cursor: pointer; transition: background .15s; }
+.switch::after { content: ""; position: absolute; top: 3px; left: 3px; width: 18px; height: 18px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,.2); transition: transform .15s; }
+.switch:checked { background: var(--primary); }
+.switch:checked::after { transform: translateX(16px); background: var(--primary-foreground); }
+.switch:focus-visible { outline: 2px solid var(--text-tertiary); outline-offset: 2px; }
+.d-small .actions { display: flex; justify-content: flex-end; gap: 8px; }
+
+.toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%) translateY(20px); background: var(--primary); color: var(--primary-foreground); padding: 10px 18px; border-radius: 999px; font-size: 14px; opacity: 0; transition: .2s; pointer-events: none; }
+.toast.on { opacity: 1; transform: translateX(-50%); }
+.mock { position: fixed; top: 14px; right: 18px; font-size: 11.5px; color: var(--text-tertiary); border: 1px dashed var(--border-strong); border-radius: 999px; padding: 3px 10px; }
+
+@media (max-width: 900px) {
+  body { grid-template-columns: 1fr; padding: 0; }
+  aside { display: none; }
+  main { padding: 0 18px 48px; height: 100vh; }
+  .table-wrap { overflow-x: auto; }
+  table.fixed { min-width: 860px; }
+  thead th { top: 0; }
+  .search { flex: 1; width: auto; min-width: 0; }
+  .d-body { grid-template-columns: 1fr; }
+  .d-rail { border-left: 0; border-top: 1px solid var(--border); }
+}
+.m-only { display: none; }
+@media (max-width: 640px) {
+  main { padding: 0 16px 40px; }
+  header.page { padding-top: 28px; }
+  h1 { font-size: 28px; }
+  .bar { gap: 10px; }
+  .tabs { width: 100%; overflow-x: auto; }
+  .grow { display: none; }
+  #invite-btn { width: 36px; height: 36px; padding: 0; justify-content: center; }
+  #invite-btn .btn-label { display: none; }
+  .m-only { display: inline; }
+  .tag.m-only { display: inline-flex; }
+  .d-only { display: none; }
+  table.fixed { min-width: 0; }
+  #members table, #members tbody, #members tr, #members td,
+  #invites table, #invites tbody, #invites tr, #invites td { display: block; }
+  #members thead, #invites thead, colgroup { display: none; }
+  #members tbody tr { padding: 14px 2px; }
+  #members td { padding: 0; white-space: normal; }
+  #members td.c-role, #members td.c-seat, #members td.c-status, #members td.c-last { display: none; }
+  #members td.who b { font-size: 15.5px; }
+  #members td.c-credit { margin-top: 10px; }
+  #members .usage { max-width: none; min-width: 0; display: grid; grid-template-columns: auto 1fr; align-items: baseline; column-gap: 8px; }
+  #members .usage small { text-align: right; margin: 0 0 6px; }
+  #members .usage .track { grid-column: 1 / -1; }
+  #invites tbody tr { padding: 14px 2px; display: grid; grid-template-columns: 1fr auto; column-gap: 12px; row-gap: 2px; align-items: center; }
+  #invites td { padding: 0; white-space: normal; }
+  #invites td.i-email { grid-column: 1; overflow-wrap: anywhere; }
+  #invites td.i-by { display: none; }
+  #invites td.i-meta { grid-column: 1; font-size: 13.5px; color: var(--text-secondary); }
+  #invites td.num { grid-column: 2; grid-row: 1 / span 3; }
+  #invites .row-actions { flex-direction: column; }
+  .foot { padding: 14px 2px; }
+  .pager label { display: none; }
+  dialog, dialog.small { width: 100vw; max-width: 100vw; max-height: 92vh; margin: auto 0 0; border-radius: 22px 22px 0 0; }
+  .d-head { padding: 22px 20px 16px; }
+  .d-head h2 { font-size: 22px; padding-right: 36px; overflow-wrap: anywhere; }
+  .d-main { padding: 0 20px 16px; }
+  .d-rail { padding: 20px; }
+  .d-sec .usage { min-width: 0; }
+  .card { padding: 20px; }
+}
+.empty-state { white-space: normal; text-align: center; display: flex; flex-direction: column; align-items: center; gap: 6px; }
+.empty-state b { font-weight: 600; color: var(--text-primary); font-size: 15px; }
+.empty-state span { max-width: 340px; font-size: 14px; }
+.empty-state .btn { margin-top: 12px; }
+#invites tr.empty-row { cursor: default; }
+#invites td.empty { padding: 64px 12px; }
+#invites tr.empty-row:hover { background: none; }
+@media (max-width: 640px) { #invites tbody tr.empty-row { display: block; } }
+dialog.confirm { width: min(420px, calc(100vw - 48px)); }
+.btn.danger-fill { background: #b42335; border-color: transparent; color: #fff; }
+.btn.danger-fill:hover { background: #9a1c2c; }
+@media (max-width: 640px) { dialog.confirm { width: 100vw; } }
+.crown { display: inline-flex; vertical-align: -1px; margin-left: 6px; color: #c99a2e; }
+</style>
+</head>
+<body>
+<aside>
+  <div class="brand">Finite.Computer</div>
+  <div class="agent"><i></i>Hyperion 9000</div>
+  <button class="nav"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>New chat</button>
+  <div class="chats">new chat here feels good?</div>
+  <div class="chats">Make me a meal planner app…</div>
+  <div class="spacer"></div>
+  <button class="nav"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>Apps</button>
+  <button class="nav on"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>Organization</button>
+  <button class="nav"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z"/></svg>Settings</button>
+</aside>
+
+<main>
+  <header class="page">
+    <h1 id="org-name">Northstar Studio</h1>
+  </header>
+
+  <div class="bar">
+    <nav class="tabs" role="tablist">
+      <button class="tab on" data-tab="members" role="tab">Members <span class="n" id="member-count"></span></button>
+      <button class="tab" data-tab="invites" role="tab">Invites <span class="n" id="invite-count"></span></button>
+      <button class="tab" data-tab="billing" role="tab">Billing</button>
+    </nav>
+    <div class="grow"></div>
+    <label class="search" id="search-box"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg><input id="q" placeholder="Search members…" autocomplete="off"></label>
+    <button class="btn primary" id="invite-btn" aria-label="Invite"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 5v14M5 12h14"/></svg><span class="btn-label">Invite</span></button>
+  </div>
+
+  <section id="members"><div class="table-wrap"><table class="fixed"><colgroup><col style="width:24%"><col style="width:14%"><col style="width:12%"><col style="width:11%"><col style="width:25%"><col style="width:14%"></colgroup><thead id="m-head"></thead><tbody id="m-rows"></tbody></table></div><div class="foot" id="m-foot"></div></section>
+  <section id="invites" hidden><div class="table-wrap"><table><thead><tr><th><button>Email</button></th><th><button>Offered</button></th><th><button>Invited by</button></th><th><button>Sent</button></th><th></th></tr></thead><tbody id="i-rows"></tbody></table></div></section>
+  <section id="billing" hidden></section>
+</main>
+
+<dialog id="member"></dialog>
+<dialog id="confirm" class="small confirm" aria-labelledby="confirm-title">
+  <form class="d-small" method="dialog">
+    <h2 id="confirm-title"></h2>
+    <p id="confirm-body"></p>
+    <div class="actions"><button class="btn" value="no">Cancel</button><button class="btn danger-fill" value="yes" id="confirm-yes"></button></div>
+  </form>
+</dialog>
+<dialog id="invite" class="small">
+  <form class="d-small" method="dialog" id="invite-form">
+    <h2>Invite to Northstar Studio</h2>
+    <p>They get an email and join once they accept.</p>
+    <label class="field">Email<input type="email" name="email" required placeholder="name@company.com" autocomplete="off"></label>
+    <label class="option"><span><b>Make them an admin</b><small>Admins can add/remove seats and change roles.</small></span><input type="checkbox" name="admin" class="switch" role="switch"></label>
+    <p style="margin:-4px 0 18px">$200 a month, billed from today and prorated on the next invoice.</p>
+    <div class="actions"><button class="btn" value="cancel" formnovalidate>Cancel</button><button class="btn primary" value="send">Send invite</button></div>
+  </form>
+</dialog>
+<div class="toast" id="toast"></div>
+
+<script>
+const ME = "skyler@northstar.studio";
+const PAYER = ME;
+const SEAT_PRICE = 200, CREDIT = 100;
+const day = 864e5, now = Date.parse("2026-10-28T17:00:00Z");
+const ago = (d) => new Date(now - d * day);
+let members = [
+  { email: ME, name: "Skyler", admin: true, seat: "always_on", comped: false, pending: false, used: 41.2, added: ago(180), seen: ago(0), agent: "Hyperion 9000", computer: "Awake" },
+  { email: "maya.okafor@northstar.studio", name: "Maya Okafor", admin: true, seat: "always_on", comped: false, pending: false, used: 88.4, added: ago(176), seen: ago(0), agent: "Atlas", computer: "Awake" },
+  { email: "theo.lindqvist@northstar.studio", name: "Theo Lindqvist", admin: false, seat: "always_on", comped: false, pending: false, used: 23.1, added: ago(150), seen: ago(1), agent: "Wren", computer: "Asleep" },
+  { email: "priya.raman@northstar.studio", name: "Priya Raman", admin: false, seat: "always_on", comped: false, pending: false, used: 104.6, credit: 125, added: ago(149), seen: ago(0), agent: "Nova", computer: "Awake" },
+  { email: "jonah.berg@northstar.studio", name: "Jonah Berg", admin: false, seat: "always_on", comped: false, pending: false, used: 61.9, added: ago(120), seen: ago(2), agent: "Finance Desk", computer: "Asleep" },
+  { email: "lena.fischer@northstar.studio", name: "Lena Fischer", admin: false, seat: "always_on", comped: false, pending: false, used: 5.4, added: ago(96), seen: ago(9), agent: "Poppy", computer: "Asleep" },
+  { email: "sam.oduya@northstar.studio", name: "Sam Oduya", admin: false, seat: "always_on", comped: false, pending: false, used: 73.0, added: ago(80), seen: ago(0), agent: "Support Copilot", computer: "Awake" },
+  { email: "ines.duarte@northstar.studio", name: "Inês Duarte", admin: false, seat: "always_on", comped: false, pending: false, used: 47.8, added: ago(61), seen: ago(3), agent: "Arlo", computer: "Asleep" },
+  { email: "kai.nakamura@northstar.studio", name: "Kai Nakamura", admin: false, seat: "sleeps", comped: true, pending: false, used: 12.3, added: ago(40), seen: ago(5), agent: "Cleo", computer: "Asleep" },
+  { email: "ruth.amsel@northstar.studio", name: "Ruth Amsel", admin: false, seat: "always_on", comped: false, pending: false, used: 100, added: ago(33), seen: ago(0), agent: "Operations Desk", computer: "Awake" },
+  { email: "omar.haddad@northstar.studio", name: "Omar Haddad", admin: false, seat: "always_on", comped: false, pending: false, used: 31.5, added: ago(21), seen: ago(1), agent: "Juniper", computer: "Awake" },
+  { email: "bea.costa@northstar.studio", name: null, admin: false, seat: "always_on", comped: false, pending: true, used: 0, added: ago(2), seen: null, by: "Maya Okafor" },
+  { email: "dev.contractor@fieldwork.io", name: null, admin: false, seat: "always_on", comped: false, pending: true, used: 0, added: ago(6), seen: null, by: "Skyler" },
+  { email: "finance@northstar.studio", name: "Ada Mensah", admin: true, seat: null, comped: false, pending: false, used: 0, added: ago(170), seen: ago(4) },
+];
+// ?n=70 fills the org with generated people, to see the page at size
+{
+  const want = Math.min(200, Number(new URLSearchParams(location.search).get("n")) || 0);
+  const F = ["Aaron","Bianca","Caleb","Dana","Elif","Felix","Grace","Hugo","Ivy","Jamal","Keira","Luca","Mina","Nils","Olive","Pablo","Quinn","Rosa","Silas","Tara","Umar","Vera","Wes","Xenia","Yusuf","Zoe","Anya","Bruno","Chloe","Dev","Esme","Farid","Gia","Hana","Idris","Jude"];
+  const L = ["Abbott","Bauer","Castro","Diallo","Ekström","Fontaine","Garza","Holm","Iqbal","Jensen","Kowalski","Lam","Moreau","Novak","Ortiz","Park","Quist","Reyes","Sato","Tanaka","Uddin","Varga","Weiss","Young","Zhou"];
+  const AG = ["Scout","Ledger","Muse","Relay","Pilot","Echo","Sage","Orbit","Quill","Harbor","Beacon","Fern"];
+  let seed = 7; const rnd = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
+  for (let i = 0; members.length < want; i++) {
+    const name = `${F[i % F.length]} ${L[(i * 7) % L.length]}`;
+    const email = name.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(" ", ".") + "@northstar.studio";
+    const pending = rnd() < 0.08, comped = !pending && rnd() < 0.06, awayDays = rnd() < 0.15 ? 8 + Math.floor(rnd() * 30) : Math.floor(rnd() * 4);
+    members.push({ email, name: pending ? null : name, admin: !pending && rnd() < 0.04, seat: comped && rnd() < 0.5 ? "sleeps" : "always_on", comped, pending,
+      used: pending ? 0 : Math.round(Math.min(100, rnd() ** 1.3 * 110) * 10) / 10, added: ago(pending ? 1 + Math.floor(rnd() * 10) : 20 + Math.floor(rnd() * 160)),
+      seen: pending ? null : ago(awayDays), agent: pending ? null : AG[i % AG.length], computer: pending ? null : rnd() < 0.5 ? "Awake" : "Asleep", by: pending ? "Maya Okafor" : undefined });
+  }
+}
+// ?invites=0 shows the page with no one waiting
+if (new URLSearchParams(location.search).get("invites") === "0") members = members.filter((m) => !m.pending);
+members.forEach((m, i) => (m.credit ??= CREDIT, m.id = "mem-" + (0x3a1f00 + i * 7919).toString(16)));
+
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+const money = (n) => "$" + n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const date = (d) => d ? d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: d.getFullYear() === 2026 ? undefined : "numeric" }) : "—";
+const rel = (d) => { if (!d) return "Never"; const n = Math.round((now - d) / day); return n === 0 ? "Today" : n === 1 ? "Yesterday" : `${n} days ago`; };
+const seatName = (m) => m.seat === "always_on" ? "Always on" : m.seat === "sleeps" ? "Sleeps when idle" : "No seat";
+const seatShort = (m) => m.seat === "sleeps" ? `<span title="Its computer sleeps when idle">Sleeps</span>` : seatName(m);
+const role = (m) => m.admin ? "Admin" : "Member";
+const status = (m) => m.pending ? "Invited" : m.seen && now - m.seen < 7 * day ? "Active" : "Idle";
+const pct = (m) => Math.round((m.used / m.credit) * 100);
+const CROWN = `<span class="crown" title="Admin" role="img" aria-label="Admin"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M3.5 8.5 8 12l4-7 4 7 4.5-3.5L18.5 19h-13z"/></svg></span>`;
+const ICON = {
+  up: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 19V5M5 12l7-7 7 7"/></svg>',
+  down: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 5v14M19 12l-7 7-7-7"/></svg>',
+  both: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m7 15 5 5 5-5M7 9l5-5 5 5"/></svg>',
+  x: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6 6 18M6 6l12 12"/></svg>',
+  pulse: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>',
+  shield: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"/></svg>',
+  cpu: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/></svg>',
+  card: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="5" width="20" height="14" rx="2"/><path d="M2 10h20"/></svg>',
+  users: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/></svg>',
+  cal: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>',
+  link: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7"/><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7"/></svg>',
+  mail: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-10 6L2 7"/></svg>',
+  ext: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 3h6v6M10 14 21 3M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></svg>',
+};
+
+function usageCell(m, big) {
+  if (m.pending) return `<span class="faint d-only">—</span><span class="faint m-only">Invited ${rel(m.added).toLowerCase()} · hasn't joined yet</span>`;
+  if (!m.seat) return `<span class="faint d-only">—</span><span class="faint m-only">No seat</span>`;
+  const p = pct(m), cls = p >= 100 ? "over" : p >= 75 ? "warn" : "";
+  const extra = m.used >= m.credit ? " · out of credit, its agents' paid calls stop" : m.credit > CREDIT ? ` · includes ${money(m.credit - CREDIT).replace(".00", "")} bought` : "";
+  const label = `<b>${p}% used</b><small>${money(m.used)} of ${money(m.credit)} credit</small>`;
+  return `<div class="usage">${big ? `<div class="top"><b>${p}% used</b><small>${money(m.used)} of ${money(m.credit)}${extra}</small></div>` : label}<div class="track"><i class="${cls}" style="width:${Math.min(100, p)}%"></i></div></div>`;
+}
+
+// ---- summary
+function renderSummary() {
+  const seats = members.filter((m) => m.seat);
+  const paid = seats.filter((m) => !m.comped).length, given = seats.length - paid;
+  const pending = members.filter((m) => m.pending).length;
+  $("invite-count").textContent = pending || "";
+  $("member-count").textContent = members.length - pending;
+}
+
+// ---- members table
+const COLS = [
+  { k: "Member", v: (m) => (m.name || m.email).toLowerCase() },
+  { k: "Role", v: (m) => (m.admin ? 0 : 1) },
+  { k: "Seat", v: (m) => seatName(m) },
+  { k: "Status", v: (m) => status(m) },
+  { k: "Credit this month", v: (m) => (m.pending || !m.seat ? -1 : m.used) },
+  { k: "Last active", v: (m) => (m.seen ? -m.seen : Infinity) },
+];
+let sort = { k: "Role", dir: 1 };
+let page = 1, pageSize = 25;
+const byName = (a, b) => (a.name || a.email).localeCompare(b.name || b.email);
+function renderHead() {
+  $("m-head").innerHTML = "<tr>" + COLS.map((c) => {
+    const on = sort.k === c.k;
+    return `<th class="${c.num ? "num" : ""}" ${on ? `aria-sort="${sort.dir > 0 ? "ascending" : "descending"}"` : ""}><button data-k="${c.k}">${c.k}${on ? (sort.dir > 0 ? ICON.up : ICON.down) : ICON.both}</button></th>`;
+  }).join("") + "</tr>";
+}
+$("m-head").addEventListener("click", (e) => {
+  const b = e.target.closest("button[data-k]"); if (!b) return;
+  sort = sort.k === b.dataset.k ? { k: sort.k, dir: -sort.dir } : { k: b.dataset.k, dir: 1 };
+  page = 1;
+  renderMembers();
+});
+function renderMembers() {
+  renderHead();
+  const q = $("q").value.trim().toLowerCase();
+  const col = COLS.find((c) => c.k === sort.k);
+  const rows = members
+    .filter((m) => !q || [m.email, m.name, m.agent, role(m), seatName(m), status(m)].join(" ").toLowerCase().includes(q))
+    .sort((a, b) => { const x = col.v(a), y = col.v(b); return ((x < y ? -1 : x > y ? 1 : 0) * sort.dir) || byName(a, b); });
+  const pages = Math.max(1, Math.ceil(rows.length / pageSize));
+  page = Math.min(page, pages);
+  const shown = rows.slice((page - 1) * pageSize, page * pageSize);
+  $("m-rows").innerHTML = rows.length ? shown.map((m) => `
+    <tr tabindex="0" data-id="${m.id}">
+      <td class="who"><b>${esc(m.name || m.email)}${m.admin ? CROWN : ""}${m.email === ME ? '<span class="tag">You</span>' : ""}</b>${m.name ? `<small>${esc(m.email)}</small>` : ""}</td>
+      <td class="c-role">${role(m)}${m.email === PAYER ? '<span class="tag">Pays</span>' : ""}</td>
+      <td class="c-seat">${m.seat ? seatShort(m) : '<span class="faint">No seat</span>'}${m.comped ? '<span class="tag">Given</span>' : ""}</td>
+      <td class="c-status"><span class="dot ${m.pending ? "wait" : status(m) === "Idle" ? "idle" : ""}"></span>${status(m)}</td>
+      <td class="c-credit">${usageCell(m)}</td>
+      <td class="muted c-last">${m.pending ? "—" : rel(m.seen)}</td>
+    </tr>`).join("") : `<tr><td colspan="6" class="empty">No one matches “${esc(q)}”.</td></tr>`;
+  const first = (page - 1) * pageSize + 1;
+  $("m-foot").innerHTML = `<span>${rows.length ? `${first}–${first + shown.length - 1} of ${rows.length}${q ? " matching" : ""}` : `0 of ${members.length}`}</span>
+    <span class="pager"><label>Rows per page<select id="page-size">${[25, 50, 100].map((n) => `<option ${n === pageSize ? "selected" : ""}>${n}</option>`).join("")}</select></label>
+    <button class="btn icon" data-page="-1" aria-label="Previous page" ${page <= 1 ? "disabled" : ""}><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m15 18-6-6 6-6"/></svg></button>
+    <span>Page ${page} of ${pages}</span>
+    <button class="btn icon" data-page="1" aria-label="Next page" ${page >= pages ? "disabled" : ""}><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m9 18 6-6-6-6"/></svg></button></span>`;
+  renderSummary();
+  renderInvites();
+}
+$("q").addEventListener("input", () => { page = 1; renderMembers(); });
+$("m-foot").addEventListener("click", (e) => { const b = e.target.closest("[data-page]"); if (!b) return; page += Number(b.dataset.page); renderMembers(); document.querySelector("main").scrollTo({ top: 0 }); });
+$("m-foot").addEventListener("change", (e) => { if (e.target.id === "page-size") { pageSize = Number(e.target.value); page = 1; renderMembers(); } });
+$("m-rows").addEventListener("click", (e) => { const tr = e.target.closest("tr[data-id]"); if (tr) openMember(tr.dataset.id, tr); });
+$("m-rows").addEventListener("keydown", (e) => { if ((e.key === "Enter" || e.key === " ") && e.target.matches("tr[data-id]")) { e.preventDefault(); openMember(e.target.dataset.id, e.target); } });
+
+// ---- member dialog
+let returnTo = null;
+function openMember(id, from) {
+  const m = members.find((x) => x.id === id); if (!m) return;
+  returnTo = from;
+  const me = m.email === ME, payer = m.email === PAYER;
+  const admins = members.filter((x) => x.admin && !x.pending).length;
+  const roleSec = m.pending
+    ? `<h3>Invite</h3><p class="lede">Sent ${rel(m.added).toLowerCase()} by ${esc(m.by)}. They join once they accept.</p>
+       <div class="kv"><small>Invite link</small><div class="copy-field"><code>${inviteLink(m)}</code><button class="btn" data-act="copy" style="height:34px">${ICON.link}Copy</button></div></div>
+       <p class="lede" style="margin-top:-6px">Send it however you like. It only works for whoever signs in as ${esc(m.email)}.</p>
+       <div class="row"><button class="btn" data-act="resend">${ICON.mail}Resend invite</button><button class="btn danger" data-act="withdraw">Withdraw invite</button></div>`
+    : `<h3>Role</h3><p class="lede">${m.admin ? "Admins add and remove seats and admins." : "Members use their seat; only admins manage the org."}${payer ? " Whoever pays stays an admin until the subscription is cancelled." : ""}</p>
+       <div class="row">${m.admin
+         ? `<button class="btn" data-act="demote" ${payer || admins <= 1 ? "disabled" : ""}>${me ? "Step down as admin" : "Remove as admin"}</button>${payer ? '<span class="faint" style="font-size:13px">Pays for the org</span>' : ""}`
+         : `<button class="btn" data-act="promote">${ICON.shield}Make admin</button><span class="faint" style="font-size:13px">They get an email to accept</span>`}</div>`;
+  const seatSec = m.pending ? "" : m.seat
+    ? `<div class="d-sec"><h3>Seat</h3><p class="lede">${m.seat === "always_on" ? "An always-on computer" : "A computer that sleeps when idle"}, ${m.comped ? "given by Finite at no charge" : `${money(SEAT_PRICE).replace(".00", "")} a month`}. Removing it stops their agents; nothing of theirs is deleted.</p>
+       <div class="row"><button class="btn danger" data-act="remove" ${payer ? "disabled" : ""}>Remove seat</button>${payer ? '<span class="faint" style="font-size:13px">Cancel the subscription in Billing instead</span>' : ""}</div></div>`
+    : `<div class="d-sec"><h3>Seat</h3><p class="lede">${esc(m.name || m.email)} admins the org without a seat of their own.</p><div class="row"><button class="btn" data-act="give">Give a seat</button></div></div>`;
+  $("member").innerHTML = `
+    <div class="d-head">
+      <h2>${esc(m.name || m.email)}</h2>
+      <div class="sub">${esc(m.email)}</div>
+      <div class="meta">
+        <span>${ICON.pulse}${status(m)}</span>
+        <span>${ICON.shield}${role(m)}${payer ? " · pays for the org" : ""}</span>
+        <span>${ICON.cpu}${m.seat ? seatName(m) + (m.comped ? " (given)" : "") : "No seat"}</span>
+      </div>
+      <button class="x" aria-label="Close" data-act="close">${ICON.x}</button>
+    </div>
+    <div class="d-body">
+      <div class="d-main">
+        ${m.seat && !m.pending ? `<div class="d-sec"><h3>Credit this month</h3><p class="lede">Each seat includes ${money(CREDIT).replace(".00", "")} of model and app usage a month. Resets Nov 1.</p>${usageCell(m, true)}<div class="row" style="margin-top:16px"><button class="btn" data-act="credit">Buy $25 of credit for them</button><span class="faint" style="font-size:13px">Charged to the org's card</span></div></div>` : ""}
+        <div class="d-sec">${roleSec}</div>
+        ${seatSec}
+      </div>
+      <div class="d-rail">
+        <h3>Details</h3><p class="lede">What the org knows about this seat.</p>
+        ${kv("Agent", m.agent || "—")}
+        ${kv("Computer", m.computer || "—")}
+        ${kv("Last active", m.pending ? "Hasn't joined yet" : rel(m.seen))}
+        ${kv(m.pending ? "Invited" : "Joined", date(m.added))}
+        ${m.pending ? kv("Invited by", esc(m.by)) : ""}
+        ${kv("Seat ID", `<code>${m.id}</code>`)}
+      </div>
+    </div>`;
+  $("member").showModal();
+}
+// a confirm in the page's own style, for actions that take something away
+function ask({ title, body, yes }) {
+  const d = $("confirm");
+  $("confirm-title").textContent = title;
+  $("confirm-body").textContent = body;
+  $("confirm-yes").textContent = yes;
+  d.returnValue = "";
+  d.showModal();
+  $("confirm-yes").focus();
+  return new Promise((done) => d.addEventListener("close", () => done(d.returnValue === "yes"), { once: true }));
+}
+$("confirm").addEventListener("click", (e) => { if (e.target === $("confirm")) $("confirm").close("no"); });
+const kv = (k, v) => `<div class="kv"><small>${k}</small><div>${v}</div></div>`;
+$("member").addEventListener("click", (e) => {
+  if (e.target === $("member")) return $("member").close();
+  const b = e.target.closest("[data-act]"); if (!b) return;
+  const dlg = $("member"), id = returnTo?.dataset.id, m = members.find((x) => x.id === id);
+  const act = b.dataset.act;
+  if (act === "close") return dlg.close();
+  if (act === "remove" || act === "withdraw") {
+    const remove = act === "remove";
+    return ask(remove
+      ? { title: `Remove ${m.name || m.email}'s seat?`, body: "Their agents stop. Nothing of theirs is deleted, and the seat is credited on your next invoice.", yes: "Remove seat" }
+      : { title: `Withdraw the invite to ${m.email}?`, body: "Their link stops working. You can invite them again any time.", yes: "Withdraw invite" })
+      .then((ok) => {
+        if (!ok) return;
+        members = members.filter((x) => x.id !== id); dlg.close(); renderMembers(); toast(remove ? "Seat removed" : "Invite withdrawn");
+      });
+  }
+  if (act === "credit") { m.credit += 25; dlg.close(); renderMembers(); return toast(`$25 of credit added for ${m.name || m.email}`); }
+  if (act === "copy") return copyInvite(m);
+  if (act === "resend") { dlg.close(); return toast(`Invite sent again to ${m.email}`); }
+  if (act === "promote") { dlg.close(); return toast(`Admin invite sent to ${m.email}`); }
+  if (act === "demote") {
+    const self = m.email === ME;
+    return ask(self
+      ? { title: "Step down as admin?", body: "You keep your seat, but you can no longer add or remove seats or change roles. Another admin can make you one again.", yes: "Step down" }
+      : { title: `Remove ${m.name || m.email} as admin?`, body: "They keep their seat, but can no longer add or remove seats or change roles.", yes: "Remove as admin" })
+      .then((ok) => {
+        if (!ok) return;
+        m.admin = false; dlg.close(); renderMembers(); toast(self ? "You're no longer an admin" : `${m.name || m.email} is no longer an admin`);
+      });
+  }
+  if (act === "give") { m.seat = "always_on"; dlg.close(); renderMembers(); return toast(`Seat given to ${m.name || m.email}`); }
+});
+$("member").addEventListener("close", () => returnTo?.focus());
+
+// ---- invites tab
+function renderInvites() {
+  const p = members.filter((m) => m.pending);
+  $("i-rows").innerHTML = p.length ? p.map((m) => `<tr tabindex="0" data-id="${m.id}">
+    <td class="i-email"><b style="font-weight:500">${esc(m.email)}</b></td><td class="i-meta">${m.admin ? "Seat and admin" : "Always-on seat"}</td><td class="muted i-by">${esc(m.by)}</td><td class="muted i-meta">${rel(m.added)}</td>
+    <td class="num"><span class="row-actions"><button class="btn" data-copy="${m.id}" style="height:34px">${ICON.link}Copy link</button><button class="btn" data-resend="${m.id}" style="height:34px">Resend</button></span></td></tr>`).join("")
+    : `<tr class="empty-row"><td colspan="5" class="empty"><div class="empty-state"><b>No invites waiting</b><span>Everyone you've invited has joined. People you invite show here until they accept.</span><button class="btn" data-empty-invite>${ICON.mail}Invite someone</button></div></td></tr>`;
+}
+// each invite has its own link; it still only works for whoever signs in with that email
+const inviteLink = (m) => `https://finite.chat/join/${(parseInt(m.id.slice(4), 16) * 2654435761 % 4294967296).toString(36).toUpperCase().padStart(7, "K")}${m.id.slice(-4).toUpperCase()}`;
+async function copyInvite(m) {
+  try { await navigator.clipboard.writeText(inviteLink(m)); } catch {}
+  toast(`Link for ${m.email} copied`);
+}
+$("i-rows").addEventListener("click", (e) => {
+  if (e.target.closest("[data-empty-invite]")) return $("invite-btn").click();
+  const c = e.target.closest("[data-copy]"); if (c) { e.stopPropagation(); return copyInvite(members.find((m) => m.id === c.dataset.copy)); }
+  const r = e.target.closest("[data-resend]"); if (r) { e.stopPropagation(); return toast("Invite sent again"); }
+  const tr = e.target.closest("tr[data-id]"); if (tr) openMember(tr.dataset.id, tr);
+});
+
+// ---- billing tab
+function renderBilling() {
+  const seats = members.filter((m) => m.seat && !m.pending);
+  const paid = members.filter((m) => m.seat && !m.comped).length;
+  const used = seats.reduce((s, m) => s + m.used, 0), pool = seats.reduce((s, m) => s + m.credit, 0);
+  const over = seats.filter((m) => m.used >= m.credit).length;
+  $("billing").innerHTML = `<div class="cards">
+    <div class="card"><h2>Subscription</h2><div class="price"><b>${money(paid * SEAT_PRICE).replace(".00", "")}</b> a month<small>${members.filter((m) => m.seat).length} seats (${paid} paid${members.some((m) => m.comped) ? `, ${members.filter((m) => m.comped).length} given` : ""}) · Renews Nov 12</small></div><p class="lede">Seats bill on one subscription. Adding one is prorated; a removed seat is credited on the next invoice.</p>
+      <div class="line"><span>Status</span><span><span class="dot"></span>Active</span></div>
+      <div class="line"><span>Paid seats</span><span>${paid} × ${money(SEAT_PRICE).replace(".00", "")}</span></div>
+      <div class="line"><span>Given seats</span><span>${members.filter((m) => m.comped).length}</span></div>
+      <div class="line"><span>Paid by</span><span>You (${esc(PAYER)})</span></div>
+      <p class="contact">Contact <a href="mailto:billing@finite.computer">billing@finite.computer</a> for any questions.</p>
+      <div class="actions"><button class="btn link" onclick="toast('Opens Stripe’s billing portal')">Payment and invoices${ICON.ext}</button></div></div>
+    <div class="card"><h2>Credit this month</h2><p class="lede">Each seat comes with ${money(CREDIT).replace(".00", "")} of usage. When a member runs out, their agents' paid calls stop until more is bought, by them or by an admin for them.</p>
+      <div class="metrics"><div class="metric"><b>${Math.round((used / pool) * 100)}%</b><small>of the org's credit used</small></div><div class="metric"><b>${money(used).replace(/\.\d+$/, "")}</b><small>of ${money(pool).replace(".00", "")}</small></div><div class="metric"><b>${over}</b><small>${over === 1 ? "member" : "members"} out of credit</small></div></div>
+      <div class="track" style="height:10px"><i class="${used / pool >= 0.75 ? "warn" : ""}" style="width:${Math.min(100, (used / pool) * 100)}%"></i></div>
+      <div class="line" style="margin-top:14px"><span>Resets</span><span>Nov 1</span></div></div>
+  </div>`;
+}
+
+// ---- tabs, invite
+document.querySelectorAll(".tab").forEach((t) => t.addEventListener("click", () => {
+  document.querySelectorAll(".tab").forEach((x) => x.classList.toggle("on", x === t));
+  for (const s of ["members", "invites", "billing"]) $(s).hidden = s !== t.dataset.tab;
+  $("search-box").style.visibility = t.dataset.tab === "members" ? "" : "hidden";
+  if (t.dataset.tab === "billing") renderBilling();
+}));
+$("invite-btn").addEventListener("click", () => { $("invite-form").reset(); $("invite").showModal(); });
+$("invite").addEventListener("close", () => {
+  if ($("invite").returnValue !== "send") return;
+  const f = new FormData($("invite-form")), email = String(f.get("email")).trim();
+  if (!email) return;
+  members.push({ id: "mem-" + Math.random().toString(16).slice(2, 8), email, name: null, admin: f.get("admin") === "on", seat: "always_on", comped: false, pending: true, used: 0, added: new Date(now), seen: null, by: "Skyler" });
+  renderMembers(); toast(`Invite sent to ${email}`);
+});
+let tt;
+function toast(t) { const el = $("toast"); el.textContent = t; el.classList.add("on"); clearTimeout(tt); tt = setTimeout(() => el.classList.remove("on"), 2200); }
+window.toast = toast;
+
+// the table header sticks just under the sticky bar, however tall the bar wraps
+new ResizeObserver(([e]) => document.querySelector("main").style.setProperty("--bar-h", e.target.offsetHeight + "px")).observe(document.querySelector(".bar"));
+renderMembers();
+
+// ?view= opens one screen directly: member, confirm, invites, invite, billing
+{
+  const view = new URLSearchParams(location.search).get("view");
+  const tab = (t) => document.querySelector(`[data-tab=${t}]`).click();
+  const maya = () => { const tr = document.querySelector('#m-rows tr[data-id]'); const row = [...document.querySelectorAll("#m-rows tr[data-id]")].find((r) => r.innerText.includes("Maya Okafor")) || tr; openMember(row.dataset.id, row); };
+  if (view === "member") maya();
+  if (view === "confirm") { maya(); document.querySelector('#member [data-act="remove"]').click(); }
+  if (view === "invites") tab("invites");
+  if (view === "invite") $("invite-btn").click();
+  if (view === "billing") tab("billing");
+}
+</script>
+</body>
+</html>
