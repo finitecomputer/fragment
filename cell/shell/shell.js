@@ -14,6 +14,7 @@ import { avatar } from "./agent-identity.js";
 import { colorOf } from "./agent-color.js";
 import { icon } from "./icons.js";
 import { appArt, openIconSheet } from "./app-icon.js";
+import { createAppsPage } from "./apps-page.js";
 import { createLayout, store, reducedMotion, springFrames } from "./layout.js";
 import { createViewer } from "./viewer.js";
 import { billingSections, returnSaid, returning, seatGives, seatOffer } from "./billing.js";
@@ -716,9 +717,8 @@ sheet.onclick = (e) => { if (e.target === sheet) sheet.close(); };
 sheet.onclose = () => {
   sheet.replaceChildren();
   load().catch(() => {});
-  // settings' Sharing says what the sheet may have changed
-  const shown = $("settings-access");
-  if (shown && state.page === "Settings") api("GET", "/api/access").then((a) => shown.replaceWith(accessSection(a))).catch(() => {});
+  // the Apps page says who has access as the sheet may have changed it
+  appsPage.shared().catch(() => {});
 };
 
 // ---- one menu, for whichever button asked ----
@@ -1260,6 +1260,7 @@ function openChat(name, push = true) {
   state.page = null;
   $("layout").classList.remove("settings-view");
   $("settings-page").hidden = true;
+  leaveApps();
   $("frames").hidden = false;
   state.current = name;
   store.set(CURRENT, name);
@@ -2063,10 +2064,11 @@ async function updateLater(version, button) {
     computerIs(await api("GET", `/api/computers/${seg(c.computer)}`).catch(() => null));
   }
 }
-// ---- where the page is: `/` its chats, `/settings` its settings,
-// `/welcome` a new person's welcome; each view says so in the address, so
-// a reload or a link stays put ----
+// ---- where the page is: `/` its chats, `/settings` its settings, `/apps`
+// its apps, `/welcome` a new person's welcome; each view says so in the
+// address, so a reload or a link stays put ----
 const SETTINGS = "/settings";
+const APPS = "/apps";
 const WELCOME = "/welcome";
 function at(path) {
   if (location.pathname !== path) history.pushState(null, "", path);
@@ -2074,9 +2076,45 @@ function at(path) {
 addEventListener("popstate", () => {
   const shown = !$("layout").hidden;
   if (shown && location.pathname === SETTINGS) openSettings(false).catch((e) => notice("Settings did not open", e.message));
+  else if (shown && location.pathname === APPS) openApps(false);
   else if (shown && location.pathname === "/" && byName(state.current)) openChat(state.current, false);
   else start().catch((e) => notice("This page did not load", e.message));
 });
+
+// ---- the Apps page (apps-page.js): every fragment of theirs but chats
+// and agents, its dock, card, icon and who has access, in the work area
+// as settings are ----
+const appsPage = createAppsPage($("apps-page"), {
+  api,
+  el,
+  icon,
+  named,
+  titleOf,
+  art: (name) => iconOf(name),
+  share: (name) => share(name),
+  iconSheet: (name) => openIconSheet(iconHelpers, name, titleOf(name), byName(name)),
+  reload: () => load(),
+  state,
+});
+function openApps(push = true) {
+  if (push) at(APPS);
+  hideNotice();
+  state.page = "Apps";
+  $("layout").classList.add("settings-view");
+  $("frames").hidden = true;
+  $("settings-page").hidden = true;
+  $("apps-page").hidden = false;
+  renderHeading();
+  renderChats();
+  leaveSidebar();
+  appsPage.open().catch((e) => notice("Apps did not open", e.message));
+}
+// a chat or settings in its place
+function leaveApps() {
+  $("apps-page").hidden = true;
+  appsPage.close();
+}
+$("apps-link").onclick = () => openApps();
 
 // ---- settings: the person's account, credit, computer and agents ----
 const usd = (micros) => (micros / 1_000_000).toLocaleString(undefined, { style: "currency", currency: "USD" });
@@ -2248,6 +2286,7 @@ async function openSettings(push = true, failed = null) {
   state.page = "Settings";
   $("layout").classList.add("settings-view");
   $("frames").hidden = true;
+  leaveApps();
   const page = $("settings-page");
   page.hidden = false;
   // in the loaded page's own layout, so nothing moves as it loads
@@ -2260,12 +2299,11 @@ async function openSettings(push = true, failed = null) {
   const billingHelpers = { api, el, section, line, actionLine, usd, reopen: () => reopenSettings(), noSeatSaid, switchForm, support: state.support, seatIs };
   const back = await returning(billingHelpers);
   if (lost()) return;
-  const [ledger, mySeat, linked, uses, access] = await Promise.all([
+  const [ledger, mySeat, linked, uses] = await Promise.all([
     api("GET", "/api/ledger").catch(() => null),
     api("GET", "/api/seat").catch(() => null),
     api("GET", "/api/connections").catch(() => null),
     state.computer ? api("GET", `/api/computers/${seg(state.computer.computer)}/uses`).catch(() => null) : null,
-    api("GET", "/api/access").catch((e) => ({ error: e.message })),
   ]);
   if (lost()) return;
   if (mySeat) setGuest(mySeat.guest);
@@ -2403,7 +2441,7 @@ async function openSettings(push = true, failed = null) {
   const skills = await skillsSection();
   if (lost()) return;
   returnSaid(back);
-  renderSettingsPage(page, [account, ...billing, computer, agents, accessSection(access), skills, connections, simplexSection(), buildSection(), dataSection(), ...releaseLine(c)]);
+  renderSettingsPage(page, [account, ...billing, computer, agents, skills, connections, simplexSection(), buildSection(), dataSection(), ...releaseLine(c)]);
   renderAgentFaces();
   // a home read that answered while these were built shown now they are in
   paintHomes();
@@ -2583,160 +2621,6 @@ function renderAgentFaces() {
   for (const label of document.querySelectorAll("[data-picture-label]")) label.textContent = byName(label.dataset.pictureLabel)?.picture ? "Change picture" : "Add a picture";
   for (const remove of document.querySelectorAll("[data-picture-remove]")) remove.hidden = !byName(remove.dataset.pictureRemove)?.picture;
   renderNames();
-}
-
-// ---- settings' Sharing: who has access to what the person owns (GET
-// /api/access), by fragment or by person; each fragment opens its share
-// sheet, where it changes ----
-const GENERAL = {
-  members: { icon: "lock", name: "Restricted" },
-  link: { icon: "link", name: "Anyone with the link" },
-  public: { icon: "globe", name: "Public" },
-};
-const ROLE = { viewer: "Viewer", editor: "Editor", owner: "Owner" };
-let accessBy = "fragment";
-// an identity too long to read whole: its npub's ends
-const shortId = (id) => (id.length > 16 ? `${id.slice(0, 9)}…${id.slice(-4)}` : id);
-// a member as the view names them, and what they are to the person; a
-// person's agents reach what they do, never named (decision 63: "I invite
-// Skyler and his agents, not Skyler and his agent Agent123")
-// (an agent member by its title, its agent fragment's: docs/api.md, "An
-// agent's name and picture")
-function accessWho(m) {
-  if (m.kind !== "agent") return { name: m.email ?? shortId(m.principal), about: "" };
-  if (m.owner === state.me.id) {
-    const mine = state.agents.get(m.principal);
-    return { name: mine ? titleOf(mine.fragment) : m.title ?? m.name ?? shortId(m.principal), fragment: mine?.fragment, about: "your agent" };
-  }
-  const whose = m.ownerEmail ?? (m.owner ? shortId(m.owner) : null);
-  return { name: m.title ?? m.name ?? shortId(m.principal), about: whose ? `${whose}'s agent: they read what it reads` : "an agent" };
-}
-// a fragment's name, as the person's list says it (followed), else the view
-const accessName = (row) => (byName(row.name) ? named(el("button", "access-name"), row.name) : el("button", "access-name", row.title || labelOf(row.name)));
-// a fragment's own line: its title (its sheet), what it is, and who may open it
-function accessHead(row) {
-  const head = el("div", "access-head");
-  const open = accessName(row);
-  open.type = "button";
-  open.title = "Open its share sheet";
-  open.dataset.share = row.name;
-  open.onclick = () => share(row.name);
-  const general = GENERAL[row.sharing?.visibility];
-  const tag = el("span", "access-tag");
-  if (general) {
-    tag.replaceChildren(icon(general.icon));
-    tag.append(general.name);
-  }
-  head.append(open, el("span", "muted access-kind", row.kind), tag);
-  return head;
-}
-function accessByFragment(rows) {
-  const list = el("div", "access-list");
-  const shared = rows.filter((r) => r.members?.length || r.invites?.length || r.sharing?.guests || r.sharing?.invites || r.sharing?.visibility === "public");
-  const rest = rows.filter((r) => !shared.includes(r));
-  for (const row of shared) {
-    const item = el("div", "access-row");
-    item.dataset.fragment = row.name;
-    const people = el("ul", "access-people");
-    for (const m of row.members ?? []) {
-      const who = accessWho(m);
-      const li = el("li");
-      li.append(who.fragment ? named(el("span", "access-who"), who.fragment) : el("span", "access-who", who.name), el("span", "muted", [who.about, ROLE[m.role] ?? m.role].filter(Boolean).join(" · ")));
-      people.append(li);
-    }
-    for (const i of row.invites ?? []) {
-      const li = el("li");
-      li.append(el("span", "access-who", i.email), el("span", "muted", `invited as ${(ROLE[i.role] ?? i.role).toLowerCase()}, waiting for their yes`));
-      people.append(li);
-    }
-    if (row.more) people.append(el("li", "muted", `and ${row.more} more`));
-    // asked of no fragment (past the view's bound): its counts
-    if (!row.members && row.sharing) people.append(el("li", "muted", `${row.sharing.guests} ${row.sharing.guests === 1 ? "person" : "people"}${row.sharing.invites ? `, ${row.sharing.invites} invited` : ""}: its sheet names them`));
-    if (!people.children.length) people.append(el("li", "muted", "No one else is in it"));
-    item.append(accessHead(row), people);
-    list.append(item);
-  }
-  if (rest.length) {
-    const more = el("details", "access-rest");
-    more.append(el("summary", null, `${rest.length} more no one else is in`));
-    for (const row of rest) {
-      const item = el("div", "access-row");
-      item.dataset.fragment = row.name;
-      item.append(accessHead(row));
-      more.append(item);
-    }
-    list.append(more);
-  }
-  if (!rows.length) list.append(el("p", "muted", "You own nothing yet."));
-  return list;
-}
-// by person: who can open what of the person's, everyone else's agents by
-// their owners, and those anyone may open
-function accessByPerson(rows) {
-  const people = new Map();
-  const add = (key, name, about, row, role) => {
-    if (!people.has(key)) people.set(key, { name, about, rows: [] });
-    people.get(key).rows.push({ row, role });
-  };
-  for (const row of rows) {
-    for (const m of row.members ?? []) {
-      // the person's own agents see all of theirs anyway (decision 44)
-      if (m.kind === "agent" && m.owner === state.me.id) continue;
-      const who = accessWho(m);
-      add(m.principal, who.name, m.kind === "agent" ? who.about : "", row, ROLE[m.role] ?? m.role);
-    }
-    for (const i of row.invites ?? []) add(`invite:${i.email}`, i.email, "invited, waiting for their yes", row, ROLE[i.role] ?? i.role);
-  }
-  const anyone = rows.filter((r) => r.sharing?.visibility === "public");
-  const linked = rows.filter((r) => r.sharing?.visibility === "link");
-  const list = el("div", "access-list");
-  const group = (name, about, entries, open = true) => {
-    const item = el("details", "access-person");
-    item.open = open;
-    const summary = el("summary");
-    summary.append(el("span", "access-who", name), el("span", "muted", [about, `${entries.length} ${entries.length === 1 ? "fragment" : "fragments"}`].filter(Boolean).join(" · ")));
-    const ul = el("ul", "access-people");
-    for (const { row, role } of entries) {
-      const li = el("li");
-      const open = accessName(row);
-      open.type = "button";
-      open.onclick = () => share(row.name);
-      li.append(open, el("span", "muted", role));
-      ul.append(li);
-    }
-    item.append(summary, ul);
-    list.append(item);
-  };
-  for (const p of people.values()) group(p.name, p.about, p.rows, true);
-  if (anyone.length) group("Everyone", "public: no link needed", anyone.map((row) => ({ row, role: "Viewer" })));
-  if (linked.length) group("Anyone with the share link", "you hold the links; each sheet copies its own", linked.map((row) => ({ row, role: "Viewer" })), false);
-  if (!list.children.length) list.append(el("p", "muted", "No one else can open anything of yours."));
-  return list;
-}
-function accessSection(access) {
-  const s = section("Sharing");
-  s.id = "settings-access";
-  if (!access || access.error) {
-    s.append(el("p", "settings-warning", `Who has access did not load${access?.error ? `: ${access.error}` : ""}.`));
-    return s;
-  }
-  s.append(el("p", "muted", "Who can open what you own. A title opens its share sheet, where that changes."));
-  const tabs = el("div", "settings-actions");
-  const body = el("div", "access-body");
-  const draw = () => {
-    for (const b of tabs.children) b.setAttribute("aria-pressed", String(b.dataset.by === accessBy));
-    body.replaceChildren(accessBy === "person" ? accessByPerson(access.fragments) : accessByFragment(access.fragments));
-  };
-  for (const [by, text] of [["fragment", "By fragment"], ["person", "By person"]]) {
-    const b = el("button", "chip", text);
-    b.type = "button";
-    b.dataset.by = by;
-    b.onclick = () => { accessBy = by; draw(); };
-    tabs.append(b);
-  }
-  draw();
-  s.append(actionLine("Show", tabs), body);
-  return s;
 }
 
 // ---- your data: an export of everything that is the person's (docs/api.md,
@@ -3961,6 +3845,7 @@ async function load(changed = false) {
   }
   renderChats();
   renderApps();
+  appsPage.listed().catch(() => {});
   renderHeading();
   renderComputer();
   rosterChanged();
@@ -4284,12 +4169,14 @@ async function start(open) {
   // invitee's), it is what is shared with them, and a seat offered. A seat
   // of theirs (not the deployment's plan) may reach their ledger a moment
   // after it is given: its first run waits for it (`seatFirst`)
-  const settings = !open && location.pathname === SETTINGS;
+  // settings or the Apps page, as the address asks
+  const settings = !open && (location.pathname === SETTINGS || location.pathname === APPS);
   if (!open && !settings && await owesFirstAgent()) return creatingAgent(mine?.seat ? {} : null);
   if (!state.fragments.length && !state.invites.length && !open && !settings && state.guest) return welcome();
   showLayout();
   const pick = open ?? (byName(state.current) ? state.current : (shown(chats())[0] ?? chats()[0])?.name);
-  if (settings) await openSettings(false);
+  if (settings && location.pathname === APPS) openApps(false);
+  else if (settings) await openSettings(false);
   else if (pick) openChat(pick);
   else if (state.guest) guestHome(mine.offer);
   else notice("No chats yet", "Make an agent to start.");

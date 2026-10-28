@@ -112,7 +112,7 @@ pub fn shell_page(text: &str, release: &str, deployed: Option<u64>) -> String {
 /// each with its content type: of the rest of cell/shell/, its pages are
 /// served at their own paths, and its credits and licenses not at all.
 #[cfg(feature = "platform")]
-const SHELL_PUBLISHED: [(&str, &str); 34] = [
+const SHELL_PUBLISHED: [(&str, &str); 35] = [
     // the cell's server-rendered pages' base look (share.rs `sheet_html`),
     // on the platform's origin and, as /__sheet.css, on a fragment's
     ("sheet.css", "text/css; charset=utf-8"),
@@ -141,6 +141,8 @@ const SHELL_PUBLISHED: [(&str, &str); 34] = [
     ("icons.js", "text/javascript; charset=utf-8"),
     // an app's own icon in the dock, and the sheet that makes one (docs/api.md, Icons)
     ("app-icon.js", "text/javascript; charset=utf-8"),
+    // the Apps page: each app's dock, card, icon and who has access (docs/api.md, The shell)
+    ("apps-page.js", "text/javascript; charset=utf-8"),
     ("tooltips.js", "text/javascript; charset=utf-8"),
     // Settings' Billing: a seat, credit, an org (docs/billing.md)
     ("billing.js", "text/javascript; charset=utf-8"),

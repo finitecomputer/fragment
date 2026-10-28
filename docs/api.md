@@ -1058,7 +1058,7 @@ email (Invites by email, below).
 
 | method & path (platform origin) | what |
 | --- | --- |
-| `GET /share/<name>` | the share sheet, a card laid out as a document's share dialog, titled with the fragment's title: who is in (emails and pictures, from the registry's profiles: a member sees the members' emails, decision 48; an agent by its title, and whose agent it is, by their email: its owner reads what it reads) and their roles, to any member (anyone else, a 403 page); for the owner ("Share …"), adding people by email with a role (Invites by email, below), the invites waiting (each email, its role, the days it waits; Revoke), each member's role (Viewer and Editor buttons, theirs pressed) and Remove (a chat's own agent has neither: it keeps its place), a person with agents in with them as one entry, "With their agents", never naming one (decisions 63 and 64), and who can open it ("General access": three buttons, Restricted `members`, Anyone with the link `link`, Public `public`, each saying what it means, the current one pressed); for a member who is not its owner ("Who has access to …"), the same read-only, and Leave. Every choice is a button (no `<select>`, which an arrow key changes as it passes over it) and is sent as it is pressed; Remove, New link and Leave ask a second click. Copy link (the share link while it is `link`, else its address: a public one opens for anyone without its token) and Done (in a dialog, closes it, as Escape does; in a window of its own, closes that, or goes to `/settings`); then, quieter, while it is `link`, a new share link. Signed out: → sign in first, and back. It reads nothing from its URL |
+| `GET /share/<name>` | the share sheet, a card laid out as a document's share dialog, titled with the fragment's title: who is in (emails and pictures, from the registry's profiles: a member sees the members' emails, decision 48; an agent by its title, and whose agent it is, by their email: its owner reads what it reads) and their roles, to any member (anyone else, a 403 page); for the owner ("Share …"), adding people by email with a role (Invites by email, below), the invites waiting (each email, its role, the days it waits; Revoke), each member's role (Viewer and Editor buttons, theirs pressed) and Remove (a chat's own agent has neither: it keeps its place), a person with agents in with them as one entry, "With their agents", never naming one (decisions 63 and 64), and who can open it ("General access": three buttons, Restricted `members`, Anyone with the link `link`, Public `public`, each saying what it means, the current one pressed); for a member who is not its owner ("Who has access to …"), the same read-only, and Leave. Every choice is a button (no `<select>`, which an arrow key changes as it passes over it) and is sent as it is pressed; Remove, New link and Leave ask a second click. Copy link (the share link while it is `link`, else its address: a public one opens for anyone without its token) and Done (in a dialog, closes it, as Escape does; in a window of its own, closes that, or goes to `/apps`); then, quieter, while it is `link`, a new share link. Signed out: → sign in first, and back. It reads nothing from its URL |
 | `POST /share/<name>` | the sheet's form: `form` (the page's token), `action`, and its fields: `invite` (`email`, `role`: `POST invites`; the sheet says they were mailed, or mailed again, and are in once they accept it; an email someone in it signs in as already, the owner's own included, changes nothing and says so: their role changes in the list), `role` (`member`, `role`: `viewer` or `editor`), `remove` (`member`), `uninvite` (`email`), `visibility` (`visibility`), `rotate` (the share link only; the inbox's token is the CLI's: the sheet, saying so), `leave` (a member's own, `DELETE members/me`: a page saying they left, whose Done closes the dialog). Done: → 303 back to the sheet; refused by the fragment (a member who is not the owner: 403; the owner leaving: 400; a day's mails spent: 429): the sheet, saying why, with the refusal's status |
 
 The sheet cannot be driven by a fragment's page. Every POST's `Origin`
@@ -1226,8 +1226,8 @@ one else is in it, or it is past the bound; its sheet names them). At
 most `ACCESS_PROFILES_MAX` (512) identities are named by email, the
 first fragments' first; past it a member has no `email`. A fragment
 that does not answer (deleted meanwhile) keeps its list's counts. The
-shell's settings show it, by fragment and by person, each fragment's
-title opening its share sheet.
+shell's Apps page shows it, one row a fragment, each with its Share…
+(The shell, below).
 
 ## Control API
 
@@ -2892,10 +2892,11 @@ means authorization is disabled. Existing own-key behavior below is unchanged.
 
 ## The shell (phase 5)
 
-The platform's one page is `/`, `/settings` and `/welcome` (cell/shell/,
-its files at `/__shell/<file>`, the release's: Serving, The release's
-files): its script reads the path, opening its
-settings at `/settings`, the welcome at `/welcome`, and the person's
+The platform's one page is `/`, `/settings`, `/apps` and `/welcome`
+(cell/shell/, its files at `/__shell/<file>`, the release's: Serving,
+The release's files): its script reads the path, opening its
+settings at `/settings`, its Apps page at `/apps`, the welcome at
+`/welcome`, and the person's
 chats at `/`, and puts the view it shows in the address, so a reload
 stays put. Finite's about page, privacy policy and terms are `/about`,
 `/privacy` and `/terms` (cell/shell/about.html, privacy.html,
@@ -2956,8 +2957,7 @@ their connections (every provider the deployment offers, one row each:
 its kind, their state there with its action, which of their agents may
 use it, pressed to narrow one, and this month's calls by agent with an
 operator key's cost: `GET /api/connections`, the computer's view and its
-`uses`), sharing (who may open each fragment they own, by fragment or
-by person: `GET /api/access`), pairing the
+`uses`), pairing the
 CLI (the one-line install, `fragment login`, and `fragment skill` for a
 coding agent), and Your data (Export, above: "Export everything", its
 state and progress while it builds, read again every 2 s while the page
@@ -2969,6 +2969,27 @@ dialog (their own's "Share…" or "Invite…"; someone else's "People…",
 where they see who is in and may leave), and the dock's Add shows ways
 to ask their agent for an app (below), not templates: the templates are
 the CLI's (`fragment create --template`) and its agents'.
+**Its Apps page** (`/apps`, the sidebar's Apps, above Settings; in the
+work area as settings are; cell/shell/apps-page.js; #587) lists every
+fragment in their list but their chats, agents and skills (apps, brains,
+a kind it does not know), as the list orders them, the archived
+folded at the end with Unarchive. Each row is its icon, title, kind
+(when not an app), their role on one someone else owns, who has access
+to one of theirs at a glance (Restricted, Anyone with the link or
+Public; the people in it by email, two named and a count past them; the
+invites waiting: `GET /api/access`, read as the page opens, as a share
+sheet closes and as the list says its sharing changed), its preview card
+(read as the page opens and for a new or changed app, with bounded retries
+while one is not there yet), and what they may do there, each showing what
+the server answered and nothing before it: an app's or a brain's **Dock** switch (`PUT
+/api/fragments/{name}/dock`; it moves once the list says so, any role),
+**New preview** (an editor's, not on a members-only one of theirs:
+`POST /api/f/{name}/card`; "Taking a new preview…" until status's
+`page.at` reaches the ask's `since`, three minutes at most, then the
+card read again), **Icon…** (an editor's: the icon sheet, Icons), and
+**Share…** (theirs) or **People…** (someone else's), the share sheet. A
+refusal is said under its row. Settings have no sharing section: who
+may open what is the Apps page's.
 It calls the API with the person's platform session
 rather than a key: a request on the platform's host is taken as the
 signed-in person when it carries `x-fragment-shell: 1` and
