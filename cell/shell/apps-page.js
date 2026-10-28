@@ -336,7 +336,9 @@ export function createAppsPage(page, h) {
     async open() {
       shown = true;
       ++visit;
-      busy.clear();
+      // preview presentation is a visit's; a Dock or archive mutation is
+      // still the one server write this app may have in flight
+      for (const [name, operation] of busy) if (operation.kind === "card") busy.delete(name);
       shots.clear();
       page.replaceChildren();
       cardsLoad.wait = 0;

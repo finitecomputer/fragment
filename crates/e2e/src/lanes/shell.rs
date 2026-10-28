@@ -5675,6 +5675,87 @@ fn apps_preview_visit_ui(s: &mut Suite, b: &mut Browser, page: &Page, app: &str)
     Ok(())
 }
 
+/// A Dock write is not preview presentation: navigation and repeated opens
+/// keep its switch busy, so no later choice can reach the server first. Once
+/// it answers, later toggles proceed in order and the list and switch agree.
+fn apps_dock_visit_ui(s: &mut Suite, b: &mut Browser, page: &Page, app: &str) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    let row = format!("document.querySelector({})", js(&format!("#apps-page .app-row[data-fragment=\"{app}\"]")));
+    let dock = format!("{row}?.querySelector('[data-action=dock]')");
+    let held = format!("{dock}?.disabled && window.__dockVisit.count() === 1");
+    b.eval(
+        page,
+        &format!(
+            "(() => {{ const real = window.fetch.bind(window); const writes = []; window.fetch = (url, o) => {{ \
+             if (String(url) === '/api/fragments/{app}/dock' && o?.method === 'PUT') {{ const answer = real(url, o); return new Promise((resolve) => writes.push({{ answer, resolve }})); }} return real(url, o); }}; \
+             window.__dockVisit = {{ count: () => writes.length, release: async () => {{ const next = writes.shift(); if (!next) return false; const r = await next.answer; next.resolve(r); await new Promise((done) => setTimeout(done, 0)); return true; }}, \
+             restore: () => {{ window.fetch = real; return true; }} }}; return true; }})()"
+        ),
+    )?;
+    let release = |b: &mut Browser| b.eval(page, "window.__dockVisit.release()");
+    let reopen = |b: &mut Browser| -> Result<bool> {
+        b.eval(page, "(document.getElementById('apps-link').click(), true)")?;
+        Ok(b.until(page, "location.pathname === '/apps'", wait))
+    };
+    let server_dock = |b: &mut Browser| {
+        b.eval(page, &format!("fetch('/api/fragments', {{ headers: {{ 'x-fragment-shell': '1' }} }}).then((r) => r.json()).then((j) => j.fragments.find((f) => f.name === '{}').dock !== false)", app))
+    };
+
+    // The first answer lands after navigation and another open. Until then
+    // there is one write alone; the next choice follows it.
+    b.eval(page, &format!("({dock}?.click(), true)"))?;
+    let first = b.until(page, &held, wait);
+    b.eval(page, "(document.getElementById('settings').click(), true)")?;
+    b.until(page, "location.pathname === '/settings'", wait);
+    let back = reopen(b)?;
+    let again = reopen(b)?;
+    let still_held = b.eval(page, &held)?;
+    release(b)?;
+    let off = b.until(page, &format!("{dock}?.getAttribute('aria-checked') === 'false' && !{dock}?.disabled"), wait);
+    b.eval(page, &format!("({dock}?.click(), true)"))?;
+    b.until(page, &held, wait);
+    release(b)?;
+    let on = b.until(page, &format!("{dock}?.getAttribute('aria-checked') === 'true' && !{dock}?.disabled"), wait);
+    let server_on = server_dock(b)?;
+    s.ok(
+        "a held Dock write stays the only write across navigation and repeated opens; the next toggle follows it, and server and switch end at the last choice",
+        first && back && again && still_held == true && off && on && server_on == true,
+        json!({ "held": still_held, "switch": b.eval(page, &format!("{dock}?.getAttribute('aria-checked')"))?, "server": server_on }),
+    );
+
+    // The other order: the first answer lands while Apps is closed. Further
+    // toggles and another repeated open remain serialized to the last choice.
+    b.eval(page, &format!("({dock}?.click(), true)"))?;
+    b.until(page, &held, wait);
+    b.eval(page, "(document.getElementById('settings').click(), true)")?;
+    b.until(page, "location.pathname === '/settings'", wait);
+    release(b)?;
+    let closed_answer = reopen(b)? && b.until(page, &format!("{dock}?.getAttribute('aria-checked') === 'false' && !{dock}?.disabled"), wait);
+    b.eval(page, &format!("({dock}?.click(), true)"))?;
+    b.until(page, &held, wait);
+    let repeated = reopen(b)?;
+    let no_overlap = b.eval(page, &held)?;
+    release(b)?;
+    b.until(page, &format!("{dock}?.getAttribute('aria-checked') === 'true' && !{dock}?.disabled"), wait);
+    b.eval(page, &format!("({dock}?.click(), true)"))?;
+    b.until(page, &held, wait);
+    release(b)?;
+    let last = b.until(page, &format!("{dock}?.getAttribute('aria-checked') === 'false' && !{dock}?.disabled"), wait);
+    let server_off = server_dock(b)?;
+    b.eval(page, "window.__dockVisit.restore()")?;
+    s.ok(
+        "with the earlier Dock answer before reopening too, subsequent toggles never overlap and the final server value and switch are the last choice",
+        closed_answer && repeated && no_overlap == true && last && server_off == false,
+        json!({ "held": no_overlap, "switch": b.eval(page, &format!("{dock}?.getAttribute('aria-checked')"))?, "server": server_off }),
+    );
+    // leave the app docked as the rest of shell-ui has it
+    b.eval(page, &format!("({dock}?.click(), true)"))?;
+    b.until(page, &held, wait);
+    release(b)?;
+    anyhow::ensure!(b.until(page, &format!("{dock}?.getAttribute('aria-checked') === 'true' && !{dock}?.disabled"), wait) && server_dock(b)? == true, "the app is docked again");
+    Ok(())
+}
+
 /// The Apps page (docs/api.md, The shell; #587), from the sidebar's Apps:
 /// the owner's app listed (no chat or skills), with its card and who has
 /// access; a kind this build does not know is listed as Other; its Dock
@@ -5728,6 +5809,7 @@ fn apps_ui(s: &mut Suite, b: &mut Browser, page: &Page, skills: &str, app: &str,
     let back = b.until(page, &format!("{}?.getAttribute('aria-checked') === 'true' && {docked}", control("dock")), wait);
     s.ok("its Dock switch takes it off the dock and puts it back, the switch moving as the list does", on == "true" && off && back, b.eval(page, &format!("{row}?.innerText ?? null"))?);
 
+    apps_dock_visit_ui(s, b, page, app)?;
     apps_response_races_ui(s, b, page, app)?;
     apps_arrival_ui(s, b, page)?;
     apps_preview_visit_ui(s, b, page, app)?;
