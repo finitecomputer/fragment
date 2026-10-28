@@ -279,6 +279,7 @@ pub fn answer(body: &Value) -> (String, Option<Value>) {
     // `browse: <url>`: the browser tool goes there; `look at your screen`:
     // computer_use captures it. Each answer quotes what its tool said.
     let browse = last_user.lines().find_map(|l| l.split_once("browse: ").map(|(_, u)| u.trim().to_string())).filter(|u| !u.is_empty());
+    let inspect_browser = last_user.lines().find_map(|l| l.split_once("inspect browser: ").map(|(_, expression)| expression.trim().to_string())).filter(|s| !s.is_empty());
     let look = last_user.contains("look at your screen");
     // `desk: <json>`: computer_use with those arguments (a scroll, a focus)
     let desk = last_user.lines().find_map(|l| l.split_once("desk: ").and_then(|(_, a)| serde_json::from_str::<Value>(a.trim()).ok())).filter(Value::is_object);
@@ -302,7 +303,7 @@ pub fn answer(body: &Value) -> (String, Option<Value>) {
             let made: String = result.split_once("made=").map(|(_, rest)| rest.chars().take_while(|c| !c.is_whitespace() && !matches!(c, '"' | '\\' | ',')).collect()).unwrap_or_default();
             return (format!("scripted: sent\nMEDIA:{made}"), None);
         }
-        if run.is_some() || start.is_some() || notify.is_some() || narrate.is_some() || browse.is_some() || look || desk.is_some() || write.is_some() || code.is_some() || clarify.is_some() || dm.is_some() || dm_back.is_some() {
+        if run.is_some() || start.is_some() || notify.is_some() || narrate.is_some() || browse.is_some() || inspect_browser.is_some() || look || desk.is_some() || write.is_some() || code.is_some() || clarify.is_some() || dm.is_some() || dm_back.is_some() {
             return (format!("scripted: the tool said: {}", result.chars().take(4000).collect::<String>()), None);
         }
         let ran = if result.contains("tool-ran") { "the tool ran" } else { "the tool said something else" };
@@ -400,6 +401,13 @@ pub fn answer(body: &Value) -> (String, Option<Value>) {
             (String::new(), Some(call("tool_call", json!({ "calls": [{ "name": "execute_code", "arguments": args }] }))))
         } else {
             ("scripted: no execute_code among my tools".into(), None)
+        };
+    }
+    if let Some(expression) = inspect_browser {
+        return if offered("browser_console") {
+            (String::new(), Some(call("browser_console", json!({ "expression": expression }))))
+        } else {
+            ("scripted: no browser_console among my tools".into(), None)
         };
     }
     match (browse, look) {

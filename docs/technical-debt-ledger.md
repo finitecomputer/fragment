@@ -1249,6 +1249,44 @@ fragment.club until cutover (decisions 34–35).
   units against a hold of its worst case, each catalog row naming how,
   proven by a lane whose upstream fake answers usage and is charged by it.
 
+## The Hermes image adapts Bot Desktop's browser ownership
+
+- **Observed:** 2026-10-28, Hermes v0.21.7's desktop base includes regular
+  Chromium 154, but our wrapper selected PM's Chrome for Testing 145.
+  Both `agent-browser` 0.26.0 and Hermes' dock launch with debugging port
+  `0`, enabling `navigator.webdriver`; switching to a nonzero port leaves
+  no `DevToolsActivePort` file for their discovery. The native daemon also
+  retains its first CDP endpoint across a desktop restart unless explicitly
+  reconnected. A global `browser.cdp_url` loses this version's local-session
+  lease fence. These were reproduced on the real image.
+- **Shortcut:** the image selects its existing `/usr/bin/chromium` and
+  extends pinned Hermes' local start/attach, dock and stop paths, using
+  `images/hermes/desktop_browser.py` and exact source replacements guarded
+  by `boot/src/desktop.rs`. The Python adapter reuses upstream's profile,
+  desktop environment and process-stop helpers. It serializes starts,
+  validates the live profile owner against CDP's browser PID, and gives
+  each visible browser a nonzero loopback port. Tool sessions use the
+  supported `agent-browser connect` command when that port changes, and
+  retain their local-session fence. No new daemon, cloud browser or
+  fingerprint script is introduced.
+- **Risk:** private upstream boundaries can change; exact-match guards
+  fail the image build if they do. A port allocation can race another
+  local process; startup then fails rather than attaching to it. The
+  adapter refuses profile downgrades, but rolling back to an image from
+  before this guard also requires restoring its pre-upgrade save: its
+  browser was 145, and the new profile may be 154's.
+- **First proof:** the Docker lane's
+  `a_regular_browser_is_shared_by_the_desktop_and_tools` (native tools,
+  webdriver, both launch orders, cookies, tool cleanup, desktop and
+  computer restarts, browser crash and stale port metadata), and
+  `two_agents_two_desktops` (distinct browser PIDs/ports, human takeover
+  refusing browser tools, idle stop sparing the other agent's browser).
+- **Delete when:** a pinned upstream desktop supports regular Chromium
+  with a nonzero CDP port, starts and reattaches it through its existing
+  local-session lease fence, and owns its shutdown independently of tool
+  session cleanup. Remove the adapter and all replacements together once
+  these same Docker checks pass against that upstream implementation.
+
 ## Hermes' direct FAL client reads process credentials, not profile scope
 
 - **Observed:** 2026-10-09, Hermes v0.21.6's

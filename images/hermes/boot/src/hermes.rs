@@ -649,31 +649,34 @@ fn provider_env_blocked(name: &str) -> bool {
 /// memory (p5, 2026-10-05).
 pub const CHROMIUM_FLAGS: [&str; 2] = ["--no-sandbox", "--disable-dev-shm-usage"];
 
-/// The image's Chromium: a script that starts the one Hermes' image pins
+/// The image's Chromium: a script that starts regular Chromium from its pinned base
 /// with `CHROMIUM_FLAGS` whatever the runtime. Hermes is pointed at it
 /// (`AGENT_BROWSER_EXECUTABLE_PATH`), so its browser and its desktop's
 /// Browser icon (Hermes' `bot_desktop.browser.executable()`) both run it.
 pub const CHROMIUM: &str = "/opt/fragment/bin/chromium";
+/// Regular Chromium, already in the pinned upstream desktop base.
+pub const SYSTEM_CHROMIUM: &str = "/usr/bin/chromium";
 
-/// The script at `CHROMIUM`, written at image build: Hermes' pinned full
-/// Chromium, `full`, its only browser (no headless shell: the full one runs
+/// The script at `CHROMIUM`, written at image build: regular distro
+/// Chromium, `full` (no headless shell: the full one runs
 /// headed on a desktop and headless with none, as its caller asks), its
 /// scratch the container's `/tmp` (`CHROMIUM_TMP`).
 pub fn chromium_script(full: &Path) -> String {
     let s = full.display().to_string();
     assert!(full.is_absolute() && !s.contains('\''), "a browser's path, absolute, quotable: {s}");
     let flags = CHROMIUM_FLAGS.join(" ");
-    format!("#!/bin/sh\n# The image's Chromium (hermes-boot build-info: images/hermes/boot/src/hermes.rs):\n# Hermes' pinned Chromium, always with the flags a container needs,\n# its scratch out of /data.\nexport TMPDIR={CHROMIUM_TMP}\nexec '{s}' {flags} \"$@\"\n")
+    format!("#!/bin/sh\n# Regular Chromium from the pinned desktop image, with its container flags.\n# --test-type suppresses the unsupported --no-sandbox infobar, as Hermes' dock does.\nexport TMPDIR={CHROMIUM_TMP}\n# Distro Chromium 154 puts a headless throwaway profile under XDG_CONFIG_HOME,\n# unlike the testing build's TMPDIR. Keep it out of every saved home too.\nfor arg in \"$@\"; do\n  case \"$arg\" in --headless|--headless=*) export XDG_CONFIG_HOME=\"/tmp/fragment-chromium-$(id -u)\" ;; esac\ndone\nexec '{s}' {flags} --test-type \"$@\"\n")
 }
 
 /// Chromium's scratch: the container's own `/tmp`, which no save keeps.
 /// Hermes points `TMPDIR` under `/data`: an agent's terminal at its
 /// profile's scratch (its work's `tmp_dir`, through a link), Hermes' browser
 /// tool at the gateway's own (`/data/hermes/cache/scratch`).
-/// Chromium keeps there a headless browser's profile when its caller names
-/// none (Chrome 145, which Hermes v0.21.6 pins; 153, in its v0.21.5 image,
-/// kept it under `~`), and the shared memory `--disable-dev-shm-usage` moves
-/// out of `/dev/shm`: throwaway state any save would carry, and under the
+/// Chromium keeps there the shared memory `--disable-dev-shm-usage` moves
+/// out of `/dev/shm`; a headless call also gets an XDG_CONFIG_HOME under
+/// /tmp, where distro Chromium 154 puts its throwaway profile when no
+/// user-data directory is named (the testing build 145 used TMPDIR).
+/// This is throwaway state any save would carry, and under the
 /// gateway's scratch a hold while one runs would find its databases under
 /// Hermes' home, locked.
 pub const CHROMIUM_TMP: &str = "/tmp";
@@ -1445,7 +1448,7 @@ mod tests {
     /// flags, on a desktop or with none: run here by `sh`, as Hermes runs it.
     #[test]
     fn the_images_chromium_carries_the_containers_flags() {
-        let s = chromium_script(Path::new("/opt/hermes/tools/chromium-1208/chrome-linux64/chrome"));
+        let s = chromium_script(Path::new(SYSTEM_CHROMIUM));
         assert!(s.starts_with("#!/bin/sh\n"), "{s}");
         assert_eq!(CHROMIUM_FLAGS, ["--no-sandbox", "--disable-dev-shm-usage"], "Hermes' CHROMIUM_SANDBOX_BYPASS_ARGS");
         let dir = std::env::temp_dir().join(format!("hermes-chromium-{}", std::process::id()));
@@ -1465,7 +1468,7 @@ mod tests {
             }
             String::from_utf8(c.output().unwrap().stdout).unwrap()
         };
-        let started = "full --no-sandbox --disable-dev-shm-usage --user-data-dir=/p https://example.com tmp=/tmp\n";
+        let started = "full --no-sandbox --disable-dev-shm-usage --test-type --user-data-dir=/p https://example.com tmp=/tmp\n";
         assert_eq!(run(Some(":20")), started, "on a desktop");
         assert_eq!(run(None), started, "with none: its caller asks for headless");
         let _ = std::fs::remove_dir_all(&dir);

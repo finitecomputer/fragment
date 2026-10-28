@@ -1114,7 +1114,54 @@ fn page_shown(frame: &[u32], width: usize, rect: [usize; 4]) -> f64 {
 
 /// The command line of the browser's Chromium (its first process).
 fn chromium(c: &Container) -> String {
-    c.exec_out(&["sh", "-c", "for p in $(pgrep -f -- '/chrome(-headless-shell)? ' | head -1); do tr '\\0' ' ' < /proc/$p/cmdline; done"])
+    c.exec_out(&["sh", "-c", "for p in $(pgrep -f -- '/(chrome(-headless-shell)?|chromium) ' | head -1); do tr '\\0' ' ' < /proc/$p/cmdline; done"])
+}
+
+/// Inspect the real desktop browser through the adapter's ownership check.
+fn desktop_browser(c: &Container, profile: &str) -> serde_json::Value {
+    const SCRIPT: &str = r#"import json, sys
+sys.path.insert(0, '/opt/hermes')
+from tools.bot_desktop import browser
+from tools.bot_desktop.fragment_browser import _owned_process, _endpoint
+p = _owned_process(browser.profile_dir())
+print(json.dumps({'pid': p.pid, 'port': _endpoint(p), 'argv': p.cmdline()} if p else None))
+"#;
+    let (code, out) = c.exec_code(&["/command/s6-setuidgid", "hermes", "env", &format!("HERMES_HOME=/data/hermes/profiles/{profile}"), "/opt/hermes/.venv/bin/python", "-c", SCRIPT]);
+    assert_eq!(code, 0, "the desktop browser's identity: {out}");
+    serde_json::from_str(out.trim().lines().last().unwrap_or("null")).expect("the browser identity is JSON")
+}
+
+/// Run the Browser icon through the desktop's own launcher and environment.
+fn open_browser_icon(c: &Container, profile: &str) {
+    const SCRIPT: &str = r#"import ctypes, os, sys, time
+sys.path.insert(0, '/opt/hermes')
+from tools.bot_desktop import browser, runtime
+from tools.bot_desktop.fragment_browser import _owned_process, _endpoint
+panel = runtime.state_dir() / 'xdg/xfce4/panel'
+number = (panel / '.hermes-browser-launcher').read_text().strip()
+os.environ.update(runtime.published_env())
+# Xfce has GIO's launcher library, without the optional `gio` CLI.
+gio = ctypes.CDLL('libgio-2.0.so.0')
+gio.g_desktop_app_info_new_from_filename.argtypes = [ctypes.c_char_p]
+gio.g_desktop_app_info_new_from_filename.restype = ctypes.c_void_p
+gio.g_app_info_launch.argtypes = [ctypes.c_void_p] * 4
+gio.g_app_info_launch.restype = ctypes.c_int
+icon = gio.g_desktop_app_info_new_from_filename(str(panel / f'launcher-{number}/hermes.desktop').encode())
+assert icon and gio.g_app_info_launch(icon, None, None, None), 'the desktop entry launches'
+for _ in range(200):
+    p = _owned_process(browser.profile_dir())
+    if p is not None:
+        try:
+            _endpoint(p)
+            break
+        except (OSError, ValueError):
+            pass
+    time.sleep(.1)
+else:
+    raise AssertionError('the Browser icon did not start Chromium within 20s')
+"#;
+    let (code, out) = c.exec_code(&["/command/s6-setuidgid", "hermes", "env", &format!("HERMES_HOME=/data/hermes/profiles/{profile}"), "/opt/hermes/.venv/bin/python", "-c", SCRIPT]);
+    assert_eq!(code, 0, "the desktop's Browser icon: {out}");
 }
 
 /// Waits until `viewer`'s frame shows the browser's page where its window
@@ -1301,7 +1348,7 @@ async fn the_hermes_desktop() {
     // and the desktop's Browser icon, a person's after Take over, starts the same
     let panel = "/data/hermes/profiles/juniper--k3x9/bot-desktop/xdg/xfce4/panel";
     let icon = c.exec_out(&["sh", "-c", &format!("cat {panel}/launcher-$(cat {panel}/.hermes-browser-launcher)/hermes.desktop")]);
-    assert!(icon.lines().any(|l| l.starts_with("Exec=\"/opt/fragment/bin/chromium\" ")), "the Browser icon starts the image's Chromium: {icon}");
+    assert!(icon.lines().any(|l| l.starts_with("Exec=\"/opt/hermes/.venv/bin/python\" \"/opt/hermes/tools/bot_desktop/fragment_browser.py\" ")), "the Browser icon starts the shared desktop Chromium: {icon}");
 
     // The desktop restarts under its viewers (stopped as `hermes
     // computer-use screen stop` stops it): each viewer's stream ends with
@@ -1344,6 +1391,68 @@ async fn the_hermes_desktop() {
         "gws sends the agent's placeholder as its bearer token: {seen:?}; it said {:?}",
         fake.with(|w| reply(w, &turn))
     );
+}
+
+/// Goal: the first native browser tool starts regular Chromium on its own
+/// screen, with webdriver off; the Browser icon and later tool connections
+/// share that process and cookies. Closing a tool connection leaves it up;
+/// stopping its desktop closes it and keeps its cookies. A human-first
+/// restart, a browser crash and a whole computer restart reuse the same jar.
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn a_regular_browser_is_shared_by_the_desktop_and_tools() {
+    use support::rfb::Viewer;
+    let (fake, _model, chat, c) = hermes_running().await;
+    let profile = "juniper--k3x9";
+    assert!(!desktop_up(&c, profile), "no desktop or browser starts at boot");
+    let navigate = tool_said(&fake, &chat, &c, "browse: https://example.com").await;
+    let first = desktop_browser(&c, profile);
+    assert!(first.is_object(), "the native browse starts its desktop browser: {navigate}");
+    let argv: Vec<&str> = first["argv"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();
+    assert!(argv[0].ends_with("/chromium"), "regular Chromium, not the testing bundle: {argv:?}");
+    assert!(argv.contains(&"--test-type") && argv.contains(&"--no-sandbox") && argv.contains(&"--disable-dev-shm-usage"), "the container and desktop UI flags: {argv:?}");
+    assert!(first["port"].as_u64().is_some_and(|p| p > 0), "a nonzero CDP port: {first}");
+    for unwanted in ["--enable-automation", "--remote-debugging-port=0", "--remote-debugging-pipe", "--headless", "--disable-blink-features"] {
+        assert!(!argv.iter().any(|arg| arg.starts_with(unwanted)), "no {unwanted}: {argv:?}");
+    }
+    let ordinary = tool_said(&fake, &chat, &c, "inspect browser: navigator.webdriver === false ? 'ordinary-browser' : 'automation-enabled'").await;
+    assert!(ordinary.contains("ordinary-browser"), "the native tool sees webdriver false: {ordinary}");
+    let cookie = tool_said(&fake, &chat, &c, "inspect browser: document.cookie = 'fragment_browser_probe=kept; Max-Age=3600; SameSite=Lax'; document.cookie").await;
+    assert!(cookie.contains("fragment_browser_probe=kept"), "a real persistent cookie: {cookie}");
+
+    let base = fragment_bridge::net::Base::parse(&format!("http://127.0.0.1:{}", c.port(6080))).unwrap();
+    let _viewer = Viewer::open(&base, "watcher", profile, Duration::from_secs(30)).await.unwrap();
+    open_browser_icon(&c, profile);
+    assert_eq!(desktop_browser(&c, profile)["pid"], first["pid"], "the icon reuses the tool's browser");
+    let port = first["port"].to_string();
+    assert!(c.exec(&["/command/s6-setuidgid", "hermes", "agent-browser", "--session", "close-probe", "--cdp", &port, "get", "title"]));
+    assert!(c.exec(&["/command/s6-setuidgid", "hermes", "agent-browser", "--session", "close-probe", "close"]));
+    assert_eq!(desktop_browser(&c, profile)["pid"], first["pid"], "tool cleanup only disconnects");
+
+    let stopped = c.exec_code(&["env", "HERMES_HOME=/data/hermes", "/command/s6-setuidgid", "hermes", "hermes", "-p", profile, "computer-use", "screen", "stop"]);
+    assert_eq!(stopped.0, 0, "desktop stop: {stopped:?}");
+    assert!(desktop_browser(&c, profile).is_null(), "desktop stop closes its Chromium");
+    let _back = Viewer::open(&base, "watcher", profile, Duration::from_secs(30)).await.unwrap();
+    open_browser_icon(&c, profile); // Human starts this browser before any tool.
+    let human_first = desktop_browser(&c, profile);
+    assert_ne!(human_first["pid"], first["pid"], "a fresh browser after the stop");
+    let read_cookie = "inspect browser: document.cookie.includes('fragment_browser_probe=kept') ? 'cookie-kept' : 'cookie-missing'";
+    tool_said(&fake, &chat, &c, "browse: https://example.com").await;
+    let cookie = tool_said(&fake, &chat, &c, read_cookie).await;
+    assert!(cookie.contains("cookie-kept"), "the tools attach to the human's browser with its cookie: {cookie}");
+    assert_eq!(desktop_browser(&c, profile)["pid"], human_first["pid"]);
+
+    // The old port file is deliberately bogus. Discovery uses the live
+    // profile owner and verifies CDP's PID, never this stale metadata.
+    assert!(c.exec(&["/command/s6-setuidgid", "hermes", "sh", "-c", &format!("printf '1\\n/devtools/browser/stale\\n' > /data/work/{profile}/browser-profile/DevToolsActivePort")]));
+    assert_eq!(desktop_browser(&c, profile)["pid"], human_first["pid"]);
+    assert!(c.exec(&["kill", "-KILL", &human_first["pid"].to_string()]));
+    tool_said(&fake, &chat, &c, "browse: https://example.com").await;
+    assert_ne!(desktop_browser(&c, profile)["pid"], human_first["pid"], "a crash starts a new browser, not the stale endpoint");
+    c.restart();
+    let navigated = tool_said(&fake, &chat, &c, "browse: https://example.com").await;
+    let cookie = tool_said(&fake, &chat, &c, read_cookie).await;
+    assert!(cookie.contains("cookie-kept"), "the cookie survives a computer restart: {cookie}; {navigated}");
 }
 
 /// Hermes' own reading of `profile`'s Bot Desktop lease, as its
@@ -1416,6 +1525,37 @@ async fn two_agents_two_desktops() {
     assert_eq!((jv.name.as_str(), fv.name.as_str()), ("hermes:juniper--k3x9", "hermes:fred--k3x9"), "each socket shows its own agent's desktop");
     let xvnc = c.exec_out(&["sh", "-c", "pgrep -x Xvnc | wc -l"]);
     assert_eq!(xvnc.trim(), "2", "two desktops, two X servers");
+    // Both icons start a browser; the agents attach to their own profile's
+    // live PID and port even if another profile's old port file is present.
+    open_browser_icon(&c, "juniper--k3x9");
+    open_browser_icon(&c, "fred--k3x9");
+    let (jb, fb) = (desktop_browser(&c, "juniper--k3x9"), desktop_browser(&c, "fred--k3x9"));
+    assert_ne!(jb["port"], fb["port"], "two agents never share a CDP port");
+    assert_ne!(jb["pid"], fb["pid"], "two browser processes");
+    const GUARDS: &str = r#"import os, sys, tempfile
+from pathlib import Path
+sys.path.insert(0, '/opt/hermes')
+from tools.bot_desktop.fragment_browser import _owned_process, _check_version
+with tempfile.TemporaryDirectory(dir='/tmp') as directory:
+    profile = Path(directory)
+    # A saved SingletonLock whose PID now belongs to another agent is stale.
+    os.symlink('previous-host-' + sys.argv[1], profile / 'SingletonLock')
+    assert _owned_process(profile) is None, 'a foreign PID is never adopted'
+    version = profile / 'Last Version'
+    version.write_text('999.0.0.0')
+    try:
+        _check_version(profile)
+    except RuntimeError as error:
+        assert 'newer Chromium image' in str(error)
+    else:
+        raise AssertionError('a newer profile must refuse before Chromium starts')
+    assert version.read_text() == '999.0.0.0', 'refusal never rewrites the profile'
+"#;
+    let (code, out) = c.exec_code(&["/command/s6-setuidgid", "hermes", "/opt/hermes/.venv/bin/python", "-c", GUARDS, &fb["pid"].to_string()]);
+    assert_eq!(code, 0, "browser ownership and profile-version guards: {out}");
+    let stale = format!("printf '{}\\n/devtools/browser/stale\\n' > /data/work/juniper--k3x9/browser-profile/DevToolsActivePort", fb["port"]);
+    assert!(c.exec(&["/command/s6-setuidgid", "hermes", "sh", "-c", &stale]));
+    assert_eq!(desktop_browser(&c, "juniper--k3x9")["pid"], jb["pid"], "another agent's stale port cannot redirect attachment");
 
     // Take over of juniper's screen is juniper's lease
     let mut driving = Control::open(&base, "driver", "juniper--k3x9").await.unwrap();
@@ -1443,6 +1583,8 @@ async fn two_agents_two_desktops() {
     let jsaid = fake.with(|w| reply(w, &jchat, &jturn)).unwrap_or_default();
     eprintln!("two desktops: juniper, held: {}", jsaid.chars().take(400).collect::<String>());
     assert!(jsaid.contains("human_has_control"), "juniper's computer_use refuses while a person holds its screen: {jsaid}");
+    let refused = tool_said(&fake, &jchat, &c, "inspect browser: document.title").await;
+    assert!(refused.to_lowercase().contains("human has taken over"), "the native browser tool retains the desktop's lease fence: {refused}");
     let fturn = look(&fchat, "fred--k3x9");
     within(&fake, &fchat, &c, 240_000, "fred's look", |w| reply(w, &fchat, &fturn).is_some()).await;
     let fsaid = fake.with(|w| reply(w, &fchat, &fturn)).unwrap_or_default();
@@ -1460,6 +1602,8 @@ async fn two_agents_two_desktops() {
     within(&fake, &jchat, &c, 240_000, "juniper's look, given back", |w| reply(w, &jchat, &jturn).is_some()).await;
     let jsaid = fake.with(|w| reply(w, &jchat, &jturn)).unwrap_or_default();
     assert!(!jsaid.contains("human_has_control"), "given back, juniper's computer_use works: {jsaid}");
+    let unheld = tool_said(&fake, &jchat, &c, "browse: https://example.com").await;
+    assert_eq!(desktop_browser(&c, "juniper--k3x9")["pid"], jb["pid"], "the native tool attaches after Give back: {unheld}");
 
     // idle: juniper's desktop, unwatched and unused, stops; fred's, watched, does not
     let marker = "/data/work/juniper--k3x9/browser-profile/fragment-marker";
@@ -1473,6 +1617,8 @@ async fn two_agents_two_desktops() {
     }
     eprintln!("two desktops: juniper's stopped {} ms after its last viewer left", t.elapsed().as_millis());
     assert!(!desktop_up(&c, "juniper--k3x9"), "an unwatched, unused desktop stops: {}", c.logs().lines().filter(|l| l.contains("screen.")).collect::<Vec<_>>().join("\n"));
+    assert!(desktop_browser(&c, "juniper--k3x9").is_null(), "idle stop closes the browser too");
+    assert_eq!(desktop_browser(&c, "fred--k3x9")["pid"], fb["pid"], "stopping one agent spares the other's browser");
     assert!(desktop_up(&c, "fred--k3x9"), "one watched does not");
     let stopped = c.logs().lines().filter(|l| l.contains("\"screen.idle_stopped\"") && l.contains("juniper--k3x9")).map(str::to_string).collect::<Vec<_>>();
     assert!(!stopped.is_empty() && stopped.iter().all(|l| l.contains("\"code\":0")), "Hermes' own stop: {stopped:?}");
@@ -1611,14 +1757,15 @@ async fn a_browser_the_agent_runs_keeps_its_databases_in_its_work() {
         assert!(t.elapsed() < Duration::from_secs(60), "the agent's Chromium made no databases; the terminal said {:?}", fake.with(|w| w.bodies(&chat, "chat", "reply").into_iter().find(|r| r["turn"] == turn)));
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
-    assert!(c.exec(&["pgrep", "-f", "chrome-linux64/chrome"]), "the agent's Chromium runs into the hold");
+    assert!(c.exec(&["pgrep", "-f", "/usr/lib/chromium/chromium"]), "the agent's regular Chromium runs into the hold");
     let left_out = hold(&c).unwrap_or_else(|| panic!("no answer to the hold; the container said:\n{}", c.logs()));
     let held = held_event(&c).unwrap_or_else(|| panic!("no held event; the container said:\n{}", c.logs()));
     eprintln!("browse: held {held}; left out {left_out:?}\nbrowse: its Chromium's databases:\n{}", dbs("/data/ /tmp/"));
-    assert!(c.exec(&["pgrep", "-f", "chrome-linux64/chrome"]), "and through it");
+    assert!(c.exec(&["pgrep", "-f", "/usr/lib/chromium/chromium"]), "and through it");
     assert_eq!(held["locked"], json!([]), "no database kept hot for being locked: {held}");
     assert_eq!(dbs("/data/hermes/").trim(), "", "none of its databases is under Hermes' home");
-    assert!(!dbs("/tmp/").trim().is_empty() || !dbs("/data/work/juniper--k3x9/home/").trim().is_empty(), "its temporary profile is the container's, or in its home, in its work");
+    assert!(!dbs("/tmp/").trim().is_empty(), "the regular browser's headless throwaway profile stays in the container's /tmp");
+    assert!(dbs("/data/work/juniper--k3x9/home/").trim().is_empty(), "a headless throwaway profile is not saved as the agent's work");
     unhold(&c);
 }
 
