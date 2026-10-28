@@ -595,11 +595,9 @@ async fn the_bridge_runs_a_linked_core() {
     });
     let t0 = Instant::now();
     let c = Computer::start(&lab, &fake, &data);
-    // Synchronization is observable in diagnostics; it sends no user message.
-    while !c.events("simplex.told").iter().any(|e| e["notice"] == "Resynced") {
-        assert!(t0.elapsed() < Duration::from_secs(60), "the rollback's encryption recovered");
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
+    recovered(&mut person, at_person, Duration::from_secs(60), || {
+        c.events("simplex.told").iter().any(|e| e["agent"] == "juniper--k3x9" && e["notice"] == "Resynced")
+    }).await;
     println!("after a rollback, encryption recovered {} ms after the start", t0.elapsed().as_millis());
     assert!(c.events("simplex.core_up").iter().any(|e| e["rollback"] == true), "its start forced a sync");
     let before = c.events("simplex.forward").len();

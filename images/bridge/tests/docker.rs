@@ -3186,7 +3186,7 @@ fn simplex_cores(c: &Container) -> usize {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
 async fn simplex_on_the_hermes_image() {
-    use support::simplex::{received, say, tag, Lab};
+    use support::simplex::{received, recovered, say, tag, Lab};
     build(&repo_dir(), "images/hermes/Dockerfile", &hermes_tag());
     let mut lab = Lab::up_with("hermes", true);
     let mut person = lab.start("person", false).await;
@@ -3373,8 +3373,10 @@ async fn simplex_on_the_hermes_image() {
     assert_eq!(code, 0, "the save checks: {said}");
     let t0 = Instant::now();
     assert!(c.exec(&["touch", "/run/computer/restored"]));
-    simplex_until(&c, "", 240_000, "running after a rollback", |v| v["running"] == true).await;
-    eprintln!("simplex: woken from an older save, its core running {} ms after the gate", t0.elapsed().as_millis());
+    recovered(&mut person, at_person, Duration::from_secs(240), || {
+        c.logs().lines().filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok()).any(|e| e["event"] == "simplex.told" && e["agent"] == "juniper--k3x9" && e["notice"] == "Resynced")
+    }).await;
+    eprintln!("simplex: woken from an older save, both ends synchronized {} ms after the gate", t0.elapsed().as_millis());
     say(&mut person, at_person, "after the rollback").await;
     let replies = received(&mut person, Duration::from_secs(180), |got| got.iter().any(|t| t.starts_with("scripted:") && t.contains("after the rollback"))).await;
     assert_eq!(replies.len(), 1, "only the requested reply, with no restart announcement: {replies:?}");
