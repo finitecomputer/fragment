@@ -83,6 +83,9 @@ pub enum Cmd {
     /// refuses it unless it found the ratchet out of step itself (`CMD
     /// PROHIBITED`); forced, it always starts one.
     Sync { contact: ContactId, force: bool },
+    /// Read the core's durable ratchet state before starting or retrying a
+    /// negotiation. A forced sync replaces keys even while one is running.
+    ContactInfo { contact: ContactId },
     /// The contact, deleted with its chat; `notify`, told so.
     Delete { contact: ContactId, notify: bool },
     /// A connection that never became a contact (a pending invitation).
@@ -209,6 +212,10 @@ impl Cmd {
                     format!("/_sync @{contact}")
                 }
             }
+            Cmd::ContactInfo { contact } => {
+                assert!(*contact > 0, "a state read names a contact");
+                format!("/_info @{contact}")
+            }
             Cmd::Delete { contact, notify } => {
                 assert!(*contact > 0, "a delete names a contact");
                 format!("/_delete @{contact} full notify={}", if *notify { "on" } else { "off" })
@@ -321,8 +328,11 @@ pub enum Resp {
     Page(Vec<Item>),
     /// A contact's ratchet synchronization moved (`contactRatchetSync`).
     Sync { contact: ContactId, status: SyncStatus },
-    /// A forced synchronization started (`contactRatchetSyncStarted`).
+    /// A synchronization command accepted (`contactRatchetSyncStarted`).
     SyncStarted { contact: ContactId },
+    /// The core's current durable state (`contactInfo`), including after
+    /// a restart that lost a negotiation's events.
+    ContactInfo { contact: ContactId, status: SyncStatus },
     /// A contact deleted, by this side (`contactDeleted`) or by theirs
     /// (`contactDeletedByContact`).
     Deleted { contact: ContactId, by_them: bool },
@@ -463,6 +473,17 @@ fn id(v: &Value, what: &str) -> Result<i64, WireError> {
     v.as_i64().filter(|n| *n > 0).ok_or_else(|| shape(what))
 }
 
+fn sync_status(v: &Value) -> Result<SyncStatus, WireError> {
+    match v.as_str() {
+        Some("ok") => Ok(SyncStatus::Ok),
+        Some("allowed") => Ok(SyncStatus::Allowed),
+        Some("required") => Ok(SyncStatus::Required),
+        Some("started") => Ok(SyncStatus::Started),
+        Some("agreed") => Ok(SyncStatus::Agreed),
+        _ => Err(shape("a sync of another status")),
+    }
+}
+
 fn read_resp(r: &Value) -> Result<Resp, WireError> {
     let t = r["type"].as_str().ok_or_else(|| shape("a resp with no type"))?;
     Ok(match t {
@@ -489,17 +510,11 @@ fn read_resp(r: &Value) -> Result<Resp, WireError> {
             Resp::Page(items.iter().take(ITEMS_MAX).filter_map(|ci| item(&chat["chatInfo"], ci)).collect())
         }
         "contactRatchetSync" => {
-            let status = match r["ratchetSyncProgress"]["ratchetSyncStatus"].as_str() {
-                Some("ok") => SyncStatus::Ok,
-                Some("allowed") => SyncStatus::Allowed,
-                Some("required") => SyncStatus::Required,
-                Some("started") => SyncStatus::Started,
-                Some("agreed") => SyncStatus::Agreed,
-                _ => return Err(shape("a sync of another status")),
-            };
+            let status = sync_status(&r["ratchetSyncProgress"]["ratchetSyncStatus"])?;
             Resp::Sync { contact: id(&r["contact"]["contactId"], "a sync with no contact")?, status }
         }
         "contactRatchetSyncStarted" => Resp::SyncStarted { contact: id(&r["contact"]["contactId"], "a sync with no contact")? },
+        "contactInfo" => Resp::ContactInfo { contact: id(&r["contact"]["contactId"], "a state read with no contact")?, status: sync_status(&r["connectionStats_"]["ratchetSyncState"])? },
         "contactDeleted" | "contactDeletedByContact" => Resp::Deleted { contact: id(&r["contact"]["contactId"], "a delete with no contact")?, by_them: t == "contactDeletedByContact" },
         "contactConnectionDeleted" => Resp::ConnDeleted { conn: id(&r["connection"]["pccConnId"], "a delete with no connection")? },
         "rcvFileDescrReady" => Resp::FileReady { file: id(&r["chatItem"]["chatItem"]["file"]["fileId"], "a file with no id")? },
@@ -599,6 +614,7 @@ mod tests {
             "apiChat" => include_str!("fixtures/apiChat.json"),
             "contactRatchetSync" => include_str!("fixtures/contactRatchetSync.json"),
             "contactRatchetSyncStarted" => include_str!("fixtures/contactRatchetSyncStarted.json"),
+            "contactInfo" => include_str!("fixtures/contactInfo.json"),
             "skipped" => include_str!("fixtures/skipped.json"),
             "prohibited" => include_str!("fixtures/prohibited.json"),
             "largeMsg" => include_str!("fixtures/largeMsg.json"),
@@ -641,6 +657,7 @@ mod tests {
         assert!(matches!(chat[7], Item { received: false, content: Content::Message { .. }, .. }));
         assert_eq!(fixture("contactRatchetSync"), Resp::Sync { contact: 3, status: SyncStatus::Ok });
         assert_eq!(fixture("contactRatchetSyncStarted"), Resp::SyncStarted { contact: 3 });
+        assert_eq!(fixture("contactInfo"), Resp::ContactInfo { contact: 3, status: SyncStatus::Ok });
         let Resp::Items(skipped) = fixture("skipped") else { panic!("items") };
         assert_eq!(skipped[0].content, Content::Skipped);
         assert_eq!(skipped[0].shared, None, "a skip is no message of its sender's");
@@ -689,6 +706,7 @@ mod tests {
         assert_eq!(Cmd::Invite.line(), "/connect");
         assert_eq!(Cmd::Sync { contact: 3, force: false }.line(), "/_sync @3");
         assert_eq!(Cmd::Sync { contact: 3, force: true }.line(), "/_sync @3 force=on");
+        assert_eq!(Cmd::ContactInfo { contact: 3 }.line(), "/_info @3");
         assert_eq!(Cmd::Delete { contact: 4, notify: false }.line(), "/_delete @4 full notify=off");
         assert_eq!(Cmd::DeleteConn { conn: 2 }.line(), "/_delete :2");
         assert_eq!(Cmd::Chat { contact: 3, count: 20, before: None }.line(), "/_get chat @3 count=20");
@@ -832,6 +850,10 @@ mod tests {
         assert!(matches!(parse(r#"{"resp":{"type":"invitation","connLinkInvitation":{"connFullLink":"https://evil.example/"},"connection":{"pccConnId":1}}}"#), Err(WireError::Shape(_))), "a link of another form");
         assert!(matches!(parse(r#"{"resp":{"type":"contactConnected","contact":{"contactId":0,"activeConn":{"connId":1}}}}"#), Err(WireError::Shape(_))));
         assert!(matches!(parse(r#"{"resp":{"type":"contactRatchetSync","contact":{"contactId":3},"ratchetSyncProgress":{"ratchetSyncStatus":"weird"}}}"#), Err(WireError::Shape(_))));
+        for stats in [serde_json::Value::Null, json!({}), json!({ "ratchetSyncState": "unknown" })] {
+            let frame = json!({ "resp": { "type": "contactInfo", "contact": { "contactId": 3 }, "connectionStats_": stats } });
+            assert!(matches!(parse(&frame.to_string()), Err(WireError::Shape(_))), "an absent or unknown state is never treated as ready");
+        }
         assert_eq!(parse(r#"{"resp":{"type":"subscriptionStatus"}}"#).expect("read").resp, Resp::Other("subscriptionStatus".into()));
         // a group's items are not a contact's
         let group = r#"{"resp":{"type":"newChatItems","chatItems":[{"chatInfo":{"type":"group","groupInfo":{"groupId":1}},"chatItem":{"chatDir":{"type":"groupRcv"},"content":{"type":"rcvMsgContent","msgContent":{"type":"text","text":"hi"}},"meta":{}}}]}}"#;
