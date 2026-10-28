@@ -17,6 +17,7 @@ import { appArt, openIconSheet } from "./app-icon.js";
 import { createLayout, store, reducedMotion, springFrames } from "./layout.js";
 import { createViewer } from "./viewer.js";
 import { billingSections, returnSaid, returning, seatGives, seatOffer } from "./billing.js";
+import { createLauncher } from "./launcher.js";
 
 const $ = (id) => document.getElementById(id);
 // New agents run on the cheap tier: GLM-5.3 Flash, DeepSeek V4 Flash its fallback (Paul, 2026-10-09).
@@ -145,6 +146,7 @@ function renderNames() {
   for (const f of document.querySelectorAll("iframe[data-simplex]")) nameSimplex(f);
 }
 const chats = () => state.fragments.filter((f) => f.kind === "chat");
+const isChat = (name) => byName(name)?.kind === "chat";
 const apps = () => state.fragments.filter((f) => f.kind === "app" || f.kind === "brain");
 // the sidebar's: what the person has not archived (search still finds the rest)
 const shown = (list) => list.filter((f) => !f.archived);
@@ -1054,7 +1056,6 @@ function openPrimaryMenu(trigger) {
     ...(state.computer ? [{ icon: "screen", text: "Its screen", onClick: () => openScreen(primary.fragment) }] : []),
   ]);
 }
-$("sidebar-new-chat").onclick = () => openSearch($("sidebar-new-chat"));
 // Match the chat composer's edge reflection, including its 64px falloff.
 // Follow the pointer across the sidebar and its fixed-position agent menu.
 const sidebarHoverPointer = matchMedia("(hover: hover) and (pointer: fine)");
@@ -1248,8 +1249,13 @@ async function setHome(agent, simplex) {
   homeIs(agent, simplex ? "simplex" : null);
 }
 
+// Each time the middle column is given a view (a chat, settings): a
+// launch's late answer changes the screen only if none was given since
+// (launcher.js).
+let views = 0;
 function openChat(name, push = true) {
   if (!byName(name)) return;
+  views++;
   if (push) at("/");
   state.page = null;
   $("layout").classList.remove("settings-view");
@@ -1258,11 +1264,7 @@ function openChat(name, push = true) {
   state.current = name;
   store.set(CURRENT, name);
   hideNotice();
-  if (!state.frames.has(name)) {
-    const frame = frameOf(framed(name, setupFor(name) ? "/?setup=1" : "/"), titleOf(name), name);
-    $("frames").append(frame);
-    state.frames.set(name, frame);
-  }
+  chatFrame(name);
   for (const [n, frame] of state.frames) frame.hidden = n !== name;
   renderHeading();
   renderChats();
@@ -1271,6 +1273,14 @@ function openChat(name, push = true) {
   navigated();
   // home: a first run a failed read put off goes on from here too
   if (firstRunPutOff) resumeFirstRun();
+}
+
+// A chat's frame, made once and kept.
+function chatFrame(name, path = setupFor(name) ? "/?setup=1" : "/") {
+  if (state.frames.has(name)) return;
+  const frame = frameOf(framed(name, path), titleOf(name), name);
+  $("frames").append(frame);
+  state.frames.set(name, frame);
 }
 
 // ---- apps: every other fragment, each a window in the viewer ----
@@ -1674,7 +1684,9 @@ const chatLabel = (agent) => freeLabel(`${labelOf(agent).slice(0, LABEL_ROOM - "
 // yet is the one to open again, not another.
 const blank = (identity) => chats().find((f) => own(f) && !f.archived && f.title === UNTITLED && !f.preview && agentsOf(f.name).length === 1 && agentsOf(f.name)[0] === identity);
 let starting = false;
-async function newChat(identity, { quiet = false } = {}) {
+// `open: false` makes it (or finds the blank one) without opening it: the
+// launcher opens it itself, as it posts its first message.
+async function newChat(identity, { quiet = false, open = true } = {}) {
   const agent = state.agents.get(identity);
   if (!agent || starting) return;
   starting = true;
@@ -1687,6 +1699,7 @@ async function newChat(identity, { quiet = false } = {}) {
       await load();
       name = chat.name;
     }
+    if (!open) return name;
     openChat(name);
     leaveSidebar();
     return name;
@@ -1697,7 +1710,6 @@ async function newChat(identity, { quiet = false } = {}) {
     starting = false;
   }
 }
-$("new-chat").onclick = () => openSearch($("new-chat"));
 // A chat of the person's still titled UNTITLED that has a message is titled
 // from its first message with words (its first line's words, cut to
 // TITLE_MAX_CHARS); one renamed in the meantime keeps its name. Once per
@@ -1805,6 +1817,9 @@ async function composeApp(text) {
     layout.hide("right");
     layout.hide("left");
   }
+  composeIn(name, text);
+}
+function composeIn(name, text) {
   if (state.page || state.current !== name) openChat(name);
   const frame = state.frames.get(name);
   frame?.focus();
@@ -1847,222 +1862,13 @@ $("rename-form").onsubmit = async (e) => {
   }
 };
 
-// ---- the launcher: one input for starting a chat or finding one again ----
-// The sidebar's +, the phone's top bar + and ⌘K (Skyler, 2026-10-12).
-// Empty stays quiet. Words ask the person's search (`GET /api/search`:
-// their chats and apps by title and label, then messages, newest first,
-// archived ones included): a chat found opens in the middle column, an app
-// in the desktop, a message its chat. Enter sends those exact words as the
-// first message of a new chat with their agent (`primaryAgent`), one record
-// however often it is tried (its id, kept). A request for an app is a
-// message like any other: their agent makes it.
-const isChat = (name) => byName(name)?.kind === "chat";
-function openFound(name) {
-  closeSearch();
-  if (isChat(name)) openChat(name); else openApp(name);
-  leaveSidebar();
-}
-function foundRow(name, preview, extra) {
-  const f = byName(name);
-  const row = el("button", "row search-result");
-  row.type = "button";
-  row.dataset.fragment = name;
-  const text = el("span", "agent-copy");
-  text.append(el("span", "label", chatTitle(name)));
-  if (preview) text.append(el("span", "agent-preview", preview));
-  row.append(isChat(name) ? mark(name, "small") : iconOf(name), text);
-  if (f?.archived) row.append(el("span", "meta", "Archived"));
-  if (extra) row.append(extra);
-  row.onclick = () => openFound(name);
-  return row;
-}
-const when = (at) => {
-  const d = new Date(at);
-  return d.toDateString() === new Date().toDateString() ? d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" }) : d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
-};
-function renderFound(fragments, messages) {
-  const results = $("search-results");
-  results.replaceChildren();
-  const q = $("workspace-search").value.trim();
-  if (!q) return;
-  if (canLaunch()) {
-    const action = el("button", "row search-result search-start");
-    action.type = "button";
-    const mark = el("span", "search-action-icon");
-    mark.append(icon("newChat"));
-    const copy = el("span", "agent-copy");
-    copy.append(el("span", "label", `Start a new chat with ${titleOf(state.agents.get(searchIdentity).fragment)}`), el("span", "agent-preview", q));
-    const enter = el("span", "meta search-enter");
-    enter.title = "Enter";
-    enter.replaceChildren(icon("cornerDownLeft"));
-    action.append(mark, copy, enter);
-    action.onclick = startFromSearch;
-    results.append(action);
-  }
-  const groups = [
-    ["Chats", fragments.filter((f) => f.kind === "chat").map((f) => foundRow(f.name, f.preview ?? ""))],
-    // the desktop's apps, as the dock lists them (`apps`)
-    ["Apps", fragments.filter((f) => f.kind === "app" || f.kind === "brain").map((f) => foundRow(f.name, ""))],
-    // a message in a fragment the list has not shown yet is left out until it has
-    ["Messages", messages.filter((m) => byName(m.fragment)).map((m) => {
-      const row = foundRow(m.fragment, m.snippet, el("span", "meta", when(m.at)));
-      row.classList.add("search-message");
-      row.dataset.seq = String(m.seq);
-      return row;
-    })],
-  ];
-  let count = 0;
-  for (const [heading, rows] of groups) {
-    if (!rows.length) continue;
-    count += rows.length;
-    results.append(el("h3", null, heading), ...rows);
-  }
-  // a seat's agent not made yet starts nothing: said, not offered
-  const waits = !state.guest && !canLaunch() ? "A new chat can start once your agent is made." : "";
-  $("search-status").textContent = [count || canLaunch() ? "" : "Nothing found.", waits].filter(Boolean).join(" ");
-}
-let asked = 0;
-let typing = null;
-let searchIdentity = null;
-let searchTrigger = null;
-let launching = false;
-let closingSearch = false;
-// Keep the same chat and record id after an uncertain send, so retry cannot
-// duplicate the first message. This is only the current dialog's draft.
-let pendingLaunch = null;
-const canLaunch = () => !state.guest && !!searchIdentity && state.agents.has(searchIdentity);
-async function search() {
-  const q = $("workspace-search").value.trim();
-  const mine = ++asked;
-  if (!q) return renderFound([], []);
-  try {
-    // A prompt can be longer than the search API's eight words / 256 bytes.
-    // Only the search hint is bounded; the complete prompt is sent to the chat.
-    const hint = [...q.split(/\s+/).slice(0, 8).join(" ")];
-    while (new TextEncoder().encode(hint.join("")).length > 256) hint.pop();
-    const found = await api("GET", `/api/search?q=${encodeURIComponent(hint.join(""))}`);
-    // a slower answer to an older query never replaces a newer one's
-    if (mine === asked) renderFound(found.fragments ?? [], found.messages ?? []);
-  } catch (e) {
-    if (mine === asked) $("search-status").textContent = e.message;
-  }
-}
-// `text`: what a suggestion asks, in place of the last unsent one
-function openSearch(trigger, text = null) {
-  if ($("search-dialog").open || launching) return;
-  closeMenu(true);
-  searchTrigger = trigger;
-  searchIdentity = primaryAgent()?.identity ?? null;
-  $("workspace-search").value = text ?? pendingLaunch?.text ?? "";
-  updateSearch();
-  $("search-dialog").showModal();
-  trigger?.setAttribute("aria-expanded", "true");
-  $("workspace-search").focus();
-}
-async function closeSearch(force = false) {
-  const dialog = $("search-dialog");
-  if (!dialog.open || closingSearch || launching && !force) return;
-  closingSearch = true;
-  ++asked;
-  clearTimeout(typing);
-  const panel = dialog.querySelector(".search-panel");
-  // Start at the current visual state, even if Escape interrupts the entrance.
-  const animations = matchMedia("(prefers-reduced-motion: reduce)").matches ? [] : [
-    dialog.animate([{ opacity: getComputedStyle(dialog).opacity }, { opacity: 0 }], { duration: 280, easing: "cubic-bezier(.4, 0, 1, 1)", fill: "forwards" }),
-    panel.animate([{ opacity: getComputedStyle(panel).opacity, transform: getComputedStyle(panel).transform }, { opacity: 0, transform: "translateY(8px)" }], { duration: 240, easing: "cubic-bezier(.4, 0, 1, 1)", fill: "forwards" }),
-  ];
-  dialog.inert = true;
-  await Promise.allSettled(animations.map(animation => animation.finished));
-  dialog.close();
-  for (const animation of animations) animation.cancel();
-  dialog.inert = false;
-  closingSearch = false;
-}
-async function startFromSearch() {
-  const text = $("workspace-search").value.trim();
-  if (!text || !canLaunch() || launching || closingSearch) return;
-  launching = true;
-  ++asked;
-  clearTimeout(typing);
-  $("workspace-search").readOnly = true;
-  $("search-send").disabled = true;
-  $("search-results").inert = true;
-  $("search-status").textContent = "Starting your chat…";
-  try {
-    if (!pendingLaunch || pendingLaunch.text !== text || pendingLaunch.identity !== searchIdentity) pendingLaunch = { text, identity: searchIdentity, id: crypto.randomUUID(), chat: null };
-    pendingLaunch.chat ||= await newChat(searchIdentity, { quiet: true });
-    if (!pendingLaunch.chat) throw new Error("Another new chat is being made; try again in a moment.");
-    await api("POST", `/api/f/${seg(pendingLaunch.chat)}/channels/chat`, { id: pendingLaunch.id, body: { text } });
-    openChat(pendingLaunch.chat);
-    pendingLaunch = null;
-    await closeSearch(true);
-    leaveSidebar();
-  } catch (e) {
-    $("search-status").textContent = `Your message wasn't sent. ${e.message}`;
-  } finally {
-    launching = false;
-    $("workspace-search").readOnly = false;
-    $("search-results").inert = false;
-    $("search-send").disabled = !canLaunch() || !$("workspace-search").value.trim();
-    if ($("search-dialog").open) $("workspace-search").focus();
-  }
-}
-function updateSearch() {
-  ++asked; // Invalidate in-flight responses immediately, before the debounce.
-  clearTimeout(typing);
-  $("search-status").textContent = "";
-  $("search-send").disabled = !canLaunch() || !$("workspace-search").value.trim();
-  renderFound([], []);
-  if ($("workspace-search").value.trim()) typing = setTimeout(search, 150);
-}
-for (const id of ["sidebar-new-chat", "new-chat"]) {
-  $(id).setAttribute("aria-keyshortcuts", "Meta+K Control+K");
-  $(id).dataset.tooltip = "Search or start a new chat (⌘K)";
-  $(id).setAttribute("aria-haspopup", "dialog");
-  $(id).setAttribute("aria-controls", "search-dialog");
-  $(id).setAttribute("aria-expanded", "false");
-}
-function launcherShortcut(e) {
-  if (e.isComposing || e.repeat || !(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey || e.code !== "KeyK" || $("layout").hidden) return;
-  e.preventDefault();
-  if ($("search-dialog").open) { $("workspace-search").focus(); return; }
-  openSearch($("sidebar-new-chat"));
-}
-addEventListener("keydown", launcherShortcut);
-// Keyboard events inside the chat iframe cannot bubble to the desktop.
-addEventListener("message", async event => {
-  if (event.data?.fragment !== "open-launcher" || $("layout").hidden) return;
-  const frame = [...document.querySelectorAll("iframe[data-fragment]")].find(f => f.contentWindow === event.source);
-  const name = frame?.dataset.fragment;
-  if (!name || !byName(name) || document.activeElement !== frame) return;
-  try { if (event.origin !== await originOf(name)) return; } catch { return; }
-  if (frame.contentWindow === event.source && document.activeElement === frame) openSearch($("sidebar-new-chat"));
-});
-$("search-dialog").addEventListener("click", (e) => {
-  if (e.target === $("search-dialog")) closeSearch();
-});
-$("search-dialog").addEventListener("cancel", (e) => { e.preventDefault(); closeSearch(); });
-$("search-dialog").addEventListener("close", () => {
-  ++asked;
-  clearTimeout(typing);
-  searchTrigger?.setAttribute("aria-expanded", "false");
-});
-$("search-form").onsubmit = (e) => { e.preventDefault(); startFromSearch(); };
-$("workspace-search").addEventListener("input", updateSearch);
-$("workspace-search").addEventListener("keydown", (e) => {
-  if (e.isComposing) return;
-  const first = $("search-results").querySelector("button");
-  if (e.key === "ArrowDown" && first) { e.preventDefault(); first.focus(); }
-  if (e.key === "Enter") { e.preventDefault(); if (canLaunch()) startFromSearch(); else first?.click(); }
-});
-$("search-results").addEventListener("keydown", (e) => {
-  if (!["ArrowDown", "ArrowUp"].includes(e.key)) return;
-  const rows = [...$("search-results").querySelectorAll("button")];
-  const index = rows.indexOf(document.activeElement);
-  if (index < 0) return;
-  e.preventDefault();
-  if (e.key === "ArrowUp" && index === 0) $("workspace-search").focus();
-  else rows[Math.min(rows.length - 1, index + (e.key === "ArrowDown" ? 1 : -1))]?.focus();
+// ---- the launcher (launcher.js): one input for starting a chat or finding one again ----
+const launcher = createLauncher({
+  $, el, api, ApiError, seg, state, byName, isChat, titleOf, chatTitle, mark, iconOf, primaryAgent, agentsOwnChat, UNTITLED,
+  openChat, openApp, chatFrame, composeIn, newChat, leaveSidebar, closeMenu, notice, prewake, originOf,
+  views: () => views,
+  busy: (name) => busyFrames.has(state.frames.get(name)),
+  setupChat: () => setup?.chat ?? null,
 });
 
 // ---- the computer: awake while the person is here, and its updates ----
@@ -2435,7 +2241,10 @@ async function openSettings(push = true, failed = null) {
   const tell = () => {
     if (failed && gen === noticeGen) notice(...failed);
   };
-  if (state.page !== "Settings") visits++;
+  if (state.page !== "Settings") {
+    visits++;
+    views++;
+  }
   state.page = "Settings";
   $("layout").classList.add("settings-view");
   $("frames").hidden = true;
@@ -4157,6 +3966,7 @@ async function load(changed = false) {
   rosterChanged();
   refreshSimplex();
   markSeen();
+  launcher.agentsRead();
   renderAgentFaces();
   loadHomes();
   for (const f of chats()) if (own(f) && f.title === UNTITLED && f.preview) titleFromFirst(f.name);
@@ -4319,7 +4129,7 @@ document.addEventListener("input", (e) => {
 function shellHolds() {
   for (const f of typedIn) if (!f.isConnected) typedIn.delete(f);
   const typed = [...typedIn].some((f) => f.value.trim() && f.getClientRects().length > 0);
-  return typed || !!document.querySelector("dialog[open]") || !menu.hidden || writing > 0 || composing.size > 0 || !!pendingLaunch || starting;
+  return typed || !!document.querySelector("dialog[open]") || !menu.hidden || writing > 0 || composing.size > 0 || launcher.holds() || starting;
 }
 
 // The chats' frames whose page said hello (`agents?`, which the chat's
