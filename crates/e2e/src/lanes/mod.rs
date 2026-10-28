@@ -158,10 +158,14 @@ const LANES: &[Lane] = &[
 /// fragment's deploy (after `effects`) up to it, so its first cron minute
 /// passes while they run, as in a whole run; `icons` joined it there, the
 /// lightest shard (run 40112403122: 3.4 minutes, the others 6.7 to 9.2).
+/// `finite-private` moved from shard 2 to 3 after run 40715118716: with a
+/// cold image build, shard 2 reached the 20-minute job limit twice, with
+/// no failed checks. Its private-model section takes about two minutes;
+/// shard 3 finished the same run in 11.5 minutes, including its build.
 pub const SHARDS: [&[&str]; 4] = [
     &["shell", "computers", "export", "hermes", "agent-smoke", "agent-ask", "agent-app", "agent-restart", "bot-mode", "checkout"],
-    &["finite-private", "chat", "shell-ui", "wipe", "sync", "migrations", "restart", "connections"],
-    &["facet-cap", "app-lockdown", "site", "watch", "icons", "schemas", "channels", "live", "routes", "cli", "browser", "jobs", "triggers"],
+    &["chat", "shell-ui", "wipe", "sync", "migrations", "restart", "connections"],
+    &["facet-cap", "app-lockdown", "site", "watch", "icons", "schemas", "channels", "live", "routes", "cli", "browser", "jobs", "triggers", "finite-private"],
     &[
         "auth", "create", "lockdown", "keys", "members", "identities", "signin", "levers", "secrets", "delegation", "files", "deploy", "templates", "share", "faces", "isolation", "frames",
         "ops", "public", "effects", "appfiles", "blobs", "notes", "brain", "doc", "push", "ai", "ledger", "transcribe", "orgs", "billing", "billing-page", "trials", "admin", "admin-page",
