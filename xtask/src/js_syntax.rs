@@ -222,6 +222,7 @@ mod tests {
     fn a_file_parses_as_its_extension_and_classic_list_say() {
         for (path, kind) in [
             ("cell/shell/shell.js", Some(InputType::Module)),
+            ("cell/shell/launcher.js", Some(InputType::Module)),
             ("cell/client.mjs", Some(InputType::Module)),
             ("templates/chat/site/chat.js", Some(InputType::Module)),
             ("cell/sw.js", Some(InputType::CommonJs)),
@@ -245,6 +246,8 @@ mod tests {
         let found = files(&devstack::repo_root()).expect("the repo's walk");
         let kind = |path: &str| found.iter().find(|(p, _)| p == path).map(|(_, k)| *k);
         assert_eq!(kind("cell/shell/shell.js"), Some(InputType::Module));
+        // the launcher, a module shell.js imports
+        assert_eq!(kind("cell/shell/launcher.js"), Some(InputType::Module));
         assert_eq!(kind("templates/todo/app.mjs"), Some(InputType::Module));
         assert_eq!(kind("templates/chat/site/chat.js"), Some(InputType::Module));
         assert_eq!(kind("templates/notes/site/assets/viewer.js"), Some(InputType::Module));

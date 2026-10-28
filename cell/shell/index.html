@@ -152,9 +152,11 @@
     <div class="wallpaper" aria-hidden="true"></div>
     <div class="search-panel">
       <form class="search-input-wrap" id="search-form">
-        <input id="workspace-search" type="text" aria-label="Ask anything or find a chat" placeholder="Ask anything, or find a chat or app…" autocomplete="off" maxlength="4000" enterkeyhint="send" autofocus aria-controls="search-results">
+        <textarea id="workspace-search" rows="1" aria-label="Ask anything or find a chat" placeholder="Ask anything, or find a chat or app…" autocomplete="off" maxlength="4000" enterkeyhint="send" autofocus aria-controls="search-results"></textarea>
         <button class="icon-button search-send" id="search-send" type="submit" aria-label="Start a new chat" title="Start a new chat" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5m-6 6 6-6 6 6"/></svg></button>
       </form>
+      <div class="search-files" id="search-files" hidden></div>
+      <div class="search-drop" id="search-drop" aria-hidden="true">Drop to attach</div>
       <div class="search-results" id="search-results"></div>
       <p class="search-status" id="search-status" role="status"></p>
     </div>

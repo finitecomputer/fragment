@@ -2341,7 +2341,7 @@ fails, and made again, asks again).
 | `POST /api/admin/trials` | the same | `NewTrialCode {name, kind?, days (1-30), capacity (1-10,000), expiresAt?, code?}` → `TrialCode {id, code, name, kind, days, capacity, expiresAt, active, revision, createdAt, createdBy, subscribed, open, uses}`: `kind` only `seat_always_on`, the default (`seat` is 400); `code` none, one is made (16 of A-Z less I and O, and 2-9, in fours); a code another has is 409 |
 | `GET /api/admin/trials` | the same | → `{codes: [TrialCode]}`, newest first, their uses counted (`subscribed`: bought; `open`: Checkouts not yet expired) |
 | `GET /api/admin/trials/{id}` | the same | → `TrialCode` with its `uses: [{person, email, at, status}]` |
-| `PATCH /api/admin/trials/{id}` | the same | `{revision, capacity?, active?, code?, expiresAt?}` → `TrialCode`: when `revision` is still its (else 409); places only grow |
+| `PATCH /api/admin/trials/{id}` | the same | `{revision, capacity?, active?, code?, expiresAt?}` → `TrialCode`: when `revision` is still its (else 409); `capacity` raises or lowers its places, never below those taken (`subscribed` + `open`, and 1 at least; else 400, saying so): nothing taken is given back |
 
 `/api/admin/*` takes an operator's signature, or the shell's session of
 a person the deployment's `operators` names (decision 59). A wipe's
@@ -3196,9 +3196,10 @@ nothing.
 
 **The launcher** (the sidebar's +, a phone's top bar +, and ⌘K or
 Ctrl K, from the chat's frame too: `{fragment: "open-launcher"}`, taken
-only from the focused frame of a listed fragment at its own origin) is one
-input over the desktop's landscape. Empty, it shows nothing. Words ask
-`GET /api/search` (Search, below; its first 8 words and 256 bytes): the
+only from the focused frame of a listed fragment at its own origin;
+cell/shell/launcher.js) is one input over the desktop's landscape.
+Empty, it shows nothing. Words ask `GET /api/search` (Search, below; its
+first 8 words and 256 bytes): the
 chats and apps whose title or label hold them, then the messages, newest
 first, archived ones marked. A chat found opens in the middle column, an
 app in the desktop, a message its chat. For a seat whose agent is made,
@@ -3206,10 +3207,30 @@ Enter (or the first row, "Start a new chat with <agent>") makes a new
 chat with it as **New chat** does and posts the words whole as its first
 message (`POST /api/f/{chat}/channels/chat`, the person's), with an id
 kept until it is sent, so trying again after an answer that was lost is
-the same record; the launcher says "Starting your chat…" until the
-platform answers, and opens the chat on its record. A request for an app
-is a message like any other: the agent makes it. A guest's launcher only
-finds.
+the same record. Enter goes straight to the chat: the launcher closes at
+once and the middle column is the new chat's while it is made; its page
+loads (`?sent=1`: docs/chat-records.md, "The launcher's chat") as its
+message is posted; a page already open that holds what no storage keeps
+(files chosen, a voice memo: its `busy`) is kept as it is. A message not
+sent opens the launcher again on its words, saying why. Once the person
+gives the middle column another view while it is on its way (another
+chat, settings, Back), the launch changes nothing on screen: its message
+is still sent, and one not sent is a notice, its words waiting in the
+launcher's next opening. The launcher wakes the person's computer as it opens
+(as focusing a chat does), so it is starting while they type. Before
+their agent runs (its first run, or their computer not read yet), Enter
+(the first row, "Say it in <chat>") opens their first chat (the first
+run's, else their agent's own) with the words in its composer, to send
+there, as the dock's prompts do (`compose`, above). The input is one
+line at rest (its placeholder too, cut short on a phone) and grows with
+a long prompt (to 200 px, then scrolls); Shift+Enter is a new line.
+Files dropped on it or pasted into it (for a person whose agent runs; at
+most 8, 25 MiB each, as chips under the words, each removable) go with
+the words, or alone, as the first message's attachments: each uploaded
+to the new chat once it is made (`PUT /api/f/{chat}/blobs/{sha256}`, a
+dropped connection tried again), then the record names them
+(docs/chat-records.md, Attachments). A request for an app is a message
+like any other: the agent makes it. A guest's launcher only finds.
 
 **The first run, in its chat.** The person's first agent is made with
 its chat (decision 10), once they hold a seat (one bought on the welcome

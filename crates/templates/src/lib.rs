@@ -146,6 +146,8 @@ const SHELL_PUBLISHED: [(&str, &str); 34] = [
     ("tooltips.js", "text/javascript; charset=utf-8"),
     // Settings' Billing: a seat, credit, an org (docs/billing.md)
     ("billing.js", "text/javascript; charset=utf-8"),
+    // the launcher: ⌘K, to start a chat or find one again (docs/api.md, The launcher)
+    ("launcher.js", "text/javascript; charset=utf-8"),
     ("vendor/split-grid.js", "text/javascript; charset=utf-8"),
     ("manifest.webmanifest", "application/manifest+json"),
     // the shell's favicon (a tab's, and the sign-in page's logo, which WorkOS takes from

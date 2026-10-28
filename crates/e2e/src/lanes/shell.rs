@@ -1033,6 +1033,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     // is labelled starfire-40k, so it is read, never guessed
     let key = b.eval(&page, "document.querySelector('#chats .chat-row')?.dataset.key ?? ''")?;
     let chat = key.as_str().and_then(|k| k.strip_prefix("chat:")).unwrap_or("").to_string();
+    first_chat_late_ui(s, &mut b, &page, &chat)?;
     let first_label = label_of(&chat).trim_end_matches("-chat").to_string();
     let host = chat.clone();
     // while its computer is held: a card of what is being made, typing, no Send, no message
@@ -1203,6 +1204,9 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     let _ = s.eventually(wait, || b.eval_in_frame(&page, &reader_chat, "!!document.querySelector('.msg.agent:not(.streaming)')").ok() == Some(Value::Bool(true)));
     unread_ui(s, api, &mut b, &page, &me, &reader_chat, &shots)?;
     new_chat_ui(s, api, &mut b, &page, &me, &reader_chat, &shots)?;
+    launch_late_ui(s, api, &mut b, &page, &me, &reader_chat)?;
+    launch_straight_ui(s, api, &mut b, &page, &me, &reader_chat)?;
+    launch_geometry_ui(s, &mut b, &page, &shots)?;
 
     // both agents in one chat, search, and archiving, as the person uses them
     groups_ui(s, api, &mut b, &page, &me, &shots)?;
@@ -1509,6 +1513,8 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     // last: it renames the person's first agent, which the checks above name
     faces_ui(s, api, &mut b, &page, &me, &chat, &shots)?;
     b.close(page)?;
+    first_chat_release_ui(s, api, &mut b)?;
+    b.set_cookie(&format!("{}/", api.base), "fragment_session", &session)?;
     // their computer unread from the page's start: theirs, then a new person's
     refresh_failed_start_ui(s, api, &mut b, &shots)?;
     first_run_put_off_ui(s, api, &mut b, &shots)?;
@@ -2616,6 +2622,12 @@ const YOUR_DATA_FITS: &str = "(() => { const d = document.getElementById('settin
 const SMALL_FIELDS: &str = "[...document.querySelectorAll('input:not([type=checkbox]):not([type=radio]):not([type=hidden]):not([type=file]):not([type=range]), textarea, select')] \
     .map((e) => [e.id || e.name || e.getAttribute('aria-label') || e.placeholder || e.tagName, parseFloat(getComputedStyle(e).fontSize)]).filter(([, px]) => px < 16)";
 
+/// The launcher's input at rest: one line (its 24 px and its padding), and
+/// its placeholder on that one line too (a textarea's would wrap to a
+/// second on a phone, which its height then took).
+const LAUNCHER_ONE_LINE: &str = "(() => { const i = document.getElementById('workspace-search'); const h = i.getBoundingClientRect().height; const was = i.style.height; \
+    i.style.height = 'auto'; const placeholder = i.scrollHeight; i.style.height = was; return { ok: !i.value && h <= 45 && placeholder <= h + 1, height: h, placeholder }; })()";
+
 /// A message the page must hold without widening: a word that never
 /// breaks, a long line of code, and a wide table.
 const WIDE_MESSAGE: &str = "A word that never breaks: supercalifragilisticexpialidociousandthensomemoreletterswithoutanyspaceatallforthephone\n\n```js\nconst line = 'a very long line of code that must scroll inside its own block and never widen the page at all';\n```\n\n| column one | column two | column three | column four | column five | column six |\n|---|---|---|---|---|---|\n| a wide table cell | another wide cell | and another one | four four four | five five five | six six six |";
@@ -2690,13 +2702,23 @@ fn phone_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &st
         b.eval(page, "(document.getElementById('toggle-left').click(), true)")?;
         b.until(page, "document.getElementById('layout').classList.contains('left-open') && document.getAnimations().every((a) => a.playState !== 'running' || a.effect?.getComputedTiming().iterations === Infinity)", wait);
         places.push(("the list", b.eval(page, PAGE_FITS)?));
-        // the launcher, words typed
+        // the launcher: one line at rest, its placeholder too; words typed
         b.eval(page, "(document.getElementById('sidebar-new-chat').click(), true)")?;
         b.until(page, "document.getElementById('search-dialog').open", wait);
+        places.push(("the launcher at rest, one line", b.eval(page, LAUNCHER_ONE_LINE)?));
         b.eval(page, &fill("#workspace-search", "garden"))?;
         b.until(page, "!!document.querySelector('#search-results .search-result')", wait);
         places.push(("the launcher", b.eval(page, PAGE_FITS)?));
         if let Value::Array(l) = b.eval(page, SMALL_FIELDS)? { small.extend(l.into_iter().map(|f| json!({ "width": w, "in": "launcher", "field": f }))); }
+        // a long prompt, which wraps and grows it, and a file under it
+        b.eval(page, &fill("#workspace-search", "Plan a garden for a small north-facing balcony: what grows in shade, what to sow each month, and a watering schedule I can keep while I travel"))?;
+        let chips = b.eval(page, PASTE_FILE)?;
+        let grown = b.eval(page, "document.getElementById('workspace-search').getBoundingClientRect().height")?.as_f64().unwrap_or(0.0);
+        let fits = b.eval(page, PAGE_FITS)?;
+        places.push(("the launcher, a long prompt and a file", json!({ "ok": fits["ok"] == true && chips == json!(1) && grown > 50.0 && grown <= 200.0, "page": fits, "chips": chips, "grown": grown })));
+        if w == 320 {
+            let _ = b.screenshot(page, &shots.join(format!("phone-{w}-launcher.png")));
+        }
         b.eval(page, "(document.getElementById('search-dialog').dispatchEvent(new Event('cancel')), true)")?;
         b.until(page, "!document.getElementById('search-dialog').open", wait);
         // settings (at 375 px, held loading a moment: where the loaded page's content goes)
@@ -2788,7 +2810,7 @@ fn phone_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &st
         }
         let bad: Vec<Value> = places.iter().filter(|(_, v)| v["ok"] != true).map(|(p, v)| json!({ "place": p, "seen": v })).collect();
         s.ok(
-            &format!("at {w} px on a phone, the page stays in its viewport, never scrolling or wider: the chat (its sidebar closed and open), a long word, code and a wide table, the launcher, settings and its Your data, the share sheet, an app's window, and the ways to ask for one, three and three more from its die (a 44 px target)"),
+            &format!("at {w} px on a phone, the page stays in its viewport, never scrolling or wider: the chat (its sidebar closed and open), a long word, code and a wide table, the launcher (one line at rest, its placeholder too; a long prompt and a file), settings and its Your data, the share sheet, an app's window, and the ways to ask for one, three and three more from its die (a 44 px target)"),
             echoed && bad.is_empty(),
             json!({ "bad": bad, "places": places.iter().map(|(p, _)| p).collect::<Vec<_>>() }),
         );
@@ -5151,6 +5173,581 @@ fn app_policy_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, app: &s
         json!({ "up": up, "opened": opened, "waited": waited, "allow": allow, "told": told }),
     );
     b.close(shell)?;
+    Ok(())
+}
+
+/// The records of `chat` whose text is `text`.
+fn said_in(api: &Api, me: &Person, chat: &str, text: &str) -> Vec<Value> {
+    shell(api, me.session, "GET", &format!("/api/f/{chat}/channels/chat?after=0&limit=100"), None, &[])
+        .map(|r| r.body["records"].as_array().into_iter().flatten().filter(|r| r["body"]["text"] == text).cloned().collect())
+        .unwrap_or_default()
+}
+
+/// The person's new chats with their agent (`<first>-chat-<n>`).
+fn new_chats(api: &Api, me: &Person) -> Vec<String> {
+    let prefix = format!("{}-chat-", me.first);
+    shell(api, me.session, "GET", "/api/fragments", None, &[])
+        .map(|r| r.body["fragments"].as_array().into_iter().flatten().filter_map(|f| f["name"].as_str()).filter(|n| label_of(n).starts_with(&prefix)).map(str::to_string).collect())
+        .unwrap_or_default()
+}
+
+/// The page's own animations (`Element.animate`: the launcher's closing,
+/// 320 ms) 30 times as long, so a step can come while one runs
+/// (`NORMAL_MOTION` puts them back).
+const SLOW_MOTION: &str = "(() => { const real = window.__animate ??= Element.prototype.animate; \
+    Element.prototype.animate = function (k, o) { return real.call(this, k, typeof o === 'number' ? o * 30 : { ...o, duration: (o?.duration ?? 0) * 30 }); }; return true; })()";
+const NORMAL_MOTION: &str = "(Element.prototype.animate = window.__animate ?? Element.prototype.animate, true)";
+
+/// Before the first agent exists, the launcher's words go to the first
+/// chat's composer. Back to settings while its close still runs is the
+/// person's newer view: no late compose opens the chat again, and the next
+/// launcher opening keeps the words.
+fn first_chat_late_ui(s: &mut Suite, b: &mut Browser, page: &Page, chat: &str) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    let opened = "document.getElementById('search-dialog').open";
+    let closed = "!document.getElementById('search-dialog').open";
+    let settings = "location.pathname === '/settings' && !document.getElementById('settings-page').hidden";
+    b.eval(page, "(document.getElementById('settings').click(), true)")?;
+    let shown = b.until(page, settings, wait);
+    open_row(b, page, chat, wait)?;
+    b.eval(page, SLOW_MOTION)?;
+    b.click(page, "#sidebar-new-chat")?;
+    let open = b.until(page, opened, wait);
+    let said = "Keep these words for the first chat, but stay where Back takes me";
+    b.eval(page, &fill("#workspace-search", said))?;
+    let offered = b.until(page, &format!("document.querySelector('#search-results .search-start')?.textContent.includes({})", js(&format!("Say it in {FIRST_CHAT}"))), wait);
+    b.eval(page, "(document.getElementById('search-form').requestSubmit(), true)")?;
+    let closing = b.eval(page, &format!("{opened} && document.getElementById('search-dialog').inert"))? == true;
+    b.eval(page, "(history.back(), true)")?;
+    let back = b.until(page, settings, wait);
+    let finished = b.until(page, closed, wait);
+    b.eval(page, NORMAL_MOTION)?;
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    let stayed = b.eval(page, &format!("{closed} && {settings}"))? == true;
+    let where_now = b.eval(page, "({ path: location.pathname, settings: !document.getElementById('settings-page').hidden, title: document.getElementById('chat-title').textContent })")?;
+    b.click(page, "#sidebar-new-chat")?;
+    let kept = b.until(page, &format!("{opened} && document.getElementById('workspace-search').value === {}", js(said)), wait);
+    b.eval(page, "(document.getElementById('search-dialog').dispatchEvent(new Event('cancel')), true)")?;
+    let dismissed = b.until(page, closed, wait);
+    open_row(b, page, chat, wait)?;
+    s.ok(
+        "before the first agent exists, Back to settings while the launcher's first-chat handoff still closes does not reopen the chat; its next opening keeps the words",
+        shown && open && offered && closing && back && finished && stayed && kept && dismissed,
+        json!({ "closing": closing, "back": back, "stayed": stayed, "kept": kept, "where": where_now }),
+    );
+    Ok(())
+}
+
+/// A pending release may not discard a first-chat draft retained when Back
+/// wins the handoff. Once the next launcher opening consumes it and the
+/// person closes that opening, nothing of it remains to hold the release.
+fn first_chat_release_ui(s: &mut Suite, api: &Api, b: &mut Browser) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    let home = format!("{}/", api.base);
+    let email = format!("shell-ui-first-chat-release-{}@e2e.test", crate::api::now_s());
+    let session = api.sign_in(&email)?;
+    b.set_cookie(&home, "fragment_session", &session)?;
+    b.set_cookie(&home, RELEASE_COOKIE, "")?;
+    let page = b.open_with_script(&home, r#"
+      if (window === window.top) {
+        const real = window.fetch.bind(window);
+        window.fetch = async (url, options) => {
+          if (url === '/api/computers' && options?.method === 'POST') {
+            window.__computerRefused = true;
+            return new Response(JSON.stringify({ message: 'setup refused for the test' }), { status: 503, headers: { 'content-type': 'application/json' } });
+          }
+          return real(url, options);
+        };
+      }
+    "#)?;
+    b.viewport(&page, 1280, 800, false)?;
+    let made = b.until(&page, "document.querySelectorAll('#chats .chat-row').length === 1 && !!document.querySelector('#frames iframe') && window.__computerRefused === true", wait);
+    let key = b.eval(&page, "document.querySelector('#chats .chat-row')?.dataset.key ?? ''")?;
+    let chat = key.as_str().and_then(|k| k.strip_prefix("chat:")).unwrap_or("").to_string();
+    let setup = s.eventually(wait, || b.eval_in_frame(&page, &chat, "!!document.querySelector('.setup-error')").ok() == Some(Value::Bool(true)));
+    b.eval(&page, "(document.getElementById('settings').click(), true)")?;
+    b.until(&page, "location.pathname === '/settings' && !document.getElementById('settings-page').hidden", wait);
+    open_row(b, &page, &chat, wait)?;
+    b.eval(&page, "(window.__release = 1, true)")?;
+    b.eval(&page, SLOW_MOTION)?;
+    b.click(&page, "#sidebar-new-chat")?;
+    b.until(&page, "document.getElementById('search-dialog').open", wait);
+    let said = "An interrupted first-chat draft holds the pending release";
+    b.eval(&page, &fill("#workspace-search", said))?;
+    let offered = b.until(&page, &format!("document.querySelector('#search-results .search-start')?.textContent.includes({})", js(&format!("Say it in {FIRST_CHAT}"))), wait);
+    b.eval(&page, "(document.getElementById('search-form').requestSubmit(), true)")?;
+    b.eval(&page, "(history.back(), true)")?;
+    let back = b.until(&page, "location.pathname === '/settings' && !document.getElementById('settings-page').hidden", wait);
+    let closed = b.until(&page, "!document.getElementById('search-dialog').open", wait);
+    b.eval(&page, NORMAL_MOTION)?;
+
+    let next = format!("e2e-first-chat-draft-{}", crate::api::now_s());
+    b.set_cookie(&home, RELEASE_COOKIE, &next)?;
+    b.eval(&page, &visibility("hidden"))?;
+    let heard = b.until(&page, &format!("document.documentElement.dataset.releaseNext === {}", js(&next)), wait);
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    let held = b.eval(&page, &format!("window.__release === 1 && document.querySelector('meta[name=fragment-release]')?.content !== {} && location.pathname === '/settings' && !document.getElementById('search-dialog').open", js(&next)))? == true;
+    b.eval(&page, &visibility("visible"))?;
+    b.click(&page, "#sidebar-new-chat")?;
+    let consumed = b.until(&page, &format!("document.getElementById('search-dialog').open && document.getElementById('workspace-search').value === {}", js(said)), wait);
+    b.eval(&page, "(document.getElementById('search-dialog').dispatchEvent(new Event('cancel')), true)")?;
+    let discarded = b.until(&page, "!document.getElementById('search-dialog').open", wait);
+    b.eval(&page, &visibility("hidden"))?;
+    let reloaded = b.until(&page, &format!("!window.__release && document.querySelector('meta[name=fragment-release]')?.content === {} && !document.getElementById('layout').hidden", js(&next)), wait);
+    s.ok(
+        "a pending release waits for an interrupted first-chat handoff's retained words; its next opening consumes them, closing that opening discards them, and the release then reloads",
+        made && setup && offered && back && closed && heard && held && consumed && discarded && reloaded,
+        json!({ "setup": setup, "back": back, "heard": heard, "held": held, "consumed": consumed, "discarded": discarded, "reloaded": reloaded }),
+    );
+    b.close(page)?;
+    b.set_cookie(&home, RELEASE_COOKIE, "")?;
+    Ok(())
+}
+
+/// A file pasted into the launcher's input, as the clipboard hands it
+/// over: how many files the launcher holds then.
+const PASTE_FILE: &str = "(() => { const d = new DataTransfer(); d.items.add(new File(['a list of atlases'], 'launch.txt', { type: 'text/plain' })); \
+    document.getElementById('workspace-search').dispatchEvent(new ClipboardEvent('paste', { clipboardData: d, bubbles: true, cancelable: true })); return document.querySelectorAll('#search-files .search-file').length; })()";
+
+/// What the launcher's send does late (Alex's review of #592). A chat's
+/// page holding what no storage keeps is never loaded again under it: a
+/// blank chat found again with a file chosen and not sent keeps it, as
+/// does the chat the launcher opened, a file chosen there while the
+/// launcher's own uploads, when that upload is refused (the launcher
+/// opening again on its words and file; sent again from there, posted
+/// there). And once the person gives the middle column another view while
+/// the chat is made, its answer changes nothing on screen: another chat
+/// opened, the message is still posted; settings, then Back, and the
+/// making refused: a notice, the words in the launcher's next opening,
+/// sent from there.
+fn launch_late_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person, reader_chat: &str) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    let own_chat = format!("{}-chat", me.first);
+    let says = |chat: &str, text: &str| said_in(api, me, chat, text);
+    let new_chats = || new_chats(api, me);
+    let chips = |b: &mut Browser, chat: &str| b.eval_in_frame(page, chat, "document.querySelectorAll('#attachments .attachment-chip').length").unwrap_or(Value::Null);
+    let shows = |chat: &str| format!("location.pathname === '/' && [...document.querySelectorAll('#frames iframe')].find((f) => !f.hidden)?.dataset.fragment === {}", js(chat));
+    let closed = "!document.getElementById('search-dialog').open";
+    let opened = "document.getElementById('search-dialog').open";
+    let submit = "(document.getElementById('search-form').requestSubmit(), true)";
+    // its first message titles a chat: the launcher finds it blank no more
+    let titled = |b: &mut Browser, chat: &str| b.until(page, &format!("(document.querySelector({})?.querySelector('.label')?.textContent ?? 'New chat') !== 'New chat'", js(&format!("#chats [data-key={}]", js(&format!("chat:{chat}"))))), wait);
+
+    // a blank chat found again, a file chosen in it and not sent
+    let blank = own_named(api, me.session, &format!("{own_chat}-3"))?;
+    open_row(b, page, &blank, wait)?;
+    let ready = s.eventually(wait, || b.eval_in_frame(page, &blank, COMPOSER_READY).ok() == Some(Value::Bool(true)));
+    let picked = b.eval_in_frame(page, &blank, PICK_FILE)? == json!(1);
+    // its page tells the shell it holds it (a message, heard in a moment)
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    let said = "Which projection suits a classroom wall map best";
+    b.click(page, "#sidebar-new-chat")?;
+    let open = b.until(page, opened, wait);
+    b.eval(page, &fill("#workspace-search", said))?;
+    b.eval(page, submit)?;
+    let posted = s.eventually(wait, || says(&blank, said).len() == 1);
+    let shown = b.until(page, &format!("{closed} && {}", shows(&blank)), wait);
+    let arrived = s.eventually(wait, || b.eval_in_frame(page, &blank, &format!("document.body.innerText.includes({})", js(said))).ok() == Some(Value::Bool(true)));
+    let kept = chips(b, &blank);
+    s.ok(
+        "the launcher's message to a blank chat found again whose page holds a file chosen and not sent: posted there and the chat opened, its page as it was (the file still in its composer)",
+        ready && picked && open && posted && shown && arrived && kept == json!(1),
+        json!({ "chips": kept, "shows": open_chat(b, page) }),
+    );
+    anyhow::ensure!(b.eval_in_frame(page, &blank, REMOVE_FILE)? == true, "the blank chat's file taken out");
+    anyhow::ensure!(titled(b, &blank), "the blank chat titled from its message");
+
+    // the launcher's own file, its upload held; a file chosen in the chat it
+    // opened meanwhile; then the upload refused
+    let said = "Sort the attached atlases by the year each was printed";
+    let before = new_chats();
+    b.click(page, "#sidebar-new-chat")?;
+    let open = b.until(page, opened, wait);
+    let pasted = b.eval(page, PASTE_FILE)? == json!(1);
+    b.eval(page, &fill("#workspace-search", said))?;
+    b.eval(page, &hold("PUT", "/blobs/[0-9a-f]{64}$", Hold::Request))?;
+    b.eval(page, submit)?;
+    let held = b.until(page, "!!window.__held.release", wait);
+    let made = open_chat(b, page);
+    let fresh = !made.is_empty() && !before.contains(&made);
+    let ready = fresh && s.eventually(wait, || b.eval_in_frame(page, &made, COMPOSER_READY).ok() == Some(Value::Bool(true)));
+    let picked = ready && b.eval_in_frame(page, &made, PICK_FILE)? == json!(1);
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    b.eval(page, "(window.__held.release?.('refuse'), true)")?;
+    let reopened = b.until(page, &format!("{opened} && document.getElementById('search-status').textContent.includes(\"wasn't sent\")"), wait);
+    let seen = b.eval(page, "({ words: document.getElementById('workspace-search').value, files: document.querySelectorAll('#search-files .search-file').length })")?;
+    let kept = if fresh { chips(b, &made) } else { Value::Null };
+    let still = b.eval(page, &shows(&made))?;
+    b.eval(page, "(window.__held.restore(), true)")?;
+    s.ok(
+        "a file chosen in the chat the launcher opened, while the launcher's own file uploads, stays in its composer when that upload is refused; the launcher opens again over it on its words and file, saying it wasn't sent",
+        open && pasted && held && fresh && picked && reopened && seen == json!({ "words": said, "files": 1 }) && kept == json!(1) && still == true,
+        json!({ "made": made, "seen": seen, "chips": kept }),
+    );
+    b.eval(page, submit)?;
+    let posted = s.eventually(wait, || says(&made, said).first().is_some_and(|r| r["body"]["attachments"][0]["name"] == "launch.txt"));
+    let shown = b.until(page, &format!("{closed} && {}", shows(&made)), wait);
+    s.ok("sent again from there, it is posted to that chat with the launcher's file", posted && shown, json!(says(&made, said)));
+    if fresh {
+        anyhow::ensure!(b.eval_in_frame(page, &made, REMOVE_FILE)? == true, "the new chat's file taken out");
+        anyhow::ensure!(titled(b, &made), "the new chat titled from its message");
+    }
+
+    // the chat's making held; another chat opened meanwhile; then made
+    let said = "Name three atlases worth owning and say why";
+    let before = new_chats();
+    b.eval(page, &hold("POST", "^/api/fragments$", Hold::Request))?;
+    b.click(page, "#sidebar-new-chat")?;
+    let open = b.until(page, opened, wait);
+    b.eval(page, &fill("#workspace-search", said))?;
+    b.eval(page, submit)?;
+    let held = b.until(page, &format!("{closed} && !!window.__held.release"), wait);
+    open_row(b, page, reader_chat, wait)?;
+    b.eval(page, "(window.__held.release?.(), true)")?;
+    let made = s.eventually(wait, || new_chats().iter().any(|c| !before.contains(c) && says(c, said).len() == 1));
+    let settled = b.until(page, HELD_SETTLED, wait);
+    b.eval(page, "(window.__held.restore(), true)")?;
+    let stayed = b.eval(page, &format!("{closed} && {} && document.getElementById('chat-title').textContent === 'Reader'", shows(reader_chat)))?;
+    s.ok(
+        "another chat opened while the launcher's chat is made: the chat made and the message posted there, the person left where they went",
+        open && held && made && settled && stayed == true,
+        json!({ "shows": open_chat(b, page), "title": b.eval(page, "document.getElementById('chat-title').textContent")? }),
+    );
+
+    // held again; settings opened meanwhile, then Back; the making refused
+    let said = "Find a printed atlas of the oceans from before 1900";
+    let before = new_chats();
+    b.eval(page, &hold("POST", "^/api/fragments$", Hold::Request))?;
+    b.click(page, "#sidebar-new-chat")?;
+    let open = b.until(page, opened, wait);
+    b.eval(page, &fill("#workspace-search", said))?;
+    b.eval(page, submit)?;
+    let held = b.until(page, &format!("{closed} && !!window.__held.release"), wait);
+    b.eval(page, "(document.getElementById('settings').click(), true)")?;
+    let settings = b.until(page, "location.pathname === '/settings' && !document.getElementById('settings-page').hidden", wait);
+    b.eval(page, "(history.back(), true)")?;
+    let back = b.until(page, &shows(reader_chat), wait);
+    b.eval(page, "(window.__held.release?.('refuse'), true)")?;
+    let told = b.until(page, "!document.getElementById('notice').hidden && document.getElementById('notice').innerText.startsWith(\"Your message wasn't sent\")", wait);
+    let settled = b.until(page, HELD_SETTLED, wait);
+    b.eval(page, "(window.__held.restore(), true)")?;
+    let seen = b.eval(page, NOTICE_SEEN)?;
+    let stayed = b.eval(page, &format!("{closed} && {}", shows(reader_chat)))?;
+    s.ok(
+        "settings, then Back, while the launcher's chat is made, and the making refused: the person stays where Back took them, the launcher closed, and a notice says the message wasn't sent",
+        open && held && settings && back && told && settled && stayed == true && seen["ok"] == true,
+        &seen,
+    );
+    b.click(page, "#sidebar-new-chat")?;
+    let kept = b.until(page, &format!("{opened} && document.getElementById('workspace-search').value === {} && document.getElementById('search-status').textContent.includes(\"wasn't sent\")", js(said)), wait);
+    b.eval(page, submit)?;
+    // another chat than the Reader's on screen: the one it made
+    let shown = b.until(page, &format!("{closed} && location.pathname === '/' && ((f) => !!f && f.dataset.fragment !== {})([...document.querySelectorAll('#frames iframe')].find((f) => !f.hidden))", js(reader_chat)), wait);
+    let made = open_chat(b, page);
+    let posted = !before.contains(&made) && s.eventually(wait, || says(&made, said).len() == 1);
+    s.ok("the launcher's next opening has its words, saying they weren't sent; sent from there, its chat opens with the message", kept && shown && posted, json!({ "made": made }));
+
+    // titled from its message: the launcher finds it blank no more
+    if !made.is_empty() {
+        anyhow::ensure!(titled(b, &made), "{made} titled from its message");
+    }
+
+    // the making refused while the person stays in the Reader's chat (the
+    // upload's and the post's refusals are above and in `new_chat_ui`): the
+    // launcher opens again over it, its own recovery no view of theirs
+    open_row(b, page, reader_chat, wait)?;
+    let said = "Which atlas maps the old Silk Road best";
+    let before = new_chats();
+    b.eval(page, &hold("POST", "^/api/fragments$", Hold::Request))?;
+    b.click(page, "#sidebar-new-chat")?;
+    let open = b.until(page, opened, wait);
+    b.eval(page, &fill("#workspace-search", said))?;
+    b.eval(page, submit)?;
+    let held = b.until(page, &format!("{closed} && !!window.__held.release"), wait);
+    b.eval(page, "(window.__held.release?.('refuse'), true)")?;
+    let reopened = b.until(page, &format!("{opened} && document.getElementById('workspace-search').value === {} && document.getElementById('search-status').textContent.includes(\"wasn't sent\") && {}", js(said), shows(reader_chat)), wait);
+    let settled = b.until(page, HELD_SETTLED, wait);
+    b.eval(page, "(window.__held.restore(), true)")?;
+    s.ok(
+        "the launcher's chat not made while the person stays: the launcher opens again on its words, saying they weren't sent, over the chat they were in",
+        open && held && reopened && settled && new_chats() == before,
+        json!({ "shows": open_chat(b, page), "status": b.eval(page, "document.getElementById('search-status').textContent")? }),
+    );
+    b.eval(page, submit)?;
+    let shown = b.until(page, &format!("{closed} && location.pathname === '/' && ((f) => !!f && f.dataset.fragment !== {})([...document.querySelectorAll('#frames iframe')].find((f) => !f.hidden))", js(reader_chat)), wait);
+    let made = open_chat(b, page);
+    let posted = !before.contains(&made) && s.eventually(wait, || says(&made, said).len() == 1);
+    s.ok("sent again from there, its chat is made and opens with the message", shown && posted, json!({ "made": made }));
+
+    // titled from its message: the launcher finds it blank no more
+    if !made.is_empty() {
+        anyhow::ensure!(titled(b, &made), "{made} titled from its message");
+    }
+
+    // refused while the launcher still closes (slowed), and Back to settings
+    // meanwhile: Back's view stands, the launcher stays closed, and a notice
+    // says the message wasn't sent
+    b.eval(page, "(document.getElementById('settings').click(), true)")?;
+    b.until(page, "location.pathname === '/settings' && !document.getElementById('settings-page').hidden", wait);
+    open_row(b, page, reader_chat, wait)?;
+    let said = "Which atlas shows the old trade winds";
+    let before = new_chats();
+    b.eval(page, SLOW_MOTION)?;
+    b.eval(page, &hold("POST", "^/api/fragments$", Hold::Request))?;
+    b.click(page, "#sidebar-new-chat")?;
+    let open = b.until(page, opened, wait);
+    b.eval(page, &fill("#workspace-search", said))?;
+    b.eval(page, submit)?;
+    let held = b.until(page, "!!window.__held.release", wait);
+    b.eval(page, "(window.__held.release?.('refuse'), true)")?;
+    // its recovery: the Reader's chat again, under the launcher still closing
+    let recovered = b.until(page, &format!("{opened} && {}", shows(reader_chat)), wait);
+    b.eval(page, "(history.back(), true)")?;
+    let back = b.until(page, "location.pathname === '/settings' && !document.getElementById('settings-page').hidden", wait);
+    let closing = b.eval(page, opened)? == true;
+    let told = b.until(page, &format!("{closed} && !document.getElementById('notice').hidden && document.getElementById('notice').innerText.startsWith(\"Your message wasn't sent\")"), wait);
+    let settled = b.until(page, HELD_SETTLED, wait);
+    b.eval(page, "(window.__held.restore(), true)")?;
+    b.eval(page, NORMAL_MOTION)?;
+    let seen = b.eval(page, NOTICE_SEEN)?;
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    let stayed = b.eval(page, &format!("{closed} && location.pathname === '/settings'"))? == true;
+    s.ok(
+        "the launcher's chat not made, and Back to settings while the launcher still closes: the person stays in settings, the launcher closed, and a notice says the message wasn't sent",
+        open && held && recovered && back && closing && told && settled && stayed && seen["ok"] == true && new_chats() == before,
+        json!({ "recovered": recovered, "closing": closing, "told": told, "seen": seen }),
+    );
+    open_row(b, page, reader_chat, wait)?;
+    b.click(page, "#sidebar-new-chat")?;
+    let kept = b.until(page, &format!("{opened} && document.getElementById('workspace-search').value === {}", js(said)), wait);
+    b.eval(page, submit)?;
+    let shown = b.until(page, &format!("{closed} && location.pathname === '/' && ((f) => !!f && f.dataset.fragment !== {})([...document.querySelectorAll('#frames iframe')].find((f) => !f.hidden))", js(reader_chat)), wait);
+    let made = open_chat(b, page);
+    let posted = !before.contains(&made) && s.eventually(wait, || says(&made, said).len() == 1);
+    s.ok("and its next opening has the words, sent from there", kept && shown && posted, json!({ "made": made }));
+
+    // titled from its message: the launcher finds it blank no more
+    if !made.is_empty() {
+        anyhow::ensure!(titled(b, &made), "{made} titled from its message");
+    }
+
+    // the Reader's chat again, as the sections after expect
+    open_row(b, page, reader_chat, wait)?;
+    b.until(page, "document.getElementById('chat-title').textContent === 'Reader'", wait);
+    Ok(())
+}
+
+/// A chat's frame on screen, of a chat not in `before`: its name.
+fn fresh_shown(b: &mut Browser, page: &Page, before: &[String]) -> Option<String> {
+    let shown = open_chat(b, page);
+    (!shown.is_empty() && !before.contains(&shown)).then_some(shown)
+}
+
+/// The launcher as a person uses it (docs/api.md, The launcher). Its input
+/// is one line at rest and as words are typed; Shift+Enter is a new line,
+/// which it grows to, and a long prompt grows it to 200 px, then it
+/// scrolls. Files dropped on it or pasted into it are chips under its words
+/// (an image's with its picture): at most 8, none over 25 MB, each
+/// removable, and a draft of that opening only. Enter goes straight to the
+/// new chat: the launcher closes and the chat shows while its message is on
+/// its way, its page never showing a new chat's start (`?sent=1`), then
+/// the message once it is posted.
+fn launch_straight_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person, reader_chat: &str) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    let opened = "document.getElementById('search-dialog').open";
+    let closed = "!document.getElementById('search-dialog').open";
+    let height = "document.getElementById('workspace-search').getBoundingClientRect().height";
+    let chips = "document.querySelectorAll('#search-files .search-file').length";
+    let status = "document.getElementById('search-status').textContent";
+
+    // the input (the launcher closed first: a click on its open dialog's
+    // backdrop would close it)
+    anyhow::ensure!(b.until(page, closed, wait), "the launcher closed before its own checks");
+    b.click(page, "#sidebar-new-chat")?;
+    let open = b.until(page, &format!("{opened} && document.activeElement === document.getElementById('workspace-search')"), wait);
+    let rest = b.eval(page, height)?;
+    b.type_text(page, "Plan a week of dinners")?;
+    let typed = b.eval(page, height)?;
+    b.press(page, "Enter", true)?;
+    b.type_text(page, "from what keeps in the freezer")?;
+    let two = b.eval(page, height)?;
+    let words = b.eval(page, "document.getElementById('workspace-search').value")?;
+    b.eval(page, &fill("#workspace-search", &"one line of a long prompt\n".repeat(20)))?;
+    let long = b.eval(page, "(() => { const i = document.getElementById('workspace-search'); const h = i.getBoundingClientRect().height; return { ok: Math.abs(h - 200) < 1 && i.scrollHeight > i.clientHeight, height: h }; })()")?;
+    b.eval(page, &fill("#workspace-search", ""))?;
+    let emptied = b.eval(page, height)?;
+    let line = rest.as_f64().unwrap_or(0.0);
+    let px = |v: &Value| v.as_f64().unwrap_or(-1.0);
+    s.ok(
+        "the launcher's input is one line at rest and as words are typed; Shift+Enter is a new line, which it grows to; a long prompt grows it to 200 px, then it scrolls; emptied, one line again",
+        open && (40.0..=48.0).contains(&line) && px(&typed) == line && px(&two) > line && px(&two) < 200.0 && words == "Plan a week of dinners\nfrom what keeps in the freezer" && long["ok"] == true && px(&emptied) == line,
+        json!({ "rest": rest, "typed": typed, "two": two, "words": words, "long": long, "emptied": emptied }),
+    );
+
+    // files: two dropped, an image among them; then more than 8, and one
+    // over 25 MB; one taken out
+    let dropped = b.eval(
+        page,
+        "(() => { const d = new DataTransfer(); d.items.add(new File([new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10])], 'map.png', { type: 'image/png' })); d.items.add(new File(['three atlases'], 'atlases.txt', { type: 'text/plain' })); \
+          const dialog = document.getElementById('search-dialog'); const at = (type) => dialog.dispatchEvent(new DragEvent(type, { dataTransfer: d, bubbles: true, cancelable: true })); \
+          at('dragenter'); at('dragover'); const said = dialog.classList.contains('dropping'); at('drop'); \
+          const chips = [...document.querySelectorAll('#search-files .search-file')]; return { said, chips: chips.length, pictured: chips.filter((c) => !!c.querySelector('img')).length, after: dialog.classList.contains('dropping') }; })()",
+    )?;
+    let many = b.eval(
+        page,
+        &format!("(() => {{ const d = new DataTransfer(); for (let i = 0; i < 7; i++) d.items.add(new File([`atlas ${{i}}`], `atlas-${{i}}.txt`, {{ type: 'text/plain' }})); \
+          document.getElementById('workspace-search').dispatchEvent(new ClipboardEvent('paste', {{ clipboardData: d, bubbles: true, cancelable: true }})); return {{ chips: {chips}, status: {status} }}; }})()"),
+    )?;
+    b.eval(page, "(document.querySelector('#search-files .search-file-remove')?.click(), true)")?;
+    let big = b.eval(
+        page,
+        &format!("(() => {{ const d = new DataTransfer(); d.items.add(new File([new Uint8Array(26 * 1024 * 1024)], 'atlas.tiff', {{ type: 'image/tiff' }})); \
+          document.getElementById('workspace-search').dispatchEvent(new ClipboardEvent('paste', {{ clipboardData: d, bubbles: true, cancelable: true }})); return {{ chips: {chips}, status: {status} }}; }})()"),
+    )?;
+    b.eval(page, "(document.getElementById('search-dialog').dispatchEvent(new Event('cancel')), true)")?;
+    b.until(page, closed, wait);
+    b.click(page, "#sidebar-new-chat")?;
+    b.until(page, opened, wait);
+    let again = b.eval(page, &format!("({{ chips: {chips}, hidden: document.getElementById('search-files').hidden, status: {status} }})"))?;
+    s.ok(
+        "files dropped on the launcher show as chips under its words (an image's with its picture), at most 8 (saying so), none over 25 MB (saying so), each removable; closed, they are gone from its next opening",
+        dropped == json!({ "said": true, "chips": 2, "pictured": 1, "after": false })
+            && many == json!({ "chips": 8, "status": "A message carries at most 8 files." })
+            && big == json!({ "chips": 7, "status": "atlas.tiff is over 25 MB." })
+            && again == json!({ "chips": 0, "hidden": true, "status": "" }),
+        json!({ "dropped": dropped, "many": many, "big": big, "again": again }),
+    );
+
+    // Enter, its message held on the way: the new chat at once, never its start
+    let said = "Plan a week of dinners from what keeps in the freezer";
+    let before = new_chats(api, me);
+    b.type_text(page, said)?;
+    b.eval(page, &hold("POST", "/channels/chat$", Hold::Request))?;
+    b.press(page, "Enter", false)?;
+    let held = b.until(page, &format!("{closed} && !!window.__held.release && document.getElementById('chat-title').textContent === 'New chat' && location.pathname === '/'"), wait);
+    let made = fresh_shown(b, page, &before).unwrap_or_default();
+    let ready = !made.is_empty() && s.eventually(wait, || b.eval_in_frame(page, &made, COMPOSER_READY).ok() == Some(Value::Bool(true)));
+    // its history read meanwhile (a fresh chat's start would show by now)
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    let quiet = if ready { b.eval_in_frame(page, &made, "({ sent: new URLSearchParams(location.search).has('sent'), start: !!document.querySelector('#messages .empty'), messages: document.querySelectorAll('#messages .msg').length })")? } else { Value::Null };
+    b.eval(page, "(window.__held.release?.(), true)")?;
+    let shown = ready && s.eventually(wait, || b.eval_in_frame(page, &made, &format!("document.body.innerText.includes({})", js(said))).ok() == Some(Value::Bool(true)));
+    let settled = b.until(page, HELD_SETTLED, wait);
+    b.eval(page, "(window.__held.restore(), true)")?;
+    let posted = ready && said_in(api, me, &made, said).len() == 1;
+    let started = ready && b.eval_in_frame(page, &made, "!!document.querySelector('#messages .empty')")? == true;
+    s.ok(
+        "Enter goes straight to the new chat: the launcher closes and the chat shows while its message is on its way, its page showing no new chat's start; then the message, posted once, and still no start",
+        held && ready && quiet == json!({ "sent": true, "start": false, "messages": 0 }) && shown && settled && posted && !started,
+        json!({ "made": made, "page": quiet, "posted": posted, "started": started }),
+    );
+
+    open_row(b, page, reader_chat, wait)?;
+    b.until(page, "document.getElementById('chat-title').textContent === 'Reader'", wait);
+    Ok(())
+}
+
+/// The launcher's grown input and Send in the visual viewport, and its
+/// file region's own scroll: the panel, Send and a removal's boxes and what
+/// a press at their middles reaches.
+const LAUNCHER_GEOMETRY: &str = "(() => { const panel = document.querySelector('.search-panel'); const input = document.getElementById('workspace-search'); const send = document.getElementById('search-send'); const files = document.getElementById('search-files'); \
+    const p = panel.getBoundingClientRect(); const s = send.getBoundingClientRect(); const at = document.elementFromPoint(s.left + s.width / 2, s.top + s.height / 2); const inside = (r) => r.width > 0 && r.height > 0 && r.left >= 0 && r.top >= 0 && r.right <= innerWidth + 1 && r.bottom <= innerHeight + 1; \
+    return { ok: inside(p) && inside(s) && s.top >= p.top && s.bottom <= p.bottom && (at === send || send.contains(at)) && input.scrollHeight > input.clientHeight, panel: [p.left, p.top, p.right, p.bottom], send: [s.left, s.top, s.right, s.bottom], \
+      input: { height: input.getBoundingClientRect().height, client: input.clientHeight, scroll: input.scrollHeight, max: getComputedStyle(input).maxHeight }, files: files.hidden ? null : { client: files.clientHeight, scroll: files.scrollHeight }, viewport: [innerWidth, innerHeight, visualViewport.height] }; })()";
+
+/// A launcher's status, wholly inside its panel and the visual viewport,
+/// with what a look at its middle reaches.
+const LAUNCHER_STATUS_GEOMETRY: &str = "(() => { const status = document.getElementById('search-status'); const p = document.querySelector('.search-panel').getBoundingClientRect(); const r = status.getBoundingClientRect(); const at = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2); \
+    return { ok: status.checkVisibility() && r.width > 0 && r.height > 0 && r.left >= p.left && r.right <= p.right + 1 && r.top >= p.top && r.bottom <= p.bottom + 1 && r.top >= 0 && r.bottom <= innerHeight + 1 && (at === status || status.contains(at)), text: status.textContent, status: [r.left, r.top, r.right, r.bottom], panel: [p.left, p.top, p.right, p.bottom], hit: at?.tagName ?? null }; })()";
+
+/// A keyboard-height visual viewport bounds an already-grown prompt, so its
+/// Send stays on screen and hit-testable. At 320×800, eight long filenames
+/// shrink their own region and scroll: every removal can be brought on
+/// screen and pressed with a real mouse click.
+fn launch_geometry_ui(s: &mut Suite, b: &mut Browser, page: &Page, shots: &std::path::Path) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    let opened = "document.getElementById('search-dialog').open";
+    let closed = "!document.getElementById('search-dialog').open";
+    b.viewport(page, 320, 800, true)?;
+    anyhow::ensure!(b.until(page, closed, wait), "the launcher closed before its geometry checks");
+    b.eval(page, "(document.getElementById('sidebar-new-chat').click(), true)")?;
+    let open = b.until(page, opened, wait);
+    b.eval(page, &fill("#workspace-search", &"one line of a long prompt\n".repeat(20)))?;
+    b.viewport(page, 320, 300, true)?;
+    let shrunk = b.until(page, "visualViewport.height === 300 && document.documentElement.style.getPropertyValue('--viewport-height') === '300px'", wait);
+    let keyboard = b.eval(page, LAUNCHER_GEOMETRY)?;
+    let _ = b.screenshot(page, &shots.join("phone-300-launcher.png"));
+    s.ok(
+        "at a 300 px visual viewport, an already-grown prompt is bounded by the room above the keyboard: the panel and Send stay on screen, and a press at Send's middle reaches it",
+        open && shrunk && keyboard["ok"] == true,
+        &keyboard,
+    );
+
+    b.eval(page, &refuse_once("POST", "^/api/fragments$"))?;
+    b.eval(page, "(document.getElementById('search-form').requestSubmit(), true)")?;
+    let failed = b.until(page, &format!("{opened} && document.getElementById('search-status').textContent.includes(\"wasn't sent\")"), wait);
+    let failed_send = b.eval(page, LAUNCHER_GEOMETRY)?;
+    let failed_status = b.eval(page, LAUNCHER_STATUS_GEOMETRY)?;
+    let _ = b.screenshot(page, &shots.join("phone-300-launcher-send-failed.png"));
+    s.ok(
+        "at a 300 px visual viewport, a long prompt's failed send keeps its whole error and Send inside the panel, both hit-testable",
+        failed && failed_send["ok"] == true && failed_status["ok"] == true,
+        json!({ "send": failed_send, "status": failed_status }),
+    );
+    b.eval(
+        page,
+        "(() => { const d = new DataTransfer(); d.items.add(new File([new Uint8Array(26 * 1024 * 1024)], 'atlas.tiff', { type: 'image/tiff' })); \
+          document.getElementById('workspace-search').dispatchEvent(new ClipboardEvent('paste', { clipboardData: d, bubbles: true, cancelable: true })); return true; })()",
+    )?;
+    let rejected = b.until(page, "document.getElementById('search-status').textContent === 'atlas.tiff is over 25 MB.'", wait);
+    let rejected_send = b.eval(page, LAUNCHER_GEOMETRY)?;
+    let rejected_status = b.eval(page, LAUNCHER_STATUS_GEOMETRY)?;
+    let _ = b.screenshot(page, &shots.join("phone-300-launcher-file-rejected.png"));
+    s.ok(
+        "at a 300 px visual viewport, an attachment rejection over a long prompt keeps its whole error and Send inside the panel, both hit-testable",
+        rejected && rejected_send["ok"] == true && rejected_status["ok"] == true,
+        json!({ "send": rejected_send, "status": rejected_status }),
+    );
+
+    b.viewport(page, 320, 800, true)?;
+    b.reload(page)?;
+    let grown = b.until(page, &format!("visualViewport.height === 800 && document.documentElement.style.getPropertyValue('--viewport-height') === '800px' && {closed} && !!document.querySelector('#frames iframe:not([hidden])')"), wait);
+    b.eval(page, "(document.getElementById('sidebar-new-chat').click(), true)")?;
+    let reopened = b.until(page, opened, wait);
+    b.eval(page, &fill("#workspace-search", &"one line of a long prompt\n".repeat(20)))?;
+    let names: Vec<String> = (0..8).map(|i| format!("atlas-{i}-with-a-very-long-filename-that-still-leaves-its-removal-reachable.txt")).collect();
+    let pasted = b.eval(
+        page,
+        &format!("(() => {{ const d = new DataTransfer(); for (const name of {}) d.items.add(new File(['atlas'], name, {{ type: 'text/plain' }})); \
+          document.getElementById('workspace-search').dispatchEvent(new ClipboardEvent('paste', {{ clipboardData: d, bubbles: true, cancelable: true }})); return document.querySelectorAll('#search-files .search-file').length; }})()", serde_json::to_string(&names)?),
+    )? == json!(8);
+    let many = b.eval(page, LAUNCHER_GEOMETRY)?;
+    let scrolls = many["files"]["client"].as_f64().zip(many["files"]["scroll"].as_f64()).is_some_and(|(client, scroll)| scroll > client);
+    let _ = b.screenshot(page, &shots.join("phone-320-launcher-eight-files.png"));
+    s.ok(
+        "at 320×800, eight long filenames leave Send visible and hit-testable, and their own region shrinks and scrolls instead of putting removals beyond the panel",
+        grown && reopened && pasted && many["ok"] == true && scrolls,
+        &many,
+    );
+    let mut reachable = true;
+    let mut removals = Vec::new();
+    for (i, name) in names.iter().enumerate() {
+        let selector = format!("#search-files .search-file-remove[aria-label={}]", js(&format!("Remove {name}")));
+        let seen = b.eval(
+            page,
+            &format!("(() => {{ const b = document.querySelector({}); if (!b) return {{ ok: false }}; b.scrollIntoView({{ block: 'nearest' }}); const f = document.getElementById('search-files').getBoundingClientRect(); const r = b.getBoundingClientRect(); const at = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2); \
+              return {{ ok: r.left >= 0 && r.right <= innerWidth + 1 && r.top >= f.top - 1 && r.bottom <= f.bottom + 1 && (at === b || b.contains(at)), button: [r.left, r.top, r.right, r.bottom], files: [f.left, f.top, f.right, f.bottom], hit: at?.tagName ?? null }}; }})()", js(&selector)),
+        )?;
+        b.click(page, &selector)?;
+        let left = b.eval(page, "document.querySelectorAll('#search-files .search-file').length")?;
+        reachable &= seen["ok"] == true && left == json!(7 - i);
+        removals.push(json!({ "name": name, "seen": seen, "left": left }));
+    }
+    let empty = b.eval(page, "document.querySelectorAll('#search-files .search-file').length === 0 && document.getElementById('search-files').hidden")? == true;
+    s.ok("each of the eight long filenames' removals scrolls into reach and a real mouse click removes it", reachable && empty, json!(removals));
+    b.eval(page, "(document.getElementById('search-dialog').dispatchEvent(new Event('cancel')), true)")?;
+    b.until(page, closed, wait);
+    b.viewport(page, 1280, 800, false)?;
     Ok(())
 }
 
