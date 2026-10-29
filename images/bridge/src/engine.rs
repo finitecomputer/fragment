@@ -1378,15 +1378,15 @@ impl Engine {
                 }
             }
             Event::End { turn, outcome } => self.end(&turn, outcome, Closed::Expired),
-            Event::Say { agent, fragment, text } => {
-                if self.agent(&agent).is_none() || text.trim().is_empty() {
+            Event::Say { agent, fragment, text, files } => {
+                if self.agent(&agent).is_none() || (text.trim().is_empty() && files.is_empty()) {
                     return;
                 }
                 self.state.said += 1;
                 self.dirty = true;
                 let turn = records::said_turn_id(&agent, &self.life, self.state.said);
                 crate::ev!("said", { "agent": agent, "fragment": fragment, "turn": turn });
-                self.post(&agent, &fragment, records::CHAT, records::reply_id(&turn, 1), records::reply(&text, &turn, &[], 0, false), Vec::new());
+                self.post(&agent, &fragment, records::CHAT, records::reply_id(&turn, 1), records::reply(&text, &turn, &[], 0, false), files);
             }
             Event::Notice { agent, fragment, category, text } => self.notice(&agent, &fragment, category, &text),
         }

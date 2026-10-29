@@ -292,7 +292,7 @@ pub fn answer(body: &Value) -> (String, Option<Value>) {
     let offered = |name: &str| body["tools"].as_array().is_some_and(|t| t.iter().any(|t| t["function"]["name"] == name));
     let has_terminal = offered("terminal");
     if last_user.contains("[ASYNC DELEGATION") && last_user.contains("fragment-delegate-complete") {
-        return ("scripted: checked the delegated result: fragment-delegate-complete".into(), None);
+        return ("scripted: checked the delegated result: fragment-delegate-complete\nMEDIA:/data/work/juniper--k3x9/delegate.txt".into(), None);
     }
     // The delegation gate calls Hermes' actual background tool. Its child
     // holds a terminal tool long enough for the parent's turn to finish.
@@ -301,7 +301,7 @@ pub fn answer(body: &Value) -> (String, Option<Value>) {
             return ("scripted: delegation dispatched".into(), None);
         }
         if offered("delegate_task") {
-            let call = json!({ "index": 0, "id": "call_delegate_gate", "type": "function", "function": { "name": "delegate_task", "arguments": json!({ "tasks": [{ "goal": "run: touch /data/work/juniper--k3x9/delegate-started; sleep 12; touch /data/work/juniper--k3x9/delegate-finished; echo fragment-delegate-complete" }], "max_iterations": 5 }).to_string() } });
+            let call = json!({ "index": 0, "id": "call_delegate_gate", "type": "function", "function": { "name": "delegate_task", "arguments": json!({ "tasks": [{ "goal": "run: touch /data/work/juniper--k3x9/delegate-started; sleep 12; touch /data/work/juniper--k3x9/delegate-finished; echo fragment-delegate-complete > /data/work/juniper--k3x9/delegate.txt; cat /data/work/juniper--k3x9/delegate.txt" }], "max_iterations": 5 }).to_string() } });
             return (String::new(), Some(call));
         }
         return ("scripted: delegate_task is not offered".into(), None);

@@ -637,6 +637,12 @@ async fn turn(gw: &Gateway, event: Value, mut rx: mpsc::UnboundedReceiver<Heard>
     }
     gw.act(json!({ "op": "send", "chat_id": chat, "content": reply, "reply_to": mid, "metadata": { "reply_to_message_id": mid, "notify": true } })).await;
     done();
+    let outside = text.contains("outside turn");
+    if outside {
+        gw.act(react("👀", true)).await;
+        gw.act(react("✅", false)).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
     if text.contains("media") {
         if let Some(url) = upload(gw, b"a picture of a cat").await {
             gw.act(json!({ "op": "send_media", "chat_id": chat, "media_kind": "image", "source_url": url, "content": "a cat", "reply_to": mid, "filename": "cat.png", "metadata": {} })).await;
@@ -650,8 +656,10 @@ async fn turn(gw: &Gateway, event: Value, mut rx: mpsc::UnboundedReceiver<Heard>
             gw.act(json!({ "op": "send", "chat_id": chat, "content": format!("a cat\n{url}"), "reply_to": mid, "metadata": { "reply_to_message_id": mid } })).await;
         }
     }
-    gw.act(react("👀", true)).await;
-    gw.act(react("✅", false)).await;
+    if !outside {
+        gw.act(react("👀", true)).await;
+        gw.act(react("✅", false)).await;
+    }
     if text.contains("notice") {
         gw.act(json!({ "op": "send", "chat_id": chat, "content": REVIEWED, "reply_to": null, "metadata": {} })).await;
     }
