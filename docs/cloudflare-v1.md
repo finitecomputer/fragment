@@ -98,10 +98,17 @@ speaking Cloudflare's APIs) returns once this product works.
    of the public repo's logs), which the team can read and change by a
    commit, the environment's next deploy taking it (Paul, 2026-10-21: it
    was a GitHub secret, which no one could read back to edit); its
-   images are pinned by digest (`xtask deploy --pinned-only`), and one
-   is built by the Image workflow, run by hand, and copied by it, at its
-   digest, into production's registry once a round proves it
-   (docs/computers.md, "Stable and canary").
+   images are pinned by digest (`xtask deploy --pinned-only`). Preview
+   follows master's image automatically (Paul, 2026-10-29): input-keyed
+   registry tags preserve identity across layer-cache eviction, BuildKit's
+   persistent Actions cache accelerates new builds, and preparation gates
+   the preview deploy before any Worker changes. Preview is the canary:
+   `hermes` and the retained `hermes-canary` name resolve to the same
+   digest, overridden in memory, with its input key and digest recorded in
+   the deploy summary rather than preview.jsonc. Production's image is
+   still copied by the manual Image workflow, at the exact digest a full
+   round proved, then pinned by hand in production.jsonc. Its deploy and
+   promotion rules stay unchanged (docs/computers.md, "Stable and canary").
 4. **Self-deploy without forking.** Configuration lives in a file
    outside the repo: domains, the WorkOS environment, AI Gateway,
    pricing, the code.storage organization, and the default computer

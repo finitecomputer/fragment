@@ -655,29 +655,52 @@ struct Args {
     branch: Option<String>,
     /// A deploy's `--pinned-only` (`pinned_only`).
     pinned_only: bool,
+    /// CI's preview-only, input-resolved image; never applied to production.
+    preview_image_digest: Option<String>,
 }
 
 fn args(rest: &[String]) -> Result<Args> {
-    let usage = || anyhow::anyhow!("usage: cargo xtask deploy --config <file> [--branch <name>] [--pinned-only] | teardown --config <file> --branch <name>");
-    let (mut config, mut branch, mut pinned_only) = (None, None, false);
+    let usage = || anyhow::anyhow!("usage: cargo xtask deploy --config <file> [--branch <name>] [--pinned-only] [--preview-image-digest <sha256:…>] | teardown --config <file> --branch <name>");
+    let (mut config, mut branch, mut pinned_only, mut preview_image_digest) = (None, None, false, None);
     let mut it = rest.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--config" => config = Some(PathBuf::from(it.next().ok_or_else(usage)?)),
             "--branch" => branch = Some(it.next().ok_or_else(usage)?.clone()),
             "--pinned-only" => pinned_only = true,
+            "--preview-image-digest" => preview_image_digest = Some(it.next().ok_or_else(usage)?.clone()),
             _ => return Err(usage()),
         }
     }
-    Ok(Args { config: config.ok_or_else(usage)?, branch, pinned_only })
+    anyhow::ensure!(preview_image_digest.is_none() || (branch.as_deref() == Some("preview") && pinned_only), "--preview-image-digest requires --branch preview --pinned-only; production uses its config's pins");
+    Ok(Args { config: config.ok_or_else(usage)?, branch, pinned_only, preview_image_digest })
+}
+
+/// Override only the preview's in-memory image lines. Keep the old name
+/// answering for computers pinned to it; there is one preview image now.
+/// Other config (including production's file) is neither rewritten nor
+/// published. The resulting pins pass the normal preflight and rollout.
+fn preview_image(d: &mut Deployment, digest: &str) -> Result<()> {
+    let reference = format!("{REGISTRY}/{}/{}@{digest}", d.account_id, crate::image::preview::REPOSITORY);
+    anyhow::ensure!(pinned_ok(&reference, &d.account_id), "preview image must be sha256:<64 lowercase hex digits>");
+    let computers = d.computers.as_mut().context("preview config has no computers")?;
+    // Fail on an unexpected name rather than silently leaving some pins
+    // behind on a separate preview image.
+    anyhow::ensure!(computers.images.keys().all(|n| matches!(n.as_str(), "hermes" | "hermes-canary")), "preview has an image other than hermes or hermes-canary; migrate its pins before following master");
+    computers.default_image = "hermes".into();
+    for name in ["hermes", "hermes-canary"] {
+        computers.images.insert(name.into(), Image::Pinned(Pinned { image: reference.clone() }));
+    }
+    println!("preview follows master's image: {reference} (hermes and hermes-canary)");
+    Ok(())
 }
 
 /// `--pinned-only`, CI's deploy (.github/workflows/ci.yml): every computer
 /// image the config names is kept at its digest, so the deploy builds none.
-/// A runner keeps no layer cache: a build there stamps every layer anew,
-/// pushes the whole base (gigabytes) and makes a new digest at every
-/// deploy, which tells each computer pinned to it that an update is ready
-/// (docs/computers.md, "What changes a version"). An image built from the
+/// Image building and preparation are separate from deploying the Worker:
+/// preview resolves its input-keyed image first, production uses its
+/// manually promoted pin. Neither deploy rebuilds an image merely because
+/// the Worker changed. An image built from the
 /// tree is refused, by name, before anything is read, built or made.
 fn pinned_only(d: &Deployment) -> Result<()> {
     let built: Vec<&str> = d.computers.iter().flat_map(|c| &c.images).filter(|(_, i)| matches!(i, Image::Built(_))).map(|(name, _)| name.as_str()).collect();
@@ -1043,8 +1066,11 @@ pub fn stripe(rest: &[String]) -> Result<()> {
 }
 
 pub fn deploy(rest: &[String]) -> Result<()> {
-    let Args { config, branch, pinned_only: pinned } = args(rest)?;
-    let d = load(&config)?;
+    let Args { config, branch, pinned_only: pinned, preview_image_digest } = args(rest)?;
+    let mut d = load(&config)?;
+    if let Some(digest) = &preview_image_digest {
+        preview_image(&mut d, digest)?;
+    }
     if pinned {
         pinned_only(&d)?;
     }
@@ -1366,8 +1392,9 @@ pub fn hosted_e2e_args(rest: &[String]) -> Result<Vec<String>> {
 /// the deployment's own blob grace and left: R2 refuses to delete a bucket
 /// with objects in it. Irreversible: ask before running it.
 pub fn teardown(rest: &[String]) -> Result<()> {
-    let Args { config, branch, pinned_only } = args(rest)?;
+    let Args { config, branch, pinned_only, preview_image_digest } = args(rest)?;
     anyhow::ensure!(!pinned_only, "--pinned-only is a deploy's: a teardown builds nothing");
+    anyhow::ensure!(preview_image_digest.is_none(), "--preview-image-digest is a deploy's");
     let d = load(&config)?;
     anyhow::ensure!(branch.is_some(), "teardown removes a branch deployment: name its --branch");
     let n = names(&d, branch.as_deref())?;
@@ -2043,6 +2070,50 @@ mod tests {
         let path = config_file("pinned-only-teardown", &v);
         let refused = teardown(&["--config", path.to_str().unwrap(), "--branch", "preview", "--pinned-only"].map(String::from)).err().map(|e| e.to_string()).unwrap_or_default();
         assert!(refused.contains("--pinned-only is a deploy's"), "{refused}");
+    }
+
+    /// Only a pinned preview deploy may override its images. The normal
+    /// config stays unchanged on disk; both names survive and resolve to
+    /// the same account-local digest in the Worker's effective config.
+    #[test]
+    fn preview_has_one_image_and_production_keeps_its_pins() {
+        let digest = format!("sha256:{}", "ab".repeat(32));
+        let parse = |args: &[&str]| super::args(&args.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        let mut d = deployment(None, None);
+        let text = fs::read_to_string(devstack::repo_root().join("deploy/e2e.jsonc")).unwrap();
+        let v: Value = serde_json::from_str(&devstack::strip_comments(&text)).unwrap();
+        d.computers = Some(serde_json::from_value(v["computers"].clone()).unwrap());
+        let old = serde_json::to_value(&d.computers.as_ref().unwrap().images).unwrap();
+        let production = parse(&["--config", "production.jsonc", "--pinned-only"]).unwrap();
+        assert!(production.preview_image_digest.is_none());
+        assert_eq!(serde_json::to_value(&d.computers.as_ref().unwrap().images).unwrap(), old);
+        for bad in [
+            vec!["--config", "production.jsonc", "--pinned-only", "--preview-image-digest", &digest],
+            vec!["--config", "production.jsonc", "--branch", "production", "--pinned-only", "--preview-image-digest", &digest],
+            vec!["--config", "preview.jsonc", "--branch", "preview", "--preview-image-digest", &digest],
+        ] { assert!(parse(&bad).is_err()); }
+        let good = parse(&["--config", "preview.jsonc", "--branch", "preview", "--pinned-only", "--preview-image-digest", &digest]).unwrap();
+        assert_eq!(good.preview_image_digest.as_deref(), Some(digest.as_str()));
+        for bad in ["latest", "sha256:abc", "sha256:../../other"] { assert!(preview_image(&mut d, bad).is_err()); }
+        preview_image(&mut d, &digest).unwrap();
+        pinned_only(&d).unwrap();
+        let c = d.computers.as_ref().unwrap();
+        assert_eq!(c.default_image, "hermes");
+        assert_eq!(c.images.len(), 2);
+        let expected = format!("{REGISTRY}/{}/{}@{digest}", d.account_id, crate::image::preview::REPOSITORY);
+        for name in ["hermes", "hermes-canary"] {
+            assert_eq!(serde_json::to_value(&c.images[name]).unwrap(), json!({"image": expected}));
+        }
+        let worker = worker_config(&d, &names(&d, Some("preview")).unwrap(), "0f0e0d0c", &test_release(), &devstack::repo_root()).unwrap();
+        assert_eq!(worker["vars"]["FRAGMENT_COMPUTER_IMAGE"], "hermes");
+        assert_eq!(worker["containers"][0]["images"]["hermes"], json!({"image": expected}));
+        assert_eq!(worker["containers"][0]["images"]["hermes-canary"], json!({"image": expected}));
+        // Replaying the same resolution leaves the effective config alone.
+        preview_image(&mut d, &digest).unwrap();
+        let images = pinned_images(&d);
+        assert_eq!(images, vec![expected.as_str(), expected.as_str()]);
+        d.computers.as_mut().unwrap().images.insert("forgotten-pin".into(), Image::Pinned(Pinned {image: expected}));
+        assert!(preview_image(&mut d, &digest).is_err());
     }
 
     /// The deployment's mail: its `mail_from` is the cell's

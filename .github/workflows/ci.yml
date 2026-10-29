@@ -176,6 +176,9 @@ jobs:
         env:
           BASE: ${{ github.event_name == 'push' && github.event.before || github.event.merge_group.base_sha || github.base_ref || 'master' }}
       - run: cargo xtask check
+      # Also exercise image-input resolution on PRs/queue trees, without
+      # secrets or registry writes. The real image job is master-only.
+      - run: cargo xtask image preview --dry-run --output "$RUNNER_TEMP/preview-image-plan.json"
 
   e2e-shard:
     name: e2e shard ${{ matrix.shard }}/4
@@ -380,6 +383,78 @@ jobs:
           overwrite: true
           retention-days: 30
 
+  # Master follows one image, keyed by its inputs rather than its commit.
+  # A registry tag preserves the digest across cache eviction and re-runs;
+  # a changed cell or shell never builds a new image. Prepare it before
+  # deploy can start. This job never changes the running Worker.
+  preview-image:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    # Build/push plus prepare.rs's 40-minute preparation limit.
+    timeout-minutes: 65
+    permissions:
+      contents: read
+    environment: preview
+    # Share the manual Image workflow's publication lock: two cold builds
+    # must not race to replace the same input tag with different digests.
+    concurrency:
+      group: image-preview
+      cancel-in-progress: false
+    outputs:
+      # A whole reference contains the secret account ID, so GitHub would
+      # suppress it as a secret output. Deploy uses its config's account.
+      digest: ${{ steps.ready.outputs.digest }}
+      key: ${{ steps.ready.outputs.key }}
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: preview-image
+          cache-targets: false
+          cache-directories: target/debug
+          cache-bin: false
+      - uses: actions/cache/restore@v4
+        with:
+          path: target/tools
+          key: node-${{ runner.os }}-${{ hashFiles('crates/devstack/src/node_release.rs') }}
+      - run: command -v skopeo > /dev/null || { sudo apt-get update -q && sudo apt-get install -y -q skopeo; }
+      - id: probe
+        run: |
+          cargo xtask image preview --output "$RUNNER_TEMP/preview-image.json"
+          echo "build=$(jq -r '.digest == null' "$RUNNER_TEMP/preview-image.json")" >> "$GITHUB_OUTPUT"
+      - id: buildx
+        if: steps.probe.outputs.build == 'true'
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      # The CLI stage now copies only its inputs (build.rs's host test).
+      # This cache saves its unchanged stage, the bridge's, and the large
+      # base. One master-only scope (~3 GB), not one entry per commit.
+      # Registry input tags, not this evictable cache, preserve identity.
+      - if: steps.probe.outputs.build == 'true'
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        env:
+          DOCKER_BUILD_SUMMARY: false
+          DOCKER_BUILD_RECORD_UPLOAD: false
+        with:
+          context: .
+          file: images/hermes/Dockerfile
+          platforms: linux/amd64
+          provenance: false
+          cache-from: type=gha,scope=preview-hermes
+          cache-to: type=gha,scope=preview-hermes,mode=max,ignore-error=true,timeout=5m
+      - id: ready
+        env:
+          BUILDX_BUILDER: ${{ steps.buildx.outputs.name }}
+        run: |
+          cargo xtask image preview --build --output "$RUNNER_TEMP/preview-image.json" --summary "$GITHUB_STEP_SUMMARY"
+          echo "digest=$(jq -er .digest "$RUNNER_TEMP/preview-image.json")" >> "$GITHUB_OUTPUT"
+          echo "key=$(jq -er .key "$RUNNER_TEMP/preview-image.json")" >> "$GITHUB_OUTPUT"
+
   # Continuous deployment, on a green push: master's to the preview
   # (`--branch preview`), production's to production, after `check` and
   # the e2e, or after `check` alone when a run proved its tree (`proven`),
@@ -396,14 +471,16 @@ jobs:
   # at the root of its main as it stands when the job runs: names and
   # paths, no secret's value, kept out of this public repo and its logs,
   # and readable by the team, as a secret is not. Every computer image is
-  # pinned by digest (`--pinned-only`): a runner builds none
+  # pinned by digest (`--pinned-only`): this job builds none; preview's
+  # separate image job resolves its input-keyed pin before it can start
   # (xtask/src/deploy.rs, `pinned_only`, says why).
   deploy:
-    needs: [proven, check, e2e]
+    needs: [proven, check, e2e, preview-image]
     if: >-
       ${{ !cancelled() && github.event_name == 'push'
       && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/production')
       && needs.check.result == 'success'
+      && (github.ref == 'refs/heads/production' || needs.preview-image.result == 'success')
       && ((needs.proven.result == 'success' && needs.proven.outputs.proven == 'true')
       || needs.e2e.result == 'success') }}
     runs-on: ubuntu-latest
@@ -512,12 +589,26 @@ jobs:
           mkdir -p ~/.config/fragment/secrets
           printf '%s\n' "$CLOUDFLARE_API_TOKEN" > ~/.config/fragment/secrets/cloudflare-api-token
           if [ -n "$PREVIEW_TEST_SECRET" ]; then printf '%s\n' "$PREVIEW_TEST_SECRET" > ~/.config/fragment/secrets/preview-test-secret; fi
+      # The private config remains the source for deployment settings.
+      # Preview's effective image is resolved by this checkout's inputs,
+      # and applied in memory; this summary is its auditable image trail.
+      - if: github.ref_name == 'master'
+        env:
+          DIGEST: ${{ needs.preview-image.outputs.digest }}
+          INPUT_KEY: ${{ needs.preview-image.outputs.key }}
+        run: |
+          test -n "$DIGEST" && test -n "$INPUT_KEY" || { echo "::error::preview image resolution is missing; no deploy"; exit 1; }
+          printf '### Resolved preview image\n\nInputs: `%s`\n\nDigest: `%s`\n\nDefault `hermes` and compatibility name `hermes-canary` both use this digest.\n' "$INPUT_KEY" "$DIGEST" >> "$GITHUB_STEP_SUMMARY"
       # green only when every object class answers this commit's release
       # (`git rev-parse --short=12 HEAD`) at /healthz/objects; a deploy that
       # cannot be finished or verified rolls back, and fails (rollout.rs)
-      - run: cargo xtask deploy --config "deploy-config/$CONFIG_FILE" --pinned-only ${{ github.ref_name == 'master' && '--branch preview' || '' }}
+      - run: |
+          args=()
+          if [ "$GITHUB_REF_NAME" = master ]; then args=(--branch preview --preview-image-digest "$PREVIEW_IMAGE_DIGEST"); fi
+          cargo xtask deploy --config "deploy-config/$CONFIG_FILE" --pinned-only "${args[@]}"
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          PREVIEW_IMAGE_DIGEST: ${{ needs.preview-image.outputs.digest }}
 
   # The e2e's builds are kept one entry per master commit (`e2e-shard`),
   # each about 0.5 GB of the repository's 10 GB of caches, and a run

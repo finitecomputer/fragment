@@ -37,6 +37,8 @@ use serde_json::{json, Value};
 
 use crate::deploy::{pinned_ok, repository_ok, REGISTRY};
 
+pub(crate) mod preview;
+
 const USAGE: &str = "usage: cargo xtask image push <image> --repository <name> --tag <tag> [--summary <file>]\n       cargo xtask image copy <image> --from <reference> --repository <name> --tag <tag> [--summary <file>]\nthe registry's account in CLOUDFLARE_ACCOUNT_ID (wrangler's token in CLOUDFLARE_API_TOKEN); a copy's source's in FROM_CLOUDFLARE_ACCOUNT_ID and FROM_CLOUDFLARE_API_TOKEN; images: hermes";
 
 /// The images it builds, by name: each one's Dockerfile and build context,
@@ -163,6 +165,9 @@ fn parse(rest: &[String], env: impl Fn(&str) -> Option<String>) -> Result<Reques
 
 /// `cargo xtask image …`.
 pub fn image(rest: &[String]) -> Result<()> {
+    if rest.first().is_some_and(|s| s == "preview") {
+        return preview::run(&rest[1..]);
+    }
     let req = parse(rest, |name| std::env::var(name).ok())?;
     // the pinned Node and wrangler first, and the API the image is prepared
     // through: one that cannot be had stops the run before a build or a

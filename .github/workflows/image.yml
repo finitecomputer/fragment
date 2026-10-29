@@ -1,42 +1,22 @@
-# A computer image put in an environment's Cloudflare registry, by hand
-# (Actions, image, Run workflow): built from a commit and pushed, or, for
-# production, copied byte for byte from the preview's registry, its digest
-# the one a round proved (Paul, 2026-10-20). The run's summary then names
-# the digest and the line a deploy config pins it with (`cargo xtask
-# image push|copy`, xtask/src/image.rs; docs/computers.md, "One round").
-# CI's deploys build no image (ci.yml's `deploy`, `--pinned-only`), so a
-# canary is built here, a promotion copied here, and a round waits on no
-# one's machine.
+# Manual image preparation and production promotion. Preview normally
+# follows master through ci.yml's preview-image job: this workflow resolves
+# and prepares that same input-keyed image, never a separate canary state.
+# Production remains manual: copy the exact preview digest a full round
+# proved (from), or explicitly build a new image not proved by that round.
 #
-# Its job runs in the environment the image is for, `preview` or
-# `production`, for its secrets: CLOUDFLARE_API_TOKEN, which wrangler
-# acts with, and CLOUDFLARE_ACCOUNT_ID, the account whose registry the
-# image goes to (the deployment's own: a deploy refuses another account's
-# image), required here, and masked wherever it appears, the summary
-# too; and, for a copy, production's PREVIEW_REGISTRY_TOKEN (a token of
-# the preview's account with Containers, which the copy mints its pull
-# credentials with) and PREVIEW_ACCOUNT_ID (that account, masked as the
-# other is). Each environment's image comes from the branch that deploys
-# it, as the environments' own rules also hold: the preview's from
-# master, production's from `production` (`ref`, below, refuses any other
-# pairing, and a copy into the preview, before an environment is
-# reached).
+# Each environment uses its own token and account ID; a production copy
+# also needs PREVIEW_REGISTRY_TOKEN and PREVIEW_ACCOUNT_ID. Only master may
+# use preview and only production may use production (ref checks this
+# before reaching an environment). A pin is always a manifest digest.
 #
-# The repositories are the ones the deploys by hand made, which the
-# configs pin today (wrangler names a Durable Object container's image
-# `<Worker>-<class>-<image>`): the preview's canary, which its stable is
-# in too, and production's `hermes`. A tag is a name for people; a config
-# pins the digest.
-#
-# A build is a deploy's wrangler's (xtask/src/build.rs, `image_build`), on
-# the runner's own Docker, with no layer cache: images.yml says why. So
-# every build makes a new digest, of a tree whose image did not change
-# too: build for a change to the image (docs/computers.md, "What changes
-# a version"), once a round, and promote by a copy, which keeps the
-# digest. The disk: images.yml's Docker lane builds this image and the
-# stub, and runs them, within about 11 GB of the runner's 85 GB free, so
-# none is freed first. A copy goes registry to registry through skopeo
-# (Ubuntu's; the runners have it), and needs no disk to speak of.
+# Production's manual build keeps no layer cache (images.yml records the
+# old measurements and cache budget); a copy uses skopeo with
+# --preserve-digests and checks the result. Preview's persistent BuildKit
+# cache lives in ci.yml, a single master-only scope. Even if evicted, an
+# existing input tag preserves identity. This manual path can cold-build a
+# missing input tag; the normal automatic path warms BuildKit first.
+# Preparation finishes before any summary names a ready image, so a later
+# deployment cannot half-deploy while Cloudflare prepares it (prepare.rs).
 name: image
 
 on:
@@ -58,7 +38,7 @@ on:
         required: false
         default: ""
       tag:
-        description: "Its tag (empty: a build's commit's first 12 hex digits, a copy's digest's)"
+        description: "Production tag (preview uses its input key; empty: build commit or copied digest first 12 hex digits)"
         type: string
         required: false
         default: ""
@@ -127,7 +107,11 @@ jobs:
             test -n "${!v}" || { echo "::error::the environment $ENVIRONMENT has no $v"; exit 1; }
           done
           case "$ENVIRONMENT" in
-            preview) repository="fragment-preview-computer-$IMAGE-canary" ;;
+            preview)
+              command -v skopeo > /dev/null || { sudo apt-get update -q && sudo apt-get install -y -q skopeo; }
+              cargo xtask image preview --build --output "$RUNNER_TEMP/preview-image.json" --summary "$GITHUB_STEP_SUMMARY"
+              exit 0
+              ;;
             production)
               repository="fragment-computer-$IMAGE"
               echo "::warning::a production build is a new image, not the one a round proved: with no layer cache, its digest is not the canary's. A promotion copies the proven digest (from)."
