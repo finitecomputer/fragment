@@ -1,6 +1,6 @@
 // Exact agent page source, with only its browser boundaries replaced. Hold
 // the first subscription hello until main has moved, without a changed frame.
-async function agentWatch(source) {
+async function agentWatch(run) {
   for (const delayed of [false, true]) {
     let socket, release;
     let job = "You are Bliss.";
@@ -21,8 +21,6 @@ async function agentWatch(source) {
       }
       return { ok: true, text: async () => "{}", json: async () => ({ files: [] }) };
     };
-    const run = new Function("document", "window", "fetch", "WebSocket", "location", "Image", "colorOf",
-      source.replace('import { colorOf } from "./agent-color.js";', "").replace("main();\nroutines();", "return main();"));
     const boot = run(document, window, fetch, class { constructor() { socket = this; } },
       { hostname: "xp--abcd.example", href: "https://xp--abcd.example/" }, class {}, () => "red");
     // Allow settings and identity reads to finish and the initial job to start.
