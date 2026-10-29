@@ -194,7 +194,7 @@
   //                      "reasoning": "max", "max_tokens": 32768, "fallback": "cloudflare",
   //                      "body": { "provider": { "zdr": true, "sort": "throughput", "require_parameters": true,
   //                                              "quantizations": ["fp8", "bf16"],
-  //                                              "max_price": { "prompt": <$>, "completion": <$> } } } },
+  //                                              "max_price": { "prompt": 0.3, "completion": 1.2 } } } },
   //   "fallback": { "provider": "openai", "base_url": "https://inference.tinfoil.sh/v1",
   //                 "key": "fragment-tinfoil-api-key", "model": "deepseek-v4-1-flash",
   //                 "price": { "input": 0.65, "cached_input": 0.13, "output": 1.45 }, "images": true, "private": true },
