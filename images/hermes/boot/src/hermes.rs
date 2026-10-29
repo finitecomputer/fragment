@@ -8,7 +8,8 @@
 
 use std::path::{Path, PathBuf};
 
-use fragment_bridge::api::{model_id_ok, Home, ModelIds};
+use fragment_bridge::api::{model_id_ok, Home, ModelIds, TierRoute};
+pub use fragment_bridge::api::Reasoning;
 use fragment_bridge::runtime::relay::wire;
 use fragment_bridge::runtime::Agent;
 
@@ -84,46 +85,9 @@ impl OwnModel {
     }
 }
 
-/// How hard an agent's model thinks before it answers (Paul, 2026-10-22:
-/// "expose the reasoning level in the model picker … high is a good
-/// default"): its `agent.json`'s `reasoning`, beside its `tier` and
-/// `model`, which its owner picks in Settings' Agents. Its profile says it
-/// as `agent.reasoning_effort`, which Hermes reads from the profile's
-/// config at each turn (v0.21.7's `resolve_reasoning_config`) and sends as
-/// each call's `reasoning_effort`. Only the efforts the platform's model
-/// route passes on (`fragment_core::models::EFFORTS`, `low` and `high`): it
-/// takes any other as `low`, as GLM takes `none`, `minimal`, `medium` and
-/// `xhigh` for its dearest, `max`. Left unset, Hermes would send its custom
-/// provider's default, `medium`, which the route took as `low`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Reasoning {
-    Low,
-    High,
-}
-
 /// What an agent whose `agent.json` names no reasoning (or one not offered)
 /// thinks at.
 pub const DEFAULT_REASONING: Reasoning = Reasoning::High;
-
-impl Reasoning {
-    /// The reasoning `agent.json` names (`{"reasoning": "low"}`), else the
-    /// default: none read, no JSON, none named, or one not offered.
-    pub fn of(agent_json: Option<&[u8]>) -> Reasoning {
-        let v = agent_json.and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
-        match v.as_ref().and_then(|v| v["reasoning"].as_str()) {
-            Some("low") => Reasoning::Low,
-            Some("high") => Reasoning::High,
-            _ => DEFAULT_REASONING,
-        }
-    }
-
-    pub fn name(self) -> &'static str {
-        match self {
-            Reasoning::Low => "low",
-            Reasoning::High => "high",
-        }
-    }
-}
 
 /// What an agent's main model is: a tier through the platform's model
 /// route, or its own (`OwnModel`), sent to its provider's base URL with
@@ -166,6 +130,13 @@ impl MainModel {
             MainModel::Own { provider, id, .. } => format!("{provider}:{id}"),
         }
     }
+
+    pub fn reasoning(&self, picked: Reasoning, route: &Route) -> Reasoning {
+        match self {
+            MainModel::Tier(tier) => route.settings(*tier).and_then(|r| r.reasoning).unwrap_or(DEFAULT_REASONING),
+            MainModel::Own { .. } => picked,
+        }
+    }
 }
 
 /// The platform's model route as the guest reaches it: the intercept's base
@@ -203,6 +174,14 @@ impl Route {
         }
     }
 
+    pub fn settings(&self, tier: Tier) -> Option<&TierRoute> {
+        self.ids.routes.as_ref().and_then(|r| match tier {
+            Tier::Cheap => Some(&r.cheap),
+            Tier::Medium => Some(&r.medium),
+            Tier::High => None,
+        })
+    }
+
     /// The model a tier agent's stall falls back to: its route's fallback
     /// by its id (Private's private, Standard's Cloudflare), or, from a
     /// platform that names no routes, the deployment's fallback. None when
@@ -210,11 +189,7 @@ impl Route {
     /// (`fragment_core::models::Models::parse`), so the switch would only
     /// ask the same server again.
     pub fn fallback(&self, tier: Tier) -> Option<&str> {
-        let routed = self.ids.routes.as_ref().and_then(|r| match tier {
-            Tier::Cheap => Some(&r.cheap.fallback),
-            Tier::Medium => Some(&r.medium.fallback),
-            Tier::High => None,
-        });
+        let routed = self.settings(tier).map(|r| &r.fallback);
         Some(routed.unwrap_or(&self.ids.fallback).as_str()).filter(|id| *id != self.tier(tier))
     }
 }
@@ -246,6 +221,9 @@ pub const FALLBACK_MODEL: &str = "fallback";
 /// Flash's first bytes are 1 to 5 s; DeepSeek's were 11 to 61 s when
 /// Workers AI was short of it.
 pub const STALE_TIMEOUT_S: u32 = 20;
+/// A Deep call may think for three minutes before it streams (decision 65).
+pub const DEEP_STALE_TIMEOUT_S: u32 = 180;
+pub const DEEP_MAX_TOKENS: u32 = 32_768;
 /// Hermes' in-place retries of a stream that dropped or went stale
 /// (`HERMES_STREAM_RETRIES`, its default 2): one, so a stall reaches the
 /// fallback after two stale timeouts.
@@ -313,12 +291,16 @@ pub const SENDING: &str = "To give someone in this chat a file (a PDF, an image,
 /// where its owner's home is, its profile's (`told_home`).
 pub const SIMPLEX: &str = "Fragment carries your owner's SimpleX for you, with any file you attach: never install, run or set up SimpleX, even when asked to send something there.";
 
+/// Native delegate_task children cannot ask the person. Settle the scope
+/// first; the main agent remains responsible for checking their work.
+pub const DELEGATING: &str = "Hand big builds (a new app, a large change, or wide research) to a subagent with delegate_task. Settle questions about the outcome with the person first: subagents cannot ask them. Give the subagent the agreed goal and enough context to finish. Keep helping while it works, then inspect and test its result before telling the person it is done.";
+
 /// The relay's hint, appended to every agent's system prompt on every turn
 /// in our chats (Hermes' `platform_hints.relay.append`): how it asks
 /// (`ASKING`), then the files it is sent (`FILES`), then how it sends one
-/// (`SENDING`), then SimpleX's rule (`SIMPLEX`).
+/// (`SENDING`), SimpleX's rule (`SIMPLEX`), and delegation (`DELEGATING`).
 pub fn relay_hint() -> String {
-    format!("{ASKING}\n\n{FILES}\n\n{SENDING}\n\n{SIMPLEX}")
+    format!("{ASKING}\n\n{FILES}\n\n{SENDING}\n\n{SIMPLEX}\n\n{DELEGATING}")
 }
 
 /// The managed overlay: how every profile streams, shows progress, asks
@@ -473,6 +455,7 @@ pub fn told(name: &str, agent_fragment: &str, home: Home) -> String {
 #[allow(clippy::too_many_arguments)]
 pub fn profile_config(agent: &Agent, name: &str, home: Home, main: &MainModel, reasoning: Reasoning, route: &Route, credential_env: &[String], credentials_file: &Path) -> String {
     let base = route.base.trim_end_matches('/');
+    let reasoning = main.reasoning(reasoning, route);
     let mut y = String::new();
     y.push_str(&format!("# Written by hermes-boot for {} (model {}) at every boot, and when its model, its reasoning, its name or its home changes.\n", agent.fragment, main.name()));
     // its name and its home, at every turn; a tier's guidance, a text tier's one retry
@@ -581,6 +564,9 @@ pub fn profile_config(agent: &Agent, name: &str, home: Home, main: &MainModel, r
     // and nor has a tier whose fallback is its own model (`Route::fallback`).
     if let MainModel::Tier(tier @ (Tier::Cheap | Tier::Medium)) = main {
         y.push_str(&format!("providers:\n  custom:\n    models:\n      {}:\n        stale_timeout_seconds: {STALE_TIMEOUT_S}\n", q(route.tier(*tier))));
+        if let Some(deep) = route.settings(*tier).and_then(|r| r.deep.as_ref()).filter(|d| d.id != route.tier(*tier)) {
+            y.push_str(&format!("      {}:\n        stale_timeout_seconds: {DEEP_STALE_TIMEOUT_S}\n", q(&deep.id)));
+        }
         if let Some(fallback) = route.fallback(*tier) {
             y.push_str(&format!(
                 "fallback_providers:\n  - provider: \"custom\"\n    base_url: {}\n    model: {}\n    api_key: {}\n",
@@ -588,6 +574,22 @@ pub fn profile_config(agent: &Agent, name: &str, home: Home, main: &MainModel, r
                 q(fallback),
                 q(&format!("agent:{}", agent.fragment))
             ));
+        }
+    }
+    // Native Hermes owns child creation, results and lifetime. A pinned
+    // model needs its own fallback chain: it must never inherit Fast's.
+    // request_overrides changes only the child's output cap; Hermes has
+    // no delegation.max_tokens setting. Older cells name no Deep slot,
+    // so their children continue to inherit the parent's route.
+    y.push_str("delegation:\n  max_concurrent_children: 3\n");
+    if let MainModel::Tier(tier) = main {
+        if let Some(deep) = route.settings(*tier).and_then(|r| r.deep.as_ref()) {
+            y.push_str(&format!("  model: {}\n  reasoning_effort: {}\n  request_overrides:\n    max_tokens: {DEEP_MAX_TOKENS}\n", q(&deep.id), q(deep.reasoning.unwrap_or(Reasoning::Max).name())));
+            if let Some(fallback) = deep.fallback.as_deref().filter(|f| *f != deep.id) {
+                y.push_str(&format!("  fallback_providers:\n    - provider: \"custom\"\n      base_url: {}\n      model: {}\n      api_key: {}\n", q(&format!("{base}/v1")), q(fallback), q(&format!("agent:{}", agent.fragment))));
+            } else {
+                y.push_str("  fallback_providers: []\n");
+            }
         }
     }
     // Stored selections, never inferred by Hermes from credential presence.
@@ -1184,18 +1186,15 @@ mod tests {
         }
     }
 
-    /// Goal (Paul, 2026-10-22: "high is a good default"): an agent thinks as
-    /// its `agent.json`'s `reasoning` says, `low` or `high`, and hard
-    /// (`high`) when it names none, or one the model route does not pass
-    /// on. Its profile says so in its one `agent` mapping whatever its
-    /// model, never the overlay, and a change is another config (written
-    /// again, which Hermes reads at the next turn). Method: read each
-    /// agent.json; write each model's config at each level.
+    /// Decision 65: a tier's Fast effort is the route's (High on an old
+    /// cell), even with an old Low pick. An owner's own model keeps its
+    /// effort. Absent/invalid settings default to High.
     #[test]
     fn reasoning_reads_and_defaults_to_high() {
         assert_eq!(Reasoning::of(Some(br#"{"tier":"cheap","reasoning":"low"}"#)), Reasoning::Low);
         assert_eq!(Reasoning::of(Some(br#"{"tier":"medium","reasoning":"high"}"#)), Reasoning::High);
-        let unnamed: [&[u8]; 8] = [b"not json", b"[]", br#"{"tier":"cheap"}"#, br#"{"reasoning":"medium"}"#, br#"{"reasoning":"max"}"#, br#"{"reasoning":"none"}"#, br#"{"reasoning":"LOW"}"#, br#"{"reasoning":1}"#];
+        assert_eq!(Reasoning::of(Some(br#"{"reasoning":"max"}"#)), Reasoning::Max);
+        let unnamed: [&[u8]; 7] = [b"not json", b"[]", br#"{"tier":"cheap"}"#, br#"{"reasoning":"medium"}"#, br#"{"reasoning":"none"}"#, br#"{"reasoning":"LOW"}"#, br#"{"reasoning":1}"#];
         assert_eq!(Reasoning::of(None), Reasoning::High, "no agent.json");
         for setting in unnamed {
             assert_eq!(Reasoning::of(Some(setting)), Reasoning::High, "{}", String::from_utf8_lossy(setting));
@@ -1207,14 +1206,15 @@ mod tests {
         assert!(matches!(own_main, MainModel::Own { .. }));
         for (main, a) in [(Tier::Cheap.into(), agent()), (Tier::Medium.into(), agent()), (Tier::High.into(), agent()), (own_main, own)] {
             let config = |r: Reasoning| profile_config(&a, "Juniper", Home::Chat, &main, r, &route("http://m"), &[], creds);
-            for r in [Reasoning::Low, Reasoning::High] {
+            for r in [Reasoning::Low, Reasoning::High, Reasoning::Max] {
                 let p = config(r);
+                let expected = if matches!(main, MainModel::Own { .. }) { r } else { Reasoning::High };
                 let mapping: Vec<&str> = p.lines().skip_while(|l| *l != "agent:").skip(1).take_while(|l| l.starts_with("  ")).collect();
-                assert!(mapping.contains(&format!("  reasoning_effort: \"{}\"", r.name()).as_str()), "the {} model thinks {} in its `agent` mapping: {p}", main.name(), r.name());
+                assert!(mapping.contains(&format!("  reasoning_effort: \"{}\"", expected.name()).as_str()), "the {} model thinks {} in its `agent` mapping: {p}", main.name(), expected.name());
                 assert_eq!((p.matches("reasoning_effort").count(), p.matches("\nagent:\n").count()), (1, 1), "said once, in its one `agent` mapping: {p}");
                 assert_eq!(p, config(r), "the same reasoning, the same config: nothing written");
             }
-            assert_ne!(config(Reasoning::Low), config(Reasoning::High), "another reasoning is another config, written again");
+            assert_eq!(config(Reasoning::Low) == config(Reasoning::High), matches!(main, MainModel::Tier(_)), "only an owner's model follows its personal reasoning setting");
         }
         let fresh = profile_config(&agent(), "Juniper", Home::Chat, &Tier::of(None, false).into(), Reasoning::of(None), &route("http://m"), &[], creds);
         assert!(fresh.contains("\n  reasoning_effort: \"high\"\n"), "a new agent, with no agent.json, thinks hard: {fresh}");
@@ -1235,6 +1235,38 @@ mod tests {
         let named = Route::new("http://model.fragment.internal", None);
         let config = profile_config(&agent(), "Juniper", Home::Chat, &tier.into(), DEFAULT_REASONING, &named, &[], Path::new("/c.sh"));
         assert!(config.contains("  default: \"cheap\"\n") && config.contains("    model: \"fallback\"\n"), "{config}");
+    }
+
+    /// Each tier pins Deep independently of Fast, with a separate fallback
+    /// chain, patience and cap. BYO and cells without Deep retain inheritance.
+    #[test]
+    fn delegation_uses_each_tiers_deep_route() {
+        let mut ids = serde_json::json!({
+            "cheap": CHEAP_ID, "medium": MEDIUM_ID, "fallback": FALLBACK_ID, "vision": FALLBACK_ID,
+            "routes": {
+                "cheap": {"fallback": "deepseek-v4-1-flash", "vision": CHEAP_ID, "reasoning": "high", "deep": {"id": "deepseek-v4-1-flash", "reasoning": "max", "fallback": CHEAP_ID}},
+                "medium": {"fallback": FALLBACK_ID, "vision": FALLBACK_ID, "reasoning": "high", "deep": {"id": "deepseek/deepseek-v4.1-flash", "reasoning": "max", "fallback": FALLBACK_ID}}
+            }
+        });
+        let config = |ids: &serde_json::Value, main: MainModel| profile_config(&agent(), "Juniper", Home::Chat, &main, Reasoning::Low, &Route::new("http://m", Some(&serde_json::from_value(ids.clone()).unwrap())), &[], Path::new("/c.sh"));
+        for (tier, deep, fallback) in [(Tier::Cheap, "deepseek-v4-1-flash", CHEAP_ID), (Tier::Medium, "deepseek/deepseek-v4.1-flash", FALLBACK_ID)] {
+            let p = config(&ids, tier.into());
+            let delegation = p.split("\ndelegation:\n").nth(1).unwrap().split("\nskills:").next().unwrap();
+            assert!(delegation.starts_with(&format!("  max_concurrent_children: 3\n  model: {}\n  reasoning_effort: \"max\"\n  request_overrides:\n    max_tokens: 32768\n", q(deep))), "{p}");
+            assert!(delegation.contains(&format!("      model: {}\n", q(fallback))), "{p}");
+            assert!(p.contains(&format!("      {}:\n        stale_timeout_seconds: 180\n", q(deep))), "{p}");
+            assert!(p.contains("  reasoning_effort: \"high\"\n"), "the old Low pick cannot lower Fast: {p}");
+        }
+        for fallback in [serde_json::Value::Null, serde_json::json!("deepseek-v4-1-flash")] {
+            ids["routes"]["cheap"]["deep"]["fallback"] = fallback;
+            assert!(config(&ids, Tier::Cheap.into()).contains("  fallback_providers: []\n"), "no child inheritance or self-loop");
+        }
+        let own = MainModel::Own { provider: "openrouter".into(), base: "https://openrouter.ai/api/v1".into(), id: "someone/model".into(), placeholder: "fck_key".into() };
+        let p = config(&ids, own);
+        assert!(p.contains("  reasoning_effort: \"low\"\n") && p.contains("delegation:\n  max_concurrent_children: 3\n"));
+        assert!(!p.contains("  request_overrides:") && !p.contains("stale_timeout_seconds"), "BYO does not borrow the platform's Deep: {p}");
+        let old = profile_config(&agent(), "Juniper", Home::Chat, &Tier::Cheap.into(), Reasoning::Low, &route("http://m"), &[], Path::new("/c.sh"));
+        assert!(!old.contains("  request_overrides:"), "old cells retain parent inheritance: {old}");
     }
 
     /// Goal: naming a tier's model by its id changes what Hermes says the
@@ -1343,7 +1375,7 @@ mod tests {
         }
         // each tier's stall falls back within its route (Paul, 2026-10-24), by its route's fallback's id
         let mut routed = route("http://model.fragment.internal");
-        let tier_route = |fallback: &str| fragment_bridge::api::TierRoute { label: None, private: false, fallback: fallback.into(), vision: FALLBACK_ID.into() };
+        let tier_route = |fallback: &str| fragment_bridge::api::TierRoute { label: None, private: false, fallback: fallback.into(), vision: FALLBACK_ID.into(), reasoning: None, deep: None };
         routed.ids.routes = Some(Box::new(fragment_bridge::api::TierRoutes { cheap: tier_route("deepseek-v4-1-flash"), medium: tier_route("@cf/example/standard-fallback") }));
         for (tier, want) in [(Tier::Cheap, "deepseek-v4-1-flash"), (Tier::Medium, "@cf/example/standard-fallback")] {
             let config = profile_config(&agent(), "Juniper", Home::Chat, &tier.into(), DEFAULT_REASONING, &routed, &[], creds);
@@ -1397,7 +1429,7 @@ mod tests {
     #[test]
     fn every_agent_is_told_its_chat_files_are_on_its_computer() {
         let m = managed_config(&[], CARD_TIMEOUT_S, crate::desktop::IDLE_STOP_MS);
-        assert_eq!(relay_hint(), format!("{ASKING}\n\n{FILES}\n\n{SENDING}\n\n{SIMPLEX}"));
+        assert_eq!(relay_hint(), format!("{ASKING}\n\n{FILES}\n\n{SENDING}\n\n{SIMPLEX}\n\n{DELEGATING}"));
         assert!(m.contains(&format!("    append: {}\n", q(&relay_hint()))), "its files beside how to ask, in the relay's hint: {m}");
         for said in ["already on your computer", "the note before their message names its path", "image_url:", "cleared after a day", "copy it into your work", "upload button with your browser tools", "full path into the file dialog on your desktop with computer_use", "press Enter"] {
             assert!(FILES.contains(said), "{said}: {FILES}");
@@ -1445,7 +1477,7 @@ mod tests {
     #[test]
     fn every_agent_is_told_simplex_is_the_platforms() {
         let m = managed_config(&[], CARD_TIMEOUT_S, crate::desktop::IDLE_STOP_MS);
-        assert!(relay_hint().ends_with(&format!("{SENDING}\n\n{SIMPLEX}")), "last: {}", relay_hint());
+        assert!(relay_hint().contains(&format!("{SENDING}\n\n{SIMPLEX}\n\n")), "after sending: {}", relay_hint());
         assert!(m.contains(&format!("    append: {}\n", q(&relay_hint()))), "in the relay's hint: {m}");
         for said in ["Fragment carries your owner's SimpleX", "never install, run or set up SimpleX"] {
             assert!(SIMPLEX.contains(said), "{said}: {SIMPLEX}");

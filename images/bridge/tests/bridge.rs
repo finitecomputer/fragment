@@ -17,6 +17,39 @@ use support::fake::{person, Fake, World};
 
 const WAIT: u64 = 8_000;
 
+/// New modes are optional on the wire; when present, every model id and
+/// effort must be safe before the boot writes a profile from the view.
+#[tokio::test]
+async fn model_modes_accept_old_views_and_reject_invalid_routes() {
+    use fragment_bridge::api::{Api, Reasoning};
+    let fake = Fake::start("127.0.0.1:0", &[]).await;
+    let api = Api::new(&fake.url()).unwrap();
+    let old = api.computer(false).await.unwrap().models.unwrap();
+    assert!(old.routes.as_ref().unwrap().cheap.deep.is_none());
+    fake.with(|w| {
+        let cheap = &mut w.computer["models"]["routes"]["cheap"];
+        cheap["reasoning"] = json!("high");
+        cheap["deep"] = json!({ "id": "deepseek-v4-1-flash", "reasoning": "max", "fallback": "z-ai/glm-5.3-flash" });
+    });
+    let modes = api.computer(false).await.unwrap().models.unwrap();
+    assert_eq!(modes.routes.unwrap().cheap.deep.unwrap().reasoning, Some(Reasoning::Max));
+    let valid = fake.with(|w| w.computer.clone());
+    for field in ["id", "fallback", "reasoning"] {
+        fake.with(|w| {
+            w.computer = valid.clone();
+            w.computer["models"]["routes"]["cheap"]["deep"][field] = json!("invalid value");
+        });
+        assert!(api.computer(false).await.is_err(), "an invalid Deep {field} is refused");
+    }
+    fake.with(|w| {
+        w.computer = valid;
+        w.computer["models"]["routes"]["cheap"]["reasoning"] = json!("medium");
+    });
+    assert!(api.computer(false).await.is_err(), "an unknown Fast effort is refused");
+    fake.with(|w| w.computer.as_object_mut().unwrap().remove("models"));
+    assert!(api.computer(false).await.unwrap().models.is_none(), "a cell before model metadata still works");
+}
+
 fn turn_of(agent: &str, chat: &str, seq: u64) -> String {
     records::turn_id(&format!("{agent}--k3x9"), chat, "chat", seq)
 }

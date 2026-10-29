@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 use serde_json::json;
 
 use support::fake::{person, Fake};
-use support::model::{Model, CHEAP_ID, ROUTE_FALLBACK_ID};
+use support::model::{Model, CHEAP_ID, FALLBACK_ID, ROUTE_FALLBACK_ID};
 
 /// An install for the session, offline (as the e2e's hermes lane has it):
 /// a package Hermes builds and installs through apt as root, and a program
@@ -694,8 +694,23 @@ fn restore_and_check(tag: &str, save: &std::path::Path) -> (i32, String, Vec<ser
 /// The Hermes image, running against the fake API and the scripted model,
 /// its agent answering in its chat.
 async fn hermes_running() -> (Fake, Model, String, Container) {
+    hermes_running_with_modes(None).await
+}
+
+async fn hermes_running_with_modes(tier: Option<&str>) -> (Fake, Model, String, Container) {
     build(&repo_dir(), "images/hermes/Dockerfile", &hermes_tag());
     let fake = Fake::start("0.0.0.0:0", &["juniper"]).await;
+    if let Some(tier) = tier {
+        fake.with(|w| {
+            let models = &mut w.computer["models"];
+            models["routes"]["cheap"]["private"] = json!(true);
+            for (tier, deep, fallback) in [("cheap", ROUTE_FALLBACK_ID, CHEAP_ID), ("medium", "deepseek/deepseek-v4.1-flash", FALLBACK_ID)] {
+                models["routes"][tier]["reasoning"] = json!("high");
+                models["routes"][tier]["deep"] = json!({ "id": deep, "reasoning": "max", "fallback": fallback });
+            }
+            w.fragments.get_mut("juniper--k3x9").unwrap().files.insert("agent.json".into(), bytes::Bytes::from(json!({ "tier": tier, "reasoning": "low" }).to_string()));
+        });
+    }
     let model = Model::start("0.0.0.0:0").await;
     let chat = fake.chat("talk", &["juniper"]);
     let c = Container::run(&hermes_tag(), fake.addr.port(), model.addr.port(), &[]);
@@ -712,7 +727,7 @@ async fn hermes_running() -> (Fake, Model, String, Container) {
 #[tokio::test]
 #[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
 async fn a_background_delegate_delivers_and_keeps_the_computer_awake() {
-    background_delegate_gate(false).await;
+    background_delegate_gate(false, None, false).await;
 }
 
 /// The child is still working while its next model call waits through a
@@ -720,11 +735,40 @@ async fn a_background_delegate_delivers_and_keeps_the_computer_awake() {
 #[tokio::test]
 #[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
 async fn a_background_delegate_waits_out_deploying_and_keeps_the_computer_awake() {
-    background_delegate_gate(true).await;
+    background_delegate_gate(true, None, false).await;
 }
 
-async fn background_delegate_gate(deploying: bool) {
-    let (fake, model, chat, c) = hermes_running().await;
+/// The same gate on both platform tiers: Fast handles chat, Deep the child;
+/// the latter keeps its tier identity, Max effort and larger output cap.
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn private_fast_delegates_to_private_deep() {
+    background_delegate_gate(false, Some("cheap"), false).await;
+}
+
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn standard_fast_delegates_to_standard_deep() {
+    background_delegate_gate(false, Some("medium"), false).await;
+}
+
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn private_deep_falls_back_to_private_fast() {
+    background_delegate_gate(false, Some("cheap"), true).await;
+}
+
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn standard_deep_falls_back_to_cloudflare() {
+    background_delegate_gate(false, Some("medium"), true).await;
+}
+
+async fn background_delegate_gate(deploying: bool, tier: Option<&str>, fallback: bool) {
+    let (fake, model, chat, c) = hermes_running_with_modes(tier).await;
+    if fallback {
+        model.fail_model(if tier == Some("cheap") { ROUTE_FALLBACK_ID } else { "deepseek/deepseek-v4.1-flash" });
+    }
     let parent = asked(&fake, &chat, &c, "delegate the gate work", |w, t| w.bodies(&chat, "work", "turn.end").iter().any(|e| e["turn"] == t)).await;
     let started = "/data/work/juniper--k3x9/delegate-started";
     let finished = "/data/work/juniper--k3x9/delegate-finished";
@@ -760,17 +804,29 @@ async fn background_delegate_gate(deploying: bool) {
     assert_eq!(delivered.len(), 1, "the background result arrives in the chat once");
     assert_ne!(delivered[0]["turn"], parent, "its completion has a turn of its own");
     assert!(held, "the computer stays awake throughout the background delegate");
+    if let Some(tier) = tier {
+        let deep = if tier == "cheap" { ROUTE_FALLBACK_ID } else { "deepseek/deepseek-v4.1-flash" };
+        let backup = if tier == "cheap" { CHEAP_ID } else { FALLBACK_ID };
+        let calls = model.calls.lock().unwrap().clone();
+        let child: Vec<_> = calls.iter().filter(|c| support::model::delegate_goal(&c.body)).collect();
+        assert!(!child.is_empty());
+        assert!(child.iter().all(|c| (c.model == deep || (fallback && c.model == backup)) && c.tier.as_deref() == Some(tier) && c.agent.as_deref() == Some("juniper--k3x9") && c.body["reasoning_effort"] == (if c.model == deep { "max" } else { "high" }) && c.body["max_tokens"] == 32768), "Deep calls retain their route and limits (Fast fallback restores its High effort): {child:?}");
+        assert_eq!(child.iter().any(|c| c.model == backup), fallback, "only its own chain is used: {child:?}");
+        assert!(!c.logs().contains("Stream stale for"), "Deep waits past Fast's stale window");
+        let main: Vec<_> = calls.iter().filter(|c| c.body.get("tools").is_some() && !support::model::delegate_goal(&c.body)).collect();
+        assert!(!main.is_empty() && main.iter().all(|c| c.model == CHEAP_ID && c.tier.as_deref() == Some(tier) && c.body["reasoning_effort"] == "high"), "Fast answers chats at High despite the old Low pick: {main:?}");
+        let settings = hermes_python(&c, &[], "import json\nfrom pathlib import Path\nimport hermes_yaml as yaml\ncfg=yaml.safe_load(Path('/data/hermes/profiles/juniper--k3x9/config.yaml').read_text())\nprint(json.dumps({'delegation':cfg['delegation'],'models':cfg['providers']['custom']['models']}))");
+        assert_eq!(settings["models"][CHEAP_ID]["stale_timeout_seconds"], 20);
+        assert_eq!(settings["models"][deep]["stale_timeout_seconds"], 180);
+        assert_eq!(settings["delegation"]["max_concurrent_children"], 3);
+        assert_eq!(settings["delegation"]["fallback_providers"][0]["model"], backup);
+    }
     if deploying {
         let (at, before) = deployment.expect("the child ran through the deployment window");
         assert!(at.elapsed() >= Duration::from_secs(90));
         assert!(model.refused.load(std::sync::atomic::Ordering::SeqCst) > 2);
         let calls = model.calls.lock().unwrap().clone();
-        let dispatched: Vec<_> = calls[before..].iter().filter(|c| {
-            c.body["messages"].as_array().and_then(|m| m.iter().rev().find(|m| m["role"] == "user")).is_some_and(|m| {
-                let text = content_text(m);
-                text.contains("run: touch /data/work/juniper--k3x9/delegate-started") && !text.contains("[ASYNC DELEGATION")
-            })
-        }).collect();
+        let dispatched: Vec<_> = calls[before..].iter().filter(|c| support::model::delegate_goal(&c.body)).collect();
         assert_eq!(dispatched.len(), 1, "one admitted child model call: {dispatched:?}");
         assert_eq!(dispatched[0].model, CHEAP_ID, "the deployment caused no fallback");
         assert!(!c.logs().contains("Stream stale for"), "marked preflight kept its own patience budget");
@@ -3313,9 +3369,7 @@ async fn an_agent_runs_on_its_owners_model() {
     let calls = calls_of(before);
     assert!(!calls.is_empty() && calls.iter().all(|c| c.path == "/v1/chat/completions" && c.model == CHEAP_ID), "its tier, through the route: {calls:?}");
 
-    // how hard it thinks (Paul, 2026-10-22): `high` with no `reasoning` in
-    // its agent.json, each of its turn's calls saying so; its owner's pick,
-    // `low`, from its next turn, nothing restarted
+    // Decision 65: platform Fast uses High even with an old Low setting.
     // (the turn's own calls: with its tools, its last user message its
     // message; Hermes' title for the chat, an auxiliary call of its own
     // with no tools, asks for no reasoning, `none`, which the route takes
@@ -3329,15 +3383,10 @@ async fn an_agent_runs_on_its_owners_model() {
     fake.with(|w| {
         w.fragments.get_mut("juniper--k3x9").unwrap().files.insert("agent.json".into(), bytes::Bytes::from_static(br#"{"tier":"cheap","reasoning":"low"}"#));
     });
-    let t = Instant::now();
-    while !config().contains("\n  reasoning_effort: \"low\"\n") {
-        assert!(t.elapsed() < Duration::from_secs(30), "the profile never took its reasoning; its config:\n{}", config());
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
     let before = model.calls.lock().unwrap().len();
     asked(&fake, &chat, &c, "hello thinking less", replied).await;
     let low = efforts(&calls_of(before), "hello thinking less");
-    assert!(!low.is_empty() && low.iter().all(|e| e == "low"), "its owner's pick, at its next turn: {low:?}");
+    assert!(!low.is_empty() && low.iter().all(|e| e == "high"), "Fast's effort comes from the route: {low:?}");
 
     // its owner connects the provider and picks one of its models
     let placeholder = format!("fck_openrouter_{}", "0123456789abcdef0123456789abcdef");
@@ -3345,7 +3394,7 @@ async fn an_agent_runs_on_its_owners_model() {
     let id = "anthropic/claude-sonnet-5.5";
     fake.with(|w| {
         w.computer["agents"][0]["credentials"] = json!([{ "provider": "openrouter", "kind": "own", "env": ["OPENROUTER_API_KEY"], "placeholder": placeholder, "hosts": ["openrouter.ai"], "modelBase": base }]);
-        let agent_json = format!(r#"{{"tier":"cheap","model":{{"provider":"openrouter","id":"{id}"}},"color":"blue"}}"#);
+        let agent_json = format!(r#"{{"tier":"cheap","model":{{"provider":"openrouter","id":"{id}"}},"reasoning":"low","color":"blue"}}"#);
         w.fragments.get_mut("juniper--k3x9").unwrap().files.insert("agent.json".into(), bytes::Bytes::from(agent_json));
     });
     let t = Instant::now();
@@ -3358,6 +3407,8 @@ async fn an_agent_runs_on_its_owners_model() {
     let calls = calls_of(before);
     let main: Vec<_> = calls.iter().filter(|c| c.body["messages"].to_string().contains("hello on my own model")).collect();
     assert!(!main.is_empty(), "the turn's model call: {calls:?}");
+    let own_effort = efforts(&calls, "hello on my own model");
+    assert!(!own_effort.is_empty() && own_effort.iter().all(|e| e == "low"), "BYO retains the owner's reasoning pick: {own_effort:?}");
     assert!(
         main.iter().all(|c| c.path == "/own/api/v1/chat/completions" && c.model == id && c.authorization.as_deref() == Some(format!("Bearer {placeholder}").as_str())),
         "its own model, at its provider, the placeholder its key: {main:?}"
