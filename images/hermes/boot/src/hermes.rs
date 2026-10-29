@@ -189,7 +189,7 @@ impl Route {
     /// The route at `base`, its ids the view's (`models`), or the route's
     /// own names, which it takes as well, from a platform that names none.
     pub fn new(base: &str, models: Option<&ModelIds>) -> Route {
-        let names = || ModelIds { cheap: Tier::Cheap.name().into(), medium: Tier::Medium.name().into(), fallback: FALLBACK_MODEL.into(), vision: VISION_MODEL.into() };
+        let names = || ModelIds { cheap: Tier::Cheap.name().into(), medium: Tier::Medium.name().into(), fallback: FALLBACK_MODEL.into(), vision: VISION_MODEL.into(), routes: None };
         Route { base: base.into(), ids: models.cloned().unwrap_or_else(names) }
     }
 
@@ -201,6 +201,21 @@ impl Route {
             Tier::Medium => &self.ids.medium,
             Tier::High => Tier::High.name(),
         }
+    }
+
+    /// The model a tier agent's stall falls back to: its route's fallback
+    /// by its id (Private's private, Standard's Cloudflare), or, from a
+    /// platform that names no routes, the deployment's fallback. None when
+    /// that is the tier's own model (#527): an id is one model at one place
+    /// (`fragment_core::models::Models::parse`), so the switch would only
+    /// ask the same server again.
+    pub fn fallback(&self, tier: Tier) -> Option<&str> {
+        let routed = self.ids.routes.as_ref().and_then(|r| match tier {
+            Tier::Cheap => Some(&r.cheap.fallback),
+            Tier::Medium => Some(&r.medium.fallback),
+            Tier::High => None,
+        });
+        Some(routed.unwrap_or(&self.ids.fallback).as_str()).filter(|id| *id != self.tier(tier))
     }
 }
 
@@ -556,20 +571,24 @@ pub fn profile_config(agent: &Agent, name: &str, home: Home, main: &MainModel, r
     // (this model's alone: `vision`, whose answers are whole and slower,
     // keeps Hermes' default), tries it once more (`STREAM_RETRIES`), then,
     // its one retry spent (`api_max_retries`, in `agent` above), switches to its
-    // `fallback_providers`: the route's `fallback`, the deployment's
-    // fallback model by its id, through the intercept as the agent (its key
-    // names the agent). The next turn starts on its tier again (Hermes'
+    // `fallback_providers`: its route's fallback, by its id (`Route::fallback`:
+    // the deployment's fallback from a platform naming no routes), through
+    // the intercept as the agent (its key names the agent; this call carries
+    // no header of ours, so its tier is not said: the id names its slot). The next turn starts on its tier again (Hermes'
     // `restore_primary_runtime`). The route itself falls back when a model
     // answers 429 or a 5xx (cell/src/models.rs); this is for a call that
-    // answers nothing. An owner's own model and the high tier have none.
+    // answers nothing. An owner's own model and the high tier have none,
+    // and nor has a tier whose fallback is its own model (`Route::fallback`).
     if let MainModel::Tier(tier @ (Tier::Cheap | Tier::Medium)) = main {
         y.push_str(&format!("providers:\n  custom:\n    models:\n      {}:\n        stale_timeout_seconds: {STALE_TIMEOUT_S}\n", q(route.tier(*tier))));
-        y.push_str(&format!(
-            "fallback_providers:\n  - provider: \"custom\"\n    base_url: {}\n    model: {}\n    api_key: {}\n",
-            q(&format!("{base}/v1")),
-            q(&route.ids.fallback),
-            q(&format!("agent:{}", agent.fragment))
-        ));
+        if let Some(fallback) = route.fallback(*tier) {
+            y.push_str(&format!(
+                "fallback_providers:\n  - provider: \"custom\"\n    base_url: {}\n    model: {}\n    api_key: {}\n",
+                q(&format!("{base}/v1")),
+                q(fallback),
+                q(&format!("agent:{}", agent.fragment))
+            ));
+        }
     }
     // Stored selections, never inferred by Hermes from credential presence.
     // Only placeholders actually held by this agent count: the catalog's
@@ -677,6 +696,35 @@ pub fn chromium_script(full: &Path) -> String {
 /// gateway's scratch a hold while one runs would find its databases under
 /// Hermes' home, locked.
 pub const CHROMIUM_TMP: &str = "/tmp";
+
+/// Where the image's Chromium takes the interception CA. Hermes' pinned
+/// Chromium is Chrome for Testing, which reads no system bundle (the CA
+/// appended there is curl's and Python's): it trusts its own roots and
+/// those its managed policy names (`CACertificates`, read from its
+/// branding's policy directory). Without it, every page whose host is
+/// intercepted on HTTPS (a provider's the swap catches: docs/computers.md,
+/// "Connections and operator keys") is an interstitial in its browser.
+pub const CHROMIUM_CA_POLICY: &str = "/etc/opt/chrome_for_testing/policies/managed/fragment-ca.json";
+
+/// The managed policy that trusts each certificate of `pem`: a PEM's body
+/// is its DER in base64, as the policy names one. `None` for no
+/// certificate.
+pub fn chromium_ca_policy(pem: &str) -> Option<String> {
+    let mut certs = vec![];
+    let mut body: Option<String> = None;
+    for line in pem.lines().map(str::trim) {
+        match line {
+            "-----BEGIN CERTIFICATE-----" => body = Some(String::new()),
+            "-----END CERTIFICATE-----" => certs.extend(body.take().filter(|b| !b.is_empty())),
+            _ => {
+                if let Some(b) = body.as_mut() {
+                    b.push_str(line);
+                }
+            }
+        }
+    }
+    (!certs.is_empty()).then(|| serde_json::json!({ "CACertificates": certs }).to_string())
+}
 
 /// What Hermes would otherwise decide by guessing whether it runs in a
 /// container, pinned in the boot's environment (and so the gateway's, its
@@ -1080,7 +1128,7 @@ mod tests {
     const FALLBACK_ID: &str = "@cf/zai-org/glm-5.3-flash";
 
     fn ids() -> ModelIds {
-        ModelIds { cheap: CHEAP_ID.into(), medium: MEDIUM_ID.into(), fallback: FALLBACK_ID.into(), vision: FALLBACK_ID.into() }
+        ModelIds { cheap: CHEAP_ID.into(), medium: MEDIUM_ID.into(), fallback: FALLBACK_ID.into(), vision: FALLBACK_ID.into(), routes: None }
     }
 
     fn route(base: &str) -> Route {
@@ -1290,6 +1338,26 @@ mod tests {
             assert!(config.contains(&format!("\nagent:\n  system_prompt: {}\n  tool_use_enforcement: false\n  execution_guidance: false\n  api_max_retries: 1\n", q(&told("Juniper", "juniper--k3x9", Home::Chat)))), "one retry, beside its name and its guidance: {config}");
             assert!(!config.contains("\"vision\":\n        stale_timeout_seconds"), "vision keeps Hermes' default: {config}");
         }
+        // each tier's stall falls back within its route (Paul, 2026-10-24), by its route's fallback's id
+        let mut routed = route("http://model.fragment.internal");
+        let tier_route = |fallback: &str| fragment_bridge::api::TierRoute { label: None, private: false, fallback: fallback.into(), vision: FALLBACK_ID.into() };
+        routed.ids.routes = Some(Box::new(fragment_bridge::api::TierRoutes { cheap: tier_route("deepseek-v4-1-flash"), medium: tier_route("@cf/example/standard-fallback") }));
+        for (tier, want) in [(Tier::Cheap, "deepseek-v4-1-flash"), (Tier::Medium, "@cf/example/standard-fallback")] {
+            let config = profile_config(&agent(), "Juniper", Home::Chat, &tier.into(), DEFAULT_REASONING, &routed, &[], creds);
+            let stall = format!("fallback_providers:\n  - provider: \"custom\"\n    base_url: \"http://model.fragment.internal/v1\"\n    model: \"{want}\"\n    api_key: \"agent:juniper--k3x9\"\n");
+            assert!(config.contains(&stall), "the {tier:?} tier's stall falls back to its route's fallback: {config}");
+            assert!(config.contains(vision), "its eyes are still the route's `vision`, its tier said: {config}");
+        }
+        assert_eq!((routed.fallback(Tier::High), route("http://x").fallback(Tier::Medium)), (Some(FALLBACK_ID), Some(FALLBACK_ID)), "none named: the deployment's");
+        // a fallback that is the tier's own model is none (#527): one id, one server, asked again
+        let mut own = route("http://model.fragment.internal");
+        own.ids.routes = Some(Box::new(fragment_bridge::api::TierRoutes { cheap: tier_route(CHEAP_ID), medium: tier_route(FALLBACK_ID) }));
+        let (cheap, medium) = (profile_config(&agent(), "Juniper", Home::Chat, &Tier::Cheap.into(), DEFAULT_REASONING, &own, &[], creds), profile_config(&agent(), "Juniper", Home::Chat, &Tier::Medium.into(), DEFAULT_REASONING, &own, &[], creds));
+        assert!(!cheap.contains("fallback_providers") && cheap.contains("stale_timeout_seconds: 20"), "no switch to its own model, its patience kept: {cheap}");
+        assert!(medium.contains(&format!("model: {}\n    api_key", q(FALLBACK_ID))), "another model stays its switch: {medium}");
+        let mut unrouted = route("http://model.fragment.internal");
+        unrouted.ids.fallback = CHEAP_ID.into();
+        assert_eq!(unrouted.fallback(Tier::Cheap), None, "from a platform naming no routes too");
         assert!(!h.contains("fallback_providers") && !h.contains("stale_timeout_seconds") && !h.contains("api_max_retries"), "the high tier has none: {h}");
         assert!(!m.contains("fallback_providers") && !m.contains("stale_timeout_seconds") && !m.contains("api_max_retries"), "a profile's own, never the overlay's: {m}");
         assert!(p.contains("skills:\n  external_dirs: [\"/data/hermes/managed-skills\", \"/var/lib/fragment-run/platform-skills\"]\n"), "the managed skills and the platform skill's view, after its own: {p}");
@@ -1439,6 +1507,18 @@ mod tests {
             assert_eq!(p.contains("fallback_providers:"), falls_back, "only a text tier falls back to the route's fallback (an owner's own model is theirs): {p}");
         }
         assert!(!default_config("http://model.fragment.internal").contains("approvals"), "the gateway's own profile runs no turns");
+    }
+
+    /// The interception CA's policy names each certificate's DER, as the
+    /// PEM carries it; a PEM with none names none.
+    #[test]
+    fn the_interception_ca_is_the_browsers_by_policy() {
+        let pem = "-----BEGIN CERTIFICATE-----\nMIIBAAAA\nBBBB==\n-----END CERTIFICATE-----\n\n-----BEGIN CERTIFICATE-----\nCCCC\n-----END CERTIFICATE-----\n";
+        let policy: serde_json::Value = serde_json::from_str(&chromium_ca_policy(pem).unwrap()).unwrap();
+        assert_eq!(policy, serde_json::json!({ "CACertificates": ["MIIBAAAABBBB==", "CCCC"] }));
+        assert_eq!(chromium_ca_policy(""), None);
+        assert_eq!(chromium_ca_policy("-----BEGIN CERTIFICATE-----\n-----END CERTIFICATE-----\n"), None);
+        assert!(CHROMIUM_CA_POLICY.starts_with("/etc/opt/chrome_for_testing/policies/managed/"), "Chrome for Testing's branding reads its policies there");
     }
 
     /// The image's Chromium starts Hermes' pinned one with the container's

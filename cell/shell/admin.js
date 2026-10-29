@@ -177,8 +177,9 @@ async function trials() {
     const raise = el("button", "Places…");
     raise.addEventListener("click", guard(async (e) => {
       e.stopPropagation();
-      const n = Number(prompt(`Places for ${t.code} (now ${t.capacity}; only more)`, String(t.capacity + 10)));
-      if (!n) return;
+      const taken = Math.max(1, t.subscribed + t.open);
+      const n = Number(prompt(`Places for ${t.code} (now ${t.capacity}; at least ${taken}, those taken)`, String(t.capacity)));
+      if (!n || n === t.capacity) return;
       await api("PATCH", `/api/admin/trials/${t.id}`, { revision: t.revision, capacity: n });
       await trials();
     }));

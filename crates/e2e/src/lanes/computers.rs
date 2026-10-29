@@ -963,9 +963,12 @@ fn intercept_takes_model_ids(s: &mut Suite, api: &Api, owner_id: &str, fetched: 
     let said = fetched(s, 80, "models")?;
     let (listed, given) = said.strip_prefix("models: ").and_then(|r| r.split_once("; given: ")).unwrap_or_default();
     let given: Value = serde_json::from_str(given).unwrap_or(Value::Null);
+    // each tier's route as the guest reads it (2026-10-24): the node's labels, its fallback's and vision's ids
+    let route = |label: &str| json!({ "label": label, "private": false, "fallback": DEEPSEEK_FLASH, "vision": GLM_FLASH });
+    let routes = json!({ "cheap": route(crate::RECOMMENDED_LABEL), "medium": route(crate::STANDARD_LABEL) });
     s.ok(
-        "the intercept lists the route's models' ids (GET /v1/models, naming no agent, as Hermes' /model asks it), each once, and they are the ids its view names by the route's names (GET /api/computer's models)",
-        listed == format!("{GLM_FLASH}, {MEDIUM_MODEL}, {DEEPSEEK_FLASH}") && given == json!({ "cheap": GLM_FLASH, "medium": MEDIUM_MODEL, "fallback": DEEPSEEK_FLASH, "vision": GLM_FLASH }),
+        "the intercept lists the route's models' ids (GET /v1/models, naming no agent, as Hermes' /model asks it), each once, and they are the ids its view names by the route's names (GET /api/computer's models), each tier's route beside them",
+        listed == format!("{GLM_FLASH}, {MEDIUM_MODEL}, {DEEPSEEK_FLASH}") && given == json!({ "cheap": GLM_FLASH, "medium": MEDIUM_MODEL, "fallback": DEEPSEEK_FLASH, "vision": GLM_FLASH, "routes": routes }),
         &said,
     );
     let (calls, before) = (s.ai.calls().len(), quiet(api, owner_id, "aig:"));

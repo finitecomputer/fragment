@@ -879,37 +879,25 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         seen.join("; "),
     );
 
-    // ---- settings' Sharing: who has access to what of the owner's, by
-    // fragment and by person (GET /api/access); a title opens its sheet
+    // ---- the Apps page: who has access to each of the owner's (GET
+    // /api/access) at a glance; its Share… opens the sheet
     let r = with_session(api, "GET", "/api/access", &owner_session)?;
     s.ok("(the access view is the shell's API, not a page's: a session alone, without the shell's header, is 401)", r.status == 401, &r);
-    let access = format!("#settings-access .access-row[data-fragment={chat:?}]");
-    let drawn = chrome.until(&home, &format!("!!document.querySelector({access:?})"), wait);
+    chrome.eval(&home, "(document.getElementById('apps-link').click(), true)")?;
+    let access = format!("#apps-page .app-row[data-fragment={chat:?}]");
+    let drawn = chrome.until(&home, &format!("location.pathname === '/apps' && !!document.querySelector({access:?})?.querySelector('.app-row-access')?.textContent.includes('1 invited')"), wait);
     let text = chrome.eval(&home, &format!("document.querySelector({access:?})?.innerText ?? ''"))?;
     let text = text.as_str().unwrap_or_default();
     s.ok(
-        "settings' Sharing lists the owner's fragment: its title, who can open it, who is in by email with their role, and the invite waiting",
-        drawn && text.contains(&title) && text.contains("Anyone with the link") && text.contains(&member_name) && text.contains("Viewer") && text.contains(&waiting),
+        "the Apps page lists the owner's app: its title, who can open it, who is in by email, and the invite waiting",
+        drawn && text.contains(&title) && text.contains("Anyone with the link") && text.contains(&member_name) && text.contains("1 invited"),
         text,
     );
-    // At this width Settings has a sticky nav. A nearest-edge scroll can
-    // put the view buttons behind it; center them before the real clicks.
-    chrome.eval(&home, "document.querySelector('#settings-access button[data-by=person]').scrollIntoView({block:'center'})")?;
-    chrome.click(&home, "#settings-access button[data-by=person]")?;
-    let by_person = chrome.until(
-        &home,
-        &format!("[...document.querySelectorAll('#settings-access .access-person')].some(p => p.innerText.includes({member_name:?}) && p.innerText.includes({title:?}))"),
-        wait,
-    );
-    chrome.screenshot(&home, &s.scratch.join("share-settings-by-person.png"))?;
-    s.ok("and by person: what each of them can open of the owner's", by_person, chrome.eval(&home, "document.getElementById('settings-access').innerText")?);
-    chrome.eval(&home, "document.querySelector('#settings-access button[data-by=fragment]').scrollIntoView({block:'center'})")?;
-    chrome.click(&home, "#settings-access button[data-by=fragment]")?;
-    chrome.click(&home, &format!("#settings-access .access-name[data-share={chat:?}]"))?;
+    chrome.click(&home, &format!("{access} button[data-action=share]"))?;
     let opened = chrome.until(&home, SHEET_SIZED, wait) && s.eventually(wait, || inside(&mut chrome).contains("General access"));
     let _ = chrome.eval_in_frame(&home, "/share/", "(document.querySelector('button[data-done]').click(), true)");
-    let closed = opened && chrome.until(&home, "!document.getElementById('sheet').open && !!document.querySelector('#settings-access')", wait);
-    s.ok("a fragment's title there opens its share sheet, and closing it draws the section again", opened && closed, inside(&mut chrome));
+    let closed = opened && chrome.until(&home, &format!("!document.getElementById('sheet').open && !!document.querySelector({access:?})"), wait);
+    s.ok("its Share… opens its share sheet, and Done closes it back to the page", opened && closed, inside(&mut chrome));
     chrome.close(home)?;
 
     // the sheet as the owner sees it, at a popup's size and a phone's, light

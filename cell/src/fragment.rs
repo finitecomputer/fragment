@@ -44,6 +44,7 @@
 //!   POST   /cap/files/read|list|stat      the app facet's `Files` capability (files.rs); never routed from outside
 //!   POST   /deliver/report                the delivery consumer (deliveries.rs); never routed from outside
 //!   GET    /api/card                      viewer: the preview card's JPEG (card.rs)
+//!   POST   /api/card  PUT /api/card       editor: a shot again; an upload as the card (card.rs)
 //!   POST   /meter/acked  /meter/whose     the ledger queue's consumer, and the model route (meter.rs); never routed from outside
 //!   POST   /test/keys  /test/fragment     the router's `/api/test/*`, on fleets with test hooks only (ops.rs)
 
@@ -388,6 +389,11 @@ pub(crate) enum MetaKey {
     /// Test fleets only: how many more card shots open a page nothing
     /// serves, so they fail (`fail-cards`).
     TestFailCards,
+    /// Its icon's SHA-256: one of its blobs, a PNG (icon.rs).
+    Icon,
+    /// When its last icon makings started (ms, a JSON array, oldest
+    /// first): the hour's are counted (`fragment_core::icon::admit`).
+    IconMakings,
 }
 
 impl MetaKey {
@@ -445,6 +451,8 @@ impl MetaKey {
             MetaKey::StorageSampledAt => "storage_sampled_at",
             MetaKey::Cards => "cards",
             MetaKey::TestFailCards => "test_fail_cards",
+            MetaKey::Icon => "icon",
+            MetaKey::IconMakings => "icon_makings",
         }
     }
 
@@ -985,6 +993,20 @@ impl FragmentCell {
                 self.deploy_api(&caller, body).await
             }
             (Method::Get, ["api", "card"]) => self.card_api(&caller, &req).await,
+            (Method::Post, ["api", "card"]) => self.again_card(&caller).await,
+            (Method::Put, ["api", "card"]) => {
+                let bytes = req.bytes().await?;
+                self.upload_card(&caller, bytes).await
+            }
+            (Method::Get, ["api", "icon"]) => self.icon_get(&caller, &req).await,
+            (Method::Put, ["api", "icon"]) => self.icon_put(&caller, &mut req).await,
+            (Method::Delete, ["api", "icon"]) => self.icon_delete(&caller).await,
+            (Method::Post, ["api", "icon", "make"]) => {
+                let bytes = req.bytes().await?;
+                let body: Value =
+                    if bytes.is_empty() { json!({}) } else { serde_json::from_slice(&bytes).map_err(|e| CellError::invalid(format!("body: {e}")))? };
+                self.icon_make(&caller, body).await
+            }
             (Method::Get, ["api", "file"]) => self.file(&caller, &query("path").unwrap_or_default()).await,
             (Method::Get, ["api", "events"]) => self.events(&caller, query("since").and_then(|s| s.parse().ok()).unwrap_or(0), query("tail")),
             (Method::Get, ["api", "channels"]) => self.channels(&caller),
