@@ -457,15 +457,41 @@ export function createAppsPage(page, h) {
     return JSON.stringify(picture ? [picture.hasAttribute("data-unread"), !!picture.querySelector("img")] : null);
   }
 
+  // Leave connected children in place. Removing/reinserting an iframe's
+  // ancestor destroys its document, even when the element itself is reused.
+  function updateChildren(parent, next) {
+    const kept = new Set(next);
+    for (const child of [...parent.childNodes]) if (!kept.has(child)) child.remove();
+    let cursor = parent.firstChild;
+    for (const child of next) {
+      if (child === cursor) cursor = cursor.nextSibling;
+      else parent.insertBefore(child, cursor);
+    }
+  }
+
   // rows put in place by key, an element kept while it shows the same; the
   // retained art's readiness is read now, not only when its row was made
   function place(box, rows) {
     const was = new Map([...box.children].filter((e) => e.dataset.key).map((e) => [e.dataset.key, e]));
     const next = rows.map((r) => {
       const old = was.get(r.dataset.key);
-      return old && old.dataset.shows === r.dataset.shows && artReadiness(old) === r.dataset.art ? old : r;
+      if (!old) return r;
+      if (old.dataset.shows === r.dataset.shows && artReadiness(old) === r.dataset.art) return old;
+      const panel = old.querySelector(":scope > [data-share-editor]");
+      const replacement = r.querySelector(":scope > [data-share-editor]");
+      if (panel && replacement && panel.dataset.shareEditor === replacement.dataset.shareEditor) {
+        // Patch the header/controls around an open sharing view. Its
+        // browsing context, typed invite and focus belong to this visit.
+        updateChildren(old, [...r.childNodes].map((child) => child === replacement ? panel : child));
+        old.dataset.shows = r.dataset.shows;
+        old.dataset.art = r.dataset.art;
+        if (r.hasAttribute("aria-busy")) old.setAttribute("aria-busy", r.getAttribute("aria-busy"));
+        else old.removeAttribute("aria-busy");
+        return old;
+      }
+      return r;
     });
-    box.replaceChildren(...next);
+    updateChildren(box, next);
   }
 
   function render() {

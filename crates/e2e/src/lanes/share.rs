@@ -893,11 +893,11 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         drawn && text.contains(&title) && text.contains("Anyone with the link") && text.contains(&member_name) && text.contains("1 invited"),
         text,
     );
-    chrome.click(&home, &format!("{access} button[data-action=share]"))?;
-    let opened = chrome.until(&home, SHEET_SIZED, wait) && s.eventually(wait, || inside(&mut chrome).contains("General access"));
+    chrome.click(&home, &format!("{access} button[data-action=sharing]"))?;
+    let opened = chrome.until(&home, &format!("!!document.querySelector({access:?})?.querySelector('.app-sharing-frame')?.style.height"), wait) && s.eventually(wait, || inside(&mut chrome).contains("General access"));
     let _ = chrome.eval_in_frame(&home, "/share/", "(document.querySelector('button[data-done]').click(), true)");
-    let closed = opened && chrome.until(&home, &format!("!document.getElementById('sheet').open && !!document.querySelector({access:?})"), wait);
-    s.ok("its Share… opens its share sheet, and Done closes it back to the page", opened && closed, inside(&mut chrome));
+    let closed = opened && chrome.until(&home, &format!("!document.querySelector({access:?})?.querySelector('.app-sharing-frame') && !!document.querySelector({access:?})"), wait);
+    s.ok("Sharing expands inline, and Done closes it back to the page", opened && closed, inside(&mut chrome));
     chrome.close(home)?;
 
     // the sheet as the owner sees it, at a popup's size and a phone's, light

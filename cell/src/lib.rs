@@ -1069,7 +1069,7 @@ pub(crate) async fn route(req: Request, env: &Env, ctx: &Context) -> CellResult<
     }
     if let Some(label) = host.and_then(|h| cfg.address_of_host(h)) {
         let address = ask_registry(env, &crate::registry::calls::AddressOf::Label { label }).await?
-            .ok_or_else(|| CellError::new(ErrorCode::NotFound, "no app has claimed this address"))?;
+            .ok_or_else(|| CellError::new(ErrorCode::NotFound, "no fragment here: no app has claimed this address"))?;
         let rest = path.trim_start_matches('/').to_string();
         return serve(req, env, cfg, &url, &address.fragment, &rest, Some(&address.npub)).await;
     }
