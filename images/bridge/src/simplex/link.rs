@@ -26,10 +26,11 @@
 //!   went back in time (`restored.rollback` in the guest's view) reads the
 //!   core's durable state first: an existing negotiation finishes; otherwise
 //!   one is begun, forced if the core reports `ok`. Replies wait for it
-//!   (`outbox`); its owner is told a message
-//!   may have been lost. A start that did not go back in time (a sleep that
-//!   saved, a restart) needs none: the hold stops the core before the save,
-//!   so the save is exact. A ratchet the core itself finds out of step
+//!   (`outbox`). Possible message loss is logged without sending a chat
+//!   message. A start that did not go back
+//!   in time (a sleep that saved, a restart) needs none: the hold stops the
+//!   core before the save, so the save is exact. A ratchet the core itself
+//!   finds out of step
 //!   (`required`, `allowed`, an undecryptable message) is synchronized the
 //!   same way, unforced.
 //! - **A start** reads back, newest page first (`CATCHUP_ITEMS` a page,
@@ -183,7 +184,7 @@ pub enum Action {
     Ask(Cmd),
     /// The owner's message, for the agent's chat.
     Forward(Inbound),
-    /// Something to tell the owner, in their chat with the agent.
+    /// A diagnostic or link change for the manager to handle.
     Tell(Notice),
     /// The link changed what a lost life would lose (a contact bound or
     /// let go, an invitation made): a save is wanted soon.
@@ -210,7 +211,7 @@ pub struct Inbound {
     pub file: Option<FileRef>,
 }
 
-/// What the owner is told.
+/// What the link reports: diagnostics and changes the manager acts on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Notice {
     /// The link is bound to their SimpleX contact, by its name.
@@ -696,7 +697,7 @@ mod tests {
         link.apply(Input::Said(&page(100..=131)));
         let gone = link.apply(Input::Failed { cmd: &Cmd::Chat { contact: 3, count: CATCHUP_ITEMS, before: Some(100) }, what: "errorStore chatItemNotFound" });
         assert_eq!(forwarded(&gone).first(), Some(&100));
-        assert_eq!(gone.last(), Some(&Action::Tell(Notice::MaybeLost)), "short of what was delivered: the owner is told");
+        assert_eq!(gone.last(), Some(&Action::Tell(Notice::MaybeLost)), "short of what was delivered: logged for diagnostics");
         assert!(link.scan.items.is_empty());
         // bounded: past SCAN_MAX it asks no older page
         link.apply(Input::Started { rollback: false });
@@ -705,7 +706,7 @@ mod tests {
         loop {
             let got = link.apply(Input::Said(&page(top - 31..=top)));
             if !got.iter().any(|a| matches!(a, Action::Ask(Cmd::Chat { .. }))) {
-                assert_eq!(got.last(), Some(&Action::Tell(Notice::MaybeLost)), "past the bound: the owner is told");
+                assert_eq!(got.last(), Some(&Action::Tell(Notice::MaybeLost)), "past the bound: logged for diagnostics");
                 break;
             }
             asked += 1;

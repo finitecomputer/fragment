@@ -1782,8 +1782,9 @@ The steps:
   tools?, tool_choice?, draft?})` → `{text, message, finish_reason, model,
   tier, usage, timing}`: `model` is a tier, `cheap` (the default) or
   `medium` (`high` is refused: Models); `max_tokens` is at most 16384;
-  `reasoning_effort` is GLM's, `low` (the default) or `high` (anything
-  else is `low`, since GLM takes an unknown one as `max`). Tools, drafts
+  `reasoning_effort` is `low` (the default), `high` or `max`, the
+  dearest (anything else is `low`, since GLM takes an unknown one as
+  `max`). Tools, drafts
   and timing are below (Text steps).
 - `job.ai.decide({model?, input, questions, media?})` → `{model,
   answers, usage}`: a typed decision on the Clef family (Decisions,
@@ -2572,7 +2573,7 @@ API answers on the platform's host):
 | path | |
 | --- | --- |
 | `/`, `/<page>` | `site/` in the live commit (`index.html` for directories); Open Graph tags from `fragment.json`'s `meta` |
-| `__file?path=` | a content file from live, else main |
+| `__file?path=` | a content file from live, else main; an agent fragment's from main, else live (its job, its `agent.json`, its memories: its computer's sync writes them to main and never deploys, `images/hermes/boot/src/sync.rs`, so its page shows them as the agent and its owner left them, with no deploy) |
 | `__preview.svg` | the placeholder preview image |
 | `__blob/{sha256}` | one of this fragment's blobs (Blobs, above), `GET` or `HEAD`, viewers and up (on a `public` fragment too: whoever holds only `public` is refused): its bytes as the type its upload declared (ranges answer 206), `Cache-Control: private, max-age=31536000, immutable`, `X-Content-Type-Options: nosniff`, and an `ETag` of the hash; another fragment's hash is 404. `PUT` uploads one from the fragment's own page, as `PUT /api/f/{name}/blobs/{sha256}` does (editors; the body streamed and hashed on the way, bytes that are not what the hash says 400; a declared `content-length`, at most 256 MiB, else 400 or 413) → `{ok, sha, size, stored}` (`stored: false`: it was there); its `content-type` is the type it is served as. As for any write on this host, only the page's own cookies count (`fetched`): another fragment's page uploads as no one (401) |
 | `__members` | viewers and up (the share link too): `{members: [{principal, role, addedBy, addedAt, kind, owner?}]}`, the first added first, as `GET /api/f/{name}/members` answers it (a chat's agents, its lead the first agent added) |
@@ -2585,7 +2586,7 @@ API answers on the platform's host):
 | `__fragment.css` | the platform's stylesheet (below), for a page that links it |
 | `__markdown.js` | the platform's markdown renderer, a module any page may import: `markdown(text, options)` → a DocumentFragment and `inline(parent, text, options)`, markdown to DOM only, never to markup (HTML in the text is text; nesting stops at 32). Its caller decides where links go (`resolve(target, kind)` → `{href, path?}` or null), which pictures show (`image(src, kind)` → `{src, href?}` or null), how a code block looks (`code(text, lang)`), and whether every newline breaks a line (`breaks`); whatever they answer, links stay http(s), mailto or relative and pictures http(s) or relative. The files viewer, the chat and the notes viewer render with it |
 | `__people?id=…&id=…` | anyone who can see the fragment: `{profiles: {<id>: {kind, email?, picture, name?, fragment?, title?}}}` for up to 64 identities (a person's `email` only for a member, and only when the asker is a member too: decision 48; a picture is an absolute platform URL; an agent made from an agent fragment, a computer's, has that `fragment`, its label as its `name`, which `@mentions` it, and its fragment's `title` and `picture`, which it shows by: Identities, "An agent's name and picture"); an id the registry does not hold is left out |
-| `__files` | the files viewer, the platform's page (`__files.js`, `__files.css`): the content files (live and main) as a tree beside a reader (markdown with `[[wikilinks]]`, other text with line numbers, pictures, downloads), reading each through `__file`, following `__watch` where it may; asked for `application/json`, the list it reads, `{type: "files", count, files: [{path, size}]}` (a path on both is live's). Framed, the reader's bar asks the page around it to open a file as a pane (`postMessage({fragment: "open", url, title})`) |
+| `__files` | the files viewer, the platform's page (`__files.js`, `__files.css`): the content files (live and main) as a tree beside a reader (markdown with `[[wikilinks]]`, other text with line numbers, pictures, downloads), reading each through `__file`, following `__watch` where it may; asked for `application/json`, the list it reads, `{type: "files", count, files: [{path, size}]}` (a path on both is the one `__file` reads: live's, an agent's main's). Framed, the reader's bar asks the page around it to open a file as a pane (`postMessage({fragment: "open", url, title})`) |
 | `__live` | WebSocket, anyone who can see the fragment: channel subscriptions from a cursor, presence, change signals, queries (below) |
 | `__watch` | WebSocket, viewers and up (the share link, or a signed upgrade): `{type: "hello", ref, sha}`, then `{type: "changed", ref: "main", sha, paths}` per external move of main |
 | anything else | the app's `fetch`, when it has one |
