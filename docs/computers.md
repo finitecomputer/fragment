@@ -1287,8 +1287,9 @@ expires within 30 days. The container application is the deployment's
   `supports_vision` follows that list, including fallbacks. BYO OpenRouter
   uses Hermes' OpenRouter capability catalog. Unknown/text-only models
   retain `auxiliary.vision` through their route's `vision`, as do older
-  cells and images. A native image call falls back only to a model also
-  declared image-capable; its input is never stripped for a blind fallback.
+  cells and images. The cell falls back with an image-bearing request only
+  to a model also declared image-capable. Hermes' own stall recovery may
+  select a text-only model and describe the images before continuing.
 
   The `fragment-native-images` plugin makes the managed auxiliary backend
   a fallback in Hermes' routing decision, retaining the actual backend.
@@ -1296,6 +1297,8 @@ expires within 30 days. The container application is the deployment's
   across attachments and screenshots per call. It uses Hermes' Pillow
   resize helper to fit each embedded image within 256 KiB of encoded data
   and a 1568 px long edge, leaving room under the route's 6 MiB body cap.
+  Resized images retain the SDK's coordinate-mapping note; transparent
+  PNGs retain alpha so a dark logo on transparency stays distinguishable.
   Older images become text markers in that API copy; canonical history
   and original files remain available for another look. Corrupt or
   unshrinkable images become markers rather than oversized requests.

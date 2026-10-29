@@ -27,20 +27,22 @@ def register(ctx):
 
 def shrink(url):
     if not url.startswith("data:"):
-        return url  # Remote references carry no embedded bytes.
+        return url, None  # Remote references carry no embedded bytes.
     from agent.vision_message_prep import VisionMessagePrepMixin
-    from tools.vision_tools import _resize_image_for_vision
+    from tools.vision_tools import _build_scale_note, _resize_image_for_vision
     path, cleanup = VisionMessagePrepMixin._materialize_data_url_for_vision(url)
     if not path:
-        return None
+        return None, None
     try:
         from PIL import Image
         with Image.open(path) as image:
+            alpha = image.format == "PNG" and (image.mode in {"RGBA", "LA"} or "transparency" in image.info)
             image.verify()
+        scale = {}
         resized = _resize_image_for_vision(
             Path(path), max_base64_bytes=IMAGE_BYTES_MAX,
-            max_dimension=IMAGE_EDGE_MAX, force_jpeg=True)
-        return resized if len(resized) <= IMAGE_BYTES_MAX else None
+            max_dimension=IMAGE_EDGE_MAX, force_jpeg=not alpha, scale_out=scale)
+        return (resized, _build_scale_note(scale, None)) if len(resized) <= IMAGE_BYTES_MAX else (None, None)
     finally:
         if cleanup is not None:
             cleanup.unlink(missing_ok=True)
@@ -73,12 +75,14 @@ def bound_images(request=None, **kwargs):
                 parts[i] = {"type": "text", "text": "[Earlier image omitted from this call; its saved file is still available.]"}
             else:
                 try:
-                    resized = shrink(url) if isinstance(url, str) else None
+                    resized, note = shrink(url) if isinstance(url, str) else (None, None)
                 except Exception:
                     # Invalid/corrupt images and decoder limits become a
                     # visible marker, never an unbounded fail-open request.
-                    resized = None
+                    resized, note = None, None
                 parts[i] = ({**part, "image_url": {**(image if isinstance(image, dict) else {}), "url": resized}}
                             if resized else {"type": "text", "text": "[Image could not fit this call; its saved file is still available.]"})
+                if resized and note:
+                    parts.insert(i, {"type": "text", "text": note + " Apply this scaling before any earlier scale/crop mapping supplied by the tool."})
             changed = True
     return {"request": request, "source": "fragment-native-images"} if changed else None

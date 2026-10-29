@@ -753,6 +753,8 @@ assert all(len(p['image_url']['url']) <= 256*1024 for p in images)
 for part in images:
     resized = Image.open(io.BytesIO(base64.b64decode(part['image_url']['url'].split(',',1)[1])))
     assert max(resized.size) <= 1568
+    factor = 2400 / resized.width
+    assert any(f'multiply any coordinates you report by {factor:.2f}' in p.get('text','') for p in parts), 'resized pixels retain their coordinate mapping'
 assert all(m['content'][0]['type'] == 'text' for m in result['messages'][:3]), 'oldest images retire first'
 assert apply_llm_request_middleware(request).payload == result, 'retry starts from the same history'
 class NoCopy:
@@ -763,6 +765,16 @@ shallow = apply_llm_request_middleware(request).payload
 assert request['messages'] == before['messages'], 'shallow-copy fallback also preserves canonical history'
 assert sum(p.get('type') == 'image_url' for m in shallow['messages'] for p in m['content']) == 4
 request.pop('test_handle')
+transparent = Image.new('RGBA', (2400,1800), (0,0,0,0))
+transparent.paste((0,0,0,255), (100,100,1400,900))
+buf = io.BytesIO()
+transparent.save(buf, format='PNG')
+alpha_url = 'data:image/png;base64,' + base64.b64encode(buf.getvalue()).decode()
+alpha_request = {'messages':[{'role':'user','content':[{'type':'image_url','image_url':{'url':alpha_url}}]}]}
+alpha_parts = apply_llm_request_middleware(alpha_request).payload['messages'][0]['content']
+alpha_image = next(p for p in alpha_parts if p.get('type') == 'image_url')['image_url']['url']
+alpha_pixels = Image.open(io.BytesIO(base64.b64decode(alpha_image.split(',',1)[1])))
+assert alpha_pixels.mode == 'RGBA' and alpha_pixels.getchannel('A').getextrema() == (0,255), 'transparent PNG pixels remain distinguishable'
 bad = {'messages': [{'role':'user','content':[{'type':'image_url','image_url':{'url':'data:image/png;base64,YmFk'}}]}]}
 assert apply_llm_request_middleware(bad).payload['messages'][0]['content'][0]['type'] == 'text'
 print(json.dumps({'images':len(images),'largest':max(len(p['image_url']['url']) for p in images),'original':len(original)}))
