@@ -175,6 +175,14 @@ tier's fallback: a call of 30,000 tokens in (25,000 of them cached) and
 Workers AI's GLM-5.3 Flash, which the fallback answers only when they
 fail.
 
+**Deep's price** (decision 65). A tier's Deep is a slot like any: priced
+as its model's row (Tinfoil's list for Private's, its ceiling for
+Standard's on OpenRouter), its reasoning tokens counted in its output, a
+call at most its slot's `max_tokens` (32,768 for Deep: $0.0475 of
+Tinfoil's output at list). A delegate's calls carry its agent's name, so
+they bill the agent's owner, as its turns do, under no fragment's cap; a
+person's own Deep (their OpenRouter) is their account's.
+
 **Finite Private's price** (decision 61; a decision for Paul): its list
 price is Workers AI's GLM-5.3 Flash's, and its rows take the credits fee
 and the margin as every token row does, though no gateway is between: a

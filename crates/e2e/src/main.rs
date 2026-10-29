@@ -109,16 +109,28 @@ pub const TINFOIL_KEY: &str = "tk_e2e0c0ffee";
 /// names, `tinfoil_price`, reading images) and vision (Finite Private),
 /// each private. Standard, the medium tier: OpenRouter's GLM-5.3 Flash
 /// with its routing, its route's fallback and vision a slot of its own,
-/// `cloudflare` (Workers AI's GLM-5.3 Flash, reading images).
+/// `cloudflare` (Workers AI's GLM-5.3 Flash, reading images). Each tier
+/// its Fast at `high` and its Deep (Paul, 2026-10-27) at `max` and
+/// `DEEP_MAX_TOKENS` a call: Private's Tinfoil's DeepSeek V4.1 Flash
+/// (`private_deep`), falling back to Private's Fast; Standard's
+/// OpenRouter's (`standard_deep`, at its own ceiling,
+/// `openrouter_deep_routing`), falling back to Cloudflare.
 pub fn private_tier_models(fake: &str) -> Value {
     let mut private = json!({ "provider": "openai", "base_url": format!("{fake}/v1"), "model": fragment_core::models::FINITE_PRIVATE_FLASH, "private": true });
     let tinfoil = json!({ "provider": "openai", "base_url": format!("{fake}/v1"), "model": fragment_fakes::workers_ai::TINFOIL_FLASH, "price": tinfoil_price(), "images": true, "private": true });
-    let standard = json!({ "provider": "openai", "base_url": format!("{fake}/v1"), "model": fragment_core::models::OPENROUTER_FLASH, "body": openrouter_routing(), "label": "Standard", "fallback": "cloudflare", "vision": "cloudflare" });
+    let standard = json!({ "provider": "openai", "base_url": format!("{fake}/v1"), "model": fragment_core::models::OPENROUTER_FLASH, "body": openrouter_routing(), "label": "Standard", "fallback": "cloudflare", "vision": "cloudflare", "reasoning": "high", "deep": "standard_deep" });
+    let standard_deep = json!({ "provider": "openai", "base_url": format!("{fake}/v1"), "model": fragment_fakes::workers_ai::OPENROUTER_DEEPSEEK, "body": openrouter_deep_routing(), "reasoning": "max", "max_tokens": DEEP_MAX_TOKENS, "fallback": "cloudflare" });
     let cloudflare = json!({ "provider": "workers_ai", "model": fragment_core::models::GLM_FLASH, "images": true });
     let vision = private.clone();
-    private["label"] = json!("Private (recommended)");
-    json!({ "cheap": private, "medium": standard, "fallback": tinfoil, "vision": vision, "cloudflare": cloudflare })
+    let mut private_deep = tinfoil.clone();
+    private_deep.as_object_mut().unwrap().extend([("reasoning".into(), json!("max")), ("max_tokens".into(), json!(DEEP_MAX_TOKENS)), ("fallback".into(), json!("cheap"))]);
+    private.as_object_mut().unwrap().extend([("label".into(), json!("Private (recommended)")), ("reasoning".into(), json!("high")), ("deep".into(), json!("private_deep")), ("fallback".into(), json!("private_deep"))]);
+    json!({ "cheap": private, "medium": standard, "fallback": tinfoil, "vision": vision, "cloudflare": cloudflare, "private_deep": private_deep, "standard_deep": standard_deep })
 }
+
+/// The most one call of a Deep slot writes on a node shaped as the private
+/// tier (Paul, 2026-10-27).
+pub const DEEP_MAX_TOKENS: u32 = 32_768;
 
 /// The `price` of Tinfoil's slot on a node shaped as the private tier: its
 /// list on 2026-10-22, dollars a million tokens.
@@ -142,6 +154,12 @@ pub fn finite_private_models(fake: &str) -> Value {
 /// deploy/example.jsonc's provider routing.
 pub fn openrouter_routing() -> Value {
     json!({ "provider": { "zdr": true, "sort": "throughput", "require_parameters": true, "quantizations": ["fp8", "bf16"], "max_price": { "prompt": 0.15, "completion": 0.5 } } })
+}
+
+/// The `body` of Standard's Deep on a node shaped as the private tier:
+/// OpenRouter's routing at a ceiling of its own (a test value).
+pub fn openrouter_deep_routing() -> Value {
+    json!({ "provider": { "zdr": true, "sort": "throughput", "require_parameters": true, "quantizations": ["fp8", "bf16"], "max_price": { "prompt": 0.3, "completion": 1.2 } } })
 }
 const ORG: &str = "fragment-e2e";
 /// The poll backstop runs this often here (5 minutes in production).
@@ -672,6 +690,8 @@ impl Suite {
                         key("medium", "fragment-openrouter-key", FINITE_PRIVATE_KEY),
                         key("fallback", "fragment-tinfoil-api-key", TINFOIL_KEY),
                         key("vision", "fragment-finite-private-key", FINITE_PRIVATE_KEY),
+                        key("private_deep", "fragment-tinfoil-api-key", TINFOIL_KEY),
+                        key("standard_deep", "fragment-openrouter-key", FINITE_PRIVATE_KEY),
                     ],
                     _ => vec![],
                 }

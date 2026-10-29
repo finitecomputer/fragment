@@ -962,7 +962,8 @@ expires within 30 days. The container application is the deployment's
     (docs/api.md, Models).
   - A call naming an id runs on the slot of the caller's tier when that
     slot runs it (`x-fragment-tier: cheap` or `medium`, optional: the
-    intercept sends it on), else on the first slot that does, in that
+    intercept sends it on), else on its tier's Deep when that runs it
+    ("Fast and Deep", below), else on the first slot that does, in that
     order: a tier's before `fallback` and `vision`. The slot is the call's
     as if it named the slot: its key, its `body`, its fallback (the
     slot's own: "A slot's own fallback", below), its price. An id no
@@ -1179,6 +1180,26 @@ expires within 30 days. The container application is the deployment's
   Hermes image reads to name its stall's fallback; an image that does not
   names the route's four's `fallback`, on which a Standard agent's stall
   is stricter than its route, never less private.
+
+  **Fast and Deep** (Paul, 2026-10-27; cloudflare-v1.md, decision 65).
+  Each tier runs two modes: Fast, its own slot, for its agents' turns,
+  and Deep, the slot its `"deep"` names, for their delegates. A slot may
+  say the effort a mode on it thinks at (`"reasoning"`: `low`, `high` or
+  `max`, on a tier or a tier's Deep alone), and the most one call of it
+  writes (`"max_tokens"`, 1 to 65,536; 16,384 unnamed), and each mode
+  falls back as its slot does. A delegate names its Deep by its model's
+  id, its tier said, and runs its tier's Deep (Private's Tinfoil, never
+  Standard's OpenRouter); the private guard walks a private tier's Deep,
+  its fallback, and the slot its stall reaches. The computer's view
+  carries each tier's modes (`models.routes`: `reasoning`, its Fast's,
+  and `deep`: `{id, reasoning?, fallback?}`, both absent when the
+  deployment names none), which an image copies into each profile; one
+  that reads neither runs its delegates on its Fast, as before. Finite's:
+
+  | | Fast | Deep |
+  |---|---|---|
+  | Private | Finite Private's GLM-5.3 Flash at `high`, falling back to Deep | Tinfoil's DeepSeek V4.1 Flash at `max`, 32,768 tokens a call, falling back to Fast |
+  | Standard | OpenRouter's GLM-5.3 Flash at `high`, falling back to Cloudflare's | OpenRouter's DeepSeek V4.1 Flash at `max`, 32,768 tokens a call, falling back to Cloudflare's GLM-5.3 Flash |
 
   **A slot's `price`.** A slot on an OpenAI-compatible API that is not
   OpenRouter may name its model's list price there, dollars a million
