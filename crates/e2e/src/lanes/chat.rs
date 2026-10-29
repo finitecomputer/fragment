@@ -124,6 +124,24 @@ fn still_loading_in_frame(s: &mut Suite, api: &Api, chrome: &mut Browser, chat: 
     s.ok("the chat in the shell's frame loads, and never says it is still loading (its script drew the page, the line gone with what was there)", listed && framed, "");
 
     let frame = chrome.frame(chat)?;
+    // A page navigation during release skew must never strand this pane
+    // on raw JSON. Refuse the frame session lookup, then let it recover.
+    if !api.signs_in_by_levers() {
+        let skew = |times: u64| -> Result<()> {
+            let r = api.unsigned("POST", "/api/test/registry", Some(&json!({ "skewFor": { "path": "/session", "times": times } })))?;
+            anyhow::ensure!(r.status == 200, "setting release skew: {r}");
+            Ok(())
+        };
+        skew(100)?;
+        chrome.eval(&frame, "(location.reload(), true)")?;
+        let updating = chrome.until(&frame, "document.body?.innerText.trim() === 'Updating — back in a moment'", wait);
+        let styled = chrome.until(&frame, "document.body?.innerText.trim() === 'Updating — back in a moment' && getComputedStyle(document.body).display === 'flex'", wait);
+        skew(0)?;
+        let recovered = chrome.until(&frame, &ready, wait);
+        let stays = chrome.eval(&shell, "window.__shellStays === true")?;
+        s.ok("a framed chat shows Updating during release skew, styled under CSP, then reloads itself and recovers without reloading the shell", updating && styled && recovered && stays == true,
+            json!({ "updating": updating, "styled": styled, "recovered": recovered, "shellStayed": stays }));
+    }
     chrome.block(&frame, &["*/chat.js"])?;
     chrome.eval(&frame, "(location.reload(), true)")?;
     // (styled: its stylesheet in; before it a line is unstyled, which a
