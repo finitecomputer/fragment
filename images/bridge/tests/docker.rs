@@ -296,7 +296,9 @@ async fn the_hermes_image() {
     let chat = fake.chat("talk", &["juniper"]);
 
     let t = Instant::now();
-    let c = Container::run(&tag, fake.addr.port(), model.addr.port(), &[("RESTORE_PENDING", "1"), ("HERMES_BOOT_SYNC_MS", "2000"), ("HERMES_BOOT_SKILLS_MS", "2000")]);
+    // Longer than the dirty-check cadence: the direct write below must still
+    // reach the repo through an ordinary full sync.
+    let c = Container::run(&tag, fake.addr.port(), model.addr.port(), &[("RESTORE_PENDING", "1"), ("HERMES_BOOT_SYNC_MS", "6000"), ("HERMES_BOOT_SKILLS_MS", "2000")]);
     tokio::time::sleep(Duration::from_secs(2)).await;
     assert!(fake.with(|w| w.calls.is_empty()), "the gate holds: {:?}", fake.with(|w| w.calls.clone()));
     let gate = Instant::now();

@@ -1286,6 +1286,7 @@ async fn boot_main() {
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut last_sync = Instant::now();
+    let mut last_dirty = Instant::now();
     let mut last_agents = Instant::now();
     let mut last_models = Instant::now();
     // HERMES_BOOT_MODEL_MS: a test's cadence for reading agent.json again, at least 1 s.
@@ -1422,10 +1423,17 @@ async fn boot_main() {
                     write_identity(a, &dir, ids, &title);
                 }
             }
+            // Full rounds and dirty checks have independent clocks: looking
+            // for a native change must not postpone the ordinary full sync.
             let sync_due = last_sync.elapsed() > Duration::from_millis(sync_every);
-            let dirty_due = last_sync.elapsed() >= Duration::from_millis(DIRTY_SYNC_EVERY_MS);
+            let dirty_due = last_dirty.elapsed() >= Duration::from_millis(DIRTY_SYNC_EVERY_MS);
             if sync_due || dirty_due {
-                last_sync = Instant::now();
+                if sync_due {
+                    last_sync = Instant::now();
+                }
+                if dirty_due {
+                    last_dirty = Instant::now();
+                }
                 for a in &agents {
                     let dir = hermes::profile_dir(&home, &a.fragment);
                     let marked = match sync::dirty(&dir) {
