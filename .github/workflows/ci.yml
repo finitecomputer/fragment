@@ -27,8 +27,8 @@
 #
 # A green push deploys (`deploy`, below): master's to the preview,
 # production's to production. A push of a tree a green run already
-# tested (master's, for production; for master, its pull request's, when
-# master had not moved since) skips the tests and deploys at once
+# tested (master's, for production; for master, its merge queue's or its
+# pull request's, when master had not moved since) skips the shards
 # (`proven`, below).
 name: ci
 
@@ -36,6 +36,8 @@ on:
   push:
     branches: [master, production]
   pull_request:
+  merge_group:
+    types: [checks_requested]
   workflow_dispatch:
 
 # a pull request's newer run cancels its older one; a push's run is never
@@ -68,6 +70,11 @@ jobs:
   #   proves nothing here, whatever tree it names, and this one's workflow
   #   is the one this merge brings to master. A squash or a rebase merge
   #   has no such parent.
+  # - on master only, a merge_group run from this repository's master
+  #   queue (`gh-readonly-queue/master/…`) that recorded this tree, whose
+  #   head really has this tree too. The queue tests the combined changes
+  #   against the base they will land on; moving master rebuilds the
+  #   group. Neither another base's queue nor a fork can prove it.
   #
   # Proven, the e2e's shards skip and `deploy` runs once `check` is green;
   # otherwise (a hotfix pushed straight to production, master moved since
@@ -121,6 +128,9 @@ jobs:
               why="master's run of $head proved this tree"
             elif [ "$GITHUB_REF" = refs/heads/master ] && [ -n "$merged" ] && jq -e --arg h "$merged" '.event == "pull_request" and .head_sha == $h' <<< "$run" > /dev/null; then
               why="the run of the pull request this merges, at its head $head, proved this tree"
+            elif [ "$GITHUB_REF" = refs/heads/master ] && jq -e --arg r "$GITHUB_REPOSITORY" '.event == "merge_group" and .head_repository.full_name == $r and (.head_branch | startswith("gh-readonly-queue/master/"))' <<< "$run" > /dev/null; then
+              [ "$(gh api "$repo/git/commits/$head" --jq .tree.sha)" = "$tree" ] || continue
+              why="master's merge queue run of $head proved this tree"
             else
               continue
             fi
@@ -160,10 +170,11 @@ jobs:
           key: node-${{ runner.os }}-${{ hashFiles('crates/devstack/src/node_release.rs') }}
       # the schema lock master holds, which this tree's keeps step for
       # step (xtask/src/schema_lock.rs): a pull request's base, or the
-      # master a push moved on from
+      # master a push moved on from, or a merge group's exact base (not
+      # master, which can move while the group is being tested)
       - run: git fetch --no-tags --depth=1 origin "$BASE" && echo "FRAGMENT_SCHEMA_BASE=FETCH_HEAD" >> "$GITHUB_ENV"
         env:
-          BASE: ${{ github.event_name == 'push' && github.event.before || github.base_ref || 'master' }}
+          BASE: ${{ github.event_name == 'push' && github.event.before || github.event.merge_group.base_sha || github.base_ref || 'master' }}
       - run: cargo xtask check
 
   e2e-shard:
@@ -340,7 +351,8 @@ jobs:
     steps:
       - run: test "${{ needs.e2e-shard.result }}" = success || { echo "a shard's job failed (${{ needs.e2e-shard.result }}); its log says where"; exit 1; }
       # The tree every shard tested, for `proven`: GITHUB_SHA's (a pull
-      # request's merge commit, a push's head), which each checked out,
+      # request's merge commit, a merge group's head, a push's head),
+      # which each checked out,
       # recorded once they are all green as an artifact named by it (the
       # commit and the tree in it). `proven` counts it only for a run that
       # succeeded, `check` and every shard of its latest attempt included.

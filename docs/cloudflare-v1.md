@@ -85,7 +85,11 @@ speaking Cloudflare's APIs) returns once this product works.
    tree (master unmoved since): it deploys the preview once `check`, a
    couple of minutes, is green (Paul, 2026-10-23; `proven` matches trees,
    which every run records; `check` runs on every push, as it holds the
-   schema lock to what the push moved from). Each
+   schema lock to what the push moved from). The merge queue also runs
+   `check` and all four shards, against its exact base, and records its
+   combined tree: a successful run from this repo's master queue proves
+   a master push of that tree (Paul, 2026-10-29). Production still needs
+   a successful master push, its preview deploy included. Each
    deploys from a GitHub environment (`preview`, `production`) that only
    its branch may use, holding its Cloudflare token and a token that
    reads its config: a file in the private repo

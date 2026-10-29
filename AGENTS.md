@@ -388,11 +388,18 @@ wrangler and the Sandbox SDK the cell's shim bundles, pinned in
   `tested-tree-<tree>`). On `production`, a run of ci.yml that succeeded
   on a push to master of that SHA, or of a commit with that tree, proves
   it, its preview deploy included (Paul, 2026-10-20); on master, such a
-  run, or the green run of the pull request a merge commit merges (its
+  run, a green `merge_group` run from this repo's master queue whose
+  head and `tested-tree-<tree>` record both match the push's tree, or the
+  green run of the pull request a merge commit merges (its
   head the commit's second parent) that recorded the merge commit's
   tree: a pull request's run tests its merge into master as master
   stood, so this holds when master has not moved since (Paul,
-  2026-10-23). Its caches restore on
+  2026-10-23). The `merge_group` event runs `check` and all four shards
+  on the queue's combined tree; `check` holds its schema lock to the
+  group's exact base SHA. The queue is enabled by Paul's master ruleset,
+  not by this workflow. Queue runs never deploy; production still needs
+  a successful master push (its preview deploy included) for proof.
+  Its caches restore on
   every run and save only from master's pushes (each one's contents are
   named in the workflow): `check`'s Rust dependencies and the e2e's
   tools through `Swatinem/rust-cache`; the e2e's builds, our own crates'
@@ -410,7 +417,9 @@ wrangler and the Sandbox SDK the cell's shim bundles, pinned in
   in parallel; about 13 minutes), on pull requests and master's
   pushes that touch images/hermes, images/bridge, images/stub, the
   images' manifest or lock, or the workflow (its `changes` job, through
-  `dorny/paths-filter`), and on a run by hand. It keeps no layer cache: the workflow
+  `dorny/paths-filter`), and on a run by hand. It also runs on merge
+  groups: `check` always, Docker when the group's diff from its exact
+  base touches those paths. It keeps no layer cache: the workflow
   says why. `release.yml` builds the CLI for macOS and Linux.
   `image.yml`, the Image workflow, runs only by hand (Actions, image, Run
   workflow: `environment` preview or production, `from`, `tag`) in that
