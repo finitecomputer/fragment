@@ -706,6 +706,82 @@ async fn hermes_running() -> (Fake, Model, String, Container) {
     (fake, model, chat, c)
 }
 
+/// Decision 65's image gate: a real Hermes background delegate finishes
+/// after its parent's reply, its result comes back through the bridge
+/// once, and the computer remains held while the child is still working.
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn a_background_delegate_delivers_and_keeps_the_computer_awake() {
+    background_delegate_gate(false).await;
+}
+
+/// The child is still working while its next model call waits through a
+/// deployment longer than Fast's two stale windows (#674 + #654).
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn a_background_delegate_waits_out_deploying_and_keeps_the_computer_awake() {
+    background_delegate_gate(true).await;
+}
+
+async fn background_delegate_gate(deploying: bool) {
+    let (fake, model, chat, c) = hermes_running().await;
+    let parent = asked(&fake, &chat, &c, "delegate the gate work", |w, t| w.bodies(&chat, "work", "turn.end").iter().any(|e| e["turn"] == t)).await;
+    let started = "/data/work/juniper--k3x9/delegate-started";
+    let finished = "/data/work/juniper--k3x9/delegate-finished";
+    let mut active = false;
+    let mut held = true;
+    let mut delivered = vec![];
+    let mut deployment = None;
+    let t0 = Instant::now();
+    while t0.elapsed() < Duration::from_secs(120) {
+        if c.exec(&["test", "-f", started]) && !c.exec(&["test", "-f", finished]) {
+            active = true;
+            held &= fake.with(|w| w.keepalive_open > 0);
+            if deploying && deployment.is_none() {
+                let calls = model.calls.lock().unwrap().len();
+                model.deploying_for(Duration::from_secs(90));
+                deployment = Some((Instant::now(), calls));
+            }
+        }
+        // The terminal tool finishes first; the child then waits for its
+        // model's signing preflight. Leave a margin before admission so
+        // its eventual stop hook can legitimately release the hold.
+        if deployment.as_ref().is_some_and(|(at, _)| at.elapsed() < Duration::from_secs(85)) {
+            held &= fake.with(|w| w.keepalive_open > 0);
+        }
+        delivered = fake.with(|w| w.bodies(&chat, "chat", "reply").into_iter().filter(|r| r["text"].as_str().is_some_and(|s| s.contains("checked the delegated result: fragment-delegate-complete"))).collect::<Vec<_>>());
+        if !delivered.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    eprintln!("delegation gate: active after parent ended={active}, held={held}, replies={delivered:?}; {}", told(&fake, &chat, &c));
+    assert!(active, "the delegate runs after the parent's turn ends");
+    assert_eq!(delivered.len(), 1, "the background result arrives in the chat once");
+    assert_ne!(delivered[0]["turn"], parent, "its completion has a turn of its own");
+    assert!(held, "the computer stays awake throughout the background delegate");
+    if deploying {
+        let (at, before) = deployment.expect("the child ran through the deployment window");
+        assert!(at.elapsed() >= Duration::from_secs(90));
+        assert!(model.refused.load(std::sync::atomic::Ordering::SeqCst) > 2);
+        let calls = model.calls.lock().unwrap().clone();
+        let dispatched: Vec<_> = calls[before..].iter().filter(|c| {
+            c.body["messages"].as_array().and_then(|m| m.iter().rev().find(|m| m["role"] == "user")).is_some_and(|m| {
+                let text = content_text(m);
+                text.contains("run: touch /data/work/juniper--k3x9/delegate-started") && !text.contains("[ASYNC DELEGATION")
+            })
+        }).collect();
+        assert_eq!(dispatched.len(), 1, "one admitted child model call: {dispatched:?}");
+        assert_eq!(dispatched[0].model, CHEAP_ID, "the deployment caused no fallback");
+        assert!(!c.logs().contains("Stream stale for"), "marked preflight kept its own patience budget");
+        assert!(!fake.with(|w| w.records(&chat, "chat").iter().any(|r| r.to_string().contains("Provider temporarily unavailable"))));
+    }
+    within(&fake, &chat, &c, 10_000, "the child's hold to end", |w| w.keepalive_open == 0).await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let replies = fake.with(|w| w.bodies(&chat, "chat", "reply").into_iter().filter(|r| r["text"].as_str().is_some_and(|s| s.contains("checked the delegated result: fragment-delegate-complete"))).count());
+    assert_eq!(replies, 1, "no duplicate arrives after the completion settles");
+}
+
 /// A deployment is platform preflight, not provider silence: real Hermes
 /// waits beyond Fast's two stale windows without falling back or posting a
 /// provider error. The fake refuses before counting a provider dispatch.

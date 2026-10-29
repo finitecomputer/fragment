@@ -276,6 +276,9 @@ pub enum Command {
 /// dropped.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
+    /// The runtime has work outside a chat turn (delegated children).
+    /// Live only: a new bridge life starts with no such work.
+    Working(bool),
     /// The runtime can take turns now (true), or cannot (false). The bridge
     /// claims a turn only while it can, so a turn claimed is one the runtime
     /// is there to run (Relay: Hermes has dialed and said hello). A runtime

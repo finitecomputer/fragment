@@ -398,6 +398,9 @@ pub struct Engine {
     life: String,
     /// The runtime can take turns now.
     connected: bool,
+    /// Work the runtime still owns outside its parent chat turns. Never
+    /// saved: a restart runs none of that process's children.
+    working: bool,
     /// Turns whose claim is posted and not answered yet: queued in the
     /// state, so a crash leaves them for the next life to claim.
     claiming: BTreeSet<String>,
@@ -485,6 +488,7 @@ impl Engine {
             settings,
             life: life.to_string(),
             connected: false,
+            working: false,
             claiming: BTreeSet::new(),
             agents: Vec::new(),
             views: HashMap::new(),
@@ -594,7 +598,7 @@ impl Engine {
     fn finish(&mut self) -> Step {
         // a turn waiting on its card holds the computer too, until the card
         // is answered or expires: an idle sleep would cut it
-        let busy = self.state.turns.values().any(|t| matches!(t.phase, Phase::Queued | Phase::Running | Phase::Waiting));
+        let busy = self.working || self.state.turns.values().any(|t| matches!(t.phase, Phase::Queued | Phase::Running | Phase::Waiting));
         if busy != self.keepalive {
             self.keepalive = busy;
             self.out.push(Effect::Keepalive(busy));
@@ -1307,7 +1311,7 @@ impl Engine {
             match e {
                 Event::Draft { turn, .. } | Event::Reply { turn, .. } | Event::Attachment { turn, .. } | Event::Retract { turn, .. } => Some(turn.clone()),
                 Event::Step { turn, .. } | Event::Prompt { turn, .. } | Event::Asked { turn } | Event::End { turn, .. } => Some(turn.clone()),
-                Event::Connected(_) | Event::Say { .. } | Event::Notice { .. } => None,
+                Event::Connected(_) | Event::Working(_) | Event::Say { .. } | Event::Notice { .. } => None,
             }
         };
         if let Some(id) = turn_of(&event) {
@@ -1320,6 +1324,7 @@ impl Engine {
             }
         }
         match event {
+            Event::Working(working) => self.working = working,
             Event::Connected(connected) => {
                 if connected != self.connected {
                     crate::ev!("runtime.connected", { "connected": connected });

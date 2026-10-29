@@ -29,6 +29,21 @@ fn engine(agents: &[Agent]) -> Engine {
     e
 }
 
+/// Live runtime work holds even with no chat turn. Repeated snapshots do
+/// nothing, and a restore inherits none of the previous process's work.
+#[test]
+fn runtime_work_holds_until_it_ends_and_is_never_restored() {
+    let mut e = engine(&[agent("juniper")]);
+    assert_eq!(keepalive(&e.step(Input::Runtime(Event::Working(true)), T0 + 1)), Some(true));
+    assert_eq!(keepalive(&e.step(Input::Runtime(Event::Working(true)), T0 + 2)), None);
+    assert_eq!(keepalive(&e.step(Input::Runtime(Event::Connected(false)), T0 + 3)), None, "the gateway's chat dial can reconnect while its children run");
+    let mut restored = Engine::new(e.state().clone(), Settings { prompt_ttl_ms: 60_000, turn_idle_ms: 600_000 }, LIFE).unwrap();
+    restored.recover(T0 + 4);
+    assert!(!restored.keepalive());
+    assert_eq!(keepalive(&e.step(Input::Runtime(Event::Working(false)), T0 + 5)), Some(false));
+    assert_eq!(keepalive(&e.step(Input::Runtime(Event::Working(false)), T0 + 6)), None);
+}
+
 /// `s`, with each claim it makes answered as this life's and each record it
 /// owes answered, and what each answer does (the turn handed to the
 /// runtime, an ended turn let go) added to it.

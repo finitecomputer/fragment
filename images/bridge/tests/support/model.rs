@@ -274,6 +274,21 @@ pub fn answer(body: &Value) -> (String, Option<Value>) {
     let tool_result = messages.iter().rev().take_while(|m| m["role"] != "user").find(|m| m["role"] == "tool").map(|m| text_of(&m["content"]));
     let offered = |name: &str| body["tools"].as_array().is_some_and(|t| t.iter().any(|t| t["function"]["name"] == name));
     let has_terminal = offered("terminal");
+    if last_user.contains("[ASYNC DELEGATION") && last_user.contains("fragment-delegate-complete") {
+        return ("scripted: checked the delegated result: fragment-delegate-complete".into(), None);
+    }
+    // The delegation gate calls Hermes' actual background tool. Its child
+    // holds a terminal tool long enough for the parent's turn to finish.
+    if last_user.contains("delegate the gate work") {
+        if tool_result.is_some() {
+            return ("scripted: delegation dispatched".into(), None);
+        }
+        if offered("delegate_task") {
+            let call = json!({ "index": 0, "id": "call_delegate_gate", "type": "function", "function": { "name": "delegate_task", "arguments": json!({ "tasks": [{ "goal": "run: touch /data/work/juniper--k3x9/delegate-started; sleep 12; touch /data/work/juniper--k3x9/delegate-finished; echo fragment-delegate-complete" }], "max_iterations": 5 }).to_string() } });
+            return (String::new(), Some(call));
+        }
+        return ("scripted: delegate_task is not offered".into(), None);
+    }
     // `use the terminal twice`: a quick command, then, at once, one that
     // sleeps 2 s (the second's progress line comes within Hermes' 1.5 s edit
     // interval of the first's, as a real model's quick second call does),
