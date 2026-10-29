@@ -6361,9 +6361,11 @@ fn apps_sharing_refresh_ui(s: &mut Suite, b: &mut Browser, page: &Page, app: &st
     let row = format!("document.querySelector({})", js(&format!("#apps-page .app-row[data-fragment=\"{app}\"]")));
     b.eval(page, &format!("({row}.querySelector('[data-action=sharing]').click(), true)"))?;
     anyhow::ensure!(s.eventually(wait, || b.eval_in_frame(page, "/share/", "!!document.querySelector('input[name=email]')").ok() == Some(Value::Bool(true))), "inline sharing is ready");
-    b.eval_in_frame(page, "/share/", "(() => { window.__sharingVisit = 'kept'; const input = document.querySelector('input[name=email]'); input.value = 'friend@example.com'; input.focus(); return true; })()")?;
-    let intact = |b: &mut Browser| b.eval_in_frame(page, "/share/", "window.__sharingVisit === 'kept' && document.querySelector('input[name=email]')?.value === 'friend@example.com' && document.activeElement === document.querySelector('input[name=email]')").ok() == Some(Value::Bool(true));
-    let created = b.eval(page, "fetch('/api/fragments', { method: 'POST', headers: { 'x-fragment-shell': '1', 'content-type': 'application/json' }, body: JSON.stringify({ label: 'sharing-refresh-' + Date.now().toString(36), template: 'blank' }) }).then(r => r.json())")?;
+    // Each eval_in_frame uses a new isolated JS world. A DOM marker is
+    // shared across those worlds, but disappears if the frame reloads.
+    b.eval_in_frame(page, "/share/", "(() => { document.documentElement.dataset.sharingVisit = 'kept'; const input = document.querySelector('input[name=email]'); input.value = 'friend@example.com'; input.focus(); return true; })()")?;
+    let intact = |b: &mut Browser| b.eval_in_frame(page, "/share/", "document.documentElement.dataset.sharingVisit === 'kept' && document.querySelector('input[name=email]')?.value === 'friend@example.com' && document.activeElement === document.querySelector('input[name=email]')").ok() == Some(Value::Bool(true));
+    let created = b.eval(page, "fetch('/api/fragments', { method: 'POST', headers: { 'x-fragment-shell': '1', 'content-type': 'application/json' }, body: JSON.stringify({ label: 'sharing-refresh-' + Date.now().toString(36) }) }).then(r => r.json())")?;
     let extra = created["name"].as_str().ok_or_else(|| anyhow::anyhow!("the unrelated app was created: {created}"))?;
     let selector = js(&format!("#apps-page .app-row[data-fragment=\"{extra}\"]"));
     let arrived = b.until(page, &format!("!!document.querySelector({selector})"), wait);
