@@ -120,8 +120,9 @@ RUN mkdir /novnc && tar -xzf /novnc.tgz -C /novnc --strip-components=1
 # The base (layer 1): nothing of ours that changes with our code is in it.
 FROM ${HERMES} AS hermes
 # Upstream's settings, as its image sets them: the flatten below restates
-# them, and checks it does.
-RUN mkdir -p /opt/fragment && env | sort > /opt/fragment/upstream.env
+# them, and checks it does. Builder trace context changes per step and is
+# not upstream runtime configuration; never capture it into the image.
+RUN mkdir -p /opt/fragment && env | grep -Ev '^(TRACEPARENT|TRACESTATE)=' | sort > /opt/fragment/upstream.env
 COPY --from=docker.io/cloudflare/sandbox:1.0.0 /usr/local/bin/sandbox-shim /usr/local/bin/sandbox-shim
 # cua-driver, the backend of Hermes' computer_use (screenshots of the agent's
 # desktop, XTest input): without it Hermes offers the agent no computer_use.
@@ -367,7 +368,7 @@ WORKDIR /opt/hermes
 # differ (its PATH's home, read as ours): the build fails on one the
 # flatten drops or sets otherwise, as a new base's would be.
 RUN env | sort > /tmp/env.now \
- && lost="$(grep -Ev '^(HOME|HOSTNAME|PWD|SHLVL|_|HERMES_HOME|HERMES_WRITE_SAFE_ROOT)=' /opt/fragment/upstream.env | sed '/^PATH=/s#/opt/data#/data/hermes#' | grep -vxFf /tmp/env.now || true)" \
+ && lost="$(grep -Ev '^(HOME|HOSTNAME|PWD|SHLVL|_|TRACEPARENT|TRACESTATE|HERMES_HOME|HERMES_WRITE_SAFE_ROOT)=' /opt/fragment/upstream.env | sed '/^PATH=/s#/opt/data#/data/hermes#' | grep -vxFf /tmp/env.now || true)" \
  && rm /tmp/env.now \
  && if [ -n "$lost" ]; then printf 'upstream sets what the flatten does not:\n%s\n' "$lost"; exit 1; fi
 # SimpleX's core (layer 1b), before ours: a change of ours pulls none of it.
