@@ -15,7 +15,7 @@ pub(crate) const REPOSITORY: &str = "fragment-preview-computer-hermes-canary";
 const INPUTS: &[&str] = &[
     ".dockerignore", "images/hermes", "images/bridge", "images/Cargo.toml", "images/Cargo.lock",
     "Cargo.toml", "Cargo.lock", "cli", "crates/core", "crates/nip98", "crates/proto", "crates/templates",
-    "templates/blank", "templates/calories", "templates/doc", "templates/inbox", "templates/notes", "templates/todo",
+    "templates/blank", "templates/calories", "templates/doc", "templates/inbox", "templates/notes", "templates/releasegoal", "templates/todo",
     "crates/devstack/Cargo.toml", "crates/e2e/Cargo.toml", "crates/fakes/Cargo.toml", "xtask/Cargo.toml",
 ];
 
