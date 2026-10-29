@@ -3183,7 +3183,15 @@ async fn bots_message_each_other() {
     assert!(system.contains("`@hermes` — this computer's gateway, not an agent"), "the gateway's own profile, said to be no agent: {system}");
     assert!(!system.contains("`@juniper--k3x9` —"), "juniper is not her own teammate: {system}");
 
-    assert!(ack.contains("live Bot Chat owner"), "queued for maple's live owner, the keeper: {ack}");
+    // A queued process acknowledges hand-off, not recipient delivery:
+    // its completion notifies the sender. Actual delivery is checked below.
+    let queued: serde_json::Value = serde_json::from_str(ack.strip_prefix("scripted: the tool said: ").expect("the scripted model echoes message_agent's result")).unwrap_or_else(|e| panic!("message_agent's structured acknowledgment: {e}: {ack}"));
+    assert!(
+        queued["status"] == "queued" && queued["to"] == "@maple--k3x9" && queued["reply_delivery"] == "notification"
+            && queued["delivery_id"].as_str().is_some_and(|id| !id.is_empty())
+            && queued["process_id"].as_str().is_some_and(|id| !id.is_empty()),
+        "queued for maple through a background process whose completion notifies juniper: {queued}",
+    );
     // the message is juniper's, in maple's own chat, for maple: a hand-off
     let t = Instant::now();
     let asked_maple = |w: &support::fake::World| w.records(&mchat, "chat").into_iter().find(|r| r["principal"] == "npub1juniper" && r["body"]["to"] == json!(["npub1maple"]));
