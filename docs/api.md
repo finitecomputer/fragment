@@ -1075,7 +1075,7 @@ email (Invites by email, below).
 
 | method & path (platform origin) | what |
 | --- | --- |
-| `GET /share/<name>` | the share sheet, a card laid out as a document's share dialog, titled with the fragment's title: who is in (emails and pictures, from the registry's profiles: a member sees the members' emails, decision 48; an agent by its title, and whose agent it is, by their email: its owner reads what it reads) and their roles, to any member (anyone else, a 403 page); for the owner ("Share …"), adding people by email with a role (Invites by email, below), the invites waiting (each email, its role, the days it waits; Revoke), each member's role (Viewer and Editor buttons, theirs pressed) and Remove (a chat's own agent has neither: it keeps its place), a person with agents in with them as one entry, "With their agents", never naming one (decisions 63 and 64), and who can open it ("General access": three buttons, Restricted `members`, Anyone with the link `link`, Public `public`, each saying what it means, the current one pressed); for a member who is not its owner ("Who has access to …"), the same read-only, and Leave. Every choice is a button (no `<select>`, which an arrow key changes as it passes over it) and is sent as it is pressed; Remove, New link and Leave ask a second click. Copy link (the share link while it is `link`, else its address: a public one opens for anyone without its token) and Done (in a dialog, closes it, as Escape does; in a window of its own, closes that, or goes to `/settings`); then, quieter, while it is `link`, a new share link. Signed out: → sign in first, and back. It reads nothing from its URL |
+| `GET /share/<name>` | the share sheet, a card laid out as a document's share dialog, titled with the fragment's title: who is in (emails and pictures, from the registry's profiles: a member sees the members' emails, decision 48; an agent by its title, and whose agent it is, by their email: its owner reads what it reads) and their roles, to any member (anyone else, a 403 page); for the owner ("Share …"), adding people by email with a role (Invites by email, below), the invites waiting (each email, its role, the days it waits; Revoke), each member's role (Viewer and Editor buttons, theirs pressed) and Remove (a chat's own agent has neither: it keeps its place), a person with agents in with them as one entry, "With their agents", never naming one (decisions 63 and 64), and who can open it ("General access": three buttons, Restricted `members`, Anyone with the link `link`, Public `public`, each saying what it means, the current one pressed); for a member who is not its owner ("Who has access to …"), the same read-only, and Leave. Every choice is a button (no `<select>`, which an arrow key changes as it passes over it) and is sent as it is pressed; Remove, New link and Leave ask a second click. Copy link (the share link while it is `link`, else its address: a public one opens for anyone without its token) and Done (in a dialog, closes it, as Escape does; in a window of its own, closes that, or goes to `/apps`); then, quieter, while it is `link`, a new share link. Signed out: → sign in first, and back. It reads nothing from its URL |
 | `POST /share/<name>` | the sheet's form: `form` (the page's token), `action`, and its fields: `invite` (`email`, `role`: `POST invites`; the sheet says they were mailed, or mailed again, and are in once they accept it; an email someone in it signs in as already, the owner's own included, changes nothing and says so: their role changes in the list), `role` (`member`, `role`: `viewer` or `editor`), `remove` (`member`), `uninvite` (`email`), `visibility` (`visibility`), `rotate` (the share link only; the inbox's token is the CLI's: the sheet, saying so), `leave` (a member's own, `DELETE members/me`: a page saying they left, whose Done closes the dialog). Done: → 303 back to the sheet; refused by the fragment (a member who is not the owner: 403; the owner leaving: 400; a day's mails spent: 429): the sheet, saying why, with the refusal's status |
 
 The sheet cannot be driven by a fragment's page. Every POST's `Origin`
@@ -1243,8 +1243,8 @@ one else is in it, or it is past the bound; its sheet names them). At
 most `ACCESS_PROFILES_MAX` (512) identities are named by email, the
 first fragments' first; past it a member has no `email`. A fragment
 that does not answer (deleted meanwhile) keeps its list's counts. The
-shell's settings show it, by fragment and by person, each fragment's
-title opening its share sheet.
+shell's Apps page shows it, one row a fragment, each with its Share…
+(The shell, below).
 
 ## Control API
 
@@ -1281,7 +1281,9 @@ title opening its share sheet.
 | `GET /api/f/{name}/file?path=` | viewer | → the bytes at main (`x-fragment-ref`); a pointer's come from the blob store; with none of its own at `path`, a blessed template's data file from the release |
 | `PUT /api/f/{name}/blobs/{sha256}` | editor | the bytes as the body (`content-length` required, at most 256 MiB), streamed through and hashed on the way in: → `{ok, sha, size, stored}`; bytes that hash to anything else are deleted and refused (400). Its `content-type` is what `__blob` serves it as, when that is passive media (Blobs, below) |
 | `GET`, `HEAD /api/f/{name}/blobs/{sha256}` | viewer | → the bytes (ranges answer 206) |
-| `GET /api/f/{name}/card` | viewer | → the fragment's preview card (Cards, below): a 1280×800 JPEG, `ETag` its blob's SHA-256, `Cache-Control: private, no-cache`, `X-Fragment-Ref` the live commit it shows; `If-None-Match` naming the tag is 304. Before the first is made, 404 `not_found` |
+| `GET /api/f/{name}/card` | viewer | → the fragment's preview card (Cards, below): a 1280×800 JPEG, `ETag` its blob's SHA-256, `Cache-Control: private, no-cache`, `X-Fragment-Ref` the live commit it shows (a shot's: an upload shows none, and has none); `If-None-Match` naming the tag is 304. Before the first is made, 404 `not_found` |
+| `POST /api/f/{name}/card` | editor | → `{ok, live, since, joined}`: a shot of the live again, which the fragment's alarm takes as it takes a deploy's and which replaces the card, an upload too (Cards, below: Asked for again); `joined` when a shot of that live was wanted already (that one is it). 400 for a chat, an agent or a members-only fragment, or with nothing deployed; 402 when its owner pays for nothing now; 429 within a minute of the last ask, saying how long is left |
+| `PUT /api/f/{name}/card` | editor | a JPEG of 1280×800, at most 512 KiB, as the body → `{ok, blob, size}`: the card from now until a shot is asked for again or another is uploaded; deploys are still shot, for the page's report, and leave it (Cards, below: Uploaded). 400 for anything else (empty, not a JPEG, another size, a JPEG cut short or with a part missing: `card::check_upload`) and for a chat or an agent, 413 over 512 KiB, 402 past its owner's overdraft |
 | `GET /api/f/{name}/events?since=` or `?tail=` | viewer | → `{events: [{id, at, kind, summary, data}]}`, oldest first: the page after `since`, or the newest `tail` (1-500; 400 otherwise, or with `since`) (500 a page; 10 000 kept, as for `ops`: `limits::AUDIT_KEPT`) |
 | `POST /api/f/{name}/ops/{op}` | the operation's role | `{id, input}` → `{result, replayed}`; for a job, `result` is `{run, status}` (the same id answers the same run) |
 | `GET /api/f/{name}/runs?status=&op=&limit=` | viewer | → `{runs: [{id, op, via, trigger, principal, status, attempt, depth, createdAt, finishedAt, error}], counts: {<status>: n}, paused}` newest first (30, at most 200) |
@@ -1530,8 +1532,10 @@ by its extension, and prints its sha256.
 
 Every move of `live` (a deploy, a rollback, a push to `live`, a
 template's first deploy) wants a **preview card**: a screenshot of the
-fragment's page, which the shell's Apps list shows. The schedule and its
-rules are pure (`fragment_core::card`); cell/src/card.rs runs them.
+fragment's page, which the shell's Apps list shows. Its editors may ask
+for a shot again, or upload an image of their own as the card (below).
+The schedule and its rules are pure (`fragment_core::card`);
+cell/src/card.rs runs them.
 
 - **Never in the deploy's request.** The move records the card it wants;
   the fragment's alarm, after the rest of its work, takes the shot itself
@@ -1580,6 +1584,37 @@ rules are pure (`fragment_core::card`); cell/src/card.rs runs them.
 - **Apps only.** A chat or an agent fragment is not an app (the shell
   lists it elsewhere): its deploys are not shot (`card.skipped`). A
   brain is an app.
+- **Asked for again.** An editor's `POST /api/f/{name}/card` wants a
+  shot of the live as it is now, the one the card shows too (a card shot
+  as the page loaded, or of data since changed): the alarm takes it as it
+  takes a deploy's, with its tries, its report and its meter row, and it
+  replaces the card, an upload too. A shot of that live already wanted (a
+  deploy's, waiting or out) is the one asked for (`joined`), and an
+  upload's next shot replaces it then. At most one ask a minute per
+  fragment (`card::AGAIN_EVERY_MS`: each is a browser session from the
+  account's few, which every fragment's deploys share; a deploy's shot is
+  not counted, nor an ask that joins one): within it, 429 saying how long
+  is left, and nothing changes. Where no shot would be taken it is
+  refused with the reason a deploy's skip gives: a chat or an agent, a
+  members-only fragment (400), an owner who pays for nothing now (402);
+  and with nothing deployed (400).
+- **Uploaded.** An editor's `PUT /api/f/{name}/card` makes their image
+  the card at once. It is held to what a shot is held to (a JPEG of
+  1280×800, at most 512 KiB: every card is one shape, which the shell
+  lays out without asking, so a client resizes first), and whole too: its
+  structure read through to its end, so a JPEG cut short (a header and
+  no image, a frame header that ends early) is 400 and the card stays
+  (`media::jpeg_whole`; its compressed data is not decoded). It is
+  stored as one of the fragment's blobs (`image/jpeg`, kept while it is
+  the card) and
+  served as a shot is, with no `X-Fragment-Ref`: it shows no commit.
+  **It stays until a shot is asked for again or another image is
+  uploaded.** A later deploy is still shot, for the page's report (and
+  billed as one), but its shot leaves the uploaded card, as does a shot
+  out when the upload came: a person's choice outlives their agent's
+  next deploy. A chat or an agent takes none (400); a members-only app
+  does, its page unshot all the same. The same image again changes
+  nothing.
 - **Metered to the owner.** Each try's browser time (acquire to close; a
   close that was lost adds the session's 10 s inactivity timeout) is a
   `browser` row in the fragment's meter outbox,
@@ -1589,13 +1624,95 @@ rules are pure (`fragment_core::card`); cell/src/card.rs runs them.
   create is: a guest pays for nothing and a read-only owner makes nothing
   new, so neither's deploys are shot (`card.skipped`); a ledger that does
   not answer refuses none.
-- **Events:** `card.made` (`{live, blob, attempt}`), `card.skipped`
+- **Events:** `card.made` (`{live, blob, attempt}`), `card.uploaded`
+  (`{blob, size}`), `card.skipped`
   (`{live, why: not_an_app | members_only | owner_pays}`),
   `card.failed` (`{failures}`), and `page.errors` (the report, when it
   has errors; its summary their count and the first one's first line).
-  A retry and a stale shot say nothing.
+  A retry, a stale shot and a shot an upload kept from the card say
+  nothing.
   A page's Open Graph image
   stays `__preview.svg`: the card is its members'.
+
+### Icons (issue #587)
+
+A fragment's **icon** is one 256×256 PNG of one object on a transparent
+background, a clean 3D CG render in the look of the bot's own picture,
+which the shell's dock shows and the fragment's pages take as their
+favicon. Its editors make one or upload one; the pure rules are
+`fragment_core::icon`, cell/src/icon.rs runs them. An agent fragment has
+none: its picture is its `avatar.png` (An agent's name and picture), and
+a making or a `PUT` on one answers 400.
+
+| Method | Path | Who | What |
+| --- | --- | --- | --- |
+| POST | `/api/f/{name}/icon/make` | editors | `{hint?}` (at most 200 characters) → `{subject, candidates: [{png, score}], flaws}` |
+| PUT | `/api/f/{name}/icon` | editors | the image's bytes → `{icon, sha256, size}` |
+| GET | `/api/f/{name}/icon` | viewers | the PNG (ETag its SHA-256), or 404 |
+| DELETE | `/api/f/{name}/icon` | editors | `{icon: null}` |
+
+- **A making** asks, in its request (a minute at most), for:
+  1. a **subject**: the fragment's title and description (live's
+     `fragment.json` `meta`, else its name's label) and the hint, named as
+     one concrete object by GLM-5.3 Flash on Workers AI (an abstract name
+     drawn as it is comes back a flat rounded square); when it names none,
+     the hint, or the title, is drawn;
+  2. four **drawings** of it at once, FLUX.2 [klein] 4B at 512×512, each
+     with a seed of its own;
+  3. each one **cut out** by Cloudflare Images (`segment: foreground`)
+     and examined by the cell from its alpha: refused when nothing was
+     cut out (`empty`), it runs off the frame (`cut_off`), it is a filled
+     square, a tile (`tile`), it is in several pieces (`pieces`), or its
+     edges are mostly half transparent (`ragged`);
+  4. each kept one **cropped** around its object (a margin of 6% of its
+     longer side), fitted inside 256×256 with transparent padding, and
+     **checked** by Clef flash on a plain blue: refused for writing
+     (`writing`), a tile or frame (`framed`), no one object
+     (`no_object`), or another subject (`off_subject`), each past even
+     odds. Its `score` is how surely it shows one object of its subject.
+  A step that fails is the drawing's `failed`. The answer's `candidates`
+  are the ones kept, best first, each `png` the icon's bytes as base64;
+  `flaws` counts the refused by flaw. Nothing of a making is kept: its
+  asker keeps a candidate by sending its bytes to `PUT`.
+- **Bounded per fragment: 10 makings an hour**, the 11th 429, counted
+  as each is admitted, after the owner's ledger has answered: makings
+  asked at once each count the others'.
+- **Metered to the owner**, one row of the fragment's meter outbox per
+  call that answered, `icon:<fragment>@<incarnation>:<op>:<call>`, `op`
+  the making's or upload's own name (`<started ms>.<8 hex>`, a nonce of
+  its own: two in one millisecond are two) and `call` one of `subject`,
+  `draw-<n>`, `cut-<n>`, `fit-<n>`, `flat-<n>`, `check-<n>` and
+  `upload`: the subject and the checks in tokens, a drawing in the
+  neurons Workers AI says it cost (its `cf-ai-neurons`; 104.2 when it
+  says none), each Images transformation as one (docs/ledger.md). The
+  owner's ledger is asked first as a job's AI step is: a guest's fragment
+  makes none, and one at its cap makes none for anyone but its owner and
+  their agents (402; docs/ledger.md, Caps). A making that fails halfway
+  has paid for what it bought.
+- **An upload** is a PNG, JPEG, WebP or GIF by its bytes, at most the
+  router's 2 MiB (413 past it). A 256×256 PNG of at most 256 KiB (a
+  candidate) is kept as it is; any other is fitted inside 256×256 by
+  Images, its padding transparent (one transformation, metered as
+  `upload`), and refused 413 when that is still over 256 KiB.
+- **Keeping and removing are writes:** while the owner's fragments are
+  read-only (past the overdraft), `PUT` and `DELETE` are 402, before
+  anything is fitted or stored, and the icon stays.
+- **Kept** as one of the fragment's blobs (`image/png`), named in its
+  meta, which the blob collection keeps. Its members' lists show it as
+  the fragment's `picture`, `/api/f/<name>/icon?v=<12 hex of its
+  SHA-256>`: a new icon is a new address, so a matching `GET` may be
+  cached a day. A stale or unrelated version is 404 with `Cache-Control:
+  no-store`, never the current icon's bytes.
+- **Its pages' favicon.** A browser asks a page that names no icon of
+  its own for `favicon.ico` on the fragment's origin. When live has no
+  such file and the app's own route there answers 404 (or it has none),
+  a `GET` or `HEAD` of it is answered the icon (a PNG, which browsers
+  read at that path), to whoever may open its pages, `no-cache` with its
+  SHA-256 as the ETag, so a new icon shows at the next look. A page's own
+  `<link rel="icon">`, a `favicon.ico` file of its own, or its app's
+  answer there wins; with no icon, the path is the app's as before.
+- **Events:** `icon.made` (`{subject, offered, flaws}`), `icon.set`
+  (`{sha256, fitted}`), `icon.removed`.
 
 ### Deliveries: web push
 
@@ -1682,8 +1799,9 @@ The steps:
   tools?, tool_choice?, draft?})` → `{text, message, finish_reason, model,
   tier, usage, timing}`: `model` is a tier, `cheap` (the default) or
   `medium` (`high` is refused: Models); `max_tokens` is at most 16384;
-  `reasoning_effort` is GLM's, `low` (the default) or `high` (anything
-  else is `low`, since GLM takes an unknown one as `max`). Tools, drafts
+  `reasoning_effort` is `low` (the default), `high` or `max`, the
+  dearest (anything else is `low`, since GLM takes an unknown one as
+  `max`). Tools, drafts
   and timing are below (Text steps).
 - `job.ai.decide({model?, input, questions, media?})` → `{model,
   answers, usage}`: a typed decision on the Clef family (Decisions,
@@ -1976,14 +2094,20 @@ charged nothing, after two tries in all.
 `vision` falls back so only when the fallback's slot says its model
 reads images (`"images": true` in the deployment's `models`; the
 default fallback, DeepSeek V4 Flash, reads none), and transcriptions
-never. A job's text step falls back the same, and its output's `model`
-names the model that answered.
+never. Each tier has its route (a tier slot's `"fallback"` and
+`"vision"`; the deployment's `fallback` and `vision` unless it names
+others): a tier's call falls back to its route's fallback, and a caller
+that says its tier (`x-fragment-tier`) runs `vision` and `fallback` as
+its route's. Any slot may name its own `"fallback"` instead, and every
+call falls back as the slot it runs does, however it named it
+(docs/computers.md, "A slot's own fallback"). A job's text step falls
+back the same, and its output's `model` names the model that answered.
 
 `fallback` names the deployment's fallback model itself: a runtime's own
 switch when its model stalls, streaming nothing (our Hermes image's
 `fallback_providers`: docs/computers.md, Models). It is metered as a
-tier's call, has no fallback of its own, and is no tier an agent or a
-job's step may name.
+tier's call, has no fallback of its own unless its slot names one, and
+is no tier an agent or a job's step may name.
 
 A call may name one of those four by its model's own id instead (Paul,
 2026-10-16: "be able to run `/model` with hermes and see the real
@@ -2241,7 +2365,7 @@ fails, and made again, asks again).
 | `POST /api/admin/trials` | the same | `NewTrialCode {name, kind?, days (1-30), capacity (1-10,000), expiresAt?, code?}` → `TrialCode {id, code, name, kind, days, capacity, expiresAt, active, revision, createdAt, createdBy, subscribed, open, uses}`: `kind` only `seat_always_on`, the default (`seat` is 400); `code` none, one is made (16 of A-Z less I and O, and 2-9, in fours); a code another has is 409 |
 | `GET /api/admin/trials` | the same | → `{codes: [TrialCode]}`, newest first, their uses counted (`subscribed`: bought; `open`: Checkouts not yet expired) |
 | `GET /api/admin/trials/{id}` | the same | → `TrialCode` with its `uses: [{person, email, at, status}]` |
-| `PATCH /api/admin/trials/{id}` | the same | `{revision, capacity?, active?, code?, expiresAt?}` → `TrialCode`: when `revision` is still its (else 409); places only grow |
+| `PATCH /api/admin/trials/{id}` | the same | `{revision, capacity?, active?, code?, expiresAt?}` → `TrialCode`: when `revision` is still its (else 409); `capacity` raises or lowers its places, never below those taken (`subscribed` + `open`, and 1 at least; else 400, saying so): nothing taken is given back |
 
 `/api/admin/*` takes an operator's signature, or the shell's session of
 a person the deployment's `operators` names (decision 59). A wipe's
@@ -2792,10 +2916,11 @@ means authorization is disabled. Existing own-key behavior below is unchanged.
 
 ## The shell (phase 5)
 
-The platform's one page is `/`, `/settings` and `/welcome` (cell/shell/,
-its files at `/__shell/<file>`, the release's: Serving, The release's
-files): its script reads the path, opening its
-settings at `/settings`, the welcome at `/welcome`, and the person's
+The platform's one page is `/`, `/settings`, `/apps` and `/welcome`
+(cell/shell/, its files at `/__shell/<file>`, the release's: Serving,
+The release's files): its script reads the path, opening its
+settings at `/settings`, its Apps page at `/apps`, the welcome at
+`/welcome`, and the person's
 chats at `/`, and puts the view it shows in the address, so a reload
 stays put. Finite's about page, privacy policy and terms are `/about`,
 `/privacy` and `/terms` (cell/shell/about.html, privacy.html,
@@ -2856,8 +2981,7 @@ their connections (every provider the deployment offers, one row each:
 its kind, their state there with its action, which of their agents may
 use it, pressed to narrow one, and this month's calls by agent with an
 operator key's cost: `GET /api/connections`, the computer's view and its
-`uses`), sharing (who may open each fragment they own, by fragment or
-by person: `GET /api/access`), pairing the
+`uses`), pairing the
 CLI (the one-line install, `fragment login`, and `fragment skill` for a
 coding agent), and Your data (Export, above: "Export everything", its
 state and progress while it builds, read again every 2 s while the page
@@ -2869,6 +2993,27 @@ dialog (their own's "Share…" or "Invite…"; someone else's "People…",
 where they see who is in and may leave), and the dock's Add shows ways
 to ask their agent for an app (below), not templates: the templates are
 the CLI's (`fragment create --template`) and its agents'.
+**Its Apps page** (`/apps`, the sidebar's Apps, above Settings; in the
+work area as settings are; cell/shell/apps-page.js; #587) lists every
+fragment in their list but their chats, agents and skills (apps, brains,
+a kind it does not know), as the list orders them, the archived
+folded at the end with Unarchive. Each row is its icon, title, kind
+(when not an app), their role on one someone else owns, who has access
+to one of theirs at a glance (Restricted, Anyone with the link or
+Public; the people in it by email, two named and a count past them; the
+invites waiting: `GET /api/access`, read as the page opens, as a share
+sheet closes and as the list says its sharing changed), its preview card
+(read as the page opens and for a new or changed app, with bounded retries
+while one is not there yet), and what they may do there, each showing what
+the server answered and nothing before it: an app's or a brain's **Dock** switch (`PUT
+/api/fragments/{name}/dock`; it moves once the list says so, any role),
+**New preview** (an editor's, not on a members-only one of theirs:
+`POST /api/f/{name}/card`; "Taking a new preview…" until status's
+`page.at` reaches the ask's `since`, three minutes at most, then the
+card read again), **Icon…** (an editor's: the icon sheet, Icons), and
+**Share…** (theirs) or **People…** (someone else's), the share sheet. A
+refusal is said under its row. Settings have no sharing section: who
+may open what is the Apps page's.
 It calls the API with the person's platform session
 rather than a key: a request on the platform's host is taken as the
 signed-in person when it carries `x-fragment-shell: 1` and
@@ -3075,9 +3220,10 @@ nothing.
 
 **The launcher** (the sidebar's +, a phone's top bar +, and ⌘K or
 Ctrl K, from the chat's frame too: `{fragment: "open-launcher"}`, taken
-only from the focused frame of a listed fragment at its own origin) is one
-input over the desktop's landscape. Empty, it shows nothing. Words ask
-`GET /api/search` (Search, below; its first 8 words and 256 bytes): the
+only from the focused frame of a listed fragment at its own origin;
+cell/shell/launcher.js) is one input over the desktop's landscape.
+Empty, it shows nothing. Words ask `GET /api/search` (Search, below; its
+first 8 words and 256 bytes): the
 chats and apps whose title or label hold them, then the messages, newest
 first, archived ones marked. A chat found opens in the middle column, an
 app in the desktop, a message its chat. For a seat whose agent is made,
@@ -3085,10 +3231,30 @@ Enter (or the first row, "Start a new chat with <agent>") makes a new
 chat with it as **New chat** does and posts the words whole as its first
 message (`POST /api/f/{chat}/channels/chat`, the person's), with an id
 kept until it is sent, so trying again after an answer that was lost is
-the same record; the launcher says "Starting your chat…" until the
-platform answers, and opens the chat on its record. A request for an app
-is a message like any other: the agent makes it. A guest's launcher only
-finds.
+the same record. Enter goes straight to the chat: the launcher closes at
+once and the middle column is the new chat's while it is made; its page
+loads (`?sent=1`: docs/chat-records.md, "The launcher's chat") as its
+message is posted; a page already open that holds what no storage keeps
+(files chosen, a voice memo: its `busy`) is kept as it is. A message not
+sent opens the launcher again on its words, saying why. Once the person
+gives the middle column another view while it is on its way (another
+chat, settings, Back), the launch changes nothing on screen: its message
+is still sent, and one not sent is a notice, its words waiting in the
+launcher's next opening. The launcher wakes the person's computer as it opens
+(as focusing a chat does), so it is starting while they type. Before
+their agent runs (its first run, or their computer not read yet), Enter
+(the first row, "Say it in <chat>") opens their first chat (the first
+run's, else their agent's own) with the words in its composer, to send
+there, as the dock's prompts do (`compose`, above). The input is one
+line at rest (its placeholder too, cut short on a phone) and grows with
+a long prompt (to 200 px, then scrolls); Shift+Enter is a new line.
+Files dropped on it or pasted into it (for a person whose agent runs; at
+most 8, 25 MiB each, as chips under the words, each removable) go with
+the words, or alone, as the first message's attachments: each uploaded
+to the new chat once it is made (`PUT /api/f/{chat}/blobs/{sha256}`, a
+dropped connection tried again), then the record names them
+(docs/chat-records.md, Attachments). A request for an app is a message
+like any other: the agent makes it. A guest's launcher only finds.
 
 **The first run, in its chat.** The person's first agent is made with
 its chat (decision 10), once they hold a seat (one bought on the welcome

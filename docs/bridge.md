@@ -613,12 +613,28 @@ drives it.
   copy of the databases under a hold passes `/data/simplex` over (held.rs,
   `SIMPLEX`). An awake save starts them again as the hold goes.
 - **A start that went back in time** (the view's `restored.rollback`, for a
-  link last run in an earlier start) forces a ratchet sync before anything
-  is sent, holds replies through it, and tells the owner's app a message
-  may have been lost: the core cannot see a rollback itself
-  (docs/explorations/simplex-connector.md, "The lab"). Every start reads
+  link last run in an earlier start) requires a ratchet sync before anything
+  is sent and holds replies through it: the core cannot see a rollback itself
+  (docs/explorations/simplex-connector.md, "The lab"). Each linked start
+  reads the core's durable state (`/_info @contact`): `started` or `agreed`
+  waits for that negotiation, `required` or `allowed` begins an unforced
+  sync, and `ok` forces one only when the rollback still needs it. Acceptance
+  (`contactRatchetSyncStarted`, or a running state) clears that requirement.
+  While replies wait, every 30 s reads the state again; it never forces an
+  accepted sync again. SimpleX v7.0.3's force generates new private keys
+  even mid-negotiation: repeated forces while the phone is offline queue
+  public keys whose private halves have been replaced, causing encryption
+  re-negotiation errors when it returns (the synthetic offline-phone lab,
+  `a_rollback_sync_waits_for_an_offline_phone`). An `ok` event or state read
+  releases held replies once, including after a restart lost the event;
+  a failed command or state read keeps them held. This prevents repeated
+  resets; a connection already damaged by them can remain stuck in a
+  negotiation, so automatic recovery is not guaranteed. Every start also reads
   back the newest items, and forwards are by the sender's message id, so
   a core killed mid-burst loses nothing it committed.
+- **Restarts and encryption recovery send no chat announcements.** Possible
+  message loss is logged by the bridge, without sending the owner a message
+  or queuing one to deliver after synchronization.
 - **A link's change asks for a save**: the keepalive held for 3 s, so the
   platform saves as that ends rather than after the next turn.
 - **A core that stops on its own** is started again (2 s, doubled); three
@@ -651,8 +667,8 @@ home that chat, answered on SimpleX, and one with nothing to tell (its
 `[SILENT]`), nothing; a reply in its own chat, not; a voice note
 transcribed through the route and answered (0.4 s); a hold that stops the
 core first, its copies naming none of the core's databases; a restart; and
-a wake from a save older than the life before it, healed, the person told
-(1.0 s after the gate). By hand, `tests/simplex.rs` holds the rest against
+a wake from a save older than the life before it, healed without a restart
+announcement. By hand, `tests/simplex.rs` holds the rest against
 the real core: the link's rules, voice both ways, the profile's name (a
 start keeps the profile its first made; `/p` renames it, idempotent;
 every name `display_name` makes taken as it is), the lifecycle (a forged

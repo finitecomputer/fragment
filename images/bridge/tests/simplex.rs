@@ -83,15 +83,19 @@ impl Agent {
         // bounded by `within`
         while !done(self) {
             assert!(t0.elapsed() < within, "not within {within:?}: link {:?}, told {:?}, forwarded {:?}", self.link, self.told, self.forwarded.iter().map(|i| &i.text).collect::<Vec<_>>());
-            if self.api.events.is_empty() {
-                self.api.drain(Duration::from_millis(200)).await;
-            }
-            while let Some(resp) = self.api.events.pop_front() {
-                self.seen.push(resp.clone());
-                let frame = wire::parse(&json!({ "resp": resp }).to_string()).unwrap_or_else(|e| panic!("an event of the core's reads: {e}: {resp}"));
-                let actions = self.link.apply(Input::Said(&frame.resp));
-                self.run(actions).await;
-            }
+            self.poll().await;
+        }
+    }
+
+    async fn poll(&mut self) {
+        if self.api.events.is_empty() {
+            self.api.drain(Duration::from_millis(200)).await;
+        }
+        while let Some(resp) = self.api.events.pop_front() {
+            self.seen.push(resp.clone());
+            let frame = wire::parse(&json!({ "resp": resp }).to_string()).unwrap_or_else(|e| panic!("an event of the core's reads: {e}: {resp}"));
+            let actions = self.link.apply(Input::Said(&frame.resp));
+            self.run(actions).await;
         }
     }
 
@@ -225,6 +229,88 @@ async fn the_link_against_the_real_core() {
     println!("frames in {}", lab.dir.display());
 }
 
+
+/// A phone away for several recovery timer ticks must see a single key
+/// negotiation when it returns. Re-forcing an accepted sync replaces its
+/// private keys while earlier public keys are already queued on SMP.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Docker; run by hand"]
+async fn a_rollback_sync_waits_for_an_offline_phone() {
+    let mut lab = Lab::up("offline-sync");
+    let mut agent = Agent::new(lab.start("agent", true).await);
+    let mut person = lab.start("person", false).await;
+    agent.apply(Input::Want).await;
+    let Phase::Inviting { link, .. } = agent.link.phase.clone() else { panic!("an invitation") };
+    assert_eq!(tag(&person.cmd(&format!("/connect {link}")).await), "sentConfirmation");
+    agent.until(Duration::from_secs(30), |a| a.link.contact().is_some()).await;
+    let at_person = person.wait(Duration::from_secs(30), |e| tag(e) == "contactConnected").await["contact"]["contactId"].as_i64().expect("the agent's contact");
+    say(&mut person, at_person, "before going offline").await;
+    agent.until(Duration::from_secs(30), |a| a.texts().contains(&"before going offline")).await;
+    drop(person);
+    lab.stop("person");
+
+    agent.apply(Input::Started { rollback: true }).await;
+    agent.apply(Input::Reply("held while the phone is offline")).await;
+    // The manager supplies these every 30 s. Drive the same inputs without
+    // waiting a minute: the phone cannot consume any queued keys yet.
+    agent.apply(Input::Resync).await;
+    agent.apply(Input::Resync).await;
+    // An awake save stops and restarts the core while the phone is away.
+    let saved = agent.link.to_json();
+    drop(agent);
+    lab.stop("agent");
+    let mut agent = Agent::new(lab.start("agent", true).await);
+    agent.link = Link::from_json(&saved).expect("the link survives the save");
+    agent.apply(Input::Started { rollback: false }).await;
+    agent.apply(Input::Resync).await;
+    let mut person = lab.start("person", false).await;
+    let decrypt_error = |e: &Value| e["chatItems"].as_array().is_some_and(|items| items.iter().any(|i| i["chatItem"]["content"]["type"] == "rcvDecryptionError")) || e["chatItem"]["chatItem"]["content"]["type"] == "rcvDecryptionError";
+    agent.until(Duration::from_secs(30), |a| !a.link.syncing || a.seen.iter().any(decrypt_error)).await;
+    assert!(!agent.seen.iter().any(decrypt_error), "recovery introduced a decryption error; synthetic frames: {}", lab.dir.display());
+    received(&mut person, Duration::from_secs(30), |got| got.iter().any(|t| t == "held while the phone is offline")).await;
+    assert!(!person.events.iter().any(decrypt_error), "the phone saw a decryption error; synthetic frames: {}", lab.dir.display());
+    say(&mut person, at_person, "after coming online").await;
+    agent.until(Duration::from_secs(30), |a| a.texts().contains(&"after coming online")).await;
+    agent.apply(Input::Reply("answered after coming online")).await;
+    received(&mut person, Duration::from_secs(30), |got| got.iter().any(|t| t == "answered after coming online")).await;
+    // Read both clients' whole synthetic event logs: `received` consumes
+    // other events too, so the remaining queue alone cannot prove this.
+    for log in [&agent.api.log, &person.log] {
+        for line in std::fs::read_to_string(log).expect("the client's frames").lines() {
+            let v: Value = serde_json::from_str(line).expect("a logged frame");
+            assert!(!decrypt_error(&v["frame"]["resp"]), "a decryption error in {}", log.display());
+        }
+    }
+    let commands = std::fs::read_to_string(&agent.api.log).expect("the agent's commands");
+    assert_eq!(commands.lines().filter(|line| {
+        let v: Value = serde_json::from_str(line).expect("a logged frame");
+        v["dir"] == "out" && v["frame"]["cmd"].as_str().is_some_and(|c| c.starts_with("/_sync "))
+    }).count(), 1, "exactly one negotiation, through timer ticks and a core restart");
+
+    // Inject the earlier bug using raw core commands. The fixed bridge
+    // prevents this damage; a link already damaged this way can remain
+    // stuck in started/agreed. Verify that relinking restores messaging.
+    drop(person);
+    lab.stop("person");
+    let contact = agent.link.contact().expect("still linked");
+    for _ in 0..3 {
+        let r = agent.api.cmd(&wire::Cmd::Sync { contact, force: true }.line()).await;
+        assert_eq!(tag(&r), "contactRatchetSyncStarted");
+    }
+    agent.apply(Input::Started { rollback: false }).await;
+    let mut person = lab.start("person", false).await;
+    agent.until(Duration::from_secs(30), |a| a.seen.iter().any(decrypt_error)).await;
+    agent.apply(Input::Unlink).await;
+    agent.apply(Input::Want).await;
+    let Phase::Inviting { link, .. } = agent.link.phase.clone() else { panic!("a fresh invitation") };
+    assert_eq!(tag(&person.cmd(&format!("/connect {link}")).await), "sentConfirmation");
+    agent.until(Duration::from_secs(30), |a| a.link.contact().is_some()).await;
+    let at_person = person.wait(Duration::from_secs(30), |e| tag(e) == "contactConnected" && e["contact"]["contactId"] != at_person).await["contact"]["contactId"].as_i64().expect("the new contact");
+    say(&mut person, at_person, "the relinked phone answers").await;
+    agent.until(Duration::from_secs(30), |a| a.texts().contains(&"the relinked phone answers")).await;
+    agent.apply(Input::Reply("answered after relinking")).await;
+    received(&mut person, Duration::from_secs(30), |got| got.iter().any(|t| t == "answered after relinking")).await;
+}
 
 /// The voice message `text`'s sender sent with file `name`: its file's id,
 /// protocol and status as the receiving core said them (`seen`, newest last).
@@ -485,8 +571,8 @@ fn build_bridge_image() {
 /// asked); stopped under a hold before the bridge answers it, its databases
 /// whole, and started again after; stopped while the computer is not always
 /// on, and started again when it is; through a planned restart, as it was;
-/// and after a rollback of its `/data`, its forced sync heals the link, the
-/// owner is told a message may be lost, and both directions work.
+/// and after a rollback of its `/data`, its forced sync heals the link
+/// without sending a chat announcement, and both directions work.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs Docker; run by hand"]
 async fn the_bridge_runs_a_linked_core() {
@@ -595,8 +681,10 @@ async fn the_bridge_runs_a_linked_core() {
     });
     let t0 = Instant::now();
     let c = Computer::start(&lab, &fake, &data);
-    let told = received(&mut person, Duration::from_secs(60), |got| got.iter().any(|t| t.contains("may have missed a message"))).await;
-    println!("after a rollback, the owner told {} ms after the start: {told:?}", t0.elapsed().as_millis());
+    recovered(&mut person, at_person, Duration::from_secs(60), || {
+        c.events("simplex.told").iter().any(|e| e["agent"] == "juniper--k3x9" && e["notice"] == "Resynced")
+    }).await;
+    println!("after a rollback, encryption recovered {} ms after the start", t0.elapsed().as_millis());
     assert!(c.events("simplex.core_up").iter().any(|e| e["rollback"] == true), "its start forced a sync");
     let before = c.events("simplex.forward").len();
     say(&mut person, at_person, "after the rollback").await;

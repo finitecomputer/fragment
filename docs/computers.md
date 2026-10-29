@@ -1018,8 +1018,8 @@ expires within 30 days. The container application is the deployment's
     slot runs it (`x-fragment-tier: cheap` or `medium`, optional: the
     intercept sends it on), else on the first slot that does, in that
     order: a tier's before `fallback` and `vision`. The slot is the call's
-    as if it named the slot: its key, its `body`, its fallback (a tier's
-    falls back; `fallback`'s and `vision`'s do not), its price. An id no
+    as if it named the slot: its key, its `body`, its fallback (the
+    slot's own: "A slot's own fallback", below), its price. An id no
     slot runs is refused, 400, the message listing those it may name;
     nothing is charged or sent. The route's names keep naming their slots,
     whatever tier the caller says.
@@ -1199,6 +1199,41 @@ expires within 30 days. The container application is the deployment's
   (`models.routes`: its label, whether it is private, its fallback's and
   vision model's ids).
 
+  **Each tier's route** (Paul, 2026-10-24: "A fallback on private should
+  fall back to something private, a fallback on normal should fall back
+  to something normal"). A tier slot may name `"fallback"` and
+  `"vision"`, each a slot's name: `fallback` and `vision` (the route's
+  four's, which it names unless it names others) or a slot of the
+  deployment's own beside them (at most 4, named 1 to 24 of a-z, 0-9 and
+  `_`, each some tier's fallback or vision, or another slot's fallback:
+  Standard's `cloudflare`). A tier's call falls back to its route's
+  fallback; a caller that says its tier (`x-fragment-tier`: every call of
+  our Hermes image's tier agents, its auxiliary vision's included) runs
+  `vision` and `fallback` as its route's, a caller that says none the
+  route's four's. A call naming a model by its id runs that model,
+  whatever the caller's route (only the aliases `fallback` and `vision`
+  follow it); a slot of the deployment's own is named so (it is listed
+  with the rest).
+
+  **A slot's own fallback** (#589's review). Any slot may name
+  `"fallback"`, another slot by its name: its calls are made on it once
+  more when they fail before answering, however the call named the slot
+  (its name, an alias, its model's id: `Models::fallback_of`), and never a
+  third time. Unnamed, a tier's is its route's (above); `vision`'s is
+  `fallback` when that slot says its model reads images, as before; any
+  other slot's is none. A slot images go to (`vision`, or a tier's
+  vision) falls back only to one that reads them, or the deploy is
+  refused. The private guard walks each private tier's route, each slot's
+  own fallback after it, the slot a stall's call runs (named by the
+  fallback's id, its tier unsaid), and the route's four's `fallback` too:
+  an image that has not read its route names that fallback for its stall,
+  its tier unsaid, so a deployment with a private tier keeps it private.
+  The computer's view carries each tier's route
+  (`models.routes`: its fallback's and vision model's ids), which our
+  Hermes image reads to name its stall's fallback; an image that does not
+  names the route's four's `fallback`, on which a Standard agent's stall
+  is stricter than its route, never less private.
+
   **A slot's `price`.** A slot on an OpenAI-compatible API that is not
   OpenRouter may name its model's list price there, dollars a million
   tokens as its vendor lists them: `{"input": <$>, "cached_input"?: <$>,
@@ -1231,13 +1266,14 @@ expires within 30 days. The container application is the deployment's
   that model's alone: `vision`, whose answers come whole and slower, keeps
   Hermes' default), tries it once more (`HERMES_STREAM_RETRIES=1`, the
   gateway's environment), then, its one retry spent
-  (`agent.api_max_retries: 1`), switches to its `fallback_providers`: the
-  route's `fallback` by its model's id (the deployment's fallback model,
-  its key `agent:<name>` naming the agent;
-  Workers AI's GLM-5.3 Flash on Finite's own deployment, so a stall on
-  OpenRouter or Finite Private ends on Workers AI), about 40 s after the stall began. The next turn starts on its tier
-  again (Hermes' `restore_primary_runtime`). An owner's own model and the
-  high tier have none. The Docker lane stalls the scripted model to prove
+  (`agent.api_max_retries: 1`), switches to its `fallback_providers`: its
+  tier's route's fallback by its model's id (`models.routes`; the
+  deployment's fallback model from a platform naming no routes), its key
+  `agent:<name>` naming the agent, about 40 s after the stall began. The
+  next turn starts on its tier again (Hermes' `restore_primary_runtime`).
+  An owner's own model and the high tier have none, nor has a tier whose
+  fallback is its own model (one id, one server: the switch would only
+  ask it again; #527). The Docker lane stalls the scripted model to prove
   it (images/bridge/tests/docker.rs).
 - A call its owner's ledger refuses (zero credit or a canceled seat:
   402 `budget_used_up`; a guest: 403) gets the ledger's reason, and no
@@ -1558,7 +1594,13 @@ the provider's own hosts.
   something lets their agents use it, with no approval of the platform's
   (what Hermes asks about: "Approvals in our Hermes image").
 - HTTPS interception needs Cloudflare's CA: the image waits for it at
-  boot and appends it to its trust store.
+  boot and appends it to its trust store (curl's, Python's, and Node's,
+  which reads it with `NODE_USE_SYSTEM_CA=1`: its own roots alone refused
+  it), and names it in its browser's managed policy (`CACertificates`, in
+  Debian Chromium's `/etc/chromium/policies/managed` directory:
+  `hermes::CHROMIUM_CA_POLICY`), since the browser reads no system bundle:
+  without it, every page on an intercepted host is an interstitial in the
+  agent's browser.
 - What the catalog cannot express is never swapped: a key in a path is
   refused, and a body goes as it came (a placeholder in it reaches the
   provider, which refuses it). A vendor that signs its requests with the
@@ -1776,11 +1818,11 @@ settings and state):
   level in the model picker … high is a good default"), is how hard it
   thinks, whatever its model: its profile's `agent.reasoning_effort`
   (`hermes::Reasoning`), which Hermes reads at each turn and sends as each
-  call's `reasoning_effort`. Absent, or any other, it is `high`. Those two
-  are what the model route passes on (`fragment_core::models::EFFORTS`;
-  any other it takes as `low`, as GLM takes `medium` for its dearest,
-  `max`), and left unset Hermes sent its own default, `medium`, which the
-  route took as `low`. Settings' Agents offers it beside the model for
+  call's `reasoning_effort`. Absent, or any other, it is `high`. The
+  model route passes those two on, and `max` (`fragment_core::models::
+  EFFORTS`; any other it takes as `low`, as GLM takes `medium` for its
+  dearest, `max`), and left unset Hermes sent its own default, `medium`,
+  which the route took as `low`. Settings' Agents offers it beside the model for
   every agent: Default (High), Low and High; a pick writes `reasoning` to
   `agent.json` as the model's pick is written, and the default removes it.
   Its `home`, `"simplex"` or none (Paul, 2026-10-26; docs/api.md, "An
@@ -1993,17 +2035,52 @@ settings and state):
   Hermes' own PM, on PATH). Its browser, and the desktop's Browser icon a
   person uses after Take over, are the image's Chromium
   (`/opt/fragment/bin/chromium`, named to Hermes by
-  `AGENT_BROWSER_EXECUTABLE_PATH`): the full Chromium Hermes' image pins
-  (its PM's, named in `/etc/hermes/agent-browser-executable-path`), always
-  started with `--no-sandbox --disable-dev-shm-usage`, its scratch
+  `AGENT_BROWSER_EXECUTABLE_PATH`): regular distro Chromium, already in
+  the pinned desktop base (`/usr/bin/chromium`, 154.0.8037.92 in this
+  image), rather than PM's Chrome for Testing 145. Always
+  started with `--no-sandbox --disable-dev-shm-usage --test-type`, its scratch
   (`TMPDIR`: a headless one's temporary profile, and its shared memory)
   the container's `/tmp`, never Hermes' home's `cache/scratch` under
   `/data`. Hermes adds those flags itself only
   where it sees Docker's marker (`/.dockerenv`), and Containers gives a
   container neither that marker nor a `/dev/shm` (Docker mounts one in
   every container), so there Chromium died as it started (p5,
-  2026-10-05); the lower rung runs the desktop as Containers does
-  (`--ipc=none`, no marker). Events: `agents.changed`,
+  2026-10-05); `--test-type` suppresses that required container flag's
+  warning infobar, as upstream's desktop icon does. The lower rung runs
+  the desktop as Containers does (`--ipc=none`, no marker).
+
+  The desktop owns its visible browser, and `agent-browser` attaches to
+  it. The first native browse or Browser-icon click starts one headed
+  Chromium on the agent's published display, with its existing saved
+  profile (`bot-desktop/browser-profile`, linked into its work) and a
+  nonzero loopback CDP port of its own. No `--enable-automation`, headless
+  mode, debugging pipe or port `0`: the last also enables
+  `navigator.webdriver`. No fingerprint script or user-agent override is
+  added. Closing a tool session disconnects from the browser; the
+  desktop's stop closes its browser group gracefully before its X server,
+  keeping cookies. This includes the image's idle stop. A browser crash
+  starts a new browser on the next native browse.
+
+  The image adapts pinned Hermes' local-session start/attach, dock and
+  stop helpers (`images/hermes/desktop_browser.py`; exact source guards
+  in `boot/src/desktop.rs`). It does not set `browser.cdp_url`: in this
+  Hermes version a global CDP override would lose the desktop's local
+  lease fence. The lease brackets the entire tool call, including the
+  first startup; Take over refuses reads and actions until Give back.
+  Discovery verifies the live profile-lock owner's executable, exact
+  user-data directory, and CDP's browser PID. Stale `DevToolsActivePort`
+  files are not used, nor is another profile's port. These are the same
+  profiles and sign-ins as before; an agent's separate ad hoc profile is
+  never merged automatically. The adapter refuses to open a profile whose
+  `Last Version` is newer than its Chromium. A rollback to an image from
+  before this guard (which selects Chrome for Testing 145) must restore
+  its pre-upgrade save as well; do not open a Chromium 154 profile with
+  that older browser. The debt ledger names the upstream deletion gate.
+  This improves the browser defaults, not a site's acceptance policy:
+  when a site still needs human verification, the agent asks its owner
+  to take over the same desktop.
+
+  Events: `agents.changed`,
   `profile.written`, `agents.served` (the gateway's answer and its
   `ms`), `agents.ready` (the whole change's `ms`).
 

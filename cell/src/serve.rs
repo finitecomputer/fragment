@@ -529,7 +529,20 @@ impl FragmentCell {
         }
         let Some(row) = found else {
             if !path.starts_with("__") {
-                return self.app_fetch(req, caller, facts, path, url, link, anon).await;
+                let answered = self.app_fetch(req, caller, facts, path, url, link, anon).await;
+                // what a browser asks of a page that names no icon of its
+                // own: the fragment's icon (icon.rs), when it has one and
+                // neither its live nor its app's own route answers there
+                let unanswered = match &answered {
+                    Ok(r) => r.status_code() == 404,
+                    Err(e) => e.code == ErrorCode::NotFound,
+                };
+                if path == "favicon.ico" && unanswered && matches!(req.method(), Method::Get | Method::Head) {
+                    if let Some(resp) = self.favicon(req, public, head).await? {
+                        return Ok(resp);
+                    }
+                }
+                return answered;
             }
             return Err(CellError::new(ErrorCode::NotFound, format!("no page {path:?}")));
         };

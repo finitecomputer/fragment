@@ -22,13 +22,15 @@
 //!   duplicates, dropped there (`A_DUPLICATE`) with nothing said on this
 //!   side; across sends too, its next message may still decrypt, and an
 //!   unforced sync is refused (`PROHIBITED`: it sees nothing wrong). A forced
-//!   sync, asked as it starts, healed both directions in about 3 s every
-//!   time. So every start that went back in time (the platform says so:
-//!   `restored.rollback` in the guest's view) forces one before anything is
-//!   sent, and replies wait for it (`outbox`); its owner is told a message
-//!   may have been lost. A start that did not go back in time (a sleep that
-//!   saved, a restart) needs none: the hold stops the core before the save,
-//!   so the save is exact. A ratchet the core itself finds out of step
+//!   sync healed both directions in about 3 s every time. Every start that
+//!   went back in time (`restored.rollback` in the guest's view) reads the
+//!   core's durable state first: an existing negotiation finishes; otherwise
+//!   one is begun, forced if the core reports `ok`. Replies wait for it
+//!   (`outbox`). Possible message loss is logged without sending a chat
+//!   message. A start that did not go back
+//!   in time (a sleep that saved, a restart) needs none: the hold stops the
+//!   core before the save, so the save is exact. A ratchet the core itself
+//!   finds out of step
 //!   (`required`, `allowed`, an undecryptable message) is synchronized the
 //!   same way, unforced.
 //! - **A start** reads back, newest page first (`CATCHUP_ITEMS` a page,
@@ -40,11 +42,11 @@
 //!   crash, a refusal) is read again. Forwarding is idempotent, so this
 //!   costs reads. An anchor the core no longer has ends the scan with what
 //!   it read.
-//! - **A reply the core will not send now** (`PROHIBITED` while its ratchet
-//!   synchronizes, which an unforced sync after a restart cannot tell
-//!   apart from one in step) waits in the outbox until the ratchet is `ok`
-//!   or the next start, never dropped. A forced sync the core refuses keeps
-//!   replies waiting too, and is asked again (`Resync`) until it is `ok`.
+//! - **A reply the core will not send now** waits in the outbox until the
+//!   ratchet is `ok`. Failed syncs keep replies held too. Restarts and timer
+//!   ticks (`Resync`) read `/_info` before retrying: a forced sync replaces
+//!   its private keys even during negotiation, breaking the keys already
+//!   queued on SMP when the peer is away (the offline-phone lab).
 
 use std::collections::VecDeque;
 
@@ -87,9 +89,9 @@ pub struct Link {
     /// A sync asked and not yet `ok`: replies wait in the outbox.
     #[serde(default)]
     pub syncing: bool,
-    /// That sync was forced (a start that went back in time): a restart
-    /// before it is `ok` forces it again, since an unforced one is refused
-    /// by a core that sees nothing wrong.
+    /// A rollback still needs a forced sync. Cleared once the core accepts
+    /// one, or reports a negotiation already running: forcing again would
+    /// replace its private keys while its peer still has the earlier keys.
     #[serde(default)]
     pub forced: bool,
     #[serde(default)]
@@ -171,7 +173,7 @@ pub enum Input<'a> {
     Reply(&'a str),
     /// The owner's message of this item is on their chat with the agent.
     Delivered(i64),
-    /// A forced sync still waits for `ok`: ask it again.
+    /// A sync still waits for `ok`: read the core's state before retrying.
     Resync,
 }
 
@@ -182,7 +184,7 @@ pub enum Action {
     Ask(Cmd),
     /// The owner's message, for the agent's chat.
     Forward(Inbound),
-    /// Something to tell the owner, in their chat with the agent.
+    /// A diagnostic or link change for the manager to handle.
     Tell(Notice),
     /// The link changed what a lost life would lose (a contact bound or
     /// let go, an invitation made): a save is wanted soon.
@@ -209,7 +211,7 @@ pub struct Inbound {
     pub file: Option<FileRef>,
 }
 
-/// What the owner is told.
+/// What the link reports: diagnostics and changes the manager acts on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Notice {
     /// The link is bound to their SimpleX contact, by its name.
@@ -270,12 +272,12 @@ impl Link {
                         if rollback {
                             self.syncing = true;
                             self.forced = true;
-                            out.extend([Action::Ask(Cmd::Sync { contact, force: true }), Action::Tell(Notice::MaybeLost)]);
-                        } else if self.syncing {
-                            // a sync the last life asked: asked again (forced again
-                            // if it was), refused if done
-                            out.push(Action::Ask(Cmd::Sync { contact, force: self.forced }));
+                            out.push(Action::Tell(Notice::MaybeLost));
                         }
+                        // The core may have committed a start or completion
+                        // whose response died with the last process. Its state
+                        // decides whether to wait, flush, or begin a sync.
+                        out.push(Action::Ask(Cmd::ContactInfo { contact }));
                         self.scan.items.clear();
                         self.scan.running = true;
                         out.push(Action::Ask(Cmd::Chat { contact, count: CATCHUP_ITEMS, before: None }));
@@ -290,20 +292,14 @@ impl Link {
                         self.phase = Phase::Off;
                         out.push(Action::Tell(Notice::Failed { what }));
                     }
-                    // a forced sync refused heals nothing: replies wait on,
-                    // and it is asked again (`Resync`)
-                    Cmd::Sync { contact, force: true } if self.linked_to(*contact) && self.syncing => out.push(Action::Tell(Notice::Failed { what })),
+                    // A failure proves neither completion nor acceptance.
+                    // Keep replies held; the next state read decides the retry.
+                    Cmd::Sync { contact, .. } | Cmd::ContactInfo { contact } if self.linked_to(*contact) && self.syncing => out.push(Action::Tell(Notice::Failed { what })),
                     // the catch-up's next page, gone (its anchor deleted): what it read goes
                     Cmd::Chat { contact, .. } if self.linked_to(*contact) => self.finish_scan(false, &mut out),
                     // gone already, or not the core's to let go: not asked again
                     Cmd::Delete { contact, .. } if self.cleanup == Some(Cleanup::Contact(*contact)) => self.cleanup = None,
                     Cmd::DeleteConn { conn } if self.cleanup == Some(Cleanup::Conn(*conn)) => self.cleanup = None,
-                    // not needed (in step), or not possible: what waits goes
-                    Cmd::Sync { contact, .. } if self.linked_to(*contact) && self.syncing => {
-                        self.syncing = false;
-                        self.forced = false;
-                        self.flush(&mut out);
-                    }
                     // not sent now (a ratchet mid-sync refuses sends): it
                     // waits, and what comes after it, until the ratchet is
                     // ok or the next start
@@ -321,8 +317,8 @@ impl Link {
                 }
             }
             Input::Resync => {
-                if let (Some(contact), true) = (self.contact(), self.syncing && self.forced) {
-                    out.push(Action::Ask(Cmd::Sync { contact, force: true }));
+                if let (Some(contact), true) = (self.contact(), self.syncing) {
+                    out.push(Action::Ask(Cmd::ContactInfo { contact }));
                 }
             }
             Input::Reply(text) => {
@@ -364,13 +360,31 @@ impl Link {
             Resp::Page(items) => self.page(items, out),
             Resp::Sync { contact, status } if self.linked_to(*contact) => match status {
                 SyncStatus::Required | SyncStatus::Allowed => self.sync(*contact, out),
-                SyncStatus::Ok if self.syncing => {
-                    self.syncing = false;
+                SyncStatus::Ok => self.synced(out),
+                SyncStatus::Started | SyncStatus::Agreed => {
+                    self.syncing = true;
                     self.forced = false;
-                    out.push(Action::Tell(Notice::Resynced));
-                    self.flush(out);
                 }
-                SyncStatus::Ok | SyncStatus::Started | SyncStatus::Agreed => {}
+            },
+            Resp::SyncStarted { contact } if self.linked_to(*contact) => {
+                self.syncing = true;
+                self.forced = false;
+            }
+            Resp::ContactInfo { contact, status } if self.linked_to(*contact) => match status {
+                SyncStatus::Started | SyncStatus::Agreed => {
+                    self.syncing = true;
+                    self.forced = false;
+                }
+                SyncStatus::Ok if self.forced => out.push(Action::Ask(Cmd::Sync { contact: *contact, force: true })),
+                SyncStatus::Ok => self.synced(out),
+                SyncStatus::Required | SyncStatus::Allowed => {
+                    if !self.syncing {
+                        out.push(Action::Tell(Notice::MaybeLost));
+                    }
+                    self.syncing = true;
+                    self.forced = false;
+                    out.push(Action::Ask(Cmd::Sync { contact: *contact, force: false }));
+                }
             },
             Resp::Deleted { contact, by_them } if self.linked_to(*contact) => {
                 self.phase = Phase::Off;
@@ -389,7 +403,7 @@ impl Link {
             // a file's own events are the bridge's to act on (it receives the
             // file a forwarded message carries), never the link's, as is the
             // agent's profile (its name)
-            Resp::Sync { .. } | Resp::SyncStarted { .. } | Resp::Deleted { .. } | Resp::ConnDeleted { .. } | Resp::FileReady { .. } | Resp::FileDone { .. } | Resp::FileFailed { .. } | Resp::FileSent { .. } | Resp::FileUnsent { .. } | Resp::Profile { .. } | Resp::Error { .. } | Resp::Other(_) => {}
+            Resp::Sync { .. } | Resp::SyncStarted { .. } | Resp::ContactInfo { .. } | Resp::Deleted { .. } | Resp::ConnDeleted { .. } | Resp::FileReady { .. } | Resp::FileDone { .. } | Resp::FileFailed { .. } | Resp::FileSent { .. } | Resp::FileUnsent { .. } | Resp::Profile { .. } | Resp::Error { .. } | Resp::Other(_) => {}
         }
     }
 
@@ -479,6 +493,15 @@ impl Link {
     fn flush(&mut self, out: &mut Vec<Action>) {
         if let Phase::Linked { contact, .. } = self.phase {
             out.extend(self.outbox.drain(..).map(|text| Action::Ask(Cmd::Send { contact, text })));
+        }
+    }
+
+    fn synced(&mut self, out: &mut Vec<Action>) {
+        if self.syncing {
+            self.syncing = false;
+            self.forced = false;
+            out.push(Action::Tell(Notice::Resynced));
+            self.flush(out);
         }
     }
 
@@ -648,7 +671,7 @@ mod tests {
         let forwarded = |actions: &[Action]| actions.iter().filter_map(|a| if let Action::Forward(i) = a { Some(i.item) } else { None }).collect::<Vec<_>>();
         // the first: nothing delivered yet, read back to the chat's start
         let mut link = linked();
-        assert_eq!(link.apply(Input::Started { rollback: false }), vec![Action::Ask(Cmd::Chat { contact: 3, count: CATCHUP_ITEMS, before: None })]);
+        assert_eq!(link.apply(Input::Started { rollback: false }), vec![Action::Ask(Cmd::ContactInfo { contact: 3 }), Action::Ask(Cmd::Chat { contact: 3, count: CATCHUP_ITEMS, before: None })]);
         assert_eq!(link.apply(Input::Said(&page(12..=43))), vec![Action::Ask(Cmd::Chat { contact: 3, count: CATCHUP_ITEMS, before: Some(12) })]);
         let got = link.apply(Input::Said(&page(1..=11)));
         assert_eq!(forwarded(&got), (1..=43).filter(|id| id % 3 != 0).collect::<Vec<_>>(), "every message of the chat, oldest first");
@@ -674,7 +697,7 @@ mod tests {
         link.apply(Input::Said(&page(100..=131)));
         let gone = link.apply(Input::Failed { cmd: &Cmd::Chat { contact: 3, count: CATCHUP_ITEMS, before: Some(100) }, what: "errorStore chatItemNotFound" });
         assert_eq!(forwarded(&gone).first(), Some(&100));
-        assert_eq!(gone.last(), Some(&Action::Tell(Notice::MaybeLost)), "short of what was delivered: the owner is told");
+        assert_eq!(gone.last(), Some(&Action::Tell(Notice::MaybeLost)), "short of what was delivered: logged for diagnostics");
         assert!(link.scan.items.is_empty());
         // bounded: past SCAN_MAX it asks no older page
         link.apply(Input::Started { rollback: false });
@@ -683,7 +706,7 @@ mod tests {
         loop {
             let got = link.apply(Input::Said(&page(top - 31..=top)));
             if !got.iter().any(|a| matches!(a, Action::Ask(Cmd::Chat { .. }))) {
-                assert_eq!(got.last(), Some(&Action::Tell(Notice::MaybeLost)), "past the bound: the owner is told");
+                assert_eq!(got.last(), Some(&Action::Tell(Notice::MaybeLost)), "past the bound: logged for diagnostics");
                 break;
             }
             asked += 1;
@@ -694,11 +717,8 @@ mod tests {
         link.apply(Input::Unlink);
         assert_eq!(link.delivered, 0);
     }
-    /// Goal (Alex's review of #523): a reply the core will not send now (a
-    /// restart mid-sync, the peer away: the unforced sync is refused as it
-    /// is when in step, and the send then too) waits, and is sent once the
-    /// ratchet is ok, never dropped; a sync refused when in step sends what
-    /// waited at once.
+    /// A failed command cannot prove that a negotiation finished. Replies
+    /// survive failures and restarts until the core reports `ok`.
     #[test]
     fn a_reply_the_core_refuses_waits_for_the_ratchet() {
         let mut link = linked();
@@ -707,27 +727,28 @@ mod tests {
         let mut link = Link::from_json(&link.to_json()).expect("it reads back");
         link.apply(Input::Started { rollback: false });
         let prohibited = "errorAgent CMD PROHIBITED synchronizeRatchet: not allowed";
-        let flushed = link.apply(Input::Failed { cmd: &Cmd::Sync { contact: 3, force: false }, what: prohibited });
-        assert_eq!(sends(&flushed), vec!["must survive restart"]);
-        // the core is mid-sync after all: the send is refused, and the reply waits
-        let send = Cmd::Send { contact: 3, text: "must survive restart".into() };
-        link.apply(Input::Failed { cmd: &send, what: "errorAgent CMD PROHIBITED" });
+        let failed = link.apply(Input::Failed { cmd: &Cmd::Sync { contact: 3, force: false }, what: prohibited });
+        assert!(sends(&failed).is_empty());
+        assert!(link.apply(Input::Said(&Resp::ContactInfo { contact: 3, status: SyncStatus::Started })).is_empty());
         assert_eq!((link.syncing, link.outbox.iter().cloned().collect::<Vec<_>>()), (true, vec!["must survive restart".to_string()]));
         assert!(link.apply(Input::Reply("and this")).is_empty(), "what comes after it waits behind it");
         let ok = link.apply(Input::Said(&Resp::Sync { contact: 3, status: SyncStatus::Ok }));
         assert_eq!(sends(&ok), vec!["must survive restart", "and this"]);
         assert!(!link.syncing && link.outbox.is_empty());
-        // a forced sync that fails (a rollback's) heals nothing: the core may
-        // take a send its peer drops, so nothing is sent; it is asked again
-        // until the ratchet is ok
+        // A forced sync refused before acceptance is retried only after
+        // reading the core's state. A failed read keeps everything held.
         let mut link = linked();
         link.apply(Input::Started { rollback: true });
         link.apply(Input::Reply("held again"));
         let failed = link.apply(Input::Failed { cmd: &Cmd::Sync { contact: 3, force: true }, what: "errorStore SEInternalError" });
         assert!(sends(&failed).is_empty(), "nothing sent: {failed:?}");
         assert!(link.syncing && link.outbox.len() == 1);
-        assert_eq!(link.apply(Input::Resync), vec![Action::Ask(Cmd::Sync { contact: 3, force: true })]);
-        let ok = link.apply(Input::Said(&Resp::Sync { contact: 3, status: SyncStatus::Ok }));
+        assert_eq!(link.apply(Input::Resync), vec![Action::Ask(Cmd::ContactInfo { contact: 3 })]);
+        let failed = link.apply(Input::Failed { cmd: &Cmd::ContactInfo { contact: 3 }, what: "errorDatabase" });
+        assert!(sends(&failed).is_empty() && link.syncing && link.forced);
+        assert_eq!(link.apply(Input::Said(&Resp::ContactInfo { contact: 3, status: SyncStatus::Ok })), vec![Action::Ask(Cmd::Sync { contact: 3, force: true })]);
+        link.apply(Input::Said(&Resp::SyncStarted { contact: 3 }));
+        let ok = link.apply(Input::Said(&Resp::ContactInfo { contact: 3, status: SyncStatus::Ok }));
         assert_eq!(sends(&ok), vec!["held again"]);
         assert!(link.apply(Input::Resync).is_empty(), "in step: nothing to ask");
     }
@@ -739,31 +760,34 @@ mod tests {
     #[test]
     fn a_start_catches_up_and_a_rollback_forces_a_sync() {
         let mut link = linked();
-        assert_eq!(link.apply(Input::Started { rollback: false }), vec![Action::Ask(Cmd::Chat { contact: 3, count: CATCHUP_ITEMS, before: None })]);
+        assert_eq!(link.apply(Input::Started { rollback: false }), vec![Action::Ask(Cmd::ContactInfo { contact: 3 }), Action::Ask(Cmd::Chat { contact: 3, count: CATCHUP_ITEMS, before: None })]);
         assert_eq!(
             link.apply(Input::Started { rollback: true }),
-            vec![Action::Ask(Cmd::Sync { contact: 3, force: true }), Action::Tell(Notice::MaybeLost), Action::Ask(Cmd::Chat { contact: 3, count: CATCHUP_ITEMS, before: None })]
+            vec![Action::Tell(Notice::MaybeLost), Action::Ask(Cmd::ContactInfo { contact: 3 }), Action::Ask(Cmd::Chat { contact: 3, count: CATCHUP_ITEMS, before: None })]
         );
         assert!(link.syncing);
+        assert_eq!(link.apply(Input::Said(&Resp::ContactInfo { contact: 3, status: SyncStatus::Ok })), vec![Action::Ask(Cmd::Sync { contact: 3, force: true })]);
         assert!(link.apply(Input::Reply("held")).is_empty(), "nothing is sent out of step");
         assert!(link.apply(Input::Said(&Resp::Sync { contact: 3, status: SyncStatus::Agreed })).is_empty());
         let ok = link.apply(Input::Said(&Resp::Sync { contact: 3, status: SyncStatus::Ok }));
         assert_eq!(ok, vec![Action::Tell(Notice::Resynced), Action::Ask(Cmd::Send { contact: 3, text: "held".into() })]);
-        // a restart while a forced sync was under way forces it again
+        // A restart whose acceptance response was lost reads the core first.
         let mut cut = linked();
         cut.apply(Input::Started { rollback: true });
         let mut cut = Link::from_json(&cut.to_json()).expect("it reads back");
         assert!(cut.forced);
-        assert_eq!(cut.apply(Input::Started { rollback: false }), vec![Action::Ask(Cmd::Sync { contact: 3, force: true }), Action::Ask(Cmd::Chat { contact: 3, count: CATCHUP_ITEMS, before: None })]);
-        // a restart while a sync was under way asks it again, unforced
+        assert_eq!(cut.apply(Input::Started { rollback: false }), vec![Action::Ask(Cmd::ContactInfo { contact: 3 }), Action::Ask(Cmd::Chat { contact: 3, count: CATCHUP_ITEMS, before: None })]);
+        assert!(cut.apply(Input::Said(&Resp::ContactInfo { contact: 3, status: SyncStatus::Started })).is_empty());
+        assert!(cut.syncing && !cut.forced, "an accepted sync is never re-forced");
+        // A restart after an unforced sync also reads the current state.
         link.apply(Input::Said(&Resp::Sync { contact: 3, status: SyncStatus::Required }));
         let back = Link::from_json(&link.to_json()).expect("it reads back");
         assert_eq!(back, link);
         let mut back = back;
-        assert_eq!(back.apply(Input::Started { rollback: false }), vec![Action::Ask(Cmd::Sync { contact: 3, force: false }), Action::Ask(Cmd::Chat { contact: 3, count: CATCHUP_ITEMS, before: None })]);
-        // refused as needless (in step after all): what waited goes
+        assert_eq!(back.apply(Input::Started { rollback: false }), vec![Action::Ask(Cmd::ContactInfo { contact: 3 }), Action::Ask(Cmd::Chat { contact: 3, count: CATCHUP_ITEMS, before: None })]);
+        // The completion event was lost: a state read releases replies too.
         back.apply(Input::Reply("after"));
-        let sent = back.apply(Input::Failed { cmd: &Cmd::Sync { contact: 3, force: false }, what: "errorAgent CMD PROHIBITED synchronizeRatchet: not allowed" });
+        let sent = back.apply(Input::Said(&Resp::ContactInfo { contact: 3, status: SyncStatus::Ok }));
         assert_eq!(sends(&sent), vec!["after"]);
         assert!(!back.syncing);
         // an invitation: kept across a plain restart, made anew after a rollback
@@ -790,6 +814,47 @@ mod tests {
         let mut quiet = linked();
         assert!(quiet.apply(Input::Said(&Resp::Items(vec![Item { content: Content::Skipped, shared: None, ..msg(3, None, "") }]))).is_empty());
         assert_eq!(quiet.apply(Input::Said(&Resp::Sync { contact: 3, status: SyncStatus::Allowed })), vec![Action::Ask(Cmd::Sync { contact: 3, force: false }), Action::Tell(Notice::MaybeLost)]);
+    }
+
+    /// An offline peer may take any number of timer ticks or restarts to
+    /// return. An accepted negotiation keeps its keys through all of them,
+    /// even when the bridge lost the acceptance response before saving it.
+    #[test]
+    fn an_accepted_sync_keeps_its_keys_across_retries_and_restarts() {
+        for status in [SyncStatus::Started, SyncStatus::Agreed] {
+            for accepted in [false, true] {
+                let mut link = linked();
+                link.apply(Input::Started { rollback: true });
+                link.apply(Input::Reply("held for the phone"));
+                if accepted {
+                    link.apply(Input::Said(&Resp::SyncStarted { contact: 3 }));
+                }
+                let mut link = Link::from_json(&link.to_json()).expect("a restart reads it");
+                for _ in 0..3 {
+                    let started = link.apply(Input::Started { rollback: false });
+                    assert!(!started.iter().any(|a| matches!(a, Action::Ask(Cmd::Sync { .. }))));
+                    assert!(link.apply(Input::Said(&Resp::ContactInfo { contact: 3, status })).is_empty());
+                    assert!(link.syncing && !link.forced && link.outbox.len() == 1);
+                    assert_eq!(link.apply(Input::Resync), vec![Action::Ask(Cmd::ContactInfo { contact: 3 })]);
+                    link = Link::from_json(&link.to_json()).expect("still held across a restart");
+                }
+                assert_eq!(sends(&link.apply(Input::Said(&Resp::ContactInfo { contact: 3, status: SyncStatus::Ok }))), vec!["held for the phone"]);
+                assert!(link.apply(Input::Said(&Resp::Sync { contact: 3, status: SyncStatus::Ok })).is_empty(), "completion twice sends once");
+                assert!(link.apply(Input::Resync).is_empty());
+            }
+        }
+        // The peer can begin a sync while the bridge is restarting too.
+        let mut link = linked();
+        link.apply(Input::Said(&Resp::Sync { contact: 3, status: SyncStatus::Agreed }));
+        assert!(link.apply(Input::Reply("wait for the peer")).is_empty());
+        // Another contact's state never starts, completes or retries ours.
+        for status in [SyncStatus::Ok, SyncStatus::Started, SyncStatus::Required] {
+            assert!(link.apply(Input::Said(&Resp::ContactInfo { contact: 9, status })).is_empty());
+            assert!(link.syncing && link.outbox.len() == 1);
+        }
+        for status in [SyncStatus::Required, SyncStatus::Allowed] {
+            assert_eq!(link.apply(Input::Said(&Resp::ContactInfo { contact: 3, status })), vec![Action::Ask(Cmd::Sync { contact: 3, force: false })]);
+        }
     }
 
     /// Goal: the outbox is bounded: past it the oldest parts go, counted.

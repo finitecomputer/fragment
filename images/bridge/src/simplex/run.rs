@@ -92,7 +92,7 @@ const PULSE_MS: u64 = 3_000;
 /// answer them (an unlink's delete) first.
 const DRAIN_MS: u64 = 5_000;
 const TICK_MS: u64 = 100;
-/// A forced sync that failed is asked again this often until it is `ok`.
+/// A sync still waiting reads the core's state this often until it is `ok`.
 const RESYNC_MS: u64 = 30_000;
 const INBOX_MAX: usize = 256;
 const WRITER_MAX: usize = 64;
@@ -620,9 +620,6 @@ pub fn display_name(title: Option<&str>, label: &str) -> String {
 fn greeting(name: &str) -> String {
     format!("Hi, it's {name}. You're linked: write to me here any time, as you would in our chat.")
 }
-
-/// What the owner's SimpleX app is told after a start that went back in time.
-const MAYBE_LOST: &str = "I restarted and may have missed a message you sent me just before. If I don't answer something, please send it again.";
 
 /// What it is told when its message cannot be carried: this link has no
 /// door key (one made before doors, or one a rollback took).
@@ -1252,15 +1249,16 @@ impl Manager {
         }
     }
 
-    /// A forced sync still waiting (one the core refused), asked again every
-    /// `RESYNC_MS` while its core is up, until the ratchet is `ok`.
+    /// A sync still waiting reads the core's state every `RESYNC_MS` while
+    /// its core is up. Never re-force an accepted negotiation: that replaces
+    /// private keys for public keys already queued at the peer's SMP server.
     fn resync(&mut self) {
         let now = Instant::now();
         let due: Vec<String> = self
             .slots
             .iter_mut()
             .filter_map(|(f, s)| {
-                if !(s.up && s.saved.link.syncing && s.saved.link.forced) {
+                if !(s.up && s.saved.link.syncing) {
                     s.resync_at = None;
                     return None;
                 }
@@ -1946,11 +1944,9 @@ impl Manager {
                     Notice::Failed { what } => s.note = Some(format!("SimpleX said: {what}")),
                 }
                 crate::ev!("simplex.told", { "agent": f, "notice": format!("{n:?}") });
-                let name = s.shown_name();
-                match n {
-                    Notice::Linked { .. } => self.apply(f, Input::Reply(&greeting(&name))),
-                    Notice::MaybeLost => self.apply(f, Input::Reply(MAYBE_LOST)),
-                    _ => {}
+                if let Notice::Linked { .. } = n {
+                    let name = s.shown_name();
+                    self.apply(f, Input::Reply(&greeting(&name)));
                 }
             }
             Action::Save => {
@@ -2156,6 +2152,7 @@ fn kind_of(cmd: &Cmd) -> &'static str {
         Cmd::Send { .. } => "send",
         Cmd::Sync { force: true, .. } => "sync_forced",
         Cmd::Sync { .. } => "sync",
+        Cmd::ContactInfo { .. } => "contact_info",
         Cmd::Delete { .. } => "delete",
         Cmd::DeleteConn { .. } => "delete_conn",
         Cmd::Chat { .. } => "chat",
@@ -3343,59 +3340,37 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// Goal (Alex's re-review of #523): a forced sync still waiting is asked
-    /// again every `RESYNC_MS` while its core is up, and no more once the
-    /// ratchet is ok.
+    /// A waiting sync polls state at the timer's bound, before and after
+    /// acceptance, and stops polling once it is ready. No timer replaces
+    /// the keys of an accepted negotiation.
     #[tokio::test]
-    async fn a_forced_sync_still_waiting_is_asked_again() {
-        let (tx, _rx) = mpsc::channel(4);
-        let (pulse, _) = watch::channel(false);
-        let mut link = Link { phase: Phase::Linked { contact: 3, name: "paul".into() }, ..Link::default() };
-        link.apply(Input::Started { rollback: true });
-        assert!(link.syncing && link.forced);
-        let mut slot = Slot {
-            agent: agent(),
-            dir: PathBuf::from("/nowhere"),
-            saved: Saved { identity: "npub1juniper".into(), generation: 1, link, used: BTreeMap::new(), abandoned: BTreeMap::new(), receiving: BTreeSet::new(), sending: BTreeMap::new(), chat: None },
-            name: None,
-            named_at: None,
-            naming: false,
-            profiled: None,
-            epoch: 1,
-            core: None,
-            up: true,
-            corr: 0,
-            pending: BTreeMap::new(),
-            started: true,
-            exits: VecDeque::new(),
-            retry_at: None,
-            resync_at: None,
-            broken: None,
-            note: None,
-            draining_since: None,
-            cancel_at: None,
-            files: BTreeMap::new(),
-            sends: BTreeMap::new(),
-            poster: None,
-            gap: false,
-            outstanding: Default::default(),
-            acked: 0,
-            door: None,
-            session: None,
-            linking: None,
-        };
-        slot.up = true;
-        let cfg = Config { bin: PathBuf::from("/nowhere"), dir: PathBuf::from("/nowhere"), smp: None, xftp: None };
-        let mut m = Manager { cfg, api: Api::new("http://127.0.0.1:9").expect("an address"), quiet: Arc::new(AtomicBool::new(true)), hold: PathBuf::from("/nowhere/hold"), tx, slots: BTreeMap::from([("juniper--k3x9".to_string(), slot)]), computer: Some(computer(true, 1, None)), held: false, pulse, pulse_until: None, relaying: watch::channel(BTreeMap::new()).0, socks: None, offer: watch::channel(None).0, stop: watch::channel(false).1 };
+    async fn a_waiting_sync_polls_state_without_replacing_keys() {
+        let dir = std::env::temp_dir().join(format!("simplex-sync-timer-{}", std::process::id()));
+        let (mut m, mut sent, _) = captured(&dir, 16);
+        let f = "juniper--k3x9";
+        m.apply(f, Input::Started { rollback: true });
+        sent_lines(&mut sent);
         m.resync();
-        let first = m.slots["juniper--k3x9"].resync_at.expect("its next ask, set");
-        m.slots.get_mut("juniper--k3x9").expect("its slot").resync_at = Some(Instant::now() - Duration::from_millis(1));
-        m.resync();
-        assert!(m.slots["juniper--k3x9"].resync_at.is_some_and(|t| t > Instant::now()), "asked, and the next one set");
+        let first = m.slots[f].resync_at.expect("its next read, set");
         assert!(first > Instant::now());
-        m.apply("juniper--k3x9", Input::Said(&Resp::Sync { contact: 3, status: wire::SyncStatus::Ok }));
+        assert!(sent_lines(&mut sent).is_empty(), "nothing before the bound");
+        for accepted in [false, true] {
+            if accepted {
+                m.apply(f, Input::Said(&Resp::SyncStarted { contact: 3 }));
+                assert!(!m.slots[f].saved.link.forced);
+            }
+            m.slots.get_mut(f).expect("its slot").resync_at = Some(Instant::now() - Duration::from_millis(1));
+            m.resync();
+            let lines = sent_lines(&mut sent);
+            assert_eq!(lines.iter().map(|(_, cmd)| cmd.as_str()).collect::<Vec<_>>(), vec!["/_info @3"]);
+            assert!(m.slots[f].resync_at.is_some_and(|t| t > Instant::now()), "read, and the next one set");
+        }
+        m.apply(f, Input::Said(&Resp::Sync { contact: 3, status: wire::SyncStatus::Ok }));
+        sent_lines(&mut sent);
         m.resync();
-        assert_eq!(m.slots["juniper--k3x9"].resync_at, None, "ok: nothing more");
+        assert_eq!(m.slots[f].resync_at, None, "ok: nothing more");
+        assert!(sent_lines(&mut sent).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Goal (Alex's re-review of #548): what a start reads back to moves

@@ -82,10 +82,16 @@ use fragment_bridge::net::{self, Body};
 /// on OpenRouter's GLM-5.3 Flash, its fallback and vision on Workers AI's.
 pub const CHEAP_ID: &str = "z-ai/glm-5.3-flash";
 pub const FALLBACK_ID: &str = "@cf/zai-org/glm-5.3-flash";
+/// The cheap tier's route's own fallback (2026-10-24): what its agent's
+/// stall falls back to, by its id.
+pub const ROUTE_FALLBACK_ID: &str = "deepseek-v4-1-flash";
 
-/// The view's `models`, by the route's names.
+/// The view's `models`, by the route's names, and each tier's route: the
+/// cheap tier's falling back to a model of its own (`ROUTE_FALLBACK_ID`),
+/// the medium tier's to the deployment's.
 pub fn ids() -> Value {
-    json!({ "cheap": CHEAP_ID, "medium": CHEAP_ID, "fallback": FALLBACK_ID, "vision": FALLBACK_ID })
+    let route = |fallback: &str| json!({ "private": false, "fallback": fallback, "vision": FALLBACK_ID });
+    json!({ "cheap": CHEAP_ID, "medium": CHEAP_ID, "fallback": FALLBACK_ID, "vision": FALLBACK_ID, "routes": { "cheap": route(ROUTE_FALLBACK_ID), "medium": route(FALLBACK_ID) } })
 }
 
 #[derive(Default, Debug, Clone)]
@@ -199,7 +205,7 @@ pub const STALL_S: u64 = 120;
 fn stalls(body: &Value) -> bool {
     let last_user = body["messages"].as_array().and_then(|m| m.iter().rev().find(|m| m["role"] == "user")).map(|m| text_of(&m["content"])).unwrap_or_default();
     // Hermes' review prompts say "install" (and so `stall`): never one of a test's
-    last_user.contains("stall") && !last_user.starts_with("Review the conversation above") && body["model"] != FALLBACK_ID && body["model"] != "fallback"
+    last_user.contains("stall") && !last_user.starts_with("Review the conversation above") && body["model"] != FALLBACK_ID && body["model"] != ROUTE_FALLBACK_ID && body["model"] != "fallback"
 }
 
 /// How long a call waits whose last user message says `take your time`: past
@@ -279,6 +285,7 @@ pub fn answer(body: &Value) -> (String, Option<Value>) {
     // `browse: <url>`: the browser tool goes there; `look at your screen`:
     // computer_use captures it. Each answer quotes what its tool said.
     let browse = last_user.lines().find_map(|l| l.split_once("browse: ").map(|(_, u)| u.trim().to_string())).filter(|u| !u.is_empty());
+    let inspect_browser = last_user.lines().find_map(|l| l.split_once("inspect browser: ").map(|(_, expression)| expression.trim().to_string())).filter(|s| !s.is_empty());
     let look = last_user.contains("look at your screen");
     // `desk: <json>`: computer_use with those arguments (a scroll, a focus)
     let desk = last_user.lines().find_map(|l| l.split_once("desk: ").and_then(|(_, a)| serde_json::from_str::<Value>(a.trim()).ok())).filter(Value::is_object);
@@ -302,7 +309,7 @@ pub fn answer(body: &Value) -> (String, Option<Value>) {
             let made: String = result.split_once("made=").map(|(_, rest)| rest.chars().take_while(|c| !c.is_whitespace() && !matches!(c, '"' | '\\' | ',')).collect()).unwrap_or_default();
             return (format!("scripted: sent\nMEDIA:{made}"), None);
         }
-        if run.is_some() || start.is_some() || notify.is_some() || narrate.is_some() || browse.is_some() || look || desk.is_some() || write.is_some() || code.is_some() || clarify.is_some() || dm.is_some() || dm_back.is_some() {
+        if run.is_some() || start.is_some() || notify.is_some() || narrate.is_some() || browse.is_some() || inspect_browser.is_some() || look || desk.is_some() || write.is_some() || code.is_some() || clarify.is_some() || dm.is_some() || dm_back.is_some() {
             return (format!("scripted: the tool said: {}", result.chars().take(4000).collect::<String>()), None);
         }
         let ran = if result.contains("tool-ran") { "the tool ran" } else { "the tool said something else" };
@@ -402,6 +409,13 @@ pub fn answer(body: &Value) -> (String, Option<Value>) {
             ("scripted: no execute_code among my tools".into(), None)
         };
     }
+    if let Some(expression) = inspect_browser {
+        return if offered("browser_console") {
+            (String::new(), Some(call("browser_console", json!({ "expression": expression }))))
+        } else {
+            ("scripted: no browser_console among my tools".into(), None)
+        };
+    }
     match (browse, look) {
         (Some(url), _) if offered("browser_navigate") => return (String::new(), Some(call("browser_navigate", json!({ "url": url })))),
         (Some(_), _) => return ("scripted: no browser_navigate among my tools".into(), None),
@@ -428,7 +442,7 @@ async fn handle(req: Request<Incoming>, calls: Arc<Mutex<Vec<Call>>>) -> Respons
     if path.ends_with("/models") {
         // the intercept's list (`Models::listed`): the ids, never the route's names
         let model = |id: &str| json!({ "id": id, "object": "model", "created": 0, "owned_by": "fragment" });
-        return net::json_answer(StatusCode::OK, &json!({ "object": "list", "data": [model(CHEAP_ID), model(FALLBACK_ID)] }));
+        return net::json_answer(StatusCode::OK, &json!({ "object": "list", "data": [model(CHEAP_ID), model(FALLBACK_ID), model(ROUTE_FALLBACK_ID)] }));
     }
     let body = req.into_body().collect().await.map(|b| b.to_bytes()).unwrap_or_default();
     if path.ends_with("/audio/transcriptions") {

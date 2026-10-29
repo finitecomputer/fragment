@@ -691,32 +691,47 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     let stop = records(api, &owner, &chat_name, "chat").into_iter().find(|r| r["body"]["kind"] == "stop").unwrap_or_default();
     s.ok("the page's Stop is a record naming the turn", stop["body"]["turn"] == turn.as_str(), &stop);
 
-    // a picture the owner attaches: in their message, as the chat's blob, and read by the agent
-    let png = chrome.eval(
-        &page,
-        "(() => { const c = document.createElement('canvas'); c.width = 160; c.height = 100; const g = c.getContext('2d'); const l = g.createLinearGradient(0, 0, 160, 100); l.addColorStop(0, '#a88bea'); l.addColorStop(1, '#62c8af'); g.fillStyle = l; g.fillRect(0, 0, 160, 100); return c.toDataURL('image/png').split(',')[1]; })()",
-    )?;
-    use base64::Engine;
-    let picture = base64::engine::general_purpose::STANDARD.decode(png.as_str().context("the canvas answered a data URL")?)?;
-    let picture_sha = hex::encode(Sha256::digest(&picture));
-    let path = shots.join("picture.png");
-    std::fs::write(&path, &picture)?;
-    chrome.choose_files(&page, "#attachment-picker", &[Path::new(&path)])?;
-    s.ok("a chosen file shows as a removable chip", shows(&mut chrome, &page, "[...document.querySelectorAll('#attachments .attachment-chip')].some((c) => c.textContent.includes('picture.png') && c.querySelector('.attachment-remove'))"), "");
+    // pictures the owner attaches: in their message, as the chat's blobs, and read by the agent
+    let mut pictures = Vec::new();
+    for (name, width, height) in [("picture.png", 960, 240), ("tall.png", 240, 960), ("square.png", 960, 960)] {
+        let png = chrome.eval(
+            &page,
+            &format!("(() => {{ const c = document.createElement('canvas'); c.width = {width}; c.height = {height}; const g = c.getContext('2d'); const l = g.createLinearGradient(0, 0, {width}, {height}); l.addColorStop(0, '#a88bea'); l.addColorStop(1, '#62c8af'); g.fillStyle = l; g.fillRect(0, 0, {width}, {height}); return c.toDataURL('image/png').split(',')[1]; }})()"),
+        )?;
+        use base64::Engine;
+        let bytes = base64::engine::general_purpose::STANDARD.decode(png.as_str().context("the canvas answered a data URL")?)?;
+        let sha = hex::encode(Sha256::digest(&bytes));
+        let path = shots.join(name);
+        std::fs::write(&path, &bytes)?;
+        pictures.push((name, bytes, sha, path));
+    }
+    let paths: Vec<&Path> = pictures.iter().map(|(_, _, _, path)| path.as_path()).collect();
+    chrome.choose_files(&page, "#attachment-picker", &paths)?;
+    s.ok("chosen files show as removable chips", shows(&mut chrome, &page, "[...document.querySelectorAll('#attachments .attachment-chip')].length === 3 && [...document.querySelectorAll('#attachments .attachment-chip')].every((c) => c.querySelector('.attachment-remove'))"), "");
     say(&mut chrome, "here is a picture")?;
-    let shown = format!("!!document.querySelector('.msg.user.mine .attachment-image img[src=\"./__blob/{picture_sha}\"]')");
-    s.ok("the message carries it, shown inline", shows(&mut chrome, &page, &shown), chrome.eval(&page, "document.getElementById('messages').innerHTML.slice(-600)")?);
+    let images = "[...document.querySelectorAll('.msg.user.mine .attachment-image img')].filter((i) => ['picture.png', 'tall.png', 'square.png'].includes(i.alt))";
+    let shown = format!("{images}.length === 3 && {images}.every((i) => i.complete && i.naturalWidth > 0)");
+    s.ok("the message carries them, shown inline", shows(&mut chrome, &page, &shown), chrome.eval(&page, "document.getElementById('messages').innerHTML.slice(-600)")?);
+    let picture = &pictures[0].1;
+    let picture_sha = &pictures[0].2;
     let fetched = chrome.eval(&page, &format!("fetch('./__blob/{picture_sha}').then(async (r) => [r.status, r.headers.get('content-type'), (await r.arrayBuffer()).byteLength])"))?;
-    s.ok("the page reads it back as the chat's blob, as uploaded", fetched == json!([200, "image/png", picture.len()]), &fetched);
+    s.ok("the page reads one back as the chat's blob, as uploaded", fetched == json!([200, "image/png", picture.len()]), &fetched);
     let blob = api.signed(&owner, "GET", &format!("/api/f/{chat_name}/blobs/{picture_sha}"), None)?;
-    s.ok("the same bytes the API serves", blob.status == 200 && blob.bytes == picture, blob.status);
+    s.ok("the same bytes the API serves", blob.status == 200 && blob.bytes == *picture, blob.status);
     let carried = posted(s, "here is a picture")["body"]["attachments"].clone();
-    s.ok(
-        "its record names the file as docs/chat-records.md does",
-        carried == json!([{ "sha256": picture_sha, "size": picture.len(), "type": "image/png", "name": "picture.png" }]),
-        &carried,
-    );
-    s.ok("the agent read it", shows(&mut chrome, &page, &replied("[got 1: picture.png]")), "");
+    let expected: Vec<Value> = pictures.iter().map(|(name, bytes, sha, _)| json!({ "sha256": sha, "size": bytes.len(), "type": "image/png", "name": name })).collect();
+    s.ok("their record names the files as docs/chat-records.md does", carried == Value::Array(expected), &carried);
+    s.ok("the agent read them", shows(&mut chrome, &page, &replied("[got 3: picture.png, tall.png, square.png]")), "");
+
+    // Large pictures keep their aspect ratio, capped at 240px and at the
+    // message's available width; each wrapper's content box hugs its image.
+    for (width, height, mobile) in [(1280, 860, false), (375, 812, true), (280, 812, true)] {
+        fit(&mut chrome, &page, width, height, mobile)?;
+        let geometry = chrome.eval(&page, &format!("(() => {{ const images = {images}; return {{ width: innerWidth, images: images.map((img) => {{ const box = img.closest('.attachment-image'); const message = img.closest('.msg'); const r = img.getBoundingClientRect(); const b = box.getBoundingClientRect(); const style = getComputedStyle(box); const left = parseFloat(style.borderLeftWidth); const right = parseFloat(style.borderRightWidth); const top = parseFloat(style.borderTopWidth); const bottom = parseFloat(style.borderBottomWidth); const available = message.clientWidth - left - right; const scale = Math.min(1, (240 - left - right) / img.naturalWidth, 240 / img.naturalHeight, available / img.naturalWidth); const expected = [img.naturalWidth * scale, img.naturalHeight * scale]; const hugs = Math.abs(box.clientWidth - r.width) <= 1 && Math.abs(box.clientHeight - r.height) <= 1; const inside = r.left >= b.left + left - 0.5 && r.right <= b.right - right + 0.5 && r.top >= b.top + top - 0.5 && r.bottom <= b.bottom - bottom + 0.5; return {{ name: img.alt, natural: [img.naturalWidth, img.naturalHeight], image: [r.width, r.height], wrapper: [b.width, b.height], expected, hugs, inside, sized: Math.abs(r.width - expected[0]) <= 1 && Math.abs(r.height - expected[1]) <= 1, large: img.naturalWidth > 240 || img.naturalHeight > 240 }}; }}) }}; }})()"))?;
+        let fits = geometry["width"] == width && geometry["images"].as_array().is_some_and(|images| images.len() == 3 && images.iter().all(|image| image["hugs"] == true && image["inside"] == true && image["sized"] == true && image["large"] == true));
+        s.ok(&format!("at {width}px, large wide, tall and square pictures fit their wrappers with no blank band or clipping"), fits, &geometry);
+    }
+    fit(&mut chrome, &page, 1280, 860, false)?;
 
     // a reply's file: a chip that downloads it
     say(&mut chrome, "draw me something")?;

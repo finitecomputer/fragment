@@ -56,6 +56,8 @@
       <section class="invites" id="invites" aria-label="Invites" hidden></section>
       <nav class="rows" id="chats" aria-label="Chats"></nav>
       <div class="spacer"></div>
+      <!-- every fragment of theirs but chats and agents: the dock, cards, icons and sharing (apps-page.js) -->
+      <button class="row settings" id="apps-link" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg><span class="label">Apps</span></button>
       <button class="row settings" id="settings" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg><span class="label">Settings</span></button>
     </aside>
     </div>
@@ -87,6 +89,7 @@
       <div class="notice" id="notice"><strong>Loading…</strong></div>
       <div class="frames" id="frames"></div>
       <section class="page" id="settings-page" hidden></section>
+      <section class="page" id="apps-page" hidden></section>
     </main>
 
     <div class="gutter gutter-col" id="gutter-right" role="separator" aria-orientation="vertical" aria-label="Resize viewer" title="Drag to resize · double-click to reset"></div>
@@ -149,9 +152,11 @@
     <div class="wallpaper" aria-hidden="true"></div>
     <div class="search-panel">
       <form class="search-input-wrap" id="search-form">
-        <input id="workspace-search" type="text" aria-label="Ask anything or find a chat" placeholder="Ask anything, or find a chat or app…" autocomplete="off" maxlength="4000" enterkeyhint="send" autofocus aria-controls="search-results">
+        <textarea id="workspace-search" rows="1" aria-label="Ask anything or find a chat" placeholder="Ask anything, or find a chat or app…" autocomplete="off" maxlength="4000" enterkeyhint="send" autofocus aria-controls="search-results"></textarea>
         <button class="icon-button search-send" id="search-send" type="submit" aria-label="Start a new chat" title="Start a new chat" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5m-6 6 6-6 6 6"/></svg></button>
       </form>
+      <div class="search-files" id="search-files" hidden></div>
+      <div class="search-drop" id="search-drop" aria-hidden="true">Drop to attach</div>
       <div class="search-results" id="search-results"></div>
       <p class="search-status" id="search-status" role="status"></p>
     </div>

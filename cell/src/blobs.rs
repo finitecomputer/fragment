@@ -237,9 +237,9 @@ impl FragmentCell {
                WHERE json_valid(r.body) AND json_type(r.body, '$.attachments') = 'array' AND a.type = 'object')",
             vec![now_v.clone()],
         )?;
-        // the preview card is named by the fragment itself (card.rs)
-        if let Some(card) = self.cards()?.card {
-            self.exec("UPDATE blobs SET seen_at = ? WHERE sha = ?", vec![now_v, card.blob.as_str().into()])?;
+        // the preview card (a shot or an upload) and the icon are named by the fragment itself (card.rs, icon.rs)
+        for named in [self.cards()?.card.map(|c| c.blob), self.meta(MetaKey::Icon)?].into_iter().flatten() {
+            self.exec("UPDATE blobs SET seen_at = ? WHERE sha = ?", vec![now_v.clone(), named.as_str().into()])?;
         }
         let count = self.drop_blobs("SELECT sha FROM blobs WHERE seen_at < ? LIMIT 1000", now - self.cfg.blob_grace_ms).await?;
         if count > 0 {

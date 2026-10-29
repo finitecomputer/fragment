@@ -1033,6 +1033,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     // is labelled starfire-40k, so it is read, never guessed
     let key = b.eval(&page, "document.querySelector('#chats .chat-row')?.dataset.key ?? ''")?;
     let chat = key.as_str().and_then(|k| k.strip_prefix("chat:")).unwrap_or("").to_string();
+    first_chat_late_ui(s, &mut b, &page, &chat)?;
     let first_label = label_of(&chat).trim_end_matches("-chat").to_string();
     let host = chat.clone();
     // while its computer is held: a card of what is being made, typing, no Send, no message
@@ -1203,6 +1204,9 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     let _ = s.eventually(wait, || b.eval_in_frame(&page, &reader_chat, "!!document.querySelector('.msg.agent:not(.streaming)')").ok() == Some(Value::Bool(true)));
     unread_ui(s, api, &mut b, &page, &me, &reader_chat, &shots)?;
     new_chat_ui(s, api, &mut b, &page, &me, &reader_chat, &shots)?;
+    launch_late_ui(s, api, &mut b, &page, &me, &reader_chat)?;
+    launch_straight_ui(s, api, &mut b, &page, &me, &reader_chat)?;
+    launch_geometry_ui(s, &mut b, &page, &shots)?;
 
     // both agents in one chat, search, and archiving, as the person uses them
     groups_ui(s, api, &mut b, &page, &me, &shots)?;
@@ -1248,6 +1252,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     let _ = b.screenshot(&page, &shots.join("desktop-app-card.png"));
     b.eval(&page, &format!("({icon}?.dispatchEvent(new PointerEvent('pointerleave')), true)"))?;
     let _ = b.screenshot(&page, &shots.join("desktop-app.png"));
+    icon_ui(s, &mut b, &page, &groceries, &shots)?;
     compose_elsewhere_ui(s, api, &mut b, &page, &session, &asked_in, &groceries)?;
     open_beside_ui(s, api, &mut b, &page, &me, &groceries, &shots)?;
     app_policy_ui(s, api, &mut b, &page, &groceries)?;
@@ -1263,7 +1268,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
         loading["ok"] == true,
         &loading,
     );
-    let settings = b.until(&page, "location.pathname === '/settings' && ['Account', 'Credit', 'Computer', 'Sharing', 'Connections', 'Build with Claude Code or Codex'].every(h => document.getElementById('settings-page').innerText.toUpperCase().includes(h.toUpperCase()))", wait);
+    let settings = b.until(&page, "location.pathname === '/settings' && ['Account', 'Credit', 'Computer', 'Connections', 'Build with Claude Code or Codex'].every(h => document.getElementById('settings-page').innerText.toUpperCase().includes(h.toUpperCase()))", wait);
     let text = b.eval(&page, "document.getElementById('settings-page').innerText")?;
     let text = text.as_str().unwrap_or("");
     let mut has = |q: &str| b.eval(&page, &format!("!!document.querySelector({q:?})")).ok() == Some(serde_json::json!(true));
@@ -1338,6 +1343,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
         &legal,
     );
     release_line_ui(s, api, &mut b, &page)?;
+    settings_navigation_ui(s, &mut b, &page)?;
     // a prompt for Claude Code or Codex naming this platform's own llms.txt,
     // copied whole; the CLI's install folded below it
     let prompt = format!("Read {}/llms.txt and help me build: ", api.base);
@@ -1399,14 +1405,11 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
         held && later && stands == true,
         b.eval(&page, COPY_SEEN)?,
     );
-    // Sharing: what they own, each with who can open it (GET /api/access)
-    let theirs = format!("#settings-access .access-row[data-fragment={groceries:?}]");
-    let listed = b.until(&page, &format!("!!document.querySelector({theirs:?}) && document.querySelector({theirs:?}).textContent.includes('Anyone with the link')"), wait);
-    s.ok(
-        "settings' Sharing lists what they own, with who can open each",
-        listed,
-        b.eval(&page, "document.getElementById('settings-access')?.innerText ?? 'no Sharing section'")?,
-    );
+    // sharing is the Apps page's: Settings have none
+    let none = b.eval(&page, "![...document.querySelectorAll('#settings-page h2, #settings-page .settings-nav-link')].some((h) => /sharing/i.test(h.textContent)) && !document.querySelector('#settings-access, #settings-page .access-row')")?;
+    s.ok("Settings have no Sharing section: who has access is the Apps page's", settings && none == true, b.eval(&page, "[...document.querySelectorAll('#settings-page h2')].map((h) => h.textContent)")?);
+    let skills = own_skills(api, &session)?.into_iter().next().context("the person's skills fragment")?;
+    apps_ui(s, &mut b, &page, &skills, &groceries, &chat, &shots)?;
     add_skills_ui(s, api, &mut b, &page, &session)?;
     skills_ui(s, api, &mut b, &page, &session)?;
     connections_ui(s, api, &mut b, &page, &session, &email, &chat)?;
@@ -1510,6 +1513,8 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     // last: it renames the person's first agent, which the checks above name
     faces_ui(s, api, &mut b, &page, &me, &chat, &shots)?;
     b.close(page)?;
+    first_chat_release_ui(s, api, &mut b)?;
+    b.set_cookie(&format!("{}/", api.base), "fragment_session", &session)?;
     // their computer unread from the page's start: theirs, then a new person's
     refresh_failed_start_ui(s, api, &mut b, &shots)?;
     first_run_put_off_ui(s, api, &mut b, &shots)?;
@@ -2332,7 +2337,7 @@ fn faces_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person,
     );
     // Every surface follows a rename (Paul, 2026-10-26: "be systematic about
     // referring to the user's chosen name"): with Settings drawn (Agents,
-    // Computer, Skills, Sharing, …) and its page, its files and its screen
+    // Computer, Skills, …) and its page, its files and its screen
     // open, renamed elsewhere; then nothing the shell draws, nor any page it
     // frames, says a name it had, in its text, its labels or its titles. A
     // surface that copies a name once fails here, wherever it is.
@@ -2341,7 +2346,7 @@ fn faces_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person,
     b.click(page, "#sidebar-agent")?;
     let screen_open = menu_item(b, page, "Its screen")? && screen_named(s, b, "Frankie");
     b.click(page, "#settings")?;
-    let drawn = b.until(page, &format!("location.pathname === '/settings' && document.querySelector({face})?.textContent === 'Frankie' && !!document.querySelector('#settings-page .access-list')"), wait);
+    let drawn = b.until(page, &format!("location.pathname === '/settings' && document.querySelector({face})?.textContent === 'Frankie'"), wait);
     let wrote = rename_by_cli(s, api, &cli, &agent, "Rosalind");
     // its page, open, says its new name, and its job (read again) says it too ("Its job")
     let job_shown = |b: &mut Browser| b.eval_in_frame(page, &its_page, "document.getElementById('soul')?.textContent ?? ''").ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
@@ -2506,6 +2511,76 @@ const SETTINGS_BOX: &str = "(() => { const p = document.getElementById('settings
 const HOLD_LEDGER: &str = "(() => { const real = window.fetch; window.__ledgerHeld = null; window.fetch = async (url, o) => { \
     if (String(url) === '/api/ledger') { window.fetch = real; await new Promise((r) => { window.__ledgerHeld = r; }); } return real(url, o); }; return true; })()";
 
+/// Settings' section navigation, by mouse and by scrolling, on wide and
+/// narrow desktops and a phone: every section can be picked, the last one
+/// included, and a horizontal nav both scrolls and reveals the section the
+/// page scrolls to.
+fn settings_navigation_ui(s: &mut Suite, b: &mut Browser, page: &Page) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    for (layout, width, height, mobile) in [("wide desktop", 1280, 800, false), ("narrow desktop", 1100, 800, false), ("phone", 390, 844, true)] {
+        b.viewport(page, width, height, mobile)?;
+        let listed = b.eval(page, "[...document.querySelectorAll('#settings-page .settings-nav-link:not([hidden])')].map((b) => b.dataset.section)")?;
+        let ids: Vec<String> = listed.as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect();
+        let mut picked = Vec::new();
+        for id in ids {
+            let link = format!(".settings-nav-link[data-section={}]", js(&id));
+            if mobile {
+                b.eval(page, &format!("(document.querySelector({link:?})?.click(), true)"))?;
+            } else {
+                b.click(page, &link)?;
+            }
+            let selected = b.until(
+                page,
+                &format!("(() => {{ const b = document.querySelector({link:?}); const s = document.getElementById({id:?}); if (!s) return false; const p = document.getElementById('settings-page'); const r = s.getBoundingClientRect(); const pr = p.getBoundingClientRect(); const top = pr.top + p.clientTop + parseFloat(getComputedStyle(p).scrollPaddingTop) + parseFloat(getComputedStyle(s).scrollMarginTop); return b?.getAttribute('aria-current') === 'location' && Math.abs(r.top - top) < 2 && r.top < innerHeight && r.bottom > 0; }})()"),
+                wait,
+            );
+            picked.push(json!({ "section": id, "selected": selected }));
+        }
+        s.ok(
+            &format!("every Settings nav item selects its section on a {layout}, including Build with Claude Code or Codex and Your data at the end"),
+            !picked.is_empty() && picked.iter().all(|p| p["selected"] == true),
+            json!(picked),
+        );
+    }
+
+    b.viewport(page, 1280, 800, false)?;
+    b.eval(page, "document.getElementById('settings-page').scrollTo({ top: 0, behavior: 'auto' })")?;
+    let account = b.until(page, "document.querySelector('.settings-nav-link[data-section=settings-section-0]')?.getAttribute('aria-current') === 'location'", wait);
+    b.eval(page, "document.getElementById('settings-connections').scrollIntoView({ block: 'start', behavior: 'auto' })")?;
+    let connections = b.until(page, "document.querySelector('.settings-nav-link[data-section=settings-connections]')?.getAttribute('aria-current') === 'location'", wait);
+    b.eval(page, "(() => { const p = document.getElementById('settings-page'); p.scrollTo({ top: p.scrollHeight, behavior: 'auto' }); return true; })()")?;
+    let data = b.until(page, "document.querySelector('.settings-nav-link[data-section=settings-data]')?.getAttribute('aria-current') === 'location'", wait);
+    s.ok(
+        "Settings highlighting follows actual scrolling: Account at the top, Connections in the middle, and Your data at the bottom",
+        account && connections && data,
+        json!({ "account": account, "connections": connections, "yourData": data }),
+    );
+
+    b.viewport(page, 1100, 800, false)?;
+    let horizontal = b.eval(
+        page,
+        "(() => { const n = document.querySelector('#settings-page .settings-nav'); const links = [...n.querySelectorAll('.settings-nav-link:not([hidden])')]; n.scrollLeft = 0; const before = n.scrollLeft; n.scrollLeft = n.scrollWidth; const r = n.getBoundingClientRect(); const last = links.at(-1)?.getBoundingClientRect(); return { overflowing: n.scrollWidth > n.clientWidth, overflowX: getComputedStyle(n).overflowX, scrollbar: getComputedStyle(n).scrollbarWidth, webkitScrollbar: getComputedStyle(n, '::-webkit-scrollbar').display, before, after: n.scrollLeft, lastReachable: !!last && last.left >= r.left - 1 && last.right <= r.right + 1 }; })()",
+    )?;
+    s.ok(
+        "on a narrow desktop the overflowing Settings nav has a visible scrollbar and scrolls horizontally far enough to reach Your data",
+        horizontal["overflowing"] == true && horizontal["overflowX"] == "auto" && horizontal["scrollbar"] == "thin" && horizontal["webkitScrollbar"] != "none" && horizontal["after"].as_f64().is_some_and(|x| x > 0.0) && horizontal["lastReachable"] == true,
+        &horizontal,
+    );
+    b.eval(page, "(() => { const p = document.getElementById('settings-page'); document.querySelector('#settings-page .settings-nav').scrollLeft = 0; p.scrollTo({ top: 0, behavior: 'auto' }); return true; })()")?;
+    b.until(page, "document.querySelector('.settings-nav-link[aria-current=location]')?.dataset.section === 'settings-section-0'", wait);
+    b.eval(page, "(() => { const p = document.getElementById('settings-page'); p.scrollTo({ top: p.scrollHeight, behavior: 'auto' }); return true; })()")?;
+    let revealed = b.until(
+        page,
+        "(() => { const n = document.querySelector('#settings-page .settings-nav'); const b = n.querySelector('[aria-current=location]'); const nr = n.getBoundingClientRect(); const br = b?.getBoundingClientRect(); return b?.dataset.section === 'settings-data' && n.scrollLeft > 0 && !!br && br.left >= nr.left - 1 && br.right <= nr.right + 1; })()",
+        wait,
+    );
+    s.ok("scrolling a narrow desktop to Your data brings its active nav item into view", revealed, b.eval(page, "({ active: document.querySelector('.settings-nav-link[aria-current=location]')?.dataset.section, scrollLeft: document.querySelector('.settings-nav').scrollLeft })")?);
+    b.viewport(page, 1280, 800, false)?;
+    b.eval(page, "document.getElementById('settings-page').scrollTo({ top: 0, behavior: 'auto' })")?;
+    b.until(page, "document.querySelector('.settings-nav-link[aria-current=location]')?.dataset.section === 'settings-section-0'", wait);
+    Ok(())
+}
+
 /// Opens settings by `open` (a script's expression) with their read of
 /// the ledger held (`HOLD_LEDGER`), so they stay loading: their boxes then
 /// (`SETTINGS_BOX`), and once the read is let go and they load. `ok` when
@@ -2591,6 +2666,12 @@ const YOUR_DATA_FITS: &str = "(() => { const d = document.getElementById('settin
 const SMALL_FIELDS: &str = "[...document.querySelectorAll('input:not([type=checkbox]):not([type=radio]):not([type=hidden]):not([type=file]):not([type=range]), textarea, select')] \
     .map((e) => [e.id || e.name || e.getAttribute('aria-label') || e.placeholder || e.tagName, parseFloat(getComputedStyle(e).fontSize)]).filter(([, px]) => px < 16)";
 
+/// The launcher's input at rest: one line (its 24 px and its padding), and
+/// its placeholder on that one line too (a textarea's would wrap to a
+/// second on a phone, which its height then took).
+const LAUNCHER_ONE_LINE: &str = "(() => { const i = document.getElementById('workspace-search'); const h = i.getBoundingClientRect().height; const was = i.style.height; \
+    i.style.height = 'auto'; const placeholder = i.scrollHeight; i.style.height = was; return { ok: !i.value && h <= 45 && placeholder <= h + 1, height: h, placeholder }; })()";
+
 /// A message the page must hold without widening: a word that never
 /// breaks, a long line of code, and a wide table.
 const WIDE_MESSAGE: &str = "A word that never breaks: supercalifragilisticexpialidociousandthensomemoreletterswithoutanyspaceatallforthephone\n\n```js\nconst line = 'a very long line of code that must scroll inside its own block and never widen the page at all';\n```\n\n| column one | column two | column three | column four | column five | column six |\n|---|---|---|---|---|---|\n| a wide table cell | another wide cell | and another one | four four four | five five five | six six six |";
@@ -2665,13 +2746,23 @@ fn phone_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &st
         b.eval(page, "(document.getElementById('toggle-left').click(), true)")?;
         b.until(page, "document.getElementById('layout').classList.contains('left-open') && document.getAnimations().every((a) => a.playState !== 'running' || a.effect?.getComputedTiming().iterations === Infinity)", wait);
         places.push(("the list", b.eval(page, PAGE_FITS)?));
-        // the launcher, words typed
+        // the launcher: one line at rest, its placeholder too; words typed
         b.eval(page, "(document.getElementById('sidebar-new-chat').click(), true)")?;
         b.until(page, "document.getElementById('search-dialog').open", wait);
+        places.push(("the launcher at rest, one line", b.eval(page, LAUNCHER_ONE_LINE)?));
         b.eval(page, &fill("#workspace-search", "garden"))?;
         b.until(page, "!!document.querySelector('#search-results .search-result')", wait);
         places.push(("the launcher", b.eval(page, PAGE_FITS)?));
         if let Value::Array(l) = b.eval(page, SMALL_FIELDS)? { small.extend(l.into_iter().map(|f| json!({ "width": w, "in": "launcher", "field": f }))); }
+        // a long prompt, which wraps and grows it, and a file under it
+        b.eval(page, &fill("#workspace-search", "Plan a garden for a small north-facing balcony: what grows in shade, what to sow each month, and a watering schedule I can keep while I travel"))?;
+        let chips = b.eval(page, PASTE_FILE)?;
+        let grown = b.eval(page, "document.getElementById('workspace-search').getBoundingClientRect().height")?.as_f64().unwrap_or(0.0);
+        let fits = b.eval(page, PAGE_FITS)?;
+        places.push(("the launcher, a long prompt and a file", json!({ "ok": fits["ok"] == true && chips == json!(1) && grown > 50.0 && grown <= 200.0, "page": fits, "chips": chips, "grown": grown })));
+        if w == 320 {
+            let _ = b.screenshot(page, &shots.join(format!("phone-{w}-launcher.png")));
+        }
         b.eval(page, "(document.getElementById('search-dialog').dispatchEvent(new Event('cancel')), true)")?;
         b.until(page, "!document.getElementById('search-dialog').open", wait);
         // settings (at 375 px, held loading a moment: where the loaded page's content goes)
@@ -2681,7 +2772,7 @@ fn phone_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &st
         } else {
             b.eval(page, &format!("({open}, true)"))?;
         }
-        b.until(page, "location.pathname === '/settings' && !!document.querySelector('#settings-access')", wait);
+        b.until(page, "location.pathname === '/settings' && !!document.querySelector('#settings-data')", wait);
         places.push(("settings", b.eval(page, PAGE_FITS)?));
         if let Value::Array(l) = b.eval(page, SMALL_FIELDS)? { small.extend(l.into_iter().map(|f| json!({ "width": w, "in": "settings", "field": f }))); }
         if w == 320 {
@@ -2693,6 +2784,15 @@ fn phone_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &st
         places.push(("settings' Your data, an export ready", json!({ "ok": ready && data["ok"] == true, "seen": data })));
         if w == 320 {
             let _ = b.screenshot(page, &shots.join(format!("phone-{w}-your-data.png")));
+        }
+        // the Apps page, its rows stacked: from the sidebar's Apps
+        b.eval(page, "(document.getElementById('toggle-left').click(), document.getElementById('apps-link').click(), true)")?;
+        let rows = b.until(page, "location.pathname === '/apps' && !!document.querySelector('#apps-page .app-row [data-action=share]')", wait);
+        let fits = b.eval(page, PAGE_FITS)?;
+        places.push(("the Apps page", json!({ "ok": rows && fits["ok"] == true, "page": fits })));
+        if let Value::Array(l) = b.eval(page, SMALL_FIELDS)? { small.extend(l.into_iter().map(|f| json!({ "width": w, "in": "apps", "field": f }))); }
+        if w == 390 {
+            let _ = b.screenshot(page, &shots.join(format!("phone-{w}-apps.png")));
         }
         // the share sheet, over the chat
         // (the chat of theirs, from its row: at / the newest chat opens, maybe one shared with them)
@@ -2754,7 +2854,7 @@ fn phone_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &st
         }
         let bad: Vec<Value> = places.iter().filter(|(_, v)| v["ok"] != true).map(|(p, v)| json!({ "place": p, "seen": v })).collect();
         s.ok(
-            &format!("at {w} px on a phone, the page stays in its viewport, never scrolling or wider: the chat (its sidebar closed and open), a long word, code and a wide table, the launcher, settings and its Your data, the share sheet, an app's window, and the ways to ask for one, three and three more from its die (a 44 px target)"),
+            &format!("at {w} px on a phone, the page stays in its viewport, never scrolling or wider: the chat (its sidebar closed and open), a long word, code and a wide table, the launcher (one line at rest, its placeholder too; a long prompt and a file), settings and its Your data, the share sheet, an app's window, and the ways to ask for one, three and three more from its die (a 44 px target)"),
             echoed && bad.is_empty(),
             json!({ "bad": bad, "places": places.iter().map(|(p, _)| p).collect::<Vec<_>>() }),
         );
@@ -5120,12 +5220,1311 @@ fn app_policy_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, app: &s
     Ok(())
 }
 
+/// The records of `chat` whose text is `text`.
+fn said_in(api: &Api, me: &Person, chat: &str, text: &str) -> Vec<Value> {
+    shell(api, me.session, "GET", &format!("/api/f/{chat}/channels/chat?after=0&limit=100"), None, &[])
+        .map(|r| r.body["records"].as_array().into_iter().flatten().filter(|r| r["body"]["text"] == text).cloned().collect())
+        .unwrap_or_default()
+}
+
+/// The person's new chats with their agent (`<first>-chat-<n>`).
+fn new_chats(api: &Api, me: &Person) -> Vec<String> {
+    let prefix = format!("{}-chat-", me.first);
+    shell(api, me.session, "GET", "/api/fragments", None, &[])
+        .map(|r| r.body["fragments"].as_array().into_iter().flatten().filter_map(|f| f["name"].as_str()).filter(|n| label_of(n).starts_with(&prefix)).map(str::to_string).collect())
+        .unwrap_or_default()
+}
+
+/// The page's own animations (`Element.animate`: the launcher's closing,
+/// 320 ms) 30 times as long, so a step can come while one runs
+/// (`NORMAL_MOTION` puts them back).
+const SLOW_MOTION: &str = "(() => { const real = window.__animate ??= Element.prototype.animate; \
+    Element.prototype.animate = function (k, o) { return real.call(this, k, typeof o === 'number' ? o * 30 : { ...o, duration: (o?.duration ?? 0) * 30 }); }; return true; })()";
+const NORMAL_MOTION: &str = "(Element.prototype.animate = window.__animate ?? Element.prototype.animate, true)";
+
+/// Before the first agent exists, the launcher's words go to the first
+/// chat's composer. Back to settings while its close still runs is the
+/// person's newer view: no late compose opens the chat again, and the next
+/// launcher opening keeps the words.
+fn first_chat_late_ui(s: &mut Suite, b: &mut Browser, page: &Page, chat: &str) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    let opened = "document.getElementById('search-dialog').open";
+    let closed = "!document.getElementById('search-dialog').open";
+    let settings = "location.pathname === '/settings' && !document.getElementById('settings-page').hidden";
+    b.eval(page, "(document.getElementById('settings').click(), true)")?;
+    let shown = b.until(page, settings, wait);
+    open_row(b, page, chat, wait)?;
+    b.eval(page, SLOW_MOTION)?;
+    b.click(page, "#sidebar-new-chat")?;
+    let open = b.until(page, opened, wait);
+    let said = "Keep these words for the first chat, but stay where Back takes me";
+    b.eval(page, &fill("#workspace-search", said))?;
+    let offered = b.until(page, &format!("document.querySelector('#search-results .search-start')?.textContent.includes({})", js(&format!("Say it in {FIRST_CHAT}"))), wait);
+    b.eval(page, "(document.getElementById('search-form').requestSubmit(), true)")?;
+    let closing = b.eval(page, &format!("{opened} && document.getElementById('search-dialog').inert"))? == true;
+    b.eval(page, "(history.back(), true)")?;
+    let back = b.until(page, settings, wait);
+    let finished = b.until(page, closed, wait);
+    b.eval(page, NORMAL_MOTION)?;
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    let stayed = b.eval(page, &format!("{closed} && {settings}"))? == true;
+    let where_now = b.eval(page, "({ path: location.pathname, settings: !document.getElementById('settings-page').hidden, title: document.getElementById('chat-title').textContent })")?;
+    b.click(page, "#sidebar-new-chat")?;
+    let kept = b.until(page, &format!("{opened} && document.getElementById('workspace-search').value === {}", js(said)), wait);
+    b.eval(page, "(document.getElementById('search-dialog').dispatchEvent(new Event('cancel')), true)")?;
+    let dismissed = b.until(page, closed, wait);
+    open_row(b, page, chat, wait)?;
+    s.ok(
+        "before the first agent exists, Back to settings while the launcher's first-chat handoff still closes does not reopen the chat; its next opening keeps the words",
+        shown && open && offered && closing && back && finished && stayed && kept && dismissed,
+        json!({ "closing": closing, "back": back, "stayed": stayed, "kept": kept, "where": where_now }),
+    );
+    Ok(())
+}
+
+/// A pending release may not discard a first-chat draft retained when Back
+/// wins the handoff. Once the next launcher opening consumes it and the
+/// person closes that opening, nothing of it remains to hold the release.
+fn first_chat_release_ui(s: &mut Suite, api: &Api, b: &mut Browser) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    let home = format!("{}/", api.base);
+    let email = format!("shell-ui-first-chat-release-{}@e2e.test", crate::api::now_s());
+    let session = api.sign_in(&email)?;
+    b.set_cookie(&home, "fragment_session", &session)?;
+    b.set_cookie(&home, RELEASE_COOKIE, "")?;
+    let page = b.open_with_script(&home, r#"
+      if (window === window.top) {
+        const real = window.fetch.bind(window);
+        window.fetch = async (url, options) => {
+          if (url === '/api/computers' && options?.method === 'POST') {
+            window.__computerRefused = true;
+            return new Response(JSON.stringify({ message: 'setup refused for the test' }), { status: 503, headers: { 'content-type': 'application/json' } });
+          }
+          return real(url, options);
+        };
+      }
+    "#)?;
+    b.viewport(&page, 1280, 800, false)?;
+    let made = b.until(&page, "document.querySelectorAll('#chats .chat-row').length === 1 && !!document.querySelector('#frames iframe') && window.__computerRefused === true", wait);
+    let key = b.eval(&page, "document.querySelector('#chats .chat-row')?.dataset.key ?? ''")?;
+    let chat = key.as_str().and_then(|k| k.strip_prefix("chat:")).unwrap_or("").to_string();
+    let setup = s.eventually(wait, || b.eval_in_frame(&page, &chat, "!!document.querySelector('.setup-error')").ok() == Some(Value::Bool(true)));
+    b.eval(&page, "(document.getElementById('settings').click(), true)")?;
+    b.until(&page, "location.pathname === '/settings' && !document.getElementById('settings-page').hidden", wait);
+    open_row(b, &page, &chat, wait)?;
+    b.eval(&page, "(window.__release = 1, true)")?;
+    b.eval(&page, SLOW_MOTION)?;
+    b.click(&page, "#sidebar-new-chat")?;
+    b.until(&page, "document.getElementById('search-dialog').open", wait);
+    let said = "An interrupted first-chat draft holds the pending release";
+    b.eval(&page, &fill("#workspace-search", said))?;
+    let offered = b.until(&page, &format!("document.querySelector('#search-results .search-start')?.textContent.includes({})", js(&format!("Say it in {FIRST_CHAT}"))), wait);
+    b.eval(&page, "(document.getElementById('search-form').requestSubmit(), true)")?;
+    b.eval(&page, "(history.back(), true)")?;
+    let back = b.until(&page, "location.pathname === '/settings' && !document.getElementById('settings-page').hidden", wait);
+    let closed = b.until(&page, "!document.getElementById('search-dialog').open", wait);
+    b.eval(&page, NORMAL_MOTION)?;
+
+    let next = format!("e2e-first-chat-draft-{}", crate::api::now_s());
+    b.set_cookie(&home, RELEASE_COOKIE, &next)?;
+    b.eval(&page, &visibility("hidden"))?;
+    let heard = b.until(&page, &format!("document.documentElement.dataset.releaseNext === {}", js(&next)), wait);
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    let held = b.eval(&page, &format!("window.__release === 1 && document.querySelector('meta[name=fragment-release]')?.content !== {} && location.pathname === '/settings' && !document.getElementById('search-dialog').open", js(&next)))? == true;
+    b.eval(&page, &visibility("visible"))?;
+    b.click(&page, "#sidebar-new-chat")?;
+    let consumed = b.until(&page, &format!("document.getElementById('search-dialog').open && document.getElementById('workspace-search').value === {}", js(said)), wait);
+    b.eval(&page, "(document.getElementById('search-dialog').dispatchEvent(new Event('cancel')), true)")?;
+    let discarded = b.until(&page, "!document.getElementById('search-dialog').open", wait);
+    b.eval(&page, &visibility("hidden"))?;
+    let reloaded = b.until(&page, &format!("!window.__release && document.querySelector('meta[name=fragment-release]')?.content === {} && !document.getElementById('layout').hidden", js(&next)), wait);
+    s.ok(
+        "a pending release waits for an interrupted first-chat handoff's retained words; its next opening consumes them, closing that opening discards them, and the release then reloads",
+        made && setup && offered && back && closed && heard && held && consumed && discarded && reloaded,
+        json!({ "setup": setup, "back": back, "heard": heard, "held": held, "consumed": consumed, "discarded": discarded, "reloaded": reloaded }),
+    );
+    b.close(page)?;
+    b.set_cookie(&home, RELEASE_COOKIE, "")?;
+    Ok(())
+}
+
+/// A file pasted into the launcher's input, as the clipboard hands it
+/// over: how many files the launcher holds then.
+const PASTE_FILE: &str = "(() => { const d = new DataTransfer(); d.items.add(new File(['a list of atlases'], 'launch.txt', { type: 'text/plain' })); \
+    document.getElementById('workspace-search').dispatchEvent(new ClipboardEvent('paste', { clipboardData: d, bubbles: true, cancelable: true })); return document.querySelectorAll('#search-files .search-file').length; })()";
+
+/// What the launcher's send does late (Alex's review of #592). A chat's
+/// page holding what no storage keeps is never loaded again under it: a
+/// blank chat found again with a file chosen and not sent keeps it, as
+/// does the chat the launcher opened, a file chosen there while the
+/// launcher's own uploads, when that upload is refused (the launcher
+/// opening again on its words and file; sent again from there, posted
+/// there). And once the person gives the middle column another view while
+/// the chat is made, its answer changes nothing on screen: another chat
+/// opened, the message is still posted; settings, then Back, and the
+/// making refused: a notice, the words in the launcher's next opening,
+/// sent from there.
+fn launch_late_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person, reader_chat: &str) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    let own_chat = format!("{}-chat", me.first);
+    let says = |chat: &str, text: &str| said_in(api, me, chat, text);
+    let new_chats = || new_chats(api, me);
+    let chips = |b: &mut Browser, chat: &str| b.eval_in_frame(page, chat, "document.querySelectorAll('#attachments .attachment-chip').length").unwrap_or(Value::Null);
+    let shows = |chat: &str| format!("location.pathname === '/' && [...document.querySelectorAll('#frames iframe')].find((f) => !f.hidden)?.dataset.fragment === {}", js(chat));
+    let closed = "!document.getElementById('search-dialog').open";
+    let opened = "document.getElementById('search-dialog').open";
+    let submit = "(document.getElementById('search-form').requestSubmit(), true)";
+    // its first message titles a chat: the launcher finds it blank no more
+    let titled = |b: &mut Browser, chat: &str| b.until(page, &format!("(document.querySelector({})?.querySelector('.label')?.textContent ?? 'New chat') !== 'New chat'", js(&format!("#chats [data-key={}]", js(&format!("chat:{chat}"))))), wait);
+
+    // a blank chat found again, a file chosen in it and not sent
+    let blank = own_named(api, me.session, &format!("{own_chat}-3"))?;
+    open_row(b, page, &blank, wait)?;
+    let ready = s.eventually(wait, || b.eval_in_frame(page, &blank, COMPOSER_READY).ok() == Some(Value::Bool(true)));
+    let picked = b.eval_in_frame(page, &blank, PICK_FILE)? == json!(1);
+    // its page tells the shell it holds it (a message, heard in a moment)
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    let said = "Which projection suits a classroom wall map best";
+    b.click(page, "#sidebar-new-chat")?;
+    let open = b.until(page, opened, wait);
+    b.eval(page, &fill("#workspace-search", said))?;
+    b.eval(page, submit)?;
+    let posted = s.eventually(wait, || says(&blank, said).len() == 1);
+    let shown = b.until(page, &format!("{closed} && {}", shows(&blank)), wait);
+    let arrived = s.eventually(wait, || b.eval_in_frame(page, &blank, &format!("document.body.innerText.includes({})", js(said))).ok() == Some(Value::Bool(true)));
+    let kept = chips(b, &blank);
+    s.ok(
+        "the launcher's message to a blank chat found again whose page holds a file chosen and not sent: posted there and the chat opened, its page as it was (the file still in its composer)",
+        ready && picked && open && posted && shown && arrived && kept == json!(1),
+        json!({ "chips": kept, "shows": open_chat(b, page) }),
+    );
+    anyhow::ensure!(b.eval_in_frame(page, &blank, REMOVE_FILE)? == true, "the blank chat's file taken out");
+    anyhow::ensure!(titled(b, &blank), "the blank chat titled from its message");
+
+    // the launcher's own file, its upload held; a file chosen in the chat it
+    // opened meanwhile; then the upload refused
+    let said = "Sort the attached atlases by the year each was printed";
+    let before = new_chats();
+    b.click(page, "#sidebar-new-chat")?;
+    let open = b.until(page, opened, wait);
+    let pasted = b.eval(page, PASTE_FILE)? == json!(1);
+    b.eval(page, &fill("#workspace-search", said))?;
+    b.eval(page, &hold("PUT", "/blobs/[0-9a-f]{64}$", Hold::Request))?;
+    b.eval(page, submit)?;
+    let held = b.until(page, "!!window.__held.release", wait);
+    let made = open_chat(b, page);
+    let fresh = !made.is_empty() && !before.contains(&made);
+    let ready = fresh && s.eventually(wait, || b.eval_in_frame(page, &made, COMPOSER_READY).ok() == Some(Value::Bool(true)));
+    let picked = ready && b.eval_in_frame(page, &made, PICK_FILE)? == json!(1);
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    b.eval(page, "(window.__held.release?.('refuse'), true)")?;
+    let reopened = b.until(page, &format!("{opened} && document.getElementById('search-status').textContent.includes(\"wasn't sent\")"), wait);
+    let seen = b.eval(page, "({ words: document.getElementById('workspace-search').value, files: document.querySelectorAll('#search-files .search-file').length })")?;
+    let kept = if fresh { chips(b, &made) } else { Value::Null };
+    let still = b.eval(page, &shows(&made))?;
+    b.eval(page, "(window.__held.restore(), true)")?;
+    s.ok(
+        "a file chosen in the chat the launcher opened, while the launcher's own file uploads, stays in its composer when that upload is refused; the launcher opens again over it on its words and file, saying it wasn't sent",
+        open && pasted && held && fresh && picked && reopened && seen == json!({ "words": said, "files": 1 }) && kept == json!(1) && still == true,
+        json!({ "made": made, "seen": seen, "chips": kept }),
+    );
+    b.eval(page, submit)?;
+    let posted = s.eventually(wait, || says(&made, said).first().is_some_and(|r| r["body"]["attachments"][0]["name"] == "launch.txt"));
+    let shown = b.until(page, &format!("{closed} && {}", shows(&made)), wait);
+    s.ok("sent again from there, it is posted to that chat with the launcher's file", posted && shown, json!(says(&made, said)));
+    if fresh {
+        anyhow::ensure!(b.eval_in_frame(page, &made, REMOVE_FILE)? == true, "the new chat's file taken out");
+        anyhow::ensure!(titled(b, &made), "the new chat titled from its message");
+    }
+
+    // the chat's making held; another chat opened meanwhile; then made
+    let said = "Name three atlases worth owning and say why";
+    let before = new_chats();
+    b.eval(page, &hold("POST", "^/api/fragments$", Hold::Request))?;
+    b.click(page, "#sidebar-new-chat")?;
+    let open = b.until(page, opened, wait);
+    b.eval(page, &fill("#workspace-search", said))?;
+    b.eval(page, submit)?;
+    let held = b.until(page, &format!("{closed} && !!window.__held.release"), wait);
+    open_row(b, page, reader_chat, wait)?;
+    b.eval(page, "(window.__held.release?.(), true)")?;
+    let made = s.eventually(wait, || new_chats().iter().any(|c| !before.contains(c) && says(c, said).len() == 1));
+    let settled = b.until(page, HELD_SETTLED, wait);
+    b.eval(page, "(window.__held.restore(), true)")?;
+    let stayed = b.eval(page, &format!("{closed} && {} && document.getElementById('chat-title').textContent === 'Reader'", shows(reader_chat)))?;
+    s.ok(
+        "another chat opened while the launcher's chat is made: the chat made and the message posted there, the person left where they went",
+        open && held && made && settled && stayed == true,
+        json!({ "shows": open_chat(b, page), "title": b.eval(page, "document.getElementById('chat-title').textContent")? }),
+    );
+
+    // held again; settings opened meanwhile, then Back; the making refused
+    let said = "Find a printed atlas of the oceans from before 1900";
+    let before = new_chats();
+    b.eval(page, &hold("POST", "^/api/fragments$", Hold::Request))?;
+    b.click(page, "#sidebar-new-chat")?;
+    let open = b.until(page, opened, wait);
+    b.eval(page, &fill("#workspace-search", said))?;
+    b.eval(page, submit)?;
+    let held = b.until(page, &format!("{closed} && !!window.__held.release"), wait);
+    b.eval(page, "(document.getElementById('settings').click(), true)")?;
+    let settings = b.until(page, "location.pathname === '/settings' && !document.getElementById('settings-page').hidden", wait);
+    b.eval(page, "(history.back(), true)")?;
+    let back = b.until(page, &shows(reader_chat), wait);
+    b.eval(page, "(window.__held.release?.('refuse'), true)")?;
+    let told = b.until(page, "!document.getElementById('notice').hidden && document.getElementById('notice').innerText.startsWith(\"Your message wasn't sent\")", wait);
+    let settled = b.until(page, HELD_SETTLED, wait);
+    b.eval(page, "(window.__held.restore(), true)")?;
+    let seen = b.eval(page, NOTICE_SEEN)?;
+    let stayed = b.eval(page, &format!("{closed} && {}", shows(reader_chat)))?;
+    s.ok(
+        "settings, then Back, while the launcher's chat is made, and the making refused: the person stays where Back took them, the launcher closed, and a notice says the message wasn't sent",
+        open && held && settings && back && told && settled && stayed == true && seen["ok"] == true,
+        &seen,
+    );
+    b.click(page, "#sidebar-new-chat")?;
+    let kept = b.until(page, &format!("{opened} && document.getElementById('workspace-search').value === {} && document.getElementById('search-status').textContent.includes(\"wasn't sent\")", js(said)), wait);
+    b.eval(page, submit)?;
+    // another chat than the Reader's on screen: the one it made
+    let shown = b.until(page, &format!("{closed} && location.pathname === '/' && ((f) => !!f && f.dataset.fragment !== {})([...document.querySelectorAll('#frames iframe')].find((f) => !f.hidden))", js(reader_chat)), wait);
+    let made = open_chat(b, page);
+    let posted = !before.contains(&made) && s.eventually(wait, || says(&made, said).len() == 1);
+    s.ok("the launcher's next opening has its words, saying they weren't sent; sent from there, its chat opens with the message", kept && shown && posted, json!({ "made": made }));
+
+    // titled from its message: the launcher finds it blank no more
+    if !made.is_empty() {
+        anyhow::ensure!(titled(b, &made), "{made} titled from its message");
+    }
+
+    // the making refused while the person stays in the Reader's chat (the
+    // upload's and the post's refusals are above and in `new_chat_ui`): the
+    // launcher opens again over it, its own recovery no view of theirs
+    open_row(b, page, reader_chat, wait)?;
+    let said = "Which atlas maps the old Silk Road best";
+    let before = new_chats();
+    b.eval(page, &hold("POST", "^/api/fragments$", Hold::Request))?;
+    b.click(page, "#sidebar-new-chat")?;
+    let open = b.until(page, opened, wait);
+    b.eval(page, &fill("#workspace-search", said))?;
+    b.eval(page, submit)?;
+    let held = b.until(page, &format!("{closed} && !!window.__held.release"), wait);
+    b.eval(page, "(window.__held.release?.('refuse'), true)")?;
+    let reopened = b.until(page, &format!("{opened} && document.getElementById('workspace-search').value === {} && document.getElementById('search-status').textContent.includes(\"wasn't sent\") && {}", js(said), shows(reader_chat)), wait);
+    let settled = b.until(page, HELD_SETTLED, wait);
+    b.eval(page, "(window.__held.restore(), true)")?;
+    s.ok(
+        "the launcher's chat not made while the person stays: the launcher opens again on its words, saying they weren't sent, over the chat they were in",
+        open && held && reopened && settled && new_chats() == before,
+        json!({ "shows": open_chat(b, page), "status": b.eval(page, "document.getElementById('search-status').textContent")? }),
+    );
+    b.eval(page, submit)?;
+    let shown = b.until(page, &format!("{closed} && location.pathname === '/' && ((f) => !!f && f.dataset.fragment !== {})([...document.querySelectorAll('#frames iframe')].find((f) => !f.hidden))", js(reader_chat)), wait);
+    let made = open_chat(b, page);
+    let posted = !before.contains(&made) && s.eventually(wait, || says(&made, said).len() == 1);
+    s.ok("sent again from there, its chat is made and opens with the message", shown && posted, json!({ "made": made }));
+
+    // titled from its message: the launcher finds it blank no more
+    if !made.is_empty() {
+        anyhow::ensure!(titled(b, &made), "{made} titled from its message");
+    }
+
+    // refused while the launcher still closes (slowed), and Back to settings
+    // meanwhile: Back's view stands, the launcher stays closed, and a notice
+    // says the message wasn't sent
+    b.eval(page, "(document.getElementById('settings').click(), true)")?;
+    b.until(page, "location.pathname === '/settings' && !document.getElementById('settings-page').hidden", wait);
+    open_row(b, page, reader_chat, wait)?;
+    let said = "Which atlas shows the old trade winds";
+    let before = new_chats();
+    b.eval(page, SLOW_MOTION)?;
+    b.eval(page, &hold("POST", "^/api/fragments$", Hold::Request))?;
+    b.click(page, "#sidebar-new-chat")?;
+    let open = b.until(page, opened, wait);
+    b.eval(page, &fill("#workspace-search", said))?;
+    b.eval(page, submit)?;
+    let held = b.until(page, "!!window.__held.release", wait);
+    b.eval(page, "(window.__held.release?.('refuse'), true)")?;
+    // its recovery: the Reader's chat again, under the launcher still closing
+    let recovered = b.until(page, &format!("{opened} && {}", shows(reader_chat)), wait);
+    b.eval(page, "(history.back(), true)")?;
+    let back = b.until(page, "location.pathname === '/settings' && !document.getElementById('settings-page').hidden", wait);
+    let closing = b.eval(page, opened)? == true;
+    let told = b.until(page, &format!("{closed} && !document.getElementById('notice').hidden && document.getElementById('notice').innerText.startsWith(\"Your message wasn't sent\")"), wait);
+    let settled = b.until(page, HELD_SETTLED, wait);
+    b.eval(page, "(window.__held.restore(), true)")?;
+    b.eval(page, NORMAL_MOTION)?;
+    let seen = b.eval(page, NOTICE_SEEN)?;
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    let stayed = b.eval(page, &format!("{closed} && location.pathname === '/settings'"))? == true;
+    s.ok(
+        "the launcher's chat not made, and Back to settings while the launcher still closes: the person stays in settings, the launcher closed, and a notice says the message wasn't sent",
+        open && held && recovered && back && closing && told && settled && stayed && seen["ok"] == true && new_chats() == before,
+        json!({ "recovered": recovered, "closing": closing, "told": told, "seen": seen }),
+    );
+    open_row(b, page, reader_chat, wait)?;
+    b.click(page, "#sidebar-new-chat")?;
+    let kept = b.until(page, &format!("{opened} && document.getElementById('workspace-search').value === {}", js(said)), wait);
+    b.eval(page, submit)?;
+    let shown = b.until(page, &format!("{closed} && location.pathname === '/' && ((f) => !!f && f.dataset.fragment !== {})([...document.querySelectorAll('#frames iframe')].find((f) => !f.hidden))", js(reader_chat)), wait);
+    let made = open_chat(b, page);
+    let posted = !before.contains(&made) && s.eventually(wait, || says(&made, said).len() == 1);
+    s.ok("and its next opening has the words, sent from there", kept && shown && posted, json!({ "made": made }));
+
+    // titled from its message: the launcher finds it blank no more
+    if !made.is_empty() {
+        anyhow::ensure!(titled(b, &made), "{made} titled from its message");
+    }
+
+    // the Reader's chat again, as the sections after expect
+    open_row(b, page, reader_chat, wait)?;
+    b.until(page, "document.getElementById('chat-title').textContent === 'Reader'", wait);
+    Ok(())
+}
+
+/// A chat's frame on screen, of a chat not in `before`: its name.
+fn fresh_shown(b: &mut Browser, page: &Page, before: &[String]) -> Option<String> {
+    let shown = open_chat(b, page);
+    (!shown.is_empty() && !before.contains(&shown)).then_some(shown)
+}
+
+/// The launcher as a person uses it (docs/api.md, The launcher). Its input
+/// is one line at rest and as words are typed; Shift+Enter is a new line,
+/// which it grows to, and a long prompt grows it to 200 px, then it
+/// scrolls. Files dropped on it or pasted into it are chips under its words
+/// (an image's with its picture): at most 8, none over 25 MB, each
+/// removable, and a draft of that opening only. Enter goes straight to the
+/// new chat: the launcher closes and the chat shows while its message is on
+/// its way, its page never showing a new chat's start (`?sent=1`), then
+/// the message once it is posted.
+fn launch_straight_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person, reader_chat: &str) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    let opened = "document.getElementById('search-dialog').open";
+    let closed = "!document.getElementById('search-dialog').open";
+    let height = "document.getElementById('workspace-search').getBoundingClientRect().height";
+    let chips = "document.querySelectorAll('#search-files .search-file').length";
+    let status = "document.getElementById('search-status').textContent";
+
+    // the input (the launcher closed first: a click on its open dialog's
+    // backdrop would close it)
+    anyhow::ensure!(b.until(page, closed, wait), "the launcher closed before its own checks");
+    b.click(page, "#sidebar-new-chat")?;
+    let open = b.until(page, &format!("{opened} && document.activeElement === document.getElementById('workspace-search')"), wait);
+    let rest = b.eval(page, height)?;
+    b.type_text(page, "Plan a week of dinners")?;
+    let typed = b.eval(page, height)?;
+    b.press(page, "Enter", true)?;
+    b.type_text(page, "from what keeps in the freezer")?;
+    let two = b.eval(page, height)?;
+    let words = b.eval(page, "document.getElementById('workspace-search').value")?;
+    b.eval(page, &fill("#workspace-search", &"one line of a long prompt\n".repeat(20)))?;
+    let long = b.eval(page, "(() => { const i = document.getElementById('workspace-search'); const h = i.getBoundingClientRect().height; return { ok: Math.abs(h - 200) < 1 && i.scrollHeight > i.clientHeight, height: h }; })()")?;
+    b.eval(page, &fill("#workspace-search", ""))?;
+    let emptied = b.eval(page, height)?;
+    let line = rest.as_f64().unwrap_or(0.0);
+    let px = |v: &Value| v.as_f64().unwrap_or(-1.0);
+    s.ok(
+        "the launcher's input is one line at rest and as words are typed; Shift+Enter is a new line, which it grows to; a long prompt grows it to 200 px, then it scrolls; emptied, one line again",
+        open && (40.0..=48.0).contains(&line) && px(&typed) == line && px(&two) > line && px(&two) < 200.0 && words == "Plan a week of dinners\nfrom what keeps in the freezer" && long["ok"] == true && px(&emptied) == line,
+        json!({ "rest": rest, "typed": typed, "two": two, "words": words, "long": long, "emptied": emptied }),
+    );
+
+    // files: two dropped, an image among them; then more than 8, and one
+    // over 25 MB; one taken out
+    let dropped = b.eval(
+        page,
+        "(() => { const d = new DataTransfer(); d.items.add(new File([new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10])], 'map.png', { type: 'image/png' })); d.items.add(new File(['three atlases'], 'atlases.txt', { type: 'text/plain' })); \
+          const dialog = document.getElementById('search-dialog'); const at = (type) => dialog.dispatchEvent(new DragEvent(type, { dataTransfer: d, bubbles: true, cancelable: true })); \
+          at('dragenter'); at('dragover'); const said = dialog.classList.contains('dropping'); at('drop'); \
+          const chips = [...document.querySelectorAll('#search-files .search-file')]; return { said, chips: chips.length, pictured: chips.filter((c) => !!c.querySelector('img')).length, after: dialog.classList.contains('dropping') }; })()",
+    )?;
+    let many = b.eval(
+        page,
+        &format!("(() => {{ const d = new DataTransfer(); for (let i = 0; i < 7; i++) d.items.add(new File([`atlas ${{i}}`], `atlas-${{i}}.txt`, {{ type: 'text/plain' }})); \
+          document.getElementById('workspace-search').dispatchEvent(new ClipboardEvent('paste', {{ clipboardData: d, bubbles: true, cancelable: true }})); return {{ chips: {chips}, status: {status} }}; }})()"),
+    )?;
+    b.eval(page, "(document.querySelector('#search-files .search-file-remove')?.click(), true)")?;
+    let big = b.eval(
+        page,
+        &format!("(() => {{ const d = new DataTransfer(); d.items.add(new File([new Uint8Array(26 * 1024 * 1024)], 'atlas.tiff', {{ type: 'image/tiff' }})); \
+          document.getElementById('workspace-search').dispatchEvent(new ClipboardEvent('paste', {{ clipboardData: d, bubbles: true, cancelable: true }})); return {{ chips: {chips}, status: {status} }}; }})()"),
+    )?;
+    b.eval(page, "(document.getElementById('search-dialog').dispatchEvent(new Event('cancel')), true)")?;
+    b.until(page, closed, wait);
+    b.click(page, "#sidebar-new-chat")?;
+    b.until(page, opened, wait);
+    let again = b.eval(page, &format!("({{ chips: {chips}, hidden: document.getElementById('search-files').hidden, status: {status} }})"))?;
+    s.ok(
+        "files dropped on the launcher show as chips under its words (an image's with its picture), at most 8 (saying so), none over 25 MB (saying so), each removable; closed, they are gone from its next opening",
+        dropped == json!({ "said": true, "chips": 2, "pictured": 1, "after": false })
+            && many == json!({ "chips": 8, "status": "A message carries at most 8 files." })
+            && big == json!({ "chips": 7, "status": "atlas.tiff is over 25 MB." })
+            && again == json!({ "chips": 0, "hidden": true, "status": "" }),
+        json!({ "dropped": dropped, "many": many, "big": big, "again": again }),
+    );
+
+    // Enter, its message held on the way: the new chat at once, never its start
+    let said = "Plan a week of dinners from what keeps in the freezer";
+    let before = new_chats(api, me);
+    b.type_text(page, said)?;
+    b.eval(page, &hold("POST", "/channels/chat$", Hold::Request))?;
+    b.press(page, "Enter", false)?;
+    let held = b.until(page, &format!("{closed} && !!window.__held.release && document.getElementById('chat-title').textContent === 'New chat' && location.pathname === '/'"), wait);
+    let made = fresh_shown(b, page, &before).unwrap_or_default();
+    let ready = !made.is_empty() && s.eventually(wait, || b.eval_in_frame(page, &made, COMPOSER_READY).ok() == Some(Value::Bool(true)));
+    // its history read meanwhile (a fresh chat's start would show by now)
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    let quiet = if ready { b.eval_in_frame(page, &made, "({ sent: new URLSearchParams(location.search).has('sent'), start: !!document.querySelector('#messages .empty'), messages: document.querySelectorAll('#messages .msg').length })")? } else { Value::Null };
+    b.eval(page, "(window.__held.release?.(), true)")?;
+    let shown = ready && s.eventually(wait, || b.eval_in_frame(page, &made, &format!("document.body.innerText.includes({})", js(said))).ok() == Some(Value::Bool(true)));
+    let settled = b.until(page, HELD_SETTLED, wait);
+    b.eval(page, "(window.__held.restore(), true)")?;
+    let posted = ready && said_in(api, me, &made, said).len() == 1;
+    let started = ready && b.eval_in_frame(page, &made, "!!document.querySelector('#messages .empty')")? == true;
+    s.ok(
+        "Enter goes straight to the new chat: the launcher closes and the chat shows while its message is on its way, its page showing no new chat's start; then the message, posted once, and still no start",
+        held && ready && quiet == json!({ "sent": true, "start": false, "messages": 0 }) && shown && settled && posted && !started,
+        json!({ "made": made, "page": quiet, "posted": posted, "started": started }),
+    );
+
+    open_row(b, page, reader_chat, wait)?;
+    b.until(page, "document.getElementById('chat-title').textContent === 'Reader'", wait);
+    Ok(())
+}
+
+/// The launcher's grown input and Send in the visual viewport, and its
+/// file region's own scroll: the panel, Send and a removal's boxes and what
+/// a press at their middles reaches.
+const LAUNCHER_GEOMETRY: &str = "(() => { const panel = document.querySelector('.search-panel'); const input = document.getElementById('workspace-search'); const send = document.getElementById('search-send'); const files = document.getElementById('search-files'); \
+    const p = panel.getBoundingClientRect(); const s = send.getBoundingClientRect(); const at = document.elementFromPoint(s.left + s.width / 2, s.top + s.height / 2); const inside = (r) => r.width > 0 && r.height > 0 && r.left >= 0 && r.top >= 0 && r.right <= innerWidth + 1 && r.bottom <= innerHeight + 1; \
+    return { ok: inside(p) && inside(s) && s.top >= p.top && s.bottom <= p.bottom && (at === send || send.contains(at)) && input.scrollHeight > input.clientHeight, panel: [p.left, p.top, p.right, p.bottom], send: [s.left, s.top, s.right, s.bottom], \
+      input: { height: input.getBoundingClientRect().height, client: input.clientHeight, scroll: input.scrollHeight, max: getComputedStyle(input).maxHeight }, files: files.hidden ? null : { client: files.clientHeight, scroll: files.scrollHeight }, viewport: [innerWidth, innerHeight, visualViewport.height] }; })()";
+
+/// A launcher's status, wholly inside its panel and the visual viewport,
+/// with what a look at its middle reaches.
+const LAUNCHER_STATUS_GEOMETRY: &str = "(() => { const status = document.getElementById('search-status'); const p = document.querySelector('.search-panel').getBoundingClientRect(); const r = status.getBoundingClientRect(); const at = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2); \
+    return { ok: status.checkVisibility() && r.width > 0 && r.height > 0 && r.left >= p.left && r.right <= p.right + 1 && r.top >= p.top && r.bottom <= p.bottom + 1 && r.top >= 0 && r.bottom <= innerHeight + 1 && (at === status || status.contains(at)), text: status.textContent, status: [r.left, r.top, r.right, r.bottom], panel: [p.left, p.top, p.right, p.bottom], hit: at?.tagName ?? null }; })()";
+
+/// A keyboard-height visual viewport bounds an already-grown prompt, so its
+/// Send stays on screen and hit-testable. At 320×800, eight long filenames
+/// shrink their own region and scroll: every removal can be brought on
+/// screen and pressed with a real mouse click.
+fn launch_geometry_ui(s: &mut Suite, b: &mut Browser, page: &Page, shots: &std::path::Path) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    let opened = "document.getElementById('search-dialog').open";
+    let closed = "!document.getElementById('search-dialog').open";
+    b.viewport(page, 320, 800, true)?;
+    anyhow::ensure!(b.until(page, closed, wait), "the launcher closed before its geometry checks");
+    b.eval(page, "(document.getElementById('sidebar-new-chat').click(), true)")?;
+    let open = b.until(page, opened, wait);
+    b.eval(page, &fill("#workspace-search", &"one line of a long prompt\n".repeat(20)))?;
+    b.viewport(page, 320, 300, true)?;
+    let shrunk = b.until(page, "visualViewport.height === 300 && document.documentElement.style.getPropertyValue('--viewport-height') === '300px'", wait);
+    let keyboard = b.eval(page, LAUNCHER_GEOMETRY)?;
+    let _ = b.screenshot(page, &shots.join("phone-300-launcher.png"));
+    s.ok(
+        "at a 300 px visual viewport, an already-grown prompt is bounded by the room above the keyboard: the panel and Send stay on screen, and a press at Send's middle reaches it",
+        open && shrunk && keyboard["ok"] == true,
+        &keyboard,
+    );
+
+    b.eval(page, &refuse_once("POST", "^/api/fragments$"))?;
+    b.eval(page, "(document.getElementById('search-form').requestSubmit(), true)")?;
+    let failed = b.until(page, &format!("{opened} && document.getElementById('search-status').textContent.includes(\"wasn't sent\")"), wait);
+    let failed_send = b.eval(page, LAUNCHER_GEOMETRY)?;
+    let failed_status = b.eval(page, LAUNCHER_STATUS_GEOMETRY)?;
+    let _ = b.screenshot(page, &shots.join("phone-300-launcher-send-failed.png"));
+    s.ok(
+        "at a 300 px visual viewport, a long prompt's failed send keeps its whole error and Send inside the panel, both hit-testable",
+        failed && failed_send["ok"] == true && failed_status["ok"] == true,
+        json!({ "send": failed_send, "status": failed_status }),
+    );
+    b.eval(
+        page,
+        "(() => { const d = new DataTransfer(); d.items.add(new File([new Uint8Array(26 * 1024 * 1024)], 'atlas.tiff', { type: 'image/tiff' })); \
+          document.getElementById('workspace-search').dispatchEvent(new ClipboardEvent('paste', { clipboardData: d, bubbles: true, cancelable: true })); return true; })()",
+    )?;
+    let rejected = b.until(page, "document.getElementById('search-status').textContent === 'atlas.tiff is over 25 MB.'", wait);
+    let rejected_send = b.eval(page, LAUNCHER_GEOMETRY)?;
+    let rejected_status = b.eval(page, LAUNCHER_STATUS_GEOMETRY)?;
+    let _ = b.screenshot(page, &shots.join("phone-300-launcher-file-rejected.png"));
+    s.ok(
+        "at a 300 px visual viewport, an attachment rejection over a long prompt keeps its whole error and Send inside the panel, both hit-testable",
+        rejected && rejected_send["ok"] == true && rejected_status["ok"] == true,
+        json!({ "send": rejected_send, "status": rejected_status }),
+    );
+
+    b.viewport(page, 320, 800, true)?;
+    b.reload(page)?;
+    let grown = b.until(page, &format!("visualViewport.height === 800 && document.documentElement.style.getPropertyValue('--viewport-height') === '800px' && {closed} && !!document.querySelector('#frames iframe:not([hidden])')"), wait);
+    b.eval(page, "(document.getElementById('sidebar-new-chat').click(), true)")?;
+    let reopened = b.until(page, opened, wait);
+    b.eval(page, &fill("#workspace-search", &"one line of a long prompt\n".repeat(20)))?;
+    let names: Vec<String> = (0..8).map(|i| format!("atlas-{i}-with-a-very-long-filename-that-still-leaves-its-removal-reachable.txt")).collect();
+    let pasted = b.eval(
+        page,
+        &format!("(() => {{ const d = new DataTransfer(); for (const name of {}) d.items.add(new File(['atlas'], name, {{ type: 'text/plain' }})); \
+          document.getElementById('workspace-search').dispatchEvent(new ClipboardEvent('paste', {{ clipboardData: d, bubbles: true, cancelable: true }})); return document.querySelectorAll('#search-files .search-file').length; }})()", serde_json::to_string(&names)?),
+    )? == json!(8);
+    let many = b.eval(page, LAUNCHER_GEOMETRY)?;
+    let scrolls = many["files"]["client"].as_f64().zip(many["files"]["scroll"].as_f64()).is_some_and(|(client, scroll)| scroll > client);
+    let _ = b.screenshot(page, &shots.join("phone-320-launcher-eight-files.png"));
+    s.ok(
+        "at 320×800, eight long filenames leave Send visible and hit-testable, and their own region shrinks and scrolls instead of putting removals beyond the panel",
+        grown && reopened && pasted && many["ok"] == true && scrolls,
+        &many,
+    );
+    let mut reachable = true;
+    let mut removals = Vec::new();
+    for (i, name) in names.iter().enumerate() {
+        let selector = format!("#search-files .search-file-remove[aria-label={}]", js(&format!("Remove {name}")));
+        let seen = b.eval(
+            page,
+            &format!("(() => {{ const b = document.querySelector({}); if (!b) return {{ ok: false }}; b.scrollIntoView({{ block: 'nearest' }}); const f = document.getElementById('search-files').getBoundingClientRect(); const r = b.getBoundingClientRect(); const at = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2); \
+              return {{ ok: r.left >= 0 && r.right <= innerWidth + 1 && r.top >= f.top - 1 && r.bottom <= f.bottom + 1 && (at === b || b.contains(at)), button: [r.left, r.top, r.right, r.bottom], files: [f.left, f.top, f.right, f.bottom], hit: at?.tagName ?? null }}; }})()", js(&selector)),
+        )?;
+        b.click(page, &selector)?;
+        let left = b.eval(page, "document.querySelectorAll('#search-files .search-file').length")?;
+        reachable &= seen["ok"] == true && left == json!(7 - i);
+        removals.push(json!({ "name": name, "seen": seen, "left": left }));
+    }
+    let empty = b.eval(page, "document.querySelectorAll('#search-files .search-file').length === 0 && document.getElementById('search-files').hidden")? == true;
+    s.ok("each of the eight long filenames' removals scrolls into reach and a real mouse click removes it", reachable && empty, json!(removals));
+    b.eval(page, "(document.getElementById('search-dialog').dispatchEvent(new Event('cancel')), true)")?;
+    b.until(page, closed, wait);
+    b.viewport(page, 1280, 800, false)?;
+    Ok(())
+}
+
+/// What the icon checks read of the page (`window.__icons`): the sheet,
+/// its picks, the dock's art for the app (`DOCK`), an image's pixels drawn
+/// 32×32 (which picture it is, as these checks tell them apart: `null`
+/// while it is not loaded), and the sheet's state as a person sees it.
+const ICON_PROBE: &str = "(window.__icons = {
+  sheet: () => document.querySelector('dialog.icon-sheet'),
+  picks: () => [...document.querySelectorAll('dialog.icon-sheet .icon-pick')],
+  dock: () => document.querySelector(DOCK),
+  dockArt: () => __icons.dock()?.querySelector('.dock-art .app-picture') ?? null,
+  px: (img) => { if (!img?.complete || !img.naturalWidth) return null; const c = document.createElement('canvas'); c.width = c.height = 32; const g = c.getContext('2d'); g.drawImage(img, 0, 0, 32, 32); return g.getImageData(0, 0, 32, 32).data.join(); },
+  pickPx: (i) => __icons.px(__icons.picks()[i]?.querySelector('img')),
+  dockPx: () => __icons.px(__icons.dockArt()?.querySelector('img')),
+  currentPx: () => __icons.px(__icons.sheet()?.querySelector('.icon-current img')),
+  pixelsMatch: async (art, path) => {
+    const img = art?.querySelector('img');
+    if (!img?.complete || !img.naturalWidth) return false;
+    const r = await fetch(path, { headers: { 'x-fragment-shell': '1' }, credentials: 'same-origin', cache: 'no-store' });
+    if (!r.ok) return false;
+    const expected = document.createElement('img');
+    const url = URL.createObjectURL(await r.blob());
+    expected.src = url;
+    try {
+      await expected.decode();
+      const px = __icons.px(expected);
+      return px !== null && px === __icons.px(img);
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  },
+  state: () => {
+    const d = __icons.sheet();
+    const q = (s) => d?.querySelector(s);
+    const art = __icons.dockArt();
+    return {
+      open: !!d?.open,
+      picked: __icons.picks().map((b) => b.classList.contains('picked')),
+      disabled: __icons.picks().map((b) => b.disabled),
+      upload: q('.icon-upload')?.disabled ?? null,
+      remove: q('.icon-remove') ? { hidden: q('.icon-remove').hidden, disabled: q('.icon-remove').disabled } : null,
+      said: q('.icon-said') && !q('.icon-said').hidden ? q('.icon-said').textContent : null,
+      role: q('.icon-said')?.getAttribute('role') ?? null,
+      current: q('.icon-current img') ? 'picture' : 'glyph',
+      dock: art ? (art.querySelector('img') ? 'picture' : 'glyph') : 'none',
+    };
+  },
+}, true)";
+
+/// An app's icon as its owner makes one in the shell (docs/api.md, Icons;
+/// the Workers AI fake draws them, local Images fits uploads): its
+/// window's More, Icon…, Make icons, four to pick from. A pick is shown
+/// kept only once the platform kept it; one write goes at a time, every
+/// other control disabled until it answers, in that sheet and in one
+/// reopened meanwhile; a write that fails says why in the sheet, and
+/// nothing once the sheet is closed. An icon read that fails is read again
+/// at the next draw, and the dock shows the newest icon when the list
+/// moves on while an older one is still being read. Remove, and its glyph
+/// is back. The app's window is open. Held writes and reads are the
+/// browser's (`Browser::hold`), refused ones its own (`Browser::block`).
+fn icon_ui(s: &mut Suite, b: &mut Browser, page: &Page, app: &str, shots: &std::path::Path) -> Result<()> {
+    let wait = std::time::Duration::from_secs(60);
+    let dock = format!("document.querySelector({})", js(&format!("#apps [data-key=\"app:{app}\"]")));
+    b.eval(page, &ICON_PROBE.replace("DOCK", &js(&format!("#apps [data-key=\"app:{app}\"]"))))?;
+    let item = "[...document.querySelectorAll('#menu [role=menuitem]')].find((b) => b.textContent === 'Icon…')";
+    let open_sheet = |b: &mut Browser| -> Result<bool> {
+        b.eval(page, "([...document.querySelectorAll('#stack .pane button[aria-label=More]')].pop()?.click(), true)")?;
+        let offered = b.until(page, &format!("!!{item}"), wait);
+        b.eval(page, &format!("({item}?.click(), true)"))?;
+        Ok(offered && b.until(page, "!!document.querySelector('dialog.icon-sheet[open]')", wait))
+    };
+    let click = |b: &mut Browser, what: &str| b.eval(page, &format!("({what}?.click(), true)"));
+    let pick = |i: usize| format!("__icons.picks()[{i}]");
+    let (upload_input, remove, done) = ("dialog.icon-sheet input[type=file]", "__icons.sheet()?.querySelector('.icon-remove')", "__icons.sheet()?.querySelector('.icon-done')");
+    let settle = |b: &mut Browser, ms: u64| b.eval(page, &format!("new Promise((r) => setTimeout(() => r(true), {ms}))"));
+    let state = |b: &mut Browser| b.eval(page, "__icons.state()");
+    let held = |s: &Suite, b: &mut Browser, n: usize| s.eventually(wait, || b.held(page).is_ok_and(|h| h.len() == n));
+    // its writes (a PUT, a DELETE) and its reads (`?v=`), by their URLs
+    let writes = format!("*/api/f/{app}/icon");
+    let reads = format!("*/api/f/{app}/icon?v=*");
+    let photo = shots.join("icon-photo.jpg");
+    std::fs::write(&photo, super::icons::photo())?;
+    let blue = shots.join("icon-blue.png");
+    std::fs::write(&blue, super::faces::blue())?;
+    let words = shots.join("icon-words.txt");
+    std::fs::write(&words, "hello, I am no picture")?;
+
+    let sheet = open_sheet(b)?;
+    b.eval(page, "(document.querySelector('dialog.icon-sheet .icon-make button[type=submit]')?.click(), true)")?;
+    let picks = "[...document.querySelectorAll('dialog.icon-sheet .icon-pick img')]";
+    let four = b.until(page, &format!("{picks}.length === 4 && {picks}.every((i) => i.complete && i.naturalWidth === 256 && i.naturalHeight === 256)"), wait);
+    s.ok(
+        "an app's owner opens its window's More, Icon…, and makes icons: four to pick from, each 256×256",
+        sheet && four,
+        b.eval(page, "document.querySelector('dialog.icon-sheet')?.innerText ?? null")?,
+    );
+    let _ = b.screenshot(page, &shots.join("icon-sheet.png"));
+
+    // a pick kept while its icon cannot be read: the glyph stays, and the
+    // next draw (the same pick kept again) reads it again, with no reload
+    b.block(page, &[&reads])?;
+    click(b, &pick(0))?;
+    let kept = b.until(page, "__icons.state().picked[0] && __icons.state().dock !== 'none'", wait);
+    settle(b, 600)?;
+    let unread = state(b)?;
+    s.ok(
+        "a pick kept while its icon cannot be read: shown kept, saying nothing, and the dock and the sheet keep its glyph",
+        kept && unread["dock"] == "glyph" && unread["current"] == "glyph" && unread["said"].is_null(),
+        &unread,
+    );
+    b.block(page, &[])?;
+    // app-icon.js reads a failed icon again no sooner than RETRY_MS (2 s) after
+    std::thread::sleep(std::time::Duration::from_millis(2200));
+    click(b, &pick(0))?;
+    let healed = b.until(
+        page,
+        &format!("(() => {{ const d = {dock}; const i = __icons.dockArt()?.querySelector('img'); return !!i && i.src.startsWith('blob:') && i.naturalWidth === 256 && !d.querySelector('.app-icon') && __icons.dockPx() === __icons.pickPx(0) && __icons.currentPx() === __icons.dockPx(); }})()"),
+        wait,
+    );
+    s.ok(
+        "read again at the next draw (the same pick kept again), with no reload, it is the app's icon in the dock and the sheet: the object on nothing, no tile, read as a blob URL",
+        healed,
+        json!({ "state": state(b)?, "dock": b.eval(page, &format!("{dock}?.querySelector('.dock-art')?.outerHTML.slice(0, 300) ?? null"))? }),
+    );
+
+    // one write at a time: a pick held unanswered
+    let x = b.eval(page, "__icons.picks().findIndex((_, i) => i > 0 && __icons.pickPx(i) !== __icons.pickPx(0))")?.as_u64().unwrap_or(0) as usize;
+    anyhow::ensure!(x > 0, "two of the four candidates differ");
+    b.hold(page, &[&writes])?;
+    click(b, &pick(x))?;
+    let one = held(s, b, 1);
+    let waiting = state(b)?;
+    let others = if x == 1 { 2 } else { 1 };
+    click(b, &pick(others))?;
+    b.choose_files(page, upload_input, &[&photo])?;
+    settle(b, 400)?;
+    let still = b.held(page)?;
+    let _ = b.screenshot(page, &shots.join("icon-sheet-keeping.png"));
+    let disabled = waiting["disabled"].as_array().is_some_and(|d| d.iter().all(|d| d == true)) && waiting["upload"] == true && waiting["remove"]["disabled"] == true;
+    let shown_kept: Vec<bool> = (0..4).map(|i| waiting["picked"][i] == true).collect();
+    s.ok(
+        "while a pick is being kept, the sheet's picks, Upload and Remove are disabled, another pick or a file chosen asks nothing, and the new pick is not shown kept yet: the one kept before still is",
+        one && disabled && shown_kept == [true, false, false, false] && still.len() == 1,
+        json!({ "waiting": waiting, "held": still }),
+    );
+    b.release(page, false)?;
+    let answered = b.until(
+        page,
+        &format!("(() => {{ const s = __icons.state(); return s.picked.every((p, i) => p === (i === {x})) && s.disabled.every((d) => !d) && !s.upload && !s.remove.disabled; }})() && __icons.dockPx() === __icons.pickPx({x})"),
+        wait,
+    );
+    s.ok("answered, that pick alone is shown kept, the controls are back, and it is the dock's icon", answered, state(b)?);
+    let _ = b.screenshot(page, &shots.join("icon-docked.png"));
+
+    // failures, said in the sheet: an upload the platform refuses (no
+    // image), and a pick and a removal whose connection drops
+    let notice = "({ hidden: document.getElementById('notice').hidden, text: document.getElementById('notice').textContent })";
+    let notice_before = b.eval(page, notice)?;
+    b.choose_files(page, upload_input, &[&words])?;
+    let refused = b.until(page, "(__icons.state().said ?? '').startsWith('The icon was not uploaded: an icon is made from')", wait);
+    let upload_said = state(b)?;
+    b.block(page, &[&writes])?;
+    click(b, &pick(others))?;
+    let unkept = b.until(page, "(__icons.state().said ?? '').startsWith('The icon was not kept: ')", wait);
+    let pick_said = state(b)?;
+    click(b, remove)?;
+    let unremoved = b.until(page, "(__icons.state().said ?? '').startsWith('The icon was not removed: ')", wait);
+    let remove_said = state(b)?;
+    b.block(page, &[])?;
+    let still_x = b.eval(page, &format!("__icons.dockPx() === __icons.pickPx({x})"))?;
+    let notice_after = b.eval(page, notice)?;
+    let only_x = |st: &Value| (0..4).all(|i| st["picked"][i] == (i == x));
+    s.ok(
+        "a pick, an upload and a removal that fail say why in the sheet, as an alert, and not on the page; the pick shown kept, Remove, and the dock's icon stay",
+        refused
+            && unkept
+            && unremoved
+            && [&upload_said, &pick_said, &remove_said].iter().all(|st| st["role"] == "alert" && only_x(st))
+            && remove_said["remove"]["hidden"] == false
+            && still_x == true
+            && notice_after == notice_before,
+        json!({ "upload": upload_said, "pick": pick_said, "remove": remove_said, "notice": notice_after }),
+    );
+    let _ = b.screenshot(page, &shots.join("icon-sheet-failed.png"));
+    // on a phone, the same sheet
+    b.viewport(page, 390, 844, true)?;
+    let fits = b.until(
+        page,
+        "innerWidth === 390 && (() => { const d = __icons.sheet(); const r = d.getBoundingClientRect(); return r.left >= 0 && r.right <= innerWidth && r.bottom <= innerHeight && [...d.querySelectorAll('.icon-pick, .icon-actions button, .icon-said, .icon-make input, .icon-make button')].every((e) => { const b = e.getBoundingClientRect(); return b.width > 0 && b.left >= r.left && b.right <= r.right; }); })()",
+        wait,
+    );
+    let _ = b.screenshot(page, &shots.join("phone-390-icon-sheet.png"));
+    let rects = b.eval(page, "[...__icons.sheet().querySelectorAll('.icon-picks, .icon-said, .icon-actions')].map((e) => e.getBoundingClientRect().toJSON())")?;
+    b.viewport(page, 1280, 800, false)?;
+    s.ok("at a phone's width (390 px) the sheet fits the screen: its picks, what it says and its buttons inside it", fits, &rects);
+
+    // the list moving on while the old icon's read is still going
+    b.hold(page, &[&reads])?;
+    b.choose_files(page, upload_input, &[&photo])?;
+    let first = b.until(page, "!!__icons.dockArt() && !__icons.dockArt().querySelector('img') && !__icons.state().upload", wait);
+    let was = b.eval(page, "__icons.dockArt()?.dataset.picture ?? null")?;
+    b.choose_files(page, upload_input, &[&blue])?;
+    let moved = b.until(page, &format!("(() => {{ const a = __icons.dockArt(); return !!a && !a.querySelector('img') && a.dataset.picture !== {was}; }})()"), wait);
+    b.eval(page, "(window.__liveArt = __icons.dockArt(), true)")?;
+    let reading = b.held(page)?;
+    b.release(page, false)?;
+    let newest = b.until(
+        page,
+        "!!window.__liveArt && __icons.dock().contains(window.__liveArt) && __icons.px(window.__liveArt.querySelector('img')) !== null && __icons.px(window.__liveArt.querySelector('img')) === __icons.currentPx()",
+        wait,
+    );
+    s.ok(
+        "the list moving on to a new icon while the old one is still being read: when both answer, the dock shows the new one",
+        first && moved && reading.len() == 2 && newest,
+        json!({ "held": reading, "state": state(b)?, "dock": b.eval(page, &format!("{dock}?.querySelector('.dock-art')?.outerHTML.slice(0, 300) ?? null"))? }),
+    );
+
+    // A's delayed read was stale. After RETRY_MS, choosing A again reads
+    // it again: an upload held unanswered, with Remove waiting here and in
+    // the sheet reopened after Done.
+    std::thread::sleep(std::time::Duration::from_millis(2200));
+    b.hold(page, &[&writes])?;
+    b.choose_files(page, upload_input, &[&photo])?;
+    let one = held(s, b, 1);
+    let here = state(b)?;
+    click(b, remove)?;
+    settle(b, 400)?;
+    let still = b.held(page)?;
+    click(b, done)?;
+    let closed = b.until(page, "!document.querySelector('dialog.icon-sheet')", wait);
+    let reopened = open_sheet(b)?;
+    let there = state(b)?;
+    b.release(page, false)?;
+    let after = b.until(
+        page,
+        &format!("(() => {{ const s = __icons.state(); const current = __icons.sheet()?.querySelector('.icon-current .app-picture'); const dock = __icons.dockArt(); return !s.upload && !s.remove.hidden && !s.remove.disabled && s.said === null && current?.dataset.picture === {was} && dock?.dataset.picture === {was} && __icons.currentPx() !== null && __icons.dockPx() === __icons.currentPx(); }})()"),
+        wait,
+    );
+    let selected = b.eval(
+        page,
+        &format!("(async () => {{ const current = __icons.sheet()?.querySelector('.icon-current .app-picture'); return await __icons.pixelsMatch(current, {was}) && await __icons.pixelsMatch(__icons.dockArt(), {was}); }})()"),
+    );
+    let selected_ok = selected.as_ref().ok() == Some(&Value::Bool(true));
+    let selected = selected.unwrap_or_else(|e| json!(format!("{e:#}")));
+    s.ok(
+        "while an upload goes, Remove asks nothing, in its sheet and in the sheet reopened after Done; after A→B→A, the selected A pixels are the icon in both",
+        one && here["upload"] == true && here["remove"]["disabled"] == true && still.len() == 1 && closed && reopened && there["upload"] == true && there["remove"]["disabled"] == true && after && selected_ok,
+        json!({ "here": here, "held": still, "reopened": there, "after": state(b)?, "selected": selected }),
+    );
+
+    // a removal that fails after Done
+    let notice_before = b.eval(page, notice)?;
+    b.hold(page, &[&writes])?;
+    click(b, remove)?;
+    let one = held(s, b, 1);
+    click(b, done)?;
+    let closed = b.until(page, "!document.querySelector('dialog.icon-sheet')", wait);
+    b.release(page, true)?;
+    settle(b, 600)?;
+    let quiet = b.eval(page, &format!("({{ sheets: document.querySelectorAll('dialog.icon-sheet').length, notice: {notice} }})"))?;
+    let reopened = open_sheet(b)?;
+    let clear = b.until(page, "(() => { const s = __icons.state(); return s.said === null && !s.remove.hidden && !s.remove.disabled && s.current === 'picture' && s.dock === 'picture'; })() && __icons.dockPx() === __icons.currentPx()", wait);
+    s.ok(
+        "a removal that fails after Done says nothing on the page (no notice, no sheet); the next sheet opens clear, the icon still there",
+        one && closed && quiet["sheets"] == 0 && quiet["notice"] == notice_before && reopened && clear,
+        json!({ "quiet": quiet, "before": notice_before, "next": state(b)? }),
+    );
+
+    click(b, remove)?;
+    let back = b.until(page, &format!("!!{dock}?.querySelector('.dock-art .app-icon') && !{dock}?.querySelector('.app-picture')"), wait);
+    click(b, done)?;
+    let closed = b.until(page, "!document.querySelector('dialog.icon-sheet')", wait);
+    s.ok("removed, its glyph is back in the dock; Done closes the sheet", back && closed, b.eval(page, &format!("{dock}?.querySelector('.dock-art')?.outerHTML.slice(0, 300) ?? null"))?);
+    Ok(())
+}
+
 /// An app beside the chat (docs/api.md, The shell; docs/chat-records.md,
 /// "The page"): a link in an agent's reply to another fragment's page gets
 /// "Open", which opens that page in the viewer beside the chat, at its
 /// path, signed in as its row's window is; a link to anything else gets
 /// none, and a page that asks the shell to open a URL that is no
 /// fragment's opens nothing.
+const APPS_HASH_PROBE: &str = "(() => { const blobs = window.__appsBlobs ??= new Map(); if (!window.__appsObjectURL) { const make = URL.createObjectURL.bind(URL); window.__appsObjectURL = make; URL.createObjectURL = (blob) => { const url = make(blob); blobs.set(url, blob); return url; }; } window.__appsHash = async (value) => { const blob = typeof value === 'string' ? blobs.get(value) ?? await fetch(value, { headers: { 'x-fragment-shell': '1' } }).then((r) => r.blob()) : value; const bytes = await blob.arrayBuffer(); const hash = await crypto.subtle.digest('SHA-256', bytes); return [...new Uint8Array(hash)].map((b) => b.toString(16).padStart(2, '0')).join(''); }; return true; })()";
+
+const APPS_RACE_PROBE: &str = "(() => {
+  const real = window.fetch.bind(window);
+  const revoke = URL.revokeObjectURL;
+  URL.revokeObjectURL = () => {};
+  const pending = { access: [], card: [] };
+  const hold = (kind, url, o) => {
+    const options = kind === 'card' ? { ...o, headers: { ...o?.headers } } : o;
+    if (kind === 'card') delete options.headers['if-none-match'];
+    const answer = real(url, options);
+    return new Promise((resolve) => pending[kind].push({
+      answer,
+      release: async () => { const r = await answer; resolve(r); await new Promise((done) => setTimeout(done, 0)); },
+    }));
+  };
+  window.fetch = (url, o) => {
+    const u = String(url);
+    if (u === '/api/access') return hold('access', url, o);
+    if (/^\\/api\\/f\\/[^/]+\\/card$/.test(u) && (o?.method ?? 'GET') === 'GET') return hold('card', url, o);
+    return real(url, o);
+  };
+  window.__appsRace = {
+    count: (kind) => pending[kind].length,
+    release: async (kind, newest) => {
+      const all = pending[kind].splice(0);
+      if (newest) all.reverse();
+      for (const p of all) await p.release();
+      return true;
+    },
+    restore: () => { window.fetch = real; URL.revokeObjectURL = revoke; return true; },
+  };
+  return true;
+})()";
+
+/// Access and card responses held at the browser, then answered in both
+/// orders around a sharing change and around closing and reopening Apps.
+/// Every answer is the server's own at the time its request was made; the
+/// final text and card's bytes must be the newest visit's and request's.
+fn apps_response_races_ui(s: &mut Suite, b: &mut Browser, page: &Page, app: &str) -> Result<()> {
+    let wait = std::time::Duration::from_secs(60);
+    let row = format!("document.querySelector({})", js(&format!("#apps-page .app-row[data-fragment=\"{app}\"]")));
+    let access = format!("{row}?.querySelector('.app-row-access')?.textContent ?? ''");
+    let card = format!("{row}?.querySelector('.app-row-card')");
+    b.eval(page, APPS_HASH_PROBE)?;
+    b.eval(page, &format!("(async () => {{ window.__appsOriginalCard = await fetch('/api/f/{app}/card', {{ headers: {{ 'x-fragment-shell': '1' }} }}).then((r) => r.blob()); \
+         const bytes = new Uint8Array(await window.__appsOriginalCard.arrayBuffer()); const comment = new TextEncoder().encode('e2e upload'); \
+         const changed = new Uint8Array(6 + comment.length + bytes.length - 2); changed.set([0xff, 0xd8, 0xff, 0xfe, 0, 12]); changed.set(comment, 6); changed.set(bytes.slice(2), 6 + comment.length); \
+         window.__appsChangedCard = new Blob([changed], {{ type: 'image/jpeg' }}); return true; }})()"))?;
+    let original = b.eval(page, "window.__appsHash(window.__appsOriginalCard)")?;
+    let changed_card = b.eval(page, "window.__appsHash(window.__appsChangedCard)")?;
+    let release = |b: &mut Browser, kind: &str, newest: bool| b.eval(page, &format!("window.__appsRace.release({kind:?}, {newest})"));
+    let set_visibility = |b: &mut Browser, visibility: &str| -> Result<Value> {
+        b.eval(page, &format!("fetch('/api/f/{app}/visibility', {{ method: 'PUT', headers: {{ 'x-fragment-shell': '1', 'content-type': 'application/json' }}, body: JSON.stringify({{ visibility: {} }}), credentials: 'same-origin' }}).then((r) => ({{ status: r.status, body: r.json() }}))", js(visibility)))
+    };
+    let put_card = |b: &mut Browser, source: &str| -> Result<Value> {
+        b.eval(page, &format!("(async () => {{ const r = await fetch('/api/f/{app}/card', {{ method: 'PUT', headers: {{ 'x-fragment-shell': '1', 'content-type': 'image/jpeg' }}, body: {source}, credentials: 'same-origin' }}); return {{ status: r.status, body: await r.text() }}; }})()"))
+    };
+    let share = |s: &Suite, b: &mut Browser| -> Result<bool> {
+        b.eval(page, &format!("({row}?.querySelector('[data-action=share]')?.click(), true)"))?;
+        let open = b.until(page, "document.getElementById('sheet').open", wait);
+        let ready = open && s.eventually(wait, || b.eval_in_frame(page, "/share/", "!!document.querySelector('button[data-done]')").ok() == Some(Value::Bool(true)));
+        let _ = b.eval_in_frame(page, "/share/", "(document.querySelector('button[data-done]').click(), true)");
+        Ok(ready && b.until(page, "!document.getElementById('sheet').open", wait))
+    };
+    let revisit = |b: &mut Browser| -> Result<bool> {
+        b.eval(page, "(document.getElementById('settings').click(), true)")?;
+        let closed = b.until(page, "location.pathname === '/settings'", wait);
+        b.eval(page, "(document.getElementById('apps-link').click(), true)")?;
+        Ok(closed && b.until(page, &format!("location.pathname === '/apps' && !!{row}"), wait))
+    };
+
+    // A no-change share sheet asks for the old access view; a real sharing
+    // change asks for the new one. Newest first, then oldest first.
+    b.eval(page, APPS_RACE_PROBE)?;
+    let shared = share(s, b)?;
+    let public = set_visibility(b, "public")?;
+    b.until(page, "window.__appsRace.count('access') >= 2", wait);
+    release(b, "access", true)?;
+    let newest = b.until(page, &format!("{access}.includes('Public')"), wait);
+    release(b, "card", true)?;
+    let shared_again = share(s, b)?;
+    let linked = set_visibility(b, "link")?;
+    b.until(page, "window.__appsRace.count('access') >= 2", wait);
+    release(b, "access", false)?;
+    let oldest = b.until(page, &format!("{access}.includes('Anyone with the link')"), wait);
+    release(b, "card", false)?;
+    b.eval(page, "window.__appsRace.restore()")?;
+    s.ok(
+        "access responses in either completion order around a sharing change end at the newest sharing: newest first Public, oldest first Anyone with the link",
+        shared && shared_again && public["status"] == 200 && linked["status"] == 200 && newest && oldest,
+        json!({ "newest": newest, "oldest": oldest, "access": b.eval(page, &access)? }),
+    );
+
+    // Close and reopen once to make the old visit's reads; while closed,
+    // change sharing and the card's bytes, then reopen into the new visit.
+    for (newest_first, visibility, source, expected_access, expected_card) in [
+        (true, "public", "window.__appsChangedCard", "Public", changed_card.clone()),
+        (false, "link", "window.__appsOriginalCard", "Anyone with the link", original.clone()),
+    ] {
+        b.eval(page, APPS_RACE_PROBE)?;
+        let old_visit = revisit(b)?;
+        b.until(page, "window.__appsRace.count('access') >= 1 && window.__appsRace.count('card') >= 1", wait);
+        b.eval(page, "(document.getElementById('settings').click(), true)")?;
+        b.until(page, "location.pathname === '/settings'", wait);
+        let changed = set_visibility(b, visibility)?;
+        let put = put_card(b, source)?;
+        b.eval(page, "(document.getElementById('apps-link').click(), true)")?;
+        let new_visit = b.until(page, &format!("location.pathname === '/apps' && !!{row} && window.__appsRace.count('access') >= 2 && window.__appsRace.count('card') >= 2"), wait);
+        release(b, "access", newest_first)?;
+        release(b, "card", newest_first)?;
+        let final_access = b.until(page, &format!("{access}.includes({})", js(expected_access)), wait);
+        let mut final_card = Value::Null;
+        let card_settled = s.eventually(wait, || {
+            final_card = b.eval(page, &format!("window.__appsHash({card}?.src).catch((e) => `hash failed: ${{e.message}}`)")).unwrap_or(Value::Null);
+            final_card == expected_card
+        });
+        b.eval(page, "window.__appsRace.restore()")?;
+        s.ok(
+            "closing and reopening Apps with access and card reads held: either completion order leaves the new visit's access text and card bytes",
+            old_visit && new_visit && changed["status"] == 200 && put["status"] == 200 && final_access && card_settled,
+            json!({ "newest_first": newest_first, "access": b.eval(page, &access)?, "card": final_card, "expected": expected_card, "put": put, "image": b.eval(page, &format!("{card}?.outerHTML ?? null"))?, "row": b.eval(page, &format!("{row}?.innerText ?? null"))? }),
+        );
+    }
+    Ok(())
+}
+
+/// An app created while Apps is open appears from the list, and its card is
+/// read then. Its first reads are 404; the bounded retry shows the card the
+/// platform has since made, byte for byte, without another list change.
+fn apps_arrival_ui(s: &mut Suite, b: &mut Browser, page: &Page) -> Result<()> {
+    let wait = std::time::Duration::from_secs(60);
+    b.eval(page, APPS_HASH_PROBE)?;
+    b.eval(
+        page,
+        "(() => { const real = window.fetch.bind(window); window.__arriving = { name: null, fail: true, reads: 0 }; \
+         window.fetch = async (url, o) => { const u = String(url); const a = window.__arriving; \
+         if (u === '/api/fragments' && o?.method === 'POST') { const r = await real(url, o); const made = await r.clone().json(); if (made.name?.startsWith('arriving-apps--')) a.name = made.name; return r; } \
+         if (a.name && u === `/api/f/${a.name}/card` && (o?.method ?? 'GET') === 'GET') { a.reads++; if (a.fail) return new Response('{}', { status: 404, headers: { 'content-type': 'application/json' } }); } \
+         return real(url, o); }; window.__arrivingRestore = () => { window.fetch = real; return true; }; return true; })()",
+    )?;
+    let made = b.eval(
+        page,
+        "fetch('/api/fragments', { method: 'POST', headers: { 'x-fragment-shell': '1', 'content-type': 'application/json' }, body: JSON.stringify({ label: 'arriving-apps', template: 'todo', title: 'Arriving app' }), credentials: 'same-origin' }).then(async (r) => ({ status: r.status, body: await r.json() }))",
+    )?;
+    let name = made["body"]["name"].as_str().unwrap_or("").to_string();
+    let row = format!("document.querySelector({})", js(&format!("#apps-page .app-row[data-fragment=\"{name}\"]")));
+    let unavailable = b.until(page, &format!("window.__arriving.reads > 0 && !!{row} && !{row}.querySelector('.app-row-card')"), wait);
+    b.eval(page, "(window.__arriving.fail = false, true)")?;
+    let arrived = b.until(page, &format!("!!{row}?.querySelector('.app-row-card')?.src.startsWith('blob:')"), wait);
+    let shown = b.eval(page, &format!("window.__appsHash({row}?.querySelector('.app-row-card')?.src)"))?;
+    let server = b.eval(page, &format!("window.__appsHash('/api/f/{name}/card')"))?;
+    s.ok(
+        "an app arriving while Apps is open gets its preview: initially unavailable, a bounded retry shows the server's card bytes with no navigation",
+        made["status"] == 200 && unavailable && arrived && shown == server,
+        json!({ "made": made, "unavailable": unavailable, "reads": b.eval(page, "window.__arriving.reads")?, "shown": shown, "server": server }),
+    );
+    b.eval(page, "window.__arrivingRestore()")?;
+    b.eval(page, &format!("fetch('/api/f/{name}', {{ method: 'DELETE', headers: {{ 'x-fragment-shell': '1' }}, credentials: 'same-origin' }}).then((r) => r.status)"))?;
+    b.until(page, &format!("!{row}"), wait);
+    Ok(())
+}
+
+/// Preview actions answered after a navigation or another open: visible
+/// operation state is cleaned up at each visit, an old result never renders,
+/// and an old POST's cleanup never unlocks a newer POST. Responses are gated
+/// here so the four orders do not spend the server's once-a-minute shot.
+fn apps_preview_visit_ui(s: &mut Suite, b: &mut Browser, page: &Page, app: &str) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    let row = format!("document.querySelector({})", js(&format!("#apps-page .app-row[data-fragment=\"{app}\"]")));
+    let control = |action: &str| format!("{row}?.querySelector('[data-action={action}]')");
+    let asking = format!("{}?.textContent === 'Asking…' && {0}?.disabled && {}?.disabled && {}?.disabled", control("card"), control("dock"), control("icon"));
+    let taking = format!("{}?.textContent === 'Taking a new preview…' && {0}?.disabled", control("card"));
+    let usable = format!("{}?.textContent === 'New preview' && !{0}?.disabled && !{}?.disabled && !{}?.disabled && !{row}?.querySelector('.app-row-said')", control("card"), control("dock"), control("icon"));
+    b.eval(
+        page,
+        &format!(
+            "(() => {{ const real = window.fetch.bind(window); const posts = [], statuses = []; const answer = (queue, body, status = 200) => {{ const next = queue.shift(); if (!next) return false; next(new Response(JSON.stringify(body), {{ status, headers: {{ 'content-type': 'application/json' }} }})); return true; }}; \
+             window.fetch = (url, o) => {{ const u = String(url); if (u === '/api/f/{app}/card' && o?.method === 'POST') return new Promise((resolve) => posts.push(resolve)); \
+             if (u === '/api/f/{app}/status' && (o?.method ?? 'GET') === 'GET') return new Promise((resolve) => statuses.push(resolve)); return real(url, o); }}; \
+             window.__previewVisit = {{ posts: () => posts.length, statuses: () => statuses.length, post: async (ok) => {{ const answered = answer(posts, ok ? {{ since: Date.now() }} : {{ error: 'rate_limited', message: 'within the minute' }}, ok ? 200 : 429); await new Promise((r) => setTimeout(r, 0)); return answered; }}, \
+             status: async () => {{ const answered = answer(statuses, {{ page: {{ at: Date.now() }} }}); await new Promise((r) => setTimeout(r, 0)); return answered; }}, restore: () => {{ window.fetch = real; return true; }} }}; return true; }})()"
+        ),
+    )?;
+    let post = |b: &mut Browser, ok: bool| b.eval(page, &format!("window.__previewVisit.post({ok})"));
+    let reopen = |b: &mut Browser| -> Result<bool> {
+        b.eval(page, "(document.getElementById('apps-link').click(), true)")?;
+        Ok(b.until(page, &usable, wait))
+    };
+
+    // A success and a refusal, each answered after Apps was left: reopening
+    // has no Asking… or refusal of the old visit, and the controls work.
+    b.eval(page, &format!("({}?.click(), true)", control("card")))?;
+    let asked = b.until(page, &asking, wait);
+    b.eval(page, "(document.getElementById('settings').click(), true)")?;
+    b.until(page, "location.pathname === '/settings'", wait);
+    post(b, true)?;
+    let succeeded = reopen(b)?;
+    b.eval(page, &format!("({}?.click(), true)", control("card")))?;
+    b.until(page, &asking, wait);
+    b.eval(page, "(document.getElementById('settings').click(), true)")?;
+    b.until(page, "location.pathname === '/settings'", wait);
+    post(b, false)?;
+    let refused = reopen(b)?;
+    s.ok(
+        "New preview answered after navigation: success or refusal leaves no old Asking…, refusal or disabled controls on reopen",
+        asked && succeeded && refused,
+        b.eval(page, &format!("{row}?.innerText ?? null"))?,
+    );
+
+    // Another open during the POST clears its Asking…. A newer POST started
+    // before the old one answers stays busy when the old one completes.
+    b.eval(page, &format!("({}?.click(), true)", control("card")))?;
+    b.until(page, &asking, wait);
+    let reopened = reopen(b)?;
+    b.eval(page, &format!("({}?.click(), true)", control("card")))?;
+    let newer = b.until(page, &asking, wait);
+    post(b, true)?;
+    let still_newer = b.eval(page, &asking)?;
+    post(b, true)?;
+    let polling = b.until(page, &taking, wait);
+    let reopened_polling = reopen(b)?;
+    s.ok(
+        "clicking Apps again during the request clears Asking…, and an old completion does not unlock a newer request or leave polling state",
+        reopened && newer && still_newer == true && polling && reopened_polling,
+        b.eval(page, &format!("{row}?.innerText ?? null"))?,
+    );
+
+    // Polling had actually started before the repeated open. Its old status
+    // answer cannot restore Taking… or disable the new visit's controls.
+    b.eval(page, &format!("({}?.click(), true)", control("card")))?;
+    post(b, true)?;
+    b.until(page, "window.__previewVisit.statuses() > 0", wait);
+    let during_poll = reopen(b)?;
+    b.eval(page, "window.__previewVisit.status()")?;
+    let settled = b.eval(page, &usable)?;
+    b.eval(page, "window.__previewVisit.restore()")?;
+    s.ok("clicking Apps again during polling clears Taking…, and the old status answer leaves the new visit usable", during_poll && settled == true, b.eval(page, &format!("{row}?.innerText ?? null"))?);
+    Ok(())
+}
+
+/// A Dock write is not preview presentation: navigation and repeated opens
+/// keep its switch busy, so no later choice can reach the server first. Once
+/// it answers, later toggles proceed in order and the list and switch agree.
+fn apps_dock_visit_ui(s: &mut Suite, b: &mut Browser, page: &Page, app: &str) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    let row = format!("document.querySelector({})", js(&format!("#apps-page .app-row[data-fragment=\"{app}\"]")));
+    let dock = format!("{row}?.querySelector('[data-action=dock]')");
+    let held = format!("{dock}?.disabled && window.__dockVisit.count() === 1");
+    b.eval(
+        page,
+        &format!(
+            "(() => {{ const real = window.fetch.bind(window); const writes = []; window.fetch = (url, o) => {{ \
+             if (String(url) === '/api/fragments/{app}/dock' && o?.method === 'PUT') {{ const answer = real(url, o); return new Promise((resolve) => writes.push({{ answer, resolve }})); }} return real(url, o); }}; \
+             window.__dockVisit = {{ count: () => writes.length, release: async () => {{ const next = writes.shift(); if (!next) return false; const r = await next.answer; next.resolve(r); await new Promise((done) => setTimeout(done, 0)); return true; }}, \
+             restore: () => {{ window.fetch = real; return true; }} }}; return true; }})()"
+        ),
+    )?;
+    let release = |b: &mut Browser| b.eval(page, "window.__dockVisit.release()");
+    let reopen = |b: &mut Browser| -> Result<bool> {
+        b.eval(page, "(document.getElementById('apps-link').click(), true)")?;
+        Ok(b.until(page, "location.pathname === '/apps'", wait))
+    };
+    let server_dock = |b: &mut Browser| {
+        b.eval(page, &format!("fetch('/api/fragments', {{ headers: {{ 'x-fragment-shell': '1' }} }}).then((r) => r.json()).then((j) => j.fragments.find((f) => f.name === '{}').dock !== false)", app))
+    };
+
+    // The first answer lands after navigation and another open. Until then
+    // there is one write alone; the next choice follows it.
+    b.eval(page, &format!("({dock}?.click(), true)"))?;
+    let first = b.until(page, &held, wait);
+    b.eval(page, "(document.getElementById('settings').click(), true)")?;
+    b.until(page, "location.pathname === '/settings'", wait);
+    let back = reopen(b)?;
+    let again = reopen(b)?;
+    let still_held = b.eval(page, &held)?;
+    release(b)?;
+    let off = b.until(page, &format!("{dock}?.getAttribute('aria-checked') === 'false' && !{dock}?.disabled"), wait);
+    b.eval(page, &format!("({dock}?.click(), true)"))?;
+    b.until(page, &held, wait);
+    release(b)?;
+    let on = b.until(page, &format!("{dock}?.getAttribute('aria-checked') === 'true' && !{dock}?.disabled"), wait);
+    let server_on = server_dock(b)?;
+    s.ok(
+        "a held Dock write stays the only write across navigation and repeated opens; the next toggle follows it, and server and switch end at the last choice",
+        first && back && again && still_held == true && off && on && server_on == true,
+        json!({ "held": still_held, "switch": b.eval(page, &format!("{dock}?.getAttribute('aria-checked')"))?, "server": server_on }),
+    );
+
+    // The other order: the first answer lands while Apps is closed. Further
+    // toggles and another repeated open remain serialized to the last choice.
+    b.eval(page, &format!("({dock}?.click(), true)"))?;
+    b.until(page, &held, wait);
+    b.eval(page, "(document.getElementById('settings').click(), true)")?;
+    b.until(page, "location.pathname === '/settings'", wait);
+    release(b)?;
+    let closed_answer = reopen(b)? && b.until(page, &format!("{dock}?.getAttribute('aria-checked') === 'false' && !{dock}?.disabled"), wait);
+    b.eval(page, &format!("({dock}?.click(), true)"))?;
+    b.until(page, &held, wait);
+    let repeated = reopen(b)?;
+    let no_overlap = b.eval(page, &held)?;
+    release(b)?;
+    b.until(page, &format!("{dock}?.getAttribute('aria-checked') === 'true' && !{dock}?.disabled"), wait);
+    b.eval(page, &format!("({dock}?.click(), true)"))?;
+    b.until(page, &held, wait);
+    release(b)?;
+    let last = b.until(page, &format!("{dock}?.getAttribute('aria-checked') === 'false' && !{dock}?.disabled"), wait);
+    let server_off = server_dock(b)?;
+    b.eval(page, "window.__dockVisit.restore()")?;
+    s.ok(
+        "with the earlier Dock answer before reopening too, subsequent toggles never overlap and the final server value and switch are the last choice",
+        closed_answer && repeated && no_overlap == true && last && server_off == false,
+        json!({ "held": no_overlap, "switch": b.eval(page, &format!("{dock}?.getAttribute('aria-checked')"))?, "server": server_off }),
+    );
+    // leave the app docked as the rest of shell-ui has it
+    b.eval(page, &format!("({dock}?.click(), true)"))?;
+    b.until(page, &held, wait);
+    release(b)?;
+    anyhow::ensure!(b.until(page, &format!("{dock}?.getAttribute('aria-checked') === 'true' && !{dock}?.disabled"), wait) && server_dock(b)? == true, "the app is docked again");
+    Ok(())
+}
+
+/// The Apps page (docs/api.md, The shell; #587), from the sidebar's Apps:
+/// the owner's app listed (no chat or skills), with its card and who has
+/// access; a kind this build does not know is listed as Other; its Dock
+/// switch takes it off the dock and back, moving only as the list does;
+/// New preview has it shot again (a second ask within the minute refused
+/// under its row); Icon… makes one, which its row shows; Share… opens the
+/// sheet, whose change of who has access the row then says. Settings are
+/// open, and open again at the end.
+fn apps_ui(s: &mut Suite, b: &mut Browser, page: &Page, skills: &str, app: &str, chat: &str, shots: &std::path::Path) -> Result<()> {
+    let wait = std::time::Duration::from_secs(60);
+    let row = format!("document.querySelector({})", js(&format!("#apps-page .app-row[data-fragment=\"{app}\"]")));
+    let control = |action: &str| format!("{row}?.querySelector('[data-action={action}]')");
+    let docked = format!("!!document.querySelector({})", js(&format!("#apps [data-key=\"app:{app}\"]")));
+    let absent = |name: &str| format!("!document.querySelector({})", js(&format!("#apps-page [data-fragment=\"{name}\"]")));
+    b.eval(page, "(document.getElementById('apps-link').click(), true)")?;
+    let listed = b.until(
+        page,
+        &format!("location.pathname === '/apps' && !!{row} && {row}.querySelector('.app-row-access')?.textContent.includes('Anyone with the link') && {row}.querySelector('.app-row-card')?.src.startsWith('blob:') && {} && {}", absent(chat), absent(skills)),
+        wait,
+    );
+    let _ = b.screenshot(page, &shots.join("apps-page.png"));
+    s.ok(
+        "the sidebar's Apps opens the Apps page (/apps): their app with its card and who can open it (Anyone with the link), and no chat or skills",
+        listed,
+        b.eval(page, "document.getElementById('apps-page')?.innerText ?? null")?,
+    );
+
+    // a newer platform's kind, added to the next list's answer as the wire
+    // forwards it: unfamiliar, but not a chat, an agent or skills, so listed
+    let future = "future-app--e2e";
+    let future_row = format!("document.querySelector({})", js(&format!("#apps-page .app-row[data-fragment=\"{future}\"]")));
+    b.eval(
+        page,
+        &format!(
+            "(() => {{ const real = window.fetch; window.__appsRealFetch = real; window.fetch = async (url, o) => {{ const r = await real(url, o); \
+             if (String(url) !== '/api/fragments' || (o?.method ?? 'GET') !== 'GET' || !r.ok) return r; \
+             const list = await r.clone().json(); list.fragments.push({{ name: {}, role: 'owner', kind: 'site', title: 'Future app', sharing: {{ visibility: 'members' }} }}); \
+             return new Response(JSON.stringify(list), {{ status: r.status, headers: {{ 'content-type': 'application/json' }} }}); }}; return true; }})()",
+            js(future)
+        ),
+    )?;
+
+    // the dock: off, then on again, the switch as the list says
+    let on = b.eval(page, &format!("{}?.getAttribute('aria-checked')", control("dock")))?;
+    b.eval(page, &format!("({}?.click(), true)", control("dock")))?;
+    let off = b.until(page, &format!("{}?.getAttribute('aria-checked') === 'false' && !{}?.disabled && !{docked}", control("dock"), control("dock")), wait);
+    let other = b.until(page, &format!("!!{future_row} && {future_row}.innerText.includes('Future app') && {future_row}.innerText.includes('Other') && !{future_row}.querySelector('[data-action=dock]')"), wait);
+    s.ok("a kind the page does not know still lists as Other, with no Dock switch", other, b.eval(page, &format!("{future_row}?.innerText ?? null"))?);
+    b.eval(page, "(window.fetch = window.__appsRealFetch, true)")?;
+    b.eval(page, &format!("({}?.click(), true)", control("dock")))?;
+    let back = b.until(page, &format!("{}?.getAttribute('aria-checked') === 'true' && {docked}", control("dock")), wait);
+    s.ok("its Dock switch takes it off the dock and puts it back, the switch moving as the list does", on == "true" && off && back, b.eval(page, &format!("{row}?.innerText ?? null"))?);
+
+    apps_dock_visit_ui(s, b, page, app)?;
+    apps_response_races_ui(s, b, page, app)?;
+    apps_arrival_ui(s, b, page)?;
+    apps_preview_visit_ui(s, b, page, app)?;
+
+    // its card shot again; asked again within the minute, refused under its row
+    let before = b.eval(page, &format!("{row}?.querySelector('.app-row-card')?.src ?? null"))?;
+    b.eval(page, &format!("({}?.click(), true)", control("card")))?;
+    let taking = b.until(page, &format!("{}?.textContent === 'Taking a new preview…' && {}?.disabled", control("card"), control("card")), wait);
+    let taken = b.until(page, &format!("{}?.textContent === 'New preview' && !{row}?.querySelector('.app-row-said')", control("card")), std::time::Duration::from_secs(120));
+    b.eval(page, &format!("({}?.click(), true)", control("card")))?;
+    let refused = b.until(page, &format!("/within the minute/.test({row}?.querySelector('.app-row-said')?.textContent ?? '') && {}?.textContent === 'New preview'", control("card")), wait);
+    s.ok(
+        "New preview has its card shot again: Taking a new preview… until the shot reports, then its card; asked again within the minute, it says so under the row",
+        taking && taken && refused,
+        json!({ "before": before, "after": b.eval(page, &format!("{row}?.querySelector('.app-row-card')?.src ?? null"))?, "row": b.eval(page, &format!("{row}?.innerText ?? null"))? }),
+    );
+
+    // an icon made here: its first read is held until the loading row is in
+    // the DOM, then fails. A share sheet opened and closed (no fragment
+    // change, no navigation) draws again; after its refreshes settle, the
+    // retry has succeeded into the live row rather than detached art
+    b.eval(page, &format!("({}?.click(), true)", control("icon")))?;
+    let sheet = b.until(page, "!!document.querySelector('dialog.icon-sheet[open]')", wait);
+    b.eval(page, "(document.querySelector('dialog.icon-sheet .icon-make button[type=submit]')?.click(), true)")?;
+    let made = b.until(page, "document.querySelectorAll('dialog.icon-sheet .icon-pick img').length > 0", wait);
+    let reads = format!("*/api/f/{app}/icon?v=*");
+    b.hold(page, &[&reads])?;
+    b.eval(page, "(document.querySelector('dialog.icon-sheet .icon-pick')?.click(), true)")?;
+    let loading = b.until(page, &format!("!!{row}?.querySelector('.app-row-art .app-picture:not([data-unread]) .app-icon')"), wait) && s.eventually(wait, || b.held(page).is_ok_and(|h| !h.is_empty()));
+    b.release(page, true)?;
+    let unread = b.until(page, &format!("!!{row}?.querySelector('.app-row-art .app-picture[data-unread] .app-icon') && !{row}?.querySelector('.app-row-art img')"), wait);
+    b.eval(page, "(document.querySelector('dialog.icon-sheet')?.close(), true)")?;
+    std::thread::sleep(std::time::Duration::from_millis(2200));
+    b.eval(page, &format!("({}?.click(), true)", control("share")))?;
+    let shared = b.until(page, "document.getElementById('sheet').open", wait);
+    let ready = shared && s.eventually(wait, || b.eval_in_frame(page, "/share/", "!!document.querySelector('button[data-done]')").ok() == Some(Value::Bool(true)));
+    let _ = b.eval_in_frame(page, "/share/", "(document.querySelector('button[data-done]').click(), true)");
+    let closed = b.until(page, "!document.getElementById('sheet').open", wait);
+    let settled = b.until(page, &format!("!!{row}?.querySelector('.app-row-access')?.textContent"), wait);
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    let shown = b.until(page, &format!("(() => {{ const i = {row}?.querySelector('.app-row-art img'); return location.pathname === '/apps' && !!i && i.src.startsWith('blob:') && i.complete && i.naturalWidth === 256 && !{row}?.querySelector('.app-row-art [data-unread]'); }})()"), wait);
+    s.ok(
+        "its icon read fails after the loading row is drawn, then the same fragment's next draw retries and shows the loaded picture after refreshes settle",
+        sheet && made && loading && unread && ready && closed && settled && shown,
+        b.eval(page, &format!("{row}?.querySelector('.app-row-art')?.outerHTML.slice(0, 300) ?? null"))?,
+    );
+    b.eval(page, &format!("({}?.click(), true)", control("icon")))?;
+    b.until(page, "!!document.querySelector('dialog.icon-sheet[open]')", wait);
+    b.eval(page, "([...document.querySelectorAll('dialog.icon-sheet .icon-actions button')].find((b) => b.textContent === 'Remove')?.click(), true)")?;
+    let removed = b.until(page, &format!("!!{row}?.querySelector('.app-row-art .app-icon') && !{row}?.querySelector('.app-row-art img')"), wait);
+    b.eval(page, "(document.querySelector('dialog.icon-sheet')?.close(), true)")?;
+    s.ok("removed, its glyph is back", removed, b.eval(page, &format!("{row}?.querySelector('.app-row-art')?.outerHTML.slice(0, 300) ?? null"))?);
+
+    // who has access, changed in its share sheet: Public, then back
+    let visibility = |b: &mut Browser, v: &str| -> Result<bool> {
+        b.eval(page, &format!("({}?.click(), true)", control("share")))?;
+        let open = b.until(page, "document.getElementById('sheet').open", wait);
+        let armed = format!("!!document.querySelector('button[name=visibility][value={v}]:not([disabled])')");
+        let ready = open && s.eventually(wait, || b.eval_in_frame(page, "/share/", &armed).ok() == Some(Value::Bool(true)));
+        let _ = b.eval_in_frame(page, "/share/", &format!("(document.querySelector('button[name=visibility][value={v}]').click(), true)"));
+        let pressed = ready && s.eventually(wait, || b.eval_in_frame(page, "/share/", &format!("!!document.querySelector('button[value={v}][aria-pressed=true]')")).ok() == Some(Value::Bool(true)));
+        let _ = b.eval_in_frame(page, "/share/", "(document.querySelector('button[data-done]').click(), true)");
+        Ok(pressed && b.until(page, "!document.getElementById('sheet').open", wait))
+    };
+    let public = visibility(b, "public")? && b.until(page, &format!("{row}?.querySelector('.app-row-access')?.textContent.includes('Public')"), wait);
+    let linked = visibility(b, "link")? && b.until(page, &format!("{row}?.querySelector('.app-row-access')?.textContent.includes('Anyone with the link')"), wait);
+    s.ok("its Share… opens its share sheet; made Public there, its row says Public, and back to Anyone with the link", public && linked, b.eval(page, &format!("{row}?.innerText ?? null"))?);
+
+    // back to settings, where the checks after these are
+    b.eval(page, "(document.getElementById('settings').click(), true)")?;
+    b.until(page, "location.pathname === '/settings' && !!document.querySelector('#settings-data')", wait);
+    Ok(())
+}
+
 fn open_beside_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person, app: &str, shots: &std::path::Path) -> Result<()> {
     let wait = std::time::Duration::from_secs(30);
     let agent_wait = std::time::Duration::from_secs(120);

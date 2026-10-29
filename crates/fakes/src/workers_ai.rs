@@ -19,6 +19,20 @@
 //! the prompt (`image_bytes`), with no usage: Workers AI prices an image by
 //! its tiles and steps, which the cell counts itself.
 //!
+//! An icon (fragment_core::icon) is made of three calls here:
+//! - its subject, GLM-5.3 Flash asked with the icon's own system message
+//!   (`icon::subject_input`): named as its maker's hint asked, else
+//!   `ICON_SUBJECT` (`icon_subject`), unstreamed with its usage;
+//! - its drawings, FLUX.2 [klein] 4B (`ICON_MODEL`), `{prompt, width,
+//!   height, seed}` as JSON (the cell sends the binding a form): `{"image":
+//!   <base64>}` with `cf-ai-neurons: DRAWN_NEURONS`, as the spike's answers
+//!   came. The real model draws a JPEG, which Images cuts out; local Images
+//!   cuts nothing (`segment` is a no-op under `wrangler dev`), so the fake
+//!   draws the cutout itself: a PNG whose alpha holds one object
+//!   (`icon_drawing`), which the cell's pixel checks read. A subject that
+//!   names a square is drawn as a filled square, the tile they refuse;
+//! - its checks, Clef's (below), answered `ICON_CHECKED`, which passes.
+//!
 //! The decision models (the Clef family: `fragment_core::decide::Model`)
 //! take System One's input as their catalog schemas say: `model` their own
 //! selector, `state`, `questions`, and media as base64 `data:` URLs,
@@ -29,7 +43,8 @@
 //! image `IMAGE_TOKENS`, audio and video a token a KiB. Past the model's
 //! context window it is a 400, as Clef's request "fails". Its default
 //! answer is mechanical: each choice's first option, each score's first
-//! level, 0.5 for a predicate; `decide_next` scripts raw answers (a
+//! level, 0.5 for a predicate, but an icon's check (`icon::check`, known by
+//! its input) `ICON_CHECKED`; `decide_next` scripts raw answers (a
 //! malformed one too), never an accuracy claim.
 //!
 //! The transcription model (`TRANSCRIBE_MODEL`, Whisper) answers as its
@@ -126,6 +141,22 @@ pub use fragment_core::decide::Model as DecisionModel;
 pub const IMAGE_TOKENS: u64 = 16 * 16 + 3;
 /// What Whisper hears in audio that carries no words of `spoken_wav`'s.
 pub const NO_WORDS: &str = "(no words)";
+/// The icons' drawing model (fragment_core::icon::IMAGE_MODEL).
+pub use fragment_core::icon::IMAGE_MODEL as ICON_MODEL;
+/// The subject GLM names for an icon its maker asked nothing of
+/// (`icon_subject`).
+pub const ICON_SUBJECT: &str = "a red apple with a yellow tape measure";
+/// What a drawing cost, as Workers AI says it (`cf-ai-neurons`): the
+/// spike's at 512×512 (fragment_core::icon::DRAWN_MILLI_NEURONS).
+pub const DRAWN_NEURONS: &str = "104.20";
+/// Clef's answer to each of an icon's questions (`icon::check`): no
+/// writing, no tile, one object, of its subject, as the spike's good
+/// drawings were answered.
+pub const ICON_CHECKED: [(&str, f64); 4] = [("writing", 0.01), ("tile", 0.05), ("object", 0.9), ("subject", 0.9)];
+/// A drawing's side when its input names none, and the sides its input
+/// may name (the model's catalog entry: fragment_core::icon::IMAGE_MODEL).
+const DRAWN_SIDE_DEFAULT: u32 = 1024;
+const DRAWN_SIDES: std::ops::RangeInclusive<u64> = 256..=1920;
 
 /// The chat models the platform calls that read images: those Workers AI's
 /// catalog marks "Vision: Yes" (GLM-5.3 Flash, the cheap tier's and the
@@ -700,6 +731,86 @@ fn image_answer(input: &Value, log_id: &str) -> Response {
     Response::json(200, &json!({ "image": image })).with_header("cf-aig-log-id", log_id)
 }
 
+/// The subject named when `body` asks an icon's (its system message
+/// `icon::subject_input`'s): the hint its maker asked for (the user
+/// message's "Its maker asks for: …"), else `ICON_SUBJECT`. `None` for any
+/// other chat.
+pub fn icon_subject(body: &Value) -> Option<String> {
+    let asked = fragment_core::icon::subject_input("", None, None);
+    let messages = body["messages"].as_array()?;
+    if messages.first() != Some(&asked["messages"][0]) {
+        return None;
+    }
+    let said = messages.iter().rev().find(|m| m["role"] == "user").map(|m| text_of(&m["content"])).unwrap_or_default();
+    let hint = said.split_once(fragment_core::icon::ASKS).map(|(_, h)| h.trim().to_string()).filter(|h| !h.is_empty());
+    Some(hint.unwrap_or_else(|| ICON_SUBJECT.to_string()))
+}
+
+/// What the icon model draws for `prompt`, `width` × `height`: a PNG whose
+/// alpha holds its object, already cut out (the module's doc). The object
+/// is a disc of a colour `seed` picks, outlined, its radius 30 to 37% of
+/// the shorter side as `seed` says, centred well inside its frame; or,
+/// when the subject drawn (`icon::prompt`'s, after "The object:") names a
+/// square, a filled square half the shorter side across: a tile.
+pub fn icon_drawing(prompt: &str, width: u32, height: u32, seed: u64) -> Vec<u8> {
+    const COLOURS: [[u8; 3]; 5] = [[214, 48, 49], [9, 132, 227], [0, 184, 148], [253, 150, 68], [108, 92, 231]];
+    assert!(DRAWN_SIDES.contains(&u64::from(width)) && DRAWN_SIDES.contains(&u64::from(height)), "a drawing's sides are its model's");
+    // the prompt's style says "no rounded square": only its subject counts
+    let tile = prompt.rsplit_once(fragment_core::icon::OBJECT.trim_start()).map_or(prompt, |(_, subject)| subject).contains("square");
+    let fill = COLOURS[(seed % COLOURS.len() as u64) as usize];
+    let outline = fill.map(|c| c / 3);
+    let side = f64::from(width.min(height));
+    let (cx, cy) = (f64::from(width) / 2.0, f64::from(height) / 2.0);
+    let r = side * (0.30 + (seed % 8) as f64 * 0.01);
+    let mut rgba = Vec::with_capacity(width as usize * height as usize * 4);
+    // bounded: width × height ≤ 1920², its sides asserted above
+    for y in 0..height {
+        for x in 0..width {
+            let (px, py) = (f64::from(x) + 0.5, f64::from(y) + 0.5);
+            let (colour, alpha) = if tile {
+                let inside = (px - cx).abs() <= side / 4.0 && (py - cy).abs() <= side / 4.0;
+                (fill, if inside { 255 } else { 0 })
+            } else {
+                // its edge one pixel of coverage, as a cutout's is
+                let d = (px - cx).hypot(py - cy);
+                let alpha = ((r - d + 0.5).clamp(0.0, 1.0) * 255.0).round() as u8;
+                (if d > r - side / 80.0 { outline } else { fill }, alpha)
+            };
+            match alpha {
+                0 => rgba.extend([0, 0, 0, 0]),
+                a => rgba.extend([colour[0], colour[1], colour[2], a]),
+            }
+        }
+    }
+    let mut png = Vec::new();
+    let mut encoder = png::Encoder::new(&mut png, width, height);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = encoder.write_header().expect("a PNG's header writes to memory");
+    writer.write_image_data(&rgba).expect("its pixels are its size's");
+    writer.finish().expect("a PNG ends in memory");
+    png
+}
+
+/// The icon model's answer to `input` (`{prompt, width?, height?, seed?}`):
+/// `{"image": <base64>}` of `icon_drawing`, and what it cost.
+fn icon_answer(input: &Value, log_id: &str) -> Response {
+    let Some(prompt) = input["prompt"].as_str() else { return problem(400, "Type mismatch of '/prompt', 'undefined' not in 'string'") };
+    let side = |k: &str| match input.get(k) {
+        None | Some(Value::Null) => Some(DRAWN_SIDE_DEFAULT),
+        Some(v) => v.as_u64().filter(|n| DRAWN_SIDES.contains(n)).and_then(|n| u32::try_from(n).ok()),
+    };
+    let (Some(width), Some(height)) = (side("width"), side("height")) else { return problem(400, "width and height are each 256 to 1920") };
+    let image = base64::engine::general_purpose::STANDARD.encode(icon_drawing(prompt, width, height, input["seed"].as_u64().unwrap_or(0)));
+    Response::json(200, &json!({ "image": image })).with_header("cf-aig-log-id", log_id).with_header("cf-ai-neurons", DRAWN_NEURONS)
+}
+
+/// Whether a decision's input is an icon's check (`icon::check`, by its
+/// input, which the wire carries as `state`).
+fn icon_check(input: &Value) -> bool {
+    input["state"] == fragment_core::icon::check("", "")["input"]
+}
+
 /// Finite Private's limiter's refusal: OpenAI's error shape, its `code`
 /// and `type` as the limiter names them.
 fn limiter_error(status: u16, kind: &str, code: &str, message: &str) -> Response {
@@ -769,9 +880,10 @@ fn decision_answer(s: &mut State, model: DecisionModel, input: &Value, log_id: &
     };
     let answer = s.decisions.pop_front().unwrap_or_else(|| {
         let mut answers = serde_json::Map::new();
+        let checked: &[(&str, f64)] = if icon_check(input) { &ICON_CHECKED } else { &[] };
         for (id, q) in input["questions"].as_object().into_iter().flatten() {
             let a = match q["type"].as_str() {
-                Some("noul") => json!({ "type": "noul", "noul": 0.5 }),
+                Some("noul") => json!({ "type": "noul", "noul": checked.iter().find(|(q, _)| *q == id.as_str()).map_or(0.5, |(_, p)| *p) }),
                 Some("choice") => {
                     let keys: Vec<&String> = q["criteria"].as_object().into_iter().flatten().map(|(k, _)| k).collect();
                     let ps: serde_json::Map<String, Value> = keys.iter().enumerate().map(|(i, k)| ((*k).clone(), json!(if i == 0 { 1.0 } else { 0.0 }))).collect();
@@ -814,6 +926,9 @@ fn answer(s: &mut State, req: &Request) -> Response {
     let log_id = format!("01FAKE{:020}", s.answers);
     if model == IMAGE_MODEL {
         return image_answer(&body, &log_id);
+    }
+    if model == ICON_MODEL {
+        return icon_answer(&body, &log_id);
     }
     if model == TRANSCRIBE_MODEL {
         return transcription_answer(&body, &log_id);
@@ -873,10 +988,11 @@ fn chat_answer(s: &mut State, face: Face, model: &str, body: &Value) -> Response
         s.sleep_ms = s.sleep_ms.max(FOLLOW_UP_MS);
     }
     let broken = s.breaks.pop_front().unwrap_or(false);
-    let reply = match said {
-        Some(reply) => reply,
-        None if s.transcripts => transcript_reply(body),
-        None => Reply::Text(format!("echo: {}", last.as_str().unwrap_or(""))),
+    let reply = match (said, icon_subject(body)) {
+        (Some(reply), _) => reply,
+        (None, Some(subject)) => Reply::Text(subject),
+        (None, None) if s.transcripts => transcript_reply(body),
+        (None, None) => Reply::Text(format!("echo: {}", last.as_str().unwrap_or(""))),
     };
     if body["stream"] == true {
         let called = |calls: &[(String, Value)]| calls.iter().map(|(n, a)| n.len() + a.to_string().len()).sum::<usize>();
@@ -1537,6 +1653,108 @@ mod tests {
         s.decisions.push_back(json!({ "answers": {} }));
         assert_eq!(answered(&mut s, DecisionModel::ClefFlash, &wrong).0, 400, "a refused input takes no scripted answer");
         assert_eq!(answered(&mut s, DecisionModel::Clef, &wrong).1, json!({ "answers": {} }), "the next does");
+    }
+
+    /// Goal: an icon's drawing is a cutout the cell's checks offer: one
+    /// object well inside its frame, its corners clear, a little different
+    /// each seed; a subject that names a square is the tile they refuse,
+    /// and the style's own words name none. Method: drawings through the
+    /// core's own reader and `examine`, for each seed and subject.
+    #[test]
+    fn an_icon_is_drawn_as_a_cutout_its_checks_read() {
+        use fragment_core::icon::{alpha_of, examine, prompt, Flaw};
+        let side = fragment_core::icon::DRAWN_PX;
+        let examined = |p: &str, seed: u64| {
+            let png = icon_drawing(p, side, side, seed);
+            let (w, h, alpha) = alpha_of(&png).expect("a PNG the core reads");
+            assert_eq!((w, h), (side, side));
+            let corners = [0, side as usize - 1, (side * (side - 1)) as usize, (side * side) as usize - 1].map(|i| alpha[i]);
+            (png, examine(w, h, &alpha), corners)
+        };
+        for seed in 0..8 {
+            let (_, shape, corners) = examined(&prompt(ICON_SUBJECT), seed);
+            let s = shape.unwrap_or_else(|f| panic!("seed {seed}: {f:?}"));
+            assert!(s.left > side / 8 && s.top > side / 8 && s.right < side * 7 / 8 && s.bottom < side * 7 / 8, "well inside: {s:?}");
+            assert_eq!(corners, [0; 4], "seed {seed}");
+        }
+        assert_ne!(examined(&prompt(ICON_SUBJECT), 0).0, examined(&prompt(ICON_SUBJECT), 1).0, "each seed its own drawing");
+        assert_eq!(examined(&prompt(ICON_SUBJECT), 5).0, examined(&prompt(ICON_SUBJECT), 5).0, "a seed draws the same again");
+        assert_eq!(examined(&prompt("a square"), 3).1, Err(Flaw::Tile));
+        assert_eq!(examined("a square", 0).1, Err(Flaw::Tile), "a prompt of no style is all subject");
+        assert!(examined("No rounded square, no tile. The object: a red apple.", 0).1.is_ok(), "the style's square is no subject's");
+    }
+
+    /// Goal: the icon model answers as the spike's calls were answered,
+    /// `{image}` and its cost in `cf-ai-neurons`, which the core reads as
+    /// its price's own figure; its input's sides are the catalog's.
+    /// Method: the cell's input through the handler, and inputs it refuses.
+    #[test]
+    fn an_icon_drawing_answers_its_image_and_its_cost() {
+        let mut s = State::default();
+        let draw = |s: &mut State, input: &Value| answer(s, &Request::new("POST", &format!("/run/{ICON_MODEL}"), &[], input.to_string().as_bytes()));
+        let r = draw(&mut s, &fragment_core::icon::image_input(ICON_SUBJECT, 7));
+        let v: Value = serde_json::from_slice(&r.body).unwrap();
+        let png = base64::engine::general_purpose::STANDARD.decode(v["image"].as_str().unwrap()).unwrap();
+        assert_eq!(r.status, 200);
+        assert_eq!(fragment_core::icon::alpha_of(&png).map(|(w, h, _)| (w, h)), Ok((512, 512)));
+        let neurons = r.headers.iter().find(|(k, _)| k == "cf-ai-neurons").map(|(_, v)| v.as_str());
+        assert_eq!(fragment_core::icon::neurons(neurons), fragment_core::price::Usage::Neurons { milli: fragment_core::icon::DRAWN_MILLI_NEURONS });
+        let png = |r: Response| base64::engine::general_purpose::STANDARD.decode(serde_json::from_slice::<Value>(&r.body).unwrap()["image"].as_str().unwrap()).unwrap();
+        let wide = draw(&mut s, &json!({ "prompt": "a kite", "width": 768 }));
+        assert_eq!(fragment_core::icon::alpha_of(&png(wide)).map(|(w, h, _)| (w, h)), Ok((768, 1024)), "a side not named is the default");
+        assert_eq!(draw(&mut s, &json!({ "width": 512, "height": 512 })).status, 400, "no prompt");
+        assert_eq!(draw(&mut s, &json!({ "prompt": "a kite", "width": 2048, "height": 512 })).status, 400, "past its catalog's sides");
+        assert_eq!(draw(&mut s, &json!({ "prompt": "a kite", "height": "512" })).status, 400);
+        assert_eq!(s.calls.iter().filter(|c| c.model == ICON_MODEL).count(), 5, "each call recorded, the refused too");
+    }
+
+    /// Goal: an icon's subject question (its own system message) is
+    /// answered as its maker asked, else `ICON_SUBJECT`, unstreamed with
+    /// its usage, which the cell reads; a test's script comes first, and
+    /// any other chat is answered as before. Method: the core's question,
+    /// with a hint and without, through the handler.
+    #[test]
+    fn an_icons_subject_is_named_as_its_maker_asked() {
+        use fragment_core::icon::{subject_input, subject_of, SUBJECT_MODEL};
+        let mut s = State::default();
+        let ask = |s: &mut State, body: &Value| {
+            let r = answer(s, &Request::new("POST", &format!("/run/{SUBJECT_MODEL}"), &[], body.to_string().as_bytes()));
+            serde_json::from_slice::<Value>(&r.body).unwrap()
+        };
+        let v = ask(&mut s, &subject_input("Todo", Some("Lists of things to do."), None));
+        assert_eq!(subject_of(&v).as_deref(), Some(ICON_SUBJECT), "{v}");
+        assert!(fragment_core::models::usage_of(SUBJECT_MODEL, &v["usage"]).is_some(), "{v}");
+        let v = ask(&mut s, &subject_input("Todo", None, Some("a square")));
+        assert_eq!(subject_of(&v).as_deref(), Some("a square"));
+        let other = json!({ "messages": [{ "role": "system", "content": "You are helpful." }, { "role": "user", "content": "hi" }] });
+        assert_eq!(ask(&mut s, &other)["choices"][0]["message"]["content"], "echo: hi");
+        s.said.push_back(Reply::Text("a scripted kettle".into()));
+        assert_eq!(subject_of(&ask(&mut s, &subject_input("Todo", None, None))).as_deref(), Some("a scripted kettle"));
+    }
+
+    /// Goal: Clef passes an icon's check as the spike's good drawings were
+    /// passed (no writing, no tile, one object, its subject), the core
+    /// judging the answer as the cell does, and counts its input; any other
+    /// decision of the same questions is answered as before. Method: the
+    /// core's check of a JPEG, and the same questions about something else.
+    #[test]
+    fn an_icons_check_passes_it() {
+        let mut s = State::default();
+        let url = format!("data:image/jpeg;base64,{}", base64::engine::general_purpose::STANDARD.encode(image_bytes("a flat icon")));
+        let checked = fragment_core::icon::check(ICON_SUBJECT, &url);
+        let call = fragment_core::decide::bound(&checked, fragment_core::decide::Asker::Agent).unwrap();
+        let r = decision_answer(&mut s, call.model, &call.input(vec![]), "log");
+        let v: Value = serde_json::from_slice(&r.body).unwrap();
+        let answer = call.answer(&v).expect("an answer the cell takes");
+        let score = fragment_core::icon::judged(&answer).expect("it passes");
+        assert!((score - 0.9 * 0.9 * 0.99 * 0.95).abs() < 1e-9, "{score}");
+        assert_eq!(call.usage(&v), Some(fragment_core::price::Usage::Tokens { model: call.model.id().into(), input: v["usage"]["input_tokens"].as_u64().unwrap(), cached_input: 0, cache_write: 0, output: 0 }));
+        assert!(v["usage"]["input_tokens"].as_u64().unwrap() > IMAGE_TOKENS);
+        let mut elsewhere = checked.clone();
+        elsewhere["input"] = json!("A photograph of a desk.");
+        let call = fragment_core::decide::bound(&elsewhere, fragment_core::decide::Asker::Agent).unwrap();
+        let v: Value = serde_json::from_slice(&decision_answer(&mut s, call.model, &call.input(vec![]), "log").body).unwrap();
+        assert!(["writing", "tile", "object", "subject"].iter().all(|q| v["answers"][q]["noul"] == 0.5), "{v}");
     }
 
     #[test]

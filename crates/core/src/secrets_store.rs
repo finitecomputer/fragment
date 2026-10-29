@@ -41,10 +41,10 @@ pub fn connection_secret(provider: &str) -> String {
 /// a value changed in the store (`cargo xtask secret set`) reaches every
 /// warm isolate within this, with no deploy.
 pub const CACHE_MS_MAX: i64 = 60_000;
-/// The bindings one Worker has: the seven above, a model's key per slot of
-/// the model route (`models::SLOTS`), and an operator key per provider of
-/// the catalog, at most.
-pub const CACHE_ENTRIES_MAX: usize = 7 + crate::models::SLOTS.len() + catalog::PROVIDERS_MAX;
+/// The bindings one Worker has: the seven above, a model's key per slot a
+/// deployment's `models` may name (`models::SLOTS_MAX`), and an operator
+/// key per provider of the catalog, at most.
+pub const CACHE_ENTRIES_MAX: usize = 7 + crate::models::SLOTS_MAX + catalog::PROVIDERS_MAX;
 
 /// The binding that holds operator key `provider` (`perplexity` →
 /// `OPERATOR_KEY_PERPLEXITY`, `google-places` → `OPERATOR_KEY_GOOGLE_PLACES`).
@@ -57,10 +57,11 @@ pub fn operator_key(provider: &str) -> String {
 
 /// The binding that holds the key of the model the route's `slot` runs on
 /// an OpenAI-compatible API (`models::Upstream::Openai`; `cheap` →
-/// `MODEL_KEY_CHEAP`). Each slot has its own, though two may name one
-/// secret (Finite's tiers name Finite Private's key).
+/// `MODEL_KEY_CHEAP`, a route's own `standard_fallback` →
+/// `MODEL_KEY_STANDARD_FALLBACK`). Each slot has its own, though two may
+/// name one secret (Finite's tiers name Finite Private's key).
 pub fn model_key(slot: &str) -> String {
-    assert!(crate::models::SLOTS.contains(&slot), "a slot is one of the model route's: {slot:?}");
+    assert!(crate::models::valid_slot_name(slot), "a slot is one a deployment's models may name: {slot:?}");
     format!("{MODEL_KEY_PREFIX}{}", slot.to_ascii_uppercase())
 }
 
@@ -181,7 +182,8 @@ mod tests {
         assert_eq!(operator_key("google-places"), "OPERATOR_KEY_GOOGLE_PLACES");
         assert!(std::panic::catch_unwind(|| operator_key("Not A Name")).is_err());
         assert_eq!(crate::models::SLOTS.map(model_key), ["MODEL_KEY_CHEAP", "MODEL_KEY_MEDIUM", "MODEL_KEY_FALLBACK", "MODEL_KEY_VISION"]);
-        assert!(std::panic::catch_unwind(|| model_key("high")).is_err(), "high is no slot");
+        assert_eq!(model_key("standard_fallback"), "MODEL_KEY_STANDARD_FALLBACK", "a route's own slot's");
+        assert!(std::panic::catch_unwind(|| model_key("High")).is_err(), "no slot's name");
         // none is a name an earlier deploy's Worker secret had
         for b in [HOST_SECRET, HOST_SECRET_PREVIOUS, CODESTORAGE_KEY, WORKOS_CLIENT, WORKOS_KEY, STRIPE_KEY, STRIPE_WEBHOOK, &operator_key("xai"), &model_key("cheap")] {
             assert!(!["FRAGMENT_HOST_SECRET", "FRAGMENT_HOST_SECRET_PREVIOUS", "CODESTORAGE_PRIVATE_KEY", "WORKOS_API_KEY", "WORKOS_CLIENT_ID", "FRAGMENT_KEY_XAI"].contains(&b), "{b}");

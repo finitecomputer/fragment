@@ -516,16 +516,15 @@ fn screen_start(agent: Option<&str>) -> ! {
 /// At image build: what the boot reads instead of finding it each time, and
 /// the platform skill (skills.rs), from the image's own `fragment` CLI.
 fn build_info() -> ! {
+    desktop::install_browser(Path::new("/opt/hermes")).unwrap_or_else(|e| fail(&e));
     let plugins = hermes::lean_plugins(Path::new("/opt/hermes/plugins"));
     std::fs::write(format!("{OPT}/lean-plugins.txt"), plugins.join("\n")).unwrap_or_else(|e| fail(&e.to_string()));
-    // the image's Chromium (hermes::CHROMIUM): the full Chromium Hermes'
-    // build pins and names (its one browser, headed or headless), with the
-    // flags a container needs, whatever the runtime
-    let named = std::fs::read_to_string(PINNED_CHROMIUM).unwrap_or_else(|e| fail(&format!("{PINNED_CHROMIUM}: {e}")));
-    let full = PathBuf::from(named.trim());
+    // The desktop image already contains regular distro Chromium. Its PM
+    // marker names Chrome for Testing, which is not our desktop default.
+    let full = PathBuf::from(hermes::SYSTEM_CHROMIUM);
     let runs = std::fs::metadata(&full).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0);
     if !full.is_absolute() || !runs {
-        fail(&format!("{PINNED_CHROMIUM} names no Chromium that runs: {full:?}"));
+        fail(&format!("the image has no regular Chromium that runs: {full:?}"));
     }
     std::fs::write(hermes::CHROMIUM, hermes::chromium_script(&full)).unwrap_or_else(|e| fail(&format!("{}: {e}", hermes::CHROMIUM)));
     std::fs::set_permissions(hermes::CHROMIUM, std::fs::Permissions::from_mode(0o755)).unwrap_or_else(|e| fail(&format!("{}: {e}", hermes::CHROMIUM)));
@@ -542,11 +541,6 @@ fn build_info() -> ! {
     println!("{} plugins disabled; Chromium {full:?} as {}; the platform skill, {} bytes", plugins.len(), hermes::CHROMIUM, skill.len());
     std::process::exit(0);
 }
-
-/// Where Hermes' image build names the Chromium it pinned (its PM's full
-/// Chromium, whose directory differs by architecture), so nothing hunts for
-/// it.
-const PINNED_CHROMIUM: &str = "/etc/hermes/agent-browser-executable-path";
 
 // ---- main: under s6, after its setup ----
 
@@ -580,20 +574,24 @@ fn alive(pid: u32) -> bool {
 
 /// Appends the interception CA to the system bundle once it appears, never
 /// rebuilding the store (S3b: `update-ca-certificates` is 0.7 s), and never
-/// twice (a snapshot carries the last boot's bundle).
+/// twice (a snapshot carries the last boot's bundle); and names it in the
+/// browser's policy (`hermes::CHROMIUM_CA_POLICY`), written each boot, as
+/// a container's CA is its own.
 fn trust_ca() {
     std::thread::spawn(|| {
         let t = Instant::now();
         // bounded by CA_WAIT_MS
         while t.elapsed() < Duration::from_millis(CA_WAIT_MS) {
             if let Ok(pem) = std::fs::read_to_string(CA) {
+                let policy = Path::new(hermes::CHROMIUM_CA_POLICY);
+                let browser = hermes::chromium_ca_policy(&pem).is_some_and(|p| policy.parent().is_some_and(|d| std::fs::create_dir_all(d).is_ok()) && std::fs::write(policy, p).is_ok());
                 let bundle = std::fs::read_to_string(CA_BUNDLE).unwrap_or_default();
                 if !bundle.contains(pem.trim()) {
                     use std::io::Write;
                     let appended = std::fs::OpenOptions::new().append(true).open(CA_BUNDLE).and_then(|mut f| writeln!(f, "\n{}", pem.trim()));
-                    ev!("boot.ca", { "appended": appended.is_ok(), "ms": t.elapsed().as_millis() as u64 });
+                    ev!("boot.ca", { "appended": appended.is_ok(), "browser": browser, "ms": t.elapsed().as_millis() as u64 });
                 } else {
-                    ev!("boot.ca", { "appended": false, "already": true });
+                    ev!("boot.ca", { "appended": false, "already": true, "browser": browser });
                 }
                 return;
             }

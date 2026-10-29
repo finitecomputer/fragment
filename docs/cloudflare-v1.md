@@ -1306,7 +1306,10 @@ Private stays possible by config.
     Cloudflare AI ... Fallbacks are GOOD." A tier slot's `label` names a
     route Settings offers ("Private (recommended)" on the cheap tier,
     every agent's default; "Standard" on the medium tier), picked per
-    agent as its `tier`.
+    agent as its `tier`; and each tier names its route's fallback and
+    vision (`"fallback"`, `"vision"`, a slot's name, the deployment's
+    own beside the four), so Standard falls back to, and sees on,
+    Cloudflare while Private stays private.
 
     **Going live** (Paul's): finite-mono issues the key; `cargo xtask
     secret set fragment-finite-private-key --config <production's

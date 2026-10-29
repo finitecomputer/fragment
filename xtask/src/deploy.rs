@@ -2165,7 +2165,7 @@ mod tests {
         for base_url in ["https://OPENROUTER.AI/api/v1", "https://openrouter.ai:443/api/v1", "https://eu.openrouter.ai/api/v1"] {
             refused(row(json!({ "base_url": base_url, "model": "anthropic/claude-opus-5.5" })), "models.cheap: a model on OpenRouter is priced at the ceiling its calls route under");
         }
-        refused(json!({ "high": { "provider": "workers_ai", "model": "@cf/zai-org/glm-5.3" } }), "unknown field `high`");
+        refused(json!({ "high": { "provider": "workers_ai", "model": "@cf/zai-org/glm-5.3" } }), "models.high: the high tier is off (decision 23)");
         refused(json!([]), "models is an object");
         // a body: the API's own fields, rendered as named; one the cell refuses, refused here
         refused(row(json!({ "body": "zdr" })), "body is a JSON object of the fields every call to this API carries");
