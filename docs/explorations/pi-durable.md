@@ -718,13 +718,11 @@ turn to give it to.
   once; its text is what was asked and what was chosen, with P5's note.
 - A card past `expiresAt` is closed by whichever life next reads it.
 
-Open, and for the real-Hermes lane to settle: how the cut turn's end
-reads in the chat (it is no error); where the bridge finds a card's text
-when its state is gone (the journal's tail); and whether Hermes, handed
-"the owner approved this", asks again. If it does, the cheaper course is
-to hold the keepalive while a card is open: the card's promise is then
-true, at the cost of at most its life awake (an hour by default). That
-revisits decision 42 and is Paul's.
+Built in P6 (#627): see docs/bridge.md, "A card outlives its turn".
+The journal supplies the card and original request; a late answer starts
+a new claimed turn. The real-Hermes proof sleeps and restores under a
+clarify card, answers it after wake, and counts one tool effect without
+repeating the question (`an_approval_answered_after_a_restart`).
 
 ### P7. A wake says what it restored
 

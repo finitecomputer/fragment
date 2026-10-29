@@ -1489,32 +1489,6 @@ fragment.club until cutover (decisions 34–35).
   before its tip (skipping a deploy's first step), or code.storage merges
   with the source's tree.
 
-## An open card keeps its computer awake, and any other restart under it still loses its card
-
-- **Observed:** 2026-10-05, Paul on p5 missed an approval card's hour and
-  his agent stopped answering: the idle sleep under the card cut its
-  turn, and Hermes folded every later message into the cut request,
-  asking its approval again. The bridge now holds the keepalive while a
-  turn waits on its card (images/bridge/src/engine.rs, `finish`;
-  docs/bridge.md, "A card keeps its computer awake"), the P6 stopgap
-  Paul agreed (docs/durable-computers.md). The fold itself is closed by
-  P5 (2026-10-06: the boot closes a cut turn in Hermes' session, and the
-  next turn is told what was cut; `a_turn_cut_by_a_restart_is_closed_and_told`
-  in images/bridge/tests/docker.rs).
-- **Risk:** an unanswered card costs its life awake (an hour by default;
-  a runtime may ask up to `PROMPT_TTL_MS_MAX`, a day). A restart for any
-  other reason while a card is open (an owner's sleep, a crash, a deploy,
-  an image pinned) still cuts the turn and closes its card `expired`
-  before its `expiresAt`: the owner's answer has no turn to go to (F9 of
-  docs/explorations/pi-durable.md).
-- **First proof:** a computer's awake time dominated by turns waiting on
-  cards; or an owner who answers a card after a restart and sees nothing
-  happen.
-- **Delete when:** P6 lands: a card outlives its turn (a late answer
-  starts a new turn, told what was cut), so the keepalive can be let go
-  while a card waits again, proven on the real-Hermes lane by a sleep
-  under a card whose answer, after the wake, is acted on once.
-
 ## Preview cards drive Browser Rendering over a CDP client of our own
 
 - **Observed:** 2026-10-06 (issue #156, head scratcher 4). A card's shot

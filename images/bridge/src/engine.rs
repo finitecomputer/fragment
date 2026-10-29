@@ -80,11 +80,7 @@
 //!   both: an answer's files go with it. It is a running turn of this
 //!   life: a restart ends it as lost, and that message, read by the next
 //!   life, is a turn of its own.
-//! - The computer is kept awake while a turn waits to run, runs, or waits
-//!   on its card (at most the card's life), so a card expires with its
-//!   runtime there and its turn ends as the runtime ends it, never cut by an
-//!   idle sleep (docs/bridge.md, "A card keeps its computer awake": a cut
-//!   one left Hermes to meet the next message with the cut request).
+//! - Wakefulness follows docs/bridge.md, including runtime activity.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
@@ -164,8 +160,7 @@ pub enum Phase {
     /// Its claim was answered as this life's, and the runtime has it (a
     /// restart ends it: one life per turn).
     Running,
-    /// Waiting on a prompt's answer, or its expiry: the computer is kept
-    /// awake for it.
+    /// Waiting on a prompt's answer, or its expiry; eligible for idle sleep.
     Waiting,
     /// Over (run and ended, or ended without running: refused, stopped
     /// while it waited, or another life's), and its last records are owed
@@ -324,6 +319,8 @@ pub enum Input {
     /// A record from before `since` (ms; when the agent joined the chat) is
     /// history: its cursor passes it, and it starts nothing.
     Record { agent: String, fragment: String, record: Record, view: Option<ChatView>, since: i64 },
+    /// A card response with authoritative journal history, read before advancing its cursor.
+    CardRecord { agent: String, fragment: String, record: Record, view: Option<ChatView>, since: i64, work: Vec<Record>, chat: Vec<Record> },
     Runtime(Event),
     /// The platform's answer to a turn's claim.
     Claimed { turn: String, answer: ClaimAnswer },
@@ -575,6 +572,7 @@ impl Engine {
         match input {
             Input::Agents(agents) => self.set_agents(agents),
             Input::Record { agent, fragment, record, view, since } => self.record(&agent, &fragment, record, view, since),
+            Input::CardRecord { agent, fragment, record, view, since, work, chat } => self.card_record(&agent, &fragment, record, view, since, &work, &chat),
             Input::Runtime(event) => self.runtime(event),
             Input::Claimed { turn, answer } => self.claimed(&turn, answer),
             Input::Posted { turn, id } => self.posted(&turn, &id),
@@ -596,9 +594,7 @@ impl Engine {
     }
 
     fn finish(&mut self) -> Step {
-        // a turn waiting on its card holds the computer too, until the card
-        // is answered or expires: an idle sleep would cut it
-        let busy = self.working || self.state.turns.values().any(|t| matches!(t.phase, Phase::Queued | Phase::Running | Phase::Waiting));
+        let busy = self.working || self.state.turns.values().any(|t| t.phase == Phase::Queued || (t.phase == Phase::Running && !t.asking));
         if busy != self.keepalive {
             self.keepalive = busy;
             self.out.push(Effect::Keepalive(busy));
@@ -698,6 +694,40 @@ impl Engine {
             }
             _ => {}
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn card_record(&mut self, agent: &str, fragment: &str, record: Record, view: Option<ChatView>, since: i64, work: &[Record], chat: &[Record]) {
+        let Some(a) = self.agent(agent).cloned() else { return };
+        if record.seq <= self.state.cursors.get(&cursor_key(agent, fragment, &record.channel)).copied().unwrap_or(0) {
+            return;
+        }
+        let active = match records::said(&record.body) {
+            Said::PromptResponse { prompt, card, .. } => self.state.turns.values().any(|t| t.active() && t.agent == agent && t.fragment == fragment && card.as_ref().is_none_or(|c| c.agent == a.identity && c.turn == t.id) && t.prompts.iter().any(|p| p.id == prompt)),
+            _ => false,
+        };
+        if active {
+            self.record(agent, fragment, record, view, since);
+            return;
+        }
+        let resolved = (record.at >= since).then(|| crate::cards::resolve(&a, &record, work, chat, self.now)).flatten();
+        if let Some((body, closed)) = resolved {
+            let turn = closed["turn"].as_str().expect("resolved turn");
+            let prompt = closed["prompt"].as_str().expect("resolved prompt");
+            self.post(agent, fragment, records::WORK, records::work_id(turn, &format!("pc:{prompt}")), closed, Vec::new());
+            if let Some(body) = body {
+                // Consume the response, then admit directly: a late answer
+                // must never become Tell/Other for a different live question.
+                self.record(agent, fragment, record.clone(), view, since);
+                let Said::Message(message) = records::said(&body) else { unreachable!("resolved answer is a message") };
+                let name = self.views.get(fragment).and_then(|v| v.names.get(&record.principal)).cloned().unwrap_or_else(|| "someone".into());
+                let cause = Cause { fragment: fragment.to_string(), channel: record.channel.clone(), seq: record.seq };
+                self.admit(&a, fragment, cause, record.at, &record.principal, name, &message, 0, Ask::Message);
+                return;
+            }
+        }
+        // Invalid, expired or already answered: still pass the cursor.
+        self.record(agent, fragment, record, view, since);
     }
 
     fn said(&mut self, agent: &Agent, fragment: &str, record: &Record) {
@@ -1270,7 +1300,7 @@ impl Engine {
             return;
         }
         let p = self.state.turns[&id].prompts.iter().find(|p| p.id == prompt).expect("found");
-        if p.closed {
+        if p.closed || p.expires_at <= self.now {
             crate::ev!("prompt.ignored", { "turn": id, "prompt": prompt, "why": "already closed: the first answer won" });
             return;
         }
@@ -1299,7 +1329,8 @@ impl Engine {
         t.last_ms = now;
         self.dirty = true;
         crate::ev!("prompt.answered", { "turn": id, "prompt": prompt, "option": option, "words": words.is_some() });
-        let closed = records::turn_prompt_closed(id, prompt, Closed::Answered, Some((option, principal, shown.as_deref())));
+        let mut closed = records::turn_prompt_closed(id, prompt, Closed::Answered, Some((option, principal, shown.as_deref())));
+        closed["answerSeq"] = serde_json::json!(seq);
         self.post(agent, fragment, records::WORK, records::work_id(id, &format!("pc:{prompt}")), closed, Vec::new());
         self.out.push(Effect::Runtime(Command::Answer { turn: id.to_string(), prompt: prompt.to_string(), option: Some(option.to_string()), seq, by: principal.to_string(), words, attached }));
     }
@@ -1523,11 +1554,9 @@ impl Engine {
         self.post(&agent, &fragment, records::WORK, records::work_id(id, &format!("p:{prompt}")), records::turn_prompt(id, &prompt, &text, &options, &owner, expires_at), Vec::new());
     }
 
-    /// The turn is over: its last reply, its open prompts closed as
-    /// `unanswered`, its end, and its chat's next turn.
-    /// The turn's run is over: its last reply, its open prompts closed as
-    /// `unanswered`, its end (owed: kept with the turn until answered), and
-    /// its chat's next turn.
+    /// The run is over: seal its reply and owe its end, then pump the chat.
+    /// Unexpired cards outlive the run, except an explicit Stop. Their
+    /// later answers are reconstructed from the journal as fresh turns.
     fn end(&mut self, id: &str, outcome: Outcome, unanswered: Closed) {
         self.seal(id, false);
         let t = self.state.turns.get_mut(id).expect("ending a held turn");
@@ -1546,7 +1575,8 @@ impl Engine {
             self.ended.pop_front();
         }
         crate::ev!("turn.end", { "turn": id, "agent": agent, "fragment": fragment, "outcome": match &outcome { Outcome::Idle => "idle", Outcome::Stopped => "stopped", Outcome::Error(_) => "error" } });
-        for p in prompts.iter().filter(|p| !p.closed) {
+        let now = self.now;
+        for p in prompts.iter().filter(|p| !p.closed && (outcome == Outcome::Stopped || p.expires_at <= now)) {
             self.post(&agent, &fragment, records::WORK, records::work_id(id, &format!("pc:{}", p.id)), records::turn_prompt_closed(id, &p.id, unanswered, None), Vec::new());
         }
         self.owe(&agent, &fragment, id, end);

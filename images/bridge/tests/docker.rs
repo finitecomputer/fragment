@@ -2549,9 +2549,9 @@ async fn an_expired_card_ends_its_turn() {
         assert!(x.reply(w, &next).is_some_and(|r| r["text"].as_str().unwrap_or("").contains("good morning")), "the next message is answered: {:?}; the model saw {saw:#?}", x.reply(w, &next));
         assert_eq!((x.ends(w, &risky).len(), x.closed(w, &risky).len()), (1, 1), "the card's turn ends once, its card closed once");
         assert_eq!(x.closed(w, &risky)[0]["outcome"], "expired");
-        assert_eq!(x.ends(w, &risky)[0]["outcome"], "idle", "Hermes ended it, its wait timed out with the card");
+        assert_eq!(x.ends(w, &risky)[0]["outcome"], if let_go { "error" } else { "idle" }, "sleep cuts the old turn; a live runtime ends it itself");
     });
-    assert!(!let_go, "the card holds the computer awake");
+    assert!(let_go, "the unanswered card permits idle sleep");
 
     // 2. its owner's message while the card (a clarify's, which takes words)
     // is open answers it (Paul on production, 2026-10-22: his typed answer
@@ -2765,6 +2765,51 @@ async fn a_turn_cut_by_a_restart_is_closed_and_told() {
     let (asked_after, _) = asked_with(&calls, "and after that").expect("a request for the message after");
     assert!(!asked_after.contains("cut short"), "the turn after is told nothing: {asked_after:?}");
     eprintln!("cut: {closed}\ncut: the boundary the model saw: {before:?}\ncut: the message: {asked:?}");
+}
+
+/// P6: sleep under a real Hermes clarify, restore it, answer the original
+/// card, and count the tool's append. A second click and another restart
+/// must not repeat the question or the action. Vendor model only is scripted.
+#[tokio::test]
+#[ignore = "needs Docker"]
+async fn an_approval_answered_after_a_restart() {
+    let (fake, model, chat, c) = hermes_running().await;
+    let x = Expiry { fake, model, chat };
+    let risky = x.say("clarify: Publish the approvals proof? | Publish | Keep private");
+    within(&x.fake, &x.chat, &c, 120_000, "the original card", |w| !x.cards(w, &risky).is_empty()).await;
+    let card = x.fake.with(|w| x.cards(w, &risky)[0].clone());
+    within(&x.fake, &x.chat, &c, 10_000, "the idle hold released", |w| w.keepalive_open == 0).await;
+    let left_out = hold(&c).expect("held for sleep");
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("approvals-restart");
+    std::fs::create_dir_all(&dir).unwrap();
+    let save = dir.join("asleep.tar");
+    save_data(&c, &left_out, &save);
+    c.sigterm();
+    drop(c);
+    x.fake.until(30_000, "sleep sockets closed", |w| w.live_sockets() == 0).await;
+    let c = x.container(&[("RESTORE_PENDING", "1")]);
+    let cp = Command::new(docker()).args(["cp", "-a", "-", &format!("{}:/data", c.id)]).stdin(std::fs::File::open(&save).unwrap()).output().unwrap();
+    assert!(cp.status.success(), "restored");
+    assert!(c.exec(&["touch", "/run/computer/restored"]));
+    within(&x.fake, &x.chat, &c, 120_000, "the cut turn ended", |w| !x.ends(w, &risky).is_empty()).await;
+    assert!(x.fake.with(|w| x.closed(w, &risky).is_empty()), "restart preserves the original card");
+    let response = json!({"kind":"prompt_response", "agent":"npub1juniper", "turn":risky, "prompt":card["prompt"], "option":card["options"][0]["id"]});
+    let answer = x.fake.say(&x.chat, &person("paul"), response.clone());
+    let fresh = fragment_bridge::records::turn_id("juniper--k3x9", &x.chat, "chat", answer["seq"].as_u64().unwrap());
+    within(&x.fake, &x.chat, &c, 180_000, "fresh answer turn completed", |w| !x.ends(w, &fresh).is_empty()).await;
+    assert_ne!(risky, fresh);
+    assert!(x.fake.with(|w| x.cards(w, &fresh).is_empty()), "no repeated question");
+    assert_eq!(c.exec_out(&["cat", "/data/work/juniper--k3x9/approval-effects"]).trim(), "published", "the chosen action happened once");
+    x.fake.say(&x.chat, &person("paul"), response.clone());
+    c.restart();
+    x.fake.say(&x.chat, &person("paul"), response);
+    let next = x.say("good morning");
+    within(&x.fake, &x.chat, &c, 180_000, "next message completed", |w| !x.ends(w, &next).is_empty()).await;
+    assert_eq!(c.exec_out(&["cat", "/data/work/juniper--k3x9/approval-effects"]).trim(), "published", "duplicate answers and restart repeat no effect");
+    within(&x.fake, &x.chat, &c, 10_000, "idle after answer", |w| w.keepalive_open == 0).await;
+    let calls = x.model.calls.lock().unwrap();
+    let (asked, _) = asked_with(&calls, "A late answer to your earlier question.").expect("fresh model request");
+    for expected in ["Original request:", "Publish the approvals proof?", "Chosen answer: Publish", "Cut-turn steps:"] { assert!(asked.contains(expected), "{asked}") }
 }
 
 /// Goal: offered operator placeholders select Hermes' real backends;
