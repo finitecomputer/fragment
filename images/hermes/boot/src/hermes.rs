@@ -681,14 +681,14 @@ pub fn chromium_script(full: &Path) -> String {
 /// Hermes' home, locked.
 pub const CHROMIUM_TMP: &str = "/tmp";
 
-/// Where the image's Chromium takes the interception CA. Hermes' pinned
-/// Chromium is Chrome for Testing, which reads no system bundle (the CA
-/// appended there is curl's and Python's): it trusts its own roots and
-/// those its managed policy names (`CACertificates`, read from its
-/// branding's policy directory). Without it, every page whose host is
+/// Where `SYSTEM_CHROMIUM` takes the interception CA: Debian Chromium's
+/// managed policy directory, rather than Chrome for Testing's. The CA
+/// appended to the system bundle is curl's, Python's and Node's; the
+/// browser reads `CACertificates` from its own policy directory.
+/// Without it, every page whose host is
 /// intercepted on HTTPS (a provider's the swap catches: docs/computers.md,
 /// "Connections and operator keys") is an interstitial in its browser.
-pub const CHROMIUM_CA_POLICY: &str = "/etc/opt/chrome_for_testing/policies/managed/fragment-ca.json";
+pub const CHROMIUM_CA_POLICY: &str = "/etc/chromium/policies/managed/fragment-ca.json";
 
 /// The managed policy that trusts each certificate of `pem`: a PEM's body
 /// is its DER in base64, as the policy names one. `None` for no
@@ -1482,7 +1482,17 @@ mod tests {
         assert_eq!(policy, serde_json::json!({ "CACertificates": ["MIIBAAAABBBB==", "CCCC"] }));
         assert_eq!(chromium_ca_policy(""), None);
         assert_eq!(chromium_ca_policy("-----BEGIN CERTIFICATE-----\n-----END CERTIFICATE-----\n"), None);
-        assert!(CHROMIUM_CA_POLICY.starts_with("/etc/opt/chrome_for_testing/policies/managed/"), "Chrome for Testing's branding reads its policies there");
+    }
+
+    /// A browser change must also select that browser's managed policy
+    /// directory: Chrome for Testing's directory is ignored by Debian Chromium.
+    #[test]
+    fn the_interception_ca_policy_follows_the_launched_browser() {
+        let managed = match SYSTEM_CHROMIUM {
+            "/usr/bin/chromium" => Path::new("/etc/chromium/policies/managed"),
+            browser => panic!("define the managed policy directory for the launched browser: {browser}"),
+        };
+        assert_eq!(Path::new(CHROMIUM_CA_POLICY).parent(), Some(managed), "the interception CA must be a policy of {SYSTEM_CHROMIUM}");
     }
 
     /// The image's Chromium starts Hermes' pinned one with the container's
