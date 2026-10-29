@@ -360,39 +360,64 @@ if (new URLSearchParams(location.search).get("invites") === "0") members = membe
 members.forEach((m, i) => (m.credit ??= CREDIT, m.id = "mem-" + (0x3a1f00 + i * 7919).toString(16)));
 
 const $ = (id) => document.getElementById(id);
-const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+// The page is built through the DOM, never from markup (xtask/src/html_sinks.rs):
+// h(tag, attributes, ...children), each child a node, a string or a list of
+// them; null and false are left out.
+function h(tag, attrs, ...kids) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) if (v != null && v !== false) el.setAttribute(k, v === true ? "" : String(v));
+  el.append(...kids.flat(Infinity).filter((k) => k != null && k !== false));
+  return el;
+}
 const money = (n) => "$" + n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const date = (d) => d ? d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: d.getFullYear() === 2026 ? undefined : "numeric" }) : "—";
 const rel = (d) => { if (!d) return "Never"; const n = Math.round((now - d) / day); return n === 0 ? "Today" : n === 1 ? "Yesterday" : `${n} days ago`; };
 const seatName = (m) => m.seat === "always_on" ? "Always on" : m.seat === "sleeps" ? "Sleeps when idle" : "No seat";
-const seatShort = (m) => m.seat === "sleeps" ? `<span title="Its computer sleeps when idle">Sleeps</span>` : seatName(m);
+const seatShort = (m) => m.seat === "sleeps" ? h("span", { title: "Its computer sleeps when idle" }, "Sleeps") : seatName(m);
 const role = (m) => m.admin ? "Admin" : "Member";
 const status = (m) => m.pending ? "Invited" : m.seen && now - m.seen < 7 * day ? "Active" : "Idle";
 const pct = (m) => Math.round((m.used / m.credit) * 100);
-const CROWN = `<span class="crown" title="Admin" role="img" aria-label="Admin"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M3.5 8.5 8 12l4-7 4 7 4.5-3.5L18.5 19h-13z"/></svg></span>`;
+const tag = (t) => h("span", { class: "tag" }, t);
+const faint = (t, cls) => h("span", { class: cls ? `faint ${cls}` : "faint" }, t);
+const note = (t) => h("span", { class: "faint", style: "font-size:13px" }, t);
+const kv = (k, v) => h("div", { class: "kv" }, h("small", null, k), h("div", null, v));
+// each icon: [size, stroke width, its shapes on a 24-unit grid, attributes of its own]
+const SVG_NS = "http://www.w3.org/2000/svg";
 const ICON = {
-  up: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 19V5M5 12l7-7 7 7"/></svg>',
-  down: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 5v14M19 12l-7 7-7-7"/></svg>',
-  both: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m7 15 5 5 5-5M7 9l5-5 5 5"/></svg>',
-  x: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6 6 18M6 6l12 12"/></svg>',
-  pulse: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>',
-  shield: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"/></svg>',
-  cpu: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/></svg>',
-  card: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="5" width="20" height="14" rx="2"/><path d="M2 10h20"/></svg>',
-  users: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/></svg>',
-  cal: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>',
-  link: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7"/><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7"/></svg>',
-  mail: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-10 6L2 7"/></svg>',
-  ext: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 3h6v6M10 14 21 3M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></svg>',
+  up: [13, 2.2, [["path", { d: "M12 19V5M5 12l7-7 7 7" }]]],
+  down: [13, 2.2, [["path", { d: "M12 5v14M19 12l-7 7-7-7" }]]],
+  both: [13, 2, [["path", { d: "m7 15 5 5 5-5M7 9l5-5 5 5" }]]],
+  x: [18, 2, [["path", { d: "M18 6 6 18M6 6l12 12" }]]],
+  pulse: [14, 2, [["path", { d: "M22 12h-4l-3 9L9 3l-3 9H2" }]]],
+  shield: [14, 2, [["path", { d: "M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z" }]]],
+  cpu: [14, 2, [["rect", { x: 4, y: 4, width: 16, height: 16, rx: 2 }], ["rect", { x: 9, y: 9, width: 6, height: 6 }]]],
+  link: [14, 2, [["path", { d: "M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7" }], ["path", { d: "M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7" }]]],
+  mail: [14, 2, [["rect", { x: 2, y: 4, width: 20, height: 16, rx: 2 }], ["path", { d: "m22 7-10 6L2 7" }]]],
+  ext: [14, 2, [["path", { d: "M15 3h6v6M10 14 21 3M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" }]]],
+  prev: [16, 2, [["path", { d: "m15 18-6-6 6-6" }]]],
+  next: [16, 2, [["path", { d: "m9 18 6-6-6-6" }]]],
+  crown: [14, 1.5, [["path", { d: "M3.5 8.5 8 12l4-7 4 7 4.5-3.5L18.5 19h-13z" }]], { fill: "currentColor", "stroke-linejoin": "round" }],
 };
+function icon(name) {
+  const [size, width, shapes, own] = ICON[name];
+  const svg = document.createElementNS(SVG_NS, "svg");
+  for (const [k, v] of Object.entries({ width: size, height: size, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", "stroke-width": width, "aria-hidden": "true", ...own })) svg.setAttribute(k, String(v));
+  for (const [t, attrs] of shapes) {
+    const shape = document.createElementNS(SVG_NS, t);
+    for (const [k, v] of Object.entries(attrs)) shape.setAttribute(k, String(v));
+    svg.append(shape);
+  }
+  return svg;
+}
+const crown = () => h("span", { class: "crown", title: "Admin", role: "img", "aria-label": "Admin" }, icon("crown"));
 
 function usageCell(m, big) {
-  if (m.pending) return `<span class="faint d-only">—</span><span class="faint m-only">Invited ${rel(m.added).toLowerCase()} · hasn't joined yet</span>`;
-  if (!m.seat) return `<span class="faint d-only">—</span><span class="faint m-only">No seat</span>`;
+  if (m.pending) return [faint("—", "d-only"), faint(`Invited ${rel(m.added).toLowerCase()} · hasn't joined yet`, "m-only")];
+  if (!m.seat) return [faint("—", "d-only"), faint("No seat", "m-only")];
   const p = pct(m), cls = p >= 100 ? "over" : p >= 75 ? "warn" : "";
   const extra = m.used >= m.credit ? " · out of credit, its agents' paid calls stop" : m.credit > CREDIT ? ` · includes ${money(m.credit - CREDIT).replace(".00", "")} bought` : "";
-  const label = `<b>${p}% used</b><small>${money(m.used)} of ${money(m.credit)} credit</small>`;
-  return `<div class="usage">${big ? `<div class="top"><b>${p}% used</b><small>${money(m.used)} of ${money(m.credit)}${extra}</small></div>` : label}<div class="track"><i class="${cls}" style="width:${Math.min(100, p)}%"></i></div></div>`;
+  const label = [h("b", null, `${p}% used`), h("small", null, `${money(m.used)} of ${money(m.credit)}${big ? extra : " credit"}`)];
+  return h("div", { class: "usage" }, big ? h("div", { class: "top" }, label) : label, h("div", { class: "track" }, h("i", { class: cls, style: `width:${Math.min(100, p)}%` })));
 }
 
 // ---- summary
@@ -417,10 +442,10 @@ let sort = { k: "Role", dir: 1 };
 let page = 1, pageSize = 25;
 const byName = (a, b) => (a.name || a.email).localeCompare(b.name || b.email);
 function renderHead() {
-  $("m-head").innerHTML = "<tr>" + COLS.map((c) => {
+  $("m-head").replaceChildren(h("tr", null, COLS.map((c) => {
     const on = sort.k === c.k;
-    return `<th class="${c.num ? "num" : ""}" ${on ? `aria-sort="${sort.dir > 0 ? "ascending" : "descending"}"` : ""}><button data-k="${c.k}">${c.k}${on ? (sort.dir > 0 ? ICON.up : ICON.down) : ICON.both}</button></th>`;
-  }).join("") + "</tr>";
+    return h("th", { "aria-sort": on && (sort.dir > 0 ? "ascending" : "descending") }, h("button", { "data-k": c.k }, c.k, icon(on ? (sort.dir > 0 ? "up" : "down") : "both")));
+  })));
 }
 $("m-head").addEventListener("click", (e) => {
   const b = e.target.closest("button[data-k]"); if (!b) return;
@@ -438,21 +463,22 @@ function renderMembers() {
   const pages = Math.max(1, Math.ceil(rows.length / pageSize));
   page = Math.min(page, pages);
   const shown = rows.slice((page - 1) * pageSize, page * pageSize);
-  $("m-rows").innerHTML = rows.length ? shown.map((m) => `
-    <tr tabindex="0" data-id="${m.id}">
-      <td class="who"><b>${esc(m.name || m.email)}${m.admin ? CROWN : ""}${m.email === ME ? '<span class="tag">You</span>' : ""}</b>${m.name ? `<small>${esc(m.email)}</small>` : ""}</td>
-      <td class="c-role">${role(m)}${m.email === PAYER ? '<span class="tag">Pays</span>' : ""}</td>
-      <td class="c-seat">${m.seat ? seatShort(m) : '<span class="faint">No seat</span>'}${m.comped ? '<span class="tag">Given</span>' : ""}</td>
-      <td class="c-status"><span class="dot ${m.pending ? "wait" : status(m) === "Idle" ? "idle" : ""}"></span>${status(m)}</td>
-      <td class="c-credit">${usageCell(m)}</td>
-      <td class="muted c-last">${m.pending ? "—" : rel(m.seen)}</td>
-    </tr>`).join("") : `<tr><td colspan="6" class="empty">No one matches “${esc(q)}”.</td></tr>`;
+  $("m-rows").replaceChildren(...(rows.length ? shown.map((m) => h("tr", { tabindex: 0, "data-id": m.id },
+    h("td", { class: "who" }, h("b", null, m.name || m.email, m.admin && crown(), m.email === ME && tag("You")), m.name && h("small", null, m.email)),
+    h("td", { class: "c-role" }, role(m), m.email === PAYER && tag("Pays")),
+    h("td", { class: "c-seat" }, m.seat ? seatShort(m) : faint("No seat"), m.comped && tag("Given")),
+    h("td", { class: "c-status" }, h("span", { class: `dot ${m.pending ? "wait" : status(m) === "Idle" ? "idle" : ""}` }), status(m)),
+    h("td", { class: "c-credit" }, usageCell(m)),
+    h("td", { class: "muted c-last" }, m.pending ? "—" : rel(m.seen)),
+  )) : [h("tr", null, h("td", { colspan: 6, class: "empty" }, `No one matches “${q}”.`))]));
   const first = (page - 1) * pageSize + 1;
-  $("m-foot").innerHTML = `<span>${rows.length ? `${first}–${first + shown.length - 1} of ${rows.length}${q ? " matching" : ""}` : `0 of ${members.length}`}</span>
-    <span class="pager"><label>Rows per page<select id="page-size">${[25, 50, 100].map((n) => `<option ${n === pageSize ? "selected" : ""}>${n}</option>`).join("")}</select></label>
-    <button class="btn icon" data-page="-1" aria-label="Previous page" ${page <= 1 ? "disabled" : ""}><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m15 18-6-6 6-6"/></svg></button>
-    <span>Page ${page} of ${pages}</span>
-    <button class="btn icon" data-page="1" aria-label="Next page" ${page >= pages ? "disabled" : ""}><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m9 18 6-6-6-6"/></svg></button></span>`;
+  $("m-foot").replaceChildren(
+    h("span", null, rows.length ? `${first}–${first + shown.length - 1} of ${rows.length}${q ? " matching" : ""}` : `0 of ${members.length}`),
+    h("span", { class: "pager" },
+      h("label", null, "Rows per page", h("select", { id: "page-size" }, [25, 50, 100].map((n) => h("option", { selected: n === pageSize }, String(n))))),
+      h("button", { class: "btn icon", "data-page": -1, "aria-label": "Previous page", disabled: page <= 1 }, icon("prev")),
+      h("span", null, `Page ${page} of ${pages}`),
+      h("button", { class: "btn icon", "data-page": 1, "aria-label": "Next page", disabled: page >= pages }, icon("next"))));
   renderSummary();
   renderInvites();
 }
@@ -469,46 +495,50 @@ function openMember(id, from) {
   returnTo = from;
   const me = m.email === ME, payer = m.email === PAYER;
   const admins = members.filter((x) => x.admin && !x.pending).length;
-  const roleSec = m.pending
-    ? `<h3>Invite</h3><p class="lede">Sent ${rel(m.added).toLowerCase()} by ${esc(m.by)}. They join once they accept.</p>
-       <div class="kv"><small>Invite link</small><div class="copy-field"><code>${inviteLink(m)}</code><button class="btn" data-act="copy" style="height:34px">${ICON.link}Copy</button></div></div>
-       <p class="lede" style="margin-top:-6px">Send it however you like. It only works for whoever signs in as ${esc(m.email)}.</p>
-       <div class="row"><button class="btn" data-act="resend">${ICON.mail}Resend invite</button><button class="btn danger" data-act="withdraw">Withdraw invite</button></div>`
-    : `<h3>Role</h3><p class="lede">${m.admin ? "Admins add and remove seats and admins." : "Members use their seat; only admins manage the org."}${payer ? " Whoever pays stays an admin until the subscription is cancelled." : ""}</p>
-       <div class="row">${m.admin
-         ? `<button class="btn" data-act="demote" ${payer || admins <= 1 ? "disabled" : ""}>${me ? "Step down as admin" : "Remove as admin"}</button>${payer ? '<span class="faint" style="font-size:13px">Pays for the org</span>' : ""}`
-         : `<button class="btn" data-act="promote">${ICON.shield}Make admin</button><span class="faint" style="font-size:13px">They get an email to accept</span>`}</div>`;
-  const seatSec = m.pending ? "" : m.seat
-    ? `<div class="d-sec"><h3>Seat</h3><p class="lede">${m.seat === "always_on" ? "An always-on computer" : "A computer that sleeps when idle"}, ${m.comped ? "given by Finite at no charge" : `${money(SEAT_PRICE).replace(".00", "")} a month`}. Removing it stops their agents; nothing of theirs is deleted.</p>
-       <div class="row"><button class="btn danger" data-act="remove" ${payer ? "disabled" : ""}>Remove seat</button>${payer ? '<span class="faint" style="font-size:13px">Cancel the subscription in Billing instead</span>' : ""}</div></div>`
-    : `<div class="d-sec"><h3>Seat</h3><p class="lede">${esc(m.name || m.email)} admins the org without a seat of their own.</p><div class="row"><button class="btn" data-act="give">Give a seat</button></div></div>`;
-  $("member").innerHTML = `
-    <div class="d-head">
-      <h2>${esc(m.name || m.email)}</h2>
-      <div class="sub">${esc(m.email)}</div>
-      <div class="meta">
-        <span>${ICON.pulse}${status(m)}</span>
-        <span>${ICON.shield}${role(m)}${payer ? " · pays for the org" : ""}</span>
-        <span>${ICON.cpu}${m.seat ? seatName(m) + (m.comped ? " (given)" : "") : "No seat"}</span>
-      </div>
-      <button class="x" aria-label="Close" data-act="close">${ICON.x}</button>
-    </div>
-    <div class="d-body">
-      <div class="d-main">
-        ${m.seat && !m.pending ? `<div class="d-sec"><h3>Credit this month</h3><p class="lede">Each seat includes ${money(CREDIT).replace(".00", "")} of model and app usage a month. Resets Nov 1.</p>${usageCell(m, true)}<div class="row" style="margin-top:16px"><button class="btn" data-act="credit">Buy $25 of credit for them</button><span class="faint" style="font-size:13px">Charged to the org's card</span></div></div>` : ""}
-        <div class="d-sec">${roleSec}</div>
-        ${seatSec}
-      </div>
-      <div class="d-rail">
-        <h3>Details</h3><p class="lede">What the org knows about this seat.</p>
-        ${kv("Agent", m.agent || "—")}
-        ${kv("Computer", m.computer || "—")}
-        ${kv("Last active", m.pending ? "Hasn't joined yet" : rel(m.seen))}
-        ${kv(m.pending ? "Invited" : "Joined", date(m.added))}
-        ${m.pending ? kv("Invited by", esc(m.by)) : ""}
-        ${kv("Seat ID", `<code>${m.id}</code>`)}
-      </div>
-    </div>`;
+  const roleSec = m.pending ? [
+    h("h3", null, "Invite"), h("p", { class: "lede" }, `Sent ${rel(m.added).toLowerCase()} by ${m.by}. They join once they accept.`),
+    h("div", { class: "kv" }, h("small", null, "Invite link"), h("div", { class: "copy-field" }, h("code", null, inviteLink(m)), h("button", { class: "btn", "data-act": "copy", style: "height:34px" }, icon("link"), "Copy"))),
+    h("p", { class: "lede", style: "margin-top:-6px" }, `Send it however you like. It only works for whoever signs in as ${m.email}.`),
+    h("div", { class: "row" }, h("button", { class: "btn", "data-act": "resend" }, icon("mail"), "Resend invite"), h("button", { class: "btn danger", "data-act": "withdraw" }, "Withdraw invite")),
+  ] : [
+    h("h3", null, "Role"), h("p", { class: "lede" }, (m.admin ? "Admins add and remove seats and admins." : "Members use their seat; only admins manage the org.") + (payer ? " Whoever pays stays an admin until the subscription is cancelled." : "")),
+    h("div", { class: "row" }, m.admin
+      ? [h("button", { class: "btn", "data-act": "demote", disabled: payer || admins <= 1 }, me ? "Step down as admin" : "Remove as admin"), payer && note("Pays for the org")]
+      : [h("button", { class: "btn", "data-act": "promote" }, icon("shield"), "Make admin"), note("They get an email to accept")]),
+  ];
+  const seatSec = m.pending ? null : h("div", { class: "d-sec" }, h("h3", null, "Seat"), m.seat ? [
+    h("p", { class: "lede" }, `${m.seat === "always_on" ? "An always-on computer" : "A computer that sleeps when idle"}, ${m.comped ? "given by Finite at no charge" : `${money(SEAT_PRICE).replace(".00", "")} a month`}. Removing it stops their agents; nothing of theirs is deleted.`),
+    h("div", { class: "row" }, h("button", { class: "btn danger", "data-act": "remove", disabled: payer }, "Remove seat"), payer && note("Cancel the subscription in Billing instead")),
+  ] : [
+    h("p", { class: "lede" }, `${m.name || m.email} admins the org without a seat of their own.`),
+    h("div", { class: "row" }, h("button", { class: "btn", "data-act": "give" }, "Give a seat")),
+  ]);
+  $("member").replaceChildren(
+    h("div", { class: "d-head" },
+      h("h2", null, m.name || m.email),
+      h("div", { class: "sub" }, m.email),
+      h("div", { class: "meta" },
+        h("span", null, icon("pulse"), status(m)),
+        h("span", null, icon("shield"), role(m) + (payer ? " · pays for the org" : "")),
+        h("span", null, icon("cpu"), m.seat ? seatName(m) + (m.comped ? " (given)" : "") : "No seat")),
+      h("button", { class: "x", "aria-label": "Close", "data-act": "close" }, icon("x"))),
+    h("div", { class: "d-body" },
+      h("div", { class: "d-main" },
+        m.seat && !m.pending && h("div", { class: "d-sec" },
+          h("h3", null, "Credit this month"),
+          h("p", { class: "lede" }, `Each seat includes ${money(CREDIT).replace(".00", "")} of model and app usage a month. Resets Nov 1.`),
+          usageCell(m, true),
+          h("div", { class: "row", style: "margin-top:16px" }, h("button", { class: "btn", "data-act": "credit" }, "Buy $25 of credit for them"), note("Charged to the org's card"))),
+        h("div", { class: "d-sec" }, roleSec),
+        seatSec),
+      h("div", { class: "d-rail" },
+        h("h3", null, "Details"), h("p", { class: "lede" }, "What the org knows about this seat."),
+        kv("Agent", m.agent || "—"),
+        kv("Computer", m.computer || "—"),
+        kv("Last active", m.pending ? "Hasn't joined yet" : rel(m.seen)),
+        kv(m.pending ? "Invited" : "Joined", date(m.added)),
+        m.pending && kv("Invited by", m.by),
+        kv("Seat ID", h("code", null, m.id)))));
   $("member").showModal();
 }
 // a confirm in the page's own style, for actions that take something away
@@ -523,7 +553,6 @@ function ask({ title, body, yes }) {
   return new Promise((done) => d.addEventListener("close", () => done(d.returnValue === "yes"), { once: true }));
 }
 $("confirm").addEventListener("click", (e) => { if (e.target === $("confirm")) $("confirm").close("no"); });
-const kv = (k, v) => `<div class="kv"><small>${k}</small><div>${v}</div></div>`;
 $("member").addEventListener("click", (e) => {
   if (e.target === $("member")) return $("member").close();
   const b = e.target.closest("[data-act]"); if (!b) return;
@@ -561,10 +590,18 @@ $("member").addEventListener("close", () => returnTo?.focus());
 // ---- invites tab
 function renderInvites() {
   const p = members.filter((m) => m.pending);
-  $("i-rows").innerHTML = p.length ? p.map((m) => `<tr tabindex="0" data-id="${m.id}">
-    <td class="i-email"><b style="font-weight:500">${esc(m.email)}</b></td><td class="i-meta">${m.admin ? "Seat and admin" : "Always-on seat"}</td><td class="muted i-by">${esc(m.by)}</td><td class="muted i-meta">${rel(m.added)}</td>
-    <td class="num"><span class="row-actions"><button class="btn" data-copy="${m.id}" style="height:34px">${ICON.link}Copy link</button><button class="btn" data-resend="${m.id}" style="height:34px">Resend</button></span></td></tr>`).join("")
-    : `<tr class="empty-row"><td colspan="5" class="empty"><div class="empty-state"><b>No invites waiting</b><span>Everyone you've invited has joined. People you invite show here until they accept.</span><button class="btn" data-empty-invite>${ICON.mail}Invite someone</button></div></td></tr>`;
+  $("i-rows").replaceChildren(...(p.length ? p.map((m) => h("tr", { tabindex: 0, "data-id": m.id },
+    h("td", { class: "i-email" }, h("b", { style: "font-weight:500" }, m.email)),
+    h("td", { class: "i-meta" }, m.admin ? "Seat and admin" : "Always-on seat"),
+    h("td", { class: "muted i-by" }, m.by),
+    h("td", { class: "muted i-meta" }, rel(m.added)),
+    h("td", { class: "num" }, h("span", { class: "row-actions" },
+      h("button", { class: "btn", "data-copy": m.id, style: "height:34px" }, icon("link"), "Copy link"),
+      h("button", { class: "btn", "data-resend": m.id, style: "height:34px" }, "Resend")))))
+    : [h("tr", { class: "empty-row" }, h("td", { colspan: 5, class: "empty" }, h("div", { class: "empty-state" },
+      h("b", null, "No invites waiting"),
+      h("span", null, "Everyone you've invited has joined. People you invite show here until they accept."),
+      h("button", { class: "btn", "data-empty-invite": true }, icon("mail"), "Invite someone"))))]));
 }
 // each invite has its own link; it still only works for whoever signs in with that email
 const inviteLink = (m) => `https://finite.chat/join/${(parseInt(m.id.slice(4), 16) * 2654435761 % 4294967296).toString(36).toUpperCase().padStart(7, "K")}${m.id.slice(-4).toUpperCase()}`;
@@ -585,20 +622,31 @@ function renderBilling() {
   const paid = members.filter((m) => m.seat && !m.comped).length;
   const used = seats.reduce((s, m) => s + m.used, 0), pool = seats.reduce((s, m) => s + m.credit, 0);
   const over = seats.filter((m) => m.used >= m.credit).length;
-  $("billing").innerHTML = `<div class="cards">
-    <div class="card"><h2>Subscription</h2><div class="price"><b>${money(paid * SEAT_PRICE).replace(".00", "")}</b> a month<small>${members.filter((m) => m.seat).length} seats (${paid} paid${members.some((m) => m.comped) ? `, ${members.filter((m) => m.comped).length} given` : ""}) · Renews Nov 12</small></div><p class="lede">Seats bill on one subscription. Adding one is prorated; a removed seat is credited on the next invoice.</p>
-      <div class="line"><span>Status</span><span><span class="dot"></span>Active</span></div>
-      <div class="line"><span>Paid seats</span><span>${paid} × ${money(SEAT_PRICE).replace(".00", "")}</span></div>
-      <div class="line"><span>Given seats</span><span>${members.filter((m) => m.comped).length}</span></div>
-      <div class="line"><span>Paid by</span><span>You (${esc(PAYER)})</span></div>
-      <p class="contact">Contact <a href="mailto:billing@finite.computer">billing@finite.computer</a> for any questions.</p>
-      <div class="actions"><button class="btn link" onclick="toast('Opens Stripe’s billing portal')">Payment and invoices${ICON.ext}</button></div></div>
-    <div class="card"><h2>Credit this month</h2><p class="lede">Each seat comes with ${money(CREDIT).replace(".00", "")} of usage. When a member runs out, their agents' paid calls stop until more is bought, by them or by an admin for them.</p>
-      <div class="metrics"><div class="metric"><b>${Math.round((used / pool) * 100)}%</b><small>of the org's credit used</small></div><div class="metric"><b>${money(used).replace(/\.\d+$/, "")}</b><small>of ${money(pool).replace(".00", "")}</small></div><div class="metric"><b>${over}</b><small>${over === 1 ? "member" : "members"} out of credit</small></div></div>
-      <div class="track" style="height:10px"><i class="${used / pool >= 0.75 ? "warn" : ""}" style="width:${Math.min(100, (used / pool) * 100)}%"></i></div>
-      <div class="line" style="margin-top:14px"><span>Resets</span><span>Nov 1</span></div></div>
-  </div>`;
+  const given = members.filter((m) => m.comped).length;
+  const line = (k, ...v) => h("div", { class: "line" }, h("span", null, k), h("span", null, v));
+  const metric = (b, small) => h("div", { class: "metric" }, h("b", null, b), h("small", null, small));
+  $("billing").replaceChildren(h("div", { class: "cards" },
+    h("div", { class: "card" },
+      h("h2", null, "Subscription"),
+      h("div", { class: "price" }, h("b", null, money(paid * SEAT_PRICE).replace(".00", "")), " a month", h("small", null, `${members.filter((m) => m.seat).length} seats (${paid} paid${given ? `, ${given} given` : ""}) · Renews Nov 12`)),
+      h("p", { class: "lede" }, "Seats bill on one subscription. Adding one is prorated; a removed seat is credited on the next invoice."),
+      line("Status", h("span", { class: "dot" }), "Active"),
+      line("Paid seats", `${paid} × ${money(SEAT_PRICE).replace(".00", "")}`),
+      line("Given seats", String(given)),
+      line("Paid by", `You (${PAYER})`),
+      h("p", { class: "contact" }, "Contact ", h("a", { href: "mailto:billing@finite.computer" }, "billing@finite.computer"), " for any questions."),
+      h("div", { class: "actions" }, h("button", { class: "btn link", "data-portal": true }, "Payment and invoices", icon("ext")))),
+    h("div", { class: "card" },
+      h("h2", null, "Credit this month"),
+      h("p", { class: "lede" }, `Each seat comes with ${money(CREDIT).replace(".00", "")} of usage. When a member runs out, their agents' paid calls stop until more is bought, by them or by an admin for them.`),
+      h("div", { class: "metrics" },
+        metric(`${Math.round((used / pool) * 100)}%`, "of the org's credit used"),
+        metric(money(used).replace(/\.\d+$/, ""), `of ${money(pool).replace(".00", "")}`),
+        metric(String(over), `${over === 1 ? "member" : "members"} out of credit`)),
+      h("div", { class: "track", style: "height:10px" }, h("i", { class: used / pool >= 0.75 ? "warn" : "", style: `width:${Math.min(100, (used / pool) * 100)}%` })),
+      h("div", { class: "line", style: "margin-top:14px" }, h("span", null, "Resets"), h("span", null, "Nov 1")))));
 }
+$("billing").addEventListener("click", (e) => { if (e.target.closest("[data-portal]")) toast("Opens Stripe’s billing portal"); });
 
 // ---- tabs, invite
 document.querySelectorAll(".tab").forEach((t) => t.addEventListener("click", () => {
@@ -617,7 +665,6 @@ $("invite").addEventListener("close", () => {
 });
 let tt;
 function toast(t) { const el = $("toast"); el.textContent = t; el.classList.add("on"); clearTimeout(tt); tt = setTimeout(() => el.classList.remove("on"), 2200); }
-window.toast = toast;
 
 // the table header sticks just under the sticky bar, however tall the bar wraps
 new ResizeObserver(([e]) => document.querySelector("main").style.setProperty("--bar-h", e.target.offsetHeight + "px")).observe(document.querySelector(".bar"));
