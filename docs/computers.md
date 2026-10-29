@@ -1781,11 +1781,11 @@ settings and state):
   level in the model picker … high is a good default"), is how hard it
   thinks, whatever its model: its profile's `agent.reasoning_effort`
   (`hermes::Reasoning`), which Hermes reads at each turn and sends as each
-  call's `reasoning_effort`. Absent, or any other, it is `high`. Those two
-  are what the model route passes on (`fragment_core::models::EFFORTS`;
-  any other it takes as `low`, as GLM takes `medium` for its dearest,
-  `max`), and left unset Hermes sent its own default, `medium`, which the
-  route took as `low`. Settings' Agents offers it beside the model for
+  call's `reasoning_effort`. Absent, or any other, it is `high`. The
+  model route passes those two on, and `max` (`fragment_core::models::
+  EFFORTS`; any other it takes as `low`, as GLM takes `medium` for its
+  dearest, `max`), and left unset Hermes sent its own default, `medium`,
+  which the route took as `low`. Settings' Agents offers it beside the model for
   every agent: Default (High), Low and High; a pick writes `reasoning` to
   `agent.json` as the model's pick is written, and the default removes it.
   Its `home`, `"simplex"` or none (Paul, 2026-10-26; docs/api.md, "An

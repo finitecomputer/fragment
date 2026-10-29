@@ -1782,8 +1782,9 @@ The steps:
   tools?, tool_choice?, draft?})` → `{text, message, finish_reason, model,
   tier, usage, timing}`: `model` is a tier, `cheap` (the default) or
   `medium` (`high` is refused: Models); `max_tokens` is at most 16384;
-  `reasoning_effort` is GLM's, `low` (the default) or `high` (anything
-  else is `low`, since GLM takes an unknown one as `max`). Tools, drafts
+  `reasoning_effort` is `low` (the default), `high` or `max`, the
+  dearest (anything else is `low`, since GLM takes an unknown one as
+  `max`). Tools, drafts
   and timing are below (Text steps).
 - `job.ai.decide({model?, input, questions, media?})` → `{model,
   answers, usage}`: a typed decision on the Clef family (Decisions,
