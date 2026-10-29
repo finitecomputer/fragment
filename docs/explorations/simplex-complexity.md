@@ -37,7 +37,10 @@ Alex's review (2026-10-24), each finding reproduced and fixed in its own layer:
   posted (`delivered`, at most 256 items), not only the newest 32, so a
   message read but never posted is carried at the next start; a reply the
   core refuses mid-sync waits, never dropped; a forced sync that fails holds
-  replies and is asked again every 30 s until ok.
+  replies. Recovery now reads the core's state every 30 s until ok instead
+  of forcing an accepted negotiation again (2026-10-28: the synthetic
+  offline-phone lab reproduced a re-negotiation error from repeated forces;
+  docs/bridge.md, "SimpleX").
 - #546: no core outlives the bridge (`stop_cores` before it exits, SIGKILL on
   the forced exit, a parent-death signal for a bridge killed outright, and
   any core an older bridge left is killed before a hold is answered); a core
