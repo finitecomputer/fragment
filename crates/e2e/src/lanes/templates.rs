@@ -277,11 +277,12 @@ fn skills(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
         format!("{landed} template, {failed} template.failed events: {}", api.signed(owner, "GET", &format!("/api/f/{name}/events?tail=20"), None).map(|r| r.text).unwrap_or_default()),
     );
     let skill_names: Vec<&str> = want.iter().filter_map(|(p, _)| p.strip_suffix("/SKILL.md")).filter_map(|d| d.rsplit('/').next()).collect();
+    let expected: std::collections::BTreeSet<&str> = ["apps-finite", "git-finite", "brain-finite", "google-workspace-finite", "image-generation-finite", "model-council-finite", "chat-attachments-finite", "cocod-finite", "nostr-agent-interface-cli-finite", "x-api-finite", "music-generation-finite", "trading-agent-finite", "polymarket-finite", "design-finite", "gws-docs", "gws-slides", "release-goal-finite"].into_iter().collect();
+    let actual: std::collections::BTreeSet<&str> = skill_names.iter().copied().collect();
     s.ok(
-        "the managed set contains sixteen skills, including design-finite, gws-docs and gws-slides",
-        skill_names.len() == 16
-            && ["apps-finite", "git-finite", "brain-finite", "google-workspace-finite", "image-generation-finite", "model-council-finite", "chat-attachments-finite", "cocod-finite", "nostr-agent-interface-cli-finite", "x-api-finite", "music-generation-finite", "trading-agent-finite", "polymarket-finite", "design-finite", "gws-docs", "gws-slides"].iter().all(|n| skill_names.contains(n)),
-        format!("{skill_names:?}"),
+        &format!("the managed set contains the {} expected skills, including release-goal-finite", expected.len()),
+        actual == expected && skill_names.len() == actual.len(),
+        format!("actual: {actual:?}; expected: {expected:?}"),
     );
     let apps = "skills/software-development/apps-finite/SKILL.md";
     let read = |k: &Keys, path: &str| api.signed(k, "GET", &format!("/api/f/{name}/file?path={}", crate::api::url_enc(path)), None);
