@@ -1,4 +1,5 @@
 mod api;
+mod apps;
 mod ask;
 mod auth;
 mod blobs;
@@ -121,6 +122,17 @@ enum Cmd {
     },
     /// Print the manifest
     Manifest { name: String },
+    /// Change a fragment's display name and deploy it (its address stays put)
+    Rename { name: String, title: String },
+    /// Generate, upload or remove an app's icon (optional; never part of create/deploy)
+    Icon {
+        #[command(subcommand)]
+        sub: apps::IconCmd,
+    },
+    /// Request a fresh preview screenshot; returns while the browser works
+    Preview { name: String },
+    /// Show an app's public address, or claim one (first come, stays with this app)
+    Address { name: String, label: Option<String> },
     /// Sync a local folder with the fragment's code.storage repo
     /// (default: bidirectional mirror)
     Sync {
@@ -174,6 +186,9 @@ enum Cmd {
         /// Template name: todo (default) | blank | inbox | notes | calories | doc (`fragment new --list`)
         #[arg(long)]
         template: Option<String>,
+        /// Display name (default: derived from the app's label, never the template's "Blank")
+        #[arg(long)]
+        title: Option<String>,
     },
     /// List runs (jobs and triggered operations; --status held shows parked failures), or show one
     Runs {
@@ -1451,6 +1466,7 @@ fn run(cli: Cli) -> Result<()> {
                 Some(v) => Some(Visibility::parse(v).ok_or_else(|| usage(format!("--visibility is public, link, or members, not {v:?}")))?),
                 None => None,
             };
+            let title = title.or_else(|| template.as_deref().filter(|t| TEMPLATES.iter().any(|known| known.name == *t)).map(|_| apps::default_title(&name)));
             let body = fragment_proto::CreateFragment { visibility, template, title, ..to_create(&name) };
             let v: Created = c.call_as(c.post_json("/api/fragments", &body)?)?;
             if j {
@@ -1672,7 +1688,31 @@ fn run(cli: Cli) -> Result<()> {
             println!("roll back with: fragment rollback {name} --to <sha>");
         }
 
-        Cmd::Init { name, template } => {
+        Cmd::Rename { name, title } => {
+            let result = apps::rename(&c, &name, &title)?;
+            json_exit(j, &result);
+            println!("{}: {}", result["name"].as_str().unwrap_or(&name), result["title"].as_str().unwrap_or(&title));
+        }
+        Cmd::Icon { sub } => {
+            let result = apps::icon(&c, sub, !j)?;
+            json_exit(j, &result);
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
+        Cmd::Preview { name } => {
+            let result = apps::preview(&c, &name)?;
+            json_exit(j, &result);
+            println!("Preview requested. Check it with `fragment status {name}`.");
+        }
+        Cmd::Address { name, label } => {
+            let result = apps::address(&c, &name, label.as_deref())?;
+            json_exit(j, &result);
+            match result["address"]["url"].as_str() {
+                Some(url) => println!("{url}"),
+                None => println!("No public address. Claim one with `fragment address {name} <label>` (first come, stays with this app)."),
+            }
+        }
+        Cmd::Init { name, template, title } => {
+            let title = apps::checked_title(title.as_deref().unwrap_or(&apps::default_title(&name)))?;
             let dir = std::env::current_dir()?.join(&name);
             if dir.exists() {
                 anyhow::bail!("{} already exists", dir.display());
@@ -1686,6 +1726,7 @@ fn run(cli: Cli) -> Result<()> {
                 let mut m: Value = serde_json::from_str(&std::fs::read_to_string(&mf)?)?;
                 if let Value::Object(o) = &mut m {
                     o.insert("name".into(), Value::String(name.clone()));
+                    apps::set_title(&mut m, &title)?;
                 }
                 std::fs::write(&mf, serde_json::to_vec_pretty(&m)?)?;
             }
@@ -2388,6 +2429,14 @@ fn scaffold(dir: &Path, tpl_name: &str) -> Result<(Vec<&'static str>, usize)> {
         std::fs::create_dir_all(target.parent().unwrap_or(dir))?;
         std::fs::write(&target, f.bytes)?;
         created.push(f.path);
+    }
+    if created.contains(&"fragment.json") {
+        let path = dir.join("fragment.json");
+        let mut manifest: Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+        let resolved = dir.canonicalize()?;
+        let label = resolved.file_name().and_then(|n| n.to_str()).unwrap_or(tpl_name);
+        apps::set_title(&mut manifest, &apps::default_title(label))?;
+        std::fs::write(path, serde_json::to_vec_pretty(&manifest)?)?;
     }
     Ok((created, skipped))
 }

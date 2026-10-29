@@ -278,6 +278,44 @@ no clicks: it catches a syntax error, a missing import, a blocked
 script, not a bug behind a button. A members-only fragment's page is not
 loaded, so it gets no report.
 
+## Names, icons, previews and public addresses
+
+Give an app a useful display name: `fragment init meal-planner --template
+blank --title "Meal planner"` (or `create … --template blank --title …`).
+Without `--title`, scaffolded apps and copied templates use a name derived
+from their label instead of a template placeholder such as "Blank".
+
+```
+fragment rename meal-planner "Meals this week"     # changes meta.title, deploys; address stays put
+fragment icon generate meal-planner --hint "a cooking pot"   # generates and sets the best candidate
+fragment icon set meal-planner pot.png             # or upload an image
+fragment icon remove meal-planner                  # restore the default glyph
+fragment preview meal-planner                     # request a new screenshot, returns immediately
+fragment address meal-planner                     # read its optional public address
+fragment address meal-planner family-meals        # claim one, first come first served
+```
+
+These are independent of publishing. Icon generation can take a minute:
+run it as a background terminal task after revealing the working app;
+never hold up creation, deployment or the first link for it. It uses the
+app's title, description and optional hint, then sets the best candidate.
+If none passes the checks, it reports failure and keeps the current icon.
+Generation and upload require editor access and bill the app's owner.
+
+Preview refresh queues the browser capture; check `fragment status` for
+`page.at >= since` from the request's JSON receipt, or see it in Apps.
+Deploys already request previews. Members-only apps have none; refreshes
+are limited to once a minute. The capture uses 200% zoom.
+
+Claim an address only when the person wants one. It stays in the address
+bar, changes no visibility or membership, and belongs permanently to this
+app's identity, even after deletion. The owner's agent may claim for them,
+with the same authority and holds as sharing. A taken label or an app
+already bound to another is refused without changing anything.
+
+Renaming updates the platform's manifest. A synced local folder is a
+working copy: sync again to bring the new name into it before editing it.
+
 ## Sync in depth
 
 The repo is the truth; your folder is a working copy. Sync talks to
@@ -923,7 +961,7 @@ fragment ledger [grant <who> <usd> --why W [--id ID]]
 fragment export [--out FILE]             fragment channel <name> [<channel>] [--after N] [--follow]
 fragment cap <name> <usd>|default        fragment post <name> <channel> --body JSON [--id ID]
 fragment host [<url>]                    fragment runs <name> [<run>] [--status S] [--limit N]
-fragment init <name> [--template T]      fragment replay <name> <run>
+fragment init <name> [--template T] [--title T]      fragment replay <name> <run>
 fragment new <dir> [--template T]        fragment triggers <name>
 fragment new --list                      fragment pause|unpause <name> <op>
 fragment create <name> [--visibility V] [--template T [--title T]] [--show-tokens]
@@ -935,6 +973,12 @@ fragment events <name> [--since N | --tail N]
 fragment members add <name> <email|npub> [--role viewer|editor]
 fragment members role <name> <email|npub> viewer|editor
 fragment manifest <name>                 fragment invite list|revoke ...
+fragment rename <name> <title>
+fragment icon generate <name> [--hint H]
+fragment icon set <name> <file>
+fragment icon remove <name>
+fragment preview <name>
+fragment address <name> [<label>]
 fragment access                          # who can open what you own
 fragment invites                         # the invites waiting for your yes
 fragment invites accept|decline <name>   # an agent: its owner's, acting for them

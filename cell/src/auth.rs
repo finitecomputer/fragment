@@ -430,11 +430,11 @@ pub async fn platform(mut req: Request, env: &Env, ctx: &Context, cfg: &Config, 
             }
             (Method::Get, ["auth", "fragment"]) => {
                 let (name, back) = fragment_asked(url)?;
-                let signed_out = || to_login(&platform, &format!("/auth/fragment?name={name}&return={}", enc(&back)));
+                let signed_out = || to_login(&platform, &format!("/auth/fragment?name={name}&return={}{}", enc(&back), address_query(cfg, url)));
                 let Some(token) = cookie_of(&req, SESSION_COOKIE, secure(url), "/")? else { return signed_out() };
                 match mint_for(env, url, &token, &name, &back, None).await? {
-                    Minting::Redeem(redeem) => to_signin(cfg, url, &name, &redeem),
-                    Minting::Ask(who, email) => consent_page(&token, &who, email.as_deref(), &name, &back),
+                    Minting::Redeem(redeem) => to_signin(env, cfg, url, &name, &redeem).await,
+                    Minting::Ask(who, email) => consent_page(&token, &who, email.as_deref(), &name, &back, &address_query(cfg, url)),
                     Minting::SignedOut => signed_out(),
                 }
             }
@@ -446,7 +446,7 @@ pub async fn platform(mut req: Request, env: &Env, ctx: &Context, cfg: &Config, 
                 };
                 let given = calls::Mint { token: session, fragment: name.clone(), return_to: back, consent: Consent::Given, embedder: None };
                 let minted = ask_registry(env, &given).await?;
-                Ok(to_signin(cfg, url, &name, minted.redeem.as_deref().ok_or_else(|| CellError::host("a given mint answered no redemption"))?)?.with_status(303))
+                Ok(to_signin(env, cfg, url, &name, minted.redeem.as_deref().ok_or_else(|| CellError::host("a given mint answered no redemption"))?).await?.with_status(303))
             }
             (Method::Get, ["auth", "frame"]) => frame(&req, env, cfg, url).await,
             // a CLI's new key asks for the code its person types: signed by
@@ -610,8 +610,26 @@ fn fragment_asked(url: &Url) -> CellResult<(String, String)> {
     Ok((name, site::return_path(query(url, "return").as_deref())))
 }
 
-fn to_signin(cfg: &Config, url: &Url, name: &str, redeem: &str) -> CellResult<Response> {
-    redirect(&format!("{}__signin?token={redeem}", cfg.canonical(url, name)), &[])
+fn address_query(cfg: &Config, url: &Url) -> String {
+    let label = query(url, "address").or_else(|| url.host_str().and_then(|host| cfg.address_of_host(host)));
+    label.filter(|label| fragment_core::address::valid(label, cfg.host_label_suffix())).map(|label| format!("&address={label}")).unwrap_or_default()
+}
+
+async fn to_signin(env: &Env, cfg: &Config, url: &Url, name: &str, redeem: &str) -> CellResult<Response> {
+    let base = match query(url, "address") {
+        Some(label) => {
+            if !fragment_core::address::valid(&label, cfg.host_label_suffix()) {
+                return Err(CellError::invalid("invalid public address"));
+            }
+            let binding = ask_registry(env, &calls::AddressOf::Label { label: label.clone() }).await?;
+            if !binding.is_some_and(|binding| binding.fragment == name) {
+                return Err(CellError::new(ErrorCode::NotFound, "that address does not belong to this app"));
+            }
+            format!("{}/", cfg.address_origin(url, &label))
+        }
+        None => cfg.canonical(url, name),
+    };
+    redirect(&format!("{base}__signin?token={redeem}"), &[])
 }
 
 /// What a platform session may sign a browser in to a fragment with.
@@ -681,7 +699,7 @@ async fn frame(req: &Request, env: &Env, cfg: &Config, url: &Url) -> CellResult<
     let Some(token) = cookie_of(req, SESSION_COOKIE, secure(url), "/")? else { return frame_note(&platform, &name, &back, Unsigned::SignedOut) };
     match mint_for(env, url, &token, &name, &back, Some(&platform)).await? {
         Minting::Redeem(redeem) => {
-            let mut resp = to_signin(cfg, url, &name, &redeem)?;
+            let mut resp = to_signin(env, cfg, url, &name, &redeem).await?;
             // the platform's page, by its path, is nothing the fragment hears
             resp.headers_mut().set("referrer-policy", "no-referrer")?;
             Ok(resp)
@@ -751,7 +769,7 @@ fn frame_note(platform: &str, name: &str, back: &str, why: Unsigned) -> CellResu
 /// sharing page's protections (share.rs): unframed, a form token, a button
 /// that arms after a moment. Its form redirects on to the fragment's
 /// origin, so it has no forms-here rule.
-fn consent_page(session: &str, who: &Signed, email: Option<&str>, name: &str, back: &str) -> CellResult<Response> {
+fn consent_page(session: &str, who: &Signed, email: Option<&str>, name: &str, back: &str, address: &str) -> CellResult<Response> {
     let label = share::label(name);
     let you = match email {
         Some(e) => esc(e),
@@ -759,12 +777,13 @@ fn consent_page(session: &str, who: &Signed, email: Option<&str>, name: &str, ba
     };
     let body = format!(
         "<p><b>{l}</b> (<code>{n}</code>) is not yours, and no one shared it with you. Continuing lets its author's code know who you are: {you}.</p>\
-         <form method=\"post\" action=\"/auth/fragment?name={qn}&amp;return={qb}\"><input type=\"hidden\" name=\"form\" value=\"{f}\"><button data-arm disabled>Continue as {you}</button></form>\
+         <form method=\"post\" action=\"/auth/fragment?name={qn}&amp;return={qb}{address}\"><input type=\"hidden\" name=\"form\" value=\"{f}\"><button data-arm disabled>Continue as {you}</button></form>\
          <p class=\"hint\">Asked once for each fragment; signing out of it there makes it ask again. Or <a href=\"/\">go back</a>.</p>",
         l = esc(label),
         n = esc(name),
         qn = esc(&enc(name)),
         qb = esc(&enc(back)),
+        address = esc(address),
         f = esc(&form::issue(session, &format!("consent:{name}"), crate::js::now_ms())),
     );
     share::sheet_page(200, &format!("Continue to {label}?"), &body, false)
@@ -820,7 +839,7 @@ pub(crate) fn refused(cfg: &Config, url: &Url, name: &str, rest: &str, framed: b
     let link_changed = !signing_in && query(url, "view").is_some();
     let signed_out = e.code == ErrorCode::Unauthenticated;
     if signed_out && !framed && !link_changed && !signing_in {
-        return redirect(&format!("{}/auth/fragment?name={name}&return={}", cfg.platform(), enc(&back)), &[]);
+        return redirect(&format!("{}/auth/fragment?name={name}&return={}{}", cfg.platform(), enc(&back), address_query(cfg, url)), &[]);
     }
     // its owner is not named: who owns it is theirs to tell, to whom they share it with
     let (label, ask) = (crate::share::label(name), "its owner".to_string());
@@ -895,7 +914,7 @@ pub async fn fragment(req: &Request, env: &Env, cfg: &Config, url: &Url, name: &
             if fetched.site && signed_in_here(req, env, name, url).await? {
                 return redirect(&back_to(&base, Some(&back))?, &[]);
             }
-            redirect(&format!("{}/auth/fragment?name={name}&return={}", cfg.platform(), enc(&back)), &[])
+            redirect(&format!("{}/auth/fragment?name={name}&return={}{}", cfg.platform(), enc(&back), address_query(cfg, url)), &[])
         }
         ("__signout", Method::Get) => page_response(
             200,

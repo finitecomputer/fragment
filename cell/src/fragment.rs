@@ -915,6 +915,11 @@ impl FragmentCell {
         }
         // Every route below is the router's: decoded once, from headers only it sets.
         let Routed { name: routed_name, url, signed, credential } = Routed::from_headers(req.headers())?;
+        if let Some(expected) = req.headers().get(crate::address::IDENTITY_HEADER)? {
+            if self.meta(MetaKey::Npub)?.as_deref() != Some(expected.as_str()) || self.meta(MetaKey::CreatedAt)?.is_none() {
+                return Err(CellError::new(ErrorCode::NotFound, "the app at this address has ended"));
+            }
+        }
         let caller = Caller { signed, unresolved: credential, url, site: path.starts_with("/serve/") };
         // every request the router hands a fragment is its owner's to pay for
         self.count_request();
@@ -946,6 +951,11 @@ impl FragmentCell {
             }
             (Method::Delete, ["delete"]) => self.delete(&caller).await,
             (Method::Get, ["api", "status"]) => self.status(&caller),
+            (Method::Get, ["api", "address"]) => self.address(&caller).await,
+            (Method::Put, ["api", "address"]) => {
+                let body = body_json(&mut req).await?;
+                self.claim_address(&caller, body).await
+            }
             (Method::Get, ["api", "manifest"]) => self.manifest(&caller),
             (Method::Get, ["api", "members"]) => self.members(&caller),
             (Method::Put, ["api", "members", who]) => {

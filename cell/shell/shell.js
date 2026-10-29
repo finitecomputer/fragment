@@ -15,6 +15,7 @@ import { colorOf } from "./agent-color.js";
 import { icon } from "./icons.js";
 import { appArt, openIconSheet } from "./app-icon.js";
 import { createAppsPage } from "./apps-page.js";
+import { createTitles } from "./fragment-title.js";
 import { createLayout, store, reducedMotion, springFrames } from "./layout.js";
 import { createViewer } from "./viewer.js";
 import { billingSections, returnSaid, returning, seatGives, seatOffer } from "./billing.js";
@@ -1829,87 +1830,8 @@ function composeIn(name, text) {
   else composing.set(name, text);
 }
 
-// ---- renaming: a chat's title, or an agent's (its name), each alone ----
-// A fragment's title, its fragment.json's `meta.title`, deployed.
-async function retitle(name, title, message) {
-  const manifest = await api("GET", `/api/f/${seg(name)}/manifest`);
-  const old = manifest.meta?.title;
-  manifest.meta = { ...(manifest.meta ?? {}), title };
-  const files = [{ path: "fragment.json", text: JSON.stringify(manifest, null, 2) + "\n" }];
-  // an agent's job says its new name where it said an old one, in the same
-  // commit: its name at main, and the one the shell's first job gave it
-  if (byName(name)?.kind === "agent") {
-    const job = await jobOf(name);
-    const renamed = job === null ? null : jobRenamed(job, [old, jobFirstName(job)], title);
-    if (renamed !== null) files.push({ path: JOB, text: renamed });
-  }
-  await api("POST", `/api/f/${seg(name)}/files`, { message, files });
-  await api("POST", `/api/f/${seg(name)}/deploy`, {});
-}
-// An agent's job (its SOUL.md) as its owner's rename leaves it (docs/api.md,
-// "An agent's name and picture"; `fragment_core::face::job_renamed`, which
-// `fragment agent --name` runs, is the same rule): each whole-word mention
-// of an old name (case and all; whole when no letter, digit or `_` touches
-// it) said as the new one, longest first, in one pass; null when there is
-// nothing to rewrite, or the job is past JOB_RENAME_MAX bytes before or
-// after. Asked again with the name it has now, it changes nothing.
-const JOB = "SOUL.md";
-const JOB_RENAME_MAX = 64 * 1024;
-const utf8Bytes = (s) => new TextEncoder().encode(s).length;
-function jobRenamed(job, olds, name) {
-  name = name.trim();
-  const words = [...new Set(olds.map((o) => (typeof o === "string" ? o.trim() : "")).filter((o) => o && o !== name))].sort((a, b) => b.length - a.length);
-  if (!name || !words.length || utf8Bytes(job) > JOB_RENAME_MAX) return null;
-  const escaped = words.map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
-  const mention = new RegExp(`(?<![\\p{Alphabetic}\\p{N}_])(?:${escaped.join("|")})(?![\\p{Alphabetic}\\p{N}_])`, "gu");
-  let changed = false;
-  const out = job.replace(mention, () => ((changed = true), name));
-  return changed && utf8Bytes(out) <= JOB_RENAME_MAX ? out : null;
-}
-// The name the shell's first job gave its agent until 2026-10-16: "You are
-// <name>, <owner>'s default agent: …" on its first line (the owner holds no
-// ", "); null for any other (`fragment_core::face::job_first_name`).
-function jobFirstName(job) {
-  const line = job.split("\n", 1)[0];
-  if (!line.startsWith("You are ")) return null;
-  const end = line.indexOf("'s default agent: ");
-  const said = end < 0 ? "" : line.slice("You are ".length, end);
-  const name = said.lastIndexOf(", ") < 0 ? "" : said.slice(0, said.lastIndexOf(", "));
-  return name.trim() && [...name].length <= 120 ? name : null;
-}
-// an agent's job at main, as text; null when it has none
-async function jobOf(agent) {
-  const r = await fetch(`/api/f/${seg(agent)}/file?path=${JOB}`, { headers: { "x-fragment-shell": "1" }, credentials: "same-origin" });
-  heard(r);
-  if (r.status === 404) return null;
-  if (!r.ok) throw new ApiError(r.status, "", `Its job did not read (${r.status}): nothing was renamed`);
-  return r.text();
-}
-let renaming = null;
-function rename(name) {
-  renaming = name;
-  const agent = byName(name)?.kind === "agent";
-  $("rename-title").textContent = agent ? "Name your agent" : "Name this chat";
-  $("rename-label").textContent = agent ? "Agent name" : "Chat name";
-  $("agent-name").value = titleOf(name);
-  $("rename-error").hidden = true;
-  $("rename-agent").showModal();
-  $("agent-name").select();
-}
-$("rename-cancel").onclick = () => $("rename-agent").close();
-$("rename-form").onsubmit = async (e) => {
-  e.preventDefault();
-  const title = $("agent-name").value.trim();
-  if (!title || !renaming) return;
-  try {
-    await retitle(renaming, title, "rename");
-    $("rename-agent").close();
-    await load();
-  } catch (err) {
-    $("rename-error").textContent = err.message;
-    $("rename-error").hidden = false;
-  }
-};
+// The same display-name editor for chats, agents and Apps.
+const { retitle, rename } = createTitles({ $, api, seg, byName, titleOf, reload: () => load(), heard, ApiError });
 
 // ---- the launcher (launcher.js): one input for starting a chat or finding one again ----
 const launcher = createLauncher({
@@ -2040,8 +1962,10 @@ function noticeRow(n) {
     later.dataset.action = "later";
     later.onclick = () => updateLater(n.version, later);
     actions.append(later);
+  } else if (n.kind === "deploying") {
+    copy.append(el("strong", null, "Updating — back in a moment"));
   } else if (n.kind === "refresh") {
-    copy.append(el("strong", null, "Couldn't refresh your computer"));
+    copy.append(el("strong", null, state.computerFailed ? "Couldn't refresh your computer" : "Couldn't refresh your apps"));
     const again = el("button", "primary", "Try again");
     again.type = "button";
     again.dataset.action = "refresh";
@@ -2052,10 +1976,10 @@ function noticeRow(n) {
   return row;
 }
 // a read of it that failed (a blip, a 5xx) says so first, over what the
-// last read said, with Try again
+// last read said, with Try again; a confirmed deploy waits by itself
 function renderComputer() {
   const box = $("computer-notices");
-  const rows = [...(state.computerFailed ? [{ kind: "refresh" }] : []), ...(state.computer?.notices ?? [])].map(noticeRow).filter(Boolean);
+  const rows = [...(reads.updating ? [{ kind: "deploying" }] : state.computerFailed || reads.listFailed ? [{ kind: "refresh" }] : []), ...(state.computer?.notices ?? [])].map(noticeRow).filter(Boolean);
   box.replaceChildren(...rows);
   box.hidden = !rows.length;
 }
@@ -2064,6 +1988,8 @@ function renderComputer() {
 // stays, to try again.
 async function readAgain(button) {
   button.disabled = true;
+  reads.since = null;
+  reads.wait = 3000;
   await load().catch(() => {});
   button.disabled = false;
 }
@@ -2141,6 +2067,9 @@ const appsPage = createAppsPage($("apps-page"), {
   art: (name) => iconOf(name),
   share: (name) => share(name),
   iconSheet: (name) => openIconSheet(iconHelpers, name, titleOf(name), byName(name)),
+  retitle,
+  originOf,
+  openApp,
   reload: () => load(),
   state,
 });
@@ -3697,6 +3626,10 @@ const unjoined = (f) => own(f) && !f.agents?.length && /-chat$/.test(labelOf(f.n
 // (`resumeFirstRun`).
 async function owesFirstAgent() {
   if (state.guest) return false;
+  if (reads.listFailed || reads.updating) {
+    firstRunPutOff = true;
+    return false;
+  }
   if (!chats().length) return true;
   if (state.computerFailed) {
     firstRunPutOff = true;
@@ -3875,14 +3808,40 @@ function seatFirst(seat) {
 // (`watchList`: `changed`), only the apps whose rows it touched (new, or
 // not as they were) have their card read again. An older read's answer
 // that comes after a newer one's is not shown.
-const reads = { asked: 0, shown: 0 };
+// Cloudflare can keep busy objects on the previous release for minutes.
+// Retry only a confirmed release mismatch, at 3, 6, 12, 24, then 30s,
+// bounded by eight minutes; other failures keep their usual Try again.
+const READ_DEPLOY_WAIT_MS = 8 * 60_000;
+const reads = { asked: 0, shown: 0, since: null, wait: 3000, timer: null, updating: false, listFailed: false };
+async function shellRead(path) {
+  try { return { value: await api("GET", path) }; }
+  catch (error) { return { error, deploying: error.status === 503 && error.code === "deploying" }; }
+}
 async function load(changed = false) {
   const mine = ++reads.asked;
-  const [list, computers] = await Promise.all([api("GET", "/api/fragments"), api("GET", "/api/computers").catch(() => null)]);
+  const [listRead, computerRead] = await Promise.all([shellRead("/api/fragments"), shellRead("/api/computers")]);
   if (mine < reads.shown) return;
   reads.shown = mine;
+  clearTimeout(reads.timer);
+  // A list's ordinary failure still goes to its caller, as before.
+  if (listRead.error && !listRead.deploying) {
+    reads.updating = false;
+    renderComputer();
+    throw listRead.error;
+  }
+  const deploying = listRead.deploying || computerRead.deploying;
+  if (deploying) reads.since ??= Date.now();
+  else { reads.since = null; reads.wait = 3000; }
+  const left = deploying ? READ_DEPLOY_WAIT_MS - (Date.now() - reads.since) : 0;
+  reads.updating = left > 0 && ![listRead, computerRead].some((r) => r.error && !r.deploying);
+  reads.listFailed = !!listRead.error;
+  if (reads.updating) {
+    reads.timer = setTimeout(() => load().catch(() => {}), Math.min(reads.wait, left));
+    reads.wait = Math.min(reads.wait * 2, 30_000);
+  }
+  const list = listRead.value, computers = computerRead.value;
   const before = new Map(state.fragments.map((f) => [f.name, JSON.stringify(f)]));
-  state.fragments = list.fragments ?? [];
+  if (list) state.fragments = list.fragments ?? [];
   // failed, it is not "no computer": what was read before stays, and is said to be old
   const unknown = state.computerFailed && !state.computer;
   state.computerFailed = !computers;
@@ -3905,7 +3864,7 @@ async function load(changed = false) {
   for (const f of chats()) if (own(f) && f.title === UNTITLED && f.preview) titleFromFirst(f.name);
   // answered, it goes on with what a failure put off, whoever asked
   if (computers && unknown) reopenSettings().catch(() => {});
-  if (computers && firstRunPutOff) resumeFirstRun();
+  if (list && computers && firstRunPutOff) resumeFirstRun();
   const touched = changed ? new Set(state.fragments.filter((f) => before.get(f.name) !== JSON.stringify(f)).map((f) => f.name)) : null;
   cardsLoad.wait = 0;
   loadCards(touched).catch(() => {});
