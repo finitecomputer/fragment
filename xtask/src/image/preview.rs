@@ -89,10 +89,9 @@ fn input_key(root: &Path) -> Result<String> {
     Ok(fragment_core::blob::sha256_hex(&tree.stdout))
 }
 
-/// Skopeo handles the registry's authentication protocol. Listing tags
-/// distinguishes absence from a credentials/network failure without
-/// interpreting an error's prose. This repository already exists (it was
-/// the preview canary's). Inspect the raw manifest to pin its real digest.
+/// Inspect this one tag, never list the repository: Cloudflare rejects
+/// skopeo's paginated tag-list query (run 40933094816). Only a definite
+/// missing manifest permits a build; all other failures stop the job.
 fn existing(req: &Request, tools: &devstack::Tools) -> Result<Option<String>> {
     skopeo_installed()?;
     let dir = devstack::repo_root().join("target/image-preview");
@@ -100,24 +99,37 @@ fn existing(req: &Request, tools: &devstack::Tools) -> Result<Option<String>> {
     fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))?;
     let auth = login(tools, &req.account, None, &["--pull"], dir.join("auth.json"))?;
     let repository = format!("{REGISTRY}/{}/{}", req.account, req.repository);
-    let out = Command::new("skopeo").args(["--command-timeout", "2m", "list-tags", "--authfile"]).arg(&auth.0).arg(format!("docker://{repository}")).stdin(Stdio::null()).output()?;
-    anyhow::ensure!(out.status.success(), "cannot resolve preview image tags: {}", said(&out));
-    if !has_tag(&out.stdout, &req.tag)? { return Ok(None); }
     let out = Command::new("skopeo").args(["--command-timeout", "2m", "inspect", "--raw", "--authfile"]).arg(&auth.0).arg(format!("docker://{}", req.tagged())).stdin(Stdio::null()).output()?;
-    anyhow::ensure!(out.status.success(), "cannot inspect preview image: {}", said(&out));
-    let reference = format!("{repository}@sha256:{}", fragment_core::blob::sha256_hex(&out.stdout));
+    let Some(digest) = inspect_answer(&req.tagged(), out.status.success(), &out.stdout, &out.stderr)? else { return Ok(None); };
+    let reference = format!("{repository}@{digest}");
     anyhow::ensure!(pinned_ok(&reference, &req.account), "registry named no pinned preview image");
     println!("reusing {}: {reference}", req.tag);
     Ok(Some(reference))
 }
 
-fn has_tag(bytes: &[u8], tag: &str) -> Result<bool> {
-    anyhow::ensure!(bytes.len() <= 4 * 1024 * 1024, "preview image tag listing exceeds 4 MiB");
-    let v: Value = serde_json::from_slice(bytes)?;
-    let tags = v["Tags"].as_array().context("registry tag listing has no Tags array")?;
-    anyhow::ensure!(tags.len() <= 16_384, "preview registry exceeds 16384 tags; archive old input tags before adding more");
-    anyhow::ensure!(tags.iter().all(Value::is_string), "registry tag listing has a non-string tag");
-    Ok(tags.iter().any(|t| t.as_str() == Some(tag)))
+/// Skopeo reports registry error codes in its fatal diagnostic. Decode
+/// logrus's quoted msg, then require the exact tag/repository context and
+/// a MANIFEST_UNKNOWN diagnostic or explicit manifest HTTP 404. A new or
+/// ambiguous diagnostic fails closed, never authorizes a cold rebuild.
+fn inspect_answer(tagged: &str, success: bool, manifest: &[u8], stderr: &[u8]) -> Result<Option<String>> {
+    if success {
+        anyhow::ensure!(!manifest.is_empty(), "registry returned an empty preview manifest for {tagged}");
+        return Ok(Some(format!("sha256:{}", fragment_core::blob::sha256_hex(manifest))));
+    }
+    let diagnostic = String::from_utf8_lossy(stderr);
+    let last = diagnostic.trim().lines().last().unwrap_or_default();
+    let message = match last.split_once("level=fatal msg=") {
+        Some((_, quoted)) => serde_json::from_str::<String>(quoted).unwrap_or_else(|_| last.to_string()),
+        None => last.to_string(),
+    };
+    let (repository, tag) = tagged.rsplit_once(':').context("preview lookup must name a tag")?;
+    let context = format!("reading manifest {tag} in {repository}: ");
+    let cause = [format!("Error parsing image name \"docker://{tagged}\": "), format!("parsing image name \"docker://{tagged}\": "), "retrieving manifest for image: ".into()]
+        .iter().find_map(|prefix| message.strip_prefix(prefix).and_then(|m| m.strip_prefix(&context)));
+    if manifest.is_empty() && cause.is_some_and(|c| c == "manifest unknown" || c.starts_with("manifest unknown: ") || c.starts_with("StatusCode: 404, ")) {
+        return Ok(None);
+    }
+    bail!("cannot inspect preview image {tagged}: {}", diagnostic.trim())
 }
 
 #[cfg(test)]
@@ -145,16 +157,32 @@ mod tests {
         }
     }
 
-    /// Absence is a successful listing without the tag, never malformed
-    /// output, which could be a registry outage or an authentication error.
+    /// Found manifests keep their actual bytes' digest. Only an explicit
+    /// absence at the requested manifest authorizes building; auth,
+    /// transport, server, malformed and unrelated 404 errors do not.
     #[test]
-    fn only_a_valid_listing_can_authorize_a_build() {
-        assert!(has_tag(br#"{"Tags":["inputs-abc","r12"]}"#, "inputs-abc").unwrap());
-        assert!(!has_tag(br#"{"Tags":["r12"]}"#, "inputs-abc").unwrap());
-        assert!(!has_tag(br#"{"Tags":[]}"#, "inputs-abc").unwrap());
-        for bad in [br#"{}"#.as_slice(), br#"{"Tags":null}"#, br#"{"Tags":[1]}"#, b"error"] {
-            assert!(has_tag(bad, "inputs-abc").is_err());
+    fn direct_manifest_lookup_distinguishes_absence_from_failure() {
+        let tagged = "registry.cloudflare.com/account/repo:inputs-abc";
+        let manifest = br#"{"schemaVersion":2,"layers":[]}"#;
+        assert_eq!(inspect_answer(tagged, true, manifest, b"").unwrap(), Some(format!("sha256:{}", fragment_core::blob::sha256_hex(manifest))));
+        assert!(inspect_answer(tagged, true, b"", b"").is_err());
+        let context = format!("Error parsing image name \"docker://{tagged}\": reading manifest inputs-abc in registry.cloudflare.com/account/repo: ");
+        let logged = |message: &str| format!("time=\"2026-10-29T00:00:00Z\" level=fatal msg={}", serde_json::to_string(message).unwrap());
+        for missing in ["manifest unknown", "manifest unknown: manifest unknown", "manifest unknown: The named manifest is not known to the registry.", "StatusCode: 404, Not Found"] {
+            let message = format!("{context}{missing}");
+            for diagnostic in [message.clone(), logged(&message)] {
+                assert_eq!(inspect_answer(tagged, false, b"", diagnostic.as_bytes()).unwrap(), None, "{diagnostic}");
+            }
         }
+        for error in ["unauthorized: authentication required", "denied: access forbidden", "StatusCode: 429, Too Many Requests", "StatusCode: 500, Internal Server Error", "context deadline exceeded", "unknown: manifest unknown", "unknown: 404 Not Found"] {
+            assert!(inspect_answer(tagged, false, b"", logged(&format!("{context}{error}")).as_bytes()).is_err(), "{error}");
+        }
+        for error in ["manifest unknown", "404 Not Found", "pinging registry: StatusCode: 404, Not Found", "malformed response"] {
+            assert!(inspect_answer(tagged, false, b"", error.as_bytes()).is_err(), "{error}");
+        }
+        let missing = logged(&format!("{context}manifest unknown"));
+        assert!(inspect_answer("registry.cloudflare.com/account/repo:another-tag", false, b"", missing.as_bytes()).is_err());
+        assert!(inspect_answer(tagged, false, manifest, missing.as_bytes()).is_err());
     }
 
     /// A new commit, dirty unrelated files, or a restarted process cannot
