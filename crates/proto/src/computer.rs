@@ -489,6 +489,8 @@ pub struct ComputerRestore {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LossCause {
+    /// Returning to an image restores its pre-upgrade checkpoint.
+    ImageRollback,
     /// It stopped on its own (a crash, a host restart, the runtime's idle
     /// stop), or died while its sleep was saving it.
     Crash,

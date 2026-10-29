@@ -1100,9 +1100,21 @@ impl ComputerCell {
         };
         let from = planned.plan.source();
         let save_id = planned.save.as_ref().map(|s| s.id.clone());
-        match self.try_start(generation, &planned).await {
+        let result = self.try_start(generation, &planned).await;
+        if self.lifecycle().ok().is_none_or(|l| !l.accepts_start(generation)) {
+            return Event::StartFailed { generation, why: "the start was superseded".into() };
+        }
+        match result {
             Ok(()) => {
-                let came_up = |s: &mut Saves| s.came_up(generation, from, save_id.as_deref(), planned.reference.as_deref(), js::now_ms()).map(|r| (r, s.rollbacks()));
+                let came_up = |s: &mut Saves| {
+                    let before = s.every_record();
+                    let restored = s.came_up(generation, from, save_id.as_deref(), planned.reference.as_deref(), js::now_ms())?;
+                    let after = s.every_record();
+                    for record in before.iter().filter(|r| !after.contains(r)) {
+                        console_error!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "unforgotten": record["id"] }));
+                    }
+                    Some((restored, s.rollbacks()))
+                };
                 match self.update_saves(came_up) {
                     // one line per start that came up (lesson 14): what it restored
                     Ok(Some((restored, rollbacks))) => console_log!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "restored": restored, "rollbacks": rollbacks })),
@@ -1156,8 +1168,12 @@ impl ComputerCell {
         let image = self.must(MetaKey::Image)?;
         // what the start runs is what it looked at: the version it comes up on
         let reference = self.look().await?;
+        if !self.lifecycle()?.accepts_start(generation) {
+            return Err(CellError::host("the start was superseded"));
+        }
         let snapshots = reference.as_deref().filter(|_| self.cfg.computer_snapshots);
         let (plan, save) = self.update_saves(|s| {
+            s.select_image(reference.as_deref());
             let plan = s.plan(snapshots);
             s.starting(generation, plan.source());
             let save = s.current().cloned().filter(|_| plan != Restore::Nothing);
@@ -1423,7 +1439,7 @@ impl ComputerCell {
             }
         }
         let bytes: u64 = records.iter().filter_map(|r| r["size"].as_u64()).sum();
-        match self.keep_save(generation, records, held).await {
+        match self.keep_save(generation, seq, records, held).await {
             Ok(save) => {
                 // one line per save (lesson 14): which, how big, how long
                 console_log!("{}", json!({ "computer": id, "saved": save.number, "id": save.id, "generation": generation, "held": held, "leftOut": left_out, "bytes": bytes, "ms": js::now_ms() - t0 }));
@@ -1464,7 +1480,13 @@ impl ComputerCell {
 
     /// A save worked: it is the newest save, and the ones it pushed out of
     /// the newest `SAVES_KEPT` are let go of (`forget`). Answers it.
-    async fn keep_save(&self, generation: u64, records: Vec<Value>, held: bool) -> CellResult<Save> {
+    async fn keep_save(&self, generation: u64, seq: u64, records: Vec<Value>, held: bool) -> CellResult<Save> {
+        let life = self.lifecycle()?;
+        if !life.accepts_save(generation, seq) {
+            let lost = self.update_saves(|s| s.let_go(records))?;
+            self.forget(lost).await;
+            return Err(CellError::host("the save was superseded"));
+        }
         let at = js::now_ms();
         let lost = self.update_saves(|s| s.saved(generation, records, at, held))?;
         let saves = self.saves()?;

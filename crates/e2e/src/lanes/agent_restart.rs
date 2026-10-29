@@ -275,15 +275,15 @@ pub fn agent_restart(s: &mut Suite, api: &Api) -> Result<()> {
         let newest = newest_save(api, &id);
         let restored = &back["restored"];
         s.ok(
-            &format!("restarted, it runs {first_image}'s version again, from its newest save (the restart's own, held), and no rollback"),
+            &format!("restarted, it runs {first_image}'s version again, from its pre-upgrade checkpoint, reporting the canary work lost"),
             pressed.as_ref().is_ok_and(|r| r.status == 200)
                 && back["generation"].as_u64() == Some(g2 + 1)
                 && back["version"] == stable.as_str()
                 && restored["from"] == "backup"
-                && restored["save"] == newest["id"]
-                && newest["generation"].as_u64() == Some(g2)
-                && newest["held"] == true
-                && restored["rollback"] == false,
+                && restored["save"] == after["restored"]["save"]
+                && restored["savedAt"] == after["restored"]["savedAt"]
+                && restored["rollback"] == true
+                && notice(&back, "went_back")["cause"] == "image_rollback",
             json!({ "view": back, "newest": newest }),
         );
         let third = say(3, "And the word once more? Just the word.")?;
@@ -291,8 +291,8 @@ pub fn agent_restart(s: &mut Suite, api: &Api) -> Result<()> {
         let answered = within(REPLY, || reply_to(&third_turn)).is_some();
         let v = view();
         s.ok(
-            "after the rollback its chat goes on: it answers, naming the word again (model-dependent), and nothing is left to tell its owner",
-            answered && names_word(reply_to(&third_turn)) && v["notices"].as_array().is_none_or(|l| l.is_empty()),
+            "after the rollback its chat goes on: it answers, naming the word again (model-dependent), and its owner is told what the rollback lost",
+            answered && names_word(reply_to(&third_turn)) && notice(&v, "went_back")["cause"] == "image_rollback",
             json!({ "word": word, "reply": reply_to(&third_turn), "view": v }),
         );
         rolled_back = json!({ "candidate": image, "upgradedTo": latest, "backTo": stable, "view": back });

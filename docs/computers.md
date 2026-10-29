@@ -93,7 +93,8 @@ container starts until someone asks again).
   its sleep (the hold, the save, the stop) then a start at once; a save
   that fails keeps no container, since its owner asked. Asleep or won't
   wake, a start. Either way the start is fresh: from the image and the
-  newest good save, never the snapshot.
+  newest good save, never the snapshot (returning to the checkpoint's
+  image selects that checkpoint instead, below).
 - **A sleep's end is its stop's to report** (`Asleep`): the container's
   exit, which the stop's SIGTERM causes and the runtime reports as a
   request of its own (`computer/exited`), changes nothing while that stop
@@ -180,7 +181,7 @@ whoever reads it:
   save works first and nothing holds it, none while a port tab or a
   keepalive is open (in use) or for an always-on computer.
 - `went_back {life, cause, endedAt, pending, save, savedAt, at}`: a start
-  went back to an older save (`crash`, `unsaved`, `restart`, `unusable`),
+  went back to an older save (`crash`, `unsaved`, `restart`, `unusable`, `image_rollback`),
   or will as it next starts (`pending`). Told until its owner says they
   saw it (`POST …/notices/seen {life}`), whatever starts come after; the
   newest loss only. None for a loss that lost nothing (Paul, 2026-10-23:
@@ -445,20 +446,20 @@ instead: `"hermes-canary": { "dockerfile": "images/hermes/Dockerfile",
   the rule: a change to what the guest relies on (this contract, the
   bridge's routes, the CLI's) is additive, and what it replaces goes only
   once stable has moved past it.
-- **A Hermes release is forward only** (Paul, 2026-10-13). A round that
-  changes only our layers (the bridge, hermes-boot, the CLI and the
-  image's own files) on the same Hermes base can be pinned back: the
-  older image runs on a `/data` the newer wrote, files our code reads
-  either way. A round that moves the base to a new Hermes release (v0.21.6
-  to v0.21.7 is the first) cannot: a new release may move its databases'
-  schema forward, and a computer keeps three saves, each turn's end
-  replacing the oldest, so within a day no save from before the canary is
-  left (decision 19's point-in-time restore has none to go back to):
-  pinned back, an older Hermes would start on a newer schema. So a bad
-  Hermes release is fixed by the next one, until a computer keeps the save
-  an image change started from (docs/technical-debt-ledger.md). v0.21.7
-  happens to move none (`state.db` is schema 31 and the config version 50
-  in both), but the rule does not read each release's schema.
+- **A Hermes release can be rolled back across one image boundary.**
+  The Computer DO keeps the save the first successful start on a new
+  image restored, outside its normal three-save rotation, associated with
+  the previous image's reference. Returning to that reference restores
+  this exact checkpoint, even after many canary saves. It discards the
+  newer-image saves as restore candidates: older Hermes never opens their
+  migrated databases. Work on the computer since the checkpoint is lost,
+  including saved canary work; chats and the journal remain authoritative.
+  The usual rollback counter and owner notice report that loss, with
+  cause `image_rollback`. A corrupt checkpoint fails the start rather
+  than falling forward into newer data. The next successful image change
+  replaces the checkpoint; this is one reversible boundary, not image
+  history. Computers already on a canary before this ships have no
+  pre-upgrade checkpoint retroactively.
 - **Production** keeps its images in its own account's registry, which
   holds none of the preview's digests (the deploy refuses another
   account's). CI deploys it from the `production` branch (in minutes for
@@ -520,8 +521,8 @@ group is pinned to `hermes-canary`.
    stable into it, the chat going on, and its rollback); then stable under
    the new cell, `--only computers,agent-restart --max-paid-calls 50`.
 4. **Watch** each canary computer (`fragment operator person <npub>`):
-   `computer.version == computer.latest`, `rollbacks` unchanged, every
-   save `held`, and no `wont_wake`, `unsaved` or `went_back` notice (a
+   `computer.version == computer.latest`, `rollbacks` unchanged except for the deliberate pin back, every
+   save `held`, and no `wont_wake`, `unsaved` or `went_back` notice except the deliberate rollback's `image_rollback` (a
    `went_back` of cause `unusable` is the new image refusing the old
    save); `fragment operator health`; the Computer DO's lines in the
    Workers logs (a start that failed, `restored`); the ledger for spend
@@ -536,7 +537,7 @@ group is pinned to `hermes-canary`.
    to fragment-deploy's `main`; the next deploy takes it, as in step 1.
    One computer on stable awake is told; one asleep wakes onto it.
 7. **Or roll back**: `fragment operator pin <npub> hermes` for each of the
-   group (a Hermes release is forward only, above); after a promotion,
+   group (the checkpoint and expected canary work loss, above); after a promotion,
    the commented line back by a commit, and a deploy.
 8. **Production takes the proven image**, copied, never rebuilt: the
    Image workflow run from `production` (Actions, image, Run workflow:
@@ -681,7 +682,8 @@ the processes: a start from one runs the entrypoint again.
 
 P2, P3 and P7 of docs/explorations/pi-durable.md, and step 1 of
 docs/durable-computers.md. A computer keeps its newest three saves of
-`/data`, and a snapshot is only ever a cache of the current one:
+`/data`, plus one image-boundary checkpoint (above, "Stable and canary").
+A snapshot is only ever a cache of the current save:
 
 - **A save** is a `DirectoryBackup` of `/data`, taken under the hold
   (above). The Computer DO keeps its record with a number (1 for the

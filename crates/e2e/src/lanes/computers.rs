@@ -1787,7 +1787,7 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     }
 
     // its image pin: an upgrade its owner is told of and restarts to take,
-    // then a rollback its sleep takes, its data kept. A pin while it runs is
+    // then a rollback its sleep takes, its pre-upgrade data restored. A pin while it runs is
     // what a deploy that changed its image is to it: its next start runs
     // another image than the one it runs (docs/computers.md, "What its owner
     // is told")
@@ -1861,6 +1861,7 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
             r.status == 200 && r.body["phase"] == "awake" && r.body["generation"].as_u64() == Some(generation + 1) && r.body["version"] == latest.as_str() && r.body["latest"] == latest.as_str() && notice(&r.body, "update").is_null() && version() == "2",
             json!({ "served": version(), "view": r.body }),
         );
+        let checkpoint = r.body["restored"].clone();
         say(30, "after the upgrade")?;
         replies_so_far += 1;
         let kept = s.eventually(wake, || agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).len() == replies_so_far);
@@ -1881,6 +1882,15 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         let r = api.signed(&owner, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({})))?;
         s.ok("asleep, no update is told: its next start takes it", r.body["phase"] == "asleep" && r.body["version"].is_null() && r.body["latest"] == first["version"] && notice(&r.body, "update").is_null(), &r);
         s.ok("woken, it runs the first build again (a rollback)", version() == "1", version());
+        let back = view();
+        s.ok(
+            "pinning back restores the exact pre-upgrade checkpoint and reports the canary work lost",
+            back["restored"]["save"] == checkpoint["save"]
+                && back["restored"]["savedAt"] == checkpoint["savedAt"]
+                && back["restored"]["rollback"] == true
+                && notice(&back, "went_back")["cause"] == "image_rollback",
+            json!({ "checkpoint": checkpoint, "view": back }),
+        );
     }
 
     // a computer's egress alone asks for a wake subscription

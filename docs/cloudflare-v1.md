@@ -387,9 +387,11 @@ speaking Cloudflare's APIs) returns once this product works.
     no image, decision 3's status); a promotion moves the default's
     digest, a rollback pins back (docs/computers.md, "Stable and
     canary"). The point-in-time
-    restore is not built: three rotating saves keep none from before a
-    canary, so a Hermes release is forward only for now (Paul, 2026-10-13;
-    docs/technical-debt-ledger.md, "A Hermes release has no rollback").
+    restore keeps the save the first successful start on a new image
+    restored, outside the three-save rotation until the next successful
+    image change. Pinning back to the matching reference restores that
+    checkpoint and reports the canary-era work lost (docs/computers.md,
+    "Stable and canary").
 20. **Preview environments.** Every branch deploys a complete, separately
     named copy to the dev account with one command: its own Workers, DOs,
     Workflows, Queues, containers and R2 prefix. It is routed on the dev

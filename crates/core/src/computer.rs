@@ -500,6 +500,16 @@ impl Default for Lifecycle {
 }
 
 impl Lifecycle {
+    /// Whether this start may still select and report saves.
+    pub fn accepts_start(&self, generation: u64) -> bool {
+        matches!(self.phase, Phase::Starting { generation: g, .. } if g == generation)
+    }
+
+    /// Whether this exact save ask may still publish its records.
+    pub fn accepts_save(&self, generation: u64, seq: u64) -> bool {
+        self.running() == Some(generation) && matches!(self.saving, Some(Saving::Save { seq: s, .. }) if s == seq)
+    }
+
     /// Whether it stays awake whatever is open (a `seat_always_on` seat's,
     /// as its owner's seat says: the registry tells it).
     pub fn always_on(&self) -> bool {
@@ -1487,6 +1497,14 @@ pub struct Starting {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Saves {
+    /// The save restored at the last image boundary, outside the rotation.
+    /// Its image is the one we can return to without reading newer data.
+    #[serde(default)]
+    checkpoint: Option<ImageCheckpoint>,
+    /// A start returning to the checkpoint image selects only that save.
+    /// Persisted so retries and isolate restarts make the same choice.
+    #[serde(default)]
+    restore_checkpoint: bool,
     /// The saves kept, newest first, at most `SAVES_KEPT`.
     #[serde(default)]
     saves: Vec<Save>,
@@ -1526,6 +1544,13 @@ pub struct Saves {
     fresh: bool,
 }
 
+/// One reversible image boundary; not a history of image migrations.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct ImageCheckpoint {
+    image: String,
+    save: Save,
+}
+
 /// A start that went back in time, as its owner is told of it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1561,6 +1586,16 @@ pub struct Running {
 }
 
 impl Saves {
+    fn keeps_record(&self, record: &Value) -> bool {
+        self.saves.iter().any(|s| s.records.contains(record)) || self.checkpoint.as_ref().is_some_and(|c| c.save.records.contains(record))
+    }
+
+    /// Select before planning; the caller checks the lifecycle generation
+    /// after looking up the image and before writing this state.
+    pub fn select_image(&mut self, image: Option<&str>) {
+        self.restore_checkpoint = image.is_some_and(|image| self.running.as_ref().is_some_and(|r| r.image != image) && self.checkpoint.as_ref().is_some_and(|c| c.image == image));
+    }
+
     /// The saves kept, newest first.
     pub fn all(&self) -> &[Save] {
         &self.saves
@@ -1569,6 +1604,9 @@ impl Saves {
     /// The save a start restores: the newest one not found unusable (or,
     /// with every one found so, the newest, tried again as any start is).
     pub fn current(&self) -> Option<&Save> {
+        if self.restore_checkpoint {
+            return self.checkpoint.as_ref().map(|c| &c.save);
+        }
         self.saves.iter().find(|s| !s.unusable).or(self.saves.first())
     }
 
@@ -1664,6 +1702,17 @@ impl Saves {
     /// it again, nor a snapshot of it. Answers whether a save is left to
     /// try, which is older (each newer one was found unusable first).
     pub fn unusable(&mut self, id: &str) -> bool {
+        if self.restore_checkpoint {
+            // Never fall forward into newer-image data when this checkpoint
+            // is corrupt. A retry may try it again, as with the last save.
+            if let Some(c) = &mut self.checkpoint {
+                if c.save.id == id {
+                    c.save.unusable = true;
+                }
+            }
+            self.snapshot = None;
+            return false;
+        }
         if let Some(s) = self.saves.iter_mut().find(|s| s.id == id) {
             s.unusable = true;
         }
@@ -1691,9 +1740,10 @@ impl Saves {
             return None;
         }
         self.starting = None;
-        self.running = image.map(|image| Running { generation, image: image.to_string() });
+        let previous = self.running.clone();
         assert_eq!(from == RestoreSource::Nothing, save.is_none(), "a start restores a save when there is one");
-        let restored_save = save.and_then(|id| self.saves.iter().find(|b| b.id == id));
+        let selected = save.and_then(|id| self.current().filter(|s| s.id == id)).cloned();
+        let restored_save = selected.as_ref();
         let ended = self.ended.take();
         // a life's work since its last save is in no save unless its sleep
         // saved it, and this start restored that save (its life's newest):
@@ -1706,16 +1756,7 @@ impl Saves {
                 !(saved && restored_save.is_some_and(|s| s.generation == life) && newest_of_life == save)
             }
         };
-        let restored = ComputerRestore {
-            generation,
-            from,
-            save: save.map(str::to_string),
-            saved_at: restored_save.map(|s| s.at_ms),
-            age_ms: restored_save.map(|s| now_ms.saturating_sub(s.at_ms).max(0)),
-            after: ended.map(|e| e.by),
-            rollback,
-            at: now_ms,
-        };
+        let restored = ComputerRestore { generation, from, save: save.map(str::to_string), saved_at: restored_save.map(|s| s.at_ms), age_ms: restored_save.map(|s| now_ms.saturating_sub(s.at_ms).max(0)), after: ended.map(|e| e.by), rollback, at: now_ms };
         // its owner is told of it until they say they saw it (`notices`),
         // unless it lost nothing (read before this start's `restored`
         // replaces the lost life's)
@@ -1723,8 +1764,36 @@ impl Saves {
         self.rollbacks += u64::from(rollback);
         self.restored = Some(restored.clone());
         if let Some(e) = told {
-            self.went_back = Some(WentBack { life: e.generation, cause: loss_cause(&e), ended_at_ms: e.at_ms, restored: restored.clone(), save: restored_save.map(|s| s.number) });
+            self.went_back = Some(WentBack { life: e.generation, cause: if self.restore_checkpoint { LossCause::ImageRollback } else { loss_cause(&e) }, ended_at_ms: e.at_ms, restored: restored.clone(), save: restored_save.map(|s| s.number) });
         }
+        let changed = previous.as_ref().zip(image).is_some_and(|(r, i)| r.image != i);
+        if changed {
+            let old = self.checkpoint.take();
+            let mut released = Vec::new();
+            if self.restore_checkpoint {
+                // These are newer-image saves. Once back, none is a fallback
+                // for the older runtime, even if its checkpoint is damaged.
+                released.extend(self.saves.drain(..).flat_map(|s| s.records));
+                if let Some(s) = &selected {
+                    self.saves.push(s.clone());
+                }
+                self.snapshot = None;
+            }
+            self.checkpoint = previous.zip(selected).map(|(r, save)| ImageCheckpoint { image: r.image, save });
+            released.extend(old.into_iter().flat_map(|c| c.save.records));
+            released.retain(|r| !self.keeps_record(r));
+            // Same bounded deletion queue as rotation; overflow is reclaimed
+            // by the computer's prefix sweep at wipe.
+            let mut unique = Vec::new();
+            for record in released {
+                if !unique.contains(&record) {
+                    unique.push(record);
+                }
+            }
+            self.let_go(unique);
+        }
+        self.restore_checkpoint = false;
+        self.running = image.map(|image| Running { generation, image: image.to_string() });
         // a restart's start is fresh; the starts after it may use a snapshot again
         self.fresh = false;
         assert!(self.went_back.as_ref().is_none_or(|w| w.restored.rollback && w.life < w.restored.generation), "a start went back for an earlier life");
@@ -1751,7 +1820,8 @@ impl Saves {
         let dropped = if self.saves.len() > SAVES_KEPT { self.saves.split_off(SAVES_KEPT) } else { vec![] };
         assert!(self.saves.windows(2).all(|w| w[0].number > w[1].number), "newest first");
         assert!(self.snapshot.as_ref().is_none_or(|s| self.saves[0].id == s.save), "a snapshot kept is of the current save");
-        self.let_go(dropped.into_iter().flat_map(|s| s.records).collect())
+        let records = dropped.into_iter().flat_map(|s| s.records).filter(|r| !self.keeps_record(r)).collect();
+        self.let_go(records)
     }
 
     /// `records` are no save's now (a save pushed out, or what a failed
@@ -1760,7 +1830,7 @@ impl Saves {
     /// pushed past `FORGETTING_MAX`, oldest first, which no one will delete.
     pub fn let_go(&mut self, records: Vec<Value>) -> Vec<Value> {
         assert!(records.iter().all(|r| r["id"].as_str().is_some_and(|id| !id.is_empty())), "a record has an id: {records:?}");
-        assert!(!records.iter().any(|r| self.saves.iter().any(|s| s.records.contains(r))), "a record let go of is no kept save's");
+        assert!(!records.iter().any(|r| self.keeps_record(r)), "a record let go of is no kept save's");
         self.forgetting.extend(records);
         let over = self.forgetting.len().saturating_sub(FORGETTING_MAX);
         let lost: Vec<Value> = self.forgetting.drain(..over).collect();
@@ -1778,8 +1848,13 @@ impl Saves {
     /// record is a save's or waits to be deleted, never both.
     pub fn every_record(&self) -> Vec<Value> {
         let kept = self.saves.iter().flat_map(|s| s.records.iter());
-        let out: Vec<Value> = kept.chain(self.forgetting.iter()).cloned().collect();
-        assert!(out.len() <= SAVES_KEPT * SAVE_RECORDS_MAX + FORGETTING_MAX, "a computer's records are bounded");
+        let mut out: Vec<Value> = kept.chain(self.forgetting.iter()).cloned().collect();
+        for record in self.checkpoint.iter().flat_map(|c| &c.save.records) {
+            if !out.contains(record) {
+                out.push(record.clone());
+            }
+        }
+        assert!(out.len() <= (SAVES_KEPT + 1) * SAVE_RECORDS_MAX + FORGETTING_MAX, "a computer's records are bounded");
         out
     }
 
@@ -2625,6 +2700,7 @@ mod tests {
         /// last (its `plan` looks, and starts what it saw).
         fn come_up(&mut self, generation: u64) -> ComputerRestore {
             let image = self.images.next().map(str::to_string);
+            self.saves.select_image(image.as_deref());
             let plan = self.saves.plan(image.as_deref());
             let save = self.saves.current().map(|c| c.id.clone()).filter(|_| plan != Plan::Nothing);
             self.saves.starting(generation, plan.source());
@@ -3447,6 +3523,146 @@ mod tests {
         }
         let s = l.apply(Event::RestoreFailed { generation: SAVES_KEPT as u64 + 1, why: "x".into(), older: true }, T + 10);
         assert!(s.actions.is_empty() && l.failures == 1, "a fallback past the saves kept is a strike: {s:?}");
+    }
+
+    #[test]
+    fn image_rollback_keeps_the_exact_boundary_past_rotation() {
+        let mut c = Computer::new();
+        c.wake();
+        c.sleep(Some("stable-boundary"));
+        c.images.looked(Some("canary"));
+        let upgrade = c.wake();
+        assert_eq!(upgrade.save.as_deref(), Some("stable-boundary"));
+        assert!(!upgrade.rollback);
+        for id in ["c1", "c2", "c3", "c4", "c5"] {
+            c.turn_saved(id);
+        }
+        assert!(c.saves.all().iter().all(|s| s.id != "stable-boundary"));
+        assert!(!c.saves.forgetting().contains(&rec("stable-boundary")[0]));
+        assert!(c.saves.every_record().contains(&rec("stable-boundary")[0]));
+        // The isolate can be replaced before the pin back.
+        c.saves = serde_json::from_str(&serde_json::to_string(&c.saves).unwrap()).unwrap();
+        c.images.looked(Some(IMAGE));
+        let g = c.life.generation();
+        c.saves.restart_fresh();
+        c.apply(Event::Restart { generation: g });
+        assert!(c.apply(Event::Restart { generation: g }).actions.is_empty());
+        c.saved_as("canary-last");
+        let stopped = c.apply(Event::Asleep { generation: g });
+        assert!(stopped.actions.contains(&Action::Start { generation: g + 1 }));
+        assert!(!c.life.accepts_start(g));
+        assert!(c.life.accepts_start(g + 1));
+        let back = c.come_up(g + 1);
+        assert_eq!(back.save.as_deref(), Some("stable-boundary"));
+        assert!(back.rollback);
+        let notice = c.saves.went_back().unwrap();
+        assert_eq!(notice.cause, LossCause::ImageRollback);
+        assert_eq!(notice.restored.saved_at, upgrade.saved_at);
+        assert!(c.saves.all().iter().all(|s| s.id == "stable-boundary"));
+        assert!(c.saves.forgetting().contains(&rec("canary-last")[0]));
+        assert!(c.saves.saw(notice.life));
+        c.turn_saved("back-on-stable");
+        // Normal saves/wakes resume on the returned image.
+        c.sleep(Some("stable-next"));
+        assert_eq!(c.wake().save.as_deref(), Some("stable-next"));
+    }
+
+    #[test]
+    fn an_upgrade_checkpoints_the_save_that_actually_restored() {
+        let mut c = Computer::new();
+        c.wake();
+        c.turn_saved("good");
+        c.sleep(Some("bad"));
+        c.images.looked(Some("canary"));
+        assert!(c.saves.unusable("bad"));
+        let upgraded = c.wake();
+        assert_eq!(upgraded.save.as_deref(), Some("good"));
+        assert_eq!(c.saves.checkpoint.as_ref().unwrap().save.id, "good");
+        c.sleep(Some("new"));
+        c.saves.select_image(Some(IMAGE));
+        // The image lookup still selects the checkpoint with snapshots off.
+        assert_eq!(c.saves.plan(None), Plan::Backup);
+        assert_eq!(c.saves.current().unwrap().id, "good");
+    }
+
+    #[test]
+    fn saves_stored_before_checkpoints_remain_readable() {
+        let mut s = serde_json::to_value(Saves::default()).unwrap();
+        s.as_object_mut().unwrap().remove("checkpoint");
+        s.as_object_mut().unwrap().remove("restoreCheckpoint");
+        let saves: Saves = serde_json::from_value(s).unwrap();
+        assert_eq!(saves, Saves::default());
+    }
+
+    #[test]
+    fn a_bad_rollback_checkpoint_never_falls_forward() {
+        let mut c = Computer::new();
+        c.wake();
+        c.sleep(Some("boundary"));
+        c.images.looked(Some("canary"));
+        c.wake();
+        c.turn_saved("new-schema");
+        c.sleep(Some("newest-schema"));
+        c.saves.select_image(Some(IMAGE));
+        assert_eq!(c.saves.current().unwrap().id, "boundary");
+        assert!(!c.saves.unusable("boundary"));
+        assert_eq!(c.saves.current().unwrap().id, "boundary");
+        assert_eq!(c.saves.plan(Some(IMAGE)), Plan::Backup);
+        let stored = serde_json::to_string(&c.saves).unwrap();
+        let again: Saves = serde_json::from_str(&stored).unwrap();
+        assert_eq!(again.current().unwrap().id, "boundary");
+    }
+
+    #[test]
+    fn a_next_image_boundary_releases_the_previous_checkpoint() {
+        let mut c = Computer::new();
+        c.wake();
+        c.sleep(Some("first"));
+        c.images.looked(Some("canary"));
+        c.wake();
+        c.sleep(Some("second"));
+        c.images.looked(Some("third-image"));
+        assert_eq!(c.wake().save.as_deref(), Some("second"));
+        for id in ["a", "b", "c", "d"] {
+            c.turn_saved(id);
+        }
+        assert!(c.saves.forgetting().contains(&rec("first")[0]));
+        assert!(!c.saves.forgetting().contains(&rec("second")[0]));
+        // Replayed and late start reports cannot replace the checkpoint.
+        let before = c.saves.clone();
+        assert!(c.saves.came_up(2, RestoreSource::Backup, Some("first"), Some("canary"), c.now).is_none());
+        assert_eq!(before, c.saves);
+    }
+
+    #[test]
+    #[should_panic(expected = "a record let go of is no kept save's")]
+    fn a_checkpoint_record_cannot_be_deleted_by_a_late_cleanup() {
+        let mut c = Computer::new();
+        c.wake();
+        c.sleep(Some("protected"));
+        c.images.looked(Some("canary"));
+        c.wake();
+        for id in ["a", "b", "c", "d"] {
+            c.turn_saved(id);
+        }
+        c.saves.let_go(rec("protected"));
+    }
+
+    #[test]
+    fn a_late_save_cannot_publish_after_its_ask_or_generation() {
+        let mut c = Computer::new();
+        c.wake();
+        let g = c.life.generation();
+        c.apply(Event::Sleep);
+        let (_, _, seq) = save_asked(&c.apply(Event::Held { generation: g, held: true }));
+        assert!(c.life.accepts_save(g, seq));
+        assert!(!c.life.accepts_save(g, seq + 1));
+        c.saves.saved(g, rec("last"), c.now, true);
+        c.apply(Event::Saved { generation: g, seq });
+        assert!(!c.life.accepts_save(g, seq));
+        c.apply(Event::Asleep { generation: g });
+        c.wake();
+        assert!(!c.life.accepts_save(g, seq));
     }
 
     /// Goal: its owner's restart of a running computer is a sleep that
