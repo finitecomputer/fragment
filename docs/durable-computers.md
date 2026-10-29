@@ -407,3 +407,23 @@ messages in flight.
   answer starts a new turn.
 - **A backlog's age:** chat messages have no age limit after a long
   outage (routines have an hour). Decide before production.
+## Structured tool evidence (2026-10-29)
+
+Our Hermes image records supported terminal observations through the existing
+local activity socket (docs/bridge.md), with call identity, outcome, duration
+and bounded safe result metadata / source reference on `turn.step`. Recovery
+notes can distinguish a failed call and its exit code from a completed one.
+This is evidence, not deterministic replay, selective retry or exactly-once
+effects. Missing or disconnected observations establish no success. No new
+child cache or platform API is involved; waiting on a person still holds nothing.
+
+## Sandbox release-goal experiment
+
+`templates/releasegoal` and the managed `release-goal-finite` skill exercise
+one immutable release note across fresh turns. The app's SQLite checkpoint,
+its file artifact and vendor key/receipt live outside `/data`; Hermes keeps
+its native memory, skills and tools. A short delivery job performs the
+external step; it does not run or resume Hermes. See the template README
+for its editor trust boundary, routine reconciliation and vendor retention
+limits. This is a sandbox experiment, not a general durable-goal guarantee.
+

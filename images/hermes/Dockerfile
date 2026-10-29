@@ -90,6 +90,7 @@ COPY templates/calories templates/calories
 COPY templates/doc templates/doc
 COPY templates/inbox templates/inbox
 COPY templates/notes templates/notes
+COPY templates/releasegoal templates/releasegoal
 COPY templates/todo templates/todo
 COPY crates/devstack/Cargo.toml crates/devstack/Cargo.toml
 COPY crates/e2e/Cargo.toml crates/e2e/Cargo.toml

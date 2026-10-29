@@ -132,3 +132,9 @@ key (restoring old state must not revive it) and an unlinked person.
 - **What "reads whatever the agent reads" covers** (FIN-11 rule 5):
   fragment caps the owner at `viewer` (rule 5 above). Whether BANKS's
   services should do the same is Alex's call.
+
+The sandbox release-goal experiment (`templates/releasegoal`, managed
+`release-goal-finite`) uses only ordinary app SQLite, files, operations,
+scheduled records and jobs. It introduces no Core concern or runtime to
+swap. Its local fake vendor is test-only; the template README describes
+which guarantees depend on that vendor and on an owner's continuation.

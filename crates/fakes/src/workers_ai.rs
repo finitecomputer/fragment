@@ -426,6 +426,24 @@ pub fn transcript_reply(body: &Value) -> Reply {
     let users: Vec<&Value> = messages.iter().filter(|m| m["role"] == "user").collect();
     let last = users.last().map(|m| &m["content"]).cloned().unwrap_or(Value::Null);
     let said = text_of(&last);
+    // Sandbox release-goal lane: only the model is scripted. Hermes' real
+    // terminal/clarify, the app, scheduler and vendor HTTP all run normally.
+    let goal_said = said.rsplit_once("[New message]\n").map_or(said.as_str(), |(_, text)| text);
+    let marker = goal_said.split("sandbox-goal:").nth(1).and_then(|s| s.split_whitespace().next()).map(|s| s.trim_end_matches(['?', '”', '"']));
+    if let Some(goal) = marker.filter(|g| g.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')) {
+        let results = messages.iter().rev().take_while(|m| m["role"] != "user").filter(|m| m["role"] == "tool").count();
+        if goal_said.contains("A late answer to your earlier question.") {
+            if results == 0 && goal_said.contains("Chosen answer: Publish") {
+                return Reply::Tools(vec![("terminal".into(), json!({"command":format!("fragment call {goal} state --json && fragment call {goal} approve --id owner-answer-v1 --input '{{\"answer\":\"Publish\",\"source\":\"original-sandbox-card\"}}' --json && sleep 30 && fragment call {goal} deliver --id release-delivery-v1 --json")}))]);
+            }
+            return Reply::Text("[SILENT]".into());
+        }
+        if goal_said.contains("sandbox-review") {
+            if results == 0 { return Reply::Tools(vec![("terminal".into(), json!({"command":format!("fragment call {goal} state --json && fragment call {goal} review --id review-v1 --json")}))]); }
+            if results == 1 { return Reply::Tools(vec![("clarify".into(), json!({"questions":[{"question":format!("Publish sandbox-goal:{goal}?"),"choices":["Publish","Keep private"]}]}))]); }
+            return Reply::Text("[SILENT]".into());
+        }
+    }
     let result = messages.iter().rev().take_while(|m| m["role"] != "user").find(|m| m["role"] == "tool").map(|m| text_of(&m["content"]));
     if let Some(result) = result {
         // a screenshot's description, as the vision model gave it (in the
@@ -1765,6 +1783,17 @@ mod tests {
         let call = fragment_core::decide::bound(&elsewhere, fragment_core::decide::Asker::Agent).unwrap();
         let v: Value = serde_json::from_slice(&decision_answer(&mut s, call.model, &call.input(vec![]), "log").body).unwrap();
         assert!(["writing", "tile", "object", "subject"].iter().all(|q| v["answers"][q]["noul"] == 0.5), "{v}");
+    }
+
+    #[test]
+    fn sandbox_goal_script_requires_the_original_positive_answer() {
+        let ask = |text: &str| json!({"messages":[{"role":"user", "content":text}]});
+        let late = "A late answer to your earlier question.\nPublish sandbox-goal:note--abcd?\nChosen answer: Publish";
+        assert!(matches!(transcript_reply(&ask(late)), Reply::Tools(c) if c.len() == 1 && c[0].0 == "terminal" && c[0].1["command"].as_str().unwrap().contains("note--abcd approve")));
+        assert!(matches!(transcript_reply(&ask(&late.replace("Chosen answer: Publish", "Chosen answer: Keep private"))), Reply::Text(t) if t == "[SILENT]"));
+        // Recovery context quotes a cut request; it is never a new approval.
+        let next = format!("[Recent channel messages]\n{late}\n\n[New message]\n[paul] hello");
+        assert!(matches!(transcript_reply(&ask(&next)), Reply::Text(_)));
     }
 
     #[test]

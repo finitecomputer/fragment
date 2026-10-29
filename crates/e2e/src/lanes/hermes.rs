@@ -310,11 +310,11 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     let tooled = turn_for(&r);
     s.eventually(TURN, || ended(&tooled).is_some());
     let steps: Vec<Value> = work_of(&records(api, &owner, &chat_name, "work"), &tooled).into_iter().filter(|r| r["body"]["kind"] == "turn.step").collect();
-    // Hermes shows the command as a fenced block under its header: the
-    // block is the step's arguments, never a step of its own
+    // #664's supported observer supplies bounded outcome evidence, never
+    // arbitrary terminal arguments or output from display text.
     s.ok(
-        "Hermes' terminal call is one step on work, its command the step's arguments",
-        steps.len() == 1 && steps[0]["body"]["tool"] == "terminal" && steps[0]["body"]["args"].as_str().is_some_and(|a| a.contains("echo tool-ran")),
+        "Hermes' terminal call is one structured completed step on work with a source reference",
+        steps.len() == 1 && steps[0]["body"]["tool"] == "terminal" && steps[0]["body"]["status"] == "completed" && steps[0]["body"]["ok"] == true && steps[0]["body"]["tool_call_id"].is_string() && steps[0]["body"]["result_ref"].is_string(),
         json!(steps),
     );
     s.ok("and its answer names the tool's result", reply_of(&tooled).is_some_and(|t| t.contains("the tool ran: ") && t.contains("tool-ran")), json!(reply_of(&tooled)));
@@ -654,11 +654,11 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("woken again", r.body["phase"] == "awake", &r);
     let closed = s.eventually(WAKE, || {
         let w = work_of(&records(api, &owner, &chat_name, "work"), &lost);
-        w.iter().any(|r| r["body"]["kind"] == "turn.prompt.closed" && r["body"]["outcome"] == "expired") && w.iter().any(|r| r["body"]["kind"] == "turn.end" && r["body"]["outcome"] == "error")
+        w.iter().any(|r| r["body"]["kind"] == "turn.end" && r["body"]["outcome"] == "error")
     });
     s.ok(
-        "a turn the restart cut short ends in an error, its card expired, its question never answered",
-        closed && reply_of(&lost).is_none_or(|t| !t.contains("the tool ran")),
+        "a turn the restart cut short ends in an error, preserving its unanswered card for a fresh late-answer turn",
+        closed && reply_of(&lost).is_none_or(|t| !t.contains("the tool ran")) && !work_of(&records(api, &owner, &chat_name, "work"), &lost).iter().any(|r| r["body"]["kind"] == "turn.prompt.closed"),
         json!(work_of(&records(api, &owner, &chat_name, "work"), &lost)),
     );
 
@@ -832,6 +832,8 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     let lever = cron_now(api, &maple_name)?;
     let ran = s.eventually(ROUTINE, || routines() > routine_before);
     s.ok("its routine, due, wakes it, and Hermes does it in the chat", lever.body["records"] == 1 && ran, json!(agent_replies(&records(api, &owner, &chat_name, "chat"), &maple_id)));
+
+    super::release_goal::hermes(s, api, &owner, &id, &agent_name, &chat_name, &identity)?;
 
     std::thread::sleep(QUEUE_DRAIN);
     let r = api.signed(&owner, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({})))?;

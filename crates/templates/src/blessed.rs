@@ -359,7 +359,8 @@ mod tests {
         }
         assert!(names.contains("gws-docs"), "the upstream Docs guide complements connected Google");
         assert!(names.contains("gws-slides"), "the connected Google Slides service skill");
-        assert_eq!(names.len(), 16, "Fragment contracts, the six retained integrations, design-finite and the Docs and Slides guides");
+        assert!(names.contains("release-goal-finite"), "the sandbox release-goal skill");
+        assert_eq!(names.len(), 17, "Fragment contracts, the six retained integrations, design-finite, the Docs and Slides guides and sandbox release goal");
         assert!(data_file("skills", "fragment.json").is_none() && data_file("skills", "skills/nope/SKILL.md").is_none());
     }
 

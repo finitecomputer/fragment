@@ -1,0 +1,11 @@
+{
+  "meta": { "title": "Sandbox release goal", "description": "One release note, one follow-up, one owner decision, one sandbox effect." },
+  "operations": {
+    "state": { "kind": "query", "role": "editor", "description": "Read the authoritative goal checkpoint." },
+    "draft": { "kind": "mutation", "description": "Checkpoint the immutable release artifact and sandbox effect identity.", "input": { "type": "object", "additionalProperties": false, "required": ["text", "vendor", "key"], "properties": { "text": { "type": "string", "minLength": 1, "maxLength": 8000 }, "vendor": { "type": "string", "maxLength": 200 }, "key": { "type": "string", "minLength": 16, "maxLength": 128 } } } },
+    "review": { "kind": "mutation", "description": "Consume the single logical follow-up and checkpoint the owner wait." },
+    "approve": { "kind": "mutation", "description": "Checkpoint the owner's original-card answer and its chat record reference.", "input": { "type": "object", "additionalProperties": false, "required": ["answer", "source"], "properties": { "answer": { "enum": ["Publish", "Keep private"] }, "source": { "type": "string", "minLength": 1, "maxLength": 300 } } } },
+    "receipt": { "kind": "mutation", "description": "Keep the sandbox vendor's receipt for the approved effect.", "input": { "type": "object", "required": ["key", "receipt"], "additionalProperties": false, "properties": { "key": { "type": "string" }, "receipt": { "type": "object", "required": ["id", "key"], "additionalProperties": false, "properties": { "id": { "type": "string" }, "key": { "type": "string" } } } } } },
+    "deliver": { "kind": "job", "description": "POST the approved note to the local fake using its stable Idempotency-Key, then checkpoint the receipt." }
+  }
+}

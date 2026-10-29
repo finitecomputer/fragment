@@ -11,6 +11,7 @@ mod appfiles;
 mod blobs;
 mod bot_mode;
 mod brain;
+mod release_goal;
 mod chat;
 mod author;
 mod billing;
@@ -112,6 +113,7 @@ const LANES: &[Lane] = &[
     blobs::blobs,
     notes::notes,
     brain::brain,
+    release_goal::release_goal,
     doc::doc,
     deliver::push,
     deliver::ai,
@@ -164,7 +166,7 @@ pub const SHARDS: [&[&str]; 4] = [
     &["facet-cap", "app-lockdown", "site", "watch", "icons", "schemas", "channels", "live", "routes", "cli", "browser", "jobs", "triggers", "finite-private", "chat"],
     &[
         "auth", "create", "lockdown", "keys", "members", "identities", "signin", "levers", "secrets", "delegation", "files", "deploy", "templates", "share", "faces", "isolation", "frames",
-        "ops", "public", "effects", "appfiles", "blobs", "notes", "brain", "doc", "push", "ai", "ledger", "transcribe", "orgs", "billing", "billing-page", "trials", "admin", "admin-page",
+        "ops", "public", "effects", "appfiles", "blobs", "notes", "brain", "release-goal", "doc", "push", "ai", "ledger", "transcribe", "orgs", "billing", "billing-page", "trials", "admin", "admin-page",
     ],
 ];
 
