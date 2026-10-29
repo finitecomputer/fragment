@@ -267,7 +267,7 @@ pub async fn complete(env: &Env, call: ModelCall<'_>, after: &dyn Background) ->
     let mut charge = gate(env, call.payer, call.agent, call.fragment.as_ref(), bounded.model.id(), call.named.as_str()).await?;
     let meta = Metadata { user_id: opaque(call.payer), agent_id: call.agent.map(opaque) };
     // as its slot falls back, however the call named it (#589's review)
-    let fallback = cfg.models.fallback_of(bounded.model.slot);
+    let fallback = cfg.models.fallback_for_input(bounded.model.slot, &bounded.input);
     let (answer, model, calls) = tried(env, cfg, &bounded, fallback, &meta).await;
     charge.model = model.id();
     charge.calls = calls;
@@ -370,7 +370,7 @@ pub(crate) async fn streamed(env: &Env, bounded: &Bounded<'static>, payer: &str,
     let cfg = Config::from_env(env);
     let meta = Metadata { user_id: opaque(payer), agent_id: agent.map(opaque) };
     // a step names its tier: it falls back within that tier's route
-    let fallback = cfg.models.fallback_of(bounded.model.slot);
+    let fallback = cfg.models.fallback_for_input(bounded.model.slot, &bounded.input);
     let (answer, model, calls) = tried(env, cfg, bounded, fallback, &meta).await;
     let answer = answer?;
     let log_id = answer.headers().get("cf-aig-log-id")?;

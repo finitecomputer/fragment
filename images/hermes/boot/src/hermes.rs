@@ -7,6 +7,7 @@
 //! JSON string, which is a YAML double-quoted scalar.
 
 use std::path::{Path, PathBuf};
+use std::collections::BTreeMap;
 
 use fragment_bridge::api::{model_id_ok, Home, ModelIds, TierRoute};
 pub use fragment_bridge::api::Reasoning;
@@ -205,7 +206,7 @@ impl Route {
     /// The route at `base`, its ids the view's (`models`), or the route's
     /// own names, which it takes as well, from a platform that names none.
     pub fn new(base: &str, models: Option<&ModelIds>) -> Route {
-        let names = || ModelIds { cheap: Tier::Cheap.name().into(), medium: Tier::Medium.name().into(), fallback: FALLBACK_MODEL.into(), vision: VISION_MODEL.into(), routes: None };
+        let names = || ModelIds { cheap: Tier::Cheap.name().into(), medium: Tier::Medium.name().into(), fallback: FALLBACK_MODEL.into(), vision: VISION_MODEL.into(), routes: None, images: None };
         Route { base: base.into(), ids: models.cloned().unwrap_or_else(names) }
     }
 
@@ -269,6 +270,45 @@ pub const STALE_TIMEOUT_S: u32 = 20;
 /// A Deep call may think for three minutes before it streams (decision 65).
 pub const DEEP_STALE_TIMEOUT_S: u32 = 180;
 pub const DEEP_MAX_TOKENS: u32 = 32_768;
+/// One provider block owns patience and per-model capabilities. Root
+/// model.supports_vision would also override a text-only Deep/fallback.
+fn provider_config(main: &MainModel, route: &Route) -> String {
+    let mut models: BTreeMap<&str, (Option<u32>, Option<bool>)> = BTreeMap::new();
+    let mut catalog = false;
+    match main {
+        MainModel::Tier(tier @ (Tier::Cheap | Tier::Medium)) => {
+            models.insert(route.tier(*tier), (Some(STALE_TIMEOUT_S), None));
+            if let Some(deep) = route.settings(*tier).and_then(|r| r.deep.as_ref()) {
+                models.insert(&deep.id, (Some(DEEP_STALE_TIMEOUT_S), None));
+            }
+            if let Some(images) = &route.ids.images {
+                for id in images { models.entry(id).or_default().1 = Some(true); }
+                for (id, (_, sees)) in &mut models { *sees = Some(images.iter().any(|image| image == id)); }
+            }
+        }
+        MainModel::Own { fast, deep } => {
+            let deep = deep.as_deref().map_or(fast, |(d, _)| d);
+            // Hermes keys patience by provider/model, so shared ids get
+            // Deep's budget. OpenRouter's catalog describes BYO models.
+            let patience = if fast.id == deep.id { DEEP_STALE_TIMEOUT_S } else { STALE_TIMEOUT_S };
+            models.insert(&fast.id, (Some(patience), None));
+            models.insert(&deep.id, (Some(DEEP_STALE_TIMEOUT_S), None));
+            catalog = fast.provider == "openrouter" && deep.provider == "openrouter";
+        }
+        MainModel::Tier(Tier::High) => {}
+    }
+    if models.is_empty() { return String::new(); }
+    let mut y = "providers:\n  custom:\n".to_string();
+    if catalog { y.push_str("    catalog_provider: \"openrouter\"\n"); }
+    y.push_str("    models:\n");
+    for (id, (patience, images)) in models {
+        y.push_str(&format!("      {}:\n", q(id)));
+        if let Some(s) = patience { y.push_str(&format!("        stale_timeout_seconds: {s}\n")); }
+        if let Some(images) = images { y.push_str(&format!("        supports_vision: {images}\n")); }
+    }
+    y
+}
+
 /// Hermes' in-place retries of a stream that dropped or went stale
 /// (`HERMES_STREAM_RETRIES`, its default 2): one, so a stall reaches the
 /// fallback after two stale timeouts.
@@ -313,7 +353,7 @@ pub const ASKING: &str = "You are in a Fragment chat, and its people are not tec
 /// desktop, where `computer_use` types the path. The `fragment` skill's
 /// first page (`computer.md`, "Files your owner sends you") says the same
 /// at more length.
-pub const FILES: &str = "A file someone attaches in this chat is already on your computer: the note before their message names its path (for an image, after image_url:). It is cleared after a day, so copy it into your work to keep it. To put it on a website, click the site's upload button with your browser tools, then type its full path into the file dialog on your desktop with computer_use and press Enter.";
+pub const FILES: &str = "A file someone attaches in this chat is already on your computer: the note before their message names its path. It is cleared after a day, so copy it into your work to keep it. To put it on a website, click the site's upload button with your browser tools, then type its full path into the file dialog on your desktop with computer_use and press Enter.";
 
 /// What every agent is told of the files it sends in our chats, after
 /// `FILES` on every turn (Paul, 2026-10-23: asked for a PDF in the chat,
@@ -560,22 +600,13 @@ pub fn profile_config(agent: &Agent, name: &str, home: Home, main: &MainModel, r
     // over the platform's, which leaves the view for it.
     let dirs: Vec<String> = crate::skills::EXTERNAL_DIRS.iter().map(|d| q(d)).collect();
     y.push_str(&format!("skills:\n  external_dirs: [{}]\n", dirs.join(", ")));
-    // Its eyes: Hermes' auxiliary vision (each computer_use screenshot, and
-    // an image a person attaches, described in words for the main model) on
-    // the route's `vision`, the deployment's vision model, whatever the
-    // agent's tier (the medium tier's GLM-5.3 reads no images). Named
-    // outright, Hermes routes every capture and attachment through it (its
-    // image routing, `agent/image_routing.py`: in `auto`, an explicit
-    // `auxiliary.vision` makes it text, which each capture asks through
-    // `tools/vision_tools.py`'s `_native_tool_result_images`) and
-    // sends it, as every
-    // call to a custom endpoint, with `model.default_headers`: the agent's
-    // `x-fragment-agent`, so the intercept meters it to the agent's owner.
-    // Always OpenAI's shape, the high tier's agents' too.
+    // Capable models see pixels directly. The managed image plugin treats
+    // this backend as a fallback for text-only/unknown models, retaining
+    // each active agent's metering header for the describing call.
     // Memory and skill reviews are on. The image plugin forks our external
     // skills into the active profile before writes; Hermes retains its guards.
     y.push_str(&format!(
-        "plugins:\n  enabled: [fragment-skill-fork, fragment-deploy-wait, fragment-activity]\nauxiliary:\n  background_review: {{ enabled: true }}\n  vision:\n    provider: \"custom\"\n    base_url: {}\n    model: {}\n    api_key: \"fragment-model\"\n",
+        "plugins:\n  enabled: [fragment-skill-fork, fragment-deploy-wait, fragment-activity, fragment-native-images]\nauxiliary:\n  background_review: {{ enabled: true }}\n  vision:\n    provider: \"custom\"\n    base_url: {}\n    model: {}\n    api_key: \"fragment-model\"\n",
         q(&format!("{base}/v1")),
         q(VISION_MODEL)
     ));
@@ -608,10 +639,6 @@ pub fn profile_config(agent: &Agent, name: &str, home: Home, main: &MainModel, r
     // answers nothing. An owner's own model and the high tier have none,
     // and nor has a tier whose fallback is its own model (`Route::fallback`).
     if let MainModel::Tier(tier @ (Tier::Cheap | Tier::Medium)) = main {
-        y.push_str(&format!("providers:\n  custom:\n    models:\n      {}:\n        stale_timeout_seconds: {STALE_TIMEOUT_S}\n", q(route.tier(*tier))));
-        if let Some(deep) = route.settings(*tier).and_then(|r| r.deep.as_ref()).filter(|d| d.id != route.tier(*tier)) {
-            y.push_str(&format!("      {}:\n        stale_timeout_seconds: {DEEP_STALE_TIMEOUT_S}\n", q(&deep.id)));
-        }
         if let Some(fallback) = route.fallback(*tier) {
             y.push_str(&format!(
                 "fallback_providers:\n  - provider: \"custom\"\n    base_url: {}\n    model: {}\n    api_key: {}\n",
@@ -640,13 +667,8 @@ pub fn profile_config(agent: &Agent, name: &str, home: Home, main: &MainModel, r
     if let MainModel::Own { fast, deep } = main {
         let (deep, effort) = deep.as_deref().map(|(d, e)| (d, *e)).unwrap_or((fast, reasoning));
         y.push_str(&format!("  provider: \"custom\"\n  base_url: {}\n  api_key: {}\n  model: {}\n  reasoning_effort: {}\n  fallback_providers: []\n  request_overrides:\n    max_tokens: {DEEP_MAX_TOKENS}\n", q(&deep.base), q(&deep.placeholder), q(&deep.id), q(effort.name())));
-        // Hermes keys patience by provider/model, not by mode. Shared ids
-        // get Deep's longer budget (also preserves legacy BYO patience).
-        let shared = fast.id == deep.id;
-        let patience = if shared { DEEP_STALE_TIMEOUT_S } else { STALE_TIMEOUT_S };
-        y.push_str(&format!("providers:\n  custom:\n    models:\n      {}:\n        stale_timeout_seconds: {patience}\n", q(&fast.id)));
-        if !shared { y.push_str(&format!("      {}:\n        stale_timeout_seconds: {DEEP_STALE_TIMEOUT_S}\n", q(&deep.id))); }
     }
+    y.push_str(&provider_config(main, route));
     // Stored selections, never inferred by Hermes from credential presence.
     // Only placeholders actually held by this agent count: the catalog's
     // credential_env also includes providers it cannot currently use.
@@ -1188,7 +1210,7 @@ mod tests {
     const FALLBACK_ID: &str = "@cf/zai-org/glm-5.3-flash";
 
     fn ids() -> ModelIds {
-        ModelIds { cheap: CHEAP_ID.into(), medium: MEDIUM_ID.into(), fallback: FALLBACK_ID.into(), vision: FALLBACK_ID.into(), routes: None }
+        ModelIds { cheap: CHEAP_ID.into(), medium: MEDIUM_ID.into(), fallback: FALLBACK_ID.into(), vision: FALLBACK_ID.into(), routes: None, images: None }
     }
 
     fn route(base: &str) -> Route {
@@ -1324,6 +1346,26 @@ mod tests {
         assert!(!old.contains("  request_overrides:"), "old cells retain parent inheritance: {old}");
     }
 
+    #[test]
+    fn vision_capabilities_are_per_model_and_old_cells_keep_the_describer() {
+        let mut ids = ids();
+        let mut cheap = fragment_bridge::api::TierRoute { label: None, private: false, fallback: FALLBACK_ID.into(), vision: FALLBACK_ID.into(), reasoning: None, deep: None };
+        cheap.deep = Some(fragment_bridge::api::RouteMode { id: "text-only".into(), reasoning: Some(Reasoning::Max), fallback: Some(FALLBACK_ID.into()) });
+        ids.routes = Some(Box::new(fragment_bridge::api::TierRoutes { cheap: cheap.clone(), medium: cheap }));
+        let write = |ids: &ModelIds| provider_config(&Tier::Cheap.into(), &Route::new("http://m", Some(ids)));
+        let old = write(&ids);
+        assert!(!old.contains("supports_vision") && !old.contains("catalog_provider"));
+        ids.images = Some(vec![CHEAP_ID.into(), FALLBACK_ID.into()]);
+        let capable = write(&ids);
+        assert!(capable.contains(&format!("{}:\n        stale_timeout_seconds: 20\n        supports_vision: true\n", q(CHEAP_ID))));
+        assert!(capable.contains("\"text-only\":\n        stale_timeout_seconds: 180\n        supports_vision: false\n"));
+        assert_eq!(write(&ids), capable, "replay is stable");
+        ids.images = Some(vec![]);
+        assert!(write(&ids).contains("supports_vision: false"), "revoked capability clears native mode");
+        ids.images = None;
+        assert_eq!(write(&ids), old, "old cell metadata restores the describer");
+    }
+
     /// Goal: naming a tier's model by its id changes what Hermes says the
     /// model is, not the prompt the tier was validated on (named `cheap`
     /// and `medium`, which no family Hermes guides matched). Method: every
@@ -1410,7 +1452,7 @@ mod tests {
         let vision = "  vision:\n    provider: \"custom\"\n    base_url: \"http://model.fragment.internal/v1\"\n    model: \"vision\"\n    api_key: \"fragment-model\"\n";
         for (tier, config) in [("medium", &p), ("high", &h), ("cheap", &profile_config(&agent(), "Juniper", Home::Chat, &Tier::Cheap.into(), DEFAULT_REASONING, &route("http://model.fragment.internal"), &[], creds))] {
             assert!(config.contains(vision), "the {tier} tier's screenshots go to the route's vision model: {config}");
-            assert!(config.contains("plugins:\n  enabled: [fragment-skill-fork, fragment-deploy-wait, fragment-activity]\nauxiliary:\n  background_review: { enabled: true }\n"), "the {tier} tier reviews memory, forks external skills, waits for deployment preflight and holds delegated work: {config}");
+            assert!(config.contains("plugins:\n  enabled: [fragment-skill-fork, fragment-deploy-wait, fragment-activity, fragment-native-images]\nauxiliary:\n  background_review: { enabled: true }\n"), "the {tier} tier reviews memory, forks external skills, waits for deployment preflight and holds delegated work: {config}");
             assert!(!config.contains("curator:"), "the separate periodic curator keeps Hermes' defaults: {config}");
         }
         assert!(!m.contains("auxiliary:"), "each profile's own, beside the headers that name its agent: {m}");
@@ -1486,14 +1528,14 @@ mod tests {
         let m = managed_config(&[], CARD_TIMEOUT_S, crate::desktop::IDLE_STOP_MS);
         assert_eq!(relay_hint(), format!("{ASKING}\n\n{FILES}\n\n{SENDING}\n\n{SIMPLEX}\n\n{DELEGATING}"));
         assert!(m.contains(&format!("    append: {}\n", q(&relay_hint()))), "its files beside how to ask, in the relay's hint: {m}");
-        for said in ["already on your computer", "the note before their message names its path", "image_url:", "cleared after a day", "copy it into your work", "upload button with your browser tools", "full path into the file dialog on your desktop with computer_use", "press Enter"] {
+        for said in ["already on your computer", "the note before their message names its path", "cleared after a day", "copy it into your work", "upload button with your browser tools", "full path into the file dialog on your desktop with computer_use", "press Enter"] {
             assert!(FILES.contains(said), "{said}: {FILES}");
         }
         assert!(!FILES.contains(['`', '\n', '$']) && FILES.len() < 500, "one plain paragraph, nothing Hermes would expand: {FILES}");
         let page = include_str!("computer.md");
         let section = page.split("\n## ").find(|s| s.starts_with("Files your owner sends you\n")).expect("computer.md has the section");
         let section = section.split_whitespace().collect::<Vec<_>>().join(" ");
-        for said in ["already on your computer", "image_url:", "after a day", "copy it into your work", "upload button with your browser tools", "file dialog on your desktop", "computer_use", "press Enter"] {
+        for said in ["already on your computer", "the note before their message names its path", "after a day", "copy it into your work", "upload button with your browser tools", "file dialog on your desktop", "computer_use", "press Enter"] {
             assert!(section.contains(said), "computer.md, \"Files your owner sends you\", says {said}: {section}");
         }
     }

@@ -5,6 +5,27 @@ Each entry names where it was observed, the risk, the first proof that
 would show it biting, and the condition that deletes it. An entry
 without a delete condition is unfinished design, not debt.
 
+## Hermes' explicit auxiliary vision overrides native image routing
+
+- **Observed:** #505 and the decision 65 probe (2026-10-29): all four
+  deployed Fast/Deep models read user and tool-result images, but Hermes
+  v0.21.7's explicit auxiliary backend forces text descriptions.
+- **Stand-in:** `fragment-native-images` gives the routing decision a copy
+  without that forced choice, retaining the real fallback backend. Its
+  supported request middleware uses Hermes' resize helper on a temporary
+  materialization, limits a call to four images of 256 KiB each, and edits
+  only the API copy. Originals and canonical history remain intact.
+- **Risk:** the decision function and resize/materialization helpers are
+  pinned upstream APIs; a changed call path or middleware failure policy
+  could bypass the bounds or restore unwanted descriptions.
+- **First proof:** the real-Hermes native-image Docker test covers capable
+  and text-only models, attachments, desktop captures, large/corrupt
+  images, per-call bounds and retry; the delegation gates retain result
+  delivery and wakefulness.
+- **Delete when:** upstream supports an auxiliary fallback without forcing
+  text, and one per-call image-count/encoded-byte budget for attachments
+  and screenshots passes those same checks under the route's 6 MiB cap.
+
 ## The Hermes image adapts model preflight deployment waits
 
 - **Observed:** #625, 2026-10-29: release guard refusals lasted about five

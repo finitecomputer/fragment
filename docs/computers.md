@@ -1107,8 +1107,8 @@ expires within 30 days. The container application is the deployment's
   see marked). The promise is per route, the tier an agent runs on: a
   private tier is a private route, every slot its agents' calls reach is
   private, and a config that breaks that is refused, naming the slot
-  (`Models::reached`): the tier itself, `vision` (Hermes sends it every
-  image, whatever the tier) and `fallback` (the route's on a failure,
+  (`Models::reached`): the tier itself, `vision` (the describer for
+  text-only models and older images) and `fallback` (the route's on a failure,
   Hermes' own on a stall). A slot marked private promises nothing to the
   agents of a tier that is not: theirs is their route. What a private
   tier's agent reaches, read from Hermes v0.21.7 (`agent/
@@ -1280,21 +1280,28 @@ expires within 30 days. The container application is the deployment's
   bounded, gated and charged as a tier's call is, at its model's
   price, to the agent's owner. It is no tier: an agent's `agent.json`,
   a job's step and a manifest name only tiers.
-- Our Hermes image's profiles send their image calls to `vision`
-  (`auxiliary.vision`: provider `custom`, model `vision`, through the
-  intercept), whatever the agent's tier: by the route's name, not its
-  model's id, since a deployment may run vision on a tier's model (every
-  preview: GLM-5.3 Flash), and an id a tier runs names the tier's slot,
-  whose call falls back to the fallback model, which may read no images
-  (DeepSeek V4 Flash). `vision` falls back only when the fallback's slot
-  says its model reads images (`"images": true`: the private tier's,
-  Tinfoil's DeepSeek V4.1 Flash), on the tiers' rule. Hermes describes each
-  `computer_use` screenshot with it and hands the main model the words
-  (named outright, Hermes routes every capture so: its
-  `tools/computer_use/vision_routing.py`), and an image a person attaches
-  too. Before, a capture went to the agent's own tier's model, which on
-  the medium tier reads no images. DeepSeek Flash's vision build is only
-  on DeepSeek's own API (decision 23, its status).
+- **Native images (decision 65).** A model declared image-capable gets
+  attachments and screenshots directly, in Fast and Deep. The computer's
+  `models.images` lists those model ids (at most eight), from the config's
+  per-slot `images: true`; older cells omit it. Hermes' per-model
+  `supports_vision` follows that list, including fallbacks. BYO OpenRouter
+  uses Hermes' OpenRouter capability catalog. Unknown/text-only models
+  retain `auxiliary.vision` through their route's `vision`, as do older
+  cells and images. A native image call falls back only to a model also
+  declared image-capable; its input is never stripped for a blind fallback.
+
+  The `fragment-native-images` plugin makes the managed auxiliary backend
+  a fallback in Hermes' routing decision, retaining the actual backend.
+  Its supported request middleware keeps the four newest image blocks
+  across attachments and screenshots per call. It uses Hermes' Pillow
+  resize helper to fit each embedded image within 256 KiB of encoded data
+  and a 1568 px long edge, leaving room under the route's 6 MiB body cap.
+  Older images become text markers in that API copy; canonical history
+  and original files remain available for another look. Corrupt or
+  unshrinkable images become markers rather than oversized requests.
+  Remote image references count toward the four-image limit; their URLs
+  carry no embedded bytes. The Docker lane drives the real SDK, middleware,
+  attachments and desktop captures, capability revocation and replay.
 - **Its speech-to-text** goes to `whisper`, whatever the agent's tier.
   - **Config.** Each profile has `stt: {provider: openai, language: "",
     openai: {base_url: <route>/v1, api_key: "agent:<name>", model:
@@ -1673,8 +1680,9 @@ offered (decision 60 says why, with the vendors' words).
   platform Deep route. Distinct model ids get Fast's 20 s and Deep's
   180 s stream patience. Hermes keys patience by provider/model, so the
   same id in both modes shares 180 s, preserving legacy BYO patience.
-  Vision (`auxiliary.vision`) and voice notes (`stt`) stay on the route's
-  `vision` and `whisper`, metered to the owner as before.
+  Native images on an own model are paid by that provider account.
+  Models without vision use the route's `vision` describer, metered to
+  the owner; voice notes (`stt`) stay on its `whisper`.
 - **What its owner is shown.** Their view of the computer names, for each
   agent, the providers whose models it may run now (`modelProviders`:
   `fragment_core::catalog::Catalog::model_providers`, an own key set whose

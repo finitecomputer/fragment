@@ -149,6 +149,8 @@ impl Computer {
 /// slot by besides its name.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelIds {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub images: Option<Vec<String>>,
     pub cheap: String,
     pub medium: String,
     pub fallback: String,
@@ -536,7 +538,8 @@ impl Api {
         if let Some(m) = &c.models {
             let routes = m.routes.iter().flat_map(|r| [&r.cheap, &r.medium]);
             let routed = routes.flat_map(|r| [&r.fallback, &r.vision].into_iter().chain(r.deep.iter().flat_map(|d| [&d.id].into_iter().chain(d.fallback.iter()))));
-            if let Some(bad) = [&m.cheap, &m.medium, &m.fallback, &m.vision].into_iter().chain(routed).find(|id| !model_id_ok(id)) {
+            if m.images.as_ref().is_some_and(|ids| ids.len() > 8) { return Err(ApiError::Decode("models.images names at most 8 models".into())); }
+            if let Some(bad) = [&m.cheap, &m.medium, &m.fallback, &m.vision].into_iter().chain(routed).chain(m.images.iter().flatten()).find(|id| !model_id_ok(id)) {
                 return Err(ApiError::Decode(format!("models: {bad:?} is no model id")));
             }
         }
