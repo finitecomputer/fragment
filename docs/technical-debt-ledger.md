@@ -5,6 +5,30 @@ Each entry names where it was observed, the risk, the first proof that
 would show it biting, and the condition that deletes it. An entry
 without a delete condition is unfinished design, not debt.
 
+## The Hermes image adapts model preflight deployment waits
+
+- **Observed:** #625, 2026-10-29: release guard refusals lasted about five
+  minutes. A silent cell wait exceeds Hermes' Fast 20 s and planned Deep
+  180 s stale limits, permitting abandoned calls to overlap.
+- **Shortcut:** the image-owned `deploy_wait.py`, installed by the
+  `fragment-deploy-wait` plugin, wraps pinned Hermes v0.21.7's
+  `_StreamingCall._open_chat_stream`, stale-kill and heartbeat hooks.
+  Only the private intercept's marked not-dispatched preflight refusals
+  get a six-minute budget inside one attempt. A plugin error hook makes
+  that budget's expiry terminal, rather than another fallback/retry cycle.
+- **Risk:** an upstream change to the request-client retry policy,
+  watchdog, cancellation or writer fence could allow a duplicate dispatch
+  or suppress a real stall. Non-streaming and auxiliary calls do not use
+  this adapter and retain their existing failure behavior.
+- **First proof:** real-Hermes Docker: 90 s of marked preflight refusals,
+  one reply and one provider dispatch, no provider recovery notice;
+  cancellation before admission dispatches nothing; an ordinary silent
+  provider still triggers the existing ~40 s Fast fallback. Contract tests
+  exercise markers, budget exhaustion, cancellation and supersession.
+- **Delete when:** Hermes natively supports a bounded deployment-preflight
+  wait with these timer, retry, cancellation and no-dispatch guarantees,
+  and the same real-image tests pass without the adapter.
+
 Entries whose subject went at the cut (computers, sandcastle, Hermes,
 the desktop, chats; docs/cloudflare-v1.md, decision 33) went with it
 and are at the tag `celld-final`. Entries about the hosted fleet (Fly,

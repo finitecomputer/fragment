@@ -1,0 +1,4 @@
+name: fragment-deploy-wait
+version: 1.0.0
+description: Wait for confirmed Fragment model preflight refusals without provider failover.
+provides_hooks: [transform_api_error_classification]

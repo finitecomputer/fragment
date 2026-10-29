@@ -977,6 +977,15 @@ expires within 30 days. The container application is the deployment's
   Older images ignore the additive headers. A client must coordinate its
   deployment wait with its stale detector and cancellation; a long silent
   cell wait outlasts Hermes' normal provider timeout (#625).
+  Our Hermes image's `fragment-deploy-wait` plugin consumes this
+  contract on streaming chat completions to the private intercept. It
+  retries inside the same attempt for up to six minutes, silently, checking
+  cancellation and the attempt, route and writer fences before each retry.
+  Only confirmed preflight refusals reset the silence clock; the next
+  unconfirmed HTTP request and the provider's stream keep Hermes' normal
+  stale budget (Fast's 20 s, Deep's own configured budget). An unmarked
+  refusal or lost answer follows the existing provider error path. The
+  deployment budget's own expiry is terminal, with no provider fallback.
 - `POST http://model.fragment.internal/v1/chat/completions`, OpenAI's
   shape, with `model` a tier (`cheap`, `medium`, or `high` while it is
   on), or one of the route's models by its own id (below, "A model by
