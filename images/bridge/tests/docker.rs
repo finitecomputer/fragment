@@ -730,6 +730,22 @@ async fn a_background_delegate_delivers_and_keeps_the_computer_awake() {
     background_delegate_gate(false, None, false).await;
 }
 
+#[tokio::test]
+#[ignore = "needs Docker"]
+async fn a_background_delegate_delivers_a_file() {
+    let (fake, _model, chat, c) = hermes_running().await;
+    asked(&fake, &chat, &c, "delegate the gate work", |w, t| w.bodies(&chat, "work", "turn.end").iter().any(|e| e["turn"] == t)).await;
+    within(&fake, &chat, &c, 90_000, "the checked background result", |w| w.bodies(&chat, "chat", "reply").iter().any(|r| r["text"].as_str().is_some_and(|t| t.contains("checked the delegated result")))).await;
+    within(&fake, &chat, &c, 10_000, "the background result's explicit MEDIA file", |w| w.bodies(&chat, "chat", "reply").iter().any(|r| r["attachments"].as_array().is_some_and(|a| a.iter().any(|a| a["name"] == "delegate.txt")))).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    fake.with(|w| {
+        let files: Vec<_> = w.bodies(&chat, "chat", "reply").into_iter().flat_map(|r| r["attachments"].as_array().cloned().unwrap_or_default()).filter(|a| a["name"] == "delegate.txt").collect();
+        assert_eq!(files.len(), 1);
+        let sha = files[0]["sha256"].as_str().unwrap();
+        assert_eq!(w.fragments[&chat].blobs[sha].1.as_ref(), b"fragment-delegate-complete\n");
+    });
+}
+
 /// The child is still working while its next model call waits through a
 /// deployment longer than Fast's two stale windows (#674 + #654).
 #[tokio::test]

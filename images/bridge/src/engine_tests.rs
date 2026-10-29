@@ -44,6 +44,27 @@ fn runtime_work_holds_until_it_ends_and_is_never_restored() {
     assert_eq!(keepalive(&e.step(Input::Runtime(Event::Working(false)), T0 + 6)), None);
 }
 
+/// A background file needs no active turn or caption. It is posted as
+/// the registered agent, with its bytes carried to the driver's uploader.
+#[test]
+fn a_background_file_is_posted_without_a_caption() {
+    let a = agent("juniper");
+    let mut e = engine(std::slice::from_ref(&a));
+    let file = LocalFile { path: "/data/result.txt".into(), media_type: "text/plain".into(), name: "result.txt".into(), size: 27 };
+    let event = |agent: &str, files: Vec<LocalFile>| Event::Say { agent: agent.into(), fragment: "talk--k3x9".into(), text: String::new(), files };
+    assert!(posts(&ev(&mut e, event("unknown--k3x9", vec![file.clone()]), T0)).is_empty());
+    assert!(posts(&ev(&mut e, event(&a.fragment, Vec::new()), T0)).is_empty());
+    let s = ev(&mut e, event(&a.fragment, vec![file.clone()]), T0 + 1);
+    let sent: Vec<_> = s.effects.iter().filter_map(|x| match x {
+        Effect::Post { agent, fragment, body, files, .. } => Some((agent, fragment, body, files)),
+        _ => None,
+    }).collect();
+    assert_eq!(sent.len(), 1);
+    assert_eq!((sent[0].0.as_str(), sent[0].1.as_str(), sent[0].2["text"].as_str()), (a.fragment.as_str(), "talk--k3x9", Some("")));
+    assert_eq!(sent[0].3, &vec![file]);
+    assert_eq!(e.state().said, 1);
+}
+
 /// `s`, with each claim it makes answered as this life's and each record it
 /// owes answered, and what each answer does (the turn handed to the
 /// runtime, an ended turn let go) added to it.
@@ -1902,7 +1923,7 @@ impl World {
     /// The lead's runtime says something with no turn running.
     fn say_unasked(&mut self, text: &str) {
         let agent = self.lead().fragment.clone();
-        self.step(Input::Runtime(Event::Say { agent, fragment: CHAT.into(), text: text.into() }));
+        self.step(Input::Runtime(Event::Say { agent, fragment: CHAT.into(), text: text.into(), files: Vec::new() }));
     }
 
     fn runs_of(&self, turn: &str) -> usize {

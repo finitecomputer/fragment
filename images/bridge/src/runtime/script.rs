@@ -246,7 +246,7 @@ async fn run(cfg: ScriptConfig, mut io: RuntimeIo) -> Result<(), crate::runtime:
                         let _ = tx.send(Heard::Steered(words.to_string())).await;
                     }
                     None => {
-                        let _ = io.events.send(Event::Say { agent, fragment, text: format!("aside: {text}") }).await;
+                        let _ = io.events.send(Event::Say { agent, fragment, text: format!("aside: {text}"), files: Vec::new() }).await;
                     }
                 }
             }

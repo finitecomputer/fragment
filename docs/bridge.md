@@ -56,7 +56,7 @@ A runtime gets commands and sends events, each naming its turn
 | `Prompt {prompt, text, options, ttl?}` | a card; the turn waits, its computer kept awake until the card is answered (a press, or, for a card that takes words, its owner's message in the chat: `Answer`) or expires |
 | `Asked` | the turn asked its asker something to answer in words (the question is a reply part before it): their next message to the agent in that chat is its answer (`Tell`); it waits, running, as long as a prompt's life, and the chat is told (`turn.asked`) |
 | `End {outcome}` | `idle`, `stopped`, or `error` |
-| `Say {agent, fragment, text}` | said with no turn running, or answering a command said beside one (`Aside`): a turn of its own |
+| `Say {agent, fragment, text, files}` | said with no turn running, or answering a command said beside one (`Aside`): a turn of its own, with any files uploaded and attached to the same reply; a file needs no caption |
 | `Notice {agent, fragment, category, text}` | a notice, neither a step nor a reply: a `turn.notice` of the agent's turn running in that chat, or of the last this life ran there (none: not posted) |
 
 A runtime also names its **menu** (`Runtime::menu`): the commands it
@@ -360,6 +360,10 @@ includes those live sockets in its existing keepawake predicate. Nothing
 of the children is persisted or replayed on restart: Hermes owns them,
 and a new process has none. Their completion still uses Hermes' ordinary
 Relay reply, which the bridge posts once as a turn of its own.
+Files from that completion use the same path: `send_media` accepts an
+upload or a fetched provider URL after the parent ends and posts a reply
+with the file, even without a caption. It uses the registered agent and
+the chat's ordinary blob upload; no active parent turn is required.
 
 ## A card keeps its computer awake
 
