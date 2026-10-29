@@ -6280,6 +6280,7 @@ fn apps_dock_visit_ui(s: &mut Suite, b: &mut Browser, page: &Page, app: &str) ->
     let row = format!("document.querySelector({})", js(&format!("#apps-page .app-row[data-fragment=\"{app}\"]")));
     let dock = format!("{row}?.querySelector('[data-action=dock]')");
     let held = format!("{dock}?.disabled && window.__dockVisit.count() === 1");
+    anyhow::ensure!(b.until(page, &format!("{dock}?.getAttribute('aria-checked') === 'true' && !{dock}?.disabled"), wait), "the previous Dock write has settled before holding the next one");
     b.eval(
         page,
         &format!(
@@ -6339,7 +6340,6 @@ fn apps_dock_visit_ui(s: &mut Suite, b: &mut Browser, page: &Page, app: &str) ->
     release(b)?;
     let last = b.until(page, &format!("{dock}?.getAttribute('aria-checked') === 'false' && !{dock}?.disabled"), wait);
     let server_off = server_dock(b)?;
-    b.eval(page, "window.__dockVisit.restore()")?;
     s.ok(
         "with the earlier Dock answer before reopening too, subsequent toggles never overlap and the final server value and switch are the last choice",
         closed_answer && repeated && no_overlap == true && last && server_off == false,
@@ -6350,6 +6350,7 @@ fn apps_dock_visit_ui(s: &mut Suite, b: &mut Browser, page: &Page, app: &str) ->
     b.until(page, &held, wait);
     release(b)?;
     anyhow::ensure!(b.until(page, &format!("{dock}?.getAttribute('aria-checked') === 'true' && !{dock}?.disabled"), wait) && server_dock(b)? == true, "the app is docked again");
+    b.eval(page, "window.__dockVisit.restore()")?;
     Ok(())
 }
 
