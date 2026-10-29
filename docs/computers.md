@@ -1202,6 +1202,23 @@ expires within 30 days. The container application is the deployment's
   | Private | Finite Private's GLM-5.3 Flash at `high`, falling back to Deep | Tinfoil's DeepSeek V4.1 Flash at `max`, 32,768 tokens a call, falling back to Fast |
   | Standard | OpenRouter's GLM-5.3 Flash at `high`, falling back to Cloudflare's | OpenRouter's DeepSeek V4.1 Flash at `max`, 32,768 tokens a call, falling back to Cloudflare's GLM-5.3 Flash |
 
+  Our Hermes image writes Fast as the profile's main model and Deep as
+  its native `delegation.model`, with its own `reasoning_effort` and
+  `fallback_providers` (explicitly empty when none, never Fast's chain).
+  `delegation.request_overrides.max_tokens` asks for 32,768 tokens; the
+  route enforces each answering slot's cap. The profile's per-model
+  `stale_timeout_seconds` is 20 for Fast, 180 for Deep, and
+  `delegation.max_concurrent_children` is 3. The same model headers name
+  the agent and its tier on child calls, so a private child stays on its
+  private slot even when Standard uses the same model id. Hermes' helper
+  tasks retain Fast. Children use the existing activity signal
+  (docs/bridge.md, "Runtime work outside a turn") to hold the computer;
+  their background results return to the chat once, through the relay.
+  The real-Hermes Docker gate exercises both tiers and the old view
+  without Deep metadata. Agent guidance says to settle questions with
+  the person before handing off a big build or research, then inspect
+  and test the result before saying it is done.
+
   **A slot's `price`.** A slot on an OpenAI-compatible API that is not
   OpenRouter may name its model's list price there, dollars a million
   tokens as its vendor lists them: `{"input": <$>, "cached_input"?: <$>,
@@ -1782,17 +1799,12 @@ settings and state):
   runs on while its credentials hold that provider (above, "An agent's
   own model"); the image reads `agent.json` again every 10 s while awake
   (`HERMES_BOOT_MODEL_MS`, a test's), so a pick is its next turn's. Its
-  `reasoning`, `low` or `high` (Paul, 2026-10-22: "expose the reasoning
-  level in the model picker … high is a good default"), is how hard it
-  thinks, whatever its model: its profile's `agent.reasoning_effort`
-  (`hermes::Reasoning`), which Hermes reads at each turn and sends as each
-  call's `reasoning_effort`. Absent, or any other, it is `high`. The
-  model route passes those two on, and `max` (`fragment_core::models::
-  EFFORTS`; any other it takes as `low`, as GLM takes `medium` for its
-  dearest, `max`), and left unset Hermes sent its own default, `medium`,
-  which the route took as `low`. Settings' Agents offers it beside the model for
-  every agent: Default (High), Low and High; a pick writes `reasoning` to
-  `agent.json` as the model's pick is written, and the default removes it.
+  `reasoning` applies to its owner's own model: `low`, `high` or `max`,
+  High when absent or invalid, as `agent.reasoning_effort`, read by Hermes
+  at each turn. Platform tiers take their Fast effort from the route,
+  High on an older cell, ignoring a personal pick: an agent left on Low
+  moves to High with this image. Settings still offers the old picker
+  until the shell's Fast/Deep update (decision 65).
   Its `home`, `"simplex"` or none (Paul, 2026-10-26; docs/api.md, "An
   agent's home"), is where its owner is reached: its profile's
   `agent.system_prompt` tells it, beside its name, at every turn

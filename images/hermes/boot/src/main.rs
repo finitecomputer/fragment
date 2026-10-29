@@ -745,7 +745,7 @@ async fn write_config(api: &Api, a: &Agent, dir: &Path, ids: Option<(u32, u32)>,
     };
     let own = answer.as_ref().ok().and_then(|b| hermes::OwnModel::of(b));
     let (main, unused) = hermes::MainModel::of(a, tier, own.as_ref());
-    let reasoning = hermes::Reasoning::of(answer.as_ref().ok().map(|b| b.as_ref()));
+    let reasoning = main.reasoning(hermes::Reasoning::of(answer.as_ref().ok().map(|b| b.as_ref())), route);
     let home = fragment_bridge::api::Home::of(answer.as_ref().ok().map(|b| b.as_ref()));
     let text = hermes::profile_config(a, name, home, &main, reasoning, route, credential_env, &dir.join(hermes::CREDENTIALS_FILE));
     if std::fs::read_to_string(&config).ok().as_deref() != Some(text.as_str()) {
