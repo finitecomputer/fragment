@@ -3088,7 +3088,7 @@ impl ComputerEgress {
         let ctx = Context::new(ctx);
         let (method, path) = (req.method().to_string(), req.path());
         let answered = match route.as_str() {
-            "api" => egress_api(req, &env, &ctx, &computer).await,
+            "api" => egress_api(req, &env, &ctx, &computer, false).await,
             "model" => egress_model(req, &env, &ctx, &computer).await,
             "swap" => egress_swap(req, &env, &ctx, &computer).await,
             "codestorage" => egress_codestorage(req, &env).await,
@@ -3120,7 +3120,7 @@ impl ComputerEgress {
 /// Without the header, only the computer's own routes answer. A storage
 /// token names the code.storage the guest can reach: its egress's, on a
 /// local fleet (`egress_codestorage`).
-async fn egress_api(mut req: Request, env: &Env, ctx: &Context, computer: &str) -> CellResult<Response> {
+async fn egress_api(mut req: Request, env: &Env, ctx: &Context, computer: &str, model_call: bool) -> CellResult<Response> {
     let cfg = Config::from_env(env);
     let url = req.url()?;
     let path = url.path().to_string();
@@ -3218,13 +3218,23 @@ async fn egress_api(mut req: Request, env: &Env, ctx: &Context, computer: &str) 
         }
     }
     let payload = (!body.is_empty()).then(|| hex::encode(Sha256::digest(&body)));
-    let signed = crate::fragment::ask(
+    let signed = match crate::fragment::ask(
         env,
         &agent,
         "computer/sign",
         &json!({ "computer": computer, "method": method.as_ref(), "url": target, "payload": payload }),
     )
-    .await?;
+    .await {
+        // Only the model's signing preflight, before route() can dispatch
+        // to any provider. A nested deploying answer has no provenance.
+        Err(e) if model_call && fragment_core::release::model_not_dispatched(e.code, e.release_refused.as_deref()) => {
+            let mut response = e.response()?;
+            response.headers_mut().set(fragment_core::release::MODEL_NOT_DISPATCHED, "deploying")?;
+            response.headers_mut().set(fragment_core::release::REFUSED, e.release_refused.as_deref().expect("a direct guard refusal"))?;
+            return Ok(response);
+        }
+        other => other?,
+    };
     let authorization = signed["header"].as_str().ok_or_else(|| CellError::host("the agent fragment signed nothing"))?;
     let headers = Headers::new();
     // the caller's tier, which the model route reads (`Models::named`), and no other of ours
@@ -3336,7 +3346,7 @@ async fn egress_model(mut req: Request, env: &Env, ctx: &Context, computer: &str
     let mut init = RequestInit::new();
     init.with_method(Method::Post).with_headers(headers).with_body(Some(js_sys::Uint8Array::from(body.as_slice()).into()));
     let api = Request::new_with_init(&format!("http://api.fragment.internal{route}"), &init)?;
-    egress_api(api, env, ctx, computer).await
+    egress_api(api, env, ctx, computer, true).await
 }
 
 /// Headers a hop answers for itself, never sent on.
