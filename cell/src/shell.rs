@@ -1,5 +1,5 @@
 //! The shell (docs/cloudflare-v1.md, decisions 6–12): the platform's one
-//! page, at `/`, `/settings` and `/welcome`, Finite's about page, privacy
+//! page, at `/`, `/settings`, `/apps` and `/welcome`, Finite's about page, privacy
 //! policy and terms at `/about`, `/privacy` and `/terms`, and its files at
 //! `/__shell/<file>`, the release's (cell/shell/), read from its Static
 //! Assets (assets.rs). It holds no key: its script calls the API with
@@ -89,7 +89,7 @@ fn frame_src(cfg: &Config, url: &Url) -> String {
     format!("'self' {platform} {scheme}://*.{}{port}", cfg.host_suffix)
 }
 
-/// `GET /`, `GET /settings` and `GET /welcome`: the shell's page, for
+/// `GET /`, `GET /settings`, `GET /apps` and `GET /welcome`: the shell's page, for
 /// anyone (signed out, it asks them to sign in; the shell opens the view
 /// its path names), naming the release that answers it and when it was
 /// deployed (`fragment_templates::shell_page`): its script reloads at a

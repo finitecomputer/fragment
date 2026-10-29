@@ -456,9 +456,10 @@ impl FragmentCell {
                 if !req.headers().get("accept")?.is_some_and(|a| a.contains("application/json")) {
                     return Ok(Response::ok(files_page(name))?.with_headers(headers("text/html; charset=utf-8", "no-store")?));
                 }
-                // a path on both is live's, as `__file` reads it
+                // a path on both is the one `__file` reads (live's; an agent's, main's)
                 let mut sizes = std::collections::BTreeMap::new();
-                for which in ["main", "live"] {
+                let last_wins = if self.kind()? == fragment_proto::FragmentKind::Agent { ["live", "main"] } else { ["main", "live"] };
+                for which in last_wins {
                     let blobs = self.pointer_sizes(which)?;
                     for r in self.tree_rows(which)?.into_iter().filter(|r| !site::is_machinery(&r.path)) {
                         let size = blobs.get(&r.path).copied().unwrap_or(r.size);
@@ -479,16 +480,22 @@ impl FragmentCell {
                 if !valid_repo_path(&p) || site::is_machinery(&p) {
                     return Err(CellError::invalid("path must be a content path (not the fragment's own machinery)"));
                 }
-                // Data an app writes lands on main; a path not yet on live reads from there.
-                let (which, row) = match self.tree_row("live", &p)? {
-                    Some(row) => ("live", row),
-                    None => match self.tree_row("main", &p)? {
-                        Some(row) => ("main", row),
-                        // beneath both, its blessed template's data (decision 40)
-                        None => match self.release_file(&p)? {
-                            Some(d) => return self.release_response(d, head).await,
-                            None => return Err(CellError::new(ErrorCode::NotFound, format!("no file {p}"))),
-                        },
+                // Data an app writes lands on main; a path not yet on live
+                // reads from there. An agent's files (its job, its settings,
+                // its memories) are main's first: its computer's sync writes
+                // them there and never deploys (images/hermes/boot/src/
+                // sync.rs), so live keeps the job of its last deploy.
+                let first = if self.kind()? == fragment_proto::FragmentKind::Agent { ["main", "live"] } else { ["live", "main"] };
+                let found = match self.tree_row(first[0], &p)? {
+                    Some(row) => Some((first[0], row)),
+                    None => self.tree_row(first[1], &p)?.map(|row| (first[1], row)),
+                };
+                let (which, row) = match found {
+                    Some(f) => f,
+                    // beneath both, its blessed template's data (decision 40)
+                    None => match self.release_file(&p)? {
+                        Some(d) => return self.release_response(d, head).await,
+                        None => return Err(CellError::new(ErrorCode::NotFound, format!("no file {p}"))),
                     },
                 };
                 if head {
@@ -522,7 +529,20 @@ impl FragmentCell {
         }
         let Some(row) = found else {
             if !path.starts_with("__") {
-                return self.app_fetch(req, caller, facts, path, url, link, anon).await;
+                let answered = self.app_fetch(req, caller, facts, path, url, link, anon).await;
+                // what a browser asks of a page that names no icon of its
+                // own: the fragment's icon (icon.rs), when it has one and
+                // neither its live nor its app's own route answers there
+                let unanswered = match &answered {
+                    Ok(r) => r.status_code() == 404,
+                    Err(e) => e.code == ErrorCode::NotFound,
+                };
+                if path == "favicon.ico" && unanswered && matches!(req.method(), Method::Get | Method::Head) {
+                    if let Some(resp) = self.favicon(req, public, head).await? {
+                        return Ok(resp);
+                    }
+                }
+                return answered;
             }
             return Err(CellError::new(ErrorCode::NotFound, format!("no page {path:?}")));
         };

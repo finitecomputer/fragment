@@ -488,12 +488,29 @@ acknowledged within five minutes is sent again. A guest's ledger refuses
 the batch, so a guest's fragments are billed nothing.
 
 - **Preview cards** (decision 31; docs/api.md, Cards): each try at a
-  deploy's card is a `browser` row in the fragment's outbox
+  deploy's card, or at one an editor asked for again, is a `browser` row
+  in the fragment's outbox
   (`card:<fragment>@<incarnation>:<live, 12 hex>:<wanted at>:<try>`),
   its session's time from acquire to close (a close that was lost adds
   the session's 10 s inactivity timeout), to the fragment's owner. A
   stale shot and a failed one are billed too: their browser time was
-  spent. A guest's or a read-only owner's deploys are not shot.
+  spent. A guest's or a read-only owner's deploys are not shot, and an
+  ask for a shot again is refused (402). An uploaded card is a blob,
+  stored as any is.
+- **Icons** (docs/api.md, Icons): a making's calls, each a row in the
+  fragment's outbox as it answers
+  (`icon:<fragment>@<incarnation>:<op>:<call>`, `op` when the making or
+  upload started and a nonce of its own), to its owner: the
+  subject (`tokens`, GLM-5.3 Flash), each drawing (`neurons`, FLUX.2
+  [klein] 4B, what Workers AI said it cost, 104.2 when it says none: its
+  pricing page's 26.05 a 512×512 output tile, four times, as it said in
+  the spike), each check (`tokens`, Clef-flash), and each Images
+  transformation (`images`: a cutout, a fit, a flattening; an upload
+  fitted). A drawing refused after its call was bought. The owner's ledger
+  is asked first, as for a job's AI step: capped (with the fragment's
+  cap) when the one asking is neither its owner nor an agent of theirs.
+  An upload is a write: refused while the owner is read-only, before
+  anything is fitted.
 - **Images** (the deploy path): `images` rows to the fragment's owner,
   when a transformation is made.
 - **An export** (a person's list, export.rs; docs/api.md, Export): one

@@ -111,12 +111,30 @@ pub fn trials(s: &mut Suite, api: &Api) -> Result<()> {
     );
     let stale = admin("PATCH", &format!("/trials/{id}"), Some(&json!({ "revision": 0, "capacity": 3 })))?;
     let fewer = admin("PATCH", &format!("/trials/{id}"), Some(&json!({ "revision": 1, "capacity": 1 })))?;
-    let raised = admin("PATCH", &format!("/trials/{id}"), Some(&json!({ "revision": 1, "capacity": 3 })))?;
+    let raised = admin("PATCH", &format!("/trials/{id}"), Some(&json!({ "revision": 1, "capacity": 4 })))?;
     let now_room = api.signed(&max, "POST", "/api/billing/checkout", Some(&json!({ "trialCode": code })))?;
     s.ok(
-        "a change on a stale revision is refused (409), places never shrink (400); raised, there is room again",
-        stale.status == 409 && fewer.status == 400 && raised.status == 200 && raised.body["revision"] == 2 && now_room.status == 200,
-        json!([stale.status, fewer.status, raised.body, now_room.status]),
+        "a change on a stale revision is refused (409), places never fall below those taken (400, saying so); raised, there is room again",
+        stale.status == 409
+            && fewer.status == 400
+            && fewer.message().contains("1 bought and 1 held")
+            && raised.status == 200
+            && raised.body["revision"] == 2
+            && now_room.status == 200,
+        json!([stale.status, fewer.status, fewer.message(), raised.body, now_room.status]),
+    );
+    let lowered = admin("PATCH", &format!("/trials/{id}"), Some(&json!({ "revision": 2, "capacity": 3 })))?;
+    let ned = api.person()?;
+    let none_left = api.signed(&ned, "POST", "/api/billing/checkout", Some(&json!({ "trialCode": code })))?;
+    s.ok(
+        "lowered to the places taken (one bought, two open), it keeps them and is full: a fourth finds none (409)",
+        lowered.status == 200
+            && lowered.body["capacity"] == 3
+            && lowered.body["revision"] == 3
+            && lowered.body["subscribed"] == 1
+            && lowered.body["open"] == 2
+            && none_left.status == 409,
+        json!([lowered.body, none_left.status, none_left.message()]),
     );
 
     // ---- once a person; for those who never paid

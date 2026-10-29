@@ -1594,7 +1594,12 @@ the provider's own hosts.
   something lets their agents use it, with no approval of the platform's
   (what Hermes asks about: "Approvals in our Hermes image").
 - HTTPS interception needs Cloudflare's CA: the image waits for it at
-  boot and appends it to its trust store.
+  boot and appends it to its trust store (curl's, Python's, and Node's,
+  which reads it with `NODE_USE_SYSTEM_CA=1`: its own roots alone refused
+  it), and names it in its browser's managed policy (`CACertificates`, in
+  Chrome for Testing's policy directory: `hermes::CHROMIUM_CA_POLICY`),
+  since Hermes' pinned Chromium reads no system bundle: without it, every
+  page on an intercepted host is an interstitial in the agent's browser.
 - What the catalog cannot express is never swapped: a key in a path is
   refused, and a body goes as it came (a placeholder in it reaches the
   provider, which refuses it). A vendor that signs its requests with the
@@ -1812,11 +1817,11 @@ settings and state):
   level in the model picker … high is a good default"), is how hard it
   thinks, whatever its model: its profile's `agent.reasoning_effort`
   (`hermes::Reasoning`), which Hermes reads at each turn and sends as each
-  call's `reasoning_effort`. Absent, or any other, it is `high`. Those two
-  are what the model route passes on (`fragment_core::models::EFFORTS`;
-  any other it takes as `low`, as GLM takes `medium` for its dearest,
-  `max`), and left unset Hermes sent its own default, `medium`, which the
-  route took as `low`. Settings' Agents offers it beside the model for
+  call's `reasoning_effort`. Absent, or any other, it is `high`. The
+  model route passes those two on, and `max` (`fragment_core::models::
+  EFFORTS`; any other it takes as `low`, as GLM takes `medium` for its
+  dearest, `max`), and left unset Hermes sent its own default, `medium`,
+  which the route took as `low`. Settings' Agents offers it beside the model for
   every agent: Default (High), Low and High; a pick writes `reasoning` to
   `agent.json` as the model's pick is written, and the default removes it.
   Its `home`, `"simplex"` or none (Paul, 2026-10-26; docs/api.md, "An

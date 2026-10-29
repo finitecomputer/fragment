@@ -323,22 +323,25 @@ button:focus-visible, .rename-agent input:focus-visible { outline: 2px solid var
 
 .sidebar-top .brand { min-width: 0; padding-right: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-.search-dialog { --search-top: max(calc(24px + env(safe-area-inset-top, 0px)), calc(var(--vh) / 2 - 33px)); position: fixed; inset: 0; top: var(--viewport-top, 0px); bottom: auto; width: 100%; max-width: none; height: var(--vh); max-height: none; margin: 0; padding: var(--search-top) 20px 24px; border: 0; border-radius: 0; background: transparent; isolation: isolate; color: var(--text-primary); overflow-y: auto; }
+.search-dialog { --search-top: max(calc(24px + env(safe-area-inset-top, 0px)), calc(var(--vh) / 2 - 33px)); --search-file-room: 0px; --search-status-room: 0px; position: fixed; inset: 0; top: var(--viewport-top, 0px); bottom: auto; width: 100%; max-width: none; height: var(--vh); max-height: none; margin: 0; padding: var(--search-top) 20px 24px; border: 0; border-radius: 0; background: transparent; isolation: isolate; color: var(--text-primary); overflow-y: auto; }
+.search-dialog.has-files { --search-file-room: 58px; }
 .search-dialog[open] { display: block; animation: search-landscape-in 280ms cubic-bezier(.22, 1, .36, 1) both; }
 /* Transparent underneath: the landscape fades over the current workspace. */
 .search-dialog::backdrop { background: transparent; }
-/* Keep the input centered; only the results below it grow and scroll. */
-.search-panel { position: relative; display: flex; flex-direction: column; width: min(620px, 100%); max-height: calc(var(--vh) - var(--search-top) - 24px); margin: 0 auto; overflow: hidden; border: 1px solid var(--border-strong); border-radius: 33px; background: var(--bg-sidebar); }
+/* Keep the input centered; what grows below it shrinks and scrolls. */
+.search-panel { position: relative; display: flex; flex-direction: column; width: min(620px, 100%); max-height: calc(var(--vh) - var(--search-top) - 24px); margin: 0 auto; overflow: hidden; border: 0; border-radius: 33px; background: var(--bg-sidebar); }
 .search-dialog[open] .search-panel { animation: search-panel-in 240ms cubic-bezier(.22, 1, .36, 1) both; }
 @keyframes search-landscape-in { from { opacity: 0; } to { opacity: 1; } }
 @keyframes search-panel-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
 @media (prefers-reduced-motion: reduce) { .search-dialog[open], .search-dialog[open] .search-panel { animation: none; } }
-.search-input-wrap { display: flex; flex: none; align-items: center; gap: 8px; padding: 10px 12px 10px 22px; background: transparent; }
-#workspace-search { display: block; flex: 1; min-width: 0; width: 100%; height: 44px; padding: 0; border: 0; border-radius: 0; background: transparent; color: inherit; font: inherit; font-size: 17px; box-shadow: none; }
-#workspace-search::placeholder { color: var(--text-secondary); opacity: 1; }
+.search-input-wrap { display: flex; flex: none; align-items: flex-end; gap: 8px; padding: 10px 12px 10px 22px; background: transparent; }
+/* one line at rest, growing to INPUT_MAX_PX (launcher.js) or the visual viewport's room, then scrolling; files and a status keep their room too */
+#workspace-search { display: block; flex: 1; min-width: 0; width: 100%; height: 44px; max-height: min(200px, calc(var(--vh) - var(--search-top) - 44px - var(--search-file-room) - var(--search-status-room))); padding: 10px 0; overflow-y: auto; resize: none; border: 0; border-radius: 0; background: transparent; color: inherit; font: inherit; font-size: 17px; line-height: 24px; box-shadow: none; }
+/* on one line too, cut short on a phone (a textarea's would wrap to a second) */
+#workspace-search::placeholder { color: var(--text-secondary); opacity: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 #workspace-search:focus-visible { outline: none; }
-.search-panel:focus-within { border-color: var(--border-strong); }
-.search-send { flex: none; width: 36px; height: 36px; border-radius: 50%; background: var(--primary); color: var(--primary-foreground); }
+/* centred on the input's last line (its 24px line, 10px padding) */
+.search-send { flex: none; width: 36px; height: 36px; margin-bottom: 4px; border-radius: 50%; background: var(--primary); color: var(--primary-foreground); }
 .search-send:hover { background: var(--text-secondary); }
 .search-send:disabled { background: var(--bg-hover); color: var(--text-tertiary); cursor: default; }
 .search-results { min-height: 0; max-height: 400px; overflow-y: auto; margin: 0; padding: 8px; border-top: 1px solid var(--border); background: transparent; }
@@ -359,6 +362,22 @@ button:focus-visible, .rename-agent input:focus-visible { outline: 2px solid var
 .search-result .meta { flex: none; }
 .search-enter { display: flex; align-items: center; }
 .search-message .agent-preview { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+/* the launcher's files (launcher.js, launchFiles): rows of chips under its words, scrolling when the viewport leaves less room */
+.search-files { display: flex; flex: 0 1 auto; flex-wrap: wrap; min-height: 0; overflow-y: auto; gap: 8px; padding: 0 18px 14px 18px; }
+.search-files[hidden] { display: none; }
+.search-file { display: inline-flex; align-items: center; gap: 8px; max-width: 240px; min-width: 0; height: 44px; padding: 4px; border-radius: 14px; background: var(--bg-hover); color: var(--text-primary); font-size: 13px; animation: search-file-in 220ms cubic-bezier(.22, 1, .36, 1) both; }
+.search-file img, .search-file-icon { width: 36px; height: 36px; flex: none; border-radius: 10px; object-fit: cover; }
+.search-file-icon { display: grid; place-items: center; background: var(--surface-muted); color: var(--text-secondary); }
+.search-file-icon svg { width: 18px; height: 18px; stroke-width: 1.6; }
+.search-file-name { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.search-file-remove { display: grid; place-items: center; width: 26px; height: 26px; flex: none; padding: 0; border: 0; border-radius: 50%; background: transparent; color: var(--text-secondary); cursor: pointer; }
+.search-file-remove:hover { background: var(--bg-hover); color: var(--text-primary); }
+.search-file-remove svg { width: 14px; height: 14px; }
+@keyframes search-file-in { from { opacity: 0; transform: scale(.94); } }
+/* files dragged over the launcher: its panel says where they go */
+.search-drop { position: absolute; inset: 0; z-index: 2; display: grid; place-items: center; border-radius: inherit; background: color-mix(in srgb, var(--bg-sidebar) 86%, transparent); color: var(--text-primary); font-size: 15px; font-weight: 500; opacity: 0; pointer-events: none; transition: opacity 140ms ease; }
+.search-dialog.dropping .search-drop { opacity: 1; }
+@media (prefers-reduced-motion: reduce) { .search-file { animation: none; } .search-drop { transition: none; } }
 
 /* a group chat's mark: its agents' avatars in one avatar's room, the lead
    on top (shell.js `mark`); sized by the room it stands in */
@@ -468,6 +487,8 @@ iframe[data-blocked] { display: none; }
 .settings-nav-link:hover, .settings-nav-link:focus-visible { background: var(--bg-hover); color: var(--text-primary); }
 .settings-nav-link[aria-current="location"] { background: var(--bg-active); color: var(--text-primary); font-weight: 600; }
 .settings-content { min-width: 0; }
+/* room for the last section's heading to reach the scroll handler's line */
+.settings-content:has(.settings-section) { padding-bottom: calc(100vh - 250px); }
 .settings-intro { padding: 2px 0 8px; }
 .settings-intro h1 { margin: 0 0 6px; font-size: clamp(26px, 2.5vw, 32px); font-weight: 600; line-height: 1.2; letter-spacing: -.035em; text-wrap: balance; }
 .settings-intro p { margin: 0; color: var(--text-secondary); font-size: 14px; }
@@ -517,11 +538,11 @@ iframe[data-blocked] { display: none; }
 @container settings (max-width: 880px) {
   .settings-layout { display: block; max-width: 760px; padding: 22px 24px 72px; }
   /* as tall before its links come (settings loading) as with them: a link's 36px, padded */
-  .settings-nav { position: sticky; z-index: 4; top: 0; flex-direction: row; gap: 4px; min-height: 61px; margin: -22px -24px 24px; padding: 12px 24px; border-bottom: 1px solid var(--border); background: var(--bg-sidebar); overflow-x: auto; scrollbar-width: none; }
-  .settings-nav::-webkit-scrollbar { display: none; }
+  .settings-nav { position: sticky; z-index: 4; top: 0; flex-direction: row; gap: 4px; min-height: 61px; margin: -22px -24px 24px; padding: 12px 24px; border-bottom: 1px solid var(--border); background: var(--bg-sidebar); overflow-x: auto; scrollbar-width: thin; }
+  .settings-nav::-webkit-scrollbar { display: block; height: 6px; }
   .settings-nav-title { display: none; }
   .settings-nav-link { flex: none; white-space: nowrap; }
-  .settings-section { scroll-margin-top: 118px; }
+  .settings-section { scroll-margin-top: 109px; }
 }
 @container settings (max-width: 620px) {
   .settings-layout { padding: 16px 20px 60px; }
@@ -537,6 +558,10 @@ iframe[data-blocked] { display: none; }
   .settings-stack .settings-actions { justify-content: flex-start; }
   .settings-intro { padding-bottom: 4px; }
   .settings-section { margin-top: 60px; padding: 6px 16px 12px; border-radius: 16px; }
+}
+@media (pointer: coarse) {
+  .settings-nav { scrollbar-width: none; }
+  .settings-nav::-webkit-scrollbar { display: none; }
 }
 /* settings' connections: one block per provider (shell.js connectionsSection) */
 .provider { width: 100%; display: flex; flex-direction: column; gap: 8px; padding: 16px 2px; border-bottom: 1px solid var(--border-strong); }
@@ -578,32 +603,47 @@ iframe[data-blocked] { display: none; }
 .chip { height: 26px; padding: 0 10px; border: 1px solid var(--border-strong); border-radius: 999px; background: none; color: var(--text-tertiary); font-size: 12.5px; }
 .chip[aria-pressed="true"] { background: var(--bg-active); color: var(--text-primary); }
 .chip:disabled { opacity: .6; }
-/* settings' Sharing: who has access to what of the person's (shell.js
-   accessSection), in the settings' card: a row a fragment (or a person),
-   its people under it, its view's two pills on their own line */
 .settings-section .chip { min-height: 32px; height: auto; padding: 5px 14px; border-radius: 999px; font-size: 13px; transition: background .15s; }
 .settings-section .chip:hover { background: var(--bg-hover); }
-.access-body { width: 100%; }
-.access-list { width: 100%; display: flex; flex-direction: column; }
-.access-row, .access-person { padding: 14px 2px; border-bottom: 1px solid var(--border-strong); }
-.access-list > :last-child { border-bottom: 0; }
-.access-head { display: flex; align-items: center; gap: 10px; min-width: 0; font-size: 14px; }
-.access-name { min-width: 0; padding: 0; border: 0; background: none; color: var(--text-primary); font: inherit; font-weight: 600; text-align: left; cursor: pointer; overflow-wrap: anywhere; }
-.access-name:hover { text-decoration: underline; text-underline-offset: 3px; }
-.access-kind { font-size: 12.5px; }
-.access-tag { margin-left: auto; display: inline-flex; align-items: center; gap: 5px; flex: none; padding: 3px 10px; border: 1px solid var(--border-strong); border-radius: 999px; font-size: 12.5px; color: var(--text-secondary); }
-.access-tag:empty { display: none; }
-.access-tag svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
-.access-people { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
-.access-people li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; font-size: 13.5px; }
-.access-people li .muted { color: var(--text-secondary); font-size: 12.5px; }
-.access-who { overflow-wrap: anywhere; }
-.access-rest, .access-person { width: 100%; }
-.access-rest { padding: 12px 2px 0; }
-.access-rest summary, .access-person summary { cursor: pointer; padding: 2px 0; color: var(--text-secondary); font-size: 13.5px; }
-.access-person summary { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; color: var(--text-primary); font-weight: 600; }
-.access-person summary .muted { color: var(--text-secondary); font-size: 12.5px; font-weight: 400; }
-.access-rest .access-row { padding: 10px 2px; border-bottom: 0; }
+/* the Apps page (apps-page.js): in the work area as settings are, one row
+   an app: its icon, title, what it is and who has access, its card, and
+   its controls under them; a phone's stacks */
+.apps-layout { max-width: 820px; margin: 0 auto; padding: 34px clamp(20px, 4vw, 56px) 88px; }
+.apps-intro h1 { margin: 0 0 18px; font-size: clamp(26px, 2.5vw, 32px); font-weight: 600; line-height: 1.2; letter-spacing: -.035em; }
+.apps-list { display: flex; flex-direction: column; }
+.apps-empty { margin: 8px 2px; font-size: 14px; }
+.app-row { display: flex; flex-direction: column; gap: 10px; padding: 16px 2px; border-bottom: 1px solid var(--border); }
+.apps-list > .app-row:last-child { border-bottom: 0; }
+.app-row-head { display: flex; align-items: center; gap: 14px; min-width: 0; }
+.app-row-art { display: grid; place-items: center; width: 40px; height: 40px; flex: none; }
+.app-row-art .app-icon, .app-row-art .app-picture, .app-row-art .app-picture .app-icon { width: 40px; height: 40px; border-radius: 11px; }
+.app-row-art .app-icon { background: linear-gradient(155deg, color-mix(in srgb, var(--app-color), white 26%), var(--app-color)); }
+.app-row-art .app-icon svg { width: 25px; height: 25px; stroke-width: 1.6; }
+.app-row-text { display: flex; flex: 1; flex-direction: column; gap: 1px; min-width: 0; }
+.app-row-title { overflow: hidden; font-size: 15px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.app-row-meta, .app-row-access { color: var(--text-secondary); font-size: 13px; overflow-wrap: anywhere; }
+.app-row-access { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 0 4px; }
+.app-row-access svg { width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.app-row-card { width: 112px; height: 70px; flex: none; border: 1px solid var(--border); border-radius: 8px; object-fit: cover; object-position: top; }
+.app-row-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding-left: 54px; }
+.app-row-controls .quiet { min-height: 32px; height: auto; padding: 5px 14px; background: var(--bg-active); }
+.app-row-controls .quiet:hover { background: var(--bg-hover); }
+.app-row-controls .quiet:disabled { opacity: .6; cursor: default; }
+.app-row-said { margin: 0; padding-left: 54px; color: var(--text-secondary); font-size: 13px; }
+/* the dock switch: its track says whether the dock shows it, as the list does */
+.app-dock { display: inline-flex; align-items: center; gap: 8px; min-height: 32px; padding: 0 12px 0 6px; border: 1px solid var(--border-strong); border-radius: 999px; background: none; color: var(--text-primary); font-size: 13px; font-weight: 600; }
+.app-dock-track { position: relative; width: 30px; height: 18px; border-radius: 999px; background: var(--border-strong); transition: background .15s; }
+.app-dock-track::after { content: ""; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,.3); transition: transform .15s; }
+.app-dock[aria-checked="true"] .app-dock-track { background: var(--accent-blue); }
+.app-dock[aria-checked="true"] .app-dock-track::after { transform: translateX(12px); }
+.app-dock:disabled { opacity: .6; cursor: default; }
+.apps-archived { margin-top: 24px; }
+.apps-archived summary { padding: 6px 2px; color: var(--text-secondary); font-size: 14px; cursor: pointer; }
+@container settings (max-width: 620px) {
+  .apps-layout { padding: 18px 16px 60px; }
+  .app-row-card { width: 72px; height: 45px; }
+  .app-row-controls, .app-row-said { padding-left: 0; }
+}
 .picture { gap: 10px; cursor: pointer; }
 .picture img { width: 22px; height: 22px; border-radius: 50%; object-fit: cover; }
 /* An agent's image (Paul, 2026-10-03): a CRT monitor, whole (no circle),
@@ -724,3 +764,31 @@ iframe[data-blocked] { display: none; }
 /* the release and the computer's version, under Settings' last section (shell.js releaseLine) */
 .settings-release { margin: 28px 2px 0; font-size: 12.5px; }
 .settings-release a { color: inherit; }
+
+/* an app's own icon (app-icon.js): an object on nothing, never on a tile */
+.app-picture { display: inline-grid; place-items: center; width: 16px; height: 16px; flex: none; }
+.app-picture img { width: 100%; height: 100%; object-fit: contain; }
+.dock-art .app-picture { width: 40px; height: 40px; }
+.dock-art .app-picture .app-icon { width: 40px; height: 40px; border-radius: 11px; background: linear-gradient(155deg, color-mix(in srgb, var(--app-color), white 26%), var(--app-color)); }
+/* the icon sheet: make, pick, upload, remove */
+.icon-sheet { box-sizing: border-box; padding: 24px; width: min(420px, calc(100vw - 32px)); border: 1px solid var(--border-strong); border-radius: 18px; background: var(--bg-card); color: var(--text-primary); }
+.icon-sheet::backdrop { background: rgba(0,0,0,.5); }
+.icon-sheet h2 { margin: 0 0 14px; font-size: 19px; }
+.icon-current { display: grid; place-items: center; height: 88px; margin-bottom: 14px; border-radius: 12px; background: var(--bg-window); }
+.icon-current .app-picture, .icon-current .app-icon { width: 64px; height: 64px; border-radius: 14px; }
+.icon-make { display: flex; gap: 8px; }
+.icon-make input { flex: 1; min-width: 0; padding: 10px 12px; border: 1px solid var(--border-strong); border-radius: 9px; font: inherit; color: inherit; background: var(--bg-window); }
+.icon-make button, .icon-actions button { padding: 10px 14px; border: 1px solid var(--border-strong); border-radius: 9px; background: var(--bg-window); color: inherit; font: inherit; }
+.icon-make button[type=submit] { background: var(--text-primary); color: var(--bg-window); border-color: transparent; }
+.icon-make button:disabled, .icon-pick:disabled, .icon-actions button:disabled { opacity: .55; }
+.icon-said { margin: 12px 0 0; color: var(--text-secondary); font-size: 14px; }
+.icon-picks { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin-top: 12px; }
+.icon-picks:empty { display: none; }
+.icon-pick { min-width: 0; aspect-ratio: 1; padding: 6px; border: 1px solid var(--border-strong); border-radius: 12px; background: var(--bg-window); }
+.icon-pick img { display: block; width: 100%; height: 100%; min-width: 0; object-fit: contain; }
+.icon-pick.picked { outline: 2px solid var(--accent-blue); outline-offset: 2px; }
+/* what is being kept or removed, until the platform answers (the rest wait, disabled) */
+.icon-sheet button[aria-busy=true] { opacity: 1; }
+.icon-pick[aria-busy=true] { outline: 2px dashed var(--border-strong); outline-offset: 2px; }
+.icon-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 18px; }
+.icon-actions button:first-child { margin-right: auto; }

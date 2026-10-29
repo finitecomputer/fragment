@@ -1,6 +1,6 @@
 //! The JavaScript surfaces workers-rs 0.8.5 does not wrap (the Worker
 //! Loader, Durable Object facets, the Workflows binding, the AI binding's
-//! options, R2's read of a `Range` header as it came, and synchronous
+//! options and multipart input, the Images binding, R2's read of a `Range` header as it came, and synchronous
 //! storage transactions), and the blob store's calls, on workers-rs's R2.
 //! Every `Reflect` call in the cell lives here, behind typed functions.
 
@@ -598,6 +598,62 @@ pub async fn ai_run(env: &JsValue, model: &str, input: &serde_json::Value, optio
     let out = await_js(call(&ai, "run", &[model.into(), to_js(input), opts]), "AI.run").await?;
     let resp: worker_sys::web_sys::Response = out.dyn_into().map_err(|_| CellError::host("AI.run answered no Response"))?;
     Ok(worker::Response::from(resp))
+}
+
+/// `env.AI.run(model, {multipart: {body, contentType}}, {returnRawResponse:
+/// true})`: a model whose input is a multipart form (FLUX.2's), its fields
+/// `fields`'s, each sent as text. Not through the AI Gateway: the binding
+/// refuses a gateway for a form's streamed body ("AI Gateway does not
+/// support ReadableStreams yet", 2026-10-24), and as bytes the gateway
+/// answers 400 (docs/technical-debt-ledger.md).
+pub async fn ai_run_form(env: &JsValue, model: &str, fields: &serde_json::Map<String, serde_json::Value>) -> CellResult<worker::Response> {
+    use worker::web_sys::{FormData, Response};
+    let ai = binding(env, "AI", "ai")?;
+    let failed = |what: &str, e: JsValue| CellError::host(format!("{what}: {}", js_message(&e)));
+    let form = FormData::new().map_err(|e| failed("FormData", e))?;
+    // bounded: the fields a model's input names
+    for (name, value) in fields {
+        let text = match value {
+            serde_json::Value::String(s) => s.clone(),
+            other => other.to_string(),
+        };
+        form.append_with_str(name, &text).map_err(|e| failed("FormData.append", e))?;
+    }
+    // a Response frames the form, and says its boundary
+    let framed = Response::new_with_opt_form_data(Some(&form)).map_err(|e| failed("new Response(form)", e))?;
+    let content_type = framed.headers().get("content-type").ok().flatten().ok_or_else(|| CellError::host("a framed form has its content-type"))?;
+    let multipart = Object::new();
+    set(&multipart, "body", framed.body().ok_or_else(|| CellError::host("a framed form has its body"))?);
+    set(&multipart, "contentType", content_type);
+    let input = Object::new();
+    set(&input, "multipart", multipart);
+    let opts = Object::new();
+    set(&opts, "returnRawResponse", true);
+    let out = await_js(call(&ai, "run", &[model.into(), input.into(), opts.into()]), "AI.run").await?;
+    let resp: Response = out.dyn_into().map_err(|_| CellError::host("AI.run answered no Response"))?;
+    Ok(worker::Response::from(resp))
+}
+
+/// The Images binding (`IMAGES`): `bytes` through each of `steps` in
+/// order (`input(…).transform(step)…`), then out as `format`
+/// (`image/png`, `image/jpeg`), its bytes. Under `wrangler dev` the
+/// binding is a local one that ignores `segment` and `trim`.
+pub async fn images(env: &JsValue, bytes: &[u8], steps: &[serde_json::Value], format: &str) -> CellResult<Vec<u8>> {
+    use worker::web_sys::Response;
+    let images = binding(env, "IMAGES", "images")?;
+    let failed = |what: &str, e: JsValue| CellError::host(format!("IMAGES {what}: {}", js_message(&e)));
+    let source = Response::new_with_opt_buffer_source(Some(&js_sys::Uint8Array::from(bytes))).map_err(|e| failed("source", e))?;
+    let mut image = call(&images, "input", &[source.body().ok_or_else(|| CellError::host("a framed image has its body"))?.into()]).map_err(|e| failed("input", e))?;
+    // bounded: an icon's few steps
+    for step in steps {
+        image = call(&image, "transform", &[to_js(step)]).map_err(|e| failed("transform", e))?;
+    }
+    let options = Object::new();
+    set(&options, "format", format);
+    let result = await_js(call(&image, "output", &[options.into()]), "IMAGES output").await?;
+    let resp: Response = call(&result, "response", &[]).map_err(|e| failed("response", e))?.dyn_into().map_err(|_| CellError::host("IMAGES answered no Response"))?;
+    let buffer = await_js(resp.array_buffer().map(JsValue::from), "IMAGES bytes").await?;
+    Ok(js_sys::Uint8Array::new(&buffer).to_vec())
 }
 
 /// Sends one message through Cloudflare Email Sending (`EMAIL`, the
