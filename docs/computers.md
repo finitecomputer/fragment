@@ -355,8 +355,9 @@ Hermes' image inputs, never the commit or a clock. It resolves
 `inputs-<key>` in the existing preview repository
 `fragment-preview-computer-hermes-canary`. A tag already there is reused
 at its manifest's digest, even after BuildKit's layer cache was evicted.
-A registry error stops the job; only a successful listing without that
-tag authorizes a build. Input tags are not overwritten by CI.
+A direct manifest lookup resolves only that tag; a definite missing
+manifest authorizes a build, and other registry errors stop the job.
+Input tags are not overwritten by CI.
 
 An absent tag builds with BuildKit's persistent Actions cache (one
 master-only `preview-hermes` scope, `mode=max`), then pushes and prepares
