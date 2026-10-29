@@ -25,7 +25,7 @@ fn free_port() -> SocketAddr {
 }
 
 fn relay(listen: SocketAddr, dir: &std::path::Path) -> Box<Relay> {
-    Box::new(Relay { config: RelayConfig { listen, gateway_id: "computer-test".into(), secret: SECRET.into(), media_dir: dir.join("relay-media"), media_local: true } })
+    Box::new(Relay { config: RelayConfig { listen, gateway_id: "computer-test".into(), secret: SECRET.into(), media_dir: dir.join("relay-media"), media_local: true, structured_tools: false } })
 }
 
 fn replies(w: &World, chat: &str) -> Vec<Value> {
@@ -842,7 +842,7 @@ async fn an_image_sent_by_url_is_fetched() {
     let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
     let dir = support::dir("relay-image-url-public");
     let listen = free_port();
-    let config = RelayConfig { listen, gateway_id: "computer-test".into(), secret: SECRET.into(), media_dir: dir.join("relay-media"), media_local: false };
+    let config = RelayConfig { listen, gateway_id: "computer-test".into(), secret: SECRET.into(), media_dir: dir.join("relay-media"), media_local: false, structured_tools: false };
     let bridge = support::start(support::config(&fake.url(), &dir, support::settings()), Box::new(Relay { config }));
     let _hermes = Hermes::spawn(listen, "computer-test", SECRET);
     let chat = fake.chat("talk", &["juniper"]);

@@ -398,3 +398,13 @@ its restart and rollback protocol is in docs/bridge.md, "SimpleX".
   answer starts a new turn.
 - **A backlog's age:** chat messages have no age limit after a long
   outage (routines have an hour). Decide before production.
+
+## Structured tool evidence (2026-10-29)
+
+Our Hermes image records supported terminal observations through the existing
+local activity socket (docs/bridge.md), with call identity, outcome, duration
+and bounded safe result metadata / source reference on `turn.step`. Recovery
+notes can distinguish a failed call and its exit code from a completed one.
+This is evidence, not deterministic replay, selective retry or exactly-once
+effects. Missing or disconnected observations establish no success. No new
+child cache or platform API is involved; waiting on a person still holds nothing.
