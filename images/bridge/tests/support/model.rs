@@ -289,6 +289,13 @@ pub fn answer(body: &Value) -> (String, Option<Value>) {
         }
         return ("scripted: delegate_task is not offered".into(), None);
     }
+    // P6's fresh turn carries a chosen outcome, rather than re-running
+    // the original clarify call. Count a real tool effect, not chat records.
+    if last_user.contains("A late answer to your earlier question.") && last_user.contains("Publish the approvals proof?") {
+        if tool_result.is_some() { return ("scripted: published the approvals proof".into(), None) }
+        let call = json!({ "index": 0, "id": "call_approval_effect", "type": "function", "function": { "name": "terminal", "arguments": json!({ "command": "echo published >> /data/work/juniper--k3x9/approval-effects" }).to_string() } });
+        return (String::new(), Some(call));
+    }
     // `use the terminal twice`: a quick command, then, at once, one that
     // sleeps 2 s (the second's progress line comes within Hermes' 1.5 s edit
     // interval of the first's, as a real model's quick second call does),
@@ -347,7 +354,7 @@ pub fn answer(body: &Value) -> (String, Option<Value>) {
     }
     if let (Some(command), true) = (narrate.as_deref(), has_terminal) {
         let call = json!({ "index": 0, "id": "call_1", "type": "function", "function": { "name": "terminal", "arguments": json!({ "command": command }).to_string() } });
-        return (narrated(), Some(call));
+        return (if last_user.contains("brief narration") { "Let me check that.".into() } else { narrated() }, Some(call));
     }
     // `image: <url>`: an answer with that image, as a model whose tool made
     // one at its provider gives it (a markdown image, which Hermes sends)

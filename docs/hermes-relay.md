@@ -160,7 +160,11 @@ translates both, keeping the glyphs); a tool step as anything but
 progress text (`task_card` is Slack's alone). Hermes' supported hooks
 (`gateway/hooks.py`: `agent:start`, `agent:step`, `agent:end`; plugins'
 `pre_tool_call`, `post_tool_call`) have all three, but outside Relay:
-the bridge would need a channel of its own beside it.
+our image uses the existing authenticated local `/relay/activity` socket
+for both child lifecycle and terminal tool observers (docs/bridge.md).
+The pinned observer supplies tool/session/call ids, duration, status
+(`ok`, `error`, `cancelled`, `blocked`) and error fields. We do not patch
+Hermes or infer completion from progress text.
 
 ## Hermes' settings (images/hermes)
 

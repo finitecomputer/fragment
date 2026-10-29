@@ -127,7 +127,7 @@ fn cut(from: &[Record], agent: &str, turn: &str, start: &Value, started_at: i64)
         .iter()
         .filter(mine)
         .filter(|r| r.body["kind"] == "turn.step")
-        .map(|r| CutStep { tool: field(&r.body, "tool").to_string(), args: field(&r.body, "args").to_string(), ok: r.body["ok"] != false })
+        .map(|r| CutStep { tool: field(&r.body, "tool").to_string(), args: if field(&r.body, "args").is_empty() { field(&r.body, "excerpt").to_string() } else { field(&r.body, "args").to_string() }, ok: r.body["ok"] != false })
         .collect();
     let steps_total = steps.len();
     let closed = |prompt: &str| -> Option<String> {
@@ -324,7 +324,7 @@ mod tests {
     }
 
     fn step(tool: &str, args: &str, ok: bool) -> Step {
-        Step { tool: tool.into(), args: args.into(), ok, excerpt: String::new(), category: crate::records::Category::Shell }
+        Step { tool: tool.into(), args: args.into(), ok, excerpt: String::new(), category: crate::records::Category::Shell, evidence: None, defer_reply: false }
     }
 
     /// Goal (P5): the turn after a cut one is told of it, with its steps and

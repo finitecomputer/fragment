@@ -516,18 +516,17 @@ async fn the_hermes_image() {
         assert!(answered(w, &t3).is_some_and(|r| r["text"].as_str().unwrap_or("").contains("the tool ran")), "{:?}", answered(w, &t3));
     });
 
-    // Two tool calls back to back, the second within Hermes' 1.5 s progress
-    // edit interval of the first (a real model's quick call after a skill
-    // read, seen on a preview): each is a step. Upstream's sender kept the
-    // second line until a newer one came, and none did (the image's patch
-    // of `send_progress_messages`, images/hermes/Dockerfile).
+    // Back-to-back terminal calls each have independent structured evidence,
+    // regardless of the progress sender's edit interval.
     let twice = fake.say(&chat, &person("paul"), json!({ "text": "please use the terminal twice" }));
     let t_twice = fragment_bridge::records::turn_id("juniper--k3x9", &chat, "chat", twice["seq"].as_u64().unwrap());
     fake.until(120_000, "the two-tool turn's end", |w| w.bodies(&chat, "work", "turn.end").iter().any(|e| e["turn"] == t_twice)).await;
     fake.with(|w| {
         let steps: Vec<_> = w.bodies(&chat, "work", "turn.step").into_iter().filter(|s| s["turn"] == t_twice).collect();
-        let args: Vec<&str> = steps.iter().filter(|s| s["tool"] == "terminal").filter_map(|s| s["args"].as_str()).collect();
-        assert_eq!(args, ["echo first-ran", "sleep 2 && echo tool-ran"], "a step for each terminal call, in order: {steps:?}; the reply {:?}", answered(w, &t_twice));
+        let terminal: Vec<_> = steps.iter().filter(|s| s["tool"] == "terminal").collect();
+        assert_eq!(terminal.len(), 2, "a step per call: {steps:?}");
+        assert!(terminal.iter().all(|s| s["status"] == "completed" && s["args"] == ""));
+        assert_ne!(terminal[0]["tool_call_id"], terminal[1]["tool_call_id"]);
         assert!(answered(w, &t_twice).is_some_and(|r| r["text"].as_str().unwrap_or("").contains("the tool ran")), "{:?}", answered(w, &t_twice));
     });
 
@@ -548,7 +547,7 @@ async fn the_hermes_image() {
     // within seconds, while the other agent's slow turn runs on, whole.
     let fifth = fake.say(&chat, &person("paul"), json!({ "text": "please use the terminal slowly" }));
     let t5 = fragment_bridge::records::turn_id("juniper--k3x9", &chat, "chat", fifth["seq"].as_u64().unwrap());
-    fake.until(60_000, "juniper's slow turn running", |w| w.keepalive_open == 1 && w.bodies(&chat, "work", "turn.step").iter().any(|s| s["turn"] == t5)).await;
+    fake.until(60_000, "juniper's slow turn running", |w| w.keepalive_open == 1 && c.exec(&["pgrep", "-f", "^sleep 8$"])).await;
     let calls_before = model.calls.lock().unwrap().len();
     let assigned = Instant::now();
     fake.add_agent("maple");
@@ -929,7 +928,6 @@ async fn a_save_taken_while_it_writes_opens() {
     for round in 0..ROUNDS {
         let said = fake.say(&chat, &person("paul"), json!({ "text": WRITING }));
         let t = fragment_bridge::records::turn_id("juniper--k3x9", &chat, "chat", said["seq"].as_u64().unwrap());
-        fake.until(120_000, "the writing turn's tool asked for", |w| w.bodies(&chat, "work", "turn.step").iter().any(|s| s["turn"] == t)).await;
         // A script run from `-c`, which Hermes flags ("script execution via
         // -e/-c flag"), runs unasked: no card.
         let asked = Instant::now();
@@ -2113,7 +2111,7 @@ async fn commands_and_quotes_reach_hermes() {
 
     // /steer while a turn runs its tool: into that turn
     let slow = turn(&fake.say(&chat, &person("paul"), json!({ "text": "use the terminal slowly" })));
-    within(&fake, &chat, &c, 120_000, "the slow turn's step", |w| w.bodies(&chat, "work", "turn.step").iter().any(|s| s["turn"] == slow.as_str())).await;
+    within(&fake, &chat, &c, 120_000, "the slow tool is running", |_| c.exec(&["pgrep", "-f", "^sleep 8$"])).await;
     let steer = command("steer", "and say blue");
     within(&fake, &chat, &c, 120_000, "the slow turn's end", ended_turn(&chat, &slow)).await;
     let steered = calls().iter().any(|x| x.body["messages"].to_string().contains("and say blue"));
@@ -2159,6 +2157,23 @@ async fn commands_and_quotes_reach_hermes() {
 /// Whether the turn `t` of `chat` has ended.
 fn ended_turn<'a>(chat: &'a str, t: &'a str) -> impl Fn(&support::fake::World) -> bool + 'a {
     move |w| w.bodies(chat, "work", "turn.end").iter().any(|e| e["turn"] == t)
+}
+
+/// Match the full lane's short narration and instant command: one final
+/// reply, with pre-tool words retaining their non-final semantics.
+#[tokio::test]
+#[ignore = "needs Docker"]
+async fn short_narration_keeps_its_interim_semantics() {
+    let (fake, _model, chat, c) = hermes_running().await;
+    let ended = |w: &support::fake::World, turn: &str| w.bodies(&chat, "work", "turn.end").iter().any(|e| e["turn"] == turn);
+    for _ in 0..6 {
+        let turn = asked(&fake, &chat, &c, "brief narration\nnarrate: echo narrated-ran", ended).await;
+        let replies = fake.with(|w| w.bodies(&chat, "chat", "reply").into_iter().filter(|r| r["turn"] == turn).collect::<Vec<_>>());
+        assert_eq!(replies.len(), 2, "{replies:?}");
+        assert_eq!(replies[0], json!({"turn":turn,"text":"Let me check that.","interim":true}));
+        assert!(replies[1].get("interim").is_none(), "{replies:?}");
+        assert!(replies[1]["text"].as_str().unwrap().contains("narrated-ran"));
+    }
 }
 
 /// Goal (the finite-mono parity audit, 2026-10-09: an image an agent made
@@ -2286,13 +2301,12 @@ async fn steps_say_what_they_do() {
     let command = "echo a-command-that-runs-well-past-forty-characters-0123456789";
     let path = "/data/work/juniper--k3x9/a-file-whose-path-runs-past-forty-characters.txt";
     let code = "print('a script whose one line runs well past forty characters')";
-    // the model takes its time after each call: a quick tool's line is sent
-    // only if its turn runs on past Hermes' progress poll (the debt ledger)
-    for (said, want) in [(format!("take your time\nrun: {command}"), ("terminal", "shell", command)), (format!("take your time\nwrite: {path}"), ("write_file", "write", path)), (format!("take your time\ncode: {code}"), ("execute_code", "shell", code))] {
+    // The image retains tool identity and category without copying arguments.
+    for (said, want) in [(format!("take your time\nrun: {command}"), ("terminal", "shell", "")), (format!("take your time\nwrite: {path}"), ("write_file", "write", "")), (format!("take your time\ncode: {code}"), ("execute_code", "shell", ""))] {
         let turn = asked(&fake, &chat, &c, &said, ended).await;
         let got = fake.with(|w| steps(w, &turn));
         eprintln!("steps: {said:?} is {got:?}");
-        assert!(got.iter().any(|(tool, category, args)| (tool.as_str(), category.as_str(), args.as_str()) == want), "{said:?}: a step {want:?}, its preview whole; got {got:?}");
+        assert!(got.iter().any(|(tool, category, args)| (tool.as_str(), category.as_str(), args.as_str()) == want), "{said:?}: a step {want:?}, its arguments withheld; got {got:?}");
     }
 }
 
@@ -2303,15 +2317,14 @@ async fn steps_say_what_they_do() {
 /// are a reply of their own, whole, posted before the step and marked
 /// `interim`; the step carries no words; the turn's answer is a reply after
 /// it. Two full replies, one step. Method: the scripted model says a long
-/// answer before its terminal call (`narrate:`), its command slow enough
-/// that Hermes sends the step (the debt ledger, "A quick tool's step can be
-/// lost in Hermes").
+/// answer before its instant terminal call (`narrate:`). The companion
+/// short-narration test also covers a result overtaking the first Relay send.
 #[tokio::test]
 #[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
 async fn words_before_a_tool_call_are_a_reply() {
     let (fake, _model, chat, c) = hermes_running().await;
     let ended = |w: &support::fake::World, turn: &str| w.bodies(&chat, "work", "turn.end").iter().any(|e| e["turn"] == turn);
-    let turn = asked(&fake, &chat, &c, "narrate: sleep 2 && echo narrated-ran", ended).await;
+    let turn = asked(&fake, &chat, &c, "narrate: echo narrated-ran", ended).await;
     fake.with(|w| {
         let replies: Vec<serde_json::Value> = w.records(&chat, "chat").into_iter().filter(|r| r["body"]["turn"] == turn).collect();
         let steps: Vec<serde_json::Value> = w.records(&chat, "work").into_iter().filter(|r| r["body"]["turn"] == turn && r["body"]["kind"] == "turn.step").collect();
@@ -2549,9 +2562,9 @@ async fn an_expired_card_ends_its_turn() {
         assert!(x.reply(w, &next).is_some_and(|r| r["text"].as_str().unwrap_or("").contains("good morning")), "the next message is answered: {:?}; the model saw {saw:#?}", x.reply(w, &next));
         assert_eq!((x.ends(w, &risky).len(), x.closed(w, &risky).len()), (1, 1), "the card's turn ends once, its card closed once");
         assert_eq!(x.closed(w, &risky)[0]["outcome"], "expired");
-        assert_eq!(x.ends(w, &risky)[0]["outcome"], "idle", "Hermes ended it, its wait timed out with the card");
+        assert_eq!(x.ends(w, &risky)[0]["outcome"], if let_go { "error" } else { "idle" }, "sleep cuts the old turn; a live runtime ends it itself");
     });
-    assert!(!let_go, "the card holds the computer awake");
+    assert!(let_go, "the unanswered card permits idle sleep");
 
     // 2. its owner's message while the card (a clarify's, which takes words)
     // is open answers it (Paul on production, 2026-10-22: his typed answer
@@ -2765,6 +2778,51 @@ async fn a_turn_cut_by_a_restart_is_closed_and_told() {
     let (asked_after, _) = asked_with(&calls, "and after that").expect("a request for the message after");
     assert!(!asked_after.contains("cut short"), "the turn after is told nothing: {asked_after:?}");
     eprintln!("cut: {closed}\ncut: the boundary the model saw: {before:?}\ncut: the message: {asked:?}");
+}
+
+/// P6: sleep under a real Hermes clarify, restore it, answer the original
+/// card, and count the tool's append. A second click and another restart
+/// must not repeat the question or the action. Vendor model only is scripted.
+#[tokio::test]
+#[ignore = "needs Docker"]
+async fn an_approval_answered_after_a_restart() {
+    let (fake, model, chat, c) = hermes_running().await;
+    let x = Expiry { fake, model, chat };
+    let risky = x.say("clarify: Publish the approvals proof? | Publish | Keep private");
+    within(&x.fake, &x.chat, &c, 120_000, "the original card", |w| !x.cards(w, &risky).is_empty()).await;
+    let card = x.fake.with(|w| x.cards(w, &risky)[0].clone());
+    within(&x.fake, &x.chat, &c, 10_000, "the idle hold released", |w| w.keepalive_open == 0).await;
+    let left_out = hold(&c).expect("held for sleep");
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("approvals-restart");
+    std::fs::create_dir_all(&dir).unwrap();
+    let save = dir.join("asleep.tar");
+    save_data(&c, &left_out, &save);
+    c.sigterm();
+    drop(c);
+    x.fake.until(30_000, "sleep sockets closed", |w| w.live_sockets() == 0).await;
+    let c = x.container(&[("RESTORE_PENDING", "1")]);
+    let cp = Command::new(docker()).args(["cp", "-a", "-", &format!("{}:/data", c.id)]).stdin(std::fs::File::open(&save).unwrap()).output().unwrap();
+    assert!(cp.status.success(), "restored");
+    assert!(c.exec(&["touch", "/run/computer/restored"]));
+    within(&x.fake, &x.chat, &c, 120_000, "the cut turn ended", |w| !x.ends(w, &risky).is_empty()).await;
+    assert!(x.fake.with(|w| x.closed(w, &risky).is_empty()), "restart preserves the original card");
+    let response = json!({"kind":"prompt_response", "agent":"npub1juniper", "turn":risky, "prompt":card["prompt"], "option":card["options"][0]["id"]});
+    let answer = x.fake.say(&x.chat, &person("paul"), response.clone());
+    let fresh = fragment_bridge::records::turn_id("juniper--k3x9", &x.chat, "chat", answer["seq"].as_u64().unwrap());
+    within(&x.fake, &x.chat, &c, 180_000, "fresh answer turn completed", |w| !x.ends(w, &fresh).is_empty()).await;
+    assert_ne!(risky, fresh);
+    assert!(x.fake.with(|w| x.cards(w, &fresh).is_empty()), "no repeated question");
+    assert_eq!(c.exec_out(&["cat", "/data/work/juniper--k3x9/approval-effects"]).trim(), "published", "the chosen action happened once");
+    x.fake.say(&x.chat, &person("paul"), response.clone());
+    c.restart();
+    x.fake.say(&x.chat, &person("paul"), response);
+    let next = x.say("good morning");
+    within(&x.fake, &x.chat, &c, 180_000, "next message completed", |w| !x.ends(w, &next).is_empty()).await;
+    assert_eq!(c.exec_out(&["cat", "/data/work/juniper--k3x9/approval-effects"]).trim(), "published", "duplicate answers and restart repeat no effect");
+    within(&x.fake, &x.chat, &c, 10_000, "idle after answer", |w| w.keepalive_open == 0).await;
+    let calls = x.model.calls.lock().unwrap();
+    let (asked, _) = asked_with(&calls, "A late answer to your earlier question.").expect("fresh model request");
+    for expected in ["Original request:", "Publish the approvals proof?", "Chosen answer: Publish", "Cut-turn steps:"] { assert!(asked.contains(expected), "{asked}") }
 }
 
 /// Goal: offered operator placeholders select Hermes' real backends;
@@ -3138,7 +3196,15 @@ async fn bots_message_each_other() {
     assert!(system.contains("`@hermes` — this computer's gateway, not an agent"), "the gateway's own profile, said to be no agent: {system}");
     assert!(!system.contains("`@juniper--k3x9` —"), "juniper is not her own teammate: {system}");
 
-    assert!(ack.contains("live Bot Chat owner"), "queued for maple's live owner, the keeper: {ack}");
+    // A queued process acknowledges hand-off, not recipient delivery:
+    // its completion notifies the sender. Actual delivery is checked below.
+    let queued: serde_json::Value = serde_json::from_str(ack.strip_prefix("scripted: the tool said: ").expect("the scripted model echoes message_agent's result")).unwrap_or_else(|e| panic!("message_agent's structured acknowledgment: {e}: {ack}"));
+    assert!(
+        queued["status"] == "queued" && queued["to"] == "@maple--k3x9" && queued["reply_delivery"] == "notification"
+            && queued["delivery_id"].as_str().is_some_and(|id| !id.is_empty())
+            && queued["process_id"].as_str().is_some_and(|id| !id.is_empty()),
+        "queued for maple through a background process whose completion notifies juniper: {queued}",
+    );
     // the message is juniper's, in maple's own chat, for maple: a hand-off
     let t = Instant::now();
     let asked_maple = |w: &support::fake::World| w.records(&mchat, "chat").into_iter().find(|r| r["principal"] == "npub1juniper" && r["body"]["to"] == json!(["npub1maple"]));
@@ -3657,4 +3723,28 @@ async fn simplex_on_the_hermes_image() {
     let relayed = fake.with(|w| w.records(&chat, "chat").iter().filter(|r| r["body"]["relayed"]["via"] == "simplex").count());
     eprintln!("simplex: {relayed} relayed records on its SimpleX chat");
     assert!(fake.with(|w| w.made.as_slice() == std::slice::from_ref(&chat)), "its SimpleX chat found again after the restarts, never made twice");
+}
+
+/// Real supported observers, including a quick tool and nonzero exit.
+#[tokio::test]
+#[ignore = "needs Docker"]
+async fn structured_tool_success_and_failure() {
+    let (fake, _model, chat, c) = hermes_running().await;
+    for (command, status, code) in [("printf tool-evidence", "completed", 0), ("printf private-result; exit 7", "failed", 7)] {
+        let turn = asked(&fake, &chat, &c, &format!("run: {command}"), |w, t| w.bodies(&chat, "work", "turn.end").iter().any(|e| e["turn"] == t)).await;
+        let steps = fake.with(|w| w.bodies(&chat, "work", "turn.step").into_iter().filter(|s| s["turn"] == turn).collect::<Vec<_>>());
+        assert!(!steps.is_empty(), "an instant tool has an observation: {}", told(&fake, &chat, &c));
+        let terminal = steps.iter().find(|s| s["tool"] == "terminal").expect("terminal step");
+        assert_eq!(terminal["status"], status, "{terminal}");
+        assert_eq!(terminal["ok"], status == "completed");
+        if status == "failed" {
+            assert_eq!(terminal["error_type"], "tool_error");
+            assert_eq!(terminal["error_message"], "Exit code: 7");
+        }
+        assert!(terminal["tool_call_id"].as_str().is_some_and(|id| !id.is_empty()));
+        assert!(terminal["duration_ms"].as_u64().is_some());
+        assert_eq!(terminal["excerpt"], format!("Exit code: {code}"));
+        assert!(terminal["result_ref"].as_str().unwrap().starts_with("hermes:"));
+        assert!(!terminal.to_string().contains("private-result"));
+    }
 }

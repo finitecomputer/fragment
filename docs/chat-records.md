@@ -336,6 +336,22 @@ computer (docs/computers.md, the hold).
   "category": "shell", "args": "ls -la", "ok": true, "excerpt": "…", "text": "…" }
 ```
 
+Structured Hermes steps add `tool_call_id`, `status` (`completed`, `failed`,
+`cancelled`, `blocked`), `duration_ms`, nullable `error_type` / `error_message`,
+and `result_ref` (at most 300 characters, `hermes:<session>:<call>` identifying
+Hermes' source evidence, not a public URL). `ok` remains for old readers and
+is true only for `completed`. No step is inferred on disconnect. Old steps
+without these fields still render. Terminal steps never show as running;
+cancelled and blocked cards name their outcome and details show duration.
+
+The image retains no arbitrary arguments, result bodies, or exception text:
+`args` is empty; `excerpt` and the failure's `error_message` keep safe metadata
+(exit code when available, else the observer outcome); `error_type` is a bounded
+identifier. Raw evidence remains in Hermes' session, subject to its own disk
+retention and rollback, not a new platform store. These additions use the
+same channel retention and 200-step limit. Recovery notes use the bounded
+excerpt when a structured step has no argument preview.
+
 Part `<step>`, from 1: one tool call. `tool` (the runtime's own name for
 it) and `args` (the call's preview) at most 140 characters, `excerpt`
 (its result) at most 300; empty when the runtime does not say. At most
@@ -371,10 +387,9 @@ optional (`primary`, `danger`). An option with `"words": true` is
 answered in words (a clarify's "Other": docs/bridge.md, Relay): a field
 on the card, whose answer carries what was typed (`text`, above), so
 nothing asks for it after. Only `asks` may answer, until
-`expiresAt` (ms). An open card keeps its computer awake until it is
-answered or expires (docs/bridge.md, "A card keeps its computer awake"),
-so it expires with its runtime there, and its turn ends as the runtime
-ends it.
+`expiresAt` (ms). A restart leaves unexpired cards answerable. An answer
+whose original turn is gone starts a fresh turn with its question and
+chosen answer (docs/bridge.md, "A card outlives its turn").
 
 ```json
 { "kind": "turn.prompt.closed", "turn": "…", "prompt": "<prompt>",
@@ -384,10 +399,10 @@ ends it.
 Part `pc:<prompt>`. `outcome` is `answered` (with `option` and `by`, and
 `text` for an option answered in words: typed on the card, or the owner's
 message that answered it, its files' names when it had no words),
-`expired` (no answer by `expiresAt`, or the computer restarted while it
-waited, as an owner's sleep or a crash does: Hermes cannot resume a turn
-across a restart, and the agent's next turn is told the card was cut
-with it), or `stopped`.
+`expired` (no answer by `expiresAt`), or `stopped`. An answered closure
+also records `answerSeq`, the answer's seq on `chat`, allowing its retry
+to reconstruct the same fresh turn after a restart. Older closures without
+it stay final; they never authorize a fresh turn.
 
 ```json
 { "kind": "turn.asked", "turn": "…", "asks": "npub1…" }

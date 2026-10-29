@@ -411,6 +411,32 @@ async fn turn(gw: &Gateway, event: Value, mut rx: mpsc::UnboundedReceiver<Heard>
     tokio::time::sleep(Duration::from_millis(100)).await;
     gw.act(react("👀", false)).await;
     let message = event["text"].as_str().unwrap_or("").trim_start_matches('\u{200b}').to_string();
+    if message.contains("observed boundary") {
+        let base = Base { host: gw.addr.ip().to_string(), port: gw.addr.port(), prefix: String::new() };
+        let mut activity = net::connect_ws(&base, "/relay/activity?events=1", &[("authorization", bearer(&gw.id, &gw.secret))]).await.unwrap();
+        activity.next().await.unwrap().unwrap(); // ready
+        let observation = json!({"turn":mid,"tool":"terminal","excerpt":"Exit code: 0","evidence":{
+            "tool_call_id":"call-boundary","status":"completed","duration_ms":1,
+            "error_type":null,"error_message":null,"result_ref":"hermes:session:call-boundary"}});
+        activity.send(Message::text(observation.to_string())).await.unwrap();
+        assert_eq!(activity.next().await.unwrap().unwrap().into_text().unwrap(), "observed");
+        // Deliberately no draft: completion wins the race against a short
+        // preamble's first Relay send, as the real Hermes reproduction did.
+        if message.contains("with words") {
+            gw.act(json!({"op":"send","chat_id":chat,"content":NARRATION,"reply_to":mid,"metadata":{"notify":true}})).await;
+        }
+        if message.contains("with review") {
+            let mut review = observation.clone();
+            review["tool"] = json!("memory");
+            review["evidence"]["tool_call_id"] = json!("call-review");
+            activity.send(Message::text(review.to_string())).await.unwrap();
+            assert_eq!(activity.next().await.unwrap().unwrap().into_text().unwrap(), "observed");
+        }
+        gw.act(json!({"op":"send","chat_id":chat,"content":"the final answer","reply_to":mid,"metadata":{"notify":true}})).await;
+        gw.act(react("👀", true)).await;
+        gw.act(react("✅", false)).await;
+        return;
+    }
     if message.contains("fail") {
         // v0.21.5 when its handler raises (`_process_message_background`):
         // `❌` with nothing said, then its notice as a send answering nothing

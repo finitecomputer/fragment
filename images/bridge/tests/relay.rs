@@ -25,7 +25,7 @@ fn free_port() -> SocketAddr {
 }
 
 fn relay(listen: SocketAddr, dir: &std::path::Path) -> Box<Relay> {
-    Box::new(Relay { config: RelayConfig { listen, gateway_id: "computer-test".into(), secret: SECRET.into(), media_dir: dir.join("relay-media"), media_local: true } })
+    Box::new(Relay { config: RelayConfig { listen, gateway_id: "computer-test".into(), secret: SECRET.into(), media_dir: dir.join("relay-media"), media_local: true, structured_tools: false } })
 }
 
 fn replies(w: &World, chat: &str) -> Vec<Value> {
@@ -264,7 +264,7 @@ async fn an_approval_through_the_relay() {
     let options: Vec<&str> = p["options"].as_array().unwrap().iter().map(|o| o["id"].as_str().unwrap()).collect();
     assert_eq!(options, vec!["once", "session", "deny"]);
     tokio::time::sleep(Duration::from_millis(300)).await;
-    fake.with(|w| assert_eq!((w.keepalive_open, w.keepalive_log.clone()), (1, vec![true]), "the card holds the computer awake"));
+    fake.with(|w| assert_eq!((w.keepalive_open, w.keepalive_log.clone()), (0, vec![true, false]), "the card releases the computer"));
     fake.say(&chat, &person("paul"), json!({ "kind": "prompt_response", "prompt": p["prompt"], "option": "once" }));
     fake.until(WAIT, "the reply", |w| !replies(w, &chat).is_empty()).await;
     fake.with(|w| {
@@ -474,11 +474,8 @@ fn work_of(w: &World, chat: &str, turn: &str, kind: &str) -> Vec<Value> {
 /// keepalive go while the card waits, the computer is put to sleep as the DO
 /// does it (the hold, its answer, the container gone, Hermes with it) and
 /// woken from its state by the next message, after the card's `expiresAt`;
-/// otherwise it stays awake through the expiry. The scripted Hermes keeps
-/// its session as v0.21.5 does: a turn cut before its reply leaves its
-/// message the session's last, and the next message is folded into it. On
-/// master the keepalive is let go (decision 42), the sleep cuts the turn,
-/// and the next message asks the cut approval again.
+/// otherwise it stays awake through the expiry. As in the real image,
+/// after_boot closes the cut turn in the scripted Hermes session.
 #[tokio::test]
 async fn an_expired_card_ends_its_turn_and_the_next_message_is_answered() {
     let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
@@ -514,7 +511,7 @@ async fn an_expired_card_ends_its_turn_and_the_next_message_is_answered() {
         let next = say("good morning");
         support::unhold(&dir);
         let bridge = support::start_killable(cfg, relay(listen, &dir));
-        let woken = hermes.after(listen, "computer-test", SECRET);
+        let woken = hermes.after_boot(listen, "computer-test", SECRET);
         (bridge, woken, next)
     } else {
         fake.until(WAIT, "the card expired, awake, and its turn's end", |w| !work_of(w, &chat, &risky, "turn.prompt.closed").is_empty() && !work_of(w, &chat, &risky, "turn.end").is_empty()).await;
@@ -534,7 +531,7 @@ async fn an_expired_card_ends_its_turn_and_the_next_message_is_answered() {
         assert_eq!(answer, Some(json!("echo: [paul] good morning")), "the next message is answered, and only it");
         assert_eq!(work_of(w, &chat, &next, "turn.end")[0]["outcome"], "idle");
     });
-    assert!(!let_go, "the card held the computer awake: an idle sleep under it is what cut its turn");
+    assert!(let_go, "waiting on a card permits idle sleep");
     hermes.with(|s| assert!(s.session.is_empty(), "nothing is left unanswered in its session: {:?}", s.session));
     bridge.stop().await;
 }
@@ -589,7 +586,7 @@ async fn a_turn_cut_by_a_restart_is_told_and_never_folded() {
         let n = heard(&next);
         assert_eq!(n["text"], "good morning", "the message's words alone: {n}");
         let note = n["context"][0]["text"].as_str().unwrap_or_else(|| panic!("the note, as the inbound's context: {n}"));
-        for said in ["Your previous turn in this chat was cut short: your computer restarted before it finished.", "Check what it already did before you do any of it again", "It was answering: “something risky”", "It asked: “⚠️ **Dangerous command** `rm -rf x`” (expired)"] {
+        for said in ["Your previous turn in this chat was cut short: your computer restarted before it finished.", "Check what it already did before you do any of it again", "It was answering: “something risky”", "It asked: “⚠️ **Dangerous command** `rm -rf x`” (unanswered)"] {
             assert!(note.contains(said), "{said:?} in {note}");
         }
         assert!(heard(&after).get("context").is_none(), "the turn after is told nothing: {}", heard(&after));
@@ -815,7 +812,7 @@ async fn an_image_sent_by_url_is_fetched() {
     let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
     let dir = support::dir("relay-image-url-public");
     let listen = free_port();
-    let config = RelayConfig { listen, gateway_id: "computer-test".into(), secret: SECRET.into(), media_dir: dir.join("relay-media"), media_local: false };
+    let config = RelayConfig { listen, gateway_id: "computer-test".into(), secret: SECRET.into(), media_dir: dir.join("relay-media"), media_local: false, structured_tools: false };
     let bridge = support::start(support::config(&fake.url(), &dir, support::settings()), Box::new(Relay { config }));
     let _hermes = Hermes::spawn(listen, "computer-test", SECRET);
     let chat = fake.chat("talk", &["juniper"]);
@@ -1106,5 +1103,31 @@ async fn commands_said_as_they_are() {
         assert_eq!(reply_of(w, &ts).unwrap()["text"], "echo: [paul] slow please");
         assert_eq!(w.bodies(&chat, "work", "turn.start").len(), 4, "usage, the typed one, the quote, the slow one: the steer and the side question are no turns");
     });
+    bridge.stop().await;
+}
+
+/// Tool observers and Relay sends are independent authenticated sockets.
+/// Completing before any draft must not promote a late preamble to final,
+/// or demote a real final when the tool has no preamble.
+#[tokio::test]
+async fn observed_outcomes_preserve_reply_boundaries_without_drafts() {
+    let (fake, bridge, _hermes, _dir) = setup("observer-boundary", &["juniper"]).await;
+    let chat = fake.chat("talk", &["juniper"]);
+    fake.until(WAIT, "chat followed", |w| w.live_sockets() >= 2).await;
+    for (words, review) in [(true,false),(false,false),(true,true)] {
+        let text = if review { "observed boundary with words with review" } else if words { "observed boundary with words" } else { "observed boundary" };
+        let said = fake.say(&chat, &person("paul"), json!({"text":text}));
+        let turn = records::turn_id("juniper--k3x9", &chat, "chat", said["seq"].as_u64().unwrap());
+        fake.until(WAIT, "observed turn ended", |w| w.bodies(&chat,"work","turn.end").iter().any(|r| r["turn"] == turn)).await;
+        fake.with(|w| {
+            let replies: Vec<_> = replies(w,&chat).into_iter().filter(|r| r["turn"] == turn).collect();
+            let final_replies: Vec<_> = replies.iter().filter(|r| r["interim"] != true).collect();
+            assert_eq!(final_replies.len(),1,"{replies:?}");
+            assert_eq!(final_replies[0]["text"],"the final answer");
+            assert_eq!(replies.len(),if words {2} else {1});
+            if words { assert_eq!(replies[0]["interim"],true); }
+            assert_eq!(w.bodies(&chat,"work","turn.step").iter().filter(|r| r["turn"] == turn).count(),if review {2} else {1});
+        });
+    }
     bridge.stop().await;
 }

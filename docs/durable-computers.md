@@ -30,9 +30,18 @@ file is the newer word, and decision 18 points here.
   Hermes' lifecycle hooks hold a local authenticated activity socket
   while children run (docs/bridge.md, "Runtime work outside a turn").
   This is live runtime state, never saved: a restarted gateway has no
-  children from its previous process. Waiting only on a person will stop
-  holding with P6 (#627); this change leaves the existing card hold alone.
+  children from its previous process. The shared wakefulness rule is: hold
+  while a turn is queued or running, or a delegated child is running; never
+  while only waiting on a person.
 
+- **Approvals outlive a restart (P6, #627).** A restart ends the old
+  turn, leaving unexpired cards answerable. A late response starts a fresh
+  turn with the original request, question, chosen answer and recorded
+  context. The journal supplies them even without the bridge cache;
+  the answer's chat record supplies the fresh turn's deduplicated claim.
+  No old turn resumes or replays. See docs/bridge.md, "A card outlives its
+  turn", for first-answer, expiry and stop rules. The real-image proof is
+  `an_approval_answered_after_a_restart` in images/bridge/tests/docker.rs.
 - **One life per turn (P1, #137).** A turn runs only in the life of the
   bridge that wrote its `turn.start` to `work`, and only once that post
   is answered. A rolled-back or lost `/data` runs no turn twice; a turn
@@ -400,11 +409,6 @@ messages in flight.
 
 ## Deferred, with the recommendation
 
-- **P6, approvals outlive a restart:** for now, an open approval card
-  holds the keepalive until it is answered or expires (decision 42
-  changes; built 2026-10-05, after Paul's missed card on p5:
-  docs/bridge.md, "A card keeps its computer awake"); later, a late
-  answer starts a new turn.
 - **A backlog's age:** chat messages have no age limit after a long
   outage (routines have an hour). Decide before production.
 ## Structured tool evidence (2026-10-29)
@@ -416,6 +420,7 @@ notes can distinguish a failed call and its exit code from a completed one.
 This is evidence, not deterministic replay, selective retry or exactly-once
 effects. Missing or disconnected observations establish no success. No new
 child cache or platform API is involved; waiting on a person still holds nothing.
+<<<<<<< HEAD
 
 ## Sandbox release-goal experiment
 

@@ -143,7 +143,8 @@ const NOTICE_ICON = { info: "info", warning: "alert", memory: "brain" };
 /// stands alone (`joined` false: an icon's name).
 export function stepSays(s, now = false, joined = true) {
   const args = typeof s.args === "string" ? s.args : "";
-  const failed = s.ok === false ? "Failed " : "";
+  if (s.status) now = false;
+  const failed = s.status === "cancelled" ? "Cancelled " : s.status === "blocked" ? "Blocked " : s.ok === false ? "Failed " : "";
   if (!Object.hasOwn(STEP_SAYS, s.category)) {
     const tool = typeof s.tool === "string" && s.tool ? s.tool : "a tool";
     return { icon: "wrench", verb: `${failed}${tool}${args && joined ? ":" : ""}`, args };
@@ -1435,6 +1436,7 @@ export function mount(root) {
   // another tool's (its wrench names none), and a failed one (its colour
   // alone would say so).
   function stepLine(t, s, now, agent) {
+    if (s.status) now = false;
     const says = stepSays(s, now);
     const step = el("div", `step${s.ok === false ? " error" : ""}${now ? " running" : ""}`);
     const known = Object.hasOwn(STEP_SAYS, s.category);
@@ -1462,6 +1464,8 @@ export function mount(root) {
     const detail = el("div", "step-detail");
     if (says.args) detail.append(el("pre", "step-call", shortStepArgs(says.args, agent)));
     if (s.excerpt) detail.append(el("pre", "step-result", s.excerpt));
+    if (Number.isFinite(s.duration_ms)) detail.append(el("span", "step-duration", `${s.duration_ms} ms`));
+    if (s.result_ref) detail.append(el("pre", "step-reference", s.result_ref));
     const show = () => {
       const open = state.openSteps.has(id);
       detail.hidden = !open;
