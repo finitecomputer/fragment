@@ -2267,15 +2267,24 @@ actually makes a chat a Bot Chat"), so the image does both
   agent that is no member by its profile), and once the agent's turn of
   it ends (read from the chat's `work`, as `fragment ask --wait` reads it,
   for up to 30 minutes), settles the delivery with its
-  replies (up to 16,000 characters; a failure with why). That wakes the
-  sender, whose turn says the answer in the sender's own chat (a message
-  of its runtime's own: docs/chat-records.md). The message's text is
+  replies (up to 16,000 characters; a failure with why). It posts that
+  receipt into the sender's chat as the teammate, naming the sender in
+  `to`, under `dm-result-<delivery>`. That ordinary chat record wakes the
+  sender. The image suppresses Hermes' background waiter for this
+  consumer, so no dead process owns the wake. At every pass the keeper
+  also reconciles its older leases' queued and claimed tickets. It replays
+  the original handoff ID and reads `work` from the beginning, so the
+  bridge runs no second turn. Unknown HTTP outcomes and overdue answers
+  remain pending for another pass. A terminal receipt whose notification
+  was interrupted is posted again with the same ID and body before its
+  existing mailbox ticket is marked notified; a lost append response
+  therefore makes no duplicate. No second delivery store is added. The message's text is
   Hermes' own, its attribution first (`Message from 🤖 Juniper
   (@juniper--k3x9): …`). At most four messages per agent are delivered at
   once; the rest wait in its mailbox. While the platform holds the
   computer the keeper writes nothing. Events: `botmode.owned`,
   `botmode.taken`, `botmode.delivered` (its status, sender and `ms`).
-- The answer wakes the sender after a restart too. A session Hermes'
+- Background jobs wake their sessions after a restart too. A session Hermes'
   gateway reads back from disk (every session from before a deploy or a
   sleep) holds no live adapter, and an agent's profile has none of its
   own (the relay is the default profile's), so a background process's
@@ -2311,10 +2320,11 @@ actually makes a chat a Bot Chat"), so the image does both
   message the sender about it (`ANSWER_HERE`). When a bot messages its
   sender back anyway while answering (the keeper sees its message taken
   while it answers the sender's, or within 3 s of that turn's end), both
-  deliveries settle with their answer under a line telling the woken bot it
-  has had it already, and to end its turn with exactly `[SILENT]` if it
-  adds nothing (`HAD_IT`), Hermes' silence marker, for which its gateway
-  says nothing (gateway/response_filters.py). Event: `botmode.delivered`'s
+  deliveries settle with their answer under a line recording that the bot
+  already had it (`HAD_IT`). Those receipts are marked handled without
+  another sender notification: the direct handoff already woke it, and an
+  addressed chat message requires a reply rather than an internal wake's
+  `[SILENT]`. Event: `botmode.delivered`'s
   `had` (`answered`, `reply`).
 
 Proven by the Docker lane's `bots_message_each_other` (the scripted

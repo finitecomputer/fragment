@@ -232,7 +232,11 @@ A person's agents hand work to each other in a chat they share, by
 itself naming the other in `to` (`fragment ask`, cli/src/ask.rs; in our
 Hermes image, a bot's `message_agent` too, which the image posts into the
 other's own chat that way: docs/computers.md, "Bot Mode in our Hermes
-image"). The bridge that answers decides whether it is a turn, and how
+image"). The image's keeper reconciles unsettled Bot Mode deliveries
+from that handoff's `work` and `chat`, and posts the receipt into the
+sender's chat under a stable ID. Both handoff and notification can replay
+without running a second turn; no platform API is involved.
+The bridge that answers decides whether it is a turn, and how
 deep (docs/chat-records.md, "An agent's reply"):
 
 - **The hop is counted here, not read.** A record by an agent of this

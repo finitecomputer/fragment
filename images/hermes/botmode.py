@@ -56,19 +56,16 @@ HOLD = os.environ.get("FRAGMENT_HOLD", "/run/computer/hold")
 API = os.environ.get("FRAGMENT_API", "http://api.fragment.internal").rstrip("/")
 TITLE = "Bot Chat"
 EVERY_S = 1.0
-# How long a teammate's answer is waited for (`fragment ask`'s longest
-# wait): Hermes' sender waits 30 minutes at most on its side too
-# (tools/bot_mode_dm.py). It is looked for this often.
+# One journal scan waits at most this long, then leaves the claim for
+# another pass. The sender has no process waiting on this deadline.
 ANSWER_WAIT_S = 1800
 POLL_S = 2.0
 # One request to the platform, at most this long.
 CALL_S = 30
-# Pages of a channel one look reads, at most (1000 records each), and how
-# far back a message posted before (a replay of the same post) has its
-# turn looked for (`fragment ask`'s REPLAY_BACK_RECORDS).
+# Pages of a channel one look reads, at most (1000 records each).
+# A replay starts at the journal's beginning.
 PAGES_MAX = 10
 PAGE_RECORDS = 1000
-REPLAY_BACK = 2000
 # A bot that messages its sender back while answering it does so in its
 # turn, which has ended by the time its own answer is read: its message is
 # taken within the keeper's next pass, so an answer waits this long for it.
@@ -94,7 +91,8 @@ REPLY_MAX_CHARS = 16000
 from hermes_state import SessionDB  # noqa: E402
 from hermes_cli.active_sessions import release_active_session, try_acquire_active_session  # noqa: E402
 from tools.bot_failure_reasons import classify_agent_error  # noqa: E402
-from tools.bot_live_delivery import claim_pending_delivery, complete_delivery, find_canonical_live_owner, has_mailbox  # noqa: E402
+from tools import bot_live_delivery as mailbox
+from tools.bot_live_delivery import complete_delivery, find_canonical_live_owner, has_mailbox  # noqa: E402
 
 
 def ev(event, **fields):
@@ -147,12 +145,8 @@ class Owner:
         self.live = "fragment-bot-mode:" + bot["profile"]
         self.session = None
         self.lease = None
-        self.in_flight = 0
+        self.in_flight = set()
         self.lock = threading.Lock()
-
-    def pin(self):
-        """The owner a delivery for this bot is pinned to (tools/bot_live_delivery.py)."""
-        return {"profile_home": self.home, "session_id": self.session, "lease_id": self.lease.lease_id, "live_session_id": self.live}
 
     def hold(self, bot, session):
         """Holds `session` as the bot's Bot Chat's live owner: whether it does."""
@@ -213,26 +207,36 @@ def bodies_after(chat, channel, after, sender):
 def hand_off(bot, sender, message, post):
     """`message` posted into the bot's own chat as `sender` (id `post`), naming the bot, as `fragment
     ask` posts a question (cli/src/ask.rs), but adding no one to the chat; then, once the bot's turn
-    of it ends, its replies' text and its error, or (None, why) when it has not ended in ANSWER_WAIT_S."""
+    of it ends, its replies' text and its error. An overdue or unreadable answer is retried."""
     chat, me = bot["chat"], bot["identity"]
-    listed = call("GET", f"/api/f/{chat}/channels", sender)["channels"]
-    work_seq = next((c.get("seq") or 0 for c in listed if c.get("name") == "work"), 0)
     posted = call("POST", f"/api/f/{chat}/channels/chat", sender, {"id": post, "body": {"text": message, "to": [me]}})
     seq = posted["record"]["seq"]
-    # a replay's turn may have run already: read `work` back for it
-    cursor = max(0, work_seq - REPLAY_BACK) if posted.get("replayed") else work_seq
+    # A replay's turn may have run already, arbitrarily far back.
+    cursor = 0  # the journal may predate this keeper by arbitrarily many records
     turn, seen, deadline = None, [], time.monotonic() + ANSWER_WAIT_S
     # bounded by the deadline: one look every POLL_S
     while True:
         more, cursor = bodies_after(chat, "work", cursor, sender)
-        seen += [r["body"] for r in more]
+        seen += [r["body"] for r in more if r.get("principal") == me]
         if turn is None:
             turn = next((b.get("turn") for b in seen if b.get("kind") == "turn.start" and b.get("agent") == me and (b.get("cause") or {}).get("channel") == "chat" and (b.get("cause") or {}).get("seq") == seq), None)
         if turn is not None:
             end = next((b for b in seen if b.get("kind") == "turn.end" and b.get("turn") == turn), None)
             if end is not None:
-                said, _ = bodies_after(chat, "chat", seq, sender)
-                text = "\n\n".join(r["body"].get("text") or "" for r in said if r.get("principal") == me and r["body"].get("turn") == turn and r["body"].get("kind") in (None, "message")).strip()
+                parts, after = [], seq
+                # A recovered answer can lie beyond many pages of later
+                # chat records. Never settle an incomplete page as silence.
+                while True:
+                    said, following = bodies_after(chat, "chat", after, sender)
+                    if following <= after:
+                        break
+                    parts += [r["body"].get("text") or "" for r in said if r.get("principal") == me and r["body"].get("turn") == turn and r["body"].get("kind") in (None, "message")]
+                    after = following
+                    if sum(map(len, parts)) >= REPLY_MAX_CHARS or not said:
+                        break
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError("answer scan overdue; retry from journal")
+                text = "\n\n".join(parts).strip()
                 return text, (end.get("error") or f"its turn ended {end.get('outcome')}") if end.get("outcome") != "idle" else None
             # only its own records matter from here
             seen = [b for b in seen if b.get("turn") == turn]
@@ -240,7 +244,7 @@ def hand_off(bot, sender, message, post):
             # the start may be in a later page; a record of no turn of its is none of ours
             seen = [b for b in seen if b.get("agent") == me]
         if time.monotonic() >= deadline:
-            return None, f"no answer within {ANSWER_WAIT_S} s; it will be in {chat}"
+            raise TimeoutError(f"no answer within {ANSWER_WAIT_S} s; retry from {chat}")
         time.sleep(POLL_S)
 
 
@@ -306,8 +310,14 @@ def deliver(bot, sender, owner, claimed):
                     reply = f"{reply}\n\n({failed})".strip()
             else:
                 error = failed
-    except Exception as e:  # the delivery is settled whatever went wrong
-        error = f"{type(e).__name__}: {e}"[:600]
+    except Exception as e:
+        # An unknown HTTP outcome is retried with the same post id. Never
+        # turn a lost response into a terminal delivery failure.
+        ev("retry", agent=bot["agent"], delivery=delivery, error=f"{type(e).__name__}: {e}"[:300])
+        EXCHANGES.close(delivery)
+        with owner.lock:
+            owner.in_flight.discard(delivery)
+        return
     if status == "failed":
         reason = classify_agent_error(error)
     else:
@@ -321,35 +331,92 @@ def deliver(bot, sender, owner, claimed):
             reply = HAD_IT[had].format(name=bot_name(bot)) + "\n\n" + reply
     until_unheld()
     try:
-        complete_delivery(owner.home, delivery, status=status, reply=reply, error=error, reason=reason)
+        receipt = complete_delivery(owner.home, delivery, status=status, reply=reply, error=error, reason=reason)
+        notify(bot, sender, owner, receipt)
     except Exception as e:
         ev("settle_failed", agent=bot["agent"], delivery=delivery, error=f"{type(e).__name__}: {e}"[:300])
     ev("delivered", agent=bot["agent"], sender=sender["agent"] if sender else None, delivery=delivery, status=status, reason=reason or None, had=had, ms=int((time.time() - t) * 1000))
     with owner.lock:
-        owner.in_flight -= 1
+        owner.in_flight.discard(delivery)
+
+
+def tickets(owner):
+    """Our existing Hermes mailbox, including claims left by an older keeper.
+
+    Never requeue a claim or steal another consumer's input. The stable
+    live-session id identifies this image's consumer across lease changes.
+    Queued tickets are claimed under Hermes' own lock before any HTTP call.
+    """
+    with mailbox._locked(owner.home) as root:
+        out = []
+        for path in root.glob("*.json"):
+            record = mailbox._scan_read(path)
+            if record is None or record["owner"]["live_session_id"] != owner.live:
+                continue
+            if record["status"] in ("queued", "claimed") or (record["status"] in ("settled", "failed") and not record.get("fragment_notified")):
+                out.append(record)
+        return sorted(out, key=lambda r: (r.get("sequence", r["created_at"]), r["delivery_id"]))
+
+
+def notify(bot, sender, owner, receipt):
+    """A receipt wakes the sender through its ordinary journal, once.
+
+    The post id is the acknowledgement: a crash after append and before
+    marking Hermes' receipt simply replays it. No background waiter owns it.
+    """
+    if sender is None:
+        return
+    until_unheld()
+    delivery = receipt["delivery_id"]
+    text = receipt.get("reply") or receipt.get("error") or "The teammate's turn ended without text."
+    # A direct reciprocal handoff already woke this bot with the answer.
+    # Posting a second ordinary message would demand another reply (Hermes
+    # permits [SILENT] only for internal wakes, not addressed chat input).
+    already_had = any(text.startswith(note.format(name=bot_name(bot))) for note in HAD_IT.values())
+    if not already_had:
+        call("POST", f"/api/f/{sender['chat']}/channels/chat", bot, {
+            "id": "dm-result-" + delivery,
+            "body": {"text": f"Bot Mode delivery {delivery} ({receipt['status']}):\n\n{text}", "to": [sender["identity"]]},
+        })
+    until_unheld()
+    with mailbox._locked(owner.home) as root:
+        path = root / f"{delivery}.json"
+        record = mailbox._read(path)
+        record["fragment_notified"] = True
+        mailbox._write(path, record)
 
 
 def take(bot, bots, owner):
-    """Each message queued for the bot, taken and delivered, up to IN_FLIGHT_MAX at once."""
+    """Reconcile this consumer's mailbox, bounded by IN_FLIGHT_MAX waiters."""
     if not has_mailbox(owner.home):
         return
-    # bounded: IN_FLIGHT_MAX deliveries in flight
-    while True:
+    for claimed in tickets(owner):
+        delivery = claimed["delivery_id"]
         with owner.lock:
-            if owner.in_flight >= IN_FLIGHT_MAX:
+            if delivery in owner.in_flight:
+                continue
+            if len(owner.in_flight) >= IN_FLIGHT_MAX:
                 return
         if held():
             return
-        claimed = claim_pending_delivery(owner.home, owner.pin())
-        if claimed is None:
-            return
         author = str((claimed.get("author") or {}).get("id") or "")
         sender = next((b for b in bots if "bot:" + b["profile"] == author), None)
-        replying = EXCHANGES.open(claimed["delivery_id"], sender["agent"] if sender else None, bot["agent"])
-        ev("taken", agent=bot["agent"], sender=sender["agent"] if sender else None, delivery=claimed["delivery_id"], replying=replying)
+        if claimed["status"] == "queued":
+            until_unheld()
+            with mailbox._locked(owner.home) as root:
+                path = root / f"{delivery}.json"
+                claimed = mailbox._read(path)
+                if claimed["status"] == "queued":
+                    claimed.update(status="claimed", claimed_at=time.time_ns())
+                    mailbox._write(path, claimed)
+        if claimed["status"] != "claimed":
+            notify(bot, sender, owner, claimed)
+            continue
+        replying = EXCHANGES.open(delivery, sender["agent"] if sender else None, bot["agent"])
+        ev("taken", agent=bot["agent"], sender=sender["agent"] if sender else None, delivery=delivery, replying=replying)
         with owner.lock:
-            owner.in_flight += 1
-        threading.Thread(target=deliver, args=(bot, sender, owner, claimed), name="deliver-" + claimed["delivery_id"][:12], daemon=True).start()
+            owner.in_flight.add(delivery)
+        threading.Thread(target=deliver, args=(bot, sender, owner, claimed), name="deliver-" + delivery[:12], daemon=True).start()
 
 
 def main():
