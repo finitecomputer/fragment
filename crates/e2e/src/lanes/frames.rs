@@ -304,6 +304,38 @@ pub(super) fn computer_ports(s: &mut Suite, api: &Api, owner: &fragment_nip98::K
     Ok(())
 }
 
+/// Both entry points start on the platform's origin inside the shell.
+/// A notice that refuses same-origin framing cannot refresh or recover.
+fn updating_platform_frames(s: &mut Suite, api: &Api, chrome: &mut Browser, shell: &Page, name: &str, owner_id: &str) -> Result<()> {
+    if api.signs_in_by_levers() {
+        return Ok(()); // the registry skew hook is local only
+    }
+    let wait = Duration::from_secs(20);
+    chrome.eval(shell, "(window.__updatingShellStays = true, true)")?;
+    for (path, skew_path, recovered) in [
+        (format!("/auth/frame?name={name}&return=/"), "/redeem/mint", format!("document.body?.innerText.includes('me:{owner_id}')")),
+        (format!("/share/{name}"), "/session", "!!document.querySelector('button[data-done]')".to_string()),
+    ] {
+        let skew = |times: u64| -> Result<()> {
+            let r = api.unsigned("POST", "/api/test/registry", Some(&json!({ "skewFor": { "path": skew_path, "times": times } })))?;
+            anyhow::ensure!(r.status == 200, "setting release skew: {r}");
+            Ok(())
+        };
+        skew(100)?;
+        let src = format!("{}{path}", api.base);
+        chrome.eval(shell, &format!("(() => {{ const f = document.createElement('iframe'); f.id = 'updating-frame'; f.src = {src:?}; document.body.append(f); return true; }})()"))?;
+        let shown = chrome.until(shell, "(() => { const d = document.getElementById('updating-frame')?.contentDocument; return d?.body?.innerText.trim() === 'Updating — back in a moment' && d.defaultView.getComputedStyle(d.body).display === 'flex'; })()", wait);
+        skew(0)?;
+        let target = if skew_path == "/redeem/mint" { name } else { "/share/" };
+        let back = s.eventually(wait, || chrome.eval_in_frame(shell, target, &recovered).ok() == Some(json!(true)));
+        let stayed = chrome.eval(shell, "window.__updatingShellStays === true")?;
+        s.ok(&format!("{path} initially refused during a deploy shows a styled notice in the shell's frame, then refreshes and recovers"),
+            shown && back && stayed == true, json!({ "shown": shown, "recovered": back, "shellStayed": stayed }));
+        chrome.eval(shell, "(document.getElementById('updating-frame').remove(), true)")?;
+    }
+    Ok(())
+}
+
 fn in_chrome(s: &mut Suite, api: &Api, n: &Names<'_>, (owner_id, owner_session): (&str, &str), (guest_id, guest_session): (&str, &str)) -> Result<()> {
     let wait = Duration::from_secs(20);
     let platform = api.base.clone();
@@ -321,6 +353,7 @@ fn in_chrome(s: &mut Suite, api: &Api, n: &Names<'_>, (owner_id, owner_session):
     // ---- the owner's page frames their own members-only fragment
     chrome.set_cookie(&format!("{platform}/"), "fragment_session", owner_session)?;
     let shell = platform_page(&mut chrome, api, SIGNED_IN)?;
+    updating_platform_frames(s, api, &mut chrome, &shell, n.own, owner_id)?;
     frame(&mut chrome, &shell, &mint(n.own))?;
     let me = frame_says(s, &mut chrome, &shell, &host(n.own), &format!("me:{owner_id}"), wait);
     let op = me && frame_says(s, &mut chrome, &shell, &host(n.own), &format!("op:{owner_id}"), wait);

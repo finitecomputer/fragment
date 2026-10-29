@@ -55,8 +55,10 @@ pub(crate) async fn answer(mut resp: Response, env: &worker::Env, platform: bool
     h.set("cache-control", "no-store")?;
     h.set("retry-after", "3")?;
     // No script or inline style; meta refresh works under this policy.
-    // Keep any original policy too. This notice carries no private data.
-    let ancestors = if platform { "'none'".into() } else { format!("'self' {}", Config::from_env(env).platform()) };
+    // The shell frames the platform's /auth/frame and /share pages too.
+    // This notice carries no private data; any original policy stays and
+    // still restricts framing independently of this appended policy.
+    let ancestors = if platform { "'self'".into() } else { format!("'self' {}", Config::from_env(env).platform()) };
     h.append("content-security-policy", &format!("default-src 'none'; style-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors {ancestors}"))?;
     Ok(Response::from_html(html.replace("{{sheet}}", &sheet))?.with_status(503).with_headers(h))
 }
