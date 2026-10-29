@@ -302,8 +302,17 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         !calls.is_empty() && calls.iter().all(|c| c.model.contains("flash") && c.metadata["agent_id"].is_string()),
         json!(calls.iter().map(|c| json!({ "model": c.model, "metadata": c.metadata })).collect::<Vec<_>>()),
     );
-    let aig = super::ledger::entries(api, &owner_id, "aig:");
-    s.ok("and each is charged on its owner's ledger", !aig.is_empty() && aig.iter().all(|e| super::ledger::charged(e).is_some()), json!(aig));
+    // Model settlement sends charges through the ledger queue after the
+    // answer. A completed turn does not establish that its rows arrived.
+    let ledger_started = std::time::Instant::now();
+    let mut aig = super::ledger::entries(api, &owner_id, "aig:");
+    let immediate = aig.clone();
+    let charged = s.eventually(Duration::from_secs(60), || {
+        aig = super::ledger::entries(api, &owner_id, "aig:");
+        !aig.is_empty() && aig.iter().all(|e| super::ledger::charged(e).is_some())
+    });
+    println!("      (initial model ledger: {} immediate entries, {} after {:.1?}; refs: {:?})", immediate.len(), aig.len(), ledger_started.elapsed(), aig.iter().map(|e| &e["ref"]).collect::<Vec<_>>());
+    s.ok("and each is charged on its owner's ledger", charged, json!({ "immediate": immediate, "settled": aig }));
 
     // a tool step, then the answer that names it
     let r = say(2, "run: echo tool-ran")?;
