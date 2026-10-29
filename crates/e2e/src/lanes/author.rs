@@ -673,6 +673,14 @@ fn apps_cli(s: &mut Suite, api: &Api, home: &std::path::Path, keys: &Keys) -> Re
     let after = api.signed(keys, "GET", &format!("/api/f/{name}/manifest"), None)?;
     let again = s.cli_json(api, home, &["rename", &name, "Meals this week", "--json"])?;
     s.ok("CLI rename deploys the name, preserves the other metadata and is safe to repeat", after.body["meta"]["title"] == "Meals this week" && after.body["meta"]["description"] == before.body["meta"]["description"] && renamed["title"] == again["title"], &after.body);
+    let mut titles = vec![];
+    for title in ["Meal archive", "Meals this week", "Meals this week"] {
+        s.cli_json(api, home, &["rename", &name, title, "--json"])?;
+        let manifest = api.signed(keys, "GET", &format!("/api/f/{name}/manifest"), None)?;
+        let status = api.status(keys, &name)?;
+        titles.push(json!({ "wanted": title, "main": manifest.body["meta"]["title"], "live": status.body["title"] }));
+    }
+    s.ok("CLI rename A to B to A and an immediate repeat each change main and the live display name", titles.iter().all(|r| r["wanted"] == r["main"] && r["wanted"] == r["live"]), &titles);
     let receipt = s.cli_json(api, home, &["preview", &name, "--json"])?;
     s.ok("CLI preview asks for a screenshot and returns its completion receipt", receipt["since"].is_i64() && receipt["live"].is_string(), &receipt);
     let label = name.split_once("--").expect("the name has a suffix").0;

@@ -64,7 +64,9 @@ pub fn rename(c: &Client, name: &str, title: &str) -> Result<Value> {
     let mut manifest: Value = c.call_as(c.get(&format!("{path}/manifest"))?)?;
     set_title(&mut manifest, &title)?;
     let files = json!([{ "path": "fragment.json", "text": format!("{}\n", serde_json::to_string_pretty(&manifest)?) }]);
-    let key = format!("rename-{}", &hex::encode(<sha2::Sha256 as sha2::Digest>::digest(serde_json::to_vec(&files)?))[..16]);
+    // A new request is a new operation, even when returning to an earlier
+    // title. The HTTP client's retries retain this same body and key.
+    let key = format!("rename-{:032x}", rand::random::<u128>());
     c.call(c.post_json(&format!("{path}/files"), &json!({ "files": files, "message": "rename", "key": key }))?)?;
     let crate::Deployed::Live { live_tip, .. } = crate::deploy(c, &name, None, None)? else { unreachable!("no folder is synced") };
     crate::refused_live(c, &name, &live_tip)?;
