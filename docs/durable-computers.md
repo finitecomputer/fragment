@@ -191,6 +191,13 @@ file is the newer word, and decision 18 points here.
   next wake takes it, with nothing to tell. docs/computers.md, "What its
   owner is told".
 
+- **One reversible image boundary.** The first successful start on a
+  new image preserves the save it restored outside the three-save rotation,
+  until the next successful image change. Returning to the matching image
+  restores this checkpoint and reports the canary work discarded, as any
+  rollback does. A damaged checkpoint never falls forward into newer-image
+  data. docs/computers.md, "Stable and canary".
+
 ## What changes under the hold (2026-10-07)
 
 The hold promises that no file the save keeps tears. Held, our image
