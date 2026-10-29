@@ -102,16 +102,22 @@ pub fn plain_models() -> Value {
 /// a test value, which the model fake asks for of Tinfoil's model alone.
 pub const TINFOIL_KEY: &str = "tk_e2e0c0ffee";
 
-/// `FRAGMENT_MODELS` on a node shaped as the private tier
-/// (deploy/example.jsonc's third alternative), less its keys, each API's
-/// base URL the model fake's: `cheap`, `medium` and `vision` on Finite
-/// Private, `fallback` on Tinfoil's DeepSeek V4.1 Flash at the list price
-/// its slot names (`tinfoil_price`), saying it reads images; every slot
-/// private.
+/// `FRAGMENT_MODELS` on a node shaped as Private and Standard per route
+/// (deploy/example.jsonc's), less its keys, each API's base URL the model
+/// fake's. Private, the cheap tier: Finite Private, the route's four's
+/// fallback (Tinfoil's DeepSeek V4.1 Flash at the list price its slot
+/// names, `tinfoil_price`, reading images) and vision (Finite Private),
+/// each private. Standard, the medium tier: OpenRouter's GLM-5.3 Flash
+/// with its routing, its route's fallback and vision a slot of its own,
+/// `cloudflare` (Workers AI's GLM-5.3 Flash, reading images).
 pub fn private_tier_models(fake: &str) -> Value {
-    let private = json!({ "provider": "openai", "base_url": format!("{fake}/v1"), "model": fragment_core::models::FINITE_PRIVATE_FLASH, "private": true });
+    let mut private = json!({ "provider": "openai", "base_url": format!("{fake}/v1"), "model": fragment_core::models::FINITE_PRIVATE_FLASH, "private": true });
     let tinfoil = json!({ "provider": "openai", "base_url": format!("{fake}/v1"), "model": fragment_fakes::workers_ai::TINFOIL_FLASH, "price": tinfoil_price(), "images": true, "private": true });
-    json!({ "cheap": private, "medium": private, "fallback": tinfoil, "vision": private })
+    let standard = json!({ "provider": "openai", "base_url": format!("{fake}/v1"), "model": fragment_core::models::OPENROUTER_FLASH, "body": openrouter_routing(), "label": "Standard", "fallback": "cloudflare", "vision": "cloudflare" });
+    let cloudflare = json!({ "provider": "workers_ai", "model": fragment_core::models::GLM_FLASH, "images": true });
+    let vision = private.clone();
+    private["label"] = json!("Private (recommended)");
+    json!({ "cheap": private, "medium": standard, "fallback": tinfoil, "vision": vision, "cloudflare": cloudflare })
 }
 
 /// The `price` of Tinfoil's slot on a node shaped as the private tier: its
@@ -662,7 +668,8 @@ impl Suite {
                     Shape::FinitePrivate => vec![key("cheap", "fragment-openrouter-key", FINITE_PRIVATE_KEY), key("medium", "fragment-openrouter-key", FINITE_PRIVATE_KEY)],
                     Shape::PrivateTier => vec![
                         key("cheap", "fragment-finite-private-key", FINITE_PRIVATE_KEY),
-                        key("medium", "fragment-finite-private-key", FINITE_PRIVATE_KEY),
+                        // OpenRouter's, the key the model fake lets in for every model but Tinfoil's
+                        key("medium", "fragment-openrouter-key", FINITE_PRIVATE_KEY),
                         key("fallback", "fragment-tinfoil-api-key", TINFOIL_KEY),
                         key("vision", "fragment-finite-private-key", FINITE_PRIVATE_KEY),
                     ],

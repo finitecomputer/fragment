@@ -111,7 +111,15 @@
   // and fallback private too (what its agents reach). `"label"` on a tier
   // names the route Settings offers for it (an agent's pick, its tier): each
   // labelled tier is offered by its label; none labelled, the tier's name
-  // alone, as before. A slot left out is on
+  // alone, as before. A tier may name its route's `"fallback"` and
+  // `"vision"` (a slot's name: `fallback` and `vision` unless it names
+  // others, or a slot of the deployment's own beside them, any name of a-z,
+  // 0-9 and _, at most 4, each some slot's): its call falls back there, and
+  // its agents' images go there. Any other slot may name its own
+  // `"fallback"` (none unless it does; `vision`'s is `fallback` when that
+  // reads images), one that reads images behind a slot images go to: a
+  // call falls back as the slot it runs does, however it named it. A slot
+  // left out is on
   // Workers AI: cheap GLM-5.3 Flash, medium GLM-5.3, fallback DeepSeek V4
   // Flash, vision GLM-5.3 Flash. Every model is one the price book prices
   // (fragment_core::price), one its slot names a price for, or one on
@@ -156,17 +164,19 @@
   //   "vision": { "provider": "workers_ai", "model": "@cf/zai-org/glm-5.3-flash" }
   // },
   // Or Private and Standard (Paul, 2026-10-22 and 10-24), the routes
-  // Settings offers: Private, the cheap tier and every agent's default, on
-  // Finite Private, Tinfoil's DeepSeek V4.1 Flash behind it, text and images,
-  // on Tinfoil's own key (tinfoil.sh's confidential inference, its list
-  // price named here); Standard, the medium tier, on our OpenRouter key. One
-  // fallback and one vision model serve both, the private ones:
+  // Settings offers, each falling back and seeing within itself: Private,
+  // the cheap tier and every agent's default, on Finite Private, Tinfoil's
+  // DeepSeek V4.1 Flash behind it, text and images, on Tinfoil's own key
+  // (tinfoil.sh's confidential inference, its list price named here);
+  // Standard, the medium tier, on our OpenRouter key, Cloudflare's GLM-5.3
+  // Flash behind it and for its images:
   // "models": {
   //   "cheap": { "provider": "openai", "base_url": "https://finite-private.finite.containers.tinfoil.dev/v1",
   //              "key": "fragment-finite-private-key", "model": "glm-5-3-flash", "private": true,
   //              "label": "Private (recommended)" },
   //   "medium": { "provider": "openai", "base_url": "https://openrouter.ai/api/v1",
   //               "key": "fragment-openrouter-key", "model": "z-ai/glm-5.3-flash", "label": "Standard",
+  //               "fallback": "cloudflare", "vision": "cloudflare",
   //               "body": { "provider": { "zdr": true, "sort": "throughput", "require_parameters": true,
   //                                       "quantizations": ["fp8", "bf16"],
   //                                       "max_price": { "prompt": 0.15, "completion": 0.75 } } } },
@@ -174,7 +184,8 @@
   //                 "key": "fragment-tinfoil-api-key", "model": "deepseek-v4-1-flash",
   //                 "price": { "input": 0.65, "cached_input": 0.13, "output": 1.45 }, "images": true, "private": true },
   //   "vision": { "provider": "openai", "base_url": "https://finite-private.finite.containers.tinfoil.dev/v1",
-  //               "key": "fragment-finite-private-key", "model": "glm-5-3-flash", "private": true }
+  //               "key": "fragment-finite-private-key", "model": "glm-5-3-flash", "private": true },
+  //   "cloudflare": { "provider": "workers_ai", "model": "@cf/zai-org/glm-5.3-flash", "images": true }
   // },
   // A new person's plan: guest (the default), seat, or seat_always_on.
   // "default_plan": "guest",

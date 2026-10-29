@@ -23,16 +23,17 @@
 //! A tier's call whose model fails before answering anything (not reached,
 //! 429, or a 5xx; on an OpenAI-compatible API, where the key is the
 //! platform's, also 401, 402, 403 or 404: `fragment_core::models::falls_back`,
-//! a 401 or 402 logged aloud as `model.platform-key`) is made once more, the same, on the deployment's fallback
-//! model (its `models.fallback`: DeepSeek V4 Flash unless named, behind the
-//! cheap tier's GLM-5.3 Flash; Workers AI's GLM-5.3 Flash behind
-//! OpenRouter on Finite's own; `fragment_core::models::Tries`), logged as
-//! `model.fallback`, and charged as the fallback's.
-//! Not a race: the fallback is called only after the model failed. An
-//! answer that began is final, and the fallback's failure is passed
-//! through as any. `vision` has one only when the fallback's slot says its
-//! model reads images (`images: true`: `Models::vision_fallback`; the
-//! default fallback, DeepSeek, reads none), and a transcription none.
+//! a 401 or 402 logged aloud as `model.platform-key`) is made once more, the
+//! same, on its slot's own fallback (`fragment_core::models::Models::
+//! fallback_of`, `Tries`), however the call named the slot: a tier's, its
+//! route's (the deployment's `models.fallback` unless it names another:
+//! DeepSeek V4 Flash unless named, behind the cheap tier's GLM-5.3 Flash);
+//! `vision`'s, `fallback` only when that slot says its model reads images
+//! (`images: true`; the default fallback, DeepSeek, reads none); any other
+//! slot's, the one it names, if any. It is logged as `model.fallback`, and
+//! charged as the fallback's. Not a race: the fallback is called only
+//! after the model failed. An answer that began is final, and the
+//! fallback's failure is passed through as any. A transcription has none.
 //!
 //! Where a model runs is the deployment's (`FRAGMENT_MODELS`, config.rs;
 //! decision 61), on one of two kinds of upstream, one input:
@@ -131,6 +132,9 @@ pub struct ModelCall<'a> {
     pub agent: Option<&'a str>,
     pub fragment: Option<InFragment<'a>>,
     pub named: Named,
+    /// The tier its caller runs on (its `x-fragment-tier`): whose route's
+    /// `vision` and `fallback` it runs (`Models::route_for`).
+    pub tier: Option<Tier>,
     pub body: Value,
     pub stream: bool,
 }
@@ -258,17 +262,12 @@ pub async fn complete(env: &Env, call: ModelCall<'_>, after: &dyn Background) ->
     if body_bytes > MODEL_BODY_MAX_BYTES {
         return Err(CellError::too_large("a model call", body_bytes, MODEL_BODY_MAX_BYTES));
     }
-    let model = cfg.models.capped(call.named).map_err(refused)?;
+    let model = cfg.models.capped_for(call.named, call.tier).map_err(refused)?;
     let bounded = bounds::bound(model, call.body, call.stream).map_err(refused)?;
     let mut charge = gate(env, call.payer, call.agent, call.fragment.as_ref(), bounded.model.id(), call.named.as_str()).await?;
     let meta = Metadata { user_id: opaque(call.payer), agent_id: call.agent.map(opaque) };
-    // a tier's call falls back; a `vision` call only to a fallback whose
-    // slot says it reads images; `fallback` is the fallback already
-    let fallback = match call.named {
-        Named::Tier(_) => Some(cfg.models.fallback()),
-        Named::Vision => cfg.models.vision_fallback(),
-        Named::Fallback => None,
-    };
+    // as its slot falls back, however the call named it (#589's review)
+    let fallback = cfg.models.fallback_of(bounded.model.slot);
     let (answer, model, calls) = tried(env, cfg, &bounded, fallback, &meta).await;
     charge.model = model.id();
     charge.calls = calls;
@@ -370,7 +369,9 @@ pub(crate) async fn streamed(env: &Env, bounded: &Bounded<'static>, payer: &str,
     assert!(bounded.stream, "a step's call streams: its answer is read as it comes");
     let cfg = Config::from_env(env);
     let meta = Metadata { user_id: opaque(payer), agent_id: agent.map(opaque) };
-    let (answer, model, calls) = tried(env, cfg, bounded, Some(cfg.models.fallback()), &meta).await;
+    // a step names its tier: it falls back within that tier's route
+    let fallback = cfg.models.fallback_of(bounded.model.slot);
+    let (answer, model, calls) = tried(env, cfg, bounded, fallback, &meta).await;
     let answer = answer?;
     let log_id = answer.headers().get("cf-aig-log-id")?;
     Ok(Streamed { answer, log_id, model: model.id(), upstream: model.upstream, calls })
@@ -491,7 +492,7 @@ struct Metadata {
 async fn transport(env: &Env, cfg: &Config, model: Model<'_>, input: &Value, meta: &Metadata) -> CellResult<Response> {
     match model.upstream {
         Upstream::WorkersAi { model } => workers_ai(env, cfg, model, input, meta).await,
-        Upstream::Openai { base_url, model: id, body, .. } => openai(env, model.named, base_url, &bounds::openai_request(input, id, body.as_ref())).await,
+        Upstream::Openai { base_url, model: id, body, .. } => openai(env, model.slot, base_url, &bounds::openai_request(input, id, body.as_ref())).await,
     }
 }
 
@@ -501,8 +502,8 @@ async fn transport(env: &Env, cfg: &Config, model: Model<'_>, input: &Value, met
 /// (`keys::model_key`) as its bearer token, and nothing of the client's
 /// or of the payer's. A key the deployment does not bind is a model not
 /// reached (its call falls back), said in the log without it.
-async fn openai(env: &Env, named: Named, base_url: &str, body: &Value) -> CellResult<Response> {
-    let key = crate::keys::model_key(env, named.as_str()).await?;
+async fn openai(env: &Env, slot: &str, base_url: &str, body: &Value) -> CellResult<Response> {
+    let key = crate::keys::model_key(env, slot).await?;
     let h = Headers::new();
     h.set("content-type", "application/json")?;
     h.set("authorization", &format!("Bearer {key}"))?;
@@ -589,7 +590,7 @@ pub(crate) async fn route(mut req: Request, env: &Env, url: &Url, after: &dyn Ba
     };
     let named = named.map_err(|e| CellError::invalid(e.message()))?;
     let stream = v.get("stream") == Some(&Value::Bool(true));
-    let call = ModelCall { payer: &caller.owner, agent: Some(&caller.agent), fragment: caller.in_fragment(), named, body: v, stream };
+    let call = ModelCall { payer: &caller.owner, agent: Some(&caller.agent), fragment: caller.in_fragment(), named, tier, body: v, stream };
     complete(env, call, after).await
 }
 

@@ -29,17 +29,21 @@
 //! up on (the route never tries again on its own); and a job's `ai.text`
 //! runs there too, falling back the same, a tool loop among its steps.
 //!
-//! Then the private tier (deploy/example.jsonc's third alternative), on a
-//! node of its own shape: its tiers and `vision` on Finite Private and its
-//! fallback on Tinfoil's DeepSeek V4.1 Flash, a model only the config
-//! names, on a key of its own, at the list price its slot names, saying it
-//! reads images. What it proves: a call Finite Private fails before
-//! answering is made once more on Tinfoil with Tinfoil's key (never Finite
-//! Private's), streamed or not, a job's step too, and charged at that
-//! price, its cached tokens at theirs; a `vision` call runs on Finite
+//! Then Private and Standard per route (deploy/example.jsonc's), on a node
+//! of their own shape. Private, the cheap tier: Finite Private, its
+//! fallback Tinfoil's DeepSeek V4.1 Flash (a model only the config names,
+//! on a key of its own, at the list price its slot names, reading images)
+//! and its vision Finite Private. Standard, the medium tier: OpenRouter's
+//! GLM-5.3 Flash, its fallback and vision a slot of its own, Workers AI's
+//! GLM-5.3 Flash. What it proves: a Private call Finite Private fails
+//! before answering is made once more on Tinfoil with Tinfoil's key (never
+//! Finite Private's), streamed or not, a job's step too, and charged at
+//! that price, its cached tokens at theirs; a `vision` call runs on Finite
 //! Private and falls back the same, its image sent on as it came; the
-//! route's `fallback` runs there; and Tinfoil's key refused is the call's
-//! failure, charged nothing and logged aloud.
+//! route's `fallback` runs there; Tinfoil's key refused is the call's
+//! failure, charged nothing and logged aloud; and Standard falls back, and
+//! sees, within its own route: OpenRouter's failure on Workers AI, never
+//! Tinfoil, its `vision` and `fallback` there too, a job's step the same.
 
 use std::time::Duration;
 
@@ -166,13 +170,13 @@ fn tier_checks(s: &mut Suite, api: &Api) -> Result<()> {
     let (calls, before) = (s.ai.calls().len(), quiet(api, &owner_id, "aig:"));
     s.ai.down(&[PRIVATE]);
     s.ai.set_usage(&[Used { prompt: 70, cached: 40, completion: 12 }]);
-    let r = api.signed(&hand, "POST", ROUTE, Some(&chat("medium", true)))?;
+    let r = api.signed(&hand, "POST", ROUTE, Some(&chat("cheap", true)))?;
     s.ai.down(&[]);
     let last = lines(&r.text).last().cloned().unwrap_or_default();
     let priced = charge(&cached(TINFOIL, 30, 40, 12));
     let settled = s.eventually(wait, || settled_as(before, TINFOIL, priced));
     s.ok(
-        "a streamed medium call whose Finite Private model is down falls back the same, streamed in OpenAI's shape, its cached tokens charged at Tinfoil's cached price",
+        "a streamed call whose Finite Private model is down falls back the same, streamed in OpenAI's shape, its cached tokens charged at Tinfoil's cached price",
         r.status == 200 && last["choices"] == json!([]) && last["usage"]["completion_tokens"] == 12 && tried(s, calls) == fell() && settled,
         json!({ "status": r.status, "tried": format!("{:?}", tried(s, calls)), "last": last, "charge": priced, "entries": aig() }),
     );
@@ -190,7 +194,47 @@ fn tier_checks(s: &mut Suite, api: &Api) -> Result<()> {
     );
     let r = api.signed(&hand, "GET", "/api/models/v1/models", None)?;
     let listed: Vec<&str> = r.body["data"].as_array().into_iter().flatten().filter_map(|m| m["id"].as_str()).collect();
-    s.ok("the route lists the tier's ids, each once, and nothing of their prices", r.status == 200 && listed == [PRIVATE, TINFOIL] && !r.text.contains("price"), &r);
+    s.ok("the route lists the routes' ids, each once, and nothing of their prices", r.status == 200 && listed == [PRIVATE, ROUTED, TINFOIL, FLASH] && !r.text.contains("price"), &r);
+
+    // ---- Standard (the medium tier): within its own route, never Tinfoil
+    let as_standard = |body: Value| Call {
+        method: "POST",
+        url: format!("{}{ROUTE}", api.base),
+        body: Some(body.to_string().into_bytes()),
+        content_type: Some("application/json"),
+        keys: Some(&hand),
+        extra: vec![("x-fragment-tier", "medium".into())],
+        ..Call::default()
+    };
+    let standard_fell = || vec![(Face::OpenAi, ROUTED.to_string()), (Face::WorkersAi, FLASH.to_string())];
+    let (calls, before) = (s.ai.calls().len(), quiet(api, &owner_id, "aig:"));
+    s.ai.fail_next(&[429]);
+    s.ai.set_usage(&[Used { prompt: 50, cached: 0, completion: 20 }]);
+    let r = api.signed(&hand, "POST", ROUTE, Some(&chat("medium", false)))?;
+    let settled = s.eventually(wait, || settled_as(before, FLASH, charge(&tokens(FLASH, 50, 20))));
+    s.ok(
+        "a Standard call OpenRouter answers 429 is made once more on its route's own fallback, Workers AI's GLM-5.3 Flash, never Tinfoil, and charged at Workers AI's price",
+        r.status == 200 && tried(s, calls) == standard_fell() && settled,
+        json!({ "status": r.status, "tried": format!("{:?}", tried(s, calls)), "entries": aig().len() - before }),
+    );
+    let (calls, before) = (s.ai.calls().len(), quiet(api, &owner_id, "aig:"));
+    s.ai.set_usage(&[Used { prompt: 30, cached: 0, completion: 10 }]);
+    let r = api.call(as_standard(chat("fallback", false)))?;
+    let settled = s.eventually(wait, || settled_as(before, FLASH, charge(&tokens(FLASH, 30, 10))));
+    s.ok(
+        "a Standard agent's `fallback` (its tier said) is its route's, Workers AI's GLM-5.3 Flash",
+        r.status == 200 && tried(s, calls) == [(Face::WorkersAi, FLASH.to_string())] && settled,
+        format!("{} {:?}", r.status, tried(s, calls)),
+    );
+    let (calls, before) = (s.ai.calls().len(), quiet(api, &owner_id, "aig:"));
+    s.ai.set_usage(&[Used { prompt: 30, cached: 0, completion: 10 }]);
+    let r = api.call(as_standard(chat(TINFOIL, false)))?;
+    let settled = s.eventually(wait, || settled_as(before, TINFOIL, charge(&tokens(TINFOIL, 30, 10))));
+    s.ok(
+        "a Standard agent naming Tinfoil's model by its id runs that model, with Tinfoil's key, not its route's fallback: an id is a model, only the aliases follow a route",
+        r.status == 200 && tried(s, calls) == [(Face::OpenAi, TINFOIL.to_string())] && settled,
+        format!("{} {:?}", r.status, tried(s, calls)),
+    );
 
     // ---- `vision` on Finite Private, falling back to Tinfoil's, which reads images
     let png = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
@@ -216,6 +260,16 @@ fn tier_checks(s: &mut Suite, api: &Api) -> Result<()> {
         "a `vision` call Finite Private answers 503 is made once more on Tinfoil's DeepSeek V4.1 Flash, whose slot says it reads images: the same image, Tinfoil's key, charged at its price",
         r.status == 200 && tried(s, calls) == fell() && made.iter().all(image_of) && made.get(1).is_some_and(|c| c.authorization.as_deref() == Some(tinfoil_key.as_str())) && settled,
         json!({ "status": r.status, "tried": format!("{:?}", tried(s, calls)), "entries": aig().len() - before }),
+    );
+    let (calls, before) = (s.ai.calls().len(), quiet(api, &owner_id, "aig:"));
+    s.ai.set_usage(&[Used { prompt: 900, cached: 0, completion: 40 }]);
+    let r = api.call(as_standard(look.clone()))?;
+    let call = s.ai.calls().get(calls).cloned();
+    let settled = s.eventually(wait, || settled_as(before, FLASH, charge(&tokens(FLASH, 900, 40))));
+    s.ok(
+        "a Standard agent's `vision` (its tier said) runs on its route's, Workers AI's GLM-5.3 Flash, the image sent as it came, never Finite Private",
+        r.status == 200 && tried(s, calls) == [(Face::WorkersAi, FLASH.to_string())] && call.is_some_and(|c| c.body["messages"][0]["content"][1]["image_url"]["url"].as_str() == Some(png)) && settled,
+        json!({ "status": r.status, "tried": format!("{:?}", tried(s, calls)) }),
     );
 
     // ---- Tinfoil's key refused: the call's failure, charged nothing, said aloud
@@ -250,6 +304,16 @@ fn tier_checks(s: &mut Suite, api: &Api) -> Result<()> {
             && tried(s, calls) == fell()
             && made.get(1).is_some_and(|c| c.authorization.as_deref() == Some(tinfoil_key.as_str()))
             && run["costMicros"] == charge(&tokens(TINFOIL, 1_000, 500)),
+        json!({ "run": run, "tried": format!("{:?}", tried(s, calls)) }),
+    );
+    let calls = s.ai.calls().len();
+    s.ai.fail_next(&[502]);
+    s.ai.set_usage(&[Used { prompt: 800, cached: 0, completion: 300 }]);
+    let r = api.op(&owner, &name, "summarize", "tier-2", json!({ "text": "the standard notes", "tier": "medium" }))?;
+    let run = settle(api, &owner, &name, started(&r), &["succeeded", "held"], wait);
+    s.ok(
+        "a job's `ai.text` on Standard whose OpenRouter answers 502 is answered by its route's fallback, Workers AI's GLM-5.3 Flash, and costs that call",
+        run["status"] == "succeeded" && run["output"]["model"] == FLASH && tried(s, calls) == standard_fell() && run["costMicros"] == charge(&tokens(FLASH, 800, 300)),
         json!({ "run": run, "tried": format!("{:?}", tried(s, calls)) }),
     );
     Ok(())
