@@ -1597,9 +1597,10 @@ the provider's own hosts.
   boot and appends it to its trust store (curl's, Python's, and Node's,
   which reads it with `NODE_USE_SYSTEM_CA=1`: its own roots alone refused
   it), and names it in its browser's managed policy (`CACertificates`, in
-  Chrome for Testing's policy directory: `hermes::CHROMIUM_CA_POLICY`),
-  since Hermes' pinned Chromium reads no system bundle: without it, every
-  page on an intercepted host is an interstitial in the agent's browser.
+  Debian Chromium's `/etc/chromium/policies/managed` directory:
+  `hermes::CHROMIUM_CA_POLICY`), since the browser reads no system bundle:
+  without it, every page on an intercepted host is an interstitial in the
+  agent's browser.
 - What the catalog cannot express is never swapped: a key in a path is
   refused, and a body goes as it came (a placeholder in it reaches the
   provider, which refuses it). A vendor that signs its requests with the
@@ -2034,17 +2035,52 @@ settings and state):
   Hermes' own PM, on PATH). Its browser, and the desktop's Browser icon a
   person uses after Take over, are the image's Chromium
   (`/opt/fragment/bin/chromium`, named to Hermes by
-  `AGENT_BROWSER_EXECUTABLE_PATH`): the full Chromium Hermes' image pins
-  (its PM's, named in `/etc/hermes/agent-browser-executable-path`), always
-  started with `--no-sandbox --disable-dev-shm-usage`, its scratch
+  `AGENT_BROWSER_EXECUTABLE_PATH`): regular distro Chromium, already in
+  the pinned desktop base (`/usr/bin/chromium`, 154.0.8037.92 in this
+  image), rather than PM's Chrome for Testing 145. Always
+  started with `--no-sandbox --disable-dev-shm-usage --test-type`, its scratch
   (`TMPDIR`: a headless one's temporary profile, and its shared memory)
   the container's `/tmp`, never Hermes' home's `cache/scratch` under
   `/data`. Hermes adds those flags itself only
   where it sees Docker's marker (`/.dockerenv`), and Containers gives a
   container neither that marker nor a `/dev/shm` (Docker mounts one in
   every container), so there Chromium died as it started (p5,
-  2026-10-05); the lower rung runs the desktop as Containers does
-  (`--ipc=none`, no marker). Events: `agents.changed`,
+  2026-10-05); `--test-type` suppresses that required container flag's
+  warning infobar, as upstream's desktop icon does. The lower rung runs
+  the desktop as Containers does (`--ipc=none`, no marker).
+
+  The desktop owns its visible browser, and `agent-browser` attaches to
+  it. The first native browse or Browser-icon click starts one headed
+  Chromium on the agent's published display, with its existing saved
+  profile (`bot-desktop/browser-profile`, linked into its work) and a
+  nonzero loopback CDP port of its own. No `--enable-automation`, headless
+  mode, debugging pipe or port `0`: the last also enables
+  `navigator.webdriver`. No fingerprint script or user-agent override is
+  added. Closing a tool session disconnects from the browser; the
+  desktop's stop closes its browser group gracefully before its X server,
+  keeping cookies. This includes the image's idle stop. A browser crash
+  starts a new browser on the next native browse.
+
+  The image adapts pinned Hermes' local-session start/attach, dock and
+  stop helpers (`images/hermes/desktop_browser.py`; exact source guards
+  in `boot/src/desktop.rs`). It does not set `browser.cdp_url`: in this
+  Hermes version a global CDP override would lose the desktop's local
+  lease fence. The lease brackets the entire tool call, including the
+  first startup; Take over refuses reads and actions until Give back.
+  Discovery verifies the live profile-lock owner's executable, exact
+  user-data directory, and CDP's browser PID. Stale `DevToolsActivePort`
+  files are not used, nor is another profile's port. These are the same
+  profiles and sign-ins as before; an agent's separate ad hoc profile is
+  never merged automatically. The adapter refuses to open a profile whose
+  `Last Version` is newer than its Chromium. A rollback to an image from
+  before this guard (which selects Chrome for Testing 145) must restore
+  its pre-upgrade save as well; do not open a Chromium 154 profile with
+  that older browser. The debt ledger names the upstream deletion gate.
+  This improves the browser defaults, not a site's acceptance policy:
+  when a site still needs human verification, the agent asks its owner
+  to take over the same desktop.
+
+  Events: `agents.changed`,
   `profile.written`, `agents.served` (the gateway's answer and its
   `ms`), `agents.ready` (the whole change's `ms`).
 
