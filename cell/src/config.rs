@@ -444,6 +444,24 @@ impl Config {
         valid_fragment_name(name).then(|| name.to_string())
     }
 
+    /// A claimed address's label, in this deployment alone. A lookup in
+    /// the registry still has to prove it names a fragment.
+    pub fn address_of_host(&self, host: &str) -> Option<String> {
+        if self.is_platform_host(host) { return None; }
+        let label = label_under(host, &self.host_suffix)?;
+        let name = label.strip_suffix(self.host_label_suffix())?;
+        fragment_core::address::valid(name, self.host_label_suffix()).then(|| name.to_string())
+    }
+
+    pub fn address_origin(&self, arrived: &url::Url, label: &str) -> String {
+        format!("{}://{label}{}", arrived.scheme(), self.address_suffix(arrived))
+    }
+
+    pub fn address_suffix(&self, arrived: &url::Url) -> String {
+        let port = arrived.port().map(|p| format!(":{p}")).unwrap_or_default();
+        format!("{}.{suffix}{port}", self.host_label_suffix(), suffix = self.host_suffix)
+    }
+
     /// The computer a hostname names (`<24 hex>--computer.<suffix>`, a
     /// branch's mark before the dot): its own origin, where its ports are.
     pub fn computer_of_host(&self, host: &str) -> Option<String> {
@@ -488,6 +506,12 @@ impl Config {
     /// A fragment's own origin, as a browser on its page names it in
     /// `Origin` (`scheme://host[:port]`).
     pub fn origin(&self, arrived: &url::Url, name: &str) -> String {
+        // The router resolved this request's public address before making
+        // its Routed URL. Keep that real origin through sockets, auth,
+        // app fetches and relative links; never rewrite it to the default.
+        if arrived.host_str().and_then(|host| self.address_of_host(host)).is_some() {
+            return arrived.origin().ascii_serialization();
+        }
         let port = arrived.port().map(|p| format!(":{p}")).unwrap_or_default();
         let host = name;
         let branch = self.host_label_suffix.as_deref().unwrap_or("");

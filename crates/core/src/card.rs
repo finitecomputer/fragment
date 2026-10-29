@@ -38,10 +38,15 @@ use fragment_proto::{FragmentKind, PageError, PageErrorKind, PageReport, Visibil
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// The viewport a page is shot at, at a device scale of 1: a laptop's.
+/// The saved image's size. At 200% zoom the page lays out in half as
+/// many CSS pixels, rendered at twice the device scale: legible cards
+/// with the same image size and upload contract.
 pub const WIDTH: u16 = 1280;
 pub const HEIGHT: u16 = 800;
-pub const SCALE: u8 = 1;
+pub const SCALE: u8 = 2;
+pub const VIEWPORT_WIDTH: u16 = WIDTH / SCALE as u16;
+pub const VIEWPORT_HEIGHT: u16 = HEIGHT / SCALE as u16;
+const _: () = assert!(VIEWPORT_WIDTH * SCALE as u16 == WIDTH && VIEWPORT_HEIGHT * SCALE as u16 == HEIGHT);
 /// What a card is stored and served as.
 pub const MEDIA_TYPE: &str = "image/jpeg";
 /// The JPEG qualities a shot tries, in turn: the next when the image is

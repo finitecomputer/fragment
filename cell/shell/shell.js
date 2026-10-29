@@ -15,6 +15,7 @@ import { colorOf } from "./agent-color.js";
 import { icon } from "./icons.js";
 import { appArt, openIconSheet } from "./app-icon.js";
 import { createAppsPage } from "./apps-page.js";
+import { createTitles } from "./fragment-title.js";
 import { createLayout, store, reducedMotion, springFrames } from "./layout.js";
 import { createViewer } from "./viewer.js";
 import { billingSections, returnSaid, returning, seatGives, seatOffer } from "./billing.js";
@@ -1829,39 +1830,8 @@ function composeIn(name, text) {
   else composing.set(name, text);
 }
 
-// ---- renaming: a chat's title, or an agent's (its name), each alone ----
-// A fragment's title, its fragment.json's `meta.title`, deployed.
-async function retitle(name, title, message) {
-  const manifest = await api("GET", `/api/f/${seg(name)}/manifest`);
-  manifest.meta = { ...(manifest.meta ?? {}), title };
-  await api("POST", `/api/f/${seg(name)}/files`, { message, files: [{ path: "fragment.json", text: JSON.stringify(manifest, null, 2) + "\n" }] });
-  await api("POST", `/api/f/${seg(name)}/deploy`, {});
-}
-let renaming = null;
-function rename(name) {
-  renaming = name;
-  const agent = byName(name)?.kind === "agent";
-  $("rename-title").textContent = agent ? "Name your agent" : "Name this chat";
-  $("rename-label").textContent = agent ? "Agent name" : "Chat name";
-  $("agent-name").value = titleOf(name);
-  $("rename-error").hidden = true;
-  $("rename-agent").showModal();
-  $("agent-name").select();
-}
-$("rename-cancel").onclick = () => $("rename-agent").close();
-$("rename-form").onsubmit = async (e) => {
-  e.preventDefault();
-  const title = $("agent-name").value.trim();
-  if (!title || !renaming) return;
-  try {
-    await retitle(renaming, title, "rename");
-    $("rename-agent").close();
-    await load();
-  } catch (err) {
-    $("rename-error").textContent = err.message;
-    $("rename-error").hidden = false;
-  }
-};
+// The same display-name editor for chats, agents and Apps.
+const { retitle, rename } = createTitles({ $, api, seg, byName, titleOf, reload: () => load() });
 
 // ---- the launcher (launcher.js): one input for starting a chat or finding one again ----
 const launcher = createLauncher({
@@ -2097,6 +2067,9 @@ const appsPage = createAppsPage($("apps-page"), {
   art: (name) => iconOf(name),
   share: (name) => share(name),
   iconSheet: (name) => openIconSheet(iconHelpers, name, titleOf(name), byName(name)),
+  retitle,
+  originOf,
+  openApp,
   reload: () => load(),
   state,
 });

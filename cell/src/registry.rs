@@ -47,6 +47,7 @@ pub(crate) const PROFILES_MAX: usize = 64;
 pub(crate) mod admin;
 pub(crate) mod billing;
 pub(crate) mod calls;
+mod addresses;
 pub(crate) mod invites;
 pub(crate) mod offers;
 pub(crate) mod orgs;
@@ -829,6 +830,8 @@ impl RegistryCell {
             return answer;
         }
         match path.as_str() {
+            calls::AddressOf::PATH => reply::<calls::AddressOf>(self.address_of(body(&bytes)?)),
+            calls::ClaimAddress::PATH => reply::<calls::ClaimAddress>(self.claim_address(body(&bytes)?)),
             calls::BeginConnection::PATH => reply::<calls::BeginConnection>(self.begin_connection(body(&bytes)?).await),
             calls::FinishConnection::PATH => reply::<calls::FinishConnection>(self.finish_connection(body(&bytes)?).await),
             calls::FenceConnection::PATH => reply::<calls::FenceConnection>(self.fence_connection(body(&bytes)?)),
