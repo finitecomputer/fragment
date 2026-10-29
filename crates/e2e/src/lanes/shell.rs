@@ -6353,6 +6353,33 @@ fn apps_dock_visit_ui(s: &mut Suite, b: &mut Browser, page: &Page, app: &str) ->
     Ok(())
 }
 
+/// An open inline sharing view owns its document and typed invite across
+/// an unrelated list update and changes to its own row's controls.
+fn apps_sharing_refresh_ui(s: &mut Suite, b: &mut Browser, page: &Page, app: &str) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    let row = format!("document.querySelector({})", js(&format!("#apps-page .app-row[data-fragment=\"{app}\"]")));
+    b.eval(page, &format!("({row}.querySelector('[data-action=sharing]').click(), true)"))?;
+    anyhow::ensure!(s.eventually(wait, || b.eval_in_frame(page, "/share/", "!!document.querySelector('input[name=email]')").ok() == Some(Value::Bool(true))), "inline sharing is ready");
+    b.eval_in_frame(page, "/share/", "(() => { window.__sharingVisit = 'kept'; const input = document.querySelector('input[name=email]'); input.value = 'friend@example.com'; input.focus(); return true; })()")?;
+    let intact = |b: &mut Browser| b.eval_in_frame(page, "/share/", "window.__sharingVisit === 'kept' && document.querySelector('input[name=email]')?.value === 'friend@example.com' && document.activeElement === document.querySelector('input[name=email]')").ok() == Some(Value::Bool(true));
+    let created = b.eval(page, "fetch('/api/fragments', { method: 'POST', headers: { 'x-fragment-shell': '1', 'content-type': 'application/json' }, body: JSON.stringify({ label: 'sharing-refresh-' + Date.now().toString(36), template: 'blank' }) }).then(r => r.json())")?;
+    let extra = created["name"].as_str().ok_or_else(|| anyhow::anyhow!("the unrelated app was created: {created}"))?;
+    let selector = js(&format!("#apps-page .app-row[data-fragment=\"{extra}\"]"));
+    let arrived = b.until(page, &format!("!!document.querySelector({selector})"), wait);
+    s.ok("an unrelated app arriving keeps the sharing document, invite text and focus", arrived && intact(b), b.eval(page, &format!("{row}.querySelector('.app-sharing-frame')?.src"))?);
+    let mut saved = true;
+    for state in ["false", "true"] {
+        b.eval(page, &format!("({row}.querySelector('[data-action=dock]').click(), true)"))?;
+        saved &= b.until(page, &format!("{row}.querySelector('[data-action=dock]')?.getAttribute('aria-checked') === '{state}' && !{row}.querySelector('[data-action=dock]').disabled"), wait) && intact(b);
+    }
+    s.ok("a sharing row's Dock write and server refresh keep its document, invite text and focus", saved, b.eval(page, &format!("{row}.querySelector('[data-action=dock]')?.getAttribute('aria-checked')"))?);
+    b.eval(page, &format!("fetch('/api/f/{extra}', {{ method: 'DELETE', headers: {{ 'x-fragment-shell': '1' }} }}).then(r => r.ok)"))?;
+    b.until(page, &format!("!document.querySelector({selector})"), wait);
+    b.eval_in_frame(page, "/share/", "(document.querySelector('button[data-done]').click(), true)")?;
+    anyhow::ensure!(b.until(page, &format!("!{row}.querySelector('.app-sharing-frame')"), wait), "sharing closes after the refresh checks");
+    Ok(())
+}
+
 /// The Apps page (docs/api.md, The shell; #587), from the sidebar's Apps:
 /// the owner's app listed (no chat or skills), with its card and who has
 /// access; a kind this build does not know is listed as Other; its Dock
@@ -6414,6 +6441,7 @@ fn apps_ui(s: &mut Suite, b: &mut Browser, page: &Page, skills: &str, app: &str,
     s.ok("its Dock switch takes it off the dock and puts it back, the switch moving as the list does", on == "true" && off && back, b.eval(page, &format!("{row}?.innerText ?? null"))?);
 
     apps_dock_visit_ui(s, b, page, app)?;
+    apps_sharing_refresh_ui(s, b, page, app)?;
     apps_response_races_ui(s, b, page, app)?;
     apps_arrival_ui(s, b, page)?;
     b.eval(page, &format!("(() => {{ if (!{row}?.querySelector('.icon-editor')) {}?.click(); return true; }})()", control("appearance")))?;
