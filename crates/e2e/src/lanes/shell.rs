@@ -934,6 +934,9 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     let agent_wait = std::time::Duration::from_secs(120);
     // signed out, settings is the shell asking them to sign in, and back to settings
     let page = b.open(&format!("{}/settings", api.base))?;
+    let agent_source = std::str::from_utf8(fragment_templates::blessed::site_file("agent", "site/agent.js").context("the release's agent.js")?.bytes)?;
+    let caught_up = b.eval(&page, &format!("({})({})", include_str!("agent-watch.js"), js(agent_source)))?;
+    s.ok("the agent page catches a job move before its first watch hello, including when the initial read finishes last", caught_up == json!(true), caught_up);
     let asked = b.until(&page, "document.querySelector('#first-run-card a.primary')?.getAttribute('href') === '/auth/login?screen_hint=sign-up&return=%2Fsettings'", wait);
     s.ok("signed out, /settings is the shell asking them to sign in, and to come back to settings", asked, b.eval(&page, "document.body.innerText.slice(0, 200)")?);
     let other = b.eval(&page, "(() => { const a = document.querySelector('#first-run-card a.splash-secondary'); return { href: a?.getAttribute('href'), says: a?.textContent }; })()")?;

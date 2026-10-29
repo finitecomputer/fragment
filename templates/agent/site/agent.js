@@ -70,8 +70,9 @@ async function main() {
     box.classList.toggle("muted", !soul);
   };
   // Main's moves (`__watch`, viewers and up): its job read again when one
-  // names it (or names more than a frame holds), and after a feed that came
-  // back, which may have missed one. A feed refused (4003, 4004) or never
+  // names it (or names more than a frame holds), and on every hello: a move
+  // before the subscription, including the first, may have been missed.
+  // A feed refused (4003, 4004) or never
   // heard from stays shut, the job as last read.
   const watchJob = (wait = 0) => {
     const url = new URL("__watch", location.href);
@@ -84,7 +85,7 @@ async function main() {
         frame = JSON.parse(e.data);
       } catch {}
       const paths = Array.isArray(frame?.paths) ? frame.paths : null;
-      if ((frame?.type === "hello" && wait) || (frame?.type === "changed" && (!paths || paths.length >= 200 || paths.includes("SOUL.md")))) showJob();
+      if (frame?.type === "hello" || (frame?.type === "changed" && (!paths || paths.length >= 200 || paths.includes("SOUL.md")))) showJob();
       heard = true;
     };
     ws.onclose = (e) => {
