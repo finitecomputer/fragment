@@ -29,6 +29,26 @@ pub(crate) trait Call: Serialize {
     }
 }
 
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "by", rename_all = "camelCase")]
+pub(crate) enum AddressOf {
+    Label { label: String },
+    Fragment { fragment: String, npub: String },
+}
+impl Call for AddressOf {
+    const PATH: &'static str = "/address/of";
+    type Answer = Option<fragment_core::address::Address>;
+}
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct ClaimAddress {
+    pub address: fragment_core::address::Address,
+}
+impl Call for ClaimAddress {
+    const PATH: &'static str = "/address/claim";
+    type Answer = fragment_core::address::Address;
+}
+
 /// Who asks the Registry to act, resolved in the same turn as the act:
 /// one round trip, and a key revoked a moment before cannot act.
 #[derive(Serialize, Deserialize)]

@@ -423,7 +423,24 @@ runtime's own files never hold either (Hermes' `profile.yaml`, and the
 line of its profile's config that tells it its name, are written from
 the title, and written again), nor does the agent's job: its `SOUL.md`
 says what it does, never who it is (the shell's first agent's names
-none; one an owner or agent wrote may).
+none; one an owner or agent wrote may, as the shell's first did from
+2026-10-03 to 2026-10-16: "You are <name>, <owner>'s default agent: …").
+
+**A rename by its owner says the new name in its job too** (Paul,
+2026-10-27: an agent's page showed its old name under "Its job"):
+Settings' Rename and `fragment agent --name` write the job again in the
+same commit as the title, each whole-word mention of an old name (case
+and all; whole when no letter, digit or `_` touches it) said as the new
+one, longest first, in one pass (`fragment_core::face::job_renamed`,
+which the shell's `jobRenamed` matches). The old names are the title at
+main and the one the shell's first job named it by (its first line, as
+that template wrote it: `job_first_name`), so an agent renamed before
+this, whose job still names it so, is told its name there by its owner's
+next rename, even to the name it has. A job past 64 KiB, before or after
+(`JOB_RENAME_MAX_BYTES`), or one that names no old name, is left as it
+is, and asked again the rename changes nothing. No old name is guessed:
+one the job says some other way stays until its owner or the agent edits
+it.
 
 **Served** at `GET /api/identities/{npub}/picture`, `{npub}` the agent's
 (its fragment's own npub): the bytes of the commit whose install checked
@@ -461,6 +478,30 @@ Every path names a fragment in full: a bare label there is 404, saying
 so. The CLI finds a bare label among the caller's fragments (its list:
 the one with it, or of several, the one they own), so `fragment status
 todo` works; a person's labels need not be unique.
+
+An app or brain may also have one optional **public address**, claimed
+by its owner from Apps: `<label>.<suffix>`, or `<label>--<branch>.<suffix>`
+on a branch. It is a real second origin, with the pretty URL kept in the
+address bar; the generated name, repository, memberships and old address
+stay as they are. It changes no visibility or permissions.
+
+`GET /api/f/{name}/address` (viewer) answers `{address, suffix, maxLength}`:
+`address` is null, or `{label, url}`. `PUT` (the owner, or their agent
+acting for them with sharing authority) takes `{label}` and claims it first-come, first-served; retrying
+the same claim answers the same binding. Names use lowercase letters,
+digits and single dashes, fit one 63-byte DNS label with the branch mark,
+and cannot collide with generated names or computer hosts (double dashes)
+or the platform's own host. An invalid name is 400, one already taken or
+an app that already has another address is 409. Nothing changes on refusal.
+
+The registry keeps the reservation, bound to this life's fragment npub.
+It is never reassigned or released by a delete or wipe: an old origin's
+cookies and browser storage must never reach a new app. A deleted app's
+address is 404, including when someone recreates its generated name.
+Each routed request checks that npub before serving or acting. Sign-in
+round trips and sockets keep the actual public origin; an auth return
+may name an address only after the registry proves it names that fragment.
+The ordinary generated origin still takes no registry lookup for routing.
 
 A fragment's host label, its name and a branch deployment's mark
 (`--<branch>`), is one DNS label: at most 63 bytes
@@ -1523,7 +1564,8 @@ cell/src/card.rs runs them.
 - **Never in the deploy's request.** The move records the card it wants;
   the fragment's alarm, after the rest of its work, takes the shot itself
   with the `BROWSER` binding: a Browser Rendering session, CDP over its
-  socket, the page at 1280×800 and a device scale of 1, its load waited
+  socket, the page at 200% zoom (640×400 CSS pixels, device scale 2,
+  saved as the same 1280×800 JPEG), its load waited
   for (at most 15 s), then 1 s for its scripts, a JPEG at quality 70 (40
   if that is over 512 KiB; over the cap at both, the deploy gets no
   card), and the session closed whatever happens (at most 45 s in all).
@@ -2993,10 +3035,22 @@ the server answered and nothing before it: an app's or a brain's **Dock** switch
 **New preview** (an editor's, not on a members-only one of theirs:
 `POST /api/f/{name}/card`; "Taking a new preview…" until status's
 `page.at` reaches the ask's `since`, three minutes at most, then the
-card read again), **Icon…** (an editor's: the icon sheet, Icons), and
-**Share…** (theirs) or **People…** (someone else's), the share sheet. A
+card read again), **Appearance** (an editor's: the inline icon editor,
+Icons, and preview controls), and **Sharing** (theirs) or **People**
+(someone else's), the platform sharing view expanded inline. A
 refusal is said under its row. Settings have no sharing section: who
 may open what is the Apps page's.
+
+The row's title, icon and preview open the app; its address is visible
+beside an open-in-new-tab link. The pencil edits the display name inline,
+through the manifest's `meta.title`, leaving the address alone. Dock is a
+shortcut switch. Appearance expands the icon editor and preview controls
+inline; Sharing expands the existing isolated platform sharing view;
+Address expands the owner's public-address claim. These do not open
+dialogs. A real icon/preview request shows an indeterminate activity
+indicator and elapsed time, not an invented completion percentage.
+Preview completion is checked every second, so a finished card need not
+wait through the earlier ten-second polling interval.
 It calls the API with the person's platform session
 rather than a key: a request on the platform's host is taken as the
 signed-in person when it carries `x-fragment-shell: 1` and

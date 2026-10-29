@@ -278,6 +278,7 @@ Every change is checked against this table.
 | A chat's unsent words (its composer's draft) | the chat's page, as its person types | that page's origin's storage (`localStorage`, `fragment.chat.draft.v1`), as the principal it is signed in as: put back for that principal alone as the page loads (anyone else's let go), emptied as it is sent, and let go when the shell asks as its person signs out or uses another account (docs/chat-records.md, "Its draft, kept") |
 | Large file bytes (1 MiB or more) | R2 (`BLOBS`), keyed by SHA-256 | git holds a pointer; a sync resolves it; a blob no branch tip references is deleted |
 | Identities (npubs) and their keys, each person's own key (sealed), sign-ins and their verified emails, agents' owners, sessions | the registry (fragment's BANKS: docs/cloudflare-v1.md, decisions 45 to 50) | an identity's npub never changes; an email names at most one person; sessions and caches name an identity and never outlive a revocation; cookies hold only tokens, the registry their hashes |
+| Optional public addresses, first-come and never reassigned | the registry's `public_addresses`, one label and one fragment npub per reservation | the router resolves only pretty hosts there and the fragment checks the binding's npub on each request; the generated address and fragment identity stay fixed. A delete or wipe leaves the non-personal origin reservation, so an old origin never becomes a new app's |
 | A person's wipe: how far it got, and that it locks them | the registry's `wipes` (docs/api.md, Operators) | a wiped person's ledger, list and computer each keep one row saying so, and take nothing more |
 | Secrets | the Durable Object that owns each, sealed for it; the deployment's own in its Secrets Store (docs/secrets.md) | never in a repo, a log, a command line, or an app's env |
 | Orgs, their admins and seats (held by an npub, or pending on an email; comped or paid) | the registry (docs/billing.md) | a seat holder's plan and standing on their ledger, and their computer's always-on, are pushed from it: one queued row a person, pushed one at a time by its alarm, each read fresh as it goes, so the newest push is of the newest state. The ledger keeps the seat in the registry's order (`SetSeat.seq`), refusing an older one as stale and naming its own, which the registry's next order passes; always-on carries no order (the one row a person orders it), and a computer made later asks for a push as it is made, its making failing when it cannot. The registry is the seat's one writer: operators comp and end seats through it (the ledger's `seat` command went 2026-10-16); an operator's `plan` command is the debt ledger's |
@@ -415,6 +416,11 @@ alone (`<sha>-dirty-<second>`). Dev and the e2e run one build in one
   retried as any failure of theirs is. A `deploying` an object answers
   because a call of its own was refused is its answer, never asked
   again: it may have acted before that call.
+  The model intercept alone marks a direct refusal of its signing
+  preflight as not dispatched to a provider (docs/computers.md, Models).
+  That additive image contract permits a bounded image-side wait without
+  replaying a model call that may have run; ordinary routed waits stay
+  the same.
 - **An object behind restarts.** A deploy restarts every object onto
   its code, but Cloudflare holds one it keeps busy on the code before:
   on the preview on 2026-10-21, after 7 of its 17 deploys, a busy

@@ -54,7 +54,47 @@ async function main() {
   // `fragment_core::face::agent_name`), whether it runs on a computer yet
   // or not; then, framed by its owner's shell, as the shell says it, again
   // on any change (a rename while it is open)
+  let shown = null;
+  // Its job (SOUL.md) as its files say it now (main's: its computer's sync
+  // writes there, and its owner's rename says its new name there:
+  // docs/api.md, "An agent's name and picture"), read again whenever it
+  // moves (`watchJob`) and as its name changes; only the newest read is
+  // shown, whatever order the reads answer in
+  let jobReads = 0;
+  const showJob = async () => {
+    const mine = ++jobReads;
+    const soul = await text("SOUL.md");
+    if (mine !== jobReads) return;
+    const box = document.getElementById("soul");
+    box.textContent = soul?.trim() || "No job written down yet.";
+    box.classList.toggle("muted", !soul);
+  };
+  // Main's moves (`__watch`, viewers and up): its job read again when one
+  // names it (or names more than a frame holds), and on every hello: a move
+  // before the subscription, including the first, may have been missed.
+  // A feed refused (4003, 4004) or never
+  // heard from stays shut, the job as last read.
+  const watchJob = (wait = 0) => {
+    const url = new URL("__watch", location.href);
+    url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+    const ws = new WebSocket(url);
+    let heard = false;
+    ws.onmessage = (e) => {
+      let frame = null;
+      try {
+        frame = JSON.parse(e.data);
+      } catch {}
+      const paths = Array.isArray(frame?.paths) ? frame.paths : null;
+      if (frame?.type === "hello" || (frame?.type === "changed" && (!paths || paths.length >= 200 || paths.includes("SOUL.md")))) showJob();
+      heard = true;
+    };
+    ws.onclose = (e) => {
+      if (heard && e.code !== 4003 && e.code !== 4004) setTimeout(() => watchJob(Math.min((wait || 500) * 2, 30000)), wait || 1000);
+    };
+  };
   const named = (name) => {
+    if (shown !== null && shown !== name) showJob();
+    shown = name;
     document.title = name;
     document.getElementById("name").textContent = name;
   };
@@ -90,10 +130,8 @@ async function main() {
     avatar.replaceChildren(picture);
   };
   picture.src = "__file?path=avatar.png";
-  const soul = await text("SOUL.md");
-  const box = document.getElementById("soul");
-  box.textContent = soul?.trim() || "No job written down yet.";
-  if (!soul) box.classList.add("muted");
+  watchJob();
+  await showJob();
   const files = (await json("__files")) ?? { files: [] };
   const skills = [...new Set(files.files.map((f) => f.path).filter((p) => p.startsWith("skills/") && p.endsWith("/SKILL.md")).map((p) => p.split("/")[1]))];
   if (skills.length) {

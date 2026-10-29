@@ -664,6 +664,48 @@ pub fn routes(s: &mut Suite, api: &Api) -> Result<()> {
     Ok(())
 }
 
+fn apps_cli(s: &mut Suite, api: &Api, home: &std::path::Path, keys: &Keys) -> Result<()> {
+    let name = s.named(api, keys, "cli-appearance")?;
+    s.cli_json(api, home, &["create", &name, "--template", "blank", "--visibility", "public", "--json"])?;
+    let before = api.signed(keys, "GET", &format!("/api/f/{name}/manifest"), None)?;
+    s.ok("CLI template creation gives the app its own display name instead of Blank", before.body["meta"]["title"].as_str().is_some_and(|t| !t.is_empty() && t != "Blank"), &before.body);
+    let renamed = s.cli_json(api, home, &["rename", &name, "Meals this week", "--json"])?;
+    let after = api.signed(keys, "GET", &format!("/api/f/{name}/manifest"), None)?;
+    let again = s.cli_json(api, home, &["rename", &name, "Meals this week", "--json"])?;
+    s.ok("CLI rename deploys the name, preserves the other metadata and is safe to repeat", after.body["meta"]["title"] == "Meals this week" && after.body["meta"]["description"] == before.body["meta"]["description"] && renamed["title"] == again["title"], &after.body);
+    let mut titles = vec![];
+    for title in ["Meal archive", "Meals this week", "Meals this week"] {
+        s.cli_json(api, home, &["rename", &name, title, "--json"])?;
+        let manifest = api.signed(keys, "GET", &format!("/api/f/{name}/manifest"), None)?;
+        let status = api.status(keys, &name)?;
+        titles.push(json!({ "wanted": title, "main": manifest.body["meta"]["title"], "live": status.body["title"] }));
+    }
+    s.ok("CLI rename A to B to A and an immediate repeat each change main and the live display name", titles.iter().all(|r| r["wanted"] == r["main"] && r["wanted"] == r["live"]), json!(titles));
+    let receipt = s.cli_json(api, home, &["preview", &name, "--json"])?;
+    s.ok("CLI preview asks for a screenshot and returns its completion receipt", receipt["since"].is_i64() && receipt["live"].is_string(), &receipt);
+    let label = name.split_once("--").expect("the name has a suffix").0;
+    let claimed = s.cli_json(api, home, &["address", &name, label, "--json"])?;
+    let read = s.cli_json(api, home, &["address", &name, "--json"])?;
+    let replay = s.cli_json(api, home, &["address", &name, label, "--json"])?;
+    s.ok("CLI address claims and reads the same permanent binding, including on retry", claimed == read && read == replay && claimed["address"]["label"] == label, &read);
+    let second = s.named(api, keys, "cli-title")?;
+    s.cli_json(api, home, &["create", &second, "--template", "blank", "--title", "My chosen name", "--json"])?;
+    let mf = api.signed(keys, "GET", &format!("/api/f/{second}/manifest"), None)?;
+    s.ok("CLI creation honours an explicit display name", mf.body["meta"]["title"] == "My chosen name", &mf.body);
+    let init_name = s.named(api, keys, "cli-init-title")?;
+    let work = s.dir("cli-init-title");
+    let out = s.bare_cli().args(["init", &init_name, "--template", "blank", "--title", "Weekend plans", "--json"])
+        .current_dir(&work).env("HOME", home).env("FRAGMENT_HOST", &api.base).env_remove("FRAGMENT_OUTPUT").output()?;
+    let local: Value = serde_json::from_slice(&std::fs::read(work.join(&init_name).join("fragment.json"))?)?;
+    let live = api.signed(keys, "GET", &format!("/api/f/{init_name}/manifest"), None)?;
+    s.ok("CLI init puts its chosen name in both the working copy and the first live deploy", out.status.success() && local["meta"]["title"] == "Weekend plans" && live.body["meta"]["title"] == "Weekend plans", String::from_utf8_lossy(&out.stderr));
+    let scaffold = s.dir("cli-new-title");
+    let out = s.bare_cli().args(["new", ".", "--template", "blank"]).current_dir(&scaffold).output()?;
+    let local: Value = serde_json::from_slice(&std::fs::read(scaffold.join("fragment.json"))?)?;
+    s.ok("CLI new in the current directory uses that folder's name instead of Blank", out.status.success() && local["meta"]["title"] != "Blank", &local);
+    Ok(())
+}
+
 pub fn cli(s: &mut Suite, api: &Api) -> Result<()> {
     if !s.section("cli", &[]) {
         return Ok(());
@@ -712,6 +754,7 @@ pub fn cli(s: &mut Suite, api: &Api) -> Result<()> {
         json!({ "login": logged, "host": host, "whoami": me }),
     );
     let keys = s.cli_keys(&home).expect("the CLI logged in");
+    apps_cli(s, api, &home, &keys)?;
     let (name, c) = chat(s, api, &keys, "cli")?;
     let r = s.cli_json(api, &home, &["call", &name, "say", "--input", r#"{"text":"from the cli"}"#, "--id", "cli-1", "--json"])?;
     s.ok("fragment call runs an operation", r["result"]["id"] == 1 && r["replayed"] == false, &r);

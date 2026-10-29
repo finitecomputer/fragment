@@ -75,7 +75,7 @@ the product.
 
 ```sh
 mkdir -p ~/apps && cd ~/apps
-fragment init garden --template blank     # scaffold, create, first deploy: prints its link and share link
+fragment init garden --template blank --title "Garden"   # scaffold, create, first deploy: prints its links
 cd garden                                 # the folder is the fragment's working copy
 ```
 
@@ -137,6 +137,13 @@ fragment rollback garden                  # live back to the deploy before
   the folder and deploy the built output under `site/`; keep the source
   beside it (a top-level `node_modules/` never syncs).
 - Commit after each meaningful milestone: each deploy is one.
+
+Give every app a useful name (`--title` when creating it, or `fragment
+rename <app> "Name"` later). Optional finishing tools: `fragment icon
+generate <app>` (run as a background terminal task after revealing the
+app), `fragment preview <app>`, and `fragment address <app> <label>`
+(claim only when requested; permanent, and changes no permissions).
+Never delay a working link for icon generation. Details: `fragment guide`.
 
 ## Choose the shape
 

@@ -164,11 +164,20 @@ commit there, which the environment's next deploy takes: the preview's
 at master's next green push, or a re-run of its `deploy` job;
 production's only at a deploy of Paul's, his next move of `production`
 or his re-run of its `deploy` job.
-`CLOUDFLARE_ACCOUNT_ID`, optional but recommended, is a secret only to be
-masked: the runner masks each secret its job names wherever it appears
+`CLOUDFLARE_ACCOUNT_ID` is **required on preview**: ci.yml's automatic
+`preview-image` job resolves/builds in that account's registry using the
+same environment's `CLOUDFLARE_API_TOKEN` (Containers access). Production's
+deploy still makes it optional but recommended for masking; the manual
+Image workflow requires it for either environment. It is kept as a
+GitHub secret so the runner masks it wherever it appears
 in the job's logs, so the account id in wrangler's and xtask's output
-(registry paths, URLs) is `***`. The job runs without it. Paul sets them
-in the repository's settings.
+(registry paths, URLs) is `***`. Paul sets them in the repository's
+environment settings. Preview's image job passes only the digest and
+input key to deploy: an output containing the masked account ID would
+be suppressed as a secret. Deploy reconstructs its pinned reference
+using its config's account, overrides both preview image names in memory,
+and records the key and digest in its job summary. No write token for
+fragment-deploy is needed; production's config pins remain manual.
 
 **On the Image workflow** (.github/workflows/image.yml, run by hand:
 `cargo xtask image push|copy`) the job runs in the same environment, for

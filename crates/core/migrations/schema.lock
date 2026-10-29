@@ -13,6 +13,7 @@ step Registry 3 trial_hold_attempts 07e123e05a049abe
 step Registry 4 connection_fences ac8ad73c1302c4be
 step Registry 5 invites_answered 189ad3c09884ab61
 step Registry 6 connection_accounts 05c1285d594517cb
+step Registry 7 public_addresses ab8499c84e7997be
 step Principal 1 baseline 28b4d4bf3f8cdb71
 step Principal 2 listed 09e5aab70c4f7f61
 step Principal 3 memberships_dock 607987fd7686be8b
@@ -123,6 +124,7 @@ Registry table pictures: CREATE TABLE pictures ( identity TEXT PRIMARY KEY, sha 
 Registry table plan_seq: CREATE TABLE plan_seq ( one INTEGER PRIMARY KEY CHECK (one = 1), seq INTEGER NOT NULL)
 Registry table plan_syncs: CREATE TABLE plan_syncs ( person TEXT PRIMARY KEY, since INTEGER NOT NULL, due INTEGER NOT NULL, tries INTEGER NOT NULL)
 Registry index plan_syncs_due: CREATE INDEX plan_syncs_due ON plan_syncs (due)
+Registry table public_addresses: CREATE TABLE public_addresses ( label TEXT PRIMARY KEY, fragment TEXT NOT NULL, npub TEXT NOT NULL UNIQUE )
 Registry table quantity_syncs: CREATE TABLE quantity_syncs ( org TEXT PRIMARY KEY, since INTEGER NOT NULL, due INTEGER NOT NULL, tries INTEGER NOT NULL)
 Registry table redemptions: CREATE TABLE redemptions ( hash TEXT PRIMARY KEY, session TEXT NOT NULL, fragment TEXT NOT NULL, return_to TEXT NOT NULL, expires_at INTEGER NOT NULL, embedder TEXT)
 Registry index redemptions_expires: CREATE INDEX redemptions_expires ON redemptions (expires_at)

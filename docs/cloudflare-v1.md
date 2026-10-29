@@ -85,7 +85,11 @@ speaking Cloudflare's APIs) returns once this product works.
    tree (master unmoved since): it deploys the preview once `check`, a
    couple of minutes, is green (Paul, 2026-10-23; `proven` matches trees,
    which every run records; `check` runs on every push, as it holds the
-   schema lock to what the push moved from). Each
+   schema lock to what the push moved from). The merge queue also runs
+   `check` and all four shards, against its exact base, and records its
+   combined tree: a successful run from this repo's master queue proves
+   a master push of that tree (Paul, 2026-10-29). Production still needs
+   a successful master push, its preview deploy included. Each
    deploys from a GitHub environment (`preview`, `production`) that only
    its branch may use, holding its Cloudflare token and a token that
    reads its config: a file in the private repo
@@ -94,10 +98,17 @@ speaking Cloudflare's APIs) returns once this product works.
    of the public repo's logs), which the team can read and change by a
    commit, the environment's next deploy taking it (Paul, 2026-10-21: it
    was a GitHub secret, which no one could read back to edit); its
-   images are pinned by digest (`xtask deploy --pinned-only`), and one
-   is built by the Image workflow, run by hand, and copied by it, at its
-   digest, into production's registry once a round proves it
-   (docs/computers.md, "Stable and canary").
+   images are pinned by digest (`xtask deploy --pinned-only`). Preview
+   follows master's image automatically (Paul, 2026-10-29): input-keyed
+   registry tags preserve identity across layer-cache eviction, BuildKit's
+   persistent Actions cache accelerates new builds, and preparation gates
+   the preview deploy before any Worker changes. Preview is the canary:
+   `hermes` and the retained `hermes-canary` name resolve to the same
+   digest, overridden in memory, with its input key and digest recorded in
+   the deploy summary rather than preview.jsonc. Production's image is
+   still copied by the manual Image workflow, at the exact digest a full
+   round proved, then pinned by hand in production.jsonc. Its deploy and
+   promotion rules stay unchanged (docs/computers.md, "Stable and canary").
 4. **Self-deploy without forking.** Configuration lives in a file
    outside the repo: domains, the WorkOS environment, AI Gateway,
    pricing, the code.storage organization, and the default computer

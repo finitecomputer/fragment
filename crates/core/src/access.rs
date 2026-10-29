@@ -164,7 +164,7 @@ pub fn listed_role(asker: Option<Role>, cap: Cap) -> Option<Role> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Reserved {
     /// Sharing: adding, changing, or removing members (but not leaving),
-    /// invites, visibility, and rotating the links. The owner's, and their
+    /// invites, visibility, rotating links, and claiming an app address. The owner's, and their
     /// own agent's acting for them (`agent_shares`; Paul, 2026-10-04).
     Sharing,
     /// The owner's own: deleting the fragment, and its money cap
@@ -182,6 +182,7 @@ pub fn reserved(method: &str, rest: &[&str]) -> Option<Reserved> {
         ("DELETE", [] | [""]) => Some(Reserved::OwnerOnly),
         // a fragment's cap is its owner's money (docs/ledger.md)
         ("PUT", ["cap"]) => Some(Reserved::OwnerOnly),
+        ("PUT", ["address"]) => Some(Reserved::Sharing),
         ("PUT", ["members", _]) => Some(Reserved::Sharing),
         ("DELETE", ["members", "me"]) => None,
         ("DELETE", ["members", _]) => Some(Reserved::Sharing),
@@ -497,6 +498,7 @@ mod tests {
             assert_eq!(reserved(method, rest), Some(Reserved::OwnerOnly), "{method} {rest:?}");
         }
         for (method, rest) in [
+            ("PUT", &["address"][..]),
             ("PUT", &["members", "id:00"][..]),
             ("DELETE", &["members", "npub1x"][..]),
             ("POST", &["invites"][..]),

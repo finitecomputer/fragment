@@ -405,7 +405,7 @@ async fn shoot(cdp: &mut Cdp<'_>, page: &card::Visit, deadline: i64) -> Result<V
     let target = target["targetId"].as_str().ok_or_else(|| Failure::retry("no page target"))?.to_string();
     let attached = cdp.call("Target.attachToTarget", json!({ "targetId": target, "flatten": true }), deadline).await?;
     cdp.target_session = Some(attached["sessionId"].as_str().ok_or_else(|| Failure::retry("no target session"))?.to_string());
-    let viewport = json!({ "width": card::WIDTH, "height": card::HEIGHT, "deviceScaleFactor": card::SCALE, "mobile": false });
+    let viewport = json!({ "width": card::VIEWPORT_WIDTH, "height": card::VIEWPORT_HEIGHT, "deviceScaleFactor": card::SCALE, "mobile": false });
     cdp.call("Emulation.setDeviceMetricsOverride", viewport, deadline).await?;
     for domain in ["Page", "Runtime", "Log"] {
         cdp.call(&format!("{domain}.enable"), json!({}), deadline).await?;

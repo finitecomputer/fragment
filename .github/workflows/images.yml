@@ -8,7 +8,7 @@
 #   --test docker -- --ignored`). It runs only when a change touches what it
 #   builds or runs (`changes` below: images/hermes, images/bridge,
 #   images/stub, the images' manifest and lock, or this workflow), on pull
-#   requests and on master's pushes, and on every run by hand.
+#   requests, merge groups and master's pushes, and on every run by hand.
 #
 # Their Rust cache (the registry and images/target's dependencies) is
 # Swatinem/rust-cache's, one key for both jobs, saved only from master's
@@ -21,6 +21,10 @@ on:
     paths: ["images/**", "cli/SKILL.md", ".github/workflows/images.yml"]
   pull_request:
     paths: ["images/**", "cli/SKILL.md", ".github/workflows/images.yml"]
+  # No event-level path filter exists for merge_group. `changes` compares
+  # the group's exact base and head, so the Docker lane stays conditional.
+  merge_group:
+    types: [checks_requested]
   workflow_dispatch:
 
 concurrency:
@@ -29,6 +33,8 @@ concurrency:
 
 jobs:
   check:
+    # ci.yml also has `check`; required checks need unambiguous names.
+    name: images check
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -50,8 +56,8 @@ jobs:
   # Whether the Docker lane runs: a change to what it builds or runs. Its own
   # job, since a job's `if` reads only another job's outputs. The changed
   # files are the pull request's (from the API, every page), or the push's
-  # since its `before` (by git, hence the checkout); a run by hand runs the
-  # lane whatever it says.
+  # since its `before`, or the merge group's since its exact base (by git,
+  # hence the checkout); a run by hand runs the lane whatever it says.
   changes:
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -62,6 +68,8 @@ jobs:
       - id: paths
         uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
         with:
+          base: ${{ github.event.merge_group.base_sha || github.ref }}
+          ref: ${{ github.event.merge_group.head_sha || github.ref }}
           filters: |
             docker:
               - images/hermes/**

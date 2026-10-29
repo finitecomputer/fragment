@@ -169,6 +169,7 @@ pub fn site(s: &mut Suite, api: &Api) -> Result<()> {
     if !s.section("site", &[crate::Need::Fakes, crate::Need::Deployment, crate::Need::Levers]) {
         return Ok(());
     }
+    public_addresses(s, api)?;
     let owner = api.person()?;
     let viewer = api.person()?;
     let stranger = api.person()?;
@@ -427,6 +428,61 @@ pub fn site(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.call(Call { method: "POST", url: format!("{}/f/{name}", api.base), body: Some(b"{}".to_vec()), content_type: Some("application/json"), ..Call::default() })?;
     s.ok("nor does the bare path: a write is no redirect (a 308 would send it on)", r.status == 404 && r.header("location").is_empty(), &r);
     preview_cards(s, api, &owner)
+}
+
+/// A pretty address really serves the same app at its own origin. The
+/// registry arbitrates claims, and an ended app never hands that origin
+/// to a replacement with the same generated name.
+fn public_addresses(s: &mut Suite, api: &Api) -> Result<()> {
+    let owner = api.person()?;
+    let viewer = api.person()?;
+    let name = s.named(api, &owner, "pretty-address")?;
+    let other = s.named(api, &owner, "other-address")?;
+    for name in [&name, &other] {
+        let made = api.signed(&owner, "POST", "/api/fragments", Some(&json!({ "name": name, "template": "todo", "visibility": "public" })))?;
+        s.ok("a public-address test app is deployed from the real template", made.status == 200, &made);
+    }
+    api.share(&name, viewer.pubkey_hex(), "viewer")?;
+    let route = format!("/api/f/{name}/address");
+    let label = name.split("--").next().expect("a named fragment has a label");
+    let body = json!({ "label": label });
+    let refused = api.signed(&viewer, "PUT", &route, Some(&body))?;
+    s.ok("a viewer cannot claim the app's address", refused.status == 403, &refused);
+    for bad in ["UPPER", "a.b", "a--b", "-a", "a-", ""] {
+        let refused = api.signed(&owner, "PUT", &route, Some(&json!({ "label": bad })))?;
+        s.ok("an invalid public hostname is refused", refused.status == 400, &refused);
+    }
+    let agent = fragment_nip98::Keys::generate();
+    let registered = api.signed(&owner, "POST", "/api/identities", Some(&json!({ "kind": "agent", "proof": api.proof(&agent, "POST", "/api/identities", &owner) })))?;
+    s.ok("the address owner's agent is registered", registered.status == 200, &registered);
+    let owner_id = api.identity(&owner)?;
+    let by_itself = api.signed(&agent, "PUT", &route, Some(&body))?;
+    s.ok("an agent claims only acting for its owner", by_itself.status == 403, &by_itself);
+    let agent_id = registered.body["id"].as_str().expect("the registered agent has an identity");
+    let hold = format!("/api/identities/{agent_id}/held");
+    api.signed(&owner, "PUT", &hold, Some(&json!({ "held": "viewer" })))?;
+    let held = api.signed(&agent, "PUT", &format!("{route}?for={owner_id}"), Some(&body))?;
+    s.ok("a held agent cannot claim an address above its owner's hold", held.status == 403, &held);
+    api.signed(&owner, "PUT", &hold, Some(&json!({ "held": null })))?;
+    let claimed = api.signed(&agent, "PUT", &format!("{route}?for={owner_id}"), Some(&body))?;
+    let replay = api.signed(&owner, "PUT", &route, Some(&body))?;
+    let collision = api.signed(&owner, "PUT", &format!("/api/f/{other}/address"), Some(&body))?;
+    s.ok("the first address claim wins, retrying it is idempotent, and a competing app is refused", claimed.status == 200 && replay.body == claimed.body && collision.status == 409, json!({ "claim": claimed.body, "replay": replay.body, "collision": collision.body }));
+    let address = claimed.body["address"]["url"].as_str().unwrap_or_default().to_string();
+    let page = api.call(Call { method: "GET", url: address.clone(), ..Call::default() })?;
+    s.ok("the pretty origin serves the real app directly, with no redirect", page.status == 200 && page.header("location").is_empty() && page.text.contains("__fragment.js") && guarded(&page), origin_detail(&page));
+    let old = api.page(&name, "", None)?;
+    // Origin-specific metadata (canonical and preview URLs) must differ;
+    // the app's body is still the same deployed file.
+    let old_body = old.text.split_once("<body").map(|(_, body)| body);
+    let pretty_body = page.text.split_once("<body").map(|(_, body)| body);
+    s.ok("the generated address still opens the same app", old.status == 200 && old_body.is_some() && old_body == pretty_body, origin_detail(&old));
+    let gone = api.signed(&owner, "DELETE", &format!("/api/f/{name}"), None)?;
+    let ended = api.call(Call { method: "GET", url: address.clone(), ..Call::default() })?;
+    s.ok("deleting an app ends its pretty address", gone.status == 200 && ended.status == 404, json!({ "delete": gone.body, "address_status": ended.status }));
+    let stolen = api.signed(&owner, "PUT", &format!("/api/f/{other}/address"), Some(&body))?;
+    s.ok("an ended app's public origin cannot be claimed by another app", stolen.status == 409, &stolen);
+    Ok(())
 }
 
 /// Preview cards beyond the first: who gets none, and a shot that fails.
