@@ -86,3 +86,53 @@ only, so a note's HTML shows as text). `api/tree` lists the
 brain's files and two it makes: `_index.md` (its wikis, the landing) and
 `AGENTS.md` (the guide), each unless the brain holds one of its own. An
 asset's bytes come from the platform's `__file`.
+
+## Search the current local folder
+
+    fragment search garden--k3x9 'orchard pruning' --dir ./garden
+    fragment search garden--k3x9 'orchard pruning' --dir ./garden --limit 5 --json
+
+This CLI search reads the actual working files without syncing or contacting
+any server, and needs no login or watcher. Each invocation rebuilds a disposable
+SQLite FTS5 index **in memory**, outside the synced content. Unsynced edits and
+new Markdown files are included; deleted files disappear immediately. There is
+no disk index to invalidate or repair. A missing, old or corrupt sync journal
+makes files `local_only`; a valid journal naming another fragment is refused.
+The supplied name identifies the source; without a journal it is a label, not
+proof that the folder has ever synced to that fragment.
+
+`--json` uses the CLI's usual `{ok:true,data:…}` envelope. Data is
+`{q, words, results, skipped}`; each result has `{rank, fragment, path, title,
+heading, ancestry, state, snippet}`. Rank starts at 1, ancestry is an array of
+parent headings, heading is null for a page's introductory text, and snippet
+is a plain excerpt of at most 300 UTF-8 bytes. States are:
+
+- `synced`: bytes match the **last local sync journal**. This does not verify
+  the server's current version or a deployed release.
+- `local_only`: a new local file or bytes changed since the last sync.
+- `conflicted`: sync recorded divergence, a sibling `.conflict-…` copy remains,
+  or the working file contains merge conflict markers. Search returns the
+  working file's text with this warning; remote conflict copies are evidence,
+  not separate search hits. Sync clears its journal flag when it next adopts,
+  pushes or pulls agreed content; retained copies keep warning until removed.
+  Older journals cannot report a conflict whose copy was never saved.
+
+Query words use the server search's NFKC/lowercase, all-required prefix
+semantics, with no FTS operators: 1–256 characters, 1–16 words, and `--limit`
+1–50 (default 10). Ranking uses BM25 with title 4, heading 3, path and ancestry
+2, body 1, with stable path/section tie breaks. Local files obey sync's ignore
+rules and never follow symlinks. Brain machinery, `AGENTS.md` and `_index.md`
+are excluded, as on the server. Pages at least 1 MiB and non-UTF-8 pages are
+reported in `skipped`; only the first 500 sections per page are retained
+(also reported). Other read failures fail the command rather than silently
+returning an incomplete answer.
+
+The local parser uses CommonMark (including Setext headings), ignoring headings
+inside code fences. It recognizes scalar frontmatter title, summary,
+description and inline tags; unlike the server parser it does not interpret
+multiline YAML tags. Long sections split at 8000 Unicode characters, including
+inside paragraphs. Local and server rank values are not interchangeable.
+Rebuilding means each search reads every eligible page: this favors freshness
+and a simple rebuildable interface over incremental performance. A search is
+not an atomic filesystem snapshot; files edited during a scan can reflect
+different moments. It never changes working files or the sync journal.

@@ -1,5 +1,6 @@
 mod api;
 mod ask;
+mod brain_search;
 mod auth;
 mod blobs;
 mod codestorage;
@@ -56,6 +57,15 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Search a brain's current local Markdown sections, offline (never syncs)
+    Search {
+        name: String,
+        q: String,
+        #[arg(long, default_value = ".")]
+        dir: PathBuf,
+        #[arg(long, default_value = "10", value_parser = clap::value_parser!(u32).range(1..=50))]
+        limit: u32,
+    },
     /// Make a nostr key (or use the one you have) and add it to you: it
     /// prints a code, which you type at the host's /cli page, signed in, in
     /// a browser (--force makes a new key)
@@ -1087,6 +1097,19 @@ fn run(cli: Cli) -> Result<()> {
     let j = cli.json || json_env_flag();
 
     match cli.cmd {
+        Cmd::Search { name, q, dir, limit } => {
+            brain_search::validate_query(&q).map_err(usage)?;
+            let answer = brain_search::search(&name, &dir, &q, limit)?;
+            json_exit(j, &answer);
+            for hit in &answer.results {
+                println!("{}. {}:{} [{}] {}", hit.rank, hit.fragment, hit.path, hit.state, hit.ancestry.iter().chain(hit.heading.iter()).cloned().collect::<Vec<_>>().join(" > "));
+                println!("  {}", hit.snippet);
+            }
+            for skipped in &answer.skipped {
+                eprintln!("skipped {}: {}", skipped.path, skipped.reason);
+            }
+            return Ok(());
+        }
         Cmd::Login { force, no_wait, no_browser } => {
             // an agent has no key to log in with: its computer signs for it
             if let Some(mode) = agent_mode()? {
@@ -2244,7 +2267,7 @@ fn run(cli: Cli) -> Result<()> {
             json_exit(j, &json!({ "visibility": visibility }));
             println!("{name}: {}", visibility.as_str());
         }
-        Cmd::Login { .. } | Cmd::Host { .. } | Cmd::Guide | Cmd::Skill | Cmd::New { .. } | Cmd::Operator { .. } => unreachable!(),
+        Cmd::Search { .. } | Cmd::Login { .. } | Cmd::Host { .. } | Cmd::Guide | Cmd::Skill | Cmd::New { .. } | Cmd::Operator { .. } => unreachable!(),
     }
     Ok(())
 }
