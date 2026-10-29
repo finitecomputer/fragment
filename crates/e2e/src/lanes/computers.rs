@@ -1891,6 +1891,27 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
                 && notice(&back, "went_back")["cause"] == "image_rollback",
             json!({ "checkpoint": checkpoint, "view": back }),
         );
+        // The bridge tells the agent what the canary did after the checkpoint.
+        // Read that note here, before later command checks parse plain replies.
+        let reply_after = |seq| {
+            let turn = turn_of(&agent_name, &chat_name, "chat", seq);
+            agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).into_iter().find(|r| r["body"]["turn"] == turn.as_str())
+        };
+        let said = say(33, "after the image rollback")?;
+        let seq = said.body["record"]["seq"].as_i64().unwrap_or(0);
+        let answered = s.eventually(wake, || reply_after(seq).is_some());
+        let told = reply_after(seq).and_then(|r| r["body"]["text"].as_str().map(str::to_string)).unwrap_or_default();
+        let said = say(34, "after the rollback note")?;
+        let seq = said.body["record"]["seq"].as_i64().unwrap_or(0);
+        let answered_again = s.eventually(wake, || reply_after(seq).is_some());
+        let then = reply_after(seq).and_then(|r| r["body"]["text"].as_str().map(str::to_string)).unwrap_or_default();
+        s.ok(
+            "the agent is told once what the image rollback forgot, from the journal",
+            answered && told.contains("(told: Your memory of this chat is behind")
+                && told.contains("You were asked: “after the upgrade”")
+                && answered_again && !then.contains("(told:"),
+            json!({ "first": told, "second": then }),
+        );
     }
 
     // a computer's egress alone asks for a wake subscription
