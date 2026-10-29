@@ -2940,6 +2940,7 @@ fn update_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
     );
     // a read of it failing meanwhile (#437): what the last one said stays
     refresh_failed_ui(s, api, b, page, session, first["agents"][0]["fragment"].as_str().unwrap_or(""), shots)?;
+    deploying_read_ui(s, api, b, page, session, first["agents"][0]["fragment"].as_str().unwrap_or(""))?;
     // settings, read again, says the version it runs and the latest
     b.reload(page)?;
     let versions = b.until(page, "document.getElementById('settings-page').innerText.includes('Latest version')", wait);
@@ -3065,6 +3066,61 @@ fn refresh_failed_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, ses
     b.eval(page, READ_AGAIN)?;
     let back = b.until(page, &format!("{NO_REFRESH_LINE} && {update}"), wait);
     s.ok("Try again reads it again: the line goes, the update stays", back, b.eval(page, "document.getElementById('computer-notices').innerText")?);
+    Ok(())
+}
+
+/// Release mismatches use the real read/error path, with the response injected
+/// at fetch like FAIL_COMPUTERS. No server-only deployment lever is needed.
+fn deploying_read_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &str, fragment: &str) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    let updating = "!!document.querySelector('#computer-notices .computer-notice[data-kind=deploying]')";
+    b.eval(page, r#"(() => {
+        const real = window.fetch.bind(window);
+        window.__deployPath = null; window.__deployReads = 0; window.__deployError = 'deploying';
+        window.fetch = (url, o) => {
+            if (url === window.__deployPath && o?.method === 'GET') {
+                window.__deployReads++;
+                return Promise.resolve(new Response(JSON.stringify({ error: window.__deployError }), { status: 503, headers: { 'content-type': 'application/json' } }));
+            }
+            return real(url, o);
+        }; return true;
+    })()"#)?;
+    for path in ["/api/computers", "/api/fragments"] {
+        b.eval(page, &format!("(window.__deployPath = {}, window.__deployReads = 0, true)", json!(path)))?;
+        shell(api, session, "PUT", &format!("/api/fragments/{fragment}/archived"), Some(&json!({ "archived": false })), &[])?;
+        let shown = b.until(page, updating, wait);
+        let said = b.eval(page, "document.getElementById('computer-notices').innerText")?;
+        let no_retry = b.eval(page, "!document.querySelector('#computer-notices [data-action=refresh]')")?;
+        let menu = agent_menu(b, page)?;
+        s.ok(&format!("{path} deploying: Updating, no Try again, last good computer and sidebar kept"),
+            shown && no_retry == true && knows_agent(&menu) && said.as_str().is_some_and(|t| t.contains("Updating — back in a moment") && t.contains("An update is ready for your computer")),
+            json!({ "said": said, "menu": menu }));
+        b.eval(page, "(window.__deployPath = null, true)")?;
+        let cleared = b.until(page, &format!("!({updating}) && {NO_REFRESH_LINE}"), wait);
+        s.ok(&format!("{path} deploying clears itself without a click"), cleared, b.eval(page, "window.__deployReads")?);
+    }
+    // Advance only this page's clock, then let its real retry timer fire.
+    b.eval(page, "(window.__deployPath = '/api/computers', window.__deployReads = 0, true)")?;
+    shell(api, session, "PUT", &format!("/api/fragments/{fragment}/archived"), Some(&json!({ "archived": false })), &[])?;
+    b.until(page, updating, wait);
+    b.eval(page, "(() => { const now = Date.now; Date.now = () => now() + 8 * 60_000; window.__restoreNow = () => { Date.now = now; }; return true; })()")?;
+    let expired = b.until(page, REFRESH_LINE, wait);
+    let count = b.eval(page, "window.__deployReads")?;
+    std::thread::sleep(std::time::Duration::from_secs(4));
+    let stopped = b.eval(page, "window.__deployReads")? == count;
+    b.eval(page, "(window.__restoreNow(), true)")?;
+    s.ok("deploying after eight minutes falls back to Try again and stops automatic reads", expired && stopped, count);
+    b.eval(page, "(window.__deployPath = null, true)")?;
+    b.eval(page, READ_AGAIN)?;
+    b.until(page, NO_REFRESH_LINE, wait);
+    // A different 503 must still offer Try again, without auto-retrying.
+    b.eval(page, "(window.__deployPath = '/api/computers', window.__deployError = 'unavailable', true)")?;
+    shell(api, session, "PUT", &format!("/api/fragments/{fragment}/archived"), Some(&json!({ "archived": false })), &[])?;
+    let failed = b.until(page, REFRESH_LINE, wait);
+    s.ok("a non-deploying 503 still offers Try again", failed, b.eval(page, "document.getElementById('computer-notices').innerText")?);
+    b.eval(page, "(window.__deployPath = null, true)")?;
+    b.eval(page, READ_AGAIN)?;
+    b.until(page, NO_REFRESH_LINE, wait);
     Ok(())
 }
 
