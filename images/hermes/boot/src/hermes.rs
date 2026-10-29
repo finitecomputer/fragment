@@ -79,9 +79,48 @@ impl OwnModel {
     /// name (`[a-z0-9-]`, 1 to 32) and a model's id (`model_id_ok`).
     pub fn of(agent_json: &[u8]) -> Option<OwnModel> {
         let v: serde_json::Value = serde_json::from_slice(agent_json).ok()?;
-        let (provider, id) = (v["model"]["provider"].as_str()?, v["model"]["id"].as_str()?);
+        Self::at(&v["model"], None)
+    }
+
+    fn at(v: &serde_json::Value, default_provider: Option<&str>) -> Option<OwnModel> {
+        let provider = match v.get("provider") {
+            Some(v) => v.as_str()?,
+            None => default_provider?,
+        };
+        let id = v["id"].as_str()?;
         let provider_ok = (1..=32).contains(&provider.len()) && provider.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
         (provider_ok && model_id_ok(id)).then(|| OwnModel { provider: provider.into(), id: id.into() })
+    }
+
+    /// The optional, add-only Deep choice inside the legacy Fast model.
+    /// No choice means the existing Fast model and effort serve both modes.
+    pub fn deep_of(agent_json: &[u8]) -> Option<(OwnModel, Reasoning)> {
+        let v: serde_json::Value = serde_json::from_slice(agent_json).ok()?;
+        let fast = Self::at(&v["model"], None)?;
+        let deep = Self::at(&v["model"]["deep"], Some(&fast.provider))?;
+        let reasoning = serde_json::from_value(v["model"]["deep"]["reasoning"].clone()).unwrap_or_else(|_| Reasoning::of(Some(agent_json)));
+        Some((deep, reasoning))
+    }
+}
+
+/// A connected own model's endpoint and placeholder, shared by both modes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnRoute {
+    pub provider: String,
+    pub base: String,
+    pub id: String,
+    pub placeholder: String,
+}
+
+impl OwnRoute {
+    fn of(agent: &Agent, model: &OwnModel) -> Result<Self, String> {
+        let Some(c) = agent.credentials.iter().find(|c| c.provider == model.provider) else {
+            return Err(format!("its owner has not connected {} (or narrowed the agent from it)", model.provider));
+        };
+        let base = c.model_base.as_deref().map(|b| b.trim_end_matches('/')).unwrap_or_default();
+        let base_ok = (base.starts_with("https://") || base.starts_with("http://")) && base.len() <= MODEL_BASE_MAX_BYTES && base.bytes().all(|b| (0x21..=0x7e).contains(&b) && b != b'"' && b != b'\\');
+        if !base_ok { return Err(format!("{} serves no models here", model.provider)); }
+        Ok(Self { provider: model.provider.clone(), base: base.into(), id: model.id.clone(), placeholder: c.placeholder.clone() })
     }
 }
 
@@ -96,7 +135,7 @@ pub const DEFAULT_REASONING: Reasoning = Reasoning::High;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MainModel {
     Tier(Tier),
-    Own { provider: String, base: String, id: String, placeholder: String },
+    Own { fast: OwnRoute, deep: Option<Box<(OwnRoute, Reasoning)>> },
 }
 
 impl From<Tier> for MainModel {
@@ -112,22 +151,28 @@ impl MainModel {
     /// its own and that is not used, why.
     pub fn of(agent: &Agent, tier: Tier, own: Option<&OwnModel>) -> (MainModel, Option<String>) {
         let Some(own) = own else { return (MainModel::Tier(tier), None) };
-        let Some(c) = agent.credentials.iter().find(|c| c.provider == own.provider) else {
-            return (MainModel::Tier(tier), Some(format!("its owner has not connected {} (or narrowed the agent from it)", own.provider)));
-        };
-        let base = c.model_base.as_deref().map(|b| b.trim_end_matches('/')).unwrap_or_default();
-        let base_ok = (base.starts_with("https://") || base.starts_with("http://")) && base.len() <= MODEL_BASE_MAX_BYTES && base.bytes().all(|b| (0x21..=0x7e).contains(&b) && b != b'"' && b != b'\\');
-        if !base_ok {
-            return (MainModel::Tier(tier), Some(format!("{} serves no models here", own.provider)));
+        match OwnRoute::of(agent, own) {
+            Ok(fast) => (MainModel::Own { fast, deep: None }, None),
+            Err(why) => (MainModel::Tier(tier), Some(why)),
         }
-        (MainModel::Own { provider: own.provider.clone(), base: base.into(), id: own.id.clone(), placeholder: c.placeholder.clone() }, None)
+    }
+
+    /// An unavailable Deep choice keeps the working Fast route, never a
+    /// platform fallback. A tier ignores own-mode settings altogether.
+    pub fn with_deep(self, agent: &Agent, choice: Option<(OwnModel, Reasoning)>) -> (Self, Option<String>) {
+        let Self::Own { fast, .. } = self else { return (self, None) };
+        let Some((model, reasoning)) = choice else { return (Self::Own { fast, deep: None }, None) };
+        match OwnRoute::of(agent, &model) {
+            Ok(deep) => (Self::Own { fast, deep: Some(Box::new((deep, reasoning))) }, None),
+            Err(why) => (Self::Own { fast, deep: None }, Some(why)),
+        }
     }
 
     /// How events name it: a tier, or `<provider>:<id>`.
     pub fn name(&self) -> String {
         match self {
             MainModel::Tier(t) => t.name().into(),
-            MainModel::Own { provider, id, .. } => format!("{provider}:{id}"),
+            MainModel::Own { fast, .. } => format!("{}:{}", fast.provider, fast.id),
         }
     }
 
@@ -498,9 +543,9 @@ pub fn profile_config(agent: &Agent, name: &str, home: Home, main: &MainModel, r
         // shape): its key the provider's placeholder, which the swap
         // replaces on the way out. Its context length is Hermes' to find
         // (the provider's own metadata).
-        MainModel::Own { base, id, placeholder, .. } => {
-            y.push_str(&format!("model:\n  provider: \"custom\"\n  base_url: {}\n  default: {}\n", q(base), q(id)));
-            y.push_str(&format!("  api_key: {}\n", q(placeholder)));
+        MainModel::Own { fast, .. } => {
+            y.push_str(&format!("model:\n  provider: \"custom\"\n  base_url: {}\n  default: {}\n", q(&fast.base), q(&fast.id)));
+            y.push_str(&format!("  api_key: {}\n", q(&fast.placeholder)));
         }
     }
     // On every call, the main model's and the auxiliary ones': the route
@@ -591,6 +636,16 @@ pub fn profile_config(agent: &Agent, name: &str, home: Home, main: &MainModel, r
                 y.push_str("  fallback_providers: []\n");
             }
         }
+    }
+    if let MainModel::Own { fast, deep } = main {
+        let (deep, effort) = deep.as_deref().map(|(d, e)| (d, *e)).unwrap_or((fast, reasoning));
+        y.push_str(&format!("  provider: \"custom\"\n  base_url: {}\n  api_key: {}\n  model: {}\n  reasoning_effort: {}\n  fallback_providers: []\n  request_overrides:\n    max_tokens: {DEEP_MAX_TOKENS}\n", q(&deep.base), q(&deep.placeholder), q(&deep.id), q(effort.name())));
+        // Hermes keys patience by provider/model, not by mode. Shared ids
+        // get Deep's longer budget (also preserves legacy BYO patience).
+        let shared = fast.id == deep.id;
+        let patience = if shared { DEEP_STALE_TIMEOUT_S } else { STALE_TIMEOUT_S };
+        y.push_str(&format!("providers:\n  custom:\n    models:\n      {}:\n        stale_timeout_seconds: {patience}\n", q(&fast.id)));
+        if !shared { y.push_str(&format!("      {}:\n        stale_timeout_seconds: {DEEP_STALE_TIMEOUT_S}\n", q(&deep.id))); }
     }
     // Stored selections, never inferred by Hermes from credential presence.
     // Only placeholders actually held by this agent count: the catalog's
@@ -1211,7 +1266,7 @@ mod tests {
                 let expected = if matches!(main, MainModel::Own { .. }) { r } else { Reasoning::High };
                 let mapping: Vec<&str> = p.lines().skip_while(|l| *l != "agent:").skip(1).take_while(|l| l.starts_with("  ")).collect();
                 assert!(mapping.contains(&format!("  reasoning_effort: \"{}\"", expected.name()).as_str()), "the {} model thinks {} in its `agent` mapping: {p}", main.name(), expected.name());
-                assert_eq!((p.matches("reasoning_effort").count(), p.matches("\nagent:\n").count()), (1, 1), "said once, in its one `agent` mapping: {p}");
+                assert_eq!((p.matches("reasoning_effort").count(), p.matches("\nagent:\n").count()), (if matches!(main, MainModel::Own { .. }) { 2 } else { 1 }, 1), "one main effort, and an own model's inherited Deep effort: {p}");
                 assert_eq!(p, config(r), "the same reasoning, the same config: nothing written");
             }
             assert_eq!(config(Reasoning::Low) == config(Reasoning::High), matches!(main, MainModel::Tier(_)), "only an owner's model follows its personal reasoning setting");
@@ -1261,10 +1316,10 @@ mod tests {
             ids["routes"]["cheap"]["deep"]["fallback"] = fallback;
             assert!(config(&ids, Tier::Cheap.into()).contains("  fallback_providers: []\n"), "no child inheritance or self-loop");
         }
-        let own = MainModel::Own { provider: "openrouter".into(), base: "https://openrouter.ai/api/v1".into(), id: "someone/model".into(), placeholder: "fck_key".into() };
+        let own = MainModel::Own { fast: OwnRoute { provider: "openrouter".into(), base: "https://openrouter.ai/api/v1".into(), id: "someone/model".into(), placeholder: "fck_key".into() }, deep: None };
         let p = config(&ids, own);
         assert!(p.contains("  reasoning_effort: \"low\"\n") && p.contains("delegation:\n  max_concurrent_children: 3\n"));
-        assert!(!p.contains("  request_overrides:") && !p.contains("stale_timeout_seconds"), "BYO does not borrow the platform's Deep: {p}");
+        assert!(p.contains("  model: \"someone/model\"\n") && p.contains("  fallback_providers: []\n"), "BYO inherits its own Fast, never the platform's Deep: {p}");
         let old = profile_config(&agent(), "Juniper", Home::Chat, &Tier::Cheap.into(), Reasoning::Low, &route("http://m"), &[], Path::new("/c.sh"));
         assert!(!old.contains("  request_overrides:"), "old cells retain parent inheritance: {old}");
     }
@@ -1539,7 +1594,7 @@ mod tests {
                 assert!(!p.contains(overlaid), "the overlay's alone, never the {} profile's: {p}", main.name());
             }
             let falls_back = matches!(main, MainModel::Tier(Tier::Cheap | Tier::Medium));
-            assert_eq!(p.contains("fallback_providers:"), falls_back, "only a text tier falls back to the route's fallback (an owner's own model is theirs): {p}");
+            assert_eq!(p.contains("\nfallback_providers:\n"), falls_back, "only a text tier falls back to the route's fallback (an owner's own model is theirs): {p}");
         }
         assert!(!default_config("http://model.fragment.internal").contains("approvals"), "the gateway's own profile runs no turns");
     }
@@ -1752,6 +1807,58 @@ mod tests {
         assert!(!p.contains("context_length"), "its provider says its context: {p}");
         assert!(p.contains("    base_url: \"http://model.fragment.internal/v1\"\n    model: \"vision\"\n"), "its eyes stay the route's: {p}");
         assert!(p.contains("    model: \"whisper\"\n"), "its ears too: {p}");
+    }
+
+    /// Independent modes, legacy inheritance, and a revoked Deep provider:
+    /// regenerate from the same inputs after a restart without borrowing
+    /// any platform model or losing the working Fast credential.
+    #[test]
+    fn own_modes_keep_their_models_efforts_and_credentials() {
+        let mut a = agent();
+        let mut fast = credential("openrouter", &["OPENROUTER_API_KEY"], "fck_fast");
+        fast.model_base = Some("https://openrouter.ai/api/v1".into());
+        let mut deep = credential("other", &[], "fck_deep");
+        deep.model_base = Some("https://models.example/v1".into());
+        a.credentials = vec![fast, deep];
+        let write = |a: &Agent, json: &[u8]| {
+            let (main, why) = MainModel::of(a, Tier::Cheap, OwnModel::of(json).as_ref());
+            assert_eq!(why, None);
+            let (main, unused) = main.with_deep(a, OwnModel::deep_of(json));
+            (profile_config(a, "Juniper", Home::Chat, &main, Reasoning::of(Some(json)), &route("http://m"), &[], Path::new("/c.sh")), unused)
+        };
+        let json = br#"{"model":{"provider":"openrouter","id":"fast","deep":{"provider":"other","id":"deep","reasoning":"max"}},"reasoning":"low"}"#;
+        let (config, unused) = write(&a, json);
+        assert_eq!(unused, None);
+        assert!(config.contains("  default: \"fast\"\n  api_key: \"fck_fast\"\n"));
+        assert!(config.contains("reasoning_effort: \"low\"\n"));
+        assert!(config.contains("delegation:\n  max_concurrent_children: 3\n  provider: \"custom\"\n  base_url: \"https://models.example/v1\"\n  api_key: \"fck_deep\"\n  model: \"deep\"\n  reasoning_effort: \"max\"\n  fallback_providers: []\n  request_overrides:\n    max_tokens: 32768\n"));
+        assert!(config.contains("\"fast\":\n        stale_timeout_seconds: 20\n"));
+        assert!(config.contains("\"deep\":\n        stale_timeout_seconds: 180\n"));
+        assert_eq!(write(&a, json).0, config, "a restart replays both choices");
+        a.credentials.pop();
+        let (revoked, why) = write(&a, json);
+        assert!(why.unwrap().contains("not connected other"));
+        assert!(revoked.contains("  default: \"fast\"\n  api_key: \"fck_fast\"\n"));
+        assert!(revoked.contains("  model: \"fast\"\n  reasoning_effort: \"low\"\n  fallback_providers: []\n"));
+        assert!(!revoked.contains("fck_deep") && !revoked.contains("x-fragment-tier"));
+        assert!(revoked.contains("\"fast\":\n        stale_timeout_seconds: 180\n"), "one model id shares Deep's patience");
+        let legacy = br#"{"model":{"provider":"openrouter","id":"fast"},"reasoning":"low"}"#;
+        assert_eq!(write(&a, legacy), (revoked, None), "old BYO inherits Fast, including Low");
+        a.credentials.clear();
+        let (main, why) = MainModel::of(&a, Tier::Cheap, OwnModel::of(json).as_ref());
+        assert_eq!(main, MainModel::Tier(Tier::Cheap));
+        assert!(why.is_some());
+        assert_eq!(main.with_deep(&a, OwnModel::deep_of(json)), (MainModel::Tier(Tier::Cheap), None));
+    }
+
+    #[test]
+    fn own_deep_validates_the_optional_choice_and_inherits_legacy_defaults() {
+        let json = br#"{"model":{"provider":"openrouter","id":"fast","deep":{"id":"deep"}},"reasoning":"low"}"#;
+        assert_eq!(OwnModel::deep_of(json), Some((OwnModel { provider: "openrouter".into(), id: "deep".into() }, Reasoning::Low)));
+        for deep in [serde_json::json!({"id":"a b"}), serde_json::json!({"id":"x\n"}), serde_json::json!({"id":"x","provider":null}), serde_json::json!({"id":"x","provider":"Upper"}), serde_json::json!({"id":"x".repeat(129)}), serde_json::json!(null)] {
+            let value = serde_json::json!({"model":{"provider":"openrouter","id":"fast","deep":deep}});
+            assert_eq!(OwnModel::deep_of(&serde_json::to_vec(&value).unwrap()), None, "{value}");
+        }
     }
 
     /// Valid: each credential's placeholder is in its environment

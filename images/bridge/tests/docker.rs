@@ -3408,9 +3408,10 @@ async fn an_agent_runs_on_its_owners_model() {
     let placeholder = format!("fck_openrouter_{}", "0123456789abcdef0123456789abcdef");
     let base = format!("http://model.fragment.internal:{}/own/api/v1", model.addr.port());
     let id = "anthropic/claude-sonnet-5.5";
+    let deep_id = "deepseek/deepseek-v4.1-flash";
     fake.with(|w| {
         w.computer["agents"][0]["credentials"] = json!([{ "provider": "openrouter", "kind": "own", "env": ["OPENROUTER_API_KEY"], "placeholder": placeholder, "hosts": ["openrouter.ai"], "modelBase": base }]);
-        let agent_json = format!(r#"{{"tier":"cheap","model":{{"provider":"openrouter","id":"{id}"}},"reasoning":"low","color":"blue"}}"#);
+        let agent_json = json!({"tier":"cheap","model":{"provider":"openrouter","id":id,"deep":{"provider":"openrouter","id":deep_id,"reasoning":"max"}},"reasoning":"low","color":"blue"}).to_string();
         w.fragments.get_mut("juniper--k3x9").unwrap().files.insert("agent.json".into(), bytes::Bytes::from(agent_json));
     });
     let t = Instant::now();
@@ -3433,6 +3434,20 @@ async fn an_agent_runs_on_its_owners_model() {
     // `/model` shows the model it runs: its owner's, by its id
     let shown = model_shown(&fake, &chat, &c).await;
     assert!(shown.contains(id), "/model shows its own model: {shown:?}");
+
+    // Its separate Deep selection is used by native background delegates.
+    // The result's file still reaches the chat after the parent ended.
+    let before = model.calls.lock().unwrap().len();
+    let parent = asked(&fake, &chat, &c, "delegate the gate work", replied).await;
+    within(&fake, &chat, &c, 90_000, "BYO Deep's background result and file", |w| w.bodies(&chat, "chat", "reply").iter().any(|r| r["turn"] != parent && r["attachments"].as_array().is_some_and(|a| a.iter().any(|a| a["name"] == "delegate.txt")))).await;
+    let calls = calls_of(before);
+    let child: Vec<_> = calls.iter().filter(|c| support::model::delegate_goal(&c.body)).collect();
+    assert!(!child.is_empty(), "a real native delegate ran");
+    assert!(child.iter().all(|c| c.path == "/own/api/v1/chat/completions" && c.model == deep_id && c.authorization.as_deref() == Some(format!("Bearer {placeholder}").as_str()) && c.tier.is_none() && c.body["reasoning_effort"] == "max" && c.body["max_tokens"] == 32768), "Deep uses its owner's model, credential, effort and output cap: {child:?}");
+    let main: Vec<_> = calls.iter().filter(|c| c.body.get("tools").is_some() && !support::model::delegate_goal(&c.body)).collect();
+    assert!(!main.is_empty() && main.iter().all(|c| c.model == id && c.body["reasoning_effort"] == "low"), "Fast keeps its own selection: {main:?}");
+    assert!(config().contains("  fallback_providers: []\n"), "BYO never inherits platform Deep fallbacks");
+    assert_eq!(c.logs().matches("\"boot.init\"").count(), 1, "both choices took effect without restarting");
 
     // disconnected: its tier again, through the route
     fake.with(|w| w.computer["agents"][0]["credentials"] = json!([]));
