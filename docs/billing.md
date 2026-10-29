@@ -625,8 +625,9 @@ Checked against finite-mono's code (2026-10-08):
   - **Create:** name, days, capacity and expiry, with the code
     generated or typed; its kind is the always-on seat's.
   - **List:** each code's uses (who, when, the subscription's status).
-  - **Change:** raise the capacity, deactivate it, or edit the code.
-    Each change is compare-and-set.
+  - **Change:** raise or lower the capacity (never below the places
+    taken, which stay taken), deactivate it, or edit the code. Each
+    change is compare-and-set.
 - **Orgs.**
   - **The list:** name, admins, seats by kind, comped count, Stripe
     status, period end, and a link to the customer in Stripe's

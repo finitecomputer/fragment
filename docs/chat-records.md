@@ -543,6 +543,18 @@ layout and accessibility; its record replacing it on the way keeps the
 same entrance. Incoming messages, history and failed sends do not
 replay it; reduced motion skips it; scrolling or resizing ends it.
 
+**Arriving.** The page shows a new chat's start (its agent and the
+suggestions) only once its history is read and holds nothing, never
+while it loads. Arriving at a chat whose newest message is its person's
+own, said under 90 s ago with no turn started on it, it shows that
+message's waiting line at once (its agent starting up, or being waited
+for), as the page that sent it would.
+
+**The launcher's chat.** The shell's launcher loads a chat as it posts
+its first message, with `?sent=1` (docs/api.md, The launcher): the page
+then never shows a new chat's start, only that message once it is here,
+and its waiting line under it.
+
 **The first run.** The shell opens its person's first chat before their
 first agent is in it (`?setup=1`; docs/api.md, "The first run, in its
 chat"). The page then shows a card above the chat, "Setting up your

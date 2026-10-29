@@ -90,7 +90,7 @@ fn charged_for(milli: u64, (lo, hi): (f64, f64)) -> bool {
 /// Its decisions (fragment_core::decide).
 const DECIDE_ROUTE: &str = "/api/models/v1/decide";
 const GLM: &str = "@cf/zai-org/glm-5.3";
-const USD: i64 = 1_000_000;
+pub(super) const USD: i64 = 1_000_000;
 
 fn tokens(model: &str, input: u64, cached: u64, output: u64) -> Usage {
     Usage::Tokens { model: model.into(), input, cached_input: cached, cache_write: 0, output }
@@ -102,13 +102,13 @@ fn hello() -> Value {
 }
 
 /// What the default book charges for `usage`.
-fn charge(usage: &Usage) -> i64 {
+pub(super) fn charge(usage: &Usage) -> i64 {
     PriceBook::defaults().price(usage).expect("the book prices the tiers' models").charge
 }
 
 /// The fewest output tokens on `model`, after `prompt` in, that charge at
 /// least `micros` (a call a test sizes to move a balance where it wants).
-fn tokens_costing(model: &str, prompt: u64, micros: i64) -> u64 {
+pub(super) fn tokens_costing(model: &str, prompt: u64, micros: i64) -> u64 {
     let costs = |n: u64| charge(&tokens(model, prompt, 0, n));
     let mut hi = 1u64;
     // bounded: doubling past any charge a ledger takes ($100,000 a row)
@@ -131,7 +131,7 @@ fn tokens_costing(model: &str, prompt: u64, micros: i64) -> u64 {
     lo
 }
 
-fn ledger(api: &Api, keys: &Keys) -> Value {
+pub(super) fn ledger(api: &Api, keys: &Keys) -> Value {
     api.signed(keys, "GET", "/api/ledger", None).map(|r| r.body).unwrap_or(Value::Null)
 }
 
@@ -172,7 +172,7 @@ fn totals(api: &Api, identity: &str) -> Value {
     api.unsigned("POST", "/api/test/ledger", Some(&json!({ "identity": identity, "op": "totals" }))).map(|r| r.body).unwrap_or(Value::Null)
 }
 
-fn lever(api: &Api, fragment: &str, op: &str, extra: Value) -> Result<Reply> {
+pub(super) fn lever(api: &Api, fragment: &str, op: &str, extra: Value) -> Result<Reply> {
     let mut body = json!({ "fragment": fragment, "op": op });
     if let (Some(b), Some(e)) = (body.as_object_mut(), extra.as_object()) {
         b.extend(e.clone());

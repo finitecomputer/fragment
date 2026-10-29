@@ -112,7 +112,7 @@ pub fn shell_page(text: &str, release: &str, deployed: Option<u64>) -> String {
 /// each with its content type: of the rest of cell/shell/, its pages are
 /// served at their own paths, and its credits and licenses not at all.
 #[cfg(feature = "platform")]
-const SHELL_PUBLISHED: [(&str, &str); 32] = [
+const SHELL_PUBLISHED: [(&str, &str); 35] = [
     // the cell's server-rendered pages' base look (share.rs `sheet_html`),
     // on the platform's origin and, as /__sheet.css, on a fragment's
     ("sheet.css", "text/css; charset=utf-8"),
@@ -139,9 +139,15 @@ const SHELL_PUBLISHED: [(&str, &str); 32] = [
     ("agent-color.js", "text/javascript; charset=utf-8"),
     // its icons (Lucide's among them: vendor/lucide-LICENSE) and an app's
     ("icons.js", "text/javascript; charset=utf-8"),
+    // an app's own icon in the dock, and the sheet that makes one (docs/api.md, Icons)
+    ("app-icon.js", "text/javascript; charset=utf-8"),
+    // the Apps page: each app's dock, card, icon and who has access (docs/api.md, The shell)
+    ("apps-page.js", "text/javascript; charset=utf-8"),
     ("tooltips.js", "text/javascript; charset=utf-8"),
     // Settings' Billing: a seat, credit, an org (docs/billing.md)
     ("billing.js", "text/javascript; charset=utf-8"),
+    // the launcher: ⌘K, to start a chat or find one again (docs/api.md, The launcher)
+    ("launcher.js", "text/javascript; charset=utf-8"),
     ("vendor/split-grid.js", "text/javascript; charset=utf-8"),
     ("manifest.webmanifest", "application/manifest+json"),
     // the shell's favicon (a tab's, and the sign-in page's logo, which WorkOS takes from

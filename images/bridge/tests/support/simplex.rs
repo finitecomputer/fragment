@@ -348,6 +348,30 @@ pub async fn received_file(person: &mut Api, files: &Path, kind: &str, within: D
     (ci["chatItem"]["content"]["msgContent"].clone(), files.join(path))
 }
 
+/// A restored bridge and its peer have both finished ratchet recovery.
+/// Process readiness is earlier than this, and one endpoint can report
+/// `ok` while the other still prohibits sends. Poll the peer's durable
+/// state only after the bridge's recovery diagnostic has been observed.
+pub async fn recovered(person: &mut Api, contact: i64, within: Duration, bridge_ready: impl Fn() -> bool) {
+    let t0 = Instant::now();
+    let mut bridge_synced = false;
+    // bounded by `within`, including the wait for the bridge's diagnostic
+    loop {
+        assert!(t0.elapsed() < within, "both ends did not finish encryption recovery within {within:?}");
+        bridge_synced |= bridge_ready();
+        if bridge_synced {
+            let r = person.cmd(&format!("/_info @{contact}")).await;
+            assert_eq!(tag(&r), "contactInfo", "the peer's recovery state: {r}");
+            match r["connectionStats_"]["ratchetSyncState"].as_str() {
+                Some("ok") => return,
+                Some("started" | "agreed" | "required" | "allowed") => {}
+                _ => panic!("an unknown peer recovery state: {r}"),
+            }
+        }
+        person.drain(Duration::from_millis(200)).await;
+    }
+}
+
 /// The person writes to the agent; the id their app gave the message.
 pub async fn say(person: &mut Api, agent: i64, text: &str) -> String {
     let body = json!([{ "msgContent": { "type": "text", "text": text } }]);

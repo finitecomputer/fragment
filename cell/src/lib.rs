@@ -44,6 +44,7 @@ mod error;
 mod export;
 mod files;
 mod fragment;
+mod icon;
 mod jobs;
 mod json_response;
 mod js;
@@ -1128,8 +1129,8 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
             None => Err(CellError::new(ErrorCode::NotFound, format!("no shell file {}", file.join("/")))),
         },
         // the shell, for everyone: signed out it asks them to sign in;
-        // `/settings` opens its settings, `/welcome` a new person's welcome
-        (Method::Get, [""] | ["settings"] | ["welcome"]) => shell::page(&req, env, cfg, &url).await,
+        // `/settings` opens its settings, `/apps` the person's apps, `/welcome` a new person's welcome
+        (Method::Get, [""] | ["settings"] | ["apps"] | ["welcome"]) => shell::page(&req, env, cfg, &url).await,
         // the operators' admin page: to anyone else, the 404 below
         (Method::Get, ["admin"]) => shell::admin_page(&req, env, cfg, &url).await,
         // Finite's about page, privacy policy and terms, for anyone (signed out too)

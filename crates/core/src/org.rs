@@ -346,6 +346,13 @@ pub fn trial_has_place(capacity: u64, subscribed: u64, open: u64) -> bool {
     subscribed.saturating_add(open) < capacity
 }
 
+/// The fewest places an operator may lower a code to: those taken, and
+/// one at least. Nothing taken is given back, so a code lowered to its
+/// floor is full.
+pub fn trial_capacity_floor(subscribed: u64, open: u64) -> u64 {
+    subscribed.saturating_add(open).max(1)
+}
+
 /// The most Checkouts a person's held trial place names
 /// (`trial_uses.attempts`); past it the oldest give way to `HOLD_KEPT`.
 pub const TRIAL_HOLD_ATTEMPTS_MAX: usize = 16;
@@ -609,6 +616,15 @@ mod tests {
         assert!(!trial_has_place(2, 1, 1), "the last place is held by an open Checkout");
         assert!(!trial_has_place(2, 2, 0));
         assert!(!trial_has_place(0, 0, 0));
+    }
+
+    #[test]
+    fn a_codes_places_lower_to_those_taken_and_never_to_none() {
+        assert_eq!(trial_capacity_floor(0, 0), 1, "a code keeps a place");
+        assert_eq!(trial_capacity_floor(24, 3), 27, "an open Checkout's place is taken too");
+        assert_eq!(trial_capacity_floor(u64::MAX, 1), u64::MAX);
+        assert!(!trial_has_place(trial_capacity_floor(24, 3), 24, 3), "lowered to its floor, a code is full");
+        assert!(trial_has_place(trial_capacity_floor(0, 0), 0, 0));
     }
 
     #[test]
