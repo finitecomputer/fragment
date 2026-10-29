@@ -599,6 +599,12 @@ iframe[data-blocked] { display: none; }
 .settings-section select.agent-model { width: min(320px, 62%); height: 36px; min-width: 0; padding: 0 34px 0 15px; appearance: none; -webkit-appearance: none; border: 1px solid var(--border-strong); border-radius: 999px; background: var(--bg-active); color: var(--text-primary); font-size: 13px; font-weight: 600; text-overflow: ellipsis; cursor: pointer; }
 .settings-section select.agent-model:hover { background: var(--bg-hover); }
 .settings-section select.agent-model:disabled { opacity: .55; cursor: default; }
+.agent-mode-picks { display: flex; gap: 8px; width: min(460px, 74%); min-width: 0; }
+.agent-mode-picks select.agent-model { width: 100%; flex: 1; }
+.agent-mode-picks select.agent-effort { flex: 0 0 86px; }
+.agent-model-label:not(.has-modes) .agent-mode-picks { width: min(320px, 62%); }
+.agent-model-label.has-modes::after { display: none; }
+.agent-model-label.has-modes select.agent-model { appearance: auto; padding: 0 10px; }
 .agent-model-said { font-size: 12.5px; }
 .chip { height: 26px; padding: 0 10px; border: 1px solid var(--border-strong); border-radius: 999px; background: none; color: var(--text-tertiary); font-size: 12.5px; }
 .chip[aria-pressed="true"] { background: var(--bg-active); color: var(--text-primary); }

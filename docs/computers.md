@@ -1637,14 +1637,21 @@ offered (decision 60 says why, with the vendors' words).
   The swap adds the key only toward `openrouter.ai`. Its calls are counted
   as the agent's in the computer's `uses` and charged nothing (no platform
   fee: Paul).
-- **Picking a model.** Settings' Agents section offers each agent the
-  connected provider's models beside its tier's (included in their credit). The pick
-  is written to the agent fragment's `agent.json`: `"model": {"provider":
-  "openrouter", "id": "anthropic/claude-sonnet-5.5"}`, beside its `tier`,
-  and put live (`POST …/deploy`, as its name and picture are: its computer
-  reads main, its page live). Its tier's option, named by the tier and its
-  model's id, removes `model`. Any model the provider serves may be named
-  by hand; settings offers the catalog's `offer`.
+- **Picking Fast and Deep.** Settings' Agents section offers each agent
+  the connected provider's models beside its tier's (included in their
+  credit). Choosing an own model reveals two rows, Fast and Deep, each
+  with a model and Low/High/Max effort. The legacy `model: {provider, id}`
+  and top-level `reasoning` remain Fast; the optional `model.deep` holds
+  `{provider, id, reasoning}`. With no Deep choice it inherits Fast's
+  model and effort. A Deep choice may omit `provider` to use Fast's.
+  Each edit preserves the other mode and unrelated settings, reading
+  `agent.json` fresh before its serialized write; a failed read changes
+  nothing. The file is put live (`POST …/deploy`, as its name and picture
+  are: its computer reads main, its page live). Its tier's option removes
+  `model` and hides the own-mode rows and efforts: Private/Standard's
+  efforts belong to the deployment. Any model the provider serves may be
+  named by hand; settings offers the catalog's `offer`. Older images
+  ignore nested `deep` and continue using Fast.
 - **Our Hermes image** reads each agent's `agent.json` again every 10 s
   while awake, and whenever its credentials change. When the agent's
   credentials hold the named provider with a `modelBase`, its profile's
@@ -1659,6 +1666,13 @@ offered (decision 60 says why, with the vendors' words).
   `profile.model_unused` says why: not connected, or narrowed from it. The
   config is rewritten only when it changes. Hermes reads it at the next
   turn and rebuilds the agent on the new model, with nothing restarted.
+  Native delegates use the own Deep model's base, placeholder and effort,
+  with no fallback chain, at most three children and 32,768 output tokens.
+  A Deep provider the agent cannot use leaves delegation on its working
+  own Fast model and effort (`profile.deep_unused`); it never borrows a
+  platform Deep route. Distinct model ids get Fast's 20 s and Deep's
+  180 s stream patience. Hermes keys patience by provider/model, so the
+  same id in both modes shares 180 s, preserving legacy BYO patience.
   Vision (`auxiliary.vision`) and voice notes (`stt`) stay on the route's
   `vision` and `whisper`, metered to the owner as before.
 - **What its owner is shown.** Their view of the computer names, for each
@@ -1803,8 +1817,9 @@ settings and state):
   High when absent or invalid, as `agent.reasoning_effort`, read by Hermes
   at each turn. Platform tiers take their Fast effort from the route,
   High on an older cell, ignoring a personal pick: an agent left on Low
-  moves to High with this image. Settings still offers the old picker
-  until the shell's Fast/Deep update (decision 65).
+  moves to High with this image. Settings offers efforts only for BYO's
+  Fast and Deep rows (decision 65); `model.deep.reasoning` is Deep's
+  effort, inheriting Fast's when absent or invalid.
   Its `home`, `"simplex"` or none (Paul, 2026-10-26; docs/api.md, "An
   agent's home"), is where its owner is reached: its profile's
   `agent.system_prompt` tells it, beside its name, at every turn

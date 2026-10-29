@@ -745,6 +745,7 @@ async fn write_config(api: &Api, a: &Agent, dir: &Path, ids: Option<(u32, u32)>,
     };
     let own = answer.as_ref().ok().and_then(|b| hermes::OwnModel::of(b));
     let (main, unused) = hermes::MainModel::of(a, tier, own.as_ref());
+    let (main, deep_unused) = main.with_deep(a, answer.as_ref().ok().and_then(|b| hermes::OwnModel::deep_of(b)));
     let reasoning = main.reasoning(hermes::Reasoning::of(answer.as_ref().ok().map(|b| b.as_ref())), route);
     let home = fragment_bridge::api::Home::of(answer.as_ref().ok().map(|b| b.as_ref()));
     let text = hermes::profile_config(a, name, home, &main, reasoning, route, credential_env, &dir.join(hermes::CREDENTIALS_FILE));
@@ -753,6 +754,7 @@ async fn write_config(api: &Api, a: &Agent, dir: &Path, ids: Option<(u32, u32)>,
         if let (Some(own), Some(why)) = (&own, &unused) {
             ev!("profile.model_unused", { "agent": a.fragment, "provider": own.provider, "id": own.id, "why": why, "model": main.name() });
         }
+        if let Some(why) = &deep_unused { ev!("profile.deep_unused", { "agent": a.fragment, "why": why, "fallback": "Fast" }); }
         ev!("profile.model", { "agent": a.fragment, "model": main.name(), "reasoning": reasoning.name(), "home": format!("{home:?}").to_lowercase() });
     }
     Some(main)
