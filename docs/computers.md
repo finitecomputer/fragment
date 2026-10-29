@@ -1266,13 +1266,14 @@ expires within 30 days. The container application is the deployment's
   that model's alone: `vision`, whose answers come whole and slower, keeps
   Hermes' default), tries it once more (`HERMES_STREAM_RETRIES=1`, the
   gateway's environment), then, its one retry spent
-  (`agent.api_max_retries: 1`), switches to its `fallback_providers`: the
-  route's `fallback` by its model's id (the deployment's fallback model,
-  its key `agent:<name>` naming the agent;
-  Workers AI's GLM-5.3 Flash on Finite's own deployment, so a stall on
-  OpenRouter or Finite Private ends on Workers AI), about 40 s after the stall began. The next turn starts on its tier
-  again (Hermes' `restore_primary_runtime`). An owner's own model and the
-  high tier have none. The Docker lane stalls the scripted model to prove
+  (`agent.api_max_retries: 1`), switches to its `fallback_providers`: its
+  tier's route's fallback by its model's id (`models.routes`; the
+  deployment's fallback model from a platform naming no routes), its key
+  `agent:<name>` naming the agent, about 40 s after the stall began. The
+  next turn starts on its tier again (Hermes' `restore_primary_runtime`).
+  An owner's own model and the high tier have none, nor has a tier whose
+  fallback is its own model (one id, one server: the switch would only
+  ask it again; #527). The Docker lane stalls the scripted model to prove
   it (images/bridge/tests/docker.rs).
 - A call its owner's ledger refuses (zero credit or a canceled seat:
   402 `budget_used_up`; a guest: 403) gets the ledger's reason, and no

@@ -82,10 +82,16 @@ use fragment_bridge::net::{self, Body};
 /// on OpenRouter's GLM-5.3 Flash, its fallback and vision on Workers AI's.
 pub const CHEAP_ID: &str = "z-ai/glm-5.3-flash";
 pub const FALLBACK_ID: &str = "@cf/zai-org/glm-5.3-flash";
+/// The cheap tier's route's own fallback (2026-10-24): what its agent's
+/// stall falls back to, by its id.
+pub const ROUTE_FALLBACK_ID: &str = "deepseek-v4-1-flash";
 
-/// The view's `models`, by the route's names.
+/// The view's `models`, by the route's names, and each tier's route: the
+/// cheap tier's falling back to a model of its own (`ROUTE_FALLBACK_ID`),
+/// the medium tier's to the deployment's.
 pub fn ids() -> Value {
-    json!({ "cheap": CHEAP_ID, "medium": CHEAP_ID, "fallback": FALLBACK_ID, "vision": FALLBACK_ID })
+    let route = |fallback: &str| json!({ "private": false, "fallback": fallback, "vision": FALLBACK_ID });
+    json!({ "cheap": CHEAP_ID, "medium": CHEAP_ID, "fallback": FALLBACK_ID, "vision": FALLBACK_ID, "routes": { "cheap": route(ROUTE_FALLBACK_ID), "medium": route(FALLBACK_ID) } })
 }
 
 #[derive(Default, Debug, Clone)]
@@ -199,7 +205,7 @@ pub const STALL_S: u64 = 120;
 fn stalls(body: &Value) -> bool {
     let last_user = body["messages"].as_array().and_then(|m| m.iter().rev().find(|m| m["role"] == "user")).map(|m| text_of(&m["content"])).unwrap_or_default();
     // Hermes' review prompts say "install" (and so `stall`): never one of a test's
-    last_user.contains("stall") && !last_user.starts_with("Review the conversation above") && body["model"] != FALLBACK_ID && body["model"] != "fallback"
+    last_user.contains("stall") && !last_user.starts_with("Review the conversation above") && body["model"] != FALLBACK_ID && body["model"] != ROUTE_FALLBACK_ID && body["model"] != "fallback"
 }
 
 /// How long a call waits whose last user message says `take your time`: past
@@ -428,7 +434,7 @@ async fn handle(req: Request<Incoming>, calls: Arc<Mutex<Vec<Call>>>) -> Respons
     if path.ends_with("/models") {
         // the intercept's list (`Models::listed`): the ids, never the route's names
         let model = |id: &str| json!({ "id": id, "object": "model", "created": 0, "owned_by": "fragment" });
-        return net::json_answer(StatusCode::OK, &json!({ "object": "list", "data": [model(CHEAP_ID), model(FALLBACK_ID)] }));
+        return net::json_answer(StatusCode::OK, &json!({ "object": "list", "data": [model(CHEAP_ID), model(FALLBACK_ID), model(ROUTE_FALLBACK_ID)] }));
     }
     let body = req.into_body().collect().await.map(|b| b.to_bytes()).unwrap_or_default();
     if path.ends_with("/audio/transcriptions") {
