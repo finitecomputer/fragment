@@ -247,7 +247,7 @@ fn steps_split_replies() {
     let looking = format!("Looking. {}", "I will read every page of the docs first, then the code, so nothing I change breaks what works. ".repeat(20));
     assert!(looking.chars().count() > 1000);
     ev(&mut e, Event::Reply { turn: turn.clone(), part: 1, text: looking.clone() }, T0 + 1);
-    let step = ToolStep { tool: "web_search".into(), args: "{\"q\":\"x\"}".into(), ok: true, excerpt: "3 results".into(), category: crate::records::Category::Web, evidence: None };
+    let step = ToolStep { tool: "web_search".into(), args: "{\"q\":\"x\"}".into(), ok: true, excerpt: "3 results".into(), category: crate::records::Category::Web, evidence: None, defer_reply: false };
     let s = ev(&mut e, Event::Step { turn: turn.clone(), step: step.clone() }, T0 + 2);
     assert_eq!(kinds(&s), vec!["reply", "turn.step"]);
     assert_eq!(posts(&s)[0], (records::reply_id(&turn, 1), json!({ "text": looking, "turn": turn, "interim": true })), "whole, before the step, interim");
@@ -265,7 +265,7 @@ fn steps_split_replies() {
     // nothing after it) is the turn's answer, not interim
     let t3 = started(&said(&mut e, &a, &v, 3, "npub1paul", json!({ "text": "remember this" }), T0 + 7)).expect("started").turn;
     ev(&mut e, Event::Reply { turn: t3.clone(), part: 1, text: "Noted: you like tomatoes.".into() }, T0 + 8);
-    let memory = ToolStep { tool: "memory".into(), args: "tomatoes".into(), ok: true, excerpt: String::new(), category: crate::records::Category::Memory, evidence: None };
+    let memory = ToolStep { tool: "memory".into(), args: "tomatoes".into(), ok: true, excerpt: String::new(), category: crate::records::Category::Memory, evidence: None, defer_reply: false };
     let m = ev(&mut e, Event::Step { turn: t3.clone(), step: memory }, T0 + 9);
     assert_eq!(posts(&m)[0], (records::reply_id(&t3, 1), json!({ "text": "Noted: you like tomatoes.", "turn": t3 })));
     let end3 = ev(&mut e, Event::End { turn: t3.clone(), outcome: Outcome::Idle }, T0 + 10);
@@ -292,7 +292,7 @@ fn narration_never_costs_the_answer() {
     let v = view(&[&a]);
     let mut e = engine(std::slice::from_ref(&a));
     let turn = started(&said(&mut e, &a, &v, 1, "npub1paul", json!({ "text": "fix everything" }), T0)).expect("started").turn;
-    let step = || ToolStep { tool: "terminal".into(), args: "ls".into(), ok: true, excerpt: String::new(), category: crate::records::Category::Shell, evidence: None };
+    let step = || ToolStep { tool: "terminal".into(), args: "ls".into(), ok: true, excerpt: String::new(), category: crate::records::Category::Shell, evidence: None, defer_reply: false };
     let narrated = limits::INTERIM_REPLIES_PER_TURN_MAX + 5;
     assert!(narrated > limits::REPLIES_PER_TURN_MAX && limits::REPLIES_PER_TURN_MAX >= 64);
     let mut posted = Vec::new();
@@ -1926,7 +1926,7 @@ impl World {
 
     /// A step of a turn the runtime holds, as the runtime reports it.
     fn did(&mut self, turn: &str, tool: &str, args: &str) {
-        self.step(Input::Runtime(Event::Step { turn: turn.into(), step: ToolStep { tool: tool.into(), args: args.into(), ok: true, excerpt: String::new(), category: crate::records::Category::Shell, evidence: None } }));
+        self.step(Input::Runtime(Event::Step { turn: turn.into(), step: ToolStep { tool: tool.into(), args: args.into(), ok: true, excerpt: String::new(), category: crate::records::Category::Shell, evidence: None, defer_reply: false } }));
     }
 
     /// The turns whose `turn.start` the lane holds, in order.

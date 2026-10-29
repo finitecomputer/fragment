@@ -197,6 +197,12 @@ struct Inflight {
     /// at every tool boundary with one, so the model's words before a tool
     /// call arrive as a reply, which its tool's progress can come before).
     drafting: bool,
+    /// A tool result overtook its words before any draft arrived. The
+    /// first subsequent reply may still be final; only another reply
+    /// proves it was an interim segment.
+    unworded_step: bool,
+    late_reply: Option<u32>,
+    words_since_step: bool,
     /// The turn's events (steps, replies and their files, cards, its end)
     /// that wait, in the order they came, behind what is not whole yet: a
     /// reply's image links being fetched (nothing after a reply may seal
@@ -676,7 +682,7 @@ impl Loop {
         self.next_order += 1;
         let turn = ts.turn.clone();
         let sent = self.send(frame.clone());
-        self.inflight.insert(turn.clone(), Inflight { start: ts, chat: chat.clone(), profile, order: self.next_order, frame, acked: false, sent, parts: HashMap::new(), progress: HashMap::new(), observed: std::collections::BTreeSet::new(), next_part: 1, said: false, stopped: false, asking: false, carded: false, worded: false, drafting: false, queue: VecDeque::new(), words_at: None, held_at: None, ending: false, taken: Vec::new(), pictures: 0, pictured: HashMap::new() });
+        self.inflight.insert(turn.clone(), Inflight { start: ts, chat: chat.clone(), profile, order: self.next_order, frame, acked: false, sent, parts: HashMap::new(), progress: HashMap::new(), observed: std::collections::BTreeSet::new(), next_part: 1, said: false, stopped: false, asking: false, carded: false, worded: false, drafting: false, unworded_step: false, late_reply: None, words_since_step: false, queue: VecDeque::new(), words_at: None, held_at: None, ending: false, taken: Vec::new(), pictures: 0, pictured: HashMap::new() });
         self.by_chat.insert(chat, turn.clone());
         crate::ev!("relay.inbound", { "turn": turn, "sent": sent });
     }
@@ -898,6 +904,14 @@ impl Loop {
                     f.next_part += 1;
                     f.parts.insert(id.clone(), part);
                     f.drafting = false;
+                    if let Some(part) = f.late_reply.take() {
+                        f.queue.push_back(Event::Interim { turn: turn.clone(), part });
+                    }
+                    if f.unworded_step {
+                        f.late_reply = Some(part);
+                        f.unworded_step = false;
+                    }
+                    f.words_since_step = true;
                     let said = Event::Reply { turn: turn.clone(), part, text: text.clone() };
                     match f.words_at.take() {
                         Some(at) => {
@@ -1131,11 +1145,23 @@ impl Loop {
     /// streams (its `send` to come) wait for those words, which go before
     /// them (`Inflight::words_at`); any that come while something before
     /// them is not whole wait in order (`out`).
-    async fn steps(&mut self, turn: &str, steps: Vec<Step>) {
+    async fn steps(&mut self, turn: &str, mut steps: Vec<Step>) {
         if steps.is_empty() {
             return;
         }
         let Some(f) = self.inflight.get_mut(turn) else { return };
+        // Hermes' background memory review may finish between the late
+        // preamble and final answer. It must not prematurely seal those
+        // still-ambiguous words as final; end/next reply decides instead.
+        let deferred = f.late_reply.is_some() && steps.iter().all(|s| s.category == crate::records::Category::Memory);
+        if self.structured && !deferred {
+            f.unworded_step = !f.drafting && !f.words_since_step;
+            f.late_reply = None;
+            f.words_since_step = false;
+        }
+        if deferred {
+            for step in &mut steps { step.defer_reply = true; }
+        }
         if f.drafting && f.words_at.is_none() {
             f.words_at = Some(f.queue.len());
             f.held_at = Some(tokio::time::Instant::now());

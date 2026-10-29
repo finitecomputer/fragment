@@ -635,7 +635,7 @@ pub fn new_steps(content: &str, seen: usize) -> Vec<Step> {
 
 fn step(tool: String, args: String) -> Step {
     let category = category_of(&tool);
-    Step { tool, args, ok: true, excerpt: String::new(), category, evidence: None }
+    Step { tool, args, ok: true, excerpt: String::new(), category, evidence: None, defer_reply: false }
 }
 
 /// Hermes' tools, as v0.21.6 registers them (`tools/`): what each does (a
@@ -1017,7 +1017,7 @@ pub fn observed_tool(v: &Value) -> Option<(String, Step)> {
         || evidence.error_message.as_ref().is_some_and(|s| s.chars().count() > 300) { return None }
     Some((turn.into(), Step { tool: tool.into(), args: String::new(), ok: evidence.status == "completed",
         excerpt: crate::records::cut(v.get("excerpt").and_then(Value::as_str).unwrap_or(""), 300),
-        category: category_of(tool), evidence: Some(evidence) }))
+        category: category_of(tool), evidence: Some(evidence), defer_reply: false }))
 }
 
 #[cfg(test)]

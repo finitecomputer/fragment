@@ -926,3 +926,11 @@ Of decision 21's list, v0.21.5 has every op, but sends `task_card` only
 for Slack chats (`gateway/run_turn.py`), so our image uses supported observers over the activity socket; `follow_up` is Discord's interaction tokens; neither is
 advertised. It also has `thread_create` and `thread_rename` (threads are
 off here).
+
+Structured tool outcomes may overtake the Relay sender before even a first
+draft, especially for short narration beside an instant command. The runtime
+tracks that boundary in memory: a subsequent reply segment proves those late
+words were interim, and seals that still-open part as interim before passing
+on the next segment. A lone answer stays final; no posted record is rewritten.
+Hermes' `metadata.notify` does not prove finality here: its stream sender can
+set it on both a tool-boundary preamble and the actual final answer.

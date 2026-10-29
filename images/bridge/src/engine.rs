@@ -1309,7 +1309,7 @@ impl Engine {
     fn runtime(&mut self, event: Event) {
         let turn_of = |e: &Event| -> Option<String> {
             match e {
-                Event::Draft { turn, .. } | Event::Reply { turn, .. } | Event::Attachment { turn, .. } | Event::Retract { turn, .. } => Some(turn.clone()),
+                Event::Draft { turn, .. } | Event::Reply { turn, .. } | Event::Attachment { turn, .. } | Event::Retract { turn, .. } | Event::Interim { turn, .. } => Some(turn.clone()),
                 Event::Step { turn, .. } | Event::Prompt { turn, .. } | Event::Asked { turn } | Event::End { turn, .. } => Some(turn.clone()),
                 Event::Connected(_) | Event::Working(_) | Event::Say { .. } | Event::Notice { .. } => None,
             }
@@ -1337,6 +1337,11 @@ impl Engine {
                 let (agent, fragment) = (t.agent.clone(), t.fragment.clone());
                 self.draft(&agent, &fragment, &turn, Some(records::cut_bytes(&text, limits::DRAFT_TEXT_MAX_BYTES)));
             }
+            Event::Interim { turn, part } => {
+                if self.state.turns[&turn].open.as_ref().is_some_and(|o| o.part == part) {
+                    self.seal(&turn, true);
+                }
+            }
             Event::Reply { turn, part, text } => self.reply(&turn, part, Some(text), None),
             Event::Attachment { turn, part, file } => self.reply(&turn, part, None, Some(file)),
             Event::Retract { turn, part } => {
@@ -1353,7 +1358,9 @@ impl Engine {
                 // interim (its push leaves them out), unless the call only
                 // updates its memory: an answer said beside housekeeping is
                 // the turn's answer (Hermes sends nothing after it)
-                self.seal(&turn, step.category != records::Category::Memory);
+                if !step.defer_reply {
+                    self.seal(&turn, step.category != records::Category::Memory);
+                }
                 let t = self.state.turns.get_mut(&turn).expect("checked");
                 t.steps = t.steps.saturating_add(1);
                 self.dirty = true;

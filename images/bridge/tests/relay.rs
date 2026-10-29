@@ -1108,3 +1108,29 @@ async fn commands_said_as_they_are() {
     });
     bridge.stop().await;
 }
+
+/// Tool observers and Relay sends are independent authenticated sockets.
+/// Completing before any draft must not promote a late preamble to final,
+/// or demote a real final when the tool has no preamble.
+#[tokio::test]
+async fn observed_outcomes_preserve_reply_boundaries_without_drafts() {
+    let (fake, bridge, _hermes, _dir) = setup("observer-boundary", &["juniper"]).await;
+    let chat = fake.chat("talk", &["juniper"]);
+    fake.until(WAIT, "chat followed", |w| w.live_sockets() >= 2).await;
+    for (words, review) in [(true,false),(false,false),(true,true)] {
+        let text = if review { "observed boundary with words with review" } else if words { "observed boundary with words" } else { "observed boundary" };
+        let said = fake.say(&chat, &person("paul"), json!({"text":text}));
+        let turn = records::turn_id("juniper--k3x9", &chat, "chat", said["seq"].as_u64().unwrap());
+        fake.until(WAIT, "observed turn ended", |w| w.bodies(&chat,"work","turn.end").iter().any(|r| r["turn"] == turn)).await;
+        fake.with(|w| {
+            let replies: Vec<_> = replies(w,&chat).into_iter().filter(|r| r["turn"] == turn).collect();
+            let final_replies: Vec<_> = replies.iter().filter(|r| r["interim"] != true).collect();
+            assert_eq!(final_replies.len(),1,"{replies:?}");
+            assert_eq!(final_replies[0]["text"],"the final answer");
+            assert_eq!(replies.len(),if words {2} else {1});
+            if words { assert_eq!(replies[0]["interim"],true); }
+            assert_eq!(w.bodies(&chat,"work","turn.step").iter().filter(|r| r["turn"] == turn).count(),if review {2} else {1});
+        });
+    }
+    bridge.stop().await;
+}

@@ -347,7 +347,7 @@ pub fn answer(body: &Value) -> (String, Option<Value>) {
     }
     if let (Some(command), true) = (narrate.as_deref(), has_terminal) {
         let call = json!({ "index": 0, "id": "call_1", "type": "function", "function": { "name": "terminal", "arguments": json!({ "command": command }).to_string() } });
-        return (narrated(), Some(call));
+        return (if last_user.contains("brief narration") { "Let me check that.".into() } else { narrated() }, Some(call));
     }
     // `image: <url>`: an answer with that image, as a model whose tool made
     // one at its provider gives it (a markdown image, which Hermes sends)
