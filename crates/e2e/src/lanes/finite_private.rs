@@ -270,10 +270,12 @@ fn tier_checks(s: &mut Suite, api: &Api) -> Result<()> {
     let made = s.ai.calls()[calls..].to_vec();
     let settled = s.eventually(wait, || settled_as(before, PRIVATE, charge(&tokens(PRIVATE, 400, 300))));
     s.ok(
-        "Private's Deep answering 503 is made once more on Private's Fast, Finite Private, with its key: within Private, never out of it",
+        "Private's Deep answering 503 is made once more on Private's Fast, with its key and smaller token cap: within Private, never out of it",
         r.status == 200
             && tried(s, calls) == [(Face::OpenAi, TINFOIL.to_string()), (Face::OpenAi, PRIVATE.to_string())]
-            && made.get(1).is_some_and(|c| c.authorization.as_deref() == Some(private_key.as_str()) && c.body["reasoning_effort"] == "max")
+            && made.get(1).is_some_and(|c| c.authorization.as_deref() == Some(private_key.as_str()) && c.body["reasoning_effort"] == "max" && c.body["max_tokens"] == fragment_core::models::MAX_TOKENS)
+            && made[0].body["max_tokens"] == deep_cap
+            && made[0].body["messages"] == made[1].body["messages"]
             && settled,
         json!({ "status": r.status, "tried": format!("{:?}", tried(s, calls)) }),
     );
@@ -294,12 +296,31 @@ fn tier_checks(s: &mut Suite, api: &Api) -> Result<()> {
     s.ai.fail_next(&[429]);
     s.ai.set_usage(&[Used { prompt: 400, cached: 0, completion: 300 }]);
     let r = api.call(as_tier("medium", delegated(ROUTED_DEEP)))?;
+    let made = s.ai.calls()[calls..].to_vec();
     let settled = s.eventually(wait, || settled_as(before, FLASH, charge(&tokens(FLASH, 400, 300))));
     s.ok(
         "Standard's Deep answering 429 is made once more on Standard's Cloudflare, never Tinfoil",
-        r.status == 200 && tried(s, calls) == [(Face::OpenAi, ROUTED_DEEP.to_string()), (Face::WorkersAi, FLASH.to_string())] && settled,
+        r.status == 200 && tried(s, calls) == [(Face::OpenAi, ROUTED_DEEP.to_string()), (Face::WorkersAi, FLASH.to_string())]
+            && made.get(1).is_some_and(|c| c.body["max_tokens"] == fragment_core::models::MAX_TOKENS)
+            && settled,
         json!({ "status": r.status, "tried": format!("{:?}", tried(s, calls)) }),
     );
+    // A smaller request stays smaller on both tries, even when Fast's
+    // fallback has Deep's larger cap.
+    for (tier, model, cap) in [("cheap", TINFOIL, 512), ("medium", ROUTED_DEEP, 512), ("cheap", PRIVATE, 512)] {
+        let (calls, before) = (s.ai.calls().len(), quiet(api, &owner_id, "aig:"));
+        let mut body = delegated(model);
+        body["max_tokens"] = json!(cap);
+        s.ai.fail_next(&[503]);
+        let r = api.call(as_tier(tier, body))?;
+        let made = s.ai.calls()[calls..].to_vec();
+        let once = s.eventually(wait, || aig().len() == before + 1);
+        s.ok(
+            &format!("{tier}'s {model} fallback never raises the caller's smaller token limit"),
+            r.status == 200 && made.len() == 2 && made.iter().all(|c| c.body["max_tokens"] == cap) && once,
+            json!({ "status": r.status, "tried": format!("{:?}", tried(s, calls)) }),
+        );
+    }
 
     // ---- `vision` on Finite Private, falling back to Tinfoil's, which reads images
     let png = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";

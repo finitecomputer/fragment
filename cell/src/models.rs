@@ -383,13 +383,14 @@ pub(crate) async fn streamed(env: &Env, bounded: &Bounded<'static>, payer: &str,
 /// call's, its body unread, the model whose answer it is, and the tries.
 async fn tried(env: &Env, cfg: &Config, bounded: &Bounded<'static>, fallback: Option<Model<'static>>, meta: &Metadata) -> (CellResult<Response>, Model<'static>, u32) {
     let mut tries = Tries::new(bounded.model, fallback);
+    let mut input = std::borrow::Cow::Borrowed(&bounded.input);
     let mut calls = 0;
     // bounded by `Tries`: a second try at most
     loop {
         let model = tries.model();
         let t0 = js::now_ms();
         calls += 1;
-        let answer = transport(env, cfg, model, &bounded.input, meta).await;
+        let answer = transport(env, cfg, model, &input, meta).await;
         let status = answer.as_ref().ok().map(Response::status_code);
         // the platform's own key refused or its credit spent, on any try (a
         // fallback's own key too): every call to it falls back, or fails
@@ -404,6 +405,12 @@ async fn tried(env: &Env, cfg: &Config, bounded: &Bounded<'static>, fallback: Op
             Err(e) => e.message,
         };
         console_log!("{}", json!({ "event": "model.fallback", "from": model.id(), "to": next.id(), "status": status, "ms": js::now_ms() - t0, "why": why }));
+        // Deep may fall back to Fast: its smaller cap still holds. Never
+        // raise the caller's count, and copy the prompt only on this path.
+        let cap = cfg.models.opts(next.slot).max_tokens.unwrap_or(bounds::MAX_TOKENS);
+        if bounded.max_tokens > cap {
+            input.to_mut()["max_tokens"] = json!(cap);
+        }
     }
 }
 

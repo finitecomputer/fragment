@@ -124,7 +124,7 @@ pub fn private_tier_models(fake: &str) -> Value {
     let vision = private.clone();
     let mut private_deep = tinfoil.clone();
     private_deep.as_object_mut().unwrap().extend([("reasoning".into(), json!("max")), ("max_tokens".into(), json!(DEEP_MAX_TOKENS)), ("fallback".into(), json!("cheap"))]);
-    private.as_object_mut().unwrap().extend([("label".into(), json!("Private (recommended)")), ("reasoning".into(), json!("high")), ("deep".into(), json!("private_deep"))]);
+    private.as_object_mut().unwrap().extend([("label".into(), json!("Private (recommended)")), ("reasoning".into(), json!("high")), ("deep".into(), json!("private_deep")), ("fallback".into(), json!("private_deep"))]);
     json!({ "cheap": private, "medium": standard, "fallback": tinfoil, "vision": vision, "cloudflare": cloudflare, "private_deep": private_deep, "standard_deep": standard_deep })
 }
 

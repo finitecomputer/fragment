@@ -178,7 +178,7 @@
   // "models": {
   //   "cheap": { "provider": "openai", "base_url": "https://finite-private.finite.containers.tinfoil.dev/v1",
   //              "key": "fragment-finite-private-key", "model": "glm-5-3-flash", "private": true,
-  //              "label": "Private (recommended)", "reasoning": "high", "deep": "private_deep" },
+  //              "label": "Private (recommended)", "reasoning": "high", "deep": "private_deep", "fallback": "private_deep" },
   //   "private_deep": { "provider": "openai", "base_url": "https://inference.tinfoil.sh/v1",
   //                     "key": "fragment-tinfoil-api-key", "model": "deepseek-v4-1-flash",
   //                     "price": { "input": 0.65, "cached_input": 0.13, "output": 1.45 }, "images": true, "private": true,
