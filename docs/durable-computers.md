@@ -25,6 +25,14 @@ file is the newer word, and decision 18 points here.
 
 ## Built (2026-10-05)
 
+- **Delegated work holds the computer (decision 65).** A child that
+  outlives its parent's chat turn still holds the bridge's keepalive.
+  Hermes' lifecycle hooks hold a local authenticated activity socket
+  while children run (docs/bridge.md, "Runtime work outside a turn").
+  This is live runtime state, never saved: a restarted gateway has no
+  children from its previous process. Waiting only on a person will stop
+  holding with P6 (#627); this change leaves the existing card hold alone.
+
 - **One life per turn (P1, #137).** A turn runs only in the life of the
   bridge that wrote its `turn.start` to `work`, and only once that post
   is answered. A rolled-back or lost `/data` runs no turn twice; a turn

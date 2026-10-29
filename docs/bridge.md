@@ -336,6 +336,31 @@ so the platform's lanes run each with no agent runtime: `usage` and
 `model` (`ran /<name> <args>`), `new`, `stop`, `steer` (into a `steer-me`
 turn, which waits for one), `queue`, `btw` (`aside: /btw …`).
 
+## Runtime work outside a turn
+
+The computer is held while the agent does work: a queued or running
+turn, or a delegated child still running after its parent replied.
+Waiting on a person alone will not hold it once P6 (#627) lands; until
+then an open card still holds it as described below.
+
+The image's `fragment-activity` plugin uses Hermes v0.21.7's supported
+`subagent_start` and `subagent_stop` lifecycle hooks, keyed by
+`child_session_id`. While its set of children is nonempty it holds
+`ws://<bridge listen>/relay/activity`, authenticated by the gateway's
+normal Relay bearer token (`gateway.relay.auth.make_token`). The bridge
+queues `Working(true)` and answers `ready` before the start hook returns,
+so the parent's end cannot release the hold first. Each plugin instance
+has at most one socket; several profiles' sockets hold together. This is
+the one runtime-work signal: it names no chat turn and appends no record.
+
+The socket closes when the last child stops, or when its gateway process
+exits. A socket silent for 30 seconds closes too (the plugin pings every
+10 seconds and reconnects while children remain). The bridge's engine
+includes those live sockets in its existing keepawake predicate. Nothing
+of the children is persisted or replayed on restart: Hermes owns them,
+and a new process has none. Their completion still uses Hermes' ordinary
+Relay reply, which the bridge posts once as a turn of its own.
+
 ## A card keeps its computer awake
 
 A turn waiting on its card holds the keepalive until the card is

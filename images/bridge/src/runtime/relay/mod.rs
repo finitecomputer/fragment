@@ -151,6 +151,7 @@ impl MediaTable {
 /// What the connections tell the runtime's loop, and a file sent by URL
 /// once fetched (or refused): the answer to `request` on `conn`.
 enum Wire {
+    Activity { conn: u64, working: bool },
     Connected { conn: u64, tx: mpsc::Sender<Message> },
     Frame { conn: u64, text: String },
     Closed { conn: u64 },
@@ -287,7 +288,7 @@ async fn run(cfg: RelayConfig, mut io: RuntimeIo) -> Result<(), RuntimeError> {
         tokio::spawn(net::serve(listener, handler, io.shutdown.clone()));
     }
 
-    let mut st = Loop { cfg, events: io.events.clone(), media, wire_tx, inflight: HashMap::new(), by_chat: HashMap::new(), answers: Vec::new(), asides: VecDeque::new(), conn: None, greeted: false, next_message: 0, next_order: 0 };
+    let mut st = Loop { cfg, events: io.events.clone(), media, wire_tx, inflight: HashMap::new(), by_chat: HashMap::new(), answers: Vec::new(), asides: VecDeque::new(), activity: std::collections::BTreeSet::new(), conn: None, greeted: false, next_message: 0, next_order: 0 };
     let mut shutdown = io.shutdown.clone();
     // bounded by the bridge's life: one input per pass, ended by shutdown
     loop {
@@ -325,7 +326,8 @@ fn bearer_ok(req: &Request<Incoming>, cfg: &RelayConfig) -> Result<(), wire::Ref
 
 async fn handle(mut req: Request<Incoming>, cfg: RelayConfig, media: Arc<Mutex<MediaTable>>, wire_tx: mpsc::Sender<Wire>, conns: Arc<std::sync::atomic::AtomicU64>) -> Response<Body> {
     let path = req.uri().path().to_string();
-    if path == "/relay" {
+    if path == "/relay" || path == "/relay/activity" {
+        let activity = path == "/relay/activity";
         let checked = bearer_ok(&req, &cfg);
         let Some((response, socket)) = net::accept_ws(&mut req) else {
             return net::refusal(StatusCode::BAD_REQUEST, "invalid", "the relay is a WebSocket");
@@ -338,7 +340,14 @@ async fn handle(mut req: Request<Incoming>, cfg: RelayConfig, media: Arc<Mutex<M
                     let (mut sink, _) = ws.split();
                     let _ = sink.send(Message::Close(Some(CloseFrame { code: CloseCode::from(4401), reason: refused.reason().into() }))).await;
                 }
-                Ok(()) => connection(ws, wire_tx, conns.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1).await,
+                Ok(()) => {
+                    let conn = conns.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                    if activity {
+                        activity_connection(ws, wire_tx, conn).await;
+                    } else {
+                        connection(ws, wire_tx, conn).await;
+                    }
+                }
             }
         });
         return response;
@@ -449,6 +458,28 @@ async fn connection(ws: net::ServerWs, wire_tx: mpsc::Sender<Wire>, conn: u64) {
     crate::ev!("relay.closed", { "conn": conn });
 }
 
+/// A live runtime-work signal, authenticated as the gateway. It holds no
+/// turn and writes no state. Its close (or 30 s without a ping) lets go.
+async fn activity_connection(ws: net::ServerWs, wire_tx: mpsc::Sender<Wire>, conn: u64) {
+    let (mut sink, mut stream) = ws.split();
+    if wire_tx.send(Wire::Activity { conn, working: true }).await.is_err() {
+        return;
+    }
+    // The hook waits for this before returning: its signal is queued
+    // before Hermes can end the parent turn.
+    if sink.send(Message::text("ready")).await.is_ok() {
+        while let Ok(Some(frame)) = tokio::time::timeout(std::time::Duration::from_secs(30), stream.next()).await {
+            match frame {
+                Ok(Message::Ping(data)) => if sink.send(Message::Pong(data)).await.is_err() { break },
+                Ok(Message::Close(_)) | Err(_) => break,
+                Ok(_) => {}
+            }
+        }
+    }
+    let _ = sink.close().await;
+    let _ = wire_tx.send(Wire::Activity { conn, working: false }).await;
+}
+
 struct Loop {
     cfg: RelayConfig,
     events: mpsc::Sender<Event>,
@@ -457,6 +488,8 @@ struct Loop {
     wire_tx: mpsc::Sender<Wire>,
     inflight: HashMap<String, Inflight>,
     by_chat: HashMap<String, String>,
+    /// Live activity sockets, one per hook instance with children running.
+    activity: std::collections::BTreeSet<u64>,
     answers: Vec<PendingAnswer>,
     /// Commands said beside a turn (`Command::Aside`), by their message id,
     /// and the agent and chat they were said in: what answers one is a
@@ -630,6 +663,15 @@ impl Loop {
 
     async fn wire(&mut self, w: Wire) {
         match w {
+            Wire::Activity { conn, working } => {
+                if working {
+                    self.activity.insert(conn);
+                    assert!(self.activity.len() <= 2 * limits::AGENTS_MAX, "at most two activity sockets per profile during a reconnect");
+                } else {
+                    self.activity.remove(&conn);
+                }
+                self.emit(Event::Working(!self.activity.is_empty())).await;
+            }
             Wire::Connected { conn, tx } => {
                 if let Some((old, old_tx)) = self.conn.replace((conn, tx)) {
                     crate::ev!("relay.replaced_dial", { "conn": old });

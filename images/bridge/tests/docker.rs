@@ -736,6 +736,10 @@ async fn a_background_delegate_delivers_and_keeps_the_computer_awake() {
     assert_eq!(delivered.len(), 1, "the background result arrives in the chat once");
     assert_ne!(delivered[0]["turn"], parent, "its completion has a turn of its own");
     assert!(held, "the computer stays awake throughout the background delegate");
+    within(&fake, &chat, &c, 10_000, "the child's hold to end", |w| w.keepalive_open == 0).await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let replies = fake.with(|w| w.bodies(&chat, "chat", "reply").into_iter().filter(|r| r["text"].as_str().is_some_and(|s| s.contains("checked the delegated result: fragment-delegate-complete"))).count());
+    assert_eq!(replies, 1, "no duplicate arrives after the completion settles");
 }
 
 /// Goal (Paul, 2026-10-09: a time-based fallback "only if time-based
