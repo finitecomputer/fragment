@@ -1,0 +1,4 @@
+name: fragment-self-sync
+version: 1.0.0
+description: Mark native memory and skill changes for prompt sync to the agent fragment.
+provides_hooks: [post_tool_call]

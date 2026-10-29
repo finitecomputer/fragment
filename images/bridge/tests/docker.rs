@@ -296,7 +296,9 @@ async fn the_hermes_image() {
     let chat = fake.chat("talk", &["juniper"]);
 
     let t = Instant::now();
-    let c = Container::run(&tag, fake.addr.port(), model.addr.port(), &[("RESTORE_PENDING", "1"), ("HERMES_BOOT_SYNC_MS", "2000"), ("HERMES_BOOT_SKILLS_MS", "2000")]);
+    // Longer than the dirty-check cadence: the direct write below must still
+    // reach the repo through an ordinary full sync.
+    let c = Container::run(&tag, fake.addr.port(), model.addr.port(), &[("RESTORE_PENDING", "1"), ("HERMES_BOOT_SYNC_MS", "6000"), ("HERMES_BOOT_SKILLS_MS", "2000")]);
     tokio::time::sleep(Duration::from_secs(2)).await;
     assert!(fake.with(|w| w.calls.is_empty()), "the gate holds: {:?}", fake.with(|w| w.calls.clone()));
     let gate = Instant::now();
@@ -694,11 +696,15 @@ fn restore_and_check(tag: &str, save: &std::path::Path) -> (i32, String, Vec<ser
 /// The Hermes image, running against the fake API and the scripted model,
 /// its agent answering in its chat.
 async fn hermes_running() -> (Fake, Model, String, Container) {
+    hermes_running_with(&[]).await
+}
+
+async fn hermes_running_with(extra: &[(&str, &str)]) -> (Fake, Model, String, Container) {
     build(&repo_dir(), "images/hermes/Dockerfile", &hermes_tag());
     let fake = Fake::start("0.0.0.0:0", &["juniper"]).await;
     let model = Model::start("0.0.0.0:0").await;
     let chat = fake.chat("talk", &["juniper"]);
-    let c = Container::run(&hermes_tag(), fake.addr.port(), model.addr.port(), &[]);
+    let c = Container::run(&hermes_tag(), fake.addr.port(), model.addr.port(), extra);
     fake.until(120_000, "Hermes' bridge to follow its chat", |w| w.live_sockets() >= 2).await;
     let first = fake.say(&chat, &person("paul"), json!({ "text": "hello" }));
     let t = fragment_bridge::records::turn_id("juniper--k3x9", &chat, "chat", first["seq"].as_u64().unwrap());
@@ -2211,11 +2217,12 @@ async fn words_before_a_tool_call_are_a_reply() {
 /// `memory.nudge_interval`) and announces once the turn is done, is a
 /// `turn.notice` of the turn it reviewed (`memory`), never a step nor a
 /// reply. Method: short turns until one is reviewed, the scripted model
-/// saving one thing when asked to review.
+/// saving one thing when asked to review. That memory then reaches the agent
+/// repo with the ordinary sync poll ten minutes away.
 #[tokio::test]
 #[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
 async fn a_memory_review_is_a_notice() {
-    let (fake, model, chat, c) = hermes_running().await;
+    let (fake, model, chat, c) = hermes_running_with(&[("HERMES_BOOT_SYNC_MS", "600000")]).await;
     let ended = |w: &support::fake::World, turn: &str| w.bodies(&chat, "work", "turn.end").iter().any(|e| e["turn"] == turn);
     let reviewed = |w: &support::fake::World| w.bodies(&chat, "work", "turn.notice").into_iter().find(|n| n["category"] == "memory");
     let reviews = || model.calls.lock().unwrap().iter().filter(|call| content_text(call.body["messages"].as_array().and_then(|m| m.last()).unwrap_or(&json!(null))).starts_with("Review the conversation")).count();
@@ -2248,6 +2255,9 @@ async fn a_memory_review_is_a_notice() {
         let said = w.bodies(&chat, "chat", "reply");
         assert!(!said.iter().any(|r| r["text"].as_str().is_some_and(|t| t.contains("Self-improvement"))), "no reply: {said:?}");
     });
+    fake.until(30_000, "the reviewed memory committed before the periodic poll", |w| {
+        w.fragments["juniper--k3x9"].files.get("memories/MEMORY.md").is_some_and(|b| String::from_utf8_lossy(b).contains(support::model::REMEMBERED))
+    }).await;
 }
 
 // ---- a card nobody answers (Paul on p5, 2026-10-05: "I missed the 1hr

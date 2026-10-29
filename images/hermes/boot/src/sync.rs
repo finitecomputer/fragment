@@ -37,6 +37,34 @@ pub const FILE_MAX_BYTES: usize = 192 * 1024;
 pub const FILES_MAX: usize = 500;
 /// What was agreed at the last sync, in the profile.
 pub const MANIFEST: &str = ".fragment-sync.json";
+const DIRTY_FILE: &str = ".fragment-self-sync-dirty";
+const CLAIMED_FILE: &str = ".fragment-self-sync-claimed";
+
+/// Whether a native memory/skill change or an unfinished sync awaits a round.
+pub fn dirty(profile: &Path) -> std::io::Result<bool> {
+    Ok(profile.join(DIRTY_FILE).try_exists()? || profile.join(CLAIMED_FILE).try_exists()?)
+}
+
+/// Claim the current dirty marker. A newer marker written during the round is
+/// left alone, so this round's success cannot clear a change it did not read.
+pub fn claim(profile: &Path) -> std::io::Result<()> {
+    let dirty = profile.join(DIRTY_FILE);
+    let claimed = profile.join(CLAIMED_FILE);
+    if claimed.try_exists()? || !dirty.try_exists()? {
+        return Ok(());
+    }
+    std::fs::rename(dirty, claimed)
+}
+
+/// Settle only the claimed change. An unfinished claim or a newer dirty
+/// marker keeps the profile pending.
+pub fn settle(profile: &Path) -> std::io::Result<()> {
+    match std::fs::remove_file(profile.join(CLAIMED_FILE)) {
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
+        other => other,
+    }
+}
+
 /// One commit carries at most this many files (the route's 16), and is cut
 /// before its text and base64 pass this many bytes unless it carries a
 /// single file (at most 256 KiB as base64): well within the route's 1 MiB.
@@ -390,6 +418,40 @@ mod tests {
     }
 
     #[test]
+    fn a_claim_settles_without_losing_a_newer_change() {
+        let d = std::env::temp_dir().join(format!("hermes-boot-dirty-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        assert!(!dirty(&d).unwrap());
+        std::fs::write(d.join(DIRTY_FILE), "").unwrap();
+        claim(&d).unwrap();
+        assert!(d.join(CLAIMED_FILE).exists() && !d.join(DIRTY_FILE).exists());
+        std::fs::write(d.join(DIRTY_FILE), "newer").unwrap();
+        settle(&d).unwrap();
+        assert!(dirty(&d).unwrap() && !d.join(CLAIMED_FILE).exists());
+        claim(&d).unwrap();
+        settle(&d).unwrap();
+        assert!(!dirty(&d).unwrap());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn an_unfinished_claim_stays_pending() {
+        let d = std::env::temp_dir().join(format!("hermes-boot-claimed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join(DIRTY_FILE), "").unwrap();
+        claim(&d).unwrap();
+        assert!(dirty(&d).unwrap(), "no settle: the failed or interrupted round is retried");
+        std::fs::write(d.join(DIRTY_FILE), "newer").unwrap();
+        claim(&d).unwrap();
+        assert_eq!(std::fs::read(d.join(DIRTY_FILE)).unwrap(), b"newer", "an old claim does not consume a newer marker");
+        settle(&d).unwrap();
+        assert!(d.join(DIRTY_FILE).exists());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
     fn only_the_agents_own_files_sync() {
         for yes in ["SOUL.md", "memories/MEMORY.md", "skills/cook/SKILL.md"] {
             assert!(synced(yes), "{yes}");
@@ -576,7 +638,7 @@ mod tests {
         let d = std::env::temp_dir().join(format!("hermes-boot-scan-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         let big = "x".repeat(FILE_MAX_BYTES + 1);
-        for (p, body) in [("SOUL.md", "me"), ("memories/MEMORY.md", "m"), ("memories/big.md", &big), ("skills/mine/SKILL.md", "s"), ("skills/mine/__pycache__/a.pyc", "c"), ("skills/.git/HEAD", "h"), ("sessions/x.json", "{}")] {
+        for (p, body) in [("SOUL.md", "me"), ("memories/MEMORY.md", "m"), ("memories/big.md", &big), ("skills/mine/SKILL.md", "s"), ("skills/mine/__pycache__/a.pyc", "c"), ("skills/.git/HEAD", "h"), ("sessions/x.json", "{}"), (DIRTY_FILE, ""), (CLAIMED_FILE, "")] {
             std::fs::create_dir_all(d.join(p).parent().unwrap()).unwrap();
             std::fs::write(d.join(p), body).unwrap();
         }

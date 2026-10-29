@@ -61,8 +61,12 @@ const GATE_MS_MAX: u64 = 15 * 60 * 1000;
 const CA_WAIT_MS: u64 = 15_000;
 const CA: &str = "/etc/cloudflare/certs/cloudflare-containers-ca.crt";
 const CA_BUNDLE: &str = "/etc/ssl/certs/ca-certificates.crt";
-/// The agents' repos sync this often while awake.
+/// The agents' repos sync this often while awake, and native memory/skill
+/// changes sync on the dirty cadence below.
 const SYNC_EVERY_MS: u64 = 60_000;
+/// A native self-change prompts a sync at most this often; failures leave the
+/// profile dirty rather than spinning on the platform.
+const DIRTY_SYNC_EVERY_MS: u64 = 5_000;
 /// Each agent's `agent.json` is read again this often while awake: a model
 /// its owner picks in settings is its next turn's within about this
 /// (`write_config`). One small file read per agent.
@@ -1280,6 +1284,7 @@ async fn boot_main() {
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut last_sync = Instant::now();
+    let mut last_dirty = Instant::now();
     let mut last_agents = Instant::now();
     let mut last_models = Instant::now();
     // HERMES_BOOT_MODEL_MS: a test's cadence for reading agent.json again, at least 1 s.
@@ -1416,19 +1421,50 @@ async fn boot_main() {
                     write_identity(a, &dir, ids, &title);
                 }
             }
-            if last_sync.elapsed() > Duration::from_millis(sync_every) {
-                last_sync = Instant::now();
+            // Full rounds and dirty checks have independent clocks: looking
+            // for a native change must not postpone the ordinary full sync.
+            let sync_due = last_sync.elapsed() > Duration::from_millis(sync_every);
+            let dirty_due = last_dirty.elapsed() >= Duration::from_millis(DIRTY_SYNC_EVERY_MS);
+            if sync_due || dirty_due {
+                if sync_due {
+                    last_sync = Instant::now();
+                }
+                if dirty_due {
+                    last_dirty = Instant::now();
+                }
                 for a in &agents {
                     let dir = hermes::profile_dir(&home, &a.fragment);
-                    match sync::round(&api, a, &dir, &own).await {
-                        Ok(d) if d != sync::Done::default() => {
-                            // its job may have changed: its Bot Mode description with it
-                            if d.pulled > 0 {
-                                write_identity(a, &dir, ids, &read_title(&api, a).await);
-                            }
-                            ev!("sync.round", { "agent": a.fragment, "pulled": d.pulled, "pushed": d.pushed, "conflicts": d.conflicts, "deleted": d.deleted })
+                    let marked = match sync::dirty(&dir) {
+                        Ok(m) => m,
+                        Err(e) => {
+                            ev!("sync.failed", { "agent": a.fragment, "error": e.to_string() });
+                            continue;
                         }
-                        Ok(_) => {}
+                    };
+                    if !sync_due && !marked {
+                        continue;
+                    }
+                    if marked {
+                        if let Err(e) = sync::claim(&dir) {
+                            ev!("sync.failed", { "agent": a.fragment, "error": e.to_string() });
+                            continue;
+                        }
+                    }
+                    match sync::round(&api, a, &dir, &own).await {
+                        Ok(d) => {
+                            if marked {
+                                if let Err(e) = sync::settle(&dir) {
+                                    ev!("sync.failed", { "agent": a.fragment, "error": e.to_string() });
+                                }
+                            }
+                            if d != sync::Done::default() {
+                                // its job may have changed: its Bot Mode description with it
+                                if d.pulled > 0 {
+                                    write_identity(a, &dir, ids, &read_title(&api, a).await);
+                                }
+                                ev!("sync.round", { "agent": a.fragment, "pulled": d.pulled, "pushed": d.pushed, "conflicts": d.conflicts, "deleted": d.deleted })
+                            }
+                        }
                         Err(e) => ev!("sync.failed", { "agent": a.fragment, "error": e.to_string() }),
                     }
                 }
