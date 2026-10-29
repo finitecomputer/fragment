@@ -264,7 +264,7 @@ async fn an_approval_through_the_relay() {
     let options: Vec<&str> = p["options"].as_array().unwrap().iter().map(|o| o["id"].as_str().unwrap()).collect();
     assert_eq!(options, vec!["once", "session", "deny"]);
     tokio::time::sleep(Duration::from_millis(300)).await;
-    fake.with(|w| assert_eq!((w.keepalive_open, w.keepalive_log.clone()), (1, vec![true]), "the card holds the computer awake"));
+    fake.with(|w| assert_eq!((w.keepalive_open, w.keepalive_log.clone()), (0, vec![true, false]), "the card releases the computer"));
     fake.say(&chat, &person("paul"), json!({ "kind": "prompt_response", "prompt": p["prompt"], "option": "once" }));
     fake.until(WAIT, "the reply", |w| !replies(w, &chat).is_empty()).await;
     fake.with(|w| {
@@ -474,11 +474,8 @@ fn work_of(w: &World, chat: &str, turn: &str, kind: &str) -> Vec<Value> {
 /// keepalive go while the card waits, the computer is put to sleep as the DO
 /// does it (the hold, its answer, the container gone, Hermes with it) and
 /// woken from its state by the next message, after the card's `expiresAt`;
-/// otherwise it stays awake through the expiry. The scripted Hermes keeps
-/// its session as v0.21.5 does: a turn cut before its reply leaves its
-/// message the session's last, and the next message is folded into it. On
-/// master the keepalive is let go (decision 42), the sleep cuts the turn,
-/// and the next message asks the cut approval again.
+/// otherwise it stays awake through the expiry. As in the real image,
+/// after_boot closes the cut turn in the scripted Hermes session.
 #[tokio::test]
 async fn an_expired_card_ends_its_turn_and_the_next_message_is_answered() {
     let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
@@ -514,7 +511,7 @@ async fn an_expired_card_ends_its_turn_and_the_next_message_is_answered() {
         let next = say("good morning");
         support::unhold(&dir);
         let bridge = support::start_killable(cfg, relay(listen, &dir));
-        let woken = hermes.after(listen, "computer-test", SECRET);
+        let woken = hermes.after_boot(listen, "computer-test", SECRET);
         (bridge, woken, next)
     } else {
         fake.until(WAIT, "the card expired, awake, and its turn's end", |w| !work_of(w, &chat, &risky, "turn.prompt.closed").is_empty() && !work_of(w, &chat, &risky, "turn.end").is_empty()).await;
@@ -534,7 +531,7 @@ async fn an_expired_card_ends_its_turn_and_the_next_message_is_answered() {
         assert_eq!(answer, Some(json!("echo: [paul] good morning")), "the next message is answered, and only it");
         assert_eq!(work_of(w, &chat, &next, "turn.end")[0]["outcome"], "idle");
     });
-    assert!(!let_go, "the card held the computer awake: an idle sleep under it is what cut its turn");
+    assert!(let_go, "waiting on a card permits idle sleep");
     hermes.with(|s| assert!(s.session.is_empty(), "nothing is left unanswered in its session: {:?}", s.session));
     bridge.stop().await;
 }
@@ -589,7 +586,7 @@ async fn a_turn_cut_by_a_restart_is_told_and_never_folded() {
         let n = heard(&next);
         assert_eq!(n["text"], "good morning", "the message's words alone: {n}");
         let note = n["context"][0]["text"].as_str().unwrap_or_else(|| panic!("the note, as the inbound's context: {n}"));
-        for said in ["Your previous turn in this chat was cut short: your computer restarted before it finished.", "Check what it already did before you do any of it again", "It was answering: “something risky”", "It asked: “⚠️ **Dangerous command** `rm -rf x`” (expired)"] {
+        for said in ["Your previous turn in this chat was cut short: your computer restarted before it finished.", "Check what it already did before you do any of it again", "It was answering: “something risky”", "It asked: “⚠️ **Dangerous command** `rm -rf x`” (unanswered)"] {
             assert!(note.contains(said), "{said:?} in {note}");
         }
         assert!(heard(&after).get("context").is_none(), "the turn after is told nothing: {}", heard(&after));

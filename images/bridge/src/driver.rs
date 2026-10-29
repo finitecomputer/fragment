@@ -955,7 +955,35 @@ async fn feed(api: &Api, agent: &Agent, fragment: &str, record: Record, inbox: &
     } else {
         record
     };
-    let fed = inbox.send(Msg::Input(Input::Record { agent: agent.fragment.clone(), fragment: fragment.to_string(), record, view: input_view, since })).await;
+    let input = if !tasks && matches!(records::said(&record.body), records::Said::PromptResponse { card, .. } if record.principal == agent.owner && card.as_ref().is_none_or(|c| c.agent == agent.identity)) {
+        // A failed read must leave the cursor before the answer for retry.
+        let history = async {
+            let tail = api.channels(&agent.fragment, fragment).await?.into_iter().find(|c| c.name == records::WORK).map_or(0, |c| c.seq);
+            let records::Said::PromptResponse { prompt, card, .. } = records::said(&record.body) else { unreachable!() };
+            let target = |r: &&Record| r.principal == agent.identity && r.body["kind"] == "turn.prompt" && r.body["prompt"] == prompt && card.as_ref().is_none_or(|c| c.agent == agent.identity && r.body["turn"] == c.turn);
+            let complete = |rs: &[Record]| rs.iter().filter(target).any(|p| rs.iter().any(|s| s.principal == agent.identity && s.body["kind"] == "turn.start" && s.body["turn"] == p.body["turn"]));
+            let (work, _) = read_back_limit(api, &agent.fragment, fragment, records::WORK, tail + 1, complete, usize::MAX).await?;
+            let oldest = work.iter().filter(target).map(|r| r.at).min().unwrap_or(record.at);
+            let original = work.iter().find(|r| r.principal == agent.identity && r.body["kind"] == "turn.start" && work.iter().filter(target).any(|p| p.body["turn"] == r.body["turn"]));
+            let cause = original.map(|r| &r.body["cause"]);
+            let seq = cause.filter(|c| c["fragment"] == fragment && c["channel"] == records::CHAT).and_then(|c| c["seq"].as_u64()).unwrap_or(record.seq);
+            let (mut chat, _) = read_back_limit(api, &agent.fragment, fragment, records::CHAT, record.seq + 1, |rs| rs.first().is_some_and(|r| r.at < oldest && r.seq <= seq), usize::MAX).await?;
+            if let Some(cause) = cause.filter(|c| c["fragment"] != fragment || c["channel"] != records::CHAT) {
+                if let (Some(f), Some(c), Some(s)) = (cause["fragment"].as_str(), cause["channel"].as_str(), cause["seq"].as_u64()) {
+                    chat.extend(api.records(&agent.fragment, f, c, s.saturating_sub(1), 1).await?.records);
+                }
+            }
+            Ok::<_, ApiError>((work, chat))
+        }.await;
+        let (work, chat) = match history {
+            Ok(h) => h,
+            Err(e) => return Some(Ended::Again(format!("card history unread: {e}"))),
+        };
+        Input::CardRecord { agent: agent.fragment.clone(), fragment: fragment.to_string(), record, view: input_view, since, work, chat }
+    } else {
+        Input::Record { agent: agent.fragment.clone(), fragment: fragment.to_string(), record, view: input_view, since }
+    };
+    let fed = inbox.send(Msg::Input(input)).await;
     fed.is_err().then_some(Ended::Stopped)
 }
 
@@ -1446,15 +1474,21 @@ async fn download(api: &Api, agent: &str, fragment: &str, refs: &[AttachmentRef]
 /// says the records read answer, the channel's first record is read, or
 /// `NOTE_SCAN_RECORDS_MAX` are. With whether they reach back to its start.
 async fn read_back(api: &Api, agent: &str, fragment: &str, channel: &str, before: u64, enough: impl Fn(&[Record]) -> bool) -> Result<(Vec<Record>, bool), ApiError> {
+    read_back_limit(api, agent, fragment, channel, before, enough, limits::NOTE_SCAN_RECORDS_MAX).await
+}
+
+async fn read_back_limit(api: &Api, agent: &str, fragment: &str, channel: &str, before: u64, enough: impl Fn(&[Record]) -> bool, limit: usize) -> Result<(Vec<Record>, bool), ApiError> {
     let mut got: Vec<Record> = Vec::new();
     // the newest seq not read yet
     let mut upto = before.saturating_sub(1);
-    // bounded by NOTE_SCAN_RECORDS_MAX: each pass reads a page further back
+    // Each pass decreases upto by one page, bounded by the captured tail.
+    // Optional notes also cap their record count; card answers read to
+    // their exact card and cause so an old, unexpired card stays answerable.
     loop {
         if upto == 0 {
             return Ok((got, true));
         }
-        if enough(&got) || got.len() >= limits::NOTE_SCAN_RECORDS_MAX {
+        if enough(&got) || got.len() >= limit {
             return Ok((got, false));
         }
         let after = upto.saturating_sub(u64::from(limits::NOTE_PAGE_RECORDS));

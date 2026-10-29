@@ -172,7 +172,7 @@ async fn notices_are_the_turns() {
 }
 
 /// Goal (decision 42): an approval is a card for the agent's owner; while
-/// it waits the keepalive is held (an idle sleep would cut its turn); the
+/// it waits the computer may sleep; the
 /// owner's answer resumes the turn, a second answer is ignored, and someone
 /// else's never counts.
 #[tokio::test]
@@ -190,7 +190,7 @@ async fn an_approval_answered() {
     assert_eq!(prompt["options"].as_array().map(Vec::len), Some(2));
     let id = prompt["prompt"].as_str().unwrap().to_string();
     tokio::time::sleep(Duration::from_millis(300)).await;
-    fake.with(|w| assert_eq!((w.keepalive_open, w.keepalive_log.clone()), (1, vec![true]), "the card holds the computer awake"));
+    fake.with(|w| assert_eq!((w.keepalive_open, w.keepalive_log.clone()), (0, vec![true, false]), "the card releases the computer"));
 
     fake.say(&chat, &person("skyler"), json!({ "kind": "prompt_response", "prompt": id, "option": "deny" }));
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -204,7 +204,7 @@ async fn an_approval_answered() {
         assert_eq!(closed.len(), 1);
         assert_eq!((closed[0]["outcome"].as_str(), closed[0]["option"].as_str(), closed[0]["by"].as_str()), (Some("answered"), Some("once"), Some("npub1paul")));
     });
-    fake.until(WAIT, "held through the card, dropped at the turn's end", |w| w.keepalive_log == [true, false]).await;
+    fake.until(WAIT, "released while waiting and after the turn ends", |w| w.keepalive_open == 0 && w.keepalive_log.last() == Some(&false)).await;
     bridge.stop().await;
 }
 
