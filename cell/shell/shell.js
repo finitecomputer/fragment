@@ -2420,7 +2420,7 @@ async function openSettings(push = true, failed = null) {
   const skills = await skillsSection();
   if (lost()) return;
   returnSaid(back);
-  renderSettingsPage(page, [account, ...billing, computer, agents, skills, connections, simplexSection(), buildSection(), dataSection(), helpSection(), ...releaseLine(c)]);
+  renderSettingsPage(page, [account, ...billing, computer, agents, skills, connections, simplexSection(), buildSection(), helpSection(), dataSection(), ...releaseLine(c)]);
   renderAgentFaces();
   // a home read that answered while these were built shown now they are in
   paintHomes();
