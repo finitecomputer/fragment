@@ -706,6 +706,38 @@ async fn hermes_running() -> (Fake, Model, String, Container) {
     (fake, model, chat, c)
 }
 
+/// Decision 65's image gate: a real Hermes background delegate finishes
+/// after its parent's reply, its result comes back through the bridge
+/// once, and the computer remains held while the child is still working.
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn a_background_delegate_delivers_and_keeps_the_computer_awake() {
+    let (fake, _model, chat, c) = hermes_running().await;
+    let parent = asked(&fake, &chat, &c, "delegate the gate work", |w, t| w.bodies(&chat, "work", "turn.end").iter().any(|e| e["turn"] == t)).await;
+    let started = "/data/work/juniper--k3x9/delegate-started";
+    let finished = "/data/work/juniper--k3x9/delegate-finished";
+    let mut active = false;
+    let mut held = true;
+    let mut delivered = vec![];
+    let t0 = Instant::now();
+    while t0.elapsed() < Duration::from_secs(120) {
+        if c.exec(&["test", "-f", started]) && !c.exec(&["test", "-f", finished]) {
+            active = true;
+            held &= fake.with(|w| w.keepalive_open > 0);
+        }
+        delivered = fake.with(|w| w.bodies(&chat, "chat", "reply").into_iter().filter(|r| r["text"].as_str().is_some_and(|s| s.contains("checked the delegated result: fragment-delegate-complete"))).collect::<Vec<_>>());
+        if !delivered.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    eprintln!("delegation gate: active after parent ended={active}, held={held}, replies={delivered:?}; {}", told(&fake, &chat, &c));
+    assert!(active, "the delegate runs after the parent's turn ends");
+    assert_eq!(delivered.len(), 1, "the background result arrives in the chat once");
+    assert_ne!(delivered[0]["turn"], parent, "its completion has a turn of its own");
+    assert!(held, "the computer stays awake throughout the background delegate");
+}
+
 /// Goal (Paul, 2026-10-09: a time-based fallback "only if time-based
 /// fallback is built into hermes"): a tier agent whose model stalls, its
 /// call streaming nothing, switches to the route's `fallback` by Hermes'
