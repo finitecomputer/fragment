@@ -6,8 +6,8 @@
 //!
 //! - a reply streams as `draft` frames, then arrives as a `send` that
 //!   answers the turn's message: a reply part;
-//! - its tool progress is a `send` answering nothing whose lines grow by
-//!   `edit`s: each new line a step;
+//! - supported tool observers share the authenticated activity socket;
+//!   legacy peers alone use progress text as steps;
 //! - a `send` answering nothing that starts with a notice glyph (`💾`,
 //!   `⚠️`, `⏳`, …: `wire::NOTICES`) is a notice (`Event::Notice`), with a
 //!   turn running or not (its review comes after its turn's `✅`);
@@ -112,6 +112,8 @@ pub struct RelayConfig {
     /// A file sent by URL may come over plain http from a local address (a
     /// test's fake server; `BRIDGE_MEDIA_LOCAL=allow`).
     pub media_local: bool,
+    /// Image guarantees observer hooks; never fall back even if their dial fails.
+    pub structured_tools: bool,
 }
 
 pub struct Relay {
@@ -152,6 +154,8 @@ impl MediaTable {
 /// once fetched (or refused): the answer to `request` on `conn`.
 enum Wire {
     Activity { conn: u64, working: bool },
+    Tool { turn: String, step: Step },
+    Structured,
     Connected { conn: u64, tx: mpsc::Sender<Message> },
     Frame { conn: u64, text: String },
     Closed { conn: u64 },
@@ -174,6 +178,7 @@ struct Inflight {
     parts: HashMap<String, u32>,
     /// Progress messages, and how many of their lines are steps already.
     progress: HashMap<String, usize>,
+    observed: std::collections::BTreeSet<String>,
     next_part: u32,
     /// It said something: a reply, a draft, a step, a prompt, a file (so
     /// its next `✅` is its end, not the startup gate's empty bracket's).
@@ -288,7 +293,8 @@ async fn run(cfg: RelayConfig, mut io: RuntimeIo) -> Result<(), RuntimeError> {
         tokio::spawn(net::serve(listener, handler, io.shutdown.clone()));
     }
 
-    let mut st = Loop { cfg, events: io.events.clone(), media, wire_tx, inflight: HashMap::new(), by_chat: HashMap::new(), answers: Vec::new(), asides: VecDeque::new(), activity: std::collections::BTreeSet::new(), conn: None, greeted: false, next_message: 0, next_order: 0 };
+    let structured = cfg.structured_tools;
+    let mut st = Loop { cfg, events: io.events.clone(), media, wire_tx, inflight: HashMap::new(), by_chat: HashMap::new(), answers: Vec::new(), asides: VecDeque::new(), activity: std::collections::BTreeSet::new(), structured, conn: None, greeted: false, next_message: 0, next_order: 0 };
     let mut shutdown = io.shutdown.clone();
     // bounded by the bridge's life: one input per pass, ended by shutdown
     loop {
@@ -328,6 +334,7 @@ async fn handle(mut req: Request<Incoming>, cfg: RelayConfig, media: Arc<Mutex<M
     let path = req.uri().path().to_string();
     if path == "/relay" || path == "/relay/activity" {
         let activity = path == "/relay/activity";
+        let events_only = req.uri().query() == Some("events=1");
         let checked = bearer_ok(&req, &cfg);
         let Some((response, socket)) = net::accept_ws(&mut req) else {
             return net::refusal(StatusCode::BAD_REQUEST, "invalid", "the relay is a WebSocket");
@@ -343,7 +350,7 @@ async fn handle(mut req: Request<Incoming>, cfg: RelayConfig, media: Arc<Mutex<M
                 Ok(()) => {
                     let conn = conns.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
                     if activity {
-                        activity_connection(ws, wire_tx, conn).await;
+                        activity_connection(ws, wire_tx, conn, events_only).await;
                     } else {
                         connection(ws, wire_tx, conn).await;
                     }
@@ -460,9 +467,10 @@ async fn connection(ws: net::ServerWs, wire_tx: mpsc::Sender<Wire>, conn: u64) {
 
 /// A live runtime-work signal, authenticated as the gateway. It holds no
 /// turn and writes no state. Its close (or 30 s without a ping) lets go.
-async fn activity_connection(ws: net::ServerWs, wire_tx: mpsc::Sender<Wire>, conn: u64) {
+async fn activity_connection(ws: net::ServerWs, wire_tx: mpsc::Sender<Wire>, conn: u64, events_only: bool) {
     let (mut sink, mut stream) = ws.split();
-    if wire_tx.send(Wire::Activity { conn, working: true }).await.is_err() {
+    if events_only { let _ = wire_tx.send(Wire::Structured).await; }
+    if wire_tx.send(Wire::Activity { conn, working: !events_only }).await.is_err() {
         return;
     }
     // The hook waits for this before returning: its signal is queued
@@ -471,6 +479,17 @@ async fn activity_connection(ws: net::ServerWs, wire_tx: mpsc::Sender<Wire>, con
         while let Ok(Some(frame)) = tokio::time::timeout(std::time::Duration::from_secs(30), stream.next()).await {
             match frame {
                 Ok(Message::Ping(data)) => if sink.send(Message::Pong(data)).await.is_err() { break },
+                Ok(Message::Text(text)) if text.len() <= 4096 => {
+                    if let Ok(v) = serde_json::from_str::<Value>(&text) {
+                        if let Some(working) = v.get("working").and_then(Value::as_bool) {
+                            let _ = wire_tx.send(Wire::Activity { conn, working }).await;
+                            if sink.send(Message::text("working")).await.is_err() { break }
+                        } else if let Some((turn, step)) = wire::observed_tool(&v) {
+                            let _ = wire_tx.send(Wire::Tool { turn, step }).await;
+                            if sink.send(Message::text("observed")).await.is_err() { break }
+                        }
+                    }
+                }
                 Ok(Message::Close(_)) | Err(_) => break,
                 Ok(_) => {}
             }
@@ -488,8 +507,9 @@ struct Loop {
     wire_tx: mpsc::Sender<Wire>,
     inflight: HashMap<String, Inflight>,
     by_chat: HashMap<String, String>,
-    /// Live activity sockets, one per hook instance with children running.
+    /// Activity sockets currently reporting children running.
     activity: std::collections::BTreeSet<u64>,
+    structured: bool,
     answers: Vec<PendingAnswer>,
     /// Commands said beside a turn (`Command::Aside`), by their message id,
     /// and the agent and chat they were said in: what answers one is a
@@ -656,13 +676,22 @@ impl Loop {
         self.next_order += 1;
         let turn = ts.turn.clone();
         let sent = self.send(frame.clone());
-        self.inflight.insert(turn.clone(), Inflight { start: ts, chat: chat.clone(), profile, order: self.next_order, frame, acked: false, sent, parts: HashMap::new(), progress: HashMap::new(), next_part: 1, said: false, stopped: false, asking: false, carded: false, worded: false, drafting: false, queue: VecDeque::new(), words_at: None, held_at: None, ending: false, taken: Vec::new(), pictures: 0, pictured: HashMap::new() });
+        self.inflight.insert(turn.clone(), Inflight { start: ts, chat: chat.clone(), profile, order: self.next_order, frame, acked: false, sent, parts: HashMap::new(), progress: HashMap::new(), observed: std::collections::BTreeSet::new(), next_part: 1, said: false, stopped: false, asking: false, carded: false, worded: false, drafting: false, queue: VecDeque::new(), words_at: None, held_at: None, ending: false, taken: Vec::new(), pictures: 0, pictured: HashMap::new() });
         self.by_chat.insert(chat, turn.clone());
         crate::ev!("relay.inbound", { "turn": turn, "sent": sent });
     }
 
     async fn wire(&mut self, w: Wire) {
         match w {
+            Wire::Structured => self.structured = true,
+            Wire::Tool { turn, step } => {
+                if self.inflight.get_mut(&turn).is_some_and(|f| {
+                    let id = &step.evidence.as_ref().expect("observed evidence").tool_call_id;
+                    f.observed.len() < 200 && f.observed.insert(id.clone())
+                }) {
+                    self.steps(&turn, vec![step]).await;
+                }
+            }
             Wire::Activity { conn, working } => {
                 if working {
                     self.activity.insert(conn);
@@ -888,7 +917,7 @@ impl Loop {
                     self.picture(&turn, part, links);
                     self.drain(&turn, false).await;
                 } else {
-                    let steps = wire::new_steps(&content, 0);
+                    let steps = if self.structured { Vec::new() } else { wire::new_steps(&content, 0) };
                     f.progress.insert(id.clone(), steps.len());
                     self.steps(&turn, steps).await;
                 }
@@ -903,7 +932,7 @@ impl Loop {
                     let (text, _) = wire::uncursored(&content);
                     self.out(&turn, Event::Reply { turn: turn.clone(), part, text: text.to_string() }).await;
                 } else if let Some(seen) = f.progress.get(&message_id).copied() {
-                    let steps = wire::new_steps(&content, seen);
+                    let steps = if self.structured { Vec::new() } else { wire::new_steps(&content, seen) };
                     f.progress.insert(message_id, seen + steps.len());
                     self.steps(&turn, steps).await;
                 } else if f.taken.contains(&message_id) {

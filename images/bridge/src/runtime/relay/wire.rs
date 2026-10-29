@@ -635,7 +635,7 @@ pub fn new_steps(content: &str, seen: usize) -> Vec<Step> {
 
 fn step(tool: String, args: String) -> Step {
     let category = category_of(&tool);
-    Step { tool, args, ok: true, excerpt: String::new(), category }
+    Step { tool, args, ok: true, excerpt: String::new(), category, evidence: None }
 }
 
 /// Hermes' tools, as v0.21.6 registers them (`tools/`): what each does (a
@@ -1001,5 +1001,46 @@ mod tests {
         ] {
             assert_eq!(said(&step_of(line)), want, "{line}");
         }
+    }
+}
+
+/// A terminal observation, never inferred from presentation text or disconnect.
+pub fn observed_tool(v: &Value) -> Option<(String, Step)> {
+    let turn = v.get("turn")?.as_str()?;
+    let tool = v.get("tool")?.as_str()?;
+    let evidence: crate::records::ToolEvidence = serde_json::from_value(v.get("evidence")?.clone()).ok()?;
+    if !crate::records::valid_post_id(turn) || tool.is_empty() || tool.len() > 140
+        || !crate::records::valid_post_id(&evidence.tool_call_id)
+        || !matches!(evidence.status.as_str(), "completed" | "failed" | "cancelled" | "blocked")
+        || evidence.result_ref.len() > 300
+        || evidence.error_type.as_ref().is_some_and(|s| s.len() > 140)
+        || evidence.error_message.as_ref().is_some_and(|s| s.chars().count() > 300) { return None }
+    Some((turn.into(), Step { tool: tool.into(), args: String::new(), ok: evidence.status == "completed",
+        excerpt: crate::records::cut(v.get("excerpt").and_then(Value::as_str).unwrap_or(""), 300),
+        category: category_of(tool), evidence: Some(evidence) }))
+}
+
+#[cfg(test)]
+mod observer_tests {
+    use super::*;
+    #[test]
+    fn terminal_outcomes_are_bounded_and_never_guessed() {
+        for status in ["completed", "failed", "cancelled", "blocked"] {
+            let mut v = serde_json::json!({"turn":"turn-1", "tool":"terminal", "excerpt":"x".repeat(400),
+                "evidence":{"tool_call_id":"call-1", "status":status, "duration_ms":12,
+                "error_type":null,"error_message":null,"result_ref":"hermes:session:call-1"}});
+            let (_, step) = observed_tool(&v).unwrap();
+            assert_eq!(step.ok, status == "completed");
+            let body = crate::records::turn_step("turn-1", 1, &step);
+            assert_eq!(body["status"], status);
+            assert_eq!(body["tool_call_id"], "call-1");
+            assert_eq!(body["excerpt"].as_str().unwrap().chars().count(), 300);
+            v["evidence"]["status"] = serde_json::json!("unknown");
+            assert!(observed_tool(&v).is_none());
+            v["evidence"]["status"] = serde_json::json!(status);
+            v["evidence"]["error_message"] = serde_json::json!("x".repeat(301));
+            assert!(observed_tool(&v).is_none());
+        }
+        assert!(observed_tool(&serde_json::json!({"tool":"terminal"})).is_none());
     }
 }

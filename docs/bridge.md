@@ -344,22 +344,33 @@ Waiting on a person alone will not hold it once P6 (#627) lands; until
 then an open card still holds it as described below.
 
 The image's `fragment-activity` plugin uses Hermes v0.21.7's supported
-`subagent_start` and `subagent_stop` lifecycle hooks, keyed by
-`child_session_id`. While its set of children is nonempty it holds
-`ws://<bridge listen>/relay/activity`, authenticated by the gateway's
-normal Relay bearer token (`gateway.relay.auth.make_token`). The bridge
-queues `Working(true)` and answers `ready` before the start hook returns,
-so the parent's end cannot release the hold first. Each plugin instance
-has at most one socket; several profiles' sockets hold together. This is
-the one runtime-work signal: it names no chat turn and appends no record.
+`subagent_start` / `subagent_stop` and `pre_tool_call` / `post_tool_call`
+hooks. Its one authenticated `/relay/activity` socket carries both work
+and terminal observations. `?events=1` opens without holding; explicit
+`{working:true|false}` frames reflect only the in-memory set of children,
+keyed by `child_session_id`. The bridge queues each signal before
+acknowledging it, before the hook returns. Several instances hold together.
+Old activity clients without the query still hold for their socket's life.
 
-The socket closes when the last child stops, or when its gateway process
-exits. A socket silent for 30 seconds closes too (the plugin pings every
-10 seconds and reconnects while children remain). The bridge's engine
-includes those live sockets in its existing keepawake predicate. Nothing
-of the children is persisted or replayed on restart: Hermes owns them,
-and a new process has none. Their completion still uses Hermes' ordinary
-Relay reply, which the bridge posts once as a turn of its own.
+Tool frames carry the task-local `HERMES_SESSION_MESSAGE_ID` (our turn),
+never a process-global chat guess. The bridge bounds and validates them,
+ignores absent turns, and deduplicates call ids within the turn (at most
+200). Pre-call establishes structured capability before progress; post-call
+maps Hermes `ok/error/cancelled/blocked` to
+`completed/failed/cancelled/blocked`. Pre-call is a policy gate, not proof
+execution started, so it creates no step. The same category table still
+classifies tools. Our image sets `BRIDGE_TOOL_OBSERVERS=1` before any turn, so an initial
+activity dial failure cannot enable legacy inference. Once structured
+capability is configured or seen, presentation progress
+never makes steps, including after disconnect. Older peers retain their
+legacy progress parser. Missing observations never become completions.
+
+The socket may stay connected without holding, including while a person
+answers a card. A gateway exit or 30 seconds without frames closes it;
+pings run every 10 seconds and children reconnect while running. No child
+state or tool delivery queue is persisted or replayed. Delivery is best
+effort; a disconnect can lose evidence. It cannot promise replay, retries,
+or exactly-once effects. Child completion still uses the ordinary Relay reply.
 
 ## A card keeps its computer awake
 
@@ -728,23 +739,11 @@ get_chat_info`.
   In its owner's SimpleX chat every inbound's source carries
   `chat_topic` (`wire::SIMPLEX_TOPIC`), which Hermes renders in that
   session's context as `**Channel Topic:**` (above, "SimpleX").
-- A reply streams as `draft` frames (the chat's draft), and arrives as a
-  `send` answering the turn's message; tool progress is a `send`
-  answering nothing whose lines grow by `edit`, each new line a step.
-  Hermes edits it at most every 1.5 s, and upstream held a line that came
-  sooner until a newer one, so a turn's last quick tool call showed no
-  step; our image patches its sender to send the line once the interval
-  is out (images/hermes/Dockerfile; the debt ledger).
-- A progress line names its tool (`🖥️ computer_use: "capture"`, a
-  terminal command's fenced block) or says its friendly verb (`🔍
-  Searching the web for rust`, `✍️ Writing notes.md`: Hermes' own labels
-  for its built-in tools, `display.verb` of its `locales/en.yaml`). One
-  table of Hermes' tools (`relay/wire.rs`, `TOOLS`) reads either as the
-  step's `tool` (Hermes' name for it), its `args` (the call's preview,
-  its quotes and a repeat's count dropped) and its `category`; a tool not
-  there is `other`, but for its browser's (`browser_…`). Hermes cuts a
-  preview at its `display.tool_preview_length`, 40 unless set: our image
-  sets it to 140, the most a step's `args` keeps (`hermes-boot`).
+- A reply streams as `draft` frames and arrives as a `send` answering
+  the turn's message. Tool steps come from the supported observer over the
+  activity socket above, independent of Hermes' progress sender's polling.
+  Legacy peers' progress previews still use the category table in
+  `relay/wire.rs`; our image retains no raw args or output in step cards.
 - Everything the agent says is a reply (Paul, 2026-10-24, in place of
   2026-10-05's one reply a turn). Hermes ends a draft segment at every
   tool boundary with a `send` answering the message, so the model's text
@@ -924,7 +923,6 @@ get_chat_info`.
   (a silent routine at home sends the phone nothing).
 
 Of decision 21's list, v0.21.5 has every op, but sends `task_card` only
-for Slack chats (`gateway/run_turn.py`), so steps come from progress
-text; `follow_up` is Discord's interaction tokens; neither is
+for Slack chats (`gateway/run_turn.py`), so our image uses supported observers over the activity socket; `follow_up` is Discord's interaction tokens; neither is
 advertised. It also has `thread_create` and `thread_rename` (threads are
 off here).

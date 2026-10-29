@@ -1,4 +1,4 @@
 name: fragment-activity
 version: 1.0.0
 description: Hold the computer while delegated children run outside their parent turns.
-provides_hooks: [subagent_start, subagent_stop]
+provides_hooks: [subagent_start, subagent_stop, pre_tool_call, post_tool_call]
