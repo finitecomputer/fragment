@@ -939,6 +939,8 @@ fragment invites accept|decline <name>   # an agent: its owner's, acting for the
 fragment sync <name> [--dir D] [--watch] [--mode M [--prune] | --live] [--apply-mass-delete]
 fragment verify <name> [--dir D]         fragment secret list|rm ...
 fragment search <name> <q> [--dir D] [--limit N]
+fragment collection --manifest FILE [--offline] list
+fragment collection --manifest FILE [--offline] search <q> [--limit N]
 fragment secret set <name> <KEY> --to HOST [--to HOST]   # the value from $KEY, else stdin
 fragment deploy <name> [--dir D] [--note N]
 fragment write <name> <path> --text T | --from FILE|- [--message M]
@@ -1032,3 +1034,13 @@ apply, with brain machinery and instruction files excluded too. Oversized
 (1 MiB), non-UTF-8 and truncated pages are reported in `skipped`. See the
 brain template README for the complete output contract, parsing limits and
 conflict semantics. Search never syncs or writes an index into the folder.
+
+A trusted local collection manifest can group separately synced brains under
+aliases: `fragment collection --manifest collection.json list` and
+`fragment collection --manifest collection.json search 'words'`. These only
+browse existing folders. Online mode checks each source's access; `--offline`
+searches retained copies with access explicitly unchecked. Inspect every
+source's disposition even when the command succeeds. The manifest exposes
+source names and local paths to everyone who reads it; keep it private or
+share only with an audience allowed to know all references. Format, provenance
+and revocation caveats: `templates/brain/README.md`, "CLI collections".

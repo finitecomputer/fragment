@@ -1,6 +1,7 @@
 mod api;
 mod ask;
 mod brain_search;
+mod collections;
 mod auth;
 mod blobs;
 mod codestorage;
@@ -57,6 +58,16 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Browse a trusted local collection manifest (read only)
+    Collection {
+        #[arg(long)]
+        manifest: PathBuf,
+        /// Read retained local copies without checking current source access
+        #[arg(long)]
+        offline: bool,
+        #[command(subcommand)]
+        sub: CollectionCmd,
+    },
     /// Search a brain's current local Markdown sections, offline (never syncs)
     Search {
         name: String,
@@ -409,6 +420,18 @@ enum Cmd {
         /// List available templates
         #[arg(long)]
         list: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum CollectionCmd {
+    /// List aliases, source identities and availability
+    List,
+    /// Search each source's current local Markdown sections
+    Search {
+        q: String,
+        #[arg(long, default_value = "10", value_parser = clap::value_parser!(u32).range(1..=50))]
+        limit: u32,
     },
 }
 
@@ -1097,6 +1120,21 @@ fn run(cli: Cli) -> Result<()> {
     let j = cli.json || json_env_flag();
 
     match cli.cmd {
+        Cmd::Collection { manifest, offline, sub } => {
+            let (q, limit) = match sub {
+                CollectionCmd::List => (None, 10),
+                CollectionCmd::Search { q, limit } => {
+                    brain_search::validate_query(&q).map_err(usage)?;
+                    (Some(q), limit)
+                }
+            };
+            let definition = collections::load(&manifest).map_err(|e| usage(format!("{e:#}")))?;
+            let client = if offline { None } else { Some(require_client(&cli.host, cli.verbose)?) };
+            let answer = collections::browse(definition, &manifest, client.as_ref(), q.as_deref(), limit)?;
+            json_exit(j, &answer);
+            collections::print(&answer)?;
+            return Ok(());
+        }
         Cmd::Search { name, q, dir, limit } => {
             brain_search::validate_query(&q).map_err(usage)?;
             let answer = brain_search::search(&name, &dir, &q, limit)?;
@@ -2267,7 +2305,7 @@ fn run(cli: Cli) -> Result<()> {
             json_exit(j, &json!({ "visibility": visibility }));
             println!("{name}: {}", visibility.as_str());
         }
-        Cmd::Search { .. } | Cmd::Login { .. } | Cmd::Host { .. } | Cmd::Guide | Cmd::Skill | Cmd::New { .. } | Cmd::Operator { .. } => unreachable!(),
+        Cmd::Collection { .. } | Cmd::Search { .. } | Cmd::Login { .. } | Cmd::Host { .. } | Cmd::Guide | Cmd::Skill | Cmd::New { .. } | Cmd::Operator { .. } => unreachable!(),
     }
     Ok(())
 }
