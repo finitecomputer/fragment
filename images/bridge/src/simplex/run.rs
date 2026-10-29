@@ -621,9 +621,6 @@ fn greeting(name: &str) -> String {
     format!("Hi, it's {name}. You're linked: write to me here any time, as you would in our chat.")
 }
 
-/// What the owner's SimpleX app is told after a start that went back in time.
-const MAYBE_LOST: &str = "I restarted and may have missed a message you sent me just before. If I don't answer something, please send it again.";
-
 /// What it is told when its message cannot be carried: this link has no
 /// door key (one made before doors, or one a rollback took).
 const NO_DOOR: &str = "Your message didn't reach me. Please link SimpleX to me again from your Settings.";
@@ -1946,11 +1943,9 @@ impl Manager {
                     Notice::Failed { what } => s.note = Some(format!("SimpleX said: {what}")),
                 }
                 crate::ev!("simplex.told", { "agent": f, "notice": format!("{n:?}") });
-                let name = s.shown_name();
-                match n {
-                    Notice::Linked { .. } => self.apply(f, Input::Reply(&greeting(&name))),
-                    Notice::MaybeLost => self.apply(f, Input::Reply(MAYBE_LOST)),
-                    _ => {}
+                if let Notice::Linked { .. } = n {
+                    let name = s.shown_name();
+                    self.apply(f, Input::Reply(&greeting(&name)));
                 }
             }
             Action::Save => {
