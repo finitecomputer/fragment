@@ -531,6 +531,8 @@ pub struct Step {
     pub excerpt: String,
     pub category: Category,
     pub evidence: Option<ToolEvidence>,
+    /// Runtime-only: a late reply has not yet proved final or interim.
+    pub defer_reply: bool,
 }
 
 /// Terminal observer evidence; old records and runtimes omit it.
@@ -924,7 +926,7 @@ mod tests {
         let c = Cause { fragment: "talk--k3x9".into(), channel: "chat".into(), seq: 4 };
         let life = "0123456789abcdef0123456789abcdef";
         assert_eq!(turn_start("t", "npub1p", "npub1a", &c, life), json!({ "kind": "turn.start", "turn": "t", "asker": "npub1p", "agent": "npub1a", "cause": { "fragment": "talk--k3x9", "channel": "chat", "seq": 4 }, "life": life }));
-        let s = Step { tool: "terminal".into(), args: "ls".into(), ok: true, excerpt: String::new(), category: Category::Shell, evidence: None };
+        let s = Step { tool: "terminal".into(), args: "ls".into(), ok: true, excerpt: String::new(), category: Category::Shell, evidence: None, defer_reply: false };
         assert_eq!(turn_step("t", 1, &s), json!({ "kind": "turn.step", "turn": "t", "step": 1, "tool": "terminal", "category": "shell", "args": "ls", "ok": true, "excerpt": "" }), "no words: they are a reply");
         assert_eq!(reply("Let me look.", "t", &[], 1, false), json!({ "text": "Let me look.", "turn": "t" }));
         assert_eq!(reply("Let me look.", "t", &[], 1, true), json!({ "text": "Let me look.", "turn": "t", "interim": true }));

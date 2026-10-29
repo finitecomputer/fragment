@@ -2347,6 +2347,23 @@ fn ended_turn<'a>(chat: &'a str, t: &'a str) -> impl Fn(&support::fake::World) -
     move |w| w.bodies(chat, "work", "turn.end").iter().any(|e| e["turn"] == t)
 }
 
+/// Match the full lane's short narration and instant command: one final
+/// reply, with pre-tool words retaining their non-final semantics.
+#[tokio::test]
+#[ignore = "needs Docker"]
+async fn short_narration_keeps_its_interim_semantics() {
+    let (fake, _model, chat, c) = hermes_running().await;
+    let ended = |w: &support::fake::World, turn: &str| w.bodies(&chat, "work", "turn.end").iter().any(|e| e["turn"] == turn);
+    for _ in 0..6 {
+        let turn = asked(&fake, &chat, &c, "brief narration\nnarrate: echo narrated-ran", ended).await;
+        let replies = fake.with(|w| w.bodies(&chat, "chat", "reply").into_iter().filter(|r| r["turn"] == turn).collect::<Vec<_>>());
+        assert_eq!(replies.len(), 2, "{replies:?}");
+        assert_eq!(replies[0], json!({"turn":turn,"text":"Let me check that.","interim":true}));
+        assert!(replies[1].get("interim").is_none(), "{replies:?}");
+        assert!(replies[1]["text"].as_str().unwrap().contains("narrated-ran"));
+    }
+}
+
 /// Goal (the finite-mono parity audit, 2026-10-09: an image an agent made
 /// with FAL's image generation showed as a bare link): real Hermes sends a
 /// reply's image link by its URL (`send_media`), and the bridge fetches it:
@@ -2488,15 +2505,14 @@ async fn steps_say_what_they_do() {
 /// are a reply of their own, whole, posted before the step and marked
 /// `interim`; the step carries no words; the turn's answer is a reply after
 /// it. Two full replies, one step. Method: the scripted model says a long
-/// answer before its terminal call (`narrate:`), its command slow enough
-/// that Hermes sends the step (the debt ledger, "A quick tool's step can be
-/// lost in Hermes").
+/// answer before its instant terminal call (`narrate:`). The companion
+/// short-narration test also covers a result overtaking the first Relay send.
 #[tokio::test]
 #[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
 async fn words_before_a_tool_call_are_a_reply() {
     let (fake, _model, chat, c) = hermes_running().await;
     let ended = |w: &support::fake::World, turn: &str| w.bodies(&chat, "work", "turn.end").iter().any(|e| e["turn"] == turn);
-    let turn = asked(&fake, &chat, &c, "narrate: sleep 2 && echo narrated-ran", ended).await;
+    let turn = asked(&fake, &chat, &c, "narrate: echo narrated-ran", ended).await;
     fake.with(|w| {
         let replies: Vec<serde_json::Value> = w.records(&chat, "chat").into_iter().filter(|r| r["body"]["turn"] == turn).collect();
         let steps: Vec<serde_json::Value> = w.records(&chat, "work").into_iter().filter(|r| r["body"]["turn"] == turn && r["body"]["kind"] == "turn.step").collect();
