@@ -195,6 +195,30 @@ fn deploying_cases(s: &mut Suite, api: &Api) -> Result<()> {
             && calls_after == calls,
         format!("asked {} times ({asks} at most), read {}: {refused}", skewed_after - skewed, calls_after - calls),
     );
+    for (label, extra, html) in [
+        ("navigation", vec![("sec-fetch-mode", "navigate".into())], true),
+        ("frame", vec![("sec-fetch-dest", "iframe".into())], true),
+        ("HTML preferred", vec![("accept", "text/html,application/json;q=0.5".into())], true),
+        ("JSON preferred", vec![("accept", "application/json,text/html;q=0.5".into())], false),
+        ("HTML refused", vec![("accept", "text/html;q=0".into())], false),
+        ("wildcard preferred", vec![("accept", "text/html;q=0.5,*/*".into())], false),
+        ("fetch", vec![("sec-fetch-mode", "cors".into()), ("accept", "text/html".into())], false),
+    ] {
+        skew(asks)?;
+        let r = api.call(Call { method: "GET", url: callback.clone(), cookie: Some(bound.clone()), extra, ..Call::default() })?;
+        s.ok(&format!("deploying {label}: HTML only for a document, JSON unchanged otherwise"),
+            r.status == 503 && if html {
+                r.header("content-type").starts_with("text/html")
+                    && r.text.contains("Updating — back in a moment")
+                    && r.text.contains("http-equiv=\"refresh\" content=\"3\"")
+                    && r.header("retry-after") == "3"
+                    && r.header("cache-control") == "no-store"
+                    && r.header("content-security-policy").contains("style-src 'self'")
+                    && !r.text.contains("<script")
+            } else { r.code() == Some(ErrorCode::Deploying) && r.header("content-type").starts_with("application/json") }, &r);
+    }
+    skew(1)?;
+    let (calls_after, skewed_after) = registry_counts(api)?;
     // the hook's last refusal meets the first ask: asked again, the
     // exchange is read once, and WorkOS's code is exchanged then, its first time
     let r = api.call(Call { method: "GET", url: callback, cookie: Some(bound), ..Call::default() })?;

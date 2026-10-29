@@ -75,6 +75,7 @@ mod share;
 mod shell;
 mod stripe;
 mod subscriptions;
+mod updating;
 mod wipe;
 
 use fragment_core::access;
@@ -1047,6 +1048,16 @@ fn moved(to: &str) -> CellResult<Response> {
 }
 
 pub(crate) async fn route(req: Request, env: &Env, ctx: &Context) -> CellResult<Response> {
+    let navigation = updating::navigation(&req)?;
+    let platform = Config::from_env(env).is_platform_host(req.url()?.host_str().unwrap_or_default());
+    let resp = match route_inner(req, env, ctx).await {
+        Ok(resp) => resp,
+        Err(e) => e.response()?,
+    };
+    if navigation { updating::answer(resp, env, platform).await } else { Ok(resp) }
+}
+
+async fn route_inner(req: Request, env: &Env, ctx: &Context) -> CellResult<Response> {
     let cfg = Config::from_env(env);
     // as its client named it: signatures, links, and cookies name the https URL
     let url = fragment_nip98::arrived_url(req.url()?, req.headers().get("x-forwarded-proto")?.as_deref());
