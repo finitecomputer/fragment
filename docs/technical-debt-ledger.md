@@ -5,6 +5,30 @@ Each entry names where it was observed, the risk, the first proof that
 would show it biting, and the condition that deletes it. An entry
 without a delete condition is unfinished design, not debt.
 
+## The Hermes image adapts model preflight deployment waits
+
+- **Observed:** #625, 2026-10-29: release guard refusals lasted about five
+  minutes. A silent cell wait exceeds Hermes' Fast 20 s and planned Deep
+  180 s stale limits, permitting abandoned calls to overlap.
+- **Shortcut:** the image-owned `deploy_wait.py`, installed by the
+  `fragment-deploy-wait` plugin, wraps pinned Hermes v0.21.7's
+  `_StreamingCall._open_chat_stream`, stale-kill and heartbeat hooks.
+  Only the private intercept's marked not-dispatched preflight refusals
+  get a six-minute budget inside one attempt. A plugin error hook makes
+  that budget's expiry terminal, rather than another fallback/retry cycle.
+- **Risk:** an upstream change to the request-client retry policy,
+  watchdog, cancellation or writer fence could allow a duplicate dispatch
+  or suppress a real stall. Non-streaming and auxiliary calls do not use
+  this adapter and retain their existing failure behavior.
+- **First proof:** real-Hermes Docker: 90 s of marked preflight refusals,
+  one reply and one provider dispatch, no provider recovery notice;
+  cancellation before admission dispatches nothing; an ordinary silent
+  provider still triggers the existing ~40 s Fast fallback. Contract tests
+  exercise markers, budget exhaustion, cancellation and supersession.
+- **Delete when:** Hermes natively supports a bounded deployment-preflight
+  wait with these timer, retry, cancellation and no-dispatch guarantees,
+  and the same real-image tests pass without the adapter.
+
 Entries whose subject went at the cut (computers, sandcastle, Hermes,
 the desktop, chats; docs/cloudflare-v1.md, decision 33) went with it
 and are at the tag `celld-final`. Entries about the hosted fleet (Fly,
@@ -209,37 +233,6 @@ fragment.club until cutover (decisions 34–35).
   (the save its first start on a new image restored), apart from its three,
   until its next image change, and a pin back restores it: a rollback then
   loses only the canary's own work, and says so as any going back does.
-
-## CI deploys pinned images only; a pushed image's digest is pinned by hand
-
-- **Observed:** 2026-10-16, continuous deployment (.github/workflows/
-  ci.yml, `deploy`). A runner keeps no Docker layer cache: a build there
-  stamps every layer anew, pushes the whole Hermes base (gigabytes, whose
-  push has timed out even from a machine with the cache) and makes a new
-  digest at every deploy, which tells every computer on that image an
-  update is ready (docs/computers.md, "What changes a version").
-- **Shortcut:** CI deploys with `--pinned-only` (xtask/src/deploy.rs),
-  which refuses a config with an image built from the tree. The canary
-  is built and pushed by the Image workflow (.github/workflows/image.yml,
-  run by hand: `cargo xtask image push`, since 2026-10-20), on a runner
-  with no layer cache, so each build makes a new digest and pushes the
-  whole base, tried up to four times; production's next stable is the
-  round's proven image, copied by it at its digest (`cargo xtask image
-  copy`). The digest its summary names is copied by hand into the
-  environment's config in finitecomputer/fragment-deploy and committed
-  there.
-- **Risk:** a deploy by hand from a config that is not fragment-deploy's
-  committed one (a canary pinned only in a local copy) is put back at
-  the committed digest by the environment's next CI deploy, telling the
-  canary group of an update no round made. A run for a commit whose
-  image did not change still makes a new digest, which, pinned, tells
-  the canary group of an update that changes nothing.
-- **First proof:** a canary computer told an update is ready after a
-  master deploy that no round built.
-- **Delete when:** the Image workflow builds on a builder whose cache
-  keeps a digest while its inputs stay the same, and the digest it names
-  becomes the image's line in fragment-deploy's config without a copy
-  by hand.
 
 ## A direct chat's label is its agent's, which a branch may lack room for
 
@@ -1248,6 +1241,44 @@ fragment.club until cutover (decisions 34–35).
   body, as the model route reads tokens) and settles the vendor's own
   units against a hold of its worst case, each catalog row naming how,
   proven by a lane whose upstream fake answers usage and is charged by it.
+
+## The Hermes image adapts Bot Desktop's browser ownership
+
+- **Observed:** 2026-10-28, Hermes v0.21.7's desktop base includes regular
+  Chromium 154, but our wrapper selected PM's Chrome for Testing 145.
+  Both `agent-browser` 0.26.0 and Hermes' dock launch with debugging port
+  `0`, enabling `navigator.webdriver`; switching to a nonzero port leaves
+  no `DevToolsActivePort` file for their discovery. The native daemon also
+  retains its first CDP endpoint across a desktop restart unless explicitly
+  reconnected. A global `browser.cdp_url` loses this version's local-session
+  lease fence. These were reproduced on the real image.
+- **Shortcut:** the image selects its existing `/usr/bin/chromium` and
+  extends pinned Hermes' local start/attach, dock and stop paths, using
+  `images/hermes/desktop_browser.py` and exact source replacements guarded
+  by `boot/src/desktop.rs`. The Python adapter reuses upstream's profile,
+  desktop environment and process-stop helpers. It serializes starts,
+  validates the live profile owner against CDP's browser PID, and gives
+  each visible browser a nonzero loopback port. Tool sessions use the
+  supported `agent-browser connect` command when that port changes, and
+  retain their local-session fence. No new daemon, cloud browser or
+  fingerprint script is introduced.
+- **Risk:** private upstream boundaries can change; exact-match guards
+  fail the image build if they do. A port allocation can race another
+  local process; startup then fails rather than attaching to it. The
+  adapter refuses profile downgrades, but rolling back to an image from
+  before this guard also requires restoring its pre-upgrade save: its
+  browser was 145, and the new profile may be 154's.
+- **First proof:** the Docker lane's
+  `a_regular_browser_is_shared_by_the_desktop_and_tools` (native tools,
+  webdriver, both launch orders, cookies, tool cleanup, desktop and
+  computer restarts, browser crash and stale port metadata), and
+  `two_agents_two_desktops` (distinct browser PIDs/ports, human takeover
+  refusing browser tools, idle stop sparing the other agent's browser).
+- **Delete when:** a pinned upstream desktop supports regular Chromium
+  with a nonzero CDP port, starts and reattaches it through its existing
+  local-session lease fence, and owns its shutdown independently of tool
+  session cleanup. Remove the adapter and all replacements together once
+  these same Docker checks pass against that upstream implementation.
 
 ## Hermes' direct FAL client reads process credentials, not profile scope
 

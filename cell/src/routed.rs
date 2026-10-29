@@ -357,7 +357,9 @@ async fn sent(env: &Env, binding: &str, name: &str, req: Request) -> CellResult<
         Ok(b) if b.error == ErrorCode::Deploying => b.message,
         _ => format!("{binding} {name} runs another release: a deploy is going out; try again in a few seconds"),
     };
-    Ok(Sent::Refused(CellError::new(ErrorCode::Deploying, message), theirs))
+    let mut error = CellError::new(ErrorCode::Deploying, message);
+    error.release_refused = Some(theirs.clone());
+    Ok(Sent::Refused(error, theirs))
 }
 
 /// One call into the Durable Object `name` of `binding` (the only way the

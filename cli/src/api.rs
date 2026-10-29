@@ -444,6 +444,11 @@ impl Client {
     pub fn post_json(&self, path: &str, v: &impl serde::Serialize) -> Result<Resp> {
         self.request("POST", path, Some(serde_json::to_vec(v)?))
     }
+    /// A bounded slow operation, such as icon generation. It retains the
+    /// normal non-idempotent POST retry policy.
+    pub fn post_json_with_timeout(&self, path: &str, v: &impl serde::Serialize, timeout: Duration) -> Result<Resp> {
+        self.send("POST", path, serde_json::to_vec(v)?, Replay::ConnectOnly, Signed::Body, timeout, None)
+    }
     /// A POST whose body carries its idempotency id (an operation call):
     /// retried like a read (`Replay::ById`).
     pub fn post_json_by_id(&self, path: &str, v: &impl serde::Serialize) -> Result<Resp> {

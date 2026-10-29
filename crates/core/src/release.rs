@@ -44,6 +44,18 @@ pub const HEADER: &str = "x-fragment-release";
 /// of its own (which may have done something before it).
 pub const REFUSED: &str = "x-fragment-release-refused";
 
+/// The model intercept alone promises it has not dispatched to a provider.
+/// Paired with 503 `deploying` and `REFUSED`, on a direct refusal of its
+/// signing preflight only. Images may retry that request; an unmarked
+/// error (including a nested object's refusal) makes no such promise.
+pub const MODEL_NOT_DISPATCHED: &str = "x-fragment-model-not-dispatched";
+
+/// Whether a model's preflight error has direct guard provenance. Its
+/// HTTP status and error code remain the ordinary 503 `deploying`.
+pub fn model_not_dispatched(code: fragment_proto::ErrorCode, refused_by: Option<&str>) -> bool {
+    code == fragment_proto::ErrorCode::Deploying && refused_by.is_some_and(valid)
+}
+
 /// The header a call into a platform object carries when its caller's
 /// release was deployed in (`FRAGMENT_DEPLOYED_AT`, whole seconds since
 /// 1970, set by `cargo xtask deploy`), beside `HEADER`. It orders two
@@ -193,6 +205,20 @@ mod tests {
         assert_eq!(DEPLOYED, "x-fragment-release-deployed");
         assert_eq!(fragment_proto::ErrorCode::Deploying.status(), 503);
         assert_eq!(serde_json::to_value(fragment_proto::ErrorCode::Deploying).unwrap(), "deploying");
+    }
+
+    #[test]
+    fn only_a_direct_preflight_refusal_promises_no_model_dispatch() {
+        use fragment_proto::ErrorCode;
+        assert_eq!(MODEL_NOT_DISPATCHED, "x-fragment-model-not-dispatched");
+        assert!(model_not_dispatched(ErrorCode::Deploying, Some("old-release")));
+        // A nested deploying error and a provider's 503 are not proof that
+        // the original model request did nothing. Neither is retried.
+        assert!(!model_not_dispatched(ErrorCode::Deploying, None));
+        assert!(!model_not_dispatched(ErrorCode::UpstreamFailed, Some("old-release")));
+        for bad in ["", "release with spaces", "old\r\nx-forged: 1"] {
+            assert!(!model_not_dispatched(ErrorCode::Deploying, Some(bad)));
+        }
     }
 
     #[test]

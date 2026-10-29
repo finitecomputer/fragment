@@ -11,11 +11,15 @@ pub struct CellError {
     /// Why, for the people who read it (`ErrorBody::reason`): billing's,
     /// seats' and orgs' refusals name theirs.
     pub reason: Option<Reason>,
+    /// A direct release guard refusal, before the called object acted.
+    /// Never reconstructed from an object's JSON answer: it may have acted
+    /// before a call of its own was refused (routed.rs).
+    pub release_refused: Option<String>,
 }
 
 impl CellError {
     pub fn new(code: ErrorCode, message: impl Into<String>) -> CellError {
-        CellError { code, message: message.into(), reason: None }
+        CellError { code, message: message.into(), reason: None, release_refused: None }
     }
 
     /// The refusal, naming its cause.

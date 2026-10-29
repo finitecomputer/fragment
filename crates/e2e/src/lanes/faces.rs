@@ -274,7 +274,18 @@ pub fn faces(s: &mut Suite, api: &Api) -> Result<()> {
     // status's title too (what its computer's image reads it by), and
     // `fragment access` names it by its name, never its label
     let home = super::shell::cli_home(s, api, &session, "faces-cli")?;
+    // its job named it (one an owner or the agent wrote): the rename says
+    // the new name there too, in its own commit (Paul, 2026-10-27)
+    let job = |text: &str| api.signed(&paul, "POST", &format!("/api/f/{agent}/files"), Some(&json!({ "message": "its job", "files": [{ "path": "SOUL.md", "text": text }] })));
+    let job_now = || api.signed(&paul, "GET", &format!("/api/f/{agent}/file?path=SOUL.md"), None).map(|r| r.text).unwrap_or_default();
+    anyhow::ensure!(job("Frank keeps the garden; Frankly, Frank_ and frank are other words.\n")?.status == 200, "its job written");
     let said = s.cli_json(api, &home, &["agent", &agent, "--name", "Frances", "--json"]);
+    let rewritten = job_now();
+    s.ok(
+        "`fragment agent --name` says the new name where its job said the old one as a word, and nowhere else",
+        rewritten == "Frances keeps the garden; Frankly, Frank_ and frank are other words.\n",
+        &rewritten,
+    );
     let followed = s.eventually(WAIT, || row(api, &paul, &agent)["title"] == "Frances");
     let status = api.status(&paul, &agent)?.body["title"].clone();
     let asked = people(api, &chat, &cookie, &agent_id);
@@ -291,6 +302,22 @@ pub fn faces(s: &mut Suite, api: &Api) -> Result<()> {
     anyhow::ensure!(r.status == 200, "Bob, out again: {r}");
     let line = printed.lines().find(|l| l.contains("Frances") || l.split('\t').any(|w| w.trim() == label));
     s.ok("`fragment access` names it by its name, never its label", out.status.success() && line.is_some_and(|l| l.contains("Frances")), &printed);
+    // renamed before a rename said so in its job (Skyler's XP, once Bliss):
+    // the shell's first job of then ("You are <name>, <owner>'s default
+    // agent: …") still names it. Its owner's rename again, to the name it
+    // has, says it there; asked once more, nothing changes (replay)
+    let first = "You are Bliss, paul@example.com's default agent: the first one they talk to.\nBliss keeps the garden.\n";
+    anyhow::ensure!(job(first)?.status == 200, "its old job written");
+    let again = s.cli_json(api, &home, &["agent", &agent, "--name", "Frances", "--json"]);
+    let recovered = job_now();
+    let tip = api.status(&paul, &agent)?.body["pins"]["main"].clone();
+    let replay = s.cli_json(api, &home, &["agent", &agent, "--name", "Frances", "--json"]);
+    let replayed = (job_now(), api.status(&paul, &agent)?.body["pins"]["main"].clone());
+    s.ok(
+        "an agent renamed before: its owner's rename again says its name where the shell's first job named it, and once more changes nothing",
+        again.is_ok() && recovered == "You are Frances, paul@example.com's default agent: the first one they talk to.\nFrances keeps the garden.\n" && replay.is_ok() && replayed == (recovered.clone(), tip.clone()),
+        json!({ "recovered": recovered, "replayed": replayed.0, "tips": [tip, replayed.1] }),
+    );
     // invalid: a title of only spaces is no name: every reader falls back to
     // its label alike, never a blank; and an agent made with no title is
     // untitled, never a word it was not given ("Agent")

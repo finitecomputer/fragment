@@ -179,7 +179,11 @@ You have a desktop of your own, with a browser on it (each agent here
 has its own). Yours starts the first time you use a computer-use
 or browser tool, and stops once no one has used it for ten minutes; it
 starts again when you next need it, your browser's sign-ins kept. Your
-owner watches it live from "Its screen" in your chat's menu (in a group
+native browser tools and the desktop's Browser icon share one regular
+Chromium and its saved sign-ins. Use those tools for signed-in browsing;
+you do not need to install or launch a second browser. If a site asks for
+human verification, ask your owner to take over this desktop.
+Your owner watches it live from "Its screen" in your chat's menu (in a group
 chat, "<your name>'s screen"), and can take over the mouse and keyboard
 there: when a page needs them (a sign-in, a choice that is theirs), say so
 and ask them to take over. While they hold it, your computer-use and

@@ -341,222 +341,148 @@ whoever runs it.
 
 ## Stable and canary
 
-A new image reaches a few people first, and everyone after it has proved
-itself (decision 19: a canary is a per-computer pin; Paul, 2026-10-13:
-"a few rounds of successful upgrades to the hermes image so we know
-that's seamless for users (including a canary path)"). A deployment's
-config names two images (xtask/src/deploy.rs, `computers.images`):
+**Preview is the canary; production is stable** (Paul, 2026-10-29).
+Preview has one image, following master. Production keeps a digest
+promoted by hand after a full round. This does not force-restart an awake
+computer: as with every image change, its owner sees an update, its next
+Restart or sleep/wake takes it, and an always-on computer is only told.
 
-```jsonc
-"default_image": "hermes",
-"images": {
-  "hermes":        { "image": "registry.cloudflare.com/<account_id>/<repository>@sha256:<64 hex>" },
-  "hermes-canary": { "image": "registry.cloudflare.com/<account_id>/<repository>@sha256:<64 hex>" }
-}
-```
+### Preview follows master
 
-(A deploy by hand, where Docker runs, may build the canary from the tree
-instead: `"hermes-canary": { "dockerfile": "images/hermes/Dockerfile",
-"build_context": "." }`.)
+Every master push starts ci.yml's `preview-image` beside its checks.
+`cargo xtask image preview` hashes git's path, mode and blob records for
+Hermes' image inputs, never the commit or a clock. It resolves
+`inputs-<key>` in the existing preview repository
+`fragment-preview-computer-hermes-canary`. A tag already there is reused
+at its manifest's digest, even after BuildKit's layer cache was evicted.
+A registry error stops the job; only a successful listing without that
+tag authorizes a build. Input tags are not overwritten by CI.
 
-- **Stable** is the default, kept at a digest: wrangler builds nothing
-  for it, prepares the image the account's registry already holds, and
-  refuses the deploy when it does not hold it; the deploy refuses, before
-  it builds anything, a reference that is no digest in its own account's
-  registry. It changes only when its line does, so a deploy tells the
-  computers on it nothing. New computers start on it.
-- **The canary** is built from the tree by the Image workflow
-  (.github/workflows/image.yml, run by hand: `cargo xtask image push`,
-  xtask/src/image.rs), on a runner, from the branch that deploys the
-  environment (on the preview, master's tree), and pushed to that
-  environment's registry; its run's summary names the digest. A
-  computer pinned to it is on the canary: every deploy that changes its
-  image tells it an update is ready, as any deploy that changes an image
-  tells (above).
-- **CI's deploys build no image** (`--pinned-only`; ci.yml's `deploy`):
-  every image of the config it deploys from (its environment's file in
-  the private repo finitecomputer/fragment-deploy, `preview.jsonc` or
-  `production.jsonc`, read from its `main` at each deploy) is kept at a
-  digest, the canary's too, as a runner, with no layer cache, would make
-  a new digest at every deploy (below). So the canary the Image workflow
-  pushed is pinned there by a commit, at the digest its summary names,
-  and the next deploy takes it; until then, deploys keep the canary
-  where that file has it. A run makes a new digest each time, as its
-  runner keeps no layer cache either: it is run for a change to the
-  image, once a round.
-- **What changes a version** (Paul, 2026-10-14: "changes to the cells, or
-  frontend, that don't change the hermes image shouldn't require a hermes
-  image rollout"). The image's inputs are what it runs, and no more:
-  `images/` (the bridge, hermes-boot, the image's own files, its
-  Dockerfile), the Hermes base by its digest, and the fragment CLI's build:
-  `cli/` (its code, GUIDE.md and SKILL.md), the crates it builds from
-  (`crates/core`, `nip98`, `proto`, `templates`), the templates it
-  scaffolds (`blank`, `calories`, `doc`, `inbox`, `notes`, `todo`), and the root
-  manifest and lock. A change to anything else (the cell, the shell, the
-  chat page and the other blessed templates, the e2e, xtask, the docs)
-  leaves every build step cached, so the canary's digest, and its
-  version, stay as they were, and no one is told of an update. The CLI
-  builds without the platform's own files (crates/templates' `platform`
-  feature: the blessed templates and the shell's), which no one
-  scaffolds, and the image's build copies the workspace's other members as
-  manifests alone (xtask's `the_cli_stage_copies_what_the_cli_builds_from`
-  holds the Dockerfile to cargo's account of what the CLI builds from). A
-  change to a crate the CLI shares with the cell (`crates/core`, `proto`)
-  rebuilds the CLI; when its binary comes out the same bytes, the build's
-  cache, which goes by content, keeps the digest too. Two limits: a
-  deploying machine that lost its build cache rebuilds every layer, each
-  stamped anew, and pushes a new digest (and the whole base); and a change
-  to the CLI is a change to the image, whatever it is for.
-- **Who is on it** is the operators' to say, a person at a time: `fragment
-  operator pin <npub> hermes-canary` (`PUT
-  /api/admin/people/{npub}/computer/image`, logged as `pin`; docs/api.md,
-  Operators) pins their computer as its owner's pin does. The pin is the
-  one record of what a computer runs, so there is no list beside it; the
-  group (the finite team, by npub, an email found with `fragment operator
-  people --q`) is the operators', outside the repo.
-- **Where a digest comes from.** The Image workflow's summary names the
-  reference it pushed or copied (`registry.cloudflare.com/<account>/<repository>@sha256:…`)
-  and the config line that pins it; a deploy names each image's reference as
-  wrangler prepares it (`hermes-canary is ready to run`, then
-  `registry.cloudflare.com/…@sha256:…`); and an operator's view of a person
-  (`fragment operator person <npub>`) names the whole reference their
-  computer runs and the one its next start runs (`references.running`,
-  `references.next`); the version Settings shows is a digest's first 12
-  hex digits.
-- **Promotion**: the canary's digest becomes stable's line, and a deploy
-  (production's: that digest copied into its registry first, below).
-  Every computer on stable then runs another version than the one its
-  next start runs: asleep, its next wake takes it (from the image and its
-  save: the snapshot is of the old image), paying the new image's pull;
-  awake, its owner is told an update is ready (Restart, or Later, or its
-  next sleep); always on, only told. The canary's computers are told
-  nothing: they run that digest already.
-- **Rollback**: a canary computer is pinned back to `hermes` (`fragment
-  operator pin <npub> hermes`), told as any pin is (the `update` notice;
-  "an update" is another version, older or newer). Stable goes back by
-  its previous line, and a deploy. Keep the line a promotion replaced,
-  commented, for that.
-- **A name stays.** A computer pinned to a name the deployment no longer
-  has has no image to start. `hermes-canary` is kept: between rounds its
-  digest is stable's, or master's ahead of it.
-- **The cell is ahead of stable.** The cell deploys from the tree at every
-  deploy; stable lags by a round. An awake computer already runs its old
-  image across a deploy, for days if always on, but a round makes that
-  the rule: a change to what the guest relies on (this contract, the
-  bridge's routes, the CLI's) is additive, and what it replaces goes only
-  once stable has moved past it.
-- **A Hermes release is forward only** (Paul, 2026-10-13). A round that
-  changes only our layers (the bridge, hermes-boot, the CLI and the
-  image's own files) on the same Hermes base can be pinned back: the
-  older image runs on a `/data` the newer wrote, files our code reads
-  either way. A round that moves the base to a new Hermes release (v0.21.6
-  to v0.21.7 is the first) cannot: a new release may move its databases'
-  schema forward, and a computer keeps three saves, each turn's end
-  replacing the oldest, so within a day no save from before the canary is
-  left (decision 19's point-in-time restore has none to go back to):
-  pinned back, an older Hermes would start on a newer schema. So a bad
-  Hermes release is fixed by the next one, until a computer keeps the save
-  an image change started from (docs/technical-debt-ledger.md). v0.21.7
-  happens to move none (`state.db` is schema 31 and the config version 50
-  in both), but the rule does not read each release's schema.
-- **Production** keeps its images in its own account's registry, which
-  holds none of the preview's digests (the deploy refuses another
-  account's). CI deploys it from the `production` branch (in minutes for
-  a commit master's run proved green, ci.yml's `proven`; after the full
-  tests otherwise), its images pinned as the preview's are. **Its
-  promotion is a copy** (Paul, 2026-10-20): the image a round proved on
-  the preview, the very digest its canary computers ran, copied byte for
-  byte into production's registry (`fragment-computer-hermes`) by the
-  Image workflow run from `production` with `environment` production and
-  `from` that reference (`cargo xtask image copy`: skopeo, with
-  `--preserve-digests`, then the copy's manifest held to the source's
-  digest), and that digest then `hermes`'s line in production's config,
-  fragment-deploy's `production.jsonc` (One round, step 8). A run
-  without `from` builds production's tree instead, warning that its
-  digest is not the canary's: with no layer cache, a build is a new
-  image of the same inputs, which no round proved.
+An absent tag builds with BuildKit's persistent Actions cache (one
+master-only `preview-hermes` scope, `mode=max`), then pushes and prepares
+the image on Cloudflare's network. The Dockerfile's CLI stage copies only
+what the CLI builds from, so a changed bridge can reuse that stage. The
+cache takes about 3 GB of the shared cache budget; eviction costs a cold
+build for new inputs, never a new image for unchanged inputs. The image
+job waits up to 40 minutes for preparation and says which image is
+pending. Until it succeeds, the preview deploy cannot start and the
+running preview is unchanged. A retry reuses the input tag. Deploy also
+keeps its own preparation preflight and its verified rollout/rollback
+path (xtask/src/prepare.rs, rollout.rs).
 
-### One round
+A green push deploys with the digest it resolved for **that checkout's
+inputs**, not a moving `latest` tag. The deploy applies it in memory to
+`hermes` (the default) and `hermes-canary` (a compatibility name). There
+is no separate stable/canary state on preview. A name stays: a computer
+pinned to `hermes-canary` still has an image to start, the same as
+`hermes`. Neither the private config nor people's pin records are
+rewritten. An unexpected third image name refuses the override: migrate
+its pins before removing it.
 
-On the preview (`preview.finite.build`, master's, which CI deploys at
-every green push), with the operators' key (`--key-file`, or
-`FRAGMENT_OPERATOR_KEY_FILE`) and `FRAGMENT_HOST` naming it. Once:
-stable's line is the digest its computers run (`references.running` of
-one awake on it), the canary's a digest too, both in the preview's
-config (`preview.jsonc` in the private repo
-finitecomputer/fragment-deploy, which CI's deploy reads from its
-`main`: a commit there, never a secret, pins a digest), and the canary
-group is pinned to `hermes-canary`.
+`fragment-deploy/preview.jsonc` still supplies deployment settings; its
+image lines no longer record the image CI runs. The **deploy job's
+summary records the resolved input key and digest**, as does the image
+job's, with the reference's account written as `<account>`. Deploy logs
+name the effective pinned reference. `fragment operator person <npub>`
+names the whole running and next references (`references.running`,
+`references.next`); Settings shows the digest's first 12 hex digits.
+`image.yml` can still be run by hand for preview: it resolves/prepares
+the same input-keyed image. It does not create a separate canary or
+change the running preview; the next CI deploy takes its checkout's key.
 
-1. **The change lands** on master, and the Image workflow is run from
-   master (Actions, image, Run workflow: `environment` preview; `tag`
-   empty for the commit's first 12 hex digits, or a name of the round's,
-   `r9-<sha>`). It builds the canary on a runner and pushes it to
-   `fragment-preview-computer-hermes-canary`; its summary names the
-   reference and the line
-   `"hermes-canary": { "image": "registry.cloudflare.com/<account>/…@sha256:…" }`,
-   which replaces the canary's in `preview.jsonc` (the config's
-   `account_id` for `<account>`, masked in the run), committed to
-   fragment-deploy's `main`. The next deploy takes it: master's next
-   green push, or a re-run of the `deploy` job of master's latest ci run
-   (its log names the fragment-deploy commit it deployed from). Its
-   version: `fragment operator person <npub> --json | jq -r
-   .computer.latest` for one of the group.
-2. **The group takes it**: awake, each is told an update is ready and
-   presses Restart (the path under test); asleep, its next wake takes it.
-   Each checks, on their own computer: an old chat goes on where it was;
-   a new chat recalls a memory; their own skills are listed and used; a
-   routine fires after the update; the screen opens and Take over works;
-   Google answers (Gmail or Calendar); a Bot Chat goes on; Settings shows
-   the canary's version and no notice of going back. These are a lived-in
-   computer's, which no hosted run has: its people are new.
-3. **The hosted runs** (`cargo xtask e2e --hosted --config <the preview's
-   config> --branch preview`), each followed by `--sweep`: the candidate,
-   `--candidate hermes-canary --only
-   computers,agent-restart,agent-smoke,agent-ask,bot-mode --max-paid-calls
-   190` (new computers on it: a routine, the CLI and managed skills, an
-   app, the screen, an approval, saves held across a sleep and a wake,
-   agents asking each other, Bot Mode; and agent-restart's upgrade from
-   stable into it, the chat going on, and its rollback); then stable under
-   the new cell, `--only computers,agent-restart --max-paid-calls 50`.
-4. **Watch** each canary computer (`fragment operator person <npub>`):
-   `computer.version == computer.latest`, `rollbacks` unchanged, every
-   save `held`, and no `wont_wake`, `unsaved` or `went_back` notice (a
-   `went_back` of cause `unusable` is the new image refusing the old
-   save); `fragment operator health`; the Computer DO's lines in the
-   Workers logs (a start that failed, `restored`); the ledger for spend
-   out of the ordinary.
-5. **The soak** (Paul, 2026-10-13): 24 hours, every canary computer woken
-   on the canary and having answered a turn on it, and the hosted runs
-   green.
-6. **Promote**: the reference a watched canary computer runs
-   (`fragment operator person <npub> --json | jq -r .references.running`,
-   its first 12 hex digits the version step 1 named) becomes `hermes`'s
-   `image` in `preview.jsonc`, the old line kept commented, by a commit
-   to fragment-deploy's `main`; the next deploy takes it, as in step 1.
-   One computer on stable awake is told; one asleep wakes onto it.
-7. **Or roll back**: `fragment operator pin <npub> hermes` for each of the
-   group (a Hermes release is forward only, above); after a promotion,
-   the commented line back by a commit, and a deploy.
-8. **Production takes the proven image**, copied, never rebuilt: the
-   Image workflow run from `production` (Actions, image, Run workflow:
-   branch `production`, `environment` production, `from` the reference
-   step 6 promoted, as step 1's summary wrote it, with `<account>`;
-   `tag` empty for its digest's first 12 hex digits, the version
-   Settings shows). It mints pull credentials for the preview's registry
-   with production's `PREVIEW_REGISTRY_TOKEN` and push credentials for
-   production's with its own token, copies the image registry to
-   registry, and refuses a copy whose manifest is not the source's
-   digest, then waits until Cloudflare has prepared it on production's
-   network (a copy is prepared only when asked: round 11's was still
-   pending 50 minutes on, at its deploy; xtask/src/prepare.rs); its
-   summary names
-   `registry.cloudflare.com/<account>/fragment-computer-hermes@sha256:…`,
-   the same digest, and the line
-   `"hermes": { "image": "…" }`, which becomes stable's in
-   fragment-deploy's `production.jsonc` (the old line kept commented),
-   by a commit to its `main`. Production's next deploy, Paul's next push
-   to `production`, takes it.
+**What changes a version** (Paul, 2026-10-14: "changes to the cells, or
+frontend, that don't change the hermes image shouldn't require a hermes
+image rollout"). The key covers `images/hermes/` (including its Dockerfile
+and Hermes base pin), `images/bridge/`, the images' manifest and lock,
+`.dockerignore`, and the CLI build: `cli/` (code, GUIDE.md, SKILL.md),
+`crates/core`, `nip98`, `proto`, `templates`, the scaffolding templates
+`blank`, `calories`, `doc`, `inbox`, `notes`, `todo`, the root manifest and
+lock, and the other workspace members' manifests alone. A host test holds
+that list to every local Dockerfile COPY; build.rs's
+`the_cli_stage_copies_what_the_cli_builds_from` holds the CLI stage to
+cargo's dependency graph. Cell, shell, chat and other blessed templates,
+e2e and xtask sources, and docs do not change the key. Dirty image inputs
+are refused so a build cannot differ from the git content its key names.
+A changed input whose final image bytes remain the same may keep the same
+digest through the layer cache. Pins are always digests; tags only find
+them.
+
+### Production stays pinned
+
+Production's config (`production.jsonc` in the private repo
+finitecomputer/fragment-deploy) names its stable image `hermes` at a
+digest in its own account's registry. CI's production deploy reads those
+pins as they stand: there is no automatic image build or override. Only
+Paul moves `production`; its CI rules are unchanged (a successful master
+push, preview deploy included, proves its tree; otherwise full tests).
+Other deployments can still name distinct `hermes` and `hermes-canary`
+images, and `--candidate` still selects the latter for hosted runs.
+
+A promotion copies the exact preview digest a round proved into
+production's registry, byte for byte (`cargo xtask image copy`, skopeo's
+`--preserve-digests`, and a manifest digest check), never rebuilds it.
+`image.yml` runs from `production` with `environment` production and
+`from` the proven preview reference; production's `PREVIEW_REGISTRY_TOKEN`
+and `PREVIEW_ACCOUNT_ID` allow the copy. It waits for Cloudflare to
+prepare it before its summary names the pinned reference. The digest
+then becomes `hermes`'s line in `production.jsonc`, committed by hand,
+with the old line kept commented for rollback. Paul's next production
+deploy takes it. A manual production build without `from` is still
+possible, but warns: it is a new image that no preview round proved.
+
+The cell can be ahead of a computer for days (an awake computer keeps its
+image across a deploy). Production's stable image also lags master by a
+round: guest-facing contracts and replacements stay additive until stable
+has moved past them. A name stays on production too: keep a named image
+while any computer is pinned to it.
+
+**A Hermes release is forward only** (Paul, 2026-10-13). Changes only to
+our layers on the same Hermes base can be pinned back: our code reads its
+files either way. A new Hermes release may advance its databases' schema;
+computers keep three saves, each turn replacing the oldest, so soon no
+save from before the update remains. Pinning an older release onto those
+databases is unsafe. Fix such a release forward until a computer keeps
+the save an image change started from (docs/technical-debt-ledger.md).
+v0.21.7 happens to change neither state.db's schema 31 nor config version
+50, but the rule does not depend on inspecting each release's schema.
+
+### One round before production
+
+1. **Master ships the image to preview automatically.** Record the input
+   key and digest from that successful deploy's summary. Every preview
+   computer is a canary; there is no operator pinning group or second
+   promotion within preview. Awake computers take Restart, sleeping ones
+   take their next wake. Record the actual running reference of the
+   computers being watched, since a later master push may advance preview.
+2. **Exercise lived-in computers.** An old chat continues; a new chat
+   recalls a memory; skills are listed and used; a routine fires; the
+   screen and Take over work; Google answers; Bot Chat continues; Settings
+   shows the watched version. Watch `computer.version == computer.latest`,
+   `rollbacks` unchanged, every save `held`, no `wont_wake`, `unsaved` or
+   `went_back`, operator health, logs and ledger spend. If preview has
+   advanced, verify the watched digest rather than assuming it is latest.
+3. **Run the hosted lanes on preview**, followed by `--sweep`:
+   `cargo xtask e2e --hosted --config <preview config> --branch preview
+   --only computers,agent-restart,agent-smoke,agent-ask,bot-mode
+   --max-paid-calls 190`. Omit `--candidate`: on preview both names resolve
+   to the default, so selecting it is redundant. This proves restart on
+   the current image, not an upgrade/rollback between different images.
+4. **Prove the production upgrade on a production-shaped test branch**
+   (deployment approved by Paul): its default `hermes` is production's
+   current stable digest in that account's registry, and `hermes-canary`
+   is the recorded preview digest. Keep these pins fixed for the round.
+   Run hosted `--candidate hermes-canary --only
+   computers,agent-restart,agent-smoke,agent-ask,bot-mode
+   --max-paid-calls 190`, then without `--candidate`, `--only
+   computers,agent-restart --max-paid-calls 50`, each followed by `--sweep`.
+   `--candidate` retains its existing upgrade/rollback behavior here.
+5. **Soak the recorded image for 24 hours**, with watched computers woken
+   on it and having answered a turn, and hosted runs green. A later image
+   is a different round; do not promote whichever happens to be latest.
+6. **Paul promotes the recorded digest** with Image's production copy
+   above, commits its resulting pin to production.jsonc, then deploys it
+   by moving `production`. To roll back our layers on the same Hermes
+   base, restore the old pin and deploy; a Hermes release is forward only.
 
 ## The guest's contract
 
@@ -966,6 +892,26 @@ expires within 30 days. The container application is the deployment's
 
 ### Models
 
+- **A deploy before dispatch.** The model intercept's signing preflight
+  may answer 503 `deploying` with both
+  `x-fragment-model-not-dispatched: deploying` and
+  `x-fragment-release-refused: <release>`. Together these promise that
+  the provider was never called: a new image may retry that request with
+  its own bounded deployment wait. They appear only on a direct release
+  guard refusal of signing, never a nested object's refusal or a provider
+  error. The API intercept and public model API make no such promise.
+  Older images ignore the additive headers. A client must coordinate its
+  deployment wait with its stale detector and cancellation; a long silent
+  cell wait outlasts Hermes' normal provider timeout (#625).
+  Our Hermes image's `fragment-deploy-wait` plugin consumes this
+  contract on streaming chat completions to the private intercept. It
+  retries inside the same attempt for up to six minutes, silently, checking
+  cancellation and the attempt, route and writer fences before each retry.
+  Only confirmed preflight refusals reset the silence clock; the next
+  unconfirmed HTTP request and the provider's stream keep Hermes' normal
+  stale budget (Fast's 20 s, Deep's own configured budget). An unmarked
+  refusal or lost answer follows the existing provider error path. The
+  deployment budget's own expiry is terminal, with no provider fallback.
 - `POST http://model.fragment.internal/v1/chat/completions`, OpenAI's
   shape, with `model` a tier (`cheap`, `medium`, or `high` while it is
   on), or one of the route's models by its own id (below, "A model by
@@ -1618,9 +1564,10 @@ the provider's own hosts.
   boot and appends it to its trust store (curl's, Python's, and Node's,
   which reads it with `NODE_USE_SYSTEM_CA=1`: its own roots alone refused
   it), and names it in its browser's managed policy (`CACertificates`, in
-  Chrome for Testing's policy directory: `hermes::CHROMIUM_CA_POLICY`),
-  since Hermes' pinned Chromium reads no system bundle: without it, every
-  page on an intercepted host is an interstitial in the agent's browser.
+  Debian Chromium's `/etc/chromium/policies/managed` directory:
+  `hermes::CHROMIUM_CA_POLICY`), since the browser reads no system bundle:
+  without it, every page on an intercepted host is an interstitial in the
+  agent's browser.
 - What the catalog cannot express is never swapped: a key in a path is
   refused, and a body goes as it came (a placeholder in it reaches the
   provider, which refuses it). A vendor that signs its requests with the
@@ -2055,17 +2002,52 @@ settings and state):
   Hermes' own PM, on PATH). Its browser, and the desktop's Browser icon a
   person uses after Take over, are the image's Chromium
   (`/opt/fragment/bin/chromium`, named to Hermes by
-  `AGENT_BROWSER_EXECUTABLE_PATH`): the full Chromium Hermes' image pins
-  (its PM's, named in `/etc/hermes/agent-browser-executable-path`), always
-  started with `--no-sandbox --disable-dev-shm-usage`, its scratch
+  `AGENT_BROWSER_EXECUTABLE_PATH`): regular distro Chromium, already in
+  the pinned desktop base (`/usr/bin/chromium`, 154.0.8037.92 in this
+  image), rather than PM's Chrome for Testing 145. Always
+  started with `--no-sandbox --disable-dev-shm-usage --test-type`, its scratch
   (`TMPDIR`: a headless one's temporary profile, and its shared memory)
   the container's `/tmp`, never Hermes' home's `cache/scratch` under
   `/data`. Hermes adds those flags itself only
   where it sees Docker's marker (`/.dockerenv`), and Containers gives a
   container neither that marker nor a `/dev/shm` (Docker mounts one in
   every container), so there Chromium died as it started (p5,
-  2026-10-05); the lower rung runs the desktop as Containers does
-  (`--ipc=none`, no marker). Events: `agents.changed`,
+  2026-10-05); `--test-type` suppresses that required container flag's
+  warning infobar, as upstream's desktop icon does. The lower rung runs
+  the desktop as Containers does (`--ipc=none`, no marker).
+
+  The desktop owns its visible browser, and `agent-browser` attaches to
+  it. The first native browse or Browser-icon click starts one headed
+  Chromium on the agent's published display, with its existing saved
+  profile (`bot-desktop/browser-profile`, linked into its work) and a
+  nonzero loopback CDP port of its own. No `--enable-automation`, headless
+  mode, debugging pipe or port `0`: the last also enables
+  `navigator.webdriver`. No fingerprint script or user-agent override is
+  added. Closing a tool session disconnects from the browser; the
+  desktop's stop closes its browser group gracefully before its X server,
+  keeping cookies. This includes the image's idle stop. A browser crash
+  starts a new browser on the next native browse.
+
+  The image adapts pinned Hermes' local-session start/attach, dock and
+  stop helpers (`images/hermes/desktop_browser.py`; exact source guards
+  in `boot/src/desktop.rs`). It does not set `browser.cdp_url`: in this
+  Hermes version a global CDP override would lose the desktop's local
+  lease fence. The lease brackets the entire tool call, including the
+  first startup; Take over refuses reads and actions until Give back.
+  Discovery verifies the live profile-lock owner's executable, exact
+  user-data directory, and CDP's browser PID. Stale `DevToolsActivePort`
+  files are not used, nor is another profile's port. These are the same
+  profiles and sign-ins as before; an agent's separate ad hoc profile is
+  never merged automatically. The adapter refuses to open a profile whose
+  `Last Version` is newer than its Chromium. A rollback to an image from
+  before this guard (which selects Chrome for Testing 145) must restore
+  its pre-upgrade save as well; do not open a Chromium 154 profile with
+  that older browser. The debt ledger names the upstream deletion gate.
+  This improves the browser defaults, not a site's acceptance policy:
+  when a site still needs human verification, the agent asks its owner
+  to take over the same desktop.
+
+  Events: `agents.changed`,
   `profile.written`, `agents.served` (the gateway's answer and its
   `ms`), `agents.ready` (the whole change's `ms`).
 

@@ -251,7 +251,8 @@ RUN mkdir -p /tmp/rh \
 # Our Hermes plugin, compiled as the base's bytecode is; it goes in layer 2.
 FROM hermes AS plugin
 COPY images/hermes/plugins/fragment-skill-fork /opt/hermes/plugins/fragment-skill-fork
-RUN /opt/hermes/.venv/bin/python -m compileall -q --invalidation-mode unchecked-hash /opt/hermes/plugins/fragment-skill-fork > /dev/null
+COPY images/hermes/plugins/fragment-deploy-wait /opt/hermes/plugins/fragment-deploy-wait
+RUN /opt/hermes/.venv/bin/python -m compileall -q --invalidation-mode unchecked-hash /opt/hermes/plugins/fragment-skill-fork /opt/hermes/plugins/fragment-deploy-wait > /dev/null
 
 # Ours (layer 2): each of our files at its place in the image, root's, as
 # the base's directories they land in are.
@@ -290,8 +291,10 @@ exec /opt/hermes/bin/hermes "$@"
 EOF
 COPY images/hermes/preload.py /opt/fragment/preload.py
 COPY images/hermes/tool_keys.py /opt/fragment/tool_keys.py
+COPY images/hermes/deploy_wait.py /opt/fragment/deploy_wait.py
 COPY images/hermes/hooks /opt/fragment/hooks
 COPY --from=plugin /opt/hermes/plugins/fragment-skill-fork /opt/hermes/plugins/fragment-skill-fork
+COPY --from=plugin /opt/hermes/plugins/fragment-deploy-wait /opt/hermes/plugins/fragment-deploy-wait
 COPY images/hermes/botmode.py /opt/fragment/botmode.py
 COPY images/hermes/screen /opt/fragment/screen
 COPY --from=novnc /novnc/core /opt/fragment/screen/novnc/core
@@ -375,12 +378,16 @@ RUN /opt/fragment/bin/simplex-chat --version | grep -q 'v7\.0\.0\.12'
 COPY --from=ours / /
 # What the boot reads instead of finding it each time: the lean plugin list;
 # the image's Chromium, /opt/fragment/bin/chromium
-# (the full Chromium Hermes' build pins and names in
-# /etc/hermes/agent-browser-executable-path, always with the flags a
-# container needs, which Hermes adds only where it sees Docker:
-# boot/src/hermes.rs); and the platform skill every profile
+# (regular /usr/bin/chromium from the pinned desktop base, always with the
+# flags a container needs: boot/src/hermes.rs); and the platform skill every profile
 # has, from the fragment CLI above (`fragment skill`: boot/src/skills.rs).
-RUN /opt/fragment/bin/hermes-boot build-info
+# The adapter extends the pinned Bot Desktop's start, attach and stop paths;
+# the boot refuses upstream source changes before it installs those hooks.
+COPY images/hermes/desktop_browser.py /opt/hermes/tools/bot_desktop/fragment_browser.py
+RUN /opt/fragment/bin/hermes-boot build-info \
+ && /opt/hermes/.venv/bin/python -m compileall -q --invalidation-mode unchecked-hash \
+    /opt/hermes/tools/browser_tool_session.py /opt/hermes/tools/bot_desktop/browser.py \
+    /opt/hermes/tools/bot_desktop/runtime.py /opt/hermes/tools/bot_desktop/fragment_browser.py
 # which build this is, served beside the screen (the platform's upgrade and
 # rollback lane reads it through the computer's port): a layer of its own,
 # so another build shares the ones above

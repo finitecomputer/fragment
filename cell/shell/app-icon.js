@@ -5,6 +5,7 @@
 // still loading or did not load, shows the shell's glyph in its colour
 // (`appIcon`).
 import { appIcon } from "./icons.js";
+import { activity } from "./activity.js";
 
 const SHELL = { "x-fragment-shell": "1" };
 // An icon's address names its bytes (`?v=`), so one read is kept for the
@@ -76,13 +77,13 @@ const sheets = new Set();
 // one, or remove it. `h`: the shell's `api` and `reload` (its list again,
 // which carries the new icon to the dock), and the app's name, title and
 // row. A pick is shown kept once the platform has kept it.
-export function openIconSheet(h, name, title, f) {
+export function createIconEditor(h, name, title, f, inline = false) {
   const path = `/api/f/${encodeURIComponent(name)}/icon`;
-  const dialog = document.createElement("dialog");
-  dialog.className = "icon-sheet";
+  const dialog = document.createElement(inline ? "section" : "dialog");
+  dialog.className = inline ? "icon-editor" : "icon-sheet";
   dialog.setAttribute("aria-label", `${title} icon`);
   const head = document.createElement("h2");
-  head.textContent = "Icon";
+  head.textContent = inline ? "App icon" : "Icon";
   const current = document.createElement("div");
   current.className = "icon-current";
 
@@ -100,6 +101,9 @@ export function openIconSheet(h, name, title, f) {
 
   const picks = document.createElement("div");
   picks.className = "icon-picks";
+  const progress = document.createElement("div");
+  progress.className = "icon-progress";
+  progress.hidden = true;
   const said = document.createElement("p");
   said.className = "icon-said";
   said.setAttribute("role", "alert");
@@ -120,6 +124,7 @@ export function openIconSheet(h, name, title, f) {
   const upload = button("icon-upload", "Upload…");
   const remove = button("icon-remove", "Remove");
   const done = button("icon-done", "Done");
+  done.hidden = inline;
   const actions = document.createElement("div");
   actions.className = "icon-actions";
   actions.append(upload, remove, done, file);
@@ -129,7 +134,7 @@ export function openIconSheet(h, name, title, f) {
   let row = f;
   let kept = null;
   const showCurrent = () => {
-    current.replaceChildren(appArt(row, title));
+    current.replaceChildren(appArt(row, name.replace(/--[a-km-np-z2-9]{4}$/, "")));
     remove.hidden = !row?.picture;
   };
   const controls = () => {
@@ -183,6 +188,9 @@ export function openIconSheet(h, name, title, f) {
     e.preventDefault();
     make.disabled = true;
     make.textContent = "Making…";
+    form.setAttribute("aria-busy", "true");
+    progress.replaceChildren(activity("Making icons…"));
+    progress.hidden = false;
     picks.replaceChildren();
     say("");
     try {
@@ -204,6 +212,9 @@ export function openIconSheet(h, name, title, f) {
     } catch (err) {
       say(err.message);
     } finally {
+      progress.hidden = true;
+      progress.replaceChildren();
+      form.removeAttribute("aria-busy");
       make.disabled = false;
       make.textContent = "Make icons";
     }
@@ -218,17 +229,25 @@ export function openIconSheet(h, name, title, f) {
     await h.api("DELETE", path);
     return { ...row, picture: undefined };
   });
-  done.onclick = () => dialog.close();
-  dialog.onclick = (e) => { if (e.target === dialog) dialog.close(); };
-  dialog.onclose = () => {
+  const dispose = () => {
     sheets.delete(sheet);
     dialog.remove();
   };
+  if (!inline) {
+    done.onclick = () => dialog.close();
+    dialog.onclick = (e) => { if (e.target === dialog) dialog.close(); };
+    dialog.onclose = dispose;
+  }
   showCurrent();
   sheets.add(sheet);
   controls();
-  dialog.append(head, current, form, said, picks, actions);
-  document.body.append(dialog);
-  dialog.showModal();
-  hint.focus();
+  dialog.append(head, current, form, progress, said, picks, actions);
+  return { element: dialog, dispose };
+}
+
+export function openIconSheet(h, name, title, f) {
+  const { element } = createIconEditor(h, name, title, f);
+  document.body.append(element);
+  element.showModal();
+  element.querySelector("input[name=hint]").focus();
 }

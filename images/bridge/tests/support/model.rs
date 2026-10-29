@@ -68,6 +68,8 @@
 
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
 use http_body_util::BodyExt;
 use hyper::body::Incoming;
@@ -177,6 +179,9 @@ fn transcription(content_type: &str, body: &[u8], agent: &Option<String>, author
 pub struct Model {
     pub addr: SocketAddr,
     pub calls: Arc<Mutex<Vec<Call>>>,
+    /// Preflight refusals, separate from dispatched provider calls.
+    pub refused: Arc<AtomicUsize>,
+    deploying_until: Arc<Mutex<Option<Instant>>>,
     _stop: watch::Sender<bool>,
 }
 
@@ -185,14 +190,24 @@ impl Model {
         let listener = tokio::net::TcpListener::bind(bind).await.expect("the model listens");
         let addr = listener.local_addr().unwrap();
         let calls = Arc::new(Mutex::new(Vec::new()));
+        let refused = Arc::new(AtomicUsize::new(0));
+        let deploying_until = Arc::new(Mutex::new(None));
         let (stop, rx) = watch::channel(false);
         let c = calls.clone();
+        let r = refused.clone();
+        let d = deploying_until.clone();
         let handler = move |req: Request<Incoming>, _peer: SocketAddr| {
             let c = c.clone();
-            async move { handle(req, c).await }
+            let r = r.clone();
+            let d = d.clone();
+            async move { handle(req, c, r, d).await }
         };
         tokio::spawn(net::serve(listener, handler, rx));
-        Model { addr, calls, _stop: stop }
+        Model { addr, calls, refused, deploying_until, _stop: stop }
+    }
+
+    pub fn deploying_for(&self, duration: Duration) {
+        *self.deploying_until.lock().unwrap() = Some(Instant::now() + duration);
     }
 }
 
@@ -285,6 +300,7 @@ pub fn answer(body: &Value) -> (String, Option<Value>) {
     // `browse: <url>`: the browser tool goes there; `look at your screen`:
     // computer_use captures it. Each answer quotes what its tool said.
     let browse = last_user.lines().find_map(|l| l.split_once("browse: ").map(|(_, u)| u.trim().to_string())).filter(|u| !u.is_empty());
+    let inspect_browser = last_user.lines().find_map(|l| l.split_once("inspect browser: ").map(|(_, expression)| expression.trim().to_string())).filter(|s| !s.is_empty());
     let look = last_user.contains("look at your screen");
     // `desk: <json>`: computer_use with those arguments (a scroll, a focus)
     let desk = last_user.lines().find_map(|l| l.split_once("desk: ").and_then(|(_, a)| serde_json::from_str::<Value>(a.trim()).ok())).filter(Value::is_object);
@@ -308,7 +324,7 @@ pub fn answer(body: &Value) -> (String, Option<Value>) {
             let made: String = result.split_once("made=").map(|(_, rest)| rest.chars().take_while(|c| !c.is_whitespace() && !matches!(c, '"' | '\\' | ',')).collect()).unwrap_or_default();
             return (format!("scripted: sent\nMEDIA:{made}"), None);
         }
-        if run.is_some() || start.is_some() || notify.is_some() || narrate.is_some() || browse.is_some() || look || desk.is_some() || write.is_some() || code.is_some() || clarify.is_some() || dm.is_some() || dm_back.is_some() {
+        if run.is_some() || start.is_some() || notify.is_some() || narrate.is_some() || browse.is_some() || inspect_browser.is_some() || look || desk.is_some() || write.is_some() || code.is_some() || clarify.is_some() || dm.is_some() || dm_back.is_some() {
             return (format!("scripted: the tool said: {}", result.chars().take(4000).collect::<String>()), None);
         }
         let ran = if result.contains("tool-ran") { "the tool ran" } else { "the tool said something else" };
@@ -408,6 +424,13 @@ pub fn answer(body: &Value) -> (String, Option<Value>) {
             ("scripted: no execute_code among my tools".into(), None)
         };
     }
+    if let Some(expression) = inspect_browser {
+        return if offered("browser_console") {
+            (String::new(), Some(call("browser_console", json!({ "expression": expression }))))
+        } else {
+            ("scripted: no browser_console among my tools".into(), None)
+        };
+    }
     match (browse, look) {
         (Some(url), _) if offered("browser_navigate") => return (String::new(), Some(call("browser_navigate", json!({ "url": url })))),
         (Some(_), _) => return ("scripted: no browser_navigate among my tools".into(), None),
@@ -422,7 +445,7 @@ pub fn answer(body: &Value) -> (String, Option<Value>) {
     (format!("scripted: {said}"), None)
 }
 
-async fn handle(req: Request<Incoming>, calls: Arc<Mutex<Vec<Call>>>) -> Response<Body> {
+async fn handle(req: Request<Incoming>, calls: Arc<Mutex<Vec<Call>>>, refused: Arc<AtomicUsize>, deploying_until: Arc<Mutex<Option<Instant>>>) -> Response<Body> {
     let path = req.uri().path().to_string();
     let agent = req.headers().get("x-fragment-agent").and_then(|v| v.to_str().ok()).map(str::to_string);
     let tier = req.headers().get("x-fragment-tier").and_then(|v| v.to_str().ok()).map(str::to_string);
@@ -443,6 +466,13 @@ async fn handle(req: Request<Incoming>, calls: Arc<Mutex<Vec<Call>>>) -> Respons
         return answer;
     }
     let v: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+    if path.ends_with("/chat/completions") && deploying_until.lock().unwrap().is_some_and(|until| Instant::now() < until) {
+        refused.fetch_add(1, Ordering::SeqCst);
+        let mut response = net::refusal(StatusCode::SERVICE_UNAVAILABLE, "deploying", "a deploy is going out");
+        response.headers_mut().insert("x-fragment-model-not-dispatched", "deploying".parse().unwrap());
+        response.headers_mut().insert("x-fragment-release-refused", "previous-release".parse().unwrap());
+        return response;
+    }
     let stream = v["stream"] == json!(true);
     calls.lock().unwrap().push(Call { path: path.clone(), model: v["model"].as_str().unwrap_or("").into(), agent, tier, stream, body: v.clone(), authorization });
     if !path.ends_with("/chat/completions") {

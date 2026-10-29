@@ -388,11 +388,18 @@ wrangler and the Sandbox SDK the cell's shim bundles, pinned in
   `tested-tree-<tree>`). On `production`, a run of ci.yml that succeeded
   on a push to master of that SHA, or of a commit with that tree, proves
   it, its preview deploy included (Paul, 2026-10-20); on master, such a
-  run, or the green run of the pull request a merge commit merges (its
+  run, a green `merge_group` run from this repo's master queue whose
+  head and `tested-tree-<tree>` record both match the push's tree, or the
+  green run of the pull request a merge commit merges (its
   head the commit's second parent) that recorded the merge commit's
   tree: a pull request's run tests its merge into master as master
   stood, so this holds when master has not moved since (Paul,
-  2026-10-23). Its caches restore on
+  2026-10-23). The `merge_group` event runs `check` and all four shards
+  on the queue's combined tree; `check` holds its schema lock to the
+  group's exact base SHA. The queue is enabled by Paul's master ruleset,
+  not by this workflow. Queue runs never deploy; production still needs
+  a successful master push (its preview deploy included) for proof.
+  Its caches restore on
   every run and save only from master's pushes (each one's contents are
   named in the workflow): `check`'s Rust dependencies and the e2e's
   tools through `Swatinem/rust-cache`; the e2e's builds, our own crates'
@@ -410,25 +417,38 @@ wrangler and the Sandbox SDK the cell's shim bundles, pinned in
   in parallel; about 13 minutes), on pull requests and master's
   pushes that touch images/hermes, images/bridge, images/stub, the
   images' manifest or lock, or the workflow (its `changes` job, through
-  `dorny/paths-filter`), and on a run by hand. It keeps no layer cache: the workflow
+  `dorny/paths-filter`), and on a run by hand. It also runs on merge
+  groups: `check` always, Docker when the group's diff from its exact
+  base touches those paths. It keeps no layer cache: the workflow
   says why. `release.yml` builds the CLI for macOS and Linux.
-  `image.yml`, the Image workflow, runs only by hand (Actions, image, Run
-  workflow: `environment` preview or production, `from`, `tag`) in that
-  GitHub environment, for its `CLOUDFLARE_API_TOKEN` and
-  `CLOUDFLARE_ACCOUNT_ID` (required there), from the branch that deploys
-  it (master for the preview, `production` for production; any other
-  is refused), to the repository the deploys made
-  (`fragment-preview-computer-hermes-canary`,
-  `fragment-computer-hermes`). Without `from` it builds and pushes
-  (`cargo xtask image push`; `tag` empty for the commit's first 12 hex
-  digits): the preview's canary, or, warned that its digest is not the
-  canary's, production's. With `from`, production's alone, a proven
-  preview reference, it copies it (`cargo xtask image copy`, with
-  production's `PREVIEW_REGISTRY_TOKEN` and `PREVIEW_ACCOUNT_ID`; `tag`
-  empty for the digest's first 12 hex digits): a promotion keeps the
-  digest the round proved (Paul, 2026-10-20). Its summary names the
-  digest and the `computers.images` line to pin it with, the account
-  masked.
+  Master's pushes also run `preview-image` beside the tests. It hashes the
+  committed image inputs (`xtask/src/image/preview.rs`), reuses the registry's
+  `inputs-<key>` tag when present, or builds and pushes it once with a
+  persistent BuildKit Actions cache (one master-only `preview-hermes` scope,
+  `mode=max`, about 3 GB). Unchanged inputs reuse the same digest after cache
+  eviction too. The image job waits for Cloudflare preparation before the
+  preview deploy may start; slow or failed preparation leaves the running
+  preview unchanged. No test or rollout check is removed.
+  **Preview is the canary**, with no separate stable image: deploy applies
+  the resolved digest to default `hermes` and compatibility name
+  `hermes-canary` in memory. Both names stay for existing pins. The deploy
+  summary records the input key and digest; preview.jsonc's old image lines
+  no longer describe what CI runs. No write token or config commit is needed.
+  `image.yml`, the manual Image workflow (environment preview or production,
+  `from`, `tag`), uses that environment's token and account ID. Preview from
+  master resolves/prepares the same input-keyed image (`tag` is unused);
+  production from `production` is unchanged: without `from`, a new build
+  (`tag` defaults to the commit's first 12 hex digits), with a warning that
+  no preview round proved it; with `from`, a byte-for-byte copy of the proven
+  preview digest (`cargo xtask image copy`, production's
+  `PREVIEW_REGISTRY_TOKEN` and `PREVIEW_ACCOUNT_ID`; `tag` defaults to the
+  digest's first 12). Its repository is `fragment-computer-hermes`, preview's
+  remains `fragment-preview-computer-hermes-canary`. The production summary
+  names the digest and config line to pin manually, the account masked.
+  Production promotion still follows a full round (docs/computers.md):
+  preview's hosted lanes omit the now-redundant `--candidate`; a separate
+  production-shaped test branch with distinct stable and candidate pins
+  retains `--candidate` for the real upgrade/rollback checks.
 - CI deploys to Cloudflare (ci.yml's `deploy`: `xtask deploy
   --pinned-only`) on every green push: master's to its preview,
   `preview.finite.build` (`--branch preview`, a branch copy on the dev
@@ -447,8 +467,9 @@ wrangler and the Sandbox SDK the cell's shim bundles, pinned in
   `DEPLOY_REPO_TOKEN` (a fine-grained token with Contents · Read on
   finitecomputer/fragment-deploy alone),
   `CLOUDFLARE_API_TOKEN` (wrangler's, and the DNS token), the preview's
-  `PREVIEW_TEST_SECRET`, and, optional but recommended,
-  `CLOUDFLARE_ACCOUNT_ID`, named only so the job's logs mask the account
+  `PREVIEW_TEST_SECRET`, and `CLOUDFLARE_ACCOUNT_ID` (required for preview's
+  image resolution; on production optional but recommended for masking).
+  The job's logs mask the account
   wherever wrangler or xtask print it. The configs live in the private
   repo finitecomputer/fragment-deploy, `preview.jsonc` and
   `production.jsonc` at the root of its `main`: names and paths, no
@@ -462,12 +483,11 @@ wrangler and the Sandbox SDK the cell's shim bundles, pinned in
   The job writes the token and the test secret where a CI config names
   them, `~/.config/fragment/secrets/cloudflare-api-token` and
   `…/preview-test-secret` (deploy/example.jsonc). Every image a CI
-  config names is pinned by digest: a canary is built and pushed by the
-  Image workflow (above), production's stable copied by it from the
-  preview's registry, and the digest its summary names then pinned by a
-  commit to the environment's file in fragment-deploy
-  (docs/computers.md, "One round"). Other branches' copies deploy by
-  hand.
+  config names is pinned by digest. Preview's effective image is resolved
+  from its checkout's inputs and recorded in the deploy summary; production's
+  is copied by Image from the digest a full round proved, then pinned by a
+  hand commit to production.jsonc in fragment-deploy. Only Paul moves
+  production. Other branches' copies deploy by hand.
   fragment.club (the celld fleet on Fly) deploys only from the `celld`
   branch (tag `celld-final`) until cutover: its fleet file, node image
   and docs/operate.md's commands are that branch's. Deploys to the
