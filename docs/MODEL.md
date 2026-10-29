@@ -416,6 +416,11 @@ alone (`<sha>-dirty-<second>`). Dev and the e2e run one build in one
   retried as any failure of theirs is. A `deploying` an object answers
   because a call of its own was refused is its answer, never asked
   again: it may have acted before that call.
+  The model intercept alone marks a direct refusal of its signing
+  preflight as not dispatched to a provider (docs/computers.md, Models).
+  That additive image contract permits a bounded image-side wait without
+  replaying a model call that may have run; ordinary routed waits stay
+  the same.
 - **An object behind restarts.** A deploy restarts every object onto
   its code, but Cloudflare holds one it keeps busy on the code before:
   on the preview on 2026-10-21, after 7 of its 17 deploys, a busy

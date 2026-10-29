@@ -966,6 +966,17 @@ expires within 30 days. The container application is the deployment's
 
 ### Models
 
+- **A deploy before dispatch.** The model intercept's signing preflight
+  may answer 503 `deploying` with both
+  `x-fragment-model-not-dispatched: deploying` and
+  `x-fragment-release-refused: <release>`. Together these promise that
+  the provider was never called: a new image may retry that request with
+  its own bounded deployment wait. They appear only on a direct release
+  guard refusal of signing, never a nested object's refusal or a provider
+  error. The API intercept and public model API make no such promise.
+  Older images ignore the additive headers. A client must coordinate its
+  deployment wait with its stale detector and cancellation; a long silent
+  cell wait outlasts Hermes' normal provider timeout (#625).
 - `POST http://model.fragment.internal/v1/chat/completions`, OpenAI's
   shape, with `model` a tier (`cheap`, `medium`, or `high` while it is
   on), or one of the route's models by its own id (below, "A model by
