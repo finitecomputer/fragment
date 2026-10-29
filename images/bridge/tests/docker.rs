@@ -706,6 +706,56 @@ async fn hermes_running() -> (Fake, Model, String, Container) {
     (fake, model, chat, c)
 }
 
+/// A deployment is platform preflight, not provider silence: real Hermes
+/// waits beyond Fast's two stale windows without falling back or posting a
+/// provider error. The fake refuses before counting a provider dispatch.
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn hermes_waits_out_model_preflight_deploying() {
+    use std::sync::atomic::Ordering;
+    let (fake, model, chat, c) = hermes_running().await;
+    let before = model.calls.lock().unwrap().len();
+    model.deploying_for(Duration::from_secs(90));
+    let started = Instant::now();
+    let said = fake.say(&chat, &person("paul"), json!({ "text": "hello after the deployment" }));
+    let turn = fragment_bridge::records::turn_id("juniper--k3x9", &chat, "chat", said["seq"].as_u64().unwrap());
+    fake.until(180_000, "one reply after a 90s deployment", |w| w.bodies(&chat, "work", "turn.end").iter().any(|e| e["turn"] == turn)).await;
+    let calls = model.calls.lock().unwrap().clone();
+    let dispatched: Vec<_> = calls[before..].iter().filter(|c| c.body["messages"].to_string().contains("hello after the deployment")).collect();
+    assert!(started.elapsed() >= Duration::from_secs(90), "the deploy window really elapsed");
+    assert!(model.refused.load(Ordering::SeqCst) > 2, "multiple marked preflight refusals");
+    assert_eq!(dispatched.len(), 1, "one provider dispatch, no stale retry/fallback: {dispatched:?}");
+    assert_eq!(dispatched[0].model, CHEAP_ID, "same model throughout");
+    fake.with(|w| {
+        let replies: Vec<_> = w.bodies(&chat, "chat", "reply").into_iter().filter(|r| r["turn"] == turn).collect();
+        assert_eq!(replies.len(), 1, "one reply: {replies:?}");
+        assert!(replies[0]["text"].as_str().unwrap_or("").contains("hello after the deployment"), "{replies:?}");
+        assert!(!w.records(&chat, "chat").iter().any(|r| r.to_string().contains("Provider temporarily unavailable")), "no provider recovery message");
+    });
+    assert!(!c.logs().contains("Stream stale for"), "the deployment never tripped the provider watchdog");
+
+    // Stop while the preflight is refusing. After the gate opens, the
+    // abandoned turn must never dispatch a provider request.
+    let refused_before = model.refused.load(Ordering::SeqCst);
+    model.deploying_for(Duration::from_secs(6));
+    let said = fake.say(&chat, &person("paul"), json!({ "text": "cancel this deployment wait" }));
+    let turn = fragment_bridge::records::turn_id("juniper--k3x9", &chat, "chat", said["seq"].as_u64().unwrap());
+    fake.until(20_000, "the cancelled turn's preflight refusal", |_| model.refused.load(Ordering::SeqCst) > refused_before).await;
+    fake.say(&chat, &person("paul"), json!({ "kind": "stop", "turn": turn }));
+    fake.until(30_000, "the cancelled turn ends", |w| w.bodies(&chat, "work", "turn.end").iter().any(|e| e["turn"] == turn)).await;
+    tokio::time::sleep(Duration::from_secs(8)).await;
+    assert!(!model.calls.lock().unwrap()[before..].iter().any(|c| c.body["messages"].to_string().contains("cancel this deployment wait")), "no provider dispatch after cancellation");
+}
+
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn hermes_deployment_adapter_contract() {
+    build(&repo_dir(), "images/hermes/Dockerfile", &hermes_tag());
+    let c = Container::idle(&hermes_tag());
+    let (code, report) = c.exec_code(&["/opt/hermes/.venv/bin/python", "-c", include_str!("deploy_wait.py")]);
+    assert_eq!(code, 0, "{report}");
+}
+
 /// Goal (Paul, 2026-10-09: a time-based fallback "only if time-based
 /// fallback is built into hermes"): a tier agent whose model stalls, its
 /// call streaming nothing, switches to the route's `fallback` by Hermes'

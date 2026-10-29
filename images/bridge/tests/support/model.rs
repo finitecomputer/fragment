@@ -68,6 +68,8 @@
 
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
 use http_body_util::BodyExt;
 use hyper::body::Incoming;
@@ -177,6 +179,9 @@ fn transcription(content_type: &str, body: &[u8], agent: &Option<String>, author
 pub struct Model {
     pub addr: SocketAddr,
     pub calls: Arc<Mutex<Vec<Call>>>,
+    /// Preflight refusals, separate from dispatched provider calls.
+    pub refused: Arc<AtomicUsize>,
+    deploying_until: Arc<Mutex<Option<Instant>>>,
     _stop: watch::Sender<bool>,
 }
 
@@ -185,14 +190,24 @@ impl Model {
         let listener = tokio::net::TcpListener::bind(bind).await.expect("the model listens");
         let addr = listener.local_addr().unwrap();
         let calls = Arc::new(Mutex::new(Vec::new()));
+        let refused = Arc::new(AtomicUsize::new(0));
+        let deploying_until = Arc::new(Mutex::new(None));
         let (stop, rx) = watch::channel(false);
         let c = calls.clone();
+        let r = refused.clone();
+        let d = deploying_until.clone();
         let handler = move |req: Request<Incoming>, _peer: SocketAddr| {
             let c = c.clone();
-            async move { handle(req, c).await }
+            let r = r.clone();
+            let d = d.clone();
+            async move { handle(req, c, r, d).await }
         };
         tokio::spawn(net::serve(listener, handler, rx));
-        Model { addr, calls, _stop: stop }
+        Model { addr, calls, refused, deploying_until, _stop: stop }
+    }
+
+    pub fn deploying_for(&self, duration: Duration) {
+        *self.deploying_until.lock().unwrap() = Some(Instant::now() + duration);
     }
 }
 
@@ -430,7 +445,7 @@ pub fn answer(body: &Value) -> (String, Option<Value>) {
     (format!("scripted: {said}"), None)
 }
 
-async fn handle(req: Request<Incoming>, calls: Arc<Mutex<Vec<Call>>>) -> Response<Body> {
+async fn handle(req: Request<Incoming>, calls: Arc<Mutex<Vec<Call>>>, refused: Arc<AtomicUsize>, deploying_until: Arc<Mutex<Option<Instant>>>) -> Response<Body> {
     let path = req.uri().path().to_string();
     let agent = req.headers().get("x-fragment-agent").and_then(|v| v.to_str().ok()).map(str::to_string);
     let tier = req.headers().get("x-fragment-tier").and_then(|v| v.to_str().ok()).map(str::to_string);
@@ -451,6 +466,13 @@ async fn handle(req: Request<Incoming>, calls: Arc<Mutex<Vec<Call>>>) -> Respons
         return answer;
     }
     let v: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+    if path.ends_with("/chat/completions") && deploying_until.lock().unwrap().is_some_and(|until| Instant::now() < until) {
+        refused.fetch_add(1, Ordering::SeqCst);
+        let mut response = net::refusal(StatusCode::SERVICE_UNAVAILABLE, "deploying", "a deploy is going out");
+        response.headers_mut().insert("x-fragment-model-not-dispatched", "deploying".parse().unwrap());
+        response.headers_mut().insert("x-fragment-release-refused", "previous-release".parse().unwrap());
+        return response;
+    }
     let stream = v["stream"] == json!(true);
     calls.lock().unwrap().push(Call { path: path.clone(), model: v["model"].as_str().unwrap_or("").into(), agent, tier, stream, body: v.clone(), authorization });
     if !path.ends_with("/chat/completions") {

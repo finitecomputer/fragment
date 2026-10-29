@@ -547,7 +547,7 @@ pub fn profile_config(agent: &Agent, name: &str, home: Home, main: &MainModel, r
     // Memory and skill reviews are on. The image plugin forks our external
     // skills into the active profile before writes; Hermes retains its guards.
     y.push_str(&format!(
-        "plugins:\n  enabled: [fragment-skill-fork]\nauxiliary:\n  background_review: {{ enabled: true }}\n  vision:\n    provider: \"custom\"\n    base_url: {}\n    model: {}\n    api_key: \"fragment-model\"\n",
+        "plugins:\n  enabled: [fragment-skill-fork, fragment-deploy-wait]\nauxiliary:\n  background_review: {{ enabled: true }}\n  vision:\n    provider: \"custom\"\n    base_url: {}\n    model: {}\n    api_key: \"fragment-model\"\n",
         q(&format!("{base}/v1")),
         q(VISION_MODEL)
     ));
@@ -1323,7 +1323,7 @@ mod tests {
         let vision = "  vision:\n    provider: \"custom\"\n    base_url: \"http://model.fragment.internal/v1\"\n    model: \"vision\"\n    api_key: \"fragment-model\"\n";
         for (tier, config) in [("medium", &p), ("high", &h), ("cheap", &profile_config(&agent(), "Juniper", Home::Chat, &Tier::Cheap.into(), DEFAULT_REASONING, &route("http://model.fragment.internal"), &[], creds))] {
             assert!(config.contains(vision), "the {tier} tier's screenshots go to the route's vision model: {config}");
-            assert!(config.contains("plugins:\n  enabled: [fragment-skill-fork]\nauxiliary:\n  background_review: { enabled: true }\n"), "the {tier} tier reviews memory and forks external skills before writes: {config}");
+            assert!(config.contains("plugins:\n  enabled: [fragment-skill-fork, fragment-deploy-wait]\nauxiliary:\n  background_review: { enabled: true }\n"), "the {tier} tier reviews memory, forks external skills and waits for deployment preflight: {config}");
             assert!(!config.contains("curator:"), "the separate periodic curator keeps Hermes' defaults: {config}");
         }
         assert!(!m.contains("auxiliary:"), "each profile's own, beside the headers that name its agent: {m}");
