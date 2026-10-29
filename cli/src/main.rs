@@ -2353,8 +2353,18 @@ fn agent_face_writes(c: &api::Client, agent: &str, name: Option<&str>, picture: 
         }
         let mut manifest: Value = c.call_as(c.get(&format!("/api/f/{agent}/manifest"))?)?;
         anyhow::ensure!(manifest.is_object(), "{agent}'s fragment.json is not an object: {manifest}");
+        let old = manifest["meta"]["title"].as_str().map(str::to_string);
         manifest["meta"]["title"] = json!(name);
         files.push(json!({ "path": "fragment.json", "text": format!("{}\n", serde_json::to_string_pretty(&manifest)?) }));
+        // its job says its new name where it said an old one, in the same
+        // commit (docs/api.md, "An agent's name and picture"): its name at
+        // main, and the one the shell's first job gave it
+        if let Some(job) = agent_job(c, agent)? {
+            let olds: Vec<&str> = old.as_deref().into_iter().chain(fragment_core::face::job_first_name(&job)).collect();
+            if let Some(renamed) = fragment_core::face::job_renamed(&job, &olds, name) {
+                files.push(json!({ "path": fragment_core::face::JOB, "text": renamed }));
+            }
+        }
     }
     let at = fragment_core::face::AGENT_PICTURE;
     if let Some(path) = picture {
@@ -2365,6 +2375,17 @@ fn agent_face_writes(c: &api::Client, agent: &str, name: Option<&str>, picture: 
         files.push(json!({ "path": at, "delete": true }));
     }
     Ok(files)
+}
+
+/// An agent's job (`SOUL.md`) at main, as text: none when it has none, or
+/// one past what a rename rewrites, or not text.
+fn agent_job(c: &api::Client, agent: &str) -> Result<Option<String>> {
+    let r = c.get(&format!("/api/f/{agent}/file?path={}", fragment_core::face::JOB))?;
+    if r.status == 404 {
+        return Ok(None);
+    }
+    anyhow::ensure!(r.ok(), "reading {agent}'s {}: {}", fragment_core::face::JOB, String::from_utf8_lossy(&r.body));
+    Ok((r.body.len() <= fragment_core::face::JOB_RENAME_MAX_BYTES).then(|| String::from_utf8(r.body).ok()).flatten())
 }
 
 fn writer_id(c: &api::Client) -> String {

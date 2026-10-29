@@ -934,6 +934,10 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     let agent_wait = std::time::Duration::from_secs(120);
     // signed out, settings is the shell asking them to sign in, and back to settings
     let page = b.open(&format!("{}/settings", api.base))?;
+    let agent_source = std::str::from_utf8(fragment_templates::blessed::site_file("agent", "site/agent.js").context("the release's agent.js")?.bytes)?;
+    let agent_body = agent_source.replace("import { colorOf } from \"./agent-color.js\";", "").replace("main();\nroutines();", "return main();");
+    let caught_up = b.eval(&page, &format!("({})(function(document, window, fetch, WebSocket, location, Image, colorOf) {{ {agent_body} }})", include_str!("agent-watch.js")))?;
+    s.ok("the agent page catches a job move before its first watch hello, including when the initial read finishes last", caught_up == json!(true), caught_up);
     let asked = b.until(&page, "document.querySelector('#first-run-card a.primary')?.getAttribute('href') === '/auth/login?screen_hint=sign-up&return=%2Fsettings'", wait);
     s.ok("signed out, /settings is the shell asking them to sign in, and to come back to settings", asked, b.eval(&page, "document.body.innerText.slice(0, 200)")?);
     let other = b.eval(&page, "(() => { const a = document.querySelector('#first-run-card a.splash-secondary'); return { href: a?.getAttribute('href'), says: a?.textContent }; })()")?;
@@ -2209,6 +2213,18 @@ fn faces_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person,
     anyhow::ensure!(!agent.is_empty() && !id.is_empty(), "the first agent: {r}");
     let face = js(&format!("[data-agent-face={}]", js(&agent)));
     let own_row = js(&format!("#chats [data-key={}] .label", js(&format!("chat:{chat}"))));
+    // its job as the shell's first job wrote it until 2026-10-16, naming it
+    // (Skyler's XP, once Bliss): each rename by its owner (Settings' here,
+    // the CLI's below) says its new name there too (Paul, 2026-10-27)
+    let old = me.first_title;
+    let job = |text: &str| -> Result<bool> {
+        let wrote = shell(api, me.session, "POST", &format!("/api/f/{agent}/files"), Some(&json!({ "message": "its job, as it was", "files": [{ "path": "SOUL.md", "text": text }] })), &[])?;
+        Ok(wrote.status == 200 && shell(api, me.session, "POST", &format!("/api/f/{agent}/deploy"), Some(&json!({})), &[])?.status == 200)
+    };
+    let job_now = || shell(api, me.session, "GET", &format!("/api/f/{agent}/file?path=SOUL.md"), None, &[]).map(|r| r.text).unwrap_or_default();
+    let job_of = |name: &str| format!("You are {name}, someone@e2e.test's default agent: the first one they talk to.\n{name} keeps a reading list.\n");
+    anyhow::ensure!(job(&job_of(old))?, "its job, naming it");
+    let cli = cli_home(s, api, me.session, "faces-ui-cli")?;
     // Rename, in Settings' Agents
     b.click(page, "#settings")?;
     let rename = js(&format!("[data-rename-agent={}]", js(&agent)));
@@ -2226,9 +2242,10 @@ fn faces_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person,
         ),
         wait,
     );
+    let rewritten = job_now();
     s.ok(
-        "Settings' Agents renames the person's agent: its name shows in the sidebar, its settings row and its screen's button, with no reload, and its first chat's row keeps the chat's own title",
-        asked && renamed,
+        "Settings' Agents renames the person's agent: its name shows in the sidebar, its settings row and its screen's button, with no reload, and its first chat's row keeps the chat's own title; its job says the new name where it said the old",
+        asked && renamed && rewritten == job_of("Frank"),
         b.eval(page, &format!("({{ pill: document.querySelector('#sidebar-agent .title')?.textContent, row: document.querySelector({face})?.textContent, chat: document.querySelector({own_row})?.textContent, screen: document.querySelector({screen})?.textContent }})"))?,
     );
     // a picture, from a file
@@ -2279,10 +2296,10 @@ fn faces_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person,
     let opened = menu_item(b, page, "Its screen")?;
     let named = opened && screen_named(s, b, "Frank");
     s.ok("its screen's window and page name it by its name, never its label", named, json!({ "label": me.first, "shown": screen_said(b) }));
-    // renamed elsewhere, as `fragment agent --name` does (its files, then a
+    // renamed elsewhere, with `fragment agent --name` (its files, then a
     // deploy): the sidebar and the chat's page follow; the chat's own title
     // is the chat's, and stays
-    let wrote = rename_elsewhere(api, me.session, &agent, "Frankie")?;
+    let wrote = rename_by_cli(s, api, &cli, &agent, "Frankie") && job_now() == job_of("Frankie");
     let followed = b.until(page, "document.querySelector('#sidebar-agent .title')?.textContent === 'Frankie'", wait);
     let in_frame = s.eventually(wait, || b.eval_in_frame(page, chat, "document.getElementById('head-label')?.textContent === 'Frankie'").ok() == Some(Value::Bool(true)));
     let kept = b.eval(page, &format!("({{ row: document.querySelector({own_row})?.textContent ?? null, header: document.getElementById('chat-title').textContent }})"))?;
@@ -2299,8 +2316,9 @@ fn faces_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person,
     b.eval(page, &format!("(document.querySelector({screen_pane})?.closest('.pane')?.querySelector('button[aria-label=Close]')?.click(), true)"))?;
     b.until(page, &format!("!document.querySelector({screen_pane})"), wait);
     // its page (its menu's Its profile): its new name, and no old one
-    // anywhere on it (its job names none); the model it runs, its tier's
-    // (agent.json's `cheap`), by its id as their computer's view names it
+    // anywhere on it (its job says the new one); the model it runs, its
+    // tier's (agent.json's `cheap`), by its id as their computer's view
+    // names it
     b.click(page, "#sidebar-agent")?;
     let profile = menu_item(b, page, "Its profile")?;
     let mut seen = Value::Null;
@@ -2313,10 +2331,12 @@ fn faces_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person,
             seen["name"] == "Frankie" && seen["soul"].as_str().is_some_and(|t| t.contains("default agent")) && seen["model"] == cheap.as_str()
         });
     let text = seen["text"].as_str().unwrap_or("");
+    let soul = seen["soul"].as_str().unwrap_or("");
+    let said_frank = soul.split(|c: char| !c.is_alphanumeric()).any(|w| w == "Frank");
     let _ = b.screenshot(page, &shots.join("agent-page-renamed.png"));
     s.ok(
-        "its page shows its new name, and none of the names it had (its job says what it does, never who it is), and the model it runs by its id (its tier's, as their computer's view names it), never a tier's name",
-        named && seen["title"] == "Frankie" && !text.contains(me.first_title) && !seen["soul"].as_str().unwrap_or("").contains("Frank") && !cheap.is_empty() && cheap != "cheap" && !text.contains("cheap model"),
+        "its page shows its new name, and none of the names it had (its job, which named it, says the new one), and the model it runs by its id (its tier's, as their computer's view names it), never a tier's name",
+        named && seen["title"] == "Frankie" && !text.contains(me.first_title) && soul.trim() == job_of("Frankie").trim() && !said_frank && !cheap.is_empty() && cheap != "cheap" && !text.contains("cheap model"),
         json!({ "was": me.first_title, "seen": seen, "cheap": cheap }),
     );
     // Every surface follows a rename (Paul, 2026-10-26: "be systematic about
@@ -2331,10 +2351,13 @@ fn faces_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person,
     let screen_open = menu_item(b, page, "Its screen")? && screen_named(s, b, "Frankie");
     b.click(page, "#settings")?;
     let drawn = b.until(page, &format!("location.pathname === '/settings' && document.querySelector({face})?.textContent === 'Frankie'"), wait);
-    let wrote = rename_elsewhere(api, me.session, &agent, "Rosalind")?;
+    let wrote = rename_by_cli(s, api, &cli, &agent, "Rosalind");
+    // its page, open, says its new name, and its job (read again) says it too ("Its job")
+    let job_shown = |b: &mut Browser| b.eval_in_frame(page, &its_page, "document.getElementById('soul')?.textContent ?? ''").ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
     let followed = b.until(page, &format!("document.querySelector({face})?.textContent === 'Rosalind'"), wait)
         && screen_named(s, b, "Rosalind")
-        && s.eventually(wait, || b.eval_in_frame(page, &its_page, "document.getElementById('name')?.textContent").ok() == Some(json!("Rosalind")));
+        && s.eventually(wait, || b.eval_in_frame(page, &its_page, "document.getElementById('name')?.textContent").ok() == Some(json!("Rosalind")))
+        && s.eventually(wait, || job_shown(b).trim() == job_of("Rosalind").trim());
     let swept = |b: &mut Browser, frame: Option<&str>| -> Value {
         let expr = format!("({OLD_NAME_SWEEP})({})", js("Frank"));
         match frame {
@@ -2356,6 +2379,28 @@ fn faces_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person,
         files_open && screen_open && drawn && wrote && followed && in_chat && clean,
         json!({ "files": files_open, "screen": screen_open, "drawn": drawn, "followed": followed, "chat": in_chat, "hits": hits }),
     );
+    // its job edited on main alone (as its computer's sync leaves the
+    // agent's own edits: no deploy) shows on its page, open, with no
+    // reload; and an agent renamed before, whose job names it as the first
+    // job did (Skyler's XP, once Bliss), is told its name there by its
+    // owner's rename again, to the name it has, the open page following
+    let edited = shell(api, me.session, "POST", &format!("/api/f/{agent}/files"), Some(&json!({ "message": "its job, as it was", "files": [{ "path": "SOUL.md", "text": job_of("Bliss") }] })), &[])?.status == 200;
+    let shows = |b: &mut Browser, job: &str| s.eventually(wait, || job_shown(b).trim() == job.trim());
+    let edit_shown = edited && shows(b, &job_of("Bliss"));
+    b.click(page, "#settings")?;
+    b.until(page, &format!("!!document.querySelector({rename})"), wait);
+    b.eval(page, &format!("(document.querySelector({rename}).click(), true)"))?;
+    b.until(page, "document.getElementById('rename-agent').open", wait);
+    b.eval(page, &fill("#agent-name", "Rosalind"))?;
+    b.eval(page, "(document.getElementById('rename-form').requestSubmit(), true)")?;
+    let closed = b.until(page, "!document.getElementById('rename-agent').open", wait);
+    let repaired = closed && shows(b, &job_of("Rosalind")) && job_now() == job_of("Rosalind");
+    s.ok(
+        "its job edited on main alone shows on its open page with no deploy; renamed again to the name it has, an agent whose job named it by its first name is told its name there, and its open page follows",
+        edit_shown && repaired,
+        json!({ "edited": edited, "shown": job_shown(b), "stored": job_now() }),
+    );
+    open_row(b, page, chat, wait)?;
     // Rename asks for what it renames: the chat's name in the chat's ⋯, the
     // agent's in its menu, each alone
     let asked_for = |b: &mut Browser, open: &str| -> Result<Value> {
@@ -2556,16 +2601,17 @@ fn settings_loading(b: &mut Browser, page: &Page, open: &str, wait: std::time::D
     Ok(json!({ "ok": held && loaded && loading["loading"] == true && after["loading"] == false && same, "loading": loading, "loaded": after }))
 }
 
-/// Opens `chat` from its row in the sidebar, as a person picks it (a
-/// reload, or /, opens the newest chat: maybe another).
-/// An agent renamed as `fragment agent --name` does it: its `fragment.json`'s
-/// `meta.title` written, then deployed (docs/api.md, "An agent's name and
-/// picture"); whether both answered.
-fn rename_elsewhere(api: &Api, session: &str, agent: &str, title: &str) -> Result<bool> {
-    retitle(api, session, agent, Some(title))
+/// An agent renamed by its owner with the CLI, `fragment agent --name`
+/// (its `fragment.json`'s `meta.title`, and its job where it named it, in
+/// one commit, then deployed: docs/api.md, "An agent's name and picture"):
+/// whether the CLI said its new name.
+fn rename_by_cli(s: &Suite, api: &Api, home: &std::path::Path, agent: &str, title: &str) -> bool {
+    s.cli_json(api, home, &["agent", agent, "--name", title, "--json"]).is_ok_and(|v| v["name"] == title)
 }
 
-/// `rename_elsewhere`, or with no title (`None`: `meta.title` left out).
+/// An agent's `fragment.json`'s `meta.title` written as is, or left out
+/// (`None`), then deployed: what no rename of its owner's makes (a blank
+/// title), as its files route takes it; whether both answered.
 fn retitle(api: &Api, session: &str, agent: &str, title: Option<&str>) -> Result<bool> {
     let mut manifest = shell(api, session, "GET", &format!("/api/f/{agent}/manifest"), None, &[])?.body;
     match title {
@@ -2602,6 +2648,8 @@ const OLD_NAME_SWEEP: &str = r#"(old) => {
   return hits;
 }"#;
 
+/// Opens `chat` from its row in the sidebar, as a person picks it (a
+/// reload, or /, opens the newest chat: maybe another).
 fn open_row(b: &mut Browser, page: &Page, chat: &str, wait: std::time::Duration) -> Result<()> {
     let row = format!("document.querySelector({})", js(&format!("#chats [data-key={}]", js(&format!("chat:{chat}")))));
     let open = format!("location.pathname === '/' && [...document.querySelectorAll('#frames iframe')].find((f) => !f.hidden)?.dataset.fragment === {}", js(chat));

@@ -870,7 +870,9 @@ fragment agent juniper--k3x9                       # what they are now
 ```
 
 `fragment agent` checks the picture, writes both in one commit and puts
-it live; an agent on a computer leaves its own name out. A picture too
+it live; an agent on a computer leaves its own name out. A new name is
+said in its job too (`SOUL.md`), in the same commit, wherever the job
+said its old one as a word. A picture too
 large or that is no picture is refused before anything is written; one
 committed by hand is refused when it is deployed (`fragment deploy` and
 `fragment status` say why), and the last good name and picture stay.

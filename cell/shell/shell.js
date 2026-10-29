@@ -1831,7 +1831,7 @@ function composeIn(name, text) {
 }
 
 // The same display-name editor for chats, agents and Apps.
-const { retitle, rename } = createTitles({ $, api, seg, byName, titleOf, reload: () => load() });
+const { retitle, rename } = createTitles({ $, api, seg, byName, titleOf, reload: () => load(), heard, ApiError });
 
 // ---- the launcher (launcher.js): one input for starting a chat or finding one again ----
 const launcher = createLauncher({
