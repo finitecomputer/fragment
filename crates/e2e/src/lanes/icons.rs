@@ -128,6 +128,7 @@ pub fn icons(s: &mut Suite, api: &Api) -> Result<()> {
     if !s.section("icons", &[crate::Need::Fakes, crate::Need::Levers]) {
         return Ok(());
     }
+    cli_icons(s, api)?;
     let owner = api.person()?;
     let owner_id = api.identity(&owner)?;
     let name = s.named(api, &owner, "icons")?;
@@ -358,6 +359,26 @@ pub fn icons(s: &mut Suite, api: &Api) -> Result<()> {
     at_once(s, api)?;
     capped(s, api)?;
     read_only(s, api)?;
+    Ok(())
+}
+
+fn cli_icons(s: &mut Suite, api: &Api) -> Result<()> {
+    let home = s.dir("cli-icons-home");
+    s.login(api, &home);
+    let keys = s.cli_keys(&home).expect("the icon CLI logged in");
+    let name = s.named(api, &keys, "cli-icons")?;
+    s.cli_json(api, &home, &["create", &name, "--template", "blank", "--title", "Tea timer", "--json"])?;
+    let made = s.cli_json(api, &home, &["icon", "generate", &name, "--hint", "a teapot", "--json"])?;
+    let got = get(api, &keys, &name, None)?;
+    s.ok("CLI icon generation sets a real PNG and returns metadata without dumping candidates", made["sha256"].as_str().is_some_and(|s| s.len() == 64) && made.get("candidates").is_none() && got.status == 200 && read(&got.bytes).is_some(), &made);
+    let image = s.scratch.join("cli-icon.jpg");
+    std::fs::write(&image, photo())?;
+    let uploaded = s.cli_json(api, &home, &["icon", "set", &name, &image.to_string_lossy(), "--json"])?;
+    let got = get(api, &keys, &name, None)?;
+    s.ok("CLI icon set uploads an image the platform fits", uploaded["sha256"].is_string() && got.status == 200 && read(&got.bytes).is_some(), &uploaded);
+    let removed = s.cli_json(api, &home, &["icon", "remove", &name, "--json"])?;
+    let gone = get(api, &keys, &name, None)?;
+    s.ok("CLI icon remove restores the default", removed["icon"].is_null() && gone.status == 404, &removed);
     Ok(())
 }
 
