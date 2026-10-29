@@ -1395,24 +1395,22 @@ fragment.club until cutover (decisions 34–35).
 - **Delete when:** Hermes lets an install leave its default profile out
   of the roster, or our gateway's own profile is an agent's.
 
-## A bot's answer to a teammate outlives the teammate's wait only while awake
+## The Hermes image suppresses its Bot Mode background waiter
 
-- **Observed:** 2026-10-08, Bot Mode in our Hermes image (the keeper,
-  `images/hermes/botmode.py`). A bot's `message_agent` waits for its
-  teammate's answer in a background process of Hermes' (up to 30
-  minutes), and the keeper delivers the message by a `fragment ask --wait`
-  of its own. Neither is saved: a sleep, a crash or a restart while the
-  teammate's turn runs ends both. Hermes keeps the delivery's claim for
-  good (its receipts never expire), and nothing settles it.
-- **Risk:** the sender never hears the answer, and never tells its owner;
-  the answer is in the teammate's chat, and the sender's owner sees it
-  there only if they look.
-- **First proof:** a hosted run where a computer sleeps while one bot's
-  teammate is still answering it, and the sender's chat says nothing more.
-- **Delete when:** a delivery's wait is the journal's: the keeper, at its
-  start, finds each claim of its own left unsettled and settles it from
-  the teammate's chat (the hand-off's record is `dm-<delivery>`), and the
-  sender's wake comes from that receipt rather than from a process.
+- **Observed:** 2026-10-29. For deliveries pinned to the image's
+  `fragment-bot-mode:` consumer, the image patches `bot_mode_dm` to
+  acknowledge the durable admission without spawning a background waiter.
+  The keeper settles Hermes' existing receipt from the teammate's journal
+  and posts `dm-result-<delivery>` in the sender's chat. Other consumers
+  retain Hermes' behavior. The build asserts the patched seam still exists.
+- **Risk:** an upstream change needs the patch reviewed. This does not
+  make the mailbox survive a rollback to a save before admission; that
+  ticket is still Hermes' local state (docs/durable-computers.md).
+- **First proof:** the Docker lane's `bot_delivery_recovers` kills the
+  keeper during the teammate's tool call, then kills it again after
+  settlement, and checks one handoff, turn, receipt and notification.
+- **Delete when:** Hermes lets a live consumer own its durable sender
+  notification without spawning a process to wait for it.
 
 ## Own keys are kept by the person's computer
 

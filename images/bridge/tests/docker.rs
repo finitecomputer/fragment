@@ -3532,3 +3532,59 @@ async fn simplex_on_the_hermes_image() {
     eprintln!("simplex: {relayed} relayed records on its SimpleX chat");
     assert!(fake.with(|w| w.made.as_slice() == std::slice::from_ref(&chat)), "its SimpleX chat found again after the restarts, never made twice");
 }
+
+/// Restart only the keeper while the real Hermes teammate executes a
+/// tool. Recovery reads the same journal turn and wakes its sender once.
+#[tokio::test]
+#[ignore = "needs Docker"]
+async fn bot_delivery_recovers() {
+    let tag = hermes_tag();
+    build(&repo_dir(), "images/hermes/Dockerfile", &tag);
+    let fake = Fake::start("0.0.0.0:0", &["juniper", "maple"]).await;
+    let model = Model::start("0.0.0.0:0").await;
+    let jchat = fake.chat_named("juniper-chat--h6j7", &["juniper"]);
+    let mchat = fake.chat_named("maple-chat--z8w6", &["maple"]);
+    let c = Container::run(&tag, fake.addr.port(), model.addr.port(), &[]);
+    for (chat, agent) in [(&jchat, "juniper--k3x9"), (&mchat, "maple--k3x9")] {
+        let said = fake.say(chat, &person("paul"), json!({"text": "hello"}));
+        let turn = fragment_bridge::records::turn_id(agent, chat, "chat", said["seq"].as_u64().unwrap());
+        within(&fake, chat, &c, 180_000, "the bot's first turn", |w| w.bodies(chat, "work", "turn.end").iter().any(|e| e["turn"] == turn)).await;
+    }
+    let t = Instant::now();
+    while c.logs().matches("\"botmode.owned\"").count() < 2 {
+        assert!(t.elapsed() < Duration::from_secs(60), "both Bot Chats owned: {}", c.logs());
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    asked(&fake, &jchat, &c, "dm: maple: run: sleep 15 && echo recovered-answer", |w, turn| w.bodies(&jchat, "work", "turn.end").iter().any(|e| e["turn"] == turn)).await;
+    within(&fake, &mchat, &c, 120_000, "maple executing her tool", |w| w.bodies(&mchat, "work", "turn.step").iter().any(|s| s.to_string().contains("sleep 15"))).await;
+    let started = c.logs().matches("\"botmode.started\"").count();
+    let kill = ["sh", "-c", "pkill -9 -f '^/opt/hermes/.venv/bin/python /opt/fragment/botmode.py$'"];
+    assert!(c.exec(&kill));
+    within(&fake, &jchat, &c, 180_000, "the recovered receipt resumes sender", |w| {
+        w.records(&jchat, "chat").iter().any(|r| {
+            if r["principal"] != "npub1maple" || !r["body"]["text"].as_str().is_some_and(|s| s.contains("recovered-answer")) {
+                return false;
+            }
+            let turn = fragment_bridge::records::turn_id("juniper--k3x9", &jchat, "chat", r["seq"].as_u64().unwrap());
+            w.bodies(&jchat, "work", "turn.end").iter().any(|end| end["turn"] == turn)
+        })
+    }).await;
+    assert!(!calls_of(&model, "juniper--k3x9", "Bot Mode delivery").is_empty(), "the sender's model receives the receipt");
+    assert!(c.logs().matches("\"botmode.started\"").count() > started);
+    assert!(c.exec(&kill));
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    fake.with(|w| {
+        let handoffs: Vec<_> = w.records(&mchat, "chat").into_iter().filter(|r| r["principal"] == "npub1juniper" && r["body"]["to"] == json!(["npub1maple"])).collect();
+        assert_eq!(handoffs.len(), 1, "one handoff: {handoffs:?}");
+        let results: Vec<_> = w.records(&jchat, "chat").into_iter().filter(|r| r["principal"] == "npub1maple" && r["body"]["text"].as_str().is_some_and(|s| s.starts_with("Bot Mode delivery "))).collect();
+        assert_eq!(results.len(), 1, "one notification: {results:?}");
+        let turn = fragment_bridge::records::turn_id("maple--k3x9", &mchat, "chat", handoffs[0]["seq"].as_u64().unwrap());
+        for kind in ["turn.start", "turn.end"] {
+            assert_eq!(w.bodies(&mchat, "work", kind).iter().filter(|r| r["turn"] == turn).count(), 1);
+        }
+    });
+    let receipts = c.exec_out(&["sh", "-c", "cat /data/hermes/profiles/maple--k3x9/runtime/bot_live_delivery/*.json"]);
+    let receipt: serde_json::Value = serde_json::from_str(&receipts).expect("one Hermes receipt");
+    assert_eq!(receipt["status"], "settled");
+    assert_eq!(receipt["fragment_notified"], true);
+}

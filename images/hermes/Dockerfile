@@ -250,6 +250,21 @@ RUN mkdir -p /tmp/rh \
 
 # Our Hermes plugin, compiled as the base's bytecode is; it goes in layer 2.
 FROM hermes AS plugin
+# Our live owner owns completion notifications durably; spawning Hermes'
+# background waiter as well would deliver the answer twice. Other live
+# consumers keep upstream's behavior. Fail the build if this seam moves.
+RUN /opt/hermes/.venv/bin/python - <<'PYBOT'
+from pathlib import Path
+p = Path('/opt/hermes/tools/bot_mode_dm.py')
+s = p.read_text()
+old = '        if record is not None:\n            command = _delivery_command'
+new = '        if record is not None and record["owner"]["live_session_id"].startswith("fragment-bot-mode:"):\n            _unlink_dm_file(_live_intent_file(dm_file))\n            _unlink_dm_file(dm_file)\n            return json.dumps(dict(status=record["status"], delivery_id=record["delivery_id"], to=label,\n                detail="Durably queued for the live Bot Chat owner. Its journal reply wakes you; do not wait or resend."))\n        if record is not None:\n            command = _delivery_command'
+assert s.count(old) == 1, 'upstream Bot Mode admission changed'
+p.write_text(s.replace(old, new))
+for cache in p.parent.glob('__pycache__/bot_mode_dm.*.pyc'):
+    cache.unlink()
+PYBOT
+RUN /opt/hermes/.venv/bin/python -m compileall -q --invalidation-mode unchecked-hash /opt/hermes/tools/bot_mode_dm.py
 COPY images/hermes/plugins/fragment-skill-fork /opt/hermes/plugins/fragment-skill-fork
 RUN /opt/hermes/.venv/bin/python -m compileall -q --invalidation-mode unchecked-hash /opt/hermes/plugins/fragment-skill-fork > /dev/null
 
@@ -293,6 +308,8 @@ COPY images/hermes/tool_keys.py /opt/fragment/tool_keys.py
 COPY images/hermes/hooks /opt/fragment/hooks
 COPY --from=plugin /opt/hermes/plugins/fragment-skill-fork /opt/hermes/plugins/fragment-skill-fork
 COPY images/hermes/botmode.py /opt/fragment/botmode.py
+COPY --from=plugin /opt/hermes/tools/bot_mode_dm.py /opt/hermes/tools/bot_mode_dm.py
+COPY --from=plugin /opt/hermes/tools/__pycache__/bot_mode_dm.*.pyc /opt/hermes/tools/__pycache__/
 COPY images/hermes/screen /opt/fragment/screen
 COPY --from=novnc /novnc/core /opt/fragment/screen/novnc/core
 COPY --from=novnc /novnc/vendor /opt/fragment/screen/novnc/vendor

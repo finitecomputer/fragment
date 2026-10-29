@@ -399,3 +399,11 @@ messages in flight.
   answer starts a new turn.
 - **A backlog's age:** chat messages have no age limit after a long
   outage (routines have an hour). Decide before production.
+
+Bot Mode delivery recovery (2026-10-29) reads the teammate's authoritative
+chat/work journal when its keeper restarts. Hermes' existing mailbox
+keeps admission and the immutable receipt; a sender notification is an
+ordinary idempotent chat post, retried after interruption. This removes
+the dead-waiter dependency, but a disk rollback to before admission can
+still lose a mailbox ticket. It does not make `/data` authoritative over
+a turn's journal or permit another life to execute that turn again.
