@@ -4014,7 +4014,7 @@ fn reasoning_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session:
         b.viewport(page, width, 812, true)?;
         b.color_scheme(page, theme)?;
         b.eval(page, &format!("({deep}.scrollIntoView({{block:'center'}}),true)"))?;
-        let fits = b.eval(page, &format!("[{fast_model},{fast},{deep_model},{deep}].every((p)=>{{const r=p.getBoundingClientRect();return r.x>=0&&r.right<=innerWidth&&r.height>=32;}})"))?;
+        let fits = b.eval(page, &format!("[{fast_model},{fast},{deep_model},{deep}].every((p)=>{{const r=p.getBoundingClientRect();return r.x>=0&&r.right<=innerWidth&&r.height>=32;}}) && [{fast_model},{deep_model}].every((p)=>p.getBoundingClientRect().width>=100)"))?;
         s.ok(&format!("BYO model and effort controls fit a {width}px {theme} phone"), fits == true, &fits);
         let _ = b.screenshot(page, &shots.join(format!("phone-agent-model-modes-{width}-{theme}.png")));
     }

@@ -588,7 +588,7 @@ iframe[data-blocked] { display: none; }
 .provider-account-pick { height: 26px; max-width: 220px; padding: 0 6px; border: 1px solid var(--border-strong); border-radius: 8px; background: none; color: var(--text-primary); font: inherit; font-size: 12.5px; }
 .provider-key { display: flex; gap: 8px; flex-wrap: wrap; }
 .provider-key input { height: 30px; min-width: 0; width: 220px; max-width: 100%; padding: 0 10px; border: 1px solid var(--border-strong); border-radius: 8px; background: none; color: var(--text-primary); font: inherit; font-size: 13px; }
-/* settings' agents: an agent's model, when a provider that offers models is connected (shell.js modelPicker) */
+/* settings' agents: a platform route, or independent BYO Fast/Deep picks */
 .agent-setting { width: 100%; display: flex; flex-direction: column; gap: 4px; padding: 14px 2px; border-bottom: 1px solid var(--border-strong); }
 .agent-setting:last-child { border-bottom: 0; }
 .agent-setting .settings-line { padding: 0 0 4px; border: 0; }
@@ -604,6 +604,8 @@ iframe[data-blocked] { display: none; }
 .agent-mode-picks select.agent-effort { flex: 0 0 86px; }
 .agent-model-label:not(.has-modes) .agent-mode-picks { width: min(320px, 62%); }
 .agent-model-label.has-modes::after { display: none; }
+.agent-model-label.has-modes .settings-key { min-width: 32px; }
+.agent-model-label.has-modes .agent-mode-picks { width: min(460px, calc(100% - 40px)); }
 .agent-model-label.has-modes select.agent-model { appearance: auto; padding: 0 10px; }
 .agent-model-said { font-size: 12.5px; }
 .chip { height: 26px; padding: 0 10px; border: 1px solid var(--border-strong); border-radius: 999px; background: none; color: var(--text-tertiary); font-size: 12.5px; }
