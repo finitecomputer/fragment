@@ -16,6 +16,9 @@ image's agent runtime.
 
 ## Read first
 
+`THE-FRAGMENT-WAY.md` — Paul's words on what Fragment is for and how it
+should grow. Human-written: an agent never edits it.
+
 0. `docs/cloudflare-v1.md` — **the plan of record since 2026-10-02**:
    fragment v1 entirely on Cloudflare, its decisions, phases and the
    hard cut. Where it disagrees with anything below, it wins.
