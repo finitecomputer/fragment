@@ -913,13 +913,31 @@ impl FragmentCell {
         }
     }
 
-    /// `job.fetch(url, init)`: the fragment's one way out. Header values
-    /// may name secrets as `{{NAME}}`; they are opened here, at the egress
-    /// point, and never reach the app. A step is performed at least once (a
+    /// `job.fetch(url, init)`: the fragment's one way out. Header values,
+    /// and the URL's path and query, may name secrets as `{{NAME}}`; they
+    /// are opened here, at the egress point, and never reach the app (a
+    /// failure's message names a URL's secrets as their placeholders). A step is performed at least once (a
     /// crash after the request, before its answer is kept, sends it again),
     /// so a request that may change something names its step in an
     /// `Idempotency-Key`, the same on every try and replay, unless the job
     /// named its own: a vendor that honours the header acts on it once.
+    /// Secret `name`'s value, for a fetch to `url`: a secret's name, set,
+    /// for that host.
+    async fn fill(&self, name: &str, url: &url::Url) -> Result<String, StepFail> {
+        if !valid_secret_name(name) {
+            return Err(permanent(format!("{{{{{name}}}}} is not a secret name (^[A-Z][A-Z0-9_]*$)")));
+        }
+        // its hosts and its sealed value read in one statement, so the value
+        // opened is the one those hosts were set with
+        let stored = self
+            .stored_secret(name)
+            .map_err(|e| StepFail::Retry(e.message))?
+            .ok_or_else(|| permanent(format!("no secret named {name} (set it with `fragment secret set <fragment> {name} --to <the API's host>`)")))?;
+        fragment_core::secrets::may_fill(&stored.hosts, url, self.cfg.egress_local).map_err(|why| permanent(why.message(name)))?;
+        let secret = self.open_secret(name, &stored.sealed).await.map_err(|e| StepFail::Retry(e.message))?;
+        String::from_utf8(secret).map_err(|_| permanent(format!("secret {name} is not UTF-8 text")))
+    }
+
     async fn step_fetch(&self, run: &RunRow, index: u32, f: Fetch) -> Result<Value, StepFail> {
         let url = egress::check(&f.url, self.cfg.egress_local).map_err(permanent)?;
         // a connector bound as a door that is shut sends nothing (doors.rs)
@@ -938,9 +956,10 @@ impl FragmentCell {
         if f.headers.len() > FETCH_HEADERS_MAX {
             return Err(permanent(format!("at most {FETCH_HEADERS_MAX} headers")));
         }
+        let in_url = fragment_core::secrets::url_placeholders(&url);
         // a request carrying a secret goes to its URL's host, the one its
         // secrets' hosts are checked against, and to no host a header names
-        if f.headers.values().any(|v| !placeholders(v).is_empty()) {
+        if !in_url.is_empty() || f.headers.values().any(|v| !placeholders(v).is_empty()) {
             if let Some(h) = fragment_core::secrets::routing_header(f.headers.keys().map(String::as_str)) {
                 return Err(permanent(format!("a fetch that carries a secret goes to its URL's host alone: it sets no {h} header")));
             }
@@ -949,22 +968,22 @@ impl FragmentCell {
         for (k, given) in &f.headers {
             let mut value = given.clone();
             for name in placeholders(given) {
-                if !valid_secret_name(name) {
-                    return Err(permanent(format!("{{{{{name}}}}} is not a secret name (^[A-Z][A-Z0-9_]*$)")));
-                }
-                // its hosts and its sealed value read in one statement, so
-                // the value opened is the one those hosts were set with
-                let stored = self
-                    .stored_secret(name)
-                    .map_err(|e| StepFail::Retry(e.message))?
-                    .ok_or_else(|| permanent(format!("no secret named {name} (set it with `fragment secret set <fragment> {name} --to <the API's host>`)")))?;
-                fragment_core::secrets::may_fill(&stored.hosts, &url, self.cfg.egress_local).map_err(|why| permanent(why.message(name)))?;
-                let secret = self.open_secret(name, &stored.sealed).await.map_err(|e| StepFail::Retry(e.message))?;
-                let secret = String::from_utf8(secret).map_err(|_| permanent(format!("secret {name} is not UTF-8 text")))?;
+                let secret = self.fill(name, &url).await?;
                 value = value.replace(&format!("{{{{{name}}}}}"), &secret);
             }
             headers.set(k, &value).map_err(|e| permanent(format!("header {k}: {e}")))?;
         }
+        // the URL's own: checked against its host as it stands, then filled
+        let mut opened = BTreeMap::new();
+        for name in &in_url {
+            opened.insert(name.clone(), self.fill(name, &url).await?);
+        }
+        let url = fragment_core::secrets::fill_url(&url, |name| opened.get(name).cloned().ok_or_else(|| format!("{{{{{name}}}}} unopened"))).map_err(|why| match why {
+            fragment_core::secrets::UrlUnfilled::Value(why) => permanent(why),
+            fragment_core::secrets::UrlUnfilled::Moved => permanent("a secret's value would change where this fetch goes (its host, or its path's segments or query's parameters): it is not sent"),
+        })?;
+        // what a failure says names the URL's secrets as the job wrote them
+        let redact = |message: String| opened.iter().fold(message, |m, (name, secret)| m.replace(&fragment_core::secrets::url_encoded(secret), &format!("{{{{{name}}}}}")).replace(secret.as_str(), &format!("{{{{{name}}}}}")));
         if !matches!(method, Method::Get | Method::Head) && !f.headers.keys().any(|k| k.eq_ignore_ascii_case(IDEMPOTENCY_HEADER)) {
             let key = format!("{}-s{index}", self.run_key(run.id).map_err(|e| StepFail::Retry(e.message))?);
             headers.set(IDEMPOTENCY_HEADER, &key).map_err(|e| permanent(e.to_string()))?;
@@ -980,10 +999,10 @@ impl FragmentCell {
             }
             init.with_body(Some(JsValue::from_str(&body)));
         }
-        let req = Request::new_with_init(url.as_str(), &init).map_err(|e| permanent(e.to_string()))?;
+        let req = Request::new_with_init(url.as_str(), &init).map_err(|e| permanent(redact(e.to_string())))?;
         let host = url.host_str().unwrap_or("").to_string();
         let max = limits::FETCH_RESPONSE_MAX_BYTES;
-        let answer = crate::cs::fetch_all(req, Duration::from_millis(limits::FETCH_TIMEOUT_MS), max).await.map_err(|e| StepFail::Retry(format!("{host}: {}", e.message)))?;
+        let answer = crate::cs::fetch_all(req, Duration::from_millis(limits::FETCH_TIMEOUT_MS), max).await.map_err(|e| StepFail::Retry(redact(format!("{host}: {}", e.message))))?;
         let status = answer.status;
         if status == 429 || status >= 500 {
             return Err(StepFail::Retry(format!("{host} answered {status}")));
