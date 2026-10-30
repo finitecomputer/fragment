@@ -39,6 +39,7 @@ mod limits;
 mod members;
 mod migrations;
 mod notes;
+mod org_fragments;
 mod orgs;
 mod plane;
 mod posts;
@@ -122,6 +123,7 @@ const LANES: &[Lane] = &[
     orgs::orgs,
     billing::billing,
     governance::governance,
+    org_fragments::org_fragments,
     billing::billing_page,
     trials::trials,
     admin::admin,
@@ -166,7 +168,7 @@ pub const SHARDS: [&[&str]; 4] = [
     &["facet-cap", "app-lockdown", "site", "watch", "icons", "schemas", "channels", "live", "routes", "cli", "browser", "jobs", "triggers", "finite-private", "chat"],
     &[
         "auth", "create", "lockdown", "keys", "members", "identities", "signin", "levers", "secrets", "delegation", "files", "deploy", "templates", "share", "faces", "isolation", "frames",
-        "ops", "public", "effects", "appfiles", "blobs", "notes", "brain", "doc", "push", "ai", "ledger", "transcribe", "orgs", "billing", "governance", "billing-page", "trials", "admin", "admin-page",
+        "ops", "public", "effects", "appfiles", "blobs", "notes", "brain", "doc", "push", "ai", "ledger", "transcribe", "orgs", "billing", "governance", "org-fragments", "billing-page", "trials", "admin", "admin-page",
     ],
 ];
 

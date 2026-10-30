@@ -2428,7 +2428,8 @@ leaves with no one or no admin, and cancels what they pay for
 An org's content is apart from its billing (`fragment_core::governance`;
 the registry's `org_content`): a seat or a billing admin's place gives
 none of it, and a seatless person may hold it. Its people (`ContentPerson
-{person, email?, admin, since}`) are in by their own yes, and its
+{person, email?, epoch, active, admin, since}`) are in by their own yes,
+to an admin's place or an invite to one of its fragments, and its
 **content admins** govern it. Each is a person acting as themselves (an
 agent is 403), and every change is in the org's **governance log** with
 it, in one transaction: an entry names offers and people by id, never an
@@ -2445,8 +2446,14 @@ platform's own, and a replay answers as its first did.
 - **Offers end.** An offer is withdrawn by the org's admins, or expires
   after 7 days. A person stepping down, stepped down or wiped takes their
   waiting offers with them, made or received.
-- **The last admin stays.** Stepping down never leaves the org with no
-  content admin (409).
+- **The last admin stays.** Stepping down and offboarding never leave
+  the org with no content admin (409).
+- **Offboarding** raises the person's epoch and makes them inactive at
+  once: their membership in every one of the org's fragments counts no
+  more from their next request (An org's fragments, below), before
+  anything there is cleaned up, and an invite or an offer made before it
+  admits them no more. Coming back is a new yes, at the raised epoch.
+  Offboarding deletes, exports and transfers nothing (decision 70).
 - **It outlives its billing.** An org with anyone in its content is never
   dropped when its subscription ends and its seats go; one dropped with no
   one in it takes its offers with it. A person's wipe makes them an admin
@@ -2462,9 +2469,45 @@ platform's own, and a replay answers as its first did.
 | `POST /api/orgs/{org}/content-admin-offers/{offer}/decline` | the same | `{}` or none → `ContentOffer`; accepted before, 409 |
 | `DELETE /api/orgs/{org}/content-admin-offers/{offer}` | its content admins | → `ContentOffer`, `answer: withdrawn` (again, the same); answered or expired, 409 or 404 |
 | `DELETE /api/orgs/{org}/content-admins/{person}` | the same | → `ContentPerson`: an admin no more, still in its content, their waiting offers withdrawn (one who is none: as they are). The last admin is 409 |
+| `POST /api/orgs/{org}/offboard` | the same | `Offboard {id, person, expectedEpoch}` → `ContentPerson`: out at once, at the next epoch, their waiting offers withdrawn, once by `id` (a replay answers as the first did). An epoch not theirs now is 409 (read the content again); the last admin, 409; someone not in it, 404 |
 | `GET /api/orgs/{org}/content?before=` | the same | → `OrgContent {org, people, offers, log: [GovernanceEntry {seq, at, actor, action, subject?, request, detail}], next?}`: the offers waiting, and the log newest first, 100 a page (`before` a number, or 400) |
 | `POST /api/admin/orgs/{org}/content-admin-offers` | the deployment's operators, while it has no content admin | `NewContentAdmin` → `ContentOffer`, logged as theirs there and in the operators' log in the same change; never refused for offers waiting; with an admin, 403 |
 | `GET /api/admin/orgs/{org}/content?before=` | the same | → `OrgContent` |
+
+### An org's fragments (decisions 66 to 71)
+
+A fragment is owned by a person or by an org: its `ownership` row, which
+status names (`ownerRef: {kind: person | org, id}`; `owner`, as before, a
+person's npub or `org:<id>`). An org's fragment is the org's to pay for:
+its hosting, storage, cards, icons and its own AI steps bill the org's
+ledger (Ledger, above), every AI step there meets its $5 cap and the
+org's budget, whoever starts it (its admins too), and no one changes its
+cap (403). A person's agent working in it bills that person (decision
+67). It is never an agent, a chat or skills, which stay a person's.
+
+- **Its content admins administer it,** each as themselves (an agent:
+  403): its members, invites, visibility, share link and subscriptions,
+  and its delete (decision 70). This is a capability apart from any role:
+  one who is no member reads none of it until they give themselves
+  access (`PUT …/members/<their npub>`), which its events show.
+- **Its members count at their org epoch.** A person comes in by their
+  yes to an invite, which enrolls them in the org's content (one from
+  before they last left admits them no more, 403); a content admin adds
+  themselves or their own agents at once; a person's agents come in at
+  their epoch. A member row counts only while their place in the org's
+  content is at its epoch, as the registry answers each request (an
+  agent's, its owner's): an offboarding fences them at their next
+  request, a socket at its next frame after its minute's re-check, before
+  their rows are cleaned up. An agent there acts `for` its own person
+  alone.
+- **No storage token.** A token writes the repo for its 15 minutes
+  whatever happens to its holder, so an org's fragment hands out none
+  (403): its files change through the platform's own routes.
+
+| method & path | who | body → answer |
+| --- | --- | --- |
+| `POST /api/orgs/{org}/fragments` | its content admins, each as themselves | a create's body (Fragments, above; `members` unless named) → `Created`, `owner: org:<id>`: the org's, made only while its ledger takes writes (funded: 402 otherwise), its maker an editor at their epoch |
+| `GET /api/orgs/{org}/fragments` | its content admins | → `FragmentList`: its inventory, the org's own list (a person's is theirs), each row its owner's, with its sharing |
 
 ### Billing (docs/billing.md, "Stripe" and "Trials")
 

@@ -19,7 +19,9 @@ is the wire contract. It replaced the OpenRouter-backed ledger and
   - an agent's model calls, operator-key calls and compute bill the
     agent's owner;
   - a fragment's hosting (requests, storage, dynamic workers,
-    screenshots) and its AI steps bill the fragment's owner.
+    screenshots) and its AI steps bill the fragment's owner: a person,
+    or an org (its fragment's rows go to `org:<id>`, an agent's turns
+    there to the agent's own owner).
 - **An org's ledger** (decisions 66 to 68; `fragment_core::ledger::org`)
   holds the credit the org bought (its own $25 packs) or an operator
   gave it, and nothing else: no plan, seat, included credit or default
