@@ -328,7 +328,7 @@ pub(crate) async fn admin(mut req: Request, env: &Env, cfg: &Config, url: &Url, 
             );
             let mail = crate::mail::Mail { to: send.email.trim().to_ascii_lowercase(), subject: format!("Try {PRODUCT}"), text };
             crate::mail::send(env, cfg, &mail).await?;
-            ask_registry(env, &admin::Note { by, action: "trial-send".into(), target: code.id.clone(), detail: format!("to {}", mail.to) }).await?;
+            ask_registry(env, &admin::Note { by, action: "trial-send".into(), target: code.id.clone(), detail: format!("to {}", mail.to), request: None }).await?;
             json_answer(&serde_json::json!({ "sent": true, "to": mail.to }))
         }
         // the recovery of an org with no content admin (a sole admin's
@@ -387,7 +387,7 @@ async fn pin(env: &Env, by: &str, person: &str, bytes: &[u8]) -> CellResult<serd
         ErrorCode::NotFound => CellError::new(ErrorCode::NotFound, format!("{person} has no computer yet")),
         _ => e,
     })?;
-    ask_registry(env, &admin::Note { by: by.to_string(), action: "pin".into(), target: person.to_string(), detail: image }).await?;
+    ask_registry(env, &admin::Note { by: by.to_string(), action: "pin".into(), target: person.to_string(), detail: image, request: None }).await?;
     Ok(view)
 }
 

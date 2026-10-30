@@ -5,6 +5,21 @@ Each entry names where it was observed, the risk, the first proof that
 would show it biting, and the condition that deletes it. An entry
 without a delete condition is unfinished design, not debt.
 
+## A paid org pack is still credited, though none is sold
+
+- **Observed:** #736 review, 2026-10-30: orgs now pay out of band and an
+  operator credits them (decision 66), so no org pack is opened any more.
+  But preview sold one in Stripe's sandbox from #716 until #736 deployed.
+- **Shortcut:** `pack_paid` (`cell/src/billing.rs`) still grants a
+  Checkout whose `fragment_payer` names its org's ledger, once by its
+  Checkout, so one paid after that deploy (its return, or a webhook
+  Stripe sends again) is credited and not lost.
+- **Risk:** none beyond the read: nothing opens such a Checkout.
+- **First proof:** a webhook for such a Checkout that fails its grant
+  (Stripe's dashboard shows it retried).
+- **Delete when:** three days (Stripe's retries) have passed since #736
+  deployed to preview; a Checkout itself expires after 31 minutes.
+
 ## Hermes' explicit auxiliary vision overrides native image routing
 
 - **Observed:** #505 and the decision 65 probe (2026-10-29): all four

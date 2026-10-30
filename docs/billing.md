@@ -148,12 +148,15 @@ create trial codes, etc." The Stripe account is finite-mono's.
   credit stays each holder's.
 - **Operators fund it.** Orgs pay out of band (a Stripe link, an invoice;
   Paul, 2026-10-30): an operator credits it (`fragment operator credit
-  <org> <usd> --why …`, `POST /api/ledger/org:<id>/grant`), sets its
+  <org> <usd> --why … --id <reference>`, the invoice's or payment's, so a
+  retry credits it once; `POST /api/ledger/org:<id>/grant`), sets its
   monthly budget (`fragment operator budget`, `…/budget`), past which its
-  fragments' AI steps stop (zero until set), each once by its id and in
-  the operators' log, and names the person its credit is invoiced to
-  (`fragment operator payer`), in its governance log. Its overdraft is
-  zero. Orgs buy no credit and set no budget themselves yet.
+  fragments' AI steps stop (zero until set), and names the person its
+  credit is invoiced to (`fragment operator payer`). Each is done and
+  logged once by its id, in its governance log and the operators' log.
+  Its overdraft is zero. Orgs buy no credit and set no budget themselves
+  yet. A pack of an org's own opened while one was sold (preview, until
+  2026-10-30) still credits it, paid (the debt ledger).
 - **Its billing admins** read it (`GET /api/orgs/<org>/ledger`).
 - **Nothing of it is a content power.** Reading or funding an org's
   ledger lets no one into its fragments (decision 69).
@@ -162,9 +165,9 @@ create trial codes, etc." The Stripe account is finite-mono's.
 
 An org's content admins and its governance log are the registry's, apart
 from `org_members` (docs/api.md, Org content). An org with anyone in its
-content is never dropped when its subscription ends and its seats go
-(`drop_if_empty`; one dropped with no one in it takes its offers with
-it), and a person's wipe makes them an admin no more there rather than
+content, or that an operator credited or named a payer for, is never
+dropped when its subscription ends and its seats go (`drop_if_empty`;
+its credit is never stranded, and one dropped takes its offers with it), and a person's wipe makes them an admin no more there rather than
 taking the org with them; an org left with no content admin waits on an
 operator's recovery offer, logged.
 

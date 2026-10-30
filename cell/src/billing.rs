@@ -5,7 +5,8 @@
 //! taken from what it was handed; the registry keeps the copy
 //! (registry/billing.rs) and pushes what it means to each holder.
 
-use fragment_core::stripe::{self as core_stripe, CheckoutSession, Event, Form, List, Price, Subscription, META_BUYER, META_DEPLOYMENT, META_KIND, META_ORG, META_PACK, META_PERSON};
+use fragment_core::ledger::org::Payer;
+use fragment_core::stripe::{self as core_stripe, CheckoutSession, Event, Form, List, Price, Subscription, META_BUYER, META_DEPLOYMENT, META_KIND, META_ORG, META_PACK, META_PAYER, META_PERSON};
 use fragment_proto::ledger::GrantCredit;
 use fragment_proto::org::{MySeat, SeatKind};
 use fragment_proto::{limits, ErrorCode};
@@ -198,12 +199,19 @@ async fn pack(env: &Env, cfg: &Config, by: By, member: Option<String>) -> CellRe
     Ok(Checkout { url, session: session.id })
 }
 
-/// A paid pack's credit on its person's ledger, once by its Checkout.
+/// A paid pack's credit on its person's ledger, once by its Checkout; or
+/// on its org's, a pack of an org's own opened while orgs bought them
+/// (preview, 2026-10-30), so one paid since is credited still (the debt
+/// ledger).
 async fn pack_paid(env: &Env, session: &CheckoutSession) -> CellResult<bool> {
-    let person = session.metadata.get(META_PERSON).ok_or_else(|| CellError::host(format!("{} has no {META_PERSON}", session.id)))?;
-    if !fragment_core::npub::is_identity(person) {
-        return Err(CellError::host(format!("{}'s {META_PERSON} is no identity", session.id)));
-    }
+    let person = match (session.metadata.get(META_PAYER), session.metadata.get(META_PERSON)) {
+        (Some(org), None) => match (Payer::parse(org), session.metadata.get(META_ORG)) {
+            (Some(Payer::Org(id)), Some(named)) if id == *named => org,
+            _ => return Err(CellError::host(format!("{}'s {META_PAYER} is no ledger of its org", session.id))),
+        },
+        (None, Some(person)) if fragment_core::npub::is_identity(person) => person,
+        _ => return Err(CellError::host(format!("{} names no person and no org to grant", session.id))),
+    };
     let grant = GrantCredit {
         id: format!("pack:{}", session.id),
         micros: core_stripe::PACK_MICROS,
