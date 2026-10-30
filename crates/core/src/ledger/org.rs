@@ -1,13 +1,13 @@
 //! An org's ledger (docs/cloudflare-v1.md, decisions 66 to 68): credit
-//! the org bought (its own $25 packs) or an operator gave it, which pays
+//! an operator gave it (orgs pay out of band: Paul, 2026-10-30), which pays
 //! for the fragments it owns: their hosting, storage and AI steps. It has
 //! none of a person's plan, seat, included credit or overdraft, and pays
 //! for no agent's turn and no computer: a person's agents bill that
 //! person, in an org's fragment too (decision 67).
 //!
 //! Its overdraft is zero: at a balance of zero its fragments are
-//! read-only until credit arrives. Its billing admins set a monthly
-//! budget, zero until they do; once its fragments' charges this month
+//! read-only until credit arrives. An operator sets its monthly budget,
+//! zero until they do; once its fragments' charges this month
 //! reach it, their AI steps stop until a larger one or the next month
 //! (hosting is still metered: a budget stops what starts, as a cap does).
 //! Every AI step in its fragments meets the fragment's cap as well: an
@@ -59,7 +59,7 @@ impl Payer {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct OrgTerms {
     /// What its fragments may be charged a month before their AI steps
-    /// stop: zero until its billing admins set one.
+    /// stop: zero until an operator sets one.
     budget: i64,
 }
 
@@ -163,7 +163,7 @@ impl Ledger {
         }
     }
 
-    /// An org's monthly budget, from its billing admins.
+    /// An org's monthly budget, from an operator.
     pub fn set_budget(&mut self, store: &mut impl Store, c: &OrgBudget, now_ms: i64) -> Result<(), Refused> {
         if self.org.is_none() {
             return Err(Refused::OrgsOnly);
