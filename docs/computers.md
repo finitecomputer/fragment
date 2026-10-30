@@ -832,10 +832,11 @@ expires within 30 days. The container application is the deployment's
     its protocol only from one (measured on a preview computer,
     2026-10-25), so a computer reaches SimpleX's file servers only through
     this: the Worker's `connect()`, which nothing inspects, carries them
-    (the shim's `ComputerEgress`, entry.mjs `relay`). Only the hosts and
-    port the guest view's `relay` names (SimpleX's and Flux's preset XFTP
-    servers, `relay::HOSTS`, on 443; 403 for any other, and 400 without
-    an upgrade), at most `relay::OPEN_MAX` (4) open at once per computer
+    (the shim's `ComputerEgress`, entry.mjs `relay`). Only the targets
+    the guest view's `relayTargets` names, its `relay` those on 443 (the
+    deployment's connector policy, below; by default SimpleX's and Flux's
+    preset XFTP servers, `relay::HOSTS`, on 443; 403 for any other, and
+    400 without an upgrade), at most `relay::OPEN_MAX` (4) open at once per computer
     and `relay::DAY_BYTES_MAX` (2 GiB) a UTC day (429 past either), each
     closed with code 4008 past its allowance (`relay::BYTES_MAX`, 32 MiB
     both ways together, or what is left of the day's budget past what the
@@ -2818,3 +2819,21 @@ for a host) and finds the same `HOME`, `~` and modes.
   hosted `agent-smoke` checks that its chat's agent's screen is the one
   served: the RFB stream's desktop is that agent's (`hermes:<profile>`),
   the page names it, and another agent's is refused.
+
+### Connector policy
+
+The deployment's `connectors` (its config; `FRAGMENT_CONNECTORS`, checked
+by `fragment_core::connectors::Policy`) name the doors its people may open
+and the exact endpoints a computer's relay carries for each: `[{id,
+relayTargets: [{host, port}]}]`, each target an exact public DNS name on a
+nonzero port (no wildcard, IP, local or internal name, or suffix). Absent,
+the cell's default: `simplex`, with `relay::HOSTS` on 443. `[]` is the
+kill switch: no door is linked, redeemed or checked, and no relay opens;
+an owner may still unlink. A computer's relay offer (`relayTargets`, and
+`relay` for the 443 ones) and its relay admission read the same policy,
+for the connectors its agents are allowed; the relay's bounds stay the
+computer's, whichever connector a relay is for.
+
+`Policy::authorize(owner, agent, connector, action)` is the one decision
+every door and relay asks; org policy will intersect there. An image's
+own declarations grant nothing.

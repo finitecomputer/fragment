@@ -475,6 +475,19 @@ impl FragmentCell {
                 self.set_meta(key, &times.to_string())?;
                 json!({ "ok": true })
             }
+            Some("connectors") => {
+                // its doors' connector policy in place of the deployment's
+                // (runs_on.rs `door_allowed`); null gives the deployment's back
+                match &body["policy"] {
+                    Value::Null => self.del_meta(MetaKey::TestConnectors)?,
+                    p => {
+                        let raw = p.to_string();
+                        fragment_core::connectors::Policy::parse(&raw).map_err(|e| CellError::invalid(format!("policy: {e}")))?;
+                        self.set_meta(MetaKey::TestConnectors, &raw)?;
+                    }
+                }
+                json!({ "ok": true })
+            }
             Some("cards") => {
                 // the card and its schedule (card.rs), and the shots the lever still fails
                 let left: u64 = self.meta(MetaKey::TestFailCards)?.and_then(|n| n.parse().ok()).unwrap_or(0);
