@@ -1200,5 +1200,58 @@ pub fn browser(s: &mut Suite, api: &Api) -> Result<()> {
     let calls = chrome.eval(&v, "performance.getEntriesByType('resource').filter((e) => e.name.includes('__op/list')).length")?;
     println!("      its page made {calls} HTTP calls to the query");
     s.ok("and asked the query over HTTP once, before its socket opened: every re-run went over the socket", calls == 1, format!("{calls} HTTP calls to list"));
+    deploying_call(s, api, &mut chrome)?;
     super::posts::browser(s, api, &mut chrome)
+}
+
+/// An app's call while a deploy goes out: the fragment's ask for its
+/// member's session is refused as another release's (the Registry's
+/// `skewFor` lever: the real refusal), so the call is 503 `deploying`. The
+/// browser library's error says "Updating — back in a moment", its code
+/// and status kept, the releases go to the console alone, and the same
+/// call again once the refusals stop is done, once. Local only: a
+/// preview's Registry is shared.
+fn deploying_call(s: &mut Suite, api: &Api, chrome: &mut crate::browser::Browser) -> Result<()> {
+    if api.signs_in_by_levers() {
+        return Ok(());
+    }
+    let (owner, session) = super::templates::person(api)?;
+    let name = s.named(api, &owner, "todo-deploying")?;
+    let c = s.create(api, &owner, &name)?;
+    let files: Vec<(&str, Option<&[u8]>)> = TODO_FILES.iter().map(|(p, b)| (*p, Some(*b))).collect();
+    s.commit(&c, &files);
+    s.deploy(&c);
+    let context = chrome.another_context()?;
+    chrome.set_cookie_in(&context, &format!("{}/", api.base), "fragment_session", &session)?;
+    let page = chrome.open_in(&context, &api.site_url(&name, "__signin?return=/"))?;
+    let here = chrome.until(&page, "document.getElementById('here')?.textContent === 'just you here'", Duration::from_secs(15));
+    let skew = |times: u64| -> Result<()> {
+        let r = api.unsigned("POST", "/api/test/registry", Some(&json!({ "skewFor": { "path": "/session", "times": times } })))?;
+        anyhow::ensure!(r.status == 200, "setting release skew: {r}");
+        Ok(())
+    };
+    // the library as the page has it, read before the refusals start
+    chrome.eval(&page, "(async () => { window.__fragment = await import('./__fragment.js'); return true; })()")?;
+    let add = "window.__fragment.call('add', { text: 'during a deploy' }, { id: 'during-a-deploy' })";
+    // the most the lever takes; the call needs four (the fragment asks again)
+    skew(100)?;
+    let refused = chrome.eval(&page, &format!("(async () => {{
+        const logged = [], info = console.info;
+        console.info = (...a) => {{ logged.push(a.join(' ')); info.apply(console, a); }};
+        try {{ await {add}; return {{ done: true, logged }}; }}
+        catch (e) {{ return {{ message: e.message, code: e.code, status: e.status, logged }}; }}
+        finally {{ console.info = info; }}
+    }})()"))?;
+    skew(0)?;
+    let again = chrome.eval(&page, &format!("{add}.then(() => 'done', (e) => e.message)"))?;
+    let r = api.op(&owner, &name, "list", "q", json!({}))?;
+    let once = r.body["result"]["todos"].as_array().map(|t| t.iter().filter(|t| t["text"] == "during a deploy").count()).unwrap_or(0);
+    let logged = refused["logged"].as_array().is_some_and(|l| l.iter().any(|t| t.as_str().is_some_and(|t| t.contains("reached release"))));
+    s.ok(
+        "an app's call refused as a deploy goes out says Updating, its code and status kept, the releases in the console alone; asked again, it is done once",
+        here && refused["message"] == "Updating — back in a moment" && refused["code"] == "deploying" && refused["status"] == 503 && logged && again == "done" && once == 1,
+        json!({ "here": here, "refused": refused, "again": again, "listed": once }),
+    );
+    chrome.close(page)?;
+    Ok(())
 }
