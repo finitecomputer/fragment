@@ -90,11 +90,14 @@ jobs:
         env:
           COPYFILE_DISABLE: 1
         run: tar -czf "$RUNNER_TEMP/fragment-${{ matrix.asset }}.tar.gz" -C "target/${{ matrix.target }}/release" fragment
+      # a build run again (re-running ci.yml's cli-plan runs these again,
+      # in the same run) replaces its own artifact
       - uses: actions/upload-artifact@v4
         with:
           name: fragment-${{ matrix.asset }}
           path: ${{ runner.temp }}/fragment-${{ matrix.asset }}.tar.gz
           retention-days: 7
+          overwrite: true
 
   release:
     needs: build
@@ -104,8 +107,12 @@ jobs:
       group: cli-release
       cancel-in-progress: false
     steps:
+      # the builds' artifacts alone: called, this is ci.yml's run, whose
+      # own artifacts (tested-tree-*, a failed shard's e2e-scratch-*, which
+      # holds directories) are never a release's assets
       - uses: actions/download-artifact@v4
         with:
+          pattern: fragment-*
           path: dist
           merge-multiple: true
       - name: attach
@@ -115,6 +122,17 @@ jobs:
           CALLED_TAG: ${{ inputs.tag }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
+          # exactly the four tarballs the install fetches, each of
+          # `fragment` alone, or nothing is published; uploaded by name
+          assets=(dist/fragment-Darwin-arm64.tar.gz dist/fragment-Darwin-x86_64.tar.gz dist/fragment-Linux-x86_64.tar.gz dist/fragment-Linux-aarch64.tar.gz)
+          found=$(find dist -mindepth 1 | sort)
+          if [ "$found" != "$(printf '%s\n' "${assets[@]}" | sort)" ]; then
+            echo "::error::dist holds ${found//$'\n'/ }, not the four tarballs, so nothing is published"
+            exit 1
+          fi
+          for asset in "${assets[@]}"; do
+            [ "$(tar -tzf "$asset")" = fragment ] || { echo "::error::$asset is not a tarball of fragment alone, so nothing is published"; exit 1; }
+          done
           notes=() target=()
           if [ -n "$CALLED_TAG" ]; then
             # never another release's tag: one taken since the plan (a hand
@@ -129,9 +147,9 @@ jobs:
             notes=(--notes "The CLI of production's deploy of $SHA ($RUN_URL).") target=(--target "$SHA")
           fi
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release upload "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --clobber
+            gh release upload "$TAG" "${assets[@]}" --repo "$GITHUB_REPOSITORY" --clobber
           else
-            gh release create "$TAG" dist/* --repo "$GITHUB_REPOSITORY" "${target[@]}" \
+            gh release create "$TAG" "${assets[@]}" --repo "$GITHUB_REPOSITORY" "${target[@]}" \
               --title "fragment $TAG" --generate-notes "${notes[@]}"
           fi
           # published, and the latest: the install command fetches from releases/latest

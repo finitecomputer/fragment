@@ -579,12 +579,26 @@ fn skill_installs_release(skill: &str, workflow: &str, copies: &[(&str, String)]
 /// FRAGMENT_CLI_VERSION, which the CLI's `VERSION` reads: cli/src/main.rs).
 /// A side renamed alone would publish nothing after a deploy, or binaries
 /// that say Cargo.toml's version, and only a release would say so.
+///
+/// Called, the release runs in ci.yml's run, whose artifacts are its too:
+/// it downloads its builds' alone (`fragment-*`, a name no artifact of
+/// ci.yml's takes) and publishes the four tarballs the install fetches by
+/// name, never what else `dist` holds (a tested tree's record, a failed
+/// shard's scratch, which holds directories and breaks the upload).
 fn release_follows_production(workflow: &str, ci: &str, cli_main: &str) -> Result<()> {
     anyhow::ensure!(workflow.contains("\n  workflow_call:\n"), "release.yml is callable (workflow_call), as production's deploy calls it");
     anyhow::ensure!(ci.contains("    uses: ./.github/workflows/release.yml\n"), "ci.yml's cli-release calls release.yml");
     let build = r#"FRAGMENT_CLI_VERSION="${TAG#v}" cargo build --release -p fragment-cli"#;
     anyhow::ensure!(workflow.contains(build), "release.yml builds the tag's version in: {build}");
     anyhow::ensure!(cli_main.contains(r#"option_env!("FRAGMENT_CLI_VERSION")"#), "cli/src/main.rs reads its version from FRAGMENT_CLI_VERSION");
+    let download = "      - uses: actions/download-artifact@v4\n        with:\n          pattern: fragment-*\n";
+    anyhow::ensure!(workflow.contains(download) && workflow.matches("actions/download-artifact@").count() == 1, "release.yml downloads its builds' artifacts alone: pattern: fragment-*");
+    let taken: Vec<&str> = ci.lines().map(str::trim).filter(|l| l.starts_with("name: fragment-")).collect();
+    anyhow::ensure!(taken.is_empty(), "ci.yml names {taken:?}, which a release it calls would take for its builds' (fragment-*)");
+    anyhow::ensure!(!workflow.contains("dist/*"), "release.yml publishes the four tarballs by name, never dist/*");
+    for (_, asset) in RELEASE_ASSETS {
+        anyhow::ensure!(workflow.contains(&format!("dist/fragment-{asset}.tar.gz")), "release.yml publishes dist/fragment-{asset}.tar.gz by name");
+    }
     Ok(())
 }
 
@@ -650,8 +664,10 @@ mod tests {
     }
 
     /// The repo's own workflows and CLI agree; a release that is not
-    /// callable, a deploy that calls none, or a version renamed on one side
-    /// alone does not.
+    /// callable, a deploy that calls none, a version renamed on one side
+    /// alone, or a release that would publish its caller's artifacts (an
+    /// unfiltered download, `dist/*`, an asset not named, a ci.yml artifact
+    /// its pattern takes) does not.
     #[test]
     fn production_releases_the_cli() {
         let read = |path: &str| std::fs::read_to_string(super::devstack::repo_root().join(path)).unwrap();
@@ -661,6 +677,13 @@ mod tests {
         assert!(super::release_follows_production(&workflow, &ci.replace("uses: ./.github/workflows/release.yml", "uses: ./.github/workflows/build.yml"), &cli).is_err());
         assert!(super::release_follows_production(&workflow.replace("FRAGMENT_CLI_VERSION=", "CLI_VERSION="), &ci, &cli).is_err());
         assert!(super::release_follows_production(&workflow, &ci, &cli.replace("\"FRAGMENT_CLI_VERSION\"", "\"CLI_VERSION\"")).is_err());
+        // what a release called by ci.yml publishes: its builds' alone
+        assert!(super::release_follows_production(&workflow.replace("          pattern: fragment-*\n", ""), &ci, &cli).is_err(), "every artifact of the caller's run");
+        assert!(super::release_follows_production(&workflow.replace("pattern: fragment-*", "pattern: '*'"), &ci, &cli).is_err());
+        assert!(super::release_follows_production(&workflow.replace(r#""${assets[@]}" --repo"#, "dist/* --repo"), &ci, &cli).is_err(), "whatever dist holds");
+        assert!(super::release_follows_production(&workflow.replace(" dist/fragment-Linux-aarch64.tar.gz", ""), &ci, &cli).is_err(), "an asset the install fetches, left out");
+        let scratch = ci.replace("name: e2e-scratch-${{ matrix.shard }}", "name: fragment-scratch-${{ matrix.shard }}");
+        assert!(super::release_follows_production(&workflow, &scratch, &cli).is_err(), "an artifact of ci.yml's the pattern would take");
     }
 
     #[test]
