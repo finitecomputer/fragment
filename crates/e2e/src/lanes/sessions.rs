@@ -64,11 +64,14 @@ fn export_with(root: &Path, later: bool) -> Result<()> {
 /// Goal: the person's Session Archive shows in their shell, below their
 /// chats, its chats newest first, and one opens read-only in the middle
 /// column in a chat's look, the agent's steps folded away; the archive's
-/// own list folds its scheduled runs away. Method: an export imported
-/// with the real CLI, then the shell in Chrome as its person, at Settings
-/// (the sidebar, with no first agent to make).
+/// own list folds its scheduled runs away. Continue makes it a chat with
+/// their agent, its history first, which the chat shows and the agent is
+/// told at its first turn there (the stub's agent echoes what it is told),
+/// and the archive then offers that chat. Method: an export imported with
+/// the real CLI, the person's agent on a computer of theirs (the stub),
+/// then the shell in Chrome as its person, at Settings.
 pub fn sessions_ui(s: &mut Suite, api: &Api) -> Result<()> {
-    if !s.section("sessions-ui", &[crate::Need::Fakes, crate::Need::Levers, crate::Need::Chrome]) {
+    if !s.section("sessions-ui", &[crate::Need::Fakes, crate::Need::Levers, crate::Need::Chrome, crate::Need::LocalDocker]) {
         return Ok(());
     }
     let Some(mut b) = s.browser()? else {
@@ -85,6 +88,16 @@ pub fn sessions_ui(s: &mut Suite, api: &Api) -> Result<()> {
     export(&root)?;
     let imported = s.cli_json(api, &home, &["session", "import", root.to_str().expect("utf-8 path"), "--json"])?;
     let name = imported["archive"].as_str().unwrap_or("").to_string();
+    // their agent, on a computer of theirs (the stub, which echoes)
+    let r = api.signed(&keys, "POST", "/api/computers", Some(&json!({})))?;
+    let computer = r.body["computer"].as_str().unwrap_or("").to_string();
+    let agent_name = s.named(api, &keys, "juniper")?;
+    let agent = s.create(api, &keys, &agent_name)?;
+    s.commit(&agent, &[("fragment.json", Some(super::computers::AGENT_JSON))]);
+    s.deploy(&agent);
+    let r = api.signed(&keys, "PUT", &format!("/api/computers/{computer}/agents/{agent_name}"), Some(&json!({})))?;
+    let identity = r.body["agents"][0]["identity"].as_str().unwrap_or("").to_string();
+    anyhow::ensure!(fragment_core::npub::is_identity(&identity), "the agent on its computer: {r}");
     let session = api.sign_in(&crate::cli_email(&fragment_core::npub::encode(keys.pubkey_hex()))?)?;
     b.set_cookie(&format!("{}/", api.base), "fragment_session", &session)?;
     let page = b.open(&format!("{}/settings", api.base))?;
@@ -121,6 +134,53 @@ pub fn sessions_ui(s: &mut Suite, api: &Api) -> Result<()> {
         b.eval_in_frame(&page, &name, "document.body.innerText.slice(0, 300)").unwrap_or_default(),
     );
     b.screenshot(&page, &shots.join("list.png"))?;
+
+    // Continue: a chat with their agent, its history first
+    b.click(&page, "#archive-rows [data-key=\"archived:hermes-e2e_beans\"]")?;
+    let offered = s.eventually(wait, || b.eval_in_frame(&page, frame, "document.querySelector('.archive-continue:not([hidden])')?.textContent === 'Continue'").is_ok_and(|v| v == true));
+    b.eval_in_frame(&page, frame, "(document.querySelector('.archive-continue').click(), true)")?;
+    let me = api.identity(&keys)?;
+    let mut chat = String::new();
+    let made = s.eventually(wait, || {
+        let listed = api.signed(&keys, "GET", "/api/fragments", None).map(|r| r.body).unwrap_or_default();
+        chat = listed["fragments"].as_array().into_iter().flatten().find(|f| f["kind"] == "chat" && f["title"] == "Beans").and_then(|f| f["name"].as_str()).unwrap_or("").to_string();
+        !chat.is_empty()
+    });
+    // the shell posts the history as it makes the chat: its first record once there
+    let mut first = Value::Null;
+    s.eventually(wait, || {
+        first = super::jobs::records(api, &keys, &chat, "chat").into_iter().next().unwrap_or_default();
+        !first.is_null()
+    });
+    let tail: Vec<&str> = first["body"]["messages"].as_array().into_iter().flatten().filter_map(|m| m["text"].as_str()).collect();
+    s.ok(
+        "Continue makes a chat with the person's agent, titled as the conversation, whose first record is its history, theirs",
+        offered && made && first["body"]["kind"] == "history" && first["principal"] == me.as_str() && tail == ["plant beans?", "in spring"] && first["body"]["key"] == "hermes-e2e_beans",
+        &first,
+    );
+    let shown = s.eventually(wait, || b.eval_in_frame(&page, &chat, "document.querySelector('.history-block .history-head')?.textContent?.startsWith('From “Beans”') ?? false").is_ok_and(|v| v == true));
+    let opened = b.until(&page, &format!("[...document.querySelectorAll('#frames iframe')].find((f) => !f.hidden)?.dataset.fragment === {chat:?}"), wait);
+    s.ok("it opens in the middle column, its history shown above the chat", shown && opened, b.eval_in_frame(&page, &chat, "document.body.innerText.slice(0, 300)").unwrap_or_default());
+    b.screenshot(&page, &shots.join("continued.png"))?;
+
+    // the agent is told it at its first turn there
+    let said = api.signed(&keys, "POST", &format!("/api/f/{chat}/channels/chat"), Some(&json!({ "id": "first", "body": { "text": "and peas?" } })))?;
+    let mut reply = String::new();
+    let answered = s.eventually(std::time::Duration::from_secs(120), || {
+        reply = super::computers::agent_replies(&super::jobs::records(api, &keys, &chat, "chat"), &identity).first().and_then(|r| r["body"]["text"].as_str()).unwrap_or("").to_string();
+        !reply.is_empty()
+    });
+    s.ok(
+        "the agent is told what was said there at its first turn in the chat, as a note",
+        said.status == 200 && answered && reply.contains("(told: This chat goes on from a conversation your owner had with you before they moved here, “Beans”") && reply.contains("Your owner: plant beans?\nYou: in spring"),
+        &reply,
+    );
+
+    // the archive offers that chat now
+    let linked = api.signed(&keys, "GET", &format!("/api/f/{name}/file?path=continued/hermes-e2e_beans.json"), None)?;
+    b.click(&page, "#archive-rows [data-key=\"archived:hermes-e2e_beans\"]")?;
+    let again = s.eventually(wait, || b.eval_in_frame(&page, frame, "document.querySelector('.archive-continue:not([hidden])')?.textContent === 'Open the chat'").is_ok_and(|v| v == true));
+    s.ok("the archive keeps the chat it was continued in, and offers it", linked.body["chat"] == chat.as_str() && again, &linked.body);
     Ok(())
 }
 

@@ -1937,3 +1937,39 @@ async fn commands_and_quotes() {
     });
     bridge.stop().await;
 }
+
+/// Goal (docs/chat-records.md, "History"): a chat continued from its
+/// owner's Session Archive tells its agent what was said there, once, at
+/// its first turn in it, as the turn's read-only note; a `history` record
+/// anyone else posts tells nothing. Method: a chat whose first record is
+/// its owner's history, two messages; another chat whose history a member
+/// who is not the owner posted, one message.
+#[tokio::test]
+async fn a_continued_chat_is_told_its_history_once() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    let chat = fake.chat("beans", &["juniper"]);
+    let other = fake.chat("peas", &["juniper"]);
+    fake.add_member(&other, "npub1mallory", "editor");
+    let history = || json!({ "kind": "history", "title": "Beans", "archive": "sessions--k3x9", "key": "hermes-20261001_ab", "started_at": "2026-10-01T09:00:00.000Z",
+        "messages": [{ "role": "user", "text": "plant beans?" }, { "role": "assistant", "text": "in spring" }], "earlier": 0 });
+    fake.say(&chat, &person("paul"), history());
+    fake.say(&other, "npub1mallory", history());
+    let dir = support::dir("history");
+    let bridge = support::start(support::config(&fake.url(), &dir, support::settings()), support::script());
+    following(&fake, 3).await;
+    let first = said_and_ended(&fake, &chat, "and peas?").await;
+    let second = said_and_ended(&fake, &chat, "and corn?").await;
+    let elsewhere = said_and_ended(&fake, &other, "hello").await;
+    fake.with(|w| {
+        let text = |c: &str, turn: &str| replies(w, c).into_iter().find(|r| r["turn"] == turn).and_then(|r| r["text"].as_str().map(str::to_string)).unwrap_or_default();
+        let first = text(&chat, &first);
+        let note = first.strip_prefix("echo: [paul] and peas?\n\n(told: ").and_then(|n| n.strip_suffix(')')).unwrap_or_else(|| panic!("the first turn is told its history: {first:?}"));
+        for said in ["a conversation your owner had with you before they moved here, “Beans” (2026-10-01)", "sessions/hermes-20261001_ab.json", "Your owner: plant beans?\nYou: in spring"] {
+            assert!(note.contains(said), "{said:?} in {note}");
+        }
+        assert_eq!(text(&chat, &second), "echo: [paul] and corn?", "told once");
+        assert_eq!(text(&other, &elsewhere), "echo: [paul] hello", "a history not its owner's tells nothing");
+        assert!(w.bodies(&chat, "work", "turn.start").len() == 2, "a history starts no turn");
+    });
+    bridge.stop().await;
+}

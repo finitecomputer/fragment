@@ -94,7 +94,8 @@ export function createSessionArchive({
   async function continueSession(key) {
     const agent = primaryAgent();
     const fragment = agents().get(agent?.identity)?.fragment;
-    if (continuing || !read.name || !fragment) return;
+    if (continuing || !read.name) return;
+    if (!fragment) return notice("No agent yet", "Continue needs your agent.");
     continuing = true;
     try {
       const c = await api("GET", `/api/f/${seg(read.name)}/file?path=${encodeURIComponent(`sessions/${key}.json`)}`);
