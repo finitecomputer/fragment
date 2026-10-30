@@ -386,13 +386,17 @@ jobs:
   # Master follows one image, keyed by its inputs rather than its commit.
   # A registry tag preserves the digest across cache eviction and re-runs;
   # a changed cell or shell never builds a new image. Prepare it before
-  # deploy can start. This job never changes the running Worker.
+  # deploy can start. This job never changes the running Worker. The merge
+  # queue builds and prepares a group's image ahead (preview-image.yml),
+  # which this job copies to its input tag; it builds only when neither
+  # is there.
   preview-image:
     if: github.event_name == 'push' && github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     # Build/push plus prepare.rs's 40-minute preparation limit.
     timeout-minutes: 65
     permissions:
+      actions: read # the merge queue's image build of this commit, through the API
       contents: read
     environment: preview
     # Share the manual Image workflow's publication lock: two cold builds
@@ -424,10 +428,28 @@ jobs:
           path: target/tools
           key: node-${{ runner.os }}-${{ hashFiles('crates/devstack/src/node_release.rs') }}
       - run: command -v skopeo > /dev/null || { sudo apt-get update -q && sudo apt-get install -y -q skopeo; }
+      # A merge group's head is the commit master moves to, so the queue's
+      # image run for this very commit, when one is still going, is
+      # building these inputs: wait for it rather than build them beside
+      # it. It ends within its own 65 minutes; past 30, or if it failed,
+      # this job resolves and builds as it would without it.
+      - name: wait for the merge queue's image build of this commit
+        timeout-minutes: 30
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          run=$(gh api -X GET "repos/$GITHUB_REPOSITORY/actions/workflows/preview-image.yml/runs" -f head_sha="$GITHUB_SHA" -f event=merge_group -f per_page=1 --jq '.workflow_runs[0] // empty | "\(.id) \(.html_url)"')
+          [ -n "$run" ] || { echo "the merge queue built no image for $GITHUB_SHA"; exit 0; }
+          id=${run%% *}
+          echo "the merge queue's image run for $GITHUB_SHA: ${run#* }"
+          until [ "$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$id" --jq .status)" = completed ]; do sleep 15; done
+          echo "it ended: $(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$id" --jq .conclusion)"
       - id: probe
         run: |
           cargo xtask image preview --output "$RUNNER_TEMP/preview-image.json"
-          echo "build=$(jq -r '.digest == null' "$RUNNER_TEMP/preview-image.json")" >> "$GITHUB_OUTPUT"
+          echo "build=$(jq -r .build "$RUNNER_TEMP/preview-image.json")" >> "$GITHUB_OUTPUT"
       - id: buildx
         if: steps.probe.outputs.build == 'true'
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1

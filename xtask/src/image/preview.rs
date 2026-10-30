@@ -3,6 +3,13 @@
 //! evicted. Only a missing tag authorizes a build; registry errors fail.
 //! The workflow passes the digest alone between jobs: a reference that
 //! contains the masked account ID would be dropped as a secret output.
+//!
+//! The merge queue builds a group's image ahead of its master push
+//! (`--queue`, .github/workflows/preview-image.yml) under `queue-<key>`,
+//! never `inputs-<key>`: master's image job, one at a time, is the only
+//! writer of an input tag. It copies a queue build it finds by digest,
+//! so a later queue push to the same tag cannot change what it copies,
+//! and builds only when neither tag is there.
 
 use super::*;
 use std::path::Path;
@@ -23,59 +30,114 @@ const INPUTS: &[&str] = &[
 struct Resolution {
     key: String,
     digest: Option<String>,
+    /// Whether resolving needs an image built: neither master's input tag
+    /// nor the queue's is in the registry (a dry run asks nothing: true).
+    build: bool,
 }
 
-/// A probe writes the key and an existing digest, or null. `--build`
-/// fills a missing tag and waits for preparation before writing a digest
-/// the deploy can consume. No Worker, DNS or deploy config changes here.
+/// A probe writes the key, an existing input tag's digest or null, and
+/// whether a build is needed. `--build` reuses the input tag, or copies
+/// the queue's build to it, or builds it, and waits for preparation before
+/// writing a digest the deploy can consume. `--queue` reuses either tag or
+/// builds the queue's, and prepares it. No Worker, DNS or deploy config
+/// changes here.
 pub(super) fn run(args: &[String]) -> Result<()> {
-    let usage = || anyhow::anyhow!("usage: cargo xtask image preview --output <file> [--build | --dry-run] [--summary <file>]");
-    let (mut output, mut build, mut dry_run, mut summary) = (None, false, false, None);
+    let usage = || anyhow::anyhow!("usage: cargo xtask image preview --output <file> [--build | --queue | --dry-run] [--summary <file>]");
+    let (mut output, mut build, mut queue, mut dry_run, mut summary) = (None, false, false, false, None);
     let mut it = args.iter();
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--output" => output = Some(PathBuf::from(it.next().ok_or_else(usage)?)),
             "--build" => build = true,
+            "--queue" => queue = true,
             "--dry-run" => dry_run = true,
             "--summary" => summary = Some(PathBuf::from(it.next().ok_or_else(usage)?)),
             _ => return Err(usage()),
         }
     }
     let output = output.ok_or_else(usage)?;
-    anyhow::ensure!(!dry_run || (!build && summary.is_none()), "--dry-run cannot build or record a ready image summary");
+    anyhow::ensure!([build, queue, dry_run].iter().filter(|f| **f).count() <= 1, "--build, --queue and --dry-run are three ways to run: one at a time");
+    anyhow::ensure!(!dry_run || summary.is_none(), "--dry-run cannot build or record a ready image summary");
+    anyhow::ensure!(!queue || summary.is_none(), "--queue prepares an image ahead of its deploy: the master job's summary names it");
     // A failed retry must not leave a prior resolution for a caller to use.
     if output.exists() { fs::remove_file(&output)?; }
     let root = devstack::repo_root();
     let key = input_key(&root)?;
     if dry_run {
-        println!("preview image input key: {key}\nwould resolve {REGISTRY}/<account>/{REPOSITORY}:inputs-{key}; build only if absent, prepare before deploy, then pin both preview names at its digest (no requests made)");
-        fs::write(output, serde_json::to_vec(&Resolution { key, digest: None })?)?;
+        println!("preview image input key: {key}\nwould resolve {REGISTRY}/<account>/{REPOSITORY}:inputs-{key}, else copy the merge queue's queue-{key} to it, and build only if neither is there; prepare before deploy, then pin both preview names at its digest (no requests made)");
+        fs::write(output, serde_json::to_vec(&Resolution { key, digest: None, build: true })?)?;
         return Ok(());
     }
-    let req = parse(&[
+    let tagged = |prefix: &str| parse(&[
         "push".into(), "hermes".into(), "--repository".into(), REPOSITORY.into(),
-        "--tag".into(), format!("inputs-{key}"),
-    ], |name| std::env::var(name).ok())?;
+        "--tag".into(), format!("{prefix}-{key}"),
+    ], |name| std::env::var(name).ok());
+    let (inputs, queued) = (tagged("inputs")?, tagged("queue")?);
     let tools = devstack::Tools::locate()?;
-    let mut reference = existing(&req, &tools)?;
+    let found = existing(&inputs, &tools)?;
+    let prebuilt = if found.is_none() { existing(&queued, &tools)? } else { None };
+    if queue {
+        let reference = match found.or(prebuilt) {
+            Some(reference) => reference,
+            None => push(&queued, &tools)?,
+        };
+        println!("preview image inputs {key}: {reference}; preparing it on Cloudflare's network ahead of its master push");
+        prepare(&inputs, &reference)?;
+        let digest = Some(reference.split_once('@').expect("pinned").1.to_string());
+        fs::write(output, serde_json::to_vec(&Resolution { key, digest, build: false })?)?;
+        return Ok(());
+    }
+    let needs_build = found.is_none() && prebuilt.is_none();
+    let mut reference = found;
     if reference.is_none() && build {
-        reference = Some(push(&req, &tools)?);
+        reference = Some(match prebuilt {
+            Some(queued) => promote(&inputs, &queued, &tools)?,
+            None => push(&inputs, &tools)?,
+        });
     }
     if build {
-        let reference = reference.as_deref().expect("built or found the input-keyed image");
+        let reference = reference.as_deref().expect("reused, copied or built the input-keyed image");
         println!("preview image inputs {key}: {reference}; waiting for Cloudflare before allowing its preview deploy (the running preview is unchanged)");
-        let mut api = crate::cloudflare::Api::from_env(&req.account)?;
-        crate::prepare::until_ready(&mut api, &mut crate::prepare::Wall::new(), &[reference], crate::prepare::IMAGE_LIMIT)
-            .context("preview image is not ready: blocked this preview deploy before any Worker change; retry this job to reuse its input-keyed image")?;
+        prepare(&inputs, reference)?;
         if let Some(path) = summary {
             let mut file = fs::OpenOptions::new().create(true).append(true).open(path)?;
             writeln!(file, "### Preview image\n\nInputs: `{key}`\n\nDigest: `{}`\n\nReference: `{}`\n\nBoth `hermes` and `hermes-canary` use this image; production is pinned separately.\n",
-                reference.split_once('@').expect("pinned").1, reference.replace(&req.account, "<account>"))?;
+                reference.split_once('@').expect("pinned").1, reference.replace(&inputs.account, "<account>"))?;
         }
     }
     let digest = reference.as_deref().map(|r| r.split_once('@').expect("pinned").1.to_string());
-    fs::write(output, serde_json::to_vec(&Resolution { key, digest })?)?;
+    fs::write(output, serde_json::to_vec(&Resolution { key, digest, build: needs_build })?)?;
     Ok(())
+}
+
+/// Waits until Cloudflare has prepared `reference` on the account's
+/// network (prepare.rs): a deploy that pins it then starts it at once.
+fn prepare(req: &Request, reference: &str) -> Result<()> {
+    let mut api = crate::cloudflare::Api::from_env(&req.account)?;
+    crate::prepare::until_ready(&mut api, &mut crate::prepare::Wall::new(), &[reference], crate::prepare::IMAGE_LIMIT)
+        .context("preview image is not ready: blocked this preview deploy before any Worker change; retry this job to reuse its input-keyed image")
+}
+
+/// Tags the merge queue's build of these inputs as master's: a copy of
+/// its manifest within the repository (its layers are there already),
+/// read by its digest, so whatever the queue's tag names since cannot
+/// change what is copied. The input tag is read back and held to that
+/// digest. The reference the registry holds it at.
+fn promote(inputs: &Request, queued: &str, tools: &devstack::Tools) -> Result<String> {
+    let digest = queued.split_once('@').expect("pinned").1;
+    let to = inputs.tagged();
+    let dir = devstack::repo_root().join("target/image-preview");
+    tried(TRIES, PAUSE, |n| {
+        println!("copying the merge queue's build {queued} to {to} (try {n} of {TRIES})");
+        let auth = login(tools, &inputs.account, None, &["--push", "--pull"], dir.join("promote.json"))?;
+        let mut cmd = Command::new("skopeo");
+        cmd.args(["--command-timeout", "5m", "copy", "--all", "--preserve-digests", "--authfile"]).arg(&auth.0);
+        cmd.arg(format!("docker://{queued}")).arg(format!("docker://{to}")).stdin(Stdio::null());
+        crate::run(&mut cmd)
+    })?;
+    let promoted = existing(inputs, tools)?.with_context(|| format!("{to} is not in the registry after copying {queued} to it"))?;
+    anyhow::ensure!(promoted.ends_with(&format!("@{digest}")), "{to} is {promoted}, not the merge queue's {digest}: the copy changed the image");
+    Ok(promoted)
 }
 
 /// Hash git's path, mode and blob records rather than a commit ID or
@@ -99,7 +161,7 @@ fn existing(req: &Request, tools: &devstack::Tools) -> Result<Option<String>> {
     let Some(digest) = inspect_answer(&req.tagged(), out.status.success(), &out.stdout, &out.stderr)? else { return Ok(None); };
     let reference = format!("{repository}@{digest}");
     anyhow::ensure!(pinned_ok(&reference, &req.account), "registry named no pinned preview image");
-    println!("reusing {}: {reference}", req.tag);
+    println!("found {}: {reference}", req.tag);
     Ok(Some(reference))
 }
 
@@ -179,6 +241,27 @@ mod tests {
         let missing = logged(&format!("{context}manifest unknown"));
         assert!(inspect_answer("registry.cloudflare.com/account/repo:another-tag", false, b"", missing.as_bytes()).is_err());
         assert!(inspect_answer(tagged, false, manifest, missing.as_bytes()).is_err());
+    }
+
+    /// One way to run at a time, refused before any key, registry or
+    /// file is touched: a probe, `--build`, `--queue` or `--dry-run`, and a
+    /// summary only from `--build`, the run that names the deployed image.
+    #[test]
+    fn a_run_is_one_of_its_modes() {
+        let output = std::env::temp_dir().join(format!("preview-modes-{}", std::process::id()));
+        let refused = |extra: &[&str]| {
+            let mut args = vec!["--output".to_string(), output.display().to_string()];
+            args.extend(extra.iter().map(|s| s.to_string()));
+            run(&args).unwrap_err().to_string()
+        };
+        for both in [&["--build", "--queue"][..], &["--queue", "--dry-run"], &["--build", "--dry-run"]] {
+            assert!(refused(both).contains("one at a time"), "{both:?}");
+        }
+        assert!(refused(&["--queue", "--summary", "s.md"]).contains("--queue"));
+        assert!(refused(&["--dry-run", "--summary", "s.md"]).contains("--dry-run"));
+        assert!(refused(&["--queue", "--all"]).starts_with("usage:"));
+        assert!(run(&["--queue".to_string()]).unwrap_err().to_string().starts_with("usage:"));
+        assert!(!output.exists());
     }
 
     /// A new commit, dirty unrelated files, or a restarted process cannot
