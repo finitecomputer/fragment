@@ -45,10 +45,6 @@ use fragment_devstack as devstack;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-fn connectors_of(d: &Deployment) -> Result<fragment_core::connectors::ComputerConnectorPolicy> {
-    fragment_core::connectors::ComputerConnectorPolicy::parse(&d.computer_connectors.as_ref().map_or_else(|| fragment_core::connectors::DEFAULT_POLICY.into(), Value::to_string)).map_err(|e| anyhow::anyhow!("computer_connectors: {e}"))
-}
-
 /// A deployment's settings (its config file). Unknown keys are refused, so
 /// a misspelt one never silently does nothing.
 #[derive(Deserialize)]
@@ -119,7 +115,11 @@ struct Deployment {
     /// Computers (docs/computers.md): the images they run, and the one a
     /// new computer is pinned to. Without it, the deployment makes none.
     computers: Option<Computers>,
-    computer_connectors: Option<Value>,
+    /// The connectors its people may link, and the exact endpoints a
+    /// computer's relay carries for them (`FRAGMENT_CONNECTORS`;
+    /// docs/computers.md, "Connector policy"). Without it, the cell's
+    /// default (SimpleX); `[]` turns every connector off.
+    connectors: Option<Vec<fragment_core::connectors::Connector>>,
     /// The provider catalog a computer's swap offers (decisions 22 and 37;
     /// `fragment_core::catalog`): each row a connection, an operator key or
     /// an own key, with its hosts, placements, environment variables and
@@ -369,7 +369,6 @@ fn bound(d: &Deployment) -> Result<devstack::store::Bound> {
 /// `bound`, for a deploy of `branch` (one that makes its endpoint binds no
 /// store secret for it).
 fn bound_for(d: &Deployment, branch: Option<&str>) -> Result<devstack::store::Bound> {
-    connectors_of(d)?;
     let (catalog, provider_keys) = catalog_of(d)?;
     let (operator_keys, connection_secrets) = provider_keys.into_iter().partition(|(name, _)| catalog.get(name).is_some_and(|p| p.kind == fragment_core::catalog::Kind::Operator));
     let (_, model_keys) = models_of(d)?;
@@ -651,6 +650,9 @@ fn checked(d: Deployment) -> Result<Deployment> {
     }
     if let Some(f) = &d.mail_from {
         fragment_core::mail::Sender::parse(f).map_err(|e| anyhow::anyhow!("mail_from: {e}"))?;
+    }
+    if let Some(c) = &d.connectors {
+        fragment_core::connectors::Policy::new(c.clone()).map_err(|e| anyhow::anyhow!("connectors: {e}"))?;
     }
     Ok(d)
 }
@@ -1325,7 +1327,9 @@ fn worker_config(d: &Deployment, n: &Names, store_id: &str, release: &Release, r
     if let Some(version) = d.price_book_version {
         v.insert("FRAGMENT_PRICE_BOOK_VERSION".into(), json!(version.to_string()));
     }
-    v.insert("FRAGMENT_COMPUTER_CONNECTORS".into(), json!(serde_json::to_string(connectors_of(d)?.entries())?));
+    if let Some(c) = &d.connectors {
+        v.insert("FRAGMENT_CONNECTORS".into(), json!(serde_json::to_string(c)?));
+    }
     c.insert("vars".into(), vars);
     anyhow::ensure!(!c.contains_key("secrets_store_secrets"), "cell/wrangler.jsonc binds no secrets of its own: a deployment's are bound here");
     c.insert("secrets_store_secrets".into(), devstack::store::bindings_json(store_id, &bound.cell()));
@@ -1588,7 +1592,7 @@ mod tests {
             support_url: None,
             mail_from: None,
             computers: None,
-            computer_connectors: None,
+            connectors: None,
             providers: vec![],
             price_book_version: None,
             test_secret_file: None,
@@ -1903,15 +1907,18 @@ mod tests {
         assert_eq!(said.matches("cargo xtask secret set ").count(), named.len(), "{said}");
     }
 
+    /// Goal: a config without `connectors` leaves the cell its default; one
+    /// with them hands the Worker exactly those, `[]` included; a bad one
+    /// is refused before anything is built.
     #[test]
-    fn connector_policy_defaults_and_disable_render_for_the_worker() {
+    fn connectors_render_for_the_worker_only_when_named() {
         let mut d = deployment(Some("finite.chat"), Some("finite.place"));
         let render = |d: &Deployment| worker_config(d, &names(d, None).unwrap(), "0f0e0d0c", &test_release(), &devstack::repo_root()).unwrap();
-        let read = |v: &Value| fragment_core::connectors::ComputerConnectorPolicy::parse(v["vars"]["FRAGMENT_COMPUTER_CONNECTORS"].as_str().unwrap()).unwrap();
-        assert_eq!(read(&render(&d)), fragment_core::connectors::ComputerConnectorPolicy::default());
-        d.computer_connectors = Some(json!([]));
-        assert_eq!(read(&render(&d)).targets().count(), 0);
-        d.computer_connectors = Some(json!([{"id":"other", "relayTargets":[{"host":"api.internal","port":443}]}]));
+        assert!(render(&d)["vars"].get("FRAGMENT_CONNECTORS").is_none(), "the cell's default");
+        d.connectors = Some(vec![]);
+        let off = render(&d);
+        assert_eq!(fragment_core::connectors::Policy::parse(off["vars"]["FRAGMENT_CONNECTORS"].as_str().unwrap()).unwrap().entries().len(), 0);
+        d.connectors = Some(serde_json::from_value(json!([{"id": "other", "relayTargets": [{"host": "api.internal", "port": 443}]}])).unwrap());
         assert!(checked(d).is_err());
     }
 

@@ -12,8 +12,9 @@
 //! chunks besides: the platform sees the host, the port, the byte counts and
 //! the times, never what is sent.
 //!
-//! No open proxy: only the preset XFTP servers of SimpleX's two operators,
-//! only on 443, at most `OPEN_MAX` at once per computer, each at most
+//! No open proxy: only the exact targets the deployment's connector policy
+//! names (`connectors::Policy`; by default SimpleX's two operators' preset
+//! XFTP servers, `HOSTS`, on 443), at most `OPEN_MAX` at once per computer, each at most
 //! `BYTES_MAX` and `MS_MAX`, and at most `DAY_BYTES_MAX` a day per computer,
 //! each relay's allowance reserved against that as it opens.
 
@@ -36,6 +37,26 @@ pub const HEADER: &str = "x-fragment-relay";
 pub fn is_relay_header(name: &str) -> bool {
     name.get(..HEADER.len()).is_some_and(|p| p.eq_ignore_ascii_case(HEADER))
 }
+
+/// The hosts relayed by default (`connectors::Policy::default`): the
+/// preset XFTP servers of SimpleX Chat and Flux, the two operators
+/// SimpleX's apps and its core (v7.0.3) offer by default. A file a phone
+/// sends is on its own servers, these unless its person chose others; one
+/// on any other server does not arrive (the bridge says so).
+pub const HOSTS: [&str; 12] = [
+    "xftp1.simplex.im",
+    "xftp2.simplex.im",
+    "xftp3.simplex.im",
+    "xftp4.simplex.im",
+    "xftp5.simplex.im",
+    "xftp6.simplex.im",
+    "xftp1.simplexonflux.com",
+    "xftp2.simplexonflux.com",
+    "xftp3.simplexonflux.com",
+    "xftp4.simplexonflux.com",
+    "xftp5.simplexonflux.com",
+    "xftp6.simplexonflux.com",
+];
 
 /// Relays open at once per computer, at most: the core receives a file's
 /// chunks from a few servers at a time.
@@ -76,8 +97,9 @@ impl Refusal {
     }
 }
 
-/// An exact operator-configured endpoint; case-insensitive DNS, no suffix matching.
-pub fn target<'a>(policy: &'a crate::connectors::ComputerConnectorPolicy, host: &str, port: &str) -> Result<(&'a str, u16), Refusal> {
+/// The relay a computer asks for: exactly one of the policy's targets
+/// (its host in any case, no suffix), as given in the ask's query.
+pub fn target<'a>(policy: &'a crate::connectors::Policy, host: &str, port: &str) -> Result<(&'a str, u16), Refusal> {
     let refused = || Refusal::NotRelayed(format!("{}:{}", cut(host), cut(port)));
     let port: u16 = port.parse().map_err(|_| refused())?;
     policy.targets().find(|t| t.host.eq_ignore_ascii_case(host) && t.port == port).map(|t| (t.host.as_str(), t.port)).ok_or_else(refused)
@@ -229,7 +251,7 @@ mod tests {
     /// what. Case does not matter; the host answered is the list's own.
     #[test]
     fn only_the_preset_xftp_servers_on_443_are_relayed() {
-        let policy = crate::connectors::ComputerConnectorPolicy::default();
+        let policy = crate::connectors::Policy::default();
         for t in policy.targets() {
             let h = t.host.as_str();
             assert_eq!(target(&policy, h, "443"), Ok((h, 443)));

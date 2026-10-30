@@ -47,7 +47,9 @@ pub struct StripeConfig {
 }
 
 pub struct Config {
-    pub computer_connectors: fragment_core::connectors::ComputerConnectorPolicy,
+    /// `FRAGMENT_CONNECTORS`: the connectors an owner may link, and their
+    /// relay targets; absent, `connectors::Policy::default()` (docs/computers.md, "Connector policy").
+    pub connectors: fragment_core::connectors::Policy,
     /// `CODESTORAGE_ORG` (required) and the settings beside it.
     codestorage: CodeStorageConfig,
     /// `FRAGMENT_HOST_SUFFIX`: fragments are served from `<name>.<suffix>`.
@@ -306,7 +308,7 @@ impl Config {
         let levers_fleet = levers_fleet(egress_local, host_label_suffix.is_some());
         let test_secret = test_secret(env, levers_fleet);
         Config {
-            computer_connectors: fragment_core::connectors::ComputerConnectorPolicy::parse(var(env, "FRAGMENT_COMPUTER_CONNECTORS").as_deref().unwrap_or(fragment_core::connectors::DEFAULT_POLICY)).unwrap_or_else(|e| panic!("FRAGMENT_COMPUTER_CONNECTORS: {e}")),
+            connectors: var(env, "FRAGMENT_CONNECTORS").map_or_else(fragment_core::connectors::Policy::default, |v| fragment_core::connectors::Policy::parse(&v).unwrap_or_else(|e| panic!("FRAGMENT_CONNECTORS: {e}"))),
             codestorage: {
                 let org = var(env, "CODESTORAGE_ORG").unwrap_or_else(|| panic!("CODESTORAGE_ORG names the deployment's code.storage org"));
                 let api =

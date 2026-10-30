@@ -1624,16 +1624,19 @@ impl ComputerCell {
         Ok(())
     }
 
-    // Shared computer transport: the union authorized for its assigned agents.
-    // Limits remain per computer, never per connector or per agent.
+    /// What this computer's relays may reach: the targets of each connector
+    /// the policy allows one of its agents. The relay's bounds stay the
+    /// computer's, whichever connector a relay is for.
     fn relay_targets(&self) -> CellResult<Vec<fragment_proto::computer::RelayTarget>> {
-        use fragment_core::connectors::{Action, Context};
         let owner = self.must(MetaKey::Owner)?;
         let agents = self.agents()?;
+        let policy = &self.cfg.connectors;
         let mut targets = Vec::new();
-        for c in self.cfg.computer_connectors.entries() {
-            if agents.iter().any(|a| self.cfg.computer_connectors.authorize_connector(&Context { owner: &owner, agent: &a.fragment }, &c.id, Action::Relay, None).allowed) {
-                for t in &c.relay_targets { if !targets.contains(t) { targets.push(t.clone()); } }
+        for c in policy.entries().iter().filter(|c| agents.iter().any(|a| policy.authorize(&owner, &a.fragment, &c.id, fragment_core::connectors::Action::Relay).is_ok())) {
+            for t in &c.relay_targets {
+                if !targets.contains(t) {
+                    targets.push(t.clone());
+                }
             }
         }
         Ok(targets)
@@ -2463,7 +2466,7 @@ impl ComputerCell {
                 self.must(MetaKey::Id)?;
                 let b: RelayAsk = body_json(&mut req).await?;
                 if !self.relay_targets()?.iter().any(|t| t.host == b.host && t.port == b.port) {
-                    return Err(CellError::new(ErrorCode::Forbidden, "connector relay target is not authorized"));
+                    return Err(CellError::new(ErrorCode::Forbidden, format!("{}:{} is no relay target of this computer's connectors", b.host, b.port)));
                 }
                 let lease = js::random_hex::<16>();
                 let spent = fragment_core::relay::parse_spent(self.meta(MetaKey::RelayDay)?.as_deref());
@@ -3165,7 +3168,7 @@ async fn egress_api(mut req: Request, env: &Env, ctx: &Context, computer: &str, 
         // (entry.mjs `relay`), told how by these headers, which it alone reads
         p if p == fragment_core::relay::ROUTE => {
             let q: BTreeMap<String, String> = url.query_pairs().into_owned().collect();
-            let (host, port) = fragment_core::relay::target(&Config::from_env(env).computer_connectors, q.get("host").map_or("", String::as_str), q.get("port").map_or("", String::as_str)).map_err(|r| CellError::new(ErrorCode::Forbidden, r.message()))?;
+            let (host, port) = fragment_core::relay::target(&Config::from_env(env).connectors, q.get("host").map_or("", String::as_str), q.get("port").map_or("", String::as_str)).map_err(|r| CellError::new(ErrorCode::Forbidden, r.message()))?;
             if !req.headers().get("upgrade")?.is_some_and(|u| u.eq_ignore_ascii_case("websocket")) {
                 return Err(CellError::invalid("a relay is a WebSocket"));
             }
