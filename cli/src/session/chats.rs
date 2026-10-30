@@ -1,16 +1,19 @@
 //! The old Finite's export of an agent's chats (`export.py`'s `chats/`,
 //! format `finite-chat-archive/1`) as a session archive's conversations.
 //! Its records are Hermes' sessions as the export joined them, keyed by
-//! the same ids, so the same chats imported from the export and from
-//! Hermes' own database are the same conversations (`session::key`).
+//! their Hermes ids, so the same chats from another of Hermes' stores are
+//! the same conversations (`session::key`).
 //!
 //! Its layout: `chats/index.json` lists every conversation (`file`, a path
 //! under the export's root); a chat's file is the conversation itself
 //! (`chats/sessions/<id>.json`); a month's scheduled runs or side tasks
 //! share one (`chats/runs/<kind>-<YYYY-MM>.json`, `{conversations: {<id>:
-//! …}}`). A file is read only inside `chats/`, and only once.
+//! …}}`). Only regular files inside `chats/` are read (no link out of it,
+//! no device), each once and at most `FILE_MAX_BYTES`, and each
+//! conversation goes to the spool as it is read.
 
 use std::collections::BTreeMap;
+use std::io::Read as _;
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
@@ -18,12 +21,18 @@ use fragment_core::session::{Kind, Message, Session};
 use serde::Deserialize;
 use serde_json::Value;
 
-use super::hermes::{Read, ORIGIN};
+use super::{said_id, Spool};
 
 /// The export's chats' format.
 pub const FORMAT: &str = "finite-chat-archive/1";
-/// The largest of its files read (a month's runs share one).
-const FILE_MAX_BYTES: u64 = 512 * 1024 * 1024;
+/// The origin its conversations are keyed under: Hermes', whose ids they are.
+pub const ORIGIN: &str = "hermes";
+/// Which read this is (`Session::reader`).
+pub const READER: u32 = 10;
+/// The largest of its files read (a month's runs share one; a chat's is
+/// held to `SESSION_MAX_BYTES` once filed, and its record's text is said
+/// whole by the export, so a little over).
+const FILE_MAX_BYTES: u64 = 64 * 1024 * 1024;
 
 /// A conversation as the export wrote it (its index's record, and with
 /// its messages in its file).
@@ -57,6 +66,9 @@ struct Record {
 #[derive(Debug, Deserialize)]
 struct IndexFile {
     format: String,
+    /// The agent it exported.
+    #[serde(default)]
+    agent: Option<String>,
     conversations: Vec<Record>,
 }
 
@@ -64,40 +76,40 @@ struct IndexFile {
 /// (holding `index.json`), or the folder holding that. The export's root
 /// (which every `file` is under) is the folder holding `chats/`.
 pub fn root_of(path: &Path) -> Option<PathBuf> {
-    let is_index = |p: &Path| p.join("index.json").is_file() && p.file_name().is_some_and(|n| n == "chats");
+    let is_index = |p: &Path| regular(&p.join("index.json")) && p.file_name().is_some_and(|n| n == "chats");
     if is_index(path) {
         return path.parent().map(Path::to_path_buf);
     }
     is_index(&path.join("chats")).then(|| path.to_path_buf())
 }
 
-/// The conversations of the export whose root is `root` (`root_of`).
-pub fn read(root: &Path) -> Result<Read> {
+/// Whether `path` is a regular file itself, never through a link.
+fn regular(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_file())
+}
+
+/// The conversations of the export whose root is `root` (`root_of`), each
+/// into `spool` as it is read. What it could not read, each in a sentence
+/// (the rest is read); an import past an archive's limits stops, refused.
+pub fn read(root: &Path, spool: &mut Spool) -> Result<Vec<String>> {
     let index_path = root.join("chats/index.json");
-    let index: IndexFile = serde_json::from_slice(&read_file(&index_path)?).with_context(|| format!("reading {}", index_path.display()))?;
+    let index: IndexFile = serde_json::from_slice(&read_file(root, "chats/index.json")?).with_context(|| format!("reading {}", index_path.display()))?;
     if index.format != FORMAT {
         bail!("{} is format {:?}, not the old Finite's export ({FORMAT})", index_path.display(), index.format);
     }
-    let mut out = Read::default();
+    let mut problems = Vec::new();
     let mut by_file: BTreeMap<String, Vec<Record>> = BTreeMap::new();
     for r in index.conversations {
         match r.file.clone().filter(|f| inside_chats(f)) {
             Some(f) => by_file.entry(f).or_default().push(r),
-            None => out.problems.push(format!("conversation {}: its file is not one of the export's chats ({:?})", r.id, r.file)),
+            None => problems.push(format!("conversation {}: its file is not one of the export's chats", said_id(&r.id))),
         }
     }
     for (file, records) in by_file {
-        let bytes = match read_file(&root.join(&file)) {
-            Ok(b) => b,
-            Err(e) => {
-                out.problems.push(format!("{file}: {e:#}"));
-                continue;
-            }
-        };
-        let v: Value = match serde_json::from_slice(&bytes) {
+        let v: Value = match read_file(root, &file).and_then(|b| serde_json::from_slice(&b).with_context(|| file.clone())) {
             Ok(v) => v,
             Err(e) => {
-                out.problems.push(format!("{file}: {e}"));
+                problems.push(format!("{file}: {e:#}"));
                 continue;
             }
         };
@@ -105,23 +117,23 @@ pub fn read(root: &Path) -> Result<Read> {
             // a chat's file is the conversation; a month's names each by id
             let held = if v.get("conversations").is_some() { v["conversations"].get(&listed.id).cloned() } else { Some(v.clone()).filter(|c| c["id"] == listed.id.as_str()) };
             let Some(held) = held else {
-                out.problems.push(format!("conversation {}: not in {file}", listed.id));
+                problems.push(format!("conversation {}: not in {file}", said_id(&listed.id)));
                 continue;
             };
-            match serde_json::from_value::<Record>(held).map_err(|e| e.to_string()).and_then(|r| session(r, &listed)) {
-                Ok(s) => out.sessions.push(s),
-                Err(e) => out.problems.push(format!("conversation {} in {file}: {e}", listed.id)),
+            match serde_json::from_value::<Record>(held).map_err(|e| e.to_string()).and_then(|r| session(r, &listed, index.agent.as_deref())) {
+                Ok(s) => spool.add(s)?,
+                Err(e) => problems.push(format!("conversation {} in {file}: {e}", said_id(&listed.id))),
             }
         }
     }
-    Ok(out)
+    Ok(problems)
 }
 
 /// A conversation from its file's record (`held`), its index's `listed`
 /// filling in what the file left out.
-fn session(held: Record, listed: &Record) -> Result<Session, String> {
+fn session(held: Record, listed: &Record, agent: Option<&str>) -> Result<Session, String> {
     let kind_name = held.kind.as_deref().or(listed.kind.as_deref()).unwrap_or("chat");
-    let kind = Kind::parse(kind_name).ok_or_else(|| format!("its kind {kind_name:?} is none of chat, cron, subagent"))?;
+    let kind = Kind::parse(kind_name).ok_or_else(|| format!("its kind {:?} is none of chat, cron, subagent", said_id(kind_name)))?;
     let messages: Vec<Message> = match held.messages {
         Value::Array(_) => serde_json::from_value(held.messages).map_err(|e| format!("its messages: {e}"))?,
         _ => return Err("its file holds no messages".into()),
@@ -131,7 +143,9 @@ fn session(held: Record, listed: &Record) -> Result<Session, String> {
         format: String::new(),
         id: held.id,
         origin: ORIGIN.to_string(),
+        reader: READER,
         kind,
+        agent: agent.map(str::to_string),
         title: or(held.title, &listed.title).unwrap_or_default(),
         source: or(held.source, &listed.source),
         with: or(held.with, &listed.with),
@@ -150,18 +164,33 @@ fn inside_chats(file: &str) -> bool {
     file.starts_with("chats/") && p.components().all(|c| matches!(c, Component::Normal(_)))
 }
 
-fn read_file(path: &Path) -> Result<Vec<u8>> {
-    let size = std::fs::metadata(path).with_context(|| format!("reading {}", path.display()))?.len();
-    if size > FILE_MAX_BYTES {
-        bail!("{} is {} MiB, past the {} MiB a file of an export may be", path.display(), size / (1024 * 1024), FILE_MAX_BYTES / (1024 * 1024));
+/// The bytes of `file` under `root`: a regular file, every folder on the
+/// way to it a folder (no link out of the export), at most
+/// `FILE_MAX_BYTES` (read so, whatever it says its size is).
+fn read_file(root: &Path, file: &str) -> Result<Vec<u8>> {
+    let path = root.join(file);
+    let mut at = root.to_path_buf();
+    for part in Path::new(file).components() {
+        at.push(part);
+        let m = std::fs::symlink_metadata(&at).with_context(|| format!("reading {}", path.display()))?;
+        let ok = if at == path { m.file_type().is_file() } else { m.file_type().is_dir() };
+        if !ok {
+            bail!("{} is no regular file of the export's (a link, or a device)", at.display());
+        }
     }
-    std::fs::read(path).with_context(|| format!("reading {}", path.display()))
+    let mut bytes = Vec::new();
+    std::fs::File::open(&path).with_context(|| format!("reading {}", path.display()))?.take(FILE_MAX_BYTES + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > FILE_MAX_BYTES {
+        bail!("{} is past the {} MiB a file of an export may be", path.display(), FILE_MAX_BYTES / (1024 * 1024));
+    }
+    Ok(bytes)
 }
 
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
     use serde_json::json;
+    use std::collections::BTreeSet;
 
     /// An export's `chats/` under `root`, as export.py writes one: a chat
     /// of its own, and a month's scheduled runs together.
@@ -187,45 +216,59 @@ pub(crate) mod tests {
         std::fs::write(chats.join("runs/cron-2026-10.json"), json!({ "format": FORMAT, "conversations": { "r1": run_file } }).to_string()).unwrap();
     }
 
+    fn spool() -> Spool {
+        Spool::new(BTreeSet::new()).unwrap()
+    }
+
+    fn read_back(spool: &Spool, key: &str) -> Session {
+        serde_json::from_slice(&std::fs::read(spool.path(key)).unwrap()).unwrap()
+    }
+
     /// Goal: an export's chats read as the conversations it holds, each
     /// as it was written. Method: a chat and a scheduled run, found from
     /// the export's root and from its `chats/`.
     #[test]
     fn an_export_reads_as_its_conversations() {
-        let root = super::super::hermes::tests::tempdir();
+        let root = super::super::tempdir();
         export(&root);
         assert_eq!(root_of(&root).as_deref(), Some(root.as_path()));
         assert_eq!(root_of(&root.join("chats")).as_deref(), Some(root.as_path()));
         assert_eq!(root_of(&root.join("chats/sessions")), None);
-        let r = read(&root).unwrap();
-        assert!(r.problems.is_empty(), "{:?}", r.problems);
-        let by_id: BTreeMap<&str, &Session> = r.sessions.iter().map(|s| (s.id.as_str(), s)).collect();
-        let c = by_id["c1"];
-        assert_eq!((c.kind, c.title.as_str(), c.with.as_deref(), c.parts.len(), c.messages.len()), (Kind::Chat, "Beans", Some("Ann"), 2, 4));
+        let mut s = spool();
+        let problems = read(&root, &mut s).unwrap();
+        assert!(problems.is_empty(), "{problems:?}");
+        let c = read_back(&s, "hermes-c1");
+        assert_eq!((c.kind, c.title.as_str(), c.with.as_deref(), c.agent.as_deref(), c.reader, c.parts.len(), c.messages.len()), (Kind::Chat, "Beans", Some("Ann"), Some("Juniper"), READER, 2, 4));
         assert_eq!(c.messages[1].tool_calls[0].name, "web");
-        let run = by_id["r1"].clone().normalized();
+        let run = read_back(&s, "hermes-r1");
         assert_eq!((run.kind, run.messages[0].text.as_deref()), (Kind::Cron, Some("digest")), "Hermes' structured text, which the export copied raw, reads as text");
     }
 
     /// Goal: an export is read only inside its `chats/`, and what it cannot
     /// read is a problem said, the rest read. Invalid: an index naming a
-    /// file outside `chats/`, a file that is missing, another format.
+    /// file outside `chats/`, a file that is missing, a link out of the
+    /// export, a device, another format.
     #[test]
     fn an_export_reads_nothing_outside_its_chats() {
-        let root = super::super::hermes::tests::tempdir();
+        let root = super::super::tempdir();
         export(&root);
         std::fs::write(root.join("secret.json"), "{}").unwrap();
+        std::os::unix::fs::symlink(root.join("secret.json"), root.join("chats/sessions/linked.json")).unwrap();
+        std::os::unix::fs::symlink("/dev/zero", root.join("chats/sessions/zero.json")).unwrap();
+        std::os::unix::fs::symlink(root.join("chats/sessions"), root.join("chats/through")).unwrap();
         let index = root.join("chats/index.json");
         let mut v: Value = serde_json::from_slice(&std::fs::read(&index).unwrap()).unwrap();
-        v["conversations"].as_array_mut().unwrap().push(json!({ "id": "x", "file": "chats/../secret.json" }));
-        v["conversations"].as_array_mut().unwrap().push(json!({ "id": "y", "file": "chats/sessions/missing.json" }));
+        for (id, file) in [("x", "chats/../secret.json"), ("y", "chats/sessions/missing.json"), ("l", "chats/sessions/linked.json"), ("z", "chats/sessions/zero.json"), ("t", "chats/through/c1.json")] {
+            v["conversations"].as_array_mut().unwrap().push(json!({ "id": id, "file": file }));
+        }
         std::fs::write(&index, v.to_string()).unwrap();
-        let r = read(&root).unwrap();
-        assert_eq!(r.sessions.len(), 2);
-        assert_eq!(r.problems.len(), 2, "{:?}", r.problems);
-        assert!(r.problems[0].contains("not one of the export's chats") || r.problems[1].contains("not one of the export's chats"));
+        let mut s = spool();
+        let problems = read(&root, &mut s).unwrap();
+        assert_eq!(s.entries.len(), 2);
+        assert_eq!(problems.len(), 5, "{problems:?}");
+        assert!(problems.iter().filter(|p| p.contains("no regular file of the export's")).count() == 3, "{problems:?}");
         v["format"] = json!("finite-chat-archive/2");
         std::fs::write(&index, v.to_string()).unwrap();
-        assert!(format!("{:#}", read(&root).unwrap_err()).contains("not the old Finite's export"));
+        assert!(format!("{:#}", read(&root, &mut spool()).unwrap_err()).contains("not the old Finite's export"));
     }
 }
