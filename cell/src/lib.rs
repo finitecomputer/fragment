@@ -695,7 +695,7 @@ async fn ledger_route(mut req: Request, env: &Env, cfg: &Config, url: &Url, rest
         other => return Err(CellError::invalid(format!("{other:?} is not an email, an identity (an npub), `org:<org id>`, or `me`"))),
     };
     // each command is the operators' log's too (docs/api.md, Operators)
-    let note = |detail: String| registry::admin::Note { by: op.clone(), action: format!("ledger-{command}"), target: person.clone(), detail };
+    let note = |id: &str, detail: String| registry::admin::Note { by: op.clone(), action: format!("ledger-{command}"), target: person.clone(), detail, request: Some(id.to_string()) };
     match *command {
         "grant" => {
             let mut g: fragment_proto::ledger::GrantCredit = command_body(&body, "grant")?;
@@ -705,21 +705,21 @@ async fn ledger_route(mut req: Request, env: &Env, cfg: &Config, url: &Url, rest
             }
             g.id = commanded("grant", &g.id)?;
             let answer = ledger::ask(env, &person, &g).await?;
-            ask_registry(env, &note(format!("{} micros: {}", g.micros, g.why))).await?;
+            ask_registry(env, &note(&g.id, format!("{} micros: {}", g.micros, g.why))).await?;
             json_answer(&answer)
         }
         "plan" => {
             let mut c: fragment_proto::ledger::SetPlan = command_body(&body, "plan")?;
             c.id = commanded("plan", &c.id)?;
             let answer = ledger::ask(env, &person, &c).await?;
-            ask_registry(env, &note(format!("{:?}", c.plan))).await?;
+            ask_registry(env, &note(&c.id, format!("{:?}", c.plan))).await?;
             json_answer(&answer)
         }
         "overdraft" => {
             let mut c: fragment_proto::ledger::SetOverdraft = command_body(&body, "overdraft")?;
             c.id = commanded("overdraft", &c.id)?;
             let answer = ledger::ask(env, &person, &c).await?;
-            ask_registry(env, &note(format!("{} micros", c.micros))).await?;
+            ask_registry(env, &note(&c.id, format!("{} micros", c.micros))).await?;
             json_answer(&answer)
         }
         // an org's monthly budget (decision 68), an operator's while orgs
@@ -728,7 +728,7 @@ async fn ledger_route(mut req: Request, env: &Env, cfg: &Config, url: &Url, rest
             let mut c: fragment_proto::ledger::OrgBudget = command_body(&body, "budget")?;
             c.id = commanded("budget", &c.id)?;
             let answer = ledger::ask(env, &person, &c).await?;
-            ask_registry(env, &note(format!("{} micros", c.micros))).await?;
+            ask_registry(env, &note(&c.id, format!("{} micros", c.micros))).await?;
             json_answer(&answer)
         }
         // a seat is the registry's alone: an operator comps or ends one there (`/api/admin/seats`)

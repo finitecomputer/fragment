@@ -514,10 +514,17 @@ fn org_credit(s: &mut Suite, api: &Api) -> Result<()> {
     let again = s.cli_json(api, &home, &["operator", "credit", &org, "20", "--why", "a pilot, invoiced", "--id", "fund-1", "--key-file", &key, "--json"]);
     let budget = s.cli_json(api, &home, &["operator", "budget", &org, "10", "--id", "b-1", "--key-file", &key, "--json"]);
     let budget_again = s.cli_json(api, &home, &["operator", "budget", &org, "10", "--id", "b-1", "--key-file", &key, "--json"]);
+    // each logged once, in the org's governance log and the operators' log
+    let logs = |api: &Api| -> Result<(usize, usize)> {
+        let governed = api.signed(&s.operator, "GET", &format!("/api/admin/orgs/{org}/content"), None)?.body["log"].as_array().map_or(0, |l| l.iter().filter(|e| e["action"] == "ledger-grant").count());
+        let noted = api.signed(&s.operator, "GET", "/api/admin/log", None)?.body["entries"].as_array().map_or(0, |e| e.iter().filter(|x| x["action"] == "ledger-grant" && x["target"] == format!("org:{org}").as_str()).count());
+        Ok((governed, noted))
+    };
+    let logged = logs(api)?;
     s.ok(
-        "credit_granted_once: the same credit's id again credits nothing more; its budget, set by `fragment operator budget`, likewise once by its id",
-        again.is_ok() && budget.is_ok() && budget_again.is_ok() && read(api, &vic)["balanceMicros"] == 20_000_000 && read(api, &vic)["budgetMicros"] == 10_000_000,
-        json!([format!("{again:?}"), format!("{budget:?}"), read(api, &vic)]),
+        "credit_granted_once: the same credit's id again credits nothing more, and is logged once, in the org's governance log and the operators'; its budget, set by `fragment operator budget`, likewise once by its id",
+        again.is_ok() && budget.is_ok() && budget_again.is_ok() && read(api, &vic)["balanceMicros"] == 20_000_000 && read(api, &vic)["budgetMicros"] == 10_000_000 && logged == (1, 1),
+        json!([format!("{again:?}"), format!("{budget:?}"), read(api, &vic), logged]),
     );
     let payer = s.cli_json(api, &home, &["operator", "payer", &org, &Api::email_of(&vic), "--id", "p-1", "--key-file", &key, "--json"]);
     let view = api.signed(&s.operator, "GET", &format!("/api/admin/orgs/{org}/content"), None)?;
@@ -573,11 +580,28 @@ fn org_credit(s: &mut Suite, api: &Api) -> Result<()> {
             println!("      {what}: {} {}", r.status, r.body);
         }
     }
-    let bad = s.cli(api, &home, &["operator", "credit", "org-nope", "5", "--why", "x", "--key-file", &key]);
+    let bad = s.cli(api, &home, &["operator", "credit", "org-nope", "5", "--why", "x", "--id", "x", "--key-file", &key]);
     s.ok(
         "nonoperator_cannot_credit: no one but an operator credits it, budgets it or names its payer; the self-serve routes are not there; the CLI names no org it cannot parse",
         all && !bad.status.success(),
         json!(refused.iter().map(|(w, r, _)| json!([w, r.status])).collect::<Vec<_>>()),
+    );
+
+    // funded_org_outlives_its_people: an org an operator credited is never
+    // dropped as its last person goes, its credit stranded
+    let zed = api.person()?;
+    let comped = api.signed(&s.operator, "POST", "/api/admin/seats", Some(&json!({ "email": Api::email_of(&zed), "kind": "seat" })))?;
+    let zorg = comped.body["org"]["id"].as_str().context("zed's comped org")?.to_string();
+    let funded = api.signed(&s.operator, "POST", &format!("/api/ledger/org:{zorg}/grant"), Some(&json!({ "id": "inv-z", "micros": 5_000_000, "by": op, "why": "an invoice" })))?;
+    let r = api.signed(&vic, "POST", "/api/org/seats", Some(&json!({ "email": Api::email_of(&zed) })))?;
+    let moved = answer(api, &zed, r.body["seat"]["id"].as_str().unwrap_or(""), "accept")?;
+    let left = s.eventually(PUSHED, || org_of(api, &zed) == org);
+    let kept = api.signed(&s.operator, "GET", &format!("/api/admin/orgs/{zorg}"), None)?;
+    let zl = api.signed(&s.operator, "GET", &format!("/api/admin/orgs/{zorg}/ledger"), None)?;
+    s.ok(
+        "funded_org_outlives_its_people: its only person gone to another org, an org an operator credited stays, its credit there for an operator",
+        funded.status == 200 && moved.status == 200 && left && kept.status == 200 && zl.status == 200 && zl.body["balanceMicros"] == 5_000_000,
+        json!([funded.body, moved.body, kept.status, zl.body]),
     );
 
     // org_terms_survive_restart: its credit and budget, read back after a restart

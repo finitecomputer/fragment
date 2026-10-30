@@ -627,10 +627,33 @@ impl RegistryCell {
         Ok(PayerNamed { org: org.id, email: self.email_now(&person)?, person, seq })
     }
 
-    /// Whether `org` has anyone in its content: its ledger and estate
-    /// outlive its billing (decision 69), so it is never dropped with it.
+    /// An operator's command on `org`'s ledger (its credit, its budget), in
+    /// its governance log and the operators' log in one change, once by its
+    /// id: sent again, it is there already.
+    pub(super) fn org_noted(&self, org: &str, request: &str, note: &super::admin::Note) -> CellResult<()> {
+        let detail: String = note.detail.chars().take(super::admin::DETAIL_MAX_BYTES).collect();
+        let (org, request, operator, action) = (org.to_string(), request.to_string(), note.by.clone(), note.action.clone());
+        self.atomically(move |tx| {
+            if tx.governed(&org, &request)?.is_some() {
+                return Ok(());
+            }
+            let now = js::now_ms();
+            tx.govern(&org, Logged { request: &request, actor: &operator, action: &action, subject: None, detail: json!({ "note": detail }) }, now)?;
+            tx.exec(
+                "INSERT INTO admin_log (at, operator, action, target, detail) VALUES (?, ?, ?, ?, ?)",
+                vec![SqlStorageValue::Integer(now), operator.as_str().into(), action.as_str().into(), format!("org:{org}").into(), detail.into()],
+            )
+        })
+    }
+
+    /// Whether `org` holds what outlives its billing: anyone in its content
+    /// (decision 69), or credit an operator gave it or a payer they named
+    /// (orgs pay out of band: Paul, 2026-10-30), so it is never dropped
+    /// with it, nor its credit stranded.
     pub(super) fn has_content(&self, org: &str) -> CellResult<bool> {
-        Ok(self.count("SELECT COUNT(*) AS n FROM org_content WHERE org = ?", vec![org.into()])? > 0)
+        let people = self.count("SELECT COUNT(*) AS n FROM org_content WHERE org = ?", vec![org.into()])?;
+        let funded = self.count("SELECT COUNT(*) AS n FROM org_governance WHERE org = ? AND action IN ('ledger-grant', 'payer-named')", vec![org.into()])?;
+        Ok(people + funded > 0)
     }
 
     /// An org dropped with no one in its content: its offers go with it,
