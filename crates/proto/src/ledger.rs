@@ -165,7 +165,7 @@ pub struct PutCap {
     pub micros: Option<i64>,
 }
 
-/// `PUT /api/orgs/<org>/budget` (its billing admins): what the org's
+/// `POST /api/ledger/org:<org>/budget` (an operator's): what the org's
 /// fragments may spend a month before their AI steps stop (decision 68),
 /// in micro-dollars; zero until set. `id` makes the change once.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -176,7 +176,7 @@ pub struct OrgBudget {
 }
 
 /// An org's ledger now (`GET /api/orgs/<org>/ledger`; decision 66): the
-/// credit it bought or was given, with no plan, seat, included credit or
+/// credit operators gave it, with no plan, seat, included credit or
 /// overdraft, and the month's budget beside what its fragments spent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

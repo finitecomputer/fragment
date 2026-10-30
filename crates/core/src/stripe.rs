@@ -38,9 +38,8 @@ pub const META_ORG: &str = "fragment_org";
 pub const META_PERSON: &str = "fragment_person";
 pub const META_KIND: &str = "fragment_kind";
 /// A pack's Checkout: who bought it (whose return it is), and the pack;
-/// `META_PERSON` is whose ledger it grants, or, for an org's own credit
-/// (decision 66), `META_PAYER` names the org's ledger (`org:<id>`) and
-/// there is no `META_PERSON`.
+/// `META_PERSON` is whose ledger it grants, or, on an org's own pack opened
+/// while one was sold, `META_PAYER` names the org's ledger (`org:<id>`).
 pub const META_BUYER: &str = "fragment_buyer";
 pub const META_PACK: &str = "fragment_pack";
 pub const META_PAYER: &str = "fragment_payer";

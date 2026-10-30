@@ -572,7 +572,7 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("home is the shell", is_shell(&home), &home);
     let settings = with_session(api, "GET", "/settings", &chooser)?;
     let theirs = from_shell(api, &chooser, "GET", "/api/fragments", None, &api.base, "same-origin")?;
-    let script = api.unsigned("GET", "/__shell/shell.js", None)?;
+    let script = api.unsigned("GET", "/__shell/settings.js", None)?;
     s.ok(
         "their settings are the shell's: it knows who they are, that they have no fragments yet, and hands a coding agent this platform's llms.txt (the install folded beside it)",
         is_shell(&settings)

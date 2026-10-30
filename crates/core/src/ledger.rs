@@ -384,6 +384,19 @@ fn valid_id(s: &str) -> bool {
     price::printable(s, ID_MAX_BYTES)
 }
 
+/// Why a grant's body is refused, whatever its ledger holds: the router
+/// asks first for an org's, whose log records the grant before its ledger
+/// takes it, so the log never names one the ledger would refuse.
+pub fn grant_invalid(g: &GrantCredit) -> Option<Refused> {
+    if !(1..=GRANT_MAX).contains(&g.micros) {
+        return Some(invalid(Invalid::Amount));
+    }
+    if !valid_id(&g.by) {
+        return Some(invalid(Invalid::Id));
+    }
+    (g.why.len() > NOTE_MAX_BYTES).then(|| invalid(Invalid::Note))
+}
+
 fn valid_names(names: [&Option<String>; 3]) -> bool {
     names.iter().all(|n| n.as_deref().is_none_or(valid_id))
 }
@@ -1008,14 +1021,8 @@ impl Ledger {
         if !Self::admit(store, &g.id, &command)? {
             return Ok(());
         }
-        if !(1..=GRANT_MAX).contains(&g.micros) {
-            return Err(invalid(Invalid::Amount));
-        }
-        if !valid_id(&g.by) {
-            return Err(invalid(Invalid::Id));
-        }
-        if g.why.len() > NOTE_MAX_BYTES {
-            return Err(invalid(Invalid::Note));
+        if let Some(why) = grant_invalid(g) {
+            return Err(why);
         }
         self.money.purchased_left += g.micros;
         self.money.totals.purchased += g.micros;

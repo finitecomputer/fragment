@@ -521,7 +521,7 @@ fn check() -> Result<()> {
     no_eval_sinks(&root)?;
     schema_lock::holds(&root)?;
     let read = |path: &str| std::fs::read_to_string(root.join(path)).with_context(|| format!("read {path}"));
-    let copies = ["cli/GUIDE.md", "README.md", "cell/shell/shell.js"].map(|path| read(path).map(|text| (path, text)));
+    let copies = ["cli/GUIDE.md", "README.md", "cell/shell/settings.js"].map(|path| read(path).map(|text| (path, text)));
     let copies: Vec<(&str, String)> = copies.into_iter().collect::<Result<_>>()?;
     skill_installs_release(&read("cli/SKILL.md")?, &read(".github/workflows/release.yml")?, &copies)?;
     javascript_parses(&root)?;
