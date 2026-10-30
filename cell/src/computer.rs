@@ -129,7 +129,7 @@ const EXIT_WAIT_MS: i64 = 5_000;
 /// The markers the DO leaves in the container (docs/computers.md, "What
 /// every image carries"): the restore gate's, and a save's hold, which the
 /// guest reads as "claim no turn, and say `held` once nothing is claimed
-/// and what you keep is copied" (P2 of docs/explorations/pi-durable.md).
+/// and what you keep is copied" (docs/durable-computers.md).
 /// A hold clears the last answer before it asks, so only an answer to it
 /// counts. Each needs only `sh` (and its `test`), `mkdir`, `touch`, `rm`
 /// and `cat`, which every image carries.
@@ -1088,10 +1088,10 @@ impl ComputerCell {
     /// failure destroys what started. A start from the snapshot that fails
     /// forgets the snapshot and reports `SnapshotFailed`, which the lifecycle
     /// answers with a start from the image and the save in the same wake, no
-    /// strike against the computer (F7). A start whose save will never
+    /// strike against the computer . A start whose save will never
     /// restore (its archive gone or altered) marks it unusable and reports
     /// `RestoreFailed`, which starts it again at once from the save before
-    /// it, when there is one (F5). A start that comes up records what it
+    /// it, when there is one . A start that comes up records what it
     /// restored, and logs it (P7).
     async fn start(&self, generation: u64) -> Event {
         let planned = match self.plan(generation).await {
@@ -1132,7 +1132,7 @@ impl ComputerCell {
                 Event::SnapshotFailed { generation, why: e.message }
             }
             Err(Unstarted::Dead(why)) => {
-                // as a snapshot that would not start (F7): its snapshot
+                // as a snapshot that would not start : its snapshot
                 // forgotten and its container destroyed, whose exit is this
                 // report's to make (`exit_of`), and the same wake starts the
                 // image and the save, no strike. Its own line, so the logs
