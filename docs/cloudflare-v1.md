@@ -1536,10 +1536,12 @@ An org owns and pays for fragments as a person does, and the people it
 appoints control who may use them.
 
 66. **An org pays from credit of its own.** Its ledger (`org:<id>`) runs
-    a person's machine: credit it buys (the $25 pack, bought by who pays
-    for the org, for the org) or an operator grants it. It has no plan,
-    seat or included credit, and no free credit. Each seat's included
-    credit stays its holder's: nothing pools.
+    a person's machine: credit an operator grants it, as orgs pay out of
+    band (a Stripe link, an invoice; Paul, 2026-10-30), the person it is
+    invoiced to named by an operator in its governance log. It has no
+    plan, seat or included credit, and no free credit. Each seat's
+    included credit stays its holder's: nothing pools. Orgs buy no credit
+    for themselves yet.
 67. **Org credit pays for the org's fragments, never a person's agent.**
     An org-owned app's hosting, storage and own AI steps bill the org. A
     person's agent turns, desktop and computer bill that person, in an
@@ -1547,8 +1549,8 @@ appoints control who may use them.
     agent's: the org's ledger refuses them.
 68. **No overdraft, an explicit budget, and the cap for everyone.** An
     org's overdraft is zero: at a balance of zero its fragments are
-    read-only. Its billing admins set a monthly budget, zero until set,
-    past which its fragments' AI steps stop (hosting is still metered).
+    read-only. An operator sets its monthly budget, zero until set, past
+    which its fragments' AI steps stop (hosting is still metered).
     Each fragment's $5 monthly cap holds for every caller, admins
     included. No one passes either: content admins mint no credit.
 69. **Content admins are appointed, never inherited.** An org's content
