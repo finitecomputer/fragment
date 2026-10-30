@@ -527,6 +527,17 @@ fn org_credit(s: &mut Suite, api: &Api) -> Result<()> {
         payer.as_ref().is_ok_and(|v| v["person"] == vic_id.as_str()) && named,
         json!({ "cli": format!("{payer:?}"), "log": view.body["log"] }),
     );
+    // payer_named_once: the same id again is the same entry; another person under it, 409
+    let payer_at = format!("/api/admin/orgs/{org}/payer");
+    let again = api.signed(&s.operator, "POST", &payer_at, Some(&json!({ "id": "p-1", "person": Api::email_of(&vic) })))?;
+    let yan = api.person()?;
+    let other = api.signed(&s.operator, "POST", &payer_at, Some(&json!({ "id": "p-1", "person": Api::email_of(&yan) })))?;
+    let entries = api.signed(&s.operator, "GET", &format!("/api/admin/orgs/{org}/content"), None)?.body["log"].as_array().map_or(0, |l| l.iter().filter(|e| e["action"] == "payer-named").count());
+    s.ok(
+        "payer_named_once: naming the payer again by its id answers the same entry, another person under it is 409, and the log holds one",
+        again.status == 200 && payer.as_ref().is_ok_and(|v| v["seq"] == again.body["seq"]) && entries == 1 && other.status == 409,
+        json!({ "again": again.body, "other": [other.status, other.body], "entries": entries }),
+    );
 
     // nonoperator_cannot_credit, and the self-serve routes are not there
     let wen = api.person()?;
@@ -534,10 +545,19 @@ fn org_credit(s: &mut Suite, api: &Api) -> Result<()> {
     answer(api, &wen, r.body["admin"]["id"].as_str().unwrap_or(""), "accept")?;
     let xan = api.person()?;
     let op = api.identity(&s.operator)?;
+    // an agent of who pays, signing as itself
+    let hand = Keys::generate();
+    let reg = "/api/identities";
+    let made = api.signed(&vic, "POST", reg, Some(&json!({ "kind": "agent", "proof": api.proof(&hand, "POST", reg, &vic) })))?;
+    anyhow::ensure!(made.status == 200, "an agent of vic's: {made}");
     let refused = [
         ("a billing admin credits nothing: an operator's (403)", api.signed(&wen, "POST", &format!("/api/ledger/org:{org}/grant"), Some(&json!({ "id": "mine", "micros": 1, "by": api.identity(&wen)?, "why": "" })))?, 403),
         ("nor sets its budget (403)", api.signed(&wen, "POST", &format!("/api/ledger/org:{org}/budget"), Some(&json!({ "id": "mine", "micros": 1 })))?, 403),
         ("nor names its payer (403)", api.signed(&wen, "POST", &format!("/api/admin/orgs/{org}/payer"), Some(&json!({ "id": "mine", "person": Api::email_of(&wen) })))?, 403),
+        ("nor reads it as an operator (403)", api.signed(&wen, "GET", &format!("/api/admin/orgs/{org}/ledger"), None)?, 403),
+        ("an agent of who pays credits nothing (403)", api.signed(&hand, "POST", &format!("/api/ledger/org:{org}/grant"), Some(&json!({ "id": "bot", "micros": 1, "by": api.identity(&hand)?, "why": "" })))?, 403),
+        ("nor sets its budget (403)", api.signed(&hand, "POST", &format!("/api/ledger/org:{org}/budget"), Some(&json!({ "id": "bot", "micros": 1 })))?, 403),
+        ("nor names its payer (403)", api.signed(&hand, "POST", &format!("/api/admin/orgs/{org}/payer"), Some(&json!({ "id": "bot", "person": Api::email_of(&vic) })))?, 403),
         ("the self-serve budget is not there (404)", api.signed(&wen, "PUT", &format!("{root}/budget"), Some(&json!({ "id": "b", "micros": 1 })))?, 404),
         ("nor is the self-serve pack (404)", api.signed(&vic, "POST", &format!("{root}/billing/pack"), Some(&json!({})))?, 404),
         ("someone not in it reads none of it (403)", api.signed(&xan, "GET", &format!("{root}/ledger"), None)?, 403),
