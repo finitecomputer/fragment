@@ -78,12 +78,6 @@ from Google Workspace CLI v0.22.5, adapted to `google-workspace-finite`
 authentication. The deployment allows `slides.googleapis.com` and enables
 the Slides API on its OAuth client's Cloud project.
 
-The 2026-10-08 audit, amended by Paul on 2026-10-09, removed 29 generic copies from the Finite skills
-snapshot imported on 2026-10-03. It also removed apps' generic design and
-game references, retaining the four platform references. The inventory,
-sources, PDF experiment and recommendations are in
-[docs/skills-audit.md](../../docs/skills-audit.md).
-
 Our Hermes image exposes its own pinned bundled skills to every profile,
 read-only, with the agent's own skills and managed overrides winning by
 name (docs/computers.md, Skills and the CLI). The image also installs the

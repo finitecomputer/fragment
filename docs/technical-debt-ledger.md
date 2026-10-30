@@ -1526,8 +1526,7 @@ fragment.club until cutover (decisions 34–35).
   a runtime may ask up to `PROMPT_TTL_MS_MAX`, a day). A restart for any
   other reason while a card is open (an owner's sleep, a crash, a deploy,
   an image pinned) still cuts the turn and closes its card `expired`
-  before its `expiresAt`: the owner's answer has no turn to go to (F9 of
-  docs/explorations/pi-durable.md).
+  before its `expiresAt`: the owner's answer has no turn to go to (docs/durable-computers.md).
 - **First proof:** a computer's awake time dominated by turns waiting on
   cards; or an owner who answers a card after a restart and sees nothing
   happen.
@@ -1663,3 +1662,26 @@ fragment.club until cutover (decisions 34–35).
 - **Delete when:** Cloudflare fixes #362 and a canary round shows no
   `snapshot: "dead"` across its snapshot wakes; or snapshots go
   (`FRAGMENT_COMPUTER_SNAPSHOTS=off`), when the wait goes with them.
+
+## SimpleX retains the computer's root trust and rewindable state
+
+- **Observed:** the SimpleX review (2026-10-22 to 2026-10-28) left these
+  obligations. The current protocol is in docs/bridge.md, "SimpleX";
+  decision 32 in docs/cloudflare-v1.md records Paul's product choices.
+- **Risk:** passwordless sudo lets a prompt-injected agent read the
+  root-only door key or drive the unauthenticated loopback bot API.
+  The signed link ticket and separate door key do not fence root.
+- **Delete when:** the agent has no sudo, or the bridge and cores run
+  outside the agent's root authority, with forged-owner tests.
+- **Risk:** a restore before linking loses the contact until relinked;
+  saving immediately narrows that window but cannot eliminate it.
+  A newer core may migrate its databases so an older image cannot open
+  them. Check upgrade and rollback compatibility in each core image round.
+- **Delete when:** messenger state no longer rewinds (durable-computers.md,
+  option F), and core upgrade/rollback is proved against real databases.
+- **Risk:** one core per linked agent has no overall resource cap;
+  voice attachments have no transcript text for search; the original
+  review did not prove the shell link pane or "via SimpleX" in a browser.
+- **Delete when:** core resource limits, searchable voice text without
+  double transcription, and browser coverage of linking and attribution
+  close those gaps. Existing tests and contracts remain in place.

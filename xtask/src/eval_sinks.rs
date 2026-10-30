@@ -500,6 +500,18 @@ fn quoted_end(b: &[u8], i: usize, quote: u8, ends_at_newline: bool) -> usize {
 /// JavaScript: `//` and `/* */` comments; strings, templates (their `${…}`
 /// code is code) and regular expressions as literals, a `/` taken for a
 /// regular expression's where a value cannot stand before it.
+///
+/// Why keep this lexer (tooling review, 2026-10-30): Acorn 8.19.0 is maintained
+/// and has zero transitive npm dependencies (ESLint 10.14.0 has 74), but we
+/// also scan every decoded Rust string, including text and incomplete JS.
+/// Strict parsing/tokenization rejects those; acorn-loose 8.5.2 (one
+/// dependency, Acorn) guesses an AST and can discard a forbidden use: for
+/// `/\neval(source);` it returns no eval identifier, while this scan finds it
+/// after the broken regex's newline. A parser-only swap would lose that
+/// conservative cross-language check; a fallback would retain this lexer
+/// plus the Node adapter. The JS lexer and its two helpers are about 107
+/// lines, not the whole mixed-language scanner. Replace when the adapter
+/// shrinks that code and preserves the embedded-source fixtures too.
 fn lex_js(b: &[u8]) -> Vec<Part> {
     let mut parts = vec![Part::Code; b.len()];
     // the brace depth to go back to as each open template's `${…}` closes
@@ -786,7 +798,7 @@ mod tests {
     #[test]
     fn a_planted_eval_fails_the_check_naming_its_line() {
         let clean = file("cell/clean.mjs", "export const ok = 1;\n");
-        let planted: [(&str, &str, usize, &str); 37] = [
+        let planted: [(&str, &str, usize, &str); 38] = [
             // DevTools, as a method on the wire and as a client's call
             ("cell/src/card.rs", "async fn f() {\n    cdp.call(\"Runtime.evaluate\", json!({ \"expression\": js }), deadline).await?;\n}\n", 2, "Runtime.evaluate"),
             ("crates/core/src/a.rs", "const M: &str = \"Runtime.callFunctionOn\";\n", 1, "callFunctionOn"),
@@ -829,6 +841,9 @@ mod tests {
             ("cell/src/af.rs", "let page = format!(\"<p>{x}</p>\\\n    <script>eval(\\\"{y}\\\")</script>\");\n", 2, "eval"),
             ("cell/src/ag.rs", "let v = js_sys::eval(&source)?;\n", 1, "eval"),
             ("cell/src/ah.rs", "let f = js_sys::Function::new_no_args(&body);\n", 1, "js_sys::Function"),
+            // An arbitrary Rust string need not be valid JS. Acorn's strict
+            // parser rejects this; its loose parser discards the eval.
+            ("cell/src/ai.rs", "let fragment = r#\"/\neval(source);\"#;\n", 2, "eval"),
         ];
         check(std::slice::from_ref(&clean), &[]).expect("clean code passes");
         let names: BTreeSet<&str> = planted.iter().map(|(_, _, _, name)| *name).collect();

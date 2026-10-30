@@ -959,6 +959,9 @@ fn tee(mut from: impl Read, mut to: impl Write) -> std::io::Result<Vec<u8>> {
 
 /// The release a deploy makes: its id and when it was made.
 struct Release {
+    /// A verified published CLI for these inputs, supplied by CI. Missing
+    /// after a failed release, so production promises no download yet.
+    cli_version: Option<String>,
     /// `FRAGMENT_DEPLOY_ID`: its commit, which is also its release, the one
     /// id every call between its Worker and its objects carries
     /// (fragment_core::release). A tree with changes not committed is
@@ -982,7 +985,9 @@ fn this_release() -> Result<Release> {
     let id = deploy_id(&sha, !dirty.stdout.is_empty(), at_s);
     anyhow::ensure!(fragment_core::release::valid(&id), "the deploy's id {id:?} is a release's (fragment_core::release::valid)");
     anyhow::ensure!(fragment_core::release::deployed(&at_s.to_string()) == Some(at_s), "the deploy's second {at_s} is a deploy time (fragment_core::release::deployed)");
-    Ok(Release { id, deployed_at: at_s })
+    let cli_version = std::env::var("FRAGMENT_RELEASED_CLI_VERSION").ok().filter(|v| !v.is_empty());
+    anyhow::ensure!(cli_version.as_deref().is_none_or(|v| fragment_core::release::cli_version(v).is_some()), "FRAGMENT_RELEASED_CLI_VERSION must be major.minor.patch");
+    Ok(Release { id, deployed_at: at_s, cli_version })
 }
 
 /// A deploy's id from its commit, whether its tree has changes not
@@ -1270,6 +1275,9 @@ fn worker_config(d: &Deployment, n: &Names, store_id: &str, release: &Release, r
         "CODESTORAGE_ORG": d.codestorage.org,
     });
     let v = vars.as_object_mut().expect("an object");
+    if let Some(version) = &release.cli_version {
+        v.insert("FRAGMENT_CLI_VERSION".into(), json!(version));
+    }
     if let Some(s) = &n.label_suffix {
         v.insert("FRAGMENT_HOST_LABEL_SUFFIX".into(), json!(s));
     }
@@ -1536,7 +1544,7 @@ mod tests {
 
     /// The release the rendering tests deploy.
     fn test_release() -> Release {
-        Release { id: "abc123".into(), deployed_at: 1_792_615_843 }
+        Release { id: "abc123".into(), deployed_at: 1_792_615_843, cli_version: None }
     }
 
     /// The Worker's variables name the release and when it was deployed,
@@ -1550,6 +1558,11 @@ mod tests {
         assert_eq!(vars["FRAGMENT_DEPLOYED_AT"], "1792615843", "a Worker variable is a string");
         assert_eq!(vars["FRAGMENT_DEPLOYED_AT"].as_str().and_then(fragment_core::release::deployed), Some(1_792_615_843));
         assert_eq!(vars["FRAGMENT_SCHEMA"], schema_id().unwrap(), "the schema a rollback to it is checked against");
+        assert!(vars.get("FRAGMENT_CLI_VERSION").is_none(), "a failed or absent CLI release promises no update");
+        let mut with_cli = test_release();
+        with_cli.cli_version = Some("0.15.10".into());
+        let named = worker_config(&deployment(None, None), &n, "0f0e0d0c", &with_cli, &devstack::repo_root()).unwrap();
+        assert_eq!(named["vars"]["FRAGMENT_CLI_VERSION"], "0.15.10");
         let release = this_release().unwrap();
         assert!(fragment_core::release::valid(&release.id) && release.deployed_at > 1_792_615_843, "this tree's, made now");
     }

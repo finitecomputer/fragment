@@ -1,7 +1,7 @@
 # MODEL — the fragment core model
 
 The shape the cell is built to: decided 2026-09-23 (the five changes
-Paul approved), on Cloudflare since phase 2 of docs/cloudflare-v1.md.
+Paul approved), on Cloudflare (docs/cloudflare-v1.md).
 Every mechanism names the Cloudflare primitive it uses; docs/api.md is
 the wire contract in full.
 

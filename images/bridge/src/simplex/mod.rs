@@ -18,8 +18,8 @@
 //! - `socks`: the cores' way out: SimpleX's file servers through the
 //!   platform's XFTP relay, everything else straight out of the computer.
 //!
-//! What it adds to the platform, entry by entry, is
-//! docs/explorations/simplex-complexity.md.
+//! The protocol is in docs/bridge.md, "SimpleX"; outstanding risks are
+//! in docs/technical-debt-ledger.md.
 
 pub mod audio;
 pub mod door;

@@ -584,7 +584,7 @@ pub fn dir_name_ok(fragment: &str) -> bool {
 /// Cloudflare Containers reset every such hello on 443 (measured on a
 /// preview computer, 2026-10-25: each SMP preset reset there, and the same
 /// servers answering on 5223). XFTP's servers are on 443 alone, so a file
-/// arrives only through the relay (docs/explorations/simplex-complexity.md).
+/// arrives only through the relay (docs/bridge.md, "SimpleX").
 fn core_args(cfg: &Config, dir: &Path, port: u16, name: &str, socks: Option<u16>) -> Vec<std::ffi::OsString> {
     let mut args: Vec<std::ffi::OsString> = vec!["-d".into(), dir.join("sx").into(), "-p".into(), port.to_string().into()];
     args.extend(["--files-folder".into(), dir.join("files").into(), "--temp-folder".into(), dir.join("tmp").into()]);

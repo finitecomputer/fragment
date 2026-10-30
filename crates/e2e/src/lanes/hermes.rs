@@ -1,4 +1,4 @@
-//! The real-Hermes lane (docs/cloudflare-v1.md, phase 4's exit): our Hermes
+//! The real-Hermes lane (docs/computers.md): our Hermes
 //! image (`images/hermes`: Hermes' desktop image, the bridge as its Relay
 //! connector) on the platform's computers, under `wrangler dev` with
 //! Docker, its model the platform's model route through the computer's
