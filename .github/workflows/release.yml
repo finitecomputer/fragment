@@ -133,7 +133,9 @@ jobs:
           # published, and the latest: the install command fetches from releases/latest
           gh release edit "$TAG" "${repo[@]}" "${target[@]}" --draft=false --latest
       # The marker is written only after all four builds and the publish
-      # succeed; read it back with the assets before allowing a header.
+      # succeed. List the uploaded assets, re-upload missing/empty ones
+      # once, then fail if any is still absent. Read the marker and assets
+      # back again before allowing a header.
       - id: verified
         env:
           GH_TOKEN: ${{ github.token }}
