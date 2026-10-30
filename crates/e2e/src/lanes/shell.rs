@@ -1,4 +1,4 @@
-//! The shell's platform (docs/cloudflare-v1.md, phase 5): what its page
+//! The shell's platform (docs/api.md): what its page
 //! asks of the API and the fragments it frames.
 //!
 //! The shell is the platform's own page, so it calls the API with the

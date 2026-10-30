@@ -66,9 +66,8 @@ pub struct Config {
     pub computer_snapshots: bool,
     /// `FRAGMENT_COMPUTER_UNSAVED_MAX_MS` (the deploy config's
     /// `computers.unsaved_max_ms`): how long a computer whose sleep's save
-    /// keeps failing stays awake before it sleeps unsaved (I5 of
-    /// docs/explorations/pi-durable.md). Thirty minutes by default, Paul's
-    /// (2026-10-08; `fragment_core::computer`).
+    /// keeps failing stays awake before it sleeps unsaved. See
+    /// docs/durable-computers.md and `fragment_core::computer`.
     pub computer_unsaved_max_ms: i64,
     /// `FRAGMENT_SUPPORT_URL` (the deploy config's `support_url`): where a
     /// person whose computer will not start gets help, an `https:` page or
