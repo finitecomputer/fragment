@@ -191,9 +191,9 @@ impl System {
             System::DoHybrid => "DO baseline hybrid (+ int8 streamed scan, RRF)",
             System::VectorF32 => "vectors alone, float32 exact",
             System::VectorI8 => "vectors alone, int8 exact",
-            System::LanceFts => "LanceDB BM25",
+            System::LanceFts => "LanceDB BM25F",
             System::LanceVector => "LanceDB vectors (IVF_FLAT)",
-            System::LanceHybrid => "LanceDB hybrid (BM25 + IVF_FLAT, RRF)",
+            System::LanceHybrid => "LanceDB hybrid (BM25F + IVF_FLAT, RRF)",
         }
     }
 

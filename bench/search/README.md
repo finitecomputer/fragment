@@ -20,7 +20,7 @@ same pages (the brain's `indexable` rule), with the same vectors.
 | fbrain lexical / hybrid | Finite Brain's search (finite-brain-cli `search.rs`): FTS5 OR of exact tokens, its weights, the top 50 ranked again by its own BM25 over the corpus; hybrid adds an exact float32 cosine scan (top 50), fused by RRF (k = 60) |
 | DO baseline lexical / hybrid | what a fragment could do in its own Durable Object: FTS5 OR of exact tokens with the brain's weights; hybrid adds an int8 vector scan (one byte a dimension, a scale per vector) streamed row by row from SQLite, fused by RRF |
 | vectors alone | the exact float32 and int8 scans by themselves |
-| LanceDB | LanceDB OSS (`lancedb` 0.40): native BM25 over title, heading, context and body with the brain's weights as boosts, an IVF_FLAT cosine index, and its own hybrid query (RRF, k = 60) |
+| LanceDB | LanceDB OSS (`lancedb` 0.40): native BM25F (`CombinedFields`) over title, heading, context and body with the brain's weights, an IVF_FLAT cosine index, and its own hybrid query (RRF, k = 60) |
 
 Scores are over pages: a result is a section, judged by its page; a page's
 second section in the top 10 earns nothing. Recall@10, nDCG@10 (gains

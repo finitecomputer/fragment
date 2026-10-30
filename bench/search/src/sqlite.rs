@@ -34,6 +34,9 @@ pub struct Fts {
     /// The brain's cap on admitting a new page, when it applies.
     cap: Option<u64>,
     pub skipped_pages: usize,
+    /// The pages it holds: a page it never held has no rows to delete (an
+    /// FTS5 delete by an unindexed column reads every row).
+    indexed: std::collections::HashSet<String>,
 }
 
 /// A lexical candidate, with what Finite Brain's rescoring reads.
@@ -51,20 +54,20 @@ impl Fts {
              tokenize = 'unicode61 remove_diacritics 2')",
         )
         .map_err(|e| e.to_string())?;
-        Ok(Fts { conn, cap, skipped_pages: 0 })
+        Ok(Fts { conn, cap, skipped_pages: 0, indexed: Default::default() })
     }
 
     /// A page's sections, in, as the brain writes them; false when the
     /// brain's cap keeps the page out.
     pub fn put_page(&mut self, path: &str, sections: &[&Section]) -> Result<bool, String> {
+        let held = self.indexed.contains(path);
         let tx = self.conn.transaction().map_err(|e| e.to_string())?;
-        tx.execute("DELETE FROM sections WHERE path = ?", [path]).map_err(|e| e.to_string())?;
-        if let Some(cap) = self.cap {
-            if file_bytes(&tx) > cap {
-                tx.commit().map_err(|e| e.to_string())?;
-                self.skipped_pages += 1;
-                return Ok(false);
-            }
+        if held {
+            tx.execute("DELETE FROM sections WHERE path = ?", [path]).map_err(|e| e.to_string())?;
+        } else if self.cap.is_some_and(|cap| file_bytes(&tx) > cap) {
+            // the brain's rule: past its cap, a page it never held is not indexed
+            self.skipped_pages += 1;
+            return Ok(false);
         }
         {
             let mut ins = tx
@@ -77,10 +80,12 @@ impl Fts {
             }
         }
         tx.commit().map_err(|e| e.to_string())?;
+        self.indexed.insert(path.to_owned());
         Ok(true)
     }
 
     pub fn delete_page(&mut self, path: &str) -> Result<(), String> {
+        self.indexed.remove(path);
         self.conn.execute("DELETE FROM sections WHERE path = ?", [path]).map(|_| ()).map_err(|e| e.to_string())
     }
 

@@ -1,7 +1,9 @@
 //! LanceDB OSS, as the search service would hold a fragment's sections: one
-//! table, BM25 over its text columns (title, headings, context, body, with
-//! the brain's weights as boosts), an indexed vector column by cosine, and
-//! its own hybrid query (both legs, fused by reciprocal rank, k = 60).
+//! table, BM25F over its text columns (title, headings, context, body, one
+//! virtual field with the brain's weights, as FTS5 weighs its columns: its
+//! per-column `MultiMatch` scored far worse on the benchmark's corpus), an
+//! indexed vector column by cosine, and its own hybrid query (both legs,
+//! fused by reciprocal rank, k = 60).
 
 use crate::corpus::Section;
 use futures::TryStreamExt;
@@ -9,7 +11,7 @@ use lancedb::arrow::arrow_array::{
     types::Float32Type, Array, FixedSizeListArray, RecordBatch, StringArray,
 };
 use lancedb::arrow::arrow_schema::{DataType, Field, Schema};
-use lancedb::index::scalar::{FtsIndexBuilder, FullTextSearchQuery, MultiMatchQuery};
+use lancedb::index::scalar::{CombinedFieldsQuery, FtsIndexBuilder, FullTextSearchQuery};
 use lancedb::index::vector::IvfFlatIndexBuilder;
 use lancedb::index::Index;
 use lancedb::query::{ExecutableQuery, QueryBase, QueryExecutionOptions, Select};
@@ -134,8 +136,8 @@ impl Lance {
     fn fts_query(q: &str) -> Result<FullTextSearchQuery, String> {
         let columns = TEXT.iter().map(|(c, _)| c.to_string()).collect();
         let boosts = TEXT.iter().map(|(_, b)| *b).collect();
-        let multi = MultiMatchQuery::try_new(q.to_owned(), columns).and_then(|m| m.try_with_boosts(boosts)).map_err(err)?;
-        Ok(FullTextSearchQuery::new_query(multi.into()))
+        let combined = CombinedFieldsQuery::try_new(q.to_owned(), columns).and_then(|m| m.try_with_boosts(boosts)).map_err(err)?;
+        Ok(FullTextSearchQuery::new_query(combined.into()))
     }
 
     pub fn fts(&self, q: &str, limit: usize) -> Result<Vec<String>, String> {
