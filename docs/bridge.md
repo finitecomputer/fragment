@@ -848,9 +848,11 @@ get_chat_info`.
   a message's attachments are served at `/relay/media/<id>`, behind the
   token. Before the inbound is sent, the driver has downloaded the originals
   to `<BRIDGE_MEDIA_DIR>/<sha256>` (default `/tmp/bridge-media`). Their
-  original names, MIME types and absolute local paths accompany the turn
-  in read-only `context`, beside any restart note; an unread file is counted
-  explicitly. The same file-note formatter names files sent as answers to
+  original names, MIME types and absolute local paths follow the new message's
+  words as file notes; an unread file is counted explicitly. They stay with
+  the message so Hermes' prepended voice transcript is not separated from
+  it by a channel-context block. Restart notes keep their read-only `context`.
+  The same file-note formatter names files sent as answers to
   a question. No filename from the record becomes a disk path, and there
   is no extra download or cache. Hermes' own localisation and native-image
   routing continue normally. The scratch is not saved across a sleep.

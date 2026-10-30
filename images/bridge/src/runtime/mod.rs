@@ -104,8 +104,7 @@ pub struct Attached {
     pub refs: Vec<crate::records::AttachmentRef>,
 }
 
-/// A message's words or read-only context, then a line for each downloaded
-/// file: its original name,
+/// A message's words, then a line for each downloaded file: its original name,
 /// its type, and where it is on this computer; and one for any it could not
 /// read. Names are the sender's: anything but plain text in them is a space.
 pub fn with_files(words: &str, by_name: &str, expected: usize, files: &[LocalFile]) -> String {

@@ -2172,8 +2172,8 @@ is a test's shorter one).
 Beside how to ask, every agent is told on every turn in our chats that a
 file someone attaches is already on its computer (`hermes::FILES`, after
 `hermes::ASKING` in `platform_hints.relay`; 2026-10-22). The bridge names
-each original filename, MIME type and local path in the turn's read-only
-context: `/tmp/bridge-media/<sha256>` by default. The files are already
+each original filename, MIME type and local path after the new message's
+words: `/tmp/bridge-media/<sha256>` by default. The files are already
 downloaded before the turn, including images given natively to the model.
 They are scratch, lost at a sleep; copy them into the app or work to keep
 them. Hermes also caches each in the profile's `cache/scratch` as

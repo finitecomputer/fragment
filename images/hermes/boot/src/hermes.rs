@@ -344,7 +344,7 @@ pub const ASKING: &str = "You are in a Fragment chat, and its people are not tec
 /// What every agent is told of the files people attach in our chats, beside
 /// `ASKING` on every turn (2026-10-22: nothing told it an attachment is a
 /// file it can use). The bridge downloads originals into its media scratch
-/// and names each file, MIME and path in the turn's read-only context,
+/// and names each file, MIME and path after the message's words,
 /// independent of Hermes' cache hints and image routing. Its browser tools
 /// have no upload: a site's upload button opens the file dialog on its
 /// desktop, where `computer_use` types the path. The `fragment` skill's

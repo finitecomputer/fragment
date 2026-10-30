@@ -836,6 +836,8 @@ async fn chat_attachments_have_tool_usable_paths_with_native_images() {
     let inbound = calls.iter().find_map(|call| call.body["messages"].as_array()?.iter().find(|m| m["role"] == "user" && content_text(m).contains("put this image into my app")).cloned()).expect("the person's turn reached the model");
     let text = content_text(&inbound);
     eprintln!("attachment turn text: {text}");
+    assert!(text.contains("put this image into my app, with the PDF beside it\n[paul sent a file: 'logo.png'"), "the caption precedes the file notes in the new message: {text}");
+    assert!(!text.contains("[New message]"), "attachments create no channel-context wrapper: {text}");
     assert!(inbound["content"].as_array().is_some_and(|parts| parts.iter().any(|p| p["type"] == "image_url")), "the image reaches the native model");
     for a in &refs {
         let path = format!("/tmp/bridge-media/{}", a["sha256"].as_str().unwrap());
@@ -857,6 +859,17 @@ async fn chat_attachments_have_tool_usable_paths_with_native_images() {
         let path = format!("/tmp/bridge-media/{}", a["sha256"].as_str().unwrap());
         assert!(text.lines().any(|line| line.contains(&path) && line.contains(a["name"].as_str().unwrap()) && line.contains(a["type"].as_str().unwrap())), "a consistent note must map the original name and MIME to its local path: {text}");
     }
+    // A file without words is a new message containing its file note.
+    let before = model.calls.lock().unwrap().len();
+    let said = fake.say(&chat, &person("paul"), json!({ "text": "", "attachments": [refs[1]] }));
+    let turn = fragment_bridge::records::turn_id("juniper--k3x9", &chat, "chat", said["seq"].as_u64().unwrap());
+    within(&fake, &chat, &c, 90_000, "the file-only turn ends", |w| w.bodies(&chat, "work", "turn.end").iter().any(|r| r["turn"] == turn)).await;
+    let calls = model.calls.lock().unwrap().clone();
+    let (text, _) = asked_with(&calls[before..], "[paul sent a file: 'guide.pdf'").expect("the file-only message reached the model");
+    let path = format!("/tmp/bridge-media/{}", refs[1]["sha256"].as_str().unwrap());
+    assert!(text.contains(&format!("[paul sent a file: 'guide.pdf' (application/pdf). It is on your computer at: {path}]")), "the file note is the new message: {text}");
+    assert!(!text.contains("put this image into my app"), "the file-only message is its own request: {text}");
+    assert!(!text.contains("[New message]"), "the file note creates no empty new-message section: {text}");
 }
 
 async fn hermes_running_with_modes(tier: Option<&str>) -> (Fake, Model, String, Container) {

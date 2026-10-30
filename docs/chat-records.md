@@ -528,8 +528,8 @@ period.
 
 Before handing a turn to Hermes, the bridge downloads its attachments to
 `/tmp/bridge-media/<sha256>` by default and names each original filename,
-MIME type and local path in read-only turn context. The agent can copy or
-edit these originals with its tools, including when the model sees an
+MIME type and local path in file notes after the new message's words.
+The agent can copy or edit these originals with its tools, including when the model sees an
 image's pixels directly. These scratch paths are local to the running
 computer and are not stored in the chat record; copy files into the app
 or work to keep them across a sleep (docs/bridge.md).
