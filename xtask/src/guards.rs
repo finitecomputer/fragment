@@ -94,10 +94,11 @@ mod tests {
     /// the schema lock holds: no statement of the cell's makes, alters or
     /// drops a table, an index or a trigger, but the test levers that plant
     /// the shapes the runner must tell apart (schema.rs, its
-    /// `schema-unversion` dropping what later steps made, and a list's
-    /// `before-searched`). A `CREATE TABLE IF NOT EXISTS` in a module, as
-    /// every object's schema was until 2026-10-19, never reaches an object
-    /// made before it. Method: the cell's source, read.
+    /// `schema-unversion` dropping what later steps made, Fragment step
+    /// 4's `members.epoch` among them, and a list's `before-searched`). A
+    /// `CREATE TABLE IF NOT EXISTS` in a module, as every object's schema
+    /// was until 2026-10-19, never reaches an object made before it.
+    /// Method: the cell's source, read.
     #[test]
     fn the_cell_changes_no_schema_outside_its_steps() {
         let files = cell_sources();
@@ -107,7 +108,7 @@ mod tests {
                 *found.entry(file).or_default() += n;
             }
         }
-        let levers = BTreeMap::from([("principal.rs".to_string(), 2), ("schema.rs".to_string(), 7)]);
+        let levers = BTreeMap::from([("principal.rs".to_string(), 2), ("schema.rs".to_string(), 8)]);
         assert_eq!(found, levers, "a schema changes by a step of its class's (crates/core/src/migrate.rs says how), not in the cell");
     }
 
