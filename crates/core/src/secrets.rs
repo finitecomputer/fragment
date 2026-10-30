@@ -104,6 +104,62 @@ pub fn placeholders(v: &str) -> Vec<&str> {
     names
 }
 
+/// A URL's part a secret may fill: its path, query and fragment, after
+/// its scheme, host and port (`url::Position::BeforePath`), with `{{` and
+/// `}}` as the parser kept them (raw in a query, `%7B%7B` in a path) read
+/// as braces, so a placeholder is found wherever the job wrote it.
+fn fillable(url: &Url) -> String {
+    let tail = &url[url::Position::BeforePath..];
+    ["%7B", "%7b"].iter().fold(tail.to_string(), |t, b| t.replace(b, "{")).replace("%7D", "}").replace("%7d", "}")
+}
+
+/// The secret names a URL refers to as `{{NAME}}` in its path or query
+/// (a job's fetch: `https://api.telegram.org/bot{{TOKEN}}/sendMessage`).
+/// Never in its scheme, host or port, where a brace does not parse.
+pub fn url_placeholders(url: &Url) -> Vec<String> {
+    placeholders(&fillable(url)).into_iter().map(str::to_string).collect()
+}
+
+/// A secret's value as it goes into a URL: every byte but the unreserved
+/// ones and `:` (a bot token's) percent-encoded, so it is one path
+/// segment's or one query value's bytes and nothing more: no `/`, `?`,
+/// `#`, `&`, `=` or `%` of its own.
+pub fn url_encoded(value: &str) -> String {
+    value.bytes().map(|b| if b.is_ascii_alphanumeric() || b"-._~:".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") }).collect()
+}
+
+/// Why a URL's placeholders were not filled.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UrlUnfilled {
+    /// The value asked for the name could not be had (its message).
+    Value(String),
+    /// Filled, it would go elsewhere: another scheme, host or port, or
+    /// another number of path segments or query parameters (a value of
+    /// `..`, say).
+    Moved,
+}
+
+/// `url` with each `{{NAME}}` in its path and query replaced by
+/// `value(NAME)`, `url_encoded`, at the egress point: the request goes to
+/// the same scheme, host and port, in as many path segments and query
+/// parameters, or it is not made (`Moved`). Host checks (`may_fill`) are
+/// the caller's, on `url` before this.
+pub fn fill_url(url: &Url, mut value: impl FnMut(&str) -> Result<String, String>) -> Result<Url, UrlUnfilled> {
+    let mut tail = fillable(url);
+    for name in url_placeholders(url) {
+        let v = value(&name).map_err(UrlUnfilled::Value)?;
+        tail = tail.replace(&format!("{{{{{name}}}}}"), &url_encoded(&v));
+    }
+    let filled = Url::parse(&format!("{}{tail}", &url[..url::Position::BeforePath])).map_err(|_| UrlUnfilled::Moved)?;
+    let segments = |u: &Url| u.path_segments().map_or(0, Iterator::count);
+    let pairs = |u: &Url| u.query_pairs().count();
+    let same = filled.scheme() == url.scheme() && filled.host() == url.host() && filled.port_or_known_default() == url.port_or_known_default() && segments(&filled) == segments(url) && pairs(&filled) == pairs(url);
+    if !same {
+        return Err(UrlUnfilled::Moved);
+    }
+    Ok(filled)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -172,5 +228,37 @@ mod tests {
         assert_eq!(placeholders("{{A}}:{{B}}"), vec!["A", "B"]);
         assert!(placeholders("no {{ end").is_empty());
         assert!(placeholders("plain").is_empty());
+    }
+
+    /// Goal: a URL's placeholders fill its path and query alone, the value
+    /// encoded so the request goes where its URL said, in as many segments
+    /// and parameters; a value that would move it is refused.
+    #[test]
+    fn a_secret_fills_a_urls_path_and_query_and_moves_nothing() {
+        let given = url("https://api.telegram.org/bot{{TELEGRAM_BOT_TOKEN}}/setWebhook?url=https%3A%2F%2Fx.example%2Fin&secret_token={{HOOK}}");
+        assert_eq!(url_placeholders(&given), ["TELEGRAM_BOT_TOKEN", "HOOK"]);
+        let values = |n: &str| Ok(match n { "TELEGRAM_BOT_TOKEN" => "123456:AA-bb_cc".to_string(), _ => "0f1e".to_string() });
+        let filled = fill_url(&given, values).unwrap();
+        assert_eq!(filled.as_str(), "https://api.telegram.org/bot123456:AA-bb_cc/setWebhook?url=https%3A%2F%2Fx.example%2Fin&secret_token=0f1e");
+        // a value with a URL's own characters is one segment's, one value's bytes
+        let odd = fill_url(&given, |_| Ok("a/b?c#d&e=f%g h".to_string())).unwrap();
+        assert_eq!(odd.host_str(), Some("api.telegram.org"));
+        assert_eq!(odd.path_segments().unwrap().count(), 2, "{odd}");
+        assert_eq!(odd.query_pairs().count(), 2, "{odd}");
+        assert!(odd.fragment().is_none(), "{odd}");
+        assert_eq!(odd.query_pairs().find(|(k, _)| k == "secret_token").unwrap().1, "a/b?c#d&e=f%g h", "the server reads the value as it was");
+        // a whole segment of `..` would drop one: refused, as is an empty value
+        let dots = url("https://api.example.com/v1/{{S}}/x");
+        assert_eq!(fill_url(&dots, |_| Ok("..".to_string())), Err(UrlUnfilled::Moved));
+        assert_eq!(fill_url(&dots, |_| Ok(".".to_string())), Err(UrlUnfilled::Moved));
+        assert_eq!(fill_url(&dots, |_| Err("no secret named S".to_string())), Err(UrlUnfilled::Value("no secret named S".to_string())));
+        // no placeholders: the same URL; none is read from the host
+        let plain = url("https://api.example.com/v1/x?k=v");
+        assert!(url_placeholders(&plain).is_empty());
+        assert_eq!(fill_url(&plain, |_| unreachable!()).unwrap(), plain);
+        // a placeholder before the path is no placeholder: the host stays as written
+        let host = url("https://{{HOST}}.example.com/x");
+        assert!(url_placeholders(&host).is_empty());
+        assert_eq!(fill_url(&host, |_| unreachable!()).unwrap(), host);
     }
 }
