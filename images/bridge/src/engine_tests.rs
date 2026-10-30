@@ -1563,10 +1563,10 @@ fn a_question_is_answered_back_where_it_was_asked() {
     assert_eq!(*body, json!({ "kind": "answer", "chat": HOME, "text": text, "by": "npub1rowan", "name": "Rowan", "asked": { "fragment": "talk--k3x9", "seq": 1 }, "turn": t.turn, "outcome": "idle", "hop": 2 }), "called by its name, as its chat shows it");
     assert!(e.state().turns.is_empty(), "let go once its end and its answer are posted");
 
-    // juniper's bridge reads it: a turn at home, its owner's, told by rowan
+    // juniper's bridge reads it: a turn at home, asked as rowan
     let a = read(&mut e, &juniper, &juniper.fragment, answer_task(1, &juniper.identity, body.clone()), None, T0 + 7);
     let woke = started(&a).expect("juniper's answer turn");
-    assert_eq!((woke.fragment.as_str(), woke.text.as_str(), woke.asker.as_str(), woke.asker_name.as_str()), (HOME, text, "npub1paul", "Rowan"));
+    assert_eq!((woke.fragment.as_str(), woke.text.as_str(), woke.asker.as_str(), woke.asker_name.as_str()), (HOME, text, "npub1rowan", "Rowan"), "named as the agent that answered");
     assert_eq!(woke.turn, records::turn_id(&juniper.fragment, &juniper.fragment, "tasks", 1));
     assert_eq!(e.state().turns[&woke.turn].hop, 2, "no shallower than the turn that answered");
     assert!(e.state().agent_turns.contains_key(HOME), "it spends its chat's budget");
@@ -1596,7 +1596,7 @@ fn a_question_is_answered_back_where_it_was_asked() {
     assert_eq!(kinds(&a), vec!["turn.start", "turn.end"], "a turn at home, refused");
     let home: Vec<&str> = a.effects.iter().filter_map(|x| match x { Effect::Owed { fragment, .. } => Some(fragment.as_str()), _ => None }).collect();
     assert_eq!(home, vec![HOME, HOME]);
-    assert!(posts(&a)[1].1["error"].as_str().is_some_and(|e| e.starts_with("Rowan could not answer your question in talk--k3x9 (\"And the day after?\"): agents handed this on")), "{:?}", posts(&a));
+    assert!(posts(&a)[1].1["error"].as_str().is_some_and(|e| e.starts_with(&format!("Rowan wasn't asked: {}. (Your question in talk--k3x9: \"And the day after?\")", refused_deep()))), "the reason first: {:?}", posts(&a));
 }
 
 /// Goal: an answer says how the asked turn ended, and a turn is never run
@@ -1658,26 +1658,70 @@ fn every_end_of_an_asked_turn_answers() {
     assert_eq!((&answers(&s)[0].2["refused"], &answers(&s)[0].2["error"]), (&json!(true), &json!(REFUSED_QUEUED)));
 }
 
-/// Goal: a turn an agent asked that asks back in words (a clarify) ends at
-/// once, its question its answer: an agent's words never answer one, so it
-/// would hold the computer awake its whole bound. Invalid: its owner's
-/// turn (an answer's, a person's) waits for them as before.
+/// Goal (Paul, 2026-10-30): an answer's turn is asked as the agent that
+/// answered (its identity, its name), and is still its owner's business in
+/// the chat it runs in: their Stop stops it, and a question it asks in
+/// words waits for them (`turn.asked` says so), their next message its
+/// answer, never a turn of its own; it is not ended as a question to an
+/// agent. Invalid: another person's Stop, and the answering agent's words.
 #[test]
-fn a_turn_an_agent_asked_asks_back_no_one() {
+fn an_answers_turn_is_its_answerers_and_its_owners_to_stop_and_answer() {
     let (rowan, juniper) = (agent("rowan"), agent("juniper"));
-    let talk = view(&[&rowan, &juniper]);
+    let mut home = view(&[&juniper]);
+    home.names.insert("npub1rowan".into(), "Rowan".into());
+    let mut e = engine(&[rowan.clone(), juniper.clone()]);
+    let answer = |seq: u64| answer_task(seq, &juniper.identity, json!({ "kind": "answer", "chat": HOME, "text": "Rowan answered your question in talk--k3x9 (\"q\"):\n\nWhich garden?", "by": "npub1rowan", "name": "Rowan", "asked": { "fragment": "talk--k3x9", "seq": seq }, "turn": format!("t{seq}"), "outcome": "idle", "hop": 2 }));
+    let said = |e: &mut Engine, seq: u64, who: &str, body: Value| read(e, &juniper, HOME, rec(seq, who, body), Some(&home), T0);
+
+    // Stop: skyler's is passed over, paul's stops it
+    let t = started(&read(&mut e, &juniper, &juniper.fragment, answer(1), None, T0)).expect("the answer's turn").turn;
+    assert_eq!(e.state().turns[&t].asker, "npub1rowan");
+    let s = said(&mut e, 1, "npub1skyler", json!({ "kind": "stop", "turn": t }));
+    assert!(commands(&s).is_empty(), "not skyler's: {:?}", s.effects);
+    let s = said(&mut e, 2, "npub1paul", json!({ "kind": "stop", "turn": t }));
+    assert!(commands(&s).contains(&Command::Stop { turn: t.clone() }), "its owner's Stop: {:?}", s.effects);
+    ev(&mut e, Event::End { turn: t, outcome: Outcome::Stopped }, T0);
+
+    // a question in words: it waits for paul, whose next message answers it
+    let t = started(&read(&mut e, &juniper, &juniper.fragment, answer(2), None, T0)).expect("the answer's turn").turn;
+    ev(&mut e, Event::Reply { turn: t.clone(), part: 1, text: "Which garden do you mean?".into() }, T0);
+    let s = ev(&mut e, Event::Asked { turn: t.clone() }, T0);
+    assert!(!commands(&s).contains(&Command::Forget { turn: t.clone() }), "not ended as a question to an agent: {:?}", s.effects);
+    assert!(posts(&s).iter().any(|(_, b)| b["kind"] == "turn.asked" && b["asks"] == "npub1paul"), "the chat is told it waits for paul: {:?}", posts(&s));
+    let s = said(&mut e, 3, "npub1rowan", json!({ "text": "the back one", "to": ["npub1juniper"] }));
+    assert!(!commands(&s).iter().any(|c| matches!(c, Command::Tell { .. })), "the answering agent's words are not its answer: {:?}", s.effects);
+    let s = said(&mut e, 4, "npub1paul", json!({ "text": "the back one" }));
+    assert!(commands(&s).iter().any(|c| matches!(c, Command::Tell { turn, by, .. } if *turn == t && by == "npub1paul")), "paul's are: {:?}", s.effects);
+    assert!(started(&s).is_none(), "and start no turn of their own");
+}
+
+/// Goal (#717's re-review): an ask's turn (one with a return) that asks
+/// back in words is told at once, in words its runtime's question takes,
+/// that no answer is coming, and goes on: it is not ended (a runtime held
+/// in a clarify lets go of words alone), and its answer is what it then
+/// says. Invalid: a plain hand-off's turn (no return) waits as before.
+#[test]
+fn an_asks_turn_that_asks_back_is_told_to_go_on() {
+    let (rowan, juniper) = (agent("rowan"), agent("juniper"));
+    let mut talk = view(&[&rowan, &juniper]);
+    talk.names.insert("npub1juniper".into(), "Juniper".into());
     let mut e = engine(&[rowan.clone(), juniper.clone()]);
     let t = started(&read(&mut e, &rowan, "talk--k3x9", question(1, "Which garden?"), Some(&talk), T0)).expect("rowan's turn");
     ev(&mut e, Event::Reply { turn: t.turn.clone(), part: 1, text: "Which one do you mean?".into() }, T0 + 1);
     let s = ev(&mut e, Event::Asked { turn: t.turn.clone() }, T0 + 2);
-    assert!(commands(&s).contains(&Command::Forget { turn: t.turn.clone() }), "the runtime lets it go: {:?}", s.effects);
-    assert!(answers(&s)[0].2["text"].as_str().is_some_and(|a| a.ends_with("Which one do you mean?")), "its question is its answer");
-    assert!(e.state().turns.is_empty(), "nothing held awake");
-    // paul's own turn asks him, and waits
-    let p = started(&read(&mut e, &rowan, "talk--k3x9", rec(2, "npub1paul", json!({ "text": "hi" })), Some(&talk), T0 + 3)).expect("paul's");
-    ev(&mut e, Event::Reply { turn: p.turn.clone(), part: 1, text: "Which one?".into() }, T0 + 4);
-    let s = ev(&mut e, Event::Asked { turn: p.turn.clone() }, T0 + 5);
+    assert_eq!(commands(&s), vec![Command::Tell { turn: t.turn.clone(), seq: ASKED_BACK_SEQ, by: "npub1juniper".into(), by_name: "Juniper".into(), text: ASKED_BACK.into(), attached: None }], "told to go on, in words");
+    assert!(!kinds(&s).contains(&"turn.asked".to_string()), "waiting for no one: {:?}", s.effects);
+    assert!(e.state().turns[&t.turn].active() && !e.state().turns[&t.turn].asking, "still running");
+    ev(&mut e, Event::Reply { turn: t.turn.clone(), part: 2, text: "The back one, I think.".into() }, T0 + 3);
+    let end = ev(&mut e, Event::End { turn: t.turn.clone(), outcome: Outcome::Idle }, T0 + 4);
+    assert!(answers(&end)[0].2["text"].as_str().is_some_and(|a| a.ends_with("Which one do you mean?\n\nThe back one, I think.")), "its answer is what it said: {:?}", answers(&end));
+
+    // a plain hand-off (no return): it waits for its asker, as before
+    let p = started(&read(&mut e, &rowan, "talk--k3x9", rec(2, "npub1juniper", json!({ "text": "Which garden?", "to": ["npub1rowan"] })), Some(&talk), T0 + 5)).expect("the hand-off's turn");
+    ev(&mut e, Event::Reply { turn: p.turn.clone(), part: 1, text: "Which one?".into() }, T0 + 6);
+    let s = ev(&mut e, Event::Asked { turn: p.turn.clone() }, T0 + 7);
     assert!(commands(&s).is_empty() && e.state().turns[&p.turn].asking, "{:?}", s.effects);
+    assert!(posts(&s).iter().any(|(_, b)| b["kind"] == "turn.asked" && b["asks"] == "npub1juniper"));
 }
 
 /// Goal: a state holding an ask's return is format 3, which a bridge
@@ -2040,6 +2084,12 @@ impl World {
                 }
                 Effect::Runtime(Command::Forget { turn }) => {
                     self.held.remove(&turn);
+                }
+                // the bridge's own words to an ask's turn that asked back
+                Effect::Runtime(Command::Tell { turn, seq: ASKED_BACK_SEQ, .. }) => {
+                    if let Some(h) = self.held.get_mut(&turn) {
+                        h.asking = false;
+                    }
                 }
                 Effect::Runtime(Command::Tell { turn, seq, .. }) => {
                     let claim = self.journal.work(&turn, "turn.start").into_iter().next();

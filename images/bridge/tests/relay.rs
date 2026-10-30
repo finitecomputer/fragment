@@ -339,6 +339,37 @@ async fn other_answered_in_words_through_the_relay() {
     bridge.stop().await;
 }
 
+/// Goal (#717's re-review): an ask's turn (juniper asked rowan, to be
+/// answered back) whose clarify asks back in words is told at once, through
+/// Relay, that no answer is coming: Hermes' clarify takes the bridge's
+/// words as its answer, the turn goes on and ends, nothing waits on an
+/// agent's words, and its answer goes back to juniper. Before, the bridge
+/// ended the turn and left Hermes' clarify holding the chat for an hour.
+#[tokio::test]
+async fn an_asks_turn_that_asks_back_in_words_goes_on() {
+    let (fake, bridge, hermes, _dir) = setup("relay-asked-back", &["juniper", "rowan"]).await;
+    let pair = fake.chat("pair", &["juniper", "rowan"]);
+    let home = fake.chat("home", &["juniper"]);
+    fake.until(WAIT, "the bridge to follow", |w| w.live_sockets() >= 5).await;
+    let asked = fake.say(&pair, &person("juniper"), json!({ "text": "clarify a color", "to": [person("rowan")], "return_to": home }));
+    let turn = records::turn_id("rowan--k3x9", &pair, "chat", asked["seq"].as_u64().unwrap());
+    fake.until(WAIT, "the clarify's card", |w| !work_of(w, &pair, &turn, "turn.prompt").is_empty()).await;
+    // its owner presses "Other" with no words: Hermes asks for them
+    let p = fake.with(|w| work_of(w, &pair, &turn, "turn.prompt")[0].clone());
+    fake.say(&pair, &person("paul"), json!({ "kind": "prompt_response", "prompt": p["prompt"], "option": "other" }));
+    fake.until(WAIT, "the turn's end", |w| !work_of(w, &pair, &turn, "turn.end").is_empty()).await;
+    fake.with(|w| {
+        assert_eq!(work_of(w, &pair, &turn, "turn.end")[0]["outcome"], "idle", "it went on and answered");
+        assert!(work_of(w, &pair, &turn, "turn.asked").is_empty(), "waiting for no one");
+        let said: Vec<String> = replies(w, &pair).iter().filter(|r| r["turn"] == turn.as_str()).map(|r| r["text"].as_str().unwrap_or("").to_string()).collect();
+        assert_eq!(said, vec!["Type your answer:".to_string(), format!("echo: [Juniper] clarify a color (chose: {})", fragment_bridge::engine::ASKED_BACK)], "Hermes' clarify took the bridge's words");
+        let a = w.records("juniper--k3x9", "tasks").into_iter().find(|r| r["body"]["turn"] == turn.as_str()).expect("its answer");
+        assert!(a["body"]["text"].as_str().is_some_and(|t| t.contains("(chose: No answer is coming")), "and its answer went back: {a}");
+    });
+    hermes.with(|s| assert!(s.heard.iter().any(|e| e["text"] == fragment_bridge::engine::ASKED_BACK), "told in words, in its chat: {:?}", s.heard));
+    bridge.stop().await;
+}
+
 /// Goal (Paul on production, 2026-10-22: his answer typed in the message box
 /// stayed queued, the card open): a clarify's card is answered by its
 /// owner's message in the chat as by "Other" with those words on the card:

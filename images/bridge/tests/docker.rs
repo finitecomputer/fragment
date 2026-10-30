@@ -3336,6 +3336,10 @@ async fn teammates_ask_each_other() {
     let (manswer, a) = fake.with(|w| (reply(w, &pair, &mturn), answers_of(w, "juniper", "ping from juniper")[0].clone()));
     assert!(manswer.contains("ping from juniper"), "maple answered in their chat: {manswer}");
     assert_eq!((&a["principal"], &a["body"]["name"], &a["body"]["outcome"], &a["body"]["turn"]), (&json!("npub1juniper"), &json!("Maple"), &json!("idle"), &json!(mturn)));
+    let woken = fake.with(|w| w.bodies(&jchat, "work", "turn.start").into_iter().find(|b| b["turn"] == woke("juniper", &a).as_str())).expect("its start");
+    assert_eq!(woken["asker"], "npub1maple", "asked as the agent that answered");
+    let told_as = handed(&model, "juniper--k3x9", "Maple answered your question").first().map(|m| m.body["messages"].as_array().and_then(|ms| ms.iter().rev().find(|x| x["role"] == "user")).map(content_text).unwrap_or_default()).unwrap_or_default();
+    assert!(told_as.starts_with("[Maple]"), "Hermes is told it is from Maple: {told_as}");
     let said = fake.with(|w| reply(w, &jchat, &woke("juniper", &a)));
     eprintln!("teammates: juniper said on: {said}");
     assert!(said.contains("passed on: Maple answered your question in") && said.contains(&manswer), "juniper says maple's answer in her own chat: {said}");
@@ -3351,6 +3355,23 @@ async fn teammates_ask_each_other() {
     assert!(refused.contains("names 2 agents") && refused.contains("fern--k3x9") && refused.contains("maple--k3x9"), "never a guess, the two named by their fragments: {refused}");
     assert_eq!(fake.with(|w| (w.records(&pair, "chat").len(), w.made.len())), (asked_before, 1), "nothing asked, no chat made");
     fake.with(|w| w.fragments.get_mut("fern--k3x9").unwrap().title = "Fernando".into());
+
+    // an ask whose answering turn clarifies, its owner pressing Other with
+    // no words: Hermes asks for words, which no agent can give, so the
+    // bridge tells it no answer is coming; it goes on, and answers back
+    let clar = say(&jchat, "juniper", "ask: maple: clarify: Which color? | red | blue");
+    within(&fake, &jchat, &c, 180_000, "juniper's asking turn", |w| ended(w, &jchat, &clar)).await;
+    let card = |w: &support::fake::World| w.bodies(&pair, "work", "turn.prompt").into_iter().find(|p| p["text"].as_str().is_some_and(|t| t.contains("Which color?")));
+    within(&fake, &pair, &c, 180_000, "maple's clarify card", |w| card(w).is_some()).await;
+    let p = fake.with(|w| card(w)).unwrap();
+    fake.say(&pair, &person("paul"), json!({ "kind": "prompt_response", "prompt": p["prompt"], "option": "other" }));
+    within(&fake, &jchat, &c, 180_000, "maple's answer, gone on", |w| answers_of(w, "juniper", "Which color?").first().is_some_and(|a| ended(w, &jchat, &woke("juniper", a)))).await;
+    fake.with(|w| {
+        let a = &answers_of(w, "juniper", "Which color?")[0]["body"];
+        assert_eq!(a["outcome"], "idle", "maple's turn went on and ended: {a}");
+        assert!(a["text"].as_str().is_some_and(|t| t.contains("No answer is coming")), "Hermes' clarify took the bridge's words: {a}");
+        assert!(w.bodies(&pair, "work", "turn.asked").iter().all(|q| q["turn"] != a["turn"]), "waiting for no one");
+    });
 
     // two asking each other at once: each answered once, in its own chat
     let (ja, mb) = (say(&jchat, "juniper", "ask: maple: one at once"), say(&mchat, "maple", "ask: juniper: two at once"));
