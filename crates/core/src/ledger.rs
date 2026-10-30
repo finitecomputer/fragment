@@ -757,8 +757,11 @@ fn allowed(standing: Standing, spend: Spend) -> Result<(), Refused> {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Ledger {
     money: Money,
-    /// An org's terms; a person's head has none, and is written as before.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// An org's terms, never written in the head: an older release that
+    /// rewrites a head it reads (its sweep) drops what it does not know.
+    /// The cell binds them as it reads one, from its ledger's name and its
+    /// own row of the budget (`bind_org`).
+    #[serde(skip)]
     org: Option<org::OrgTerms>,
     /// The reservations the releases before decision 62 held, by their
     /// references as a head of theirs names them, until `retire_holds`

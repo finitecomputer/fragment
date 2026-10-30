@@ -516,13 +516,26 @@ impl Store for SqlStore {
     }
 }
 
-/// The head as this cell keeps it, or a new one: an org's, with no credit
+/// The head as this cell keeps it, bound as an org's when its name is an
+/// org's (`Ledger::bind_org`), or a new one: an org's, with no credit
 /// (`Ledger::new_org`), or a person's, a guest with no credit
 /// (`Ledger::new`), then the deployment's default plan for new people
 /// (decision 25: `FRAGMENT_DEFAULT_PLAN`).
 fn head(store: &mut SqlStore, cfg: &Config, now_ms: i64) -> CellResult<Ledger> {
+    // an org's terms are never in its head (an older release's sweep
+    // rewrites the head it reads): that it is an org's is its name, kept
+    // as its first call named it, and its budget a row of its own
+    let payer: Vec<Json> = store.rows("SELECT value FROM meta WHERE key = 'payer'", vec![]);
+    let budget: Vec<Json> = store.rows("SELECT value FROM meta WHERE key = 'org_budget'", vec![]);
     let rows: Vec<Json> = store.rows("SELECT ledger AS value FROM head WHERE id = 1", vec![]);
     store.checked()?;
+    let org = match payer.first().and_then(|p| Payer::parse(&p.value)) {
+        Some(Payer::Org(_)) => {
+            let budget = budget.first().map(|b| b.value.parse::<i64>().map_err(|e| CellError::host(format!("the org's budget row: {e}")))).transpose()?;
+            Some(core::org::OrgTerms::of(budget.unwrap_or(0)))
+        }
+        _ => None,
+    };
     if let Some(row) = rows.into_iter().next() {
         let mut ledger: Ledger = serde_json::from_str(&row.value).map_err(|e| CellError::host(format!("the ledger's head does not read as it was written: {e}")))?;
         // a head of the releases before decision 62: its holds forgiven,
@@ -531,12 +544,13 @@ fn head(store: &mut SqlStore, cfg: &Config, now_ms: i64) -> CellResult<Ledger> {
         if retired > 0 {
             console_log!("{}", json!({ "event": "ledger.holds-retired", "retired": retired }));
         }
+        if let Some(terms) = org {
+            ledger.bind_org(terms);
+        }
         ledger.assert_valid();
         return Ok(ledger);
     }
-    let payer: Vec<Json> = store.rows("SELECT value FROM meta WHERE key = 'payer'", vec![]);
-    store.checked()?;
-    if let Some(Payer::Org(_)) = payer.first().and_then(|p| Payer::parse(&p.value)) {
+    if org.is_some() {
         return Ok(Ledger::new_org(now_ms));
     }
     let mut ledger = Ledger::new(now_ms);
@@ -548,8 +562,15 @@ fn head(store: &mut SqlStore, cfg: &Config, now_ms: i64) -> CellResult<Ledger> {
 }
 
 /// Writes the head back, with the book this release charges with
-/// (`Ledger::written`: for a rollback to a release that kept its own).
+/// (`Ledger::written`: for a rollback to a release that kept its own), and
+/// an org's budget in its own row, which no head's rewrite touches.
 fn save(store: &SqlStore, ledger: &Ledger, book: &PriceBook) {
+    if let Some(terms) = ledger.org_terms() {
+        store.exec(
+            "INSERT INTO meta (key, value) VALUES ('org_budget', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+            vec![terms.budget().to_string().into()],
+        );
+    }
     store.exec(
         "INSERT INTO head (id, ledger) VALUES (1, ?) ON CONFLICT (id) DO UPDATE SET ledger = excluded.ledger",
         vec![ledger.written(book).into()],
