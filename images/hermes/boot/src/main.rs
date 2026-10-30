@@ -673,7 +673,8 @@ fn work_dirs(profile: &Path, a: &Agent, ids: Option<(u32, u32)>) {
 /// (`follow_agents`); Hermes reads it at the agent's first turn either way.
 /// The config is written before `.env`, so the directory is a profile to
 /// Hermes (an identity file) only once its config is whole.
-async fn write_profile(api: &Api, a: &Agent, home: &Path, ids: Option<(u32, u32)>, route: &hermes::Route, credential_env: &[String]) {
+#[allow(clippy::too_many_arguments)]
+async fn write_profile(api: &Api, a: &Agent, home: &Path, ids: Option<(u32, u32)>, route: &hermes::Route, credential_env: &[String], team: &[hermes::Teammate]) {
     let t = Instant::now();
     let high_on = env("FRAGMENT_HIGH_TIER").as_deref() == Some("on");
     let own = move |p: &Path| chown(p, ids);
@@ -689,7 +690,7 @@ async fn write_profile(api: &Api, a: &Agent, home: &Path, ids: Option<(u32, u32)
     // Which agent this profile is: what retiring it later reads.
     let _ = std::fs::write(dir.join(".fragment-agent"), &a.fragment);
     let title = read_title(api, a).await;
-    let main = write_config(api, a, &dir, ids, route, credential_env, high_on, &title).await;
+    let main = write_config(api, a, &dir, ids, route, credential_env, high_on, &title, team).await;
     // who the agent is and its credentials, for Hermes and its terminal (the
     // fragment CLI, the skills' helpers, any SDK): written whole each time,
     // after the config
@@ -731,7 +732,7 @@ async fn read_title(api: &Api, a: &Agent) -> Result<Option<String>, ()> {
 /// unread keeps it the same way. Answers the model it names, or none if it
 /// was left as it was.
 #[allow(clippy::too_many_arguments)]
-async fn write_config(api: &Api, a: &Agent, dir: &Path, ids: Option<(u32, u32)>, route: &hermes::Route, credential_env: &[String], high_on: bool, title: &Result<Option<String>, ()>) -> Option<hermes::MainModel> {
+async fn write_config(api: &Api, a: &Agent, dir: &Path, ids: Option<(u32, u32)>, route: &hermes::Route, credential_env: &[String], high_on: bool, title: &Result<Option<String>, ()>, team: &[hermes::Teammate]) -> Option<hermes::MainModel> {
     let config = dir.join("config.yaml");
     let answer = api.file(&a.fragment, &a.fragment, "agent.json", fragment_bridge::api::AGENT_JSON_MAX_BYTES).await;
     let tier = hermes::Tier::read(&answer, high_on).or_else(|| {
@@ -748,7 +749,7 @@ async fn write_config(api: &Api, a: &Agent, dir: &Path, ids: Option<(u32, u32)>,
     let (main, deep_unused) = main.with_deep(a, answer.as_ref().ok().and_then(|b| hermes::OwnModel::deep_of(b)));
     let reasoning = main.reasoning(hermes::Reasoning::of(answer.as_ref().ok().map(|b| b.as_ref())), route);
     let home = fragment_bridge::api::Home::of(answer.as_ref().ok().map(|b| b.as_ref()));
-    let text = hermes::profile_config(a, name, home, &main, reasoning, route, credential_env, &dir.join(hermes::CREDENTIALS_FILE));
+    let text = hermes::profile_config(a, name, home, team, &main, reasoning, route, credential_env, &dir.join(hermes::CREDENTIALS_FILE));
     if std::fs::read_to_string(&config).ok().as_deref() != Some(text.as_str()) {
         write_whole(&config, &text, ids);
         if let (Some(own), Some(why)) = (&own, &unused) {
@@ -785,15 +786,37 @@ fn write_identity(a: &Agent, dir: &Path, ids: Option<(u32, u32)>, title: &Result
     }
 }
 
+/// The computer's agents as each other's teammates (hermes.rs,
+/// `told_team`), with the titles read for it: each one's name (its title
+/// as read now, else its name on the computer) and role (its job's first
+/// line, from its SOUL.md as the sync left it). Read again with each
+/// agent's model, every `HERMES_BOOT_MODEL_MS`, so a rename or a new job
+/// reaches its teammates' next turns.
+async fn team_of(api: &Api, agents: &[Agent], home: &Path) -> (Vec<Result<Option<String>, ()>>, Vec<hermes::Teammate>) {
+    let mut titles = Vec::with_capacity(agents.len());
+    for a in agents {
+        titles.push(read_title(api, a).await);
+    }
+    let team = agents
+        .iter()
+        .zip(&titles)
+        .map(|(a, t)| {
+            let soul = std::fs::read_to_string(hermes::profile_dir(home, &a.fragment).join("SOUL.md")).unwrap_or_default();
+            hermes::Teammate { name: bots::name(a, t.as_ref().ok().and_then(|t| t.as_deref())).to_string(), fragment: a.fragment.clone(), role: bots::description(&soul) }
+        })
+        .collect();
+    (titles, team)
+}
+
 /// Each agent's profile at a boot, and the profiles of agents that left
 /// this computer retired: moved aside, never deleted. Only a boot retires
 /// one: no Hermes runs yet that could be winding down a turn in it.
-async fn profiles(api: &Api, agents: &[Agent], home: &Path, ids: Option<(u32, u32)>, route: &hermes::Route, credential_env: &[String]) {
+async fn profiles(api: &Api, agents: &[Agent], home: &Path, ids: Option<(u32, u32)>, route: &hermes::Route, credential_env: &[String], team: &[hermes::Teammate]) {
     let profiles_root = home.join("profiles");
     let _ = std::fs::create_dir_all(&profiles_root);
     chown(&profiles_root, ids);
     for a in agents {
-        write_profile(api, a, home, ids, route, credential_env).await;
+        write_profile(api, a, home, ids, route, credential_env, team).await;
     }
     if let Ok(entries) = std::fs::read_dir(&profiles_root) {
         for e in entries.filter_map(Result::ok) {
@@ -1008,12 +1031,12 @@ async fn ask_gateway(home: &Path, verb: &str) -> Result<serde_json::Value, Strin
 /// no turn before its profile is whole. A removed agent leaves the ready
 /// file, so the bridge stops at once; its profile waits for the next boot.
 #[allow(clippy::too_many_arguments)]
-async fn follow_agents(api: &Api, change: &agents::Change, now: &[Agent], home: &Path, ids: Option<(u32, u32)>, route: &hermes::Route, credential_env: &[String], chats: &mut BotChats) {
+async fn follow_agents(api: &Api, change: &agents::Change, now: &[Agent], home: &Path, ids: Option<(u32, u32)>, route: &hermes::Route, credential_env: &[String], chats: &mut BotChats, team: &[hermes::Teammate]) {
     let t = Instant::now();
     let names = |l: &[Agent]| l.iter().map(|a| a.fragment.clone()).collect::<Vec<_>>();
     ev!("agents.changed", { "added": names(&change.added), "removed": names(&change.removed), "credentials": names(&change.credentials), "agents": now.len() });
     for a in &change.added {
-        write_profile(api, a, home, ids, route, credential_env).await;
+        write_profile(api, a, home, ids, route, credential_env, team).await;
     }
     // an agent's credentials changed: its next turn reads them (its `.env`),
     // and its terminal's next session (its credentials file); and its model,
@@ -1022,7 +1045,7 @@ async fn follow_agents(api: &Api, change: &agents::Change, now: &[Agent], home: 
     for a in &change.credentials {
         write_credentials(a, home, ids);
         let title = read_title(api, a).await;
-        write_config(api, a, &hermes::profile_dir(home, &a.fragment), ids, route, credential_env, high_on, &title).await;
+        write_config(api, a, &hermes::profile_dir(home, &a.fragment), ids, route, credential_env, high_on, &title, team).await;
         ev!("profile.credentials", { "agent": a.fragment, "providers": a.credentials.iter().map(|c| c.provider.clone()).collect::<Vec<_>>() });
     }
     if !change.added.is_empty() {
@@ -1257,7 +1280,8 @@ async fn boot_main() {
     // Hermes skips an external dir it does not find, until the profile's
     // config changes. What it holds is installed off the boot's path.
     managed_dir();
-    profiles(&api, &agents, &home, ids, &route, &credential_env).await;
+    let (_, mut team) = team_of(&api, &agents, &home).await;
+    profiles(&api, &agents, &home, ids, &route, &credential_env, &team).await;
     ev!("boot.configured", { "agents": agents.len(), "ms": t0.elapsed().as_millis() as u64 });
 
     match tokio::time::timeout(Duration::from_millis(END_PREVIOUS_LIFE_MS_MAX), ending).await {
@@ -1376,7 +1400,7 @@ async fn boot_main() {
                         if c.credential_env != credential_env {
                             credential_env = c.credential_env.clone();
                             for a in agents.iter().filter(|a| c.agents.iter().any(|n| n.fragment == a.fragment)) {
-                                write_profile(&api, a, &home, ids, &route, &credential_env).await;
+                                write_profile(&api, a, &home, ids, &route, &credential_env, &team).await;
                             }
                         }
                         // the deployment's models changed (a release): every
@@ -1386,12 +1410,12 @@ async fn boot_main() {
                             ev!("profile.model_ids", { "ids": route.ids });
                             for a in agents.iter().filter(|a| c.agents.iter().any(|n| n.fragment == a.fragment)) {
                                 let title = read_title(&api, a).await;
-                                write_config(&api, a, &hermes::profile_dir(&home, &a.fragment), ids, &route, &credential_env, high_on, &title).await;
+                                write_config(&api, a, &hermes::profile_dir(&home, &a.fragment), ids, &route, &credential_env, high_on, &title, &team).await;
                             }
                         }
                         let change = agents::diff(&agents, &c.agents);
                         if !change.is_empty() {
-                            follow_agents(&api, &change, &c.agents, &home, ids, &route, &credential_env, &mut chats).await;
+                            follow_agents(&api, &change, &c.agents, &home, ids, &route, &credential_env, &mut chats, &team).await;
                         }
                         agents = c.agents;
                         // an agent's chat made after the agent: its Bot Chat now
@@ -1411,11 +1435,13 @@ async fn boot_main() {
             // and its name, as it or its owner last named it
             if last_models.elapsed() >= Duration::from_millis(models_every) {
                 last_models = Instant::now();
-                for a in &agents {
+                // and its teammates, as they are named and doing now
+                let titles;
+                (titles, team) = team_of(&api, &agents, &home).await;
+                for (a, title) in agents.iter().zip(&titles) {
                     let dir = hermes::profile_dir(&home, &a.fragment);
-                    let title = read_title(&api, a).await;
-                    write_config(&api, a, &dir, ids, &route, &credential_env, high_on, &title).await;
-                    write_identity(a, &dir, ids, &title);
+                    write_config(&api, a, &dir, ids, &route, &credential_env, high_on, title, &team).await;
+                    write_identity(a, &dir, ids, title);
                 }
             }
             if last_sync.elapsed() > Duration::from_millis(sync_every) {

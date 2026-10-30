@@ -367,9 +367,8 @@ address it is served at, below), and that face is what is shown:
 - the share sheet and the access view (an agent's `title`), and an
   export (its members' `title`);
 - its computer's runtime: our Hermes image tells the agent its name at
-  every turn, and names it in Bot Mode by its title (docs/computers.md,
-  "Its name, in our Hermes image" and "Bot Mode in our Hermes image").
-  Bot Mode has no picture;
+  every turn, and its teammates its title (docs/computers.md, "Its name,
+  in our Hermes image" and "Teammates in our Hermes image");
 - its owner's SimpleX app: the bridge names the agent's SimpleX profile
   by its title, which the core sends to the linked app (docs/bridge.md,
   "SimpleX"). It has no picture either.
@@ -3174,8 +3173,8 @@ run's, titled "Your first chat": below), is titled on its own as any
 chat is, never by its agent: the sidebar names the agent above it, and
 Rename in a chat's ⋯ renames that chat alone, as Rename in the agent's
 menu and Settings' Agents rename the agent alone (Identities, "An
-agent's name and picture"). It is the one `fragment ask` and Hermes'
-Bot Mode find, by its label.
+agent's name and picture"). It is the one `fragment ask` finds, by its
+label.
 An agent shows its picture, where it has one, in place of its tinted
 image wherever the shell draws it (the sidebar, a chat's mark, the
 launcher, Settings). A chat still
