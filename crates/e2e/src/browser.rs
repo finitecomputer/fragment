@@ -514,13 +514,15 @@ impl Browser {
         Ok(r["result"]["value"].clone())
     }
 
-    /// Waits until `expr` is truthy in the page.
+    /// Waits until `expr` is truthy in the page, a promise once it settles
+    /// (`navigator.serviceWorker.getRegistration(…).then(…)`): a promise
+    /// itself is truthy, and `!!` of one held at once, before it said.
     #[track_caller]
     pub fn until(&mut self, page: &Page, expr: &str, timeout: Duration) -> bool {
         let at = std::panic::Location::caller();
         let t0 = Instant::now();
         while t0.elapsed() < timeout {
-            if self.eval(page, &format!("!!({expr})")).ok() == Some(Value::Bool(true)) {
+            if self.eval(page, &format!("(async () => !!(await ({expr})))()")).ok() == Some(Value::Bool(true)) {
                 return true;
             }
             std::thread::sleep(Duration::from_millis(100));
