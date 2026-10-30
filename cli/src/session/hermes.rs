@@ -31,24 +31,29 @@
 //! (`split_summary`). The export read rows by timestamp, kept duplicates,
 //! and read Hermes' structured content (`\0json:`) as raw text.
 //!
-//! **Bounded.** SQLite hands over at most what a conversation could keep
-//! of each row (a tool's output and reasoning their cut's worth, with their
-//! length, so the cut says how much more there was), a conversation whose
-//! rows pass twice what one may hold is refused alone, and a database with
-//! more sessions than `SESSIONS_READ_MAX` is refused whole: a multi-GB
-//! `state.db` is read in bounded memory. Each conversation goes to the
-//! import's spool as it is read.
+//! **Bounded by what is kept.** SQLite hands over only what a
+//! conversation keeps of each row (`kept_content`, `kept_calls`): a
+//! structured message's text parts and a mark for each medium (never a
+//! picture's data), each tool call's id, name and the start of its
+//! arguments, a tool's output and reasoning their cut's worth, each with
+//! its whole length, so a cut says how much more there was. A conversation
+//! whose kept rows pass twice what one may hold is refused alone, as soon
+//! as they do; a database with more sessions than `SESSIONS_READ_MAX`
+//! whole: a multi-GB `state.db` is read in bounded memory. Each
+//! conversation goes to the import's spool as it is read.
 //!
-//! **Not this computer's own.** A database under this computer's Hermes
-//! root (any of its agents', `$HERMES_HOME` or its `profiles/`) is refused:
-//! those conversations are chats here already.
+//! **Not this computer's own.** On a platform computer (the CLI acting as
+//! an agent), a database under the computer's Hermes root (any of its
+//! agents', `$HERMES_HOME` or its `profiles/`) is refused: those
+//! conversations are chats here already. A person's own Hermes elsewhere
+//! (their laptop's, which sets `$HERMES_HOME` too) is theirs to import.
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{bail, Context, Result};
-use fragment_core::session::{self, Kind, Message, Session, ToolCall, REASONING_MAX_CHARS, SESSION_MAX_BYTES, TOOL_TEXT_MAX_CHARS};
+use fragment_core::session::{self, Kind, Message, Session, ToolCall, ARGUMENTS_MAX_CHARS, REASONING_MAX_CHARS, SESSION_MAX_BYTES, TOOL_TEXT_MAX_CHARS};
 use rusqlite::types::Value as Sql;
 use rusqlite::{Connection, OpenFlags};
 use serde_json::Value;
@@ -63,10 +68,13 @@ pub const READER: u32 = 20;
 /// Sessions a database may hold to be read (each a few hundred bytes read
 /// before its chains are known): past it, refused whole.
 const SESSIONS_READ_MAX: usize = 200_000;
-/// What SQLite hands over of a tool's output and of reasoning, in bytes:
-/// their cut's worth of characters, however wide (`cut_as_clipped` says
-/// how many more there were, from the row's own length).
+/// What SQLite hands over of a tool's output and of reasoning, in bytes,
+/// and of a text part or a call's arguments, in characters: their cut's
+/// worth, however wide (`cut_as_clipped` says how many more there were,
+/// from the whole's length).
 const CUT_READ_BYTES: usize = 4 * TOOL_TEXT_MAX_CHARS;
+const CUT_READ_CHARS: usize = 2 * TOOL_TEXT_MAX_CHARS;
+const ARGUMENTS_READ_CHARS: usize = 2 * ARGUMENTS_MAX_CHARS;
 /// A session's `model_config`, in bytes (it holds only markers here).
 const CONFIG_READ_BYTES: usize = 4096;
 
@@ -247,7 +255,10 @@ fn kind(root: &Row, parent: Option<&Row>) -> Kind {
 struct MessageRow {
     id: i64,
     role: String,
+    /// What a conversation keeps of its content (`kept_content`), and the
+    /// whole of that in bytes (`kept_length`).
     content: Option<String>,
+    content_whole: Option<i64>,
     tool_call_id: Option<String>,
     tool_calls: Option<String>,
     tool_name: Option<String>,
@@ -357,6 +368,13 @@ fn message(m: &MessageRow, text: Option<String>, summary: bool) -> Message {
                 other => other.to_string(),
             };
             let id = ["call_id", "id"].iter().find_map(|k| c[*k].as_str().map(str::trim).filter(|s| !s.is_empty())).map(str::to_string);
+            // SQLite handed over their start (`kept_calls`) and how long they were
+            let whole = c["chars"].as_u64().and_then(|n| usize::try_from(n).ok()).unwrap_or(0);
+            let arguments = if whole > ARGUMENTS_MAX_CHARS && arguments.chars().count() < whole {
+                format!("{}… [{} more characters not kept]", arguments.chars().take(ARGUMENTS_MAX_CHARS).collect::<String>(), whole - ARGUMENTS_MAX_CHARS)
+            } else {
+                arguments
+            };
             ToolCall { id, name: f["name"].as_str().filter(|n| !n.is_empty()).unwrap_or("tool").to_string(), arguments }
         })
         .collect();
@@ -378,6 +396,8 @@ fn messages(rows: Vec<MessageRow>) -> Vec<Message> {
     let mut out = Vec::new();
     for m in dedupe(shown) {
         let text = m.content.as_deref().map(content_text).filter(|t| !t.is_empty());
+        // a tool's output, as SQLite cut it: cut as `clip` cuts, its whole's length said
+        let text = if m.role == "tool" { cut_as_clipped(text, m.content_whole, TOOL_TEXT_MAX_CHARS) } else { text };
         if m.summary {
             let (before, summary, after) = split_summary(text.as_deref().unwrap_or_default());
             if before.is_some() {
@@ -399,9 +419,12 @@ fn messages(rows: Vec<MessageRow>) -> Vec<Message> {
 
 /// The conversations in the Hermes database at `path`, each into `spool`
 /// as it is read. What it could not read, each in a sentence (the rest is
-/// read); a database too large, or this computer's own, is refused.
-pub fn read(path: &Path, spool: &mut Spool) -> Result<Vec<String>> {
-    refuse_own(path)?;
+/// read); a database too large, or under `own` (this platform computer's
+/// Hermes home, when the CLI acts as its agent), is refused.
+pub fn read(path: &Path, spool: &mut Spool, own: Option<&Path>) -> Result<Vec<String>> {
+    if let Some(home) = own {
+        refuse_own(path, home)?;
+    }
     let db = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)
         .with_context(|| format!("opening {} read-only", path.display()))?;
     // one read transaction: a Hermes writing meanwhile is read as of now
@@ -411,15 +434,14 @@ pub fn read(path: &Path, spool: &mut Spool) -> Result<Vec<String>> {
     read
 }
 
-/// This computer's own Hermes databases are its agents' conversations
-/// here, which are chats here already: importing them would show each
-/// twice. Its Hermes root is `$HERMES_HOME`, or the folder holding its
-/// `profiles/` when `$HERMES_HOME` is one of them.
-fn refuse_own(db: &Path) -> Result<()> {
-    let Some(home) = std::env::var_os("HERMES_HOME").filter(|h| !h.is_empty()).map(PathBuf::from) else { return Ok(()) };
+/// A platform computer's own Hermes databases are its agents'
+/// conversations here, which are chats here already: importing them would
+/// show each twice. Its Hermes root is `home` (`$HERMES_HOME`), or the
+/// folder holding its `profiles/` when `home` is one of them.
+fn refuse_own(db: &Path, home: &Path) -> Result<()> {
     let root = match home.parent() {
-        Some(p) if p.file_name().is_some_and(|n| n == "profiles") => p.parent().map(Path::to_path_buf).unwrap_or(home.clone()),
-        _ => home.clone(),
+        Some(p) if p.file_name().is_some_and(|n| n == "profiles") => p.parent().map(Path::to_path_buf).unwrap_or(home.to_path_buf()),
+        _ => home.to_path_buf(),
     };
     if let (Ok(db), Ok(root)) = (db.canonicalize(), root.canonicalize()) {
         if db.starts_with(&root) {
@@ -481,6 +503,60 @@ fn bounded(expr: &str, max: usize) -> String {
     format!("CASE WHEN length(CAST({expr} AS BLOB)) > {max} THEN substr(CAST({expr} AS BLOB), 1, {max}) ELSE {expr} END")
 }
 
+/// Hermes' structured content (`\0json:` and its JSON, or a list of parts
+/// as an older Hermes stored it) of `c`, as JSON text; NULL for plain text.
+fn structured(c: &str) -> String {
+    format!("(CASE WHEN substr(CAST({c} AS BLOB), 1, 6) = X'006A736F6E3A' THEN CAST(substr(CAST({c} AS BLOB), 7) AS TEXT) WHEN substr(CAST({c} AS BLOB), 1, 1) = X'5B' THEN {c} END)")
+}
+
+/// What a conversation keeps of a message's content `c`, at most `chars`
+/// of each text: of structured content (valid JSON: a list of parts, each
+/// with a type; or a string), its text parts and each medium's type, never
+/// its data (a picture's base64), as `\0json:` and that JSON (`content_text`
+/// reads it); anything else as it is, at most `bytes` (`bounded`).
+fn kept_content(c: &str, chars: usize, bytes: usize) -> String {
+    let j = structured(c);
+    let parts = format!(
+        "(SELECT json_group_array(CASE WHEN json_extract(p.value, '$.type') IN ('text', 'input_text', 'output_text') \
+           THEN json_object('type', 'text', 'text', substr(json_extract(p.value, '$.text'), 1, {chars})) \
+           ELSE json_object('type', json_extract(p.value, '$.type')) END) FROM json_each({j}) p)"
+    );
+    let typed = format!("(SELECT count(*) FROM json_each({j}) p WHERE json_type(p.value, '$.type') IS NOT 'text') = 0");
+    let raw = bounded(c, bytes);
+    format!(
+        "CASE WHEN {j} IS NULL THEN {raw} WHEN NOT json_valid({j}) THEN {raw} \
+         ELSE CASE json_type({j}) \
+           WHEN 'array' THEN CASE WHEN {typed} THEN char(0) || 'json:' || {parts} ELSE {raw} END \
+           WHEN 'text' THEN char(0) || 'json:' || json_quote(substr(json_extract({j}, '$'), 1, {chars})) \
+           ELSE {raw} END END"
+    )
+}
+
+/// The whole length in bytes of what `kept_content` keeps of `c`: its text
+/// parts', or its own.
+fn kept_length(c: &str) -> String {
+    let j = structured(c);
+    format!(
+        "CASE WHEN {j} IS NOT NULL AND json_valid({j}) AND json_type({j}) = 'array' \
+         THEN (SELECT coalesce(sum(length(CAST(json_extract(p.value, '$.text') AS BLOB))), 0) FROM json_each({j}) p) \
+         ELSE length(CAST({c} AS BLOB)) END"
+    )
+}
+
+/// What a conversation keeps of a row's `tool_calls` `t`: each call's ids,
+/// its name, the start of its arguments and their whole length (`chars`);
+/// NULL when it is no list.
+fn kept_calls(t: &str) -> String {
+    format!(
+        "CASE WHEN {t} IS NULL OR NOT json_valid({t}) THEN NULL ELSE CASE json_type({t}) WHEN 'array' THEN \
+           (SELECT json_group_array(json_object('id', json_extract(c.value, '$.id'), 'call_id', json_extract(c.value, '$.call_id'), \
+             'function', json_object('name', json_extract(c.value, '$.function.name'), \
+               'arguments', substr(json_extract(c.value, '$.function.arguments'), 1, {ARGUMENTS_READ_CHARS})), \
+             'chars', length(json_extract(c.value, '$.function.arguments')))) FROM json_each({t}) c) \
+         END END"
+    )
+}
+
 /// A row's text as SQLite handed it over (`bounded`), its whole length in
 /// bytes beside it: one cut there is cut as `session::clip` cuts, saying
 /// how many more there were (in bytes past the kept characters' own: a
@@ -517,7 +593,7 @@ fn read_in(db: &Connection, spool: &mut Spool) -> Result<Vec<String>> {
     if count as usize > SESSIONS_READ_MAX {
         return Err(anyhow::Error::new(crate::api::CodedError {
             code: crate::api::Code::TooLarge,
-            msg: format!("it holds {count} sessions, past the {SESSIONS_READ_MAX} an import reads (`--kind chat` keeps only the chats it reads)"),
+            msg: format!("it holds {count} sessions, past the {SESSIONS_READ_MAX} an import reads"),
         }));
     }
 
@@ -559,11 +635,11 @@ fn read_in(db: &Connection, spool: &mut Spool) -> Result<Vec<String>> {
     let (content, reasoning) = (col(&m, "content"), format!("COALESCE({}, {})", col(&m, "reasoning"), col(&m, "reasoning_content")));
     let message_select = [
         col(&m, "id"),
-        format!("CASE WHEN {} = 'tool' THEN {} ELSE {} END", col(&m, "role"), bounded(&content, CUT_READ_BYTES), bounded(&content, SESSION_MAX_BYTES + 1)),
-        format!("length(CAST({content} AS BLOB))"),
+        format!("CASE WHEN {} = 'tool' THEN {} ELSE {} END", col(&m, "role"), kept_content(&content, CUT_READ_CHARS, CUT_READ_BYTES), kept_content(&content, SESSION_MAX_BYTES + 1, SESSION_MAX_BYTES + 1)),
+        kept_length(&content),
         col(&m, "role"),
         col(&m, "tool_call_id"),
-        bounded(&col(&m, "tool_calls"), SESSION_MAX_BYTES),
+        kept_calls(&col(&m, "tool_calls")),
         col(&m, "tool_name"),
         col(&m, "timestamp"),
         bounded(&reasoning, CUT_READ_BYTES),
@@ -582,7 +658,7 @@ fn read_in(db: &Connection, spool: &mut Spool) -> Result<Vec<String>> {
         let parent = root.parent.as_deref().and_then(|p| at.get(p)).map(|&i| &rows[i]);
         let mut found = Vec::new();
         let mut held = 0usize;
-        for &i in &chain {
+        'chain: for &i in &chain {
             let read = q.query_map([&rows[i].id], |r| {
                 let v = |i: usize| r.get::<_, Sql>(i);
                 let role = text(&v(3)?).unwrap_or_default();
@@ -594,14 +670,14 @@ fn read_in(db: &Connection, spool: &mut Spool) -> Result<Vec<String>> {
                     Sql::Integer(n) => Some(n),
                     _ => None,
                 };
-                let content = if role == "tool" { cut_as_clipped(text(&v(1)?), content_chars, TOOL_TEXT_MAX_CHARS) } else { text(&v(1)?) };
                 Ok(MessageRow {
                     id: match v(0)? {
                         Sql::Integer(i) => i,
                         _ => 0,
                     },
                     role,
-                    content,
+                    content: text(&v(1)?),
+                    content_whole: content_chars,
                     tool_call_id: text(&v(4)?),
                     tool_calls: text(&v(5)?),
                     tool_name: text(&v(6)?),
@@ -614,16 +690,29 @@ fn read_in(db: &Connection, spool: &mut Spool) -> Result<Vec<String>> {
                     model_only: metadata(text(&v(14)?)).as_ref().map(|m| &m["model_only"]).is_some_and(|f| f.as_bool().unwrap_or(false) || f.as_i64().is_some_and(|i| i != 0)),
                 })
             });
-            match read.and_then(|rows| rows.collect::<rusqlite::Result<Vec<_>>>()) {
-                Ok(ms) => {
-                    held += ms.iter().map(|m| m.content.as_ref().map_or(0, String::len) + m.tool_calls.as_ref().map_or(0, String::len) + m.reasoning.as_ref().map_or(0, String::len)).sum::<usize>();
-                    found.extend(ms);
+            let rows_read = match read {
+                Ok(it) => it,
+                Err(e) => {
+                    problems.push(format!("the messages of session {}: {e}", super::said_id(&rows[i].id)));
+                    continue;
                 }
-                Err(e) => problems.push(format!("the messages of session {}: {e}", super::said_id(&rows[i].id))),
-            }
-            // a conversation past twice what one may hold is refused, its rows let go
-            if held > 2 * SESSION_MAX_BYTES {
-                break;
+            };
+            for m in rows_read {
+                match m {
+                    Ok(m) => {
+                        held += m.content.as_ref().map_or(0, String::len) + m.tool_calls.as_ref().map_or(0, String::len) + m.reasoning.as_ref().map_or(0, String::len);
+                        found.push(m);
+                    }
+                    Err(e) => {
+                        problems.push(format!("a message of session {}: {e}", super::said_id(&rows[i].id)));
+                        continue;
+                    }
+                }
+                // a conversation whose kept rows pass twice what one may
+                // hold is refused, as soon as they do, its rows let go
+                if held > 2 * SESSION_MAX_BYTES {
+                    break 'chain;
+                }
             }
         }
         if held > 2 * SESSION_MAX_BYTES {
@@ -682,7 +771,7 @@ pub(crate) mod tests {
 
     fn read_path(path: &Path) -> (Spool, Vec<Session>, Vec<String>) {
         let mut spool = Spool::new(BTreeSet::new()).unwrap();
-        let problems = read(path, &mut spool).unwrap();
+        let problems = read(path, &mut spool, None).unwrap();
         let sessions = spooled(&spool);
         (spool, sessions, problems)
     }
@@ -837,7 +926,7 @@ and peas?',210,1,'hidden');
 
         let path = super::super::tempdir().join("state.db");
         database(&path, &format!("WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i <= {SESSIONS_READ_MAX}) INSERT INTO sessions (id, source, started_at) SELECT 's' || i, 'cli', i FROM n;"));
-        let e = read(&path, &mut Spool::new(BTreeSet::new()).unwrap()).unwrap_err();
+        let e = read(&path, &mut Spool::new(BTreeSet::new()).unwrap(), None).unwrap_err();
         assert!(format!("{e:#}").contains("past the 200000 an import reads"), "{e:#}");
     }
 
@@ -863,11 +952,11 @@ and peas?',210,1,'hidden');
         let other = dir.join("other.db");
         Connection::open(&other).unwrap().execute_batch("CREATE TABLE t (x)").unwrap();
         let mut spool = Spool::new(BTreeSet::new()).unwrap();
-        let e = read(&other, &mut spool).unwrap_err();
+        let e = read(&other, &mut spool, None).unwrap_err();
         assert!(format!("{e:#}").contains("is it Hermes' state.db?"), "{e:#}");
         let text = dir.join("notes.txt");
         std::fs::write(&text, "not a database").unwrap();
-        assert!(read(&text, &mut spool).is_err());
+        assert!(read(&text, &mut spool, None).is_err());
     }
 
     /// Goal: a read changes nothing: the database is opened read-only.
@@ -880,26 +969,60 @@ and peas?',210,1,'hidden');
         assert_eq!(std::fs::read(&path).unwrap(), before);
     }
 
-    /// Goal: this computer's own Hermes databases are refused, any agent's
-    /// of it: its root's, and each profile's. Method: `HERMES_HOME` a
-    /// profile's folder, and a database at the root and at a sibling
-    /// profile; one elsewhere reads.
+    /// Goal: on a platform computer, its own Hermes databases are refused,
+    /// any agent's of it: its root's, and each profile's; one elsewhere
+    /// reads. Method: the home a profile's folder (as `$HERMES_HOME` is in
+    /// an agent's terminal), the check given it, as the CLI gives it only
+    /// as an agent; with none (a person's own Hermes), nothing is refused.
     #[test]
-    fn this_computers_own_databases_are_refused() {
+    fn a_platform_computers_own_databases_are_refused() {
         let root = super::super::tempdir();
         let (mine, sibling) = (root.join("profiles/juniper"), root.join("profiles/maple"));
         std::fs::create_dir_all(&mine).unwrap();
         std::fs::create_dir_all(&sibling).unwrap();
-        for db in [root.join("state.db"), sibling.join("state.db"), mine.join("state.db")] {
+        let elsewhere = super::super::tempdir().join("state.db");
+        for db in [root.join("state.db"), sibling.join("state.db"), mine.join("state.db"), elsewhere.clone()] {
             database(&db, "");
         }
-        let elsewhere = super::super::tempdir().join("state.db");
-        database(&elsewhere, "");
-        // set for this test alone: no other test reads HERMES_HOME
-        std::env::set_var("HERMES_HOME", &mine);
-        let refused: Vec<bool> = [root.join("state.db"), sibling.join("state.db"), mine.join("state.db"), elsewhere.clone()].iter().map(|p| refuse_own(p).is_err()).collect();
-        std::env::remove_var("HERMES_HOME");
+        let refused: Vec<bool> = [root.join("state.db"), sibling.join("state.db"), mine.join("state.db"), elsewhere.clone()].iter().map(|p| refuse_own(p, &mine).is_err()).collect();
         assert_eq!(refused, [true, true, true, false]);
+        let (_, all, _) = read_path(&mine.join("state.db"));
+        assert!(all.is_empty(), "a person's own Hermes reads, refused by nothing");
+        let mut spool = Spool::new(BTreeSet::new()).unwrap();
+        assert!(read(&mine.join("state.db"), &mut spool, Some(&mine)).is_err());
+    }
+
+    /// Goal: what a conversation keeps is read, not what Hermes stored:
+    /// a screenshot's result reads as its words and a mark, never its
+    /// data; photos a person sent do not make a chat too large, nor do a
+    /// tool's long arguments, cut saying how much more there was; a list
+    /// that is no parts, and a string Hermes encoded so, read as they are.
+    #[test]
+    fn what_is_kept_is_read_not_what_is_stored() {
+        let data = "A".repeat(200_000);
+        let photo = "B".repeat(3 * 1024 * 1024);
+        let mut sql = String::from("INSERT INTO sessions VALUES ('s','telegram',NULL,NULL,NULL,NULL,NULL,1,NULL,NULL,NULL,NULL,NULL);");
+        sql += &format!("INSERT INTO messages (session_id,role,content,timestamp,tool_name) VALUES ('s','tool',char(0) || 'json:[{{\"type\":\"text\",\"text\":\"Screenshot taken\"}},{{\"type\":\"image_url\",\"image_url\":{{\"url\":\"data:image/png;base64,{data}\"}}}}]',2,'browser');");
+        for i in 0..6 {
+            sql += &format!("INSERT INTO messages (session_id,role,content,timestamp) VALUES ('s','user',char(0) || 'json:[{{\"type\":\"text\",\"text\":\"meal {i}\"}},{{\"type\":\"image_url\",\"image_url\":{{\"url\":\"data:image/jpeg;base64,{photo}\"}}}}]',{});", 10 + i);
+        }
+        let args = "x".repeat(1024 * 1024);
+        for i in 0..20 {
+            sql += &format!("INSERT INTO messages (session_id,role,content,timestamp,tool_calls) VALUES ('s','assistant','',{},'[{{\"id\":\"w{i}\",\"function\":{{\"name\":\"write_file\",\"arguments\":\"{args}\"}}}}]');", 100 + i);
+        }
+        sql += "INSERT INTO messages (session_id,role,content,timestamp) VALUES ('s','user','[1, 2]',200);";
+        sql += "INSERT INTO messages (session_id,role,content,timestamp) VALUES ('s','user',char(0) || 'json:\"[not parts]\"',201);";
+        let (spool, all, problems) = read_sql(&sql);
+        assert!(problems.is_empty() && spool.refused.is_empty(), "{problems:?} {:?}", spool.refused.iter().map(|r| &r.why).collect::<Vec<_>>());
+        let s = &all[0];
+        assert_eq!(s.messages[0].text.as_deref(), Some("Screenshot taken\n[image]"));
+        assert_eq!(s.messages[1].text.as_deref(), Some("meal 0\n[image]"));
+        let call = &s.messages[7].tool_calls[0];
+        assert_eq!((call.id.as_deref(), call.name.as_str()), (Some("w0"), "write_file"));
+        assert!(call.arguments.ends_with(&format!("… [{} more characters not kept]", 1024 * 1024 - ARGUMENTS_MAX_CHARS)), "{}", call.arguments.len());
+        assert_eq!(s.messages[27].text.as_deref(), Some("[1, 2]"));
+        assert_eq!(s.messages[28].text.as_deref(), Some("[not parts]"));
+        assert!(spool.bytes < 200_000, "{}", spool.bytes);
     }
 
     /// What Hermes v0.21.7 itself writes (its own `SessionDB`, run in our
