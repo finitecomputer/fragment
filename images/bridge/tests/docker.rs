@@ -3070,52 +3070,81 @@ async fn a_card_answered_after_a_sleep_starts_one_fresh_turn() {
     within(&x.fake, &x.chat, &c, 10_000, "idle after", |w| w.keepalive_open == 0).await;
 }
 
-/// Goal (P6, the rollback's double run), with real Hermes: a card answered
-/// live and acted on, then the computer back on a save from before the
-/// answer, reads the answer again and starts nothing (its closure was the
-/// live one's); and an answer after a card's life, across a restart, closes
-/// it expired and starts nothing.
+/// Goal (P6, the rollback's double run; Alex on #660), with real Hermes:
+/// a live answer is acted on only once its closure is on `work`, so a
+/// computer back on a save from before the answer runs it once, whatever
+/// landed first. The platform refusing the closure (503s, as a deploy):
+/// Hermes has no answer; a crash then and that restore, and the answer,
+/// never recorded, runs once as a fresh turn. The closure landed and acted
+/// on, then the same restore: the card was answered live, nothing runs. And
+/// an answer after a card's life, across a restart, closes it expired and
+/// starts nothing.
 #[tokio::test]
 #[ignore = "needs Docker"]
 async fn a_card_answered_live_runs_once_after_a_rollback() {
-    // an hour's card first (a save takes its time); the restored
-    // computer's are 20 s (`Expiry::container`), for the expiry
+    // an hour's cards (a save takes its time) until the last restore,
+    // whose are 20 s (`Expiry::container`), for the expiry
     let (fake, model, chat, c) = hermes_running().await;
     let x = Expiry { fake, model, chat };
-    let asked = x.say("prepare the approvals proof, then ask me");
-    within(&x.fake, &x.chat, &c, 180_000, "the card after its steps", |w| !x.cards(w, &asked).is_empty()).await;
-    let card = x.fake.with(|w| x.cards(w, &asked)[0].clone());
-    let publish = option(&card, "Publish");
-    // a save from before the answer, the computer awake after it
-    let left_out = hold(&c).expect("held for a save");
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("approvals-rollback");
     std::fs::create_dir_all(&dir).unwrap();
-    let save = dir.join("before-the-answer.tar");
-    save_data(&c, &left_out, &save);
-    unhold(&c);
-    x.fake.say(&x.chat, &person("paul"), json!({ "kind": "prompt_response", "agent": "npub1juniper", "turn": asked, "prompt": card["prompt"], "option": publish }));
-    within(&x.fake, &x.chat, &c, 120_000, "the card's turn acted and ended", |w| !x.ends(w, &asked).is_empty()).await;
-    x.fake.with(|w| assert!(x.closed(w, &asked).iter().any(|p| p["outcome"] == "answered" && p.get("answerSeq").is_none()), "answered live: {:?}", x.closed(w, &asked)));
-    assert_eq!(c.exec_out(&["cat", "/data/work/juniper--k3x9/approval-effects"]).trim(), "published");
-    assert_eq!(effects_asked(&x.model), 1);
+    // a card, a save from before its answer, the computer awake after it
+    let card_and_save = |c: &Container, name: &str| {
+        let left_out = hold(c).expect("held for a save");
+        let save = dir.join(name);
+        save_data(c, &left_out, &save);
+        unhold(c);
+        save
+    };
+    // a new computer woken from `save`
+    let restore = |save: &std::path::Path, c: Container| {
+        let cp = Command::new(docker()).args(["cp", "-a", "-", &format!("{}:/data", c.id)]).stdin(std::fs::File::open(save).unwrap()).output().unwrap();
+        assert!(cp.status.success(), "restored");
+        assert!(c.exec(&["touch", "/run/computer/restored"]));
+        c
+    };
+
+    // 1. its closure never lands before a crash: Hermes never had it
+    let first = x.say("prepare the approvals proof, then ask me");
+    within(&x.fake, &x.chat, &c, 180_000, "the card after its steps", |w| !x.cards(w, &first).is_empty()).await;
+    let card = x.fake.with(|w| x.cards(w, &first)[0].clone());
+    let save = card_and_save(&c, "before-the-first-answer.tar");
+    x.fake.with(|w| w.fail_closures = true);
+    let answer = x.fake.say(&x.chat, &person("paul"), json!({ "kind": "prompt_response", "agent": "npub1juniper", "turn": first, "prompt": card["prompt"], "option": option(&card, "Publish") }));
+    let rebuilt = fragment_bridge::records::turn_id("juniper--k3x9", &x.chat, "chat", answer["seq"].as_u64().unwrap());
+    within(&x.fake, &x.chat, &c, 60_000, "its closure refused, and refused again", |w| w.refused_closures >= 2).await;
+    assert_eq!(effects_asked(&x.model), 0, "Hermes has no answer the journal does not hold");
+    x.fake.with(|w| assert!(x.ends(w, &first).is_empty(), "its turn still waits"));
     c.sigterm();
     drop(c);
     x.fake.until(30_000, "its sockets closed", |w| w.live_sockets() == 0).await;
-    let c = x.container(&[("RESTORE_PENDING", "1")]);
-    let cp = Command::new(docker()).args(["cp", "-a", "-", &format!("{}:/data", c.id)]).stdin(std::fs::File::open(&save).unwrap()).output().unwrap();
-    assert!(cp.status.success(), "restored");
-    assert!(c.exec(&["touch", "/run/computer/restored"]));
+    x.fake.with(|w| w.fail_closures = false);
+    let c = restore(&save, Container::run(&hermes_tag(), x.fake.addr.port(), x.model.addr.port(), &[("RESTORE_PENDING", "1")]));
+    within(&x.fake, &x.chat, &c, 180_000, "the answer, never recorded, run once as a fresh turn", |w| !x.ends(w, &rebuilt).is_empty()).await;
+    assert_eq!(effects_asked(&x.model), 1);
+    x.fake.with(|w| assert!(x.closed(w, &first).iter().any(|p| p["answerSeq"] == answer["seq"]), "closed late: {:?}", x.closed(w, &first)));
+
+    // 2. its closure landed and Hermes acted on it before a crash
+    let asked = x.say("prepare the approvals proof, then ask me");
+    within(&x.fake, &x.chat, &c, 180_000, "the second card after its steps", |w| !x.cards(w, &asked).is_empty()).await;
+    let card = x.fake.with(|w| x.cards(w, &asked)[0].clone());
+    let save = card_and_save(&c, "before-the-second-answer.tar");
+    let live = x.fake.say(&x.chat, &person("paul"), json!({ "kind": "prompt_response", "agent": "npub1juniper", "turn": asked, "prompt": card["prompt"], "option": option(&card, "Publish") }));
+    within(&x.fake, &x.chat, &c, 120_000, "the card's turn acted and ended", |w| !x.ends(w, &asked).is_empty()).await;
+    x.fake.with(|w| assert!(x.closed(w, &asked).iter().any(|p| p["outcome"] == "answered" && p.get("answerSeq").is_none()), "answered live: {:?}", x.closed(w, &asked)));
+    assert_eq!(effects_asked(&x.model), 2);
+    c.sigterm();
+    drop(c);
+    x.fake.until(30_000, "its sockets closed", |w| w.live_sockets() == 0).await;
+    let c = restore(&save, x.container(&[("RESTORE_PENDING", "1")]));
     let next = x.say("good morning");
     within(&x.fake, &x.chat, &c, 180_000, "the next message's end, after the answer read again", |w| !x.ends(w, &next).is_empty()).await;
     x.fake.with(|w| {
-        let answers: Vec<u64> = w.records(&x.chat, "chat").iter().filter(|r| r["body"]["kind"] == "prompt_response").filter_map(|r| r["seq"].as_u64()).collect();
-        for seq in answers {
-            let fresh = fragment_bridge::records::turn_id("juniper--k3x9", &x.chat, "chat", seq);
-            assert!(!w.bodies(&x.chat, "work", "turn.start").iter().any(|s| s["turn"] == fresh), "no fresh turn from a live answer");
-        }
+        let fresh = fragment_bridge::records::turn_id("juniper--k3x9", &x.chat, "chat", live["seq"].as_u64().unwrap());
+        assert!(!w.bodies(&x.chat, "work", "turn.start").iter().any(|s| s["turn"] == fresh), "no fresh turn from a live answer");
         assert_eq!(x.closed(w, &asked).len(), 1, "its one, live closure");
     });
-    assert_eq!(effects_asked(&x.model), 1, "the effect was asked for once, before the rollback");
+    assert_eq!(effects_asked(&x.model), 2, "each answer acted on once");
 
     // past its life: expired, nothing run
     let late = x.say("prepare the approvals proof, then ask me");
@@ -3130,7 +3159,7 @@ async fn a_card_answered_live_runs_once_after_a_rollback() {
     let fresh = fragment_bridge::records::turn_id("juniper--k3x9", &x.chat, "chat", answer["seq"].as_u64().unwrap());
     within(&x.fake, &x.chat, &c, 60_000, "closed expired", |w| x.closed(w, &late).iter().any(|p| p["outcome"] == "expired")).await;
     x.fake.with(|w| assert!(!w.bodies(&x.chat, "work", "turn.start").iter().any(|s| s["turn"] == fresh), "an answer after a card's life starts nothing"));
-    assert_eq!(effects_asked(&x.model), 1);
+    assert_eq!(effects_asked(&x.model), 2);
 }
 
 /// A real Hermes card further back than a late answer's read goes is

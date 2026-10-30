@@ -384,6 +384,7 @@ pub async fn run(cfg: Config, runtime: Box<dyn Runtime>, stop: watch::Receiver<b
                     lanes.push(&fragment, Job::Post { agent, channel, id, body, files, relay })
                 }
                 Effect::Claim { agent, fragment, turn, id, body } => lanes.push(&fragment, Job::Claim { agent, turn, id, body }),
+                Effect::Fence { agent, fragment, turn, prompt, id, body } => lanes.push(&fragment, Job::Fence { agent, turn, prompt, id, body }),
                 Effect::Owed { agent, fragment, turn, id, body } => lanes.push(&fragment, Job::Owed { agent, turn, id, body }),
                 Effect::Draft { agent, fragment, turn, text } => lanes.push(&fragment, Job::Draft { agent, turn, text }),
                 Effect::Runtime(c) => runtime_lane.push(c),
@@ -969,7 +970,7 @@ async fn feed(api: &Api, agent: &Agent, fragment: &str, record: Record, inbox: &
     // follow, which reads it again from the cursor after a wait, so a card
     // is never closed for a blip. (A turn that ends between this look and
     // the engine's is a race of a few ms; its answer is passed over.)
-    let late = !tasks && record.at >= since && record.principal == agent.owner && matches!(records::said(&record.body), records::Said::PromptResponse { prompt, card, .. } if card.as_ref().is_none_or(|c| c.agent == agent.identity) && !shared.holds(&agent.fragment, fragment, &prompt));
+    let late = !tasks && record.at >= since && record.seq > shared.cursor(&agent.fragment, fragment, &record.channel) && record.principal == agent.owner && matches!(records::said(&record.body), records::Said::PromptResponse { prompt, card, .. } if card.as_ref().is_none_or(|c| c.agent == agent.identity) && !shared.holds(&agent.fragment, fragment, &prompt));
     let input = if late {
         let read = tokio::time::timeout(Duration::from_millis(limits::CARD_READ_MS_MAX), card_history(api, agent, fragment, &record)).await;
         let history = read.unwrap_or(Err(Unavailable::Read));
@@ -1047,6 +1048,9 @@ enum Job {
     Post { agent: String, channel: &'static str, id: String, body: Value, files: Vec<LocalFile>, relay: Option<String> },
     /// A turn's `turn.start` on `work`, whose answer the engine waits for.
     Claim { agent: String, turn: String, id: String, body: Value },
+    /// A live card answer's closure on `work`, whose answer the engine
+    /// waits for before the runtime has the answer.
+    Fence { agent: String, turn: String, prompt: String, id: String, body: Value },
     /// One of a turn's last records on `work`: the engine hears when the
     /// lane is done with it.
     Owed { agent: String, turn: String, id: String, body: Value },
@@ -1190,9 +1194,15 @@ async fn work(api: Api, fragment: String, lane: Arc<Lane>, claims: Claims, mut s
                 }
             }
             Job::Claim { agent, turn, id, body } => {
-                let answer = claim(&api, &fragment, &agent, &id, &body, &claims, stop.clone()).await;
+                let answer = claim(&api, &fragment, &agent, &id, &body, Some(&claims), stop.clone()).await;
                 // A closed inbox is an engine that has stopped.
                 let _ = claims.inbox.send(Msg::Input(Input::Claimed { turn, answer })).await;
+            }
+            Job::Fence { agent, turn, prompt, id, body } => {
+                // an answer's record, not a turn's claim: posted whatever
+                // the hold, so a sleep under way loses no answer given
+                let answer = claim(&api, &fragment, &agent, &id, &body, None, stop.clone()).await;
+                let _ = claims.inbox.send(Msg::Input(Input::Fenced { turn, prompt, answer })).await;
             }
         }
     }
@@ -1201,14 +1211,16 @@ async fn work(api: Api, fragment: String, lane: Arc<Lane>, claims: Claims, mut s
 /// A turn's claim, posted unless the computer is held (looked at before
 /// each try, so a hold made while a try waits stops the next): the
 /// platform's answer, or none. Each try is in flight from its look at the
-/// hold to its answer, so the bridge never says `held` with one out.
+/// hold to its answer, so the bridge never says `held` with one out. With
+/// no `claims`, a post whose answer the engine waits for all the same, the
+/// hold aside (a live answer's closure: `Job::Fence`).
 #[allow(clippy::too_many_arguments)]
-async fn claim(api: &Api, fragment: &str, agent: &str, id: &str, body: &Value, claims: &Claims, stop: watch::Receiver<bool>) -> ClaimAnswer {
+async fn claim(api: &Api, fragment: &str, agent: &str, id: &str, body: &Value, claims: Option<&Claims>, stop: watch::Receiver<bool>) -> ClaimAnswer {
     let mut backoff = Backoff::default();
     for attempt in 1..=limits::POST_TRIES_MAX {
         let answered = {
-            let _flight = Flight::new(&claims.in_flight);
-            if claims.hold.exists() {
+            let _flight = claims.map(|c| Flight::new(&c.in_flight));
+            if let Some(claims) = claims.filter(|c| c.hold.exists()) {
                 crate::ev!("claim.held", { "fragment": fragment, "id": id, "hold": claims.hold.display().to_string() });
                 return ClaimAnswer::Unanswered;
             }

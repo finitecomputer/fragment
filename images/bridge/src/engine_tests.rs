@@ -65,10 +65,17 @@ fn a_background_file_is_posted_without_a_caption() {
     assert_eq!(e.state().said, 1);
 }
 
-/// `s`, with each claim it makes answered as this life's and each record it
-/// owes answered, and what each answer does (the turn handed to the
-/// runtime, an ended turn let go) added to it.
+/// `s`, with each claim it makes answered as this life's, each live
+/// answer's closure as on `work`, and each record it owes answered, and
+/// what each answer does (the turn handed to the runtime, the answer given
+/// it, an ended turn let go) added to it.
 fn answered(e: &mut Engine, mut s: Step, now: u64) -> Step {
+    let fences: Vec<(String, String)> = s.effects.iter().filter_map(|x| match x { Effect::Fence { turn, prompt, .. } => Some((turn.clone(), prompt.clone())), _ => None }).collect();
+    for (turn, prompt) in fences {
+        let more = e.step(Input::Fenced { turn, prompt, answer: ClaimAnswer::Ours { seq: None } }, now);
+        s.dirty |= more.dirty;
+        s.effects.extend(more.effects);
+    }
     let claims: Vec<String> = s.effects.iter().filter_map(|x| match x { Effect::Claim { turn, .. } => Some(turn.clone()), _ => None }).collect();
     for turn in claims {
         let more = e.step(Input::Claimed { turn, answer: ClaimAnswer::Ours { seq: None } }, now);
@@ -100,9 +107,9 @@ fn said(e: &mut Engine, a: &Agent, v: &ChatView, seq: u64, principal: &str, body
     answered(e, s, now)
 }
 
-/// What a step posts, claims and owed records included.
+/// What a step posts, claims, live answers' closures and owed records included.
 fn posts(s: &Step) -> Vec<(String, Value)> {
-    s.effects.iter().filter_map(|e| match e { Effect::Post { id, body, .. } | Effect::Claim { id, body, .. } | Effect::Owed { id, body, .. } => Some((id.clone(), body.clone())), _ => None }).collect()
+    s.effects.iter().filter_map(|e| match e { Effect::Post { id, body, .. } | Effect::Claim { id, body, .. } | Effect::Fence { id, body, .. } | Effect::Owed { id, body, .. } => Some((id.clone(), body.clone())), _ => None }).collect()
 }
 
 fn kinds(s: &Step) -> Vec<String> {
@@ -1700,7 +1707,7 @@ impl World {
             }
         }
         for e in self.lane.drain(..) {
-            if let Effect::Post { id, .. } | Effect::Claim { id, .. } = e {
+            if let Effect::Post { id, .. } | Effect::Claim { id, .. } | Effect::Fence { id, .. } = e {
                 self.dropped.push(id);
             }
         }
@@ -1721,7 +1728,7 @@ impl World {
         }
         for e in s.effects {
             match e {
-                Effect::Post { .. } | Effect::Claim { .. } | Effect::Owed { .. } => self.lane.push_back(e),
+                Effect::Post { .. } | Effect::Claim { .. } | Effect::Fence { .. } | Effect::Owed { .. } => self.lane.push_back(e),
                 Effect::Runtime(Command::Start(ts)) => {
                     let claim = self.journal.work(&ts.turn, "turn.start").into_iter().next();
                     self.runs.push((self.lives, ts.turn.clone()));
@@ -1735,7 +1742,13 @@ impl World {
                         h.stop = true;
                     }
                 }
-                Effect::Runtime(Command::Answer { turn, .. }) => {
+                Effect::Runtime(Command::Answer { turn, prompt, option, .. }) => {
+                    // the runtime acts on no owner's answer the journal does
+                    // not hold: a life rolled back past it rebuilds nothing
+                    if option.is_some() {
+                        let closed = self.journal.work(&turn, "turn.prompt.closed");
+                        assert!(closed.iter().any(|c| c["prompt"] == prompt.as_str() && c["option"] == json!(option) && c.get("answerSeq").is_none()), "{turn}/{prompt}: answered before its closure was on work: {closed:?}");
+                    }
                     if let Some(h) = self.held.get_mut(&turn) {
                         h.prompted = None;
                     }
@@ -1778,7 +1791,7 @@ impl World {
     fn land(&mut self, e: &Effect) -> Answer {
         let (agent, fragment, channel, id, body) = match e {
             Effect::Post { agent, fragment, channel, id, body, .. } => (agent, fragment, *channel, id, body),
-            Effect::Claim { agent, fragment, id, body, .. } | Effect::Owed { agent, fragment, id, body, .. } => (agent, fragment, records::WORK, id, body),
+            Effect::Claim { agent, fragment, id, body, .. } | Effect::Fence { agent, fragment, id, body, .. } | Effect::Owed { agent, fragment, id, body, .. } => (agent, fragment, records::WORK, id, body),
             _ => panic!("the lane holds posts, claims and owed records: {e:?}"),
         };
         let principal = self.agents.iter().find(|a| &a.fragment == agent).map(|a| a.identity.clone()).expect("an agent's post");
@@ -1794,6 +1807,7 @@ impl World {
     fn tell(&mut self, e: &Effect, answer: ClaimAnswer) {
         match e {
             Effect::Claim { turn, .. } => self.step(Input::Claimed { turn: turn.clone(), answer }),
+            Effect::Fence { turn, prompt, .. } => self.step(Input::Fenced { turn: turn.clone(), prompt: prompt.clone(), answer }),
             Effect::Owed { turn, id, .. } => self.step(Input::Posted { turn: turn.clone(), id: id.clone() }),
             _ => {}
         }
@@ -1826,13 +1840,14 @@ impl World {
         panic!("a lane that never empties");
     }
 
-    /// The lane gives up on its next claim: it never reaches the platform,
-    /// and the engine hears it unanswered. Any other post the model's lane
+    /// The lane gives up on its next claim (or a live answer's closure): it
+    /// never reaches the platform, and the engine hears it unanswered. Any
+    /// other post the model's lane
     /// tries until it lands (the lane's own bound of tries is a property of
     /// every post, out of this model; a crash is in it).
     fn lose_one(&mut self) {
         match self.lane.front() {
-            Some(Effect::Claim { .. }) => {
+            Some(Effect::Claim { .. } | Effect::Fence { .. }) => {
                 let e = self.lane.pop_front().expect("a claim");
                 self.tell(&e, ClaimAnswer::Unanswered);
             }
@@ -1850,7 +1865,7 @@ impl World {
     fn land_unanswered_one(&mut self) {
         let Some(e) = self.lane.front().cloned() else { return };
         self.land(&e);
-        if matches!(e, Effect::Claim { .. }) {
+        if matches!(e, Effect::Claim { .. } | Effect::Fence { .. }) {
             self.lane.pop_front();
             self.tell(&e, ClaimAnswer::Unanswered);
         }
@@ -2870,6 +2885,68 @@ fn a_card_answered_live_starts_nothing_after_a_rollback() {
     assert_eq!(posts(&unread), vec![(records::work_id(&old, "pc:p"), json!({"kind":"turn.prompt.closed","turn":old,"prompt":"p","outcome":"history_unavailable"}))], "closed on its own turn, no notice");
     assert!(!unread.effects.iter().any(|x| matches!(x, Effect::Claim {..})));
     assert!(lost.step(input(Err(crate::history::Unavailable::Budget)), T0 + 2).effects.is_empty(), "replayed: nothing");
+}
+
+/// Goal (Alex on #660: a live answer must be in the journal before the
+/// runtime acts on it): an owner's answer to a running turn's card is held
+/// from the runtime until its closure's post is answered. Unanswered (a
+/// deploy's 503s past the lane's tries), it is posted again at the next
+/// tick and still held; on `work`, the runtime has it; a closure another
+/// body holds (409) ends the runtime's wait with no answer; a restart while
+/// held ends the turn, the runtime never having had it.
+#[test]
+fn a_live_answer_reaches_the_runtime_only_once_its_closure_is_on_work() {
+    let a = agent("juniper");
+    let v = view(&[&a]);
+    let mut e = engine(std::slice::from_ref(&a));
+    let turn = started(&said(&mut e, &a, &v, 1, &a.owner, json!({"text":"ask me"}), T0)).unwrap().turn;
+    let options = || vec![PromptOption { id:"yes".into(), label:"Publish".into(), style:None, words:false }];
+    ev(&mut e, Event::Prompt { turn: turn.clone(), prompt: "p".into(), text: "Publish?".into(), options: options(), ttl_ms: None }, T0);
+    let record = |seq: u64, prompt: &str| Input::Record { agent: a.fragment.clone(), fragment: "talk--k3x9".into(), record: rec(seq, &a.owner, json!({"kind":"prompt_response","prompt":prompt,"option":"yes"})), view: Some(v.clone()), since: 0 };
+    let live = e.step(record(2, "p"), T0 + 1);
+    let fences: Vec<&Value> = live.effects.iter().filter_map(|x| match x { Effect::Fence { prompt, body, .. } if prompt == "p" => Some(body), _ => None }).collect();
+    assert_eq!(fences.len(), 1, "its closure, posted to be answered: {:?}", live.effects);
+    assert!(fences[0].get("answerSeq").is_none() && fences[0]["outcome"] == "answered");
+    assert!(commands(&live).is_empty(), "the runtime has nothing before the journal holds it");
+    assert!(live.dirty && keepalive(&live) == Some(true), "the answer is taken, and the computer held while it lands");
+    let fenced = |answer| Input::Fenced { turn: turn.clone(), prompt: "p".into(), answer };
+    assert!(commands(&e.step(fenced(ClaimAnswer::Unanswered), T0 + 2)).is_empty(), "no answer from the platform: still held");
+    let tick = e.step(Input::Tick, T0 + 3);
+    assert!(tick.effects.iter().any(|x| matches!(x, Effect::Fence { prompt, .. } if prompt == "p")) && commands(&tick).is_empty(), "posted again at the tick");
+    assert!(!e.step(Input::Tick, T0 + 4).effects.iter().any(|x| matches!(x, Effect::Fence { .. })), "once in flight, not again");
+    let on_work = e.step(fenced(ClaimAnswer::Ours { seq: Some(9) }), T0 + 5);
+    assert_eq!(commands(&on_work), vec![Command::Answer { turn: turn.clone(), prompt: "p".into(), option: Some("yes".into()), seq: 2, by: a.owner.clone(), words: None, attached: None }]);
+    assert!(e.step(fenced(ClaimAnswer::Ours { seq: Some(9) }), T0 + 6).effects.is_empty(), "a stale answer: nothing");
+
+    // another body under its id: the runtime's wait ends unanswered
+    ev(&mut e, Event::Prompt { turn: turn.clone(), prompt: "q".into(), text: "Again?".into(), options: options(), ttl_ms: None }, T0 + 7);
+    e.step(record(3, "q"), T0 + 8);
+    let theirs = e.step(Input::Fenced { turn: turn.clone(), prompt: "q".into(), answer: ClaimAnswer::Theirs }, T0 + 9);
+    assert_eq!(commands(&theirs), vec![Command::Answer { turn: turn.clone(), prompt: "q".into(), option: None, seq: 0, by: String::new(), words: None, attached: None }]);
+
+    // a restart while held: the turn ends, its answer never given
+    ev(&mut e, Event::Prompt { turn: turn.clone(), prompt: "r".into(), text: "Last?".into(), options: options(), ttl_ms: None }, T0 + 10);
+    e.step(record(4, "r"), T0 + 11);
+    let mut next = Engine::new(e.state().clone(), Settings::default(), "11111111111111111111111111111111").unwrap();
+    next.step(Input::Agents(vec![a.clone()]), T0 + 12);
+    let recovered = next.recover(T0 + 12);
+    assert!(!recovered.effects.iter().any(|x| matches!(x, Effect::Runtime(Command::Answer { .. }) | Effect::Fence { .. })), "{:?}", recovered.effects);
+    assert!(next.step(Input::Fenced { turn: turn.clone(), prompt: "r".into(), answer: ClaimAnswer::Ours { seq: None } }, T0 + 13).effects.is_empty(), "the old life's answer: nothing");
+
+    // a platform that answers no closure for a turn's idle bound: the turn
+    // ends, its answer never given
+    let mut e = engine(std::slice::from_ref(&a));
+    let turn = started(&said(&mut e, &a, &v, 1, &a.owner, json!({"text":"ask me"}), T0)).unwrap().turn;
+    ev(&mut e, Event::Prompt { turn: turn.clone(), prompt: "p".into(), text: "Publish?".into(), options: options(), ttl_ms: None }, T0);
+    e.step(record(2, "p"), T0 + 1);
+    let idle = 600_000; // engine()'s bound
+    for at in [T0 + 2, T0 + idle / 2, T0 + idle] {
+        assert!(commands(&e.step(Input::Fenced { turn: turn.clone(), prompt: "p".into(), answer: ClaimAnswer::Unanswered }, at)).is_empty());
+        e.step(Input::Tick, at);
+    }
+    let over = e.step(Input::Tick, T0 + 2 + idle);
+    assert_eq!(commands(&over), vec![Command::Forget { turn: turn.clone() }], "ended, never answered");
+    assert!(kinds(&over).contains(&"turn.end".to_string()));
 }
 
 #[test]

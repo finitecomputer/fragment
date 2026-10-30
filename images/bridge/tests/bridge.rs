@@ -1993,6 +1993,56 @@ async fn a_late_answer_survives_a_deploy_and_runs_once() {
     bridge.stop().await;
 }
 
+/// Goal (Alex on #660): a live answer is acted on only once its closure is
+/// on `work`, so a rollback past it runs nothing twice, whatever landed
+/// before the crash. Method: the platform refuses the closure (503) while
+/// the answer waits, and the agent has no answer meanwhile; then a crash and
+/// a wake on a save from before the answer. Never landed: the answer is
+/// late, and runs once as a fresh turn. Landed and acted on first: the wake
+/// finds the card answered live, and runs nothing.
+#[tokio::test]
+async fn a_live_answer_runs_once_whatever_landed_before_a_crash() {
+    for landed in [false, true] {
+        let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+        let chat = fake.chat("talk", &["juniper"]);
+        let dir = support::dir(&format!("live-fence-{landed}"));
+        let cfg = support::config(&fake.url(), &dir, support::settings());
+        let bridge = support::start_killable(cfg.clone(), support::script());
+        following(&fake, 2).await;
+        let said = fake.say(&chat, &person("paul"), json!({ "text": "do something risky" }));
+        let turn = turn_of("juniper", &chat, seq(&said));
+        fake.until(WAIT, "the card", |w| !w.bodies(&chat, "work", "turn.prompt").is_empty()).await;
+        let card = fake.with(|w| w.bodies(&chat, "work", "turn.prompt")[0].clone());
+        let saved = support::save_state(&dir);
+        fake.with(|w| w.fail_closures = true);
+        let answer = fake.say(&chat, &person("paul"), json!({ "kind": "prompt_response", "agent": "npub1juniper", "turn": turn, "prompt": card["prompt"], "option": "once" }));
+        let fresh = turn_of("juniper", &chat, seq(&answer));
+        let approved = |w: &World| replies(w, &chat).iter().filter(|r| r["turn"] == turn.as_str() && r["text"].as_str().is_some_and(|t| t.contains("(approved)"))).count();
+        fake.until(WAIT, "its closure refused, and refused again", |w| w.refused_closures >= 2).await;
+        fake.with(|w| assert_eq!(approved(w), 0, "no answer before its closure is on work"));
+        if landed {
+            fake.with(|w| w.fail_closures = false);
+            fake.until(WAIT, "acted on once its closure landed", |w| approved(w) == 1).await;
+        }
+        bridge.kill().await;
+        fake.until(WAIT, "the first life ended", |w| w.live_sockets() == 0).await;
+        support::restore_state(&dir, &saved);
+        fake.with(|w| w.fail_closures = false);
+        let bridge = support::start_killable(cfg, support::script());
+        following(&fake, 2).await;
+        let next = said_and_ended(&fake, &chat, "good morning").await;
+        fake.with(|w| {
+            let rebuilt = replies(w, &chat).iter().filter(|r| r["turn"] == fresh.as_str()).count();
+            assert_eq!((approved(w), rebuilt), if landed { (1, 0) } else { (0, 1) }, "acted on once (landed: {landed})");
+            let closed = w.bodies(&chat, "work", "turn.prompt.closed");
+            assert_eq!(closed.len(), 1, "{closed:?}");
+            assert_eq!(closed[0].get("answerSeq").is_some(), !landed, "a late closure names its answer; a live one does not");
+            assert_eq!(ends_of(w, &chat, &next).len(), 1);
+        });
+        bridge.stop().await;
+    }
+}
+
 /// Goal (P6): a card whose journal cannot be read whole (a gap, a card
 /// further back than a read goes, an older start with no cause) is closed
 /// on its own turn as `history_unavailable`, and starts nothing: never a

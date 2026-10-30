@@ -390,9 +390,14 @@ the card (`card_history`: `work` from its tail to the card's turn's start,
   its steps (8, the rest counted) and its last replies. Nothing of it is
   the owner's words. The old turn never resumes.
 - **Only a late closure rebuilds.** The card's closure on this path names
-  its answer (`answerSeq`); a closure written live names none. So a card
-  answered live and acted on, then a `/data` rolled back to before the
-  answer, reads the answer again and starts nothing.
+  its answer (`answerSeq`); a closure written live names none, and the
+  runtime has a live answer only once that closure is on `work`
+  (`Effect::Fence`, answered back as `Input::Fenced`, as a claim is:
+  posted again at each tick until the platform answers it; a 409 or a
+  chat the agent may no longer post in ends the runtime's wait with no
+  answer, as an expiry does). So a `/data` rolled back to before the
+  answer reads it again and finds it answered live, and starts nothing,
+  or not recorded, and so never acted on, and runs it once, late.
 - **Otherwise nothing runs.** A card closed already, a Stop of its turn or
   from its asker before the answer, another option or another person's
   answer start nothing; an answer read after the card's life with none in
@@ -408,21 +413,27 @@ to the card's life (`BRIDGE_PROMPT_TTL_MS`, an hour), so a runtime still
 alive at its expiry times out as before. The fresh turn is a new Hermes
 turn: an approval Hermes itself asks (its few left: a saved payment card's
 fill; `managed_config`) is asked again there, as its gate keeps no answer.
-A card answered live whose turn a crash then cut before it acted is
-answered and lost, as at-most-once has it; the next turn's note says so.
+A card answered live whose turn a crash then cut before it acted (its
+closure on `work`, its runtime given the answer or not yet) is answered
+and lost, as at-most-once has it; the next turn's note says so.
 SimpleX answers a card in words (a message), never a `prompt_response`: one
 read late is a message of its own.
 
 Proven in `cards.rs` (a long turn's late answer and its note, the live
 closure's rollback, first answer, Stop, expiry, refusals), the engine
 (`a_late_answer_is_a_fresh_claim_even_without_the_cache`,
-`a_card_answered_live_starts_nothing_after_a_rollback`), through the bridge
+`a_card_answered_live_starts_nothing_after_a_rollback`,
+`a_live_answer_reaches_the_runtime_only_once_its_closure_is_on_work`, and
+the crash world's rule that the runtime acts on no owner's answer the
+journal does not hold), through the bridge
 (`a_late_answer_survives_a_deploy_and_runs_once`,
+`a_live_answer_runs_once_whatever_landed_before_a_crash`,
 `a_late_card_with_unavailable_history_runs_nothing`) and with the real
 Hermes (tests/docker.rs `a_card_answered_after_a_sleep_starts_one_fresh_turn`:
 a turn of six tool calls and a long plan, a sleep and a restore, a deploy's
 503s, the answer again, Keep private; `a_card_answered_live_runs_once_after_a_rollback`:
-the rollback and an expiry).
+a closure refused then a restore, a closure landed then a restore, and an
+expiry).
 
 ## The turn after a cut one is told
 

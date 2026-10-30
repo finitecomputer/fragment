@@ -99,6 +99,10 @@ pub struct World {
     /// The next this many reads of a page of 100 records (a note's, or a
     /// late card answer's) answer 503, as a deploying platform does.
     pub fail_history_reads: u32,
+    /// While set, every post of a card's closure (`turn.prompt.closed`)
+    /// answers 503, as a deploying platform does; counted.
+    pub fail_closures: bool,
+    pub refused_closures: u32,
     /// Fragments whose `GET …/channels` answers 500, every time.
     pub broken: Vec<String>,
     /// Each post to a `work` channel (a claim, among others) is answered
@@ -743,6 +747,10 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
                     return answer(StatusCode::OK, json!({ "record": record, "replayed": true }));
                 }
                 return refuse(StatusCode::CONFLICT, "that id was posted with another body");
+            }
+            if w.fail_closures && body["kind"] == "turn.prompt.closed" {
+                w.refused_closures += 1;
+                return refuse(StatusCode::SERVICE_UNAVAILABLE, "deploying");
             }
             if w.fail_posts > 0 {
                 w.fail_posts -= 1;
