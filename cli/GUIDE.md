@@ -885,8 +885,10 @@ their archive, never one of its own), and so reads it: `fragment sync
 `~/archive/sessions/`. A conversation's file (format
 `session-archive/1`) is `{id, origin, kind, title, source, with,
 started_at, ended_at, parts, messages}`, each message `{role, at, text,
-tool, tool_calls, reasoning, summary}`; `kind` is `chat`, `cron` (a
-scheduled job's run) or `subagent` (a side task); times are UTC.
+tool, tool_calls, reasoning, summary, attachments}`; `kind` is `chat`,
+`cron` (a scheduled job's run) or `subagent` (a side task); times are UTC.
+A file a message held is under `~/archive/media/`, named in its
+`attachments`.
 
 ## Agents
 

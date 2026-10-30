@@ -8,8 +8,10 @@
 //! under the export's root); a chat's file is the conversation itself
 //! (`chats/sessions/<id>.json`); a month's scheduled runs or side tasks
 //! share one (`chats/runs/<kind>-<YYYY-MM>.json`, `{conversations: {<id>:
-//! …}}`). Only regular files inside `chats/` are read (no link out of it,
-//! no device), each once and at most `FILE_MAX_BYTES`, and each
+//! …}}`). A message's files are named by its `attachments` (`{name,
+//! media_type, size, sha256, path}`, `path` under `chats/`), their bytes
+//! checked against their hash. Only regular files inside `chats/` are read
+//! (no link out of it, no device), each once and bounded, and each
 //! conversation goes to the spool as it is read.
 
 use std::collections::BTreeMap;
@@ -17,7 +19,7 @@ use std::io::Read as _;
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
-use fragment_core::session::{Kind, Message, Session};
+use fragment_core::session::{self, Kind, Message, Session};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -93,7 +95,7 @@ fn regular(path: &Path) -> bool {
 /// (the rest is read); an import past an archive's limits stops, refused.
 pub fn read(root: &Path, spool: &mut Spool) -> Result<Vec<String>> {
     let index_path = root.join("chats/index.json");
-    let index: IndexFile = serde_json::from_slice(&read_file(root, "chats/index.json")?).with_context(|| format!("reading {}", index_path.display()))?;
+    let index: IndexFile = serde_json::from_slice(&read_file(root, "chats/index.json", FILE_MAX_BYTES)?).with_context(|| format!("reading {}", index_path.display()))?;
     if index.format != FORMAT {
         bail!("{} is format {:?}, not the old Finite's export ({FORMAT})", index_path.display(), index.format);
     }
@@ -106,7 +108,7 @@ pub fn read(root: &Path, spool: &mut Spool) -> Result<Vec<String>> {
         }
     }
     for (file, records) in by_file {
-        let v: Value = match read_file(root, &file).and_then(|b| serde_json::from_slice(&b).with_context(|| file.clone())) {
+        let v: Value = match read_file(root, &file, FILE_MAX_BYTES).and_then(|b| serde_json::from_slice(&b).with_context(|| file.clone())) {
             Ok(v) => v,
             Err(e) => {
                 problems.push(format!("{file}: {e:#}"));
@@ -121,7 +123,10 @@ pub fn read(root: &Path, spool: &mut Spool) -> Result<Vec<String>> {
                 continue;
             };
             match serde_json::from_value::<Record>(held).map_err(|e| e.to_string()).and_then(|r| session(r, &listed, index.agent.as_deref())) {
-                Ok(s) => spool.add(s)?,
+                Ok((mut s, files)) => {
+                    media(root, &mut s, files, spool, &mut problems)?;
+                    spool.add(s)?;
+                }
                 Err(e) => problems.push(format!("conversation {} in {file}: {e}", said_id(&listed.id))),
             }
         }
@@ -129,17 +134,47 @@ pub fn read(root: &Path, spool: &mut Spool) -> Result<Vec<String>> {
     Ok(problems)
 }
 
+/// A file a message names: its message's place, its attachment's place,
+/// and its path under `chats/`.
+type Named = (usize, usize, String);
+
+/// The files its messages hold, into `spool`: each read from `chats/` and
+/// kept when its bytes are what its attachment names; one that is not (or
+/// is missing, or too large) is left out of its message, said.
+fn media(root: &Path, s: &mut Session, files: Vec<Named>, spool: &mut Spool, problems: &mut Vec<String>) -> Result<()> {
+    let mut lost: Vec<(usize, usize)> = Vec::new();
+    for (i, j, path) in files {
+        let a = &s.messages[i].attachments[j];
+        let kept = match Some(format!("chats/{path}")).filter(|p| inside_chats(p)).map(|p| read_file(root, &p, session::MEDIA_FILE_MAX_BYTES)) {
+            Some(Ok(bytes)) => spool.add_media(a, &bytes)?,
+            _ => false,
+        };
+        if !kept {
+            problems.push(format!("conversation {}: its file {} is not what it names, or not there", said_id(&s.id), said_id(&a.name)));
+            lost.push((i, j));
+        }
+    }
+    for (i, j) in lost.into_iter().rev() {
+        s.messages[i].attachments.remove(j);
+    }
+    Ok(())
+}
+
 /// A conversation from its file's record (`held`), its index's `listed`
-/// filling in what the file left out.
-fn session(held: Record, listed: &Record, agent: Option<&str>) -> Result<Session, String> {
+/// filling in what the file left out; with each file its messages name
+/// (message, attachment, its path under `chats/`).
+fn session(held: Record, listed: &Record, agent: Option<&str>) -> Result<(Session, Vec<Named>), String> {
     let kind_name = held.kind.as_deref().or(listed.kind.as_deref()).unwrap_or("chat");
     let kind = Kind::parse(kind_name).ok_or_else(|| format!("its kind {:?} is none of chat, cron, subagent", said_id(kind_name)))?;
+    let files: Vec<Named> = held.messages.as_array().into_iter().flatten().enumerate()
+        .flat_map(|(i, m)| m["attachments"].as_array().into_iter().flatten().enumerate().map(move |(j, a)| (i, j, a["path"].as_str().unwrap_or_default().to_string())))
+        .collect();
     let messages: Vec<Message> = match held.messages {
         Value::Array(_) => serde_json::from_value(held.messages).map_err(|e| format!("its messages: {e}"))?,
         _ => return Err("its file holds no messages".into()),
     };
     let or = |a: Option<String>, b: &Option<String>| a.or_else(|| b.clone());
-    Ok(Session {
+    let s = Session {
         format: String::new(),
         id: held.id,
         origin: ORIGIN.to_string(),
@@ -154,7 +189,8 @@ fn session(held: Record, listed: &Record, agent: Option<&str>) -> Result<Session
         ended_at: or(held.ended_at, &listed.ended_at),
         parts: if held.sessions.is_empty() { listed.sessions.clone() } else { held.sessions },
         messages,
-    })
+    };
+    Ok((s, files))
 }
 
 /// Whether an index's `file` is one of the export's chats: relative,
@@ -165,9 +201,9 @@ fn inside_chats(file: &str) -> bool {
 }
 
 /// The bytes of `file` under `root`: a regular file, every folder on the
-/// way to it a folder (no link out of the export), at most
-/// `FILE_MAX_BYTES` (read so, whatever it says its size is).
-fn read_file(root: &Path, file: &str) -> Result<Vec<u8>> {
+/// way to it a folder (no link out of the export), at most `max` bytes
+/// (read so, whatever it says its size is).
+fn read_file(root: &Path, file: &str, max: u64) -> Result<Vec<u8>> {
     let path = root.join(file);
     let mut at = root.to_path_buf();
     for part in Path::new(file).components() {
@@ -179,9 +215,9 @@ fn read_file(root: &Path, file: &str) -> Result<Vec<u8>> {
         }
     }
     let mut bytes = Vec::new();
-    std::fs::File::open(&path).with_context(|| format!("reading {}", path.display()))?.take(FILE_MAX_BYTES + 1).read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > FILE_MAX_BYTES {
-        bail!("{} is past the {} MiB a file of an export may be", path.display(), FILE_MAX_BYTES / (1024 * 1024));
+    std::fs::File::open(&path).with_context(|| format!("reading {}", path.display()))?.take(max + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > max {
+        bail!("{} is past the {} MiB it may be", path.display(), max / (1024 * 1024));
     }
     Ok(bytes)
 }
@@ -242,6 +278,36 @@ pub(crate) mod tests {
         assert_eq!(c.messages[1].tool_calls[0].name, "web");
         let run = read_back(&s, "hermes-r1");
         assert_eq!((run.kind, run.messages[0].text.as_deref()), (Kind::Cron, Some("digest")), "Hermes' structured text, which the export copied raw, reads as text");
+    }
+
+    /// Goal: a message's files come with it, by their hash, each once; one
+    /// whose bytes are not what it names, missing, or outside `chats/` is
+    /// left out of its message, said, and the message kept.
+    #[test]
+    fn a_messages_files_come_with_it() {
+        let root = super::super::tempdir();
+        let chats = root.join("chats");
+        std::fs::create_dir_all(chats.join("media")).unwrap();
+        let png = b"\x89PNG fake bytes";
+        std::fs::write(chats.join("media/plot.png"), png).unwrap();
+        std::fs::write(root.join("outside.png"), png).unwrap();
+        let sha = fragment_core::blob::sha256_hex(png);
+        let file = |path: &str, sha: &str| json!({ "name": "plot.png", "media_type": "image/png", "size": png.len(), "sha256": sha, "path": path });
+        let chat = json!({ "format": FORMAT, "id": "c1", "kind": "chat", "messages": [
+            { "role": "user", "at": "2026-10-01T09:00:00Z", "attachments": [file("media/plot.png", &sha), file("media/plot.png", &"0".repeat(64)), file("../outside.png", &sha), file("media/missing.png", &sha)] },
+            { "role": "user", "at": "2026-10-01T09:01:00Z", "text": "again", "attachments": [file("media/plot.png", &sha)] },
+        ] });
+        std::fs::write(chats.join("c1.json"), chat.to_string()).unwrap();
+        std::fs::write(chats.join("index.json"), json!({ "format": FORMAT, "conversations": [{ "id": "c1", "file": "chats/c1.json" }] }).to_string()).unwrap();
+        let mut s = spool();
+        let problems = read(&root, &mut s).unwrap();
+        assert_eq!(problems.len(), 3, "{problems:?}");
+        let c = read_back(&s, "hermes-c1");
+        assert_eq!(c.messages[0].attachments.len(), 1);
+        assert_eq!(c.messages[0].attachments[0].path, format!("media/{sha}.png"));
+        assert_eq!(c.messages[1].attachments.len(), 1, "a file two messages hold");
+        assert_eq!(s.media.len(), 1, "is kept once");
+        assert_eq!(std::fs::read(&s.media[&format!("media/{sha}.png")]).unwrap(), png);
     }
 
     /// Goal: an export is read only inside its `chats/`, and what it cannot

@@ -12,6 +12,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use fragment_core::session::{self as archive, Kind, Message, Session};
 use serde_json::{json, Value};
+use sha2::Digest;
 
 use crate::api::Api;
 use crate::Suite;
@@ -35,8 +36,15 @@ fn export_with(root: &Path, later: bool) -> Result<()> {
             "with": "Ann", "started_at": at, "ended_at": at, "messages": words, "sessions": [id] })
     };
     let said = |role: &str, at: &str, text: &str| json!({ "role": role, "at": at, "text": text });
+    // a picture the person sent with their first message, as an export
+    // that carries files names it (templates/sessions/README.md)
+    std::fs::create_dir_all(chats.join("media"))?;
+    std::fs::write(chats.join("media/plot.png"), DOT_PNG())?;
+    let picture = json!({ "name": "plot.png", "media_type": "image/png", "size": DOT_PNG().len(), "sha256": hex::encode(sha2::Sha256::digest(DOT_PNG())), "path": "media/plot.png" });
+    let mut first = said("user", "2026-10-01T09:00:00Z", "plant beans?");
+    first["attachments"] = json!([picture]);
     let mut said_in_beans = vec![
-        said("user", "2026-10-01T09:00:00Z", "plant beans?"),
+        first,
         json!({ "role": "assistant", "at": "2026-10-01T09:00:02Z", "reasoning": "weigh the soil", "tool_calls": [{ "name": "web_search", "arguments": "{\"q\":\"beans\"}" }] }),
         json!({ "role": "tool", "at": "2026-10-01T09:00:03Z", "tool": "web_search", "text": "beans like warm soil" }),
         said("assistant", "2026-10-01T09:00:05Z", "in spring"),
@@ -121,6 +129,8 @@ pub fn sessions_ui(s: &mut Suite, api: &Api) -> Result<()> {
         opened && drawn && read == json!({ "title": "Beans", "user": ["plant beans?"], "agent": ["in spring"], "folded": [{ "open": false, "steps": ["Thought", "web_search"] }], "composer": false }),
         &read,
     );
+    let pictured = s.eventually(wait, || b.eval_in_frame(&page, frame, "document.querySelector('.msg.user img.archive-file')?.naturalWidth === 1").is_ok_and(|v| v == true));
+    s.ok("a picture the person sent shows with their message, from the archive", pictured, b.eval_in_frame(&page, frame, "document.querySelector('.msg.user')?.outerHTML ?? ''").unwrap_or_default());
     b.screenshot(&page, &shots.join("reader.png"))?;
 
     b.eval_in_frame(&page, frame, "(location.href = './', true)")?;
@@ -184,6 +194,12 @@ pub fn sessions_ui(s: &mut Suite, api: &Api) -> Result<()> {
     Ok(())
 }
 
+/// A picture: one pixel, a PNG.
+#[allow(non_snake_case)]
+fn DOT_PNG() -> Vec<u8> {
+    base64::Engine::decode(&base64::engine::general_purpose::STANDARD, "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==").expect("a PNG")
+}
+
 fn code(out: &std::process::Output) -> i32 {
     out.status.code().unwrap_or(-1)
 }
@@ -225,6 +241,9 @@ pub fn sessions(s: &mut Suite, api: &Api) -> Result<()> {
     let big_row = files.body["files"].as_array().and_then(|l| l.iter().find(|f| f["path"] == "sessions/hermes-e2e_big.json").cloned()).unwrap_or_default();
     let big = file(&keys, "sessions/hermes-e2e_big.json")?;
     let big_read = serde_json::from_slice::<Session>(&big.bytes).ok();
+    let picture = format!("media/{}.png", hex::encode(sha2::Sha256::digest(DOT_PNG())));
+    let pic = file(&keys, &picture)?;
+    s.ok("a picture a message held is kept in the archive by its hash", pic.status == 200 && pic.bytes == DOT_PNG(), pic.status);
     s.ok(
         "its chats' index lists them newest first, and a conversation of 1 MiB or more is a blob that reads back whole",
         keys_of(&index) == ["hermes-e2e_big", "hermes-e2e_beans"] && big_row["sha256"].is_string() && big_read.is_some_and(|b| b.messages[0].text.as_ref().is_some_and(|t| t.len() > 1_500_000)),

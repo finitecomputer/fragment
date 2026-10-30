@@ -29,14 +29,18 @@ import reads are cli/src/session/.
   | `source`, `with`, `model` | where it was said (`telegram`, `cli`), whom with, on which model, as its origin named them (optional) |
   | `started_at`, `ended_at` | when it began, and when it was last said (its last message's time, else its end) |
   | `parts` | its origin's own records it joins, in order (Hermes starts a new session each time it compresses a long conversation) |
-  | `messages` | `[{role, at?, text?, tool?, call?, tool_calls?: [{id?, name, arguments}], reasoning?, summary?}]`, in the order they were said |
+  | `messages` | `[{role, at?, text?, tool?, call?, tool_calls?: [{id?, name, arguments}], reasoning?, summary?, attachments?}]`, in the order they were said |
 
   Times are UTC, `YYYY-MM-DDTHH:MM:SS.sssZ`, so they sort as text. A
   message's `role` is `user`, `assistant`, `tool` or `system`; `tool` is
   the tool a result came from and `call` the call it answers (a call's
   `id`, where its origin kept one); `summary` marks the summary its origin
-  wrote when it compressed. An image, a recording or a file a message
-  held is a mark in its text (`[image]`, `[audio]`, `[video]`, `[file]`).
+  wrote when it compressed. A file a message held whose bytes came with it
+  is one of its `attachments`, `{name, media_type, size, sha256, path}`,
+  its bytes the archive's `path`, `media/<sha256>.<ext>` (each file once,
+  however many messages hold it; at most 25 MiB, and counted toward the
+  archive's bytes); one whose bytes did not is a mark in its text
+  (`[image]`, `[audio]`, `[video]`, `[file]`), as its origin left it.
   A tool's output and an assistant's reasoning are cut to 2,000
   characters and a call's arguments to 1,000, saying how many more there
   were (`… [N more characters not kept]`); what a person and the agent
@@ -93,8 +97,12 @@ fragment's is.
 - **The old Finite's export** (format `finite-chat-archive/1`: its
   `chats/`, or the folder holding it; cli/src/session/chats.rs), whose
   records are Hermes' sessions as its `export.py` joined them, keyed by
-  the same ids. It reads only regular files inside `chats/`, no link out
-  of it and no device, each at most 64 MiB.
+  the same ids. A message's files come with it when it names them in
+  `attachments` (the archive's own fields, `path` under `chats/`), each
+  checked against its `sha256` and `size`; one that is not what it names,
+  missing, or outside `chats/` is left out of its message, said. It reads
+  only regular files inside `chats/`, no link out of it and no device,
+  each at most 64 MiB (a file a message held, 25 MiB).
 - **Hermes' `state.db`** (or a Hermes home holding it), read-only, in one
   read transaction (cli/src/session/hermes.rs, which says how it follows
   Hermes v0.21.7, checked against what that Hermes writes:

@@ -50,6 +50,9 @@ const _: () = assert!(SESSIONS_MAX + 2_000 <= crate::export::limits::FILES_MAX, 
 const _: () = assert!(2 * ARCHIVE_MAX_BYTES <= crate::export::limits::FRAGMENT_MAX_BYTES, "an archive's bytes fit its person's export");
 /// One conversation's file: one larger is refused, and the rest imported.
 pub const SESSION_MAX_BYTES: usize = 8 * 1024 * 1024;
+/// One file a message held (`Attachment`): one larger is left out, its
+/// message kept. An archive's bytes count every one (`ARCHIVE_MAX_BYTES`).
+pub const MEDIA_FILE_MAX_BYTES: u64 = 25 * 1024 * 1024;
 /// A tool's output, an assistant's reasoning, and a tool call's arguments
 /// are cut to this many characters (what the person and the agent said
 /// never is), as the old Finite's export cuts them.
@@ -106,6 +109,39 @@ pub struct ToolCall {
     pub arguments: String,
 }
 
+/// A file a message held (an image, a recording, a document): its bytes
+/// are the archive's `path` (`media_path`: by their SHA-256, so a file two
+/// messages held is kept once; one of 1 MiB or more a blob, as any
+/// fragment's).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Attachment {
+    pub name: String,
+    pub media_type: String,
+    pub size: u64,
+    pub sha256: String,
+    #[serde(default)]
+    pub path: String,
+}
+
+/// Where a file's bytes are in an archive: `media/<sha256>.<ext>`, its
+/// extension its name's (letters and digits, at most 8), else `bin`, so
+/// the archive's page serves it as its kind.
+pub fn media_path(sha256: &str, name: &str) -> String {
+    let ext = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).filter(|e| (1..=8).contains(&e.len()) && e.bytes().all(|b| b.is_ascii_alphanumeric())).unwrap_or_else(|| "bin".into());
+    format!("media/{sha256}.{ext}")
+}
+
+impl Attachment {
+    /// Whether it names a file an archive keeps: a SHA-256, a size of at
+    /// most `MEDIA_FILE_MAX_BYTES`, a name and a type.
+    pub fn valid(&self) -> bool {
+        let sha = self.sha256.len() == 64 && self.sha256.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase());
+        let name = !self.name.trim().is_empty() && self.name.chars().count() <= FIELD_MAX_CHARS && !self.name.chars().any(char::is_control);
+        let kind = (1..=100).contains(&self.media_type.len()) && self.media_type.bytes().all(|b| b.is_ascii_graphic());
+        sha && name && kind && (1..=MEDIA_FILE_MAX_BYTES).contains(&self.size)
+    }
+}
+
 /// One message of a conversation, in its order.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Message {
@@ -128,13 +164,17 @@ pub struct Message {
     /// The summary its origin wrote when it compressed a long conversation.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub summary: bool,
+    /// The files it held, whose bytes the archive keeps.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<Attachment>,
 }
 
 impl Message {
     /// Whether a person wrote it or the agent said it to them: what a
     /// conversation's count and preview are made of.
     pub fn said(&self) -> bool {
-        matches!(self.role.as_str(), "user" | "assistant") && self.text.as_deref().is_some_and(|t| !t.trim().is_empty()) && !self.summary && self.tool_calls.is_empty()
+        let anything = self.text.as_deref().is_some_and(|t| !t.trim().is_empty()) || !self.attachments.is_empty();
+        matches!(self.role.as_str(), "user" | "assistant") && anything && !self.summary && self.tool_calls.is_empty()
     }
 }
 
@@ -252,6 +292,11 @@ impl Session {
                 call.arguments = clip(&call.arguments, ARGUMENTS_MAX_CHARS);
             }
             m.at = m.at.take().and_then(|at| normal_iso(&at));
+            m.attachments.retain(Attachment::valid);
+            for a in &mut m.attachments {
+                a.name = bounded(&a.name);
+                a.path = media_path(&a.sha256, &a.name);
+            }
         }
         for field in [&mut self.source, &mut self.with, &mut self.model, &mut self.agent] {
             *field = field.take().map(|v| bounded(&v)).filter(|v| !v.is_empty());
@@ -308,6 +353,7 @@ impl Session {
             preview: preview.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(PREVIEW_MAX_CHARS).collect(),
             sha256: hex::encode(Sha256::digest(&bytes)),
             bytes: bytes.len() as u64,
+            media: self.messages.iter().flat_map(|m| &m.attachments).map(|a| a.size).sum(),
         };
         Ok((entry, bytes))
     }
@@ -341,6 +387,14 @@ pub struct Entry {
     /// nothing.
     pub sha256: String,
     pub bytes: u64,
+    /// The bytes of the files its messages held (`Attachment`), which count
+    /// toward the archive's bytes.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub media: u64,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 impl Entry {
@@ -480,7 +534,7 @@ pub fn merge<P>(indexed: &BTreeMap<String, Entry>, stored: &std::collections::BT
         }
     }
     if m.added > 0 || m.updated > 0 {
-        within(m.entries.len(), m.entries.values().map(|e| e.bytes).sum())?;
+        within(m.entries.len(), m.entries.values().map(|e| e.bytes + e.media).sum())?;
     }
     m.indexes = changed.into_iter().collect();
     Ok(m)
@@ -719,6 +773,25 @@ mod tests {
         assert!(fragment_proto::valid_repo_path(&session_path(&hashed)));
         assert_eq!(key_of_path("sessions/a/b.json"), None);
         assert_eq!(index_path(Kind::Cron), "index/cron.json");
+    }
+
+    /// Goal: a file a message held is kept by its hash, at a path its kind
+    /// is served as, and counted; one that is no file an archive keeps is
+    /// dropped, its message kept. Invalid: no hash, an uppercase one, too
+    /// large, no name, a control character.
+    #[test]
+    fn a_messages_files_are_kept_by_their_hash() {
+        let file = |name: &str, sha: &str, size: u64| Attachment { name: name.into(), media_type: "image/png".into(), size, sha256: sha.into(), path: String::new() };
+        let sha = "a".repeat(64);
+        let photo = Message { role: "user".into(), at: Some("2026-10-01T09:00:00Z".into()), attachments: vec![file("plot.PNG", &sha, 10), file("x", "nope", 10), file("big.png", &sha, MEDIA_FILE_MAX_BYTES + 1), file("", &sha, 10), file("a\u{7}b", &sha, 10), file("UP", &"A".repeat(64), 10)], ..Default::default() };
+        let (e, bytes) = filed(chat("p", vec![photo]));
+        let back: Session = serde_json::from_slice(&bytes).unwrap();
+        let kept = &back.messages[0].attachments;
+        assert_eq!(kept.len(), 1, "{kept:?}");
+        assert_eq!(kept[0].path, format!("media/{sha}.png"));
+        assert_eq!((e.messages, e.media), (1, 10), "a photo with no words is said, and its bytes counted");
+        assert_eq!(media_path(&sha, "notes"), format!("media/{sha}.bin"));
+        assert_eq!(media_path(&sha, "a.tar.gz"), format!("media/{sha}.gz"));
     }
 
     /// Goal: one conversation too large for an archive is refused alone.
