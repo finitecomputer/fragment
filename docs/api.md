@@ -1345,7 +1345,7 @@ shell's Apps page shows it, one row a fragment, each with its Share…
 | `PUT /api/f/{name}/schedules/{id}` | editor | `{paused}` → `{schedule}`: paused, or resumed from its next minute after now (past the owner's overdraft, a resume is 402); the same again answers the same |
 | `DELETE /api/f/{name}/schedules/{id}` | editor | → `{ok, removed}`: it fires no more; one that is not there is 404 |
 | `GET /api/f/{name}/database?table=&offset=` | the owner (never an agent: an agent's owner reads as a viewer, and an agent acts at most as an editor) | its app's database, as the platform code in its facet reads it (`__dump`, cell/platform.mjs), for an export (Export, below). With no `table`, `{schema: [{type, name, table, sql}], tables}`: each table's, index's, view's and trigger's statement in the order SQLite made them, a virtual table's shadow tables and the platform's operation ledger (`_fragment_ops`) left out, and the tables whose rows it holds. With one, `{table, offset, rows, next}`: at most 1000 of its rows from `offset`, each a JSON object of its columns (a blob `{"$base64"}`), about 4 MiB of their JSON at most (the first whatever its size), `next` the offset after them or `null` at the end; a table not in the schema is 404. Without app code, 404 `no_code`. It loads the app's code, as a query does (its dynamic worker, metered) |
-| `POST /api/f/{name}/inbox` | the inbox token | token in `x-fragment-inbox-token` or `?t=`; a JSON body `{source?, payload}` (any other JSON, or text, is the payload), at most 64 KiB → `{ok, seq, runs}`. Bad token 403; 1000 pending, 429 |
+| `POST /api/f/{name}/inbox` | the inbox token, or the secret its code's `inbox` names (Apps) | token in `x-fragment-inbox-token` or `?t=` (or, when its code names an inbox secret, that header holding it, and no token: 403 otherwise); a JSON body `{source?, payload}` (any other JSON, or text, is the payload), at most 64 KiB → `{ok, seq, runs}`. Bad token 403; 1000 pending, 429 |
 | `POST /api/f/{name}/subscriptions` | a member who may read the channel | `{channel, url}` → `{id, channel, url}`: each new record of the channel is POSTed to `url` through the delivery queue as `{type: "record", fragment, channel, record}` (unsigned: the URL is the subscriber's capability; egress-checked; at most 32 a fragment; a 404 or 410 drops it; a removed member's go with it) |
 | `GET /api/f/{name}/subscriptions` | a member (the owner sees all) | → `{subscriptions: [{id, principal, channel, url, createdAt}]}` |
 | `DELETE /api/f/{name}/subscriptions/{id}` | its subscriber, or the owner | → `{ok, removed}` |
@@ -1455,6 +1455,15 @@ the code the fragment's own.
   "run": op}` (a move of `main` changing a matching path; `*`, `**`, `?`,
   a trailing `/`). The operation must be a mutation or a job an editor
   may call.
+- `inbox` (optional): `{"header": "x-telegram-bot-api-secret-token",
+  "secret": "TELEGRAM_WEBHOOK_SECRET"}`, how its inbox knows a delivery:
+  only with that header (lower case; never `x-fragment-*`, `cookie`,
+  `host`, `authorization` or `content-type`) holding the fragment's secret
+  of that name, compared in constant time; its inbox token, which its
+  editors read, then admits nothing, and before the secret is set nothing
+  is taken. A webhook that signs with a secret the sender was given (a
+  bot's `secret_token`) reaches an app so, and no editor can forge one. A
+  fragment on a blessed template declares none of its own.
 
 `app.mjs` exports `class App extends DurableObject` with one method per
 operation, each called `(input, call)`: `call.principal` (an identity,

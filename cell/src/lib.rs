@@ -860,14 +860,21 @@ fn check_name(name: &str) -> CellResult<()> {
     }
 }
 
+/// Headers an inbox delivery passes on at most, besides the inbox's token
+/// and hop count (`manifest::inbox_header_ok`): read in name order, so
+/// high enough that Cloudflare's own (`cf-…`, a few dozen at most) never
+/// crowd out a webhook's `x-…`; their bytes are Cloudflare's to bound.
+const INBOX_HEADERS_MAX: usize = 100;
+
 /// A request for a fragment's supervisor: what the router decided, and
 /// where it goes inside.
 struct Forward {
     routed: Routed,
     /// The inner path; the query string travels only in `routed.url`.
     inner: String,
-    /// Headers this route passes on purpose (the inbox's token and hop count).
-    extra: Vec<(&'static str, String)>,
+    /// Headers this route passes on purpose (the inbox's token, hop count,
+    /// and the headers an inbox may read its secret from).
+    extra: Vec<(String, String)>,
 }
 
 /// A blob upload declares its length, at most `limits::BLOB_MAX_BYTES`:
@@ -1043,7 +1050,7 @@ async fn site(mut req: Request, env: &Env, cfg: &Config, url: &Url, name: &str, 
         Some(_) => req.inner().body().map(worker::wasm_bindgen::JsValue::from),
         None => bytes_body(body),
     };
-    let extra = identity.map(|id| vec![(address::IDENTITY_HEADER, id.to_string())]).unwrap_or_default();
+    let extra = identity.map(|id| vec![(address::IDENTITY_HEADER.to_string(), id.to_string())]).unwrap_or_default();
     let mut resp = forward(env, &req, body, Forward { routed, inner: format!("/serve/{rest}"), extra }).await?;
     // the fragment's own refusal, never its app's answer
     if resp.headers().has(serve::REFUSAL)? {
@@ -1390,8 +1397,13 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
                 "/api/inbox" => {
                     for k in ["x-fragment-inbox-token", jobs::HOPS_HEADER] {
                         if let Some(v) = req.headers().get(k)? {
-                            extra.push((k, v));
+                            extra.push((k.to_string(), v));
                         }
+                    }
+                    // a webhook's own secret header, whichever its code names
+                    // (`inbox`): none the platform's objects trust
+                    for (k, v) in req.headers().entries().filter(|(k, _)| fragment_core::manifest::inbox_header_ok(k)).take(INBOX_HEADERS_MAX) {
+                        extra.push((k, v));
                     }
                     None
                 }

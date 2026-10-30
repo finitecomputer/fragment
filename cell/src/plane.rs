@@ -476,6 +476,11 @@ impl FragmentCell {
             }
         };
         self.face_is(manifest.kind(), manifest.title(), manifest.role(), shown.as_deref())?;
+        // how its inbox knows a delivery, as its code says (InboxDecl)
+        match &manifest.inbox {
+            Some(i) => self.set_meta(MetaKey::InboxSecret, &format!("{} {}", i.header, i.secret))?,
+            None => self.del_meta(MetaKey::InboxSecret)?,
+        }
         let Some(source) = source else {
             self.exec("DELETE FROM code", vec![])?;
             // no operations to run, so nothing for a trigger to start
