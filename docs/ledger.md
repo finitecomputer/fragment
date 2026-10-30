@@ -1,6 +1,6 @@
 # The usage ledger
 
-Status: **built** (phase 3 of docs/cloudflare-v1.md, decisions 24–28 and
+Status: **built** (docs/cloudflare-v1.md, decisions 24–28 and
 36–37; spike S4). The pure core is `crates/core/src/ledger.rs` (the state
 machine) and `crates/core/src/price.rs` (the price book), with the public
 wire types in `crates/proto/src/ledger.rs`. The cell runs it: the

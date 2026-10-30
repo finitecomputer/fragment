@@ -47,6 +47,9 @@ pub struct StripeConfig {
 }
 
 pub struct Config {
+    /// `FRAGMENT_CONNECTORS`: the connectors an owner may link, and their
+    /// relay targets; absent, `connectors::Policy::default()` (docs/computers.md, "Connector policy").
+    pub connectors: fragment_core::connectors::Policy,
     /// `CODESTORAGE_ORG` (required) and the settings beside it.
     codestorage: CodeStorageConfig,
     /// `FRAGMENT_HOST_SUFFIX`: fragments are served from `<name>.<suffix>`.
@@ -66,9 +69,8 @@ pub struct Config {
     pub computer_snapshots: bool,
     /// `FRAGMENT_COMPUTER_UNSAVED_MAX_MS` (the deploy config's
     /// `computers.unsaved_max_ms`): how long a computer whose sleep's save
-    /// keeps failing stays awake before it sleeps unsaved (I5 of
-    /// docs/explorations/pi-durable.md). Thirty minutes by default, Paul's
-    /// (2026-10-08; `fragment_core::computer`).
+    /// keeps failing stays awake before it sleeps unsaved. See
+    /// docs/durable-computers.md and `fragment_core::computer`.
     pub computer_unsaved_max_ms: i64,
     /// `FRAGMENT_SUPPORT_URL` (the deploy config's `support_url`): where a
     /// person whose computer will not start gets help, an `https:` page or
@@ -306,6 +308,7 @@ impl Config {
         let levers_fleet = levers_fleet(egress_local, host_label_suffix.is_some());
         let test_secret = test_secret(env, levers_fleet);
         Config {
+            connectors: var(env, "FRAGMENT_CONNECTORS").map_or_else(fragment_core::connectors::Policy::default, |v| fragment_core::connectors::Policy::parse(&v).unwrap_or_else(|e| panic!("FRAGMENT_CONNECTORS: {e}"))),
             codestorage: {
                 let org = var(env, "CODESTORAGE_ORG").unwrap_or_else(|| panic!("CODESTORAGE_ORG names the deployment's code.storage org"));
                 let api =

@@ -1,6 +1,6 @@
 # Computers: the platform's contract with an image
 
-Status: **the contract phase 4 builds** (docs/cloudflare-v1.md, decisions
+Status: **the image contract** (docs/cloudflare-v1.md, decisions
 13, 18, 19, 22, 23, 39, 41–44). The platform side is the generic Computer
 Durable Object in the cell. The image side is any image: ours runs
 Hermes (`images/hermes/`), and a stub image (`images/stub/`) proves
@@ -151,7 +151,7 @@ the bridge), what its person saw before 2026-10-08, and what they see now:
 |---|---|---|---|
 | **An idle sleep**, saved | nothing holds it for 20 minutes | Settings' "State" only / nothing (a message wakes it) | the same: nothing is lost, nothing to tell |
 | **Its owner's sleep**, saved (the shell's update is one) | `POST …/sleep` | the same | the same |
-| **A sleep whose save fails** | any sleep; it is kept awake (I5) and tried again after 1, 2, 4, 8, 15 minutes | Settings' `why`, read only when Settings was opened after it / nothing; its owner charged for the time it was kept | an `unsaved` notice at once, over every chat and Settings, pushed to open pages: since when its work is in no save, the save a stop goes back to, the time the bound stops it, and Restart; the time it is kept, from its failing try's start to the bound, is free |
+| **A sleep whose save fails** | any sleep; it is kept awake  and tried again after 1, 2, 4, 8, 15 minutes | Settings' `why`, read only when Settings was opened after it / nothing; its owner charged for the time it was kept | an `unsaved` notice at once, over every chat and Settings, pushed to open pages: since when its work is in no save, the save a stop goes back to, the time the bound stops it, and Restart; the time it is kept, from its failing try's start to the bound, is free |
 | **Awake saves that keep failing** (a turn's end, every 15 minutes busy) | tried again after a growing pause, unbounded while awake | nothing anywhere: no `why` for an awake save | the `unsaved` notice once two fail in a row (no stop time: none is due until it would sleep) |
 | **The bound runs out**: put to sleep unsaved | the sleep tried at `unsaved_since + unsaved_max_ms` (exactly: the last try is the bound's), only when nothing holds it | Settings' `why` ("slept unsaved"), which then stayed for good (only a save of the same life cleared it) / nothing | a `went_back` notice (pending) while it is asleep: since when changes on it won't be there; the `why` goes at the next save that works; nothing when nothing was done on it since that save |
 | **A crash**: the container stops on its own (out of memory, a host restart, the runtime's idle stop, or dying while its sleep held or saved it) | `Exited`; it starts again at once while anything wants it, else at its next wake | nothing (`restored` and `rollbacks` were in the API only) / a turn it cut ends quietly as "lost when the computer restarted"; the agent's next turn there is told what was cut (docs/bridge.md) | a `went_back` notice, only when something was done on it since the save it went back to (below): "Your computer restarted. Changes on it since `HH:MM` weren't kept. Your chats are all here."; the chat and the agent as before |
@@ -545,8 +545,7 @@ the processes: a start from one runs the entrypoint again.
   DO polls with `true`, opens the restore gate and makes a hold with
   `touch`, looks for the guest's answer with `test -e` and reads it with
   `cat`, and lets go of a hold with `rm`.
-- **The hold**, a handshake before every save (P2 of
-  docs/explorations/pi-durable.md). The DO removes `/run/computer/held`,
+- **The hold**, a handshake before every save (docs/durable-computers.md). The DO removes `/run/computer/held`,
   touches `/run/computer/hold`, and waits up to 20 s for the guest to
   touch `/run/computer/held`: its answer that it claims nothing now (no
   claim in flight, none new while the hold exists) and has copied what it
@@ -577,7 +576,7 @@ the processes: a start from one runs the entrypoint again.
   answer at most 64 KiB (`fragment_core::computer::left_out`). They are
   files it copied under the hold to names the save keeps (our Hermes
   image: its SQLite databases, below), so a hot copy of one, which could
-  tear (F4), is never what a wake restores. An empty answer leaves nothing
+  tear , is never what a wake restores. An empty answer leaves nothing
   out; an answer the DO refuses saves the guest whole; a save not held
   leaves nothing out. Our bridge answers for the stub, naming what
   `BRIDGE_HELD_LEAVE_OUT` names (the stub's `*.scratch`, only so the
@@ -625,9 +624,8 @@ the processes: a start from one runs the entrypoint again.
 
 ### Saves and what a wake restores
 
-P2, P3 and P7 of docs/explorations/pi-durable.md, and step 1 of
-docs/durable-computers.md. A computer keeps its newest three saves of
-`/data`, and a snapshot is only ever a cache of the current one:
+The design is docs/durable-computers.md. A computer keeps its newest
+three saves of `/data`, and a snapshot is only ever a cache of the current one:
 
 - **A save** is a `DirectoryBackup` of `/data`, taken under the hold
   (above). The Computer DO keeps its record with a number (1 for the
@@ -648,7 +646,7 @@ docs/durable-computers.md. A computer keeps its newest three saves of
   again after a pause (a minute, doubled each time, at most 15). So a
   crash loses what its life did since its last save, at most a turn and
   its settle, or 15 minutes of one.
-- **A sleep whose save fails** keeps its container (I5): it is awake
+- **A sleep whose save fails** keeps its container : it is awake
   again, held no more, and its view's `why` and its owner's notice say so
   (above, "What its owner is told"); its sleep is tried again after the
   same pause, the last try at the bound itself, so the time its owner is
@@ -659,7 +657,7 @@ docs/durable-computers.md. A computer keeps its newest three saves of
 - **A wake restores the current save:** the newest one not found
   unusable. A start whose save will never restore (its archive gone or
   altered) marks it unusable and starts again at once from the save before
-  it (F5), with no strike against the computer; with none left to try, it
+  it , with no strike against the computer; with none left to try, it
   is a strike like any other failed start. A start that fails for another
   reason (an image pull, the platform) is a strike, and tries the same
   save again.
@@ -670,14 +668,14 @@ docs/durable-computers.md. A computer keeps its newest three saves of
   it is the image and the save. A sleep whose save failed takes none, and
   a snapshot that fails forgets nothing: the one kept is still a cache of
   its own save. So a snapshot only ever makes a wake faster, never
-  different (I9).
+  different .
 - **Why the two agree.** The snapshot is taken after the backup within
   one sleep, with the guest held from before the backup (the hold, above)
   until it is gone: it claims no new turn in between. A turn it had
   claimed before the hold can still write between the two.
 - **A broken snapshot** (one that will not start: expired, say) is
   forgotten as its start fails, and the same wake starts the image and
-  restores the save, with no strike against the computer (F7). Only the
+  restores the save, with no strike against the computer . Only the
   hosted lane can show what Cloudflare answers for one (local workerd
   takes no snapshots: the lifecycle's fallback is proven pure, in
   `crates/core`).
@@ -834,10 +832,11 @@ expires within 30 days. The container application is the deployment's
     its protocol only from one (measured on a preview computer,
     2026-10-25), so a computer reaches SimpleX's file servers only through
     this: the Worker's `connect()`, which nothing inspects, carries them
-    (the shim's `ComputerEgress`, entry.mjs `relay`). Only the hosts and
-    port the guest view's `relay` names (SimpleX's and Flux's preset XFTP
-    servers, `relay::HOSTS`, on 443; 403 for any other, and 400 without
-    an upgrade), at most `relay::OPEN_MAX` (4) open at once per computer
+    (the shim's `ComputerEgress`, entry.mjs `relay`). Only the targets
+    the guest view's `relayTargets` names, its `relay` those on 443 (the
+    deployment's connector policy, below; by default SimpleX's and Flux's
+    preset XFTP servers, `relay::HOSTS`, on 443; 403 for any other, and
+    400 without an upgrade), at most `relay::OPEN_MAX` (4) open at once per computer
     and `relay::DAY_BYTES_MAX` (2 GiB) a UTC day (429 past either), each
     closed with code 4008 past its allowance (`relay::BYTES_MAX`, 32 MiB
     both ways together, or what is left of the day's budget past what the
@@ -2448,8 +2447,7 @@ and how a runtime finds them, is the image's.
   page with `pdf_page_image.py` and inspect it before delivery. No
   WeasyPrint, Pandoc, LaTeX, LibreOffice or nano-pdf is preinstalled;
   document conversion, spreadsheet recalculation and AI PDF edits that
-  need those remain optional. The audit and two offline sample paths are
-  in docs/skills-audit.md.
+  need those remain optional.
 - **Automatic learning and local forks (2026-10-09):** automatic memory and
   skill reviews are on (`auxiliary.background_review: { enabled: true }`).
   Managed skills stay read-only in `/data/hermes/managed-skills`; sync
@@ -2816,3 +2814,21 @@ for a host) and finds the same `HOME`, `~` and modes.
   hosted `agent-smoke` checks that its chat's agent's screen is the one
   served: the RFB stream's desktop is that agent's (`hermes:<profile>`),
   the page names it, and another agent's is refused.
+
+### Connector policy
+
+The deployment's `connectors` (its config; `FRAGMENT_CONNECTORS`, checked
+by `fragment_core::connectors::Policy`) name the doors its people may open
+and the exact endpoints a computer's relay carries for each: `[{id,
+relayTargets: [{host, port}]}]`, each target an exact public DNS name on a
+nonzero port (no wildcard, IP, local or internal name, or suffix). Absent,
+the cell's default: `simplex`, with `relay::HOSTS` on 443. `[]` is the
+kill switch: no door is linked, redeemed or checked, and no relay opens;
+an owner may still unlink. A computer's relay offer (`relayTargets`, and
+`relay` for the 443 ones) and its relay admission read the same policy,
+for the connectors its agents are allowed; the relay's bounds stay the
+computer's, whichever connector a relay is for.
+
+`Policy::authorize(owner, agent, connector, action)` is the one decision
+every door and relay asks; org policy will intersect there. An image's
+own declarations grant nothing.

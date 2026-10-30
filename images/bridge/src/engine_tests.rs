@@ -1486,7 +1486,7 @@ fn tasks_hear_only_the_owner_and_the_fragment() {
     assert!(started(&owner).is_some(), "its owner's runs");
 }
 
-// ---- across lives (docs/explorations/pi-durable.md, rung 1) ----
+// ---- across lives (docs/durable-computers.md) ----
 //
 // The engine inside a model of what is around it: the platform's channels
 // with their replay and 409 rule (the journal), the lane that posts to them
@@ -2059,8 +2059,8 @@ impl World {
         panic!("a world that never settles");
     }
 
-    /// Settled, every message said has one start and one end (I2, I4), and
-    /// ran at most once (I1), or it was the answer a turn asked for in words
+    /// Settled, every message said has one start and one end , and
+    /// ran at most once , or it was the answer a turn asked for in words
     /// (told to that turn, in the life that ran it) and started no turn of
     /// its own; and no turn is held any more.
     fn check_settled(&self, said: &[String]) -> Result<(), String> {
@@ -2113,7 +2113,7 @@ fn a_turn_starts_only_once_its_claim_is_answered() {
     assert_eq!((w.runs_of(&t), w.starts(&t).len()), (1, 1), "its own claim, replayed: run once");
 }
 
-/// Goal (I1): a claim another life holds (409) is never run here; the
+/// Goal : a claim another life holds (409) is never run here; the
 /// turn gets its one end, and the next message runs.
 #[test]
 fn a_claim_another_life_holds_ends_the_turn() {
@@ -2197,7 +2197,7 @@ fn a_restart_ends_what_was_handed() {
     assert_eq!(ends[0]["error"], "lost when the computer restarted");
 }
 
-/// Goal (I3): a rollback starts nothing twice. Method: keep the state after
+/// Goal : a rollback starts nothing twice. Method: keep the state after
 /// turn one, run turn two to its end, start a new life from the kept state,
 /// feed it the records again against the journal, and count runs.
 #[test]
@@ -2231,7 +2231,7 @@ fn a_rollback_starts_nothing_twice() {
     w.check().unwrap();
 }
 
-/// Goal (I4): a message admitted and never started before a crash is run by
+/// Goal : a message admitted and never started before a crash is run by
 /// the next life, whether that life wakes with the state the crash left (it
 /// queued there), a state from before it was said, or none.
 #[test]
@@ -2261,7 +2261,7 @@ fn said_before_a_crash_and_never_started_runs_in_the_next_life() {
     }
 }
 
-/// Goal (F11): what an agent says with no turn running survives a
+/// Goal : what an agent says with no turn running survives a
 /// rollback: its id holds the life, so a counter that went back collides
 /// with nothing, and both messages are posted.
 #[test]
@@ -2548,7 +2548,7 @@ fn simulate(seed: u64) -> Result<Reached, String> {
     Ok(Reached { told: w.tells.len(), told_then_run })
 }
 
-/// Goal (I1, I2, I4): any history of messages, answers lost and late, runs,
+/// Goal : any history of messages, answers lost and late, runs,
 /// cards, questions in words and their answers (`Asked`, `Tell`), Stops,
 /// crashes (each taking the lane's unsent posts with it), and lives started
 /// from any saved state or none keeps the invariants: checked after every
@@ -2566,7 +2566,7 @@ fn any_history_of_crashes_and_rollbacks_keeps_the_invariants() {
     assert!(reached.told > 0 && reached.told_then_run > 0, "the histories answer questions in words, and a rollback reads some answers again: {reached:?}");
 }
 
-/// Goal (I2, I4): the case the simulation found, each way it happens: a
+/// Goal : the case the simulation found, each way it happens: a
 /// crash takes a turn's last records from the lane after the state was
 /// written without them, and the next life (from the state the crash
 /// left) posts them again, under the same ids and bodies, so the turn ends

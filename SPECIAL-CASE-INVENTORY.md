@@ -54,3 +54,5 @@ These are fragments or computers, or components any fragment may use:
   markdown renderer (`__markdown.js`: markdown to DOM, never markup; the
   vault UI, the chat and the notes viewer use it), and the stylesheet a
   page may link (`__fragment.css`).
+
+Which connectors may be linked, and the exact TCP targets a computer's relay carries for them, are the deployment's policy (`connectors`; docs/computers.md, "Connector policy"), never an image's declaration. Relay leases and the computer's pooled quotas stay the platform's.

@@ -26,6 +26,17 @@
 //! itself rebuild for stale. Content decides, never a commit's date, which
 //! can be older than builds that lack its change.
 //!
+//! Why keep this (tooling review, 2026-10-30): git-restore-mtime has no
+//! Python dependencies, but restores commit dates, not the content/build
+//! relationship above; a change committed before a cached build can look
+//! fresh without having been built. Swatinem/rust-cache is already used;
+//! caching workspace crates there does not repair checkout mtimes. sccache
+//! 0.19.0 with only its GHA backend has 292 normal transitive packages and
+//! cannot cache linker-invoking crates (our CLI, e2e and cell cdylib). Using
+//! dependency caches alone is correct, but gives up first-party build reuse:
+//! a shard has already exhausted CI's 20-minute budget (lanes/mod.rs).
+//! Retain this until a simpler cache's PR run proves it fits that budget.
+//!
 //! Std alone, no crate: CI compiles this file by itself with `rustc`
 //! before its first cargo build, as no cargo build is to be trusted before
 //! it has run. xtask holds it for its tests alone.
@@ -498,6 +509,9 @@ mod tests {
         );
         f.write("templates/todo/app.mjs", "one\n");
         f.write("cell/shell/index.html", "<!doctype html>\n");
+        for file in ["client.mjs", "fragment.css", "files.mjs", "files.css", "markdown.mjs", "sw.js"] {
+            f.write(&format!("cell/{file}"), "browser file\n");
+        }
         f.write("cli/SKILL.md", "skill\n");
         f.write("cli/GUIDE.md", "guide\n");
         let manifest = ["--manifest-path", "crates/templates/Cargo.toml"];

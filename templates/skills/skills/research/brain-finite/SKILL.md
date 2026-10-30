@@ -103,6 +103,24 @@ fragment call <brain> search --input '{"q": "…"}'     # check that what you ad
 - When the brain has no answer, say so, and say what to ingest. Never
   answer from memory as though the brain said it.
 
+## Curate a parent brain
+
+A meta-brain is the same brain template, curated from child fragments.
+Use the guide's **A parent brain** workflow: a source list, incorporated
+revision file and synthesis pages citing child pages and revisions. Read
+children as a viewer, write the parent as editor, and refresh explicitly.
+Check each child's main pin before and after reading; retry if it moved.
+Publish outputs and their revision record together, updating stable paths;
+after restart, reconcile from the parent's files before writing again.
+
+Synthesis publishes to the parent's audience. Create with
+`--visibility members`; keep that audience inside every child's, including
+owners and agents. If a child becomes unreadable, mark dependent pages
+stale or withdrawn; never regenerate from cached copies. Withdraw content
+that should no longer be disclosed. Old git history cannot be recalled.
+Search children through their existing `search` operation as the reader,
+reporting incomplete coverage. The parent's browser searches its own pages.
+
 ## Rules
 
 - Raw is immutable: correct and interpret in `wiki/`, never in `raw/`.

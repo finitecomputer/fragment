@@ -147,7 +147,7 @@ each chat's budget of agent turns ("Agents asking each other", below). It
 is a cache. The authority on which turns have started is the chat's `work`
 channel, which never goes back in time, so `/data` restored from any
 earlier save, or lost, costs reads and runs nothing twice
-(docs/explorations/pi-durable.md, P1).
+(docs/durable-computers.md, P1).
 
 - **One life per turn.** Each bridge process is a life, with 128 random
   bits of its own, never written to `/data`. A turn is run only by the
@@ -389,7 +389,7 @@ any other reason while a card is open (an owner's sleep, a crash, a
 deploy) still cuts the turn, which ends as lost; the next message is now
 a turn of its own, told what was cut (below), never folded into the cut
 request. The card's promise outliving a restart is P6 of
-docs/explorations/pi-durable.md, and the debt ledger.
+docs/durable-computers.md, and the debt ledger.
 
 ## The turn after a cut one is told
 
@@ -399,8 +399,8 @@ email sent, a file half written), and its runtime may still hold its
 request: Hermes keeps a turn's message as its session's last until the
 turn answers, and joins the next message to it (two user messages in a
 row are one), so its model was handed `[paul] do the risky thing\n\n[paul]
-good morning` and did the risky thing again (F10 of
-docs/explorations/pi-durable.md; P5 of docs/durable-computers.md). Two
+good morning` and did the risky thing again (P5 of
+docs/durable-computers.md). Two
 parts close it:
 
 - **The note (every runtime).** The first turn an agent runs in a chat
@@ -462,8 +462,7 @@ by the `computers` lane's recovery checks, where the stub echoes it.
 ## SimpleX
 
 An agent's owner may link the agent to their SimpleX app (decision 32;
-`src/simplex/`; what it adds to the platform, entry by entry:
-docs/explorations/simplex-complexity.md). The bridge runs SimpleX's own
+`src/simplex/`). The bridge runs SimpleX's own
 core, `simplex-chat`, one per linked agent, as a child process, driven
 over its bot API (`-p`, loopback only) by one task, so nothing else ever
 drives it.
@@ -644,7 +643,7 @@ drives it.
 - **A start that went back in time** (the view's `restored.rollback`, for a
   link last run in an earlier start) requires a ratchet sync before anything
   is sent and holds replies through it: the core cannot see a rollback itself
-  (docs/explorations/simplex-connector.md, "The lab"). Each linked start
+  (tests/simplex.rs). Each linked start
   reads the core's durable state (`/_info @contact`): `started` or `agreed`
   waits for that negotiation, `required` or `allowed` begins an unforced
   sync, and `ok` forces one only when the rollback still needs it. Acceptance
