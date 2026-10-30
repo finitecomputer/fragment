@@ -1,6 +1,6 @@
 name: release
-# Binary releases: ci.yml calls this after each production deploy, with the
-# next version's tag and the deployed commit (its `cli-release`), or push
+# Binary releases: ci.yml calls this before production deploys new CLI
+# inputs, with the next version's tag and commit, or push
 # a v* tag by hand. CI builds the tarballs, attaches them, and publishes
 # the release as the latest. Each tarball is
 # fragment-<uname -s>-<uname -m>.tar.gz holding one binary, `fragment`, so
@@ -20,6 +20,10 @@ on:
       sha:
         type: string
         required: true
+    outputs:
+      version:
+        description: Published and verified CLI version
+        value: ${{ jobs.release.outputs.version }}
 
 permissions:
   contents: write
@@ -64,7 +68,7 @@ jobs:
           echo "FRAGMENT_CLI_VERSION=${TAG#v}" >> "$GITHUB_ENV"
           echo "FRAGMENT_CLI_COMMIT=$(git rev-parse HEAD | cut -c1-12)" >> "$GITHUB_ENV"
       - name: build
-        run: cargo build --release -p fragment-cli --target ${{ matrix.target }}
+        run: cargo build --locked --release -p fragment-cli --target ${{ matrix.target }}
       # each binary this runner can run (x86_64 macOS's would need Rosetta)
       - name: version
         if: matrix.target != 'x86_64-apple-darwin'
@@ -85,7 +89,17 @@ jobs:
   release:
     needs: build
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.verified.outputs.version }}
     steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          save-if: false
       # called, this is ci.yml's run, whose own artifacts (tested-tree-*,
       # e2e-scratch-*) are not the release's
       - uses: actions/download-artifact@v4
@@ -102,11 +116,16 @@ jobs:
           repo=(--repo "$GITHUB_REPOSITORY")
           target=()
           if [ -n "$SHA" ]; then
-            # called: the tag is new, made at the deployed commit
-            if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" --silent 2>/dev/null; then
-              echo "::error::$TAG already exists: nothing published (production's deploy stands)"
+            # called: the tag is new, made at the approved production commit
+            if tag_error=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" --silent 2>&1); then
+              echo "::error::$TAG already exists: nothing published (production may still deploy)"
               exit 1
             fi
+            # Only a definite absence authorizes creating the tag.
+            case "$tag_error" in
+              *"(HTTP 404)"*) ;;
+              *) echo "::error::could not check $TAG: $tag_error"; exit 1 ;;
+            esac
             target=(--target "$SHA")
           fi
           if gh release view "$TAG" "${repo[@]}" >/dev/null 2>&1; then
@@ -117,3 +136,9 @@ jobs:
           fi
           # published, and the latest: the install command fetches from releases/latest
           gh release edit "$TAG" "${repo[@]}" "${target[@]}" --draft=false --latest
+      # The marker is written only after all four builds and the publish
+      # succeed; read it back with the assets before allowing a header.
+      - id: verified
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: cargo xtask cli-release record "$TAG" >> "$GITHUB_OUTPUT"
