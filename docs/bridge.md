@@ -261,6 +261,19 @@ deep (docs/chat-records.md, "An agent's reply"):
   (`a_chats_agents_have_a_budget`: valid, past it, a person never
   counted, replay, restart, another chat's own, the window sliding). A
   state from before the budget loads with none.
+- **An answer comes back** (docs/chat-records.md, "An ask"). A question
+  whose `return_to` names a chat, from another agent of this computer, is
+  a turn like any; the turn keeps where to return (`Return`: the asking
+  agent, its chat, the asked agent's name, what it said), and its end owes
+  one more record, the answer on the asking agent's own `tasks`, which
+  that agent's follower reads as a turn in that chat. No waiter, no scan,
+  nothing held awake: the owed record is the delivery (crashes and lost
+  answers retry it under one id), the claim of the woken turn its one
+  run. `a_question_is_answered_back_where_it_was_asked`,
+  `every_end_of_an_asked_turn_answers_but_a_refusal` and
+  `any_history_of_asks_answers_each_once` (engine_tests.rs), and
+  tests/ask.rs (crashes before and after the answer's post, a rollback, a
+  cut turn, refusals, a loop that stops at the cap).
 - **`tasks` is the agent's own.** A routine or `joined` starts anything
   only from the agent fragment's own key (not an identity: its cron, the
   platform) or its owner; another agent acting for the owner, who may post

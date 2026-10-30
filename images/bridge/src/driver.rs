@@ -376,7 +376,7 @@ pub async fn run(cfg: Config, runtime: Box<dyn Runtime>, stop: watch::Receiver<b
                     lanes.push(&fragment, Job::Post { agent, channel, id, body, files, relay })
                 }
                 Effect::Claim { agent, fragment, turn, id, body } => lanes.push(&fragment, Job::Claim { agent, turn, id, body }),
-                Effect::Owed { agent, fragment, turn, id, body } => lanes.push(&fragment, Job::Owed { agent, turn, id, body }),
+                Effect::Owed { agent, fragment, channel, turn, id, body } => lanes.push(&fragment, Job::Owed { agent, channel, turn, id, body }),
                 Effect::Draft { agent, fragment, turn, text } => lanes.push(&fragment, Job::Draft { agent, turn, text }),
                 Effect::Runtime(c) => runtime_lane.push(c),
                 Effect::Keepalive(on) => {
@@ -718,7 +718,9 @@ impl ViewCache {
         // agent's message, a hand-off, is told by its name: its title, as
         // `__people` says it now).
         let mut ids: Vec<String> = writer.filter(|w| records::is_identity(w) && *w != agent.identity).map(str::to_string).into_iter().collect();
-        let (agents, people): (Vec<&api::Member>, Vec<&api::Member>) = members.iter().filter(|m| m.principal != agent.identity && records::is_identity(&m.principal)).partition(|m| m.kind == "agent");
+        // the agent itself too: an answer names the agent that gave it
+        // (engine.rs, `owe_answer`) from whichever agent's view it holds
+        let (agents, people): (Vec<&api::Member>, Vec<&api::Member>) = members.iter().filter(|m| records::is_identity(&m.principal)).partition(|m| m.kind == "agent");
         for m in people.into_iter().chain(agents) {
             if ids.len() >= api::PEOPLE_MAX {
                 break;
@@ -1022,9 +1024,9 @@ enum Job {
     Post { agent: String, channel: &'static str, id: String, body: Value, files: Vec<LocalFile>, relay: Option<String> },
     /// A turn's `turn.start` on `work`, whose answer the engine waits for.
     Claim { agent: String, turn: String, id: String, body: Value },
-    /// One of a turn's last records on `work`: the engine hears when the
-    /// lane is done with it.
-    Owed { agent: String, turn: String, id: String, body: Value },
+    /// One of a turn's last records (on `work`, or an answer on `tasks`):
+    /// the engine hears when the lane is done with it.
+    Owed { agent: String, channel: &'static str, turn: String, id: String, body: Value },
     Draft { agent: String, turn: String, text: Option<String> },
 }
 
@@ -1156,11 +1158,11 @@ async fn work(api: Api, fragment: String, lane: Arc<Lane>, claims: Claims, mut s
                     sx.reply(&agent, &text, &files).await;
                 }
             }
-            Job::Owed { agent, turn, id, body } => {
+            Job::Owed { agent, channel, turn, id, body } => {
                 // Done (answered, or given up after its tries) unless the
                 // bridge is stopping: then the turn keeps owing it, and the
                 // next life posts it again.
-                if post(&api, &fragment, &agent, records::WORK, &id, body, &[], None, stop.clone()).await.ended() {
+                if post(&api, &fragment, &agent, channel, &id, body, &[], None, stop.clone()).await.ended() {
                     let _ = claims.inbox.send(Msg::Input(Input::Posted { turn, id })).await;
                 }
             }

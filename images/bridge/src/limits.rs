@@ -165,6 +165,14 @@ pub const TURN_IDLE_MS_MAX: u64 = 15 * 60 * 1000;
 /// API) resets nothing.
 pub const HOPS_MAX: u32 = 3;
 
+/// What an asked agent's turn said that its answer carries back to the
+/// asking agent (its replies but interim ones), at most; past it, cut. The
+/// replies themselves stay whole in the chat it was asked in.
+pub const ANSWER_TEXT_MAX_BYTES: usize = 16 * 1024;
+/// The question an answer names, at most, so the asking agent knows which
+/// of its asks it answers.
+pub const ANSWER_ASKED_MAX_BYTES: usize = 300;
+
 /// Turns agents start of each other in one chat (a record an agent posts
 /// whose `to` names an agent), at most this many in `AGENT_TURNS_WINDOW_MS`
 /// by the causing records' own times (the platform's clock, so every life
@@ -289,6 +297,7 @@ const _: () = assert!(2 * NOTE_MAX_BYTES + 2 < MESSAGE_TEXT_MAX_BYTES, "a cut tu
 const _: () = assert!(NOTE_FORGOTTEN_MAX >= 1, "a forgotten turn is named");
 const _: () = assert!(NOTE_PAGE_RECORDS as usize <= NOTE_SCAN_RECORDS_MAX && NOTE_PAGE_RECORDS <= CATCHUP_PAGE_RECORDS);
 const _: () = assert!(HOPS_MAX >= 1, "an agent's record is one hop at least");
+const _: () = assert!(ANSWER_TEXT_MAX_BYTES + ANSWER_ASKED_MAX_BYTES + 1024 < MESSAGE_TEXT_MAX_BYTES, "an answer, its question and its framing are a turn's message whole");
 const _: () = assert!(AGENT_TURNS_PER_CHAT_MAX > HOPS_MAX as usize, "the budget is a backstop, past one chain of hand-offs");
 const _: () = assert!(AGENT_TURNS_WINDOW_MS > 0 && ENDED_HOPS_MS > 0);
 const _: () = assert!(MEDIA_FETCH_MS < 30_000, "Hermes waits 30 s for an op's answer, a fetched file's included");

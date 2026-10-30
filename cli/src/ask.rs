@@ -12,6 +12,10 @@
 //! the hop is that bridge's to count, never this post's (engine.rs,
 //! `hop_of`). `--wait` follows the chat's `work` for the asked agent's turn
 //! of that message, and prints its replies once the turn ends.
+//! `--return-to` (an agent's) names the chat it asks from instead: once the
+//! asked agent's turn is over, its bridge wakes the asking agent there with
+//! the answer, as a turn of its own, whether or not it still runs
+//! (docs/chat-records.md, "An ask").
 //!
 //! Who may be asked is the computer's own list: an agent's `GET
 //! /api/computer` (its computer's agents, all its owner's), a person's
@@ -71,12 +75,18 @@ fn label(name: &str) -> &str {
     fragment_proto::split_fragment_name(name).map_or(name, |(label, _)| label)
 }
 
-/// The agent `who` names: its fragment's name or label, its name, or its
-/// identity (case aside, but for the identity).
+/// The agent `who` names: its fragment's name or its identity, else its
+/// label or its name when only one agent answers to it (case aside, but for
+/// the identity). None for a name two agents answer to: never a guess.
 pub fn pick<'a>(agents: &'a [Agent], who: &str) -> Option<&'a Agent> {
     let who = who.trim();
     let lower = who.to_ascii_lowercase();
-    agents.iter().find(|a| a.identity == who || a.fragment == lower || label(&a.fragment) == lower || a.name.to_ascii_lowercase() == lower)
+    if let Some(a) = agents.iter().find(|a| a.identity == who || a.fragment == lower) {
+        return Some(a);
+    }
+    let mut named = agents.iter().filter(|a| label(&a.fragment) == lower || a.name.to_ascii_lowercase() == lower);
+    let first = named.next()?;
+    named.next().is_none().then_some(first)
 }
 
 /// `s` cut to at most `max` bytes (a label is ASCII), never ending in `-`.
@@ -177,6 +187,9 @@ pub struct Asked {
     /// `--wait`: its answer, or none in the time given.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub answer: Option<Answer>,
+    /// `--return-to`: the chat its answer comes back to, in full.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub return_to: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub waited_s: Option<u64>,
 }
@@ -247,8 +260,9 @@ fn names_path(signer: &crate::api::Signer, asker: Option<&Agent>) -> String {
 
 /// Asks `who` `text`, as the CLI's signer: finds or makes the chat, adds
 /// whoever of the two is missing, posts, and with `wait` follows the
-/// asked agent's turn to its end.
-pub fn ask(c: &Client, who: &str, text: &str, chat: Option<&str>, wait: Option<u64>, id: String) -> Result<Asked> {
+/// asked agent's turn to its end; with `return_to` (an agent's), its
+/// answer comes back to that chat as the asking agent's turn instead.
+pub fn ask(c: &Client, who: &str, text: &str, chat: Option<&str>, wait: Option<u64>, return_to: Option<&str>, id: String) -> Result<Asked> {
     let text = text.trim();
     if text.is_empty() {
         return Err(coded(Code::InvalidUsage, "ask something: the text is empty"));
@@ -258,10 +272,26 @@ pub fn ask(c: &Client, who: &str, text: &str, chat: Option<&str>, wait: Option<u
             return Err(coded(Code::InvalidUsage, format!("--wait is 1 to {WAIT_S_MAX} seconds")));
         }
     }
+    if wait.is_some() && return_to.is_some() {
+        return Err(coded(Code::InvalidUsage, "--wait prints the answer; --return-to has it come back as a turn: one of the two"));
+    }
     let (asker, agents) = roster(c)?;
+    // the chat the answer comes back to: one the asking agent answers in
+    let return_to = match (return_to, &asker) {
+        (None, _) => None,
+        (Some(_), None) => return Err(coded(Code::InvalidUsage, "--return-to is an agent's: a person reads the answer where they asked, or with --wait")),
+        (Some(r), Some(me)) => {
+            let full = c.fragment(r.trim())?;
+            let list = members(c, &full)?.ok_or_else(|| coded(Code::NotFound, format!("no chat named {full}")))?;
+            if !list.members.iter().any(|m| m.principal == me.identity && m.role >= Role::Editor) {
+                return Err(coded(Code::Forbidden, format!("{} is no editor of {full}, so its answer cannot come back there: return to a chat it answers in", me.shown())));
+            }
+            Some(full)
+        }
+    };
     let mut asked = pick(&agents, who).cloned().ok_or_else(|| {
         let names: Vec<&str> = agents.iter().map(|a| a.name.as_str()).collect();
-        coded(Code::NotFound, format!("{who:?} is none of the agents that may be asked here ({})", if names.is_empty() { "none".into() } else { names.join(", ") }))
+        coded(Code::NotFound, format!("{who:?} names none of the agents that may be asked here, or more than one ({}): name it by its fragment", if names.is_empty() { "none".into() } else { names.join(", ") }))
     })?;
     if asker.as_ref().is_some_and(|a| a.identity == asked.identity) {
         return Err(coded(Code::InvalidUsage, "an agent asks another agent, not itself"));
@@ -338,7 +368,10 @@ pub fn ask(c: &Client, who: &str, text: &str, chat: Option<&str>, wait: Option<u
     }
     assert!(list.members.iter().any(|m| m.principal == asked.identity), "the asked agent is in the chat before it is asked");
 
-    let body = json!({ "text": text, "to": [asked.identity] });
+    let mut body = json!({ "text": text, "to": [asked.identity] });
+    if let Some(r) = &return_to {
+        body["return_to"] = json!(r);
+    }
     let posted: Posted = c
         .post_json_by_id(&format!("/api/f/{full}/channels/chat"), &fragment_proto::PostRecord { id: id.clone(), body })
         .and_then(|r| c.call_as(r))
@@ -351,7 +384,7 @@ pub fn ask(c: &Client, who: &str, text: &str, chat: Option<&str>, wait: Option<u
         Some(s) => answered(c, &full, &asked.identity, seq, from, Duration::from_secs(s))?,
         None => None,
     };
-    Ok(Asked { chat: full, asked, record, replayed: posted.replayed, created, added, answer, waited_s: wait })
+    Ok(Asked { chat: full, asked, record, replayed: posted.replayed, created, added, answer, return_to, waited_s: wait })
 }
 
 /// Records of `channel` after `after`, at most `PAGES_MAX` pages, and the
@@ -425,6 +458,13 @@ mod tests {
         for who in ["fre", "fred--p2m4", "NPUB1FRED", "", "juniper-chat"] {
             assert_eq!(pick(&agents, who), None, "{who}");
         }
+        // two agents answer to `fred`: only their fragments or identities name one
+        let mut other = agent("fred");
+        (other.fragment, other.identity) = ("fred--p2m4".into(), "npub1fred2".into());
+        let two = [agent("fred"), other];
+        assert_eq!(pick(&two, "fred"), None, "never a guess");
+        assert_eq!(pick(&two, "fred--p2m4").map(|a| a.identity.as_str()), Some("npub1fred2"));
+        assert_eq!(pick(&two, "npub1fred").map(|a| a.fragment.as_str()), Some("fred--k3x9"));
     }
 
     /// Goal (Alex's review of #630): the list that names an agent's fellow
