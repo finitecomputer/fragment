@@ -94,7 +94,8 @@ fragment's is.
   `chats/`, or the folder holding it; cli/src/session/chats.rs), whose
   records are Hermes' sessions as its `export.py` joined them, keyed by
   the same ids. It reads only regular files inside `chats/`, no link out
-  of it and no device, each at most 64 MiB.
+  of it and no device, each at most 512 MiB, read through a message at a
+  time (a picture's base64, which `export.py` copied, is not held).
 - **Hermes' `state.db`** (or a Hermes home holding it), read-only, in one
   read transaction (cli/src/session/hermes.rs, which says how it follows
   Hermes v0.21.7, checked against what that Hermes writes:
@@ -102,11 +103,14 @@ fragment's is.
   continued it in each time it compressed, as Hermes' own session list
   joins them; its messages are what Hermes shows a person, each once. A
   better read than the export's (20 to 10), which kept a compression's
-  copied tail twice. Bounded: SQLite hands over at most what a
-  conversation could keep of each row, a conversation past twice its
-  limit is refused alone, and a database of more than 200,000 sessions
-  whole. This computer's own databases (its Hermes root's, any profile's)
-  are refused: their conversations are chats here already.
+  copied tail twice. Bounded by what is kept: SQLite hands over only a
+  message's text parts and a mark for each medium (never a picture's
+  data), each call's id, name and the start of its arguments, and a
+  tool's output and reasoning their cut's worth; a conversation whose
+  kept rows pass twice its limit is refused alone, and a database of more
+  than 200,000 sessions whole. On a platform computer (the CLI as its
+  agent) its own databases (its Hermes root's, any profile's) are
+  refused: their conversations are chats here already.
 
 Another agent runtime's sessions (Claude Code's, Codex's) are another
 read into the same format.
