@@ -1533,29 +1533,24 @@ Paul:
 ### Orgs own fragments (Paul, 2026-10-30)
 
 An org owns and pays for fragments as a person does, and the people it
-appoints control who may use them. The design and its build order are
-the audit's `org-governance-design.md` (in `~/dev/finite/audit/`).
+appoints control who may use them.
 
 66. **An org pays from credit of its own.** Its ledger (`org:<id>`) runs
     a person's machine: credit it buys (the $25 pack, bought by who pays
     for the org, for the org) or an operator grants it. It has no plan,
     seat or included credit, and no free credit. Each seat's included
     credit stays its holder's: nothing pools.
-    - Status (2026-10-30): built on `org-payer`.
 67. **Org credit pays for the org's fragments, never a person's agent.**
     An org-owned app's hosting, storage and own AI steps bill the org. A
     person's agent turns, desktop and computer bill that person, in an
     org's fragment too: naming an org's fragment bills it nothing of an
-    agent's.
-    - Status (2026-10-30): the org's ledger refuses them, built on
-      `org-payer`.
+    agent's: the org's ledger refuses them.
 68. **No overdraft, an explicit budget, and the cap for everyone.** An
     org's overdraft is zero: at a balance of zero its fragments are
     read-only. Its billing admins set a monthly budget, zero until set,
     past which its fragments' AI steps stop (hosting is still metered).
     Each fragment's $5 monthly cap holds for every caller, admins
     included. No one passes either: content admins mint no credit.
-    - Status (2026-10-30): built on `org-payer`.
 69. **Content admins are appointed, never inherited.** An org's content
     admins are a role apart from its billing admins. Who pays for it
     appoints the first, by an offer that person accepts; billing admins
