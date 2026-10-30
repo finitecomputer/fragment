@@ -229,28 +229,6 @@ jobs:
           path: target/e2e/
           retention-days: 7
 
-  # A master push whose shards skip (`proven`) still builds the e2e and
-  # saves it, as the first shard does on any other master push: pull
-  # requests and merge groups restore master's newest build, the stub
-  # image's layers and the tools, and without this they built from the
-  # last master push that ran its shards (on 2026-10-30, about 160 s more
-  # for the stub's bridge and 100 s more of Rust in every shard). Nothing
-  # waits for it: `deploy` restores whatever is newest, as it did.
-  e2e-build:
-    needs: proven
-    if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/master' && needs.proven.result == 'success' && needs.proven.outputs.proven == 'true' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    env:
-      # xtask/src/build.rs, WORKER_BUILD_VERSION
-      WORKER_BUILD_VERSION: 0.8.5
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/e2e-build
-        with:
-          save: true
-          worker-build-version: ${{ env.WORKER_BUILD_VERSION }}
-
   # the check named `e2e`: green when every shard is (a re-run's, by each
   # shard's latest attempt). It runs whenever the shards were to run,
   # whatever they did (unless the run was cancelled), so a red or skipped
@@ -567,6 +545,28 @@ jobs:
     with:
       tag: ${{ needs.cli-version.outputs.tag }}
       sha: ${{ github.sha }}
+
+  # A master push whose shards skip (`proven`) still builds the e2e and
+  # saves it, as the first shard does on any other master push: pull
+  # requests and merge groups restore master's newest build, the stub
+  # image's layers and the tools, and without this they built from the
+  # last master push that ran its shards (on 2026-10-30, about 160 s more
+  # for the stub's bridge and 100 s more of Rust in every shard). Nothing
+  # waits for it: `deploy` restores whatever is newest, as it did.
+  e2e-build:
+    needs: proven
+    if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/master' && needs.proven.result == 'success' && needs.proven.outputs.proven == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # xtask/src/build.rs, WORKER_BUILD_VERSION
+      WORKER_BUILD_VERSION: 0.8.5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/e2e-build
+        with:
+          save: true
+          worker-build-version: ${{ env.WORKER_BUILD_VERSION }}
 
   # The e2e's builds are kept one entry per master commit (`e2e-shard`'s
   # first shard, or `e2e-build`), each about 0.5 GB of the repository's
