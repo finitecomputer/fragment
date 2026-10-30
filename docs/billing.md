@@ -245,12 +245,13 @@ the dashboard. Worth taking:
 
 ### An org's content outlives its billing (decisions 69 to 71)
 
-An org's content admins, its people's epochs and its governance log are
-the registry's, apart from `org_members` (docs/api.md, Org content). An
-org with content is never dropped when its subscription ends and its
-seats go (`drop_if_empty`), and a person's wipe offboards them from every
-org's content rather than taking the org with them; an org left with no
-content admin waits on an operator's recovery offer, logged.
+An org's content admins and its governance log are the registry's, apart
+from `org_members` (docs/api.md, Org content). An org with anyone in its
+content is never dropped when its subscription ends and its seats go
+(`drop_if_empty`; one dropped with no one in it takes its offers with
+it), and a person's wipe makes them an admin no more there rather than
+taking the org with them; an org left with no content admin waits on an
+operator's recovery offer, logged.
 
 ### What a seat does
 
@@ -322,7 +323,7 @@ For docs/MODEL.md's truth map:
 | How many paid seats | the registry's seats; Stripe's item quantity is a copy | every seat change pushes it; the reconcile repairs a drift |
 | A person's plan and seat standing | their ledger | the registry alone |
 | An org's own credit and monthly budget | its ledger (`org:<id>`) | its packs' Checkouts (who pays for it), operators' grants, its billing admins (the budget) |
-| An org's content people, epochs, content admins and governance log | the registry (`org_content`, `org_content_offers`, `org_governance`) | its content admins (offers, step-downs, offboarding), the people offered (their answers), who pays (the first offer), operators (recovery) and a wipe |
+| An org's content people, content admins and governance log | the registry (`org_content`, `org_content_offers`, `org_governance`) | its content admins (offers, withdrawals, step-downs), the people offered (their answers), who pays (the first offer), operators (recovery) and a wipe |
 | A computer's always-on | the computer | the registry, from its owner's plan and choice |
 | Trial codes and their uses | the registry | operators; redemptions |
 | What an operator did | the registry's admin log | every admin route |

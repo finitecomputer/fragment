@@ -461,6 +461,7 @@ impl RegistryCell {
         }
         self.exec("DELETE FROM orgs WHERE id = ?", vec![org.into()])?;
         self.exec("DELETE FROM org_payers WHERE org = ?", vec![org.into()])?;
+        self.content_dropped(org)?;
         self.exec("DELETE FROM quantity_syncs WHERE org = ?", vec![org.into()])?;
         console_log!("{}", json!({ "org-ended": org }));
         assert!(self.org_sub(org)?.is_none(), "an org dropped is gone");

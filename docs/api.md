@@ -2428,38 +2428,42 @@ leaves with no one or no admin, and cancels what they pay for
 An org's content is apart from its billing (`fragment_core::governance`;
 the registry's `org_content`): a seat or a billing admin's place gives
 none of it, and a seatless person may hold it. Its people (`ContentPerson
-{person, email?, epoch, active, admin, since}`) are in by their own yes,
-and its **content admins** govern it. Each is a person acting as
-themselves (an agent is 403), and every change is in the org's
-**governance log**, under its request id, in the turn it is made.
+{person, email?, admin, since}`) are in by their own yes, and its
+**content admins** govern it. Each is a person acting as themselves (an
+agent is 403), and every change is in the org's **governance log** with
+it, in one transaction: an entry names offers and people by id, never an
+email. A client's id is kept as its kind's (`offer:<id>`), apart from the
+platform's own, and a replay answers as its first did.
 
-- **Appointed, never inherited** (decision 69). An admin's place is an
-  offer to an email, answered once by whoever signs in with it. The
-  org's content admins offer it. Who pays for it offers the first, while
-  its content has had no one; one left with no admin after that (its sole
-  admin's wipe) waits on an operator's offer. A billing admin is never
-  promoted to it.
-- **The last admin stays.** Stepping down and offboarding never leave the
-  org with no content admin (409).
-- **Offboarding** raises the person's epoch and makes them inactive at
-  once, before anything of theirs elsewhere is cleaned up: what was
-  granted them under the old epoch, or offered them before it, opens
-  nothing. Coming back is a new yes, at the raised epoch. Offboarding deletes, exports and transfers
-  nothing (decision 70).
-- **It outlives its billing.** An org with content is never dropped when
-  its subscription ends and its seats go. A person's wipe offboards them
-  from every org's content, logged as the operator who wiped them.
+- **Appointed, never automatically** (decision 69). An admin's place is
+  an offer to an email, answered once by whoever signs in with it, while
+  the grounds it was made on still hold: an admin's offer while they are
+  one; who pays for the org's, its first, while its content has had no
+  one (they may name themselves); an operator's, the recovery of an org
+  with no admin (its sole admin's wipe), while it has none. No billing
+  admin is promoted by being one.
+- **Offers end.** An offer is withdrawn by the org's admins, or expires
+  after 7 days. A person stepping down, stepped down or wiped takes their
+  waiting offers with them, made or received.
+- **The last admin stays.** Stepping down never leaves the org with no
+  content admin (409).
+- **It outlives its billing.** An org with anyone in its content is never
+  dropped when its subscription ends and its seats go; one dropped with no
+  one in it takes its offers with it. A person's wipe makes them an admin
+  no more there, logged as the operator who wiped them.
+- **Not yet:** an offer is mailed to no one and shown in no page: its
+  person reads it at `GET /api/orgs/offers`.
 
 | method & path | who | body → answer |
 | --- | --- | --- |
-| `POST /api/orgs/{org}/content-admin-offers` | its content admins; who pays for it, for its first (its content having had no one) | `NewContentAdmin {id, email}` → `ContentOffer {id, org, email, from?, at, answer?}`: waiting on the email, once by `id` (the same id for another email: 409); an email offered and waiting already answers that offer. A billing admin, a seat's holder or anyone else is 403; who pays, once its content has had anyone, 403; past 32 admins, offers included, 400 |
+| `POST /api/orgs/{org}/content-admin-offers` | its content admins; who pays for it, for its first (its content having had no one) | `NewContentAdmin {id, email}` → `ContentOffer {id, org, email, grounds, from?, at, expiresAt, answer?}`: waiting on the email, once by `id` (the same id for another change: 409); an email offered and waiting already answers that offer. A billing admin, a seat's holder or anyone else is 403; who pays, once its content has had anyone, 403; past 32 admins, their offers waiting included, 400 |
 | `GET /api/orgs/offers` | a person | → `ContentOffers {offers}`: the admins' places waiting on an email of theirs |
-| `POST /api/orgs/{org}/content-admin-offers/{offer}/accept` | whoever signs in with its email (anyone else: 404) | `{}` or none → `ContentOffer`: they are in its content, an admin, at their epoch (one an offboarding raised stays raised). Again, the same answer; declined before, 409 |
+| `POST /api/orgs/{org}/content-admin-offers/{offer}/accept` | whoever signs in with its email (anyone else: 404) | `{}` or none → `ContentOffer`: they are its content admin. Again, the same answer; declined before, or its grounds no longer holding, 409; withdrawn or expired, 404 |
 | `POST /api/orgs/{org}/content-admin-offers/{offer}/decline` | the same | `{}` or none → `ContentOffer`; accepted before, 409 |
-| `DELETE /api/orgs/{org}/content-admins/{person}` | its content admins | → `ContentPerson`: an admin no more, still in its content (one who is none: as they are). The last admin is 409 |
-| `POST /api/orgs/{org}/offboard` | the same | `Offboard {id, person, expectedEpoch}` → `ContentPerson`: out at once, at the next epoch, once by `id`. An epoch not theirs now is 409 (read the content again); the last admin, 409; someone not in it, 404 |
-| `GET /api/orgs/{org}/content?before=` | the same | → `OrgContent {org, people, offers, log: [GovernanceEntry {seq, at, actor, action, subject?, request, detail}], next?}`: the log newest first, 100 a page |
-| `POST /api/admin/orgs/{org}/content-admin-offers` | the deployment's operators, while it has no content admin | `NewContentAdmin` → `ContentOffer`, logged as theirs there and in the operators' log; with an admin, 403 |
+| `DELETE /api/orgs/{org}/content-admin-offers/{offer}` | its content admins | → `ContentOffer`, `answer: withdrawn` (again, the same); answered or expired, 409 or 404 |
+| `DELETE /api/orgs/{org}/content-admins/{person}` | the same | → `ContentPerson`: an admin no more, still in its content, their waiting offers withdrawn (one who is none: as they are). The last admin is 409 |
+| `GET /api/orgs/{org}/content?before=` | the same | → `OrgContent {org, people, offers, log: [GovernanceEntry {seq, at, actor, action, subject?, request, detail}], next?}`: the offers waiting, and the log newest first, 100 a page (`before` a number, or 400) |
+| `POST /api/admin/orgs/{org}/content-admin-offers` | the deployment's operators, while it has no content admin | `NewContentAdmin` → `ContentOffer`, logged as theirs there and in the operators' log in the same change; never refused for offers waiting; with an admin, 403 |
 | `GET /api/admin/orgs/{org}/content?before=` | the same | → `OrgContent` |
 
 ### Billing (docs/billing.md, "Stripe" and "Trials")

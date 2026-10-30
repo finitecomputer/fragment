@@ -1,62 +1,65 @@
 //! An org's content governance (docs/cloudflare-v1.md, decisions 69 to
-//! 71): who of its people are in its content, at which epoch, and which
-//! of them are its content admins. A role apart from its billing: a seat
-//! or a billing admin's place gives none of it, and a seatless person may
-//! hold it. The registry keeps the rows (`org_content`); these are the
-//! rules it applies, each a pure function of what it read.
+//! 71): its content admins, a role apart from its billing. A seat or a
+//! billing admin's place gives none of it, and a seatless person may hold
+//! it. The registry keeps the rows (`org_content`, `org_content_offers`);
+//! these are the rules it applies, each a pure function of what it read.
 //!
-//! - **Appointed, never inherited** (decision 69). An admin's place is an
-//!   offer to an email, no one's until whoever signs in with it accepts
-//!   it. An org's content admins offer it. Who pays for it offers the
-//!   first, while its content has had no one at all; an org left with no
-//!   admin after that (a sole admin's wipe) waits on an operator's offer,
-//!   logged. Billing admins are never promoted to it.
-//! - **The last admin stays.** Neither stepping down nor offboarding
-//!   leaves an org with no content admin.
-//! - **Epochs fence.** Offboarding a person raises their epoch and makes
-//!   them inactive at once: whatever was granted them under the old one
-//!   opens nothing, before anything is cleaned up. Coming back is a new
-//!   yes, at the raised epoch, so an old grant never wakes.
-//! - **One answer.** An offer is answered once: the same answer again
-//!   answers as the first did, the other is refused.
+//! - **Appointed, never automatically** (decision 69). An admin's place is
+//!   an offer to an email, no one's until whoever signs in with it
+//!   accepts it. The offer records its grounds, which must still hold when
+//!   it is accepted: an admin's, while they are one; who pays for the
+//!   org's, its first, while its content has had no one (they may name
+//!   themselves); an operator's, the recovery of an org with no admin (a
+//!   sole admin's wipe). No billing admin is promoted by being one.
+//! - **The last admin stays.** Stepping down never leaves an org with no
+//!   content admin.
+//! - **Offers end.** Each is answered once (the same answer again answers
+//!   as the first did; the other is refused), withdrawn by the org's
+//!   admins, or expires after `OFFER_TTL_MS`. A person stepping down takes
+//!   their waiting offers with them, made or received.
 
 use fragment_proto::ErrorCode;
 use serde::{Deserialize, Serialize};
 
-/// Content admins an org holds at most, offers waiting included.
+/// Content admins an org holds at most, its admins' offers waiting
+/// included (an operator's recovery is never refused for it).
 pub const ADMINS_MAX: u64 = 32;
+/// How long an offer waits for its answer.
+pub const OFFER_TTL_MS: i64 = 7 * 24 * 3_600_000;
 /// Entries of an org's governance log a page holds.
 pub const LOG_PAGE: u64 = 100;
 /// A request id, as a client names its change (a replay finds the first).
 pub const REQUEST_MAX_BYTES: usize = 128;
 
-/// A person's place in an org's content.
+/// Who offers a content admin's place, and on what grounds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Place {
-    /// From 1; raised by each offboarding.
-    pub epoch: u64,
-    pub active: bool,
-    pub admin: bool,
-}
-
-impl Place {
-    fn assert_valid(self) {
-        assert!(self.epoch >= 1, "an epoch counts from 1");
-        assert!(self.active || !self.admin, "an admin is active");
-    }
-}
-
-/// Who offers a content admin's place.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Offerer {
-    /// One of the org's active content admins.
+#[serde(rename_all = "snake_case")]
+pub enum Grounds {
+    /// One of the org's content admins.
     Admin,
-    /// Who pays for the org: its first admin's offer alone.
+    /// Who pays for the org: its first admin alone.
     Payer,
-    /// The deployment's operator.
+    /// The deployment's operator: the recovery of an org with no admin.
     Operator,
-    /// Anyone else: a billing admin, a seat's holder, a stranger.
-    Other,
+}
+
+impl Grounds {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Grounds::Admin => "admin",
+            Grounds::Payer => "payer",
+            Grounds::Operator => "operator",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Grounds> {
+        match s {
+            "admin" => Some(Grounds::Admin),
+            "payer" => Some(Grounds::Payer),
+            "operator" => Some(Grounds::Operator),
+            _ => None,
+        }
+    }
 }
 
 /// An offer's answer, as its person gives it.
@@ -74,34 +77,64 @@ impl Answer {
             Answer::Declined => "declined",
         }
     }
+}
 
-    pub fn parse(s: &str) -> Option<Answer> {
-        match s {
-            "accepted" => Some(Answer::Accepted),
-            "declined" => Some(Answer::Declined),
-            _ => None,
-        }
+/// Where an offer stands, as its row says at `now`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Standing {
+    Waiting,
+    Answered(Answer),
+    Withdrawn,
+    Expired,
+}
+
+impl Standing {
+    /// From its row: its answer column and when it expires.
+    pub fn of(answer: Option<&str>, expires_at: i64, now: i64) -> Option<Standing> {
+        Some(match answer {
+            None if now >= expires_at => Standing::Expired,
+            None => Standing::Waiting,
+            Some("accepted") => Standing::Answered(Answer::Accepted),
+            Some("declined") => Standing::Answered(Answer::Declined),
+            Some("withdrawn") => Standing::Withdrawn,
+            Some("expired") => Standing::Expired,
+            Some(_) => return None,
+        })
     }
+}
+
+/// What a person's answer finds the org as, for its grounds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Now {
+    /// Whoever its content has ever taken in.
+    pub people: u64,
+    /// Its content admins now.
+    pub admins: u64,
+    /// Whether who made the offer still stands as its grounds say: an
+    /// admin of the org's, or who pays for it.
+    pub offerer_stands: bool,
 }
 
 /// Why a governance change is refused. A refusal changes nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Refusal {
-    /// Only an org's content admins do that (and, before it has one, who
-    /// pays for it).
+    /// Only an org's content admins do that (and, for its first, who pays
+    /// for it).
     NotAdmin,
-    /// The org has, or has had, content admins: one of them offers the
-    /// next, or, with none left, an operator.
+    /// The org's content has had its admins: one of them offers the next
+    /// (with none left, an operator does).
     HasAdmins,
-    /// The org holds `ADMINS_MAX` admins, offers waiting included.
+    /// The org holds `ADMINS_MAX` admins, its admins' offers included.
     AdminsFull,
     /// The offer was answered the other way.
     Answered(Answer),
+    /// The offer was withdrawn, or expired, unanswered.
+    Ended,
+    /// What the offer was made on holds no more.
+    Lapsed(Grounds),
     /// It would leave the org with no content admin.
     LastAdmin,
-    /// The person's epoch is not the one the request expected.
-    StaleEpoch { current: u64 },
-    /// The person is not in the org's content now.
+    /// The person is not one of the org's content admins.
     NotIn,
 }
 
@@ -110,95 +143,81 @@ impl Refusal {
         match self {
             Refusal::NotAdmin | Refusal::HasAdmins => ErrorCode::Forbidden,
             Refusal::AdminsFull => ErrorCode::InvalidRequest,
-            Refusal::Answered(_) | Refusal::LastAdmin | Refusal::StaleEpoch { .. } => ErrorCode::ConflictingBody,
-            Refusal::NotIn => ErrorCode::NotFound,
+            Refusal::Answered(_) | Refusal::Lapsed(_) | Refusal::LastAdmin => ErrorCode::ConflictingBody,
+            Refusal::Ended | Refusal::NotIn => ErrorCode::NotFound,
         }
     }
 
     pub fn message(self) -> String {
         match self {
             Refusal::NotAdmin => "only the org's content admins do this; a billing admin's place gives none of it".into(),
-            Refusal::HasAdmins => "the org's content has its admins: one of them offers the next (with none left, an operator does)".into(),
-            Refusal::AdminsFull => format!("an org has at most {ADMINS_MAX} content admins, offers waiting included"),
+            Refusal::HasAdmins => "the org's content has had its admins: one of them offers the next (with none left, an operator does)".into(),
+            Refusal::AdminsFull => format!("an org has at most {ADMINS_MAX} content admins, its admins' offers waiting included: withdraw one first"),
             Refusal::Answered(a) => format!("this offer was {} already", a.as_str()),
+            Refusal::Ended => "this offer was withdrawn, or expired, unanswered".into(),
+            Refusal::Lapsed(Grounds::Admin) => "whoever made this offer is no longer the org's content admin: ask for a new one".into(),
+            Refusal::Lapsed(Grounds::Payer) => "this offer was the org's first admin's, and the org has had one since: ask its admins".into(),
+            Refusal::Lapsed(Grounds::Operator) => "this offer was the recovery of an org with no admin, and it has one now: ask its admins".into(),
             Refusal::LastAdmin => "the org's last content admin stays: another accepts the place first".into(),
-            Refusal::StaleEpoch { current } => format!("their epoch is {current} now: read the org's content again"),
-            Refusal::NotIn => "they are not in the org's content".into(),
+            Refusal::NotIn => "they are not one of the org's content admins".into(),
         }
     }
 }
 
 /// Whether `offerer` may offer a content admin's place, the org's content
-/// holding `people` (anyone it ever took in), `admins` (active ones) and
-/// `waiting` offers.
-pub fn may_offer(offerer: Offerer, people: u64, admins: u64, waiting: u64) -> Result<(), Refusal> {
+/// having taken in `people` ever, holding `admins` now and its admins'
+/// unexpired offers `waiting`.
+pub fn may_offer(offerer: Option<Grounds>, people: u64, admins: u64, waiting: u64) -> Result<Grounds, Refusal> {
     assert!(admins <= people, "an admin is one of its people");
-    match offerer {
-        Offerer::Admin => {}
-        Offerer::Payer if people == 0 => {}
-        Offerer::Operator if admins == 0 => {}
-        Offerer::Payer | Offerer::Operator => return Err(Refusal::HasAdmins),
-        Offerer::Other => return Err(Refusal::NotAdmin),
-    }
-    if admins + waiting >= ADMINS_MAX {
-        return Err(Refusal::AdminsFull);
-    }
-    Ok(())
-}
-
-/// An answer to an offer `recorded` answered (or not): `Ok(true)` to apply
-/// it, `Ok(false)` a replay of the same answer, or refused.
-pub fn answer(recorded: Option<Answer>, asked: Answer) -> Result<bool, Refusal> {
-    match recorded {
-        None => Ok(true),
-        Some(a) if a == asked => Ok(false),
-        Some(a) => Err(Refusal::Answered(a)),
-    }
-}
-
-/// A person's place once they accept an admin's: in at once, at their
-/// epoch (one an offboarding raised stays raised).
-pub fn accepted(place: Option<Place>) -> Place {
-    let next = match place {
-        None => Place { epoch: 1, active: true, admin: true },
-        Some(p) => Place { active: true, admin: true, ..p },
+    let grounds = match offerer {
+        Some(Grounds::Admin) if admins + waiting >= ADMINS_MAX => return Err(Refusal::AdminsFull),
+        Some(Grounds::Payer) if people > 0 => return Err(Refusal::HasAdmins),
+        Some(Grounds::Payer) if waiting >= ADMINS_MAX => return Err(Refusal::AdminsFull),
+        Some(Grounds::Operator) if admins > 0 => return Err(Refusal::HasAdmins),
+        Some(g) => g,
+        None => return Err(Refusal::NotAdmin),
     };
-    next.assert_valid();
-    next
+    Ok(grounds)
 }
 
-/// A content admin stepping down or removed: an admin no more, still in
-/// the org's content. The org's last admin stays.
-pub fn removed_admin(place: Place, admins: u64) -> Result<Place, Refusal> {
-    place.assert_valid();
-    if !place.admin {
-        return Ok(place);
+/// An answer to an offer standing as `standing`: `Ok(true)` to apply it,
+/// `Ok(false)` a replay of the same answer, or refused. An accept also
+/// needs its grounds to hold now (`grounds_hold`).
+pub fn answer(standing: Standing, asked: Answer) -> Result<bool, Refusal> {
+    match standing {
+        Standing::Waiting => Ok(true),
+        Standing::Answered(a) if a == asked => Ok(false),
+        Standing::Answered(a) => Err(Refusal::Answered(a)),
+        Standing::Withdrawn | Standing::Expired => Err(Refusal::Ended),
     }
-    if admins <= 1 {
-        return Err(Refusal::LastAdmin);
-    }
-    Ok(Place { admin: false, ..place })
 }
 
-/// A person offboarded at `expected` epoch: out at once, at the next.
-/// Never the org's last admin.
-pub fn offboarded(place: Place, expected: u64, admins: u64) -> Result<Place, Refusal> {
-    place.assert_valid();
-    if place.epoch != expected {
-        return Err(Refusal::StaleEpoch { current: place.epoch });
+/// Whether an offer made on `grounds` may be accepted now.
+pub fn grounds_hold(grounds: Grounds, now: Now) -> Result<(), Refusal> {
+    let holds = match grounds {
+        Grounds::Admin => now.offerer_stands,
+        Grounds::Payer => now.offerer_stands && now.people == 0,
+        Grounds::Operator => now.admins == 0,
+    };
+    match holds {
+        true => Ok(()),
+        false => Err(Refusal::Lapsed(grounds)),
     }
-    if !place.active {
-        return Err(Refusal::NotIn);
-    }
-    if place.admin && admins <= 1 {
-        return Err(Refusal::LastAdmin);
-    }
-    let next = Place { epoch: place.epoch + 1, active: false, admin: false };
-    next.assert_valid();
-    Ok(next)
 }
 
-/// A request id: 1 to `REQUEST_MAX_BYTES` printable ASCII, no spaces.
+/// An admin stepping down, or stepped down, the org holding `admins`:
+/// whether anything changes (none for one who is no admin). Never its last.
+pub fn steps_down(admin: bool, admins: u64) -> Result<bool, Refusal> {
+    match (admin, admins) {
+        (false, _) => Ok(false),
+        (true, 0..=1) => Err(Refusal::LastAdmin),
+        (true, _) => Ok(true),
+    }
+}
+
+/// A client's request id: 1 to `REQUEST_MAX_BYTES` printable ASCII, no
+/// spaces. It is kept prefixed by its kind (`offer:`), apart from the
+/// platform's own.
 pub fn valid_request(id: &str) -> bool {
     crate::price::printable(id, REQUEST_MAX_BYTES)
 }
@@ -207,65 +226,70 @@ pub fn valid_request(id: &str) -> bool {
 mod tests {
     use super::*;
 
-    const IN: Place = Place { epoch: 1, active: true, admin: false };
-    const ADMIN: Place = Place { epoch: 1, active: true, admin: true };
+    const T: i64 = 1_790_812_800_000;
+    const NONE_YET: Now = Now { people: 0, admins: 0, offerer_stands: true };
 
-    /// Valid: an accepted admin offers, steps others down, offboards.
+    /// Valid: an accepted admin offers, withdraws, steps others down.
     #[test]
     fn accepted_admin_controls() {
-        assert_eq!(accepted(None), ADMIN);
-        assert_eq!(may_offer(Offerer::Admin, 1, 1, 0), Ok(()));
-        assert_eq!(removed_admin(ADMIN, 2), Ok(IN));
-        assert_eq!(offboarded(ADMIN, 1, 2), Ok(Place { epoch: 2, active: false, admin: false }));
-        assert_eq!(offboarded(IN, 1, 1), Ok(Place { epoch: 2, active: false, admin: false }));
-        assert_eq!(removed_admin(IN, 1), Ok(IN), "no admin to remove: nothing changes");
+        assert_eq!(may_offer(Some(Grounds::Admin), 1, 1, 0), Ok(Grounds::Admin));
+        assert_eq!(grounds_hold(Grounds::Admin, Now { people: 1, admins: 1, offerer_stands: true }), Ok(()));
+        assert_eq!(steps_down(true, 2), Ok(true));
+        assert_eq!(steps_down(false, 1), Ok(false), "no admin to step down: nothing changes");
+        assert_eq!(Standing::of(Some("withdrawn"), T + OFFER_TTL_MS, T), Some(Standing::Withdrawn));
     }
 
     /// Invalid: a billing admin, a seat, a stranger hold no content power;
-    /// who pays and an operator only name the first admin; the last stays.
+    /// who pays names only the first, an operator recovers only an org
+    /// with no admin; the last admin stays; offers lapse with their grounds.
     #[test]
     fn billing_admin_has_no_content_power() {
-        assert_eq!(may_offer(Offerer::Other, 0, 0, 0), Err(Refusal::NotAdmin));
-        assert_eq!(may_offer(Offerer::Other, 3, 3, 0), Err(Refusal::NotAdmin));
-        assert_eq!(may_offer(Offerer::Payer, 0, 0, 0), Ok(()), "the first");
-        assert_eq!(may_offer(Offerer::Payer, 1, 1, 0), Err(Refusal::HasAdmins));
-        assert_eq!(may_offer(Offerer::Payer, 2, 0, 0), Err(Refusal::HasAdmins), "a sole admin wiped: an operator's to recover, not who pays");
-        assert_eq!(may_offer(Offerer::Operator, 2, 0, 2), Ok(()));
-        assert_eq!(may_offer(Offerer::Operator, 1, 1, 0), Err(Refusal::HasAdmins));
-        assert_eq!(may_offer(Offerer::Admin, ADMINS_MAX - 1, ADMINS_MAX - 1, 1), Err(Refusal::AdminsFull));
-        assert_eq!(removed_admin(ADMIN, 1), Err(Refusal::LastAdmin));
-        assert_eq!(offboarded(ADMIN, 1, 1), Err(Refusal::LastAdmin));
-        assert_eq!(offboarded(IN, 2, 1), Err(Refusal::StaleEpoch { current: 1 }));
-        let out = Place { epoch: 2, active: false, admin: false };
-        assert_eq!(offboarded(out, 2, 1), Err(Refusal::NotIn));
-        for r in [Refusal::NotAdmin, Refusal::HasAdmins, Refusal::LastAdmin, Refusal::NotIn] {
+        assert_eq!(may_offer(None, 0, 0, 0), Err(Refusal::NotAdmin));
+        assert_eq!(may_offer(None, 3, 3, 0), Err(Refusal::NotAdmin));
+        assert_eq!(may_offer(Some(Grounds::Payer), 0, 0, 0), Ok(Grounds::Payer), "the first");
+        assert_eq!(may_offer(Some(Grounds::Payer), 1, 1, 0), Err(Refusal::HasAdmins));
+        assert_eq!(may_offer(Some(Grounds::Payer), 2, 0, 0), Err(Refusal::HasAdmins), "a sole admin wiped: an operator's to recover, not who pays");
+        assert_eq!(may_offer(Some(Grounds::Operator), 2, 0, ADMINS_MAX), Ok(Grounds::Operator), "a recovery is never capped by waiting offers");
+        assert_eq!(may_offer(Some(Grounds::Operator), 1, 1, 0), Err(Refusal::HasAdmins));
+        assert_eq!(may_offer(Some(Grounds::Admin), ADMINS_MAX - 1, ADMINS_MAX - 1, 1), Err(Refusal::AdminsFull));
+        assert_eq!(steps_down(true, 1), Err(Refusal::LastAdmin));
+        // who pays offered many "firsts": once one is accepted, the rest lapse
+        assert_eq!(grounds_hold(Grounds::Payer, NONE_YET), Ok(()));
+        assert_eq!(grounds_hold(Grounds::Payer, Now { people: 1, admins: 1, offerer_stands: true }), Err(Refusal::Lapsed(Grounds::Payer)));
+        assert_eq!(grounds_hold(Grounds::Payer, Now { offerer_stands: false, ..NONE_YET }), Err(Refusal::Lapsed(Grounds::Payer)), "who paid no more");
+        // an admin who made it and stepped down: it lapses with them
+        assert_eq!(grounds_hold(Grounds::Admin, Now { people: 2, admins: 1, offerer_stands: false }), Err(Refusal::Lapsed(Grounds::Admin)));
+        assert_eq!(grounds_hold(Grounds::Operator, Now { people: 2, admins: 1, offerer_stands: true }), Err(Refusal::Lapsed(Grounds::Operator)));
+        for r in [Refusal::NotAdmin, Refusal::HasAdmins, Refusal::LastAdmin, Refusal::NotIn, Refusal::Ended, Refusal::Lapsed(Grounds::Admin)] {
             assert!(!r.message().is_empty() && r.code().status() >= 400);
         }
     }
 
-    /// Replay: one answer, again as the first; the other is a conflict.
+    /// Replay: one answer, again as the first; the other is a conflict; an
+    /// offer withdrawn or expired takes none.
     #[test]
     fn role_answer_conflict() {
-        assert_eq!(answer(None, Answer::Accepted), Ok(true));
-        assert_eq!(answer(Some(Answer::Accepted), Answer::Accepted), Ok(false));
-        assert_eq!(answer(Some(Answer::Accepted), Answer::Declined), Err(Refusal::Answered(Answer::Accepted)));
-        assert_eq!(answer(Some(Answer::Declined), Answer::Accepted), Err(Refusal::Answered(Answer::Declined)));
+        assert_eq!(answer(Standing::Waiting, Answer::Accepted), Ok(true));
+        assert_eq!(answer(Standing::Answered(Answer::Accepted), Answer::Accepted), Ok(false));
+        assert_eq!(answer(Standing::Answered(Answer::Accepted), Answer::Declined), Err(Refusal::Answered(Answer::Accepted)));
+        assert_eq!(answer(Standing::Answered(Answer::Declined), Answer::Accepted), Err(Refusal::Answered(Answer::Declined)));
+        assert_eq!(answer(Standing::Withdrawn, Answer::Accepted), Err(Refusal::Ended));
+        assert_eq!(answer(Standing::Expired, Answer::Declined), Err(Refusal::Ended));
         assert_eq!(Refusal::Answered(Answer::Declined).code().status(), 409);
-        for a in [Answer::Accepted, Answer::Declined] {
-            assert_eq!(Answer::parse(a.as_str()), Some(a));
+        for g in [Grounds::Admin, Grounds::Payer, Grounds::Operator] {
+            assert_eq!(Grounds::parse(g.as_str()), Some(g));
         }
     }
 
-    /// Restart: the fence is the stored place; read back, it holds, and a
-    /// new yes comes back at the raised epoch, never the old one.
+    /// Restart: an offer's standing is its stored row read at a later
+    /// time: waiting until it expires, and expired after, unanswered.
     #[test]
-    fn offboard_fence_survives_restart() {
-        let out = offboarded(ADMIN, 1, 2).unwrap();
-        let kept: Place = serde_json::from_str(&serde_json::to_string(&out).unwrap()).unwrap();
-        assert_eq!(kept, out);
-        assert!(!kept.active && kept.epoch == 2, "a grant bound to epoch 1 opens nothing");
-        let back = accepted(Some(kept));
-        assert_eq!(back, Place { epoch: 2, active: true, admin: true });
-        assert_ne!(back.epoch, ADMIN.epoch, "coming back never wakes an old grant");
+    fn an_offer_expires_across_a_restart() {
+        let expires = T + OFFER_TTL_MS;
+        assert_eq!(Standing::of(None, expires, T), Some(Standing::Waiting));
+        assert_eq!(Standing::of(None, expires, expires - 1), Some(Standing::Waiting));
+        assert_eq!(Standing::of(None, expires, expires), Some(Standing::Expired));
+        assert_eq!(Standing::of(Some("accepted"), expires, expires + 1), Some(Standing::Answered(Answer::Accepted)), "an answer outlives its expiry");
+        assert_eq!(Standing::of(Some("maybe"), expires, T), None);
     }
 }
