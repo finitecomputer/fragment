@@ -177,7 +177,12 @@ pub fn run(c: &Client, sub: SessionCmd) -> Result<Imported> {
     let mut spool = Spool::new(kinds)?;
     let problems = match source(&path)? {
         Source::Export(root) => chats::read(&root, &mut spool)?,
-        Source::Hermes(db) => hermes::read(&db, &mut spool)?,
+        Source::Hermes(db) => {
+            // on a platform computer (as its agent), its own Hermes home's
+            // databases are its chats here already; a person's own Hermes is theirs
+            let own = c.agent().and(std::env::var_os("HERMES_HOME")).filter(|h| !h.is_empty()).map(PathBuf::from);
+            hermes::read(&db, &mut spool, own.as_deref())?
+        }
     };
     let (archive, made) = archive(c)?;
     let written = write(c, &archive, &spool)?;

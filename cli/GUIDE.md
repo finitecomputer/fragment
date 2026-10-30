@@ -868,8 +868,9 @@ fragment session import ~/.hermes --kind chat               # only chats (also: 
 ```
 
 A `state.db` copied from elsewhere needs its `state.db-wal` beside it, or
-its newest messages are not in it. This computer's own Hermes databases
-are refused: their conversations are your chats here already.
+its newest messages are not in it. On an agent's computer here, its own
+Hermes databases are refused: their conversations are your chats here
+already.
 
 Each conversation is kept by its own id, so importing again adds
 nothing twice, and a newer copy of one (a later export, the same chats

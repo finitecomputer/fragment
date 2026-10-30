@@ -102,11 +102,14 @@ fragment's is.
   continued it in each time it compressed, as Hermes' own session list
   joins them; its messages are what Hermes shows a person, each once. A
   better read than the export's (20 to 10), which kept a compression's
-  copied tail twice. Bounded: SQLite hands over at most what a
-  conversation could keep of each row, a conversation past twice its
-  limit is refused alone, and a database of more than 200,000 sessions
-  whole. This computer's own databases (its Hermes root's, any profile's)
-  are refused: their conversations are chats here already.
+  copied tail twice. Bounded by what is kept: SQLite hands over only a
+  message's text parts and a mark for each medium (never a picture's
+  data), each call's id, name and the start of its arguments, and a
+  tool's output and reasoning their cut's worth; a conversation whose
+  kept rows pass twice its limit is refused alone, and a database of more
+  than 200,000 sessions whole. On a platform computer (the CLI as its
+  agent) its own databases (its Hermes root's, any profile's) are
+  refused: their conversations are chats here already.
 
 Another agent runtime's sessions (Claude Code's, Codex's) are another
 read into the same format.
