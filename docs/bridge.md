@@ -374,7 +374,10 @@ A socket alone holds nothing: `{"working": true}` holds while the
 plugin's set of children (by `child_session_id`, in memory) is nonempty,
 until `{"working": false}`, its close, its gateway process's exit, or 30
 seconds without a frame or ping (websockets pings every 10 seconds; while
-children run the plugin checks it every second and reconnects). Several
+children run the plugin checks it every second and reconnects). A socket
+the plugin opens again, for a tool's end or for its worker, says the
+children's work before anything else, so a drop never loses the hold
+(`tests/activity_reconnect.py`, run in the image). Several
 profiles' sockets hold together. The bridge's engine includes them in its
 existing keepawake predicate. Nothing of the children is persisted or
 replayed on restart: Hermes owns them, and a new process has none. Their

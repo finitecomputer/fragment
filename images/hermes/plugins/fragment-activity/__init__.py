@@ -34,6 +34,9 @@ def register(ctx):
 
 
 def _connect():
+    """Called under the condition: a socket the bridge acknowledged, which
+    holds while children run. A new socket holds nothing until it says so,
+    so it does, whichever hook opens it (never replaying a tool's end)."""
     url = os.environ["GATEWAY_RELAY_URL"].rstrip("/")
     url = url.replace("https://", "wss://", 1).replace("http://", "ws://", 1)
     token = make_token(os.environ["GATEWAY_RELAY_ID"], os.environ["GATEWAY_RELAY_SECRET"], ttl_seconds=60)
@@ -42,6 +45,10 @@ def _connect():
     try:
         if socket.recv(timeout=2) != "ready":
             raise ValueError("the bridge did not acknowledge runtime activity")
+        if _children:
+            socket.send(json.dumps({"working": True}))
+            if socket.recv(timeout=2) != "working":
+                raise ValueError("the bridge did not hold for the children")
     except Exception:
         socket.close()
         raise

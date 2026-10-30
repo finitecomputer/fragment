@@ -422,6 +422,9 @@ async fn the_hermes_image() {
         "/command/s6-setuidgid", "hermes", "env", "HERMES_HOME=/data/hermes/profiles/juniper--k3x9", "HOME=/data/hermes/profiles/juniper--k3x9/home",
         "/opt/hermes/.venv/bin/python", "-c", include_str!("skill_fork.py"),
     ]), "automatic memory/skill review stays on; background skill writes create complete local forks");
+    // the activity plugin holds for its children however its socket is opened again
+    let (code, said) = c.exec_code(&["/command/s6-setuidgid", "hermes", "env", "HOME=/data/hermes", "HERMES_HOME=/data/hermes", "/opt/hermes/.venv/bin/python", "-c", include_str!("activity_reconnect.py")]);
+    assert_eq!(code, 0, "a reopened activity socket holds while children run: {said}");
     fake.until(30_000, "the local skill fork and its helper committed to the agent fragment", |w| {
         let files = &w.fragments["juniper--k3x9"].files;
         files.get("skills/research/model-council-finite/SKILL.md").is_some_and(|b| String::from_utf8_lossy(b).contains("# My Revised Council"))
