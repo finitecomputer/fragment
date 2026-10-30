@@ -1,7 +1,7 @@
 //! A production push releases only new CLI inputs, before deploying. The
 //! published release's body is the completed-build record; tags alone (or
 //! drafts, partial uploads) never authorize an update notice.
-use std::{fs, process::Command};
+use std::{fs, process::{Command, Stdio}};
 use anyhow::{Context, Result};
 use fragment_core::release::cli_version;
 use serde_json::Value;
@@ -92,7 +92,8 @@ pub(crate) fn run(args: &[String]) -> Result<()> {
             let release = complete_assets(release, |missing| {
                 eprintln!("repairing CLI release assets once: {}", missing.join(", "));
                 let assets = missing.iter().map(|name| root.join("dist").join(name));
-                crate::run(Command::new("gh").args(["release", "upload", tag, "--repo", &repo, "--clobber"]).args(assets))?;
+                // stdout is the Actions output file, never gh's messages.
+                crate::run(Command::new("gh").args(["release", "upload", tag, "--repo", &repo, "--clobber"]).args(assets).stdout(Stdio::null()))?;
                 api(&repo, &format!("releases/tags/{tag}"), false)
             })?;
             let body = release["body"].as_str().unwrap_or_default();
@@ -102,7 +103,7 @@ pub(crate) fn run(args: &[String]) -> Result<()> {
                 let notes = root.join("target/cli-release-notes.md");
                 fs::create_dir_all(notes.parent().expect("target"))?;
                 fs::write(&notes, format!("{body}\n\n{mark}\n"))?;
-                crate::run(Command::new("gh").args(["release", "edit", tag, "--repo", &repo, "--notes-file"]).arg(&notes))?;
+                crate::run(Command::new("gh").args(["release", "edit", tag, "--repo", &repo, "--notes-file"]).arg(&notes).stdout(Stdio::null()))?;
             }
             let verified = api(&repo, &format!("releases/tags/{tag}"), false)?;
             let version = published(&verified, &key).context("published CLI release did not verify after recording its inputs")?;
