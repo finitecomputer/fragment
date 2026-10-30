@@ -99,6 +99,9 @@ pub struct RegistryCell {
     /// Dev fleets' test hook: how long the next call waits before it is
     /// answered (0: it does not), set only by the hook.
     hold_ms: Cell<u32>,
+    /// Test fleets: how many more wipes fail just after their orgs' content
+    /// (`TestHook::FailWipeRows`).
+    fail_wipe_rows: Cell<u32>,
     /// CLI codes asked for this minute, by each address and in all
     /// (`POST /cli/begin`: `limits::CLI_BEGINS_PER_MINUTE_MAX`, and the
     /// fleet's `cli_begins_per_ip_minute`). In memory: a restart forgets
@@ -142,6 +145,7 @@ impl DurableObject for RegistryCell {
             calls: Cell::new(0),
             skewed: Cell::new(0),
             hold_ms: Cell::new(0),
+            fail_wipe_rows: Cell::new(0),
             cli_begins,
             finishing: RefCell::default(),
             deciding: RefCell::default(),
@@ -777,6 +781,13 @@ impl RegistryCell {
                 Ok(json!({ "down": down }))
             }
             TestHook::Calls => Ok(json!({ "calls": self.calls.get(), "skewed": self.skewed.get() })),
+            TestHook::FailWipeRows(times) => {
+                if times > TEST_DOWN_FOR_MAX {
+                    return Err(CellError::invalid(format!("fail at most {TEST_DOWN_FOR_MAX} wipes")));
+                }
+                self.fail_wipe_rows.set(times);
+                Ok(json!({ "failWipeRows": times }))
+            }
             TestHook::Hold(ms) => {
                 if ms > TEST_HOLD_MAX_MS {
                     return Err(CellError::invalid(format!("hold at most {TEST_HOLD_MAX_MS} ms")));

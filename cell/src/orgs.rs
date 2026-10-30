@@ -7,14 +7,14 @@
 
 use fragment_core::mail::PRODUCT;
 use fragment_core::governance::Answer;
-use fragment_proto::org::{CompSeat, Comped, NewContentAdmin, Offboard, OrgMember, SeatKind, SeatStatus, SetSeatKind, SetSleeps};
+use fragment_proto::org::{CompSeat, Comped, NamePayer, NewContentAdmin, Offboard, OrgMember, SeatKind, SeatStatus, SetSeatKind, SetSleeps};
 use fragment_proto::{limits, ErrorCode};
 use worker::*;
 
 use crate::config::Config;
 use crate::error::{CellError, CellResult};
 use crate::registry::calls::By;
-use crate::registry::content::{AnswerOffer, ContentOf, OfferAdmin, OffboardCall, OffersToMe, StepDown, WithdrawOffer};
+use crate::registry::content::{AnswerOffer, ContentOf, NominatePayer, OfferAdmin, OffboardCall, OffersToMe, StepDown, WithdrawOffer};
 use crate::registry::orgs::{CompKind, CompSeatCall, EndComp, Mine, Mined, OrgOf, Sleeps, SyncSeat};
 use crate::registry::offers::{AcceptOffer, DeclineOffer, LeaveOrg};
 use crate::registry::seats::{AddAdmin, AddSeat, Added, RemoveAdmin, RemoveSeat};
@@ -142,9 +142,9 @@ pub(crate) async fn org(mut req: Request, env: &Env, cfg: &Config, url: &Url, re
 
 /// `/api/orgs/<org>/…`, an org named, never found through a person
 /// (decision 66). Its money: `GET ledger`, its own credit and this month's
-/// spend, and `PUT budget {id, micros}`, for its billing admins; `POST
-/// billing/pack {}`, a Checkout of its own $25 of credit, for who pays for
-/// it alone (its seats' credit stays each holder's). Its content
+/// spend, for its billing admins; its credit and its budget are an
+/// operator's to set (orgs pay out of band: Paul, 2026-10-30), at
+/// `/api/ledger/org:<id>/…` and `/api/admin/orgs/<org>/…`. Its content
 /// (decisions 69 to 71), apart from its billing: `POST
 /// content-admin-offers {id, email}` (its content admins; who pays, for
 /// its first), answered by whoever signs in with the email (`POST
@@ -176,16 +176,6 @@ pub(crate) async fn named(mut req: Request, env: &Env, cfg: &Config, url: &Url, 
         (Method::Get, ["ledger"]) => {
             ask_registry(env, &admins(by)).await?;
             json_answer(&crate::ledger::ask(env, &ledger, &crate::ledger::OrgStatus {}).await?)
-        }
-        (Method::Put, ["budget"]) => {
-            let mut budget: fragment_proto::ledger::OrgBudget = body(&bytes)?;
-            ask_registry(env, &admins(by)).await?;
-            budget.id = crate::commanded("budget", &budget.id)?;
-            json_answer(&crate::ledger::ask(env, &ledger, &budget).await?)
-        }
-        (Method::Post, ["billing", "pack"]) => {
-            empty().map_err(|_| CellError::invalid("an org's pack takes no body (or {}): the org named is whose credit it is"))?;
-            json_answer(&crate::billing::pack(env, cfg, by, None, Some(org.to_string())).await?)
         }
         (Method::Post, ["content-admin-offers"]) => {
             let b: NewContentAdmin = body(&bytes)?;
@@ -349,6 +339,18 @@ pub(crate) async fn admin(mut req: Request, env: &Env, cfg: &Config, url: &Url, 
             json_answer(&ask_registry(env, &OfferAdmin { by: None, operator: Some(by), org: org.to_string(), email: b.email, request: b.id }).await?)
         }
         (Method::Get, ["orgs", org, "content"]) => json_answer(&ask_registry(env, &ContentOf { by: None, org: org.to_string(), before: before(url)? }).await?),
+        // an org's own credit, as an operator who credits it reads it
+        (Method::Get, ["orgs", org, "ledger"]) => {
+            ask_registry(env, &OrgOf { by: None, org: Some(org.to_string()) }).await?;
+            let ledger = fragment_core::ledger::org::Payer::Org(org.to_string()).name();
+            json_answer(&crate::ledger::ask(env, &ledger, &crate::ledger::OrgStatus {}).await?)
+        }
+        // the person an org's credit is invoiced to, named by an operator
+        // (orgs pay out of band: Paul, 2026-10-30), in its governance log
+        (Method::Post, ["orgs", org, "payer"]) => {
+            let b: NamePayer = body(&bytes)?;
+            json_answer(&ask_registry(env, &NominatePayer { operator: by, org: org.to_string(), person: b.person, request: b.id }).await?)
+        }
         (m, _) => Err(CellError::new(ErrorCode::NotFound, format!("no route {} /api/admin/{}", m.as_ref(), rest.join("/")))),
     }
 }

@@ -16,7 +16,9 @@
 //! - **Offers end.** Each is answered once (the same answer again answers
 //!   as the first did; the other is refused), withdrawn by the org's
 //!   admins, or expires after `OFFER_TTL_MS`. A person stepping down takes
-//!   their waiting offers with them, made or received.
+//!   their waiting offers with them, made or received. One whose grounds
+//!   no longer hold lapses as soon as a change shows it (`lapses`), so it
+//!   is never handed back as if new, nor counted against the cap.
 //! - **Epochs fence.** A person is in the org's content at an epoch, from
 //!   their yes to an admin's place or an invite to one of its fragments.
 //!   Offboarding raises it and makes them inactive at once: whatever its
@@ -96,6 +98,8 @@ pub enum Standing {
     Answered(Answer),
     Withdrawn,
     Expired,
+    /// Its grounds held no more (`lapses`).
+    Lapsed,
 }
 
 impl Standing {
@@ -108,6 +112,7 @@ impl Standing {
             Some("declined") => Standing::Answered(Answer::Declined),
             Some("withdrawn") => Standing::Withdrawn,
             Some("expired") => Standing::Expired,
+            Some("lapsed") => Standing::Lapsed,
             Some(_) => return None,
         })
     }
@@ -138,7 +143,7 @@ pub enum Refusal {
     AdminsFull,
     /// The offer was answered the other way.
     Answered(Answer),
-    /// The offer was withdrawn, or expired, unanswered.
+    /// The offer was withdrawn, expired or lapsed, unanswered.
     Ended,
     /// What the offer was made on holds no more.
     Lapsed(Grounds),
@@ -170,7 +175,7 @@ impl Refusal {
             Refusal::HasAdmins => "the org's content has had its admins: one of them offers the next (with none left, an operator does)".into(),
             Refusal::AdminsFull => format!("an org has at most {ADMINS_MAX} content admins, its admins' offers waiting included: withdraw one first"),
             Refusal::Answered(a) => format!("this offer was {} already", a.as_str()),
-            Refusal::Ended => "this offer was withdrawn, or expired, unanswered".into(),
+            Refusal::Ended => "this offer was withdrawn, expired or lapsed, unanswered: ask the org's admins for a new one".into(),
             Refusal::Lapsed(Grounds::Admin) => "whoever made this offer is no longer the org's content admin: ask for a new one".into(),
             Refusal::Lapsed(Grounds::Payer) => "this offer was the org's first admin's, and the org has had one since: ask its admins".into(),
             Refusal::Lapsed(Grounds::Operator) => "this offer was the recovery of an org with no admin, and it has one now: ask its admins".into(),
@@ -206,7 +211,7 @@ pub fn answer(standing: Standing, asked: Answer) -> Result<bool, Refusal> {
         Standing::Waiting => Ok(true),
         Standing::Answered(a) if a == asked => Ok(false),
         Standing::Answered(a) => Err(Refusal::Answered(a)),
-        Standing::Withdrawn | Standing::Expired => Err(Refusal::Ended),
+        Standing::Withdrawn | Standing::Expired | Standing::Lapsed => Err(Refusal::Ended),
     }
 }
 
@@ -221,6 +226,12 @@ pub fn grounds_hold(grounds: Grounds, now: Now) -> Result<(), Refusal> {
         true => Ok(()),
         false => Err(Refusal::Lapsed(grounds)),
     }
+}
+
+/// Whether a waiting offer made on `grounds` has lapsed: what it was made
+/// on holds no more. The registry marks it so in the change that shows it.
+pub fn lapses(grounds: Grounds, now: Now) -> bool {
+    grounds_hold(grounds, now).is_err()
 }
 
 /// An admin stepping down, or stepped down, the org holding `admins`:
@@ -384,10 +395,29 @@ mod tests {
         assert_eq!(enrolled(Some(IN), None, None), Ok((IN, false)), "in already: their epoch, nothing new");
     }
 
-    /// Restart: an offer's standing is its stored row read at a later
-    /// time: waiting until it expires, and expired after, unanswered.
+
+    /// R1: once someone accepts the first admin's place, who pays's other
+    /// "firsts" lapse, and an operator's recovery lapses once an admin is
+    /// there; an admin's lapses with its maker. A lapsed offer takes no
+    /// answer.
     #[test]
-    fn an_offer_expires_across_a_restart() {
+    fn a_lapsed_offer_is_never_waiting() {
+        let after_first = Now { people: 1, admins: 1, offerer_stands: true };
+        assert!(lapses(Grounds::Payer, after_first));
+        assert!(lapses(Grounds::Operator, after_first));
+        assert!(!lapses(Grounds::Admin, after_first));
+        assert!(lapses(Grounds::Admin, Now { offerer_stands: false, ..after_first }));
+        assert!(!lapses(Grounds::Payer, NONE_YET));
+        assert!(!lapses(Grounds::Operator, Now { people: 2, admins: 0, offerer_stands: true }));
+        assert_eq!(answer(Standing::Lapsed, Answer::Accepted), Err(Refusal::Ended));
+        assert_eq!(Standing::of(Some("lapsed"), T + OFFER_TTL_MS, T), Some(Standing::Lapsed));
+    }
+
+    /// An offer's standing is its stored row read at a later time: waiting
+    /// until it expires, and expired after, unanswered (the row is all a
+    /// restart keeps of it).
+    #[test]
+    fn an_offer_expires_by_its_row() {
         let expires = T + OFFER_TTL_MS;
         assert_eq!(Standing::of(None, expires, T), Some(Standing::Waiting));
         assert_eq!(Standing::of(None, expires, expires - 1), Some(Standing::Waiting));

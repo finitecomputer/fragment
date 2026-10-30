@@ -478,6 +478,27 @@ pub struct Offboard {
     pub expected_epoch: u64,
 }
 
+/// `POST /api/admin/orgs/{org}/payer`: an operator names the person an
+/// org's credit is invoiced to (an email, or an npub), once by `id`: its
+/// governance log's record of who pays (orgs pay out of band), which gives
+/// them no power of its own.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NamePayer {
+    pub id: String,
+    pub person: String,
+}
+
+/// An org's payer named (`NamePayer`): who, and the log entry's number.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PayerNamed {
+    pub org: String,
+    pub person: String,
+    pub email: Option<String>,
+    pub seq: u64,
+}
+
 /// `POST /api/orgs/{org}/content-admin-offers`: offer `email` a content
 /// admin's place, once by `id`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

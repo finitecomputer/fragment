@@ -15,7 +15,8 @@ CREATE INDEX org_content_person ON org_content (person);
 -- signs in with it accepts it, on the grounds it was made on (an admin of
 -- the org's, who pays for an org whose content has had no one, or an
 -- operator's for an org with no admin), which must still hold then. It is
--- answered once, withdrawn, or expires.
+-- answered once, withdrawn, expires, or lapses as soon as its grounds hold
+-- no more.
 CREATE TABLE org_content_offers (
   id TEXT PRIMARY KEY,
   org TEXT NOT NULL,
@@ -24,7 +25,7 @@ CREATE TABLE org_content_offers (
   offered_by TEXT NOT NULL,
   offered_at INTEGER NOT NULL,
   expires_at INTEGER NOT NULL,
-  answer TEXT CHECK (answer IN ('accepted', 'declined', 'withdrawn', 'expired')),
+  answer TEXT CHECK (answer IN ('accepted', 'declined', 'withdrawn', 'expired', 'lapsed')),
   answered_by TEXT,
   answered_at INTEGER
 );

@@ -673,9 +673,10 @@ fn command_body<T: serde::de::DeserializeOwned>(body: &[u8], what: &str) -> Cell
 /// `/api/ledger…` (docs/ledger.md; docs/api.md, Ledger): `GET` reads the
 /// signer's (an agent's: its owner's); the deployment's operators grant
 /// credit and set a person's plan and overdraft, the person named by email
-/// or identity, and grant an org's own credit, named `org:<org id>`. A
-/// seat's state has one writer, the registry (docs/billing.md): an
-/// operator comps or ends a seat through it.
+/// or identity, and grant an org's own credit and set its budget, named
+/// `org:<org id>` (orgs pay out of band: Paul, 2026-10-30). A seat's state
+/// has one writer, the registry (docs/billing.md): an operator comps or
+/// ends a seat through it.
 async fn ledger_route(mut req: Request, env: &Env, cfg: &Config, url: &Url, rest: &[&str]) -> CellResult<Response> {
     let body = read_body(&mut req, limits::BODY_MAX_BYTES).await?;
     if let (Method::Get, []) = (req.method(), rest) {
@@ -690,7 +691,7 @@ async fn ledger_route(mut req: Request, env: &Env, cfg: &Config, url: &Url, rest
     let person = match *person {
         "me" => op.clone(),
         id if npub::is_identity(id) => id.to_string(),
-        // an org's own credit (decision 66): only a grant takes, an org that is
+        // an org's own credit and budget (decisions 66 and 68), an org that is
         // there (its ledger refuses a plan or an overdraft)
         id if id.starts_with(fragment_core::ledger::org::ORG_LEDGER_PREFIX) => match fragment_core::ledger::org::Payer::parse(id) {
             Some(fragment_core::ledger::org::Payer::Org(org)) => {
@@ -730,8 +731,17 @@ async fn ledger_route(mut req: Request, env: &Env, cfg: &Config, url: &Url, rest
             ask_registry(env, &note(format!("{} micros", c.micros))).await?;
             json_answer(&answer)
         }
+        // an org's monthly budget (decision 68), an operator's while orgs
+        // pay out of band (a person's ledger refuses it: 403)
+        "budget" => {
+            let mut c: fragment_proto::ledger::OrgBudget = command_body(&body, "budget")?;
+            c.id = commanded("budget", &c.id)?;
+            let answer = ledger::ask(env, &person, &c).await?;
+            ask_registry(env, &note(format!("{} micros", c.micros))).await?;
+            json_answer(&answer)
+        }
         // a seat is the registry's alone: an operator comps or ends one there (`/api/admin/seats`)
-        other => Err(CellError::new(ErrorCode::NotFound, format!("no ledger command {other:?}: grant, plan, or overdraft (a seat is comped or ended at /api/admin/seats)"))),
+        other => Err(CellError::new(ErrorCode::NotFound, format!("no ledger command {other:?}: grant, plan, overdraft, or an org's budget (a seat is comped or ended at /api/admin/seats)"))),
     }
 }
 

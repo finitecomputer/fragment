@@ -1,13 +1,13 @@
 //! An org's ledger (docs/cloudflare-v1.md, decisions 66 to 68): credit
-//! the org bought (its own $25 packs) or an operator gave it, which pays
+//! an operator gave it (orgs pay out of band: Paul, 2026-10-30), which pays
 //! for the fragments it owns: their hosting, storage and AI steps. It has
 //! none of a person's plan, seat, included credit or overdraft, and pays
 //! for no agent's turn and no computer: a person's agents bill that
 //! person, in an org's fragment too (decision 67).
 //!
 //! Its overdraft is zero: at a balance of zero its fragments are
-//! read-only until credit arrives. Its billing admins set a monthly
-//! budget, zero until they do; once its fragments' charges this month
+//! read-only until credit arrives. An operator sets its monthly budget,
+//! zero until they do; once its fragments' charges this month
 //! reach it, their AI steps stop until a larger one or the next month
 //! (hosting is still metered: a budget stops what starts, as a cap does).
 //! Every AI step in its fragments meets the fragment's cap as well: an
@@ -59,15 +59,16 @@ impl Payer {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct OrgTerms {
     /// What its fragments may be charged a month before their AI steps
-    /// stop: zero until its billing admins set one.
+    /// stop: zero until an operator sets one.
     budget: i64,
 }
 
 impl OrgTerms {
-    /// Its terms as kept: the budget's row (none: zero).
+    /// Its terms as kept: the budget's row (none: zero), held to today's
+    /// limit (a budget set under a larger one is read as the limit, never
+    /// a panic on every call).
     pub fn of(budget: i64) -> OrgTerms {
-        assert!((0..=BUDGET_MAX).contains(&budget), "a budget kept is one set within its limit");
-        OrgTerms { budget }
+        OrgTerms { budget: budget.clamp(0, BUDGET_MAX) }
     }
 
     pub fn budget(&self) -> i64 {
@@ -164,7 +165,7 @@ impl Ledger {
         }
     }
 
-    /// An org's monthly budget, from its billing admins.
+    /// An org's monthly budget, from an operator.
     pub fn set_budget(&mut self, store: &mut impl Store, c: &OrgBudget, now_ms: i64) -> Result<(), Refused> {
         if self.org.is_none() {
             return Err(Refused::OrgsOnly);
@@ -381,5 +382,6 @@ mod tests {
         let status = l.org_status(ORG, &s, T0 + 2 * DAY_MS, &book).unwrap();
         assert_eq!((status.budget_micros, status.balance_micros + status.spent_micros), (10 * USD, 50 * USD));
         assert!(!serde_json::to_string(&Ledger::new(T0)).unwrap().contains("org"), "a person's head is written as before");
+        assert_eq!((OrgTerms::of(BUDGET_MAX + 1).budget(), OrgTerms::of(-1).budget()), (BUDGET_MAX, 0), "a budget kept past today's limit reads as the limit");
     }
 }
