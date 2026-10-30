@@ -383,6 +383,14 @@ pub(crate) struct WipeFacts {
     pub keys: u64,
     pub sessions: u64,
     pub pictures: Vec<WipePicture>,
+    /// The feedback they sent (its screenshots go with their pictures).
+    #[serde(default)]
+    pub feedback: u64,
+    /// The latest a byte of their feedback's may still land (a try in
+    /// flight: registry/feedback.rs), when it is to come: the `pictures`
+    /// step deletes their screenshots only past it.
+    #[serde(default)]
+    pub feedback_fenced_until: Option<i64>,
     pub done: Option<u32>,
     /// The orgs its `billing` step settles (their own, and any whose
     /// subscription their card pays), and what it does to each.
@@ -461,6 +469,11 @@ pub(crate) enum TestHook {
     /// `TEST_DOWN_FOR_MAX`; 0 answers them again), as `Down` does: a test
     /// fails one call a request makes, and the rest go on.
     DownFor(DownFor),
+    /// The next `times` calls to one path (at most `TEST_DOWN_FOR_MAX`; 0
+    /// answers them again) act, then answer 503 as if their answer were
+    /// lost on its way back: a test sees what a caller does that cannot
+    /// tell whether its call acted.
+    DropFor(DownFor),
     /// Answer the next `times` calls to one path (at most
     /// `TEST_DOWN_FOR_MAX`; 0 answers them again) as an object of another
     /// release (`SKEWED`) would: each refused, 503 `deploying`, before it is
@@ -491,6 +504,24 @@ pub(crate) enum TestHook {
     /// The steps its schema holds (schema.rs `view`), answered by a
     /// registry that refuses its schema too.
     Schema,
+    /// A feedback's latest try, and its fence, made `ms` older (at most an
+    /// hour and a fence), and the alarm armed now (`{aged}`: 1, or 0 when
+    /// there is none): a test brings its expiry or its fence to now.
+    FeedbackAge(FeedbackAge),
+    /// The next call to one path acts, then waits `ms` (at most
+    /// `TEST_HOLD_MAX_MS`) before it is answered, while other calls go on:
+    /// a test holds a request between two of its steps. `null` sets
+    /// nothing; either answers how many such waits have begun (`{started}`).
+    HoldAfter(Option<HoldAfter>),
+    /// The registry ends its instance just after it answers (`{restarting}`),
+    /// as a deploy's restart does; the next call starts another, its hooks
+    /// and counts gone, its storage and alarm as they were.
+    Restart,
+    /// The next `n` runs of the alarm's deletes of feedback fail before
+    /// they delete a thing, as when BLOBS does not answer (at most
+    /// `TEST_DOWN_FOR_MAX`; 0 lets them run): a test sees what is left.
+    /// `null` sets nothing; either answers how many are left (`{left}`).
+    FeedbackSweepFails(Option<u32>),
     /// Makes every invite waiting on this email one mailed before invites
     /// waited for a yes (decision 63: no role, title or sharer kept), which
     /// a sign-in as it still meets (`{before}`: how many).
@@ -539,6 +570,22 @@ pub(crate) struct E2ePeopleAnswer {
 
 /// The e2e people one page lists.
 pub(crate) const E2E_PEOPLE_PAGE: u32 = 100;
+
+/// `TestHook::FeedbackAge`: which feedback, and by how much.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct FeedbackAge {
+    pub id: String,
+    pub ms: i64,
+}
+
+/// `TestHook::HoldAfter`: which call (a `Call`'s path), and how long.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct HoldAfter {
+    pub path: String,
+    pub ms: u32,
+}
 
 /// The longest `TestHook::Hold`.
 pub(crate) const TEST_HOLD_MAX_MS: u32 = 10_000;

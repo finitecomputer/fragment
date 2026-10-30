@@ -213,6 +213,10 @@
   // domain onboarded to Cloudflare Email Sending (`wrangler email sending
   // enable <domain>`). Without it, the deployment sends no mail.
   // "mail_from": "Finite.Computer <mail@finite.place>",
+  // Where the operators are mailed each problem reported or message sent
+  // from the shell's Settings (docs/api.md, Feedback): one plain address,
+  // and it needs mail_from. Without it, they read feedback on /admin alone.
+  // "feedback_to": "help@example.dev",
   // The operators (npubs or identities): they grant credit, set plans,
   // release usernames, and wipe a person (docs/api.md, Operators). Wipe
   // with an operator key no person holds (`fragment operator key <file>`

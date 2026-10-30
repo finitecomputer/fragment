@@ -58,6 +58,7 @@ the deployment's secrets are Worker secrets (below).
 | `FRAGMENT_DEFAULT_PLAN` | a new person's plan (Ledger, below): `guest` (the default and production's), `seat`, or `seat_always_on`; dev and the e2e set `seat` |
 | `FRAGMENT_COMPUTER_UNSAVED_MAX_MS` | how long a computer whose sleep's save keeps failing stays awake, its container kept, before it sleeps unsaved (the deploy config's `computers.unsaved_max_ms`; default 1800000, thirty minutes; docs/computers.md, "Saves and what a wake restores") |
 | `FRAGMENT_SUPPORT_URL` | where a person whose computer will not start gets help (the deploy config's `support_url`): an `https:` page or a `mailto:` address, at most 512 visible characters, refused at the node's first request otherwise; `GET /api/computers` gives it as `support`, and the shell links it (docs/computers.md, "What its owner is told"). Unset, none |
+| `FRAGMENT_FEEDBACK_TO` | where the operators are mailed each problem reported or message sent from the shell (the deploy config's `feedback_to`; Feedback, below): one plain address, refused at the node's first request otherwise (and before a deploy, as is one without `mail_from`). Unset, feedback is read on `/admin` alone; dev and the e2e name the mail fake's `feedback@fragment.localhost` |
 | `FRAGMENT_OPERATORS` | identities and keys that grant credit and set plans, seats and overdrafts, and wipe a person (Operators, below); a key listed is an operator's whether or not anyone holds it |
 | `FRAGMENT_DEPLOY_ID` | which deployment this is (default `dev`); every answer of the platform's host names it in `x-fragment-deploy` (`GET /healthz`'s among them, which CD checks), and the shell's page in its meta, so a page left open reloads once the platform under it changed (The shell, "A new release"). `cargo xtask deploy` sets the deploy's commit (`git rev-parse --short=12 HEAD`; a tree with uncommitted changes adds `-dirty-<unix seconds>`, so two such deploys differ). It is the release every call between the Worker and its objects carries, and each object admits only its own (docs/MODEL.md, Calls between releases): 1 to 64 of letters, digits, `.`, `_` and `-`, or the isolate does not start |
 | `FRAGMENT_DEPLOYED_AT` | when the release was deployed, whole seconds since 1970 (default none; dev and the e2e: their node's start). `cargo xtask deploy` sets the deploy's second. The shell's page names it in its `fragment-release-deployed` meta, which Settings shows (The shell). Every call between the Worker and its objects carries it beside the release, and an object that refuses a call from a release deployed after its own restarts onto it (docs/MODEL.md, Calls between releases, "An object behind restarts"): 1 to 12 digits, or the isolate does not start |
@@ -116,8 +117,9 @@ registry's are no route (404); a local fleet's reach everything.
 | `POST /api/test/fragment` | `{fragment, op, …}` pulls a lever on that fragment: `fail-deliveries {times}` fails its next queue sends, `fail-outbox {times}` fails its next records' outbox writes just after their append, `fail-triggers {times}` fails its next trigger steps just before their last run starts, `drop-effects {times}` loses its next job step answers on their way back to the Workflow (after the step ran and its answer was kept), `forget-steps` forgets the kept answers of its runs in flight, `hold-advances {on}` holds each advance after a run's first step while on (at most 20 s), and `advance-held` answers `{run}`, the last run it held, `forget-live` makes it forget what it knows of its live sockets beyond their attachments (as waking from hibernation does), `age-live {ms}` makes every live socket's identity check `ms` older (as if that long had passed), `drop-live {code}` drops its live sockets, `ledger {ms \| null}` shortens (or restores) its operation ledger's window, `age {ms}` forgets its write keys as if `ms` had passed, `members {fill}` adds placeholder members until there are `fill`, `legacy-member-kind {principal}` makes that member's row one from before member rows named their kind (its kind NULL), its schema's levers (cell/src/schema.rs, answered by a fragment that refuses its schema too): `schema` answers its steps as the list's `schema` does, with the columns of its `members` and `runs`, `schema-rerun` runs its migration again as a start does (`{ran}` or `{refused}`), `schema-unversion {shape?}` makes it a fragment from before versions (no `_schema`), as `people-only` one from the days of people-only shares (`members.people_only`) and as `before-code` one from before `runs.code` (#178), answering those columns, and `schema-try {step}` runs its steps and one more of the e2e's (`adds` a column to `members`; `fails` once it has made a table), answering `{ran}` or `{refused}`, and `probeTable` (whether the table `fails` makes is there), `code-builds` answers `{builds}`: how many times the fragment's activation built its app's worker code for the loader, `alarm` answers `{alarmAt, pollAt, now}` (ms): when its alarm and its next poll are set for, `age-outside {ms}` makes the last sign its pins may lag (a storage token minted, a move that failed to follow) `ms` older, `age-invites {ms}` makes every invite waiting run out `ms` sooner and arms its alarm for the soonest (`{aged, invites}`: how many), `fail-after-paid {times}` fails its next paid AI steps just after their call was paid and kept (so the step is tried again), `fail-meter-acks {times}` loses its next meter batches' acknowledgements (so the queue delivers them again), `meter-now {sample?, resend?}` closes every counted minute, takes a storage sample (unless `sample: false`) and sends its outbox's batch now (a waiting one again with `resend`), answering the outbox, `meter` answers the outbox, `receipt-before {run}` makes that run's paid receipts as the release before decision 62 left them (kept, not marked charged, charged under an attempt's reference: docs/ledger.md, AI steps), `forget-standing` makes its isolate's gate forget every answer it heard, its owner's standing among them (docs/ledger.md, "The gate"; locally one isolate runs the router and every object, so it is the whole node's), `cron-now` makes each of its cron schedules, and each of its scheduled records not paused, due at once (`{due, records}`: how many of each), so a test need not wait for a schedule's minute, `poll-now` makes its next alarm a poll pass (the blob collection's), `fail-cards {times}` makes its next card shots open a page nothing serves (`http://127.0.0.1:9/`, which Chrome refuses), so they fail as an unreachable page does, `cards` answers `{cards, failCardsLeft}`: its card and schedule as kept (`fragment_core::card::Cards`) and the shots the lever still fails, `repo {repo}` makes it name the repo `repo` (`[a-z0-9-]`), as a fragment made before repos were named for their owner does (a wipe deletes what it names), and `ended` answers `{ended: [{incarnation, name, stored, attempts, lists, repos, agents, tries, held, error}], dueAt}`: each life a delete ended whose cleanup is not done (at most 8; `lists`: the members' lists it has still to tell; `stored`: 1 while its app's database or blobs remain; `repos`: 1 while a wipe's end of it has its repo still to delete; `agents`: 1 while an agent fragment's agent has still to leave its computer and the registry's names; `tries`: the most failed tries of a part left; `held`: one failed ten times or was refused, so it is tried daily, and by each wipe call; `error`: the last error of a part left, `part: error`), and when its next pass is due. `ended` alone answers on a name with no fragment (deleted, and not made again) |
 | `POST /api/test/computer` | `{computer, op, times?, on?, ms?, freeze?}` pulls a lever on that computer (docs/computers.md): `kill` → `{computer, killed}` sends SIGKILL to the guest's PID 1 (from outside its PID namespace), so its container exits as a crash does and its real exit is reported (`killed`: the start it was); one not running (asleep, or won't wake) is 400. `saves` → what its Computer DO keeps of its saves: `saves` (newest first, at most three: `{number, id, generation, atMs, held, records, unusable}`, each with its `DirectoryBackup` records), `numbered` (the last save's number), `snapshot` (`{id, image, save}`, the cache of a save for one image, or `null`), `restored` (what its last start that came up restored, as the view has it), `rollbacks`, `ended` (`{generation, by, saved}`: how the last life ended, until the next start that comes up reads it), `starting` (`{generation, from}`: the start under way), `running` (`{generation, image}`: the image's reference the last start that came up runs), `generation` (its lifecycle's last start), `saving` (the save under way, by its step: `{step: hold \| save \| stop, since_ms, …}`, or `null`), `unsavedSince` (since when a sleep's save has kept failing, or `null`: the bound counts from it), `freeSince` (since when its awake time is free, the start of the try whose save failed first, or `null`), `keepalives` (the guest's keepalives it counts open: its turns running), `failSaves` (the lever's failures still to come) and `hangBackups` (the lever's bound on its backups, or 0). `fail-saves` with `times` (0 to 100) → `{computer, failSaves}`: its next that many saves fail before they start (a sleep's included, which then keeps its container); 0 fails none more. `hang-backups` with `ms` (0 to 480000) → `{computer, hangBackups}`: a sick container's backups (r4, r6): its awake container's `sandbox-shim` swapped for one that never answers, and its saves' backups bounded by `ms` in place of their 8 minutes, so each fails at it (`no answer within <ms> ms`); 0 puts its shim back and the bound. One not awake is 400 (0 aside). `alive-check` with `ms` (1 to 45000) and `freeze` → `{computer, aliveCheck}`: its next start waits `ms` for its guest to read its view, as a start from a snapshot does (local workerd takes none); with `freeze` its guest's PID 1 is stopped (SIGSTOP) once its container is up, so it never does: the start came up dead, and the same wake starts it again from its save (#362). `always-on` with `on` → `{computer, alwaysOn, view}`: its owner's plan made always-on, or not (decision 25: the plan itself does not reach a computer yet). `simplex` with `on` → `{computer, simplex}`: its bridge's word that its image does SimpleX, taken as `GET /api/computer?simplex=1` takes it (one not running is 400), or forgotten (`on: false`); its owner's pages are told either way. `expire-sign-ins` → `{computer, expiredSignIns}`: every own-key sign-in under way (Connections) is past its time, as ten minutes would leave it. `schema` answers the steps its schema holds, as the list's `schema` does (on a computer no one made too). Another op, or one without its argument, is 400; a computer no one made is 404 |
 | `POST /api/test/mail` | a local fleet's only (a preview's mail is real): `{to, subject, text}` → `{messageId}`, one message as the platform sends it (Mail, below), to the mail fake |
+| `POST /api/test/feedback` | any fleet with levers (on a preview, an e2e person's alone): `{person, id}` → `{keys, more}`, the keys BLOBS holds under that feedback's prefix, so a test sees its screenshots' bytes there or gone (Feedback, below) |
 | `POST /api/test/export` | `{identity, op, steps?}` (on a preview, an e2e person's): a lever on that person's export (Export, below). `pace` with `steps` lets their build take at most that many more steps (a copy's piece, a page of records, a fragment's facts…), then wait, a second at a time, until it is let go (`steps: null`): a build held part way, as a crash or a restart finds one. `piece` with `steps` (1024 to 8 MiB, or `null`) holds an entry of unknown size that many bytes at a time before putting it aside, so a small export puts its entries aside in many pieces, as a large one does. `cap` with `steps` (bytes, or `null`) makes their archive's limit that many bytes, so a small export meets it → `{pace}`, `{piece}` or `{cap}` |
-| `POST /api/test/registry` | a local fleet's only: `{down}` makes the registry answer 503 (until it is set back, or the registry restarts), `{calls: null}` answers `{calls, skewed}`, how many calls the registry has had since it started (a test counts a request's round trips by the difference), and how many it refused for their release (not among `calls`), `{skewFor: {path, times, deployed?}}` makes it answer the next `times` calls (at most 100; 0 answers them again) to one of its inner paths (`/login/exchange`: a sign-in's callback) as a registry of another release would, each refused unread (503 `deploying`) by the check every call into an object meets, as a deploy going out does (docs/MODEL.md, Calls between releases), and with `deployed` (a deploy's seconds, as `FRAGMENT_DEPLOYED_AT`) as one deployed then: before the caller's release (0), it restarts at the first refusal, as an object a deploy replaced does, its hooks and counts gone with it (so the router's next ask is answered); after it, it refuses and stays, `{hold: ms}` makes its next call wait that long (at most 10 s) before it is answered, while other calls go on, `{downFor: {path, times}}` makes it answer 503 to the next `times` calls (at most 100; 0 answers them again) to one of its inner paths (`/orgs/sync`: a computer's making asking for its seat's push), as `{down}` does, the rest answered, and `{signins: "count"\|"expire"\|"sweep"\|{expireSession: token}}` counts sign-in's rows (`{logins, redemptions, sessions}`), expires every pending sign-in and unspent redemption, runs its sweep now, or expires the one session a cookie's token names (a platform session's site sessions end with it), `"schema"` answers the steps its schema holds, as the list's `schema` does, on a registry that refuses its schema too, and `{invitesBefore: email}` makes every invite waiting on that email one mailed before invites waited for a yes (decision 63: its role, title and sharer forgotten), which a sign-in as it still meets, answering `{before}`, how many |
+| `POST /api/test/registry` | a local fleet's only: `{down}` makes the registry answer 503 (until it is set back, or the registry restarts), `{calls: null}` answers `{calls, skewed}`, how many calls the registry has had since it started (a test counts a request's round trips by the difference), and how many it refused for their release (not among `calls`), `{skewFor: {path, times, deployed?}}` makes it answer the next `times` calls (at most 100; 0 answers them again) to one of its inner paths (`/login/exchange`: a sign-in's callback) as a registry of another release would, each refused unread (503 `deploying`) by the check every call into an object meets, as a deploy going out does (docs/MODEL.md, Calls between releases), and with `deployed` (a deploy's seconds, as `FRAGMENT_DEPLOYED_AT`) as one deployed then: before the caller's release (0), it restarts at the first refusal, as an object a deploy replaced does, its hooks and counts gone with it (so the router's next ask is answered); after it, it refuses and stays, `{hold: ms}` makes its next call wait that long (at most 10 s) before it is answered, while other calls go on, `{downFor: {path, times}}` makes it answer 503 to the next `times` calls (at most 100; 0 answers them again) to one of its inner paths (`/orgs/sync`: a computer's making asking for its seat's push), as `{down}` does, the rest answered, `{dropFor: {path, times}}` makes the next `times` calls to one act, then answer 503 as an answer lost on its way back (`/feedback/keep`: a send kept, its sender not told), `{feedbackAge: {id, ms}}` makes a feedback's latest try and its fence `ms` older and arms the alarm now (`{aged}`), `{holdAfter: {path, ms}\|null}` makes the next call to one path act, then wait `ms` (at most 10 s) before it is answered, while other calls go on (`/feedback/begin`: a send held between its begin and its puts; `{started}`, how many such waits have begun), `"restart"` ends the registry's instance just after it answers, as a deploy's restart does (its hooks and counts gone, its storage and alarm kept), `{feedbackSweepFails: n|null}` fails the next `n` runs of the alarm's deletes of feedback before they delete a thing (null sets nothing; `{left}`), and `{signins: "count"\|"expire"\|"sweep"\|{expireSession: token}}` counts sign-in's rows (`{logins, redemptions, sessions}`), expires every pending sign-in and unspent redemption, runs its sweep now, or expires the one session a cookie's token names (a platform session's site sessions end with it), `"schema"` answers the steps its schema holds, as the list's `schema` does, on a registry that refuses its schema too, and `{invitesBefore: email}` makes every invite waiting on that email one mailed before invites waited for a yes (decision 63: its role, title and sharer forgotten), which a sign-in as it still meets, answering `{before}`, how many |
 
 One hook is no route: on a local fleet with a test secret, a request
 whose `fragment_e2e_release` cookie names a release's id is answered as
@@ -171,7 +173,7 @@ sender, an outage) 502. Dev and the e2e send to the mail fake instead
 (`FRAGMENT_MAIL_URL`). On a preview, whose mail is real, a message to an
 e2e person (`<name>@e2e.test`, an address with no mailbox) goes nowhere
 rather than bounce. What it sends: invites by email (Sharing), seats
-and trials (Billing), and a key added to a person (Sign-in: the key's ending, the whole key, how it came (a CLI's code typed: where, when and by what it was asked for, and never to type a code someone sent; or by which of their keys, `POST /api/identities/{id}/keys`), and `fragment keys revoke`; sent on every key added, after the answer, and a key is added whatever becomes of its mail). Each names the platform as its shell does
+and trials (Billing), each feedback to the operators' `feedback_to` (Feedback), and a key added to a person (Sign-in: the key's ending, the whole key, how it came (a CLI's code typed: where, when and by what it was asked for, and never to type a code someone sent; or by which of their keys, `POST /api/identities/{id}/keys`), and `fragment keys revoke`; sent on every key added, after the answer, and a key is added whatever becomes of its mail). Each names the platform as its shell does
 (`fragment_core::mail::PRODUCT`, Finite.Computer, held to the shell's
 page and web manifest by a test). The sender, its address and any name,
 is the deployment's `mail_from`: a name there should say the same.
@@ -549,10 +551,106 @@ learns the page is there. Its API decides again on every call.
 | `PUT /api/admin/people/{npub}/computer/image` | the same | `{image}` → `ComputerView`: their computer pinned to `image`, as its owner's `PUT /api/computers/{id}/image` pins it (a canary, or back to the default): its next start runs it, and awake on another, its owner is told an update is ready. Logged (`pin`, the image its detail). An image the deployment lacks is 400; a person with no computer, 404 |
 | `GET /api/admin/orgs?after=` | the same | → `AdminOrgs {orgs: [AdminOrg {id, name, createdAt, status, customer, subscription, periodEnd, cancelAtEnd, admins, paidSeats, compedSeats, pending}], next}` (`admins`: those who said yes; `pending`: its offers) |
 | `GET /api/admin/health` | the same | → `AdminHealth {orgsPaying, orgsLapsed, seatsPaid, seatsComped, planPushesQueued, quantityPushesQueued, failing: [{queue, target, tries, due}], lastEventAt, oldestCopyAt}` (`queue`: `plan`, `quantity`, or `cancel`, a subscription whose cancel failed) |
-| `GET /api/admin/log?before=` | the same | → `AdminLog {entries: [{n, at, operator, action, target, detail}], next}`, newest first: each comp, comp's kind and end, trial code made, changed and mailed, computer pinned, and ledger command, written in its own turn; the newest 10,000 kept |
+| `GET /api/admin/log?before=` | the same | → `AdminLog {entries: [{n, at, operator, action, target, detail}], next}`, newest first: each comp, comp's kind and end, trial code made, changed and mailed, computer pinned, feedback marked done, opened again or deleted, and ledger command, written in its own turn; the newest 10,000 kept |
+| `GET /api/admin/feedback?before=&open=` | the same | → `FeedbackPage {feedback: [Feedback], next}`: a page of 50, newest first, before `before` (a feedback's `n`); `open=1`, only those not done (Feedback, below) |
+| `GET /api/admin/feedback/{id}/screenshots/{place}` | the same | → its bytes, as they came: its `content-type` read from them, `nosniff`, `content-security-policy: default-src 'none'; sandbox`, never cached. A place it lacks, or no such feedback, is 404 |
+| `PATCH /api/admin/feedback/{id}` | the same | `{resolved}` → `Feedback`: marked done (its `resolvedAt` and `resolvedBy`, the operator), or open again; asked again, it changes and logs nothing (`feedback-done`, `feedback-reopen`) |
+| `DELETE /api/admin/feedback/{id}` | the same | → `Feedback` as it was (`feedback-delete`): no longer listed or served at once, its screenshots' bytes deleted by the registry's alarm, then its row (Feedback, below); again, 404 |
 | `POST /api/admin/trials/{id}/send` | the same | `{email}` → `{sent, to}`: mails the code, its days, and `/welcome?trial=<code>`; an ended code is 400 |
 
 Comps, orgs' views and trial codes are under Seats and orgs.
+
+## Feedback
+
+A person reports a problem or sends a message to the deployment's
+operators from the shell: Settings' Help (Report a problem, Send a
+message), and a chat's ⋯ (Report a problem…). It is the shell's dialog:
+a kind, a message, and up to three screenshots, picked, pasted or
+dropped. No vendor's product takes it: Cloudflare offers none
+(Turnstile's feedback is its own challenges'), nor do WorkOS or Stripe,
+and a tracker's widget would run a third party's script in the shell,
+which holds the person's session. The registry keeps it
+(`registry/feedback.rs`), its screenshots' bytes in BLOBS under
+`feedback/<person>/<id>/<try>/<place>`; the operators read it on `/admin`'s
+Feedback (Operators: the admin, above), and are mailed each one at the
+deployment's `feedback_to` (`FRAGMENT_FEEDBACK_TO`) when it names one, by
+whichever try of its send learns it is kept and its notice has not gone: who
+sent what, its first 2,000 characters, its page, its screenshots counted,
+and a link to `/admin`. The feedback is kept whatever becomes of the
+mail. On a preview, whose mail is real, an e2e person's
+(`<name>@e2e.test`) is not mailed: a hosted run sends a dozen, and
+deletes them as it ends. A wipe of the person deletes theirs, rows and bytes (`pictures`
+step; `found.feedback`).
+
+| method & path | who | body → answer |
+| --- | --- | --- |
+| `POST /api/feedback` | a person: their session, or a key of theirs (an agent is 403; `for` is not honored) | `multipart/form-data` → `FeedbackSent {id, screenshots}` |
+
+Its form (`fragment_core::feedback::read`): `id` at most once, the
+send's own (32 lowercase hex digits: the shell's dialog makes one each
+time it opens, and sends it again with every try), or none for one the
+router makes; `kind` once, `problem` or
+`message`; `message` once, 1 to 5,000 characters once trimmed (a
+browser's CRLFs kept as newlines; no control character but a newline or
+a tab); `page` at most once, the shell's path it was sent from (`/…`, at
+most 512 characters, no scheme or host), or empty for none; and
+`screenshot` up to three times, each a PNG, JPEG, WebP or GIF by its
+bytes (its part's declared type and file name are not trusted) of at
+most 5 MiB. Any other field, a field twice, or a body that is no form is
+400, saying which; a screenshot past 5 MiB, or a body past 15 MiB and 64
+KiB, 413. A person sends at most 10 in 24 hours (the eleventh is 429),
+and the registry keeps at most 10,000 (past them, 429 until an operator
+deletes some). Nothing refused is kept. The platform adds who sent it
+(their npub, and their latest sign-in's email), their browser's
+`User-Agent` (its first 512 characters), the release that took it, and
+when.
+
+A send is two registry turns, each idempotent on its id: the first
+begins it, a row `sending` (so no one it does not know, nor anyone past
+their day, stores bytes, and no byte is put that no row records), and
+makes it a try of its own, each time it is asked (at most 8); the
+screenshots go to BLOBS under that try's own keys; the second keeps it,
+if that try is still its latest. Two tries of one send at once never mix:
+the latest one's words and screenshots are what is kept and served, and
+an earlier try's bytes, under its own keys, are never served. A send
+asked again with its id is the same one: begun and not kept, it is a new
+try, as asked now (the try before can keep it no longer: asked to, it is
+409, unless the send is kept by then, when it is answered as kept); kept,
+it is answered as it was (200, `FeedbackSent`), nothing put or kept
+again, and its operators' notice sent then only if it never went (its
+row marks it once it has: at least once, and again only when a mark is
+lost). Another person's id is 409; a send of an id deleted, or begun and
+not kept for an hour (swept, below), is a new one once it is gone (409,
+or 404 at its keeping, until then: the shell makes a new id). The router
+asks a turn again once when its answer was lost (503
+`registry_unavailable`, after which the turn may have acted), and deletes
+nothing on any failure: the row is its bytes' record, and the registry
+finishes or deletes them. A send its sender heard fail, then, is either
+kept whole or, never kept, deleted with its bytes.
+
+A try starts no put later than a minute after it asked to begin
+(`WRITE_WINDOW_MS`; past it, the send is 502 `upstream_failed`, to send
+again), and a put begun in time lands within nine more (`PUT_MAX_MS`), so
+no byte of a try lands past ten minutes from its beginning (`FENCE_MS`):
+a row with a try that may still be writing (one not kept, or earlier than
+the one that kept it) holds that fence (`fenced_until`), and nothing
+under it is deleted before it.
+
+Its states (`fragment_core::feedback::State`): `sending`, `kept` (the
+operators see no other), and `deleting`. A send not kept within an hour
+of its latest try (`SENDING_TTL_MS`: a retry renews it), and one an
+operator deletes, are `deleting`; the registry's alarm (armed as each is
+begun, kept or deleted) then deletes each one's bytes (everything under
+its prefix, every try's) once past its fence, and only then its row; and,
+past a kept one's fence, its earlier tries' bytes. 16 of each a run; a
+run that fails (BLOBS not answering) leaves all of it and arms the next a
+minute on. A row and an alarm are the object's storage: both outlive a
+restart, or a deploy. A wipe's `pictures` step waits out the person's
+fences (going on, saying how long) before it deletes their bytes.
+
+`Feedback` (`fragment_proto::feedback`) is `{id, n, person, email, kind,
+message, page, userAgent, release, screenshots: [{mime, size}],
+createdAt, resolvedAt, resolvedBy}`.
 
 ## Operators: wiping a person
 
@@ -585,7 +683,7 @@ wipe runs next; `ran`, the steps this call ran, each `{step, done,
 deleted, note?, cleaning?}` (`note` says what a step skipped, waits for, or why it
 failed this time: the next call tries again; `cleaning`, the `cleanup` step's, below); `done`, wiped with nothing
 left. `found` is what the person and their agents hold now: `{signIns,
-keys, sessions, pictures, agents, fragments, memberships, computer,
+keys, sessions, pictures, feedback, agents, fragments, memberships, computer,
 ledger, lists}`, `fragments` (theirs) and `memberships` (theirs and their
 agents' in other people's fragments, `<fragment> (<role>, <identity>)`)
 each `{count, names, more}` (at most 50 names), `computer` `{computer,
@@ -2992,7 +3090,7 @@ of what a guest may do, what a seat gives, and who is signed in
 welcome and whose Use another account switches; the welcome offers the
 seat to any guest, one whose seat ended and
 who keeps their chats too; their settings are their Billing, their
-account, then Your data. Its
+account, Your data, then Help. Its
 settings hold the person's account (who is signed in, their latest
 sign-in's email, beside a POST to `/auth/logout` and one to
 `/auth/switch`, Use another account; their sign-ins when they have
@@ -3024,7 +3122,9 @@ coding agent), and Your data (Export, above: "Export everything", its
 state and progress while it builds, read again every 2 s while the page
 shows it, its size, until when it is kept and its Download once ready,
 which downloads on the click with the platform session, and a refusal's
-reason); its sidebar shows their agent and lists their chats, its
+reason), and Help (Report a problem and Send a message, each opening
+the shell's feedback dialog: Feedback, above; a chat's ⋯ offers Report a
+problem… too, naming that chat's page); its sidebar shows their agent and lists their chats, its
 desktop's dock their apps, each one's share sheet (`/share/<name>`) in a
 dialog (their own's "Share…" or "Invite…"; someone else's "People…",
 where they see who is in and may leave), and the dock's Add shows ways

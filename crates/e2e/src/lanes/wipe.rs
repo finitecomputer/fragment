@@ -1,7 +1,8 @@
 //! An operator's wipe of a person (docs/api.md, Operators), the whole round
 //! trip: a person, an agent and its computer (the stub
 //! locally, the deployment's own image hosted), a saved `/data`, an app, a
-//! picture, a membership in someone else's fragment, and a CLI key; the
+//! picture, feedback with a screenshot, a membership in someone else's
+//! fragment, and a CLI key; the
 //! dry run, which changes nothing; the refusals; the person made as p5's
 //! were (2026-10-08): their list and their agent's from before a list's
 //! table named the channels searched, so they refuse every change, and
@@ -132,6 +133,11 @@ pub fn wipe(s: &mut Suite, api: &Api) -> Result<()> {
     s.deploy(&app);
     let r = api.call(Call { method: "PUT", url: format!("{}/api/identities/me/picture", api.base), body: Some(PNG.to_vec()), keys: Some(&paul), ..Call::default() })?;
     s.ok("a picture", r.status == 200, &r);
+    const FORM: &[u8] = b"--wiped-form\r\nContent-Disposition: form-data; name=\"kind\"\r\n\r\nproblem\r\n--wiped-form\r\nContent-Disposition: form-data; name=\"message\"\r\n\r\nIt broke.\r\n--wiped-form\r\nContent-Disposition: form-data; name=\"screenshot\"\r\n\r\n";
+    let body = [FORM, PNG, b"\r\n--wiped-form--\r\n"].concat();
+    let r = api.call(Call { method: "POST", url: format!("{}/api/feedback", api.base), body: Some(body), content_type: Some("multipart/form-data; boundary=wiped-form"), keys: Some(&paul), ..Call::default() })?;
+    let feedback = r.body["id"].as_str().unwrap_or("").to_string();
+    s.ok("feedback, with a screenshot", r.status == 200 && r.body["screenshots"] == 1, &r);
     // a seat an operator comped them, in an org of their own (docs/billing.md)
     let org = if s.hosted() {
         None
@@ -160,7 +166,7 @@ pub fn wipe(s: &mut Suite, api: &Api) -> Result<()> {
     let owned = names(&f["fragments"]);
     let elsewhere = names(&f["memberships"]);
     s.ok(
-        "the dry run names the person, their agent, fragments, memberships elsewhere, keys, sessions, sign-in, picture, computer and ledger, and (locally) their org of one, which ends with them, nothing of it billed",
+        "the dry run names the person, their agent, fragments, memberships elsewhere, keys, sessions, sign-in, picture, feedback, computer and ledger, and (locally) their org of one, which ends with them, nothing of it billed",
         d["identity"] == paul_id.as_str()
             && org.as_ref().is_none_or(|o| f["orgs"].as_array().map(Vec::len) == Some(1) && f["orgs"][0]["org"] == o.as_str() && f["orgs"][0]["ends"] == true && f["orgs"][0]["cancels"] == false)
             && d["state"] == "live"
@@ -174,6 +180,7 @@ pub fn wipe(s: &mut Suite, api: &Api) -> Result<()> {
             && f["sessions"].as_u64().is_some_and(|n| n >= 1)
             && f["signIns"] == 1
             && f["pictures"] == 1
+            && f["feedback"] == 1
             && f["computer"]["computer"] == computer.as_str()
             && f["computer"]["saves"].as_u64().is_some_and(|n| n >= 1)
             && f["computer"]["backups"].as_u64().is_some_and(|n| n >= 1)
@@ -321,6 +328,7 @@ pub fn wipe(s: &mut Suite, api: &Api) -> Result<()> {
             && f["sessions"] == 0
             && f["signIns"] == 0
             && f["pictures"] == 0
+            && f["feedback"] == 0
             && f["lists"] == 0
             && f["ledger"] == false
             && f["agents"] == json!([])
@@ -331,6 +339,9 @@ pub fn wipe(s: &mut Suite, api: &Api) -> Result<()> {
     );
     let again = cli_wipe(s, api, &file, &[&paul_id, "--yes"]);
     s.ok("a wipe again finds nothing left", again.as_ref().is_ok_and(|v| v["report"]["done"] == true), format!("{again:?}"));
+    let shot = api.signed(&wiper, "GET", &format!("/api/admin/feedback/{feedback}/screenshots/0"), None)?;
+    let gone = api.signed(&wiper, "PATCH", &format!("/api/admin/feedback/{feedback}"), Some(&json!({ "resolved": true })))?;
+    s.ok("their feedback is gone from the operators' admin, its screenshot too (404)", shot.status == 404 && gone.status == 404, format!("{shot} / {gone}"));
     let r = dry_run(api, &wiper, &email)?;
     s.ok("their email names no one (404)", r.status == 404, &r);
     let cleaned: Vec<(bool, String)> = ours.iter().map(|n| s.ended_cleaned(api, n)).collect();

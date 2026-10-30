@@ -338,6 +338,17 @@ fn restart_soon(ctx: &JsValue) -> Result<bool, JsValue> {
     Ok(true)
 }
 
+/// A test hook's restart of the object whose state is `ctx`, as
+/// `restart_soon`'s, `RESTART_AFTER_MS` from now, whether or not this
+/// isolate restarted it before: a test sees what outlives an instance.
+pub(crate) fn abort_soon(ctx: &JsValue) -> Result<(), JsValue> {
+    let abort: Function = Reflect::get(ctx, &JsValue::from_str("abort"))?.dyn_into()?;
+    let set_timeout: Function = Reflect::get(&worker::js_sys::global(), &JsValue::from_str("setTimeout"))?.dyn_into()?;
+    let restart = abort.bind1(ctx, &JsValue::from_str("a test hook's restart"));
+    set_timeout.call2(&JsValue::UNDEFINED, &restart, &JsValue::from(RESTART_AFTER_MS))?;
+    Ok(())
+}
+
 /// What one call into an object came to: its answer, or its refusal of
 /// this release (which did nothing), and the release it runs.
 enum Sent {

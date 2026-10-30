@@ -10,6 +10,7 @@
 // everything in a frame is a fragment. Design: Skyler's handoff
 // (2026-10-02); what it did not draw is the older prototype's, in its look.
 import "./tooltips.js";
+import { createFeedback } from "./feedback.js";
 import { avatar } from "./agent-identity.js";
 import { colorOf } from "./agent-color.js";
 import { icon } from "./icons.js";
@@ -1140,6 +1141,7 @@ function openChatMenu(name, trigger) {
     ...profiles,
     ...screens,
     archiveItem(name),
+    { icon: "flag", text: "Report a problem…", onClick: () => openFeedback("problem") },
   ]);
 }
 // The identity of the person's own agent a direct chat is with (its row's
@@ -2344,7 +2346,7 @@ async function openSettings(push = true, failed = null) {
   // reads its export again while one builds
   if (state.guest) {
     returnSaid(back);
-    renderSettingsPage(page, [...billing, account, dataSection(), ...releaseLine(null)]);
+    renderSettingsPage(page, [...billing, account, dataSection(), helpSection(), ...releaseLine(null)]);
     return tell();
   }
   const standing = ledger?.standing?.standing;
@@ -2418,7 +2420,7 @@ async function openSettings(push = true, failed = null) {
   const skills = await skillsSection();
   if (lost()) return;
   returnSaid(back);
-  renderSettingsPage(page, [account, ...billing, computer, agents, skills, connections, simplexSection(), buildSection(), dataSection(), ...releaseLine(c)]);
+  renderSettingsPage(page, [account, ...billing, computer, agents, skills, connections, simplexSection(), buildSection(), helpSection(), dataSection(), ...releaseLine(c)]);
   renderAgentFaces();
   // a home read that answered while these were built shown now they are in
   paintHomes();
@@ -2600,6 +2602,11 @@ function renderAgentFaces() {
   renderNames();
 }
 
+// Feedback owns its UI and lifecycle in feedback.js.
+const { openFeedback, helpSection } = createFeedback({
+  $, el, icon, section, actionLine, heard,
+  beginWrite: () => { writing++; return () => { writing--; }; },
+});
 // ---- your data: an export of everything that is the person's (docs/api.md,
 // Export), built in the background, which they are mailed about once it is
 // ready, and which downloads from here (the platform session, on a click

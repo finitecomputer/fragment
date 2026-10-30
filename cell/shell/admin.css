@@ -20,3 +20,8 @@ dl { display: grid; grid-template-columns: max-content 1fr; gap: .2rem 1rem; }
 dt { opacity: .7; }
 code, .mono { font-family: ui-monospace, monospace; font-size: .9em; }
 .lapsed { color: #c33; }
+#feedback-filter label { display: inline-flex; gap: .4rem; align-items: center; }
+#feedback-rows td:nth-child(4) { max-width: 32rem; }
+#feedback-one .message { white-space: pre-wrap; overflow-wrap: anywhere; margin: 0 0 .75rem; }
+#feedback-one .shots { display: flex; flex-wrap: wrap; gap: .5rem; margin: 0 0 .75rem; }
+#feedback-one .shots img { display: block; max-width: 22rem; max-height: 14rem; border: 1px solid #8884; border-radius: .3rem; }
