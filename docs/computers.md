@@ -408,6 +408,25 @@ A changed input whose final image bytes remain the same may keep the same
 digest through the layer cache. Pins are always digests; tags only find
 them.
 
+The standalone CLI release uses the CLI portion of this input list plus
+`.github/workflows/release.yml`, which defines its binary builds. The
+preview and CLI share `xtask/src/inputs.rs`'s hashing. On a green production
+push, CI reuses a published stable release with this key recorded in its
+body (`<!-- fragment-cli-inputs:<key> -->`) and all four nonempty, uploaded
+tarballs, or builds and publishes one before deploying. The version is the
+next patch above the highest stable `v*` tag, with cli/Cargo.toml as its floor.
+The existing-tag refusal, artifact filter and binary version checks still
+apply. CI writes the input marker only after publishing, then verifies it
+and the assets again. An upload that silently omitted a tarball is repaired
+once, uploading only missing or incomplete assets, and fails the job if
+the four still do not verify. Deploy advertises the verified version as
+`x-fragment-cli`.
+A failed lookup or release does not block deploy; it omits the header. Rerun
+the release jobs (including `cli-version` to choose a fresh tag if one was
+already created); the next deploy advertises the completed release. No
+runtime GitHub lookup or availability store is needed. Reverting inputs
+reuses their earlier release rather than publishing identical inputs again.
+
 ### Production stays pinned
 
 Production's config (`production.jsonc` in the private repo

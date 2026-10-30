@@ -148,6 +148,9 @@ pub struct Config {
     /// object admits only its own (fragment_core::release): a Worker
     /// variable, so the Worker and every object of one deploy run one value.
     pub deploy_id: String,
+    /// A published CLI for this deployment's exact inputs, verified by CI.
+    /// Absent when its release failed or this deployment does not release.
+    pub cli_version: Option<String>,
     /// `FRAGMENT_DEPLOYED_AT`: when this release was deployed, whole
     /// seconds since 1970 (the deploy sets it; none where a fleet sets none,
     /// dev's default). Every call into a platform object carries it beside
@@ -366,6 +369,7 @@ impl Config {
             levers_scoped: test_secret.is_some() && levers_fleet == fragment_core::levers::Fleet::Branch,
             test_secret,
             deploy_id: deploy_id(env),
+            cli_version: var(env, "FRAGMENT_CLI_VERSION").filter(|v| fragment_core::release::cli_version(v).is_some()),
             deployed_at: deployed_at(env),
             book: configured_book(&providers, &models, var(env, "FRAGMENT_PRICE_BOOK_VERSION").map(|v| v.parse().unwrap_or_else(|_| panic!("FRAGMENT_PRICE_BOOK_VERSION is a whole number"))).unwrap_or(1)),
             providers,

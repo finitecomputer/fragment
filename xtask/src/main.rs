@@ -65,6 +65,9 @@
 //!                    and prepare it once if absent (--build); write its
 //!                    input key and digest for CI's preview deploy
 //!                    --dry-run prints its plan without credentials or calls
+//!   cli-release plan | record <tag>
+//!                    CI's CLI input lookup/version plan, or record and
+//!                    verify inputs after publishing all four tarballs
 //!   image push <image> --repository <name> --tag <tag> [--summary <file>]
 //!                    build a computer image (hermes) as a deploy builds it and
 //!                    push it to the registry of the account CLOUDFLARE_ACCOUNT_ID
@@ -98,6 +101,7 @@ use fragment_devstack as devstack;
 
 mod build;
 mod cloudflare;
+mod cli_release;
 mod deploy;
 mod dev_agent;
 mod dns;
@@ -105,6 +109,7 @@ mod eval_sinks;
 mod guards;
 mod html_sinks;
 mod image;
+mod inputs;
 mod js_syntax;
 mod prepare;
 #[cfg(test)]
@@ -562,6 +567,8 @@ fn skill_installs_release(skill: &str, workflow: &str, copies: &[(&str, String)]
     anyhow::ensure!(built == RELEASE_ASSETS, "the release builds {built:?}, not the assets the install fetches: {RELEASE_ASSETS:?}");
     let packed = r#"tar -czf "$RUNNER_TEMP/fragment-${{ matrix.asset }}.tar.gz" -C "target/${{ matrix.target }}/release" fragment"#;
     anyhow::ensure!(workflow.contains(packed), "each release asset is a tarball of `fragment` alone: {packed}");
+    // called from ci.yml, the release shares its run, and its artifacts
+    anyhow::ensure!(workflow.contains("pattern: fragment-*") && !workflow.contains("dist/*"), "the release downloads and attaches its own assets alone");
     Ok(())
 }
 
@@ -579,6 +586,7 @@ fn main() -> Result<()> {
         Some("teardown") => deploy::teardown(&args[1..]),
         Some("stripe") => deploy::stripe(&args[1..]),
         Some("image") => image::image(&args[1..]),
+        Some("cli-release") => cli_release::run(&args[1..]),
         _ => bail!("usage: cargo xtask build [--dev] | dev [--clean] | try <template> [name] | e2e [--build-only | --no-build] [--only | --except <section>[,...] | --shard <k>/<n>] [--rehearse] | e2e --hosted --config <file> --branch <name> [--dry-run | --sweep] | check | schema-lock | secret set <name> | gen <name> | list --config <file> | deploy --config <file> [--branch <name>] [--pinned-only] | image push <image> | copy <image> --from <reference> --repository <name> --tag <tag> [--summary <file>] | teardown --config <file> --branch <name>"),
     }
 }
@@ -623,6 +631,7 @@ mod tests {
         assert!(super::skill_installs_release(&skill, &workflow.replace("asset: Darwin-arm64", "asset: Darwin-aarch64"), &copies).is_err());
         assert!(super::skill_installs_release(&skill, &workflow, &[("README.md", read("README.md").replace("uname -m", "arch"))]).is_err());
         assert!(super::skill_installs_release(&skill.replacen("name: fragment", "title: fragment", 1), &workflow, &copies).is_err());
+        assert!(super::skill_installs_release(&skill, &workflow.replace("pattern: fragment-*", "pattern: '*'"), &copies).is_err());
     }
 
     #[test]
