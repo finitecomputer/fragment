@@ -115,9 +115,9 @@ pub const ATTACHMENTS_MAX: usize = 8;
 pub const ATTACHMENT_MAX_BYTES: u64 = 25 * 1024 * 1024;
 
 /// A prompt waits this long for its answer unless the runtime says
-/// otherwise. An hour: the person may be away from the chat. An open card
-/// holds the computer awake, so this is also how long one unanswered card
-/// keeps it awake (docs/durable-computers.md, P6 for now).
+/// otherwise. An hour: the person may be away from the chat. An unanswered
+/// card stays answerable across a restart for this long, subject to the
+/// recovery budgets below (docs/durable-computers.md, P6).
 pub const PROMPT_TTL_MS_DEFAULT: u64 = 60 * 60 * 1000;
 /// The note a turn after a cut one carries (note.rs), at most: its bytes
 /// (its first line says what it is and what to do, so a cut keeps that,
@@ -138,15 +138,21 @@ pub const NOTE_REPLIES_MAX: usize = 2;
 /// `/data`: note.rs, "forgotten") is told of the newest this many of its
 /// turns there that another life ran; the rest are counted.
 pub const NOTE_FORGOTTEN_MAX: usize = 4;
-/// The journal a note reads, at most: pages of this many records, back from
-/// the turn's claim on `work` (to the agent's turn before it) and back from
-/// the chat's tail (to that turn's start, for its replies), at most
-/// `NOTE_SCAN_RECORDS_MAX` records each. A turn before it further back than
-/// that is told nothing.
+/// One recovery lookup (P5 note or P6 card) has a shared budget: 24 calls,
+/// 8 MiB of response bodies, 2000 records and 8 million comparison units.
+/// At 100 records/page this covers 1000 work + 1000 chat records, with room
+/// for channel metadata and one cause lookup. Body reads are capped before
+/// allocation; scan work charges n*n + 16*n for each predicate. One turn is
+/// already limited to 200 steps and 64 final replies; this permits several
+/// turns' ordinary history without letting a busy chat cost unbounded work.
+/// Exhaustion yields visible history-unavailable, never a partial replay.
+pub const HISTORY_PAGES_MAX: usize = 24;
+pub const HISTORY_BYTES_MAX: usize = 8 * 1024 * 1024;
+pub const HISTORY_RECORDS_MAX: usize = 2000;
+pub const HISTORY_WORK_MAX: usize = 8_000_000;
 pub const NOTE_PAGE_RECORDS: u32 = 100;
 pub const NOTE_SCAN_RECORDS_MAX: usize = 1000;
-/// A note's reads are given this long in all: a turn waits for its note
-/// at most this, and past it is handed without one.
+/// Each complete lookup also has a wall-clock budget; a timeout is visible.
 pub const NOTE_READ_MS_MAX: u64 = 5_000;
 
 /// A runtime's own prompt lifetime is honored within these bounds.

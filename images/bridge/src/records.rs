@@ -608,6 +608,7 @@ pub fn turn_prompt(turn: &str, prompt: &str, text: &str, options: &[PromptOption
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Closed {
+    Unavailable,
     Answered,
     Expired,
     Stopped,
@@ -616,6 +617,7 @@ pub enum Closed {
 impl Closed {
     pub fn as_str(self) -> &'static str {
         match self {
+            Closed::Unavailable => "history_unavailable",
             Closed::Answered => "answered",
             Closed::Expired => "expired",
             Closed::Stopped => "stopped",

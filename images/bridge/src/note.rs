@@ -17,7 +17,8 @@
 //! records before this turn's own (its claim), passing over a refusal's,
 //! which never ran. At the turn after, the turn before is this one, so the
 //! note is said once. A turn before it with no end in the journal (its end
-//! never landed) is told nothing: only a recorded loss is a cut.
+//! never landed) is unavailable history, not an empty past; only a
+//! recorded loss is rendered as a known cut.
 
 use serde_json::Value;
 
@@ -61,6 +62,8 @@ pub struct Cut {
 /// it in the chat.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Before {
+    /// Relevant records exist but cannot establish a complete prior turn.
+    Unavailable,
     /// No turn of the agent's in the records read: read further back.
     Unread,
     /// Its turn before this one did not end as lost (or there was none
@@ -103,16 +106,19 @@ pub fn previous(work: &[Record], agent: &str, from_start: bool) -> Before {
             continue;
         }
         let turn = field(start, "turn");
-        let end = ends.iter().find(|(t, _)| *t == turn).map(|(_, e)| *e);
+        let end = ends.iter().position(|(t, _)| *t == turn).map(|i| ends.remove(i).1);
         match end {
             Some(e) if refused(e) => continue,
             Some(e) if e["outcome"] == "error" && field(e, "error") == LOST => {
-                return cut(&work[i..], agent, turn, start, r.at).map_or(Before::Kept, Before::Cut);
+                return cut(&work[i..], agent, turn, start, r.at).map_or(Before::Unavailable, Before::Cut);
             }
-            _ => return Before::Kept,
+            Some(e) if matches!(field(e, "outcome"), "idle" | "stopped" | "error") => return Before::Kept,
+            _ => return Before::Unavailable,
         }
     }
-    if from_start {
+    if from_start && !ends.is_empty() {
+        Before::Unavailable
+    } else if from_start {
         Before::Kept
     } else {
         Before::Unread
@@ -123,6 +129,11 @@ pub fn previous(work: &[Record], agent: &str, from_start: bool) -> Before {
 fn cut(from: &[Record], agent: &str, turn: &str, start: &Value, started_at: i64) -> Option<Cut> {
     let cause: Cause = serde_json::from_value(start["cause"].clone()).ok()?;
     let mine = |r: &&Record| r.principal == agent && r.body["turn"] == turn;
+    if from.iter().filter(mine).any(|r| {
+        let b = &r.body;
+        (b["kind"] == "turn.step" && (b["tool"].as_str().is_none() || b["args"].as_str().is_none() || b["ok"].as_bool().is_none()))
+            || (b["kind"] == "turn.prompt" && (b["text"].as_str().is_none() || b["prompt"].as_str().is_none()))
+    }) { return None }
     let steps: Vec<CutStep> = from
         .iter()
         .filter(mine)
@@ -256,7 +267,7 @@ pub fn forgotten(work: &[Record], chat: &[Record], agent: &str, turns: &[String]
         if cut {
             continue;
         }
-        let asked = chat.iter().find(|r| r.channel == records::CHAT && r.seq == cause.seq && cause.channel == records::CHAT).and_then(asked);
+        let asked = chat.iter().find(|r| r.channel == cause.channel && r.seq == cause.seq).and_then(asked);
         out.push(Forgot { turn: turn.clone(), asked, replies: replies(chat, agent, turn) });
     }
     assert!(out.len() <= turns.len(), "each forgotten turn is told once at most");
@@ -368,7 +379,7 @@ mod tests {
     }
 
     /// Goal: only a recorded loss is a cut. A turn that ended any other way,
-    /// one whose end never landed, or none at all, is told nothing; a
+    /// or no prior turn is told nothing. A missing end is unavailable. A
     /// refusal (it never ran) is passed over, so the turn after a cut one
     /// is told of it even with a refusal between; another agent's cut turn
     /// is not this agent's.
@@ -384,7 +395,7 @@ mod tests {
         let mut w = Work::default();
         w.start(ME, "t", 1);
         let n = w.start(ME, "n", 2);
-        assert_eq!(previous(w.before(n), ME, true), Before::Kept, "no end landed: no recorded loss");
+        assert_eq!(previous(w.before(n), ME, true), Before::Unavailable, "a missing end is incomplete history");
         assert_eq!(previous(&[], ME, true), Before::Kept, "the first turn");
         assert_eq!(previous(&[], ME, false), Before::Unread, "nothing read yet");
 
@@ -523,5 +534,19 @@ mod tests {
         let note = forgotten_text(&vec![long; limits::NOTE_FORGOTTEN_MAX], u32::MAX);
         assert!(note.len() <= limits::NOTE_MAX_BYTES && note.lines().next().unwrap().ends_with("before you do any of it again."), "{}", note.len());
         assert!(forgotten_text(&[Forgot { turn: "t".into(), asked: None, replies: vec![] }], 0).ends_with("You were asked: something"));
+    }
+}
+
+#[cfg(test)]
+mod unavailable_tests {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn corrupt_cut_context_and_an_orphan_end_are_not_an_empty_past() {
+        let r = |seq, body| Record {channel:records::WORK.into(),seq,at:1,principal:"npub1agent".into(),kind:"message".into(),body};
+        let start = r(1,json!({"kind":"turn.start","turn":"t","agent":"npub1agent"}));
+        let end = r(2,json!({"kind":"turn.end","turn":"t","outcome":"error","error":LOST}));
+        assert_eq!(previous(&[start,end.clone()],"npub1agent",true),Before::Unavailable);
+        assert_eq!(previous(&[end],"npub1agent",true),Before::Unavailable);
     }
 }

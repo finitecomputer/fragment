@@ -383,7 +383,11 @@ chosen answer (docs/bridge.md, "A card outlives its turn").
 Part `pc:<prompt>`. `outcome` is `answered` (with `option` and `by`, and
 `text` for an option answered in words: typed on the card, or the owner's
 message that answered it, its files' names when it had no words),
-`expired` (no answer by `expiresAt`), or `stopped`. An answered closure
+`expired` (no answer by `expiresAt`), `stopped`, or `history_unavailable`
+(required context is missing, corrupt, truncated, or exceeds the recovery
+budgets). The latter is terminal, shown as “History unavailable: ask again
+with the context”, with a warning notice on the original turn; no fresh
+turn starts from the answer. An answered closure
 also records `answerSeq`, the answer's seq on `chat`, allowing its retry
 to reconstruct the same fresh turn after a restart. Older closures without
 it stay final; they never authorize a fresh turn.

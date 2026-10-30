@@ -2800,7 +2800,7 @@ fn a_late_answer_is_a_fresh_claim_even_without_the_cache() {
             let handed = answered(&mut next, step, T0 + 1);
             ev(&mut next, Event::Asked {turn:started(&handed).unwrap().turn}, T0 + 1);
         }
-        let input = Input::CardRecord { agent:a.fragment.clone(), fragment:"talk--k3x9".into(), record:chat[1].clone(), view:Some(v.clone()), since:0, work:work.clone(), chat:chat.clone() };
+        let input = Input::CardRecord { agent:a.fragment.clone(), fragment:"talk--k3x9".into(), record:chat[1].clone(), view:Some(v.clone()), since:0, work:work.clone(), chat:chat.clone(), unavailable:None };
         let step = next.step(input.clone(), T0 + 1);
         let fresh = records::turn_id(&a.fragment, "talk--k3x9", "chat", 2);
         assert_ne!(fresh, old);

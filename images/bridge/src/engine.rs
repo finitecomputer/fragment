@@ -320,7 +320,9 @@ pub enum Input {
     /// history: its cursor passes it, and it starts nothing.
     Record { agent: String, fragment: String, record: Record, view: Option<ChatView>, since: i64 },
     /// A card response with authoritative journal history, read before advancing its cursor.
-    CardRecord { agent: String, fragment: String, record: Record, view: Option<ChatView>, since: i64, work: Vec<Record>, chat: Vec<Record> },
+    CardRecord { agent: String, fragment: String, record: Record, view: Option<ChatView>, since: i64, work: Vec<Record>, chat: Vec<Record>, unavailable: Option<crate::history::Unavailable> },
+    /// An optional P5 recovery note could not be reconstructed.
+    HistoryUnavailable { turn: String },
     Runtime(Event),
     /// The platform's answer to a turn's claim.
     Claimed { turn: String, answer: ClaimAnswer },
@@ -572,7 +574,8 @@ impl Engine {
         match input {
             Input::Agents(agents) => self.set_agents(agents),
             Input::Record { agent, fragment, record, view, since } => self.record(&agent, &fragment, record, view, since),
-            Input::CardRecord { agent, fragment, record, view, since, work, chat } => self.card_record(&agent, &fragment, record, view, since, &work, &chat),
+            Input::CardRecord { agent, fragment, record, view, since, work, chat, unavailable } => self.card_record(&agent, &fragment, record, view, since, &work, &chat, unavailable),
+            Input::HistoryUnavailable { turn } => self.history_unavailable(&turn),
             Input::Runtime(event) => self.runtime(event),
             Input::Claimed { turn, answer } => self.claimed(&turn, answer),
             Input::Posted { turn, id } => self.posted(&turn, &id),
@@ -697,7 +700,7 @@ impl Engine {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn card_record(&mut self, agent: &str, fragment: &str, record: Record, view: Option<ChatView>, since: i64, work: &[Record], chat: &[Record]) {
+    fn card_record(&mut self, agent: &str, fragment: &str, record: Record, view: Option<ChatView>, since: i64, work: &[Record], chat: &[Record], unavailable: Option<crate::history::Unavailable>) {
         let Some(a) = self.agent(agent).cloned() else { return };
         if record.seq <= self.state.cursors.get(&cursor_key(agent, fragment, &record.channel)).copied().unwrap_or(0) {
             return;
@@ -710,8 +713,24 @@ impl Engine {
             self.record(agent, fragment, record, view, since);
             return;
         }
-        let resolved = (record.at >= since).then(|| crate::cards::resolve(&a, &record, work, chat, self.now)).flatten();
-        if let Some((body, closed)) = resolved {
+        let resolved = if record.at < since { Ok(None) } else {
+            match unavailable { Some(why) => Err(why), None => crate::cards::resolve(&a, &record, work, chat, self.now) }
+        };
+        if let Err(why) = resolved {
+            // Only an authenticated owner's answer can produce a warning.
+            if record.principal == a.owner {
+                if let Said::PromptResponse { prompt, card, .. } = records::said(&record.body) {
+                    if card.as_ref().is_none_or(|c| c.agent == a.identity) {
+                        let turn = card.map(|c| c.turn).unwrap_or_else(|| records::turn_id(agent, fragment, records::CHAT, record.seq));
+                        let closed = records::turn_prompt_closed(&turn, &prompt, Closed::Unavailable, None);
+                        self.post(agent, fragment, records::WORK, records::work_id(&turn, &format!("pc:{prompt}")), closed, Vec::new());
+                        self.post(agent, fragment, records::WORK, records::work_id(&turn, &format!("history:{prompt}")), records::turn_notice(&turn, NoticeCategory::Warning, crate::history::VISIBLE), Vec::new());
+                        crate::ev!("card.history_unavailable", { "turn": turn, "why": why.message() });
+                    }
+                }
+            }
+        }
+        if let Ok(Some((body, closed))) = resolved {
             let turn = closed["turn"].as_str().expect("resolved turn");
             let prompt = closed["prompt"].as_str().expect("resolved prompt");
             self.post(agent, fragment, records::WORK, records::work_id(turn, &format!("pc:{prompt}")), closed, Vec::new());
@@ -728,6 +747,13 @@ impl Engine {
         }
         // Invalid, expired or already answered: still pass the cursor.
         self.record(agent, fragment, record, view, since);
+    }
+
+    fn history_unavailable(&mut self, id: &str) {
+        if let Some(t) = self.state.turns.get(id) {
+            let (agent, fragment) = (t.agent.clone(), t.fragment.clone());
+            self.post(&agent, &fragment, records::WORK, records::work_id(id, "history"), records::turn_notice(id, NoticeCategory::Warning, crate::history::VISIBLE), Vec::new());
+        }
     }
 
     fn said(&mut self, agent: &Agent, fragment: &str, record: &Record) {

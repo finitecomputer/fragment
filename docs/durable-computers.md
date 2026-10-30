@@ -36,7 +36,10 @@ file is the newer word, and decision 18 points here.
   turn with the original request, question, chosen answer and recorded
   context. The journal supplies them even without the bridge cache;
   the answer's chat record supplies the fresh turn's deduplicated claim.
-  No old turn resumes or replays. See docs/bridge.md, "A card outlives its
+  No old turn resumes or replays. Recovery reads have page, byte, record,
+  comparison-work and time budgets; incomplete or over-budget context
+  closes a late card visibly as history unavailable and starts nothing.
+  See docs/bridge.md, "A card outlives its
   turn", for first-answer, expiry and stop rules. The real-image proof is
   `an_approval_answered_after_a_restart` in images/bridge/tests/docker.rs.
 - **One life per turn (P1, #137).** A turn runs only in the life of the

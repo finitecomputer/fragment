@@ -1937,3 +1937,56 @@ async fn commands_and_quotes() {
     });
     bridge.stop().await;
 }
+
+/// Missing records and a card outside the recovery window produce visible
+/// unavailability after a restart, never a guessed fresh action. Replays
+/// and a second restart keep that closure final.
+#[tokio::test]
+async fn a_late_card_with_unavailable_history_is_visible_and_runs_nothing() {
+    for failure in ["gap", "budget", "legacy"] {
+        let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+        let chat = fake.chat("talk", &["juniper"]);
+        let dir = support::dir(&format!("card-history-{failure}"));
+        let cfg = support::config(&fake.url(), &dir, support::settings());
+        let bridge = support::start_killable(cfg.clone(), support::script());
+        following(&fake, 2).await;
+        let said = fake.say(&chat, &person("paul"), json!({"text":"do something risky"}));
+        let turn = turn_of("juniper",&chat,seq(&said));
+        fake.until(WAIT,"the original card",|w| !w.bodies(&chat,"work","turn.prompt").is_empty()).await;
+        let card = fake.with(|w| w.bodies(&chat,"work","turn.prompt")[0].clone());
+        bridge.kill().await;
+        fake.until(WAIT,"the original life ended",|w| w.live_sockets()==0).await;
+        fake.with(|w| {
+            if failure == "budget" {
+                for _ in 0..1100 { w.append(&chat,"work","npub1juniper",json!({"kind":"commands","items":[]})); }
+            } else {
+                let records = &mut w.fragments.get_mut(&chat).unwrap().channels.get_mut("work").unwrap().records;
+                let start = records.iter_mut().find(|r| r["body"]["kind"]=="turn.start").unwrap();
+                if failure == "gap" { start["seq"] = json!(99999) } else { start["body"].as_object_mut().unwrap().remove("cause"); }
+            }
+        });
+        let response = json!({"kind":"prompt_response","agent":"npub1juniper","turn":turn,"prompt":card["prompt"],"option":"once"});
+        let answer = fake.say(&chat,&person("paul"),response.clone());
+        let fresh = turn_of("juniper",&chat,seq(&answer));
+        let before = fake.with(|w| w.requests.len());
+        let bridge = support::start_killable(cfg.clone(), support::script());
+        fake.until(WAIT,"visible history unavailable",|w| w.bodies(&chat,"work","turn.prompt.closed").iter().any(|c| c["outcome"]=="history_unavailable") && w.bodies(&chat,"work","turn.notice").iter().any(|n| n["text"].as_str().is_some_and(|t| t.starts_with("History unavailable:")))).await;
+        if failure == "budget" {
+            let reads = fake.with(|w| w.requests[before..].iter().filter(|(path,query,_,_)| path.contains("/channels/work") && query.contains("limit=100")).count());
+            assert!(reads <= 10,"bounded work scan: {reads}");
+        }
+        bridge.kill().await;
+        fake.until(WAIT,"the second life ended",|w| w.live_sockets()==0).await;
+        fake.say(&chat,&person("paul"),response);
+        let bridge = support::start_killable(cfg,support::script());
+        following(&fake,2).await;
+        let next = said_and_ended(&fake,&chat,"good morning").await;
+        fake.with(|w| {
+            assert!(!w.bodies(&chat,"work","turn.start").iter().any(|s| s["turn"]==fresh),"no fresh action from incomplete context");
+            assert!(!replies(w,&chat).iter().any(|r| r["turn"]==fresh));
+            assert_eq!(w.bodies(&chat,"work","turn.prompt.closed").iter().filter(|c| c["prompt"]==card["prompt"]).count(),1,"one terminal card outcome after replay/restart");
+            assert!(ends_of(w,&chat,&next).len()==1);
+        });
+        bridge.stop().await;
+    }
+}

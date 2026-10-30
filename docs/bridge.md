@@ -86,7 +86,7 @@ Bodies are JSON. `api.rs` has one method for each.
 | `GET /f/{f}/__people?id=…` | | `{profiles: {id: {kind, email?, name?, title?}}}`: what to call a writer: a person by their email (which its agent, a member, is shown), another agent by its name (`title`, its agent fragment's), else its label (`name`), read again with the chat's members (30 s), so a rename reaches it; none is "someone" |
 | `GET /api/f/{f}/subscriptions` | | `{subscriptions: [{id, principal, channel, wake}]}` |
 | `POST /api/f/{f}/subscriptions` | `{channel, wake: true}` | `{id, channel, wake}`; only when the list has none |
-| `GET /api/f/{f}/channels/{c}?after=&limit=1000` | | `{records: [{channel, seq, at, principal, kind, body}], next}`: the catch-up, at most 20 pages; a turn's note, read back from its claim on `work` (and from `chat`'s tail) in pages of 100, at most 1000 records each; and the message a turn's message quotes (`reply_to`: `after=<seq − 1>&limit=1`, within 5 s or none) |
+| `GET /api/f/{f}/channels/{c}?after=&limit=1000` | | `{records: [{channel, seq, at, principal, kind, body}], next}`: the catch-up, at most 20 pages; P5 notes and P6 cards, read back in pages of 100 under the shared recovery budgets ("A card outlives its turn"); and the message a turn's message quotes (`reply_to`: `after=<seq − 1>&limit=1`, within 5 s or none) |
 | `GET /f/{f}/__live`, WebSocket | `{type: "subscribe", channel, after}`, `{type: "ping"}` | `hello`, `record`, `subscribed {next, more}`; 4003/4004 end the follow |
 | `POST /api/f/{f}/channels/{chat\|work}` | `{id, body}` | `{record, replayed}` (a claim's `record.seq` is where the turn's note is read back from); retried 10 times with jitter on a transport error, 429 or 5xx. A turn's claim (its `turn.start`) is answered back to the engine: posted or replayed, this life runs it; 409, another life claimed it; 403/404, the agent may not post there (it left the chat, or its owner holds it below editor), and the turn is dropped; anything else, no answer. Any other 409 is another life's post of the id, and a 403/404 is no longer the agent's to post in: dropped and logged |
 | `PUT /api/f/{f}/channels/chat/draft` | `{turn, text \| null}` | at most 4 a second a turn; a 429 is ignored |
@@ -376,14 +376,37 @@ turn. Hermes' failed-turn boundary still closes the cut session at boot.
 
 The driver reads the agent's signed cards, starts, steps and closures from
 `work`, and the original request and answers from `chat`, before advancing
-the answer's cursor. It pages back to the card's start and request, rather
-than limiting an answer to the tail used for an optional P5 note. A failed
-read retries without consuming the answer. Only the owner may answer, only
-an offered option is valid, and the earliest valid response wins. The
-closure records `answerSeq`; a retry of that response reconstructs the
-same fresh turn, whose ordinary `turn.start` claim prevents a second run
-even after loss or rollback of the cache. A stopped card stays stopped.
-Expired cards are closed when recovered or read for a late response.
+the answer's cursor. Only the owner may answer, only an offered option is
+valid, and the earliest valid response wins. The closure records
+`answerSeq`; a retry reconstructs the same fresh turn, whose ordinary
+`turn.start` claim prevents a second run even after loss or rollback of the
+cache. A stopped card stays stopped. Expired cards are closed when
+recovered or read for a late response.
+
+Every P6 lookup and each P5 cut/forgotten-note lookup has explicit shared
+budgets (`limits.rs`, `history.rs`): 24 requests, 8 MiB of response bodies,
+2000 records, 8 million comparison units, and 5 seconds. Records are paged
+100 at a time, with at most 1000 per channel. Metadata reserves its HTTP
+body cap (2 MiB per call); record bodies are limited by the remaining byte
+budget before allocation. Each predicate is charged pessimistically for
+`n*n + 16*n` comparisons, including validation and rendering. These are
+ceilings, not a promise that all can be exhausted at once. A normal turn
+has at most 200 steps and 64 final replies; a busy chat may exceed a
+lookup's budget even while its card is unexpired. The lookup stops there.
+
+A page must cover its captured sequence window contiguously. A gap,
+truncated page, corrupt or missing required context (including an older
+card without its original request), timeout, or exhausted budget closes a
+late card as `history_unavailable`, adds a visible warning, and starts no
+turn. It does not guess that there is no history or execute a truncated
+request. A repeated answer/restart keeps the terminal outcome. P5 uses a
+visible `turn.notice` warning and tells the next fresh turn history is
+unavailable and to ask for context before repeating earlier actions.
+Recovery's in-memory pass remains bounded by the 4 MiB state file and 512
+held turns. Ordinary forward catch-up keeps its existing 20 pages of 1000
+records, each under the 2 MiB HTTP cap; it then follows from its cursor.
+An optional quote is a single capped HTTP lookup with a 5-second timeout.
+No journal recovery scan uses an unbounded history window.
 
 The image still sets Hermes' `agent.clarify_timeout` and `approvals.timeout`
 to the card's lifetime (`BRIDGE_PROMPT_TTL_MS`, an hour by default), so a
@@ -415,9 +438,9 @@ parts close it:
   `lost when the computer restarted`, its cause and its replies (`chat`,
   back from its tail to that turn's cause or start). So it is the same in
   any life and after any rollback of `/data`, and said once: at the turn
-  after, the turn before is this one. A journal that does not answer
-  within 5 s, or an agent's turn before further back than 1000 records,
-  gives no note: a turn is never held back longer for one. Relay hands it as the inbound's
+  after, the turn before is this one. An incomplete or over-budget journal
+  produces the visible history-unavailable warning described above, never
+  an empty past. Relay hands the note or warning as the inbound's
   read-only `context` (below); the scripted agent echoes it after its
   reply (`(told: …)`).
 - **The cut turn closed in Hermes' session (our image).** Before the

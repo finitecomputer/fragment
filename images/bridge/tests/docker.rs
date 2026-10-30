@@ -2832,6 +2832,10 @@ async fn a_stop_lets_its_clarify_go() {
     fake.say(&chat, &person("paul"), json!({ "kind": "stop", "turn": turn }));
     // well inside the card's hour
     within(&fake, &chat, &c, 60_000, "the stopped turn's end", |w| !of(w, &turn, "turn.end").is_empty()).await;
+    let card = fake.with(|w| of(w, &turn, "turn.prompt")[0].clone());
+    c.restart();
+    // A stopped card cannot lend its answer to a fresh turn after restart.
+    fake.say(&chat, &person("paul"), json!({ "kind":"prompt_response", "agent":"npub1juniper", "turn":turn, "prompt":card["prompt"], "option":card["options"][0]["id"] }));
     let next = turn_of(fake.say(&chat, &person("paul"), json!({ "text": "good morning" })));
     within(&fake, &chat, &c, 120_000, "the next message's end", |w| !of(w, &next, "turn.end").is_empty()).await;
     fake.with(|w| {
@@ -2998,6 +3002,27 @@ async fn an_approval_answered_after_a_restart() {
     let calls = x.model.calls.lock().unwrap();
     let (asked, _) = asked_with(&calls, "A late answer to your earlier question.").expect("fresh model request");
     for expected in ["Original request:", "Publish the approvals proof?", "Chosen answer: Publish", "Cut-turn steps:"] { assert!(asked.contains(expected), "{asked}") }
+}
+
+/// A real Hermes card whose context no longer fits the recovery window
+/// closes visibly unavailable after restart. No model turn or tool effect
+/// is started from that late answer.
+#[tokio::test]
+#[ignore = "needs Docker"]
+async fn a_late_approval_over_budget_is_visibly_unavailable() {
+    let (fake, _model, chat, c) = hermes_running().await;
+    let say = fake.say(&chat, &person("paul"), json!({"text":"clarify: Publish the approvals proof? | Publish | Keep private"}));
+    let old = fragment_bridge::records::turn_id("juniper--k3x9", &chat, "chat", say["seq"].as_u64().unwrap());
+    within(&fake,&chat,&c,120_000,"the real card",|w| w.bodies(&chat,"work","turn.prompt").iter().any(|p| p["turn"]==old)).await;
+    let card = fake.with(|w| w.bodies(&chat,"work","turn.prompt").into_iter().find(|p| p["turn"]==old).unwrap());
+    fake.with(|w| { for _ in 0..1100 { w.append(&chat,"work","npub1juniper",json!({"kind":"commands","items":[]})); } });
+    c.restart();
+    let answer = fake.say(&chat,&person("paul"),json!({"kind":"prompt_response","agent":"npub1juniper","turn":old,"prompt":card["prompt"],"option":card["options"][0]["id"]}));
+    let fresh = fragment_bridge::records::turn_id("juniper--k3x9", &chat, "chat", answer["seq"].as_u64().unwrap());
+    within(&fake,&chat,&c,120_000,"visible history unavailable",|w| w.bodies(&chat,"work","turn.prompt.closed").iter().any(|p| p["turn"]==old && p["outcome"]=="history_unavailable") && w.bodies(&chat,"work","turn.notice").iter().any(|p| p["turn"]==old && p["text"].as_str().is_some_and(|s| s.starts_with("History unavailable:")))).await;
+    assert!(!fake.with(|w| w.bodies(&chat,"work","turn.start").iter().any(|s| s["turn"]==fresh)),"no fresh action from partial history");
+    assert!(!c.exec(&["test","-f","/data/work/juniper--k3x9/approval-effects"]),"no tool effect");
+    within(&fake,&chat,&c,10_000,"unavailability leaves no running hold",|w| w.keepalive_open==0).await;
 }
 
 /// Goal: offered operator placeholders select Hermes' real backends;
