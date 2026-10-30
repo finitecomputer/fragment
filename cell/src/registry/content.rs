@@ -182,20 +182,30 @@ impl Tx {
     }
 
     /// An entry of `org`'s governance log.
-    fn govern(&self, org: &str, request: &str, actor: &str, action: &str, subject: Option<&str>, detail: Value, now: i64) -> CellResult<()> {
+    fn govern(&self, org: &str, e: Logged<'_>, now: i64) -> CellResult<()> {
         self.exec(
             "INSERT INTO org_governance (org, request, at, actor, action, subject, detail) VALUES (?, ?, ?, ?, ?, ?, ?)",
             vec![
                 org.into(),
-                request.into(),
+                e.request.into(),
                 SqlStorageValue::Integer(now),
-                actor.into(),
-                action.into(),
-                subject.map_or(SqlStorageValue::Null, |s| s.into()),
-                detail.to_string().into(),
+                e.actor.into(),
+                e.action.into(),
+                e.subject.map_or(SqlStorageValue::Null, |s| s.into()),
+                e.detail.to_string().into(),
             ],
         )
     }
+}
+
+/// A governance log entry to write: under which request, who did it, what,
+/// to whom, and its detail (ids, never an email).
+struct Logged<'a> {
+    request: &'a str,
+    actor: &'a str,
+    action: &'a str,
+    subject: Option<&'a str>,
+    detail: Value,
 }
 
 #[derive(Deserialize)]
@@ -353,7 +363,7 @@ impl RegistryCell {
                         id
                     }
                 };
-                tx.govern(&org, &request, &actor, "admin-offered", Some(&id), json!({ "offer": id, "grounds": grounds.as_str() }), now)?;
+                tx.govern(&org, Logged { request: &request, actor: &actor, action: "admin-offered", subject: Some(&id), detail: json!({ "offer": id, "grounds": grounds.as_str() }) }, now)?;
                 if grounds == Grounds::Operator {
                     // the operators' log too, in the same change
                     tx.exec(
@@ -403,7 +413,7 @@ impl RegistryCell {
                     vec![b.answer.as_str().into(), person.as_str().into(), SqlStorageValue::Integer(now), o.id.as_str().into()],
                 )?;
                 let action = format!("admin-{}", b.answer.as_str());
-                tx.govern(&org, &format!("answer:{}", o.id), &person, &action, Some(&person), json!({ "offer": o.id }), now)?;
+                tx.govern(&org, Logged { request: &format!("answer:{}", o.id), actor: &person, action: &action, subject: Some(&person), detail: json!({ "offer": o.id }) }, now)?;
                 Ok(o.id)
             }
         })?;
@@ -432,7 +442,7 @@ impl RegistryCell {
                     "UPDATE org_content_offers SET answer = 'withdrawn', answered_by = ?, answered_at = ? WHERE id = ? AND answer IS NULL",
                     vec![person.as_str().into(), SqlStorageValue::Integer(now), o.id.as_str().into()],
                 )?;
-                tx.govern(&org, &format!("withdraw:{}", o.id), &person, "admin-offer-withdrawn", Some(&o.id), json!({ "offer": o.id }), now)
+                tx.govern(&org, Logged { request: &format!("withdraw:{}", o.id), actor: &person, action: "admin-offer-withdrawn", subject: Some(&o.id), detail: json!({ "offer": o.id }) }, now)
             }
         })?;
         let row = self.row::<OfferRow>(&format!("SELECT {OFFER_COLUMNS} FROM org_content_offers WHERE id = ?"), vec![b.offer.as_str().into()])?.ok_or_else(|| CellError::host("an offer withdrawn is not there"))?;
@@ -475,7 +485,7 @@ impl RegistryCell {
                 tx.exec("UPDATE org_content SET admin = 0 WHERE org = ? AND person = ?", vec![org.as_str().into(), person.as_str().into()])?;
                 tx.retire_offers(&org, &person, &actor, now)?;
                 let request = format!("step-down:{}", hex::encode(js::random_bytes::<8>()));
-                tx.govern(&org, &request, &actor, "admin-stepped-down", Some(&person), json!({}), now)
+                tx.govern(&org, Logged { request: &request, actor: &actor, action: "admin-stepped-down", subject: Some(&person), detail: json!({}) }, now)
             }
         })?;
         self.person_view(&org.id, &b.person)
@@ -556,7 +566,7 @@ impl RegistryCell {
         for r in self.rows::<Row>("SELECT org FROM org_content WHERE person = ?", vec![person.into()])? {
             tx.exec("UPDATE org_content SET admin = 0 WHERE org = ? AND person = ?", vec![r.org.as_str().into(), person.into()])?;
             tx.retire_offers(&r.org, person, operator, now)?;
-            tx.govern(&r.org, &format!("wipe:{person}"), operator, "wiped", Some(person), json!({}), now)?;
+            tx.govern(&r.org, Logged { request: &format!("wipe:{person}"), actor: operator, action: "wiped", subject: Some(person), detail: json!({}) }, now)?;
         }
         Ok(())
     }
