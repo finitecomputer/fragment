@@ -238,8 +238,10 @@ runtime as any turn does.
   a restart cut, or another life ran, is answered `error` "lost when the
   computer restarted", never run again for a better one; one its agent
   may not run where it was asked (its claim refused, or it left the chat),
-  `error` saying so; one an agent asked that asks back in words ends at
-  once, its question its answer (an agent's words never answer it).
+  `error` saying so. One that asks back in words is told at once, in
+  words, that no answer is coming (its asker is an agent, whose words
+  never answer it), and goes on to answer as best it can; a plain
+  hand-off that asks back waits as any turn does.
 - A question refused as it comes (past the hops, where any other
   hand-off is let go; past the chat's budget; its queue full) is a turn
   that never runs, and is answered `refused`: a turn of the asking

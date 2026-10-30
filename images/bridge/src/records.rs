@@ -747,6 +747,14 @@ pub fn answer_text(by: &str, chat: &str, asked: &str, said: &str, files: u32, ou
     text
 }
 
+/// What a refused question's answer tells its asking agent, the reason
+/// first (its turn's end, cut to `ERROR_MAX_CHARS`, says it whole): the
+/// agent was never asked, why, and which question.
+pub fn refused_text(by: &str, chat: &str, asked: &str, why: &str) -> String {
+    let flat = |s: &str| s.chars().map(|c| if c.is_control() { ' ' } else { c }).collect::<String>();
+    format!("{} wasn't asked: {why}. (Your question in {chat}: \"{}\")", flat(by), cut_bytes(&flat(asked.trim()), limits::ANSWER_ASKED_MAX_BYTES))
+}
+
 /// The commands an agent's runtime takes from its owner (its menu,
 /// `runtime::MenuItem`), as the chat's page offers them: each one's name,
 /// what it does, and what its argument is. Posted by the agent on a chat's
