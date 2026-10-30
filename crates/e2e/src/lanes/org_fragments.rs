@@ -41,7 +41,7 @@ pub fn org_fragments(s: &mut Suite, api: &Api) -> Result<()> {
     let took = api.signed(&ada, "POST", &format!("{root}/content-admin-offers/{}/accept", offer.body["id"].as_str().unwrap_or("")), Some(&json!({})))?;
     let op = api.identity(&s.operator)?;
     let grant = api.signed(&s.operator, "POST", &format!("/api/ledger/{ledger}/grant"), Some(&json!({ "id": "fund", "micros": 20_000_000, "by": op, "why": "an org's fragments" })))?;
-    let budget = api.signed(&ada, "PUT", &format!("{root}/budget"), Some(&json!({ "id": "b1", "micros": 10_000_000 })))?;
+    let budget = api.signed(&s.operator, "POST", &format!("/api/ledger/{ledger}/budget"), Some(&json!({ "id": "b1", "micros": 10_000_000 })))?;
     anyhow::ensure!(took.status == 200 && grant.status == 200 && budget.status == 200, "the org's admin, credit and budget: {took}; {grant}; {budget}");
     let org_ledger = |api: &Api| api.signed(&ada, "GET", &format!("{root}/ledger"), None).map(|r| r.body).unwrap_or(Value::Null);
 
@@ -154,7 +154,7 @@ pub fn org_fragments(s: &mut Suite, api: &Api) -> Result<()> {
     );
 
     // org_admin_cannot_bypass_cap: its budget stops its admin's AI steps too
-    let tight = api.signed(&ada, "PUT", &format!("{root}/budget"), Some(&json!({ "id": "b2", "micros": 1 })))?;
+    let tight = api.signed(&s.operator, "POST", &format!("/api/ledger/{ledger}/budget"), Some(&json!({ "id": "b2", "micros": 1 })))?;
     let _ = api.unsigned("POST", "/api/test/ledger", Some(&json!({ "identity": ledger, "op": "forget-gate" })));
     let r = api.op(&ada, &name, "summarize", "s2", json!({}))?;
     let run = settle(api, &ada, &name, started(&r), &["succeeded", "held"], WAIT);
