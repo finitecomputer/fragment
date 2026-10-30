@@ -372,6 +372,10 @@ pub(crate) enum MetaKey {
     /// The link ticket made last, until redeemed or past its time
     /// (`<door> <nonce> <exp>`).
     DoorTicket,
+    /// A connector fragment's binding as one of its owner's agent's doors
+    /// (`<door> <agent fragment>`), set and cleared by its owner in person
+    /// (doors.rs; fragment_core::door::Hosted).
+    DoorActor,
     /// The next time a page may pre-wake the computers its channels wake.
     PrewakeAt,
     /// Test fleets only: how many more paid AI steps fail just after their
@@ -446,6 +450,7 @@ impl MetaKey {
             MetaKey::AgentIdentity => "agent_identity",
             MetaKey::Door => "door",
             MetaKey::DoorTicket => "door_ticket",
+            MetaKey::DoorActor => "door_actor",
             MetaKey::PrewakeAt => "prewake_at",
             MetaKey::TestFailAfterPaid => "test_fail_after_paid",
             MetaKey::TestFailMeterAcks => "test_fail_meter_acks",
@@ -992,6 +997,11 @@ impl FragmentCell {
                 self.put_secret(&caller, key, bytes).await
             }
             (Method::Get, ["api", "secrets"]) => self.list_secrets(&caller),
+            (Method::Get, ["api", "door"]) => json_response(&self.door_binding(&caller)?),
+            (Method::Post, ["api", "door"]) => {
+                let body: Value = body_json(&mut req).await?;
+                json_response(&self.bind_door(&caller, &body).await?)
+            }
             (Method::Delete, ["api", "secrets", key]) => self.delete_secret(&caller, key),
             (Method::Get, ["api", "storage-token"]) => self.storage_token(&caller).await,
             (Method::Post, ["api", "refresh"]) => self.refresh(&caller).await,

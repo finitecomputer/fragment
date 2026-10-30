@@ -56,3 +56,5 @@ These are fragments or computers, or components any fragment may use:
   page may link (`__fragment.css`).
 
 Which connectors may be linked, and the exact TCP targets a computer's relay carries for them, are the deployment's policy (`connectors`; docs/computers.md, "Connector policy"), never an image's declaration. Relay leases and the computer's pooled quotas stay the platform's.
+
+A hosted door is the one case where a fragment's app may publish a record that speaks for a person (`relayed`): only a fragment its owner bound as their agent's door, only while it runs the blessed template named for that door, only `relayed` exactly `{via, for, agent}` (cell/src/doors.rs). Every other app publishes none.

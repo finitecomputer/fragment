@@ -21,6 +21,13 @@
 //!   signed, signed lately (`SKEW_MS`); an app publishes none
 //!   (`effects::check_record`).
 //!
+//! - **A hosted door** is a connector fragment its owner bound as one of
+//!   their agent's doors, running the platform's blessed template named
+//!   for the door (`telegram`): it carries their messages in its own
+//!   channels, `relayed` exactly `Hosted::relayed`, unsigned, since the
+//!   platform knows which fragment publishes (`effects::check_record`).
+//!   Its binding is the connector fragment's, set by its owner in person.
+//!
 //! The digests are tagged (`fragment door …`), so no signature made for
 //! one is another's, nor a NIP-98 event's. The bridge computes the same
 //! ones (images/bridge/src/simplex/door.rs); the vectors in the tests
@@ -33,6 +40,31 @@ use sha2::{Digest, Sha256};
 
 /// The door SimpleX is (a relayed record's `via`).
 pub const SIMPLEX: &str = "simplex";
+
+/// A connector fragment bound as `door` of its owner's `agent`, while its
+/// code is still the blessed template of that name and the deployment
+/// allows the door: what it may say it relays.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Hosted {
+    pub door: String,
+    /// The agent fragment.
+    pub agent: String,
+    /// The owner's identity, as a relayed record's `for` names them.
+    pub owner: String,
+}
+
+impl Hosted {
+    /// The one `relayed` its records may carry.
+    pub fn relayed(&self) -> Value {
+        serde_json::json!({ "via": self.door, "for": self.owner, "agent": self.agent })
+    }
+}
+
+/// The blessed template a fragment's installed code is (`code.loader_id`,
+/// `blessed:<template>@<release>`), if it is one.
+pub fn blessed_template(loader_id: &str) -> Option<&str> {
+    loader_id.strip_prefix("blessed:")?.split_once('@').map(|(t, _)| t)
+}
 
 /// A ticket holds this long after it is made: its owner's page hands it
 /// to the bridge at once.
