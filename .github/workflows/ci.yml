@@ -620,8 +620,10 @@ jobs:
   # from git as content ids (a hash of what the CLI is built from, never of
   # a commit), and names the version, the next patch above every release's
   # tag (or cli/Cargo.toml's, when that is higher). release.yml, called,
-  # builds the binaries with that version in and publishes them as the
-  # latest. Both run after the deploy and change nothing of it: a plan or a
+  # builds the binaries with that version and that id in and publishes
+  # them as the latest. The deploy names the same id on every answer of
+  # production's host (`FRAGMENT_CLI_ID`: xtask/src/deploy.rs), so a CLI
+  # of other code says to update (fragment_core::cli_build). Both run after the deploy and change nothing of it: a plan or a
   # release that fails leaves production deployed and this run red at the
   # job that failed, and re-running `cli-plan` runs both again, never the
   # deploy. Master's deploys (the preview) publish nothing.
@@ -636,6 +638,7 @@ jobs:
     outputs:
       release: ${{ steps.plan.outputs.release }}
       tag: ${{ steps.plan.outputs.tag }}
+      id: ${{ steps.plan.outputs.id }}
     steps:
       # every tag, as the version is above them all, and the latest
       # release's commit, whose CLI this one's is compared with
@@ -662,6 +665,7 @@ jobs:
     with:
       tag: ${{ needs.cli-plan.outputs.tag }}
       sha: ${{ github.sha }}
+      id: ${{ needs.cli-plan.outputs.id }}
 
   # The e2e's builds are kept one entry per master commit (`e2e-shard`),
   # each about 0.5 GB of the repository's 10 GB of caches, and a run

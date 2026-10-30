@@ -12,7 +12,11 @@ name: release
 #
 # Either way it publishes the release as the latest, and each binary says
 # the tag's version (`fragment --version`, its User-Agent: built in from
-# FRAGMENT_CLI_VERSION, cli/src/main.rs `VERSION`), which the build checks.
+# FRAGMENT_CLI_VERSION, cli/src/main.rs `VERSION`), which the build checks,
+# and carries its code's content id (FRAGMENT_CLI_ID, `cargo xtask cli id`:
+# cli/src/notice.rs), which it compares with the one production names, to
+# say when it is not the CLI production ships (docs/api.md, "The CLI it
+# ships").
 # Each tarball is fragment-<uname -s>-<uname -m>.tar.gz holding one binary,
 # `fragment`, so the one-line install (cli/SKILL.md) fetches
 # releases/latest/download/fragment-$(uname -s)-$(uname -m).tar.gz;
@@ -30,6 +34,10 @@ on:
         description: the commit the tag is made at, and every binary built from
         type: string
         required: true
+      id:
+        description: "the CLI's content id at that commit, as `cargo xtask cli plan` gave it"
+        type: string
+        required: true
 
 permissions:
   contents: write
@@ -40,7 +48,31 @@ env:
   SHA: ${{ inputs.sha || github.sha }}
 
 jobs:
+  # The content id the binaries carry: the plan's when production's deploy
+  # called, else the tag's commit's (`cargo xtask cli id`, built here)
+  id:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      id: ${{ steps.id.outputs.id }}
+    steps:
+      - if: ${{ !inputs.id }}
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - if: ${{ !inputs.id }}
+        uses: dtolnay/rust-toolchain@stable
+      - id: id
+        env:
+          GIVEN: ${{ inputs.id }}
+        run: |
+          id=${GIVEN:-$(cargo xtask cli id HEAD)}
+          [[ "$id" =~ ^[0-9a-f]{16}$ ]] || { echo "::error::$id is no CLI content id (16 lowercase hex digits)"; exit 1; }
+          echo "the CLI of $SHA is $id"
+          echo "id=$id" >> "$GITHUB_OUTPUT"
+
   build:
+    needs: id
     strategy:
       matrix:
         include:
@@ -73,18 +105,24 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - name: build
+        env:
+          FRAGMENT_CLI_ID: ${{ needs.id.outputs.id }}
         run: |
           [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || { echo "::error::$TAG is no release's tag: v<major>.<minor>.<patch>"; exit 1; }
           FRAGMENT_CLI_VERSION="${TAG#v}" cargo build --release -p fragment-cli --target ${{ matrix.target }}
-      # each binary says the tag's version; macOS's x86_64 one runs under
-      # Rosetta on the arm64 runner, installed when it is not there
+      # each binary says the tag's version, and carries its id; macOS's
+      # x86_64 one runs under Rosetta on the arm64 runner, installed when it
+      # is not there
       - name: version
+        env:
+          CLI_ID: ${{ needs.id.outputs.id }}
         run: |
           if [ "${{ matrix.target }}" = x86_64-apple-darwin ] && ! arch -x86_64 /usr/bin/true 2>/dev/null; then
             sudo softwareupdate --install-rosetta --agree-to-license
           fi
           said=$("target/${{ matrix.target }}/release/fragment" --version)
           [ "$said" = "fragment ${TAG#v}" ] || { echo "::error::the binary says \"$said\", not fragment ${TAG#v}"; exit 1; }
+          grep -qaF "$CLI_ID" "target/${{ matrix.target }}/release/fragment" || { echo "::error::the binary does not carry its content id $CLI_ID"; exit 1; }
       - name: package
         # macOS's tar adds no AppleDouble `._fragment` beside the binary
         env:
@@ -120,6 +158,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           # set when production's deploy called: its tag is new, made here
           CALLED_TAG: ${{ inputs.tag }}
+          CALLED_ID: ${{ inputs.id }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           # exactly the four tarballs the install fetches, each of
@@ -144,7 +183,7 @@ jobs:
               echo "::error::cannot tell whether $TAG exists, so nothing is published: $out"
               exit 1
             fi
-            notes=(--notes "The CLI of production's deploy of $SHA ($RUN_URL).") target=(--target "$SHA")
+            notes=(--notes "The CLI of production's deploy of $SHA ($RUN_URL); its content id is \`$CALLED_ID\`.") target=(--target "$SHA")
           fi
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release upload "$TAG" "${assets[@]}" --repo "$GITHUB_REPOSITORY" --clobber

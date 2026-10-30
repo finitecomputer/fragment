@@ -870,6 +870,16 @@ fn release_assets(s: &mut Suite, api: &Api, session: &str, agent: &str) -> Resul
         fragment_core::release::valid(&release) && [&page, &r, &me, &refused].iter().all(|a| a.header("x-fragment-deploy") == release) && refused.status == 401,
         json!({ "release": release, "page": page.header("x-fragment-deploy"), "file": r.header("x-fragment-deploy"), "api": me.header("x-fragment-deploy"), "refused": refused.header("x-fragment-deploy") }),
     );
+    // and the CLI it ships, which a CLI of other code compares with its own
+    // (fragment_core::cli_build): the node's is the lanes' CLI's; a
+    // preview's, a branch's, is none
+    let cli = fragment_core::cli_build::HEADER;
+    let shipped = s.cli_shipped().unwrap_or_default().to_string();
+    s.ok(
+        "every answer of the platform's host names the CLI it ships (x-fragment-cli), or none on a branch: its page, its files, the API's, a refusal's",
+        (shipped.is_empty() || fragment_core::cli_build::valid(&shipped)) && [&page, &r, &me, &refused].iter().all(|a| a.header(cli) == shipped),
+        json!({ "shipped": shipped, "page": page.header(cli), "file": r.header(cli), "api": me.header(cli), "refused": refused.header(cli) }),
+    );
     let paths = [
         "/__shell/CREDITS.md".to_string(),
         "/__shell/index.html".into(),

@@ -484,6 +484,7 @@ impl Client {
             eprintln!("GET {path}");
         }
         let mut resp = self.http.get(&url).header(header, value).timeout(Duration::from_secs(6 * 3600)).send().with_context(|| format!("GET {path}"))?;
+        crate::notice::heard(resp.headers());
         let status = resp.status().as_u16();
         if !(200..300).contains(&status) {
             let body = resp.bytes().map(|b| b.to_vec()).unwrap_or_default();
@@ -557,6 +558,9 @@ pub fn send_retrying(build: impl Fn() -> reqwest::blocking::RequestBuilder, repl
         // the body is read here too: an answer cut off mid-body is as
         // lost as one that never came
         let answer = build().send().and_then(|resp| {
+            // the platform's answers name the CLI it ships: one of other
+            // code says so, once a run (notice.rs)
+            crate::notice::heard(resp.headers());
             let status = resp.status().as_u16();
             resp.bytes().map(|b| (status, b.to_vec()))
         });

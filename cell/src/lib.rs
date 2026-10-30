@@ -1091,7 +1091,7 @@ async fn route_inner(req: Request, env: &Env, ctx: &Context) -> CellResult<Respo
         Ok(resp) => resp,
         Err(e) => e.response()?,
     };
-    platform_origin(answered, &release)
+    platform_origin(answered, &release, cfg.cli_id.as_deref())
 }
 
 /// The header the platform's own host names the release that answered in
@@ -1105,12 +1105,17 @@ const DEPLOY_HEADER: &str = "x-fragment-deploy";
 /// its own (sign-in's hand-offs send none; the shell's pages say theirs),
 /// and the release that answered (`DEPLOY_HEADER`: the shell compares it
 /// with its page's, to reload once the platform under it changed;
-/// docs/api.md, The shell). A computer's origin is left as its guest
-/// answers: its pages are the image's own.
-fn platform_origin(resp: Response, release: &str) -> CellResult<Response> {
+/// docs/api.md, The shell), and the CLI it ships, where it names one
+/// (`cli`: fragment_core::cli_build, which the CLI compares with its own).
+/// A computer's origin is left as its guest answers: its pages are the
+/// image's own.
+fn platform_origin(resp: Response, release: &str, cli: Option<&str>) -> CellResult<Response> {
     let h = resp.headers().clone();
     h.set("x-content-type-options", "nosniff")?;
     h.set(DEPLOY_HEADER, release)?;
+    if let Some(cli) = cli {
+        h.set(fragment_core::cli_build::HEADER, cli)?;
+    }
     if !h.has("referrer-policy")? {
         h.set("referrer-policy", "same-origin")?;
     }

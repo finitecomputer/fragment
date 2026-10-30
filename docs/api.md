@@ -60,6 +60,7 @@ the deployment's secrets are Worker secrets (below).
 | `FRAGMENT_SUPPORT_URL` | where a person whose computer will not start gets help (the deploy config's `support_url`): an `https:` page or a `mailto:` address, at most 512 visible characters, refused at the node's first request otherwise; `GET /api/computers` gives it as `support`, and the shell links it (docs/computers.md, "What its owner is told"). Unset, none |
 | `FRAGMENT_OPERATORS` | identities and keys that grant credit and set plans, seats and overdrafts, and wipe a person (Operators, below); a key listed is an operator's whether or not anyone holds it |
 | `FRAGMENT_DEPLOY_ID` | which deployment this is (default `dev`); every answer of the platform's host names it in `x-fragment-deploy` (`GET /healthz`'s among them, which CD checks), and the shell's page in its meta, so a page left open reloads once the platform under it changed (The shell, "A new release"). `cargo xtask deploy` sets the deploy's commit (`git rev-parse --short=12 HEAD`; a tree with uncommitted changes adds `-dirty-<unix seconds>`, so two such deploys differ). It is the release every call between the Worker and its objects carries, and each object admits only its own (docs/MODEL.md, Calls between releases): 1 to 64 of letters, digits, `.`, `_` and `-`, or the isolate does not start |
+| `FRAGMENT_CLI_ID` | the content id of the CLI the deployment ships (Agent docs, "The CLI it ships"): 16 lowercase hex digits, named on every answer of the platform's host in `x-fragment-cli`. `cargo xtask deploy` sets it on a deployment of its own (production) from the tree it deploys (`cargo xtask cli id HEAD`), and never on a branch's; dev sets none, and the e2e the id its CLI is built with. One malformed is said in the log and named nowhere |
 | `FRAGMENT_DEPLOYED_AT` | when the release was deployed, whole seconds since 1970 (default none; dev and the e2e: their node's start). `cargo xtask deploy` sets the deploy's second. The shell's page names it in its `fragment-release-deployed` meta, which Settings shows (The shell). Every call between the Worker and its objects carries it beside the release, and an object that refuses a call from a release deployed after its own restarts onto it (docs/MODEL.md, Calls between releases, "An object behind restarts"): 1 to 12 digits, or the isolate does not start |
 | `WORKOS_API_URL` | where WorkOS is (default https://api.workos.com; dev and the e2e: the fake); sign-in is on where the `WORKOS_CLIENT` secret is bound (below), and answers 500 where it is not |
 | `FRAGMENT_PLATFORM_URL` | the platform's origin, where sign-in and the platform session live (required; production's is https://finite.chat, on no fragment's domain, and the CLI's default host). Every push's VAPID token names it as its contact (`sub`, RFC 8292) |
@@ -2892,6 +2893,40 @@ a prompt to copy, `Read <the platform>/llms.txt and help me build: `,
 which the person finishes and pastes into their coding agent, which
 installs the CLI and asks them to approve it. The install line itself is
 folded below it ("Install it yourself").
+
+### The CLI it ships
+
+The install line every guide gives (`cli/SKILL.md`, the shell's
+settings) fetches the latest GitHub release, and production's deploy
+publishes a new one whenever the CLI's code changed (ci.yml, `cli-plan`;
+`cargo xtask cli plan`). So a CLI downloaded earlier can lack what
+production's guide tells it to run; the platform tells it so.
+
+Each build of the CLI is named by its content id: the first 16 hex
+digits of a SHA-256 of what it is built from at one commit, its sources,
+the templates it scaffolds and the lock entries it resolves, never of
+the commit (`cargo xtask cli id <rev>`, xtask/src/cli.rs). A release's
+binary carries its own (`FRAGMENT_CLI_ID` at build), and production
+names the one its tree ships in `x-fragment-cli` on every answer of its
+host, beside `x-fragment-deploy` (`FRAGMENT_CLI_ID`, Configuration). On
+each answer it reads, a CLI that carries an id other than the one named
+prints one line on stderr, once a run:
+
+```
+fragment: a CLI matching this platform is available (this one is <version>, built from other code); install it: <the install line>
+```
+
+and goes on: the command runs as it would have, and stdout (a `--json`
+envelope, `fragment mcp`'s messages) never carries it. The two ids are
+compared, never versions (fragment_core::cli_build): a deploy that did
+not touch the CLI names the id it named before, and a rollback that
+brought older CLI code back names that code's id, which the release its
+deploy publishes carries. A branch's deployment names none, as the
+install line fetches production's CLI; and a build without an id (a
+developer's `cargo build`, a computer image's, built from the tree its
+agent's platform runs) compares nothing. Just after production's deploy,
+until its release is published (minutes), the line points to a release
+that is not yet the matching one.
 
 ### Operations as MCP tools (`fragment mcp`)
 

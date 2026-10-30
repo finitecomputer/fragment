@@ -334,6 +334,7 @@ fn suite(only: Option<Vec<String>>, except: Vec<String>, hosted: &Hosted, shared
         // read as the run starts (`sections`): a dry run reads no secret
         wiper: None,
         cli,
+        cli_id: crate::cli_id(),
         scratch,
         project: PathBuf::new(),
         shape: Shape::Plain,

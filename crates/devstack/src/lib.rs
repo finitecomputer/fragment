@@ -366,6 +366,10 @@ pub struct Fleet {
     pub operator_key_values: Vec<(String, String)>,
     pub connection_secret_values: Vec<(String, String)>,
     pub swap_upstream: Option<String>,
+    /// `FRAGMENT_CLI_ID`: the CLI build the node ships, named on every
+    /// answer of its host (fragment_core::cli_build); the e2e's, the one
+    /// its CLI is built with. Dev names none.
+    pub cli_id: Option<String>,
 }
 
 /// A Stripe account as the cell reads it.
@@ -532,6 +536,9 @@ impl Fleet {
         }
         if let Some(u) = &self.swap_upstream {
             vars.push(("FRAGMENT_SWAP_UPSTREAM", u.as_str()));
+        }
+        if let Some(id) = &self.cli_id {
+            vars.push(("FRAGMENT_CLI_ID", id.as_str()));
         }
         write_dev_vars(project, &vars)
     }

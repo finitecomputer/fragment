@@ -8,6 +8,7 @@ pub mod backoff;
 pub mod blob;
 pub mod body;
 pub mod card;
+pub mod cli_build;
 pub mod cli_code;
 pub mod catalog;
 pub mod codestorage;

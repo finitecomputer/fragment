@@ -706,6 +706,59 @@ fn apps_cli(s: &mut Suite, api: &Api, home: &std::path::Path, keys: &Keys) -> Re
     Ok(())
 }
 
+/// What a CLI says of its build (fragment_core::cli_build; docs/api.md,
+/// "The CLI it ships"): against its platform, which ships it (the node, as
+/// production does its release; a branch names none), nothing. Against a
+/// platform that ships another, the first answer of a run that names it
+/// says so on stderr, with the install line, and the run goes on: its
+/// `--json` stdout is the envelope alone, and later answers say nothing.
+fn cli_build(s: &mut Suite, api: &Api, home: &std::path::Path) -> Result<()> {
+    const SAID: &str = "a CLI matching this platform is available";
+    let out = s.cli(api, home, &["whoami", "--json"]);
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    s.ok(
+        "a CLI its platform ships says nothing of its build",
+        out.status.success() && !stderr.contains(SAID),
+        json!({ "shipped": s.cli_shipped(), "built": s.cli_id, "stderr": stderr }),
+    );
+    let Some(own) = s.cli_id.clone() else {
+        s.skip("a CLI of other code than its platform ships says so, once a run", "the CLI was built without a content id (`cargo xtask e2e` builds it with one)");
+        return Ok(());
+    };
+    // a platform shipping another build, as production after a deploy that
+    // changed the CLI: its list names one fragment, whose runs are none
+    let other = if own == "0123456789abcdef" { "fedcba9876543210" } else { "0123456789abcdef" };
+    let asked = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = std::sync::Arc::clone(&asked);
+    let platform = fragment_fakes::http::Server::start(
+        0,
+        std::sync::Arc::new(move |req: &fragment_fakes::http::Request| {
+            counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let body = match req.path.as_str() {
+                "/api/fragments" => json!({ "fragments": [{ "name": "todo--k3x9", "role": "owner" }] }),
+                _ => json!({ "runs": [], "counts": {}, "paused": [] }),
+            };
+            fragment_fakes::http::Response::json(200, &body).with_header(fragment_core::cli_build::HEADER, other)
+        }),
+    )?;
+    // a bare label: the list is asked, then the fragment's runs
+    let out = s.bare_cli().args(["runs", "todo", "--json"]).env("HOME", home).env("FRAGMENT_HOST", &platform.url).env_remove("FRAGMENT_OUTPUT").output()?;
+    let (stdout, stderr) = (String::from_utf8_lossy(&out.stdout).into_owned(), String::from_utf8_lossy(&out.stderr).into_owned());
+    let envelope: Value = serde_json::from_str(stdout.trim()).unwrap_or_default();
+    let asked = asked.load(std::sync::atomic::Ordering::SeqCst);
+    s.ok(
+        "a CLI of other code than its platform ships says so on stderr, once a run, with the install line; its --json stdout is the envelope alone, and the command runs on",
+        out.status.success()
+            && envelope["ok"] == true
+            && !stdout.contains(SAID)
+            && asked >= 2
+            && stderr.matches(SAID).count() == 1
+            && stderr.lines().any(|l| l.contains(SAID) && l.contains("releases/latest/download/fragment-$(uname -s)-$(uname -m).tar.gz")),
+        json!({ "own": own, "announced": other, "asked": asked, "status": out.status.code(), "stdout": stdout, "stderr": stderr }),
+    );
+    Ok(())
+}
+
 pub fn cli(s: &mut Suite, api: &Api) -> Result<()> {
     if !s.section("cli", &[]) {
         return Ok(());
@@ -754,6 +807,7 @@ pub fn cli(s: &mut Suite, api: &Api) -> Result<()> {
         json!({ "login": logged, "host": host, "whoami": me }),
     );
     let keys = s.cli_keys(&home).expect("the CLI logged in");
+    cli_build(s, api, &home)?;
     apps_cli(s, api, &home, &keys)?;
     let (name, c) = chat(s, api, &keys, "cli")?;
     let r = s.cli_json(api, &home, &["call", &name, "say", "--input", r#"{"text":"from the cli"}"#, "--id", "cli-1", "--json"])?;

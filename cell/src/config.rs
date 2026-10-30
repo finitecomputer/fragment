@@ -156,6 +156,13 @@ pub struct Config {
     /// deployed after its own restarts onto it (fragment_core::release
     /// `restarts`). A Worker variable, as the release is.
     pub deployed_at: Option<u64>,
+    /// `FRAGMENT_CLI_ID`: the content id of the CLI this deployment ships
+    /// (fragment_core::cli_build), which every answer of its host names in
+    /// `x-fragment-cli`, so a CLI built from other code says to update.
+    /// A deploy of its own (production) sets it from the tree it deploys;
+    /// a branch's, dev's and none else do, as the install line fetches
+    /// production's CLI. One malformed is said in the log and named nowhere.
+    pub cli_id: Option<String>,
     /// `FRAGMENT_PROVIDERS`: the provider catalog (`fragment_core::catalog`),
     /// every credential a computer's guest may use: the WorkOS Pipes
     /// connections, the operator's keys (each bound as
@@ -228,6 +235,17 @@ fn deploy_id(env: &Env) -> String {
     let id = var(env, "FRAGMENT_DEPLOY_ID").unwrap_or_else(|| "dev".into());
     assert!(fragment_core::release::valid(&id), "FRAGMENT_DEPLOY_ID is 1 to {} of letters, digits, `.`, `_` and `-`", fragment_core::release::ID_MAX_BYTES);
     id
+}
+
+/// `FRAGMENT_CLI_ID`, when it is an id: a malformed one is said in the
+/// log and named nowhere, as a CLI's notice is never worth a start.
+fn cli_id(env: &Env) -> Option<String> {
+    let id = var(env, "FRAGMENT_CLI_ID")?;
+    if !fragment_core::cli_build::valid(&id) {
+        worker::console_error!("{}", serde_json::json!({ "event": "cli_id.refused", "why": format!("FRAGMENT_CLI_ID is {} lowercase hex digits", fragment_core::cli_build::ID_HEX) }));
+        return None;
+    }
+    Some(id)
 }
 
 /// `FRAGMENT_DEPLOYED_AT`, or `None` where a fleet sets none: seconds as
@@ -368,6 +386,7 @@ impl Config {
             test_secret,
             deploy_id: deploy_id(env),
             deployed_at: deployed_at(env),
+            cli_id: cli_id(env),
             book: configured_book(&providers, &models, var(env, "FRAGMENT_PRICE_BOOK_VERSION").map(|v| v.parse().unwrap_or_else(|_| panic!("FRAGMENT_PRICE_BOOK_VERSION is a whole number"))).unwrap_or(1)),
             providers,
             models,

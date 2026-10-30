@@ -1267,6 +1267,13 @@ fn worker_config(d: &Deployment, n: &Names, store_id: &str, release: &Release, r
     if let Some(s) = &n.label_suffix {
         v.insert("FRAGMENT_HOST_LABEL_SUFFIX".into(), json!(s));
     }
+    // the CLI it ships, named on every answer so a CLI of other code says
+    // to update (fragment_core::cli_build): a deployment of its own's
+    // (production's), whose deploy releases its CLI (ci.yml, `cli-plan`),
+    // and never a branch's, as the install line fetches production's
+    if n.label_suffix.is_none() {
+        v.insert("FRAGMENT_CLI_ID".into(), json!(crate::cli::id(root, "HEAD")?));
+    }
     if let Some(p) = &n.repo_prefix {
         v.insert("CODESTORAGE_REPO_PREFIX".into(), json!(p));
     }
@@ -1545,6 +1552,21 @@ mod tests {
         assert_eq!(vars["FRAGMENT_SCHEMA"], schema_id().unwrap(), "the schema a rollback to it is checked against");
         let release = this_release().unwrap();
         assert!(fragment_core::release::valid(&release.id) && release.deployed_at > 1_792_615_843, "this tree's, made now");
+    }
+
+    /// A deployment of its own names the CLI its tree ships, as the
+    /// release its deploy publishes carries it; a branch names none, so a
+    /// released CLI never says to update against a preview.
+    #[test]
+    fn production_names_the_cli_it_ships() {
+        let root = devstack::repo_root();
+        let own = deployment(Some("finite.chat"), Some("finite.place"));
+        let vars = worker_config(&own, &names(&own, None).unwrap(), "0f0e0d0c", &test_release(), &root).unwrap()["vars"].clone();
+        assert_eq!(vars["FRAGMENT_CLI_ID"], crate::cli::id(&root, "HEAD").unwrap());
+        assert!(vars["FRAGMENT_CLI_ID"].as_str().is_some_and(fragment_core::cli_build::valid));
+        let branch = deployment(None, None);
+        let vars = worker_config(&branch, &names(&branch, Some("dev")).unwrap(), "0f0e0d0c", &test_release(), &root).unwrap()["vars"].clone();
+        assert!(vars.get("FRAGMENT_CLI_ID").is_none(), "{vars}");
     }
 
     /// A branch config (on the zone finite.place) with neither host, else a

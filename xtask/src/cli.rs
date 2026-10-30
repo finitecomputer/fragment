@@ -39,8 +39,10 @@ const INPUTS: &[&str] = &[".cargo", "Cargo.toml", "cli", "crates/core", "crates/
 /// The CLI's package, which the lock is walked from.
 const PACKAGE: &str = "fragment-cli";
 
-/// The hex digits of the hash an id keeps (as FRAGMENT_SCHEMA does).
-const ID_HEX: usize = 16;
+/// The hex digits of the hash an id keeps (as FRAGMENT_SCHEMA does): the
+/// ids the platform announces and a release's binary carries are compared
+/// as they are (fragment_core::cli_build).
+const ID_HEX: usize = fragment_core::cli_build::ID_HEX;
 
 const USAGE: &str = "usage: cargo xtask cli id [<rev>] | cli plan [--at <rev>] [--latest <tag>] [--github-output <file>] [--summary <file>]";
 
@@ -201,7 +203,9 @@ pub(crate) fn id(root: &Path, rev: &str) -> Result<String> {
     links_stay_inside(root, &entries(&hashed)?, &paths)?;
     hashed.extend_from_slice(b"\0Cargo.lock\0");
     hashed.extend_from_slice(locked(root, &commit)?.join("\n").as_bytes());
-    Ok(fragment_core::blob::sha256_hex(&hashed)[..ID_HEX].to_string())
+    let id = fragment_core::blob::sha256_hex(&hashed)[..ID_HEX].to_string();
+    assert!(fragment_core::cli_build::valid(&id), "a SHA-256's hex is an id");
+    Ok(id)
 }
 
 /// The commit `rev` names, in full.

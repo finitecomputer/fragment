@@ -394,6 +394,11 @@ pub struct Suite {
     /// per run; hosted: `--operator-key-file`'s, or none.
     pub wiper: Option<Keys>,
     pub cli: PathBuf,
+    /// The CLI's content id, as `cargo xtask e2e` builds it in and names it
+    /// to the run (`FRAGMENT_CLI_ID`; `cli_id`): the local node ships it,
+    /// so every lane's CLI is the one its platform ships. None, a CLI built
+    /// without one.
+    pub cli_id: Option<String>,
     pub scratch: PathBuf,
     /// The node's own copy of the cell project (never `cell/`, where `xtask dev` runs).
     project: PathBuf,
@@ -436,6 +441,16 @@ impl Suite {
     /// vendor or the deployment's own image answers.
     pub fn hosted(&self) -> bool {
         self.hosted_rules
+    }
+
+    /// The CLI build the platform under test ships (`x-fragment-cli`,
+    /// fragment_core::cli_build): a local node's (a rehearsal's too) is the
+    /// one the lanes' CLI is built with; a preview, a branch, names none.
+    pub fn cli_shipped(&self) -> Option<&str> {
+        match self.preview {
+            Some(_) => None,
+            None => self.cli_id.as_deref(),
+        }
     }
 
     /// Whether the node's vendors are the fakes: a local run, or its
@@ -739,6 +754,9 @@ impl Suite {
             operator_key_values: SWAP_KEYS.iter().chain((self.shape == Shape::OneKeyMore).then_some(&ADDED_KEY)).map(|(name, value, _)| (name.to_string(), value.to_string())).collect(),
             connection_secret_values: vec![("e2e-oauth".into(), "mock-connection-secret".into()), (SEVERAL.into(), "mock-connection-secret".into())],
             swap_upstream: Some(self.upstream.node().url.clone()),
+            // the CLI it ships is the one the lanes drive, as production's
+            // is the one its deploy releases
+            cli_id: self.cli_id.clone(),
         };
         // its secrets go to wrangler's local store in the node's own state
         // (seeded once a state, bound by name as a deploy binds them)
@@ -1041,6 +1059,12 @@ fn main() -> Result<()> {
     }
 }
 
+/// The content id `cargo xtask e2e` built the CLI with, when it names one
+/// (`FRAGMENT_CLI_ID`, fragment_core::cli_build).
+fn cli_id() -> Option<String> {
+    std::env::var("FRAGMENT_CLI_ID").ok().filter(|id| fragment_core::cli_build::valid(id))
+}
+
 /// The CLI the lanes drive (`FRAGMENT_BIN`, else the release build).
 fn cli_binary() -> Result<PathBuf> {
     let cli = std::env::var_os("FRAGMENT_BIN").map(PathBuf::from).unwrap_or_else(|| devstack::repo_root().join("target/release/fragment"));
@@ -1157,6 +1181,7 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
         operator: Keys::generate(),
         wiper: Some(Keys::generate()),
         cli,
+        cli_id: cli_id(),
         scratch,
         project,
         shape: Shape::Plain,
