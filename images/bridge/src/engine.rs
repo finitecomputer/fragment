@@ -268,6 +268,10 @@ pub struct Turn {
     /// The seq on `chat` of the message its message quotes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply_to: Option<u64>,
+    /// What it is told before its message, for a late card answer's turn:
+    /// the card's turn (cards.rs, `Fresh::note`; `TurnStart::note`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
     #[serde(skip)]
     pub open: Option<OpenReply>,
 }
@@ -319,10 +323,11 @@ pub enum Input {
     /// A record from before `since` (ms; when the agent joined the chat) is
     /// history: its cursor passes it, and it starts nothing.
     Record { agent: String, fragment: String, record: Record, view: Option<ChatView>, since: i64 },
-    /// A card response with authoritative journal history, read before advancing its cursor.
-    CardRecord { agent: String, fragment: String, record: Record, view: Option<ChatView>, since: i64, work: Vec<Record>, chat: Vec<Record>, unavailable: Option<crate::history::Unavailable> },
-    /// An optional P5 recovery note could not be reconstructed.
-    HistoryUnavailable { turn: String },
+    /// An owner's answer to a card of the agent's that no running turn
+    /// held, with the chat's journal read for it (`work` back to the card's
+    /// turn, `chat` back to the card, the turn's cause), or why it could
+    /// not be, finally (`Engine::card_record`).
+    CardRecord { agent: String, fragment: String, record: Record, view: Option<ChatView>, since: i64, history: Result<crate::history::Journal, crate::history::Unavailable> },
     Runtime(Event),
     /// The platform's answer to a turn's claim.
     Claimed { turn: String, answer: ClaimAnswer },
@@ -574,8 +579,7 @@ impl Engine {
         match input {
             Input::Agents(agents) => self.set_agents(agents),
             Input::Record { agent, fragment, record, view, since } => self.record(&agent, &fragment, record, view, since),
-            Input::CardRecord { agent, fragment, record, view, since, work, chat, unavailable } => self.card_record(&agent, &fragment, record, view, since, &work, &chat, unavailable),
-            Input::HistoryUnavailable { turn } => self.history_unavailable(&turn),
+            Input::CardRecord { agent, fragment, record, view, since, history } => self.card_record(&agent, &fragment, record, view, since, history),
             Input::Runtime(event) => self.runtime(event),
             Input::Claimed { turn, answer } => self.claimed(&turn, answer),
             Input::Posted { turn, id } => self.posted(&turn, &id),
@@ -699,61 +703,67 @@ impl Engine {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn card_record(&mut self, agent: &str, fragment: &str, record: Record, view: Option<ChatView>, since: i64, work: &[Record], chat: &[Record], unavailable: Option<crate::history::Unavailable>) {
+    /// An owner's answer to a card of the agent's that no running turn of
+    /// this life held when its follower read it (driver.rs `feed`), with
+    /// the journal read for it, or why it could not be (final: never a
+    /// failed read, which its follower reads again). The card's first answer starts a
+    /// fresh turn, caused by the answer itself, told the card's turn as
+    /// its note (cards.rs); a card that cannot be rebuilt is closed
+    /// `history_unavailable` and starts nothing. Either way the cursor
+    /// passes the answer, as it passes any record.
+    fn card_record(&mut self, agent: &str, fragment: &str, record: Record, view: Option<ChatView>, since: i64, history: Result<crate::history::Journal, crate::history::Unavailable>) {
         let Some(a) = self.agent(agent).cloned() else { return };
         if record.seq <= self.state.cursors.get(&cursor_key(agent, fragment, &record.channel)).copied().unwrap_or(0) {
             return;
         }
-        let active = match records::said(&record.body) {
-            Said::PromptResponse { prompt, card, .. } => self.state.turns.values().any(|t| t.active() && t.agent == agent && t.fragment == fragment && card.as_ref().is_none_or(|c| c.agent == a.identity && c.turn == t.id) && t.prompts.iter().any(|p| p.id == prompt)),
-            _ => false,
-        };
-        if active {
+        let Said::PromptResponse { prompt, card, .. } = records::said(&record.body) else { unreachable!("the driver sends a card's answer alone") };
+        // a turn of this life holds it after all (it was read as the turn
+        // asked): the card's answer, as any is
+        let held = self.state.turns.values().any(|t| t.active() && t.agent == agent && t.fragment == fragment && card.as_ref().is_none_or(|c| c.agent == a.identity && c.turn == t.id) && t.prompts.iter().any(|p| p.id == prompt));
+        if held || record.at < since {
             self.record(agent, fragment, record, view, since);
             return;
         }
-        let resolved = if record.at < since { Ok(None) } else {
-            match unavailable { Some(why) => Err(why), None => crate::cards::resolve(&a, &record, work, chat, self.now) }
-        };
-        if let Err(why) = resolved {
-            // Only an authenticated owner's answer can produce a warning.
-            if record.principal == a.owner {
-                if let Said::PromptResponse { prompt, card, .. } = records::said(&record.body) {
-                    if card.as_ref().is_none_or(|c| c.agent == a.identity) {
-                        let turn = card.map(|c| c.turn).unwrap_or_else(|| records::turn_id(agent, fragment, records::CHAT, record.seq));
-                        let closed = records::turn_prompt_closed(&turn, &prompt, Closed::Unavailable, None);
-                        self.post(agent, fragment, records::WORK, records::work_id(&turn, &format!("pc:{prompt}")), closed, Vec::new());
-                        self.post(agent, fragment, records::WORK, records::work_id(&turn, &format!("history:{prompt}")), records::turn_notice(&turn, NoticeCategory::Warning, crate::history::VISIBLE), Vec::new());
-                        crate::ev!("card.history_unavailable", { "turn": turn, "why": why.message() });
-                    }
+        if let Some(v) = &view {
+            self.views.insert(fragment.to_string(), v.clone());
+        }
+        let names = self.views.get(fragment).map(|v| v.names.clone()).unwrap_or_default();
+        let name = |p: &str| names.get(p).cloned().unwrap_or_else(|| "someone".into());
+        let resolved = history.and_then(|j| crate::cards::resolve(&a, &record, &j.work, &j.chat, j.cause.as_ref(), name, self.now));
+        let (seq, at, asker) = (record.seq, record.at, record.principal.clone());
+        self.record(agent, fragment, record, view, since);
+        match resolved {
+            Ok(None) => {}
+            Ok(Some(r)) => {
+                let turn = r.closed["turn"].as_str().expect("a closure names its turn").to_string();
+                crate::ev!("card.late", { "agent": agent, "fragment": fragment, "seq": seq, "turn": turn, "outcome": r.closed["outcome"], "fresh": r.fresh.is_some() });
+                self.post(agent, fragment, records::WORK, records::work_id(&turn, &format!("pc:{prompt}")), r.closed, Vec::new());
+                let Some(fresh) = r.fresh else { return };
+                // admitted as the answer's own turn, never Tell or Other for
+                // a question another turn asks meanwhile
+                let cause = Cause { fragment: fragment.to_string(), channel: records::CHAT.to_string(), seq };
+                let id = records::turn_id(agent, fragment, records::CHAT, seq);
+                let m = Message { text: fresh.text, to: vec![a.identity.clone()], attachments: Vec::new(), turn: None, hop: 0, reply_to: None };
+                self.admit(&a, fragment, cause, at, &asker, name(&asker), &m, 0, Ask::Message);
+                if let Some(t) = self.state.turns.get_mut(&id).filter(|t| t.phase == Phase::Queued) {
+                    t.note = Some(fresh.note);
+                }
+            }
+            Err(why) => {
+                crate::ev!("card.unavailable", { "agent": agent, "fragment": fragment, "seq": seq, "why": why.why() });
+                // closed on the card's own turn; an answer that names no
+                // card has no turn to close
+                if let Some(c) = card {
+                    self.post(agent, fragment, records::WORK, records::work_id(&c.turn, &format!("pc:{prompt}")), records::turn_prompt_closed(&c.turn, &prompt, Closed::Unavailable, None), Vec::new());
                 }
             }
         }
-        if let Ok(Some((body, closed))) = resolved {
-            let turn = closed["turn"].as_str().expect("resolved turn");
-            let prompt = closed["prompt"].as_str().expect("resolved prompt");
-            self.post(agent, fragment, records::WORK, records::work_id(turn, &format!("pc:{prompt}")), closed, Vec::new());
-            if let Some(body) = body {
-                // Consume the response, then admit directly: a late answer
-                // must never become Tell/Other for a different live question.
-                self.record(agent, fragment, record.clone(), view, since);
-                let Said::Message(message) = records::said(&body) else { unreachable!("resolved answer is a message") };
-                let name = self.views.get(fragment).and_then(|v| v.names.get(&record.principal)).cloned().unwrap_or_else(|| "someone".into());
-                let cause = Cause { fragment: fragment.to_string(), channel: record.channel.clone(), seq: record.seq };
-                self.admit(&a, fragment, cause, record.at, &record.principal, name, &message, 0, Ask::Message);
-                return;
-            }
-        }
-        // Invalid, expired or already answered: still pass the cursor.
-        self.record(agent, fragment, record, view, since);
     }
 
-    fn history_unavailable(&mut self, id: &str) {
-        if let Some(t) = self.state.turns.get(id) {
-            let (agent, fragment) = (t.agent.clone(), t.fragment.clone());
-            self.post(&agent, &fragment, records::WORK, records::work_id(id, "history"), records::turn_notice(id, NoticeCategory::Warning, crate::history::VISIBLE), Vec::new());
-        }
+    /// The prompts this life's running turns hold open, by agent and chat:
+    /// their answers are theirs, read with no journal (driver.rs `feed`).
+    pub fn held(&self) -> BTreeSet<(String, String, String)> {
+        self.state.turns.values().filter(|t| t.active()).flat_map(|t| t.prompts.iter().filter(|p| !p.closed).map(|p| (t.agent.clone(), t.fragment.clone(), p.id.clone()))).collect()
     }
 
     fn said(&mut self, agent: &Agent, fragment: &str, record: &Record) {
@@ -991,6 +1001,7 @@ impl Engine {
             asking: false,
             command: matches!(ask, Ask::Command | Ask::Refused(_)),
             reply_to: m.reply_to,
+            note: None,
             open: None,
         };
         self.dirty = true;
@@ -1181,7 +1192,7 @@ impl Engine {
             files: Vec::new(),
             routine: t.routine,
             claim_seq,
-            note: None,
+            note: t.note.clone(),
             forgotten,
             forgotten_more,
             command: t.command,
@@ -1355,8 +1366,9 @@ impl Engine {
         t.last_ms = now;
         self.dirty = true;
         crate::ev!("prompt.answered", { "turn": id, "prompt": prompt, "option": option, "words": words.is_some() });
-        let mut closed = records::turn_prompt_closed(id, prompt, Closed::Answered, Some((option, principal, shown.as_deref())));
-        closed["answerSeq"] = serde_json::json!(seq);
+        // no `answerSeq`: a card answered live never starts a fresh turn
+        // (cards.rs), however far back a `/data` goes
+        let closed = records::turn_prompt_closed(id, prompt, Closed::Answered, Some((option, principal, shown.as_deref())));
         self.post(agent, fragment, records::WORK, records::work_id(id, &format!("pc:{prompt}")), closed, Vec::new());
         self.out.push(Effect::Runtime(Command::Answer { turn: id.to_string(), prompt: prompt.to_string(), option: Some(option.to_string()), seq, by: principal.to_string(), words, attached }));
     }
@@ -1700,6 +1712,9 @@ pub fn check(state: &State) -> Result<(), Corrupt> {
         }
         if t.interim > t.replies {
             return Err(Corrupt(format!("turn {id} posted {} interim replies of {}", t.interim, t.replies)));
+        }
+        if t.note.as_ref().is_some_and(|n| n.len() > limits::NOTE_MAX_BYTES) {
+            return Err(Corrupt(format!("turn {id}'s note is past a note's bound")));
         }
         let ended = t.phase == Phase::Ended;
         if ended == t.owed.is_empty() {

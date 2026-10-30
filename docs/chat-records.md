@@ -384,13 +384,12 @@ Part `pc:<prompt>`. `outcome` is `answered` (with `option` and `by`, and
 `text` for an option answered in words: typed on the card, or the owner's
 message that answered it, its files' names when it had no words),
 `expired` (no answer by `expiresAt`), `stopped`, or `history_unavailable`
-(required context is missing, corrupt, truncated, or exceeds the recovery
-budgets). The latter is terminal, shown as “History unavailable: ask again
-with the context”, with a warning notice on the original turn; no fresh
-turn starts from the answer. An answered closure
-also records `answerSeq`, the answer's seq on `chat`, allowing its retry
-to reconstruct the same fresh turn after a restart. Older closures without
-it stay final; they never authorize a fresh turn.
+(a late answer whose card's journal could not be read whole: shown as
+“Not acted on: ask again”; nothing ran). A card answered late, its turn
+gone, also records `answerSeq`, the answer's seq on `chat`: the fresh turn
+it started is the answer's, and only such a closure lets that answer
+rebuild it after a restart (docs/bridge.md, "A card outlives its turn");
+one answered live names none, and is final.
 
 ```json
 { "kind": "turn.asked", "turn": "…", "asks": "npub1…" }

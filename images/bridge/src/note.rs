@@ -17,8 +17,7 @@
 //! records before this turn's own (its claim), passing over a refusal's,
 //! which never ran. At the turn after, the turn before is this one, so the
 //! note is said once. A turn before it with no end in the journal (its end
-//! never landed) is unavailable history, not an empty past; only a
-//! recorded loss is rendered as a known cut.
+//! never landed) is told nothing: only a recorded loss is a cut.
 
 use serde_json::Value;
 
@@ -62,8 +61,6 @@ pub struct Cut {
 /// it in the chat.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Before {
-    /// Relevant records exist but cannot establish a complete prior turn.
-    Unavailable,
     /// No turn of the agent's in the records read: read further back.
     Unread,
     /// Its turn before this one did not end as lost (or there was none
@@ -106,19 +103,16 @@ pub fn previous(work: &[Record], agent: &str, from_start: bool) -> Before {
             continue;
         }
         let turn = field(start, "turn");
-        let end = ends.iter().position(|(t, _)| *t == turn).map(|i| ends.remove(i).1);
+        let end = ends.iter().find(|(t, _)| *t == turn).map(|(_, e)| *e);
         match end {
             Some(e) if refused(e) => continue,
             Some(e) if e["outcome"] == "error" && field(e, "error") == LOST => {
-                return cut(&work[i..], agent, turn, start, r.at).map_or(Before::Unavailable, Before::Cut);
+                return cut(&work[i..], agent, turn, start, r.at).map_or(Before::Kept, Before::Cut);
             }
-            Some(e) if matches!(field(e, "outcome"), "idle" | "stopped" | "error") => return Before::Kept,
-            _ => return Before::Unavailable,
+            _ => return Before::Kept,
         }
     }
-    if from_start && !ends.is_empty() {
-        Before::Unavailable
-    } else if from_start {
+    if from_start {
         Before::Kept
     } else {
         Before::Unread
@@ -129,11 +123,6 @@ pub fn previous(work: &[Record], agent: &str, from_start: bool) -> Before {
 fn cut(from: &[Record], agent: &str, turn: &str, start: &Value, started_at: i64) -> Option<Cut> {
     let cause: Cause = serde_json::from_value(start["cause"].clone()).ok()?;
     let mine = |r: &&Record| r.principal == agent && r.body["turn"] == turn;
-    if from.iter().filter(mine).any(|r| {
-        let b = &r.body;
-        (b["kind"] == "turn.step" && (b["tool"].as_str().is_none() || b["args"].as_str().is_none() || b["ok"].as_bool().is_none()))
-            || (b["kind"] == "turn.prompt" && (b["text"].as_str().is_none() || b["prompt"].as_str().is_none()))
-    }) { return None }
     let steps: Vec<CutStep> = from
         .iter()
         .filter(mine)
@@ -204,33 +193,75 @@ pub fn text(cut: &Cut, asked: Option<&str>, replies: &[String]) -> String {
     if let Some(a) = asked.filter(|a| !a.trim().is_empty()) {
         lines.push(format!("It was answering: {}", quoted(a, limits::NOTE_ASKED_MAX_CHARS)));
     }
-    if !cut.steps.is_empty() {
-        let mut steps: Vec<String> = cut
-            .steps
-            .iter()
-            .map(|s| {
-                let args = s.args.split_whitespace().collect::<Vec<_>>().join(" ");
-                let args = if args.is_empty() { String::new() } else { format!(" {}", records::cut(&args, limits::NOTE_ARGS_MAX_CHARS)) };
-                let tool = if s.tool.trim().is_empty() { "a step".to_string() } else { records::cut(&s.tool, limits::NOTE_TOOL_MAX_CHARS) };
-                format!("{tool}{args} ({})", if s.ok { "ok" } else { "failed" })
-            })
-            .collect();
-        if cut.steps_total > cut.steps.len() {
-            steps.push(format!("and {} more", cut.steps_total - cut.steps.len()));
-        }
-        lines.push(format!("Its steps, as recorded: {}", steps.join("; ")));
-    }
+    lines.extend(steps(cut));
     for c in &cut.cards {
         let closed = c.closed.as_deref().unwrap_or("unanswered");
         lines.push(format!("It asked: {} ({closed})", quoted(&c.text, limits::NOTE_CARD_MAX_CHARS)));
     }
-    let shown = replies.len().min(limits::NOTE_REPLIES_MAX);
-    for r in &replies[replies.len() - shown..] {
-        lines.push(format!("It had replied: {}", quoted(r, limits::NOTE_REPLY_MAX_CHARS)));
-    }
+    lines.extend(replied(replies));
     let note = records::cut_bytes(&lines.join("\n"), limits::NOTE_MAX_BYTES);
     assert!(note.len() <= limits::NOTE_MAX_BYTES, "a note is bounded");
     note
+}
+
+/// The turn `turn` of the agent's, as `work` holds it from its start on;
+/// `None` when its start is not among the records, or names no cause.
+pub fn turn(work: &[Record], agent: &str, turn: &str) -> Option<Cut> {
+    let i = work.iter().position(|r| own(r, agent, "turn.start").is_some_and(|b| b["turn"] == turn))?;
+    cut(&work[i..], agent, turn, &work[i].body, work[i].at)
+}
+
+/// What a fresh turn from a late answer to its card is told (cards.rs),
+/// bounded (`NOTE_MAX_BYTES`): that the card's turn ended before the
+/// answer and is not resumed, and to check what it did before doing any of
+/// it again; who asked it what (`by`: their name; the request cut to
+/// `NOTE_LATE_ASKED_MAX_CHARS`, said so); its steps; its last replies.
+/// Context, not the person's words: Relay hands it as the inbound's
+/// read-only `context`, as it hands `text`.
+pub fn late(cut: &Cut, by: &str, asked: Option<&str>, replies: &[String]) -> String {
+    let mut lines = vec![
+        "The message below answers a question your earlier turn in this chat asked. That turn ended before the answer came and is not resumed: this is a new turn. Check what it already did before you do any of it again, and don't ask the question again.".to_string(),
+    ];
+    match asked.filter(|a| !a.trim().is_empty()) {
+        Some(a) => {
+            let one_line = a.split_whitespace().collect::<Vec<_>>().join(" ");
+            let more = one_line.chars().count() > limits::NOTE_LATE_ASKED_MAX_CHARS;
+            lines.push(format!("It was answering {by}: {}{}", quoted(a, limits::NOTE_LATE_ASKED_MAX_CHARS), if more { " (the rest is cut)" } else { "" }));
+        }
+        None => lines.push(format!("It was answering {by}; what they asked is not in this chat's record.")),
+    }
+    lines.extend(steps(cut));
+    lines.extend(replied(replies));
+    let note = records::cut_bytes(&lines.join("\n"), limits::NOTE_MAX_BYTES);
+    assert!(note.len() <= limits::NOTE_MAX_BYTES, "a note is bounded");
+    note
+}
+
+/// A turn's steps on one line: at most `NOTE_STEPS_MAX`, the rest counted.
+fn steps(cut: &Cut) -> Option<String> {
+    if cut.steps.is_empty() {
+        return None;
+    }
+    let mut steps: Vec<String> = cut
+        .steps
+        .iter()
+        .map(|s| {
+            let args = s.args.split_whitespace().collect::<Vec<_>>().join(" ");
+            let args = if args.is_empty() { String::new() } else { format!(" {}", records::cut(&args, limits::NOTE_ARGS_MAX_CHARS)) };
+            let tool = if s.tool.trim().is_empty() { "a step".to_string() } else { records::cut(&s.tool, limits::NOTE_TOOL_MAX_CHARS) };
+            format!("{tool}{args} ({})", if s.ok { "ok" } else { "failed" })
+        })
+        .collect();
+    if cut.steps_total > cut.steps.len() {
+        steps.push(format!("and {} more", cut.steps_total - cut.steps.len()));
+    }
+    Some(format!("Its steps, as recorded: {}", steps.join("; ")))
+}
+
+/// A turn's last `NOTE_REPLIES_MAX` replies, a line each.
+fn replied(replies: &[String]) -> impl Iterator<Item = String> + '_ {
+    let shown = replies.len().min(limits::NOTE_REPLIES_MAX);
+    replies[replies.len() - shown..].iter().map(|r| format!("It had replied: {}", quoted(r, limits::NOTE_REPLY_MAX_CHARS)))
 }
 
 /// One of the agent's turns in a chat that another life ran since the
@@ -267,7 +298,7 @@ pub fn forgotten(work: &[Record], chat: &[Record], agent: &str, turns: &[String]
         if cut {
             continue;
         }
-        let asked = chat.iter().find(|r| r.channel == cause.channel && r.seq == cause.seq).and_then(asked);
+        let asked = chat.iter().find(|r| r.channel == records::CHAT && r.seq == cause.seq && cause.channel == records::CHAT).and_then(asked);
         out.push(Forgot { turn: turn.clone(), asked, replies: replies(chat, agent, turn) });
     }
     assert!(out.len() <= turns.len(), "each forgotten turn is told once at most");
@@ -379,7 +410,7 @@ mod tests {
     }
 
     /// Goal: only a recorded loss is a cut. A turn that ended any other way,
-    /// or no prior turn is told nothing. A missing end is unavailable. A
+    /// one whose end never landed, or none at all, is told nothing; a
     /// refusal (it never ran) is passed over, so the turn after a cut one
     /// is told of it even with a refusal between; another agent's cut turn
     /// is not this agent's.
@@ -395,7 +426,7 @@ mod tests {
         let mut w = Work::default();
         w.start(ME, "t", 1);
         let n = w.start(ME, "n", 2);
-        assert_eq!(previous(w.before(n), ME, true), Before::Unavailable, "a missing end is incomplete history");
+        assert_eq!(previous(w.before(n), ME, true), Before::Kept, "no end landed: no recorded loss");
         assert_eq!(previous(&[], ME, true), Before::Kept, "the first turn");
         assert_eq!(previous(&[], ME, false), Before::Unread, "nothing read yet");
 
@@ -534,19 +565,5 @@ mod tests {
         let note = forgotten_text(&vec![long; limits::NOTE_FORGOTTEN_MAX], u32::MAX);
         assert!(note.len() <= limits::NOTE_MAX_BYTES && note.lines().next().unwrap().ends_with("before you do any of it again."), "{}", note.len());
         assert!(forgotten_text(&[Forgot { turn: "t".into(), asked: None, replies: vec![] }], 0).ends_with("You were asked: something"));
-    }
-}
-
-#[cfg(test)]
-mod unavailable_tests {
-    use super::*;
-    use serde_json::json;
-    #[test]
-    fn corrupt_cut_context_and_an_orphan_end_are_not_an_empty_past() {
-        let r = |seq, body| Record {channel:records::WORK.into(),seq,at:1,principal:"npub1agent".into(),kind:"message".into(),body};
-        let start = r(1,json!({"kind":"turn.start","turn":"t","agent":"npub1agent"}));
-        let end = r(2,json!({"kind":"turn.end","turn":"t","outcome":"error","error":LOST}));
-        assert_eq!(previous(&[start,end.clone()],"npub1agent",true),Before::Unavailable);
-        assert_eq!(previous(&[end],"npub1agent",true),Before::Unavailable);
     }
 }

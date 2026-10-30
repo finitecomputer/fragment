@@ -1938,11 +1938,67 @@ async fn commands_and_quotes() {
     bridge.stop().await;
 }
 
-/// Missing records and a card outside the recovery window produce visible
-/// unavailability after a restart, never a guessed fresh action. Replays
-/// and a second restart keep that closure final.
+/// Goal (P6): a card outlives its turn. After a restart cut its turn, the
+/// owner's answer starts one fresh turn, its message the answer alone and
+/// its card's turn (who asked what, its steps, its reply) its note, though
+/// the platform answers the journal's first reads 503 as a deploy does: a
+/// failed read is read again, never the card closed. Its answer again, and
+/// another restart, start nothing more.
 #[tokio::test]
-async fn a_late_card_with_unavailable_history_is_visible_and_runs_nothing() {
+async fn a_late_answer_survives_a_deploy_and_runs_once() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    let chat = fake.chat("talk", &["juniper"]);
+    let dir = support::dir("card-late");
+    let cfg = support::config(&fake.url(), &dir, support::settings());
+    let bridge = support::start_killable(cfg.clone(), support::script());
+    following(&fake, 2).await;
+    let said = fake.say(&chat, &person("paul"), json!({ "text": "use the tool, then do something risky" }));
+    let turn = turn_of("juniper", &chat, seq(&said));
+    fake.until(WAIT, "the original card", |w| !w.bodies(&chat, "work", "turn.prompt").is_empty()).await;
+    let card = fake.with(|w| w.bodies(&chat, "work", "turn.prompt")[0].clone());
+    bridge.kill().await;
+    fake.until(WAIT, "the original life ended", |w| w.live_sockets() == 0).await;
+    let response = json!({ "kind": "prompt_response", "agent": "npub1juniper", "turn": turn, "prompt": card["prompt"], "option": "once" });
+    let answer = fake.say(&chat, &person("paul"), response.clone());
+    let fresh = turn_of("juniper", &chat, seq(&answer));
+    fake.with(|w| w.fail_history_reads = 2);
+    let bridge = support::start_killable(cfg.clone(), support::script());
+    fake.until(WAIT, "the fresh turn's reply", |w| replies(w, &chat).iter().any(|r| r["turn"] == fresh)).await;
+    fake.with(|w| {
+        assert_eq!(w.fail_history_reads, 0, "the deploy's 503s were met");
+        let closed = w.bodies(&chat, "work", "turn.prompt.closed");
+        assert_eq!(closed.len(), 1, "{closed:?}");
+        assert_eq!((closed[0]["turn"].as_str(), closed[0]["outcome"].as_str(), closed[0]["answerSeq"].as_u64()), (Some(turn.as_str()), Some("answered"), Some(seq(&answer))));
+        let reply = replies(w, &chat).into_iter().find(|r| r["turn"] == fresh).unwrap();
+        let text = reply["text"].as_str().unwrap();
+        let (message, note) = text.split_once("\n\n(told: ").expect("its note");
+        assert_eq!(message, "echo: [paul] Answer to your earlier question “Run `rm -rf ./scratch`?”: Allow once", "the owner's answer alone");
+        for said in ["is not resumed", "It was answering paul: “use the tool, then do something risky”", "Its steps, as recorded: search use the tool, then do something risky (ok); terminal rm -rf ./scratch (ok)", "It had replied: “Let me look.”"] {
+            assert!(note.contains(said), "{said:?} in {note}");
+        }
+        assert!(!note.contains("cut short"), "the card's turn is told once, as its note: {note}");
+    });
+    bridge.kill().await;
+    fake.until(WAIT, "the second life ended", |w| w.live_sockets() == 0).await;
+    fake.say(&chat, &person("paul"), response);
+    let bridge = support::start_killable(cfg, support::script());
+    following(&fake, 2).await;
+    let next = said_and_ended(&fake, &chat, "good morning").await;
+    fake.with(|w| {
+        assert_eq!(w.bodies(&chat, "work", "turn.start").iter().filter(|s| s["turn"] == fresh).count(), 1, "one claim");
+        assert_eq!(replies(w, &chat).iter().filter(|r| r["turn"] == fresh).count(), 1, "one run");
+        assert_eq!(w.bodies(&chat, "work", "turn.prompt.closed").len(), 1, "one closure");
+        assert_eq!(ends_of(w, &chat, &next).len(), 1);
+    });
+    bridge.stop().await;
+}
+
+/// Goal (P6): a card whose journal cannot be read whole (a gap, a card
+/// further back than a read goes, an older start with no cause) is closed
+/// on its own turn as `history_unavailable`, and starts nothing: never a
+/// guess. Its answer again and another restart keep that one closure.
+#[tokio::test]
+async fn a_late_card_with_unavailable_history_runs_nothing() {
     for failure in ["gap", "budget", "legacy"] {
         let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
         let chat = fake.chat("talk", &["juniper"]);
@@ -1950,42 +2006,48 @@ async fn a_late_card_with_unavailable_history_is_visible_and_runs_nothing() {
         let cfg = support::config(&fake.url(), &dir, support::settings());
         let bridge = support::start_killable(cfg.clone(), support::script());
         following(&fake, 2).await;
-        let said = fake.say(&chat, &person("paul"), json!({"text":"do something risky"}));
-        let turn = turn_of("juniper",&chat,seq(&said));
-        fake.until(WAIT,"the original card",|w| !w.bodies(&chat,"work","turn.prompt").is_empty()).await;
-        let card = fake.with(|w| w.bodies(&chat,"work","turn.prompt")[0].clone());
+        let said = fake.say(&chat, &person("paul"), json!({ "text": "do something risky" }));
+        let turn = turn_of("juniper", &chat, seq(&said));
+        fake.until(WAIT, "the original card", |w| !w.bodies(&chat, "work", "turn.prompt").is_empty()).await;
+        let card = fake.with(|w| w.bodies(&chat, "work", "turn.prompt")[0].clone());
         bridge.kill().await;
-        fake.until(WAIT,"the original life ended",|w| w.live_sockets()==0).await;
+        fake.until(WAIT, "the original life ended", |w| w.live_sockets() == 0).await;
         fake.with(|w| {
             if failure == "budget" {
-                for _ in 0..1100 { w.append(&chat,"work","npub1juniper",json!({"kind":"commands","items":[]})); }
+                for _ in 0..1100 {
+                    w.append(&chat, "work", "npub1juniper", json!({ "kind": "commands", "items": [] }));
+                }
             } else {
                 let records = &mut w.fragments.get_mut(&chat).unwrap().channels.get_mut("work").unwrap().records;
-                let start = records.iter_mut().find(|r| r["body"]["kind"]=="turn.start").unwrap();
-                if failure == "gap" { start["seq"] = json!(99999) } else { start["body"].as_object_mut().unwrap().remove("cause"); }
+                let start = records.iter_mut().find(|r| r["body"]["kind"] == "turn.start").unwrap();
+                if failure == "gap" {
+                    start["seq"] = json!(99999);
+                } else {
+                    start["body"].as_object_mut().unwrap().remove("cause");
+                }
             }
         });
-        let response = json!({"kind":"prompt_response","agent":"npub1juniper","turn":turn,"prompt":card["prompt"],"option":"once"});
-        let answer = fake.say(&chat,&person("paul"),response.clone());
-        let fresh = turn_of("juniper",&chat,seq(&answer));
+        let response = json!({ "kind": "prompt_response", "agent": "npub1juniper", "turn": turn, "prompt": card["prompt"], "option": "once" });
+        let answer = fake.say(&chat, &person("paul"), response.clone());
+        let fresh = turn_of("juniper", &chat, seq(&answer));
         let before = fake.with(|w| w.requests.len());
         let bridge = support::start_killable(cfg.clone(), support::script());
-        fake.until(WAIT,"visible history unavailable",|w| w.bodies(&chat,"work","turn.prompt.closed").iter().any(|c| c["outcome"]=="history_unavailable") && w.bodies(&chat,"work","turn.notice").iter().any(|n| n["text"].as_str().is_some_and(|t| t.starts_with("History unavailable:")))).await;
+        fake.until(WAIT, "the card closed unavailable", |w| w.bodies(&chat, "work", "turn.prompt.closed").iter().any(|c| c["turn"] == turn && c["outcome"] == "history_unavailable")).await;
         if failure == "budget" {
-            let reads = fake.with(|w| w.requests[before..].iter().filter(|(path,query,_,_)| path.contains("/channels/work") && query.contains("limit=100")).count());
-            assert!(reads <= 10,"bounded work scan: {reads}");
+            let reads = fake.with(|w| w.requests[before..].iter().filter(|(path, query, _, _)| path.contains("/channels/work") && query.contains("limit=100")).count());
+            assert!(reads <= 10, "bounded work scan: {reads}");
         }
         bridge.kill().await;
-        fake.until(WAIT,"the second life ended",|w| w.live_sockets()==0).await;
-        fake.say(&chat,&person("paul"),response);
-        let bridge = support::start_killable(cfg,support::script());
-        following(&fake,2).await;
-        let next = said_and_ended(&fake,&chat,"good morning").await;
+        fake.until(WAIT, "the second life ended", |w| w.live_sockets() == 0).await;
+        fake.say(&chat, &person("paul"), response);
+        let bridge = support::start_killable(cfg, support::script());
+        following(&fake, 2).await;
+        let next = said_and_ended(&fake, &chat, "good morning").await;
         fake.with(|w| {
-            assert!(!w.bodies(&chat,"work","turn.start").iter().any(|s| s["turn"]==fresh),"no fresh action from incomplete context");
-            assert!(!replies(w,&chat).iter().any(|r| r["turn"]==fresh));
-            assert_eq!(w.bodies(&chat,"work","turn.prompt.closed").iter().filter(|c| c["prompt"]==card["prompt"]).count(),1,"one terminal card outcome after replay/restart");
-            assert!(ends_of(w,&chat,&next).len()==1);
+            assert!(!w.bodies(&chat, "work", "turn.start").iter().any(|s| s["turn"] == fresh), "{failure}: no fresh turn from incomplete context");
+            assert!(w.bodies(&chat, "work", "turn.notice").is_empty(), "{failure}: the card's outcome says it; no notice");
+            assert_eq!(w.bodies(&chat, "work", "turn.prompt.closed").len(), 1, "{failure}: one closure after a replay and a restart");
+            assert_eq!(ends_of(w, &chat, &next).len(), 1);
         });
         bridge.stop().await;
     }

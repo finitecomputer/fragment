@@ -32,16 +32,18 @@ file is the newer word, and decision 18 points here.
   while only waiting on a person.
 
 - **Approvals outlive a restart (P6, #627).** A restart ends the old
-  turn, leaving unexpired cards answerable. A late response starts a fresh
-  turn with the original request, question, chosen answer and recorded
-  context. The journal supplies them even without the bridge cache;
-  the answer's chat record supplies the fresh turn's deduplicated claim.
-  No old turn resumes or replays. Recovery reads have page, byte, record,
-  comparison-work and time budgets; incomplete or over-budget context
-  closes a late card visibly as history unavailable and starts nothing.
-  See docs/bridge.md, "A card outlives its
-  turn", for first-answer, expiry and stop rules. The real-image proof is
-  `an_approval_answered_after_a_restart` in images/bridge/tests/docker.rs.
+  turn, leaving unexpired cards answerable. A late answer starts one fresh
+  turn: its message the answer, the card's turn (what it was asked, its
+  steps and replies) its read-only note, all from the chat's journal, so
+  the same with no bridge state; its claim is the answer's, so it runs
+  once. No old turn resumes. A failed read is read again; a journal that
+  cannot be read whole closes the card `history_unavailable` and starts
+  nothing; a card answered live never runs again after a rollback.
+  docs/bridge.md, "A card outlives its turn"; the real-image proofs are
+  `a_card_answered_after_a_sleep_starts_one_fresh_turn` and
+  `a_card_answered_live_runs_once_after_a_rollback` in
+  images/bridge/tests/docker.rs. A sleep there is a save and a restore;
+  a hosted run's real sleep and wake is still owed.
 - **One life per turn (P1, #137).** A turn runs only in the life of the
   bridge that wrote its `turn.start` to `work`, and only once that post
   is answered. A rolled-back or lost `/data` runs no turn twice; a turn

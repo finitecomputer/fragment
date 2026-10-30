@@ -431,7 +431,7 @@ fn an_approval_answered() {
     assert!(commands(&bad).is_empty(), "not an option of this prompt");
     let yes = said(&mut e, &a, &v, 4, "npub1paul", json!({ "kind": "prompt_response", "prompt": "ab12.0011", "option": "once" }), T0 + 22);
     assert_eq!(commands(&yes), vec![Command::Answer { turn: turn.clone(), prompt: "ab12.0011".into(), option: Some("once".into()), seq: 4, by: "npub1paul".into(), words: None, attached: None }]);
-    assert_eq!(posts(&yes)[0].1, json!({ "kind": "turn.prompt.closed", "turn": turn, "prompt": "ab12.0011", "outcome": "answered", "option": "once", "by": "npub1paul", "answerSeq": 4 }));
+    assert_eq!(posts(&yes)[0].1, json!({ "kind": "turn.prompt.closed", "turn": turn, "prompt": "ab12.0011", "outcome": "answered", "option": "once", "by": "npub1paul" }));
     assert_eq!(keepalive(&yes), Some(true), "running again");
     let second = said(&mut e, &a, &v, 5, "npub1paul", json!({ "kind": "prompt_response", "prompt": "ab12.0011", "option": "deny" }), T0 + 23);
     assert!(commands(&second).is_empty(), "the first answer won");
@@ -477,7 +477,7 @@ fn other_answered_in_words_on_its_card() {
     assert_eq!(posts(&p)[0].1["options"][1], json!({ "id": "other", "label": "Other", "words": true }), "the card says which option takes words");
     let other = said(&mut e, &a, &v, 2, "npub1paul", json!({ "kind": "prompt_response", "prompt": "q.1", "option": "other", "text": "purple" }), T0 + 20);
     assert_eq!(commands(&other), vec![Command::Answer { turn: turn.clone(), prompt: "q.1".into(), option: Some("other".into()), seq: 2, by: "npub1paul".into(), words: Some("purple".into()), attached: None }]);
-    assert_eq!(posts(&other)[0].1, json!({ "kind": "turn.prompt.closed", "turn": turn, "prompt": "q.1", "outcome": "answered", "option": "other", "by": "npub1paul", "text": "purple", "answerSeq": 2 }));
+    assert_eq!(posts(&other)[0].1, json!({ "kind": "turn.prompt.closed", "turn": turn, "prompt": "q.1", "outcome": "answered", "option": "other", "by": "npub1paul", "text": "purple" }));
     // the turn asks nothing after: the next message waits as a turn of its own
     let next = said(&mut e, &a, &v, 3, "npub1paul", json!({ "text": "and now?" }), T0 + 30);
     assert!(commands(&next).is_empty() && started(&next).is_none(), "queued behind the running turn, told to it never");
@@ -949,8 +949,8 @@ fn a_message_answers_a_card_that_takes_words() {
 
     // valid: its owner's words answer it
     let typed = said(&mut e, &a, &v, 3, "npub1paul", json!({ "text": "Tomatoes" }), T0 + 3);
-    let closed = |prompt: &str, text: &str, seq: u64| (records::work_id(&turn, &format!("pc:{prompt}")), json!({ "kind": "turn.prompt.closed", "turn": turn, "prompt": prompt, "outcome": "answered", "option": "other", "by": "npub1paul", "text": text, "answerSeq": seq }));
-    assert_eq!(posts(&typed), vec![closed("q.1", "Tomatoes", 3)], "the card closes with their words; no turn of its own");
+    let closed = |prompt: &str, text: &str| (records::work_id(&turn, &format!("pc:{prompt}")), json!({ "kind": "turn.prompt.closed", "turn": turn, "prompt": prompt, "outcome": "answered", "option": "other", "by": "npub1paul", "text": text }));
+    assert_eq!(posts(&typed), vec![closed("q.1", "Tomatoes")], "the card closes with their words; no turn of its own");
     assert_eq!(commands(&typed), vec![Command::Answer { turn: turn.clone(), prompt: "q.1".into(), option: Some("other".into()), seq: 3, by: "npub1paul".into(), words: Some("Tomatoes".into()), attached: None }]);
     assert!(typed.dirty && !open(&e, "q.1") && e.state().turns[&turn].phase == Phase::Running, "the turn runs on");
     assert_eq!(said(&mut e, &a, &v, 3, "npub1paul", json!({ "text": "Tomatoes" }), T0 + 4), Step::default(), "replay: nothing");
@@ -960,11 +960,11 @@ fn a_message_answers_a_card_that_takes_words() {
     // words and files; then files alone, the card showing their names
     card(&mut e, "q.2", T0 + 6);
     let both = said(&mut e, &a, &v, 5, "npub1paul", json!({ "text": "these", "attachments": [photo("a.png")] }), T0 + 7);
-    assert_eq!(posts(&both), vec![closed("q.2", "these", 5)]);
+    assert_eq!(posts(&both), vec![closed("q.2", "these")]);
     assert_eq!(commands(&both), vec![Command::Answer { turn: turn.clone(), prompt: "q.2".into(), option: Some("other".into()), seq: 5, by: "npub1paul".into(), words: Some("these".into()), attached: attached(&a, &["a.png"]) }]);
     card(&mut e, "q.3", T0 + 8);
     let only = said(&mut e, &a, &v, 6, "npub1paul", json!({ "attachments": [photo("a.png"), photo("b.png")] }), T0 + 9);
-    assert_eq!(posts(&only), vec![closed("q.3", "a.png, b.png", 6)]);
+    assert_eq!(posts(&only), vec![closed("q.3", "a.png, b.png")]);
     assert_eq!(commands(&only), vec![Command::Answer { turn: turn.clone(), prompt: "q.3".into(), option: Some("other".into()), seq: 6, by: "npub1paul".into(), words: Some(String::new()), attached: attached(&a, &["a.png", "b.png"]) }]);
 
     // a card that takes no words takes a press alone
@@ -2771,9 +2771,14 @@ fn an_older_states_via_is_let_go() {
     assert!(!serde_json::to_string(&back).expect("serializes").contains("via"), "written again without it");
 }
 
-/// Recovery leaves a live card open; its answer claims a different turn.
-/// A lost cache reconstructs the same claim, and another life's claim
-/// never starts the runtime again.
+/// Goal (P6): a card outlives its turn. Its answer read by a later life
+/// (or after a runtime's own end) is a fresh turn, caused by the answer,
+/// told its card's turn as its note, never the old turn resumed nor a
+/// Tell to another turn's question; replayed, nothing; another life's
+/// claim of it, no run. Method: the journal the driver reads, from the
+/// records this engine posted, through each kind of life after it: the
+/// saved state, the state after a normal end, none (a lost `/data`), and
+/// one whose own turn asks a question meanwhile.
 #[test]
 fn a_late_answer_is_a_fresh_claim_even_without_the_cache() {
     let a = agent("juniper");
@@ -2793,6 +2798,7 @@ fn a_late_answer_is_a_fresh_claim_even_without_the_cache() {
         next.step(Input::Agents(vec![a.clone()]), T0 + 1);
         let recovery = next.recover(T0 + 1);
         assert!(!kinds(&recovery).contains(&"turn.prompt.closed".into()), "the card outlives its turn");
+        assert!(next.held().is_empty(), "no turn of this life holds it");
         next.step(Input::Runtime(Event::Connected(true)), T0 + 1);
         if questioning {
             let routine = Record { channel:records::TASKS.into(), ..rec(1, &a.owner, json!({"kind":"routine","text":"another question","chat":"talk--k3x9"})) };
@@ -2800,10 +2806,12 @@ fn a_late_answer_is_a_fresh_claim_even_without_the_cache() {
             let handed = answered(&mut next, step, T0 + 1);
             ev(&mut next, Event::Asked {turn:started(&handed).unwrap().turn}, T0 + 1);
         }
-        let input = Input::CardRecord { agent:a.fragment.clone(), fragment:"talk--k3x9".into(), record:chat[1].clone(), view:Some(v.clone()), since:0, work:work.clone(), chat:chat.clone(), unavailable:None };
+        let input = Input::CardRecord { agent:a.fragment.clone(), fragment:"talk--k3x9".into(), record:chat[1].clone(), view:Some(v.clone()), since:0, history: Ok(crate::history::Journal { work: work.clone(), chat: chat.clone(), cause: Some(chat[0].clone()) }) };
         let step = next.step(input.clone(), T0 + 1);
         let fresh = records::turn_id(&a.fragment, "talk--k3x9", "chat", 2);
         assert_ne!(fresh, old);
+        let closed: Vec<Value> = posts(&step).into_iter().filter(|(_, b)| b["kind"] == "turn.prompt.closed").map(|(_, b)| b).collect();
+        assert_eq!((closed.len(), closed[0]["turn"].as_str(), closed[0]["answerSeq"].as_u64()), (1, Some(old.as_str()), Some(2)), "the old card closed, naming the answer that rebuilds it");
         if questioning {
             assert!(commands(&step).is_empty(), "never Tell/Other into another live question");
             assert_eq!(next.state().turns[&fresh].phase, Phase::Queued);
@@ -2811,10 +2819,57 @@ fn a_late_answer_is_a_fresh_claim_even_without_the_cache() {
         }
         assert!(step.effects.iter().any(|x| matches!(x, Effect::Claim {turn,..} if turn == &fresh)));
         assert!(started(&step).is_none());
-        assert!(next.step(input, T0 + 1).effects.is_empty(), "cursor replay");
-        let denied = next.step(Input::Claimed { turn:fresh, answer:ClaimAnswer::Theirs }, T0 + 1);
+        assert!(next.step(input.clone(), T0 + 1).effects.is_empty(), "cursor replay");
+        let handed = next.step(Input::Claimed { turn: fresh.clone(), answer: ClaimAnswer::Ours { seq: Some(3) } }, T0 + 1);
+        let ts = started(&handed).expect("handed");
+        assert_eq!(ts.text, "Answer to your earlier question “Publish?”: Publish", "the owner's answer alone");
+        assert!(ts.note.as_deref().is_some_and(|n| n.contains("It was answering paul: “publish after asking”")), "its card's turn as its note: {:?}", ts.note);
+        let mut other = Engine::new(State::default(), Settings::default(), "22222222222222222222222222222222").unwrap();
+        other.step(Input::Agents(vec![a.clone()]), T0 + 1);
+        other.recover(T0 + 1);
+        other.step(input, T0 + 1);
+        let denied = other.step(Input::Claimed { turn:fresh, answer:ClaimAnswer::Theirs }, T0 + 1);
         assert!(started(&denied).is_none(), "journal claim prevents another run after rollback");
     }
+}
+
+/// Goal (P6, the rollback's double run): a card answered live, its turn
+/// acting on it, then a `/data` rolled back to before the answer: the
+/// next life reads the answer again, and the card's closure (written live,
+/// naming no answer) starts nothing. A history that could not be read is
+/// closed on the card's own turn, once, and starts nothing either.
+#[test]
+fn a_card_answered_live_starts_nothing_after_a_rollback() {
+    let a = agent("juniper");
+    let v = view(&[&a]);
+    let mut e = engine(std::slice::from_ref(&a));
+    let initial = said(&mut e, &a, &v, 1, &a.owner, json!({"text":"publish after asking"}), T0);
+    let old = started(&initial).unwrap().turn;
+    let options = vec![PromptOption { id:"yes".into(), label:"Publish".into(), style:None, words:false }];
+    let card = ev(&mut e, Event::Prompt { turn: old.clone(), prompt: "p".into(), text: "Publish?".into(), options, ttl_ms:None }, T0);
+    let saved = e.state().clone();
+    assert!(e.held().contains(&(a.fragment.clone(), "talk--k3x9".into(), "p".into())), "its answer is the running turn's");
+    let response = json!({"kind":"prompt_response","prompt":"p","option":"yes","agent":a.identity,"turn":old});
+    let live = said(&mut e, &a, &v, 2, &a.owner, response.clone(), T0 + 1);
+    assert_eq!(commands(&live).len(), 1, "the running turn has its answer");
+    let journal: Vec<Value> = posts(&initial).into_iter().chain(posts(&card)).chain(posts(&live)).map(|(_, b)| b).collect();
+    assert!(journal.iter().any(|b| b["kind"] == "turn.prompt.closed" && b.get("answerSeq").is_none()), "a live closure names no answer");
+    let work: Vec<Record> = journal.into_iter().enumerate().map(|(i, body)| Record { channel: records::WORK.into(), seq: i as u64 + 1, at: T0 as i64, principal: a.identity.clone(), kind:"message".into(), body }).collect();
+    let chat = vec![Record { at:T0 as i64, ..rec(1, &a.owner, json!({"text":"publish after asking"})) }, Record { at:T0 as i64 + 1, ..rec(2, &a.owner, response) }];
+    let mut back = Engine::new(saved, Settings::default(), "11111111111111111111111111111111").unwrap();
+    back.step(Input::Agents(vec![a.clone()]), T0 + 2);
+    back.recover(T0 + 2);
+    let again = back.step(Input::CardRecord { agent:a.fragment.clone(), fragment:"talk--k3x9".into(), record:chat[1].clone(), view:Some(v.clone()), since:0, history: Ok(crate::history::Journal { work, chat: chat.clone(), cause: Some(chat[0].clone()) }) }, T0 + 2);
+    assert!(posts(&again).is_empty() && commands(&again).is_empty() && !again.effects.iter().any(|x| matches!(x, Effect::Claim {..})), "nothing again: {:?}", again.effects);
+    assert!(again.dirty, "its cursor passes it");
+
+    let mut lost = engine(std::slice::from_ref(&a));
+    lost.recover(T0 + 2);
+    let input = |history| Input::CardRecord { agent:a.fragment.clone(), fragment:"talk--k3x9".into(), record:chat[1].clone(), view:Some(v.clone()), since:0, history };
+    let unread = lost.step(input(Err(crate::history::Unavailable::Budget)), T0 + 2);
+    assert_eq!(posts(&unread), vec![(records::work_id(&old, "pc:p"), json!({"kind":"turn.prompt.closed","turn":old,"prompt":"p","outcome":"history_unavailable"}))], "closed on its own turn, no notice");
+    assert!(!unread.effects.iter().any(|x| matches!(x, Effect::Claim {..})));
+    assert!(lost.step(input(Err(crate::history::Unavailable::Budget)), T0 + 2).effects.is_empty(), "replayed: nothing");
 }
 
 #[test]

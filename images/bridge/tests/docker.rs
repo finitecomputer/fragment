@@ -178,6 +178,12 @@ impl Container {
         assert!(out.status.success(), "docker restart: {}", String::from_utf8_lossy(&out.stderr));
     }
 
+    /// Started again after it exited, its filesystem as it was.
+    fn start(&self) {
+        let out = Command::new(docker()).args(["start", &self.id]).output().expect("docker runs");
+        assert!(out.status.success(), "docker start: {}", String::from_utf8_lossy(&out.stderr));
+    }
+
     /// SIGTERM, as the Computer DO's sleep sends it: how long until it is
     /// gone, and its exit code.
     fn sigterm(&self) -> (Duration, i64) {
@@ -2959,18 +2965,48 @@ async fn a_turn_cut_by_a_restart_is_closed_and_told() {
     eprintln!("cut: {closed}\ncut: the boundary the model saw: {before:?}\ncut: the message: {asked:?}");
 }
 
-/// P6: sleep under a real Hermes clarify, restore it, answer the original
-/// card, and count the tool's append. A second click and another restart
-/// must not repeat the question or the action. Vendor model only is scripted.
+/// The id of `card`'s option labelled `label` (Hermes may add "
+/// (Recommended)").
+fn option(card: &serde_json::Value, label: &str) -> serde_json::Value {
+    card["options"].as_array().into_iter().flatten().find(|o| o["label"].as_str().is_some_and(|l| l.starts_with(label))).unwrap_or_else(|| panic!("{label:?} among the card's options: {card}"))["id"].clone()
+}
+
+/// The model's calls that asked for the approvals proof's effect
+/// (`support::model::APPROVAL_EFFECT`): counted where a rolled-back `/data`
+/// cannot forget them.
+fn effects_asked(model: &Model) -> usize {
+    let calls = model.calls.lock().unwrap();
+    calls.iter().filter(|c| c.path.ends_with("/chat/completions")).filter(|c| support::model::answer(&c.body).1.is_some_and(|t| t["id"] == support::model::APPROVAL_EFFECT)).count()
+}
+
+/// Goal (P6): a card outlives its turn and its computer, with real Hermes.
+/// A turn as a real one runs (six tool calls, each with its words, then a
+/// long plan) asks its card; waiting on its owner alone lets the computer
+/// sleep; woken from that save, the owner's answer, read while the platform
+/// answers its first journal reads 503 as a deploy does, starts one fresh
+/// turn that does what was chosen once, never asking again: its message
+/// the answer alone, the card's turn its read-only context. The answer
+/// again and another restart repeat nothing; a later card answered "Keep
+/// private" across a restart does nothing.
 #[tokio::test]
 #[ignore = "needs Docker"]
-async fn an_approval_answered_after_a_restart() {
+async fn a_card_answered_after_a_sleep_starts_one_fresh_turn() {
     let (fake, model, chat, c) = hermes_running().await;
     let x = Expiry { fake, model, chat };
-    let risky = x.say("clarify: Publish the approvals proof? | Publish | Keep private");
-    within(&x.fake, &x.chat, &c, 120_000, "the original card", |w| !x.cards(w, &risky).is_empty()).await;
-    let card = x.fake.with(|w| x.cards(w, &risky)[0].clone());
-    within(&x.fake, &x.chat, &c, 10_000, "the idle hold released", |w| w.keepalive_open == 0).await;
+    let effects = "/data/work/juniper--k3x9/approval-effects";
+    let asked = x.say("prepare the approvals proof, then ask me");
+    within(&x.fake, &x.chat, &c, 180_000, "the card after its steps", |w| !x.cards(w, &asked).is_empty()).await;
+    x.fake.with(|w| {
+        let steps = w.bodies(&x.chat, "work", "turn.step").into_iter().filter(|s| s["turn"] == asked).count();
+        // Hermes may send a quick tool's step late or not at all
+        // (docs/technical-debt-ledger.md): most of them, then
+        assert!(steps >= support::model::PREPARE_STEPS / 2, "a real turn's steps before its card: {steps}; the model saw {:#?}", x.model_saw(0));
+        assert!(w.bodies(&x.chat, "chat", "reply").iter().any(|r| r["turn"] == asked && r["text"].as_str().is_some_and(|t| t.len() > 1000)), "and its long plan");
+    });
+    let card = x.fake.with(|w| x.cards(w, &asked)[0].clone());
+    let publish = option(&card, "Publish");
+    let private = option(&card, "Keep private");
+    within(&x.fake, &x.chat, &c, 10_000, "waiting on its owner lets the computer go", |w| w.keepalive_open == 0).await;
     let left_out = hold(&c).expect("held for sleep");
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("approvals-restart");
     std::fs::create_dir_all(&dir).unwrap();
@@ -2979,34 +3015,127 @@ async fn an_approval_answered_after_a_restart() {
     c.sigterm();
     drop(c);
     x.fake.until(30_000, "sleep sockets closed", |w| w.live_sockets() == 0).await;
+    // its owner answers while it sleeps; the wake meets a deploy
+    let response = json!({ "kind": "prompt_response", "agent": "npub1juniper", "turn": asked, "prompt": card["prompt"], "option": publish });
+    let answer = x.fake.say(&x.chat, &person("paul"), response.clone());
+    let fresh = fragment_bridge::records::turn_id("juniper--k3x9", &x.chat, "chat", answer["seq"].as_u64().unwrap());
+    x.fake.with(|w| w.fail_history_reads = 2);
     let c = x.container(&[("RESTORE_PENDING", "1")]);
     let cp = Command::new(docker()).args(["cp", "-a", "-", &format!("{}:/data", c.id)]).stdin(std::fs::File::open(&save).unwrap()).output().unwrap();
     assert!(cp.status.success(), "restored");
     assert!(c.exec(&["touch", "/run/computer/restored"]));
-    within(&x.fake, &x.chat, &c, 120_000, "the cut turn ended", |w| !x.ends(w, &risky).is_empty()).await;
-    assert!(x.fake.with(|w| x.closed(w, &risky).is_empty()), "restart preserves the original card");
-    let response = json!({"kind":"prompt_response", "agent":"npub1juniper", "turn":risky, "prompt":card["prompt"], "option":card["options"][0]["id"]});
-    let answer = x.fake.say(&x.chat, &person("paul"), response.clone());
-    let fresh = fragment_bridge::records::turn_id("juniper--k3x9", &x.chat, "chat", answer["seq"].as_u64().unwrap());
-    within(&x.fake, &x.chat, &c, 180_000, "fresh answer turn completed", |w| !x.ends(w, &fresh).is_empty()).await;
-    assert_ne!(risky, fresh);
-    assert!(x.fake.with(|w| x.cards(w, &fresh).is_empty()), "no repeated question");
-    assert_eq!(c.exec_out(&["cat", "/data/work/juniper--k3x9/approval-effects"]).trim(), "published", "the chosen action happened once");
+    within(&x.fake, &x.chat, &c, 180_000, "the fresh turn's end", |w| !x.ends(w, &fresh).is_empty()).await;
+    x.fake.with(|w| {
+        assert_eq!(w.fail_history_reads, 0, "the deploy's 503s were read again");
+        assert_eq!(x.ends(w, &asked).len(), 1, "the cut turn ended once");
+        let closed = x.closed(w, &asked);
+        assert_eq!((closed.len(), closed[0]["outcome"].as_str(), closed[0]["answerSeq"].as_u64()), (1, Some("answered"), answer["seq"].as_u64()), "{closed:?}");
+        assert!(x.cards(w, &fresh).is_empty(), "no question asked again");
+        assert!(x.reply(w, &fresh).is_some_and(|r| r["text"] == "scripted: published the approvals proof"), "{:?}", x.reply(w, &fresh));
+    });
+    assert_eq!(c.exec_out(&["cat", effects]).trim(), "published", "the chosen action, once");
+    {
+        let calls = x.model.calls.lock().unwrap();
+        let (said, _) = asked_with(&calls, "Answer to your earlier question “Publish the approvals proof?").expect("the fresh turn's model request");
+        assert!(said.contains("”: Publish"), "the chosen option: {said}");
+        let (context, message) = said.rsplit_once("[New message]").unwrap_or_else(|| panic!("the note as Hermes' context: {said}"));
+        for told in ["is not resumed", "It was answering", "prepare the approvals proof, then ask me", "Its steps, as recorded: terminal", "It had replied: “scripted: here is what I found so far"] {
+            assert!(context.contains(told), "{told:?} in the context: {context}");
+        }
+        assert!(!message.contains("Its steps") && !message.contains("It was answering"), "the message is the owner's answer alone: {message}");
+    }
     x.fake.say(&x.chat, &person("paul"), response.clone());
     c.restart();
     x.fake.say(&x.chat, &person("paul"), response);
     let next = x.say("good morning");
-    within(&x.fake, &x.chat, &c, 180_000, "next message completed", |w| !x.ends(w, &next).is_empty()).await;
-    assert_eq!(c.exec_out(&["cat", "/data/work/juniper--k3x9/approval-effects"]).trim(), "published", "duplicate answers and restart repeat no effect");
-    within(&x.fake, &x.chat, &c, 10_000, "idle after answer", |w| w.keepalive_open == 0).await;
-    let calls = x.model.calls.lock().unwrap();
-    let (asked, _) = asked_with(&calls, "A late answer to your earlier question.").expect("fresh model request");
-    for expected in ["Original request:", "Publish the approvals proof?", "Chosen answer: Publish", "Cut-turn steps:"] { assert!(asked.contains(expected), "{asked}") }
+    within(&x.fake, &x.chat, &c, 180_000, "the next message's end", |w| !x.ends(w, &next).is_empty()).await;
+    assert_eq!(c.exec_out(&["cat", effects]).trim(), "published", "the answer again and a restart repeat nothing");
+    assert_eq!(effects_asked(&x.model), 1);
+    x.fake.with(|w| assert_eq!(w.bodies(&x.chat, "work", "turn.start").iter().filter(|s| s["turn"] == fresh).count(), 1, "one claim"));
+
+    // Keep private, answered while the computer is down (within the card's
+    // 20 s life, this container's): nothing done
+    let second = x.say("prepare the approvals proof, then ask me");
+    within(&x.fake, &x.chat, &c, 180_000, "the second card", |w| !x.cards(w, &second).is_empty()).await;
+    let card = x.fake.with(|w| x.cards(w, &second)[0].clone());
+    c.sigterm();
+    let answer = x.fake.say(&x.chat, &person("paul"), json!({ "kind": "prompt_response", "agent": "npub1juniper", "turn": second, "prompt": card["prompt"], "option": private }));
+    assert!(answer["at"].as_u64().unwrap() < card["expiresAt"].as_u64().unwrap(), "answered in the card's life");
+    c.start();
+    let kept = fragment_bridge::records::turn_id("juniper--k3x9", &x.chat, "chat", answer["seq"].as_u64().unwrap());
+    within(&x.fake, &x.chat, &c, 180_000, "the Keep private turn's end", |w| !x.ends(w, &kept).is_empty()).await;
+    x.fake.with(|w| assert!(x.reply(w, &kept).is_some_and(|r| r["text"].as_str().is_some_and(|t| t.starts_with("scripted: kept it private"))), "{:?}", x.reply(w, &kept)));
+    assert_eq!(c.exec_out(&["cat", effects]).trim(), "published", "Keep private does nothing");
+    assert_eq!(effects_asked(&x.model), 1);
+    within(&x.fake, &x.chat, &c, 10_000, "idle after", |w| w.keepalive_open == 0).await;
 }
 
-/// A real Hermes card whose context no longer fits the recovery window
-/// closes visibly unavailable after restart. No model turn or tool effect
-/// is started from that late answer.
+/// Goal (P6, the rollback's double run), with real Hermes: a card answered
+/// live and acted on, then the computer back on a save from before the
+/// answer, reads the answer again and starts nothing (its closure was the
+/// live one's); and an answer after a card's life, across a restart, closes
+/// it expired and starts nothing.
+#[tokio::test]
+#[ignore = "needs Docker"]
+async fn a_card_answered_live_runs_once_after_a_rollback() {
+    // an hour's card first (a save takes its time); the restored
+    // computer's are 20 s (`Expiry::container`), for the expiry
+    let (fake, model, chat, c) = hermes_running().await;
+    let x = Expiry { fake, model, chat };
+    let asked = x.say("prepare the approvals proof, then ask me");
+    within(&x.fake, &x.chat, &c, 180_000, "the card after its steps", |w| !x.cards(w, &asked).is_empty()).await;
+    let card = x.fake.with(|w| x.cards(w, &asked)[0].clone());
+    let publish = option(&card, "Publish");
+    // a save from before the answer, the computer awake after it
+    let left_out = hold(&c).expect("held for a save");
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("approvals-rollback");
+    std::fs::create_dir_all(&dir).unwrap();
+    let save = dir.join("before-the-answer.tar");
+    save_data(&c, &left_out, &save);
+    unhold(&c);
+    x.fake.say(&x.chat, &person("paul"), json!({ "kind": "prompt_response", "agent": "npub1juniper", "turn": asked, "prompt": card["prompt"], "option": publish }));
+    within(&x.fake, &x.chat, &c, 120_000, "the card's turn acted and ended", |w| !x.ends(w, &asked).is_empty()).await;
+    x.fake.with(|w| assert!(x.closed(w, &asked).iter().any(|p| p["outcome"] == "answered" && p.get("answerSeq").is_none()), "answered live: {:?}", x.closed(w, &asked)));
+    assert_eq!(c.exec_out(&["cat", "/data/work/juniper--k3x9/approval-effects"]).trim(), "published");
+    assert_eq!(effects_asked(&x.model), 1);
+    c.sigterm();
+    drop(c);
+    x.fake.until(30_000, "its sockets closed", |w| w.live_sockets() == 0).await;
+    let c = x.container(&[("RESTORE_PENDING", "1")]);
+    let cp = Command::new(docker()).args(["cp", "-a", "-", &format!("{}:/data", c.id)]).stdin(std::fs::File::open(&save).unwrap()).output().unwrap();
+    assert!(cp.status.success(), "restored");
+    assert!(c.exec(&["touch", "/run/computer/restored"]));
+    let next = x.say("good morning");
+    within(&x.fake, &x.chat, &c, 180_000, "the next message's end, after the answer read again", |w| !x.ends(w, &next).is_empty()).await;
+    x.fake.with(|w| {
+        let answers: Vec<u64> = w.records(&x.chat, "chat").iter().filter(|r| r["body"]["kind"] == "prompt_response").filter_map(|r| r["seq"].as_u64()).collect();
+        for seq in answers {
+            let fresh = fragment_bridge::records::turn_id("juniper--k3x9", &x.chat, "chat", seq);
+            assert!(!w.bodies(&x.chat, "work", "turn.start").iter().any(|s| s["turn"] == fresh), "no fresh turn from a live answer");
+        }
+        assert_eq!(x.closed(w, &asked).len(), 1, "its one, live closure");
+    });
+    assert_eq!(effects_asked(&x.model), 1, "the effect was asked for once, before the rollback");
+
+    // past its life: expired, nothing run
+    let late = x.say("prepare the approvals proof, then ask me");
+    within(&x.fake, &x.chat, &c, 180_000, "the next card", |w| !x.cards(w, &late).is_empty()).await;
+    let card = x.fake.with(|w| x.cards(w, &late)[0].clone());
+    c.restart();
+    within(&x.fake, &x.chat, &c, 180_000, "the cut turn's end", |w| !x.ends(w, &late).is_empty()).await;
+    while fragment_bridge::log::now_ms() < card["expiresAt"].as_u64().unwrap() + 1_000 {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    let answer = x.fake.say(&x.chat, &person("paul"), json!({ "kind": "prompt_response", "agent": "npub1juniper", "turn": late, "prompt": card["prompt"], "option": card["options"][0]["id"] }));
+    let fresh = fragment_bridge::records::turn_id("juniper--k3x9", &x.chat, "chat", answer["seq"].as_u64().unwrap());
+    within(&x.fake, &x.chat, &c, 60_000, "closed expired", |w| x.closed(w, &late).iter().any(|p| p["outcome"] == "expired")).await;
+    x.fake.with(|w| assert!(!w.bodies(&x.chat, "work", "turn.start").iter().any(|s| s["turn"] == fresh), "an answer after a card's life starts nothing"));
+    assert_eq!(effects_asked(&x.model), 1);
+}
+
+/// A real Hermes card further back than a late answer's read goes is
+/// closed `history_unavailable` after a restart, and starts no model turn
+/// and no tool effect.
 #[tokio::test]
 #[ignore = "needs Docker"]
 async fn a_late_approval_over_budget_is_visibly_unavailable() {
@@ -3019,7 +3148,7 @@ async fn a_late_approval_over_budget_is_visibly_unavailable() {
     c.restart();
     let answer = fake.say(&chat,&person("paul"),json!({"kind":"prompt_response","agent":"npub1juniper","turn":old,"prompt":card["prompt"],"option":card["options"][0]["id"]}));
     let fresh = fragment_bridge::records::turn_id("juniper--k3x9", &chat, "chat", answer["seq"].as_u64().unwrap());
-    within(&fake,&chat,&c,120_000,"visible history unavailable",|w| w.bodies(&chat,"work","turn.prompt.closed").iter().any(|p| p["turn"]==old && p["outcome"]=="history_unavailable") && w.bodies(&chat,"work","turn.notice").iter().any(|p| p["turn"]==old && p["text"].as_str().is_some_and(|s| s.starts_with("History unavailable:")))).await;
+    within(&fake,&chat,&c,120_000,"the card closed unavailable",|w| w.bodies(&chat,"work","turn.prompt.closed").iter().any(|p| p["turn"]==old && p["outcome"]=="history_unavailable")).await;
     assert!(!fake.with(|w| w.bodies(&chat,"work","turn.start").iter().any(|s| s["turn"]==fresh)),"no fresh action from partial history");
     assert!(!c.exec(&["test","-f","/data/work/juniper--k3x9/approval-effects"]),"no tool effect");
     within(&fake,&chat,&c,10_000,"unavailability leaves no running hold",|w| w.keepalive_open==0).await;

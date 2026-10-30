@@ -115,18 +115,21 @@ pub const ATTACHMENTS_MAX: usize = 8;
 pub const ATTACHMENT_MAX_BYTES: u64 = 25 * 1024 * 1024;
 
 /// A prompt waits this long for its answer unless the runtime says
-/// otherwise. An hour: the person may be away from the chat. An unanswered
-/// card stays answerable across a restart for this long, subject to the
-/// recovery budgets below (docs/durable-computers.md, P6).
+/// otherwise. An hour: the person may be away from the chat. A card
+/// outlives its turn, answerable this long (docs/bridge.md, "A card
+/// outlives its turn").
 pub const PROMPT_TTL_MS_DEFAULT: u64 = 60 * 60 * 1000;
 /// The note a turn after a cut one carries (note.rs), at most: its bytes
 /// (its first line says what it is and what to do, so a cut keeps that,
 /// and its parts below fit whole unless they are far from ASCII); what the
 /// cut turn was asked, each step's tool and arguments, each card's text and
 /// each reply it had said, in characters; and the steps, cards and replies
-/// it names (the rest of the steps are counted).
+/// it names (the rest of the steps are counted). A late card answer's turn
+/// is told its card's turn's request at more length (note.rs, `late`): the
+/// answer is to it.
 pub const NOTE_MAX_BYTES: usize = 4096;
 pub const NOTE_ASKED_MAX_CHARS: usize = 300;
+pub const NOTE_LATE_ASKED_MAX_CHARS: usize = 1500;
 pub const NOTE_TOOL_MAX_CHARS: usize = 40;
 pub const NOTE_ARGS_MAX_CHARS: usize = 80;
 pub const NOTE_CARD_MAX_CHARS: usize = 200;
@@ -138,22 +141,29 @@ pub const NOTE_REPLIES_MAX: usize = 2;
 /// `/data`: note.rs, "forgotten") is told of the newest this many of its
 /// turns there that another life ran; the rest are counted.
 pub const NOTE_FORGOTTEN_MAX: usize = 4;
-/// One recovery lookup (P5 note or P6 card) has a shared budget: 24 calls,
-/// 8 MiB of response bodies, 2000 records and 8 million comparison units.
-/// At 100 records/page this covers 1000 work + 1000 chat records, with room
-/// for channel metadata and one cause lookup. Body reads are capped before
-/// allocation; scan work charges n*n + 16*n for each predicate. One turn is
-/// already limited to 200 steps and 64 final replies; this permits several
-/// turns' ordinary history without letting a busy chat cost unbounded work.
-/// Exhaustion yields visible history-unavailable, never a partial replay.
+/// The journal a note or a late card's answer reads, at most: pages of
+/// this many records, back from the turn's claim on `work` (to the agent's
+/// turn before it, or to the card) and back from the chat's tail (to that
+/// turn's start, for its replies), at most `NOTE_SCAN_RECORDS_MAX` records
+/// each. A turn before it further back than that is told nothing; a card
+/// further back is closed `history_unavailable`.
+pub const NOTE_PAGE_RECORDS: u32 = 100;
+pub const NOTE_SCAN_RECORDS_MAX: usize = 1000;
+/// One read's bounds in all (history.rs): its calls, its bodies' bytes and
+/// its records: both channels' scans, the channel list and a cause in
+/// another channel.
 pub const HISTORY_PAGES_MAX: usize = 24;
 pub const HISTORY_BYTES_MAX: usize = 8 * 1024 * 1024;
 pub const HISTORY_RECORDS_MAX: usize = 2000;
-pub const HISTORY_WORK_MAX: usize = 8_000_000;
-pub const NOTE_PAGE_RECORDS: u32 = 100;
-pub const NOTE_SCAN_RECORDS_MAX: usize = 1000;
-/// Each complete lookup also has a wall-clock budget; a timeout is visible.
+/// A note's reads are given this long in all: a turn waits for its note
+/// at most this, and past it is handed without one.
 pub const NOTE_READ_MS_MAX: u64 = 5_000;
+/// A late card answer's read is given this long at a time, its chat's
+/// follower held meanwhile; past it, or a call failed (`HTTP_TIMEOUT_MS`
+/// among them), the follower reads again from its cursor after a wait
+/// (`Unavailable::Read`): a slow or deploying platform delays the card,
+/// never closes it.
+pub const CARD_READ_MS_MAX: u64 = 30_000;
 
 /// A runtime's own prompt lifetime is honored within these bounds.
 pub const PROMPT_TTL_MS_MIN: u64 = 10 * 1000;
@@ -289,11 +299,13 @@ const _: () = assert!(PROMPT_TTL_MS_MIN <= PROMPT_TTL_MS_DEFAULT && PROMPT_TTL_M
 const _: () = assert!(SHUTDOWN_MS_MAX < 5_000, "the platform kills the guest 5 s after SIGTERM");
 const _: () = assert!(QUEUED_PER_CHAT_MAX < TURNS_OPEN_MAX);
 const _: () = assert!(LIVE_PING_MS > HTTP_TIMEOUT_MS);
+const _: () = assert!(CARD_READ_MS_MAX > HTTP_TIMEOUT_MS, "one hung call fits a card's read");
 const _: () = assert!(2 * KEEPALIVE_PING_MS < 60_000, "a cut keepalive is opened again well within the platform's idle hold (20 minutes)");
 const _: () = assert!(NOTE_MAX_BYTES < MESSAGE_TEXT_MAX_BYTES, "a note is small beside the message it comes with");
 const _: () = assert!(2 * NOTE_MAX_BYTES + 2 < MESSAGE_TEXT_MAX_BYTES, "a cut turn's note and a forgotten one's, together, are small beside it too");
 const _: () = assert!(NOTE_FORGOTTEN_MAX >= 1, "a forgotten turn is named");
 const _: () = assert!(NOTE_PAGE_RECORDS as usize <= NOTE_SCAN_RECORDS_MAX && NOTE_PAGE_RECORDS <= CATCHUP_PAGE_RECORDS);
+const _: () = assert!(2 * NOTE_SCAN_RECORDS_MAX <= HISTORY_RECORDS_MAX && 2 * NOTE_SCAN_RECORDS_MAX / NOTE_PAGE_RECORDS as usize + 2 <= HISTORY_PAGES_MAX, "a read's bounds hold both scans");
 const _: () = assert!(HOPS_MAX >= 1, "an agent's record is one hop at least");
 const _: () = assert!(AGENT_TURNS_PER_CHAT_MAX > HOPS_MAX as usize, "the budget is a backstop, past one chain of hand-offs");
 const _: () = assert!(AGENT_TURNS_WINDOW_MS > 0 && ENDED_HOPS_MS > 0);
