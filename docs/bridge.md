@@ -346,24 +346,24 @@ then an open card still holds it as described below.
 The image's `fragment-activity` plugin uses Hermes v0.21.7's supported
 `subagent_start` / `subagent_stop` and `pre_tool_call` / `post_tool_call`
 hooks. Its one authenticated `/relay/activity` socket carries both work
-and terminal observations. `?events=1` opens without holding; explicit
+and terminal observations. A connection alone holds nothing; explicit
 `{working:true|false}` frames reflect only the in-memory set of children,
 keyed by `child_session_id`. The bridge queues each signal before
 acknowledging it, before the hook returns. Several instances hold together.
-Old activity clients without the query still hold for their socket's life.
 
 Tool frames carry the task-local `HERMES_SESSION_MESSAGE_ID` (our turn),
 never a process-global chat guess. The bridge bounds and validates them,
 ignores absent turns, and deduplicates call ids within the turn (at most
-200). Pre-call establishes structured capability before progress; post-call
-maps Hermes `ok/error/cancelled/blocked` to
-`completed/failed/cancelled/blocked`. Pre-call is a policy gate, not proof
-execution started, so it creates no step. The same category table still
-classifies tools. Our image sets `BRIDGE_TOOL_OBSERVERS=1` before any turn, so an initial
-activity dial failure cannot enable legacy inference. Once structured
-capability is configured or seen, presentation progress
-never makes steps, including after disconnect. Older peers retain their
-legacy progress parser. Missing observations never become completions.
+200). Supported post-call events map Hermes `ok/error/cancelled/blocked`
+to `completed/failed/cancelled/blocked`. Pre-call is a policy gate, not proof
+execution started, so it creates no step; it only opens the shared socket.
+The category table classifies the observed tool identity.
+
+This is a hard cut: supported observations are the only source of tool
+steps. Presentation progress sends and edits are acknowledged and ignored.
+There is no parser, compatibility fallback, or configuration switch.
+Missing observations, including an absent hook or a disconnected socket,
+never become completions. Historical channel records still render as before.
 
 The socket may stay connected without holding, including while a person
 answers a card. A gateway exit or 30 seconds without frames closes it;
@@ -746,8 +746,8 @@ get_chat_info`.
 - A reply streams as `draft` frames and arrives as a `send` answering
   the turn's message. Tool steps come from the supported observer over the
   activity socket above, independent of Hermes' progress sender's polling.
-  Legacy peers' progress previews still use the category table in
-  `relay/wire.rs`; our image retains no raw args or output in step cards.
+  The category table in `relay/wire.rs` uses tool identities only; no
+  progress text is parsed. Our image retains no raw args or output in cards.
 - Everything the agent says is a reply (Paul, 2026-10-24, in place of
   2026-10-05's one reply a turn). Hermes ends a draft segment at every
   tool boundary with a `send` answering the message, so the model's text
@@ -763,7 +763,7 @@ get_chat_info`.
   replies have a bound of their own (`INTERIM_REPLIES_PER_TURN_MAX`, one
   a posted step), apart from `REPLIES_PER_TURN_MAX`, so narration never
   costs the turn its answer (`narration_never_costs_the_answer`). The
-  tool's progress can reach the bridge before that `send`: a step that
+  tool's observation can reach the bridge before that `send`: a step that
   comes while a draft segment streams waits for it, at most
   `STEP_HOLD_MS` (3 s), the words then going before it; a question, a
   card, a file or the end stops the wait. And while a reply's image links

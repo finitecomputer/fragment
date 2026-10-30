@@ -340,7 +340,8 @@ Structured Hermes steps add `tool_call_id`, `status` (`completed`, `failed`,
 `cancelled`, `blocked`), `duration_ms`, nullable `error_type` / `error_message`,
 and `result_ref` (at most 300 characters, `hermes:<session>:<call>` identifying
 Hermes' source evidence, not a public URL). `ok` remains for old readers and
-is true only for `completed`. No step is inferred on disconnect. Old steps
+is true only for `completed`. Tool steps come only from supported observer results: presentation progress
+text is never parsed, and no step is inferred on disconnect. Old steps
 without these fields still render. Terminal steps never show as running;
 cancelled and blocked cards name their outcome and details show duration.
 

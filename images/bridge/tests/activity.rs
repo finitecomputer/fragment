@@ -17,7 +17,7 @@ async fn activity_is_authenticated_and_every_live_socket_holds() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let listen = listener.local_addr().unwrap();
     drop(listener);
-    let runtime = Box::new(Relay { config: RelayConfig { listen, gateway_id: "activity-test".into(), secret: SECRET.into(), media_dir: dir.join("media"), media_local: true, structured_tools: false } });
+    let runtime = Box::new(Relay { config: RelayConfig { listen, gateway_id: "activity-test".into(), secret: SECRET.into(), media_dir: dir.join("media"), media_local: true } });
     let bridge = support::start(support::config(&fake.url(), &dir, support::settings()), runtime);
     fake.until(10_000, "the bridge to start", |w| w.live_sockets() >= 1).await;
     let request = |secret| {
@@ -31,15 +31,19 @@ async fn activity_is_authenticated_and_every_live_socket_holds() {
     assert!(fake.with(|w| w.keepalive_log.is_empty()), "an unauthenticated socket holds nothing");
     let (mut first, _) = connect_async(request(SECRET)).await.unwrap();
     assert_eq!(first.next().await.unwrap().unwrap().into_text().unwrap(), "ready");
+    first.send(tokio_tungstenite::tungstenite::Message::text(r#"{"working":true}"#)).await.unwrap();
+    assert_eq!(first.next().await.unwrap().unwrap().into_text().unwrap(), "working");
     fake.until(10_000, "runtime work holds", |w| w.keepalive_open == 1).await;
     let (mut second, _) = connect_async(request(SECRET)).await.unwrap();
     assert_eq!(second.next().await.unwrap().unwrap().into_text().unwrap(), "ready");
-    let mut event_req = format!("ws://{listen}/relay/activity?events=1").into_client_request().unwrap();
+    let mut event_req = format!("ws://{listen}/relay/activity").into_client_request().unwrap();
     event_req.headers_mut().insert("authorization", format!("Bearer {}", wire::token("activity-test", SECRET, 0)).parse().unwrap());
     let (mut observer, _) = connect_async(event_req).await.unwrap();
     assert_eq!(observer.next().await.unwrap().unwrap().into_text().unwrap(), "ready");
     observer.send(tokio_tungstenite::tungstenite::Message::text(r#"{"working":false}"#)).await.unwrap();
     observer.close(None).await.unwrap();
+    second.send(tokio_tungstenite::tungstenite::Message::text(r#"{"working":true}"#)).await.unwrap();
+    assert_eq!(second.next().await.unwrap().unwrap().into_text().unwrap(), "working");
     first.close(None).await.unwrap();
     // No gateway chat connection is needed for runtime activity. Give the
     // first socket's close time to reach the engine before checking it.
@@ -59,7 +63,7 @@ async fn structured_disconnect_keeps_other_work_and_never_invents_completion() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let listen = listener.local_addr().unwrap();
     drop(listener);
-    let runtime = Box::new(Relay { config: RelayConfig { listen, gateway_id: "activity-test".into(), secret: SECRET.into(), media_dir: dir.join("media"), media_local: true, structured_tools: true } });
+    let runtime = Box::new(Relay { config: RelayConfig { listen, gateway_id: "activity-test".into(), secret: SECRET.into(), media_dir: dir.join("media"), media_local: true } });
     let bridge = support::start(support::config(&fake.url(), &dir, support::settings()), runtime);
     let hermes = Hermes::spawn(listen, "activity-test", SECRET);
     let chat = fake.chat("talk", &["juniper"]);
@@ -71,9 +75,11 @@ async fn structured_disconnect_keeps_other_work_and_never_invents_completion() {
     };
     let (mut children, _) = connect_async(request("")).await.unwrap();
     children.next().await.unwrap().unwrap();
-    let (mut observer, _) = connect_async(request("?events=1")).await.unwrap();
+    children.send(tokio_tungstenite::tungstenite::Message::text(r#"{"working":true}"#)).await.unwrap();
+    assert_eq!(children.next().await.unwrap().unwrap().into_text().unwrap(), "working");
+    let (mut observer, _) = connect_async(request("")).await.unwrap();
     observer.next().await.unwrap().unwrap();
-    let said = fake.say(&chat, &person("paul"), json!({"text":"use a tool slow"}));
+    let said = fake.say(&chat, &person("paul"), json!({"text":"use a tool slow without observations"}));
     let turn = fragment_bridge::records::turn_id("juniper--k3x9", &chat, "chat", said["seq"].as_u64().unwrap());
     fake.until(10_000, "turn started", |w| !w.bodies(&chat, "work", "turn.start").is_empty()).await;
     let frame = json!({"turn":turn,"tool":"terminal","excerpt":"Exit code: 7", "evidence":{

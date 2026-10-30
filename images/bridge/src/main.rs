@@ -54,11 +54,6 @@ fn runtime() -> Box<dyn Runtime> {
                 listen,
                 gateway_id: env_or("GATEWAY_RELAY_ID", "fragment-computer"),
                 secret,
-                structured_tools: match env("BRIDGE_TOOL_OBSERVERS").as_deref() {
-                    None | Some("") => false,
-                    Some("1") => true,
-                    Some(_) => fail("BRIDGE_TOOL_OBSERVERS is `1`, or unset"),
-                },
                 media_dir: PathBuf::from(env_or("BRIDGE_RELAY_MEDIA_DIR", "/tmp/bridge-relay-media")),
                 // a test's fake servers, local and plain http (runtime/relay/fetch.rs)
                 media_local: match env("BRIDGE_MEDIA_LOCAL").as_deref() {

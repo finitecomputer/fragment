@@ -112,7 +112,7 @@ upgrade re-reads it, and the real-Hermes lane
     Hermes sends the link as text;
   - `get_chat_info`, `thread_create`, `thread_rename`;
   - `task_card`, `task_card_stop`: only for Slack chats
-    (`gateway/run_turn.py`), so Relay's own steps are progress text;
+    (`gateway/run_turn.py`); our image gets steps from supported observers;
   - `follow_up`: Discord's interaction tokens.
 - The connector: `interrupt_inbound {session_key, chat_id}`: Stop, for
   `agent:<profile>:relay:group:<chat_id>` (never a `/stop` message: one
@@ -164,7 +164,9 @@ our image uses the existing authenticated local `/relay/activity` socket
 for both child lifecycle and terminal tool observers (docs/bridge.md).
 The pinned observer supplies tool/session/call ids, duration, status
 (`ok`, `error`, `cancelled`, `blocked`) and error fields. We do not patch
-Hermes or infer completion from progress text.
+Hermes or infer completion from progress text. Progress sends and edits
+are presentation only: the bridge contains no legacy tool-step parser or
+fallback. A missing observer result establishes no outcome.
 
 ## Hermes' settings (images/hermes)
 

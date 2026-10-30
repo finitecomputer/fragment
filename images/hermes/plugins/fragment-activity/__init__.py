@@ -31,7 +31,7 @@ def _connect():
     url = os.environ["GATEWAY_RELAY_URL"].rstrip("/")
     url = url.replace("https://", "wss://", 1).replace("http://", "ws://", 1)
     token = make_token(os.environ["GATEWAY_RELAY_ID"], os.environ["GATEWAY_RELAY_SECRET"], ttl_seconds=60)
-    socket = connect(url + "/relay/activity?events=1", additional_headers={"Authorization": "Bearer " + token},
+    socket = connect(url + "/relay/activity", additional_headers={"Authorization": "Bearer " + token},
                      open_timeout=2, close_timeout=1, ping_interval=10, ping_timeout=10, proxy=None)
     try:
         if socket.recv(timeout=2) != "ready":

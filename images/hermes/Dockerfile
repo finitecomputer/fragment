@@ -351,7 +351,6 @@ ENV PATH="/opt/hermes/bin:/opt/hermes/.venv/bin:/data/hermes/.local/bin:/usr/loc
     HERMES_CUA_DRIVER_CMD=/usr/local/bin/cua-driver \
     CUA_DRIVER_RS_TELEMETRY_ENABLED=false \
     CUA_DRIVER_RS_UPDATE_CHECK=false \
-    BRIDGE_TOOL_OBSERVERS=1 \
     FRAGMENT_API=http://api.fragment.internal \
     FRAGMENT_MODEL=http://model.fragment.internal
 WORKDIR /opt/hermes

@@ -25,7 +25,7 @@ fn free_port() -> SocketAddr {
 }
 
 fn relay(listen: SocketAddr, dir: &std::path::Path) -> Box<Relay> {
-    Box::new(Relay { config: RelayConfig { listen, gateway_id: "computer-test".into(), secret: SECRET.into(), media_dir: dir.join("relay-media"), media_local: true, structured_tools: false } })
+    Box::new(Relay { config: RelayConfig { listen, gateway_id: "computer-test".into(), secret: SECRET.into(), media_dir: dir.join("relay-media"), media_local: true } })
 }
 
 fn replies(w: &World, chat: &str) -> Vec<Value> {
@@ -51,7 +51,7 @@ fn card_settings() -> fragment_bridge::engine::Settings {
 }
 
 /// Goal: Hermes' turn reaches the chat as the bridge's records: its tool
-/// progress lines as steps, its draft frames as the chat's drafts, its
+/// supported observations as steps, its draft frames as the chat's drafts, its
 /// final send as the reply, its reactions as the turn's end.
 #[tokio::test]
 async fn a_reply_with_steps_and_drafts() {
@@ -63,10 +63,10 @@ async fn a_reply_with_steps_and_drafts() {
     fake.until(WAIT, "the turn's end", |w| !w.bodies(&chat, "work", "turn.end").is_empty()).await;
     fake.with(|w| {
         assert_eq!(replies(w, &chat), vec![json!({ "text": "echo: [paul] use a tool please", "turn": turn })]);
-        // each line its tool, what it does, and the call's preview, whether
-        // Hermes names the tool or says its friendly verb
+        // Observed tool identities classify work; arguments are withheld.
+        // The presentation sends/edits create no extra steps.
         let steps: Vec<(String, String, String)> = w.bodies(&chat, "work", "turn.step").iter().map(|s| (s["tool"].as_str().unwrap().into(), s["category"].as_str().unwrap().into(), s["args"].as_str().unwrap().into())).collect();
-        assert_eq!(steps, vec![("terminal".into(), "shell".into(), "`ls`".into()), ("web_search".into(), "web".into(), "x".into())]);
+        assert_eq!(steps, vec![("terminal".into(), "shell".into(), "".into()), ("web_search".into(), "web".into(), "".into())]);
         let reply = "echo: [paul] use a tool please";
         let partial = w.drafts.iter().filter(|d| d.2 == turn).filter_map(|d| d.3.as_deref()).any(|t| t.len() < reply.len() && reply.starts_with(t));
         assert!(partial, "Hermes' draft frames are the chat's drafts: {:?}", w.drafts);
@@ -842,7 +842,7 @@ async fn an_image_sent_by_url_is_fetched() {
     let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
     let dir = support::dir("relay-image-url-public");
     let listen = free_port();
-    let config = RelayConfig { listen, gateway_id: "computer-test".into(), secret: SECRET.into(), media_dir: dir.join("relay-media"), media_local: false, structured_tools: false };
+    let config = RelayConfig { listen, gateway_id: "computer-test".into(), secret: SECRET.into(), media_dir: dir.join("relay-media"), media_local: false };
     let bridge = support::start(support::config(&fake.url(), &dir, support::settings()), Box::new(Relay { config }));
     let _hermes = Hermes::spawn(listen, "computer-test", SECRET);
     let chat = fake.chat("talk", &["juniper"]);
@@ -978,12 +978,12 @@ async fn a_file_fetched_while_words_are_awaited_keeps_the_order() {
             let seen: Vec<String> = all
                 .iter()
                 .map(|r| match r["body"]["kind"].as_str() {
-                    Some(kind) => format!("{kind} {}", r["body"]["args"].as_str().unwrap_or("")).trim_end().to_string(),
+                    Some(kind) => format!("{kind} {}", r["body"]["tool_call_id"].as_str().unwrap_or("")).trim_end().to_string(),
                     None => format!("reply {} {} {}", r["body"]["text"].as_str().unwrap_or(""), r["body"]["attachments"][0]["name"].as_str().unwrap_or("-"), if r["body"]["interim"] == true { "interim" } else { "said" }),
                 })
                 .collect();
             let answer = format!("reply echo: [paul] narrate twice late words-picture:{url} pause:{pause} - said");
-            let want = vec!["turn.start".to_string(), format!("reply {} cat.png interim", support::hermes::NARRATION), "turn.step `echo 1`".into(), format!("reply {} - interim", support::hermes::SECOND_NARRATION), "turn.step `echo 2`".into(), answer, "turn.end".into()];
+            let want = vec!["turn.start".to_string(), format!("reply {} cat.png interim", support::hermes::NARRATION), "turn.step narrated-1".into(), format!("reply {} - interim", support::hermes::SECOND_NARRATION), "turn.step narrated-2".into(), answer, "turn.end".into()];
             assert_eq!(seen, want, "pause {pause}");
         });
     }
@@ -1159,5 +1159,21 @@ async fn observed_outcomes_preserve_reply_boundaries_without_drafts() {
             assert_eq!(w.bodies(&chat,"work","turn.step").iter().filter(|r| r["turn"] == turn).count(),if review {2} else {1});
         });
     }
+    bridge.stop().await;
+}
+
+/// A hard cut: even plausible sends and growing edits never become tool
+/// evidence when hooks are absent. There is no compatibility switch.
+#[tokio::test]
+async fn presentation_progress_without_observations_creates_no_steps() {
+    let (fake, bridge, _hermes, _dir) = setup("no-progress-parser", &["juniper"]).await;
+    let chat = fake.chat("talk", &["juniper"]);
+    fake.until(WAIT,"chat followed", |w| w.live_sockets() >= 2).await;
+    fake.say(&chat,&person("paul"),json!({"text":"use a tool without observations"}));
+    fake.until(WAIT,"turn ended", |w| !w.bodies(&chat,"work","turn.end").is_empty()).await;
+    fake.with(|w| {
+        assert!(w.bodies(&chat,"work","turn.step").is_empty());
+        assert_eq!(replies(w,&chat).len(),1);
+    });
     bridge.stop().await;
 }
