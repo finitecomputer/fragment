@@ -1341,13 +1341,13 @@ impl RuntimeLane {
                     Command::Tell { text, attached, .. } => {
                         if let Some(a) = attached.take() {
                             let files = download(&api, &a.agent, &a.fragment, &a.refs, &media_dir).await;
-                            *text = crate::runtime::with_files(text, &a, &files);
+                            *text = crate::runtime::with_files(text, &a.by_name, a.refs.len(), &files);
                         }
                     }
                     Command::Answer { words, attached, .. } => {
                         if let Some(a) = attached.take() {
                             let files = download(&api, &a.agent, &a.fragment, &a.refs, &media_dir).await;
-                            *words = Some(crate::runtime::with_files(words.as_deref().unwrap_or(""), &a, &files));
+                            *words = Some(crate::runtime::with_files(words.as_deref().unwrap_or(""), &a.by_name, a.refs.len(), &files));
                         }
                     }
                     _ => {}

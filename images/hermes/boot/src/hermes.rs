@@ -343,17 +343,14 @@ pub const ASKING: &str = "You are in a Fragment chat, and its people are not tec
 
 /// What every agent is told of the files people attach in our chats, beside
 /// `ASKING` on every turn (2026-10-22: nothing told it an attachment is a
-/// file it can use). Hermes' relay adapter downloads each attachment before
-/// the turn into the scratch it moves to the profile's cache
-/// (`relay_media_<random>.<ext>`; Hermes prunes what sits a day unused:
-/// its `SCRATCH_MAX_IDLE_HOURS`, 24), and the turn's text names that path
-/// only in its note before the message: an image's as `vision_analyze`'s
-/// `image_url:`, a document's as where it is "saved at". Its browser tools
+/// file it can use). The bridge downloads originals into its media scratch
+/// and names each file, MIME and path after the message's words,
+/// independent of Hermes' cache hints and image routing. Its browser tools
 /// have no upload: a site's upload button opens the file dialog on its
 /// desktop, where `computer_use` types the path. The `fragment` skill's
 /// first page (`computer.md`, "Files your owner sends you") says the same
 /// at more length.
-pub const FILES: &str = "A file someone attaches in this chat is already on your computer: the note before their message names its path. It is cleared after a day, so copy it into your work to keep it. To put it on a website, click the site's upload button with your browser tools, then type its full path into the file dialog on your desktop with computer_use and press Enter.";
+pub const FILES: &str = "Chat attachments are already on your computer. The attachment note names each file, its type and its local path under /tmp/bridge-media. Use that path with your tools to copy or edit the original; copy it into your app or work to keep it across a sleep. To put it on a website, click the site's upload button with your browser tools, then type its full path into the file dialog on your desktop with computer_use and press Enter.";
 
 /// What every agent is told of the files it sends in our chats, after
 /// `FILES` on every turn (Paul, 2026-10-23: asked for a PDF in the chat,
@@ -1511,10 +1508,9 @@ mod tests {
     }
 
     /// Goal (2026-10-22): every agent is told, on every turn in our chats,
-    /// that a file someone attaches is already on its computer, where the
-    /// note before the message names its path (an image's after
-    /// `image_url:`, as Hermes' note says it), that it is cleared after a
-    /// day, and how to put it on a website (a site's upload button with
+    /// that a file someone attaches is already on its computer, its
+    /// original path, name and type, copying it into the app or work to
+    /// survive a sleep, and how to put it on a website (its upload button with
     /// its browser tools, then the path typed into its desktop's file dialog
     /// with computer_use), in plain words; and the `fragment` skill's first
     /// page says the same at more length. Method: the overlay's relay hint
@@ -1524,14 +1520,14 @@ mod tests {
         let m = managed_config(&[], CARD_TIMEOUT_S, crate::desktop::IDLE_STOP_MS);
         assert_eq!(relay_hint(), format!("{ASKING}\n\n{FILES}\n\n{SENDING}\n\n{SIMPLEX}\n\n{DELEGATING}"));
         assert!(m.contains(&format!("    append: {}\n", q(&relay_hint()))), "its files beside how to ask, in the relay's hint: {m}");
-        for said in ["already on your computer", "the note before their message names its path", "cleared after a day", "copy it into your work", "upload button with your browser tools", "full path into the file dialog on your desktop with computer_use", "press Enter"] {
+        for said in ["already on your computer", "each file, its type and its local path under /tmp/bridge-media", "tools to copy or edit the original", "copy it into your app or work", "across a sleep", "upload button with your browser tools", "full path into the file dialog on your desktop with computer_use", "press Enter"] {
             assert!(FILES.contains(said), "{said}: {FILES}");
         }
         assert!(!FILES.contains(['`', '\n', '$']) && FILES.len() < 500, "one plain paragraph, nothing Hermes would expand: {FILES}");
         let page = include_str!("computer.md");
         let section = page.split("\n## ").find(|s| s.starts_with("Files your owner sends you\n")).expect("computer.md has the section");
         let section = section.split_whitespace().collect::<Vec<_>>().join(" ");
-        for said in ["already on your computer", "the note before their message names its path", "after a day", "copy it into your work", "upload button with your browser tools", "file dialog on your desktop", "computer_use", "press Enter"] {
+        for said in ["already on your computer", "original name, type and local path", "/tmp/bridge-media", "copy or edit", "app or work", "across a sleep", "upload button with your browser tools", "file dialog on your desktop", "computer_use", "press Enter"] {
             assert!(section.contains(said), "computer.md, \"Files your owner sends you\", says {said}: {section}");
         }
     }
