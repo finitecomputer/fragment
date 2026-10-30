@@ -588,5 +588,29 @@ pub fn secrets(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("an editor deletes a secret", r.status == 200 && r.body["removed"] == true, &r);
     let r = api.signed(&owner, "DELETE", &format!("/api/f/{name}/secrets/OPENROUTER_API_KEY"), None)?;
     s.ok("deleting it again removes nothing", r.status == 200 && r.body["removed"] == false, &r);
+
+    // from its own page (`__secrets`): an editor's session there sets one as
+    // the API does, written and never read back; a viewer's does not, nor
+    // a cross-site form
+    let token = "123456:page-set-never-shown";
+    let site = |keys: &Keys| -> Result<String> { Ok(format!("fragment_site={}", super::signin::site_cookie(api, &api.sign_in(&Api::email_of(keys))?, &name)?)) };
+    let (editor_site, viewer_site) = (site(&owner)?, site(&viewer)?);
+    let page_put = |cookie: &str, content_type: &str| {
+        let body = json!({ "value": token, "hosts": ["api.telegram.org"] });
+        api.call(api::Call { method: "PUT", url: api.site_url(&name, "__secrets/BOT_TOKEN"), body: Some(body.to_string().into_bytes()), content_type: Some(content_type), cookie: Some(cookie.to_string()), ..api::Call::default() })
+    };
+    let r = page_put(&editor_site, "application/json")?;
+    s.ok("an editor sets a secret from its page, as the API sets it, its value in no answer", r.status == 200 && r.body["hosts"] == json!(["api.telegram.org"]) && !r.text.contains(token), &r);
+    let r = page_put(&viewer_site, "application/json")?;
+    s.ok("a viewer's page sets none", r.status == 403, &r);
+    let r = page_put(&editor_site, "text/plain")?;
+    s.ok("nor does a form (no JSON, no preflight)", r.status == 400, &r);
+    let listed = api.signed(&owner, "GET", &format!("/api/f/{name}/secrets"), None)?;
+    let events = api.signed(&owner, "GET", &format!("/api/f/{name}/events"), None)?;
+    s.ok(
+        "it lists by name and hosts, is logged as set, and its value is in no list or event",
+        listed.body["secrets"].as_array().is_some_and(|l| l.iter().any(|x| x == &json!({ "name": "BOT_TOKEN", "hosts": ["api.telegram.org"] }))) && events.text.contains("secret.set") && !listed.text.contains(token) && !events.text.contains(token),
+        format!("{listed} {events}"),
+    );
     Ok(())
 }
