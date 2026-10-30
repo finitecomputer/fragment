@@ -421,6 +421,9 @@ pub struct ComputerView {
     /// offer SimpleX only then. Absent for an image that never said so.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub simplex: bool,
+    /// Image-declared UI and chat references; grants no connector authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<ComputerCapabilities>,
     /// The guest's view only: what its XFTP relay carries
     /// (`fragment_core::relay`; `GET /api/computer/relay`), so its bridge
     /// sends its SimpleX core's files through it. Absent from a platform
@@ -744,4 +747,35 @@ mod tests {
 pub struct RelayTarget {
     pub host: String,
     pub port: u16,
+}
+
+/// Bounded image discovery. All additions default absent/empty for old images.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ComputerCapabilities {
+    #[serde(default)]
+    pub home_chat: bool,
+    #[serde(default)]
+    pub connectors: Vec<ConnectorPage>,
+    #[serde(default)]
+    pub chats: Vec<ConnectorChat>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ConnectorPage {
+    pub id: String,
+    pub title: String,
+    pub port: u16,
+    pub path: String,
+    #[serde(default)]
+    pub requires_always_on: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConnectorChat {
+    pub connector: String,
+    pub agent: String,
+    pub chat: String,
 }

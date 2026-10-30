@@ -2823,3 +2823,25 @@ and image-side mirroring; those transports must check it when introduced.
 Org disable/resume, outbound mirror/credential fencing and older-image
 suspension ship with org policy. This seam alone does not stop outbound
 mirroring by today's images.
+
+### Image capabilities
+
+An authenticated guest may `POST /api/computer/capabilities` with
+`{homeChat, connectors: [{id, title, port, path, requiresAlwaysOn}],
+chats: [{connector, agent, chat}]}`. It answers `{accepted}`: false while
+starting, when no running image may own the report. Declarations are at
+most 16 KiB, 16 pages and 128 chat references; page titles are 1–80 bytes,
+IDs connector slugs and paths local port paths. Duplicate pages and chat
+references are refused. Chat references must name assigned owner agents
+and an owner-owned fragment including that agent. Consumers must recheck
+membership before using a stored reference after membership changes.
+
+`ComputerView.capabilities` is optional. Explicit reports persist against
+`version_running`, are hidden when the current image differs, and an
+explicit empty report suppresses legacy discovery. Old `?simplex=1` and
+`ComputerView.simplex` remain supported, translated in `computer_legacy.rs`
+to the existing 6080 `/simplex/` page (requiresAlwaysOn, no homeChat support).
+New reports win without duplicating that page. Discovery contains no
+invitation, key or link state, grants no door or network permission, and
+changes no shell/image/chat behavior. Existing port tickets still authorize
+the owner to open a declared page.

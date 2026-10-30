@@ -58,3 +58,5 @@ These are fragments or computers, or components any fragment may use:
 Connector permission and restricted TCP targets are operator policy (`deploy/computer-connectors.json` defaults), not image declarations. Relay leases and pooled computer quotas remain platform security.
 
 Door IDs and storage are connector-neutral; owner-issued authorization stays platform-side. Older SimpleX images retain byte-compatible tickets; schema step 4 prevents rollback to older Worker code.
+
+Legacy SimpleX discovery is isolated in `computer_legacy.rs`, retained until active and rollback images no longer need it. Generic image capabilities describe pages and chats without granting connector permission.

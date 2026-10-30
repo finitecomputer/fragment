@@ -169,6 +169,11 @@ impl FragmentCell {
             // its face (kind, title, picture), for whatever names it: an
             // agent shows by its fragment's (share.rs, `name_agents`)
             "face" => Ok(self.meta(MetaKey::Face)?.and_then(|f| serde_json::from_str::<Value>(&f).ok()).unwrap_or(Value::Null)),
+            "connector-chat" => {
+                let text = |k: &str| body[k].as_str().unwrap_or("");
+                let ok = self.must(MetaKey::Owner)? == text("owner") && self.member_role(text("identity"))?.is_some();
+                Ok(json!({ "ok": ok }))
+            }
             "identity" => {
                 let computer = body["computer"].as_str().unwrap_or("");
                 self.assigned_to(computer)?;

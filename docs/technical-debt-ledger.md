@@ -1663,3 +1663,5 @@ fragment.club until cutover (decisions 34–35).
 - **Delete when:** Cloudflare fixes #362 and a canary round shows no
   `snapshot: "dead"` across its snapshot wakes; or snapshots go
   (`FRAGMENT_COMPUTER_SNAPSHOTS=off`), when the wait goes with them.
+
+Image discovery keeps `?simplex=1` and `ComputerView.simplex` translation in `cell/src/computer_legacy.rs`. Remove only when all active images and retained rollback images use generic capabilities; the existing shell and page protocols are still supported.
