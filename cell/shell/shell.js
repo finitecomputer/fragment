@@ -19,7 +19,7 @@ import { createTitles } from "./fragment-title.js";
 import { createLayout, store, reducedMotion, springFrames } from "./layout.js";
 import { createViewer } from "./viewer.js";
 import { billingSections, returnSaid, returning, seatGives } from "./billing.js";
-import { createChatList } from "./chat-list.js";
+import { createChatList, newestChat } from "./chat-list.js";
 import { createSessionRefresh } from "./session-refresh.js";
 import { createOnboarding } from "./onboarding.js";
 import { createComputer } from "./computer.js";
@@ -1314,7 +1314,7 @@ async function promptChat() {
   if (open && open.kind === "chat" && own(open)) return open.name;
   const primary = primaryAgent();
   if (!primary?.identity) return null;
-  const theirs = shown(chats()).filter((f) => own(f) && agentsOf(f.name).includes(primary.identity)).sort(newest)[0];
+  const theirs = shown(chats()).filter((f) => own(f) && agentsOf(f.name).includes(primary.identity)).sort(newestChat)[0];
   return theirs?.name ?? (await newChat(primary.identity, { quiet: true })) ?? null;
 }
 // A prompt waiting for its chat's page to ask `agents?` (a frame just

@@ -1,5 +1,8 @@
 import { avatar } from "./agent-identity.js";
 
+// Newest first, with a newly made chat (no preview yet) before older ones.
+export const newestChat = (a, b) => (b.previewAt ?? Infinity) - (a.previewAt ?? Infinity) || (a.name < b.name ? -1 : 1);
+
 export function createChatList({ api, ui, data, selection, menus, navigation, listLive, load, invites, setInvites }) {
   const { $, el, patch, agentFace, notice } = ui;
   const { byName, own, chats, shown, titleOf, chatTitle, homeMark, isGroup, agentOfChat, agentsOf, agents, allFragments, computer, isGuest, personId } = data;
@@ -100,9 +103,6 @@ export function createChatList({ api, ui, data, selection, menus, navigation, li
     const next = Math.min(...doing.map((x) => x.until));
     if (Number.isFinite(next)) doingTimer = setTimeout(renderChats, Math.max(1000, next - Date.now()));
   }
-  // Newest first: a chat by when its newest message was said (its row's
-  // `previewAt`); one with nothing said yet (just made) above them all.
-  const newest = (a, b) => (b.previewAt ?? Infinity) - (a.previewAt ?? Infinity) || (a.name < b.name ? -1 : 1);
   function renderChats() {
     const primary = primaryAgent();
     const agentRows = [];
@@ -140,7 +140,7 @@ export function createChatList({ api, ui, data, selection, menus, navigation, li
       $(id).dataset.tooltip = `${launcherLabel} (⌘K)`;
       $(id).setAttribute("aria-label", launcherLabel);
     }
-    const rows = shown(chats()).sort(newest).map((f) => {
+    const rows = shown(chats()).sort(newestChat).map((f) => {
       const active = f.name === current() && !page();
       const row = el("button", `row chat-row${active ? " active" : ""}`);
       row.type = "button";

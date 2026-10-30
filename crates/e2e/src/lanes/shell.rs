@@ -6878,6 +6878,30 @@ fn roster_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person
         there && listed == want && still == want,
         json!({ "listed": listed, "after": still }),
     );
+    // A prompt from someone else's chat goes to one of the person's own
+    // chats with their primary agent. This also exercises the comparator
+    // shared by the shell's prompt fallback and chat-list.js (#707).
+    b.click(page, "#add-app")?;
+    let prompt = "document.querySelector('.pane[data-key=prompts] .app-prompt')";
+    let offered = b.until(page, &format!("!!{prompt}"), wait);
+    let text = b.eval(page, &format!("{prompt}?.textContent ?? ''"))?;
+    b.eval(page, &format!("({prompt}?.click(), true)"))?;
+    let composed = s.eventually(wait, || {
+        let chosen = open_chat(b, page);
+        !chosen.is_empty() && chosen != theirs
+            && b.eval_in_frame(page, &chosen, COMPOSER).ok().is_some_and(|v| v["value"] == text && v["focused"] == true)
+    });
+    let chosen = open_chat(b, page);
+    let row = own_row_of(api, me.session, &chosen);
+    s.ok(
+        "an app prompt from someone else's chat opens one of the person's own chats with their primary agent and fills its composer",
+        offered && composed && text.as_str().is_some_and(|t| !t.is_empty())
+            && row["role"] == "owner" && row["agents"].as_array().is_some_and(|a| a.contains(&json!(first))),
+        json!({ "chosen": chosen, "row": row, "composed": composed }),
+    );
+    if composed {
+        b.eval_in_frame(page, &chosen, "(() => { const t = document.getElementById('text'); t.value = ''; t.dispatchEvent(new Event('input', { bubbles: true })); return true; })()")?;
+    }
     b.click(page, &format!("#chats [data-key={}]", js(&format!("chat:{chat}"))))?;
     Ok(())
 }
