@@ -513,7 +513,8 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("the owner, signed in on the chat's page, may write", ready && role == "owner" && chrome.eval(&page, "!document.getElementById('text').disabled")? == true, &role);
     let named = format!("document.title === {} && document.getElementById('text').placeholder === {}", js(&capital(&label)), js(&format!("Message {}", capital(&label))));
     s.ok("it names the chat by its agent, and the composer says whom it messages", shows(&mut chrome, &page, &named), chrome.eval(&page, "[document.title, document.getElementById('text').placeholder]")?);
-    s.ok("a new chat shows its empty start", chrome.eval(&page, "!!document.querySelector('.empty .agent-avatar.large')")? == true, "");
+    // drawn once its history is read, a moment after the composer is ready
+    s.ok("a new chat shows its empty start", shows(&mut chrome, &page, "!!document.querySelector('.empty .agent-avatar.large')"), "");
 
     // the page notes every draft it shows, as a person would see them
     chrome.eval(
