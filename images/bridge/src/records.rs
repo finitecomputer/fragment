@@ -608,6 +608,8 @@ pub fn turn_prompt(turn: &str, prompt: &str, text: &str, options: &[PromptOption
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Closed {
+    /// A late answer whose card's journal could not be read whole.
+    #[serde(rename = "history_unavailable")]
     Unavailable,
     Answered,
     Expired,

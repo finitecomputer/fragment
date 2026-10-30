@@ -174,6 +174,7 @@ mod tests {
         work.push(rec("work", 15, 21, ME, records::turn_prompt_closed("old", "p", Closed::Answered, Some(("yes", OWNER, None)))));
         assert_eq!(late(&work, &chat, &chat[2], 20), Ok(None));
         for how in [Closed::Expired, Closed::Stopped, Closed::Unavailable] {
+            assert_eq!(serde_json::to_value(how).unwrap(), how.as_str(), "one name on the wire and in the state");
             let mut w = history().0;
             w.push(rec("work", 15, 21, ME, records::turn_prompt_closed("old", "p", how, None)));
             assert_eq!(late(&w, &chat, &chat[2], 20), Ok(None), "{how:?} is final");
