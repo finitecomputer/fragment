@@ -472,7 +472,10 @@ checksum = "ee"
 
     impl Repo {
         fn new() -> Repo {
-            let at = std::env::temp_dir().join(format!("cli-id-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+            // the tests run at once, and a clock may tick in microseconds
+            static MADE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            let made = MADE.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let at = std::env::temp_dir().join(format!("cli-id-{}-{made}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
             fs::create_dir_all(&at).unwrap();
             let repo = Repo(at);
             repo.git(&["init", "-q"]);
