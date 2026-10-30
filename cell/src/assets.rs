@@ -1,5 +1,5 @@
 //! The release's files in the Worker's Static Assets (`ASSETS`,
-//! cell/wrangler.jsonc): the templates, the shell's files and the agent
+//! cell/wrangler.jsonc): the templates, the shell's and browser files and the agent
 //! docs, each named by its SHA-256. The cell carries only their index
 //! (crates/templates, made by its build), so an isolate holds a file's
 //! bytes only while it reads one, and none of them in its memory from the

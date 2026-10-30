@@ -108,19 +108,23 @@ impl Call for CheckoutBegin {
 }
 
 /// `POST /billing/pack`: a credit pack is to be bought by `by`, for
-/// themselves (a seat's holder) or for a member of the org they admin who
-/// holds a seat. Whose ledger it grants, and what Stripe needs.
+/// themselves (a seat's holder), for a member of the org they admin who
+/// holds a seat, or for the org it names, its own credit, which only who
+/// pays for it buys (decision 66). Whose ledger it grants, and what Stripe
+/// needs.
 #[derive(Serialize, Deserialize)]
 pub(crate) struct PackBegin {
     pub by: By,
     pub member: Option<String>,
+    pub org: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct PackPlan {
     pub buyer: String,
-    pub person: String,
+    /// The person whose ledger it grants; `None`: the org's own.
+    pub person: Option<String>,
     pub email: String,
     pub org: String,
     pub org_name: String,
@@ -339,18 +343,25 @@ impl RegistryCell {
         let who = self.person_by(&b.by)?;
         let email = self.latest_email(&who.id)?.ok_or_else(|| CellError::invalid("a pack is bought by someone who signs in, with their email"))?;
         let mine = self.member_of(&who.id)?;
-        let (org, person) = match (&b.member, mine) {
-            (None, Some(m)) if m.seat.is_some() => (m.org, who.id.clone()),
-            (None, _) => return Err(CellError::invalid("credit packs are for a seat's holder: you hold none").because(Reason::NoSeat)),
-            (Some(id), Some(m)) if m.admin != 0 => {
+        let (org, person) = match (&b.member, &b.org, mine) {
+            (Some(_), Some(_), _) => return Err(CellError::invalid("a pack is for a member or for the org, not both")),
+            // the org's own credit: who pays for it alone buys it, as only
+            // they open its billing (`customer_of`)
+            (None, Some(org), _) => match self.payer_of(org)? {
+                Some(payer) if payer == who.id => (org.clone(), None),
+                _ => return Err(CellError::new(ErrorCode::Forbidden, "only who pays for an org buys its credit").because(Reason::NotPayer)),
+            },
+            (None, None, Some(m)) if m.seat.is_some() => (m.org, Some(who.id.clone())),
+            (None, None, _) => return Err(CellError::invalid("credit packs are for a seat's holder: you hold none").because(Reason::NoSeat)),
+            (Some(id), None, Some(m)) if m.admin != 0 => {
                 let member = self.member(id)?;
                 match (member.org == m.org, member.person, member.seat) {
-                    (true, Some(p), Some(_)) => (m.org, p),
+                    (true, Some(p), Some(_)) => (m.org, Some(p)),
                     (true, None, Some(_)) => return Err(CellError::invalid("that seat waits on its email: credit is bought once someone holds it")),
                     _ => return Err(not_found(format!("no seat {id} in your org"))),
                 }
             }
-            (Some(_), _) => return Err(CellError::new(ErrorCode::Forbidden, "only an org's admins buy credit for its members")),
+            (Some(_), None, _) => return Err(CellError::new(ErrorCode::Forbidden, "only an org's admins buy credit for its members")),
         };
         let o = self.stored_org(&org)?;
         let customer = self.billing_row(&org)?.and_then(|r| r.customer);

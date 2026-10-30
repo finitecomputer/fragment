@@ -154,6 +154,10 @@ impl Store for Audited {
         self.inner.spends(month, limit)
     }
 
+    fn month_spent(&self, month: Month) -> i64 {
+        self.inner.month_spent(month)
+    }
+
     fn cap(&self, fragment: &str) -> Option<i64> {
         self.inner.cap(fragment)
     }
