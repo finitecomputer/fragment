@@ -69,9 +69,9 @@
       "class_name": "Computer",
       "scheduling_policy": "durable_object",
       "images": {
-        "stub": { "dockerfile": "../images/stub/Dockerfile", "build_context": "../images" },
+        "stub": { "dockerfile": "../images/stub/Dockerfile", "build_context": ".." },
         // the next build of the same image: the e2e's upgrade and rollback
-        "stub-next": { "dockerfile": "../images/stub/Dockerfile", "build_context": "../images", "build_vars": { "STUB_VERSION": "2" } }
+        "stub-next": { "dockerfile": "../images/stub/Dockerfile", "build_context": "..", "build_vars": { "STUB_VERSION": "2" } }
       }
     }
   ],

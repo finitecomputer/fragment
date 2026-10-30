@@ -294,6 +294,10 @@ jobs:
       # commit in eight changes one) is its layers fetched in seconds, not
       # its bridge compiled (about 100 s alone, 250 beside the Rust); a
       # changed one compiles here, before the Rust rather than beside it.
+      # Its CLI stage (the fragment CLI its agents ask with) is the same:
+      # cached until the CLI or a crate it builds from changes, then built
+      # beside the bridge's stage. The context is the repo's root, cut to
+      # what the images build from (.dockerignore).
       # Saved from the first shard on master's pushes, every stage's layers
       # (mode=max: the build stage's base too, 345 MB in all, each layer
       # kept once by its digest).
@@ -305,7 +309,7 @@ jobs:
           DOCKER_BUILD_SUMMARY: false
           DOCKER_BUILD_RECORD_UPLOAD: false
         with:
-          context: images
+          context: .
           file: images/stub/Dockerfile
           platforms: linux/amd64
           provenance: false

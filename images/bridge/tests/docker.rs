@@ -39,8 +39,8 @@ fn images_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().expect("images/").to_path_buf()
 }
 
-/// The repo's root: the Hermes image's build context (it carries the
-/// fragment CLI, of the root workspace).
+/// The repo's root: both images' build context (each carries the fragment
+/// CLI, of the root workspace).
 fn repo_dir() -> PathBuf {
     images_dir().parent().expect("the repo").to_path_buf()
 }
@@ -194,7 +194,7 @@ impl Container {
 #[tokio::test]
 #[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
 async fn the_stub_image() {
-    let built = build(&images_dir(), "stub/Dockerfile", "fragment-stub:test");
+    let built = build(&repo_dir(), "images/stub/Dockerfile", "fragment-stub:test");
     eprintln!("stub: built in {:.1} s, {} MB", built.as_secs_f64(), size("fragment-stub:test") / 1_000_000);
     let fake = Fake::start("0.0.0.0:0", &["juniper"]).await;
     let model = Model::start("0.0.0.0:0").await;

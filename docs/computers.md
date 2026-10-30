@@ -1785,9 +1785,11 @@ settings and state):
   and the fragment API, with the chat records of docs/chat-records.md.
   Its core names no runtime; `relay` (Hermes' Relay) and `script` (a
   deterministic agent) are its two runtimes.
-- `images/stub`: the bridge with `script`, and a screen page. 9.6 MB; a
-  local start follows its chats in 0.3 s. The platform's own lanes run
-  against it.
+- `images/stub`: the bridge with `script`, the fragment CLI (its agents
+  ask each other with it, `ask <agent> <words>`, as our Hermes image's
+  do: both images build it by the same stage), and a screen page. 9.6 MB
+  and 13 MB of CLI; a local start follows its chats in 0.3 s. The
+  platform's own lanes run against it.
 - `images/hermes`: Hermes v0.21.7's desktop image, `hermes-boot`, the
   bridge as Hermes' Relay connector, the screen. The base is pinned by
   digest to v0.21.7's release build (its versioned tag
