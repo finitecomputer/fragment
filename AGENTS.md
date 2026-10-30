@@ -431,6 +431,10 @@ wrangler and the Sandbox SDK the cell's shim bundles, pinned in
   Deploy waits for these jobs but proceeds if they fail, omitting the CLI
   version header; a later deploy can advertise a retried release. Only a
   verified published version sets `FRAGMENT_CLI_VERSION` (`x-fragment-cli`).
+  A released CLI compares that version numerically and warns once on stderr
+  only when finite.chat advertises a newer one, using that version's install
+  URL. Local builds, other hosts and missing headers stay silent
+  (cli/src/notice.rs); platform commits are not CLI versions.
   Master's pushes also run `preview-image` beside the tests. It hashes the
   committed image inputs (`xtask/src/image/preview.rs`), reuses the registry's
   `inputs-<key>` tag when present, or builds and pushes it once with a

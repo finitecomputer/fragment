@@ -1,44 +1,55 @@
-//! A released CLI out of step with production says so, once, on stderr. Its
-//! build names the commit it was built from (`FRAGMENT_CLI_COMMIT`,
-//! .github/workflows/release.yml), and production names its own on every
-//! answer (`x-fragment-deploy`); production's deploy releases a CLI of its
-//! commit (ci.yml's `cli-release`), so a difference means a matching one is
-//! out. A local build names no commit, and another host (a preview, a dev
-//! stack) says nothing: both are silent.
+//! A released CLI warns once, on stderr, only when production advertises
+//! a newer published CLI for its inputs. Platform commits are independent;
+//! missing headers, local builds and other hosts are silent. No extra call.
 use std::sync::atomic::{AtomicBool, Ordering};
+use fragment_core::release::cli_version;
 
-const BUILT_FROM: Option<&str> = option_env!("FRAGMENT_CLI_COMMIT");
+const RELEASED_VERSION: Option<&str> = option_env!("FRAGMENT_CLI_VERSION");
 static SAID: AtomicBool = AtomicBool::new(false);
 
-/// The commits compared: `x-fragment-deploy`'s first 12 hex digits.
-fn short(commit: &str) -> &str {
-    &commit[..commit.len().min(12)]
+fn newer(host: Option<&str>, own: Option<&str>, available: Option<&str>) -> bool {
+    host == crate::DEFAULT_HOST.strip_prefix("https://")
+        && matches!((own.and_then(cli_version), available.and_then(cli_version)), (Some(own), Some(available)) if available > own)
 }
 
-fn out_of_step(own: Option<&str>, deployed: Option<&str>) -> bool {
-    matches!((own, deployed), (Some(own), Some(deployed)) if !own.is_empty() && !deployed.is_empty() && short(own) != short(deployed))
+fn install(version: &str) -> String {
+    crate::SKILL.lines().find(|l| l.contains("releases/latest/download"))
+        .unwrap_or("see https://finite.chat/llms.txt").trim()
+        .replace("releases/latest/download", &format!("releases/download/v{version}"))
 }
 
-/// Each answer's host and `x-fragment-deploy`, as it arrives.
-pub fn heard(host: Option<&str>, deployed: Option<&str>) {
-    let production = crate::DEFAULT_HOST.strip_prefix("https://");
-    if host == production && out_of_step(BUILT_FROM, deployed) && !SAID.swap(true, Ordering::Relaxed) {
-        let install = crate::SKILL.lines().find(|l| l.contains("releases/latest/download")).unwrap_or("see https://finite.chat/llms.txt");
-        eprintln!("fragment: a CLI matching {} is out; update it with:\n  {}", crate::DEFAULT_HOST, install.trim());
+/// Each answer's host and `x-fragment-cli`, as it arrives. The header
+/// names a release already published and verified before this deploy.
+pub fn heard(host: Option<&str>, available: Option<&str>) {
+    if newer(host, RELEASED_VERSION, available) && !SAID.swap(true, Ordering::Relaxed) {
+        let version = available.expect("newer requires a version");
+        eprintln!("fragment: CLI {version} matching {} is out; update it with:\n  {}", crate::DEFAULT_HOST, install(version));
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::out_of_step;
+    use super::*;
 
     #[test]
-    fn says_so_only_when_both_commits_are_known_and_differ() {
-        assert!(out_of_step(Some("9ef22ed57c5a"), Some("cc15f8350000")));
-        assert!(out_of_step(Some("9ef22ed57c5a6dca"), Some("cc15f8350000")));
-        assert!(!out_of_step(Some("9ef22ed57c5a6dca"), Some("9ef22ed57c5a")));
-        assert!(!out_of_step(None, Some("9ef22ed57c5a")));
-        assert!(!out_of_step(Some("9ef22ed57c5a"), None));
-        assert!(!out_of_step(Some(""), Some("9ef22ed57c5a")));
+    fn only_a_newer_published_version_on_production_warns() {
+        let prod = Some("finite.chat");
+        assert!(newer(prod, Some("0.15.9"), Some("0.15.10")));
+        assert!(newer(prod, Some("0.15.10"), Some("0.16.0")));
+        assert!(newer(prod, Some("0.99.99"), Some("1.0.0")));
+        for available in [None, Some(""), Some("0.15.10"), Some("0.15.9"), Some("0.15.11-rc1"), Some("v0.16.0"), Some("bogus"), Some("0.15.💥")] {
+            assert!(!newer(prod, Some("0.15.10"), available), "{available:?}");
+        }
+        for own in [None, Some(""), Some("dev")] { assert!(!newer(prod, own, Some("0.15.10"))); }
+        for host in [None, Some("preview.finite.build"), Some("localhost"), Some("finite.chat.attacker.test")] {
+            assert!(!newer(host, Some("0.15.9"), Some("0.15.10")));
+        }
+    }
+
+    #[test]
+    fn the_install_fetches_the_advertised_release_even_after_a_rollback() {
+        let command = install("0.15.1");
+        assert!(command.contains("releases/download/v0.15.1/fragment-$(uname -s)-$(uname -m).tar.gz"));
+        assert!(!command.contains("releases/latest"));
     }
 }
