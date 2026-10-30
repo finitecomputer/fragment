@@ -152,8 +152,10 @@ create trial codes, etc." The Stripe account is finite-mono's.
   retry credits it once; `POST /api/ledger/org:<id>/grant`), sets its
   monthly budget (`fragment operator budget`, `…/budget`), past which its
   fragments' AI steps stop (zero until set), and names the person its
-  credit is invoiced to (`fragment operator payer`). Each is done and
-  logged once by its id, in its governance log and the operators' log.
+  credit is invoiced to (`fragment operator payer`). Each is logged once
+  by its id, in its governance log and the operators' log, before its
+  ledger takes it: an org being credited is never dropped, and a command
+  cut short is finished by sending it again.
   Its overdraft is zero. Orgs buy no credit and set no budget themselves
   yet. A pack of an org's own opened while one was sold (preview, until
   2026-10-30) still credits it, paid (the debt ledger).

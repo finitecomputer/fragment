@@ -703,8 +703,12 @@ async fn ledger_route(mut req: Request, env: &Env, cfg: &Config, url: &Url, rest
         email if fragment_core::mail::valid_address(email) => ask_registry(env, &calls::Lookup { who: email.to_string() }).await?.id,
         other => return Err(CellError::invalid(format!("{other:?} is not an email, an identity (an npub), `org:<org id>`, or `me`"))),
     };
-    // each command is the operators' log's too (docs/api.md, Operators)
+    // each command is the operators' log's too (docs/api.md, Operators);
+    // an org's, its governance log's, written before its ledger takes it
+    // (`registry::content::org_noted`), its body checked as its ledger will
     let note = |id: &str, detail: String| registry::admin::Note { by: op.clone(), action: format!("ledger-{command}"), target: person.clone(), detail, request: Some(id.to_string()) };
+    let org = person.starts_with(fragment_core::ledger::org::ORG_LEDGER_PREFIX);
+    let refused = |why: fragment_core::ledger::Refused| CellError::from(ledger::LedgerError::from(why));
     match *command {
         "grant" => {
             let mut g: fragment_proto::ledger::GrantCredit = command_body(&body, "grant")?;
@@ -713,8 +717,17 @@ async fn ledger_route(mut req: Request, env: &Env, cfg: &Config, url: &Url, rest
                 return Err(CellError::invalid(format!("a grant's `by` is the operator who signs it ({op})")));
             }
             g.id = commanded("grant", &g.id)?;
+            let noted = note(&g.id, format!("{} micros: {}", g.micros, g.why));
+            if org {
+                if let Some(why) = fragment_core::ledger::grant_invalid(&g) {
+                    return Err(refused(why));
+                }
+                ask_registry(env, &noted).await?;
+            }
             let answer = ledger::ask(env, &person, &g).await?;
-            ask_registry(env, &note(&g.id, format!("{} micros: {}", g.micros, g.why))).await?;
+            if !org {
+                ask_registry(env, &noted).await?;
+            }
             json_answer(&answer)
         }
         "plan" => {
@@ -736,9 +749,14 @@ async fn ledger_route(mut req: Request, env: &Env, cfg: &Config, url: &Url, rest
         "budget" => {
             let mut c: fragment_proto::ledger::OrgBudget = command_body(&body, "budget")?;
             c.id = commanded("budget", &c.id)?;
-            let answer = ledger::ask(env, &person, &c).await?;
+            if !org {
+                return Err(refused(fragment_core::ledger::Refused::OrgsOnly));
+            }
+            if let Some(why) = fragment_core::ledger::org::budget_invalid(&c) {
+                return Err(refused(why));
+            }
             ask_registry(env, &note(&c.id, format!("{} micros", c.micros))).await?;
-            json_answer(&answer)
+            json_answer(&ledger::ask(env, &person, &c).await?)
         }
         // a seat is the registry's alone: an operator comps or ends one there (`/api/admin/seats`)
         other => Err(CellError::new(ErrorCode::NotFound, format!("no ledger command {other:?}: grant, plan, overdraft, or an org's budget (a seat is comped or ended at /api/admin/seats)"))),
