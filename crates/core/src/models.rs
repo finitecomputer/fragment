@@ -440,6 +440,10 @@ pub struct Models {
     /// What each of the route's four says of the calls run on it
     /// (`SlotOpts`), in `SLOTS`' order; an extra's is its own.
     pub opts: [SlotOpts; 4],
+    /// Where the route's embeddings run, and their space (`models.
+    /// embeddings`, crate::embed): no chat slot, so no call names it as
+    /// one, and no route falls back to it.
+    pub embeddings: crate::embed::Slot,
 }
 
 /// What a slot says of the calls run on it, beside where it runs: the
@@ -693,6 +697,7 @@ impl Models {
             routes: [RouteSlots::defaults(), RouteSlots::defaults()],
             fallbacks: [None, None],
             opts: [SlotOpts::default(); 4],
+            embeddings: crate::embed::Slot::default(),
         }
     }
 
@@ -721,6 +726,7 @@ impl Models {
             models.routes = routes_of(&mut v)?;
             models.fallbacks = fallbacks_of(&mut v)?;
             models.opts = opts_of(&mut v)?;
+            models.embeddings = crate::embed::slot_of(&mut v)?;
             models.extra = extras_of(&mut v)?;
             let n: Slots = serde_json::from_str(&v.to_string()).map_err(|e| format!("models: {e}"))?;
             for (slot, upstream) in [(&mut models.cheap, n.cheap), (&mut models.medium, n.medium), (&mut models.fallback, n.fallback), (&mut models.vision, n.vision)] {
@@ -771,6 +777,11 @@ impl Models {
                 return Err(format!("models.{slot}: {:?} is models.{first}'s model too, at another price: a model is one row of the price book, so name the price (or max_price) models.{first} does", upstream.model()));
             }
         }
+        let embeddings = &models.embeddings.upstream;
+        check(embeddings, book, loopback).map_err(|e| format!("models.embeddings: {e}"))?;
+        if let Some((slot, _)) = models.all_slots().into_iter().find(|(_, u)| u.model() == embeddings.model()) {
+            return Err(format!("models.embeddings: {:?} is models.{slot}'s model, a chat model: an embeddings slot runs a model of its own", embeddings.model()));
+        }
         private_closed(&models)?;
         Ok(models)
     }
@@ -780,7 +791,7 @@ impl Models {
     /// the book the deployment charges with, so a change to its config
     /// re-prices its calls with the deploy.
     pub fn priced(&self, mut book: PriceBook) -> PriceBook {
-        for (_, upstream) in self.all_slots() {
+        for upstream in self.all_slots().into_iter().map(|(_, u)| u).chain([&self.embeddings.upstream]) {
             if let Some(price) = upstream.own_price().expect("a slot's price is checked as it is parsed") {
                 book.models.retain(|m| m.model != upstream.model());
                 book.models.push(ModelPrice { model: upstream.model().to_string(), price });
@@ -2021,7 +2032,7 @@ mod tests {
         assert!(d.slots().iter().all(|(_, u)| matches!(u, Upstream::WorkersAi { .. })));
         let finite = finite();
         let private = openai("https://finite-private.finite.containers.tinfoil.dev/v1", FINITE_PRIVATE_FLASH);
-        assert_eq!(finite, Models { cheap: private.clone(), medium: private.clone(), fallback: workers_ai(GLM_FLASH), vision: workers_ai(GLM_FLASH), images: [false; 4], private: [false; 4], labels: [None, None], extra: vec![], routes: [RouteSlots::defaults(), RouteSlots::defaults()], fallbacks: [None, None], opts: [SlotOpts::default(); 4] });
+        assert_eq!(finite, Models { cheap: private.clone(), medium: private.clone(), fallback: workers_ai(GLM_FLASH), vision: workers_ai(GLM_FLASH), images: [false; 4], private: [false; 4], labels: [None, None], extra: vec![], routes: [RouteSlots::defaults(), RouteSlots::defaults()], fallbacks: [None, None], opts: [SlotOpts::default(); 4], embeddings: crate::embed::Slot::default() });
         assert_eq!(finite.route(Named::Tier(Tier::Cheap)).unwrap(), Model { named: Named::Tier(Tier::Cheap), upstream: &private, slot: "cheap" });
         assert_eq!(finite.route(Named::Tier(Tier::Medium)).unwrap().id(), "glm-5-3-flash");
         assert_eq!(finite.route(Named::Tier(Tier::High)), Err(Refusal::HighOff), "high stays off wherever the tiers run");
@@ -2033,7 +2044,7 @@ mod tests {
         assert_eq!(serde_json::to_value(workers_ai(GLM_FLASH)).unwrap(), json!({ "provider": "workers_ai", "model": GLM_FLASH }));
         // OpenRouter's (Finite's since 2026-10-15): its tiers routed by their body, the rest on Workers AI
         let routed = Upstream::Openai { base_url: "https://openrouter.ai/api/v1".into(), model: OPENROUTER_FLASH.into(), body: routing().as_object().cloned(), price: None };
-        assert_eq!(openrouter(), Models { cheap: routed.clone(), medium: routed.clone(), fallback: workers_ai(GLM_FLASH), vision: workers_ai(GLM_FLASH), images: [false; 4], private: [false; 4], labels: [None, None], extra: vec![], routes: [RouteSlots::defaults(), RouteSlots::defaults()], fallbacks: [None, None], opts: [SlotOpts::default(); 4] });
+        assert_eq!(openrouter(), Models { cheap: routed.clone(), medium: routed.clone(), fallback: workers_ai(GLM_FLASH), vision: workers_ai(GLM_FLASH), images: [false; 4], private: [false; 4], labels: [None, None], extra: vec![], routes: [RouteSlots::defaults(), RouteSlots::defaults()], fallbacks: [None, None], opts: [SlotOpts::default(); 4], embeddings: crate::embed::Slot::default() });
         assert_eq!(serde_json::to_value(&routed).unwrap(), json!({ "provider": "openai", "base_url": "https://openrouter.ai/api/v1", "model": "z-ai/glm-5.3-flash", "body": routing() }));
         let empty = Models::parse(Some(&json!({ "cheap": { "provider": "openai", "base_url": "https://a.example/v1", "model": FINITE_PRIVATE_FLASH, "body": {} } }).to_string()), &book, false).unwrap();
         assert_eq!(empty.cheap, Upstream::Openai { base_url: "https://a.example/v1".into(), model: FINITE_PRIVATE_FLASH.into(), body: Some(Map::new()), price: None }, "an empty body adds nothing");
@@ -3483,5 +3494,31 @@ mod tests {
         let mut s = Stream::default().on(&workers_ai(GLM_FLASH));
         s.push(text.as_bytes(), None);
         assert_eq!(s.usage(), None, "none reported");
+    }
+
+    /// Goal: a deployment's embeddings slot is its own (crate::embed): BGE-M3
+    /// on Workers AI unnamed; a self-hosted model on an OpenAI-compatible
+    /// API at the price it names, laid over the book; never a chat slot's
+    /// model, nor one the book cannot price. Method: parse each.
+    #[test]
+    fn the_embeddings_slot_is_its_own() {
+        let book = PriceBook::defaults();
+        let unnamed = Models::parse(Some("{}"), &book, false).unwrap();
+        assert_eq!(unnamed.embeddings.space().model, crate::embed::MODEL_DEFAULT);
+        assert!(unnamed.priced(book.clone()).models.iter().any(|m| m.model == crate::embed::MODEL_DEFAULT));
+        let local = r#"{"embeddings": {"provider": "openai", "base_url": "http://127.0.0.1:18091/v1", "model": "BAAI/bge-m3", "dimensions": 1024, "version": "1", "price": {"input": 0.01, "output": 0}}}"#;
+        let m = Models::parse(Some(local), &book, true).unwrap();
+        assert_eq!(m.embeddings.space().version, Some("1"));
+        let row = m.priced(book.clone()).models.into_iter().find(|r| r.model == "BAAI/bge-m3").expect("its own price is its row");
+        assert_eq!(row.price.input, 10_000);
+        assert!(m.all_slots().iter().all(|(slot, _)| *slot != crate::embed::EMBEDDINGS), "no chat slot");
+        for (config, why) in [
+            (local, "base_url"),
+            (r#"{"embeddings": {"provider": "workers_ai", "model": "@cf/zai-org/glm-5.3-flash", "dimensions": 1024}}"#, "a chat model"),
+            (r#"{"embeddings": {"provider": "workers_ai", "model": "@cf/unknown/embedder", "dimensions": 768}}"#, "price book"),
+        ] {
+            let err = Models::parse(Some(config), &book, false).unwrap_err();
+            assert!(err.contains("models.embeddings") && err.contains(why), "{err}");
+        }
     }
 }
