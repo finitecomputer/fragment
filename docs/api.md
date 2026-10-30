@@ -3692,3 +3692,13 @@ chat. One home per agent, as each agent links its own SimpleX.
 A chat's records (its `chat` and `work` channels: turns, steps,
 replies, prompts, Stop) are docs/chat-records.md's: the bridge writes
 them and the chat template reads them.
+
+Door IDs are connector slugs (1–32 lowercase letters/digits with single
+internal dashes, beginning with a letter). Deployment authorization is
+checked through the owner/agent/action seam at issue, redemption and record
+check; a disabled door may still be unlinked. Keys and latest pending
+nonces are independent `agent_doors` rows; opening/unlinking one cannot
+invalidate another. SimpleX ticket and record digests and wire bodies are
+unchanged. Fragment schema step 4 preserves existing keys and pending
+tickets; old Worker code cannot roll back past this step. Older images
+remain supported and keep their existing disk state and signatures.

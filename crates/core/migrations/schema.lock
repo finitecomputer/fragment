@@ -7,6 +7,7 @@
 step Fragment 1 baseline 6f010c0c276b4871
 step Fragment 2 listed 464da803484efc23
 step Fragment 3 record_schedules 90308e727fc4ce8b
+step Fragment 4 agent_doors 2dfbd303a1a9668b
 step Registry 1 baseline fd5a79e5c834a15d
 step Registry 2 connection_signins e9d1f862c2e3e4ed
 step Registry 3 trial_hold_attempts 07e123e05a049abe
@@ -21,6 +22,7 @@ step Ledger 1 baseline 6d5c6ebad64a53b2
 step Computer 1 baseline 0f429c07654198e6
 step Computer 2 agent_accounts 55b329a8b0da4bbd
 
+Fragment table agent_doors: CREATE TABLE agent_doors ( door TEXT PRIMARY KEY, key TEXT, nonce TEXT, expires_at INTEGER)
 Fragment table blobs: CREATE TABLE blobs ( sha TEXT PRIMARY KEY, size INTEGER NOT NULL, uploaded_at INTEGER NOT NULL, seen_at INTEGER NOT NULL, mime TEXT)
 Fragment table charges: CREATE TABLE charges ( ref TEXT PRIMARY KEY, run INTEGER NOT NULL, micros INTEGER NOT NULL, held INTEGER NOT NULL, at INTEGER NOT NULL)
 Fragment index charges_run: CREATE INDEX charges_run ON charges (run)

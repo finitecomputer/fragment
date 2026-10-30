@@ -108,7 +108,7 @@ macro_rules! step {
 
 pub const FRAGMENT: Class = Class {
     name: "Fragment",
-    steps: &[step!("baseline", "fragment/0001_baseline.sql"), step!("listed", "fragment/0002_listed.sql"), step!("record_schedules", "fragment/0003_record_schedules.sql")],
+    steps: &[step!("baseline", "fragment/0001_baseline.sql"), step!("listed", "fragment/0002_listed.sql"), step!("record_schedules", "fragment/0003_record_schedules.sql"), step!("agent_doors", "fragment/0004_agent_doors.sql")],
     variants: &[Variant {
         name: "members",
         sql: "CREATE TABLE members ( principal TEXT PRIMARY KEY, role TEXT NOT NULL, added_by TEXT NOT NULL, added_at INTEGER NOT NULL, kind TEXT, owner TEXT, people_only INTEGER NOT NULL DEFAULT 0)",
@@ -522,6 +522,23 @@ mod tests {
     const TWO: &[Step] = &[step!("baseline", "fragment/0001_baseline.sql"), STEP_TWO];
     const THREE: &[Step] = &[step!("baseline", "fragment/0001_baseline.sql"), STEP_TWO, STEP_THREE];
     const BROKEN: &[Step] = &[step!("baseline", "fragment/0001_baseline.sql"), STEP_TWO, FAILING];
+
+    #[test]
+    fn doors_migrate_once_across_restarts_and_refuse_older_worker_code() {
+        let before = Class { name: FRAGMENT.name, steps: &FRAGMENT.steps[..3], variants: FRAGMENT.variants, kept: FRAGMENT.kept };
+        let db = Lite::new();
+        migrated(&db, &before, 10).unwrap();
+        db.exec("INSERT INTO meta VALUES ('door', 'simplex unchanged-key')").unwrap();
+        db.exec(&format!("INSERT INTO meta VALUES ('door_ticket', 'simplex {} 1000')", "0f".repeat(16))).unwrap();
+        migrated(&db, &FRAGMENT, 20).unwrap();
+        let first = db.rows("SELECT * FROM agent_doors").unwrap();
+        assert_eq!(first[0]["key"], "unchanged-key");
+        assert_eq!(first[0]["expires_at"], 1000);
+        db.exec("UPDATE agent_doors SET key='new-key', nonce=NULL, expires_at=NULL WHERE door='simplex'").unwrap();
+        migrated(&db, &FRAGMENT, 30).unwrap();
+        assert_eq!(db.rows("SELECT key FROM agent_doors").unwrap()[0]["key"], "new-key", "a restart never copies old meta back over live state");
+        assert!(migrated(&db, &before, 40).is_err(), "older Worker cannot roll back past the schema");
+    }
 
     /// Goal: a new object of every class runs every step and holds each
     /// as declared; started again, it runs nothing (the replay). Method:

@@ -878,6 +878,16 @@ fn door_checks(s: &mut Suite, api: &Api, c: &Doors, fetched: &dyn Fn(&Suite, u32
         t.status == 200 && t.body["act"] == "link" && t.body["agent"] == c.agent && t.body["computer"] == c.id && signed && within,
         &t,
     );
+    for (i, field, value) in [(407, "sig", json!("00".repeat(64))), (408, "agent", json!("wrong--abcd")), (409, "computer", json!("computer:0000")), (410, "exp", json!(now_ms() - 1))] {
+        let mut bad = t.body.clone();
+        bad[field] = value;
+        let refused = fetched(s, i, &format!("door link {bad}"))?;
+        s.ok(&format!("a ticket with forged or stale {field} never opens the door"), refused.starts_with("door refused:"), &refused);
+    }
+    let unauthorized = api.signed(c.owner, "POST", &path, Some(&json!({"door":"telegram","act":"link"})))?;
+    s.ok("a valid connector slug absent from deployment policy cannot be linked", unauthorized.status == 403, &unauthorized);
+    let unlink = api.signed(c.owner, "POST", &path, Some(&json!({"door":"telegram","act":"unlink"})))?;
+    s.ok("a deconfigured connector can still be unlinked", unlink.status == 200, &unlink);
     let forged = fetched(s, 400, "door forge yes, go ahead")?;
     s.ok(
         "a record that relays its owner with no door's signature, posted with the agent's own key, is refused: never its owner's",
@@ -904,7 +914,7 @@ fn door_checks(s: &mut Suite, api: &Api, c: &Doors, fetched: &dyn Fn(&Suite, u32
     s.ok("its owner's unlink ticket", r.status == 200 && r.body["act"] == "unlink" && r.body["agent"] == c.agent, &r);
     let closed = fetched(s, 406, "door say after the unlink")?;
     s.ok("unlinked, the door is closed at once: what its key signs is refused", closed.starts_with("door refused: 403"), &closed);
-    Ok(7)
+    Ok(11)
 }
 
 /// The route's models by their ids, through the intercept (Paul,
