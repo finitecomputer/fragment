@@ -1,0 +1,32 @@
+{
+  "kind": "chat",
+  "channels": {
+    "chat": { "read": "viewer", "post": "viewer" },
+    "work": {
+      "read": "viewer", "post": "editor", "from": "agent",
+      "listed": {
+        "kinds": ["turn.start", "turn.step", "turn.prompt", "turn.prompt.closed", "turn.asked", "turn.end"],
+        "fields": ["asks"]
+      }
+    }
+  },
+  "inbox": { "header": "x-telegram-bot-api-secret-token", "secret": "TELEGRAM_WEBHOOK_SECRET" },
+  "operations": {
+    "state": { "kind": "query", "role": "owner", "description": "The bot, the Telegram account paired, and a pairing waiting: {bot, paired, pairing}." },
+    "connect": { "kind": "job", "role": "owner", "input": { "type": "object", "required": ["platform"], "properties": { "platform": { "type": "string", "maxLength": 200 }, "api": { "type": "string", "maxLength": 200 } }, "additionalProperties": false }, "description": "Checks the bot token (TELEGRAM_BOT_TOKEN) and points the bot's webhook at this chat's inbox." },
+    "pair": { "kind": "mutation", "role": "owner", "description": "Starts pairing: a link that opens the bot in Telegram, good for ten minutes." },
+    "confirm": { "kind": "mutation", "role": "owner", "input": { "type": "object", "required": ["user"], "properties": { "user": { "type": "integer" } }, "additionalProperties": false }, "description": "Its owner, in person, says the Telegram account that answered the pairing link is theirs." },
+    "unpair": { "kind": "mutation", "role": "owner", "description": "Forgets the Telegram account paired." },
+    "known": { "kind": "mutation", "role": "owner", "input": { "type": "object", "properties": { "bot": { "type": "object" }, "api": { "type": "string" }, "error": { "type": "string" } } } },
+    "propose": { "kind": "mutation", "input": { "type": "object", "required": ["nonce", "user", "chat", "name"], "properties": { "nonce": { "type": "string" }, "user": { "type": "integer" }, "chat": { "type": "integer" }, "name": { "type": "string" } } } },
+    "seen": { "kind": "mutation", "input": { "type": "object", "required": ["update"], "properties": { "update": { "type": "integer" } } } },
+    "route": { "kind": "query", "role": "editor" },
+    "intake": { "kind": "job" },
+    "mirror": { "kind": "job" }
+  },
+  "triggers": [
+    { "channel": "inbox", "run": "intake" },
+    { "channel": "chat", "from": "agent", "run": "mirror" }
+  ],
+  "meta": { "title": "Telegram", "description": "A chat with your agent that you also reach from Telegram: your direct messages to your own bot come here as yours, and its replies go back. Telegram carries them as plain text, not end-to-end encrypted." }
+}

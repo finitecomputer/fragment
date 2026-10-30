@@ -130,7 +130,7 @@ struct Deployment {
     /// The connectors its people may link, and the exact endpoints a
     /// computer's relay carries for them (`FRAGMENT_CONNECTORS`;
     /// docs/computers.md, "Connector policy"). Without it, the cell's
-    /// default (SimpleX); `[]` turns every connector off.
+    /// default (SimpleX and Telegram); `[]` turns every connector off.
     connectors: Option<Vec<fragment_core::connectors::Connector>>,
     /// The provider catalog a computer's swap offers (decisions 22 and 37;
     /// `fragment_core::catalog`): each row a connection, an operator key or

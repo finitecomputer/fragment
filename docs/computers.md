@@ -2776,7 +2776,8 @@ by `fragment_core::connectors::Policy`) name the doors its people may open
 and the exact endpoints a computer's relay carries for each: `[{id,
 relayTargets: [{host, port}]}]`, each target an exact public DNS name on a
 nonzero port (no wildcard, IP, local or internal name, or suffix). Absent,
-the cell's default: `simplex`, with `relay::HOSTS` on 443. `[]` is the
+the cell's default: `simplex`, with `relay::HOSTS` on 443, and `telegram`
+(a hosted connector, templates/telegram: no relay). `[]` is the
 kill switch: no door is linked, redeemed or checked, and no relay opens;
 an owner may still unlink. A computer's relay offer (`relayTargets`, and
 `relay` for the 443 ones) and its relay admission read the same policy,

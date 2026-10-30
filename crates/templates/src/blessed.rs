@@ -37,6 +37,7 @@ pub fn template(name: &str) -> Option<&'static Template> {
         "brain" => Some(&crate::BRAIN),
         "skills" => Some(&crate::SKILLS),
         "sessions" => Some(&crate::SESSIONS),
+        "telegram" => Some(&crate::TELEGRAM),
         _ => None,
     }
 }
