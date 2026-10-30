@@ -593,15 +593,23 @@ fn org_credit(s: &mut Suite, api: &Api) -> Result<()> {
     let comped = api.signed(&s.operator, "POST", "/api/admin/seats", Some(&json!({ "email": Api::email_of(&zed), "kind": "seat" })))?;
     let zorg = comped.body["org"]["id"].as_str().context("zed's comped org")?.to_string();
     let funded = api.signed(&s.operator, "POST", &format!("/api/ledger/org:{zorg}/grant"), Some(&json!({ "id": "inv-z", "micros": 5_000_000, "by": op, "why": "an invoice" })))?;
-    let r = api.signed(&vic, "POST", "/api/org/seats", Some(&json!({ "email": Api::email_of(&zed) })))?;
-    let moved = answer(api, &zed, r.body["seat"]["id"].as_str().unwrap_or(""), "accept")?;
-    let left = s.eventually(PUSHED, || org_of(api, &zed) == org);
+    // and one no operator credited, its person moving after: once it is
+    // dropped (its push, queued after the other's, ran), the other's ran too
+    let yul = api.person()?;
+    let comped = api.signed(&s.operator, "POST", "/api/admin/seats", Some(&json!({ "email": Api::email_of(&yul), "kind": "seat" })))?;
+    let yorg = comped.body["org"]["id"].as_str().context("yul's comped org")?.to_string();
+    let mut moved = Vec::new();
+    for who in [&zed, &yul] {
+        let r = api.signed(&vic, "POST", "/api/org/seats", Some(&json!({ "email": Api::email_of(who) })))?;
+        moved.push(answer(api, who, r.body["seat"]["id"].as_str().unwrap_or(""), "accept")?.status);
+    }
+    let control_gone = s.eventually(PUSHED, || api.signed(&s.operator, "GET", &format!("/api/admin/orgs/{yorg}"), None).is_ok_and(|r| r.status == 404));
     let kept = api.signed(&s.operator, "GET", &format!("/api/admin/orgs/{zorg}"), None)?;
     let zl = api.signed(&s.operator, "GET", &format!("/api/admin/orgs/{zorg}/ledger"), None)?;
     s.ok(
-        "funded_org_outlives_its_people: its only person gone to another org, an org an operator credited stays, its credit there for an operator",
-        funded.status == 200 && moved.status == 200 && left && kept.status == 200 && zl.status == 200 && zl.body["balanceMicros"] == 5_000_000,
-        json!([funded.body, moved.body, kept.status, zl.body]),
+        "funded_org_outlives_its_people: its only person gone to another org, an org an operator credited stays, its credit there for an operator, while one with nothing of its own is dropped",
+        funded.status == 200 && moved == [200, 200] && control_gone && org_of(api, &zed) == org && kept.status == 200 && zl.status == 200 && zl.body["balanceMicros"] == 5_000_000,
+        json!([funded.body, moved, control_gone, kept.status, zl.body]),
     );
 
     // org_terms_survive_restart: its credit and budget, read back after a restart
