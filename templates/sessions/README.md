@@ -22,7 +22,7 @@ import reads are cli/src/session/.
   | `format` | `session-archive/1` |
   | `id` | its id where it came from (Hermes': the session it began as) |
   | `origin` | where it came from: `hermes` |
-  | `reader` | which read made it: 10 the old Finite's export (a later, better or fixed read takes a higher number: An import) |
+  | `reader` | which read made it: 10 the old Finite's export, 20 Hermes' own database (a later, better or fixed read takes a higher number: An import) |
   | `agent` | the agent it was with, as its origin named it (optional) |
   | `kind` | `chat` (a person's conversation with the agent), `cron` (a scheduled job's run), `subagent` (a side task the agent ran) |
   | `title` | its own, else the first line its person said (80 characters), else `Untitled` |
@@ -95,6 +95,18 @@ fragment's is.
   records are Hermes' sessions as its `export.py` joined them, keyed by
   the same ids. It reads only regular files inside `chats/`, no link out
   of it and no device, each at most 64 MiB.
+- **Hermes' `state.db`** (or a Hermes home holding it), read-only, in one
+  read transaction (cli/src/session/hermes.rs, which says how it follows
+  Hermes v0.21.7, checked against what that Hermes writes:
+  `hermes-v0.21.7.sql`): a conversation is a session and the ones Hermes
+  continued it in each time it compressed, as Hermes' own session list
+  joins them; its messages are what Hermes shows a person, each once. A
+  better read than the export's (20 to 10), which kept a compression's
+  copied tail twice. Bounded: SQLite hands over at most what a
+  conversation could keep of each row, a conversation past twice its
+  limit is refused alone, and a database of more than 200,000 sessions
+  whole. This computer's own databases (its Hermes root's, any profile's)
+  are refused: their conversations are chats here already.
 
-Another store (Hermes' own database, another agent runtime's sessions) is
-another read into the same format.
+Another agent runtime's sessions (Claude Code's, Codex's) are another
+read into the same format.
