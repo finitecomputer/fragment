@@ -427,6 +427,9 @@ pub struct ComputerView {
     /// without one, and the core then reaches no file server.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay: Option<RelayOffer>,
+    /// Exact configured endpoints, additive to the legacy 443 offer. Guest only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_targets: Option<Vec<RelayTarget>>,
 }
 
 /// The hosts and the port a computer's XFTP relay carries.
@@ -733,4 +736,12 @@ mod tests {
         assert_eq!(serde_json::to_value(&own).unwrap()["modelBase"], "https://openrouter.ai/api/v1");
         assert_eq!(serde_json::to_value(ProviderState::NeedsReauthorization).unwrap(), "needs_reauthorization");
     }
+}
+
+/// An exact operator-authorized TCP endpoint.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RelayTarget {
+    pub host: String,
+    pub port: u16,
 }

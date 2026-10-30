@@ -228,6 +228,9 @@
   //   "hermes": { "image": "registry.cloudflare.com/<account_id>/<repository>@sha256:<64 hex>" },
   //   "hermes-canary": { "dockerfile": "images/hermes/Dockerfile", "build_context": "." }
   // Never drop a name while computers are pinned to it.
+  // Optional computer_connectors: [{id, relayTargets: [{host, port}]}].
+  // Omitted: deploy/computer-connectors.json (today's twelve XFTP hosts).
+  // Explicit [] disables connector permission and relay targets.
   "computers": {
     "default_image": "hermes",
     "images": {

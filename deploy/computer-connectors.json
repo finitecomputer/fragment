@@ -1,0 +1,55 @@
+[
+  {
+    "id": "simplex",
+    "relayTargets": [
+      {
+        "host": "xftp1.simplex.im",
+        "port": 443
+      },
+      {
+        "host": "xftp2.simplex.im",
+        "port": 443
+      },
+      {
+        "host": "xftp3.simplex.im",
+        "port": 443
+      },
+      {
+        "host": "xftp4.simplex.im",
+        "port": 443
+      },
+      {
+        "host": "xftp5.simplex.im",
+        "port": 443
+      },
+      {
+        "host": "xftp6.simplex.im",
+        "port": 443
+      },
+      {
+        "host": "xftp1.simplexonflux.com",
+        "port": 443
+      },
+      {
+        "host": "xftp2.simplexonflux.com",
+        "port": 443
+      },
+      {
+        "host": "xftp3.simplexonflux.com",
+        "port": 443
+      },
+      {
+        "host": "xftp4.simplexonflux.com",
+        "port": 443
+      },
+      {
+        "host": "xftp5.simplexonflux.com",
+        "port": 443
+      },
+      {
+        "host": "xftp6.simplexonflux.com",
+        "port": 443
+      }
+    ]
+  }
+]

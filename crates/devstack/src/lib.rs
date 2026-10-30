@@ -533,6 +533,8 @@ impl Fleet {
         if let Some(u) = &self.swap_upstream {
             vars.push(("FRAGMENT_SWAP_UPSTREAM", u.as_str()));
         }
+        let connectors = serde_json::to_string(fragment_core::connectors::ComputerConnectorPolicy::default().entries())?;
+        vars.push(("FRAGMENT_COMPUTER_CONNECTORS", &connectors));
         write_dev_vars(project, &vars)
     }
 }
