@@ -134,17 +134,21 @@ const STEP_SAYS = {
   memory: ["brain", "Updating memory", "Updated memory", ":"],
 };
 
+// How a step's call ended, when its runtime says (its `status`), other than
+// done: the words before its verb.
+const ENDED = { failed: "Failed", timed_out: "Timed out", cancelled: "Cancelled", blocked: "Blocked" };
+
 // What a runtime's notice is about (its `category`): its icon. Any other is `info`.
 const NOTICE_ICON = { info: "info", warning: "alert", memory: "brain" };
 
 /// A step as a line reads it: `{icon, verb, args}` ("Ran", `npm test`), as
-/// it runs (`now`) or once it ran ("Failed running", for `ok: false`); the
+/// it runs (`now`) or once it ran ("Failed running", for `ok: false`;
+/// "Timed out running", for its `status`); the
 /// verb ends as it joins its arguments ("Searched the web for") unless it
 /// stands alone (`joined` false: an icon's name).
 export function stepSays(s, now = false, joined = true) {
   const args = typeof s.args === "string" ? s.args : "";
-  if (s.status) now = false;
-  const failed = s.status === "cancelled" ? "Cancelled " : s.status === "blocked" ? "Blocked " : s.ok === false ? "Failed " : "";
+  const failed = Object.hasOwn(ENDED, s.status) ? `${ENDED[s.status]} ` : s.ok === false ? "Failed " : "";
   if (!Object.hasOwn(STEP_SAYS, s.category)) {
     const tool = typeof s.tool === "string" && s.tool ? s.tool : "a tool";
     return { icon: "wrench", verb: `${failed}${tool}${args && joined ? ":" : ""}`, args };
@@ -1395,8 +1399,9 @@ export function mount(root) {
         }
         summary.append(el("span", null, `· ${plural(steps.length, "step")}`), icon("chevron", "chev"));
         // the step it is on now: the last of a card its turn works in, unless
-        // it failed (a runtime's progress may say `ok` before its result)
-        const lines = steps.map((s, i) => stepLine(t, s, live && i === steps.length - 1 && s.ok !== false, agent));
+        // it failed (a runtime's progress may say `ok` before its result) or
+        // is a call's observed end (`status`: it ran already)
+        const lines = steps.map((s, i) => stepLine(t, s, live && i === steps.length - 1 && s.ok !== false && !s.status, agent));
         d.dataset.lines = String(lines.length);
         d.append(summary, ...lines);
         // a line come since the last draw arrives as the ones before it step back
@@ -1436,7 +1441,6 @@ export function mount(root) {
   // another tool's (its wrench names none), and a failed one (its colour
   // alone would say so).
   function stepLine(t, s, now, agent) {
-    if (s.status) now = false;
     const says = stepSays(s, now);
     const step = el("div", `step${s.ok === false ? " error" : ""}${now ? " running" : ""}`);
     const known = Object.hasOwn(STEP_SAYS, s.category);
@@ -1464,8 +1468,6 @@ export function mount(root) {
     const detail = el("div", "step-detail");
     if (says.args) detail.append(el("pre", "step-call", shortStepArgs(says.args, agent)));
     if (s.excerpt) detail.append(el("pre", "step-result", s.excerpt));
-    if (Number.isFinite(s.duration_ms)) detail.append(el("span", "step-duration", `${s.duration_ms} ms`));
-    if (s.result_ref) detail.append(el("pre", "step-reference", s.result_ref));
     const show = () => {
       const open = state.openSteps.has(id);
       detail.hidden = !open;

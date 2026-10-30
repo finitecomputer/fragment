@@ -333,25 +333,9 @@ computer (docs/computers.md, the hold).
 
 ```json
 { "kind": "turn.step", "turn": "…", "step": 1, "tool": "terminal",
-  "category": "shell", "args": "ls -la", "ok": true, "excerpt": "…", "text": "…" }
+  "category": "shell", "args": "ls -la", "ok": true, "excerpt": "…", "text": "…",
+  "tool_call_id": "call_…", "status": "completed", "duration_ms": 120 }
 ```
-
-Structured Hermes steps add `tool_call_id`, `status` (`completed`, `failed`,
-`cancelled`, `blocked`), `duration_ms`, nullable `error_type` / `error_message`,
-and `result_ref` (at most 300 characters, `hermes:<session>:<call>` identifying
-Hermes' source evidence, not a public URL). `ok` remains for old readers and
-is true only for `completed`. Tool steps come only from supported observer results: presentation progress
-text is never parsed, and no step is inferred on disconnect. Old steps
-without these fields still render. Terminal steps never show as running;
-cancelled and blocked cards name their outcome and details show duration.
-
-The image retains no arbitrary arguments, result bodies, or exception text:
-`args` is empty; `excerpt` and the failure's `error_message` keep safe metadata
-(exit code when available, else the observer outcome); `error_type` is a bounded
-identifier. Raw evidence remains in Hermes' session, subject to its own disk
-retention and rollback, not a new platform store. These additions use the
-same channel retention and 200-step limit. Recovery notes use the bounded
-excerpt when a structured step has no argument preview.
 
 Part `<step>`, from 1: one tool call. `tool` (the runtime's own name for
 it) and `args` (the call's preview) at most 140 characters, `excerpt`
@@ -370,6 +354,17 @@ handed to another agent), `memory` (what it remembers, changed), or
 (`ls -la`), and a step with another or none (one from before steps said)
 as `other`, its `tool` in words. The bridge's runtime says which (our
 Hermes image's: one table of Hermes' tools, docs/bridge.md).
+
+`tool_call_id`, `status` and `duration_ms` (since 2026-10-30): the call
+as its runtime observed its end (our Hermes image's: its `post_tool_call`,
+docs/bridge.md), its id there (at most 128 characters), how it ended
+(`completed`, `failed`, `timed_out`, `cancelled` or `blocked`) and how
+long it ran; `ok` is true for `completed` alone. A step with them is a
+call that ended, so a page never shows it running, and names how it
+ended when it did not complete ("Timed out running"). `excerpt` is then a
+command's exit code (`Exit code: 7`) or empty: never its output. A step
+without them (an older bridge's, read from its runtime's progress) says
+only `ok`, which was true even for a call that failed.
 
 ```json
 { "kind": "turn.prompt", "turn": "…", "prompt": "<prompt>",

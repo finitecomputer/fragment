@@ -344,33 +344,43 @@ Waiting on a person alone will not hold it once P6 (#627) lands; until
 then an open card still holds it as described below.
 
 The image's `fragment-activity` plugin uses Hermes v0.21.7's supported
-`subagent_start` / `subagent_stop` and `pre_tool_call` / `post_tool_call`
-hooks. Its one authenticated `/relay/activity` socket carries both work
-and terminal observations. A connection alone holds nothing; explicit
-`{working:true|false}` frames reflect only the in-memory set of children,
-keyed by `child_session_id`. The bridge queues each signal before
-acknowledging it, before the hook returns. Several instances hold together.
+hooks: `subagent_start` and `subagent_stop` for its children,
+`pre_llm_call` and `post_tool_call` for the person's turns' steps (below).
+Its one `ws://<bridge listen>/relay/activity` socket, authenticated by the
+gateway's normal Relay bearer token (`gateway.relay.auth.make_token`),
+carries both. The bridge answers each frame (`working`, `observed`, or
+`refused`) once its loop has it, and the hook returns only then, so the
+parent's end cannot release a hold first, nor a step come after its
+turn's end.
 
-Tool frames carry the task-local `HERMES_SESSION_MESSAGE_ID` (our turn),
-never a process-global chat guess. The bridge bounds and validates them,
-ignores absent turns, and deduplicates call ids within the turn (at most
-200). Supported post-call events map Hermes `ok/error/cancelled/blocked`
-to `completed/failed/cancelled/blocked`. Pre-call is a policy gate, not proof
-execution started, so it creates no step; it only opens the shared socket.
-The category table classifies the observed tool identity.
+A socket alone holds nothing: `{"working": true}` holds while the
+plugin's set of children (by `child_session_id`, in memory) is nonempty,
+until `{"working": false}`, its close, its gateway process's exit, or 30
+seconds without a frame or ping (websockets pings every 10 seconds; while
+children run the plugin checks it every second and reconnects). Several
+profiles' sockets hold together. The bridge's engine includes them in its
+existing keepawake predicate. Nothing of the children is persisted or
+replayed on restart: Hermes owns them, and a new process has none. Their
+completion still uses Hermes' ordinary Relay reply, which the bridge posts
+once as a turn of its own.
 
-This is a hard cut: supported observations are the only source of tool
-steps. Presentation progress sends and edits are acknowledged and ignored.
-There is no parser, compatibility fallback, or configuration switch.
-Missing observations, including an absent hook or a disconnected socket,
-never become completions. Historical channel records still render as before.
-
-The socket may stay connected without holding, including while a person
-answers a card. A gateway exit or 30 seconds without frames closes it;
-pings run every 10 seconds and children reconnect while running. No child
-state or tool delivery queue is persisted or replayed. Delivery is best
-effort; a disconnect can lose evidence. It cannot promise replay, retries,
-or exactly-once effects. Child completion still uses the ordinary Relay reply.
+A step is a tool call's end as Hermes observed it (`post_tool_call`), never
+its progress text: the image turns progress off, and the bridge reads none.
+Only the person's turn's own calls are its steps: `pre_llm_call` maps the
+run Hermes starts for a Relay message (its `turn_id`) to that message's id
+(`HERMES_SESSION_MESSAGE_ID`, our turn). Hermes' memory review forks a run
+that shares the session and the message's context but persists nothing,
+for which Hermes skips that hook; a delegated child's run is its own
+(top-level delegation always runs in the background on a gateway, so its
+calls would land in the parent's turn or not by chance). Their calls are
+no steps. Hermes' outcomes `ok`, `error`, `timeout`, `cancelled` and
+`blocked` are `completed`, `failed`, `timed_out`, `cancelled` and
+`blocked`; the step's `args` are Hermes' own preview of the call
+(`agent.display.build_tool_preview`, at most 140 characters, what its
+progress showed), its `excerpt` a command's exit code, never its output or
+error text. A call whose end is not observed (no hook, a lost socket) is
+no step: delivery is best effort, each frame sent at most once, and
+nothing is guessed.
 
 Files from delegated completion use the same path: `send_media` accepts an
 upload or a fetched provider URL after the parent ends and posts a reply
@@ -744,10 +754,10 @@ get_chat_info`.
   `chat_topic` (`wire::SIMPLEX_TOPIC`), which Hermes renders in that
   session's context as `**Channel Topic:**` (above, "SimpleX").
 - A reply streams as `draft` frames and arrives as a `send` answering
-  the turn's message. Tool steps come from the supported observer over the
-  activity socket above, independent of Hermes' progress sender's polling.
-  The category table in `relay/wire.rs` uses tool identities only; no
-  progress text is parsed. Our image retains no raw args or output in cards.
+  the turn's message. A step is a tool call's observed end, on the
+  activity socket (above, "Runtime work outside a turn"); `relay/wire.rs`'s
+  table of Hermes' tools gives its `category` (a tool not there is
+  `other`, but for its browser's, `browser_…`).
 - Everything the agent says is a reply (Paul, 2026-10-24, in place of
   2026-10-05's one reply a turn). Hermes ends a draft segment at every
   tool boundary with a `send` answering the message, so the model's text
@@ -763,10 +773,19 @@ get_chat_info`.
   replies have a bound of their own (`INTERIM_REPLIES_PER_TURN_MAX`, one
   a posted step), apart from `REPLIES_PER_TURN_MAX`, so narration never
   costs the turn its answer (`narration_never_costs_the_answer`). The
-  tool's observation can reach the bridge before that `send`: a step that
-  comes while a draft segment streams waits for it, at most
-  `STEP_HOLD_MS` (3 s), the words then going before it; a question, a
-  card, a file or the end stops the wait. And while a reply's image links
+  two sockets keep no order between them, so a quick tool's end can reach
+  the bridge before that `send`: a step that comes while a draft segment
+  streams waits for it, at most `STEP_HOLD_MS` (3 s), the words then going
+  before it; a question, a card, a file or the end stops the wait. One
+  that comes before even a draft (a short preamble beside an instant
+  command) leaves the words that come next unknown: that step's, late, or
+  the turn's next (its answer). They count as no next step's words, and a
+  reply after them with no step between says they were the step's: the
+  runtime marks them interim just before that reply, wherever it goes
+  (`Event::Interim`), while a lone answer stays the answer. Posted records
+  are never rewritten (`words_and_steps_out_of_order_keep_the_answer`;
+  Hermes' `metadata.notify` cannot say it: its stream sender sets it on
+  both). And while a reply's image links
   are fetched (within the fetch's own 20 s) everything of its turn after
   it waits in order (`Inflight::queue`: its steps, a later reply, a card,
   a file, its end), so the reply keeps its files and the answer after it
@@ -801,7 +820,7 @@ get_chat_info`.
   category, never a step. Hermes releases its review's notice once the
   turn is done, after its `✅`, so a notice with no turn running is the
   turn's the engine last ran in that chat, not a turn of its own. No
-  tool's emoji is a notice glyph, so no progress line reads as one; and
+  tool's emoji is a notice glyph (and the image sends no progress); and
   Hermes' word on a command said beside a turn (`⏩` a steer's, `💬 /btw:`
   a side question's answer) is the command's message of its own
   (above, "Commands"), read before any notice.
@@ -927,14 +946,7 @@ get_chat_info`.
   (a silent routine at home sends the phone nothing).
 
 Of decision 21's list, v0.21.5 has every op, but sends `task_card` only
-for Slack chats (`gateway/run_turn.py`), so our image uses supported observers over the activity socket; `follow_up` is Discord's interaction tokens; neither is
+for Slack chats (`gateway/run_turn.py`), so steps come from its tool hooks
+(above); `follow_up` is Discord's interaction tokens; neither is
 advertised. It also has `thread_create` and `thread_rename` (threads are
 off here).
-
-Structured tool outcomes may overtake the Relay sender before even a first
-draft, especially for short narration beside an instant command. The runtime
-tracks that boundary in memory: a subsequent reply segment proves those late
-words were interim, and seals that still-open part as interim before passing
-on the next segment. A lone answer stays final; no posted record is rewritten.
-Hermes' `metadata.notify` does not prove finality here: its stream sender can
-set it on both a tool-boundary preamble and the actual final answer.
