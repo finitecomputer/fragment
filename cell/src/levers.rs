@@ -108,8 +108,10 @@ pub async fn route(mut req: Request, env: &Env, cfg: &Config, rest: &[&str]) -> 
                 hook: ledger::TestHook,
             }
             let t: TestLedger = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
-            if !npub::is_identity(&t.identity) {
-                return Err(CellError::invalid("name an identity"));
+            // a person's, or an org's (`org:<id>`) where levers reach everyone
+            let org = fragment_core::ledger::org::Payer::parse(&t.identity).is_some_and(|p| matches!(p, fragment_core::ledger::org::Payer::Org(_)));
+            if !npub::is_identity(&t.identity) && !(org && !cfg.levers_scoped) {
+                return Err(CellError::invalid("name an identity (or, unscoped, an org's ledger: org:<id>)"));
             }
             if cfg.levers_scoped && !is_e2e(env, &t.identity).await? {
                 return Err(CellError::new(ErrorCode::Forbidden, "on a preview, the ledger levers reach e2e people alone"));

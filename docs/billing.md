@@ -144,19 +144,22 @@ create trial codes, etc." The Stripe account is finite-mono's.
 ### An org's own credit (decisions 66 to 68)
 
 - **Its own ledger.** An org's ledger (`org:<id>`; docs/ledger.md) pays
-  for what the org owns, from credit of its own: its $25 packs and
-  operators' grants. Its seats' included credit stays each holder's.
-- **Who pays buys it.** `POST /api/orgs/<org>/billing/pack` opens a
-  Checkout of the pack for the org, on its customer, for who pays for it
-  alone (as only they open its billing). Its metadata names the org's
-  ledger (`fragment_payer`) and no person, so a pack paid after its buyer
-  left still credits the org, once by its Checkout.
-- **Its billing admins** read it (`GET /api/orgs/<org>/ledger`) and set
-  its monthly budget (`PUT …/budget`), past which its fragments' AI steps
-  stop; it is zero until they do. Its overdraft is zero.
-- **Operators** grant it credit as they grant a person's
-  (`POST /api/ledger/org:<id>/grant`, logged), the path for a deployment
-  that sells nothing.
+  for what the org owns, from credit of its own. Its seats' included
+  credit stays each holder's.
+- **Operators fund it.** Orgs pay out of band (a Stripe link, an invoice;
+  Paul, 2026-10-30): an operator credits it (`fragment operator credit
+  <org> <usd> --why … --id <reference>`, the invoice's or payment's, so a
+  retry credits it once; `POST /api/ledger/org:<id>/grant`), sets its
+  monthly budget (`fragment operator budget`, `…/budget`), past which its
+  fragments' AI steps stop (zero until set), and names the person its
+  credit is invoiced to (`fragment operator payer`). Each is logged once
+  by its id, in its governance log and the operators' log, before its
+  ledger takes it: an org being credited is never dropped, and a command
+  cut short is finished by sending it again.
+  Its overdraft is zero. Orgs buy no credit and set no budget themselves
+  yet. A pack of an org's own opened while one was sold (preview, until
+  2026-10-30) still credits it, paid (the debt ledger).
+- **Its billing admins** read it (`GET /api/orgs/<org>/ledger`).
 - **Nothing of it is a content power.** Reading or funding an org's
   ledger lets no one into its fragments (decision 69).
 
@@ -164,9 +167,9 @@ create trial codes, etc." The Stripe account is finite-mono's.
 
 An org's content admins and its governance log are the registry's, apart
 from `org_members` (docs/api.md, Org content). An org with anyone in its
-content is never dropped when its subscription ends and its seats go
-(`drop_if_empty`; one dropped with no one in it takes its offers with
-it), and a person's wipe makes them an admin no more there rather than
+content, or that an operator credited or named a payer for, is never
+dropped when its subscription ends and its seats go (`drop_if_empty`;
+its credit is never stranded, and one dropped takes its offers with it), and a person's wipe makes them an admin no more there rather than
 taking the org with them; an org left with no content admin waits on an
 operator's recovery offer, logged.
 
@@ -239,7 +242,8 @@ For docs/MODEL.md's truth map:
 | A subscription's status, trial end and period end | Stripe; the registry keeps a copy | the webhook, the Checkout return and a daily reconcile, each by fetching it from Stripe |
 | How many paid seats | the registry's seats; Stripe's item quantity is a copy | every seat change pushes it; the reconcile repairs a drift |
 | A person's plan and seat standing | their ledger | the registry alone |
-| An org's own credit and monthly budget | its ledger (`org:<id>`) | its packs' Checkouts (who pays for it), operators' grants, its billing admins (the budget) |
+| An org's own credit and monthly budget | its ledger (`org:<id>`) | operators (credit and budget), its billing admins read it |
+| Who an org's credit is invoiced to | its governance log (`payer-named`) | operators |
 | An org's content people, content admins and governance log | the registry (`org_content`, `org_content_offers`, `org_governance`) | its content admins (offers, withdrawals, step-downs), the people offered (their answers), who pays (the first offer), operators (recovery) and a wipe |
 | A computer's always-on | the computer | the registry, from its owner's plan and choice |
 | Trial codes and their uses | the registry | operators; redemptions |
@@ -730,9 +734,9 @@ Paul took every recommendation. In docs/cloudflare-v1.md:
 | Previews | `xtask deploy --branch` registers its sandbox endpoint and uploads its signing secret | 58 |
 | The admin page | an operator's browser session; the wipe stays CLI-signed | 59 |
 | Annual prices | none; monthly only | 51 |
-| How an org pays for what it owns (Paul, 2026-10-30) | credit of its own, bought by who pays for it; seat credit stays personal | 66 |
+| How an org pays for what it owns (Paul, 2026-10-30) | credit of its own, credited by an operator (it pays out of band), its payer named in its governance log; seat credit stays personal | 66 |
 | Who pays for a person's agent in an org's fragment (Paul, 2026-10-30) | the person; the org pays for the fragment's hosting and own AI steps | 67 |
-| An org's overdraft and budget (Paul, 2026-10-30) | no overdraft; an explicit monthly budget, zero until set; the $5 cap for every caller | 68 |
+| An org's overdraft and budget (Paul, 2026-10-30) | no overdraft; an explicit monthly budget, an operator's, zero until set; the $5 cap for every caller | 68 |
 
 Still Paul's, before the slices that need them:
 
