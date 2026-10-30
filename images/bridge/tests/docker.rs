@@ -3335,6 +3335,10 @@ async fn teammates_ask_each_other() {
     let (manswer, a) = fake.with(|w| (reply(w, &pair, &mturn), answers_of(w, "juniper", "ping from juniper")[0].clone()));
     assert!(manswer.contains("ping from juniper"), "maple answered in their chat: {manswer}");
     assert_eq!((&a["principal"], &a["body"]["name"], &a["body"]["outcome"], &a["body"]["turn"]), (&json!("npub1juniper"), &json!("Maple"), &json!("idle"), &json!(mturn)));
+    let woken = fake.with(|w| w.bodies(&jchat, "work", "turn.start").into_iter().find(|b| b["turn"] == woke("juniper", &a).as_str())).expect("its start");
+    assert_eq!(woken["asker"], "npub1maple", "asked as the agent that answered");
+    let told_as = handed(&model, "juniper--k3x9", "Maple answered your question").first().map(|m| m.body["messages"].as_array().and_then(|ms| ms.iter().rev().find(|x| x["role"] == "user")).map(content_text).unwrap_or_default()).unwrap_or_default();
+    assert!(told_as.starts_with("[Maple]"), "Hermes is told it is from Maple: {told_as}");
     let said = fake.with(|w| reply(w, &jchat, &woke("juniper", &a)));
     eprintln!("teammates: juniper said on: {said}");
     assert!(said.contains("passed on: Maple answered your question in") && said.contains(&manswer), "juniper says maple's answer in her own chat: {said}");

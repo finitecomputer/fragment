@@ -850,18 +850,20 @@ impl Engine {
             }
             Task::Joined { fragment } => self.out.push(Effect::Discover { agent: agent.fragment.clone(), joined: fragment }),
             // Only its own bridge answers it (as itself, `owe_answer`): a
-            // turn its owner's business in that chat, as a routine's is, and
-            // no fewer hops deep than the turn that answered, so a callback
-            // resets no depth and spends that chat's budget.
-            Task::Answer { chat, text, name, hop, refused } if record.principal == agent.identity => {
+            // turn asked as the agent that answered (its identity and name,
+            // which the runtime is told it is from: Paul, 2026-10-30), its
+            // owner's business in that chat still (`who_answers`: their
+            // Stop, their words to a question it asks), and no fewer hops
+            // deep than the turn that answered, so a callback resets no
+            // depth and spends that chat's budget.
+            Task::Answer { chat, text, by, name, hop, refused } if record.principal == agent.identity => {
                 let cause = Cause { fragment: agent.fragment.clone(), channel: record.channel.clone(), seq: record.seq };
                 let m = Message { text: text.clone(), ..Message::default() };
-                let owner = agent.owner.clone();
                 // a refused question's answer is a turn that never runs, its
                 // end saying why: no runtime hears it, so nothing asks again
                 let ask = if refused { Ask::Refused(&text) } else { Ask::Message };
                 let hop = if refused { 0 } else { hop.clamp(1, limits::HOPS_MAX) };
-                self.admit(agent, &chat, cause, record.at, &owner, name, &m, hop, ask);
+                self.admit(agent, &chat, cause, record.at, &by, name, &m, hop, ask);
             }
             Task::Answer { .. } => crate::ev!("task.ignored", { "agent": agent.fragment, "seq": record.seq, "why": "only the agent's own bridge posts its answers" }),
             Task::Other => {}
@@ -1310,8 +1312,8 @@ impl Engine {
         let by_name = view.names.get(principal).cloned().unwrap_or_else(|| "someone".into());
         let attached = (!m.attachments.is_empty()).then(|| Attached { agent: agent.fragment.clone(), fragment: fragment.to_string(), by_name: by_name.clone(), refs: m.attachments.clone() });
         let mine = |t: &&Turn| t.agent == agent.fragment && t.fragment == fragment;
-        if let Some((id, asker)) = self.state.turns.values().filter(mine).find(|t| t.asking && t.active()).map(|t| (t.id.clone(), t.asker.clone())) {
-            if asker != principal {
+        if let Some((id, answers)) = self.state.turns.values().filter(mine).find(|t| t.asking && t.active()).map(|t| (t.id.clone(), self.who_answers(t))) {
+            if answers != principal {
                 return false;
             }
             let t = self.state.turns.get_mut(&id).expect("found");
@@ -1336,6 +1338,17 @@ impl Engine {
         true
     }
 
+    /// Whom a turn's question in words waits for, and who stops it: its
+    /// asker, but a turn caused on its agent's own `tasks` (a routine, an
+    /// answer) is its owner's business in its chat, whoever is named as
+    /// asking it (an answer names the agent that answered).
+    fn who_answers(&self, t: &Turn) -> String {
+        match self.agent(&t.agent) {
+            Some(a) if t.cause.channel == records::TASKS => a.owner.clone(),
+            _ => t.asker.clone(),
+        }
+    }
+
     fn stop(&mut self, agent: &Agent, fragment: &str, principal: &str, named: Option<&str>) {
         let target = self
             .state
@@ -1346,13 +1359,13 @@ impl Engine {
                 Some(id) => t.id == id,
                 None => t.active(),
             })
-            .map(|t| (t.id.clone(), t.asker.clone(), t.phase));
-        let Some((id, asker, phase)) = target else {
+            .map(|t| (t.id.clone(), self.who_answers(t), t.phase));
+        let Some((id, answers, phase)) = target else {
             crate::ev!("stop.ignored", { "agent": agent.fragment, "fragment": fragment, "why": "no such turn" });
             return;
         };
-        if asker != principal {
-            crate::ev!("stop.ignored", { "turn": id, "why": "only the turn's asker stops it" });
+        if answers != principal {
+            crate::ev!("stop.ignored", { "turn": id, "why": "only the turn's asker (its owner, for a routine's or an answer's) stops it" });
             return;
         }
         match phase {
@@ -1520,7 +1533,8 @@ impl Engine {
                 // it would wait out its bound: it ends at once, its question
                 // its answer (an ask's carries it back)
                 let t = &self.state.turns[&turn];
-                if t.hop > 0 && self.agent(&t.agent).is_some_and(|a| a.owner != t.asker) {
+                let answers = self.who_answers(t);
+                if t.hop > 0 && self.agent(&t.agent).is_some_and(|a| a.owner != answers) {
                     crate::ev!("turn.asked_an_agent", { "turn": turn });
                     self.out.push(Effect::Runtime(Command::Forget { turn: turn.clone() }));
                     self.end(&turn, Outcome::Idle, Closed::Expired);
@@ -1531,7 +1545,7 @@ impl Engine {
                     t.asking = true;
                     self.dirty = true;
                     crate::ev!("turn.asked", { "turn": turn });
-                    let (agent, fragment, id, body) = (t.agent.clone(), t.fragment.clone(), records::work_id(&turn, &format!("q{}", t.last_part)), records::turn_asked(&turn, &t.asker));
+                    let (agent, fragment, id, body) = (t.agent.clone(), t.fragment.clone(), records::work_id(&turn, &format!("q{}", t.last_part)), records::turn_asked(&turn, &answers));
                     self.post(&agent, &fragment, records::WORK, id, body, Vec::new());
                 }
             }

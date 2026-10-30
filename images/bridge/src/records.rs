@@ -116,10 +116,10 @@ pub enum Task {
     /// (another agent of this computer in it would miss the new one).
     Joined { fragment: Option<String> },
     /// The answer to a question the agent asked another (`answer`): a turn
-    /// in `chat`, told `text` by that agent (its `name`), `hop` hand-offs
-    /// deep; `refused`: the question was never taken, and the turn never
-    /// runs.
-    Answer { chat: String, text: String, name: String, hop: u32, refused: bool },
+    /// in `chat`, told `text` by that agent (`by`, its `name`), `hop`
+    /// hand-offs deep; `refused`: the question was never taken, and the
+    /// turn never runs.
+    Answer { chat: String, text: String, by: String, name: String, hop: u32, refused: bool },
     Other,
 }
 
@@ -377,8 +377,9 @@ pub fn task(body: &Value) -> Task {
                 Some(Value::Bool(b)) => Some(*b),
                 Some(_) => None,
             };
-            match (text_field(o, "chat"), text_field(o, "text"), text_field(o, "name"), hop, refused) {
-                (Some(chat), Some(text), Some(name), Some(hop), Some(refused)) if fragment_name_ok(&chat) && !name.trim().is_empty() && name.len() <= limits::ANSWER_NAME_MAX_BYTES => Task::Answer { chat, text, name, hop, refused },
+            let by = text_field(o, "by").filter(|b| is_identity(b) && b.len() <= 128);
+            match (text_field(o, "chat"), text_field(o, "text"), by, text_field(o, "name"), hop, refused) {
+                (Some(chat), Some(text), Some(by), Some(name), Some(hop), Some(refused)) if fragment_name_ok(&chat) && !name.trim().is_empty() && name.len() <= limits::ANSWER_NAME_MAX_BYTES => Task::Answer { chat, text, by, name, hop, refused },
                 _ => Task::Other,
             }
         }
@@ -934,8 +935,8 @@ mod tests {
     fn tasks_read() {
         assert_eq!(task(&json!({ "kind": "routine", "text": "water", "chat": "c--k3x9" })), Task::Routine { text: "water".into(), chat: "c--k3x9".into() });
         assert_eq!(task(&json!({ "kind": "joined", "fragment": "c--k3x9" })), Task::Joined { fragment: Some("c--k3x9".into()) });
-        let answer = json!({ "kind": "answer", "chat": "home--k3x9", "text": "t", "name": "Rowan", "hop": 2 });
-        assert_eq!(task(&answer), Task::Answer { chat: "home--k3x9".into(), text: "t".into(), name: "Rowan".into(), hop: 2, refused: false });
+        let answer = json!({ "kind": "answer", "chat": "home--k3x9", "text": "t", "by": "npub1rowan", "name": "Rowan", "hop": 2 });
+        assert_eq!(task(&answer), Task::Answer { chat: "home--k3x9".into(), text: "t".into(), by: "npub1rowan".into(), name: "Rowan".into(), hop: 2, refused: false });
         let mut refused = answer.clone();
         refused["refused"] = json!(true);
         assert!(matches!(task(&refused), Task::Answer { refused: true, .. }));
@@ -946,7 +947,7 @@ mod tests {
             assert!(written["name"].as_str().unwrap().len() <= limits::ANSWER_NAME_MAX_BYTES);
             assert!(matches!(task(&written), Task::Answer { .. }), "{long}");
         }
-        for (key, bad) in [("chat", json!("Home Chat")), ("name", json!(" ")), ("name", json!("a".repeat(201))), ("hop", json!(-1)), ("text", json!(null)), ("refused", json!("yes"))] {
+        for (key, bad) in [("chat", json!("Home Chat")), ("by", json!("rowan")), ("by", json!(null)), ("name", json!(" ")), ("name", json!("a".repeat(201))), ("hop", json!(-1)), ("text", json!(null)), ("refused", json!("yes"))] {
             let mut broken = answer.clone();
             broken[key] = bad;
             assert_eq!(task(&broken), Task::Other, "{key}");
