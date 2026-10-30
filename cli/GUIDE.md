@@ -984,6 +984,7 @@ fragment invites                         # the invites waiting for your yes
 fragment invites accept|decline <name>   # an agent: its owner's, acting for them
 fragment sync <name> [--dir D] [--watch] [--mode M [--prune] | --live] [--apply-mass-delete]
 fragment verify <name> [--dir D]         fragment secret list|rm ...
+fragment search <name> <q> [--dir D] [--limit N]
 fragment secret set <name> <KEY> --to HOST [--to HOST]   # the value from $KEY, else stdin
 fragment deploy <name> [--dir D] [--note N]
 fragment write <name> <path> --text T | --from FILE|- [--message M]
@@ -1056,3 +1057,24 @@ it. A failed `fragment call` names its id (in the message, and as
 up); when its outcome is unknown, call it again with that `--id`, which
 replays it and never runs it twice. A request may take 30 s plus a
 second for every 32 KiB it uploads.
+
+### Search a local brain
+
+`fragment search <name> '<words>' --dir <folder> [--limit 1..50]` searches
+current Markdown sections offline, including unsynced edits and new files.
+It requires no key, server, watcher or prior sync. `--json` returns
+`{q,words,results,skipped}` in the usual success envelope; each ranked result
+names its fragment, path, title, heading, ancestry, snippet and state.
+`state` is `synced` (matches the last local journal), `local_only` (new or
+edited), or `conflicted` (recorded divergence, conflict copy or merge markers).
+`Synced` is not a fresh check of the remote or published content. Deleted
+files and remote conflict copies are not hits. The name must match a valid
+existing sync journal; with no journal it labels the folder's source.
+
+Each invocation rebuilds an in-memory FTS5 index from actual files. Words are
+all required prefixes, ranked by weighted BM25. Queries take 1–256 characters
+and 1–16 words; results default to 10. Sync's ignores and symlink exclusions
+apply, with brain machinery and instruction files excluded too. Oversized
+(1 MiB), non-UTF-8 and truncated pages are reported in `skipped`. See the
+brain template README for the complete output contract, parsing limits and
+conflict semantics. Search never syncs or writes an index into the folder.

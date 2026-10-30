@@ -124,6 +124,9 @@ pub struct SyncState {
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct FileState {
+    /// Divergence observed by sync, even when saving a remote copy failed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub conflicted: bool,
     pub sha256: String,
     pub size: u64,
     pub mtime_ns: i128,
@@ -352,7 +355,7 @@ pub fn syncable(rel: &str) -> bool {
 /// `path` relative to `root`, its segments joined by `/` ("" for the root
 /// itself). A segment keeps its name whole: a Unix file named `a\b` is
 /// one segment with a backslash (no repo path), never `a/b`.
-fn relative(root: &Path, path: &Path) -> String {
+pub(crate) fn relative(root: &Path, path: &Path) -> String {
     let Ok(rel) = path.strip_prefix(root) else { return String::new() };
     let segments: Vec<std::borrow::Cow<'_, str>> = rel.components().map(|c| c.as_os_str().to_string_lossy()).collect();
     segments.join("/")
@@ -629,7 +632,7 @@ pub fn pass_over(client: &Client, storage: &CodeStorage, name: &str, dir: &Path,
                         if let Some(lf) = local.get(p) {
                             state.files.insert(
                                 p.clone(),
-                                FileState { sha256: lf.sha256.clone(), size: lf.size, mtime_ns: lf.mtime_ns, commit: tip.clone() },
+                                FileState { conflicted: false, sha256: lf.sha256.clone(), size: lf.size, mtime_ns: lf.mtime_ns, commit: tip.clone() },
                             );
                         }
                         report.pushed.push(p.to_string());
@@ -821,7 +824,7 @@ fn adopt_identical(
         if crate::blobs::content_sha(&bytes) == lf.sha256 {
             state.files.insert(
                 p.clone(),
-                FileState { sha256: lf.sha256.clone(), size: lf.size, mtime_ns: lf.mtime_ns, commit: rf.last_commit_sha.clone() },
+                FileState { conflicted: false, sha256: lf.sha256.clone(), size: lf.size, mtime_ns: lf.mtime_ns, commit: rf.last_commit_sha.clone() },
             );
         }
     }
@@ -884,9 +887,9 @@ fn record_conflicts(
             }
         }
         let entry = match ctx.local.get(path) {
-            Some(lf) => FileState { sha256: lf.sha256.clone(), size: lf.size, mtime_ns: lf.mtime_ns, commit: rf_commit },
+            Some(lf) => FileState { conflicted: true, sha256: lf.sha256.clone(), size: lf.size, mtime_ns: lf.mtime_ns, commit: rf_commit },
             None => match ctx.state.files.get(path) {
-                Some(st) => FileState { commit: rf_commit, ..st.clone() },
+                Some(st) => FileState { conflicted: true, commit: rf_commit, ..st.clone() },
                 None => continue,
             },
         };
@@ -957,7 +960,7 @@ fn pull_file(storage: &CodeStorage, blobs: &crate::blobs::Blobs<'_>, dir: &Path,
     let mtime_ns = md.modified().map(|m| m.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as i128).unwrap_or(0)).unwrap_or(0);
     state.files.insert(
         path.clone(),
-        FileState { sha256: sha, size: md.len(), mtime_ns, commit: commit.to_string() },
+        FileState { conflicted: false, sha256: sha, size: md.len(), mtime_ns, commit: commit.to_string() },
     );
     report.pulled.push(path.to_string());
     Ok(())
@@ -1025,7 +1028,7 @@ mod tests {
         assert_eq!(s1.hashed, 1);
         let mut st = SyncState { schema_version: 3, name: "x".into(), host: None, repo: None, files: BTreeMap::new() };
         let lf = l1.get("site/index.html").unwrap();
-        st.files.insert(rp("site/index.html"), FileState { sha256: lf.sha256.clone(), size: lf.size, mtime_ns: lf.mtime_ns, commit: "c".into() });
+        st.files.insert(rp("site/index.html"), FileState { conflicted: false, sha256: lf.sha256.clone(), size: lf.size, mtime_ns: lf.mtime_ns, commit: "c".into() });
         let s2 = scan_local(&dir, Some(&st), false).unwrap().stats;
         assert_eq!(s2.hashed, 0);
         fs::remove_dir_all(&dir).ok();
@@ -1562,6 +1565,8 @@ mod tests {
         assert_eq!(report.conflicts.len(), 1);
         assert_eq!(report.exit_code(), 3);
         assert_eq!(fs::read(dir.join("shared.txt")).unwrap(), b"ours", "local keeps ours");
+        assert!(load_state(&dir, "t--k3x9").unwrap().files["shared.txt"].conflicted,
+            "a conflict survives even when no remote copy could be saved");
         // the copy name splits stem/ext like the old engine: shared.conflict-<ts>-<w>.txt
         let copy = fs::read_dir(&dir).unwrap().filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().to_string()).find(|n| n.starts_with("shared.conflict-"));
         assert!(copy.is_some(), "remote copy saved beside it");
