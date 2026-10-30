@@ -6,17 +6,20 @@
 //!
 //! - a reply streams as `draft` frames, then arrives as a `send` that
 //!   answers the turn's message: a reply part;
-//! - supported tool observers share the authenticated activity socket;
-//!   presentation progress never creates steps;
+//! - a step is a tool call's end, which our image's plugin says on the
+//!   activity socket (`activity_connection`); progress text is none;
 //! - a `send` answering nothing that starts with a notice glyph (`💾`,
 //!   `⚠️`, `⏳`, …: `wire::NOTICES`) is a notice (`Event::Notice`), with a
 //!   turn running or not (its review comes after its turn's `✅`);
 //! - the model's text beside a tool call arrives as a reply too (Hermes
 //!   ends a draft segment at every tool boundary with such a `send`), and is
 //!   one, whole: the engine posts it before the step that follows (Paul,
-//!   2026-10-24: everything the agent says is a reply in the chat). A step
-//!   that reaches the bridge while those words still stream waits for them
-//!   (at most `limits::STEP_HOLD_MS`), so they post before it; and while a
+//!   2026-10-24: everything the agent says is a reply in the chat). The
+//!   two sockets keep no order between them: a step that reaches the bridge
+//!   while those words still stream waits for them (at most
+//!   `limits::STEP_HOLD_MS`), so they post before it; words that come after
+//!   a step that had none are its, late, or the turn's next, and another
+//!   reply after them says which (`Inflight::late_reply`); and while a
 //!   reply's image links are fetched, everything of its turn after it (its
 //!   steps, a later reply, a card, a file, its end) waits in order, so the
 //!   reply keeps its files and no later part is sealed out of turn
@@ -92,9 +95,9 @@ use wire::{Action, FromGateway};
 /// Files kept for Hermes (uploads and re-hosted attachments), at most; past
 /// it the oldest go.
 pub const MEDIA_KEPT_MAX: usize = 256;
-/// Messages of a turn that are neither a reply nor its progress (a notice,
-/// "Other"'s ask for words) that the bridge remembers, at most (only so
-/// their edits change nothing; Hermes edits none once sent).
+/// Messages of a turn that are no reply (a notice, "Other"'s ask for
+/// words, its progress) that the bridge remembers, at most (only so their
+/// edits change nothing).
 pub const TAKEN_KEPT_MAX: usize = 64;
 /// Commands said beside a turn (`Command::Aside`) whose answers the bridge
 /// still knows, at most: the oldest go (Hermes answers one at once).
@@ -173,8 +176,6 @@ struct Inflight {
     sent: bool,
     /// Reply messages, by the id the bridge gave them, and their parts.
     parts: HashMap<String, u32>,
-    /// Progress messages, and how many of their lines are steps already.
-    observed: std::collections::BTreeSet<String>,
     next_part: u32,
     /// It said something: a reply, a draft, a step, a prompt, a file (so
     /// its next `✅` is its end, not the startup gate's empty bracket's).
@@ -193,12 +194,16 @@ struct Inflight {
     /// at every tool boundary with one, so the model's words before a tool
     /// call arrive as a reply, which its tool's observation can come before).
     drafting: bool,
-    /// A tool result overtook its words before any draft arrived. The
-    /// first subsequent reply may still be final; only another reply
-    /// proves it was an interim segment.
+    /// Words came since its last step, not that step's late ones: the
+    /// next step's.
+    worded_since_step: bool,
+    /// Its last step came with no words nor any streaming: its words, if
+    /// any, are still to come (its end overtook their `send`).
     unworded_step: bool,
+    /// The words that came first after an unworded step: its, late, or the
+    /// turn's next. A reply after them, no step between, says they were
+    /// its: interim (`Event::Interim`, just before that reply).
     late_reply: Option<u32>,
-    words_since_step: bool,
     /// The turn's events (steps, replies and their files, cards, its end)
     /// that wait, in the order they came, behind what is not whole yet: a
     /// reply's image links being fetched (nothing after a reply may seal
@@ -214,8 +219,8 @@ struct Inflight {
     /// Its end is said (queued behind what waits, or posted): another
     /// says nothing more.
     ending: bool,
-    /// Messages that are neither a reply nor its progress (a notice,
-    /// "Other"'s ask for words): an edit of one changes nothing.
+    /// Messages that are no reply (a notice, "Other"'s ask for words, its
+    /// progress): an edit of one changes nothing.
     taken: Vec<String>,
     /// Its replies' image links being fetched (`picture`), and the reply
     /// parts they are in with their text as it stands.
@@ -238,8 +243,8 @@ impl Inflight {
         self.held_at = None;
     }
 
-    /// A message that is neither a reply nor progress (its edits change
-    /// nothing), the oldest let go past `TAKEN_KEPT_MAX`.
+    /// A message that is no reply (its edits change nothing), the oldest
+    /// let go past `TAKEN_KEPT_MAX`.
     fn take_message(&mut self, id: String) {
         if self.taken.len() >= TAKEN_KEPT_MAX {
             self.taken.remove(0);
@@ -465,29 +470,37 @@ async fn connection(ws: net::ServerWs, wire_tx: mpsc::Sender<Wire>, conn: u64) {
     crate::ev!("relay.closed", { "conn": conn });
 }
 
-/// A live runtime-work signal, authenticated as the gateway. It holds no
-/// turn and writes no state. Its close (or 30 s without a ping) lets go.
+/// The gateway's runtime work and tool steps, authenticated as it is. A
+/// socket alone holds nothing: `{"working": true}` holds until `false`, its
+/// close, or 30 s without a frame or ping; a tool call's end
+/// (`wire::observed_tool`) is a step. Each frame is answered once the loop
+/// has it, so its hook returns only then, before Hermes can end the turn.
 async fn activity_connection(ws: net::ServerWs, wire_tx: mpsc::Sender<Wire>, conn: u64) {
     let (mut sink, mut stream) = ws.split();
-    // A socket alone holds nothing. Only an acknowledged lifecycle
-    // working=true signal holds, before Hermes can end the parent turn.
     if sink.send(Message::text("ready")).await.is_ok() {
+        // bounded by the connection: ends when the peer closes, errs or
+        // goes quiet
         while let Ok(Some(frame)) = tokio::time::timeout(std::time::Duration::from_secs(30), stream.next()).await {
-            match frame {
-                Ok(Message::Ping(data)) => if sink.send(Message::Pong(data)).await.is_err() { break },
-                Ok(Message::Text(text)) if text.len() <= 4096 => {
-                    if let Ok(v) = serde_json::from_str::<Value>(&text) {
-                        if let Some(working) = v.get("working").and_then(Value::as_bool) {
-                            let _ = wire_tx.send(Wire::Activity { conn, working }).await;
-                            if sink.send(Message::text("working")).await.is_err() { break }
-                        } else if let Some((turn, step)) = wire::observed_tool(&v) {
-                            let _ = wire_tx.send(Wire::Tool { turn, step }).await;
-                            if sink.send(Message::text("observed")).await.is_err() { break }
-                        }
+            let answer = match frame {
+                Ok(Message::Ping(data)) => Message::Pong(data),
+                Ok(Message::Text(text)) => {
+                    let v = (text.len() <= 4096).then(|| serde_json::from_str::<Value>(&text).ok()).flatten();
+                    if let Some(working) = v.as_ref().and_then(|v| v.get("working")).and_then(Value::as_bool) {
+                        let _ = wire_tx.send(Wire::Activity { conn, working }).await;
+                        Message::text("working")
+                    } else if let Some((turn, step)) = v.as_ref().and_then(wire::observed_tool) {
+                        let _ = wire_tx.send(Wire::Tool { turn, step }).await;
+                        Message::text("observed")
+                    } else {
+                        crate::ev!("relay.activity_refused", { "bytes": text.len() });
+                        Message::text("refused")
                     }
                 }
                 Ok(Message::Close(_)) | Err(_) => break,
-                Ok(_) => {}
+                Ok(_) => continue,
+            };
+            if sink.send(answer).await.is_err() {
+                break;
             }
         }
     }
@@ -671,21 +684,14 @@ impl Loop {
         self.next_order += 1;
         let turn = ts.turn.clone();
         let sent = self.send(frame.clone());
-        self.inflight.insert(turn.clone(), Inflight { start: ts, chat: chat.clone(), profile, order: self.next_order, frame, acked: false, sent, parts: HashMap::new(), observed: std::collections::BTreeSet::new(), next_part: 1, said: false, stopped: false, asking: false, carded: false, worded: false, drafting: false, unworded_step: false, late_reply: None, words_since_step: false, queue: VecDeque::new(), words_at: None, held_at: None, ending: false, taken: Vec::new(), pictures: 0, pictured: HashMap::new() });
+        self.inflight.insert(turn.clone(), Inflight { start: ts, chat: chat.clone(), profile, order: self.next_order, frame, acked: false, sent, parts: HashMap::new(), next_part: 1, said: false, stopped: false, asking: false, carded: false, worded: false, drafting: false, worded_since_step: false, unworded_step: false, late_reply: None, queue: VecDeque::new(), words_at: None, held_at: None, ending: false, taken: Vec::new(), pictures: 0, pictured: HashMap::new() });
         self.by_chat.insert(chat, turn.clone());
         crate::ev!("relay.inbound", { "turn": turn, "sent": sent });
     }
 
     async fn wire(&mut self, w: Wire) {
         match w {
-            Wire::Tool { turn, step } => {
-                if self.inflight.get_mut(&turn).is_some_and(|f| {
-                    let id = &step.evidence.as_ref().expect("observed evidence").tool_call_id;
-                    f.observed.len() < 200 && f.observed.insert(id.clone())
-                }) {
-                    self.steps(&turn, vec![step]).await;
-                }
-            }
+            Wire::Tool { turn, step } => self.step(&turn, step).await,
             Wire::Activity { conn, working } => {
                 if working {
                     self.activity.insert(conn);
@@ -888,26 +894,31 @@ impl Loop {
                     // before a tool call): a reply part, which the engine
                     // posts at the next step, part, card or end. Words its
                     // steps waited for go before them; any other, in order.
+                    // Late words before them were a step's: interim, said
+                    // just before them, wherever they go.
                     let part = f.next_part;
                     f.next_part += 1;
                     f.parts.insert(id.clone(), part);
                     f.drafting = false;
-                    if let Some(part) = f.late_reply.take() {
-                        f.queue.push_back(Event::Interim { turn: turn.clone(), part });
-                    }
-                    if f.unworded_step {
-                        f.late_reply = Some(part);
-                        f.unworded_step = false;
-                    }
-                    f.words_since_step = true;
-                    let said = Event::Reply { turn: turn.clone(), part, text: text.clone() };
+                    let said = f.late_reply.take().map(|late| Event::Interim { turn: turn.clone(), part: late }).into_iter().chain([Event::Reply { turn: turn.clone(), part, text: text.clone() }]);
                     match f.words_at.take() {
                         Some(at) => {
                             f.held_at = None;
                             let at = at.min(f.queue.len());
-                            f.queue.insert(at, said);
+                            for (i, e) in said.enumerate() {
+                                f.queue.insert(at + i, e);
+                            }
                         }
-                        None => self.out(&turn, said).await,
+                        None => {
+                            if std::mem::take(&mut f.unworded_step) {
+                                f.late_reply = Some(part);
+                            } else {
+                                f.worded_since_step = true;
+                            }
+                            for e in said {
+                                self.out(&turn, e).await;
+                            }
+                        }
                     }
                     // its image links are its files, once fetched: what
                     // comes after it waits for them
@@ -919,8 +930,8 @@ impl Loop {
                     self.picture(&turn, part, links);
                     self.drain(&turn, false).await;
                 } else {
-                    // Presentation-only progress is acknowledged and ignored.
-                    // Missing hook evidence must never fabricate a tool result.
+                    // its progress, or another message answering nothing:
+                    // no step (those are observed), nor words
                     f.take_message(id.clone());
                 }
                 json!({ "success": true, "message_id": id })
@@ -933,7 +944,6 @@ impl Loop {
                     // later (posted, a reply is whole)
                     let (text, _) = wire::uncursored(&content);
                     self.out(&turn, Event::Reply { turn: turn.clone(), part, text: text.to_string() }).await;
-
                 } else if f.taken.contains(&message_id) {
                     return ok;
                 } else {
@@ -1130,37 +1140,23 @@ impl Loop {
         }
     }
 
-    /// Supported terminal observations, after the model's
-    /// words before the call: those are a reply part the engine posts
-    /// before the step. Steps that come while their draft segment still
-    /// streams (its `send` to come) wait for those words, which go before
-    /// them (`Inflight::words_at`); any that come while something before
-    /// them is not whole wait in order (`out`).
-    async fn steps(&mut self, turn: &str, mut steps: Vec<Step>) {
-        if steps.is_empty() {
-            return;
-        }
+    /// A tool call's end, a step of its turn (which said something, so its
+    /// `✅` ends it), after the model's words before the call: a reply part
+    /// the engine posts before the step. One that comes while its words
+    /// still stream (their `send` to come) waits for them, which go before
+    /// it (`Inflight::words_at`); one that comes while something before it
+    /// is not whole waits in order (`out`).
+    async fn step(&mut self, turn: &str, step: Step) {
         let Some(f) = self.inflight.get_mut(turn) else { return };
-        // Hermes' background memory review may finish between the late
-        // preamble and final answer. It must not prematurely seal those
-        // still-ambiguous words as final; end/next reply decides instead.
-        let deferred = f.late_reply.is_some() && steps.iter().all(|s| s.category == crate::records::Category::Memory);
-        if !deferred {
-            f.unworded_step = !f.drafting && !f.words_since_step;
-            f.late_reply = None;
-            f.words_since_step = false;
-        }
-        if deferred {
-            for step in &mut steps { step.defer_reply = true; }
-        }
+        f.said = true;
+        f.unworded_step = !f.drafting && !f.worded_since_step;
+        f.worded_since_step = false;
         if f.drafting && f.words_at.is_none() {
             f.words_at = Some(f.queue.len());
             f.held_at = Some(tokio::time::Instant::now());
             crate::ev!("relay.steps_wait", { "turn": turn, "for": "words" });
         }
-        for step in steps {
-            self.out(turn, Event::Step { turn: turn.to_string(), step }).await;
-        }
+        self.out(turn, Event::Step { turn: turn.to_string(), step }).await;
     }
 
     /// An event of the turn, in its order: at once, or, while something

@@ -7,10 +7,11 @@
 
 use base64::Engine;
 use hmac::{Hmac, Mac};
+use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::Sha256;
 
-use crate::records::{Category, NoticeCategory, PromptOption, Step};
+use crate::records::{valid_post_id, Category, NoticeCategory, PromptOption, Step, ToolEvidence, ToolStatus};
 
 /// The contract this connector speaks.
 pub const CONTRACT_VERSION: u64 = 1;
@@ -36,8 +37,8 @@ pub const FAILED: &str = "❌";
 /// The ops this connector takes (the descriptor's `supported_ops`). Of
 /// decision 21's list, `task_card` exists in v0.21.5 but Hermes sends it
 /// for Slack chats only (`run_turn.py`: `source.platform == SLACK`), so
-/// tool steps arrive through supported observers on the activity socket; `follow_up` is Discord's
-/// interaction tokens. Neither is advertised.
+/// steps come from its tool hooks (`observed_tool`); `follow_up` is
+/// Discord's interaction tokens. Neither is advertised.
 pub const SUPPORTED_OPS: [&str; 9] = ["send", "edit", "delete", "typing", "react", "draft", "prompt", "send_media", "get_chat_info"];
 
 /// The Authorization a gateway dials with: `Bearer
@@ -587,7 +588,9 @@ pub fn uncursored(content: &str) -> (&str, bool) {
     }
 }
 
-/// Hermes tool identities mapped to presentation categories. No text parsing.
+/// What Hermes' tools do (a step's category), by their names as v0.21.7
+/// registers them (`tools/`). A tool not here is `other`, but for its
+/// browser's (`browser_…`).
 const TOOLS: &[(&str, Category)] = &[
     ("terminal", Category::Shell),
     ("execute_code", Category::Shell),
@@ -595,7 +598,6 @@ const TOOLS: &[(&str, Category)] = &[
     ("web_search", Category::Web),
     ("x_search", Category::Web),
     ("read_file", Category::Read),
-    // the same verb as read_file's: a preview that is a URL is this one's
     ("web_extract", Category::Read),
     ("search_files", Category::Read),
     ("session_search", Category::Read),
@@ -628,6 +630,34 @@ pub fn category_of(tool: &str) -> Category {
         None if tool.starts_with("browser_") => Category::Browser,
         None => Category::Other,
     }
+}
+
+/// A tool call's end, as our image's `fragment-activity` plugin observes
+/// it (Hermes' `post_tool_call`) on the activity socket: the turn it is a
+/// step of (Hermes' message id, ours), the call's preview and exit code
+/// (Hermes' own display helpers'), its outcome.
+#[derive(Deserialize)]
+struct Observed {
+    turn: String,
+    tool: String,
+    #[serde(default)]
+    args: String,
+    #[serde(default)]
+    excerpt: String,
+    tool_call_id: String,
+    status: ToolStatus,
+    duration_ms: u64,
+}
+
+/// The step an observed end is, and its turn: the one source of steps
+/// (nothing is read from Hermes' progress text, nor inferred from silence).
+pub fn observed_tool(v: &Value) -> Option<(String, Step)> {
+    let o = Observed::deserialize(v).ok()?;
+    if !valid_post_id(&o.turn) || o.tool.is_empty() || !valid_post_id(&o.tool_call_id) {
+        return None;
+    }
+    let evidence = ToolEvidence { tool_call_id: o.tool_call_id, status: o.status, duration_ms: o.duration_ms };
+    Some((o.turn, Step { category: category_of(&o.tool), ok: o.status == ToolStatus::Completed, tool: o.tool, args: o.args, excerpt: o.excerpt, evidence: Some(evidence) }))
 }
 
 #[cfg(test)]
@@ -848,53 +878,26 @@ mod tests {
         assert_eq!(split_chat_id("nochat"), None);
     }
 
+    /// A step is a tool call's observed end, its outcome as observed: a
+    /// frame without what makes one, or naming an outcome not ours, is none.
     #[test]
-    fn tool_categories_use_observed_identity() {
-        assert_eq!(category_of("terminal"), Category::Shell);
+    fn a_step_is_an_observed_end() {
+        for (status, ok) in [("completed", true), ("failed", false), ("timed_out", false), ("cancelled", false), ("blocked", false)] {
+            let v = json!({ "turn": "t-1", "tool": "terminal", "args": "ls", "excerpt": "Exit code: 0", "tool_call_id": "call_1", "status": status, "duration_ms": 12 });
+            let (turn, step) = observed_tool(&v).expect(status);
+            assert_eq!(crate::records::turn_step(&turn, 1, &step), json!({ "kind": "turn.step", "turn": "t-1", "step": 1, "tool": "terminal", "category": "shell", "args": "ls", "ok": ok, "excerpt": "Exit code: 0", "tool_call_id": "call_1", "status": status, "duration_ms": 12 }));
+        }
+        let bare = json!({ "turn": "t-1", "tool": "memory", "tool_call_id": "call_1", "status": "completed", "duration_ms": 1 });
+        assert_eq!(observed_tool(&bare).map(|(_, s)| (s.args, s.excerpt, s.category)), Some((String::new(), String::new(), Category::Memory)));
+        for (field, bad) in [("status", json!("timeout")), ("status", json!("ok")), ("turn", json!("")), ("tool_call_id", json!("a b")), ("tool", json!("")), ("duration_ms", json!(-1))] {
+            let mut v = bare.clone();
+            v[field] = bad;
+            assert!(observed_tool(&v).is_none(), "{v}");
+        }
+        assert!(observed_tool(&json!({ "working": true })).is_none());
         assert_eq!(category_of("browser_snapshot"), Category::Browser);
         assert_eq!(category_of("invented_tool"), Category::Other);
         assert_eq!(uncursored("Hello ▉"), ("Hello", true));
     }
-
 }
 
-/// A terminal observation, never inferred from presentation text or disconnect.
-pub fn observed_tool(v: &Value) -> Option<(String, Step)> {
-    let turn = v.get("turn")?.as_str()?;
-    let tool = v.get("tool")?.as_str()?;
-    let evidence: crate::records::ToolEvidence = serde_json::from_value(v.get("evidence")?.clone()).ok()?;
-    if !crate::records::valid_post_id(turn) || tool.is_empty() || tool.len() > 140
-        || !crate::records::valid_post_id(&evidence.tool_call_id)
-        || !matches!(evidence.status.as_str(), "completed" | "failed" | "cancelled" | "blocked")
-        || evidence.result_ref.len() > 300
-        || evidence.error_type.as_ref().is_some_and(|s| s.len() > 140)
-        || evidence.error_message.as_ref().is_some_and(|s| s.chars().count() > 300) { return None }
-    Some((turn.into(), Step { tool: tool.into(), args: String::new(), ok: evidence.status == "completed",
-        excerpt: crate::records::cut(v.get("excerpt").and_then(Value::as_str).unwrap_or(""), 300),
-        category: category_of(tool), evidence: Some(evidence), defer_reply: false }))
-}
-
-#[cfg(test)]
-mod observer_tests {
-    use super::*;
-    #[test]
-    fn terminal_outcomes_are_bounded_and_never_guessed() {
-        for status in ["completed", "failed", "cancelled", "blocked"] {
-            let mut v = serde_json::json!({"turn":"turn-1", "tool":"terminal", "excerpt":"x".repeat(400),
-                "evidence":{"tool_call_id":"call-1", "status":status, "duration_ms":12,
-                "error_type":null,"error_message":null,"result_ref":"hermes:session:call-1"}});
-            let (_, step) = observed_tool(&v).unwrap();
-            assert_eq!(step.ok, status == "completed");
-            let body = crate::records::turn_step("turn-1", 1, &step);
-            assert_eq!(body["status"], status);
-            assert_eq!(body["tool_call_id"], "call-1");
-            assert_eq!(body["excerpt"].as_str().unwrap().chars().count(), 300);
-            v["evidence"]["status"] = serde_json::json!("unknown");
-            assert!(observed_tool(&v).is_none());
-            v["evidence"]["status"] = serde_json::json!(status);
-            v["evidence"]["error_message"] = serde_json::json!("x".repeat(301));
-            assert!(observed_tool(&v).is_none());
-        }
-        assert!(observed_tool(&serde_json::json!({"tool":"terminal"})).is_none());
-    }
-}

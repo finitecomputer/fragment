@@ -51,8 +51,8 @@ fn card_settings() -> fragment_bridge::engine::Settings {
 }
 
 /// Goal: Hermes' turn reaches the chat as the bridge's records: its tool
-/// supported observations as steps, its draft frames as the chat's drafts, its
-/// final send as the reply, its reactions as the turn's end.
+/// calls' ends as steps, its draft frames as the chat's drafts, its final
+/// send as the reply, its reactions as the turn's end.
 #[tokio::test]
 async fn a_reply_with_steps_and_drafts() {
     let (fake, bridge, hermes, _dir) = setup("relay-reply", &["juniper"]).await;
@@ -63,10 +63,10 @@ async fn a_reply_with_steps_and_drafts() {
     fake.until(WAIT, "the turn's end", |w| !w.bodies(&chat, "work", "turn.end").is_empty()).await;
     fake.with(|w| {
         assert_eq!(replies(w, &chat), vec![json!({ "text": "echo: [paul] use a tool please", "turn": turn })]);
-        // Observed tool identities classify work; arguments are withheld.
-        // The presentation sends/edits create no extra steps.
+        // each call its tool, what it does, and its preview; its progress
+        // text is no step
         let steps: Vec<(String, String, String)> = w.bodies(&chat, "work", "turn.step").iter().map(|s| (s["tool"].as_str().unwrap().into(), s["category"].as_str().unwrap().into(), s["args"].as_str().unwrap().into())).collect();
-        assert_eq!(steps, vec![("terminal".into(), "shell".into(), "".into()), ("web_search".into(), "web".into(), "".into())]);
+        assert_eq!(steps, vec![("terminal".into(), "shell".into(), "ls".into()), ("web_search".into(), "web".into(), "x".into())]);
         let reply = "echo: [paul] use a tool please";
         let partial = w.drafts.iter().filter(|d| d.2 == turn).filter_map(|d| d.3.as_deref()).any(|t| t.len() < reply.len() && reply.starts_with(t));
         assert!(partial, "Hermes' draft frames are the chat's drafts: {:?}", w.drafts);
@@ -978,12 +978,12 @@ async fn a_file_fetched_while_words_are_awaited_keeps_the_order() {
             let seen: Vec<String> = all
                 .iter()
                 .map(|r| match r["body"]["kind"].as_str() {
-                    Some(kind) => format!("{kind} {}", r["body"]["tool_call_id"].as_str().unwrap_or("")).trim_end().to_string(),
+                    Some(kind) => format!("{kind} {}", r["body"]["args"].as_str().unwrap_or("")).trim_end().to_string(),
                     None => format!("reply {} {} {}", r["body"]["text"].as_str().unwrap_or(""), r["body"]["attachments"][0]["name"].as_str().unwrap_or("-"), if r["body"]["interim"] == true { "interim" } else { "said" }),
                 })
                 .collect();
             let answer = format!("reply echo: [paul] narrate twice late words-picture:{url} pause:{pause} - said");
-            let want = vec!["turn.start".to_string(), format!("reply {} cat.png interim", support::hermes::NARRATION), "turn.step narrated-1".into(), format!("reply {} - interim", support::hermes::SECOND_NARRATION), "turn.step narrated-2".into(), answer, "turn.end".into()];
+            let want = vec!["turn.start".to_string(), format!("reply {} cat.png interim", support::hermes::NARRATION), "turn.step echo 1".into(), format!("reply {} - interim", support::hermes::SECOND_NARRATION), "turn.step echo 2".into(), answer, "turn.end".into()];
             assert_eq!(seen, want, "pause {pause}");
         });
     }
@@ -1136,44 +1136,52 @@ async fn commands_said_as_they_are() {
     bridge.stop().await;
 }
 
-/// Tool observers and Relay sends are independent authenticated sockets.
-/// Completing before any draft must not promote a late preamble to final,
-/// or demote a real final when the tool has no preamble.
+/// Goal: a tool call's end and the words said before the call come on two
+/// sockets, with no order between them, and the turn still says which of
+/// its words are its answer. An end that comes first, before even a draft
+/// of those words, makes neither them the answer nor a lone answer interim;
+/// the answer streaming while another call ends leaves them interim (the
+/// review of #664: they were posted as the answer); and past the 200 steps
+/// a turn posts, each call still makes the words before it interim (the
+/// review: they were posted as answers, and 64 of them cost the turn its
+/// answer). Method: the scripted gateway's `observed boundary` turns.
 #[tokio::test]
-async fn observed_outcomes_preserve_reply_boundaries_without_drafts() {
+async fn words_and_steps_out_of_order_keep_the_answer() {
     let (fake, bridge, _hermes, _dir) = setup("observer-boundary", &["juniper"]).await;
     let chat = fake.chat("talk", &["juniper"]);
     fake.until(WAIT, "chat followed", |w| w.live_sockets() >= 2).await;
-    for (words, review) in [(true,false),(false,false),(true,true)] {
-        let text = if review { "observed boundary with words with review" } else if words { "observed boundary with words" } else { "observed boundary" };
-        let said = fake.say(&chat, &person("paul"), json!({"text":text}));
+    let (first, second) = (support::hermes::NARRATION, support::hermes::SECOND_NARRATION);
+    // each turn's replies, whether each is interim, and how many steps it posts
+    for (text, want, steps) in [
+        ("observed boundary", vec![("the final answer", false)], 1),
+        ("observed boundary with words", vec![(first, true), ("the final answer", false)], 1),
+        ("observed boundary with words streamed", vec![(first, true), ("the final answer", false)], 2),
+        ("observed boundary many", vec![(first, true), (second, true), ("the final answer", false)], fragment_bridge::limits::STEPS_PER_TURN_MAX as usize),
+    ] {
+        let said = fake.say(&chat, &person("paul"), json!({ "text": text }));
         let turn = records::turn_id("juniper--k3x9", &chat, "chat", said["seq"].as_u64().unwrap());
-        fake.until(WAIT, "observed turn ended", |w| w.bodies(&chat,"work","turn.end").iter().any(|r| r["turn"] == turn)).await;
+        fake.until(WAIT, "the turn's end", |w| w.bodies(&chat, "work", "turn.end").iter().any(|r| r["turn"] == turn)).await;
         fake.with(|w| {
-            let replies: Vec<_> = replies(w,&chat).into_iter().filter(|r| r["turn"] == turn).collect();
-            let final_replies: Vec<_> = replies.iter().filter(|r| r["interim"] != true).collect();
-            assert_eq!(final_replies.len(),1,"{replies:?}");
-            assert_eq!(final_replies[0]["text"],"the final answer");
-            assert_eq!(replies.len(),if words {2} else {1});
-            if words { assert_eq!(replies[0]["interim"],true); }
-            assert_eq!(w.bodies(&chat,"work","turn.step").iter().filter(|r| r["turn"] == turn).count(),if review {2} else {1});
+            let got: Vec<(String, bool)> = w.bodies(&chat, "chat", "reply").iter().filter(|r| r["turn"] == turn).map(|r| (r["text"].as_str().unwrap().to_string(), r["interim"] == true)).collect();
+            assert_eq!(got, want.iter().map(|(t, i)| (t.to_string(), *i)).collect::<Vec<_>>(), "{text}");
+            assert_eq!(w.bodies(&chat, "work", "turn.step").iter().filter(|r| r["turn"] == turn).count(), steps, "{text}");
         });
     }
     bridge.stop().await;
 }
 
-/// A hard cut: even plausible sends and growing edits never become tool
-/// evidence when hooks are absent. There is no compatibility switch.
+/// Goal: Hermes' progress text is no step, sent and edited as it is, when
+/// no call's end is observed (a hard cut: nothing reads it).
 #[tokio::test]
-async fn presentation_progress_without_observations_creates_no_steps() {
+async fn progress_without_observations_is_no_step() {
     let (fake, bridge, _hermes, _dir) = setup("no-progress-parser", &["juniper"]).await;
     let chat = fake.chat("talk", &["juniper"]);
-    fake.until(WAIT,"chat followed", |w| w.live_sockets() >= 2).await;
-    fake.say(&chat,&person("paul"),json!({"text":"use a tool without observations"}));
-    fake.until(WAIT,"turn ended", |w| !w.bodies(&chat,"work","turn.end").is_empty()).await;
+    fake.until(WAIT, "chat followed", |w| w.live_sockets() >= 2).await;
+    fake.say(&chat, &person("paul"), json!({ "text": "use a tool without observations" }));
+    fake.until(WAIT, "turn ended", |w| !w.bodies(&chat, "work", "turn.end").is_empty()).await;
     fake.with(|w| {
-        assert!(w.bodies(&chat,"work","turn.step").is_empty());
-        assert_eq!(replies(w,&chat).len(),1);
+        assert!(w.bodies(&chat, "work", "turn.step").is_empty());
+        assert_eq!(replies(w, &chat).len(), 1);
     });
     bridge.stop().await;
 }

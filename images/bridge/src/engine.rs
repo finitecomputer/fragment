@@ -1358,9 +1358,7 @@ impl Engine {
                 // interim (its push leaves them out), unless the call only
                 // updates its memory: an answer said beside housekeeping is
                 // the turn's answer (Hermes sends nothing after it)
-                if !step.defer_reply {
-                    self.seal(&turn, step.category != records::Category::Memory);
-                }
+                self.seal(&turn, step.category != records::Category::Memory);
                 let t = self.state.turns.get_mut(&turn).expect("checked");
                 t.steps = t.steps.saturating_add(1);
                 self.dirty = true;
