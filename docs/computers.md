@@ -2153,12 +2153,17 @@ is a test's shorter one).
 
 Beside how to ask, every agent is told on every turn in our chats that a
 file someone attaches is already on its computer (`hermes::FILES`, after
-`hermes::ASKING` in `platform_hints.relay`; 2026-10-22): Hermes' relay
-adapter downloads each attachment before the turn into the profile's
-scratch, which Hermes prunes once a day unused, and the note before the
-message names its path (an image's after `image_url:`); nothing else
-told the agent it was a file it could use. Copied into its work, it is
-kept. Its browser tools have no upload, so to put one on a website it
+`hermes::ASKING` in `platform_hints.relay`; 2026-10-22). The bridge names
+each original filename, MIME type and local path in the turn's read-only
+context: `/tmp/bridge-media/<sha256>` by default. The files are already
+downloaded before the turn, including images given natively to the model.
+They are scratch, lost at a sleep; copy them into the app or work to keep
+them. Hermes also caches each in the profile's `cache/scratch` as
+`relay_media_<random>.<ext>`; its own hints differ between image and
+document input and lose original names. Native images still carry pixels
+and Hermes' cache-path hint. The bridge's note gives tools a consistent
+mapping independent of that vision routing. Its browser tools have no
+upload, so to put one on a website it
 clicks the site's upload button with them, then types the path into
 the file dialog on its desktop with `computer_use`. The `fragment`
 skill's first page says the same (`computer.md`, "Files your owner sends

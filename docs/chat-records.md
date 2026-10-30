@@ -480,6 +480,14 @@ MiB each. The record keeps the file while the channel keeps the record
 (docs/api.md, Blobs); an upload no record names goes after the grace
 period.
 
+Before handing a turn to Hermes, the bridge downloads its attachments to
+`/tmp/bridge-media/<sha256>` by default and names each original filename,
+MIME type and local path in read-only turn context. The agent can copy or
+edit these originals with its tools, including when the model sees an
+image's pixels directly. These scratch paths are local to the running
+computer and are not stored in the chat record; copy files into the app
+or work to keep them across a sleep (docs/bridge.md).
+
 **A voice memo** is an attachment whose `type` is audio. The page records
 one (MediaRecorder) and sends it as the recorder made it: `audio/webm`
 (Chrome and Firefox, Opus), `audio/ogg` (Opus), or `audio/mp4` (Safari,

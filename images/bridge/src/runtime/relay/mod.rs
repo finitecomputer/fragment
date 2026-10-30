@@ -651,7 +651,11 @@ impl Loop {
         // boot (hermes-boot, `close_cut_turns`), so the message is a turn of
         // its own, never folded into the cut one's. Its owner's SimpleX chat
         // says so as its topic (`wire::SIMPLEX_TOPIC`).
-        let m = wire::Inbound { chat: &chat, chat_name: &ts.chat_name, profile: &profile, message_id: &ts.turn, user_id: &ts.asker, user_name: &ts.asker_name, text: &ts.text, media: &hosted, context: ts.note.as_deref(), command: ts.command, quote: ts.quote.as_ref(), topic: wire::topic(ts.simplex) };
+        // Hermes' cache hints vary by media/vision mode and lose the
+        // original names. Name our already-downloaded originals in
+        // read-only context, beside any restart note, for tools to use.
+        let context = super::with_files(ts.note.as_deref().unwrap_or(""), &ts.asker_name, ts.attachments.len(), &ts.files);
+        let m = wire::Inbound { chat: &chat, chat_name: &ts.chat_name, profile: &profile, message_id: &ts.turn, user_id: &ts.asker, user_name: &ts.asker_name, text: &ts.text, media: &hosted, context: Some(&context), command: ts.command, quote: ts.quote.as_ref(), topic: wire::topic(ts.simplex) };
         let frame = wire::inbound(&m, &ts.turn);
         self.next_order += 1;
         let turn = ts.turn.clone();

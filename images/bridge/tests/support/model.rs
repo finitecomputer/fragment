@@ -278,6 +278,7 @@ fn text_of(content: &Value) -> String {
 pub fn answer(body: &Value) -> (String, Option<Value>) {
     let messages = body["messages"].as_array().cloned().unwrap_or_default();
     let last_user = messages.iter().rev().find(|m| m["role"] == "user").map(|m| text_of(&m["content"])).unwrap_or_default();
+    let inbound_text = last_user.clone();
     // Hermes renders an inbound's read-only context before the message it
     // comes with (`[Recent channel messages]\n…\n\n[New message]\n[name]
     // text`): the context is reference (the platform's note on a cut turn),
@@ -291,6 +292,23 @@ pub fn answer(body: &Value) -> (String, Option<Value>) {
     let tool_result = messages.iter().rev().take_while(|m| m["role"] != "user").find(|m| m["role"] == "tool").map(|m| text_of(&m["content"]));
     let offered = |name: &str| body["tools"].as_array().is_some_and(|t| t.iter().any(|t| t["function"]["name"] == name));
     let has_terminal = offered("terminal");
+    // Use only paths named in the turn: seeing pixels does not tell a
+    // model which local file its terminal can copy into an app.
+    if last_user.contains("put this image into my app") {
+        if tool_result.is_some() {
+            return ("scripted: copied both attachments into the app\nMEDIA:/data/work/juniper--k3x9/app/public/logo.png\nMEDIA:/data/work/juniper--k3x9/app/public/guide.pdf".into(), None);
+        }
+        let path = |mime: &str, legacy: &str| inbound_text.lines().find(|line| line.contains(mime))
+            .or_else(|| inbound_text.lines().find(|line| line.contains(legacy) || (mime == "image/png" && line.contains("[Image attached at:"))))
+            .and_then(|line| line.split_whitespace().find(|word| word.starts_with('/')))
+            .map(|path| path.trim_end_matches(['.', ']']))
+            .filter(|path| path.bytes().all(|b| b.is_ascii_alphanumeric() || b"/._-".contains(&b)));
+        let (Some(image), Some(pdf)) = (path("image/png", "image_url:"), path("application/pdf", ".pdf")) else {
+            return ("scripted: missing an attachment's local path".into(), None);
+        };
+        let command = format!("mkdir -p /data/work/juniper--k3x9/app/public && cp -- '{image}' /data/work/juniper--k3x9/app/public/logo.png && cp -- '{pdf}' /data/work/juniper--k3x9/app/public/guide.pdf && sha256sum /data/work/juniper--k3x9/app/public/logo.png /data/work/juniper--k3x9/app/public/guide.pdf");
+        return (String::new(), Some(json!({ "index": 0, "id": "call_copy_attachments", "type": "function", "function": { "name": "terminal", "arguments": json!({ "command": command }).to_string() } })));
+    }
     if last_user.contains("[ASYNC DELEGATION") && last_user.contains("fragment-delegate-complete") {
         return ("scripted: checked the delegated result: fragment-delegate-complete\nMEDIA:/data/work/juniper--k3x9/delegate.txt".into(), None);
     }

@@ -812,6 +812,55 @@ print(json.dumps({'images':len(images),'largest':max(len(p['image_url']['url']) 
     assert_eq!(c.logs().matches("\"boot.init\"").count(),1);
 }
 
+/// A person's PNG and PDF reach real Hermes together. The model must be
+/// told usable paths even with native vision, copy the original bytes into
+/// its app through its terminal, and send both back as chat attachments.
+#[tokio::test]
+#[ignore = "needs Docker"]
+async fn chat_attachments_have_tool_usable_paths_with_native_images() {
+    build(&repo_dir(), "images/hermes/Dockerfile", &hermes_tag());
+    let fake = Fake::start("0.0.0.0:0", &["juniper"]).await;
+    fake.with(|w| w.computer["models"]["images"] = json!([CHEAP_ID, FALLBACK_ID]));
+    let model = Model::start("0.0.0.0:0").await;
+    let chat = fake.chat("talk", &["juniper"]);
+    let c = Container::run(&hermes_tag(), fake.addr.port(), model.addr.port(), &[]);
+    within(&fake, &chat, &c, 120_000, "the bridge follows the attachment chat", |w| w.live_sockets() >= 2).await;
+    let fixtures = [("logo.png", "image/png", support::model::IMAGE), ("guide.pdf", "application/pdf", include_bytes!("../../../crates/e2e/fixtures/chat-preview.pdf").as_slice())];
+    let refs: Vec<_> = fixtures.iter().map(|(name, mime, bytes)| {
+        let sha = fragment_bridge::records::hex(&<sha2::Sha256 as sha2::Digest>::digest(bytes));
+        fake.with(|w| w.fragments.get_mut(&chat).unwrap().blobs.insert(sha.clone(), ((*mime).into(), bytes::Bytes::copy_from_slice(bytes))));
+        json!({ "name": name, "type": mime, "size": bytes.len(), "sha256": sha })
+    }).collect();
+    let said = fake.say(&chat, &person("paul"), json!({ "text": "put this image into my app, with the PDF beside it", "attachments": refs }));
+    let turn = fragment_bridge::records::turn_id("juniper--k3x9", &chat, "chat", said["seq"].as_u64().unwrap());
+    within(&fake, &chat, &c, 90_000, "the attachment copy turn ends", |w| w.bodies(&chat, "work", "turn.end").iter().any(|r| r["turn"] == turn)).await;
+    let calls = model.calls.lock().unwrap().clone();
+    let inbound = calls.iter().find_map(|call| call.body["messages"].as_array()?.iter().find(|m| m["role"] == "user" && content_text(m).contains("put this image into my app")).cloned()).expect("the person's turn reached the model");
+    let text = content_text(&inbound);
+    eprintln!("attachment turn text: {text}");
+    assert!(inbound["content"].as_array().is_some_and(|parts| parts.iter().any(|p| p["type"] == "image_url")), "the image reaches the native model");
+    for a in &refs {
+        let path = format!("/tmp/bridge-media/{}", a["sha256"].as_str().unwrap());
+        let hash = c.exec_out(&["sha256sum", &path]);
+        assert!(hash.starts_with(a["sha256"].as_str().unwrap()), "the bridge already downloaded the original: {hash}");
+    }
+    let copied = c.exec_out(&["sha256sum", "/data/work/juniper--k3x9/app/public/logo.png", "/data/work/juniper--k3x9/app/public/guide.pdf"]);
+    eprintln!("copied originals: {copied}");
+    for a in &refs {
+        assert!(copied.contains(a["sha256"].as_str().unwrap()), "the terminal copied the original bytes: {copied}");
+    }
+    fake.with(|w| {
+        let sent: Vec<_> = w.bodies(&chat, "chat", "reply").into_iter().filter(|r| r["turn"] == turn).flat_map(|r| r["attachments"].as_array().cloned().unwrap_or_default()).collect();
+        assert_eq!(sent.len(), 2, "both files arrive in chat once: {sent:?}");
+        for a in &refs { assert!(sent.contains(a), "the round trip preserves the attachment: {sent:?}"); }
+    });
+    assert!(!calls.iter().any(|call| call.model == "vision"), "file paths do not turn off native vision");
+    for a in &refs {
+        let path = format!("/tmp/bridge-media/{}", a["sha256"].as_str().unwrap());
+        assert!(text.lines().any(|line| line.contains(&path) && line.contains(a["name"].as_str().unwrap()) && line.contains(a["type"].as_str().unwrap())), "a consistent note must map the original name and MIME to its local path: {text}");
+    }
+}
+
 async fn hermes_running_with_modes(tier: Option<&str>) -> (Fake, Model, String, Container) {
     build(&repo_dir(), "images/hermes/Dockerfile", &hermes_tag());
     let fake = Fake::start("0.0.0.0:0", &["juniper"]).await;
