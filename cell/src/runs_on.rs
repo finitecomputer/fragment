@@ -21,7 +21,7 @@
 //!   own. A row that fails for a passing reason is tried again from the
 //!   alarm; an agent that runs on no computer is told nothing.
 
-use fragment_core::{door, npub};
+use fragment_core::{connectors::Action, door, npub};
 use fragment_proto::{valid_channel_name, valid_fragment_name, ErrorCode, IdentityKind, Role};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -94,6 +94,24 @@ pub(crate) fn wake_url(computer: &str) -> String {
 }
 
 impl FragmentCell {
+    /// Whether this agent's owner may `action` its door `door` now: the
+    /// deployment's connector policy (fragment_core::connectors), asked at
+    /// each ticket, redemption and relayed record's check. A door the
+    /// policy no longer allows is refused at once, and still unlinked.
+    fn door_allowed(&self, door: &str, action: fragment_core::connectors::Action) -> CellResult<()> {
+        if !fragment_core::connectors::id_ok(door) {
+            return Err(CellError::invalid("door: a connector's id (1 to 32 lower-case letters, digits and single dashes)"));
+        }
+        let (owner, agent) = (self.owner()?.person().ok_or_else(|| CellError::host("an agent fragment is a person's"))?.to_string(), self.name()?);
+        // a test fleet's lever may stand in for the deployment's (`connectors`)
+        let lever = match self.meta(MetaKey::TestConnectors)? {
+            Some(p) => Some(fragment_core::connectors::Policy::parse(&p).map_err(|e| CellError::host(format!("the connectors lever: {e}")))?),
+            None => None,
+        };
+        let policy = lever.as_ref().unwrap_or(&self.cfg.connectors);
+        policy.authorize(&owner, &agent, door, action).map_err(|why| CellError::new(ErrorCode::Forbidden, format!("door {door} {why}")))
+    }
+
     /// `computer/picture`: an agent fragment's picture, for `GET
     /// /api/identities/<npub>/picture`: its bytes from the commit live's
     /// install checked them at (`MetaKey::Picture`: `<sha256> <type>
@@ -185,9 +203,7 @@ impl FragmentCell {
                     "unlink" => door::Act::Unlink,
                     _ => return Err(CellError::invalid("act: link or unlink")),
                 };
-                if !door::known(text("door")) {
-                    return Err(CellError::invalid("door: simplex"));
-                }
+                self.door_allowed(text("door"), if act == door::Act::Link { Action::Link } else { Action::Unlink })?;
                 let nonce = hex::encode(js::random_bytes::<16>());
                 let ticket = door::Ticket { door: text("door").into(), act, agent: self.name()?, computer: text("computer").into(), nonce, exp: js::now_ms() + door::TICKET_MS, sig: String::new() };
                 assert!(ticket.well_formed(), "a ticket the platform makes is well formed");
@@ -209,6 +225,7 @@ impl FragmentCell {
                 let text = |k: &str| body[k].as_str().unwrap_or("");
                 self.assigned_to(text("computer"))?;
                 let (door, key) = (text("door"), text("key"));
+                self.door_allowed(door, Action::Redeem)?;
                 if !npub::is_hex_key(key) {
                     return Err(CellError::invalid("a door's key is 64 hex"));
                 }
@@ -230,8 +247,9 @@ impl FragmentCell {
                 if self.meta(MetaKey::AgentIdentity)?.as_deref() != Some(text("identity")) {
                     return Err(refused("is posted by the agent whose door it came through"));
                 }
+                self.door_allowed(text("door"), Action::Check)?;
                 let open = self.meta(MetaKey::Door)?.unwrap_or_default();
-                let Some(key) = open.strip_prefix(text("door")).and_then(|k| k.strip_prefix(' ')).filter(|_| door::known(text("door"))) else {
+                let Some(key) = open.strip_prefix(text("door")).and_then(|k| k.strip_prefix(' ')) else {
                     return Err(refused("came through a door its owner has not opened, or closed"));
                 };
                 let mut digest = [0u8; 32];

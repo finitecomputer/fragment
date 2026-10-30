@@ -223,6 +223,7 @@ mod tests {
         for (path, kind) in [
             ("cell/shell/shell.js", Some(InputType::Module)),
             ("cell/shell/launcher.js", Some(InputType::Module)),
+            ("cell/shell/computer.js", Some(InputType::Module)),
             ("cell/shell/agent-settings.js", Some(InputType::Module)),
             ("cell/shell/connections.js", Some(InputType::Module)),
             ("cell/shell/exports.js", Some(InputType::Module)),

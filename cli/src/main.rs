@@ -5,6 +5,7 @@ mod auth;
 mod blobs;
 mod codestorage;
 mod mcp;
+mod notice;
 mod operator;
 mod sync;
 mod watch;
