@@ -514,14 +514,15 @@ async fn the_hermes_image() {
 
     // Two tool calls back to back, the second quick after the first (a real
     // model's quick call after a skill read, seen on a preview): each is a
-    // step, in order. Hermes' progress sender (off now) lost the second.
+    // step, in order (Hermes' preview of a command of two: its first, and
+    // how many more). Hermes' progress sender (off now) lost the second.
     let twice = fake.say(&chat, &person("paul"), json!({ "text": "please use the terminal twice" }));
     let t_twice = fragment_bridge::records::turn_id("juniper--k3x9", &chat, "chat", twice["seq"].as_u64().unwrap());
     fake.until(120_000, "the two-tool turn's end", |w| w.bodies(&chat, "work", "turn.end").iter().any(|e| e["turn"] == t_twice)).await;
     fake.with(|w| {
         let steps: Vec<_> = w.bodies(&chat, "work", "turn.step").into_iter().filter(|s| s["turn"] == t_twice).collect();
         let args: Vec<&str> = steps.iter().filter(|s| s["tool"] == "terminal" && s["status"] == "completed").filter_map(|s| s["args"].as_str()).collect();
-        assert_eq!(args, ["echo first-ran", "sleep 2 && echo tool-ran"], "a step for each terminal call, in order: {steps:?}; the reply {:?}", answered(w, &t_twice));
+        assert_eq!(args, ["echo first-ran", "sleep 2 + 1 command"], "a step for each terminal call, in order: {steps:?}; the reply {:?}", answered(w, &t_twice));
         assert!(answered(w, &t_twice).is_some_and(|r| r["text"].as_str().unwrap_or("").contains("the tool ran")), "{:?}", answered(w, &t_twice));
     });
 
