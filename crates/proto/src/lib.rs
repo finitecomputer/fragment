@@ -1003,6 +1003,10 @@ pub struct FragmentStatus {
     pub kind: FragmentKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// An agent fragment's role, as its face says it (`ListedFragment`'s
+    /// `agent_role`): what its runtime tells it it does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_role: Option<String>,
     pub npub: String,
     pub owner: String,
     /// The caller's role.

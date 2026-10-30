@@ -381,7 +381,7 @@ pub fn faces(s: &mut Suite, api: &Api) -> Result<()> {
         Ok(())
     };
     role_is(&agent, None, " project manager ")?;
-    let given = s.eventually(WAIT, || row(api, &paul, &agent)["agentRole"] == "project manager");
+    let given = s.eventually(WAIT, || row(api, &paul, &agent)["agentRole"] == "project manager") && api.status(&paul, &agent)?.body["agentRole"] == "project manager";
     role_is(&agent, None, &"r".repeat(fragment_proto::limits::ROLE_MAX_CHARS + 1))?;
     let said = api.status(&paul, &agent)?.body["code"]["error"].clone();
     let kept = row(api, &paul, &agent);
@@ -390,7 +390,7 @@ pub fn faces(s: &mut Suite, api: &Api) -> Result<()> {
     role_is(&chat, Some("Garden plans"), "a chat")?;
     let chats = s.eventually(WAIT, || row(api, &paul, &chat)["title"] == "Garden plans") && row(api, &paul, &chat).get("agentRole").is_none();
     s.ok(
-        "its role (its fragment.json's meta.role) shows on its owner's list beside its name, trimmed; one past 48 characters is refused at its deploy, saying why, the last kept; one of spaces is none; a chat's is never carried",
+        "its role (its fragment.json's meta.role) shows on its owner's list beside its name, and on its status, trimmed; one past 48 characters is refused at its deploy, saying why, the last kept; one of spaces is none; a chat's is never carried",
         given && said.as_str().is_some_and(|e| e.contains("meta.role")) && kept["agentRole"] == "project manager" && blank && chats,
         json!({ "error": said, "kept": kept, "row": row(api, &paul, &agent), "chat": row(api, &paul, &chat) }),
     );

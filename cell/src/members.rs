@@ -714,6 +714,13 @@ impl FragmentCell {
         Ok(face.and_then(|f| f["title"].as_str().map(str::to_string)).filter(|t| !t.is_empty()))
     }
 
+    /// An agent fragment's role, as its face keeps it (`face`): none for
+    /// any other fragment.
+    pub(crate) fn agent_role(&self) -> CellResult<Option<String>> {
+        let face: Option<Value> = self.meta(MetaKey::Face)?.and_then(|f| serde_json::from_str(&f).ok());
+        Ok(face.and_then(|f| f["role"].as_str().map(str::to_string)))
+    }
+
     /// Shares it with whoever signs in as `body.email` (decisions 48 and
     /// 63): the invite waits on the email here, and the registry keeps it
     /// against the email and mails them, for their yes, which makes them a

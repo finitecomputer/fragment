@@ -1238,6 +1238,7 @@ impl FragmentCell {
         json_response(&FragmentStatus {
             kind: self.kind()?,
             title: self.title()?,
+            agent_role: self.agent_role()?,
             npub: npub.ok_or_else(|| missing(MetaKey::Npub))?,
             owner: npub::display(&owner.ok_or_else(|| missing(MetaKey::Owner))?),
             role,
