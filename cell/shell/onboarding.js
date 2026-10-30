@@ -336,11 +336,22 @@ export function createOnboarding({ api, ui, account, fragments, computer, naviga
     if (!atHome()) firstRunPutOff = true;
     else if (owed) creatingAgent();
   }
-  // Each step reuses what an earlier try made, including a create whose
-  // response was lost. The chat's frame opens once: a draft in it stays put.
+  // Another agent's job (Settings' Add agent): what it does is its role
+  // (its `meta.role`, which its runtime tells it), never copied here.
+  const addedJob = (owner) => `You are one of ${owner}'s agents. Help with whatever they ask, in your role. The first time you talk, say hello briefly and ask what they'd like to start with.\n`;
+  // Another agent, named and given a role by its person (Settings' Agents,
+  // Add; Paul, 2026-10-30), made as the first is: its own chat first, open
+  // at once, the making's steps in it, then its hello. One making at a time:
+  // one under way, or failed and waiting for Try again in its chat, is the
+  // one to finish first.
+  function addAgent({ name, role }) {
+    if (setup) return Promise.reject(new Error("Another agent is being made: finish it in its chat first."));
+    setup = { label: freeLabel(slug(name)), title: name, role: role || null, job: addedJob, chat: null, made: false, joined: false, ready: false, error: null };
+    return creatingAgent();
+  }
+  // The first run's agent, named as an earlier try named it, if one did.
   async function defaultAgent() {
     await load();
-    const owner = person().email || "your person";
     if (!setup) {
       // an earlier try's names, by what it made: its agent, else its chat's
       // label (the chat's title is its own)
@@ -348,10 +359,18 @@ export function createOnboarding({ api, ui, account, fragments, computer, naviga
       const chat = agent ? null : chats().find(unjoined);
       const earlier = agent ? labelOf(agent.fragment) : chat ? labelOf(chat.name).slice(0, -"-chat".length) : null;
       const title = agent ? titleOf(agent.fragment) : (earlier && nameOfLabel(earlier)) || pickName();
-      setup = { label: earlier ?? freeLabel(slug(title)), title, chat: null, made: false, joined: false, ready: false, error: null };
+      setup = { label: earlier ?? freeLabel(slug(title)), title, job: firstSoul, chat: null, made: false, joined: false, ready: false, error: null };
     }
+    return makeAgent();
+  }
+  // An agent and its own chat, as `setup` names them (the first run's, and
+  // Settings' Add agent's): each step reuses what an earlier try made,
+  // including a create whose response was lost. The chat's frame opens
+  // once: a draft in it stays put.
+  async function makeAgent() {
+    const owner = person().email || "your person";
     setupChanged({ error: null });
-    const { title, label } = setup;
+    const { title, label, job } = setup;
     const chatName = allFragments().find((f) => f.kind === "chat" && own(f) && labelOf(f.name) === `${label}-chat`)?.name ??
       (await api("POST", "/api/fragments", { label: `${label}-chat`, template: "chat", title: FIRST_CHAT })).name;
     setupChanged({ chat: chatName });
@@ -372,11 +391,14 @@ export function createOnboarding({ api, ui, account, fragments, computer, naviga
     // its job and tier, written once: an agent already set up keeps its own
     const written = await api("GET", `/api/f/${seg(agent.name)}/file?path=agent.json`).then(() => true, (e) => { if (e.status === 404) return false; throw e; });
     if (!written) {
-      await api("POST", `/api/f/${agent.name}/files`, {
-        key: "agent-default",
-        message: "the default agent",
-        files: [{ path: "SOUL.md", text: firstSoul(owner) }, { path: "agent.json", text: JSON.stringify({ tier: DEFAULT_AGENT_TIER }, null, 2) + "\n" }],
-      });
+      const files = [{ path: "SOUL.md", text: job(owner) }, { path: "agent.json", text: JSON.stringify({ tier: DEFAULT_AGENT_TIER }, null, 2) + "\n" }];
+      // its role, beside its name in its fragment.json (`meta.role`)
+      if (setup.role) {
+        const manifest = await api("GET", `/api/f/${seg(agent.name)}/manifest`);
+        manifest.meta = { ...(manifest.meta ?? {}), role: setup.role };
+        files.push({ path: "fragment.json", text: JSON.stringify(manifest, null, 2) + "\n" });
+      }
+      await api("POST", `/api/f/${agent.name}/files`, { key: "agent-default", message: "its job", files });
     }
     await api("POST", `/api/f/${agent.name}/deploy`, {});
     setupChanged({ made: true });
@@ -478,7 +500,7 @@ export function createOnboarding({ api, ui, account, fragments, computer, naviga
       },
     );
   }
-  return { signIn, showLayout, welcome, switchForm, noSeatSaid, setupFor, owesFirstAgent, resumeFirstRun, creatingAgent,
+  return { signIn, showLayout, welcome, switchForm, noSeatSaid, setupFor, owesFirstAgent, resumeFirstRun, creatingAgent, addAgent,
     setupChat: () => setup?.chat ?? null,
     setupState: () => setup && [setup.chat, setupFor(setup.chat)],
     setupPending: () => setup && !setup.joined,

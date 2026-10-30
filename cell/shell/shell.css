@@ -600,6 +600,11 @@ iframe[data-blocked] { display: none; }
 .settings-section select.agent-model { width: min(320px, 62%); height: 36px; min-width: 0; padding: 0 34px 0 15px; appearance: none; -webkit-appearance: none; border: 1px solid var(--border-strong); border-radius: 999px; background: var(--bg-active); color: var(--text-primary); font-size: 13px; font-weight: 600; text-overflow: ellipsis; cursor: pointer; }
 .settings-section select.agent-model:hover { background: var(--bg-hover); }
 .settings-section select.agent-model:disabled { opacity: .55; cursor: default; }
+/* Settings' Agents: an agent's role, and another agent to add (agent-settings.js) */
+.agent-role-label::after { content: none; }
+.settings-section input.agent-role { width: min(320px, 62%); height: 36px; }
+.agent-add { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 14px 0 4px; }
+.agent-add input { flex: 1 1 140px; min-width: 0; }
 .agent-mode-picks { display: flex; gap: 8px; width: min(460px, 74%); min-width: 0; }
 .agent-mode-picks select.agent-model { width: 100%; flex: 1; }
 .agent-mode-picks select.agent-effort { flex: 0 0 86px; }

@@ -1506,6 +1506,8 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     phone_ui(s, api, &mut b, &page, &session, &shots)?;
     // last: it renames the person's first agent, which the checks above name
     faces_ui(s, api, &mut b, &page, &me, &chat, &shots)?;
+    // and a third agent, which none of the checks above counts
+    add_agent_ui(s, api, &mut b, &page, &session, &shots)?;
     b.close(page)?;
     first_chat_release_ui(s, api, &mut b)?;
     b.set_cookie(&format!("{}/", api.base), "fragment_session", &session)?;
@@ -6818,6 +6820,58 @@ fn agents_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
         "renamed elsewhere, its chat's row and New chat's list follow with no reload; renamed back, nothing the shell draws says the name it had",
         renamed && listed == json!([first_title, "Ingrid"]) && back && hits == json!([]),
         json!({ "renamed": renamed, "listed": listed, "back": back, "hits": hits }),
+    );
+    Ok(())
+}
+
+/// Another agent, added in Settings' Agents (Paul, 2026-10-30): a name and
+/// a role, then made as the first run's agent is, in its own chat, which
+/// opens at once with the making's steps; its chat's row names it with its
+/// role's tag once the list does, it says hello first, and its job names
+/// no role (its runtime tells it). Its role edited in Settings follows on
+/// that row with no reload; taken away, the tag goes.
+fn add_agent_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &str, shots: &std::path::Path) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    let agent_wait = std::time::Duration::from_secs(120);
+    b.viewport(page, 1280, 900, false)?;
+    b.click(page, "#settings")?;
+    let offered = b.until(page, "!!document.querySelector('#settings-page .agent-add')", wait);
+    b.eval(page, &fill("#settings-page .agent-add-name", "Wren"))?;
+    b.eval(page, &fill("#settings-page .agent-add-role", "editor"))?;
+    b.eval(page, "(document.querySelector('#settings-page .agent-add').scrollIntoView({ block: 'center' }), true)")?;
+    let _ = b.screenshot(page, &shots.join("settings-add-agent.png"));
+    b.eval(page, "(document.querySelector('#settings-page .agent-add').requestSubmit(), true)")?;
+    let mut chat = String::new();
+    let made = s.eventually(wait, || own_named(api, session, "wren-chat").map(|c| chat = c).is_ok());
+    let opened = made && b.until(page, &format!("location.pathname === '/' && document.getElementById('chat-title').textContent === {} && [...document.querySelectorAll('#frames iframe')].find((f) => !f.hidden)?.dataset.fragment === {}", js(FIRST_CHAT), js(&chat)), wait);
+    // its frame opened for the making's steps (its card, gone once it is ready)
+    let card = opened && b.eval(page, &format!("[...document.querySelectorAll('#frames iframe')].find((f) => f.dataset.fragment === {})?.dataset.src.includes('setup%3D1') ?? false", js(&chat)))? == true;
+    let row = format!("document.querySelector({})", js(&format!("#chats [data-key={}]", js(&format!("chat:{chat}")))));
+    let tag = format!("({row}?.querySelector('.role-tag')?.textContent ?? null)");
+    let listed = b.until(page, &format!("{row}?.querySelector('.chat-agent')?.textContent === 'Wren' && {tag} === 'editor'"), agent_wait);
+    let agent = own_named(api, session, "wren")?;
+    let id = agent_ids(api, session, &["wren"])?.remove(0);
+    let (hello, seen) = said_hello(s, api, session, &chat, &id, agent_wait);
+    let job = shell(api, session, "GET", &format!("/api/f/{agent}/file?path=SOUL.md"), None, &[])?.text;
+    let _ = b.screenshot(page, &shots.join("desktop-agent-added.png"));
+    s.ok(
+        "Add agent, in Settings (a name and a role): its chat opens at once, for the making's steps; once made, its row names it with its role's tag, it says hello first, and its job names no role",
+        offered && card && listed && hello && !job.is_empty() && !job.contains("editor"),
+        json!({ "chat": chat, "hello": seen, "job": job }),
+    );
+    // its role, edited in Settings, then taken away
+    b.click(page, "#settings")?;
+    let field = format!("document.querySelector({})", js(&format!("[data-role-for={}]", js(&agent))));
+    b.until(page, &format!("{field}?.value === 'editor'"), wait);
+    let set = |b: &mut Browser, role: &str| b.eval(page, &format!("(() => {{ const f = {field}; f.value = {}; f.dispatchEvent(new Event('change')); return true; }})()", js(role)));
+    set(b, "copy editor")?;
+    let edited = b.until(page, &format!("{tag} === 'copy editor'"), wait);
+    set(b, "")?;
+    let gone = b.until(page, &format!("{tag} === null && {row}?.querySelector('.chat-agent')?.textContent === 'Wren'"), wait);
+    s.ok(
+        "its role edited in Settings is its row's tag, with no reload; taken away, the tag goes",
+        edited && gone,
+        json!({ "tag": b.eval(page, &tag)?, "role": own_row_of(api, session, &agent)["agentRole"] }),
     );
     Ok(())
 }
