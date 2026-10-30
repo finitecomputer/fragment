@@ -207,8 +207,8 @@ async fn a_cut_turn_is_answered_lost() {
 /// Goal (Paul, 2026-10-30): juniper's answer turn is asked as rowan, and
 /// is its owner's business at home still: paul's Stop stops one, and his
 /// words answer one that asks him something (never a turn of their own).
-/// Rowan's own turn, asked by juniper, that asks back in words ends at
-/// once, its question its answer.
+/// Rowan's own turn, asked by juniper, that asks back in words is told no
+/// answer is coming, and goes on.
 #[tokio::test]
 async fn an_answers_owner_stops_it_and_answers_its_question() {
     let fake = Fake::start("127.0.0.1:0", &["juniper", "rowan"]).await;
@@ -232,7 +232,7 @@ async fn an_answers_owner_stops_it_and_answers_its_question() {
     fake.until(WAIT, "juniper's answer turn asking paul", |w| answers(w).len() == 2 && w.bodies(&home, "work", "turn.asked").iter().any(|q| q["turn"] == woke(&answers(w)[1]).as_str())).await;
     let (asking, rowans) = fake.with(|w| {
         let a = answers(w)[1].clone();
-        assert!(a["body"]["text"].as_str().is_some_and(|t| t.ends_with("What should I call it?")), "rowan, asked by an agent, answered with its question: {a}");
+        assert!(a["body"]["text"].as_str().is_some_and(|t| t.contains("What should I call it?") && t.contains(&format!("(told: {})", fragment_bridge::engine::ASKED_BACK))), "rowan, asked by an agent, was told no answer is coming and went on: {a}");
         assert_eq!(w.bodies(&home, "work", "turn.asked").iter().find(|q| q["turn"] == woke(&a).as_str()).unwrap()["asks"], person("paul"), "it waits for paul");
         (woke(&a), a["body"]["turn"].as_str().unwrap().to_string())
     });

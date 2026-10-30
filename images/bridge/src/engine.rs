@@ -119,6 +119,13 @@ pub fn refused_deep() -> String {
     format!("agents handed this on {} times without a person, the most they may", limits::HOPS_MAX)
 }
 
+/// What an ask's turn that asks back in words is told at once: its asker
+/// is an agent, which cannot answer it (`Event::Asked`). Its `seq` names
+/// no record (the bridge's own words): Relay's message id for it is the
+/// turn's and this.
+pub const ASKED_BACK: &str = "No answer is coming: you were asked by another agent, which cannot answer questions here. Answer as best you can with what you have, and say what you would need.";
+pub const ASKED_BACK_SEQ: u64 = u64::MAX;
+
 /// Why a turn an earlier life claimed is ended.
 pub const LOST: &str = "lost when the computer restarted";
 
@@ -834,7 +841,7 @@ impl Engine {
         for (_, id, phase) in mine {
             crate::ev!("turn.stopped", { "turn": id, "phase": format!("{phase:?}").to_lowercase(), "by": "command" });
             match phase {
-                Phase::Queued => self.end_unrun(&id, Outcome::Stopped),
+                Phase::Queued => self.end_unrun(&id, Outcome::Stopped, false),
                 _ => self.stop_running(agent, fragment, &id),
             }
         }
@@ -1032,7 +1039,8 @@ impl Engine {
             let outcome = Outcome::Error(why);
             if self.state.turns.len() < limits::TURNS_OPEN_MAX {
                 self.state.turns.insert(id.clone(), turn);
-                self.end_unrun(&id, outcome);
+                // refused at admission: its answer runs nothing
+                self.end_unrun(&id, outcome, true);
             } else {
                 // Past the bound of turns held, its two records are posted
                 // and not kept: a crash before they land loses them.
@@ -1056,7 +1064,7 @@ impl Engine {
     /// every turn does, and it is kept until both are answered. When
     /// another life claimed it, the first is a 409, and so is the second if
     /// that life ended it.
-    fn end_unrun(&mut self, id: &str, outcome: Outcome) {
+    fn end_unrun(&mut self, id: &str, outcome: Outcome, refused: bool) {
         self.claiming.remove(id);
         let agent = self.state.turns[id].agent.clone();
         let identity = self.agent(&agent).expect("a held turn's agent is on this computer").identity.clone();
@@ -1071,8 +1079,6 @@ impl Engine {
         self.dirty = true;
         self.owe(&agent, &fragment, id, start);
         self.owe(&agent, &fragment, id, end);
-        // an error here is a refusal at admission: its answer runs nothing
-        let refused = matches!(outcome, Outcome::Error(_));
         self.owe_answer(id, &outcome, refused);
     }
 
@@ -1093,7 +1099,10 @@ impl Engine {
             return;
         }
         let by = self.agent(&t.agent).expect("a held turn's agent is on this computer");
-        let text = records::answer_text(&r.name, &t.fragment, &t.text, &r.said, r.files, outcome);
+        let text = match outcome {
+            Outcome::Error(why) if refused => records::refused_text(&r.name, &t.fragment, &t.text, why),
+            _ => records::answer_text(&r.name, &t.fragment, &t.text, &r.said, r.files, outcome),
+        };
         let hop = t.hop.saturating_add(1).min(limits::HOPS_MAX);
         let body = records::answer(&r.chat, &text, &by.identity, &r.name, &t.cause, id, outcome, hop, refused);
         let o = Owed { id: records::answer_id(id), body, to: Some(r.agent.clone()) };
@@ -1372,7 +1381,7 @@ impl Engine {
             Phase::Queued => {
                 // Never run here (a claim in flight is answered to no one).
                 crate::ev!("turn.stopped", { "turn": id, "phase": "queued" });
-                self.end_unrun(&id, Outcome::Stopped);
+                self.end_unrun(&id, Outcome::Stopped, false);
                 self.pump(&agent.fragment, fragment);
             }
             Phase::Ended => crate::ev!("stop.ignored", { "turn": id, "why": "it is over" }),
@@ -1528,16 +1537,18 @@ impl Engine {
                 // chat is told whose answer it waits for (`turn.asked`, once
                 // a question: the part asking it is in its id)
                 self.seal(&turn, false);
-                // a turn an agent asked asks back no one who hears it (an
-                // agent's words never answer one: `said`, hop 0's alone), so
-                // it would wait out its bound: it ends at once, its question
-                // its answer (an ask's carries it back)
+                // an ask's turn (one with a return) asks back an agent, whose
+                // words never answer it (`said`: hop 0's alone), so it would
+                // wait out its bound: it is told at once, in words (its
+                // runtime's question wants words: a clarify lets go of
+                // nothing else), that no answer is coming, and goes on to
+                // answer as best it can. A plain hand-off waits as before.
                 let t = &self.state.turns[&turn];
                 let answers = self.who_answers(t);
-                if t.hop > 0 && self.agent(&t.agent).is_some_and(|a| a.owner != answers) {
-                    crate::ev!("turn.asked_an_agent", { "turn": turn });
-                    self.out.push(Effect::Runtime(Command::Forget { turn: turn.clone() }));
-                    self.end(&turn, Outcome::Idle, Closed::Expired);
+                if t.ret.is_some() {
+                    crate::ev!("turn.asked_back", { "turn": turn });
+                    let (by, by_name) = (t.asker.clone(), t.asker_name.clone());
+                    self.out.push(Effect::Runtime(Command::Tell { turn, seq: ASKED_BACK_SEQ, by, by_name, text: ASKED_BACK.into(), attached: None }));
                     return;
                 }
                 let t = self.state.turns.get_mut(&turn).expect("checked");

@@ -3355,6 +3355,23 @@ async fn teammates_ask_each_other() {
     assert_eq!(fake.with(|w| (w.records(&pair, "chat").len(), w.made.len())), (asked_before, 1), "nothing asked, no chat made");
     fake.with(|w| w.fragments.get_mut("fern--k3x9").unwrap().title = "Fernando".into());
 
+    // an ask whose answering turn clarifies, its owner pressing Other with
+    // no words: Hermes asks for words, which no agent can give, so the
+    // bridge tells it no answer is coming; it goes on, and answers back
+    let clar = say(&jchat, "juniper", "ask: maple: clarify: Which color? | red | blue");
+    within(&fake, &jchat, &c, 180_000, "juniper's asking turn", |w| ended(w, &jchat, &clar)).await;
+    let card = |w: &support::fake::World| w.bodies(&pair, "work", "turn.prompt").into_iter().find(|p| p["text"].as_str().is_some_and(|t| t.contains("Which color?")));
+    within(&fake, &pair, &c, 180_000, "maple's clarify card", |w| card(w).is_some()).await;
+    let p = fake.with(|w| card(w)).unwrap();
+    fake.say(&pair, &person("paul"), json!({ "kind": "prompt_response", "prompt": p["prompt"], "option": "other" }));
+    within(&fake, &jchat, &c, 180_000, "maple's answer, gone on", |w| answers_of(w, "juniper", "Which color?").first().is_some_and(|a| ended(w, &jchat, &woke("juniper", a)))).await;
+    fake.with(|w| {
+        let a = &answers_of(w, "juniper", "Which color?")[0]["body"];
+        assert_eq!(a["outcome"], "idle", "maple's turn went on and ended: {a}");
+        assert!(a["text"].as_str().is_some_and(|t| t.contains("No answer is coming")), "Hermes' clarify took the bridge's words: {a}");
+        assert!(w.bodies(&pair, "work", "turn.asked").iter().all(|q| q["turn"] != a["turn"]), "waiting for no one");
+    });
+
     // two asking each other at once: each answered once, in its own chat
     let (ja, mb) = (say(&jchat, "juniper", "ask: maple: one at once"), say(&mchat, "maple", "ask: juniper: two at once"));
     let both = |w: &support::fake::World| {
