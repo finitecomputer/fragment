@@ -1,6 +1,8 @@
 //! An agent's doors (docs/api.md, "An agent's doors"): ways its owner
 //! reaches it other than its chat, run by its computer (SimpleX, decision
-//! 32; Paul's design of 2026-10-23). Only its owner opens one, and only
+//! 32; Paul's design of 2026-10-23). A door's id is a connector's
+//! (`connectors::id_ok`), and the deployment's policy says which may be
+//! opened (`connectors::Policy::authorize`). Only its owner opens one, and only
 //! what came through it speaks for them; the agent itself can do neither.
 //!
 //! - **A ticket** starts a link or an unlink. The platform makes one at
@@ -31,11 +33,6 @@ use sha2::{Digest, Sha256};
 
 /// The door SimpleX is (a relayed record's `via`).
 pub const SIMPLEX: &str = "simplex";
-
-/// Whether `door` is one there is.
-pub fn known(door: &str) -> bool {
-    door == SIMPLEX
-}
 
 /// A ticket holds this long after it is made: its owner's page hands it
 /// to the bridge at once.
@@ -94,7 +91,7 @@ impl Ticket {
     /// Its fields' shapes. None can hold a line break, so its digest reads
     /// one way only.
     pub fn well_formed(&self) -> bool {
-        known(&self.door) && valid_fragment_name(&self.agent) && computer_ok(&self.computer) && hex_of(&self.nonce, 32) && self.exp > 0 && (self.sig.is_empty() || hex_of(&self.sig, 128))
+        crate::connectors::id_ok(&self.door) && valid_fragment_name(&self.agent) && computer_ok(&self.computer) && hex_of(&self.nonce, 32) && self.exp > 0 && (self.sig.is_empty() || hex_of(&self.sig, 128))
     }
 
     /// What its signature signs.
@@ -132,7 +129,7 @@ pub fn relayed(body: &Value) -> Option<Result<Relayed, &'static str>> {
     let read = || -> Result<Relayed, &'static str> {
         let o = r.as_object().ok_or("is an object")?;
         let text = |k: &str| o.get(k).and_then(Value::as_str);
-        let via = text("via").filter(|v| known(v)).ok_or("names its door (via: simplex)")?;
+        let via = text("via").filter(|v| crate::connectors::id_ok(v)).ok_or("names its door (via, a connector's id)")?;
         let for_ = text("for").filter(|f| !f.is_empty() && f.len() <= 128).ok_or("names whom it speaks for (for)")?;
         let agent = text("agent").filter(|a| valid_fragment_name(a)).ok_or("names its agent fragment (agent)")?;
         let at = o.get("at").and_then(Value::as_i64).filter(|t| *t > 0).ok_or("says when its door signed it (at, ms)")?;
@@ -260,7 +257,7 @@ mod tests {
             Some(Ok(Relayed { via: SIMPLEX.into(), for_: "npub1paul".into(), agent: "juniper--k3x9".into(), at: 1_790_000_000_000, sig: "ab".repeat(64) }))
         );
         assert!(relays(&b) && !relays(&json!({ "text": "x" })));
-        for (k, v) in [("via", json!("telegram")), ("for", json!("")), ("agent", json!("../x")), ("at", json!(-1)), ("at", json!("soon")), ("sig", json!("AB".repeat(64))), ("sig", json!("ab"))] {
+        for (k, v) in [("via", json!("../simplex")), ("via", json!("SimpleX")), ("for", json!("")), ("agent", json!("../x")), ("at", json!(-1)), ("at", json!("soon")), ("sig", json!("AB".repeat(64))), ("sig", json!("ab"))] {
             let mut bad = b.clone();
             bad["relayed"][k] = v.clone();
             assert!(matches!(relayed(&bad), Some(Err(_))), "{k}: {v}");
@@ -276,7 +273,7 @@ mod tests {
     fn tickets_are_well_formed() {
         assert!(ticket().well_formed());
         let bad = [
-            Ticket { door: "telegram".into(), ..ticket() },
+            Ticket { door: "../simplex".into(), ..ticket() },
             Ticket { agent: "juniper\n--k3x9".into(), ..ticket() },
             Ticket { computer: "computer:00AA".into(), ..ticket() },
             Ticket { computer: "laptop".into(), ..ticket() },
