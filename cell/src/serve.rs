@@ -249,8 +249,8 @@ impl FragmentCell {
             let ids: Vec<String> = url.query_pairs().filter(|(k, _)| k == "id").map(|(_, v)| v.into_owned()).collect();
             // who asks decides the emails: resolved, though the page is anyone's
             let asker = self.identified(caller, &facts.name).await?;
-            let emails_of = match asker.principal() {
-                Some(p) if self.member_role(p)?.is_some() => self.members_among(&ids)?,
+            let emails_of = match asker.signed.as_ref() {
+                Some(s) if self.fenced_role(s)?.is_some() => self.members_among(&ids)?,
                 _ => vec![],
             };
             json_response(&self.people(ids, emails_of).await?)?

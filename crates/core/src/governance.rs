@@ -17,6 +17,13 @@
 //!   as the first did; the other is refused), withdrawn by the org's
 //!   admins, or expires after `OFFER_TTL_MS`. A person stepping down takes
 //!   their waiting offers with them, made or received.
+//! - **Epochs fence.** A person is in the org's content at an epoch, from
+//!   their yes to an admin's place or an invite to one of its fragments.
+//!   Offboarding raises it and makes them inactive at once: whatever its
+//!   fragments granted them under the old one opens nothing, before
+//!   anything is cleaned up there. Coming back is a new yes, at the raised
+//!   epoch; an offer or an invite made before they left admits them no
+//!   more (`left_at`).
 
 use fragment_proto::ErrorCode;
 use serde::{Deserialize, Serialize};
@@ -26,6 +33,9 @@ use serde::{Deserialize, Serialize};
 pub const ADMINS_MAX: u64 = 32;
 /// How long an offer waits for its answer.
 pub const OFFER_TTL_MS: i64 = 7 * 24 * 3_600_000;
+/// Orgs' content a person is in at once: every request of theirs carries
+/// their places (`Identity::orgs`).
+pub const ORGS_PER_PERSON_MAX: u64 = 64;
 /// Entries of an org's governance log a page holds.
 pub const LOG_PAGE: u64 = 100;
 /// A request id, as a client names its change (a replay finds the first).
@@ -136,6 +146,11 @@ pub enum Refusal {
     LastAdmin,
     /// The person is not one of the org's content admins.
     NotIn,
+    /// The person's epoch is not the one the request expected.
+    StaleEpoch { current: u64 },
+    /// Made before the person last left the org's content: it admits them
+    /// no more.
+    LeftSince,
 }
 
 impl Refusal {
@@ -143,8 +158,9 @@ impl Refusal {
         match self {
             Refusal::NotAdmin | Refusal::HasAdmins => ErrorCode::Forbidden,
             Refusal::AdminsFull => ErrorCode::InvalidRequest,
-            Refusal::Answered(_) | Refusal::Lapsed(_) | Refusal::LastAdmin => ErrorCode::ConflictingBody,
+            Refusal::Answered(_) | Refusal::Lapsed(_) | Refusal::LastAdmin | Refusal::StaleEpoch { .. } => ErrorCode::ConflictingBody,
             Refusal::Ended | Refusal::NotIn => ErrorCode::NotFound,
+            Refusal::LeftSince => ErrorCode::Forbidden,
         }
     }
 
@@ -159,7 +175,9 @@ impl Refusal {
             Refusal::Lapsed(Grounds::Payer) => "this offer was the org's first admin's, and the org has had one since: ask its admins".into(),
             Refusal::Lapsed(Grounds::Operator) => "this offer was the recovery of an org with no admin, and it has one now: ask its admins".into(),
             Refusal::LastAdmin => "the org's last content admin stays: another accepts the place first".into(),
-            Refusal::NotIn => "they are not one of the org's content admins".into(),
+            Refusal::NotIn => "they are not in the org's content".into(),
+            Refusal::StaleEpoch { current } => format!("their epoch is {current} now: read the org's content again"),
+            Refusal::LeftSince => "this was made before they left the org's content: only a new one admits them".into(),
         }
     }
 }
@@ -213,6 +231,67 @@ pub fn steps_down(admin: bool, admins: u64) -> Result<bool, Refusal> {
         (true, 0..=1) => Err(Refusal::LastAdmin),
         (true, _) => Ok(true),
     }
+}
+
+/// A person's place in an org's content.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Place {
+    /// From 1; raised by each offboarding.
+    pub epoch: u64,
+    pub active: bool,
+    pub admin: bool,
+}
+
+impl Place {
+    fn assert_valid(self) {
+        assert!(self.epoch >= 1, "an epoch counts from 1");
+        assert!(self.active || !self.admin, "an admin is active");
+    }
+}
+
+/// A person's place once they accept an admin's offer made at
+/// `offered_at`: in, an admin, at their epoch (one an offboarding raised
+/// stays raised), unless they left since it was made.
+pub fn accepted(place: Option<Place>, left_at: Option<i64>, offered_at: i64) -> Result<Place, Refusal> {
+    if left_at.is_some_and(|left| left > offered_at) {
+        return Err(Refusal::LeftSince);
+    }
+    let next = match place {
+        None => Place { epoch: 1, active: true, admin: true },
+        Some(p) => Place { active: true, admin: true, ..p },
+    };
+    next.assert_valid();
+    Ok(next)
+}
+
+/// A person coming into the org's content as they come into one of its
+/// fragments, by their yes to an invite made at `invited_at` (none: a
+/// content admin's own add): their place, and whether it is new to them.
+pub fn enrolled(place: Option<Place>, left_at: Option<i64>, invited_at: Option<i64>) -> Result<(Place, bool), Refusal> {
+    match place {
+        None => Ok((Place { epoch: 1, active: true, admin: false }, true)),
+        Some(p) if p.active => Ok((p, false)),
+        Some(_) if invited_at.zip(left_at).is_some_and(|(invited, left)| invited < left) => Err(Refusal::LeftSince),
+        Some(p) => Ok((Place { active: true, admin: false, ..p }, true)),
+    }
+}
+
+/// A person offboarded at `expected` epoch, the org holding `admins`: out
+/// at once, at the next, an admin no more. Never its last admin.
+pub fn offboarded(place: Place, expected: u64, admins: u64) -> Result<Place, Refusal> {
+    place.assert_valid();
+    if place.epoch != expected {
+        return Err(Refusal::StaleEpoch { current: place.epoch });
+    }
+    if !place.active {
+        return Err(Refusal::NotIn);
+    }
+    if place.admin && admins <= 1 {
+        return Err(Refusal::LastAdmin);
+    }
+    let next = Place { epoch: place.epoch + 1, active: false, admin: false };
+    next.assert_valid();
+    Ok(next)
 }
 
 /// A client's request id: 1 to `REQUEST_MAX_BYTES` printable ASCII, no
@@ -279,6 +358,30 @@ mod tests {
         for g in [Grounds::Admin, Grounds::Payer, Grounds::Operator] {
             assert_eq!(Grounds::parse(g.as_str()), Some(g));
         }
+    }
+
+    /// Offboarding: out at once at the next epoch, never the last admin,
+    /// at the epoch read; coming back is at the raised one, and what was
+    /// made before they left admits them no more.
+    #[test]
+    fn offboarding_raises_the_epoch_and_fences_what_came_before() {
+        const ADMIN: Place = Place { epoch: 1, active: true, admin: true };
+        const IN: Place = Place { epoch: 1, active: true, admin: false };
+        let out = offboarded(IN, 1, 1).unwrap();
+        assert_eq!(out, Place { epoch: 2, active: false, admin: false });
+        assert_eq!(offboarded(ADMIN, 1, 2), Ok(Place { epoch: 2, active: false, admin: false }));
+        assert_eq!(offboarded(ADMIN, 1, 1), Err(Refusal::LastAdmin));
+        assert_eq!(offboarded(IN, 2, 1), Err(Refusal::StaleEpoch { current: 1 }));
+        assert_eq!(offboarded(out, 2, 1), Err(Refusal::NotIn));
+        // an invite, or an offer, made before they left admits no one
+        let left = T + 10;
+        assert_eq!(enrolled(Some(out), Some(left), Some(T)), Err(Refusal::LeftSince));
+        assert_eq!(accepted(Some(out), Some(left), T), Err(Refusal::LeftSince));
+        // a new one admits them at the raised epoch, never the old
+        assert_eq!(enrolled(Some(out), Some(left), Some(left + 1)), Ok((Place { epoch: 2, active: true, admin: false }, true)));
+        assert_eq!(accepted(Some(out), Some(left), left + 1), Ok(Place { epoch: 2, active: true, admin: true }));
+        assert_eq!(enrolled(None, None, Some(T)), Ok((IN, true)));
+        assert_eq!(enrolled(Some(IN), None, None), Ok((IN, false)), "in already: their epoch, nothing new");
     }
 
     /// Restart: an offer's standing is its stored row read at a later

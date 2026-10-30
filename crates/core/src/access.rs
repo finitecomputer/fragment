@@ -284,11 +284,13 @@ pub fn decide(visibility: Visibility, standing: Standing, purpose: Purpose, need
 }
 
 /// Why a membership change is refused, or `None` when it is allowed. Only
-/// the owner manages members (their own agent sharing for them acts with
-/// their role: `agent_shares`); the owner's own row is never changed here
-/// (there is no owner transfer yet); `public` is a floor, not a grant.
-pub fn refuse_set_role(actor: Option<Role>, target_current: Option<Role>, new_role: Role) -> Option<&'static str> {
-    if actor != Some(Role::Owner) {
+/// who administers it manages members (`admin`: a person's fragment's
+/// owner, their own agent sharing for them, `agent_shares`; an org's, its
+/// content admins, each as themselves); the owner's own row is never
+/// changed here (there is no owner transfer yet); `public` is a floor, not
+/// a grant.
+pub fn refuse_set_role(admin: bool, target_current: Option<Role>, new_role: Role) -> Option<&'static str> {
+    if !admin {
         return Some("only the owner manages members");
     }
     if target_current == Some(Role::Owner) {
@@ -301,13 +303,13 @@ pub fn refuse_set_role(actor: Option<Role>, target_current: Option<Role>, new_ro
     }
 }
 
-/// Why removing `target` is refused, or `None`. The owner removes anyone
-/// but themselves; any other member may leave.
-pub fn refuse_remove(actor: Option<Role>, actor_is_target: bool, target_current: Option<Role>) -> Option<&'static str> {
+/// Why removing `target` is refused, or `None`. Who administers it
+/// (`admin`) removes anyone but its owner; any other member may leave.
+pub fn refuse_remove(admin: bool, actor_is_target: bool, target_current: Option<Role>) -> Option<&'static str> {
     match target_current {
         None => Some("not a member"),
         Some(Role::Owner) => Some("the owner cannot be removed"),
-        Some(_) if actor_is_target || actor == Some(Role::Owner) => None,
+        Some(_) if actor_is_target || admin => None,
         Some(_) => Some("only the owner removes other members"),
     }
 }
@@ -537,14 +539,14 @@ mod tests {
         assert_eq!(agent_may_ask(Reserved::Sharing, for_owner), Ok(()));
         assert_eq!(agent_shares(for_owner, owns), Ok(Owner));
         // ...under the role rules: it adds, changes, and removes members
-        assert_eq!(refuse_set_role(Some(Owner), None, Viewer), None);
-        assert_eq!(refuse_set_role(Some(Owner), Some(Viewer), Editor), None);
-        assert_eq!(refuse_remove(Some(Owner), false, Some(Editor)), None);
+        assert_eq!(refuse_set_role(true, None, Viewer), None);
+        assert_eq!(refuse_set_role(true, Some(Viewer), Editor), None);
+        assert_eq!(refuse_remove(true, false, Some(Editor)), None);
         // ...and never makes anyone owner, itself included, nor changes or removes the owner
-        assert!(refuse_set_role(Some(Owner), Some(Editor), Owner).is_some());
-        assert!(refuse_set_role(Some(Owner), None, Public).is_some());
-        assert!(refuse_set_role(Some(Owner), Some(Owner), Viewer).is_some());
-        assert!(refuse_remove(Some(Owner), false, Some(Owner)).is_some());
+        assert!(refuse_set_role(true, Some(Editor), Owner).is_some());
+        assert!(refuse_set_role(true, None, Public).is_some());
+        assert!(refuse_set_role(true, Some(Owner), Viewer).is_some());
+        assert!(refuse_remove(true, false, Some(Owner)).is_some());
 
         // invalid: as itself, or for anyone but its owner (another
         // person's agent naming you, or your agent naming someone else)
@@ -579,23 +581,23 @@ mod tests {
         // replay: the same member PUT twice decides the same, the second
         // finding the role the first granted
         assert_eq!(agent_shares(for_owner, owns), agent_shares(for_owner, owns));
-        let first = refuse_set_role(Some(Owner), None, Viewer);
-        let again = refuse_set_role(Some(Owner), Some(Viewer), Viewer);
+        let first = refuse_set_role(true, None, Viewer);
+        let again = refuse_set_role(true, Some(Viewer), Viewer);
         assert_eq!((first, again), (None, None));
     }
 
     #[test]
     fn membership_changes() {
-        assert!(refuse_set_role(Some(Owner), None, Editor).is_none());
-        assert!(refuse_set_role(Some(Owner), Some(Viewer), Editor).is_none());
-        assert!(refuse_set_role(Some(Editor), None, Viewer).is_some());
-        assert!(refuse_set_role(Some(Owner), Some(Owner), Viewer).is_some());
-        assert!(refuse_set_role(Some(Owner), None, Owner).is_some());
-        assert!(refuse_set_role(Some(Owner), None, Public).is_some());
-        assert!(refuse_remove(Some(Owner), false, Some(Editor)).is_none());
-        assert!(refuse_remove(Some(Viewer), true, Some(Viewer)).is_none());
-        assert!(refuse_remove(Some(Editor), false, Some(Viewer)).is_some());
-        assert!(refuse_remove(Some(Owner), true, Some(Owner)).is_some());
-        assert!(refuse_remove(Some(Owner), false, None).is_some());
+        assert!(refuse_set_role(true, None, Editor).is_none());
+        assert!(refuse_set_role(true, Some(Viewer), Editor).is_none());
+        assert!(refuse_set_role(false, None, Viewer).is_some());
+        assert!(refuse_set_role(true, Some(Owner), Viewer).is_some());
+        assert!(refuse_set_role(true, None, Owner).is_some());
+        assert!(refuse_set_role(true, None, Public).is_some());
+        assert!(refuse_remove(true, false, Some(Editor)).is_none());
+        assert!(refuse_remove(false, true, Some(Viewer)).is_none());
+        assert!(refuse_remove(false, false, Some(Viewer)).is_some());
+        assert!(refuse_remove(true, true, Some(Owner)).is_some());
+        assert!(refuse_remove(true, false, None).is_some());
     }
 }

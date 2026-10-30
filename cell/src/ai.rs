@@ -120,8 +120,9 @@ impl FragmentCell {
 
     /// Who pays for step `index` of `run`, and where on their ledger.
     fn paying(&self, run: &RunRow, index: u32) -> Result<Paying, StepFail> {
-        let [owner, created] = self.metas([MetaKey::Owner, MetaKey::CreatedAt]).map_err(retry)?;
-        let (owner, created) = (owner.ok_or_else(|| retry(crate::fragment::missing(MetaKey::Owner)))?, created.ok_or_else(|| retry(crate::fragment::missing(MetaKey::CreatedAt)))?);
+        // the owner's ledger pays: a person's, or an org's (decision 67)
+        let owner = self.owner().map_err(retry)?.name();
+        let created = self.must(MetaKey::CreatedAt).map_err(retry)?;
         let fragment = self.name().map_err(retry)?;
         #[derive(Deserialize)]
         struct Agent {

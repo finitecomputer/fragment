@@ -407,7 +407,7 @@ impl RegistryCell {
         if row.parent.is_some() && row.parent_live.is_none() {
             return Err(not_signed_in());
         }
-        let identity = joined_identity(row.identity, row.kind, row.owner, row.held, "a session")?;
+        let identity = self.placed(joined_identity(row.identity, row.kind, row.owner, row.held, "a session")?)?;
         Ok(Live { hash, session: LiveSession { identity, email: row.email, embedder: row.embedder } })
     }
 

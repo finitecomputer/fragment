@@ -111,7 +111,7 @@ impl FragmentCell {
         self.require(caller, false, Role::Editor)?;
         let hint = icon::hint(&body).map_err(refused)?;
         self.icon_taker()?;
-        let owner = self.must(MetaKey::Owner)?;
+        let owner = self.owner()?.name();
         // asked as a job's AI step is: a guest's fragment makes none, nor
         // one at its cap for anyone but its owner and their agents
         let by_owner = spends_as_owner(caller, &owner);

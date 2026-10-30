@@ -256,7 +256,7 @@ impl FragmentCell {
         let rows: Vec<Row> = self.typed("SELECT row FROM meter_rows WHERE batch = ? ORDER BY ref", vec![SqlStorageValue::Integer(batch.id)])?;
         let rows: Vec<MeterRow> = rows.iter().map(|r| serde_json::from_str(&r.row)).collect::<Result<_, _>>().map_err(|e| CellError::host(format!("a meter row: {e}")))?;
         assert!(!rows.is_empty() && rows.len() <= BATCH_ROWS as usize, "a batch holds 1 to BATCH_ROWS rows");
-        let message = MeterBatch { payer: self.must(MetaKey::Owner)?, source: self.name()?, seq: batch.id, meter: Meter { batch: format!("frag:{key}:{}", batch.id), rows } };
+        let message = MeterBatch { payer: self.owner()?.name(), source: self.name()?, seq: batch.id, meter: Meter { batch: format!("frag:{key}:{}", batch.id), rows } };
         let body = serde_json::to_value(&message).expect("a batch serializes");
         match js::queue_send(self.env.as_ref(), QUEUE_BINDING, &[body]).await {
             Ok(()) => self.exec("UPDATE meter_batches SET sent_at = ? WHERE id = ?", vec![SqlStorageValue::Integer(now), SqlStorageValue::Integer(batch.id)]),
@@ -337,11 +337,15 @@ impl FragmentCell {
     /// default. Its `id` makes the change once; the ledger keeps it under
     /// `cap:<fragment>:<id>`, apart from every other command's.
     pub(crate) async fn put_cap(&self, caller: &Caller, body: PutCap) -> CellResult<Response> {
+        let owner = self.owner()?;
+        if owner.org().is_some() {
+            return Err(CellError::new(ErrorCode::Forbidden, "an org's fragment keeps the $5 cap: no one passes it (decision 68)"));
+        }
         self.require(caller, false, Role::Owner)?;
         if !fragment_core::price::printable(&body.id, CAP_ID_MAX_BYTES) {
             return Err(CellError::invalid(format!("a cap's id is 1-{CAP_ID_MAX_BYTES} printable ASCII characters, no spaces")));
         }
-        let (name, owner) = (self.name()?, self.must(MetaKey::Owner)?);
+        let (name, owner) = (self.name()?, owner.name());
         let set = SetFragmentCap { id: format!("cap:{name}:{}", body.id), fragment: name.clone(), micros: body.micros };
         ledger::ask(&self.env, &owner, &set).await?;
         self.event("cap.set", &format!("{name}'s monthly cap: {}", body.micros.map_or_else(|| "the default".into(), fragment_core::price::dollars)), json!({ "micros": body.micros }));
@@ -352,8 +356,7 @@ impl FragmentCell {
     /// `principal` is a member (the model route: a call names a fragment its
     /// agent is in).
     pub(crate) fn whose(&self, principal: &str) -> CellResult<Value> {
-        let owner = self.must(MetaKey::Owner)?;
-        Ok(json!({ "owner": owner, "member": self.member_role(principal)?.is_some() }))
+        Ok(json!({ "owner": self.owner()?.name(), "member": self.member_role(principal)?.is_some() }))
     }
 
     /// Whether the fragment takes writes now (decision 27): refused, 402,
@@ -374,7 +377,7 @@ impl FragmentCell {
     /// costs cents at most. Any other refusal is none too: a guest's
     /// fragments are billed nothing and take writes.
     pub(crate) async fn read_only(&self) -> CellResult<Option<Why>> {
-        let owner = self.must(MetaKey::Owner)?;
+        let owner = self.owner()?.name();
         match ledger::may(&self.env, &owner, &MaySpend { spend: Spend::Write, fragment: None, by_owner: true }).await {
             Err(e) => match e.refused {
                 Some(Refused::ReadOnly { why }) => Ok(Some(why)),
