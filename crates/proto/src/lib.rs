@@ -826,6 +826,10 @@ pub enum FragmentKind {
     /// A person's managed skills (decision 17: the blessed `skills`
     /// template), which their agents' computers install.
     Skills,
+    /// A person's session archive (the blessed `sessions` template): the
+    /// conversations they had with an agent elsewhere, which `fragment
+    /// session import` brings in (templates/sessions/README.md).
+    Sessions,
     /// A kind this build does not know: one a newer platform's list,
     /// status or access view names (#587's), read as this so that one new
     /// kind breaks no shipped CLI or pinned image. It is only ever read:
@@ -845,6 +849,7 @@ impl FragmentKind {
             FragmentKind::Agent => "agent",
             FragmentKind::Brain => "brain",
             FragmentKind::Skills => "skills",
+            FragmentKind::Sessions => "sessions",
             FragmentKind::Other => "other",
         }
     }
@@ -858,6 +863,7 @@ impl FragmentKind {
             "agent" => Some(FragmentKind::Agent),
             "brain" => Some(FragmentKind::Brain),
             "skills" => Some(FragmentKind::Skills),
+            "sessions" => Some(FragmentKind::Sessions),
             _ => None,
         }
     }
@@ -897,11 +903,11 @@ impl Visibility {
 
     /// Who may open a fragment made from `template` with no visibility
     /// asked: a chat or an agent (its SOUL and memories) only its members
-    /// (Paul, 2026-10-13); anything else anyone with its share link
-    /// (decision 48).
+    /// (Paul, 2026-10-13), as a session archive (a person's old chats);
+    /// anything else anyone with its share link (decision 48).
     pub fn made_from(template: Option<&str>) -> Visibility {
         match template {
-            Some("chat" | "agent") => Visibility::Members,
+            Some("chat" | "agent" | "sessions") => Visibility::Members,
             _ => Visibility::Link,
         }
     }
@@ -2426,7 +2432,7 @@ mod tests {
         assert!(Sharing { invites: Some(1), ..old }.with_others());
         assert!(Sharing { guests: 1, invites: Some(0), ..old }.with_others());
         // a chat and an agent are made members only; the rest by link
-        assert_eq!([Some("chat"), Some("agent")].map(Visibility::made_from), [Visibility::Members; 2]);
+        assert_eq!([Some("chat"), Some("agent"), Some("sessions")].map(Visibility::made_from), [Visibility::Members; 3]);
         assert_eq!([None, Some("todo"), Some("brain"), Some("blank"), Some("skills")].map(Visibility::made_from), [Visibility::Link; 5]);
         // a share is the person's and their agents' (Paul, 2026-10-13): no
         // field says otherwise, and one that tries is refused

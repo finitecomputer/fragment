@@ -24,3 +24,5 @@ fragment-fakes = { path = "../fakes" }
 fragment-templates = { path = "../templates", features = ["embed"] }
 # reads back the archive an export downloads
 tar = { version = "0.4", default-features = false }
+# writes the synthetic Hermes database the sessions section imports
+rusqlite = { version = "0.40", default-features = false, features = ["bundled"] }

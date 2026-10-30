@@ -1,0 +1,92 @@
+# sessions
+
+The blessed session archive template (decision 40): the conversations a
+person had with an agent somewhere else, kept in a fragment of theirs of
+kind `sessions`, titled Session Archive, private to them (`members`).
+`fragment session import` makes it at their first import, as they run it
+or as their agent acting for them (the archive is then theirs, with the
+agent an editor of it), and writes it; the shell reads it. A fragment on
+it names it and holds nothing else of the template's: `{"template":
+"sessions", "meta": {"title": "Session Archive"}}`, then its data.
+
+Its format is `session-archive/1`; its rules are
+`fragment_core::session` (crates/core/src/session.rs), and the stores an
+import reads are cli/src/session/.
+
+## The files
+
+- `sessions/<key>.json`: one conversation, pretty JSON:
+
+  | field | what it is |
+  |---|---|
+  | `format` | `session-archive/1` |
+  | `id` | its id where it came from (Hermes': the session it began as) |
+  | `origin` | where it came from: `hermes` |
+  | `kind` | `chat` (a person's conversation with the agent), `cron` (a scheduled job's run), `subagent` (a side task the agent ran) |
+  | `title` | its own, else the first line its person said (80 characters), else `Untitled` |
+  | `source`, `with`, `model` | where it was said (`telegram`, `cli`), whom with, on which model, as its origin named them (optional) |
+  | `started_at`, `ended_at` | when it began, and when it was last said (its last message's time, else its end) |
+  | `parts` | its origin's own records it joins, in order (Hermes starts a new session each time it compresses a long conversation) |
+  | `messages` | `[{role, at?, text?, tool?, tool_calls?: [{name, arguments}], reasoning?, summary?}]`, in the order they were said |
+
+  Times are UTC, `YYYY-MM-DDTHH:MM:SS.sssZ`, so they sort as text. A
+  message's `role` is `user`, `assistant`, `tool` or `system`; `tool` is
+  the tool a result came from; `summary` marks the summary its origin
+  wrote when it compressed. An image, a recording or a file a message
+  held is a mark in its text (`[image]`, `[audio]`, `[video]`, `[file]`).
+  A tool's output and an assistant's reasoning are cut to 2,000
+  characters and a call's arguments to 1,000, saying how many more there
+  were (`… [N more characters not kept]`); what a person and the agent
+  said never is.
+- `index/<kind>.json`: `{format, kind, sessions: [entry]}`, the
+  conversations of one kind, newest first (by `ended_at`, else
+  `started_at`). An entry is `{key, id, origin, kind, title, source?,
+  with?, started_at?, ended_at?, messages, preview, sha256, bytes}`:
+  `messages` counts what was said (a person's or the agent's words, not
+  tool calls, results or summaries), `preview` is the first words its
+  person said (160 characters), and `sha256` and `bytes` are its file's.
+
+A conversation's key is its origin and its id there,
+`hermes-20261029_183012_ab12cd`; an id that is no file name's (another
+character, over 100 bytes, not starting with a letter or digit) is keyed
+by its hash instead, `hermes--<32 hex>`. A file of 1 MiB or more is one
+of the fragment's blobs (a pointer in git, docs/api.md, Blobs), as any
+fragment's is.
+
+## An import
+
+- **Keyed by the original id.** The same conversation imported again (a
+  re-run, a retry after a crash, the same chats from another of its
+  origin's stores) is found by its key and replaced only by a newer copy
+  of it: one last said later, or as late and with more said. The same
+  bytes, or an older copy, write nothing.
+- **Conversations first, then the indexes.** An import writes its new and
+  newer conversations a batch a commit (at most 256 files and 16 MiB of
+  them), then every index they change in one last commit, made from main
+  as it is then. That commit also lists any conversation `sessions/`
+  holds and the indexes lack (an import stopped before its last commit)
+  and drops an entry whose file is gone, so the next import of anything
+  puts a crash right. Each commit names the head it read; one another
+  writer beat is made again on the new head.
+- **Limits.** An archive holds at most 20,000 conversations: an import
+  that would add past that is refused whole, before it writes anything
+  (`too_large`; `--kind chat` brings only the chats). A conversation's
+  file is at most 8 MiB: one larger is left out, saying so, and the rest
+  imported. Its id is at most 200 bytes.
+
+## Where they come from
+
+- **Hermes' `state.db`** (or a Hermes home holding it), read-only, in one
+  read transaction (cli/src/session/hermes.rs, which says how it follows
+  Hermes v0.21.7): a conversation is a session and the ones Hermes
+  continued it in each time it compressed, as Hermes' own session list
+  joins them; its messages are what Hermes shows a person, each once.
+  The agent's own `state.db` on its computer is refused: its
+  conversations are chats here already.
+- **The old Finite's export** (format `finite-chat-archive/1`: its
+  `chats/`, or the folder holding it; cli/src/session/chats.rs), whose
+  records are Hermes' sessions as its `export.py` joined them, keyed by
+  the same ids, read only inside `chats/`.
+
+Another agent runtime's sessions (Claude Code's, Codex's) are another
+origin, read into the same format.

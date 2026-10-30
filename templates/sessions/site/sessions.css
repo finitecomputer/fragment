@@ -1,0 +1,21 @@
+/* The session archive's page: the skills page's look (templates/skills). */
+:root {
+  --bg: #212121; --text-primary: #ececec; --text-secondary: #a6a19d; --text-tertiary: #706d69;
+  --border: rgba(255,255,255,.085);
+  --font-sans: "Funnel Sans", ui-sans-serif, system-ui, -apple-system, sans-serif;
+  color-scheme: dark;
+}
+@media (prefers-color-scheme: light) {
+  :root { --bg: #f7f6f3; --text-primary: #171717; --text-secondary: #66615b; --text-tertiary: #918a82; --border: rgba(20,20,20,.105); color-scheme: light; }
+}
+:root[data-theme="light"] { --bg: #f7f6f3; --text-primary: #171717; --text-secondary: #66615b; --text-tertiary: #918a82; --border: rgba(20,20,20,.105); color-scheme: light; }
+:root[data-theme="dark"] { --bg: #212121; --text-primary: #ececec; --text-secondary: #a6a19d; --text-tertiary: #706d69; --border: rgba(255,255,255,.085); color-scheme: dark; }
+* { box-sizing: border-box; }
+html, body { margin: 0; min-height: 100%; background: var(--bg); color: var(--text-primary); }
+body { font: 15px/1.5 var(--font-sans); -webkit-font-smoothing: antialiased; }
+.sessions-page { max-width: 720px; margin: 0 auto; padding: 16px 20px 64px; }
+h2 { font-size: 13px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--text-tertiary); margin: 28px 0 6px; }
+ul { list-style: none; padding: 0; margin: 0; }
+li { border-bottom: 1px solid var(--border); padding: 9px 0; }
+li small { display: block; color: var(--text-secondary); font-size: 13px; overflow-wrap: anywhere; }
+.muted { color: var(--text-tertiary); }

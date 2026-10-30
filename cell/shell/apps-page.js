@@ -25,7 +25,7 @@ const ROLE = { viewer: "Viewer", editor: "Editor", owner: "Owner" };
 const GENERAL = { members: ["lock", "Restricted"], link: ["link", "Anyone with the link"], public: ["globe", "Public"] };
 // the list's kinds the dock shows, and a card is shot of (card::is_app)
 const dockable = (f) => f.kind === "app" || f.kind === "brain";
-const listed = (f) => f.kind !== "chat" && f.kind !== "agent" && f.kind !== "skills";
+const listed = (f) => f.kind !== "chat" && f.kind !== "agent" && f.kind !== "skills" && f.kind !== "sessions";
 const owns = (f) => f.role === "owner";
 const edits = (f) => f.role === "owner" || f.role === "editor";
 const seg = (s) => encodeURIComponent(s).replace(/%3A/gi, ":");
