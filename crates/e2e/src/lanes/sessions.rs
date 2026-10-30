@@ -20,6 +20,12 @@ use crate::Suite;
 /// a chat large enough to be a blob, a month's scheduled runs, and a chat
 /// past what a conversation may hold.
 fn export(root: &Path) -> Result<()> {
+    export_with(root, false)
+}
+
+/// `export`, or a later one of the same agent (`later`): its first chat
+/// with a reply more, days after.
+fn export_with(root: &Path, later: bool) -> Result<()> {
     let chats = root.join("chats");
     std::fs::create_dir_all(chats.join("sessions"))?;
     std::fs::create_dir_all(chats.join("runs"))?;
@@ -29,7 +35,11 @@ fn export(root: &Path) -> Result<()> {
             "with": "Ann", "started_at": at, "ended_at": at, "messages": words, "sessions": [id] })
     };
     let said = |role: &str, at: &str, text: &str| json!({ "role": role, "at": at, "text": text });
-    let beans = chat("e2e_beans", "Beans", "2026-10-01T09:00:00Z", vec![said("user", "2026-10-01T09:00:00Z", "plant beans?"), said("assistant", "2026-10-01T09:00:05Z", "in spring")]);
+    let mut said_in_beans = vec![said("user", "2026-10-01T09:00:00Z", "plant beans?"), said("assistant", "2026-10-01T09:00:05Z", "in spring")];
+    if later {
+        said_in_beans.push(said("user", "2026-10-04T09:00:00Z", "and peas?"));
+    }
+    let beans = chat("e2e_beans", "Beans", "2026-10-01T09:00:00Z", said_in_beans);
     let big = chat("e2e_big", "A long letter", "2026-10-05T09:00:00Z", vec![said("user", "2026-10-05T09:00:00Z", &"a long letter ".repeat(110_000))]);
     let huge = chat("e2e_huge", "Too long", "2026-10-06T09:00:00Z", vec![said("user", "2026-10-06T09:00:00Z", &"w".repeat(archive::SESSION_MAX_BYTES + 1))]);
     let run = json!({ "id": "e2e_digest", "file": "chats/runs/cron-2026-10.json", "title": "Digest", "kind": "cron", "started_at": "2026-10-02T06:00:00Z",
@@ -43,31 +53,6 @@ fn export(root: &Path) -> Result<()> {
     std::fs::write(chats.join("runs/cron-2026-10.json"), json!({ "format": format, "conversations": { "e2e_digest": run } }).to_string())?;
     listed.push(json!({ "id": "e2e_digest", "file": "chats/runs/cron-2026-10.json", "kind": "cron" }));
     std::fs::write(chats.join("index.json"), json!({ "format": format, "agent": "Juniper", "conversations": listed }).to_string())?;
-    Ok(())
-}
-
-/// A Hermes database (the columns of v0.21.7's a read uses): the export's
-/// first chat again, a reply longer, and a chat Hermes compressed once.
-fn database(path: &Path) -> Result<()> {
-    let db = rusqlite::Connection::open(path)?;
-    db.execute_batch(
-        "CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT NOT NULL, session_key TEXT, display_name TEXT, model TEXT, model_config TEXT,
-            parent_session_id TEXT, started_at REAL NOT NULL, ended_at REAL, end_reason TEXT, title TEXT, last_activity_at REAL);
-         CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, role TEXT NOT NULL, content TEXT,
-            tool_call_id TEXT, tool_calls TEXT, tool_name TEXT, timestamp REAL NOT NULL, reasoning TEXT, reasoning_content TEXT,
-            _compressed_summary INTEGER NOT NULL DEFAULT 0, active INTEGER NOT NULL DEFAULT 1, compacted INTEGER NOT NULL DEFAULT 0,
-            display_kind TEXT, display_metadata TEXT);
-         -- 2026-10-01T09:00:00Z, and a reply the export did not have
-         INSERT INTO sessions VALUES ('e2e_beans','finitechat','fc:1','Ann',NULL,NULL,NULL,1790845200,NULL,NULL,'Beans',NULL);
-         INSERT INTO messages (session_id,role,content,timestamp) VALUES ('e2e_beans','user','plant beans?',1790845200);
-         INSERT INTO messages (session_id,role,content,timestamp) VALUES ('e2e_beans','assistant','in spring',1790845205);
-         INSERT INTO messages (session_id,role,content,timestamp) VALUES ('e2e_beans','user','and peas?',1791104400);
-         -- a chat compressed into a second session
-         INSERT INTO sessions VALUES ('e2e_long','cli','cli:1',NULL,NULL,NULL,NULL,1790931600,1790931700,'compression','Long',NULL);
-         INSERT INTO sessions VALUES ('e2e_long_2','cli','cli:1',NULL,NULL,'{}','e2e_long',1790931700,NULL,NULL,NULL,NULL);
-         INSERT INTO messages (session_id,role,content,timestamp) VALUES ('e2e_long','user','one',1790931600);
-         INSERT INTO messages (session_id,role,content,timestamp) VALUES ('e2e_long_2','user','two',1790931800);",
-    )?;
     Ok(())
 }
 
@@ -128,17 +113,17 @@ pub fn sessions(s: &mut Suite, api: &Api) -> Result<()> {
         &again,
     );
 
-    // a newer copy: Hermes' own database holds the first chat with a reply
-    // more, and a chat it compressed, which is one conversation
-    let db_dir = s.dir("sessions-hermes");
-    database(&db_dir.join("state.db"))?;
-    let newer = s.cli_json(api, &home, &["session", "import", &path(&db_dir), "--json"])?;
+    // a newer copy: a later export holds the first chat with a reply more,
+    // which replaces it; the earlier export again replaces nothing
+    let later = s.dir("sessions-later");
+    export_with(&later, true)?;
+    let newer = s.cli_json(api, &home, &["session", "import", &path(&later), "--json"])?;
     let beans = serde_json::from_slice::<Session>(&file(&keys, "sessions/hermes-e2e_beans.json")?.bytes).ok();
-    let long = serde_json::from_slice::<Session>(&file(&keys, "sessions/hermes-e2e_long.json")?.bytes).ok();
+    let older = s.cli_json(api, &home, &["session", "import", &path(&root), "--json"])?;
     s.ok(
-        "Hermes' database updates a chat it holds a newer copy of and adds one it compressed, as one conversation",
-        newer["updated"] == 1 && newer["added"] == 1 && beans.is_some_and(|b| b.messages.len() == 3) && long.is_some_and(|l| l.parts == ["e2e_long", "e2e_long_2"] && l.messages.len() == 2),
-        &newer,
+        "a later export updates the chat it holds a newer copy of, and the earlier one never takes it back",
+        newer["updated"] == 1 && newer["added"] == 0 && beans.is_some_and(|b| b.messages.len() == 3) && older["updated"] == 0 && older["unchanged"] == 3,
+        json!({ "newer": newer, "older": older }),
     );
 
     // restart: an import that stopped after its conversations, before its
@@ -147,7 +132,9 @@ pub fn sessions(s: &mut Suite, api: &Api) -> Result<()> {
         format: String::new(),
         id: "e2e_orphan".into(),
         origin: "hermes".into(),
+        reader: 10,
         kind: Kind::Subagent,
+        agent: None,
         title: "Left behind".into(),
         source: None,
         with: None,
@@ -170,7 +157,7 @@ pub fn sessions(s: &mut Suite, api: &Api) -> Result<()> {
     let empty = s.dir("sessions-empty");
     let out = s.cli(api, &home, &["session", "import", &path(&empty), "--json"]);
     let said: Value = serde_json::from_slice(&out.stdout).unwrap_or_default();
-    s.ok("a folder holding no store is refused, saying what to name", code(&out) == 2 && said["error"]["code"] == "invalid_usage", String::from_utf8_lossy(&out.stdout));
+    s.ok("a folder holding no export is refused, saying what to name", code(&out) == 2 && said["error"]["code"] == "invalid_usage", String::from_utf8_lossy(&out.stdout));
 
     // the person's agent, acting for them, reaches the same archive as an
     // editor (the CLI on its computer acts so); someone else, none of it
@@ -178,12 +165,25 @@ pub fn sessions(s: &mut Suite, api: &Api) -> Result<()> {
     let for_me = |p: &str| api.signed(&agent, "GET", &format!("{p}{}for={me}", if p.contains('?') { "&" } else { "?" }), None);
     let theirs = for_me("/api/fragments")?;
     let found = theirs.body["fragments"].as_array().and_then(|l| l.iter().find(|f| f["kind"] == "sessions").cloned()).unwrap_or_default();
-    let token = for_me(&format!("/api/f/{name}/storage-token"))?;
     let read = for_me(&format!("/api/f/{name}/file?path=index/chat.json"))?;
+    let note = json!({ "message": "an agent's note", "files": [{ "path": "notes/agent.md", "text": "read" }] });
+    let wrote = api.signed(&agent, "POST", &format!("/api/f/{name}/files?for={me}"), Some(&note))?;
     s.ok(
-        "an agent acting for its owner finds their archive, owned by them, and may read and write it",
-        found["name"] == name.as_str() && found["owned"] == true && token.status == 200 && read.status == 200,
-        json!({ "found": found, "token": token.status, "read": read.status }),
+        "an agent acting for its owner finds their archive, owned by them, reads it and writes to it",
+        found["name"] == name.as_str() && found["owned"] == true && read.status == 200 && wrote.status == 200,
+        json!({ "found": found, "read": read.status, "wrote": wrote.status }),
+    );
+    // and one whose owner has none makes theirs, as the CLI does for them
+    let other = api.person()?;
+    let other_id = api.identity(&other)?;
+    let (their_agent, _) = super::delegation::agent_of(api, &other)?;
+    let made = api.signed(&their_agent, "POST", &format!("/api/fragments?for={other_id}"), Some(&json!({ "label": archive::LABEL, "template": archive::TEMPLATE, "title": archive::TITLE })))?;
+    let listed = api.signed(&other, "GET", "/api/fragments", None)?;
+    let theirs = listed.body["fragments"].as_array().and_then(|l| l.iter().find(|f| f["name"] == made.body["name"]).cloned()).unwrap_or_default();
+    s.ok(
+        "an agent acting for its owner makes their archive, theirs and members only",
+        made.status == 200 && made.body["owner"] == other_id.as_str() && made.body["visibility"] == "members" && theirs["kind"] == "sessions" && theirs["role"] == "owner",
+        json!({ "made": made.body, "listed": theirs }),
     );
     let stranger = api.person()?;
     let r = file(&stranger, "index/chat.json")?;

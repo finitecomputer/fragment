@@ -2,20 +2,26 @@
 //! person's session archive (templates/sessions/README.md), a fragment of
 //! theirs of kind `sessions`, made at their first import. Its format, its
 //! limits and its merge are `fragment_core::session`'s; the stores it
-//! reads are this module's (`hermes`: Hermes' `state.db`; `chats`: the old
-//! Finite's export). It writes as the archive's owner or as their agent
-//! acting for them (`FRAGMENT_FOR`), which is an editor of what its owner
-//! owns: one commit a batch of conversations, then one for the indexes,
-//! each on the head it read (a commit that lost that race reads again).
+//! reads are this module's (`chats`: the old Finite's export). It writes as
+//! the archive's owner or as their agent acting for them (`FRAGMENT_FOR`),
+//! which is an editor of what its owner owns: one commit a batch of
+//! conversations, then one for the indexes, each on the head it read (a
+//! commit that lost that race is made again on the new one).
+//!
+//! **Bounded as it reads.** Each conversation is filed as it is read, and
+//! its file spooled to a folder of the import's own (`Spool`), so an import
+//! holds entries in memory, never every conversation's bytes; one that
+//! passes an archive's limits stops there, refused, before an archive is
+//! made or anything written.
 
 mod chats;
-mod hermes;
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use clap::Subcommand;
+use fragment_core::blob;
 use fragment_core::session::{self, Entry, Index, Kind, Session};
 use fragment_proto::{CreateFragment, Created, FragmentKind, FragmentList, RepoPath, Role};
 use serde::Serialize;
@@ -27,11 +33,10 @@ use crate::codestorage::{Author, Change, CodeStorage, CsError, MAIN};
 #[derive(Subcommand)]
 pub enum SessionCmd {
     /// Bring an agent's past conversations into your Session Archive, a
-    /// private fragment of yours (made the first time): from Hermes'
-    /// state.db, a Hermes home holding one, or the old Finite's export
-    /// (its chats/ folder, or the folder holding it). Each conversation is
-    /// kept by its own id, so importing again adds nothing twice and only
-    /// a newer copy of one replaces it
+    /// private fragment of yours (made the first time): from the old
+    /// Finite's export (its chats/ folder, or the folder holding it). Each
+    /// conversation is kept by its own id, so importing again adds nothing
+    /// twice and only a newer copy of one replaces it
     Import {
         path: PathBuf,
         /// Only conversations of these kinds: chat, cron (a scheduled
@@ -48,6 +53,11 @@ const BATCH_BYTES: usize = 16 * 1024 * 1024;
 /// Tries of one commit that lost its head to another writer, or whose
 /// answer was lost.
 const COMMIT_TRIES: u32 = 5;
+/// Conversations' files read at once when the indexes are made again from
+/// `sessions/` (after an import that stopped before its indexes).
+const READERS: usize = 8;
+/// An id said in a refusal, at most (it is refused for being odd: escaped).
+const SAID_ID_MAX_CHARS: usize = 80;
 
 /// What an import did.
 #[derive(Debug, Serialize)]
@@ -57,7 +67,7 @@ pub struct Imported {
     pub made: bool,
     pub added: usize,
     pub updated: usize,
-    /// Held as they were: the same, or a newer copy held already.
+    /// Held as they were: the same, or a copy as new held already.
     pub unchanged: usize,
     /// Conversations not imported, each with why (the rest were).
     pub refused: Vec<RefusedOne>,
@@ -69,34 +79,84 @@ pub struct Imported {
 
 #[derive(Debug, Serialize)]
 pub struct RefusedOne {
+    /// Its id, escaped and cut (`said_id`).
     pub id: String,
     pub why: String,
 }
 
-/// Where a path a person names reads from.
-enum Source {
-    Hermes(PathBuf),
-    Export(PathBuf),
-}
-
-fn source(path: &Path) -> Result<Source> {
-    if path.is_file() {
-        return Ok(Source::Hermes(path.to_path_buf()));
+/// An id as a refusal says it: control characters escaped, at most
+/// `SAID_ID_MAX_CHARS`, so an id refused for being odd prints as text.
+pub(crate) fn said_id(id: &str) -> String {
+    let mut out: String = id.chars().take(SAID_ID_MAX_CHARS).collect::<String>().escape_debug().to_string();
+    if id.chars().count() > SAID_ID_MAX_CHARS {
+        out.push('…');
     }
-    if !path.is_dir() {
-        bail!(usage(format!("{} is no file or folder", path.display())));
-    }
-    if let Some(root) = chats::root_of(path) {
-        return Ok(Source::Export(root));
-    }
-    if path.join("state.db").is_file() {
-        return Ok(Source::Hermes(path.join("state.db")));
-    }
-    Err(usage(format!("{} holds no state.db and no export's chats/ (index.json): name Hermes' state.db, a Hermes home, or the old Finite's export", path.display())))
+    out
 }
 
 fn usage(msg: String) -> anyhow::Error {
     anyhow::Error::new(CodedError { code: Code::InvalidUsage, msg })
+}
+
+fn too_much(e: session::TooMuch) -> anyhow::Error {
+    anyhow::Error::new(CodedError { code: Code::TooLarge, msg: e.to_string() })
+}
+
+/// The conversations an import read, filed: each one's file spooled to a
+/// folder of the import's own, its entry kept, within an archive's limits
+/// as they are read (`add`). The folder goes with it.
+pub struct Spool {
+    dir: PathBuf,
+    entries: BTreeMap<String, Entry>,
+    bytes: u64,
+    kinds: BTreeSet<Kind>,
+    refused: Vec<RefusedOne>,
+}
+
+impl Spool {
+    fn new(kinds: BTreeSet<Kind>) -> Result<Spool> {
+        let dir = std::env::temp_dir().join(format!("fragment-session-import-{}-{:016x}", std::process::id(), rand::random::<u64>()));
+        std::fs::create_dir_all(&dir).with_context(|| format!("making {}", dir.display()))?;
+        Ok(Spool { dir, entries: BTreeMap::new(), bytes: 0, kinds, refused: Vec::new() })
+    }
+
+    fn path(&self, key: &str) -> PathBuf {
+        self.dir.join(format!("{key}.json"))
+    }
+
+    /// One conversation read: filed and spooled (if of the kinds asked; one
+    /// the format refuses is said, and the rest go on), the newer of two
+    /// copies of one kept. An import past an archive's limits stops here.
+    pub fn add(&mut self, s: Session) -> Result<()> {
+        if !self.kinds.is_empty() && !self.kinds.contains(&s.kind) {
+            return Ok(());
+        }
+        let id = s.id.clone();
+        let (entry, bytes) = match s.normalized().filed() {
+            Ok(filed) => filed,
+            Err(why) => {
+                self.refused.push(RefusedOne { id: said_id(&id), why: why.to_string() });
+                return Ok(());
+            }
+        };
+        let replaced = match self.entries.get(&entry.key) {
+            Some(held) if !entry.newer(held) => return Ok(()),
+            Some(held) => held.bytes,
+            None => 0,
+        };
+        let count = self.entries.len() + usize::from(replaced == 0 && !self.entries.contains_key(&entry.key));
+        session::within(count, self.bytes - replaced + entry.bytes).map_err(too_much)?;
+        std::fs::write(self.path(&entry.key), &bytes).with_context(|| format!("spooling {}", entry.key))?;
+        self.bytes = self.bytes - replaced + entry.bytes;
+        self.entries.insert(entry.key.clone(), entry);
+        Ok(())
+    }
+}
+
+impl Drop for Spool {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
 }
 
 /// `fragment session import`.
@@ -108,51 +168,26 @@ pub fn run(c: &Client, sub: SessionCmd) -> Result<Imported> {
             return Err(usage(format!("a session archive is a person's: {} imports into its owner's, acting for them (FRAGMENT_FOR)", mode.agent)));
         }
     }
-    let read = match source(&path)? {
-        Source::Hermes(db) => {
-            refuse_own_home(&db)?;
-            hermes::read(&db)?
-        }
-        Source::Export(root) => chats::read(&root)?,
-    };
-    let mut refused = Vec::new();
-    let mut incoming: BTreeMap<String, (Entry, Vec<u8>)> = BTreeMap::new();
-    for s in read.sessions.into_iter().filter(|s| kinds.is_empty() || kinds.contains(&s.kind)) {
-        let id = s.id.clone();
-        match s.normalized().filed() {
-            // the same conversation twice in one store: its newer copy
-            Ok((e, bytes)) => match incoming.get(&e.key) {
-                Some((held, _)) if !e.newer(held) => {}
-                _ => {
-                    incoming.insert(e.key.clone(), (e, bytes));
-                }
-            },
-            Err(why) => refused.push(RefusedOne { id, why: why.to_string() }),
-        }
+    if !path.exists() {
+        bail!(usage(format!("{} is no file or folder", path.display())));
     }
+    let root = chats::root_of(&path).ok_or_else(|| usage(format!("{} holds no export's chats/ (its index.json): name the old Finite's export, or its chats/", path.display())))?;
+    let mut spool = Spool::new(kinds)?;
+    let problems = chats::read(&root, &mut spool)?;
     let (archive, made) = archive(c)?;
-    let written = write(c, &archive, incoming.into_values().collect())?;
+    let written = write(c, &archive, &spool)?;
     let mut holds: BTreeMap<&'static str, usize> = Kind::ALL.iter().map(|k| (k.as_str(), 0)).collect();
     for e in written.entries.values() {
         *holds.entry(e.kind.as_str()).or_default() += 1;
     }
-    Ok(Imported { archive, made, added: written.added, updated: written.updated, unchanged: written.unchanged, refused, problems: read.problems, holds })
-}
-
-/// Hermes' own database on this computer is its agent's conversations
-/// here, which are chats here already: importing them would show each
-/// twice.
-fn refuse_own_home(db: &Path) -> Result<()> {
-    let Some(home) = std::env::var_os("HERMES_HOME").filter(|h| !h.is_empty()) else { return Ok(()) };
-    let same = |a: &Path, b: &Path| matches!((a.canonicalize(), b.canonicalize()), (Ok(a), Ok(b)) if a == b);
-    if same(db, &Path::new(&home).join("state.db")) {
-        return Err(usage(format!("{} is this agent's own state.db: its conversations are your chats here already. Import another agent's (its state.db, or its export)", db.display())));
-    }
-    Ok(())
+    let refused = std::mem::take(&mut spool.refused);
+    Ok(Imported { archive, made, added: written.added, updated: written.updated, unchanged: written.unchanged, refused, problems, holds })
 }
 
 /// The person's archive: theirs already (the first by name, should two
-/// imports at once have made one each), or made now.
+/// imports at once have made one each), or made now. Asked only once what
+/// was read is within an archive's limits (`Spool::add`), so a refused
+/// import makes none.
 fn archive(c: &Client) -> Result<(String, bool)> {
     let list: FragmentList = c.call_as(c.get("/api/fragments")?)?;
     let theirs = list.fragments.iter().filter(|f| f.kind == FragmentKind::Sessions && (f.role == Role::Owner || f.owned)).map(|f| f.name.clone()).min();
@@ -170,20 +205,26 @@ fn archive(c: &Client) -> Result<(String, bool)> {
     Ok((made.name, true))
 }
 
-/// The archive at one head of main: what its indexes list, the keys
-/// `sessions/` holds files for, and the head.
+/// The archive at one head of main: what its indexes list, and each file
+/// `sessions/` holds, by key, with its size in git (a blob's pointer's).
 struct Held {
     head: Option<String>,
     indexed: BTreeMap<String, Entry>,
-    stored: BTreeSet<String>,
+    stored: BTreeMap<String, u64>,
+}
+
+impl Held {
+    fn keys(&self) -> BTreeSet<String> {
+        self.stored.keys().cloned().collect()
+    }
 }
 
 fn held(storage: &CodeStorage, blobs: &Blobs) -> Result<Held> {
     let head = storage.branch_head(MAIN)?;
-    let Some(rev) = head.clone() else { return Ok(Held { head, indexed: BTreeMap::new(), stored: BTreeSet::new() }) };
+    let Some(rev) = head.clone() else { return Ok(Held { head, indexed: BTreeMap::new(), stored: BTreeMap::new() }) };
     let listed = storage.list_files(&rev)?;
     let paths: BTreeSet<&str> = listed.entries.iter().map(|e| e.path.as_str()).collect();
-    let stored = paths.iter().filter_map(|p| session::key_of_path(p)).map(str::to_string).collect();
+    let stored = listed.entries.iter().filter_map(|e| session::key_of_path(e.path.as_str()).map(|k| (k.to_string(), e.size))).collect();
     let mut indexed = BTreeMap::new();
     for kind in Kind::ALL {
         let path = session::index_path(kind);
@@ -202,23 +243,56 @@ fn held(storage: &CodeStorage, blobs: &Blobs) -> Result<Held> {
     Ok(Held { head, indexed, stored })
 }
 
-/// The entry of each conversation `sessions/` holds and the indexes lack:
-/// one this run wrote, as it wrote it; any other read from its file.
-fn found(storage: &CodeStorage, blobs: &Blobs, h: &Held, written: &BTreeMap<String, Entry>) -> Result<Vec<Entry>> {
+/// The entry of each conversation whose file in `sessions/` the indexes
+/// do not describe: one they lack, or name another copy than (its size in
+/// git is not their entry's, or, for a blob, its pointer names other
+/// bytes): an import that stopped before its indexes. One this run wrote is
+/// its entry as written, whatever the indexes say (the indexes' commit lost
+/// its race, or its answer); any other is read from its file, `READERS` at
+/// once.
+fn found(c: &Client, name: &str, storage: &CodeStorage, h: &Held, written: &BTreeMap<String, Entry>) -> Result<Vec<Entry>> {
     let rev = h.head.as_deref().unwrap_or(MAIN);
-    let mut out = Vec::new();
-    for key in h.stored.iter().filter(|k| !h.indexed.contains_key(*k)) {
-        if let Some(e) = written.get(key) {
-            out.push(e.clone());
+    let mut out: Vec<Entry> = written.values().filter(|e| h.stored.contains_key(&e.key)).cloned().collect();
+    let mut unread = Vec::new();
+    for (key, size) in &h.stored {
+        if written.contains_key(key) {
             continue;
         }
-        let path = session::session_path(key);
-        let bytes = blobs.resolve(storage.read_file(&path, rev)?)?;
-        match serde_json::from_slice::<Session>(&bytes).map_err(|e| e.to_string()).and_then(|s| s.normalized().filed().map_err(|e| e.to_string())) {
-            Ok((e, _)) if e.key == *key => out.push(e),
-            Ok((e, _)) => eprintln!("warning: {path} holds conversation {}, filed under another key: left out of the indexes", e.key),
-            Err(e) => eprintln!("warning: {path} is no conversation ({e}): left out of the indexes"),
+        let described = match h.indexed.get(key) {
+            None => false,
+            Some(e) if *size == e.bytes => true,
+            // a blob's pointer: does it name the entry's bytes?
+            Some(e) if *size as usize <= blob::POINTER_MAX_BYTES && e.bytes as usize >= blob::BLOB_MIN_BYTES => {
+                let pointer = storage.read_file(&session::session_path(key), rev)?;
+                blob::parse(&pointer).is_some_and(|p| p.sha256 == e.sha256 && p.size == e.bytes)
+            }
+            Some(_) => false,
+        };
+        if !described {
+            unread.push(key.clone());
         }
+    }
+    let read = |keys: &[String]| -> Result<Vec<Entry>> {
+        let blobs = Blobs::new(c, name);
+        let mut entries = Vec::new();
+        for key in keys {
+            let path = session::session_path(key);
+            let bytes = blobs.resolve(storage.read_file(&path, rev)?)?;
+            match serde_json::from_slice::<Session>(&bytes).map_err(|e| e.to_string()).and_then(|s| s.normalized().filed().map_err(|e| e.to_string())) {
+                Ok((e, _)) if e.key == *key => entries.push(e),
+                Ok((e, _)) => eprintln!("warning: {path} holds conversation {}, filed under another key: left out of the indexes", said_id(&e.key)),
+                Err(e) => eprintln!("warning: {path} is no conversation ({e}): left out of the indexes"),
+            }
+        }
+        Ok(entries)
+    };
+    let per = unread.len().div_ceil(READERS).max(1);
+    let parts: Vec<Result<Vec<Entry>>> = std::thread::scope(|scope| {
+        let readers: Vec<_> = unread.chunks(per).map(|keys| scope.spawn(move || read(keys))).collect();
+        readers.into_iter().map(|r| r.join().unwrap_or_else(|_| Err(anyhow!("a reader of the archive's files panicked")))).collect()
+    });
+    for part in parts {
+        out.extend(part?);
     }
     Ok(out)
 }
@@ -231,13 +305,14 @@ struct Written {
     entries: BTreeMap<String, Entry>,
 }
 
-fn write(c: &Client, name: &str, incoming: Vec<(Entry, Vec<u8>)>) -> Result<Written> {
+fn write(c: &Client, name: &str, spool: &Spool) -> Result<Written> {
     let storage = CodeStorage::connect(c, name)?;
     let blobs = Blobs::new(c, name);
     let author = Author::writer(&c.writer_id());
     let h = held(&storage, &blobs)?;
-    let orphans = found(&storage, &blobs, &h, &BTreeMap::new())?;
-    let merge = session::merge(&h.indexed, &h.stored, orphans, incoming).map_err(|e| anyhow::Error::new(CodedError { code: Code::TooLarge, msg: e.to_string() }))?;
+    let orphans = found(c, name, &storage, &h, &BTreeMap::new())?;
+    let incoming: Vec<(Entry, PathBuf)> = spool.entries.values().map(|e| (e.clone(), spool.path(&e.key))).collect();
+    let merge = session::merge(&h.indexed, &h.keys(), orphans, incoming).map_err(too_much)?;
     let (added, updated, unchanged) = (merge.added, merge.updated, merge.unchanged);
     let mut head = h.head;
 
@@ -246,8 +321,8 @@ fn write(c: &Client, name: &str, incoming: Vec<(Entry, Vec<u8>)>) -> Result<Writ
     let mut batch_bytes = 0;
     let total = merge.writes.len();
     let mut sent = 0;
-    for (key, bytes) in &merge.writes {
-        let stored = blobs.store(bytes.clone())?;
+    for (key, path) in &merge.writes {
+        let stored = blobs.store(std::fs::read(path).with_context(|| format!("reading back {}", path.display()))?)?;
         batch_bytes += stored.len();
         batch.push(Change::Upsert { path: RepoPath::parse(&session::session_path(key)).map_err(|e| anyhow!("{e}"))?, bytes: stored });
         if batch.len() >= BATCH_FILES || batch_bytes >= BATCH_BYTES {
@@ -260,42 +335,54 @@ fn write(c: &Client, name: &str, incoming: Vec<(Entry, Vec<u8>)>) -> Result<Writ
         head = commit(&storage, &author, head, &format!("session import: {total} conversations"), &batch)?;
     }
     let written: BTreeMap<String, Entry> = merge.entries.iter().filter(|(k, _)| merge.writes.contains_key(*k)).map(|(k, e)| (k.clone(), e.clone())).collect();
-
-    // the indexes, made from main as it is when they are written
-    let mut entries = merge.entries;
-    let mut indexes = merge.indexes;
-    let mut moved = !merge.writes.is_empty();
-    for attempt in 1..=COMMIT_TRIES {
-        if indexes.is_empty() {
-            break;
-        }
-        let mut changes = Vec::new();
-        for kind in &indexes {
-            let bytes = blobs.store(Index::of(*kind, &entries).file())?;
-            changes.push(Change::Upsert { path: RepoPath::parse(&session::index_path(*kind)).map_err(|e| anyhow!("{e}"))?, bytes });
-        }
-        match storage.commit(head.as_deref(), "session import: the indexes", &author, &changes) {
-            Ok(_) => {
-                moved = true;
-                break;
-            }
-            // nothing changed (they are as main holds them already)
-            Err(CsError::Precondition(_)) => break,
-            Err(CsError::CasRejected { .. } | CsError::OutcomeUnknown(_)) if attempt < COMMIT_TRIES => {
-                // another writer moved main (or this one's answer was lost):
-                // what the indexes list is made again from main as it is now
-                let h = held(&storage, &blobs)?;
-                let orphans = found(&storage, &blobs, &h, &written)?;
-                let again = session::merge(&h.indexed, &h.stored, orphans, Vec::new()).map_err(|e| anyhow!("{e}"))?;
-                (head, entries, indexes) = (h.head, again.entries, again.indexes);
-            }
-            Err(e) => return Err(anyhow::Error::new(e).context("writing the archive's indexes")),
-        }
-    }
-    if moved {
+    let indexes = Indexes { c, name, storage: &storage, author: &author };
+    let (entries, indexed) = indexes.write(head, merge.entries, merge.indexes, &written)?;
+    if !merge.writes.is_empty() || indexed {
         crate::sync::refresh_pins(c, name);
     }
     Ok(Written { added, updated, unchanged, entries })
+}
+
+/// Where the indexes are written, and as whom.
+struct Indexes<'a> {
+    c: &'a Client,
+    name: &'a str,
+    storage: &'a CodeStorage,
+    author: &'a Author,
+}
+
+impl Indexes<'_> {
+    /// The indexes of `kinds` over `entries`, in one commit on `head`. One
+    /// that loses its race to another writer, or whose answer is lost, is
+    /// made again from main as it is then, the conversations this run wrote
+    /// (`written`) listed by their entries as written. With every entry the
+    /// indexes list, and whether a commit landed.
+    fn write(&self, mut head: Option<String>, mut entries: BTreeMap<String, Entry>, mut kinds: Vec<Kind>, written: &BTreeMap<String, Entry>) -> Result<(BTreeMap<String, Entry>, bool)> {
+        let blobs = Blobs::new(self.c, self.name);
+        for attempt in 1..=COMMIT_TRIES {
+            if kinds.is_empty() {
+                return Ok((entries, false));
+            }
+            let mut changes = Vec::new();
+            for kind in &kinds {
+                let bytes = blobs.store(Index::of(*kind, &entries).file())?;
+                changes.push(Change::Upsert { path: RepoPath::parse(&session::index_path(*kind)).map_err(|e| anyhow!("{e}"))?, bytes });
+            }
+            match self.storage.commit(head.as_deref(), "session import: the indexes", self.author, &changes) {
+                Ok(_) => return Ok((entries, true)),
+                // nothing changed (they are as main holds them already)
+                Err(CsError::Precondition(_)) => return Ok((entries, false)),
+                Err(CsError::CasRejected { .. } | CsError::OutcomeUnknown(_)) if attempt < COMMIT_TRIES => {
+                    let h = held(self.storage, &blobs)?;
+                    let orphans = found(self.c, self.name, self.storage, &h, written)?;
+                    let again = session::merge::<()>(&h.indexed, &h.keys(), orphans, Vec::new()).map_err(too_much)?;
+                    (head, entries, kinds) = (h.head, again.entries, again.indexes);
+                }
+                Err(e) => return Err(anyhow::Error::new(e).context("writing the archive's indexes")),
+            }
+        }
+        unreachable!("the last try returns")
+    }
 }
 
 /// One commit of `changes` on `head`: on another head when another writer
@@ -335,6 +422,14 @@ pub fn print(r: &Imported) {
     );
 }
 
+/// A fresh folder in the system's temporary place (a test's).
+#[cfg(test)]
+pub(crate) fn tempdir() -> PathBuf {
+    let d = std::env::temp_dir().join(format!("fragment-session-{}-{}", std::process::id(), rand::random::<u64>()));
+    std::fs::create_dir_all(&d).unwrap();
+    d
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -342,10 +437,21 @@ mod tests {
 
     const NAME: &str = "sessions--k3x9";
 
-    fn conversation(id: &str, kind: Kind, at: &str, words: &[&str]) -> (Entry, Vec<u8>) {
+    fn session(id: &str, kind: Kind, at: &str, words: &[&str]) -> Session {
         let messages = words.iter().enumerate().map(|(i, w)| Message { role: if i % 2 == 0 { "user" } else { "assistant" }.into(), at: Some(at.into()), text: Some(w.to_string()), ..Default::default() }).collect();
-        let s = Session { format: String::new(), id: id.into(), origin: "hermes".into(), kind, title: String::new(), source: None, with: None, model: None, started_at: Some(at.into()), ended_at: None, parts: vec![], messages };
-        s.normalized().filed().unwrap()
+        Session { format: String::new(), id: id.into(), origin: "hermes".into(), reader: 10, kind, agent: None, title: String::new(), source: None, with: None, model: None, started_at: Some(at.into()), ended_at: None, parts: vec![], messages }
+    }
+
+    fn spooled(sessions: Vec<Session>) -> Spool {
+        let mut spool = Spool::new(BTreeSet::new()).unwrap();
+        for s in sessions {
+            spool.add(s).unwrap();
+        }
+        spool
+    }
+
+    fn file_of(s: Session) -> Vec<u8> {
+        s.normalized().filed().unwrap().1
     }
 
     fn archive() -> (crate::mockcs::MockServer, Client) {
@@ -355,9 +461,17 @@ mod tests {
         (mock, c)
     }
 
-    fn index(mock: &crate::mockcs::MockServer, kind: Kind) -> Vec<String> {
+    fn index(mock: &crate::mockcs::MockServer, kind: Kind) -> Vec<(String, String)> {
         let bytes = mock.file_at(NAME, "main", &session::index_path(kind)).unwrap_or_default();
-        serde_json::from_slice::<Index>(&bytes).map(|i| i.sessions.into_iter().map(|e| e.key).collect()).unwrap_or_default()
+        serde_json::from_slice::<Index>(&bytes).map(|i| i.sessions.into_iter().map(|e| (e.key, e.sha256)).collect()).unwrap_or_default()
+    }
+
+    fn keys(mock: &crate::mockcs::MockServer, kind: Kind) -> Vec<String> {
+        index(mock, kind).into_iter().map(|(k, _)| k).collect()
+    }
+
+    fn sha(bytes: &[u8]) -> String {
+        fragment_core::blob::sha256_hex(bytes)
     }
 
     /// Goal: an import writes its conversations and then the indexes that
@@ -367,76 +481,109 @@ mod tests {
     #[test]
     fn an_import_writes_its_conversations_then_its_indexes_and_again_nothing() {
         let (mock, c) = archive();
-        let these = vec![
-            conversation("a", Kind::Chat, "2026-10-01T09:00:00Z", &["first", "hi"]),
-            conversation("b", Kind::Chat, "2026-10-03T09:00:00Z", &["second"]),
-            conversation("r", Kind::Cron, "2026-10-02T06:00:00Z", &["digest"]),
-        ];
+        let these = || vec![session("a", Kind::Chat, "2026-10-01T09:00:00Z", &["first", "hi"]), session("b", Kind::Chat, "2026-10-03T09:00:00Z", &["second"]), session("r", Kind::Cron, "2026-10-02T06:00:00Z", &["digest"])];
         let packs = mock.requests(NAME, "POST commit-pack");
-        let w = write(&c, NAME, these.clone()).unwrap();
+        let w = write(&c, NAME, &spooled(these())).unwrap();
         assert_eq!((w.added, w.updated, w.unchanged, w.entries.len()), (3, 0, 0, 3));
         assert_eq!(mock.requests(NAME, "POST commit-pack") - packs, 2, "one commit of conversations, one of the indexes");
-        for (e, bytes) in &these {
-            assert_eq!(mock.file_at(NAME, "main", &session::session_path(&e.key)).as_ref(), Some(bytes));
+        for s in these() {
+            let path = session::session_path(&session::key("hermes", &s.id).unwrap());
+            assert_eq!(mock.file_at(NAME, "main", &path), Some(file_of(s)));
         }
-        assert_eq!(index(&mock, Kind::Chat), ["hermes-b", "hermes-a"], "newest first");
-        assert_eq!(index(&mock, Kind::Cron), ["hermes-r"]);
+        assert_eq!(keys(&mock, Kind::Chat), ["hermes-b", "hermes-a"], "newest first");
+        assert_eq!(keys(&mock, Kind::Cron), ["hermes-r"]);
         assert!(mock.file_at(NAME, "main", &session::index_path(Kind::Subagent)).is_none(), "no index for a kind it holds none of");
         assert!(mock.refresh_count() >= 1, "the cell is told main moved");
 
         let packs = mock.requests(NAME, "POST commit-pack");
-        let again = write(&c, NAME, these).unwrap();
+        let again = write(&c, NAME, &spooled(these())).unwrap();
         assert_eq!((again.added, again.updated, again.unchanged), (0, 0, 3));
         assert_eq!(mock.requests(NAME, "POST commit-pack"), packs, "a replay commits nothing");
     }
 
     /// Goal: an import after a crash (restart) leaves the indexes as
-    /// `sessions/` is. Method: an archive holding a conversation's file its
-    /// index lacks (an import stopped before its last commit), and an
-    /// index entry whose file is gone; an import of one new conversation.
+    /// `sessions/` is, whatever it imports. Method: an archive holding a
+    /// conversation's file its index lacks, a newer copy of one under its
+    /// older entry (an update whose indexes never landed), and an entry
+    /// whose file is gone; an import of something else.
     #[test]
     fn an_import_after_a_crash_puts_the_indexes_right() {
         let (mock, c) = archive();
-        let (orphan, orphan_bytes) = conversation("orphan", Kind::Chat, "2026-10-01T09:00:00Z", &["left"]);
-        let (gone, _) = conversation("gone", Kind::Chat, "2026-10-02T09:00:00Z", &["gone"]);
-        let stale = Index::of(Kind::Chat, &BTreeMap::from([(gone.key.clone(), gone)])).file();
-        let orphan_path = session::session_path(&orphan.key);
-        let index_path = session::index_path(Kind::Chat);
-        mock.external_commit(NAME, "main", &[(orphan_path.as_str(), Some(&orphan_bytes)), (index_path.as_str(), Some(&stale))], "a crashed import");
-        let w = write(&c, NAME, vec![conversation("new", Kind::Chat, "2026-10-03T09:00:00Z", &["new"])]).unwrap();
-        assert_eq!((w.added, w.entries.len()), (1, 2));
-        assert_eq!(index(&mock, Kind::Chat), ["hermes-new", "hermes-orphan"], "the orphan is listed, the entry without a file dropped");
-        let nothing = write(&c, NAME, vec![]).unwrap();
-        assert_eq!(nothing.entries.len(), 2);
+        write(&c, NAME, &spooled(vec![session("a", Kind::Chat, "2026-10-01T09:00:00Z", &["hello"]), session("gone", Kind::Chat, "2026-10-02T09:00:00Z", &["gone"])])).unwrap();
+        let orphan = file_of(session("orphan", Kind::Subagent, "2026-10-01T09:00:00Z", &["left"]));
+        let newer_a = file_of(session("a", Kind::Chat, "2026-10-04T09:00:00Z", &["hello", "and a longer reply"]));
+        let (orphan_path, a_path, gone_path) = (session::session_path("hermes-orphan"), session::session_path("hermes-a"), session::session_path("hermes-gone"));
+        mock.external_commit(NAME, "main", &[(orphan_path.as_str(), Some(&orphan)), (a_path.as_str(), Some(&newer_a)), (gone_path.as_str(), None)], "a crashed import");
+        let w = write(&c, NAME, &spooled(vec![session("new", Kind::Cron, "2026-10-03T09:00:00Z", &["new"])])).unwrap();
+        assert_eq!((w.added, w.entries.len()), (1, 3));
+        assert_eq!(index(&mock, Kind::Chat), [("hermes-a".to_string(), sha(&newer_a))], "the newer copy's entry, the gone one dropped");
+        assert_eq!(keys(&mock, Kind::Subagent), ["hermes-orphan"]);
+        let packs = mock.requests(NAME, "POST commit-pack");
+        assert_eq!(write(&c, NAME, &spooled(vec![])).unwrap().entries.len(), 3);
+        assert_eq!(mock.requests(NAME, "POST commit-pack"), packs, "then nothing is left to put right");
+    }
+
+    /// Goal: a commit that loses its race, or whose answer is lost, is made
+    /// again, and the indexes then list what this import wrote, not what
+    /// main's indexes said. Method: the conversations' commit beaten once by
+    /// a competitor; then an update whose indexes' commit is beaten (its
+    /// copy the same size as the one indexed, so only what it wrote says
+    /// it); then one whose indexes' answer is lost.
+    #[test]
+    fn a_commit_that_loses_its_race_is_made_again() {
+        let (mock, c) = archive();
+        mock.sabotage_commit_packs(1);
+        write(&c, NAME, &spooled(vec![session("a", Kind::Chat, "2026-10-01T09:00:00Z", &["hellp"])])).unwrap();
+        assert!(mock.file_at(NAME, "main", "competitor.txt").is_some() && keys(&mock, Kind::Chat) == ["hermes-a"], "both land");
+
+        let same_size = session("a", Kind::Chat, "2026-10-02T09:00:00Z", &["hello"]);
+        let bytes = file_of(same_size.clone());
+        assert_eq!(bytes.len(), file_of(session("a", Kind::Chat, "2026-10-01T09:00:00Z", &["hellp"])).len());
+        mock.sabotage_commit_packs_after(1, 1);
+        let w = write(&c, NAME, &spooled(vec![same_size])).unwrap();
+        assert_eq!(w.updated, 1);
+        assert_eq!(index(&mock, Kind::Chat), [("hermes-a".to_string(), sha(&bytes))], "the indexes list what was written");
+
+        let repo = mock.repo_url(NAME).unwrap();
+        mock.drop_commit_answers(&repo, 2);
+        let w = write(&c, NAME, &spooled(vec![session("b", Kind::Chat, "2026-10-03T09:00:00Z", &["b"])])).unwrap();
+        assert_eq!(w.added, 1);
+        assert_eq!(keys(&mock, Kind::Chat), ["hermes-b", "hermes-a"]);
     }
 
     /// Goal: a newer copy of a conversation replaces the one held, and an
-    /// older copy never does. Method: a chat, then it with a reply more,
-    /// then the first copy again.
+    /// older copy never does. Method: a chat, then it later with a reply
+    /// more, then the first copy again.
     #[test]
     fn only_a_newer_copy_replaces_a_conversation() {
         let (mock, c) = archive();
-        let first = conversation("a", Kind::Chat, "2026-10-01T09:00:00Z", &["hello"]);
-        let longer = conversation("a", Kind::Chat, "2026-10-01T09:00:00Z", &["hello", "hi there"]);
-        write(&c, NAME, vec![first.clone()]).unwrap();
-        let w = write(&c, NAME, vec![longer.clone()]).unwrap();
-        assert_eq!(w.updated, 1);
-        let back = write(&c, NAME, vec![first]).unwrap();
+        let first = || session("a", Kind::Chat, "2026-10-01T09:00:00Z", &["hello"]);
+        let later = session("a", Kind::Chat, "2026-10-02T09:00:00Z", &["hello", "hi there"]);
+        write(&c, NAME, &spooled(vec![first()])).unwrap();
+        assert_eq!(write(&c, NAME, &spooled(vec![later.clone()])).unwrap().updated, 1);
+        let back = write(&c, NAME, &spooled(vec![first()])).unwrap();
         assert_eq!((back.updated, back.unchanged), (0, 1));
-        assert_eq!(mock.file_at(NAME, "main", &session::session_path("hermes-a")), Some(longer.1));
+        assert_eq!(mock.file_at(NAME, "main", &session::session_path("hermes-a")), Some(file_of(later)));
     }
 
-    /// Goal: a path names a store, or says what it should be. Invalid: a
-    /// folder with neither, a path that is nothing.
+    /// Goal: a spool holds what an import read within an archive's limits,
+    /// the newer of two copies of one, refusing the rest as it reads.
+    /// Method: two copies of one, an id that is no id (said escaped), and a
+    /// kind not asked for.
     #[test]
-    fn a_path_names_a_store_or_says_what_to_name() {
-        let dir = hermes::tests::tempdir();
-        let e = source(&dir).err().map(|e| format!("{e:#}")).unwrap_or_default();
-        assert!(e.contains("name Hermes' state.db, a Hermes home, or the old Finite's export"), "{e}");
-        assert!(source(&dir.join("nothing")).is_err());
-        hermes::tests::database(&dir.join("state.db"), "");
-        assert!(matches!(source(&dir), Ok(Source::Hermes(p)) if p == dir.join("state.db")));
-        chats::tests::export(&dir);
-        assert!(matches!(source(&dir), Ok(Source::Export(p)) if p == dir), "an export's chats/ wins over a state.db beside it");
+    fn a_spool_keeps_the_newer_copy_and_says_what_it_refuses() {
+        let mut spool = Spool::new(BTreeSet::from([Kind::Chat])).unwrap();
+        spool.add(session("a", Kind::Chat, "2026-10-02T09:00:00Z", &["later"])).unwrap();
+        spool.add(session("a", Kind::Chat, "2026-10-01T09:00:00Z", &["earlier"])).unwrap();
+        spool.add(session("run", Kind::Cron, "2026-10-01T09:00:00Z", &["not asked"])).unwrap();
+        spool.add(session(&format!("\u{1b}[31m{}", "x".repeat(300)), Kind::Chat, "2026-10-01T09:00:00Z", &["odd"])).unwrap();
+        assert_eq!(spool.entries.keys().collect::<Vec<_>>(), ["hermes-a"]);
+        assert_eq!(std::fs::read(spool.path("hermes-a")).unwrap(), file_of(session("a", Kind::Chat, "2026-10-02T09:00:00Z", &["later"])));
+        assert_eq!(spool.refused.len(), 1);
+        let said = &spool.refused[0].id;
+        assert!(said.starts_with("\\u{1b}[31m") && said.ends_with('…') && said.chars().count() < 100, "{said}");
+        let dir = spool.dir.clone();
+        drop(spool);
+        assert!(!dir.exists(), "its folder goes with it");
     }
 }

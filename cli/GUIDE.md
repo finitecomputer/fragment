@@ -856,27 +856,24 @@ fragment export --out ~/me.tar           # somewhere else
 The conversations you had with an agent somewhere else, kept in a
 private fragment of yours (kind `sessions`, titled Session Archive, made
 the first time you import): one file a conversation, under `sessions/`,
-and one index a kind, under `index/`, newest first. The shell lists them
-under Session Archive. Bring them in from Hermes' own `state.db` (or the
-Hermes home holding it), or from the old Finite's export (its `chats/`,
-or the folder holding it):
+and one index a kind, under `index/`, newest first. Bring them in from
+the old Finite's export (its `chats/`, or the folder holding it):
 
 ```
-fragment session import ~/finite-import/export     # the old Finite's export, unpacked
-fragment session import ~/.hermes                  # a Hermes home, or its state.db
-fragment session import ~/.hermes --kind chat      # only chats (also: cron, subagent)
+fragment session import ~/finite-import/export              # the old Finite's export, unpacked
+fragment session import ~/finite-import/export --kind chat  # only chats (also: cron, subagent)
 ```
 
 Each conversation is kept by its own id, so importing again adds
-nothing twice, and a newer copy of one (a later export, the same chats
-from Hermes' database) replaces the older; an older copy never does. It
-says what it added, updated and already had, and what it left out and
-why: at most 20,000 conversations an archive (an import past that adds
-nothing), 8 MiB a conversation. A tool's output and an agent's reasoning
-are cut to 2,000 characters; what was said, never. An agent runs it for
-its owner (into their archive, never one of its own), and so reads it:
-`fragment sync <archive> --dir ~/archive --mode pull`, then your own
-tools over `~/archive/sessions/`. A conversation's file (format
+nothing twice, and a newer copy of one (a later export) replaces the
+older; an older copy never does. It says what it added, updated and
+already had, and what it left out and why: at most 18,000 conversations
+and 1 GiB an archive (an import past either adds nothing), 8 MiB a
+conversation. A tool's output and an agent's reasoning are cut to 2,000
+characters; what was said, never. An agent runs it for its owner (into
+their archive, never one of its own), and so reads it: `fragment sync
+<archive> --dir ~/archive --mode pull`, then your own tools over
+`~/archive/sessions/`. A conversation's file (format
 `session-archive/1`) is `{id, origin, kind, title, source, with,
 started_at, ended_at, parts, messages}`, each message `{role, at, text,
 tool, tool_calls, reasoning, summary}`; `kind` is `chat`, `cron` (a

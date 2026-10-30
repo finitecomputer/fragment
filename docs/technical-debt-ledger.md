@@ -14,7 +14,8 @@ without a delete condition is unfinished design, not debt.
 - **Shortcut:** two imports of the same conversation at once (the same
   person running it twice, on two machines) keep the last one's file,
   and an index entry may name the other's copy (its `sha256` and
-  `ended_at`) until the next import compares against it.
+  `ended_at`) when the two are the same size; one of another size is
+  listed by its file at the next import (`found`, cli/src/session).
 - **Risk:** a stale entry makes the next import of that conversation
   compare against the wrong copy: it may skip a newer copy once, or write
   the same one again. Nothing is lost: the file is one of the two copies.
