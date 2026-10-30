@@ -2854,8 +2854,10 @@ Both on the platform's host, for anyone, each naming its release in
 
 The files the platform serves as they are in its release, a blessed
 template's site, data and code (Apps, above), a catalog template's
-files, the shell's files (The shell, below) and the agent docs (Agent
-docs, below), are the Worker's Static Assets (`ASSETS`), each named by
+files, the shell's files (The shell, below), the shared browser library,
+stylesheets, files viewer, markdown renderer and push service worker,
+and the agent docs (Agent docs, below), are the Worker's Static Assets
+(`ASSETS`), each named by
 its SHA-256. The cell carries only their index, each file's path,
 hash and size and each template's release, made by its build
 (crates/templates), and reads a file by its hash when it answers with

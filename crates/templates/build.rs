@@ -5,7 +5,8 @@
 // into the assets, and the e2e). They are one `Template` per directory
 // under templates/ (every file but src/, which holds sources of committed
 // bundles) and `ALL`; the shell's files (cell/shell/, `SHELL`); and the
-// agent docs (cli/SKILL.md, cli/GUIDE.md). Each template's release, a
+// shared browser files (cell/, `BROWSER`) and agent docs (cli/SKILL.md,
+// cli/GUIDE.md). Each template's release, a
 // hash of its paths and bytes, is made here, so a cell that never holds
 // the bytes names it all the same.
 //
@@ -71,6 +72,14 @@ fn main() {
     let tdir = repo.join("templates");
     let shell = repo.join("cell/shell");
     let docs = [("SKILL_MD", repo.join("cli/SKILL.md")), ("GUIDE_MD", repo.join("cli/GUIDE.md"))];
+    let browser = [
+        ("CLIENT_JS", "client.mjs"),
+        ("CLIENT_CSS", "fragment.css"),
+        ("FILES_JS", "files.mjs"),
+        ("FILES_CSS", "files.css"),
+        ("MARKDOWN_JS", "markdown.mjs"),
+        ("SW_JS", "sw.js"),
+    ];
     let names_file = Path::new(&manifest).join("src/blessed_names.rs");
     let watched = [&tdir, &names_file].into_iter().chain(platform.then_some(&shell));
     for watched in watched.chain(docs.iter().map(|(_, p)| p)) {
@@ -116,6 +125,16 @@ fn main() {
     }
     src.push_str("];\n");
     if platform {
+        for (name, file) in browser {
+            let path = repo.join("cell").join(file);
+            println!("cargo:rerun-if-changed={}", path.display());
+            let bytes = fs::read(&path).unwrap_or_else(|e| panic!("cell/{file}: {e}"));
+            src.push_str(&format!(
+                "pub static {name}: File = {};\n",
+                entry(file, &bytes, statics.id(path), embed)
+            ));
+        }
+        src.push_str("pub static BROWSER: &[&File] = &[&CLIENT_JS, &CLIENT_CSS, &FILES_JS, &FILES_CSS, &MARKDOWN_JS, &SW_JS];\n");
         let mut files = Vec::new();
         assert!(shell.is_dir(), "cell/shell/: the platform's files hold the shell's");
         collect(&shell, &shell, &mut files);

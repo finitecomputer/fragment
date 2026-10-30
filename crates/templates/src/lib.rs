@@ -1,8 +1,8 @@
 //! The files the release serves from the cell's Static Assets: the
 //! templates under `templates/` (`fragment new` scaffolds them, and the
 //! cell makes a fragment from one: docs/api.md, Control API), the shell's
-//! files (`cell/shell/`), and the agent docs (`cli/SKILL.md`,
-//! `cli/GUIDE.md`, the platform's `/llms.txt` and `/llms-full.txt`, their
+//! files (`cell/shell/`), the shared browser files (`cell/`), and the agent
+//! docs (`cli/SKILL.md`, `cli/GUIDE.md`, the platform's `/llms.txt` and `/llms-full.txt`, their
 //! blanks filled as they are shown: `agent_doc`).
 //!
 //! The cell holds only their index: each file's path, SHA-256 and size,
@@ -12,8 +12,8 @@
 //! bytes (the CLI scaffolds them, xtask writes them into the assets
 //! directory a cell build uploads: `write_assets`). The `platform` feature
 //! (on by default) adds the platform's own files: the blessed templates
-//! (`blessed`) and the shell's. The CLI builds without it, so its inputs
-//! are the templates it scaffolds and the agent docs alone.
+//! (`blessed`), the shell's and shared browser files. The CLI builds without
+//! it, so its inputs are the templates it scaffolds and the agent docs alone.
 
 /// One file, as the build found it.
 #[derive(Debug, PartialEq, Eq)]
@@ -188,11 +188,11 @@ pub fn shell_published(name: &str) -> Option<(&'static File, &'static str)> {
 pub mod blessed;
 
 /// Every file the cell may read from its Static Assets, each once: the
-/// blessed and catalog templates', the shell's and the agent docs.
+/// blessed and catalog templates', the shell's, browser files and agent docs.
 #[cfg(feature = "platform")]
 pub fn release_files() -> Vec<&'static File> {
     let templates = blessed::BLESSED.iter().filter_map(|n| blessed::template(n)).chain(CATALOG);
-    let all = templates.flat_map(|t| t.files.iter()).chain(SHELL).chain([&SKILL_MD, &GUIDE_MD]);
+    let all = templates.flat_map(|t| t.files.iter()).chain(SHELL).chain(BROWSER.iter().copied()).chain([&SKILL_MD, &GUIDE_MD]);
     let mut seen = std::collections::BTreeSet::new();
     all.filter(|f| seen.insert(f.sha256)).collect()
 }
