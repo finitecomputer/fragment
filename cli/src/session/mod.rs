@@ -19,7 +19,7 @@ mod chats;
 mod hermes;
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Context, Result};
 use clap::Subcommand;
@@ -118,7 +118,8 @@ pub struct Spool {
 
 impl Spool {
     fn new(kinds: BTreeSet<Kind>) -> Result<Spool> {
-        let dir = std::env::temp_dir().join(format!("fragment-session-import-{}-{:016x}", std::process::id(), rand::random::<u64>()));
+        clear_stale_spools(&std::env::temp_dir());
+        let dir = std::env::temp_dir().join(format!("{SPOOL_PREFIX}{}-{:016x}", std::process::id(), rand::random::<u64>()));
         std::fs::create_dir_all(&dir).with_context(|| format!("making {}", dir.display()))?;
         Ok(Spool { dir, entries: BTreeMap::new(), bytes: 0, kinds, refused: Vec::new() })
     }
@@ -159,6 +160,25 @@ impl Spool {
 impl Drop for Spool {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+const SPOOL_PREFIX: &str = "fragment-session-import-";
+/// How long a spool is left before another import clears it: one an
+/// import stopped short of dropping (killed, or interrupted). No import
+/// runs this long.
+const SPOOL_STALE: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+
+/// Clears the spools under `tmp` imports left past `SPOOL_STALE`, as well
+/// as it can: a spool it cannot clear is left for the next.
+fn clear_stale_spools(tmp: &Path) {
+    let Ok(dir) = std::fs::read_dir(tmp) else { return };
+    for e in dir.flatten() {
+        let stale = e.file_name().to_str().is_some_and(|n| n.starts_with(SPOOL_PREFIX))
+            && e.metadata().is_ok_and(|m| m.is_dir() && m.modified().is_ok_and(|t| t.elapsed().is_ok_and(|age| age > SPOOL_STALE)));
+        if stale {
+            let _ = std::fs::remove_dir_all(e.path());
+        }
     }
 }
 
@@ -284,33 +304,33 @@ fn held(storage: &CodeStorage, blobs: &Blobs) -> Result<Held> {
 fn found(c: &Client, name: &str, storage: &CodeStorage, h: &Held, written: &BTreeMap<String, Entry>) -> Result<Vec<Entry>> {
     let rev = h.head.as_deref().unwrap_or(MAIN);
     let mut out: Vec<Entry> = written.values().filter(|e| h.stored.contains_key(&e.key)).cloned().collect();
-    let mut unread = Vec::new();
+    // each file its index entry may not describe, and the entry a blob's
+    // pointer must name to describe it
+    let mut unread: Vec<(&String, Option<&Entry>)> = Vec::new();
     for (key, size) in &h.stored {
         if written.contains_key(key) {
             continue;
         }
-        let described = match h.indexed.get(key) {
-            None => false,
-            Some(e) if *size == e.bytes => true,
-            // a blob's pointer: does it name the entry's bytes?
-            Some(e) if *size as usize <= blob::POINTER_MAX_BYTES && e.bytes as usize >= blob::BLOB_MIN_BYTES => {
-                let pointer = storage.read_file(&session::session_path(key), rev)?;
-                blob::parse(&pointer).is_some_and(|p| p.sha256 == e.sha256 && p.size == e.bytes)
-            }
-            Some(_) => false,
-        };
-        if !described {
-            unread.push(key.clone());
+        match h.indexed.get(key) {
+            Some(e) if *size == e.bytes => {}
+            Some(e) if *size as usize <= blob::POINTER_MAX_BYTES && e.bytes as usize >= blob::BLOB_MIN_BYTES => unread.push((key, Some(e))),
+            _ => unread.push((key, None)),
         }
     }
-    let read = |keys: &[String]| -> Result<Vec<Entry>> {
+    let read = |keys: &[(&String, Option<&Entry>)]| -> Result<Vec<Entry>> {
         let blobs = Blobs::new(c, name);
         let mut entries = Vec::new();
-        for key in keys {
+        for (key, pointed) in keys {
             let path = session::session_path(key);
-            let bytes = blobs.resolve(storage.read_file(&path, rev)?)?;
+            let stored = storage.read_file(&path, rev)?;
+            if pointed.is_some_and(|e| blob::parse(&stored).is_some_and(|p| p.sha256 == e.sha256 && p.size == e.bytes)) {
+                continue;
+            }
+            let bytes = blobs.resolve(stored)?;
             match serde_json::from_slice::<Session>(&bytes).map_err(|e| e.to_string()).and_then(|s| s.normalized().filed().map_err(|e| e.to_string())) {
-                Ok((e, _)) if e.key == *key => entries.push(e),
+                // described as stored, which another CLI's may have written
+                // otherwise, so that it is found described next time
+                Ok((e, _)) if e.key == **key => entries.push(Entry { sha256: blob::sha256_hex(&bytes), bytes: bytes.len() as u64, ..e }),
                 Ok((e, _)) => eprintln!("warning: {path} holds conversation {}, filed under another key: left out of the indexes", said_id(&e.key)),
                 Err(e) => eprintln!("warning: {path} is no conversation ({e}): left out of the indexes"),
             }
@@ -580,6 +600,45 @@ mod tests {
         let w = write(&c, NAME, &spooled(vec![session("b", Kind::Chat, "2026-10-03T09:00:00Z", &["b"])])).unwrap();
         assert_eq!(w.added, 1);
         assert_eq!(keys(&mock, Kind::Chat), ["hermes-b", "hermes-a"]);
+    }
+
+    /// Goal: a conversation's file is indexed as it is stored, however the
+    /// CLI that wrote it laid it out, so the next import reads it no more.
+    /// Method: an archive holding a file laid out another way (compact) its
+    /// indexes lack; an import; then another, counting the files read.
+    #[test]
+    fn a_file_is_indexed_as_it_is_stored() {
+        let (mock, c) = archive();
+        let left = || session("o", Kind::Chat, "2026-10-01T09:00:00Z", &["left"]);
+        let compact = serde_json::to_vec(&left().normalized()).unwrap();
+        assert_ne!(compact, file_of(left()));
+        let path = session::session_path("hermes-o");
+        mock.external_commit(NAME, "main", &[(path.as_str(), Some(&compact))], "another CLI's import");
+        write(&c, NAME, &spooled(vec![])).unwrap();
+        assert_eq!(index(&mock, Kind::Chat), [("hermes-o".to_string(), sha(&compact))]);
+        let reads = mock.requests(NAME, "GET file");
+        let again = write(&c, NAME, &spooled(vec![left()])).unwrap();
+        assert_eq!((again.added, again.updated, again.unchanged), (0, 0, 1));
+        assert_eq!(mock.requests(NAME, "GET file") - reads, 1, "the chats' index, and no conversation");
+    }
+
+    /// Goal: an import clears the spools imports left behind (killed, or
+    /// interrupted) a day on, and no other. Method: a stale spool, a fresh
+    /// one, and a stale folder not a spool.
+    #[test]
+    fn an_import_clears_the_spools_left_behind() {
+        let tmp = tempdir();
+        let old = std::time::SystemTime::now() - SPOOL_STALE - std::time::Duration::from_secs(60);
+        let (stale, fresh, other) = (tmp.join(format!("{SPOOL_PREFIX}1-a")), tmp.join(format!("{SPOOL_PREFIX}2-b")), tmp.join("other"));
+        for dir in [&stale, &fresh, &other] {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join("hermes-a.json"), "{}").unwrap();
+        }
+        for dir in [&stale, &other] {
+            std::fs::File::open(dir).unwrap().set_modified(old).unwrap();
+        }
+        clear_stale_spools(&tmp);
+        assert!(!stale.exists() && fresh.exists() && other.exists());
     }
 
     /// Goal: a newer copy of a conversation replaces the one held, and an
