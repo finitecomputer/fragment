@@ -405,9 +405,9 @@ pub enum Input {
     /// The agent is no longer in the fragment (403 or 404 there).
     Gone { agent: String, fragment: String },
     /// The agents whose SimpleX link is bound now (simplex/run.rs), each
-    /// with its SimpleX chat once found: their relayed records alone are
-    /// honored, as their owner's messages, and what each says in that chat
-    /// goes to its owner's phone.
+    /// with its SimpleX chat once found: what each says in that chat goes to
+    /// its owner's phone (`mirror`). Their relayed records are honored with
+    /// or without it.
     Relaying(BTreeMap<String, Option<String>>),
 }
 
@@ -505,8 +505,8 @@ pub struct Engine {
     /// one entry per followed chat of each agent.
     published: BTreeSet<(String, String)>,
     /// The agents whose SimpleX link is bound (`Input::Relaying`), each with
-    /// its SimpleX chat once found: only their own relayed records are their
-    /// owner's messages, and that chat is their owner's phone (`mirror`).
+    /// its SimpleX chat once found: that chat is their owner's phone
+    /// (`mirror`).
     /// Never written to `/data`: the bridge reads it from each link's file
     /// as it starts.
     relaying: BTreeMap<String, Option<String>>,
@@ -764,18 +764,20 @@ impl Engine {
             return;
         }
         match record.channel.as_str() {
+            // its owner's words through one of its doors (docs/chat-records.md,
+            // "A relayed message") are their message, as theirs, whichever
+            // door and whoever carried them: the platform takes such a record
+            // only through a door its owner opened, so no door need be linked
+            // on this computer. Another agent of the chat carrying them is a
+            // hand-off from that agent at most, never its owner.
+            records::CHAT if self.relayed_for(&agent, fragment, &record) => {
+                let via = records::relayed(&record.body).map(|r| r.via).unwrap_or_default();
+                crate::ev!("relayed", { "agent": agent.fragment, "fragment": fragment, "seq": record.seq, "via": via });
+                let as_owner = Record { principal: agent.owner.clone(), ..record };
+                self.said(&agent, fragment, &as_owner);
+            }
             // the agent's own words are not for it
             records::CHAT if record.principal != agent.identity => self.said(&agent, fragment, &record),
-            // but its owner's words it relays are, when it is linked
-            // (docs/chat-records.md, "A relayed message"): its owner's
-            // message, as theirs
-            records::CHAT if self.relaying.contains_key(&agent.fragment) => {
-                if let Some(r) = records::relayed(&record.body).filter(|r| r.for_ == agent.owner && r.agent == agent.fragment) {
-                    crate::ev!("relayed", { "agent": agent.fragment, "fragment": fragment, "seq": record.seq, "via": r.via });
-                    let as_owner = Record { principal: agent.owner.clone(), ..record };
-                    self.said(&agent, fragment, &as_owner);
-                }
-            }
             records::TASKS if fragment == agent.fragment => {
                 // Only the agent's own fragment (its cron, the platform's
                 // `joined`: by the fragment's key, whose npub is the agent's
@@ -853,6 +855,14 @@ impl Engine {
     /// their answers are theirs, read with no journal (driver.rs `feed`).
     pub fn held(&self) -> BTreeSet<(String, String, String)> {
         self.state.turns.values().filter(|t| t.active()).flat_map(|t| t.prompts.iter().filter(|p| !p.closed).map(|p| (t.agent.clone(), t.fragment.clone(), p.id.clone()))).collect()
+    }
+
+    /// Whether `record` relays `agent`'s owner through `agent`'s own door,
+    /// carried by the agent itself or by none of the chat's other agents (a
+    /// hosted connector publishes as its own fragment's key).
+    fn relayed_for(&self, agent: &Agent, fragment: &str, record: &Record) -> bool {
+        let carrier = record.principal == agent.identity || !self.views.get(fragment).is_some_and(|v| v.agents.contains(&record.principal));
+        carrier && records::relayed(&record.body).is_some_and(|r| r.for_ == agent.owner && r.agent == agent.fragment)
     }
 
     fn said(&mut self, agent: &Agent, fragment: &str, record: &Record) {
