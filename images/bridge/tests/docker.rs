@@ -3893,7 +3893,9 @@ async fn simplex_on_the_hermes_image() {
 /// preview of the call, never its output. Method: a command
 /// each, in a computer whose Hermes gives a call 4 s
 /// (`HERMES_CONCURRENT_TOOL_TIMEOUT_S`, its own setting); a call carrying
-/// Hermes' context-compression marker is one it refuses to run.
+/// Hermes' context-compression marker is one it refuses to run. And the
+/// image's plugin keeps a turn's steps however many runs start after it,
+/// while it calls tools.
 #[tokio::test]
 #[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
 async fn a_step_says_how_its_call_ended() {
@@ -3903,6 +3905,10 @@ async fn a_step_says_how_its_call_ended() {
     let chat = fake.chat("talk", &["juniper"]);
     let c = Container::run(&hermes_tag(), fake.addr.port(), model.addr.port(), &[("HERMES_CONCURRENT_TOOL_TIMEOUT_S", "4")]);
     within(&fake, &chat, &c, 120_000, "Hermes' bridge to follow its chat", |w| w.live_sockets() >= 2).await;
+    // the plugin's memory of the person's turns keeps one still calling
+    // tools past many newer runs (tests/activity_turns.py)
+    let (code, said) = c.exec_code(&["/command/s6-setuidgid", "hermes", "env", "HOME=/data/hermes", "HERMES_HOME=/data/hermes", "/opt/hermes/.venv/bin/python", "-c", include_str!("activity_turns.py")]);
+    assert_eq!(code, 0, "a busy turn keeps its steps: {said}");
     let ended = |w: &support::fake::World, t: &str| w.bodies(&chat, "work", "turn.end").iter().any(|e| e["turn"] == t);
     let steps = |t: &str| fake.with(|w| w.bodies(&chat, "work", "turn.step").into_iter().filter(|s| s["turn"] == t).collect::<Vec<_>>());
     let check = |preview: &str, got: &[serde_json::Value], status: &str, excerpt: &str| {

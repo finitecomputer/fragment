@@ -38,10 +38,16 @@ pub const TEMPLATE: &str = "sessions";
 pub const LABEL: &str = "sessions";
 pub const TITLE: &str = "Session Archive";
 
-/// Conversations one archive holds: an import that would pass it is
-/// refused whole, before it writes anything. Bounds each index too (at
-/// about 500 bytes an entry, 10 MB if every one is a scheduled run).
-pub const SESSIONS_MAX: usize = 20_000;
+/// Conversations one archive holds, and the bytes of their files: an import
+/// that would pass either is refused whole, before it writes anything. Both
+/// sit inside what a person's export takes of one fragment (its files, and
+/// its bytes: `export::limits`), with room for the archive's other files,
+/// so an archive never fails its person's export. The count bounds each
+/// index too (at about 500 bytes an entry, 9 MB if every one is a run).
+pub const SESSIONS_MAX: usize = 18_000;
+pub const ARCHIVE_MAX_BYTES: u64 = 1024 * 1024 * 1024;
+const _: () = assert!(SESSIONS_MAX + 2_000 <= crate::export::limits::FILES_MAX, "an archive's files fit its person's export");
+const _: () = assert!(2 * ARCHIVE_MAX_BYTES <= crate::export::limits::FRAGMENT_MAX_BYTES, "an archive's bytes fit its person's export");
 /// One conversation's file: one larger is refused, and the rest imported.
 pub const SESSION_MAX_BYTES: usize = 8 * 1024 * 1024;
 /// A tool's output, an assistant's reasoning, and a tool call's arguments
@@ -89,9 +95,12 @@ impl Kind {
     }
 }
 
-/// A tool call an assistant's message made: its tool, and what it passed.
+/// A tool call an assistant's message made: its tool, what it passed, and
+/// its id where its origin kept one (a tool's result names it: `call`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolCall {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     pub name: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub arguments: String,
@@ -107,9 +116,11 @@ pub struct Message {
     pub at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
-    /// A tool's output: the tool it came from.
+    /// A tool's output: the tool it came from, and the call it answers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_calls: Vec<ToolCall>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -135,7 +146,14 @@ pub struct Session {
     pub id: String,
     /// The system it came from (`hermes`).
     pub origin: String,
+    /// Which read made it (`Entry::newer`): the old Finite's export 10,
+    /// Hermes' own database 20; a reader fixed later takes the next number.
+    #[serde(default)]
+    pub reader: u32,
     pub kind: Kind,
+    /// The agent it was with, as its origin named it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
     pub title: String,
     /// Where it was said, as its origin named it (`telegram`, `cli`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -226,14 +244,16 @@ impl Session {
             m.role = bounded(&m.role);
             m.text = m.text.take().map(|t| text_of(&t)).filter(|t| !t.is_empty()).map(|t| if m.role == "tool" { clip(&t, TOOL_TEXT_MAX_CHARS) } else { t });
             m.tool = m.tool.take().map(|t| bounded(&t)).filter(|t| !t.is_empty());
+            m.call = m.call.take().map(|t| bounded(&t)).filter(|t| !t.is_empty());
             m.reasoning = m.reasoning.take().filter(|r| !r.is_empty()).map(|r| clip(&r, REASONING_MAX_CHARS));
             for call in &mut m.tool_calls {
+                call.id = call.id.take().map(|t| bounded(&t)).filter(|t| !t.is_empty());
                 call.name = bounded(&call.name);
                 call.arguments = clip(&call.arguments, ARGUMENTS_MAX_CHARS);
             }
             m.at = m.at.take().and_then(|at| normal_iso(&at));
         }
-        for field in [&mut self.source, &mut self.with, &mut self.model] {
+        for field in [&mut self.source, &mut self.with, &mut self.model, &mut self.agent] {
             *field = field.take().map(|v| bounded(&v)).filter(|v| !v.is_empty());
         }
         self.started_at = self.started_at.take().and_then(|at| normal_iso(&at));
@@ -277,6 +297,7 @@ impl Session {
             key,
             id: self.id.clone(),
             origin: self.origin.clone(),
+            reader: self.reader,
             kind: self.kind,
             title: self.title.clone(),
             source: self.source.clone(),
@@ -298,6 +319,9 @@ pub struct Entry {
     pub key: String,
     pub id: String,
     pub origin: String,
+    /// Which read made it (`Session::reader`).
+    #[serde(default)]
+    pub reader: u32,
     pub kind: Kind,
     pub title: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -325,11 +349,13 @@ impl Entry {
         self.ended_at.as_deref().or(self.started_at.as_deref())
     }
 
-    /// Whether this copy of a conversation should replace `held`: it runs
-    /// later, or as long and holds more said. An older or smaller copy
-    /// (an earlier export of it) never replaces a newer one.
+    /// Whether this copy of a conversation should replace `held`: it was
+    /// last said later, or as late by a better read of it (a reader that
+    /// shows it as its origin did, or one fixed since: `reader`). An older
+    /// copy (an earlier export of it) never replaces a newer one, nor an
+    /// equal read one as late.
     pub fn newer(&self, held: &Entry) -> bool {
-        (self.when(), self.messages) > (held.when(), held.messages)
+        (self.when(), self.reader) > (held.when(), held.reader)
     }
 }
 
@@ -357,11 +383,12 @@ impl Index {
     }
 }
 
-/// An import merged into what an archive holds.
-#[derive(Debug, Default, PartialEq, Eq)]
-pub struct Merge {
+/// An import merged into what an archive holds; `P` is where each
+/// conversation's file is (its bytes, or a file they were spooled to).
+#[derive(Debug, PartialEq, Eq)]
+pub struct Merge<P> {
     /// The conversations to write, by key, with their files.
-    pub writes: BTreeMap<String, Vec<u8>>,
+    pub writes: BTreeMap<String, P>,
     /// Every entry after the import: what the indexes list.
     pub entries: BTreeMap<String, Entry>,
     /// The kinds whose index changes.
@@ -372,24 +399,51 @@ pub struct Merge {
     pub unchanged: usize,
 }
 
-/// Too many conversations: what the import would hold, and the most.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TooMany(pub usize);
-
-impl std::fmt::Display for TooMany {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "the archive would hold {} conversations, past the {SESSIONS_MAX} it holds", self.0)
+impl<P> Default for Merge<P> {
+    fn default() -> Self {
+        Merge { writes: BTreeMap::new(), entries: BTreeMap::new(), indexes: Vec::new(), added: 0, updated: 0, unchanged: 0 }
     }
+}
+
+/// An import past an archive's limits: the conversations, or the bytes of
+/// their files, it would hold.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TooMuch {
+    Conversations(usize),
+    Bytes(u64),
+}
+
+impl std::fmt::Display for TooMuch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TooMuch::Conversations(n) => write!(f, "the archive would hold {n} conversations, past the {SESSIONS_MAX} it holds (`--kind chat` imports only the chats)"),
+            TooMuch::Bytes(n) => write!(f, "the archive would hold {} MiB of conversations, past the {} MiB it holds (`--kind chat` imports only the chats)", n / (1024 * 1024), ARCHIVE_MAX_BYTES / (1024 * 1024)),
+        }
+    }
+}
+
+/// Whether `entries` (an archive's, or an import's alone) are within an
+/// archive's limits.
+pub fn within(count: usize, bytes: u64) -> Result<(), TooMuch> {
+    if count > SESSIONS_MAX {
+        return Err(TooMuch::Conversations(count));
+    }
+    if bytes > ARCHIVE_MAX_BYTES {
+        return Err(TooMuch::Bytes(bytes));
+    }
+    Ok(())
 }
 
 /// An import into an archive: `indexed` is what its indexes list,
 /// `stored` the keys `sessions/` holds files for, `found` the entry of
-/// each of those the indexes lack (read from its file), and `incoming` the
-/// import's conversations. Every write is a conversation new or newer; the
-/// indexes change when a conversation does, or when they disagree with
-/// `sessions/` (an entry without its file is dropped, a file without its
-/// entry added from `found`).
-pub fn merge(indexed: &BTreeMap<String, Entry>, stored: &std::collections::BTreeSet<String>, found: Vec<Entry>, incoming: Vec<(Entry, Vec<u8>)>) -> Result<Merge, TooMany> {
+/// each of those whose file the indexes do not describe (they lack it, or
+/// name another copy than the one there: read from its file), and
+/// `incoming` the import's conversations. Every write is a conversation new
+/// or newer; the indexes change when a conversation does, or when they
+/// disagree with `sessions/` (an entry without its file is dropped, a file
+/// is listed by `found`'s entry). One that grows the archive past its
+/// limits is refused whole.
+pub fn merge<P>(indexed: &BTreeMap<String, Entry>, stored: &std::collections::BTreeSet<String>, found: Vec<Entry>, incoming: Vec<(Entry, P)>) -> Result<Merge<P>, TooMuch> {
     let mut m = Merge::default();
     let mut changed: std::collections::BTreeSet<Kind> = std::collections::BTreeSet::new();
     for (key, entry) in indexed {
@@ -400,12 +454,14 @@ pub fn merge(indexed: &BTreeMap<String, Entry>, stored: &std::collections::BTree
         }
     }
     for entry in found {
-        if stored.contains(&entry.key) && !m.entries.contains_key(&entry.key) {
+        if stored.contains(&entry.key) && m.entries.get(&entry.key) != Some(&entry) {
             changed.insert(entry.kind);
-            m.entries.insert(entry.key.clone(), entry);
+            if let Some(stale) = m.entries.insert(entry.key.clone(), entry) {
+                changed.insert(stale.kind);
+            }
         }
     }
-    for (entry, bytes) in incoming {
+    for (entry, file) in incoming {
         match m.entries.get(&entry.key) {
             Some(held) if held.sha256 == entry.sha256 || !entry.newer(held) => m.unchanged += 1,
             held => {
@@ -418,13 +474,13 @@ pub fn merge(indexed: &BTreeMap<String, Entry>, stored: &std::collections::BTree
                     changed.insert(h.kind);
                 }
                 changed.insert(entry.kind);
-                m.writes.insert(entry.key.clone(), bytes);
+                m.writes.insert(entry.key.clone(), file);
                 m.entries.insert(entry.key.clone(), entry);
             }
         }
     }
-    if m.entries.len() > SESSIONS_MAX && m.added > 0 {
-        return Err(TooMany(m.entries.len()));
+    if m.added > 0 || m.updated > 0 {
+        within(m.entries.len(), m.entries.values().map(|e| e.bytes).sum())?;
     }
     m.indexes = changed.into_iter().collect();
     Ok(m)
@@ -472,8 +528,9 @@ pub fn clip(text: &str, max: usize) -> String {
         return text.to_string();
     }
     if let Some((head, tail)) = text.rsplit_once("… [") {
-        let marked = tail.ends_with(" more characters not kept]") || tail.ends_with(" more characters not exported]");
-        if marked && tail.bytes().take_while(u8::is_ascii_digit).count() > 0 && head.chars().count() <= max {
+        let count = tail.strip_suffix(" more characters not kept]").or_else(|| tail.strip_suffix(" more characters not exported]"));
+        let marked = count.is_some_and(|c| (1..=20).contains(&c.len()) && c.bytes().all(|b| b.is_ascii_digit()));
+        if marked && head.chars().count() <= max {
             return text.to_string();
         }
     }
@@ -571,7 +628,9 @@ mod tests {
             format: String::new(),
             id: id.into(),
             origin: "hermes".into(),
+            reader: 10,
             kind: Kind::Chat,
+            agent: None,
             title: String::new(),
             source: Some("telegram".into()),
             with: Some("Ann".into()),
@@ -596,7 +655,7 @@ mod tests {
         let long = "x".repeat(5_000);
         let mut s = chat("20261001_090000_ab12cd", vec![
             said("user", "2026-10-01T09:00:00.5+00:00", "  \n Plan the garden\nwith beans"),
-            Message { role: "assistant".into(), at: Some("2026-10-01T09:00:01Z".into()), reasoning: Some(long.clone()), tool_calls: vec![ToolCall { name: "search".into(), arguments: long.clone() }], ..Default::default() },
+            Message { role: "assistant".into(), at: Some("2026-10-01T09:00:01Z".into()), reasoning: Some(long.clone()), tool_calls: vec![ToolCall { id: Some("c1".into()), name: "search".into(), arguments: long.clone() }], ..Default::default() },
             Message { role: "tool".into(), tool: Some("search".into()), text: Some(long.clone()), ..Default::default() },
             said("assistant", "2026-10-01T09:00:02Z", &long),
             said("user", "2026-10-01T09:01:00Z", "\u{0}json:[{\"type\":\"text\",\"text\":\"look\"},{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:…\"}}]"),
@@ -631,6 +690,10 @@ mod tests {
         let fake = format!("{}… [7 more characters not kept]", "c".repeat(11));
         assert!(clip(&fake, 10).starts_with(&"c".repeat(10)) && clip(&fake, 10).ends_with("more characters not kept]") && clip(&fake, 10) != fake);
         assert_eq!(clip("short", 10), "short");
+        // a marker after anything but its count is no cut: a long output
+        // ending in one is cut all the same
+        let crafted = format!("{}… [7{} more characters not kept]", "d".repeat(5), "x".repeat(10_000));
+        assert!(clip(&crafted, 10).chars().count() < 60, "{}", clip(&crafted, 10).chars().count());
     }
 
     /// Goal: a conversation is keyed by its origin and id, one key each.
@@ -672,7 +735,9 @@ mod tests {
     /// Goal: an import adds each conversation once, however often it runs
     /// (replay), and only ever replaces one with a newer copy of it. Method:
     /// an archive holding one; an import of it again (nothing), of an older
-    /// copy (nothing), of a newer copy (updated), and of a new one (added).
+    /// copy (nothing), of a newer copy (updated), and of a new one (added);
+    /// then copies as late as the one held: another of the same read
+    /// (nothing, whatever it holds), and a better read (updated).
     #[test]
     fn an_import_adds_nothing_twice_and_keeps_the_newest() {
         let one = vec![said("user", "2026-10-01T09:00:00Z", "hello")];
@@ -695,6 +760,15 @@ mod tests {
         let index = Index::of(Kind::Chat, &m.entries);
         assert_eq!(index.sessions.iter().map(|e| e.key.as_str()).collect::<Vec<_>>(), ["hermes-b", "hermes-a"], "newest first");
         assert!(Index::of(Kind::Cron, &m.entries).sessions.is_empty());
+
+        // as late: the export's copy that kept a duplicate never replaces a
+        // copy as late, and a better read of it (or a fixed one) does
+        let (late, _) = filed(chat("c", vec![said("user", "2026-10-03T09:00:00Z", "x")]));
+        let (indexed3, stored3) = held(&[&late]);
+        let dup = filed(chat("c", vec![said("user", "2026-10-03T09:00:00Z", "x"), said("user", "2026-10-03T09:00:00Z", "x")]));
+        assert_eq!(merge(&indexed3, &stored3, vec![], vec![dup]).map(|m| m.unchanged), Ok(1));
+        let better = filed(Session { reader: 20, ..chat("c", vec![said("user", "2026-10-03T09:00:00Z", "x!")]) });
+        assert_eq!(merge(&indexed3, &stored3, vec![], vec![better]).map(|m| m.updated), Ok(1));
     }
 
     /// Goal: after a crash (restart), the next import puts the indexes
@@ -708,23 +782,38 @@ mod tests {
         let (orphan, _) = filed(Session { kind: Kind::Cron, ..chat("orphan", vec![said("user", "2026-10-02T09:00:00Z", "o")]) });
         let (indexed, _) = held(&[&a, &gone]);
         let stored: BTreeSet<String> = [a.key.clone(), orphan.key.clone()].into();
-        let m = merge(&indexed, &stored, vec![orphan.clone()], vec![]).unwrap();
+        let m = merge::<Vec<u8>>(&indexed, &stored, vec![orphan.clone()], vec![]).unwrap();
         assert!(m.writes.is_empty());
         assert_eq!(m.entries.keys().collect::<Vec<_>>(), [&a.key, &orphan.key]);
         assert_eq!(m.indexes, vec![Kind::Chat, Kind::Cron], "both indexes are written again");
+
+        // a file whose index entry names another copy (an update whose index
+        // commit never landed) is listed by its own entry
+        let (newer_a, _) = filed(chat("a", vec![said("user", "2026-10-05T09:00:00Z", "a, later")]));
+        let m = merge::<Vec<u8>>(&indexed, &stored, vec![orphan, newer_a.clone()], vec![]).unwrap();
+        assert_eq!(m.entries.get(&a.key), Some(&newer_a));
+        assert_eq!(m.indexes, vec![Kind::Chat, Kind::Cron]);
     }
 
-    /// Goal: an archive past its limit is refused before anything is
-    /// written, and one already full still takes newer copies of what it holds.
+    /// Goal: an archive past its limits (its conversations, or their
+    /// bytes) is refused before anything is written, and one already full
+    /// still takes newer copies of what it holds.
     #[test]
-    fn an_import_past_the_limit_is_refused_whole() {
+    fn an_import_past_the_limits_is_refused_whole() {
         let base = filed(chat("x", vec![said("user", "2026-10-01T09:00:00Z", "x")])).0;
         let indexed: BTreeMap<String, Entry> = (0..SESSIONS_MAX).map(|i| (format!("hermes-{i}"), Entry { key: format!("hermes-{i}"), ..base.clone() })).collect();
         let stored: BTreeSet<String> = indexed.keys().cloned().collect();
         let more = merge(&indexed, &stored, vec![], vec![filed(chat("new", vec![said("user", "2026-10-01T09:00:00Z", "n")]))]);
-        assert_eq!(more, Err(TooMany(SESSIONS_MAX + 1)));
+        assert_eq!(more.err(), Some(TooMuch::Conversations(SESSIONS_MAX + 1)));
         let newer = filed(chat("0", vec![said("user", "2026-10-05T09:00:00Z", "n")]));
         assert_eq!(merge(&indexed, &stored, vec![], vec![newer]).map(|m| m.updated), Ok(1));
+
+        let heavy = Entry { bytes: ARCHIVE_MAX_BYTES / 2, ..base.clone() };
+        let (indexed, stored) = held(&[&heavy]);
+        let (light, bytes) = filed(chat("light", vec![said("user", "2026-10-01T09:00:00Z", "l")]));
+        let past = merge(&indexed, &stored, vec![], vec![(Entry { bytes: ARCHIVE_MAX_BYTES / 2 + 1, ..light }, bytes)]);
+        assert_eq!(past.err(), Some(TooMuch::Bytes(ARCHIVE_MAX_BYTES + 1)));
+        assert_eq!(within(SESSIONS_MAX, ARCHIVE_MAX_BYTES), Ok(()));
     }
 
     /// Goal: times read as the export wrote them and Hermes kept them, and

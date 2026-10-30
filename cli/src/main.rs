@@ -536,6 +536,57 @@ enum OperatorCmd {
         #[arg(long)]
         key_file: Option<PathBuf>,
     },
+    /// Credit an org's own ledger, which pays for what it owns (orgs pay
+    /// out of band: a Stripe link, an invoice): its id (`org-…`, as `orgs`
+    /// prints it), dollars, why, and --id, the invoice's or payment's
+    /// reference, so a retry credits it once. Prints its balance then
+    Credit {
+        org: String,
+        usd: f64,
+        #[arg(long)]
+        why: String,
+        #[arg(long)]
+        id: String,
+        #[arg(long)]
+        key_file: Option<PathBuf>,
+    },
+    /// An org's monthly budget: what its fragments may spend before their
+    /// AI steps stop (zero until set). Once by --id
+    Budget {
+        org: String,
+        usd: f64,
+        #[arg(long)]
+        id: Option<String>,
+        #[arg(long)]
+        key_file: Option<PathBuf>,
+    },
+    /// Name the person an org's credit is invoiced to (an email, or an
+    /// npub), in its governance log. Once by --id
+    Payer {
+        org: String,
+        person: String,
+        #[arg(long)]
+        id: Option<String>,
+        #[arg(long)]
+        key_file: Option<PathBuf>,
+    },
+}
+
+/// An org's id as an operator names it: `org-…`, or its ledger's name
+/// (`org:org-…`).
+fn org_id(named: &str) -> Result<String> {
+    let id = named.strip_prefix("org:").unwrap_or(named);
+    match fragment_core::org::valid_org_id(id) {
+        true => Ok(id.to_string()),
+        false => Err(usage(format!("{named:?} is no org's id: org-<16 hex>, as `fragment operator orgs` prints it"))),
+    }
+}
+
+/// An org's ledger, as an operator reads it, in one line.
+fn org_ledger_line(c: &api::Client, org: &str) -> Result<String> {
+    let v = admin_answer(c, c.get(&format!("/api/admin/orgs/{org}/ledger"))?)?;
+    let m = |k: &str| v[k].as_i64().unwrap_or(0);
+    Ok(format!("{org}: {} left, {} of its {} budget spent this month", dollars(m("balanceMicros")), dollars(m("spentMicros")), dollars(m("budgetMicros"))))
 }
 
 /// A seat's kind as the CLI takes it.
@@ -568,7 +619,7 @@ fn admin_answer(c: &api::Client, resp: api::Resp) -> Result<Value> {
 #[derive(Subcommand)]
 enum LedgerCmd {
     /// Grant someone credit (the deployment's operators): an email, an
-    /// identity (an npub), `me`, or an org's own (`org:<org id>`)
+    /// identity (an npub), or `me` (an org's: `fragment operator credit`)
     Grant {
         who: String,
         usd: f64,
@@ -1391,6 +1442,43 @@ fn run(cli: Cli) -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&v)?);
             return Ok(());
         }
+        Cmd::Operator { sub: OperatorCmd::Credit { org, usd, why, id, key_file } } => {
+            let c = operator_client(&cli.host, cli.verbose, key_file.as_deref())?;
+            let org = org_id(&org)?;
+            // who credits: the person who holds the key, or a key no one holds, by itself
+            let me = c.get("/api/identities/me")?;
+            let by = match me.ok() {
+                true => c.call_as::<IdentityView>(me)?.id,
+                false => c.key()?.npub(),
+            };
+            let body = json!({ "id": id, "micros": micros_of(usd)?, "by": by, "why": why });
+            admin_answer(&c, c.post_json(&format!("/api/ledger/org:{org}/grant"), &body)?)?;
+            let line = org_ledger_line(&c, &org)?;
+            json_exit(j, &json!({ "credited": body, "org": org }));
+            println!("credited {org} {} ({id})", dollars(micros_of(usd)?));
+            println!("{line}");
+            return Ok(());
+        }
+        Cmd::Operator { sub: OperatorCmd::Budget { org, usd, id, key_file } } => {
+            let c = operator_client(&cli.host, cli.verbose, key_file.as_deref())?;
+            let org = org_id(&org)?;
+            let id = id.unwrap_or_else(|| format!("cli-{:016x}", rand::random::<u64>()));
+            let micros = if usd == 0.0 { 0 } else { micros_of(usd)? };
+            admin_answer(&c, c.post_json(&format!("/api/ledger/org:{org}/budget"), &json!({ "id": id, "micros": micros }))?)?;
+            let line = org_ledger_line(&c, &org)?;
+            json_exit(j, &json!({ "org": org, "budgetMicros": micros }));
+            println!("{line}");
+            return Ok(());
+        }
+        Cmd::Operator { sub: OperatorCmd::Payer { org, person, id, key_file } } => {
+            let c = operator_client(&cli.host, cli.verbose, key_file.as_deref())?;
+            let org = org_id(&org)?;
+            let id = id.unwrap_or_else(|| format!("cli-{:016x}", rand::random::<u64>()));
+            let v = admin_answer(&c, c.post_json(&format!("/api/admin/orgs/{org}/payer"), &json!({ "id": id, "person": person }))?)?;
+            json_exit(j, &v);
+            println!("{org}'s credit is invoiced to {} ({})", v["email"].as_str().unwrap_or("?"), v["person"].as_str().unwrap_or("?"));
+            return Ok(());
+        }
         Cmd::Operator { sub: OperatorCmd::Log { before, key_file } } => {
             let c = operator_client(&cli.host, cli.verbose, key_file.as_deref())?;
             let path = match before {
@@ -1863,6 +1951,9 @@ fn run(cli: Cli) -> Result<()> {
                 }
             }
             Some(LedgerCmd::Grant { who, usd, why, id }) => {
+                if who.starts_with("org:") {
+                    return Err(usage("an org is credited by `fragment operator credit <org> <usd> --why W --id REF`, its invoice's or payment's reference"));
+                }
                 let me: IdentityView = c.call_as(c.get("/api/identities/me")?)?;
                 let id = id.unwrap_or_else(|| format!("cli-{:016x}", rand::random::<u64>()));
                 let body = json!({ "id": id, "micros": micros_of(usd)?, "by": me.id, "why": why });
@@ -2484,6 +2575,22 @@ mod tests {
         browser.kill().expect("killed");
         browser.wait().expect("reaped");
         assert!(open_link("/nonexistent/xdg-open", "https://x.test").is_err());
+    }
+
+    /// An org named as `orgs` prints it, or as its ledger is named; any
+    /// other name is a usage error, never a call. A credit with no
+    /// reference is refused.
+    #[test]
+    fn an_org_is_named_by_its_id() {
+        assert_eq!(org_id("org-0123456789abcdef").unwrap(), "org-0123456789abcdef");
+        assert_eq!(org_id("org:org-0123456789abcdef").unwrap(), "org-0123456789abcdef");
+        for bad in ["org-xyz", "org:", "npub1abc", "", "org:org-0123456789ABCDEF"] {
+            assert_eq!(code_of(org_id(bad)), Code::InvalidUsage, "{bad:?}");
+        }
+        // an org's credit names its reference, so a retry credits it once
+        let parses = |args: &[&str]| Cli::try_parse_from(args.iter().copied()).is_ok();
+        assert!(parses(&["fragment", "operator", "credit", "org-0123456789abcdef", "5", "--why", "an invoice", "--id", "inv-12"]));
+        assert!(!parses(&["fragment", "operator", "credit", "org-0123456789abcdef", "5", "--why", "an invoice"]));
     }
 
     fn code_of(r: Result<impl std::fmt::Debug>) -> Code {

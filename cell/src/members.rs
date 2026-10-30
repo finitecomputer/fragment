@@ -414,6 +414,13 @@ impl FragmentCell {
         Ok(face.and_then(|f| serde_json::from_value(f["kind"].clone()).ok()).unwrap_or_default())
     }
 
+    /// Whether its content files read from main first (`__file`, `__files`):
+    /// an agent's and a session archive's, whose writers write main and
+    /// never deploy.
+    pub(crate) fn main_first(&self) -> CellResult<bool> {
+        Ok(matches!(self.kind()?, FragmentKind::Agent | FragmentKind::Sessions))
+    }
+
     /// A chat's own agent: its lead, the first agent added, which answers
     /// when no one is named (docs/chat-records.md) and posts its turns and
     /// steps to `work`, which takes editors only. None for anything else.

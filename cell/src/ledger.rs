@@ -71,6 +71,8 @@ const TEST_ENTRIES_MAX: i64 = 500;
 /// Test fleets: the longest a slowed ledger waits before each answer
 /// (`TestHook::Slow`).
 const TEST_SLOW_MAX_MS: u64 = 30_000;
+/// The grants a test fails at once, at most (`fail-grants`).
+const TEST_FAIL_GRANTS_MAX: u32 = 10;
 /// The meta key of a capped ledger's paid calls (`TestHook::PaidCalls`).
 const PAID_CALLS_MAX: &str = "test_paid_calls_max";
 /// How long a gate waits on a ledger it has no fresh answer from: a few
@@ -99,6 +101,8 @@ pub struct LedgerCell {
     /// Test fleets: how long it waits before each answer but a lever's
     /// (`TestHook::Slow`; this activation's alone).
     slow_ms: Cell<u64>,
+    /// Test fleets: the next grants to fail before they are taken.
+    fail_grants: Cell<u32>,
     /// Its schema as it started (schema.rs): ready, or refused.
     schema: crate::schema::Schema,
 }
@@ -111,7 +115,7 @@ impl DurableObject for LedgerCell {
         let schema = crate::schema::Schema::start(&raw, sql.clone(), &fragment_core::migrate::LEDGER, &state.id().to_string());
         let wiped = schema.wiped(&sql);
         let cfg = Config::from_env(&env);
-        LedgerCell { state, raw, cfg, armed: Cell::new(None), wiped: Cell::new(wiped), slow_ms: Cell::new(0), schema }
+        LedgerCell { state, raw, cfg, armed: Cell::new(None), wiped: Cell::new(wiped), slow_ms: Cell::new(0), fail_grants: Cell::new(0), schema }
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {
@@ -230,7 +234,10 @@ pub struct OrgStatus {}
 /// (`slow {ms}`, at most `TEST_SLOW_MAX_MS`, 0 to end it: a slow or far
 /// ledger, which no paid call waits on past the gate's wait), or make the
 /// gate of its isolate (and, through the router's lever, the router's)
-/// forget what it heard (`forget-gate`).
+/// forget what it heard (`forget-gate`), or fail its next `times` grants
+/// before it takes them (`fail-grants {times}`, at most
+/// `TEST_FAIL_GRANTS_MAX`, 0 to end it: a ledger not reached once the
+/// router recorded an org's grant, which its retry completes).
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "kebab-case")]
 pub enum TestHook {
@@ -248,6 +255,9 @@ pub enum TestHook {
         ms: u64,
     },
     ForgetGate,
+    FailGrants {
+        times: u32,
+    },
 }
 
 impl Route for core::Meter {
@@ -703,6 +713,10 @@ impl LedgerCell {
             }
             <GrantCredit as Route>::PATH => {
                 let c: GrantCredit = decode(&body)?;
+                if self.fail_grants.get() > 0 {
+                    self.fail_grants.set(self.fail_grants.get() - 1);
+                    return Err(CellError::host("a test's failed grant (`fail-grants`): nothing taken").into());
+                }
                 reply(done(self.mutate(move |l, s, now| l.grant(s, &c, now)).await?))
             }
             <SetPlan as Route>::PATH => {
@@ -817,6 +831,10 @@ impl LedgerCell {
             TestHook::ForgetGate => {
                 forget_gate();
                 Ok(json!({ "forgot": true }))
+            }
+            TestHook::FailGrants { times } => {
+                self.fail_grants.set(times.min(TEST_FAIL_GRANTS_MAX));
+                Ok(json!({ "failGrants": self.fail_grants.get() }))
             }
             TestHook::PaidCalls { max } => {
                 let max = match max {

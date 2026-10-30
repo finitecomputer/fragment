@@ -14,7 +14,8 @@ without a delete condition is unfinished design, not debt.
 - **Shortcut:** two imports of the same conversation at once (the same
   person running it twice, on two machines) keep the last one's file,
   and an index entry may name the other's copy (its `sha256` and
-  `ended_at`) until the next import compares against it.
+  `ended_at`) when the two are the same size; one of another size is
+  listed by its file at the next import (`found`, cli/src/session).
 - **Risk:** a stale entry makes the next import of that conversation
   compare against the wrong copy: it may skip a newer copy once, or write
   the same one again. Nothing is lost: the file is one of the two copies.
@@ -22,6 +23,21 @@ without a delete condition is unfinished design, not debt.
 - **Delete when:** each batch's commit is made again from main as the
   indexes' is (read the entries of the conversations it writes, keep the
   newer), or the archive moves to an app whose mutation writes both.
+
+## A paid org pack is still credited, though none is sold
+
+- **Observed:** #736 review, 2026-10-30: orgs now pay out of band and an
+  operator credits them (decision 66), so no org pack is opened any more.
+  But preview sold one in Stripe's sandbox from #716 until #736 deployed.
+- **Shortcut:** `pack_paid` (`cell/src/billing.rs`) still grants a
+  Checkout whose `fragment_payer` names its org's ledger, once by its
+  Checkout, so one paid after that deploy (its return, or a webhook
+  Stripe sends again) is credited and not lost.
+- **Risk:** none beyond the read: nothing opens such a Checkout.
+- **First proof:** a webhook for such a Checkout that fails its grant
+  (Stripe's dashboard shows it retried).
+- **Delete when:** three days (Stripe's retries) have passed since #736
+  deployed to preview; a Checkout itself expires after 31 minutes.
 
 ## Hermes' explicit auxiliary vision overrides native image routing
 
