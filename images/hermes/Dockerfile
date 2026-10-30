@@ -120,8 +120,9 @@ RUN mkdir /novnc && tar -xzf /novnc.tgz -C /novnc --strip-components=1
 # The base (layer 1): nothing of ours that changes with our code is in it.
 FROM ${HERMES} AS hermes
 # Upstream's settings, as its image sets them: the flatten below restates
-# them, and checks it does.
-RUN mkdir -p /opt/fragment && env | sort > /opt/fragment/upstream.env
+# them, and checks it does. Builder trace context changes per step and is
+# not upstream runtime configuration; never capture it into the image.
+RUN mkdir -p /opt/fragment && env | grep -Ev '^(TRACEPARENT|TRACESTATE)=' | sort > /opt/fragment/upstream.env
 COPY --from=docker.io/cloudflare/sandbox:1.0.0 /usr/local/bin/sandbox-shim /usr/local/bin/sandbox-shim
 # cua-driver, the backend of Hermes' computer_use (screenshots of the agent's
 # desktop, XTest input): without it Hermes offers the agent no computer_use.
@@ -253,7 +254,8 @@ FROM hermes AS plugin
 COPY images/hermes/plugins/fragment-skill-fork /opt/hermes/plugins/fragment-skill-fork
 COPY images/hermes/plugins/fragment-deploy-wait /opt/hermes/plugins/fragment-deploy-wait
 COPY images/hermes/plugins/fragment-activity /opt/hermes/plugins/fragment-activity
-RUN /opt/hermes/.venv/bin/python -m compileall -q --invalidation-mode unchecked-hash /opt/hermes/plugins/fragment-skill-fork /opt/hermes/plugins/fragment-deploy-wait /opt/hermes/plugins/fragment-activity > /dev/null
+COPY images/hermes/plugins/fragment-native-images /opt/hermes/plugins/fragment-native-images
+RUN /opt/hermes/.venv/bin/python -m compileall -q --invalidation-mode unchecked-hash /opt/hermes/plugins/fragment-skill-fork /opt/hermes/plugins/fragment-deploy-wait /opt/hermes/plugins/fragment-activity /opt/hermes/plugins/fragment-native-images > /dev/null
 
 # Ours (layer 2): each of our files at its place in the image, root's, as
 # the base's directories they land in are.
@@ -297,6 +299,7 @@ COPY images/hermes/hooks /opt/fragment/hooks
 COPY --from=plugin /opt/hermes/plugins/fragment-skill-fork /opt/hermes/plugins/fragment-skill-fork
 COPY --from=plugin /opt/hermes/plugins/fragment-deploy-wait /opt/hermes/plugins/fragment-deploy-wait
 COPY --from=plugin /opt/hermes/plugins/fragment-activity /opt/hermes/plugins/fragment-activity
+COPY --from=plugin /opt/hermes/plugins/fragment-native-images /opt/hermes/plugins/fragment-native-images
 COPY images/hermes/botmode.py /opt/fragment/botmode.py
 COPY images/hermes/screen /opt/fragment/screen
 COPY --from=novnc /novnc/core /opt/fragment/screen/novnc/core
@@ -367,7 +370,7 @@ WORKDIR /opt/hermes
 # differ (its PATH's home, read as ours): the build fails on one the
 # flatten drops or sets otherwise, as a new base's would be.
 RUN env | sort > /tmp/env.now \
- && lost="$(grep -Ev '^(HOME|HOSTNAME|PWD|SHLVL|_|HERMES_HOME|HERMES_WRITE_SAFE_ROOT)=' /opt/fragment/upstream.env | sed '/^PATH=/s#/opt/data#/data/hermes#' | grep -vxFf /tmp/env.now || true)" \
+ && lost="$(grep -Ev '^(HOME|HOSTNAME|PWD|SHLVL|_|TRACEPARENT|TRACESTATE|HERMES_HOME|HERMES_WRITE_SAFE_ROOT)=' /opt/fragment/upstream.env | sed '/^PATH=/s#/opt/data#/data/hermes#' | grep -vxFf /tmp/env.now || true)" \
  && rm /tmp/env.now \
  && if [ -n "$lost" ]; then printf 'upstream sets what the flatten does not:\n%s\n' "$lost"; exit 1; fi
 # SimpleX's core (layer 1b), before ours: a change of ours pulls none of it.

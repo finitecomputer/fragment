@@ -318,7 +318,7 @@ impl Resp {
 
 /// What the CLI calls itself to a host: its name, version, and system.
 pub fn user_agent() -> String {
-    format!("fragment-cli/{} ({}; {})", env!("CARGO_PKG_VERSION"), std::env::consts::OS, std::env::consts::ARCH)
+    format!("fragment-cli/{} ({}; {})", crate::VERSION, std::env::consts::OS, std::env::consts::ARCH)
 }
 
 impl Client {

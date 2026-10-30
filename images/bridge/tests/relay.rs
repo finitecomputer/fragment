@@ -772,6 +772,33 @@ async fn provider() -> (SocketAddr, tokio::sync::watch::Sender<bool>) {
 /// A PNG's bytes, as a provider serves one.
 const CAT: &[u8] = b"\x89PNG\r\n\x1a\na generated cat";
 
+/// A background completion's upload or provider URL is a reply even after
+/// the parent turn ends. Its bytes land once, in the chat's own blob store.
+#[tokio::test]
+async fn media_after_the_parent_turn_is_delivered() {
+    let (fake, bridge, _hermes, _dir) = setup("relay-background-media", &["juniper"]).await;
+    let (cdn, _stop) = provider().await;
+    let chat = fake.chat("talk", &["juniper"]);
+    fake.until(WAIT, "the bridge to follow", |w| w.live_sockets() >= 2).await;
+    for (i, text, expected) in [(0, "send media outside turn".to_string(), b"a picture of a cat".to_vec()), (1, format!("image:http://{cdn}/cat.png outside turn"), CAT.to_vec())] {
+        let said = fake.say(&chat, &person("paul"), json!({ "text": text }));
+        let parent = records::turn_id("juniper--k3x9", &chat, "chat", said["seq"].as_u64().unwrap());
+        fake.until(WAIT, "the parent to end", |w| !work_of(w, &chat, &parent, "turn.end").is_empty()).await;
+        fake.until(WAIT, "the background file", |w| replies(w, &chat).iter().filter(|r| r.get("attachments").is_some()).count() == i + 1).await;
+        fake.with(|w| {
+            let files: Vec<_> = replies(w, &chat).into_iter().filter(|r| r.get("attachments").is_some()).collect();
+            let r = &files[i];
+            assert_ne!(r["turn"], parent);
+            assert_eq!(r["text"], "a cat");
+            let sha = r["attachments"][0]["sha256"].as_str().unwrap();
+            assert_eq!(w.fragments[&chat].blobs[sha].1.as_ref(), expected.as_slice());
+        });
+    }
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert_eq!(fake.with(|w| replies(w, &chat).iter().filter(|r| r.get("attachments").is_some()).count()), 2);
+    bridge.stop().await;
+}
+
 /// Goal (the finite-mono parity audit, 2026-10-09: an image Hermes made
 /// with FAL showed as a bare link): a file Hermes sends by a URL of its
 /// provider's is fetched and posted as the reply's attachment, the chat's

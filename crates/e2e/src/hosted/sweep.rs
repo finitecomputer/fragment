@@ -271,8 +271,17 @@ pub fn sweep_on(api: &Api, scope: &Scope, now_ms: i64) -> Result<Swept> {
             let email = person["email"].as_str().context("an e2e person has an email")?;
             swept.people += 1;
             let (session, _) = api.e2e_session(email)?;
-            let listed = shell(api, &session, "GET", "/api/fragments")?;
-            anyhow::ensure!(listed.status == 200, "{email}'s fragments: {listed}");
+            let listed = match shell(api, &session, "GET", "/api/fragments") {
+                Ok(r) if r.status == 200 => r,
+                Ok(r) => {
+                    left.push(format!("listing {email}'s fragments: {r}"));
+                    continue;
+                }
+                Err(e) => {
+                    left.push(format!("listing {email}'s fragments: {e:#}"));
+                    continue;
+                }
+            };
             let (mut chosen, mut spared) = (0usize, 0usize);
             for f in listed.body["fragments"].as_array().into_iter().flatten().filter(|f| f["role"] == "owner") {
                 let name = f["name"].as_str().unwrap_or("");

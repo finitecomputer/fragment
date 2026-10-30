@@ -149,6 +149,8 @@ impl Computer {
 /// slot by besides its name.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelIds {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub images: Option<Vec<String>>,
     pub cheap: String,
     pub medium: String,
     pub fallback: String,
@@ -180,6 +182,46 @@ pub struct TierRoute {
     pub private: bool,
     pub fallback: String,
     pub vision: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<Reasoning>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deep: Option<RouteMode>,
+}
+
+/// A tier's delegated-work route (decision 65). Absent on an older cell.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RouteMode {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<Reasoning>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback: Option<String>,
+}
+
+/// The efforts the platform accepts, shared by a tier's modes and an
+/// owner's model selection. Unknown efforts are rejected in the view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Reasoning {
+    Low,
+    High,
+    Max,
+}
+
+impl Reasoning {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::High => "high",
+            Self::Max => "max",
+        }
+    }
+
+    /// An owner's model setting, High when absent or invalid. Platform
+    /// tiers use their route's effort instead of this personal setting.
+    pub fn of(agent_json: Option<&[u8]>) -> Self {
+        agent_json.and_then(|b| serde_json::from_slice::<Value>(b).ok()).and_then(|v| serde_json::from_value(v["reasoning"].clone()).ok()).unwrap_or(Self::High)
+    }
 }
 
 /// A model's id, at most (`anthropic/claude-sonnet-5.5`; the platform's
@@ -494,8 +536,10 @@ impl Api {
             return Err(ApiError::Decode(format!("more credentials than a deployment offers (at most {})", crate::runtime::CREDENTIALS_MAX)));
         }
         if let Some(m) = &c.models {
-            let routed = m.routes.iter().flat_map(|r| [&r.cheap.fallback, &r.cheap.vision, &r.medium.fallback, &r.medium.vision]);
-            if let Some(bad) = [&m.cheap, &m.medium, &m.fallback, &m.vision].into_iter().chain(routed).find(|id| !model_id_ok(id)) {
+            let routes = m.routes.iter().flat_map(|r| [&r.cheap, &r.medium]);
+            let routed = routes.flat_map(|r| [&r.fallback, &r.vision].into_iter().chain(r.deep.iter().flat_map(|d| [&d.id].into_iter().chain(d.fallback.iter()))));
+            if m.images.as_ref().is_some_and(|ids| ids.len() > 8) { return Err(ApiError::Decode("models.images names at most 8 models".into())); }
+            if let Some(bad) = [&m.cheap, &m.medium, &m.fallback, &m.vision].into_iter().chain(routed).chain(m.images.iter().flatten()).find(|id| !model_id_ok(id)) {
                 return Err(ApiError::Decode(format!("models: {bad:?} is no model id")));
             }
         }

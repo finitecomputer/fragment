@@ -36,9 +36,16 @@ const SKILL: &str = include_str!("../SKILL.md");
 /// `fragment login --host` (or `fragment host`) saves another in the
 /// config, so a preview's or a dev stack's is typed once.
 const DEFAULT_HOST: &str = "https://finite.chat";
+/// The CLI's version: a release's, which its build names
+/// (`FRAGMENT_CLI_VERSION`, .github/workflows/release.yml), else
+/// cli/Cargo.toml's.
+pub const VERSION: &str = match option_env!("FRAGMENT_CLI_VERSION") {
+    Some(v) => v,
+    None => env!("CARGO_PKG_VERSION"),
+};
 
 #[derive(Parser)]
-#[command(name = "fragment", version, about = "make and run fragments: a folder in git, an app of operations and jobs, channels, members; on Cloudflare")]
+#[command(name = "fragment", version = VERSION, about = "make and run fragments: a folder in git, an app of operations and jobs, channels, members; on Cloudflare")]
 struct Cli {
     /// Host base URL (else FRAGMENT_HOST, else the config's, which `fragment
     /// login` saves, else https://finite.chat)

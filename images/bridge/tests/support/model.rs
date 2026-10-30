@@ -182,6 +182,7 @@ pub struct Model {
     /// Preflight refusals, separate from dispatched provider calls.
     pub refused: Arc<AtomicUsize>,
     deploying_until: Arc<Mutex<Option<Instant>>>,
+    failing: Arc<Mutex<Option<String>>>,
     _stop: watch::Sender<bool>,
 }
 
@@ -192,23 +193,39 @@ impl Model {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let refused = Arc::new(AtomicUsize::new(0));
         let deploying_until = Arc::new(Mutex::new(None));
+        let failing = Arc::new(Mutex::new(None));
         let (stop, rx) = watch::channel(false);
         let c = calls.clone();
         let r = refused.clone();
         let d = deploying_until.clone();
+        let f = failing.clone();
         let handler = move |req: Request<Incoming>, _peer: SocketAddr| {
             let c = c.clone();
             let r = r.clone();
             let d = d.clone();
-            async move { handle(req, c, r, d).await }
+            let f = f.clone();
+            async move { handle(req, c, r, d, f).await }
         };
         tokio::spawn(net::serve(listener, handler, rx));
-        Model { addr, calls, refused, deploying_until, _stop: stop }
+        Model { addr, calls, refused, deploying_until, failing, _stop: stop }
     }
 
     pub fn deploying_for(&self, duration: Duration) {
         *self.deploying_until.lock().unwrap() = Some(Instant::now() + duration);
     }
+
+    pub fn fail_model(&self, model: &str) {
+        *self.failing.lock().unwrap() = Some(model.into());
+    }
+}
+
+/// A native child in the delegation gate, excluding the parent's async
+/// completion turn (which quotes its goal too).
+pub fn delegate_goal(body: &Value) -> bool {
+    body["messages"].as_array().and_then(|m| m.iter().rev().find(|m| m["role"] == "user")).is_some_and(|m| {
+        let text = text_of(&m["content"]);
+        text.contains("run: touch /data/work/juniper--k3x9/delegate-started") && !text.contains("[ASYNC DELEGATION")
+    })
 }
 
 /// How long `stall` holds a call: well past the image's stale timeout
@@ -275,7 +292,7 @@ pub fn answer(body: &Value) -> (String, Option<Value>) {
     let offered = |name: &str| body["tools"].as_array().is_some_and(|t| t.iter().any(|t| t["function"]["name"] == name));
     let has_terminal = offered("terminal");
     if last_user.contains("[ASYNC DELEGATION") && last_user.contains("fragment-delegate-complete") {
-        return ("scripted: checked the delegated result: fragment-delegate-complete".into(), None);
+        return ("scripted: checked the delegated result: fragment-delegate-complete\nMEDIA:/data/work/juniper--k3x9/delegate.txt".into(), None);
     }
     // The delegation gate calls Hermes' actual background tool. Its child
     // holds a terminal tool long enough for the parent's turn to finish.
@@ -284,7 +301,7 @@ pub fn answer(body: &Value) -> (String, Option<Value>) {
             return ("scripted: delegation dispatched".into(), None);
         }
         if offered("delegate_task") {
-            let call = json!({ "index": 0, "id": "call_delegate_gate", "type": "function", "function": { "name": "delegate_task", "arguments": json!({ "tasks": [{ "goal": "run: touch /data/work/juniper--k3x9/delegate-started; sleep 12; touch /data/work/juniper--k3x9/delegate-finished; echo fragment-delegate-complete" }], "max_iterations": 5 }).to_string() } });
+            let call = json!({ "index": 0, "id": "call_delegate_gate", "type": "function", "function": { "name": "delegate_task", "arguments": json!({ "tasks": [{ "goal": "run: touch /data/work/juniper--k3x9/delegate-started; sleep 12; touch /data/work/juniper--k3x9/delegate-finished; echo fragment-delegate-complete > /data/work/juniper--k3x9/delegate.txt; cat /data/work/juniper--k3x9/delegate.txt" }], "max_iterations": 5 }).to_string() } });
             return (String::new(), Some(call));
         }
         return ("scripted: delegate_task is not offered".into(), None);
@@ -467,7 +484,7 @@ pub fn answer(body: &Value) -> (String, Option<Value>) {
     (format!("scripted: {said}"), None)
 }
 
-async fn handle(req: Request<Incoming>, calls: Arc<Mutex<Vec<Call>>>, refused: Arc<AtomicUsize>, deploying_until: Arc<Mutex<Option<Instant>>>) -> Response<Body> {
+async fn handle(req: Request<Incoming>, calls: Arc<Mutex<Vec<Call>>>, refused: Arc<AtomicUsize>, deploying_until: Arc<Mutex<Option<Instant>>>, failing: Arc<Mutex<Option<String>>>) -> Response<Body> {
     let path = req.uri().path().to_string();
     let agent = req.headers().get("x-fragment-agent").and_then(|v| v.to_str().ok()).map(str::to_string);
     let tier = req.headers().get("x-fragment-tier").and_then(|v| v.to_str().ok()).map(str::to_string);
@@ -499,6 +516,13 @@ async fn handle(req: Request<Incoming>, calls: Arc<Mutex<Vec<Call>>>, refused: A
     calls.lock().unwrap().push(Call { path: path.clone(), model: v["model"].as_str().unwrap_or("").into(), agent, tier, stream, body: v.clone(), authorization });
     if !path.ends_with("/chat/completions") {
         return net::refusal(StatusCode::NOT_FOUND, "not_found", "the scripted model answers /v1/chat/completions");
+    }
+    if failing.lock().unwrap().as_deref().is_some_and(|m| v["model"] == m) {
+        return net::refusal(StatusCode::INTERNAL_SERVER_ERROR, "provider_failed", "the scripted model is unavailable");
+    }
+    if delegate_goal(&v) && matches!(v["model"].as_str(), Some(ROUTE_FALLBACK_ID | "deepseek/deepseek-v4.1-flash")) && v["messages"].as_array().and_then(|m| m.last()).is_some_and(|m| m["role"] == "user") {
+        // Think past Fast's stale window: native Deep must keep waiting.
+        tokio::time::sleep(Duration::from_secs(25)).await;
     }
     if stalls(&v) {
         // nothing at all, not even the answer's head, until the stall is over

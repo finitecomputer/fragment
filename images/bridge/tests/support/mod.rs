@@ -2,8 +2,7 @@
 //! scripted Hermes, and a bridge run in process (stopped and started again
 //! over the same state, as a restart does; or killed, as a crash does).
 //!
-//! The tools of the failure cases (docs/explorations/pi-durable.md,
-//! "Testing the failure cases"):
+//! The tools of the failure cases (docs/durable-computers.md):
 //!
 //! - `Running::kill`: an abrupt stop. A bridge from `start_killable` runs on
 //!   a tokio runtime of its own, and a kill shuts that runtime down: every

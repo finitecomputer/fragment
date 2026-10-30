@@ -5,6 +5,27 @@ Each entry names where it was observed, the risk, the first proof that
 would show it biting, and the condition that deletes it. An entry
 without a delete condition is unfinished design, not debt.
 
+## Hermes' explicit auxiliary vision overrides native image routing
+
+- **Observed:** #505 and the decision 65 probe (2026-10-29): all four
+  deployed Fast/Deep models read user and tool-result images, but Hermes
+  v0.21.7's explicit auxiliary backend forces text descriptions.
+- **Stand-in:** `fragment-native-images` gives the routing decision a copy
+  without that forced choice, retaining the real fallback backend. Its
+  supported request middleware uses Hermes' resize helper on a temporary
+  materialization, limits a call to four images of 256 KiB each, and edits
+  only the API copy. Originals and canonical history remain intact.
+- **Risk:** the decision function and resize/materialization helpers are
+  pinned upstream APIs; a changed call path or middleware failure policy
+  could bypass the bounds or restore unwanted descriptions.
+- **First proof:** the real-Hermes native-image Docker test covers capable
+  and text-only models, attachments, desktop captures, large/corrupt
+  images, per-call bounds and retry; the delegation gates retain result
+  delivery and wakefulness.
+- **Delete when:** upstream supports an auxiliary fallback without forcing
+  text, and one per-call image-count/encoded-byte budget for attachments
+  and screenshots passes those same checks under the route's 6 MiB cap.
+
 ## The Hermes image adapts model preflight deployment waits
 
 - **Observed:** #625, 2026-10-29: release guard refusals lasted about five
@@ -1616,3 +1637,26 @@ fragment.club until cutover (decisions 34–35).
 - **Delete when:** Cloudflare fixes #362 and a canary round shows no
   `snapshot: "dead"` across its snapshot wakes; or snapshots go
   (`FRAGMENT_COMPUTER_SNAPSHOTS=off`), when the wait goes with them.
+
+## SimpleX retains the computer's root trust and rewindable state
+
+- **Observed:** the SimpleX review (2026-10-22 to 2026-10-28) left these
+  obligations. The current protocol is in docs/bridge.md, "SimpleX";
+  decision 32 in docs/cloudflare-v1.md records Paul's product choices.
+- **Risk:** passwordless sudo lets a prompt-injected agent read the
+  root-only door key or drive the unauthenticated loopback bot API.
+  The signed link ticket and separate door key do not fence root.
+- **Delete when:** the agent has no sudo, or the bridge and cores run
+  outside the agent's root authority, with forged-owner tests.
+- **Risk:** a restore before linking loses the contact until relinked;
+  saving immediately narrows that window but cannot eliminate it.
+  A newer core may migrate its databases so an older image cannot open
+  them. Check upgrade and rollback compatibility in each core image round.
+- **Delete when:** messenger state no longer rewinds (durable-computers.md,
+  option F), and core upgrade/rollback is proved against real databases.
+- **Risk:** one core per linked agent has no overall resource cap;
+  voice attachments have no transcript text for search; the original
+  review did not prove the shell link pane or "via SimpleX" in a browser.
+- **Delete when:** core resource limits, searchable voice text without
+  double transcription, and browser coverage of linking and attribution
+  close those gaps. Existing tests and contracts remain in place.

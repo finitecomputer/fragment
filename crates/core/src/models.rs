@@ -874,7 +874,11 @@ impl Models {
             TierRoute { label: label.clone(), private: self.slot_private(tier.as_str()), fallback: of(&slots.fallback), vision: of(&slots.vision), reasoning: reasoning(tier.as_str()), deep }
         };
         let routes = TierRoutes { cheap: route(Tier::Cheap, &self.labels[0]), medium: route(Tier::Medium, &self.labels[1]) };
-        ModelIds { cheap: id(&self.cheap), medium: id(&self.medium), fallback: id(&self.fallback), vision: id(&self.vision), routes: Some(routes) }
+        let mut images = Vec::new();
+        for (slot, upstream) in self.all_slots() {
+            if self.slot_images(slot) && !images.iter().any(|id| id == upstream.model()) { images.push(upstream.model().to_string()); }
+        }
+        ModelIds { cheap: id(&self.cheap), medium: id(&self.medium), fallback: id(&self.fallback), vision: id(&self.vision), routes: Some(routes), images: Some(images) }
     }
 
     /// What a call naming `model` runs, as the route reads its body's
@@ -957,6 +961,15 @@ impl Models {
     pub fn fallback_of(&self, slot: &str) -> Option<Model<'_>> {
         let to = self.fallback_named_by(slot).or_else(|| (slot == VISION && self.slot_images(FALLBACK)).then_some(FALLBACK))?;
         Some(self.model_of(to, Named::Fallback))
+    }
+
+    /// Native image calls may fall back only to another model that reads
+    /// images. Text calls keep their existing chain, including older images.
+    pub fn fallback_for_input(&self, slot: &str, input: &Value) -> Option<Model<'_>> {
+        let fallback = self.fallback_of(slot)?;
+        let images = input["messages"].as_array().is_some_and(|messages| messages.iter().any(|m| m["content"].as_array().is_some_and(|parts| parts.iter().any(|p| p["type"] == "image_url"))));
+        if images && !self.slot_images(fallback.slot) { return None; }
+        Some(fallback)
     }
 
     /// Whether images go to the slot named `slot`: the route's four's
@@ -1978,11 +1991,11 @@ mod tests {
         let route = |fallback: &str, vision: &str| json!({ "private": false, "fallback": fallback, "vision": vision });
         assert_eq!(
             serde_json::to_value(routed.ids_by_name()).unwrap(),
-            json!({ "cheap": OPENROUTER_FLASH, "medium": OPENROUTER_FLASH, "fallback": GLM_FLASH, "vision": GLM_FLASH, "routes": { "cheap": route(GLM_FLASH, GLM_FLASH), "medium": route(GLM_FLASH, GLM_FLASH) } })
+            json!({ "cheap": OPENROUTER_FLASH, "medium": OPENROUTER_FLASH, "fallback": GLM_FLASH, "vision": GLM_FLASH, "images": [], "routes": { "cheap": route(GLM_FLASH, GLM_FLASH), "medium": route(GLM_FLASH, GLM_FLASH) } })
         );
         assert_eq!(
             serde_json::to_value(d.ids_by_name()).unwrap(),
-            json!({ "cheap": GLM_FLASH, "medium": MEDIUM_MODEL, "fallback": DEEPSEEK_FLASH, "vision": GLM_FLASH, "routes": { "cheap": route(DEEPSEEK_FLASH, GLM_FLASH), "medium": route(DEEPSEEK_FLASH, GLM_FLASH) } })
+            json!({ "cheap": GLM_FLASH, "medium": MEDIUM_MODEL, "fallback": DEEPSEEK_FLASH, "vision": GLM_FLASH, "images": [], "routes": { "cheap": route(DEEPSEEK_FLASH, GLM_FLASH), "medium": route(DEEPSEEK_FLASH, GLM_FLASH) } })
         );
         // a reader of the view before its routes (a pinned image's) reads it still
         let before: fragment_proto::computer::ModelIds = serde_json::from_value(json!({ "cheap": GLM_FLASH, "medium": MEDIUM_MODEL, "fallback": DEEPSEEK_FLASH, "vision": GLM_FLASH })).unwrap();
@@ -2312,6 +2325,27 @@ mod tests {
         }
         assert!(parse(json!({ "fallback": { "provider": "workers_ai", "model": GLM_FLASH, "seeing": true } })).unwrap_err().contains("unknown field `seeing`"), "the rest is the upstream's, as before");
         assert!(parse(json!([])).unwrap_err().starts_with("models:"), "no object: the slots' own refusal");
+    }
+
+    #[test]
+    fn native_images_keep_their_capability_and_never_fall_back_to_text_only() {
+        let mut models = Models::defaults();
+        models.images[0] = true;
+        let user = json!({"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,eA=="}}]}]});
+        let tool = json!({"messages":[{"role":"tool","content":user["messages"][0]["content"]}]});
+        let text = json!({"messages":[{"role":"user","content":"hello"}]});
+        assert!(models.fallback_for_input("cheap", &text).is_some(), "existing text fallback");
+        assert!(models.fallback_for_input("cheap", &user).is_none());
+        assert!(models.fallback_for_input("cheap", &tool).is_none());
+        models.images[2] = true;
+        assert!(models.fallback_for_input("cheap", &user).is_some());
+        assert!(models.fallback_for_input("cheap", &tool).is_some());
+        let ids = models.ids_by_name();
+        assert_eq!(ids.images.as_ref().unwrap(), &vec![GLM_FLASH.to_string(), DEEPSEEK_FLASH.to_string()]);
+        let replay = serde_json::from_value::<fragment_proto::computer::ModelIds>(serde_json::to_value(&ids).unwrap()).unwrap();
+        assert_eq!(ids, replay);
+        let old: fragment_proto::computer::ModelIds = serde_json::from_value(json!({"cheap":"a","medium":"b","fallback":"c","vision":"d"})).unwrap();
+        assert!(old.images.is_none(), "old cell metadata remains readable");
     }
 
     /// Goal (Paul, 2026-10-22: "When a user has private selected, it's not

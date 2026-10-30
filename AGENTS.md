@@ -16,6 +16,9 @@ image's agent runtime.
 
 ## Read first
 
+`THE-FRAGMENT-WAY.md` — Paul's words on what Fragment is for and how it
+should grow. Human-written: an agent never edits it.
+
 0. `docs/cloudflare-v1.md` — **the plan of record since 2026-10-02**:
    fragment v1 entirely on Cloudflare, its decisions, phases and the
    hard cut. Where it disagrees with anything below, it wins.
@@ -420,7 +423,17 @@ wrangler and the Sandbox SDK the cell's shim bundles, pinned in
   `dorny/paths-filter`), and on a run by hand. It also runs on merge
   groups: `check` always, Docker when the group's diff from its exact
   base touches those paths. It keeps no layer cache: the workflow
-  says why. `release.yml` builds the CLI for macOS and Linux.
+  says why. `release.yml` builds the CLI for macOS and Linux and publishes
+  it as the latest release (the install line's) before a green production
+  push deploys new CLI inputs, or from a `v*` tag pushed by hand. `cli-version`
+  reuses a published release whose body records the same input key and whose
+  four tarballs are uploaded and nonempty; otherwise `cli-release` takes the
+  next patch above the highest `v*` tag, or cli/Cargo.toml's version when
+  higher. The key covers the CLI build's inputs (docs/computers.md) plus
+  release.yml, using the preview image's git hashing (`xtask/src/inputs.rs`).
+  Deploy waits for these jobs but proceeds if they fail, omitting the CLI
+  version header; a later deploy can advertise a retried release. Only a
+  verified published version sets `FRAGMENT_CLI_VERSION` (`x-fragment-cli`).
   Master's pushes also run `preview-image` beside the tests. It hashes the
   committed image inputs (`xtask/src/image/preview.rs`), reuses the registry's
   `inputs-<key>` tag when present, or builds and pushes it once with a

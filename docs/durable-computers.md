@@ -1,10 +1,7 @@
 # Durable computers: the design
 
 The design of record for how a computer's state survives a sleep, a
-crash, a host restart or a rolled-back disk (Paul, 2026-10-05). The
-analysis behind it is docs/explorations/pi-durable.md, where the
-findings (F1–F11), invariants (I1–I9) and proposals (P1–P8) are named.
-The discussion is in the Claude Doc "Durable computers: what's left".
+crash, a host restart or a rolled-back disk (Paul, 2026-10-05).
 Where this file and docs/cloudflare-v1.md decision 18 disagree, this
 file is the newer word, and decision 18 points here.
 
@@ -138,7 +135,7 @@ file is the newer word, and decision 18 points here.
   with the hold: that is how the second cause showed.
   docs/computers.md, "The hold".
 - **The model is told what was cut (P5, 2026-10-06).** A turn a restart
-  cut is never redone by the chat's next message (F10, bit on p5: Hermes
+  cut is never redone by the chat's next message (bit on p5: Hermes
   kept the cut request as its session's last message and joined the next
   message to it, so its model did the cut request again). Two parts. The
   first turn an agent runs in a chat after one of its turns there ended as
@@ -186,7 +183,7 @@ file is the newer word, and decision 18 points here.
   for again, for good, so the computer stayed sleeping, held and owed, and
   its owner's sleep never answered. Now every container step of the DO is
   bounded (docs/computers.md, "Bounds"), a save past its bound or its
-  deadline fails as any does (so I5's bound ends a sick one), and a start
+  deadline fails as any does (so the unsaved bound ends a sick one), and a start
   from a snapshot is up only once its guest reads its view: one unheard
   in 45 s is answered as a snapshot that would not start, from the image
   and the save in the same wake.
@@ -350,7 +347,7 @@ tests, each leaving master whole:
    - A sleep whose save fails is retried and does not destroy the
      container, within a bound; the computer's view says so.
    - Litestream goes: it is neither vendor's intended store, and its
-     replicas are never read (F8).
+     replicas are never read .
 2. **The seam.** `/data` splits into Hermes' home (its databases,
    sessions, profiles) and a work directory for everything its tools
    write (projects, scratch files, its home, the browser profile), each saved on
@@ -396,16 +393,10 @@ sockets only); and whether the protocol's library can run on Workers or
 needs a small stateless container doing the cryptography while the
 Durable Object keeps the state.
 
-**The SimpleX spike (2026-10-05) is parked** (Paul: "too much of a
-lift for now"; docs/explorations/simplex-connector.md). It ran end to
-end against a local SMP server, but no SimpleX library exists outside
-the Haskell app: the practical shape is a small always-on container per
-account running `simplex-chat`, and only a pure-Workers client (about
-1.5 to 2 months) fully meets "never goes back in time". Not built now.
-SimpleX stays on an always-on computer (decision 32), whose disk can
-still go back in time at a host restart; the exploration's rollback
-runs show `/_sync` heals the connection in about 0.2 s, losing the
-messages in flight.
+**A separate SimpleX connector remains deferred** (Paul, 2026-10-05:
+"too much of a lift for now"). A pure-Workers client was explicitly
+rejected for now. SimpleX runs on the always-on computer (decision 32);
+its restart and rollback protocol is in docs/bridge.md, "SimpleX".
 
 ## Deferred, with the recommendation
 

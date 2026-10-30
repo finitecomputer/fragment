@@ -799,7 +799,7 @@ impl Loop {
                 let id = self.message_id();
                 let (text, _) = wire::uncursored(content);
                 crate::ev!("relay.aside_answered", { "chat": chat, "answering": reply_to });
-                self.emit(Event::Say { agent, fragment, text: text.to_string() }).await;
+                self.emit(Event::Say { agent, fragment, text: text.to_string(), files: Vec::new() }).await;
                 return json!({ "success": true, "message_id": id });
             }
         }
@@ -820,7 +820,7 @@ impl Loop {
                     // the turn is done) is still that turn's
                     match wire::notice(&text) {
                         Some((category, text)) => self.emit(Event::Notice { agent, fragment, category, text }).await,
-                        None => self.emit(Event::Say { agent, fragment, text }).await,
+                        None => self.emit(Event::Say { agent, fragment, text, files: Vec::new() }).await,
                     }
                     return json!({ "success": true, "message_id": id });
                 };
@@ -985,8 +985,14 @@ impl Loop {
     /// A file of the chat's turn, its own reply part with its caption: the
     /// op's answer.
     async fn attach(&mut self, chat: &str, caption: String, file: LocalFile) -> Value {
-        let Some(turn) = self.by_chat.get(chat).cloned() else { return json!({ "success": false, "error": "no turn runs in that chat" }) };
         let id = self.message_id();
+        let Some(turn) = self.by_chat.get(chat).cloned() else {
+            let Some((fragment, agent)) = wire::split_chat_id(chat) else { return json!({ "success": false, "error": "no chat by that id" }) };
+            // A background completion has no bridge-owned turn, just as
+            // its text send above. Its file is a reply of its own.
+            self.emit(Event::Say { agent: agent.into(), fragment: fragment.into(), text: caption, files: vec![file] }).await;
+            return json!({ "success": true, "message_id": id });
+        };
         let f = self.inflight.get_mut(&turn).expect("held");
         let part = f.next_part;
         f.next_part += 1;
@@ -1008,8 +1014,8 @@ impl Loop {
     /// sends the link as text instead.
     fn fetch_media(&mut self, request: &str, chat: String, url: String, caption: String, filename: Option<String>) -> Option<Value> {
         crate::ev!("relay.op", { "op": "send_media", "chat": chat, "by_url": true, "turn": self.by_chat.get(&chat) });
-        if !self.by_chat.contains_key(&chat) {
-            return Some(json!({ "success": false, "error": "no turn runs in that chat" }));
+        if !self.by_chat.contains_key(&chat) && wire::split_chat_id(&chat).is_none() {
+            return Some(json!({ "success": false, "error": "no chat by that id" }));
         }
         self.spoke(&chat);
         // no dial: no one to answer, nor to fetch it for

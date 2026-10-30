@@ -4,8 +4,7 @@
 //! Cloudflare Containers reset a TLS hello on port 443 that names no server
 //! (SNI), and a SimpleX server on 443 takes its protocol only from such a
 //! hello, so a computer reaches no XFTP server directly (measured on a
-//! preview computer, 2026-10-25; docs/explorations/simplex-complexity.md,
-//! section 8). A Worker's `connect()` is raw TCP that nothing inspects: the
+//! preview computer, 2026-10-25; docs/bridge.md, "SimpleX"). A Worker's `connect()` is raw TCP that nothing inspects: the
 //! computer's bridge hands the platform the core's bytes over a WebSocket
 //! (`GET /api/computer/relay?host=&port=`), and the platform pipes them to
 //! the server untouched. The core's TLS runs end to end, checked against the

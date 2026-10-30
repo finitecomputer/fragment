@@ -17,6 +17,47 @@ use support::fake::{person, Fake, World};
 
 const WAIT: u64 = 8_000;
 
+/// New modes are optional on the wire; when present, every model id and
+/// effort must be safe before the boot writes a profile from the view.
+#[tokio::test]
+async fn model_modes_accept_old_views_and_reject_invalid_routes() {
+    use fragment_bridge::api::{Api, Reasoning};
+    let fake = Fake::start("127.0.0.1:0", &[]).await;
+    let api = Api::new(&fake.url()).unwrap();
+    let old = api.computer(false).await.unwrap().models.unwrap();
+    assert!(old.routes.as_ref().unwrap().cheap.deep.is_none());
+    fake.with(|w| {
+        let cheap = &mut w.computer["models"]["routes"]["cheap"];
+        cheap["reasoning"] = json!("high");
+        cheap["deep"] = json!({ "id": "deepseek-v4-1-flash", "reasoning": "max", "fallback": "z-ai/glm-5.3-flash" });
+    });
+    let modes = api.computer(false).await.unwrap().models.unwrap();
+    assert_eq!(modes.routes.unwrap().cheap.deep.unwrap().reasoning, Some(Reasoning::Max));
+    let valid = fake.with(|w| w.computer.clone());
+    for images in [json!(["valid/model"]), json!([])] {
+        fake.with(|w| w.computer["models"]["images"] = images.clone());
+        assert!(api.computer(false).await.is_ok());
+    }
+    for images in [json!(["invalid model"]), json!(vec!["x"; 9]), json!(true)] {
+        fake.with(|w| w.computer["models"]["images"] = images.clone());
+        assert!(api.computer(false).await.is_err(), "invalid capability metadata is refused");
+    }
+    for field in ["id", "fallback", "reasoning"] {
+        fake.with(|w| {
+            w.computer = valid.clone();
+            w.computer["models"]["routes"]["cheap"]["deep"][field] = json!("invalid value");
+        });
+        assert!(api.computer(false).await.is_err(), "an invalid Deep {field} is refused");
+    }
+    fake.with(|w| {
+        w.computer = valid;
+        w.computer["models"]["routes"]["cheap"]["reasoning"] = json!("medium");
+    });
+    assert!(api.computer(false).await.is_err(), "an unknown Fast effort is refused");
+    fake.with(|w| w.computer.as_object_mut().unwrap().remove("models"));
+    assert!(api.computer(false).await.unwrap().models.is_none(), "a cell before model metadata still works");
+}
+
 fn turn_of(agent: &str, chat: &str, seq: u64) -> String {
     records::turn_id(&format!("{agent}--k3x9"), chat, "chat", seq)
 }
@@ -1394,8 +1435,7 @@ async fn the_restore_gate_holds() {
     bridge.stop().await;
 }
 
-// ---- crashes and rollbacks (docs/explorations/pi-durable.md, F2, F3 and
-// P1). Counted in runs (support::Runs: each turn the runtime was given),
+// ---- crashes and rollbacks (docs/durable-computers.md, one life per turn). Counted in runs (support::Runs: each turn the runtime was given),
 // never in records: a second run's posts are replays of the first's, or
 // 409s. A negative is proved by a later positive, never by a sleep: turns
 // of a chat run in order, and a new life reads the old records before the
@@ -1468,21 +1508,21 @@ async fn rollback_case(name: &str, lose_it_all: bool) {
     bridge.stop().await;
 }
 
-/// Goal (I3): a turn that ran is never run again after a rollback: the
+/// Goal : a turn that ran is never run again after a rollback: the
 /// next life wakes with a save from before it.
 #[tokio::test]
 async fn a_rollback_runs_nothing_twice() {
     rollback_case("rollback", false).await;
 }
 
-/// Goal (I3): a turn that ran is never run again after `/data` is lost:
+/// Goal : a turn that ran is never run again after `/data` is lost:
 /// the next life reads every chat from the start.
 #[tokio::test]
 async fn a_lost_state_runs_nothing_twice() {
     rollback_case("lost-state", true).await;
 }
 
-/// Goal (I1, I2): a turn a crash cut short ends once, as an error, and is
+/// Goal : a turn a crash cut short ends once, as an error, and is
 /// never run again, whether the next life wakes with the state from before
 /// the turn, the state the crash left (the turn running), or none.
 #[tokio::test]
@@ -1587,7 +1627,7 @@ async fn the_turn_after_a_cut_one_is_told_what_was_cut() {
     assert!(told.windows(2).all(|p| p[0] == p[1]), "the journal's note of the cut, whatever state woke: {told:#?}");
 }
 
-/// Goal (I2): a turn whose run ended, but whose end a crash kept from the
+/// Goal : a turn whose run ended, but whose end a crash kept from the
 /// platform (its posts failing, the lane retrying, when the bridge dies),
 /// ends once and as itself: the state kept it, owing its end, and the next
 /// life posts that end again under the same id and body. Its run is not
@@ -1630,7 +1670,7 @@ async fn an_end_a_crash_kept_from_the_platform_is_posted_by_the_next_life() {
     bridge.stop().await;
 }
 
-/// Goal (I4): a message said while the computer was down is answered once
+/// Goal : a message said while the computer was down is answered once
 /// by the next life, even one that wakes with an older save, and the turn
 /// that save does not know is not run again for it. That turn is in no
 /// memory of the runtime's: the answer is told what it was (forgotten,

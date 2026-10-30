@@ -1,6 +1,6 @@
 # Computers: the platform's contract with an image
 
-Status: **the contract phase 4 builds** (docs/cloudflare-v1.md, decisions
+Status: **the image contract** (docs/cloudflare-v1.md, decisions
 13, 18, 19, 22, 23, 39, 41–44). The platform side is the generic Computer
 Durable Object in the cell. The image side is any image: ours runs
 Hermes (`images/hermes/`), and a stub image (`images/stub/`) proves
@@ -151,7 +151,7 @@ the bridge), what its person saw before 2026-10-08, and what they see now:
 |---|---|---|---|
 | **An idle sleep**, saved | nothing holds it for 20 minutes | Settings' "State" only / nothing (a message wakes it) | the same: nothing is lost, nothing to tell |
 | **Its owner's sleep**, saved (the shell's update is one) | `POST …/sleep` | the same | the same |
-| **A sleep whose save fails** | any sleep; it is kept awake (I5) and tried again after 1, 2, 4, 8, 15 minutes | Settings' `why`, read only when Settings was opened after it / nothing; its owner charged for the time it was kept | an `unsaved` notice at once, over every chat and Settings, pushed to open pages: since when its work is in no save, the save a stop goes back to, the time the bound stops it, and Restart; the time it is kept, from its failing try's start to the bound, is free |
+| **A sleep whose save fails** | any sleep; it is kept awake  and tried again after 1, 2, 4, 8, 15 minutes | Settings' `why`, read only when Settings was opened after it / nothing; its owner charged for the time it was kept | an `unsaved` notice at once, over every chat and Settings, pushed to open pages: since when its work is in no save, the save a stop goes back to, the time the bound stops it, and Restart; the time it is kept, from its failing try's start to the bound, is free |
 | **Awake saves that keep failing** (a turn's end, every 15 minutes busy) | tried again after a growing pause, unbounded while awake | nothing anywhere: no `why` for an awake save | the `unsaved` notice once two fail in a row (no stop time: none is due until it would sleep) |
 | **The bound runs out**: put to sleep unsaved | the sleep tried at `unsaved_since + unsaved_max_ms` (exactly: the last try is the bound's), only when nothing holds it | Settings' `why` ("slept unsaved"), which then stayed for good (only a save of the same life cleared it) / nothing | a `went_back` notice (pending) while it is asleep: since when changes on it won't be there; the `why` goes at the next save that works; nothing when nothing was done on it since that save |
 | **A crash**: the container stops on its own (out of memory, a host restart, the runtime's idle stop, or dying while its sleep held or saved it) | `Exited`; it starts again at once while anything wants it, else at its next wake | nothing (`restored` and `rollbacks` were in the API only) / a turn it cut ends quietly as "lost when the computer restarted"; the agent's next turn there is told what was cut (docs/bridge.md) | a `went_back` notice, only when something was done on it since the save it went back to (below): "Your computer restarted. Changes on it since `HH:MM` weren't kept. Your chats are all here."; the chat and the agent as before |
@@ -355,8 +355,9 @@ Hermes' image inputs, never the commit or a clock. It resolves
 `inputs-<key>` in the existing preview repository
 `fragment-preview-computer-hermes-canary`. A tag already there is reused
 at its manifest's digest, even after BuildKit's layer cache was evicted.
-A registry error stops the job; only a successful listing without that
-tag authorizes a build. Input tags are not overwritten by CI.
+A direct manifest lookup resolves only that tag; a definite missing
+manifest authorizes a build, and other registry errors stop the job.
+Input tags are not overwritten by CI.
 
 An absent tag builds with BuildKit's persistent Actions cache (one
 master-only `preview-hermes` scope, `mode=max`), then pushes and prepares
@@ -406,6 +407,25 @@ are refused so a build cannot differ from the git content its key names.
 A changed input whose final image bytes remain the same may keep the same
 digest through the layer cache. Pins are always digests; tags only find
 them.
+
+The standalone CLI release uses the CLI portion of this input list plus
+`.github/workflows/release.yml`, which defines its binary builds. The
+preview and CLI share `xtask/src/inputs.rs`'s hashing. On a green production
+push, CI reuses a published stable release with this key recorded in its
+body (`<!-- fragment-cli-inputs:<key> -->`) and all four nonempty, uploaded
+tarballs, or builds and publishes one before deploying. The version is the
+next patch above the highest stable `v*` tag, with cli/Cargo.toml as its floor.
+The existing-tag refusal, artifact filter and binary version checks still
+apply. CI writes the input marker only after publishing, then verifies it
+and the assets again. An upload that silently omitted a tarball is repaired
+once, uploading only missing or incomplete assets, and fails the job if
+the four still do not verify. Deploy advertises the verified version as
+`x-fragment-cli`.
+A failed lookup or release does not block deploy; it omits the header. Rerun
+the release jobs (including `cli-version` to choose a fresh tag if one was
+already created); the next deploy advertises the completed release. No
+runtime GitHub lookup or availability store is needed. Reverting inputs
+reuses their earlier release rather than publishing identical inputs again.
 
 ### Production stays pinned
 
@@ -525,8 +545,7 @@ the processes: a start from one runs the entrypoint again.
   DO polls with `true`, opens the restore gate and makes a hold with
   `touch`, looks for the guest's answer with `test -e` and reads it with
   `cat`, and lets go of a hold with `rm`.
-- **The hold**, a handshake before every save (P2 of
-  docs/explorations/pi-durable.md). The DO removes `/run/computer/held`,
+- **The hold**, a handshake before every save (docs/durable-computers.md). The DO removes `/run/computer/held`,
   touches `/run/computer/hold`, and waits up to 20 s for the guest to
   touch `/run/computer/held`: its answer that it claims nothing now (no
   claim in flight, none new while the hold exists) and has copied what it
@@ -557,7 +576,7 @@ the processes: a start from one runs the entrypoint again.
   answer at most 64 KiB (`fragment_core::computer::left_out`). They are
   files it copied under the hold to names the save keeps (our Hermes
   image: its SQLite databases, below), so a hot copy of one, which could
-  tear (F4), is never what a wake restores. An empty answer leaves nothing
+  tear , is never what a wake restores. An empty answer leaves nothing
   out; an answer the DO refuses saves the guest whole; a save not held
   leaves nothing out. Our bridge answers for the stub, naming what
   `BRIDGE_HELD_LEAVE_OUT` names (the stub's `*.scratch`, only so the
@@ -605,9 +624,8 @@ the processes: a start from one runs the entrypoint again.
 
 ### Saves and what a wake restores
 
-P2, P3 and P7 of docs/explorations/pi-durable.md, and step 1 of
-docs/durable-computers.md. A computer keeps its newest three saves of
-`/data`, and a snapshot is only ever a cache of the current one:
+The design is docs/durable-computers.md. A computer keeps its newest
+three saves of `/data`, and a snapshot is only ever a cache of the current one:
 
 - **A save** is a `DirectoryBackup` of `/data`, taken under the hold
   (above). The Computer DO keeps its record with a number (1 for the
@@ -628,7 +646,7 @@ docs/durable-computers.md. A computer keeps its newest three saves of
   again after a pause (a minute, doubled each time, at most 15). So a
   crash loses what its life did since its last save, at most a turn and
   its settle, or 15 minutes of one.
-- **A sleep whose save fails** keeps its container (I5): it is awake
+- **A sleep whose save fails** keeps its container : it is awake
   again, held no more, and its view's `why` and its owner's notice say so
   (above, "What its owner is told"); its sleep is tried again after the
   same pause, the last try at the bound itself, so the time its owner is
@@ -639,7 +657,7 @@ docs/durable-computers.md. A computer keeps its newest three saves of
 - **A wake restores the current save:** the newest one not found
   unusable. A start whose save will never restore (its archive gone or
   altered) marks it unusable and starts again at once from the save before
-  it (F5), with no strike against the computer; with none left to try, it
+  it , with no strike against the computer; with none left to try, it
   is a strike like any other failed start. A start that fails for another
   reason (an image pull, the platform) is a strike, and tries the same
   save again.
@@ -650,14 +668,14 @@ docs/durable-computers.md. A computer keeps its newest three saves of
   it is the image and the save. A sleep whose save failed takes none, and
   a snapshot that fails forgets nothing: the one kept is still a cache of
   its own save. So a snapshot only ever makes a wake faster, never
-  different (I9).
+  different .
 - **Why the two agree.** The snapshot is taken after the backup within
   one sleep, with the guest held from before the backup (the hold, above)
   until it is gone: it claims no new turn in between. A turn it had
   claimed before the hold can still write between the two.
 - **A broken snapshot** (one that will not start: expired, say) is
   forgotten as its start fails, and the same wake starts the image and
-  restores the save, with no strike against the computer (F7). Only the
+  restores the save, with no strike against the computer . Only the
   hosted lane can show what Cloudflare answers for one (local workerd
   takes no snapshots: the lifecycle's fallback is proven pure, in
   `crates/core`).
@@ -1106,8 +1124,8 @@ expires within 30 days. The container application is the deployment's
   see marked). The promise is per route, the tier an agent runs on: a
   private tier is a private route, every slot its agents' calls reach is
   private, and a config that breaks that is refused, naming the slot
-  (`Models::reached`): the tier itself, `vision` (Hermes sends it every
-  image, whatever the tier) and `fallback` (the route's on a failure,
+  (`Models::reached`): the tier itself, `vision` (the describer for
+  text-only models and older images) and `fallback` (the route's on a failure,
   Hermes' own on a stall). A slot marked private promises nothing to the
   agents of a tier that is not: theirs is their route. What a private
   tier's agent reaches, read from Hermes v0.21.7 (`agent/
@@ -1201,6 +1219,23 @@ expires within 30 days. The container application is the deployment's
   | Private | Finite Private's GLM-5.3 Flash at `high`, falling back to Deep | Tinfoil's DeepSeek V4.1 Flash at `max`, 32,768 tokens a call, falling back to Fast |
   | Standard | OpenRouter's GLM-5.3 Flash at `high`, falling back to Cloudflare's | OpenRouter's DeepSeek V4.1 Flash at `max`, 32,768 tokens a call, falling back to Cloudflare's GLM-5.3 Flash |
 
+  Our Hermes image writes Fast as the profile's main model and Deep as
+  its native `delegation.model`, with its own `reasoning_effort` and
+  `fallback_providers` (explicitly empty when none, never Fast's chain).
+  `delegation.request_overrides.max_tokens` asks for 32,768 tokens; the
+  route enforces each answering slot's cap. The profile's per-model
+  `stale_timeout_seconds` is 20 for Fast, 180 for Deep, and
+  `delegation.max_concurrent_children` is 3. The same model headers name
+  the agent and its tier on child calls, so a private child stays on its
+  private slot even when Standard uses the same model id. Hermes' helper
+  tasks retain Fast. Children use the existing activity signal
+  (docs/bridge.md, "Runtime work outside a turn") to hold the computer;
+  their background results return to the chat once, through the relay.
+  The real-Hermes Docker gate exercises both tiers and the old view
+  without Deep metadata. Agent guidance says to settle questions with
+  the person before handing off a big build or research, then inspect
+  and test the result before saying it is done.
+
   **A slot's `price`.** A slot on an OpenAI-compatible API that is not
   OpenRouter may name its model's list price there, dollars a million
   tokens as its vendor lists them: `{"input": <$>, "cached_input"?: <$>,
@@ -1262,21 +1297,31 @@ expires within 30 days. The container application is the deployment's
   bounded, gated and charged as a tier's call is, at its model's
   price, to the agent's owner. It is no tier: an agent's `agent.json`,
   a job's step and a manifest name only tiers.
-- Our Hermes image's profiles send their image calls to `vision`
-  (`auxiliary.vision`: provider `custom`, model `vision`, through the
-  intercept), whatever the agent's tier: by the route's name, not its
-  model's id, since a deployment may run vision on a tier's model (every
-  preview: GLM-5.3 Flash), and an id a tier runs names the tier's slot,
-  whose call falls back to the fallback model, which may read no images
-  (DeepSeek V4 Flash). `vision` falls back only when the fallback's slot
-  says its model reads images (`"images": true`: the private tier's,
-  Tinfoil's DeepSeek V4.1 Flash), on the tiers' rule. Hermes describes each
-  `computer_use` screenshot with it and hands the main model the words
-  (named outright, Hermes routes every capture so: its
-  `tools/computer_use/vision_routing.py`), and an image a person attaches
-  too. Before, a capture went to the agent's own tier's model, which on
-  the medium tier reads no images. DeepSeek Flash's vision build is only
-  on DeepSeek's own API (decision 23, its status).
+- **Native images (decision 65).** A model declared image-capable gets
+  attachments and screenshots directly, in Fast and Deep. The computer's
+  `models.images` lists those model ids (at most eight), from the config's
+  per-slot `images: true`; older cells omit it. Hermes' per-model
+  `supports_vision` follows that list, including fallbacks. BYO OpenRouter
+  uses Hermes' OpenRouter capability catalog. Unknown/text-only models
+  retain `auxiliary.vision` through their route's `vision`, as do older
+  cells and images. The cell falls back with an image-bearing request only
+  to a model also declared image-capable. Hermes' own stall recovery may
+  select a text-only model and describe the images before continuing.
+
+  The `fragment-native-images` plugin makes the managed auxiliary backend
+  a fallback in Hermes' routing decision, retaining the actual backend.
+  Its supported request middleware keeps the four newest image blocks
+  across attachments and screenshots per call. It uses Hermes' Pillow
+  resize helper to fit each embedded image within 256 KiB of encoded data
+  and a 1568 px long edge, leaving room under the route's 6 MiB body cap.
+  Resized images retain the SDK's coordinate-mapping note; transparent
+  PNGs retain alpha so a dark logo on transparency stays distinguishable.
+  Older images become text markers in that API copy; canonical history
+  and original files remain available for another look. Corrupt or
+  unshrinkable images become markers rather than oversized requests.
+  Remote image references count toward the four-image limit; their URLs
+  carry no embedded bytes. The Docker lane drives the real SDK, middleware,
+  attachments and desktop captures, capability revocation and replay.
 - **Its speech-to-text** goes to `whisper`, whatever the agent's tier.
   - **Config.** Each profile has `stt: {provider: openai, language: "",
     openai: {base_url: <route>/v1, api_key: "agent:<name>", model:
@@ -1619,14 +1664,21 @@ offered (decision 60 says why, with the vendors' words).
   The swap adds the key only toward `openrouter.ai`. Its calls are counted
   as the agent's in the computer's `uses` and charged nothing (no platform
   fee: Paul).
-- **Picking a model.** Settings' Agents section offers each agent the
-  connected provider's models beside its tier's (included in their credit). The pick
-  is written to the agent fragment's `agent.json`: `"model": {"provider":
-  "openrouter", "id": "anthropic/claude-sonnet-5.5"}`, beside its `tier`,
-  and put live (`POST …/deploy`, as its name and picture are: its computer
-  reads main, its page live). Its tier's option, named by the tier and its
-  model's id, removes `model`. Any model the provider serves may be named
-  by hand; settings offers the catalog's `offer`.
+- **Picking Fast and Deep.** Settings' Agents section offers each agent
+  the connected provider's models beside its tier's (included in their
+  credit). Choosing an own model reveals two rows, Fast and Deep, each
+  with a model and Low/High/Max effort. The legacy `model: {provider, id}`
+  and top-level `reasoning` remain Fast; the optional `model.deep` holds
+  `{provider, id, reasoning}`. With no Deep choice it inherits Fast's
+  model and effort. A Deep choice may omit `provider` to use Fast's.
+  Each edit preserves the other mode and unrelated settings, reading
+  `agent.json` fresh before its serialized write; a failed read changes
+  nothing. The file is put live (`POST …/deploy`, as its name and picture
+  are: its computer reads main, its page live). Its tier's option removes
+  `model` and hides the own-mode rows and efforts: Private/Standard's
+  efforts belong to the deployment. Any model the provider serves may be
+  named by hand; settings offers the catalog's `offer`. Older images
+  ignore nested `deep` and continue using Fast.
 - **Our Hermes image** reads each agent's `agent.json` again every 10 s
   while awake, and whenever its credentials change. When the agent's
   credentials hold the named provider with a `modelBase`, its profile's
@@ -1641,8 +1693,16 @@ offered (decision 60 says why, with the vendors' words).
   `profile.model_unused` says why: not connected, or narrowed from it. The
   config is rewritten only when it changes. Hermes reads it at the next
   turn and rebuilds the agent on the new model, with nothing restarted.
-  Vision (`auxiliary.vision`) and voice notes (`stt`) stay on the route's
-  `vision` and `whisper`, metered to the owner as before.
+  Native delegates use the own Deep model's base, placeholder and effort,
+  with no fallback chain, at most three children and 32,768 output tokens.
+  A Deep provider the agent cannot use leaves delegation on its working
+  own Fast model and effort (`profile.deep_unused`); it never borrows a
+  platform Deep route. Distinct model ids get Fast's 20 s and Deep's
+  180 s stream patience. Hermes keys patience by provider/model, so the
+  same id in both modes shares 180 s, preserving legacy BYO patience.
+  Native images on an own model are paid by that provider account.
+  Models without vision use the route's `vision` describer, metered to
+  the owner; voice notes (`stt`) stay on its `whisper`.
 - **What its owner is shown.** Their view of the computer names, for each
   agent, the providers whose models it may run now (`modelProviders`:
   `fragment_core::catalog::Catalog::model_providers`, an own key set whose
@@ -1781,17 +1841,13 @@ settings and state):
   runs on while its credentials hold that provider (above, "An agent's
   own model"); the image reads `agent.json` again every 10 s while awake
   (`HERMES_BOOT_MODEL_MS`, a test's), so a pick is its next turn's. Its
-  `reasoning`, `low` or `high` (Paul, 2026-10-22: "expose the reasoning
-  level in the model picker … high is a good default"), is how hard it
-  thinks, whatever its model: its profile's `agent.reasoning_effort`
-  (`hermes::Reasoning`), which Hermes reads at each turn and sends as each
-  call's `reasoning_effort`. Absent, or any other, it is `high`. The
-  model route passes those two on, and `max` (`fragment_core::models::
-  EFFORTS`; any other it takes as `low`, as GLM takes `medium` for its
-  dearest, `max`), and left unset Hermes sent its own default, `medium`,
-  which the route took as `low`. Settings' Agents offers it beside the model for
-  every agent: Default (High), Low and High; a pick writes `reasoning` to
-  `agent.json` as the model's pick is written, and the default removes it.
+  `reasoning` applies to its owner's own model: `low`, `high` or `max`,
+  High when absent or invalid, as `agent.reasoning_effort`, read by Hermes
+  at each turn. Platform tiers take their Fast effort from the route,
+  High on an older cell, ignoring a personal pick: an agent left on Low
+  moves to High with this image. Settings offers efforts only for BYO's
+  Fast and Deep rows (decision 65); `model.deep.reasoning` is Deep's
+  effort, inheriting Fast's when absent or invalid.
   Its `home`, `"simplex"` or none (Paul, 2026-10-26; docs/api.md, "An
   agent's home"), is where its owner is reached: its profile's
   `agent.system_prompt` tells it, beside its name, at every turn
@@ -2390,8 +2446,7 @@ and how a runtime finds them, is the image's.
   page with `pdf_page_image.py` and inspect it before delivery. No
   WeasyPrint, Pandoc, LaTeX, LibreOffice or nano-pdf is preinstalled;
   document conversion, spreadsheet recalculation and AI PDF edits that
-  need those remain optional. The audit and two offline sample paths are
-  in docs/skills-audit.md.
+  need those remain optional.
 - **Automatic learning and local forks (2026-10-09):** automatic memory and
   skill reviews are on (`auxiliary.background_review: { enabled: true }`).
   Managed skills stay read-only in `/data/hermes/managed-skills`; sync

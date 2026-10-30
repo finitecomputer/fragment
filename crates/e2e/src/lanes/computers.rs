@@ -110,7 +110,7 @@ fn said_something(reply: &Value) -> bool {
 }
 
 /// What a second run of a turn cannot hide, where the fakes count it
-/// (docs/explorations/pi-durable.md, "Count runs, not records"): the model
+/// (docs/durable-computers.md): the model
 /// fake's calls, its owner's ledger's model and key rows, and the
 /// computer's uses. A run again posts records that replay the first's (the
 /// same ids and bodies) or are refused, so a count of records sees nothing.
@@ -166,7 +166,7 @@ const SAVE_CHECKS: [&str; 7] = [
     "a save that then works lets it sleep, and its view says no more of it",
 ];
 
-/// Its saves, rung 4 of docs/explorations/pi-durable.md: a turn's end
+/// Its saves,  docs/durable-computers.md: a turn's end
 /// saves it awake, an always-on computer is saved, a failed save keeps
 /// its container (the lever's `fail-saves`), and one that works sleeps it.
 /// Starts awake, ends asleep. Answers how many replies of its agent it
@@ -355,7 +355,7 @@ fn bound_checks(s: &mut Suite, api: &Api, c: &Crashing) -> Result<()> {
 
 /// The crash checks, each skipped off the stub and the fakes. The ones
 /// marked P1 pass once the bridge claims each turn on `work` before it runs
-/// it (docs/explorations/pi-durable.md, P1): until then a crash's restore
+/// it (docs/durable-computers.md, P1): until then a crash's restore
 /// runs every turn since the save again.
 const CRASH_CHECKS: [&str; 10] = [
     "asleep, it is no computer to kill, and the lever refuses what it does not have",
@@ -382,7 +382,7 @@ struct Crashing<'a> {
 }
 
 /// A crash, by the lever's kill, of a computer the stub runs, with the
-/// fakes counting runs (rung 4 of docs/explorations/pi-durable.md): the
+/// fakes counting runs (docs/durable-computers.md): the
 /// owner's sleep (the save), a wake, a model turn and a key turn, the kill,
 /// one more message; then a turn cut by a second kill. Starts and ends
 /// awake. Answers how many replies of its agent it added.
@@ -543,8 +543,8 @@ const RECOVERY_CHECKS: [&str; 12] = [
     "a restart whose save fails, with nothing done since the save it came up from: it goes back to that save and tells its owner nothing, since nothing was lost (Paul, 2026-10-23); a notice of it is refused",
 ];
 
-/// What its owner is told, and the way back to working (rung 4 of
-/// docs/explorations/pi-durable.md, with the platform's notices): a sleep
+/// What its owner is told, and the way back to working (
+/// docs/durable-computers.md, with the platform's notices): a sleep
 /// whose save fails tells them at once, a restart (asked twice) goes back to
 /// the last save and says so until seen, the bound puts it to sleep unsaved
 /// when it said, and the wake after is told once. Starts and ends awake.
@@ -968,7 +968,7 @@ fn intercept_takes_model_ids(s: &mut Suite, api: &Api, owner_id: &str, fetched: 
     let routes = json!({ "cheap": route(crate::RECOMMENDED_LABEL), "medium": route(crate::STANDARD_LABEL) });
     s.ok(
         "the intercept lists the route's models' ids (GET /v1/models, naming no agent, as Hermes' /model asks it), each once, and they are the ids its view names by the route's names (GET /api/computer's models), each tier's route beside them",
-        listed == format!("{GLM_FLASH}, {MEDIUM_MODEL}, {DEEPSEEK_FLASH}") && given == json!({ "cheap": GLM_FLASH, "medium": MEDIUM_MODEL, "fallback": DEEPSEEK_FLASH, "vision": GLM_FLASH, "routes": routes }),
+        listed == format!("{GLM_FLASH}, {MEDIUM_MODEL}, {DEEPSEEK_FLASH}") && given == json!({ "images": [], "cheap": GLM_FLASH, "medium": MEDIUM_MODEL, "fallback": DEEPSEEK_FLASH, "vision": GLM_FLASH, "routes": routes }),
         &said,
     );
     let (calls, before) = (s.ai.calls().len(), quiet(api, owner_id, "aig:"));

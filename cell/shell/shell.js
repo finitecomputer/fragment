@@ -19,6 +19,7 @@ import { createTitles } from "./fragment-title.js";
 import { createLayout, store, reducedMotion, springFrames } from "./layout.js";
 import { createViewer } from "./viewer.js";
 import { billingSections, returnSaid, returning, seatGives, seatOffer } from "./billing.js";
+import { dataSection } from "./exports.js";
 import { createLauncher } from "./launcher.js";
 
 const $ = (id) => document.getElementById(id);
@@ -2344,7 +2345,7 @@ async function openSettings(push = true, failed = null) {
   // reads its export again while one builds
   if (state.guest) {
     returnSaid(back);
-    renderSettingsPage(page, [...billing, account, dataSection(), ...releaseLine(null)]);
+    renderSettingsPage(page, [...billing, account, dataSection({ api, el, section, line, actionLine, isOpen: () => state.page === "Settings" }), ...releaseLine(null)]);
     return tell();
   }
   const standing = ledger?.standing?.standing;
@@ -2418,7 +2419,7 @@ async function openSettings(push = true, failed = null) {
   const skills = await skillsSection();
   if (lost()) return;
   returnSaid(back);
-  renderSettingsPage(page, [account, ...billing, computer, agents, skills, connections, simplexSection(), buildSection(), dataSection(), ...releaseLine(c)]);
+  renderSettingsPage(page, [account, ...billing, computer, agents, skills, connections, simplexSection(), buildSection(), dataSection({ api, el, section, line, actionLine, isOpen: () => state.page === "Settings" }), ...releaseLine(c)]);
   renderAgentFaces();
   // a home read that answered while these were built shown now they are in
   paintHomes();
@@ -2600,85 +2601,6 @@ function renderAgentFaces() {
   renderNames();
 }
 
-// ---- your data: an export of everything that is the person's (docs/api.md,
-// Export), built in the background, which they are mailed about once it is
-// ready, and which downloads from here (the platform session, on a click
-// on this page) for seven days. One at a time; three a day.
-const EXPORT_STATE = { building: "Building", ready: "Ready to download", failed: "Failed", expired: "Expired" };
-const sized = (n) => (n >= 1e9 ? `${(n / 1e9).toFixed(1)} GB` : n >= 1e6 ? `${(n / 1e6).toFixed(1)} MB` : n >= 1e3 ? `${(n / 1e3).toFixed(1)} KB` : `${n} bytes`);
-function dataSection() {
-  const s = section("Your data");
-  s.id = "settings-data";
-  s.append(
-    el(
-      "p",
-      "muted",
-      "Download everything that is yours: your fragments and your agents' (their files, app data and messages), your computer's newest save, and the names of what others share with you. It is one file, made in the background: we email you when it is ready, and it is kept for seven days.",
-    ),
-  );
-  // its rows, drawn again as the export changes
-  const shown = el("div", "settings-export");
-  shown.dataset.state = "loading";
-  s.append(shown);
-  let timer = null;
-  const render = (v, refused) => {
-    shown.dataset.state = v?.state ?? "none";
-    const go = el("button", "quiet", v?.state === "building" ? "Exporting…" : v?.state === "ready" ? "Export again" : "Export everything");
-    go.type = "button";
-    go.dataset.action = "export";
-    go.disabled = v?.state === "building";
-    go.onclick = async () => {
-      go.disabled = true;
-      try {
-        render(await api("POST", "/api/export"));
-      } catch (e) {
-        render(v, e.message);
-      }
-    };
-    const rows = [];
-    if (v?.state === "ready" && v.download) {
-      const get = el("a", "quiet", "Download");
-      get.href = v.download;
-      get.dataset.action = "export-download";
-      rows.push(line("Export", EXPORT_STATE.ready, get), line("Size", sized(v.size ?? 0)), line("Kept until", new Date(v.expiresAt).toLocaleString()), line("New export", "Replaces this one, and its download", go));
-    } else if (v?.state === "building") {
-      rows.push(line("Export", EXPORT_STATE.building, go), line("Progress", `${v.progress.done} of ${v.progress.total} parts, ${sized(v.progress.bytes)} so far`));
-    } else {
-      rows.push(line("Export", v ? EXPORT_STATE[v.state] ?? v.state : "None yet", go));
-      if (v?.state === "failed" && v.error) rows.push(el("p", "settings-warning", v.error.message));
-    }
-    if (refused) rows.push(el("p", "settings-warning", refused));
-    shown.replaceChildren(...rows);
-    // while it builds, read it again, as long as settings show this section
-    clearTimeout(timer);
-    if (v?.state === "building") timer = setTimeout(refresh, 2000);
-  };
-  // A read that fails keeps the rows shown, adds one line that says so,
-  // and stops reading: its Try again reads again (never a new export), and
-  // what it reads goes on as any read does (#440).
-  const unread = () => {
-    const again = el("button", "quiet", "Try again");
-    again.type = "button";
-    again.dataset.action = "export-read";
-    again.onclick = () => {
-      again.disabled = true;
-      refresh();
-    };
-    const said = actionLine(el("span", "settings-warning", "Couldn't check your export."), again);
-    said.dataset.unread = "";
-    shown.querySelector("[data-unread]")?.remove();
-    shown.append(said);
-  };
-  const refresh = () => {
-    // only while settings show it (its first read is before it is placed);
-    // settings shown again build it again, which reads again
-    if (shown.dataset.state !== "loading" && (!s.isConnected || state.page !== "Settings")) return;
-    api("GET", "/api/export").then((r) => render(r.export), unread);
-  };
-  refresh();
-  return s;
-}
-
 // ---- an agent's settings in Settings' Agents: its row, then its
 // agent.json's picks, read once for them all. Each pick is written as the
 // others are, one write at a time (each reads what the one before wrote),
@@ -2721,9 +2643,8 @@ function agentSettings(a, row, modeled) {
   // the model pick: when there may be a choice, a route the deployment
   // names (Private, Standard) or a model of a provider the person
   // connected; whether there is one, with a single route, is the agent's
-  // own tier's to say (`modelPicker`, once agent.json is read)
-  const choice = modeled.length > 0 || routesOffered().length > 0;
-  const picks = [...(choice ? [modelPicker(a, modeled, read, write, said)] : []), reasoningPicker(a, read, write, said), ...homePicker(a, said)];
+  // own tier's to say (once agent.json is read)
+  const picks = [...modelPickers(a, modeled, read, write, said), ...homePicker(a, said)];
   box.append(row, ...picks, said);
   return box;
 }
@@ -2731,15 +2652,18 @@ function agentSettings(a, row, modeled) {
 // settings; one not written shows again what agent.json holds (`was`)
 async function savePick(pick, value, said, written, saved = "Saved: its next message uses it.") {
   pick.disabled = true;
+  delete pick.dataset.saved;
   said.textContent = "Saving…";
   try {
     await written;
     said.textContent = saved;
     pick.dataset.saved = value;
     pick.dataset.was = value;
+    return true;
   } catch (e) {
     said.textContent = e.message;
     pick.value = pick.dataset.was ?? "";
+    return false;
   } finally {
     pick.disabled = false;
   }
@@ -2780,71 +2704,118 @@ const tierName = (tier) => {
 // a route's value: no provider's name has a colon (a model's is `provider id`)
 const routeValue = (tier) => `route:${tierOf(tier)}`;
 const modelValue = (provider, id) => `${provider} ${id}`;
-function modelPicker(a, modeled, read, write, said) {
-  const pick = el("select", "agent-model");
-  pick.dataset.modelFor = a.fragment;
-  named(pick, a.fragment, (t) => `${t}'s model`, "aria-label");
-  const offered = routesOffered();
-  const tiered = modelOption("", tierName());
-  pick.append(...(offered.length ? offered.map((t) => modelOption(routeValue(t), tierName(t))) : [tiered]));
-  for (const p of modeled) {
-    const group = el("optgroup");
-    group.label = `${providerName(p.provider)} (your account)`;
-    for (const m of p.models) group.append(modelOption(modelValue(p.provider, m.id), m.name));
-    pick.append(group);
-  }
-  pick.disabled = true;
-  read
-    .then((j) => {
-      tiered.textContent = tierName(j?.tier);
-      const own = j?.model?.provider && j?.model?.id ? modelValue(j.model.provider, j.model.id) : "";
-      const v = own || (offered.length ? routeValue(j?.tier) : "");
-      // one named by hand, or a tier no route names, is shown as it is
-      if (v && ![...pick.options].some((o) => o.value === v)) pick.append(modelOption(v, own ? j.model.id : tierName(j?.tier)));
-      pick.value = v;
-      pick.dataset.was = v;
-      // a single route that is the agent's own tier, and no provider: no choice, no pick
-      pick.parentElement.hidden = modeled.length === 0 && pick.options.length < 2;
-    })
-    .finally(() => { pick.disabled = false; pick.dataset.read = "1"; });
-  pick.onchange = () => {
-    const value = pick.value;
-    const route = value.startsWith("route:") ? tierOf(value.slice(6)) : null;
-    const [provider, id] = value && !route ? value.split(" ") : [];
-    savePick(pick, value, said, write((next) => {
-      if (route) next.tier = route;
-      if (provider) next.model = { provider, id };
-      else delete next.model;
-      return route ? `its route: ${state.computer?.models?.routes?.[route]?.label ?? route}` : `its model: ${provider ? id : next.tier}`;
-    }));
-  };
-  return settingLabel("Model", pick);
+// BYO keeps the legacy model + reasoning as Fast. Deep is an optional
+// nested choice, ignored by old images; without one it inherits Fast.
+const REASONING = [["low", "Low"], ["high", "High"], ["max", "Max"]];
+const effortOf = (value, fallback = "high") => REASONING.some(([v]) => v === value) ? value : fallback;
+function ownChoice(value) {
+  if (typeof value?.provider !== "string" || typeof value?.id !== "string") return null;
+  const { provider, id } = value;
+  if (!provider.length || provider.length > 32 || /[^a-z0-9-]/.test(provider)) return null;
+  if (!id.length || id.length > 128 || /[^A-Za-z0-9._:/@-]/.test(id)) return null;
+  return { provider, id };
 }
-
-// ---- how hard an agent thinks (Paul, 2026-10-22: "expose the reasoning
-// level in the model picker … high is a good default"): its agent.json's
-// `reasoning`, `low` or `high` (the efforts the platform's model route
-// passes on), or none: the default, high. Its computer runs any other it
-// names at the default too, and so it is shown.
-const REASONING = [["", "Default (High)"], ["low", "Low"], ["high", "High"]];
-function reasoningPicker(a, read, write, said) {
-  const pick = el("select", "agent-model");
-  pick.dataset.reasoningFor = a.fragment;
-  named(pick, a.fragment, (t) => `${t}'s reasoning`, "aria-label");
-  for (const [value, text] of REASONING) pick.append(modelOption(value, text));
-  pick.disabled = true;
-  read
-    .then((j) => { pick.value = pick.dataset.was = REASONING.some(([v]) => v && v === j?.reasoning) ? j.reasoning : ""; })
-    .finally(() => { pick.disabled = false; pick.dataset.read = "1"; });
-  pick.onchange = () => {
-    const value = pick.value;
-    savePick(pick, value, said, write((next) => {
-      if (value) next.reasoning = value;
-      else delete next.reasoning;
-      return `its reasoning: ${value || "the default"}`;
-    }));
+function ownModes(j) {
+  const fast = ownChoice(j?.model);
+  if (!fast) return null;
+  const reasoning = effortOf(j.reasoning);
+  const saved = j.model.deep;
+  const deep = ownChoice({ ...saved, provider: saved?.provider === undefined ? fast.provider : saved.provider });
+  return { fast: { ...fast, reasoning }, deep: deep ? { ...deep, reasoning: effortOf(saved.reasoning, reasoning) } : { ...fast, reasoning } };
+}
+function modelPickers(a, modeled, read, write, said) {
+  const offered = routesOffered();
+  const fast = el("select", "agent-model"), deep = el("select", "agent-model");
+  fast.dataset.modelFor = deep.dataset.deepModelFor = a.fragment;
+  const effort = (mode) => {
+    const pick = el("select", "agent-model agent-effort");
+    pick.dataset[mode === "Fast" ? "reasoningFor" : "deepReasoningFor"] = a.fragment;
+    named(pick, a.fragment, (t) => `${t}'s ${mode} reasoning`, "aria-label");
+    for (const [value, text] of REASONING) pick.append(modelOption(value, text));
+    return pick;
   };
-  return settingLabel("Reasoning", pick);
+  const fastEffort = effort("Fast"), deepEffort = effort("Deep");
+  const row = (key, model, level) => {
+    const line = el("div", "agent-model-label");
+    const picks = el("span", "agent-mode-picks");
+    picks.append(model, level);
+    line.append(el("span", "settings-key", key), picks);
+    return line;
+  };
+  const fastRow = row("Model", fast, fastEffort), deepRow = row("Deep", deep, deepEffort);
+  deepRow.classList.add("has-modes");
+  deepRow.hidden = fastEffort.hidden = true;
+  const controls = [fast, deep, fastEffort, deepEffort];
+  for (const pick of controls) pick.disabled = true;
+  named(deep, a.fragment, (t) => `${t}'s Deep model`, "aria-label");
+  const fill = (pick, choice, tier, routes) => {
+    pick.replaceChildren();
+    if (routes) pick.append(...(offered.length ? offered.map((t) => modelOption(routeValue(t), tierName(t))) : [modelOption("", tierName(tier))]));
+    for (const p of modeled) {
+      const group = el("optgroup");
+      group.label = `${providerName(p.provider)} (your account)`;
+      for (const m of p.models) group.append(modelOption(modelValue(p.provider, m.id), m.name));
+      pick.append(group);
+    }
+    const value = choice ? modelValue(choice.provider, choice.id) : routes && offered.length ? routeValue(tier) : "";
+    if (value && ![...pick.options].some((o) => o.value === value)) pick.append(modelOption(value, choice ? choice.id : tierName(tier)));
+    pick.value = pick.dataset.was = value;
+  };
+  const show = (j) => {
+    const modes = ownModes(j);
+    fill(fast, modes?.fast, j?.tier, true);
+    fill(deep, modes?.deep, j?.tier, false);
+    fastEffort.value = fastEffort.dataset.was = modes?.fast.reasoning ?? "high";
+    deepEffort.value = deepEffort.dataset.was = modes?.deep.reasoning ?? "high";
+    fastEffort.hidden = deepRow.hidden = !modes;
+    fastRow.classList.toggle("has-modes", !!modes);
+    fastRow.querySelector(".settings-key").textContent = modes ? "Fast" : "Model";
+    fastRow.hidden = !modes && modeled.length === 0 && fast.options.length < 2;
+    named(fast, a.fragment, (t) => `${t}'s ${modes ? "Fast model" : "model"}`, "aria-label");
+    for (const pick of controls) { pick.disabled = j === null; pick.dataset.read = "1"; }
+  };
+  const choose = async (pick, change) => {
+    let applied;
+    const value = pick.value;
+    const written = write((next) => { const message = change(next, value); applied = next; return message; });
+    if (await savePick(pick, value, said, written)) show(applied);
+  };
+  const requireOwn = (next) => {
+    const modes = ownModes(next);
+    if (!modes) throw new Error("The model changed. Reload these settings and try again.");
+    return modes;
+  };
+  fast.onchange = () => choose(fast, (next, value) => {
+    if (!value || value.startsWith("route:")) {
+      if (value) next.tier = tierOf(value.slice(6));
+      delete next.model;
+      return `its route: ${state.computer?.models?.routes?.[next.tier]?.label ?? next.tier}`;
+    }
+    const [provider, id] = value.split(" ");
+    const choice = ownChoice({ provider, id });
+    if (!choice) return null;
+    const modes = ownModes(next);
+    const prior = modes ? next.model : {};
+    next.model = { ...prior, ...choice, deep: { ...prior.deep, ...(modes?.deep ?? { ...choice, reasoning: effortOf(next.reasoning) }) } };
+    return `its Fast model: ${id}`;
+  });
+  deep.onchange = () => choose(deep, (next, value) => {
+    const modes = requireOwn(next);
+    const [provider, id] = value.split(" ");
+    const choice = ownChoice({ provider, id });
+    if (!choice) return null;
+    next.model.deep = { ...next.model.deep, ...modes.deep, ...choice };
+    return `its Deep model: ${id}`;
+  });
+  for (const [mode, pick] of [["Fast", fastEffort], ["Deep", deepEffort]]) pick.onchange = () => choose(pick, (next, value) => {
+    const modes = requireOwn(next);
+    next.model.deep = { ...next.model.deep, ...modes.deep };
+    if (mode === "Fast") next.reasoning = effortOf(value);
+    else next.model.deep.reasoning = effortOf(value);
+    return `its ${mode} reasoning: ${value}`;
+  });
+  read.then(show);
+  return [fastRow, deepRow];
 }
 
 // ---- where an agent reaches its person (its home, above): its own chat,

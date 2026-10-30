@@ -1,6 +1,8 @@
 [package]
 name = "fragment-cli"
-version = "0.14.1"
+# the floor of the next release, which production's deploy makes (ci.yml,
+# `cli-version`): a minor or major bump is an edit here
+version = "0.15.0"
 edition = "2021"
 license = "MIT"
 

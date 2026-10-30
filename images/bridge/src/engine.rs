@@ -9,8 +9,8 @@
 //! said; the chat's `work` channel owns which turns have started (the
 //! journal); the runtime owns the in-flight turn; the bridge only
 //! translates. Its state is a cache: lost, or restored from any earlier
-//! save, it costs reads, never a second run (docs/explorations/
-//! pi-durable.md, P1).
+//! save, it costs reads, never a second run (docs/durable-computers.md,
+//! one life per turn).
 //!
 //! Its rules, in one place:
 //! - A record is admitted once in a life: the cursor of its `(agent,
@@ -1409,15 +1409,15 @@ impl Engine {
                 }
             }
             Event::End { turn, outcome } => self.end(&turn, outcome, Closed::Expired),
-            Event::Say { agent, fragment, text } => {
-                if self.agent(&agent).is_none() || text.trim().is_empty() {
+            Event::Say { agent, fragment, text, files } => {
+                if self.agent(&agent).is_none() || (text.trim().is_empty() && files.is_empty()) {
                     return;
                 }
                 self.state.said += 1;
                 self.dirty = true;
                 let turn = records::said_turn_id(&agent, &self.life, self.state.said);
                 crate::ev!("said", { "agent": agent, "fragment": fragment, "turn": turn });
-                self.post(&agent, &fragment, records::CHAT, records::reply_id(&turn, 1), records::reply(&text, &turn, &[], 0, false), Vec::new());
+                self.post(&agent, &fragment, records::CHAT, records::reply_id(&turn, 1), records::reply(&text, &turn, &[], 0, false), files);
             }
             Event::Notice { agent, fragment, category, text } => self.notice(&agent, &fragment, category, &text),
         }
