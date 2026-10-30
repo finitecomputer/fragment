@@ -1,15 +1,19 @@
 <!doctype html>
 <html lang="en">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Session Archive</title>
-<link rel="stylesheet" href="sessions.css">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Session Archive</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Funnel+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap">
+  <!-- a chat's look (templates/chat's own files, held through symlinks):
+       every URL here is relative, as the chat's are -->
+  <link rel="stylesheet" href="./chat.css">
+  <link rel="stylesheet" href="./sessions.css">
 </head>
-<body>
-<main class="sessions-page">
-  <div id="kinds"><p class="muted">Loading…</p></div>
-</main>
-<script type="module" src="sessions.js"></script>
+<body class="fragment-chat">
+  <div class="scroll" id="scroll"><div class="column" id="page"><p class="muted">Loading…</p></div></div>
+  <script type="module" src="./sessions.js"></script>
 </body>
 </html>
