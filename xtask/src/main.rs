@@ -312,8 +312,6 @@ fn dev(args: &[String]) -> Result<()> {
         project: devstack::cell_dir(),
         port: DEV_PORT,
         log_dir: devstack::repo_root().join("target/devstack"),
-        // wrangler's own debug logs, when asked for
-        node_logs: std::env::var_os("FRAGMENT_NODE_LOGS").is_some(),
         // in the terminal's group: Ctrl-C stops it with xtask
         own_group: false,
     };
