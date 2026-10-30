@@ -1,5 +1,9 @@
 [package]
 name = "fragment-cli"
+# The base of the CLI's releases: production's deploy publishes the next
+# patch above every release's tag, or this when it is higher, and builds
+# it in (`fragment --version`: src/main.rs, VERSION; xtask/src/cli.rs). A
+# patch is never a hand edit; a minor or a major is, here.
 version = "0.14.1"
 edition = "2021"
 license = "MIT"

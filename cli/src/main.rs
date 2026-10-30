@@ -32,13 +32,21 @@ use std::path::{Path, PathBuf};
 
 const GUIDE: &str = include_str!("../GUIDE.md");
 const SKILL: &str = include_str!("../SKILL.md");
+/// The CLI's version, as `--version`, its User-Agent and `fragment mcp` say
+/// it: a release's tag (`FRAGMENT_CLI_VERSION`, which the release workflow
+/// sets at build: .github/workflows/release.yml), else Cargo.toml's, the
+/// base a release's is at least (xtask/src/cli.rs).
+pub const VERSION: &str = match option_env!("FRAGMENT_CLI_VERSION") {
+    Some(v) if !v.is_empty() => v,
+    _ => env!("CARGO_PKG_VERSION"),
+};
 /// The platform the CLI calls when nothing names another: production's.
 /// `fragment login --host` (or `fragment host`) saves another in the
 /// config, so a preview's or a dev stack's is typed once.
 const DEFAULT_HOST: &str = "https://finite.chat";
 
 #[derive(Parser)]
-#[command(name = "fragment", version, about = "make and run fragments: a folder in git, an app of operations and jobs, channels, members; on Cloudflare")]
+#[command(name = "fragment", version = VERSION, about = "make and run fragments: a folder in git, an app of operations and jobs, channels, members; on Cloudflare")]
 struct Cli {
     /// Host base URL (else FRAGMENT_HOST, else the config's, which `fragment
     /// login` saves, else https://finite.chat)

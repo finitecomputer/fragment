@@ -1,18 +1,43 @@
 name: release
-# Binary releases from tags: push v0.9.0 and CI builds the tarballs,
-# attaches them, and publishes the release as the latest. Each tarball is
-# fragment-<uname -s>-<uname -m>.tar.gz holding one binary, `fragment`, so
-# the one-line install (cli/SKILL.md) fetches
+# The CLI's binary releases, two ways in:
+#
+# - Production's deploy (ci.yml, `cli-plan` then `cli-release`): after a
+#   green deploy of `production` whose CLI code is not the latest
+#   release's (`cargo xtask cli plan`, xtask/src/cli.rs), ci.yml calls this
+#   with the next version's tag and the deployed commit. The tag must be
+#   new: the release makes it, at that commit.
+# - By hand: push a tag v<version> and this builds the tag's commit.
+#   Hand-written release notes can live in a draft release created before
+#   tagging; if none exists the workflow falls back to --generate-notes.
+#
+# Either way it publishes the release as the latest, and each binary says
+# the tag's version (`fragment --version`, its User-Agent: built in from
+# FRAGMENT_CLI_VERSION, cli/src/main.rs `VERSION`), which the build checks.
+# Each tarball is fragment-<uname -s>-<uname -m>.tar.gz holding one binary,
+# `fragment`, so the one-line install (cli/SKILL.md) fetches
 # releases/latest/download/fragment-$(uname -s)-$(uname -m).tar.gz;
 # `cargo xtask check` holds the matrix and that command to each other.
-# Hand-written release notes can live in a draft release created before
-# tagging; if none exists the workflow falls back to --generate-notes.
 on:
   push:
     tags: ["v*"]
+  workflow_call:
+    inputs:
+      tag:
+        description: "the release's tag, v<version>, which no tag holds yet"
+        type: string
+        required: true
+      sha:
+        description: the commit the tag is made at, and every binary built from
+        type: string
+        required: true
 
 permissions:
   contents: write
+
+env:
+  # the caller's, or the pushed tag's
+  TAG: ${{ inputs.tag || github.ref_name }}
+  SHA: ${{ inputs.sha || github.sha }}
 
 jobs:
   build:
@@ -35,7 +60,12 @@ jobs:
             asset: Linux-aarch64
     runs-on: ${{ matrix.os }}
     steps:
+      # the deployed commit when called; the pushed tag's otherwise (empty,
+      # checkout's default)
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.sha }}
+          persist-credentials: false
       - name: musl toolchain
         if: endsWith(matrix.target, '-linux-musl')
         run: sudo apt-get update && sudo apt-get install -y musl-tools
@@ -43,7 +73,18 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - name: build
-        run: cargo build --release -p fragment-cli --target ${{ matrix.target }}
+        run: |
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || { echo "::error::$TAG is no release's tag: v<major>.<minor>.<patch>"; exit 1; }
+          FRAGMENT_CLI_VERSION="${TAG#v}" cargo build --release -p fragment-cli --target ${{ matrix.target }}
+      # each binary says the tag's version; macOS's x86_64 one runs under
+      # Rosetta on the arm64 runner, installed when it is not there
+      - name: version
+        run: |
+          if [ "${{ matrix.target }}" = x86_64-apple-darwin ] && ! arch -x86_64 /usr/bin/true 2>/dev/null; then
+            sudo softwareupdate --install-rosetta --agree-to-license
+          fi
+          said=$("target/${{ matrix.target }}/release/fragment" --version)
+          [ "$said" = "fragment ${TAG#v}" ] || { echo "::error::the binary says \"$said\", not fragment ${TAG#v}"; exit 1; }
       - name: package
         # macOS's tar adds no AppleDouble `._fragment` beside the binary
         env:
@@ -58,6 +99,10 @@ jobs:
   release:
     needs: build
     runs-on: ubuntu-latest
+    # one release at a time, a hand tag's or a deploy's
+    concurrency:
+      group: cli-release
+      cancel-in-progress: false
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -66,13 +111,32 @@ jobs:
       - name: attach
         env:
           GH_TOKEN: ${{ github.token }}
+          # set when production's deploy called: its tag is new, made here
+          CALLED_TAG: ${{ inputs.tag }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          tag="${GITHUB_REF_NAME}"
-          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release upload "$tag" dist/* --repo "$GITHUB_REPOSITORY" --clobber
+          notes=() target=()
+          if [ -n "$CALLED_TAG" ]; then
+            # never another release's tag: one taken since the plan (a hand
+            # tag) means planning again
+            if out=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" 2>&1); then
+              echo "::error::$TAG exists already, so nothing is published for $SHA: re-run this run's cli-plan job, which plans the next version (the deploy does not run again)"
+              exit 1
+            elif ! grep -q "HTTP 404" <<< "$out"; then
+              echo "::error::cannot tell whether $TAG exists, so nothing is published: $out"
+              exit 1
+            fi
+            notes=(--notes "The CLI of production's deploy of $SHA ($RUN_URL).") target=(--target "$SHA")
+          fi
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --clobber
           else
-            gh release create "$tag" dist/* --repo "$GITHUB_REPOSITORY" \
-              --title "fragment $tag" --generate-notes
+            gh release create "$TAG" dist/* --repo "$GITHUB_REPOSITORY" "${target[@]}" \
+              --title "fragment $TAG" --generate-notes "${notes[@]}"
           fi
           # published, and the latest: the install command fetches from releases/latest
-          gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --draft=false --latest
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" "${target[@]}" --draft=false --latest
+          if [ -n "$CALLED_TAG" ]; then
+            tagged=$(gh api "repos/$GITHUB_REPOSITORY/commits/$TAG" --jq .sha)
+            [ "$tagged" = "$SHA" ] || { echo "::error::$TAG is at $tagged, not $SHA, which its binaries were built from"; exit 1; }
+          fi

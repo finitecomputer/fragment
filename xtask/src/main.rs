@@ -80,6 +80,13 @@
 //!                    the deployment's Stripe as docs/billing.md wants it, on the
 //!                    account its stripe.key_file names: check reads and says what
 //!                    is wrong; setup makes what is missing (xtask/src/stripe.rs)
+//!   cli id [<rev>]   the CLI's content id at a commit (default HEAD): a hash
+//!                    of what it is built from, never of the commit
+//!                    (xtask/src/cli.rs)
+//!   cli plan [--at <rev>] [--latest <tag>] [--github-output <file>] [--summary <file>]
+//!                    whether production's deploy of a commit publishes a
+//!                    CLI release (its CLI is not the latest release's), and
+//!                    its version: CI's `cli-plan` (ci.yml)
 //!
 //! dev, e2e, secret, deploy, image and teardown run wrangler and npm on the pinned Node,
 //! and check runs `node --check` on it, fetched into target/tools on first
@@ -97,6 +104,7 @@ use anyhow::{bail, Context, Result};
 use fragment_devstack as devstack;
 
 mod build;
+mod cli;
 mod cloudflare;
 mod deploy;
 mod dev_agent;
@@ -521,6 +529,7 @@ fn check() -> Result<()> {
     let copies = ["cli/GUIDE.md", "README.md", "cell/shell/shell.js"].map(|path| read(path).map(|text| (path, text)));
     let copies: Vec<(&str, String)> = copies.into_iter().collect::<Result<_>>()?;
     skill_installs_release(&read("cli/SKILL.md")?, &read(".github/workflows/release.yml")?, &copies)?;
+    release_follows_production(&read(".github/workflows/release.yml")?, &read(".github/workflows/ci.yml")?, &read("cli/src/main.rs")?)?;
     javascript_parses(&root)?;
     run(Command::new("cargo").args(["test", "--workspace", "--all-features"]).current_dir(&root))?;
     run(Command::new("cargo")
@@ -565,6 +574,20 @@ fn skill_installs_release(skill: &str, workflow: &str, copies: &[(&str, String)]
     Ok(())
 }
 
+/// Production's deploy calls the release workflow (ci.yml's `cli-release`),
+/// which builds the tag's version in (release.yml's build sets
+/// FRAGMENT_CLI_VERSION, which the CLI's `VERSION` reads: cli/src/main.rs).
+/// A side renamed alone would publish nothing after a deploy, or binaries
+/// that say Cargo.toml's version, and only a release would say so.
+fn release_follows_production(workflow: &str, ci: &str, cli_main: &str) -> Result<()> {
+    anyhow::ensure!(workflow.contains("\n  workflow_call:\n"), "release.yml is callable (workflow_call), as production's deploy calls it");
+    anyhow::ensure!(ci.contains("    uses: ./.github/workflows/release.yml\n"), "ci.yml's cli-release calls release.yml");
+    let build = r#"FRAGMENT_CLI_VERSION="${TAG#v}" cargo build --release -p fragment-cli"#;
+    anyhow::ensure!(workflow.contains(build), "release.yml builds the tag's version in: {build}");
+    anyhow::ensure!(cli_main.contains(r#"option_env!("FRAGMENT_CLI_VERSION")"#), "cli/src/main.rs reads its version from FRAGMENT_CLI_VERSION");
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
@@ -579,7 +602,8 @@ fn main() -> Result<()> {
         Some("teardown") => deploy::teardown(&args[1..]),
         Some("stripe") => deploy::stripe(&args[1..]),
         Some("image") => image::image(&args[1..]),
-        _ => bail!("usage: cargo xtask build [--dev] | dev [--clean] | try <template> [name] | e2e [--build-only | --no-build] [--only | --except <section>[,...] | --shard <k>/<n>] [--rehearse] | e2e --hosted --config <file> --branch <name> [--dry-run | --sweep] | check | schema-lock | secret set <name> | gen <name> | list --config <file> | deploy --config <file> [--branch <name>] [--pinned-only] | image push <image> | copy <image> --from <reference> --repository <name> --tag <tag> [--summary <file>] | teardown --config <file> --branch <name>"),
+        Some("cli") => cli::cli(&args[1..]),
+        _ => bail!("usage: cargo xtask build [--dev] | dev [--clean] | try <template> [name] | e2e [--build-only | --no-build] [--only | --except <section>[,...] | --shard <k>/<n>] [--rehearse] | e2e --hosted --config <file> --branch <name> [--dry-run | --sweep] | check | schema-lock | secret set <name> | gen <name> | list --config <file> | deploy --config <file> [--branch <name>] [--pinned-only] | image push <image> | copy <image> --from <reference> --repository <name> --tag <tag> [--summary <file>] | teardown --config <file> --branch <name> | cli id [<rev>] | cli plan [--at <rev>] [--latest <tag>] [--github-output <file>] [--summary <file>]"),
     }
 }
 
@@ -623,6 +647,20 @@ mod tests {
         assert!(super::skill_installs_release(&skill, &workflow.replace("asset: Darwin-arm64", "asset: Darwin-aarch64"), &copies).is_err());
         assert!(super::skill_installs_release(&skill, &workflow, &[("README.md", read("README.md").replace("uname -m", "arch"))]).is_err());
         assert!(super::skill_installs_release(&skill.replacen("name: fragment", "title: fragment", 1), &workflow, &copies).is_err());
+    }
+
+    /// The repo's own workflows and CLI agree; a release that is not
+    /// callable, a deploy that calls none, or a version renamed on one side
+    /// alone does not.
+    #[test]
+    fn production_releases_the_cli() {
+        let read = |path: &str| std::fs::read_to_string(super::devstack::repo_root().join(path)).unwrap();
+        let (workflow, ci, cli) = (read(".github/workflows/release.yml"), read(".github/workflows/ci.yml"), read("cli/src/main.rs"));
+        assert!(super::release_follows_production(&workflow, &ci, &cli).is_ok());
+        assert!(super::release_follows_production(&workflow.replace("workflow_call:", "workflow_dispatch:"), &ci, &cli).is_err());
+        assert!(super::release_follows_production(&workflow, &ci.replace("uses: ./.github/workflows/release.yml", "uses: ./.github/workflows/build.yml"), &cli).is_err());
+        assert!(super::release_follows_production(&workflow.replace("FRAGMENT_CLI_VERSION=", "CLI_VERSION="), &ci, &cli).is_err());
+        assert!(super::release_follows_production(&workflow, &ci, &cli.replace("\"FRAGMENT_CLI_VERSION\"", "\"CLI_VERSION\"")).is_err());
     }
 
     #[test]

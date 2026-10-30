@@ -19,3 +19,5 @@ fragment-nip98 = { path = "../crates/nip98" }
 fragment-templates = { path = "../crates/templates", features = ["embed"] }
 fragment-fakes = { path = "../crates/fakes" }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+# Cargo.lock and the manifests, read at a commit for the CLI's content id (cli.rs)
+toml = "0.9"

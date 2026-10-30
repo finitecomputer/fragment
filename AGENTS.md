@@ -420,7 +420,17 @@ wrangler and the Sandbox SDK the cell's shim bundles, pinned in
   `dorny/paths-filter`), and on a run by hand. It also runs on merge
   groups: `check` always, Docker when the group's diff from its exact
   base touches those paths. It keeps no layer cache: the workflow
-  says why. `release.yml` builds the CLI for macOS and Linux.
+  says why. `release.yml` builds the CLI for macOS and Linux and
+  publishes it as the latest release, which the install line fetches:
+  after production's green deploy (ci.yml's `cli-plan` and `cli-release`)
+  when the deployed CLI's code is not the latest release's (`cargo xtask
+  cli id <rev>`: a content id, a hash of what the CLI is built from at a
+  commit, xtask/src/cli.rs), as the next patch above every release's tag
+  or cli/Cargo.toml's version when that is higher (a minor or a major is
+  a hand edit there); or from a tag `v<version>` pushed by hand (Paul's).
+  Either way `fragment --version` is the tag's (`FRAGMENT_CLI_VERSION` at
+  build). A plan or a release that fails leaves the deploy standing; the
+  run is red at that job, and re-running `cli-plan` runs both again.
   Master's pushes also run `preview-image` beside the tests. It hashes the
   committed image inputs (`xtask/src/image/preview.rs`), reuses the registry's
   `inputs-<key>` tag when present, or builds and pushes it once with a
