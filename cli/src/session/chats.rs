@@ -13,15 +13,22 @@
 //! checked against their hash. Only regular files inside `chats/` are read
 //! (no link out of it, no device), each once and bounded, and each
 //! conversation goes to the spool as it is read.
+//!
+//! **Read as typed records, streaming.** A file is read through as the
+//! records it holds, never a whole tree of it and a copy, and each message
+//! is kept as it is read (`Kept`): the base64 of a picture Hermes stored
+//! with a message (which export.py copied as it was stored) is held one
+//! message at a time, so reading a file holds about what its conversations
+//! keep.
 
 use std::collections::BTreeMap;
 use std::io::Read as _;
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
-use fragment_core::session::{self, Kind, Message, Session};
+use fragment_core::session::{self, Attachment, Kind, Message, Session};
+use serde::de::IgnoredAny;
 use serde::Deserialize;
-use serde_json::Value;
 
 use super::{said_id, Spool};
 
@@ -31,15 +38,16 @@ pub const FORMAT: &str = "finite-chat-archive/1";
 pub const ORIGIN: &str = "hermes";
 /// Which read this is (`Session::reader`).
 pub const READER: u32 = 10;
-/// The largest of its files read (a month's runs share one; a chat's is
-/// held to `SESSION_MAX_BYTES` once filed, and its record's text is said
-/// whole by the export, so a little over).
-const FILE_MAX_BYTES: u64 = 64 * 1024 * 1024;
+/// The largest of its files read: a month's runs share one, and a chat's
+/// holds its pictures' base64 as Hermes stored them (read through, never
+/// held whole: the module's doc).
+const FILE_MAX_BYTES: u64 = 512 * 1024 * 1024;
 
-/// A conversation as the export wrote it (its index's record, and with
-/// its messages in its file).
+/// A conversation as the export wrote it: as its index lists it
+/// (`Record<IgnoredAny>`, its messages a count), and as its file holds it
+/// (`Record<Kept>`).
 #[derive(Debug, Deserialize)]
-struct Record {
+struct Record<M> {
     id: String,
     #[serde(default)]
     file: Option<String>,
@@ -60,9 +68,43 @@ struct Record {
     /// The Hermes sessions it joins.
     #[serde(default)]
     sessions: Vec<String>,
-    /// In a file, its messages (in the index, how many were said).
-    #[serde(default)]
-    messages: Value,
+    messages: Option<M>,
+}
+
+type Listed = Record<IgnoredAny>;
+
+/// A conversation's messages, each kept as it is read
+/// (`Message::normalized`): never more of a message's text held than one.
+/// Their files are set aside as the export names them (by message), each
+/// back in its message once its bytes are kept (`media`).
+#[derive(Debug)]
+struct Kept(Vec<Message>, Vec<(usize, Attachment)>);
+
+impl<'de> Deserialize<'de> for Kept {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Kept, D::Error> {
+        struct Each;
+        impl<'de> serde::de::Visitor<'de> for Each {
+            type Value = Kept;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a list of messages")
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Kept, A::Error> {
+                let (mut kept, mut files) = (Vec::new(), Vec::new());
+                while let Some(mut m) = seq.next_element::<Message>()? {
+                    files.extend(std::mem::take(&mut m.attachments).into_iter().map(|a| (kept.len(), a)));
+                    kept.push(m.normalized());
+                }
+                Ok(Kept(kept, files))
+            }
+        }
+        d.deserialize_seq(Each)
+    }
+}
+
+/// A month's runs (`chats/runs/…`): each conversation by its id.
+#[derive(Debug, Deserialize)]
+struct Runs {
+    conversations: BTreeMap<String, Record<Kept>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -71,7 +113,7 @@ struct IndexFile {
     /// The agent it exported.
     #[serde(default)]
     agent: Option<String>,
-    conversations: Vec<Record>,
+    conversations: Vec<Listed>,
 }
 
 /// Where an export's chats are, from a path a person names: its `chats/`
@@ -95,12 +137,12 @@ fn regular(path: &Path) -> bool {
 /// (the rest is read); an import past an archive's limits stops, refused.
 pub fn read(root: &Path, spool: &mut Spool) -> Result<Vec<String>> {
     let index_path = root.join("chats/index.json");
-    let index: IndexFile = serde_json::from_slice(&read_file(root, "chats/index.json", FILE_MAX_BYTES)?).with_context(|| format!("reading {}", index_path.display()))?;
+    let index: IndexFile = serde_json::from_reader(open_file(root, "chats/index.json", FILE_MAX_BYTES)?).with_context(|| format!("reading {}", index_path.display()))?;
     if index.format != FORMAT {
         bail!("{} is format {:?}, not the old Finite's export ({FORMAT})", index_path.display(), index.format);
     }
     let mut problems = Vec::new();
-    let mut by_file: BTreeMap<String, Vec<Record>> = BTreeMap::new();
+    let mut by_file: BTreeMap<String, Vec<Listed>> = BTreeMap::new();
     for r in index.conversations {
         match r.file.clone().filter(|f| inside_chats(f)) {
             Some(f) => by_file.entry(f).or_default().push(r),
@@ -108,21 +150,28 @@ pub fn read(root: &Path, spool: &mut Spool) -> Result<Vec<String>> {
         }
     }
     for (file, records) in by_file {
-        let v: Value = match read_file(root, &file, FILE_MAX_BYTES).and_then(|b| serde_json::from_slice(&b).with_context(|| file.clone())) {
-            Ok(v) => v,
+        // a month's runs name each by its id (`chats/runs/`); a chat's file
+        // is the conversation
+        let read: Result<BTreeMap<String, Record<Kept>>> = open_file(root, &file, FILE_MAX_BYTES).and_then(|r| {
+            if file.starts_with("chats/runs/") {
+                serde_json::from_reader::<_, Runs>(r).map(|runs| runs.conversations).with_context(|| file.clone())
+            } else {
+                serde_json::from_reader::<_, Record<Kept>>(r).map(|h| BTreeMap::from([(h.id.clone(), h)])).with_context(|| file.clone())
+            }
+        });
+        let mut held = match read {
+            Ok(held) => held,
             Err(e) => {
                 problems.push(format!("{file}: {e:#}"));
                 continue;
             }
         };
         for listed in records {
-            // a chat's file is the conversation; a month's names each by id
-            let held = if v.get("conversations").is_some() { v["conversations"].get(&listed.id).cloned() } else { Some(v.clone()).filter(|c| c["id"] == listed.id.as_str()) };
-            let Some(held) = held else {
+            let Some(h) = held.remove(&listed.id) else {
                 problems.push(format!("conversation {}: not in {file}", said_id(&listed.id)));
                 continue;
             };
-            match serde_json::from_value::<Record>(held).map_err(|e| e.to_string()).and_then(|r| session(r, &listed, index.agent.as_deref())) {
+            match session(h, &listed, index.agent.as_deref()) {
                 Ok((mut s, files)) => {
                     media(root, &mut s, files, spool, &mut problems)?;
                     spool.add(s)?;
@@ -134,44 +183,13 @@ pub fn read(root: &Path, spool: &mut Spool) -> Result<Vec<String>> {
     Ok(problems)
 }
 
-/// A file a message names: its message's place, its attachment's place,
-/// and its path under `chats/`.
-type Named = (usize, usize, String);
-
-/// The files its messages hold, into `spool`: each read from `chats/` and
-/// kept when its bytes are what its attachment names; one that is not (or
-/// is missing, or too large) is left out of its message, said.
-fn media(root: &Path, s: &mut Session, files: Vec<Named>, spool: &mut Spool, problems: &mut Vec<String>) -> Result<()> {
-    let mut lost: Vec<(usize, usize)> = Vec::new();
-    for (i, j, path) in files {
-        let a = &s.messages[i].attachments[j];
-        let kept = match Some(format!("chats/{path}")).filter(|p| inside_chats(p)).map(|p| read_file(root, &p, session::MEDIA_FILE_MAX_BYTES)) {
-            Some(Ok(bytes)) => spool.add_media(a, &bytes)?,
-            _ => false,
-        };
-        if !kept {
-            problems.push(format!("conversation {}: its file {} is not what it names, or not there", said_id(&s.id), said_id(&a.name)));
-            lost.push((i, j));
-        }
-    }
-    for (i, j) in lost.into_iter().rev() {
-        s.messages[i].attachments.remove(j);
-    }
-    Ok(())
-}
-
 /// A conversation from its file's record (`held`), its index's `listed`
-/// filling in what the file left out; with each file its messages name
-/// (message, attachment, its path under `chats/`).
-fn session(held: Record, listed: &Record, agent: Option<&str>) -> Result<(Session, Vec<Named>), String> {
+/// filling in what the file left out.
+fn session(held: Record<Kept>, listed: &Listed, agent: Option<&str>) -> Result<(Session, Vec<(usize, Attachment)>), String> {
     let kind_name = held.kind.as_deref().or(listed.kind.as_deref()).unwrap_or("chat");
     let kind = Kind::parse(kind_name).ok_or_else(|| format!("its kind {:?} is none of chat, cron, subagent", said_id(kind_name)))?;
-    let files: Vec<Named> = held.messages.as_array().into_iter().flatten().enumerate()
-        .flat_map(|(i, m)| m["attachments"].as_array().into_iter().flatten().enumerate().map(move |(j, a)| (i, j, a["path"].as_str().unwrap_or_default().to_string())))
-        .collect();
-    let messages: Vec<Message> = match held.messages {
-        Value::Array(_) => serde_json::from_value(held.messages).map_err(|e| format!("its messages: {e}"))?,
-        _ => return Err("its file holds no messages".into()),
+    let Some(Kept(messages, files)) = held.messages else {
+        return Err("its file holds no messages".into());
     };
     let or = |a: Option<String>, b: &Option<String>| a.or_else(|| b.clone());
     let s = Session {
@@ -193,6 +211,30 @@ fn session(held: Record, listed: &Record, agent: Option<&str>) -> Result<(Sessio
     Ok((s, files))
 }
 
+/// The files its messages hold, into `spool`: each read from `chats/` and
+/// back in its message when its bytes are what its attachment names; one
+/// that is not (or is missing, too large, or no file an archive keeps) is
+/// left out of its message, said.
+fn media(root: &Path, s: &mut Session, files: Vec<(usize, Attachment)>, spool: &mut Spool, problems: &mut Vec<String>) -> Result<()> {
+    for (i, a) in files {
+        let read = |p: String| -> Result<Vec<u8>> {
+            let mut bytes = Vec::new();
+            open_file(root, &p, session::MEDIA_FILE_MAX_BYTES)?.read_to_end(&mut bytes)?;
+            Ok(bytes)
+        };
+        let kept = match Some(format!("chats/{}", a.path)).filter(|p| a.valid() && inside_chats(p)).map(read) {
+            Some(Ok(bytes)) => spool.add_media(&a, &bytes)?,
+            _ => false,
+        };
+        if kept {
+            s.messages[i].attachments.push(a);
+        } else {
+            problems.push(format!("conversation {}: its file {} is not what it names, or not there", said_id(&s.id), said_id(&a.name)));
+        }
+    }
+    Ok(())
+}
+
 /// Whether an index's `file` is one of the export's chats: relative,
 /// under `chats/`, never out of it.
 fn inside_chats(file: &str) -> bool {
@@ -200,12 +242,13 @@ fn inside_chats(file: &str) -> bool {
     file.starts_with("chats/") && p.components().all(|c| matches!(c, Component::Normal(_)))
 }
 
-/// The bytes of `file` under `root`: a regular file, every folder on the
-/// way to it a folder (no link out of the export), at most `max` bytes
-/// (read so, whatever it says its size is).
-fn read_file(root: &Path, file: &str, max: u64) -> Result<Vec<u8>> {
+/// `file` under `root`, to be read through: a regular file, every folder on
+/// the way to it a folder (no link out of the export), at most `max` bytes
+/// (as its size says, and read so whatever it says).
+fn open_file(root: &Path, file: &str, max: u64) -> Result<impl std::io::Read> {
     let path = root.join(file);
     let mut at = root.to_path_buf();
+    let mut size = 0;
     for part in Path::new(file).components() {
         at.push(part);
         let m = std::fs::symlink_metadata(&at).with_context(|| format!("reading {}", path.display()))?;
@@ -213,19 +256,20 @@ fn read_file(root: &Path, file: &str, max: u64) -> Result<Vec<u8>> {
         if !ok {
             bail!("{} is no regular file of the export's (a link, or a device)", at.display());
         }
+        size = m.len();
     }
-    let mut bytes = Vec::new();
-    std::fs::File::open(&path).with_context(|| format!("reading {}", path.display()))?.take(max + 1).read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > max {
+    if size > max {
         bail!("{} is past the {} MiB it may be", path.display(), max / (1024 * 1024));
     }
-    Ok(bytes)
+    // a file that grows while read is cut, and so fails to parse
+    let f = std::fs::File::open(&path).with_context(|| format!("reading {}", path.display()))?;
+    Ok(std::io::BufReader::new(f.take(max)))
 }
 
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use serde_json::json;
+    use serde_json::{json, Value};
     use std::collections::BTreeSet;
 
     /// An export's `chats/` under `root`, as export.py writes one: a chat
@@ -278,6 +322,36 @@ pub(crate) mod tests {
         assert_eq!(c.messages[1].tool_calls[0].name, "web");
         let run = read_back(&s, "hermes-r1");
         assert_eq!((run.kind, run.messages[0].text.as_deref()), (Kind::Cron, Some("digest")), "Hermes' structured text, which the export copied raw, reads as text");
+    }
+
+    /// Goal: a file is read as what its conversations keep, so one past
+    /// the size they keep (a picture's base64, which export.py copied as
+    /// Hermes stored it) reads, and one past `FILE_MAX_BYTES` is refused
+    /// alone without being read. Method: a chat holding a 4 MiB picture,
+    /// and a sparse file a byte past the cap.
+    #[test]
+    fn an_export_reads_as_what_it_keeps() {
+        let root = super::super::tempdir();
+        export(&root);
+        let picture = "A".repeat(4 * 1024 * 1024);
+        let parts = json!([{ "type": "text", "text": "look" }, { "type": "image_url", "image_url": { "url": format!("data:image/png;base64,{picture}") } }]);
+        let photo = json!({ "id": "p1", "file": "chats/sessions/p1.json", "kind": "chat", "started_at": "2026-10-03T09:00:00Z",
+            "messages": [{ "role": "user", "at": "2026-10-03T09:00:00Z", "text": format!("\u{0}json:{parts}") }, { "role": "assistant", "at": "2026-10-03T09:00:01Z", "text": "a bean" }] });
+        std::fs::write(root.join("chats/sessions/p1.json"), photo.to_string()).unwrap();
+        std::fs::File::create(root.join("chats/sessions/big.json")).unwrap().set_len(FILE_MAX_BYTES + 1).unwrap();
+        let index = root.join("chats/index.json");
+        let mut v: Value = serde_json::from_slice(&std::fs::read(&index).unwrap()).unwrap();
+        for (id, file) in [("p1", "chats/sessions/p1.json"), ("b1", "chats/sessions/big.json")] {
+            v["conversations"].as_array_mut().unwrap().push(json!({ "id": id, "file": file }));
+        }
+        std::fs::write(&index, v.to_string()).unwrap();
+        let mut s = spool();
+        let problems = read(&root, &mut s).unwrap();
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].contains("past the 512 MiB"), "{problems:?}");
+        let p = read_back(&s, "hermes-p1");
+        assert_eq!(p.messages[0].text.as_deref(), Some("look\n[image]"));
+        assert!(s.bytes < 64 * 1024, "the spool holds what is kept: {}", s.bytes);
     }
 
     /// Goal: a message's files come with it, by their hash, each once; one

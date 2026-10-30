@@ -170,6 +170,29 @@ pub struct Message {
 }
 
 impl Message {
+    /// The message as an archive keeps it (`Session::normalized`), so a
+    /// reader can keep each as it reads it. Applying it again changes
+    /// nothing.
+    pub fn normalized(mut self) -> Message {
+        self.role = bounded(&self.role);
+        self.text = self.text.take().map(|t| text_of(&t)).filter(|t| !t.is_empty()).map(|t| if self.role == "tool" { clip(&t, TOOL_TEXT_MAX_CHARS) } else { t });
+        self.tool = self.tool.take().map(|t| bounded(&t)).filter(|t| !t.is_empty());
+        self.call = self.call.take().map(|t| bounded(&t)).filter(|t| !t.is_empty());
+        self.reasoning = self.reasoning.take().filter(|r| !r.is_empty()).map(|r| clip(&r, REASONING_MAX_CHARS));
+        for call in &mut self.tool_calls {
+            call.id = call.id.take().map(|t| bounded(&t)).filter(|t| !t.is_empty());
+            call.name = bounded(&call.name);
+            call.arguments = clip(&call.arguments, ARGUMENTS_MAX_CHARS);
+        }
+        self.at = self.at.take().and_then(|at| normal_iso(&at));
+        self.attachments.retain(Attachment::valid);
+        for a in &mut self.attachments {
+            a.name = bounded(&a.name);
+            a.path = media_path(&a.sha256, &a.name);
+        }
+        self
+    }
+
     /// Whether a person wrote it or the agent said it to them: what a
     /// conversation's count and preview are made of.
     pub fn said(&self) -> bool {
@@ -280,24 +303,7 @@ impl Session {
     /// message's time. Applying it again changes nothing.
     pub fn normalized(mut self) -> Session {
         self.format = FORMAT.to_string();
-        for m in &mut self.messages {
-            m.role = bounded(&m.role);
-            m.text = m.text.take().map(|t| text_of(&t)).filter(|t| !t.is_empty()).map(|t| if m.role == "tool" { clip(&t, TOOL_TEXT_MAX_CHARS) } else { t });
-            m.tool = m.tool.take().map(|t| bounded(&t)).filter(|t| !t.is_empty());
-            m.call = m.call.take().map(|t| bounded(&t)).filter(|t| !t.is_empty());
-            m.reasoning = m.reasoning.take().filter(|r| !r.is_empty()).map(|r| clip(&r, REASONING_MAX_CHARS));
-            for call in &mut m.tool_calls {
-                call.id = call.id.take().map(|t| bounded(&t)).filter(|t| !t.is_empty());
-                call.name = bounded(&call.name);
-                call.arguments = clip(&call.arguments, ARGUMENTS_MAX_CHARS);
-            }
-            m.at = m.at.take().and_then(|at| normal_iso(&at));
-            m.attachments.retain(Attachment::valid);
-            for a in &mut m.attachments {
-                a.name = bounded(&a.name);
-                a.path = media_path(&a.sha256, &a.name);
-            }
-        }
+        self.messages = std::mem::take(&mut self.messages).into_iter().map(Message::normalized).collect();
         for field in [&mut self.source, &mut self.with, &mut self.model, &mut self.agent] {
             *field = field.take().map(|v| bounded(&v)).filter(|v| !v.is_empty());
         }
