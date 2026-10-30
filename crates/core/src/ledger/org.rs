@@ -28,6 +28,12 @@ pub const ORG_LEDGER_PREFIX: &str = "org:";
 /// A monthly budget: more is a typo.
 pub const BUDGET_MAX: i64 = 100_000 * USD;
 
+/// Why a budget's body is refused, whatever its ledger holds (the router
+/// asks first, as for a grant: `grant_invalid`).
+pub fn budget_invalid(c: &OrgBudget) -> Option<Refused> {
+    (!(0..=BUDGET_MAX).contains(&c.micros)).then(|| invalid(Invalid::Amount))
+}
+
 /// Who pays, as their ledger is named (`name`, `parse`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Payer {
@@ -173,8 +179,8 @@ impl Ledger {
         if !Self::admit(store, &c.id, &command)? {
             return Ok(());
         }
-        if !(0..=BUDGET_MAX).contains(&c.micros) {
-            return Err(invalid(Invalid::Amount));
+        if let Some(why) = budget_invalid(c) {
+            return Err(why);
         }
         self.org = Some(OrgTerms { budget: c.micros });
         self.done(store, &c.id, command, now_ms);
@@ -313,6 +319,28 @@ mod tests {
         assert_eq!(person.set_budget(&mut ps, &budget("b", USD), T0), Err(Refused::OrgsOnly));
         assert_eq!(l.set_budget(&mut s, &budget("too-much", BUDGET_MAX + 1), T0), Err(Refused::Invalid { what: Invalid::Amount }));
         assert_eq!(l.set_budget(&mut s, &budget("negative", -1), T0), Err(Refused::Invalid { what: Invalid::Amount }));
+    }
+
+    /// The router's check of a grant's or budget's body (an org's is in
+    /// its log before its ledger takes it) refuses just what the ledger
+    /// does: the log never names a command its ledger refused.
+    #[test]
+    fn the_routers_check_is_the_ledgers() {
+        let grants = [
+            GrantCredit { micros: USD, ..pack("ok") },
+            GrantCredit { micros: 0, ..pack("zero") },
+            GrantCredit { micros: GRANT_MAX + 1, ..pack("too-much") },
+            GrantCredit { by: "a by with spaces".into(), ..pack("by") },
+            GrantCredit { why: "x".repeat(NOTE_MAX_BYTES + 1), ..pack("why") },
+        ];
+        for g in &grants {
+            let (mut l, mut s) = (Ledger::new_org(T0), Memory::default());
+            assert_eq!(grant_invalid(g), l.grant(&mut s, g, T0).err(), "{}", g.id);
+        }
+        for c in [budget("ok", USD), budget("none", 0), budget("negative", -1), budget("too-much", BUDGET_MAX + 1)] {
+            let (mut l, mut s) = (Ledger::new_org(T0), Memory::default());
+            assert_eq!(budget_invalid(&c), l.set_budget(&mut s, &c, T0).err(), "{}", c.id);
+        }
     }
 
     /// The budget is explicit, sums every fragment, stops AI steps and not

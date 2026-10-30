@@ -587,12 +587,17 @@ fn org_credit(s: &mut Suite, api: &Api) -> Result<()> {
         json!(refused.iter().map(|(w, r, _)| json!([w, r.status])).collect::<Vec<_>>()),
     );
 
-    // funded_org_outlives_its_people: an org an operator credited is never
-    // dropped as its last person goes, its credit stranded
+    // funded_org_outlives_its_people (Alex's review): an org's credit is in
+    // its log before its ledger takes it, so its last person leaving while
+    // the grant is cut short (its ledger not reached) drops nothing, and
+    // the same command after a restart finishes it, logged once
     let zed = api.person()?;
     let comped = api.signed(&s.operator, "POST", "/api/admin/seats", Some(&json!({ "email": Api::email_of(&zed), "kind": "seat" })))?;
     let zorg = comped.body["org"]["id"].as_str().context("zed's comped org")?.to_string();
-    let funded = api.signed(&s.operator, "POST", &format!("/api/ledger/org:{zorg}/grant"), Some(&json!({ "id": "inv-z", "micros": 5_000_000, "by": op, "why": "an invoice" })))?;
+    let grant = json!({ "id": "inv-z", "micros": 5_000_000, "by": op, "why": "an invoice" });
+    let grant_at = format!("/api/ledger/org:{zorg}/grant");
+    let lever = api.unsigned("POST", "/api/test/ledger", Some(&json!({ "identity": format!("org:{zorg}"), "op": "fail-grants", "times": 1 })))?;
+    let cut = api.signed(&s.operator, "POST", &grant_at, Some(&grant))?;
     // and one no operator credited, its person moving after: once it is
     // dropped (its push, queued after the other's, ran), the other's ran too
     let yul = api.person()?;
@@ -605,11 +610,11 @@ fn org_credit(s: &mut Suite, api: &Api) -> Result<()> {
     }
     let control_gone = s.eventually(PUSHED, || api.signed(&s.operator, "GET", &format!("/api/admin/orgs/{yorg}"), None).is_ok_and(|r| r.status == 404));
     let kept = api.signed(&s.operator, "GET", &format!("/api/admin/orgs/{zorg}"), None)?;
-    let zl = api.signed(&s.operator, "GET", &format!("/api/admin/orgs/{zorg}/ledger"), None)?;
+    let none_yet = api.signed(&s.operator, "GET", &format!("/api/admin/orgs/{zorg}/ledger"), None)?;
     s.ok(
-        "funded_org_outlives_its_people: its only person gone to another org, an org an operator credited stays, its credit there for an operator, while one with nothing of its own is dropped",
-        funded.status == 200 && moved == [200, 200] && control_gone && org_of(api, &zed) == org && kept.status == 200 && zl.status == 200 && zl.body["balanceMicros"] == 5_000_000,
-        json!([funded.body, moved, control_gone, kept.status, zl.body]),
+        "funded_org_outlives_its_people: an org's grant cut short after its log took it (its ledger not reached), its only person gone to another org, the org stays, while one with nothing of its own is dropped",
+        lever.status == 200 && cut.status >= 500 && moved == [200, 200] && control_gone && org_of(api, &zed) == org && kept.status == 200 && none_yet.body["balanceMicros"] == 0,
+        json!([lever.body, [cut.status, cut.body.clone()], moved, control_gone, kept.status, none_yet.body]),
     );
 
     // org_terms_survive_restart: its credit and budget, read back after a restart
@@ -626,6 +631,19 @@ fn org_credit(s: &mut Suite, api: &Api) -> Result<()> {
         "org_terms_survive_restart: after a restart the org's ledger is its own still, its credit and its budget (its own row, beside the head) as they were",
         back["balanceMicros"] == 20_000_000 && back["budgetMicros"] == 10_000_000 && back["standing"] == json!({ "standing": "ok" }),
         &back,
+    );
+    // the cut grant, sent again after the restart, lands once; the same
+    // id with another body is refused before any ledger sees it
+    let done = api.signed(&s.operator, "POST", &grant_at, Some(&grant))?;
+    let again = api.signed(&s.operator, "POST", &grant_at, Some(&grant))?;
+    let other = api.signed(&s.operator, "POST", &grant_at, Some(&json!({ "id": "inv-z", "micros": 9_000_000, "by": op, "why": "an invoice" })))?;
+    let zl = api.signed(&s.operator, "GET", &format!("/api/admin/orgs/{zorg}/ledger"), None)?;
+    let governed = api.signed(&s.operator, "GET", &format!("/api/admin/orgs/{zorg}/content"), None)?.body["log"].as_array().map_or(0, |l| l.iter().filter(|e| e["action"] == "ledger-grant" && e["request"] == "grant:inv-z").count());
+    let noted = api.signed(&s.operator, "GET", "/api/admin/log", None)?.body["entries"].as_array().map_or(0, |e| e.iter().filter(|x| x["action"] == "ledger-grant" && x["target"] == format!("org:{zorg}").as_str()).count());
+    s.ok(
+        "a cut-short grant, sent again after a restart, credits the org once, its credit there for an operator; logged once in its governance log and the operators'; its id with another body is 409",
+        done.status == 200 && again.status == 200 && other.status == 409 && zl.status == 200 && zl.body["balanceMicros"] == 5_000_000 && governed == 1 && noted == 1,
+        json!([done.body, again.body, [other.status, other.body.clone()], zl.body, governed, noted]),
     );
     Ok(())
 }

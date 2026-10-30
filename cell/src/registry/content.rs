@@ -629,19 +629,29 @@ impl RegistryCell {
 
     /// An operator's command on `org`'s ledger (its credit, its budget), in
     /// its governance log and the operators' log in one change, once by its
-    /// id: sent again, it is there already.
+    /// id, before its ledger takes it (Alex's review): from then the org is
+    /// never dropped (`has_content`), so no credit lands on an org gone, and
+    /// a command cut short after it is finished by its retry, logged once.
+    /// The same command again finds its entry; another under its id (or by
+    /// another operator) is 409, before any ledger sees it.
     pub(super) fn org_noted(&self, org: &str, request: &str, note: &super::admin::Note) -> CellResult<()> {
-        let detail: String = note.detail.chars().take(super::admin::DETAIL_MAX_BYTES).collect();
-        let (org, request, operator, action) = (org.to_string(), request.to_string(), note.by.clone(), note.action.clone());
+        let org = self.content_org(org)?.id;
+        let text: String = note.detail.chars().take(super::admin::DETAIL_MAX_BYTES).collect();
+        let (request, operator, action) = (request.to_string(), note.by.clone(), note.action.clone());
         self.atomically(move |tx| {
-            if tx.governed(&org, &request)?.is_some() {
-                return Ok(());
+            let detail = json!({ "note": text });
+            if let Some(e) = tx.governed(&org, &request)? {
+                let same = e.action == action && e.actor == operator && serde_json::from_str::<Value>(&e.detail).ok().as_ref() == Some(&detail);
+                return match same {
+                    true => Ok(()),
+                    false => Err(CellError::new(ErrorCode::ConflictingBody, "this id was used for another command")),
+                };
             }
             let now = js::now_ms();
-            tx.govern(&org, Logged { request: &request, actor: &operator, action: &action, subject: None, detail: json!({ "note": detail }) }, now)?;
+            tx.govern(&org, Logged { request: &request, actor: &operator, action: &action, subject: None, detail }, now)?;
             tx.exec(
                 "INSERT INTO admin_log (at, operator, action, target, detail) VALUES (?, ?, ?, ?, ?)",
-                vec![SqlStorageValue::Integer(now), operator.as_str().into(), action.as_str().into(), format!("org:{org}").into(), detail.into()],
+                vec![SqlStorageValue::Integer(now), operator.as_str().into(), action.as_str().into(), format!("org:{org}").into(), text.into()],
             )
         })
     }
