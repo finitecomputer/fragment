@@ -64,10 +64,11 @@ pub struct OrgTerms {
 }
 
 impl OrgTerms {
-    /// Its terms as kept: the budget's row (none: zero).
+    /// Its terms as kept: the budget's row (none: zero), held to today's
+    /// limit (a budget set under a larger one is read as the limit, never
+    /// a panic on every call).
     pub fn of(budget: i64) -> OrgTerms {
-        assert!((0..=BUDGET_MAX).contains(&budget), "a budget kept is one set within its limit");
-        OrgTerms { budget }
+        OrgTerms { budget: budget.clamp(0, BUDGET_MAX) }
     }
 
     pub fn budget(&self) -> i64 {
@@ -375,5 +376,6 @@ mod tests {
         let status = l.org_status(ORG, &s, T0 + 2 * DAY_MS, &book).unwrap();
         assert_eq!((status.budget_micros, status.balance_micros + status.spent_micros), (10 * USD, 50 * USD));
         assert!(!serde_json::to_string(&Ledger::new(T0)).unwrap().contains("org"), "a person's head is written as before");
+        assert_eq!((OrgTerms::of(BUDGET_MAX + 1).budget(), OrgTerms::of(-1).budget()), (BUDGET_MAX, 0), "a budget kept past today's limit reads as the limit");
     }
 }

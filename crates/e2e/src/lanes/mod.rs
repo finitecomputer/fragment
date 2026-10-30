@@ -25,6 +25,7 @@ mod faces;
 mod deliver;
 mod doc;
 mod finite_private;
+mod governance;
 mod frames;
 mod icons;
 pub mod hermes;
@@ -120,6 +121,7 @@ const LANES: &[Lane] = &[
     finite_private::finite_private,
     orgs::orgs,
     billing::billing,
+    governance::governance,
     billing::billing_page,
     trials::trials,
     admin::admin,
@@ -164,7 +166,7 @@ pub const SHARDS: [&[&str]; 4] = [
     &["facet-cap", "app-lockdown", "site", "watch", "icons", "schemas", "channels", "live", "routes", "cli", "browser", "jobs", "triggers", "finite-private", "chat"],
     &[
         "auth", "create", "lockdown", "keys", "members", "identities", "signin", "levers", "secrets", "delegation", "files", "deploy", "templates", "share", "faces", "isolation", "frames",
-        "ops", "public", "effects", "appfiles", "blobs", "notes", "brain", "doc", "push", "ai", "ledger", "transcribe", "orgs", "billing", "billing-page", "trials", "admin", "admin-page",
+        "ops", "public", "effects", "appfiles", "blobs", "notes", "brain", "doc", "push", "ai", "ledger", "transcribe", "orgs", "billing", "governance", "billing-page", "trials", "admin", "admin-page",
     ],
 ];
 

@@ -23,7 +23,7 @@ use crate::browser::{Lease, Page};
 use crate::{Need, Suite};
 
 /// How long a seat's push may take to reach a ledger (the registry's alarm).
-const PUSHED: Duration = Duration::from_secs(20);
+pub(super) const PUSHED: Duration = Duration::from_secs(20);
 
 fn ledger(api: &Api, keys: &Keys) -> Value {
     api.signed(keys, "GET", "/api/ledger", None).map(|r| r.body).unwrap_or(Value::Null)
@@ -68,13 +68,13 @@ const HELP_AND_CONSOLE: &str = "if (window === window.top) { const real = window
     return new Response(JSON.stringify({ ...body, support: 'mailto:help@e2e.test' }), { status: r.status, headers: { 'content-type': 'application/json' } }); }; \
     const warn = console.warn; window.__warned = []; console.warn = (...a) => { window.__warned.push(a.map(String).join(' ')); warn(...a); }; }";
 
-fn seat(api: &Api, keys: &Keys) -> Value {
+pub(super) fn seat(api: &Api, keys: &Keys) -> Value {
     api.signed(keys, "GET", "/api/seat", None).map(|r| r.body).unwrap_or(Value::Null)
 }
 
 /// The org's live subscription's id (not one that ended), from what the
 /// platform asked Stripe for.
-fn subscription_of(s: &Suite, org: &str) -> Option<String> {
+pub(super) fn subscription_of(s: &Suite, org: &str) -> Option<String> {
     s.stripe.requests().iter().rev().find_map(|r| {
         let id = r.path.strip_prefix("/v1/subscriptions/")?;
         let sub = s.stripe.subscription(id)?;
@@ -746,13 +746,13 @@ fn orphan(s: &mut Suite, api: &Api) -> Result<()> {
 }
 
 /// The id of the org `keys` is in (`GET /api/seat`'s), or "".
-fn org_of(api: &Api, keys: &Keys) -> String {
+pub(super) fn org_of(api: &Api, keys: &Keys) -> String {
     seat(api, keys)["org"]["id"].as_str().unwrap_or("").to_string()
 }
 
 /// `keys` buys their own seat on the fake's Checkout and holds it, paid.
 /// Answers the org it made.
-fn buys(s: &Suite, api: &Api, keys: &Keys) -> Result<String> {
+pub(super) fn buys(s: &Suite, api: &Api, keys: &Keys) -> Result<String> {
     let r = api.signed(keys, "POST", "/api/billing/checkout", Some(&json!({})))?;
     anyhow::ensure!(r.status == 200, "a Checkout: {r}");
     s.stripe.complete(r.body["session"].as_str().unwrap_or("")).map_err(anyhow::Error::msg)?;
@@ -770,7 +770,7 @@ const WIPE_CALLS_MAX: usize = 5;
 /// org is still to land) is done by a later call. At most
 /// `WIPE_CALLS_MAX` calls, none waiting on a clock. Answers the last
 /// report, and every step each call ran, in order.
-fn wipe_until_done(api: &Api, wiper: &Keys, who: &str) -> Result<(crate::api::Reply, Vec<Value>)> {
+pub(super) fn wipe_until_done(api: &Api, wiper: &Keys, who: &str) -> Result<(crate::api::Reply, Vec<Value>)> {
     let mut ran = vec![];
     // bounded: WIPE_CALLS_MAX calls
     for call in 1..=WIPE_CALLS_MAX {
@@ -790,7 +790,7 @@ fn billing_ran(ran: &[Value]) -> Value {
 }
 
 /// `who` answers the offer `id` (`accept` or `decline`).
-fn answer(api: &Api, who: &Keys, id: &str, verb: &str) -> Result<crate::api::Reply> {
+pub(super) fn answer(api: &Api, who: &Keys, id: &str, verb: &str) -> Result<crate::api::Reply> {
     api.signed(who, "POST", &format!("/api/seat/offers/{id}/{verb}"), Some(&json!({})))
 }
 
