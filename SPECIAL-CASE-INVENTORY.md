@@ -54,3 +54,5 @@ These are fragments or computers, or components any fragment may use:
   markdown renderer (`__markdown.js`: markdown to DOM, never markup; the
   vault UI, the chat and the notes viewer use it), and the stylesheet a
   page may link (`__fragment.css`).
+
+Connector permission and restricted TCP targets are operator policy (`deploy/computer-connectors.json` defaults), not image declarations. Relay leases and pooled computer quotas remain platform security.

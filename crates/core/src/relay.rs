@@ -38,25 +38,6 @@ pub fn is_relay_header(name: &str) -> bool {
     name.get(..HEADER.len()).is_some_and(|p| p.eq_ignore_ascii_case(HEADER))
 }
 
-/// The hosts relayed: the preset XFTP servers of SimpleX Chat and Flux, the
-/// two operators SimpleX's apps and its core (v7.0.3) offer by default. A
-/// file a phone sends is on its own servers, these unless its person chose
-/// others; one on any other server does not arrive (the bridge says so).
-pub const HOSTS: [&str; 12] = [
-    "xftp1.simplex.im",
-    "xftp2.simplex.im",
-    "xftp3.simplex.im",
-    "xftp4.simplex.im",
-    "xftp5.simplex.im",
-    "xftp6.simplex.im",
-    "xftp1.simplexonflux.com",
-    "xftp2.simplexonflux.com",
-    "xftp3.simplexonflux.com",
-    "xftp4.simplexonflux.com",
-    "xftp5.simplexonflux.com",
-    "xftp6.simplexonflux.com",
-];
-
 /// Relays open at once per computer, at most: the core receives a file's
 /// chunks from a few servers at a time.
 pub const OPEN_MAX: usize = 4;
@@ -78,7 +59,7 @@ pub const LEASE_SLACK_MS: i64 = 30 * 1000;
 /// Why a relay is refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Refusal {
-    /// Not one of `HOSTS` on `PORT` (403).
+    /// Not an exact configured target (403).
     NotRelayed(String),
     /// `OPEN_MAX` open already (429).
     Busy,
@@ -89,23 +70,18 @@ pub enum Refusal {
 impl Refusal {
     pub fn message(&self) -> String {
         match self {
-            Refusal::NotRelayed(what) => format!("{what} is not relayed: only SimpleX's preset XFTP servers, on port {PORT}"),
+            Refusal::NotRelayed(what) => format!("{what} is not relayed: only configured connector relay targets"),
             Refusal::Busy => format!("{OPEN_MAX} relays are open already"),
             Refusal::Spent => format!("this computer's relays carried {} GiB today already", DAY_BYTES_MAX >> 30),
         }
     }
 }
 
-/// The relay a computer asks for: `host` one of `HOSTS` (any case), `port`
-/// `PORT`, as given in the ask's query.
-pub fn target(host: &str, port: &str) -> Result<(&'static str, u16), Refusal> {
+/// An exact operator-configured endpoint; case-insensitive DNS, no suffix matching.
+pub fn target<'a>(policy: &'a crate::connectors::ComputerConnectorPolicy, host: &str, port: &str) -> Result<(&'a str, u16), Refusal> {
     let refused = || Refusal::NotRelayed(format!("{}:{}", cut(host), cut(port)));
     let port: u16 = port.parse().map_err(|_| refused())?;
-    let host = HOSTS.iter().find(|h| h.eq_ignore_ascii_case(host)).ok_or_else(refused)?;
-    if port != PORT {
-        return Err(refused());
-    }
-    Ok((host, port))
+    policy.targets().find(|t| t.host.eq_ignore_ascii_case(host) && t.port == port).map(|t| (t.host.as_str(), t.port)).ok_or_else(refused)
 }
 
 fn cut(s: &str) -> &str {
@@ -254,10 +230,12 @@ mod tests {
     /// what. Case does not matter; the host answered is the list's own.
     #[test]
     fn only_the_preset_xftp_servers_on_443_are_relayed() {
-        for h in HOSTS {
-            assert_eq!(target(h, "443"), Ok((h, 443)));
+        let policy = crate::connectors::ComputerConnectorPolicy::default();
+        for t in policy.targets() {
+            let h = t.host.as_str();
+            assert_eq!(target(&policy, h, "443"), Ok((h, 443)));
         }
-        assert_eq!(target("XFTP3.SimpleX.im", "443"), Ok(("xftp3.simplex.im", 443)));
+        assert_eq!(target(&policy, "XFTP3.SimpleX.im", "443"), Ok(("xftp3.simplex.im", 443)));
         for (host, port) in [
             ("xftp3.simplex.im", "5223"),
             ("xftp3.simplex.im", "80"),
@@ -274,11 +252,11 @@ mod tests {
             ("api.fragment.internal", "443"),
             ("", "443"),
         ] {
-            let r = target(host, port);
+            let r = target(&policy, host, port);
             assert!(matches!(&r, Err(Refusal::NotRelayed(_))), "{host}:{port}: {r:?}");
         }
         let long = "x".repeat(1000);
-        let Err(Refusal::NotRelayed(said)) = target(&long, "443") else { panic!("refused") };
+        let Err(Refusal::NotRelayed(said)) = target(&policy, &long, "443") else { panic!("refused") };
         assert!(said.len() < 80, "what it says of the ask is cut: {said}");
     }
 

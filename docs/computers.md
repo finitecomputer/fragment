@@ -2797,3 +2797,29 @@ for a host) and finds the same `HOME`, `~` and modes.
   hosted `agent-smoke` checks that its chat's agent's screen is the one
   served: the RFB stream's desktop is that agent's (`hermes:<profile>`),
   the page names it, and another agent's is refused.
+
+### Connector policy
+
+`computer_connectors` in the deploy config is an array of `{id,
+relayTargets: [{host, port}]}` (relayTargets may be empty). Omission uses
+`deploy/computer-connectors.json`, preserving the twelve SimpleX/Flux XFTP
+hosts on 443; `[]` denies connector authorization and new relay admission. `FRAGMENT_COMPUTER_CONNECTORS` is
+the checked policy the Worker consumes. Targets are exact public DNS names
+and nonzero ports, never wildcards, IPs, local names or suffix matches.
+The guest receives additive `relayTargets` and the legacy `relay` 443
+subset from this same policy. Four leases, 32 MiB/five minutes per lease,
+2 GiB/day, slack, persistence and shim backpressure remain per computer.
+
+`connectors::ComputerConnectorPolicy::authorize_connector(context, connector,
+action, bound_scope)` is the authorization seam. Connector identity grants no computer
+port, image assignment or transport. Today it consults deployment policy;
+future live org policy and agent opt-in must intersect that permission. The
+context carries owner and agent; decisions include a reason and optional
+policy revision (none until org policy exists). Bound scope is reserved for
+that future binding.
+Relay admission and offers use the union authorized for assigned agents.
+Export and credential actions reserve the same seam for hosted connectors
+and image-side mirroring; those transports must check it when introduced.
+Org disable/resume, outbound mirror/credential fencing and older-image
+suspension ship with org policy. This seam alone does not stop outbound
+mirroring by today's images.
