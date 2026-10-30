@@ -424,6 +424,9 @@ wrangler and the Sandbox SDK the cell's shim bundles, pinned in
   it as the latest release (the install line's) after each green production
   deploy (ci.yml's `cli-release`: the next patch above the highest `v*` tag,
   or cli/Cargo.toml's version when higher), or from a `v*` tag pushed by hand.
+  A released CLI names the commit it was built from and says once, on
+  stderr, when finite.chat's `x-fragment-deploy` names another, with the
+  install line (cli/src/notice.rs).
   Master's pushes also run `preview-image` beside the tests. It hashes the
   committed image inputs (`xtask/src/image/preview.rs`), reuses the registry's
   `inputs-<key>` tag when present, or builds and pushes it once with a

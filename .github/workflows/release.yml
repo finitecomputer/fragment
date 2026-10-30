@@ -57,8 +57,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      # the tag's version, which `fragment --version` and its User-Agent say
-      - run: echo "FRAGMENT_CLI_VERSION=${TAG#v}" >> "$GITHUB_ENV"
+      # the tag's version, which `fragment --version` and its User-Agent say,
+      # and the commit it's built from, which it holds to production's
+      # `x-fragment-deploy` (cli/src/notice.rs)
+      - run: |
+          echo "FRAGMENT_CLI_VERSION=${TAG#v}" >> "$GITHUB_ENV"
+          echo "FRAGMENT_CLI_COMMIT=$(git rev-parse HEAD | cut -c1-12)" >> "$GITHUB_ENV"
       - name: build
         run: cargo build --release -p fragment-cli --target ${{ matrix.target }}
       # each binary this runner can run (x86_64 macOS's would need Rosetta)
