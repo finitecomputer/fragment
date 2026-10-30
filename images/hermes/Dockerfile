@@ -296,13 +296,11 @@ EOF
 COPY images/hermes/preload.py /opt/fragment/preload.py
 COPY images/hermes/tool_keys.py /opt/fragment/tool_keys.py
 COPY images/hermes/deploy_wait.py /opt/fragment/deploy_wait.py
-COPY images/hermes/hooks /opt/fragment/hooks
 COPY --from=plugin /opt/hermes/plugins/fragment-skill-fork /opt/hermes/plugins/fragment-skill-fork
 COPY --from=plugin /opt/hermes/plugins/fragment-deploy-wait /opt/hermes/plugins/fragment-deploy-wait
 COPY --from=plugin /opt/hermes/plugins/fragment-activity /opt/hermes/plugins/fragment-activity
 COPY --from=plugin /opt/hermes/plugins/fragment-native-images /opt/hermes/plugins/fragment-native-images
 COPY --from=plugin /opt/hermes/plugins/fragment-ask /opt/hermes/plugins/fragment-ask
-COPY images/hermes/botmode.py /opt/fragment/botmode.py
 COPY images/hermes/screen /opt/fragment/screen
 COPY --from=novnc /novnc/core /opt/fragment/screen/novnc/core
 COPY --from=novnc /novnc/vendor /opt/fragment/screen/novnc/vendor

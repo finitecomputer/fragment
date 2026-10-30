@@ -1,51 +1,26 @@
-//! Hermes' Bot Mode on this image's agents (docs/computers.md, "Bot
-//! Mode"): each agent is a bot, so each has Hermes' teammate roster and its
-//! `message_agent` tool in its Bot Chat. Hermes turns both on for a session
-//! titled exactly `Bot Chat`, on an install where a profile's `profile.yaml`
-//! carries `ui_meta: {hermes-bots: …}` (v0.21.6: `tools/bot_mode_probe.py`,
-//! `agent/system_prompt.py`'s `_bot_mode_parts`, `tools/bot_mode_dm.py`'s
-//! gate). The boot writes each profile's `profile.yaml` (`profile_yaml`),
-//! and links the image's gateway hook into its `hooks/` (`link_hook`): as
-//! each of the agent's turns starts, before its prompt is built, the hook
-//! (`images/hermes/hooks/fragment-bot-chat`) titles its own chat's session
-//! `Bot Chat`, reading which chat that is from the bots file
-//! (`bots_file`). The image's Bot Mode keeper (`images/hermes/botmode.py`,
-//! started by the boot) reads the same file: it holds each Bot Chat as
-//! Hermes' live owner, and posts each teammate's message into the bot's own
-//! chat as a hand-off, so its answer is a turn of the bridge's.
+//! What Hermes knows of this image's agents beside their configs
+//! (docs/computers.md, "Teammates in our Hermes image"): each one's name
+//! and role, in its `profile.yaml` (`profile_yaml`) and its teammates'
+//! configs (hermes.rs, `told_team`), and the route that makes each profile
+//! one the gateway reaches (`profile_routes`).
 
 use std::collections::BTreeMap;
-use std::path::Path;
 
 use fragment_bridge::api::FragmentEntry;
 use fragment_bridge::runtime::relay::wire;
 use fragment_bridge::runtime::Agent;
-use serde_json::json;
 
-/// Under the boot's run directory: what the Bot Chat hook and the keeper
-/// read.
-pub const BOTS_FILE: &str = "bots.json";
-
-/// The image's gateway hook that titles an agent's own chat's session, under
-/// its own files (`/opt/fragment`); a profile's `hooks/` holds a link to it
-/// by its name.
-pub const HOOK: &str = "hooks/fragment-bot-chat";
-
-/// A bot's description, in characters at most: Hermes cuts each line of its
-/// roster at 160 (`_profile_role`), the bot's title and `@handle` among them.
+/// An agent's role, in characters at most (each teammate is one line).
 pub const DESCRIPTION_MAX_CHARS: usize = 120;
 
 fn q(s: &str) -> String {
     serde_json::to_string(s).expect("a string serializes")
 }
 
-/// A fragment name's label, and an agent's Bot Chat (its own chat with its
-/// owner, which SimpleX carries its owner's messages into too): the
-/// bridge's (`fragment_bridge::api`), one definition for both.
+/// A fragment name's label: the bridge's (`fragment_bridge::api`).
 use fragment_bridge::api::label;
-pub use fragment_bridge::api::bot_chat;
 
-/// What a bot does, from its job (its `SOUL.md`): the first line that says
+/// What an agent does, from its job (its `SOUL.md`): the first line that says
 /// anything, a heading's or a list's marks taken off, its spaces collapsed,
 /// at most `DESCRIPTION_MAX_CHARS`.
 pub fn description(soul: &str) -> String {
@@ -60,8 +35,9 @@ pub fn description(soul: &str) -> String {
 
 /// An agent's name (docs/api.md, "An agent's name and picture"): its agent
 /// fragment's title, else its name on the computer, else its fragment's
-/// label. What its `profile.yaml` (`profile_yaml`) and its config's
-/// `agent.system_prompt` (hermes.rs, `told_name`) say, from one read.
+/// label. What its `profile.yaml` (`profile_yaml`), its config's
+/// `agent.system_prompt` (hermes.rs, `told_name`) and its teammates'
+/// (`told_team`) say.
 pub fn name<'a>(agent: &'a Agent, title: Option<&'a str>) -> &'a str {
     [title.unwrap_or(""), agent.name.as_str()].into_iter().map(str::trim).find(|n| !n.is_empty()).unwrap_or_else(|| label(&agent.fragment))
 }
@@ -90,59 +66,9 @@ pub fn profile_yaml(agent: &Agent, title: Option<&str>, soul: Option<&str>) -> S
     y
 }
 
-/// The gateway's own profile's `profile.yaml` (Hermes' `default`, at its
-/// home's root). Hermes lists it in every bot's roster as `@hermes`, always
-/// (`_roster`); it runs no agent's turns (hermes.rs, `default_config`), so
-/// its role says so.
-pub const GATEWAY_PROFILE_YAML: &str = "# Written by hermes-boot: the gateway's own profile, which Hermes' Bot Mode roster lists as @hermes.\ndescription: \"this computer's gateway, not an agent: never message it\"\n";
-
-/// Links the image's hook (`hook`, a directory) into `profile`'s `hooks/`
-/// by its name, made if missing: Hermes' gateway loads each profile's hooks
-/// in that profile's scope, as its first turn there starts. A link already
-/// there is kept; anything else by that name is replaced.
-pub fn link_hook(profile: &Path, hook: &Path) -> std::io::Result<()> {
-    let name = hook.file_name().ok_or_else(|| std::io::Error::other(format!("a hook's directory has a name: {}", hook.display())))?;
-    let dir = profile.join("hooks");
-    std::fs::create_dir_all(&dir)?;
-    let link = dir.join(name);
-    match std::fs::symlink_metadata(&link) {
-        Ok(m) if m.file_type().is_symlink() && std::fs::read_link(&link)? == hook => return Ok(()),
-        Ok(m) if m.is_dir() => std::fs::remove_dir_all(&link)?,
-        Ok(_) => std::fs::remove_file(&link)?,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(e),
-    }
-    std::os::unix::fs::symlink(hook, &link)
-}
-
-/// The bots file: for each agent whose Bot Chat is found (`chats`, by
-/// `bot_chat`), its identity and owner, its profile's home, that chat, and
-/// the session key Hermes keeps that chat's session under
-/// (`wire::session_key`), whose session the hook titles `Bot Chat`. An
-/// agent with none yet is left out: the hook and the keeper leave it alone.
-pub fn bots_file(agents: &[Agent], home: &Path, chats: &BTreeMap<String, String>) -> String {
-    let bots: Vec<serde_json::Value> = agents
-        .iter()
-        .filter_map(|a| {
-            let profile = wire::profile(&a.fragment);
-            let chat = chats.get(&a.fragment)?;
-            Some(json!({
-                "agent": a.fragment,
-                "identity": a.identity,
-                "owner": a.owner,
-                "profile": profile,
-                "home": crate::hermes::profile_dir(home, &a.fragment).display().to_string(),
-                "chat": chat,
-                "sessionKey": wire::session_key(&profile, &wire::chat_id(chat, &a.fragment)),
-            }))
-        })
-        .collect();
-    json!({ "bots": bots }).to_string()
-}
-
 /// Hermes' `profile_routes`, for the gateway's config (the managed
-/// overlay, main.rs): one route a profile, each agent's `routed` chat (its
-/// Bot Chat, else a chat it is in: `route_chats`) to its profile. No route
+/// overlay, main.rs): one route a profile, each agent's `routed` chat (a
+/// chat it is in: `route_chat`) to its profile. No route
 /// picks a message's profile (the relay names it on each, which wins); a
 /// route makes its profile one the gateway reaches through the default
 /// profile's relay after a restart (v0.21.6: `gateway/authz_mixin.py`,
@@ -150,7 +76,7 @@ pub fn bots_file(agents: &[Agent], home: &Path, chats: &BTreeMap<String, String>
 /// profile), so one reaches its sessions in every chat. A session the
 /// gateway reads back from disk holds no live adapter, and a profile has
 /// none of its own, so without a route a background process's completion
-/// in it, message_agent's reply among them, was retried unsent for ever
+/// in it was retried unsent for ever
 /// (p5, 2026-10-09). The gateway reads them as it starts, and only then
 /// (no verb of Hermes' reloads them): an agent come since has its route at
 /// the next start, and its sessions until then are this gateway's own,
@@ -170,8 +96,8 @@ pub fn profile_routes(agents: &[Agent], routed: &BTreeMap<String, String>) -> St
     format!("profile_routes:\n{}", routes.concat())
 }
 
-/// The chat a route names for an agent with no Bot Chat found: of the
-/// fragments it is in (`fragments`, its own list), the chat first by name,
+/// The chat a route names for an agent: of the fragments it is in
+/// (`fragments`, its own list), the chat first by name,
 /// not its own fragment; None when it is in no chat (then it has no
 /// session a completion could be lost in).
 pub fn route_chat(agent_fragment: &str, fragments: &[FragmentEntry]) -> Option<String> {
@@ -188,26 +114,6 @@ mod tests {
 
     fn listed(name: &str, kind: &str, owned: bool) -> FragmentEntry {
         FragmentEntry { name: name.into(), role: "editor".into(), kind: kind.into(), owned, title: String::new() }
-    }
-
-    /// Valid: the chat its owner owns labelled `<label>-chat`, whatever its
-    /// suffix. Invalid: none, an app of that label, a chat of someone
-    /// else's of it, another agent's chat, or a chat whose label only
-    /// starts the same: no Bot Chat.
-    #[test]
-    fn a_bot_chat_is_the_agents_own_chat() {
-        let list = [
-            listed("juniper-chat--p2m4", "app", true),
-            listed("juniper-chat--r7t5", "chat", false),
-            listed("juniper-chats--b3c4", "chat", true),
-            listed("maple-chat--z8w6", "chat", true),
-            listed("juniper-chat--h6j7", "chat", true),
-        ];
-        assert_eq!(bot_chat("juniper--k3x9", &list).as_deref(), Some("juniper-chat--h6j7"));
-        assert_eq!(bot_chat("maple--q4w5", &list).as_deref(), Some("maple-chat--z8w6"), "a chat's suffix is its own");
-        assert_eq!(bot_chat("maple-2--q4w5", &list), None);
-        assert_eq!(bot_chat("juniper--k3x9", &list[..4]), None, "only its owner's chat of that label");
-        assert_eq!(bot_chat("loner--k3x9", &[]), None);
     }
 
     /// Valid: the job's first line that says anything; invalid: none, or
@@ -248,8 +154,7 @@ mod tests {
         assert!(bare.contains("display_name: \"fred\"\n") && !bare.contains("description") && !bare.contains("hermes-bots"), "{bare}");
         let odd = profile_yaml(&agent("x", "x"), Some("a: b\n# c"), Some("line: one"));
         assert!(odd.contains("display_name: \"a: b\\n# c\"\n"), "a name is one scalar, never more YAML: {odd}");
-        assert!(GATEWAY_PROFILE_YAML.contains("description: ") && !GATEWAY_PROFILE_YAML.contains("hermes-bots"), "the gateway is no bot");
-        // renamed (its fragment's title), the bot is its new name alone
+        // renamed (its fragment's title), the agent is its new name alone
         let renamed = profile_yaml(&agent("juniper", "juniper"), Some("Frank"), Some("You tend the garden.\n"));
         assert!(renamed.contains("display_name: \"Frank\"\n") && !renamed.contains("\"Juniper\""), "{renamed}");
     }
@@ -264,59 +169,6 @@ mod tests {
         for said in ["fragment agent --name", "fragment agent --picture", "fragment agent --no-picture", "`profile.yaml`", "256 KiB", "never put your name in it"] {
             assert!(page.contains(said), "computer.md says {said}");
         }
-    }
-
-    /// Valid: a fresh profile gets `hooks/` and the link; replay: the same
-    /// link is kept; a link elsewhere, a file or a directory by its name is
-    /// replaced.
-    #[test]
-    fn a_profile_links_the_hook() {
-        let root = std::env::temp_dir().join(format!("bots-hook-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        let (profile, hook) = (root.join("profiles/juniper--k3x9"), root.join("opt/hooks/fragment-bot-chat"));
-        std::fs::create_dir_all(&profile).unwrap();
-        std::fs::create_dir_all(&hook).unwrap();
-        let link = profile.join("hooks/fragment-bot-chat");
-        link_hook(&profile, &hook).unwrap();
-        assert_eq!(std::fs::read_link(&link).unwrap(), hook);
-        link_hook(&profile, &hook).unwrap();
-        assert_eq!(std::fs::read_link(&link).unwrap(), hook, "kept");
-        for stale in ["link", "file", "dir"] {
-            std::fs::remove_file(&link).unwrap();
-            match stale {
-                "link" => std::os::unix::fs::symlink(root.join("elsewhere"), &link).unwrap(),
-                "file" => std::fs::write(&link, "x").unwrap(),
-                _ => std::fs::create_dir_all(link.join("inside")).unwrap(),
-            }
-            link_hook(&profile, &hook).unwrap();
-            assert_eq!(std::fs::read_link(&link).unwrap(), hook, "a {stale} by its name replaced");
-        }
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    /// The hook's file: each agent's home, Bot Chat, and the key Hermes'
-    /// gateway keeps that chat's session under (the bridge's own); an agent
-    /// whose Bot Chat is not found yet is left out.
-    #[test]
-    fn the_bots_file_names_each_bot_chats_session() {
-        let chats: BTreeMap<String, String> = [("juniper--k3x9".to_string(), "juniper-chat--h6j7".to_string()), ("fred--k3x9".into(), "fred-chat--b3c4".into())].into();
-        let agents = [agent("juniper", "Juniper"), agent("maple", "Maple"), agent("fred", "Fred")];
-        let f: serde_json::Value = serde_json::from_str(&bots_file(&agents, Path::new("/data/hermes"), &chats)).unwrap();
-        assert_eq!(
-            f["bots"][0],
-            json!({
-                "agent": "juniper--k3x9",
-                "identity": "npub1juniper",
-                "owner": "npub1paul",
-                "profile": "juniper--k3x9",
-                "home": "/data/hermes/profiles/juniper--k3x9",
-                "chat": "juniper-chat--h6j7",
-                "sessionKey": "agent:juniper--k3x9:relay:group:juniper-chat--h6j7/juniper--k3x9",
-            })
-        );
-        assert_eq!(f["bots"].as_array().map(Vec::len), Some(2), "maple, with no chat found, is left out");
-        assert_eq!(f["bots"][1]["chat"], "fred-chat--b3c4");
-        assert_eq!(bots_file(&[], Path::new("/data/hermes"), &chats), r#"{"bots":[]}"#);
     }
 
     /// Valid: one route a profile, each agent's routed chat (as the relay
@@ -337,7 +189,7 @@ mod tests {
     /// Valid: of the fragments an agent is in, the chat first by name.
     /// Invalid: an app, its own fragment, or none: no chat.
     #[test]
-    fn an_agent_with_no_bot_chat_is_routed_by_a_chat_it_is_in() {
+    fn an_agent_is_routed_by_a_chat_it_is_in() {
         let list = [listed("todo--p2m4", "app", false), listed("garden--r2d5", "chat", false), listed("allotment--a1b2", "chat", false), listed("fern--k3x9", "chat", false)];
         assert_eq!(route_chat("fern--k3x9", &list).as_deref(), Some("allotment--a1b2"));
         assert_eq!(route_chat("fern--k3x9", &list[..1]), None, "an app is no chat");

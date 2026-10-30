@@ -257,19 +257,15 @@ pub fn label(name: &str) -> &str {
     name.rsplit_once("--").map_or(name, |(label, _)| label)
 }
 
-/// An agent's Bot Chat: its own chat with its owner, the chat fragment the
-/// shell makes with it (cell/shell/shell.js, `makeAgent`: labelled
-/// `<label>-chat` beside the agent's `<label>`), which `fragment ask` finds
-/// as a person's direct chat with it too (cli/src/ask.rs, `direct_label`),
-/// and its owner's home unless they chose its SimpleX chat (`home_chat`). A
-/// chat's name has a random suffix of its own, so it is found, never
-/// derived: in the agent's list for its owner (`fragments`), the chat its
-/// owner owns with that label. None until there is one: an agent made some
-/// other way has no Bot Chat (Hermes then makes one of its own for a
-/// teammate's message, `chat -c "Bot Chat" --create-if-missing`), and one
-/// whose chat is made after it is assigned has it at a later look
-/// (hermes-boot's main.rs, `find_bot_chats`).
-pub fn bot_chat(agent_fragment: &str, fragments: &[FragmentEntry]) -> Option<String> {
+/// An agent's own chat with its owner: the chat fragment the shell makes
+/// with it (cell/shell/shell.js, `makeAgent`: labelled `<label>-chat`
+/// beside the agent's `<label>`), which `fragment ask` finds as a person's
+/// direct chat with it too (cli/src/ask.rs, `direct_label`), and its
+/// owner's home unless they chose its SimpleX chat (`home_chat`). A chat's
+/// name has a random suffix of its own, so it is found, never derived: in
+/// the agent's list for its owner (`fragments`), the chat its owner owns
+/// with that label. None until there is one.
+pub fn own_chat(agent_fragment: &str, fragments: &[FragmentEntry]) -> Option<String> {
     let want = format!("{}-chat", label(agent_fragment));
     fragments.iter().find(|f| f.kind == "chat" && f.owned && label(&f.name) == want).map(|f| f.name.clone())
 }
@@ -305,7 +301,7 @@ pub fn simplex_chat_name(agent_fragment: &str, random: [u8; 4]) -> String {
 /// agent's home"): its `agent.json`'s `home`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Home {
-    /// Its own chat with its owner (`bot_chat`): absent, or anything but
+    /// Its own chat with its owner (`own_chat`): absent, or anything but
     /// `"simplex"`.
     Chat,
     /// Its SimpleX chat, while its link is bound.
@@ -356,7 +352,7 @@ pub fn home_chat(agent_fragment: &str, home: Home, simplex: Option<&str>, owners
         }
     }
     let theirs: Vec<FragmentEntry> = owners.iter().filter(|f| mine.iter().any(|m| m.name == f.name)).cloned().collect();
-    bot_chat(agent_fragment, &theirs).map_or(HomeChat::Nowhere, HomeChat::In)
+    own_chat(agent_fragment, &theirs).map_or(HomeChat::Nowhere, HomeChat::In)
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -795,6 +791,26 @@ mod tests {
 
     fn listed(name: &str, kind: &str, owned: bool) -> FragmentEntry {
         FragmentEntry { name: name.into(), role: "editor".into(), kind: kind.into(), owned, title: String::new() }
+    }
+
+    /// Valid: the chat its owner owns labelled `<label>-chat`, whatever its
+    /// suffix. Invalid: none, an app of that label, a chat of someone
+    /// else's of it, another agent's chat, or a chat whose label only
+    /// starts the same: no chat of its own.
+    #[test]
+    fn an_agents_own_chat_is_its_owners_labelled_for_it() {
+        let list = [
+            listed("juniper-chat--p2m4", "app", true),
+            listed("juniper-chat--r7t5", "chat", false),
+            listed("juniper-chats--b3c4", "chat", true),
+            listed("maple-chat--z8w6", "chat", true),
+            listed("juniper-chat--h6j7", "chat", true),
+        ];
+        assert_eq!(own_chat("juniper--k3x9", &list).as_deref(), Some("juniper-chat--h6j7"));
+        assert_eq!(own_chat("maple--q4w5", &list).as_deref(), Some("maple-chat--z8w6"), "a chat's suffix is its own");
+        assert_eq!(own_chat("maple-2--q4w5", &list), None);
+        assert_eq!(own_chat("juniper--k3x9", &list[..4]), None, "only its owner's chat of that label");
+        assert_eq!(own_chat("loner--k3x9", &[]), None);
     }
 
     /// Goal (Paul, 2026-10-26): an agent's SimpleX chat has one name, its

@@ -476,7 +476,7 @@ v0.21.7 happens to change neither state.db's schema 31 nor config version
    computers being watched, since a later master push may advance preview.
 2. **Exercise lived-in computers.** An old chat continues; a new chat
    recalls a memory; skills are listed and used; a routine fires; the
-   screen and Take over work; Google answers; Bot Chat continues; Settings
+   screen and Take over work; Google answers; a teammate's ask is answered back; Settings
    shows the watched version. Watch `computer.version == computer.latest`,
    `rollbacks` unchanged, every save `held`, no `wont_wake`, `unsaved` or
    `went_back`, operator health, logs and ledger spend. If preview has
@@ -2204,7 +2204,7 @@ config at each turn and adds to that turn's system prompt alone (its
 ephemeral system prompt, never kept in a session's). The boot writes it
 from the title it reads for its teammates (below), once a round for both: at
 each boot, and every `HERMES_BOOT_MODEL_MS` (10 s) while awake, so a
-rename reaches the agent's next turn, its Bot Chat's lasting session
+rename reaches the agent's next turn, its own chat's lasting session
 too, nothing restarted; a title unread leaves the config as it was. A
 `${` in a name is broken apart (`$ {`): Hermes expands `${VAR}` in a
 config's strings from its environment. Nothing else tells the agent its
@@ -2264,9 +2264,8 @@ died with a cut turn. In its place (route A of the audit, Paul
   routes as it starts, and every start is a boot's, which writes them
   first.
 
-The image still starts Bot Mode's keeper (`images/hermes/botmode.py`)
-and links its title hook; with the protocol off no message reaches a
-mailbox, so they idle.
+Bot Mode's keeper and its title hook are gone; the boot removes the
+hook's link from a profile an older image made.
 
 Proven by the Docker lane's `teammates_ask_each_other` (the scripted
 model): the roster and `fragment_ask` from an agent's first turn, an

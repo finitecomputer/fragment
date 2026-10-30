@@ -495,9 +495,9 @@ pub fn managed_config(disabled_plugins: &[String], card_timeout_s: u64, screen_i
 /// config at each turn and adds to that turn's system prompt alone, never
 /// to the prompt a session keeps (v0.21.7: its gateway's
 /// `_get_system_prompt_for_channel`, the ephemeral system prompt). So a
-/// rename reaches the agent's next turn in every chat, its Bot Chat's
+/// rename reaches the agent's next turn in every chat, its own chat's
 /// lasting session too, nothing restarted. Nothing else it reads names it
-/// (its `SOUL.md` is its job; Bot Mode tells it its `@handle` alone), and
+/// (its `SOUL.md` is its job), and
 /// what an earlier message or its memory calls it may be from before a
 /// rename. Hermes expands `${VAR}` in a config's strings from its
 /// environment, so a `${` in a name is broken apart (`$ {`).

@@ -3290,6 +3290,7 @@ async fn teammates_ask_each_other() {
     let yaml = c.exec_out(&["cat", "/data/hermes/profiles/maple--k3x9/profile.yaml"]);
     assert!(yaml.contains("display_name: \"Maple\"\n") && !yaml.contains("hermes-bots"), "maple is named by her fragment's title, and no Bot Mode bot: {yaml}");
     assert!(c.exec_out(&["cat", "/etc/hermes/config.yaml"]).contains("\n  bot_mode_protocol: false\n"), "Bot Mode's protocol is off");
+    assert!(!c.exec_out(&["ps", "-eo", "args"]).contains("botmode.py") && !c.logs().contains("\"botmode."), "no keeper runs");
     // renamed while it runs, an agent's teammates are told its new name
     // within seconds, nothing restarted
     fake.with(|w| w.fragments.get_mut("fern--k3x9").expect("fern's fragment").title = "Fernando".into());
@@ -3521,6 +3522,7 @@ async fn an_old_bot_chat_is_rebuilt_without_bot_mode() {
     let tools = call.body["tools"].to_string();
     assert!(tools.contains("fragment_ask") && !tools.contains("message_agent"), "fragment_ask, not message_agent: {tools}");
     assert!(call.body["messages"].to_string().contains("hello from before"), "its history kept");
+    assert!(!c.exec(&["test", "-L", "/data/hermes/profiles/juniper--k3x9/hooks/fragment-bot-chat"]), "the older image's Bot Mode hook link is gone");
 }
 
 /// Goal (docs/computers.md, "An agent's own model"; Paul, 2026-10-08): an
