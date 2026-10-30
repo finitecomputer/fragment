@@ -439,7 +439,11 @@ alone (`<sha>-dirty-<second>`). Dev and the e2e run one build in one
   brought forward, and costs what it costs: the requests the instance
   is answering end, its sockets close (their pages reconnect), an alarm
   running is run again, and a computer's container runs on (the next
-  instance adopts it). An object restarts so at most once in an isolate
+  instance adopts it). The restart's reason names the release that
+  restarted (`release::restart_reason`): a call of another release it
+  ends, which it refused before acting (the timer runs late under load,
+  as the caller's next ask arrives), is asked again as a refusal is
+  (`routed::sent`); one of its own release may have acted, and fails. An object restarts so at most once in an isolate
   (which runs one release): one Cloudflare starts again on the code
   before refuses, as it would have, until Cloudflare's own restart. A
   call from a release deployed before the object's, at the same second,
