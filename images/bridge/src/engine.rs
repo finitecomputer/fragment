@@ -1465,7 +1465,7 @@ impl Engine {
     fn runtime(&mut self, event: Event) {
         let turn_of = |e: &Event| -> Option<String> {
             match e {
-                Event::Draft { turn, .. } | Event::Reply { turn, .. } | Event::Attachment { turn, .. } | Event::Retract { turn, .. } => Some(turn.clone()),
+                Event::Draft { turn, .. } | Event::Reply { turn, .. } | Event::Attachment { turn, .. } | Event::Retract { turn, .. } | Event::Interim { turn, .. } => Some(turn.clone()),
                 Event::Step { turn, .. } | Event::Prompt { turn, .. } | Event::Asked { turn } | Event::End { turn, .. } => Some(turn.clone()),
                 Event::Connected(_) | Event::Working(_) | Event::Say { .. } | Event::Notice { .. } => None,
             }
@@ -1492,6 +1492,11 @@ impl Engine {
                 let t = &self.state.turns[&turn];
                 let (agent, fragment) = (t.agent.clone(), t.fragment.clone());
                 self.draft(&agent, &fragment, &turn, Some(records::cut_bytes(&text, limits::DRAFT_TEXT_MAX_BYTES)));
+            }
+            Event::Interim { turn, part } => {
+                if self.state.turns[&turn].open.as_ref().is_some_and(|o| o.part == part) {
+                    self.seal(&turn, true);
+                }
             }
             Event::Reply { turn, part, text } => self.reply(&turn, part, Some(text), None),
             Event::Attachment { turn, part, file } => self.reply(&turn, part, None, Some(file)),
