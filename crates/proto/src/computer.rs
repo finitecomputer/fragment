@@ -88,6 +88,9 @@ pub struct ComputerAgent {
 /// each slot by besides its name.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelIds {
+    /// Model ids declared image-capable by the deployment. Absent on old cells.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub images: Option<Vec<String>>,
     pub cheap: String,
     pub medium: String,
     pub fallback: String,

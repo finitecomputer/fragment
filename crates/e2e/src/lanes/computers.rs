@@ -968,7 +968,7 @@ fn intercept_takes_model_ids(s: &mut Suite, api: &Api, owner_id: &str, fetched: 
     let routes = json!({ "cheap": route(crate::RECOMMENDED_LABEL), "medium": route(crate::STANDARD_LABEL) });
     s.ok(
         "the intercept lists the route's models' ids (GET /v1/models, naming no agent, as Hermes' /model asks it), each once, and they are the ids its view names by the route's names (GET /api/computer's models), each tier's route beside them",
-        listed == format!("{GLM_FLASH}, {MEDIUM_MODEL}, {DEEPSEEK_FLASH}") && given == json!({ "cheap": GLM_FLASH, "medium": MEDIUM_MODEL, "fallback": DEEPSEEK_FLASH, "vision": GLM_FLASH, "routes": routes }),
+        listed == format!("{GLM_FLASH}, {MEDIUM_MODEL}, {DEEPSEEK_FLASH}") && given == json!({ "images": [], "cheap": GLM_FLASH, "medium": MEDIUM_MODEL, "fallback": DEEPSEEK_FLASH, "vision": GLM_FLASH, "routes": routes }),
         &said,
     );
     let (calls, before) = (s.ai.calls().len(), quiet(api, owner_id, "aig:"));

@@ -697,12 +697,128 @@ async fn hermes_running() -> (Fake, Model, String, Container) {
     hermes_running_with_modes(None).await
 }
 
+/// Real Hermes, its actual plugin loader/middleware/resize helper, and
+/// attachments plus desktop captures through the bridge. Capability
+/// revocation restores the separate describer without a restart.
+#[tokio::test]
+#[ignore = "needs Docker"]
+async fn native_images_are_bounded_and_unknown_models_keep_the_describer() {
+    build(&repo_dir(), "images/hermes/Dockerfile", &hermes_tag());
+    let fake = Fake::start("0.0.0.0:0", &["juniper"]).await;
+    let model = Model::start("0.0.0.0:0").await;
+    let chat = fake.chat("talk", &["juniper"]);
+    let fallback_chat = fake.chat("text-only", &["juniper"]);
+    let c = Container::run(&hermes_tag(), fake.addr.port(), model.addr.port(), &[]);
+    within(&fake,&chat,&c,120_000,"the bridge follows both image chats",|w|w.live_sockets()>=3).await;
+    asked(&fake,&chat,&c,"hello",|w,t|w.bodies(&chat,"work","turn.end").iter().any(|r|r["turn"]==t)).await;
+    let config = || c.exec_out(&["cat", "/data/hermes/profiles/juniper--k3x9/config.yaml"]);
+    fake.with(|w| w.computer["models"]["images"] = json!([CHEAP_ID, FALLBACK_ID]));
+    let t = Instant::now();
+    while !config().contains("supports_vision: true") {
+        assert!(t.elapsed() < Duration::from_secs(40), "capabilities reached the profile: {}", config());
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    let checked = hermes_python(&c, &["HERMES_HOME=/data/hermes/profiles/juniper--k3x9"], r#"
+import base64, copy, io, json
+from pathlib import Path
+from PIL import Image
+from hermes_cli.plugins import discover_plugins, has_middleware
+discover_plugins()
+assert has_middleware('llm_request')
+from agent import image_routing
+from tools.vision_tools import _native_tool_result_images
+from hermes_cli.middleware import apply_llm_request_middleware
+cfg = {'auxiliary': {'vision': {'provider': 'custom', 'model': 'vision'}},
+       'providers': {'custom': {'models': {'sees': {'supports_vision': True}, 'blind': {'supports_vision': False}}}}}
+assert image_routing.decide_image_input_mode('custom', 'sees', cfg) == 'native'
+assert _native_tool_result_images('custom', 'sees', cfg)
+assert image_routing.decide_image_input_mode('custom', 'blind', cfg) == 'text'
+assert not _native_tool_result_images('custom', 'blind', cfg)
+assert cfg['auxiliary']['vision']['model'] == 'vision', 'backend remains configured'
+from agent.models_dev import _models_dev_id
+assert _models_dev_id('custom', config={'providers': {'custom': {'catalog_provider': 'openrouter'}}}) == 'openrouter'
+im = Image.effect_noise((2400, 1800), 100).convert('RGB')
+buf = io.BytesIO()
+im.save(buf, format='PNG')
+original = buf.getvalue()
+url = 'data:image/png;base64,' + base64.b64encode(original).decode()
+request = {'messages': [{'role': 'user' if i % 2 else 'tool', 'content': [{'type': 'image_url', 'image_url': {'url': url}}]} for i in range(7)]}
+before = copy.deepcopy(request)
+result = apply_llm_request_middleware(request).payload
+assert request == before, 'canonical input is untouched'
+parts = [p for m in result['messages'] for p in m['content']]
+images = [p for p in parts if p.get('type') == 'image_url']
+assert len(images) == 4
+assert all(len(p['image_url']['url']) <= 256*1024 for p in images)
+for part in images:
+    resized = Image.open(io.BytesIO(base64.b64decode(part['image_url']['url'].split(',',1)[1])))
+    assert max(resized.size) <= 1568
+    factor = 2400 / resized.width
+    assert any(f'multiply any coordinates you report by {factor:.2f}' in p.get('text','') for p in parts), 'resized pixels retain their coordinate mapping'
+assert all(m['content'][0]['type'] == 'text' for m in result['messages'][:3]), 'oldest images retire first'
+assert apply_llm_request_middleware(request).payload == result, 'retry starts from the same history'
+class NoCopy:
+    def __deepcopy__(self, memo):
+        raise TypeError('SDK shallow-copy fallback')
+request['test_handle'] = NoCopy()
+shallow = apply_llm_request_middleware(request).payload
+assert request['messages'] == before['messages'], 'shallow-copy fallback also preserves canonical history'
+assert sum(p.get('type') == 'image_url' for m in shallow['messages'] for p in m['content']) == 4
+request.pop('test_handle')
+transparent = Image.new('RGBA', (2400,1800), (0,0,0,0))
+transparent.paste((0,0,0,255), (100,100,1400,900))
+buf = io.BytesIO()
+transparent.save(buf, format='PNG')
+alpha_url = 'data:image/png;base64,' + base64.b64encode(buf.getvalue()).decode()
+alpha_request = {'messages':[{'role':'user','content':[{'type':'image_url','image_url':{'url':alpha_url}}]}]}
+alpha_parts = apply_llm_request_middleware(alpha_request).payload['messages'][0]['content']
+alpha_image = next(p for p in alpha_parts if p.get('type') == 'image_url')['image_url']['url']
+alpha_pixels = Image.open(io.BytesIO(base64.b64decode(alpha_image.split(',',1)[1])))
+assert alpha_pixels.mode == 'RGBA' and alpha_pixels.getchannel('A').getextrema() == (0,255), 'transparent PNG pixels remain distinguishable'
+bad = {'messages': [{'role':'user','content':[{'type':'image_url','image_url':{'url':'data:image/png;base64,YmFk'}}]}]}
+assert apply_llm_request_middleware(bad).payload['messages'][0]['content'][0]['type'] == 'text'
+print(json.dumps({'images':len(images),'largest':max(len(p['image_url']['url']) for p in images),'original':len(original)}))
+"#);
+    assert_eq!(checked["images"], 4);
+    assert!(checked["largest"].as_u64().unwrap() <= 256 * 1024);
+    let before = model.calls.lock().unwrap().len();
+    let bytes = bytes::Bytes::from_static(support::model::IMAGE);
+    let sha = fragment_bridge::records::hex(&<sha2::Sha256 as sha2::Digest>::digest(&bytes));
+    fake.with(|w| w.fragments.get_mut(&chat).unwrap().blobs.insert(sha.clone(), ("image/png".into(), bytes.clone())));
+    let attachments: Vec<_> = (0..6).map(|i| json!({"name":format!("picture{i}.png"),"type":"image/png","size":bytes.len(),"sha256":sha})).collect();
+    let said = fake.say(&chat, &person("paul"), json!({"text":"inspect these attachments","attachments":attachments}));
+    let turn = fragment_bridge::records::turn_id("juniper--k3x9",&chat,"chat",said["seq"].as_u64().unwrap());
+    within(&fake,&chat,&c,90_000,"the native attachment reply",|w|w.bodies(&chat,"work","turn.end").iter().any(|r|r["turn"]==turn)).await;
+    asked(&fake,&chat,&c,"look at your screen",|w,t|w.bodies(&chat,"work","turn.end").iter().any(|r|r["turn"]==t)).await;
+    let calls = model.calls.lock().unwrap()[before..].to_vec();
+    let images = |body: &serde_json::Value, role: &str| body["messages"].as_array().into_iter().flatten().filter(|m|m["role"]==role).flat_map(|m|m["content"].as_array().into_iter().flatten()).filter(|p|p["type"]=="image_url").count();
+    assert!(!calls.iter().any(|c|c.model=="vision"), "native models never ask the describer");
+    assert!(calls.iter().any(|c|images(&c.body,"user")>0), "the actual main model sees the attachments");
+    assert!(calls.iter().any(|c|images(&c.body,"tool")>0), "the actual main model sees its screenshot");
+    assert!(calls.iter().all(|c|images(&c.body,"user")+images(&c.body,"tool")<=4));
+    fake.with(|w| w.computer["models"]["images"] = json!([]));
+    let t = Instant::now();
+    while !config().contains("supports_vision: false") {
+        assert!(t.elapsed()<Duration::from_secs(40), "native capability revoked");
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    let before = model.calls.lock().unwrap().len();
+    // A fresh chat forces a fresh capture: Hermes deliberately deduplicates
+    // an unchanged screen within a session, including its auxiliary call.
+    asked(&fake,&fallback_chat,&c,"look at your screen",|w,t|w.bodies(&fallback_chat,"work","turn.end").iter().any(|r|r["turn"]==t)).await;
+    let after = model.calls.lock().unwrap()[before..].to_vec();
+    let diagnostic: Vec<_> = after.iter().map(|c|json!({"model":c.model,"userImages":images(&c.body,"user"),"toolImages":images(&c.body,"tool"),"recent":c.body["messages"].as_array().map(|m|m.iter().rev().take(3).map(|m|content_text(m).chars().take(1800).collect::<String>()).collect::<Vec<_>>())})).collect();
+    assert!(after.iter().any(|c|c.model=="vision"), "a text-only model uses its configured describer: {diagnostic:?}; config: {}; log: {}", config(), c.logs().lines().rev().take(25).collect::<Vec<_>>().join("\n"));
+    assert_eq!(c.logs().matches("\"boot.init\"").count(),1);
+}
+
 async fn hermes_running_with_modes(tier: Option<&str>) -> (Fake, Model, String, Container) {
     build(&repo_dir(), "images/hermes/Dockerfile", &hermes_tag());
     let fake = Fake::start("0.0.0.0:0", &["juniper"]).await;
     if let Some(tier) = tier {
         fake.with(|w| {
             let models = &mut w.computer["models"];
+            models["images"] = json!([CHEAP_ID, ROUTE_FALLBACK_ID, FALLBACK_ID, "deepseek/deepseek-v4.1-flash"]);
             models["routes"]["cheap"]["private"] = json!(true);
             for (tier, deep, fallback) in [("cheap", ROUTE_FALLBACK_ID, CHEAP_ID), ("medium", "deepseek/deepseek-v4.1-flash", FALLBACK_ID)] {
                 models["routes"][tier]["reasoning"] = json!("high");

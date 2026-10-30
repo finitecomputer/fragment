@@ -34,6 +34,14 @@ async fn model_modes_accept_old_views_and_reject_invalid_routes() {
     let modes = api.computer(false).await.unwrap().models.unwrap();
     assert_eq!(modes.routes.unwrap().cheap.deep.unwrap().reasoning, Some(Reasoning::Max));
     let valid = fake.with(|w| w.computer.clone());
+    for images in [json!(["valid/model"]), json!([])] {
+        fake.with(|w| w.computer["models"]["images"] = images.clone());
+        assert!(api.computer(false).await.is_ok());
+    }
+    for images in [json!(["invalid model"]), json!(vec!["x"; 9]), json!(true)] {
+        fake.with(|w| w.computer["models"]["images"] = images.clone());
+        assert!(api.computer(false).await.is_err(), "invalid capability metadata is refused");
+    }
     for field in ["id", "fallback", "reasoning"] {
         fake.with(|w| {
             w.computer = valid.clone();

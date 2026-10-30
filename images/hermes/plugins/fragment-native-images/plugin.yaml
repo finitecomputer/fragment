@@ -1,0 +1,3 @@
+name: fragment-native-images
+version: 1.0.0
+description: Native images for capable models, with bounded per-call pixels.
