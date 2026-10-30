@@ -3702,3 +3702,5 @@ invalidate another. SimpleX ticket and record digests and wire bodies are
 unchanged. Fragment schema step 4 preserves existing keys and pending
 tickets; old Worker code cannot roll back past this step. Older images
 remain supported and keep their existing disk state and signatures.
+
+`POST /api/computer/capabilities` is a guest-only additive discovery route; its bounded declaration and version-scoped optional `ComputerView.capabilities` are specified in docs/computers.md, Image capabilities. Public callers cannot report capabilities.

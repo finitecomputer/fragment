@@ -38,6 +38,7 @@ mod config;
 mod connections;
 mod channels;
 mod computer;
+mod computer_legacy;
 mod deliveries;
 mod ended;
 mod cs;

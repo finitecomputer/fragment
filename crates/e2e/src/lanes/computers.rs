@@ -829,6 +829,43 @@ struct Doors<'a> {
     identity: &'a str,
 }
 
+/// Generic discovery without changing the stub image or its disk state.
+fn capability_checks(s: &mut Suite, api: &Api, c: &Doors) -> Result<()> {
+    let view = || api.signed(c.owner, "GET", &format!("/api/computers/{}", c.id), None);
+    let report = |v: Value| lever_with(api, c.id, json!({"op":"capabilities","capabilities":v}));
+    let legacy = lever_with(api, c.id, json!({"op":"simplex","on":true}))?;
+    let old = view()?;
+    s.ok("old image discovery translates to the existing SimpleX port page", legacy.status == 200 && old.body["simplex"] == true && old.body["capabilities"]["connectors"][0]["path"] == "/simplex/" && old.body["capabilities"]["homeChat"] == false, &old);
+    let declaration = json!({"homeChat":true,"connectors":[{"id":"other","title":"Another connector","port":6080,"path":"/other/","requiresAlwaysOn":true}],"chats":[{"connector":"other","agent":c.agent,"chat":c.chat}]});
+    let accepted = report(declaration.clone())?;
+    let shown = view()?;
+    s.ok("explicit generic capabilities replace legacy discovery without duplicate pages", accepted.body["accepted"] == true && shown.body["capabilities"] == declaration && shown.body.get("simplex").is_none(), &shown);
+    let repeat = report(declaration.clone())?;
+    s.ok("reporting the same capabilities is idempotent", repeat.body["accepted"] == true && view()?.body["capabilities"] == declaration, &repeat);
+    let mut wrong = declaration.clone(); wrong["chats"][0]["agent"] = json!("another--abcd");
+    let refused = report(wrong)?;
+    s.ok("a report cannot name an unassigned agent", refused.status == 400, &refused);
+    let mut wrong = declaration.clone();
+    let foreign = s.named(api, c.stranger, "connector-foreign")?; s.create(api, c.stranger, &foreign)?;
+    wrong["chats"][0]["chat"] = json!(foreign);
+    let refused = report(wrong)?;
+    s.ok("a report cannot name a chat belonging to someone else", refused.status == 403, &refused);
+    let not_joined = s.named(api, c.owner, "connector-unjoined")?; s.create(api, c.owner, &not_joined)?;
+    let mut wrong = declaration.clone(); wrong["chats"][0]["chat"] = json!(not_joined);
+    let refused = report(wrong)?;
+    s.ok("an owner-owned chat must also include the agent", refused.status == 403, &refused);
+    let sleepy_owner = api.person()?;
+    let sleepy = api.signed(&sleepy_owner, "POST", "/api/computers", Some(&json!({})))?;
+    let asleep = lever_with(api, sleepy.body["computer"].as_str().unwrap_or_default(), json!({"op":"capabilities","capabilities":{}}))?;
+    s.ok("no report is attributed to an image before a running start exists", asleep.body["accepted"] == false, &asleep);
+    let empty = report(json!({}))?;
+    let shown = view()?;
+    s.ok("an explicit empty report suppresses the old SimpleX flag", empty.body["accepted"] == true && shown.body["capabilities"]["connectors"] == json!([]) && shown.body.get("simplex").is_none(), &shown);
+    let public = api.signed(c.owner, "POST", "/api/computer/capabilities", Some(&declaration))?;
+    s.ok("an owner cannot impersonate a guest capabilities report", public.status == 404, &public);
+    Ok(())
+}
+
 /// The XFTP relay (fragment_core::relay), through the stub's `relay`
 /// commands: a host it does not carry is refused before anything is
 /// opened, and an app's answer that carries the relay's own headers (an
@@ -1582,6 +1619,7 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
             replies_so_far += codestorage_through_egress(s, api, &owner, &agent, &fetched)?;
         }
         let doors = Doors { owner: &owner, owner_id: &owner_id, stranger: &stranger, id: &id, agent: &agent_name, chat: &chat_name, identity: &identity };
+        capability_checks(s, api, &doors)?;
         replies_so_far += door_checks(s, api, &doors, &fetched)?;
         replies_so_far += relay_checks(s, api, &owner, &fetched)?;
     } else {

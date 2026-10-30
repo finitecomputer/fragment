@@ -271,6 +271,8 @@ enum MetaKey {
     /// The version whose bridge last said it does SimpleX (`GET
     /// /api/computer?simplex=1`: `fragment_core::computer::does_simplex`).
     Simplex,
+    /// Explicit image declaration and the running image version that reported it.
+    Capabilities,
     /// What its XFTP relays carried on their UTC day (`fragment_core::relay`):
     /// `<day> <bytes>`.
     RelayDay,
@@ -293,6 +295,7 @@ impl MetaKey {
             MetaKey::WorkosUser => "workos_user",
             MetaKey::Images => "images",
             MetaKey::Simplex => "simplex",
+            MetaKey::Capabilities => "capabilities",
             MetaKey::RelayDay => "relay_day",
         }
     }
@@ -666,6 +669,8 @@ struct TestLever {
     /// `alive-check`'s: its start's guest stopped as it starts.
     #[serde(default)]
     freeze: Option<bool>,
+    #[serde(default)]
+    capabilities: Option<fragment_proto::computer::ComputerCapabilities>,
 }
 
 #[derive(Deserialize)]
@@ -1624,6 +1629,31 @@ impl ComputerCell {
         Ok(())
     }
 
+    async fn said_capabilities(&self, capabilities: fragment_proto::computer::ComputerCapabilities) -> CellResult<bool> {
+        fragment_core::capabilities::validate(&capabilities).map_err(CellError::invalid)?;
+        let Some(version) = version_running(&self.lifecycle()?, &self.saves()?) else { return Ok(false) };
+        let owner = self.must(MetaKey::Owner)?;
+        let agents = self.agents()?;
+        for chat in &capabilities.chats {
+            let agent = agents.iter().find(|a| a.fragment == chat.agent && a.owner == owner).ok_or_else(|| CellError::invalid("connector chat names an assigned agent of this owner"))?;
+            let checked = crate::fragment::ask(&self.env, &chat.chat, "computer/connector-chat", &json!({"owner": owner, "identity": agent.identity})).await?;
+            if checked["ok"] != true { return Err(CellError::new(ErrorCode::Forbidden, "connector chat must belong to the owner and include the agent")); }
+        }
+        // Validation awaited other objects. Never attribute an old guest's
+        // report to an image that started in the meantime.
+        if version_running(&self.lifecycle()?, &self.saves()?).as_deref() != Some(&version) { return Ok(false); }
+        let current_agents = self.agents()?;
+        if capabilities.chats.iter().any(|c| !current_agents.iter().any(|a| a.fragment == c.agent && a.owner == owner)) {
+            return Err(CellError::new(ErrorCode::Forbidden, "connector chat agent was unassigned"));
+        }
+        let report = serde_json::to_string(&fragment_core::capabilities::Report { version, capabilities }).map_err(|e| CellError::host(e.to_string()))?;
+        if self.meta(MetaKey::Capabilities)?.as_deref() != Some(&report) {
+            self.set_meta(MetaKey::Capabilities, &report)?;
+            self.tell_owner().await;
+        }
+        Ok(true)
+    }
+
     // Shared computer transport: the union authorized for its assigned agents.
     // Limits remain per computer, never per connector or per agent.
     fn relay_targets(&self) -> CellResult<Vec<fragment_proto::computer::RelayTarget>> {
@@ -1894,6 +1924,10 @@ impl ComputerCell {
             },
         };
         let images = self.images()?;
+        let legacy_simplex = does_simplex(self.meta(MetaKey::Simplex)?.as_deref(), &life, &saves, &images);
+        let capabilities = self.meta(MetaKey::Capabilities)?.map(|raw| serde_json::from_str::<fragment_core::capabilities::Report>(&raw)).transpose().map_err(|e| CellError::host(format!("stored capabilities: {e}")))?
+            .and_then(|r| r.visible(fragment_core::computer::version_now(&life, &saves, &images).as_deref()))
+            .or_else(|| crate::computer_legacy::capabilities(legacy_simplex));
         Ok(ComputerView {
             computer: id,
             owner: self.must(MetaKey::Owner)?,
@@ -1913,7 +1947,8 @@ impl ComputerCell {
             rollbacks: saves.rollbacks(),
             saves: saves.views(),
             always_on: life.always_on(),
-            simplex: does_simplex(self.meta(MetaKey::Simplex)?.as_deref(), &life, &saves, &images),
+            simplex: crate::computer_legacy::simplex(capabilities.as_ref(), legacy_simplex),
+            capabilities,
             relay: None,
             relay_targets: None,
         })
@@ -2032,6 +2067,10 @@ impl ComputerCell {
         }
         let id = self.must(MetaKey::Id)?;
         match b.op.as_str() {
+            "capabilities" => {
+                let c = b.capabilities.clone().ok_or_else(|| CellError::invalid("name capabilities"))?;
+                Ok(json!({ "accepted": self.said_capabilities(c).await? }))
+            }
             "fail-saves" => {
                 // 0 clears it: the saves after it fail no more
                 let times = b.times.filter(|t| *t <= FAIL_SAVES_MAX).ok_or_else(|| CellError::invalid(format!("fail-saves names its times, 0 to {FAIL_SAVES_MAX}")))?;
@@ -2457,6 +2496,11 @@ impl ComputerCell {
                     self.said_simplex().await?;
                 }
                 json_response(&self.guest_view().await?)
+            }
+            "computer/capabilities" => {
+                let capabilities = body_json(&mut req).await?;
+                let accepted = self.said_capabilities(capabilities).await?;
+                json_response(&json!({ "accepted": accepted }))
             }
             "computer/relay-open" => {
                 // a place for one more XFTP relay (fragment_core::relay), or why not
@@ -3151,6 +3195,12 @@ async fn egress_api(mut req: Request, env: &Env, ctx: &Context, computer: &str, 
             // its bridge says whether its image does SimpleX (docs/computers.md, "SimpleX")
             let simplex = url.query_pairs().any(|(k, v)| k == "simplex" && v == "1");
             return json_response(&ask(env, computer, "computer/guest", &json!({ "simplex": simplex })).await?);
+        }
+        "/api/computer/capabilities" if req.method() == Method::Post => {
+            let raw = req.bytes().await?;
+            if raw.len() > fragment_core::capabilities::REPORT_MAX_BYTES { return Err(CellError::new(ErrorCode::TooLarge, "capabilities exceed 16 KiB")); }
+            let capabilities: fragment_proto::computer::ComputerCapabilities = serde_json::from_slice(&raw).map_err(|e| CellError::invalid(format!("capabilities: {e}")))?;
+            return json_response(&ask(env, computer, "computer/capabilities", &serde_json::to_value(capabilities).map_err(|e| CellError::host(e.to_string()))?).await?);
         }
         // a link's ticket redeemed with its door's public key, at the agent
         // fragment it names, for this computer alone (fragment_core::door)
