@@ -16,7 +16,7 @@ pub(crate) const ADMIN_PAGE: u32 = 100;
 /// The log's entries kept (the oldest go).
 const ADMIN_LOG_MAX: i64 = 10_000;
 /// A log entry's detail, at most.
-const DETAIL_MAX_BYTES: usize = 1_000;
+pub(super) const DETAIL_MAX_BYTES: usize = 1_000;
 
 /// `POST /admin/people`: people by identity after `after`, their latest
 /// email starting with `q` when it is named.
@@ -74,13 +74,17 @@ impl Call for Log {
 }
 
 /// `POST /admin/note`: an act of an operator's done elsewhere (a grant on
-/// a ledger, a trial mailed), for the log.
+/// a ledger, a trial mailed), for the log. A ledger command names its id
+/// (`request`): on an org's ledger it is the org's governance log's too,
+/// once by it (content.rs `org_noted`).
 #[derive(Serialize, Deserialize)]
 pub(crate) struct Note {
     pub by: String,
     pub action: String,
     pub target: String,
     pub detail: String,
+    #[serde(default)]
+    pub request: Option<String>,
 }
 
 impl Call for Note {
@@ -295,7 +299,10 @@ impl RegistryCell {
             Orgs::PATH => reply::<Orgs>(body(bytes).and_then(|b| self.orgs_page(b))),
             Health::PATH => reply::<Health>(self.health()),
             Log::PATH => reply::<Log>(body(bytes).and_then(|b| self.log_page(b))),
-            Note::PATH => reply::<Note>(body::<Note>(bytes).and_then(|b| self.log_admin(&b.by, &b.action, &b.target, &b.detail))),
+            Note::PATH => reply::<Note>(body::<Note>(bytes).and_then(|b| match (&b.request, fragment_core::ledger::org::Payer::parse(&b.target)) {
+                (Some(request), Some(fragment_core::ledger::org::Payer::Org(org))) => self.org_noted(&org, request, &b),
+                _ => self.log_admin(&b.by, &b.action, &b.target, &b.detail),
+            })),
             _ => return None,
         })
     }

@@ -38,9 +38,11 @@ pub const META_ORG: &str = "fragment_org";
 pub const META_PERSON: &str = "fragment_person";
 pub const META_KIND: &str = "fragment_kind";
 /// A pack's Checkout: who bought it (whose return it is), and the pack;
-/// `META_PERSON` is whose ledger it grants.
+/// `META_PERSON` is whose ledger it grants, or, on an org's own pack opened
+/// while one was sold, `META_PAYER` names the org's ledger (`org:<id>`).
 pub const META_BUYER: &str = "fragment_buyer";
 pub const META_PACK: &str = "fragment_pack";
+pub const META_PAYER: &str = "fragment_payer";
 
 /// The one seat Stripe sells (`SeatKind::SOLD`; Paul, 2026-10-15: "the
 /// $200 plan and the $25 credit pack"): its monthly price, found by its

@@ -639,6 +639,7 @@ struct GuestAsk {
 #[derive(Deserialize)]
 struct RelayAsk {
     host: String,
+    port: u16,
 }
 
 /// `computer/relay-close`'s body: the relay's lease, and what it carried.
@@ -1623,6 +1624,24 @@ impl ComputerCell {
         Ok(())
     }
 
+    /// What this computer's relays may reach: the targets of each connector
+    /// the policy allows one of its agents. The relay's bounds stay the
+    /// computer's, whichever connector a relay is for.
+    fn relay_targets(&self) -> CellResult<Vec<fragment_proto::computer::RelayTarget>> {
+        let owner = self.must(MetaKey::Owner)?;
+        let agents = self.agents()?;
+        let policy = &self.cfg.connectors;
+        let mut targets = Vec::new();
+        for c in policy.entries().iter().filter(|c| agents.iter().any(|a| policy.authorize(&owner, &a.fragment, &c.id, fragment_core::connectors::Action::Relay).is_ok())) {
+            for t in &c.relay_targets {
+                if !targets.contains(t) {
+                    targets.push(t.clone());
+                }
+            }
+        }
+        Ok(targets)
+    }
+
     /// The guest's own view (`GET /api/computer`): its agents, each with
     /// the credentials it may use now (a connection its owner connected, an
     /// operator key the deployment holds, an own key its owner gave; none
@@ -1632,7 +1651,9 @@ impl ComputerCell {
         // what its owner is told is theirs (its guest reads `restored`)
         view.notices = vec![];
         // what its XFTP relay carries: its bridge sends its core's files through it
-        view.relay = Some(fragment_proto::computer::RelayOffer { hosts: fragment_core::relay::HOSTS.iter().map(|h| h.to_string()).collect(), port: fragment_core::relay::PORT });
+        let targets = self.relay_targets()?;
+        view.relay = Some(fragment_proto::computer::RelayOffer { hosts: targets.iter().filter(|t| t.port == fragment_core::relay::PORT).map(|t| t.host.clone()).collect(), port: fragment_core::relay::PORT });
+        view.relay_targets = Some(targets);
         // the key each agent's fragment signs as: a door's ticket is checked with it
         for agent in &mut view.agents {
             agent.key = fragment_core::npub::parse(&agent.identity);
@@ -1897,6 +1918,7 @@ impl ComputerCell {
             always_on: life.always_on(),
             simplex: does_simplex(self.meta(MetaKey::Simplex)?.as_deref(), &life, &saves, &images),
             relay: None,
+            relay_targets: None,
         })
     }
 
@@ -2443,6 +2465,9 @@ impl ComputerCell {
                 // a place for one more XFTP relay (fragment_core::relay), or why not
                 self.must(MetaKey::Id)?;
                 let b: RelayAsk = body_json(&mut req).await?;
+                if !self.relay_targets()?.iter().any(|t| t.host == b.host && t.port == b.port) {
+                    return Err(CellError::new(ErrorCode::Forbidden, format!("{}:{} is no relay target of this computer's connectors", b.host, b.port)));
+                }
                 let lease = js::random_hex::<16>();
                 let spent = fragment_core::relay::parse_spent(self.meta(MetaKey::RelayDay)?.as_deref());
                 let (open, kept) = {
@@ -3143,11 +3168,11 @@ async fn egress_api(mut req: Request, env: &Env, ctx: &Context, computer: &str, 
         // (entry.mjs `relay`), told how by these headers, which it alone reads
         p if p == fragment_core::relay::ROUTE => {
             let q: BTreeMap<String, String> = url.query_pairs().into_owned().collect();
-            let (host, port) = fragment_core::relay::target(q.get("host").map_or("", String::as_str), q.get("port").map_or("", String::as_str)).map_err(|r| CellError::new(ErrorCode::Forbidden, r.message()))?;
+            let (host, port) = fragment_core::relay::target(&Config::from_env(env).connectors, q.get("host").map_or("", String::as_str), q.get("port").map_or("", String::as_str)).map_err(|r| CellError::new(ErrorCode::Forbidden, r.message()))?;
             if !req.headers().get("upgrade")?.is_some_and(|u| u.eq_ignore_ascii_case("websocket")) {
                 return Err(CellError::invalid("a relay is a WebSocket"));
             }
-            let held = ask(env, computer, "computer/relay-open", &json!({ "host": host })).await?;
+            let held = ask(env, computer, "computer/relay-open", &json!({ "host": host, "port": port })).await?;
             let lease = held["lease"].as_str().filter(|l| l.len() == 32).ok_or_else(|| CellError::host("a relay's lease"))?;
             let allowance = held["bytesMax"].as_u64().filter(|b| (fragment_core::relay::ALLOWANCE_MIN..=fragment_core::relay::BYTES_MAX).contains(b)).ok_or_else(|| CellError::host("a relay's allowance"))?;
             let headers = Headers::new();

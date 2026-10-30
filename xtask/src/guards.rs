@@ -171,7 +171,7 @@ mod tests {
     #[test]
     fn the_shell_copies_its_limits() {
         let root = crate::devstack::repo_root();
-        let shell = std::fs::read_to_string(root.join("cell/shell/shell.js")).expect("the shell reads");
+        let shell = std::fs::read_to_string(root.join("cell/shell/chat-list.js")).expect("the shell reads");
         let bridge = std::fs::read_to_string(root.join("images/bridge/src/limits.rs")).expect("the bridge's limits read");
         assert_eq!(constant(&shell, "const", "LISTED_FRESH_MS", " = "), fragment_proto::limits::LISTED_FRESH_MS);
         assert_eq!(constant(&shell, "const", "UNREAD_MAX", " = "), i64::from(fragment_proto::limits::LISTED_UNREAD_MAX));

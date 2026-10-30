@@ -7,8 +7,10 @@
 #   scripted model, real Hermes included (`cargo test -p fragment-bridge
 #   --test docker -- --ignored`). It runs only when a change touches what it
 #   builds or runs (`changes` below: images/hermes, images/bridge,
-#   images/stub, the images' manifest and lock, or this workflow), on pull
-#   requests, merge groups and master's pushes, and on every run by hand.
+#   images/stub, the images' manifest and lock, the Hermes image's CLI
+#   stage's inputs, or this workflow), on pull requests, merge groups and
+#   master's pushes, on every run by hand, and whenever `changes` itself
+#   did not succeed.
 #
 # Their Rust cache (the registry and images/target's dependencies) is
 # Swatinem/rust-cache's, one key for both jobs, saved only from master's
@@ -18,9 +20,9 @@ name: images
 on:
   push:
     branches: [master]
-    paths: ["images/**", "cli/SKILL.md", ".github/workflows/images.yml"]
+    paths: ["images/**", ".github/workflows/images.yml", ".dockerignore", "Cargo.toml", "Cargo.lock", "cli/**", "crates/core/**", "crates/nip98/**", "crates/proto/**", "crates/templates/**", "templates/blank/**", "templates/calories/**", "templates/doc/**", "templates/inbox/**", "templates/notes/**", "templates/todo/**", "crates/devstack/Cargo.toml", "crates/e2e/Cargo.toml", "crates/fakes/Cargo.toml", "xtask/Cargo.toml"]
   pull_request:
-    paths: ["images/**", "cli/SKILL.md", ".github/workflows/images.yml"]
+    paths: ["images/**", ".github/workflows/images.yml", ".dockerignore", "Cargo.toml", "Cargo.lock", "cli/**", "crates/core/**", "crates/nip98/**", "crates/proto/**", "crates/templates/**", "templates/blank/**", "templates/calories/**", "templates/doc/**", "templates/inbox/**", "templates/notes/**", "templates/todo/**", "crates/devstack/Cargo.toml", "crates/e2e/Cargo.toml", "crates/fakes/Cargo.toml", "xtask/Cargo.toml"]
   # No event-level path filter exists for merge_group. `changes` compares
   # the group's exact base and head, so the Docker lane stays conditional.
   merge_group:
@@ -78,6 +80,27 @@ jobs:
               - images/Cargo.toml
               - images/Cargo.lock
               - .github/workflows/images.yml
+              # the Hermes image's other inputs, its CLI stage's (#715):
+              # xtask/src/image/preview.rs `INPUTS`, which a host test
+              # holds this list and the paths above to
+              - .dockerignore
+              - Cargo.toml
+              - Cargo.lock
+              - cli/**
+              - crates/core/**
+              - crates/nip98/**
+              - crates/proto/**
+              - crates/templates/**
+              - templates/blank/**
+              - templates/calories/**
+              - templates/doc/**
+              - templates/inbox/**
+              - templates/notes/**
+              - templates/todo/**
+              - crates/devstack/Cargo.toml
+              - crates/e2e/Cargo.toml
+              - crates/fakes/Cargo.toml
+              - xtask/Cargo.toml
 
   # The Docker lane. The images are built first by the runner's own Docker
   # (its BuildKit, straight into its image store, under the tags the tests
@@ -104,7 +127,10 @@ jobs:
   docker:
     name: docker (real Hermes)
     needs: changes
-    if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.docker == 'true'
+    # fails closed: a `changes` that did not succeed (it failed, or ran out
+    # its time, as in run 41100441445) runs the lane rather than skip it,
+    # which a required check would count as a pass
+    if: ${{ !cancelled() && (github.event_name == 'workflow_dispatch' || needs.changes.result != 'success' || needs.changes.outputs.docker == 'true') }}
     # ubuntu-24.04 (Docker 28), not ubuntu-latest: since 2026-10-25,
     # ubuntu-latest is 26.04 with Docker 29, whose containerd image store
     # names `containerd` in every container's root mount, so Hermes takes

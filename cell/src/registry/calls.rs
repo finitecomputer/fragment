@@ -474,6 +474,10 @@ pub(crate) enum TestHook {
     /// it refused for their release (`{calls: null}` → `{calls, skewed}`):
     /// a test counts a request's round trips by the difference.
     Calls,
+    /// The next `times` wipes' registry steps fail just after their orgs'
+    /// content is written (at most `TEST_DOWN_FOR_MAX`; 0 ends it): a test
+    /// runs one again and sees it change nothing twice.
+    FailWipeRows(u32),
     /// The next call waits this many milliseconds (at most
     /// `TEST_HOLD_MAX_MS`) before it is answered: a test lets other
     /// requests run while a fragment waits on the Registry.

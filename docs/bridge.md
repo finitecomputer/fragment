@@ -261,6 +261,23 @@ deep (docs/chat-records.md, "An agent's reply"):
   (`a_chats_agents_have_a_budget`: valid, past it, a person never
   counted, replay, restart, another chat's own, the window sliding). A
   state from before the budget loads with none.
+- **An answer comes back** (docs/chat-records.md, "An ask"). A question
+  whose `return_to` names a chat, from another agent of this computer, is
+  a turn like any; the turn keeps where to return (`Return`: the asking
+  agent, its chat, the asked agent's name, what it said), and its end owes
+  one more record, the answer on the asking agent's own `tasks`, which
+  that agent's follower reads as a turn in that chat. No waiter, no scan,
+  nothing held awake: the owed record is the delivery (crashes and lost
+  answers retry it under one id, and the lane never gives it up), the
+  claim of the woken turn its one run. A question refused as it comes is
+  answered `refused`, a turn of the asker's that never runs. A state
+  holding a return is format 3, which a bridge before asks sets aside; one
+  holding none stays 2. `a_question_is_answered_back_where_it_was_asked`,
+  `every_end_of_an_asked_turn_answers`,
+  `a_state_owing_an_answer_is_one_an_older_bridge_sets_aside` and
+  `any_history_of_asks_answers_each_once` (engine_tests.rs), and
+  tests/ask.rs (crashes before and after the answer's post, a rollback, a
+  cut turn, refusals, a loop that stops at the cap).
 - **`tasks` is the agent's own.** A routine or `joined` starts anything
   only from the agent fragment's own key (not an identity: its cron, the
   platform) or its owner; another agent acting for the owner, who may post
@@ -344,23 +361,48 @@ Waiting on a person alone will not hold it once P6 (#627) lands; until
 then an open card still holds it as described below.
 
 The image's `fragment-activity` plugin uses Hermes v0.21.7's supported
-`subagent_start` and `subagent_stop` lifecycle hooks, keyed by
-`child_session_id`. While its set of children is nonempty it holds
-`ws://<bridge listen>/relay/activity`, authenticated by the gateway's
-normal Relay bearer token (`gateway.relay.auth.make_token`). The bridge
-queues `Working(true)` and answers `ready` before the start hook returns,
-so the parent's end cannot release the hold first. Each plugin instance
-has at most one socket; several profiles' sockets hold together. This is
-the one runtime-work signal: it names no chat turn and appends no record.
+hooks: `subagent_start` and `subagent_stop` for its children,
+`pre_llm_call` and `post_tool_call` for the person's turns' steps (below).
+Its one `ws://<bridge listen>/relay/activity` socket, authenticated by the
+gateway's normal Relay bearer token (`gateway.relay.auth.make_token`),
+carries both. The bridge answers each frame (`working`, `observed`, or
+`refused`) once its loop has it, and the hook returns only then, so the
+parent's end cannot release a hold first, nor a step come after its
+turn's end.
 
-The socket closes when the last child stops, or when its gateway process
-exits. A socket silent for 30 seconds closes too (the plugin pings every
-10 seconds and reconnects while children remain). The bridge's engine
-includes those live sockets in its existing keepawake predicate. Nothing
-of the children is persisted or replayed on restart: Hermes owns them,
-and a new process has none. Their completion still uses Hermes' ordinary
-Relay reply, which the bridge posts once as a turn of its own.
-Files from that completion use the same path: `send_media` accepts an
+A socket alone holds nothing: `{"working": true}` holds while the
+plugin's set of children (by `child_session_id`, in memory) is nonempty,
+until `{"working": false}`, its close, its gateway process's exit, or 30
+seconds without a frame or ping (websockets pings every 10 seconds; while
+children run the plugin checks it every second and reconnects). A socket
+the plugin opens again, for a tool's end or for its worker, says the
+children's work before anything else, so a drop never loses the hold
+(`tests/activity_reconnect.py`, run in the image). Several
+profiles' sockets hold together. The bridge's engine includes them in its
+existing keepawake predicate. Nothing of the children is persisted or
+replayed on restart: Hermes owns them, and a new process has none. Their
+completion still uses Hermes' ordinary Relay reply, which the bridge posts
+once as a turn of its own.
+
+A step is a tool call's end as Hermes observed it (`post_tool_call`), never
+its progress text: the image turns progress off, and the bridge reads none.
+Only the person's turn's own calls are its steps: `pre_llm_call` maps the
+run Hermes starts for a Relay message (its `turn_id`) to that message's id
+(`HERMES_SESSION_MESSAGE_ID`, our turn). Hermes' memory review forks a run
+that shares the session and the message's context but persists nothing,
+for which Hermes skips that hook; a delegated child's run is its own
+(top-level delegation always runs in the background on a gateway, so its
+calls would land in the parent's turn or not by chance). Their calls are
+no steps. Hermes' outcomes `ok`, `error`, `timeout`, `cancelled` and
+`blocked` are `completed`, `failed`, `timed_out`, `cancelled` and
+`blocked`; the step's `args` are Hermes' own preview of the call
+(`agent.display.build_tool_preview`, at most 140 characters, what its
+progress showed), its `excerpt` a command's exit code, never its output or
+error text. A call whose end is not observed (no hook, a lost socket) is
+no step: delivery is best effort, each frame sent at most once, and
+nothing is guessed.
+
+Files from delegated completion use the same path: `send_media` accepts an
 upload or a fetched provider URL after the parent ends and posts a reply
 with the file, even without a caption. It uses the registered agent and
 the chat's ordinary blob upload; no active parent turn is required.
@@ -731,23 +773,11 @@ get_chat_info`.
   In its owner's SimpleX chat every inbound's source carries
   `chat_topic` (`wire::SIMPLEX_TOPIC`), which Hermes renders in that
   session's context as `**Channel Topic:**` (above, "SimpleX").
-- A reply streams as `draft` frames (the chat's draft), and arrives as a
-  `send` answering the turn's message; tool progress is a `send`
-  answering nothing whose lines grow by `edit`, each new line a step.
-  Hermes edits it at most every 1.5 s, and upstream held a line that came
-  sooner until a newer one, so a turn's last quick tool call showed no
-  step; our image patches its sender to send the line once the interval
-  is out (images/hermes/Dockerfile; the debt ledger).
-- A progress line names its tool (`🖥️ computer_use: "capture"`, a
-  terminal command's fenced block) or says its friendly verb (`🔍
-  Searching the web for rust`, `✍️ Writing notes.md`: Hermes' own labels
-  for its built-in tools, `display.verb` of its `locales/en.yaml`). One
-  table of Hermes' tools (`relay/wire.rs`, `TOOLS`) reads either as the
-  step's `tool` (Hermes' name for it), its `args` (the call's preview,
-  its quotes and a repeat's count dropped) and its `category`; a tool not
-  there is `other`, but for its browser's (`browser_…`). Hermes cuts a
-  preview at its `display.tool_preview_length`, 40 unless set: our image
-  sets it to 140, the most a step's `args` keeps (`hermes-boot`).
+- A reply streams as `draft` frames and arrives as a `send` answering
+  the turn's message. A step is a tool call's observed end, on the
+  activity socket (above, "Runtime work outside a turn"); `relay/wire.rs`'s
+  table of Hermes' tools gives its `category` (a tool not there is
+  `other`, but for its browser's, `browser_…`).
 - Everything the agent says is a reply (Paul, 2026-10-24, in place of
   2026-10-05's one reply a turn). Hermes ends a draft segment at every
   tool boundary with a `send` answering the message, so the model's text
@@ -763,10 +793,19 @@ get_chat_info`.
   replies have a bound of their own (`INTERIM_REPLIES_PER_TURN_MAX`, one
   a posted step), apart from `REPLIES_PER_TURN_MAX`, so narration never
   costs the turn its answer (`narration_never_costs_the_answer`). The
-  tool's progress can reach the bridge before that `send`: a step that
-  comes while a draft segment streams waits for it, at most
-  `STEP_HOLD_MS` (3 s), the words then going before it; a question, a
-  card, a file or the end stops the wait. And while a reply's image links
+  two sockets keep no order between them, so a quick tool's end can reach
+  the bridge before that `send`: a step that comes while a draft segment
+  streams waits for it, at most `STEP_HOLD_MS` (3 s), the words then going
+  before it; a question, a card, a file or the end stops the wait. One
+  that comes before even a draft (a short preamble beside an instant
+  command) leaves the words that come next unknown: that step's, late, or
+  the turn's next (its answer). They count as no next step's words, and a
+  reply after them with no step between says they were the step's: the
+  runtime marks them interim just before that reply, wherever it goes
+  (`Event::Interim`), while a lone answer stays the answer. Posted records
+  are never rewritten (`words_and_steps_out_of_order_keep_the_answer`;
+  Hermes' `metadata.notify` cannot say it: its stream sender sets it on
+  both). And while a reply's image links
   are fetched (within the fetch's own 20 s) everything of its turn after
   it waits in order (`Inflight::queue`: its steps, a later reply, a card,
   a file, its end), so the reply keeps its files and the answer after it
@@ -801,13 +840,22 @@ get_chat_info`.
   category, never a step. Hermes releases its review's notice once the
   turn is done, after its `✅`, so a notice with no turn running is the
   turn's the engine last ran in that chat, not a turn of its own. No
-  tool's emoji is a notice glyph, so no progress line reads as one; and
+  tool's emoji is a notice glyph (and the image sends no progress); and
   Hermes' word on a command said beside a turn (`⏩` a steer's, `💬 /btw:`
   a side question's answer) is the command's message of its own
   (above, "Commands"), read before any notice.
 - A file Hermes sends is uploaded to `/relay/media`, then `send_media`;
   a message's attachments are served at `/relay/media/<id>`, behind the
-  token.
+  token. Before the inbound is sent, the driver has downloaded the originals
+  to `<BRIDGE_MEDIA_DIR>/<sha256>` (default `/tmp/bridge-media`). Their
+  original names, MIME types and absolute local paths follow the new message's
+  words as file notes; an unread file is counted explicitly. They stay with
+  the message so Hermes' prepended voice transcript is not separated from
+  it by a channel-context block. Restart notes keep their read-only `context`.
+  The same file-note formatter names files sent as answers to
+  a question. No filename from the record becomes a disk path, and there
+  is no extra download or cache. Hermes' own localisation and native-image
+  routing continue normally. The scratch is not saved across a sleep.
 - A file Hermes sends by a URL of its provider's (`send_media` naming
   one: a reply's image link, as FAL's image generation hands back) is
   fetched by the bridge (`relay/fetch.rs`), apart from the loop, and is
@@ -927,7 +975,7 @@ get_chat_info`.
   (a silent routine at home sends the phone nothing).
 
 Of decision 21's list, v0.21.5 has every op, but sends `task_card` only
-for Slack chats (`gateway/run_turn.py`), so steps come from progress
-text; `follow_up` is Discord's interaction tokens; neither is
+for Slack chats (`gateway/run_turn.py`), so steps come from its tool hooks
+(above); `follow_up` is Discord's interaction tokens; neither is
 advertised. It also has `thread_create` and `thread_rename` (threads are
 off here).

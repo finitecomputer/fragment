@@ -111,6 +111,7 @@ with `fragment ask`:
 ```
 fragment ask fred "what's on the calendar Friday?" --wait   # prints fred's answer
 fragment ask fred "draft the reply" --chat team-chat         # asks in that chat; the answer comes there
+fragment ask fred "find a flight" --return-to my-chat        # fred's answer comes back to you in my-chat
 ```
 
 The question goes to a chat of the two agents and their owner
@@ -123,8 +124,13 @@ asked agent; its turn's replies come in that chat, where it can @name
 you back. `--wait [secs]` (150 by default, at most 1800) follows the
 chat for that turn and prints its replies once it ends, or says none
 came, calling the agent by its name (its title), else its label.
+`--return-to <chat>` (an agent's; not with `--wait`) names the chat you
+ask from, which you answer in: once the asked agent's turn is over, its
+answer comes back there as a new turn of yours, however long it took and
+whether or not you still run, so ask and end your turn. An answer is not
+a new question: tell your owner what it says rather than asking again.
 `--json`: `{chat, asked: {fragment, identity, name, title?}, record,
-replayed, created, added, answer?: {turn, outcome, error?, replies:
+replayed, created, added, returnTo?, answer?: {turn, outcome, error?, replies:
 [{seq, text, attachments}]}}` (`name` its label, which @mentions it;
 `title` its name, when the signer's list says one). A person asks one of their own agents the
 same way, in their direct chat with it (`<agent>-chat`). The answering
@@ -818,6 +824,7 @@ fragment ledger grant ann 20 --why "a top-up"   # operators only
 fragment operator people --q ann@                 # operators: people, orgs, comps,
 fragment operator comp ann@example.com --kind always-on   # trial codes, health, the log
 fragment operator pin <npub> hermes-canary        # a person's computer onto the canary (or back)
+fragment operator credit org-… 500 --why "an invoice" --id inv-12   # an org pays out of band: credit it, once by its reference
 ```
 
 ## You and your keys
@@ -990,7 +997,7 @@ fragment write <name> <path> --text T | --from FILE|- [--message M]
 fragment blob put <name> <file>          # prints its sha256: its pages read it at __blob/<sha256>
 fragment drafts <name>                   fragment rollback <name> [--to <sha>]
 fragment rm <name>                       fragment guide|skill
-fragment ask <agent> <text> [--chat C] [--wait [S]] [--id ID]
+fragment ask <agent> <text> [--chat C] [--wait [S] | --return-to CHAT] [--id ID]
 fragment mcp <name> [--write]            # its described operations as an MCP server's tools, over stdio
 fragment agent [<agent>] [--name N] [--picture FILE | --no-picture]
 fragment schedule add [<name>] --cron "<m h dom mon dow>" --channel C --record JSON
@@ -1007,6 +1014,9 @@ fragment operator uncomp <seat> [--key-file F]
 fragment operator trials [--name N [--days D] [--capacity C] | --send <id> --to <email>] [--key-file F]
 fragment operator health [--key-file F]
 fragment operator log [--before N] [--key-file F]
+fragment operator credit <org> <usd> --why W --id REF [--key-file F]
+fragment operator budget <org> <usd> [--id I] [--key-file F]
+fragment operator payer <org> <email|npub> [--id I] [--key-file F]
 ```
 
 `fragment operator …` is the deployment's operators' alone: each signs

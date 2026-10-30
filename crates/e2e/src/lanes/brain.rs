@@ -10,6 +10,9 @@
 //! change; an asset's blob, named by its source note, is served; and the
 //! page (the notes viewer and the brain's search) loads for a member.
 
+#[path = "brain_parent.rs"]
+mod parent;
+
 use std::path::Path;
 use std::time::Duration;
 
@@ -368,5 +371,6 @@ pub fn brain(s: &mut Suite, api: &Api) -> Result<()> {
         shown && chrome.eval(&tab, "(() => { const c = document.getElementById('content'); return window.__ran === undefined && !c.querySelector('img,script,svg,iframe,a[href^=\"javascript\" i]') && c.textContent.includes('<img src=x onerror='); })()")? == true,
         chrome.eval(&tab, "JSON.stringify({ ran: window.__ran ?? null, text: document.getElementById('content')?.innerText.slice(0, 400) })")?,
     );
+    parent::run(s, api, &keys)?;
     Ok(())
 }

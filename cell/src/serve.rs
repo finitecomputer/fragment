@@ -23,7 +23,7 @@ use fragment_core::access::Purpose;
 use fragment_core::site::VIEW_COOKIE;
 use fragment_core::{npub, site};
 use fragment_proto::{valid_repo_path, ErrorCode, OpCall, Role, Visibility};
-use fragment_templates::{blessed, File};
+use fragment_templates::{blessed, File, CLIENT_CSS, CLIENT_JS, FILES_CSS, FILES_JS, MARKDOWN_JS, SW_JS};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use worker::*;
@@ -34,25 +34,6 @@ use crate::fragment::{as_themselves, decide, decode_segment, json_response, Call
 use crate::js;
 use crate::routed::Credential;
 
-/// The browser library pages import as `./__fragment.js`.
-const CLIENT_JS: &str = include_str!("../client.mjs");
-/// The stylesheet a page may link as `./__fragment.css` (never injected).
-const CLIENT_CSS: &str = include_str!("../fragment.css");
-/// The files viewer (`__files`'s page, with `./__files.js`, `./__files.css`):
-/// a fragment's files as a tree beside a reader.
-const FILES_JS: &str = include_str!("../files.mjs");
-const FILES_CSS: &str = include_str!("../files.css");
-/// The markdown renderer pages import as `./__markdown.js`: markdown to
-/// DOM, never to markup (the files viewer, the chat, the notes viewer).
-const MARKDOWN_JS: &str = include_str!("../markdown.mjs");
-/// The scripts' entity tags, hashed at build time: a page view revalidates
-/// them (`no-cache`) and gets 304 until a cell deploy changes their bytes.
-const CLIENT_JS_HASH: u64 = site::content_hash(CLIENT_JS.as_bytes());
-const MARKDOWN_JS_HASH: u64 = site::content_hash(MARKDOWN_JS.as_bytes());
-const CLIENT_CSS_HASH: u64 = site::content_hash(CLIENT_CSS.as_bytes());
-const FILES_JS_HASH: u64 = site::content_hash(FILES_JS.as_bytes());
-const FILES_CSS_HASH: u64 = site::content_hash(FILES_CSS.as_bytes());
-const SW_JS_HASH: u64 = site::content_hash(crate::push::SW_JS.as_bytes());
 /// Marks a site request's refusal (401, 403) as the platform's, never an
 /// app's answer: the router answers a browser's navigation to one as a
 /// page (`auth::refused`), and drops the mark from any other answer. An
@@ -99,14 +80,9 @@ pub(crate) fn not_modified(req: &Request, etag: &str, cache: &str) -> CellResult
     }
 }
 
-/// A script compiled into the cell, revalidated by its build-time hash.
-fn script(req: &Request, body: &'static str, hash: u64) -> CellResult<Response> {
-    compiled_in(req, body, hash, "text/javascript; charset=utf-8")
-}
-
-/// A file compiled into the cell, revalidated by its build-time hash.
-pub(crate) fn compiled_in(req: &Request, body: &'static str, hash: u64, content_type: &str) -> CellResult<Response> {
-    let etag = site::hash_etag(hash);
+/// A browser file from the release's Static Assets, revalidated by its indexed SHA.
+async fn browser_asset(req: &Request, env: &Env, file: &File, content_type: &str) -> CellResult<Response> {
+    let etag = format!("\"{}\"", &file.sha256[..16]);
     if let Some(resp) = not_modified(req, &etag, "no-cache")? {
         return Ok(resp);
     }
@@ -114,7 +90,11 @@ pub(crate) fn compiled_in(req: &Request, body: &'static str, hash: u64, content_
     h.set("content-type", content_type)?;
     h.set("cache-control", "no-cache")?;
     h.set("etag", &etag)?;
-    Ok(Response::ok(body)?.with_headers(h))
+    if req.method() == Method::Head {
+        h.set("content-length", &file.size.to_string())?;
+        return Ok(Response::empty()?.with_headers(h));
+    }
+    assets::body(env, file, h).await
 }
 
 /// Whether a site path's answer is someone's, beyond whether they may see
@@ -315,7 +295,7 @@ impl FragmentCell {
                 _ => return Err(CellError::invalid("read a blob with GET or HEAD, or upload one with PUT")),
             }
         } else if path == "__sw.js" {
-            script(&req, crate::push::SW_JS, SW_JS_HASH)?
+            browser_asset(&req, &self.env, &SW_JS, "text/javascript; charset=utf-8").await?
         } else if path == "__watch" {
             self.watch(&req, caller, &facts, link)?
         } else if path == "__live" {
@@ -421,19 +401,19 @@ impl FragmentCell {
         let caller: &Caller = &reader;
         let head = req.method() == Method::Head;
         if path == "__fragment.js" {
-            return script(req, CLIENT_JS, CLIENT_JS_HASH);
+            return browser_asset(req, &self.env, &CLIENT_JS, "text/javascript; charset=utf-8").await;
         }
         if path == "__fragment.css" {
-            return compiled_in(req, CLIENT_CSS, CLIENT_CSS_HASH, "text/css; charset=utf-8");
+            return browser_asset(req, &self.env, &CLIENT_CSS, "text/css; charset=utf-8").await;
         }
         if path == "__files.js" {
-            return script(req, FILES_JS, FILES_JS_HASH);
+            return browser_asset(req, &self.env, &FILES_JS, "text/javascript; charset=utf-8").await;
         }
         if path == "__files.css" {
-            return compiled_in(req, FILES_CSS, FILES_CSS_HASH, "text/css; charset=utf-8");
+            return browser_asset(req, &self.env, &FILES_CSS, "text/css; charset=utf-8").await;
         }
         if path == "__markdown.js" {
-            return script(req, MARKDOWN_JS, MARKDOWN_JS_HASH);
+            return browser_asset(req, &self.env, &MARKDOWN_JS, "text/javascript; charset=utf-8").await;
         }
         self.ensure_pins(facts).await?;
         let facts = &*facts;

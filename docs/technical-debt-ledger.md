@@ -5,6 +5,21 @@ Each entry names where it was observed, the risk, the first proof that
 would show it biting, and the condition that deletes it. An entry
 without a delete condition is unfinished design, not debt.
 
+## A paid org pack is still credited, though none is sold
+
+- **Observed:** #736 review, 2026-10-30: orgs now pay out of band and an
+  operator credits them (decision 66), so no org pack is opened any more.
+  But preview sold one in Stripe's sandbox from #716 until #736 deployed.
+- **Shortcut:** `pack_paid` (`cell/src/billing.rs`) still grants a
+  Checkout whose `fragment_payer` names its org's ledger, once by its
+  Checkout, so one paid after that deploy (its return, or a webhook
+  Stripe sends again) is credited and not lost.
+- **Risk:** none beyond the read: nothing opens such a Checkout.
+- **First proof:** a webhook for such a Checkout that fails its grant
+  (Stripe's dashboard shows it retried).
+- **Delete when:** three days (Stripe's retries) have passed since #736
+  deployed to preview; a Checkout itself expires after 31 minutes.
+
 ## Hermes' explicit auxiliary vision overrides native image routing
 
 - **Observed:** #505 and the decision 65 probe (2026-10-29): all four
@@ -1097,70 +1112,6 @@ fragment.club until cutover (decisions 34–35).
   structure, the entry above): the bridge then marks a routine's inbound
   as expecting no reply, and Hermes' own silence ends a turn the bridge
   can read; proven by the real-Hermes lane.
-
-## Hermes' tool steps are its progress text
-
-- **Observed:** phase 4. v0.21.5 sends `task_card` only for Slack chats,
-  so a Relay turn's steps are the lines of its progress message: a tool's
-  name and its preview, `ok` always true, no excerpt of its result.
-- **Risk:** a step card cannot say a tool failed or what it returned; a
-  change to the progress lines' format changes the cards.
-- **First proof:** phase 5's chat template showing a failed tool as ok.
-- **Delete when:** Hermes sends structured tool events (task cards, or
-  their like) to Relay connectors other than Slack's, and the relay
-  runtime maps them, proven by the real-Hermes lane's step assertions.
-
-## A quick tool's step can be lost in Hermes
-
-- **Observed:** the Docker rung's `the_hermes_image`, twice, warm.
-  Hermes v0.21.5's progress sender (`gateway/run_turn_runner.py`,
-  `TurnRunner.send_progress_messages`) takes a tool's progress line from
-  its queue every 0.3 s; when the turn's cleanup cancels it, it edits a
-  progress message it already sent but never sends a first one. A turn
-  that ends before the sender's next poll after its tool starts sends no
-  progress line at all, as a message or in a draft (its one draft is the
-  answer's), so the relay runtime has no step to record; a probe of that
-  code in the image lost 21 of 48 lines whose turns ended within 0.35 s
-  of their tool's start. The scripted model answers at once and `echo` is
-  quick: the failing turns took about 350 ms, and a passing one sent its
-  line 65 ms before its answer. So the rung's terminal command sleeps 2 s
-  first (`images/bridge/tests/support/model.rs`). The e2e's `hermes` lane
-  runs `run: echo tool-ran` through the Workers AI fake and has the same
-  race, so far unseen.
-- **Risk:** a real turn whose tool and next model call take under 0.3 s
-  together shows its answer with no step. Rare with a real model, whose
-  next call alone is slower.
-- **First proof:** a Hermes turn with a tool call in its session and no
-  `turn.step` on work.
-- **Delete when:** Hermes sends what its progress queue holds when its
-  sender is cancelled (or the entry above goes), proven by the Docker
-  rung with an instant command.
-
-## The Hermes image patches Hermes' progress sender
-
-- **Observed:** the hosted `agent-smoke` (2026-10-06): asked to list
-  fragments with the CLI, 2 runs of 3 recorded only the skill read's step
-  though the reply named the fragments a terminal call listed. Hermes
-  v0.21.5's progress sender (`gateway/run_turn_runner.py`,
-  `TurnRunner.send_progress_messages`) edits at most every 1.5 s: a line
-  that comes sooner waits out the interval, then the sender goes back to
-  its queue and sends that line only with a newer one. A tool call within
-  1.5 s of the last progress line that is its turn's last (a skill read,
-  then a quick model call to the terminal) is never sent, and the next
-  text segment's new-message marker clears it. A probe of that code in
-  the image (the sender driven with a scripted queue) lost the line in
-  each such order and sent it once the patch removes the loop's
-  `continue` after the wait; the Docker rung's `use the terminal twice`
-  turn proves the patched image. The image applies it with Python before
-  its bytecode step (`images/hermes/Dockerfile`), and the build fails if
-  the loop no longer reads as it did.
-- **Risk:** a Hermes release changes the loop: the build fails (loudly).
-  Edits stay at most one per 1.5 s; the patch only stops a held line
-  from waiting for a newer one.
-- **First proof:** the first Hermes upgrade after v0.21.5.
-- **Delete when:** upstream sends a held progress line once its edit
-  interval passes, proven by the Docker rung's `use the terminal twice`
-  turn on an unpatched image.
 
 ## The screen writes Hermes' lease file, not through Hermes
 
