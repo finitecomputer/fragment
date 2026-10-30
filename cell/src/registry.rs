@@ -47,6 +47,7 @@ pub(crate) const PROFILES_MAX: usize = 64;
 pub(crate) mod admin;
 pub(crate) mod billing;
 pub(crate) mod calls;
+pub(crate) mod content;
 mod addresses;
 pub(crate) mod invites;
 pub(crate) mod offers;
@@ -824,6 +825,9 @@ impl RegistryCell {
             return answer;
         }
         if let Some(answer) = self.trials_route(&path, &bytes) {
+            return answer;
+        }
+        if let Some(answer) = self.content_route(&path, &bytes) {
             return answer;
         }
         if let Some(answer) = self.admin_route(&path, &bytes) {

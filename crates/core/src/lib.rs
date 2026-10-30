@@ -24,6 +24,7 @@ pub mod facet;
 pub mod form;
 pub mod frames;
 pub mod glob;
+pub mod governance;
 pub mod icon;
 pub mod ledger;
 pub mod levers;

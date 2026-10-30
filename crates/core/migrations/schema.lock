@@ -14,6 +14,7 @@ step Registry 4 connection_fences ac8ad73c1302c4be
 step Registry 5 invites_answered 189ad3c09884ab61
 step Registry 6 connection_accounts 05c1285d594517cb
 step Registry 7 public_addresses ab8499c84e7997be
+step Registry 8 org_content a96737df622f1a47
 step Principal 1 baseline 28b4d4bf3f8cdb71
 step Principal 2 listed 09e5aab70c4f7f61
 step Principal 3 memberships_dock 607987fd7686be8b
@@ -111,6 +112,12 @@ Registry index logins_created: CREATE INDEX logins_created ON logins (created_at
 Registry table offer_answers: CREATE TABLE offer_answers ( offer TEXT PRIMARY KEY, person TEXT NOT NULL, at INTEGER NOT NULL)
 Registry index offer_answers_person: CREATE INDEX offer_answers_person ON offer_answers (person)
 Registry table offer_mails: CREATE TABLE offer_mails ( org TEXT NOT NULL, day INTEGER NOT NULL, mailed INTEGER NOT NULL, PRIMARY KEY (org, day))
+Registry table org_content: CREATE TABLE org_content ( org TEXT NOT NULL, person TEXT NOT NULL, epoch INTEGER NOT NULL CHECK (epoch >= 1), active INTEGER NOT NULL CHECK (active IN (0, 1)), admin INTEGER NOT NULL CHECK (admin IN (0, 1) AND (admin = 0 OR active = 1)), since INTEGER NOT NULL, left_at INTEGER, PRIMARY KEY (org, person) )
+Registry index org_content_person: CREATE INDEX org_content_person ON org_content (person)
+Registry table org_content_offers: CREATE TABLE org_content_offers ( id TEXT PRIMARY KEY, org TEXT NOT NULL, email TEXT NOT NULL, request TEXT NOT NULL, offered_by TEXT NOT NULL, offered_at INTEGER NOT NULL, answer TEXT CHECK (answer IN ('accepted', 'declined')), answered_by TEXT, answered_at INTEGER, UNIQUE (org, request) )
+Registry index org_content_offers_email: CREATE INDEX org_content_offers_email ON org_content_offers (email) WHERE answer IS NULL
+Registry index org_content_offers_waiting: CREATE UNIQUE INDEX org_content_offers_waiting ON org_content_offers (org, email) WHERE answer IS NULL
+Registry table org_governance: CREATE TABLE org_governance ( seq INTEGER PRIMARY KEY AUTOINCREMENT, org TEXT NOT NULL, request TEXT NOT NULL, at INTEGER NOT NULL, actor TEXT NOT NULL, action TEXT NOT NULL, subject TEXT, detail TEXT NOT NULL, UNIQUE (org, request) )
 Registry table org_members: CREATE TABLE org_members ( id TEXT PRIMARY KEY, org TEXT NOT NULL, person TEXT UNIQUE, email TEXT NOT NULL, admin INTEGER NOT NULL, seat TEXT, comped INTEGER NOT NULL, sleeps INTEGER NOT NULL, added_at INTEGER NOT NULL, added_by TEXT NOT NULL)
 Registry index org_members_offer_email: CREATE UNIQUE INDEX org_members_offer_email ON org_members (org, email) WHERE person IS NULL
 Registry index org_members_offers: CREATE INDEX org_members_offers ON org_members (email, added_at) WHERE person IS NULL

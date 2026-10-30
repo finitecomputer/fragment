@@ -437,11 +437,17 @@ impl RegistryCell {
     }
 
     /// An org no one is in or offered goes once nothing of it bills (no
-    /// subscription, or one ended, its cancel landed): its row, who paid,
-    /// its queued push. Its Stripe customer is kept (invoices, tax,
-    /// refunds); the registry's link to it goes with the row.
+    /// subscription, or one ended, its cancel landed) and it has no content
+    /// (content.rs `has_content`): its row, who paid, its queued push. Its
+    /// Stripe customer is kept (invoices, tax, refunds); the registry's
+    /// link to it goes with the row.
     pub(super) fn drop_if_empty(&self, org: &str) -> CellResult<()> {
         if self.count("SELECT COUNT(*) AS n FROM org_members WHERE org = ?", vec![org.into()])? > 0 {
+            return Ok(());
+        }
+        // its content outlives its billing (decision 69): its people, its
+        // ledger and what it owns stay the org's
+        if self.has_content(org)? {
             return Ok(());
         }
         let Some(sub) = self.org_sub(org)? else { return Ok(()) };
