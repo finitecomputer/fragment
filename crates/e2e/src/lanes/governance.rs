@@ -67,15 +67,17 @@ pub fn governance(s: &mut Suite, api: &Api) -> Result<()> {
     let first_id = id_of(&first);
     let again = offer(api, &pam, "first", &cat)?;
     let other = offer(api, &pam, "first", &bea)?;
-    let to_bea = offer(api, &pam, "first-bea", &bea)?;
+    let kim = api.person()?;
+    let to_kim = offer(api, &pam, "first-kim", &kim)?;
     let theirs = api.signed(&cat, "GET", "/api/orgs/offers", None)?;
     let sal = api.person()?;
     let not_theirs = reply(api, &sal, &first_id, "accept")?;
     let took = reply(api, &cat, &first_id, "accept")?;
-    let bea_late = reply(api, &bea, &id_of(&to_bea), "accept")?;
+    let kim_late = reply(api, &kim, &id_of(&to_kim), "accept")?;
     let pam_again = offer(api, &pam, "second", &sal)?;
+    let lapsed_logged = content(api, &cat)["log"].as_array().into_iter().flatten().any(|e| e["action"] == "admin-accepted" && e["detail"]["lapsed"] == json!([id_of(&to_kim)]));
     s.ok(
-        "who pays offers the first content admin's place, once by its id (another email under it: 409), waiting on its email and no one else's to answer (404); once one is accepted, its other \"firsts\" lapse (409) and who pays offers no more (403)",
+        "who pays offers the first content admin's place, once by its id (another email under it: 409), waiting on its email and no one else's to answer (404); once one is accepted, its other \"firsts\" lapse with it, named in its entry (their accept: 404), and who pays offers no more (403)",
         first.status == 200
             && first.body["grounds"] == "payer"
             && first.body["answer"].is_null()
@@ -85,9 +87,19 @@ pub fn governance(s: &mut Suite, api: &Api) -> Result<()> {
             && not_theirs.status == 404
             && took.status == 200
             && took.body["answer"] == "accepted"
-            && bea_late.status == 409
+            && kim_late.status == 404
+            && lapsed_logged
             && pam_again.status == 403,
-        json!([first.body, other.body, not_theirs.body, took.body, bea_late.body, pam_again.body]),
+        json!([first.body, other.body, not_theirs.body, took.body, kim_late.body, pam_again.body]),
+    );
+    // R1: an admin's offer to someone whose old offer lapsed is a new one, accepted
+    let to_kim_again = offer(api, &cat, "kim-2", &kim)?;
+    let kim_took = reply(api, &kim, &id_of(&to_kim_again), "accept")?;
+    let kim_down = api.signed(&cat, "DELETE", &format!("{root}/content-admins/{}", api.identity(&kim)?), None)?;
+    s.ok(
+        "an admin's offer to someone whose earlier offer lapsed is a new one, on the admin's grounds, and is accepted",
+        to_kim_again.status == 200 && to_kim_again.body["id"] != to_kim.body["id"] && to_kim_again.body["grounds"] == "admin" && kim_took.status == 200 && kim_down.status == 200,
+        json!([to_kim_again.body, kim_took.body]),
     );
 
     // role_answer_conflict
@@ -230,18 +242,46 @@ pub fn governance(s: &mut Suite, api: &Api) -> Result<()> {
         let down = api.signed(&cat, "DELETE", &format!("{root}/content-admins/{id}"), None)?;
         anyhow::ensure!(down.status == 200, "{id} steps down: {down}");
     }
+    // cat, an admin of a second org too (an operator's comp, its first by recovery)
+    let lou = api.person()?;
+    let lou_org = api.signed(&s.operator, "POST", "/api/admin/seats", Some(&json!({ "email": Api::email_of(&lou), "kind": "seat" })))?;
+    let lou_org = lou_org.body["org"]["id"].as_str().context("lou's comped org")?.to_string();
+    let to_cat = api.signed(&s.operator, "POST", &format!("/api/admin/orgs/{lou_org}/content-admin-offers"), Some(&json!({ "id": "cat", "email": Api::email_of(&cat) })))?;
+    let cat_second = api.signed(&cat, "POST", &format!("/api/orgs/{lou_org}/content-admin-offers/{}/accept", id_of(&to_cat)), Some(&json!({})))?;
+    anyhow::ensure!(cat_second.status == 200, "cat in lou's org's content too: {cat_second}");
     let waiting = offer(api, &cat, "waits", &sal)?;
+    // the wipe's registry step fails just after its orgs' content: run
+    // again, it finishes, each org logged once
+    let failed = api.unsigned("POST", "/api/test/registry", Some(&json!({ "failWipeRows": 1 })))?;
+    let (first_try, _) = wipe_until_done(api, &wiper, &cat_id)?;
     let (wiped, _) = wipe_until_done(api, &wiper, &cat_id)?;
-    let eve = api.person()?;
-    let recover = api.signed(&s.operator, "POST", &format!("/api/admin/orgs/{org}/content-admin-offers"), Some(&json!({ "id": "recover-1", "email": Api::email_of(&eve) })))?;
-    let eve_took = reply(api, &eve, &id_of(&recover), "accept")?;
+    let entries_of = |org: &str| -> usize {
+        api.signed(&s.operator, "GET", &format!("/api/admin/orgs/{org}/content"), None)
+            .map(|r| r.body["log"].as_array().into_iter().flatten().filter(|e| e["action"] == "wiped" && e["subject"] == cat_id.as_str()).count())
+            .unwrap_or(0)
+    };
+    s.ok(
+        "a wipe whose registry step failed after its orgs' content is run again and finishes, each org's place and offers written once, one entry each",
+        failed.status == 200 && first_try.body["state"] != "wiped" && wiped.status == 200 && wiped.body["state"] == "wiped" && entries_of(&org) == 1 && entries_of(&lou_org) == 1,
+        json!({ "first": first_try.body, "then": wiped.body }),
+    );
+    // the operator's recovery goes to kim, whose payer offer lapsed: a new one
+    let recover = api.signed(&s.operator, "POST", &format!("/api/admin/orgs/{org}/content-admin-offers"), Some(&json!({ "id": "recover-1", "email": Api::email_of(&kim) })))?;
+    let kim_took = reply(api, &kim, &id_of(&recover), "accept")?;
     let sal_late = reply(api, &sal, &id_of(&waiting), "accept")?;
-    let view = content(api, &eve);
-    let wiped_entry = view["log"].as_array().into_iter().flatten().any(|e| e["action"] == "wiped" && e["subject"] == cat_id.as_str());
+    let view = content(api, &kim);
+    let wiped_entry = view["log"].as_array().into_iter().flatten().any(|e| e["action"] == "wiped" && e["subject"] == cat_id.as_str() && e["detail"]["withdrawn"].as_array().is_some_and(|w| w.contains(&json!(id_of(&waiting)))));
     let recovered = view["log"].as_array().into_iter().flatten().any(|e| e["action"] == "admin-offered" && e["detail"]["grounds"] == "operator");
     s.ok(
-        "a sole content admin's wipe leaves the org to an operator's recovery: their place and their offers went with them (logged), an operator offers the next, and it is accepted",
-        waiting.status == 200 && wiped.status == 200 && recover.status == 200 && eve_took.status == 200 && sal_late.status == 404 && person(&view, &cat_id)["admin"] == false && wiped_entry && recovered,
+        "a sole content admin's wipe leaves the org to an operator's recovery: their place and their offers went with them (the offers named in its entry), an operator offers the next, a new offer though theirs once lapsed, and it is accepted",
+        waiting.status == 200
+            && recover.status == 200
+            && recover.body["id"] != to_kim.body["id"]
+            && kim_took.status == 200
+            && sal_late.status == 404
+            && person(&view, &cat_id)["admin"] == false
+            && wiped_entry
+            && recovered,
         json!({ "recover": recover.body, "sal": sal_late.body, "log": view["log"] }),
     );
     Ok(())

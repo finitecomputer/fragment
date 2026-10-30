@@ -168,12 +168,44 @@ impl Tx {
 
     /// The waiting offers `person` made, and those to their emails, taken
     /// back as they step down (or are wiped).
-    fn retire_offers(&self, org: &str, person: &str, by: &str, now: i64) -> CellResult<()> {
-        self.exec(
+    fn retire_offers(&self, org: &str, person: &str, by: &str, now: i64) -> CellResult<Vec<String>> {
+        #[derive(Deserialize)]
+        struct Id {
+            id: String,
+        }
+        // bounded: an org's waiting offers (ADMINS_MAX, an operator's few)
+        let ids = self.rows::<Id>(
             "UPDATE org_content_offers SET answer = 'withdrawn', answered_by = ?, answered_at = ?
-             WHERE org = ? AND answer IS NULL AND (offered_by = ? OR email IN (SELECT email FROM subjects WHERE identity = ?))",
+             WHERE org = ? AND answer IS NULL AND (offered_by = ? OR email IN (SELECT email FROM subjects WHERE identity = ?)) RETURNING id",
             vec![by.into(), SqlStorageValue::Integer(now), org.into(), person.into(), person.into()],
-        )
+        )?;
+        Ok(ids.into_iter().map(|r| r.id).collect())
+    }
+
+    /// `org`'s waiting offers whose grounds hold no more, marked lapsed in
+    /// the change that shows it (`governance::lapses`), so none is handed
+    /// back as if new, nor counted against the cap. `payer`: who pays now.
+    fn settle(&self, org: &str, payer: Option<&str>, now: i64) -> CellResult<Vec<String>> {
+        let (people, admins) = (self.people(org)?, self.admins(org)?);
+        // bounded: an org's waiting offers (ADMINS_MAX, an operator's few)
+        let waiting: Vec<OfferRow> = self.rows(&format!("SELECT {OFFER_COLUMNS} FROM org_content_offers WHERE org = ? AND answer IS NULL"), vec![org.into()])?;
+        let mut lapsed = vec![];
+        for o in waiting {
+            let grounds = o.grounds()?;
+            let offerer_stands = match grounds {
+                Grounds::Admin => self.place(org, &o.offered_by)? == Some(true),
+                Grounds::Payer => payer == Some(o.offered_by.as_str()),
+                Grounds::Operator => true,
+            };
+            if governance::lapses(grounds, Now { people, admins, offerer_stands }) {
+                self.exec(
+                    "UPDATE org_content_offers SET answer = 'lapsed', answered_at = ? WHERE id = ? AND answer IS NULL",
+                    vec![SqlStorageValue::Integer(now), o.id.as_str().into()],
+                )?;
+                lapsed.push(o.id);
+            }
+        }
+        Ok(lapsed)
     }
 
     /// The entry `request` made in `org`'s log, if any.
@@ -309,13 +341,14 @@ impl RegistryCell {
         let request = client_request("offer", &b.request)?;
         let org = self.content_org(&b.org)?;
         let email = super::signin::email_of(&b.email).ok_or_else(|| CellError::invalid(format!("{:?} is not an email", b.email)))?;
-        // who offers, read in this turn: the change below runs in it too
+        // who offers and who pays, read in this turn: the change below runs in it too
+        let payer = self.payer_of(&org.id)?;
         let (actor, offerer) = match (&b.by, &b.operator) {
             (None, Some(op)) => (op.clone(), Some(Grounds::Operator)),
             (Some(by), None) => {
                 let who = self.governor(by)?;
                 let admin = self.row::<Value>("SELECT 1 AS one FROM org_content WHERE org = ? AND person = ? AND admin = 1", vec![org.id.as_str().into(), who.id.as_str().into()])?.is_some();
-                let pays = self.payer_of(&org.id)?.as_deref() == Some(who.id.as_str());
+                let pays = payer.as_deref() == Some(who.id.as_str());
                 let offerer = match (admin, pays) {
                     (true, _) => Some(Grounds::Admin),
                     (false, true) => Some(Grounds::Payer),
@@ -339,13 +372,14 @@ impl RegistryCell {
                     };
                 }
                 tx.expire(&org, now)?;
+                let lapsed = tx.settle(&org, payer.as_deref(), now)?;
                 let waiting = tx.count("SELECT COUNT(*) AS n FROM org_content_offers WHERE org = ? AND answer IS NULL AND grounds != 'operator'", vec![org.as_str().into()])?;
                 let grounds = governance::may_offer(offerer, tx.people(&org)?, tx.admins(&org)?, waiting).map_err(refused)?;
                 // offered and waiting already: this request names that one
                 let existing: Option<OfferRow> =
                     tx.row(&format!("SELECT {OFFER_COLUMNS} FROM org_content_offers WHERE org = ? AND email = ? AND answer IS NULL"), vec![org.as_str().into(), email.as_str().into()])?;
-                let id = match existing {
-                    Some(o) => o.id,
+                let (id, kept) = match existing {
+                    Some(o) => (o.id, o.grounds),
                     None => {
                         let id = fresh_id("cof-");
                         tx.exec(
@@ -360,10 +394,12 @@ impl RegistryCell {
                                 SqlStorageValue::Integer(now + OFFER_TTL_MS),
                             ],
                         )?;
-                        id
+                        (id, grounds.as_str().to_string())
                     }
                 };
-                tx.govern(&org, Logged { request: &request, actor: &actor, action: "admin-offered", subject: Some(&id), detail: json!({ "offer": id, "grounds": grounds.as_str() }) }, now)?;
+                // the offer's own grounds (one waiting already keeps its own)
+                let detail = json!({ "offer": id, "grounds": kept, "lapsed": lapsed });
+                tx.govern(&org, Logged { request: &request, actor: &actor, action: "admin-offered", subject: Some(&id), detail }, now)?;
                 if grounds == Grounds::Operator {
                     // the operators' log too, in the same change
                     tx.exec(
@@ -412,8 +448,12 @@ impl RegistryCell {
                     "UPDATE org_content_offers SET answer = ?, answered_by = ?, answered_at = ? WHERE id = ? AND answer IS NULL",
                     vec![b.answer.as_str().into(), person.as_str().into(), SqlStorageValue::Integer(now), o.id.as_str().into()],
                 )?;
+                // an accept can make others lapse (who pays's other "firsts",
+                // an operator's recovery): settled with it, named in its entry
+                let lapsed = tx.settle(&org, payer.as_deref(), now)?;
                 let action = format!("admin-{}", b.answer.as_str());
-                tx.govern(&org, Logged { request: &format!("answer:{}", o.id), actor: &person, action: &action, subject: Some(&person), detail: json!({ "offer": o.id }) }, now)?;
+                let detail = json!({ "offer": o.id, "lapsed": lapsed });
+                tx.govern(&org, Logged { request: &format!("answer:{}", o.id), actor: &person, action: &action, subject: Some(&person), detail }, now)?;
                 Ok(o.id)
             }
         })?;
@@ -436,7 +476,7 @@ impl RegistryCell {
                     Standing::Waiting => {}
                     Standing::Withdrawn => return Ok(()),
                     Standing::Answered(a) => return Err(refused(Refusal::Answered(a))),
-                    Standing::Expired => return Err(refused(Refusal::Ended)),
+                    Standing::Expired | Standing::Lapsed => return Err(refused(Refusal::Ended)),
                 }
                 tx.exec(
                     "UPDATE org_content_offers SET answer = 'withdrawn', answered_by = ?, answered_at = ? WHERE id = ? AND answer IS NULL",
@@ -483,9 +523,9 @@ impl RegistryCell {
                     return Ok(());
                 }
                 tx.exec("UPDATE org_content SET admin = 0 WHERE org = ? AND person = ?", vec![org.as_str().into(), person.as_str().into()])?;
-                tx.retire_offers(&org, &person, &actor, now)?;
+                let withdrawn = tx.retire_offers(&org, &person, &actor, now)?;
                 let request = format!("step-down:{}", hex::encode(js::random_bytes::<8>()));
-                tx.govern(&org, Logged { request: &request, actor: &actor, action: "admin-stepped-down", subject: Some(&person), detail: json!({}) }, now)
+                tx.govern(&org, Logged { request: &request, actor: &actor, action: "admin-stepped-down", subject: Some(&person), detail: json!({ "withdrawn": withdrawn }) }, now)
             }
         })?;
         self.person_view(&org.id, &b.person)
@@ -553,20 +593,29 @@ impl RegistryCell {
 
     /// A wiped person, in every org's content: an admin no more, and their
     /// waiting offers, made or received, withdrawn, each logged as the
-    /// operator who wiped them, in the wipe's turn. An org left with no
-    /// admin waits on an operator's recovery.
+    /// operator who wiped them, once an org (run again, it changes
+    /// nothing). Their rows stay, the audit trail (Paul, 2026-10-30). An org
+    /// left with no admin waits on an operator's recovery.
     pub(super) fn content_wiped(&self, person: &str, operator: &str) -> CellResult<()> {
         #[derive(Deserialize)]
         struct Row {
             org: String,
         }
-        let now = js::now_ms();
-        let tx = Tx(self.state.storage().sql());
-        // bounded: the orgs whose content they said yes to
+        // bounded: the orgs whose content they said yes to. Each is its own
+        // change, done once: a wipe whose step failed after some (Alex's
+        // review) is run again, and finds those done by their entries
         for r in self.rows::<Row>("SELECT org FROM org_content WHERE person = ?", vec![person.into()])? {
-            tx.exec("UPDATE org_content SET admin = 0 WHERE org = ? AND person = ?", vec![r.org.as_str().into(), person.into()])?;
-            tx.retire_offers(&r.org, person, operator, now)?;
-            tx.govern(&r.org, Logged { request: &format!("wipe:{person}"), actor: operator, action: "wiped", subject: Some(person), detail: json!({}) }, now)?;
+            let (person, operator) = (person.to_string(), operator.to_string());
+            self.atomically(move |tx| {
+                let request = format!("wipe:{person}");
+                if tx.governed(&r.org, &request)?.is_some() {
+                    return Ok(());
+                }
+                let now = js::now_ms();
+                tx.exec("UPDATE org_content SET admin = 0 WHERE org = ? AND person = ?", vec![r.org.as_str().into(), person.as_str().into()])?;
+                let withdrawn = tx.retire_offers(&r.org, &person, &operator, now)?;
+                tx.govern(&r.org, Logged { request: &request, actor: &operator, action: "wiped", subject: Some(&person), detail: json!({ "withdrawn": withdrawn }) }, now)
+            })?;
         }
         Ok(())
     }
