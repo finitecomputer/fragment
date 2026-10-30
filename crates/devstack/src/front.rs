@@ -17,6 +17,11 @@
 //! client opens is one connection to the runtime, nothing between them that
 //! reads a request, and no pool.
 //!
+//! Each request and its answer is a line of the node's log (`[front] GET
+//! /x 200 (3ms)`, framing.rs), as wrangler's proxy wrote one: wrangler
+//! writes none of the runtime's own. A request a connection closed on
+//! unanswered says so.
+//!
 //! wrangler names the runtime's address only in its debug output, where its
 //! proxy is told of each start and restart (`reloadStart`, then
 //! `reloadComplete` with the address; a restart moves the port): the node's
@@ -24,7 +29,9 @@
 //! opened during a restart waits for the next address, as wrangler's proxy
 //! holds a request (docs/technical-debt-ledger.md).
 
-use std::io::{self, Write};
+use std::collections::VecDeque;
+use std::fs::File;
+use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
@@ -32,6 +39,8 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+
+use crate::framing::{self, Framer, Head, Side};
 
 /// What wrangler's debug output tells its proxy as the runtime restarts.
 const RESTARTING: &str = r#""type":"reloadStart""#;
@@ -133,8 +142,8 @@ pub(crate) struct Front {
 
 impl Front {
     /// Holds 127.0.0.1:`port`, passing what it accepts to the runtime
-    /// `heard` names.
-    pub(crate) fn bind(port: u16, heard: Arc<Heard>) -> Result<Front> {
+    /// `heard` names, each request a line of `log` (the boot's).
+    pub(crate) fn bind(port: u16, heard: Arc<Heard>, log: Arc<Mutex<File>>) -> Result<Front> {
         let listener = TcpListener::bind(("127.0.0.1", port)).with_context(|| format!("the node's port :{port} is taken"))?;
         let stop = Arc::new(AtomicBool::new(false));
         let stopping = stop.clone();
@@ -144,9 +153,9 @@ impl Front {
                     return;
                 }
                 let Ok(client) = client else { continue };
-                let heard = heard.clone();
+                let (heard, log) = (heard.clone(), log.clone());
                 // a thread a connection, as long as it is open
-                let _ = thread::Builder::new().name(format!("front-{port}-pass")).spawn(move || pass(client, &heard));
+                let _ = thread::Builder::new().name(format!("front-{port}-pass")).spawn(move || pass(client, &heard, &log));
             }
         })?;
         Ok(Front { port, stop, accepting: Some(accepting) })
@@ -167,8 +176,8 @@ impl Drop for Front {
 }
 
 /// One client's connection, passed to the runtime both ways until either
-/// side ends it.
-fn pass(client: TcpStream, heard: &Heard) {
+/// side ends it, each request and its answer a line of `log`.
+fn pass(client: TcpStream, heard: &Heard, log: &Mutex<File>) {
     let mut refused = None;
     let runtime = loop {
         let Some(port) = heard.running(refused, RUNTIME_WAIT) else { return };
@@ -183,17 +192,65 @@ fn pass(client: TcpStream, heard: &Heard) {
     let _ = client.set_nodelay(true);
     let _ = runtime.set_nodelay(true);
     let (Ok(client_in), Ok(runtime_in)) = (client.try_clone(), runtime.try_clone()) else { return };
-    let up = thread::Builder::new().name("front-up".into()).spawn(move || copy(client_in, runtime));
-    copy(runtime_in, client);
+    // the requests asked and not yet answered, oldest first: an HTTP/1.1
+    // connection answers them in order
+    let asked: Arc<Mutex<VecDeque<(String, String, Instant)>>> = Arc::default();
+    let up = {
+        let asked = asked.clone();
+        let mut requests = Framer::new(Side::Requests);
+        thread::Builder::new().name("front-up".into()).spawn(move || {
+            copy(client_in, runtime, |bytes| {
+                requests.feed(bytes, &|| false, |head| {
+                    if let Head::Request { method, path } = head {
+                        asked.lock().unwrap_or_else(PoisonError::into_inner).push_back((method, path, Instant::now()));
+                    }
+                })
+            })
+        })
+    };
+    let mut responses = Framer::new(Side::Responses);
+    copy(runtime_in, client, |bytes| {
+        let head_request = || asked.lock().unwrap_or_else(PoisonError::into_inner).front().is_some_and(|(m, ..)| m == "HEAD");
+        responses.feed(bytes, &head_request, |head| {
+            // an interim answer (100, 103) is not the request's
+            let Head::Response { status } = head else { return };
+            if (100..200).contains(&status) && status != 101 {
+                return;
+            }
+            if let Some((method, path, at)) = asked.lock().unwrap_or_else(PoisonError::into_inner).pop_front() {
+                write(log, &framing::said(&method, &path, status, at.elapsed()));
+            }
+        })
+    });
     if let Ok(up) = up {
         let _ = up.join();
     }
+    for (method, path, at) in asked.lock().unwrap_or_else(PoisonError::into_inner).drain(..) {
+        let path: String = path.chars().take(200).collect();
+        write(log, &format!("[front] {method} {path} unanswered: its connection closed after {}ms\n", at.elapsed().as_millis()));
+    }
 }
 
-/// `from`'s bytes to `to` until `from` ends (or either fails), then `to`'s
-/// writing side shut, as `from`'s was.
-fn copy(mut from: TcpStream, mut to: TcpStream) {
-    let _ = io::copy(&mut from, &mut to);
+/// A line into the boot's log, beside wrangler's own.
+fn write(log: &Mutex<File>, line: &str) {
+    let _ = log.lock().unwrap_or_else(PoisonError::into_inner).write_all(line.as_bytes());
+}
+
+/// `from`'s bytes to `to` until `from` ends (or either fails), each read
+/// `seen` once it is passed on, then `to`'s writing side shut, as `from`'s
+/// was.
+fn copy(mut from: TcpStream, mut to: TcpStream, mut seen: impl FnMut(&[u8])) {
+    let mut buf = vec![0; 64 * 1024];
+    loop {
+        let n = match from.read(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => n,
+        };
+        if to.write_all(&buf[..n]).is_err() {
+            break;
+        }
+        seen(&buf[..n]);
+    }
     let _ = to.flush();
     let _ = to.shutdown(Shutdown::Write);
 }
