@@ -134,3 +134,5 @@ key (restoring old state must not revive it) and an unlinked person.
   services should do the same is Alex's call.
 
 Connector authorization uses the deployment allowlist through one owner/agent/action seam (`core::connectors`); Finite org policy will intersect there. Connector IDs are transport-independent; TCP targets remain exact and quotas pooled per computer.
+
+Door authorization checks deployment policy at ticket issue, redemption and record check, with owner and agent context for future org policy. Unlink remains allowed after deconfiguration; keys and pending tickets are isolated by connector.
