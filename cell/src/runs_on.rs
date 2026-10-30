@@ -103,7 +103,13 @@ impl FragmentCell {
             return Err(CellError::invalid("door: a connector's id (1 to 32 lower-case letters, digits and single dashes)"));
         }
         let (owner, agent) = (self.must(MetaKey::Owner)?, self.name()?);
-        self.cfg.connectors.authorize(&owner, &agent, door, action).map_err(|why| CellError::new(ErrorCode::Forbidden, format!("door {door} {why}")))
+        // a test fleet's lever may stand in for the deployment's (`connectors`)
+        let lever = match self.meta(MetaKey::TestConnectors)? {
+            Some(p) => Some(fragment_core::connectors::Policy::parse(&p).map_err(|e| CellError::host(format!("the connectors lever: {e}")))?),
+            None => None,
+        };
+        let policy = lever.as_ref().unwrap_or(&self.cfg.connectors);
+        policy.authorize(&owner, &agent, door, action).map_err(|why| CellError::new(ErrorCode::Forbidden, format!("door {door} {why}")))
     }
 
     /// `computer/picture`: an agent fragment's picture, for `GET

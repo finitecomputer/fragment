@@ -919,11 +919,28 @@ fn door_checks(s: &mut Suite, api: &Api, c: &Doors, fetched: &dyn Fn(&Suite, u32
     let pending = ticket(c.owner, "link")?;
     let still = fetched(s, 408, "door say while a new link waits")?;
     s.ok("a door live before stays open while its owner starts another link, until that one is redeemed", pending.status == 200 && still.starts_with("door said "), json!({ "pending": pending.status, "said": still }));
+    // the deployment turns SimpleX off (its `connectors` without it: here
+    // the test lever's stand-in, on this agent's fragment alone): no link,
+    // no ticket made before redeemed, nothing the door open before signs
+    // taken; its owner still unlinks
+    let policy = |p: Value| api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": c.agent, "op": "connectors", "policy": p })));
+    let r = policy(json!([]))?;
+    anyhow::ensure!(r.status == 200, "the connectors lever: {r}");
+    let r = ticket(c.owner, "link")?;
+    s.ok("with SimpleX off, its owner is given no link ticket", r.status == 403 && r.text.contains("does not allow"), &r);
+    let stale = fetched(s, 410, &format!("door link {}", pending.body))?;
+    s.ok("a link ticket its owner was given before it went off redeems nothing", stale.starts_with("door refused: 403") && stale.contains("does not allow"), &stale);
+    let off = fetched(s, 411, "door say once it is off")?;
+    s.ok("what the door linked before signs is refused once it is off", off.starts_with("door refused: 403") && off.contains("does not allow"), &off);
     let r = ticket(c.owner, "unlink")?;
-    s.ok("its owner's unlink ticket", r.status == 200 && r.body["act"] == "unlink" && r.body["agent"] == c.agent, &r);
+    s.ok("its owner's unlink ticket, SimpleX off", r.status == 200 && r.body["act"] == "unlink" && r.body["agent"] == c.agent, &r);
     let closed = fetched(s, 406, "door say after the unlink")?;
     s.ok("unlinked, the door is closed at once: what its key signs is refused", closed.starts_with("door refused: 403"), &closed);
-    Ok(9)
+    let r = policy(Value::Null)?;
+    anyhow::ensure!(r.status == 200, "the connectors lever: {r}");
+    let r = ticket(c.owner, "link")?;
+    s.ok("SimpleX on again, its owner is given a link ticket", r.status == 200 && r.body["act"] == "link", &r);
+    Ok(11)
 }
 
 /// The route's models by their ids, through the intercept (Paul,
