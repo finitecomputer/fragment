@@ -2989,6 +2989,7 @@ fn update_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
     // a read of it failing meanwhile (#437): what the last one said stays
     refresh_failed_ui(s, api, b, page, session, first["agents"][0]["fragment"].as_str().unwrap_or(""), shots)?;
     deploying_read_ui(s, api, b, page, session, first["agents"][0]["fragment"].as_str().unwrap_or(""))?;
+    deploying_start_ui(s, api, b)?;
     // settings, read again, says the version it runs and the latest
     b.reload(page)?;
     let versions = b.until(page, "document.getElementById('settings-page').innerText.includes('Latest version')", wait);
@@ -3169,6 +3170,58 @@ fn deploying_read_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, ses
     b.eval(page, "(window.__deployPath = null, true)")?;
     b.eval(page, READ_AGAIN)?;
     b.until(page, NO_REFRESH_LINE, wait);
+    Ok(())
+}
+
+/// A page that starts while a deploy goes out: the Registry refuses every
+/// ask for its session as another release's (its `skewFor` lever: the real
+/// refusal, asked again by the router), so the page's reads of the list
+/// and the computer are 503 `deploying`. It says Updating where the page
+/// goes, never "No chats yet" (what they have is unknown, not nothing),
+/// its sidebar's chrome shown and no release named on it (the console
+/// names them), starts again by itself, and fills in once the refusals
+/// stop, with no click. Local only: a preview's Registry is shared.
+fn deploying_start_ui(s: &mut Suite, api: &Api, b: &mut Browser) -> Result<()> {
+    if api.signs_in_by_levers() {
+        return Ok(());
+    }
+    let wait = std::time::Duration::from_secs(30);
+    let skew = |times: u64| -> Result<()> {
+        let r = api.unsigned("POST", "/api/test/registry", Some(&json!({ "skewFor": { "path": "/session", "times": times } })))?;
+        anyhow::ensure!(r.status == 200, "setting release skew: {r}");
+        Ok(())
+    };
+    // what the page asked for its person, and what its console said
+    let heard = |b: &mut Browser, page: &Page| -> Result<(usize, Vec<String>)> {
+        let events = b.watched(page)?.events;
+        let asks = events.iter().filter(|e| e["method"] == "Network.requestWillBeSent" && e["params"]["request"]["url"].as_str().is_some_and(|u| u.ends_with("/api/identities/me"))).count();
+        let said = events.iter().filter(|e| e["method"] == "Runtime.consoleAPICalled").flat_map(|e| e["params"]["args"].as_array().cloned().unwrap_or_default()).filter_map(|a| a["value"].as_str().map(str::to_string)).collect();
+        Ok((asks, said))
+    };
+    skew(100)?;
+    let page = b.open_watched(&format!("{}/", api.base))?;
+    // the desktop's layout, its sidebar shown, as the lane's own page has
+    b.viewport(&page, 1280, 800, false)?;
+    let notice = "document.getElementById('notice')";
+    let updating = b.until(&page, &format!("!document.getElementById('layout').hidden && !{notice}.hidden && {notice}.innerText.trim() === 'Updating — back in a moment'"), wait);
+    let chrome = b.eval(&page, "['settings', 'apps-link'].every((id) => document.getElementById(id)?.checkVisibility()) && !document.body.innerText.includes('reached release')")?;
+    let again = s.eventually(wait, || heard(b, &page).is_ok_and(|(asks, _)| asks >= 2));
+    let (asks, said) = heard(b, &page)?;
+    let logged = said.iter().any(|t| t.contains("reached release"));
+    let still = b.eval(&page, &format!("{notice}.innerText.trim() === 'Updating — back in a moment'"))?;
+    s.ok(
+        "a page that starts as a deploy goes out says Updating in its place (not \"No chats yet\"), its sidebar's chrome kept and no release on the page (the console names them), and starts again by itself",
+        updating && chrome == true && again && logged && still == true,
+        json!({ "updating": updating, "chrome": chrome, "again": again, "logged": logged, "notice": b.eval(&page, &format!("{notice}.innerText"))?, "asks": asks, "console": said }),
+    );
+    skew(0)?;
+    let filled = b.until(&page, &format!("{notice}.hidden && !!document.querySelector('#chats .chat-row') && !document.getElementById('frames').hidden"), wait);
+    s.ok(
+        "once calls are admitted, the page fills in by itself: its chats, the chat open, no notice",
+        filled,
+        json!({ "notice": b.eval(&page, &format!("{notice}.hidden ? null : {notice}.innerText"))?, "asks": heard(b, &page)?.0 }),
+    );
+    b.close(page)?;
     Ok(())
 }
 
