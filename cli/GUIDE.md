@@ -818,7 +818,7 @@ fragment ledger grant ann 20 --why "a top-up"   # operators only
 fragment operator people --q ann@                 # operators: people, orgs, comps,
 fragment operator comp ann@example.com --kind always-on   # trial codes, health, the log
 fragment operator pin <npub> hermes-canary        # a person's computer onto the canary (or back)
-fragment operator credit org-… 500 --why "invoice 12"   # an org pays out of band: credit its own ledger
+fragment operator credit org-… 500 --why "an invoice" --id inv-12   # an org pays out of band: credit it, once by its reference
 ```
 
 ## You and your keys
@@ -1008,7 +1008,7 @@ fragment operator uncomp <seat> [--key-file F]
 fragment operator trials [--name N [--days D] [--capacity C] | --send <id> --to <email>] [--key-file F]
 fragment operator health [--key-file F]
 fragment operator log [--before N] [--key-file F]
-fragment operator credit <org> <usd> --why W [--id I] [--key-file F]
+fragment operator credit <org> <usd> --why W --id REF [--key-file F]
 fragment operator budget <org> <usd> [--id I] [--key-file F]
 fragment operator payer <org> <email|npub> [--id I] [--key-file F]
 ```

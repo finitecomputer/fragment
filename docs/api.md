@@ -2345,7 +2345,10 @@ credit first. What happened is always charged, past zero.
 grant or a budget, `org:<org id>`: an org that is there (404 otherwise),
 its own credit (its ledger refuses a plan or an overdraft, 403). Orgs buy
 no credit and set no budget themselves: they pay out of band, and
-`fragment operator credit|budget|payer` are the operators' commands. Commands are
+`fragment operator credit|budget|payer` are the operators' commands (a
+credit's id its invoice's or payment's reference). An org's command is
+in its governance log too (`ledger-grant`, `ledger-budget`), logged once
+by its id, as in the operators' log. Commands are
 idempotent by their `id`, kept on the ledger as `<kind>:<id>` (a grant's
 `g1` is not a plan's): the same id again changes nothing, the same id
 with another body is 409 `conflicting_body`, and a body that breaks a
@@ -2458,9 +2461,10 @@ platform's own, and a replay answers as its first did.
   cap.
 - **The last admin stays.** Stepping down never leaves the org with no
   content admin (409).
-- **It outlives its billing.** An org with anyone in its content is never
-  dropped when its subscription ends and its seats go; one dropped with no
-  one in it takes its offers with it. A person's wipe makes them an admin
+- **It outlives its billing.** An org with anyone in its content, or that
+  an operator credited or named a payer for, is never dropped when its
+  subscription ends and its seats go; one dropped takes its offers with
+  it. A person's wipe makes them an admin
   no more there, logged as the operator who wiped them.
 - **Not yet:** an offer is mailed to no one and shown in no page: its
   person reads it at `GET /api/orgs/offers`.
