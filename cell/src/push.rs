@@ -27,8 +27,6 @@ use crate::js;
 const PUSH_TTL_S: &str = "86400";
 const ENDPOINT_MAX_BYTES: usize = 1024;
 
-pub const SW_JS: &str = include_str!("../sw.js");
-
 impl FragmentCell {
     /// The fragment's VAPID key, made on first use and sealed like a secret
     /// (it opens in this cell alone).
