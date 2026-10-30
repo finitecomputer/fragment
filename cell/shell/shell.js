@@ -1196,6 +1196,18 @@ const chatLabel = (agent) => freeLabel(`${labelOf(agent).slice(0, LABEL_ROOM - "
 // An untitled chat with only this agent that no one has said anything in
 // yet is the one to open again, not another.
 const blank = (identity) => chats().find((f) => own(f) && !f.archived && f.title === UNTITLED && !f.preview && agentsOf(f.name).length === 1 && agentsOf(f.name)[0] === identity);
+// A chat's first message with words, from its records (docs/chat-records.md:
+// a body with text and no kind but "message"), or undefined.
+const firstSaid = (records) => (records ?? []).map((x) => (typeof x.body === "string" ? x.body : (x.body?.kind ?? "message") === "message" ? x.body?.text : null)).find((t) => typeof t === "string" && t.trim());
+// Whether a chat the list shows blank is blank still, asked of the chat: the
+// list as last read may not show a message said a moment ago (this page's
+// own launch, read again only once its socket is told; another tab's), and
+// the next launch went into that chat, the person's new message beside the
+// one before (CI's "settings, then Back", runs 40898440541 and #743's).
+async function stillBlank(name) {
+  const r = await api("GET", `/api/f/${seg(name)}/channels/chat?after=0&limit=20`);
+  return !firstSaid(r.records);
+}
 let starting = false;
 // `open: false` makes it (or finds the blank one) without opening it: the
 // launcher opens it itself, as it posts its first message.
@@ -1205,6 +1217,8 @@ async function newChat(identity, { quiet = false, open = true } = {}) {
   starting = true;
   try {
     let name = blank(identity)?.name;
+    // one that cannot be asked is not taken: a new chat is made
+    if (name && !(await stillBlank(name).catch(() => false))) name = null;
     if (!name) {
       const chat = await api("POST", "/api/fragments", { label: chatLabel(agent.fragment), template: "chat", title: UNTITLED });
       // adding it wakes its computer (the platform's `joined`)
@@ -1234,7 +1248,7 @@ async function titleFromFirst(name) {
   try {
     const r = await api("GET", `/api/f/${seg(name)}/channels/chat?after=0&limit=20`);
     // a message is a body with text and no kind but "message" (docs/chat-records.md)
-    const said = (r.records ?? []).map((x) => (typeof x.body === "string" ? x.body : (x.body?.kind ?? "message") === "message" ? x.body?.text : null)).find((t) => typeof t === "string" && t.trim());
+    const said = firstSaid(r.records);
     if (!said) return titling.delete(name);
     const words = said.trim().split("\n").find((l) => l.trim()).replace(/\s+/g, " ").trim();
     const title = [...words].length > TITLE_MAX_CHARS ? `${[...words].slice(0, TITLE_MAX_CHARS - 1).join("").trimEnd()}…` : words;
