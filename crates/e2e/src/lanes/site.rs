@@ -301,10 +301,30 @@ pub fn site(s: &mut Suite, api: &Api) -> Result<()> {
     let r = conditional("", &format!("\"other\", {page}"))?;
     s.ok("a page revalidates too, by any tag in the list", r.status == 304 && r.header("cache-control") == "private, no-cache", &r);
     s.ok("revalidating asks code.storage for nothing", s.fake.requests(&repo, "GET file") == reads, s.fake.requests(&repo, "GET file") - reads);
-    for file in ["__fragment.js", "__fragment.css", "__sw.js"] {
-        let first = tag(file);
-        let r = conditional(file, &first)?;
-        s.ok(&format!("{file} revalidates by its build-time hash"), first.len() == 18 && r.status == 304, format!("{first} {r}"));
+    for (path, file, mime) in [
+        ("__fragment.js", &fragment_templates::CLIENT_JS, "text/javascript; charset=utf-8"),
+        ("__fragment.css", &fragment_templates::CLIENT_CSS, "text/css; charset=utf-8"),
+        ("__files.js", &fragment_templates::FILES_JS, "text/javascript; charset=utf-8"),
+        ("__files.css", &fragment_templates::FILES_CSS, "text/css; charset=utf-8"),
+        ("__markdown.js", &fragment_templates::MARKDOWN_JS, "text/javascript; charset=utf-8"),
+        ("__sw.js", &fragment_templates::SW_JS, "text/javascript; charset=utf-8"),
+    ] {
+        let first = api.page(&name, path, Some(&cookie))?;
+        let etag = format!("\"{}\"", &file.sha256[..16]);
+        s.ok(
+            &format!("{path} serves the release's bytes and indexed SHA"),
+            first.status == 200 && first.bytes == file.bytes && first.header("etag") == etag && first.header("content-type") == mime && first.header("cache-control") == "no-cache",
+            &first,
+        );
+        let r = conditional(path, &etag)?;
+        let head = api.call(Call { method: "HEAD", url: api.site_url(&name, path), cookie: Some(cookie.clone()), ..Call::default() })?;
+        s.ok(
+            &format!("{path} revalidates and HEAD names its size without a body"),
+            r.status == 304 && r.bytes.is_empty() && r.header("etag") == etag && r.header("cache-control") == "no-cache"
+                && head.status == 200 && head.bytes.is_empty() && head.header("content-length") == file.size.to_string()
+                && head.header("etag") == etag && head.header("content-type") == mime && head.header("cache-control") == "no-cache",
+            format!("{r} / HEAD {head}"),
+        );
     }
     let r = api.page(&name, "__fragment.css", Some(&cookie))?;
     s.ok("__fragment.css is a stylesheet: the theme's variables", r.status == 200 && r.header("content-type") == "text/css; charset=utf-8" && r.text.contains("--accent:"), r.header("content-type"));

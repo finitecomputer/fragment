@@ -12,6 +12,7 @@ pub mod cli_code;
 pub mod catalog;
 pub mod codestorage;
 pub mod computer;
+pub mod connectors;
 pub mod cron;
 pub mod decide;
 pub mod door;

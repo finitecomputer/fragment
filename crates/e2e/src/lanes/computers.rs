@@ -878,6 +878,12 @@ fn door_checks(s: &mut Suite, api: &Api, c: &Doors, fetched: &dyn Fn(&Suite, u32
         t.status == 200 && t.body["act"] == "link" && t.body["agent"] == c.agent && t.body["computer"] == c.id && signed && within,
         &t,
     );
+    let r = api.signed(c.owner, "POST", &path, Some(&json!({ "door": "telegram", "act": "link" })))?;
+    s.ok("a door the deployment's connectors do not name is refused its link ticket, by the platform", r.status == 403 && r.text.contains("does not allow"), &r);
+    let r = api.signed(c.owner, "POST", &path, Some(&json!({ "door": "telegram", "act": "unlink" })))?;
+    s.ok("and may still be unlinked: an owner closes a door the deployment no longer allows", r.status == 200 && r.body["act"] == "unlink", &r);
+    let r = api.signed(c.owner, "POST", &path, Some(&json!({ "door": "../simplex", "act": "link" })))?;
+    s.ok("a door that is no connector's id is 400", r.status == 400, &r);
     let forged = fetched(s, 400, "door forge yes, go ahead")?;
     s.ok(
         "a record that relays its owner with no door's signature, posted with the agent's own key, is refused: never its owner's",
@@ -886,6 +892,16 @@ fn door_checks(s: &mut Suite, api: &Api, c: &Doors, fetched: &dyn Fn(&Suite, u32
     );
     let shut = fetched(s, 401, "door other before any link")?;
     s.ok("one signed by a key that is no open door's is refused", shut.starts_with("door refused: 403"), &shut);
+    // the ticket above is no longer the latest: the platform takes only the
+    // link its owner started last, though the image's own check passes it
+    let latest = ticket(c.owner, "link")?;
+    let stale = fetched(s, 407, &format!("door link {}", t.body))?;
+    s.ok(
+        "a second link ticket makes the first unredeemable at the platform (its signature, agent, computer and time all good)",
+        latest.status == 200 && stale.starts_with("door refused: 403") && stale.contains("its owner started last"),
+        json!({ "latest": latest.status, "stale": stale }),
+    );
+    let t = latest;
     let linked = fetched(s, 402, &format!("door link {}", t.body))?;
     s.ok("the computer checks the ticket as the bridge does (the agent's key, this computer), and redeems it with a door key it made", linked == "door linked", &linked);
     let again = fetched(s, 403, &format!("door link {}", t.body))?;
@@ -900,11 +916,31 @@ fn door_checks(s: &mut Suite, api: &Api, c: &Doors, fetched: &dyn Fn(&Suite, u32
     );
     let other = fetched(s, 405, "door other signed by another key")?;
     s.ok("with its door open, one signed by any other key is still refused", other.starts_with("door refused: 403"), &other);
+    let pending = ticket(c.owner, "link")?;
+    let still = fetched(s, 408, "door say while a new link waits")?;
+    s.ok("a door live before stays open while its owner starts another link, until that one is redeemed", pending.status == 200 && still.starts_with("door said "), json!({ "pending": pending.status, "said": still }));
+    // the deployment turns SimpleX off (its `connectors` without it: here
+    // the test lever's stand-in, on this agent's fragment alone): no link,
+    // no ticket made before redeemed, nothing the door open before signs
+    // taken; its owner still unlinks
+    let policy = |p: Value| api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": c.agent, "op": "connectors", "policy": p })));
+    let r = policy(json!([]))?;
+    anyhow::ensure!(r.status == 200, "the connectors lever: {r}");
+    let r = ticket(c.owner, "link")?;
+    s.ok("with SimpleX off, its owner is given no link ticket", r.status == 403 && r.text.contains("does not allow"), &r);
+    let stale = fetched(s, 410, &format!("door link {}", pending.body))?;
+    s.ok("a link ticket its owner was given before it went off redeems nothing", stale.starts_with("door refused: 403") && stale.contains("does not allow"), &stale);
+    let off = fetched(s, 411, "door say once it is off")?;
+    s.ok("what the door linked before signs is refused once it is off", off.starts_with("door refused: 403") && off.contains("does not allow"), &off);
     let r = ticket(c.owner, "unlink")?;
-    s.ok("its owner's unlink ticket", r.status == 200 && r.body["act"] == "unlink" && r.body["agent"] == c.agent, &r);
+    s.ok("its owner's unlink ticket, SimpleX off", r.status == 200 && r.body["act"] == "unlink" && r.body["agent"] == c.agent, &r);
     let closed = fetched(s, 406, "door say after the unlink")?;
     s.ok("unlinked, the door is closed at once: what its key signs is refused", closed.starts_with("door refused: 403"), &closed);
-    Ok(7)
+    let r = policy(Value::Null)?;
+    anyhow::ensure!(r.status == 200, "the connectors lever: {r}");
+    let r = ticket(c.owner, "link")?;
+    s.ok("SimpleX on again, its owner is given a link ticket", r.status == 200 && r.body["act"] == "link", &r);
+    Ok(11)
 }
 
 /// The route's models by their ids, through the intercept (Paul,

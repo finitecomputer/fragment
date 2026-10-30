@@ -556,7 +556,7 @@ fn admin_answer(c: &api::Client, resp: api::Resp) -> Result<Value> {
 #[derive(Subcommand)]
 enum LedgerCmd {
     /// Grant someone credit (the deployment's operators): an email, an
-    /// identity (an npub), or `me`
+    /// identity (an npub), `me`, or an org's own (`org:<org id>`)
     Grant {
         who: String,
         usd: f64,
