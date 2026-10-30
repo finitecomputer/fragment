@@ -1,4 +1,4 @@
-"""Hermes owns the children; one socket carries their work and tool evidence.
+"""Hermes owns the children; one socket carries their work and tool steps.
 
 The supported lifecycle hooks identify each child by its session id. Nothing
 is saved: a gateway exit closes the socket, and a new process has no children.
@@ -18,12 +18,18 @@ _condition = threading.Condition()
 _children = set()
 _socket = None
 _worker = None
+# The person's turns this gateway runs, by Hermes' turn id: each our turn's
+# id (its Relay message's). Bounded: the oldest go.
+_turns = {}
+_TURNS_MAX = 64
+# Hermes' tool outcomes, as a step's (docs/chat-records.md).
+_STATUS = {"ok": "completed", "error": "failed", "timeout": "timed_out", "cancelled": "cancelled", "blocked": "blocked"}
 
 
 def register(ctx):
     ctx.register_hook("subagent_start", child_started)
     ctx.register_hook("subagent_stop", child_stopped)
-    ctx.register_hook("pre_tool_call", tool_started)
+    ctx.register_hook("pre_llm_call", turn_started)
     ctx.register_hook("post_tool_call", tool_finished)
 
 
@@ -42,36 +48,42 @@ def _connect():
     return socket
 
 
-def _open():
-    """Called under the condition: never race two connects or lose a newer socket."""
+def _send(frame):
+    """Called under the condition: one frame, and the bridge's answer to it
+    (None when it has none). A socket found closed (the bridge's idle bound,
+    or its restart) is opened again once; a frame written is never resent."""
     global _socket
-    try:
-        _socket = _connect()
-        _socket.send(json.dumps({"working": bool(_children)}))
-        _socket.recv(timeout=2)
-    except Exception as error:
-        if _socket is not None:
+    for _ in range(2):
+        if _socket is None:
+            try:
+                _socket = _connect()
+            except Exception as error:
+                _log.warning("Runtime activity connect failed (%s)", type(error).__name__)
+                return None
+        try:
+            _socket.send(json.dumps(frame))
+        except Exception:
             _socket.close()
             _socket = None
-        _log.warning("Runtime activity connect failed (%s); retrying", type(error).__name__)
+            continue
+        try:
+            return _socket.recv(timeout=2)
+        except Exception as error:
+            _socket.close()
+            _socket = None
+            _log.warning("Runtime activity unanswered (%s)", type(error).__name__)
+            return None
+    return None
 
 
 def child_started(*, child_session_id=None, **kwargs):
-    global _worker, _socket
+    global _worker
     if not isinstance(child_session_id, str) or not child_session_id:
         raise ValueError("a delegated child has a session id")
     with _condition:
         _children.add(child_session_id)
-        if _socket is None:
-            # A successful signal is queued before the parent can finish.
-            _open()
-        if _socket is not None:
-            try:
-                _socket.send(json.dumps({"working": True}))
-                _socket.recv(timeout=2)
-            except Exception:
-                _socket.close()
-                _socket = None
+        # Acknowledged before the parent can finish.
+        _send({"working": True})
         if _worker is None:
             _worker = threading.Thread(target=_hold, name="fragment-activity", daemon=True)
             _worker.start()
@@ -79,15 +91,10 @@ def child_started(*, child_session_id=None, **kwargs):
 
 
 def child_stopped(*, child_session_id=None, **kwargs):
-    global _socket
     with _condition:
         _children.discard(child_session_id)
         if _socket is not None:
-            try:
-                _socket.send(json.dumps({"working": bool(_children)}))
-                _socket.recv(timeout=2)
-            except Exception:
-                pass  # Reader detects disconnect; remaining children reconnect.
+            _send({"working": bool(_children)})
         _condition.notify_all()
 
 
@@ -97,9 +104,9 @@ def _hold():
     # a disconnected bridge is retried once a second while children run.
     while True:
         with _condition:
-            _condition.wait_for(lambda: bool(_children) or _socket is not None)
+            _condition.wait_for(lambda: bool(_children))
             if _socket is None:
-                _open()
+                _send({"working": True})
             socket = _socket
             if socket is None:
                 _condition.wait(timeout=1)
@@ -119,50 +126,47 @@ def _hold():
             socket.close()
 
 
-def tool_started(**kwargs):
-    # Establish structured capability before progress text can arrive. A tool
-    # waiting on a person is not runtime work; only children set working.
-    global _worker
-    with _condition:
-        if _socket is None:
-            _open()
-        if _worker is None:
-            _worker = threading.Thread(target=_hold, name="fragment-activity", daemon=True)
-            _worker.start()
-        _condition.notify_all()
-
-
-def tool_finished(*, tool_name=None, tool_call_id=None, session_id=None,
-                  duration_ms=0, status=None, error_type=None, result=None, **kwargs):
+def turn_started(*, turn_id=None, **kwargs):
+    # The run Hermes starts for a person's Relay message. Its memory review's
+    # fork starts none (it persists nothing, so Hermes skips this hook), and
+    # a delegated child's run is its own: their tool calls are no steps.
+    from agent.delegation_context import is_delegated_child_context
     from gateway.session_context import get_session_env
-    if get_session_env("HERMES_SESSION_PLATFORM", "") != "relay":
-        return
     turn = get_session_env("HERMES_SESSION_MESSAGE_ID", "")
-    mapped = {"ok": "completed", "error": "failed", "cancelled": "cancelled", "blocked": "blocked"}.get(status)
-    if not turn or not tool_call_id or mapped is None:
-        return  # Missing evidence never implies success.
-    # Do not copy arbitrary args, output or exception messages to retained
-    # chat records. Keep a source reference and safe numeric result metadata.
-    parsed = result
+    if not turn_id or not turn or is_delegated_child_context() or get_session_env("HERMES_SESSION_PLATFORM", "") != "relay":
+        return
+    with _condition:
+        _turns[turn_id] = turn
+        while len(_turns) > _TURNS_MAX:
+            del _turns[next(iter(_turns))]
+
+
+def tool_finished(*, tool_name=None, args=None, tool_call_id=None, turn_id=None,
+                  duration_ms=0, status=None, result=None, **kwargs):
+    with _condition:
+        turn = _turns.get(turn_id)
+    outcome = _STATUS.get(status)
+    if turn is None or not tool_call_id or outcome is None:
+        return  # another run's call, or no outcome: never a guessed step
+    # What a person saw of a call before: Hermes' own preview of it (its
+    # display helper, which masks what it knows to), and a command's exit
+    # code; never its output or error text.
+    from agent.display import build_tool_preview
+    try:
+        preview = build_tool_preview(str(tool_name), args if isinstance(args, dict) else {}, max_len=140) or ""
+    except Exception:
+        preview = ""
+    parsed = None
     if isinstance(result, str) and len(result) <= 65536:
         try:
             parsed = json.loads(result)
         except ValueError:
-            parsed = None
+            pass
     exit_code = parsed.get("exit_code") if isinstance(parsed, dict) else None
-    excerpt = "Exit code: " + str(exit_code) if type(exit_code) is int else "Hermes reported " + mapped
-    safe_type = error_type if isinstance(error_type, str) and error_type.replace("_", "").isalnum() else None
-    message = excerpt if mapped != "completed" else None
-    frame = {"turn": turn, "tool": str(tool_name)[:140], "excerpt": excerpt[:300], "evidence": {
-        "tool_call_id": str(tool_call_id)[:128], "status": mapped,
-        "duration_ms": max(0, int(duration_ms)), "error_type": safe_type[:140] if safe_type else None,
-        "error_message": message, "result_ref": f"hermes:{session_id}:{tool_call_id}"[:300]}}
+    frame = {"turn": turn, "tool": str(tool_name)[:140], "args": preview,
+             "excerpt": "Exit code: " + str(exit_code) if type(exit_code) is int else "",
+             "tool_call_id": str(tool_call_id)[:128], "status": outcome, "duration_ms": max(0, int(duration_ms or 0))}
     with _condition:
-        if _socket is None:
-            _open()
-        if _socket is not None:
-            try:
-                _socket.send(json.dumps(frame))
-                _socket.recv(timeout=2)  # Queued before Hermes can finish its turn.
-            except Exception as error:
-                _log.warning("Tool observation delivery failed (%s)", type(error).__name__)
+        # Answered before Hermes can finish its turn.
+        if _send(frame) != "observed":
+            _log.warning("A tool step was not recorded")

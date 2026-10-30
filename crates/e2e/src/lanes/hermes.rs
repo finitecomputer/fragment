@@ -340,7 +340,7 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
             && steps[0]["body"]["tool"] == "terminal"
             && steps[0]["body"]["status"] == "completed"
             && steps[0]["body"]["ok"] == true
-            && steps[0]["body"]["args"] == ""
+            && steps[0]["body"]["args"].as_str().is_some_and(|a| a.contains("echo narrated-ran"))
             && ended(&narrated) == Some(json!("idle")),
         json!({ "parts": parts, "replies": replies, "steps": steps, "ended": ended(&narrated) }),
     );

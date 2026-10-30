@@ -35,7 +35,7 @@
 //! - `image: <url>` is answered with that image (`![a cat](<url>)`), as a
 //!   model whose tool made one at its provider (FAL) gives it; and the
 //!   model's own server serves one at `/generated/<name>.png` (`IMAGE`), as
-//!   that provider's CDN would;
+//!   that provider's CDN would (`slow-<name>`: after `SLOW_IMAGE`);
 //! - Hermes' self-improvement review (its prompts start `Review the
 //!   conversation above`), where it may save to memory, of a conversation
 //!   where a person said `remember this` is answered by a `memory` call
@@ -260,6 +260,9 @@ pub fn narrated() -> String {
 
 /// What `write: <path>` has Hermes' write_file put there.
 pub const WRITTEN: &str = "written by the agent\n";
+/// How long the model's server takes to serve `/generated/slow-…png`.
+pub const SLOW_IMAGE: Duration = Duration::from_secs(6);
+
 /// The image the model's server serves at `/generated/…png`: a 1×1 PNG,
 /// one pixel of the agents' violet.
 pub const IMAGE: &[u8] = b"\x89\x50\x4e\x47\x0d\x0a\x1a\x0a\x00\x00\x00\x0d\x49\x48\x44\x52\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\x0d\x49\x44\x41\x54\x78\x9c\x63\x58\xd1\xfd\xea\x3f\x00\x07\x19\x03\x1d\x5b\xc5\x9f\x97\x00\x00\x00\x00\x49\x45\x4e\x44\xae\x42\x60\x82";
@@ -274,7 +277,7 @@ fn text_of(content: &Value) -> String {
     }
 }
 
-/// The answer for a transcript: `(text, tool call)`.
+/// The answer for a transcript: `(text, tool call)` (or calls: an array).
 pub fn answer(body: &Value) -> (String, Option<Value>) {
     let messages = body["messages"].as_array().cloned().unwrap_or_default();
     let last_user = messages.iter().rev().find(|m| m["role"] == "user").map(|m| text_of(&m["content"])).unwrap_or_default();
@@ -315,6 +318,13 @@ pub fn answer(body: &Value) -> (String, Option<Value>) {
         let command = if results == 0 { "echo first-ran" } else { "sleep 2 && echo tool-ran" };
         let call = json!({ "index": 0, "id": format!("call_{}", results + 1), "type": "function", "function": { "name": "terminal", "arguments": json!({ "command": command }).to_string() } });
         return (String::new(), Some(call));
+    }
+    // `both: <a> | <b>`: both commands, two calls in the one response
+    // (Hermes runs a terminal's one after the other)
+    let both = last_user.lines().find_map(|l| l.split_once("both: ").map(|(_, c)| c.to_string()));
+    if let (Some(both), true, None) = (both, has_terminal, &tool_result) {
+        let calls = both.split(" | ").enumerate().map(|(i, c)| json!({ "index": i, "id": format!("call_{}", i + 1), "type": "function", "function": { "name": "terminal", "arguments": json!({ "command": c.trim() }).to_string() } })).collect();
+        return (String::new(), Some(Value::Array(calls)));
     }
     // `run: <command>` on a line of what the user said: that command, and an
     // answer that quotes what it printed
@@ -412,9 +422,6 @@ pub fn answer(body: &Value) -> (String, Option<Value>) {
     } else if last_user.contains("use the terminal slowly") {
         Some("sleep 8 && echo tool-ran")
     } else if last_user.contains("use the terminal") {
-        // Hermes sends a tool's progress line (its step) only if its turn
-        // runs on past its 0.3 s progress poll (docs/technical-debt-ledger.md,
-        // "A quick tool's step can be lost in Hermes")
         Some("sleep 2 && echo tool-ran")
     } else {
         None
@@ -484,6 +491,9 @@ async fn handle(req: Request<Incoming>, calls: Arc<Mutex<Vec<Call>>>, refused: A
     let authorization = req.headers().get("authorization").and_then(|v| v.to_str().ok()).map(str::to_string);
     let content_type = req.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
     if path.starts_with("/generated/") && path.ends_with(".png") {
+        if path.starts_with("/generated/slow-") {
+            tokio::time::sleep(SLOW_IMAGE).await;
+        }
         return Response::builder().status(StatusCode::OK).header("content-type", "image/png").body(http_body_util::Full::new(bytes::Bytes::from_static(IMAGE))).unwrap();
     }
     if path.ends_with("/models") {
@@ -528,12 +538,16 @@ async fn handle(req: Request<Incoming>, calls: Arc<Mutex<Vec<Call>>>, refused: A
     let model = v["model"].as_str().unwrap_or(CHEAP_ID).to_string();
     let usage = json!({ "prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15 });
     let finish = if tool.is_some() { "tool_calls" } else { "stop" };
+    // a call, or several (an array of them)
+    let calls = match tool {
+        Some(Value::Array(calls)) => calls,
+        tool => tool.into_iter().collect(),
+    };
     if !stream {
         let mut message = json!({ "role": "assistant", "content": if text.is_empty() { Value::Null } else { json!(text) } });
-        if let Some(t) = &tool {
-            let mut t = t.clone();
-            t.as_object_mut().unwrap().remove("index");
-            message["tool_calls"] = json!([t]);
+        if !calls.is_empty() {
+            let calls: Vec<Value> = calls.into_iter().map(|mut t| { t.as_object_mut().unwrap().remove("index"); t }).collect();
+            message["tool_calls"] = json!(calls);
         }
         return net::json_answer(StatusCode::OK, &json!({ "id": "chatcmpl-scripted", "object": "chat.completion", "created": 0, "model": model, "choices": [{ "index": 0, "message": message, "finish_reason": finish }], "usage": usage }));
     }
@@ -546,8 +560,8 @@ async fn handle(req: Request<Incoming>, calls: Arc<Mutex<Vec<Call>>>, refused: A
     for piece in chars.chunks(chars.len().div_ceil(3).max(1)) {
         sse.push_str(&format!("data: {}\n\n", chunk(json!({ "content": piece.iter().collect::<String>() }), Value::Null)));
     }
-    if let Some(t) = tool {
-        sse.push_str(&format!("data: {}\n\n", chunk(json!({ "tool_calls": [t] }), Value::Null)));
+    if !calls.is_empty() {
+        sse.push_str(&format!("data: {}\n\n", chunk(json!({ "tool_calls": calls }), Value::Null)));
     }
     let mut last = chunk(json!({}), json!(finish));
     last["usage"] = usage;

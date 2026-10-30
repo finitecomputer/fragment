@@ -404,18 +404,14 @@ pub fn managed_config(disabled_plugins: &[String], card_timeout_s: u64, screen_i
     y.push_str("onboarding:\n  profile_build: \"off\"\n");
     // A reply streams as Relay `draft` frames (the chat's drafts); its final is one send.
     y.push_str("streaming:\n  enabled: true\n  transport: \"draft\"\n");
-    // The bridge hands one message of a chat at a time; tool progress is one growing
-    // message, each line a step. No interim messages: the model's text beside a tool
-    // call is no message of its own (Hermes' default for a platform it has no tier
-    // for, as `relay`, is to send each as one). Hermes reads `display` for a turn
-    // from the profile's config with this overlay merged over it (its
-    // `_load_gateway_config`, under the profile's scope). A step's preview is as
-    // long as the bridge keeps a step's arguments (Hermes cuts it at 40 when
-    // unset: its `_preview_cap`).
-    y.push_str(&format!(
-        "display:\n  busy_input_mode: \"queue\"\n  tool_progress: \"all\"\n  tool_progress_grouping: \"accumulate\"\n  tool_preview_length: {}\n  long_running_notifications: false\n  interim_assistant_messages: false\n",
-        fragment_bridge::limits::STEP_ARGS_MAX_CHARS
-    ));
+    // The bridge hands one message of a chat at a time. No tool progress: a step is
+    // a tool call's end, which the image's plugin says (`fragment-activity`), never
+    // its progress text. No interim messages: the model's text beside a tool call
+    // is no message of its own (Hermes' default for a platform it has no tier for,
+    // as `relay`, is to send each as one). Hermes reads `display` for a turn from
+    // the profile's config with this overlay merged over it (its
+    // `_load_gateway_config`, under the profile's scope).
+    y.push_str("display:\n  busy_input_mode: \"queue\"\n  tool_progress: \"off\"\n  long_running_notifications: false\n  interim_assistant_messages: false\n");
     y.push_str("platforms:\n  relay:\n    gateway_restart_notification: false\n");
     // No technical approvals (Paul, 2026-10-14: its people are not technical,
     // and a question about a command makes no sense to them; finite-mono ran
@@ -1429,7 +1425,7 @@ mod tests {
         // message of its own, for every platform (none names `relay`)
         let display: Vec<&str> = m.lines().skip_while(|l| *l != "display:").skip(1).take_while(|l| l.starts_with("  ")).collect();
         assert!(display.contains(&"  interim_assistant_messages: false"), "no interim messages, under display: {m}");
-        assert!(display.contains(&"  tool_preview_length: 140"), "a step's preview as long as the bridge keeps its arguments: {m}");
+        assert!(display.contains(&"  tool_progress: \"off\""), "no progress text: steps are observed, under display: {m}");
         assert!(!m.contains("\n  platforms:"), "no platform's display setting overrides it: {m}");
         // a test's shorter card, held within the bridge's bounds: an
         // approval's wait and a clarify's both
