@@ -39,6 +39,7 @@ mod connections;
 mod channels;
 mod computer;
 mod deliveries;
+mod doors;
 mod ended;
 mod cs;
 mod error;

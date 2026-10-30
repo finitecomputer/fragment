@@ -165,6 +165,11 @@ home"; before 2026-10-26, its own chat with them):
   which its sender's app gave it), so a message the agent's core reads
   again (a catch-up, a rollback) is one record. The record's principal is
   the agent's: it says what it relays, never as its owner.
+- A hosted door's (docs/api.md, "An agent's doors": a connector chat,
+  `telegram`) is published by the connector's own app, as its own key,
+  in its own `chat`, its `relayed` exactly `{via, for, agent}`, with no
+  `at` or `sig`: the platform takes it only from the fragment its owner
+  bound as that door.
 - `relayed.via` is the door it came through, a connector's id
   (`simplex` today; docs/api.md, "An agent's doors"); `relayed.for` is the agent's
   owner; `relayed.agent` the agent fragment whose door it came through;

@@ -85,8 +85,10 @@
 //!   a door key the script makes (kept while it runs); a relayed record
 //!   that key signs, posted on this chat; one with no door's signature
 //!   (only the agent's own key's, as every request of its is); one signed
-//!   by a key that is no door's. The reply is `door linked`, `door said
-//!   <seq>`, or `door refused: <why>`;
+//!   by a key that is no door's; `door bind <fragment>`: the agent asking,
+//!   for its owner, to bind that connector as its own door. The reply is
+//!   `door linked`, `door said <seq>`, `door bound`, or `door refused:
+//!   <why>`;
 //! - `ask <agent> <words>`: another agent of its computer asked `<words>`
 //!   with the fragment CLI, `fragment ask --return-to <this chat>`, as the
 //!   agent acting for its owner, as our Hermes image's `fragment_ask` runs
@@ -509,6 +511,10 @@ async fn door(agent: &crate::runtime::Agent, chat: &str, rest: &str) -> Result<S
     let api = crate::api::Api::new(&std::env::var("FRAGMENT_API").map_err(|_| "no FRAGMENT_API".to_string())?)?;
     let now = crate::log::now_ms() as i64;
     let (verb, said) = rest.split_once(' ').unwrap_or((rest, ""));
+    if verb == "bind" {
+        api.bind_door(&agent.fragment, &agent.owner, said.trim()).await.map_err(|e| e.to_string())?;
+        return Ok("door bound".into());
+    }
     if verb == "link" {
         let ticket: Ticket = serde_json::from_str(said.trim()).map_err(|e| format!("not a ticket: {e}"))?;
         let computer = api.computer(false).await.map_err(|e| e.to_string())?.computer;
@@ -527,7 +533,7 @@ async fn door(agent: &crate::runtime::Agent, chat: &str, rest: &str) -> Result<S
         }
         "other" => Key::generate().map_err(|e| e.to_string())?.seal(&mut body, chat, crate::records::CHAT, &id, now),
         "forge" => body["relayed"]["at"] = serde_json::json!(now),
-        _ => return Err("say `door link <ticket>`, `door say <text>`, `door forge <text>` or `door other <text>`".into()),
+        _ => return Err("say `door link <ticket>`, `door bind <fragment>`, `door say <text>`, `door forge <text>` or `door other <text>`".into()),
     }
     let posted = api.post(&agent.fragment, chat, crate::records::CHAT, &id, &body).await.map_err(|e| e.to_string())?;
     Ok(format!("door said {}", posted.seq.unwrap_or(0)))

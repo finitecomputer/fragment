@@ -949,8 +949,21 @@ fn door_checks(s: &mut Suite, api: &Api, c: &Doors, fetched: &dyn Fn(&Suite, u32
     anyhow::ensure!(r.status == 200, "the connectors lever: {r}");
     let r = ticket(c.owner, "link")?;
     s.ok("SimpleX on again, its owner is given a link ticket", r.status == 200 && r.body["act"] == "link", &r);
+    // a hosted door (cell/src/doors.rs): only its owner, in person, binds a
+    // fragment running the connector's template named for the door
+    let bind = |who: &crate::Keys, body: Value| api.signed(who, "POST", &format!("/api/f/{}/door", c.chat), Some(&body));
+    let r = bind(c.stranger, json!({ "act": "link", "agent": c.agent }))?;
+    s.ok("no one but its owner binds a fragment as their agent's door", matches!(r.status, 403 | 404), &r);
+    let r = bind(c.owner, json!({ "act": "link", "agent": c.agent }))?;
+    s.ok("a fragment on no connector's template (this chat, its own code) is no door", r.status == 403 && r.text.contains("no connector's template"), &r);
+    let r = bind(c.owner, json!({ "act": "open", "agent": c.agent }))?;
+    s.ok("a binding's act is link or unlink", r.status == 400, &r);
+    let r = bind(c.owner, json!({ "act": "unlink" }))?;
+    s.ok("its owner's unlink of a fragment bound as no door is no error", r.status == 200 && r.body["ok"] == true, &r);
+    let agent = fetched(s, 409, &format!("door bind {}", c.chat))?;
+    s.ok("the agent binds no fragment as its own door, acting for its owner", agent.starts_with("door refused: 403") && agent.contains("in person"), &agent);
     // two of them its owner's words, each answered
-    Ok(13)
+    Ok(14)
 }
 
 /// The route's models by their ids, through the intercept (Paul,
