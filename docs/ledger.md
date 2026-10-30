@@ -31,8 +31,11 @@ is the wire contract. It replaced the OpenRouter-backed ledger and
   steps are refused (`budget_reached`) until a larger one or the next
   month; writes and hosting go on. Every AI step in its fragments meets
   the fragment's cap too, whoever starts it: an org's fragment has no
-  owner who passes it. Its head carries its terms beside its money
-  (`org`), and a person's head is written as before.
+  owner who passes it. Its terms are never in its head, which an older
+  release's sweep reads and rewrites with only the fields it knows: that
+  it is an org's is its ledger's name (`meta.payer`, kept as its first
+  call named it), and its budget a row of its own (`meta.org_budget`), so
+  a rollback loses neither. A person's head is written as before.
 - **Guests pay for nothing.** A guest's ledger refuses their paid calls
   at the gate and meter batches (`guest_payer`). A guest owns nothing billable, so a
   guest makes no fragment either (`guest_creates`, 403: "guests can't

@@ -14,7 +14,10 @@
 //! org's fragment has no owner who passes it (decision 68).
 //!
 //! The machine is a person's: grants, meters, caps and the store are
-//! shared, and the head carries `OrgTerms` beside the money.
+//! shared. Its terms (`OrgTerms`) are never in the head: that it is an
+//! org's is its ledger's name, which never changes, and its budget is a row
+//! of its own, so a release rolled back to one that knows no org, which
+//! reads and rewrites the head on its sweep, loses neither.
 
 use fragment_proto::ledger::OrgLedgerStatus;
 
@@ -52,8 +55,8 @@ impl Payer {
     }
 }
 
-/// What an org's head carries beside its money.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+/// An org's terms beside its money, kept apart from the head.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct OrgTerms {
     /// What its fragments may be charged a month before their AI steps
     /// stop: zero until its billing admins set one.
@@ -61,6 +64,16 @@ pub struct OrgTerms {
 }
 
 impl OrgTerms {
+    /// Its terms as kept: the budget's row (none: zero).
+    pub fn of(budget: i64) -> OrgTerms {
+        assert!((0..=BUDGET_MAX).contains(&budget), "a budget kept is one set within its limit");
+        OrgTerms { budget }
+    }
+
+    pub fn budget(&self) -> i64 {
+        self.budget
+    }
+
     /// `Ledger::may_spend` on an org's ledger, its gate passed: an AI step
     /// meets the budget, then its fragment's cap, whoever starts it.
     pub(super) fn may_spend(&self, ledger: &Ledger, store: &impl Store, spend: Spend, fragment: Option<&str>, now_ms: i64) -> Result<(), Refused> {
@@ -121,14 +134,25 @@ impl Ledger {
         let mut ledger = Ledger::new(now_ms);
         ledger.money.overdraft = 0;
         ledger.money.latch();
-        ledger.org = Some(OrgTerms::default());
-        ledger.assert_valid();
+        ledger.bind_org(OrgTerms::default());
         ledger
+    }
+
+    /// A head read back as an org's (its ledger's name says so), with its
+    /// terms as kept: its money must be an org's, never a person's.
+    pub fn bind_org(&mut self, terms: OrgTerms) {
+        self.org = Some(terms);
+        self.assert_valid();
     }
 
     /// Whether this is an org's ledger.
     pub fn is_org(&self) -> bool {
         self.org.is_some()
+    }
+
+    /// Its terms, to keep beside the head (none: a person's).
+    pub fn org_terms(&self) -> Option<OrgTerms> {
+        self.org
     }
 
     pub(super) fn persons_only(&self) -> Result<(), Refused> {
@@ -198,12 +222,39 @@ mod tests {
     }
 
     /// The head and store written and read back, as the Durable Object's
-    /// are across a restart.
+    /// are across a restart: an org's bound again from its terms as kept.
     fn restarted(ledger: &Ledger, store: &Memory) -> (Ledger, Memory) {
-        let head: Ledger = serde_json::from_str(&ledger.written(&PriceBook::defaults())).unwrap();
+        let mut head: Ledger = serde_json::from_str(&ledger.written(&PriceBook::defaults())).unwrap();
+        if let Some(terms) = ledger.org_terms() {
+            head.bind_org(OrgTerms::of(terms.budget()));
+        }
         let kept: Memory = serde_json::from_str(&serde_json::to_string(store).unwrap()).unwrap();
         assert_eq!((&head, &kept), (ledger, store), "the state reads back as it was written");
         (head, kept)
+    }
+
+    /// A rollback (Alex's and the review's M1): a release that knows no
+    /// org reads an org's head and rewrites it on its sweep, keeping only
+    /// the fields it knows. Rolled forward, the ledger is the org's still,
+    /// its budget and money whole: neither was in the head.
+    #[test]
+    fn org_terms_survive_an_older_release_sweep() {
+        let (mut l, mut s) = (Ledger::new_org(T0), Memory::default());
+        l.grant(&mut s, &pack("cs_1"), T0).unwrap();
+        l.set_budget(&mut s, &budget("b1", 10 * USD), T0).unwrap();
+        let book = PriceBook::defaults();
+        let kept_budget = l.org_terms().unwrap().budget();
+        let written: serde_json::Value = serde_json::from_str(&l.written(&book)).unwrap();
+        assert!(written.get("org").is_none(), "the head names nothing of an org's: {written}");
+        // the older release's head: the fields it knows, rewritten whole
+        let old: serde_json::Value = serde_json::json!({ "money": written["money"], "holds": written["holds"], "book": written["book"] });
+        let mut forward: Ledger = serde_json::from_value(old).unwrap();
+        forward.sweep(&mut s, T0 + 2 * DAY_MS);
+        let mut forward: Ledger = serde_json::from_str(&forward.written(&book)).unwrap();
+        forward.bind_org(OrgTerms::of(kept_budget));
+        let status = forward.org_status(ORG, &s, T0 + 2 * DAY_MS, &book).unwrap();
+        assert_eq!((status.balance_micros, status.budget_micros, status.standing), (25 * USD, 10 * USD, Standing::Ok));
+        assert_eq!(forward.gate(Spend::Write, T0 + 2 * DAY_MS), Ok(()));
     }
 
     #[test]
@@ -304,8 +355,9 @@ mod tests {
         assert_eq!(l.org_status(ORG, &s, T0, &PriceBook::defaults()).unwrap().budget_micros, 10 * USD);
     }
 
-    /// Restart: the org's head reads back as an org's (a person's head is
-    /// written as before), and a pack paid after it is still granted once.
+    /// Restart: the org's head reads back, bound as an org's from what is
+    /// kept beside it (a person's head is written as before), and a pack
+    /// paid after it is still granted once.
     #[test]
     fn paid_pack_survives_restart() {
         let (mut l, mut s) = (Ledger::new_org(T0), Memory::default());
