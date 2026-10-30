@@ -47,7 +47,9 @@ pub struct StripeConfig {
 }
 
 pub struct Config {
-    pub computer_connectors: fragment_core::connectors::ComputerConnectorPolicy,
+    /// `FRAGMENT_CONNECTORS`: the connectors an owner may link, and their
+    /// relay targets; absent, `connectors::Policy::default()` (docs/computers.md, "Connector policy").
+    pub connectors: fragment_core::connectors::Policy,
     /// `CODESTORAGE_ORG` (required) and the settings beside it.
     codestorage: CodeStorageConfig,
     /// `FRAGMENT_HOST_SUFFIX`: fragments are served from `<name>.<suffix>`.
@@ -67,9 +69,8 @@ pub struct Config {
     pub computer_snapshots: bool,
     /// `FRAGMENT_COMPUTER_UNSAVED_MAX_MS` (the deploy config's
     /// `computers.unsaved_max_ms`): how long a computer whose sleep's save
-    /// keeps failing stays awake before it sleeps unsaved (I5 of
-    /// docs/explorations/pi-durable.md). Thirty minutes by default, Paul's
-    /// (2026-10-08; `fragment_core::computer`).
+    /// keeps failing stays awake before it sleeps unsaved. See
+    /// docs/durable-computers.md and `fragment_core::computer`.
     pub computer_unsaved_max_ms: i64,
     /// `FRAGMENT_SUPPORT_URL` (the deploy config's `support_url`): where a
     /// person whose computer will not start gets help, an `https:` page or
@@ -150,6 +151,9 @@ pub struct Config {
     /// object admits only its own (fragment_core::release): a Worker
     /// variable, so the Worker and every object of one deploy run one value.
     pub deploy_id: String,
+    /// A published CLI for this deployment's exact inputs, verified by CI.
+    /// Absent when its release failed or this deployment does not release.
+    pub cli_version: Option<String>,
     /// `FRAGMENT_DEPLOYED_AT`: when this release was deployed, whole
     /// seconds since 1970 (the deploy sets it; none where a fleet sets none,
     /// dev's default). Every call into a platform object carries it beside
@@ -304,7 +308,7 @@ impl Config {
         let levers_fleet = levers_fleet(egress_local, host_label_suffix.is_some());
         let test_secret = test_secret(env, levers_fleet);
         Config {
-            computer_connectors: fragment_core::connectors::ComputerConnectorPolicy::parse(var(env, "FRAGMENT_COMPUTER_CONNECTORS").as_deref().unwrap_or(fragment_core::connectors::DEFAULT_POLICY)).unwrap_or_else(|e| panic!("FRAGMENT_COMPUTER_CONNECTORS: {e}")),
+            connectors: var(env, "FRAGMENT_CONNECTORS").map_or_else(fragment_core::connectors::Policy::default, |v| fragment_core::connectors::Policy::parse(&v).unwrap_or_else(|e| panic!("FRAGMENT_CONNECTORS: {e}"))),
             codestorage: {
                 let org = var(env, "CODESTORAGE_ORG").unwrap_or_else(|| panic!("CODESTORAGE_ORG names the deployment's code.storage org"));
                 let api =
@@ -369,6 +373,7 @@ impl Config {
             levers_scoped: test_secret.is_some() && levers_fleet == fragment_core::levers::Fleet::Branch,
             test_secret,
             deploy_id: deploy_id(env),
+            cli_version: var(env, "FRAGMENT_CLI_VERSION").filter(|v| fragment_core::release::cli_version(v).is_some()),
             deployed_at: deployed_at(env),
             book: configured_book(&providers, &models, var(env, "FRAGMENT_PRICE_BOOK_VERSION").map(|v| v.parse().unwrap_or_else(|_| panic!("FRAGMENT_PRICE_BOOK_VERSION is a whole number"))).unwrap_or(1)),
             providers,

@@ -2,6 +2,17 @@
 //! pages, evaluate JavaScript in them, and wait for what they show. Chrome
 //! resolves `*.localhost` to the loopback address, so pages open on each
 //! fragment's own origin exactly as a person's browser would.
+//!
+//! Why direct CDP (tooling review, 2026-10-30): chromiumoxide 0.9.1 has
+//! 117 normal transitive packages, headless_chrome 1.0.22 without default
+//! features 91, and fantoccini 0.22.1 with rustls only 108 (isolated cargo
+//! tree -e normal, unique package/version pairs, excluding the named crate).
+//! All have upstream activity, but none is a small replacement for send's
+//! synchronous request/answer loop over the tungstenite we already use.
+//! Context leases, bounded event evidence, held requests, third-party-cookie
+//! blocking and teardown would still belong here; fantoccini also needs a
+//! WebDriver server. Keep this adapter until a leaner transport removes more
+//! machinery than it adds while preserving those contracts.
 
 use std::cell::Cell;
 use std::collections::HashMap;

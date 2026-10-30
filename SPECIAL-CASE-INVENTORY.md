@@ -55,6 +55,4 @@ These are fragments or computers, or components any fragment may use:
   vault UI, the chat and the notes viewer use it), and the stylesheet a
   page may link (`__fragment.css`).
 
-Connector permission and restricted TCP targets are operator policy (`deploy/computer-connectors.json` defaults), not image declarations. Relay leases and pooled computer quotas remain platform security.
-
-Door IDs and storage are connector-neutral; owner-issued authorization stays platform-side. Older SimpleX images retain byte-compatible tickets; schema step 4 prevents rollback to older Worker code.
+Which connectors may be linked, and the exact TCP targets a computer's relay carries for them, are the deployment's policy (`connectors`; docs/computers.md, "Connector policy"), never an image's declaration. Relay leases and the computer's pooled quotas stay the platform's.

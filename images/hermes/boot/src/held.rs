@@ -7,7 +7,7 @@
 //! into a staging directory the save keeps. Its answer names exactly what
 //! it copied (each database and its `-wal`, `-shm`, `-journal`) as what the
 //! save leaves out, so a hot copy of a database Hermes is writing, which
-//! could tear (F4 of docs/explorations/pi-durable.md), is never what a wake
+//! could tear (docs/durable-computers.md), is never what a wake
 //! restores; a database made after the copy is named by none, and is kept
 //! hot rather than lost. A restore puts the copies back before Hermes
 //! starts, and `PRAGMA quick_check` proves each before the guest takes a

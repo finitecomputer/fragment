@@ -228,9 +228,6 @@
   //   "hermes": { "image": "registry.cloudflare.com/<account_id>/<repository>@sha256:<64 hex>" },
   //   "hermes-canary": { "dockerfile": "images/hermes/Dockerfile", "build_context": "." }
   // Never drop a name while computers are pinned to it.
-  // Optional computer_connectors: [{id, relayTargets: [{host, port}]}].
-  // Omitted: deploy/computer-connectors.json (today's twelve XFTP hosts).
-  // Explicit [] disables connector permission and relay targets.
   "computers": {
     "default_image": "hermes",
     "images": {
@@ -238,6 +235,12 @@
     }
     // no size: a computer starts at decision 13's 2 vCPU and 6 GiB
   },
+  // The connectors: the doors its people may open (docs/computers.md,
+  // "Connector policy"), [{id, relayTargets: [{host, port}]}]. Omitted: the
+  // cell's default, SimpleX with its twelve XFTP hosts on 443. [] is the
+  // kill switch: no connector may be linked, redeemed or relayed (an
+  // unlink still works), and no computer relay opens.
+  // "connectors": [{ "id": "simplex", "relayTargets": [{ "host": "xftp1.simplex.im", "port": 443 }] }],
   // The provider catalog a computer's swap offers (docs/computers.md,
   // "Connections and operator keys"): one row each, its kind, the hosts its
   // credential is sent to, where on a request it goes (a header and its

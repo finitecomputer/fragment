@@ -60,6 +60,7 @@ the deployment's secrets are Worker secrets (below).
 | `FRAGMENT_SUPPORT_URL` | where a person whose computer will not start gets help (the deploy config's `support_url`): an `https:` page or a `mailto:` address, at most 512 visible characters, refused at the node's first request otherwise; `GET /api/computers` gives it as `support`, and the shell links it (docs/computers.md, "What its owner is told"). Unset, none |
 | `FRAGMENT_OPERATORS` | identities and keys that grant credit and set plans, seats and overdrafts, and wipe a person (Operators, below); a key listed is an operator's whether or not anyone holds it |
 | `FRAGMENT_DEPLOY_ID` | which deployment this is (default `dev`); every answer of the platform's host names it in `x-fragment-deploy` (`GET /healthz`'s among them, which CD checks), and the shell's page in its meta, so a page left open reloads once the platform under it changed (The shell, "A new release"). `cargo xtask deploy` sets the deploy's commit (`git rev-parse --short=12 HEAD`; a tree with uncommitted changes adds `-dirty-<unix seconds>`, so two such deploys differ). It is the release every call between the Worker and its objects carries, and each object admits only its own (docs/MODEL.md, Calls between releases): 1 to 64 of letters, digits, `.`, `_` and `-`, or the isolate does not start |
+| `FRAGMENT_CLI_VERSION` | optional stable `major.minor.patch` CLI release for this deployment's exact CLI inputs, sent on platform answers as `x-fragment-cli`. CI sets `FRAGMENT_RELEASED_CLI_VERSION` for `xtask deploy` only after finding or publishing and verifying that release (docs/computers.md). Failed release jobs leave it unset and do not block deploy. Invalid or missing values send no header; this is independent of the platform's commit |
 | `FRAGMENT_DEPLOYED_AT` | when the release was deployed, whole seconds since 1970 (default none; dev and the e2e: their node's start). `cargo xtask deploy` sets the deploy's second. The shell's page names it in its `fragment-release-deployed` meta, which Settings shows (The shell). Every call between the Worker and its objects carries it beside the release, and an object that refuses a call from a release deployed after its own restarts onto it (docs/MODEL.md, Calls between releases, "An object behind restarts"): 1 to 12 digits, or the isolate does not start |
 | `WORKOS_API_URL` | where WorkOS is (default https://api.workos.com; dev and the e2e: the fake); sign-in is on where the `WORKOS_CLIENT` secret is bound (below), and answers 500 where it is not |
 | `FRAGMENT_PLATFORM_URL` | the platform's origin, where sign-in and the platform session live (required; production's is https://finite.chat, on no fragment's domain, and the CLI's default host). Every push's VAPID token names it as its contact (`sub`, RFC 8292) |
@@ -3545,7 +3546,7 @@ is docs/computers.md; the routes here are its owner's.
 | `DELETE /api/computers/{id}/agents/{fragment}` | the same | → the view: it signs nothing for the guest from now on; an awake guest stops running it as it reads its agents again. An agent fragment deleted leaves its computer by its delete (`DELETE /api/f/{name}`); asked of one gone, or of one the computer does not run, it answers the view, unchanged: done, not an error |
 | `PUT /api/computers/{id}/agents/{fragment}/accounts/{provider}` | its owner | `{account: "<id>" \| null}` → the view: which of its owner's accounts at a connection that takes several (`accounts_max`) the agent uses, by its id as `GET /api/connections` lists it (one not theirs: 404), or `null` for the default, the oldest connected; its agents' `accounts` say each pick (`{provider: id}`). A swap names the pick to Pipes while it is listed (one needing authorizing again is refused, never swapped for another), else the default: a pick whose account is gone falls back to it and stays until next written. Another provider is 400, as is a body without `account`. Its owner's open pages are told |
 | `PUT /api/computers/{id}/agents/{fragment}/connections` | its owner | `{connections: [provider] \| null}` → the view: the providers of the catalog (connections, operator keys, own keys) the agent may have swapped in (decisions 22 and 37), all named at once. `null`, the default, is every one its owner has (decision 44: a person's agents are not fenced from each other); a list narrows the agent to those, and its guest is given the rest no more. A provider the deployment does not offer (`FRAGMENT_PROVIDERS`) is 400, as is a body without `connections`. Its owner's open pages are told (the agent's `modelProviders` may change) |
-| `POST /api/computers/{id}/agents/{fragment}/door` | its owner | `{door: "simplex", act: "link" \| "unlink"}` → a ticket, `{door, act, agent, computer, nonce, exp, sig}`: the start of a link or an unlink of the agent's door (An agent's doors, below), signed by the agent fragment's own key, for this computer, for ten minutes. An unlink's closes the door as it is made. Anyone else 404; an agent fragment that does not run on this computer 403 |
+| `POST /api/computers/{id}/agents/{fragment}/door` | its owner | `{door, act: "link" \| "unlink"}` (`door` a connector's id, `simplex` today; one the deployment's `connectors` do not allow is 403 for a link, and still unlinked; one that is no connector's id, 400) → a ticket, `{door, act, agent, computer, nonce, exp, sig}`: the start of a link or an unlink of the agent's door (An agent's doors, below), signed by the agent fragment's own key, for this computer, for ten minutes. An unlink's closes the door as it is made. Anyone else 404; an agent fragment that does not run on this computer 403 |
 | `GET /api/computers/{id}/uses` | its owner | → `{computer, month, uses: [{provider, agent, calls, micros}]}` (proto's `ComputerUses`): this month's (UTC, `YYYY-MM`) calls through the computer's swap that a provider answered (under 500), by provider and agent fragment, and what they were charged: an operator key's at the price book's price and the margin (as its owner's ledger charged them), a connection's and an own key's `0` (counted, never charged). Thirteen months are kept |
 | `GET /api/computers/{id}/uses/{YYYY-MM}` | its owner | → the same, for that month; a month that is not one is 400 |
 | `POST /api/computers/{id}/ports/{port}/ticket` | its owner | `{path?}` → `{url, expiresAt}`: a one-time link (two minutes) that signs a browser in to the computer's own origin, `<24 hex>--computer.<suffix>` (`/__ticket`, then `/p/<port><path>`), cross-site from the platform, in a tab of its own or a frame of the platform's page (below); a signed request needs none. `path` is where on the port it lands, `/` by default: a path and query the image reads (an agent's screen: `/?agent=<agent fragment>`, docs/computers.md, Ports), which the platform carries and never reads; it starts with `/`, is at most 512 visible characters, and has no `//`, `#`, `\`, `.` or `..` segment, else 400 |
@@ -3612,7 +3613,12 @@ key's call its owner's ledger refuses).
 ### An agent's doors (decision 32; Paul, 2026-10-23)
 
 A door is a way an agent's owner reaches it other than its chat, run by
-its computer: SimpleX today (docs/bridge.md, "SimpleX"). What comes
+its computer: SimpleX today (docs/bridge.md, "SimpleX"). Its id is a
+connector's (`fragment_core::connectors::id_ok`), and the deployment's
+`connectors` say which may be opened (docs/computers.md, "Connector
+policy"): each ticket, redemption and relayed record's check asks them
+then, so a door the deployment stops allowing is refused at once, and its
+owner can still unlink it. What comes
 through one speaks for its owner (their message to the agent, answering
 its questions as theirs), so only the owner opens one, and the agent
 itself, whose tools act with its key, can neither open one nor speak
@@ -3644,7 +3650,8 @@ through one (`fragment_core::door`):
   app's operation or job publishes none (400).
 
 The door's key lives on the agent fragment (its `meta`), its ticket
-beside it; a fragment deleted takes them with it.
+beside it; a fragment deleted takes them with it. An agent has one such
+door slot: a link of another door, redeemed, replaces the one open.
 
 ### An agent's home (Paul, 2026-10-26)
 
@@ -3692,13 +3699,3 @@ chat. One home per agent, as each agent links its own SimpleX.
 A chat's records (its `chat` and `work` channels: turns, steps,
 replies, prompts, Stop) are docs/chat-records.md's: the bridge writes
 them and the chat template reads them.
-
-Door IDs are connector slugs (1–32 lowercase letters/digits with single
-internal dashes, beginning with a letter). Deployment authorization is
-checked through the owner/agent/action seam at issue, redemption and record
-check; a disabled door may still be unlinked. Keys and latest pending
-nonces are independent `agent_doors` rows; opening/unlinking one cannot
-invalidate another. SimpleX ticket and record digests and wire bodies are
-unchanged. Fragment schema step 4 preserves existing keys and pending
-tickets; old Worker code cannot roll back past this step. Older images
-remain supported and keep their existing disk state and signatures.

@@ -1,6 +1,8 @@
 //! An agent's doors (docs/api.md, "An agent's doors"): ways its owner
 //! reaches it other than its chat, run by its computer (SimpleX, decision
-//! 32; Paul's design of 2026-10-23). Only its owner opens one, and only
+//! 32; Paul's design of 2026-10-23). A door's id is a connector's
+//! (`connectors::id_ok`), and the deployment's policy says which may be
+//! opened (`connectors::Policy::authorize`). Only its owner opens one, and only
 //! what came through it speaks for them; the agent itself can do neither.
 //!
 //! - **A ticket** starts a link or an unlink. The platform makes one at
@@ -31,25 +33,6 @@ use sha2::{Digest, Sha256};
 
 /// The door SimpleX is (a relayed record's `via`).
 pub const SIMPLEX: &str = "simplex";
-
-/// A bounded connector slug; validity grants no permission.
-pub fn id_ok(door: &str) -> bool {
-    crate::connectors::id_ok(door)
-}
-
-/// Storage statements shared by the Worker and the restart/security proofs.
-/// No statement changes another door's key or latest ticket.
-pub mod storage {
-    pub const LINK: &str = "INSERT INTO agent_doors (door, nonce, expires_at) VALUES (?, ?, ?) ON CONFLICT(door) DO UPDATE SET nonce = excluded.nonce, expires_at = excluded.expires_at";
-    pub const UNLINK: &str = "DELETE FROM agent_doors WHERE door = ?";
-    pub const PENDING: &str = "SELECT nonce, expires_at FROM agent_doors WHERE door = ?";
-    pub const KEY: &str = "SELECT key FROM agent_doors WHERE door = ?";
-    pub const REDEEM: &str = "UPDATE agent_doors SET key = ?, nonce = NULL, expires_at = NULL WHERE door = ?";
-}
-
-pub fn redeemable(nonce: Option<&str>, expires_at: Option<i64>, offered: &str, now: i64) -> bool {
-    nonce.is_some_and(|n| !n.is_empty() && n == offered) && expires_at.is_some_and(|exp| exp >= now)
-}
 
 /// A ticket holds this long after it is made: its owner's page hands it
 /// to the bridge at once.
@@ -108,7 +91,7 @@ impl Ticket {
     /// Its fields' shapes. None can hold a line break, so its digest reads
     /// one way only.
     pub fn well_formed(&self) -> bool {
-        id_ok(&self.door) && valid_fragment_name(&self.agent) && computer_ok(&self.computer) && hex_of(&self.nonce, 32) && self.exp > 0 && (self.sig.is_empty() || hex_of(&self.sig, 128))
+        crate::connectors::id_ok(&self.door) && valid_fragment_name(&self.agent) && computer_ok(&self.computer) && hex_of(&self.nonce, 32) && self.exp > 0 && (self.sig.is_empty() || hex_of(&self.sig, 128))
     }
 
     /// What its signature signs.
@@ -146,7 +129,7 @@ pub fn relayed(body: &Value) -> Option<Result<Relayed, &'static str>> {
     let read = || -> Result<Relayed, &'static str> {
         let o = r.as_object().ok_or("is an object")?;
         let text = |k: &str| o.get(k).and_then(Value::as_str);
-        let via = text("via").filter(|v| id_ok(v)).ok_or("names a valid door (via)")?;
+        let via = text("via").filter(|v| crate::connectors::id_ok(v)).ok_or("names its door (via, a connector's id)")?;
         let for_ = text("for").filter(|f| !f.is_empty() && f.len() <= 128).ok_or("names whom it speaks for (for)")?;
         let agent = text("agent").filter(|a| valid_fragment_name(a)).ok_or("names its agent fragment (agent)")?;
         let at = o.get("at").and_then(Value::as_i64).filter(|t| *t > 0).ok_or("says when its door signed it (at, ms)")?;
@@ -274,7 +257,7 @@ mod tests {
             Some(Ok(Relayed { via: SIMPLEX.into(), for_: "npub1paul".into(), agent: "juniper--k3x9".into(), at: 1_790_000_000_000, sig: "ab".repeat(64) }))
         );
         assert!(relays(&b) && !relays(&json!({ "text": "x" })));
-        for (k, v) in [("via", json!("../telegram")), ("for", json!("")), ("agent", json!("../x")), ("at", json!(-1)), ("at", json!("soon")), ("sig", json!("AB".repeat(64))), ("sig", json!("ab"))] {
+        for (k, v) in [("via", json!("../simplex")), ("via", json!("SimpleX")), ("for", json!("")), ("agent", json!("../x")), ("at", json!(-1)), ("at", json!("soon")), ("sig", json!("AB".repeat(64))), ("sig", json!("ab"))] {
             let mut bad = b.clone();
             bad["relayed"][k] = v.clone();
             assert!(matches!(relayed(&bad), Some(Err(_))), "{k}: {v}");
@@ -285,64 +268,12 @@ mod tests {
         assert!(matches!(relayed(&unsigned), Some(Err(_))), "an unsigned one is no door's");
     }
 
-    #[test]
-    fn connector_slugs_are_bounded_and_records_accept_a_second_door() {
-        for id in ["", "../simplex", "SimpleX", "-a", "a-", "a--b", "a_b", "a\nb", &"a".repeat(33)] { assert!(!id_ok(id), "{id}"); }
-        for id in ["simplex", "telegram", "other-2", &"a".repeat(32)] { assert!(id_ok(id)); }
-        let mut r = record();
-        r["relayed"]["via"] = json!("telegram");
-        r["relayed"]["sig"] = json!("ab".repeat(64));
-        assert!(matches!(relayed(&r), Some(Ok(_))));
-        assert_ne!(record_digest("telegram", "juniper-chat--a1b2", "chat", "sx:1", &r), record_digest("simplex", "juniper-chat--a1b2", "chat", "sx:1", &r));
-    }
-
-    /// Real SQLite, using the same statements as the Worker: migration,
-    /// replay/restart, independent slots and stale disk-key revocation.
-    #[test]
-    fn migration_preserves_live_keys_and_pending_tickets_then_doors_are_independent() {
-        use rusqlite::{Connection, params};
-        let db = Connection::open_in_memory().unwrap();
-        db.execute_batch("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)").unwrap();
-        let old = fragment_nip98::Keys::from_secret_hex(&"08".repeat(32)).unwrap();
-        let fresh = fragment_nip98::Keys::from_secret_hex(&"09".repeat(32)).unwrap();
-        let other = fragment_nip98::Keys::from_secret_hex(&"0a".repeat(32)).unwrap();
-        let nonce = "0f".repeat(16);
-        db.execute("INSERT INTO meta VALUES ('door', ?)", [format!("simplex {}", old.pubkey_hex())]).unwrap();
-        db.execute("INSERT INTO meta VALUES ('door_ticket', ?)", [format!("simplex {nonce} 1000")]).unwrap();
-        db.execute_batch(include_str!("../migrations/fragment/0004_agent_doors.sql")).unwrap();
-        let pending = |door: &str| db.query_row(storage::PENDING, [door], |r| Ok((r.get::<_,Option<String>>(0)?, r.get::<_,Option<i64>>(1)?))).ok().unwrap_or_default();
-        let key = |door: &str| db.query_row(storage::KEY, [door], |r| r.get::<_,Option<String>>(0)).ok().flatten();
-        assert_eq!(key("simplex").as_deref(), Some(old.pubkey_hex()));
-        let (n,e) = pending("simplex");
-        assert_eq!(n.as_deref(), Some(nonce.as_str()));
-        assert!(redeemable(n.as_deref(), e, &nonce, 999));
-        assert!(redeemable(n.as_deref(), e, &nonce, 1000));
-        assert!(!redeemable(n.as_deref(), e, &nonce, 1001), "expired");
-        assert!(!redeemable(n.as_deref(), e, &"ff".repeat(16), 999), "forged");
-        db.execute(storage::LINK, params!["telegram", "another-nonce", 2000]).unwrap();
-        db.execute(storage::REDEEM, params![other.pubkey_hex(), "telegram"]).unwrap();
-        assert_eq!(pending("simplex"), (n,e), "second door leaves the pending SimpleX link intact");
-        db.execute(storage::REDEEM, params![fresh.pubkey_hex(), "simplex"]).unwrap();
-        let (n,e) = pending("simplex");
-        assert!(!redeemable(n.as_deref(), e, &nonce, 999), "replay after redemption");
-        let digest = [42;32];
-        let verify = |k: &fragment_nip98::Keys| key("simplex").is_some_and(|public| fragment_nip98::verify_digest(&public, &digest, &k.sign_digest(&digest)));
-        assert!(verify(&fresh));
-        assert!(!verify(&old), "old key restored by a disk rollback is stale after relink");
-        db.execute(storage::UNLINK, ["simplex"]).unwrap();
-        assert!(!verify(&fresh), "unlink revokes immediately");
-        assert_eq!(key("telegram").as_deref(), Some(other.pubkey_hex()), "unlink is independent");
-        // Legacy meta remains present but inert: reopening it never authorizes a key.
-        assert!(key("simplex").is_none());
-        assert!(db.query_row("SELECT value FROM meta WHERE key='door'", [], |r| r.get::<_,String>(0)).unwrap().contains(old.pubkey_hex()));
-    }
-
     /// Goal: a ticket's fields hold no line break and are of their shapes.
     #[test]
     fn tickets_are_well_formed() {
         assert!(ticket().well_formed());
         let bad = [
-            Ticket { door: "../telegram".into(), ..ticket() },
+            Ticket { door: "../simplex".into(), ..ticket() },
             Ticket { agent: "juniper\n--k3x9".into(), ..ticket() },
             Ticket { computer: "computer:00AA".into(), ..ticket() },
             Ticket { computer: "laptop".into(), ..ticket() },

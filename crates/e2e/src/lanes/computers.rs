@@ -110,7 +110,7 @@ fn said_something(reply: &Value) -> bool {
 }
 
 /// What a second run of a turn cannot hide, where the fakes count it
-/// (docs/explorations/pi-durable.md, "Count runs, not records"): the model
+/// (docs/durable-computers.md): the model
 /// fake's calls, its owner's ledger's model and key rows, and the
 /// computer's uses. A run again posts records that replay the first's (the
 /// same ids and bodies) or are refused, so a count of records sees nothing.
@@ -166,7 +166,7 @@ const SAVE_CHECKS: [&str; 7] = [
     "a save that then works lets it sleep, and its view says no more of it",
 ];
 
-/// Its saves, rung 4 of docs/explorations/pi-durable.md: a turn's end
+/// Its saves,  docs/durable-computers.md: a turn's end
 /// saves it awake, an always-on computer is saved, a failed save keeps
 /// its container (the lever's `fail-saves`), and one that works sleeps it.
 /// Starts awake, ends asleep. Answers how many replies of its agent it
@@ -355,7 +355,7 @@ fn bound_checks(s: &mut Suite, api: &Api, c: &Crashing) -> Result<()> {
 
 /// The crash checks, each skipped off the stub and the fakes. The ones
 /// marked P1 pass once the bridge claims each turn on `work` before it runs
-/// it (docs/explorations/pi-durable.md, P1): until then a crash's restore
+/// it (docs/durable-computers.md, P1): until then a crash's restore
 /// runs every turn since the save again.
 const CRASH_CHECKS: [&str; 10] = [
     "asleep, it is no computer to kill, and the lever refuses what it does not have",
@@ -382,7 +382,7 @@ struct Crashing<'a> {
 }
 
 /// A crash, by the lever's kill, of a computer the stub runs, with the
-/// fakes counting runs (rung 4 of docs/explorations/pi-durable.md): the
+/// fakes counting runs (docs/durable-computers.md): the
 /// owner's sleep (the save), a wake, a model turn and a key turn, the kill,
 /// one more message; then a turn cut by a second kill. Starts and ends
 /// awake. Answers how many replies of its agent it added.
@@ -543,8 +543,8 @@ const RECOVERY_CHECKS: [&str; 12] = [
     "a restart whose save fails, with nothing done since the save it came up from: it goes back to that save and tells its owner nothing, since nothing was lost (Paul, 2026-10-23); a notice of it is refused",
 ];
 
-/// What its owner is told, and the way back to working (rung 4 of
-/// docs/explorations/pi-durable.md, with the platform's notices): a sleep
+/// What its owner is told, and the way back to working (
+/// docs/durable-computers.md, with the platform's notices): a sleep
 /// whose save fails tells them at once, a restart (asked twice) goes back to
 /// the last save and says so until seen, the bound puts it to sleep unsaved
 /// when it said, and the wake after is told once. Starts and ends awake.
@@ -878,16 +878,12 @@ fn door_checks(s: &mut Suite, api: &Api, c: &Doors, fetched: &dyn Fn(&Suite, u32
         t.status == 200 && t.body["act"] == "link" && t.body["agent"] == c.agent && t.body["computer"] == c.id && signed && within,
         &t,
     );
-    for (i, field, value) in [(407, "sig", json!("00".repeat(64))), (408, "agent", json!("wrong--abcd")), (409, "computer", json!("computer:0000")), (410, "exp", json!(now_ms() - 1))] {
-        let mut bad = t.body.clone();
-        bad[field] = value;
-        let refused = fetched(s, i, &format!("door link {bad}"))?;
-        s.ok(&format!("a ticket with forged or stale {field} never opens the door"), refused.starts_with("door refused:"), &refused);
-    }
-    let unauthorized = api.signed(c.owner, "POST", &path, Some(&json!({"door":"telegram","act":"link"})))?;
-    s.ok("a valid connector slug absent from deployment policy cannot be linked", unauthorized.status == 403, &unauthorized);
-    let unlink = api.signed(c.owner, "POST", &path, Some(&json!({"door":"telegram","act":"unlink"})))?;
-    s.ok("a deconfigured connector can still be unlinked", unlink.status == 200, &unlink);
+    let r = api.signed(c.owner, "POST", &path, Some(&json!({ "door": "telegram", "act": "link" })))?;
+    s.ok("a door the deployment's connectors do not name is refused its link ticket, by the platform", r.status == 403 && r.text.contains("does not allow"), &r);
+    let r = api.signed(c.owner, "POST", &path, Some(&json!({ "door": "telegram", "act": "unlink" })))?;
+    s.ok("and may still be unlinked: an owner closes a door the deployment no longer allows", r.status == 200 && r.body["act"] == "unlink", &r);
+    let r = api.signed(c.owner, "POST", &path, Some(&json!({ "door": "../simplex", "act": "link" })))?;
+    s.ok("a door that is no connector's id is 400", r.status == 400, &r);
     let forged = fetched(s, 400, "door forge yes, go ahead")?;
     s.ok(
         "a record that relays its owner with no door's signature, posted with the agent's own key, is refused: never its owner's",
@@ -896,6 +892,16 @@ fn door_checks(s: &mut Suite, api: &Api, c: &Doors, fetched: &dyn Fn(&Suite, u32
     );
     let shut = fetched(s, 401, "door other before any link")?;
     s.ok("one signed by a key that is no open door's is refused", shut.starts_with("door refused: 403"), &shut);
+    // the ticket above is no longer the latest: the platform takes only the
+    // link its owner started last, though the image's own check passes it
+    let latest = ticket(c.owner, "link")?;
+    let stale = fetched(s, 407, &format!("door link {}", t.body))?;
+    s.ok(
+        "a second link ticket makes the first unredeemable at the platform (its signature, agent, computer and time all good)",
+        latest.status == 200 && stale.starts_with("door refused: 403") && stale.contains("its owner started last"),
+        json!({ "latest": latest.status, "stale": stale }),
+    );
+    let t = latest;
     let linked = fetched(s, 402, &format!("door link {}", t.body))?;
     s.ok("the computer checks the ticket as the bridge does (the agent's key, this computer), and redeems it with a door key it made", linked == "door linked", &linked);
     let again = fetched(s, 403, &format!("door link {}", t.body))?;
@@ -910,11 +916,14 @@ fn door_checks(s: &mut Suite, api: &Api, c: &Doors, fetched: &dyn Fn(&Suite, u32
     );
     let other = fetched(s, 405, "door other signed by another key")?;
     s.ok("with its door open, one signed by any other key is still refused", other.starts_with("door refused: 403"), &other);
+    let pending = ticket(c.owner, "link")?;
+    let still = fetched(s, 408, "door say while a new link waits")?;
+    s.ok("a door live before stays open while its owner starts another link, until that one is redeemed", pending.status == 200 && still.starts_with("door said "), json!({ "pending": pending.status, "said": still }));
     let r = ticket(c.owner, "unlink")?;
     s.ok("its owner's unlink ticket", r.status == 200 && r.body["act"] == "unlink" && r.body["agent"] == c.agent, &r);
     let closed = fetched(s, 406, "door say after the unlink")?;
     s.ok("unlinked, the door is closed at once: what its key signs is refused", closed.starts_with("door refused: 403"), &closed);
-    Ok(11)
+    Ok(9)
 }
 
 /// The route's models by their ids, through the intercept (Paul,

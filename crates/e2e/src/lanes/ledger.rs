@@ -1,4 +1,4 @@
-//! The usage ledger (phase 3 of docs/cloudflare-v1.md; docs/ledger.md),
+//! The usage ledger (docs/ledger.md),
 //! end to end on workerd: plans and guests (who make no fragments, and
 //! still edit a seat's), a seat's included credit, operators' commands, AI
 //! steps' charges, once whatever retries (bug 2), zero credit and the

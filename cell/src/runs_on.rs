@@ -21,7 +21,7 @@
 //!   own. A row that fails for a passing reason is tried again from the
 //!   alarm; an agent that runs on no computer is told nothing.
 
-use fragment_core::{door, npub};
+use fragment_core::{connectors::Action, door, npub};
 use fragment_proto::{valid_channel_name, valid_fragment_name, ErrorCode, IdentityKind, Role};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -94,16 +94,16 @@ pub(crate) fn wake_url(computer: &str) -> String {
 }
 
 impl FragmentCell {
-    fn authorize_door(&self, id: &str, action: fragment_core::connectors::Action) -> CellResult<()> {
-        use fragment_core::connectors::Context;
-        if !door::id_ok(id) { return Err(CellError::invalid("door is a connector slug (1 to 32 lower-case letters, digits and single dashes)")); }
-        let owner = self.must(MetaKey::Owner)?;
-        let agent = self.name()?;
-        let decision = self.cfg.computer_connectors.authorize_connector(&Context { owner: &owner, agent: &agent }, id, action, None);
-        if !decision.allowed {
-            return Err(CellError::new(ErrorCode::Forbidden, decision.reason));
+    /// Whether this agent's owner may `action` its door `door` now: the
+    /// deployment's connector policy (fragment_core::connectors), asked at
+    /// each ticket, redemption and relayed record's check. A door the
+    /// policy no longer allows is refused at once, and still unlinked.
+    fn door_allowed(&self, door: &str, action: fragment_core::connectors::Action) -> CellResult<()> {
+        if !fragment_core::connectors::id_ok(door) {
+            return Err(CellError::invalid("door: a connector's id (1 to 32 lower-case letters, digits and single dashes)"));
         }
-        Ok(())
+        let (owner, agent) = (self.must(MetaKey::Owner)?, self.name()?);
+        self.cfg.connectors.authorize(&owner, &agent, door, action).map_err(|why| CellError::new(ErrorCode::Forbidden, format!("door {door} {why}")))
     }
 
     /// `computer/picture`: an agent fragment's picture, for `GET
@@ -195,27 +195,17 @@ impl FragmentCell {
                     "unlink" => door::Act::Unlink,
                     _ => return Err(CellError::invalid("act: link or unlink")),
                 };
-                self.authorize_door(text("door"), if act == door::Act::Unlink { fragment_core::connectors::Action::Unlink } else { fragment_core::connectors::Action::Link })?;
-                if act == door::Act::Link {
-                    let count = self.rows("SELECT COUNT(*) AS n FROM agent_doors", vec![])?;
-                    let exists = !self.rows(door::storage::KEY, vec![text("door").into()])?.is_empty();
-                    if !exists && count[0]["n"].as_u64().unwrap_or(0) >= fragment_core::connectors::CONNECTORS_MAX as u64 {
-                        return Err(CellError::new(ErrorCode::TooLarge, "unlink an unused door before adding another connector"));
-                    }
-                }
+                self.door_allowed(text("door"), if act == door::Act::Link { Action::Link } else { Action::Unlink })?;
                 let nonce = hex::encode(js::random_bytes::<16>());
                 let ticket = door::Ticket { door: text("door").into(), act, agent: self.name()?, computer: text("computer").into(), nonce, exp: js::now_ms() + door::TICKET_MS, sig: String::new() };
                 assert!(ticket.well_formed(), "a ticket the platform makes is well formed");
                 match act {
-                    door::Act::Link => self.exec(
-                        door::storage::LINK,
-                        vec![ticket.door.clone().into(), ticket.nonce.clone().into(), ticket.exp.into()],
-                    )?,
+                    door::Act::Link => self.set_meta(MetaKey::DoorTicket, &format!("{} {} {}", ticket.door, ticket.nonce, ticket.exp))?,
                     // closed the moment its owner asks: its door signs nothing more
                     door::Act::Unlink => {
-                        let opened = self.rows(door::storage::KEY, vec![ticket.door.clone().into()])?.iter().any(|r| r["key"].is_string());
-                        self.exec(door::storage::UNLINK, vec![ticket.door.clone().into()])?;
-                        if opened {
+                        self.del_meta(MetaKey::DoorTicket)?;
+                        if self.meta(MetaKey::Door)?.is_some() {
+                            self.del_meta(MetaKey::Door)?;
                             self.event("door.closed", "its door closed by its owner", json!({ "door": ticket.door }));
                         }
                     }
@@ -227,16 +217,19 @@ impl FragmentCell {
                 let text = |k: &str| body[k].as_str().unwrap_or("");
                 self.assigned_to(text("computer"))?;
                 let (door, key) = (text("door"), text("key"));
-                self.authorize_door(door, fragment_core::connectors::Action::Redeem)?;
+                self.door_allowed(door, Action::Redeem)?;
                 if !npub::is_hex_key(key) {
                     return Err(CellError::invalid("a door's key is 64 hex"));
                 }
                 // its owner's latest link ticket, once, while it holds
-                let pending = self.rows(door::storage::PENDING, vec![door.into()])?.into_iter().next().unwrap_or(Value::Null);
-                if !door::redeemable(pending["nonce"].as_str(), pending["expires_at"].as_i64(), text("nonce"), js::now_ms()) {
+                let pending = self.meta(MetaKey::DoorTicket)?.unwrap_or_default();
+                let mut parts = pending.splitn(3, ' ');
+                let (was, nonce, exp) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""), parts.next().and_then(|e| e.parse::<i64>().ok()).unwrap_or(0));
+                if was != door || nonce.is_empty() || nonce != text("nonce") || exp < js::now_ms() {
                     return Err(CellError::new(ErrorCode::Forbidden, "that ticket is not the link its owner started last, or it is past its time: they start one from Settings"));
                 }
-                self.exec(door::storage::REDEEM, vec![key.into(), door.into()])?;
+                self.del_meta(MetaKey::DoorTicket)?;
+                self.set_meta(MetaKey::Door, &format!("{door} {key}"))?;
                 self.event("door.opened", "its door opened by its owner", json!({ "door": door, "key": key }));
                 Ok(json!({ "door": door, "key": key }))
             }
@@ -246,9 +239,9 @@ impl FragmentCell {
                 if self.meta(MetaKey::AgentIdentity)?.as_deref() != Some(text("identity")) {
                     return Err(refused("is posted by the agent whose door it came through"));
                 }
-                self.authorize_door(text("door"), fragment_core::connectors::Action::Check)?;
-                let open = self.rows(door::storage::KEY, vec![text("door").into()])?.into_iter().next().unwrap_or(Value::Null);
-                let Some(key) = open["key"].as_str() else {
+                self.door_allowed(text("door"), Action::Check)?;
+                let open = self.meta(MetaKey::Door)?.unwrap_or_default();
+                let Some(key) = open.strip_prefix(text("door")).and_then(|k| k.strip_prefix(' ')) else {
                     return Err(refused("came through a door its owner has not opened, or closed"));
                 };
                 let mut digest = [0u8; 32];
