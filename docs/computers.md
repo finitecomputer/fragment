@@ -417,7 +417,10 @@ tarballs, or builds and publishes one before deploying. The version is the
 next patch above the highest stable `v*` tag, with cli/Cargo.toml as its floor.
 The existing-tag refusal, artifact filter and binary version checks still
 apply. CI writes the input marker only after publishing, then verifies it
-and the assets again. Deploy advertises that version as `x-fragment-cli`.
+and the assets again. An upload that silently omitted a tarball is repaired
+once, uploading only missing or incomplete assets, and fails the job if
+the four still do not verify. Deploy advertises the verified version as
+`x-fragment-cli`.
 A failed lookup or release does not block deploy; it omits the header. Rerun
 the release jobs (including `cli-version` to choose a fresh tag if one was
 already created); the next deploy advertises the completed release. No

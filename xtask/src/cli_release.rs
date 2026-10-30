@@ -15,17 +15,27 @@ const INPUTS: &[&str] = &[
 
 fn marker(key: &str) -> String { format!("<!-- fragment-cli-inputs:{key} -->") }
 
-fn assets_present(release: &Value) -> bool {
-    crate::RELEASE_ASSETS.iter().all(|(_, asset)| {
-        release["assets"].as_array().into_iter().flatten().any(|a|
-            a["name"] == format!("fragment-{asset}.tar.gz") && a["size"].as_u64().is_some_and(|s| s > 0)
-            && a["state"] == "uploaded")
-    })
+fn missing_assets(release: &Value) -> Vec<String> {
+    crate::RELEASE_ASSETS.iter().map(|(_, asset)| format!("fragment-{asset}.tar.gz"))
+        .filter(|name| !release["assets"].as_array().into_iter().flatten().any(|a|
+            a["name"] == *name && a["size"].as_u64().is_some_and(|s| s > 0) && a["state"] == "uploaded"))
+        .collect()
+}
+
+/// GitHub has reported a successful upload while omitting a tarball
+/// (v0.15.0, run 41070578493). Repair only missing/incomplete assets once,
+/// then read back and fail rather than recording an incomplete release.
+fn complete_assets(release: Value, repair: impl FnOnce(&[String]) -> Result<Value>) -> Result<Value> {
+    let missing = missing_assets(&release);
+    let release = if missing.is_empty() { release } else { repair(&missing)? };
+    let missing = missing_assets(&release);
+    anyhow::ensure!(missing.is_empty(), "CLI release still lacks uploaded nonempty assets after one repair: {}", missing.join(", "));
+    Ok(release)
 }
 
 fn published(release: &Value, key: &str) -> Option<[u64; 3]> {
     if release["draft"] != false || release["prerelease"] != false || !release["published_at"].is_string()
-        || !assets_present(release) || !release["body"].as_str()?.lines().any(|l| l == marker(key)) { return None; }
+        || !missing_assets(release).is_empty() || !release["body"].as_str()?.lines().any(|l| l == marker(key)) { return None; }
     cli_version(release["tag_name"].as_str()?.strip_prefix('v')?)
 }
 
@@ -78,7 +88,13 @@ pub(crate) fn run(args: &[String]) -> Result<()> {
         [record, tag] if record == "record" => {
             anyhow::ensure!(tag.strip_prefix('v').and_then(cli_version).is_some(), "release tag must be v<major.minor.patch>");
             let release = api(&repo, &format!("releases/tags/{tag}"), false)?;
-            anyhow::ensure!(release["draft"] == false && release["prerelease"] == false && assets_present(&release), "release is not published with all four nonempty CLI tarballs");
+            anyhow::ensure!(release["draft"] == false && release["prerelease"] == false && release["published_at"].is_string(), "CLI release is not published and stable");
+            let release = complete_assets(release, |missing| {
+                eprintln!("repairing CLI release assets once: {}", missing.join(", "));
+                let assets = missing.iter().map(|name| root.join("dist").join(name));
+                crate::run(Command::new("gh").args(["release", "upload", tag, "--repo", &repo, "--clobber"]).args(assets))?;
+                api(&repo, &format!("releases/tags/{tag}"), false)
+            })?;
             let body = release["body"].as_str().unwrap_or_default();
             let mark = marker(&key);
             anyhow::ensure!(!body.lines().any(|l| l.starts_with("<!-- fragment-cli-inputs:") && l != mark), "release already records different CLI inputs");
@@ -101,6 +117,28 @@ pub(crate) fn run(args: &[String]) -> Result<()> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_missing_asset_is_reuploaded_once_and_still_missing_fails_the_job() {
+        let assets: Vec<_> = crate::RELEASE_ASSETS.iter().map(|(_, a)| json!({"name": format!("fragment-{a}.tar.gz"), "size": 123, "state": "uploaded"})).collect();
+        let complete = json!({"assets": assets});
+        assert!(complete_assets(complete.clone(), |_| panic!("a complete release uploads nothing")).is_ok());
+        let mut partial = complete.clone();
+        partial["assets"].as_array_mut().unwrap().retain(|a| a["name"] != "fragment-Linux-x86_64.tar.gz");
+        assert!(complete_assets(partial.clone(), |missing| {
+            assert_eq!(missing, ["fragment-Linux-x86_64.tar.gz"]);
+            Ok(complete.clone())
+        }).is_ok());
+        let mut tries = 0;
+        let failed = complete_assets(partial.clone(), |_| { tries += 1; Ok(partial) });
+        assert_eq!(tries, 1);
+        assert!(failed.unwrap_err().to_string().contains("fragment-Linux-x86_64.tar.gz"));
+        let mut empty = complete.clone(); empty["assets"][0]["size"] = json!(0);
+        assert!(complete_assets(empty, |missing| {
+            assert_eq!(missing, ["fragment-Darwin-arm64.tar.gz"]);
+            Ok(complete)
+        }).is_ok());
+    }
 
     #[test]
     fn only_a_complete_published_release_matches_the_inputs() {
