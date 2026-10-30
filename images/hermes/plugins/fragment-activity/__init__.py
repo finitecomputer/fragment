@@ -19,7 +19,8 @@ _children = set()
 _socket = None
 _worker = None
 # The person's turns this gateway runs, by Hermes' turn id: each our turn's
-# id (its Relay message's). Bounded: the oldest go.
+# id (its Relay message's). Bounded: the least recently busy go (a turn's
+# tool call makes it the newest, however long it runs).
 _turns = {}
 _TURNS_MAX = 64
 # Hermes' tool outcomes, as a step's (docs/chat-records.md).
@@ -151,7 +152,9 @@ def turn_started(*, turn_id=None, **kwargs):
 def tool_finished(*, tool_name=None, args=None, tool_call_id=None, turn_id=None,
                   duration_ms=0, status=None, result=None, **kwargs):
     with _condition:
-        turn = _turns.get(turn_id)
+        turn = _turns.pop(turn_id, None)
+        if turn is not None:
+            _turns[turn_id] = turn
     outcome = _STATUS.get(status)
     if turn is None or not tool_call_id or outcome is None:
         return  # another run's call, or no outcome: never a guessed step
