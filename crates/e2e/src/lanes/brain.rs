@@ -249,6 +249,7 @@ pub fn brain(s: &mut Suite, api: &Api) -> Result<()> {
     anyhow::ensure!(r.status == 200, "adding a viewer: {r}");
     let r = search(api, &viewer, &name, json!({ "q": "inverter" }))?;
     s.ok("a viewer may search", r.status == 200 && found(&r).first().is_some_and(|f| f.0 == SOLAR), &r);
+    collection(s, api, &home, &name)?;
     let stranger = api.person()?;
     let r = search(api, &stranger, &name, json!({ "q": "inverter" }))?;
     let anon = api.browser_op(&name, "search", "q", json!({ "q": "inverter" }), None)?;
@@ -368,5 +369,47 @@ pub fn brain(s: &mut Suite, api: &Api) -> Result<()> {
         shown && chrome.eval(&tab, "(() => { const c = document.getElementById('content'); return window.__ran === undefined && !c.querySelector('img,script,svg,iframe,a[href^=\"javascript\" i]') && c.textContent.includes('<img src=x onerror='); })()")? == true,
         chrome.eval(&tab, "JSON.stringify({ ran: window.__ran ?? null, text: document.getElementById('content')?.innerText.slice(0, 400) })")?,
     );
+    Ok(())
+}
+
+/// Two independent editor shares, real CLI syncs, retained copies and a real revoke.
+fn collection(s: &mut Suite, api: &Api, owner_home: &Path, first: &str) -> Result<()> {
+    let second = s.cli_json(api, owner_home, &["create", &s.name("collection-source"), "--template", "brain", "--json"])?;
+    let second = second["name"].as_str().context("second collection source")?;
+    let out = s.cli(api, owner_home, &["write", second, "wiki/page.md", "--text", "# Inverter\nAn inverter in the second source."]);
+    anyhow::ensure!(out.status.success(), "write second source: {}", String::from_utf8_lossy(&out.stderr));
+    let reader_home = s.dir("collection-reader");
+    s.login(api, &reader_home);
+    let reader = s.cli_keys(&reader_home).context("collection reader key")?;
+    let reader_npub = npub::encode(reader.pubkey_hex());
+    let root = s.dir("collection");
+    let mut sources = Vec::new();
+    for (alias, name) in [("garden", first), ("team", second)] {
+        let share = api.share(name, &reader_npub, "editor")?;
+        anyhow::ensure!(share.status == 200, "share collection source: {share}");
+        let dir = root.join(alias);
+        std::fs::create_dir_all(&dir)?;
+        let out = s.cli(api, &reader_home, &["sync", name, "--dir", dir.to_str().context("source path")?, "--mode", "pull"]);
+        anyhow::ensure!(out.status.success(), "sync shared source: {}", String::from_utf8_lossy(&out.stderr));
+        // Acquiring a copy needs an editor today; browsing it only needs a viewer.
+        let share = api.share(name, &reader_npub, "viewer")?;
+        anyhow::ensure!(share.status == 200, "make collection reader a viewer: {share}");
+        sources.push(json!({"alias":alias,"fragment":name,"dir":alias}));
+    }
+    let manifest = root.join("collection.json");
+    std::fs::write(&manifest, json!({"version":1,"host":api.base,"sources":sources}).to_string())?;
+    let manifest = manifest.to_str().context("manifest path")?;
+    let online = s.cli_json(api, &reader_home, &["collection", "--manifest", manifest, "search", "inverter", "--json"])?;
+    let offline = s.cli_json(api, &reader_home, &["collection", "--manifest", manifest, "--offline", "search", "inverter", "--json"])?;
+    let both = |v: &Value| ["garden", "team"].iter().all(|alias| v["results"].as_array().is_some_and(|hits| hits.iter().any(|h| h["alias"] == *alias)));
+    s.ok("two separately shared brains form one CLI workspace online and offline", both(&online) && both(&offline), json!({"online":online,"offline":offline}));
+    std::fs::write(root.join("team/wiki/page.md"), "# Edited\nlocalcollectionword")?;
+    let edited = s.cli_json(api, &reader_home, &["collection", "--manifest", manifest, "--offline", "search", "localcollectionword", "--json"])?;
+    s.ok("collection reads the reader's current unsynced bytes with provenance", edited["results"][0]["alias"] == "team" && edited["results"][0]["fragment"] == second && edited["results"][0]["state"] == "local_only", &edited);
+    let owner = s.cli_keys(owner_home).context("owner key")?;
+    let revoke = api.signed(&owner, "DELETE", &format!("/api/f/{second}/members/{reader_npub}"), None)?;
+    anyhow::ensure!(revoke.status == 200, "revoke collection source: {revoke}");
+    let denied = s.cli_json(api, &reader_home, &["collection", "--manifest", manifest, "search", "localcollectionword", "--json"])?;
+    s.ok("a revoked source is explicit and its retained local bytes are excluded online", denied["sources"][1]["access"] == "denied" && denied["results"].as_array().is_some_and(Vec::is_empty), &denied);
     Ok(())
 }

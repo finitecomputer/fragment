@@ -136,3 +136,83 @@ Rebuilding means each search reads every eligible page: this favors freshness
 and a simple rebuildable interface over incremental performance. A search is
 not an atomic filesystem snapshot; files edited during a scan can reflect
 different moments. It never changes working files or the sync journal.
+
+## CLI collections
+
+A collection is a trusted local JSON manifest of references to independently
+shared fragments. Source membership still controls each source; a reference
+adds no access. Sync each source separately first, using your own identity.
+The collection commands only read and search those existing local folders.
+They never sync, publish, edit, or copy content into another knowledge repo.
+The existing `fragment sync` storage-token endpoint requires an editor role,
+even for `--mode pull`. Collections do not change that acquisition requirement;
+an online collection access check itself works for viewers with retained copies.
+
+For example, save `collection.json` beside your two synced folders:
+
+```json
+{
+  "version": 1,
+  "host": "https://finite.chat",
+  "sources": [
+    {"alias": "personal", "fragment": "garden--k3x9", "dir": "garden"},
+    {"alias": "team", "fragment": "research--k3x9", "dir": "research"}
+  ]
+}
+```
+
+```sh
+fragment collection --manifest collection.json list
+fragment collection --manifest collection.json search 'orchard pruning' --json
+fragment collection --manifest collection.json --offline search 'orchard pruning'
+```
+
+Directories resolve relative to the manifest (absolute paths are also allowed).
+The manifest accepts version 1, 1–32 sources, unique aliases of 1–64 ASCII
+letters/digits/`-`/`_`, and full fragment names. Unknown fields are refused;
+the manifest is limited to 64 KiB. Its host must match the CLI's selected host;
+it never selects a destination for credentials. Use the ordinary `--host`
+option when browsing a collection on a different host. Each source needs a
+valid sync journal bound to the manifest's host and a repository. An online
+check also verifies that repository identity against the source's status.
+Missing, corrupt, mismatched or old unbound journals require a separate sync.
+
+**Audience and trust:** keep this manifest private by default. It contains
+private source names, aliases, and local filesystem paths. Sharing it reveals
+those names even to someone who cannot read the sources. If stored in a
+fragment, every reader of that fragment can see all its metadata: choose an
+audience allowed to know every reference, or keep separate manifests for
+separate audiences. Aliases are display labels, not redaction or permissions.
+Only open manifests you trust: they select local directories to read. Do not
+automatically run a downloaded or shared manifest. Output and snippets inherit
+the source content's audience; do not publish them into a broader collection.
+There is no platform Mount entity, path ACL, browser federation, or new agent
+capability. Hermes can use these ordinary CLI commands under its existing
+identity and delegated authority.
+
+Online mode checks each source with a signed, read-only status request before
+opening its local journal or searching. `checked` means access was verified at
+that moment, **not** that local bytes equal current remote content. A source
+refused with 401/403/404/410 is `denied` (which can mean revoked or absent).
+Other failures are `unavailable`; neither uses a local fallback. Partial results
+still succeed, including zero accessible sources: always inspect `sources`.
+This command does not erase local files on a refusal.
+
+`--offline` needs no login and makes no requests: each source says
+`unchecked_offline`. Like reading an existing local sync folder, it can read
+bytes retained before revocation. It cannot discover revocations or retract
+previously downloaded knowledge. Use online mode for a current access check;
+never treat offline output as proof of membership. Access can also change after
+an online check; this command is not an atomic authorization/filesystem snapshot.
+
+JSON data is `{host, sources, q, results}` in the normal CLI envelope. Each
+source reports `alias`, `fragment`, `dir`, `access`, `local`, `reason`, and
+`skipped`. Local disposition is `journal_bound` when listed, `searched_current`
+after a successful scan, or `unavailable` if it could not be read. Search hits
+reuse the local search's provenance, section, snippet and file `state` fields,
+adding `alias` and `source_rank`. File state `synced` still means only equality
+to the last local journal. Results interleave each source's ranked hits in
+manifest order, capped by the global `--limit` (1–50, default 10); independent
+BM25 scores are not a global relevance ranking. Current edits and deletions,
+conflicts, exclusions and page limits behave exactly as single-source local
+search does. No persistent index or collection state is written.
