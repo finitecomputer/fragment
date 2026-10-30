@@ -70,6 +70,19 @@ pub const DEPLOYED_MAX_DIGITS: usize = 12;
 /// deploy of an uncommitted tree's mark after it.
 pub const ID_MAX_BYTES: usize = 64;
 
+/// The CLI releases stable major.minor.patch versions only. Numeric order
+/// is shared by CI's version selection and the CLI's update notice.
+pub fn cli_version(text: &str) -> Option<[u64; 3]> {
+    let mut parts = text.split('.');
+    let mut version = [0; 3];
+    for n in &mut version {
+        let part = parts.next()?;
+        if part.is_empty() || part.len() > 20 || !part.bytes().all(|b| b.is_ascii_digit()) || (part.len() > 1 && part.starts_with('0')) { return None; }
+        *n = part.parse().ok()?;
+    }
+    parts.next().is_none().then_some(version)
+}
+
 /// Whether `id` can name a release: 1 to `ID_MAX_BYTES` of ASCII letters,
 /// digits, `.`, `_` and `-` (a header value as it is, and a log's).
 pub fn valid(id: &str) -> bool {

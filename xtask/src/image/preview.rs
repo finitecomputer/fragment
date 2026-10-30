@@ -82,11 +82,7 @@ pub(super) fn run(args: &[String]) -> Result<()> {
 /// worktree mtimes. A dirty image input is refused: Docker must build the
 /// content the key names. Git's ignored targets and caches are not inputs.
 fn input_key(root: &Path) -> Result<String> {
-    let status = Command::new("git").args(["status", "--porcelain", "--untracked-files=normal", "--"]).args(INPUTS).current_dir(root).output()?;
-    anyhow::ensure!(status.status.success() && status.stdout.is_empty(), "preview image inputs must be committed and clean");
-    let tree = Command::new("git").args(["ls-tree", "-rz", "HEAD", "--"]).args(INPUTS).current_dir(root).output()?;
-    anyhow::ensure!(tree.status.success() && !tree.stdout.is_empty(), "git did not name the preview image inputs");
-    Ok(fragment_core::blob::sha256_hex(&tree.stdout))
+    crate::inputs::key(root, INPUTS)
 }
 
 /// Inspect this one tag, never list the repository: Cloudflare rejects
