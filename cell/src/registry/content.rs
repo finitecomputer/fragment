@@ -17,7 +17,7 @@
 //! wiped) takes their waiting offers with them, made or received.
 
 use fragment_core::governance::{self, Answer, Grounds, Now, Refusal, Standing, LOG_PAGE, OFFER_TTL_MS};
-use fragment_proto::org::{ContentOffer, ContentOffers, ContentPerson, GovernanceEntry, OrgContent};
+use fragment_proto::org::{ContentOffer, ContentOffers, ContentPerson, GovernanceEntry, OrgContent, PayerNamed};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
@@ -93,6 +93,23 @@ pub(crate) struct StepDown {
 impl Call for StepDown {
     const PATH: &'static str = "/content/step-down";
     type Answer = ContentPerson;
+}
+
+/// `POST /content/payer`: an operator (the router checked them) names the
+/// person an org's credit is invoiced to: its governance log's record of
+/// who pays, an org paying out of band (Paul, 2026-10-30). It gives them no
+/// power of its own.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct NominatePayer {
+    pub operator: String,
+    pub org: String,
+    pub person: String,
+    pub request: String,
+}
+
+impl Call for NominatePayer {
+    const PATH: &'static str = "/content/payer";
+    type Answer = PayerNamed;
 }
 
 /// `POST /content/view`: an org's content, to its content admins or an
@@ -579,6 +596,37 @@ impl RegistryCell {
         Ok(OrgContent { org: org.reference(), people, offers, log: log.into_iter().map(LogRow::entry).collect(), next })
     }
 
+    fn nominate_payer(&self, b: NominatePayer) -> CellResult<PayerNamed> {
+        let request = client_request("payer", &b.request)?;
+        let org = self.content_org(&b.org)?;
+        // a person, by an email they sign in with or their npub
+        let person = match fragment_core::mail::valid_address(&b.person) {
+            true => self.person_by_email(&b.person)?,
+            false => npub::parse(&b.person).map(|k| npub::identity_of(&k)).filter(|id| self.identity(id).ok().flatten().is_some_and(|i| i.kind == IdentityKind::Person)),
+        }
+        .ok_or_else(|| not_found(format!("{} names no person on this fleet", b.person)))?;
+        let seq = self.atomically({
+            let (org, operator, person) = (org.id.clone(), b.operator.clone(), person.clone());
+            move |tx| {
+                let now = js::now_ms();
+                if let Some(e) = tx.governed(&org, &request)? {
+                    return match e.action == "payer-named" && e.subject.as_deref() == Some(person.as_str()) && e.actor == operator {
+                        true => Ok(e.seq),
+                        false => Err(CellError::new(ErrorCode::ConflictingBody, "this id was used for another change")),
+                    };
+                }
+                tx.govern(&org, Logged { request: &request, actor: &operator, action: "payer-named", subject: Some(&person), detail: json!({}) }, now)?;
+                // the operators' log too, in the same change
+                tx.exec(
+                    "INSERT INTO admin_log (at, operator, action, target, detail) VALUES (?, ?, 'org-payer', ?, ?)",
+                    vec![SqlStorageValue::Integer(now), operator.as_str().into(), org.as_str().into(), person.as_str().into()],
+                )?;
+                Ok(tx.governed(&org, &request)?.ok_or_else(|| CellError::host("an entry just written is not there"))?.seq)
+            }
+        })?;
+        Ok(PayerNamed { org: org.id, email: self.email_now(&person)?, person, seq })
+    }
+
     /// Whether `org` has anyone in its content: its ledger and estate
     /// outlive its billing (decision 69), so it is never dropped with it.
     pub(super) fn has_content(&self, org: &str) -> CellResult<bool> {
@@ -628,6 +676,7 @@ impl RegistryCell {
             OffersToMe::PATH => reply::<OffersToMe>(body(bytes).and_then(|b| self.offers_to_me(b))),
             StepDown::PATH => reply::<StepDown>(body(bytes).and_then(|b| self.step_down(b))),
             ContentOf::PATH => reply::<ContentOf>(body(bytes).and_then(|b| self.content_of(b))),
+            NominatePayer::PATH => reply::<NominatePayer>(body(bytes).and_then(|b| self.nominate_payer(b))),
             _ => return None,
         })
     }
