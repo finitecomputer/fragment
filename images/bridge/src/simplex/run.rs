@@ -2111,7 +2111,7 @@ async fn poster(api: Api, agent: Agent, chat: String, mut rx: mpsc::Receiver<Pos
         let body = records::relayed_message(&text, &agent, records::VIA_SIMPLEX, &[]);
         let id = records::relayed_id(&agent.fragment, &p.inbound.id);
         let files: Vec<LocalFile> = p.file.iter().cloned().collect();
-        match crate::driver::post(&api, &chat, &agent.fragment, records::CHAT, &id, body, &files, Some(&p.door), stop.clone()).await {
+        match crate::driver::post(&api, &chat, &agent.fragment, records::CHAT, &id, body, &files, Some(&p.door), crate::limits::POST_TRIES_MAX, stop.clone()).await {
             crate::driver::Sent::Stopped => return,
             // its file kept: the message is read again at the next start's
             // catch-up (by the same id), and carried then if it can be

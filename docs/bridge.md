@@ -268,9 +268,13 @@ deep (docs/chat-records.md, "An agent's reply"):
   one more record, the answer on the asking agent's own `tasks`, which
   that agent's follower reads as a turn in that chat. No waiter, no scan,
   nothing held awake: the owed record is the delivery (crashes and lost
-  answers retry it under one id), the claim of the woken turn its one
-  run. `a_question_is_answered_back_where_it_was_asked`,
-  `every_end_of_an_asked_turn_answers_but_a_refusal` and
+  answers retry it under one id, and the lane never gives it up), the
+  claim of the woken turn its one run. A question refused as it comes is
+  answered `refused`, a turn of the asker's that never runs. A state
+  holding a return is format 3, which a bridge before asks sets aside; one
+  holding none stays 2. `a_question_is_answered_back_where_it_was_asked`,
+  `every_end_of_an_asked_turn_answers`,
+  `a_state_owing_an_answer_is_one_an_older_bridge_sets_aside` and
   `any_history_of_asks_answers_each_once` (engine_tests.rs), and
   tests/ask.rs (crashes before and after the answer's post, a rollback, a
   cut turn, refusals, a loop that stops at the cap).

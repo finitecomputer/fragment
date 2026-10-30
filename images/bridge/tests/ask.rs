@@ -289,7 +289,9 @@ impl Runtime for AskingAgain {
 /// every turn, its answers' turns too: each answer is one hop past the
 /// turn that answered, so after paul's message (hop 0) rowan answers at
 /// hop 1 and 3, juniper's answers run at 2 and 3, and the question asked
-/// from the last is past the chain: it starts nothing and wakes no one.
+/// from the last is past the chain: refused, and answered so, as a turn
+/// of juniper's at home that never runs (paul sees why where he asked),
+/// so nothing asks again.
 #[tokio::test]
 async fn an_answer_cannot_restart_a_loop() {
     let fake = Fake::start("127.0.0.1:0", &["juniper", "rowan"]).await;
@@ -301,14 +303,20 @@ async fn an_answer_cannot_restart_a_loop() {
     let bridge = support::start(support::config(&fake.url(), &dir, support::settings()), support::counting(asking, &runs));
     following(&fake, 5).await;
     fake.say(&home, &person("paul"), json!({ "text": "start" }));
-    fake.until(WAIT, "three questions, two answers", |w| w.records(&pair, "chat").iter().filter(|r| r["principal"] == person("juniper")).count() == 3 && w.bodies(&home, "work", "turn.end").len() == 3).await;
+    fake.until(WAIT, "three questions, three answers", |w| w.records(&pair, "chat").iter().filter(|r| r["principal"] == person("juniper")).count() == 3 && w.bodies(&home, "work", "turn.end").len() == 4).await;
     tokio::time::sleep(Duration::from_secs(2)).await;
     fake.with(|w| {
         assert_eq!(w.records(&pair, "chat").iter().filter(|r| r["principal"] == person("juniper")).count(), 3, "and no more");
-        assert_eq!(w.bodies(&pair, "work", "turn.end").len(), 2, "rowan answered two");
-        assert_eq!(answers(w).iter().map(|a| a["body"]["hop"].clone()).collect::<Vec<_>>(), vec![json!(2), json!(3)]);
-        assert_eq!(w.bodies(&home, "work", "turn.end").len(), 3, "paul's turn and two answers");
+        let ends = w.bodies(&pair, "work", "turn.end");
+        assert_eq!(ends.iter().filter(|e| e["outcome"] == "idle").count(), 2, "rowan answered two");
+        assert!(ends.iter().any(|e| e["error"] == fragment_bridge::engine::refused_deep()), "and refused the third: {ends:?}");
+        let a = answers(w);
+        assert_eq!(a.iter().map(|a| (a["body"]["hop"].clone(), a["body"]["refused"].clone())).collect::<Vec<_>>(), vec![(json!(2), json!(null)), (json!(3), json!(null)), (json!(3), json!(true))]);
+        let refused = woke(&a[2]);
+        let home_ends = w.bodies(&home, "work", "turn.end");
+        assert_eq!(home_ends.len(), 4, "paul's turn, two answers, and the refusal");
+        assert!(home_ends.iter().any(|e| e["turn"] == refused.as_str() && e["error"].as_str().is_some_and(|x| x.contains("agents handed this on"))), "said where paul asked: {home_ends:?}");
     });
-    assert_eq!(runs.all().len(), 5);
+    assert_eq!(runs.all().len(), 5, "the refusal ran nothing");
     bridge.stop().await;
 }

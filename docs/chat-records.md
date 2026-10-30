@@ -229,18 +229,22 @@ runtime as any turn does.
   in this chat); `return_to` is the whole of the return, in the same
   record. A bridge before asks answers it as a plain message.
 - Honored only from another agent of the answering bridge's own computer
-  (a person's, or another computer's agent's, is a plain message), and
-  only for a turn admitted: a question past the hops or the chat's budget,
-  or its queue full, is refused (or not a turn) and wakes no one, so no
-  answer re-asks.
+  (a person's, or another computer's agent's, is a plain message).
 - Once that turn is over its bridge posts the **answer**, as the asking
   agent, on that agent's own `tasks` (below), with the turn's end, kept
   with the turn until both are posted (again by the next life, under the
-  same id and body). Its outcome is the turn's end's: a turn a restart cut,
-  or another life ran, is answered `error` "lost when the computer
-  restarted", never run again for a better one; one its agent may not run
-  where it was asked (its claim refused, or it left the chat), `error`
-  saying so.
+  same id and body; an answer, its question's only delivery, is tried
+  until the platform answers it). Its outcome is the turn's end's: a turn
+  a restart cut, or another life ran, is answered `error` "lost when the
+  computer restarted", never run again for a better one; one its agent
+  may not run where it was asked (its claim refused, or it left the chat),
+  `error` saying so; one an agent asked that asks back in words ends at
+  once, its question its answer (an agent's words never answer it).
+- A question refused as it comes (past the hops, where any other
+  hand-off is let go; past the chat's budget; its queue full) is a turn
+  that never runs, and is answered `refused`: a turn of the asking
+  agent's in its chat that never runs either, its end saying why, so its
+  owner sees it there and no answer asks again.
 
 **A chat's budget.** The agents of a chat start at most 20 turns of each
 other in 5 minutes (`AGENT_TURNS_PER_CHAT_MAX`, `AGENT_TURNS_WINDOW_MS`),
@@ -890,7 +894,7 @@ holds no message of its person's before it (cell/shell/shell.js,
 ```json
 { "kind": "answer", "chat": "<chat it asked from>", "text": "Rowan answered your question in <chat> (\"…\"):\n\n…",
   "by": "npub1<asked>", "name": "Rowan", "asked": { "fragment": "<chat>", "seq": 12 }, "turn": "<asked turn>",
-  "outcome": "idle", "error": "…", "hop": 2 }
+  "outcome": "idle", "error": "…", "hop": 2, "refused": true }
 ```
 
 An ask's answer ("An ask", above): posted by the asking agent's own
@@ -903,9 +907,13 @@ question it asks is theirs), told `text` by the agent that answered
 but interim ones, at most 16 KiB, and how many files it sent; the replies
 stay whole where it was asked); `outcome` and `error` are its end's. The
 turn is `hop` hand-offs deep: one past the turn that answered, at most 3,
-so an answer resets no depth, and it spends `chat`'s budget. Only the
-agent's own key's answer is taken; its owner's, or another agent's, is
-passed over.
+so an answer resets no depth, and it spends `chat`'s budget. `refused`:
+the question was never taken, and the turn is recorded refused, never
+run (its end says why). `name` is at most 200 bytes, cut as it is
+written. An answer is taken however late it is first read (an hour's
+backlog skips a routine, never an answer: its claim keeps it to one
+run). Only the agent's own key's answer is taken; its owner's, or
+another agent's, is passed over.
 
 Only the agent fragment itself (its cron, the platform's `joined`: a
 principal that is no identity) and the agent's owner ask anything on

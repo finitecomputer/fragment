@@ -117,8 +117,9 @@ pub enum Task {
     Joined { fragment: Option<String> },
     /// The answer to a question the agent asked another (`answer`): a turn
     /// in `chat`, told `text` by that agent (its `name`), `hop` hand-offs
-    /// deep.
-    Answer { chat: String, text: String, name: String, hop: u32 },
+    /// deep; `refused`: the question was never taken, and the turn never
+    /// runs.
+    Answer { chat: String, text: String, name: String, hop: u32, refused: bool },
     Other,
 }
 
@@ -371,8 +372,13 @@ pub fn task(body: &Value) -> Task {
         Some("joined") => Task::Joined { fragment: text_field(o, "fragment").filter(|f| !f.is_empty() && f.len() <= 128) },
         Some("answer") => {
             let hop = o.get("hop").and_then(Value::as_u64).and_then(|h| u32::try_from(h).ok());
-            match (text_field(o, "chat"), text_field(o, "text"), text_field(o, "name"), hop) {
-                (Some(chat), Some(text), Some(name), Some(hop)) if fragment_name_ok(&chat) && !name.trim().is_empty() && name.len() <= 200 => Task::Answer { chat, text, name, hop },
+            let refused = match o.get("refused") {
+                None | Some(Value::Null) => Some(false),
+                Some(Value::Bool(b)) => Some(*b),
+                Some(_) => None,
+            };
+            match (text_field(o, "chat"), text_field(o, "text"), text_field(o, "name"), hop, refused) {
+                (Some(chat), Some(text), Some(name), Some(hop), Some(refused)) if fragment_name_ok(&chat) && !name.trim().is_empty() && name.len() <= limits::ANSWER_NAME_MAX_BYTES => Task::Answer { chat, text, name, hop, refused },
                 _ => Task::Other,
             }
         }
@@ -698,14 +704,18 @@ pub fn answer_id(turn: &str) -> String {
 /// where its turn runs (`chat`), what it is told (`text`), who answered
 /// (`by`, called `name`), the question's record (`asked`), that turn and
 /// how it ended, and how many hand-offs deep the asking agent's turn is
-/// (`hop`).
+/// (`hop`); `refused` when the question was never taken (its turn there
+/// never runs).
 #[allow(clippy::too_many_arguments)]
-pub fn answer(chat: &str, text: &str, by: &str, name: &str, asked: &Cause, turn: &str, outcome: &Outcome, hop: u32) -> Value {
+pub fn answer(chat: &str, text: &str, by: &str, name: &str, asked: &Cause, turn: &str, outcome: &Outcome, hop: u32, refused: bool) -> Value {
     let end = turn_end(turn, outcome);
-    let mut body = json!({ "kind": "answer", "chat": chat, "text": text, "by": by, "name": name,
+    let mut body = json!({ "kind": "answer", "chat": chat, "text": text, "by": by, "name": cut_bytes(name, limits::ANSWER_NAME_MAX_BYTES),
         "asked": { "fragment": asked.fragment, "seq": asked.seq }, "turn": turn, "outcome": end["outcome"], "hop": hop });
     if let Some(e) = end.get("error") {
         body["error"] = e.clone();
+    }
+    if refused {
+        body["refused"] = json!(true);
     }
     body
 }
@@ -714,7 +724,9 @@ pub fn answer(chat: &str, text: &str, by: &str, name: &str, asked: &Cause, turn:
 /// where, how it ended, and what the asked agent said there (`said`, its
 /// replies but interim ones; `files`, how many it sent).
 pub fn answer_text(by: &str, chat: &str, asked: &str, said: &str, files: u32, outcome: &Outcome) -> String {
-    let asked = cut_bytes(asked.trim(), limits::ANSWER_ASKED_MAX_BYTES);
+    // one line each, no control characters (the body's escaped bound)
+    let flat = |s: &str| s.chars().map(|c| if c.is_control() { ' ' } else { c }).collect::<String>();
+    let (by, asked) = (flat(by), cut_bytes(&flat(asked.trim()), limits::ANSWER_ASKED_MAX_BYTES));
     let head = match outcome {
         Outcome::Idle if said.trim().is_empty() => format!("{by} finished your question in {chat} (\"{asked}\") and said nothing."),
         Outcome::Idle => format!("{by} answered your question in {chat} (\"{asked}\"):"),
@@ -923,8 +935,18 @@ mod tests {
         assert_eq!(task(&json!({ "kind": "routine", "text": "water", "chat": "c--k3x9" })), Task::Routine { text: "water".into(), chat: "c--k3x9".into() });
         assert_eq!(task(&json!({ "kind": "joined", "fragment": "c--k3x9" })), Task::Joined { fragment: Some("c--k3x9".into()) });
         let answer = json!({ "kind": "answer", "chat": "home--k3x9", "text": "t", "name": "Rowan", "hop": 2 });
-        assert_eq!(task(&answer), Task::Answer { chat: "home--k3x9".into(), text: "t".into(), name: "Rowan".into(), hop: 2 });
-        for (key, bad) in [("chat", json!("Home Chat")), ("name", json!(" ")), ("hop", json!(-1)), ("text", json!(null))] {
+        assert_eq!(task(&answer), Task::Answer { chat: "home--k3x9".into(), text: "t".into(), name: "Rowan".into(), hop: 2, refused: false });
+        let mut refused = answer.clone();
+        refused["refused"] = json!(true);
+        assert!(matches!(task(&refused), Task::Answer { refused: true, .. }));
+        // a name at its bound, written as the writer cuts one (51 emoji, 67
+        // CJK characters: a title of 120 characters is more), is read
+        for long in ["🌱".repeat(120), "森".repeat(120)] {
+            let written = super::answer("home--k3x9", "t", "npub1rowan", &long, &Cause { fragment: "talk--k3x9".into(), channel: "chat".into(), seq: 1 }, "t1", &Outcome::Idle, 2, false);
+            assert!(written["name"].as_str().unwrap().len() <= limits::ANSWER_NAME_MAX_BYTES);
+            assert!(matches!(task(&written), Task::Answer { .. }), "{long}");
+        }
+        for (key, bad) in [("chat", json!("Home Chat")), ("name", json!(" ")), ("name", json!("a".repeat(201))), ("hop", json!(-1)), ("text", json!(null)), ("refused", json!("yes"))] {
             let mut broken = answer.clone();
             broken[key] = bad;
             assert_eq!(task(&broken), Task::Other, "{key}");

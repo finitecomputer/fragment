@@ -77,16 +77,18 @@ fn label(name: &str) -> &str {
 
 /// The agent `who` names: its fragment's name or its identity, else its
 /// label or its name when only one agent answers to it (case aside, but for
-/// the identity). None for a name two agents answer to: never a guess.
-pub fn pick<'a>(agents: &'a [Agent], who: &str) -> Option<&'a Agent> {
+/// the identity). Else the agents that answer to it: none, or more than
+/// one (never a guess).
+pub fn pick<'a>(agents: &'a [Agent], who: &str) -> Result<&'a Agent, Vec<&'a Agent>> {
     let who = who.trim();
     let lower = who.to_ascii_lowercase();
     if let Some(a) = agents.iter().find(|a| a.identity == who || a.fragment == lower) {
-        return Some(a);
+        return Ok(a);
     }
-    let mut named = agents.iter().filter(|a| label(&a.fragment) == lower || a.name.to_ascii_lowercase() == lower);
-    let first = named.next()?;
-    named.next().is_none().then_some(first)
+    match agents.iter().filter(|a| label(&a.fragment) == lower || a.name.to_ascii_lowercase() == lower).collect::<Vec<_>>()[..] {
+        [one] => Ok(one),
+        ref many => Err(many.to_vec()),
+    }
 }
 
 /// `s` cut to at most `max` bytes (a label is ASCII), never ending in `-`.
@@ -286,13 +288,26 @@ pub fn ask(c: &Client, who: &str, text: &str, chat: Option<&str>, wait: Option<u
             if !list.members.iter().any(|m| m.principal == me.identity && m.role >= Role::Editor) {
                 return Err(coded(Code::Forbidden, format!("{} is no editor of {full}, so its answer cannot come back there: return to a chat it answers in", me.shown())));
             }
+            // a turn there is recorded on its `work`: a chat's
+            let channels = c.call(c.get(&format!("/api/f/{full}/channels"))?)?;
+            let has = |name: &str| channels["channels"].as_array().is_some_and(|l| l.iter().any(|ch| ch["name"] == name));
+            if !(has("chat") && has("work")) {
+                return Err(coded(Code::InvalidRequest, format!("{full} is no chat: an answer comes back as a turn in a chat")));
+            }
             Some(full)
         }
     };
-    let mut asked = pick(&agents, who).cloned().ok_or_else(|| {
-        let names: Vec<&str> = agents.iter().map(|a| a.name.as_str()).collect();
-        coded(Code::NotFound, format!("{who:?} names none of the agents that may be asked here, or more than one ({}): name it by its fragment", if names.is_empty() { "none".into() } else { names.join(", ") }))
-    })?;
+    let mut asked = match pick(&agents, who) {
+        Ok(a) => a.clone(),
+        Err(many) if many.len() > 1 => {
+            let fragments: Vec<&str> = many.iter().map(|a| a.fragment.as_str()).collect();
+            return Err(coded(Code::Conflict, format!("{who:?} names {} agents ({}): name one by its fragment", many.len(), fragments.join(", "))));
+        }
+        Err(_) => {
+            let names: Vec<&str> = agents.iter().map(|a| a.name.as_str()).collect();
+            return Err(coded(Code::NotFound, format!("{who:?} is none of the agents that may be asked here ({})", if names.is_empty() { "none".into() } else { names.join(", ") })));
+        }
+    };
     if asker.as_ref().is_some_and(|a| a.identity == asked.identity) {
         return Err(coded(Code::InvalidUsage, "an agent asks another agent, not itself"));
     }
@@ -453,18 +468,18 @@ mod tests {
     fn an_agent_is_picked_by_any_of_its_names() {
         let agents = [agent("juniper"), agent("fred")];
         for who in ["fred", "Fred", "fred--k3x9", "FRED--K3X9", " fred ", "npub1fred"] {
-            assert_eq!(pick(&agents, who).map(|a| a.name.as_str()), Some("fred"), "{who}");
+            assert_eq!(pick(&agents, who).map(|a| a.name.as_str()), Ok("fred"), "{who}");
         }
         for who in ["fre", "fred--p2m4", "NPUB1FRED", "", "juniper-chat"] {
-            assert_eq!(pick(&agents, who), None, "{who}");
+            assert_eq!(pick(&agents, who), Err(vec![]), "{who}");
         }
         // two agents answer to `fred`: only their fragments or identities name one
         let mut other = agent("fred");
         (other.fragment, other.identity) = ("fred--p2m4".into(), "npub1fred2".into());
         let two = [agent("fred"), other];
-        assert_eq!(pick(&two, "fred"), None, "never a guess");
-        assert_eq!(pick(&two, "fred--p2m4").map(|a| a.identity.as_str()), Some("npub1fred2"));
-        assert_eq!(pick(&two, "npub1fred").map(|a| a.fragment.as_str()), Some("fred--k3x9"));
+        assert_eq!(pick(&two, "fred"), Err(two.iter().collect()), "never a guess: both named, so either can be");
+        assert_eq!(pick(&two, "fred--p2m4").map(|a| a.identity.as_str()), Ok("npub1fred2"));
+        assert_eq!(pick(&two, "npub1fred").map(|a| a.fragment.as_str()), Ok("fred--k3x9"));
     }
 
     /// Goal (Alex's review of #630): the list that names an agent's fellow

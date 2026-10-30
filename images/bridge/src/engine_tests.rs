@@ -1583,20 +1583,31 @@ fn a_question_is_answered_back_where_it_was_asked() {
     assert_eq!(deep["hop"], limits::HOPS_MAX, "held at the last hop");
     let a = read(&mut e, &juniper, &juniper.fragment, answer_task(2, &juniper.identity, deep), None, T0 + 12);
     started(&a).expect("its answer still wakes juniper");
-    // and from there, no further: a question past the chain starts nothing
+    // and from there, no further: a question past the chain is refused,
+    // and answered so, as a turn at home that never runs, so nothing asks
+    // again, and its owner sees why where it asked
     let s = read(&mut e, &rowan, "talk--k3x9", question(3, "And the day after?"), Some(&talk), T0 + 13);
-    assert!(started(&s).is_none() && posts(&s).is_empty() && answers(&s).is_empty(), "past HOPS_MAX: no turn, so no answer to wake anyone: {:?}", s.effects);
+    assert!(started(&s).is_none(), "no turn of rowan's runs: {:?}", s.effects);
+    assert_eq!(kinds(&s), vec!["turn.start", "turn.end", "answer"]);
+    let refused = answers(&s).remove(0).2;
+    assert_eq!((&refused["refused"], &refused["error"]), (&json!(true), &json!(refused_deep())));
+    let a = read(&mut e, &juniper, &juniper.fragment, answer_task(3, &juniper.identity, refused), None, T0 + 14);
+    assert!(started(&a).is_none() && commands(&a).is_empty(), "juniper's runtime hears nothing: {:?}", a.effects);
+    assert_eq!(kinds(&a), vec!["turn.start", "turn.end"], "a turn at home, refused");
+    let home: Vec<&str> = a.effects.iter().filter_map(|x| match x { Effect::Owed { fragment, .. } => Some(fragment.as_str()), _ => None }).collect();
+    assert_eq!(home, vec![HOME, HOME]);
+    assert!(posts(&a)[1].1["error"].as_str().is_some_and(|e| e.starts_with("Rowan could not answer your question in talk--k3x9 (\"And the day after?\"): agents handed this on")), "{:?}", posts(&a));
 }
 
 /// Goal: an answer says how the asked turn ended, and a turn is never run
 /// again for a better one: one another life claimed is answered lost; one
 /// cut by a restart is answered lost; one stopped while it waited, stopped;
 /// one its agent may not run there (its claim refused, or it left the
-/// chat), that it may not answer. Invalid: a question refused at admission
-/// (its chat's queue full, past the budget) wakes no one, so no answer
-/// re-asks.
+/// chat), that it may not answer. A question refused at admission (its
+/// chat's queue full, past the budget, past the hops) is answered refused:
+/// a turn of its asker's that never runs, so no answer re-asks.
 #[test]
-fn every_end_of_an_asked_turn_answers_but_a_refusal() {
+fn every_end_of_an_asked_turn_answers() {
     let (rowan, juniper) = (agent("rowan"), agent("juniper"));
     let talk = view(&[&rowan, &juniper]);
     let outcome = |s: &Step| answers(s).first().map(|(_, _, b)| (b["outcome"].clone(), b["error"].clone()));
@@ -1636,15 +1647,71 @@ fn every_end_of_an_asked_turn_answers_but_a_refusal() {
     let s = answered(&mut e, s, T0);
     assert!(e.state().turns.is_empty(), "{:?}", s.effects);
 
-    // refused at admission: its records, and no answer
+    // refused at admission: its records, and an answer that says so
     let mut e = engine(&[rowan.clone(), juniper.clone()]);
     read(&mut e, &rowan, "talk--k3x9", rec(1, "npub1paul", json!({ "text": "busy" })), Some(&talk), T0);
     for seq in 2..2 + limits::QUEUED_PER_CHAT_MAX as u64 {
         read(&mut e, &rowan, "talk--k3x9", rec(seq, "npub1paul", json!({ "text": "waiting" })), Some(&talk), T0);
     }
     let s = read(&mut e, &rowan, "talk--k3x9", question(100, "q"), Some(&talk), T0);
-    assert_eq!(kinds(&s), vec!["turn.start", "turn.end"], "refused, and said so");
-    assert!(answers(&s).is_empty(), "and no one is woken");
+    assert_eq!(kinds(&s), vec!["turn.start", "turn.end", "answer"], "refused, and said so");
+    assert_eq!((&answers(&s)[0].2["refused"], &answers(&s)[0].2["error"]), (&json!(true), &json!(REFUSED_QUEUED)));
+}
+
+/// Goal: a turn an agent asked that asks back in words (a clarify) ends at
+/// once, its question its answer: an agent's words never answer one, so it
+/// would hold the computer awake its whole bound. Invalid: its owner's
+/// turn (an answer's, a person's) waits for them as before.
+#[test]
+fn a_turn_an_agent_asked_asks_back_no_one() {
+    let (rowan, juniper) = (agent("rowan"), agent("juniper"));
+    let talk = view(&[&rowan, &juniper]);
+    let mut e = engine(&[rowan.clone(), juniper.clone()]);
+    let t = started(&read(&mut e, &rowan, "talk--k3x9", question(1, "Which garden?"), Some(&talk), T0)).expect("rowan's turn");
+    ev(&mut e, Event::Reply { turn: t.turn.clone(), part: 1, text: "Which one do you mean?".into() }, T0 + 1);
+    let s = ev(&mut e, Event::Asked { turn: t.turn.clone() }, T0 + 2);
+    assert!(commands(&s).contains(&Command::Forget { turn: t.turn.clone() }), "the runtime lets it go: {:?}", s.effects);
+    assert!(answers(&s)[0].2["text"].as_str().is_some_and(|a| a.ends_with("Which one do you mean?")), "its question is its answer");
+    assert!(e.state().turns.is_empty(), "nothing held awake");
+    // paul's own turn asks him, and waits
+    let p = started(&read(&mut e, &rowan, "talk--k3x9", rec(2, "npub1paul", json!({ "text": "hi" })), Some(&talk), T0 + 3)).expect("paul's");
+    ev(&mut e, Event::Reply { turn: p.turn.clone(), part: 1, text: "Which one?".into() }, T0 + 4);
+    let s = ev(&mut e, Event::Asked { turn: p.turn.clone() }, T0 + 5);
+    assert!(commands(&s).is_empty() && e.state().turns[&p.turn].asking, "{:?}", s.effects);
+}
+
+/// Goal: a state holding an ask's return is format 3, which a bridge
+/// before asks sets aside rather than refusing (its `load` sets aside any
+/// version but 2, and its `check` would refuse an owed answer: a crash
+/// loop); one holding none is format 2, as an older bridge wrote and
+/// reads, so a rollback past asks keeps it. Both load here.
+#[test]
+fn a_state_owing_an_answer_is_one_an_older_bridge_sets_aside() {
+    let (rowan, juniper) = (agent("rowan"), agent("juniper"));
+    let talk = view(&[&rowan, &juniper]);
+    let mut e = engine(&[rowan.clone(), juniper.clone()]);
+    assert_eq!(e.state().version, 2, "no return: the older format");
+    let t = started(&read(&mut e, &rowan, "talk--k3x9", question(1, "q"), Some(&talk), T0)).expect("running");
+    assert_eq!(e.state().version, STATE_VERSION, "a return held: format 3");
+    let end = e.step(Input::Runtime(Event::End { turn: t.turn.clone(), outcome: Outcome::Idle }), T0);
+    let owing = serde_json::to_value(e.state()).unwrap();
+    assert!(owing["turns"][&t.turn]["owed"].as_array().unwrap().iter().any(|o| o["id"].as_str().is_some_and(|i| i.starts_with("an:"))), "it owes its answer");
+    // the older bridge's load: a version but its own (2) is set aside
+    assert_ne!(owing["version"], json!(2), "an older bridge sets it aside, never checks it");
+    let dir = std::env::temp_dir().join(format!("bridge-state-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(crate::driver::state_path(&dir), owing.to_string()).unwrap();
+    assert_eq!(crate::driver::load(&dir).unwrap(), *e.state(), "this bridge reads it back");
+    // let go once posted: format 2 again, all an older bridge needs
+    let s = answered(&mut e, end, T0);
+    assert!(e.state().turns.is_empty(), "{:?}", s.effects);
+    let mut older = serde_json::to_value(e.state()).unwrap();
+    assert_eq!(older["version"], json!(2));
+    assert!(!older.to_string().contains("\"ret\"") && !older.to_string().contains("\"to\""), "nothing an older bridge's check refuses");
+    older["version"] = json!(2);
+    std::fs::write(crate::driver::state_path(&dir), older.to_string()).unwrap();
+    assert_eq!(crate::driver::load(&dir).unwrap(), *e.state(), "and reads its own format too");
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Invalid: only another agent of this computer is answered back (a
@@ -1833,6 +1900,9 @@ struct World {
     conflicts_on_chat: Vec<String>,
     /// The ids of the posts a crash took from the lane before they were sent.
     dropped: Vec<String>,
+    /// The ids of the posts the lane gave up after its tries (never an
+    /// answer: the driver's lane tries one until the platform answers it).
+    given_up: Vec<String>,
     now: u64,
 }
 
@@ -1855,6 +1925,7 @@ impl World {
             tells: Vec::new(),
             conflicts_on_chat: Vec::new(),
             dropped: Vec::new(),
+            given_up: Vec::new(),
             now: T0,
         }
     }
@@ -2077,6 +2148,33 @@ impl World {
         }
     }
 
+    /// The platform keeps failing the lane's next post past its tries: a
+    /// claim is heard unanswered (claimed again at a tick); an owed record
+    /// on `work` is given up (the lane says it is done, and it never
+    /// lands), as is any other post; an answer is never given up, so it
+    /// stays at the lane's head for its retry (driver.rs, `Job::Owed`).
+    fn give_up_one(&mut self) {
+        let Some(e) = self.lane.front().cloned() else { return };
+        match &e {
+            Effect::Owed { channel, .. } if *channel == records::TASKS => return,
+            Effect::Claim { .. } => {
+                self.lane.pop_front();
+                self.tell(&e, ClaimAnswer::Unanswered);
+            }
+            Effect::Owed { turn, id, .. } => {
+                self.lane.pop_front();
+                self.given_up.push(id.clone());
+                self.step(Input::Posted { turn: turn.clone(), id: id.clone() });
+            }
+            Effect::Post { id, .. } => {
+                self.lane.pop_front();
+                self.given_up.push(id.clone());
+            }
+            _ => {}
+        }
+        self.deliver();
+    }
+
     /// The lane's next post reaches the platform, and its answer is lost: a
     /// claim is heard unanswered (the next tick's claim will find it a
     /// replay); any other post stays at the lane's head, for its retry to
@@ -2220,7 +2318,7 @@ impl World {
         let started: BTreeSet<&str> = work.iter().filter(|r| r.body["kind"] == "turn.start").filter_map(|r| r.body["turn"].as_str()).collect();
         for end in work.iter().filter(|r| r.body["kind"] == "turn.end") {
             let t = end.body["turn"].as_str().unwrap_or("");
-            if !started.contains(t) {
+            if !started.contains(t) && !self.gave_up(t, "start") {
                 return Err(format!("I2: {t} ended with no start"));
             }
         }
@@ -2293,6 +2391,17 @@ impl World {
     /// ran at most once , or it was the answer a turn asked for in words
     /// (told to that turn, in the life that ran it) and started no turn of
     /// its own; and no turn is held any more.
+    /// Whether the lane gave up `turn`'s `part` (`start`, `end`).
+    fn gave_up(&self, turn: &str, part: &str) -> bool {
+        self.given_up.contains(&records::work_id(turn, part))
+    }
+
+    /// One start and one end, but for what the lane gave up.
+    fn whole(&self, turn: &str) -> bool {
+        let (starts, ends) = (self.starts(turn).len(), self.ends(turn).len());
+        (starts == 1 || (starts == 0 && self.gave_up(turn, "start"))) && (ends == 1 || (ends == 0 && self.gave_up(turn, "end")))
+    }
+
     fn check_settled(&self, said: &[String]) -> Result<(), String> {
         self.check()?;
         for t in said {
@@ -2300,7 +2409,7 @@ impl World {
             if (starts, ends) == (0, 0) && self.was_told(t) {
                 continue;
             }
-            if (starts, ends) != (1, 1) {
+            if !self.whole(t) {
                 let dropped: Vec<&String> = self.dropped.iter().filter(|id| id.contains(t.as_str())).collect();
                 return Err(format!("I2/I4: {t} has {starts} starts and {ends} ends; crashes took its posts {dropped:?} from the lane"));
             }
@@ -2313,27 +2422,22 @@ impl World {
     }
 
     /// Settled, each of juniper's questions (`asked`: rowan's turns of
-    /// them) is no turn at all (read while juniper's turn at the last hop
-    /// ran: past the chain; or taken as an answer in words), or one start
-    /// and one end; and has one answer at most, on juniper's `tasks` under
-    /// its turn's `answer_id`: exactly one when rowan's turn was admitted (a
-    /// turn refused at admission wakes no one, though a rollback's life that
-    /// admitted it may answer it lost). Each answer is a turn of juniper's
-    /// in `HOME`, one start and one end.
+    /// them) is one turn of rowan's (one start and one end, but for what
+    /// the lane gave up), and has exactly one answer, on juniper's `tasks`
+    /// under its turn's `answer_id`, whatever ended it (a refusal, past the
+    /// hops or the budget, too, answered `refused`); each answer is a turn
+    /// of juniper's in `HOME`, likewise whole, and a refused one's never
+    /// ran.
     fn check_answers(&self, asked: &[String]) -> Result<(), String> {
         let Some(juniper) = self.agents.iter().find(|a| a.name == "juniper") else { return Ok(()) };
         let answers = self.journal.channel(&juniper.fragment, records::TASKS);
-        let refusals = [REFUSED_QUEUED.to_string(), REFUSED_BUSY.to_string(), refused_budget()];
         for t in asked {
-            let (starts, ends) = (self.starts(t).len(), self.ends(t).len());
-            if !matches!((starts, ends), (0, 0) | (1, 1)) {
-                return Err(format!("I2/I4: question {t} has {starts} starts and {ends} ends"));
+            if !self.whole(t) {
+                return Err(format!("I2/I4: question {t} has {} starts and {} ends", self.starts(t).len(), self.ends(t).len()));
             }
             let mine = answers.iter().filter(|r| r.body["turn"] == t.as_str()).count();
-            let refused = self.ends(t).iter().any(|e| refusals.iter().any(|r| e["error"] == r.as_str()));
-            let admitted = !self.starts(t).is_empty() && !refused;
-            if mine > 1 || (admitted && mine == 0) {
-                return Err(format!("A1: {t} (admitted: {admitted}, ends {:?}) has {mine} answers", self.ends(t)));
+            if mine != 1 {
+                return Err(format!("A1: {t} (ends {:?}) has {mine} answers", self.ends(t)));
             }
         }
         for r in answers {
@@ -2341,8 +2445,11 @@ impl World {
                 return Err(format!("A2: an answer by {} for {}", r.principal, r.body["chat"]));
             }
             let woke = records::turn_id(&juniper.fragment, &juniper.fragment, records::TASKS, r.seq);
-            if (self.starts(&woke).len(), self.ends(&woke).len()) != (1, 1) {
+            if !self.whole(&woke) {
                 return Err(format!("A2: answer {} woke {woke} with {} starts and {} ends", r.seq, self.starts(&woke).len(), self.ends(&woke).len()));
+            }
+            if r.body["refused"] == true && self.runs_of(&woke) > 0 {
+                return Err(format!("A3: refused answer {} ran {woke}", r.seq));
             }
         }
         Ok(())
@@ -2708,6 +2815,9 @@ struct Reached {
     /// Answers that say their turn was lost, and answers' turns a restart cut.
     answered_lost: usize,
     answers_cut: usize,
+    /// Answers of questions refused at admission, and posts the lane gave up.
+    answered_refused: usize,
+    given_up: usize,
 }
 
 /// One history: events chosen by `seed`, the invariants checked after each,
@@ -2825,6 +2935,10 @@ fn simulate(seed: u64, asking: bool) -> Result<Reached, String> {
                     w.connect();
                     "the runtime comes back"
                 }
+                98..=99 if w.alive() => {
+                    w.give_up_one();
+                    "give up"
+                }
                 _ => "nothing",
             }
         };
@@ -2837,7 +2951,8 @@ fn simulate(seed: u64, asking: bool) -> Result<Reached, String> {
     let answers = w.journal.channel("juniper--k3x9", records::TASKS);
     let answered_lost = answers.iter().filter(|r| r.body["error"] == LOST).count();
     let answers_cut = answers.iter().filter(|r| w.ends(&records::turn_id("juniper--k3x9", "juniper--k3x9", records::TASKS, r.seq)).iter().any(|e| e["error"] == LOST)).count();
-    Ok(Reached { told: w.tells.len(), told_then_run, answered: answers.len(), answered_lost, answers_cut })
+    let answered_refused = answers.iter().filter(|r| r.body["refused"] == true).count();
+    Ok(Reached { told: w.tells.len(), told_then_run, answered: answers.len(), answered_lost, answers_cut, answered_refused, given_up: w.given_up.len() })
 }
 
 /// Goal : any history of messages, answers lost and late, runs,
@@ -2859,20 +2974,21 @@ fn any_history_of_crashes_and_rollbacks_keeps_the_invariants() {
 }
 
 /// Goal: the same histories with one agent asking another to be answered
-/// back (and asking again from those answers): besides every invariant
-/// above, each question is answered at most once, exactly once unless it
-/// was refused at admission or taken as an answer in words, and each
-/// answer is one turn of the asking agent where it asked from, run once at
-/// most. Crashes before and after each post (an answer's included), lost
-/// answers and rollbacks to any save: no asked turn runs twice to answer,
-/// and no answer wakes its agent twice.
+/// back (and asking again from those answers, past the hops too): besides
+/// every invariant above, each question is answered exactly once, however
+/// it ended (refused too), and each answer is one turn of the asking agent
+/// where it asked from, run once at most, never a refused one's. Crashes
+/// before and after each post (an answer's included), lost answers, posts
+/// the lane gives up (never an answer: the driver's lane tries one until
+/// the platform answers it) and rollbacks to any save: no asked turn runs
+/// twice to answer, and no answer wakes its agent twice.
 #[test]
 fn any_history_of_asks_answers_each_once() {
     let histories: Vec<Result<Reached, String>> = (0..SIM_SEEDS).map(|seed| simulate(seed, true)).collect();
     let failures: Vec<String> = histories.iter().filter_map(|h| h.clone().err()).collect();
     assert!(failures.is_empty(), "{} of {SIM_SEEDS} histories broke an invariant; the first:\n{}", failures.len(), failures.iter().take(5).cloned().collect::<Vec<_>>().join("\n"));
-    let reached = histories.iter().filter_map(|h| h.as_ref().ok()).fold(Reached::default(), |a, r| Reached { answered: a.answered + r.answered, answered_lost: a.answered_lost + r.answered_lost, answers_cut: a.answers_cut + r.answers_cut, ..a });
-    assert!(reached.answered > SIM_SEEDS as usize && reached.answered_lost > 0 && reached.answers_cut > 0, "the histories answer back, some answers say lost, and restarts cut some answers' turns: {reached:?}");
+    let reached = histories.iter().filter_map(|h| h.as_ref().ok()).fold(Reached::default(), |a, r| Reached { answered: a.answered + r.answered, answered_lost: a.answered_lost + r.answered_lost, answers_cut: a.answers_cut + r.answers_cut, answered_refused: a.answered_refused + r.answered_refused, given_up: a.given_up + r.given_up, ..a });
+    assert!(reached.answered > SIM_SEEDS as usize && reached.answered_lost > 0 && reached.answers_cut > 0 && reached.answered_refused > 0 && reached.given_up > 0, "the histories answer back, some answers say lost or refused, restarts cut some answers' turns, and the lane gives up some posts: {reached:?}");
 }
 
 /// Goal : the case the simulation found, each way it happens: a
