@@ -21,12 +21,12 @@ is the wire contract. It replaced the OpenRouter-backed ledger and
   - a fragment's hosting (requests, storage, dynamic workers,
     screenshots) and its AI steps bill the fragment's owner.
 - **An org's ledger** (decisions 66 to 68; `fragment_core::ledger::org`)
-  holds the credit the org bought (its own $25 packs) or an operator
-  gave it, and nothing else: no plan, seat, included credit or default
+  holds the credit an operator gave it (orgs pay out of band), and
+  nothing else: no plan, seat, included credit or default
   plan. Its overdraft is zero, so its fragments are read-only at a
   balance of zero. It pays for no agent turn, no wake and no computer
   (`persons_only`, 403), and refuses a plan, a seat or an overdraft the
-  same way. Its billing admins set a monthly budget (`OrgBudget`, zero
+  same way. An operator sets its monthly budget (`OrgBudget`, zero
   until set): once its fragments' charges this month reach it, their AI
   steps are refused (`budget_reached`) until a larger one or the next
   month; writes and hosting go on. Every AI step in its fragments meets
@@ -404,13 +404,13 @@ Public routes (a hard cut of `/api/budget`; docs/api.md, Ledger):
   grant <user> <usd> --why <text>`. A seat's state is the registry's
   alone: operators comp or end seats there (`/api/admin/seats`,
   `fragment operator comp|uncomp`; docs/billing.md), and the ledger's
-  `seat` command went (2026-10-16). `<user>` may be `org:<org id>` for a
-  grant of an org's own credit (an org that is there; its ledger takes
-  no plan and no overdraft).
+  `seat` command went (2026-10-16). `<user>` may be `org:<org id>`, an
+  org that is there, for a grant of its own credit or its `budget {id,
+  micros}` (kept as `budget:<id>`; its ledger takes no plan and no
+  overdraft): `fragment operator credit|budget <org> <usd>`.
 - An org's (decision 66): `GET /api/orgs/<org>/ledger` →
-  `OrgLedgerStatus` and `PUT /api/orgs/<org>/budget {id, micros}` (its
-  billing admins; kept as `budget:<id>`), `POST
-  /api/orgs/<org>/billing/pack` (who pays for it; docs/billing.md).
+  `OrgLedgerStatus` (its billing admins; an operator's at
+  `GET /api/admin/orgs/<org>/ledger`).
 
 ## How each meter reaches it
 
@@ -561,10 +561,8 @@ the batch, so a guest's fragments are billed nothing.
 
 - **Credit:** a paid credit pack's Checkout becomes `GrantCredit {id:
   "pack:<Checkout's id>", by: "stripe"}` (docs/billing.md, decision 55)
-  on the ledger its metadata named when it was opened: its person's, or
-  for an org's own pack (`fragment_payer: org:<id>`, no person), the
-  org's. Its id may come again any time (its webhook, its return);
-  commands are never forgotten.
+  on the ledger of the person its metadata names. Its id may come again
+  any time (its webhook, its return); commands are never forgotten.
 - **A seat's state:** the registry pushes `SetPlan` (the seat's kind)
   and `SetSeat` (active while the seat is good, else canceled) in its own
   `seq`, from the seat and its org's subscription as fetched from Stripe
