@@ -1504,7 +1504,7 @@ export function mount(root) {
         const label = (id) => p.options.find((o) => o.id === id)?.label ?? id;
         const answered = typeof closed?.text === "string" && closed.text ? closed.text : label(closed?.option);
         if (closed?.outcome === "answered") card.append(outcome("answered", "check", `${answered}${by ? ` · ${by}` : ""}`));
-        else if (closed?.outcome === "history_unavailable") card.append(outcome("stopped", "stopped", "History unavailable: ask again with the context"));
+        else if (closed?.outcome === "history_unavailable") card.append(outcome("stopped", "stopped", "Not acted on: ask again"));
         else if (closed?.outcome === "expired") card.append(outcome("expired", "clock", "Expired: no answer in time"));
         else if (closed) card.append(outcome("stopped", "stopped", "Stopped"));
         else if (gone) card.append(outcome("expired", "clock", t.end ? "Closed" : "Expired: no answer in time"));

@@ -881,20 +881,24 @@ function primaryAgent() {
 // (docs/api.md, "Listed records"): each agent's newest record of a turn's
 // kind on a chat's `work` (docs/chat-records.md), which the shell reads as
 // the chat's page reads a turn. Started, a step, or a card answered is
-// working; a card open waits for the person (its owner answers its cards);
-// a question waits on whoever it asks (`asks`); an end is nothing. A
-// message waiting for its turn has no record yet, so queued is not said.
-// None while their computer is not awake (its turns stop with it) or this
-// page's list socket is shut (it would not hear the change), and none past
-// the bridge's own bound on a turn that says nothing (15 minutes; a turn
-// waiting on someone waits as long as a card, an hour), each a minute more
-// for the list's own lag. Those three are copies, named as their sources
-// name them (proto's limits; images/bridge/src/limits.rs), each held to its
-// source by a host test (xtask/src/guards.rs, `the_shell_copies_its_limits`).
+// working (a card closed any other way starts nothing: nothing); a card
+// open waits for the person (its owner answers its cards); a question
+// waits on whoever it asks (`asks`); an end is nothing. A message waiting
+// for its turn has no record yet, so queued is not said.
+// Working and waiting on someone else are none while their computer is not
+// awake (its turns stop with it); a card open still waits for them, as it
+// outlives its turn and its computer (docs/bridge.md, "A card outlives its
+// turn"). None while this page's list socket is shut (it would not hear
+// the change), and none past the bridge's own bound on a turn that says
+// nothing (15 minutes; a turn waiting on someone waits as long as a card,
+// an hour), each a minute more for the list's own lag. Those three are
+// copies, named as their sources name them (proto's limits;
+// images/bridge/src/limits.rs), each held to its source by a host test
+// (xtask/src/guards.rs, `the_shell_copies_its_limits`).
 // The list's turn kinds are the chat's records (docs/chat-records.md):
 // the shell reads them as the bridge writes them. A listed field's
-// value is any text an agent wrote (up to 128 characters): `asks` is only
-// compared with the person's id here, never shown; what is shown is these
+// value is any text an agent wrote (up to 128 characters): `asks` and
+// `outcome` are only compared here, never shown; what is shown is these
 // words and the chat's title, as text (`el`'s textContent), never markup.
 const DOING_SAYS = { you: "Waiting for you", waiting: "Waiting", working: "Working" };
 const DOING_ORDER = Object.keys(DOING_SAYS);
@@ -912,13 +916,16 @@ const listLive = () => watching.socket?.readyState === WebSocket.OPEN;
 // first (waiting for the person, then on someone, then working), the
 // newest first within each; each with when it stops counting (`until`).
 function doingChats(identity) {
-  if (!identity || !listLive() || state.computer?.phase !== "awake") return [];
+  if (!identity || !listLive()) return [];
+  const awake = state.computer?.phase === "awake";
   const now = Date.now();
   const out = [];
   for (const f of chats()) {
     for (const r of f.listed ?? []) {
       const kind = r.channel === "work" && r.principal === identity ? DOING_OF_KIND[r.kind] : undefined;
       if (!kind) continue;
+      if (r.kind === "turn.prompt.closed" && r.fields?.outcome !== "answered") continue;
+      if (!awake && r.kind !== "turn.prompt") continue;
       const doing = kind === "asked" ? (r.fields?.asks === state.me?.id ? "you" : "waiting") : kind;
       const until = r.at + DOING_QUIET_MS[doing === "working" ? "working" : "waiting"];
       if (until > now) out.push({ chat: f.name, doing, at: r.at, until });
