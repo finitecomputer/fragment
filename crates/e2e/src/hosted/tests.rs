@@ -612,3 +612,31 @@ fn a_sweep_against_a_shared_preview() {
         assert!(report.contains(part), "{part} in:\n{report}");
     }
 }
+
+/// A broken list leaves that person's data and computers alone, but does
+/// not prevent later people or later pages from being swept. The final
+/// error names the person so a partial sweep cannot look successful.
+#[test]
+fn a_sweep_continues_after_a_persons_list_fails() {
+    fn broken_list(req: &Seen) -> (u16, String) {
+        if req.path == "/api/fragments" && req.header("cookie") == Some("fragment_session=s-a") {
+            return (500, json!({ "error": "host_failed", "message": "internal error" }).to_string());
+        }
+        fake_preview(req)
+    }
+    let (addr, seen) = recorder(broken_list);
+    let run = Run::signing_in_by_levers(SECRET.into(), 0);
+    let api = api_at(addr, &run);
+    for scope in [sweep::Scope::Run("c58b2a3f9e".into()), sweep::Scope::All { spared_for_ms: sweep::SPARED_FOR_MS }] {
+        let error = sweep::sweep_on(&api, &scope, NOW_MS).unwrap_err().to_string();
+        assert!(error.contains("listing a@e2e.test's fragments: 500"), "{error}");
+        assert!(error.contains("internal error"), "{error}");
+        let requests = seen.lock().unwrap();
+        assert!(!requests.iter().any(|r| r.header("cookie") == Some("fragment_session=s-a") && r.path != "/api/fragments"));
+        assert!(requests.iter().any(|r| r.path == "/api/f/e2e-c58b2a3f9e-x--pd22" && r.method == "DELETE"), "later pages still swept");
+        drop(requests);
+        let (deleted, slept, _) = asked(&seen);
+        assert!(!deleted.iter().any(|n| n.ends_with("--pa22")));
+        assert!(!slept.iter().any(|n| n == "ca"));
+    }
+}
