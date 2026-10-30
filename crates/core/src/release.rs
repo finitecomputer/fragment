@@ -327,7 +327,7 @@ mod tests {
         let reason = restart_reason("069479198b79");
         assert_eq!(restarted_by(&reason), Some("069479198b79"));
         assert_eq!(restarted_by(&format!("Error: {reason}")), Some("069479198b79"));
-        assert_eq!(restarted_by(&format!("{RESTARTING}")), None, "the reason before it named a release");
+        assert_eq!(restarted_by(RESTARTING), None, "the reason before it named a release");
         assert_eq!(restarted_by(&format!("Error: {RESTARTING}")), None);
         assert_eq!(restarted_by(&format!("{RESTARTING} (from )")), None);
         assert_eq!(restarted_by(&format!("{RESTARTING} (from a b)")), None);
