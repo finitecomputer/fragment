@@ -1,6 +1,7 @@
 //! The usage ledger's public wire types (docs/ledger.md): what the shell
-//! and the CLI read (`LedgerStatus`) and what operators, Stripe's hooks
-//! and fragment owners send (credit, plans, seats, overdrafts, caps).
+//! and the CLI read (`LedgerStatus`, an org's `OrgLedgerStatus`) and what
+//! operators, Stripe's hooks, fragment owners and an org's billing admins
+//! send (credit, plans, seats, overdrafts, caps, an org's budget).
 //! Money is integer micro-dollars. The ledger's state machine is
 //! `fragment_core::ledger`; the platform's own inner routes (meter, the
 //! gate's questions) are its types, not these.
@@ -162,6 +163,35 @@ pub struct SetFragmentCap {
 pub struct PutCap {
     pub id: String,
     pub micros: Option<i64>,
+}
+
+/// `PUT /api/orgs/<org>/budget` (its billing admins): what the org's
+/// fragments may spend a month before their AI steps stop (decision 68),
+/// in micro-dollars; zero until set. `id` makes the change once.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OrgBudget {
+    pub id: String,
+    pub micros: i64,
+}
+
+/// An org's ledger now (`GET /api/orgs/<org>/ledger`; decision 66): the
+/// credit it bought or was given, with no plan, seat, included credit or
+/// overdraft, and the month's budget beside what its fragments spent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrgLedgerStatus {
+    pub org: String,
+    /// The UTC month, `YYYY-MM`.
+    pub month: String,
+    pub balance_micros: i64,
+    pub budget_micros: i64,
+    /// What its fragments were charged this month, all of them.
+    pub spent_micros: i64,
+    pub standing: Standing,
+    pub price_book: u32,
+    /// This month's spend by fragment, the largest first (a bounded list).
+    pub fragments: Vec<FragmentSpend>,
 }
 
 #[cfg(test)]
