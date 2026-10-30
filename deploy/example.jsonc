@@ -248,7 +248,8 @@
   },
   // The connectors: the doors its people may open (docs/computers.md,
   // "Connector policy"), [{id, relayTargets: [{host, port}]}]. Omitted: the
-  // cell's default, SimpleX with its twelve XFTP hosts on 443. [] is the
+  // cell's default, SimpleX with its twelve XFTP hosts on 443, and Telegram
+  // (a connector fragment, no relay). [] is the
   // kill switch: no connector may be linked, redeemed or relayed (an
   // unlink still works), and no computer relay opens.
   // "connectors": [{ "id": "simplex", "relayTargets": [{ "host": "xftp1.simplex.im", "port": 443 }] }],
