@@ -218,7 +218,9 @@ pub(crate) fn fragment_lever(raw: &JsValue, sql: SqlStorage, id: &str, op: &str,
             };
             // an object from before versions holds step 1's objects alone:
             // the tables and indexes later steps made go first (a later
-            // step's column would need its own undoing here)
+            // step's column would need its own undoing here). Step 4's:
+            // its person back in `meta`, as `owner`, and `members.epoch` gone
+            sql.exec("INSERT OR REPLACE INTO meta (key, value) SELECT 'owner', owner FROM ownership WHERE kind = 'person'", None)?;
             let first = migrate::declared(class.steps[0].sql);
             let held = migrate::objects(&Sql(sql.clone()), class).map_err(|e| CellError::host(e.to_string()))?;
             for o in held.iter().filter(|o| !first.iter().any(|f| f.kind == o.kind && f.name == o.name)) {
@@ -228,7 +230,7 @@ pub(crate) fn fragment_lever(raw: &JsValue, sql: SqlStorage, id: &str, op: &str,
                     other => return Err(CellError::invalid(format!("a later step's {other} {}: this lever drops tables and indexes", o.name))),
                 };
             }
-            sql.exec(&format!("DROP TABLE _schema; {plant}"), None)?;
+            sql.exec(&format!("DROP TABLE _schema; ALTER TABLE members DROP COLUMN epoch; {plant}"), None)?;
             Ok(json!({ "members": columns(&sql, "members")?, "runs": columns(&sql, "runs")? }))
         }
         ("schema-try", Some(step @ ("adds" | "fails"))) => {

@@ -679,6 +679,12 @@ impl FragmentCell {
             kind: String,
             owner: String,
         }
+        // one that refuses its schema from before Fragment step 4 (it still
+        // ends: schema.rs) is its person's, in its `owner` meta row
+        if self.schema.refused() && self.count("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name = 'ownership'")? == 0 {
+            let owner = self.rows("SELECT value FROM meta WHERE key = 'owner'", vec![])?.first().and_then(|r| r["value"].as_str().map(str::to_string));
+            return Ok(Owner::Person(owner.ok_or_else(|| CellError::host("a fragment from before step 4 has no owner meta row"))?));
+        }
         let rows: Vec<Row> = self.typed("SELECT kind, owner FROM ownership WHERE one = 1", vec![])?;
         let row = rows.into_iter().next().ok_or_else(|| CellError::host("a created fragment has no ownership row"))?;
         Owner::from_row(&row.kind, &row.owner).ok_or_else(|| CellError::host(format!("its ownership row names {} {:?}", row.kind, row.owner)))
@@ -692,11 +698,8 @@ impl FragmentCell {
     /// The signer's own membership, as it counts now (`fence`): an org's
     /// fragment's only at their place's epoch there.
     pub(crate) fn fenced_role(&self, signed: &Signed) -> CellResult<Option<Role>> {
-        let (open, epoch) = self.fence(Some(signed))?;
-        let rows = self.rows(
-            "SELECT role FROM members WHERE principal = ? AND (? OR epoch = ?)",
-            vec![signed.id.as_str().into(), SqlStorageValue::Integer(i64::from(open)), SqlStorageValue::Integer(epoch)],
-        )?;
+        let fence = self.fence(Some(signed))?;
+        let rows = self.rows(&format!("SELECT role FROM members WHERE principal = ? AND {fence}"), vec![signed.id.as_str().into()])?;
         Ok(rows.first().and_then(|r| r["role"].as_str()).and_then(Role::parse))
     }
 
@@ -721,11 +724,10 @@ impl FragmentCell {
             role: Option<String>,
             agent: i64,
         }
-        let (open, epoch) = self.fence(caller.signed.as_ref())?;
-        let (open, epoch) = (SqlStorageValue::Integer(i64::from(open)), SqlStorageValue::Integer(epoch));
+        let fence = self.fence(caller.signed.as_ref())?;
         let rows: Vec<Row> = self.typed(
-            "SELECT (SELECT role FROM members WHERE principal = ? AND (? OR epoch = ?)) AS role, EXISTS (SELECT 1 FROM members WHERE owner = ? AND (? OR epoch = ?)) AS agent",
-            vec![principal.into(), open.clone(), epoch.clone(), principal.into(), open, epoch],
+            &format!("SELECT (SELECT role FROM members WHERE principal = ? AND {fence}) AS role, EXISTS (SELECT 1 FROM members WHERE owner = ? AND {fence}) AS agent"),
+            vec![principal.into(), principal.into()],
         )?;
         let row = rows.into_iter().next().expect("a SELECT without FROM answers one row");
         let mut member = row.role.as_deref().and_then(Role::parse);
@@ -753,10 +755,10 @@ impl FragmentCell {
     fn standing_for(&self, agent: &Signed, link: bool) -> CellResult<Standing> {
         let asker = agent.acting_for.as_deref().expect("standing_for is for an agent acting for someone");
         let owner = agent.owner.as_deref().ok_or_else(|| CellError::host("an agent acting for someone has no owner"))?;
-        let (open, epoch) = self.fence(Some(agent))?;
+        let fence = self.fence(Some(agent))?;
         // in an org's fragment an agent acts for its own person alone: no
         // one else's place there is known to this request
-        if !open && asker != owner {
+        if self.owner()?.org().is_some() && asker != owner {
             let cap = access::Cap { agent: None, owner: None };
             return Ok(Standing { member: None, owns_member_agent: false, link, signed: true, cap: Some(cap), held: agent.held });
         }
@@ -769,9 +771,11 @@ impl FragmentCell {
         }
         // an org's: each row at the person's place now (the agent's is its person's)
         let rows: Vec<Row> = self.typed(
-            "SELECT (SELECT role FROM members WHERE principal = ?1 AND (?5 OR epoch = ?6)) AS role, EXISTS (SELECT 1 FROM members WHERE owner = ?2 AND (?5 OR epoch = ?6)) AS agent, \
-             (SELECT role FROM members WHERE principal = ?3 AND (?5 OR epoch = ?6)) AS agent_role, (SELECT role FROM members WHERE principal = ?4 AND (?5 OR epoch = ?6)) AS owner_role",
-            vec![asker.into(), asker.into(), agent.id.as_str().into(), owner.into(), SqlStorageValue::Integer(i64::from(open)), SqlStorageValue::Integer(epoch)],
+            &format!(
+                "SELECT (SELECT role FROM members WHERE principal = ? AND {fence}) AS role, EXISTS (SELECT 1 FROM members WHERE owner = ? AND {fence}) AS agent, \
+                 (SELECT role FROM members WHERE principal = ? AND {fence}) AS agent_role, (SELECT role FROM members WHERE principal = ? AND {fence}) AS owner_role"
+            ),
+            vec![asker.into(), asker.into(), agent.id.as_str().into(), owner.into()],
         )?;
         let row = rows.into_iter().next().expect("a SELECT without FROM answers one row");
         let role = |r: Option<String>| r.as_deref().and_then(Role::parse);
@@ -781,15 +785,17 @@ impl FragmentCell {
     }
 
     /// What a member row must hold to count for `signed` (decisions 69 to
-    /// 71), as SQL binds: `(open, epoch)`. A person's fragment counts every
-    /// row (`open`); an org's, a row only at the epoch of the signer's place
-    /// in its content now (an agent's: its person's), the registry's answer
-    /// at this request, so an offboarded person's rows open nothing from
-    /// the moment they are. Never a cached answer.
-    pub(crate) fn fence(&self, signed: Option<&Signed>) -> CellResult<(bool, i64)> {
+    /// 71), as a SQL condition on `members`. A person's fragment counts
+    /// every row (`1`: its queries as before Fragment step 4, so one that
+    /// refuses its schema still answers as it ends); an org's, a row only at
+    /// the epoch of the signer's place in its content now (an agent's: its
+    /// person's), the registry's answer at this request, so an offboarded
+    /// person's rows open nothing from the moment they are (`0` with no
+    /// place). Never a cached answer. A number, never a caller's text.
+    pub(crate) fn fence(&self, signed: Option<&Signed>) -> CellResult<String> {
         Ok(match self.owner()? {
-            Owner::Person(_) => (true, -1),
-            Owner::Org(org) => (false, signed.and_then(|s| s.org_place(&org)).map_or(-1, |p| i64::try_from(p.epoch).expect("an epoch fits SQLite's integers"))),
+            Owner::Person(_) => "1".to_string(),
+            Owner::Org(org) => signed.and_then(|s| s.org_place(&org)).map_or_else(|| "0".to_string(), |p| format!("epoch = {}", p.epoch)),
         })
     }
 

@@ -682,7 +682,9 @@ impl FragmentCell {
         let is_self = me == target;
         // leaving is any member's own; removing anyone else is sharing
         let actor = match is_self {
-            true => Actor { admin: false, epoch: None, by: me.clone(), for_owner: None },
+            // its owner leaving is refused as theirs to ask (400), not as
+            // someone who may not (an org's fragment has no owner member)
+            true => Actor { admin: self.member_role(&me)? == Some(Role::Owner), epoch: None, by: me.clone(), for_owner: None },
             false => self.sharer(caller)?,
         };
         let current = self.member_role(&target)?;
