@@ -5,13 +5,15 @@
 //! code.storage, Workers AI (the model route's lower rung, text and
 //! images), Email Sending (the platform's mail), a web push service, WorkOS
 //! (AuthKit and Pipes), OpenRouter (an own key's sign-in and its models),
-//! and the provider APIs a computer's swap sends to.
+//! the platform's search write API (until the cell serves it), and the
+//! provider APIs a computer's swap sends to.
 
 pub mod codestorage;
 pub mod http;
 pub mod mail;
 pub mod openrouter;
 pub mod push;
+pub mod search;
 pub mod stripe;
 pub mod upstream;
 pub mod workers_ai;

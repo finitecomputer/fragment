@@ -166,6 +166,10 @@ struct State {
     tokens_minted: u64,
     #[serde(skip)]
     tokens_revoked_below: u64,
+    /// The search index of each fragment whose search a test turned on
+    /// (`enable_search`; crate::search), by its name.
+    #[serde(skip)]
+    search: BTreeMap<String, crate::search::Index>,
 }
 
 struct Inner {
@@ -470,6 +474,14 @@ impl Inner {
                 let token = self.mint(st, &url, &["git:read", "git:write"], self.token_ttl_s);
                 // the host's whole answer (fragment_proto::StorageToken)
                 return Response::json(200, &json!({ "token": token, "repo": url, "api": self.url, "expiresAt": now_ms() + self.token_ttl_s * 1000 }));
+            }
+            // the search write API (crate::search), for a fragment whose
+            // search is on; another's is a host without it (404)
+            if let Some((name, op)) = path.strip_prefix("/api/f/").and_then(|p| p.split_once("/search/")) {
+                return match st.search.get_mut(name) {
+                    Some(index) => index.handle(op, req),
+                    None => problem(404, &format!("no route {m} {path}")),
+                };
             }
             if path.starts_with("/api/f/") && path.ends_with("/refresh") && m == "POST" {
                 st.refreshes += 1;
@@ -1163,6 +1175,20 @@ impl CodeStorage {
     /// Host `refresh` nudges received (with `host_routes`).
     pub fn refresh_count(&self) -> u32 {
         self.with(|st| st.refreshes)
+    }
+
+    /// Turns on the search write API for fragment `name` (with
+    /// `host_routes`), its index empty; it is off until then.
+    pub fn enable_search(&self, name: &str) {
+        self.with(|st| {
+            st.search.entry(name.into()).or_default();
+        });
+    }
+
+    /// `f` of fragment `name`'s search index, when its search is on: to
+    /// read it, or change it as a test needs (an index lost).
+    pub fn search_index<T>(&self, name: &str, f: impl FnOnce(&mut crate::search::Index) -> T) -> Option<T> {
+        self.with(|st| st.search.get_mut(name).map(f))
     }
 
     /// The requests answered since the last take, by route (`GET branch`,

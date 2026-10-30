@@ -226,6 +226,13 @@ pub fn sessions(s: &mut Suite, api: &Api) -> Result<()> {
         first["made"] == true && first["added"] == 3 && refused == ["e2e_huge"] && first["holds"] == json!({ "chat": 2, "cron": 1, "subagent": 0 }),
         &first,
     );
+    // until the cell serves search's write API (the search capability's
+    // PR), this host has none: the import says so and stands
+    s.ok(
+        "on a host without search, an import says it skipped search and stands",
+        first["search"]["state"] == "skipped" && first["search"]["why"].as_str().is_some_and(|w| w.contains("no search")),
+        &first["search"],
+    );
     let status = api.status(&keys, &name)?;
     let listed = api.signed(&keys, "GET", "/api/fragments", None)?;
     let row = listed.body["fragments"].as_array().and_then(|l| l.iter().find(|f| f["name"] == name.as_str()).cloned()).unwrap_or_default();
