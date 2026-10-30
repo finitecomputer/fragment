@@ -1480,10 +1480,30 @@ async fn read_back(api: &Api, agent: &str, fragment: &str, channel: &str, before
 /// together at most twice a note's bound. `None` when there is neither, or
 /// the journal did not answer: a turn is never held back for its note.
 async fn note_for(api: &Api, ts: &TurnStart) -> Option<String> {
-    let (cut, forgot) = tokio::join!(cut_note(api, ts), forgotten_note(api, ts));
-    let note = [cut, forgot].into_iter().flatten().collect::<Vec<_>>().join("\n\n");
-    assert!(note.len() <= 2 * limits::NOTE_MAX_BYTES + 2, "a turn's notes are bounded");
+    let (history, cut, forgot) = tokio::join!(history_note(api, ts), cut_note(api, ts), forgotten_note(api, ts));
+    let note = [history, cut, forgot].into_iter().flatten().collect::<Vec<_>>().join("\n\n");
+    assert!(note.len() <= limits::HISTORY_NOTE_MAX_BYTES + 2 * limits::NOTE_MAX_BYTES + 4, "a turn's notes are bounded");
     (!note.is_empty()).then_some(note)
+}
+
+/// What a chat continued from its owner's Session Archive was (note.rs,
+/// `history`), at the agent's first turn there: no turn of its own started
+/// in the chat before this one's claim (its `work` read back to the
+/// channel's start), and the chat's first records hold its owner's
+/// `history`. `None` otherwise, or when the chat did not answer.
+async fn history_note(api: &Api, ts: &TurnStart) -> Option<String> {
+    let claim = ts.claim_seq?;
+    let (agent, chat, me) = (ts.agent.fragment.as_str(), ts.fragment.as_str(), ts.agent.identity.as_str());
+    let unread = |e: ApiError| crate::ev!("note.unread", { "turn": ts.turn, "history": true, "error": e.to_string() });
+    let started = |rs: &[Record]| rs.iter().any(|r| r.principal == me && r.body["kind"] == "turn.start");
+    let (work, from_start) = read_back(api, agent, chat, records::WORK, claim, started).await.map_err(unread).ok()?;
+    if started(&work) || !from_start {
+        return None;
+    }
+    let first = api.records(agent, chat, records::CHAT, 0, limits::HISTORY_SCAN_RECORDS).await.map_err(unread).ok()?;
+    let text = first.records.iter().find_map(|r| note::history(r, &ts.agent.owner))?;
+    crate::ev!("note", { "turn": ts.turn, "history": true, "bytes": text.len() });
+    Some(text)
 }
 
 /// What the agent no longer remembers of the chat (note.rs, "forgotten"):

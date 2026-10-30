@@ -11,7 +11,10 @@
 // tells this page of) at most once a minute, at once when the archive is
 // new to this page, and as the page comes back into view: an import moves
 // the archive's files and not their list.
-export function createSessionArchive({ api, ui: { $, el, patch, renderHeading }, data: { allFragments, own, seg }, selection: { current, page, getFrame }, navigation: { openChat, leaveSidebar }, store }) {
+export function createSessionArchive({
+  api, ui: { $, el, patch, renderHeading, notice }, data: { allFragments, own, seg, primaryAgent, agents, chatLabel },
+  selection: { current, page, getFrame }, navigation: { openChat, leaveSidebar }, load: loadList, store,
+}) {
   // the rows the sidebar shows; the archive's page lists every one
   const SHOWN = 30;
   const READ_EVERY_MS = 60_000;
@@ -45,12 +48,70 @@ export function createSessionArchive({ api, ui: { $, el, patch, renderHeading },
   // The archive's page says which conversation it shows (its `?s=`, or none
   // for its list) as it loads, the person moving in it too, answering the
   // theme this page sends each frame: the heading and the row follow.
+  // It asks to continue one (`continue`), or to open the chat it was
+  // continued in (`chat`): the shell does either, as the person.
   addEventListener("message", (e) => {
-    if (e.data?.fragment !== "session-archive" || !read.name || e.source !== getFrame(read.name)?.contentWindow) return;
-    open = typeof e.data.key === "string" ? e.data.key : null;
+    const d = e.data;
+    if (d?.fragment !== "session-archive" || !read.name || e.source !== getFrame(read.name)?.contentWindow) return;
+    if (typeof d.continue === "string") return void continueSession(d.continue);
+    if (typeof d.chat === "string") {
+      if (allFragments().some((f) => f.name === d.chat && f.kind === "chat")) { openChat(d.chat); leaveSidebar(); }
+      return;
+    }
+    open = typeof d.key === "string" ? d.key : null;
     renderHeading();
     render();
   });
+
+  // ---- Continue: a conversation of the archive, picked up as a chat ----
+  // A new chat with the person's main agent, titled as the conversation was,
+  // whose first record is its `history` (docs/chat-records.md, "History"):
+  // a summary and the newest of what was said, bounded, which the chat's
+  // page shows above the chat and the agent is handed at its first turn
+  // there. The agent joins after it, so it is the chat's first record. The
+  // archive keeps the chat's name (`continued/<key>.json`), so the
+  // conversation offers that chat again rather than another.
+  const HISTORY = { messages: 40, text: 4_000, all: 24_000, summary: 8_000, title: 48 };
+  const cut = (text, max) => ([...text].length > max ? `${[...text].slice(0, max - 1).join("")}…` : text);
+  function history(c, key) {
+    const said = (c.messages ?? []).filter((m) => (m.role === "user" || m.role === "assistant") && typeof m.text === "string" && m.text.trim() && !m.summary && !m.tool_calls?.length);
+    const summary = [...(c.messages ?? [])].reverse().find((m) => m.summary && typeof m.text === "string" && m.text.trim())?.text ?? "";
+    // the newest that fit, oldest first
+    const tail = [];
+    let room = HISTORY.all;
+    for (const m of [...said].reverse()) {
+      const text = cut(m.text.trim(), HISTORY.text);
+      if (tail.length >= HISTORY.messages || text.length > room) break;
+      room -= text.length;
+      tail.unshift({ role: m.role, at: m.at, text });
+    }
+    return {
+      kind: "history", title: cut(c.title || "Untitled", 120), archive: read.name, key, started_at: c.started_at, ended_at: c.ended_at,
+      ...(summary ? { summary: cut(summary, HISTORY.summary) } : {}), messages: tail, earlier: said.length - tail.length,
+    };
+  }
+  let continuing = false;
+  async function continueSession(key) {
+    const agent = primaryAgent();
+    const fragment = agents().get(agent?.identity)?.fragment;
+    if (continuing || !read.name || !fragment) return;
+    continuing = true;
+    try {
+      const c = await api("GET", `/api/f/${seg(read.name)}/file?path=${encodeURIComponent(`sessions/${key}.json`)}`);
+      const chat = await api("POST", "/api/fragments", { label: chatLabel(fragment), template: "chat", title: cut(c.title || "Untitled", HISTORY.title) });
+      await api("POST", `/api/f/${seg(chat.name)}/channels/chat`, { id: "history", body: history(c, key) });
+      // adding it wakes its computer (the platform's `joined`)
+      await api("PUT", `/api/f/${seg(chat.name)}/members/${seg(agent.identity)}`, { role: "editor" });
+      await api("POST", `/api/f/${seg(read.name)}/files`, { message: `continued in ${chat.name}`, files: [{ path: `continued/${key}.json`, text: `${JSON.stringify({ chat: chat.name })}\n` }] });
+      await loadList();
+      openChat(chat.name);
+      leaveSidebar();
+    } catch (e) {
+      notice("The chat was not made", e.message);
+    } finally {
+      continuing = false;
+    }
+  }
 
   const shownOpen = () => store.get(OPEN, true) !== false;
 

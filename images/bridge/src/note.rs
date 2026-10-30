@@ -287,6 +287,79 @@ pub fn forgotten_text(items: &[Forgot], more: u32) -> String {
     note
 }
 
+/// The note a chat continued from its owner's Session Archive carries at
+/// its agent's first turn there (docs/chat-records.md, "History"): the
+/// conversation it goes on from, what was summarized of it, and the newest
+/// of what was said, the agent's own as "you" (it is the same agent, moved
+/// here), and where the whole of it is. From the `history` record `r` alone,
+/// and only its owner's (`owner`, the agent's owner): anyone else's tells
+/// nothing. At most `HISTORY_NOTE_MAX_BYTES`, the oldest messages dropped
+/// first.
+pub fn history(r: &Record, owner: &str) -> Option<String> {
+    let b = &r.body;
+    if r.principal != owner || b["kind"] != "history" {
+        return None;
+    }
+    let short = |k: &str, max: usize| records::cut(field(b, k), max);
+    let day = |k: &str| field(b, k).get(..10).filter(|d| d.bytes().all(|c| c.is_ascii_digit() || c == b'-')).map(str::to_string);
+    let when = match (day("started_at"), day("ended_at")) {
+        (Some(a), Some(z)) if a != z => format!(" ({a} to {z})"),
+        (Some(d), _) | (None, Some(d)) => format!(" ({d})"),
+        (None, None) => String::new(),
+    };
+    let title = Some(short("title", 120)).filter(|t| !t.is_empty()).unwrap_or_else(|| "an earlier chat".into());
+    let named = |k: &str, ok: fn(u8) -> bool| Some(field(b, k)).filter(|v| !v.is_empty() && v.len() <= 160 && v.bytes().all(ok));
+    let archive = named("archive", |c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-');
+    let key = named("key", |c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'_' | b'-'));
+    let mut head = vec![format!(
+        "This chat goes on from a conversation your owner had with you before they moved here, “{title}”{when}. It is read-only history: what was said there, not new messages."
+    )];
+    if let (Some(a), Some(k)) = (archive, key) {
+        head.push(format!("All of it is in their Session Archive: `fragment sync {a} --dir <folder> --mode pull`, then sessions/{k}.json."));
+    }
+    let summary = field(b, "summary").trim();
+    if !summary.is_empty() {
+        head.push(format!("What came before, as it was summarized then:\n{}", records::cut_bytes(summary, limits::HISTORY_NOTE_MAX_BYTES / 3)));
+    }
+    let said: Vec<String> = b["messages"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|m| {
+            let text = m["text"].as_str().map(str::trim).filter(|t| !t.is_empty())?;
+            let who = match m["role"].as_str() {
+                Some("user") => "Your owner",
+                Some("assistant") => "You",
+                _ => return None,
+            };
+            Some(format!("{who}: {}", records::cut_bytes(text, limits::HISTORY_NOTE_MAX_BYTES / 4)))
+        })
+        .collect();
+    let earlier = b["earlier"].as_u64().unwrap_or(0);
+    let head = head.join("\n\n");
+    // the newest that fit beside the head, oldest first
+    let mut room = limits::HISTORY_NOTE_MAX_BYTES.saturating_sub(head.len() + 200);
+    let mut kept: Vec<&String> = Vec::new();
+    for line in said.iter().rev() {
+        if line.len() + 1 > room {
+            break;
+        }
+        room -= line.len() + 1;
+        kept.push(line);
+    }
+    kept.reverse();
+    let dropped = earlier + (said.len() - kept.len()) as u64;
+    let mut text = head;
+    if !kept.is_empty() {
+        let before = if dropped > 0 { format!(" ({dropped} earlier ones are in the archive)") } else { String::new() };
+        text.push_str(&format!("\n\nIts last messages, oldest first{before}:\n"));
+        text.push_str(&kept.iter().map(|l| l.as_str()).collect::<Vec<_>>().join("\n"));
+    }
+    let text = records::cut_bytes(&text, limits::HISTORY_NOTE_MAX_BYTES);
+    assert!(text.len() <= limits::HISTORY_NOTE_MAX_BYTES, "a history note is bounded");
+    Some(text)
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -321,6 +394,39 @@ mod tests {
         fn before(&self, seq: u64) -> &[Record] {
             &self.0[..usize::try_from(seq - 1).unwrap()]
         }
+    }
+
+    fn history_record(by: &str, body: Value) -> Record {
+        Record { channel: "chat".into(), seq: 1, at: 10, principal: by.into(), kind: "message".into(), body }
+    }
+
+    /// Goal: a chat continued from its owner's Session Archive tells its
+    /// agent what was said there, its own words as "you", and where the
+    /// rest is. Invalid: anyone else's history, another kind. Bounded: the
+    /// oldest messages give way first.
+    #[test]
+    fn a_continued_chat_tells_its_agent_its_history() {
+        let body = json!({ "kind": "history", "title": "Beans", "archive": "sessions--k3x9", "key": "hermes-20261001_ab", "started_at": "2026-10-01T09:00:00.000Z",
+            "ended_at": "2026-10-04T09:00:00.000Z", "summary": "We planned the beds.", "earlier": 3,
+            "messages": [{ "role": "user", "text": "plant beans?" }, { "role": "assistant", "text": "in spring" }, { "role": "system", "text": "skipped" }] });
+        let text = history(&history_record("npub1paul", body.clone()), "npub1paul").expect("its owner's history");
+        assert!(text.contains("“Beans” (2026-10-01 to 2026-10-04)"), "{text}");
+        assert!(text.contains("`fragment sync sessions--k3x9 --dir <folder> --mode pull`, then sessions/hermes-20261001_ab.json"), "{text}");
+        assert!(text.contains("summarized then:\nWe planned the beds."), "{text}");
+        assert!(text.ends_with("Its last messages, oldest first (3 earlier ones are in the archive):\nYour owner: plant beans?\nYou: in spring"), "{text}");
+        assert_eq!(history(&history_record("npub1mallory", body.clone()), "npub1paul"), None, "only its owner's");
+        let mut message = body.clone();
+        message["kind"] = json!("message");
+        assert_eq!(history(&history_record("npub1paul", message), "npub1paul"), None);
+        // a name that is no archive's or key's leaves the pointer out
+        let mut odd = body.clone();
+        odd["archive"] = json!("../x");
+        assert!(!history(&history_record("npub1paul", odd), "npub1paul").unwrap().contains("fragment sync"));
+        // past its bound, the newest messages are kept and the rest counted
+        let long: Vec<Value> = (0..40).map(|i| json!({ "role": "user", "text": format!("{i} {}", "w".repeat(2_000)) })).collect();
+        let big = history(&history_record("npub1paul", json!({ "kind": "history", "title": "Long", "messages": long })), "npub1paul").unwrap();
+        assert!(big.len() <= limits::HISTORY_NOTE_MAX_BYTES, "{}", big.len());
+        assert!(big.contains("Your owner: 39 ") && !big.contains("Your owner: 0 ") && big.contains("earlier ones are in the archive"), "the newest kept");
     }
 
     fn step(tool: &str, args: &str, ok: bool) -> Step {

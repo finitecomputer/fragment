@@ -843,9 +843,10 @@ const { renderHeading, renderChats, loadInvites, primaryAgent, markSeen, updateS
   listLive, load, invites: () => state.invites, setInvites: (v) => { state.invites = v; },
 });
 const sessionArchive = createSessionArchive({
-  api, ui: { $, el, patch, renderHeading: () => renderHeading() }, data: { allFragments: () => state.fragments, own, seg },
+  api, ui: { $, el, patch, renderHeading: () => renderHeading(), notice },
+  data: { allFragments: () => state.fragments, own, seg, primaryAgent: () => primaryAgent(), agents: () => state.agents, chatLabel: (agent) => chatLabel(agent) },
   selection: { current: () => state.current, page: () => state.page, getFrame: (name) => state.frames.get(name) },
-  navigation: { openChat, leaveSidebar }, store,
+  navigation: { openChat, leaveSidebar }, load: () => load(), store,
 });
 
 // The identity of the person's own agent a direct chat is with (its row's

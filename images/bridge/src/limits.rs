@@ -138,6 +138,13 @@ pub const NOTE_REPLIES_MAX: usize = 2;
 /// `/data`: note.rs, "forgotten") is told of the newest this many of its
 /// turns there that another life ran; the rest are counted.
 pub const NOTE_FORGOTTEN_MAX: usize = 4;
+/// A chat continued from its owner's Session Archive (docs/chat-records.md,
+/// "History"): its agent's first turn there is told what was said, at most
+/// this (the record's summary and newest messages, the oldest dropped first
+/// past it), and its `history` record is looked for among the chat's first
+/// this many records (the shell posts it first).
+pub const HISTORY_NOTE_MAX_BYTES: usize = 24 * 1024;
+pub const HISTORY_SCAN_RECORDS: u32 = 8;
 /// The journal a note reads, at most: pages of this many records, back from
 /// the turn's claim on `work` (to the agent's turn before it) and back from
 /// the chat's tail (to that turn's start, for its replies), at most
@@ -298,6 +305,7 @@ const _: () = assert!(LIVE_PING_MS > HTTP_TIMEOUT_MS);
 const _: () = assert!(2 * KEEPALIVE_PING_MS < 60_000, "a cut keepalive is opened again well within the platform's idle hold (20 minutes)");
 const _: () = assert!(NOTE_MAX_BYTES < MESSAGE_TEXT_MAX_BYTES, "a note is small beside the message it comes with");
 const _: () = assert!(2 * NOTE_MAX_BYTES + 2 < MESSAGE_TEXT_MAX_BYTES, "a cut turn's note and a forgotten one's, together, are small beside it too");
+const _: () = assert!(HISTORY_NOTE_MAX_BYTES <= MESSAGE_TEXT_MAX_BYTES, "a chat's history is told in no more than a message holds");
 const _: () = assert!(NOTE_FORGOTTEN_MAX >= 1, "a forgotten turn is named");
 const _: () = assert!(NOTE_PAGE_RECORDS as usize <= NOTE_SCAN_RECORDS_MAX && NOTE_PAGE_RECORDS <= CATCHUP_PAGE_RECORDS);
 const _: () = assert!(HOPS_MAX >= 1, "an agent's record is one hop at least");

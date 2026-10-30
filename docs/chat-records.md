@@ -330,6 +330,31 @@ for them).
   after a restart starts nothing twice; one waiting its turn waits again
   in the next life, still a command.
 
+**History** (a chat continued from its person's Session Archive:
+templates/sessions/README.md):
+
+```json
+{ "kind": "history", "title": "Beans", "archive": "sessions--k3x9", "key": "hermes-20261001_090000_ab12cd",
+  "started_at": "2026-10-01T09:00:00.000Z", "ended_at": "2026-10-04T09:00:00.000Z",
+  "summary": "…", "messages": [{ "role": "user", "at": "…", "text": "…" }], "earlier": 12 }
+```
+
+- Posted by the chat's owner, the shell's Continue, with the id
+  `history`, before the agent joins: the chat's first record. It holds
+  the conversation's last summary (`summary`, at most 8,000 characters)
+  and the newest of what the person and the agent said, oldest first
+  (`messages`, at most 40, each at most 4,000 characters and all 24,000),
+  with how many came before them (`earlier`). `archive` and `key` name
+  the whole conversation's file.
+- The page shows its owner's first one above the chat, read-only: where
+  it came from, the summary folded, the messages as the chat's own look.
+  Anyone else's is shown by nothing.
+- The bridge hands its owner's to the agent once, at its first turn in
+  the chat: as the turn's read-only note (`TurnStart::note`, Relay's
+  `context`), the agent's own words said as "you", and where the rest is
+  (images/bridge `note::history`). It starts no turn, and a bridge or a
+  page from before it reads it as nothing.
+
 Any other `kind` on `chat` is the page's own and is never a message.
 
 **Search.** A person's message and an agent's reply are what the
