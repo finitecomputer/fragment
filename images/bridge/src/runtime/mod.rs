@@ -290,6 +290,10 @@ pub enum Event {
     /// Reply `part` (from 1, in order) of the turn, its whole text now. A
     /// later part, a step, a prompt, or the end posts it.
     Reply { turn: String, part: u32, text: String },
+    /// Reply `part`, if still open, is interim: the turn worked on after it
+    /// (its step came before it, and a later reply says so). A part posted
+    /// already stays as it was.
+    Interim { turn: String, part: u32 },
     /// A file reply `part` carries (opened empty if it was not).
     Attachment { turn: String, part: u32, file: LocalFile },
     /// Reply `part` taken back before it was posted.

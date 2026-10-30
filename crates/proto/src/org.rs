@@ -392,6 +392,87 @@ pub struct AdminLog {
     pub next: Option<u64>,
 }
 
+/// A person in an org's content (decisions 69 to 71), apart from its
+/// seats: in by their own yes to an admin's place; one who stepped down is
+/// in it still, an admin no more.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContentPerson {
+    pub person: String,
+    /// Their latest sign-in's email.
+    pub email: Option<String>,
+    pub admin: bool,
+    /// When they came in (ms).
+    pub since: i64,
+}
+
+/// A content admin's place offered to an email: no one's until whoever
+/// signs in with it accepts it, while the grounds it was made on hold;
+/// answered once, withdrawn, or expired.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContentOffer {
+    pub id: String,
+    pub org: OrgRef,
+    pub email: String,
+    /// `admin`, `payer` (the org's first) or `operator` (a recovery).
+    pub grounds: String,
+    /// Who offered it: their email (`None`: an operator key no one holds).
+    pub from: Option<String>,
+    pub at: i64,
+    pub expires_at: i64,
+    /// `accepted`, `declined`, `withdrawn` or `expired`; `None` while it
+    /// waits.
+    pub answer: Option<String>,
+}
+
+/// The content admins' places offered to a person's emails
+/// (`GET /api/orgs/offers`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContentOffers {
+    pub offers: Vec<ContentOffer>,
+}
+
+/// One entry of an org's governance log: who did what to whom, under
+/// which request id.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GovernanceEntry {
+    pub seq: u64,
+    pub at: i64,
+    /// The person who did it (an operator's name for a recovery).
+    pub actor: String,
+    pub action: String,
+    pub subject: Option<String>,
+    pub request: String,
+    /// What it did, by id (never an email).
+    pub detail: serde_json::Value,
+}
+
+/// An org's content, to its content admins (`GET /api/orgs/{org}/content`):
+/// its people, the admins' places offered and waiting, and its governance
+/// log, the newest first, a page at a time.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrgContent {
+    pub org: OrgRef,
+    pub people: Vec<ContentPerson>,
+    pub offers: Vec<ContentOffer>,
+    pub log: Vec<GovernanceEntry>,
+    /// Ask `before` this for the next page (`None`: the last).
+    pub next: Option<u64>,
+}
+
+/// `POST /api/orgs/{org}/content-admin-offers`: offer `email` a content
+/// admin's place, once by `id`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NewContentAdmin {
+    pub id: String,
+    pub email: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -671,7 +671,11 @@ once it is whole:
 - `registry`, in one turn: every row naming them or their agents
   (identities, keys, sign-in subjects and emails, picture, agent fragments,
   sessions, consents). The wipe's own row stays: the identity, its times,
-  and the operator.
+  and the operator. So do their rows in orgs' content, kept as the audit
+  trail (Paul, 2026-10-30): each org's governance log entries naming them
+  by npub (never by email), their place there (an admin no more), and the
+  offers made to or by them (withdrawn, if they still waited); each org
+  is told once, so a step run again changes nothing twice.
 
 Their next sign-in with the same account finds no subject: a new person,
 a new identity, so a new list, ledger and computer (each is named by it),
@@ -2311,6 +2315,13 @@ credit first. What happened is always charged, past zero.
   ledger, $5 until the owner sets one. Past it, AI steps and agent turns
   there stop for everyone but its owner and the owner's agents acting
   for them, until next month. Caps never stop writes.
+- **An org's ledger** (decisions 66 to 68; docs/ledger.md) is named
+  `org:<id>` and holds the org's own credit: its $25 packs, bought by
+  who pays for it, and operators' grants. It has no plan, seat, included
+  credit or overdraft (its fragments are read-only at zero), pays for no
+  agent and no computer, and its billing admins set a monthly budget,
+  zero until set, past which its fragments' AI steps stop. Every AI step
+  in its fragments meets the fragment's cap, whoever starts it.
 - **Meters** (decision 24): each fragment's hosting bills its owner: its
   requests (a row per minute), each code version that runs on a UTC day
   (a dynamic worker), and a daily sample of its SQLite (its own and its
@@ -2326,8 +2337,13 @@ credit first. What happened is always charged, past zero.
 | `POST /api/ledger/{person}/grant` | the deployment's operators | `GrantCredit {id, micros, by, why}` → `{}`: purchased credit, once by `id`; `by` is the operator who signs; at most $10,000 |
 | `POST /api/ledger/{person}/plan` | the same | `SetPlan {id, plan}` → `{}`: an override; a seat's holder's plan is the registry's to push (Seats and orgs), and its next push wins (the debt ledger) |
 | `POST /api/ledger/{person}/overdraft` | the same | `SetOverdraft {id, micros}` → `{}`: at most $1,000; read-only is decided afresh |
+| `GET /api/orgs/{org}/ledger` | the org's billing admins, each a person (never an agent) | → `OrgLedgerStatus`: `{org, month, balanceMicros, budgetMicros, spentMicros, standing, priceBook, fragments}`, `spentMicros` every fragment's charges this month; no plan, seat, included credit or overdraft. Anyone else is 403 |
+| `PUT /api/orgs/{org}/budget` | the same | `{id, micros}` → `{}`: its monthly budget, at most $100,000, once by `id` (kept as `budget:<id>`; another body under it: 409) |
+| `POST /api/orgs/{org}/billing/pack` | who pays for the org | `{}` or none → `{url, session}`: a Checkout of a $25 pack for the org's own credit (Billing); anyone else is 403, and a body naming anyone is 400 |
 
-`{person}` is an email, an identity (an npub), or `me`. Commands are
+`{person}` is an email, an identity (an npub), or `me`, or, for a
+grant alone, `org:<org id>`: an org that is there (404 otherwise), its
+own credit (its ledger refuses a plan or an overdraft, 403). Commands are
 idempotent by their `id`, kept on the ledger as `<kind>:<id>` (a grant's
 `g1` is not a plan's): the same id again changes nothing, the same id
 with another body is 409 `conflicting_body`, and a body that breaks a
@@ -2411,6 +2427,54 @@ a person the deployment's `operators` names (decision 59). A wipe's
 leaves with no one or no admin, and cancels what they pay for
 (Operators: wiping a person, below).
 
+### Org content (decisions 69 to 71)
+
+An org's content is apart from its billing (`fragment_core::governance`;
+the registry's `org_content`): a seat or a billing admin's place gives
+none of it, and a seatless person may hold it. Its people (`ContentPerson
+{person, email?, admin, since}`) are in by their own yes, and its
+**content admins** govern it. Each is a person acting as themselves (an
+agent is 403), and every change is in the org's **governance log** with
+it, in one transaction: an entry names offers and people by id, never an
+email. A client's id is kept as its kind's (`offer:<id>`), apart from the
+platform's own, and a replay answers as its first did.
+
+- **Appointed, never automatically** (decision 69). An admin's place is
+  an offer to an email, answered once by whoever signs in with it, while
+  the grounds it was made on still hold: an admin's offer while they are
+  one; who pays for the org's, its first, while its content has had no
+  one (they may name themselves); an operator's, the recovery of an org
+  with no admin (its sole admin's wipe), while it has none. No billing
+  admin is promoted by being one.
+- **Offers end.** An offer is withdrawn by the org's admins, or expires
+  after 7 days. A person stepping down, stepped down or wiped takes their
+  waiting offers with them, made or received, each named in that
+  change's log entry. An offer whose grounds no longer hold lapses in the
+  change that shows it (who pays's other "firsts" as the first is
+  accepted; an operator's recovery once the org has an admin), named in
+  its entry: it is never handed back as if new, nor counted against the
+  cap.
+- **The last admin stays.** Stepping down never leaves the org with no
+  content admin (409).
+- **It outlives its billing.** An org with anyone in its content is never
+  dropped when its subscription ends and its seats go; one dropped with no
+  one in it takes its offers with it. A person's wipe makes them an admin
+  no more there, logged as the operator who wiped them.
+- **Not yet:** an offer is mailed to no one and shown in no page: its
+  person reads it at `GET /api/orgs/offers`.
+
+| method & path | who | body → answer |
+| --- | --- | --- |
+| `POST /api/orgs/{org}/content-admin-offers` | its content admins; who pays for it, for its first (its content having had no one) | `NewContentAdmin {id, email}` → `ContentOffer {id, org, email, grounds, from?, at, expiresAt, answer?}`: waiting on the email, once by `id` (the same id for another change: 409); an email offered and waiting already answers that offer. A billing admin, a seat's holder or anyone else is 403; who pays, once its content has had anyone, 403; past 32 admins, their offers waiting included, 400 |
+| `GET /api/orgs/offers` | a person | → `ContentOffers {offers}`: the admins' places waiting on an email of theirs |
+| `POST /api/orgs/{org}/content-admin-offers/{offer}/accept` | whoever signs in with its email (anyone else: 404) | `{}` or none → `ContentOffer`: they are its content admin. Again, the same answer; declined before, or its grounds no longer holding, 409; withdrawn, expired or lapsed, 404 |
+| `POST /api/orgs/{org}/content-admin-offers/{offer}/decline` | the same | `{}` or none → `ContentOffer`; accepted before, 409 |
+| `DELETE /api/orgs/{org}/content-admin-offers/{offer}` | its content admins | → `ContentOffer`, `answer: withdrawn` (again, the same); answered or expired, 409 or 404 |
+| `DELETE /api/orgs/{org}/content-admins/{person}` | the same | → `ContentPerson`: an admin no more, still in its content, their waiting offers withdrawn (one who is none: as they are). The last admin is 409 |
+| `GET /api/orgs/{org}/content?before=` | the same | → `OrgContent {org, people, offers, log: [GovernanceEntry {seq, at, actor, action, subject?, request, detail}], next?}`: the offers waiting, and the log newest first, 100 a page (`before` a number, or 400) |
+| `POST /api/admin/orgs/{org}/content-admin-offers` | the deployment's operators, while it has no content admin | `NewContentAdmin` → `ContentOffer`, logged as theirs there and in the operators' log in the same change; never refused for offers waiting; with an admin, 403 |
+| `GET /api/admin/orgs/{org}/content?before=` | the same | → `OrgContent` |
+
 ### Billing (docs/billing.md, "Stripe" and "Trials")
 
 On a deployment that sells seats (its config's `stripe`; else these are
@@ -2463,7 +2527,7 @@ and orgs).
 | --- | --- | --- |
 | `POST /api/billing/checkout` | a person (409 holding a good seat, or in an org whose admins give seats) | `{kind?, trialCode?}` → `{url, session}`: Stripe's Checkout of one always-on seat (an org buying again: its paid seats), for 31 minutes; nothing is made until it is paid. `kind` is `seat_always_on`, the default; `seat` is 400 (not sold). With a trial code (as typed: any case, spaces and dashes aside), Stripe's trial of its days (30 at most), no card asked (its end with none on file cancels it: the seat lapses until they pay again), and no promotion code on top. A code that is unknown is 404; ended (off, past its expiry, or of the `seat` no longer sold), 400; full, or redeemed by someone who had a trial or whose org has paid, 409. Nothing is made for a refused one |
 | `POST /api/billing/sessions/{id}` | its buyer (anyone else, or a session Stripe never made: 404) | → `MySeat`: the Checkout's return (a seat's `/welcome?checkout={id}`, a pack's `/settings?pack={id}`; Back from Checkout, `?checkout=canceled` or `?pack=canceled`): a completed one's seat is theirs at once, whatever the webhook's timing; again, it changes nothing |
-| `POST /api/billing/packs` | a seat's holder; an org's admin for a member who holds a seat (`member`: their row's id; 403 otherwise; 400 holding no seat) | `{member?}` → `{url, session}`: a Checkout for a $25 credit pack (decision 55; the one-time price `fragment_credit_pack`). Paid, its webhook or its return grants $25 of purchased credit on the member's ledger, kept until spent, once by its Checkout (`GrantCredit {id: pack:<session>, by: stripe}`). Its return is its buyer's |
+| `POST /api/billing/packs` | a seat's holder; an org's admin for a member who holds a seat (`member`: their row's id; 403 otherwise; 400 holding no seat) | `{member?}` → `{url, session}`: a Checkout for a $25 credit pack (decision 55; the one-time price `fragment_credit_pack`). Paid, its webhook or its return grants $25 of purchased credit on the member's ledger, kept until spent, once by its Checkout (`GrantCredit {id: pack:<session>, by: stripe}`). Its return is its buyer's. An org's own pack is `POST /api/orgs/{org}/billing/pack` (Ledger): its metadata names the org's ledger (`fragment_payer: org:<id>`) and no person, so paid it credits the org it named, even after its buyer left |
 | `POST /api/billing/portal` | who pays for the asker's org (`MySeat`'s `pays`; anyone else, its other admins included, 403) | → `{url}`: Stripe's portal on the deployment's own configuration (`stripe.portal`): card, invoices, billing address, cancel at period end |
 | `POST /api/stripe/webhook` | Stripe, signed (`Stripe-Signature`, this endpoint's secret, within 300 s; else 401) | an event → `{received, applied}`: `checkout.session.completed` and `customer.subscription.created`, `.updated`, `.deleted` are fetched again and written; any other event, or one not this deployment's, is answered and dropped. A failure is 5xx, and Stripe sends it again |
 

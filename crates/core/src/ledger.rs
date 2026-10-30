@@ -1,8 +1,10 @@
-//! A person's usage ledger (docs/ledger.md; docs/cloudflare-v1.md,
-//! decisions 24–27, 36 and 62): credit, plans, meters, caps, and the
-//! standing that says what may still spend.
+//! A payer's usage ledger (docs/ledger.md; docs/cloudflare-v1.md,
+//! decisions 24–27, 36, 62 and 66–68): credit, plans, meters, caps, and
+//! the standing that says what may still spend.
 //!
-//! One ledger per payer. The caller decides who pays (an agent's model
+//! One ledger per payer: a person, or an org (`org`: credit it bought or
+//! was given, a budget, and none of a person's plan, seat, overdraft,
+//! agents or computer). The caller decides who pays (an agent's model
 //! and compute bill the agent's owner; a fragment's hosting bills the
 //! fragment's owner) and sends each row to that payer's ledger, which
 //! keys on nothing else. Money is integer micro-dollars, months are UTC,
@@ -58,7 +60,7 @@
 
 use std::collections::BTreeMap;
 
-use fragment_proto::ledger::{FragmentSpend, GrantCredit, LedgerStatus, Plan, SeatState, SetFragmentCap, SetOverdraft, SetPlan, SetSeat, Standing, Why};
+use fragment_proto::ledger::{FragmentSpend, GrantCredit, LedgerStatus, OrgBudget, Plan, SeatState, SetFragmentCap, SetOverdraft, SetPlan, SetSeat, Standing, Why};
 use fragment_proto::ErrorCode;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -66,6 +68,7 @@ use sha2::{Digest, Sha256};
 use crate::price::{self, dollars, PriceBook, PriceError, Priced, Usage, UsageFault, USD};
 
 pub mod gate;
+pub mod org;
 #[cfg(test)]
 mod sim;
 #[cfg(test)]
@@ -212,6 +215,7 @@ pub enum Command {
     SetOverdraft(SetOverdraft),
     SetCap(SetFragmentCap),
     SetBook(SetPriceBook),
+    OrgBudget(OrgBudget),
 }
 
 /// A batch's answer, kept with the batch so a replay answers the same.
@@ -271,6 +275,15 @@ pub enum Refused {
     /// The fragment spent its cap this month: only its owner spends in it
     /// until the next month.
     CapReached { cap: i64, spent: i64 },
+    /// What only a person's ledger has (a plan, a seat, an overdraft, an
+    /// agent's turn or a computer's time), asked of an org's: its credit
+    /// pays for its fragments alone (decision 67).
+    PersonsOnly,
+    /// What only an org's ledger has (a budget), asked of a person's.
+    OrgsOnly,
+    /// The org's fragments spent its budget this month: AI steps wait for
+    /// a larger one or the next month (decision 68).
+    BudgetReached { budget: i64, spent: i64 },
     /// The person was wiped (docs/api.md, Operators): their ledger keeps
     /// nothing but that, and takes nothing more. Not the core's to decide:
     /// the cell answers it for a ledger it emptied, so a row still on its
@@ -327,8 +340,8 @@ impl Refused {
             Refused::TooLarge => ErrorCode::TooLarge,
             // what a guest's plan does not allow, as a role does not: no
             // amount of credit is short
-            Refused::GuestPayer | Refused::GuestCreates => ErrorCode::Forbidden,
-            Refused::AgentsStopped { .. } | Refused::ReadOnly { .. } | Refused::CapReached { .. } => ErrorCode::BudgetUsedUp,
+            Refused::GuestPayer | Refused::GuestCreates | Refused::PersonsOnly | Refused::OrgsOnly => ErrorCode::Forbidden,
+            Refused::AgentsStopped { .. } | Refused::ReadOnly { .. } | Refused::CapReached { .. } | Refused::BudgetReached { .. } => ErrorCode::BudgetUsedUp,
         }
     }
 
@@ -352,6 +365,11 @@ impl Refused {
             Refused::ReadOnly { why } => format!("fragments are read-only: {}", why_text(why)),
             Refused::CapReached { cap, spent } => {
                 format!("this fragment spent {} of its {} cap this month: only its owner spends in it until next month", dollars(spent), dollars(cap))
+            }
+            Refused::PersonsOnly => "an org's credit pays for its fragments, never a person's plan, seat, agents or computer".into(),
+            Refused::OrgsOnly => "only an org's ledger has a budget".into(),
+            Refused::BudgetReached { budget, spent } => {
+                format!("this org's fragments spent {} of its {} budget this month: AI steps wait until its billing admins raise it, or next month", dollars(spent), dollars(budget))
             }
             Refused::Wiped => "this person was wiped: their ledger takes nothing more".into(),
         }
@@ -482,6 +500,8 @@ pub trait Store {
     fn add_spent(&mut self, month: Month, fragment: &str, micros: i64);
     /// A month's spend by fragment, the largest first, at most `limit`.
     fn spends(&self, month: Month, limit: usize) -> Vec<(String, i64)>;
+    /// A month's spend, every fragment's together.
+    fn month_spent(&self, month: Month) -> i64;
     fn cap(&self, fragment: &str) -> Option<i64>;
     fn set_cap(&mut self, fragment: &str, micros: Option<i64>);
     /// Forgets the entries and batches from before `before_ms` and the
@@ -531,6 +551,10 @@ impl Store for Memory {
 
     fn add_spent(&mut self, month: Month, fragment: &str, micros: i64) {
         *self.spent.entry(month).or_default().entry(fragment.to_string()).or_insert(0) += micros;
+    }
+
+    fn month_spent(&self, month: Month) -> i64 {
+        self.spent.get(&month).map_or(0, |m| m.values().sum())
     }
 
     fn spends(&self, month: Month, limit: usize) -> Vec<(String, i64)> {
@@ -712,7 +736,13 @@ fn gate(money: &Money, spend: Spend) -> Result<(), Refused> {
             Spend::AgentTurn | Spend::AiStep | Spend::Wake | Spend::Write => Refused::GuestPayer,
         });
     }
-    match (spend, money.standing()) {
+    allowed(money.standing(), spend)
+}
+
+/// Whether `spend` may start at `standing`: writes until read-only, the
+/// rest only at `Ok`.
+fn allowed(standing: Standing, spend: Spend) -> Result<(), Refused> {
+    match (spend, standing) {
         (_, Standing::ReadOnly { why }) => Err(Refused::ReadOnly { why }),
         (Spend::Write | Spend::Create, Standing::AgentsStopped { .. } | Standing::Ok) => Ok(()),
         (_, Standing::AgentsStopped { why }) => Err(Refused::AgentsStopped { why }),
@@ -720,13 +750,19 @@ fn gate(money: &Money, spend: Spend) -> Result<(), Refused> {
     }
 }
 
-/// A person's ledger: the head of its state (see the module's docs). A
+/// A payer's ledger: the head of its state (see the module's docs). A
 /// head kept before decision 62 names its `book` too: read past (the
 /// fields a head does not name are let go), and written with the book of
 /// the release writing it (`written`), for a rollback.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Ledger {
     money: Money,
+    /// An org's terms, never written in the head: an older release that
+    /// rewrites a head it reads (its sweep) drops what it does not know.
+    /// The cell binds them as it reads one, from its ledger's name and its
+    /// own row of the budget (`bind_org`).
+    #[serde(skip)]
+    org: Option<org::OrgTerms>,
     /// The reservations the releases before decision 62 held, by their
     /// references as a head of theirs names them, until `retire_holds`
     /// forgives them (the first thing done with a head read); written as
@@ -772,7 +808,7 @@ impl Ledger {
             read_only: false,
             totals: Totals::default(),
         };
-        let ledger = Ledger { money, holds: OldHolds::default() };
+        let ledger = Ledger { money, org: None, holds: OldHolds::default() };
         ledger.assert_valid();
         ledger
     }
@@ -786,14 +822,22 @@ impl Ledger {
     }
 
     pub fn standing(&self, now_ms: i64) -> Standing {
-        self.money_at(now_ms).standing()
+        let money = self.money_at(now_ms);
+        match self.org {
+            Some(_) => org::standing(&money),
+            None => money.standing(),
+        }
     }
 
-    /// Whether this payer's money lets `spend` start (decisions 25 and
-    /// 27). A spend in a fragment someone else owns also asks that owner's
-    /// ledger `fragment_open`.
+    /// Whether this payer's money lets `spend` start (decisions 25, 27
+    /// and 67). A spend in a fragment someone else owns also asks that
+    /// owner's ledger `fragment_open`.
     pub fn gate(&self, spend: Spend, now_ms: i64) -> Result<(), Refused> {
-        gate(&self.money_at(now_ms), spend)
+        let money = self.money_at(now_ms);
+        match self.org {
+            Some(_) => org::gate(&money, spend),
+            None => gate(&money, spend),
+        }
     }
 
     /// Whether `fragment`, which this ledger's person owns, is still open
@@ -820,9 +864,13 @@ impl Ledger {
     /// owns it, that owner's ledger answers `fragment_open` too (an agent
     /// working for Skyler in Paul's fragment: Skyler pays, Paul's cap
     /// applies; decisions 26 and 36). Caps stop AI steps and agent turns,
-    /// never writes or wakes.
+    /// never writes or wakes. An org's fragments have no owner who passes
+    /// their cap, and their AI steps stop at its budget too (decision 68).
     pub fn may_spend(&self, store: &impl Store, spend: Spend, fragment: Option<&str>, by_owner: bool, now_ms: i64) -> Result<(), Refused> {
         self.gate(spend, now_ms)?;
+        if let Some(terms) = &self.org {
+            return terms.may_spend(self, store, spend, fragment, now_ms);
+        }
         match (spend, fragment, by_owner) {
             (Spend::AgentTurn | Spend::AiStep, Some(f), false) => self.fragment_open(store, f, now_ms),
             _ => Ok(()),
@@ -906,6 +954,9 @@ impl Ledger {
     /// Durable Object checks them again after reading the head back.
     pub fn assert_valid(&self) {
         self.money.assert_valid();
+        if self.org.is_some() {
+            org::assert_valid(&self.money);
+        }
         assert!(self.holds.0.is_empty(), "a head's old holds are retired as it is read");
     }
 
@@ -973,6 +1024,7 @@ impl Ledger {
     }
 
     pub fn set_plan(&mut self, store: &mut impl Store, c: &SetPlan, now_ms: i64) -> Result<(), Refused> {
+        self.persons_only()?;
         self.roll(now_ms);
         let command = Command::SetPlan(c.clone());
         if !Self::admit(store, &c.id, &command)? {
@@ -990,6 +1042,7 @@ impl Ledger {
     /// undoes a `canceled`, and its sender learns it was not applied (a
     /// replay of one that was answers as it did).
     pub fn set_seat(&mut self, store: &mut impl Store, c: &SetSeat, now_ms: i64) -> Result<(), Refused> {
+        self.persons_only()?;
         self.roll(now_ms);
         let command = Command::SetSeat(c.clone());
         if !Self::admit(store, &c.id, &command)? {
@@ -1011,6 +1064,7 @@ impl Ledger {
     /// An operator's overdraft for this person. It decides read-only
     /// afresh: an operator who raises it lets the fragments write again.
     pub fn set_overdraft(&mut self, store: &mut impl Store, c: &SetOverdraft, now_ms: i64) -> Result<(), Refused> {
+        self.persons_only()?;
         self.roll(now_ms);
         let command = Command::SetOverdraft(c.clone());
         if !Self::admit(store, &c.id, &command)? {
@@ -1062,7 +1116,8 @@ impl Ledger {
         if let Some(record) = store.batch(&m.batch) {
             return if record.digest == digest { Ok(record.answer) } else { Err(Refused::ConflictingBody) };
         }
-        if self.money.plan == Plan::Guest {
+        // an org's plan is a guest's, and it pays
+        if self.money.plan == Plan::Guest && self.org.is_none() {
             return Err(Refused::GuestPayer);
         }
         let id = format!("book:{}", book.digest());
@@ -1095,6 +1150,9 @@ impl Ledger {
     /// One row: `Some(charge)` when charged now, `None` when an earlier
     /// batch charged it with the same body.
     fn meter_row(&mut self, store: &mut impl Store, row: &MeterRow, now_ms: i64, book: &PriceBook) -> Result<Option<i64>, Refused> {
+        if self.org.is_some() && !org::orgs_row(row) {
+            return Err(Refused::PersonsOnly);
+        }
         if !valid_id(&row.reference) || !valid_names([&row.fragment, &row.agent, &row.computer]) {
             return Err(invalid(Invalid::Id));
         }

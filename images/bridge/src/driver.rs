@@ -124,7 +124,7 @@ pub fn load(dir: &Path) -> Result<State, BridgeError> {
             }
             let value: Value = serde_json::from_slice(&bytes).map_err(|e| corrupt(e.to_string()))?;
             let Some(version) = value.get("version").and_then(Value::as_u64) else { return Err(corrupt("no version".into())) };
-            if version != u64::from(engine::STATE_VERSION) {
+            if !engine::STATE_VERSIONS.iter().any(|v| u64::from(*v) == version) {
                 crate::ev!("state.set_aside", { "path": path.display().to_string(), "version": version, "why": "another bridge's format: the journal says which turns ran" });
                 return Ok(State::default());
             }
@@ -376,7 +376,7 @@ pub async fn run(cfg: Config, runtime: Box<dyn Runtime>, stop: watch::Receiver<b
                     lanes.push(&fragment, Job::Post { agent, channel, id, body, files, relay })
                 }
                 Effect::Claim { agent, fragment, turn, id, body } => lanes.push(&fragment, Job::Claim { agent, turn, id, body }),
-                Effect::Owed { agent, fragment, turn, id, body } => lanes.push(&fragment, Job::Owed { agent, turn, id, body }),
+                Effect::Owed { agent, fragment, channel, turn, id, body } => lanes.push(&fragment, Job::Owed { agent, channel, turn, id, body }),
                 Effect::Draft { agent, fragment, turn, text } => lanes.push(&fragment, Job::Draft { agent, turn, text }),
                 Effect::Runtime(c) => runtime_lane.push(c),
                 Effect::Keepalive(on) => {
@@ -718,7 +718,9 @@ impl ViewCache {
         // agent's message, a hand-off, is told by its name: its title, as
         // `__people` says it now).
         let mut ids: Vec<String> = writer.filter(|w| records::is_identity(w) && *w != agent.identity).map(str::to_string).into_iter().collect();
-        let (agents, people): (Vec<&api::Member>, Vec<&api::Member>) = members.iter().filter(|m| m.principal != agent.identity && records::is_identity(&m.principal)).partition(|m| m.kind == "agent");
+        // the agent itself too: an answer names the agent that gave it
+        // (engine.rs, `owe_answer`) from whichever agent's view it holds
+        let (agents, people): (Vec<&api::Member>, Vec<&api::Member>) = members.iter().filter(|m| records::is_identity(&m.principal)).partition(|m| m.kind == "agent");
         for m in people.into_iter().chain(agents) {
             if ids.len() >= api::PEOPLE_MAX {
                 break;
@@ -920,8 +922,10 @@ async fn follow_once(
 async fn feed(api: &Api, agent: &Agent, fragment: &str, record: Record, inbox: &mpsc::Sender<Msg>, shared: &Shared, view: &mut ViewCache, tasks: bool) -> Option<Ended> {
     let (input_view, since) = if tasks {
         // A routine that fired while the computer was gone longer than this
-        // is skipped, as cron skips a missed run.
-        let since = i64::try_from(crate::log::now_ms().saturating_sub(limits::TASKS_BACKLOG_MS)).expect("ms fit");
+        // is skipped, as cron skips a missed run; an answer never is (its
+        // claim keeps it to one run however late it is read).
+        let answer = matches!(records::task(&record.body), records::Task::Answer { .. });
+        let since = if answer { 0 } else { i64::try_from(crate::log::now_ms().saturating_sub(limits::TASKS_BACKLOG_MS)).expect("ms fit") };
         (None, since)
     } else {
         // a writer the view has no name for (a person or another agent past
@@ -1022,9 +1026,9 @@ enum Job {
     Post { agent: String, channel: &'static str, id: String, body: Value, files: Vec<LocalFile>, relay: Option<String> },
     /// A turn's `turn.start` on `work`, whose answer the engine waits for.
     Claim { agent: String, turn: String, id: String, body: Value },
-    /// One of a turn's last records on `work`: the engine hears when the
-    /// lane is done with it.
-    Owed { agent: String, turn: String, id: String, body: Value },
+    /// One of a turn's last records (on `work`, or an answer on `tasks`):
+    /// the engine hears when the lane is done with it.
+    Owed { agent: String, channel: &'static str, turn: String, id: String, body: Value },
     Draft { agent: String, turn: String, text: Option<String> },
 }
 
@@ -1151,16 +1155,19 @@ async fn work(api: Api, fragment: String, lane: Arc<Lane>, claims: Claims, mut s
             }
             Job::Post { agent, channel, id, body, files, relay } => {
                 // what goes back over SimpleX goes only once it is on the chat
-                let sent = post(&api, &fragment, &agent, channel, &id, body, &files, None, stop.clone()).await;
+                let sent = post(&api, &fragment, &agent, channel, &id, body, &files, None, limits::POST_TRIES_MAX, stop.clone()).await;
                 if let (Some(text), Sent::Posted, Some(sx)) = (relay, sent, claims.simplex.as_ref()) {
                     sx.reply(&agent, &text, &files).await;
                 }
             }
-            Job::Owed { agent, turn, id, body } => {
+            Job::Owed { agent, channel, turn, id, body } => {
                 // Done (answered, or given up after its tries) unless the
                 // bridge is stopping: then the turn keeps owing it, and the
-                // next life posts it again.
-                if post(&api, &fragment, &agent, records::WORK, &id, body, &[], None, stop.clone()).await.ended() {
+                // next life posts it again. An answer (on `tasks`) is never
+                // given up: it is its question's only delivery, so it is
+                // tried until the platform answers it.
+                let tries = if channel == records::TASKS { u32::MAX } else { limits::POST_TRIES_MAX };
+                if post(&api, &fragment, &agent, channel, &id, body, &[], None, tries, stop.clone()).await.ended() {
                     let _ = claims.inbox.send(Msg::Input(Input::Posted { turn, id })).await;
                 }
             }
@@ -1239,14 +1246,15 @@ impl Sent {
     }
 }
 
-/// A post, tried until the platform answers it, or `POST_TRIES_MAX` times
-/// on a transport error, 429 or 5xx (a jittered backoff between: lesson 5),
-/// or refused at once. A relayed record is signed by its `door` at each
-/// try, its files' refs in it (simplex/door.rs).
+/// A post, tried until the platform answers it, or `tries` times on a
+/// transport error, 429 or 5xx (a jittered backoff between: lesson 5), or
+/// refused at once. A relayed record is signed by its `door` at each try,
+/// its files' refs in it (simplex/door.rs).
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn post(api: &Api, fragment: &str, agent: &str, channel: &str, id: &str, mut body: Value, files: &[LocalFile], door: Option<&crate::simplex::door::Key>, stop: watch::Receiver<bool>) -> Sent {
+pub(crate) async fn post(api: &Api, fragment: &str, agent: &str, channel: &str, id: &str, mut body: Value, files: &[LocalFile], door: Option<&crate::simplex::door::Key>, tries: u32, stop: watch::Receiver<bool>) -> Sent {
+    assert!(tries >= 1, "a post is tried");
     let mut backoff = Backoff::default();
-    for attempt in 1..=limits::POST_TRIES_MAX {
+    for attempt in 1..=tries {
         let uploaded = upload(api, fragment, agent, files).await;
         let result = match uploaded {
             Ok(refs) => {
@@ -1265,7 +1273,7 @@ pub(crate) async fn post(api: &Api, fragment: &str, agent: &str, channel: &str, 
                 crate::ev!("posted", { "fragment": fragment, "channel": channel, "id": id, "replayed": posted.replayed, "attempt": attempt });
                 return Sent::Posted;
             }
-            Err(e) if e.retryable() && attempt < limits::POST_TRIES_MAX => {
+            Err(e) if e.retryable() && attempt < tries => {
                 crate::ev!("post.retry", { "fragment": fragment, "id": id, "attempt": attempt, "error": e.to_string() });
                 if !backoff.wait(stop.clone()).await {
                     return Sent::Stopped;
@@ -1714,7 +1722,7 @@ mod tests {
             };
             tokio::spawn(crate::net::serve(listener, answer, stop.clone()));
             let api = Api::new(&format!("http://{addr}")).expect("an address");
-            let sent = post(&api, "chat--a1b2", "juniper--k3x9", records::CHAT, "sx:1", json!({ "text": "hi" }), &[], None, stop).await;
+            let sent = post(&api, "chat--a1b2", "juniper--k3x9", records::CHAT, "sx:1", json!({ "text": "hi" }), &[], None, limits::POST_TRIES_MAX, stop).await;
             assert_eq!(sent, want, "{status}");
             assert!(sent.ended());
         }

@@ -6,13 +6,15 @@
 //! and computer; this module only checks who asks.
 
 use fragment_core::mail::PRODUCT;
-use fragment_proto::org::{CompSeat, Comped, OrgMember, SeatKind, SeatStatus, SetSeatKind, SetSleeps};
+use fragment_core::governance::Answer;
+use fragment_proto::org::{CompSeat, Comped, NewContentAdmin, OrgMember, SeatKind, SeatStatus, SetSeatKind, SetSleeps};
 use fragment_proto::{limits, ErrorCode};
 use worker::*;
 
 use crate::config::Config;
 use crate::error::{CellError, CellResult};
 use crate::registry::calls::By;
+use crate::registry::content::{AnswerOffer, ContentOf, OfferAdmin, OffersToMe, StepDown, WithdrawOffer};
 use crate::registry::orgs::{CompKind, CompSeatCall, EndComp, Mine, Mined, OrgOf, Sleeps, SyncSeat};
 use crate::registry::offers::{AcceptOffer, DeclineOffer, LeaveOrg};
 use crate::registry::seats::{AddAdmin, AddSeat, Added, RemoveAdmin, RemoveSeat};
@@ -138,6 +140,66 @@ pub(crate) async fn org(mut req: Request, env: &Env, cfg: &Config, url: &Url, re
     }
 }
 
+/// `/api/orgs/<org>/…`, an org named, never found through a person
+/// (decision 66). Its money: `GET ledger`, its own credit and this month's
+/// spend, and `PUT budget {id, micros}`, for its billing admins; `POST
+/// billing/pack {}`, a Checkout of its own $25 of credit, for who pays for
+/// it alone (its seats' credit stays each holder's). Its content
+/// (decisions 69 to 71), apart from its billing: `POST
+/// content-admin-offers {id, email}` (its content admins; who pays, for
+/// its first), answered by whoever signs in with the email (`POST
+/// content-admin-offers/<offer>/accept|decline`; theirs are `GET
+/// /api/orgs/offers`); `DELETE content-admin-offers/<offer>`, `DELETE
+/// content-admins/<person>` and `GET content?before=` (its content
+/// admins). Each is a person's own, never an agent's, and a billing
+/// admin's place gives no content power.
+pub(crate) async fn named(mut req: Request, env: &Env, cfg: &Config, url: &Url, org: &str, rest: &[&str]) -> CellResult<Response> {
+    let bytes = read_body(&mut req, limits::BODY_MAX_BYTES).await?;
+    let by = by(env, &req, url, &bytes)?;
+    if let (Method::Get, "offers", []) = (req.method(), org, rest) {
+        return json_answer(&ask_registry(env, &OffersToMe { by }).await?);
+    }
+    if !fragment_core::org::valid_org_id(org) {
+        return Err(CellError::new(ErrorCode::NotFound, format!("no org {org}")));
+    }
+    let empty = || match bytes.is_empty() || body::<serde_json::Map<String, serde_json::Value>>(&bytes).is_ok_and(|m| m.is_empty()) {
+        true => Ok(()),
+        false => Err(CellError::invalid("this takes no body (or {})")),
+    };
+    let ledger = fragment_core::ledger::org::Payer::Org(org.to_string()).name();
+    // its billing admins: the registry sees them, or refuses
+    let admins = |by| OrgOf { by: Some(by), org: Some(org.to_string()) };
+    match (req.method(), rest) {
+        (Method::Get, ["ledger"]) => {
+            ask_registry(env, &admins(by)).await?;
+            json_answer(&crate::ledger::ask(env, &ledger, &crate::ledger::OrgStatus {}).await?)
+        }
+        (Method::Put, ["budget"]) => {
+            let mut budget: fragment_proto::ledger::OrgBudget = body(&bytes)?;
+            ask_registry(env, &admins(by)).await?;
+            budget.id = crate::commanded("budget", &budget.id)?;
+            json_answer(&crate::ledger::ask(env, &ledger, &budget).await?)
+        }
+        (Method::Post, ["billing", "pack"]) => {
+            empty().map_err(|_| CellError::invalid("an org's pack takes no body (or {}): the org named is whose credit it is"))?;
+            json_answer(&crate::billing::pack(env, cfg, by, None, Some(org.to_string())).await?)
+        }
+        (Method::Post, ["content-admin-offers"]) => {
+            let b: NewContentAdmin = body(&bytes)?;
+            json_answer(&ask_registry(env, &OfferAdmin { by: Some(by), operator: None, org: org.to_string(), email: b.email, request: b.id }).await?)
+        }
+        (Method::Post, ["content-admin-offers", offer, verb @ ("accept" | "decline")]) => {
+            empty()?;
+            let answer = if *verb == "accept" { Answer::Accepted } else { Answer::Declined };
+            json_answer(&ask_registry(env, &AnswerOffer { by, org: org.to_string(), offer: offer.to_string(), answer }).await?)
+        }
+        (Method::Delete, ["content-admin-offers", offer]) => json_answer(&ask_registry(env, &WithdrawOffer { by, org: org.to_string(), offer: offer.to_string() }).await?),
+        (Method::Delete, ["content-admins", person]) => json_answer(&ask_registry(env, &StepDown { by, org: org.to_string(), person: person.to_string() }).await?),
+        (Method::Get, ["content"]) => json_answer(&ask_registry(env, &ContentOf { by: Some(by), org: org.to_string(), before: before(url)? }).await?),
+        (m, _) => Err(CellError::new(ErrorCode::NotFound, format!("no route {} /api/orgs/{org}/{}", m.as_ref(), rest.join("/")))),
+    }
+}
+
 /// Who an operator's request is from (the admin's routes, operators'
 /// ledger commands): a key the deployment lists, held by anyone or no one
 /// (no registry is asked, as a wipe's); a signed request or the shell's
@@ -184,6 +246,11 @@ pub(crate) async fn session_operator(env: &Env, cfg: &Config, token: String) -> 
         }
     }
     Ok(None)
+}
+
+/// A log page's `before`, a log entry's number when named.
+fn before(url: &Url) -> CellResult<Option<u64>> {
+    param(url, "before").map(|b| b.parse().map_err(|_| CellError::invalid("before is a log entry's number"))).transpose()
 }
 
 /// A query parameter, once.
@@ -250,6 +317,14 @@ pub(crate) async fn admin(mut req: Request, env: &Env, cfg: &Config, url: &Url, 
             ask_registry(env, &admin::Note { by, action: "trial-send".into(), target: code.id.clone(), detail: format!("to {}", mail.to) }).await?;
             json_answer(&serde_json::json!({ "sent": true, "to": mail.to }))
         }
+        // the recovery of an org with no content admin (a sole admin's
+        // wipe; decision 69): its governance log and the operators' name it,
+        // in the one change
+        (Method::Post, ["orgs", org, "content-admin-offers"]) => {
+            let b: NewContentAdmin = body(&bytes)?;
+            json_answer(&ask_registry(env, &OfferAdmin { by: None, operator: Some(by), org: org.to_string(), email: b.email, request: b.id }).await?)
+        }
+        (Method::Get, ["orgs", org, "content"]) => json_answer(&ask_registry(env, &ContentOf { by: None, org: org.to_string(), before: before(url)? }).await?),
         (m, _) => Err(CellError::new(ErrorCode::NotFound, format!("no route {} /api/admin/{}", m.as_ref(), rest.join("/")))),
     }
 }

@@ -8,8 +8,10 @@
 //! - each inbound is acked, then its turn runs concurrently with other
 //!   chats': first an empty bracket (`👀`, off, `✅`: the real one's for a
 //!   message it took while its gateway was starting, sent here before
-//!   every turn), then `👀`; its tool progress (`tool`) as a send answering nothing
-//!   and an edit adding a line; an approval (`risky`) as a `prompt` op whose
+//!   every turn), then `👀`; its tool calls' ends on the activity socket,
+//!   as the image's plugin says them (`tool`: with its progress, a send
+//!   answering nothing and an edit adding a line, which are no steps); an
+//!   approval (`risky`) as a `prompt` op whose
 //!   `prompt_response` answer resolves it mid-turn, confirmed by an interim
 //!   send, or that times out after `approval_ms` (its `approvals.timeout`)
 //!   as Hermes' does: the card edited to say so, or the notice sent when the
@@ -261,6 +263,18 @@ impl Gateway {
         let _ = self.out.send(Message::text(format!("{v}\n")));
     }
 
+    /// A tool call's end, as the image's plugin says it on the activity
+    /// socket (`post_tool_call`), answered before it returns.
+    async fn observe(&self, turn: &str, id: &str, tool: &str, args: &str) {
+        let base = Base { host: self.addr.ip().to_string(), port: self.addr.port(), prefix: String::new() };
+        let mut activity = net::connect_ws(&base, "/relay/activity", &[("authorization", bearer(&self.id, &self.secret))]).await.unwrap();
+        activity.next().await.unwrap().unwrap();
+        let frame = json!({ "turn": turn, "tool": tool, "args": args, "excerpt": "", "tool_call_id": id, "status": "completed", "duration_ms": 1 });
+        activity.send(Message::text(frame.to_string())).await.unwrap();
+        assert_eq!(activity.next().await.unwrap().unwrap().into_text().unwrap(), "observed");
+        activity.close(None).await.unwrap();
+    }
+
     async fn act(&self, action: Value) -> Value {
         if self.seen.lock().unwrap().dead {
             return json!({ "success": false, "error": "gone with its container" });
@@ -411,6 +425,37 @@ async fn turn(gw: &Gateway, event: Value, mut rx: mpsc::UnboundedReceiver<Heard>
     tokio::time::sleep(Duration::from_millis(100)).await;
     gw.act(react("👀", false)).await;
     let message = event["text"].as_str().unwrap_or("").trim_start_matches('\u{200b}').to_string();
+    if message.contains("observed boundary") {
+        // A tool call's end on the activity socket, and the words said
+        // before the call on this one, with no order between the two: a
+        // quick tool's end can come before those words, even before their
+        // first draft (as real Hermes' did). `with words`: there are such
+        // words, late. `streamed`: then the answer streams, and a memory
+        // update said beside it ends while it does. `many`: 205 calls
+        // first, then two more, each after its words, in order.
+        let calls = if message.contains("many") { 205 } else { 1 };
+        for n in 0..calls {
+            gw.observe(&mid, &format!("call-{n}"), "terminal", "true").await;
+        }
+        let send = |content: &str| json!({ "op": "send", "chat_id": chat, "content": content, "reply_to": mid, "metadata": { "notify": true } });
+        if message.contains("with words") {
+            gw.act(send(NARRATION)).await;
+        }
+        if message.contains("streamed") {
+            gw.act(json!({ "op": "draft", "chat_id": chat, "draft_id": 7, "content": "the final", "final": false, "metadata": { "reply_to_message_id": mid } })).await;
+            gw.observe(&mid, "call-memory", "memory", "add: likes tea").await;
+        }
+        if message.contains("many") {
+            for (n, words) in [NARRATION, SECOND_NARRATION].into_iter().enumerate() {
+                gw.act(send(words)).await;
+                gw.observe(&mid, &format!("call-after-{n}"), "terminal", "true").await;
+            }
+        }
+        gw.act(send("the final answer")).await;
+        gw.act(react("👀", true)).await;
+        gw.act(react("✅", false)).await;
+        return;
+    }
     if message.contains("fail") {
         // v0.21.5 when its handler raises (`_process_message_background`):
         // `❌` with nothing said, then its notice as a send answering nothing
@@ -449,8 +494,8 @@ async fn turn(gw: &Gateway, event: Value, mut rx: mpsc::UnboundedReceiver<Heard>
     if text.contains("narrate") {
         // The model's text beside a tool call, as Hermes' stream consumer
         // delivers it: drafts, then, at the tool boundary, a send answering
-        // the turn that ends the segment; its tool progress reaches the
-        // connector after that send, or (`late`) before it, or (`stalled`)
+        // the turn that ends the segment; its supported observation reaches
+        // the connector after that send, or (`late`) before it, or (`stalled`)
         // before it by longer than the bridge holds a step for its words.
         // `long`: words well past a step's old 300 characters. `only`: the
         // answer said beside a housekeeping call, which Hermes sends once.
@@ -458,7 +503,7 @@ async fn turn(gw: &Gateway, event: Value, mut rx: mpsc::UnboundedReceiver<Heard>
         // `words-picture:<url>`: the (first call's) words end with that
         // image (a model showing what its tool made, then working on).
         // `twice`: two calls, the second's words `SECOND_NARRATION`;
-        // `pause:<ms>`: the second's `send` that long after its progress.
+        // `pause:<ms>`: the second's `send` that long after its observation.
         let rounds = if text.contains("many") { NARRATED_CALLS } else if text.contains("twice") { 2 } else { 1 };
         let pause = text.split_whitespace().find_map(|w| w.strip_prefix("pause:")).and_then(|ms| ms.parse::<u64>().ok());
         for round in 1..=rounds {
@@ -481,10 +526,9 @@ async fn turn(gw: &Gateway, event: Value, mut rx: mpsc::UnboundedReceiver<Heard>
             gw.act(json!({ "op": "draft", "chat_id": chat, "draft_id": 7, "content": half, "final": false, "metadata": { "reply_to_message_id": mid } })).await;
             gw.act(json!({ "op": "draft", "chat_id": chat, "draft_id": 7, "content": words, "final": false, "metadata": { "reply_to_message_id": mid } })).await;
             let said = json!({ "op": "send", "chat_id": chat, "content": words, "reply_to": mid, "metadata": { "reply_to_message_id": mid, "notify": true } });
-            let tool = if text.contains("only") { "🧠 memory: \"saved\"".to_string() } else { format!("💻 terminal: `echo {round}`") };
-            let progress = json!({ "op": "send", "chat_id": chat, "content": tool, "reply_to": null, "metadata": {} });
+            let (tool, args) = if text.contains("only") { ("memory", "saved".to_string()) } else { ("terminal", format!("echo {round}")) };
             if text.contains("late") || text.contains("stalled") {
-                gw.act(progress).await;
+                gw.observe(&mid, &format!("narrated-{round}"), tool, &args).await;
                 if text.contains("stalled") {
                     tokio::time::sleep(Duration::from_millis(fragment_bridge::limits::STEP_HOLD_MS + 700)).await;
                 }
@@ -494,7 +538,7 @@ async fn turn(gw: &Gateway, event: Value, mut rx: mpsc::UnboundedReceiver<Heard>
                 gw.act(said).await;
             } else {
                 gw.act(said).await;
-                gw.act(progress).await;
+                gw.observe(&mid, &format!("narrated-{round}"), tool, &args).await;
             }
         }
         if text.contains("only") {
@@ -507,9 +551,15 @@ async fn turn(gw: &Gateway, event: Value, mut rx: mpsc::UnboundedReceiver<Heard>
         gw.act(json!({ "op": "send", "chat_id": chat, "content": STUCK, "reply_to": null, "metadata": {} })).await;
     }
     if text.contains("tool") {
+        // its progress, as Hermes' sender sends it (no step), then its
+        // calls' ends (`without observations`: none, as with no plugin)
         let sent = gw.act(json!({ "op": "send", "chat_id": chat, "content": "💻 terminal: `ls`", "reply_to": null, "metadata": {} })).await;
         let id = sent["message_id"].as_str().unwrap_or("").to_string();
         gw.act(json!({ "op": "edit", "chat_id": chat, "message_id": id, "content": "💻 terminal: `ls`\n🔍 Searching the web for x", "metadata": {} })).await;
+        if !text.contains("without observations") {
+            gw.observe(&mid, "call-terminal", "terminal", "ls").await;
+            gw.observe(&mid, "call-search", "web_search", "x").await;
+        }
     }
     if let Some(urls) = event["media_urls"].as_array() {
         let mut bytes = 0usize;
