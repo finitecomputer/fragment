@@ -634,8 +634,8 @@ async fn the_hermes_image() {
     }
 }
 
-// ---- saves under the hold (docs/computers.md, "The hold"; rung 3 of
-// docs/explorations/pi-durable.md) ----
+// ---- saves under the hold (docs/computers.md, "The hold";
+// docs/durable-computers.md) ----
 
 /// The platform's hold of `/data`, as the Computer DO makes it, in a
 /// running container: its answer (`held`, within 20 s) and what it names
@@ -1144,7 +1144,7 @@ fn hermes_db(file: &serde_json::Value) -> bool {
     file["path"].as_str().is_some_and(|p| p.starts_with("/data/hermes/") && p.ends_with(".db"))
 }
 
-/// Goal (I8, F4): a save taken under the hold while turns write opens:
+/// Goal : a save taken under the hold while turns write opens:
 /// every one of Hermes' databases in it passes `quick_check`, whatever was
 /// writing as it was taken. Method: saves taken many times during turns
 /// whose tool writes a database of its own (and Hermes its own), half under
@@ -1306,7 +1306,7 @@ const HELD_MAX_MS: u64 = 150_000;
 /// Two of Hermes' timers, each seen rewritten inside the hold.
 const TIMERS: [&str; 2] = ["/data/hermes/state/gateway.heartbeat", "/data/hermes/cron/ticker_heartbeat"];
 
-/// Goal (P2): once the guest says `held`, no file its save keeps changes
+/// Goal: once the guest says `held`, no file its save keeps changes
 /// but what Hermes' gateway rewrites on its own timers, each whole
 /// (`kept_hot`): the bridge claims nothing, the sync, the skills and the
 /// agents' reads start no round, and the copy is done before the answer.

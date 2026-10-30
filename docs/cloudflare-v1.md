@@ -333,13 +333,12 @@ speaking Cloudflare's APIs) returns once this product works.
     restores: the container starts with `RESTORE_PENDING=1`, the DO
     restores `/data`, and it touches `/run/computer/restored`, which the
     image waits for before its own init runs. The DO retries a
-    "temporarily unavailable" start (spike S3b).
+    "temporarily unavailable" start.
 
     The agent's self is in its fragment. (The Hermes image streamed
     Hermes' SQLite with Litestream, for disaster recovery, to an S3
     endpoint the platform gave every computer over its own R2 prefix,
-    until step 1 of docs/durable-computers.md cut it: P4 of
-    docs/explorations/pi-durable.md. Its replicas were never read, no
+    until the saves in docs/durable-computers.md replaced it. Its replicas were never read, no
     restore drill existed, and a restore would have put a `state.db` of
     seconds ago into a `/data` of the last save. The saves themselves now
     carry Hermes' databases whole. The endpoint went after it, #156: no
@@ -423,7 +422,7 @@ speaking Cloudflare's APIs) returns once this product works.
     `p5.finite.place` and `e2e.finite.place`, is from before the move,
     and deploy/e2e.jsonc still names that zone.
 
-    Cloudflare's Worker Previews can't be this. Spike S1 (2026-10-02)
+    Cloudflare's Worker Previews can't be this. The Loader spike (2026-10-02)
     found that a Preview's Workflows, Queue consumers and service bindings
     stay on production, and that it can't host per-fragment origins.
     Previews may still serve the shell alone.
@@ -501,7 +500,7 @@ speaking Cloudflare's APIs) returns once this product works.
     (below).
 
     **The high tier stays off until Cloudflare raises Unified Billing's
-    Opus limit** (about 2 calls a minute per edge machine; spike S4).
+    Opus limit** (about 2 calls a minute per edge machine).
     Until then GLM-5.3 is the top tier. Paul, 2026-10-02: no BYOK and no
     sharding. Ask Cloudflare with the production account's limits
     request. (The "no BYOK" is amended by decision 60, 2026-10-08: a
@@ -653,9 +652,8 @@ speaking Cloudflare's APIs) returns once this product works.
     SimpleX is another door into the agent's own chat with its owner
     (docs/bridge.md, "SimpleX"; docs/chat-records.md, "A relayed
     message"). The lab found a rollback the core cannot see, cured by a
-    forced sync at a rollback's start (docs/explorations/simplex-connector.md,
-    "The lab, 2026-10-22"). What it adds to the platform is
-    docs/explorations/simplex-complexity.md. Its image change ships only
+    forced sync at a rollback's start (images/bridge/tests/simplex.rs).
+    The protocol is in docs/bridge.md, "SimpleX". Its image change ships only
     through an image round.
     Securing the link, Paul, 2026-10-23: once the owner has linked their
     SimpleX app from their own Settings, what it sends is the owner, with
@@ -817,10 +815,10 @@ speaking Cloudflare's APIs) returns once this product works.
     subscribes to (a chat), or someone starts typing there, the platform
     starts the computer at once. It stops again after 60 s if nothing
     arrives. An unused pre-wake costs about $0.002, and it hides the
-    whole wake if it fires 3 s before the message is sent (spike S3b).
+    whole wake if it fires 3 s before the message is sent.
     The rule names no runtime; it is presence on a subscribed channel.
 
-    Twenty minutes after neither has been true, it sleeps. Spike S3
+    Twenty minutes after neither has been true, it sleeps. The container spike
     found that traffic from the container, even a socket to another DO,
     doesn't count as activity; only a socket the Computer DO accepts
     does.
@@ -1616,7 +1614,7 @@ over. Each lesson names the smallest change it makes here:
 6. **A container can outlive a deploy.** A new isolate may find
    `ctx.container.running` true with no monitor attached. The Computer
    DO's constructor attaches `monitor()` again, sets the timeout again,
-   and registers its intercepts again (idempotently; S3 saw them
+   and registers its intercepts again (idempotently; the container spike saw them
    survive). It never destroys the container, since `/data` may be
    unsaved. After any `destroy()`, it polls `running` to false before
    `start()`.
@@ -1638,7 +1636,7 @@ over. Each lesson names the smallest change it makes here:
    containerSnapshot})`. The wake investigation measures them against
    our exec-driven restore (decision 18).
 10. **Staying awake means an alarm, and facets have none.** This agrees
-    with S1's lock on `setAlarm` and S3's keepalive rule.
+    with the lock on `setAlarm` and the keepalive rule.
 11. **A late page gets a snapshot plus the in-flight partial, and the
     final replaces it by id.** A chat's final record carries its draft's
     id, and push notifications fire only on finals.
@@ -1692,299 +1690,13 @@ stops it, restores and saves its data, runs the generic intercept
 handlers, proxies its ports, and wakes it when a subscribed channel gets
 a record. It knows nothing about what the image runs.
 
-## Phases
+## Outstanding validation
 
-Each phase ends with evidence: the tests that prove it, run where its
-exit says.
-
-0. **Spikes on the dev account.**
-   - Loader and Facets: a private SQLite per facet, FTS5 in it,
-     `limits` honored, `globalOutbound: null`, local dev.
-   - The cell on real Workers: startup, `entry.mjs` classes, RPC,
-     alarms, hibernation.
-   - Hermes on Containers:
-     - image size and start time;
-     - multiplexed profiles;
-     - the bridge to a fragment's channels through the egress swap;
-     - the model intercept with streaming and usage capture;
-     - the Google swap;
-     - the screen through a port proxy;
-     - Litestream through the S3 intercept;
-     - a `DirectoryBackup` round trip, and a save at SIGTERM.
-   - AI Gateway: Unified Billing, ZDR, metadata, the 200 requests per
-     minute cap, usage fields, GLM-5.3's 64K context under Hermes.
-   - WorkOS Pipes: Google tokens, and Google's client libraries against
-     placeholder credentials.
-   - A per-branch full deployment with wildcard hosts.
-
-   Exit: a verdict and evidence for each spike.
-
-   Status, 2026-10-02:
-   - Done (see "Spike results"): Loader and Facets (S1), Hermes on
-     Containers (S3) and its wake (S3b), Pipes (S5), AI Gateway (S4).
-   - Folded into phase 2's first step: the cell on real Workers, and a
-     per-branch deployment on `finite.place`.
-   - Phase 0 is complete.
-1. **Freeze and cut. Done 2026-10-02.**
-   - `celld-final` was tagged and the `celld` branch pushed.
-   - The product half of decision 33 went: about 64k lines.
-   - The fleet's deploy path went with it: `fleets/`, `crates/node`,
-     `xtask deploy`, `fleet` and `e2e --fleet`. So the cut can't reach
-     fragment.club.
-   - The substrate stays until phase 2 replaces it: the celld fork,
-     native `KEYS` and the devstack.
-
-   Evidence: `cargo xtask check` green, and the full remaining
-   `cargo xtask e2e` at 1057 passed and 0 failed across 40 sections (1163
-   before; the difference is the deleted lanes).
-
-   Kept for later phases:
-   - **The frame-session redeem half** (the partitioned cookie,
-     `embedder`, `frame-ancestors`). Nothing mints a frame session now
-     (a ledger entry). Phase 5 adds a platform-origin mint and a frames
-     lane, or deletes it.
-   - **The channel drafts API** for decision 21's bridge. It lost its
-     e2e (a ledger entry), and phase 4's exit covers it.
-   - `/` and `/settings` as stand-ins for the shell until phase 5.
-2. **The cell on Cloudflare.** `KEYS` in the cell; R2; wrangler; the
-   dev stack on `wrangler dev`; the e2e on workerd plus a hosted lane
-   on a preview. The celld fork and native `KEYS` are deleted here. The
-   wrangler migrations restart from scratch, since nothing migrates:
-   celld refused `deleted_classes`, so the Computer and Hermes tags are
-   still listed. CI got the e2e back: the celld e2e on macOS left CI on
-   2026-10-03, leaving only `check`, so phase 2 adds the workerd e2e on
-   Linux and the hosted lane on a branch preview. Exit: core fragment
-   sections green locally, in CI, and on a preview.
-
-   Status, 2026-10-03 (finitecomputer/fragment#115, merged):
-   - Built: the cell on workerd (wrangler 4.145.0, pinned); keys in the
-     cell (`crates/core/src/seal.rs`: AES-256-GCM, sealed per Durable
-     Object); blobs in R2; the dev stack and the e2e on `wrangler dev`;
-     `cargo xtask deploy` and `teardown` from a deployment's config file
-     (`deploy/example.jsonc`; a branch at `<b>.<zone>`); the e2e job on
-     Linux in CI. The celld fork and native `KEYS` are gone, and the
-     migrations restart at `v1`.
-   - Evidence: the full e2e on workerd, locally (1076 passed, 0 failed
-     with phase 3) and in CI on Linux (green on `8618a79`, after two
-     fixes to the retention check's wait on the slower runner).
-   - Waiting on Paul: the hosted lane on a preview needs the
-     `*.finite.place` wildcard record and a choice of sign-in for
-     previews (escalations).
-3. **The ledger.** Meters, plans, guests, caps, the overdraft and
-   read-only, and operator commands. Exit: metering matches the price
-   book, and caps and zero behave; valid, invalid and replay tests for
-   each mutation.
-
-   Status, 2026-10-03 (branch `claude/phase-3-ledger`; docs/ledger.md):
-   - Built: the `Ledger` Durable Object on the pure core; the model
-     route (`cheap` and `medium` on Workers AI through the gateway,
-     `high` refused) for the agents' Worker and, from phase 4, the
-     computer's intercept (`models::complete`); AI steps on it (bugs 2
-     and 3 fixed; since 2026-10-03 images are FLUX.1 [schnell] on Workers
-     AI, metered in neurons, bugs 1 and 5 fixed for them, and video steps
-     are off until they run on Cloudflare: OpenRouter is gone); the gates (at
-     zero, agents and AI stop; past the overdraft, a fragment refuses
-     writes); each fragment's meters (requests, dynamic workers,
-     storage) through the `fragment-ledger` queue; `fragment ledger` and
-     `fragment cap`. The OpenRouter-key ledger and `budget.rs` went (a
-     hard cut).
-   - Evidence: the e2e's `ledger` section on workerd, with the Workers
-     AI fake behind the model route (a lower rung). The binding itself,
-     the gateway's metadata and its logs-off rows are the hosted lane's.
-4. **Computers.** The generic Computer DO (lifecycle, wake on
-   subscription, intercepts, ports, backups, pins), then our Hermes
-   image (bridge, boot script, Litestream). Exit: the real-Hermes lane
-   covers:
-   - a reply, streaming, steps, an approval, and Stop;
-   - attachments;
-   - a restart mid-turn;
-   - a wake with restore;
-   - an upgrade, then a rollback;
-   - two profiles, and a group `@mention`;
-   - a routine (fragment cron) that wakes a sleeping computer on time;
-   - delegation (decision 36): another person's agent edits a fragment
-     shared with that person as an editor; an agent held below its owner
-     is refused (people-only shares went 2026-10-13);
-   - a test that the platform has no Hermes code: the same lane passes
-     with a stub image whose bridge speaks the fragment API;
-   - drafts: the bridge streams through the channel drafts API, and a
-     page sees the draft live and then the final record.
-
-   Status, 2026-10-03 (branch `claude/phases-3-4`; docs/computers.md):
-   - Built: the Computer DO (its lifecycle a pure state machine; wakes
-     on a subscription, a page, a port and its owner; adoption after a
-     platform crash; `/data` saved and restored, snapshots by image;
-     image pins); ports on the computer's own origin behind one-time
-     tickets; the intercepts (the API signed as the agent, models through
-     the platform's model route, storage over R2, and the swap:
-     connections through WorkOS Pipes per agent, operator keys priced and
-     metered); wakes gated on the owner's credit and awake time metered;
-     delegation (decision 36: agents held below their owner; its
-     people-only shares went 2026-10-13); the images (`images/`: the bridge, the stub, our Hermes).
-   - Evidence, all on workerd under `wrangler dev` with Docker, the
-     vendors faked at their boundaries (a lower rung):
-     - the `computers` section on the stub image: the platform holds no
-       Hermes code;
-     - the `delegation` section;
-     - the `hermes` section on our Hermes image, the exit list above
-       in full (`cargo xtask e2e --only hermes`: it builds a 3.8 GB
-       image, so it runs by name and not in CI). A wake follows its
-       chats in 2.5 s and answers a first message in about 5 s.
-   - Not yet: any of it on Containers. That is the hosted lane's, after
-     phase 2's preview.
-5. **The shell and the blessed templates.** The shell (onboarding,
-   sidebar, tabs, profile, search, connections) and the chat and agent
-   templates on decision 40. The shell's tabs sign in to their fragments
-   through a platform-origin frame-session mint, with a frames lane; the
-   shell replaces `/` and `/settings`. Exit: the browser lane at desktop
-   and phone sizes, on a preview.
-
-   Status, 2026-10-03 (finitecomputer/fragment#117; Skyler's design handoff
-   of 2026-10-02 for every part it draws):
-   - Built:
-     - **The shell** at `/` and `/settings` (cell/shell/; the server's
-       pages went):
-       - First run (Skyler, 2026-10-12; Paul, 2026-10-13): the chat
-         opens as soon as its fragment exists, before the default agent is
-         made and its computer starts, with a card of the making as the
-         platform says it (each step's answer, the computer's phase; never
-         a message in the agent's name, nothing kept in the browser).
-         Typing starts at once; Send waits until the agent is a member.
-         Retries happen in the same chat, keeping what was typed; a
-         reload goes on from what was made. It never asks for a job.
-       - The person's one agent above a flat chat list (newest first),
-         apps in the desktop dock; per-person archive.
-       - Search over titles and messages (FTS5 in the Principal), from
-         the launcher.
-       - Settings: the account, credit, computer, agents, connections,
-         and the CLI, in sections with a section list.
-       - An update prompt when the computer's image is behind.
-       - It calls the API with the platform session (docs/api.md, The
-         shell).
-     - **The frame mint** (`/auth/frame`). The shell's tabs, and a
-       computer's ports, sign in on their own origins with partitioned
-       cookies.
-     - **The blessed `agent` and `chat` templates** (decision 40),
-       served from the release, their app code included.
-       - The chat, on Skyler's design: drafts, steps as cards, approvals,
-         Stop, @mentions, and attachments both ways.
-       - Voice memos: an audio attachment the agent transcribes (decision
-         9, as Paul changed it).
-       - Push on an agent's final reply.
-     - **Paul's 2026-10-03 rules:**
-       - guests make no fragments;
-       - past the overdraft, triggers start no runs;
-       - the platform posts `joined` and wakes the computer;
-       - decision 44.
-     - A chat's files are kept while their records are.
-     - Computers start at the size their price names, decision 13's
-       2 vCPU and 6 GiB.
-     - `cargo xtask deploy` makes the proxied DNS record its routes need.
-   - Evidence:
-     - local, on workerd: `cargo xtask check` and the e2e (shell, shell-ui
-       in the browser at desktop and phone sizes, chat, frames, computers,
-       push, signin);
-     - the preview **p5.finite.place**: real WorkOS staging, code.storage,
-       Workers AI through the `fragment-dev` gateway, and a Hermes computer
-       on Containers. Paul signed in, made agents, and chatted; messages
-       queued, one turn at a time.
-   - Found on the preview:
-     - a computer's first start pulls the 3.8 GB image (about 29 s), now
-       hidden behind setup;
-     - an agent added to an awake Hermes computer had no profile (a 401):
-       hermes-boot now follows its computer's agents while it runs and has
-       Hermes take a new profile live (about 2 to 3 s from assign to its
-       first answer, nothing restarted; docs/computers.md).
-   - Not yet: the hosted e2e lane on the preview; files in search.
-6. **Brains, skills, sites.** The brain and skills templates, Hermes'
-   fragment skills, screenshots. Exit: from a chat, an agent builds,
-   publishes and shares an app, ingests into a brain and searches it;
-   the skills list matches the skills fragment.
-
-   Status, 2026-10-03 (finitecomputer/fragment#118, stacked on #117):
-   - Built:
-     - **The brain** (decision 30): a blessed `brain` template on the
-       notes vault UI.
-       - Finite Brain's layout and wiki conventions.
-       - FTS5 sections ranked by BM25, kept current by a file trigger,
-         behind a `search` operation.
-       - Assets are blobs. It was offered in the shell's catalog until
-         the dock's Add taught asking an agent instead (Paul,
-         2026-10-14); `fragment create --template brain` makes one.
-     - **The skills** (decision 17): a blessed `skills` template of the
-       managed set, finite-skills ported.
-       - The Finite-specific skills are rewritten: apps, git, brain,
-         Google through the swap, images on FLUX.
-       - hermes-boot installs the set read-only into every profile, beside
-         each agent's own, its own winning.
-       - The shell's settings list them.
-     - **The `fragment` CLI in the Hermes image**, acting as the agent
-       with no key in it.
-       - `fragment create --template`.
-       - `fragment write`: one file through the platform.
-       - `fragment deploy` without `--dir`: the platform moves live.
-     - **Cards** (decision 31): each move of live is shot with Browser
-       Rendering for the app's card in the shell, metered to the owner.
-     - An app's redirect now reaches the browser (both hops into a
-       fragment had followed it).
-   - Evidence, local on workerd with the vendors faked at their
-     boundaries:
-     - **The exit** (the real-Hermes lane, 40 passed, 0 failed): from its
-       chat, the agent, acting for its owner,
-       - makes a todo app (its owner's), writes a page, and deploys it;
-       - gets its share link, which an anonymous visitor opens;
-       - makes a brain, ingests a source, and finds it by searching.
-     - **The skills list** matches the skills fragment: the shell-ui and
-       templates sections.
-     - **Sections** templates, brain, notes, deploy, site, shell,
-       shell-ui, ledger, computers: 427 passed, 0 failed.
-   - The agent now shares as its owner would (decision 36, Paul,
-     2026-10-04): the exit's agent also makes the app public, which an
-     anonymous visitor opens, and adds a person as a viewer, who sees it
-     in their list (the real-Hermes lane, 42 passed, 0 failed). The
-     delegation section shares over the API with a signed agent: each
-     action, its record, and each refusal.
-   - Not yet: the same on a preview (phase 7's hosted lane).
-7. **The rest of fragments.** Jobs, cron, deliveries, webhooks, push,
-   blobs, secrets, AI steps. Exit: their e2e sections green, plus a test
-   for the in-fragment agent's reply-operation answer path (the agents
-   section's, since 2026-10-03).
-
-   Status, 2026-10-03 (finitecomputer/fragment#118):
-   - Built:
-     - **The in-fragment agent's answer path** has its test, in the agents
-       section: valid, invalid, replay, and a crash after the answer.
-       - It found a bug: any 404 on posting an answer dropped the chat's
-         listen. Now only a refusal or a fragment that is gone does.
-     - **The hosted lane**: `cargo xtask e2e --hosted --config <file>
-       --branch <b>`, with `--dry-run` for its plan, `--rehearse` for it
-       on the local node, and `--sweep`.
-       - It runs on a branch preview, choosing sections by what each
-         declares it needs.
-       - Its people sign in through a branch-only, secret-gated,
-         e2e-scoped lever (docs/secrets.md); a deployment of its own
-         refuses the secret.
-       - Its paid calls are lent from a capped budget.
-   - Evidence:
-     - Local: the full e2e, 1475 passed, 0 failed, 2 skipped (both
-       hosted-only).
-     - Hosted, on **e2e.finite.place**, on real vendors: WorkOS staging,
-       code.storage, Workers AI through `fragment-dev`, Browser Rendering,
-       and our Hermes image on Containers.
-       - First run: 354 passed, 2 failed, 57 skipped, for 11 model calls,
-         $0.16. Both failures were the lane's timing on a real
-         deployment, fixed in it.
-       - The two sections again: 79 passed, 0 failed.
-       - Then a sweep removed the run's 25 fragments.
-   - Not yet hosted: jobs, triggers, push, AI steps, blobs, sync and
-     appfiles still need local fakes or servers, so they are green locally
-     and skipped on a preview (the debt ledger).
-8. **Self-deploy.** An agent following `SETUP.md` deploys into a fresh
-   account from a clean config, and the hosted e2e passes there.
-9. **SimpleX** on $200 seats, always on.
-10. **Cutover.** Zones to Cloudflare, the production account and its
-    raised Workers AI and gateway limits, the production deploy, seats
-    for the people invited; then the old infra comes down (decision 34).
+- Self-deploy into a fresh account from a clean config using `SETUP.md`,
+  then run the hosted e2e there.
+- Restore drills into an empty account.
+- Cutover and old infrastructure teardown require Paul's approval
+  (decisions 34–35); request production model and gateway limit increases.
 
 ## Evaluation
 
@@ -2000,247 +1712,13 @@ exit says.
   code.storage, WorkOS, and a scripted model behind the model
   intercept. These are labeled lower-rung.
 - **The real-Hermes lane:** the actual image in a local container with
-  a scripted model, covering the list in phase 4.
+  a scripted model.
 - **The hosted lane on a preview:** the same suites against a real
   deployment, with real AI Gateway (cents), WorkOS' staging environment,
   and Pipes' shared credentials.
 - **The browser lane:** headless Chrome on the shell, desktop and phone.
-- **The self-deploy lane** (phase 8), and **restore drills** into an
+- **The self-deploy lane**, and **restore drills** into an
   empty computer.
-
-## Spike results
-
-**S1, the Worker Loader and Facets (2026-10-02, deployed and local;
-evidence in the session's `spikes/s1-loader/RESULTS.md`).** The cell's
-shape (`js.rs`) runs on real Workers essentially unchanged.
-
-What held:
-- each facet has its own SQLite, invisible to the supervisor and to
-  other facets;
-- a facet's data survives eviction, a parent redeploy, and new code
-  (`facets.abort` then `get` with the new class);
-- FTS5 and JSON1 work;
-- `limits` are enforced;
-- `globalOutbound: null` and the Egress loopback behave as fragment
-  needs;
-- capability props can't be forged from inside.
-
-What the port must add:
-- **`platform.mjs` locks the author's storage.** It wraps `setAlarm`,
-  `transaction` and `ctx.facets` before `super()`. A facet that sets an
-  alarm wedges, answering `internal error` with `durableObjectReset`,
-  until the platform Worker is redeployed. Author code could also start
-  nested facets outside its database cap.
-- **The capability API is batched, or `subRequests` raised.** Capability
-  RPC calls count against `subRequests`, so the current cap of 50 limits
-  a query to 50 capability calls.
-- **`facet_error` mapping:** the 10-in-flight concurrency error maps to
-  `NodeFull`, and the CPU error to `AppFailed`. Never retry on
-  `overloaded`.
-- **Runaway-CPU tests run only on a deployment.** Local workerd enforces
-  no `cpuMs`, `subRequests` or concurrency limit, and a busy loop takes
-  the whole dev node down.
-- **A Loader id is per fragment and per code version.** The isolate, and
-  with it its env and props, is shared by everything that uses one id.
-  That also gives the billing unit: $0.002 per fragment per version per
-  day, past 1,000 a month.
-
-**S3, computers on Containers and Hermes on them (2026-10-02,
-deployed; evidence in `spikes/s3-computer/RESULTS.md`; about $0.15).**
-All ten items work.
-
-The generic computer:
-- A cold start of a small image is 2–3 s at p50. The first start of a
-  new image at a location pays the pull: 10–11 s.
-- Nothing on disk survives a stop, and neither do intercepts, so they
-  are registered again at every start. A hostname costs 2 of the 128
-  entries, or 4 for HTTP and HTTPS together.
-- Placeholder swaps work over HTTP and HTTPS. HTTPS needs the image to
-  wait for Cloudflare's CA, which appears shortly after boot.
-- SSE streams through. A WebSocket from the guest to a DO works for
-  both `ws://` and `wss://` (68–318 ms to connect, about 5 ms per round
-  trip), and drops at a deploy (the guest reconnects in about 1 s).
-- Ports work over HTTP, WebSockets and raw TCP from the DO, at the
-  client's line rate.
-- `DirectoryBackup` saved 52 MB in 3.3 s and restored it in 1.3 s.
-- Litestream works through a 170-line S3 gateway over the R2 binding, so
-  no R2 token is needed (a restore took 4.6 s).
-- A running container keeps its image across a deploy; the next start
-  takes the new one.
-
-Hermes:
-- Its `-desktop` image is 1.37 GB compressed.
-- Start to ready takes 26–32 s on a fresh disk, 21 s for a wake with
-  restore, and 42–82 s for a first start or a new image version. Most
-  of that is Hermes' own boot.
-- A turn through the model intercept to GLM-5.3 Flash works: about 27K
-  input tokens and $0.004 for a simple turn with 23 tools. Flash takes a
-  1M-token context.
-- Multiplexed profiles work. `API_SERVER_KEY` needs at least 16
-  characters, and Hermes' own cron must be turned off (decision 38).
-- Memory survived a sleep and a wake.
-- Hermes' screen is an Xvnc on a Unix socket, with no viewer of its own.
-  So the image ships its own viewer page and TCP bridge, and keeps Take
-  over / Give back in that page.
-
-What it changes:
-- decision 18 (sleep is driven by the DO; the wake contract);
-- decision 39 (staying awake);
-- the image's boot script: wait for the CA, write config files instead
-  of running CLI calls, wait for the restore marker, list each profile's
-  `state.db` for Litestream, and keep the screen's lease;
-- a risk: cold wakes are slow.
-
-**S3b, a Hermes computer's wake (2026-10-02; evidence in
-`spikes/s3b-wake/RESULTS.md`; about $0.4).** Ready went from 13.1 s to
-2.95 s (p50, 2 vCPU / 6 GiB), and the first token from 18.8 s to 5.9 s.
-
-The baseline waterfall:
-
-| Phase | Time |
-|---|---|
-| Container start | 1.6 s |
-| Restore | 0.4 s |
-| Setup scripts | 1.1 s |
-| Profile reconcile | 1.3 s |
-| `update-ca-certificates` | 1.0 s |
-| Hermes' gateway importing without bytecode | 6.6 s |
-
-The cuts, cumulative, in the order measured:
-
-| Cut | Ready after it |
-|---|---|
-| Bytecode compiled into the image | 7.0 s |
-| Gateway imports preloaded during the restore | 6.2 s |
-| Unused messaging-platform plugins disabled | 4.5 s |
-| Gateway's own skills syncs skipped, its files read ahead | 3.8 s |
-| A single-layer image | 3.6 s |
-| A per-computer snapshot in place of the restore | 2.95 s |
-
-What didn't help:
-- 4 vCPU gives no gain, because the boot is one Python thread.
-- A golden snapshot shared by every computer saves nothing once
-  bytecode is in the image.
-- Native directory snapshots (`snapshotDirectory`) are only behind the
-  `experimental` flag in production.
-- The pre-distributed `cloudflare/debian-trixie` base wouldn't start on
-  this account, and would save only about 1 s of a first pull.
-
-What goes where:
-- **The Hermes image's boot list** (phase 4): bytecode with
-  `unchecked-hash`, `plugins.disabled` for platforms and dashboard auth,
-  a gateway preloaded before the restore gate, the CA appended rather
-  than regenerated, a readahead list, a single-layer image, and the
-  dashboard and screen lazy. (Setup gated on stamps went on 2026-10-06,
-  issue 156: the image carries no bundled skills, so nothing syncs them,
-  and the config migration runs at every boot, a no-op of 0.07 s on a
-  desktop CPU. The single layer became a single-layer base on
-  2026-10-09, with our code in a few small layers above it, so a deploy
-  that changes only our code pushes about 9 MB, not 1.4 GB:
-  images/hermes/Dockerfile.)
-- **Upstream Hermes:** load only the configured platforms, key the skills
-  sync on the image revision, use lazy imports, and ship bytecode.
-- **The generic Computer DO:** snapshot-backed wakes (decision 18) and a
-  pre-wake on presence (decision 39).
-
-Snapshot facts:
-- They work only with the `durable_object` scheduling policy.
-- They hold files only, are tied to the image version, are immutable,
-  are capped at 20 GB, and are kept 30 days.
-- There is no deletion API and no published price.
-- They are stored as tags in the image's registry repository; whether
-  they count against the 50 GB limit is unverified.
-
-**S4, AI Gateway (2026-10-02, both halves; evidence in
-`spikes/s4-gateway/RESULTS.md`; about $0.62 of Workers AI).** Wrangler's
-OAuth login has no AI Gateway scope, so the gateway, Unified Billing,
-Opus, ZDR and spend limits wait on an API token with AI Gateway Edit.
-Self-deploy's `SETUP.md` must ask for that token too.
-
-What ran, against Workers AI directly:
-- Both GLM tiers do OpenAI-style tool calls over streaming.
-- GLM-5.3 takes a 1M-token context; a 308K-token prompt answered, so the
-  64K listing was wrong.
-- Cost is exact from usage: neurons × $0.000011 matched token ×
-  catalog price on all 18 calls. Prices come from the catalog API
-  (`/ai/models/search`).
-
-Intercept facts:
-- Call through the Worker's `env.AI` binding with a named gateway
-  (`{gateway: {id, metadata: {user_id, agent_id}, collectLog: false}}`),
-  so no token is held. The id `default` silently creates a logging
-  gateway, so always name ours.
-- Usage arrives on every chunk; meter only the last, cumulative one.
-- Clamp GLM's `reasoning_effort`, which otherwise defaults to `max`.
-- ZDR covers only Unified Billing's third-party providers (Opus), and the
-  gateway's logs are a separate setting.
-- Gateway spend limits are eventually consistent, so they are only a
-  backstop. Our ledger stays authoritative.
-
-Phase two (2026-10-02, with an AI Gateway token, on gateway `spike-s4`
-with ZDR on and logs off; about $0.27 of credits):
-- **All three tiers work through the gateway** with tool calls and
-  streaming usage.
-  - GLM goes through `env.AI.run` with the gateway option.
-  - Opus goes in Anthropic's native Messages shape through `env.AI.run`,
-    with `system` flattened to a string and top-level `cache_control`.
-    Its model id there is `anthropic/claude-opus-5.5`.
-  - Hermes uses its Anthropic provider for the high tier, so the
-    intercept passes Messages through rather than translating from
-    OpenAI.
-  - The compat path also works, but it ignores caching. Native
-    non-streaming responses drop the cache fields, so Opus is metered
-    from the stream.
-- **Unified Billing's limit on third-party models is per edge machine.**
-  From one DO, Opus allows a burst of 3 calls, then about 2 a minute;
-  the 4th answers 429 (code 2018, "Wholesale rate limit exceeded"). A
-  computer's model calls all leave from its DO's machine. **So the high
-  tier is unusable** until Cloudflare raises this, or Opus goes BYOK, or
-  calls are sharded across gateways. GLM is unaffected.
-- **"Logs off" still keeps one row per call**: model, tokens, cost, our
-  `user_id` and `agent_id`, and timings. Prompts and responses are not
-  kept. So metadata is always opaque ids.
-- **Per-user spend rules work.** A rule partitioned on `user_id` blocks
-  that user on every model with a 429 (code 2045) on the next request;
-  other users still pass. A new rule takes about 40 s to apply.
-- **Dynamic-route fallback to a cheaper model fails** (400, code 5006),
-  so the downgrade happens in the intercept.
-- **Cost:** the gateway's log rows carry the cost even with logs off,
-  matching tokens × catalog price exactly. The credit balance is
-  readable (`GET /ai-gateway/billing/credit-balance`). The ledger's cost
-  basis is list price × 1.05, because credits carry a 5% fee, and the
-  charge is that times 1.5.
-
-**S5, WorkOS Pipes for Google (2026-10-02, staging, with Paul).** It
-works end to end.
-
-The setup:
-- Staging's Pipes offers **no shared credentials** for Google or Gmail;
-  both need a client ID and secret. We reuse Finite's Google OAuth
-  client (project `714116971392`), with WorkOS' redirect URI added.
-- The provider is WorkOS' general `google`, user-owned, with Finite's 11
-  scopes: `drive`, `documents`, `spreadsheets`, `gmail.readonly`,
-  `gmail.send`, `gmail.modify`, `calendar`, `contacts.readonly`,
-  `openid`, `userinfo.email`, `userinfo.profile`.
-
-The calls:
-- `POST /data-integrations/google/authorize {user_id}` returns
-  `{url, state}`, a plain redirect with no secret in it. Google's
-  consent asks for offline access.
-- `POST /data-integrations/google/token {user_id}` returns
-  `{active, access_token: {access_token, expires_at, scopes,
-  missing_scopes}}`. The token lasts about an hour, and WorkOS refreshes
-  it on the next call.
-
-With that token, read-only calls to Gmail, Calendar, Drive, Docs and
-Sheets all answered.
-
-Contacts was refused at first because the People API was disabled in
-that project, so finite.computer's own `contacts.readonly` never worked
-there either. Paul enabled it, and Contacts then answered 200.
-
-The placeholder swap at the computer's intercept is tested in phase 4,
-against Google's own client libraries.
 
 ## Bugs the port must fix
 
@@ -2289,7 +1767,7 @@ Each one needs a test in the phase that ports its feature.
   - the Worker Loader, Facets and the containers' `durable_object`
     scheduling policy are betas.
 - **Opus through Unified Billing is limited to about 2 calls a minute per
-  edge machine**, so about 2 a minute per computer (spike S4). Paul chose
+  edge machine**, so about 2 a minute per computer. Paul chose
   to wait for Cloudflare to raise it (decision 23): the high tier is off
   until then. BYOK and sharding were declined.
 - **Workers AI rate limits.** GLM-5.3 and Flash are "paid models":
@@ -2300,8 +1778,8 @@ Each one needs a test in the phase that ports its feature.
   Requirements Form (https://forms.gle/axnnpGDb6xrmR31T6), together with
   raising the gateway's own cap of 200 requests a minute. Paul,
   2026-10-02: don't worry about it while building; request it in the
-  production account during cutover (phase 10).
-- **Cold wakes**, after spike S3b's cuts:
+  production account during cutover.
+- **Cold wakes**, after the wake optimizations:
   - Hermes is ready in about 3 s, and the first token arrives in about
     6 s (4 s with a first-turn warm-up that needs a hook upstream);
   - with a pre-wake, about 1 s is perceived;

@@ -20,7 +20,7 @@
 //!
 //! What it does not hold off: a process as the bridge's user (today, root,
 //! which the agent's tools run as too) can read the key's file. The ledger
-//! says so (docs/explorations/simplex-complexity.md, "The door").
+//! records this risk in docs/technical-debt-ledger.md.
 
 use std::io::{Read, Write};
 use std::path::Path;

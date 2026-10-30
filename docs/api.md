@@ -60,6 +60,7 @@ the deployment's secrets are Worker secrets (below).
 | `FRAGMENT_SUPPORT_URL` | where a person whose computer will not start gets help (the deploy config's `support_url`): an `https:` page or a `mailto:` address, at most 512 visible characters, refused at the node's first request otherwise; `GET /api/computers` gives it as `support`, and the shell links it (docs/computers.md, "What its owner is told"). Unset, none |
 | `FRAGMENT_OPERATORS` | identities and keys that grant credit and set plans, seats and overdrafts, and wipe a person (Operators, below); a key listed is an operator's whether or not anyone holds it |
 | `FRAGMENT_DEPLOY_ID` | which deployment this is (default `dev`); every answer of the platform's host names it in `x-fragment-deploy` (`GET /healthz`'s among them, which CD checks), and the shell's page in its meta, so a page left open reloads once the platform under it changed (The shell, "A new release"). `cargo xtask deploy` sets the deploy's commit (`git rev-parse --short=12 HEAD`; a tree with uncommitted changes adds `-dirty-<unix seconds>`, so two such deploys differ). It is the release every call between the Worker and its objects carries, and each object admits only its own (docs/MODEL.md, Calls between releases): 1 to 64 of letters, digits, `.`, `_` and `-`, or the isolate does not start |
+| `FRAGMENT_CLI_VERSION` | optional stable `major.minor.patch` CLI release for this deployment's exact CLI inputs, sent on platform answers as `x-fragment-cli`. CI sets `FRAGMENT_RELEASED_CLI_VERSION` for `xtask deploy` only after finding or publishing and verifying that release (docs/computers.md). Failed release jobs leave it unset and do not block deploy. Invalid or missing values send no header; this is independent of the platform's commit |
 | `FRAGMENT_DEPLOYED_AT` | when the release was deployed, whole seconds since 1970 (default none; dev and the e2e: their node's start). `cargo xtask deploy` sets the deploy's second. The shell's page names it in its `fragment-release-deployed` meta, which Settings shows (The shell). Every call between the Worker and its objects carries it beside the release, and an object that refuses a call from a release deployed after its own restarts onto it (docs/MODEL.md, Calls between releases, "An object behind restarts"): 1 to 12 digits, or the isolate does not start |
 | `WORKOS_API_URL` | where WorkOS is (default https://api.workos.com; dev and the e2e: the fake); sign-in is on where the `WORKOS_CLIENT` secret is bound (below), and answers 500 where it is not |
 | `FRAGMENT_PLATFORM_URL` | the platform's origin, where sign-in and the platform session live (required; production's is https://finite.chat, on no fragment's domain, and the CLI's default host). Every push's VAPID token names it as its contact (`sub`, RFC 8292) |
@@ -2853,8 +2854,10 @@ Both on the platform's host, for anyone, each naming its release in
 
 The files the platform serves as they are in its release, a blessed
 template's site, data and code (Apps, above), a catalog template's
-files, the shell's files (The shell, below) and the agent docs (Agent
-docs, below), are the Worker's Static Assets (`ASSETS`), each named by
+files, the shell's files (The shell, below), the shared browser library,
+stylesheets, files viewer, markdown renderer and push service worker,
+and the agent docs (Agent docs, below), are the Worker's Static Assets
+(`ASSETS`), each named by
 its SHA-256. The cell carries only their index, each file's path,
 hash and size and each template's release, made by its build
 (crates/templates), and reads a file by its hash when it answers with

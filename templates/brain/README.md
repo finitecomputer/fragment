@@ -86,3 +86,14 @@ only, so a note's HTML shows as text). `api/tree` lists the
 brain's files and two it makes: `_index.md` (its wikis, the landing) and
 `AGENTS.md` (the guide), each unless the brain holds one of its own. An
 asset's bytes come from the platform's `__file`.
+
+## Parent brains
+
+A meta-brain is a convention on this template: an agent explicitly refreshes
+synthesis from child fragments, citing their pages and the revisions read.
+The served guide (`applib/guide.mjs`, “A parent brain”) defines the source
+list, incorporated revision file and restart reconciliation. Synthesis is
+publication: keep the parent members-only and its audience inside every
+child's. A denied child makes dependent pages stale or withdrawn; cached
+copies must never feed a new synthesis. Search children as the reader via
+their existing search operations; browser search covers the parent alone.

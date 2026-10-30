@@ -305,7 +305,7 @@ impl Server<'_> {
                 Ok(json!({
                     "protocolVersion": version,
                     "capabilities": { "tools": { "listChanged": false } },
-                    "serverInfo": { "name": "fragment", "title": full, "version": env!("CARGO_PKG_VERSION") },
+                    "serverInfo": { "name": "fragment", "title": full, "version": crate::VERSION },
                     "instructions": format!(
                         "The operations of {full}, a fragment (a small web app with its own data), that say what they do, as tools: {reach}. A tool's arguments are its operation's input, and each call is one call, made as you, with your role there ({}).",
                         self.role.as_str()

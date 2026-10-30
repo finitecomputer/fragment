@@ -1,4 +1,4 @@
-//! The hosted lane (docs/cloudflare-v1.md, phase 7): the suite against a
+//! The hosted lane (docs/secrets.md): the suite against a
 //! branch deployment (a preview, `https://<branch>.<zone>`) on real vendors:
 //! WorkOS staging, code.storage, Workers AI through the gateway, and the
 //! deployment's own computer image.

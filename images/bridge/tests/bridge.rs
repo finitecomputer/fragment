@@ -1435,8 +1435,7 @@ async fn the_restore_gate_holds() {
     bridge.stop().await;
 }
 
-// ---- crashes and rollbacks (docs/explorations/pi-durable.md, F2, F3 and
-// P1). Counted in runs (support::Runs: each turn the runtime was given),
+// ---- crashes and rollbacks (docs/durable-computers.md, one life per turn). Counted in runs (support::Runs: each turn the runtime was given),
 // never in records: a second run's posts are replays of the first's, or
 // 409s. A negative is proved by a later positive, never by a sleep: turns
 // of a chat run in order, and a new life reads the old records before the
@@ -1509,21 +1508,21 @@ async fn rollback_case(name: &str, lose_it_all: bool) {
     bridge.stop().await;
 }
 
-/// Goal (I3): a turn that ran is never run again after a rollback: the
+/// Goal : a turn that ran is never run again after a rollback: the
 /// next life wakes with a save from before it.
 #[tokio::test]
 async fn a_rollback_runs_nothing_twice() {
     rollback_case("rollback", false).await;
 }
 
-/// Goal (I3): a turn that ran is never run again after `/data` is lost:
+/// Goal : a turn that ran is never run again after `/data` is lost:
 /// the next life reads every chat from the start.
 #[tokio::test]
 async fn a_lost_state_runs_nothing_twice() {
     rollback_case("lost-state", true).await;
 }
 
-/// Goal (I1, I2): a turn a crash cut short ends once, as an error, and is
+/// Goal : a turn a crash cut short ends once, as an error, and is
 /// never run again, whether the next life wakes with the state from before
 /// the turn, the state the crash left (the turn running), or none.
 #[tokio::test]
@@ -1628,7 +1627,7 @@ async fn the_turn_after_a_cut_one_is_told_what_was_cut() {
     assert!(told.windows(2).all(|p| p[0] == p[1]), "the journal's note of the cut, whatever state woke: {told:#?}");
 }
 
-/// Goal (I2): a turn whose run ended, but whose end a crash kept from the
+/// Goal : a turn whose run ended, but whose end a crash kept from the
 /// platform (its posts failing, the lane retrying, when the bridge dies),
 /// ends once and as itself: the state kept it, owing its end, and the next
 /// life posts that end again under the same id and body. Its run is not
@@ -1671,7 +1670,7 @@ async fn an_end_a_crash_kept_from_the_platform_is_posted_by_the_next_life() {
     bridge.stop().await;
 }
 
-/// Goal (I4): a message said while the computer was down is answered once
+/// Goal : a message said while the computer was down is answered once
 /// by the next life, even one that wakes with an older save, and the turn
 /// that save does not know is not run again for it. That turn is in no
 /// memory of the runtime's: the answer is told what it was (forgotten,

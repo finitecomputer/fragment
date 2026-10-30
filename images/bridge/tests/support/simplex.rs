@@ -15,7 +15,7 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
 /// The SMP server, pinned: v7.0.1 by its multi-arch index's digest (Docker
-/// Hub), the version the spike ran (docs/explorations/simplex-connector.md).
+/// Hub), the version the lab runs (tests/simplex.rs).
 pub const SMP_IMAGE: &str = "simplexchat/smp-server:v7.0.1@sha256:7d825822839a9d5ee9e9a99563d77a319816c7a8e0b4b7bf4dcebe448897af54";
 pub const LAB_IMAGE: &str = "fragment-simplex-lab:7.0.3";
 /// The SMP server's name on the lab's network: a domain, as its image's

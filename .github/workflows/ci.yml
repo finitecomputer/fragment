@@ -475,7 +475,7 @@ jobs:
   # separate image job resolves its input-keyed pin before it can start
   # (xtask/src/deploy.rs, `pinned_only`, says why).
   deploy:
-    needs: [proven, check, e2e, preview-image]
+    needs: [proven, check, e2e, preview-image, cli-version, cli-release]
     if: >-
       ${{ !cancelled() && github.event_name == 'push'
       && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/production')
@@ -609,6 +609,51 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           PREVIEW_IMAGE_DIGEST: ${{ needs.preview-image.outputs.digest }}
+          # Empty after a failed lookup/build: deploy still proceeds, with
+          # no update header. Only a verified published release is named.
+          FRAGMENT_RELEASED_CLI_VERSION: ${{ needs.cli-release.result == 'success' && needs.cli-release.outputs.version || (needs.cli-version.result == 'success' && needs.cli-version.outputs.version) || '' }}
+
+  # Release new CLI inputs after green tests and before production deploys.
+  # Unchanged inputs reuse their published release. A failed lookup/build
+  # never blocks deploy, which then advertises no available CLI version.
+  cli-version:
+    needs: [proven, check, e2e]
+    if: >-
+      ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/production'
+      && needs.check.result == 'success'
+      && ((needs.proven.result == 'success' && needs.proven.outputs.proven == 'true')
+      || needs.e2e.result == 'success') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.next.outputs.tag }}
+      version: ${{ steps.next.outputs.version }}
+      publish: ${{ steps.next.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          save-if: false
+      - id: next
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cargo xtask cli-release plan >> "$GITHUB_OUTPUT"
+
+  cli-release:
+    needs: cli-version
+    if: ${{ !cancelled() && needs.cli-version.result == 'success' && needs.cli-version.outputs.publish == 'true' }}
+    permissions:
+      contents: write # the tag and the release
+    uses: ./.github/workflows/release.yml
+    with:
+      tag: ${{ needs.cli-version.outputs.tag }}
+      sha: ${{ github.sha }}
 
   # The e2e's builds are kept one entry per master commit (`e2e-shard`),
   # each about 0.5 GB of the repository's 10 GB of caches, and a run

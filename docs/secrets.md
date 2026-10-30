@@ -11,8 +11,7 @@ capability, never a key.**
 
 Each secret is stored in the cell that owns it, encrypted at rest, and
 nowhere else. Sealing is `crates/core/src/seal.rs`, used by
-`cell/src/keys.rs` (since phase 2 of docs/cloudflare-v1.md; before it,
-the celld fork's native `KEYS`): the key is HKDF-SHA256 of the
+`cell/src/keys.rs`: the key is HKDF-SHA256 of the
 deployment's host secret salted with **the sealing Durable Object's class
 and id**, so a value opens only in the object that sealed it; it is
 AES-256-GCM sealed as `w2.<key id>.<nonce‖ciphertext>`, where the key id
@@ -395,18 +394,4 @@ the wipe never removes it, as it removes the keys of whom it wipes.
   pre-authenticated, a model on an OpenAI-compatible API (OpenRouter's,
   Finite Private's) gets the deployment's key for it from `keys.rs` as the call
   leaves, toward that API alone, and the payer's ledger meters each call.
-
-## Models need no per-person credential
-
-*Superseded 2026-10-03 (docs/cloudflare-v1.md, phase 3; decision 23);
-since 2026-10-15 Finite's own tiers run through OpenRouter on one key
-the deployment holds (above; Finite Private's before, 2026-10-14), still no
-per-person credential:*
-the per-person OpenRouter keys (minted with a management key, their
-limit the month's allowance) are gone. Models are Workers AI through the
-deployment's AI Gateway, called through the AI binding, and each call is
-gated by its payer's standing and charged on their usage ledger
-(docs/ledger.md), which is what stops a person, not a vendor's key
-limit. No BYOK (Paul,
-2026-10-02).
 

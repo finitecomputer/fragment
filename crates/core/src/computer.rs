@@ -26,7 +26,7 @@
 //! - **Sleeping.** Its hold and its save, then its stop (snapshot, signal,
 //!   wait, destroy), reported back by `Asleep`. A keepalive that opens
 //!   during an idle sleep's hold cancels the sleep: the guest took work as
-//!   it was held, so it stays awake (P2 of docs/explorations/pi-durable.md).
+//!   it was held, so it stays awake (docs/durable-computers.md).
 //!   A sleep whose save fails keeps its container and is tried again, for
 //!   at most `Rules::unsaved_max_ms`; then it sleeps unsaved, and says so.
 //! - **Failing.** A start that fails, or never reports ready, is tried
@@ -131,7 +131,7 @@ pub const HOLD_DEADLINE_MS: i64 = 90_000;
 /// this catches a report its isolate lost.
 pub const SAVE_DEADLINE_MS: i64 = 10 * 60_000;
 /// Saves of `/data` kept: a wake restores the newest that restores, and
-/// falls back to the one before it (F5 of docs/explorations/pi-durable.md).
+/// falls back to the one before it (docs/durable-computers.md).
 pub const SAVES_KEPT: usize = 3;
 /// A start from a snapshot is up only once its guest has read its own view
 /// (`GET /api/computer`, which an image reads as its entrypoint starts:
@@ -160,7 +160,7 @@ const _: () = assert!(ALIVE_MS < START_DEADLINE_MS, "a start's wait for its gues
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rules {
     /// A sleep whose save keeps failing keeps its container this long at
-    /// most, then sleeps unsaved (I5 of docs/explorations/pi-durable.md).
+    /// most, then sleeps unsaved (docs/durable-computers.md).
     pub unsaved_max_ms: i64,
 }
 
@@ -267,7 +267,7 @@ pub enum Event {
     /// The start `generation` restored a save that is unusable (its archive
     /// is gone or corrupt, or the image's check of what it restored
     /// failed): the DO marked it so. With an `older` save left to try, it
-    /// starts again at once from that one, no strike against it (F5).
+    /// starts again at once from that one, no strike against it .
     RestoreFailed { generation: u64, why: String, older: bool },
     Opened { socket: Socket },
     Closed { socket: Socket },
@@ -769,7 +769,7 @@ impl Lifecycle {
         (SAVE_RETRY_MS << (self.save_failures - 1).min(8)).min(SAVE_EVERY_MS)
     }
 
-    /// A sleep's save failed: within the bound it keeps its container (I5),
+    /// A sleep's save failed: within the bound it keeps its container ,
     /// awake again and held no more, and its sleep is tried again after a
     /// pause, the last try at the bound itself; past it, it sleeps unsaved,
     /// and says so. Its owner's restart keeps nothing: it stops unsaved at
@@ -1078,8 +1078,7 @@ impl Lifecycle {
                 }
                 // a guest that died busy had turns open: its next life ends
                 // them, so it is held as a record holds it, and starts again
-                // however long the turn ran (F11 of
-                // docs/explorations/pi-durable.md)
+                // however long the turn ran (docs/durable-computers.md).
                 if self.keepalives > 0 {
                     self.hold(now_ms + IDLE_MS);
                 }
@@ -1436,7 +1435,7 @@ impl Save {
 }
 
 /// A container snapshot: a cache of one save, for one image (P3 of
-/// docs/explorations/pi-durable.md). A wake uses it only while `save` is
+/// docs/durable-computers.md). A wake uses it only while `save` is
 /// the current save and `image` the pinned image's reference, so it only
 /// ever makes a wake faster, never different.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1655,12 +1654,12 @@ impl Saves {
 
     /// A start from the snapshot failed: the snapshot is forgotten (it is
     /// only a cache), so the next start is from the image and the save
-    /// (F7). Answers the snapshot forgotten.
+    /// . Answers the snapshot forgotten.
     pub fn snapshot_failed(&mut self) -> Option<Snapshot> {
         self.snapshot.take()
     }
 
-    /// The save `id` would not restore as a whole (F5): no start restores
+    /// The save `id` would not restore as a whole : no start restores
     /// it again, nor a snapshot of it. Answers whether a save is left to
     /// try, which is older (each newer one was found unusable first).
     pub fn unusable(&mut self, id: &str) -> bool {
@@ -1805,7 +1804,7 @@ impl Saves {
     /// when `save` is still the newest save (a second ask's save may have
     /// replaced it meanwhile). A sleep whose own save failed takes none,
     /// and a snapshot that fails forgets nothing: the one kept is still a
-    /// cache of its own save (F11).
+    /// cache of its own save .
     pub fn snapshotted(&mut self, save: &str, id: &str, image: &str) -> bool {
         // a restart's sleep keeps none: its start is fresh from the image
         let current = self.saves.first().is_some_and(|b| b.id == save) && !self.fresh;
@@ -2301,7 +2300,7 @@ mod tests {
         assert_eq!(s.ended, None, "{s:?}");
     }
 
-    /// Goal (F11 of docs/explorations/pi-durable.md): a guest that dies
+    /// Goal (docs/durable-computers.md): a guest that dies
     /// while it holds its keepalive (a turn open, however long it has run)
     /// is started again, so its next life ends that turn. Method: a turn
     /// that runs past every hold, then a crash; on master `gone()` zeroed
@@ -2402,7 +2401,7 @@ mod tests {
         assert_eq!(Lifecycle::new().keepalives_lost(0), 0, "asleep, nothing to close");
     }
 
-    /// Goal (P3, F7): a start from a snapshot that fails starts again at
+    /// Goal: a start from a snapshot that fails starts again at
     /// once, from the image (the DO forgot the snapshot), with no strike
     /// against the computer and nothing metered; a second in one wake is a
     /// failure like any. Method: three snapshot failures in a row would be
@@ -2545,7 +2544,7 @@ mod tests {
         assert_eq!(s.image_of(2), None, "a start that has not come up runs nothing yet");
     }
 
-    /// Goal (F11 of docs/explorations/pi-durable.md): the second ask of a
+    /// Goal (docs/durable-computers.md): the second ask of a
     /// slow sleep (`SLEEP_DEADLINE_MS`) never forgets the snapshot the first
     /// stored, nor notes a failed save the first one made. On master a
     /// snapshot that failed forgot the stored one (cell/src/computer.rs,
@@ -2707,7 +2706,7 @@ mod tests {
         let Some(Action::Start { generation }) = s.actions.iter().find(|a| matches!(a, Action::Start { .. })).cloned() else { panic!("{s:?}") };
         let r = c.come_up(generation);
         assert_eq!((r.from, r.after, r.rollback, c.saves.rollbacks()), (RestoreSource::Backup, Some(LifeEnd::Exit), true, 1), "{r:?}");
-        // a sleep that slept unsaved: the next wake is a rollback too (F6)
+        // a sleep that slept unsaved: the next wake is a rollback too
         c.sleep(None);
         let r = c.wake();
         assert_eq!((r.save.as_deref(), r.after, r.rollback, c.saves.rollbacks()), (Some("b1"), Some(LifeEnd::Sleep), true, 2), "{r:?}");
@@ -2731,7 +2730,7 @@ mod tests {
         assert_eq!(back, c.saves);
     }
 
-    /// Goal (P3, F7): a start from a snapshot that fails forgets it, and
+    /// Goal: a start from a snapshot that fails forgets it, and
     /// the start the lifecycle makes at once restores the image and the
     /// save: one wake, no strike, the rollback rule unchanged. Method: the
     /// DO's two paths, its own failure and its container's exit before it
@@ -2757,7 +2756,7 @@ mod tests {
         assert_eq!(c.saves.came_up(generation, RestoreSource::Snapshot, Some("b1"), Some(IMAGE), c.now), None, "the broken start never comes up after");
     }
 
-    /// Goal (P2, F1): awake, a computer is saved when its work ends: its
+    /// Goal: awake, a computer is saved when its work ends: its
     /// last keepalive closes and `SAVE_SETTLE_MS` pass with none opened
     /// again; a keepalive that opens first cancels that save, so turns back
     /// to back save once; the save is a hold, the save, the hold let go.
@@ -2803,7 +2802,7 @@ mod tests {
         assert_eq!(s.alarm_ms, Some((T + 3_000 + METER_EVERY_MS).min(T + 10_000 + IDLE_MS)), "{s:?}");
     }
 
-    /// Goal (F1): an always-on computer, which never sleeps, is saved when
+    /// Goal : an always-on computer, which never sleeps, is saved when
     /// its work ends and every `SAVE_EVERY_MS` while it stays busy, its
     /// awake time never metered. On master it was never saved. Method: a
     /// day of 40-minute turns, an hour apart, every alarm it asks for
@@ -2842,7 +2841,7 @@ mod tests {
         assert!(matches!(l.phase, Phase::Awake { generation: 1, .. }));
     }
 
-    /// Goal (P2): a sleep holds the guest, then saves (held, or not when
+    /// Goal: a sleep holds the guest, then saves (held, or not when
     /// the guest never answered), then stops; its life's end says it saved.
     /// A hold or a stop that never reports is asked for again at its
     /// deadline; a save that never reports failed
@@ -2892,7 +2891,7 @@ mod tests {
         assert_eq!(old.apply(Event::Alarm, T + SLEEP_DEADLINE_MS).actions, vec![Action::Stop { generation: 1, saved: false }]);
     }
 
-    /// Goal (P2's race): a keepalive that opens while an idle sleep holds
+    /// Goal (the hold race): a keepalive that opens while an idle sleep holds
     /// its guest (it took work as it was held) cancels the sleep: it stays
     /// awake, held no more, and is saved when that work ends. Once its save
     /// is under way, or for its owner's sleep, it does not: the sleep goes
@@ -2938,7 +2937,7 @@ mod tests {
         assert!(s.actions.is_empty() && matches!(l.phase, Phase::Sleeping { .. }), "{s:?}");
     }
 
-    /// Goal (I5): a sleep whose save fails keeps its container (awake, held
+    /// Goal : a sleep whose save fails keeps its container (awake, held
     /// no more, saying so) and tries again after a growing pause; past
     /// `unsaved_max_ms` it sleeps unsaved, saying so, and that life's end
     /// says it did not save. A save that works on a try sleeps it, and
@@ -3116,7 +3115,7 @@ mod tests {
     }
 
     /// Goal (r4, r6): a save that never reports failed at its deadline, as
-    /// one that says so does, so I5's bound applies. A sleep's: kept awake
+    /// one that says so does, so the unsaved bound applies. A sleep's: kept awake
     /// (held no more, saying why), tried again after a pause, each try's
     /// save never answering either, until past `unsaved_max_ms` it sleeps
     /// unsaved, its life's end saying so; the time from the start of its
@@ -3387,7 +3386,7 @@ mod tests {
         assert!(l.retry_at_ms.is_some());
     }
 
-    /// Goal (F5): a start whose save will not restore (its archive gone or
+    /// Goal : a start whose save will not restore (its archive gone or
     /// corrupt, or the image's check of it failed) starts again at once from
     /// the save before it, no strike against the computer, until none is
     /// left; then it is a strike like any. A start that fails for another
@@ -4237,7 +4236,7 @@ mod tests {
     /// came up) ends once. A computer is never asleep with work newer than
     /// its newest save unless a crash or the bounded failure put it there,
     /// and awake and idle with work newer than its newest save, a save is
-    /// under way or due (I7). Its saves ride along as the DO keeps them, so
+    /// under way or due . Its saves ride along as the DO keeps them, so
     /// their own assertions run too. Method: the DO's reports for the
     /// actions it was handed are delivered in any order, late, twice, or
     /// never, among events of any kind.
@@ -4413,7 +4412,7 @@ mod tests {
                             assert_eq!(*g, l.generation(), "only the current start holds");
                             // most guests answer the hold
                             pending.push(Event::Held { generation: *g, held: !rng(&mut seed).is_multiple_of(4) });
-                            // and some take work as a sleep holds them (P2's race)
+                            // and some take work as a sleep holds them (the hold race)
                             if matches!(a, Action::Sleep { .. }) && rng(&mut seed).is_multiple_of(3) {
                                 pending.push(Event::Opened { socket: Socket::Keepalive });
                             }
