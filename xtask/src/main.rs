@@ -562,6 +562,8 @@ fn skill_installs_release(skill: &str, workflow: &str, copies: &[(&str, String)]
     anyhow::ensure!(built == RELEASE_ASSETS, "the release builds {built:?}, not the assets the install fetches: {RELEASE_ASSETS:?}");
     let packed = r#"tar -czf "$RUNNER_TEMP/fragment-${{ matrix.asset }}.tar.gz" -C "target/${{ matrix.target }}/release" fragment"#;
     anyhow::ensure!(workflow.contains(packed), "each release asset is a tarball of `fragment` alone: {packed}");
+    // called from ci.yml, the release shares its run, and its artifacts
+    anyhow::ensure!(workflow.contains("pattern: fragment-*") && !workflow.contains("dist/*"), "the release downloads and attaches its own assets alone");
     Ok(())
 }
 
@@ -623,6 +625,7 @@ mod tests {
         assert!(super::skill_installs_release(&skill, &workflow.replace("asset: Darwin-arm64", "asset: Darwin-aarch64"), &copies).is_err());
         assert!(super::skill_installs_release(&skill, &workflow, &[("README.md", read("README.md").replace("uname -m", "arch"))]).is_err());
         assert!(super::skill_installs_release(&skill.replacen("name: fragment", "title: fragment", 1), &workflow, &copies).is_err());
+        assert!(super::skill_installs_release(&skill, &workflow.replace("pattern: fragment-*", "pattern: '*'"), &copies).is_err());
     }
 
     #[test]

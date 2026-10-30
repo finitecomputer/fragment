@@ -420,7 +420,10 @@ wrangler and the Sandbox SDK the cell's shim bundles, pinned in
   `dorny/paths-filter`), and on a run by hand. It also runs on merge
   groups: `check` always, Docker when the group's diff from its exact
   base touches those paths. It keeps no layer cache: the workflow
-  says why. `release.yml` builds the CLI for macOS and Linux.
+  says why. `release.yml` builds the CLI for macOS and Linux and publishes
+  it as the latest release (the install line's) after each green production
+  deploy (ci.yml's `cli-release`: the next patch above the highest `v*` tag,
+  or cli/Cargo.toml's version when higher), or from a `v*` tag pushed by hand.
   Master's pushes also run `preview-image` beside the tests. It hashes the
   committed image inputs (`xtask/src/image/preview.rs`), reuses the registry's
   `inputs-<key>` tag when present, or builds and pushes it once with a
