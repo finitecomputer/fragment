@@ -138,6 +138,42 @@ pub(crate) async fn org(mut req: Request, env: &Env, cfg: &Config, url: &Url, re
     }
 }
 
+/// `/api/orgs/<org>/…`, an org named, never found through a person
+/// (decision 66): `GET ledger`, its own credit and this month's spend, and
+/// `PUT budget {id, micros}`, for its billing admins; `POST billing/pack {}`,
+/// a Checkout of its own $25 of credit, for who pays for it alone (its
+/// seats' credit stays each holder's). Each is a person's own, never an
+/// agent's, and none grants any power over the org's fragments.
+pub(crate) async fn named(mut req: Request, env: &Env, cfg: &Config, url: &Url, org: &str, rest: &[&str]) -> CellResult<Response> {
+    if !fragment_core::org::valid_org_id(org) {
+        return Err(CellError::new(ErrorCode::NotFound, format!("no org {org}")));
+    }
+    let bytes = read_body(&mut req, limits::BODY_MAX_BYTES).await?;
+    let by = by(env, &req, url, &bytes)?;
+    let ledger = fragment_core::ledger::org::Payer::Org(org.to_string()).name();
+    // its billing admins: the registry sees them, or refuses
+    let admins = |by| OrgOf { by: Some(by), org: Some(org.to_string()) };
+    match (req.method(), rest) {
+        (Method::Get, ["ledger"]) => {
+            ask_registry(env, &admins(by)).await?;
+            json_answer(&crate::ledger::ask(env, &ledger, &crate::ledger::OrgStatus {}).await?)
+        }
+        (Method::Put, ["budget"]) => {
+            let mut budget: fragment_proto::ledger::OrgBudget = body(&bytes)?;
+            ask_registry(env, &admins(by)).await?;
+            budget.id = crate::commanded("budget", &budget.id)?;
+            json_answer(&crate::ledger::ask(env, &ledger, &budget).await?)
+        }
+        (Method::Post, ["billing", "pack"]) => {
+            if !(bytes.is_empty() || body::<serde_json::Map<String, serde_json::Value>>(&bytes)?.is_empty()) {
+                return Err(CellError::invalid("an org's pack takes no body (or {}): the org named is whose credit it is"));
+            }
+            json_answer(&crate::billing::pack(env, cfg, by, None, Some(org.to_string())).await?)
+        }
+        (m, _) => Err(CellError::new(ErrorCode::NotFound, format!("no route {} /api/orgs/{org}/{}", m.as_ref(), rest.join("/")))),
+    }
+}
+
 /// Who an operator's request is from (the admin's routes, operators'
 /// ledger commands): a key the deployment lists, held by anyone or no one
 /// (no registry is asked, as a wipe's); a signed request or the shell's

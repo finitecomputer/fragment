@@ -465,7 +465,139 @@ pub fn billing(s: &mut Suite, api: &Api) -> Result<()> {
     let payer = consent(s, api)?;
     payer_goes(s, api)?;
     orphan(s, api)?;
+    org_credit(s, api)?;
     wiped(s, api, &payer)
+}
+
+/// An org's own credit (decisions 66 to 68), at its public routes on the
+/// Stripe fake: who pays buys it for the org, once by its Checkout, and a
+/// pack paid after they left (and the node restarted) still credits the
+/// org; its billing admins read it and set its budget; no one else buys,
+/// reads or sets any, and only an operator grants it.
+fn org_credit(s: &mut Suite, api: &Api) -> Result<()> {
+    let vic = api.person()?;
+    let vic_id = api.identity(&vic)?;
+    let org = buys(s, api, &vic)?;
+    let root = format!("/api/orgs/{org}");
+    let read = |api: &Api, who: &Keys| api.signed(who, "GET", &format!("{root}/ledger"), None).map(|r| r.body).unwrap_or(Value::Null);
+    let purchased = |api: &Api, who: &Keys| ledger(api, who)["purchasedMicros"].as_i64().unwrap_or(-1);
+    let fresh = read(api, &vic);
+    s.ok(
+        "an org's ledger starts with nothing: no credit, a budget of zero, read-only, and no plan, seat or included credit",
+        fresh["org"] == org.as_str()
+            && fresh["balanceMicros"] == 0
+            && fresh["budgetMicros"] == 0
+            && fresh["standing"] == json!({ "standing": "read_only", "why": "overdrawn" })
+            && fresh.get("plan").is_none()
+            && fresh.get("includedMicros").is_none(),
+        &fresh,
+    );
+    let vic_before = purchased(api, &vic);
+    let r = api.signed(&vic, "POST", &format!("{root}/billing/pack"), Some(&json!({})))?;
+    let pack1 = r.body["session"].as_str().unwrap_or("").to_string();
+    let asked = s.stripe.requests().into_iter().rev().find(|a| a.path == "/v1/checkout/sessions").context("an org pack's Checkout")?;
+    let f = |k: &str| asked.form.get(k).cloned();
+    s.stripe.complete(&pack1).map_err(anyhow::Error::msg)?;
+    let credited = s.eventually(PUSHED, || read(api, &vic)["balanceMicros"] == 25_000_000);
+    s.ok(
+        "org_pack_credits_org: who pays opens a Checkout of $25 for the org itself (its ledger in the metadata, no person's), and paid, the org has it and they do not",
+        r.status == 200
+            && f("metadata[fragment_payer]") == Some(format!("org:{org}"))
+            && f("metadata[fragment_person]").is_none()
+            && f("metadata[fragment_buyer]") == Some(vic_id.clone())
+            && credited
+            && read(api, &vic)["standing"] == json!({ "standing": "ok" })
+            && purchased(api, &vic) == vic_before,
+        json!({ "form": format!("{:?}", asked.form), "org": read(api, &vic) }),
+    );
+    let back = api.signed(&vic, "POST", &format!("/api/billing/sessions/{pack1}"), Some(&json!({})))?;
+    let again = api.signed(&vic, "POST", &format!("/api/billing/sessions/{pack1}"), Some(&json!({})))?;
+    s.ok(
+        "pack_session_granted_once: its webhook, its return and its return again are one grant",
+        back.status == 200 && again.status == 200 && read(api, &vic)["balanceMicros"] == 25_000_000,
+        read(api, &vic),
+    );
+
+    // its billing admins set its budget, once by its id
+    let wen = api.person()?;
+    let r = api.signed(&vic, "POST", "/api/org/admins", Some(&json!({ "email": Api::email_of(&wen) })))?;
+    answer(api, &wen, r.body["admin"]["id"].as_str().unwrap_or(""), "accept")?;
+    let budget = json!({ "id": "first", "micros": 10_000_000 });
+    let set = api.signed(&wen, "PUT", &format!("{root}/budget"), Some(&budget))?;
+    let replayed = api.signed(&wen, "PUT", &format!("{root}/budget"), Some(&budget))?;
+    let changed = api.signed(&wen, "PUT", &format!("{root}/budget"), Some(&json!({ "id": "first", "micros": 1 })))?;
+    s.ok(
+        "a billing admin sets its monthly budget; the same id again changes nothing, and another body under it is refused (409)",
+        set.status == 200 && replayed.status == 200 && changed.status == 409 && read(api, &wen)["budgetMicros"] == 10_000_000,
+        json!([set.body, replayed.body, changed.body]),
+    );
+
+    // nonpayer_cannot_buy, and nothing else of it is anyone's but its own
+    let xan = api.person()?;
+    let refused = [
+        ("a billing admin who does not pay buys none (403)", api.signed(&wen, "POST", &format!("{root}/billing/pack"), Some(&json!({})))?, 403),
+        ("someone not in it buys none (403)", api.signed(&xan, "POST", &format!("{root}/billing/pack"), Some(&json!({})))?, 403),
+        ("nor reads its ledger (403)", api.signed(&xan, "GET", &format!("{root}/ledger"), None)?, 403),
+        ("nor sets its budget (403)", api.signed(&xan, "PUT", &format!("{root}/budget"), Some(&json!({ "id": "x", "micros": 1 })))?, 403),
+        ("a pack names no one else to credit (400)", api.signed(&vic, "POST", &format!("{root}/billing/pack"), Some(&json!({ "member": vic_id })))?, 400),
+        ("a budget past its limit (400)", api.signed(&wen, "PUT", &format!("{root}/budget"), Some(&json!({ "id": "huge", "micros": 100_000_000_001_i64 })))?, 400),
+        ("a budget with an overdraft (400)", api.signed(&wen, "PUT", &format!("{root}/budget"), Some(&json!({ "id": "od", "micros": 1, "overdraftMicros": 1 })))?, 400),
+        ("an org id that is none (404)", api.signed(&vic, "GET", "/api/orgs/someone/ledger", None)?, 404),
+        ("unsigned (401)", api.unsigned("GET", &format!("{root}/ledger"), None)?, 401),
+        ("an admin grants it no credit: that is an operator's (403)", api.signed(&wen, "POST", &format!("/api/ledger/org:{org}/grant"), Some(&json!({ "id": "mine", "micros": 1, "by": api.identity(&wen)?, "why": "" })))?, 403),
+    ];
+    let mut all = true;
+    for (what, r, status) in &refused {
+        all &= r.status == *status;
+        if r.status != *status {
+            println!("      {what}: {} {}", r.status, r.body);
+        }
+    }
+    s.ok("nonpayer_cannot_buy: and no one but its billing admins reads or budgets it", all, json!(refused.iter().map(|(w, r, _)| json!([w, r.status])).collect::<Vec<_>>()));
+
+    // an operator's grant, once by its id, logged; an org takes no plan
+    let op = api.identity(&s.operator)?;
+    let grant = json!({ "id": "org-gift", "micros": 5_000_000, "by": op, "why": "a pilot" });
+    let g1 = api.signed(&s.operator, "POST", &format!("/api/ledger/org:{org}/grant"), Some(&grant))?;
+    let g2 = api.signed(&s.operator, "POST", &format!("/api/ledger/org:{org}/grant"), Some(&grant))?;
+    let plan = api.signed(&s.operator, "POST", &format!("/api/ledger/org:{org}/plan"), Some(&json!({ "id": "p", "plan": "seat" })))?;
+    let none = api.signed(&s.operator, "POST", "/api/ledger/org:org-0000000000000000/grant", Some(&json!({ "id": "x", "micros": 1, "by": op, "why": "" })))?;
+    s.ok(
+        "an operator grants the org credit, once by its id; its ledger takes no plan (403), and an org that is not there takes nothing (404)",
+        g1.status == 200 && g2.status == 200 && plan.status == 403 && none.status == 404 && read(api, &vic)["balanceMicros"] == 30_000_000,
+        json!([g1.body, plan.body, none.body, read(api, &vic)]),
+    );
+
+    // paid_pack_survives_buyer_departure: a Checkout opened, then its
+    // subscription lapses and who opened it leaves; the node restarts
+    // (locally); then it is paid
+    let r = api.signed(&vic, "POST", &format!("{root}/billing/pack"), Some(&json!({})))?;
+    anyhow::ensure!(r.status == 200, "a second org pack: {r}");
+    let pack2 = r.body["session"].as_str().unwrap_or("").to_string();
+    let sub = subscription_of(s, &org).context("the org's subscription")?;
+    s.stripe.set_status(&sub, "canceled").map_err(anyhow::Error::msg)?;
+    anyhow::ensure!(s.eventually(PUSHED, || seat(api, &vic)["seat"]["good"] == false), "the subscription lapses: {}", seat(api, &vic));
+    let vic_row = seat(api, &vic)["seat"]["id"].as_str().unwrap_or("").to_string();
+    let stepped = api.signed(&vic, "DELETE", &format!("/api/org/admins/{vic_row}"), None)?;
+    let left = api.signed(&vic, "POST", "/api/seat/leave", Some(&json!({})))?;
+    anyhow::ensure!(s.eventually(PUSHED, || org_of(api, &vic).is_empty()), "who paid is out: {stepped}; {left}");
+    let restarted;
+    let api = if s.runs("billing", &[Need::Node]) {
+        s.stop()?;
+        restarted = s.start(false)?;
+        &restarted
+    } else {
+        api
+    };
+    s.stripe.complete(&pack2).map_err(anyhow::Error::msg)?;
+    let survived = s.eventually(PUSHED, || read(api, &wen)["balanceMicros"] == 55_000_000);
+    let back = api.signed(&vic, "POST", &format!("/api/billing/sessions/{pack2}"), Some(&json!({})))?;
+    s.ok(
+        "paid_pack_survives_buyer_departure: paid after who opened it left the org (and a restart), the pack credits the org it named, once, and never them",
+        survived && back.status == 200 && read(api, &wen)["balanceMicros"] == 55_000_000 && read(api, &wen)["budgetMicros"] == 10_000_000 && purchased(api, &vic) == vic_before,
+        json!({ "org": read(api, &wen), "return": back.body }),
+    );
+    Ok(())
 }
 
 /// The admins' view of `org`, as an operator lists it (its customer and

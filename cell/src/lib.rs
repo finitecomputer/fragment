@@ -646,7 +646,7 @@ fn payer_of(who: &Signed) -> CellResult<String> {
 
 /// An operator's command id, kept apart from every other kind's on the
 /// person's ledger (`<kind>:<id>`): a grant's `g1` is not a plan's.
-fn commanded(kind: &str, id: &str) -> CellResult<String> {
+pub(crate) fn commanded(kind: &str, id: &str) -> CellResult<String> {
     if !fragment_core::price::printable(id, LEDGER_ID_MAX_BYTES) {
         return Err(CellError::invalid(format!("a command's id is 1-{LEDGER_ID_MAX_BYTES} printable ASCII characters, no spaces")));
     }
@@ -664,8 +664,9 @@ fn command_body<T: serde::de::DeserializeOwned>(body: &[u8], what: &str) -> Cell
 /// `/api/ledger…` (docs/ledger.md; docs/api.md, Ledger): `GET` reads the
 /// signer's (an agent's: its owner's); the deployment's operators grant
 /// credit and set a person's plan and overdraft, the person named by email
-/// or identity. A seat's state has one writer, the registry (docs/billing.md):
-/// an operator comps or ends a seat through it.
+/// or identity, and grant an org's own credit, named `org:<org id>`. A
+/// seat's state has one writer, the registry (docs/billing.md): an
+/// operator comps or ends a seat through it.
 async fn ledger_route(mut req: Request, env: &Env, cfg: &Config, url: &Url, rest: &[&str]) -> CellResult<Response> {
     let body = read_body(&mut req, limits::BODY_MAX_BYTES).await?;
     if let (Method::Get, []) = (req.method(), rest) {
@@ -680,8 +681,17 @@ async fn ledger_route(mut req: Request, env: &Env, cfg: &Config, url: &Url, rest
     let person = match *person {
         "me" => op.clone(),
         id if npub::is_identity(id) => id.to_string(),
+        // an org's own credit (decision 66): only a grant takes, an org that is
+        // there (its ledger refuses a plan or an overdraft)
+        id if id.starts_with(fragment_core::ledger::org::ORG_LEDGER_PREFIX) => match fragment_core::ledger::org::Payer::parse(id) {
+            Some(fragment_core::ledger::org::Payer::Org(org)) => {
+                ask_registry(env, &crate::registry::orgs::OrgOf { by: None, org: Some(org) }).await?;
+                id.to_string()
+            }
+            _ => return Err(CellError::invalid(format!("{id:?} names no org: org:org-<16 hex>"))),
+        },
         email if fragment_core::mail::valid_address(email) => ask_registry(env, &calls::Lookup { who: email.to_string() }).await?.id,
-        other => return Err(CellError::invalid(format!("{other:?} is not an email, an identity (an npub), or `me`"))),
+        other => return Err(CellError::invalid(format!("{other:?} is not an email, an identity (an npub), `org:<org id>`, or `me`"))),
     };
     // each command is the operators' log's too (docs/api.md, Operators)
     let note = |detail: String| registry::admin::Note { by: op.clone(), action: format!("ledger-{command}"), target: person.clone(), detail };
@@ -1275,6 +1285,10 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
         (_, ["api", "org", rest @ ..]) => {
             let rest = rest.to_vec();
             orgs::org(req, env, cfg, &url, &rest).await
+        }
+        (_, ["api", "orgs", org, rest @ ..]) => {
+            let (org, rest) = (org.to_string(), rest.to_vec());
+            orgs::named(req, env, cfg, &url, &org, &rest).await
         }
         (_, ["api", "admin", rest @ ..]) => {
             let rest = rest.to_vec();

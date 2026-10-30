@@ -12,13 +12,27 @@ is the wire contract. It replaced the OpenRouter-backed ledger and
 
 ## The model
 
-- **One ledger per payer.** A payer is a person. The caller decides who
-  pays a row and sends it to that person's ledger, which keys on nothing
-  else (decision 36):
+- **One ledger per payer.** A payer is a person, or an org (its ledger
+  named `org:<id>`; decision 66). The caller decides who pays a row and
+  sends it to that payer's ledger, which keys on nothing else (decision
+  36):
   - an agent's model calls, operator-key calls and compute bill the
     agent's owner;
   - a fragment's hosting (requests, storage, dynamic workers,
     screenshots) and its AI steps bill the fragment's owner.
+- **An org's ledger** (decisions 66 to 68; `fragment_core::ledger::org`)
+  holds the credit the org bought (its own $25 packs) or an operator
+  gave it, and nothing else: no plan, seat, included credit or default
+  plan. Its overdraft is zero, so its fragments are read-only at a
+  balance of zero. It pays for no agent turn, no wake and no computer
+  (`persons_only`, 403), and refuses a plan, a seat or an overdraft the
+  same way. Its billing admins set a monthly budget (`OrgBudget`, zero
+  until set): once its fragments' charges this month reach it, their AI
+  steps are refused (`budget_reached`) until a larger one or the next
+  month; writes and hosting go on. Every AI step in its fragments meets
+  the fragment's cap too, whoever starts it: an org's fragment has no
+  owner who passes it. Its head carries its terms beside its money
+  (`org`), and a person's head is written as before.
 - **Guests pay for nothing.** A guest's ledger refuses their paid calls
   at the gate and meter batches (`guest_payer`). A guest owns nothing billable, so a
   guest makes no fragment either (`guest_creates`, 403: "guests can't
@@ -327,6 +341,7 @@ interrupt every request"):
 | `GRANT_MAX` | $10,000 | more is a typo |
 | `CAP_MAX` | $10,000 | more is no cap |
 | `OVERDRAFT_MAX` | $1,000 | someone trusted with more is someone to invoice |
+| `org::BUDGET_MAX` | $100,000 a month | an org's budget: more is a typo |
 | `price::CHARGE_MAX` | $100,000 a row | no call or sample costs that; a row that would is a bug upstream |
 | `price::QUANTITY_MAX` | 10^15 per quantity | keeps the 128-bit math from overflowing |
 | `ID_MAX_BYTES` | 256, printable ASCII | ids and names |
@@ -335,7 +350,8 @@ interrupt every request"):
 
 ## The Ledger Durable Object
 
-One `Ledger` DO per person, named by the person's identity (cell/src/ledger.rs).
+One `Ledger` DO per payer, named by a person's identity or `org:<id>`
+(cell/src/ledger.rs).
 Each route is one `transactionSync` over the head and the store (a
 `js.rs` helper: workers-rs 0.8.5 has none). The bodies are the core's
 types (inner) or proto's (public); answers are JSON of the answer types,
@@ -343,7 +359,8 @@ and refusals are `ErrorBody {error: code(), message: message()}` with the
 typed `refused` beside it, so a caller tells a read-only owner from a
 guest. A statement that fails marks the store at fault, and the route
 rolls back whole. A new person's ledger starts as the core makes it (a
-guest), then takes `FRAGMENT_DEFAULT_PLAN` under `plan:default`.
+guest), then takes `FRAGMENT_DEFAULT_PLAN` under `plan:default`; an
+org's starts as an org's (`Ledger::new_org`), by its name.
 
 Tables:
 
@@ -363,7 +380,8 @@ Inner routes (platform code only, through the DO's stub):
 | `POST /may-spend` | `{spend, fragment, byOwner}` | `{}` or the refusal |
 | `POST /fragment-open` | `{fragment}` | `{}` or `cap_reached` |
 | `POST /grant`, `/plan`, `/seat`, `/overdraft`, `/cap` | proto's `GrantCredit`, `SetPlan`, `SetSeat`, `SetOverdraft`, `SetFragmentCap` | `{}` |
-| `POST /status` | `{}` | proto's `LedgerStatus` |
+| `POST /status` | `{}` | proto's `LedgerStatus` (a person's) |
+| `POST /org-status`, `/org-budget` | `{}`, proto's `OrgBudget` | proto's `OrgLedgerStatus`, `{}` (an org's) |
 | `POST /test` | `{op: clock {offsetMs} \| sweep \| entries {prefix} \| totals \| book \| paid-calls {max?} \| legacy-seat {seat, seq} \| schema}` | test fleets only |
 
 A batch is priced with the configured book of the DO's release
@@ -383,7 +401,13 @@ Public routes (a hard cut of `/api/budget`; docs/api.md, Ledger):
   grant <user> <usd> --why <text>`. A seat's state is the registry's
   alone: operators comp or end seats there (`/api/admin/seats`,
   `fragment operator comp|uncomp`; docs/billing.md), and the ledger's
-  `seat` command went (2026-10-16).
+  `seat` command went (2026-10-16). `<user>` may be `org:<org id>` for a
+  grant of an org's own credit (an org that is there; its ledger takes
+  no plan and no overdraft).
+- An org's (decision 66): `GET /api/orgs/<org>/ledger` →
+  `OrgLedgerStatus` and `PUT /api/orgs/<org>/budget {id, micros}` (its
+  billing admins; kept as `budget:<id>`), `POST
+  /api/orgs/<org>/billing/pack` (who pays for it; docs/billing.md).
 
 ## How each meter reaches it
 
@@ -533,9 +557,11 @@ the batch, so a guest's fragments are billed nothing.
 ## Where Stripe plugs in
 
 - **Credit:** a paid credit pack's Checkout becomes `GrantCredit {id:
-  "pack:<Checkout's id>", by: "stripe"}` (docs/billing.md, decision 55).
-  Its id may come again any time (its webhook, its return); commands are
-  never forgotten.
+  "pack:<Checkout's id>", by: "stripe"}` (docs/billing.md, decision 55)
+  on the ledger its metadata named when it was opened: its person's, or
+  for an org's own pack (`fragment_payer: org:<id>`, no person), the
+  org's. Its id may come again any time (its webhook, its return);
+  commands are never forgotten.
 - **A seat's state:** the registry pushes `SetPlan` (the seat's kind)
   and `SetSeat` (active while the seat is good, else canceled) in its own
   `seq`, from the seat and its org's subscription as fetched from Stripe

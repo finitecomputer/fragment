@@ -224,6 +224,25 @@ the dashboard. Worth taking:
     states as lapsed makes us indifferent to which one it picks.
   - Comped seats are always good.
 
+### An org's own credit (decisions 66 to 68)
+
+- **Its own ledger.** An org's ledger (`org:<id>`; docs/ledger.md) pays
+  for what the org owns, from credit of its own: its $25 packs and
+  operators' grants. Its seats' included credit stays each holder's.
+- **Who pays buys it.** `POST /api/orgs/<org>/billing/pack` opens a
+  Checkout of the pack for the org, on its customer, for who pays for it
+  alone (as only they open its billing). Its metadata names the org's
+  ledger (`fragment_payer`) and no person, so a pack paid after its buyer
+  left still credits the org, once by its Checkout.
+- **Its billing admins** read it (`GET /api/orgs/<org>/ledger`) and set
+  its monthly budget (`PUT …/budget`), past which its fragments' AI steps
+  stop; it is zero until they do. Its overdraft is zero.
+- **Operators** grant it credit as they grant a person's
+  (`POST /api/ledger/org:<id>/grant`, logged), the path for a deployment
+  that sells nothing.
+- **Nothing of it is a content power.** Reading or funding an org's
+  ledger lets no one into its fragments (decision 69).
+
 ### What a seat does
 
 The registry is the one writer of a person's plan and seat: an operator
@@ -293,6 +312,7 @@ For docs/MODEL.md's truth map:
 | A subscription's status, trial end and period end | Stripe; the registry keeps a copy | the webhook, the Checkout return and a daily reconcile, each by fetching it from Stripe |
 | How many paid seats | the registry's seats; Stripe's item quantity is a copy | every seat change pushes it; the reconcile repairs a drift |
 | A person's plan and seat standing | their ledger | the registry alone |
+| An org's own credit and monthly budget | its ledger (`org:<id>`) | its packs' Checkouts (who pays for it), operators' grants, its billing admins (the budget) |
 | A computer's always-on | the computer | the registry, from its owner's plan and choice |
 | Trial codes and their uses | the registry | operators; redemptions |
 | What an operator did | the registry's admin log | every admin route |
@@ -895,6 +915,9 @@ Paul took every recommendation. In docs/cloudflare-v1.md:
 | Previews | `xtask deploy --branch` registers its sandbox endpoint and uploads its signing secret | 58 |
 | The admin page | an operator's browser session; the wipe stays CLI-signed | 59 |
 | Annual prices | none; monthly only | 51 |
+| How an org pays for what it owns (Paul, 2026-10-30) | credit of its own, bought by who pays for it; seat credit stays personal | 66 |
+| Who pays for a person's agent in an org's fragment (Paul, 2026-10-30) | the person; the org pays for the fragment's hosting and own AI steps | 67 |
+| An org's overdraft and budget (Paul, 2026-10-30) | no overdraft; an explicit monthly budget, zero until set; the $5 cap for every caller | 68 |
 
 Still Paul's, before the slices that need them:
 
