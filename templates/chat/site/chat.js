@@ -2624,7 +2624,7 @@ export function mount(root) {
 
   // The shell that frames this page is told the person sent a message here
   // (`{fragment: "said"}`): a chat they archived comes back to their
-  // sidebar (docs/api.md, The shell's History).
+  // sidebar (docs/api.md, The shell's messages).
   function tellSaid() {
     if (framed && state.me) window.parent.postMessage({ fragment: "said" }, state.me.platform);
   }

@@ -1441,16 +1441,21 @@ const launcher = createLauncher({
   setupChat: () => onboarding.setupChat(),
 });
 
+// Each view of the computer taken in from an action's answer (`computerIs`,
+// `made`) is counted, so a list read (`load`) asked before it never shows
+// the computer as it was before: answered after it, the read would undo it.
+let computerTaken = 0;
 const { computerOf, prewake, renderComputer, restartComputer, computerSection } = createComputer({
   api, el, seg, named, section, line, actionLine, computer: () => state.computer,
   agents: () => state.agents, computerFailed: () => state.computerFailed,
   support: () => state.support, setupPending: () => onboarding.setupPending(),
-  made: (c) => { state.computer = c; }, computerIs, reopenSettings, openScreen,
+  made: (c) => { computerTaken++; state.computer = c; }, computerIs, reopenSettings, openScreen,
   reads: () => reads, load,
 });
 // The computer as the platform last answered: shown at once.
 function computerIs(v) {
   if (!v?.computer) return;
+  computerTaken++;
   state.computer = v;
   renderComputer();
   renderChats();
@@ -1611,6 +1616,7 @@ async function shellRead(path) {
 }
 async function load(changed = false) {
   const mine = ++reads.asked;
+  const taken = computerTaken;
   const [listRead, computerRead] = await Promise.all([shellRead("/api/fragments"), shellRead("/api/computers")]);
   if (mine < reads.shown) return;
   reads.shown = mine;
@@ -1638,9 +1644,13 @@ async function load(changed = false) {
   const unknown = state.computerFailed && !state.computer;
   state.computerFailed = !computers;
   if (computers) {
-    state.computer = computers.computers?.[0] ?? null;
+    // a view taken in while this read was out (an action's answer) is
+    // newer than the one it brings: the next read brings the computer on
+    if (computerTaken === taken) {
+      state.computer = computers.computers?.[0] ?? null;
+      state.agents = new Map((state.computer?.agents ?? []).map((a) => [a.identity, a]));
+    }
     state.support = computers.support ?? null;
-    state.agents = new Map((state.computer?.agents ?? []).map((a) => [a.identity, a]));
   }
   renderChats();
   threads.refresh().catch(() => {});

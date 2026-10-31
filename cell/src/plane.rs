@@ -479,6 +479,11 @@ impl FragmentCell {
             }
         };
         self.face_is(manifest.kind(), manifest.title(), manifest.role(), shown.as_deref())?;
+        // how its inbox knows a delivery, as its code says (InboxDecl)
+        match &manifest.inbox {
+            Some(i) => self.set_meta(MetaKey::InboxSecret, &format!("{} {}", i.header, i.secret))?,
+            None => self.del_meta(MetaKey::InboxSecret)?,
+        }
         // a connector that installs other code (a fork, another template, none)
         // is no door from then on, nor its owner's alone to edit (doors.rs)
         if let Some(t) = self.meta(MetaKey::DoorTemplate)? {

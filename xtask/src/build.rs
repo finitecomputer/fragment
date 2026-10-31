@@ -408,7 +408,7 @@ mod tests {
     }
 
     /// Goal: the Hermes image's inputs are what it runs (docs/computers.md,
-    /// "Stable and canary": what changes a version), so a change to the
+    /// "Preview and production": what changes a version), so a change to the
     /// cell, the shell, a blessed template, the e2e, xtask or the docs
     /// builds the same image. Method: its CLI stage
     /// (images/hermes/Dockerfile), and the stub's, the same, against

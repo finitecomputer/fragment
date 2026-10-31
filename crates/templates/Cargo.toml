@@ -14,7 +14,7 @@ default = ["platform"]
 # scaffolds the other templates alone (`fragment new --list`) and serves no
 # shell, so a change to the chat page, a blessed template or the shell is
 # no change to it, nor to the computer image that carries it
-# (docs/computers.md, "Stable and canary").
+# (docs/computers.md, "Preview and production").
 platform = []
 # Each file's bytes beside its index entry: the CLI scaffolds them, xtask
 # writes them into the assets directory a cell build uploads, and the e2e

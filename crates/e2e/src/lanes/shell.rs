@@ -1281,6 +1281,8 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
 
     // both agents in one chat, search, and archiving, as the person uses them
     groups_ui(s, api, &mut b, &page, &me, &shots)?;
+    // every chat they have had, in History
+    history_ui(s, api, &mut b, &page, &me, &shots)?;
     // the person's agents in any chat's @, and one asking another
     roster_ui(s, api, &mut b, &page, &me, &shots)?;
     ask_cli(s, api, &me)?;
@@ -3534,6 +3536,54 @@ fn first_run_put_off_ui(s: &mut Suite, api: &Api, b: &mut Browser, shots: &std::
     Ok(())
 }
 
+/// The page's reads of the computer list (`GET /api/computers`), each
+/// answered by the platform at once and held at the page until let go,
+/// oldest first (`window.__computers.release()`).
+const COMPUTERS_HELD: &str = "(() => { const real = window.fetch.bind(window); \
+    const held = window.__computers = { waiting: [], given: 0, release: () => { held.waiting.shift()?.(); return true; }, \
+      restore: () => { window.fetch = real; held.waiting.splice(0).forEach((go) => go()); return true; } }; \
+    window.fetch = async (url, o) => { const r = await real(url, o); \
+      if (new URL(String(url), location.href).pathname === '/api/computers' && (o?.method ?? 'GET') === 'GET') { \
+        await new Promise((go) => held.waiting.push(go)); held.given++; } \
+      return r; }; return true; })()";
+
+/// A list read asked before a press and answered after it never shows the
+/// computer as it was (CI, 2026-10-31: a read asked as the second press
+/// went out came back after its answer, so settings drew the provider
+/// still taken away, for good). A change to their list (the chat archived)
+/// has the page read the list and the computer; that read is answered and
+/// held; the agent's chip pressed (taken away), its answer shown; the
+/// held read let go; settings opened again draw what the press made.
+#[allow(clippy::too_many_arguments)]
+fn stale_read_after_a_press_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &str, chat: &str, lead: &str, row: &str) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    let chip = format!("document.querySelector('{row} [data-agent={lead:?}]')");
+    b.eval(page, COMPUTERS_HELD)?;
+    shell(api, session, "PUT", &format!("/api/fragments/{chat}/archived"), Some(&json!({ "archived": true })), &[])?;
+    let asked = b.until(page, "window.__computers.waiting.length >= 1", wait);
+    b.eval(page, &format!("({chip}.click(), true)"))?;
+    let narrowed = b.until(page, &format!("{chip}?.getAttribute('aria-pressed') === 'false'"), wait);
+    b.eval(page, "window.__computers.release()")?;
+    let given = b.until(page, "window.__computers.given >= 1", wait);
+    // settings drawn again from what the page holds now
+    b.eval(page, "(document.getElementById('apps-link').click(), true)")?;
+    let left = b.until(page, "location.pathname === '/apps'", wait);
+    b.eval(page, "(document.getElementById('settings').click(), true)")?;
+    let drawn = b.until(page, &format!("location.pathname === '/settings' && !!{chip}"), wait);
+    let shown = b.eval(page, &format!("{chip}?.getAttribute('aria-pressed') ?? null"))?;
+    b.eval(page, "window.__computers.restore()")?;
+    s.ok(
+        "a list read asked before a press and answered after it never shows the computer as it was: settings drawn again show the press",
+        asked && narrowed && given && left && drawn && shown == "false",
+        json!({ "asked": asked, "narrowed": narrowed, "given": given, "drawn": drawn, "shown": shown }),
+    );
+    // as it was: the chat back, the agent let use it again
+    shell(api, session, "PUT", &format!("/api/fragments/{chat}/archived"), Some(&json!({ "archived": false })), &[])?;
+    b.eval(page, &format!("({chip}.click(), true)"))?;
+    b.until(page, &format!("{chip}?.getAttribute('aria-pressed') === 'true'"), wait);
+    Ok(())
+}
+
 /// The Connections page in settings (decisions 22, 37 and 44): every
 /// provider the deployment offers, one row each, with its kind, the
 /// person's state there, which agents may use it (and a press that narrows
@@ -3629,6 +3679,7 @@ fn connections_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sessio
     let view = shell(api, session, "GET", &format!("/api/computers/{id}"), None, &[])?;
     let back = view.body["agents"].as_array().and_then(|l| l.iter().find(|a| a["fragment"] == lead.as_str())).is_some_and(|a| a["connections"].is_null());
     s.ok("pressed again, it may use every provider again (null)", again && back, &view);
+    stale_read_after_a_press_ui(s, api, b, page, session, chat, &lead, &row("perplexity"))?;
     // Disconnect: this row names no revocation endpoint, so settings says
     // where the person removes the access at the provider
     let google = row(crate::SWAP_CONNECTION);
@@ -5298,7 +5349,88 @@ fn say_in(s: &Suite, b: &mut Browser, page: &Page, host: &str, text: &str) -> bo
     s.eventually(std::time::Duration::from_secs(30), || b.eval_in_frame(page, host, &typed).ok() == Some(Value::Bool(true)))
 }
 
-/// Unread (docs/api.md, The shell): a chat not open counts on its row what
+/// History (cell/shell/history-page.js; Paul, 2026-10-31): every chat the
+/// person has had, the newest first, with its search. Valid: a continued
+/// chat (its history card alone) is listed with the card's time and newest
+/// words; archived, it is under Archived with its chip, and gone from the
+/// sidebar; its title filters it at once, and a word only its messages
+/// hold finds it through the person's search, its snippet shown; it opens
+/// in the middle column and one Back is History again. Invalid: a chat
+/// nothing was said in is not listed, and words nothing holds say so.
+/// Replay: a message the person sends in the archived chat brings it back
+/// to their sidebar. Restart: a reload at `/history` stays there.
+fn history_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person, shots: &std::path::Path) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    let first_id = agent_ids(api, me.session, &[me.first])?.remove(0);
+    let made = |label: &str, title: &str| -> Result<String> {
+        let r = shell(api, me.session, "POST", "/api/fragments", Some(&json!({ "label": label, "template": "chat", "title": title })), &[])?;
+        let name = r.body["name"].as_str().unwrap_or_default().to_string();
+        shell(api, me.session, "PUT", &format!("/api/f/{name}/members/{first_id}"), Some(&json!({ "role": "editor" })), &[])?;
+        Ok(name)
+    };
+    // a chat continued (Continue's, as continue.js makes one): its history card alone
+    let bread = made(&format!("{}-chat-bread", me.first), "Bread notes")?;
+    let card = json!({ "kind": "history", "title": "Bread notes", "archive": "e2e", "key": "e2e-bread", "messages": [{ "role": "user", "text": "When do I bake?" }, { "role": "assistant", "text": "Once the starter doubles within six hours." }], "earlier": 0 });
+    let posted = shell(api, me.session, "POST", &format!("/api/f/{bread}/channels/chat"), Some(&json!({ "id": "history", "body": card })), &[])?;
+    // a chat nothing was said in
+    let unused = made(&format!("{}-chat-unused", me.first), "Never used")?;
+    b.click(page, "#history-link")?;
+    let row = |name: &str| format!("document.querySelector({})", js(&format!(".history-row[data-key={}]", js(&format!("chat:{name}")))));
+    let listed = b.until(page, &format!("location.pathname === '/history' && !document.getElementById('history-page').hidden && {}?.innerText.includes('Once the starter doubles') && !!{}?.querySelector('time')?.dateTime", row(&bread), row(&bread)), wait);
+    let unlisted = b.eval(page, &format!("!{}", row(&unused)))?;
+    s.ok(
+        "History lists a continued chat with its card's time and newest words, and not a chat nothing was said in",
+        posted.status == 200 && listed && unlisted == true,
+        json!({ "row": b.eval(page, &format!("{}?.innerText ?? null", row(&bread)))?, "unused": unlisted }),
+    );
+    // archived: under Archived, with its chip, and gone from the sidebar
+    shell(api, me.session, "PUT", &format!("/api/fragments/{bread}/archived"), Some(&json!({ "archived": true })), &[])?;
+    b.click(page, ".history-filter[data-filter=\"archived\"]")?;
+    let archived = b.until(page, &format!("{}?.querySelector('.history-chip')?.textContent === 'Archived' && [...document.querySelectorAll('.history-row')].every((r) => r.querySelector('.history-chip')) && !document.querySelector({})", row(&bread), js(&format!("#chats [data-key={}]", js(&format!("chat:{bread}"))))), wait);
+    let _ = b.screenshot(page, &shots.join("desktop-history-archived.png"));
+    s.ok("archived, it is under Archived with its chip, and gone from the sidebar", archived, json!({ "rows": b.eval(page, "[...document.querySelectorAll('.history-row')].map((r) => r.innerText)")? }));
+    b.click(page, ".history-filter[data-filter=\"all\"]")?;
+    // its title filters it at once; words nothing holds say so
+    b.eval(page, &fill(".history-search input", "bread no"))?;
+    let titled = b.until(page, &format!("document.querySelectorAll('.history-row').length === 1 && !!{}", row(&bread)), wait);
+    b.eval(page, &fill(".history-search input", "zqxjv nothing"))?;
+    let none = b.until(page, "document.querySelector('.history-empty')?.textContent === 'Nothing found for “zqxjv nothing”'", wait);
+    b.eval(page, &fill(".history-search input", ""))?;
+    s.ok("its title filters History as it is typed, and words nothing holds say so", titled && none, json!({ "list": b.eval(page, "document.querySelector('.history-list').innerText")? }));
+    // opened from History, then one Back: History again
+    b.click(page, &format!(".history-row[data-key={}] .history-open", js(&format!("chat:{bread}"))))?;
+    let opened = b.until(page, &format!("location.pathname === '/' && document.getElementById('history-page').hidden && document.getElementById('chat-title').textContent === 'Bread notes' && [...document.querySelectorAll('#frames iframe')].find((f) => !f.hidden)?.dataset.fragment === {}", js(&bread)), wait);
+    b.eval(page, "(history.back(), true)")?;
+    let back = b.until(page, "location.pathname === '/history' && !document.getElementById('history-page').hidden", wait);
+    s.ok("a chat opens from History in the middle column, and one Back is History again", opened && back, json!({ "at": b.eval(page, "location.pathname")? }));
+    // a message sent in the archived chat brings it back to the sidebar
+    b.click(page, &format!(".history-row[data-key={}] .history-open", js(&format!("chat:{bread}"))))?;
+    let said = "the rye wants a warmer spot";
+    let sent = say_in(s, b, page, &bread, said);
+    let back_in_list = s.eventually(wait, || {
+        shell(api, me.session, "GET", "/api/fragments", None, &[]).ok().and_then(|r| r.body["fragments"].as_array().and_then(|l| l.iter().find(|f| f["name"] == bread.as_str()).map(|f| f["archived"] != true))).unwrap_or(false)
+    });
+    let in_sidebar = b.until(page, &format!("!!document.querySelector({})", js(&format!("#chats [data-key={}]", js(&format!("chat:{bread}"))))), wait);
+    s.ok("a message the person sends in a chat they archived brings it back to their sidebar", sent && back_in_list && in_sidebar, json!({ "sent": sent, "unarchived": back_in_list, "sidebar": in_sidebar }));
+    // a word only its messages hold: found by the person's search, its snippet shown
+    b.click(page, "#history-link")?;
+    b.eval(page, &fill(".history-search input", "warmer"))?;
+    let found = b.until(page, &format!("{}?.querySelector('.history-preview.found')?.textContent.includes('warmer')", row(&bread)), wait);
+    let _ = b.screenshot(page, &shots.join("desktop-history-search.png"));
+    b.eval(page, &fill(".history-search input", ""))?;
+    s.ok("a word only a chat's messages hold finds it in History, its snippet shown", found, json!({ "list": b.eval(page, "document.querySelector('.history-list').innerText")? }));
+    // a reload at /history stays there
+    b.eval(page, "(window.__before_reload = true, true)")?;
+    b.reload(page)?;
+    let stays = b.until(page, &format!("!window.__before_reload && location.pathname === '/history' && !document.getElementById('history-page').hidden && !!{}", row(&bread)), wait);
+    s.ok("a reload at /history opens History again", stays, json!({ "at": b.eval(page, "location.pathname")? }));
+    // the rest of the lane goes on from a chat
+    b.click(page, &format!(".history-row[data-key={}] .history-open", js(&format!("chat:{bread}"))))?;
+    b.until(page, "location.pathname === '/'", wait);
+    Ok(())
+}
+
+/// Unread (docs/api.md, Control API): a chat not open counts on its row what
 /// came since its person saw it, as their list does; opening it marks it
 /// seen, here and in their list; and the open chat counts nothing as its
 /// messages come. The first agent's chat, while the Reader's is open.
@@ -5340,7 +5472,7 @@ fn unread_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person
     Ok(())
 }
 
-/// A new chat (docs/api.md, The shell, the launcher): from the Reader's
+/// A new chat: from the Reader's
 /// chat, the launcher's Enter makes a chat with the person's one agent
 /// (not the open chat's), labelled beside its own (`<first>-chat-2`), the
 /// words posted whole as its first message: one record though the first
@@ -5892,7 +6024,7 @@ fn fresh_shown(b: &mut Browser, page: &Page, before: &[String]) -> Option<String
     (!shown.is_empty() && !before.contains(&shown)).then_some(shown)
 }
 
-/// The launcher as a person uses it (docs/api.md, The launcher). Its input
+/// The launcher as a person uses it. Its input
 /// is one line at rest and as words are typed; Shift+Enter is a new line,
 /// which it grows to, and a long prompt grows it to 200 px, then it
 /// scrolls. Files dropped on it or pasted into it are chips under its words
@@ -6732,7 +6864,7 @@ fn apps_sharing_refresh_ui(s: &mut Suite, b: &mut Browser, page: &Page, app: &st
     Ok(())
 }
 
-/// The Apps page (docs/api.md, The shell; #587), from the sidebar's Apps:
+/// The Apps page (#587), from the sidebar's Apps:
 /// the owner's app listed (no chat or skills), with its card and who has
 /// access; a kind this build does not know is listed as Other; its Dock
 /// switch takes it off the dock and back, moving only as the list does;

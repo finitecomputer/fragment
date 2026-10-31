@@ -141,22 +141,22 @@ const SHELL_PUBLISHED: [(&str, &str); 49] = [
     ("icons.js", "text/javascript; charset=utf-8"),
     // an app's own icon in the dock, and the sheet that makes one (docs/api.md, Icons)
     ("app-icon.js", "text/javascript; charset=utf-8"),
-    // the Apps page: each app's dock, card, icon and who has access (docs/api.md, The shell)
+    // the Apps page: each app's dock, card, icon and who has access
     ("apps-page.js", "text/javascript; charset=utf-8"),
-    // the History page: every chat they have had, and its search (docs/api.md, The shell)
+    // the History page: every chat they have had, and its search
     ("history-page.js", "text/javascript; charset=utf-8"),
     ("activity.js", "text/javascript; charset=utf-8"),
     ("fragment-title.js", "text/javascript; charset=utf-8"),
     ("tooltips.js", "text/javascript; charset=utf-8"),
     // Settings' Billing: a seat, credit, an org (docs/billing.md)
     ("billing.js", "text/javascript; charset=utf-8"),
-    // the launcher: ⌘K, to start a chat or find one again (docs/api.md, The launcher)
+    // the launcher: ⌘K, to start a chat or find one again
     ("settings.js", "text/javascript; charset=utf-8"),
     ("chat-list.js", "text/javascript; charset=utf-8"),
     // the Session Archive under the chats (templates/sessions/README.md)
     ("session-archive.js", "text/javascript; charset=utf-8"),
     ("continue.js", "text/javascript; charset=utf-8"),
-    // delegation threads: a line each over the chat an agent asked from (docs/api.md, The shell)
+    // delegation threads: a line each over the chat an agent asked from
     ("threads.js", "text/javascript; charset=utf-8"),
     ("session-refresh.js", "text/javascript; charset=utf-8"),
     ("onboarding.js", "text/javascript; charset=utf-8"),

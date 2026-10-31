@@ -475,9 +475,9 @@ enum OperatorCmd {
         #[arg(long)]
         key_file: Option<PathBuf>,
     },
-    /// Pin a person's computer to one of the deployment's images (a canary,
-    /// or back to the default): its next start runs it, and awake, its owner
-    /// is told an update is ready
+    /// Pin a person's computer to one of the deployment's images (or back to
+    /// the default): its next start runs it, and awake, its owner is told an
+    /// update is ready
     Pin {
         npub: String,
         image: String,
