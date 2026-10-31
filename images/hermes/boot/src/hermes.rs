@@ -447,7 +447,7 @@ pub fn managed_config(disabled_plugins: &[String], card_timeout_s: u64, screen_i
     // command) and OpenRouter's and Nous' routes. On, the gateway fetched
     // them from four hosts 30 s after it started and every 20 minutes, and
     // rewrote four caches in its home while the computer was held
-    // (docs/durable-computers.md, "What changes under the hold").
+    // (docs/computers.md, "What changes under the hold").
     y.push_str("model_catalog:\n  enabled: false\n");
     // Each agent's desktop starts for its screen's first viewer (the
     // bridge's `screen-start`), or at the agent's first computer_use or
@@ -755,7 +755,7 @@ pub fn profile_config(agent: &Agent, name: &str, role: Option<&str>, home: Home,
     let init = ["~/.profile", "~/.bash_profile", "~/.bashrc"].iter().map(|f| q(f)).chain([q(&credentials_file.display().to_string())]);
     y.push_str(&format!("  shell_init_files: [{}]\n", init.collect::<Vec<_>>().join(", ")));
     // Its commands run in the agent's work directory, which the computer
-    // saves on its own (the seam: step 2 of docs/durable-computers.md), never
+    // saves on its own (the seam: docs/computers.md, "Data and the restore gate"), never
     // in Hermes' home (left unset, the gateway's own home, /data/hermes)
     y.push_str(&format!("  cwd: {}\n", q(&work_dir(&agent.fragment).display().to_string())));
     y
@@ -854,8 +854,7 @@ pub fn chromium_ca_policy(pem: &str) -> Option<String> {
 /// `/proc/1/cgroup` or the root mount: Docker gives every container the
 /// marker, Cloudflare Containers likely none of them, so there Hermes would
 /// act as on a host. Each pin is what Hermes does in a container, as the
-/// Docker rung has always run it (docs/computers.md, "Hermes' container
-/// guesses", has every guess and what decides it):
+/// Docker rung has always run it:
 ///
 /// - `TERMINAL_HOME_MODE=profile`: each agent's terminal, `execute_code`
 ///   and file tools' `~` have the agent's own `HOME`, its profile's `home`
@@ -1098,7 +1097,7 @@ pub fn profile_dir(home: &Path, agent_fragment: &str) -> PathBuf {
 }
 
 /// Closes each turn a restart cut, in Hermes' own sessions, before the
-/// gateway starts (docs/durable-computers.md, P5), run by Hermes' Python as
+/// gateway starts (docs/computers.md, Durability, P5), run by Hermes' Python as
 /// the hermes user with each `state.db` to look in as its arguments.
 ///
 /// Why: Hermes persists a turn's message as the turn starts and the rest as

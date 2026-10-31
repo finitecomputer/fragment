@@ -10,7 +10,7 @@
 //! It is asked live about every signed request whose answer depends on who
 //! is asking (`/resolve`, `/session`: the router on the control API, a
 //! fragment on its site), and a request it cannot answer for is refused
-//! (rule 7). One cell keeps each key change in one transaction (an agent is
+//! (R15, rule 7). One cell keeps each key change in one transaction (an agent is
 //! never left keyless, a revoked key never comes back) and costs one hop
 //! per request that asks it (two to set a picture, whose bytes are stored
 //! between).
