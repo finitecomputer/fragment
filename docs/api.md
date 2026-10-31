@@ -3211,10 +3211,16 @@ may open what is the Apps page's.
 work area as the Apps page is; cell/shell/history-page.js; Paul,
 2026-10-31: every chat goes to a good place, so archiving is cheap and
 the sidebar stays short) lists every chat the person has had, the newest
-first (a chat with nothing said yet first, as in the sidebar): their
-chats, archived ones too, those shared with them (a delegation thread's
-chat is its thread's line, not listed), and their Session Archive's
-conversations (its `index/chat.json`: templates/sessions/README.md).
+first: their chats, archived ones too, those shared with them (a
+delegation thread's chat is its thread's line, not listed), and their
+Session Archive's conversations (its `index/chat.json`:
+templates/sessions/README.md). A chat whose row says nothing was said
+there yet (no `previewAt`) has its first record read (`GET
+/api/f/{name}/channels/chat?after=0&limit=1`), once while its row is the
+same: a continued chat's history card gives its time and newest words, a
+message its time and first line, and a chat with none, never used, is
+not listed. No row shows without its time, nor sorts as the newest for
+want of one.
 Each row is the chat's face, its title, whom it was with (its lead
 agent, when it is one of theirs; "Shared" on one someone else owns;
 "Imported" on the archive's), its first words, when it was last said
