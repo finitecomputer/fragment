@@ -252,7 +252,7 @@ unfinished design, not debt.
   within `fragment_core::computer::ALIVE_MS`, else it wakes from its
   save.
 - **Risk:** a dead restore costs the wait and a restore.
-- **Delete when:** Cloudflare fixes #362 and a canary round shows no
+- **Delete when:** Cloudflare fixes #362 and a preview round shows no
   `snapshot: "dead"`, or snapshots go (`FRAGMENT_COMPUTER_SNAPSHOTS=off`).
 
 ## A computer's saves are not metered

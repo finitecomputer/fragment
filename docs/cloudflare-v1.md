@@ -54,7 +54,10 @@ computers) returns once this product works.
    staging environment; production in Finite's production account on
    WorkOS's production one. CI deploys from a clean config, as a
    stranger would. Only Paul updates `production`: his push or merge is
-   a production deploy's approval.
+   a production deploy's approval. There is no canary: one image name,
+   `hermes`, at master's digest on preview; production's is the digest
+   preview proved, copied and pinned by hand (docs/computers.md, "Preview
+   and production").
 4. **Self-deploy without forking:** a config file outside the repo
    (deploy/example.jsonc), secrets in the account's Secrets Store, and
    `cargo xtask deploy --config <file>`. Updating is `git pull` and the
@@ -120,9 +123,10 @@ computers) returns once this product works.
     Restart. The agent's self is in its fragment (docs/computers.md).
 19. **Image updates.** An image is pinned per computer. A new default
     reaches a sleeping computer at its next wake; an awake one's owner is
-    told and restarts to take it, never behind their back. A canary is a
-    pin; a rollback is the pin back, plus a point-in-time restore when
-    the new image moved its data's schema (not built: the debt ledger).
+    told and restarts to take it, never behind their back. A pin moves
+    one computer to another of the deployment's images; a rollback is the
+    image before pinned back, plus a point-in-time restore when the new
+    image moved its data's schema (not built: the debt ledger).
 20. **Preview environments.** Every branch deploys a complete, separately
     named copy with one command, at `<branch>.<zone>` and its fragments
     at `<name>--<branch>.<zone>`; a teardown removes it (an account holds

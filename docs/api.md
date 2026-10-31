@@ -190,8 +190,8 @@ answers; requests may use either); the router asks the registry which
 identity holds it, live, on every signed request to the control API,
 and passes the fragment both. A key no one registered, or a revoked one,
 is 401; when the registry cannot answer, a signed request is 503
-`registry_unavailable`, never let through (docs/cloudflare-v1.md,
-R15, rule 7). Control routes need NIP-98; site requests may carry it. A site
+`registry_unavailable`, never let through (docs/finite-integration.md,
+rule 7). Control routes need NIP-98; site requests may carry it. A site
 request's signature (checked by the router: a bad one is 401) or session
 cookie is resolved only when the answer depends on who is asking: a page
 or a file that everyone who may see the fragment gets alike (a `public`
@@ -559,8 +559,8 @@ learns the page is there. Its API decides again on every call.
 | method & path | who | body → answer |
 | --- | --- | --- |
 | `GET /api/admin/people?q=&after=` | operators | → `AdminPeople {people: [AdminPerson {npub, email, joinedAt, lastSignInAt, org, admin, seat: {id, kind, comped, good, sleeps}}], next}`: a page of 100 by npub, after `after`; `q`, the start of their email (any case; its wildcards only themselves). `sleeps`: whether the seat's holder lets its computer sleep (`PUT /api/seat`), why a good `seat_always_on` seat's computer is not always on |
-| `GET /api/admin/people/{npub}` | the same | → `{person: AdminPerson, ledger: LedgerStatus, computer: ComputerView \| null, references: {running, next} \| null}`: `references` are the whole references of the image its computer runs (`null` while it runs nothing) and of the one its next start runs, `registry.cloudflare.com/<account>/<repository>@sha256:<hex>` on a deployment (the view's `version` and `latest` are their first 12 hex digits), which a promotion copies into the config (docs/computers.md, "Stable and canary") |
-| `PUT /api/admin/people/{npub}/computer/image` | the same | `{image}` → `ComputerView`: their computer pinned to `image`, as its owner's `PUT /api/computers/{id}/image` pins it (a canary, or back to the default): its next start runs it, and awake on another, its owner is told an update is ready. Logged (`pin`, the image its detail). An image the deployment lacks is 400; a person with no computer, 404 |
+| `GET /api/admin/people/{npub}` | the same | → `{person: AdminPerson, ledger: LedgerStatus, computer: ComputerView \| null, references: {running, next} \| null}`: `references` are the whole references of the image its computer runs (`null` while it runs nothing) and of the one its next start runs, `registry.cloudflare.com/<account>/<repository>@sha256:<hex>` on a deployment (the view's `version` and `latest` are their first 12 hex digits), which a promotion copies into the config (docs/computers.md, "Preview and production") |
+| `PUT /api/admin/people/{npub}/computer/image` | the same | `{image}` → `ComputerView`: their computer pinned to `image`, as its owner's `PUT /api/computers/{id}/image` pins it (another of the deployment's images, or back to the default): its next start runs it, and awake on another, its owner is told an update is ready. Logged (`pin`, the image its detail). An image the deployment lacks is 400; a person with no computer, 404 |
 | `GET /api/admin/orgs?after=` | the same | → `AdminOrgs {orgs: [AdminOrg {id, name, createdAt, status, customer, subscription, periodEnd, cancelAtEnd, admins, paidSeats, compedSeats, pending}], next}` (`admins`: those who said yes; `pending`: its offers) |
 | `GET /api/admin/health` | the same | → `AdminHealth {orgsPaying, orgsLapsed, seatsPaid, seatsComped, planPushesQueued, quantityPushesQueued, failing: [{queue, target, tries, due}], lastEventAt, oldestCopyAt}` (`queue`: `plan`, `quantity`, or `cancel`, a subscription whose cancel failed) |
 | `GET /api/admin/log?before=` | the same | → `AdminLog {entries: [{n, at, operator, action, target, detail}], next}`, newest first: each comp, comp's kind and end, trial code made, changed and mailed, computer pinned, and ledger command, written in its own turn; the newest 10,000 kept |
@@ -1487,7 +1487,7 @@ row, and no `ops` record, so the same id runs again, with any input
 (never 409 or a replay), and it may not publish, push, or write files
 (422, rolled back: their outbox is the ledger row); its writes, the
 role and schema checks, the 16 MiB cap, and the live views' change
-signal stay. For a "latest value" write sent often,
+signal stay (docs/MODEL.md). For a "latest value" write sent often,
 whose ids would fill the database within the week. A query's
 or a mutation's result is at most 1 MiB of JSON
 (`limits::RESULT_MAX_BYTES`) of whole characters: a larger one is refused
@@ -2441,7 +2441,7 @@ book | paid-calls {max} | legacy-seat {seat, seq} | fail-grants {times}}`.
 A seat is what lets a person create (decisions 49 and 51):
 `seat_always_on` ($200, a computer that stays awake unless its holder
 lets it sleep), the one seat sold, or `seat` (a computer that sleeps), an
-operator's comp only since 2026-10-15 (decision 25). A body
+operator's comp only since 2026-10-15 (decision 25's status). A body
 that names a kind to buy (Checkout's, an org admin's seat, a trial code)
 takes `seat_always_on`, its default; `seat` is 400 (not sold). Every seat is in an org, the one
 who pays; a person is in at most one org and holds at most one seat. An
