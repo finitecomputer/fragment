@@ -2,7 +2,8 @@
 # docs/bridge.md): its own workspace, so its own jobs.
 #
 # - `check`: host tests and clippy, warnings denied, on every change to
-#   images/ or this workflow (`changes`, below).
+#   images/, what it compiles in from outside it, or this workflow
+#   (`changes`, below).
 # - `docker`: the Docker lane (images/bridge/tests/docker.rs): both images
 #   built for linux/amd64 and run in Docker against the fake API and a
 #   scripted model, real Hermes included (`cargo test -p fragment-bridge
@@ -89,6 +90,11 @@ jobs:
             check:
               - images/**
               - .github/workflows/images.yml
+              # what images/ compiles in from outside it, which a host test
+              # (xtask/src/image/preview.rs) holds this list to
+              - cli/SKILL.md
+              - templates/skills/**
+              - crates/e2e/fixtures/chat-preview.pdf
             docker:
               - images/hermes/**
               - images/bridge/**

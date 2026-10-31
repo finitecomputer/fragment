@@ -233,6 +233,57 @@ mod tests {
         }
     }
 
+    /// images.yml's `check` runs on a change to anything the images'
+    /// workspace compiles in: images/, and each file outside it that one of
+    /// its sources includes (`include_str!`, `include_bytes!`), each in
+    /// the `check` filter, itself or under a `/**` of it.
+    #[test]
+    fn the_images_check_watches_what_it_compiles() {
+        let root = devstack::repo_root();
+        let workflow = fs::read_to_string(root.join(".github/workflows/images.yml")).unwrap();
+        let lines: Vec<&str> = workflow.lines().collect();
+        let at = lines.iter().position(|l| l.trim() == "check:" && l.starts_with("            ")).expect("the `check` filter");
+        let globs: Vec<&str> = lines[at + 1..].iter().map(|l| l.trim()).take_while(|l| l.starts_with("- ") || l.starts_with('#')).filter_map(|l| l.strip_prefix("- ")).collect();
+        assert!(globs.contains(&"images/**"), "{globs:?}");
+        let covered = |path: &str| globs.iter().any(|g| *g == path || g.strip_suffix("/**").is_some_and(|dir| path.starts_with(&format!("{dir}/"))));
+        let images = root.join("images");
+        let mut sources = vec![];
+        let mut dirs = vec![images.clone()];
+        // bounded by the images workspace's tree, its build output left out
+        while let Some(dir) = dirs.pop() {
+            for entry in fs::read_dir(&dir).unwrap().flatten() {
+                let path = entry.path();
+                if path.is_dir() && entry.file_name() != "target" {
+                    dirs.push(path);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    sources.push(path);
+                }
+            }
+        }
+        let mut outside = 0;
+        for source in sources {
+            let text = fs::read_to_string(&source).unwrap();
+            for macro_ in ["include_str!(\"", "include_bytes!(\""] {
+                for (at, _) in text.match_indices(macro_) {
+                    let rest = &text[at + macro_.len()..];
+                    let named = &rest[..rest.find('"').unwrap()];
+                    let full = std::path::absolute(source.parent().unwrap().join(named)).unwrap();
+                    let normal: std::path::PathBuf = full.components().fold(std::path::PathBuf::new(), |mut p, c| {
+                        if c == std::path::Component::ParentDir { p.pop(); } else { p.push(c); }
+                        p
+                    });
+                    let Ok(from_root) = normal.strip_prefix(&root) else { panic!("{} includes {named}, outside the repo", source.display()) };
+                    let path = from_root.to_string_lossy().replace('\\', "/");
+                    if !path.starts_with("images/") {
+                        outside += 1;
+                    }
+                    assert!(covered(&path), "{} includes {path}, which the `check` filter does not watch", source.display());
+                }
+            }
+        }
+        assert!(outside > 0, "the images' sources include files outside images/ (as of 2026-10-31)");
+    }
+
     /// Found manifests keep their actual bytes' digest. Only an explicit
     /// absence at the requested manifest authorizes building; auth,
     /// transport, server, malformed and unrelated 404 errors do not.
