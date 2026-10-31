@@ -419,6 +419,16 @@ impl Browser {
         Ok(self.watched.get(&page.session).cloned().unwrap_or_default())
     }
 
+    /// What a watched page has said, and no more kept from it: its `Network`
+    /// events stop (an open page's socket may stream a great deal, every
+    /// frame one), and the rest are no longer kept.
+    pub fn unwatch(&mut self, page: &Page) -> Result<Watched> {
+        let said = self.watched(page)?;
+        self.send("Network.disable", json!({}), Some(&page.session))?;
+        self.watched.remove(&page.session);
+        Ok(said)
+    }
+
     /// The body of a response a watched page had (its request's id, from its
     /// `Network` events), as text; while the page is open.
     pub fn response_body(&mut self, page: &Page, request: &str) -> Result<String> {

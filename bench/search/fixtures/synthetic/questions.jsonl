@@ -1,0 +1,12 @@
+{"id": "s01", "kind": "paraphrase", "q": "how do we roll back a broken firmware deploy", "relevant": {"engineering/deploys.md": 2, "engineering/incidents/2026-09-arm-stall.md": 1}}
+{"id": "s02", "kind": "exact", "q": "who was incident lead for the arm stall", "relevant": {"engineering/incidents/2026-09-arm-stall.md": 2}}
+{"id": "s03", "kind": "date", "q": "who is release captain the week of 20 October", "relevant": {"engineering/rota.md": 2}}
+{"id": "s04", "kind": "structured", "q": "what was fleet uptime last month", "relevant": {"engineering/uptime.md": 2}}
+{"id": "s05", "kind": "structured", "q": "what did Paul and Austin decide on Monday and who owns the follow-up", "relevant": {"standups/2026-10-13.md": 2}}
+{"id": "s06", "kind": "paraphrase", "q": "why did the robots run out of power during harvest", "relevant": {"engineering/incidents/2026-07-battery.md": 2, "standups/2026-10-06.md": 1}}
+{"id": "s07", "kind": "exact", "q": "Valley Growers Cooperative pickers", "relevant": {"customers/cooperative.md": 2}}
+{"id": "s08", "kind": "paraphrase", "q": "what should a new hire do in their first days", "relevant": {"people/onboarding.md": 2}}
+{"id": "s09", "kind": "paraphrase", "q": "how long is sensor data kept", "relevant": {"engineering/telemetry.md": 2}}
+{"id": "s10", "kind": "structured", "q": "what is the team working on this week", "relevant": {"standups/2026-10-13.md": 2, "product/roadmap.md": 1}}
+{"id": "s11", "kind": "unanswerable", "q": "what is our office wifi password", "relevant": {}}
+{"id": "s12", "kind": "paraphrase", "q": "which fruit needs the gentlest grip", "relevant": {"product/gripper.md": 2, "customers/pilots.md": 1}}

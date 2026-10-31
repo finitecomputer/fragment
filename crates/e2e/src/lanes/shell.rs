@@ -3187,6 +3187,11 @@ fn deploying_read_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, ses
 /// its sidebar's chrome shown and no release named on it (the console
 /// names them), starts again by itself, and fills in once the refusals
 /// stop, with no click. Local only: a preview's Registry is shared.
+///
+/// What the page shows is read as the notice first says Updating, in the
+/// page (`DEPLOY_SEEN`), not by a later look: the layout once fitted its
+/// columns while hidden and showed its sidebar a frame after the rest,
+/// which a look a moment later missed or met by chance.
 fn deploying_start_ui(s: &mut Suite, api: &Api, b: &mut Browser) -> Result<()> {
     if api.signs_in_by_levers() {
         return Ok(());
@@ -3197,39 +3202,57 @@ fn deploying_start_ui(s: &mut Suite, api: &Api, b: &mut Browser) -> Result<()> {
         anyhow::ensure!(r.status == 200, "setting release skew: {r}");
         Ok(())
     };
-    // what the page asked for its person, and what its console said
-    let heard = |b: &mut Browser, page: &Page| -> Result<(usize, Vec<String>)> {
-        let events = b.watched(page)?.events;
-        let asks = events.iter().filter(|e| e["method"] == "Network.requestWillBeSent" && e["params"]["request"]["url"].as_str().is_some_and(|u| u.ends_with("/api/identities/me"))).count();
-        let said = events.iter().filter(|e| e["method"] == "Runtime.consoleAPICalled").flat_map(|e| e["params"]["args"].as_array().cloned().unwrap_or_default()).filter_map(|a| a["value"].as_str().map(str::to_string)).collect();
-        Ok((asks, said))
-    };
     skew(100)?;
-    let page = b.open_watched(&format!("{}/", api.base))?;
-    // the desktop's layout, its sidebar shown, as the lane's own page has
+    // (the page's first refusal comes after the router's asks, 1.75 s at
+    // least: the viewport is the desktop's long before it)
+    let page = b.open_with_script(&format!("{}/", api.base), DEPLOY_SEEN)?;
     b.viewport(&page, 1280, 800, false)?;
-    let notice = "document.getElementById('notice')";
-    let updating = b.until(&page, &format!("!document.getElementById('layout').hidden && !{notice}.hidden && {notice}.innerText.trim() === 'Updating — back in a moment'"), wait);
-    let chrome = b.eval(&page, "['settings', 'apps-link'].every((id) => document.getElementById(id)?.checkVisibility()) && !document.body.innerText.includes('reached release')")?;
-    let again = s.eventually(wait, || heard(b, &page).is_ok_and(|(asks, _)| asks >= 2));
-    let (asks, said) = heard(b, &page)?;
-    let logged = said.iter().any(|t| t.contains("reached release"));
-    let still = b.eval(&page, &format!("{notice}.innerText.trim() === 'Updating — back in a moment'"))?;
+    let seen = "window.__deploySeen";
+    let updating = b.until(&page, &format!("!!{seen}.first"), wait);
+    let again = b.until(&page, &format!("{seen}.asks >= 2"), wait);
+    let first = b.eval(&page, &format!("{seen}.first"))?;
+    let logged = b.eval(&page, &format!("{seen}.logged.some((t) => t.includes('reached release'))"))?;
+    let still = b.eval(&page, "document.getElementById('notice').innerText.trim() === 'Updating — back in a moment'")?;
     s.ok(
-        "a page that starts as a deploy goes out says Updating in its place (not \"No chats yet\"), its sidebar's chrome kept and no release on the page (the console names them), and starts again by itself",
-        updating && chrome == true && again && logged && still == true,
-        json!({ "updating": updating, "chrome": chrome, "again": again, "logged": logged, "notice": b.eval(&page, &format!("{notice}.innerText"))?, "asks": asks, "console": said }),
+        "a page that starts as a deploy goes out says Updating in its place (not \"No chats yet\"), its sidebar's chrome shown with it and no release on the page (the console names them), and starts again by itself",
+        updating && first["layout"] == true && first["chrome"] == true && first["released"] == false && again && logged == true && still == true,
+        json!({ "first": first, "again": again, "logged": logged, "seen": b.eval(&page, seen)? }),
     );
     skew(0)?;
+    let notice = "document.getElementById('notice')";
     let filled = b.until(&page, &format!("{notice}.hidden && !!document.querySelector('#chats .chat-row') && !document.getElementById('frames').hidden"), wait);
     s.ok(
         "once calls are admitted, the page fills in by itself: its chats, the chat open, no notice",
         filled,
-        json!({ "notice": b.eval(&page, &format!("{notice}.hidden ? null : {notice}.innerText"))?, "asks": heard(b, &page)?.0 }),
+        json!({ "notice": b.eval(&page, &format!("{notice}.hidden ? null : {notice}.innerText"))?, "asks": b.eval(&page, &format!("{seen}.asks"))? }),
     );
     b.close(page)?;
     Ok(())
 }
+
+/// Installed before the shell's page runs (`deploying_start_ui`): what the
+/// page shows at the moment its notice first says Updating (its layout
+/// shown, its sidebar's Settings and Apps visible, any release on it),
+/// read by a MutationObserver as the notice changes, before anything is
+/// drawn; what its console said; and how often it asked who its person is.
+const DEPLOY_SEEN: &str = r#"
+window.__deploySeen = { first: null, logged: [], asks: 0 };
+const info = console.info;
+console.info = (...a) => { window.__deploySeen.logged.push(a.join(' ')); info.apply(console, a); };
+const ask = window.fetch;
+window.fetch = (url, o) => { if (String(url).endsWith('/api/identities/me')) window.__deploySeen.asks++; return ask(url, o); };
+addEventListener('DOMContentLoaded', () => {
+  const notice = document.getElementById('notice');
+  new MutationObserver(() => {
+    if (window.__deploySeen.first || notice.hidden || notice.innerText.trim() !== 'Updating — back in a moment') return;
+    window.__deploySeen.first = {
+      layout: !document.getElementById('layout').hidden,
+      chrome: ['settings', 'apps-link'].every((id) => document.getElementById(id)?.checkVisibility()),
+      released: document.body.innerText.includes('reached release'),
+    };
+  }).observe(notice, { attributes: true, childList: true, subtree: true, characterData: true });
+});
+"#;
 
 /// The shell's chat column with a chat open, and the band's line.
 const CHAT_AND_LINE: &str = "!document.getElementById('layout').hidden && !!document.querySelector('#frames iframe:not([hidden])') && ";

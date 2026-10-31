@@ -1085,6 +1085,19 @@ async fn hermes_deployment_adapter_contract() {
     assert_eq!(code, 0, "{report}");
 }
 
+/// A command never stops for an interrupt meant for an ended thread (#776):
+/// pinned Hermes' tool worker, on a recycled thread id, takes the ended
+/// thread's interrupt as its own; with the image's `tool_threads.py` it
+/// starts clean, and its own agent's interrupt still stops it.
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn hermes_tool_workers_start_clean() {
+    build(&repo_dir(), "images/hermes/Dockerfile", &hermes_tag());
+    let c = Container::idle(&hermes_tag());
+    let (code, report) = c.exec_code(&["/opt/hermes/.venv/bin/python", "-c", include_str!("tool_threads.py")]);
+    assert_eq!(code, 0, "{report}");
+}
+
 /// Goal (Paul, 2026-10-09: a time-based fallback "only if time-based
 /// fallback is built into hermes"): a tier agent whose model stalls, its
 /// call streaming nothing, switches to the route's `fallback` by Hermes'
