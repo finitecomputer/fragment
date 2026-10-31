@@ -402,6 +402,15 @@ fn tier_checks(s: &mut Suite, api: &Api) -> Result<()> {
         run["status"] == "succeeded" && run["output"]["model"] == FLASH && tried(s, calls) == standard_fell() && run["costMicros"] == charge(&tokens(FLASH, 800, 300)),
         json!({ "run": run, "tried": format!("{:?}", tried(s, calls)) }),
     );
+
+    // ---- embeddings: Private's tier is private and its embeddings slot is not (none is named)
+    let (calls, before) = (s.ai.calls().len(), quiet(api, &owner_id, "aig:"));
+    let r = api.signed(&hand, "POST", "/api/models/v1/embeddings", Some(&json!({ "input": "the standard notes" })))?;
+    s.ok(
+        "a deployment whose tiers are private embeds nothing on a slot that is not: 403, saying why, nothing sent or charged",
+        r.status == 403 && r.message().contains("not private") && s.ai.calls().len() == calls && quiet(api, &owner_id, "aig:") == before,
+        &r,
+    );
     Ok(())
 }
 

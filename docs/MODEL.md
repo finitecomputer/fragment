@@ -282,6 +282,8 @@ Every change is checked against this table.
 | A person's wipe: how far it got, and that it locks them | the registry's `wipes` (docs/api.md, Operators) | a wiped person's ledger, list and computer each keep one row saying so, and take nothing more |
 | Secrets | the Durable Object that owns each, sealed for it; the deployment's own in its Secrets Store (docs/secrets.md) | never in a repo, a log, a command line, or an app's env |
 | Orgs, their admins and seats (held by an npub, or pending on an email; comped or paid) | the registry (docs/billing.md) | a seat holder's plan and standing on their ledger, and their computer's always-on, are pushed from it: one queued row a person, pushed one at a time by its alarm, each read fresh as it goes, so the newest push is of the newest state. The ledger keeps the seat in the registry's order (`SetSeat.seq`), refusing an older one as stale and naming its own, which the registry's next order passes; always-on carries no order (the one row a person orders it), and a computer made later asks for a push as it is made, its making failing when it cannot. The registry is the seat's one writer: operators comp and end seats through it (the ledger's `seat` command went 2026-10-16); an operator's `plan` command is the debt ledger's |
+| An org's own credit and monthly budget (decisions 66 to 68) | its ledger (`org:<id>`), a person's machine with no plan, seat, included credit or overdraft | nowhere: operators credit it and set its budget (orgs pay out of band), the person invoiced named in its governance log, and its billing admins read it |
+| An org's content: its people, its content admins, the admins' places offered, and its governance log (decisions 69 to 71) | the registry (`org_content`, `org_content_offers`, `org_governance`; rules in `fragment_core::governance`), apart from its billing's `org_members` | none yet: a seat or a billing admin's place gives none of it; each change is written with its log entry in one transaction; an offer is accepted only while its grounds hold; an org with anyone in its content, or an operator's credit or payer named, outlives its billing |
 | Whether a person is a guest (decision 49) | their seat in the registry and, holding none, their ledger's plan (`fragment_core::org::guest`) | `GET /api/seat`'s `guest`, decided at each ask: the shell, its Billing and its welcome read it alone |
 | What is sold: a seat's and a pack's price, the credit a seat includes | core's constants (`fragment_core::stripe`, `ledger::included`) | Stripe's Prices, which Checkout refuses at any other amount; every page shows them from `GET /api/seat`'s `offer` |
 | A subscription's status, items and periods; an org's Stripe customer | Stripe (docs/billing.md) | the registry's copy (`orgs`) is written only from a subscription fetched from Stripe (a Checkout's return, a webhook, the daily reconcile), never from an event's own copy; a newer subscription replaces one only once it has ended, and an older event changes nothing |
@@ -294,7 +296,8 @@ Every change is checked against this table.
 | An agent's tier, or its own Fast model (`model: {provider, id}`) and effort (`reasoning`: `low`, `high`, `max`, High when absent), and optional own Deep (`model.deep: {provider, id, reasoning}`, inheriting Fast when absent) | the agent fragment's `agent.json` in git (docs/computers.md, "An agent's own model" and "Our images"); platform modes' efforts belong to the deployment, below | its computer's profile config, rewritten within seconds while awake and at each boot; own Fast used only while its credentials hold that provider (else its tier), which its owner's view names (`modelProviders`); unavailable own Deep inherits working own Fast; the agent's page shows Fast from these and `agent.json`, as its owner's shell hands them over; Settings offers independent own Fast/Deep model and effort rows, preserving legacy Fast fields for older images |
 | The model route's models (each slot's model, and where it runs), and each tier's modes: its Fast (its own slot) and its Deep (the slot its `deep` names), each's reasoning, cap and fallback (decision 65) | the deployment's config's `models` (`FRAGMENT_MODELS`, a Workers variable; docs/computers.md, Models, "Fast and Deep") | their ids only, by slot, the image-capable ids (`models.images`, from slot flags), and each tier's route and modes (`models.routes`: ids and efforts, nothing of where each runs), in each computer's guest view and its owner's view (`models`; Settings and the agent's page show them), which our Hermes image reads every 3 s and writes into each profile's config; `GET /v1/models` and the route's refusal of an unknown id list the same ids, read from the config at each request |
 | A computer's agents (which agent fragments it runs) | the Computer DO's `agents`, assigned and unassigned by its owner (docs/computers.md) | the agent fragment's own `computer` (whom it signs for) and the registry's name of its agent (`agent_fragments`); they follow the fragment: its delete unassigns it from its computer and drops the registry's row, that life's agent alone, retried until done (cell/src/ended.rs) |
-| An agent's door (SimpleX): whether its owner opened it, and its public key | the agent fragment's `meta` `door`, written only by redeeming the link ticket its owner made last (`door_ticket`), deleted the moment they unlink (docs/api.md, "An agent's doors") | the door key's private half in the computer's `/data/simplex/<agent>/door.key`, made per link, forgotten when the link goes; the link itself in the core's databases beside it (docs/bridge.md, "SimpleX"). A relayed record is taken only signed by the key the fragment holds, so a key the disk kept after the owner unlinked, or one a rollback brought back, signs nothing taken |
+| An agent's door (SimpleX; its id a connector's the deployment allows): whether its owner opened it, and its public key | the agent fragment's `meta` `door`, written only by redeeming the link ticket its owner made last (`door_ticket`), deleted the moment they unlink; each ticket, redemption and check also asks the deployment's `connectors` then (docs/api.md, "An agent's doors") | the door key's private half in the computer's `/data/simplex/<agent>/door.key`, made per link, forgotten when the link goes; the link itself in the core's databases beside it (docs/bridge.md, "SimpleX"). A relayed record is taken only signed by the key the fragment holds, so a key the disk kept after the owner unlinked, or one a rollback brought back, signs nothing taken |
+| Which connectors may be linked, and each one's exact relay targets | the deployment's config's `connectors` (`FRAGMENT_CONNECTORS`; absent, the cell's default, `connectors::Policy::default`) | none: a computer's relay offer and admission, and every door's ticket, redemption and check, ask `Policy::authorize` at the time |
 | A computer's XFTP relays (SimpleX's files: docs/computers.md, "the XFTP relay") | the Computer DO: each open relay's lease in its memory, and what they carried on their UTC day in its `meta` `relay_day` | none: the shim's `ComputerEgress` pipes each one and tells the DO its bytes as it closes; a lease whose close was never heard lapses on its own bound |
 | Money | each payer's ledger (docs/ledger.md) | meters batch usage rows to it, idempotently; each isolate's gate keeps what a person's ledger last answered whether a spend may start, a minute at most, and a spend whose ledger does not answer starts (docs/ledger.md, "The gate") |
 | A job's paid AI answer (text, decision, image), including a rejected decision answer | the fragment supervisor's `paid` receipts, keyed by incarnation, run and step (docs/api.md, AI) | its charge, a row in the fragment's meter outbox (`step:<key>`), written with the receipt and charged once by the owner's ledger; retries and replays reuse the receipt; no provider call once a receipt exists |
@@ -302,6 +305,7 @@ Every change is checked against this table.
 | The agent docs | `cli/SKILL.md` and `cli/GUIDE.md`, naming no host | never edited elsewhere: compiled into the CLI (`fragment skill`, `fragment guide`, filled with its host), and the release's files on the platform (`/llms.txt`, `/llms-full.txt`, filled with its own platform and fragments as served; docs/api.md, Agent docs) |
 | The release's files: the templates, the shell's files, the agent docs | the repo (`templates/`, `cell/shell/`, `cli/`) | the cell's index of them (path, SHA-256, size, each template's release), made by its build; their bytes in the Worker's Static Assets, named by hash, written by the same build and uploaded with it, served only through the router (docs/api.md, The release's files); the CLI embeds the templates |
 | A fragment's icon | the fragment's own storage: its meta names one of its blobs, a PNG (cell/src/icon.rs; docs/api.md, Icons) | its members' list rows carry its address as `picture`, sent with its face |
+| A person's session archive: the conversations they had with an agent elsewhere (templates/sessions/README.md) | its conversations' files, `sessions/<key>.json`, in git: a fragment of theirs of kind `sessions`, one each conversation, keyed by its origin and its id there | its indexes (`index/<kind>.json`), a projection of `sessions/` written in an import's last commit, which also lists by its file any conversation they lack, whose file changed in a commit after theirs, or that they describe as another copy, and drops an entry whose file is gone (an import that stopped before it); the store an import read (the old Finite's export) is never written, and a conversation imported again is replaced only by a newer copy of it (`session::Entry::newer`) |
 | A fragment's preview card, and what its page reported as the card's shot loaded it | the fragment's own storage (`fragment_core::card::Cards`; docs/api.md, Cards) | status's `page` reads it; a report with errors is also a `page.errors` event |
 | What a fragment's members are doing: each one's newest record of a kind a channel lists | the channel's records | the fragment's `listed` (written in each record's append while its kind is listed, what is listed no more dropped at an install, a member's going when they leave), and each member's list row, sent from the index outbox as the row's face is (at most once in 3 s), made as it is sent from what is installed then and carrying only the channels its role reads (`channel_read_role`); a list's copy is at most a minute behind while its poster keeps at it (docs/api.md, Listed records) |
 | A person's own view of their fragments: what they archived, what they took off their dock, and how far they have seen each chat | their list, the `Principal` cell (principal.rs; docs/api.md, Control API) | none: no fragment holds it, and it goes when they leave the fragment |
@@ -421,26 +425,37 @@ alone (`<sha>-dirty-<second>`). Dev and the e2e run one build in one
   That additive image contract permits a bounded image-side wait without
   replaying a model call that may have run; ordinary routed waits stay
   the same.
-- **An object behind restarts.** A deploy restarts every object onto
-  its code, but Cloudflare holds one it keeps busy on the code before:
-  on the preview on 2026-10-21, after 7 of its 17 deploys, a busy
-  object (the Registry, a computer, its agent fragment) ran the release
-  before for 283 to 297 seconds, refusing every call of the new one
-  while those refusals kept it busy (two more met one for 5 and 38
-  seconds, until it went idle); every client-visible 503 of that day
-  was in those windows (up to 340 a deploy, most of them agents'
-  calls). So an object that refuses a call from a release deployed
-  after its own restarts (`release::restarts`; `ctx.abort()` from a
-  timer 50 ms on: `routed::restart_soon`), and the caller's next ask
-  meets its next instance, the new release's. It is that restart
-  brought forward, and costs what it costs: the requests the instance
-  is answering end, its sockets close (their pages reconnect), an alarm
-  running is run again, and a computer's container runs on (the next
-  instance adopts it). An object restarts so at most once in an isolate
-  (which runs one release): one Cloudflare starts again on the code
-  before refuses, as it would have, until Cloudflare's own restart. A
-  call from a release deployed before the object's, at the same second,
-  or naming no time restarts nothing.
+- **Every object takes a deploy's code at once.** Cloudflare's default
+  defers it: an active object keeps the code before until it
+  hibernates, for up to 300 s. On the preview a busy object (the
+  Registry, a computer, its agent fragment) so ran the release before
+  for about five minutes after many deploys (283 to 297 s on
+  2026-10-21; 7 of 40 deploys 2026-10-27 to 30), refusing every call of
+  the new one, most of them agents' calls. So the Worker asks for
+  `immediate` (`durable_objects.code_update_strategy`,
+  cell/wrangler.jsonc, for every class): an active object resets onto
+  the new code as the deploy lands (on a throwaway Worker on 2026-10-30,
+  0.6 s after `wrangler deploy` ended, against 10.8 s under a 10 s
+  deferral). A reset costs what any restart does: the requests the
+  instance is answering end (one that touches storage fails), its
+  sockets close (their pages reconnect; a hibernated object's stay open
+  and wake on the new code), an alarm running is run again, and a
+  computer's container runs on (the next instance adopts it).
+- **An object behind restarts.** An object that refuses a call from a
+  release deployed after its own restarts (`release::restarts`;
+  `ctx.abort()` from a timer 50 ms on: `routed::restart_soon`), and the
+  caller's next ask meets its next instance, the new release's (during
+  a deferral too, on 2026-10-30). It costs what a reset does. The
+  restart's reason names the release that restarted
+  (`release::restart_reason`): a call of another release it ends, which
+  it refused before acting (the timer runs late under load, as the
+  caller's next ask arrives), is asked again as a refusal is
+  (`routed::sent`); one of its own release may have acted, and fails. An
+  object restarts so at most once in an isolate (which runs one
+  release): one Cloudflare starts again on the code before refuses, as
+  it would have, until Cloudflare's own restart. A call from a release
+  deployed before the object's, at the same second, or naming no time
+  restarts nothing.
 
 Both directions refuse alike: an old caller at a new object will not be
 admitted from that isolate, and its asks run out; a new caller at an old
@@ -455,13 +470,13 @@ versions serving for a while, would refuse between them for that while.
 
 **A deploy is done when every object class answers it.** `cargo xtask
 deploy` asks `/healthz/objects` (docs/api.md, Health) until each class
-admits the new release, for 7 minutes, past Cloudflare's five minutes of
-a busy object's old code (on 2026-10-24 a throwaway Worker's busy object
-took a deploy's code 300 s after it, whatever wrangler's
-`code_update_strategy` asked, immediate or a 5 s delay; and production's
-Registry, three computers and their agents' fragments, whose restarts
-came back on the old code that day, refused the new Worker for that
-long). One it cannot finish or verify goes back to the version live
+admits the new release, for 7 minutes, past Cloudflare's default five
+minutes of a busy object's old code, which the limit still covers while
+`immediate` proves itself on the preview's deploys (on 2026-10-24 a
+throwaway Worker found the setting ignored, and production's Registry,
+three computers and their agents' fragments refused the new Worker for
+five minutes; on 2026-10-30 it was honoured). One it cannot finish or
+verify goes back to the version live
 before it (`wrangler rollback`, its objects then left to Cloudflare's
 restart, which the same wait covers), unless that release's schema is
 not its own (Schemas, above): the job fails either way, never green over

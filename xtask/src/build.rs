@@ -411,8 +411,8 @@ mod tests {
     /// "Stable and canary": what changes a version), so a change to the
     /// cell, the shell, a blessed template, the e2e, xtask or the docs
     /// builds the same image. Method: its CLI stage
-    /// (images/hermes/Dockerfile) against cargo's own account of the
-    /// workspace. It copies, whole, the CLI and each workspace crate it
+    /// (images/hermes/Dockerfile), and the stub's, the same, against
+    /// cargo's own account of the workspace. It copies, whole, the CLI and each workspace crate it
     /// builds from (its normal and build dependencies by path, and theirs);
     /// each other member's manifest alone, and stubs exactly those; the
     /// root manifest and lock; and each template but the platform's own,
@@ -455,23 +455,6 @@ mod tests {
         let stubbed: BTreeSet<String> = dirs.iter().filter(|(n, _)| !closure.contains(*n)).map(|(_, d)| d.clone()).collect();
         assert!(whole.contains("cli") && whole.contains("crates/templates") && stubbed.contains("crates/e2e"), "{whole:?} {stubbed:?}");
 
-        let dockerfile = std::fs::read_to_string(root.join("images/hermes/Dockerfile")).expect("the Dockerfile");
-        let stage: Vec<&str> = dockerfile.lines().skip_while(|l| !l.starts_with("FROM rust:") || !l.ends_with(" AS cli")).skip(1).take_while(|l| !l.starts_with("FROM ")).collect();
-        assert!(!stage.is_empty(), "the Dockerfile has its CLI stage (`FROM rust:… AS cli`)");
-        let copies: Vec<Vec<&str>> = stage.iter().filter_map(|l| l.strip_prefix("COPY ")).map(|l| l.split_whitespace().collect()).collect();
-        let lock = ["Cargo.toml", "Cargo.lock", "./"];
-        assert!(copies.iter().any(|c| c.as_slice() == lock), "the root manifest and lock: {copies:?}");
-        let paths: Vec<&str> = copies.iter().filter(|c| c.as_slice() != lock).map(|c| {
-            assert!(c.len() == 2 && c[0] == c[1] && !c[0].starts_with("--"), "each copy keeps its path: {c:?}");
-            c[0]
-        }).collect();
-        let copied_whole: BTreeSet<String> = paths.iter().filter(|p| !p.ends_with("/Cargo.toml") && !p.starts_with("templates/")).map(|p| p.to_string()).collect();
-        let copied_manifests: BTreeSet<String> = paths.iter().filter_map(|p| p.strip_suffix("/Cargo.toml")).map(str::to_string).collect();
-        assert_eq!(copied_whole, whole, "the stage copies the CLI and each crate it builds from, whole");
-        assert_eq!(copied_manifests, stubbed, "and each other member's manifest alone");
-        let stubs = stage.iter().find_map(|l| l.trim().strip_prefix("for m in ").and_then(|l| l.split_once(';'))).map(|(list, _)| list.split_whitespace().map(str::to_string).collect::<BTreeSet<_>>());
-        assert_eq!(stubs, Some(stubbed), "and stubs exactly those members' sources (`for m in …;`)");
-
         let mut templates: BTreeSet<String> = BTreeSet::new();
         for entry in std::fs::read_dir(root.join("templates")).expect("templates/").flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
@@ -479,7 +462,32 @@ mod tests {
                 templates.insert(format!("templates/{name}"));
             }
         }
-        let copied_templates: BTreeSet<String> = paths.iter().filter(|p| p.starts_with("templates/")).map(|p| p.to_string()).collect();
-        assert_eq!(copied_templates, templates, "and each template the CLI scaffolds: every one but the platform's own");
+        // both images carry the CLI. Hermes' stage builds it whole, its other
+        // members' manifests and empty sources beside it; the stub's builds
+        // its dependencies first, from every member's manifest and empty
+        // sources (the CLI's a `main`), then the CLI's crates whole
+        let every: BTreeSet<String> = whole.union(&stubbed).cloned().collect();
+        let emptied: BTreeSet<String> = every.iter().filter(|d| *d != "cli").cloned().collect();
+        for (file, manifests, empties) in [("images/hermes/Dockerfile", &stubbed, &stubbed), ("images/stub/Dockerfile", &every, &emptied)] {
+            let dockerfile = std::fs::read_to_string(root.join(file)).expect("the Dockerfile");
+            let stage: Vec<&str> = dockerfile.lines().skip_while(|l| !l.starts_with("FROM rust:") || !l.ends_with(" AS cli")).skip(1).take_while(|l| !l.starts_with("FROM ")).collect();
+            assert!(!stage.is_empty(), "{file} has its CLI stage (`FROM rust:… AS cli`)");
+            let copies: Vec<Vec<&str>> = stage.iter().filter_map(|l| l.strip_prefix("COPY ")).map(|l| l.split_whitespace().collect()).collect();
+            let lock = ["Cargo.toml", "Cargo.lock", "./"];
+            assert!(copies.iter().any(|c| c.as_slice() == lock), "{file}: the root manifest and lock: {copies:?}");
+            let paths: Vec<&str> = copies.iter().filter(|c| c.as_slice() != lock).map(|c| {
+                assert!(c.len() == 2 && c[0] == c[1] && !c[0].starts_with("--"), "each copy keeps its path: {c:?}");
+                c[0]
+            }).collect();
+            let copied_whole: BTreeSet<String> = paths.iter().filter(|p| !p.ends_with("/Cargo.toml") && !p.starts_with("templates/")).map(|p| p.to_string()).collect();
+            let copied_manifests: BTreeSet<String> = paths.iter().filter_map(|p| p.strip_suffix("/Cargo.toml")).map(str::to_string).collect();
+            assert_eq!(copied_whole, whole, "{file}'s stage copies the CLI and each crate it builds from, whole");
+            assert_eq!(&copied_manifests, manifests, "{file}: and the members' manifests its stage copies alone");
+            let stubs = stage.iter().find_map(|l| l.trim().strip_prefix("for m in ").and_then(|l| l.split_once(';'))).map(|(list, _)| list.split_whitespace().map(str::to_string).collect::<BTreeSet<_>>());
+            assert_eq!(stubs.as_ref(), Some(empties), "{file}: and empties exactly those members' sources (`for m in …;`)");
+
+            let copied_templates: BTreeSet<String> = paths.iter().filter(|p| p.starts_with("templates/")).map(|p| p.to_string()).collect();
+            assert_eq!(copied_templates, templates, "{file}: and each template the CLI scaffolds: every one but the platform's own");
+        }
     }
 }

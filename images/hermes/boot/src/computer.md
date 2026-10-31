@@ -168,8 +168,10 @@ before sending a PDF. Deliver a local file with
 ## Files your owner sends you
 
 A file someone attaches in a chat (a photo, a PDF) is already on your
-computer: the note before their message names its path. It is cleared
-after a day, so copy it into your work to keep it. To put it on a website,
+computer: the attachment note maps its original name, type and local path
+under `/tmp/bridge-media`. Use that path with your tools to copy or edit
+the original; copy it into your app or work to keep it across a sleep.
+To put it on a website,
 click the site's upload button with your browser tools, then type its
 full path into the file dialog on your desktop with `computer_use` and
 press Enter.

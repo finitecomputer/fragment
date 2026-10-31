@@ -191,18 +191,6 @@ RUN mv /opt/hermes/skills /opt/fragment/bundled-skills \
 RUN rm /etc/cont-init.d/02-reconcile-profiles \
  && ! grep -rqs container_boot /etc/cont-init.d
 
-# Hermes' tool progress, each line a step (docs/hermes-relay.md): its
-# sender (gateway/run_turn_runner.py, `send_progress_messages`) waits out
-# its 1.5 s edit interval for a line, then goes back to its queue, and sends
-# that line only with a newer one. So a tool call within 1.5 s of the last
-# progress line that is its turn's last (a skill read, then a quick model
-# call to the terminal) never shows, and its step is never recorded. Patched
-# to send once the interval is out (the debt ledger, "The Hermes image
-# patches Hermes' progress sender"); the build fails if upstream's loop
-# changed. Its .pyc goes, so the bytecode step below compiles the patch.
-RUN /opt/hermes/.venv/bin/python -c "import sys; p = sys.argv[1]; s = open(p).read(); old = '                        await asyncio.sleep(remaining)\n                        continue\n'; assert s.count(old) == 1, 'upstream progress sender changed: ' + p; open(p, 'w').write(s.replace(old, '                        await asyncio.sleep(remaining)\n'))" /opt/hermes/gateway/run_turn_runner.py \
- && rm -f /opt/hermes/gateway/__pycache__/run_turn_runner.*.pyc
-
 # What our agents use is in the image, never installed at run time (lazy
 # installs are off: boot/src/hermes.rs, `managed_config`). Hermes'
 # keyless text_to_speech speaks with Edge; operator-backed tools also need
@@ -295,6 +283,7 @@ exec /opt/hermes/bin/hermes "$@"
 EOF
 COPY images/hermes/preload.py /opt/fragment/preload.py
 COPY images/hermes/tool_keys.py /opt/fragment/tool_keys.py
+COPY images/hermes/tool_threads.py /opt/fragment/tool_threads.py
 COPY images/hermes/deploy_wait.py /opt/fragment/deploy_wait.py
 COPY --from=plugin /opt/hermes/plugins/fragment-skill-fork /opt/hermes/plugins/fragment-skill-fork
 COPY --from=plugin /opt/hermes/plugins/fragment-deploy-wait /opt/hermes/plugins/fragment-deploy-wait

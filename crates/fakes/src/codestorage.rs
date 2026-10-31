@@ -135,6 +135,9 @@ struct State {
     counter: u64,
     #[serde(skip)]
     sabotage: u32,
+    /// commit packs that land before `sabotage` starts (`sabotage_commit_packs_after`)
+    #[serde(skip)]
+    sabotage_after: u32,
     /// Per repo url: commit packs still to land with their answer dropped.
     #[serde(skip)]
     unanswered: BTreeMap<String, u32>,
@@ -637,7 +640,9 @@ impl Inner {
 
     fn commit_pack(&self, st: &mut State, url: &str, req: &Request) -> Response {
         st.commit_packs += 1;
-        if st.sabotage > 0 {
+        if st.sabotage > 0 && st.sabotage_after > 0 {
+            st.sabotage_after -= 1;
+        } else if st.sabotage > 0 {
             st.sabotage -= 1;
             let n = st.counter;
             let competitor = [("competitor.txt".to_string(), Some(format!("competitor {n}").into_bytes()))];
@@ -1121,6 +1126,13 @@ impl CodeStorage {
     /// The next `n` commit packs each lose to a competitor commit (409).
     pub fn sabotage_commit_packs(&self, n: u32) {
         self.with(|st| st.sabotage = n);
+    }
+
+    /// `sabotage_commit_packs(n)`, from the commit pack after the next
+    /// `skip`: those are served as ever (a writer's later commit loses, not
+    /// its first).
+    pub fn sabotage_commit_packs_after(&self, skip: u32, n: u32) {
+        self.with(|st| (st.sabotage_after, st.sabotage) = (skip, n));
     }
 
     /// The next `n` commit packs that land on `repo` lose their answer: the

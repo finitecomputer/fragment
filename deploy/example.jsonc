@@ -152,6 +152,17 @@
                                         "max_price": { "prompt": 0.15, "completion": 0.5 } } } },
     "fallback": { "provider": "workers_ai", "model": "@cf/zai-org/glm-5.3-flash" },
     "vision": { "provider": "workers_ai", "model": "@cf/zai-org/glm-5.3-flash" }
+    // Embeddings (docs/api.md, Models): BGE-M3 on Workers AI unnamed, as
+    // if named so:
+    //   "embeddings": { "provider": "workers_ai", "model": "@cf/baai/bge-m3", "dimensions": 1024 }
+    // A self-hosted deployment runs its own, an OpenAI-compatible
+    // /embeddings (Hugging Face's TEI, say), at the price it names:
+    //   "embeddings": { "provider": "openai", "base_url": "https://embed.example.internal/v1",
+    //                   "key": "fragment-embeddings-key", "model": "BAAI/bge-m3",
+    //                   "dimensions": 1024, "version": "1", "max_input_tokens": 8192,
+    //                   "price": { "input": 0, "output": 0 } }
+    // (a deployment whose tiers are private embeds only on a slot marked
+    // "private": true, a confidential API: without one, it embeds nothing)
   },
   // Or its tiers on Finite Private, Finite's GLM-5.3 Flash on Tinfoil (its
   // key, `fpk_live_…`, issued by finite.computer; decision 61, 2026-10-14):
@@ -235,6 +246,12 @@
     }
     // no size: a computer starts at decision 13's 2 vCPU and 6 GiB
   },
+  // The connectors: the doors its people may open (docs/computers.md,
+  // "Connector policy"), [{id, relayTargets: [{host, port}]}]. Omitted: the
+  // cell's default, SimpleX with its twelve XFTP hosts on 443. [] is the
+  // kill switch: no connector may be linked, redeemed or relayed (an
+  // unlink still works), and no computer relay opens.
+  // "connectors": [{ "id": "simplex", "relayTargets": [{ "host": "xftp1.simplex.im", "port": 443 }] }],
   // The provider catalog a computer's swap offers (docs/computers.md,
   // "Connections and operator keys"): one row each, its kind, the hosts its
   // credential is sent to, where on a request it goes (a header and its

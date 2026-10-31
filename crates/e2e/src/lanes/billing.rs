@@ -23,7 +23,7 @@ use crate::browser::{Lease, Page};
 use crate::{Need, Suite};
 
 /// How long a seat's push may take to reach a ledger (the registry's alarm).
-const PUSHED: Duration = Duration::from_secs(20);
+pub(super) const PUSHED: Duration = Duration::from_secs(20);
 
 fn ledger(api: &Api, keys: &Keys) -> Value {
     api.signed(keys, "GET", "/api/ledger", None).map(|r| r.body).unwrap_or(Value::Null)
@@ -68,13 +68,13 @@ const HELP_AND_CONSOLE: &str = "if (window === window.top) { const real = window
     return new Response(JSON.stringify({ ...body, support: 'mailto:help@e2e.test' }), { status: r.status, headers: { 'content-type': 'application/json' } }); }; \
     const warn = console.warn; window.__warned = []; console.warn = (...a) => { window.__warned.push(a.map(String).join(' ')); warn(...a); }; }";
 
-fn seat(api: &Api, keys: &Keys) -> Value {
+pub(super) fn seat(api: &Api, keys: &Keys) -> Value {
     api.signed(keys, "GET", "/api/seat", None).map(|r| r.body).unwrap_or(Value::Null)
 }
 
 /// The org's live subscription's id (not one that ended), from what the
 /// platform asked Stripe for.
-fn subscription_of(s: &Suite, org: &str) -> Option<String> {
+pub(super) fn subscription_of(s: &Suite, org: &str) -> Option<String> {
     s.stripe.requests().iter().rev().find_map(|r| {
         let id = r.path.strip_prefix("/v1/subscriptions/")?;
         let sub = s.stripe.subscription(id)?;
@@ -465,7 +465,187 @@ pub fn billing(s: &mut Suite, api: &Api) -> Result<()> {
     let payer = consent(s, api)?;
     payer_goes(s, api)?;
     orphan(s, api)?;
+    org_credit(s, api)?;
     wiped(s, api, &payer)
+}
+
+/// An org's own credit (decisions 66 to 68): orgs pay out of band (a
+/// Stripe link, an invoice), so an operator credits an org's ledger and
+/// sets its budget, with `fragment operator credit|budget`, once by its
+/// id, logged; and names who pays (`fragment operator payer`), in its
+/// governance log. Its billing admins read it; no one else does, nor sets
+/// any of it, and the self-serve pack and budget are not there. Its credit
+/// and budget read back after a restart.
+fn org_credit(s: &mut Suite, api: &Api) -> Result<()> {
+    let vic = api.person()?;
+    let vic_id = api.identity(&vic)?;
+    let org = buys(s, api, &vic)?;
+    let root = format!("/api/orgs/{org}");
+    let read = |api: &Api, who: &Keys| api.signed(who, "GET", &format!("{root}/ledger"), None).map(|r| r.body).unwrap_or(Value::Null);
+    let fresh = read(api, &vic);
+    s.ok(
+        "an org's ledger starts with nothing: no credit, a budget of zero, read-only, and no plan, seat or included credit",
+        fresh["org"] == org.as_str()
+            && fresh["balanceMicros"] == 0
+            && fresh["budgetMicros"] == 0
+            && fresh["standing"] == json!({ "standing": "read_only", "why": "overdrawn" })
+            && fresh.get("plan").is_none()
+            && fresh.get("includedMicros").is_none(),
+        &fresh,
+    );
+    // the operator's CLI, with their key's file
+    let dir = s.dir("org-credit");
+    let file = dir.join("operator.key");
+    std::fs::write(&file, format!("{}\n", s.operator.secret_hex()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600))?;
+    }
+    let (home, key) = (s.dir("org-credit-cli"), file.to_string_lossy().to_string());
+    let credit = s.cli_json(api, &home, &["operator", "credit", &org, "20", "--why", "a pilot, invoiced", "--id", "fund-1", "--key-file", &key, "--json"]);
+    let after = read(api, &vic);
+    let logged = api.signed(&s.operator, "GET", "/api/admin/log", None)?.body["entries"].as_array().is_some_and(|e| e.iter().any(|x| x["action"] == "ledger-grant" && x["target"] == format!("org:{org}").as_str()));
+    s.ok(
+        "operator_credit_funds_org: `fragment operator credit` credits the org's own ledger, logged; it takes writes, and none of its people's ledgers moved",
+        credit.as_ref().is_ok_and(|v| v["org"] == org.as_str()) && after["balanceMicros"] == 20_000_000 && after["standing"] == json!({ "standing": "ok" }) && logged,
+        json!({ "cli": format!("{credit:?}"), "org": after }),
+    );
+    let again = s.cli_json(api, &home, &["operator", "credit", &org, "20", "--why", "a pilot, invoiced", "--id", "fund-1", "--key-file", &key, "--json"]);
+    let budget = s.cli_json(api, &home, &["operator", "budget", &org, "10", "--id", "b-1", "--key-file", &key, "--json"]);
+    let budget_again = s.cli_json(api, &home, &["operator", "budget", &org, "10", "--id", "b-1", "--key-file", &key, "--json"]);
+    // each logged once, in the org's governance log and the operators' log
+    let logs = |api: &Api| -> Result<(usize, usize)> {
+        let governed = api.signed(&s.operator, "GET", &format!("/api/admin/orgs/{org}/content"), None)?.body["log"].as_array().map_or(0, |l| l.iter().filter(|e| e["action"] == "ledger-grant").count());
+        let noted = api.signed(&s.operator, "GET", "/api/admin/log", None)?.body["entries"].as_array().map_or(0, |e| e.iter().filter(|x| x["action"] == "ledger-grant" && x["target"] == format!("org:{org}").as_str()).count());
+        Ok((governed, noted))
+    };
+    let logged = logs(api)?;
+    s.ok(
+        "credit_granted_once: the same credit's id again credits nothing more, and is logged once, in the org's governance log and the operators'; its budget, set by `fragment operator budget`, likewise once by its id",
+        again.is_ok() && budget.is_ok() && budget_again.is_ok() && read(api, &vic)["balanceMicros"] == 20_000_000 && read(api, &vic)["budgetMicros"] == 10_000_000 && logged == (1, 1),
+        json!([format!("{again:?}"), format!("{budget:?}"), read(api, &vic), logged]),
+    );
+    let payer = s.cli_json(api, &home, &["operator", "payer", &org, &Api::email_of(&vic), "--id", "p-1", "--key-file", &key, "--json"]);
+    let view = api.signed(&s.operator, "GET", &format!("/api/admin/orgs/{org}/content"), None)?;
+    let named = view.body["log"].as_array().is_some_and(|l| l.iter().any(|e| e["action"] == "payer-named" && e["subject"] == vic_id.as_str()));
+    s.ok(
+        "`fragment operator payer` names who the org's credit is invoiced to, in its governance log",
+        payer.as_ref().is_ok_and(|v| v["person"] == vic_id.as_str()) && named,
+        json!({ "cli": format!("{payer:?}"), "log": view.body["log"] }),
+    );
+    // payer_named_once: the same id again is the same entry; another person under it, 409
+    let payer_at = format!("/api/admin/orgs/{org}/payer");
+    let again = api.signed(&s.operator, "POST", &payer_at, Some(&json!({ "id": "p-1", "person": Api::email_of(&vic) })))?;
+    let yan = api.person()?;
+    let other = api.signed(&s.operator, "POST", &payer_at, Some(&json!({ "id": "p-1", "person": Api::email_of(&yan) })))?;
+    let entries = api.signed(&s.operator, "GET", &format!("/api/admin/orgs/{org}/content"), None)?.body["log"].as_array().map_or(0, |l| l.iter().filter(|e| e["action"] == "payer-named").count());
+    s.ok(
+        "payer_named_once: naming the payer again by its id answers the same entry, another person under it is 409, and the log holds one",
+        again.status == 200 && payer.as_ref().is_ok_and(|v| v["seq"] == again.body["seq"]) && entries == 1 && other.status == 409,
+        json!({ "again": again.body, "other": [other.status, other.body], "entries": entries }),
+    );
+
+    // nonoperator_cannot_credit, and the self-serve routes are not there
+    let wen = api.person()?;
+    let r = api.signed(&vic, "POST", "/api/org/admins", Some(&json!({ "email": Api::email_of(&wen) })))?;
+    answer(api, &wen, r.body["admin"]["id"].as_str().unwrap_or(""), "accept")?;
+    let xan = api.person()?;
+    let op = api.identity(&s.operator)?;
+    // an agent of who pays, signing as itself
+    let hand = Keys::generate();
+    let reg = "/api/identities";
+    let made = api.signed(&vic, "POST", reg, Some(&json!({ "kind": "agent", "proof": api.proof(&hand, "POST", reg, &vic) })))?;
+    anyhow::ensure!(made.status == 200, "an agent of vic's: {made}");
+    let refused = [
+        ("a billing admin credits nothing: an operator's (403)", api.signed(&wen, "POST", &format!("/api/ledger/org:{org}/grant"), Some(&json!({ "id": "mine", "micros": 1, "by": api.identity(&wen)?, "why": "" })))?, 403),
+        ("nor sets its budget (403)", api.signed(&wen, "POST", &format!("/api/ledger/org:{org}/budget"), Some(&json!({ "id": "mine", "micros": 1 })))?, 403),
+        ("nor names its payer (403)", api.signed(&wen, "POST", &format!("/api/admin/orgs/{org}/payer"), Some(&json!({ "id": "mine", "person": Api::email_of(&wen) })))?, 403),
+        ("nor reads it as an operator (403)", api.signed(&wen, "GET", &format!("/api/admin/orgs/{org}/ledger"), None)?, 403),
+        ("an agent of who pays credits nothing (403)", api.signed(&hand, "POST", &format!("/api/ledger/org:{org}/grant"), Some(&json!({ "id": "bot", "micros": 1, "by": api.identity(&hand)?, "why": "" })))?, 403),
+        ("nor sets its budget (403)", api.signed(&hand, "POST", &format!("/api/ledger/org:{org}/budget"), Some(&json!({ "id": "bot", "micros": 1 })))?, 403),
+        ("nor names its payer (403)", api.signed(&hand, "POST", &format!("/api/admin/orgs/{org}/payer"), Some(&json!({ "id": "bot", "person": Api::email_of(&vic) })))?, 403),
+        ("the self-serve budget is not there (404)", api.signed(&wen, "PUT", &format!("{root}/budget"), Some(&json!({ "id": "b", "micros": 1 })))?, 404),
+        ("nor is the self-serve pack (404)", api.signed(&vic, "POST", &format!("{root}/billing/pack"), Some(&json!({})))?, 404),
+        ("someone not in it reads none of it (403)", api.signed(&xan, "GET", &format!("{root}/ledger"), None)?, 403),
+        ("an org that is not there takes no credit (404)", api.signed(&s.operator, "POST", "/api/ledger/org:org-0000000000000000/grant", Some(&json!({ "id": "x", "micros": 1, "by": op, "why": "" })))?, 404),
+        ("its ledger takes no plan (403)", api.signed(&s.operator, "POST", &format!("/api/ledger/org:{org}/plan"), Some(&json!({ "id": "p", "plan": "seat" })))?, 403),
+        ("a budget past its limit (400)", api.signed(&s.operator, "POST", &format!("/api/ledger/org:{org}/budget"), Some(&json!({ "id": "huge", "micros": 100_000_000_001_i64 })))?, 400),
+        ("a payer no one on the fleet is (404)", api.signed(&s.operator, "POST", &format!("/api/admin/orgs/{org}/payer"), Some(&json!({ "id": "nobody", "person": "nobody@e2e.test" })))?, 404),
+    ];
+    let mut all = true;
+    for (what, r, status) in &refused {
+        all &= r.status == *status;
+        if r.status != *status {
+            println!("      {what}: {} {}", r.status, r.body);
+        }
+    }
+    let bad = s.cli(api, &home, &["operator", "credit", "org-nope", "5", "--why", "x", "--id", "x", "--key-file", &key]);
+    s.ok(
+        "nonoperator_cannot_credit: no one but an operator credits it, budgets it or names its payer; the self-serve routes are not there; the CLI names no org it cannot parse",
+        all && !bad.status.success(),
+        json!(refused.iter().map(|(w, r, _)| json!([w, r.status])).collect::<Vec<_>>()),
+    );
+
+    // funded_org_outlives_its_people (Alex's review): an org's credit is in
+    // its log before its ledger takes it, so its last person leaving while
+    // the grant is cut short (its ledger not reached) drops nothing, and
+    // the same command after a restart finishes it, logged once
+    let zed = api.person()?;
+    let comped = api.signed(&s.operator, "POST", "/api/admin/seats", Some(&json!({ "email": Api::email_of(&zed), "kind": "seat" })))?;
+    let zorg = comped.body["org"]["id"].as_str().context("zed's comped org")?.to_string();
+    let grant = json!({ "id": "inv-z", "micros": 5_000_000, "by": op, "why": "an invoice" });
+    let grant_at = format!("/api/ledger/org:{zorg}/grant");
+    let lever = api.unsigned("POST", "/api/test/ledger", Some(&json!({ "identity": format!("org:{zorg}"), "op": "fail-grants", "times": 1 })))?;
+    let cut = api.signed(&s.operator, "POST", &grant_at, Some(&grant))?;
+    // and one no operator credited, its person moving after: once it is
+    // dropped (its push, queued after the other's, ran), the other's ran too
+    let yul = api.person()?;
+    let comped = api.signed(&s.operator, "POST", "/api/admin/seats", Some(&json!({ "email": Api::email_of(&yul), "kind": "seat" })))?;
+    let yorg = comped.body["org"]["id"].as_str().context("yul's comped org")?.to_string();
+    let mut moved = Vec::new();
+    for who in [&zed, &yul] {
+        let r = api.signed(&vic, "POST", "/api/org/seats", Some(&json!({ "email": Api::email_of(who) })))?;
+        moved.push(answer(api, who, r.body["seat"]["id"].as_str().unwrap_or(""), "accept")?.status);
+    }
+    let control_gone = s.eventually(PUSHED, || api.signed(&s.operator, "GET", &format!("/api/admin/orgs/{yorg}"), None).is_ok_and(|r| r.status == 404));
+    let kept = api.signed(&s.operator, "GET", &format!("/api/admin/orgs/{zorg}"), None)?;
+    let none_yet = api.signed(&s.operator, "GET", &format!("/api/admin/orgs/{zorg}/ledger"), None)?;
+    s.ok(
+        "funded_org_outlives_its_people: an org's grant cut short after its log took it (its ledger not reached), its only person gone to another org, the org stays, while one with nothing of its own is dropped",
+        lever.status == 200 && cut.status >= 500 && moved == [200, 200] && control_gone && org_of(api, &zed) == org && kept.status == 200 && none_yet.body["balanceMicros"] == 0,
+        json!([lever.body, [cut.status, cut.body.clone()], moved, control_gone, kept.status, none_yet.body]),
+    );
+
+    // org_terms_survive_restart: its credit and budget, read back after a restart
+    let restarted;
+    let api = if s.runs("billing", &[Need::Node]) {
+        s.stop()?;
+        restarted = s.start(false)?;
+        &restarted
+    } else {
+        api
+    };
+    let back = read(api, &vic);
+    s.ok(
+        "org_terms_survive_restart: after a restart the org's ledger is its own still, its credit and its budget (its own row, beside the head) as they were",
+        back["balanceMicros"] == 20_000_000 && back["budgetMicros"] == 10_000_000 && back["standing"] == json!({ "standing": "ok" }),
+        &back,
+    );
+    // the cut grant, sent again after the restart, lands once; the same
+    // id with another body is refused before any ledger sees it
+    let done = api.signed(&s.operator, "POST", &grant_at, Some(&grant))?;
+    let again = api.signed(&s.operator, "POST", &grant_at, Some(&grant))?;
+    let other = api.signed(&s.operator, "POST", &grant_at, Some(&json!({ "id": "inv-z", "micros": 9_000_000, "by": op, "why": "an invoice" })))?;
+    let zl = api.signed(&s.operator, "GET", &format!("/api/admin/orgs/{zorg}/ledger"), None)?;
+    let governed = api.signed(&s.operator, "GET", &format!("/api/admin/orgs/{zorg}/content"), None)?.body["log"].as_array().map_or(0, |l| l.iter().filter(|e| e["action"] == "ledger-grant" && e["request"] == "grant:inv-z").count());
+    let noted = api.signed(&s.operator, "GET", "/api/admin/log", None)?.body["entries"].as_array().map_or(0, |e| e.iter().filter(|x| x["action"] == "ledger-grant" && x["target"] == format!("org:{zorg}").as_str()).count());
+    s.ok(
+        "a cut-short grant, sent again after a restart, credits the org once, its credit there for an operator; logged once in its governance log and the operators'; its id with another body is 409",
+        done.status == 200 && again.status == 200 && other.status == 409 && zl.status == 200 && zl.body["balanceMicros"] == 5_000_000 && governed == 1 && noted == 1,
+        json!([done.body, again.body, [other.status, other.body.clone()], zl.body, governed, noted]),
+    );
+    Ok(())
 }
 
 /// The admins' view of `org`, as an operator lists it (its customer and
@@ -614,13 +794,13 @@ fn orphan(s: &mut Suite, api: &Api) -> Result<()> {
 }
 
 /// The id of the org `keys` is in (`GET /api/seat`'s), or "".
-fn org_of(api: &Api, keys: &Keys) -> String {
+pub(super) fn org_of(api: &Api, keys: &Keys) -> String {
     seat(api, keys)["org"]["id"].as_str().unwrap_or("").to_string()
 }
 
 /// `keys` buys their own seat on the fake's Checkout and holds it, paid.
 /// Answers the org it made.
-fn buys(s: &Suite, api: &Api, keys: &Keys) -> Result<String> {
+pub(super) fn buys(s: &Suite, api: &Api, keys: &Keys) -> Result<String> {
     let r = api.signed(keys, "POST", "/api/billing/checkout", Some(&json!({})))?;
     anyhow::ensure!(r.status == 200, "a Checkout: {r}");
     s.stripe.complete(r.body["session"].as_str().unwrap_or("")).map_err(anyhow::Error::msg)?;
@@ -638,7 +818,7 @@ const WIPE_CALLS_MAX: usize = 5;
 /// org is still to land) is done by a later call. At most
 /// `WIPE_CALLS_MAX` calls, none waiting on a clock. Answers the last
 /// report, and every step each call ran, in order.
-fn wipe_until_done(api: &Api, wiper: &Keys, who: &str) -> Result<(crate::api::Reply, Vec<Value>)> {
+pub(super) fn wipe_until_done(api: &Api, wiper: &Keys, who: &str) -> Result<(crate::api::Reply, Vec<Value>)> {
     let mut ran = vec![];
     // bounded: WIPE_CALLS_MAX calls
     for call in 1..=WIPE_CALLS_MAX {
@@ -658,7 +838,7 @@ fn billing_ran(ran: &[Value]) -> Value {
 }
 
 /// `who` answers the offer `id` (`accept` or `decline`).
-fn answer(api: &Api, who: &Keys, id: &str, verb: &str) -> Result<crate::api::Reply> {
+pub(super) fn answer(api: &Api, who: &Keys, id: &str, verb: &str) -> Result<crate::api::Reply> {
     api.signed(who, "POST", &format!("/api/seat/offers/{id}/{verb}"), Some(&json!({})))
 }
 

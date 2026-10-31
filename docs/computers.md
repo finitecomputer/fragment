@@ -359,6 +359,19 @@ A direct manifest lookup resolves only that tag; a definite missing
 manifest authorizes a build, and other registry errors stop the job.
 Input tags are not overwritten by CI.
 
+Master's merge queue builds it first. Each merge group runs
+`.github/workflows/preview-image.yml`, which resolves the group's inputs
+the same way and, when neither `inputs-<key>` nor `queue-<key>` is
+there, builds, pushes and prepares `queue-<key>`. A group's head is the
+commit master then moves to, so that push's `preview-image` waits for the
+queue's run of its very commit when it is still going, then copies
+`queue-<key>` to `inputs-<key>` by digest (its layers are already in the
+repository) and finds it prepared. Master's job is the only writer of an
+input tag; the queue's runs only ever push queue tags, never deploy, and
+are not required checks. Their environment, `preview-image`, holds a
+token with the preview account's Containers permission alone
+(docs/secrets.md).
+
 An absent tag builds with BuildKit's persistent Actions cache (one
 master-only `preview-hermes` scope, `mode=max`), then pushes and prepares
 the image on Cloudflare's network. The Dockerfile's CLI stage copies only
@@ -832,10 +845,11 @@ expires within 30 days. The container application is the deployment's
     its protocol only from one (measured on a preview computer,
     2026-10-25), so a computer reaches SimpleX's file servers only through
     this: the Worker's `connect()`, which nothing inspects, carries them
-    (the shim's `ComputerEgress`, entry.mjs `relay`). Only the hosts and
-    port the guest view's `relay` names (SimpleX's and Flux's preset XFTP
-    servers, `relay::HOSTS`, on 443; 403 for any other, and 400 without
-    an upgrade), at most `relay::OPEN_MAX` (4) open at once per computer
+    (the shim's `ComputerEgress`, entry.mjs `relay`). Only the targets
+    the guest view's `relayTargets` names, its `relay` those on 443 (the
+    deployment's connector policy, below; by default SimpleX's and Flux's
+    preset XFTP servers, `relay::HOSTS`, on 443; 403 for any other, and
+    400 without an upgrade), at most `relay::OPEN_MAX` (4) open at once per computer
     and `relay::DAY_BYTES_MAX` (2 GiB) a UTC day (429 past either), each
     closed with code 4008 past its allowance (`relay::BYTES_MAX`, 32 MiB
     both ways together, or what is left of the day's budget past what the
@@ -1784,9 +1798,12 @@ settings and state):
   and the fragment API, with the chat records of docs/chat-records.md.
   Its core names no runtime; `relay` (Hermes' Relay) and `script` (a
   deterministic agent) are its two runtimes.
-- `images/stub`: the bridge with `script`, and a screen page. 9.6 MB; a
-  local start follows its chats in 0.3 s. The platform's own lanes run
-  against it.
+- `images/stub`: the bridge with `script`, the fragment CLI (its agents
+  ask each other with it, `ask <agent> <words>`, as our Hermes image's
+  do; built from the CLI's inputs alone, its dependencies a layer of their
+  own, unoptimized), and a screen page. 9.6 MB and a 17 MB CLI; a local
+  start follows its chats in 0.3 s. The platform's own lanes run against
+  it.
 - `images/hermes`: Hermes v0.21.7's desktop image, `hermes-boot`, the
   bridge as Hermes' Relay connector, the screen. The base is pinned by
   digest to v0.21.7's release build (its versioned tag
@@ -2170,12 +2187,17 @@ is a test's shorter one).
 
 Beside how to ask, every agent is told on every turn in our chats that a
 file someone attaches is already on its computer (`hermes::FILES`, after
-`hermes::ASKING` in `platform_hints.relay`; 2026-10-22): Hermes' relay
-adapter downloads each attachment before the turn into the profile's
-scratch, which Hermes prunes once a day unused, and the note before the
-message names its path (an image's after `image_url:`); nothing else
-told the agent it was a file it could use. Copied into its work, it is
-kept. Its browser tools have no upload, so to put one on a website it
+`hermes::ASKING` in `platform_hints.relay`; 2026-10-22). The bridge names
+each original filename, MIME type and local path after the new message's
+words: `/tmp/bridge-media/<sha256>` by default. The files are already
+downloaded before the turn, including images given natively to the model.
+They are scratch, lost at a sleep; copy them into the app or work to keep
+them. Hermes also caches each in the profile's `cache/scratch` as
+`relay_media_<random>.<ext>`; its own hints differ between image and
+document input and lose original names. Native images still carry pixels
+and Hermes' cache-path hint. The bridge's note gives tools a consistent
+mapping independent of that vision routing. Its browser tools have no
+upload, so to put one on a website it
 clicks the site's upload button with them, then types the path into
 the file dialog on its desktop with `computer_use`. The `fragment`
 skill's first page says the same (`computer.md`, "Files your owner sends
@@ -2213,6 +2235,14 @@ and its teammates are told it beside theirs. An agent made before
 this whose `SOUL.md` still says its old name is told its name all the
 same; its owner, or the agent, may take the name out of its job.
 
+Its **role** (its agent fragment's `meta.role`, its status's `agentRole`:
+docs/api.md, "An agent's name and picture") is told the same way, read
+with its title: "Your role is chief of staff: what your owner made you
+for, as it is now." between its name and its owner's home, and none when
+it has none, so an edit reaches its next turn. Its `profile.yaml`'s
+description, and what its teammates are told it does, is its role, else
+its job's first line. Its job never copies the role.
+
 ### Teammates in our Hermes image
 
 A person's agents on one computer are each other's teammates. Hermes'
@@ -2223,8 +2253,8 @@ died with a cut turn. In its place (route A of the audit, Paul
 2026-10-30), on the platform's records (docs/chat-records.md, "An ask"):
 
 - **Each agent is told its teammates at every turn**: their names (each
-  one's agent fragment's title), fragments and roles (each one's job's
-  first line, its `SOUL.md`'s, at most 120 characters), in its profile
+  one's agent fragment's title), fragments and what each does (its role,
+  else its job's first line, at most 120 characters), in its profile
   config's `agent.system_prompt` beside its name and home (hermes.rs
   `told_team`), never itself; and how asking goes: with `fragment_ask`,
   its answer back as a new message, an answer no new question, a
@@ -2244,7 +2274,7 @@ died with a cut turn. In its place (route A of the audit, Paul
   the asking agent's, however long it takes and through restarts and
   rollbacks. A name two agents answer to asks no one (the CLI's `pick`).
 - **Each `profile.yaml`** names its agent (its title, else its name on
-  the computer, else its label) and says its role, for Hermes' own lists;
+  the computer, else its label) and says what it does, for Hermes' own lists;
   it marks no profile a Bot Mode bot. That mark gone changes the
   capability fingerprint Hermes stamps on a Bot Chat's stored prompt, so
   each such session's prompt is rebuilt once, without the protocol, its
@@ -2738,3 +2768,21 @@ for a host) and finds the same `HOME`, `~` and modes.
   hosted `agent-smoke` checks that its chat's agent's screen is the one
   served: the RFB stream's desktop is that agent's (`hermes:<profile>`),
   the page names it, and another agent's is refused.
+
+### Connector policy
+
+The deployment's `connectors` (its config; `FRAGMENT_CONNECTORS`, checked
+by `fragment_core::connectors::Policy`) name the doors its people may open
+and the exact endpoints a computer's relay carries for each: `[{id,
+relayTargets: [{host, port}]}]`, each target an exact public DNS name on a
+nonzero port (no wildcard, IP, local or internal name, or suffix). Absent,
+the cell's default: `simplex`, with `relay::HOSTS` on 443. `[]` is the
+kill switch: no door is linked, redeemed or checked, and no relay opens;
+an owner may still unlink. A computer's relay offer (`relayTargets`, and
+`relay` for the 443 ones) and its relay admission read the same policy,
+for the connectors its agents are allowed; the relay's bounds stay the
+computer's, whichever connector a relay is for.
+
+`Policy::authorize(owner, agent, connector, action)` is the one decision
+every door and relay asks; org policy will intersect there. An image's
+own declarations grant nothing.

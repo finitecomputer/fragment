@@ -12,13 +12,30 @@ is the wire contract. It replaced the OpenRouter-backed ledger and
 
 ## The model
 
-- **One ledger per payer.** A payer is a person. The caller decides who
-  pays a row and sends it to that person's ledger, which keys on nothing
-  else (decision 36):
+- **One ledger per payer.** A payer is a person, or an org (its ledger
+  named `org:<id>`; decision 66). The caller decides who pays a row and
+  sends it to that payer's ledger, which keys on nothing else (decision
+  36):
   - an agent's model calls, operator-key calls and compute bill the
     agent's owner;
   - a fragment's hosting (requests, storage, dynamic workers,
     screenshots) and its AI steps bill the fragment's owner.
+- **An org's ledger** (decisions 66 to 68; `fragment_core::ledger::org`)
+  holds the credit an operator gave it (orgs pay out of band), and
+  nothing else: no plan, seat, included credit or default
+  plan. Its overdraft is zero, so its fragments are read-only at a
+  balance of zero. It pays for no agent turn, no wake and no computer
+  (`persons_only`, 403), and refuses a plan, a seat or an overdraft the
+  same way. An operator sets its monthly budget (`OrgBudget`, zero
+  until set): once its fragments' charges this month reach it, their AI
+  steps are refused (`budget_reached`) until a larger one or the next
+  month; writes and hosting go on. Every AI step in its fragments meets
+  the fragment's cap too, whoever starts it: an org's fragment has no
+  owner who passes it. Its terms are never in its head, which an older
+  release's sweep reads and rewrites with only the fields it knows: that
+  it is an org's is its ledger's name (`meta.payer`, kept as its first
+  call named it), and its budget a row of its own (`meta.org_budget`), so
+  a rollback loses neither. A person's head is written as before.
 - **Guests pay for nothing.** A guest's ledger refuses their paid calls
   at the gate and meter batches (`guest_payer`). A guest owns nothing billable, so a
   guest makes no fragment either (`guest_creates`, 403: "guests can't
@@ -89,7 +106,7 @@ the gateway's log `cost`) and its cost basis (list plus fee).
 
 | Meter (`Usage`) | Unit | Default list price | Source |
 |---|---|---|---|
-| `tokens` | tokens per model: input (uncached), cached input, cache write, output | per million: Flash $0.15 / $0.03 / $0.15 / $0.50; any model through OpenRouter (Finite's tiers', GLM-5.3 Flash: `z-ai/glm-5.3-flash`) at its slot's ceiling in the config, `max_price`'s prompt for every input token and its completion for output (Finite's $0.15 / $0.15 / $0.15 / $0.50), grossed up for OpenRouter's 5.5% fee (to $0.150715 / $0.150715 / $0.150715 / $0.502381), GLM-5.3 Flash's also kept as a row of the code's for its usage queued past a switch; a model on any other OpenAI-compatible API at the list price its slot names (`price`; the private tier's fallback, Tinfoil's DeepSeek V4.1 Flash, $0.65 / $0.13 / $0.65 / $1.45); Finite Private's GLM-5.3 Flash (`glm-5-3-flash`) the same as Flash's; GLM-5.3 $1.40 / $0.26 / $1.40 / $4.40; DeepSeek V4 Flash (the route's default fallback) $0.44 / $0.014 / $0.44 / $1.32; Opus 5.5 $4 / $0.20 / $5 / $20; the Clef family (decisions; media counted as input tokens, nothing out, no cache: every input token at its input price) Clef-flash $0.038, Clef $0.24, Clef-omni $0.15 | Workers AI catalog (`/ai/models/search`; DeepSeek's checked against its neurons on 2026-10-09); the AI model catalog page for Opus (S4); OpenRouter's is the `max_price` each slot routes under, read from the deployment's config (deploy/example.jsonc; its fee, openrouter.ai/docs/faq, read 2026-10-15), "OpenRouter's price" below, a decision for Paul; Finite Private publishes no price (finite-mono meters a key in weighted tokens, never dollars), so it is at Workers AI's Flash's, decision 61 (a decision for Paul); Workers AI's pricing page and its [Clef-flash](https://developers.cloudflare.com/workers-ai/models/clef-flash/), [Clef](https://developers.cloudflare.com/workers-ai/models/clef/) and [Clef-omni](https://developers.cloudflare.com/workers-ai/models/clef-omni/) pages (2026-10-14) |
+| `tokens` | tokens per model: input (uncached), cached input, cache write, output | per million: Flash $0.15 / $0.03 / $0.15 / $0.50; any model through OpenRouter (Finite's tiers', GLM-5.3 Flash: `z-ai/glm-5.3-flash`) at its slot's ceiling in the config, `max_price`'s prompt for every input token and its completion for output (Finite's $0.15 / $0.15 / $0.15 / $0.50), grossed up for OpenRouter's 5.5% fee (to $0.150715 / $0.150715 / $0.150715 / $0.502381), GLM-5.3 Flash's also kept as a row of the code's for its usage queued past a switch; a model on any other OpenAI-compatible API at the list price its slot names (`price`; the private tier's fallback, Tinfoil's DeepSeek V4.1 Flash, $0.65 / $0.13 / $0.65 / $1.45); Finite Private's GLM-5.3 Flash (`glm-5-3-flash`) the same as Flash's; GLM-5.3 $1.40 / $0.26 / $1.40 / $4.40; DeepSeek V4 Flash (the route's default fallback) $0.44 / $0.014 / $0.44 / $1.32; Opus 5.5 $4 / $0.20 / $5 / $20; the Clef family (decisions; media counted as input tokens, nothing out, no cache: every input token at its input price) Clef-flash $0.038, Clef $0.24, Clef-omni $0.15; BGE-M3's embeddings (`@cf/baai/bge-m3`, the embeddings slot unnamed: docs/api.md, Models) $0.012 for every input token, nothing out, its tokens counted from its input (Workers AI reports none) | Workers AI catalog (`/ai/models/search`; DeepSeek's checked against its neurons on 2026-10-09); the AI model catalog page for Opus (S4); OpenRouter's is the `max_price` each slot routes under, read from the deployment's config (deploy/example.jsonc; its fee, openrouter.ai/docs/faq, read 2026-10-15), "OpenRouter's price" below, a decision for Paul; Finite Private publishes no price (finite-mono meters a key in weighted tokens, never dollars), so it is at Workers AI's Flash's, decision 61 (a decision for Paul); Workers AI's pricing page and its [Clef-flash](https://developers.cloudflare.com/workers-ai/models/clef-flash/), [Clef](https://developers.cloudflare.com/workers-ai/models/clef/) and [Clef-omni](https://developers.cloudflare.com/workers-ai/models/clef-omni/) pages (2026-10-14) |
 | `neurons` | thousandths of a neuron | $0.011 per thousand neurons; an image (FLUX.1 [schnell]) is 4.80 neurons a 512×512 tile and 9.60 a step (`fragment_core::media`); a transcription (Whisper large-v3-turbo) is 46.63 neurons a minute of audio, charged at the length Whisper heard (`fragment_core::transcribe`) | Workers AI pricing (its image rows for FLUX.1 [schnell], its audio row for whisper-large-v3-turbo, read 2026-10-07); S4 matched it to tokens on every call |
 | `awake` | ms, per instance type | `2vcpu-6gib`: $0.064224 an hour | Containers pricing: 6 GiB memory and a 12 GB disk provisioned, plus 5% of 2 vCPU (CPU is billed on active use, which the Computer DO cannot see) |
 | `storage` | byte-hours, by class | per GB-month (10^9 bytes × 720 h): R2 $0.015, SQLite $0.20, git $0.015 | R2 and Durable Objects pricing; code.storage publishes no price to us, so git is at R2's |
@@ -327,6 +344,7 @@ interrupt every request"):
 | `GRANT_MAX` | $10,000 | more is a typo |
 | `CAP_MAX` | $10,000 | more is no cap |
 | `OVERDRAFT_MAX` | $1,000 | someone trusted with more is someone to invoice |
+| `org::BUDGET_MAX` | $100,000 a month | an org's budget: more is a typo |
 | `price::CHARGE_MAX` | $100,000 a row | no call or sample costs that; a row that would is a bug upstream |
 | `price::QUANTITY_MAX` | 10^15 per quantity | keeps the 128-bit math from overflowing |
 | `ID_MAX_BYTES` | 256, printable ASCII | ids and names |
@@ -335,7 +353,8 @@ interrupt every request"):
 
 ## The Ledger Durable Object
 
-One `Ledger` DO per person, named by the person's identity (cell/src/ledger.rs).
+One `Ledger` DO per payer, named by a person's identity or `org:<id>`
+(cell/src/ledger.rs).
 Each route is one `transactionSync` over the head and the store (a
 `js.rs` helper: workers-rs 0.8.5 has none). The bodies are the core's
 types (inner) or proto's (public); answers are JSON of the answer types,
@@ -343,7 +362,8 @@ and refusals are `ErrorBody {error: code(), message: message()}` with the
 typed `refused` beside it, so a caller tells a read-only owner from a
 guest. A statement that fails marks the store at fault, and the route
 rolls back whole. A new person's ledger starts as the core makes it (a
-guest), then takes `FRAGMENT_DEFAULT_PLAN` under `plan:default`.
+guest), then takes `FRAGMENT_DEFAULT_PLAN` under `plan:default`; an
+org's starts as an org's (`Ledger::new_org`), by its name.
 
 Tables:
 
@@ -363,7 +383,8 @@ Inner routes (platform code only, through the DO's stub):
 | `POST /may-spend` | `{spend, fragment, byOwner}` | `{}` or the refusal |
 | `POST /fragment-open` | `{fragment}` | `{}` or `cap_reached` |
 | `POST /grant`, `/plan`, `/seat`, `/overdraft`, `/cap` | proto's `GrantCredit`, `SetPlan`, `SetSeat`, `SetOverdraft`, `SetFragmentCap` | `{}` |
-| `POST /status` | `{}` | proto's `LedgerStatus` |
+| `POST /status` | `{}` | proto's `LedgerStatus` (a person's) |
+| `POST /org-status`, `/org-budget` | `{}`, proto's `OrgBudget` | proto's `OrgLedgerStatus`, `{}` (an org's) |
 | `POST /test` | `{op: clock {offsetMs} \| sweep \| entries {prefix} \| totals \| book \| paid-calls {max?} \| legacy-seat {seat, seq} \| schema}` | test fleets only |
 
 A batch is priced with the configured book of the DO's release
@@ -383,7 +404,13 @@ Public routes (a hard cut of `/api/budget`; docs/api.md, Ledger):
   grant <user> <usd> --why <text>`. A seat's state is the registry's
   alone: operators comp or end seats there (`/api/admin/seats`,
   `fragment operator comp|uncomp`; docs/billing.md), and the ledger's
-  `seat` command went (2026-10-16).
+  `seat` command went (2026-10-16). `<user>` may be `org:<org id>`, an
+  org that is there, for a grant of its own credit or its `budget {id,
+  micros}` (kept as `budget:<id>`; its ledger takes no plan and no
+  overdraft): `fragment operator credit|budget <org> <usd>`.
+- An org's (decision 66): `GET /api/orgs/<org>/ledger` →
+  `OrgLedgerStatus` (its billing admins; an operator's at
+  `GET /api/admin/orgs/<org>/ledger`).
 
 ## How each meter reaches it
 
@@ -533,9 +560,9 @@ the batch, so a guest's fragments are billed nothing.
 ## Where Stripe plugs in
 
 - **Credit:** a paid credit pack's Checkout becomes `GrantCredit {id:
-  "pack:<Checkout's id>", by: "stripe"}` (docs/billing.md, decision 55).
-  Its id may come again any time (its webhook, its return); commands are
-  never forgotten.
+  "pack:<Checkout's id>", by: "stripe"}` (docs/billing.md, decision 55)
+  on the ledger of the person its metadata names. Its id may come again
+  any time (its webhook, its return); commands are never forgotten.
 - **A seat's state:** the registry pushes `SetPlan` (the seat's kind)
   and `SetSeat` (active while the seat is good, else canceled) in its own
   `seq`, from the seat and its org's subscription as fetched from Stripe

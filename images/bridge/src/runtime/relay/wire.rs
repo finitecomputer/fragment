@@ -7,10 +7,11 @@
 
 use base64::Engine;
 use hmac::{Hmac, Mac};
+use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::Sha256;
 
-use crate::records::{Category, NoticeCategory, PromptOption, Step};
+use crate::records::{valid_post_id, Category, NoticeCategory, PromptOption, Step, ToolEvidence, ToolStatus};
 
 /// The contract this connector speaks.
 pub const CONTRACT_VERSION: u64 = 1;
@@ -36,8 +37,8 @@ pub const FAILED: &str = "❌";
 /// The ops this connector takes (the descriptor's `supported_ops`). Of
 /// decision 21's list, `task_card` exists in v0.21.5 but Hermes sends it
 /// for Slack chats only (`run_turn.py`: `source.platform == SLACK`), so
-/// tool steps arrive as progress text instead; `follow_up` is Discord's
-/// interaction tokens. Neither is advertised.
+/// steps come from its tool hooks (`observed_tool`); `follow_up` is
+/// Discord's interaction tokens. Neither is advertised.
 pub const SUPPORTED_OPS: [&str; 9] = ["send", "edit", "delete", "typing", "react", "draft", "prompt", "send_media", "get_chat_info"];
 
 /// The Authorization a gateway dials with: `Bearer
@@ -587,139 +588,76 @@ pub fn uncursored(content: &str) -> (&str, bool) {
     }
 }
 
-/// Hermes' tool progress is one message whose lines grow, a step each
-/// (`step_of`): its steps past the first `seen`. A terminal command comes
-/// as a fenced block (Hermes v0.21.5's
-/// `_progress_terminal_blocks`, on a platform with code blocks, as Relay
-/// is): `💻 terminal`, then the command between fences, which is that
-/// step's arguments, never a step of its own. Back to back, a command's
-/// header is dropped, and its block is a step of the tool before it. A
-/// header whose block has not closed yet (an edit cut inside it) is no
-/// step until it has. Each step is said `ok`, with no excerpt: progress
-/// says none (the model's words before it are a reply of their own).
-pub fn new_steps(content: &str, seen: usize) -> Vec<Step> {
-    let (text, _) = uncursored(content);
-    let mut steps: Vec<Step> = Vec::new();
-    // whether the last step is a header waiting for its block
-    let mut header = false;
-    let mut block: Option<Vec<&str>> = None;
-    // bounded by the message's lines
-    for line in text.lines().map(str::trim) {
-        if line.starts_with("```") {
-            let Some(cmd) = block.take() else {
-                block = Some(Vec::new());
-                continue;
-            };
-            let cmd = cmd.join("\n");
-            match steps.last_mut() {
-                Some(last) if header => last.args = cmd,
-                last => {
-                    let tool = last.map_or_else(|| "terminal".to_string(), |s| s.tool.clone());
-                    steps.push(step(tool, cmd));
-                }
-            }
-            header = false;
-        } else if let Some(cmd) = block.as_mut() {
-            cmd.push(line);
-        } else if !line.is_empty() {
-            let s = step_of(line);
-            header = s.args.is_empty();
-            steps.push(s);
-        }
-    }
-    if block.is_some() && header {
-        steps.pop();
-    }
-    steps.into_iter().skip(seen).collect()
-}
-
-fn step(tool: String, args: String) -> Step {
-    let category = category_of(&tool);
-    Step { tool, args, ok: true, excerpt: String::new(), category }
-}
-
-/// Hermes' tools, as v0.21.6 registers them (`tools/`): what each does (a
-/// step's category), and the verb its progress line says in place of its
-/// name (its friendly labels, on by default: `display.verb` of
-/// `locales/en.yaml`), joined to the call's preview by " for " or " ". A
-/// tool not here is `other`, but for its browser's (`browser_…`).
-const TOOLS: &[(&str, Option<&str>, Category)] = &[
-    ("terminal", Some("Running"), Category::Shell),
-    ("execute_code", Some("Running code"), Category::Shell),
-    ("process_manage", None, Category::Shell),
-    ("web_search", Some("Searching the web"), Category::Web),
-    ("x_search", None, Category::Web),
-    ("read_file", Some("Reading"), Category::Read),
-    // the same verb as read_file's: a preview that is a URL is this one's
-    ("web_extract", Some("Reading"), Category::Read),
-    ("search_files", Some("Searching files"), Category::Read),
-    ("session_search", Some("Searching past sessions"), Category::Read),
-    ("skill_view", Some("Reading skill"), Category::Read),
-    ("skills_list", Some("Listing skills"), Category::Read),
-    ("vision_analyze", Some("Looking at the image"), Category::Read),
-    ("write_file", Some("Writing"), Category::Write),
-    ("patch", Some("Editing"), Category::Write),
-    ("skill_manage", Some("Updating skill"), Category::Write),
-    ("browser_navigate", Some("Browsing"), Category::Browser),
-    ("browser_click", Some("Clicking"), Category::Browser),
-    ("browser_type", Some("Typing"), Category::Browser),
-    ("browser_exec", None, Category::Browser),
-    ("computer_use", None, Category::Browser),
-    ("image_generate", Some("Generating image"), Category::Image),
-    ("delegate_task", Some("Delegating"), Category::Delegate),
-    ("message_agent", None, Category::Delegate),
-    ("memory", Some("Updating memory"), Category::Memory),
-    ("video_generate", Some("Generating video"), Category::Other),
-    ("text_to_speech", Some("Generating speech"), Category::Other),
-    ("clarify", Some("Asking"), Category::Other),
-    ("todo_list", Some("Updating tasks"), Category::Other),
-    ("cronjob_manage", Some("Scheduling"), Category::Other),
+/// What Hermes' tools do (a step's category), by their names as v0.21.7
+/// registers them (`tools/`). A tool not here is `other`, but for its
+/// browser's (`browser_…`).
+const TOOLS: &[(&str, Category)] = &[
+    ("terminal", Category::Shell),
+    ("execute_code", Category::Shell),
+    ("process_manage", Category::Shell),
+    ("web_search", Category::Web),
+    ("x_search", Category::Web),
+    ("read_file", Category::Read),
+    ("web_extract", Category::Read),
+    ("search_files", Category::Read),
+    ("session_search", Category::Read),
+    ("skill_view", Category::Read),
+    ("skills_list", Category::Read),
+    ("vision_analyze", Category::Read),
+    ("write_file", Category::Write),
+    ("patch", Category::Write),
+    ("skill_manage", Category::Write),
+    ("browser_navigate", Category::Browser),
+    ("browser_click", Category::Browser),
+    ("browser_type", Category::Browser),
+    ("browser_exec", Category::Browser),
+    ("computer_use", Category::Browser),
+    ("image_generate", Category::Image),
+    ("delegate_task", Category::Delegate),
+    ("message_agent", Category::Delegate),
+    ("memory", Category::Memory),
+    ("video_generate", Category::Other),
+    ("text_to_speech", Category::Other),
+    ("clarify", Category::Other),
+    ("todo_list", Category::Other),
+    ("cronjob_manage", Category::Other),
 ];
 
 /// What a Hermes tool does.
 pub fn category_of(tool: &str) -> Category {
-    match TOOLS.iter().find(|(name, _, _)| *name == tool) {
-        Some((_, _, c)) => *c,
+    match TOOLS.iter().find(|(name, _)| *name == tool) {
+        Some((_, c)) => *c,
         None if tool.starts_with("browser_") => Category::Browser,
         None => Category::Other,
     }
 }
 
-/// A progress line as a step: its tool and the call's preview, its
-/// arguments. Hermes says a tool with a friendly label by its verb
-/// (`🔍 Searching the web for rust`, `✍️ Writing notes.md`), any other by
-/// its name (`🖥️ computer_use: "capture"`, `⚙️ computer_use...`): a verb is
-/// its tool's name here (`TOOLS`), the preview's quotes and a repeat's count
-/// (` (×2)`) go, and the line's first word is the tool when no verb fits.
-pub fn step_of(line: &str) -> Step {
-    let body = line.trim_start_matches(|c: char| !c.is_ascii_alphanumeric()).trim();
-    if body.is_empty() {
-        return step(line.trim().to_string(), String::new());
+/// A tool call's end, as our image's `fragment-activity` plugin observes
+/// it (Hermes' `post_tool_call`) on the activity socket: the turn it is a
+/// step of (Hermes' message id, ours), the call's preview and exit code
+/// (Hermes' own display helpers'), its outcome.
+#[derive(Deserialize)]
+struct Observed {
+    turn: String,
+    tool: String,
+    #[serde(default)]
+    args: String,
+    #[serde(default)]
+    excerpt: String,
+    tool_call_id: String,
+    status: ToolStatus,
+    duration_ms: u64,
+}
+
+/// The step an observed end is, and its turn: the one source of steps
+/// (nothing is read from Hermes' progress text, nor inferred from silence).
+pub fn observed_tool(v: &Value) -> Option<(String, Step)> {
+    let o = Observed::deserialize(v).ok()?;
+    if !valid_post_id(&o.turn) || o.tool.is_empty() || !valid_post_id(&o.tool_call_id) {
+        return None;
     }
-    // the longest verb the line starts with, whole (of two alike, the first
-    // listed: max_by_key keeps the last of its equals)
-    let verb = TOOLS
-        .iter()
-        .rev()
-        .filter_map(|(tool, verb, _)| Some((*tool, (*verb)?)))
-        .filter(|(_, verb)| body.strip_prefix(verb).is_some_and(|rest| rest.is_empty() || rest.starts_with(' ')))
-        .max_by_key(|(_, verb)| verb.len());
-    let (tool, args) = match verb {
-        Some((tool, verb)) => {
-            let rest = &body[verb.len()..];
-            let args = rest.strip_prefix(" for ").unwrap_or(rest).trim();
-            let url = args.starts_with("https://") || args.starts_with("http://");
-            (if tool == "read_file" && url { "web_extract" } else { tool }, args)
-        }
-        None => {
-            let end = body.find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-')).unwrap_or(body.len());
-            let rest = body[end..].strip_prefix("...").unwrap_or(&body[end..]);
-            (&body[..end], rest.trim_start_matches([':', ' ']).trim())
-        }
-    };
-    let args = args.rsplit_once(" (×").filter(|(_, n)| n.strip_suffix(')').is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))).map_or(args, |(a, _)| a.trim_end());
-    let args = args.strip_prefix('"').and_then(|a| a.strip_suffix('"')).unwrap_or(args);
-    step(tool.to_string(), args.to_string())
+    let evidence = ToolEvidence { tool_call_id: o.tool_call_id, status: o.status, duration_ms: o.duration_ms };
+    Some((o.turn, Step { category: category_of(&o.tool), ok: o.status == ToolStatus::Completed, tool: o.tool, args: o.args, excerpt: o.excerpt, evidence: Some(evidence) }))
 }
 
 #[cfg(test)]
@@ -940,66 +878,26 @@ mod tests {
         assert_eq!(split_chat_id("nochat"), None);
     }
 
-    /// A step's (tool, arguments, category).
-    fn said(s: &Step) -> (&str, &str, &str) {
-        (s.tool.as_str(), s.args.as_str(), s.category.as_str())
-    }
-
+    /// A step is a tool call's observed end, its outcome as observed: a
+    /// frame without what makes one, or naming an outcome not ours, is none.
     #[test]
-    fn progress_grows_into_steps() {
-        assert_eq!(uncursored("Hello wo ▉"), ("Hello wo", true));
-        assert_eq!(uncursored("Hello world"), ("Hello world", false));
-        let all = |content: &str, seen: usize| new_steps(content, seen).iter().map(|s| (s.tool.clone(), s.args.clone(), s.category.as_str())).collect::<Vec<_>>();
-        let step = |t: &str, a: &str, c: &'static str| (t.to_string(), a.to_string(), c);
-        // a terminal command's block is its header's arguments, never a step
-        let progress = "💻 terminal\n```\nuname -a && nproc\n```\n🔍 web_search: \"rust\" ▉";
-        assert_eq!(all(progress, 0), vec![step("terminal", "uname -a && nproc", "shell"), step("web_search", "rust", "web")]);
-        assert_eq!(all(progress, 1), vec![step("web_search", "rust", "web")]);
-        assert!(all(progress, 2).is_empty());
-        // back to back, the header is dropped: the block is the tool before it's
-        let twice = "💻 terminal\n```\nls\n```\n```\ncat notes.md\n```";
-        assert_eq!(all(twice, 0), vec![step("terminal", "ls", "shell"), step("terminal", "cat notes.md", "shell")]);
-        // a header whose block has not closed is no step until it has
-        assert!(all("💻 terminal\n```\nls", 0).is_empty());
-        assert_eq!(all("💻 terminal\n```\nls\n```", 0), vec![step("terminal", "ls", "shell")]);
-        // the inline form, a friendly verb, a header with no block, a repeat's count
-        assert_eq!(all("💻 terminal: `ls`\n✍️ Writing /data/hermes/notes.md\n⚙️ thinking...", 0), vec![step("terminal", "`ls`", "shell"), step("write_file", "/data/hermes/notes.md", "write"), step("thinking", "", "other")]);
-        assert_eq!(all("💻 terminal\n```\nls\n``` (×2)", 0), vec![step("terminal", "ls", "shell")]);
-        assert!(all("", 0).is_empty());
-        assert!(new_steps("💻 terminal: `ls`", 0).iter().all(|s| s.ok && s.excerpt.is_empty()));
-    }
-
-    /// Hermes' progress lines, each read as its tool, its preview and what
-    /// it does: by name (with its preview quoted, pending, a header, a call)
-    /// or by its friendly verb (its connector dropped, the longest verb
-    /// whole); a repeat's count goes; a line no verb fits is its first word's.
-    #[test]
-    fn a_progress_line_is_its_tool() {
-        for (line, want) in [
-            ("💻 terminal: `ls -la`", ("terminal", "`ls -la`", "shell")),
-            ("🔍 web_search(\"q\")", ("web_search", "(\"q\")", "web")),
-            ("🖥️ computer_use: \"capture the screen\"", ("computer_use", "capture the screen", "browser")),
-            ("📸 browser_snapshot...", ("browser_snapshot", "", "browser")),
-            ("⚙️ mcp_github_search: \"issues\"", ("mcp_github_search", "issues", "other")),
-            ("🔀 message_agent: \"maple\" (×3)", ("message_agent", "maple", "delegate")),
-            ("🔍 Searching the web for rust async", ("web_search", "rust async", "web")),
-            ("🔎 Searching files for TODO", ("search_files", "TODO", "read")),
-            ("🔍 Searching past sessions", ("session_search", "", "read")),
-            ("📖 Reading /data/work/notes.md", ("read_file", "/data/work/notes.md", "read")),
-            ("📄 Reading https://example.com/a", ("web_extract", "https://example.com/a", "read")),
-            ("📚 Reading skill fragment-apps", ("skill_view", "fragment-apps", "read")),
-            ("📖 Reading skillful.txt", ("read_file", "skillful.txt", "read")),
-            ("🐍 Running code import os", ("execute_code", "import os", "shell")),
-            ("🔧 Editing src/main.rs", ("patch", "src/main.rs", "write")),
-            ("🌐 Browsing https://example.com", ("browser_navigate", "https://example.com", "browser")),
-            ("🎨 Generating image a cat in a hat", ("image_generate", "a cat in a hat", "image")),
-            ("🔀 Delegating research pricing", ("delegate_task", "research pricing", "delegate")),
-            ("🧠 Updating memory add: likes tea", ("memory", "add: likes tea", "memory")),
-            ("✍️ Writing notes.md (×2)", ("write_file", "notes.md", "write")),
-            ("⚙️ Runningman stuff", ("Runningman", "stuff", "other")),
-            ("✅", ("✅", "", "other")),
-        ] {
-            assert_eq!(said(&step_of(line)), want, "{line}");
+    fn a_step_is_an_observed_end() {
+        for (status, ok) in [("completed", true), ("failed", false), ("timed_out", false), ("cancelled", false), ("blocked", false)] {
+            let v = json!({ "turn": "t-1", "tool": "terminal", "args": "ls", "excerpt": "Exit code: 0", "tool_call_id": "call_1", "status": status, "duration_ms": 12 });
+            let (turn, step) = observed_tool(&v).expect(status);
+            assert_eq!(crate::records::turn_step(&turn, 1, &step), json!({ "kind": "turn.step", "turn": "t-1", "step": 1, "tool": "terminal", "category": "shell", "args": "ls", "ok": ok, "excerpt": "Exit code: 0", "tool_call_id": "call_1", "status": status, "duration_ms": 12 }));
         }
+        let bare = json!({ "turn": "t-1", "tool": "memory", "tool_call_id": "call_1", "status": "completed", "duration_ms": 1 });
+        assert_eq!(observed_tool(&bare).map(|(_, s)| (s.args, s.excerpt, s.category)), Some((String::new(), String::new(), Category::Memory)));
+        for (field, bad) in [("status", json!("timeout")), ("status", json!("ok")), ("turn", json!("")), ("tool_call_id", json!("a b")), ("tool", json!("")), ("duration_ms", json!(-1))] {
+            let mut v = bare.clone();
+            v[field] = bad;
+            assert!(observed_tool(&v).is_none(), "{v}");
+        }
+        assert!(observed_tool(&json!({ "working": true })).is_none());
+        assert_eq!(category_of("browser_snapshot"), Category::Browser);
+        assert_eq!(category_of("invented_tool"), Category::Other);
+        assert_eq!(uncursored("Hello ▉"), ("Hello", true));
     }
 }
+

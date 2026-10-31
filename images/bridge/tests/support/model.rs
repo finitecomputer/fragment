@@ -40,7 +40,7 @@
 //! - `image: <url>` is answered with that image (`![a cat](<url>)`), as a
 //!   model whose tool made one at its provider (FAL) gives it; and the
 //!   model's own server serves one at `/generated/<name>.png` (`IMAGE`), as
-//!   that provider's CDN would;
+//!   that provider's CDN would (`slow-<name>`: after `SLOW_IMAGE`);
 //! - Hermes' self-improvement review (its prompts start `Review the
 //!   conversation above`), where it may save to memory, of a conversation
 //!   where a person said `remember this` is answered by a `memory` call
@@ -263,8 +263,17 @@ pub fn narrated() -> String {
     format!("scripted: here is what I found so far, before I run it. {}", more.trim_end())
 }
 
+/// The terminal calls `prepare the approvals proof` makes before its card,
+/// and the id of its effect's call (Publish), which a test counts in the
+/// model's calls: a rolled-back `/data` forgets the file it writes.
+pub const PREPARE_STEPS: usize = 6;
+pub const APPROVAL_EFFECT: &str = "call_approval_effect";
+
 /// What `write: <path>` has Hermes' write_file put there.
 pub const WRITTEN: &str = "written by the agent\n";
+/// How long the model's server takes to serve `/generated/slow-…png`.
+pub const SLOW_IMAGE: Duration = Duration::from_secs(6);
+
 /// The image the model's server serves at `/generated/…png`: a 1×1 PNG,
 /// one pixel of the agents' violet.
 pub const IMAGE: &[u8] = b"\x89\x50\x4e\x47\x0d\x0a\x1a\x0a\x00\x00\x00\x0d\x49\x48\x44\x52\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\x0d\x49\x44\x41\x54\x78\x9c\x63\x58\xd1\xfd\xea\x3f\x00\x07\x19\x03\x1d\x5b\xc5\x9f\x97\x00\x00\x00\x00\x49\x45\x4e\x44\xae\x42\x60\x82";
@@ -279,10 +288,11 @@ fn text_of(content: &Value) -> String {
     }
 }
 
-/// The answer for a transcript: `(text, tool call)`.
+/// The answer for a transcript: `(text, tool call)` (or calls: an array).
 pub fn answer(body: &Value) -> (String, Option<Value>) {
     let messages = body["messages"].as_array().cloned().unwrap_or_default();
     let last_user = messages.iter().rev().find(|m| m["role"] == "user").map(|m| text_of(&m["content"])).unwrap_or_default();
+    let inbound_text = last_user.clone();
     // Hermes renders an inbound's read-only context before the message it
     // comes with (`[Recent channel messages]\n…\n\n[New message]\n[name]
     // text`): the context is reference (the platform's note on a cut turn),
@@ -296,6 +306,23 @@ pub fn answer(body: &Value) -> (String, Option<Value>) {
     let tool_result = messages.iter().rev().take_while(|m| m["role"] != "user").find(|m| m["role"] == "tool").map(|m| text_of(&m["content"]));
     let offered = |name: &str| body["tools"].as_array().is_some_and(|t| t.iter().any(|t| t["function"]["name"] == name));
     let has_terminal = offered("terminal");
+    // Use only paths named in the turn: seeing pixels does not tell a
+    // model which local file its terminal can copy into an app.
+    if last_user.contains("put this image into my app") {
+        if tool_result.is_some() {
+            return ("scripted: copied both attachments into the app\nMEDIA:/data/work/juniper--k3x9/app/public/logo.png\nMEDIA:/data/work/juniper--k3x9/app/public/guide.pdf".into(), None);
+        }
+        let path = |mime: &str, legacy: &str| inbound_text.lines().find(|line| line.contains(mime))
+            .or_else(|| inbound_text.lines().find(|line| line.contains(legacy) || (mime == "image/png" && line.contains("[Image attached at:"))))
+            .and_then(|line| line.split_whitespace().find(|word| word.starts_with('/')))
+            .map(|path| path.trim_end_matches(['.', ']']))
+            .filter(|path| path.bytes().all(|b| b.is_ascii_alphanumeric() || b"/._-".contains(&b)));
+        let (Some(image), Some(pdf)) = (path("image/png", "image_url:"), path("application/pdf", ".pdf")) else {
+            return ("scripted: missing an attachment's local path".into(), None);
+        };
+        let command = format!("mkdir -p /data/work/juniper--k3x9/app/public && cp -- '{image}' /data/work/juniper--k3x9/app/public/logo.png && cp -- '{pdf}' /data/work/juniper--k3x9/app/public/guide.pdf && sha256sum /data/work/juniper--k3x9/app/public/logo.png /data/work/juniper--k3x9/app/public/guide.pdf");
+        return (String::new(), Some(json!({ "index": 0, "id": "call_copy_attachments", "type": "function", "function": { "name": "terminal", "arguments": json!({ "command": command }).to_string() } })));
+    }
     if last_user.contains("[ASYNC DELEGATION") && last_user.contains("fragment-delegate-complete") {
         return ("scripted: checked the delegated result: fragment-delegate-complete\nMEDIA:/data/work/juniper--k3x9/delegate.txt".into(), None);
     }
@@ -311,15 +338,58 @@ pub fn answer(body: &Value) -> (String, Option<Value>) {
         }
         return ("scripted: delegate_task is not offered".into(), None);
     }
+    // P6, as a real turn runs before its card: `prepare the approvals
+    // proof` checks the draft in `PREPARE_STEPS` terminal calls, each with
+    // its words first (each a second long: Hermes sends a quick tool's
+    // step late or not at all, docs/technical-debt-ledger.md), then says
+    // its plan at length and asks its card (a
+    // clarify, Publish or Keep private). Its effect (`approval-effects`)
+    // only for Publish: answered live (the clarify's result), or late (a
+    // fresh turn whose message is the answer: cards.rs).
+    let results = messages.iter().rev().take_while(|m| m["role"] != "user").filter(|m| m["role"] == "tool").count();
+    let effect = || json!({ "index": 0, "id": APPROVAL_EFFECT, "type": "function", "function": { "name": "terminal", "arguments": json!({ "command": "echo published >> /data/work/juniper--k3x9/approval-effects" }).to_string() } });
+    if last_user.contains("prepare the approvals proof") && has_terminal {
+        if results < PREPARE_STEPS {
+            let call = json!({ "index": 0, "id": format!("call_prepare_{results}"), "type": "function", "function": { "name": "terminal", "arguments": json!({ "command": format!("sleep 1 && echo checked part {results} of the draft >> /data/work/juniper--k3x9/prepared") }).to_string() } });
+            return (format!("Checking part {results} of the draft before I publish anything."), Some(call));
+        }
+        if results == PREPARE_STEPS {
+            let args = json!({ "questions": [{ "question": "Publish the approvals proof?", "choices": ["Publish", "Keep private"] }] });
+            let call = json!({ "index": 0, "id": "call_prepare_ask", "type": "function", "function": { "name": "clarify", "arguments": args.to_string() } });
+            return (narrated(), Some(call));
+        }
+        // the clarify's result names every choice offered, and the one chosen
+        if results == PREPARE_STEPS + 1 && tool_result.as_deref().unwrap_or("").contains("\"user_response\": \"Publish") {
+            return (String::new(), Some(effect()));
+        }
+        return ("scripted: done with the approvals proof".into(), None);
+    }
+    // the card's question as Hermes asked it (with its "skip" line), and
+    // the option as Hermes labels it ("Publish (Recommended)")
+    if let Some(chose) = last_user.split_once("Answer to your earlier question “Publish the approvals proof?").and_then(|(_, rest)| rest.split_once("”: ")).map(|(_, c)| c.trim().to_string()) {
+        if tool_result.is_some() {
+            return ("scripted: published the approvals proof".into(), None);
+        }
+        if chose.starts_with("Publish") {
+            return (String::new(), Some(effect()));
+        }
+        return (format!("scripted: kept it private ({chose})"), None);
+    }
     // `use the terminal twice`: a quick command, then, at once, one that
     // sleeps 2 s (the second's progress line comes within Hermes' 1.5 s edit
     // interval of the first's, as a real model's quick second call does),
     // then the answer
-    let results = messages.iter().rev().take_while(|m| m["role"] != "user").filter(|m| m["role"] == "tool").count();
     if last_user.contains("use the terminal twice") && has_terminal && results < 2 {
         let command = if results == 0 { "echo first-ran" } else { "sleep 2 && echo tool-ran" };
         let call = json!({ "index": 0, "id": format!("call_{}", results + 1), "type": "function", "function": { "name": "terminal", "arguments": json!({ "command": command }).to_string() } });
         return (String::new(), Some(call));
+    }
+    // `both: <a> | <b>`: both commands, two calls in the one response
+    // (Hermes runs a terminal's one after the other)
+    let both = last_user.lines().find_map(|l| l.split_once("both: ").map(|(_, c)| c.to_string()));
+    if let (Some(both), true, None) = (both, has_terminal, &tool_result) {
+        let calls = both.split(" | ").enumerate().map(|(i, c)| json!({ "index": i, "id": format!("call_{}", i + 1), "type": "function", "function": { "name": "terminal", "arguments": json!({ "command": c.trim() }).to_string() } })).collect();
+        return (String::new(), Some(Value::Array(calls)));
     }
     // `run: <command>` on a line of what the user said: that command, and an
     // answer that quotes what it printed
@@ -371,7 +441,7 @@ pub fn answer(body: &Value) -> (String, Option<Value>) {
     }
     if let (Some(command), true) = (narrate.as_deref(), has_terminal) {
         let call = json!({ "index": 0, "id": "call_1", "type": "function", "function": { "name": "terminal", "arguments": json!({ "command": command }).to_string() } });
-        return (narrated(), Some(call));
+        return (if last_user.contains("brief narration") { "Let me check that.".into() } else { narrated() }, Some(call));
     }
     // `image: <url>`: an answer with that image, as a model whose tool made
     // one at its provider gives it (a markdown image, which Hermes sends)
@@ -438,9 +508,6 @@ pub fn answer(body: &Value) -> (String, Option<Value>) {
     } else if last_user.contains("use the terminal slowly") {
         Some("sleep 8 && echo tool-ran")
     } else if last_user.contains("use the terminal") {
-        // Hermes sends a tool's progress line (its step) only if its turn
-        // runs on past its 0.3 s progress poll (docs/technical-debt-ledger.md,
-        // "A quick tool's step can be lost in Hermes")
         Some("sleep 2 && echo tool-ran")
     } else {
         None
@@ -510,6 +577,9 @@ async fn handle(req: Request<Incoming>, calls: Arc<Mutex<Vec<Call>>>, refused: A
     let authorization = req.headers().get("authorization").and_then(|v| v.to_str().ok()).map(str::to_string);
     let content_type = req.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
     if path.starts_with("/generated/") && path.ends_with(".png") {
+        if path.starts_with("/generated/slow-") {
+            tokio::time::sleep(SLOW_IMAGE).await;
+        }
         return Response::builder().status(StatusCode::OK).header("content-type", "image/png").body(http_body_util::Full::new(bytes::Bytes::from_static(IMAGE))).unwrap();
     }
     if path.ends_with("/models") {
@@ -554,12 +624,16 @@ async fn handle(req: Request<Incoming>, calls: Arc<Mutex<Vec<Call>>>, refused: A
     let model = v["model"].as_str().unwrap_or(CHEAP_ID).to_string();
     let usage = json!({ "prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15 });
     let finish = if tool.is_some() { "tool_calls" } else { "stop" };
+    // a call, or several (an array of them)
+    let calls = match tool {
+        Some(Value::Array(calls)) => calls,
+        tool => tool.into_iter().collect(),
+    };
     if !stream {
         let mut message = json!({ "role": "assistant", "content": if text.is_empty() { Value::Null } else { json!(text) } });
-        if let Some(t) = &tool {
-            let mut t = t.clone();
-            t.as_object_mut().unwrap().remove("index");
-            message["tool_calls"] = json!([t]);
+        if !calls.is_empty() {
+            let calls: Vec<Value> = calls.into_iter().map(|mut t| { t.as_object_mut().unwrap().remove("index"); t }).collect();
+            message["tool_calls"] = json!(calls);
         }
         return net::json_answer(StatusCode::OK, &json!({ "id": "chatcmpl-scripted", "object": "chat.completion", "created": 0, "model": model, "choices": [{ "index": 0, "message": message, "finish_reason": finish }], "usage": usage }));
     }
@@ -572,8 +646,8 @@ async fn handle(req: Request<Incoming>, calls: Arc<Mutex<Vec<Call>>>, refused: A
     for piece in chars.chunks(chars.len().div_ceil(3).max(1)) {
         sse.push_str(&format!("data: {}\n\n", chunk(json!({ "content": piece.iter().collect::<String>() }), Value::Null)));
     }
-    if let Some(t) = tool {
-        sse.push_str(&format!("data: {}\n\n", chunk(json!({ "tool_calls": [t] }), Value::Null)));
+    if !calls.is_empty() {
+        sse.push_str(&format!("data: {}\n\n", chunk(json!({ "tool_calls": calls }), Value::Null)));
     }
     let mut last = chunk(json!({}), json!(finish));
     last["usage"] = usage;

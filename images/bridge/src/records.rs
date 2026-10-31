@@ -562,11 +562,31 @@ pub struct Step {
     pub ok: bool,
     pub excerpt: String,
     pub category: Category,
+    pub evidence: Option<ToolEvidence>,
+}
+
+/// How a call ended, as its runtime observed it; old records and runtimes
+/// omit it (docs/chat-records.md).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ToolEvidence {
+    pub tool_call_id: String,
+    pub status: ToolStatus,
+    pub duration_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolStatus {
+    Completed,
+    Failed,
+    TimedOut,
+    Cancelled,
+    Blocked,
 }
 
 pub fn turn_step(turn: &str, n: u32, s: &Step) -> Value {
     assert!(n >= 1, "steps number from 1");
-    json!({
+    let mut body = json!({
         "kind": "turn.step",
         "turn": turn,
         "step": n,
@@ -575,7 +595,13 @@ pub fn turn_step(turn: &str, n: u32, s: &Step) -> Value {
         "args": cut_or_empty(&s.args, limits::STEP_ARGS_MAX_CHARS),
         "ok": s.ok,
         "excerpt": cut_or_empty(&s.excerpt, limits::STEP_EXCERPT_MAX_CHARS),
-    })
+    });
+    if let Some(e) = &s.evidence {
+        body["tool_call_id"] = json!(e.tool_call_id);
+        body["status"] = json!(e.status);
+        body["duration_ms"] = json!(e.duration_ms);
+    }
+    body
 }
 
 /// A turn asking `asks` something to answer in words: their next message
@@ -640,6 +666,9 @@ pub fn turn_prompt(turn: &str, prompt: &str, text: &str, options: &[PromptOption
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Closed {
+    /// A late answer whose card's journal could not be read whole.
+    #[serde(rename = "history_unavailable")]
+    Unavailable,
     Answered,
     Expired,
     Stopped,
@@ -648,6 +677,7 @@ pub enum Closed {
 impl Closed {
     pub fn as_str(self) -> &'static str {
         match self {
+            Closed::Unavailable => "history_unavailable",
             Closed::Answered => "answered",
             Closed::Expired => "expired",
             Closed::Stopped => "stopped",
@@ -1020,7 +1050,7 @@ mod tests {
         let c = Cause { fragment: "talk--k3x9".into(), channel: "chat".into(), seq: 4 };
         let life = "0123456789abcdef0123456789abcdef";
         assert_eq!(turn_start("t", "npub1p", "npub1a", &c, life), json!({ "kind": "turn.start", "turn": "t", "asker": "npub1p", "agent": "npub1a", "cause": { "fragment": "talk--k3x9", "channel": "chat", "seq": 4 }, "life": life }));
-        let s = Step { tool: "terminal".into(), args: "ls".into(), ok: true, excerpt: String::new(), category: Category::Shell };
+        let s = Step { tool: "terminal".into(), args: "ls".into(), ok: true, excerpt: String::new(), category: Category::Shell, evidence: None };
         assert_eq!(turn_step("t", 1, &s), json!({ "kind": "turn.step", "turn": "t", "step": 1, "tool": "terminal", "category": "shell", "args": "ls", "ok": true, "excerpt": "" }), "no words: they are a reply");
         assert_eq!(reply("Let me look.", "t", &[], 1, false), json!({ "text": "Let me look.", "turn": "t" }));
         assert_eq!(reply("Let me look.", "t", &[], 1, true), json!({ "text": "Let me look.", "turn": "t", "interim": true }));

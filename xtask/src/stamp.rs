@@ -509,6 +509,9 @@ mod tests {
         );
         f.write("templates/todo/app.mjs", "one\n");
         f.write("cell/shell/index.html", "<!doctype html>\n");
+        for file in ["client.mjs", "fragment.css", "files.mjs", "files.css", "markdown.mjs", "sw.js"] {
+            f.write(&format!("cell/{file}"), "browser file\n");
+        }
         f.write("cli/SKILL.md", "skill\n");
         f.write("cli/GUIDE.md", "guide\n");
         let manifest = ["--manifest-path", "crates/templates/Cargo.toml"];

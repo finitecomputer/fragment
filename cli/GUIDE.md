@@ -225,7 +225,7 @@ lists their templates:
 folder, from the platform's own templates: one of `blank`, `todo`,
 `inbox`, `calories`, `doc` is copied in as its first commit (`notes` is
 `new`'s and `init`'s alone); a blessed one, `agent`, `chat`, `brain`,
-`skills`, runs the platform's current release and is named in its
+`skills`, `sessions`, runs the platform's current release and is named in its
 `fragment.json`. Either way `--title` gives it its own title, its
 `fragment.json`'s `meta.title`, over the template's. Any other is
 refused, naming them.
@@ -824,6 +824,7 @@ fragment ledger grant ann 20 --why "a top-up"   # operators only
 fragment operator people --q ann@                 # operators: people, orgs, comps,
 fragment operator comp ann@example.com --kind always-on   # trial codes, health, the log
 fragment operator pin <npub> hermes-canary        # a person's computer onto the canary (or back)
+fragment operator credit org-… 500 --why "an invoice" --id inv-12   # an org pays out of band: credit it, once by its reference
 ```
 
 ## You and your keys
@@ -850,6 +851,45 @@ start or download it: an agent cannot, for anyone.
 fragment export                          # start one (or find the one building), wait, download it here
 fragment export --out ~/me.tar           # somewhere else
 ```
+
+## Your Session Archive
+
+The conversations you had with an agent somewhere else, kept in a
+private fragment of yours (kind `sessions`, titled Session Archive, made
+the first time you import): one file a conversation, under `sessions/`,
+and one index a kind, under `index/`, newest first. The shell lists its
+chats under Session Archive, below your chats, each read there as a
+chat. Bring them in from
+the old Finite's export (its `chats/`, or the folder holding it), or
+from Hermes' own `state.db` (or the Hermes home holding it), read-only:
+
+```
+fragment session import ~/finite-import/export              # the old Finite's export, unpacked
+fragment session import ~/.hermes                           # a Hermes home, or its state.db
+fragment session import ~/.hermes --kind chat               # only chats (also: cron, subagent)
+```
+
+A `state.db` copied from elsewhere needs its `state.db-wal` beside it, or
+its newest messages are not in it. On an agent's computer here, its own
+Hermes databases are refused: their conversations are your chats here
+already.
+
+Each conversation is kept by its own id, so importing again adds
+nothing twice, and a newer copy of one (a later export, the same chats
+from Hermes' database) replaces the older; an older copy never does. It says what it added, updated and
+already had, and what it left out and why: at most 18,000 conversations
+and 1 GiB an archive (an import past either adds nothing), 8 MiB a
+conversation. A tool's output and an agent's reasoning are cut to 2,000
+characters; what was said, never. An agent runs it for its owner (into
+their archive, never one of its own), and so reads it: `fragment sync
+<archive> --dir ~/archive --mode pull`, then your own tools over
+`~/archive/sessions/`. A conversation's file (format
+`session-archive/1`) is `{id, origin, kind, title, source, with,
+started_at, ended_at, parts, messages}`, each message `{role, at, text,
+tool, tool_calls, reasoning, summary, attachments}`; `kind` is `chat`,
+`cron` (a scheduled job's run) or `subagent` (a side task); times are UTC.
+A file a message held is under `~/archive/media/`, named in its
+`attachments`.
 
 ## Agents
 
@@ -965,6 +1005,7 @@ fragment whoami                          fragment call <name> <op> [--input JSON
 fragment keys [list|rotate|revoke <npub>]
 fragment ledger [grant <who> <usd> --why W [--id ID]]
 fragment export [--out FILE]             fragment channel <name> [<channel>] [--after N] [--follow]
+fragment session import <path> [--kind K]   # an agent's past conversations, into your Session Archive
 fragment cap <name> <usd>|default        fragment post <name> <channel> --body JSON [--id ID]
 fragment host [<url>]                    fragment runs <name> [<run>] [--status S] [--limit N]
 fragment init <name> [--template T] [--title T]      fragment replay <name> <run>
@@ -1013,6 +1054,9 @@ fragment operator uncomp <seat> [--key-file F]
 fragment operator trials [--name N [--days D] [--capacity C] | --send <id> --to <email>] [--key-file F]
 fragment operator health [--key-file F]
 fragment operator log [--before N] [--key-file F]
+fragment operator credit <org> <usd> --why W --id REF [--key-file F]
+fragment operator budget <org> <usd> [--id I] [--key-file F]
+fragment operator payer <org> <email|npub> [--id I] [--key-file F]
 ```
 
 `fragment operator …` is the deployment's operators' alone: each signs

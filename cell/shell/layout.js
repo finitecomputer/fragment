@@ -69,9 +69,13 @@ export function createLayout({ grid, gutters: [gutterLeft, gutterRight], onChang
   }
 
   // Fit the saved widths into the window without persisting the squeeze.
+  // A grid that measures nothing (hidden, as the page starts) has no window
+  // to fit: its sides stay as saved, so the sidebar is there the moment it
+  // is shown, and its first measure (the ResizeObserver) fits them.
   function fitted() {
     let left = s.leftOpen ? s.left : 0;
     let right = s.rightOpen ? s.right : 0;
+    if (!grid.clientWidth) return { left, right, hideLeft: false };
     const room = grid.clientWidth - MIN.chat - (s.leftOpen ? 1 : 0) - (s.rightOpen ? 1 : 0);
     if (left + right > room && right) right = Math.max(MIN.right, room - left);
     if (left + right > room && left) left = Math.max(MIN.left, room - right);
@@ -179,7 +183,7 @@ export function createLayout({ grid, gutters: [gutterLeft, gutterRight], onChang
   onDouble(gutterRight, () => { resetRight = true; });
 
   // The grid's own size, not the window's: it is hidden until the person is
-  // signed in, and a fit made while it measured nothing hid the sidebar.
+  // signed in, and is fitted at its first measure once shown (`fitted`).
   let frame = 0;
   new ResizeObserver(() => { cancelAnimationFrame(frame); frame = requestAnimationFrame(() => write()); }).observe(grid);
   narrow.addEventListener("change", () => { overlay = null; write(); });
