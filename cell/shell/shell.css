@@ -758,6 +758,8 @@ iframe[data-blocked] { display: none; }
 /* the sections take the sidebar's room and scroll in it; Apps and Settings stay at its foot.
    A list of ellipsized rows never scrolls sideways (its pills' rim kept inside it) */
 #chats { flex: 1 1 auto; min-height: 0; max-height: none; overflow-x: hidden; padding-inline: 2px; }
+/* its rows keep their height: past the room, the list scrolls, never squeezes them */
+#chats > * { flex-shrink: 0; }
 #chats .agent-hero { --edge-light: 0; flex: none; gap: 10px; height: 48px; margin: 10px 0 2px; padding: 8px 13px; border: 1px solid transparent; border-radius: 999px; background: var(--bg-sidebar); }
 #chats .agent-hero:first-child { margin-top: 2px; }
 #chats .agent-hero:hover { background: var(--bg-active); }
