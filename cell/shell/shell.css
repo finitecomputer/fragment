@@ -364,6 +364,13 @@ button:focus-visible, .rename-agent input:focus-visible { outline: 2px solid var
 .search-start-row .search-start { flex: 1; min-width: 0; }
 .search-agent { flex: none; max-width: 40%; height: 30px; padding: 0 8px; border: 1px solid var(--border-strong); border-radius: 999px; background: var(--bg-window); color: var(--text-primary); font: 600 13px var(--font-sans); }
 .search-message .agent-preview { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+/* the launcher's Knowledge (launcher.js): a page of the person's brains or
+   Session Archive, its snippet two lines, its fragment at its end */
+.search-known h3:first-child { margin-top: 16px; }
+.search-results > .search-known:first-child h3 { margin-top: 0; }
+.search-known .agent-preview { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.search-known .meta { max-width: 30%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.search-known-failed { margin: 4px 10px 8px; font-size: 13px; color: var(--text-secondary); }
 /* the launcher's files (launcher.js, launchFiles): rows of chips under its words, scrolling when the viewport leaves less room */
 .search-files { display: flex; flex: 0 1 auto; flex-wrap: wrap; min-height: 0; overflow-y: auto; gap: 8px; padding: 0 18px 14px 18px; }
 .search-files[hidden] { display: none; }
