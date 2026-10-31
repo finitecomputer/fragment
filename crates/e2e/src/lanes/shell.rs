@@ -5259,7 +5259,7 @@ fn unread_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person
     let shown = s.eventually(wait, || b.eval_in_frame(page, &first, "document.body.innerText").ok().and_then(|v| v.as_str().map(|t| t.matches(more).count() >= 2)).unwrap_or(false));
     let none = s.eventually(wait, || unread_of(api, me.session, &first) == 0) && b.eval(page, &format!("!{row}.querySelector('.unread')"))? == true;
     s.ok("the chat open, on screen, counts nothing as its messages come (marked seen again)", sent && answered && shown && none, json!({ "unread": unread_of(api, me.session, &first) }));
-    click_chat(b, page, &reader_chat)?;
+    click_chat(b, page, reader_chat)?;
     b.until(page, &format!("document.getElementById('chat-title').textContent === 'Reader' && {}", js(reader_chat) + " === [...document.querySelectorAll('#frames iframe')].find((f) => !f.hidden)?.dataset.fragment"), wait);
     Ok(())
 }
@@ -5362,7 +5362,7 @@ fn new_chat_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Pers
     );
     // from the Reader's chat, their main agent's New chat opens that empty
     // chat again, not another
-    click_chat(b, page, &reader_chat)?;
+    click_chat(b, page, reader_chat)?;
     b.until(page, "document.getElementById('chat-title').textContent === 'Reader'", wait);
     for scheme in ["light", "dark"] {
         b.color_scheme(page, scheme)?;
@@ -5394,7 +5394,7 @@ fn new_chat_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Pers
     anyhow::ensure!(r.status == 200, "the Reader's new chat archived: {r}");
     let own = own_named(api, me.session, &own_chat)?;
     s.ok("the agent's own chat keeps its label, apart from the new ones", label_of(&own) == own_chat && label_of(&fresh) == format!("{own_chat}-2"), json!([own, fresh]));
-    click_chat(b, page, &reader_chat)?;
+    click_chat(b, page, reader_chat)?;
     b.until(page, "document.getElementById('chat-title').textContent === 'Reader'", wait);
     Ok(())
 }
