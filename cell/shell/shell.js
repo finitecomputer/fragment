@@ -85,6 +85,10 @@ class ApiError extends Error {
     this.reason = reason ?? null;
   }
 }
+// What the page says while a deploy goes out (503 `deploying`: docs/MODEL.md,
+// "Calls between releases"), as the platform's updating page does: the
+// refusal's releases are an operator's, for the console alone
+const UPDATING = "Updating — back in a moment";
 // this page's writes still going: a reload for a new release waits for them
 let writing = 0;
 async function api(method, path, body) {
@@ -96,6 +100,10 @@ async function api(method, path, body) {
     const r = await fetch(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body), credentials: "same-origin" });
     heard(r);
     const out = await r.json().catch(() => ({}));
+    if (r.status === 503 && out.error === "deploying") {
+      console.info(`${method} ${path}:`, out.message);
+      throw new ApiError(r.status, out.error, UPDATING);
+    }
     if (!r.ok) throw new ApiError(r.status, out.error, out.message || r.statusText, out.reason);
     return out;
   } finally {
@@ -1186,6 +1194,18 @@ const chatLabel = (agent) => freeLabel(`${labelOf(agent).slice(0, LABEL_ROOM - "
 // An untitled chat with only this agent that no one has said anything in
 // yet is the one to open again, not another.
 const blank = (identity) => chats().find((f) => own(f) && !f.archived && f.title === UNTITLED && !f.preview && agentsOf(f.name).length === 1 && agentsOf(f.name)[0] === identity);
+// A chat's first message with words, from its records (docs/chat-records.md:
+// a body with text and no kind but "message"), or undefined.
+const firstSaid = (records) => (records ?? []).map((x) => (typeof x.body === "string" ? x.body : (x.body?.kind ?? "message") === "message" ? x.body?.text : null)).find((t) => typeof t === "string" && t.trim());
+// Whether a chat the list shows blank is blank still, asked of the chat: the
+// list as last read may not show a message said a moment ago (this page's
+// own launch, read again only once its socket is told; another tab's), and
+// the next launch went into that chat, the person's new message beside the
+// one before (CI's "settings, then Back", runs 40898440541 and #743's).
+async function stillBlank(name) {
+  const r = await api("GET", `/api/f/${seg(name)}/channels/chat?after=0&limit=20`);
+  return !firstSaid(r.records);
+}
 let starting = false;
 // `open: false` makes it (or finds the blank one) without opening it: the
 // launcher opens it itself, as it posts its first message.
@@ -1195,6 +1215,8 @@ async function newChat(identity, { quiet = false, open = true } = {}) {
   starting = true;
   try {
     let name = blank(identity)?.name;
+    // one that cannot be asked is not taken: a new chat is made
+    if (name && !(await stillBlank(name).catch(() => false))) name = null;
     if (!name) {
       const chat = await api("POST", "/api/fragments", { label: chatLabel(agent.fragment), template: "chat", title: UNTITLED });
       // adding it wakes its computer (the platform's `joined`)
@@ -1224,7 +1246,7 @@ async function titleFromFirst(name) {
   try {
     const r = await api("GET", `/api/f/${seg(name)}/channels/chat?after=0&limit=20`);
     // a message is a body with text and no kind but "message" (docs/chat-records.md)
-    const said = (r.records ?? []).map((x) => (typeof x.body === "string" ? x.body : (x.body?.kind ?? "message") === "message" ? x.body?.text : null)).find((t) => typeof t === "string" && t.trim());
+    const said = firstSaid(r.records);
     if (!said) return titling.delete(name);
     const words = said.trim().split("\n").find((l) => l.trim()).replace(/\s+/g, " ").trim();
     const title = [...words].length > TITLE_MAX_CHARS ? `${[...words].slice(0, TITLE_MAX_CHARS - 1).join("").trimEnd()}…` : words;
@@ -1374,7 +1396,7 @@ addEventListener("popstate", () => {
   if (shown && location.pathname === SETTINGS) openSettings(false).catch((e) => notice("Settings did not open", e.message));
   else if (shown && location.pathname === APPS) openApps(false);
   else if (shown && location.pathname === "/" && byName(state.current)) openChat(state.current, false);
-  else start().catch((e) => notice("This page did not load", e.message));
+  else startOrWait();
 });
 
 // ---- the Apps page (apps-page.js): every fragment of theirs but chats
@@ -1614,6 +1636,9 @@ async function start(open) {
   }
   state.me = me;
   const [, mine] = await Promise.all([load(), api("GET", "/api/seat").catch(() => null), loadInvites()]);
+  // a deploy refused their list (`load` throws any other failure): what
+  // they have is unknown, not nothing, so the page waits as it starts
+  if (reads.listFailed) throw new ApiError(503, "deploying", UPDATING);
   setGuest(!!mine?.guest);
   watchList();
   if (!open && location.pathname === WELCOME) return welcome();
@@ -1676,7 +1701,28 @@ if (alerted) {
   state.current = alerted;
   history.replaceState(null, "", "/");
 }
-start().catch((e) => {
-  showLayout();
-  notice("This page did not load", e.message);
-});
+// A deploy going out as the page starts (503 `deploying`): it says
+// Updating where the page goes, and starts again by itself as reads wait
+// (3 s doubling to 30 s, for READ_DEPLOY_WAIT_MS), then offers Try again;
+// any other failure is said as it is.
+const starts = { since: null, wait: 3000, timer: null };
+function startOrWait() {
+  clearTimeout(starts.timer);
+  start().then(() => { starts.since = null; starts.wait = 3000; }, (e) => {
+    showLayout();
+    const deploying = e.status === 503 && e.code === "deploying";
+    if (deploying) starts.since ??= Date.now();
+    if (!deploying) return notice("This page did not load", e.message);
+    if (Date.now() - starts.since >= READ_DEPLOY_WAIT_MS) {
+      starts.since = null;
+      starts.wait = 3000;
+      const again = el("button", "primary", "Try again");
+      again.onclick = () => { again.disabled = true; startOrWait(); };
+      return notice("This page did not load", null, again);
+    }
+    notice(UPDATING);
+    starts.timer = setTimeout(startOrWait, starts.wait);
+    starts.wait = Math.min(starts.wait * 2, 30_000);
+  });
+}
+startOrWait();

@@ -27,7 +27,9 @@ destination, or, without that metadata, Accept preferring HTML to JSON)
 gets a small “Updating — back in a moment” HTML page instead of the JSON:
 still 503, with `Retry-After: 3` and `Cache-Control: no-store`, reloading
 after three seconds by meta refresh. Fetches and JSON clients keep the
-JSON refusal. `cargo xtask e2e` proves every route. The TypeScript runtime this replaced was deleted
+JSON refusal; the shell's page, one of them, says the same words in its
+place, names the releases only in its console, and asks again by
+itself. `cargo xtask e2e` proves every route. The TypeScript runtime this replaced was deleted
 (its contract is in git history, last at `35f5e18`). The desktop and the
 personal agent's chat went at the cut (docs/cloudflare-v1.md, decision
 33; their contract is at the tag `celld-final`); computers came back

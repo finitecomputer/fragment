@@ -259,9 +259,43 @@ impl Tools {
     }
 }
 
-/// A free local port.
+/// The lowest port `free_port` picks.
+const PICKED_PORTS_FROM: u16 = 20_000;
+/// Ports `free_port` tries before it gives up.
+const PICK_TRIES_MAX: u32 = 64;
+
+/// A free local port, for a process to bind a moment later (wrangler's
+/// node, its inspector, Chrome's DevTools), picked at random below the
+/// kernel's ephemeral range. The kernel numbers its own ports from that
+/// range alone: a connection's local end, any bind to port 0 (workerd's
+/// sockets inside wrangler), Docker's published ports. A port the kernel
+/// handed out for the asking (`bind(":0")`) was free only until then, and
+/// one of those took it before wrangler's bind (`bind(): Address already in
+/// use` at a node's boot, in CI runs 40148072254 and 40937119767); a node
+/// started again keeps its port, free while it is down. Below the range,
+/// only a process that names the port can take it.
 pub fn free_port() -> Result<u16> {
-    Ok(TcpListener::bind("127.0.0.1:0")?.local_addr()?.port())
+    let ephemeral = ephemeral_ports_from()?;
+    anyhow::ensure!(ephemeral > PICKED_PORTS_FROM + 1024, "the kernel's ephemeral ports start at {ephemeral}, leaving none to pick below them from {PICKED_PORTS_FROM}");
+    for _ in 0..PICK_TRIES_MAX {
+        let r = u16::from_str_radix(&random_hex(2), 16).expect("four hex digits");
+        let port = PICKED_PORTS_FROM + r % (ephemeral - PICKED_PORTS_FROM);
+        if TcpListener::bind(("127.0.0.1", port)).is_ok() {
+            return Ok(port);
+        }
+    }
+    bail!("no free port in {PICK_TRIES_MAX} tries between {PICKED_PORTS_FROM} and {ephemeral}")
+}
+
+/// The first port of the kernel's ephemeral range: Linux's
+/// `ip_local_port_range` (32768 by default), macOS's 49152.
+fn ephemeral_ports_from() -> Result<u16> {
+    if cfg!(target_os = "macos") {
+        return Ok(49_152);
+    }
+    let range = fs::read_to_string("/proc/sys/net/ipv4/ip_local_port_range").context("read the kernel's ephemeral port range")?;
+    let first = range.split_whitespace().next().context("an empty ip_local_port_range")?;
+    first.parse().with_context(|| format!("ip_local_port_range starts at {first:?}"))
 }
 
 /// Writes a project's `.dev.vars` (dotenv, one line per value, mode 600).
@@ -807,6 +841,17 @@ mod tests {
         assert_eq!(env("XDG_CACHE_HOME"), Some(root.join("target/cache")));
         assert_eq!(env("WRANGLER_CACHE_DIR"), Some(root.join("target/cache/wrangler")));
         assert_eq!(env("WRANGLER_SEND_METRICS"), Some(PathBuf::from("false")));
+    }
+
+    /// A picked port is below the kernel's ephemeral range, and free: it binds.
+    #[test]
+    fn a_picked_port_is_free_and_below_the_ephemeral_range() {
+        let ephemeral = ephemeral_ports_from().expect("the ephemeral range");
+        for _ in 0..32 {
+            let port = free_port().expect("a free port");
+            assert!((PICKED_PORTS_FROM..ephemeral).contains(&port), "{port} is below {ephemeral}");
+            TcpListener::bind(("127.0.0.1", port)).expect("the picked port binds");
+        }
     }
 
     /// Comments go, strings keep what looks like one, and the result is JSON.

@@ -274,7 +274,7 @@ pub(crate) fn refused(req: &Request, own: Own<'_>, ctx: &JsValue) -> worker::Res
     let Err(skew) = release::admit(caller.as_deref(), own.id) else { return Ok(None) };
     let deployed = req.headers().get(release::DEPLOYED)?.as_deref().and_then(release::deployed);
     let restarting = release::restarts(deployed, own.deployed)
-        && match restart_soon(ctx) {
+        && match restart_soon(ctx, own.id) {
             Ok(asked) => asked,
             Err(e) => {
                 console_error!("{}", serde_json::json!({ "event": "release.restart_failed", "why": format!("{e:?}") }));
@@ -309,7 +309,10 @@ const RESTARTED_MAX: usize = 4096;
 /// that refusal's answer, which must reach its caller (whose next ask is
 /// what meets the new code; the restart ends every request the instance
 /// is still answering), and well before that ask
-/// (`release::AGAIN_AFTER_MS`'s first wait).
+/// (`release::AGAIN_AFTER_MS`'s first wait). Under load the timer runs
+/// late, as that ask arrives (CI runs 39814036246, 39896890808,
+/// 40898300862): the restart ends it too, and its caller, of another
+/// release, asks again as at a refusal (`sent`).
 const RESTART_AFTER_MS: u32 = 50;
 
 /// Restarts the object whose state is `ctx` (`ctx.abort()`: its instance
@@ -323,7 +326,7 @@ const RESTART_AFTER_MS: u32 = 50;
 /// close (their pages reconnect), an alarm that runs is run again, a
 /// container runs on (computer.rs adopts it). The timer calls `abort`
 /// itself, so no Rust is running in the isolate as the instance ends.
-fn restart_soon(ctx: &JsValue) -> Result<bool, JsValue> {
+fn restart_soon(ctx: &JsValue, own: &str) -> Result<bool, JsValue> {
     let id = String::from(Object::from(Reflect::get(ctx, &JsValue::from_str("id"))?).to_string());
     if !RESTARTED.with(|r| {
         let mut r = r.borrow_mut();
@@ -333,7 +336,9 @@ fn restart_soon(ctx: &JsValue) -> Result<bool, JsValue> {
     }
     let abort: Function = Reflect::get(ctx, &JsValue::from_str("abort"))?.dyn_into()?;
     let set_timeout: Function = Reflect::get(&worker::js_sys::global(), &JsValue::from_str("setTimeout"))?.dyn_into()?;
-    let restart = abort.bind1(ctx, &JsValue::from_str("a call from a release deployed after this one's: restarting onto it"));
+    // the reason names this release, so a caller of another release, ended
+    // with the rest, asks again (`sent`)
+    let restart = abort.bind1(ctx, &JsValue::from_str(&release::restart_reason(own)));
     set_timeout.call2(&JsValue::UNDEFINED, &restart, &JsValue::from(RESTART_AFTER_MS))?;
     Ok(true)
 }
@@ -347,7 +352,20 @@ enum Sent {
 
 async fn sent(env: &Env, binding: &str, name: &str, req: Request) -> CellResult<Sent> {
     stamp(&req, env)?;
-    let mut resp = env.durable_object(binding)?.get_by_name(name)?.fetch_with_request(req).await?;
+    let mut resp = match env.durable_object(binding)?.get_by_name(name)?.fetch_with_request(req).await {
+        Ok(resp) => resp,
+        Err(e) => match release::restarted_by(&e.to_string()).filter(|theirs| *theirs != Config::from_env(env).deploy_id) {
+            // the object, of another release, restarting onto a newer one
+            // (`restart_soon`) ended this call with the rest: a call it
+            // refuses before doing anything, so a refusal, asked again by
+            // `send_again` as one; its next instance runs the newer code
+            Some(theirs) => {
+                let message = format!("{binding} {name} was restarting onto a newer release: a deploy is going out; try again in a few seconds");
+                return Ok(Sent::Refused(CellError::new(ErrorCode::Deploying, message), theirs.to_string()));
+            }
+            None => return Err(e.into()),
+        },
+    };
     // an app's answer passed through with the mark would only be its own
     // request's refusal, as `serve::REFUSAL`'s would
     let Some(theirs) = resp.headers().get(release::REFUSED)?.filter(|_| resp.status_code() == 503) else {

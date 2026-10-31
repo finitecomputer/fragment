@@ -162,6 +162,40 @@ export function createSettings({ api, $, seg, account, navigation, notices, sect
   // Each visit to settings, from another page (never a reload of them): an
   // action's failure is said only in the visit it was pressed in (#439).
   let visits = 0;
+  // A read of settings that failed on its way (no answer reached the page, or
+  // a gateway's or a deploy's 502, 503, 504) is asked again by itself, calmly
+  // (3 s doubling to 30 s, for READ_AGAIN_MS from the first such failure).
+  // Until every one answers, settings say what could not be read; then they
+  // are drawn again once, as an action's reload draws them. A failure that
+  // would come again (a 4xx, a 500) is said as it is (#775: one seat read
+  // that never reached the node left "Your seat could not be read" up for
+  // good).
+  const READ_AGAIN_MS = 8 * 60_000;
+  const again = { since: null, wait: 3000, timer: null };
+  const passing = (e) => !e?.status || [502, 503, 504].includes(e.status);
+  const read = (path) => api("GET", path).then((value) => ({ path, value }), (error) => ({ path, error }));
+  function readAgain(ticket, failed) {
+    clearTimeout(again.timer);
+    if (!failed.length) {
+      again.since = null;
+      again.wait = 3000;
+      return;
+    }
+    if (!failed.every((r) => passing(r.error))) return;
+    again.since ??= Date.now();
+    if (Date.now() - again.since >= READ_AGAIN_MS) return;
+    again.timer = setTimeout(async () => {
+      const current = () => ticket === settingsLoads && isOpen();
+      if (!current()) return;
+      const now = await Promise.all(failed.map((r) => read(r.path)));
+      if (!current()) return;
+      if (now.some((r) => r.error)) return readAgain(ticket, now.filter((r) => r.error));
+      again.since = null;
+      again.wait = 3000;
+      reopenSettings();
+    }, again.wait);
+    again.wait = Math.min(again.wait * 2, 30_000);
+  }
   // `failed`: what the action that asked for this load says once it renders
   // (a failure's notice, [title, text]).
   async function openSettings(push = true, failed = null) {
@@ -176,7 +210,13 @@ export function createSettings({ api, $, seg, account, navigation, notices, sect
     const tell = () => {
       if (failed && noticeCurrent(gen)) notice(...failed);
     };
-    if (!isOpen()) visits++;
+    if (!isOpen()) {
+      visits++;
+      // a visit's reads are its own: asked again from its first failure
+      clearTimeout(again.timer);
+      again.since = null;
+      again.wait = 3000;
+    }
     enter();
     const page = $("settings-page");
     page.hidden = false;
@@ -188,13 +228,16 @@ export function createSettings({ api, $, seg, account, navigation, notices, sect
     const billingHelpers = { api, el, section, line, actionLine, usd, reopen: () => reopenSettings(), noSeatSaid, switchForm, support: support(), seatIs };
     const back = await returning(billingHelpers);
     if (lost()) return;
-    const [ledger, mySeat, linked, uses] = await Promise.all([
-      api("GET", "/api/ledger").catch(() => null),
-      api("GET", "/api/seat").catch(() => null),
-      api("GET", "/api/connections").catch(() => null),
-      getComputer() ? api("GET", `/api/computers/${seg(getComputer().computer)}/uses`).catch(() => null) : null,
+    const reads = await Promise.all([
+      read("/api/ledger"),
+      read("/api/seat"),
+      read("/api/connections"),
+      getComputer() ? read(`/api/computers/${seg(getComputer().computer)}/uses`) : { value: null },
     ]);
     if (lost()) return;
+    const [ledger, mySeat, linked, uses] = reads.map((r) => r.value ?? null);
+    // what failed on its way is read again by itself once these render
+    const settle = () => readAgain(ticket, reads.filter((r) => r.error));
     if (mySeat) setGuest(mySeat.guest);
     setSeat(mySeat?.seat ?? null);
     const emails = (person().subjects ?? []).map((x) => x.email).filter(Boolean);
@@ -257,6 +300,7 @@ export function createSettings({ api, $, seg, account, navigation, notices, sect
     if (isGuest()) {
       returnSaid(back);
       renderSettingsPage(page, [...billing, account, dataSection({ api, el, section, line, actionLine, isOpen: () => isOpen() }), ...releaseLine(null)]);
+      settle();
       return tell();
     }
     const standing = ledger?.standing?.standing;
@@ -287,6 +331,7 @@ export function createSettings({ api, $, seg, account, navigation, notices, sect
     renderAgentFaces();
     // a home read that answered while these were built shown now they are in
     paintHomes();
+    settle();
     tell();
   }
   // An action's reload of settings, only while they are shown: an answer that

@@ -411,7 +411,7 @@ async fn a_card_answered_by_a_message_through_the_relay() {
     fake.until(WAIT, "the chat told whose answer it waits for", |w| !work_of(w, &chat, &again, "turn.asked").is_empty()).await;
     fake.say(&chat, &person("paul"), json!({ "attachments": [{ "sha256": sha, "size": bytes.len(), "type": "image/png", "name": "basil.png" }] }));
     fake.until(WAIT, "the second turn's end", |w| !work_of(w, &chat, &again, "turn.end").is_empty()).await;
-    let told = format!("[paul sent a file with this answer: 'basil.png' (image/png). It is on your computer at: {}]", dir.join("media").join(&sha).display());
+    let told = format!("[paul sent a file: 'basil.png' (image/png). It is on your computer at: {}]", dir.join("media").join(&sha).display());
     hermes.with(|s| assert_eq!(s.heard.last().map(|e| e["text"].clone()), Some(json!(told)), "where the file is, in its answer's words: {:?}", s.heard));
     fake.with(|w| assert_eq!(w.bodies(&chat, "work", "turn.start").len(), 2, "the answer started no turn"));
     assert_eq!(std::fs::read(dir.join("media").join(&sha)).expect("the file"), b"a photo of basil");
@@ -751,19 +751,46 @@ async fn two_profiles_on_one_gateway() {
 /// uploads and sends is the chat's blob on its reply.
 #[tokio::test]
 async fn media_both_ways() {
-    let (fake, bridge, _hermes, _dir) = setup("relay-media", &["juniper"]).await;
+    let (fake, bridge, hermes, dir) = setup("relay-media", &["juniper"]).await;
     let chat = fake.chat("talk", &["juniper"]);
+    let turn_of = |r: &Value| records::turn_id("juniper--k3x9", &chat, "chat", r["seq"].as_u64().unwrap());
+    let reply_of = |w: &World, turn: &str| replies(w, &chat).into_iter().find(|r| r["turn"] == turn && r.get("attachments").is_none());
     let bytes = bytes::Bytes::from_static(b"twelve bytes");
     let sha = records::hex(&<sha2::Sha256 as sha2::Digest>::digest(&bytes));
     fake.with(|w| w.fragments.get_mut(&chat).unwrap().blobs.insert(sha.clone(), ("image/png".into(), bytes.clone())));
     fake.until(WAIT, "the bridge to follow", |w| w.live_sockets() >= 2).await;
-    fake.say(&chat, &person("paul"), json!({ "text": "look", "attachments": [{ "sha256": sha, "size": 12, "type": "image/png", "name": "a.png" }] }));
-    fake.until(WAIT, "its reply", |w| replies(w, &chat).len() == 1).await;
-    fake.with(|w| assert!(replies(w, &chat)[0]["text"].as_str().unwrap().ends_with("[media: 1 files, 12 bytes]"), "{:?}", replies(w, &chat)));
-    fake.say(&chat, &person("paul"), json!({ "text": "send media" }));
-    fake.until(WAIT, "a reply with a file", |w| replies(w, &chat).iter().any(|r| r.get("attachments").is_some())).await;
+    let turn = turn_of(&fake.say(&chat, &person("paul"), json!({ "text": "look", "attachments": [{ "sha256": sha, "size": 12, "type": "image/png", "name": "a.png" }] })));
+    fake.until(WAIT, "its reply", |w| reply_of(w, &turn).is_some()).await;
+    fake.with(|w| assert!(reply_of(w, &turn).unwrap()["text"].as_str().unwrap().ends_with("[media: 1 files, 12 bytes]"), "{:?}", replies(w, &chat)));
+    let note = format!("[paul sent a file: 'a.png' (image/png). It is on your computer at: {}]", dir.join("media").join(&sha).display());
+    hermes.with(|s| {
+        let event = s.heard.last().unwrap();
+        assert_eq!(event["text"], format!("look\n{note}"), "the caption precedes its file note");
+        assert!(event.get("context").is_none(), "a file belongs to the new message");
+        assert_eq!(s.handed.last().unwrap().1, format!("[paul] look\n{note}"));
+    });
+    // A second message with the same blob reuses the downloaded original.
+    let reads = || fake.with(|w| w.calls.iter().filter(|c| c.ends_with(&format!("/blobs/{sha}"))).count());
+    let before = reads();
+    let turn = turn_of(&fake.say(&chat, &person("paul"), json!({ "text": "look again", "attachments": [{ "sha256": sha, "size": 12, "type": "image/png", "name": "a.png" }] })));
+    fake.until(WAIT, "the repeated file's reply", |w| reply_of(w, &turn).is_some()).await;
+    assert_eq!(reads(), before, "no second download");
+    hermes.with(|s| assert_eq!(s.heard.last().unwrap()["text"], format!("look again\n{note}")));
+    // A file alone is a new message too, with its name, type and path.
+    let turn = turn_of(&fake.say(&chat, &person("paul"), json!({ "text": "", "attachments": [{ "sha256": sha, "size": 12, "type": "image/png", "name": "a.png" }] })));
+    fake.until(WAIT, "the file-only message's reply", |w| reply_of(w, &turn).is_some()).await;
+    hermes.with(|s| {
+        assert_eq!(s.heard.last().unwrap()["text"], note);
+        assert!(s.heard.last().unwrap().get("context").is_none());
+        assert_eq!(s.handed.last().unwrap().1, format!("[paul] {note}"));
+    });
+    let turn = turn_of(&fake.say(&chat, &person("paul"), json!({ "text": "an unread file", "attachments": [{ "sha256": "f".repeat(64), "size": 12, "type": "application/pdf", "name": "missing.pdf" }] })));
+    fake.until(WAIT, "the message survives an unread file", |w| reply_of(w, &turn).is_some()).await;
+    hermes.with(|s| assert_eq!(s.heard.last().unwrap()["text"], "an unread file\n[paul also sent 1 file that could not be read]"));
+    let turn = turn_of(&fake.say(&chat, &person("paul"), json!({ "text": "send media" })));
+    fake.until(WAIT, "a reply with a file", |w| replies(w, &chat).iter().any(|r| r["turn"] == turn && r.get("attachments").is_some())).await;
     fake.with(|w| {
-        let r = replies(w, &chat).into_iter().find(|r| r.get("attachments").is_some()).unwrap();
+        let r = replies(w, &chat).into_iter().find(|r| r["turn"] == turn && r.get("attachments").is_some()).unwrap();
         assert_eq!(r["text"], "a cat");
         assert_eq!(r["attachments"][0]["name"], "cat.png");
         assert!(w.fragments[&chat].blobs.contains_key(r["attachments"][0]["sha256"].as_str().unwrap()));
