@@ -3228,37 +3228,42 @@ Anything else needs a signature as before. Adding a key still needs a
 key.
 
 Its sidebar is the person's list, one read (Skyler, 2026-10-12; Paul,
-2026-10-13; Paul, 2026-10-30: several agents, one of them main): beside
+2026-10-13; Paul, 2026-10-31: several agents, a section each): beside
 its brand the launcher (below), a search and its key ("⌘K", "Ctrl K" off
 a Mac, the search alone on a touch screen with no finer pointer); then
-**New chat with** the agent its chip names: the open chat's (a group's
-lead) when it is one of theirs, else their **main agent** (their first,
-the one the first run makes: the first their computer took, as its view
-lists its agents in the order it took them). With more than one agent the
-chip lists them all (each one's face, name and role, the one it names
-marked), and the one picked gets that new chat alone; with one, it names
-it and opens nothing. Then the **invites** waiting on
+the **invites** waiting on
 their emails, each its title, who invited them and to edit or view it,
 with Accept and Decline (decision 63; `GET /api/invites`, read as the
 page starts, as its list's socket opens and on its `invited`; Invites by
 email): accepted, it is in their list and opens, a chat in the middle,
 else in a window; declined, it goes; one gone meanwhile says so (a
 phone shows the sidebar over the page when an invite waits and nothing
-is open; a guest's note says to accept it there). Then their chats (kind `chat`) as
-one flat list, newest first (by the row's `previewAt`; one with nothing
-said yet above them all), less the ones they archived (`PUT
-/api/fragments/{name}/archived`, above). Its apps (kind `app` or `brain`)
+is open; a guest's note says to accept it there). Then their chats (kind
+`chat`), less the ones they archived (`PUT /api/fragments/{name}/archived`,
+above), in a **section per agent of theirs**: their **main agent** first
+(their first, the one the first run makes: the first their computer took,
+as its view lists its agents in the order it took them), then the others
+in that order, which no activity reshuffles. Each section is its agent's
+**hero** (its face, its name, and under it what it is doing in any of its
+chats), whose menu, hanging from it, lists where it is doing something,
+then New chat (with it alone), Rename, its profile and its screen; then
+its chats, a chat under its lead agent (else the first of theirs in it,
+else their main agent), newest first (by the row's `previewAt`; one with
+nothing said yet above them all), five of them (the open one too, wherever it is), then More, which
+shows the rest, and Less. Chats someone else shared with them are the last
+section, Shared. Its apps (kind `app` or `brain`)
 are the desktop's: a dock of their icons and titles under the viewer's
 windows, less the archived and those they took off it (`PUT
 /api/fragments/{name}/dock`, above; search still finds them), then Add, open beside the chat on a
 desktop's width, a sheet from the bottom on a phone. A chat with any of
 their agents is a chat, listed and found as any other. Its row is two
-lines, its agent first (Paul, 2026-10-30: it reads as talking to agents,
-not as threads piling up): its agents' faces (a group's stacked, as the
-launcher shows them), their names, and when its newest message was said
-(`previewAt`: today's time, "Yesterday", a weekday within the week, else
-its date), then the chat's own title, its unread count and its home's
-bell; a chat with none of their agents is its title alone. **Add teaches
+lines (Paul, 2026-10-31; its section names its agent): its title, its
+home's bell, and how long ago its newest message was
+said (`previewAt`: now, minutes, hours, days within the week, else its
+date); then what its agent is doing there, or whom it waits on (a thread
+asked from it), else that message's first line (`preview`), and its unread
+count. Its ⋯, in the time's place on hover and always on a touch screen,
+renames it or archives it. **Add teaches
 how to ask for an app** (Paul, 2026-10-14: "rather than spawning generic
 apps we teach the user how to prompt for new apps"): a window of ways to
 ask, each saying who the app is for and what it does, `…` the part to
