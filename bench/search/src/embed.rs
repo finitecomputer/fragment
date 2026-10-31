@@ -16,22 +16,34 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
 
 pub enum Embedder {
     /// An OpenAI-compatible endpoint, which must be this machine's own.
-    Http { url: String, model: String, query_prefix: String },
+    Http { url: url::Url, model: String, query_prefix: String },
     /// Words hashed into `dims` signed buckets: no model, for tests only.
     Hashed { dims: usize },
 }
 
 impl Embedder {
     /// An endpoint on this machine, or an error: a private corpus never
-    /// leaves it to be embedded.
+    /// leaves it to be embedded. The URL is parsed once, by the parser the
+    /// HTTP client uses, and that parse is both checked and called, so the
+    /// host checked is the host sent to.
     pub fn http(url: &str, model: &str, query_prefix: &str) -> Result<Self, String> {
-        let rest = url.strip_prefix("http://").ok_or_else(|| format!("{url}: an embeddings URL is plain http to this machine"))?;
-        let host = rest.split('/').next().unwrap_or("");
-        let host = host.rsplit_once(':').map_or(host, |(h, _)| h);
-        if !matches!(host, "127.0.0.1" | "localhost" | "[::1]") {
+        let parsed = url::Url::parse(url).map_err(|e| format!("{url}: {e}"))?;
+        if parsed.scheme() != "http" {
+            return Err(format!("{url}: an embeddings URL is plain http to this machine"));
+        }
+        if !parsed.username().is_empty() || parsed.password().is_some() {
+            return Err(format!("{url}: an embeddings URL carries no user-info"));
+        }
+        let local = match parsed.host() {
+            Some(url::Host::Ipv4(ip)) => ip == std::net::Ipv4Addr::LOCALHOST,
+            Some(url::Host::Ipv6(ip)) => ip == std::net::Ipv6Addr::LOCALHOST,
+            Some(url::Host::Domain(name)) => name == "localhost",
+            None => false,
+        };
+        if !local {
             return Err(format!("{url}: embeddings come from a model on this machine (127.0.0.1, localhost or [::1]) only"));
         }
-        Ok(Embedder::Http { url: url.to_owned(), model: model.to_owned(), query_prefix: query_prefix.to_owned() })
+        Ok(Embedder::Http { url: parsed, model: model.to_owned(), query_prefix: query_prefix.to_owned() })
     }
 
     pub fn id(&self) -> String {
@@ -62,7 +74,7 @@ impl Embedder {
                 }
                 let agent = ureq::AgentBuilder::new().timeout(REQUEST_TIMEOUT).build();
                 let response: Response = agent
-                    .post(url)
+                    .request_url("POST", url)
                     .send_json(serde_json::json!({ "model": model, "input": inputs }))
                     .map_err(|e| format!("{url}: {e}"))?
                     .into_json()
@@ -193,12 +205,42 @@ mod tests {
 
     #[test]
     fn only_this_machine_embeds() {
-        assert!(Embedder::http("http://127.0.0.1:18091/v1/embeddings", "m", "").is_ok());
-        assert!(Embedder::http("http://localhost:8080/v1/embeddings", "m", "").is_ok());
-        assert!(Embedder::http("http://[::1]:8080/v1/embeddings", "m", "").is_ok());
-        assert!(Embedder::http("https://api.example.com/v1/embeddings", "m", "").is_err());
-        assert!(Embedder::http("http://10.0.0.5:8080/v1/embeddings", "m", "").is_err());
-        assert!(Embedder::http("http://127.0.0.1.evil.example/v1", "m", "").is_err());
+        for local in [
+            "http://127.0.0.1:18091/v1/embeddings",
+            "http://localhost:8080/v1/embeddings",
+            "http://[::1]:8080/v1/embeddings",
+            "HTTP://LOCALHOST:8080/v1/embeddings",
+            "http://127.1:8080/v1/embeddings",
+        ] {
+            assert!(Embedder::http(local, "m", "").is_ok(), "{local}");
+        }
+        for remote in [
+            "https://api.example.com/v1/embeddings",
+            "http://10.0.0.5:8080/v1/embeddings",
+            "http://127.0.0.1.evil.example/v1",
+            "http://localhost.evil.example/v1",
+            // User-info: the authority's host is the part after '@'.
+            "http://127.0.0.1:80@remote.example/v1/embeddings",
+            "http://127.0.0.1@remote.example/v1/embeddings",
+            "http://[::1]:80@remote.example/v1/embeddings",
+            "http://localhost:x@remote.example/v1/embeddings",
+            // User-info on a local host is refused too: nothing to authenticate.
+            "http://user:pass@127.0.0.1:8080/v1/embeddings",
+            "http://remote.example#@127.0.0.1/v1/embeddings",
+            "http://remote.example?@127.0.0.1/v1/embeddings",
+            "file:///v1/embeddings",
+            "127.0.0.1:8080/v1/embeddings",
+        ] {
+            assert!(Embedder::http(remote, "m", "").is_err(), "{remote}");
+        }
+    }
+
+    /// The request goes to the address the check passed, not to a second
+    /// reading of the same string.
+    #[test]
+    fn the_checked_address_is_the_one_called() {
+        let Ok(Embedder::Http { url, .. }) = Embedder::http("http://127.1:18091/v1/embeddings", "m", "") else { panic!() };
+        assert_eq!(url.as_str(), "http://127.0.0.1:18091/v1/embeddings");
     }
 
     #[test]
