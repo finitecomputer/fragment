@@ -1136,6 +1136,12 @@ pub struct ListedFragment {
     /// older platform, reads as on it.
     #[serde(default = "on_the_dock", skip_serializing_if = "is_on_the_dock")]
     pub dock: bool,
+    /// The signer pinned it: their own view, not the fragment's (`PUT
+    /// /api/fragments/{name}/pinned`; the shell's sidebar shows it first in
+    /// its section). Left out while false, so a row from an older platform
+    /// reads as not pinned.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pinned: bool,
     /// An agent's list `for` someone: whether that someone owns it (beside
     /// the role the agent acts with there), as no name says any more.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -1167,6 +1173,20 @@ pub struct Archived {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SetDock {
     pub dock: bool,
+}
+
+/// `PUT /api/fragments/{name}/pinned`: the signer's own choice of whether
+/// a fragment they hold a role on is pinned in their sidebar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetPinned {
+    pub pinned: bool,
+}
+
+/// Its answer: the fragment, and whether it is pinned now.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Pinned {
+    pub name: String,
+    pub pinned: bool,
 }
 
 /// Its answer: the fragment, and whether it is on their dock now.
@@ -2414,11 +2434,11 @@ mod tests {
         fn value(v: &impl Serialize) -> Value {
             serde_json::to_value(v).unwrap()
         }
-        let listed = FragmentList { fragments: vec![ListedFragment { name: "notes-k3x9".into(), role: Role::Owner, kind: FragmentKind::App, title: None, picture: None, agent_role: None, agents: vec![], preview: None, preview_at: None, unread: 0, sharing: None, archived: false, dock: true, owned: false, listed: vec![] }] };
+        let listed = FragmentList { fragments: vec![ListedFragment { name: "notes-k3x9".into(), role: Role::Owner, kind: FragmentKind::App, title: None, picture: None, agent_role: None, agents: vec![], preview: None, preview_at: None, unread: 0, sharing: None, archived: false, dock: true, pinned: false, owned: false, listed: vec![] }] };
         assert_eq!(value(&listed), serde_json::json!({ "fragments": [{ "name": "notes-k3x9", "role": "owner", "kind": "app" }] }));
         let sharing = Sharing { visibility: Visibility::Link, members: 3, guests: 1, invites: Some(2) };
         let listed = FragmentList {
-            fragments: vec![ListedFragment { name: "todo-k3x9".into(), role: Role::Owner, kind: FragmentKind::Chat, title: Some("Todo".into()), picture: None, agent_role: None, agents: vec!["npub1juniper".into()], preview: Some("hi".into()), preview_at: Some(1_760_000_000_000), unread: 3, sharing: Some(sharing), archived: true, dock: true, owned: false, listed: vec![ListedRecord { channel: "work".into(), principal: "npub1juniper".into(), kind: "turn.asked".into(), fields: [("asks".to_string(), "npub1me".to_string())].into(), at: 1_760_000_000_001 }] }],
+            fragments: vec![ListedFragment { name: "todo-k3x9".into(), role: Role::Owner, kind: FragmentKind::Chat, title: Some("Todo".into()), picture: None, agent_role: None, agents: vec!["npub1juniper".into()], preview: Some("hi".into()), preview_at: Some(1_760_000_000_000), unread: 3, sharing: Some(sharing), archived: true, dock: true, pinned: false, owned: false, listed: vec![ListedRecord { channel: "work".into(), principal: "npub1juniper".into(), kind: "turn.asked".into(), fields: [("asks".to_string(), "npub1me".to_string())].into(), at: 1_760_000_000_001 }] }],
         };
         assert_eq!(
             value(&listed),
@@ -2435,6 +2455,17 @@ mod tests {
         let off = ListedFragment { dock: false, ..read.clone() };
         assert_eq!(value(&off), serde_json::json!({ "name": "notes-k3x9", "role": "viewer", "kind": "app", "dock": false }));
         assert_eq!(serde_json::from_value::<ListedFragment>(value(&off)).unwrap(), off);
+        // a row not pinned leaves the flag out, and one without it (an older
+        // platform's) reads back not pinned; one pinned says so (Paul, 2026-10-31)
+        assert!(!read.pinned);
+        let pinned = ListedFragment { pinned: true, ..read.clone() };
+        assert_eq!(value(&pinned), serde_json::json!({ "name": "notes-k3x9", "role": "viewer", "kind": "app", "pinned": true }));
+        assert_eq!(serde_json::from_value::<ListedFragment>(value(&pinned)).unwrap(), pinned);
+        assert_eq!(value(&SetPinned { pinned: true }), serde_json::json!({ "pinned": true }));
+        assert_eq!(value(&Pinned { name: "notes-k3x9".into(), pinned: false }), serde_json::json!({ "name": "notes-k3x9", "pinned": false }));
+        for refused in [serde_json::json!({}), serde_json::json!({ "pinned": "yes" }), serde_json::json!({ "pinned": null })] {
+            assert!(serde_json::from_value::<SetPinned>(refused.clone()).is_err(), "{refused}");
+        }
         assert_eq!(value(&SetDock { dock: false }), serde_json::json!({ "dock": false }));
         assert_eq!(value(&Docked { name: "notes-k3x9".into(), dock: true }), serde_json::json!({ "name": "notes-k3x9", "dock": true }));
         for refused in [serde_json::json!({}), serde_json::json!({ "dock": "no" }), serde_json::json!({ "dock": null })] {
