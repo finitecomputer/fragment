@@ -185,7 +185,7 @@ pub struct WorkOs<'a> {
 impl WorkOs<'_> {
     /// Who vouches for a person's subject: this environment. A person is
     /// keyed by `(issuer, subject)`, so finite.computer's login (another
-    /// environment) is another issuer (docs/finite-integration.md).
+    /// environment) is another issuer (docs/cloudflare-v1.md, R15).
     pub fn issuer(&self) -> String {
         format!("workos:{}", self.client_id)
     }
