@@ -608,6 +608,7 @@ dependencies = [
  "flate2",
  "fragment-core",
  "fragment-proto",
+ "httparse",
  "libc",
  "reqwest",
  "serde_json",
