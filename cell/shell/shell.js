@@ -76,7 +76,7 @@ const promptDeck = { hand: APP_PROMPTS.map((_, i) => i).slice(0, PROMPT_HAND), d
 // failed (what an earlier one said stays: a failure is not "none");
 // invites: those waiting on their emails, theirs to answer (`GET /api/invites`);
 // seat: theirs, as Settings last read it (`GET /api/seat`'s; none unread)
-const state = { me: null, guest: false, fragments: [], invites: [], computer: null, agents: new Map(), computerFailed: false, current: store.get(CURRENT, null), frames: new Map(), page: null, seat: null };
+const state = { me: null, guest: false, fragments: [], invites: [], computer: null, agents: new Map(), computerFailed: false, current: store.get(CURRENT, null), frames: new Map(), page: null, seat: null, desktopEmpty: false };
 
 // ---- the API, as this page calls it: the person's platform session ----
 class ApiError extends Error {
@@ -863,7 +863,7 @@ addEventListener("resize", () => closeMenu(true));
 
 const watching = { on: false, socket: null, wait: 1000, timer: null, settle: null };
 const listLive = () => watching.socket?.readyState === WebSocket.OPEN;
-const { renderHeading, renderChats, loadInvites, primaryAgent, newChatAgent, ownAgents, markSeen, edgeAgain } = createChatList({
+const { renderHeading, renderChats, loadInvites, primaryAgent, newChatAgent, askedAgent, ownAgents, markSeen, edgeAgain } = createChatList({
   api, ui: { $, el, patch, agentFace, mark, notice },
   data: { byName, own, chats, shown, titleOf, chatTitle: (name) => (byName(name)?.kind === "sessions" ? sessionArchive.title() : chatTitle(name)), homeMark: (f) => homeMark(f), isGroup, agentOfChat: (name) => agentOfChat(name), agentsOf,
     agents: () => state.agents, allFragments: () => state.fragments, computer: () => state.computer, isGuest: () => state.guest, personId: () => state.me?.id,
@@ -949,6 +949,9 @@ function openChat(name, push = true, path = null) {
   for (const [n, frame] of state.frames) frame.hidden = n !== name;
   renderHeading();
   renderChats();
+  // the ways to ask for an app ask the open chat's agent
+  renderDesktopEmpty();
+  for (const lede of document.querySelectorAll(".app-prompts-lede")) namePromptsLede(lede);
   markSeen();
   prewake();
   navigated();
@@ -1066,12 +1069,15 @@ function renderApps() {
 }
 // A desktop with no apps says what lands there. A seat's also offers the
 // hand of ways to ask their agent for one (`promptHand`), each put in
-// their chat's composer as the dock's Add's are.
-function renderDesktopEmpty(empty) {
+// their chat's composer as the dock's Add's are: the agent the open chat's
+// prompt goes to (`askedAgent`), drawn again as another chat opens, its
+// name following renames (`named`).
+function renderDesktopEmpty(empty = state.desktopEmpty) {
+  state.desktopEmpty = empty;
   const box = $("desktop-empty");
-  const primary = primaryAgent();
-  const asks = empty && !state.guest && !!primary?.identity;
-  const sig = JSON.stringify([empty, state.guest, asks && titleOf(primary.fragment)]);
+  const asked = askedAgent();
+  const asks = empty && !state.guest && !!asked?.identity;
+  const sig = JSON.stringify([empty, state.guest, asks && asked.fragment]);
   box.hidden = !empty;
   if (box.dataset.sig === sig) return;
   box.dataset.sig = sig;
@@ -1079,7 +1085,7 @@ function renderDesktopEmpty(empty) {
   if (!empty) return;
   box.append(el("p", "desktop-empty-title", state.guest ? "Apps shared with you land here" : "Your apps land here"));
   if (!asks) return;
-  box.append(el("p", "desktop-empty-text", `Ask ${titleOf(primary.fragment)} for one:`));
+  box.append(named(el("p", "desktop-empty-text"), asked.fragment, (who) => `Ask ${who} for one:`));
   box.append(...promptHand("desktop-suggestions", "desktop-suggestion"));
 }
 // An app's window, at `path` (a link's, from a chat). One its row has not
@@ -1384,11 +1390,18 @@ function rollPrompts() {
     dealTo(list);
   }
 }
+const promptsLede = (who) => `${who} makes an app from a message. Say who it's for and what it does: start from one of these, make it yours, then send it.`;
+// The Add window's first line names the agent its prompts ask
+// (`askedAgent`), named again as another chat opens.
+function namePromptsLede(node) {
+  const asked = askedAgent();
+  if (asked) named(node, asked.fragment, promptsLede);
+  else node.textContent = promptsLede("Your agent");
+  return node;
+}
 function showPrompts() {
-  const primary = primaryAgent();
   const box = el("div", "app-prompts");
-  const lede = (who) => `${who} makes an app from a message. Say who it's for and what it does: start from one of these, make it yours, then send it.`;
-  box.append(primary ? named(el("p", "app-prompts-lede"), primary.fragment, lede) : el("p", "app-prompts-lede", lede("Your agent")));
+  box.append(namePromptsLede(el("p", "app-prompts-lede")));
   box.append(...promptHand("app-prompt-list", "app-prompt"));
   show({ key: "prompts", title: "Ask for an app", icon: paneIcon("plus"), body: box, persist: false });
 }

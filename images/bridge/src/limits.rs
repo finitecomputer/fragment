@@ -132,6 +132,17 @@ pub const PROMPT_TTL_MS_DEFAULT: u64 = 60 * 60 * 1000;
 /// is told its card's turn's request at more length (note.rs, `late`): the
 /// answer is to it.
 pub const NOTE_MAX_BYTES: usize = 4096;
+
+/// A message handed to its agent at least this long after it was said is
+/// told its age (note.rs, `age`; Paul, 2026-10-31, FIN-236): five times a
+/// pre-wake's hold (`fragment_core::computer::PREWAKE_MS`, the platform's
+/// own allowance for a wake), past what an ordinary hand-off takes (a
+/// claim, a cold wake and its restore, a message behind a typical turn),
+/// so the line marks a message that waited through an outage, a long
+/// restart or a backlog, and is not noise the agent learns to skip.
+pub const MESSAGE_AGE_TOLD_MS: u64 = 5 * 60_000;
+/// That line, at most (its longest, a continuation's in days, is under 150).
+pub const AGE_NOTE_MAX_BYTES: usize = 256;
 pub const NOTE_ASKED_MAX_CHARS: usize = 300;
 pub const NOTE_LATE_ASKED_MAX_CHARS: usize = 1500;
 pub const NOTE_TOOL_MAX_CHARS: usize = 40;

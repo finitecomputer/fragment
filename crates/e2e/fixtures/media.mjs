@@ -1,6 +1,6 @@
 // Deliveries and AI (slice F): pushes from a mutation and a job, and
-// text (the model route) and images (Workers AI) as a job's steps; a video
-// step, which the platform refuses.
+// text (the model route), images (Workers AI) and videos (the model
+// catalog) as a job's steps.
 import { DurableObject } from "cloudflare:workers";
 
 export class App extends DurableObject {
@@ -44,8 +44,9 @@ export class App extends DurableObject {
     return await job.ai.image({ prompt, path, ...rest });
   }
 
-  // videos are off until they run on Cloudflare: the step says so
-  async film({ prompt, path }, job) {
-    return await job.ai.video({ prompt, path, duration: 6, resolution: "768p" });
+  // meatproxy's shape: a prompt, a path and six seconds, the rest as the
+  // input names it (a resolution, a ratio, or a key the step refuses)
+  async film({ prompt, path, ...rest }, job) {
+    return await job.ai.video({ prompt, path, duration: 6, ...rest });
   }
 }

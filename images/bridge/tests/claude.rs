@@ -159,6 +159,12 @@ impl Scenario {
         self.with(|w| w.bodies(&self.chat, "work", "turn.end"))
     }
 
+    /// Each message Claude Code was given, in order, as fake-claude heard it.
+    fn heard(&self) -> Vec<String> {
+        let heard = std::fs::read_to_string(self.bin.with_file_name("heard.jsonl")).unwrap_or_default();
+        heard.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()).filter(|v| v["type"] == "user").filter_map(|v| v["message"]["content"].as_str().map(str::to_string)).collect()
+    }
+
     async fn following(&self) {
         self.fake.until(wait(), "the bridge to follow its channels", |w| w.live_sockets() >= 2).await;
     }
@@ -186,7 +192,9 @@ async fn a_reply() {
 }
 
 /// Goal: a tool call is a step: its tool, what it ran, that it completed,
-/// and its call's id; then the reply.
+/// and its call's id; then the reply. Its intent (phase 4) is recorded
+/// before its step, under the assistant message that asked for it, which
+/// its step names.
 #[tokio::test]
 async fn a_tool_call_is_a_step() {
     let s = Scenario::new("tool").await;
@@ -199,6 +207,12 @@ async fn a_tool_call_is_a_step() {
     let bash = steps.iter().find(|st| st["tool"] == "Bash").unwrap_or_else(|| panic!("a Bash step: {steps:?}"));
     assert_eq!((bash["args"].as_str(), bash["category"].as_str(), bash["ok"].as_bool(), bash["status"].as_str()), (Some("echo fragment-ok"), Some("shell"), Some(true), Some("completed")));
     assert!(bash["tool_call_id"].as_str().is_some_and(|id| id.starts_with("toolu_")), "{bash}");
+    let work = s.with(|w| w.records(&s.chat, "work"));
+    let kinds: Vec<&str> = work.iter().filter_map(|r| r["body"]["kind"].as_str()).filter(|k| *k == "turn.call" || *k == "turn.step").collect();
+    assert_eq!(kinds, ["turn.call", "turn.step"], "its intent, then its end");
+    let call = s.with(|w| w.bodies(&s.chat, "work", "turn.call")).remove(0);
+    assert_eq!((call["tool"].as_str(), call["args"].as_str(), call["category"].as_str(), &call["tool_call_id"]), (Some("Bash"), Some("echo fragment-ok"), Some("shell"), &bash["tool_call_id"]));
+    assert!(call["response"].as_str().is_some_and(|r| r.starts_with("msg_")) && call["response"] == bash["response"], "{call} / {bash}");
     assert!(!s.replies().is_empty());
     assert_eq!(s.ends()[0]["outcome"], "idle");
     bridge.stop().await;
@@ -292,9 +306,12 @@ async fn a_session_outlives_its_process_and_new_starts_another() {
 }
 
 /// Goal: the computer dying while a tool runs (the bridge and `claude`
-/// killed whole) cuts the turn, which ends lost; the next message resumes
-/// the session, Claude Code tells its model the cut call's outcome is
-/// unknown, and the bridge's note says what was cut. Nothing reruns it.
+/// killed whole) cuts the turn, which ends lost. Its call was recorded as
+/// asked for when Claude Code said it (phase 4), so the turn is continued
+/// once, by the computer, in the same session, told the call may or may
+/// not have run; nothing reruns it. (Here the tool's own process outlives
+/// the kill, as one may outlive a bridge's crash; recorded, Haiku found it
+/// still running and waited for it rather than start a second.)
 #[tokio::test]
 async fn a_crash_mid_tool_is_told_never_rerun() {
     let s = Scenario::new("crash").await;
@@ -305,18 +322,20 @@ async fn a_crash_mid_tool_is_told_never_rerun() {
     if recording().is_some() {
         support::until(wait(), "the tool to run", || s.work().join("progress.txt").is_file()).await;
     } else {
-        s.fake.until(wait(), "the turn's start", |w| !w.bodies(&s.chat, "work", "turn.start").is_empty()).await;
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        s.fake.until(wait(), "the cut call's intent", |w| !w.bodies(&s.chat, "work", "turn.call").is_empty()).await;
     }
     bridge.kill().await;
 
     let bridge = s.start();
     s.following().await;
-    s.fake.until(wait(), "the cut turn ended lost", |w| w.bodies(&s.chat, "work", "turn.end").iter().any(|e| e["error"] == "lost when the computer restarted")).await;
-    s.say(json!({ "text": "Did your last command finish? Answer in one short sentence, and do not run anything." }));
-    s.ended(2, "the next turn's end").await;
+    s.ended(2, "the cut turn's end and its continuation's").await;
     let ends = s.ends();
-    assert_eq!(ends.last().expect("its end")["outcome"], "idle", "{ends:?}");
+    assert_eq!((&ends[0]["error"], &ends[1]["outcome"]), (&json!("lost when the computer restarted"), &json!("idle")), "{ends:?}");
+    let calls = s.with(|w| w.bodies(&s.chat, "work", "turn.call"));
+    assert!(calls.iter().any(|c| c["tool"] == "Bash" && c["args"] == "python3 slow.py"), "the cut call's intent: {calls:?}");
+    let heard = s.heard();
+    let told = heard.iter().find(|m| m.contains("[your computer] I restarted while you were working")).unwrap_or_else(|| panic!("the continuation: {heard:?}"));
+    assert!(told.contains("check before running any again: Bash python3 slow.py"), "told it may or may not have run: {told}");
     let steps = s.with(|w| w.bodies(&s.chat, "work", "turn.step"));
     assert!(steps.iter().all(|st| st["args"] != "python3 slow.py"), "the cut call is never run again: {steps:?}");
     bridge.stop().await;

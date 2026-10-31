@@ -535,6 +535,94 @@ pub(super) fn working_card(s: &mut Suite, api: &Api, owner: &Keys, chrome: &mut 
     Ok(())
 }
 
+/// Goal (#725, FIN-262): a tool call shows while it runs, from its intent
+/// (`turn.call`, recorded before it runs), and its step takes its place;
+/// real state only. Live: its latest response's call is the card's live
+/// line, what it does and for how long, under a head saying the turn works,
+/// with no working line under it; an earlier response's call no step ended
+/// may have run (a runtime ends a response's calls before it asks again).
+/// Its step (renamed by its runtime, `call_0_d2`: paired by what it does,
+/// within its response) takes its place. Once the turn ends (cut by a
+/// restart), nothing reads as running: a call no step ended may have run.
+pub(super) fn calls_card(s: &mut Suite, api: &Api, owner: &Keys, chrome: &mut Browser, agent: &str) -> Result<()> {
+    let name = s.named(api, owner, "calls-card")?;
+    let made = api.create_with(owner, json!({ "name": name, "template": "chat" }))?;
+    anyhow::ensure!(made.status == 200, "making the calls-card chat: {made}");
+    s.owned(&made.body, owner);
+    // the chat's agent posts its own records, as in `working_card`
+    let hand = Keys::generate();
+    let add = format!("/api/identities/{agent}/keys");
+    let r = api.signed(owner, "POST", &add, Some(&json!({ "proof": api.proof(&hand, "POST", &add, owner) })))?;
+    anyhow::ensure!(r.status == 200, "a key of the agent's for the fixture: {r}");
+    let r = api.signed(owner, "PUT", &format!("/api/f/{name}/members/{agent}"), Some(&json!({ "role": "editor" })))?;
+    anyhow::ensure!(r.status == 200, "the agent joins the calls-card chat: {r}");
+    let post = |i: usize, body: Value| -> Result<()> {
+        let r = api.signed(&hand, "POST", &format!("/api/f/{name}/channels/work"), Some(&json!({ "id": format!("calls-{i}"), "body": body })))?;
+        anyhow::ensure!(r.status == 200, "posting calls-card fixture {i}: {r}");
+        Ok(())
+    };
+    let call = |response: &str, args: &str| json!({ "kind": "turn.call", "turn": "calls", "response": response, "tool_call_id": "call_0", "tool": "terminal", "category": "shell", "args": args });
+    post(0, json!({ "kind": "turn.start", "turn": "calls", "agent": agent }))?;
+    post(1, call("r1", "make build"))?;
+    post(2, call("r2", "npm test"))?;
+    let page = chrome.open(&api.site_url(&name, "__signin?return=/"))?;
+    super::fit(chrome, &page, 1000, 900, false)?;
+    let shots = s.dir("calls-card");
+    let card = "document.querySelector('details.tools')";
+    let line = |args: &str| format!("[...{card}.querySelectorAll(':scope > .step')].find((s) => s.querySelector('.step-args')?.textContent === {})", super::js(args));
+    let (build, test) = (line("make build"), line("npm test"));
+    s.ok(
+        "while its turn works, its latest call is the card's live line: what it does (its icon named \"Running\"), shimmering, and for how long; the head says the turn works, and no working line shows",
+        super::shows(chrome, &page, &format!("(() => {{ const t = {test}; const h = {card}?.querySelector('summary'); return !!t && t.classList.contains('running') && t.querySelector('.step-name > svg[role=\"img\"]')?.getAttribute('aria-label') === 'Running' && t.querySelector('.step-args').classList.contains('shimmer') && /^\\d+s$/.test(t.querySelector('.step-since')?.textContent ?? '') && !!h.querySelector('.step-dot') && /^Working for \\d+s· 2 steps$/.test(h.textContent) && !document.querySelector('.msg.working'); }})()")),
+        chrome.eval(&page, &format!("{card}?.outerHTML ?? ''"))?,
+    );
+    s.ok(
+        "an earlier response's call with no step may have run: said in words, never running",
+        chrome.eval(&page, &format!("(() => {{ const b = {build}; return !!b && b.classList.contains('maybe') && !b.classList.contains('running') && b.querySelector('.step-verb')?.textContent === 'May have run' && !b.querySelector('.step-since') && !b.querySelector('.shimmer'); }})()"))? == true,
+        chrome.eval(&page, &format!("{build}?.outerHTML ?? ''"))?,
+    );
+    // its frames, a second apart as its time counts (for a person: the
+    // lifecycle, stitched as they like)
+    for i in 1..=3 {
+        chrome.screenshot(&page, &shots.join(format!("frame-{i}-running.png")))?;
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    }
+    chrome.screenshot(&page, &shots.join("desktop-running.png"))?;
+    super::fit(chrome, &page, 375, 800, true)?;
+    s.ok("on a phone the live line stays one line, its time beside it", super::shows(chrome, &page, &format!("(() => {{ const t = {test}; const a = t.querySelector('.step-args'); const h = Number.parseFloat(getComputedStyle(a).lineHeight); return a.clientHeight <= h + 1 && t.querySelector('.step-since').getClientRects().length === 1; }})()")), "");
+    chrome.screenshot(&page, &shots.join("phone-running.png"))?;
+    super::fit(chrome, &page, 1000, 900, false)?;
+    // its step: renamed by its runtime (`call_0_d2`), paired by what it does
+    post(3, json!({ "kind": "turn.step", "turn": "calls", "step": 1, "tool": "terminal", "category": "shell", "args": "npm test", "ok": true, "excerpt": "Exit code: 0", "tool_call_id": "call_0_d2", "status": "completed", "duration_ms": 900, "response": "r2" }))?;
+    s.ok(
+        "its step takes its place: one line, done, with no time of its own",
+        super::shows(chrome, &page, &format!("(() => {{ const steps = [...{card}.querySelectorAll(':scope > .step')].filter((s) => s.querySelector('.step-args')?.textContent === 'npm test'); return steps.length === 1 && !steps[0].classList.contains('running') && !steps[0].querySelector('.step-since') && steps[0].querySelector('.step-name > svg')?.getAttribute('aria-label') === 'Ran'; }})()")),
+        chrome.eval(&page, &format!("{card}?.outerHTML ?? ''"))?,
+    );
+    chrome.screenshot(&page, &shots.join("frame-4-step.png"))?;
+    // cut by a restart: nothing reads as running once it ended
+    post(4, call("r3", "make deploy"))?;
+    super::shows(chrome, &page, &format!("!!{} && {}.classList.contains('running')", line("make deploy"), line("make deploy")));
+    chrome.screenshot(&page, &shots.join("frame-5-next-call.png"))?;
+    post(5, json!({ "kind": "turn.end", "turn": "calls", "outcome": "error", "error": "lost when the computer restarted" }))?;
+    let deploy = line("make deploy");
+    s.ok(
+        "once its turn ended (cut by a restart), a call no step ended may have run: nothing reads as running, and the head says how long it worked",
+        super::shows(chrome, &page, &format!("(() => {{ const d = {deploy}; const h = {card}.querySelector('summary'); return !!d && d.classList.contains('maybe') && d.querySelector('.step-verb')?.textContent === 'May have run' && !{card}.querySelector('.step.running, .step-since, .shimmer, .step-dot') && /^Worked for /.test(h.textContent); }})()")),
+        chrome.eval(&page, &format!("{card}?.outerHTML ?? ''"))?,
+    );
+    // folded once it ended, as any card: opened, as a person opens it
+    chrome.eval(&page, &format!("(() => {{ {card}.querySelector('summary').click(); return true; }})()"))?;
+    super::shows(chrome, &page, &format!("{card}.open"));
+    chrome.screenshot(&page, &shots.join("desktop-ended.png"))?;
+    chrome.screenshot(&page, &shots.join("frame-6-cut.png"))?;
+    println!("      (calls-card screenshots in {})", shots.display());
+    chrome.close(page)?;
+    let r = api.signed(owner, "DELETE", &format!("{add}/{}", fragment_core::npub::encode(hand.pubkey_hex())), None)?;
+    anyhow::ensure!(r.status == 200, "the fixture's key revoked: {r}");
+    Ok(())
+}
+
 /// The shapes of a production chat's records (2026-10-20: a chat that did
 /// not load in the shell): prompt answers from before answers named their
 /// card (`{kind: "prompt_response", option, prompt}`, no agent, no turn),

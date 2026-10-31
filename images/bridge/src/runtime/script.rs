@@ -7,9 +7,10 @@
 //! command carries (a token, a URL) says no rule by chance (`says`):
 //!
 //! - default: two drafts, then the reply `echo: [<asker>] <text>`;
-//! - `tool`: its words before a tool call (`Let me look.`), a reply of
-//!   their own, then a step (`search`, a `web` one: the message's first 40
-//!   characters its args, ok, an excerpt), then the reply;
+//! - `tool`: a tool call said before it runs (`turn.call`: `search`, a
+//!   `web` one, the message's first 40 characters its args), its words
+//!   before it (`Let me look.`), a reply of their own, then (`slow`:
+//!   `CALL_PACES` paces on) its step (ok, an excerpt), then the reply;
 //! - `approve` or `risky`: a step, then a prompt (`once`, `deny`) the
 //!   owner answers; the reply says `(approved)`, `(denied)`, or
 //!   `(not approved)` once it expired;
@@ -120,7 +121,7 @@ use std::time::Duration;
 
 use tokio::sync::mpsc;
 
-use crate::records::{Category, NoticeCategory, Outcome, PromptOption, Step};
+use crate::records::{Call, Category, NoticeCategory, Outcome, PromptOption, Step};
 use crate::runtime::{Command, Event, How, LocalFile, MenuItem, Runtime, RuntimeFuture, RuntimeIo, TurnStart};
 
 /// How long `speak`'s voice reply plays.
@@ -705,6 +706,10 @@ async fn decide(agent: &str, rest: &str) -> Result<String, String> {
 }
 
 /// Waits `pace`, hearing a Stop meanwhile (true).
+/// How many paces a slow tool call runs before its step (two seconds at the
+/// image's 40 ms: long enough for a page to show it running).
+const CALL_PACES: u32 = 50;
+
 async fn pause(pace: Duration, rx: &mut mpsc::Receiver<Heard>) -> bool {
     tokio::select! {
         _ = tokio::time::sleep(pace) => false,
@@ -819,10 +824,22 @@ async fn turn(cfg: ScriptConfig, ts: TurnStart, mut rx: mpsc::Receiver<Heard>, e
     }
     let mut part = 1;
     if says(&text, "tool") {
-        // its words before the call, a reply of their own, then the step
+        // its call said before it runs, its words before the call, a reply
+        // of their own, then (a slow call runs on a while) the step
+        let args: String = ts.text.chars().take(40).collect();
+        let call = Call { response: format!("script-{}", &id[..12]), position: 0, tool_call_id: "call-search".into(), tool: "search".into(), args: args.clone(), category: Category::Web };
+        emit(Event::Called { turn: id.clone(), call }).await;
         emit(Event::Reply { turn: id.clone(), part, text: "Let me look.".into() }).await;
         part += 1;
-        let step = Step { tool: "search".into(), args: ts.text.chars().take(40).collect(), ok: true, excerpt: "3 results".into(), category: Category::Web, evidence: None };
+        if says(&text, "slow") {
+            for _ in 0..CALL_PACES {
+                if pause(cfg.pace, &mut rx).await {
+                    emit(Event::End { turn: id, outcome: Outcome::Stopped }).await;
+                    return;
+                }
+            }
+        }
+        let step = Step { tool: "search".into(), args, ok: true, excerpt: "3 results".into(), category: Category::Web, evidence: None };
         emit(Event::Step { turn: id.clone(), step }).await;
     }
     if says(&text, "approve") || says(&text, "risky") {
