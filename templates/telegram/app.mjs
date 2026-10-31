@@ -219,8 +219,10 @@ export class App extends DurableObject {
   async mirror({ record } = {}, job) {
     // its trigger's runs alone: each reply an agent posts here
     if (job.via !== "channel") return { sent: 0, why: "only the chat's trigger sends" };
-    // unlinked, or its door shut: the agent's words stay in the chat
+    // unlinked, or its door shut: the agent's words stay in the chat; and
+    // only the bound agent's replies reach Telegram, never another's here
     if (!job.door) return { sent: 0, why: "not linked" };
+    if (record?.principal !== job.door.to) return { sent: 0, why: "not its bound agent's" };
     const b = record?.body;
     if (!b || typeof b.turn !== "string" || b.interim === true || (b.kind !== undefined && b.kind !== "message")) return { sent: 0, why: "not a reply" };
     const said = typeof b.text === "string" ? b.text.trim() : "";
