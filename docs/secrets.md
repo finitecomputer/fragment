@@ -394,7 +394,8 @@ the wipe never removes it, as it removes the keys of whom it wipes.
   put in percent-encoded (`fill_url`: all but unreserved bytes and `:`),
   and a value that would change the request's scheme, host, port, path
   segments or query parameters (`..`, say) is not sent; a failure's
-  message names it as its placeholder again. Its hosts are set with its value and only with it, so an
+  message, and the answer's headers and body, name it as its placeholder
+  again, so a vendor that echoes its URL hands the code no plaintext. Its hosts are set with its value and only with it, so an
   editor, who may set and list secrets but never read one, cannot send
   a value someone else set anywhere they did not mean it to go: the
   code's authority ends at the secret's hosts. `job.ai.*` steps name no key: text goes through the model route
