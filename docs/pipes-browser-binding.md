@@ -1,346 +1,67 @@
 # Browser-bound Pipes connections
 
-`POST /api/connections/:provider/authorize` is a platform-browser operation.
-A signed key cannot start it. A connection needs `connection_oauth` in its
-catalog row; without it authorization fails closed. There is no fallback to
-WorkOS's `/data-integrations/:provider/authorize` URL.
+A connection's grant reaches WorkOS Pipes only through the browser that
+asked for it. An authorization link that someone else finishes would put
+their provider account in the asker's Pipes account, or the asker's in
+theirs. So Fragment runs the authorization-code flow itself, with PKCE
+(S256) and a confidential client, from the catalog row's
+`connection_oauth`. A row without it refuses to connect; nothing falls
+back to WorkOS's own authorize URL. The routes are docs/api.md's
+(Connections); the rules are `fragment_core::connection_signin` and
+`cell/src/registry/connection_signin.rs`.
 
-The Registry creates a random state and S256 PKCE verifier, seals the verifier,
-and keeps the state hash with the initiating platform-session hash, provider,
-WorkOS issuer/subject, configuration hash and ten-minute expiry. The answer
-sets a host-only HttpOnly, SameSite=Lax `fragment_connection` cookie
-(`__Host-` and Secure on HTTPS). Starting again replaces that browser's cookie.
-At most eight attempts per session and the fleet's pending-sign-in limit in
-total are retained. Expired attempts are swept; wiping the person removes them.
-
-The provider returns to the platform's own
-`/api/connections/:provider/callback`. `auth::trip_bound` proves possession of
-the initiating browser's cookie. The Registry requires the *same live session*,
-provider and unexpired transaction and atomically consumes it **before** any
-external exchange. Another browser, person or session cannot consume it. The
-provider exchanges its one-time code with the saved PKCE verifier and client
-credentials. Fragment requires a bounded bearer grant (access token, refresh
-token, bounded expiry, at most 32 bounded scopes) of at least one requested
-scope beyond signing in (Partial grants, below), rechecks the live session and
-WorkOS subject, then imports it into that subject's Pipes account. Tokens are
-never returned to the browser or stored by Fragment; WorkOS stores and refreshes
-them. No response-body diagnostics, redirects or automatic network retries are
-used on the credential-bearing requests.
-
-The documented import is `POST /user_management/users/:user_id/connected_accounts/:slug`.
-Only an explicit 409 permits a `PUT` update of that same user's existing account,
-with the same body, so a reconnect's grant (its `scopes`, its label) replaces
-the earlier one's. An uncertain result consumes the attempt; reconnect rather
-than replaying it. The import's `scopes` are the grant's exactly: the token
-endpoint's `scope` as it answered, or, when it answers none, the scopes
-requested (RFC 6749 5.1).
-The import names the account as its person knows it: when the token endpoint
-answers an OpenID Connect `id_token` beside the grant (the row asks for `openid`
-and the provider's email scope: Google's `https://www.googleapis.com/auth/userinfo.email`),
-its `email` becomes the connected account's `account_display_name` (`null` when
-there is none, so an update never keeps an earlier account's). The ID token is
-read without checking its signature: it came straight from the token endpoint
-over TLS (OpenID Connect Core 3.1.3.7, step 6), its `aud` must be the row's
-client, an `email_verified: false` email is not used, and the label is only shown
-to the person (settings, `GET /api/connections`' `account`), never used to decide
-access.
-This deliberately supports confidential clients using `client_secret_post`,
-authorization code, S256, and a space-delimited scope response. Other provider
-protocols require an explicit implementation, not an unbound fallback.
+- **Start** (`POST /api/connections/{provider}/authorize`) is a browser's
+  signed in to the platform, never a signed key's. The registry keeps
+  the state's hash, the sealed PKCE verifier, the platform session, the
+  WorkOS subject, the provider and the row's configuration hash for ten
+  minutes, and a host-only HttpOnly cookie (`fragment_connection`) binds
+  them to that browser.
+- **The callback**, on the platform's own host, requires that cookie
+  (`auth::trip_bound`), the same live session, provider and unexpired
+  attempt, and consumes the attempt before any exchange: another
+  browser, person or session cannot use it, and a replay finds nothing.
+  The session and subject are checked again before the import.
+- **Tokens** go from the provider's token endpoint straight to Pipes'
+  import for that subject: never to the browser, never kept by Fragment,
+  never retried. An import whose outcome is unknown consumes the attempt;
+  the person connects again.
+- **The OAuth client** must be the one the deployment's WorkOS
+  integration uses, or Pipes cannot refresh. Its secret is a store
+  secret (docs/secrets.md).
+- **The account's label** is the email of the ID token answered beside
+  the grant: read without its signature (it came from the token endpoint
+  over TLS: OpenID Connect Core 3.1.3.7), its `aud` checked, an
+  unverified email dropped, and shown to its person, never used for
+  access.
 
 ## Partial grants
 
-Fragment asks for its row's whole scope list and is fine with whatever the
-person leaves out (Paul, issue #445): Google's consent screen lets them untick
-each permission (granular consent), and a grant of some of them connects with
-those. Only a grant of nothing the row asks for beyond signing in is refused:
-`openid`, `email`, `profile` and Google's
-`https://www.googleapis.com/auth/userinfo.email` and `…/userinfo.profile`
-(`fragment_core::connection_signin::IDENTITY_SCOPES`), which Google grants
-beside anything else and which let an agent do nothing. Such a callback imports
-nothing and comes back `?refused=no-scopes`, a page that says to leave at least
-one permission ticked. A row that asks for signing in alone takes any grant of
-it.
-
-`GET /api/connections` reads the grant back from Pipes (the connected
-account's `scopes`, read with no token minted): each connection's `granted`,
-and its `missing`, what its row asks for beyond signing in that the grant
-lacks. Settings names what is missing in words ("Not allowed: Sheets, Drive")
-with a **Reconnect to add**, the same Connect flow. Google's row asks for
-`include_granted_scopes=true`, so Google keeps what the person allowed before
-and its consent asks only for the rest; the grant it answers names them all,
-and the update records it. Pipes refreshes the grant; what it holds is what
-the list says. An agent's call outside the grant gets Google's own 403
-(insufficient scope), which the Google skill explains to the person: add it in
-Settings, under Connections. A connected account Pipes names no scopes for has
-none said to be missing.
+A person may untick permissions on the provider's consent screen. A
+grant of anything beyond signing in connects with what it holds, and the
+import records its scopes exactly; one of signing in alone
+(`IDENTITY_SCOPES`) imports nothing (`?refused=no-scopes`). Settings names
+what is missing, and a reconnect asks only for the rest.
 
 ## Disconnecting
 
-`DELETE /api/connections/:provider` (settings' Disconnect, or a person's key)
-deletes the account at Pipes (`DELETE
-/user_management/users/:user_id/connected_accounts/:slug`, 204), which ends
-every swap of it. Deleting it there leaves the grant at the provider, so a row
-may name a revocation endpoint, `connection_oauth.revoke` (RFC 7009; Google's is
-`https://oauth2.googleapis.com/revoke`). With one, Fragment first asks Pipes for
-an access token for the account and posts it there as `token`; Google revokes
-an access token's refresh token with it. The token goes only to that endpoint,
-with no redirects or retries, and is in no answer or log. A revocation that
-fails is logged and the account is deleted anyway; the answer's `revoked` says
-which happened, and settings tells the person to remove the access at the
-provider when it is false. An account Pipes no longer gives a token for has no
-grant left to revoke this way. Google's revocation ends the Google account's
-whole grant to the OAuth client, so when two people here connected the same
-Google account, one's Disconnect ends the other's connection at its next
-refresh too (Pipes can no longer refresh it).
-
-Before it revokes or deletes anything, a disconnect fences the account in the
-Registry (`POST /connection/fence`, one turn, no await between check and act),
-so no connect begun before it connects the account after it:
-
-- every attempt at that WorkOS user's account at that provider still pending is
-  ended, in each of their sessions (its callback then finds no transaction:
-  `not-under-way`);
-- each callback past its pending row and still exchanging its code is
-  cancelled: it re-checks just before importing and imports nothing. The grant
-  its exchange made is not revoked: Google's revocation ends the account's
-  whole grant to the client, so it could end a newer connect of the same
-  account, and the cancelled callback's tokens are kept nowhere;
-- a callback already importing refuses the fence (429, nothing ended), since
-  what it sent Pipes cannot be called back; the disconnect asked again, once
-  that answered, deletes it;
-- and the account stays fenced, in a Registry table (`connection_fences`), until
-  a connect of the person's is known to have imported again (Pipes answered it
-  200 or 201; the fence goes in that same turn). An import that fails, or
-  whose outcome is unknown (a timeout, a 5xx), lifts nothing, so if it lands
-  at Pipes after the disconnect deleted the account, it is not taken for a
-  connection: `GET /api/connections` reads it as `not_connected` with Pipes
-  not asked, and the person's computer, which swaps only a connection its
-  states say is connected (the disconnect tells it them at once; a refresh
-  begun before that does not draw over them), refuses its swaps and asks
-  Pipes for no token. The account lingers at Pipes, used by no one, until the
-  person connects again, which replaces it.
-
-Callbacks under way are kept in the Registry's memory, not a table: each one
-runs inside the Registry and ends with it, so a Registry that restarts has none
-under way, while the lasting fence is a row and outlives it. Another person's
-attempts, and the person's attempts at another provider, are untouched. A
-connect begun after the fence is a new one and may connect. A disconnect that
-cannot tell the person's computer fails, and is asked again (every step of it
-may be asked twice). A wipe deletes the person's fences with their sign-ins.
+A disconnect revokes the grant at the provider where the row names
+`revoke` (RFC 7009), then deletes the account at Pipes. Before either,
+the registry fences the account in one turn: attempts still pending end,
+callbacks still exchanging import nothing, and one already importing
+refuses the fence (429). The fence lasts (`connection_fences`) until a
+later connect is known to have imported, so an import that lands late is
+never taken for a connection. Google's revocation ends the Google
+account's whole grant to the client, so it also ends another person's
+connection of that same account.
 
 ## Several accounts
 
-A person may connect several accounts at one connection (a personal and a work
-Google account, issue #446), where the deployment's row says so:
-`accounts_max`, 1 to 25 (Pipes' own limit), on a `connection` with
-`connection_oauth` only (its callback imports them). Absent, it is 1, and
-every call is as above: Pipes' compatibility connection, no account named. A
-release that does not know the field refuses the catalog, so a deployment's
-config gains it only once a release that knows it is deployed, as `revoke` did.
-
-Above 1, Fragment uses Pipes' several connections
-([multiple connections](https://workos.com/docs/pipes/multiple-connections);
-the shapes as workos-node's `src/pipes/pipes.ts` sends them):
-
-- `GET /api/connections` reads Pipes' plural list once for every such row
-  (`GET /user_management/users/:user_id/data_providers?supports_multiple_connections=true`,
-  each provider's `connected_accounts`). Each row lists the person's accounts,
-  oldest first (Pipes' `created_at`, then id), each with its id, label, state,
-  `granted` and `missing`. The default account, which an agent that picked none
-  uses, is the oldest connected one; the row's own `state`, `account`,
-  `granted` and `missing` are its (connected while any account is), so a
-  reader of one account reads it as before. There is no per-person default.
-- `POST …/authorize` takes `{add: true}` for another account, or `{account:
-  "<id>"}` for one of the person's again (its Connect again, or Reconnect to
-  add). An add past `accounts_max`, or an account not theirs, is refused before
-  the provider's page. The pending attempt keeps what it was for (the
-  Registry's `connection_signins.intent` and `account`, its step 5).
-- The callback reads the person's accounts there before it imports, and the
-  ID token's `sub` (read where its `email` is, under the same `aud` check)
-  becomes the account's `account_identifier`. Pipes tells no duplicate apart,
-  so Fragment does: a grant of an account already listed (the same
-  identifier) reauthorizes that account, whatever was asked, never a second.
-  Otherwise a person's first account is imported as with one (the
-  compatibility connection: no intent, and a 409 updates it), a reconnect of
-  an account listed updates it (`PUT` with `connected_account_id` and
-  `connection_intent=reauthorize` in the query) unless the grant is plainly
-  another account's (both name identifiers, and they differ), and anything
-  else is added (`POST` with `connection_intent: "add"` in the body). An add
-  at `accounts_max` imports nothing (`?refused=account-limit`), nor one Pipes
-  refuses at its limit (409 `connected_account_limit_reached`, the same word);
-  while WorkOS has not enabled additional connections, Pipes answers an add for
-  a person who has an account 404 `multiple_connections_unavailable`, which
-  imports nothing and is said in plain words (`?refused=one-account`). An
-  uncertain outcome is never retried, as above.
-- One callback at a time decides at a person's accounts at a provider: it
-  holds its turn from its read of the list to its import's answer (the
-  Registry's memory, beside the callbacks under way), and another finishing
-  meanwhile, its code spent already, waits for it (up to 95 s), then reads
-  the list the first left, so the same provider account twice is one account,
-  and two into the last place are one and `account-limit`. An import whose
-  outcome is unknown keeps its turn a minute more: a connect there meanwhile
-  imports nothing (`?refused=finishing`, connect again in a minute), since a
-  list read then could lack it. Its session, its person's sign-in and its
-  ten minutes are checked again once it has its turn and the list, so a
-  callback that waited past a logout or its time imports nothing. An account imported before
-  this release names no identifier, so a grant of it again is not told apart
-  from another; a reconnect names one, which it keeps if Pipes keeps what a
-  `PUT` names (WorkOS' SDK sends no identifier on an update: unverified).
-- `DELETE …?account=<id>` disconnects that account: its grant revoked with a
-  token Pipes mints for it (`connected_account_id` in the token's body), then
-  it alone deleted (`?connected_account_id=` on Pipes' `DELETE`); the person's
-  other accounts stay connected. With several and none named it is refused
-  (400, naming them); with one, it is that one. Each step may be asked again,
-  as with one: an account the person disconnected that Pipes holds still (its
-  delete failed, or an import landed after) is listed with `disconnecting`,
-  not connected and used by no agent, and settings offers Disconnect again;
-  one Pipes deleted already is known as theirs by their own record of the
-  disconnect (`connection_disconnects`, by its id, whatever its fence, an
-  account with no identifier too; their newest 64 a provider), so a
-  disconnect that failed telling their computer finishes when asked again.
-  An id neither names is 404: never another person's.
-- The fence stays per provider for what is under way: a disconnect of one
-  account ends every attempt at the provider still pending and cancels every
-  callback exchanging (coarser, and safe). The lasting fence is the account's
-  alone (`connection_account_fences`, the Registry's step 5), by its
-  identifier: an import of it whose outcome was unknown, landing after the
-  disconnect, is not taken for the person's, and their other accounts are
-  read as before. A connect of that identifier known to have imported lifts
-  it. An account that names no identifier cannot be told from the person's
-  others, so its disconnect leaves no lasting fence while they have others
-  there; the last of theirs, or a disconnect with none there, fences the
-  provider whole, as with one (`fragment_core::connection_accounts::lasting`).
-
-Each agent uses one account a provider: the person picks it in Settings
-(`PUT /api/computers/:id/agents/:fragment/accounts/:provider {account}`, one
-of theirs as their list names it, or `null` for the default), and their
-computer keeps it (its `agent_accounts`, the Computer's step 2). A swap names
-that account to Pipes (`connected_account_id` with the plural opt-in), only one
-the person's list named: the agent's pick while it is listed (one that needs
-authorizing again is refused, never swapped for another account), else the
-default; a pick whose account is gone falls back to the default and stays
-until it is next written. Settings offers the choice with two accounts or
-more, or a pick saved: Default first, then each account, its state said where
-it is not connected, and the saved pick as it is stored, never another in its
-place, so a pick the swap refuses can be seen and changed. The placeholder is the same: it names the agent,
-never an account.
-
-## Evidence and scope
-
-- [Google's web-server OAuth flow](https://developers.google.com/identity/protocols/oauth2/web-server)
-  documents state validation, the callback and code exchange.
-- [Google's OAuth client](https://github.com/googleapis/google-auth-library-nodejs/blob/main/src/auth/oauth2client.ts)
-  exposes S256/code_verifier with the same confidential-client exchange.
-- [WorkOS connected-account reference](https://workos.com/docs/reference/pipes/connected-account)
-  documents import, refresh-token/access-token/expiry combinations, 409 on an
-  existing account, and update. A refresh token without the configured matching
-  OAuth client will not make refresh work; the deployment must use the same
-  client as its WorkOS integration.
-- The published `@workos-inc/widgets` 1.20.1 Pipes implementation requests
-  `requireHandoff: true` and exchanges handoff/redirect tokens with a popup.
-  Its private GraphQL completion contract is not the public REST contract.
-  This change does not infer a vendor guarantee from that implementation or
-  call its private API.
-
-The local `connections` e2e lane uses two users and separate browser cookie
-sets. It verifies copied URLs, missing/wrong-kind cookies, another user's and
-another same-user session, replay, expiry, superseded starts, PKCE code
-substitution, restart, reauthorization, and partial grants (one kept as
-granted and listed with what it lacks, one of signing in alone refused, and a
-reconnect that adds the rest), and several accounts (a first, another with its
-own scopes, the same one again reauthorized, Pipes' two refusals and the row's,
-one disconnected while the others stay, its fence against a late import, and a
-swap using the account its agent picked) against real workerd and local
-provider/Pipes fakes. Protocol tests reject malformed grants, grants of signing in alone and
-configuration overriding binding parameters. Local tests establish our ordering
-and attribution, not the live vendor configuration or refresh behavior.
-
-## Rollout still required; this change does none of it
-
-Paul reviews and deploys. Keep the staging provider disabled until the code and
-configuration are reviewed. No new GCP IAM grant is required to implement or
-test this PR locally.
-
-The repository's normal release path is `.github/workflows/ci.yml`: PRs test;
-a green `master` push deploys the GitHub `preview` environment with
-`cargo xtask deploy --pinned-only --branch preview`; the `production` branch
-uses the separate `production` environment without that branch flag. Deployment
-requires green `check` and `e2e`. Production promotion is a later, separate
-decision, after staging validation. No separate environment or manual deploy
-is needed for this fix.
-
-| Setting | Staging | Production | Reusable? |
-| --- | --- | --- | --- |
-| GitHub deployment environment / source branch | `preview` / `master` | `production` / `production` | Mechanism only; keep environment restrictions separate |
-| Platform origin | Existing `preview` environment's `DEPLOY_HOST` and deployment config | Existing `production` environment's `DEPLOY_HOST` and deployment config | No; verify actual targets before merging/promoting |
-| WorkOS environment and user issuer | Existing staging environment `environment_01KSB8XM8RSN80NM31YVYBAY20` | Existing production environment, verify its identifier | No cross-environment credentials or user IDs |
-| Google project / OAuth client | `finitestaging228527660165` / existing `Finite Pipes Staging` client | Existing production project/client, verify; do not duplicate or rotate | Separate client IDs and secrets |
-| Google authorized redirect URI | `https://<staging-platform>/api/connections/google/callback` | `https://<production-platform>/api/connections/google/callback` | Path is shared; origins are separate |
-| OAuth endpoints and compatibility scopes | Reviewed endpoints/scopes below | Same protocol and reviewed scope set | Yes, subject to production consent-screen review |
-| Cloudflare binding | `CONNECTION_SECRET_GOOGLE`, existing staging client's secret in its store | Same binding name, production client's secret in its store | Binding name only; not secret values |
-| Deployment catalog | `connection_oauth` + store-name `key` in fragment-deploy's `preview.jsonc` | Equivalent row in fragment-deploy's `production.jsonc` | Shape only; client ID/store names/origin must be checked per environment |
-| WorkOS provider | Existing staging Google integration, currently Disabled | Existing production integration, status to verify | Keep enablement separate and gated |
-| Canonical privacy-policy / terms URLs | **Pending placeholders**; not a blocker for the controlled External/Testing staging work | **Pending placeholders**; do not submit unfinished policies for production verification | Reuse the eventual approved canonical URLs; none are invented or published here |
-
-The existing WorkOS API/client bindings and Cloudflare deployment credentials
-need no rotation for this feature. The new OAuth client-secret binding is an
-additional consumer of the existing corresponding Google client, not a request
-to generate new credentials. Parent coordinates exact account configuration;
-none of these secret values were read or printed here.
-
-1. Add the exact staging platform callback
-   `https://<staging-platform>/api/connections/google/callback` to the **same**
-   Google OAuth client configured in the staging WorkOS integration. The existing
-   WorkOS callback alone does not serve this flow. Do not point staging at a
-   production client or callback.
-2. Bind that client's secret through Cloudflare Secrets Store as
-   `CONNECTION_SECRET_GOOGLE`. In the deployment provider row, `key` is its
-   **store name**, never the value. Add `connection_oauth` with `client_id`,
-   `authorize: https://accounts.google.com/o/oauth2/v2/auth?access_type=offline&include_granted_scopes=true&prompt=select_account%20consent`
-   (`select_account`: Google's account chooser, even in a browser signed in to
-   one Google account, so a person picks which account to connect; `consent`:
-   the refresh token Pipes needs, every time; `include_granted_scopes`: what
-   the person allowed before is kept, so a reconnect asks only for the rest:
-   Partial grants, above),
-   `exchange: https://oauth2.googleapis.com/token`, and the reviewed compatibility
-   scopes. Endpoint/client/scope settings are public configuration; secrets are
-   read only by `cell/src/keys.rs`. For Disconnect, add `revoke:
-   https://oauth2.googleapis.com/revoke`, but only once a release that knows the
-   field is deployed: a catalog refuses fields it does not know. Like any change
-   to the row, it changes the configuration hash, so a Connect begun before that
-   deploy comes back refused and is started again.
-3. Review prior accounts and pending legacy authorization URLs in any environment
-   that used the old flow. This patch cannot invalidate URLs already issued by
-   WorkOS or undo existing provider grants. Resolve those before enabling use;
-   deleting a Pipes account does **not** revoke the underlying Google grant.
-4. Separately authorize provider enablement and a controlled staging grant.
-   Start with the sole approved test account, isolated browser profiles and a
-   dedicated Fragment test user. Verify a copied link cannot import or expose
-   credentials, then the original profile can complete, replay cannot exchange,
-   and the imported account belongs to the initiating WorkOS user. Inspect only
-   status/attribution, never token values. Separately authorize a minimal API
-   read and refresh test. A genuine two-Google-user test requires another
-   explicitly approved test account; do not use someone else's account.
-5. Revoke the test grant at Google and remove the test connected account after
-   validation. Production requires Paul's separate rollout decision.
-
-For deployment verification, require CI's `/healthz` `x-fragment-deploy` header
-to match the merged commit, and verify that a connection with no OAuth config
-refuses authorization without redirecting or importing. Then use only the
-separately approved staging test above. Provider status remaining Disabled is
-not evidence that the new callback/import works live.
-
-Rollback: first disable new connection starts by removing both `connection_oauth`
-and its provider-row `key` from that environment's catalog through the normal
-deployment path. An orphan `key` is rejected by deployment validation. Preserve
-Registry schema step 2 in any rollback build: deploying a pre-step worker onto
-the upgraded Registry is refused by the schema guard and can break sign-in.
-Use a reviewed forward fix or revert of feature code retaining the migration,
-not an unexamined promotion of an older SHA. Credential revocation or deletion,
-if needed, is a separately authorized account operation.
-
-As of 2026-10-20, the user's staging OAuth client and compatibility scopes are
-configured and the WorkOS Google provider remains **Disabled**. No live grant,
-token import, refresh test, provider enablement or deployment was performed for
-this change. Production, Places and billing remain outside this work.
+Where a row's `accounts_max` is above 1, a person connects several
+accounts at one provider, and each agent uses one: the person's pick in
+Settings, else the oldest connected. Fragment tells accounts apart by
+the ID token's `sub`: a grant of an account already listed reauthorizes
+it, never adds a second. One callback at a time decides at a person's
+accounts at a provider. The lasting fence is the account's own; one
+with no identifier can't be told from the person's others, so it leaves
+none while they have others there, and the last of theirs fences the
+provider whole (`fragment_core::connection_accounts::lasting`).
