@@ -62,6 +62,8 @@ impl Code {
             ErrorCode::NotFound | ErrorCode::UnknownOperation | ErrorCode::NoCode => Code::NotFound,
             ErrorCode::AlreadyExists => Code::NameTaken,
             ErrorCode::ConflictingBody => Code::ConflictingBody,
+            // a write's precondition went stale (a search source's revision)
+            ErrorCode::Conflict => Code::Conflict,
             ErrorCode::TooLarge => Code::TooLarge,
             ErrorCode::AppFailed => Code::AppFailed,
             ErrorCode::RateLimited => Code::RateLimited,
@@ -725,6 +727,7 @@ mod tests {
             (ErrorCode::NoCode, "not_found"),
             (ErrorCode::AlreadyExists, "name_taken"),
             (ErrorCode::ConflictingBody, "conflicting_body"),
+            (ErrorCode::Conflict, "conflict"),
             (ErrorCode::TooLarge, "too_large"),
             (ErrorCode::AppFailed, "app_failed"),
             (ErrorCode::RateLimited, "rate_limited"),

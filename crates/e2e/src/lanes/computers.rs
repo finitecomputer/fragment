@@ -63,6 +63,12 @@ pub(super) fn turn_of(agent: &str, fragment: &str, channel: &str, seq: i64) -> S
     hex::encode(&Sha256::digest(format!("{agent}|{fragment}/{channel}/{seq}").as_bytes())[..12])
 }
 
+/// The id of the turn that continues `cut`, a turn a restart cut, as
+/// docs/chat-records.md defines it.
+pub(super) fn continuation_of(cut: &str) -> String {
+    hex::encode(&Sha256::digest(format!("continue\0{cut}").as_bytes())[..12])
+}
+
 /// The work records of one turn.
 pub(super) fn work_of(recs: &[Value], turn: &str) -> Vec<Value> {
     recs.iter().filter(|r| r["body"]["turn"] == turn).cloned().collect()
@@ -72,16 +78,6 @@ pub(super) fn work_of(recs: &[Value], turn: &str) -> Vec<Value> {
 /// (docs/chat-records.md): the platform posts one when the agent is added.
 pub(super) fn told(api: &Api, owner: &crate::Keys, agent: &str, fragment: &str) -> Vec<Value> {
     records(api, owner, agent, "tasks").into_iter().filter(|r| r["body"]["kind"] == "joined" && r["body"]["fragment"] == fragment).collect()
-}
-
-/// A hosted round's candidate (`--candidate`: docs/computers.md, "Stable
-/// and canary"): the computer `id`, made asleep, pinned to it before its
-/// first start, so its section runs on the candidate. None: nothing.
-pub(super) fn on_candidate(s: &mut Suite, api: &Api, owner: &crate::Keys, id: &str) -> Result<()> {
-    let Some(image) = s.candidate.clone() else { return Ok(()) };
-    let r = api.signed(owner, "PUT", &format!("/api/computers/{id}/image"), Some(&json!({ "image": image })))?;
-    s.ok(&format!("its computer is pinned to the candidate, {image}, before its first start"), r.status == 200 && r.body["image"] == image.as_str() && r.body["phase"] == "asleep", &r);
-    Ok(())
 }
 
 /// A view's notice of `kind` (docs/computers.md, "What its owner is told"),
@@ -367,7 +363,7 @@ const CRASH_CHECKS: [&str; 10] = [
     "a crash wakes it from its last save, and nothing that started runs again (P1)",
     "its wake says what it restored: after the kill, a rollback is counted",
     "a turn cut by a crash ends once, as an error, and its model was called once (P1)",
-    "and the next message is answered, told once what the crash cut, from the journal (P5)",
+    "the cut turn is continued once, by the computer, told what the crash cut, from the journal; the messages after it are answered, told nothing (P5, phase 4)",
 ];
 
 /// Who the crash checks act as, and on what.
@@ -473,17 +469,24 @@ fn crash_checks(s: &mut Suite, api: &Api, c: &Crashing, say: &dyn Fn(u32, &str) 
         ended && ends.len() == 1 && ends[0]["body"]["outcome"] == "error" && replied(seq_of(&cut)).is_none() && s.ai.chats().len() == called + 1,
         format!("{} model calls since; {}", s.ai.chats().len() - called, json!(work_of(&records(api, c.owner, c.chat, "work"), &cut_turn))),
     );
-    // told once what the crash cut (P5): the stub echoes the bridge's note
-    // after its reply, built from the chat's journal
+    // the cut turn is continued in its place, before the next message: said
+    // by the computer and told once what the crash cut (P5; the stub echoes
+    // the bridge's note after its reply, built from the chat's journal)
     let text_of = |r: &crate::api::Reply| replied(seq_of(r)).and_then(|r| r["body"]["text"].as_str().map(str::to_string)).unwrap_or_default();
     let once_more = say(55, "and once more")?;
     let answered_again = s.eventually(c.wake, || replied(seq_of(&once_more)).is_some());
+    let continuation = continuation_of(&cut_turn);
+    let continued: Vec<String> = agent_replies(&records(api, c.owner, c.chat, "chat"), c.identity).iter().filter(|r| r["body"]["turn"] == continuation.as_str()).filter_map(|r| r["body"]["text"].as_str().map(str::to_string)).collect();
     let (told, then) = (text_of(&next), text_of(&once_more));
-    let told_once = told.contains("(told: Your previous turn in this chat was cut short") && told.contains("It was answering: “think slowly, cut by a crash”") && answered_again && !then.contains("(told:");
-    s.ok(CRASH_CHECKS[9], answered && told_once, json!([told, then]));
+    let told_once = matches!(continued.as_slice(), [t] if t.starts_with("echo: [your computer] I restarted while you were working") && t.contains("(told: Your previous turn in this chat was cut short") && t.contains("It was answering: “think slowly, cut by a crash”"))
+        && answered_again
+        && !told.contains("(told:")
+        && !then.contains("(told:");
+    s.ok(CRASH_CHECKS[9], answered && told_once, json!([continued, told, then]));
     // its replies: the think, the fetch, after the crash, after the cut, the
-    // one after (and the cut turn's, where a crash's restore ran it again)
-    let added = [&think, &fetch, &after, &cut, &next, &once_more].iter().filter(|r| replied(seq_of(r)).is_some()).count();
+    // one after (and the cut turn's, where a crash's restore ran it again),
+    // and the cut turn's continuation's
+    let added = [&think, &fetch, &after, &cut, &next, &once_more].iter().filter(|r| replied(seq_of(r)).is_some()).count() + continued.len();
     Ok(added)
 }
 
@@ -863,7 +866,7 @@ fn relay_checks(s: &mut Suite, api: &Api, owner: &crate::Keys, fetched: &dyn Fn(
 /// door's key, never by the agent's own, which signs every request its
 /// tools make; the owner's unlink closes the door at once. The replies it
 /// adds.
-fn door_checks(s: &mut Suite, api: &Api, c: &Doors, fetched: &dyn Fn(&Suite, u32, &str) -> Result<String>) -> Result<usize> {
+fn door_checks(s: &mut Suite, api: &Api, c: &Doors, fetched: &dyn Fn(&Suite, u32, &str) -> Result<String>, wake: Duration) -> Result<usize> {
     let path = format!("/api/computers/{}/agents/{}/door", c.id, c.agent);
     let ticket = |who: &crate::Keys, act: &str| api.signed(who, "POST", &path, Some(&json!({ "door": "simplex", "act": act })));
     let r = ticket(c.stranger, "link")?;
@@ -914,11 +917,20 @@ fn door_checks(s: &mut Suite, api: &Api, c: &Doors, fetched: &dyn Fn(&Suite, u32
         said.starts_with("door said ") && relayed["body"]["relayed"]["via"] == "simplex" && relayed["body"]["relayed"]["for"] == c.owner_id && relayed["body"]["relayed"]["sig"].is_string(),
         json!({ "said": said, "record": relayed }),
     );
+    // its owner's words, as theirs: the agent answers them as its owner's
+    // message, though no SimpleX core runs on the stub (the bridge takes a
+    // relayed record the platform took, linked here or not)
+    let echo = |text: &str| agent_replies(&records(api, c.owner, c.chat, "chat"), c.identity).into_iter().find(|r| r["body"]["text"].as_str().is_some_and(|t| t.starts_with("echo: ") && t.ends_with(&format!("] {text}"))));
+    let answered = s.eventually(wake, || echo("hi from my phone").is_some());
+    let turn = echo("hi from my phone").map(|r| r["body"]["turn"].clone()).unwrap_or_default();
+    let start = records(api, c.owner, c.chat, "work").into_iter().find(|r| r["body"]["kind"] == "turn.start" && r["body"]["turn"] == turn).unwrap_or_default();
+    s.ok("its agent answers it as its owner's message, with no SimpleX core on its computer", answered && start["body"]["asker"] == c.owner_id, json!({ "turn.start": start }));
     let other = fetched(s, 405, "door other signed by another key")?;
     s.ok("with its door open, one signed by any other key is still refused", other.starts_with("door refused: 403"), &other);
     let pending = ticket(c.owner, "link")?;
     let still = fetched(s, 408, "door say while a new link waits")?;
-    s.ok("a door live before stays open while its owner starts another link, until that one is redeemed", pending.status == 200 && still.starts_with("door said "), json!({ "pending": pending.status, "said": still }));
+    let heard = s.eventually(wake, || echo("while a new link waits").is_some());
+    s.ok("a door live before stays open while its owner starts another link, until that one is redeemed", pending.status == 200 && still.starts_with("door said ") && heard, json!({ "pending": pending.status, "said": still }));
     // the deployment turns SimpleX off (its `connectors` without it: here
     // the test lever's stand-in, on this agent's fragment alone): no link,
     // no ticket made before redeemed, nothing the door open before signs
@@ -940,7 +952,21 @@ fn door_checks(s: &mut Suite, api: &Api, c: &Doors, fetched: &dyn Fn(&Suite, u32
     anyhow::ensure!(r.status == 200, "the connectors lever: {r}");
     let r = ticket(c.owner, "link")?;
     s.ok("SimpleX on again, its owner is given a link ticket", r.status == 200 && r.body["act"] == "link", &r);
-    Ok(11)
+    // a hosted door (cell/src/doors.rs): only its owner, in person, binds a
+    // fragment running the connector's template named for the door
+    let bind = |who: &crate::Keys, body: Value| api.signed(who, "POST", &format!("/api/f/{}/door", c.chat), Some(&body));
+    let r = bind(c.stranger, json!({ "act": "link", "agent": c.agent }))?;
+    s.ok("no one but its owner binds a fragment as their agent's door", matches!(r.status, 403 | 404), &r);
+    let r = bind(c.owner, json!({ "act": "link", "agent": c.agent }))?;
+    s.ok("a fragment not made from a connector's template (this chat, its own code) is no door", r.status == 403 && r.text.contains("is no connector"), &r);
+    let r = bind(c.owner, json!({ "act": "open", "agent": c.agent }))?;
+    s.ok("a binding's act is link or unlink", r.status == 400, &r);
+    let r = bind(c.owner, json!({ "act": "unlink" }))?;
+    s.ok("its owner's unlink of a fragment bound as no door is no error", r.status == 200 && r.body["ok"] == true, &r);
+    let agent = fetched(s, 409, &format!("door bind {}", c.chat))?;
+    s.ok("the agent binds no fragment as its own door, acting for its owner", agent.starts_with("door refused: 403") && agent.contains("in person"), &agent);
+    // two of them its owner's words, each answered
+    Ok(14)
 }
 
 /// The route's models by their ids, through the intercept (Paul,
@@ -1350,7 +1376,6 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.signed(&owner, "POST", "/api/computers", Some(&json!({})))?;
     let id = r.body["computer"].as_str().unwrap_or("").to_string();
     s.ok("a person makes their computer, asleep", r.status == 200 && id.starts_with("computer:") && r.body["phase"] == "asleep", &r);
-    on_candidate(s, api, &owner, &id)?;
     // The stub's scripted runtime (images/stub) answers its commands ("tool
     // please", "slow…", "fetch …", "think …") and echoes the rest; the
     // deployment's own image (our Hermes) answers as its real model does.
@@ -1608,7 +1633,7 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
             replies_so_far += codestorage_through_egress(s, api, &owner, &agent, &fetched)?;
         }
         let doors = Doors { owner: &owner, owner_id: &owner_id, stranger: &stranger, id: &id, agent: &agent_name, chat: &chat_name, identity: &identity };
-        replies_so_far += door_checks(s, api, &doors, &fetched)?;
+        replies_so_far += door_checks(s, api, &doors, &fetched, wake)?;
         replies_so_far += relay_checks(s, api, &owner, &fetched)?;
     } else {
         // a real runtime called its model to answer at all: each call went

@@ -1,5 +1,5 @@
 // Platform code that runs inside the app facet, around the author's App
-// class (docs/MODEL.md, Operations). A mutation is synchronous: the
+// class (docs/api.md, Apps). A mutation is synchronous: the
 // author's method, its ledger row, and the effects it asked for commit in
 // one facet-local transactionSync, so the facet's own database decides
 // replays and conflicting bodies, and the ledger doubles as an outbox the
@@ -272,6 +272,8 @@ class Job {
     // how the run started (call, job, cron, channel, files), and where
     this.via = meta.via;
     this.fragment = meta.fragment;
+    // a connector's door, while it is one: {relayed, to} (docs/api.md, "An agent's doors")
+    this.door = meta.door ?? null;
     this.#channels = new Set(meta.channels || []);
     this.#results = results;
     this.#onStep = onStep;
@@ -404,7 +406,7 @@ class Job {
 }
 
 // What an app may not do with its Durable Object, taken away before the
-// author's constructor runs (spike S1, docs/cloudflare-v1.md): an alarm
+// author's constructor runs (spike S1): an alarm
 // wedges the facet (every call answers `internal error` until the platform
 // Worker is deployed again), an async transaction or a KV write outside
 // SQL would bypass the mutation's own transaction and its cap, and a

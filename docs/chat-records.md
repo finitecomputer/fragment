@@ -71,6 +71,13 @@ at most 16. A turn's records, in order:
    (and a notice may follow the end: `turn.notice`, below);
 3. `turn.end` on `work`.
 
+A turn a restart cut may be followed by its **continuation** (since
+2026-10-31): a turn of its own, whose id is not its cause's but the first
+24 hex characters of the SHA-256 of `continue`, a NUL and the cut turn's
+id, with the cut turn's `cause` and asker, and a
+`turn.notice` (part `continued`) as it starts (docs/bridge.md, "A cut turn
+is continued once").
+
 Every turn has both its start and its end, one of each: a turn refused
 (too many waiting) or stopped while it waited posts its `turn.start` and
 then its `turn.end`, and runs nothing. The bridge keeps a turn until its
@@ -165,7 +172,13 @@ home"; before 2026-10-26, its own chat with them):
   which its sender's app gave it), so a message the agent's core reads
   again (a catch-up, a rollback) is one record. The record's principal is
   the agent's: it says what it relays, never as its owner.
-- `relayed.via` is `simplex`, the only way; `relayed.for` is the agent's
+- A hosted door's (docs/api.md, "An agent's doors": a connector chat,
+  `telegram`) is published by the connector's own app, as its own key,
+  in its own `chat`, its `relayed` exactly `{via, for, agent}`, with no
+  `at` or `sig`: the platform takes it only from the fragment its owner
+  bound as that door.
+- `relayed.via` is the door it came through, a connector's id
+  (`simplex` today; docs/api.md, "An agent's doors"); `relayed.for` is the agent's
   owner; `relayed.agent` the agent fragment whose door it came through;
   `at` and `sig` its door's signature (docs/api.md, "An agent's doors"):
   **the platform takes no relayed record without it**, so one the agent's
@@ -173,15 +186,19 @@ home"; before 2026-10-26, its own chat with them):
   app publishes none. A voice message (or a photo, a file) is its attachment (a voice
   message is `audio/mp4`, as SimpleX's apps record one), its text none or
   its caption; one that could not be carried says so in its text.
-- **The agent's own bridge honors it**, and nothing else does: while that
-  agent's SimpleX link is bound, a record the agent itself posted with a
-  `relayed` for its owner, through its own door, is its owner's message to it, asked as its owner
-  (by their name; their Stop stops it; it answers a question asked of
-  them). A
-  `relayed` from anyone else (a person, another agent), for anyone else,
-  by another way, or while unlinked, is what the record would be without
-  it: the agent's own words starting nothing, a person's message, a
-  hand-off.
+- **The agent's own bridge honors it**, and nothing else does: a record
+  with a `relayed` for its owner, through its own door (any door's id),
+  carried by the agent itself or by a key that is none of the chat's
+  members (a connector chat's own), is its owner's message to it, asked as its owner (by their
+  name; their Stop stops it; it answers a question asked of them),
+  whether or not a SimpleX link is bound on its computer: the platform
+  took it only through a door its owner opened, and closing the door
+  stops new ones, not those it took. A `relayed` for anyone else, through
+  another agent's door, of a `via` that is no door's id, or carried by
+  another member of the chat, is what the record would be without it: the
+  agent's own words starting nothing, a person's message, a hand-off.
+  The chat shows it as its owner's, "via" its door, once the members say
+  its poster is the owner's agent or none of the chat's members.
 - **What the agent says in its SimpleX chat goes to its owner's SimpleX
   app** once posted, while linked, whatever started its turn (their
   SimpleX message, their words typed there on the web, a routine, a
@@ -264,7 +281,8 @@ agent could not finish. A person's message is never counted, nor refused.
 ```
 
 Only the turn's asker stops it (the person whose message started it; for
-a routine, the agent's owner). Without `turn`, the asker's running turn.
+a routine, or an ask's answer, the agent's owner). Without `turn`, the
+asker's running turn.
 From anyone else it is ignored. A waiting turn named by Stop never runs.
 
 **A prompt's answer:**
@@ -342,9 +360,10 @@ templates/sessions/README.md):
 - Posted by the chat's owner, the shell's Continue, with the id
   `history`, before the agent joins: the chat's first record. It holds
   the conversation's last summary (`summary`, at most 8,000 characters)
-  and the newest of what the person and the agent said, oldest first
-  (`messages`, at most 40, each at most 4,000 characters), with how many
-  came before them (`earlier`), bounded as a whole by its body's bytes
+  and the newest of what the person and the agent said after it (the
+  summary covers what came before), oldest first (`messages`, at most 40,
+  each at most 4,000 characters), with how many others the conversation
+  holds (`earlier`), bounded as a whole by its body's bytes
   (63 KiB of JSON, under a record's 64 KiB, whatever the text: the newest
   that fit; a summary too large for it alone is cut) before the chat is
   made (cell/shell/session-archive.js, `historyOf`). `archive` and `key`
@@ -401,7 +420,8 @@ computer (docs/computers.md, the hold).
 ```json
 { "kind": "turn.step", "turn": "…", "step": 1, "tool": "terminal",
   "category": "shell", "args": "ls -la", "ok": true, "excerpt": "…", "text": "…",
-  "tool_call_id": "call_…", "status": "completed", "duration_ms": 120 }
+  "tool_call_id": "call_…", "status": "completed", "duration_ms": 120,
+  "response": "…" }
 ```
 
 Part `<step>`, from 1: one tool call. `tool` (the runtime's own name for
@@ -431,7 +451,30 @@ call that ended, so a page never shows it running, and names how it
 ended when it did not complete ("Timed out running"). `excerpt` is then a
 command's exit code (`Exit code: 7`) or empty: never its output. A step
 without them (an older bridge's, read from its runtime's progress) says
-only `ok`, which was true even for a call that failed.
+only `ok`, which was true even for a call that failed. `response` (since
+2026-10-31): the model response whose calls were running, as its
+`turn.call`s name it; an older image's step has none.
+
+```json
+{ "kind": "turn.call", "turn": "…", "response": "…", "tool_call_id": "call_…",
+  "tool": "terminal", "category": "shell", "args": "make deploy" }
+```
+
+Part `call:<24 hex of SHA-256 of its response, a NUL, and its place in
+it>` (since 2026-10-31): a tool call the model asked for, recorded before
+it runs, as its runtime says so (our Hermes image's: its
+`post_api_request`, before Hermes runs any call of the response;
+docs/bridge.md). `response` names the model response that asked for it,
+once (at most 128 of a post id's characters); its place there makes it
+one call. `tool_call_id` is the provider's, which is no call's identity:
+some providers name every response's first call `call_0`. Its intent, no
+more: a refusal may still stop it, and only a `turn.step` of the same
+`response` says it ended: the one with the same `tool_call_id`, else (its
+runtime renamed the call before running it) the one with the same `tool`
+and `args`. `tool`, `args` and `category` as a step's. At most 200 a turn.
+The note a turn cut by a restart carries names each call it asked for
+with no step, as one that may or may not have run. Pages show none of
+them yet; an older bridge posts none.
 
 ```json
 { "kind": "turn.prompt", "turn": "…", "prompt": "<prompt>",
@@ -768,13 +811,15 @@ state is persisted as a chat record. It posts:
   composer says so (`Juniper is working: a message waits its turn`), and
   the message is marked queued until its turn starts (no `turn.start`
   names it while a turn of its agent that started before it runs; one
-  sent to the turn's asker just after the turn's own reply is taken for
-  that turn's answer, unmarked). For the agent's owner, when its menu has
+  sent by whoever answers the turn, just after the turn's own reply, is
+  taken for that turn's answer, unmarked). For the agent's owner, when its menu has
   `steer`, words typed then offer Steer beside Send: the words as
   `/steer`, into the running turn now;
-- Stop, `{kind: "stop", turn}` with the id `stop:<turn>`, from the turn's
-  asker while it runs (the send circle is Stop then, until they type: then
-  it sends);
+- Stop, `{kind: "stop", turn}` with the id `stop:<turn>`, from whoever
+  stops the turn (its asker, or for a routine's or an answer's, its
+  agent's owner: Stop, above; the page's control.js) while it runs (the
+  send circle is Stop then, until they type: then it sends), and their
+  commands go to that turn's agent;
 - a prompt's answer with the id `pr:<prompt>`, with `text` for an option
   answered in words;
 - a voice memo (Attachments, above): the composer's mic records until it
@@ -956,10 +1001,11 @@ holds no message of its person's before it (cell/shell/shell.js,
 
 An ask's answer ("An ask", above): posted by the asking agent's own
 bridge, as the agent, with the id `an:<asked turn>`, so one question has
-one answer whatever life posts it. The agent takes it as a turn in `chat`,
-its owner's business there as a routine is (their Stop stops it, a
-question it asks is theirs), told `text` by the agent that answered
-(`name`, its name as its chat showed it). `text` names the question
+one answer whatever life posts it. The agent takes it as a turn in `chat`
+asked as the agent that answered (`by`, called `name`, its name as its
+chat showed it: what the runtime is told it is from; Paul, 2026-10-30),
+told `text`, and its owner's business there as a routine is: their Stop
+stops it, and a question it asks in words waits for them. `text` names the question
 (its first 300 bytes) and carries what the asked turn said (its replies
 but interim ones, at most 16 KiB, and how many files it sent; the replies
 stay whole where it was asked); `outcome` and `error` are its end's. The

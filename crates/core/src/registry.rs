@@ -1,4 +1,4 @@
-//! The identity registry's rules (docs/finite-integration.md, rules 1–7;
+//! The identity registry's rules (docs/cloudflare-v1.md, R15;
 //! the cell is `cell/src/registry.rs`). Who may change an identity's keys,
 //! and who may look at it.
 

@@ -396,7 +396,7 @@ impl DurableObject for ComputerCell {
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {
-        if let Some(refused) = crate::routed::refused(&req, crate::routed::Own::of(self.cfg), &self.raw)? {
+        if let Some(refused) = crate::routed::refused(&req, &self.cfg.deploy_id)? {
             return Ok(refused);
         }
         if let Some(probed) = crate::routed::probed(&req, &self.schema)? {
@@ -2183,8 +2183,8 @@ impl ComputerCell {
             }
             // an operator's view of it (orgs.rs, the person page): the whole
             // references of the image it runs and of the one its next start
-            // runs, which a promotion copies (docs/computers.md, "Stable and
-            // canary"); its owner's view names their versions alone
+            // runs, which a promotion copies (docs/computers.md, "Preview and
+            // production"); its owner's view names their versions alone
             "computer/references" => {
                 self.must(MetaKey::Id)?;
                 self.look_and_tell().await;

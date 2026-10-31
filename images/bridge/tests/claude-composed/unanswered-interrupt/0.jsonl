@@ -1,0 +1,5 @@
+{"args":["--session-id","00000000-0000-4000-8000-000000000002"]}
+{"in":{"type":"user"}}
+{"out":{"type":"system","subtype":"init","session_id":"00000000-0000-4000-8000-000000000002"}}
+{"out":{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_hungA","name":"Bash","input":{"command":"python3 slow.py"}}]},"parent_tool_use_id":null}}
+{"in":{"type":"control_request","request":{"subtype":"interrupt"}}}

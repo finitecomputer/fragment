@@ -76,16 +76,18 @@ fn label(name: &str) -> &str {
 }
 
 /// The agent `who` names: its fragment's name or its identity, else its
-/// label or its name when only one agent answers to it (case aside, but for
+/// label or its name (its title, as the signer's list says it: what a
+/// roster calls it) when only one agent answers to it (case aside, but for
 /// the identity). Else the agents that answer to it: none, or more than
 /// one (never a guess).
 pub fn pick<'a>(agents: &'a [Agent], who: &str) -> Result<&'a Agent, Vec<&'a Agent>> {
     let who = who.trim();
-    let lower = who.to_ascii_lowercase();
+    let lower = who.to_lowercase();
     if let Some(a) = agents.iter().find(|a| a.identity == who || a.fragment == lower) {
         return Ok(a);
     }
-    match agents.iter().filter(|a| label(&a.fragment) == lower || a.name.to_ascii_lowercase() == lower).collect::<Vec<_>>()[..] {
+    let titled = |a: &Agent| a.title.as_deref().is_some_and(|t| t.trim().to_lowercase() == lower);
+    match agents.iter().filter(|a| label(&a.fragment) == lower || a.name.to_ascii_lowercase() == lower || titled(a)).collect::<Vec<_>>()[..] {
         [one] => Ok(one),
         ref many => Err(many.to_vec()),
     }
@@ -240,12 +242,15 @@ fn members(c: &Client, chat: &str) -> Result<Option<MemberList>> {
 /// owner's shell titles it from its first message).
 pub const UNTITLED_CHAT: &str = "New chat";
 
-/// `agent`'s name, as the signer's list says it now: a person's own list,
-/// or an agent's of its owner's (`?for=`), where its owner's agents are. A
-/// list that does not read names it by its label.
-fn named(c: &Client, asker: Option<&Agent>, agent: &mut Agent) {
+/// Each agent's name, as the signer's list says it now: a person's own
+/// list, or an agent's of its owner's (`?for=`), where its owner's agents
+/// are. A list that does not read names them by their labels.
+fn named(c: &Client, asker: Option<&Agent>, agents: &mut [Agent]) {
     let Ok(v) = c.get(&names_path(&c.signer, asker)).and_then(|r| c.call(r)) else { return };
-    agent.title = v["fragments"].as_array().and_then(|l| l.iter().find(|f| f["name"] == agent.fragment.as_str())).and_then(|f| f["title"].as_str()).map(str::to_string);
+    let listed = v["fragments"].as_array().cloned().unwrap_or_default();
+    for a in agents.iter_mut() {
+        a.title = listed.iter().find(|f| f["name"] == a.fragment.as_str()).and_then(|f| f["title"].as_str()).map(str::to_string);
+    }
 }
 
 /// The list that names an agent's fellow agents: its owner's, `for` named
@@ -277,7 +282,8 @@ pub fn ask(c: &Client, who: &str, text: &str, chat: Option<&str>, wait: Option<u
     if wait.is_some() && return_to.is_some() {
         return Err(coded(Code::InvalidUsage, "--wait prints the answer; --return-to has it come back as a turn: one of the two"));
     }
-    let (asker, agents) = roster(c)?;
+    let (asker, mut agents) = roster(c)?;
+    named(c, asker.as_ref(), &mut agents);
     // the chat the answer comes back to: one the asking agent answers in
     let return_to = match (return_to, &asker) {
         (None, _) => None,
@@ -297,21 +303,20 @@ pub fn ask(c: &Client, who: &str, text: &str, chat: Option<&str>, wait: Option<u
             Some(full)
         }
     };
-    let mut asked = match pick(&agents, who) {
+    let asked = match pick(&agents, who) {
         Ok(a) => a.clone(),
         Err(many) if many.len() > 1 => {
             let fragments: Vec<&str> = many.iter().map(|a| a.fragment.as_str()).collect();
             return Err(coded(Code::Conflict, format!("{who:?} names {} agents ({}): name one by its fragment", many.len(), fragments.join(", "))));
         }
         Err(_) => {
-            let names: Vec<&str> = agents.iter().map(|a| a.name.as_str()).collect();
+            let names: Vec<String> = agents.iter().filter(|a| asker.as_ref().is_none_or(|me| me.identity != a.identity)).map(|a| format!("{} ({})", a.shown(), a.fragment)).collect();
             return Err(coded(Code::NotFound, format!("{who:?} is none of the agents that may be asked here ({})", if names.is_empty() { "none".into() } else { names.join(", ") })));
         }
     };
     if asker.as_ref().is_some_and(|a| a.identity == asked.identity) {
         return Err(coded(Code::InvalidUsage, "an agent asks another agent, not itself"));
     }
-    named(c, asker.as_ref(), &mut asked);
     // the chat: one named (--chat), the two agents' (named in full), or a
     // person's direct chat with the agent (by its label, as the shell's)
     let (found, make) = match (chat, &asker) {
@@ -480,6 +485,16 @@ mod tests {
         assert_eq!(pick(&two, "fred"), Err(two.iter().collect()), "never a guess: both named, so either can be");
         assert_eq!(pick(&two, "fred--p2m4").map(|a| a.identity.as_str()), Ok("npub1fred2"));
         assert_eq!(pick(&two, "npub1fred").map(|a| a.fragment.as_str()), Ok("fred--k3x9"));
+        // by its name (its title) too, as a roster calls it; one shared with
+        // another's label is two agents
+        let mut maple = agent("maple");
+        maple.title = Some("Fernanda".into());
+        let mut fred = agent("fred");
+        fred.title = Some("Maple".into());
+        let titled = [maple, fred];
+        assert_eq!(pick(&titled, "fernanda").map(|a| a.fragment.as_str()), Ok("maple--k3x9"));
+        assert_eq!(pick(&titled, "Maple").map_err(|m| m.len()), Err(2), "maple's label and fred's name: never a guess");
+        assert_eq!(pick(&titled, "maple--k3x9").map(|a| a.identity.as_str()), Ok("npub1maple"));
     }
 
     /// Goal (Alex's review of #630): the list that names an agent's fellow

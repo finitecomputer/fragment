@@ -68,8 +68,8 @@
   // (`fragment_seat_always_on_month`, `fragment_credit_pack`; `cargo xtask
   // stripe setup` makes them). Leave it out and seats are
   // comped by operators only. The key is a restricted key of the account's
-  // (Customers, Checkout Sessions, Subscriptions and portal sessions
-  // written; Products and Prices read); the webhook secret is this
+  // (Customers, Checkout Sessions, Subscriptions, invoice items and portal
+  // sessions written; Products and Prices read); the webhook secret is this
   // deployment's own endpoint's, which takes exactly
   // `fragment_core::stripe::EVENTS`. `portal` is the deployment's own
   // portal configuration, never the account's default (finite-mono's).
@@ -139,6 +139,10 @@
   // `completion` with OpenRouter's fee (docs/ledger.md, OpenRouter's price),
   // so trying another model is a change to this file alone. A slot there
   // without one is refused.
+  // A search service (search/README.md; docs/api.md, "A fragment's
+  // search"): where it listens and its bearer token's name in the store.
+  // Unnamed, the deployment has no search.
+  // "search": { "url": "https://search.example.internal", "token": "fragment-search-token" },
   "models": {
     "cheap": { "provider": "openai", "base_url": "https://openrouter.ai/api/v1",
                "key": "fragment-openrouter-key", "model": "z-ai/glm-5.3-flash",
@@ -234,10 +238,11 @@
   // computers. Each is built from the tree at every deploy (its Dockerfile
   // and build context, relative to the repo: the Hermes image builds from
   // the repo's root, as it carries the fragment CLI), or kept at a digest
-  // this account's registry holds. Stable and canary (docs/computers.md):
-  // the default kept at the digest a canary proved, the canary built.
+  // this account's registry holds. One image, `hermes` (docs/computers.md,
+  // "Preview and production"): production keeps it at the digest preview
+  // proved; an upgrade check names its starting image beside it.
   //   "hermes": { "image": "registry.cloudflare.com/<account_id>/<repository>@sha256:<64 hex>" },
-  //   "hermes-canary": { "dockerfile": "images/hermes/Dockerfile", "build_context": "." }
+  //   "production": { "image": "registry.cloudflare.com/<account_id>/<repository>@sha256:<64 hex>" }
   // Never drop a name while computers are pinned to it.
   "computers": {
     "default_image": "hermes",

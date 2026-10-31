@@ -1187,7 +1187,14 @@ fn paced(events: String, pace: Pace, hung_up: Arc<AtomicU64>) -> Response {
 pub struct WorkersAi {
     pub url: String,
     state: Arc<Mutex<State>>,
+    /// While true, embeddings' answers wait (`hold_embeddings`).
+    held: Arc<(Mutex<bool>, std::sync::Condvar)>,
     _server: Server,
+}
+
+/// Whether `req` asks for embeddings, on either face.
+fn embeds(req: &Request) -> bool {
+    req.path == EMBEDDINGS_PATH || req.path.strip_prefix("/run/").map(crate::http::decode).as_deref() == Some(fragment_core::embed::MODEL_DEFAULT)
 }
 
 impl WorkersAi {
@@ -1195,6 +1202,8 @@ impl WorkersAi {
     pub fn start(port: u16) -> std::io::Result<WorkersAi> {
         let state: Arc<Mutex<State>> = Arc::default();
         let st = Arc::clone(&state);
+        let held: Arc<(Mutex<bool>, std::sync::Condvar)> = Arc::default();
+        let hold = Arc::clone(&held);
         let handler: Handler = Arc::new(move |req: &Request| {
             // an answer held back (`delay_next`) waits here, with the state
             // unlocked, after its levers were consumed
@@ -1206,10 +1215,29 @@ impl WorkersAi {
             if sleep_ms > 0 {
                 std::thread::sleep(std::time::Duration::from_millis(sleep_ms));
             }
+            // an embedding held (`hold_embeddings`) waits, its call recorded
+            if embeds(req) {
+                let (lock, released) = &*hold;
+                let mut held = lock.lock().expect("embeddings hold");
+                while *held {
+                    held = released.wait(held).expect("embeddings hold");
+                }
+            }
             response
         });
         let server = Server::start(port, handler)?;
-        Ok(WorkersAi { url: server.url.clone(), state, _server: server })
+        Ok(WorkersAi { url: server.url.clone(), state, held, _server: server })
+    }
+
+    /// Embeddings' answers wait, from now until `release_embeddings`: a
+    /// caller's call is recorded (`calls`) and goes unanswered meanwhile.
+    pub fn hold_embeddings(&self) {
+        *self.held.0.lock().expect("embeddings hold") = true;
+    }
+
+    pub fn release_embeddings(&self) {
+        *self.held.0.lock().expect("embeddings hold") = false;
+        self.held.1.notify_all();
     }
 
     fn state(&self) -> std::sync::MutexGuard<'_, State> {

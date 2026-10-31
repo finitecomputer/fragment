@@ -164,7 +164,7 @@ the bridge), what its person saw before 2026-10-08, and what they see now:
 | **A slow or failed start** (fewer than three) | tried again in 5, 10 s | first run's "taking longer than usual" / nothing | the same (passing) |
 | **At zero credit, or a guest**: no wake starts | the ledger refuses (402, 403) | Settings' credit warning and `why` / unanswered | the same; the refusal's `why` now goes once a start comes up (it stayed for good); a restart is refused the same way |
 | **A deploy that changes its image** (the common update: the same name, a new image) | the deploy pushes it; awake, it keeps the image it started on until its next sleep or a restart | nothing: it ran the old image until it slept, and its owner restarted it to be sure | an `update` notice while it is awake and no turn runs: an update is ready, Restart (about a minute; its chats and work kept), or Later; nothing while it sleeps or is asleep, since its next start takes it. Settings shows the version it runs and the latest |
-| **A pin to another image** (a canary, a rollback: below, "Stable and canary") | its owner's pin, or an operator's | the update pill (pinned to the default, then a sleep and a wake) | the `update` notice while it is awake on the old image; nothing asleep, since its next start takes it (the pill went with the renamed default it served) |
+| **A pin to another image** (an operator's, an upgrade check's, a rollback: below, "Preview and production") | its owner's pin, or an operator's | the update pill (pinned to the default, then a sleep and a wake) | the `update` notice while it is awake on the old image; nothing asleep, since its next start takes it (the pill went with the renamed default it served) |
 
 **The notices** (`notices` in the owner's view, `fragment_core::computer::notices`,
 proto's `ComputerNotice`), the most pressing first, each derived from the
@@ -287,10 +287,9 @@ for days.
   version it runs (`9f86d081884c`; asleep, the one it starts on)
   and, running an older one, the latest.
 
-A default is never renamed (a promotion moves the name: below, "Stable
-and canary"), so the shell's update pill, which pinned a computer to a
-renamed default, went (2026-10-13): pinned to a canary, its person would
-have been offered stable as an update.
+A default is never renamed (a promotion moves the name's digest: below,
+"Preview and production"), so the shell's update pill, which pinned a
+computer to a renamed default, went (2026-10-13).
 
 **Does use extend the bound? No: it never stops a computer in use.** A
 computer is stopped for its bound only at a sleep, and a sleep is tried
@@ -339,11 +338,11 @@ address; `FRAGMENT_SUPPORT_URL`, given with `GET /api/computers` as
 one, the notice shows the computer's id and the platform's words, to give
 whoever runs it.
 
-## Stable and canary
+## Preview and production
 
-**Preview is the canary; production is stable** (Paul, 2026-10-29).
-Preview has one image, following master. Production keeps a digest
-promoted by hand after a full round. This does not force-restart an awake
+**There's preview and there's prod** (Paul, 2026-10-31). One image name,
+`hermes`. Preview runs master's image; production runs the digest
+preview proved, promoted by Paul. Neither force-restarts an awake
 computer: as with every image change, its owner sees an update, its next
 Restart or sleep/wake takes it, and an always-on computer is only told.
 
@@ -353,7 +352,8 @@ Every master push starts ci.yml's `preview-image` beside its checks.
 `cargo xtask image preview` hashes git's path, mode and blob records for
 Hermes' image inputs, never the commit or a clock. It resolves
 `inputs-<key>` in the existing preview repository
-`fragment-preview-computer-hermes-canary`. A tag already there is reused
+`fragment-preview-computer-hermes-canary` (named for the canary preview
+once ran; a new name would build every image again). A tag already there is reused
 at its manifest's digest, even after BuildKit's layer cache was evicted.
 A direct manifest lookup resolves only that tag; a definite missing
 manifest authorizes a build, and other registry errors stop the job.
@@ -386,12 +386,12 @@ path (xtask/src/prepare.rs, rollout.rs).
 
 A green push deploys with the digest it resolved for **that checkout's
 inputs**, not a moving `latest` tag. The deploy applies it in memory to
-`hermes` (the default) and `hermes-canary` (a compatibility name). There
-is no separate stable/canary state on preview. A name stays: a computer
-pinned to `hermes-canary` still has an image to start, the same as
-`hermes`. Neither the private config nor people's pin records are
-rewritten. An unexpected third image name refuses the override: migrate
-its pins before removing it.
+`hermes`, the default. Another image the config names (an upgrade check's
+starting image, below) stays at the digest the config pins it to.
+Neither the private config nor people's pin records are rewritten. A
+computer pinned to a name the deployment no longer has has no image to
+start: move its pins (`fragment operator pin <npub> hermes`) before a
+name goes.
 
 `fragment-deploy/preview.jsonc` still supplies deployment settings; its
 image lines no longer record the image CI runs. The **deploy job's
@@ -401,8 +401,8 @@ name the effective pinned reference. `fragment operator person <npub>`
 names the whole running and next references (`references.running`,
 `references.next`); Settings shows the digest's first 12 hex digits.
 `image.yml` can still be run by hand for preview: it resolves/prepares
-the same input-keyed image. It does not create a separate canary or
-change the running preview; the next CI deploy takes its checkout's key.
+the same input-keyed image. It does not change the running preview; the
+next CI deploy takes its checkout's key.
 
 **What changes a version** (Paul, 2026-10-14: "changes to the cells, or
 frontend, that don't change the hermes image shouldn't require a hermes
@@ -448,8 +448,6 @@ digest in its own account's registry. CI's production deploy reads those
 pins as they stand: there is no automatic image build or override. Only
 Paul moves `production`; its CI rules are unchanged (a successful master
 push, preview deploy included, proves its tree; otherwise full tests).
-Other deployments can still name distinct `hermes` and `hermes-canary`
-images, and `--candidate` still selects the latter for hosted runs.
 
 A promotion copies the exact preview digest a round proved into
 production's registry, byte for byte (`cargo xtask image copy`, skopeo's
@@ -482,14 +480,13 @@ v0.21.7 happens to change neither state.db's schema 31 nor config version
 ### One round before production
 
 1. **Master ships the image to preview automatically.** Record the input
-   key and digest from that successful deploy's summary. Every preview
-   computer is a canary; there is no operator pinning group or second
-   promotion within preview. Awake computers take Restart, sleeping ones
-   take their next wake. Record the actual running reference of the
-   computers being watched, since a later master push may advance preview.
+   key and digest from that successful deploy's summary. Awake computers
+   take Restart, sleeping ones their next wake. Record the actual running
+   reference of the computers being watched, since a later master push
+   may advance preview.
 2. **Exercise lived-in computers.** An old chat continues; a new chat
    recalls a memory; skills are listed and used; a routine fires; the
-   screen and Take over work; Google answers; Bot Chat continues; Settings
+   screen and Take over work; Google answers; a teammate's ask is answered back; Settings
    shows the watched version. Watch `computer.version == computer.latest`,
    `rollbacks` unchanged, every save `held`, no `wont_wake`, `unsaved` or
    `went_back`, operator health, logs and ledger spend. If preview has
@@ -497,18 +494,18 @@ v0.21.7 happens to change neither state.db's schema 31 nor config version
 3. **Run the hosted lanes on preview**, followed by `--sweep`:
    `cargo xtask e2e --hosted --config <preview config> --branch preview
    --only computers,agent-restart,agent-smoke,agent-ask,bot-mode
-   --max-paid-calls 190`. Omit `--candidate`: on preview both names resolve
-   to the default, so selecting it is redundant. This proves restart on
-   the current image, not an upgrade/rollback between different images.
-4. **Prove the production upgrade on a production-shaped test branch**
-   (deployment approved by Paul): its default `hermes` is production's
-   current stable digest in that account's registry, and `hermes-canary`
-   is the recorded preview digest. Keep these pins fixed for the round.
-   Run hosted `--candidate hermes-canary --only
-   computers,agent-restart,agent-smoke,agent-ask,bot-mode
-   --max-paid-calls 190`, then without `--candidate`, `--only
-   computers,agent-restart --max-paid-calls 50`, each followed by `--sweep`.
-   `--candidate` retains its existing upgrade/rollback behavior here.
+   --max-paid-calls 190`.
+4. **Prove the upgrade from production's image.** Name production's
+   current digest beside `hermes` in the preview config, as an image of
+   its own: `"production": { "image": "registry.cloudflare.com/<account>/fragment-preview-computer-hermes-canary@sha256:<digest>" }`
+   (the preview's registry holds it, as a promotion copied it from there
+   byte for byte). Let the next deploy take it, and run
+   `--upgrade-from production --only agent-restart
+   --max-paid-calls 16`, then `--sweep`. Its computer starts on
+   production's image, answers and is given a word, is pinned to `hermes`
+   (the update), restarts onto it from its own save and names the word,
+   then is pinned back (the rollback) and names it once more. Remove the
+   `production` line once no computer is pinned to it.
 5. **Soak the recorded image for 24 hours**, with watched computers woken
    on it and having answered a turn, and hosted runs green. A later image
    is a different round; do not promote whichever happens to be latest.
@@ -2224,14 +2221,14 @@ title, as it is now", and that a name an earlier message or its memory
 uses was from before a rename), which Hermes reads from the profile's
 config at each turn and adds to that turn's system prompt alone (its
 ephemeral system prompt, never kept in a session's). The boot writes it
-from the title it reads for Bot Mode (below), once a round for both: at
+from the title it reads for its teammates (below), once a round for both: at
 each boot, and every `HERMES_BOOT_MODEL_MS` (10 s) while awake, so a
-rename reaches the agent's next turn, its Bot Chat's lasting session
+rename reaches the agent's next turn, its own chat's lasting session
 too, nothing restarted; a title unread leaves the config as it was. A
 `${` in a name is broken apart (`$ {`): Hermes expands `${VAR}` in a
 config's strings from its environment. Nothing else tells the agent its
 name: its `SOUL.md` is its job (the shell's first agent's names none),
-and Hermes' Bot Mode tells it its `@handle` alone. An agent made before
+and its teammates are told it beside theirs. An agent made before
 this whose `SOUL.md` still says its old name is told its name all the
 same; its owner, or the agent, may take the name out of its job.
 
@@ -2240,149 +2237,74 @@ docs/api.md, "An agent's name and picture") is told the same way, read
 with its title: "Your role is chief of staff: what your owner made you
 for, as it is now." between its name and its owner's home, and none when
 it has none, so an edit reaches its next turn. Its `profile.yaml`'s
-description, what its teammates read it does in Hermes' roster, is its
-role, else its job's first line. Its job never copies the role.
+description, and what its teammates are told it does, is its role, else
+its job's first line. Its job never copies the role.
 
-### Bot Mode in our Hermes image
+### Teammates in our Hermes image
 
-Hermes' Bot Mode is on: each agent is a bot, and in its Bot Chat it has
-Hermes' teammate roster (each other agent of the computer, by name and
-role) and its `message_agent` tool, with which it messages another agent.
-Hermes turns both on (v0.21.6: `tools/bot_mode_probe.py`,
-`tools/bot_mode_dm.py`, `agent/system_prompt.py`) only for a session
-titled exactly `Bot Chat`, on an install where a profile's `profile.yaml`
-carries `ui_meta: {hermes-bots: …}`. A headless gateway, ours, meets
-neither on its own (Hermes' `website/docs/user-guide/bot-mode.md`, "What
-actually makes a chat a Bot Chat"), so the image does both
-(`images/hermes/boot/src/bots.rs`):
+A person's agents on one computer are each other's teammates. Hermes'
+own Bot Mode protocol is off in every profile (`agent.bot_mode_protocol:
+false`, the managed overlay: hermes.rs `managed_config`), so no agent
+has its roster or `message_agent`, whose mailbox lived in `/data` and
+died with a cut turn. In its place (route A of the audit, Paul
+2026-10-30), on the platform's records (docs/chat-records.md, "An ask"):
 
-- Each agent's `profile.yaml`, written by the boot with its profile, and
-  again whenever it would say something else: its agent fragment's title
-  (its status's, read again with its model every 10 s while awake,
-  `HERMES_BOOT_MODEL_MS`) as its display name and its bot's title, which
-  is the agent's name everywhere (docs/api.md, "An agent's name and
-  picture": the shell titles an agent fragment by the agent's name,
-  Settings and `fragment agent --name` rename it; with none, its name on
-  the computer, its label), and its job's first line (its `SOUL.md`'s,
-  at most 120 characters, as a sync pulls it) as its description.
-  Hermes' roster reads both, and signs a bot's messages to its teammates
-  with its title (`Message from 🤖 Juniper (@juniper--k3x9): …`). A
-  rename reaches Bot Mode within seconds, nothing restarted (event
-  `profile.identity`); a title unread leaves the file as it was. The
-  file is the boot's alone: an agent that writes it is overwritten, and
-  the platform skill tells every agent to rename itself with `fragment
-  agent` instead. Bot Mode carries no picture (Hermes v0.21.6 reads a
-  profile's title, display name and description alone), so an agent's
-  picture is shown by the platform's pages alone. Its roster
-  always lists the gateway's own profile too, as `@hermes`; that profile
-  runs no agent's turns, and its `profile.yaml` says so ("this computer's
-  gateway, not an agent: never message it").
-- An agent's Bot Chat is its own chat with its owner: the chat the shell
-  makes with it, labelled `<label>-chat` beside its `<label>`, its suffix
-  its own (`bots::bot_chat`, which finds it in the agent's list for its
-  owner: at a boot, as agents come, and every few seconds while one is
-  missing, since the shell makes the chat after it assigns the agent; the
-  shell's `makeAgent` and `fragment ask`'s `direct_label` make and find
-  the same). Hermes'
-  gateway makes that chat's session at its first message, and builds a
-  session's prompt once, at its first turn, keeping it with the turn's
-  agent for the next ones; so the title has to be there before. The image's
-  gateway hook (`images/hermes/hooks/fragment-bot-chat`, linked into each
-  profile's `hooks/` by the boot; Hermes' gateway/hooks.py) does it: as
-  each of the agent's turns starts (`agent:start`), before its prompt is
-  built, a turn in its own chat (the boot's bots file,
-  `/var/lib/fragment-run/bots.json`, names it, its profile's home, and the
-  key Hermes keeps its session under) titles that session `Bot Chat`
-  through Hermes' session API, as a person's `/title` would: its row
-  recorded with its gateway identity first when the turn has not yet
-  written it, and any other session of the agent's holding the title made
-  to give it up (its history kept). So the agent's first turn there has
-  the roster. The title follows a compression to the new session (Hermes'
-  own). Event: `botmode.titled` (the gateway's output).
-- A message one agent sends another is a hand-off in the other's own
-  chat, which its owner sees, and the other's answer a turn of the
-  bridge's there (drafts, steps, cards, Stop, its screen; the hop count
-  and the chat's budget, docs/bridge.md). Hermes would run that answer as
-  a turn of its own, outside the gateway (`hermes -p <agent> chat -c "Bot
-  Chat" -Q`), unless the Bot Chat has a live owner, as Hermes Desktop is
-  (`tools/bot_live_delivery.py`): then the message waits in the agent's
-  mailbox for its owner. The image's Bot Mode keeper
-  (`images/hermes/botmode.py`, in Hermes' own Python as the hermes user,
-  started and restarted by the boot) is that owner. About once a second,
-  for each agent in the bots file, it holds the agent's Bot Chat session
-  (the compression tip of the session titled `Bot Chat`, when that is its
-  own chat's) with an active-session lease marked as a live-delivery
-  consumer, and takes each message waiting in its mailbox: it posts it
-  into the agent's own chat as the agent that sent it, naming the agent
-  in `to` (id `dm-<delivery>`, acting as the sender for their owner, as
-  `fragment ask --chat` posts a question, but adding the sender to no
-  chat: the bridge answers a record by `to`, and the chat's page names an
-  agent that is no member by its profile), and once the agent's turn of
-  it ends (read from the chat's `work`, as `fragment ask --wait` reads it,
-  for up to 30 minutes), settles the delivery with its
-  replies (up to 16,000 characters; a failure with why). That wakes the
-  sender, whose turn says the answer in the sender's own chat (a message
-  of its runtime's own: docs/chat-records.md). The message's text is
-  Hermes' own, its attribution first (`Message from 🤖 Juniper
-  (@juniper--k3x9): …`). At most four messages per agent are delivered at
-  once; the rest wait in its mailbox. While the platform holds the
-  computer the keeper writes nothing. Events: `botmode.owned`,
-  `botmode.taken`, `botmode.delivered` (its status, sender and `ms`).
-- The answer wakes the sender after a restart too. A session Hermes'
-  gateway reads back from disk (every session from before a deploy or a
-  sleep) holds no live adapter, and an agent's profile has none of its
-  own (the relay is the default profile's), so a background process's
-  completion in such a session (message_agent's answer among them) had
-  no adapter to go through: the gateway retried it every 5 s, silently,
-  for ever (p5, 2026-10-09). The
-  boot routes each agent to its profile in the gateway's config
+- **Each agent is told its teammates at every turn**: their names (each
+  one's agent fragment's title), fragments and what each does (its role,
+  else its job's first line, at most 120 characters), in its profile
+  config's `agent.system_prompt` beside its name and home (hermes.rs
+  `told_team`), never itself; and how asking goes: with `fragment_ask`,
+  its answer back as a new message, an answer no new question, a
+  teammate answered where it asked. The boot reads them again with each
+  agent's model, every 10 s (`HERMES_BOOT_MODEL_MS`), so a rename, a new
+  agent or a new job reaches every teammate's next turn, nothing
+  restarted.
+- **`fragment_ask`** (`images/hermes/plugins/fragment-ask`, a Hermes
+  plugin tool enabled in every profile) asks as `fragment ask
+  --return-to <this chat>` does, as the agent whose turn calls it: the
+  agent and chat are the turn's session's (its relay chat id, checked
+  against the profile's `.env`), never the model's words, and its post id
+  is the tool call's (Hermes' own correlation id), so a retry of one call
+  posts once. It returns at once. The teammate answers in their chat (the
+  two and their owner's, made the first time, the teammate added), and
+  its bridge brings the answer back to the asking chat as a new turn of
+  the asking agent's, however long it takes and through restarts and
+  rollbacks. A name two agents answer to asks no one (the CLI's `pick`).
+- **Each `profile.yaml`** names its agent (its title, else its name on
+  the computer, else its label) and says what it does, for Hermes' own lists;
+  it marks no profile a Bot Mode bot. That mark gone changes the
+  capability fingerprint Hermes stamps on a Bot Chat's stored prompt, so
+  each such session's prompt is rebuilt once, without the protocol, its
+  history kept; a resumed session's tools drop `message_agent` and gain
+  `fragment_ask` (Hermes' `tools/mcp_tool_agent.py`). The file is the
+  boot's alone (an agent renames itself with `fragment agent`).
+- **Each agent is routed to its profile** in the gateway's config
   (`profile_routes`, in the managed overlay: `bots::profile_routes`), by
-  one chat: its Bot Chat, else a chat it is in (an agent in no chat has
-  no session to lose one in). A route makes its profile one the gateway
-  reaches through the default profile's relay (v0.21.6:
-  `gateway/authz_mixin.py`, `_is_shared_bot_satellite`), and Hermes asks
-  only whether any route names the profile, so one reaches the agent's
-  sessions in every chat it is in (its other chats, the shell's
-  `<label>-chat-<n>`, group chats, an app's chat). No route picks a
-  message's profile: the relay names it on each. The gateway reads them
-  as it starts, and no verb of Hermes' reloads them (`rescan-profiles`
-  serves a new profile, not new routes); none is needed between starts:
-  a chat or an agent come since has its sessions in that gateway's life,
-  which hold their live adapter, and every start is a boot's, which
-  writes the routes first.
-- An agent with no such chat (made by other means than the shell) has no
-  Bot Chat of ours, and no owner: Hermes runs a teammate's message in a
-  Bot Chat of its own, outside the bridge, which the person sees nowhere
-  until the agent has its own chat, whose session then takes the title.
-  So does every agent while the keeper is down.
-- A bot answers a teammate once. Hermes' roster tells a bot that a
-  teammate messaged to answer with `message_agent`, and the delivery's
-  answer wakes the sender too, so each said it twice (the sender relaying
-  the answer again, the teammate acknowledging that: two redundant lines
-  a run on the preview). So the posted message ends with a line telling
-  the bot its reply there goes back to the sender on its own, and not to
-  message the sender about it (`ANSWER_HERE`). When a bot messages its
-  sender back anyway while answering (the keeper sees its message taken
-  while it answers the sender's, or within 3 s of that turn's end), both
-  deliveries settle with their answer under a line telling the woken bot it
-  has had it already, and to end its turn with exactly `[SILENT]` if it
-  adds nothing (`HAD_IT`), Hermes' silence marker, for which its gateway
-  says nothing (gateway/response_filters.py). Event: `botmode.delivered`'s
-  `had` (`answered`, `reply`).
+  one chat: its own chat with its owner, else a chat it is in. A session
+  Hermes' gateway reads back from disk (every session from before a
+  deploy or a sleep) holds no live adapter, and an agent's profile has
+  none of its own, so without a route a background process's completion
+  in such a session had no adapter to go through (p5, 2026-10-09). A
+  route makes its profile one the gateway reaches through the default
+  profile's relay (v0.21.6: `gateway/authz_mixin.py`,
+  `_is_shared_bot_satellite`), in every chat it is in. The gateway reads
+  routes as it starts, and every start is a boot's, which writes them
+  first.
 
-Proven by the Docker lane's `bots_message_each_other` (the scripted
-model: the roster and the tool from an agent's first turn in its own
-chat, a message posted into the other's chat as the sender, answered
-there by a turn of the bridge's, settled once, and said in the sender's
-chat, and so again after the container restarts, with a background
-job's completion in a chat that is no Bot Chat, and in the chat of an
-agent with none), and on a preview by the hosted `bot-mode` section, run by name
-(`--only bot-mode`): two real agents. Juniper, asked to have Maple make
-and publish a todo app and show it in her browser, runs `message_agent`.
-Maple's turn of it, in her own chat, makes the app, which goes live, and
-opens it on her desktop. Juniper then tells the person. Both chats and
-both screens are shot as the run's evidence; Maple's screen is checked
-to connect.
+Bot Mode's keeper and its title hook are gone; the boot removes the
+hook's link from a profile an older image made.
+
+Proven by the Docker lane's `teammates_ask_each_other` (the scripted
+model): the roster and `fragment_ask` from an agent's first turn, an
+ask answered in the pair's chat and said on in the asker's own chat, one
+turn each; a name two agents answer to asking no one; two agents asking
+each other at once, each answered once; a slow answer after the asking
+turn and its CLI are gone; a restart cutting the answering turn,
+answered lost and never run again; a rollback to a save from before an
+answer, neither turn run again; and names, routes after a restart and
+`/new`. On a preview, the hosted `bot-mode` section, run by name
+(`--only bot-mode`): two real agents, Juniper asked to have Maple make
+and publish a todo app and show it in her browser.
 
 ### Skills and the CLI in our Hermes image
 
@@ -2497,7 +2419,7 @@ and how a runtime finds them, is the image's.
 - **The fragment CLI** is in the image (`/usr/local/bin/fragment`, built
   from `cli/` with the image: the Hermes image's build context is the
   repo's root, and its CLI stage copies only what the CLI builds from:
-  "Stable and canary", above). Each profile's `.env` names its agent and its owner
+  "Preview and production", above). Each profile's `.env` names its agent and its owner
   (`FRAGMENT_AS_AGENT`, `FRAGMENT_FOR`), and its config passes those two to
   its terminal (`terminal.env_passthrough`, scoped to the profile under the
   one gateway), so a command in an agent's terminal acts as that agent:
@@ -2762,14 +2684,13 @@ for a host) and finds the same `HOME`, `~` and modes.
   running from its newest save, the restart's own and held, from the image
   and not a snapshot, with no rollback; the same press again restarts
   nothing; and its agent answers after it, nothing left to tell its owner.
-  Given a round's candidate (`--candidate`), that restart is the upgrade:
-  pinned to the candidate awake after a reply that gave it a word, told
-  an update is ready, restarted onto the candidate's version from its own
-  save, and the same chat names the word; then pinned back, told again,
-  restarted onto the default's version, and the word named once more
-  (the rollback). The candidate's other real-agent sections (agent-smoke,
-  agent-ask, bot-mode) and the hosted `computers` start their computers on
-  it.
+  Given an image to upgrade from (`--upgrade-from`, production's digest
+  the preview config names), that restart is the upgrade: its computer
+  starts on that image, is pinned to the default awake after a reply
+  that gave it a word, told an update is ready, restarted onto the
+  default's version from its own save, and the same chat names the word;
+  then pinned back, told again, restarted onto the image it started on,
+  and the word named once more (the rollback).
 - The e2e's `wipe` section (crates/e2e/src/lanes/wipe.rs): a computer
   whose `/data` holds a file its agent wrote and a save, wiped with its
   owner (its first step alone, then across a node's crash): no computer

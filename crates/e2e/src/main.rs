@@ -332,11 +332,11 @@ pub struct Suite {
     hosted_rules: bool,
     /// The preview a hosted run targets (`None`: the local node).
     preview: Option<api::Preview>,
-    /// A hosted run's candidate image (`--candidate`, the canary: docs/
-    /// computers.md, "Stable and canary"): the real-agent sections' new
-    /// computers run it from their first start, and agent-restart's restart
-    /// upgrades into it and back. `None`: the deployment's default.
-    pub candidate: Option<String>,
+    /// A hosted run's upgrade (`--upgrade-from`: docs/computers.md,
+    /// "Preview and production"): agent-restart's computer starts on this
+    /// image, then upgrades into the deployment's default and back. `None`:
+    /// its restart restarts it on the default.
+    pub upgrade_from: Option<String>,
     /// A dry run's plan (`Some`: nothing runs, each section is planned).
     plan: Option<Vec<Planned>>,
     /// What the run's APIs share: the levers' secret, and (hosted) its
@@ -404,6 +404,8 @@ pub struct Suite {
     project: PathBuf,
     /// The next node's shape (`start_as_browsers_see_it`).
     shape: Shape,
+    /// The search service the next node names (the search section's).
+    pub search: Option<devstack::SearchVars>,
     /// Whether the containers the run's nodes left are removed
     /// (`remove_containers`): at its end, or as it drops.
     containers_removed: bool,
@@ -716,6 +718,7 @@ impl Suite {
                 api_key: WORKOS_KEY.into(),
                 api_url: Some(self.workos.node().url.clone()),
             }),
+            search: self.search.clone(),
             stripe: (self.shape != Shape::SellsNothing).then(|| devstack::StripeVars {
                 key: STRIPE_KEY.into(),
                 webhook_secret: STRIPE_WEBHOOK.into(),
@@ -1136,7 +1139,7 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
         rung,
         hosted_rules: rehearse.is_some(),
         preview: None,
-        candidate: None,
+        upgrade_from: None,
         plan: None,
         shared,
         owners: RefCell::new(BTreeMap::new()),
@@ -1170,6 +1173,7 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
         scratch,
         project,
         shape: Shape::Plain,
+        search: None,
         containers_removed: false,
     };
     if let Some(k) = s.shard {

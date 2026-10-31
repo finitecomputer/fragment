@@ -1,5 +1,5 @@
-//! How a fragment meets its owner's ledger (docs/ledger.md, "How each
-//! meter reaches it"; docs/cloudflare-v1.md, decisions 24, 26 and 27).
+//! How a fragment meets its owner's ledger (docs/ledger.md, "Who pays";
+//! docs/cloudflare-v1.md, decisions 24, 26 and 27).
 //!
 //! A fragment's hosting bills its owner. Three meters, each a row the
 //! fragment keeps in its own outbox (`meter_rows`) before anything is sent:

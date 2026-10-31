@@ -81,7 +81,7 @@ async fn an_answer_wakes_its_asker_after_it_has_gone() {
         assert_eq!(a[0]["body"], json!({ "kind": "answer", "chat": home, "text": text, "by": person("rowan"), "name": "Rowan", "asked": { "fragment": pair, "seq": said["seq"] }, "turn": asked, "outcome": "idle", "hop": 3 }), "rowan called by its name");
         let woke = woke(&a[0]);
         let start = &w.bodies(&home, "work", "turn.start")[0];
-        assert_eq!((&start["turn"], &start["asker"], &start["cause"]), (&json!(woke), &json!(person("paul")), &json!({ "fragment": JUNIPER, "channel": "tasks", "seq": a[0]["seq"] })));
+        assert_eq!((&start["turn"], &start["asker"], &start["cause"]), (&json!(woke), &json!(person("rowan")), &json!({ "fragment": JUNIPER, "channel": "tasks", "seq": a[0]["seq"] })), "asked as the agent that answered");
         assert_eq!(w.bodies(&home, "chat", "reply"), vec![json!({ "text": format!("echo: [Rowan] {text}"), "turn": woke })], "told by rowan");
         assert!(w.bodies(&pair, "chat", "reply").iter().all(|r| r.get("to").is_none()), "an answer hands nothing off");
     });
@@ -202,6 +202,45 @@ async fn a_cut_turn_is_answered_lost() {
     });
     assert_eq!(runs.of(&asked), 1, "never run again");
     bridge.kill().await;
+}
+
+/// Goal (Paul, 2026-10-30): juniper's answer turn is asked as rowan, and
+/// is its owner's business at home still: paul's Stop stops one, and his
+/// words answer one that asks him something (never a turn of their own).
+/// Rowan's own turn, asked by juniper, that asks back in words is told no
+/// answer is coming, and goes on.
+#[tokio::test]
+async fn an_answers_owner_stops_it_and_answers_its_question() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper", "rowan"]).await;
+    let pair = fake.chat("pair", &["juniper", "rowan"]);
+    let home = fake.chat("home", &["juniper"]);
+    let runs = Runs::default();
+    let dir = support::dir("ask-owner");
+    // slow turns take 4 s: time for a Stop
+    let bridge = support::start(support::config(&fake.url(), &dir, support::settings()), support::counting(support::script_paced(Duration::from_millis(200)), &runs));
+    following(&fake, 5).await;
+    let started = |w: &World, turn: &str| of(w, &home, "turn.start", turn) == 1;
+
+    fake.say(&pair, &person("juniper"), question(&home, "slow"));
+    fake.until(WAIT * 2, "juniper's slow answer turn", |w| answers(w).first().is_some_and(|a| started(w, &woke(a)))).await;
+    let stopped = fake.with(|w| woke(&answers(w)[0]));
+    fake.with(|w| assert_eq!(w.bodies(&home, "work", "turn.start")[0]["asker"], person("rowan")));
+    fake.say(&home, &person("paul"), json!({ "kind": "stop", "turn": stopped }));
+    fake.until(WAIT, "paul's Stop", |w| w.bodies(&home, "work", "turn.end").iter().any(|e| e["turn"] == stopped.as_str() && e["outcome"] == "stopped")).await;
+
+    fake.say(&pair, &person("juniper"), question(&home, "x ask-me x"));
+    fake.until(WAIT, "juniper's answer turn asking paul", |w| answers(w).len() == 2 && w.bodies(&home, "work", "turn.asked").iter().any(|q| q["turn"] == woke(&answers(w)[1]).as_str())).await;
+    let (asking, rowans) = fake.with(|w| {
+        let a = answers(w)[1].clone();
+        assert!(a["body"]["text"].as_str().is_some_and(|t| t.contains("What should I call it?") && t.contains(&format!("(told: {})", fragment_bridge::engine::ASKED_BACK))), "rowan, asked by an agent, was told no answer is coming and went on: {a}");
+        assert_eq!(w.bodies(&home, "work", "turn.asked").iter().find(|q| q["turn"] == woke(&a).as_str()).unwrap()["asks"], person("paul"), "it waits for paul");
+        (woke(&a), a["body"]["turn"].as_str().unwrap().to_string())
+    });
+    let basil = fake.say(&home, &person("paul"), json!({ "text": "Basil" }));
+    fake.until(WAIT, "paul's words told to it", |w| w.bodies(&home, "chat", "reply").iter().any(|r| r["turn"] == asking.as_str() && r["text"].as_str().is_some_and(|t| t.ends_with("(told: Basil)")))).await;
+    let own = fragment_bridge::records::turn_id(JUNIPER, &home, "chat", basil["seq"].as_u64().unwrap());
+    assert_eq!((runs.of(&asking), runs.of(&rowans), runs.of(&own)), (1, 1, 0), "each ran once; paul's words started no turn");
+    bridge.stop().await;
 }
 
 /// Goal: rowan may not answer where it was asked (held below editor

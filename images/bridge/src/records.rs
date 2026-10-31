@@ -116,10 +116,10 @@ pub enum Task {
     /// (another agent of this computer in it would miss the new one).
     Joined { fragment: Option<String> },
     /// The answer to a question the agent asked another (`answer`): a turn
-    /// in `chat`, told `text` by that agent (its `name`), `hop` hand-offs
-    /// deep; `refused`: the question was never taken, and the turn never
-    /// runs.
-    Answer { chat: String, text: String, name: String, hop: u32, refused: bool },
+    /// in `chat`, told `text` by that agent (`by`, its `name`), `hop`
+    /// hand-offs deep; `refused`: the question was never taken, and the
+    /// turn never runs.
+    Answer { chat: String, text: String, by: String, name: String, hop: u32, refused: bool },
     Other,
 }
 
@@ -283,9 +283,20 @@ pub fn fragment_name_ok(s: &str) -> bool {
     !s.is_empty() && s.len() <= 128 && s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 
-/// The one way an owner's message is relayed (docs/chat-records.md, "A
+/// The door SimpleX's messages come through (docs/chat-records.md, "A
 /// relayed message").
 pub const VIA_SIMPLEX: &str = "simplex";
+
+/// Whether `door` is a door's id, as the platform's are (a connector's:
+/// 1 to 32 lower-case letters, digits and single inner dashes, a letter
+/// first; `fragment_core::connectors::id_ok`).
+pub fn door_ok(door: &str) -> bool {
+    (1..=32).contains(&door.len())
+        && door.as_bytes()[0].is_ascii_lowercase()
+        && door.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        && !door.ends_with('-')
+        && !door.contains("--")
+}
 
 /// What a relayed message says it relays: the person it speaks for, how
 /// they said it, and whose door it came through.
@@ -293,30 +304,29 @@ pub const VIA_SIMPLEX: &str = "simplex";
 pub struct Relayed {
     /// The person whose message it is (an agent relays only its owner's).
     pub for_: String,
-    pub via: &'static str,
-    /// The agent fragment whose door signed it.
+    /// The door it came through (`door_ok`): `simplex`, `telegram`, ….
+    pub via: String,
+    /// The agent fragment whose door it came through.
     pub agent: String,
 }
 
-/// A relayed message's `relayed` (docs/chat-records.md): a message an agent
-/// posts on its own chat with its owner carrying what its owner said
-/// elsewhere (`{"via": "simplex", "for": <owner>, "agent": <its fragment>,
-/// "at", "sig"}`: its door's signature, which the platform checked before
-/// it took the post, and it takes none without). None for any other body,
-/// a message of another shape, or another `via`. Whether it is honored (by
-/// whom, for whom) is the engine's.
+/// A relayed message's `relayed` (docs/chat-records.md): what an agent's
+/// owner said elsewhere, carried into a chat through one of that agent's
+/// doors (`{"via": <door>, "for": <owner>, "agent": <its fragment>, …}`).
+/// The platform takes such a record only through a door its owner opened
+/// (signed by the door's key, or published by the connector they bound),
+/// and no other. None for any other body, a message of another shape, or
+/// a `via` that is no door's id. Whether it is honored (by whom, for whom)
+/// is the engine's.
 pub fn relayed(body: &Value) -> Option<Relayed> {
     let Value::Object(o) = body else { return None };
     if !matches!(o.get("kind"), None | Some(Value::Null)) && o.get("kind") != Some(&Value::String("message".into())) {
         return None;
     }
     let r = o.get("relayed")?.as_object()?;
-    let via = match r.get("via")?.as_str()? {
-        VIA_SIMPLEX => VIA_SIMPLEX,
-        _ => return None,
-    };
+    let via = r.get("via")?.as_str().filter(|v| door_ok(v))?.to_string();
     let for_ = r.get("for")?.as_str().filter(|p| is_identity(p) && p.len() <= 128)?.to_string();
-    let agent = r.get("agent")?.as_str().filter(|a| crate::simplex::run::dir_name_ok(a))?.to_string();
+    let agent = r.get("agent")?.as_str().filter(|a| fragment_name_ok(a))?.to_string();
     matches!(message(o), Said::Message(_)).then_some(Relayed { for_, via, agent })
 }
 
@@ -377,8 +387,9 @@ pub fn task(body: &Value) -> Task {
                 Some(Value::Bool(b)) => Some(*b),
                 Some(_) => None,
             };
-            match (text_field(o, "chat"), text_field(o, "text"), text_field(o, "name"), hop, refused) {
-                (Some(chat), Some(text), Some(name), Some(hop), Some(refused)) if fragment_name_ok(&chat) && !name.trim().is_empty() && name.len() <= limits::ANSWER_NAME_MAX_BYTES => Task::Answer { chat, text, name, hop, refused },
+            let by = text_field(o, "by").filter(|b| is_identity(b) && b.len() <= 128);
+            match (text_field(o, "chat"), text_field(o, "text"), by, text_field(o, "name"), hop, refused) {
+                (Some(chat), Some(text), Some(by), Some(name), Some(hop), Some(refused)) if fragment_name_ok(&chat) && !name.trim().is_empty() && name.len() <= limits::ANSWER_NAME_MAX_BYTES => Task::Answer { chat, text, by, name, hop, refused },
                 _ => Task::Other,
             }
         }
@@ -420,6 +431,14 @@ pub fn mentions(text: &str) -> Vec<String> {
 /// two agents answering one message are two turns.
 pub fn turn_id(agent: &str, fragment: &str, channel: &str, seq: u64) -> String {
     let digest = Sha256::digest(format!("{agent}|{fragment}/{channel}/{seq}").as_bytes());
+    hex(&digest)[..24].to_string()
+}
+
+/// The turn that continues the cut turn `cut` (engine.rs,
+/// `continue_turn`): one id a cut turn, the same in every life, so its
+/// claim makes it one run.
+pub fn continuation_id(cut: &str) -> String {
+    let digest = Sha256::digest(format!("continue\0{cut}").as_bytes());
     hex(&digest)[..24].to_string()
 }
 
@@ -571,6 +590,9 @@ pub struct ToolEvidence {
     pub tool_call_id: String,
     pub status: ToolStatus,
     pub duration_ms: u64,
+    /// The model response whose calls were running (`Call::response`), when
+    /// its runtime says: it pairs the step with that response's calls alone.
+    pub response: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -599,8 +621,56 @@ pub fn turn_step(turn: &str, n: u32, s: &Step) -> Value {
         body["tool_call_id"] = json!(e.tool_call_id);
         body["status"] = json!(e.status);
         body["duration_ms"] = json!(e.duration_ms);
+        if let Some(r) = &e.response {
+            assert!(valid_post_id(r), "a response's id is a post id: {r}");
+            body["response"] = json!(r);
+        }
     }
     body
+}
+
+/// A tool call the model asked for, before it runs, as its runtime says
+/// so (our Hermes image: `post_api_request`, before Hermes runs any call
+/// of the response; Claude Code: its `tool_use`). Asked is no more than
+/// that: its runtime may refuse it, and only its step (`turn.step`, of the
+/// same response) says it ended. One a cut turn asked for and never ended
+/// may or may not have run (note.rs).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Call {
+    /// The model response that asked for it: an id its runtime gives each
+    /// response once (a post id), the same when the call is said again.
+    pub response: String,
+    /// Its place among that response's calls, from 0.
+    pub position: u32,
+    /// The provider's id of the call (a post id). It is no call's identity:
+    /// some providers name every response's first call `call_0`, and one
+    /// may reuse an id across a batch.
+    pub tool_call_id: String,
+    pub tool: String,
+    pub args: String,
+    pub category: Category,
+}
+
+/// A call's record id: one per turn, response and place in it, so a call
+/// said again (a frame's replay) is one record, and a provider's id reused
+/// by a later response is another call. Hashed into the record's (a
+/// response's id runs long); the body keeps the response.
+pub fn call_id(turn: &str, response: &str, position: u32) -> String {
+    let h = hex(&Sha256::digest(format!("{response}\0{position}").as_bytes()));
+    work_id(turn, &format!("call:{}", &h[..24]))
+}
+
+pub fn turn_call(turn: &str, c: &Call) -> Value {
+    assert!(valid_post_id(&c.response) && valid_post_id(&c.tool_call_id), "a call's ids are post ids: {} {}", c.response, c.tool_call_id);
+    json!({
+        "kind": "turn.call",
+        "turn": turn,
+        "response": c.response,
+        "tool_call_id": c.tool_call_id,
+        "tool": cut(&c.tool, limits::STEP_TOOL_MAX_CHARS),
+        "category": c.category.as_str(),
+        "args": cut_or_empty(&c.args, limits::STEP_ARGS_MAX_CHARS),
+    })
 }
 
 /// A turn asking `asks` something to answer in words: their next message
@@ -833,19 +903,25 @@ pub fn reply(text: &str, turn: &str, to: &[String], hop: u32, interim: bool) -> 
 mod tests {
     use super::*;
 
-    /// Goal: a relayed message is a message that names `simplex` and a
-    /// person, nothing else; its body round-trips through `said` as a
+    /// Goal: a relayed message is a message that names a door (any door's
+    /// id) and a person, nothing else; its body round-trips through `said` as a
     /// message to its agent; its id is the same for the same message.
     #[test]
     fn a_relayed_message_reads_strictly() {
-        let juniper = crate::runtime::Agent { fragment: "juniper--k3x9".into(), identity: "npub1juniper".into(), name: "juniper".into(), owner: "npub1paul".into(), credentials: vec![], key: None };
+        let juniper = crate::runtime::Agent { fragment: "juniper--k3x9".into(), identity: "npub1juniper".into(), name: "juniper".into(), owner: "npub1paul".into(), credentials: vec![], key: None, runtime: None };
         let body = relayed_message("hi from my phone", &juniper, VIA_SIMPLEX, &[]);
         assert_eq!(body, json!({ "text": "hi from my phone", "to": ["npub1juniper"], "relayed": { "via": "simplex", "for": "npub1paul", "agent": "juniper--k3x9" } }));
-        assert_eq!(relayed(&body), Some(Relayed { for_: "npub1paul".into(), via: VIA_SIMPLEX, agent: "juniper--k3x9".into() }));
+        assert_eq!(relayed(&body), Some(Relayed { for_: "npub1paul".into(), via: VIA_SIMPLEX.into(), agent: "juniper--k3x9".into() }));
+        let mut telegram = body.clone();
+        telegram["relayed"]["via"] = json!("telegram");
+        assert_eq!(relayed(&telegram).map(|r| r.via), Some("telegram".into()), "any door's id: a hosted connector's too");
         let Said::Message(m) = said(&body) else { panic!("a message") };
         assert_eq!((m.text.as_str(), m.to.as_slice()), ("hi from my phone", ["npub1juniper".to_string()].as_slice()));
         for bad in [
-            json!({ "text": "x", "relayed": { "via": "telegram", "for": "npub1paul", "agent": "juniper--k3x9" } }),
+            json!({ "text": "x", "relayed": { "via": "../simplex", "for": "npub1paul", "agent": "juniper--k3x9" } }),
+            json!({ "text": "x", "relayed": { "via": "SimpleX", "for": "npub1paul", "agent": "juniper--k3x9" } }),
+            json!({ "text": "x", "relayed": { "via": "a--b", "for": "npub1paul", "agent": "juniper--k3x9" } }),
+            json!({ "text": "x", "relayed": { "via": "", "for": "npub1paul", "agent": "juniper--k3x9" } }),
             json!({ "text": "x", "relayed": { "via": "simplex", "for": "paul", "agent": "juniper--k3x9" } }),
             json!({ "text": "x", "relayed": { "via": "simplex", "for": "npub1paul" } }),
             json!({ "text": "x", "relayed": { "via": "simplex", "for": "npub1paul", "agent": "../x" } }),
@@ -972,8 +1048,8 @@ mod tests {
     fn tasks_read() {
         assert_eq!(task(&json!({ "kind": "routine", "text": "water", "chat": "c--k3x9" })), Task::Routine { text: "water".into(), chat: "c--k3x9".into() });
         assert_eq!(task(&json!({ "kind": "joined", "fragment": "c--k3x9" })), Task::Joined { fragment: Some("c--k3x9".into()) });
-        let answer = json!({ "kind": "answer", "chat": "home--k3x9", "text": "t", "name": "Rowan", "hop": 2 });
-        assert_eq!(task(&answer), Task::Answer { chat: "home--k3x9".into(), text: "t".into(), name: "Rowan".into(), hop: 2, refused: false });
+        let answer = json!({ "kind": "answer", "chat": "home--k3x9", "text": "t", "by": "npub1rowan", "name": "Rowan", "hop": 2 });
+        assert_eq!(task(&answer), Task::Answer { chat: "home--k3x9".into(), text: "t".into(), by: "npub1rowan".into(), name: "Rowan".into(), hop: 2, refused: false });
         let mut refused = answer.clone();
         refused["refused"] = json!(true);
         assert!(matches!(task(&refused), Task::Answer { refused: true, .. }));
@@ -984,7 +1060,7 @@ mod tests {
             assert!(written["name"].as_str().unwrap().len() <= limits::ANSWER_NAME_MAX_BYTES);
             assert!(matches!(task(&written), Task::Answer { .. }), "{long}");
         }
-        for (key, bad) in [("chat", json!("Home Chat")), ("name", json!(" ")), ("name", json!("a".repeat(201))), ("hop", json!(-1)), ("text", json!(null)), ("refused", json!("yes"))] {
+        for (key, bad) in [("chat", json!("Home Chat")), ("by", json!("rowan")), ("by", json!(null)), ("name", json!(" ")), ("name", json!("a".repeat(201))), ("hop", json!(-1)), ("text", json!(null)), ("refused", json!("yes"))] {
             let mut broken = answer.clone();
             broken[key] = bad;
             assert_eq!(task(&broken), Task::Other, "{key}");

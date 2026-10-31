@@ -12,7 +12,7 @@
 //! | `sethome` | a home channel is the gateway's configuration (the image sets none) |
 //! | `reload-mcp`, `reload-skills` | the install's MCP servers and skills, which the image keeps (its boot syncs the skills) |
 //! | `personality` | it writes the profile's `config.yaml`, which the image owns: an agent's character is its `SOUL.md` |
-//! | `title` | a session title is no chat's name (the shell names chats), and in an agent's own chat it is Bot Mode's key (`Bot Chat`: docs/computers.md), which the image's hook takes back at the next turn |
+//! | `title` | a session title is no chat's name (the shell names chats) |
 //! | `resume` | it loads another session into this chat: one chat, one session |
 //! | `reset` | the same as `new` |
 //! | `help` | it lists every command of Hermes', most of them left out here: the page's picker is the help |

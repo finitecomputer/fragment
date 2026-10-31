@@ -102,7 +102,7 @@ async fn browser_asset(req: &Request, env: &Env, file: &File, content_type: &str
 /// member's `__watch` closes when they leave), or a push subscription. Its
 /// caller is resolved first.
 fn answers_someone(path: &str) -> bool {
-    path.starts_with("__op/") || matches!(path, "__push-key" | "__push-sub" | "__push-unsub" | "__watch" | "__live")
+    path.starts_with("__op/") || path.starts_with("__secrets/") || matches!(path, "__push-key" | "__push-sub" | "__push-unsub" | "__watch" | "__live" | "__door")
 }
 
 /// A browser's navigation to a page: a GET or HEAD that its Fetch
@@ -242,6 +242,28 @@ impl FragmentCell {
                 }
             };
             json_response(&answer)?
+        } else if let Some(key) = path.strip_prefix("__secrets/") {
+            // one of its secrets set from its own page, by an editor there,
+            // as `PUT /api/f/{name}/secrets/{KEY}` sets it: written, never
+            // read back (a connector's bot token, pasted where only the
+            // platform keeps it)
+            if req.method() != Method::Put || !req.headers().get("content-type")?.is_some_and(|c| c.starts_with("application/json")) {
+                return Err(CellError::invalid("PUT the secret as application/json: {value, hosts}"));
+            }
+            let key = key.to_string();
+            let body = req.bytes().await?;
+            self.put_secret(caller, &key, body).await?
+        } else if path == "__door" {
+            // its owner binding this connector as their agent's door, from its page (doors.rs)
+            if req.method() == Method::Get {
+                json_response(&self.door_binding(caller)?)?
+            } else {
+                if req.method() != Method::Post || !req.headers().get("content-type")?.is_some_and(|c| c.starts_with("application/json")) {
+                    return Err(CellError::invalid("POST the door's binding as application/json"));
+                }
+                let body: Value = serde_json::from_slice(&req.bytes().await?).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+                json_response(&self.bind_door(caller, &body).await?)?
+            }
         } else if path == "__people" {
             // names for a page: a person's picture, and their email to a
             // member asking of a member (decision 48), or that it is an agent

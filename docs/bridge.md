@@ -65,6 +65,42 @@ takes from its agents' owners, each with how the bridge carries it
 
 Another runtime is another module here, or a bridge of its own.
 
+### Which runtime runs an agent
+
+A bridge runs one or more runtimes (`runtime::Runtimes`, at most
+`RUNTIMES_MAX`), each by the name agents give it. An agent runs on the one
+its `agent.json` `runtime` names, `hermes` when it names none
+(`runtime::DEFAULT`; Paul, 2026-10-30). `BRIDGE_RUNTIME` is the module run
+for `hermes`: Relay in our Hermes image, the scripted agent standing in for
+it in the stub's.
+
+- **Read as the computer is read**: at start, every minute, and as the
+  ready file changes (`driver::with_runtimes`). A file that does not read
+  keeps what it named last. At start, the bridge waits until every agent's
+  file has answered, as it waits for the computer. An agent first seen
+  mid-life whose file does not read is left out until it does, as an agent
+  not ready is. Its records wait on the platform.
+- **Each runtime holds only its own agents.** A turn is claimed only while
+  its agent's runtime says it can take one (`Connected`, per runtime). A
+  runtime's `Working` keeps the computer awake on its own. Its menu is its
+  agents' commands.
+- **A turn stays with the runtime it was handed to.** Its Stop, answers and
+  Forget go there, and an event about it from any other runtime is stale.
+  Which runtime has a turn is kept in memory only: a restart ends every
+  running turn anyway (one life per turn).
+- **A runtime the bridge does not run is refused, never substituted.** An
+  agent naming one (an image without Claude, a name that is no runtime's)
+  has each turn refused with both its records, its end saying "this
+  computer doesn't run claude agents", and an ask's answer says so too.
+  Proven in `each_agent_runs_on_its_runtime`,
+  `a_runtime_down_holds_only_its_agents`,
+  `a_runtime_this_bridge_lacks_refuses_its_turns`,
+  `each_agent_takes_its_runtimes_commands` and
+  `any_runtimes_work_holds_the_computer` (engine_tests.rs), and
+  `each_agent_runs_on_the_runtime_its_agent_json_names` (tests/bridge.rs:
+  two runtimes in one bridge, a missing one, a restart).
+- A runtime that ends ends the bridge, as one alone always did.
+
 ## The routes it calls
 
 Every request goes to `FRAGMENT_API` (`http://api.fragment.internal`)
@@ -76,9 +112,9 @@ Bodies are JSON. `api.rs` has one method for each.
 | `GET /api/computer` (no agent) | | `{computer, owner, image, agents: [{fragment, identity, name, owner}]}`; at start, then every minute, and within a second of a change to the ready file (below); `?simplex=1` when the image names a SimpleX core (below, "SimpleX") |
 | `GET /api/computer/relay?host=&port=` (no agent), WebSocket | | the XFTP relay (docs/computers.md): one per connection a SimpleX core makes to a host and port the view's `relay` names, through the cores' proxy (`src/simplex/socks.rs`), its bytes piped both ways |
 | `GET /api/computer/keepalive` (no agent), WebSocket | | held according to "Runtime work outside a turn", below; pinged every `BRIDGE_KEEPALIVE_PING_MS` (15 s), and opened again after twice that with nothing heard, since a deploy can cut the platform's side of it with no close reaching here (#557) |
-| `GET /api/fragments?for=<owner>` | | `{fragments: [{name, kind, owned, title}]}`: its owner's, as the agent reaches them: its own chat with them found by its label (`api::bot_chat`), as a routine with no chat fires |
+| `GET /api/fragments?for=<owner>` | | `{fragments: [{name, kind, owned, title}]}`: its owner's, as the agent reaches them: its own chat with them found by its label (`api::own_chat`), as a routine with no chat fires |
 | `POST /api/fragments?for=<owner>` | `{name, template: "chat", title}` | the agent's SimpleX chat, made for its owner by the name its link chose, when its link is bound; 409, made already (then `GET /api/f/{chat}/members` says whether it is the agent's and its owner's: below, "SimpleX") |
-| `GET /api/f/{agent}/file?path=agent.json` | | its home (`api::Home`), read as a routine with no chat fires (docs/api.md, "An agent's home"); none (404) is its own chat |
+| `GET /api/f/{agent}/file?path=agent.json` | | its home (`api::Home`), read as a routine with no chat fires (docs/api.md, "An agent's home"); none (404) is its own chat. Its `runtime` (above, "Which runtime runs an agent"), with every read of the computer; none (404) names none |
 | `GET /api/f/{agent}/status` | | `{title}`: the agent's name (docs/api.md, "An agent's name and picture"), read every 10 s while its SimpleX core runs (below, "SimpleX") |
 | `GET /api/fragments` | | `{fragments: [{name, role}]}`: what the agent follows, listed at start, on a `joined` of it (as the agent the engine runs, no read of the computer first), and every 5 minutes. A listing a read of which fails with no answer, a 429 or a 5xx is asked again after a jittered backoff (from 1 s, at most 30 s) until it answers: the list, or only the fragments whose channels did not read; what was found meanwhile is followed, so one fragment that fails keeps the agent from no other. One listing an agent at a time: a newer one takes the place of one under way |
 | `GET /api/f/{f}/channels` | | `{channels: [{name, post, seq}]}`: a postable `chat` is a chat; the agent's own `tasks` |
@@ -117,7 +153,7 @@ on a computer.
 | `BRIDGE_HOLD` | `/run/computer/hold` | while this file exists the bridge claims no turn (the platform's hold before every save; looked at before each claim's every try) |
 | `BRIDGE_HELD` | `/run/computer/held` | the bridge's answer to the hold: it writes this file while the hold exists and no claim's try is in flight, and removes it otherwise (looked at every 100 ms). An image with more to quiet than the bridge names another file and answers the platform itself |
 | `BRIDGE_HELD_LEAVE_OUT` | none | what the save may leave out, written into the answer one per line (whitespace between here): gitignore patterns relative to `/data`, of letters, digits and `._-/*?[]`, at most 16 (docs/computers.md, "The hold"). The stub names `*.scratch` |
-| `BRIDGE_RUNTIME` | `relay` | `relay` or `script` |
+| `BRIDGE_RUNTIME` | `relay` | `relay` or `script`: the runtime agents that name none run (`hermes`) |
 | `BRIDGE_STATE_DIR` | `/data/bridge` | its state; made as it starts (past the restore gate), so a first start has a `/data` to save |
 | `BRIDGE_AGENTS_FILE` | | the agents the image has made ready (`src/ready.rs`): `{"agents": [fragment]}`, written whole and renamed into place. Set, the bridge runs only those of `GET /api/computer`'s, in the platform's order, and reads the computer again within a second of the file's change; missing, no agent is ready; one that does not read keeps the set before it. Unset, every agent the platform lists (the stub). Our Hermes image's is `/var/lib/fragment-run/agents.json`, written once each new agent's profile is whole (docs/computers.md) |
 | `BRIDGE_MEDIA_DIR` | `/tmp/bridge-media` | attachments, scratch |
@@ -125,6 +161,13 @@ on a computer.
 | `BRIDGE_PROMPT_TTL_MS` | 3 600 000 | a card's life unless the runtime says |
 | `BRIDGE_TURN_IDLE_MS` | 900 000 | a running turn this quiet ends as an error |
 | `BRIDGE_KEEPALIVE_PING_MS` | 15 000 | how often the keepalive pings; silent twice that, it is opened again (#557) |
+| `BRIDGE_CLAUDE_BIN` | | the person's own unmodified `claude`: set, agents whose `agent.json` names `claude` run on it (below, "Claude Code, as the bridge speaks it"); unset (every image today), there is no such runtime and their turns are refused saying so |
+| `BRIDGE_CLAUDE_USER` | | `uid:gid` it runs as: the agents' user, never root, which Claude Code refuses to bypass permissions as |
+| `BRIDGE_CLAUDE_CONFIG_DIR` | `/data/claude` | its `CLAUDE_CONFIG_DIR`: the person's sign-in and the sessions' transcripts, saved with `/data` |
+| `BRIDGE_CLAUDE_WORK_DIR` | `/data/work` | each agent's working directory is `<dir>/<agent fragment>` |
+| `BRIDGE_CLAUDE_STATE_DIR` | `/data/bridge/claude` | each chat's `/new` count (`sessions.json`) |
+| `BRIDGE_CLAUDE_MODEL` | | `--model`; unset, the account's own default |
+| `BRIDGE_CLAUDE_IDLE_MS` | 300 000 | a session's `claude` stops this long after its last turn |
 | `BRIDGE_RELAY_LISTEN` | `127.0.0.1:8650` | where Hermes dials |
 | `BRIDGE_RELAY_SECRET_FILE` | required for `relay` | the per-boot secret (32+ characters) |
 | `GATEWAY_RELAY_ID` | `fragment-computer` | the gateway id both sides name |
@@ -230,9 +273,8 @@ within 3 s.
 A person's agents hand work to each other in a chat they share, by
 `@name` in a reply (the bridge stamps its `to`), or by a message one posts
 itself naming the other in `to` (`fragment ask`, cli/src/ask.rs; in our
-Hermes image, a bot's `message_agent` too, which the image posts into the
-other's own chat that way: docs/computers.md, "Bot Mode in our Hermes
-image"). The bridge that answers decides whether it is a turn, and how
+Hermes image, its `fragment_ask` tool: docs/computers.md, "Teammates in
+our Hermes image"). The bridge that answers decides whether it is a turn, and how
 deep (docs/chat-records.md, "An agent's reply"):
 
 - **The hop is counted here, not read.** A record by an agent of this
@@ -361,11 +403,12 @@ Waiting on a person alone never holds it.
 
 The image's `fragment-activity` plugin uses Hermes v0.21.7's supported
 hooks: `subagent_start` and `subagent_stop` for its children,
-`pre_llm_call` and `post_tool_call` for the person's turns' steps (below).
+`pre_llm_call`, `post_api_request` and `post_tool_call` for the person's
+turns' calls and steps (below).
 Its one `ws://<bridge listen>/relay/activity` socket, authenticated by the
 gateway's normal Relay bearer token (`gateway.relay.auth.make_token`),
-carries both. The bridge answers each frame (`working`, `observed`, or
-`refused`) once its loop has it, and the hook returns only then, so the
+carries both. The bridge answers each frame (`working`, `called`,
+`observed`, or `refused`) once its loop has it, and the hook returns only then, so the
 parent's end cannot release a hold first, nor a step come after its
 turn's end.
 
@@ -400,6 +443,33 @@ progress showed), its `excerpt` a command's exit code, never its output or
 error text. A call whose end is not observed (no hook, a lost socket) is
 no step: delivery is best effort, each frame sent at most once, and
 nothing is guessed.
+
+A call's intent comes before it runs: each call of a model's response, as
+Hermes' `post_api_request` hands its `assistant_message` (fired in
+`normalize_model_response`, before `run_tool_round` runs any of them;
+Hermes runs them all before it asks the model again; read from v0.21.7
+and v0.22.5). Hermes has no supported "call started" hook: `pre_tool_call`
+is a policy gate that runs before Hermes' own refusals and blocks a call
+whose hook is slow (`plugins.hook_callback_timeout`), so no observer of
+ours sits there. The plugin names each response that asks for calls once
+(its gateway's life, random, and a count: `<life>-<n>`) and says each call
+(`{"turn", "response", "call": {position, tool_call_id, tool, args}}`,
+answered `called`); the engine records it on `work` as a `turn.call`
+(docs/chat-records.md), one record per turn, response and place
+(`records::call_id`), so a frame said again is one record. The provider's
+id is no call's identity: some providers name every response's first call
+`call_0`, and Hermes renames a call after saying it (`run_tool_round`
+de-duplicates the ids a session used before, `call_0_d2`, splits
+composite ones and rewrites some providers'). A call's end names the
+turn's latest response (`"response"` on its frame), and a step pairs with
+a call of that response alone: by id, else by its tool and arguments, one
+step to one call. Asked is all a call's record says: a refusal may still
+stop the call, and only its step says it ended. A turn a restart cut is
+told, first, each call it asked for that no step ended: each may or may
+not have run (note.rs). The record is posted as soon as the lane can,
+after the hook is answered, so it trails the call's start by the lane's
+milliseconds; a call whose intent never landed is told as before, by its
+steps alone.
 
 Files from delegated completion use the same path: `send_media` accepts an
 upload or a fetched provider URL after the parent ends and posts a reply
@@ -521,6 +591,57 @@ Proven with the real Hermes in `a_turn_cut_by_a_restart_is_closed_and_told`
 second call of the cut command, no card again, an answer, and the model's
 request ends with the note and the message after the boundary. Whether a
 real model, so told, checks before it redoes is a hosted run's to see.
+
+## A cut turn is continued once
+
+Durability phase 4 (Paul, 2026-10-31): a turn a restart cut is picked up
+again by itself, so nobody types "continue", and never run twice.
+
+- **Which.** A turn this life ended as lost: at its start, one an earlier
+  life was running (`recover`), or at its claim, one another life claimed
+  (409). It is continued once its lost end lands on `work` as this life's
+  own (appended, or a replay of this body: `Input::Posted`'s `kept`). A
+  life that ran the turn to its end posted that end first, so this one's
+  is refused (409) and nothing is continued: a rolled-back disk never
+  continues a turn that finished.
+- **Not continued.** An ask's turn (its asker is answered `lost`), a
+  command, a turn its asker stopped, a turn this life knows was waiting
+  on its person (asking in words, or on a card: their answer is its next
+  turn, above, "A card outlives its turn (P6)"), and a continuation
+  itself: one continuation,
+  and a continuation a restart cuts is told to the turn after it, as any
+  cut turn is (Pi's restart limit, ending visibly). A state older than
+  the turn cannot know it waited on its person; its continuation may ask
+  again.
+- **A Stop is never undone.** A Stop this life accepted (`stop_requested`)
+  holds through a restart before the runtime's end, its question or card
+  included (a Stop answers them). One said after the restart, before the
+  lost end lands (the page still shows the turn running; a rolled-back
+  life reads it again), cancels the continuation; one naming a cut turn
+  whose continuation is queued or running stops that.
+- **What it is.** A turn queued in the cut turn's place (its order),
+  with its cause, asker and depth, whose id is the cut turn's
+  continuation's (`records::continuation_id`), so its claim makes it one
+  run in any life. It is said by the computer, never as its asker's words
+  (`[your computer] I restarted while you were working …`,
+  `engine::CONTINUE_TEXT`), and carries the cut turn's note by its id
+  (`TurnStart::continues`; driver.rs, `cut_note`), whatever ran between:
+  what it was asked, its steps and replies, and to check before redoing
+  anything. Its runtime is never asked to rerun a call: Claude Code tells
+  its model a cut call's outcome is unknown, and Hermes' cut session is
+  closed at boot (above). The chat is shown it as it starts
+  (`turn.notice`, `CONTINUE_NOTICE`).
+- **Bounds.** Past its chat's queue or the computer's turns it is not
+  admitted, and said so in the log (`turn.uncontinued`).
+- A state holding a continuation, or a turn to be continued, is format 4,
+  which a bridge before continuations sets aside.
+- Proven in `a_cut_turn_is_continued_once`,
+  `a_stopped_turn_is_never_continued`,
+  `a_claim_another_life_holds_ends_the_turn` and the simulation's
+  continuation invariants (engine_tests.rs: continued once, never a
+  continuation's continuation, only a turn the journal ended as lost),
+  tests/bridge.rs's restart cases, and with the real Hermes in
+  `a_turn_cut_while_its_tool_runs_is_continued_once` (tests/docker.rs).
 
 ## What a rollback forgot
 
@@ -793,6 +914,56 @@ ticket's signature, its one redeeming, refusing a relayed record the
 agent's own key or any other signs, and the unlink closing the door) is
 the `computers` lane's door checks, through the stub's `door` commands.
 
+## Claude Code, as the bridge speaks it
+
+`runtime/claude.rs`, behind `BRIDGE_CLAUDE_BIN`: the person's own
+unmodified `claude`, signed in with their own plan, driven over its
+stream-json wire as Anthropic's Agent SDK drives it. The bridge never sits
+between it and Anthropic: no proxy, base URL or key, and no `ANTHROPIC_*` or
+`CLAUDE_CODE_*` variable of anyone's reaches it (`withheld`). Read from
+Claude Code 2.1.312 and spiked on 2026-10-30 (crash, resume, copy under the
+hold, interrupt, questions).
+
+- **A session per agent and chat**, its id derived from the two and the
+  chat's `/new` count, so every life names the same one. Its process starts
+  at the session's first turn, resuming it when its transcript is on disk
+  (else naming it new; a start refused either way is tried once the other
+  way), and stops once idle. Transcripts are whole lines, so a save under
+  the hold never tears one; a torn last line, restored, is skipped.
+- **A turn** is one user message: its note, quote, asker and files as
+  Relay's are, in words. Text deltas are the draft; each text block a reply
+  part; each tool's result a step with its call's id and status; its
+  `result` its end (`success` idle, else the error it says, a sign-in or a
+  plan's limit in its own words).
+- **No technical approvals:** tools run with permissions bypassed.
+  `AskUserQuestion` alone still asks the host (`can_use_tool`): each
+  question a card (`<tool_use_id>-q<n>`), its options and "Other" in
+  words; an unanswered card refuses the call, saying no one answered.
+- **Stop** is Claude Code's interrupt, which stops the running tool. Its
+  tools run in process groups of their own, so a lone kill of `claude`
+  would leave them running: a session stops by closing its input, and is
+  killed only past a grace. A stopped turn ends at its own `result`.
+- **A turn let go of is over on its process before the next starts
+  there.** The bridge ends a turn itself (quiet past its bound, its agent
+  gone) and hands the chat's next at once, while Claude Code may still
+  be writing the first. So the first is interrupted and its remaining
+  output read and dropped until its `result`. Given none within
+  `DRAIN_MS_DEFAULT` (10 s), its process is replaced, and the next turn
+  resumes the session in a new one: one turn's words and end are never
+  another's (`retire_turn`; Alex's review of #812;
+  `a_let_go_turns_late_output_is_never_the_next_turns` and
+  `a_let_go_turn_whose_interrupt_goes_unanswered_has_its_process_replaced`,
+  composed scripts in tests/claude-composed/, each failing without it).
+- **A crash** (the computer's death) leaves the cut call open in the
+  transcript. The next turn resumes the session, and Claude Code itself
+  tells its model the call's outcome is unknown, with no cut-turn patch
+  of ours; the bridge's note says what the chat saw.
+- **Its menu:** `new` (the chat's next session) and `stop`.
+- Proven against `fake-claude` replaying Claude Code's wire as it spoke,
+  recorded with Haiku 5.5 (tests/claude.rs, tests/claude/: a reply, a tool
+  step, a card, Stop, a session resumed by a new bridge and `/new`, and a
+  crash mid-tool), and in its own unit tests.
+
 ## Hermes' Relay, as the bridge speaks it
 
 Hermes v0.21.7 (tag `v0.21.7`, 2026-10-12; read first from v0.21.5,
@@ -966,10 +1137,6 @@ get_chat_info`.
   Stop is. `/new` resets the session under the chat's own key (Hermes'
   `_handle_reset_command`: a new session id, the key the same; the
   overlay's `approvals.destructive_slash_confirm: false` asks nothing).
-  In an agent's own chat the image's Bot Chat hook titles the new session
-  `Bot Chat` as the next turn starts (docs/computers.md, "Bot Mode in our
-  Hermes image"); until then the keeper holds the session before, still
-  titled and the chat's, so a teammate's message still reaches the chat.
   `/model` and `/reasoning` change the chat's session alone: `--global`
   (and `reasoning`'s `show`, `hide`, which write the gateway's display
   settings) are refused.

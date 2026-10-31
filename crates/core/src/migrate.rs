@@ -108,7 +108,7 @@ macro_rules! step {
 
 pub const FRAGMENT: Class = Class {
     name: "Fragment",
-    steps: &[step!("baseline", "fragment/0001_baseline.sql"), step!("listed", "fragment/0002_listed.sql"), step!("record_schedules", "fragment/0003_record_schedules.sql"), step!("ownership", "fragment/0004_ownership.sql")],
+    steps: &[step!("baseline", "fragment/0001_baseline.sql"), step!("listed", "fragment/0002_listed.sql"), step!("record_schedules", "fragment/0003_record_schedules.sql"), step!("search_forget", "fragment/0004_search_forget.sql")],
     variants: &[Variant {
         name: "members",
         sql: "CREATE TABLE members ( principal TEXT PRIMARY KEY, role TEXT NOT NULL, added_by TEXT NOT NULL, added_at INTEGER NOT NULL, kind TEXT, owner TEXT, people_only INTEGER NOT NULL DEFAULT 0)",
@@ -129,7 +129,6 @@ pub const REGISTRY: Class = Class {
         step!("connection_accounts", "registry/0006_connection_accounts.sql"),
         step!("public_addresses", "registry/0007_public_addresses.sql"),
         step!("org_content", "registry/0008_org_content.sql"),
-        step!("org_content_epochs", "registry/0009_org_content_epochs.sql"),
     ],
     variants: &[],
     kept: &[],
@@ -649,6 +648,29 @@ mod tests {
         let remade = remake(&fragment, &FRAGMENT).expect("a delete's remake");
         assert!(remade.contains(&"record_schedules".to_string()), "a delete empties its data schedules: {remade:?}");
         assert_eq!(fragment.count("SELECT COUNT(*) FROM record_schedules"), 0);
+    }
+
+    /// Goal: the sources a push deleted, still to forget on the search
+    /// service, are step 4 of a fragment (cell/src/searchable.rs): a
+    /// fragment at step 3 migrates, keeps what it held, and holds a source
+    /// due, which a restart keeps and a delete's remake empties. Method:
+    /// its first three steps, then its class as declared.
+    #[test]
+    fn search_forget_is_step_four_of_a_fragment() {
+        let fragment = Lite::new();
+        let known = FRAGMENT.steps.len() as u32;
+        assert_eq!(migrated(&fragment, &with(&FRAGMENT.steps[..3]), 1), Ok(Ran::Made { version: 3 }));
+        fragment.exec("INSERT INTO members (principal, role, added_by, added_at) VALUES ('npub1a', 'owner', 'npub1a', 5)").expect("a member");
+        assert_eq!(FRAGMENT.steps[3].name, "search_forget");
+        assert_eq!(migrated(&fragment, &FRAGMENT, 2), Ok(Ran::Migrated { from: 3, version: known }));
+        assert_eq!(fragment.count("SELECT COUNT(*) FROM members"), 1, "its member stays");
+        fragment.exec("INSERT INTO search_forget (source, next_at) VALUES ('sessions/a.json', 5)").expect("a source to forget");
+        fragment.exec("INSERT INTO search_forget (source, next_at) VALUES ('sessions/a.json', 6) ON CONFLICT (source) DO UPDATE SET next_at = excluded.next_at").expect("named once");
+        assert_eq!(fragment.count("SELECT COUNT(*) FROM search_forget WHERE next_at = 6"), 1);
+        assert_eq!(migrated(&fragment, &FRAGMENT, 3), Ok(Ran::Current { version: known }), "a restart runs nothing");
+        let remade = remake(&fragment, &FRAGMENT).expect("a delete's remake");
+        assert!(remade.contains(&"search_forget".to_string()), "a delete empties it: {remade:?}");
+        assert_eq!(fragment.count("SELECT COUNT(*) FROM search_forget"), 0);
     }
 
     /// Goal: the person's dock is step 3 of the Principal's (#587;
