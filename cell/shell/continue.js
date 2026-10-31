@@ -93,6 +93,8 @@ export function createContinue({
 }) {
   // a chat's title, as the sidebar's room has it
   const TITLE_MAX = 48;
+  // what a Continue that made its chat tells the controls on the page
+  const CONTINUED = "fragment-continued";
   // the chat a Continue not yet finished is making, by source and agent,
   // when its own name was another's (`nameFor`)
   const PENDING = "shell.continue.pending.v1";
@@ -228,6 +230,8 @@ export function createContinue({
       await loadList();
       openChat(name);
       leaveSidebar();
+      // every control on the page says Open for it now (`continueControl`)
+      document.dispatchEvent(new CustomEvent(CONTINUED));
       return name;
     } catch (e) {
       if (made) notice("The chat is not ready yet", `${e.message} Continue again to finish it.`);
@@ -289,6 +293,11 @@ export function createContinue({
       if (name) done(name);
     };
     pick.onchange = () => void refresh();
+    // a Continue elsewhere (the archive's dialog, another row) may have made
+    // this one's chat: asked again while it is on the page
+    document.addEventListener(CONTINUED, () => {
+      if (box.isConnected) void refresh();
+    });
     box.append(go);
     if (mine.length > 1) box.append(pick);
     void defaultAgent(source).then((identity) => {

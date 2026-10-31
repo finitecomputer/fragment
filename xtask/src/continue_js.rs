@@ -23,6 +23,7 @@ use serde_json::Value;
 /// ids as the cell does: the same id and body answer the record again,
 /// another body is 409.
 const WORLD: &str = r##"
+globalThis.document = { dispatchEvent() {}, addEventListener() {} };
 const RECORD_MAX = 64 * 1024;
 const bytes = (v) => new TextEncoder().encode(JSON.stringify(v)).length;
 const results = [];
