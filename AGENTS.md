@@ -17,7 +17,7 @@ platform concept.
 - Contracts: `docs/api.md` (wire), `docs/computers.md` (image, durability),
   `docs/bridge.md` (bridge), `docs/chat-records.md` (chat records),
   `docs/secrets.md` (secret custody), `docs/ledger.md` (usage),
-  `docs/billing.md` (orgs and Stripe), `docs/hermes-relay.md` (runtime).
+  `docs/billing.md` (orgs and Stripe).
 - `docs/published-fragments.md`: primitives that must stay expressible.
 - `docs/technical-debt-ledger.md`: the only place shortcuts may live;
   include the condition for removing each one.
