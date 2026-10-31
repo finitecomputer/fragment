@@ -247,8 +247,7 @@ fn stalls(body: &Value) -> bool {
 
 /// How long a call waits whose last user message says `take your time`: past
 /// Hermes' 0.3 s progress poll, so a quick tool's step is sent before the
-/// turn's next call ends it (docs/technical-debt-ledger.md, "A quick tool's
-/// step can be lost in Hermes").
+/// turn's next call ends it.
 pub const UNHURRIED_MS: u64 = 1_000;
 
 fn unhurried(body: &Value) -> bool {
@@ -341,7 +340,7 @@ pub fn answer(body: &Value) -> (String, Option<Value>) {
     // P6, as a real turn runs before its card: `prepare the approvals
     // proof` checks the draft in `PREPARE_STEPS` terminal calls, each with
     // its words first (each a second long: Hermes sends a quick tool's
-    // step late or not at all, docs/technical-debt-ledger.md), then says
+    // step late or not at all), then says
     // its plan at length and asks its card (a
     // clarify, Publish or Keep private). Its effect (`approval-effects`)
     // only for Publish: answered live (the clarify's result), or late (a
@@ -390,6 +389,17 @@ pub fn answer(body: &Value) -> (String, Option<Value>) {
     if let (Some(both), true, None) = (both, has_terminal, &tool_result) {
         let calls = both.split(" | ").enumerate().map(|(i, c)| json!({ "index": i, "id": format!("call_{}", i + 1), "type": "function", "function": { "name": "terminal", "arguments": json!({ "command": c.trim() }).to_string() } })).collect();
         return (String::new(), Some(Value::Array(calls)));
+    }
+    // `reuse: <a> | <b> | …`: each command in a response of its own, every
+    // call named `call_0`, as some providers name every response's first
+    // call (Hermes renames the later ones, `call_0_d2`, after saying them);
+    // then the answer
+    let reuse = last_user.lines().find_map(|l| l.split_once("reuse: ").map(|(_, c)| c.to_string()));
+    if let (Some(reuse), true) = (reuse, has_terminal) {
+        return match reuse.split(" | ").map(str::trim).nth(results) {
+            Some(command) => (String::new(), Some(json!({ "index": 0, "id": "call_0", "type": "function", "function": { "name": "terminal", "arguments": json!({ "command": command }).to_string() } }))),
+            None => (format!("scripted: ran {results} commands"), None),
+        };
     }
     // `run: <command>` on a line of what the user said: that command, and an
     // answer that quotes what it printed
@@ -688,6 +698,20 @@ fn answers_are_the_transcripts() {
     assert!(call.is_some());
     let (t, call) = answer(&json!({ "messages": [{ "role": "user", "content": "please use the terminal" }, { "role": "assistant", "tool_calls": [] }, { "role": "tool", "content": "tool-ran\n" }], "tools": tools }));
     assert_eq!((t.as_str(), call), ("scripted: the tool ran", None));
+    // `reuse:` says each command in a response of its own, each `call_0`
+    let reuse = |results: usize| {
+        let mut messages = vec![json!({ "role": "user", "content": "[paul] reuse: echo a | echo b" })];
+        for _ in 0..results {
+            messages.extend([json!({ "role": "assistant", "tool_calls": [] }), json!({ "role": "tool", "content": "a\n" })]);
+        }
+        answer(&json!({ "messages": messages, "tools": tools }))
+    };
+    for (results, command) in [(0, "echo a"), (1, "echo b")] {
+        let (_, call) = reuse(results);
+        let call = call.expect("a call");
+        assert_eq!((call["id"].as_str(), call["function"]["arguments"].as_str()), (Some("call_0"), Some(json!({ "command": command }).to_string().as_str())));
+    }
+    assert_eq!(reuse(2), ("scripted: ran 2 commands".to_string(), None));
     // `run:` runs its command, and the answer quotes what it printed
     let (_, call) = answer(&json!({ "messages": [{ "role": "user", "content": "[paul] run: fragment list --json" }], "tools": tools }));
     assert!(call.is_some_and(|c| c["function"]["arguments"].as_str().unwrap().contains("fragment list --json")));
