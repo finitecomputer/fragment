@@ -2122,7 +2122,7 @@ async fn poster(api: Api, agent: Agent, chat: String, mut rx: mpsc::Receiver<Pos
                     return;
                 }
             }
-            crate::driver::Sent::Posted => {
+            crate::driver::Sent::Posted | crate::driver::Sent::Taken => {
                 crate::ev!("simplex.posted", { "agent": agent.fragment, "chat": chat, "id": id, "kind": p.inbound.kind, "file": p.file.is_some() });
                 for f in &files {
                     let _ = tokio::fs::remove_file(&f.path).await;

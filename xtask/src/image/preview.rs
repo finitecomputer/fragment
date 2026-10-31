@@ -14,6 +14,9 @@
 use super::*;
 use std::path::Path;
 
+/// The preview's registry repository. Its name is the canary's, which
+/// preview once ran: every input tag (`inputs-<key>`) lives here, so a new
+/// name would build each image again, cold.
 pub(crate) const REPOSITORY: &str = "fragment-preview-computer-hermes-canary";
 
 /// The Dockerfile's local inputs, including manifest-only workspace
@@ -101,7 +104,7 @@ pub(super) fn run(args: &[String]) -> Result<()> {
         prepare(&inputs, reference)?;
         if let Some(path) = summary {
             let mut file = fs::OpenOptions::new().create(true).append(true).open(path)?;
-            writeln!(file, "### Preview image\n\nInputs: `{key}`\n\nDigest: `{}`\n\nReference: `{}`\n\nBoth `hermes` and `hermes-canary` use this image; production is pinned separately.\n",
+            writeln!(file, "### Preview image\n\nInputs: `{key}`\n\nDigest: `{}`\n\nReference: `{}`\n\n`hermes` uses this image; production is pinned separately.\n",
                 reference.split_once('@').expect("pinned").1, reference.replace(&inputs.account, "<account>"))?;
         }
     }
