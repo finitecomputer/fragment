@@ -166,7 +166,7 @@ impl FragmentCell {
         let fragment = InFragment { name: &facts.name, owner: &owner, by_owner };
         let space = self.search_space();
         let slot = &self.cfg.models.embeddings;
-        let chunks = rules::chunked(&up, slot.max_input_bytes());
+        let chunks = rules::chunked(&up, slot.max_input_tokens);
         let mut vectors: HashMap<String, String> = HashMap::new();
         // at most twice: once more after the table was dropped for another
         // space, or the service lacked a vector it said it held
