@@ -562,6 +562,9 @@ pub enum ErrorCode {
     AlreadyExists,
     /// 409: this operation id was used with a different input.
     ConflictingBody,
+    /// 409: a write's precondition no longer holds (a search source's
+    /// revision is not the one the write replaces).
+    Conflict,
     /// 413: a body, input, or result is over its limit.
     TooLarge,
     /// 422: the author's code refused or failed.
@@ -611,7 +614,7 @@ impl ErrorCode {
             ErrorCode::Unauthenticated => 401,
             ErrorCode::Forbidden => 403,
             ErrorCode::NotFound | ErrorCode::UnknownOperation | ErrorCode::NoCode => 404,
-            ErrorCode::AlreadyExists | ErrorCode::ConflictingBody => 409,
+            ErrorCode::AlreadyExists | ErrorCode::ConflictingBody | ErrorCode::Conflict => 409,
             ErrorCode::TooLarge => 413,
             ErrorCode::AppFailed => 422,
             ErrorCode::RateLimited => 429,
@@ -2137,6 +2140,7 @@ pub mod export;
 pub mod ledger;
 pub mod live;
 pub mod org;
+pub mod search;
 pub mod wipe;
 
 #[cfg(test)]

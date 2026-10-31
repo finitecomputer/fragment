@@ -139,6 +139,10 @@
   // `completion` with OpenRouter's fee (docs/ledger.md, OpenRouter's price),
   // so trying another model is a change to this file alone. A slot there
   // without one is refused.
+  // A search service (search/README.md; docs/api.md, "A fragment's
+  // search"): where it listens and its bearer token's name in the store.
+  // Unnamed, the deployment has no search.
+  // "search": { "url": "https://search.example.internal", "token": "fragment-search-token" },
   "models": {
     "cheap": { "provider": "openai", "base_url": "https://openrouter.ai/api/v1",
                "key": "fragment-openrouter-key", "model": "z-ai/glm-5.3-flash",

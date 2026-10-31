@@ -188,7 +188,8 @@ jobs:
     needs: proven
     if: ${{ !cancelled() && (needs.proven.result == 'skipped' || (needs.proven.result == 'success' && needs.proven.outputs.proven == 'false')) }}
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # shard 1 builds the search service's image (below) when search/ moved
+    timeout-minutes: ${{ matrix.shard == 1 && 50 || 20 }}
     env:
       # xtask/src/build.rs, WORKER_BUILD_VERSION
       WORKER_BUILD_VERSION: 0.8.5
@@ -293,6 +294,27 @@ jobs:
           provenance: false
           cache-from: type=gha,scope=e2e-stub
           cache-to: ${{ matrix.shard == 1 && github.event_name == 'push' && github.ref == 'refs/heads/master' && 'type=gha,scope=e2e-stub,mode=max,ignore-error=true' || '' }}
+      # The search service's image (search/Dockerfile) for the `search`
+      # section, on shard 1 alone, which runs it: loaded into Docker as the
+      # section names it, its layers BuildKit's in the Actions cache (scope
+      # e2e-search). An unchanged search/ is its layers fetched; a changed
+      # one compiles LanceDB here (about 25 minutes on a runner), hence
+      # shard 1's longer limit.
+      - if: matrix.shard == 1
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        env:
+          DOCKER_BUILD_SUMMARY: false
+          DOCKER_BUILD_RECORD_UPLOAD: false
+        with:
+          context: search
+          file: search/Dockerfile
+          platforms: linux/amd64
+          provenance: false
+          load: true
+          tags: fragment-search:e2e
+          build-args: JOBS=4
+          cache-from: type=gha,scope=e2e-search
+          cache-to: type=gha,scope=e2e-search,mode=max,ignore-error=true
       # the cell, the CLI and the suite, and the computer images the
       # node's boot builds (xtask/src/build.rs), all at once
       - run: cargo xtask e2e --build-only

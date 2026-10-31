@@ -341,6 +341,9 @@ pub(crate) enum MetaKey {
     /// The channels its people's search holds, as the rows last named
     /// them (search.rs `search_fence`): a JSON array of names.
     Searched,
+    /// Whether the search service holds this life's sources (searchable.rs):
+    /// written at its first upsert; a push's deletes are then forgotten.
+    Search,
     /// Why live's code was not installed.
     CodeError,
     /// When the blob collection runs next.
@@ -432,6 +435,7 @@ impl MetaKey {
             MetaKey::ListedSentAt => "listed_sent_at",
             MetaKey::ListedDue => "listed_due",
             MetaKey::Searched => "searched",
+            MetaKey::Search => "search",
             MetaKey::CodeError => "code_error",
             MetaKey::BlobsGcAt => "blobs_gc_at",
             MetaKey::Vapid => "vapid",
@@ -1079,6 +1083,20 @@ impl FragmentCell {
             (Method::Delete, ["api", "schedules", id]) => self.remove_schedule(&caller, id),
             // its app's database, for its owner (export.rs)
             (Method::Get, ["api", "database"]) => self.database(&caller, query("table"), query("offset")).await,
+            (Method::Post, ["api", "search"]) => {
+                let q = body_json(&mut req).await?;
+                self.search_query(&caller, q).await
+            }
+            (Method::Post, ["api", "search", "upsert"]) => {
+                let up = body_json(&mut req).await?;
+                self.search_upsert(&caller, up).await
+            }
+            (Method::Post, ["api", "search", "delete"]) => {
+                let d = body_json(&mut req).await?;
+                self.search_delete(&caller, d).await
+            }
+            (Method::Get, ["api", "search", "sources"]) => self.search_sources(&caller, query("after"), query("limit")).await,
+            (Method::Get, ["api", "search", "status"]) => self.search_status(&caller).await,
             (Method::Post, ["api", "subscriptions"]) => {
                 let body: Value = body_json(&mut req).await?;
                 self.subscribe(&caller, &body)
@@ -1317,6 +1335,7 @@ impl FragmentCell {
         }
         self.flush_index().await;
         self.flush_search().await;
+        self.search_forget_due().await;
         self.flush_joined().await;
         if let Err(e) = self.seed().await {
             self.event("template.failed", &e.message, json!({ "code": e.code }));
@@ -1445,7 +1464,7 @@ impl FragmentCell {
             self.set_meta(MetaKey::PollAt, &poll_at.to_string())?;
         }
         let outbox = self.rows("SELECT MIN(next_at) AS at FROM index_outbox", vec![])?.first().and_then(|r| r["at"].as_i64());
-        let due = [outbox, self.listed_due_at()?, self.search_due_at()?, self.joined_due_at()?, self.runs_due_at()?, self.pending_due_at()?, self.outbox_due_at()?, self.meter_due_at()?, self.card_due_at()?, self.invites_due_at()?, ended, also];
+        let due = [outbox, self.listed_due_at()?, self.search_due_at()?, self.search_forget_due_at()?, self.joined_due_at()?, self.runs_due_at()?, self.pending_due_at()?, self.outbox_due_at()?, self.meter_due_at()?, self.card_due_at()?, self.invites_due_at()?, ended, also];
 
         let at = due.into_iter().flatten().fold(poll_at, i64::min).max(js::now_ms() + min_ms);
         self.state.storage().set_alarm(ScheduledTime::new(js_sys::Date::new(&JsValue::from_f64(at as f64)))).await?;

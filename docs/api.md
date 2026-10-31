@@ -3540,6 +3540,64 @@ viewport shorter than the layout viewport, whose bottom Safari may pan
 into view above the keyboard), so the composer sits just above the
 keyboard, not an inset's height above it.
 
+### A fragment's search
+
+A fragment's own full-text and semantic index (cell/src/searchable.rs;
+fragment_proto::search). It is the search service's (search/README.md),
+beside the deployment, `FRAGMENT_SEARCH_URL` with `SEARCH_TOKEN`. A
+deployment that names none answers these routes 404. It is opt-in: nothing
+is held for a fragment until an editor writes a source.
+
+| method & path | who | body → answer |
+| --- | --- | --- |
+| `POST /api/f/{name}/search/upsert` | an editor | `{source, revision, replaces?, title?, at?, fields?, sections: [{id, text, heading?, context?, at?, location?: {from, to}}]}` → `{source, revision, written, chunks}` |
+| `POST /api/f/{name}/search/delete` | an editor | `{source}` → `{source, deleted}` |
+| `GET /api/f/{name}/search/sources?after=&limit=` | an editor | → `{sources: [{source, revision, at, chunks}], next}`, ascending by source, `limit` 1 to 1000 |
+| `GET /api/f/{name}/search/status` | a reader | → `{exists, sources, chunks, bytes, semantic, space, forgetting}` |
+| `POST /api/f/{name}/search` | a reader | `{q, limit?, mode?, fields?, after?, before?}` → `{results: [{rank, source, section, revision, title, heading?, context?, at?, location?, snippet, score, signals}], semantic}` |
+
+- **The index.** One a fragment's life: the service's table of its scope
+  (its identity, its incarnation, `members`), which no caller names.
+  Whoever reads the fragment reads its index.
+- **A source is written whole.** An app's writer (an import, a job) sends
+  a source's sections, and they replace whatever it held, in one commit.
+  - The same `(source, revision)` again writes nothing.
+  - `replaces` is a compare-and-set: the write happens only if the
+    source's revision now is it (`""`: if it has none), else 409
+    `conflict` naming `current`.
+- **Limits**, refused 400 (413 past the body) before anything is embedded
+  or sent:
+  - at most 2,000 sections, each 1 to 8,000 characters of text, its `id`
+    at most 64 bytes;
+  - a source at most 512 bytes, a revision 128;
+  - at most 4 `fields` of `a-z`, `0-9` and `_` names and 64-byte values;
+  - a body at most 4 MiB.
+- **Embedding.** Each section is cut into chunks its embeddings slot reads
+  whole (docs/api.md, Models: its `max_input_tokens`; nothing is cut
+  away), and each chunk's input (its title, context and heading, then its
+  text) is embedded once.
+  - A chunk whose input the index holds already is not embedded again, so
+    a conversation that grew embeds its new turns alone.
+  - A write is paid for by the fragment's owner, a question by its asker
+    (an agent's owner).
+  - An anonymous reader's question is searched by its words alone, as is
+    everything on a deployment that embeds nothing (`semantic: "off"`:
+    its tiers are private and its embeddings slot is not).
+- **Search** is by words (BM25F over title, heading, context and text) and
+  by meaning (the question's vector by cosine). Each section is ranked by
+  its best chunk and fused by reciprocal rank.
+  - `mode` is `hybrid` (the default), `lexical` or `semantic`.
+  - `fields` filters by every field named; `after` and `before` by a
+    section's `at`.
+  - A hit's `snippet` is at most 300 bytes of its best chunk; `signals`
+    says which found it.
+- **Deletes follow the files.** A source named by one of the fragment's
+  paths is forgotten when a move of main deletes that file. It is gone
+  from every answer at once (`forgetting` counts what the alarm still has
+  to send) and from the service's store within minutes.
+- **A life's index goes with it.** A deleted or wiped fragment's index is
+  dropped with its database and blobs (ended.rs).
+
 ### Search (decision 9; docs/cloudflare-v1.md, lesson 12)
 
 Search is FTS5 in the person's `Principal` cell (principal.rs), a
