@@ -2189,6 +2189,53 @@ model an agent runs by its id (Paul, 2026-10-20: the agent's page said
 | `POST /api/models/v1/chat/completions[?fragment=<name>]` | an agent (`for` names whom it acts for) | an OpenAI chat completion, `model` a tier, `vision`, `fallback`, or one of their models' ids (`x-fragment-tier` its tier, optional) → the model's answer in OpenAI's shape: JSON, or with `stream: true` server-sent events, usage once on a last chunk with no choices |
 | `POST /api/models/v1/audio/transcriptions` | an agent | an OpenAI transcription, `multipart/form-data`: `file` (the audio, at most 10 MiB), `model` `whisper`, and optional `language` (ISO-639-1), `prompt` and `response_format` (`json`, the default, or `text`) → `{"text": …}`, or the text alone |
 | `POST /api/models/v1/decide[?fragment=<name>]` | an agent (`for` names whom it acts for) | a decision, `{model?, input, questions, media?}`, its media inline → `{model, answers, usage}` (Decisions, above) |
+| `POST /api/models/v1/embeddings[?fragment=<name>]` | an agent (`for` names whom it acts for) | OpenAI's embeddings request, `{input, model?, dimensions?, encoding_format?}` → `{object: "list", data: [{object, index, embedding}], model, usage, space: {model, dimensions, version}}` (Embeddings, below) |
+
+Embeddings (fragment_core::embed; the search stack's model):
+- **The slot.** A deployment's `models.embeddings`: where its embeddings
+  run and the space their vectors are in, `{provider, model, dimensions,
+  version?, max_input_tokens?, private?}` (`key` and `price` as any slot
+  on an OpenAI-compatible API names them; `max_input_tokens`, the tokens
+  of an input its model reads, 128 to 32,768, 512 unnamed). Unnamed, BGE-M3 on Workers
+  AI (`@cf/baai/bge-m3`, 1,024 dimensions, its 512-token window); a
+  self-hosted deployment names a model on its own
+  machines, an OpenAI-compatible `POST <base_url>/embeddings`. It is no
+  chat slot: no call names it as one, no route falls back to it, and it
+  runs no chat slot's model.
+- **One space.** Every answer names its `space`, and every vector is the
+  slot's length and unit length (a dot product is a cosine). An answer
+  with a vector of any other length, or another count than was asked, is
+  never passed on: 502, and charged (it was paid for). A change of the
+  slot's model, dimensions or version is a new space: vectors of two are
+  never compared, so what keeps vectors re-embeds them.
+- **Private.** A deployment whose tiers are private embeds only on a
+  slot marked private (`"private": true`: a confidential API, never
+  Workers AI or OpenRouter), as Finite Private never falls back to a
+  model that is not: without one, every call is refused 403, saying why,
+  and the deployment's search answers by words alone. Its deploy is not
+  refused.
+- **Refusals before anything is sent.** `input` other than a string or 1
+  to 100 strings (token arrays included), an empty one, one that might
+  be past the slot's window (`embed::tokens_max`, a bound for any
+  tokenizer: a byte a token or more, each character counted at its
+  longest decomposition, and 3 for the model's own; 509 bytes of ASCII for
+  BGE-M3's 512; nothing is cut, so a caller splits a long text, as the
+  search capability embeds a section's chunks),
+  `model` other than `embeddings` or the slot's model, `dimensions` other
+  than the slot's (vectors are never cut), and `encoding_format` other
+  than `float` (the default) or `base64` (each vector's little-endian
+  float32s, as OpenAI's SDKs ask) are refused 400. A body past 1 MiB is
+  413.
+- **Metering.** Charged after the answer at its input tokens, at the
+  slot's model's row of the book (BGE-M3's $0.012 a million; a
+  self-hosted slot's own `price`): the tokens the API reports, else, as
+  Workers AI reports none for embeddings, estimated from the input at a
+  token every 3 bytes (a price, not the window: English prose is about 4
+  bytes a token, numbers fewer).
+- **Who pays, and what is kept.** As a chat call: the agent's owner, under
+  `fragment`'s cap when it names one; only the usage, on the ledger. The
+  model's refusal is charged nothing and passed through. Its computer's
+  intercept takes it as `POST /v1/embeddings`.
 
 Transcription (decision 9, as Paul changed it on 2026-10-07: a voice
 memo is one the agent transcribes itself, through this route):
