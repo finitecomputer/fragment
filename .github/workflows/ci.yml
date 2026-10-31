@@ -222,7 +222,8 @@ jobs:
       && (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-e2e'))
       && (needs.proven.result == 'skipped' || (needs.proven.result == 'success' && needs.proven.outputs.proven == 'false')) }}
     runs-on: ubuntu-latest
-    # shard 1 builds the search service's image (below) when search/ moved
+    # shard 1 builds the search service's image (.github/actions/e2e-build),
+    # compiling it when search/ moved
     timeout-minutes: ${{ matrix.shard == 1 && 50 || 20 }}
     env:
       # xtask/src/build.rs, WORKER_BUILD_VERSION
@@ -243,35 +244,15 @@ jobs:
           sudo sysctl -w net.ipv6.conf.default.disable_ipv6=1
           if [ -e /proc/sys/net/ipv6/conf/docker0 ]; then sudo sysctl -w net.ipv6.conf.docker0.disable_ipv6=1; fi
       - uses: actions/checkout@v4
-      # the caches, the stub image and the build (.github/actions/e2e-build);
-      # the first shard saves them on master's pushes
+      # the caches, the stub image and the build (.github/actions/e2e-build),
+      # and on shard 1, which runs the `search` section, the search
+      # service's image; the first shard saves them on master's pushes
       - id: build
         uses: ./.github/actions/e2e-build
         with:
           save: ${{ matrix.shard == 1 && github.event_name == 'push' && github.ref == 'refs/heads/master' }}
+          search: ${{ matrix.shard == 1 }}
           worker-build-version: ${{ env.WORKER_BUILD_VERSION }}
-      # The search service's image (search/Dockerfile) for the `search`
-      # section, on shard 1 alone, which runs it: loaded into Docker as the
-      # section names it, its layers BuildKit's in the Actions cache (scope
-      # e2e-search). An unchanged search/ is its layers fetched; a changed
-      # one compiles LanceDB here (about 25 minutes on a runner), hence
-      # shard 1's longer limit.
-      - if: matrix.shard == 1
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        env:
-          DOCKER_BUILD_SUMMARY: false
-          DOCKER_BUILD_RECORD_UPLOAD: false
-        with:
-          builder: ${{ steps.build.outputs.builder }}
-          context: search
-          file: search/Dockerfile
-          platforms: linux/amd64
-          provenance: false
-          load: true
-          tags: fragment-search:e2e
-          build-args: JOBS=4
-          cache-from: type=gha,scope=e2e-search
-          cache-to: type=gha,scope=e2e-search,mode=max,ignore-error=true
       # one shard's sections on a fresh node; the run's scratch (each node
       # boot's log, the lanes' screenshots) is kept when a check fails, and
       # uploaded below
@@ -658,7 +639,9 @@ jobs:
     needs: proven
     if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/master' && needs.proven.result == 'success' && needs.proven.outputs.proven == 'true' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # as shard 1's: a changed search/ compiles LanceDB here (about 25
+    # minutes), so the merge groups after it fetch its layers instead
+    timeout-minutes: 50
     env:
       # xtask/src/build.rs, WORKER_BUILD_VERSION
       WORKER_BUILD_VERSION: 0.8.5
@@ -667,6 +650,7 @@ jobs:
       - uses: ./.github/actions/e2e-build
         with:
           save: true
+          search: true
           worker-build-version: ${{ env.WORKER_BUILD_VERSION }}
 
   # The e2e's builds are kept one entry per master commit (`e2e-shard`'s
