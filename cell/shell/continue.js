@@ -151,15 +151,6 @@ export function createContinue({
     return !first || (b?.kind === "history" && (source.chat ? b.chat === source.chat : b.archive === source.archive && b.key === source.key));
   }
 
-  // a Continue from before chats were named by their source (one archive
-  // marker, `continued/<key>.json`): its chat, when it is with `agent`
-  async function marked(source, agent) {
-    if (source.chat) return null;
-    const m = await fileOf(source.archive, `continued/${source.key}.json`).catch(() => null);
-    const chat = typeof m?.chat === "string" ? allFragments().find((f) => f.name === m.chat && f.kind === "chat") : null;
-    return chat?.agents?.includes(agent) ? chat.name : null;
-  }
-
   // the source's history and the new chat's title, read now
   async function historyFor(source, agent) {
     if (source.chat) {
@@ -197,13 +188,6 @@ export function createContinue({
     };
     let made = false;
     try {
-      const before = await marked(source, agent);
-      if (before) {
-        await loadList();
-        openChat(before);
-        leaveSidebar();
-        return before;
-      }
       // bounded before anything is made
       const { title, body } = await historyFor(source, agent);
       let name = store.get(PENDING, {})[slot] ?? (await nameFor(source, agent, chatBase(fragment)));

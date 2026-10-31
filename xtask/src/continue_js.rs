@@ -233,15 +233,6 @@ for (const [name, set] of [
   const made = await t.c.continueInto(SOURCE, "npub1juniper");
   check("a name another's fragment holds gives way to one at random, the same on a try again, then let go", made && made !== taken && w.creates === 1 && (await t.c.continued(SOURCE, "npub1juniper")) === null && JSON.stringify(store.get("shell.continue.pending.v1", {})) === "{}", { made, taken, creates: w.creates });
 }
-{
-  // a Continue from before chats were named by their source: its marker's chat
-  const w = world(conversation(said(2, "hello")), [["datastar-pro-chat-13--ke3c", { role: "owner", kind: "chat", agents: ["npub1datastar"] }]]);
-  w.files.set(`${ARCHIVE}:continued/${KEY}.json`, JSON.stringify({ chat: "datastar-pro-chat-13--ke3c" }));
-  const t = tab(w);
-  const opened = await t.c.continueInto(SOURCE, "npub1datastar");
-  const fresh = await t.c.continueInto(SOURCE, "npub1juniper");
-  check("an archive's marker from before opens its chat for its agent, and another agent's is made", opened === "datastar-pro-chat-13--ke3c" && fresh && fresh !== opened && w.creates === 1, { opened, fresh });
-}
 
 // ---- who it was with, and an archived chat's history
 {
