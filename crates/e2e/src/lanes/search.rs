@@ -3,8 +3,9 @@
 //! A fragment that wrote nothing answers `indexed: false`, embedding
 //! nothing; an editor writes a source whole, chunked and embedded once; a
 //! reader finds it by its words and its meaning, each hit placed in each
-//! leg; a replay and a grown source embed nothing again; a stale write is
-//! refused; limits are checked before anything is sent; a viewer only
+//! leg, the index's int8 dot product Wasm SIMD's; a replay and a grown
+//! source embed nothing again; a stale write is refused; limits are
+//! checked before anything is sent; a viewer only
 //! reads, a stranger neither, and a member removed reads nothing more; a
 //! push that deletes a source's file forgets it, and a forget the index's
 //! outage held back, or one past a pass's hundred, never lands after the
@@ -136,6 +137,14 @@ fn checks(s: &mut Suite, api: &Api) -> Result<(Keys, String)> {
             && hit["lexical"]["rank"] == 1 && hit["lexical"]["bm25"].as_f64().is_some_and(|b| b > 0.0) && hit["semantic"]["rank"].as_u64().is_some_and(|r| r >= 1) && (-1.01..=1.01).contains(&cosine)
             && asked && status.body["sources"] == 1 && status.body["chunks"] == 2 && status.body["semantic"] == "on" && status.body.get("ended").is_none(),
         json!({ "write": w.body, "embedded": wrote, "found": found.body, "status": status.body }),
+    );
+
+    // ---- the index's int8 dot product is Wasm SIMD's, and agrees with the scalar one
+    let index = index_of(api, &name, None, None)?;
+    s.ok(
+        "the cell is built for Wasm SIMD, and its index's int8 dot product (SIMD's) agrees with the scalar one, in the Wasm a deploy ships",
+        index["index"]["simd"]["built"] == true && index["index"]["simd"]["agrees"] == true,
+        &index,
     );
 
     // ---- a replay writes and embeds nothing; a grown source embeds only its new turn

@@ -22,6 +22,13 @@ pub const WORKER_BUILD_VERSION: &str = "0.8.5";
 /// budget was raised for launch").
 pub const CELL_WASM_MAX_BYTES: u64 = 6_500_000;
 
+/// The cell's code generation for wasm32, beside the paths it remaps: Wasm
+/// SIMD (`simd128`, which V8 and workerd run), for the search index's int8
+/// dot product (fragment_core::search_index `dot`). It shrank the release
+/// too, by 121 KB of 6.44 MB (FIN-327). Its wasm clippy builds with the
+/// same (main.rs `check`).
+pub const CELL_TARGET_FLAGS: [&str; 1] = ["-Ctarget-feature=+simd128"];
+
 /// Which build of the cell: the release's, which deploys upload and the
 /// e2e stages, or `cargo xtask dev`'s, which only `wrangler dev` under it
 /// runs (`cargo xtask build --dev`: cell/wrangler.jsonc's `build`, and
@@ -78,7 +85,8 @@ pub fn cell_as(profile: Profile) -> Result<()> {
     let building = devstack::built::building(&out, profile.name())?;
     let local = LocalPaths::here(&dir)?;
     let given = (std::env::var("CARGO_ENCODED_RUSTFLAGS").ok(), std::env::var("RUSTFLAGS").ok());
-    let flags = encoded_rustflags(given, &local.remapped());
+    let ours: Vec<String> = local.remapped().into_iter().chain(CELL_TARGET_FLAGS.map(String::from)).collect();
+    let flags = encoded_rustflags(given, &ours);
     run(Command::new("worker-build").args(profile.worker_build_args()).env("CARGO_ENCODED_RUSTFLAGS", flags).current_dir(&dir))?;
     let wasm = out.join(devstack::built::WASM);
     let built = std::fs::read(&wasm).with_context(|| format!("{} after worker-build", wasm.display()))?;

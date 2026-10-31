@@ -73,10 +73,66 @@ pub fn hold(v: &[f32]) -> Option<Held> {
     Some(Held { code, q })
 }
 
-/// The int8 dot product of two held vectors.
+/// The int8 dot product of two held vectors: Wasm SIMD's, sixteen
+/// components a step, where the cell is built for it (`simd128`:
+/// xtask/src/build.rs), else `dot_scalar`'s. The two agree exactly (an
+/// i8·i8 product and its sums fit i32 at any dimensions a slot names).
 pub fn dot(a: &[i8], b: &[i8]) -> i32 {
     assert_eq!(a.len(), b.len(), "held vectors of one space");
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    let d = simd::dot(a, b);
+    #[cfg(not(all(target_arch = "wasm32", target_feature = "simd128")))]
+    let d = dot_scalar(a, b);
+    d
+}
+
+/// `dot`, one component at a time: the reference SIMD's is checked against
+/// (the index's test lever, in the Wasm itself).
+pub fn dot_scalar(a: &[i8], b: &[i8]) -> i32 {
     a.iter().zip(b).map(|(x, y)| i32::from(*x) * i32::from(*y)).sum()
+}
+
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+mod simd {
+    use core::arch::wasm32::*;
+
+    /// Sixteen lanes of `s` from `at`.
+    fn lanes(s: &[i8], at: usize) -> v128 {
+        let c = &s[at..at + 16];
+        i8x16(c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7], c[8], c[9], c[10], c[11], c[12], c[13], c[14], c[15])
+    }
+
+    /// Each sixteen components widened to i16 and multiplied in pairs
+    /// into i32 (`i32x4.dot_i16x8_s`); the tail one at a time.
+    pub(super) fn dot(a: &[i8], b: &[i8]) -> i32 {
+        let whole = a.len() / 16 * 16;
+        let mut acc = i32x4_splat(0);
+        for at in (0..whole).step_by(16) {
+            let (x, y) = (lanes(a, at), lanes(b, at));
+            acc = i32x4_add(acc, i32x4_dot_i16x8(i16x8_extend_low_i8x16(x), i16x8_extend_low_i8x16(y)));
+            acc = i32x4_add(acc, i32x4_dot_i16x8(i16x8_extend_high_i8x16(x), i16x8_extend_high_i8x16(y)));
+        }
+        let lanes = i32x4_extract_lane::<0>(acc) + i32x4_extract_lane::<1>(acc) + i32x4_extract_lane::<2>(acc) + i32x4_extract_lane::<3>(acc);
+        lanes + super::dot_scalar(&a[whole..], &b[whole..])
+    }
+}
+
+/// Whether `dot` agrees with `dot_scalar` on `n` pseudo-random pairs of
+/// every length to 1040 (a slot's 1024 and its tails): what the index's
+/// test lever answers, run in the very Wasm a deploy ships.
+pub fn dot_agrees(n: u32) -> bool {
+    let mut s: u64 = 0x2545_f491_4f6c_dd1d;
+    let mut next = || {
+        s ^= s << 13;
+        s ^= s >> 7;
+        s ^= s << 17;
+        (s >> 32) as i8
+    };
+    (0..n).all(|i| {
+        let len = (i as usize * 37) % 1041;
+        let (a, b): (Vec<i8>, Vec<i8>) = (0..len).map(|_| (next(), next())).unzip();
+        dot(&a, &b) == dot_scalar(&a, &b)
+    })
 }
 
 /// An int8 dot product as the cosine it estimates.
@@ -330,6 +386,15 @@ mod tests {
         let reranked = best(first.iter().map(|(i, _)| (*i, dot(&hq.q, &held[*i].q) as f32)).collect(), 10);
         let kept = reranked.iter().filter(|(i, _)| truth.contains(i)).count();
         assert!(kept >= 9, "kept {kept} of the exact top 10");
+    }
+
+    #[test]
+    fn dot_agrees_with_its_reference_at_every_length() {
+        assert!(dot_agrees(200));
+        // the extremes: every product at its most
+        let (a, b) = (vec![-128i8; 1040], vec![-128i8; 1040]);
+        assert_eq!(dot(&a, &b), 1040 * 128 * 128);
+        assert_eq!(dot(&a, &vec![127i8; 1040]), -(1040 * 128 * 127));
     }
 
     #[test]

@@ -336,6 +336,9 @@ impl SearchIndexCell {
                 }
                 let mut status = self.parts().status()?;
                 status["held"] = json!(self.held.get());
+                // the build's SIMD, and its dot product checked against the
+                // scalar one in this very Wasm
+                status["simd"] = json!({ "built": cfg!(all(target_arch = "wasm32", target_feature = "simd128")), "agrees": engine::dot_agrees(64) });
                 Ok(status)
             }
             _ => Err(CellError::new(ErrorCode::NotFound, format!("no route {path}"))),
