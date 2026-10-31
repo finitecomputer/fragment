@@ -104,23 +104,22 @@ pub struct Attached {
     pub refs: Vec<crate::records::AttachmentRef>,
 }
 
-/// An answer's words (none: files alone), then a line for each file sent
-/// with it (`files`, those of `attached` the driver downloaded): its name,
+/// A message's words, then a line for each downloaded file: its original name,
 /// its type, and where it is on this computer; and one for any it could not
 /// read. Names are the sender's: anything but plain text in them is a space.
-pub fn with_files(words: &str, attached: &Attached, files: &[LocalFile]) -> String {
+pub fn with_files(words: &str, by_name: &str, expected: usize, files: &[LocalFile]) -> String {
     let plain = |s: &str| s.chars().map(|c| if c.is_control() { ' ' } else { c }).collect::<String>();
-    let by = plain(&attached.by_name);
+    let by = plain(by_name);
     let mut lines: Vec<String> = Vec::new();
     if !words.trim().is_empty() {
         lines.push(words.to_string());
     }
     for f in files {
-        lines.push(format!("[{by} sent a file with this answer: '{}' ({}). It is on your computer at: {}]", plain(&f.name), plain(&f.media_type), f.path.display()));
+        lines.push(format!("[{by} sent a file: '{}' ({}). It is on your computer at: {}]", plain(&f.name), plain(&f.media_type), f.path.display()));
     }
-    let unread = attached.refs.len().saturating_sub(files.len());
+    let unread = expected.saturating_sub(files.len());
     if unread > 0 {
-        lines.push(format!("[{by} also sent {unread} file{} with this answer that could not be read]", if unread == 1 { "" } else { "s" }));
+        lines.push(format!("[{by} also sent {unread} file{} that could not be read]", if unread == 1 { "" } else { "s" }));
     }
     lines.join("\n")
 }
@@ -367,11 +366,6 @@ mod tests {
         LocalFile { path: PathBuf::from(at), media_type: "image/png".into(), name: name.into(), size: 1 }
     }
 
-    fn attached(by: &str, n: usize) -> Attached {
-        let r: crate::records::AttachmentRef = serde_json::from_value(serde_json::json!({ "sha256": "c".repeat(64), "size": 1, "type": "image/png", "name": "p.png" })).expect("a ref");
-        Attached { agent: "juniper--k3x9".into(), fragment: "talk--k3x9".into(), by_name: by.into(), refs: vec![r; n] }
-    }
-
     /// Goal: an answer's words name each file sent with it and where it is
     /// on the computer, a line each after the words (files alone: no words
     /// line); those not downloaded are counted; a sender's name or a file's
@@ -379,12 +373,12 @@ mod tests {
     #[test]
     fn an_answers_files_are_named_in_its_words() {
         let a = file("a.png", "/tmp/bridge-media/aa");
-        let line = "[paul sent a file with this answer: 'a.png' (image/png). It is on your computer at: /tmp/bridge-media/aa]";
-        assert_eq!(with_files("these", &attached("paul", 1), std::slice::from_ref(&a)), format!("these\n{line}"));
-        assert_eq!(with_files(" ", &attached("paul", 1), std::slice::from_ref(&a)), line, "files alone");
-        assert_eq!(with_files("", &attached("paul", 3), std::slice::from_ref(&a)).lines().last(), Some("[paul also sent 2 files with this answer that could not be read]"));
-        assert_eq!(with_files("ok", &attached("paul", 1), &[]), "ok\n[paul also sent 1 file with this answer that could not be read]", "one unread, said so");
-        let odd = with_files("", &attached("pa\nul", 1), &[file("a]\n[b.png", "/tmp/x")]);
+        let line = "[paul sent a file: 'a.png' (image/png). It is on your computer at: /tmp/bridge-media/aa]";
+        assert_eq!(with_files("these", "paul", 1, std::slice::from_ref(&a)), format!("these\n{line}"));
+        assert_eq!(with_files(" ", "paul", 1, std::slice::from_ref(&a)), line, "files alone");
+        assert_eq!(with_files("", "paul", 3, std::slice::from_ref(&a)).lines().last(), Some("[paul also sent 2 files that could not be read]"));
+        assert_eq!(with_files("ok", "paul", 1, &[]), "ok\n[paul also sent 1 file that could not be read]", "one unread, said so");
+        let odd = with_files("", "pa\nul", 1, &[file("a]\n[b.png", "/tmp/x")]);
         assert_eq!(odd.lines().count(), 1, "{odd}");
     }
 }

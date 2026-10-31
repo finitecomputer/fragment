@@ -117,9 +117,12 @@ fragment's is.
   copied tail twice. Bounded by what is kept: SQLite hands over only a
   message's text parts and a mark for each medium (never a picture's
   data), each call's id, name and the start of its arguments, and a
-  tool's output and reasoning their cut's worth; a conversation whose
-  kept rows pass twice its limit is refused alone, and a database of more
-  than 200,000 sessions whole. On a platform computer (the CLI as its
+  tool's output and reasoning their cut's worth (a list that is no list
+  of typed parts, as a person's `["red", "blue"]`, kept as the text it
+  is); a conversation whose kept rows (each row counted, empty or not)
+  pass twice its limit is refused alone, and so is one SQLite cannot read
+  whole, never kept as the part read; a database of more than 200,000
+  sessions is refused whole. On a platform computer (the CLI as its
   agent) its own databases (its Hermes root's, any profile's) are
   refused: their conversations are chats here already.
 

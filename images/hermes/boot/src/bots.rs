@@ -73,11 +73,13 @@ pub fn name<'a>(agent: &'a Agent, title: Option<&'a str>) -> &'a str {
 /// "Juniper", as the shell titles it), else its name on the computer, else
 /// its fragment's label: Hermes signs its messages to teammates with it
 /// (`Message from 🤖 Juniper (@juniper-k3x9): …`). Its description is its
-/// job's first line (`description`). Written whole at every boot, for an
-/// agent assigned while the computer runs, and when a sync pulls its job.
-pub fn profile_yaml(agent: &Agent, title: Option<&str>, soul: Option<&str>) -> String {
+/// role (its agent fragment's `meta.role`, as its status says it), else its
+/// job's first line (`description`): what its teammates read it does.
+/// Written whole at every boot, for an agent assigned while the computer
+/// runs, and when a sync pulls its job.
+pub fn profile_yaml(agent: &Agent, title: Option<&str>, role: Option<&str>, soul: Option<&str>) -> String {
     let name = name(agent, title);
-    let about = soul.map(description).unwrap_or_default();
+    let about = role.map(str::trim).filter(|r| !r.is_empty()).map(description).or_else(|| soul.map(description)).unwrap_or_default();
     let mut y = format!(
         "# Written by hermes-boot for {}, from its agent fragment, and written again as that changes: its Bot Mode identity (images/hermes/boot/src/bots.rs). Never edit it: rename the agent with `fragment agent --name`.\n",
         agent.fragment
@@ -236,7 +238,7 @@ mod tests {
     /// neither, the label. Replay: the same agent writes the same bytes.
     #[test]
     fn a_profile_says_who_the_bot_is() {
-        let y = profile_yaml(&agent("juniper", "juniper"), Some("Juniper"), Some("You tend the garden: \"weeds\" first.\n"));
+        let y = profile_yaml(&agent("juniper", "juniper"), Some("Juniper"), None, Some("You tend the garden: \"weeds\" first.\n"));
         assert_eq!(
             y,
             "# Written by hermes-boot for juniper--k3x9, from its agent fragment, and written again as that changes: its Bot Mode identity (images/hermes/boot/src/bots.rs). Never edit it: rename the agent with `fragment agent --name`.\n\
@@ -244,17 +246,21 @@ mod tests {
              description: \"You tend the garden: \\\"weeds\\\" first.\"\n\
              ui_meta:\n  hermes-bots:\n    title: \"Juniper\"\n    description: \"You tend the garden: \\\"weeds\\\" first.\"\n"
         );
-        assert_eq!(y, profile_yaml(&agent("juniper", "juniper"), Some("Juniper"), Some("You tend the garden: \"weeds\" first.\n")));
-        let untitled = profile_yaml(&agent("juniper", "juniper"), Some(" "), None);
+        assert_eq!(y, profile_yaml(&agent("juniper", "juniper"), Some("Juniper"), None, Some("You tend the garden: \"weeds\" first.\n")));
+        let untitled = profile_yaml(&agent("juniper", "juniper"), Some(" "), None, None);
         assert!(untitled.contains("display_name: \"juniper\"\n"), "no title: its name on the computer: {untitled}");
-        let bare = profile_yaml(&agent("fred", " "), None, None);
+        let bare = profile_yaml(&agent("fred", " "), None, None, None);
         assert!(bare.contains("display_name: \"fred\"\n") && bare.contains("    title: \"fred\"\n") && !bare.contains("description"), "{bare}");
-        let odd = profile_yaml(&agent("x", "x"), Some("a: b\n# c"), Some("line: one"));
+        let odd = profile_yaml(&agent("x", "x"), Some("a: b\n# c"), None, Some("line: one"));
         assert!(odd.contains("display_name: \"a: b\\n# c\"\n"), "a name is one scalar, never more YAML: {odd}");
         assert!(GATEWAY_PROFILE_YAML.contains("description: ") && !GATEWAY_PROFILE_YAML.contains("hermes-bots"), "the gateway is no bot");
         // renamed (its fragment's title), the bot is its new name alone
-        let renamed = profile_yaml(&agent("juniper", "juniper"), Some("Frank"), Some("You tend the garden.\n"));
+        let renamed = profile_yaml(&agent("juniper", "juniper"), Some("Frank"), None, Some("You tend the garden.\n"));
         assert!(renamed.contains("display_name: \"Frank\"\n") && renamed.contains("    title: \"Frank\"\n") && !renamed.contains("\"Juniper\""), "{renamed}");
+        // its role, when it has one, is what its teammates read it does
+        let roled = profile_yaml(&agent("juniper", "juniper"), Some("Juniper"), Some(" chief of staff "), Some("You tend the garden.\n"));
+        assert!(roled.contains("\ndescription: \"chief of staff\"\n") && !roled.contains("garden"), "{roled}");
+        assert!(profile_yaml(&agent("juniper", "juniper"), Some("Juniper"), Some(" "), Some("You tend the garden.\n")).contains("description: \"You tend the garden.\""), "a blank role is none");
     }
 
     /// What every agent is told of its name and picture (the platform
