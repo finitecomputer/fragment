@@ -182,16 +182,16 @@ home"; before 2026-10-26, its own chat with them):
 - **The agent's own bridge honors it**, and nothing else does: a record
   with a `relayed` for its owner, through its own door (any door's id),
   carried by the agent itself or by a key that is none of the chat's
-  agents, is its owner's message to it, asked as its owner (by their
+  members (a connector chat's own), is its owner's message to it, asked as its owner (by their
   name; their Stop stops it; it answers a question asked of them),
   whether or not a SimpleX link is bound on its computer: the platform
   took it only through a door its owner opened, and closing the door
   stops new ones, not those it took. A `relayed` for anyone else, through
   another agent's door, of a `via` that is no door's id, or carried by
-  another agent of the chat, is what the record would be without it: the
+  another member of the chat, is what the record would be without it: the
   agent's own words starting nothing, a person's message, a hand-off.
   The chat shows it as its owner's, "via" its door, once the members say
-  its poster is the owner's agent.
+  its poster is the owner's agent or none of the chat's members.
 - **What the agent says in its SimpleX chat goes to its owner's SimpleX
   app** once posted, while linked, whatever started its turn (their
   SimpleX message, their words typed there on the web, a routine, a
