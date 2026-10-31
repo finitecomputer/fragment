@@ -102,13 +102,13 @@ speaking Cloudflare's APIs) returns once this product works.
    follows master's image automatically (Paul, 2026-10-29): input-keyed
    registry tags preserve identity across layer-cache eviction, BuildKit's
    persistent Actions cache accelerates new builds, and preparation gates
-   the preview deploy before any Worker changes. Preview is the canary:
-   `hermes` and the retained `hermes-canary` name resolve to the same
-   digest, overridden in memory, with its input key and digest recorded in
-   the deploy summary rather than preview.jsonc. Production's image is
-   still copied by the manual Image workflow, at the exact digest a full
-   round proved, then pinned by hand in production.jsonc. Its deploy and
-   promotion rules stay unchanged (docs/computers.md, "Stable and canary").
+   the preview deploy before any Worker changes. There is no canary
+   (Paul, 2026-10-31: "there's preview and there's prod"): one image name,
+   `hermes`, at master's digest on preview, overridden in memory, with its
+   input key and digest recorded in the deploy summary rather than
+   preview.jsonc. Production's image is copied by the manual Image
+   workflow, at the exact digest preview proved, then pinned by hand in
+   production.jsonc (docs/computers.md, "Preview and production").
 4. **Self-deploy without forking.** Configuration lives in a file
    outside the repo: domains, the WorkOS environment, AI Gateway,
    pricing, the code.storage organization, and the default computer
@@ -383,23 +383,22 @@ speaking Cloudflare's APIs) returns once this product works.
     image reaches a sleeping computer at its next wake, through the
     image-plus-restore path, since the snapshot is for the old image. The
     first start of a new image at a location pays its pull (24–40 s).
-    A canary is a per-computer pin. Rollback is the pin back, plus a
-    point-in-time restore when the new image moved its data's schema.
+    A pin moves one computer to another of the deployment's images.
+    Rollback is the image before pinned back, plus a point-in-time restore
+    when the new image moved its data's schema.
     An awake computer's owner is told an update is ready, between turns,
     and restarts it to take it, or its next sleep does (Paul, 2026-10-09:
     a notice, never a restart behind their back; docs/computers.md, "What
     its owner is told").
 
-    *Status (2026-10-13).* Stable and canary are two names of a
-    deployment's images: the default kept at a digest, the canary built
-    at every deploy until 2026-10-16, then by a deploy by hand, and since
-    2026-10-20 by the Image workflow, run by hand, and pinned (CI's build
-    no image, decision 3's status); a promotion moves the default's
-    digest, a rollback pins back (docs/computers.md, "Stable and
-    canary"). The point-in-time
-    restore is not built: three rotating saves keep none from before a
-    canary, so a Hermes release is forward only for now (Paul, 2026-10-13;
-    docs/technical-debt-ledger.md, "A Hermes release has no rollback").
+    *Status (2026-10-31).* One image name, `hermes` (Paul, 2026-10-31):
+    preview runs master's digest, production the digest preview proved,
+    which Paul promotes; a production rollback pins the digest before
+    back in production.jsonc (docs/computers.md, "Preview and
+    production"). The point-in-time restore is not built: three rotating
+    saves keep none from before an image change, so a Hermes release is
+    forward only for now (Paul, 2026-10-13; docs/technical-debt-ledger.md,
+    "A Hermes release has no rollback").
 20. **Preview environments.** Every branch deploys a complete, separately
     named copy to the dev account with one command: its own Workers, DOs,
     Workflows, Queues, containers and R2 prefix. It is routed on the dev

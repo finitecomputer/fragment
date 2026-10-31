@@ -823,7 +823,7 @@ fragment runs my-thing             # each run shows what it cost
 fragment ledger grant ann 20 --why "a top-up"   # operators only
 fragment operator people --q ann@                 # operators: people, orgs, comps,
 fragment operator comp ann@example.com --kind always-on   # trial codes, health, the log
-fragment operator pin <npub> hermes-canary        # a person's computer onto the canary (or back)
+fragment operator pin <npub> hermes               # a person's computer onto one of the deployment's images
 fragment operator credit org-… 500 --why "an invoice" --id inv-12   # an org pays out of band: credit it, once by its reference
 ```
 

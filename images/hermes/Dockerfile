@@ -29,7 +29,7 @@
 # digest, and the fragment CLI's build (its stage, below). A change to the
 # cell, the shell, the chat page, the e2e or the docs builds this same
 # image, every step cached, so its digest, its version, stays, and no
-# computer is told of an update (docs/computers.md, "Stable and canary":
+# computer is told of an update (docs/computers.md, "Preview and production":
 # what changes a version). That holds while the deploying machine's build
 # cache keeps the layers: a cold cache rebuilds them, stamped anew.
 
@@ -69,7 +69,7 @@ RUN --mount=type=cache,id=images-registry,target=/usr/local/cargo/registry \
 # Its inputs are what the CLI builds from and no more, so a change to the
 # cell, the shell, the chat page or the other blessed templates, the e2e,
 # xtask or the docs leaves this stage cached and the image's digest as it
-# was (docs/computers.md, "Stable and canary": what changes a version): the
+# was (docs/computers.md, "Preview and production": what changes a version): the
 # root workspace's manifest and lock; the CLI and the crates it depends on;
 # the templates it scaffolds (each of templates/ but the platform's own,
 # crates/templates/src/blessed_names.rs: the CLI builds without them); and

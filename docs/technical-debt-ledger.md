@@ -141,7 +141,7 @@ fragment.club until cutover (decisions 34–35).
 - **Delete when:** the image says what each agent runs (its view's agents
   written back, `PUT /api/computer/agents/{a}/model` or the like, as
   `profile.model` already logs it), its owner's view carries it, and the
-  page shows that; an image change, which ships through a canary.
+  page shows that; an image change, which ships through preview.
 
 ## OpenRouter's calls are charged at their ceiling, not their cost
 
@@ -264,9 +264,10 @@ fragment.club until cutover (decisions 34–35).
 
 ## A Hermes release has no rollback
 
-- **Observed:** 2026-10-13, designing the canary (docs/computers.md,
-  "Stable and canary"). Pinning a canary computer back to stable starts
-  the older image on the `/data` the canary wrote, its newest save. A
+- **Observed:** 2026-10-13, designing image rounds (docs/computers.md,
+  "Preview and production"). Pinning a computer back to the image before
+  starts the older image on the `/data` the newer one wrote, its newest
+  save. A
   computer keeps three saves, each turn's end replacing the oldest
   (`fragment_core::computer::Saves`), so after a few turns none is from
   before its image changed: decision 19's "point-in-time restore when the
@@ -277,17 +278,17 @@ fragment.club until cutover (decisions 34–35).
   one is fixed by the next release, never pinned back. The first such
   round is v0.21.6 to v0.21.7 (2026-10-16).
 - **Risk:** a Hermes release that breaks on real computers stays broken
-  for the canary group until a fix is built; pinned back anyway, an older
+  for the computers that took it until a fix is built; pinned back anyway, an older
   Hermes opens databases a newer one migrated, which it may refuse or
   misread (the image's `computer-check` runs `PRAGMA quick_check`, which
   a schema it does not know passes).
-- **First proof:** a canary computer pinned back after a Hermes release
+- **First proof:** a computer pinned back after a Hermes release
   whose Hermes logs a schema or migration error at boot, or whose sessions
   are missing.
 - **Delete when:** a computer keeps the save an image change started from
   (the save its first start on a new image restored), apart from its three,
   until its next image change, and a pin back restores it: a rollback then
-  loses only the canary's own work, and says so as any going back does.
+  loses only the work since the update, and says so as any going back does.
 
 ## A direct chat's label is its agent's, which a branch may lack room for
 
@@ -1632,7 +1633,7 @@ fragment.club until cutover (decisions 34–35).
   guest's first read is still not caught here (its sleep's bounds end it).
 - **First proof:** the logs' `{snapshot: "dead"}` lines against the
   snapshot wakes (`restored {from: "snapshot"}`).
-- **Delete when:** Cloudflare fixes #362 and a canary round shows no
+- **Delete when:** Cloudflare fixes #362 and a preview round shows no
   `snapshot: "dead"` across its snapshot wakes; or snapshots go
   (`FRAGMENT_COMPUTER_SNAPSHOTS=off`), when the wait goes with them.
 
