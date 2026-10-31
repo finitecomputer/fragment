@@ -1,5 +1,4 @@
-//! Jobs, triggers, and the inbox (docs/MODEL.md, Operations; phase 2
-//! slice D).
+//! Jobs, triggers, and the inbox (docs/api.md, Jobs and triggers).
 //!
 //! A **run** is one execution of an operation outside a request: a job
 //! someone called, or a mutation or job a trigger started. Each run is a
@@ -869,7 +868,7 @@ impl FragmentCell {
                 self.step_write(run, index, &w.path, Some(bytes), w.expect).await
             }
             Step::FilesRemove { path, expect } => self.step_write(run, index, &path, None, expect).await,
-            ai @ (Step::AiText(_) | Step::AiDecide(_) | Step::AiImage(_) | Step::AiVideo {}) => {
+            ai @ (Step::AiText(_) | Step::AiDecide(_) | Step::AiImage(_) | Step::AiVideo(_)) => {
                 self.step_ai(run, index, &ai, tried).await
             }
             // what the fragment's own page reads, read for its code: who is

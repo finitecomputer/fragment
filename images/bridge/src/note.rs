@@ -1,4 +1,4 @@
-//! The note a turn carries after a cut one (docs/durable-computers.md, P5):
+//! The note a turn carries after a cut one (docs/computers.md, Durability, P5):
 //! the first turn an agent runs in a chat after one of its turns there was
 //! ended as lost (a restart cut it; P1, one life per turn, never runs it
 //! again) is told so, with what that turn was asked, the steps and replies
@@ -312,6 +312,29 @@ fn steps(cut: &Cut) -> Option<String> {
     Some(format!("Its steps, as recorded: {}", steps.join("; ")))
 }
 
+/// How long ago a turn's message was said, in plain words, when it is
+/// handed at least `MESSAGE_AGE_TOLD_MS` after it (an outage, a restart, a
+/// sleep, a backlog), so its agent can judge whether it is still wanted;
+/// `None` sooner, for a time unknown (`said_at` 0), or for a routine or a
+/// command (`exempt`: a routine's message says its hour). A continuation
+/// (`continues`) is told the age of what its cut turn was answering.
+pub fn age(said_at: i64, now: u64, exempt: bool, continues: bool) -> Option<String> {
+    let late = i64::try_from(now).ok()?.checked_sub(said_at)?;
+    if said_at <= 0 || exempt || late < i64::try_from(limits::MESSAGE_AGE_TOLD_MS).ok()? {
+        return None;
+    }
+    let minutes = late / 60_000;
+    let ago = match minutes {
+        ..120 => format!("{minutes} minutes"),
+        120..2880 => format!("{} hours", minutes / 60),
+        _ => format!("{} days", minutes / 1440),
+    };
+    let what = if continues { format!("What that turn was answering was sent about {ago} ago.") } else { format!("This message was sent about {ago} ago, and is only reaching you now.") };
+    let line = format!("{what} If it may no longer be wanted, check before acting on it.");
+    assert!(line.len() <= limits::AGE_NOTE_MAX_BYTES, "an age is one short line: {line}");
+    Some(line)
+}
+
 /// The calls a turn asked for and never heard the end of, on one line:
 /// each may or may not have run (the computer stopped while it ran, or
 /// before), at most `NOTE_STEPS_MAX`, the rest counted.
@@ -561,6 +584,28 @@ mod tests {
 
     fn call(response: &str, position: u32, id: &str, tool: &str, args: &str) -> crate::records::Call {
         crate::records::Call { response: response.into(), position, tool_call_id: id.into(), tool: tool.into(), args: args.into(), category: crate::records::Category::Shell }
+    }
+
+    /// Goal (FIN-236): a message handed at least `MESSAGE_AGE_TOLD_MS` after
+    /// it was said is told its age in plain words; sooner, or a routine's or
+    /// a command's (`exempt`), or a time unknown (0, or one ahead of the
+    /// clock), none. A continuation is told what its cut turn answered.
+    #[test]
+    fn a_late_message_is_told_its_age() {
+        let (minute, now) = (60_000_i64, 100 * 86_400_000_u64);
+        let at = |late: i64| i64::try_from(now).expect("a time") - late;
+        let bound = i64::try_from(limits::MESSAGE_AGE_TOLD_MS).expect("a bound");
+        let told = |late: i64| age(at(late), now, false, false);
+        assert_eq!(told(1_000), None, "fresh");
+        assert_eq!(told(bound - 1), None, "under the bound");
+        let then = " If it may no longer be wanted, check before acting on it.";
+        for (late, ago) in [(bound, "5 minutes"), (119 * minute, "119 minutes"), (3 * 60 * minute + 59_000, "3 hours"), (47 * 60 * minute, "47 hours"), (3 * 1440 * minute, "3 days")] {
+            assert_eq!(told(late), Some(format!("This message was sent about {ago} ago, and is only reaching you now.{then}")), "{late} ms");
+        }
+        assert_eq!(age(at(2 * 60 * minute), now, false, true), Some(format!("What that turn was answering was sent about 2 hours ago.{then}")));
+        assert_eq!(age(at(3 * 60 * minute), now, true, false), None, "a routine's or a command's");
+        assert_eq!(age(0, now, false, false), None, "a time unknown");
+        assert_eq!(age(at(-minute), now, false, false), None, "a time ahead of the clock");
     }
 
     /// Goal (phase 4): a cut turn's note names, first, each call it asked

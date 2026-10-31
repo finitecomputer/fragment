@@ -284,7 +284,14 @@ pub struct PriceBook {
 /// clef-flash, clef and clef-omni, read 2026-10-14): input tokens only,
 /// media counted as input, no output charge and no cache, so a cached or
 /// written token is an input token's price.
-pub const DEFAULT_MODELS: [(&str, TokenPrices); 10] = [
+///
+/// The video model's (crate::media::VIDEO_MODEL), from its catalog entry
+/// (developers.cloudflare.com/ai/models/alibaba/hh1-t2v, read 2026-10-31):
+/// $0.14 a second at 720P and $0.28 at 1080P, through Unified Billing as
+/// the gateway's credits pay, so with the credits fee. A row per
+/// resolution (`media::Resolution::priced_as`), its output one millisecond
+/// of video, priced per million: $140 and $280.
+pub const DEFAULT_MODELS: [(&str, TokenPrices); 12] = [
     // $0.15 in, $0.03 cached, $0.50 out per million tokens (the cheap tier's, and vision)
     ("@cf/zai-org/glm-5.3-flash", TokenPrices { input: 150_000, cached_input: 30_000, cache_write: 150_000, output: 500_000 }),
     // Finite Private's (Finite's tiers' by config), at Workers AI's GLM-5.3 Flash's
@@ -306,6 +313,9 @@ pub const DEFAULT_MODELS: [(&str, TokenPrices); 10] = [
     // BGE-M3's embeddings (the route's embeddings slot unnamed, crate::embed),
     // $0.012 a million input tokens, nothing out
     (crate::embed::MODEL_DEFAULT, TokenPrices { input: 12_000, cached_input: 12_000, cache_write: 12_000, output: 0 }),
+    // HappyHorse 1.0's videos: a millisecond its output, $0.14 a second at 720P, $0.28 at 1080P
+    ("alibaba/hh1-t2v@720P", TokenPrices { input: 0, cached_input: 0, cache_write: 0, output: 140_000_000 }),
+    ("alibaba/hh1-t2v@1080P", TokenPrices { input: 0, cached_input: 0, cache_write: 0, output: 280_000_000 }),
 ];
 
 /// OpenRouter's fee on the credits that pay for its calls: 5.5% of a card
@@ -331,14 +341,14 @@ const fn clef(m: Model) -> (&'static str, TokenPrices) {
 /// The default book's version, informational since a ledger takes any book
 /// whose contents differ from its own (docs/ledger.md; #451). Before, a
 /// ledger took only a newer version, so each change to the defaults
-/// raised it: 7 for OpenRouter's GLM-5.3 Flash
-/// (2026-10-15), after 6 for the Clef family (2026-10-14), 5
+/// raised it, and each still does: 8 for HappyHorse's videos (2026-10-31),
+/// after 7 for OpenRouter's GLM-5.3 Flash (2026-10-15), after 6 for the Clef family (2026-10-14), 5
 /// for Finite Private's GLM-5.3 Flash (2026-10-14), 4 for Hermes' tool
 /// keys (2026-10-09) and 3 for
 /// DeepSeek V4 Flash, past the 2 that finite.place's preview configs
 /// already carried. A deployment's `price_book_version` raises it further (its
 /// operator keys' prices); the book is the higher of the two.
-pub const DEFAULT_BOOK_VERSION: u32 = 7;
+pub const DEFAULT_BOOK_VERSION: u32 = 8;
 /// Workers AI: $0.011 per thousand neurons (spike S4: neurons × $0.000011
 /// matched tokens × the catalog price on every call). Images are priced
 /// in neurons too (crate::media).
@@ -404,7 +414,7 @@ pub const DEFAULT_DYNAMIC_WORKERS: i64 = 2_000;
 /// Session (CDP over the binding: crate::card), which also bills
 /// concurrent browsers, $2.00 each a month past 10 (the month's average of
 /// each day's peak): a deployment-wide charge that no one shot causes, so
-/// it is not metered per person (docs/ledger.md, Assumptions).
+/// it is not metered per person.
 pub const DEFAULT_BROWSER: i64 = 90_000;
 /// Cloudflare Images: $0.50 per thousand unique transformations.
 pub const DEFAULT_IMAGES: i64 = 500_000;
@@ -685,8 +695,8 @@ mod tests {
     fn the_defaults_are_a_valid_book() {
         let book = PriceBook::defaults();
         assert_eq!(book.validate(), Ok(()));
-        assert_eq!(book.version, 7);
-        assert_eq!(book.models.len(), 10);
+        assert_eq!(book.version, 8);
+        assert_eq!(book.models.len(), 12);
         assert_eq!((book.margin_bp, book.credits_fee_bp), (5_000, 500));
     }
 

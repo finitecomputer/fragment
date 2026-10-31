@@ -2,10 +2,10 @@
 # built into BuildKit's builder, and `cargo xtask e2e --build-only` (the
 # cell, the CLI and the suite, and the computer images the node's boot
 # builds), with this commit's builds saved for the runs after it when
-# `save` says so. ci.yml's shards run it before their sections, and on a
-# master push whose shards skip (`proven`), `e2e-build` runs it alone, so
-# every pull request and merge group still starts from master's newest
-# build.
+# `save` says so.
+# ci.yml's shards run it before their sections, and on a master push whose
+# shards skip (`proven`), `e2e-build` runs it alone, so every pull request
+# and merge group still starts from master's newest build and layers.
 name: e2e build
 description: the e2e's caches, its stub image and its build, saved when asked
 inputs:

@@ -2,8 +2,8 @@
 //! core speaks only these commands and events; each runtime translates them
 //! into its own protocol. Two ship here:
 //!
-//! - `relay`: Hermes' Relay (docs/hermes-relay.md). Hermes dials the
-//!   bridge, which is its connector.
+//! - `relay`: Hermes' Relay (docs/bridge.md, "Hermes' Relay"). Hermes
+//!   dials the bridge, which is its connector.
 //! - `script`: a deterministic scripted agent (the stub image), so the
 //!   platform's lanes run without any agent runtime at all.
 //!
@@ -23,6 +23,7 @@
 //! names none. Its turns go to that runtime, and that runtime's menu is its
 //! commands (docs/bridge.md, "Which runtime runs an agent").
 
+pub mod claude;
 pub mod relay;
 pub mod script;
 
@@ -275,7 +276,7 @@ pub struct TurnStart {
     /// when the platform's answer did not say.
     pub claim_seq: Option<u64>,
     /// What the runtime tells the agent before the message, once
-    /// (docs/durable-computers.md, P5): its turn before this one in this
+    /// (docs/computers.md, Durability, P5): its turn before this one in this
     /// chat was cut by a restart, what that turn was asked, the steps and
     /// replies the journal recorded of it, and to check what was done before
     /// doing any of it again. Built from the chat's journal alone
@@ -285,6 +286,11 @@ pub struct TurnStart {
     /// echoes it. It also says what the agent no longer remembers of this
     /// chat (`forgotten`).
     pub note: Option<String>,
+    /// How old its message is, in plain words, when it is handed long after
+    /// it was said (crate::note, `age`): the driver puts it first in
+    /// `note`, before a card's or a cut turn's. Its own field, as `note`
+    /// set by the engine means a card's, in the cut note's place.
+    pub age: Option<String>,
     /// The agent's turns in this chat that another life ran since the
     /// `/data` this life restored (their claims answered 409: a rollback
     /// sent the cursor back), the newest at most `NOTE_FORGOTTEN_MAX`, and
@@ -306,6 +312,10 @@ pub struct TurnStart {
     /// turn. Relay tells its agent so in that chat's session
     /// (`relay::wire::SIMPLEX_TOPIC`).
     pub simplex: bool,
+    /// It continues the turn named, which a restart cut (engine.rs,
+    /// `continue_turn`): its note is that turn's, by its id (driver.rs,
+    /// `cut_note`); said by the computer, never as its asker's words.
+    pub continues: Option<String>,
 }
 
 /// What the bridge asks of a runtime.

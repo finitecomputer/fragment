@@ -71,6 +71,7 @@ mod schedules;
 mod schema;
 mod search;
 mod searchable;
+mod search_index;
 mod runs_on;
 mod serve;
 mod share;
@@ -115,8 +116,8 @@ const PASSED_HEADERS: [&str; 9] =
 /// Durable Object accepts the upgrade the client asked for.
 const WEBSOCKET_HEADERS: [&str; 4] = ["sec-websocket-key", "sec-websocket-version", "sec-websocket-protocol", "sec-websocket-extensions"];
 
-/// `PUT /api/fragments/{name}/archived`'s body, `{archived}`, and
-/// `…/dock`'s, `{dock}`, are a few bytes.
+/// `PUT /api/fragments/{name}/archived`'s body, `{archived}`, `…/dock`'s,
+/// `{dock}`, and `…/pinned`'s, `{pinned}`, are a few bytes.
 const OWN_VIEW_BODY_MAX_BYTES: usize = 1024;
 /// `PUT /api/fragments/{name}/seen` takes no body: what is read of one, to
 /// refuse it.
@@ -224,7 +225,7 @@ pub(crate) fn authenticate(req: &Request, url: &Url, payload: Payload<'_>) -> Ce
 /// the body, and the answer are one definition both ends compile against).
 /// Its refusals pass through; not reaching it, a failure inside it, or an
 /// answer that does not decode is `registry_unavailable`: nothing signed
-/// is decided without it (docs/finite-integration.md, rule 7). A registry
+/// is decided without it (docs/cloudflare-v1.md, R15, rule 7). A registry
 /// of another release refuses the call before it reads it, and is asked
 /// again a few times, then is `deploying` (routed.rs, `send_again`): a
 /// deploy going out never has one release act and the other read its
@@ -634,7 +635,7 @@ async fn reachable(env: &Env, agent: &Signed, asker: &str) -> CellResult<Fragmen
             // archiving and their dock) stays theirs, as do the listed
             // records their role reads: the agent's capped role may read less
             let owned = f.role == Role::Owner;
-            access::listed_role(Some(f.role), cap).map(|role| ListedFragment { role, sharing: None, preview: None, preview_at: None, unread: 0, archived: false, dock: true, owned, listed: vec![], ..f })
+            access::listed_role(Some(f.role), cap).map(|role| ListedFragment { role, sharing: None, preview: None, preview_at: None, unread: 0, archived: false, dock: true, pinned: false, owned, listed: vec![], ..f })
         })
         .collect();
     Ok(FragmentList { fragments })
@@ -1277,6 +1278,19 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
             let mut init = RequestInit::new();
             init.with_method(Method::Put).with_body(Some(inner.into()));
             let put = Request::new_with_init("https://principal.internal/dock", &init)?;
+            crate::routed::send(env, "PRINCIPAL", &who.identity.id, put).await
+        }
+        // whether the signer pinned a fragment of theirs (principal.rs):
+        // their own view again, as archiving is
+        (Method::Put, ["api", "fragments", name, "pinned"]) => {
+            let body = read_body(&mut req, OWN_VIEW_BODY_MAX_BYTES).await?;
+            let set: fragment_proto::SetPinned = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+            let who = signer(env, &req, &url, &body).await?;
+            let name = named_fragment(name)?;
+            let inner = json!({ "fragment": name, "pinned": set.pinned }).to_string();
+            let mut init = RequestInit::new();
+            init.with_method(Method::Put).with_body(Some(inner.into()));
+            let put = Request::new_with_init("https://principal.internal/pinned", &init)?;
             crate::routed::send(env, "PRINCIPAL", &who.identity.id, put).await
         }
         // the signer has seen a chat's messages (principal.rs): their own

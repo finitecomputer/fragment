@@ -44,6 +44,16 @@ export class Ledger extends DurableObject {
   alarm(info) { return this.rs.alarm(info); }
 }
 
+// A fragment life's search index (search_index.rs): its supervisor calls it.
+export class SearchIndex extends DurableObject {
+  constructor(ctx, env) {
+    super(ctx, env);
+    this.rs = new rs.SearchIndexCell(ctx, env);
+  }
+  fetch(request) { return this.rs.fetch(request); }
+  alarm(info) { return this.rs.alarm(info); }
+}
+
 export class Registry extends DurableObject {
   constructor(ctx, env) {
     super(ctx, env);
@@ -80,7 +90,7 @@ export class Files extends WorkerEntrypoint {
   stat(path) { return this.#answer("stat", { path: String(path) }); }
 }
 
-// One run of an operation (docs/MODEL.md, Operations: job). Each round asks
+// One run of an operation (docs/api.md, Jobs and triggers). Each round asks
 // the supervisor to advance the job to its next step, then performs that
 // step through the supervisor, which keeps the step's answer before it
 // replies (jobs.rs, `steps`): an advance names only how many steps are

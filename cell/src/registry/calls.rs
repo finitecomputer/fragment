@@ -466,9 +466,7 @@ pub(crate) enum TestHook {
     /// release (`SKEWED`) would: each refused, 503 `deploying`, before it is
     /// read, by the check every call meets (`routed::refused`), so a test
     /// sees what a deploy going out does to that call, and that its caller
-    /// asks again. Deployed before the caller's release, the stand-in is a
-    /// registry a deploy replaced, which restarts at its first refusal
-    /// (fragment_core::release `restarts`), its hooks gone with it.
+    /// asks again.
     SkewFor(SkewFor),
     /// How many calls the Registry has had since it started, and how many
     /// it refused for their release (`{calls: null}` → `{calls, skewed}`):
@@ -562,19 +560,12 @@ pub(crate) const TEST_DOWN_FOR_MAX: u32 = 100;
 /// (`FRAGMENT_DEPLOY_ID` is a commit, or `dev`).
 pub(crate) const SKEWED: &str = "another-release-a-test-hook";
 
-/// `TestHook::SkewFor`: which call (a `Call`'s path), how many times, and
-/// when its stand-in release was deployed (`FRAGMENT_DEPLOYED_AT`'s
-/// seconds: 0 is before every caller's, an old registry a newer caller's
-/// call restarts; `u64::MAX` after every caller's, a new one an older
-/// caller's leaves as it is; none, by default, a release from before deploy
-/// times were named: refused, and no restart).
+/// `TestHook::SkewFor`: which call (a `Call`'s path), and how many times.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct SkewFor {
     pub path: String,
     pub times: u32,
-    #[serde(default)]
-    pub deployed: Option<u64>,
 }
 
 /// The controls over sign-in's rows.

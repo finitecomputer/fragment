@@ -22,12 +22,7 @@
 //! another release is refused before anything is done, so a change to a
 //! call's shape ships safely across the seconds a deploy takes
 //! (fragment_core::release; docs/MODEL.md, "Calls between releases").
-//! An object that refuses a call from a release deployed after its own
-//! restarts onto it (`restart_soon`), so the caller's next ask meets the
-//! new code.
 
-use std::cell::RefCell;
-use std::collections::BTreeSet;
 use std::ops::Deref;
 
 use fragment_core::{npub, release};
@@ -35,8 +30,7 @@ use fragment_proto::{routed, valid_fragment_name, ErrorBody, ErrorCode, Identity
 use serde::{Deserialize, Serialize};
 // the macro's generated code names `wasm_bindgen`: worker's re-export
 use worker::wasm_bindgen::{self, prelude::*, JsCast};
-use worker::js_sys::{Function, Object, Reflect};
-use worker::{console_error, console_log, Delay, Env, Headers, Method, Request, RequestInit, Response, Url};
+use worker::{console_log, Delay, Env, Headers, Method, Request, RequestInit, Response, Url};
 
 use crate::config::Config;
 use crate::error::{CellError, CellResult};
@@ -101,7 +95,7 @@ impl Credential {
     /// Who the credential names on `fragment`, asked of the registry: a key
     /// no one holds, or a revoked one, is 401; a session that is not live
     /// is nobody (a stale cookie leaves the request anonymous); a registry
-    /// that cannot answer is 503, never anonymous (rule 7).
+    /// that cannot answer is 503, never anonymous (R15, rule 7).
     pub async fn resolve(self, env: &Env, fragment: &str) -> CellResult<Option<Signed>> {
         match self {
             Credential::Key(key) => {
@@ -210,7 +204,9 @@ fn marker(path: &str) -> CellResult<Option<(&'static str, &'static str)>> {
         Ok(Some((crate::members::CLAIM_HEADER, "1")))
     } else if path.starts_with("wipe/") {
         Ok(Some((crate::wipe::WIPE_HEADER, "1")))
-    } else if path.starts_with("test/") {
+    } else if path.starts_with("test/") || path.starts_with("index/") {
+        // a search index is called by its fragment's supervisor alone:
+        // the router never names one
         Ok(None)
     } else {
         Err(CellError::host(format!("{path} is not an internal route")))
@@ -218,8 +214,9 @@ fn marker(path: &str) -> CellResult<Option<(&'static str, &'static str)>> {
 }
 
 /// A call into a fragment's supervisor from inside the platform: `path`
-/// (`job/advance`, `cap/files/read`, `deliver/report`, `test/keys`) with a
-/// JSON body, marked as that route expects.
+/// (`job/advance`, `cap/files/read`, `deliver/report`, `test/keys`), or
+/// into its search index (`index/search`), with a JSON body, marked as
+/// that route expects.
 pub(crate) fn internal_request(path: &str, body: &str) -> CellResult<Request> {
     let headers = Headers::new();
     headers.set("content-type", "application/json")?;
@@ -232,7 +229,10 @@ pub(crate) fn internal_request(path: &str, body: &str) -> CellResult<Request> {
 }
 
 /// Stamps a call into a platform object with this release
-/// (`release::HEADER`) and when it was deployed (`release::DEPLOYED`).
+/// (`release::HEADER`), and when it was deployed (`release::DEPLOYED`),
+/// which no release reads now: an object of a release before this one read
+/// it to restart onto a newer caller's, so it stays on the wire until none
+/// can be live (docs/technical-debt-ledger.md).
 fn stamp(req: &Request, env: &Env) -> CellResult<()> {
     let cfg = Config::from_env(env);
     let headers = req.headers();
@@ -244,103 +244,18 @@ fn stamp(req: &Request, env: &Env) -> CellResult<()> {
     Ok(())
 }
 
-/// An object's own release, as its `fetch` checks each call against it
-/// (`refused`): its deployment's (`Own::of`), or a test lever's stand-in
-/// (the Registry's `skewFor`).
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct Own<'a> {
-    /// The release (`FRAGMENT_DEPLOY_ID`).
-    pub id: &'a str,
-    /// When it was deployed (`FRAGMENT_DEPLOYED_AT`), if it was named.
-    pub deployed: Option<u64>,
-}
-
-impl Own<'static> {
-    /// The release the isolate runs.
-    pub(crate) fn of(cfg: &'static Config) -> Own<'static> {
-        Own { id: &cfg.deploy_id, deployed: cfg.deployed_at }
-    }
-}
-
 /// The object's side, the first thing every platform object's `fetch`
-/// does: a call from a release other than `own`, or naming none, is
-/// answered here, 503 `deploying` marked as this refusal
+/// does: a call from a release other than `own` (its deployment's
+/// `FRAGMENT_DEPLOY_ID`, or the Registry's test stand-in, `skewFor`), or
+/// naming none, is answered here, 503 `deploying` marked as this refusal
 /// (`release::REFUSED`), before anything is read or done; `None` admits it.
-/// When the caller's release was deployed after `own`, the object
-/// restarts onto it too (`release::restarts`; `restart_soon`): `ctx` is
-/// its state, as the runtime handed it.
-pub(crate) fn refused(req: &Request, own: Own<'_>, ctx: &JsValue) -> worker::Result<Option<Response>> {
+pub(crate) fn refused(req: &Request, own: &str) -> worker::Result<Option<Response>> {
     let caller = req.headers().get(release::HEADER)?;
-    let Err(skew) = release::admit(caller.as_deref(), own.id) else { return Ok(None) };
-    let deployed = req.headers().get(release::DEPLOYED)?.as_deref().and_then(release::deployed);
-    let restarting = release::restarts(deployed, own.deployed)
-        && match restart_soon(ctx, own.id) {
-            Ok(asked) => asked,
-            Err(e) => {
-                console_error!("{}", serde_json::json!({ "event": "release.restart_failed", "why": format!("{e:?}") }));
-                false
-            }
-        };
-    console_log!(
-        "{}",
-        serde_json::json!({ "event": "release.refused", "caller": skew.caller, "callee": skew.callee, "path": req.path(), "callerDeployed": deployed, "calleeDeployed": own.deployed, "restarting": restarting })
-    );
+    let Err(skew) = release::admit(caller.as_deref(), own) else { return Ok(None) };
+    console_log!("{}", serde_json::json!({ "event": "release.refused", "caller": skew.caller, "callee": skew.callee, "path": req.path() }));
     let mut resp = CellError::new(ErrorCode::Deploying, skew.message()).response()?;
-    resp.headers_mut().set(release::REFUSED, own.id)?;
+    resp.headers_mut().set(release::REFUSED, own)?;
     Ok(Some(resp))
-}
-
-thread_local! {
-    /// The objects this isolate has restarted onto a newer release, by id
-    /// (`restart_soon`): each at most once. An isolate runs one release, so
-    /// an object of it restarts once, and its next instance is the new
-    /// release's, in another isolate. Should Cloudflare start it again on
-    /// this one (its host still behind), it is not restarted again: it
-    /// refuses until Cloudflare's own restart, as before restarts were
-    /// asked for, never restarting at every call.
-    static RESTARTED: RefCell<BTreeSet<String>> = const { RefCell::new(BTreeSet::new()) };
-}
-
-/// The most objects one isolate restarts (`RESTARTED`): far more than an
-/// isolate holds at once; past it, each is left to Cloudflare's restart.
-const RESTARTED_MAX: usize = 4096;
-
-/// How long after the refusal that asks for it an object restarts: past
-/// that refusal's answer, which must reach its caller (whose next ask is
-/// what meets the new code; the restart ends every request the instance
-/// is still answering), and well before that ask
-/// (`release::AGAIN_AFTER_MS`'s first wait). Under load the timer runs
-/// late, as that ask arrives (CI runs 39814036246, 39896890808,
-/// 40898300862): the restart ends it too, and its caller, of another
-/// release, asks again as at a refusal (`sent`).
-const RESTART_AFTER_MS: u32 = 50;
-
-/// Restarts the object whose state is `ctx` (`ctx.abort()`: its instance
-/// ends, and the next call or alarm starts another, on the code its
-/// deployment runs now) `RESTART_AFTER_MS` from now, once in this isolate
-/// (`RESTARTED`): whether this asked for it. A deploy restarts every object anyway, but
-/// Cloudflare holds one it keeps busy on the code before for minutes
-/// (fragment_core::release); this is that restart, brought forward, and
-/// it costs what that one does: the requests the instance is still
-/// answering end (each caller's failure, as at any restart), its sockets
-/// close (their pages reconnect), an alarm that runs is run again, a
-/// container runs on (computer.rs adopts it). The timer calls `abort`
-/// itself, so no Rust is running in the isolate as the instance ends.
-fn restart_soon(ctx: &JsValue, own: &str) -> Result<bool, JsValue> {
-    let id = String::from(Object::from(Reflect::get(ctx, &JsValue::from_str("id"))?).to_string());
-    if !RESTARTED.with(|r| {
-        let mut r = r.borrow_mut();
-        r.len() < RESTARTED_MAX && r.insert(id)
-    }) {
-        return Ok(false);
-    }
-    let abort: Function = Reflect::get(ctx, &JsValue::from_str("abort"))?.dyn_into()?;
-    let set_timeout: Function = Reflect::get(&worker::js_sys::global(), &JsValue::from_str("setTimeout"))?.dyn_into()?;
-    // the reason names this release, so a caller of another release, ended
-    // with the rest, asks again (`sent`)
-    let restart = abort.bind1(ctx, &JsValue::from_str(&release::restart_reason(own)));
-    set_timeout.call2(&JsValue::UNDEFINED, &restart, &JsValue::from(RESTART_AFTER_MS))?;
-    Ok(true)
 }
 
 /// What one call into an object came to: its answer, or its refusal of
@@ -351,21 +266,19 @@ enum Sent {
 }
 
 async fn sent(env: &Env, binding: &str, name: &str, req: Request) -> CellResult<Sent> {
+    let stub = namespace(env, binding)?.get_by_name(name)?;
+    sent_to(env, binding, name, stub, req).await
+}
+
+/// The objects of `binding`, reached here alone (xtask guards.rs).
+fn namespace(env: &Env, binding: &str) -> CellResult<worker::ObjectNamespace> {
+    Ok(env.durable_object(binding)?)
+}
+
+/// `sent`, to the object `stub` is (`name` says which, in a refusal's words).
+async fn sent_to(env: &Env, binding: &str, name: &str, stub: worker::Stub, req: Request) -> CellResult<Sent> {
     stamp(&req, env)?;
-    let mut resp = match env.durable_object(binding)?.get_by_name(name)?.fetch_with_request(req).await {
-        Ok(resp) => resp,
-        Err(e) => match release::restarted_by(&e.to_string()).filter(|theirs| *theirs != Config::from_env(env).deploy_id) {
-            // the object, of another release, restarting onto a newer one
-            // (`restart_soon`) ended this call with the rest: a call it
-            // refuses before doing anything, so a refusal, asked again by
-            // `send_again` as one; its next instance runs the newer code
-            Some(theirs) => {
-                let message = format!("{binding} {name} was restarting onto a newer release: a deploy is going out; try again in a few seconds");
-                return Ok(Sent::Refused(CellError::new(ErrorCode::Deploying, message), theirs.to_string()));
-            }
-            None => return Err(e.into()),
-        },
-    };
+    let mut resp = stub.fetch_with_request(req).await?;
     // an app's answer passed through with the mark would only be its own
     // request's refusal, as `serve::REFUSAL`'s would
     let Some(theirs) = resp.headers().get(release::REFUSED)?.filter(|_| resp.status_code() == 503) else {
@@ -446,12 +359,13 @@ const PROBE_HEADER: &str = "x-fragment-probe";
 /// at a deploy), and an object of each other class named for the probe, a
 /// name no fragment, person or computer has (`__`). One that never existed
 /// is made by the probe, its schema's steps run and nothing more.
-const PROBED: [(&str, &str, &str); 5] = [
+const PROBED: [(&str, &str, &str); 6] = [
     ("Registry", "REGISTRY", crate::registry::NAME),
     ("Principal", "PRINCIPAL", "__probe"),
     ("Ledger", "LEDGER", "__probe"),
     ("Fragment", "FRAGMENT", "__probe"),
     ("Computer", "COMPUTER", "__probe"),
+    ("SearchIndex", "SEARCH_INDEX", "__probe"),
 ];
 
 /// An object's answer to a deploy's probe, the second thing its `fetch`
@@ -468,6 +382,57 @@ pub(crate) fn probed(req: &Request, schema: &crate::schema::Schema) -> worker::R
     }
 }
 
+/// The request a deploy's probe of an object asks (`probed`).
+fn probe_request() -> CellResult<Request> {
+    let headers = Headers::new();
+    headers.set(PROBE_HEADER, "1")?;
+    let mut init = RequestInit::new();
+    init.with_method(Method::Get).with_headers(headers);
+    Ok(Request::new_with_init(&format!("https://probe.internal{PROBE_PATH}"), &init)?)
+}
+
+/// The object an operator wakes (`wake`), by the id Cloudflare lists it
+/// under: 64 lowercase hex digits.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Wake {
+    id: String,
+}
+
+/// An operator's wake of one platform object (`POST /api/admin/objects/
+/// {class}/wake`; docs/api.md, Operators): it starts as any call starts
+/// it, its schema made current (an object made before versions adopted at
+/// step 1, or refused), and answers as a deploy's probe does (`probed`):
+/// `{class, id, ready: true}`, or its refusal (`schema_refused`, naming
+/// it and why; `deploying` from another release). Asked again, it answers the
+/// same and runs nothing. It exists for the objects no call has started
+/// since versions came (docs/technical-debt-ledger.md), and goes with them.
+pub(crate) async fn wake(env: &Env, class: &str, Wake { id }: Wake) -> CellResult<serde_json::Value> {
+    let Some((class, binding, _)) = PROBED.iter().find(|(c, _, _)| c.eq_ignore_ascii_case(class)).copied() else {
+        let classes: Vec<&str> = PROBED.iter().map(|(c, _, _)| *c).collect();
+        return Err(CellError::invalid(format!("no class {class:?}: one of {}", classes.join(", "))));
+    };
+    if id.len() != 64 || !id.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+        return Err(CellError::invalid("an object's id is 64 lowercase hex digits"));
+    }
+    // Cloudflare refuses an id of another namespace (another class, another
+    // account's) here, before any object is made
+    let ns = namespace(env, binding)?;
+    let id = ns.id_from_string(&id).map_err(|_| CellError::invalid(format!("{id} is no {class} object's id")))?;
+    let named = id.to_string();
+    match sent_to(env, binding, &named, id.get_stub()?, probe_request()?).await? {
+        Sent::Answered(resp) if resp.status_code() == 200 => Ok(serde_json::json!({ "class": class, "id": named, "ready": true })),
+        Sent::Answered(mut resp) => {
+            let status = resp.status_code();
+            match resp.json::<ErrorBody>().await {
+                Ok(b) => Err(CellError::new(b.error, b.message)),
+                Err(_) => Err(CellError::host(format!("{class} {named} answered its wake {status}"))),
+            }
+        }
+        Sent::Refused(e, _) => Err(e),
+    }
+}
+
 /// `GET /healthz/objects` (docs/api.md, Health): this Worker's release,
 /// and what each class's probe object (`PROBED`) answered it, asked once
 /// each, at once: `{"release", "objects": {<class>: {"release"} |
@@ -478,14 +443,7 @@ pub(crate) fn probed(req: &Request, schema: &crate::schema::Schema) -> worker::R
 /// each ask is answered before anything else an object does, as cheaply as
 /// the refusal any call of another release gets.
 pub(crate) async fn objects(env: &Env, cfg: &Config) -> CellResult<Response> {
-    let ask = |binding: &'static str, name: &'static str| async move {
-        let headers = Headers::new();
-        headers.set(PROBE_HEADER, "1")?;
-        let mut init = RequestInit::new();
-        init.with_method(Method::Get).with_headers(headers);
-        let req = Request::new_with_init(&format!("https://probe.internal{PROBE_PATH}"), &init)?;
-        sent(env, binding, name, req).await
-    };
+    let ask = |binding: &'static str, name: &'static str| async move { sent(env, binding, name, probe_request()?).await };
     let answers = futures_util::future::join_all(PROBED.iter().map(|(_, binding, name)| ask(binding, name))).await;
     let mut objects = serde_json::Map::new();
     let mut all = true;

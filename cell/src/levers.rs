@@ -1,4 +1,4 @@
-//! The test levers, `/api/test/*` (docs/api.md, `FRAGMENT_TEST_SECRET`):
+//! The test levers, `/api/test/*` (docs/api.md, Test levers):
 //! the router sends a request here only once it has checked the fleet's
 //! test secret is set and that the request carries it
 //! (`fragment_core::levers`); to anyone else they are no route.

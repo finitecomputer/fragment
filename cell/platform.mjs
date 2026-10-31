@@ -1,5 +1,5 @@
 // Platform code that runs inside the app facet, around the author's App
-// class (docs/MODEL.md, Operations). A mutation is synchronous: the
+// class (docs/api.md, Apps). A mutation is synchronous: the
 // author's method, its ledger row, and the effects it asked for commit in
 // one facet-local transactionSync, so the facet's own database decides
 // replays and conflicting bodies, and the ledger doubles as an outbox the
@@ -344,8 +344,9 @@ class Job {
   }
 
   // Text through the platform's model route (a tier: cheap unless named),
-  // and images on Workers AI (FLUX.1 [schnell]); the owner's ledger pays
-  // for each (docs/ledger.md):
+  // images on Workers AI (FLUX.1 [schnell]) and videos from Cloudflare's
+  // model catalog (HappyHorse 1.0); the owner's ledger pays for each
+  // (docs/ledger.md):
   //   ai.text({ model?, prompt | messages, max_tokens?, reasoning_effort?, tools?, tool_choice?, draft?: { channel, turn } })
   //     → { text, message: { role, content, tool_calls? }, finish_reason, model, tier, usage, timing }
   //     (its arguments at most AI_TEXT_MAX_BYTES of JSON; with a draft, its
@@ -354,7 +355,8 @@ class Job {
   //     predicates and scores on the Clef family (clef-flash unless named), about text, JSON and
   //     media: the fragment's blobs ({ sha256, type }, as fragment.blob(file) answers) or small inline ({ data })
   //   ai.image({ prompt, path, steps? })  → { path, size, sha256, mediaType }: a JPEG on main
-  //   ai.video(…) is refused, saying why: videos are off until they run on Cloudflare
+  //   ai.video({ prompt, path, duration?, resolution?, aspect_ratio? })
+  //     → { path, size, sha256, mediaType, lengthMs }: an MP4 on main (refused where the tiers are private)
   get ai() {
     const step = (kind, args) => this.#step(kind, args);
     const clean = (o) => JSON.parse(JSON.stringify(o ?? {}));
@@ -366,7 +368,7 @@ class Job {
       },
       decide: (opts) => step("ai.decide", clean(opts)),
       image: (opts = {}) => (checkPath(opts.path), step("ai.image", clean(opts))),
-      video: (opts = {}) => step("ai.video", clean(opts)),
+      video: (opts = {}) => (checkPath(opts.path), step("ai.video", clean(opts))),
     };
   }
 
@@ -406,7 +408,7 @@ class Job {
 }
 
 // What an app may not do with its Durable Object, taken away before the
-// author's constructor runs (spike S1, docs/cloudflare-v1.md): an alarm
+// author's constructor runs (spike S1): an alarm
 // wedges the facet (every call answers `internal error` until the platform
 // Worker is deployed again), an async transaction or a KV write outside
 // SQL would bypass the mutation's own transaction and its cap, and a

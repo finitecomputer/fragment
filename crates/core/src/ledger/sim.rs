@@ -1,6 +1,5 @@
-//! Deterministic simulation of the ledger (docs/cloudflare-v1.md,
-//! Evaluation). Goal: the ledger's money stays right under what a real
-//! deployment does to it. Method: a seeded generator of interleaved
+//! Deterministic simulation of the ledger. Goal: the ledger's money
+//! stays right under what a real deployment does to it. Method: a seeded generator of interleaved
 //! operations from many callers (meter batches, grants, plan and seat
 //! changes, overdrafts, caps, price books, sweeps), with injected crashes (an effect lost before it is applied,
 //! or its answer lost after, then retried later), duplicates, reordering,

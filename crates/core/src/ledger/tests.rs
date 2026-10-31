@@ -864,12 +864,11 @@ fn old_reservation(reference: &str, at_ms: i64) -> serde_json::Value {
     })
 }
 
-/// Goal: a head those releases kept, holding reservations, loads; its
-/// holds are retired, never charged (what they held was never drawn), and
-/// its balance and every other part are as they were; it is written back
-/// without them. Valid, replayed (read and retired twice: the same), and
-/// restarted. Method: a head written now, the holds of the old shape put
-/// back into its JSON (their entries are the next test's).
+/// Goal: a head those releases kept, holding reservations, loads with its
+/// holds let go, never charged (what they held was never drawn), and its
+/// balance and every other part as they were; it is written back without
+/// them. Valid, replayed (read twice: the same), and restarted. Method: a
+/// head written now, the holds of the old shape put back into its JSON.
 #[test]
 fn a_head_kept_with_holds_loads_without_them_and_charges_nothing() {
     let mut w = World::seat();
@@ -879,14 +878,10 @@ fn a_head_kept_with_holds_loads_without_them_and_charges_nothing() {
         "aig:held": { "amount": TURN, "fragment": "todo.ann", "at_ms": T0 },
         "step:x@1/run/1/attempt/1/step/0": { "amount": 25 * USD, "fragment": null, "at_ms": T0 - 7 * 3_600_000 }
     });
-    let mut loaded: Ledger = serde_json::from_value(old.clone()).expect("a head with holds loads");
-    assert_eq!(loaded.retire_holds(&mut w.store), 2, "both retired");
+    let loaded: Ledger = serde_json::from_value(old.clone()).expect("a head with holds loads");
     loaded.assert_valid();
-    assert_eq!(loaded, w.ledger, "the holds are gone; nothing else moves");
-    let mut again: Ledger = serde_json::from_value(old).unwrap();
-    again.retire_holds(&mut w.store);
-    assert_eq!(again, loaded, "read and retired again, the same");
-    assert_eq!(loaded.clone().retire_holds(&mut w.store), 0, "a head with none retires nothing");
+    assert_eq!(loaded, w.ledger, "the holds are let go; nothing else moves");
+    assert_eq!(serde_json::from_value::<Ledger>(old).unwrap(), loaded, "read again, the same");
     let s = loaded.status(&w.store, T0, &w.book);
     assert_eq!((s.balance_micros, s.reserved_micros, s.available_micros), (47 * USD, 0, 47 * USD + OVERDRAFT_DEFAULT), "nothing held, nothing charged");
     assert_eq!(loaded.fragment_open(&w.store, "todo.ann", T0), Ok(()), "a hold no more counts toward a cap: $3 of $5");
@@ -896,48 +891,7 @@ fn a_head_kept_with_holds_loads_without_them_and_charges_nothing() {
     assert_eq!(w.ok(Op::Sweep), Outcome::Swept(Swept { forgotten: 0 }));
     assert_eq!((w.balance(), w.ledger.totals().charged), (47 * USD, 3 * USD), "no sweep charges a hold that was");
     let written = serde_json::to_value(&w.ledger).unwrap();
-    assert_eq!(written["holds"], serde_json::json!({}), "written back without them: {written}");
-}
-
-/// The head as the release before decision 62 read it: every field
-/// required, `holds` a map (its `Ledger`; what a hold holds is no matter
-/// here, as this release writes none).
-#[derive(Debug, serde::Deserialize)]
-struct HeadBefore {
-    money: Money,
-    book: PriceBook,
-    holds: BTreeMap<String, serde::de::IgnoredAny>,
-}
-
-/// Goal: a rollback to a release before decision 62 reads every head this
-/// one writes: old → new → old, a head with holds and a book, one without,
-/// a new person's, and one restarted. Method: the head shape of the
-/// release before the holds went (`HeadBefore`: a book and holds, both
-/// required; the release before the book went requires the book alone)
-/// reads what this one wrote (`written`), its money as it was, the book
-/// the release's own, and no holds.
-#[test]
-fn a_head_written_here_reads_in_the_release_before() {
-    let mut w = World::seat();
-    w.spend_in("b1", 3 * USD, Some("todo.ann"));
-    let mut old = serde_json::to_value(&w.ledger).unwrap();
-    old["holds"] = serde_json::json!({ "aig:held": { "amount": TURN, "fragment": "todo.ann", "at_ms": T0 } });
-    old["book"] = serde_json::to_value(PriceBook { margin_bp: 10_000, ..book() }).unwrap();
-    let before: HeadBefore = serde_json::from_value(old.clone()).expect("the old shape, as the release before wrote it");
-    assert_eq!(before.holds.len(), 1);
-    let fresh = World::guest().ledger;
-    let mut retired = serde_json::from_value::<Ledger>(old).unwrap();
-    retired.retire_holds(&mut w.store);
-    for (what, head) in [("with holds and a book", retired), ("without", w.ledger.clone()), ("a new person's", fresh)] {
-        let written = head.written(&w.book);
-        let back: HeadBefore = serde_json::from_str(&written).unwrap_or_else(|e| panic!("{what}: the release before reads it: {e}"));
-        assert_eq!((back.money, &back.book, back.holds.len()), (head.money, &w.book, 0), "{what}");
-        let again: Ledger = serde_json::from_str(&written).unwrap();
-        assert_eq!(again, head, "{what}: and this one reads it back the same");
-    }
-    let w = w.restarted();
-    let back: HeadBefore = serde_json::from_str(&w.ledger.written(&w.book)).expect("restarted, the same");
-    assert_eq!(back.money, w.ledger.money);
+    assert!(written.get("holds").is_none(), "written back without them: {written}");
 }
 
 /// Goal: a head those releases kept names the book it charged with: it
@@ -972,7 +926,7 @@ fn an_old_reservation_entry_reads_as_one_from_before() {
     for old in [settled.clone(), held.clone(), released] {
         let read = serde_json::from_value::<Entry>(old.clone()).unwrap();
         assert_eq!(read, Entry::Before(old.clone()), "{old}");
-        assert_eq!((read.charge(), read.at_ms(), read.held_before()), (None, T0, old["end"].is_null()));
+        assert_eq!((read.charge(), read.at_ms()), (None, T0));
         assert_eq!(serde_json::to_value(&read).unwrap(), old, "written back as it was");
     }
     assert!(serde_json::from_value::<Entry>(serde_json::json!({ "row": {} })).is_err(), "an entry names its kind");
@@ -989,98 +943,4 @@ fn an_old_reservation_entry_reads_as_one_from_before() {
     w.now += 1;
     w.ok(Op::Sweep);
     assert_eq!(w.store.entry("aig:old"), None, "forgotten as any is");
-}
-
-/// An entry as the releases before decision 62 read it (their `Entry`
-/// and `End`, every field required), and their sweep's guard: no
-/// reservation still held may be forgotten (`Memory::prune`'s assert, and
-/// the SQL store's refusal of a held entry older than the horizon).
-#[derive(Debug, serde::Deserialize)]
-#[serde(tag = "entry", rename_all = "snake_case")]
-enum EntryBefore {
-    Reservation {
-        #[serde(rename = "reserve")]
-        _reserve: serde_json::Value,
-        amount: i64,
-        at_ms: i64,
-        end: Option<EndBefore>,
-    },
-    // its fields are read to prove the shape, not looked at
-    Row {
-        #[serde(rename = "row")]
-        _row: MeterRow,
-        #[serde(rename = "priced")]
-        _priced: Priced,
-        #[serde(rename = "charge")]
-        _charge: i64,
-        #[serde(rename = "book")]
-        _book: u32,
-    },
-}
-
-#[derive(Debug, PartialEq, serde::Deserialize)]
-#[serde(tag = "end", rename_all = "snake_case")]
-enum EndBefore {
-    Settled { usage: Option<Usage>, priced: Option<Priced>, charge: i64, basis: String },
-    Released,
-}
-
-/// Every entry of `store`, read as the release before reads it.
-fn entries_before(store: &Memory) -> BTreeMap<String, EntryBefore> {
-    let all = serde_json::to_value(store).unwrap()["entries"].clone();
-    serde_json::from_value(all).expect("every entry reads in the release before")
-}
-
-/// Review (#474, Alex): holds forgiven in the head left their entries
-/// held, and a release rolled back to before decision 62 found them: once
-/// one passed 90 days its sweep's guard failed, every minute. Goal: a
-/// rollback finds no hold and no held entry. Method: old → new → old. A
-/// head of the release before holding one reservation, beside a settled
-/// and a released one; read here (`retire_holds`, as the Durable Object
-/// does in the transaction that writes the head back), restarted; then
-/// read as the release before reads it, its head and every entry, and its
-/// sweep's guard at 90 days and a millisecond.
-#[test]
-fn a_rollback_finds_no_hold_and_no_held_entry() {
-    let mut w = World::seat();
-    w.spend_in("b1", 3 * USD, Some("todo.ann"));
-    let mut head = serde_json::to_value(&w.ledger).unwrap();
-    head["holds"] = serde_json::json!({ "aig:held": { "amount": TURN, "fragment": "todo.ann", "at_ms": T0 } });
-    let settled = old_reservation("aig:settled", T0);
-    let mut held = old_reservation("aig:held", T0);
-    held["end"] = serde_json::Value::Null;
-    let mut released = old_reservation("aig:released", T0);
-    released["end"] = serde_json::json!({ "end": "released" });
-    for (reference, entry) in [("aig:settled", &settled), ("aig:held", &held), ("aig:released", &released)] {
-        w.store.put_entry(reference, serde_json::from_value(entry.clone()).unwrap());
-    }
-    let held_before = |store: &Memory| entries_before(store).into_iter().filter(|(_, e)| matches!(e, EntryBefore::Reservation { end: None, .. })).count();
-    assert_eq!(held_before(&w.store), 1, "the release before's state: one held");
-
-    // this release reads it
-    let mut ledger: Ledger = serde_json::from_value(head).unwrap();
-    assert_eq!(ledger.retire_holds(&mut w.store), 1);
-    ledger.assert_valid();
-    w.ledger = ledger;
-    let mut w = w.restarted();
-    assert_eq!((w.balance(), w.ledger.totals().charged), (47 * USD, 3 * USD), "forgiven: nothing charged");
-    let mut ended = held.clone();
-    ended["end"] = serde_json::json!({ "end": "released" });
-    assert_eq!(w.store.entry("aig:held"), Some(Entry::Before(ended)), "ended as released, its time as it was");
-    assert_eq!((w.store.entry("aig:settled"), w.store.entry("aig:released")), (Some(Entry::Before(settled)), Some(Entry::Before(released))), "the others as they were");
-    let Outcome::Metered(m) = w.ok(meter("b2", vec![row("aig:held", turn(), None, T0)])) else { panic!() };
-    assert_eq!(m.refused, [RowRefused { index: 0, why: Refused::ConflictingBody }], "a replay of it stays refused");
-
-    // rolled back: the release before reads the head and every entry
-    let back: HeadBefore = serde_json::from_str(&w.ledger.written(&w.book)).unwrap();
-    assert_eq!((back.holds.len(), back.money), (0, w.ledger.money));
-    assert_eq!(held_before(&w.store), 0, "no held entry for its sweep to find");
-    let ended_before = entries_before(&w.store);
-    assert!(matches!(&ended_before["aig:held"], EntryBefore::Reservation { end: Some(EndBefore::Released), amount, at_ms, .. } if *amount == TURN && *at_ms == T0));
-    // its sweep at 90 days and a millisecond: its guard holds (nothing held
-    // is forgotten), and the entries go by their time, as this one's do
-    w.now = T0 + REF_KEEP_MS + 1;
-    let Outcome::Swept(swept) = w.ok(Op::Sweep) else { panic!() };
-    assert_eq!(swept.forgotten, 6, "three reservations, the row and its batch, and the replay's batch");
-    assert!(entries_before(&w.store).is_empty());
 }

@@ -434,6 +434,14 @@ pub fn turn_id(agent: &str, fragment: &str, channel: &str, seq: u64) -> String {
     hex(&digest)[..24].to_string()
 }
 
+/// The turn that continues the cut turn `cut` (engine.rs,
+/// `continue_turn`): one id a cut turn, the same in every life, so its
+/// claim makes it one run.
+pub fn continuation_id(cut: &str) -> String {
+    let digest = Sha256::digest(format!("continue\0{cut}").as_bytes());
+    hex(&digest)[..24].to_string()
+}
+
 /// A turn of an agent's own (a message its runtime sent with no turn
 /// running): numbered by the bridge's own counter within its life. The
 /// counter is kept in `/data`, which a rollback sends back, so the life is

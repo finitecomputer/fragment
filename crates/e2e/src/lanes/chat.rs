@@ -117,7 +117,7 @@ fn still_loading_in_frame(s: &mut Suite, api: &Api, chrome: &mut Browser, chat: 
     let ready = format!("document.getElementById('say')?.dataset.ready === '1' && !{line}");
     let shell = chrome.open(&format!("{}/", api.base))?;
     chrome.viewport(&shell, 1280, 860, false)?;
-    let row = format!("#chats [data-key={}]", js(&format!("chat:{chat}")));
+    let row = format!("#chats [data-key={}] .chat-open", js(&format!("chat:{chat}")));
     let listed = chrome.until(&shell, &format!("!document.getElementById('layout').hidden && !!document.querySelector({})", js(&row)), wait);
     chrome.eval(&shell, &format!("(document.querySelector({})?.click(), window.__shellStays = true, true)", js(&row)))?;
     let framed = s.eventually(wait, || chrome.eval_in_frame(&shell, chat, &ready).ok() == Some(Value::Bool(true)));
@@ -180,7 +180,7 @@ fn mic_in_frame(s: &mut Suite, api: &Api, chrome: &mut Browser, chat: &str) -> R
     let wait = Duration::from_secs(30);
     let shell = chrome.open(&format!("{}/", api.base))?;
     chrome.viewport(&shell, 1280, 860, false)?;
-    let row = format!("#chats [data-key={}]", js(&format!("chat:{chat}")));
+    let row = format!("#chats [data-key={}] .chat-open", js(&format!("chat:{chat}")));
     let listed = chrome.until(&shell, &format!("!document.getElementById('layout').hidden && !!document.querySelector({})", js(&row)), wait);
     chrome.eval(&shell, &format!("(document.querySelector({})?.click(), true)", js(&row)))?;
     let ready = "document.getElementById('say')?.dataset.ready === '1'";
@@ -572,6 +572,19 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     let words = "[...document.querySelectorAll('.msg.agent .md')].find((m) => m.textContent === 'Let me look.')?.closest('.msg')";
     let stepped = shows(&mut chrome, &page, &format!("!!{step} && !{step}.querySelector('.step-verb') && ['Searching the web', 'Searched the web'].includes({step}.querySelector('.step-name > svg[role=\"img\"]')?.getAttribute('aria-label')) && {step}.querySelector('.step-result')?.textContent.includes('3 results') && !!{words} && !{words}.closest('details') && !!({words}.compareDocumentPosition({step}) & Node.DOCUMENT_POSITION_FOLLOWING) && !{step}.closest('details').textContent.includes('Let me look.') && {}", replied("tool please")));
     s.ok("a tool step shows as a card before the reply, saying what it does by its icon (named \"Searched the web\") and its arguments (\"tool please\"), its result kept; the agent's words before it (\"Let me look.\") are its reply before the card, never in it", stepped, chrome.eval(&page, "document.getElementById('messages').innerText")?);
+    // a tool call said before it runs (`turn.call`; the stub's slow one runs
+    // two seconds): its card's live line, what it does and for how long,
+    // under a head that says the turn works; its step then takes its place
+    say(&mut chrome, "a slow tool please")?;
+    let live = "[...document.querySelectorAll('details.tools .step.running')].find((s) => s.querySelector('.step-args')?.textContent === 'a slow tool please')";
+    let running = shows(&mut chrome, &page, &format!("!!{live} && /^\\d+s$/.test({live}.querySelector('.step-since')?.textContent ?? '') && {live}.querySelector('.step-name > svg[role=\"img\"]')?.getAttribute('aria-label') === 'Searching the web' && !!{live}.closest('details.tools').querySelector('summary .step-dot') && !document.querySelector('.msg.working')"));
+    let _ = chrome.screenshot(&page, &shots.join("desktop-call-running.png"));
+    s.ok("a tool call said before it runs shows as its card's live line: what it does (its icon named \"Searching the web\"), and for how long, under a head saying the turn works", running, chrome.eval(&page, "[...document.querySelectorAll('details.tools')].at(-1)?.outerHTML ?? ''")?);
+    let ran = "[...document.querySelectorAll('details.tools .step[data-category=\"web\"]')].filter((s) => s.querySelector('.step-args')?.textContent === 'a slow tool please')";
+    let replaced = shows(&mut chrome, &page, &format!("{ran}.length === 1 && !{ran}[0].classList.contains('running') && !{ran}[0].querySelector('.step-since') && {ran}[0].querySelector('.step-result')?.textContent === '3 results' && {}", replied("a slow tool please")));
+    s.ok("its step then takes its place: one line, done, its result kept", replaced, chrome.eval(&page, "document.getElementById('messages').innerText")?);
+    let _ = chrome.screenshot(&page, &shots.join("desktop-call-ran.png"));
+
     // every card open, for the screenshots: what each step says
     let open_cards = "(() => { const cards = [...document.querySelectorAll('details.tools')]; cards.forEach((d) => (d.open = true)); cards.at(-1)?.scrollIntoView({ block: 'center' }); return true; })()";
     chrome.eval(&page, open_cards)?;
@@ -853,7 +866,7 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     // nothing answered twice, and the computer goes back to sleep
     let turns: Vec<String> = records(api, &owner, &chat_name, "work").iter().filter(|r| r["body"]["kind"] == "turn.start").filter_map(|r| r["body"]["turn"].as_str().map(str::to_string)).collect();
     let once: std::collections::BTreeSet<&String> = turns.iter().collect();
-    s.ok("every message the page sent was one turn (the one that answered a card, none)", turns.len() == 12 && once.len() == turns.len(), json!(turns));
+    s.ok("every message the page sent was one turn (the one that answered a card, none)", turns.len() == 13 && once.len() == turns.len(), json!(turns));
     let first_turn = turn_of(&agent_name, &chat_name, "chat", sent["seq"].as_i64().unwrap_or(0));
     s.ok("the first of them the turn of the page's first message", turns.first() == Some(&first_turn), json!({ "first": first_turn, "turns": turns }));
 
@@ -997,6 +1010,7 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
 
     polish::check(s, api, &owner, &owner_session, &mut chrome, &label)?;
     polish::working_card(s, api, &owner, &mut chrome, &identity, &agent_name)?;
+    polish::calls_card(s, api, &owner, &mut chrome, &identity)?;
     polish::record_shapes(s, api, &owner, &owner_session, &mut chrome)?;
     polish::finished_card_times(s, api, &owner, &mut chrome)?;
     alerts_in_frame(s, api, &mut chrome, &owner, &owner_session, &member_session, &owner_site, &chat_name, &identity)?;
@@ -1200,7 +1214,7 @@ fn framing_shell(s: &mut Suite, api: &Api, chrome: &mut Browser, chat: &str, scr
     let wait = Duration::from_secs(30);
     let shell = chrome.open_with_script(&format!("{}/", api.base), script)?;
     chrome.viewport(&shell, 1280, 860, false)?;
-    let row = format!("#chats [data-key={}]", js(&format!("chat:{chat}")));
+    let row = format!("#chats [data-key={}] .chat-open", js(&format!("chat:{chat}")));
     let listed = chrome.until(&shell, &format!("!document.getElementById('layout').hidden && !!document.querySelector({})", js(&row)), wait);
     chrome.eval(&shell, &format!("(document.querySelector({})?.click(), true)", js(&row)))?;
     let ready = "document.getElementById('say')?.dataset.ready === '1'";
