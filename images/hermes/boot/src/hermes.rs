@@ -359,9 +359,8 @@ pub const FILES: &str = "Chat attachments are already on your computer. The atta
 /// reply's `MEDIA:` tag sends a file (its `_MEDIA_NATIVE` hint); `relay`
 /// has no hint of Hermes', so this is ours. Hermes delivers a tag only
 /// outside code and quotes (its `_mask_media_scan_text`), and the bridge
-/// posts each file as the reply's attachment (docs/bridge.md). The
-/// `fragment` skill's first page (`computer.md`, "Files you send") says
-/// the same at more length.
+/// posts each file as the reply's attachment. The `fragment` skill's first
+/// page (`computer.md`, "Files you send") says the same at more length.
 pub const SENDING: &str = "To give someone in this chat a file (a PDF, an image, a document, a spreadsheet, audio or video), put MEDIA: and its absolute path on a line of its own in your reply, outside code and quotes, for example MEDIA:/data/work/report.pdf. It arrives in this chat as an attachment they can open and download. Attach it whenever they ask for a file here, rather than emailing it or naming a path on your computer.";
 
 /// What every agent is told of SimpleX, after `SENDING` on every turn
@@ -516,7 +515,7 @@ pub fn told_role(role: &str) -> String {
 /// next turn's, as a rename is, nothing restarted. Hermes' own home channel
 /// is none of it: v0.21.7's multiplexed gateway reads a relay home only from
 /// its launch profile, and nothing an agent's tools do delivers there
-/// (docs/hermes-relay.md, "Hermes' settings").
+/// (`gateway_env`).
 pub fn told_home(agent_fragment: &str, home: Home) -> String {
     let label = fragment_bridge::api::label(agent_fragment);
     let at = match home {
@@ -1072,7 +1071,7 @@ pub fn gateway_env(listen: &str, gateway_id: &str, secret: &str) -> String {
     // platform's (its agent.json's `home`), told to it beside its name
     // (`told_home`): Hermes' own would reach nothing of ours, as its
     // multiplexed gateway reads a relay home from its launch profile alone,
-    // and nothing an agent's tools do delivers there (docs/hermes-relay.md).
+    // and nothing an agent's tools do delivers there.
     // GATEWAY_MULTIPLEX_PROFILES: one gateway serves every profile. Said
     // outright, because left to its default Hermes stays standalone in an s6
     // container with no per-profile gateway slots, which this image has none

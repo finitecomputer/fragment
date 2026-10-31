@@ -677,8 +677,8 @@ speaking Cloudflare's APIs) returns once this product works.
     as a link starts (yes by default): a routine with no chat runs there,
     and the agent is told where it is. Web push is unchanged; no
     suppression. Hermes' own home channel stays unset: in its multiplexed
-    gateway it reaches nothing of ours (docs/hermes-relay.md, "Hermes'
-    settings"). docs/api.md, "An agent's home"; docs/bridge.md, "SimpleX".
+    gateway it reaches nothing of ours (images/hermes/boot/src/hermes.rs,
+    `gateway_env`). docs/api.md, "An agent's home"; docs/bridge.md, "SimpleX".
 
 ### The cut
 
@@ -852,7 +852,7 @@ speaking Cloudflare's APIs) returns once this product works.
     now):* an open card holds the busy flag until it is answered or
     expires, at most its life (an hour). A sleep under it cut the turn,
     and Hermes met the next message with the cut command asked again
-    (docs/bridge.md, "A card keeps its computer awake").
+    (docs/bridge.md, "A card outlives its turn").
 43. **Computers reach the internet.** Browsing is the point, so
     `enableInternet` is on. The guest holds no secrets, so traffic that
     bypasses the intercepts (ports other than 80 and 443) carries nothing

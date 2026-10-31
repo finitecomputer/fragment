@@ -828,7 +828,7 @@ expires within 30 days. The container application is the deployment's
   - `GET /api/computer/keepalive` (a WebSocket): while it is open the
     computer stays awake. Hold it while busy, and while a turn waits on
     its card, until the card is answered or expires (decision 42 as
-    amended; docs/bridge.md, "A card keeps its computer awake"). It
+    amended; docs/bridge.md, "A card outlives its turn"). It
     answers `{"type":"ping"}` with `{"type":"pong"}`: a deploy can cut
     the platform's side of it with no close reaching the guest (#557),
     and the platform then counts it closed, so a guest still busy pings
@@ -896,7 +896,7 @@ expires within 30 days. The container application is the deployment's
   added to a fragment).
   The list comes from `GET /api/fragments` and `GET /api/f/{name}/channels`
   as the agent, read again every 5 minutes and on `joined`, and within
-  seconds when a read of it fails (the bridge's backoff, docs/bridge.md):
+  seconds when a read of it fails (the bridge's backoff, images/bridge/src/driver.rs):
   until a start's first listing, nothing is followed; the agents
   themselves from `GET /api/computer`, read again every minute (the
   bridge), or every 3 s (our Hermes image, below).
@@ -1874,7 +1874,7 @@ settings and state):
   is its next turn's, read with the rest of `agent.json` every 10 s and
   written only when it changed; a running turn keeps the prompt it
   started with, and nothing restarts. Hermes' own home channel is set
-  nowhere (docs/hermes-relay.md, "Hermes' settings").
+  nowhere (images/hermes/boot/src/hermes.rs, `gateway_env`).
 
   Its work (the seam, above): each agent's is `/data/work/<profile>`.
   Its profile's config makes it the terminal's working directory
