@@ -217,6 +217,16 @@ jobs:
       matrix:
         shard: [1, 2, 3, 4]
     steps:
+      # first, before any container: no IPv6 address on a link made from
+      # here on, nor on Docker's bridge. Chrome takes a link's IPv6 address
+      # coming or going for a network change, and fails every request still
+      # waiting for a connection (ERR_NETWORK_CHANGED); Docker adds a link
+      # for each container a computer starts. So a page's module loads queued
+      # behind its six connections failed, and the page never started
+      # ("Still loading…", billing-page's `__held`): the module stalls.
+      - run: |
+          sudo sysctl -w net.ipv6.conf.default.disable_ipv6=1
+          if [ -e /proc/sys/net/ipv6/conf/docker0 ]; then sudo sysctl -w net.ipv6.conf.docker0.disable_ipv6=1; fi
       - uses: actions/checkout@v4
       # the caches, the stub image and the build (.github/actions/e2e-build);
       # the first shard saves them on master's pushes
