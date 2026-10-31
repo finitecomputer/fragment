@@ -544,3 +544,85 @@ async fn an_ended_scope_is_never_written_again() {
     assert!(s.drop_table("f-other-1-members").await.unwrap());
     assert!(s.upsert("f-other-1-members", up("sessions/a.json", "r1", harbour())).await.unwrap().written);
 }
+
+#[tokio::test]
+async fn a_replacement_whose_index_fold_fails_is_still_erased() {
+    let d = dir("fold");
+    let s = store(&d).await;
+    s.upsert(SCOPE, up("sessions/00.json", "r1", json!([{ "id": "t0", "chunks": [chunk(&format!("old text {}", word(0)), Some([1.0, 0.0, 0.0, 0.0]))] }]))).await.unwrap();
+    // 31 writes more, so the next folds the newest rows into the indexes
+    for i in 1..32 {
+        let sections = json!([{ "id": "t0", "chunks": [chunk(&format!("note {i}"), Some([0.0, 1.0, 0.0, 0.0]))] }]);
+        s.upsert(SCOPE, up(&format!("sessions/{i:02}.json"), "r1", sections)).await.unwrap();
+    }
+    assert!(holds(&d, word(0).as_bytes()));
+    let mut next = up("sessions/00.json", "r2", json!([{ "id": "t0", "chunks": [chunk("new text", Some([0.0, 0.0, 1.0, 0.0]))] }]));
+    next.replaces = Some("r1".into());
+    // the replacement commits; its fold into the indexes fails
+    let _ = read_only(&d, &format!("{SCOPE}.lance/_indices"), s.upsert(SCOPE, next.clone())).await;
+    assert!(!s.upsert(SCOPE, next).await.unwrap().written, "its replay writes nothing");
+    settled(&s).await;
+    assert!(!holds(&d, word(0).as_bytes()), "and the old revision leaves the files, with no write after");
+}
+
+#[tokio::test]
+async fn an_end_cut_off_before_its_drop_is_finished() {
+    let d = dir("end-cut");
+    {
+        let s = store(&d).await;
+        s.upsert(SCOPE, up("sessions/a.json", "r1", harbour())).await.unwrap();
+    }
+    // its tombstone made, then the service stopped before its table was dropped
+    let db = lancedb::connect(d.to_str().unwrap()).execute().await.unwrap();
+    let tombstone = Arc::new(lancedb::arrow::arrow_schema::Schema::new(vec![lancedb::arrow::arrow_schema::Field::new("scope", lancedb::arrow::arrow_schema::DataType::Utf8, false)]));
+    db.create_empty_table(format!("{SCOPE}.ended"), tombstone).execute().await.unwrap();
+    let s = store(&d).await;
+    assert!(!d.join(format!("{SCOPE}.lance")).exists(), "the sweep finished its end, with no request");
+    assert!(!holds(&d, b"lantern"));
+    assert!(matches!(s.upsert(SCOPE, up("sessions/a.json", "r2", harbour())).await, Err(Error::Ended)), "a late write is refused");
+}
+
+#[tokio::test]
+async fn the_sweep_keeps_trying_a_table_it_cannot_open() {
+    use std::os::unix::fs::PermissionsExt;
+    let d = dir("sweep-retry");
+    {
+        // maintenance an hour off: the service stops first
+        let s = store_with(&d, Timing { after: Duration::from_secs(3600), keep: Duration::ZERO }).await;
+        twenty(&s).await;
+        assert!(s.delete(SCOPE, "sessions/07.json").await.unwrap());
+    }
+    // the store refuses to read the table, past the three tries the sweep once gave
+    let versions = d.join(format!("{SCOPE}.lance/_versions"));
+    std::fs::set_permissions(&versions, std::fs::Permissions::from_mode(0o000)).unwrap();
+    assert!(std::fs::read_dir(&versions).is_err(), "an unreadable directory refuses this user (not root)");
+    let s = Store::open(d.to_str().unwrap(), vec![], fast()).await.unwrap();
+    let mut sweep = s.sweeping();
+    sweep.wait_for(|w| w.failures > 3).await.unwrap();
+    assert!(!sweep.borrow().done);
+    std::fs::set_permissions(&versions, std::fs::Permissions::from_mode(0o755)).unwrap();
+    s.swept().await;
+    let mut m = s.maintenance(SCOPE).await.expect("the sweep opened it once it could, no request needed");
+    m.wait_for(|m| !m.pending).await.unwrap();
+    assert!(!holds(&d, word(7).as_bytes()) && holds(&d, word(8).as_bytes()));
+}
+
+#[tokio::test]
+async fn a_failed_drop_of_an_ended_scope_is_tried_again() {
+    let d = dir("end-fail");
+    let s = store(&d).await;
+    s.upsert(SCOPE, up("sessions/a.json", "r1", harbour())).await.unwrap();
+    let (ended, late) = read_only(&d, &format!("{SCOPE}.lance/data"), async {
+        let ended = s.end(SCOPE).await;
+        // a write sent before the end, landing while its drop fails
+        let late = s.upsert(SCOPE, up("sessions/a.json", "r2", harbour())).await;
+        (ended, late)
+    })
+    .await;
+    assert!(ended.is_err(), "its drop failed");
+    assert!(late.is_err(), "and the late write is refused: {late:?}");
+    s.ends_finished().await;
+    assert!(!d.join(format!("{SCOPE}.lance")).exists(), "its table is gone, with no end asked again");
+    assert!(!holds(&d, b"lantern"));
+    assert!(matches!(s.upsert(SCOPE, up("sessions/a.json", "r3", harbour())).await, Err(Error::Ended)));
+}

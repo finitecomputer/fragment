@@ -29,7 +29,7 @@ Every path but `GET /healthz` takes the deployment's token as
 | `GET /v1/{scope}/status` | → `{exists, chunks, sources, bytes, space, semantic, version}` |
 | `POST /v1/{scope}/search` | `{q?, vector?, space?, limit?, mode?, fields?, after?, before?}` → `{results}` |
 | `DELETE /v1/{scope}` | → `{dropped}`: its table, made again by a write (a new space's) |
-| `POST /v1/{scope}/end` | → `{ended, dropped}`: its table, and every write after it refused 410 `ended`, a write sent before it and arriving after included (a scope is one life of one fragment) |
+| `POST /v1/{scope}/end` | → `{ended, dropped}`: its table, and every write after it refused 410 `ended`, a write sent before it and arriving after included (a scope is one life of one fragment). The tombstone is the end: a drop that failed, or that a restart cut off, is finished by the service on its own, and the table is never served or written meanwhile |
 
 A scope is 1 to 128 of `a-z`, `0-9`, `-` and `_`, starting with a letter
 or digit.
@@ -106,13 +106,16 @@ row. A pass:
    minute after the next is made, however old it is.
 
 So deleted text leaves the store's files within about three minutes. A
-pass that fails is retried, waiting twice as long each time (at most 15
-minutes). A write during maintenance gets a pass after it. The store
-itself records what is left to do (more than one version, or a deletion
-not yet rewritten): after a restart, the service opens every table and
-finishes it. `tests/service.rs` checks the files themselves after a
-delete of a twentieth of a file, a delete between passes, a restart and
-a failed pass. Index files hold words encoded, so for them the check is
+write that removed rows starts maintenance as soon as it commits, before
+anything after it can fail. A pass that fails is retried, waiting twice
+as long each time (at most 15 minutes). A write during maintenance gets
+a pass after it. The store itself records what is left to do (more than
+one version, or a deletion not yet rewritten): after a restart, the
+service opens every table and finishes it, trying a table it cannot open
+again, later and later, until it can. `tests/service.rs` checks the
+files themselves after a delete of a twentieth of a file, a delete
+between passes, a restart, a failed pass, a failed index fold and a
+table the sweep cannot open for a while. Index files hold words encoded, so for them the check is
 the rebuild: an index built after a removal never held the removed row.
 
 **A first write** makes the table and its text indexes. If it is cut off
@@ -120,7 +123,8 @@ between them, nothing was acknowledged; its retry, or the table's next
 open, finishes the indexes before the table is searched.
 
 **Indexes:**
-- Every 32 writes, the indexes are brought up to date.
+- Every 32 writes, the newest rows are folded into the indexes; a fold
+  that fails is left to the next (they are searched meanwhile).
 - Past 100,000 chunks, a table's vectors get an IVF_FLAT index by cosine.
   Below that, a search compares them all, which is exact and takes a few
   milliseconds (bench/search).

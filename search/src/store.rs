@@ -56,9 +56,6 @@ const SNIPPET_MAX_BYTES: usize = 300;
 const OPTIMIZE_EVERY: u32 = 32;
 /// A failed pass's retry waits twice as long as the last, at most this.
 const RETRY_MAX: Duration = Duration::from_secs(15 * 60);
-/// A table that fails to open in the sweep after a restart is tried this
-/// many times, then left to the next request that opens it.
-const SWEEP_TRIES: u32 = 3;
 /// Table names the sweep lists at a time.
 const SWEEP_PAGE: u32 = 1000;
 /// An ended scope's tombstone: a table of no rows named for it, which no
@@ -115,6 +112,14 @@ impl Default for Timing {
     }
 }
 
+/// The sweep after opening: `done` once every table was opened (or its
+/// end finished), `failures` the tries that failed on the way.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Sweep {
+    pub done: bool,
+    pub failures: u64,
+}
+
 /// A table's maintenance: `pending` from a write that removed rows until a
 /// pass leaves the table clean (`clean`).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -148,8 +153,10 @@ pub struct Store {
     db: Connection,
     tables: tokio::sync::Mutex<HashMap<String, Arc<Entry>>>,
     timing: Timing,
-    /// Whether the sweep after opening has seen every table.
-    swept: tokio::sync::watch::Sender<bool>,
+    /// The sweep after opening (`sweep`).
+    sweep: tokio::sync::watch::Sender<Sweep>,
+    /// Ended scopes whose drop failed, tried again (`end`).
+    ending: tokio::sync::watch::Sender<std::collections::BTreeSet<String>>,
     /// Its tables' maintenance, which ends with it, as at a restart.
     tasks: std::sync::Mutex<tokio::task::JoinSet<()>>,
 }
@@ -285,14 +292,24 @@ impl Store {
         for (k, v) in options {
             connect = connect.storage_option(k, v);
         }
-        let store = Arc::new(Store { db: connect.execute().await?, tables: Default::default(), timing, swept: tokio::sync::watch::channel(false).0, tasks: Default::default() });
+        let store = Arc::new(Store {
+            db: connect.execute().await?,
+            tables: Default::default(),
+            timing,
+            sweep: Default::default(),
+            ending: Default::default(),
+            tasks: Default::default(),
+        });
         tokio::spawn(store.clone().sweep());
         Ok(store)
     }
 
     /// Every table opened (`entry`), so each that a restart left with
-    /// maintenance to do gets it.
+    /// maintenance to do gets it, and every end a restart cut off finished
+    /// (`finish_end`). A table that fails is tried again, later and later,
+    /// until it opens; the others go on meanwhile.
     async fn sweep(self: Arc<Self>) {
+        let mut todo = Vec::new();
         let mut after: Option<String> = None;
         let mut wait = self.timing.after;
         loop {
@@ -300,35 +317,58 @@ impl Store {
             if let Some(a) = &after {
                 list = list.start_after(a.clone());
             }
-            let names = match list.execute().await {
-                Ok(n) => n,
-                Err(e) => {
-                    eprintln!("{}", json!({ "event": "search.sweep-failed", "error": e.to_string() }));
-                    tokio::time::sleep(wait).await;
-                    wait = (wait * 2).min(RETRY_MAX);
-                    continue;
-                }
-            };
-            for name in names.iter().filter(|n| !n.ends_with(ENDED)) {
-                for tried in 1..=SWEEP_TRIES {
-                    match self.entry(name).await {
-                        Ok(_) => break,
-                        Err(e) if tried == SWEEP_TRIES => eprintln!("{}", json!({ "event": "search.sweep-failed", "scope": name, "error": format!("{e:?}") })),
-                        Err(_) => tokio::time::sleep(self.timing.after * tried).await,
+            match list.execute().await {
+                Ok(names) => {
+                    let more = names.len() == SWEEP_PAGE as usize;
+                    after = names.last().cloned();
+                    todo.extend(names);
+                    if !more {
+                        break;
                     }
                 }
+                Err(e) => {
+                    self.sweep_failed(None, &e.to_string());
+                    tokio::time::sleep(wait).await;
+                    wait = (wait * 2).min(RETRY_MAX);
+                }
             }
-            if names.len() < SWEEP_PAGE as usize {
+        }
+        let mut wait = self.timing.after;
+        loop {
+            let mut failed = Vec::new();
+            for name in todo {
+                let swept = match name.strip_suffix(ENDED) {
+                    Some(scope) => self.finish_end(scope).await,
+                    None => self.entry(&name).await.map(|_| ()),
+                };
+                if let Err(e) = swept {
+                    self.sweep_failed(Some(&name), &format!("{e:?}"));
+                    failed.push(name);
+                }
+            }
+            if failed.is_empty() {
                 break;
             }
-            after = names.last().cloned();
+            tokio::time::sleep(wait).await;
+            wait = (wait * 2).min(RETRY_MAX);
+            todo = failed;
         }
-        self.swept.send_replace(true);
+        self.sweep.send_modify(|w| w.done = true);
+    }
+
+    fn sweep_failed(&self, name: Option<&str>, error: &str) {
+        eprintln!("{}", json!({ "event": "search.sweep-failed", "table": name, "error": error }));
+        self.sweep.send_modify(|w| w.failures += 1);
     }
 
     /// Once the sweep after opening has seen every table.
     pub async fn swept(&self) {
-        let _ = self.swept.subscribe().wait_for(|s| *s).await;
+        let _ = self.sweep.subscribe().wait_for(|w| w.done).await;
+    }
+
+    /// The sweep after opening, as it goes.
+    pub fn sweeping(&self) -> tokio::sync::watch::Receiver<Sweep> {
+        self.sweep.subscribe()
     }
 
     /// `scope`'s maintenance, if its table is open.
@@ -349,6 +389,13 @@ impl Store {
             Err(lancedb::Error::TableNotFound { .. }) => return Ok(None),
             Err(e) => return Err(e.into()),
         };
+        if self.ended(scope).await? {
+            // an end cut off before its drop (a restart, a failed drop):
+            // finished now, and nothing is served or written
+            drop(table);
+            self.finish_end(scope).await?;
+            return Ok(None);
+        }
         let space = space_of(&table).await?;
         index_text(&table, false).await?;
         let unclean = !clean(&table).await?;
@@ -408,15 +455,20 @@ impl Store {
         let mut merge = table.merge_insert(&["id"]);
         merge.when_matched_update_all(None).when_not_matched_insert_all().when_not_matched_by_source_delete(Some(filter));
         merge.execute(Box::new(RecordBatchIterator::new(vec![Ok(batch)], schema))).await?;
-        writes.since_optimize += 1;
-        if writes.since_optimize >= OPTIMIZE_EVERY {
-            table.optimize(OptimizeAction::Index(OptimizeOptions::default())).await?;
-            writes.since_optimize = 0;
-        }
         if current.is_some() {
-            // what the old revision held leaves the store
+            // committed: what the old revision held leaves the store, whatever
+            // fails after
             writes.removed = true;
             self.maintain(scope, &entry);
+        }
+        writes.since_optimize += 1;
+        if writes.since_optimize >= OPTIMIZE_EVERY {
+            // optional: unfolded rows are searched as the unindexed tail, and
+            // the next write, or a pass, folds them
+            match table.optimize(OptimizeAction::Index(OptimizeOptions::default())).await {
+                Ok(_) => writes.since_optimize = 0,
+                Err(e) => eprintln!("{}", json!({ "event": "search.fold-failed", "scope": scope, "error": e.to_string() })),
+            }
         }
         Ok(Written { source: up.source, revision: up.revision, written: true, chunks, version: table.version().await? })
     }
@@ -576,14 +628,62 @@ impl Store {
     /// `scope` ended: its tombstone made, then its table dropped, so no
     /// write makes it again, however late it comes (one sent before the
     /// end, say). Its life is over: a scope is one life of one fragment.
-    pub async fn end(&self, scope: &str) -> Result<bool> {
+    /// The tombstone is the end: a drop that fails is tried again, later
+    /// and later (`ending`), as is one a restart cut off (`sweep`), and
+    /// the table is never opened meanwhile (`entry`).
+    pub async fn end(self: &Arc<Self>, scope: &str) -> Result<bool> {
         let mut tables = self.tables.lock().await;
         let tombstone = Arc::new(Schema::new(vec![Field::new("scope", DataType::Utf8, false)]));
         match self.db.create_empty_table(format!("{scope}{ENDED}"), tombstone).execute().await {
             Ok(_) | Err(lancedb::Error::TableAlreadyExists { .. }) => {}
             Err(e) => return Err(e.into()),
         }
-        self.dropped(&mut tables, scope).await
+        let dropped = self.dropped(&mut tables, scope).await;
+        if dropped.is_err() {
+            self.end_later(scope);
+        }
+        dropped
+    }
+
+    /// An ended scope's table dropped, if it is still there: an end that
+    /// was cut off, finished.
+    async fn finish_end(&self, scope: &str) -> Result<()> {
+        match self.db.drop_table(scope, &[]).await {
+            Ok(()) | Err(lancedb::Error::TableNotFound { .. }) => Ok(()),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// `scope`'s drop tried again, later and later, until it is gone.
+    fn end_later(self: &Arc<Self>, scope: &str) {
+        if !self.ending.send_if_modified(|e| e.insert(scope.to_string())) {
+            return;
+        }
+        let (store, scope) = (Arc::downgrade(self), scope.to_string());
+        let mut wait = self.timing.after;
+        let mut tasks = self.tasks.lock().unwrap();
+        while tasks.try_join_next().is_some() {}
+        tasks.spawn(async move {
+            loop {
+                tokio::time::sleep(wait).await;
+                let Some(store) = store.upgrade() else { return };
+                match store.finish_end(&scope).await {
+                    Ok(()) => {
+                        store.ending.send_modify(|e| {
+                            e.remove(&scope);
+                        });
+                        return;
+                    }
+                    Err(e) => eprintln!("{}", json!({ "event": "search.end-unfinished", "scope": scope, "error": format!("{e:?}") })),
+                }
+                wait = (wait * 2).min(RETRY_MAX);
+            }
+        });
+    }
+
+    /// Once no ended scope's drop waits to be tried again.
+    pub async fn ends_finished(&self) {
+        let _ = self.ending.subscribe().wait_for(|e| e.is_empty()).await;
     }
 
     async fn dropped(&self, tables: &mut HashMap<String, Arc<Entry>>, scope: &str) -> Result<bool> {
