@@ -48,11 +48,13 @@ import reads are cli/src/session/.
 - `index/<kind>.json`: `{format, kind, sessions: [entry]}`, the
   conversations of one kind, newest first (by `ended_at`, else
   `started_at`). An entry is `{key, id, origin, reader, kind, title,
-  source?, with?, started_at?, ended_at?, messages, preview, sha256,
-  bytes}`:
-  `messages` counts what was said (a person's or the agent's words, not
-  tool calls, results or summaries), `preview` is the first words its
-  person said (160 characters), and `sha256` and `bytes` are its file's.
+  agent?, source?, with?, started_at?, ended_at?, messages, preview,
+  sha256, bytes}`:
+  `agent` is the agent it was with, as its origin named it (an entry an
+  import made before it has none), `messages` counts what was said (a
+  person's or the agent's words, not tool calls, results or summaries),
+  `preview` is the first words its person said (160 characters), and
+  `sha256` and `bytes` are its file's.
 
 A conversation's key is its origin and its id there,
 `hermes-20261029_183012_ab12cd`; an id that is no file name's (another
