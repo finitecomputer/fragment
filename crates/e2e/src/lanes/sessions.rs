@@ -226,11 +226,10 @@ pub fn sessions(s: &mut Suite, api: &Api) -> Result<()> {
         first["made"] == true && first["added"] == 3 && refused == ["e2e_huge"] && first["holds"] == json!({ "chat": 2, "cron": 1, "subagent": 0 }),
         &first,
     );
-    // this node names no search service (the search section's does, and
-    // checks an import's writes there): the import says so and stands
+    // every fragment has its search (the search section checks what it holds)
     s.ok(
-        "on a host without search, an import says it skipped search and stands",
-        first["search"]["state"] == "skipped" && first["search"]["why"].as_str().is_some_and(|w| w.contains("no search")),
+        "the import writes its archive's search, one source each conversation it keeps",
+        first["search"]["state"] == "written" && first["search"]["written"] == 3 && first["search"]["refused_count"] == 0,
         &first["search"],
     );
     let status = api.status(&keys, &name)?;
