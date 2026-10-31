@@ -33,16 +33,16 @@
 # what changes a version). That holds while the deploying machine's build
 # cache keeps the layers: a cold cache rebuilds them, stamped anew.
 
-# Hermes v0.21.7 (git tag v0.21.7, commit 71d34bad1045, 2026-10-12; its
-# install stamp says 0.21.7 at that commit), pinned by digest. Upstream
+# Hermes v0.22.5 (git tag v0.22.5, commit bf0203a794a0, 2026-10-23; its
+# install stamp says 0.22.5 at that commit), pinned by digest. Upstream
 # publishes a release as its last attempt's versioned tag
 # (`rc.<N>-vX.Y.Z-desktop`) and moves `stable-desktop` and `latest-desktop`
-# to it; v0.21.7's is rc.15, and no tag `v0.21.7-desktop` exists. A bare
+# to it; v0.22.5's is rc.3 (`v0.22.5-desktop` is the same digest). A bare
 # version tag is not always the release: `v0.21.6-desktop` was an earlier
 # attempt's build, not v0.21.6. A next release is pinned the same way: its
 # attempt's tag and digest, checked against its install stamp's commit and
 # version (`/opt/hermes/install-stamp.json`).
-ARG HERMES=nousresearch/hermes-agent:rc.15-v0.21.7-desktop@sha256:04c1a71a37da7d143202454234cf6952000e827e8ae47b36f7c26f1372a9c138
+ARG HERMES=nousresearch/hermes-agent:rc.3-v0.22.5-desktop@sha256:04f7a36d125bc3ebdef090cd5cf0cccaa74699e5a1a77c2965a4db437f24bf13
 
 # The bridge and hermes-boot, static (Alpine's Rust targets musl): the
 # images' own workspace.

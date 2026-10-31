@@ -3047,7 +3047,7 @@ async fn a_turn_cut_by_a_restart_is_closed_and_told() {
     let calls: Vec<support::model::Call> = x.model.calls.lock().unwrap()[calls_before..].to_vec();
     let redone: Vec<String> = calls.iter().filter(|c| c.path.ends_with("/chat/completions")).filter_map(|c| support::model::answer(&c.body).1).map(|call| call.to_string()).filter(|call| call.contains("clarify")).collect();
     let logs = c.logs();
-    let closed = logs.lines().find(|l| l.contains("boot.cut_turns_closed") || l.contains("boot.cut_turns_failed")).unwrap_or("no word from the boot's closer").to_string();
+    let closed = logs.lines().find(|l| l.contains("boot.cut_turns_settled") || l.contains("boot.cut_turns_failed")).unwrap_or("no word from the boot's closer").to_string();
     let saw = x.model_saw(calls_before);
     fake.with(|w| {
         assert_eq!(x.ends(w, &risky).len(), 1, "the cut turn ends once");
@@ -3067,6 +3067,57 @@ async fn a_turn_cut_by_a_restart_is_closed_and_told() {
     let (asked_after, _) = asked_with(&calls, "and after that").expect("a request for the message after");
     assert!(!asked_after.contains("cut short"), "the turn after is told nothing: {asked_after:?}");
     eprintln!("cut: {closed}\ncut: the boundary the model saw: {before:?}\ncut: the message: {asked:?}");
+}
+
+/// Goal (never break agents; Hermes v0.22's durable admissions): a turn cut
+/// by a crash (SIGKILL: no hold, nothing saved) or by a stop and start (a
+/// deploy's SIGTERM, the same `/data`) never wedges its chat, and nothing of
+/// it runs again. Left alone, Hermes pauses a chat behind a turn a restart
+/// cut until its sender sends `/discard`, and answers each message with a
+/// notice saying so; the boot settles that turn as `/discard` does
+/// (`hermes::SETTLE_CUT_TURNS`). Method: the scripted model runs a long
+/// command, cut while it runs; then the chat's next message is answered,
+/// with no pause notice, the cut turn ends lost once, its command never
+/// runs again and the model never calls it again.
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn a_turn_cut_by_a_crash_or_a_deploy_never_wedges_its_chat() {
+    let (x, c) = Expiry::start().await;
+    let (fake, chat) = (&x.fake, x.chat.as_str());
+    for (how, signal) in [("crash", "KILL"), ("deploy", "TERM")] {
+        let cut = x.say(&format!("run: sleep 300 # {how}"));
+        within(fake, chat, &c, 120_000, "the long command runs", |_| c.exec(&["pgrep", "-f", "^sleep 300$"])).await;
+        let calls_before = x.model.calls.lock().unwrap().len();
+        assert!(Command::new(docker()).args(["kill", "--signal", signal, &c.id]).output().expect("docker runs").status.success());
+        let _ = Command::new(docker()).args(["wait", &c.id]).output();
+        fake.until(30_000, "its sockets closed", |w| w.live_sockets() == 0).await;
+        c.start();
+        let next = x.say(&format!("good morning after the {how}"));
+        within(fake, chat, &c, 240_000, "the next message's turn to end", |w| !x.ends(w, &next).is_empty()).await;
+        let after = x.say(&format!("and after the {how}"));
+        within(fake, chat, &c, 120_000, "the turn after's end", |w| !x.ends(w, &after).is_empty()).await;
+        let calls: Vec<support::model::Call> = x.model.calls.lock().unwrap()[calls_before..].to_vec();
+        let redone: Vec<String> = calls.iter().filter(|c| c.path.ends_with("/chat/completions")).filter_map(|c| support::model::answer(&c.body).1).map(|call| call.to_string()).filter(|call| call.contains("sleep 300")).collect();
+        let saw = x.model_saw(calls_before);
+        let logs = c.logs();
+        let settled = logs.lines().rev().find(|l| l.contains("boot.cut_turns_settled") || l.contains("boot.cut_turns_failed")).unwrap_or("no word from the boot's settler").to_string();
+        eprintln!("{how}: {settled}");
+        assert!(settled.contains("boot.cut_turns_settled"), "{how}: the boot settled its cut turns: {settled}");
+        assert!(!c.exec(&["pgrep", "-f", "^sleep 300$"]), "{how}: the cut command does not run again");
+        fake.with(|w| {
+            assert_eq!(x.ends(w, &cut).len(), 1, "{how}: the cut turn ends once");
+            assert_eq!(x.ends(w, &cut)[0]["error"], "lost when the computer restarted", "{how}");
+            assert!(redone.is_empty(), "{how}: the model never runs the cut command again: {redone:?}; it saw {saw:#?}");
+            let said: Vec<String> = w.bodies(chat, "chat", "reply").iter().map(|r| r["text"].as_str().unwrap_or("").to_string()).collect();
+            assert!(!said.iter().any(|t| t.contains("paused") || t.contains("/discard")), "{how}: no pause notice: {said:?}");
+            for turn in [&next, &after] {
+                assert!(x.reply(w, turn).is_some_and(|r| r["text"].as_str().unwrap_or("").contains(how)), "{how}: answered: {:?}; it saw {saw:#?}", x.reply(w, turn));
+            }
+        });
+        let (asked, (before_role, before)) = asked_with(&calls, &format!("good morning after the {how}")).unwrap_or_else(|| panic!("{how}: a model request for the next message; it saw {saw:#?}"));
+        assert!(!asked.contains(&format!("[paul] run: sleep 300 # {how}\n")), "{how}: the cut request is never joined to it: {asked:?}");
+        assert_eq!(before_role, "assistant", "{how}: the cut turn is closed before it: {before:?}");
+    }
 }
 
 /// The id of `card`'s option labelled `label` (Hermes may add "
@@ -3879,6 +3930,110 @@ async fn an_old_bot_chat_is_rebuilt_without_bot_mode() {
     assert!(tools.contains("fragment_ask") && !tools.contains("message_agent"), "fragment_ask, not message_agent: {tools}");
     assert!(call.body["messages"].to_string().contains("hello from before"), "its history kept");
     assert!(!c.exec(&["test", "-L", "/data/hermes/profiles/juniper--k3x9/hooks/fragment-bot-chat"]), "the older image's Bot Mode hook link is gone");
+}
+
+/// Every session and message in a computer's Hermes databases, read as root
+/// (Hermes keeps them owner-only).
+fn hermes_rows(c: &Container) -> (u64, u64) {
+    let out = c.exec_out(&["/opt/hermes/.venv/bin/python", "-c", "import glob, sqlite3\ns = m = 0\nfor p in glob.glob('/data/hermes/state.db') + glob.glob('/data/hermes/profiles/*/state.db'):\n    c = sqlite3.connect('file:' + p + '?mode=ro', uri=True)\n    s += c.execute('SELECT COUNT(*) FROM sessions').fetchone()[0]\n    m += c.execute('SELECT COUNT(*) FROM messages').fetchone()[0]\nprint(s, m)"]);
+    let mut n = out.split_whitespace().filter_map(|w| w.parse().ok());
+    (n.next().unwrap_or(0), n.next().unwrap_or(0))
+}
+
+/// Goal (never break agents: a computer upgrades in place, Hermes and
+/// all): a computer an older image ran (`FRAGMENT_DOCKER_OLD_HERMES_TAG`:
+/// production's, its Hermes older; skipped without it) wakes on this image
+/// from a save taken under a deploy, one of juniper's commands still
+/// running, and goes on. Its `/data` checks; every session and message is
+/// kept (Hermes migrates its `state.db` forward, and an older Hermes may
+/// refuse it after: no rollback, docs/technical-debt-ledger.md); its
+/// agents' work is kept; the cut turn ends lost once, is closed before the
+/// next message (an older Hermes had no admissions: its open tail is
+/// closed all the same) and never runs again; and each agent answers on in
+/// its chat with its history, with no pause notice. Method: juniper runs a
+/// command that writes into her work and maple answers, on the older image;
+/// then juniper's long command runs while the computer is held and saved,
+/// and this image wakes from that save.
+#[tokio::test]
+#[ignore = "needs Docker and an older image: FRAGMENT_DOCKER_OLD_HERMES_TAG=<tag> cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn a_computer_upgrades_hermes_in_place() {
+    let Ok(old) = std::env::var("FRAGMENT_DOCKER_OLD_HERMES_TAG") else {
+        eprintln!("skip: no FRAGMENT_DOCKER_OLD_HERMES_TAG (an older image) to upgrade from");
+        return;
+    };
+    let tag = hermes_tag();
+    build(&repo_dir(), "images/hermes/Dockerfile", &tag);
+    let fake = Fake::start("0.0.0.0:0", &["juniper", "maple"]).await;
+    let model = Model::start("0.0.0.0:0").await;
+    let jchat = fake.chat_named("juniper-chat--h6j7", &["juniper"]);
+    let mchat = fake.chat_named("maple-chat--z8w6", &["maple"]);
+    let say = |chat: &str, agent: &str, text: &str| -> String {
+        let said = fake.say(chat, &person("paul"), json!({ "text": text }));
+        fragment_bridge::records::turn_id(&format!("{agent}--k3x9"), chat, "chat", said["seq"].as_u64().unwrap())
+    };
+    let ends = |w: &support::fake::World, chat: &str, turn: &str| -> Vec<serde_json::Value> { w.bodies(chat, "work", "turn.end").into_iter().filter(|e| e["turn"] == turn).collect() };
+    let reply = |w: &support::fake::World, chat: &str, turn: &str| -> String { w.bodies(chat, "chat", "reply").into_iter().filter(|r| r["turn"] == turn).map(|r| r["text"].as_str().unwrap_or("").to_string()).collect::<Vec<_>>().join("\n") };
+
+    // the older image: a turn of each agent's, juniper's writing into her work
+    let c = Container::run(&old, fake.addr.port(), model.addr.port(), &[]);
+    fake.until(180_000, "the older image's bridge to follow", |w| w.live_sockets() >= 4).await;
+    let wrote = say(&jchat, "juniper", "run: echo kept-before > /data/work/juniper--k3x9/before.txt && echo wrote-before");
+    within(&fake, &jchat, &c, 180_000, "juniper's turn before", |w| !ends(w, &jchat, &wrote).is_empty()).await;
+    let hello = say(&mchat, "maple", "hello maple from before");
+    within(&fake, &mchat, &c, 180_000, "maple's turn before", |w| !ends(w, &mchat, &hello).is_empty()).await;
+    let cut = say(&jchat, "juniper", "run: sleep 300 # the upgrade");
+    within(&fake, &jchat, &c, 120_000, "the long command runs", |_| c.exec(&["pgrep", "-f", "^sleep 300$"])).await;
+    let (sessions_before, messages_before) = hermes_rows(&c);
+    let left_out = hold(&c).unwrap_or_else(|| panic!("no answer to the hold; {}", told(&fake, &jchat, &c)));
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("hermes-upgrade");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let save = dir.join("deploy.tar");
+    save_data(&c, &left_out, &save);
+    c.sigterm();
+    drop(c);
+    fake.until(30_000, "its sockets closed", |w| w.live_sockets() == 0).await;
+
+    // this image, from that save
+    let c = Container::run(&tag, fake.addr.port(), model.addr.port(), &[("RESTORE_PENDING", "1")]);
+    let tar = std::fs::File::open(&save).expect("the save");
+    let cp = Command::new(docker()).args(["cp", "-a", "-", &format!("{}:/data", c.id)]).stdin(tar).output().expect("docker runs");
+    assert!(cp.status.success(), "the restore: {}", String::from_utf8_lossy(&cp.stderr));
+    let (code, checked) = c.exec_code(&["/usr/local/bin/computer-check"]);
+    assert_eq!(code, 0, "the save checks on this image: {checked}");
+    assert!(c.exec(&["touch", "/run/computer/restored"]));
+    let calls_before = model.calls.lock().unwrap().len();
+    let jnext = say(&jchat, "juniper", "hello juniper after the upgrade");
+    within(&fake, &jchat, &c, 240_000, "juniper's turn after", |w| !ends(w, &jchat, &jnext).is_empty()).await;
+    let mnext = say(&mchat, "maple", "hello maple after the upgrade");
+    within(&fake, &mchat, &c, 240_000, "maple's turn after", |w| !ends(w, &mchat, &mnext).is_empty()).await;
+
+    let logs = c.logs();
+    let settled = logs.lines().rev().find(|l| l.contains("boot.cut_turns_settled") || l.contains("boot.cut_turns_failed")).unwrap_or("no word from the boot's settler").to_string();
+    eprintln!("upgrade: {settled}");
+    assert!(settled.contains("boot.cut_turns_settled"), "the boot settled the cut turns: {settled}");
+    let calls: Vec<support::model::Call> = model.calls.lock().unwrap()[calls_before..].to_vec();
+    let redone: Vec<String> = calls.iter().filter(|c| c.path.ends_with("/chat/completions")).filter_map(|c| support::model::answer(&c.body).1).map(|call| call.to_string()).filter(|call| call.contains("sleep 300")).collect();
+    assert!(redone.is_empty(), "the cut command is never called again: {redone:?}");
+    assert!(!c.exec(&["pgrep", "-f", "^sleep 300$"]), "nor run");
+    fake.with(|w| {
+        assert_eq!(ends(w, &jchat, &cut).len(), 1, "the cut turn ends once");
+        assert_eq!(ends(w, &jchat, &cut)[0]["error"], "lost when the computer restarted");
+        for (chat, turn) in [(&jchat, &jnext), (&mchat, &mnext)] {
+            let said = reply(w, chat, turn);
+            assert!(said.contains("after the upgrade") && !said.contains("paused") && !said.contains("/discard"), "answered, never paused: {said:?}");
+        }
+    });
+    let (asked, (before_role, before)) = asked_with(&calls, "hello juniper after the upgrade").expect("juniper's request after");
+    assert_eq!(before_role, "assistant", "the cut turn is closed before the next message: {before:?}");
+    assert!(!asked.contains("[paul] run: sleep 300 # the upgrade\n"), "the cut request is never joined to it: {asked:?}");
+    let juniper = calls_of(&model, "juniper--k3x9", "hello juniper after the upgrade").into_iter().find(|m| m.body.get("tools").is_some()).expect("juniper's turn after");
+    assert!(juniper.body["messages"].to_string().contains("wrote-before"), "juniper's history kept");
+    let maple = calls_of(&model, "maple--k3x9", "hello maple after the upgrade").into_iter().find(|m| m.body.get("tools").is_some()).expect("maple's turn after");
+    assert!(maple.body["messages"].to_string().contains("hello maple from before"), "maple's history kept");
+    assert_eq!(c.exec_out(&["cat", "/data/work/juniper--k3x9/before.txt"]).trim(), "kept-before", "juniper's work kept");
+    let (sessions, messages) = hermes_rows(&c);
+    assert!(sessions >= sessions_before && messages > messages_before, "every session and message kept: {sessions_before} sessions and {messages_before} messages before, {sessions} and {messages} after");
 }
 
 /// Goal (docs/computers.md, "An agent's own model"; Paul, 2026-10-08): an

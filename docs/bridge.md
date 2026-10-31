@@ -543,18 +543,25 @@ parts close it:
   gives no note: a turn is never held back longer for one. Relay hands it as the inbound's
   read-only `context` (below); the scripted agent echoes it after its
   reply (`(told: …)`).
-- **The cut turn closed in Hermes' session (our image).** Before the
-  gateway starts, `hermes-boot` appends Hermes' own failed-turn boundary
-  (the assistant row Hermes writes itself when a turn ends without an
-  answer, `display_kind` `failed_turn`) to each relay session whose last
-  message is unanswered (a user row, a tool call, or a tool result),
-  through Hermes' session code (`hermes::CLOSE_CUT_TURNS`;
-  docs/computers.md). The next message is then a user message of its own.
+- **The cut turn settled in Hermes' session (our image).** Hermes (v0.22)
+  admits each relayed message durably and, after a restart, pauses a chat
+  behind a turn it had started until its sender sends `/discard`. Before
+  the gateway starts, `hermes-boot` settles each such turn as that
+  `/discard` does, through Hermes' own runtime code
+  (`hermes::SETTLE_CUT_TURNS`; docs/computers.md): terminal
+  `interrupted`, never run again, with Hermes' failed-turn boundary (the
+  assistant row Hermes writes itself when a turn ends without an answer,
+  `display_kind` `failed_turn`) in the same transaction. A message it took
+  and had not started is cancelled, never run. The next message is then a
+  user message of its own, and the chat is never paused.
 
 Proven with the real Hermes in `a_turn_cut_by_a_restart_is_closed_and_told`
 (tests/docker.rs): an owner's sleep under a card, then "good morning": no
 second call of the cut command, no card again, an answer, and the model's
-request ends with the note and the message after the boundary. Whether a
+request ends with the note and the message after the boundary; and in
+`a_turn_cut_by_a_crash_or_a_deploy_never_wedges_its_chat`, a SIGKILL and a
+SIGTERM under a running command: the chat answers on, with no pause notice,
+and the command never runs again. Whether a
 real model, so told, checks before it redoes is a hosted run's to see.
 
 ## What a rollback forgot

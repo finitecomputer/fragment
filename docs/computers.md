@@ -1836,12 +1836,17 @@ settings and state):
   signalled, so a restored one always reads as an unclean exit, and a
   resumed turn would carry the old turn's message id and fold the
   person's next message into it, while the bridge has already ended it
-  (docs/chat-records.md). Then it closes each turn a restart cut in its
-  Hermes session (`hermes::CLOSE_CUT_TURNS`): a gateway session whose last
-  message has no answer gets the row Hermes itself writes when a turn ends
-  without one, its failed-turn boundary, through Hermes' own session code;
-  left open, Hermes would join the next message to the cut request and its
-  model would do it again (docs/durable-computers.md, P5; the bridge tells
+  (docs/chat-records.md). Then it settles each turn a restart cut in its
+  Hermes session (`hermes::SETTLE_CUT_TURNS`) as Hermes' own `/discard`
+  does: its relayed turns a previous gateway started are resolved
+  `interrupted`, never run again, with the row Hermes itself writes when a
+  turn ends without an answer (its failed-turn boundary) in the same
+  transaction, and the ones it took and had not started are cancelled.
+  Left alone, Hermes would pause the chat until its sender sent `/discard`
+  (which a person's chat never sends: the bridge keeps a leading `/` from
+  reading as a command). A session's tail a release before admissions left
+  open is closed with the same boundary, so an upgrade's first boot closes
+  what the old image cut (docs/durable-computers.md, P5; the bridge tells
   the next turn what was cut, docs/bridge.md). The managed skills and
   the fragment CLI: below,
   "Skills and the CLI in our Hermes image". An agent fragment's optional
