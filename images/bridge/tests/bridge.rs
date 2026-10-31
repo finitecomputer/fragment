@@ -254,10 +254,11 @@ async fn a_reply_is_not_held_behind_its_drafts_interval() {
 }
 
 /// Goal (Paul, 2026-10-24: everything the agent says is a reply in the
-/// chat): a tool call is a step on `work`; the words the agent said before
-/// it are a reply of their own, posted before the step and marked
-/// `interim` (its turn worked on after them), never the step's; the turn's
-/// answer is a reply after it.
+/// chat): a tool call is a step on `work`, said first as asked for
+/// (`turn.call`, before it runs); the words the agent said before it are a
+/// reply of their own, posted before the step and marked `interim` (its
+/// turn worked on after them), never the step's; the turn's answer is a
+/// reply after it.
 #[tokio::test]
 async fn tool_steps() {
     let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
@@ -275,7 +276,9 @@ async fn tool_steps() {
         assert!(steps[0].get("text").is_none(), "the words are no part of the step: {}", steps[0]);
         assert_eq!((&steps[0]["category"], &steps[0]["args"]), (&json!("web"), &json!("use a tool")), "what it does, and its preview");
         let ids: Vec<String> = w.records(&chat, "work").iter().map(|r| r["body"]["kind"].as_str().unwrap_or("").to_string()).collect();
-        assert_eq!(ids, vec!["turn.start", "commands", "turn.step", "turn.end"]);
+        assert_eq!(ids, vec!["turn.start", "commands", "turn.call", "turn.step", "turn.end"], "its call said before it ran, then its end");
+        let call = w.bodies(&chat, "work", "turn.call").remove(0);
+        assert_eq!((&call["tool"], &call["args"], &call["category"], &call["tool_call_id"]), (&json!("search"), &json!("use a tool"), &json!("web"), &json!("call-search")), "{call}");
         let replies: Vec<Value> = w.records(&chat, "chat").into_iter().filter(|r| r["body"]["turn"] == turn).collect();
         let bodies: Vec<Value> = replies.iter().map(|r| r["body"].clone()).collect();
         assert_eq!(bodies, vec![json!({ "text": "Let me look.", "turn": turn, "interim": true }), json!({ "text": "echo: [paul] use a tool", "turn": turn })], "its words, then its answer");
