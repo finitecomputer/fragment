@@ -690,7 +690,14 @@ impl FragmentCell {
             return Ok(Owner::Person(owner.ok_or_else(|| CellError::host("a fragment from before step 4 has no owner meta row"))?));
         }
         let rows: Vec<Row> = self.typed("SELECT kind, owner FROM ownership WHERE one = 1", vec![])?;
-        let row = rows.into_iter().next().ok_or_else(|| CellError::host("a created fragment has no ownership row"))?;
+        let Some(row) = rows.into_iter().next() else {
+            // never created (or deleted): 404, as `name` answers, so a
+            // request's standing read first never makes it a 500
+            return Err(match self.meta(MetaKey::CreatedAt)? {
+                None => not_created(),
+                Some(_) => CellError::host("a created fragment has no ownership row"),
+            });
+        };
         Owner::from_row(&row.kind, &row.owner).ok_or_else(|| CellError::host(format!("its ownership row names {} {:?}", row.kind, row.owner)))
     }
 

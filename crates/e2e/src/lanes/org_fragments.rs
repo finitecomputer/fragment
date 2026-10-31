@@ -85,6 +85,7 @@ pub fn org_fragments(s: &mut Suite, api: &Api) -> Result<()> {
         ("an agent fragment is a person's (400)", api.signed(&ada, "POST", &format!("{root}/fragments"), Some(&json!({ "label": s.name("orgagent"), "template": "agent" })))?, 400),
         ("its editor gets no storage token: an offboarding could not take one back (403)", api.signed(&ada, "GET", &format!("/api/f/{name}/storage-token"), None)?, 403),
         ("its cap is no one's to change: its admin's neither (403)", api.signed(&ada, "PUT", &format!("/api/f/{name}/cap"), Some(&json!({ "id": "c1", "micros": 50_000_000 })))?, 403),
+        ("a fragment never made has no owner to read: its channels are 404, not 500", api.signed(&ada, "GET", &format!("/api/f/{}/channels", s.named(api, &ada, "nevermade")?), None)?, 404),
     ];
     let all = refused.iter().all(|(_, r, status)| r.status == *status);
     s.ok("and refused: each says why", all, json!(refused.iter().map(|(w, r, _): &(&str, Reply, u16)| json!([w, r.status, r.body])).collect::<Vec<_>>()));
