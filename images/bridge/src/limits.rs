@@ -1,4 +1,4 @@
-//! Every bound the bridge keeps, with its reason (docs/engineering-style.md:
+//! Every bound the bridge keeps, with its reason (the engineering style:
 //! "put a limit on everything"). A bound reached is either refused as a
 //! value (a message past `QUEUED_PER_CHAT_MAX` gets a `turn.end` saying so)
 //! or is a bug the bridge crashes on, as each use says.

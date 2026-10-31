@@ -192,7 +192,7 @@ fn quiet_poll(s: &mut Suite, api: &Api) -> Result<()> {
         None => crate::api::now_s() >= (requested_minute + 1) * 60,
     };
     s.ok("its request's minute is counted, and its alarm set to close it at the minute's end", armed, json!({ "alarm": alarm, "meter": meter }));
-    // the minute closed now (the `meter-now` lever, docs/api.md) rather than
+    // the minute closed now (the `meter-now` lever, cell/src/ops.rs) rather than
     // waited out: its meter batch goes to the ledger and is acknowledged
     let closed = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "meter-now", "sample": false })))?;
     let idle = s.eventually(Duration::from_secs(30), || ahead(&hook("alarm", None), "alarmAt") > day_ms - 180_000);

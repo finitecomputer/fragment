@@ -40,7 +40,7 @@ webpki-roots = "1"
 
 [profile.release]
 strip = true
-# Assertions stay on in release (docs/engineering-style.md, "Wear the
+# Assertions stay on in release (the engineering style, "Wear the
 # seatbelt on the racetrack").
 debug-assertions = false
 overflow-checks = true

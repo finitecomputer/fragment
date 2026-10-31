@@ -1,7 +1,7 @@
 //! SQLite's engines: FTS5 as the brain keeps it (templates/brain/app.mjs)
 //! and as Finite Brain queries it (finite-brain-cli's search.rs), and
 //! vectors as blobs scanned row by row, float32 as Finite Brain stores
-//! them and int8 as a Durable Object would (docs/search-bench.md).
+//! them and int8 as a Durable Object would (bench/search/README.md).
 
 use crate::corpus::{words, Section};
 use rusqlite::{params, Connection};

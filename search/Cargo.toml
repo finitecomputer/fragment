@@ -33,6 +33,6 @@ hyper-util = { version = "0.1", features = ["client-legacy", "tokio", "server", 
 
 [profile.release]
 strip = true
-# Assertions stay on in release (docs/engineering-style.md).
+# Assertions stay on in release (the engineering style).
 debug-assertions = false
 overflow-checks = true

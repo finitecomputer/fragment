@@ -3509,7 +3509,7 @@ mod tests {
         assert_eq!(back, l);
     }
 
-    /// Goal (docs/self-host.md, found 21): its owner's restart answers once
+    /// Goal: its owner's restart answers once
     /// its start is up. The DO performs the restart's sleep and the start
     /// after it in the restart's own request, and answers with the view at
     /// its end; the container's exit report is a request of its own, which

@@ -9,7 +9,7 @@
 //! repo (`pins_may_lag`: a storage token minted, or a move that failed to
 //! follow, in the last day), so a fragment no one pushes to asks
 //! code.storage nothing. code.storage's push webhooks are not taken: its
-//! subscription is one per org (docs/phase-3.md, D), and every push the
+//! subscription is one per org, and every push the
 //! platform makes or hears of is followed without one.
 
 use std::collections::BTreeMap;
