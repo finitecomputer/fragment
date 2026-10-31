@@ -237,8 +237,8 @@ fn write(log: &Mutex<File>, line: &str) {
 }
 
 /// `from`'s bytes to `to` until `from` ends (or either fails), each read
-/// `seen` once it is passed on, then `to`'s writing side shut, as `from`'s
-/// was.
+/// `seen` before it is passed on, then `to`'s writing side shut, as
+/// `from`'s was.
 fn copy(mut from: TcpStream, mut to: TcpStream, mut seen: impl FnMut(&[u8])) {
     let mut buf = vec![0; 64 * 1024];
     loop {
@@ -246,10 +246,12 @@ fn copy(mut from: TcpStream, mut to: TcpStream, mut seen: impl FnMut(&[u8])) {
             Ok(0) | Err(_) => break,
             Ok(n) => n,
         };
+        // seen first: a request is recorded before the runtime can answer
+        // it, and one that never went on is still said, unanswered
+        seen(&buf[..n]);
         if to.write_all(&buf[..n]).is_err() {
             break;
         }
-        seen(&buf[..n]);
     }
     let _ = to.flush();
     let _ = to.shutdown(Shutdown::Write);
@@ -292,5 +294,147 @@ mod tests {
         assert_eq!(heard.running(Some(39825), Duration::from_millis(10)), None, "refused there, and nothing newer");
         heard.ended();
         assert_eq!(heard.running(None, Duration::from_secs(5)), None, "gone: no wait");
+    }
+
+    /// Two ends of one connection on this machine.
+    fn pair() -> (TcpStream, TcpStream) {
+        let l = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let near = TcpStream::connect(l.local_addr().unwrap()).unwrap();
+        (near, l.accept().unwrap().0)
+    }
+
+    /// What `s` has for us now, without waiting: how many bytes.
+    fn drain(s: &mut TcpStream) -> usize {
+        let (mut buf, mut got) = ([0; 64 * 1024], 0);
+        loop {
+            match s.read(&mut buf) {
+                Ok(0) => return got,
+                Ok(n) => got += n,
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => return got,
+                Err(e) => panic!("the far end reads: {e}"),
+            }
+        }
+    }
+
+    /// Each read is seen before it is passed on: whenever `seen` runs, the
+    /// far end has had every byte before that read, and none of it. So a
+    /// request is recorded before the runtime can answer it (Alex's review
+    /// of #748: a fast answer to a request not yet recorded was dropped,
+    /// the next answers each said as the request before's).
+    #[test]
+    fn a_read_is_seen_before_it_is_passed_on() {
+        let (mut client, from) = pair();
+        let (to, mut far) = pair();
+        far.set_nonblocking(true).unwrap();
+        let copying = thread::spawn(move || {
+            let (mut passed, mut arrived, mut early) = (0, 0, Vec::new());
+            copy(from, to, |bytes| {
+                arrived += drain(&mut far);
+                if arrived != passed {
+                    early.push((passed, arrived));
+                }
+                passed += bytes.len();
+            });
+            far.set_nonblocking(false).unwrap();
+            let mut rest = Vec::new();
+            far.read_to_end(&mut rest).unwrap();
+            (passed, arrived + rest.len(), early)
+        });
+        let sent: usize = (0..500).map(|i| client.write(format!("GET /{i} HTTP/1.1\r\nhost: x\r\n\r\n").repeat(1 + i % 7).as_bytes()).unwrap()).sum();
+        client.shutdown(Shutdown::Write).unwrap();
+        let (passed, arrived, early) = copying.join().unwrap();
+        assert!(early.is_empty(), "bytes reached the far end before they were seen (passed, arrived): {early:?}");
+        assert_eq!((passed, arrived), (sent, sent), "every byte passed on");
+    }
+
+    /// A runtime of a few lines: each request answered at once, its status
+    /// the path's last part; a 200's or 404's body is 5 bytes (none to a
+    /// HEAD, though its length says 5), a 204's or 304's none.
+    fn serve(s: TcpStream) {
+        let mut answer = s.try_clone().unwrap();
+        let mut asked = io::BufReader::new(s);
+        loop {
+            let mut line = String::new();
+            if io::BufRead::read_line(&mut asked, &mut line).unwrap_or(0) == 0 {
+                return;
+            }
+            let mut header = String::new();
+            while io::BufRead::read_line(&mut asked, &mut header).unwrap_or(0) > 2 {
+                header.clear();
+            }
+            let mut parts = line.split_whitespace();
+            let (method, path) = (parts.next().unwrap(), parts.next().unwrap());
+            let status: u16 = path.rsplit('/').next().unwrap().parse().unwrap();
+            let said = match status {
+                204 | 304 => format!("HTTP/1.1 {status} X\r\n\r\n"),
+                _ if method == "HEAD" => format!("HTTP/1.1 {status} X\r\ncontent-length: 5\r\n\r\n"),
+                _ => format!("HTTP/1.1 {status} X\r\ncontent-length: 5\r\n\r\nhello"),
+            };
+            if answer.write_all(said.as_bytes()).is_err() {
+                return;
+            }
+        }
+    }
+
+    /// An answer read whole, as a client reads it: its status.
+    fn answer(r: &mut io::BufReader<TcpStream>, method: &str) -> u16 {
+        let mut line = String::new();
+        io::BufRead::read_line(r, &mut line).unwrap();
+        let status: u16 = line.split_whitespace().nth(1).unwrap().parse().unwrap();
+        let mut length = 0;
+        loop {
+            let mut h = String::new();
+            io::BufRead::read_line(r, &mut h).unwrap();
+            if h == "\r\n" {
+                break;
+            }
+            if let Some(v) = h.to_ascii_lowercase().strip_prefix("content-length:") {
+                length = v.trim().parse().unwrap();
+            }
+        }
+        if method != "HEAD" && !matches!(status, 204 | 304) {
+            r.read_exact(&mut vec![0; length]).unwrap();
+        }
+        status
+    }
+
+    /// Through `pass`, to a runtime that answers each request at once: 1,000
+    /// requests kept alive on one connection, each with a 4 KiB header, HEAD
+    /// then GET in turn, their paths and statuses mixed. Every answer
+    /// reaches the client, and the log says each request with its own
+    /// answer, in order, none unanswered (Alex's review of #748: one in a
+    /// thousand was dropped and another said unanswered).
+    #[test]
+    fn each_request_is_logged_with_its_own_answer() {
+        const ASKED: usize = 1_000;
+        const STATUSES: [u16; 4] = [200, 204, 304, 404];
+        let runtime = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let heard = Heard::default();
+        heard.line(NAMED.replace("43765", &runtime.local_addr().unwrap().port().to_string()).as_bytes());
+        let serving = thread::spawn(move || serve(runtime.accept().unwrap().0));
+        let front = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let at = front.local_addr().unwrap();
+        let path = std::env::temp_dir().join(format!("front-log-{}", crate::random_hex(4)));
+        let log = Arc::new(Mutex::new(File::create(&path).unwrap()));
+        let passing = thread::spawn(move || pass(front.accept().unwrap().0, &heard, &log));
+        let mut client = TcpStream::connect(at).unwrap();
+        let mut reader = io::BufReader::new(client.try_clone().unwrap());
+        let cookie = "c".repeat(4096);
+        let mut expected = Vec::new();
+        for i in 0..ASKED {
+            let (method, status) = (if i % 2 == 0 { "HEAD" } else { "GET" }, STATUSES[i / 2 % STATUSES.len()]);
+            let path = format!("/r{i}/{status}");
+            client.write_all(format!("{method} {path} HTTP/1.1\r\nhost: x\r\ncookie: {cookie}\r\n\r\n").as_bytes()).unwrap();
+            assert_eq!(answer(&mut reader, method), status, "{method} {path}'s answer reaches the client");
+            expected.push(format!("[front] {method} {path} {status}"));
+        }
+        drop((client, reader));
+        passing.join().unwrap();
+        serving.join().unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        std::fs::remove_file(&path).ok();
+        let said: Vec<&str> = text.lines().map(|l| l.rsplit_once(" (").map_or(l, |(said, _)| said)).collect();
+        let first_wrong = said.iter().zip(&expected).position(|(s, e)| s != e);
+        assert!(said.len() == ASKED && first_wrong.is_none(), "{} lines for {ASKED} requests; the first wrong: {:?}", said.len(), first_wrong.map(|i| (&expected[i], said[i])));
     }
 }
