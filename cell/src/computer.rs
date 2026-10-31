@@ -3224,6 +3224,24 @@ async fn egress_api(mut req: Request, env: &Env, ctx: &Context, computer: &str, 
     let storage_token = method == Method::Get
         && matches!(segments.as_slice(), ["", "api", "f", _, endpoint] if crate::fragment::decode_segment(endpoint) == "storage-token");
     let socket = req.headers().get("upgrade")?.is_some_and(|u| u.eq_ignore_ascii_case("websocket"));
+    // an org's fragment's repo, through the platform (plane.rs `proxy`):
+    // the guest's storage token goes on as it came, being the grant (asked
+    // again at each call), unsigned, and its body streams through, as a
+    // commit pack may pass this egress's limit
+    if matches!(segments.as_slice(), ["", "api", "f", _, "codestorage", ..]) {
+        let headers = Headers::new();
+        for k in ["content-type", "authorization"] {
+            if let Some(v) = req.headers().get(k)? {
+                headers.set(k, &v)?;
+            }
+        }
+        let mut init = RequestInit::new();
+        init.with_method(method).with_headers(headers);
+        if let Some(body) = req.inner().body() {
+            init.with_body(Some(body.into()));
+        }
+        return crate::route(Request::new_with_init(&target, &init)?, env, ctx).await;
+    }
     let body = match method {
         Method::Get | Method::Head => vec![],
         _ => crate::read_body(&mut req, EGRESS_BODY_MAX_BYTES).await?,
@@ -3289,9 +3307,16 @@ async fn egress_api(mut req: Request, env: &Env, ctx: &Context, computer: &str, 
     }
     let out = Request::new_with_init(&target, &init)?;
     let mut answered = crate::route(out, env, ctx).await?;
-    if let Some(api) = fragment_core::codestorage::guest_api(&cfg.codestorage().api).filter(|_| storage_token && answered.status_code() == 200) {
+    if storage_token && answered.status_code() == 200 {
         let mut token: fragment_proto::StorageToken = answered.json().await?;
-        token.api = api;
+        // an org's names the platform's route to its repo: this egress's,
+        // to the guest; a local fleet's code.storage, at its loopback, too
+        let proxied = token.api.strip_prefix(platform.trim_end_matches('/')).filter(|p| p.starts_with("/api/f/")).map(str::to_string);
+        match (proxied, fragment_core::codestorage::guest_api(&cfg.codestorage().api)) {
+            (Some(path), _) => token.api = format!("http://api.fragment.internal{path}"),
+            (None, Some(api)) => token.api = api,
+            (None, None) => {}
+        }
         return json_response(&token);
     }
     Ok(answered)

@@ -13,6 +13,7 @@ use fragment_proto::{limits, ErrorCode, StorageToken};
 use futures_util::future::{select, Either};
 use futures_util::StreamExt;
 use serde_json::{json, Value};
+use worker::wasm_bindgen::JsValue;
 use worker::{console_warn, AbortController, Delay, Env, Fetch, Headers, Method, Request, RequestInit, Response, ResponseBody};
 
 use crate::config::CodeStorageConfig;
@@ -21,6 +22,9 @@ use crate::{js, keys};
 
 /// A call's deadline, its answer read whole; a streamed read's for headers.
 const CALL_TIMEOUT: Duration = Duration::from_secs(30);
+/// A proxied call's deadline: a commit pack of large files takes longer
+/// than the cell's own calls (the CLI allows one by its size: `timeout_for`).
+const FORWARD_TIMEOUT: Duration = Duration::from_secs(300);
 /// The most of an answer a call reads (a file's read takes its own limit):
 /// the largest, a tree page of 1000 entries, is well under 1 MiB.
 const ANSWER_MAX_BYTES: usize = 8 * 1024 * 1024;
@@ -194,6 +198,27 @@ impl<'a> Cs<'a> {
         let (token, expires_ms) = keys::codestorage_token(self.env, &self.cfg.org, repo, RUNTIME_SUB, scopes, RUNTIME_TOKEN_TTL_S).await?;
         TOKENS.with(|t| t.borrow_mut().insert(repo, scopes, token.clone(), expires_ms / 1000, now));
         Ok(token)
+    }
+
+    /// One call of an editor's client through an org's fragment's proxy
+    /// (`fragment_core::codestorage::proxied`; plane.rs `proxy`), to its
+    /// own repo: with its runtime token, read or write, its body streamed
+    /// through and its answer streamed back. `rest` is the endpoint and its
+    /// query, as the client named them.
+    pub async fn forward(&self, method: Method, repo: &str, rest: &str, writes: bool, content_type: Option<String>, body: Option<JsValue>) -> CellResult<Response> {
+        let scopes: &[&str] = if writes { &["git:read", "git:write"] } else { &["git:read"] };
+        let headers = Headers::new();
+        headers.set("authorization", &format!("Bearer {}", self.runtime_token(repo, scopes).await?))?;
+        if let Some(content_type) = content_type {
+            headers.set("content-type", &content_type)?;
+        }
+        let mut init = RequestInit::new();
+        init.with_method(method).with_headers(headers);
+        if let Some(body) = body {
+            init.with_body(Some(body));
+        }
+        let req = Request::new_with_init(&format!("{}/api/repos/{}/{rest}", self.cfg.api, seg(repo)), &init)?;
+        fetch(req, FORWARD_TIMEOUT).await.map_err(|FetchFailed(why)| CellError::new(ErrorCode::UpstreamFailed, format!("code.storage: {why}")))
     }
 
     /// `body`: its content type and text.

@@ -14,16 +14,18 @@
 
 use std::collections::BTreeMap;
 
+use fragment_core::codestorage::{self as core_cs, Capability};
 use fragment_core::tree::{self, Indexed, TreeDiff};
 use fragment_core::{face, manifest, npub, site};
 use fragment_proto::{
     limits, valid_listed_field, valid_listed_kind, valid_repo_path, ChannelDecl, ChannelRecord, ErrorCode, FragmentKind, IdentityKind, ListedDecl, OpDecl, OpKind, Role,
-    TriggerDecl, TriggerOn,
+    StorageToken, TriggerDecl, TriggerOn,
 };
 use fragment_templates::{blessed, File};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use worker::wasm_bindgen::JsValue;
 use worker::*;
 
 use crate::cs::Cs;
@@ -781,25 +783,87 @@ impl FragmentCell {
 
     pub(crate) async fn storage_token(&self, caller: &Caller) -> CellResult<Response> {
         self.require(caller, false, Role::Editor)?;
-        // a token writes the repo for its 15 minutes whatever happens to its
-        // holder: an org's fragment, whose people an offboarding removes at
-        // once, hands out none
-        if self.owner()?.org().is_some() {
-            return Err(CellError::new(ErrorCode::Forbidden, "an org's fragment hands out no storage token: an offboarding could not take one back"));
-        }
         // its token writes the repo: a deploy's first step
         self.writable().await?;
 
         let who = self.caller_id(caller)?;
         let repo = self.must(MetaKey::Repo)?;
-        let token = self.cs()?.storage_token(&repo, who).await?;
+        // an org's: a code.storage token writes the repo for its 15 minutes
+        // whatever happens to its holder, so its people reach the repo
+        // through the platform instead, which asks again at each call
+        // (`proxy`): the same answer's shape, so a CLI of any release follows
+        let (token, how) = match self.owner()?.org() {
+            Some(_) => (self.proxy_token(who, &repo).await?, "through the platform"),
+            None => (self.cs()?.storage_token(&repo, who).await?, "git:read+git:write"),
+        };
         self.event(
             "storage-token.minted",
-            &format!("{} → repo {repo}, git:read+git:write, {}s", npub::display(who), limits::STORAGE_TOKEN_TTL_S),
+            &format!("{} → repo {repo}, {how}, {}s", npub::display(who), limits::STORAGE_TOKEN_TTL_S),
             json!({ "actor": npub::display(who), "key": caller.key().map(npub::display), "repo": repo, "expiresAt": token.expires_at }),
         );
         self.may_lag().await?;
         json_response(&token)
+    }
+
+    /// An org's fragment's storage token: a capability it seals for itself
+    /// (it opens here alone), naming its holder, this life and its expiry,
+    /// and the platform's route to its repo as the `api` (`proxy`).
+    async fn proxy_token(&self, principal: &str, repo: &str) -> CellResult<StorageToken> {
+        let expires_at = js::now_ms() + limits::STORAGE_TOKEN_TTL_S * 1000;
+        let claims = Capability { principal: principal.to_string(), incarnation: self.must(MetaKey::CreatedAt)?, expires_at };
+        let sealed = crate::keys::seal(&self.env, &self.scope(), &serde_json::to_vec(&claims).expect("claims serialize")).await?;
+        let api = format!("{}/api/f/{}/codestorage", self.cfg.platform_url.trim_end_matches('/'), self.name()?);
+        Ok(StorageToken { token: sealed, repo: repo.to_string(), api, expires_at })
+    }
+
+    /// `/api/codestorage/api/repos/{repo}/{endpoint}`: an org's fragment's
+    /// repo, through the platform (docs/api.md, "Its repo, through the
+    /// platform"), for the holder of a storage token it minted (the router
+    /// passes it as `x-fragment-storage-token`). Each call asks again
+    /// whether its holder may still write here, as a request of theirs
+    /// would be decided now (`receivers`: an offboarding fences them at
+    /// once, and a removal), and only the CLI's calls go on
+    /// (`fragment_core::codestorage::proxied`), to its own repo, with its
+    /// own token, a write only while its ledger takes writes.
+    pub(crate) async fn proxy(&self, req: &mut Request, rest: &[String], query: Option<String>, sealed: Option<String>) -> CellResult<Response> {
+        self.name()?;
+        if self.owner()?.org().is_none() {
+            return Err(CellError::new(ErrorCode::NotFound, "a person's fragment's repo is reached with its storage token, not through the platform"));
+        }
+        let unauthenticated = |why: &str| CellError::new(ErrorCode::Unauthenticated, why.to_string());
+        let sealed = sealed.ok_or_else(|| unauthenticated("a storage token of this fragment's (`GET …/storage-token`), as Bearer"))?;
+        let opened = crate::keys::open(&self.env, &self.scope(), &sealed).await.map_err(|_| unauthenticated("not a storage token of this fragment's"))?;
+        let claims: Capability = serde_json::from_slice(&opened.plaintext).map_err(|_| unauthenticated("not a storage token of this fragment's"))?;
+        if let Some(why) = claims.refused(&self.must(MetaKey::CreatedAt)?, js::now_ms()) {
+            return Err(unauthenticated(why));
+        }
+        if !self.receivers(&[(claims.principal.clone(), Role::Editor)]).await?.first().copied().unwrap_or(false) {
+            return Err(CellError::new(ErrorCode::Forbidden, "this storage token's holder may write here no more"));
+        }
+        let repo = self.must(MetaKey::Repo)?;
+        let (endpoint, writes) = match rest {
+            [api, repos, named, endpoint @ ..] if api == "api" && repos == "repos" && *named == repo => {
+                let endpoint = endpoint.join("/");
+                let writes = core_cs::proxied(req.method().as_ref(), &endpoint).ok_or_else(|| CellError::new(ErrorCode::NotFound, format!("no route {} {endpoint} through the platform", req.method().as_ref())))?;
+                (endpoint, writes)
+            }
+            _ => return Err(CellError::new(ErrorCode::NotFound, "this fragment's own repo alone, at /api/repos/<its repo>/…")),
+        };
+        if writes {
+            self.writable().await?;
+        }
+        let rest = match query {
+            Some(q) => format!("{endpoint}?{q}"),
+            None => endpoint,
+        };
+        let content_type = req.headers().get("content-type")?;
+        let body = if writes { req.inner().body().map(JsValue::from) } else { None };
+        let answered = self.cs()?.forward(req.method(), &repo, &rest, writes, content_type, body).await?;
+        // a write moved its repo: its pins follow on its next pass
+        if writes && (200..300).contains(&answered.status_code()) {
+            self.may_lag().await?;
+        }
+        Ok(answered)
     }
 
     pub(crate) fn manifest(&self, caller: &Caller) -> CellResult<Response> {

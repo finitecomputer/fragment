@@ -376,7 +376,10 @@ answers within 11 minutes.
 - `http://api.fragment.internal/<path>` is the platform's API
   (docs/api.md), and `…/f/<fragment>/<path>` a fragment's own routes
   (`__live` sockets included), as on its host. A storage token minted
-  through it names the code.storage the guest can reach.
+  through it names the code.storage the guest can reach; an org's
+  fragment's names the egress's route to its repo
+  (`http://api.fragment.internal/api/f/<fragment>/codestorage`), whose
+  calls go on as they came, the guest's token unsigned, bodies streamed.
 - `x-fragment-agent: <agent fragment>` says which agent a request acts
   as. The intercept refuses an agent not assigned to this computer, then
   signs the request (NIP-98) as that agent.

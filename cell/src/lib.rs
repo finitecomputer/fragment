@@ -1406,6 +1406,17 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
             let routed = Routed { name, url: url.clone(), signed: Some(principal), credential: None };
             forward(env, &req, body, Forward { routed, inner: format!("/api/blobs/{sha}"), extra: vec![] }).await
         }
+        // an org's fragment's repo, through the platform (plane.rs `proxy`):
+        // its own storage token, not a signature, and the body streamed
+        // through, as a commit pack may pass the router's limit
+        (_, ["api", "f", name, "codestorage", rest @ ..]) => {
+            let name = named_fragment(name)?;
+            let token = req.headers().get("authorization")?.and_then(|a| a.strip_prefix("Bearer ").map(str::to_string));
+            let extra = token.map(|t| (fragment::STORAGE_TOKEN_HEADER.to_string(), t)).into_iter().collect();
+            let body = req.inner().body().map(worker::wasm_bindgen::JsValue::from);
+            let routed = Routed { name, url: url.clone(), signed: None, credential: None };
+            forward(env, &req, body, Forward { routed, inner: format!("/api/codestorage/{}", rest.join("/")), extra }).await
+        }
         (method, ["api", "f", name, rest @ ..]) => {
             if !valid_fragment_name(name) && !fragment_proto::valid_label(name) {
                 return Err(CellError::invalid("a fragment's name is <label>--<suffix>"));

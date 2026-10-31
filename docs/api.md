@@ -656,7 +656,8 @@ inbox's, which takes its token. `{name}` is a fragment's name in full.
 | `DELETE /api/f/{name}/secrets/{KEY}` | editor | → `{ok, removed}` |
 | `GET /api/f/{name}/door` | its owner | → `{bound: {door, agent} \| null}`: whose door this connector is (An agent's doors) |
 | `POST /api/f/{name}/door` | its owner, in person (never an agent) | `{act: "link", agent}` → `{door, agent, relayed}`, or `{act: "unlink"}` → `{ok}` (An agent's doors). No connector, one the deployment does not allow, or an agent not the owner's, 403; another `act` 400 |
-| `GET /api/f/{name}/storage-token` | editor | → `{token, repo, api, expiresAt}`: ES256, this repo, `git:read`+`git:write`, `STORAGE_TOKEN_TTL_S` |
+| `GET /api/f/{name}/storage-token` | editor | → `{token, repo, api, expiresAt}`: ES256, this repo, `git:read`+`git:write`, `STORAGE_TOKEN_TTL_S`. An org's fragment's is the same shape, its `api` the platform's route to its repo and its `token` a capability it seals for itself (An org's fragments) |
+| `* /api/f/{name}/codestorage/api/repos/{repo}/{endpoint}` | an org's fragment's storage token (`Bearer`), asked again each call | its repo through the platform: `GET branch`, `files/metadata`, `file`, `commits`, `POST commit-pack`, `restore-commit` (a write while its ledger takes writes), bodies streamed; its own repo alone (else 404). A token not this life's or past its time 401; a holder who may write there no more 403 |
 | `POST /api/f/{name}/refresh` | editor | → `{ok, refs: {main: {pin, moved} \| {absent}, live: …}}` once a moved live is installed. A writer to the repo asks this after its push; the platform follows its own moves, and a busy fragment's poll is the backstop (`FRAGMENT_POLL_INTERVAL_S`) |
 | `POST /api/f/{name}/files` | editor | `{files: [{path, text \| base64} \| {path, delete: true}], message?, key?}` → `{commit}`: one commit to main (at most `FILE_WRITES_MAX` files, 400; `API_FILES_WRITE_MAX_BYTES` decoded in a body of `BODY_MAX_BYTES`, 413; relative paths, no `.` or `..`). The same `key` from the same person answers the first commit again; a write of what main holds commits nothing. Main moves at once; live does not |
 | `POST /api/f/{name}/deploy` | editor | `{note?}` → `{live, canonical}`: live to main's tip, guarded against a live that moved meanwhile; the app installs at once |
@@ -1401,9 +1402,13 @@ that person (decision 67). It is never an agent, a chat or skills.
   queue's consumer asks again before each send: `deliver/authorize`), and
   their list's row is taken away. Whatever admits them again takes their
   old rows away first, an ordinary member still by their own yes.
-- **No storage token.** A token writes the repo for its 15 minutes
-  whatever happens to its holder, so an org's fragment hands out none
-  (403).
+- **Its repo, through the platform.** A code.storage token writes the
+  repo for its 15 minutes whatever happens to its holder, so an org's
+  fragment's storage token is a capability it seals for itself (whose,
+  this life, 15 minutes) and its `api` the platform's route to its repo:
+  the same shape, so any CLI syncs, deploys and rolls back through it.
+  Each call asks again whether its holder may write there now; only the
+  CLI's calls go on, to its own repo, with the fragment's own token.
 
 | method & path | who | body → answer |
 | --- | --- | --- |
