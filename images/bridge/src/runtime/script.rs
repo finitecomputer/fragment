@@ -87,6 +87,14 @@
 //!   (only the agent's own key's, as every request of its is); one signed
 //!   by a key that is no door's. The reply is `door linked`, `door said
 //!   <seq>`, or `door refused: <why>`;
+//! - `ask <agent> <words>`: another agent of its computer asked `<words>`
+//!   with the fragment CLI, `fragment ask --return-to <this chat>`, as the
+//!   agent acting for its owner, as our Hermes image's `fragment_ask` runs
+//!   it: the question posted in the two agents' chat with their owner, and
+//!   its answer back here once that agent's turn is over, as a turn of this
+//!   agent's own (docs/chat-records.md, "An ask"). Its post id is the
+//!   turn's, so a turn read again asks once. The reply: `asked <its name>`,
+//!   or `ask refused: <why>`;
 //! - a message with attachments: the reply names them;
 //! - a turn told something first (`TurnStart::note`: its agent's turn before
 //!   it in the chat was cut by a restart): the reply ends with
@@ -416,6 +424,37 @@ async fn schedule(agent: &crate::runtime::Agent, chat: &str, rest: &str) -> Stri
         ScheduleAsk::Unsaid => return "say `schedule add <minute> <hour> <day> <month> <weekday> <text>`, `schedule list` or `schedule rm <id>`".into(),
     };
     asked.unwrap_or_else(|e| format!("schedule refused: {e}"))
+}
+
+/// The fragment CLI the stub image carries (images/stub/Dockerfile).
+const CLI: &str = "/usr/local/bin/fragment";
+/// An ask is a few platform calls (who may be asked, their chat, made the
+/// first time, its post): at most this long.
+const ASK_WAIT: Duration = Duration::from_secs(60);
+
+/// `ask <agent> <words>`: the module's list.
+async fn ask_another(agent: &crate::runtime::Agent, chat: &str, turn: &str, rest: &str) -> String {
+    let Some((who, words)) = rest.trim().split_once(char::is_whitespace) else {
+        return "say `ask <agent> <words>`".into();
+    };
+    let run = tokio::process::Command::new(CLI)
+        .args(["--json", "ask", "--return-to", chat, "--id", &format!("ask-{turn}"), "--", who, words.trim()])
+        .env("FRAGMENT_AS_AGENT", &agent.fragment)
+        .env("FRAGMENT_FOR", &agent.owner)
+        .kill_on_drop(true)
+        .output();
+    let out = match tokio::time::timeout(ASK_WAIT, run).await {
+        Ok(Ok(out)) => out,
+        Ok(Err(e)) => return format!("ask refused: the CLI did not run ({e})"),
+        Err(_) => return format!("ask refused: no answer in {} s", ASK_WAIT.as_secs()),
+    };
+    let said: serde_json::Value = String::from_utf8_lossy(&out.stdout).lines().last().and_then(|l| serde_json::from_str(l).ok()).unwrap_or_default();
+    if said["ok"] != true {
+        let why = said["error"]["message"].as_str().map(str::to_string).unwrap_or_else(|| String::from_utf8_lossy(&out.stderr).chars().take(300).collect());
+        return format!("ask refused: {why}");
+    }
+    let asked = &said["data"]["asked"];
+    format!("asked {}", asked["title"].as_str().or(asked["name"].as_str()).unwrap_or(who))
 }
 
 /// The door keys `door link` made, by agent, for the process's life.
@@ -750,6 +789,9 @@ async fn turn(cfg: ScriptConfig, ts: TurnStart, mut rx: mpsc::Receiver<Heard>, e
     }
     if let Some(rest) = ts.text.strip_prefix("schedule ") {
         reply = schedule(&ts.agent, &ts.fragment, rest).await;
+    }
+    if let Some(rest) = ts.text.strip_prefix("ask ") {
+        reply = ask_another(&ts.agent, &ts.fragment, &id, rest).await;
     }
     if let Some(rest) = ts.text.strip_prefix("relay ") {
         reply = relay(&ts.agent.fragment, rest).await.unwrap_or_else(|e| format!("relay failed: {e}"));

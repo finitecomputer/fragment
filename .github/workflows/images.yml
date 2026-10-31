@@ -155,10 +155,11 @@ jobs:
       - run: cargo test -p fragment-bridge --test docker --locked --no-run
       - name: the runner
         run: nproc; free -g; df -h /; docker version --format '{{.Server.Version}}'
-      # as the tests' own `build` does (docker.rs), the stub from images/, the
-      # Hermes image from the repo's root
+      # as the tests' own `build` does (docker.rs), both from the repo's root
+      # (each carries the fragment CLI, of the root workspace)
       - name: build the stub image
-        run: docker build --platform linux/amd64 -f stub/Dockerfile -t fragment-stub:test .
+        working-directory: .
+        run: docker build --platform linux/amd64 -f images/stub/Dockerfile -t fragment-stub:test .
       - name: build the Hermes image
         working-directory: .
         run: docker build --platform linux/amd64 -f images/hermes/Dockerfile -t fragment-hermes:test .

@@ -1727,6 +1727,28 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     let led = s.eventually(wake, || agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).len() == replies_so_far);
     s.ok("unmentioned, the lead answers", led && agent_replies(&records(api, &owner, &chat_name, "chat"), &maple_id).len() == 1, "");
 
+    // an ask (docs/chat-records.md, "An ask") with the CLI the stub carries,
+    // as our Hermes image's agents ask: the lead asks the second agent; the
+    // question is in the two agents' chat with their owner, answered there,
+    // and the answer comes back here as a turn of the lead's own
+    let label = "an agent asks another with the CLI its image carries: the question in the two agents' chat with their owner (its return_to this chat), answered there, and the answer back here as the asker's own turn";
+    if scripted {
+        let said = fetched(s, 22, &format!("ask {maple_label} what is the time"))?;
+        replies_so_far += 1;
+        let answer = |r: &Value| r["body"]["text"].as_str().is_some_and(|t| t.contains(" answered your question in "));
+        let answered = s.eventually(wake, || agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).iter().any(answer));
+        replies_so_far += 1;
+        let listed = api.signed(&owner, "GET", "/api/fragments", None)?.body;
+        let both = |f: &Value| f["agents"].as_array().is_some_and(|a| a.len() == 2 && a.iter().any(|x| x == identity.as_str()) && a.iter().any(|x| x == maple_id.as_str()));
+        let pair = listed["fragments"].as_array().into_iter().flatten().find(|f| f["kind"] == "chat" && f["name"] != chat_name.as_str() && both(f)).and_then(|f| f["name"].as_str()).unwrap_or("").to_string();
+        let asked = if pair.is_empty() { vec![] } else { records(api, &owner, &pair, "chat") };
+        let question = asked.iter().any(|r| r["principal"] == identity.as_str() && r["body"]["to"][0] == maple_id.as_str() && r["body"]["return_to"] == chat_name.as_str());
+        let echoed = agent_replies(&asked, &maple_id).len() == 1;
+        s.ok(label, said.starts_with("asked ") && question && echoed && answered, json!({ "said": said, "pair": pair, "asked": asked.iter().map(|r| &r["body"]).collect::<Vec<_>>() }));
+    } else {
+        s.skip(label, "it needs the stub's scripted runtime");
+    }
+
     // a placeholder names its agent, not whoever sends it: the second
     // agent's, sent by the lead, is the second's (a person's agents are not
     // fenced: decision 44); removed from the computer, its tags are refused
