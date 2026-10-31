@@ -722,6 +722,29 @@ fragment channel my-thing                                      # list channels
 fragment channel my-thing activity --follow                     # the backlog a page at a time, then new records, as JSON lines
 ```
 
+## Searching a fragment
+
+A fragment with a search index (docs/api.md, "A fragment's search": its
+app's sources, such as your Session Archive's conversations) is searched
+by its words and its meaning, by anyone who may read it:
+
+```
+fragment search my-sessions "what did we decide about the ferry"   # a result a line, its snippet under it
+fragment search my-sessions ferry --mode lexical --limit 5          # words alone; hybrid (default), semantic
+fragment search my-sessions ferry --field kind=chat --after 2026-10-01
+fragment search my-sessions ferry --json                            # {semantic, results: [{fragment, source, section, …, snippet}]}
+```
+
+- Each result is a section of one of its sources (a conversation's turn,
+  a document's part), best first, with the source, the section, its
+  title and heading, and a snippet of its best part. `--json` names each
+  result's fragment.
+- Your question is embedded on the platform's model, paid by you; on a
+  deployment that embeds nothing it is searched by its words alone
+  (`semantic: off`).
+- It answers 404 on a deployment with no search, and 403 to someone who
+  may not read the fragment.
+
 ## Your operations as tools (MCP)
 
 `fragment mcp <name>` is an MCP server over stdio: another agent (Claude
@@ -758,6 +781,10 @@ codex mcp add my-thing -- fragment mcp my-thing              # Codex (or in ~/.c
   call that got no answer says `unavailable`, or `outcome_unknown` when
   it may have run: `fragment call <name> <op> --id <id>` finds out, and
   never runs it twice.
+- A fragment with a search index its reader may search has one tool
+  more, `fragment-search` (a name no operation can have): its arguments
+  are a search's question, `{q, limit?, mode?, fields?, after?,
+  before?}`, and its result is `fragment search --json`'s.
 - One server serves one fragment: add one for each. Claude desktop
   takes one in its config's `mcpServers`: `{"my-thing": {"command":
   "/Users/<you>/.local/bin/fragment", "args": ["mcp", "my-thing"]}}` (a
@@ -1039,6 +1066,7 @@ fragment drafts <name>                   fragment rollback <name> [--to <sha>]
 fragment rm <name>                       fragment guide|skill
 fragment ask <agent> <text> [--chat C] [--wait [S] | --return-to CHAT] [--id ID]
 fragment mcp <name> [--write]            # its described operations as an MCP server's tools, over stdio
+fragment search <name> <query> [--limit N] [--mode hybrid|lexical|semantic] [--field K=V]… [--after T] [--before T]
 fragment agent [<agent>] [--name N] [--picture FILE | --no-picture]
 fragment schedule add [<name>] --cron "<m h dom mon dow>" --channel C --record JSON
 fragment schedule add [<name>] --cron "<m h dom mon dow>" --routine TEXT [--chat C]   # an agent's routine, on its tasks; no --chat: its owner's home

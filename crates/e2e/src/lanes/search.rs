@@ -12,10 +12,12 @@
 //! made again writes nothing to either life; the service restarted still
 //! holds what was written; a deleted fragment's index goes with it; and a
 //! deployment whose tiers are private, with no private embeddings slot,
-//! indexes by words alone.
+//! indexes by words alone. `fragment search` and `fragment mcp`'s
+//! `fragment-search` tool ask it as the signed-in person.
 
 use std::collections::BTreeSet;
-use std::process::Command;
+use std::io::Write;
+use std::process::{Command, Stdio};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
@@ -253,6 +255,42 @@ fn checks(s: &mut Suite, api: &Api, service: &Service, door: &Door) -> Result<()
         "the same revision again writes nothing and embeds nothing; a grown source embeds its new turn alone, its others' vectors the index's own",
         again.status == 200 && again.body["written"] == false && more.status == 200 && more.body["written"] == true && embedded(s, calls) == 1,
         json!({ "again": again.body, "more": more.body, "embedded": embedded(s, calls) }),
+    );
+
+    // ---- the CLI, and an MCP client through it, ask it as the signed-in person, a reader
+    let home = s.dir("search-cli");
+    s.login(api, &home);
+    let cli = s.cli_keys(&home).context("the CLI's key")?;
+    let shared = api.share(&name, &api.identity(&cli)?, "viewer")?;
+    let asked = s.cli_json(api, &home, &["search", &name, "harbour lantern audit", "--json"])?;
+    let printed = String::from_utf8_lossy(&s.cli(api, &home, &["search", &name, "book the ferry for friday", "--limit", "1"]).stdout).into_owned();
+    s.ok(
+        "fragment search asks a fragment's index as the signed-in person, a reader: each result its section, named by its fragment; printed, a line each and its snippet",
+        shared.status == 200 && asked["semantic"] == "on" && asked["results"][0]["fragment"] == name.as_str() && asked["results"][0]["section"] == "t0"
+            && printed.starts_with("1. sessions/a.json #t2") && printed.contains("ferry"),
+        json!({ "json": asked, "printed": printed }),
+    );
+    let mut mcp = s.bare_cli().args(["mcp", &name]).env("HOME", &home).env("FRAGMENT_HOST", &api.base).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn()?;
+    {
+        let mut stdin = mcp.stdin.take().context("its stdin is piped")?;
+        let init = json!({ "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": { "name": "e2e", "version": "1" } });
+        for line in [
+            json!({ "jsonrpc": "2.0", "id": 0, "method": "initialize", "params": init }),
+            json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }),
+            json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }),
+            json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": { "name": "fragment-search", "arguments": { "q": "taxes due in april" } } }),
+        ] {
+            writeln!(stdin, "{line}")?;
+        }
+    }
+    let out = mcp.wait_with_output()?;
+    let answers: Vec<Value> = String::from_utf8_lossy(&out.stdout).lines().map(|l| serde_json::from_str(l).unwrap_or_else(|_| json!({ "not JSON-RPC": l }))).collect();
+    let listed = answers.get(1).and_then(|a| a["result"]["tools"].as_array().cloned()).unwrap_or_default();
+    let found = answers.get(2).map(|a| a["result"]["structuredContent"].clone()).unwrap_or(Value::Null);
+    s.ok(
+        "fragment mcp serves the fragment's index as its fragment-search tool, asked as the signed-in reader",
+        listed.iter().any(|t| t["name"] == "fragment-search") && found["results"][0]["section"] == "t1" && found["results"][0]["fragment"] == name.as_str(),
+        json!({ "mcp": answers }),
     );
 
     // ---- a stale write is refused, naming the revision it is not

@@ -3625,7 +3625,9 @@ A fragment's own full-text and semantic index (cell/src/searchable.rs;
 fragment_proto::search). It is the search service's (search/README.md),
 beside the deployment, `FRAGMENT_SEARCH_URL` with `SEARCH_TOKEN`. A
 deployment that names none answers these routes 404. It is opt-in: nothing
-is held for a fragment until an editor writes a source.
+is held for a fragment until an editor writes a source. The CLI asks it
+(`fragment search`, cli/GUIDE.md, "Searching a fragment"), as does
+`fragment mcp`'s `fragment-search` tool.
 
 | method & path | who | body → answer |
 | --- | --- | --- |

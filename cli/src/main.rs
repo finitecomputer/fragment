@@ -7,6 +7,7 @@ mod codestorage;
 mod mcp;
 mod notice;
 mod operator;
+mod search;
 mod session;
 mod sync;
 mod watch;
@@ -297,6 +298,29 @@ enum Cmd {
     Blob {
         #[command(subcommand)]
         sub: BlobCmd,
+    },
+    /// Search a fragment's index by its words and its meaning (a reader's):
+    /// each result a section of one of its sources, best first, with a
+    /// snippet. `--json` prints each result with its fragment
+    Search {
+        name: String,
+        /// What to find, in words
+        query: String,
+        /// How many results, at most (1 to 50; 10 unnamed)
+        #[arg(long)]
+        limit: Option<usize>,
+        /// By words and meaning (the default), words alone, or meaning alone
+        #[arg(long, value_parser = ["hybrid", "lexical", "semantic"])]
+        mode: Option<String>,
+        /// Only sources with this field (`--field kind=chat`); each named is required
+        #[arg(long = "field", value_name = "NAME=VALUE")]
+        fields: Vec<String>,
+        /// Only sections at or after this time (RFC 3339)
+        #[arg(long)]
+        after: Option<String>,
+        /// Only sections before this time
+        #[arg(long)]
+        before: Option<String>,
     },
     /// Serve a fragment's described operations as tools to an MCP client
     /// (Claude Code, Codex) over stdio: its queries, and with --write its
@@ -2247,6 +2271,13 @@ fn run(cli: Cli) -> Result<()> {
             if v.replayed {
                 eprintln!("(replayed: operation {id} had already run)");
             }
+        }
+        Cmd::Search { name, query, limit, mode, fields, after, before } => {
+            let mode = mode.map(|m| serde_json::from_value(json!(m)).expect("clap took one of the modes"));
+            let q = search::query(query, limit, mode, &fields, after, before).map_err(usage)?;
+            let answer = search::search(&c, &name, &q)?;
+            json_exit(j, &answer);
+            search::print(&answer);
         }
         Cmd::Blob { sub: BlobCmd::Put { name, file } } => {
             let bytes = std::fs::read(&file).with_context(|| format!("reading {}", file.display()))?;

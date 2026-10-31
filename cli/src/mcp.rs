@@ -16,6 +16,11 @@
 //! computer's egress signs it as the agent (`FRAGMENT_AS_AGENT`). A call
 //! the platform refuses is the tool's error, carrying the platform's own
 //! error (its `ErrorBody`: code, status and message).
+//!
+//! Beside its operations, a fragment with an index its caller may read
+//! (a viewer's; docs/api.md, "A fragment's search") has one tool more:
+//! `fragment-search` (search.rs), its arguments the search route's
+//! question as they are. Its name is none an operation can have.
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, Read, Write};
@@ -197,12 +202,14 @@ pub struct Server<'a> {
     write: bool,
     operations: BTreeMap<String, OpDecl>,
     role: Role,
+    /// It has an index, and the caller may search it.
+    searchable: bool,
 }
 
 /// Serves `fragment`'s tools to the client on `input` and `output` until
 /// the client closes `input`.
 pub fn serve(client: &Client, fragment: &str, write: bool, mut input: impl BufRead, mut output: impl Write) -> Result<()> {
-    let mut server = Server { client, fragment: fragment.to_string(), write, operations: BTreeMap::new(), role: Role::Public };
+    let mut server = Server { client, fragment: fragment.to_string(), write, operations: BTreeMap::new(), role: Role::Public, searchable: false };
     let mut line = Vec::new();
     // one message a line, until the client closes its end
     loop {
@@ -302,12 +309,16 @@ impl Server<'_> {
                     true => "its queries read it, and its mutations and jobs change it",
                     false => "its queries alone, which read it (`fragment mcp` with --write serves its mutations and jobs too)",
                 };
+                let index = match self.searchable {
+                    true => format!(" Its index (its sources' sections) is searched by words and meaning with the {} tool.", crate::search::TOOL),
+                    false => String::new(),
+                };
                 Ok(json!({
                     "protocolVersion": version,
                     "capabilities": { "tools": { "listChanged": false } },
                     "serverInfo": { "name": "fragment", "title": full, "version": crate::VERSION },
                     "instructions": format!(
-                        "The operations of {full}, a fragment (a small web app with its own data), that say what they do, as tools: {reach}. A tool's arguments are its operation's input, and each call is one call, made as you, with your role there ({}).",
+                        "The operations of {full}, a fragment (a small web app with its own data), that say what they do, as tools: {reach}. A tool's arguments are its operation's input, and each call is one call, made as you, with your role there ({}).{index}",
                         self.role.as_str()
                     ),
                 }))
@@ -315,7 +326,11 @@ impl Server<'_> {
             "ping" => Ok(json!({})),
             "tools/list" => {
                 self.read()?;
-                Ok(json!({ "tools": tools(&self.operations, self.role, self.write) }))
+                let mut tools = tools(&self.operations, self.role, self.write);
+                if self.searchable {
+                    tools.push(crate::search::tool());
+                }
+                Ok(json!({ "tools": tools }))
             }
             "tools/call" => self.call(params),
             other => Err(RpcError::new(METHOD_NOT_FOUND, format!("no method {other:?}: this server serves tools (initialize, ping, tools/list, tools/call)"))),
@@ -332,7 +347,36 @@ impl Server<'_> {
         let status = read.map_err(|f| RpcError { code: INTERNAL_ERROR, message: format!("reading {}'s operations: {}", self.fragment, f.message), data: Some(f.json()) })?;
         self.operations = status.code.operations;
         self.role = status.role;
+        // a reader's index, if it has one (a deployment with no search answers 404)
+        self.searchable = self.role >= Role::Viewer
+            && answered(self.client.get(&format!("/api/f/{}/search/status", self.fragment)))
+                .ok()
+                .and_then(|body| serde_json::from_slice::<Value>(&body).ok())
+                .is_some_and(|s| s["exists"] == true);
         Ok(())
+    }
+
+    /// The `fragment-search` tool's call: the fragment's index asked the
+    /// question its arguments are.
+    fn search(&mut self, input: Value) -> Result<Value, RpcError> {
+        if !self.searchable {
+            self.read()?;
+        }
+        if !self.searchable {
+            return Err(RpcError::new(INVALID_PARAMS, format!("{} has no index you may search (a reader's: your role here is {})", self.fragment, self.role.as_str())));
+        }
+        let query: fragment_proto::search::Query = serde_json::from_value(input).map_err(|e| RpcError::new(INVALID_PARAMS, format!("{}'s arguments are its question ({{q, limit?, mode?, fields?, after?, before?}}): {e}", crate::search::TOOL)))?;
+        let full = self.client.fragment(&self.fragment).unwrap_or_else(|_| self.fragment.clone());
+        let answer = answered(self.client.post_json(&crate::search::path(&full), &query)).and_then(|body| {
+            serde_json::from_slice::<fragment_proto::search::Found>(&body).map_err(|e| Failed { code: Code::ServerError.as_str().into(), status: None, message: format!("the platform's answer is no search's: {e}") })
+        });
+        Ok(match answer {
+            Ok(found) => called(&serde_json::to_value(crate::search::named(&full, found)).expect("an answer serializes")),
+            Err(f) => {
+                let text = format!("{}: {}", f.code, f.message);
+                json!({ "content": [{ "type": "text", "text": text }], "structuredContent": { "error": f.json() }, "isError": true })
+            }
+        })
     }
 
     fn call(&mut self, params: &Value) -> Result<Value, RpcError> {
@@ -342,6 +386,9 @@ impl Server<'_> {
             Some(args @ Value::Object(_)) => args.clone(),
             Some(_) => return Err(RpcError::new(INVALID_PARAMS, "a tool's arguments are an object: its operation's input")),
         };
+        if name == crate::search::TOOL {
+            return self.search(input);
+        }
         // a tool the client knows and this server does not: deployed since
         if !self.operations.contains_key(name) {
             self.read()?;
@@ -467,6 +514,67 @@ mod tests {
     /// fake host (initialize, the initialized notification, a ping,
     /// tools/list, calls), read-only and then with --write; each answer
     /// checked, and each request the host saw.
+    /// Goal: a fragment with an index its caller may read has one tool
+    /// more, `fragment-search`, beside its operations: its arguments the
+    /// search route's question as they are, each hit named by its fragment,
+    /// a refusal the tool's error with the platform's code. One with no
+    /// index, or whose caller is no reader, has none, and an argument the
+    /// route does not take is refused before anything is sent.
+    #[test]
+    fn a_readers_index_is_one_tool_more() {
+        let host = |role: &'static str, exists: bool| {
+            let seen: Seen = Arc::new(Mutex::new(Vec::new()));
+            let log = Arc::clone(&seen);
+            let host = FakeHost::start(
+                0,
+                Arc::new(move |r: &Request| {
+                    let body: Value = serde_json::from_slice(&r.body).unwrap_or(Value::Null);
+                    log.lock().unwrap().push((r.method.clone(), r.path.clone(), body.clone(), None));
+                    match (r.method.as_str(), r.path.as_str()) {
+                        ("GET", p) if p == format!("/api/f/{NAME}/status") => Response::json(200, &status(role)),
+                        ("GET", p) if p == format!("/api/f/{NAME}/search/status") => Response::json(200, &json!({ "exists": exists, "sources": 1, "chunks": 2, "semantic": "on" })),
+                        ("POST", p) if p == format!("/api/f/{NAME}/search") && body["q"] == "boom" => Response::json(502, &json!({ "error": "upstream_failed", "message": "the search service did not answer" })),
+                        ("POST", p) if p == format!("/api/f/{NAME}/search") => Response::json(200, &json!({ "semantic": "on", "results": [{
+                            "rank": 1, "source": "sessions/a.json", "section": "t0", "revision": "r1", "title": "Trip", "snippet": "the harbour lantern", "score": 0.03, "signals": ["lexical", "semantic"] }] })),
+                        _ => Response::json(404, &json!({ "error": "not_found", "message": "no such route" })),
+                    }
+                }),
+            )
+            .expect("start the fake host");
+            (host, seen)
+        };
+        let (reader, seen) = host("viewer", true);
+        let client = Client::new(&reader.url, crate::auth::fixed(7));
+        let answers = session(
+            &client,
+            NAME,
+            false,
+            &[
+                initialize(1, "2025-06-18"),
+                request(2, "tools/list", json!({})),
+                call(3, crate::search::TOOL, json!({ "q": "harbour lantern", "limit": 3 })),
+                call(4, crate::search::TOOL, json!({ "q": "x", "page": 2 })),
+                call(5, crate::search::TOOL, json!({ "q": "boom" })),
+            ],
+        );
+        assert!(answers[0]["result"]["instructions"].as_str().unwrap().contains(crate::search::TOOL));
+        assert_eq!(names(&answers[1]).last(), Some(&crate::search::TOOL), "beside its operations: {:?}", names(&answers[1]));
+        let found = &answers[2]["result"]["structuredContent"];
+        assert_eq!((found["results"][0]["fragment"].clone(), found["results"][0]["section"].clone()), (json!(NAME), json!("t0")));
+        assert_eq!(answers[3]["error"]["code"], INVALID_PARAMS, "an argument the route does not take: {}", answers[3]);
+        assert_eq!((answers[4]["result"]["isError"].clone(), answers[4]["result"]["structuredContent"]["error"]["code"].clone()), (json!(true), json!("upstream_failed")));
+        let asked: Vec<Value> = seen.lock().unwrap().iter().filter(|(m, p, _, _)| m == "POST" && p.ends_with("/search")).map(|(_, _, b, _)| b.clone()).collect();
+        assert_eq!(asked, vec![json!({ "q": "harbour lantern", "limit": 3, "mode": "hybrid" }), json!({ "q": "boom", "mode": "hybrid" })], "the refused one sent nothing");
+
+        for (role, exists) in [("viewer", false), ("public", true)] {
+            let (h, _) = host(role, exists);
+            let client = Client::new(&h.url, crate::auth::fixed(7));
+            let answers = session(&client, NAME, false, &[request(1, "tools/list", json!({})), call(2, crate::search::TOOL, json!({ "q": "x" }))]);
+            assert!(!names(&answers[0]).contains(&crate::search::TOOL), "{role}, an index {exists}: no search tool");
+            assert_eq!(answers[1]["error"]["code"], INVALID_PARAMS, "{role}: {}", answers[1]);
+        }
+    }
+
     #[test]
     fn a_session_serves_the_described_operations() {
         let (host, seen) = host("editor");
@@ -523,7 +631,8 @@ mod tests {
         assert_eq!(calls[1].2["input"], json!({ "q": "milk" }), "the arguments are the input, flat");
         assert_eq!(calls[3].2["input"], json!({}));
         assert!(seen.iter().all(|r| r.3.as_deref() == Some("Nostr")), "each request signed with the key, as the CLI's are");
-        assert_eq!(seen.iter().filter(|r| r.0 == "GET").count(), 2, "the operations read at initialize and at tools/list (add is among them: no read for it)");
+        assert_eq!(seen.iter().filter(|r| r.0 == "GET" && r.1.ends_with("/status") && !r.1.ends_with("/search/status")).count(), 2, "the operations read at initialize and at tools/list (add is among them: no read for it)");
+        assert_eq!(seen.iter().filter(|r| r.1.ends_with("/search/status")).count(), 2, "and whether it has an index a reader may search, with them");
         drop(seen);
 
         // with --write: the described mutations and jobs too
