@@ -660,6 +660,106 @@ fn channel_run_inputs(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
 /// them; due (the `cron-now` lever), one fires once; paused it fires
 /// nothing, resumed it fires again; removed, it fires no more; and a
 /// fragment keeps at most 32.
+/// An installed trigger: each install of new code runs its operation once,
+/// as the fragment; asked again, nothing more; cut short by an outage, once
+/// after; a bad shape refused at deploy.
+fn installed_trigger(s: &mut Suite, api: &Api, long: Duration) -> Result<()> {
+    let owner = api.person()?;
+    let (name, c) = jobs_fragment(s, api, &owner, "installed", |m| m["triggers"] = json!([{ "installed": true, "run": "tick" }]))?;
+    let refresh = || api.signed(&owner, "POST", &format!("/api/f/{name}/refresh"), Some(&json!({})));
+    let installs = || runs(api, &owner, &name, "&op=tick").into_iter().filter(|r| r["via"] == "installed").collect::<Vec<_>>();
+    let status = api.status(&owner, &name)?;
+    let (own, code) = (status.body["npub"].clone(), status.body["code"].clone());
+    let first = installs().first().cloned().unwrap_or(Value::Null);
+    let done = settle(api, &owner, &name, first["id"].as_i64().unwrap_or(0), &["succeeded", "held", "blocked"], long);
+    let ticked = api.op(&owner, &name, "ticks", "q", json!({}))?;
+    s.ok(
+        "a deploy runs its installed trigger once, as the fragment, with the commit and code it installed",
+        installs().len() == 1
+            && done["status"] == "succeeded"
+            && done["principal"] == own
+            && done["depth"] == 0
+            && done["trigger"] == code["id"]
+            && ticked.body["result"] == json!([{ "ref": "live", "commit": code["sha"], "code": code["id"] }]),
+        format!("{done} {ticked}"),
+    );
+    let r = api.signed(&owner, "GET", &format!("/api/f/{name}/triggers"), None)?;
+    s.ok("the triggers list names it", r.body["triggers"] == json!([{ "installed": true, "run": "tick", "paused": false }]), &r);
+    refresh()?;
+    s.deploy(&c);
+    s.commit(&c, &[("notes/only-main.md", Some(b"main moves, live does not"))]);
+    refresh()?;
+    s.ok("asked again, and a move of main alone, it starts nothing more", installs().len() == 1, json!(installs()));
+
+    // an install cut short (code.storage down after live moved) starts
+    // nothing; the next refresh installs it whole, and runs it once
+    s.fake.fail_file_reads(true);
+    s.commit(&c, &[("README.md", Some(b"v2"))]);
+    let during = s.deploy(&c);
+    let cut = (installs().len(), api.status(&owner, &name)?.body["code"]["sha"].clone());
+    s.fake.fail_file_reads(false);
+    refresh()?;
+    refresh()?;
+    let after = installs();
+    let newest = run(api, &owner, &name, after[0]["id"].as_i64().unwrap_or(0))?;
+    s.ok(
+        "an install cut short starts nothing; done once reads come back, it runs once",
+        cut == (1, code["sha"].clone()) && after.len() == 2 && newest.body["input"]["commit"] == during.as_str(),
+        format!("cut short: {cut:?}; after: {} {newest}", json!(after)),
+    );
+
+    // a bad shape is refused at deploy: the last good code stays, nothing runs
+    let mut bad: Value = serde_json::from_slice(JOBS_JSON)?;
+    bad["triggers"] = json!([{ "installed": false, "run": "tick" }]);
+    s.commit(&c, &[("fragment.json", Some(bad.to_string().as_bytes()))]);
+    s.deploy(&c);
+    let r = api.status(&owner, &name)?;
+    s.ok(
+        "an installed trigger that is not true is refused at deploy, the last good code kept, nothing run",
+        r.body["code"]["sha"] == during.as_str() && r.body["code"]["error"].as_str().is_some_and(|e| e.contains("installed must be true")) && installs().len() == 2,
+        &r,
+    );
+    Ok(())
+}
+
+/// What a later release writes, this one reads and leaves alone: a
+/// trigger of a kind it does not know starts nothing and is listed nowhere
+/// (the cron beside it keeps its next time), and a run of a via it does not
+/// know is listed as written.
+fn future_rows(s: &mut Suite, api: &Api) -> Result<()> {
+    let owner = api.person()?;
+    let (name, c) = jobs_fragment(s, api, &owner, "future", |m| {
+        m["triggers"] = json!([{ "files": "notes/**", "run": "tick" }, { "cron": "0 0 1 1 *", "run": "tick" }])
+    })?;
+    let r = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "future-rows" })))?;
+    s.ok("(the test fleet stores a trigger and a run as a later release may)", r.status == 200 && r.body["triggers"] == 1, &r);
+    let future_run = r.body["run"].as_i64().unwrap_or(0);
+    let r = api.signed(&owner, "GET", &format!("/api/f/{name}/triggers"), None)?;
+    let listed = r.body["triggers"].as_array().cloned().unwrap_or_default();
+    s.ok(
+        "the triggers list leaves out a kind it does not know; the cron beside it keeps its next time",
+        r.status == 200 && listed.len() == 1 && listed[0]["cron"] == "0 0 1 1 *" && listed[0]["nextAt"].is_i64(),
+        &r,
+    );
+    let moved = s.commit(&c, &[("notes/after.md", Some(b"a path the unknown trigger matched"))]);
+    let again = api.signed(&owner, "POST", &format!("/api/f/{name}/refresh"), Some(&json!({})))?;
+    let main = api.status(&owner, &name)?.body["pins"]["main"].clone();
+    let ticks = runs(api, &owner, &name, "&op=tick");
+    s.ok(
+        "a move of main is followed as ever, and the unknown trigger starts nothing",
+        again.status == 200 && main == moved.as_str() && ticks.iter().all(|r| r["via"] != "files"),
+        format!("{again}; main {main}; {}", json!(ticks)),
+    );
+    let listed = ticks.iter().find(|r| r["id"] == future_run).cloned().unwrap_or(Value::Null);
+    let one = run(api, &owner, &name, future_run)?;
+    s.ok(
+        "a run of a via it does not know is listed, and read, as written",
+        listed["via"] == "future" && listed["status"] == "succeeded" && one.status == 200 && one.body["via"] == "future",
+        format!("{listed} {one}"),
+    );
+    Ok(())
+}
+
 fn scheduled_records(s: &mut Suite, api: &Api, long: Duration) -> Result<()> {
     let (owner, editor, viewer, stranger) = (api.person()?, api.person()?, api.person()?, api.person()?);
     let (name, c) = jobs_fragment(s, api, &owner, "schedules", |m| {
@@ -1047,6 +1147,8 @@ pub fn triggers(s: &mut Suite, api: &Api, cron: Option<Result<Option<Cron>, Stri
     );
     s.ok("the event log says the inbox was full", events(api, &owner, &full).iter().any(|e| e["kind"] == "inbox.rejected"), "no inbox.rejected");
 
+    installed_trigger(s, api, long)?;
+    future_rows(s, api)?;
     scheduled_records(s, api, long)?;
 
     // cron, last: its fragment was deployed before the sections ahead of
