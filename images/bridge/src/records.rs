@@ -848,7 +848,7 @@ mod tests {
     /// message to its agent; its id is the same for the same message.
     #[test]
     fn a_relayed_message_reads_strictly() {
-        let juniper = crate::runtime::Agent { fragment: "juniper--k3x9".into(), identity: "npub1juniper".into(), name: "juniper".into(), owner: "npub1paul".into(), credentials: vec![], key: None };
+        let juniper = crate::runtime::Agent { fragment: "juniper--k3x9".into(), identity: "npub1juniper".into(), name: "juniper".into(), owner: "npub1paul".into(), credentials: vec![], key: None, runtime: None };
         let body = relayed_message("hi from my phone", &juniper, VIA_SIMPLEX, &[]);
         assert_eq!(body, json!({ "text": "hi from my phone", "to": ["npub1juniper"], "relayed": { "via": "simplex", "for": "npub1paul", "agent": "juniper--k3x9" } }));
         assert_eq!(relayed(&body), Some(Relayed { for_: "npub1paul".into(), via: VIA_SIMPLEX.into(), agent: "juniper--k3x9".into() }));
