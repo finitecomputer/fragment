@@ -1207,7 +1207,7 @@ mod tests {
     }
 
     fn agent() -> Agent {
-        Agent { fragment: "juniper--k3x9".into(), identity: "npub1j".into(), name: "Juniper".into(), owner: "npub1paul".into(), credentials: vec![], key: None }
+        Agent { fragment: "juniper--k3x9".into(), identity: "npub1j".into(), name: "Juniper".into(), owner: "npub1paul".into(), credentials: vec![], key: None, runtime: None }
     }
 
     /// The tiers' models as Finite's names them, but for a medium tier of

@@ -17,15 +17,21 @@ const T0: u64 = 1_000_000;
 const LIFE: &str = "0123456789abcdef0123456789abcdef";
 
 fn agent(label: &str) -> Agent {
-    Agent { fragment: format!("{label}--k3x9"), identity: format!("npub1{label}"), name: label.to_string(), owner: "npub1paul".into(), credentials: vec![], key: None }
+    Agent { fragment: format!("{label}--k3x9"), identity: format!("npub1{label}"), name: label.to_string(), owner: "npub1paul".into(), credentials: vec![], key: None, runtime: None }
+}
+
+/// What the default runtime said (`runtime::DEFAULT`, the one agents that
+/// name none run on).
+fn heard(event: Event) -> Input {
+    Input::Runtime { runtime: crate::runtime::DEFAULT.into(), event }
 }
 
 /// A fresh engine whose runtime can take turns.
 fn engine(agents: &[Agent]) -> Engine {
-    let mut e = Engine::new(State::default(), Settings { prompt_ttl_ms: 60_000, turn_idle_ms: 600_000 }, LIFE).expect("a fresh state");
+    let mut e = Engine::new(State::default(), Settings { prompt_ttl_ms: 60_000, turn_idle_ms: 600_000 }, LIFE).expect("a fresh state").with_runtime(crate::runtime::DEFAULT, &[]);
     e.step(Input::Agents(agents.to_vec()), T0);
     e.recover(T0);
-    e.step(Input::Runtime(Event::Connected(true)), T0);
+    e.step(heard(Event::Connected(true)), T0);
     e
 }
 
@@ -34,14 +40,163 @@ fn engine(agents: &[Agent]) -> Engine {
 #[test]
 fn runtime_work_holds_until_it_ends_and_is_never_restored() {
     let mut e = engine(&[agent("juniper")]);
-    assert_eq!(keepalive(&e.step(Input::Runtime(Event::Working(true)), T0 + 1)), Some(true));
-    assert_eq!(keepalive(&e.step(Input::Runtime(Event::Working(true)), T0 + 2)), None);
-    assert_eq!(keepalive(&e.step(Input::Runtime(Event::Connected(false)), T0 + 3)), None, "the gateway's chat dial can reconnect while its children run");
-    let mut restored = Engine::new(e.state().clone(), Settings { prompt_ttl_ms: 60_000, turn_idle_ms: 600_000 }, LIFE).unwrap();
+    assert_eq!(keepalive(&e.step(heard(Event::Working(true)), T0 + 1)), Some(true));
+    assert_eq!(keepalive(&e.step(heard(Event::Working(true)), T0 + 2)), None);
+    assert_eq!(keepalive(&e.step(heard(Event::Connected(false)), T0 + 3)), None, "the gateway's chat dial can reconnect while its children run");
+    let mut restored = Engine::new(e.state().clone(), Settings { prompt_ttl_ms: 60_000, turn_idle_ms: 600_000 }, LIFE).unwrap().with_runtime(crate::runtime::DEFAULT, &[]);
     restored.recover(T0 + 4);
     assert!(!restored.keepalive());
-    assert_eq!(keepalive(&e.step(Input::Runtime(Event::Working(false)), T0 + 5)), Some(false));
-    assert_eq!(keepalive(&e.step(Input::Runtime(Event::Working(false)), T0 + 6)), None);
+    assert_eq!(keepalive(&e.step(heard(Event::Working(false)), T0 + 5)), Some(false));
+    assert_eq!(keepalive(&e.step(heard(Event::Working(false)), T0 + 6)), None);
+}
+
+// ---- several runtimes ----
+
+/// What `runtime`, one of the bridge's, said.
+fn heard_from(runtime: &str, event: Event) -> Input {
+    Input::Runtime { runtime: runtime.into(), event }
+}
+
+/// Each command a step asks for, with the runtime it is for.
+fn routed(s: &Step) -> Vec<(String, Command)> {
+    s.effects.iter().filter_map(|e| match e { Effect::Runtime { runtime, command } => Some((runtime.clone(), command.clone())), _ => None }).collect()
+}
+
+/// An agent whose `agent.json` names `runtime`.
+fn on(label: &str, runtime: &str) -> Agent {
+    Agent { runtime: Some(runtime.into()), ..agent(label) }
+}
+
+/// An engine running the default runtime (no menu) and `other` (the
+/// scripted agent's menu), each able to take turns.
+fn two_runtimes(agents: &[Agent]) -> Engine {
+    let mut e = Engine::new(State::default(), Settings { prompt_ttl_ms: 60_000, turn_idle_ms: 600_000 }, LIFE)
+        .expect("a fresh state")
+        .with_runtime(crate::runtime::DEFAULT, &[])
+        .with_runtime("other", crate::runtime::script::MENU);
+    e.step(Input::Agents(agents.to_vec()), T0);
+    e.recover(T0);
+    e.step(heard_from(crate::runtime::DEFAULT, Event::Connected(true)), T0);
+    e.step(heard_from("other", Event::Connected(true)), T0);
+    e
+}
+
+/// `body` said by Paul to `a` in its own chat, `<label>-talk--k3x9`, with
+/// each claim answered as this life's.
+fn to_own_chat(e: &mut Engine, a: &Agent, seq: u64, body: Value, now: u64) -> Step {
+    let chat = format!("{}-talk--k3x9", a.name);
+    let s = e.step(Input::Record { agent: a.fragment.clone(), fragment: chat, record: rec(seq, "npub1paul", body), view: Some(view(&[a])), since: 0 }, now);
+    answered(e, s, now)
+}
+
+/// Goal: each agent's turns go to the runtime its `agent.json` names (the
+/// default when it names none), and every later command of a turn goes to
+/// the runtime it was handed to. Invalid: an event about a turn from a
+/// runtime it was not handed to is stale, and ends nothing. Restart: a
+/// new life hands no earlier life's turn to any runtime, and tells none.
+#[test]
+fn each_agent_runs_on_its_runtime() {
+    let (j, r) = (agent("juniper"), on("rowan", "other"));
+    let mut e = two_runtimes(&[j.clone(), r.clone()]);
+    let s = to_own_chat(&mut e, &j, 1, json!({ "text": "hi" }), T0);
+    let jt = started(&s).expect("juniper's turn starts").turn;
+    assert_eq!(routed(&s).iter().map(|(rt, _)| rt.as_str()).collect::<Vec<_>>(), vec![crate::runtime::DEFAULT]);
+    let s = to_own_chat(&mut e, &r, 1, json!({ "text": "hi" }), T0);
+    let rt = started(&s).expect("rowan's turn starts").turn;
+    assert_eq!(routed(&s).iter().map(|(rt, _)| rt.as_str()).collect::<Vec<_>>(), vec!["other"]);
+    assert_eq!(kinds(&s), vec!["turn.start", "commands"], "the menu of rowan's runtime, posted as it first runs there");
+
+    // invalid: the default runtime cannot end rowan's turn
+    let wrong = e.step(heard_from(crate::runtime::DEFAULT, Event::End { turn: rt.clone(), outcome: Outcome::Idle }), T0 + 1);
+    assert!(posts(&wrong).is_empty(), "{wrong:?}");
+    // its Stop goes to the runtime that has it
+    let s = to_own_chat(&mut e, &r, 2, json!({ "kind": "stop" }), T0 + 2);
+    assert_eq!(routed(&s), vec![("other".to_string(), Command::Stop { turn: rt.clone() })]);
+    let ended = e.step(heard_from("other", Event::End { turn: rt.clone(), outcome: Outcome::Stopped }), T0 + 3);
+    assert_eq!(kinds(&ended), vec!["turn.end"]);
+
+    // restart: juniper's turn, running as the life ends, is lost, and no
+    // runtime of the next life is told of it
+    let mut next = Engine::new(e.state().clone(), Settings::default(), "fedcba9876543210fedcba9876543210")
+        .expect("whole")
+        .with_runtime(crate::runtime::DEFAULT, &[])
+        .with_runtime("other", crate::runtime::script::MENU);
+    next.step(Input::Agents(vec![j.clone(), r.clone()]), T0 + 4);
+    let s = next.recover(T0 + 4);
+    assert!(routed(&s).is_empty(), "{s:?}");
+    assert!(posts(&s).iter().any(|(id, b)| id == &records::work_id(&jt, "end") && b["error"] == LOST));
+    let late = next.step(heard_from(crate::runtime::DEFAULT, Event::End { turn: jt, outcome: Outcome::Idle }), T0 + 5);
+    assert!(posts(&late).is_empty(), "an earlier life's turn is no runtime's now");
+}
+
+/// Goal: a runtime that cannot take turns holds only its own agents' turns;
+/// the others run. Its agents' turns are claimed once it can.
+#[test]
+fn a_runtime_down_holds_only_its_agents() {
+    let (j, r) = (agent("juniper"), on("rowan", "other"));
+    let mut e = two_runtimes(&[j.clone(), r.clone()]);
+    e.step(heard_from("other", Event::Connected(false)), T0);
+    let s = to_own_chat(&mut e, &r, 1, json!({ "text": "hi" }), T0 + 1);
+    assert!(posts(&s).is_empty(), "rowan's turn waits, unclaimed: {s:?}");
+    assert_eq!(keepalive(&s), Some(true), "a turn waiting to run keeps the computer awake");
+    let s = to_own_chat(&mut e, &j, 1, json!({ "text": "hi" }), T0 + 2);
+    assert!(started(&s).is_some(), "juniper's runtime is up");
+    let s = e.step(heard_from("other", Event::Connected(true)), T0 + 3);
+    let s = answered(&mut e, s, T0 + 3);
+    let t = started(&s).expect("rowan's turn, claimed once its runtime can take it");
+    assert_eq!(t.agent.fragment, r.fragment);
+    assert_eq!(routed(&s)[0].0, "other");
+}
+
+/// Goal: an agent whose `agent.json` names a runtime this bridge does not
+/// run has its turns refused, both records posted, the end saying so; none
+/// is handed to another runtime, and none waits. A name that is no
+/// runtime's at all says so plainly. An agent that changes its runtime runs
+/// its next turn on the new one.
+#[test]
+fn a_runtime_this_bridge_lacks_refuses_its_turns() {
+    let (s1, s2) = (on("sage", "claude"), on("wren", "Claude Code!"));
+    let mut e = two_runtimes(&[s1.clone(), s2.clone()]);
+    for (a, why) in [(&s1, "this computer doesn't run claude agents"), (&s2, "this computer doesn't run this agent's runtime")] {
+        let s = to_own_chat(&mut e, a, 1, json!({ "text": "hi" }), T0);
+        assert!(routed(&s).is_empty(), "{s:?}");
+        assert_eq!(kinds(&s), vec!["turn.start", "turn.end"]);
+        assert_eq!(posts(&s)[1].1["error"], why);
+        assert_eq!(e.state().turns.values().filter(|t| t.agent == a.fragment && t.phase == Phase::Queued).count(), 0);
+    }
+    // its owner's command finds no menu: passed over
+    let s = to_own_chat(&mut e, &s1, 2, json!({ "kind": "command", "command": "usage" }), T0 + 1);
+    assert_eq!(s.effects, vec![]);
+    // its agent.json now names a runtime this bridge runs
+    e.step(Input::Agents(vec![on("sage", "other"), s2.clone()]), T0 + 2);
+    let s = to_own_chat(&mut e, &s1, 3, json!({ "text": "again" }), T0 + 3);
+    assert_eq!(routed(&s).first().map(|(rt, _)| rt.as_str()), Some("other"));
+}
+
+/// Goal: an owner's commands are its agent's runtime's menu: the scripted
+/// agent's `usage` reaches `other`'s agent as a turn, and is passed over for
+/// an agent of the default runtime here, whose menu is empty.
+#[test]
+fn each_agent_takes_its_runtimes_commands() {
+    let (j, r) = (agent("juniper"), on("rowan", "other"));
+    let mut e = two_runtimes(&[j.clone(), r.clone()]);
+    let s = to_own_chat(&mut e, &r, 1, json!({ "kind": "command", "command": "usage" }), T0);
+    let t = started(&s).expect("a command of its runtime's menu is a turn");
+    assert!(t.command && t.text == "/usage", "{t:?}");
+    assert_eq!(routed(&s)[0].0, "other");
+    let s = to_own_chat(&mut e, &j, 1, json!({ "kind": "command", "command": "usage" }), T0 + 1);
+    assert_eq!(s.effects, vec![], "not on the default runtime's menu here");
+}
+
+/// Goal: the computer is kept awake while any runtime has work outside a
+/// turn; one finishing lets go of nothing another still holds.
+#[test]
+fn any_runtimes_work_holds_the_computer() {
+    let mut e = two_runtimes(&[agent("juniper")]);
+    assert_eq!(keepalive(&e.step(heard_from("other", Event::Working(true)), T0 + 1)), Some(true));
+    assert_eq!(keepalive(&e.step(heard_from(crate::runtime::DEFAULT, Event::Working(true)), T0 + 2)), None);
+    assert_eq!(keepalive(&e.step(heard_from("other", Event::Working(false)), T0 + 3)), None, "the default runtime's work still holds it");
+    assert_eq!(keepalive(&e.step(heard_from(crate::runtime::DEFAULT, Event::Working(false)), T0 + 4)), Some(false));
 }
 
 /// A background file needs no active turn or caption. It is posted as
@@ -117,11 +272,11 @@ fn kinds(s: &Step) -> Vec<String> {
 }
 
 fn started(s: &Step) -> Option<TurnStart> {
-    s.effects.iter().find_map(|e| match e { Effect::Runtime(Command::Start(t)) => Some((**t).clone()), _ => None })
+    s.effects.iter().find_map(|e| match e { Effect::Runtime { command: Command::Start(t), .. } => Some((**t).clone()), _ => None })
 }
 
 fn commands(s: &Step) -> Vec<Command> {
-    s.effects.iter().filter_map(|e| match e { Effect::Runtime(c) => Some(c.clone()), _ => None }).collect()
+    s.effects.iter().filter_map(|e| match e { Effect::Runtime { command: c, .. } => Some(c.clone()), _ => None }).collect()
 }
 
 fn keepalive(s: &Step) -> Option<bool> {
@@ -129,7 +284,7 @@ fn keepalive(s: &Step) -> Option<bool> {
 }
 
 fn ev(e: &mut Engine, event: Event, now: u64) -> Step {
-    let s = e.step(Input::Runtime(event), now);
+    let s = e.step(heard(event), now);
     answered(e, s, now)
 }
 
@@ -200,7 +355,7 @@ fn a_reply_streams_then_posts() {
     assert!(!d.dirty, "drafts are never stored");
     let r = ev(&mut e, Event::Reply { turn: turn.clone(), part: 1, text: "Hello".into() }, T0 + 3);
     assert!(posts(&r).is_empty(), "a reply waits for its turn's end, or a later part");
-    let end = e.step(Input::Runtime(Event::End { turn: turn.clone(), outcome: Outcome::Idle }), T0 + 4);
+    let end = e.step(heard(Event::End { turn: turn.clone(), outcome: Outcome::Idle }), T0 + 4);
     let p = posts(&end);
     assert_eq!(p[0], (records::reply_id(&turn, 1), json!({ "text": "Hello", "turn": turn })));
     assert_eq!(p[1], (records::work_id(&turn, "end"), json!({ "kind": "turn.end", "turn": turn, "outcome": "idle" })));
@@ -209,7 +364,7 @@ fn a_reply_streams_then_posts() {
     // its end is owed: the turn is kept, ended, until the lane is done with it
     let t = &e.state().turns[&turn];
     assert_eq!((t.phase, t.owed.len()), (Phase::Ended, 1));
-    assert!(e.step(Input::Runtime(Event::Draft { turn: turn.clone(), text: "late".into() }), T0 + 4).effects.is_empty(), "an ended turn hears its runtime no more");
+    assert!(e.step(heard(Event::Draft { turn: turn.clone(), text: "late".into() }), T0 + 4).effects.is_empty(), "an ended turn hears its runtime no more");
     let done = e.step(Input::Posted { turn: turn.clone(), id: records::work_id(&turn, "end") }, T0 + 4);
     assert!(done.dirty && done.effects.is_empty());
     assert!(e.state().turns.is_empty(), "let go once its end is answered");
@@ -253,10 +408,10 @@ fn notices_belong_to_the_chats_turn() {
     assert!(posts(&ev(&mut e, mine("one too many"), T0 + 7)).is_empty(), "at most {} a turn", limits::NOTICES_PER_TURN_MAX);
     // restart: the next life knows no turn of this one's
     let saved: State = serde_json::from_str(&serde_json::to_string(e.state()).expect("serializes")).expect("deserializes");
-    let mut e2 = Engine::new(saved, Settings::default(), "fedcba9876543210fedcba9876543210").expect("whole");
+    let mut e2 = Engine::new(saved, Settings::default(), "fedcba9876543210fedcba9876543210").expect("whole").with_runtime(crate::runtime::DEFAULT, &[]);
     e2.step(Input::Agents(vec![a.clone()]), T0 + 8);
     e2.recover(T0 + 8);
-    assert!(posts(&e2.step(Input::Runtime(mine("late")), T0 + 9)).is_empty(), "no turn of this life's there");
+    assert!(posts(&e2.step(heard(mine("late")), T0 + 9)).is_empty(), "no turn of this life's there");
 }
 
 /// Goal (Paul, 2026-10-24: everything the agent says is a reply in the
@@ -572,14 +727,14 @@ fn a_restart_starts_nothing_twice() {
     assert!(!saved.contains(LIFE), "the life is never in the state");
 
     let next_life = "fedcba9876543210fedcba9876543210";
-    let mut e2 = Engine::new(state, Settings::default(), next_life).expect("whole");
+    let mut e2 = Engine::new(state, Settings::default(), next_life).expect("whole").with_runtime(crate::runtime::DEFAULT, &[]);
     e2.step(Input::Agents(vec![a.clone(), b]), T0 + 10);
     let r = e2.recover(T0 + 10);
     let p = posts(&r);
     assert_eq!(p.len(), 1, "{p:?}");
     assert_eq!(p[0].1, json!({ "kind": "turn.end", "turn": first, "outcome": "error", "error": LOST }));
     assert!(started(&r).is_none(), "nothing runs before its runtime can take it");
-    let c = e2.step(Input::Runtime(Event::Connected(true)), T0 + 10);
+    let c = e2.step(heard(Event::Connected(true)), T0 + 10);
     assert_eq!(posts(&c)[0].1["life"], next_life, "claimed by the new life");
     let next = started(&answered(&mut e2, c, T0 + 10)).expect("the queued one runs");
     assert_eq!(next.text, "two");
@@ -674,16 +829,16 @@ fn a_group_picks_who_answers() {
         (started(&sj).is_some(), started(&sr).is_some())
     };
     assert_eq!(both(&mut e, 1, "npub1paul", json!({ "text": "hello all" })), (true, false), "the lead answers");
-    e.step(Input::Runtime(Event::End { turn: records::turn_id(&j.fragment, "talk--k3x9", "chat", 1), outcome: Outcome::Idle }), T0);
+    e.step(heard(Event::End { turn: records::turn_id(&j.fragment, "talk--k3x9", "chat", 1), outcome: Outcome::Idle }), T0);
     assert_eq!(both(&mut e, 2, "npub1paul", json!({ "text": "@Rowan what do you think?" })), (false, true), "a mention picks rowan");
-    e.step(Input::Runtime(Event::End { turn: records::turn_id(&r.fragment, "talk--k3x9", "chat", 2), outcome: Outcome::Idle }), T0);
+    e.step(heard(Event::End { turn: records::turn_id(&r.fragment, "talk--k3x9", "chat", 2), outcome: Outcome::Idle }), T0);
     assert_eq!(both(&mut e, 3, "npub1paul", json!({ "text": "you two", "to": ["npub1juniper", "npub1rowan"] })), (true, true), "to names both");
 
     // juniper hands off to rowan
     let jt = records::turn_id(&j.fragment, "talk--k3x9", "chat", 3);
-    e.step(Input::Runtime(Event::End { turn: records::turn_id(&r.fragment, "talk--k3x9", "chat", 3), outcome: Outcome::Idle }), T0);
-    e.step(Input::Runtime(Event::Reply { turn: jt.clone(), part: 1, text: "@rowan can take this".into() }), T0);
-    let end = e.step(Input::Runtime(Event::End { turn: jt.clone(), outcome: Outcome::Idle }), T0);
+    e.step(heard(Event::End { turn: records::turn_id(&r.fragment, "talk--k3x9", "chat", 3), outcome: Outcome::Idle }), T0);
+    e.step(heard(Event::Reply { turn: jt.clone(), part: 1, text: "@rowan can take this".into() }), T0);
+    let end = e.step(heard(Event::End { turn: jt.clone(), outcome: Outcome::Idle }), T0);
     let reply = posts(&end)[0].1.clone();
     assert_eq!(reply["to"], json!(["npub1rowan"]));
     assert_eq!(reply["hop"], 1);
@@ -854,12 +1009,12 @@ fn a_question_is_answered_by_the_next_message() {
     let saved: State = serde_json::from_str(&serde_json::to_string(e.state()).expect("serializes")).expect("deserializes");
     assert_eq!(&saved, e.state());
     assert!(saved.turns[&skylers].asking, "kept asking");
-    let mut e2 = Engine::new(saved, Settings::default(), "fedcba9876543210fedcba9876543210").expect("whole");
+    let mut e2 = Engine::new(saved, Settings::default(), "fedcba9876543210fedcba9876543210").expect("whole").with_runtime(crate::runtime::DEFAULT, &[]);
     e2.step(Input::Agents(vec![a.clone(), b.clone()]), T0 + 12);
     let r = e2.recover(T0 + 12);
     assert!(posts(&r).contains(&(records::work_id(&skylers, "end"), json!({ "kind": "turn.end", "turn": skylers, "outcome": "error", "error": LOST }))), "ended as lost: {:?}", posts(&r));
     assert!(!e2.state().turns[&skylers].asking, "over, it asks nothing");
-    e2.step(Input::Runtime(Event::Connected(true)), T0 + 12);
+    e2.step(heard(Event::Connected(true)), T0 + 12);
     let answer = said(&mut e2, &a, &v, 8, "npub1skyler", json!({ "text": "cherry ones" }), T0 + 13);
     assert!(!commands(&answer).iter().any(|c| matches!(c, Command::Tell { .. })), "never told to a turn of another life");
 }
@@ -870,10 +1025,10 @@ fn a_question_is_answered_by_the_next_message() {
 fn a_question_waits_as_long_as_a_prompt() {
     let a = agent("juniper");
     let v = view(&[&a]);
-    let mut e = Engine::new(State::default(), Settings { prompt_ttl_ms: 3_600_000, turn_idle_ms: 600_000 }, LIFE).expect("a fresh state");
+    let mut e = Engine::new(State::default(), Settings { prompt_ttl_ms: 3_600_000, turn_idle_ms: 600_000 }, LIFE).expect("a fresh state").with_runtime(crate::runtime::DEFAULT, &[]);
     e.step(Input::Agents(vec![a.clone()]), T0);
     e.recover(T0);
-    e.step(Input::Runtime(Event::Connected(true)), T0);
+    e.step(heard(Event::Connected(true)), T0);
     let turn = started(&said(&mut e, &a, &v, 1, "npub1paul", json!({ "text": "hi" }), T0)).expect("started").turn;
     ev(&mut e, Event::Reply { turn: turn.clone(), part: 1, text: "Which one?".into() }, T0);
     ev(&mut e, Event::Asked { turn: turn.clone() }, T0);
@@ -990,10 +1145,10 @@ fn a_message_answers_a_card_that_takes_words() {
 /// An engine whose runtime takes the scripted agent's commands (one of
 /// each way the bridge carries one).
 fn commanded(agents: &[Agent], life: &str) -> Engine {
-    let mut e = Engine::new(State::default(), Settings { prompt_ttl_ms: 60_000, turn_idle_ms: 600_000 }, life).expect("a fresh state").with_menu(crate::runtime::script::MENU);
+    let mut e = Engine::new(State::default(), Settings { prompt_ttl_ms: 60_000, turn_idle_ms: 600_000 }, life).expect("a fresh state").with_runtime(crate::runtime::DEFAULT, crate::runtime::script::MENU);
     e.step(Input::Agents(agents.to_vec()), T0);
     e.recover(T0);
-    e.step(Input::Runtime(Event::Connected(true)), T0);
+    e.step(heard(Event::Connected(true)), T0);
     e
 }
 
@@ -1030,10 +1185,10 @@ fn a_command_from_the_owner_is_a_turn_of_its_own() {
     let state: State = serde_json::from_str(&serde_json::to_string(e.state()).expect("serializes")).expect("deserializes");
     assert_eq!(&state, e.state());
     let next_life = "fedcba9876543210fedcba9876543210";
-    let mut e2 = Engine::new(state, Settings::default(), next_life).expect("whole").with_menu(crate::runtime::script::MENU);
+    let mut e2 = Engine::new(state, Settings::default(), next_life).expect("whole").with_runtime(crate::runtime::DEFAULT, crate::runtime::script::MENU);
     e2.step(Input::Agents(vec![a.clone()]), T0 + 10);
     e2.recover(T0 + 10);
-    let c = e2.step(Input::Runtime(Event::Connected(true)), T0 + 10);
+    let c = e2.step(heard(Event::Connected(true)), T0 + 10);
     let s = answered(&mut e2, c, T0 + 10);
     let next = started(&s).expect("the waiting command runs");
     assert_eq!((next.text.as_str(), next.command), ("/usage again", true));
@@ -1194,10 +1349,10 @@ fn a_quote_rides_along() {
     said(&mut e, &a, &v, 2, "npub1paul", json!({ "text": "that one", "reply_to": 1 }), T0 + 1);
     let saved = serde_json::to_string(e.state()).expect("serializes");
     assert!(saved.contains("\"reply_to\":1"), "{saved}");
-    let mut e2 = Engine::new(serde_json::from_str(&saved).expect("deserializes"), Settings::default(), "fedcba9876543210fedcba9876543210").expect("whole");
+    let mut e2 = Engine::new(serde_json::from_str(&saved).expect("deserializes"), Settings::default(), "fedcba9876543210fedcba9876543210").expect("whole").with_runtime(crate::runtime::DEFAULT, &[]);
     e2.step(Input::Agents(vec![a.clone()]), T0 + 2);
     e2.recover(T0 + 2);
-    let c = e2.step(Input::Runtime(Event::Connected(true)), T0 + 2);
+    let c = e2.step(heard(Event::Connected(true)), T0 + 2);
     let next = started(&answered(&mut e2, c, T0 + 2)).expect("the waiting one runs");
     assert_eq!((next.text.as_str(), next.reply_to, next.quote), ("that one", Some(1), None), "the driver reads the quote");
 }
@@ -1291,8 +1446,8 @@ fn an_ended_turn_counts_only_for_the_reply_that_names_it() {
     // from it, `fragment ask` into the pair chat: one hop, not three
     let asked = to_all(&mut e, &[&j, &r], &v, pair, rec_at(4, 14, "npub1juniper", json!({ "text": "and now?", "to": ["npub1rowan"] })), T0 + 7);
     assert_eq!(asked.iter().map(|(t, h)| (t.agent.name.as_str(), *h)).collect::<Vec<_>>(), vec![("rowan", 1)]);
-    e.step(Input::Runtime(Event::End { turn: asked[0].0.turn.clone(), outcome: Outcome::Idle }), T0 + 8);
-    e.step(Input::Runtime(Event::End { turn: t0[0].0.turn.clone(), outcome: Outcome::Idle }), T0 + 8);
+    e.step(heard(Event::End { turn: asked[0].0.turn.clone(), outcome: Outcome::Idle }), T0 + 8);
+    e.step(heard(Event::End { turn: t0[0].0.turn.clone(), outcome: Outcome::Idle }), T0 + 8);
     // naming the ended hop-2 turn (in no turn now) counts from it
     let named = to_all(&mut e, &[&j, &r], &v, pair, rec_at(5, 15, "npub1juniper", json!({ "text": "late", "to": ["npub1rowan"], "turn": j2_turn })), T0 + 9);
     assert_eq!(named[0].1, limits::HOPS_MAX, "one past the turn it names");
@@ -1332,14 +1487,14 @@ fn a_post_around_the_bridge_counts_from_its_turn() {
     assert_eq!(asked.len(), 1);
     assert_eq!((asked[0].0.agent.name.as_str(), asked[0].1), ("rowan", 1), "one past juniper's turn in talk");
     // a claim of hop 0 from a deep turn resets nothing
-    e.step(Input::Runtime(Event::End { turn: jt, outcome: Outcome::Idle }), T0 + 2);
+    e.step(heard(Event::End { turn: jt, outcome: Outcome::Idle }), T0 + 2);
     let rt = asked[0].0.turn.clone();
     reply_and_end(&mut e, &rt, "sunny", T0 + 3);
     let deep = to_all(&mut e, &[&j, &r], &v, pair, rec_at(2, 12, "npub1paul", json!({ "text": "@juniper and @rowan, chat", "to": ["npub1juniper", "npub1rowan"] })), T0 + 4);
     assert_eq!(deep.iter().map(|(t, h)| (t.agent.name.as_str(), *h)).collect::<Vec<_>>(), vec![("juniper", 0), ("rowan", 0)], "a person's message is hop 0");
     // drive juniper to hop 3 in the pair chat: rowan's turn hands to juniper twice
     let (jt0, rt0) = (deep[0].0.turn.clone(), deep[1].0.turn.clone());
-    e.step(Input::Runtime(Event::End { turn: jt0, outcome: Outcome::Idle }), T0 + 5);
+    e.step(heard(Event::End { turn: jt0, outcome: Outcome::Idle }), T0 + 5);
     let to_j = reply_and_end(&mut e, &rt0, "@juniper yours", T0 + 6);
     let j1 = to_all(&mut e, &[&j, &r], &v, pair, rec_at(3, 13, "npub1rowan", to_j), T0 + 7);
     assert_eq!(j1[0].1, 1);
@@ -1357,7 +1512,7 @@ fn a_post_around_the_bridge_counts_from_its_turn() {
     // a claim deeper than the count is kept
     let claimed = to_all(&mut e, &[&j, &r], &v, pair, rec_at(7, 17, "npub1juniper", json!({ "text": "deep", "to": ["npub1rowan"], "hop": 9 })), T0 + 13);
     assert!(claimed.is_empty());
-    e.step(Input::Runtime(Event::End { turn: j3[0].0.turn.clone(), outcome: Outcome::Idle }), T0 + 14);
+    e.step(heard(Event::End { turn: j3[0].0.turn.clone(), outcome: Outcome::Idle }), T0 + 14);
 
     // in no turn, long after its last one here: the last hop, once
     let later = T0 + 14 + limits::ENDED_HOPS_MS + 1;
@@ -1381,10 +1536,10 @@ fn a_reply_read_by_the_next_life_resets_nothing() {
     // juniper's follower read it (its own); the life ends before rowan's did
     e.step(Input::Record { agent: j.fragment.clone(), fragment: "talk--k3x9".into(), record: rec_at(2, 11, "npub1juniper", reply.clone()), view: Some(v.clone()), since: 0 }, T0 + 2);
     let saved = e.state().clone();
-    let mut e2 = Engine::new(saved, Settings::default(), "fedcba9876543210fedcba9876543210").expect("whole");
+    let mut e2 = Engine::new(saved, Settings::default(), "fedcba9876543210fedcba9876543210").expect("whole").with_runtime(crate::runtime::DEFAULT, &[]);
     e2.step(Input::Agents(vec![j.clone(), r.clone()]), T0 + 3);
     e2.recover(T0 + 3);
-    e2.step(Input::Runtime(Event::Connected(true)), T0 + 3);
+    e2.step(heard(Event::Connected(true)), T0 + 3);
     let s = e2.step(Input::Record { agent: r.fragment.clone(), fragment: "talk--k3x9".into(), record: rec_at(2, 11, "npub1juniper", reply), view: Some(v.clone()), since: 0 }, T0 + 4);
     let rt = started(&answered(&mut e2, s, T0 + 4)).expect("rowan answers it");
     assert_eq!(e2.state().turns[&rt.turn].hop, limits::HOPS_MAX);
@@ -1407,7 +1562,7 @@ fn a_chats_agents_have_a_budget() {
     for seq in 1..=max {
         let s = to_all(&mut e, &[&j], &v, "talk--k3x9", ask(seq, at0 + seq as i64), T0 + seq);
         assert_eq!(s.len(), 1, "within the budget: {seq}");
-        e.step(Input::Runtime(Event::End { turn: s[0].0.turn.clone(), outcome: Outcome::Idle }), T0 + seq);
+        e.step(heard(Event::End { turn: s[0].0.turn.clone(), outcome: Outcome::Idle }), T0 + seq);
     }
     assert_eq!(e.state().agent_turns["talk--k3x9"].len() as u64, max);
     // replay: the last one read again spends nothing
@@ -1415,10 +1570,10 @@ fn a_chats_agents_have_a_budget() {
     assert_eq!(e.state().agent_turns["talk--k3x9"].len() as u64, max);
     // restart: the count is kept
     let saved: State = serde_json::from_str(&serde_json::to_string(e.state()).expect("serializes")).expect("deserializes");
-    let mut e = Engine::new(saved, Settings::default(), "fedcba9876543210fedcba9876543210").expect("whole");
+    let mut e = Engine::new(saved, Settings::default(), "fedcba9876543210fedcba9876543210").expect("whole").with_runtime(crate::runtime::DEFAULT, &[]);
     e.step(Input::Agents(vec![j.clone(), r.clone()]), T0 + 100);
     e.recover(T0 + 100);
-    e.step(Input::Runtime(Event::Connected(true)), T0 + 100);
+    e.step(heard(Event::Connected(true)), T0 + 100);
     // past it: refused, with both records, saying why
     let over = e.step(Input::Record { agent: j.fragment.clone(), fragment: "talk--k3x9".into(), record: ask(max + 1, at0 + max as i64 + 1), view: Some(v.clone()), since: 0 }, T0 + 101);
     let over = answered(&mut e, over, T0 + 101);
@@ -1429,11 +1584,11 @@ fn a_chats_agents_have_a_budget() {
     let person = to_all(&mut e, &[&j], &v, "talk--k3x9", rec_at(max + 2, at0 + max as i64 + 2, "npub1paul", json!({ "text": "still there?" })), T0 + 102);
     assert_eq!(person.len(), 1);
     assert_eq!(e.state().agent_turns["talk--k3x9"].len() as u64, max);
-    e.step(Input::Runtime(Event::End { turn: person[0].0.turn.clone(), outcome: Outcome::Idle }), T0 + 102);
+    e.step(heard(Event::End { turn: person[0].0.turn.clone(), outcome: Outcome::Idle }), T0 + 102);
     // another chat has a budget of its own
     let other = to_all(&mut e, &[&j], &v, "other--k3x9", ask(1, at0 + max as i64 + 3), T0 + 103);
     assert_eq!(other.len(), 1);
-    e.step(Input::Runtime(Event::End { turn: other[0].0.turn.clone(), outcome: Outcome::Idle }), T0 + 103);
+    e.step(heard(Event::End { turn: other[0].0.turn.clone(), outcome: Outcome::Idle }), T0 + 103);
     // the window slides: once the first is older than it, one more runs
     let later = at0 + 1 + limits::AGENT_TURNS_WINDOW_MS;
     let slid = to_all(&mut e, &[&j], &v, "talk--k3x9", ask(max + 3, later), T0 + 104);
@@ -1479,7 +1634,7 @@ fn tasks_hear_only_the_owner_and_the_fragment() {
     let cron = feed(&mut e, task(1, &a.identity, routine.clone()));
     let t = started(&cron).expect("its cron's routine runs");
     assert_eq!(t.asker, "npub1paul", "asked by its owner");
-    e.step(Input::Runtime(Event::End { turn: t.turn, outcome: Outcome::Idle }), T0);
+    e.step(heard(Event::End { turn: t.turn, outcome: Outcome::Idle }), T0);
     let rowan = feed(&mut e, task(2, "npub1rowan", routine.clone()));
     assert!(rowan.effects.is_empty(), "another agent starts no routine: {:?}", rowan.effects);
     assert_eq!(e.cursor(&a.fragment, &a.fragment, "tasks"), 2, "the cursor passes it");
@@ -1625,7 +1780,7 @@ fn every_end_of_an_asked_turn_answers() {
     // a restart's cut
     let mut e = engine(&[rowan.clone(), juniper.clone()]);
     let t = started(&read(&mut e, &rowan, "talk--k3x9", question(1, "q"), Some(&talk), T0)).expect("running");
-    let mut again = Engine::new(e.state().clone(), Settings::default(), LIFE).expect("its state is whole");
+    let mut again = Engine::new(e.state().clone(), Settings::default(), LIFE).expect("its state is whole").with_runtime(crate::runtime::DEFAULT, &[]);
     again.step(Input::Agents(vec![rowan.clone(), juniper.clone()]), T0 + 1);
     let r = again.recover(T0 + 1);
     assert_eq!(outcome(&r), Some((json!("error"), json!(LOST))), "{t:?}");
@@ -1703,7 +1858,7 @@ fn a_state_owing_an_answer_is_one_an_older_bridge_sets_aside() {
     assert_eq!(e.state().version, 2, "no return: the older format");
     let t = started(&read(&mut e, &rowan, "talk--k3x9", question(1, "q"), Some(&talk), T0)).expect("running");
     assert_eq!(e.state().version, STATE_VERSION, "a return held: format 3");
-    let end = e.step(Input::Runtime(Event::End { turn: t.turn.clone(), outcome: Outcome::Idle }), T0);
+    let end = e.step(heard(Event::End { turn: t.turn.clone(), outcome: Outcome::Idle }), T0);
     let owing = serde_json::to_value(e.state()).unwrap();
     assert!(owing["turns"][&t.turn]["owed"].as_array().unwrap().iter().any(|o| o["id"].as_str().is_some_and(|i| i.starts_with("an:"))), "it owes its answer");
     // the older bridge's load: a version but its own (2) is set aside
@@ -1763,11 +1918,11 @@ fn an_answer_owed_survives_a_restart_and_a_forged_one_is_corrupt() {
     let t = started(&read(&mut e, &rowan, "talk--k3x9", question(1, "q"), Some(&talk), T0)).expect("running");
     ev(&mut e, Event::Reply { turn: t.turn.clone(), part: 1, text: "half".into() }, T0);
     ev(&mut e, Event::Reply { turn: t.turn.clone(), part: 2, text: "done".into() }, T0);
-    let end = e.step(Input::Runtime(Event::End { turn: t.turn.clone(), outcome: Outcome::Idle }), T0);
+    let end = e.step(heard(Event::End { turn: t.turn.clone(), outcome: Outcome::Idle }), T0);
     assert!(answers(&end)[0].2["text"].as_str().unwrap().ends_with("half\n\ndone"));
     let saved: State = serde_json::from_str(&serde_json::to_string(e.state()).unwrap()).unwrap();
     assert_eq!(&saved, e.state(), "kept whole");
-    let mut again = Engine::new(saved.clone(), Settings::default(), LIFE).expect("whole");
+    let mut again = Engine::new(saved.clone(), Settings::default(), LIFE).expect("whole").with_runtime(crate::runtime::DEFAULT, &[]);
     again.step(Input::Agents(vec![rowan.clone(), juniper.clone()]), T0 + 1);
     let r = again.recover(T0 + 1);
     assert_eq!(answers(&r).len(), 1, "owed again, under the same id and body");
@@ -1979,7 +2134,7 @@ impl World {
         self.lives += 1;
         let settings = Settings { prompt_ttl_ms: 60_000, turn_idle_ms: 600_000 };
         let life = self.life();
-        self.engine = Some(Engine::new(state.unwrap_or_default(), settings, &life).expect("a saved state is whole"));
+        self.engine = Some(Engine::new(state.unwrap_or_default(), settings, &life).expect("a saved state is whole").with_runtime(crate::runtime::DEFAULT, &[]));
         self.step(Input::Agents(self.agents.clone()));
         let now = self.now;
         let s = self.engine.as_mut().expect("alive").recover(now);
@@ -1989,12 +2144,12 @@ impl World {
 
     /// Its runtime can take turns now.
     fn connect(&mut self) {
-        self.step(Input::Runtime(Event::Connected(true)));
+        self.step(heard(Event::Connected(true)));
     }
 
     /// Its runtime can take no turn now (Hermes gone from its socket).
     fn disconnect(&mut self) {
-        self.step(Input::Runtime(Event::Connected(false)));
+        self.step(heard(Event::Connected(false)));
     }
 
     /// The life ends where it is: the post in flight lands (`landed`) or
@@ -2029,7 +2184,7 @@ impl World {
         for e in s.effects {
             match e {
                 Effect::Post { .. } | Effect::Claim { .. } | Effect::Fence { .. } | Effect::Owed { .. } => self.lane.push_back(e),
-                Effect::Runtime(Command::Start(ts)) => {
+                Effect::Runtime { command: Command::Start(ts), .. } => {
                     let claim = self.journal.work(&ts.turn, "turn.start").into_iter().next();
                     self.runs.push((self.lives, ts.turn.clone()));
                     self.claims_at_run.push((self.lives, ts.turn.clone(), claim));
@@ -2038,12 +2193,12 @@ impl World {
                     self.notes.push((ts.turn.clone(), note));
                     self.held.insert(ts.turn.clone(), Held::default());
                 }
-                Effect::Runtime(Command::Stop { turn }) => {
+                Effect::Runtime { command: Command::Stop { turn }, .. } => {
                     if let Some(h) = self.held.get_mut(&turn) {
                         h.stop = true;
                     }
                 }
-                Effect::Runtime(Command::Answer { turn, prompt, option, .. }) => {
+                Effect::Runtime { command: Command::Answer { turn, prompt, option, .. }, .. } => {
                     // the runtime acts on no owner's answer the journal does
                     // not hold: a life rolled back past it rebuilds nothing
                     if option.is_some() {
@@ -2054,16 +2209,16 @@ impl World {
                         h.prompted = None;
                     }
                 }
-                Effect::Runtime(Command::Forget { turn }) => {
+                Effect::Runtime { command: Command::Forget { turn }, .. } => {
                     self.held.remove(&turn);
                 }
                 // the bridge's own words to an ask's turn that asked back
-                Effect::Runtime(Command::Tell { turn, seq: ASKED_BACK_SEQ, .. }) => {
+                Effect::Runtime { command: Command::Tell { turn, seq: ASKED_BACK_SEQ, .. }, .. } => {
                     if let Some(h) = self.held.get_mut(&turn) {
                         h.asking = false;
                     }
                 }
-                Effect::Runtime(Command::Tell { turn, seq, .. }) => {
+                Effect::Runtime { command: Command::Tell { turn, seq, .. }, .. } => {
                     let claim = self.journal.work(&turn, "turn.start").into_iter().next();
                     let held = match self.held.get_mut(&turn) {
                         Some(h) => {
@@ -2074,7 +2229,7 @@ impl World {
                     };
                     self.tells.push(Told { life: self.lives, turn, seq, claim, held });
                 }
-                Effect::Draft { .. } | Effect::Keepalive(_) | Effect::Discover { .. } | Effect::Runtime(Command::Aside { .. }) => {}
+                Effect::Draft { .. } | Effect::Keepalive(_) | Effect::Discover { .. } | Effect::Runtime { command: Command::Aside { .. }, .. } => {}
             }
         }
     }
@@ -2234,9 +2389,9 @@ impl World {
     fn end(&mut self, turn: &str, outcome: Outcome) {
         let h = self.held.remove(turn).unwrap_or_else(|| panic!("the runtime holds {turn}"));
         if outcome == Outcome::Idle {
-            self.step(Input::Runtime(Event::Reply { turn: turn.into(), part: h.parts + 1, text: format!("an answer to {turn}") }));
+            self.step(heard(Event::Reply { turn: turn.into(), part: h.parts + 1, text: format!("an answer to {turn}") }));
         }
-        self.step(Input::Runtime(Event::End { turn: turn.into(), outcome }));
+        self.step(heard(Event::End { turn: turn.into(), outcome }));
     }
 
     /// The runtime asks its asker something to answer in words (Hermes'
@@ -2247,8 +2402,8 @@ impl World {
         h.asking = true;
         h.parts += 1;
         let part = h.parts;
-        self.step(Input::Runtime(Event::Reply { turn: turn.into(), part, text: format!("a question of {turn}") }));
-        self.step(Input::Runtime(Event::Asked { turn: turn.into() }));
+        self.step(heard(Event::Reply { turn: turn.into(), part, text: format!("a question of {turn}") }));
+        self.step(heard(Event::Asked { turn: turn.into() }));
     }
 
     /// Whether the message whose turn (were it one) is `turn` was told to a
@@ -2262,7 +2417,7 @@ impl World {
         let prompt = format!("p-{}", &turn[..12]);
         self.held.get_mut(turn).expect("held").prompted = Some(prompt.clone());
         let options = vec![PromptOption { id: "once".into(), label: "Allow once".into(), style: None, words: false }, PromptOption { id: "deny".into(), label: "Deny".into(), style: None, words: false }];
-        self.step(Input::Runtime(Event::Prompt { turn: turn.into(), prompt, text: "ok?".into(), options, ttl_ms: None }));
+        self.step(heard(Event::Prompt { turn: turn.into(), prompt, text: "ok?".into(), options, ttl_ms: None }));
     }
 
     fn tick(&mut self, ms: u64) {
@@ -2275,7 +2430,7 @@ impl World {
     /// The lead's runtime says something with no turn running.
     fn say_unasked(&mut self, text: &str) {
         let agent = self.lead().fragment.clone();
-        self.step(Input::Runtime(Event::Say { agent, fragment: CHAT.into(), text: text.into(), files: Vec::new() }));
+        self.step(heard(Event::Say { agent, fragment: CHAT.into(), text: text.into(), files: Vec::new() }));
     }
 
     fn runs_of(&self, turn: &str) -> usize {
@@ -2299,7 +2454,7 @@ impl World {
 
     /// A step of a turn the runtime holds, as the runtime reports it.
     fn did(&mut self, turn: &str, tool: &str, args: &str) {
-        self.step(Input::Runtime(Event::Step { turn: turn.into(), step: ToolStep { tool: tool.into(), args: args.into(), ok: true, excerpt: String::new(), category: crate::records::Category::Shell, evidence: None } }));
+        self.step(heard(Event::Step { turn: turn.into(), step: ToolStep { tool: tool.into(), args: args.into(), ok: true, excerpt: String::new(), category: crate::records::Category::Shell, evidence: None } }));
     }
 
     /// The turns whose `turn.start` the lane holds, in order.
@@ -2781,7 +2936,7 @@ fn the_turn_after_a_lost_one_carries_the_note_once() {
         w.answer_all();
         assert_eq!(w.note_of(&cut), None, "{wake}: the turn before it was answered");
         w.did(&cut, "terminal", "ls /tmp");
-        w.step(Input::Runtime(Event::Reply { turn: cut.clone(), part: 1, text: "Checking first.".into() }));
+        w.step(heard(Event::Reply { turn: cut.clone(), part: 1, text: "Checking first.".into() }));
         w.did(&cut, "terminal", "rm -rf /tmp/x");
         w.answer_all();
         let state = match wake {
@@ -3163,7 +3318,7 @@ fn a_relayed_record_is_honored_only_from_a_linked_agent_for_its_owner() {
 fn turns_in_its_simplex_chat_are_its_owners_phone() {
     let a = agent("juniper");
     let v = view(&[&a]);
-    let mut e = engine(std::slice::from_ref(&a)).with_menu(crate::runtime::script::MENU);
+    let mut e = commanded(std::slice::from_ref(&a), LIFE);
     let in_chat = |e: &mut Engine, chat: &str, seq: u64, principal: &str, body: Value, now: u64| {
         let s = e.step(Input::Record { agent: a.fragment.clone(), fragment: chat.into(), record: rec(seq, principal, body), view: Some(v.clone()), since: 0 }, now);
         let s = answered(e, s, now);
@@ -3247,12 +3402,12 @@ fn a_late_answer_is_a_fresh_claim_even_without_the_cache() {
     let work: Vec<Record> = posts(&initial).into_iter().chain(posts(&card)).enumerate().map(|(i, (_, body))| Record { channel: records::WORK.into(), seq: i as u64 + 1, at: T0 as i64, principal: a.identity.clone(), kind:"message".into(), body }).collect();
     let chat = vec![Record { at:T0 as i64, ..rec(1, &a.owner, json!({"text":"publish after asking"})) }, Record { at:T0 as i64 + 1, ..rec(2, &a.owner, json!({"kind":"prompt_response","prompt":"p","option":"yes","agent":a.identity,"turn":old})) }];
     for (state, questioning) in [(saved, false), (e.state().clone(), false), (State::default(), false), (State::default(), true)] {
-        let mut next = Engine::new(state, Settings::default(), "11111111111111111111111111111111").unwrap();
+        let mut next = Engine::new(state, Settings::default(), "11111111111111111111111111111111").unwrap().with_runtime(crate::runtime::DEFAULT, &[]);
         next.step(Input::Agents(vec![a.clone()]), T0 + 1);
         let recovery = next.recover(T0 + 1);
         assert!(!kinds(&recovery).contains(&"turn.prompt.closed".into()), "the card outlives its turn");
         assert!(next.held().is_empty(), "no turn of this life holds it");
-        next.step(Input::Runtime(Event::Connected(true)), T0 + 1);
+        next.step(heard(Event::Connected(true)), T0 + 1);
         if questioning {
             let routine = Record { channel:records::TASKS.into(), ..rec(1, &a.owner, json!({"kind":"routine","text":"another question","chat":"talk--k3x9"})) };
             let step = next.step(Input::Record {agent:a.fragment.clone(), fragment:a.fragment.clone(),record:routine,view:None,since:0}, T0 + 1);
@@ -3277,7 +3432,7 @@ fn a_late_answer_is_a_fresh_claim_even_without_the_cache() {
         let ts = started(&handed).expect("handed");
         assert_eq!(ts.text, "Answer to your earlier question “Publish?”: Publish", "the owner's answer alone");
         assert!(ts.note.as_deref().is_some_and(|n| n.contains("It was answering paul: “publish after asking”")), "its card's turn as its note: {:?}", ts.note);
-        let mut other = Engine::new(State::default(), Settings::default(), "22222222222222222222222222222222").unwrap();
+        let mut other = Engine::new(State::default(), Settings::default(), "22222222222222222222222222222222").unwrap().with_runtime(crate::runtime::DEFAULT, &[]);
         other.step(Input::Agents(vec![a.clone()]), T0 + 1);
         other.recover(T0 + 1);
         other.step(input, T0 + 1);
@@ -3309,7 +3464,7 @@ fn a_card_answered_live_starts_nothing_after_a_rollback() {
     assert!(journal.iter().any(|b| b["kind"] == "turn.prompt.closed" && b.get("answerSeq").is_none()), "a live closure names no answer");
     let work: Vec<Record> = journal.into_iter().enumerate().map(|(i, body)| Record { channel: records::WORK.into(), seq: i as u64 + 1, at: T0 as i64, principal: a.identity.clone(), kind:"message".into(), body }).collect();
     let chat = vec![Record { at:T0 as i64, ..rec(1, &a.owner, json!({"text":"publish after asking"})) }, Record { at:T0 as i64 + 1, ..rec(2, &a.owner, response) }];
-    let mut back = Engine::new(saved, Settings::default(), "11111111111111111111111111111111").unwrap();
+    let mut back = Engine::new(saved, Settings::default(), "11111111111111111111111111111111").unwrap().with_runtime(crate::runtime::DEFAULT, &[]);
     back.step(Input::Agents(vec![a.clone()]), T0 + 2);
     back.recover(T0 + 2);
     let again = back.step(Input::CardRecord { agent:a.fragment.clone(), fragment:"talk--k3x9".into(), record:chat[1].clone(), view:Some(v.clone()), since:0, history: Ok(crate::history::Journal { work, chat: chat.clone(), cause: Some(chat[0].clone()) }) }, T0 + 2);
@@ -3365,10 +3520,10 @@ fn a_live_answer_reaches_the_runtime_only_once_its_closure_is_on_work() {
     // a restart while held: the turn ends, its answer never given
     ev(&mut e, Event::Prompt { turn: turn.clone(), prompt: "r".into(), text: "Last?".into(), options: options(), ttl_ms: None }, T0 + 10);
     e.step(record(4, "r"), T0 + 11);
-    let mut next = Engine::new(e.state().clone(), Settings::default(), "11111111111111111111111111111111").unwrap();
+    let mut next = Engine::new(e.state().clone(), Settings::default(), "11111111111111111111111111111111").unwrap().with_runtime(crate::runtime::DEFAULT, &[]);
     next.step(Input::Agents(vec![a.clone()]), T0 + 12);
     let recovered = next.recover(T0 + 12);
-    assert!(!recovered.effects.iter().any(|x| matches!(x, Effect::Runtime(Command::Answer { .. }) | Effect::Fence { .. })), "{:?}", recovered.effects);
+    assert!(!recovered.effects.iter().any(|x| matches!(x, Effect::Runtime { command: Command::Answer { .. }, .. } | Effect::Fence { .. })), "{:?}", recovered.effects);
     assert!(next.step(Input::Fenced { turn: turn.clone(), prompt: "r".into(), answer: ClaimAnswer::Ours { seq: None } }, T0 + 13).effects.is_empty(), "the old life's answer: nothing");
 
     // a platform that answers no closure for a turn's idle bound: the turn
