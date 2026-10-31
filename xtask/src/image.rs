@@ -39,13 +39,15 @@ use crate::deploy::{pinned_ok, repository_ok, REGISTRY};
 
 pub(crate) mod preview;
 
-const USAGE: &str = "usage: cargo xtask image push <image> --repository <name> --tag <tag> [--summary <file>]\n       cargo xtask image copy <image> --from <reference> --repository <name> --tag <tag> [--summary <file>]\nthe registry's account in CLOUDFLARE_ACCOUNT_ID (wrangler's token in CLOUDFLARE_API_TOKEN); a copy's source's in FROM_CLOUDFLARE_ACCOUNT_ID and FROM_CLOUDFLARE_API_TOKEN; images: hermes";
+const USAGE: &str = "usage: cargo xtask image push <image> --repository <name> --tag <tag> [--summary <file>]\n       cargo xtask image copy <image> --from <reference> --repository <name> --tag <tag> [--summary <file>]\nthe registry's account in CLOUDFLARE_ACCOUNT_ID (wrangler's token in CLOUDFLARE_API_TOKEN); a copy's source's in FROM_CLOUDFLARE_ACCOUNT_ID and FROM_CLOUDFLARE_API_TOKEN; images: hermes, search";
 
 /// The images it builds, by name: each one's Dockerfile and build context,
 /// relative to the repo, as a deploy config's line builds it
 /// (deploy/example.jsonc: the Hermes image builds from the repo's root,
-/// as it carries the fragment CLI).
-const IMAGES: [(&str, &str, &str); 1] = [("hermes", "images/hermes/Dockerfile", ".")];
+/// as it carries the fragment CLI; the search service's from search/, its
+/// own workspace), so a config pins it by digest rather than compiling it
+/// at every deploy (LanceDB takes about 25 minutes cold).
+const IMAGES: [(&str, &str, &str); 2] = [("hermes", "images/hermes/Dockerfile", "."), ("search", "search/Dockerfile", "search")];
 
 /// How many times a push or a copy is tried, and the pause after each that
 /// fails: the Hermes image's base is one layer of 1.4 GB compressed, whose
@@ -350,6 +352,16 @@ fn pinned_of(repo_digests: &str, account: &str, repository: &str) -> Result<Stri
 /// `account_id`.
 fn summary(req: &Request, reference: &str) -> String {
     let readable = |r: &str, account: &str| r.replacen(account, "<account>", 1);
+    // the search service's image has one line, its container's (no canary)
+    if req.image == "search" {
+        let from = req.from.as_ref().map(|s| format!("From `{}`, its digest unchanged.\n\n", readable(&s.reference, &s.account))).unwrap_or_default();
+        return format!(
+            "### search as {}:{}\n\n{from}`{}`\n\nIts line in the deploy config's `search.r2`, the account the config's `account_id` (search/README.md, \"On Cloudflare\"):\n\n```jsonc\n\"image\": {{ \"image\": \"{reference}\" }},\n```\n",
+            req.repository,
+            req.tag,
+            readable(reference, &req.account)
+        );
+    }
     let canary = format!("{}-canary", req.image);
     let (done, from, line, other) = match &req.from {
         None => ("pushed", String::new(), canary.as_str(), req.image),
@@ -397,6 +409,8 @@ mod tests {
         let refused = |list: &[&str], account: &str| parse(&args(list), with(account)).unwrap_err().to_string();
         let ok = ["push", "hermes", "--repository", "fragment-computer-hermes", "--tag", "r9"];
         assert!(parse(&args(&ok), with(ACCOUNT)).is_ok());
+        let search = parse(&args(&["push", "search", "--repository", "fragment-search", "--tag", "r1"]), with(ACCOUNT)).unwrap();
+        assert_eq!((search.dockerfile, search.context), ("search/Dockerfile", "search"), "the search service's image, from its own workspace");
         assert!(refused(&["push", "stub", "--repository", "r", "--tag", "t"], ACCOUNT).contains("no image \"stub\""));
         assert!(refused(&["push", "hermes", "--repository", "Hermes", "--tag", "t"], ACCOUNT).contains("is no repository"));
         assert!(refused(&["push", "hermes", "--repository", "a/-b", "--tag", "t"], ACCOUNT).contains("is no repository"));
@@ -529,5 +543,11 @@ mod tests {
         assert!(text.starts_with("### hermes copied as fragment-computer-hermes:r9") && text.contains(&format!("From `registry.cloudflare.com/<account>/fragment-preview-computer-hermes-canary@sha256:{digest}`, its digest unchanged")), "{text}");
         assert!(!text.contains(PREVIEW), "{text}");
         assert_eq!(line_of(&text, "hermes")["hermes"]["image"], reference.as_str());
+        // the search service's: its one line, `search.r2.image`
+        let s = parse(&args(&["push", "search", "--repository", "fragment-search", "--tag", "r1"]), &all).unwrap();
+        let reference = format!("registry.cloudflare.com/{ACCOUNT}/fragment-search@sha256:{digest}");
+        let text = summary(&s, &reference);
+        assert!(text.contains("`search.r2`") && !text.contains("canary"), "{text}");
+        assert_eq!(line_of(&text, "image")["image"]["image"], reference.as_str());
     }
 }

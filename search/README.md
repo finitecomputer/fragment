@@ -215,6 +215,12 @@ How it runs:
   sweep after each start opens every table, and so costs a few requests
   for each (docs/technical-debt-ledger.md).
 
+Its image: built from `search/Dockerfile` at every deploy (LanceDB takes
+about 25 minutes to compile cold), or pinned by digest, which a deploy
+prepares before it changes anything: `cargo xtask image push search
+--repository fragment-search --tag <tag>` prints the line for
+`search.r2.image`.
+
 Measured on R2 from outside Cloudflare (2026-10-31, three runs; inside it,
 each request is closer):
 
