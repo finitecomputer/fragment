@@ -209,9 +209,14 @@ export function createChatList({ api, ui, data, selection, menus, navigation, li
     named.append(el("strong", "title", name));
     if (says) named.append(el("span", `agent-doing ${doing.doing}`, says));
     row.append(face, named);
-    row.onclick = () => openAgentMenu(agent, row);
+    // its agent as it is when pressed: a hero kept from an earlier drawing
+    // (the same node) may have been drawn before its computer was read
+    row.onclick = () => openAgentMenu(agentNow(agent.fragment), row);
     return row;
   }
+  // An agent of theirs by its fragment, as the list and their computer say
+  // now: its identity once their computer has it.
+  const agentNow = (fragment) => ownAgents().find((a) => a.fragment === fragment) ?? (primaryAgent()?.fragment === fragment ? primaryAgent() : { fragment, identity: null });
   // An agent's menu: where it is doing something (each chat opens; read as
   // it opens, not from when its hero was drawn), a new chat with it, its
   // name, its profile and its screen. Its hero is first scrolled up enough
