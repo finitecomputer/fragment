@@ -1462,7 +1462,9 @@ the code the fragment's own.
   of that name, compared in constant time; its inbox token, which its
   editors read, then admits nothing, and before the secret is set nothing
   is taken. A webhook that signs with a secret the sender was given (a
-  bot's `secret_token`) reaches an app so, and no editor can forge one. A
+  bot's `secret_token`) reaches an app so: a delivery is forged only by
+  whoever may set that secret, its editors (on a connector, its owner
+  alone: An agent's doors), never by one who reads the inbox token. A
   fragment on a blessed template declares none of its own.
 
 `app.mjs` exports `class App extends DurableObject` with one method per
