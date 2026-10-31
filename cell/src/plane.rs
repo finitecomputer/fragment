@@ -476,6 +476,15 @@ impl FragmentCell {
             }
         };
         self.face_is(manifest.kind(), manifest.title(), manifest.role(), shown.as_deref())?;
+        // a connector that installs other code (a fork, another template, none)
+        // is no door from then on, nor its owner's alone to edit (doors.rs)
+        if let Some(t) = self.meta(MetaKey::DoorTemplate)? {
+            if fragment_core::door::blessed_template(&loader_id) != Some(t.as_str()) {
+                self.del_meta(MetaKey::DoorTemplate)?;
+                self.unbind_door("its code is no longer its connector's")?;
+                self.event("door.unmade", &format!("ran code that is not the {t} connector's: never a door again"), json!({ "template": t, "code": loader_id }));
+            }
+        }
         let Some(source) = source else {
             self.exec("DELETE FROM code", vec![])?;
             // no operations to run, so nothing for a trigger to start
