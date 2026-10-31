@@ -1418,6 +1418,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     skills_ui(s, api, &mut b, &page, &session)?;
     connections_ui(s, api, &mut b, &page, &session, &email, &chat)?;
     settings_race_ui(s, api, &mut b, &page, &session)?;
+    settings_read_again_ui(s, &mut b, &page)?;
     notice_ui(s, &mut b, &page, &chat, &shots)?;
     reasoning_ui(s, api, &mut b, &page, &session, &shots)?;
     home_ui(s, api, &mut b, &page, &me, &shots)?;
@@ -3717,6 +3718,36 @@ fn settings_race_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sess
     shell(api, session, "DELETE", &key, None, &[])?;
     b.reload(page)?;
     anyhow::ensure!(b.until(page, &format!("{state} === 'not_set'"), wait), "settings show {} not set again", crate::SWAP_OWN);
+    Ok(())
+}
+
+/// A read of settings that fails on its way (#775: one `GET /api/seat` that
+/// never reached the node left "Your seat could not be read." up for good).
+/// Valid: settings say what could not be read, ask it again by themselves,
+/// and show it once it answers, with no reload. The page's fetch fails its
+/// next seat read as a dropped connection does (fetch's TypeError), and
+/// passes every other call, and every seat read after it.
+fn settings_read_again_ui(s: &mut Suite, b: &mut Browser, page: &Page) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    let billing = "([...document.querySelectorAll('#settings-page .settings-section')].find((x) => x.querySelector('h2')?.textContent === 'Billing')?.innerText ?? '')";
+    b.eval(
+        page,
+        "(() => { const real = window.fetch; window.__seatReads = 0; window.fetch = async (url, o) => { \
+         if ((o?.method ?? 'GET') === 'GET' && String(url) === '/api/seat' && window.__seatReads++ === 0) throw new TypeError('Failed to fetch'); \
+         return real(url, o); }; return true; })()",
+    )?;
+    b.eval(page, "(document.getElementById('settings').click(), true)")?;
+    let said = b.until(page, &format!("{billing}.includes('Your seat could not be read.')"), wait);
+    let read = b.until(page, &format!("window.__seatReads > 1 && !{billing}.includes('could not be read') && {billing}.length > 'Billing'.length"), wait);
+    let seen = b.eval(page, &format!("({{ reads: window.__seatReads, billing: {billing}, at: location.pathname + location.search }})"))?;
+    // the page's own fetch again
+    b.reload(page)?;
+    anyhow::ensure!(b.until(page, "location.pathname === '/settings' && !!document.querySelector('#settings-page .settings-section')", wait), "settings again after the read checks");
+    s.ok(
+        "a seat read that fails on its way: settings say the seat could not be read, read it again by themselves, and show it once it answers, with no reload",
+        said && read && seen["at"] == "/settings",
+        &seen,
+    );
     Ok(())
 }
 
