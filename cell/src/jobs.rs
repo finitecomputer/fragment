@@ -310,6 +310,13 @@ struct FinishCall {
     error: String,
 }
 
+/// What admits a delivery to a fragment's inbox: its inbox token, or, when
+/// its code names an inbox secret (`InboxSecret`), that header holding it.
+pub(crate) enum Admits {
+    Token(String),
+    Secret { header: String, name: String, given: String },
+}
+
 impl FragmentCell {
     /// The fragment's own key: who triggered runs act as.
     pub(crate) fn own_key(&self) -> CellResult<String> {
@@ -1401,10 +1408,22 @@ impl FragmentCell {
     /// appended to the `inbox` channel; the operations it triggers run with
     /// the record. Records whose runs have not succeeded are pending; past
     /// the cap a post is refused, so overload is a 429, not memory.
-    pub(crate) async fn inbox(&self, token: &str, hops: u32, body: &[u8]) -> CellResult<Response> {
+    pub(crate) async fn inbox(&self, given: Admits, hops: u32, body: &[u8]) -> CellResult<Response> {
         self.name()?;
-        if !crate::serve::eq_ct(token, &self.must(MetaKey::InboxToken)?) {
-            return Err(CellError::new(ErrorCode::Forbidden, "bad inbox token (x-fragment-inbox-token, or ?t=)"));
+        match given {
+            Admits::Token(token) => {
+                if !crate::serve::eq_ct(&token, &self.must(MetaKey::InboxToken)?) {
+                    return Err(CellError::new(ErrorCode::Forbidden, "bad inbox token (x-fragment-inbox-token, or ?t=)"));
+                }
+            }
+            Admits::Secret { header, name, given } => {
+                let refused = || CellError::new(ErrorCode::Forbidden, format!("bad inbox secret ({header}): this inbox takes a delivery only with its secret there"));
+                let stored = self.stored_secret(&name)?.ok_or_else(refused)?;
+                let value = self.open_secret(&name, &stored.sealed).await?;
+                if given.is_empty() || !crate::serve::eq_ct(&given, &String::from_utf8_lossy(&value)) {
+                    return Err(refused());
+                }
+            }
         }
         // a delivery to the inbox is a write
         self.writable().await?;
