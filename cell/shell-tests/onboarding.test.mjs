@@ -27,6 +27,7 @@ function platform() {
   const computer = { computer: "c1", phase: "awake", agents: [] };
   let made = 0;
   let cut = null;
+  const writes = [];
   const row = (name) => rows.find((f) => f.name === name);
   const make = (label, kind, title) => {
     const n = made++;
@@ -79,6 +80,7 @@ function platform() {
     throw new Error(`no route: ${method} ${path}`);
   };
   const api = async (method, path, body) => {
+    if (method !== "GET") writes.push(`${method} ${path}`);
     if (cut && cut.when(method, path, body)) {
       const { done } = cut;
       cut = null;
@@ -101,6 +103,9 @@ function platform() {
     files: (name) => files.get(name),
     tasks: (name) => tasks.get(name),
     members: (name) => members.get(name),
+    make,
+    // what was asked to change since the last ask
+    writes: () => writes.splice(0),
     // the next call `when` names fails; `done`, after it was done
     cut: (when, done = false) => { cut = { when, done }; },
   };
@@ -232,13 +237,20 @@ test("Try again on the same page finishes what failed", async () => {
   madeWhole(world);
 });
 
-test("a page opened on a made agent's quiet chat makes nothing", async () => {
-  const world = platform();
-  const p = page(world);
-  await p.load();
-  await adding(p);
-  const before = JSON.stringify([world.rows(), world.computer()]);
-  await page(world).opened();
-  assert.equal(JSON.stringify([world.rows(), world.computer()]), before);
-  madeWhole(world);
-});
+// Made whole, its chat still quiet (its hello not answered yet): a page
+// opened then posts its hello again, the same record, and nothing else; a
+// second chat of its label (a create whose answer was lost) is left be.
+for (const stray of [false, true]) {
+  test(`a page opened on a made agent's quiet chat makes nothing${stray ? ", nor of a stray chat of its label" : ""}`, async () => {
+    const world = platform();
+    const p = page(world);
+    await p.load();
+    await adding(p);
+    if (stray) world.make("wren-chat", "chat", "Your first chat");
+    world.writes();
+    const before = JSON.stringify([world.rows(), world.computer()]);
+    await page(world).opened();
+    assert.equal(JSON.stringify([world.rows(), world.computer()]), before);
+    assert.deepEqual(world.writes().map((w) => w.replace(/--[a-z0-9]{4}/g, "")), ["POST /api/f/wren/channels/tasks"]);
+  });
+}
