@@ -181,7 +181,7 @@ mod tests {
     use super::*;
 
     fn agent(label: &str) -> Agent {
-        Agent { fragment: format!("{label}--k3x9"), identity: format!("npub1{label}"), name: label.into(), owner: "npub1paul".into(), credentials: vec![], key: None }
+        Agent { fragment: format!("{label}--k3x9"), identity: format!("npub1{label}"), name: label.into(), owner: "npub1paul".into(), credentials: vec![], key: None, runtime: None }
     }
 
     /// Valid: each agent's screen is its own profile's desktop, as the

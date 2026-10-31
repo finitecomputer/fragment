@@ -188,7 +188,7 @@ mod tests {
     use super::*;
 
     fn agent(label: &str, name: &str) -> Agent {
-        Agent { fragment: format!("{label}--k3x9"), identity: format!("npub1{label}"), name: name.into(), owner: "npub1paul".into(), credentials: vec![], key: None }
+        Agent { fragment: format!("{label}--k3x9"), identity: format!("npub1{label}"), name: name.into(), owner: "npub1paul".into(), credentials: vec![], key: None, runtime: None }
     }
 
     fn listed(name: &str, kind: &str, owned: bool) -> FragmentEntry {
