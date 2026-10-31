@@ -37,6 +37,9 @@ platform concept.
   `crates/fakes`, `crates/devstack`, `crates/e2e`: local vendor fakes and harness.
 - `templates/`: fragment templates; `applib/`: reusable app code.
 - `images/`: a separate Rust workspace (bridge, stub, Hermes).
+- `search/`: the search service (LanceDB on R2, S3 or a disk;
+  `search/README.md`); `bench/search/`: the benchmark that chose it. Each a
+  separate Rust workspace (`cargo test --release`).
 - `.github/workflows/`: CI, image promotion and CLI releases. Read the
   relevant workflow and xtask module for mechanics and flags.
   Released CLIs warn on stderr when finite.chat advertises a newer
