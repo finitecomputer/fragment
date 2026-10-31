@@ -53,7 +53,7 @@ A runtime gets commands and sends events, each naming its turn
 | `Reply {part, text}` | reply `part` (from 1) whole; posted at the next part, step, prompt, or end (at a step, `interim`: the turn works on after it, unless the step only updates memory) |
 | `Attachment {part, file}` · `Retract {part}` | a file on a reply; a reply taken back |
 | `Step {tool, args, ok, excerpt, category}` | a tool call, and what it does (docs/chat-records.md, `turn.step`); the model's words before it are a reply part of their own, sent before it |
-| `Prompt {prompt, text, options, ttl?}` | a card; the turn waits, its computer kept awake until the card is answered (a press, or, for a card that takes words, its owner's message in the chat: `Answer`) or expires |
+| `Prompt {prompt, text, options, ttl?}` | a card; the turn waits until the card is answered (a press, or, for a card that takes words, its owner's message in the chat: `Answer`) or expires |
 | `Asked` | the turn asked its asker something to answer in words (the question is a reply part before it): their next message to the agent in that chat is its answer (`Tell`); it waits, running, as long as a prompt's life, and the chat is told (`turn.asked`) |
 | `End {outcome}` | `idle`, `stopped`, or `error` |
 | `Say {agent, fragment, text, files}` | said with no turn running, or answering a command said beside one (`Aside`): a turn of its own, with any files uploaded and attached to the same reply; a file needs no caption |
@@ -75,7 +75,7 @@ Bodies are JSON. `api.rs` has one method for each.
 |---|---|---|
 | `GET /api/computer` (no agent) | | `{computer, owner, image, agents: [{fragment, identity, name, owner}]}`; at start, then every minute, and within a second of a change to the ready file (below); `?simplex=1` when the image names a SimpleX core (below, "SimpleX") |
 | `GET /api/computer/relay?host=&port=` (no agent), WebSocket | | the XFTP relay (docs/computers.md): one per connection a SimpleX core makes to a host and port the view's `relay` names, through the cores' proxy (`src/simplex/socks.rs`), its bytes piped both ways |
-| `GET /api/computer/keepalive` (no agent), WebSocket | | held while a turn waits to run, runs, or waits on its card (below, "A card keeps its computer awake"); pinged every `BRIDGE_KEEPALIVE_PING_MS` (15 s), and opened again after twice that with nothing heard, since a deploy can cut the platform's side of it with no close reaching here (#557) |
+| `GET /api/computer/keepalive` (no agent), WebSocket | | held according to "Runtime work outside a turn", below; pinged every `BRIDGE_KEEPALIVE_PING_MS` (15 s), and opened again after twice that with nothing heard, since a deploy can cut the platform's side of it with no close reaching here (#557) |
 | `GET /api/fragments?for=<owner>` | | `{fragments: [{name, kind, owned, title}]}`: its owner's, as the agent reaches them: its own chat with them found by its label (`api::bot_chat`), as a routine with no chat fires |
 | `POST /api/fragments?for=<owner>` | `{name, template: "chat", title}` | the agent's SimpleX chat, made for its owner by the name its link chose, when its link is bound; 409, made already (then `GET /api/f/{chat}/members` says whether it is the agent's and its owner's: below, "SimpleX") |
 | `GET /api/f/{agent}/file?path=agent.json` | | its home (`api::Home`), read as a routine with no chat fires (docs/api.md, "An agent's home"); none (404) is its own chat |
@@ -86,7 +86,7 @@ Bodies are JSON. `api.rs` has one method for each.
 | `GET /f/{f}/__people?id=…` | | `{profiles: {id: {kind, email?, name?, title?}}}`: what to call a writer: a person by their email (which its agent, a member, is shown), another agent by its name (`title`, its agent fragment's), else its label (`name`), read again with the chat's members (30 s), so a rename reaches it; none is "someone" |
 | `GET /api/f/{f}/subscriptions` | | `{subscriptions: [{id, principal, channel, wake}]}` |
 | `POST /api/f/{f}/subscriptions` | `{channel, wake: true}` | `{id, channel, wake}`; only when the list has none |
-| `GET /api/f/{f}/channels/{c}?after=&limit=1000` | | `{records: [{channel, seq, at, principal, kind, body}], next}`: the catch-up, at most 20 pages; a turn's note, read back from its claim on `work` (and from `chat`'s tail) in pages of 100, at most 1000 records each; and the message a turn's message quotes (`reply_to`: `after=<seq − 1>&limit=1`, within 5 s or none) |
+| `GET /api/f/{f}/channels/{c}?after=&limit=1000` | | `{records: [{channel, seq, at, principal, kind, body}], next}`: the catch-up, at most 20 pages; a turn's note, and a late card answer's journal ("A card outlives its turn"), read back in pages of 100, at most 1000 records each; and the message a turn's message quotes (`reply_to`: `after=<seq − 1>&limit=1`, within 5 s or none) |
 | `GET /f/{f}/__live`, WebSocket | `{type: "subscribe", channel, after}`, `{type: "ping"}` | `hello`, `record`, `subscribed {next, more}`; 4003/4004 end the follow |
 | `POST /api/f/{f}/channels/{chat\|work}` | `{id, body}` | `{record, replayed}` (a claim's `record.seq` is where the turn's note is read back from); retried 10 times with jitter on a transport error, 429 or 5xx. A turn's claim (its `turn.start`) is answered back to the engine: posted or replayed, this life runs it; 409, another life claimed it; 403/404, the agent may not post there (it left the chat, or its owner holds it below editor), and the turn is dropped; anything else, no answer. Any other 409 is another life's post of the id, and a 403/404 is no longer the agent's to post in: dropped and logged |
 | `PUT /api/f/{f}/channels/chat/draft` | `{turn, text \| null}` | at most 4 a second a turn; a 429 is ignored |
@@ -160,8 +160,8 @@ earlier save, or lost, costs reads and runs nothing twice
   its claim is the 409.
 - **At a start**, every turn the state holds that is not queued belongs
   to an earlier life and is ended (`error: lost when the computer
-  restarted`, its cards `expired`), never handed again: this is the
-  at-most-once choice, so a turn whose life ended before it did is lost,
+  restarted`, leaving unexpired cards answerable), never handed again:
+  this is the at-most-once choice, so a turn whose life ended before it did is lost,
   and said so. Queued turns stay queued and are claimed like any other.
 - **A claim waits for the runtime and the hold**: a turn is claimed only
   while the runtime says it can take one (`Connected`), and not while
@@ -357,8 +357,7 @@ turn, which waits for one), `queue`, `btw` (`aside: /btw …`).
 
 The computer is held while the agent does work: a queued or running
 turn, or a delegated child still running after its parent replied.
-Waiting on a person alone will not hold it once P6 (#627) lands; until
-then an open card still holds it as described below.
+Waiting on a person alone never holds it.
 
 The image's `fragment-activity` plugin uses Hermes v0.21.7's supported
 hooks: `subagent_start` and `subagent_stop` for its children,
@@ -407,31 +406,76 @@ upload or a fetched provider URL after the parent ends and posts a reply
 with the file, even without a caption. It uses the registered agent and
 the chat's ordinary blob upload; no active parent turn is required.
 
-## A card keeps its computer awake
+## A card outlives its turn (P6)
 
-A turn waiting on its card holds the keepalive until the card is
-answered or expires, at most the card's life (`BRIDGE_PROMPT_TTL_MS`, an
-hour; docs/durable-computers.md, P6 for now). So a card expires with its
-runtime there: Hermes' wait on it times out with it (the image sets
-`agent.clarify_timeout` and `approvals.timeout` to the card's life), its
-model is told no one answered, the turn ends, and the chat's next message
-is answered.
+Waiting on a person never holds the computer, so a sleep or a restart may
+cut a turn under its card. The turn ends as lost; its unexpired cards stay
+open, answerable until `expiresAt`. An answer a running turn of this life
+holds is that turn's, as ever. Any other owner's answer to the agent's card
+is late (`driver.rs` `feed`: the engine's held prompts, `Engine::held`):
+before its cursor passes it, the driver reads the chat's journal back to
+the card (`card_history`: `work` from its tail to the card's turn's start,
+`chat` from the answer to before the card, and that turn's cause), within
+`HISTORY_*` bounds of pages, bytes and records, and the engine resolves it
+(`cards.rs`):
 
-It used to be let go (decision 42 as first written), so an idle computer
-slept 20 minutes into an unanswered card, and the next life ended its turn
-as lost. Hermes, though, had kept the cut turn's message as its session's
-last, unanswered, and folds the next message into it (two user messages
-in a row are one): the model was given `[paul] do the risky thing\n\n[paul]
-good morning`, and asked the cut command's approval again. Every message
-after a missed card was met by the card again, and the computer slept
-under each one (Paul on p5, 2026-10-05: "I missed the 1hr window and now
-it's not responding to chats"; `an_expired_card_ends_its_turn` in
-tests/docker.rs, and its scripted twin in tests/relay.rs). A restart for
-any other reason while a card is open (an owner's sleep, a crash, a
-deploy) still cuts the turn, which ends as lost; the next message is now
-a turn of its own, told what was cut (below), never folded into the cut
-request. The card's promise outliving a restart is P6 of
-docs/durable-computers.md, and the debt ledger.
+- **The first answer starts one fresh turn.** The earliest valid answer
+  given in the card's life (the owner's, an offered option, this card)
+  starts a turn of its own, caused by the answer's record, so its claim
+  is the answer's: a retry after any restart is the same claim, never a
+  second run. Its message is the owner's answer alone ("Answer to your
+  earlier question “…”: …", the words typed for a card that takes them);
+  its note (`TurnStart::note`, Relay's read-only `context`, in the cut
+  note's place) is the card's turn as `note.rs` renders one: that it ended
+  before the answer and is not resumed, to check what it did before doing
+  any of it again, who asked it what (cut at 1500 characters, said so),
+  its steps (8, the rest counted) and its last replies. Nothing of it is
+  the owner's words. The old turn never resumes.
+- **Only a late closure rebuilds.** The card's closure on this path names
+  its answer (`answerSeq`); a closure written live names none, and the
+  runtime has a live answer only once that closure is on `work`
+  (`Effect::Fence`, answered back as `Input::Fenced`, as a claim is:
+  posted again at each tick until the platform answers it; a 409 or a
+  chat the agent may no longer post in ends the runtime's wait with no
+  answer, as an expiry does). So a `/data` rolled back to before the
+  answer reads it again and finds it answered live, and starts nothing,
+  or not recorded, and so never acted on, and runs it once, late.
+- **Otherwise nothing runs.** A card closed already, a Stop of its turn or
+  from its asker before the answer, another option or another person's
+  answer start nothing; an answer read after the card's life with none in
+  it closes the card `expired`; a journal that cannot be read whole (a
+  gap, a card further back than a read goes, a start with no cause) closes
+  it `history_unavailable`, on its own turn, and starts nothing.
+- **A failed read is read again.** A call that fails or times out (a
+  deploy's 503, `CARD_READ_MS_MAX`) ends the chat's follow, which reads the
+  answer again from its cursor after a wait: never a closure.
+
+The image still sets Hermes' `agent.clarify_timeout` and `approvals.timeout`
+to the card's life (`BRIDGE_PROMPT_TTL_MS`, an hour), so a runtime still
+alive at its expiry times out as before. The fresh turn is a new Hermes
+turn: an approval Hermes itself asks (its few left: a saved payment card's
+fill; `managed_config`) is asked again there, as its gate keeps no answer.
+A card answered live whose turn a crash then cut before it acted (its
+closure on `work`, its runtime given the answer or not yet) is answered
+and lost, as at-most-once has it; the next turn's note says so.
+SimpleX answers a card in words (a message), never a `prompt_response`: one
+read late is a message of its own.
+
+Proven in `cards.rs` (a long turn's late answer and its note, the live
+closure's rollback, first answer, Stop, expiry, refusals), the engine
+(`a_late_answer_is_a_fresh_claim_even_without_the_cache`,
+`a_card_answered_live_starts_nothing_after_a_rollback`,
+`a_live_answer_reaches_the_runtime_only_once_its_closure_is_on_work`, and
+the crash world's rule that the runtime acts on no owner's answer the
+journal does not hold), through the bridge
+(`a_late_answer_survives_a_deploy_and_runs_once`,
+`a_live_answer_runs_once_whatever_landed_before_a_crash`,
+`a_late_card_with_unavailable_history_runs_nothing`) and with the real
+Hermes (tests/docker.rs `a_card_answered_after_a_sleep_starts_one_fresh_turn`:
+a turn of six tool calls and a long plan, a sleep and a restore, a deploy's
+503s, the answer again, Keep private; `a_card_answered_live_runs_once_after_a_rollback`:
+a closure refused then a restore, a closure landed then a restore, and an
+expiry).
 
 ## The turn after a cut one is told
 

@@ -1830,17 +1830,19 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     let version = || api.call(Call { method: "GET", url: format!("{origin}/p/6080/version.txt"), keys: Some(&owner), ..Call::default() }).map(|r| r.text.trim().to_string()).unwrap_or_default();
     let r = api.signed(&owner, "PUT", &format!("/api/computers/{id}/image"), Some(&json!({ "image": "no-such-image" })))?;
     s.ok("an image the deployment does not have is refused", r.status == 400, &r);
-    const PINS: [&str; 10] = [
+    const PINS: [&str; 12] = [
         "it runs its first build, the version its next start runs: no update to tell",
         "the next build is pinned",
         "awake on the first, its owner is told an update is ready: the version its next start runs, not the one it runs",
         "it keeps running the build it started with until it sleeps",
-        "not while a turn runs: its card waiting holds the keepalive, and no update is told",
+        "while a model call runs, its keepalive suppresses the update notice",
         "the turn over, the update is told again",
         "Later puts that version off: told no more; again, the same; another version, or none, is refused; no one else's",
         "restarted, it runs the next build (an upgrade): its version the latest, nothing to tell",
         "with its /data restored: it answers anew, and nothing runs twice",
         "the first build pinned again, an update is told again: a version other than the one put off",
+        "while a card waits only on its owner, the keepalive is released and the update is told",
+        "the card answered, its turn finishes and the update remains available",
     ];
     if !scripted {
         for label in PINS.iter().chain(&["asleep, no update is told: its next start takes it", "woken, it runs the first build again (a rollback)"]) {
@@ -1857,13 +1859,37 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         s.ok(PINS[1], r.status == 200 && r.body["image"] == "stub-next", &r);
         s.ok(PINS[2], !latest.is_empty() && notice(&r.body, "update") == json!({ "kind": "update", "version": latest }) && r.body["version"] == first["version"] && first["version"] != latest.as_str(), &r);
         s.ok(PINS[3], version() == "1", version());
-        // a turn waiting on its card holds the keepalive (docs/bridge.md)
+        // Hold a real model call at the vendor boundary so the running
+        // turn, rather than a question waiting on a person, suppresses the
+        // update. The call is observed before its keepalive is checked.
+        if fakes {
+            let called = s.ai.chats().len();
+            s.ai.delay_next(&[15_000]);
+            let said = say(15, "think while an update is ready")?;
+            let turn = turn_of(&agent_name, &chat_name, "chat", said.body["record"]["seq"].as_i64().unwrap_or(0));
+            let running = s.eventually(wake, || s.ai.chats().len() > called && lever(api, &id, "saves").is_ok_and(|r| r.body["keepalives"].as_u64().is_some_and(|n| n > 0)));
+            let work = work_of(&records(api, &owner, &chat_name, "work"), &turn);
+            let mid = view();
+            s.ok(PINS[4], running && work.iter().any(|r| r["body"]["kind"] == "turn.start") && !work.iter().any(|r| r["body"]["kind"] == "turn.end") && mid["phase"] == "awake" && notice(&mid, "update").is_null(), json!({ "work": work, "view": mid }));
+            let completed = s.eventually(wake, || work_of(&records(api, &owner, &chat_name, "work"), &turn).iter().any(|r| r["body"]["kind"] == "turn.end") && agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).iter().any(|r| r["body"]["turn"] == turn.as_str()));
+            replies_so_far += 1;
+            let again = s.eventually(Duration::from_secs(15), || notice(&view(), "update")["version"] == latest.as_str());
+            s.ok(PINS[5], completed && again, view());
+        } else {
+            for label in &PINS[4..=5] {
+                s.skip(label, "it needs the local model fake to hold a running call");
+            }
+        }
+        // Person-waiting is deliberately idle under P6, even though the
+        // card's turn has not ended. Its owner may take the update now.
         let said = say(14, "approve this one too, please")?;
         let turn = turn_of(&agent_name, &chat_name, "chat", said.body["record"]["seq"].as_i64().unwrap_or(0));
         let asked = s.eventually(wake, || work_of(&records(api, &owner, &chat_name, "work"), &turn).iter().any(|r| r["body"]["kind"] == "turn.prompt"));
+        let released = s.eventually(Duration::from_secs(15), || lever(api, &id, "saves").is_ok_and(|r| r.body["keepalives"] == 0) && notice(&view(), "update")["version"] == latest.as_str());
         let held = lever(api, &id, "saves").map(|r| r.body["keepalives"].clone()).unwrap_or(Value::Null);
+        let work = work_of(&records(api, &owner, &chat_name, "work"), &turn);
         let mid = view();
-        s.ok(PINS[4], asked && held.as_u64().is_some_and(|n| n > 0) && mid["phase"] == "awake" && notice(&mid, "update").is_null(), json!({ "keepalives": held, "view": mid }));
+        s.ok(PINS[10], asked && released && held == 0 && !work.iter().any(|r| r["body"]["kind"] == "turn.end") && mid["phase"] == "awake" && notice(&mid, "update")["version"] == latest.as_str(), json!({ "keepalives": held, "work": work, "view": mid }));
         let card = work_of(&records(api, &owner, &chat_name, "work"), &turn).into_iter().find(|r| r["body"]["kind"] == "turn.prompt").unwrap_or_default();
         let prompt = card["body"]["prompt"].as_str().unwrap_or("").to_string();
         let answer = json!({ "id": format!("pr:{prompt}"), "body": { "kind": "prompt_response", "prompt": prompt, "option": "once", "agent": card["principal"], "turn": card["body"]["turn"] } });
@@ -1871,7 +1897,7 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         let approved = s.eventually(wake, || agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).iter().any(|r| r["body"]["turn"] == turn.as_str()));
         replies_so_far += 1;
         let again = s.eventually(Duration::from_secs(15), || notice(&view(), "update")["version"] == latest.as_str());
-        s.ok(PINS[5], approved && again, view());
+        s.ok(PINS[11], approved && again, view());
         let later = |who: &crate::Keys, v: &str| api.signed(who, "POST", &format!("/api/computers/{id}/notices/later"), Some(&json!({ "version": v })));
         let (once, twice) = (later(&owner, &latest)?, later(&owner, &latest)?);
         let (running, malformed, none) = (later(&owner, first["version"].as_str().unwrap_or(""))?, later(&owner, "not a version")?, api.signed(&owner, "POST", &format!("/api/computers/{id}/notices/later"), Some(&json!({})))?);

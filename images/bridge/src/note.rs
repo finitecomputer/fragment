@@ -193,33 +193,75 @@ pub fn text(cut: &Cut, asked: Option<&str>, replies: &[String]) -> String {
     if let Some(a) = asked.filter(|a| !a.trim().is_empty()) {
         lines.push(format!("It was answering: {}", quoted(a, limits::NOTE_ASKED_MAX_CHARS)));
     }
-    if !cut.steps.is_empty() {
-        let mut steps: Vec<String> = cut
-            .steps
-            .iter()
-            .map(|s| {
-                let args = s.args.split_whitespace().collect::<Vec<_>>().join(" ");
-                let args = if args.is_empty() { String::new() } else { format!(" {}", records::cut(&args, limits::NOTE_ARGS_MAX_CHARS)) };
-                let tool = if s.tool.trim().is_empty() { "a step".to_string() } else { records::cut(&s.tool, limits::NOTE_TOOL_MAX_CHARS) };
-                format!("{tool}{args} ({})", if s.ok { "ok" } else { "failed" })
-            })
-            .collect();
-        if cut.steps_total > cut.steps.len() {
-            steps.push(format!("and {} more", cut.steps_total - cut.steps.len()));
-        }
-        lines.push(format!("Its steps, as recorded: {}", steps.join("; ")));
-    }
+    lines.extend(steps(cut));
     for c in &cut.cards {
         let closed = c.closed.as_deref().unwrap_or("unanswered");
         lines.push(format!("It asked: {} ({closed})", quoted(&c.text, limits::NOTE_CARD_MAX_CHARS)));
     }
-    let shown = replies.len().min(limits::NOTE_REPLIES_MAX);
-    for r in &replies[replies.len() - shown..] {
-        lines.push(format!("It had replied: {}", quoted(r, limits::NOTE_REPLY_MAX_CHARS)));
-    }
+    lines.extend(replied(replies));
     let note = records::cut_bytes(&lines.join("\n"), limits::NOTE_MAX_BYTES);
     assert!(note.len() <= limits::NOTE_MAX_BYTES, "a note is bounded");
     note
+}
+
+/// The turn `turn` of the agent's, as `work` holds it from its start on;
+/// `None` when its start is not among the records, or names no cause.
+pub fn turn(work: &[Record], agent: &str, turn: &str) -> Option<Cut> {
+    let i = work.iter().position(|r| own(r, agent, "turn.start").is_some_and(|b| b["turn"] == turn))?;
+    cut(&work[i..], agent, turn, &work[i].body, work[i].at)
+}
+
+/// What a fresh turn from a late answer to its card is told (cards.rs),
+/// bounded (`NOTE_MAX_BYTES`): that the card's turn ended before the
+/// answer and is not resumed, and to check what it did before doing any of
+/// it again; who asked it what (`by`: their name; the request cut to
+/// `NOTE_LATE_ASKED_MAX_CHARS`, said so); its steps; its last replies.
+/// Context, not the person's words: Relay hands it as the inbound's
+/// read-only `context`, as it hands `text`.
+pub fn late(cut: &Cut, by: &str, asked: Option<&str>, replies: &[String]) -> String {
+    let mut lines = vec![
+        "The message below answers a question your earlier turn in this chat asked. That turn ended before the answer came and is not resumed: this is a new turn. Check what it already did before you do any of it again, and don't ask the question again.".to_string(),
+    ];
+    match asked.filter(|a| !a.trim().is_empty()) {
+        Some(a) => {
+            let one_line = a.split_whitespace().collect::<Vec<_>>().join(" ");
+            let more = one_line.chars().count() > limits::NOTE_LATE_ASKED_MAX_CHARS;
+            lines.push(format!("It was answering {by}: {}{}", quoted(a, limits::NOTE_LATE_ASKED_MAX_CHARS), if more { " (the rest is cut)" } else { "" }));
+        }
+        None => lines.push(format!("It was answering {by}; what they asked is not in this chat's record.")),
+    }
+    lines.extend(steps(cut));
+    lines.extend(replied(replies));
+    let note = records::cut_bytes(&lines.join("\n"), limits::NOTE_MAX_BYTES);
+    assert!(note.len() <= limits::NOTE_MAX_BYTES, "a note is bounded");
+    note
+}
+
+/// A turn's steps on one line: at most `NOTE_STEPS_MAX`, the rest counted.
+fn steps(cut: &Cut) -> Option<String> {
+    if cut.steps.is_empty() {
+        return None;
+    }
+    let mut steps: Vec<String> = cut
+        .steps
+        .iter()
+        .map(|s| {
+            let args = s.args.split_whitespace().collect::<Vec<_>>().join(" ");
+            let args = if args.is_empty() { String::new() } else { format!(" {}", records::cut(&args, limits::NOTE_ARGS_MAX_CHARS)) };
+            let tool = if s.tool.trim().is_empty() { "a step".to_string() } else { records::cut(&s.tool, limits::NOTE_TOOL_MAX_CHARS) };
+            format!("{tool}{args} ({})", if s.ok { "ok" } else { "failed" })
+        })
+        .collect();
+    if cut.steps_total > cut.steps.len() {
+        steps.push(format!("and {} more", cut.steps_total - cut.steps.len()));
+    }
+    Some(format!("Its steps, as recorded: {}", steps.join("; ")))
+}
+
+/// A turn's last `NOTE_REPLIES_MAX` replies, a line each.
+fn replied(replies: &[String]) -> impl Iterator<Item = String> + '_ {
+    let shown = replies.len().min(limits::NOTE_REPLIES_MAX);
+    replies[replies.len() - shown..].iter().map(|r| format!("It had replied: {}", quoted(r, limits::NOTE_REPLY_MAX_CHARS)))
 }
 
 /// One of the agent's turns in a chat that another life ran since the
