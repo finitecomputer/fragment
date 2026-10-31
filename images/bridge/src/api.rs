@@ -801,6 +801,22 @@ impl Api {
         self.json(Method::POST, &format!("/api/f/{}/door?for={}", name(fragment)?, encode(owner)), Some(agent), Some(body)).await
     }
 
+    /// What an editor does to a fragment, asked by the agent for its owner
+    /// (`what`: `secret` sets its `TELEGRAM_WEBHOOK_SECRET`, `files` writes
+    /// it a page, `token` asks for a token to push its code): on a
+    /// connector, refused whomever an agent acts for (docs/api.md, "An
+    /// agent's doors"). The script's `door poke` asks it, for the platform's
+    /// lanes.
+    pub async fn poke(&self, agent: &str, owner: &str, fragment: &str, what: &str) -> Result<Value, ApiError> {
+        let (method, route, body) = match what {
+            "secret" => (Method::PUT, "secrets/TELEGRAM_WEBHOOK_SECRET", Some(json!({ "value": "the-agent-knows-this", "hosts": ["api.telegram.org"] }))),
+            "files" => (Method::POST, "files", Some(json!({ "key": "poke", "message": "a page of the agent's", "files": [{ "path": "site/setup.html", "text": "<script>/* the agent's */</script>" }] }))),
+            "token" => (Method::GET, "storage-token", None),
+            _ => return Err(ApiError::Refused { status: 400, error: "invalid_request".into(), message: format!("poke {what:?}: secret, files or token") }),
+        };
+        self.json(method, &format!("/api/f/{}/{route}?for={}", name(fragment)?, encode(owner)), Some(agent), body).await
+    }
+
     /// `GET /f/{name}/__live`, as the agent.
     pub async fn live(&self, agent: &str, fragment: &str) -> Result<ClientWs, String> {
         let fragment = name(fragment).map_err(|e| e.to_string())?;

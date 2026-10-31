@@ -12,9 +12,15 @@
 //   its name only shown.
 // - `intake` (the inbox's trigger alone) takes a direct message from that
 //   account and publishes it here as its owner's words to their agent
-//   (`relayed`), which the platform takes only while its owner has bound
-//   this chat as that agent's `telegram` door.
-// - `mirror` (each reply an agent posts here) sends it to that account.
+//   (`job.door`'s `relayed`, `to` that agent), which the platform takes
+//   only while its owner has bound this chat as that agent's `telegram`
+//   door.
+// - `mirror` (each reply an agent posts here) sends it to that account,
+//   while the door is open.
+//
+// No one but its owner edits this chat: its secrets, its code, its pages
+// and the operations here that are an editor's are theirs alone, the
+// platform's rule for a connector (docs/api.md, "An agent's doors").
 //
 // Telegram carries it all as plain text to and from its servers: it is not
 // end-to-end encrypted. Direct messages only, text only, for now.
@@ -50,17 +56,13 @@ async function send(job, api, chat, text) {
   if (!sent.ok) throw new Error(`sendMessage: ${sent.description}`);
 }
 
-/// The one `relayed` this chat may say (the platform checks it is exactly
-/// its binding's): its owner, through its `telegram` door, to their agent
-/// that is a member here.
-async function door(job) {
-  const members = await job.members();
-  const owner = members.find((m) => m.role === "owner")?.principal;
-  const agents = members.filter((m) => m.kind === "agent" && m.owner === owner).map((m) => m.principal);
-  if (!owner || !agents.length) return null;
-  const people = await job.people(agents);
-  const agent = agents.map((a) => people?.[a]?.fragment).find((f) => typeof f === "string" && f);
-  return agent ? { via: "telegram", for: owner, agent } : null;
+/// What a run says to Telegram when it may: a bound connector whose door
+/// is shut (its deployment turned it off) sends nothing, and that is no
+/// failure of the run.
+async function tell(job, api, chat, text) {
+  try {
+    await send(job, api, chat, text);
+  } catch {}
 }
 
 export class App extends DurableObject {
@@ -113,10 +115,12 @@ export class App extends DurableObject {
       return { ok: false };
     }
     this.put("error", null);
-    // another bot: the account paired with the one before is no one here
+    // another bot: the account paired with the one before is no one here,
+    // and its update ids are another bot's
     if (this.get("bot")?.id !== bot.id) {
       this.put("paired", null);
       this.put("pairing", null);
+      this.ctx.storage.sql.exec("DELETE FROM seen");
     }
     this.put("bot", { id: bot.id, username: String(bot.username).slice(0, 64) });
     this.put("api", api);
@@ -203,21 +207,20 @@ export class App extends DurableObject {
       await send(job, api, m.chat.id, "Only text reaches your agent from Telegram for now.");
       return { ignored: "not text" };
     }
-    const relayed = await door(job);
-    try {
-      if (!relayed) throw new Error("no agent of its owner's is here");
-      // the platform takes it only while its owner has bound this chat as that agent's door
-      await job.publish("chat", { text: [...text].slice(0, TEXT_MAX).join(""), relayed }, "message");
-    } catch (e) {
-      await send(job, api, m.chat.id, "This chat isn't linked to your agent.");
-      return { ignored: "not linked", why: String(e?.message ?? e).slice(0, 200) };
+    // its binding, as the platform tells it: no guess at which agent
+    if (!job.door) {
+      await tell(job, api, m.chat.id, "This chat isn't linked to your agent.");
+      return { ignored: "not linked" };
     }
+    await job.publish("chat", { text: [...text].slice(0, TEXT_MAX).join(""), to: [job.door.to], relayed: job.door.relayed }, "message");
     return { relayed: true };
   }
 
   async mirror({ record } = {}, job) {
     // its trigger's runs alone: each reply an agent posts here
     if (job.via !== "channel") return { sent: 0, why: "only the chat's trigger sends" };
+    // unlinked, or its door shut: the agent's words stay in the chat
+    if (!job.door) return { sent: 0, why: "not linked" };
     const b = record?.body;
     if (!b || typeof b.turn !== "string" || b.interim === true || (b.kind !== undefined && b.kind !== "message")) return { sent: 0, why: "not a reply" };
     const said = typeof b.text === "string" ? b.text.trim() : "";
