@@ -94,15 +94,16 @@ function tab(w, store) {
   const t = { notices: [], opened: [] };
   t.archive = createSessionArchive({
     api: w.api,
-    ui: { $: () => element(), el: () => element(), patch() {}, renderHeading() {}, notice: (title, words) => t.notices.push([title, words]) },
+    ui: { renderHeading() {}, notice: (title, words) => t.notices.push([title, words]) },
     data: {
       allFragments: () => [...w.fragments].map(([name, f]) => ({ name, ...f })), own: (f) => f.role === "owner", seg: encodeURIComponent,
       primaryAgent: () => ({ identity: "npub1agent" }), agents: () => new Map([["npub1agent", { fragment: "juniper--k3x9" }]]), chatLabel: () => "juniper-chat",
     },
-    selection: { current: () => null, page: () => null, getFrame: () => null },
+    selection: { getFrame: () => null },
     navigation: { openChat: (name) => t.opened.push(name), leaveSidebar() {} },
     load: async () => {},
     store,
+    changed() {},
   });
   return t;
 }
