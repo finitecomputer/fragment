@@ -63,6 +63,12 @@ pub(super) fn turn_of(agent: &str, fragment: &str, channel: &str, seq: i64) -> S
     hex::encode(&Sha256::digest(format!("{agent}|{fragment}/{channel}/{seq}").as_bytes())[..12])
 }
 
+/// The id of the turn that continues `cut`, a turn a restart cut, as
+/// docs/chat-records.md defines it.
+pub(super) fn continuation_of(cut: &str) -> String {
+    hex::encode(&Sha256::digest(format!("continue\0{cut}").as_bytes())[..12])
+}
+
 /// The work records of one turn.
 pub(super) fn work_of(recs: &[Value], turn: &str) -> Vec<Value> {
     recs.iter().filter(|r| r["body"]["turn"] == turn).cloned().collect()
@@ -357,7 +363,7 @@ const CRASH_CHECKS: [&str; 10] = [
     "a crash wakes it from its last save, and nothing that started runs again (P1)",
     "its wake says what it restored: after the kill, a rollback is counted",
     "a turn cut by a crash ends once, as an error, and its model was called once (P1)",
-    "and the next message is answered, told once what the crash cut, from the journal (P5)",
+    "the cut turn is continued once, by the computer, told what the crash cut, from the journal; the messages after it are answered, told nothing (P5, phase 4)",
 ];
 
 /// Who the crash checks act as, and on what.
@@ -463,17 +469,24 @@ fn crash_checks(s: &mut Suite, api: &Api, c: &Crashing, say: &dyn Fn(u32, &str) 
         ended && ends.len() == 1 && ends[0]["body"]["outcome"] == "error" && replied(seq_of(&cut)).is_none() && s.ai.chats().len() == called + 1,
         format!("{} model calls since; {}", s.ai.chats().len() - called, json!(work_of(&records(api, c.owner, c.chat, "work"), &cut_turn))),
     );
-    // told once what the crash cut (P5): the stub echoes the bridge's note
-    // after its reply, built from the chat's journal
+    // the cut turn is continued in its place, before the next message: said
+    // by the computer and told once what the crash cut (P5; the stub echoes
+    // the bridge's note after its reply, built from the chat's journal)
     let text_of = |r: &crate::api::Reply| replied(seq_of(r)).and_then(|r| r["body"]["text"].as_str().map(str::to_string)).unwrap_or_default();
     let once_more = say(55, "and once more")?;
     let answered_again = s.eventually(c.wake, || replied(seq_of(&once_more)).is_some());
+    let continuation = continuation_of(&cut_turn);
+    let continued: Vec<String> = agent_replies(&records(api, c.owner, c.chat, "chat"), c.identity).iter().filter(|r| r["body"]["turn"] == continuation.as_str()).filter_map(|r| r["body"]["text"].as_str().map(str::to_string)).collect();
     let (told, then) = (text_of(&next), text_of(&once_more));
-    let told_once = told.contains("(told: Your previous turn in this chat was cut short") && told.contains("It was answering: “think slowly, cut by a crash”") && answered_again && !then.contains("(told:");
-    s.ok(CRASH_CHECKS[9], answered && told_once, json!([told, then]));
+    let told_once = matches!(continued.as_slice(), [t] if t.starts_with("echo: [your computer] I restarted while you were working") && t.contains("(told: Your previous turn in this chat was cut short") && t.contains("It was answering: “think slowly, cut by a crash”"))
+        && answered_again
+        && !told.contains("(told:")
+        && !then.contains("(told:");
+    s.ok(CRASH_CHECKS[9], answered && told_once, json!([continued, told, then]));
     // its replies: the think, the fetch, after the crash, after the cut, the
-    // one after (and the cut turn's, where a crash's restore ran it again)
-    let added = [&think, &fetch, &after, &cut, &next, &once_more].iter().filter(|r| replied(seq_of(r)).is_some()).count();
+    // one after (and the cut turn's, where a crash's restore ran it again),
+    // and the cut turn's continuation's
+    let added = [&think, &fetch, &after, &cut, &next, &once_more].iter().filter(|r| replied(seq_of(r)).is_some()).count() + continued.len();
     Ok(added)
 }
 
