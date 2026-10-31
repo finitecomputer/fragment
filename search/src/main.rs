@@ -41,10 +41,10 @@ async fn main() {
         eprintln!("fragment-search: SEARCH_TOKEN is at least {TOKEN_MIN_BYTES} bytes");
         std::process::exit(2);
     }
-    let listen = std::env::var("SEARCH_LISTEN").unwrap_or_else(|_| "0.0.0.0:8080".into());
+    let listen = env::value("SEARCH_LISTEN").unwrap_or_else(|e| fail(&e)).unwrap_or_else(|| "0.0.0.0:8080".into());
     let options = env::options("SEARCH_STORAGE_").unwrap_or_else(|e| fail(&e));
-    let store = match store::Store::open(&storage, options).await {
-        Ok(s) => Arc::new(s),
+    let store = match store::Store::open(&storage, options, store::Timing::default()).await {
+        Ok(s) => s,
         Err(e) => {
             eprintln!("fragment-search: {storage}: {e:?}");
             std::process::exit(1);

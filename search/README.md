@@ -53,7 +53,9 @@ old revision or its new one, never part of each.
   another space is 409 `space_changed`: drop the table and write it
   again. Vectors of two spaces are never compared.
 - `fields` is up to 4 `name: value` filters (a source's kind, say).
-  `sections: []` deletes the source.
+- `sections: []` empties the source and keeps its revision: its replay
+  writes nothing, and a later write `replaces` it. `delete` removes the
+  source and its revision.
 
 **Search** finds:
 - sections whose chunks hold the words: BM25F over title, heading,
@@ -91,13 +93,29 @@ Writes to one scope take turns. One service should hold a scope: the
 platform routes each scope to one instance, and reads never wait.
 
 **Deleted bytes are purged.** A write that removed rows (a delete, or a
-source's old revision) is followed, about 75 seconds later, by:
-1. compaction, which rewrites the table's files without the removed rows
-   and folds new rows into its indexes;
-2. as long again after, a prune of the versions older than a minute.
+source's old revision) starts maintenance: passes 75 seconds apart, each
+holding the table's writes, until a pass leaves one version deleting no
+row. A pass:
+1. rewrites every file holding a deleted row without it (Lance's own
+   threshold, a tenth of a file, would keep a few rows' bytes for good);
+2. rebuilds the text indexes from the rows left, after a removal (an
+   index keeps a removed row's words otherwise), else folds new rows in;
+3. prunes the versions older than a minute, with every file only they
+   held.
 
-So deleted text leaves the store's files within about three minutes.
-`tests/service.rs` checks that no deleted word remains in any file.
+So deleted text leaves the store's files within about three minutes. A
+pass that fails is retried, waiting twice as long each time (at most 15
+minutes). A write during maintenance gets a pass after it. The store
+itself records what is left to do (more than one version, or a deletion
+not yet rewritten): after a restart, the service opens every table and
+finishes it. `tests/service.rs` checks the files themselves after a
+delete of a twentieth of a file, a delete between passes, a restart and
+a failed pass. Index files hold words encoded, so for them the check is
+the rebuild: an index built after a removal never held the removed row.
+
+**A first write** makes the table and its text indexes. If it is cut off
+between them, nothing was acknowledged; its retry, or the table's next
+open, finishes the indexes before the table is searched.
 
 **Indexes:**
 - Every 32 writes, the indexes are brought up to date.

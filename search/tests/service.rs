@@ -5,10 +5,11 @@
 
 use base64::Engine;
 use fragment_search::api::{Search, Upsert};
-use fragment_search::store::{Error, Store};
+use fragment_search::store::{Error, Store, Timing};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 const SCOPE: &str = "f0123-1-members";
 
@@ -35,8 +36,20 @@ fn dir(name: &str) -> Dir {
     Dir(d)
 }
 
+/// Maintenance at once after a write, keeping no old version.
+fn fast() -> Timing {
+    Timing { after: Duration::from_millis(10), keep: Duration::ZERO }
+}
+
 async fn store(d: &Path) -> Arc<Store> {
-    Arc::new(Store::open(d.to_str().unwrap(), vec![]).await.unwrap())
+    store_with(d, fast()).await
+}
+
+/// Its sweep done: a test's own writes race no sweep of its tables.
+async fn store_with(d: &Path, timing: Timing) -> Arc<Store> {
+    let s = Store::open(d.to_str().unwrap(), vec![], timing).await.unwrap();
+    s.swept().await;
+    s
 }
 
 /// A stand-in for a text's sha256: 64 hex of its bytes' hash.
@@ -297,7 +310,7 @@ async fn the_api_needs_the_token() {
 async fn on_an_object_store() {
     let uri = std::env::var("SEARCH_TEST_STORAGE").expect("SEARCH_TEST_STORAGE");
     let options = fragment_search::env::options("SEARCH_TEST_STORAGE_").unwrap();
-    let open = || async { Arc::new(Store::open(&uri, options.clone()).await.unwrap()) };
+    let open = || async { Store::open(&uri, options.clone(), Timing::default()).await.unwrap() };
     let scope = format!("f-s3-{}", std::process::id());
     let mut took: Vec<(&str, u128)> = Vec::new();
     let mut lap = std::time::Instant::now();
@@ -339,4 +352,163 @@ async fn on_an_object_store() {
     assert!(s.drop_table(&scope).await.unwrap());
     mark("drop", &mut took);
     eprintln!("{}", json!({ "store": uri.split('/').take(3).collect::<Vec<_>>().join("/"), "ms": took.iter().map(|(k, v)| json!({ k.to_string(): v })).collect::<Vec<_>>() }));
+}
+
+#[tokio::test]
+async fn an_empty_write_keeps_its_revision() {
+    let d = dir("empty");
+    {
+        let s = store(&d).await;
+        s.upsert(SCOPE, up("sessions/a.json", "r1", harbour())).await.unwrap();
+        let mut emptied = up("sessions/a.json", "r2", json!([]));
+        emptied.replaces = Some("r1".into());
+        assert!(s.upsert(SCOPE, emptied.clone()).await.unwrap().written);
+        assert!(!s.upsert(SCOPE, emptied.clone()).await.unwrap().written, "its replay, after a lost answer, is a no-op");
+        assert!(s.search(SCOPE, search(json!({ "q": "lantern" }))).await.unwrap().is_empty());
+        // a source empty from its first write, in a table and in a scope never written
+        assert!(s.upsert(SCOPE, up("sessions/b.json", "r1", json!([]))).await.unwrap().written);
+        assert!(s.upsert("f-empty-1-members", up("sessions/c.json", "r1", json!([]))).await.unwrap().written);
+    }
+    let s = store(&d).await;
+    let mut emptied = up("sessions/a.json", "r2", json!([]));
+    emptied.replaces = Some("r1".into());
+    assert!(!s.upsert(SCOPE, emptied).await.unwrap().written, "and after a restart");
+    let mut next = up("sessions/a.json", "r3", json!([{ "id": "t0", "chunks": [chunk("back again", Some([1.0, 0.0, 0.0, 0.0]))] }]));
+    next.replaces = Some("r2".into());
+    assert!(s.upsert(SCOPE, next).await.unwrap().written, "a write replacing the empty revision");
+    for (scope, source) in [(SCOPE, "sessions/b.json"), ("f-empty-1-members", "sessions/c.json")] {
+        let mut stale = up(source, "r9", json!([]));
+        stale.replaces = Some(String::new());
+        assert!(matches!(s.upsert(scope, stale).await, Err(Error::Conflict { current: Some(c) }) if c == "r1"), "{source} has r1");
+        let mut next = up(source, "r2", json!([{ "id": "t0", "chunks": [chunk("now some words", Some([0.0, 1.0, 0.0, 0.0]))] }]));
+        next.replaces = Some("r1".into());
+        assert!(s.upsert(scope, next).await.unwrap().written, "{source}");
+    }
+    let (sources, _) = s.sources(SCOPE, "", 10).await.unwrap();
+    let listed: Vec<(&str, &str, u64)> = sources.iter().map(|x| (x["source"].as_str().unwrap(), x["revision"].as_str().unwrap(), x["chunks"].as_u64().unwrap())).collect();
+    assert_eq!(listed, vec![("sessions/a.json", "r3", 1), ("sessions/b.json", "r2", 1)]);
+    assert_eq!(s.status(SCOPE).await.unwrap()["chunks"], 2, "a source's revision is no chunk");
+    assert!(!s.search(SCOPE, search(json!({ "vector": b64(&[0.0, 1.0, 0.0, 0.0]), "space": space(), "mode": "semantic" }))).await.unwrap().is_empty());
+}
+
+/// `d`'s directory `rel`, read-only while `f` runs (a store that refuses
+/// writes there), then writable again.
+async fn read_only<T>(d: &Path, rel: &str, f: impl std::future::Future<Output = T>) -> T {
+    use std::os::unix::fs::PermissionsExt;
+    let p = d.join(rel);
+    std::fs::create_dir_all(&p).unwrap();
+    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o555)).unwrap();
+    assert!(std::fs::write(p.join("probe"), b"").is_err(), "a read-only directory refuses this user's writes (not root's)");
+    let out = f.await;
+    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    out
+}
+
+#[tokio::test]
+async fn an_interrupted_first_write_is_finished_before_it_is_served() {
+    let d = dir("init");
+    let first = || up("sessions/a.json", "r1", harbour());
+    {
+        let s = store(&d).await;
+        // its table is made, then its first text index fails
+        let failed = read_only(&d, &format!("{SCOPE}.lance/_indices"), s.upsert(SCOPE, first())).await;
+        assert!(failed.is_err(), "nothing is acknowledged before the table is indexed");
+        assert!(s.upsert(SCOPE, first()).await.is_ok(), "its retry finishes it");
+        assert_eq!(s.search(SCOPE, search(json!({ "q": "lantern" }))).await.unwrap()[0].section, "t0");
+    }
+    let d2 = dir("init-restart");
+    {
+        let s = store(&d2).await;
+        assert!(read_only(&d2, &format!("{SCOPE}.lance/_indices"), s.upsert(SCOPE, first())).await.is_err());
+    }
+    let s = store(&d2).await;
+    assert_eq!(s.search(SCOPE, search(json!({ "q": "lantern" }))).await.unwrap()[0].section, "t0", "a restart finishes it before serving it");
+    assert!(!s.upsert(SCOPE, first()).await.unwrap().written);
+}
+
+/// A word only source `i` holds.
+fn word(i: usize) -> String {
+    format!("zqv{i:02}word")
+}
+
+/// Twenty sources in one file (a purge compacts them into it), so one of
+/// them is a twentieth of it, under Lance's own threshold of a tenth.
+async fn twenty(s: &Arc<Store>) {
+    for i in 0..20 {
+        let sections = json!([{ "id": "t0", "chunks": [chunk(&format!("note {i} holds {}", word(i)), Some([1.0, 0.0, 0.0, 0.0]))] }]);
+        s.upsert(SCOPE, up(&format!("sessions/{i:02}.json"), "r1", sections)).await.unwrap();
+    }
+    s.purge(SCOPE).await.unwrap();
+}
+
+async fn settled(s: &Store) {
+    s.maintenance(SCOPE).await.expect("its table is open").wait_for(|m| !m.pending).await.unwrap();
+}
+
+#[tokio::test]
+async fn a_low_fraction_delete_leaves_the_store_files() {
+    let d = dir("low");
+    let s = store(&d).await;
+    twenty(&s).await;
+    assert!(holds(&d, word(7).as_bytes()) && holds(&d, word(8).as_bytes()));
+    assert!(s.delete(SCOPE, "sessions/07.json").await.unwrap());
+    settled(&s).await;
+    assert!(!holds(&d, word(7).as_bytes()), "its rows rewritten away, its words out of the indexes");
+    assert!(holds(&d, word(8).as_bytes()));
+    let mut next = up("sessions/08.json", "r2", json!([{ "id": "t0", "chunks": [chunk("note 8 rewritten", Some([0.0, 1.0, 0.0, 0.0]))] }]));
+    next.replaces = Some("r1".into());
+    assert!(s.upsert(SCOPE, next).await.unwrap().written);
+    settled(&s).await;
+    assert!(!holds(&d, word(8).as_bytes()), "a replaced revision's too");
+    assert_eq!(s.search(SCOPE, search(json!({ "q": word(9) }))).await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn a_delete_while_maintenance_runs_gets_a_pass_of_its_own() {
+    let d = dir("between");
+    // a pass keeps the versions it made younger than a second, so the
+    // first leaves maintenance pending
+    let s = store_with(&d, Timing { after: Duration::from_millis(10), keep: Duration::from_secs(1) }).await;
+    twenty(&s).await;
+    let mut m = s.maintenance(SCOPE).await.unwrap();
+    assert!(s.delete(SCOPE, "sessions/07.json").await.unwrap());
+    m.wait_for(|m| m.passes >= 1).await.unwrap();
+    assert!(s.delete(SCOPE, "sessions/08.json").await.unwrap());
+    m.wait_for(|m| !m.pending).await.unwrap();
+    assert!(m.borrow().passes >= 2);
+    assert!(!holds(&d, word(7).as_bytes()) && !holds(&d, word(8).as_bytes()));
+    assert!(holds(&d, word(9).as_bytes()));
+}
+
+#[tokio::test]
+async fn maintenance_a_restart_cut_off_is_finished_after_it() {
+    let d = dir("restart-purge");
+    {
+        // maintenance an hour off: the service stops first
+        let s = store_with(&d, Timing { after: Duration::from_secs(3600), keep: Duration::ZERO }).await;
+        twenty(&s).await;
+        assert!(s.delete(SCOPE, "sessions/07.json").await.unwrap());
+    }
+    assert!(holds(&d, word(7).as_bytes()));
+    let s = store(&d).await;
+    s.swept().await;
+    let mut m = s.maintenance(SCOPE).await.expect("the sweep opened every table");
+    m.wait_for(|m| !m.pending).await.unwrap();
+    assert!(!holds(&d, word(7).as_bytes()), "no request needed");
+    assert!(holds(&d, word(8).as_bytes()));
+}
+
+#[tokio::test]
+async fn a_failed_pass_is_retried() {
+    let d = dir("retry");
+    let s = store(&d).await;
+    twenty(&s).await;
+    let mut m = s.maintenance(SCOPE).await.unwrap();
+    read_only(&d, &format!("{SCOPE}.lance/data"), async {
+        assert!(s.delete(SCOPE, "sessions/07.json").await.unwrap());
+        m.wait_for(|m| m.failures >= 1).await.unwrap();
+    })
+    .await;
+    m.wait_for(|m| !m.pending).await.unwrap();
+    assert!(!holds(&d, word(7).as_bytes()));
 }

@@ -5,8 +5,19 @@
 //! scope to one instance), its reads do not wait. Each upsert replaces its
 //! source whole in one commit (`merge_insert`, its old chunks deleted in the
 //! same), so a search sees a source's old revision or its new, never part.
-//! What a write removed leaves the store within about three minutes: its
-//! table is compacted, then its old versions pruned (`maintain`).
+//! A source's revision is its own row's (`MARKERS`), so a source of no
+//! chunks keeps one. A table is served only once its text is indexed
+//! (`index_text`): a first write cut off before that is finished by its
+//! retry, or when the table is next opened.
+//!
+//! What a write removed leaves the store within about three minutes: each
+//! pass of `maintain` rewrites every file holding a deleted row, rebuilds
+//! the indexes that held one, and prunes the versions that held either,
+//! until a single version is left; it retries a pass that failed, and a
+//! write while it runs gets another pass. The store itself says what is
+//! left to do (more than one version, or a deletion not yet rewritten),
+//! so a table a restart left so is finished once the service is up again
+//! (`sweep`).
 
 use crate::api::{self, Hit, Invalid, Mode, Space};
 use futures::TryStreamExt;
@@ -18,13 +29,16 @@ use lancedb::index::scalar::{CombinedFieldsQuery, FtsIndexBuilder, FullTextSearc
 use lancedb::index::vector::IvfFlatIndexBuilder;
 use lancedb::index::Index;
 use lancedb::query::{ExecutableQuery, QueryBase, Select};
-use lancedb::table::OptimizeAction;
+use lancedb::table::{CompactionOptions, OptimizeAction, OptimizeOptions};
 use lancedb::{Connection, DistanceType, Table};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+/// A source's own row, holding its revision, and its chunks' rows.
+const MARKERS: &str = "section = ''";
+const CHUNKS: &str = "section != ''";
 /// The schema's metadata key its space is pinned under.
 const SPACE_KEY: &str = "fragment.space";
 /// The text columns BM25F reads as one field, with the brain's weights
@@ -40,11 +54,13 @@ const SNIPPET_MAX_BYTES: usize = 300;
 /// Writes between optimizations, which fold the newest rows into the
 /// indexes (a search reads them before: the unindexed tail).
 const OPTIMIZE_EVERY: u32 = 32;
-/// How long after a write that removed rows its table is compacted, then
-/// again before its old versions are pruned (each prune keeps what is
-/// younger than `KEEP_VERSIONS`, for reads in flight).
-const MAINTAIN_AFTER: Duration = Duration::from_secs(75);
-const KEEP_VERSIONS: Duration = Duration::from_secs(60);
+/// A failed pass's retry waits twice as long as the last, at most this.
+const RETRY_MAX: Duration = Duration::from_secs(15 * 60);
+/// A table that fails to open in the sweep after a restart is tried this
+/// many times, then left to the next request that opens it.
+const SWEEP_TRIES: u32 = 3;
+/// Table names the sweep lists at a time.
+const SWEEP_PAGE: u32 = 1000;
 /// A table's vectors get an index (IVF_FLAT, by cosine) past this many
 /// chunks; below it a search compares them all (bench/search: exact at 17k
 /// chunks in milliseconds).
@@ -79,23 +95,58 @@ impl From<lancedb::Error> for Error {
 
 type Result<T> = std::result::Result<T, Error>;
 
+/// When maintenance runs: `after` a write that removed rows (and between
+/// its passes), keeping each version younger than `keep` for the reads
+/// that may be in flight on it.
+#[derive(Debug, Clone, Copy)]
+pub struct Timing {
+    pub after: Duration,
+    pub keep: Duration,
+}
+
+impl Default for Timing {
+    fn default() -> Timing {
+        Timing { after: Duration::from_secs(75), keep: Duration::from_secs(60) }
+    }
+}
+
+/// A table's maintenance: `pending` from a write that removed rows until a
+/// pass leaves the table clean (`clean`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Maintenance {
+    pub pending: bool,
+    pub passes: u64,
+    pub failures: u64,
+}
+
 struct Entry {
     table: Table,
     space: Option<Space>,
-    /// Held by a write, and by maintenance.
+    /// Held by a write, and by a pass of maintenance. Its `Maintenance`
+    /// changes only while it is held.
     writes: tokio::sync::Mutex<Writes>,
+    maintenance: tokio::sync::watch::Sender<Maintenance>,
     used: std::sync::Mutex<Instant>,
 }
 
 #[derive(Default)]
 struct Writes {
     since_optimize: u32,
-    maintaining: bool,
+    /// A write removed rows since the last pass began: the next rebuilds
+    /// the text indexes, which keep a deleted row's words otherwise.
+    removed: bool,
+    /// The table was dropped: its maintenance ends.
+    dropped: bool,
 }
 
 pub struct Store {
     db: Connection,
     tables: tokio::sync::Mutex<HashMap<String, Arc<Entry>>>,
+    timing: Timing,
+    /// Whether the sweep after opening has seen every table.
+    swept: tokio::sync::watch::Sender<bool>,
+    /// Its tables' maintenance, which ends with it, as at a restart.
+    tasks: std::sync::Mutex<tokio::task::JoinSet<()>>,
 }
 
 #[derive(Debug, PartialEq, serde::Serialize)]
@@ -129,7 +180,8 @@ fn schema(space: Option<&Space>) -> Arc<Schema> {
     ];
     fields.extend(FIELD_COLUMNS.iter().map(|c| text(c)));
     if let Some(s) = space {
-        fields.push(Field::new("vector", DataType::FixedSizeList(Arc::new(Field::new("item", DataType::Float32, true)), s.dimensions as i32), false));
+        // a source's own row (`MARKERS`) has none
+        fields.push(Field::new("vector", DataType::FixedSizeList(Arc::new(Field::new("item", DataType::Float32, true)), s.dimensions as i32), true));
     }
     let meta = [(SPACE_KEY.to_string(), serde_json::to_string(&space).expect("a space serializes"))].into();
     Arc::new(Schema::new_with_metadata(fields, meta))
@@ -221,16 +273,67 @@ impl Store {
     /// The service's store: `uri` a directory or an object store's
     /// (`s3://bucket/prefix`), `options` its client's (LanceDB's storage
     /// options: an S3-compatible endpoint, its region and keys).
-    pub async fn open(uri: &str, options: Vec<(String, String)>) -> Result<Store> {
+    /// Its tables are swept once it is open (`sweep`): maintenance a
+    /// restart cut off is finished.
+    pub async fn open(uri: &str, options: Vec<(String, String)>, timing: Timing) -> Result<Arc<Store>> {
         let mut connect = lancedb::connect(uri);
         for (k, v) in options {
             connect = connect.storage_option(k, v);
         }
-        Ok(Store { db: connect.execute().await?, tables: Default::default() })
+        let store = Arc::new(Store { db: connect.execute().await?, tables: Default::default(), timing, swept: tokio::sync::watch::channel(false).0, tasks: Default::default() });
+        tokio::spawn(store.clone().sweep());
+        Ok(store)
     }
 
-    /// `scope`'s table, if it was made.
-    async fn entry(&self, scope: &str) -> Result<Option<Arc<Entry>>> {
+    /// Every table opened (`entry`), so each that a restart left with
+    /// maintenance to do gets it.
+    async fn sweep(self: Arc<Self>) {
+        let mut after: Option<String> = None;
+        let mut wait = self.timing.after;
+        loop {
+            let mut list = self.db.table_names().limit(SWEEP_PAGE);
+            if let Some(a) = &after {
+                list = list.start_after(a.clone());
+            }
+            let names = match list.execute().await {
+                Ok(n) => n,
+                Err(e) => {
+                    eprintln!("{}", json!({ "event": "search.sweep-failed", "error": e.to_string() }));
+                    tokio::time::sleep(wait).await;
+                    wait = (wait * 2).min(RETRY_MAX);
+                    continue;
+                }
+            };
+            for name in &names {
+                for tried in 1..=SWEEP_TRIES {
+                    match self.entry(name).await {
+                        Ok(_) => break,
+                        Err(e) if tried == SWEEP_TRIES => eprintln!("{}", json!({ "event": "search.sweep-failed", "scope": name, "error": format!("{e:?}") })),
+                        Err(_) => tokio::time::sleep(self.timing.after * tried).await,
+                    }
+                }
+            }
+            if names.len() < SWEEP_PAGE as usize {
+                break;
+            }
+            after = names.last().cloned();
+        }
+        self.swept.send_replace(true);
+    }
+
+    /// Once the sweep after opening has seen every table.
+    pub async fn swept(&self) {
+        let _ = self.swept.subscribe().wait_for(|s| *s).await;
+    }
+
+    /// `scope`'s maintenance, if its table is open.
+    pub async fn maintenance(&self, scope: &str) -> Option<tokio::sync::watch::Receiver<Maintenance>> {
+        self.tables.lock().await.get(scope).map(|e| e.maintenance.subscribe())
+    }
+
+    /// `scope`'s table, if it was made: opened with its text indexed, and
+    /// its maintenance begun if it has some left (a restart cut it off).
+    async fn entry(self: &Arc<Self>, scope: &str) -> Result<Option<Arc<Entry>>> {
         let mut tables = self.tables.lock().await;
         if let Some(e) = tables.get(scope) {
             *e.used.lock().unwrap() = Instant::now();
@@ -242,7 +345,14 @@ impl Store {
             Err(e) => return Err(e.into()),
         };
         let space = space_of(&table).await?;
-        let e = Arc::new(Entry { table, space, writes: Default::default(), used: std::sync::Mutex::new(Instant::now()) });
+        index_text(&table, false).await?;
+        let unclean = !clean(&table).await?;
+        let e = Arc::new(Entry { table, space, writes: Default::default(), maintenance: Default::default(), used: std::sync::Mutex::new(Instant::now()) });
+        if unclean {
+            // what it removed is unknown: rebuild its indexes too
+            e.writes.lock().await.removed = true;
+            self.maintain(scope, &e);
+        }
         if tables.len() >= HANDLES_MAX {
             // let go of the least used table no request holds
             let idle = tables.iter().filter(|(_, e)| Arc::strong_count(e) == 1).min_by_key(|(_, e)| *e.used.lock().unwrap()).map(|(k, _)| k.clone());
@@ -277,15 +387,9 @@ impl Store {
             }
         }
         let filter = format!("source = {}", quote(&up.source));
-        if up.sections.is_empty() {
-            table.delete(filter.as_str()).await?;
-            drop(writes);
-            self.maintain(scope, &entry).await;
-            return Ok(Written { source: up.source, revision: up.revision, written: true, chunks: 0, version: table.version().await? });
-        }
         let rows = table.count_rows(None).await?;
         let chunks: usize = up.sections.iter().map(|s| s.chunks.len()).sum();
-        if rows + chunks > api::TABLE_ROWS_MAX {
+        if rows + chunks + 1 > api::TABLE_ROWS_MAX {
             return Err(Error::Full);
         }
         let reused = reusable(table, entry.space.as_ref(), &up).await?;
@@ -296,16 +400,15 @@ impl Store {
         merge.execute(Box::new(RecordBatchIterator::new(vec![Ok(batch)], schema))).await?;
         writes.since_optimize += 1;
         if writes.since_optimize >= OPTIMIZE_EVERY {
-            table.optimize(OptimizeAction::All).await?;
+            table.optimize(OptimizeAction::Index(OptimizeOptions::default())).await?;
             writes.since_optimize = 0;
         }
-        let version = table.version().await?;
-        drop(writes);
         if current.is_some() {
             // what the old revision held leaves the store
-            self.maintain(scope, &entry).await;
+            writes.removed = true;
+            self.maintain(scope, &entry);
         }
-        Ok(Written { source: up.source, revision: up.revision, written: true, chunks, version })
+        Ok(Written { source: up.source, revision: up.revision, written: true, chunks, version: table.version().await? })
     }
 
     /// A table made by its first upsert, its space pinned, its text indexed.
@@ -319,17 +422,14 @@ impl Store {
         if up.replaces.as_deref().is_some_and(|r| !r.is_empty()) {
             return Err(Error::Conflict { current: None });
         }
-        if up.sections.is_empty() {
-            return Ok(Written { source: up.source, revision: up.revision, written: false, chunks: 0, version: 0 });
-        }
         let batch = batch_of(&up, up.space.as_ref(), &HashMap::new())?;
-        let chunks = batch.num_rows();
+        let chunks = batch.num_rows() - 1;
         let table = self.db.create_table(scope, batch).execute().await?;
-        for (column, _) in TEXT {
-            table.create_index(&[column], Index::FTS(FtsIndexBuilder::default())).execute().await?;
-        }
+        // Not acknowledged until indexed: cut off here, its retry or the
+        // next open (`entry`) indexes it before it is served.
+        index_text(&table, false).await?;
         let version = table.version().await?;
-        let entry = Arc::new(Entry { table, space: up.space.clone(), writes: Default::default(), used: std::sync::Mutex::new(Instant::now()) });
+        let entry = Arc::new(Entry { table, space: up.space.clone(), writes: Default::default(), maintenance: Default::default(), used: std::sync::Mutex::new(Instant::now()) });
         tables.insert(scope.to_string(), entry);
         Ok(Written { source: up.source, revision: up.revision, written: true, chunks, version })
     }
@@ -339,19 +439,19 @@ impl Store {
             return Err(Error::Invalid(format!("source is 1 to {} bytes", api::SOURCE_MAX_BYTES)));
         }
         let Some(entry) = self.entry(scope).await? else { return Ok(false) };
-        let writes = entry.writes.lock().await;
+        let mut writes = entry.writes.lock().await;
         let filter = format!("source = {}", quote(source));
         if entry.table.count_rows(Some(filter.clone())).await? == 0 {
             return Ok(false);
         }
         entry.table.delete(filter.as_str()).await?;
-        drop(writes);
-        self.maintain(scope, &entry).await;
+        writes.removed = true;
+        self.maintain(scope, &entry);
         Ok(true)
     }
 
     /// Which of `hashes` the table holds a vector of.
-    pub async fn known(&self, scope: &str, k: api::Known) -> Result<Vec<String>> {
+    pub async fn known(self: &Arc<Self>, scope: &str, k: api::Known) -> Result<Vec<String>> {
         k.check()?;
         let Some(entry) = self.entry(scope).await? else { return Ok(vec![]) };
         if entry.space.is_none() || k.hashes.is_empty() {
@@ -371,20 +471,26 @@ impl Store {
 
     /// Its sources after `after`, ascending, at most `limit`, and the
     /// cursor after them (none at the end).
-    pub async fn sources(&self, scope: &str, after: &str, limit: usize) -> Result<(Vec<Value>, Option<String>)> {
+    pub async fn sources(self: &Arc<Self>, scope: &str, after: &str, limit: usize) -> Result<(Vec<Value>, Option<String>)> {
         if !(1..=api::SOURCES_PAGE_MAX).contains(&limit) {
             return Err(Error::Invalid(format!("limit is 1 to {}", api::SOURCES_PAGE_MAX)));
         }
         let Some(entry) = self.entry(scope).await? else { return Ok((vec![], None)) };
-        let mut q = entry.table.query().select(Select::columns(&["source", "revision", "at"]));
+        let mut q = entry.table.query().select(Select::columns(&["source", "section", "revision", "at"]));
         if !after.is_empty() {
             q = q.only_if(format!("source > {}", quote(after)));
         }
+        // each source's revision and time are its own row's (`MARKERS`)
         let mut by: BTreeMap<String, (String, String, usize)> = BTreeMap::new();
         for b in q.execute().await?.try_collect::<Vec<_>>().await? {
-            let (s, r, a) = (strings(&b, "source"), strings(&b, "revision"), strings(&b, "at"));
+            let (s, section, r, a) = (strings(&b, "source"), strings(&b, "section"), strings(&b, "revision"), strings(&b, "at"));
             for i in 0..b.num_rows() {
-                by.entry(s.value(i).to_string()).or_insert_with(|| (r.value(i).to_string(), a.value(i).to_string(), 0)).2 += 1;
+                let e = by.entry(s.value(i).to_string()).or_default();
+                if section.value(i).is_empty() {
+                    (e.0, e.1) = (r.value(i).to_string(), a.value(i).to_string());
+                } else {
+                    e.2 += 1;
+                }
             }
         }
         let more = by.len() > limit;
@@ -397,19 +503,14 @@ impl Store {
         Ok((page, next))
     }
 
-    pub async fn status(&self, scope: &str) -> Result<Value> {
+    pub async fn status(self: &Arc<Self>, scope: &str) -> Result<Value> {
         let Some(entry) = self.entry(scope).await? else { return Ok(json!({ "exists": false })) };
         let t = &entry.table;
         let stats = t.stats().await?;
-        let mut sources = std::collections::HashSet::new();
-        for b in t.query().select(Select::columns(&["source"])).execute().await?.try_collect::<Vec<_>>().await? {
-            let s = strings(&b, "source");
-            sources.extend((0..b.num_rows()).map(|i| s.value(i).to_string()));
-        }
         Ok(json!({
             "exists": true,
-            "chunks": t.count_rows(None).await?,
-            "sources": sources.len(),
+            "chunks": t.count_rows(Some(CHUNKS.into())).await?,
+            "sources": t.count_rows(Some(MARKERS.into())).await?,
             "bytes": stats.total_bytes,
             "space": entry.space,
             "semantic": if entry.space.is_some() { "on" } else { "off" },
@@ -417,7 +518,7 @@ impl Store {
         }))
     }
 
-    pub async fn search(&self, scope: &str, s: api::Search) -> Result<Vec<Hit>> {
+    pub async fn search(self: &Arc<Self>, scope: &str, s: api::Search) -> Result<Vec<Hit>> {
         s.check()?;
         let Some(entry) = self.entry(scope).await? else { return Ok(vec![]) };
         let t = &entry.table;
@@ -440,10 +541,9 @@ impl Store {
                     return Err(Error::SpaceChanged { current: entry.space.clone() });
                 }
                 let v = api::vector_of(b64, space.dimensions)?;
-                let mut q = t.query().nearest_to(v.as_slice())?.distance_type(DistanceType::Cosine).select(Select::columns(&ROW_COLUMNS)).limit(DEPTH);
-                if let Some(f) = &filter {
-                    q = q.only_if(f.clone());
-                }
+                // a source's own row has no vector, and is no hit
+                let only = filter.as_ref().map_or(CHUNKS.to_string(), |f| format!("{CHUNKS} AND {f}"));
+                let q = t.query().nearest_to(v.as_slice())?.distance_type(DistanceType::Cosine).select(Select::columns(&ROW_COLUMNS)).limit(DEPTH).only_if(only);
                 legs.push(("semantic", rows(&q.execute().await?.try_collect::<Vec<_>>().await?)));
             }
         }
@@ -452,7 +552,10 @@ impl Store {
 
     pub async fn drop_table(&self, scope: &str) -> Result<bool> {
         let mut tables = self.tables.lock().await;
-        tables.remove(scope);
+        if let Some(e) = tables.remove(scope) {
+            e.writes.lock().await.dropped = true;
+            e.maintenance.send_modify(|m| m.pending = false);
+        }
         match self.db.drop_table(scope, &[]).await {
             Ok(()) => Ok(true),
             Err(lancedb::Error::TableNotFound { .. }) => Ok(false),
@@ -460,62 +563,107 @@ impl Store {
         }
     }
 
-    /// After a write that removed rows: in `MAINTAIN_AFTER`, compact the
-    /// table and fold its rows into its indexes (and index its vectors once
-    /// it has `VECTOR_INDEX_MIN_ROWS`), then, as long again after, prune its
-    /// versions older than `KEEP_VERSIONS`. One at a time a table.
-    async fn maintain(self: &Arc<Self>, scope: &str, entry: &Arc<Entry>) {
-        {
-            let mut w = entry.writes.lock().await;
-            if w.maintaining {
-                return;
-            }
-            w.maintaining = true;
+    /// Called holding `entry`'s writes, after a write that removed rows:
+    /// passes (`pass`) `after` it and after each other until one leaves the
+    /// table clean, a failed one retried later and later. A write meanwhile
+    /// waits for a pass in progress, and gets one of its own after it.
+    fn maintain(self: &Arc<Self>, scope: &str, entry: &Arc<Entry>) {
+        if !entry.maintenance.send_if_modified(|m| !std::mem::replace(&mut m.pending, true)) {
+            return;
         }
-        let (store, entry, scope) = (self.clone(), entry.clone(), scope.to_string());
-        tokio::spawn(async move {
-            tokio::time::sleep(MAINTAIN_AFTER).await;
-            let compacted = store.compact(&entry).await;
-            tokio::time::sleep(MAINTAIN_AFTER).await;
-            let pruned = store.prune(&entry, KEEP_VERSIONS).await;
-            entry.writes.lock().await.maintaining = false;
-            if let Err(e) = compacted.and(pruned) {
-                eprintln!("{}", json!({ "event": "search.maintain-failed", "scope": scope, "error": format!("{e:?}") }));
+        let (timing, entry, scope) = (self.timing, entry.clone(), scope.to_string());
+        let mut tasks = self.tasks.lock().unwrap();
+        while tasks.try_join_next().is_some() {}
+        tasks.spawn(async move {
+            let mut wait = timing.after;
+            loop {
+                tokio::time::sleep(wait).await;
+                let mut w = entry.writes.lock().await;
+                if w.dropped {
+                    return;
+                }
+                let removed = std::mem::take(&mut w.removed);
+                match pass(&entry, removed, timing.keep).await {
+                    Ok(clean) => {
+                        w.since_optimize = 0;
+                        entry.maintenance.send_modify(|m| {
+                            m.passes += 1;
+                            m.pending = !clean;
+                        });
+                        if clean {
+                            return;
+                        }
+                        wait = timing.after;
+                    }
+                    Err(e) => {
+                        w.removed |= removed;
+                        entry.maintenance.send_modify(|m| m.failures += 1);
+                        eprintln!("{}", json!({ "event": "search.maintain-failed", "scope": scope, "error": format!("{e:?}") }));
+                        wait = (wait * 2).min(RETRY_MAX);
+                    }
+                }
             }
         });
     }
 
-    /// The table compacted (its deleted rows' bytes rewritten away), its
-    /// newest rows folded into its indexes, and its vectors indexed once it
-    /// has `VECTOR_INDEX_MIN_ROWS`.
-    async fn compact(&self, entry: &Entry) -> Result<()> {
-        let mut w = entry.writes.lock().await;
-        entry.table.optimize(OptimizeAction::All).await?;
-        w.since_optimize = 0;
-        if entry.space.is_some() && entry.table.count_rows(None).await? >= VECTOR_INDEX_MIN_ROWS && !has_vector_index(&entry.table).await? {
-            entry.table.create_index(&["vector"], Index::IvfFlat(IvfFlatIndexBuilder::default().distance_type(DistanceType::Cosine))).execute().await?;
-        }
-        Ok(())
-    }
-
-    /// The table's versions older than `keep` deleted, and the files only
-    /// they held. No write is in flight while its lock is held, so none is
-    /// unverified.
-    async fn prune(&self, entry: &Entry, keep: Duration) -> Result<()> {
-        let _w = entry.writes.lock().await;
-        let older_than = Some(chrono::TimeDelta::seconds(keep.as_secs() as i64));
-        entry.table.optimize(OptimizeAction::Prune { older_than, delete_unverified: Some(true), error_if_tagged_old_versions: Some(false) }).await?;
-        Ok(())
-    }
-
-    /// `scope`'s table compacted and every version but its newest pruned,
-    /// now: what was deleted from it leaves the store (`maintain` does this
-    /// on its own, minutes after a write).
-    pub async fn purge(&self, scope: &str) -> Result<()> {
+    /// `scope`'s table maintained now, every version but its newest pruned:
+    /// what was deleted from it leaves the store (`maintain` does this on
+    /// its own, minutes after a write).
+    pub async fn purge(self: &Arc<Self>, scope: &str) -> Result<()> {
         let Some(entry) = self.entry(scope).await? else { return Ok(()) };
-        self.compact(&entry).await?;
-        self.prune(&entry, Duration::ZERO).await
+        let mut w = entry.writes.lock().await;
+        pass(&entry, true, Duration::ZERO).await?;
+        w.removed = false;
+        w.since_optimize = 0;
+        Ok(())
     }
+}
+
+/// One pass of maintenance, holding the table's writes: every file that
+/// holds a deleted row rewritten without it (Lance's own threshold, 10%
+/// of a file, would keep a few deleted rows' bytes for good); the text
+/// indexes rebuilt when a write `removed` rows (an index keeps a removed
+/// row's words, whatever was rewritten), else the newest rows folded into
+/// them; the vectors indexed once there are `VECTOR_INDEX_MIN_ROWS` (that
+/// index rebuilt too when rows were removed); and the versions older than
+/// `keep` pruned, with every file only they held. Whether it left the
+/// table clean (`clean`).
+async fn pass(entry: &Entry, removed: bool, keep: Duration) -> Result<bool> {
+    let t = &entry.table;
+    let every_deletion = CompactionOptions { materialize_deletions: true, materialize_deletions_threshold: 0.0, ..CompactionOptions::default() };
+    t.optimize(OptimizeAction::Compact { options: every_deletion, remap_options: None }).await?;
+    let vector_index = has_vector_index(t).await?;
+    if removed {
+        index_text(t, true).await?;
+    } else {
+        t.optimize(OptimizeAction::Index(OptimizeOptions::default())).await?;
+    }
+    if entry.space.is_some() && ((removed && vector_index) || (!vector_index && t.count_rows(Some(CHUNKS.into())).await? >= VECTOR_INDEX_MIN_ROWS)) {
+        t.create_index(&["vector"], Index::IvfFlat(IvfFlatIndexBuilder::default().distance_type(DistanceType::Cosine))).replace(true).execute().await?;
+    }
+    let older_than = Some(chrono::TimeDelta::from_std(keep).map_err(|e| Error::Engine(e.to_string()))?);
+    t.optimize(OptimizeAction::Prune { older_than, delete_unverified: Some(true), error_if_tagged_old_versions: Some(false) }).await?;
+    clean(t).await
+}
+
+/// A table with nothing left to maintain: one version, deleting no row.
+/// Every write makes a version, and only a pass prunes one.
+async fn clean(t: &Table) -> Result<bool> {
+    let native = t.as_native().ok_or_else(|| Error::Engine("a table not on this store".into()))?;
+    let deletes = native.manifest().await?.fragments.iter().any(|f| f.deletion_file.is_some());
+    Ok(!deletes && t.list_versions().await?.len() == 1)
+}
+
+/// The table's text indexes, each made that is missing (every one,
+/// rebuilt, when `rebuild`).
+async fn index_text(t: &Table, rebuild: bool) -> Result<()> {
+    let indexed: Vec<String> = t.list_indices().await?.into_iter().flat_map(|i| i.columns).collect();
+    for (column, _) in TEXT {
+        if rebuild || !indexed.iter().any(|c| c == column) {
+            t.create_index(&[column], Index::FTS(FtsIndexBuilder::default())).replace(true).execute().await?;
+        }
+    }
+    Ok(())
 }
 
 async fn space_of(table: &Table) -> Result<Option<Space>> {
@@ -529,7 +677,7 @@ async fn has_vector_index(table: &Table) -> lancedb::Result<bool> {
 }
 
 async fn revision_of(table: &Table, source: &str) -> Result<Option<String>> {
-    let s = table.query().only_if(format!("source = {}", quote(source))).select(Select::columns(&["revision"])).limit(1).execute().await?;
+    let s = table.query().only_if(format!("source = {} AND {MARKERS}", quote(source))).select(Select::columns(&["revision"])).limit(1).execute().await?;
     let batches = s.try_collect::<Vec<_>>().await?;
     Ok(batches.iter().find(|b| b.num_rows() > 0).map(|b| strings(b, "revision").value(0).to_string()))
 }
@@ -568,6 +716,19 @@ fn batch_of(up: &api::Upsert, space: Option<&Space>, reused: &HashMap<String, Ve
     let mut chunk_ix: Vec<u32> = Vec::new();
     let mut vectors: Vec<Option<Vec<Option<f32>>>> = Vec::new();
     let fields: Vec<String> = up.fields.iter().map(|(k, v)| format!("{k}={v}")).chain(std::iter::repeat(String::new())).take(FIELD_COLUMNS.len()).collect();
+    // The source's own row (`MARKERS`): its revision, whatever its chunks
+    // (none, too); no words, no vector, no fields, so no search finds it.
+    let marker = [format!("{}\u{1f}", up.source), up.source.clone(), String::new(), String::new(), up.revision.clone(), String::new(), String::new(), String::new(), "[]".into(), String::new(), up.at.clone().unwrap_or_default(), String::new()];
+    for (k, v) in marker.into_iter().enumerate() {
+        cols[k].push(v);
+    }
+    for col in &mut cols[12..] {
+        col.push(String::new());
+    }
+    chunk_ix.push(0);
+    if space.is_some() {
+        vectors.push(None);
+    }
     for s in &up.sections {
         for (i, c) in s.chunks.iter().enumerate() {
             let row = [
