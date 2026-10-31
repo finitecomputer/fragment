@@ -302,8 +302,14 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         !calls.is_empty() && calls.iter().all(|c| c.model.contains("flash") && c.metadata["agent_id"].is_string()),
         json!(calls.iter().map(|c| json!({ "model": c.model, "metadata": c.metadata })).collect::<Vec<_>>()),
     );
-    let aig = super::ledger::entries(api, &owner_id, "aig:");
-    s.ok("and each is charged on its owner's ledger", !aig.is_empty() && aig.iter().all(|e| super::ledger::charged(e).is_some()), json!(aig));
+    // a call is charged after its answer, through the ledger's queue (meter.rs
+    // `charge`), whose batch waits up to a second: each call's row, once there
+    let mut aig = Vec::new();
+    let charged = s.eventually(TURN, || {
+        aig = super::ledger::entries(api, &owner_id, "aig:");
+        aig.len() >= calls.len() && aig.iter().all(|e| super::ledger::charged(e).is_some())
+    });
+    s.ok("and each is charged on its owner's ledger", charged && !aig.is_empty(), json!({ "calls": calls.len(), "entries": aig }));
 
     // a tool step, then the answer that names it
     let r = say(2, "run: echo tool-ran")?;
@@ -783,13 +789,18 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         maple_reply(&looked).is_some_and(|t| t.contains("the screen: I see an image, a ")),
         json!({ "reply": maple_reply(&looked), "work": work_of(&records(api, &owner, &grove_name, "work"), &looked) }),
     );
-    let vision_entries: Vec<Value> = super::ledger::entries(api, &owner_id, "aig:")
-        .into_iter()
-        .filter(|e| e["entry"]["row"]["agent"] == maple_id.as_str() && super::ledger::usage(e)["model"] == fragment_core::models::VISION_MODEL_DEFAULT)
-        .collect();
+    // charged after their answers, through the ledger's queue: once there
+    let mut vision_entries: Vec<Value> = Vec::new();
+    let metered = s.eventually(TURN, || {
+        vision_entries = super::ledger::entries(api, &owner_id, "aig:")
+            .into_iter()
+            .filter(|e| e["entry"]["row"]["agent"] == maple_id.as_str() && super::ledger::usage(e)["model"] == fragment_core::models::VISION_MODEL_DEFAULT)
+            .collect();
+        vision_entries.len() >= looks.len() && vision_entries.iter().all(|e| super::ledger::charged(e).is_some())
+    });
     s.ok(
         "each vision call is metered to the agent's owner, as the agent, charged at the vision model's price",
-        vision_entries.len() >= looks.len() && !looks.is_empty() && vision_entries.iter().all(|e| super::ledger::charged(e).is_some()),
+        metered && !looks.is_empty(),
         json!(vision_entries),
     );
 

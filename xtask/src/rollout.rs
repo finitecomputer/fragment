@@ -35,10 +35,12 @@
 //!    asked again with backoff for `FINISH_LIMIT`.
 //! 4. Verified: the platform's `/healthz/objects` asked until every object
 //!    class answers the new release (docs/api.md, Health), for
-//!    `VERIFY_LIMIT`, longer than the five minutes Cloudflare holds a busy
-//!    object on its old code (measured 2026-10-21, and again 2026-10-24 on
-//!    a throwaway Worker: a busy object took a deploy's code 300 s after
-//!    it, whatever `code_update_strategy` asked).
+//!    `VERIFY_LIMIT`, longer than the five minutes Cloudflare's default
+//!    holds a busy object on its old code (measured 2026-10-21, and
+//!    2026-10-24 on a throwaway Worker, which found `code_update_strategy`
+//!    ignored then). The Worker asks for `immediate` (cell/wrangler.jsonc;
+//!    honoured on 2026-10-30: 0.6 s), and the limit stays until the
+//!    preview's deploys show it holds.
 //! 5. When it cannot be finished or verified, the release before is
 //!    deployed again (`wrangler rollback` to its version), and verified
 //!    the same way; unless the new release's schema is not the one before
@@ -70,7 +72,8 @@ pub(crate) const OBSERVE_LIMIT: Duration = Duration::from_secs(3 * 60);
 const FINISH_PAUSE_FIRST: Duration = Duration::from_secs(10);
 const FINISH_PAUSE_MAX: Duration = Duration::from_secs(60);
 /// How long the platform has to answer a release at every object class:
-/// past Cloudflare's five minutes of a busy object's old code.
+/// past Cloudflare's default five minutes of a busy object's old code,
+/// until `immediate` (cell/wrangler.jsonc) has held on the preview.
 pub(crate) const VERIFY_LIMIT: Duration = Duration::from_secs(7 * 60);
 /// The pause between two probes, and how often a wait says where it is.
 const PROBE_PAUSE: Duration = Duration::from_secs(5);

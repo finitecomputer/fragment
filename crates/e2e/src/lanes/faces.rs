@@ -1,6 +1,6 @@
-//! An agent's name and picture (docs/api.md, "An agent's name and
-//! picture"): its agent fragment's title and `avatar.png` at live, the one
-//! source everything shows it by. Renamed and given a picture through the
+//! An agent's name, role and picture (docs/api.md, "An agent's name and
+//! picture"): its agent fragment's title, `meta.role` and `avatar.png` at
+//! live, the one source everything shows it by. Renamed and given a picture through the
 //! routes Settings and `fragment agent` use (its files, then a deploy), it
 //! reaches its owner's list (what the shell draws), a chat's `__people`
 //! (what its page draws), the share sheet, the access view and its
@@ -363,6 +363,36 @@ pub fn faces(s: &mut Suite, api: &Api) -> Result<()> {
         "an agent made with no title is untitled (its label shows), never called by the template's word",
         made && shown.get("title").is_none_or(Value::is_null) && status.is_null(),
         json!({ "row": shown, "status": status }),
+    );
+    // its role (`meta.role`): the tag beside its name, on its owner's list
+    // as its name is (Paul, 2026-10-30: one source, live everywhere); one of
+    // spaces is none, one too long is refused at its deploy and the last
+    // kept, and a role is an agent's alone
+    let role_is = |name: &str, title: Option<&str>, role: &str| -> Result<()> {
+        let mut manifest = api.signed(&paul, "GET", &format!("/api/f/{name}/manifest"), None)?.body;
+        if let Some(t) = title {
+            manifest["meta"]["title"] = json!(t);
+        }
+        manifest["meta"]["role"] = json!(role);
+        let files = json!({ "message": "its role", "files": [{ "path": "fragment.json", "text": format!("{}\n", serde_json::to_string_pretty(&manifest)?) }] });
+        let wrote = api.signed(&paul, "POST", &format!("/api/f/{name}/files"), Some(&files))?;
+        let deployed = api.signed(&paul, "POST", &format!("/api/f/{name}/deploy"), Some(&json!({})))?;
+        anyhow::ensure!(wrote.status == 200 && deployed.status == 200, "its role written: {wrote} {deployed}");
+        Ok(())
+    };
+    role_is(&agent, None, " project manager ")?;
+    let given = s.eventually(WAIT, || row(api, &paul, &agent)["agentRole"] == "project manager") && api.status(&paul, &agent)?.body["agentRole"] == "project manager";
+    role_is(&agent, None, &"r".repeat(fragment_proto::limits::ROLE_MAX_CHARS + 1))?;
+    let said = api.status(&paul, &agent)?.body["code"]["error"].clone();
+    let kept = row(api, &paul, &agent);
+    role_is(&agent, None, "   ")?;
+    let blank = s.eventually(WAIT, || row(api, &paul, &agent).get("agentRole").is_none());
+    role_is(&chat, Some("Garden plans"), "a chat")?;
+    let chats = s.eventually(WAIT, || row(api, &paul, &chat)["title"] == "Garden plans") && row(api, &paul, &chat).get("agentRole").is_none();
+    s.ok(
+        "its role (its fragment.json's meta.role) shows on its owner's list beside its name, and on its status, trimmed; one past 48 characters is refused at its deploy, saying why, the last kept; one of spaces is none; a chat's is never carried",
+        given && said.as_str().is_some_and(|e| e.contains("meta.role")) && kept["agentRole"] == "project manager" && blank && chats,
+        json!({ "error": said, "kept": kept, "row": row(api, &paul, &agent), "chat": row(api, &paul, &chat) }),
     );
     Ok(())
 }
