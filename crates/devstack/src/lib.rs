@@ -267,7 +267,7 @@ const PICKED_PORTS_FROM: u16 = 20_000;
 const PICK_TRIES_MAX: u32 = 64;
 
 /// A free local port, for a process to bind a moment later (wrangler's
-/// node, its inspector, Chrome's DevTools), picked at random below the
+/// node, its inspector), picked at random below the
 /// kernel's ephemeral range. The kernel numbers its own ports from that
 /// range alone: a connection's local end, any bind to port 0 (workerd's
 /// sockets inside wrangler), Docker's published ports. A port the kernel
