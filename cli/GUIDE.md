@@ -225,7 +225,7 @@ lists their templates:
 folder, from the platform's own templates: one of `blank`, `todo`,
 `inbox`, `calories`, `doc` is copied in as its first commit (`notes` is
 `new`'s and `init`'s alone); a blessed one, `agent`, `chat`, `brain`,
-`skills`, runs the platform's current release and is named in its
+`skills`, `sessions`, runs the platform's current release and is named in its
 `fragment.json`. Either way `--title` gives it its own title, its
 `fragment.json`'s `meta.title`, over the template's. Any other is
 refused, naming them.
@@ -852,6 +852,34 @@ fragment export                          # start one (or find the one building),
 fragment export --out ~/me.tar           # somewhere else
 ```
 
+## Your Session Archive
+
+The conversations you had with an agent somewhere else, kept in a
+private fragment of yours (kind `sessions`, titled Session Archive, made
+the first time you import): one file a conversation, under `sessions/`,
+and one index a kind, under `index/`, newest first. Bring them in from
+the old Finite's export (its `chats/`, or the folder holding it):
+
+```
+fragment session import ~/finite-import/export              # the old Finite's export, unpacked
+fragment session import ~/finite-import/export --kind chat  # only chats (also: cron, subagent)
+```
+
+Each conversation is kept by its own id, so importing again adds
+nothing twice, and a newer copy of one (a later export) replaces the
+older; an older copy never does. It says what it added, updated and
+already had, and what it left out and why: at most 18,000 conversations
+and 1 GiB an archive (an import past either adds nothing), 8 MiB a
+conversation. A tool's output and an agent's reasoning are cut to 2,000
+characters; what was said, never. An agent runs it for its owner (into
+their archive, never one of its own), and so reads it: `fragment sync
+<archive> --dir ~/archive --mode pull`, then your own tools over
+`~/archive/sessions/`. A conversation's file (format
+`session-archive/1`) is `{id, origin, kind, title, source, with,
+started_at, ended_at, parts, messages}`, each message `{role, at, text,
+tool, tool_calls, reasoning, summary}`; `kind` is `chat`, `cron` (a
+scheduled job's run) or `subagent` (a side task); times are UTC.
+
 ## Agents
 
 An agent is an identity of its own, and you own it: an agent fragment
@@ -966,6 +994,7 @@ fragment whoami                          fragment call <name> <op> [--input JSON
 fragment keys [list|rotate|revoke <npub>]
 fragment ledger [grant <who> <usd> --why W [--id ID]]
 fragment export [--out FILE]             fragment channel <name> [<channel>] [--after N] [--follow]
+fragment session import <path> [--kind K]   # an agent's past conversations, into your Session Archive
 fragment cap <name> <usd>|default        fragment post <name> <channel> --body JSON [--id ID]
 fragment host [<url>]                    fragment runs <name> [<run>] [--status S] [--limit N]
 fragment init <name> [--template T] [--title T]      fragment replay <name> <run>

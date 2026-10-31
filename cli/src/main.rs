@@ -7,6 +7,7 @@ mod codestorage;
 mod mcp;
 mod notice;
 mod operator;
+mod session;
 mod sync;
 mod watch;
 
@@ -384,6 +385,11 @@ enum Cmd {
     Schedule {
         #[command(subcommand)]
         sub: ScheduleCmd,
+    },
+    /// An agent's past conversations, in your Session Archive
+    Session {
+        #[command(subcommand)]
+        sub: session::SessionCmd,
     },
     /// Write one text file to main through the platform (no folder, no git):
     /// what an agent on a computer uses. `fragment deploy` puts it live.
@@ -1793,6 +1799,11 @@ fn run(cli: Cli) -> Result<()> {
             let result = apps::rename(&c, &name, &title)?;
             json_exit(j, &result);
             println!("{}: {}", result["name"].as_str().unwrap_or(&name), result["title"].as_str().unwrap_or(&title));
+        }
+        Cmd::Session { sub } => {
+            let imported = session::run(&c, sub)?;
+            json_exit(j, &imported);
+            session::print(&imported);
         }
         Cmd::Icon { sub } => {
             let result = apps::icon(&c, sub, !j)?;

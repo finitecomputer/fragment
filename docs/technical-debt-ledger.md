@@ -5,6 +5,25 @@ Each entry names where it was observed, the risk, the first proof that
 would show it biting, and the condition that deletes it. An entry
 without a delete condition is unfinished design, not debt.
 
+## Two imports into one session archive at once agree last-writer-wins
+
+- **Observed:** `fragment session import` (templates/sessions/README.md),
+  2026-10-30: each conversation's file goes up as an upsert on whatever
+  head main has, and only the indexes' commit is made again on a head
+  another writer moved.
+- **Shortcut:** two imports of the same conversation at once (the same
+  person running it twice, on two machines) keep the last one's file,
+  and an index entry may name the other's copy (its `sha256` and
+  `ended_at`) when the two are the same size; one of another size is
+  listed by its file at the next import (`found`, cli/src/session).
+- **Risk:** a stale entry makes the next import of that conversation
+  compare against the wrong copy: it may skip a newer copy once, or write
+  the same one again. Nothing is lost: the file is one of the two copies.
+- **First proof:** an archive whose entry's `sha256` is not its file's.
+- **Delete when:** each batch's commit is made again from main as the
+  indexes' is (read the entries of the conversations it writes, keep the
+  newer), or the archive moves to an app whose mutation writes both.
+
 ## A paid org pack is still credited, though none is sold
 
 - **Observed:** #736 review, 2026-10-30: orgs now pay out of band and an

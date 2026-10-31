@@ -387,6 +387,7 @@ mod tests {
         assert_eq!(parse(b"{}").unwrap().kind(), FragmentKind::App);
         assert_eq!(parse(br#"{"kind":"brain"}"#).unwrap().kind(), FragmentKind::Brain);
         assert_eq!(parse(br#"{"kind":"skills"}"#).unwrap().kind(), FragmentKind::Skills);
+        assert_eq!(parse(br#"{"kind":"sessions"}"#).unwrap().kind(), FragmentKind::Sessions);
         assert!(parse(br#"{"kind":"bot"}"#).is_err());
         // a kind this build does not know is refused, with what it may be:
         // a list reads one as `Other` (proto), a manifest never, nor
