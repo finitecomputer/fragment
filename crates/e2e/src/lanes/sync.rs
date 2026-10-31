@@ -153,7 +153,7 @@ pub fn folder_sync(s: &mut Suite, api: &Api) -> Result<()> {
     quiet_poll(s, api)
 }
 
-/// The poll backstop (docs/api.md, `FRAGMENT_POLL_INTERVAL_S`): a fragment
+/// The poll backstop (`FRAGMENT_POLL_INTERVAL_S`, cell/src/config.rs): a fragment
 /// whose pins may lag its repo (a storage token was minted for it in the
 /// last day) is polled every interval, so an editor's push through
 /// code.storage syncs within it; one nothing touches is never polled, its

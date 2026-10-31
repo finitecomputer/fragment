@@ -22,7 +22,7 @@
 // the person gives the middle column another view (a chat, settings,
 // Back), the launch changes nothing on screen: its message is still sent,
 // and one not sent is a notice, its words and files waiting in the
-// launcher's next opening (docs/api.md, The launcher).
+// launcher's next opening.
 
 import { icon } from "./icons.js";
 
@@ -40,8 +40,8 @@ const HINT_MAX_BYTES = 256;
 /**
  * Makes the launcher, its dialog `#search-dialog` (index.html), and opens it
  * from `#sidebar-new-chat`, `#new-chat` and ⌘K. `shell`: the shell's
- * helpers it uses, as shell.js names them (`$`, `el`, `api`, `ApiError`,
- * `seg`, `state`, `byName`, `isChat`, `titleOf`, `chatTitle`, `mark`,
+ * helpers it uses, as shell.js names them (`$`, `el`, `api`, `seg`,
+ * `state`, `byName`, `isChat`, `titleOf`, `chatTitle`, `mark`,
  * `iconOf`, `primaryAgent`, `newChatAgent`, `agentsOwnChat`, `UNTITLED`, `openChat`,
  * `openApp`, `chatFrame`, `composeIn`, `newChat`, `leaveSidebar`,
  * `closeMenu`, `notice`, `prewake`, `originOf`), and three it reads late:
@@ -56,7 +56,7 @@ const HINT_MAX_BYTES = 256;
  * not sent yet (a reload for a new release waits for it).
  */
 export function createLauncher(shell) {
-  const { $, el, api, ApiError, seg, state, byName, isChat, titleOf, chatTitle, mark, iconOf, primaryAgent, newChatAgent, agentsOwnChat, UNTITLED } = shell;
+  const { $, el, api, seg, state, byName, isChat, titleOf, chatTitle, mark, iconOf, primaryAgent, newChatAgent, agentsOwnChat, UNTITLED } = shell;
   const { openChat, openApp, chatFrame, composeIn, newChat, leaveSidebar, closeMenu, notice, prewake, originOf } = shell;
   const input = $("workspace-search");
   const dialog = $("search-dialog");
@@ -254,19 +254,15 @@ export function createLauncher(shell) {
     const bytes = await file.arrayBuffer();
     const sha256 = [...new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))].map((b) => b.toString(16).padStart(2, "0")).join("");
     const type = file.type || "application/octet-stream";
-    let r;
     for (let attempt = 1; ; attempt++) {
       try {
-        r = await fetch(`/api/f/${seg(chat)}/blobs/${sha256}`, { method: "PUT", headers: { "x-fragment-shell": "1", "content-type": type }, body: bytes, credentials: "same-origin" });
+        await api("PUT", `/api/f/${seg(chat)}/blobs/${sha256}`, bytes, type);
         break;
       } catch (e) {
-        if (attempt >= UPLOAD_TRIES) throw e;
+        // only a dropped connection (fetch's TypeError); an answer stands
+        if (!(e instanceof TypeError) || attempt >= UPLOAD_TRIES) throw e;
         await new Promise((resolve) => setTimeout(resolve, 300 * attempt));
       }
-    }
-    if (!r.ok) {
-      const out = await r.json().catch(() => ({}));
-      throw new ApiError(r.status, out.error, out.message || r.statusText);
     }
     return { sha256, size: bytes.byteLength, type, name: file.name || "" };
   }

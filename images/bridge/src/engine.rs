@@ -9,8 +9,8 @@
 //! said; the chat's `work` channel owns which turns have started (the
 //! journal); the runtime owns the in-flight turn; the bridge only
 //! translates. Its state is a cache: lost, or restored from any earlier
-//! save, it costs reads, never a second run (docs/durable-computers.md,
-//! one life per turn).
+//! save, it costs reads, never a second run (docs/computers.md,
+//! Durability, P1).
 //!
 //! Its rules, in one place:
 //! - A record is admitted once in a life: the cursor of its `(agent,
@@ -1353,10 +1353,10 @@ impl Engine {
     /// The lane is done with one of a turn's owed records; a turn that owes
     /// none is let go. Done means answered (appended, a replay, or refused:
     /// a 409 is another life's end of the turn, a 403/404 a chat it may no
-    /// longer post in) or given up after the lane's tries (docs/bridge.md:
-    /// `POST_TRIES_MAX`, with jitter, on a transport error, 429 or 5xx), so
-    /// a record that keeps failing holds its turn for one life's tries at
-    /// most, then goes.
+    /// longer post in) or given up after the lane's tries
+    /// (`limits::POST_TRIES_MAX`, with jitter, on a transport error, 429 or
+    /// 5xx), so a record that keeps failing holds its turn for one life's
+    /// tries at most, then goes.
     fn posted(&mut self, id: &str, post: &str, kept: bool) {
         let Some(t) = self.state.turns.get_mut(id) else {
             crate::ev!("owed.stale", { "turn": id, "id": post, "why": "no turn held by that id" });

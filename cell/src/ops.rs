@@ -1,4 +1,4 @@
-//! Calling an operation (docs/MODEL.md, Operations): the supervisor checks
+//! Calling an operation (docs/api.md, Apps): the supervisor checks
 //! the caller's role against the operation's declared role, bounds the
 //! input, and runs it in the `app` facet, where a mutation and its ledger
 //! row commit together. Callers who hold only the `public` floor (visitors
@@ -376,7 +376,7 @@ impl FragmentCell {
         bounded(Answered { result: ran.result, replayed })
     }
 
-    /// An ephemeral mutation (docs/MODEL.md): the facet runs it in its own
+    /// An ephemeral mutation (docs/api.md, Apps): the facet runs it in its own
     /// transaction and keeps no ledger row, so there is no pending row, no
     /// `ops` record, and nothing to settle after a crash; the same id runs
     /// again. It has no effects (their outbox is the ledger row): the facet
@@ -420,7 +420,7 @@ impl FragmentCell {
 
     /// `POST /api/test/fragment {fragment, op, …}`, the router's, on fleets
     /// with test hooks only: the levers the e2e pulls on one fragment
-    /// (docs/api.md, `FRAGMENT_TEST_SECRET`).
+    /// (docs/api.md, Test levers).
     pub(crate) async fn test_fragment(&self, body: &Value) -> CellResult<Value> {
         assert!(self.cfg.test_hooks, "the route answers only on fleets with test hooks");
         if body["op"] == "ended" {
