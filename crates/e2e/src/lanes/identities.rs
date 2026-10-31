@@ -1,4 +1,4 @@
-//! Identities (docs/api.md; docs/finite-integration.md): every signed
+//! Identities (docs/api.md; docs/cloudflare-v1.md, R15): every signed
 //! request resolves to an identity in the registry, live; grants name
 //! identities, so a key replaced with a proof keeps every grant; a revoked
 //! key is refused from the next request and never comes back; an agent's

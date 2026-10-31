@@ -22,7 +22,7 @@
 // the person gives the middle column another view (a chat, settings,
 // Back), the launch changes nothing on screen: its message is still sent,
 // and one not sent is a notice, its words and files waiting in the
-// launcher's next opening (docs/api.md, The launcher).
+// launcher's next opening.
 
 import { icon } from "./icons.js";
 

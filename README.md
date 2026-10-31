@@ -14,7 +14,7 @@ Your **agents** are fragments too, run by a computer of your own (Hermes,
 in a container), and act on other fragments as their members. On
 Cloudflare, each fragment is a Durable Object that sleeps when idle, with
 its app in a Worker of its own
-([docs/cloudflare-v1.md](docs/cloudflare-v1.md)), and each computer is a
+([docs/MODEL.md](docs/MODEL.md)), and each computer is a
 Container beside an object of its own ([docs/computers.md](docs/computers.md)).
 
 This repo holds:
@@ -31,7 +31,7 @@ This repo holds:
 
 Read [docs/MODEL.md](docs/MODEL.md) for the model,
 [docs/api.md](docs/api.md) for the wire contract, and
-[docs/cloudflare-v1.md](docs/cloudflare-v1.md) for the plan of record.
+[docs/cloudflare-v1.md](docs/cloudflare-v1.md) for the decisions that bind.
 MIT licensed; see [LICENSE](LICENSE).
 
 ## Use Finite
@@ -146,5 +146,5 @@ crates/e2e     the end-to-end suite
 templates/     blank, calories, doc, inbox, notes, todo; the blessed agent, brain, chat, skills
 xtask/         build, dev, try, check, e2e, deploy, teardown
 deploy/        example.jsonc: a deployment's config (yours lives outside the repo)
-docs/          the plan (cloudflare-v1.md), model, contract, the debt ledger
+docs/          the decisions (cloudflare-v1.md), model, contract, the debt ledger
 ```
