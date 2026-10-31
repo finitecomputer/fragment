@@ -1434,6 +1434,11 @@ impl Manager {
         // SAFETY: only async-signal-safe calls, in the child before its exec
         unsafe {
             cmd.pre_exec(move || {
+                // Linux's alone, as the image is. Elsewhere (a reviewer's Mac,
+                // for the tests) there is no parent-death signal: a core
+                // outlives a SIGKILLed bridge there, and `kill_strays`, which
+                // reads `/proc`, finds none of them.
+                #[cfg(target_os = "linux")]
                 if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
                     return Err(std::io::Error::last_os_error());
                 }
@@ -2122,7 +2127,7 @@ async fn poster(api: Api, agent: Agent, chat: String, mut rx: mpsc::Receiver<Pos
                     return;
                 }
             }
-            crate::driver::Sent::Posted => {
+            crate::driver::Sent::Posted | crate::driver::Sent::Taken => {
                 crate::ev!("simplex.posted", { "agent": agent.fragment, "chat": chat, "id": id, "kind": p.inbound.kind, "file": p.file.is_some() });
                 for f in &files {
                     let _ = tokio::fs::remove_file(&f.path).await;
@@ -3310,7 +3315,8 @@ mod tests {
     /// Goal (Alex's re-review of #546): a core a bridge before this one left
     /// running (one whose death it outlived) is killed before this bridge
     /// answers a hold or starts its own; a process that is not this
-    /// computer's core is left alone.
+    /// computer's core is left alone. Linux's alone: it reads `/proc`.
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn a_core_left_by_a_bridge_before_is_killed_first() {
         use std::os::unix::fs::PermissionsExt;

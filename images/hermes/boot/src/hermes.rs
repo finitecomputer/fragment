@@ -359,9 +359,8 @@ pub const FILES: &str = "Chat attachments are already on your computer. The atta
 /// reply's `MEDIA:` tag sends a file (its `_MEDIA_NATIVE` hint); `relay`
 /// has no hint of Hermes', so this is ours. Hermes delivers a tag only
 /// outside code and quotes (its `_mask_media_scan_text`), and the bridge
-/// posts each file as the reply's attachment (docs/bridge.md). The
-/// `fragment` skill's first page (`computer.md`, "Files you send") says
-/// the same at more length.
+/// posts each file as the reply's attachment. The `fragment` skill's first
+/// page (`computer.md`, "Files you send") says the same at more length.
 pub const SENDING: &str = "To give someone in this chat a file (a PDF, an image, a document, a spreadsheet, audio or video), put MEDIA: and its absolute path on a line of its own in your reply, outside code and quotes, for example MEDIA:/data/work/report.pdf. It arrives in this chat as an attachment they can open and download. Attach it whenever they ask for a file here, rather than emailing it or naming a path on your computer.";
 
 /// What every agent is told of SimpleX, after `SENDING` on every turn
@@ -447,7 +446,7 @@ pub fn managed_config(disabled_plugins: &[String], card_timeout_s: u64, screen_i
     // command) and OpenRouter's and Nous' routes. On, the gateway fetched
     // them from four hosts 30 s after it started and every 20 minutes, and
     // rewrote four caches in its home while the computer was held
-    // (docs/durable-computers.md, "What changes under the hold").
+    // (docs/computers.md, "What changes under the hold").
     y.push_str("model_catalog:\n  enabled: false\n");
     // Each agent's desktop starts for its screen's first viewer (the
     // bridge's `screen-start`), or at the agent's first computer_use or
@@ -516,7 +515,7 @@ pub fn told_role(role: &str) -> String {
 /// next turn's, as a rename is, nothing restarted. Hermes' own home channel
 /// is none of it: v0.21.7's multiplexed gateway reads a relay home only from
 /// its launch profile, and nothing an agent's tools do delivers there
-/// (docs/hermes-relay.md, "Hermes' settings").
+/// (`gateway_env`).
 pub fn told_home(agent_fragment: &str, home: Home) -> String {
     let label = fragment_bridge::api::label(agent_fragment);
     let at = match home {
@@ -755,7 +754,7 @@ pub fn profile_config(agent: &Agent, name: &str, role: Option<&str>, home: Home,
     let init = ["~/.profile", "~/.bash_profile", "~/.bashrc"].iter().map(|f| q(f)).chain([q(&credentials_file.display().to_string())]);
     y.push_str(&format!("  shell_init_files: [{}]\n", init.collect::<Vec<_>>().join(", ")));
     // Its commands run in the agent's work directory, which the computer
-    // saves on its own (the seam: step 2 of docs/durable-computers.md), never
+    // saves on its own (the seam: docs/computers.md, "Data and the restore gate"), never
     // in Hermes' home (left unset, the gateway's own home, /data/hermes)
     y.push_str(&format!("  cwd: {}\n", q(&work_dir(&agent.fragment).display().to_string())));
     y
@@ -854,8 +853,7 @@ pub fn chromium_ca_policy(pem: &str) -> Option<String> {
 /// `/proc/1/cgroup` or the root mount: Docker gives every container the
 /// marker, Cloudflare Containers likely none of them, so there Hermes would
 /// act as on a host. Each pin is what Hermes does in a container, as the
-/// Docker rung has always run it (docs/computers.md, "Hermes' container
-/// guesses", has every guess and what decides it):
+/// Docker rung has always run it:
 ///
 /// - `TERMINAL_HOME_MODE=profile`: each agent's terminal, `execute_code`
 ///   and file tools' `~` have the agent's own `HOME`, its profile's `home`
@@ -1072,7 +1070,7 @@ pub fn gateway_env(listen: &str, gateway_id: &str, secret: &str) -> String {
     // platform's (its agent.json's `home`), told to it beside its name
     // (`told_home`): Hermes' own would reach nothing of ours, as its
     // multiplexed gateway reads a relay home from its launch profile alone,
-    // and nothing an agent's tools do delivers there (docs/hermes-relay.md).
+    // and nothing an agent's tools do delivers there.
     // GATEWAY_MULTIPLEX_PROFILES: one gateway serves every profile. Said
     // outright, because left to its default Hermes stays standalone in an s6
     // container with no per-profile gateway slots, which this image has none
@@ -1098,7 +1096,7 @@ pub fn profile_dir(home: &Path, agent_fragment: &str) -> PathBuf {
 }
 
 /// Closes each turn a restart cut, in Hermes' own sessions, before the
-/// gateway starts (docs/durable-computers.md, P5), run by Hermes' Python as
+/// gateway starts (docs/computers.md, Durability, P5), run by Hermes' Python as
 /// the hermes user with each `state.db` to look in as its arguments.
 ///
 /// Why: Hermes persists a turn's message as the turn starts and the rest as

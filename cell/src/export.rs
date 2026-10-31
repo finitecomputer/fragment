@@ -1312,6 +1312,7 @@ impl PrincipalCell {
                     sharing: None,
                     archived: false,
                     dock: true,
+                    pinned: false,
                     owned: false,
                     listed: vec![],
                 })

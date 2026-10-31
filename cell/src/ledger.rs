@@ -15,15 +15,11 @@
 //!
 //! Nothing is held before a paid call (decision 62): a head or an entry
 //! the releases before kept (holds, reservations) loads, its holds
-//! forgiven uncharged and their entries ended as released in the same
-//! transaction, and a head is written with `holds` empty, so a release
-//! rolled back to one of those reads a ledger with no hold and no held
-//! entry (`fragment_core::ledger`, `retire_holds`). The
-//! `entries.held` column stays (a schema changes only by a new step),
-//! written 0. A batch is priced with this release's configured book
-//! (`Config::book`): every call into a ledger is its own release's, so it
-//! keeps none (decision 62); a head is written with that book too, which
-//! a release rolled back to one that kept its own reads.
+//! forgiven uncharged (`fragment_core::ledger`). The `entries.held`
+//! column stays (a schema changes only by a new step), written 0. A batch
+//! is priced with this release's configured book (`Config::book`): every
+//! call into a ledger is its own release's, so it keeps none (decision
+//! 62).
 //!
 //! Inner routes (platform code only, through `ask`): each is a POST of a
 //! `Route`'s request (the core's types, or proto's), answered with its
@@ -45,7 +41,6 @@
 use std::cell::{Cell, RefCell};
 
 use fragment_core::ledger::gate::Gate;
-use fragment_core::price::PriceBook;
 use fragment_core::ledger::org::Payer;
 use fragment_core::ledger::{self as core, BatchRecord, CommandRecord, Entry, Ledger, Month, Refused, Spend, Store};
 use fragment_proto::ledger::{GrantCredit, LedgerStatus, OrgBudget, OrgLedgerStatus, Plan, SeatState, SetFragmentCap, SetOverdraft, SetPlan, SetSeat, Why};
@@ -119,7 +114,7 @@ impl DurableObject for LedgerCell {
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {
-        if let Some(refused) = crate::routed::refused(&req, crate::routed::Own::of(self.cfg), &self.raw)? {
+        if let Some(refused) = crate::routed::refused(&req, &self.cfg.deploy_id)? {
             return Ok(refused);
         }
         if let Some(probed) = crate::routed::probed(&req, &self.schema)? {
@@ -188,7 +183,7 @@ pub trait Route: Serialize + DeserializeOwned {
 #[serde(deny_unknown_fields)]
 pub struct Done {}
 
-/// May this spend start (docs/ledger.md, `may_spend`)? The whole question
+/// May this spend start (docs/ledger.md, "The gate")? The whole question
 /// when the payer owns the fragment (or there is none); when another
 /// person owns it, that owner's ledger answers `FragmentOpen` too.
 #[derive(Debug, Serialize, Deserialize)]
@@ -548,12 +543,6 @@ fn head(store: &mut SqlStore, cfg: &Config, now_ms: i64) -> CellResult<Ledger> {
     };
     if let Some(row) = rows.into_iter().next() {
         let mut ledger: Ledger = serde_json::from_str(&row.value).map_err(|e| CellError::host(format!("the ledger's head does not read as it was written: {e}")))?;
-        // a head of the releases before decision 62: its holds forgiven,
-        // their entries ended, in this transaction with the head's rewrite
-        let retired = ledger.retire_holds(store);
-        if retired > 0 {
-            console_log!("{}", json!({ "event": "ledger.holds-retired", "retired": retired }));
-        }
         if let Some(terms) = org {
             ledger.bind_org(terms);
         }
@@ -571,10 +560,9 @@ fn head(store: &mut SqlStore, cfg: &Config, now_ms: i64) -> CellResult<Ledger> {
     Ok(ledger)
 }
 
-/// Writes the head back, with the book this release charges with
-/// (`Ledger::written`: for a rollback to a release that kept its own), and
-/// an org's budget in its own row, which no head's rewrite touches.
-fn save(store: &SqlStore, ledger: &Ledger, book: &PriceBook) {
+/// Writes the head back, and an org's budget in its own row, which no
+/// head's rewrite touches.
+fn save(store: &SqlStore, ledger: &Ledger) {
     if let Some(terms) = ledger.org_terms() {
         store.exec(
             "INSERT INTO meta (key, value) VALUES ('org_budget', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value",
@@ -583,7 +571,7 @@ fn save(store: &SqlStore, ledger: &Ledger, book: &PriceBook) {
     }
     store.exec(
         "INSERT INTO head (id, ledger) VALUES (1, ?) ON CONFLICT (id) DO UPDATE SET ledger = excluded.ledger",
-        vec![ledger.written(book).into()],
+        vec![serde_json::to_string(ledger).expect("a head serializes").into()],
     );
 }
 
@@ -612,8 +600,8 @@ impl LedgerCell {
 
     /// Runs `op` on the head and the store in one transaction, at the
     /// ledger's now: the head is written back whatever `op` answers (a
-    /// refusal changed nothing but the month it rolled to, and a newer
-    /// book), and a store that failed rolls everything back. Answers `op`'s
+    /// refusal changed nothing but the month it rolled to), and a store
+    /// that failed rolls everything back. Answers `op`'s
     /// answer and when the next sweep is due (the ledger's clock).
     fn transact<T: 'static>(&self, op: impl FnOnce(&mut Ledger, &mut SqlStore, i64) -> Result<T, Refused> + 'static) -> CellResult<(Result<T, Refused>, i64)> {
         let now = js::now_ms() + self.offset_ms()?;
@@ -622,7 +610,7 @@ impl LedgerCell {
             let mut store = SqlStore::new(sql);
             let mut ledger = head(&mut store, cfg, now)?;
             let answer = op(&mut ledger, &mut store, now);
-            save(&store, &ledger, &cfg.book);
+            save(&store, &ledger);
             store.checked()?;
             Ok((answer, ledger.next_sweep_ms(now)))
         })

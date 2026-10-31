@@ -13,17 +13,18 @@
 //!
 //! Five things here are the person's own, not a fragment's:
 //!
-//! - **Archived** and **on their dock**, flags on their row (`PUT
-//!   /api/fragments/{name}/archived`, `…/dock`): their view of the
-//!   fragment, which no fragment's change touches. Each goes when they
-//!   leave the fragment, or it is made again (not archived, on the dock).
+//! - **Archived**, **on their dock** and **pinned**, flags on their row
+//!   (`PUT /api/fragments/{name}/archived`, `…/dock`, `…/pinned`): their
+//!   view of the fragment, which no fragment's change touches. Each goes
+//!   when they leave the fragment, or it is made again (not archived, on
+//!   the dock, not pinned).
 //! - **Seen** (`PUT /api/fragments/{name}/seen`): the place in a chat's
 //!   search entries (below) up to which they have seen its messages, so
 //!   its row counts the rest as `unread` (at most
 //!   `limits::LISTED_UNREAD_MAX`). A chat they never marked counts every
 //!   entry it holds. Kept beside the row, never on it (a table of its own,
 //!   which an older list gains as it starts: docs/technical-debt-ledger.md,
-//!   "Objects made before a column"), and gone with their entries when they
+//!   "Objects made before versioned schemas"), and gone with their entries when they
 //!   leave the fragment, or it is made again. An entry names no author, so a
 //!   message of their own sent from elsewhere counts too.
 //! - **Search** (docs/cloudflare-v1.md, decision 9 and lesson 12): the text
@@ -76,7 +77,7 @@ use std::cell::Cell;
 
 use fragment_core::npub;
 use fragment_core::search::{self, Query};
-use fragment_proto::{limits, valid_channel_name, Archived, Docked, ErrorCode, FragmentKind, FragmentList, ListedFragment, ListedRecord, MessageHit, Role, SearchAnswer, Seen, Sharing};
+use fragment_proto::{limits, valid_channel_name, Archived, Docked, ErrorCode, FragmentKind, FragmentList, ListedFragment, ListedRecord, MessageHit, Pinned, Role, SearchAnswer, Seen, Sharing};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use worker::wasm_bindgen::{JsCast, JsValue};
@@ -102,7 +103,7 @@ const INVITED: &str = r#"{"type":"invited"}"#;
 /// entry (`said`, and when: `said_at`), read by its place in its fragment's log, and its entries
 /// after the place its person last saw (`unread`), counted up to the one
 /// bound number (`limits::LISTED_UNREAD_MAX`, `listed_binds`).
-const LISTED: &str = "SELECT fragment AS name, role, sharing, face, archived, dock,
+const LISTED: &str = "SELECT fragment AS name, role, sharing, face, archived, dock, pinned,
   (SELECT records FROM listed l WHERE l.fragment = m.fragment) AS listed,
   CASE WHEN json_extract(face, '$.kind') = 'chat'
     THEN (SELECT text FROM search_entries e WHERE e.fragment = m.fragment ORDER BY e.n DESC LIMIT 1) END AS said,
@@ -196,6 +197,7 @@ struct Listed {
     face: Option<String>,
     archived: i64,
     dock: i64,
+    pinned: i64,
     listed: Option<String>,
     said: Option<String>,
     said_at: Option<i64>,
@@ -216,11 +218,19 @@ struct SetDock {
     dock: bool,
 }
 
+/// `PUT /pinned`: the router's, for the signer (`SetPinned`, named).
+#[derive(Deserialize)]
+struct SetPinned {
+    fragment: String,
+    pinned: bool,
+}
+
 /// The person's own flags on a row (`set_own`): its column's name.
 #[derive(Clone, Copy)]
 enum Own {
     Archived,
     Dock,
+    Pinned,
 }
 
 impl Own {
@@ -228,6 +238,7 @@ impl Own {
         match self {
             Own::Archived => "archived",
             Own::Dock => "dock",
+            Own::Pinned => "pinned",
         }
     }
 }
@@ -290,7 +301,7 @@ impl DurableObject for PrincipalCell {
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {
-        if let Some(refused) = crate::routed::refused(&req, crate::routed::Own::of(crate::config::Config::from_env(&self.env)), &self.raw)? {
+        if let Some(refused) = crate::routed::refused(&req, &crate::config::Config::from_env(&self.env).deploy_id)? {
             return Ok(refused);
         }
         if let Some(probed) = crate::routed::probed(&req, &self.schema)? {
@@ -408,6 +419,12 @@ impl PrincipalCell {
                 self.set_own(&s.fragment, Own::Dock, s.dock)?;
                 self.tell();
                 Ok(Response::from_json(&Docked { name: s.fragment, dock: s.dock })?)
+            }
+            (Method::Put, "/pinned") => {
+                let s: SetPinned = serde_json::from_slice(&req.bytes().await?).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+                self.set_own(&s.fragment, Own::Pinned, s.pinned)?;
+                self.tell();
+                Ok(Response::from_json(&Pinned { name: s.fragment, pinned: s.pinned })?)
             }
             (Method::Put, "/seen") => {
                 let s: MarkSeen = serde_json::from_slice(&req.bytes().await?).map_err(|e| CellError::invalid(format!("body: {e}")))?;
@@ -601,7 +618,7 @@ impl PrincipalCell {
         };
         let gone = c.role.is_none() || reborn;
         // the face is the change's, as every column but the person's own
-        // (archiving, the dock) is: a fragment sends its face on every row
+        // (archiving, the dock, pins) is: a fragment sends its face on every row
         // a role names once it has one (it is never taken back within a
         // life), so a change without one is a life that has none yet, never
         // the face of one before it; no change touches the person's own
@@ -611,7 +628,8 @@ impl PrincipalCell {
              ON CONFLICT (fragment) DO UPDATE SET role = excluded.role, incarnation = excluded.incarnation, version = excluded.version,
                sharing = excluded.sharing, face = excluded.face, searched = excluded.searched,
                archived = CASE WHEN ? THEN 0 ELSE memberships.archived END,
-               dock = CASE WHEN ? THEN 1 ELSE memberships.dock END",
+               dock = CASE WHEN ? THEN 1 ELSE memberships.dock END,
+               pinned = CASE WHEN ? THEN 0 ELSE memberships.pinned END",
             vec![
                 c.fragment.as_str().into(),
                 role,
@@ -620,6 +638,7 @@ impl PrincipalCell {
                 sharing,
                 face,
                 searched.clone(),
+                SqlStorageValue::Integer(i64::from(gone)),
                 SqlStorageValue::Integer(i64::from(gone)),
                 SqlStorageValue::Integer(i64::from(gone)),
             ],
@@ -649,7 +668,8 @@ impl PrincipalCell {
     }
 
     /// The person archives a fragment of theirs, or brings it back; takes
-    /// it off their dock, or puts it back: only a row that names a role
+    /// it off their dock, or puts it back; pins it, or unpins it: only a row
+    /// that names a role
     /// (404 for any other, as for a fragment they cannot see). The same
     /// again answers the same.
     fn set_own(&self, fragment: &str, own: Own, on: bool) -> CellResult<()> {
@@ -862,5 +882,5 @@ fn listed(r: Listed) -> CellResult<ListedFragment> {
         None => vec![],
     };
     assert!(listed.len() <= limits::LISTED_POSTERS_MAX, "a row carries what it took, a bounded number");
-    Ok(ListedFragment { name: r.name, role: r.role, kind, title, picture, agent_role, agents, preview, preview_at, unread, sharing, archived: r.archived != 0, dock: r.dock != 0, owned: false, listed })
+    Ok(ListedFragment { name: r.name, role: r.role, kind, title, picture, agent_role, agents, preview, preview_at, unread, sharing, archived: r.archived != 0, dock: r.dock != 0, pinned: r.pinned != 0, owned: false, listed })
 }

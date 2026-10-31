@@ -1,4 +1,4 @@
-// The Apps page (`/apps`; docs/api.md, The shell): every fragment in the
+// The Apps page (`/apps`): every fragment in the
 // person's list but their chats, agents and skills (apps, brains, a kind
 // this page does not know), each with what they may change of it here, as
 // the server says it is:

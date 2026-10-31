@@ -158,7 +158,7 @@ impl DurableObject for FragmentCell {
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {
-        if let Some(refused) = crate::routed::refused(&req, crate::routed::Own::of(self.cfg), &self.raw)? {
+        if let Some(refused) = crate::routed::refused(&req, &self.cfg.deploy_id)? {
             return Ok(refused);
         }
         if let Some(probed) = crate::routed::probed(&req, &self.schema)? {
@@ -345,8 +345,10 @@ pub(crate) enum MetaKey {
     /// The channels its people's search holds, as the rows last named
     /// them (search.rs `search_fence`): a JSON array of names.
     Searched,
-    /// Whether the search service holds this life's sources (searchable.rs):
-    /// written at its first upsert; a push's deletes are then forgotten.
+    /// Whether this life may have written its search index (searchable.rs):
+    /// set before its first upsert is sent. Unset, a search answers
+    /// `indexed: false` waking no index; set, a push's deletes are
+    /// forgotten, and the life's end ends its index.
     Search,
     /// Why live's code was not installed.
     CodeError,
@@ -383,6 +385,10 @@ pub(crate) enum MetaKey {
     /// (`<door> <agent fragment>`), set and cleared by its owner in person
     /// (doors.rs; fragment_core::door::Hosted).
     DoorActor,
+    /// The installed code's inbox secret (`<header> <SECRET>`): its inbox
+    /// takes a delivery only with that header holding that secret, and its
+    /// inbox token admits nothing (fragment_core::manifest::InboxDecl).
+    InboxSecret,
     /// The blessed connector template it was made from (`blessed::
     /// CONNECTORS`), while it runs no other code: no one but its owner edits
     /// it, and only then may it be a door (doors.rs).
@@ -404,6 +410,9 @@ pub(crate) enum MetaKey {
     /// Test fleets only: how many more card shots open a page nothing
     /// serves, so they fail (`fail-cards`).
     TestFailCards,
+    /// Test fleets only: how many more calls into its search index fail
+    /// before they are sent (`fail-search-index`): the index out of reach.
+    TestFailSearchIndex,
     /// Test fleets only: the connector policy its doors ask in place of the
     /// deployment's (`connectors`), so a run turns one off and on again.
     TestConnectors,
@@ -463,6 +472,7 @@ impl MetaKey {
             MetaKey::Door => "door",
             MetaKey::DoorTicket => "door_ticket",
             MetaKey::DoorActor => "door_actor",
+            MetaKey::InboxSecret => "inbox_secret",
             MetaKey::DoorTemplate => "door_template",
             MetaKey::PrewakeAt => "prewake_at",
             MetaKey::TestFailAfterPaid => "test_fail_after_paid",
@@ -472,6 +482,7 @@ impl MetaKey {
             MetaKey::StorageSampledAt => "storage_sampled_at",
             MetaKey::Cards => "cards",
             MetaKey::TestFailCards => "test_fail_cards",
+            MetaKey::TestFailSearchIndex => "test_fail_search_index",
             MetaKey::TestConnectors => "test_connectors",
             MetaKey::Icon => "icon",
             MetaKey::IconMakings => "icon_makings",
@@ -973,6 +984,12 @@ impl FragmentCell {
                 self.create(&caller, body).await
             }
             (Method::Delete, ["delete"]) => self.delete(&caller).await,
+            // a question the platform embedded once, for many fragments:
+            // the router maps no outside path here (searchable.rs)
+            (Method::Post, ["search", "asked"]) => {
+                let asked = body_json(&mut req).await?;
+                self.search_asked(&caller, asked).await
+            }
             (Method::Get, ["api", "status"]) => self.status(&caller),
             (Method::Get, ["api", "address"]) => self.address(&caller).await,
             (Method::Put, ["api", "address"]) => {
@@ -1124,13 +1141,20 @@ impl FragmentCell {
             (Method::Get, ["api", "subscriptions"]) => self.subscriptions(&caller),
             (Method::Delete, ["api", "subscriptions", id]) => self.unsubscribe(&caller, id),
             (Method::Post, ["api", "inbox"]) => {
-                let token = match req.headers().get("x-fragment-inbox-token")? {
-                    Some(t) => t,
-                    None => query("t").unwrap_or_default(),
+                // its code's inbox secret, else its inbox token
+                let given = match self.meta(MetaKey::InboxSecret)? {
+                    Some(declared) => {
+                        let (header, secret) = declared.split_once(' ').ok_or_else(|| CellError::host(format!("its inbox secret {declared:?} is not `<header> <SECRET>`")))?;
+                        crate::jobs::Admits::Secret { header: header.into(), name: secret.into(), given: req.headers().get(header)?.unwrap_or_default() }
+                    }
+                    None => crate::jobs::Admits::Token(match req.headers().get("x-fragment-inbox-token")? {
+                        Some(t) => t,
+                        None => query("t").unwrap_or_default(),
+                    }),
                 };
                 let hops = req.headers().get(crate::jobs::HOPS_HEADER)?.and_then(|h| h.parse().ok()).unwrap_or(0);
                 let body = req.bytes().await?;
-                self.inbox(&token, hops, &body).await
+                self.inbox(given, hops, &body).await
             }
             _ => Err(CellError::new(ErrorCode::NotFound, format!("no route {} {path}", req.method().as_ref()))),
         }

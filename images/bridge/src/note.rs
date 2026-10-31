@@ -1,4 +1,4 @@
-//! The note a turn carries after a cut one (docs/durable-computers.md, P5):
+//! The note a turn carries after a cut one (docs/computers.md, Durability, P5):
 //! the first turn an agent runs in a chat after one of its turns there was
 //! ended as lost (a restart cut it; P1, one life per turn, never runs it
 //! again) is told so, with what that turn was asked, the steps and replies
@@ -18,6 +18,10 @@
 //! which never ran. At the turn after, the turn before is this one, so the
 //! note is said once. A turn before it with no end in the journal (its end
 //! never landed) is told nothing: only a recorded loss is a cut.
+//!
+//! A call the cut turn asked for (`turn.call`, recorded before it ran) that
+//! no step of its response ended never reported back: it may or may not
+//! have run, and the note names it first among what to check.
 
 use serde_json::Value;
 
@@ -31,6 +35,13 @@ pub struct CutStep {
     pub tool: String,
     pub args: String,
     pub ok: bool,
+}
+
+/// A call a cut turn asked for and never heard the end of.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CutCall {
+    pub tool: String,
+    pub args: String,
 }
 
 /// A card a cut turn had shown, and how it closed (`None`: never closed).
@@ -53,6 +64,10 @@ pub struct Cut {
     /// Its steps in order, at most `NOTE_STEPS_MAX`, and how many it had.
     pub steps: Vec<CutStep>,
     pub steps_total: usize,
+    /// The calls it asked for with no step ending them, in order, at most
+    /// `NOTE_STEPS_MAX`, and how many it had.
+    pub unended: Vec<CutCall>,
+    pub unended_total: usize,
     /// Its cards in order, at most `NOTE_CARDS_MAX`.
     pub cards: Vec<CutCard>,
 }
@@ -130,6 +145,34 @@ fn cut(from: &[Record], agent: &str, turn: &str, start: &Value, started_at: i64)
         .map(|r| CutStep { tool: field(&r.body, "tool").to_string(), args: field(&r.body, "args").to_string(), ok: r.body["ok"] != false })
         .collect();
     let steps_total = steps.len();
+    // Each step ends a call it pairs with, among the calls of the response
+    // it ran in (Hermes runs a response's calls before it asks the model
+    // again; a step naming no response, an older image's, among all the
+    // turn's): by its id, else, for one its runtime renamed after saying it
+    // (Hermes de-duplicates a session's ids, `_d<n>`, splits composite ones
+    // and rewrites some providers'), by its tool and arguments. One step to
+    // one call, the first still open; a call no step pairs with is unended.
+    let calls: Vec<&Value> = from.iter().filter(mine).map(|r| &r.body).filter(|b| b["kind"] == "turn.call").collect();
+    let ends: Vec<&Value> = from.iter().filter(mine).map(|r| &r.body).filter(|b| b["kind"] == "turn.step").collect();
+    let mut open: Vec<bool> = vec![true; calls.len()];
+    let mut paired: Vec<bool> = vec![false; ends.len()];
+    let rules: [fn(&Value, &Value) -> bool; 2] = [|c, end| end["tool_call_id"].is_string() && c["tool_call_id"] == end["tool_call_id"], |c, end| c["tool"] == end["tool"] && c["args"] == end["args"]];
+    for pairs in rules {
+        for (e, end) in ends.iter().enumerate() {
+            let of_its_response = |c: &Value| end.get("response").is_none_or(|r| c["response"] == *r);
+            if let Some(i) = (0..calls.len()).find(|&i| !paired[e] && open[i] && of_its_response(calls[i]) && pairs(calls[i], end)) {
+                open[i] = false;
+                paired[e] = true;
+            }
+        }
+    }
+    let unended: Vec<CutCall> = calls
+        .iter()
+        .zip(&open)
+        .filter(|(_, open)| **open)
+        .map(|(c, _)| CutCall { tool: field(c, "tool").to_string(), args: field(c, "args").to_string() })
+        .collect();
+    let unended_total = unended.len();
     let closed = |prompt: &str| -> Option<String> {
         let c = from.iter().filter(mine).map(|r| &r.body).find(|b| b["kind"] == "turn.prompt.closed" && b["prompt"] == prompt)?;
         Some(match field(c, "outcome") {
@@ -144,7 +187,16 @@ fn cut(from: &[Record], agent: &str, turn: &str, start: &Value, started_at: i64)
         .take(limits::NOTE_CARDS_MAX)
         .map(|r| CutCard { text: field(&r.body, "text").to_string(), closed: closed(field(&r.body, "prompt")) })
         .collect();
-    Some(Cut { turn: turn.to_string(), cause, started_at, steps: steps.into_iter().take(limits::NOTE_STEPS_MAX).collect(), steps_total, cards })
+    Some(Cut {
+        turn: turn.to_string(),
+        cause,
+        started_at,
+        steps: steps.into_iter().take(limits::NOTE_STEPS_MAX).collect(),
+        steps_total,
+        unended: unended.into_iter().take(limits::NOTE_STEPS_MAX).collect(),
+        unended_total,
+        cards,
+    })
 }
 
 /// What a cause record asked: a message's text (or what it carried), or a
@@ -193,6 +245,7 @@ pub fn text(cut: &Cut, asked: Option<&str>, replies: &[String]) -> String {
     if let Some(a) = asked.filter(|a| !a.trim().is_empty()) {
         lines.push(format!("It was answering: {}", quoted(a, limits::NOTE_ASKED_MAX_CHARS)));
     }
+    lines.extend(unended(cut));
     lines.extend(steps(cut));
     for c in &cut.cards {
         let closed = c.closed.as_deref().unwrap_or("unanswered");
@@ -230,6 +283,7 @@ pub fn late(cut: &Cut, by: &str, asked: Option<&str>, replies: &[String]) -> Str
         }
         None => lines.push(format!("It was answering {by}; what they asked is not in this chat's record.")),
     }
+    lines.extend(unended(cut));
     lines.extend(steps(cut));
     lines.extend(replied(replies));
     let note = records::cut_bytes(&lines.join("\n"), limits::NOTE_MAX_BYTES);
@@ -256,6 +310,52 @@ fn steps(cut: &Cut) -> Option<String> {
         steps.push(format!("and {} more", cut.steps_total - cut.steps.len()));
     }
     Some(format!("Its steps, as recorded: {}", steps.join("; ")))
+}
+
+/// How long ago a turn's message was said, in plain words, when it is
+/// handed at least `MESSAGE_AGE_TOLD_MS` after it (an outage, a restart, a
+/// sleep, a backlog), so its agent can judge whether it is still wanted;
+/// `None` sooner, for a time unknown (`said_at` 0), or for a routine or a
+/// command (`exempt`: a routine's message says its hour). A continuation
+/// (`continues`) is told the age of what its cut turn was answering.
+pub fn age(said_at: i64, now: u64, exempt: bool, continues: bool) -> Option<String> {
+    let late = i64::try_from(now).ok()?.checked_sub(said_at)?;
+    if said_at <= 0 || exempt || late < i64::try_from(limits::MESSAGE_AGE_TOLD_MS).ok()? {
+        return None;
+    }
+    let minutes = late / 60_000;
+    let ago = match minutes {
+        ..120 => format!("{minutes} minutes"),
+        120..2880 => format!("{} hours", minutes / 60),
+        _ => format!("{} days", minutes / 1440),
+    };
+    let what = if continues { format!("What that turn was answering was sent about {ago} ago.") } else { format!("This message was sent about {ago} ago, and is only reaching you now.") };
+    let line = format!("{what} If it may no longer be wanted, check before acting on it.");
+    assert!(line.len() <= limits::AGE_NOTE_MAX_BYTES, "an age is one short line: {line}");
+    Some(line)
+}
+
+/// The calls a turn asked for and never heard the end of, on one line:
+/// each may or may not have run (the computer stopped while it ran, or
+/// before), at most `NOTE_STEPS_MAX`, the rest counted.
+fn unended(cut: &Cut) -> Option<String> {
+    if cut.unended.is_empty() {
+        return None;
+    }
+    let mut calls: Vec<String> = cut
+        .unended
+        .iter()
+        .map(|c| {
+            let args = c.args.split_whitespace().collect::<Vec<_>>().join(" ");
+            let args = if args.is_empty() { String::new() } else { format!(" {}", records::cut(&args, limits::NOTE_ARGS_MAX_CHARS)) };
+            let tool = if c.tool.trim().is_empty() { "a tool".to_string() } else { records::cut(&c.tool, limits::NOTE_TOOL_MAX_CHARS) };
+            format!("{tool}{args}")
+        })
+        .collect();
+    if cut.unended_total > cut.unended.len() {
+        calls.push(format!("and {} more", cut.unended_total - cut.unended.len()));
+    }
+    Some(format!("It had started these and never heard back, so each may or may not have run, perhaps partly; check before running any again: {}", calls.join("; ")))
 }
 
 /// A turn's last `NOTE_REPLIES_MAX` replies, a line each.
@@ -473,6 +573,109 @@ mod tests {
 
     fn step(tool: &str, args: &str, ok: bool) -> Step {
         Step { tool: tool.into(), args: args.into(), ok, excerpt: String::new(), category: crate::records::Category::Shell, evidence: None }
+    }
+
+    /// A step that ended the call `id` of `response` (`None`: an older
+    /// image's, naming none).
+    fn ended(response: Option<&str>, id: &str, tool: &str, args: &str) -> Step {
+        let evidence = crate::records::ToolEvidence { tool_call_id: id.into(), status: crate::records::ToolStatus::Completed, duration_ms: 5, response: response.map(Into::into) };
+        Step { evidence: Some(evidence), ..step(tool, args, true) }
+    }
+
+    fn call(response: &str, position: u32, id: &str, tool: &str, args: &str) -> crate::records::Call {
+        crate::records::Call { response: response.into(), position, tool_call_id: id.into(), tool: tool.into(), args: args.into(), category: crate::records::Category::Shell }
+    }
+
+    /// Goal (FIN-236): a message handed at least `MESSAGE_AGE_TOLD_MS` after
+    /// it was said is told its age in plain words; sooner, or a routine's or
+    /// a command's (`exempt`), or a time unknown (0, or one ahead of the
+    /// clock), none. A continuation is told what its cut turn answered.
+    #[test]
+    fn a_late_message_is_told_its_age() {
+        let (minute, now) = (60_000_i64, 100 * 86_400_000_u64);
+        let at = |late: i64| i64::try_from(now).expect("a time") - late;
+        let bound = i64::try_from(limits::MESSAGE_AGE_TOLD_MS).expect("a bound");
+        let told = |late: i64| age(at(late), now, false, false);
+        assert_eq!(told(1_000), None, "fresh");
+        assert_eq!(told(bound - 1), None, "under the bound");
+        let then = " If it may no longer be wanted, check before acting on it.";
+        for (late, ago) in [(bound, "5 minutes"), (119 * minute, "119 minutes"), (3 * 60 * minute + 59_000, "3 hours"), (47 * 60 * minute, "47 hours"), (3 * 1440 * minute, "3 days")] {
+            assert_eq!(told(late), Some(format!("This message was sent about {ago} ago, and is only reaching you now.{then}")), "{late} ms");
+        }
+        assert_eq!(age(at(2 * 60 * minute), now, false, true), Some(format!("What that turn was answering was sent about 2 hours ago.{then}")));
+        assert_eq!(age(at(3 * 60 * minute), now, true, false), None, "a routine's or a command's");
+        assert_eq!(age(0, now, false, false), None, "a time unknown");
+        assert_eq!(age(at(-minute), now, false, false), None, "a time ahead of the clock");
+    }
+
+    /// Goal (phase 4): a cut turn's note names, first, each call it asked
+    /// for (`turn.call`, recorded before it ran) with no step ending it:
+    /// each may or may not have run. A step ends a call of its own response
+    /// alone, by its id or (its runtime renamed it before it ran) its tool
+    /// and arguments: a provider's id reused by a later response
+    /// (`call_0`, every response), with another preview or the same, is
+    /// another call, which the earlier one's step never ends. Another
+    /// agent's call, or another turn's, is not this one's. Past
+    /// `NOTE_STEPS_MAX` they are counted. Replay: a call said again is one
+    /// record (`call_id`), and its reused id in a later response another.
+    #[test]
+    fn a_cut_turns_unended_calls_are_named_first() {
+        use crate::records::{call_id, turn_call};
+        let mut w = Work::default();
+        w.start(ME, "cut", 3);
+        // the first response: two calls, both ended (one renamed first)
+        w.post(ME, turn_call("cut", &call("r1", 0, "call_0", "terminal", "ls")));
+        w.post(ME, turn_call("cut", &call("r1", 1, "call_1", "write_file", "/tmp/a")));
+        w.post(ME, turn_step("cut", 1, &ended(Some("r1"), "call_0", "terminal", "ls")));
+        w.post(ME, turn_step("cut", 2, &ended(Some("r1"), "call_1_d2", "write_file", "/tmp/a")));
+        // the second reuses its ids, one with another preview, one the
+        // same, and a restart cuts it before either ends
+        w.post(ME, turn_call("cut", &call("r2", 0, "call_0", "terminal", "make deploy")));
+        w.post(ME, turn_call("cut", &call("r2", 1, "call_1", "terminal", "ls")));
+        w.post("npub1rowan", turn_call("cut", &call("r2", 2, "c9", "terminal", "not mine")));
+        w.post(ME, turn_call("other", &call("r2", 3, "c8", "terminal", "another turn's")));
+        w.end(ME, "cut", Outcome::Error(LOST.into()));
+        let next = w.start(ME, "next", 9);
+        let Before::Cut(c) = previous(w.before(next), ME, true) else { panic!("a cut turn") };
+        let named = |c: &Cut| c.unended.iter().map(|c| format!("{} {}", c.tool, c.args)).collect::<Vec<_>>();
+        assert_eq!(named(&c), ["terminal make deploy", "terminal ls"], "{c:?}");
+        let note = text(&c, Some("ship it"), &[]);
+        assert_eq!(
+            note,
+            "Your previous turn in this chat was cut short: your computer restarted before it finished. Check what it already did before you do any of it again; the message below is new.\n\
+             It was answering: “ship it”\n\
+             It had started these and never heard back, so each may or may not have run, perhaps partly; check before running any again: terminal make deploy; terminal ls\n\
+             Its steps, as recorded: terminal ls (ok); write_file /tmp/a (ok)"
+        );
+        assert_eq!(call_id("cut", "r2", 0), call_id("cut", "r2", 0), "said again, one record");
+        assert_ne!(call_id("cut", "r2", 0), call_id("cut", "r1", 0), "its id reused by a later response, another call");
+        assert_ne!(call_id("cut", "r2", 0), call_id("cut", "r2", 1));
+        assert_ne!(call_id("cut", "r2", 0), call_id("other", "r2", 0));
+
+        // a step of a response whose calls never landed ends none of
+        // another response's; an older image's step, naming none, pairs
+        // among all the turn's
+        let mut w = Work::default();
+        w.start(ME, "cut", 3);
+        w.post(ME, turn_call("cut", &call("r2", 0, "call_0", "terminal", "make deploy")));
+        w.post(ME, turn_step("cut", 1, &ended(Some("r1"), "call_0", "terminal", "make deploy")));
+        w.post(ME, turn_call("cut", &call("r3", 0, "call_7", "terminal", "make test")));
+        w.post(ME, turn_step("cut", 2, &ended(None, "call_7", "terminal", "make test")));
+        w.end(ME, "cut", Outcome::Error(LOST.into()));
+        let next = w.start(ME, "next", 9);
+        let Before::Cut(c) = previous(w.before(next), ME, true) else { panic!("a cut turn") };
+        assert_eq!(named(&c), ["terminal make deploy"], "{c:?}");
+
+        let mut w = Work::default();
+        w.start(ME, "many", 3);
+        for i in 0..limits::NOTE_STEPS_MAX + 3 {
+            w.post(ME, turn_call("many", &call("r1", i as u32, &format!("c{i}"), "terminal", &format!("step {i}"))));
+        }
+        w.end(ME, "many", Outcome::Error(LOST.into()));
+        let next = w.start(ME, "next", 9);
+        let Before::Cut(c) = previous(w.before(next), ME, true) else { panic!("a cut turn") };
+        assert_eq!((c.unended.len(), c.unended_total), (limits::NOTE_STEPS_MAX, limits::NOTE_STEPS_MAX + 3));
+        assert!(text(&c, None, &[]).contains("; and 3 more"));
     }
 
     /// Goal (P5): the turn after a cut one is told of it, with its steps and

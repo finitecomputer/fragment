@@ -8,18 +8,20 @@
 //! fragment-bridge version
 //! ```
 //!
-//! Its settings are environment variables (docs/bridge.md lists them);
+//! Its settings are environment variables (docs/bridge.md, "Settings");
 //! secrets are files named by path, never values.
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use fragment_bridge::driver::{self, Config};
 use fragment_bridge::engine::Settings;
 use fragment_bridge::runtime::relay::{Relay, RelayConfig};
 use fragment_bridge::runtime::script::{Script, ScriptConfig};
-use fragment_bridge::runtime::Runtime;
+use fragment_bridge::runtime::claude::{Claude, ClaudeConfig};
+use fragment_bridge::runtime::{Runtime, Runtimes};
 use fragment_bridge::{ev, limits, screen};
 
 fn env(name: &str) -> Option<String> {
@@ -40,6 +42,29 @@ fn parse_ms(name: &str, default: u64) -> u64 {
         Some(v) => v.parse().unwrap_or_else(|_| fail(&format!("{name} is not a number of ms"))),
         None => default,
     }
+}
+
+/// The runtimes the bridge runs: the default (`runtime()`), and Claude Code
+/// for agents whose `agent.json` names `claude`, only where the image sets
+/// `BRIDGE_CLAUDE_BIN` (docs/bridge.md, "The Claude runtime").
+fn runtimes() -> Runtimes {
+    let r = Runtimes::from(runtime());
+    let Some(bin) = env("BRIDGE_CLAUDE_BIN") else { return r };
+    let run_as = env("BRIDGE_CLAUDE_USER").map(|u| {
+        let (uid, gid) = u.split_once(':').unwrap_or_else(|| fail("BRIDGE_CLAUDE_USER is uid:gid"));
+        (uid.parse().unwrap_or_else(|_| fail("BRIDGE_CLAUDE_USER's uid is a number")), gid.parse().unwrap_or_else(|_| fail("BRIDGE_CLAUDE_USER's gid is a number")))
+    });
+    let config = ClaudeConfig {
+        bin: PathBuf::from(bin),
+        config_dir: PathBuf::from(env_or("BRIDGE_CLAUDE_CONFIG_DIR", "/data/claude")),
+        work_dir: PathBuf::from(env_or("BRIDGE_CLAUDE_WORK_DIR", "/data/work")),
+        state_dir: PathBuf::from(env_or("BRIDGE_CLAUDE_STATE_DIR", "/data/bridge/claude")),
+        model: env("BRIDGE_CLAUDE_MODEL"),
+        idle: Duration::from_millis(parse_ms("BRIDGE_CLAUDE_IDLE_MS", 300_000)),
+        drain: Duration::from_millis(fragment_bridge::runtime::claude::DRAIN_MS_DEFAULT),
+        run_as,
+    };
+    r.with("claude", Box::new(Claude { config }))
 }
 
 /// The runtime agents that name none run (`runtime::DEFAULT`): Hermes'
@@ -65,7 +90,9 @@ fn runtime() -> Box<dyn Runtime> {
                     Some(_) => fail("BRIDGE_MEDIA_LOCAL is `allow`, or unset"),
                 },
             };
-            Box::new(Relay { config })
+            // bound here, at the start: a port in use says so at once
+            let listener = std::net::TcpListener::bind(listen).unwrap_or_else(|e| fail(&format!("listen {listen}: {e}")));
+            Box::new(Relay { config, listener })
         }
         "script" => Box::new(Script { config: ScriptConfig { pace: Duration::from_millis(parse_ms("BRIDGE_SCRIPT_PACE_MS", 40)), scratch: PathBuf::from(env_or("BRIDGE_SCRIPT_SCRATCH", "/tmp/bridge-script")), data: PathBuf::from(env_or("BRIDGE_SCRIPT_DATA", "/data")) } }),
         other => fail(&format!("BRIDGE_RUNTIME {other:?} is neither relay nor script")),
@@ -90,7 +117,16 @@ fn screen_config() -> Option<screen::ScreenConfig> {
     }
     let screens_file = env("BRIDGE_SCREENS_FILE").map(PathBuf::from);
     let start = env("BRIDGE_SCREEN_START").map(|s| s.split_whitespace().map(str::to_string).collect());
-    Some(screen::ScreenConfig { listen, dir: PathBuf::from(env_or("BRIDGE_SCREEN_DIR", "/opt/fragment/screen")), screens_file, start })
+    // bound here, at the start; a port in use leaves the bridge without a
+    // screen, as a screen that fails does (driver.rs), not without agents
+    let listener = match std::net::TcpListener::bind(listen) {
+        Ok(l) => Arc::new(l),
+        Err(e) => {
+            ev!("screen.failed", { "error": format!("screen listen {listen}: {e}") });
+            return None;
+        }
+    };
+    Some(screen::ScreenConfig { listener, dir: PathBuf::from(env_or("BRIDGE_SCREEN_DIR", "/opt/fragment/screen")), screens_file, start })
 }
 
 /// `BRIDGE_SIMPLEX_BIN` and the rest: SimpleX, when the image names its
@@ -158,7 +194,7 @@ async fn main() {
                 simplex: simplex_config(),
             };
             ev!("bridge.boot", { "computer": env("FRAGMENT_COMPUTER"), "image": env("FRAGMENT_IMAGE"), "restorePending": cfg.restore_pending, "agentsFile": cfg.agents_file.as_ref().map(|p| p.display().to_string()), "simplex": cfg.simplex.is_some() });
-            let ran = driver::run(cfg, runtime().into(), stop).await;
+            let ran = driver::run(cfg, runtimes(), stop).await;
             // its SimpleX cores stopped and reaped first, within the shutdown's bound
             fragment_bridge::simplex::run::stop_cores(Duration::from_millis(limits::SHUTDOWN_MS_MAX / 2)).await;
             match ran {

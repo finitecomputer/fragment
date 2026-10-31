@@ -71,6 +71,7 @@ mod schedules;
 mod schema;
 mod search;
 mod searchable;
+mod search_index;
 mod runs_on;
 mod serve;
 mod share;
@@ -115,8 +116,8 @@ const PASSED_HEADERS: [&str; 9] =
 /// Durable Object accepts the upgrade the client asked for.
 const WEBSOCKET_HEADERS: [&str; 4] = ["sec-websocket-key", "sec-websocket-version", "sec-websocket-protocol", "sec-websocket-extensions"];
 
-/// `PUT /api/fragments/{name}/archived`'s body, `{archived}`, and
-/// `…/dock`'s, `{dock}`, are a few bytes.
+/// `PUT /api/fragments/{name}/archived`'s body, `{archived}`, `…/dock`'s,
+/// `{dock}`, and `…/pinned`'s, `{pinned}`, are a few bytes.
 const OWN_VIEW_BODY_MAX_BYTES: usize = 1024;
 /// `PUT /api/fragments/{name}/seen` takes no body: what is read of one, to
 /// refuse it.
@@ -224,7 +225,7 @@ pub(crate) fn authenticate(req: &Request, url: &Url, payload: Payload<'_>) -> Ce
 /// the body, and the answer are one definition both ends compile against).
 /// Its refusals pass through; not reaching it, a failure inside it, or an
 /// answer that does not decode is `registry_unavailable`: nothing signed
-/// is decided without it (docs/finite-integration.md, rule 7). A registry
+/// is decided without it (docs/cloudflare-v1.md, R15, rule 7). A registry
 /// of another release refuses the call before it reads it, and is asked
 /// again a few times, then is `deploying` (routed.rs, `send_again`): a
 /// deploy going out never has one release act and the other read its
@@ -634,7 +635,7 @@ async fn reachable(env: &Env, agent: &Signed, asker: &str) -> CellResult<Fragmen
             // archiving and their dock) stays theirs, as do the listed
             // records their role reads: the agent's capped role may read less
             let owned = f.role == Role::Owner;
-            access::listed_role(Some(f.role), cap).map(|role| ListedFragment { role, sharing: None, preview: None, preview_at: None, unread: 0, archived: false, dock: true, owned, listed: vec![], ..f })
+            access::listed_role(Some(f.role), cap).map(|role| ListedFragment { role, sharing: None, preview: None, preview_at: None, unread: 0, archived: false, dock: true, pinned: false, owned, listed: vec![], ..f })
         })
         .collect();
     Ok(FragmentList { fragments })
@@ -863,14 +864,21 @@ fn check_name(name: &str) -> CellResult<()> {
     }
 }
 
+/// Headers an inbox delivery passes on at most, besides the inbox's token
+/// and hop count (`manifest::inbox_header_ok`): read in name order, so
+/// high enough that Cloudflare's own (`cf-…`, a few dozen at most) never
+/// crowd out a webhook's `x-…`; their bytes are Cloudflare's to bound.
+const INBOX_HEADERS_MAX: usize = 100;
+
 /// A request for a fragment's supervisor: what the router decided, and
 /// where it goes inside.
 struct Forward {
     routed: Routed,
     /// The inner path; the query string travels only in `routed.url`.
     inner: String,
-    /// Headers this route passes on purpose (the inbox's token and hop count).
-    extra: Vec<(&'static str, String)>,
+    /// Headers this route passes on purpose (the inbox's token, hop count,
+    /// and the headers an inbox may read its secret from).
+    extra: Vec<(String, String)>,
 }
 
 /// A blob upload declares its length, at most `limits::BLOB_MAX_BYTES`:
@@ -1046,7 +1054,7 @@ async fn site(mut req: Request, env: &Env, cfg: &Config, url: &Url, name: &str, 
         Some(_) => req.inner().body().map(worker::wasm_bindgen::JsValue::from),
         None => bytes_body(body),
     };
-    let extra = identity.map(|id| vec![(address::IDENTITY_HEADER, id.to_string())]).unwrap_or_default();
+    let extra = identity.map(|id| vec![(address::IDENTITY_HEADER.to_string(), id.to_string())]).unwrap_or_default();
     let mut resp = forward(env, &req, body, Forward { routed, inner: format!("/serve/{rest}"), extra }).await?;
     // the fragment's own refusal, never its app's answer
     if resp.headers().has(serve::REFUSAL)? {
@@ -1272,6 +1280,19 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
             let put = Request::new_with_init("https://principal.internal/dock", &init)?;
             crate::routed::send(env, "PRINCIPAL", &who.identity.id, put).await
         }
+        // whether the signer pinned a fragment of theirs (principal.rs):
+        // their own view again, as archiving is
+        (Method::Put, ["api", "fragments", name, "pinned"]) => {
+            let body = read_body(&mut req, OWN_VIEW_BODY_MAX_BYTES).await?;
+            let set: fragment_proto::SetPinned = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+            let who = signer(env, &req, &url, &body).await?;
+            let name = named_fragment(name)?;
+            let inner = json!({ "fragment": name, "pinned": set.pinned }).to_string();
+            let mut init = RequestInit::new();
+            init.with_method(Method::Put).with_body(Some(inner.into()));
+            let put = Request::new_with_init("https://principal.internal/pinned", &init)?;
+            crate::routed::send(env, "PRINCIPAL", &who.identity.id, put).await
+        }
         // the signer has seen a chat's messages (principal.rs): their own
         // view again, so their row counts none of them unread
         (Method::Put, ["api", "fragments", name, "seen"]) => {
@@ -1395,8 +1416,13 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
                 "/api/inbox" => {
                     for k in ["x-fragment-inbox-token", jobs::HOPS_HEADER] {
                         if let Some(v) = req.headers().get(k)? {
-                            extra.push((k, v));
+                            extra.push((k.to_string(), v));
                         }
+                    }
+                    // a webhook's own secret header, whichever its code names
+                    // (`inbox`): none the platform's objects trust
+                    for (k, v) in req.headers().entries().filter(|(k, _)| fragment_core::manifest::inbox_header_ok(k)).take(INBOX_HEADERS_MAX) {
+                        extra.push((k, v));
                     }
                     None
                 }

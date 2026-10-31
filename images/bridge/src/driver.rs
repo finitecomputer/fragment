@@ -1117,6 +1117,16 @@ enum Job {
     Draft { agent: String, turn: String, text: Option<String> },
 }
 
+impl Job {
+    /// The turn a job is of (a post's, by its body: a reply's, a step's).
+    fn turn(&self) -> Option<&str> {
+        match self {
+            Job::Post { body, .. } => body["turn"].as_str(),
+            Job::Claim { turn, .. } | Job::Fence { turn, .. } | Job::Owed { turn, .. } | Job::Draft { turn, .. } => Some(turn),
+        }
+    }
+}
+
 struct Lane {
     queue: Mutex<VecDeque<Job>>,
     ready: Notify,
@@ -1219,14 +1229,28 @@ async fn work(api: Api, fragment: String, lane: Arc<Lane>, claims: Claims, mut s
         match job {
             Job::Draft { agent, turn, text } => {
                 if text.is_some() {
-                    let wait = drafted.get(&turn).map(|t| Duration::from_millis(limits::DRAFT_INTERVAL_MS).saturating_sub(t.elapsed())).unwrap_or_default();
-                    if !wait.is_zero() {
-                        tokio::time::sleep(wait).await;
-                        // A newer draft may have come meanwhile.
-                        let newer = lane.queue.lock().expect("lane").iter().any(|j| matches!(j, Job::Draft { turn: t, .. } if *t == turn));
-                        if newer {
-                            continue;
+                    // Within its interval it waits, unless its turn has more
+                    // behind it (a newer draft, or its reply or its end):
+                    // then it is moot, and waiting would hold that behind it
+                    // (a reply waited up to the interval so, and an ask's
+                    // answer, in its asker's lane, overtook it).
+                    let until = drafted.get(&turn).map(|t| *t + Duration::from_millis(limits::DRAFT_INTERVAL_MS));
+                    let mut moot = false;
+                    // bounded: each pass ends at the interval's end, or as a
+                    // job comes (a lane holds at most LANE_MAX)
+                    while let Some(left) = until.map(|u| u.saturating_duration_since(Instant::now())).filter(|l| !l.is_zero()) {
+                        if lane.queue.lock().expect("lane").iter().any(|j| j.turn() == Some(turn.as_str())) {
+                            moot = true;
+                            break;
                         }
+                        tokio::select! {
+                            _ = tokio::time::sleep(left) => {}
+                            _ = lane.ready.notified() => {}
+                        }
+                    }
+                    // the interval out, a newer draft of its turn still goes first
+                    if moot || (until.is_some() && lane.queue.lock().expect("lane").iter().any(|j| matches!(j, Job::Draft { turn: t, .. } if *t == turn))) {
+                        continue;
                     }
                     drafted.insert(turn.clone(), Instant::now());
                 } else {
@@ -1241,7 +1265,7 @@ async fn work(api: Api, fragment: String, lane: Arc<Lane>, claims: Claims, mut s
             Job::Post { agent, channel, id, body, files, relay } => {
                 // what goes back over SimpleX goes only once it is on the chat
                 let sent = post(&api, &fragment, &agent, channel, &id, body, &files, None, limits::POST_TRIES_MAX, stop.clone()).await;
-                if let (Some(text), Sent::Posted, Some(sx)) = (relay, sent, claims.simplex.as_ref()) {
+                if let (Some(text), true, Some(sx)) = (relay, sent.on_chat(), claims.simplex.as_ref()) {
                     sx.reply(&agent, &text, &files).await;
                 }
             }
@@ -1252,8 +1276,9 @@ async fn work(api: Api, fragment: String, lane: Arc<Lane>, claims: Claims, mut s
                 // given up: it is its question's only delivery, so it is
                 // tried until the platform answers it.
                 let tries = if channel == records::TASKS { u32::MAX } else { limits::POST_TRIES_MAX };
-                if post(&api, &fragment, &agent, channel, &id, body, &[], None, tries, stop.clone()).await.ended() {
-                    let _ = claims.inbox.send(Msg::Input(Input::Posted { turn, id })).await;
+                let sent = post(&api, &fragment, &agent, channel, &id, body, &[], None, tries, stop.clone()).await;
+                if sent.ended() {
+                    let _ = claims.inbox.send(Msg::Input(Input::Posted { turn, id, kept: sent == Sent::Posted })).await;
                 }
             }
             Job::Claim { agent, turn, id, body } => {
@@ -1327,7 +1352,10 @@ async fn claim(api: &Api, fragment: &str, agent: &str, id: &str, body: &Value, c
 /// post in), or not ended, the bridge stopping first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Sent {
+    /// Appended, or a replay of this body: the platform holds it as ours.
     Posted,
+    /// Another life's under the same id (409): on the chat, not this life's.
+    Taken,
     Refused,
     Stopped,
 }
@@ -1336,6 +1364,11 @@ impl Sent {
     /// Done with, either way: what a turn's owed records wait for.
     pub(crate) fn ended(self) -> bool {
         self != Sent::Stopped
+    }
+
+    /// The id is on the chat, this life's body or another's.
+    pub(crate) fn on_chat(self) -> bool {
+        matches!(self, Sent::Posted | Sent::Taken)
     }
 }
 
@@ -1377,7 +1410,7 @@ pub(crate) async fn post(api: &Api, fragment: &str, agent: &str, channel: &str, 
                 // turn that life ended, or the records of one it claimed
                 // (one life per turn). Never retried.
                 crate::ev!("post.taken", { "fragment": fragment, "channel": channel, "id": id });
-                return Sent::Posted;
+                return Sent::Taken;
             }
             Err(e) => {
                 // Out of tries, or a 403/404: it is no longer the agent's to
@@ -1466,11 +1499,12 @@ impl RuntimeLane {
                     };
                     let (files, note, quote) = tokio::join!(download(&api, &ts.agent.fragment, &ts.fragment, &ts.attachments, &media_dir), note, quote);
                     ts.files = files;
-                    // a late card answer's turn's own note first (engine.rs `hand`)
-                    let notes: Vec<String> = [ts.note.take(), note].into_iter().flatten().collect();
+                    // its age first (a late message's), then a late card
+                    // answer's turn's own note (engine.rs `hand`)
+                    let notes: Vec<String> = [ts.age.take(), ts.note.take(), note].into_iter().flatten().collect();
                     ts.note = (!notes.is_empty()).then(|| notes.join("\n\n"));
                     // (its own, a card's turn, in the cut note's place: `note_for`)
-                    assert!(ts.note.as_ref().is_none_or(|n| n.len() <= limits::HISTORY_NOTE_MAX_BYTES + 2 * limits::NOTE_MAX_BYTES + 4), "a turn's notes are bounded");
+                    assert!(ts.note.as_ref().is_none_or(|n| n.len() <= limits::AGE_NOTE_MAX_BYTES + limits::HISTORY_NOTE_MAX_BYTES + 2 * limits::NOTE_MAX_BYTES + 6), "a turn's notes are bounded");
                     ts.quote = quote;
                 }
                 if to_runtime.send(c).await.is_err() {
@@ -1707,13 +1741,29 @@ async fn cut_note(api: &Api, ts: &TurnStart) -> Option<String> {
     let claim = ts.claim_seq?;
     let (agent, chat, me) = (ts.agent.fragment.as_str(), ts.fragment.as_str(), ts.agent.identity.as_str());
     let unread = |e: Unavailable| crate::ev!("note.unread", { "turn": ts.turn, "error": e.why() });
-    let (work, from_start) = read_back(api, agent, chat, records::WORK, claim, |rs| note::previous(rs, me, false) != note::Before::Unread, &mut Budget::default()).await.map_err(unread).ok()?;
-    let cut = match note::previous(&work, me, from_start) {
-        note::Before::Cut(c) => c,
-        note::Before::Kept => return None,
-        note::Before::Unread => {
-            crate::ev!("note.unread", { "turn": ts.turn, "why": "the agent's turn before is further back than a note reads", "read": work.len() });
-            return None;
+    // a cut turn's continuation is told of that turn, whatever ran between
+    // (engine.rs, `continue_turn`); any other turn, of the agent's turn
+    // before it when that one was cut
+    let cut = match ts.continues.as_deref() {
+        Some(continues) => {
+            let started = |rs: &[Record]| rs.iter().any(|r| r.principal == me && r.body["kind"] == "turn.start" && r.body["turn"] == continues);
+            let (work, _) = read_back(api, agent, chat, records::WORK, claim, started, &mut Budget::default()).await.map_err(unread).ok()?;
+            let Some(c) = note::turn(&work, me, continues) else {
+                crate::ev!("note.unread", { "turn": ts.turn, "why": "the cut turn it continues is further back than a note reads", "read": work.len() });
+                return None;
+            };
+            c
+        }
+        None => {
+            let (work, from_start) = read_back(api, agent, chat, records::WORK, claim, |rs| note::previous(rs, me, false) != note::Before::Unread, &mut Budget::default()).await.map_err(unread).ok()?;
+            match note::previous(&work, me, from_start) {
+                note::Before::Cut(c) => c,
+                note::Before::Kept => return None,
+                note::Before::Unread => {
+                    crate::ev!("note.unread", { "turn": ts.turn, "why": "the agent's turn before is further back than a note reads", "read": work.len() });
+                    return None;
+                }
+            }
         }
     };
     // the cut turn's replies, from the chat's tail back to its cause (or,
@@ -1884,10 +1934,11 @@ mod tests {
     /// Goal (Alex's review of #548): a post says how it ended, so what goes
     /// back over SimpleX, and an inbound file's deletion, wait for one on
     /// the chat: a refusal (403, 404) is no post; another life's under the
-    /// same id (409) is.
+    /// same id (409) is, as another life's (a cut turn's continuation
+    /// waits for its lost end to be this life's own).
     #[tokio::test]
     async fn a_post_says_how_it_ended() {
-        for (status, want) in [(200u16, Sent::Posted), (409, Sent::Posted), (403, Sent::Refused), (404, Sent::Refused)] {
+        for (status, want) in [(200u16, Sent::Posted), (409, Sent::Taken), (403, Sent::Refused), (404, Sent::Refused)] {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("a port");
             let addr = listener.local_addr().expect("its address");
             let (_stop_tx, stop) = watch::channel(false);
@@ -1900,6 +1951,7 @@ mod tests {
             let sent = post(&api, "chat--a1b2", "juniper--k3x9", records::CHAT, "sx:1", json!({ "text": "hi" }), &[], None, limits::POST_TRIES_MAX, stop).await;
             assert_eq!(sent, want, "{status}");
             assert!(sent.ended());
+            assert_eq!(sent.on_chat(), status == 200 || status == 409, "on the chat, ours or another life's: {status}");
         }
     }
 

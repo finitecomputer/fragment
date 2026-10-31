@@ -226,6 +226,7 @@ pub fn shell_platform(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("a template that is none is refused, naming the blessed ones", r.status == 400 && r.text.contains("agent"), &r);
     search_and_archive(s, api, &session)?;
     dock_choice(s, api, &session)?;
+    pin_choice(s, api, &session)?;
     search_follows_reading(s, api)?;
     unread_and_seen(s, api, &session)?;
     list_watch(s, api, &session, &id)
@@ -772,6 +773,81 @@ fn dock_choice(s: &mut Suite, api: &Api, session: &str) -> Result<()> {
     Ok(())
 }
 
+/// A pin, the person's own choice (Paul, 2026-10-31; docs/api.md, `PUT
+/// /api/fragments/{name}/pinned`): nothing is pinned until they pin it, for
+/// themselves alone (a member's list keeps its own), twice the same as once,
+/// and only one of theirs; archiving and the dock are choices of their own;
+/// it goes when they leave (back in, it is not pinned). Valid, invalid and
+/// replay here; a restart keeps it (the restart section).
+fn pin_choice(s: &mut Suite, api: &Api, session: &str) -> Result<()> {
+    let r = shell(api, session, "POST", "/api/fragments", Some(&json!({ "label": "pinned-talk", "template": "chat" })), &[])?;
+    let chat = r.body["name"].as_str().unwrap_or("").to_string();
+    anyhow::ensure!(r.status == 200 && label_of(&chat) == "pinned-talk", "making the chat: {r}");
+    let member = api.person()?;
+    let member_id = api.identity(&member)?;
+    let r = api.share(&chat, &member_id, "viewer")?;
+    anyhow::ensure!(r.status == 200, "adding the member: {r}");
+    let row = |r: &Reply| r.body["fragments"].as_array().and_then(|l| l.iter().find(|f| f["name"] == chat.as_str()).cloned());
+    // not pinned, a row leaves `pinned` out; pinned, it says `true`
+    let loose = |r: &Reply| row(r).is_some_and(|f| f.get("pinned").is_none());
+    let held = |r: &Reply| row(r).is_some_and(|f| f["pinned"] == true);
+    let mine = || shell(api, session, "GET", "/api/fragments", None, &[]);
+    let theirs = || api.signed(&member, "GET", "/api/fragments", None);
+    let pin = |name: &str, body: Value| shell(api, session, "PUT", &format!("/api/fragments/{name}/pinned"), Some(&body), &[]);
+    let listed = s.eventually(SEARCH_WAIT, || theirs().is_ok_and(|r| row(&r).is_some()));
+    let (m, t) = (mine()?, theirs()?);
+    s.ok("a new chat is pinned in no one's list: its owner's and a member's rows leave `pinned` out", listed && loose(&m) && loose(&t), json!([row(&m), row(&t)]));
+
+    let r = pin(&chat, json!({ "pinned": true }))?;
+    s.ok("the person pins a chat of theirs", r.status == 200 && r.body == json!({ "name": chat, "pinned": true }), &r);
+    let again = pin(&chat, json!({ "pinned": true }))?;
+    s.ok("pinning it again is the same", again.status == 200 && again.body == r.body, &again);
+    let (m, t) = (mine()?, theirs()?);
+    s.ok("their list says it is pinned, not archived and on their dock; a member's has it not pinned", held(&m) && row(&m).is_some_and(|f| f.get("archived").is_none() && f.get("dock").is_none()) && loose(&t), json!([row(&m), row(&t)]));
+    let r = api.signed(&member, "PUT", &format!("/api/fragments/{chat}/pinned"), Some(&json!({ "pinned": true })))?;
+    let back = pin(&chat, json!({ "pinned": false }))?;
+    let (m, t) = (mine()?, theirs()?);
+    s.ok(
+        "the member, a viewer, pins it for themselves (with their key); the person unpins it, and each list keeps its own",
+        r.status == 200 && back.status == 200 && back.body == json!({ "name": chat, "pinned": false }) && loose(&m) && held(&t),
+        json!([row(&m), row(&t)]),
+    );
+    // archiving is a choice of its own: neither changes the other
+    let archive = |on: bool| shell(api, session, "PUT", &format!("/api/fragments/{chat}/archived"), Some(&json!({ "archived": on })), &[]);
+    let (p, a, u) = (pin(&chat, json!({ "pinned": true }))?, archive(true)?, archive(false)?);
+    let m = mine()?;
+    s.ok("pinned, archived, then unarchived, it is pinned still", p.status == 200 && a.status == 200 && u.status == 200 && held(&m), json!(row(&m)));
+
+    let other = api.person()?;
+    let theirs_only = s.named(api, &other, "not-pinned")?;
+    let r = api.create(&other, &theirs_only)?;
+    anyhow::ensure!(r.status == 200, "someone else's app: {r}");
+    let r = pin(&theirs_only, json!({ "pinned": true }))?;
+    s.ok("a fragment they are not in is none of theirs to pin (404)", r.status == 404, &r);
+    let r = pin("nothing-here--k3x9", json!({ "pinned": true }))?;
+    s.ok("nor one that does not exist (404)", r.status == 404, &r);
+    let r = pin("pinned-talk", json!({ "pinned": true }))?;
+    s.ok("a bare label names nothing here (404): a fragment is named in full", r.status == 404 && r.message().contains("in full"), &r);
+    let r = pin("Not A Name", json!({ "pinned": true }))?;
+    s.ok("a name that is none is refused (400)", r.status == 400, &r);
+    let (r, r2) = (pin(&chat, json!({}))?, pin(&chat, json!({ "pinned": "yes" }))?);
+    s.ok("a body without `pinned`, or not a boolean, is refused (400)", r.status == 400 && r2.status == 400, format!("{r} {r2}"));
+    let r = api.unsigned("PUT", &format!("/api/fragments/{chat}/pinned"), Some(&json!({ "pinned": false })))?;
+    let m = mine()?;
+    s.ok("no one pins anyone's chats (401), and theirs is as it was", r.status == 401 && held(&m), &r);
+
+    // removed, their pin goes with their row; back in, it is not pinned
+    let r = shell(api, session, "DELETE", &format!("/api/f/{chat}/members/{member_id}"), None, &[])?;
+    let gone = s.eventually(SEARCH_WAIT, || theirs().is_ok_and(|r| r.status == 200 && row(&r).is_none()));
+    let r2 = api.signed(&member, "PUT", &format!("/api/fragments/{chat}/pinned"), Some(&json!({ "pinned": true })))?;
+    s.ok("a removed member's list has it no more, nor may they pin it (404)", r.status == 200 && gone && r2.status == 404, &r2);
+    let r = api.share(&chat, &member_id, "viewer")?;
+    let back = s.eventually(SEARCH_WAIT, || theirs().is_ok_and(|r| row(&r).is_some()));
+    let t = theirs()?;
+    s.ok("back in, it is not pinned for them", r.status == 200 && back && loose(&t), json!(row(&t)));
+    Ok(())
+}
+
 /// Search follows who may read (#156, problem 5): a deploy that makes a
 /// channel the editors' takes its messages from every list (only channels
 /// every member reads are searched), and a member who joins after never
@@ -1099,11 +1175,11 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("reloaded mid-run, the shell goes on from what was made (the same chat, no other), and Send turns on once the platform has the agent in it", resumed && sendable && joined.len() == 1, json!({ "agents": joined }));
     let ready = s.eventually(agent_wait, || b.eval_in_frame(&page, &host, "!document.querySelector('.setup-card') && document.getElementById('note').textContent === ''").ok() == Some(Value::Bool(true)));
     s.ok("once the agent follows its chat, the card goes", ready, "");
-    let row = b.eval(&page, "document.querySelector('#new-chat-agent .name')?.textContent ?? null")?;
+    let row = b.eval(&page, "document.querySelector('#chats .agent-hero .title')?.textContent ?? null")?;
     let list = shell(api, &session, "GET", "/api/fragments", None, &[])?;
     let owned = |kind: &str| list.body["fragments"].as_array().into_iter().flatten().filter(|f| f["kind"] == kind && f["role"] == "owner").count();
     s.ok(
-        "the sidebar's New chat names their one agent, and the run made one agent and one chat, though it was tried twice and reloaded",
+        "the sidebar's hero names their one agent, and the run made one agent and one chat, though it was tried twice and reloaded",
         row.as_str().is_some_and(|t| !t.is_empty()) && owned("agent") == 1 && owned("chat") == 1,
         json!({ "agent": row, "agents": owned("agent"), "chats": owned("chat") }),
     );
@@ -1183,7 +1259,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     // another agent of theirs, made elsewhere (the CLI, or an agent): a row
     // of its own under their main agent, and its chat a chat like any other
     let first_title = row.as_str().unwrap_or("").to_string();
-    let one = b.eval(&page, CHIP)?;
+    let one = b.eval(&page, HEROES)?;
     let (reader, reader_chat, reader_id) = extra_agent(api, &session, "reader", "Reader", "keep my reading list")?;
     agents_ui(s, api, &mut b, &page, &session, &first_title, &one, &chat, &reader, &reader_chat, &shots)?;
     let (hello, seen) = said_hello(s, api, &session, &reader_chat, &reader_id, agent_wait);
@@ -1194,12 +1270,12 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     // hello shown once it is open: no frame of it before)
     let first_title = row.as_str().unwrap_or("").to_string();
     let me = Person { session: &session, first: &first_label, first_title: &first_title };
-    b.click(&page, &format!("#chats [data-key={}]", js(&format!("chat:{reader_chat}"))))?;
+    click_chat(&mut b, &page, &reader_chat)?;
     b.until(&page, "document.getElementById('chat-title').textContent === 'Reader'", wait);
     let _ = s.eventually(wait, || b.eval_in_frame(&page, &reader_chat, "!!document.querySelector('.msg.agent:not(.streaming)')").ok() == Some(Value::Bool(true)));
     unread_ui(s, api, &mut b, &page, &me, &reader_chat, &shots)?;
     new_chat_ui(s, api, &mut b, &page, &me, &reader_chat, &shots)?;
-    launch_late_ui(s, api, &mut b, &page, &me, &reader_chat)?;
+    launch_late_ui(s, api, &mut b, &page, &me, &reader_chat, &shots)?;
     launch_straight_ui(s, api, &mut b, &page, &me, &reader_chat)?;
     launch_geometry_ui(s, &mut b, &page, &shots)?;
 
@@ -1248,6 +1324,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     b.eval(&page, &format!("({icon}?.dispatchEvent(new PointerEvent('pointerleave')), true)"))?;
     let _ = b.screenshot(&page, &shots.join("desktop-app.png"));
     icon_ui(s, &mut b, &page, &groceries, &shots)?;
+    deploying_uploads_ui(s, &mut b, &page, &groceries, &shots)?;
     compose_elsewhere_ui(s, api, &mut b, &page, &session, &asked_in, &groceries)?;
     open_beside_ui(s, api, &mut b, &page, &me, &groceries, &shots)?;
     app_policy_ui(s, api, &mut b, &page, &groceries)?;
@@ -1762,8 +1839,9 @@ fn release_steps(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session
     };
     // a person's press on a row or a button, as a script's click (its
     // handler, wherever a pointer would be): whether it was there
+    // pressed as the person would: a chat past its section's five after its More
     let press = |b: &mut Browser, selector: &str| -> Result<bool> {
-        Ok(b.eval(page, &format!("(() => {{ const e = document.querySelector({}); e?.click(); return !!e; }})()", js(selector)))? == true)
+        Ok(b.eval(page, &format!("(() => {{ const e = document.querySelector({s}) ?? ({UNFOLD}, document.querySelector({s})); e?.click(); return !!e; }})()", s = js(selector)))? == true)
     };
     // a negative check's look: past the shell's own wait after a press (0.4 s)
     let quiet = std::time::Duration::from_secs(3);
@@ -1772,7 +1850,8 @@ fn release_steps(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session
     let meta = |id: &str| format!("document.querySelector('meta[name=fragment-release]')?.content === {}", js(id));
     let shown = |name: &str| format!("[...document.querySelectorAll('#frames iframe')].find((f) => !f.hidden)?.dataset.fragment === {}", js(name));
     let window = format!("!!document.querySelector({})", js(&format!("#stack .pane[data-key=\"app:{app}\"] iframe")));
-    let row = |name: &str| format!("#chats [data-key={}]", js(&format!("chat:{name}")));
+    // a chat's row's button (the row opens by it)
+    let row = |name: &str| format!("#chats [data-key={}] .chat-open", js(&format!("chat:{name}")));
     let composer = |b: &mut Browser| b.eval_in_frame(page, chat, "({ text: document.getElementById('text')?.value ?? null, files: document.querySelectorAll('#attachments .attachment-chip').length })").unwrap_or(Value::Null);
     let ready = |s: &Suite, b: &mut Browser| s.eventually(wait, || b.eval_in_frame(page, chat, COMPOSER_READY).ok() == Some(Value::Bool(true)));
     let me_id = super::signin::who(api, session)?["id"].as_str().unwrap_or("").to_string();
@@ -2207,6 +2286,9 @@ fn faces_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person,
     anyhow::ensure!(!agent.is_empty() && !id.is_empty(), "the first agent: {r}");
     let face = js(&format!("[data-agent-face={}]", js(&agent)));
     let own_row = js(&format!("#chats [data-key={}] .label", js(&format!("chat:{chat}"))));
+    // its hero in the sidebar (its section's head)
+    let hero = format!("#chats [data-key={}]", js(&format!("agent:{agent}")));
+    let hero_title = js(&format!("{hero} .title"));
     // its job as the shell's first job wrote it until 2026-10-16, naming it
     // (Skyler's XP, once Bliss): each rename by its owner (Settings' here,
     // the CLI's below) says its new name there too (Paul, 2026-10-27)
@@ -2231,7 +2313,7 @@ fn faces_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person,
     let renamed = b.until(
         page,
         &format!(
-            "document.querySelector('#new-chat-agent .name')?.textContent === 'Frank' && document.querySelector({face})?.textContent === 'Frank' && document.querySelector({own_row})?.textContent === {first_chat} && document.querySelector({screen})?.textContent === \"Open Frank's screen\"",
+            "document.querySelector({hero_title})?.textContent === 'Frank' && document.querySelector({face})?.textContent === 'Frank' && document.querySelector({own_row})?.textContent === {first_chat} && document.querySelector({screen})?.textContent === \"Open Frank's screen\"",
             first_chat = js(FIRST_CHAT)
         ),
         wait,
@@ -2240,7 +2322,7 @@ fn faces_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person,
     s.ok(
         "Settings' Agents renames the person's agent: its name shows in the sidebar, its settings row and its screen's button, with no reload, and its first chat's row keeps the chat's own title; its job says the new name where it said the old",
         asked && renamed && rewritten == job_of("Frank"),
-        b.eval(page, &format!("({{ chip: document.querySelector('#new-chat-agent .name')?.textContent, row: document.querySelector({face})?.textContent, chat: document.querySelector({own_row})?.textContent, screen: document.querySelector({screen})?.textContent }})"))?,
+        b.eval(page, &format!("({{ hero: document.querySelector({hero_title})?.textContent, row: document.querySelector({face})?.textContent, chat: document.querySelector({own_row})?.textContent, screen: document.querySelector({screen})?.textContent }})"))?,
     );
     // a picture, from a file
     let orange = super::faces::orange();
@@ -2249,7 +2331,7 @@ fn faces_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person,
     b.choose_files(page, &format!("[data-picture-for={}]", js(&agent)), &[&file])?;
     let path = super::faces::picture_path(&id, &orange);
     let loaded = |sel: &str| format!("(() => {{ const i = document.querySelector({}); return !!i && i.getAttribute('src') === {} && i.complete && i.naturalWidth === 16; }})()", js(sel), js(&path));
-    let pictured = b.until(page, &format!("{} && {}", loaded("#new-chat-agent img"), loaded(&format!("[data-agent-face={}] img", js(&agent)))), wait);
+    let pictured = b.until(page, &format!("{} && {}", loaded(&format!("{hero} img")), loaded(&format!("[data-agent-face={}] img", js(&agent)))), wait);
     let offers = b.eval(page, &format!("({{ label: document.querySelector('[data-picture-label={a}]')?.textContent, remove: !document.querySelector('[data-picture-remove={a}]')?.hidden }})", a = js(&agent)))?;
     s.ok(
         "and gives it a picture from a file: the sidebar and its row show it in its image's place, loaded, and the row offers Change and Remove",
@@ -2294,7 +2376,7 @@ fn faces_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person,
     // deploy): the sidebar and the chat's page follow; the chat's own title
     // is the chat's, and stays
     let wrote = rename_by_cli(s, api, &cli, &agent, "Frankie") && job_now() == job_of("Frankie");
-    let followed = b.until(page, "document.querySelector('#new-chat-agent .name')?.textContent === 'Frankie'", wait);
+    let followed = b.until(page, &format!("document.querySelector({hero_title})?.textContent === 'Frankie'"), wait);
     let in_frame = s.eventually(wait, || b.eval_in_frame(page, chat, "document.getElementById('head-label')?.textContent === 'Frankie'").ok() == Some(Value::Bool(true)));
     let kept = b.eval(page, &format!("({{ row: document.querySelector({own_row})?.textContent ?? null, header: document.getElementById('chat-title').textContent }})"))?;
     let listed = own_row_of(api, me.session, chat);
@@ -2453,7 +2535,7 @@ fn faces_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person,
     let remove = js(&format!("[data-picture-remove={}]", js(&agent)));
     b.until(page, &format!("!!document.querySelector({remove}) && !document.querySelector({remove}).hidden"), wait);
     b.eval(page, &format!("(document.querySelector({remove}).click(), true)"))?;
-    let gone = b.until(page, &format!("!document.querySelector('#new-chat-agent img') && !document.querySelector('[data-agent-face={a}] img') && document.querySelector('[data-picture-label={a}]')?.textContent === 'Add a picture'", a = js(&agent)), wait);
+    let gone = b.until(page, &format!("!document.querySelector({h}) && !document.querySelector('[data-agent-face={a}] img') && document.querySelector('[data-picture-label={a}]')?.textContent === 'Add a picture'", h = js(&format!("{hero} img")), a = js(&agent)), wait);
     let none = super::faces::fetched(api, &format!("/api/identities/{id}/picture"))?;
     s.ok("Remove takes its picture away: no picture in the sidebar or its row, which offers Add again, and none at its address", gone && none.status == 404, none.status);
     // its colour, by its identity (the agent template's agent-color.js, which
@@ -2461,7 +2543,7 @@ fn faces_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person,
     // sidebar and on its chat's page; agent.json names none
     let tint = "(e) => e?.style.getPropertyValue('--agent-color') ?? null";
     let want = b.eval(page, &format!("import('/__shell/agent-color.js').then((m) => m.colorOf({}))", js(&id)))?;
-    let sidebar = b.eval(page, &format!("({tint})(document.querySelector('#new-chat-agent .agent-avatar'))"))?;
+    let sidebar = b.eval(page, &format!("({tint})(document.querySelector({}))", js(&format!("{hero} .agent-avatar"))))?;
     open_row(b, page, chat, wait)?;
     let in_chat = s.eventually(wait, || b.eval_in_frame(page, chat, &format!("({tint})(document.querySelector('#head-marks .agent-avatar'))")).ok() == Some(want.clone()));
     b.click(page, "#chat-options")?;
@@ -2651,11 +2733,26 @@ const OLD_NAME_SWEEP: &str = r#"(old) => {
 
 /// Opens `chat` from its row in the sidebar, as a person picks it (a
 /// reload, or /, opens the newest chat: maybe another).
+/// Every section's More pressed (Paul, 2026-10-31: a section shows its
+/// first five chats): its chats past them shown, as the person would.
+const UNFOLD: &str = "[...document.querySelectorAll('#chats .more-row[aria-expanded=\"false\"]')].forEach((m) => m.click())";
+
+/// A chat's row clicked, its section unfolded first when it is past the
+/// five it shows.
+fn click_chat(b: &mut Browser, page: &Page, chat: &str) -> Result<()> {
+    let row = format!("#chats [data-key={}]", js(&format!("chat:{chat}")));
+    if b.eval(page, &format!("!document.querySelector({})", js(&row)))? == true {
+        b.eval(page, &format!("({UNFOLD}, true)"))?;
+        b.until(page, &format!("!!document.querySelector({})", js(&row)), std::time::Duration::from_secs(5));
+    }
+    b.click(page, &row)
+}
+
 fn open_row(b: &mut Browser, page: &Page, chat: &str, wait: std::time::Duration) -> Result<()> {
     let row = format!("document.querySelector({})", js(&format!("#chats [data-key={}]", js(&format!("chat:{chat}")))));
     let open = format!("location.pathname === '/' && [...document.querySelectorAll('#frames iframe')].find((f) => !f.hidden)?.dataset.fragment === {}", js(chat));
     if b.eval(page, &format!("!!({open})"))? != true {
-        b.eval(page, &format!("({row}?.click(), true)"))?;
+        b.eval(page, &format!("(!{row} && {UNFOLD}, {row}?.querySelector('.chat-open')?.click(), true)"))?;
     }
     anyhow::ensure!(b.until(page, &open, wait), "{chat} opened from its row");
     Ok(())
@@ -3077,12 +3174,11 @@ fn open_failing(b: &mut Browser, api: &Api, path: &str, before: &str) -> Result<
     Ok(page)
 }
 
-/// What the shell offers of their agent: its New chat's label (none while
-/// it is hidden), then, with a chat open, what its ⋯ offers (opened and
-/// closed again).
+/// What the shell offers of their agent: what its hero's menu offers (none
+/// without a hero), then, with a chat open, what its ⋯ offers (each opened
+/// and closed again).
 fn agent_menu(b: &mut Browser, page: &Page) -> Result<Vec<String>> {
-    let start = b.eval(page, "(() => { const s = document.getElementById('sidebar-start-chat'); return s.hidden ? null : s.getAttribute('aria-label'); })()")?;
-    let mut offered: Vec<String> = start.as_str().map(str::to_string).into_iter().collect();
+    let mut offered = if b.eval(page, "!!document.querySelector('#chats .agent-hero')")? == true { hero_menu(b, page, "#chats .agent-hero")? } else { vec![] };
     if b.eval(page, "!document.getElementById('chat-options').hidden")? == true {
         b.click(page, "#chat-options")?;
         b.until(page, "!document.getElementById('menu').hidden", std::time::Duration::from_secs(5));
@@ -3093,9 +3189,9 @@ fn agent_menu(b: &mut Browser, page: &Page) -> Result<Vec<String>> {
 }
 
 /// Whether the shell knows the agent (its identity, from the computer's
-/// view): a new chat with it, and, with its chat open, its screen there.
+/// view): its hero's menu offers a new chat with it, and its screen.
 fn knows_agent(menu: &[String]) -> bool {
-    menu.first().is_some_and(|m| m.starts_with("New chat with ")) && (menu.len() == 1 || menu.iter().any(|m| m.ends_with("screen")))
+    menu.iter().any(|m| m == "New chat") && menu.iter().any(|m| m.ends_with("screen"))
 }
 
 /// A read of the computer that fails, the shell open (#437: a blip or a
@@ -3115,7 +3211,7 @@ fn refresh_failed_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, ses
     let menu = agent_menu(b, page)?;
     let _ = b.screenshot(page, &shots.join("computer-refresh-failed.png"));
     s.ok(
-        "a read of the computer that fails is not \"no computer\": the update it told stays, with \"Couldn't refresh your computer\" and Try again, and New chat still names their agent and its chat's ⋯ its screen",
+        "a read of the computer that fails is not \"no computer\": the update it told stays, with \"Couldn't refresh your computer\" and Try again, and their agent's hero still offers a new chat with it and its screen",
         r.status == 200 && failed && knows_agent(&menu),
         json!({ "said": said, "menu": menu, "reads": b.eval(page, "window.__computerReads")? }),
     );
@@ -3255,6 +3351,60 @@ addEventListener('DOMContentLoaded', () => {
 });
 "#;
 
+/// A deploy going out as a person uploads (#769): an app's icon, chosen in
+/// its sheet, and their own picture, in Settings. Each upload is answered
+/// with the deploy's refusal (`hold`'s `deploying`, the router's 503), and
+/// each says Updating where its failure is said, naming no release (the
+/// launcher's file: `launch_late_ui`).
+fn deploying_uploads_ui(s: &mut Suite, b: &mut Browser, page: &Page, app: &str, shots: &std::path::Path) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    let photo = shots.join("icon-photo.jpg");
+    std::fs::write(&photo, super::icons::photo())?;
+    let no_release = "!document.body.innerText.includes('reached release')";
+
+    // the app's icon, from its window's More, Icon…
+    let item = "[...document.querySelectorAll('#menu [role=menuitem]')].find((b) => b.textContent === 'Icon…')";
+    b.eval(page, "([...document.querySelectorAll('#stack .pane button[aria-label=More]')].pop()?.click(), true)")?;
+    let offered = b.until(page, &format!("!!{item}"), wait);
+    b.eval(page, &format!("({item}?.click(), true)"))?;
+    let sheet = offered && b.until(page, "!!document.querySelector('dialog.icon-sheet[open]')", wait);
+    b.eval(page, &hold("PUT", &format!("/api/f/{app}/icon$"), Hold::Request))?;
+    b.choose_files(page, "dialog.icon-sheet input[type=file]", &[&photo])?;
+    let held = b.until(page, "!!window.__held.release", wait);
+    b.eval(page, "(window.__held.release('deploying'), true)")?;
+    let said = format!("The icon was not uploaded: {UPDATING}");
+    let told = b.until(page, &format!("(__icons.state().said ?? '') === {} && {no_release}", js(&said)), wait);
+    let _ = b.screenshot(page, &shots.join("icon-upload-deploying.png"));
+    s.ok(
+        "an app's icon uploaded as a deploy goes out: its sheet says it was not uploaded, Updating, naming no release",
+        sheet && held && told,
+        b.eval(page, "__icons.state().said")?,
+    );
+    b.eval(page, "(window.__held.restore(), __icons.sheet()?.querySelector('.icon-done')?.click(), true)")?;
+    b.until(page, "!document.querySelector('dialog.icon-sheet')", wait);
+
+    // their own picture, in Settings
+    let input = "#settings-page label.picture input[type=file]";
+    b.eval(page, "(document.getElementById('settings').click(), true)")?;
+    let open = b.until(page, &format!("location.pathname === '/settings' && !!document.querySelector({})", js(input)), wait);
+    b.eval(page, &hold("PUT", "/api/identities/me/picture$", Hold::Request))?;
+    b.choose_files(page, input, &[&photo])?;
+    let held = b.until(page, "!!window.__held.release", wait);
+    b.eval(page, "(window.__held.release('deploying'), true)")?;
+    let line = "document.querySelector('#settings-page label.picture span')";
+    let told = b.until(page, &format!("{line}?.textContent === {} && {no_release}", js(UPDATING)), wait);
+    b.eval(page, &format!("({line}?.scrollIntoView({{ block: 'center' }}), true)"))?;
+    let _ = b.screenshot(page, &shots.join("picture-upload-deploying.png"));
+    s.ok(
+        "their own picture uploaded as a deploy goes out: Settings says Updating where the picture is, naming no release",
+        open && held && told,
+        b.eval(page, &format!("{line}?.textContent ?? null"))?,
+    );
+    b.eval(page, "(window.__held.restore(), history.back(), true)")?;
+    b.until(page, "location.pathname !== '/settings'", wait);
+    Ok(())
+}
+
 /// The shell's chat column with a chat open, and the band's line.
 const CHAT_AND_LINE: &str = "!document.getElementById('layout').hidden && !!document.querySelector('#frames iframe:not([hidden])') && ";
 
@@ -3287,7 +3437,7 @@ fn refresh_failed_start_ui(s: &mut Suite, api: &Api, b: &mut Browser, shots: &st
     std::thread::sleep(settle);
     let made = b.eval(&page, MADE)?;
     s.ok(
-        "Try again reads it: the line goes, New chat names their agent and its chat's ⋯ its screen, and still nothing is made",
+        "Try again reads it: the line goes, their agent's hero offers a new chat with it and its screen, and still nothing is made",
         read && knows_agent(&menu) && made["makingSaid"] == false && made["makes"] == 0,
         json!({ "menu": menu, "made": made }),
     );
@@ -3439,6 +3589,54 @@ fn first_run_put_off_ui(s: &mut Suite, api: &Api, b: &mut Browser, shots: &std::
     Ok(())
 }
 
+/// The page's reads of the computer list (`GET /api/computers`), each
+/// answered by the platform at once and held at the page until let go,
+/// oldest first (`window.__computers.release()`).
+const COMPUTERS_HELD: &str = "(() => { const real = window.fetch.bind(window); \
+    const held = window.__computers = { waiting: [], given: 0, release: () => { held.waiting.shift()?.(); return true; }, \
+      restore: () => { window.fetch = real; held.waiting.splice(0).forEach((go) => go()); return true; } }; \
+    window.fetch = async (url, o) => { const r = await real(url, o); \
+      if (new URL(String(url), location.href).pathname === '/api/computers' && (o?.method ?? 'GET') === 'GET') { \
+        await new Promise((go) => held.waiting.push(go)); held.given++; } \
+      return r; }; return true; })()";
+
+/// A list read asked before a press and answered after it never shows the
+/// computer as it was (CI, 2026-10-31: a read asked as the second press
+/// went out came back after its answer, so settings drew the provider
+/// still taken away, for good). A change to their list (the chat archived)
+/// has the page read the list and the computer; that read is answered and
+/// held; the agent's chip pressed (taken away), its answer shown; the
+/// held read let go; settings opened again draw what the press made.
+#[allow(clippy::too_many_arguments)]
+fn stale_read_after_a_press_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &str, chat: &str, lead: &str, row: &str) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    let chip = format!("document.querySelector('{row} [data-agent={lead:?}]')");
+    b.eval(page, COMPUTERS_HELD)?;
+    shell(api, session, "PUT", &format!("/api/fragments/{chat}/archived"), Some(&json!({ "archived": true })), &[])?;
+    let asked = b.until(page, "window.__computers.waiting.length >= 1", wait);
+    b.eval(page, &format!("({chip}.click(), true)"))?;
+    let narrowed = b.until(page, &format!("{chip}?.getAttribute('aria-pressed') === 'false'"), wait);
+    b.eval(page, "window.__computers.release()")?;
+    let given = b.until(page, "window.__computers.given >= 1", wait);
+    // settings drawn again from what the page holds now
+    b.eval(page, "(document.getElementById('apps-link').click(), true)")?;
+    let left = b.until(page, "location.pathname === '/apps'", wait);
+    b.eval(page, "(document.getElementById('settings').click(), true)")?;
+    let drawn = b.until(page, &format!("location.pathname === '/settings' && !!{chip}"), wait);
+    let shown = b.eval(page, &format!("{chip}?.getAttribute('aria-pressed') ?? null"))?;
+    b.eval(page, "window.__computers.restore()")?;
+    s.ok(
+        "a list read asked before a press and answered after it never shows the computer as it was: settings drawn again show the press",
+        asked && narrowed && given && left && drawn && shown == "false",
+        json!({ "asked": asked, "narrowed": narrowed, "given": given, "drawn": drawn, "shown": shown }),
+    );
+    // as it was: the chat back, the agent let use it again
+    shell(api, session, "PUT", &format!("/api/fragments/{chat}/archived"), Some(&json!({ "archived": false })), &[])?;
+    b.eval(page, &format!("({chip}.click(), true)"))?;
+    b.until(page, &format!("{chip}?.getAttribute('aria-pressed') === 'true'"), wait);
+    Ok(())
+}
+
 /// The Connections page in settings (decisions 22, 37 and 44): every
 /// provider the deployment offers, one row each, with its kind, the
 /// person's state there, which agents may use it (and a press that narrows
@@ -3534,6 +3732,7 @@ fn connections_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sessio
     let view = shell(api, session, "GET", &format!("/api/computers/{id}"), None, &[])?;
     let back = view.body["agents"].as_array().and_then(|l| l.iter().find(|a| a["fragment"] == lead.as_str())).is_some_and(|a| a["connections"].is_null());
     s.ok("pressed again, it may use every provider again (null)", again && back, &view);
+    stale_read_after_a_press_ui(s, api, b, page, session, chat, &lead, &row("perplexity"))?;
     // Disconnect: this row names no revocation endpoint, so settings says
     // where the person removes the access at the provider
     let google = row(crate::SWAP_CONNECTION);
@@ -3873,7 +4072,8 @@ pub(super) enum Hold {
 /// The shell's next `method` call whose path matches `re` (a regular
 /// expression's source) held at `at` until `window.__held.release()`;
 /// let go with `release('refuse')`, it is answered as a failing network's
-/// is (a 503 with a message), never sent if it was held before it was.
+/// is (a 503 with a message), and with `release('deploying')` as a deploy
+/// going out answers (`DEPLOYING`), never sent if it was held before it was.
 /// Every call counted while it is under way (`inflight`), and when the
 /// last one ended (`quiet`), so a check can wait for what the held call let
 /// go to finish (`HELD_SETTLED`); `restore()` puts the page's fetch back.
@@ -3882,15 +4082,23 @@ pub(super) fn hold(method: &str, re: &str, at: Hold) -> String {
         "(() => {{ const real = window.fetch; const re = new RegExp({}); const before = {}; let holding = true; \
          const held = window.__held = {{ release: null, inflight: 0, quiet: performance.now(), restore: () => {{ window.fetch = real; }} }}; \
          const wait = () => new Promise((go) => {{ held.release = go; }}); \
-         const refused = () => new Response(JSON.stringify({{ error: 'unavailable', message: 'refused for the test' }}), {{ status: 503, headers: {{ 'content-type': 'application/json' }} }}); \
+         const refused = (how) => new Response(how === 'deploying' ? {} : JSON.stringify({{ error: 'unavailable', message: 'refused for the test' }}), {{ status: 503, headers: {{ 'content-type': 'application/json' }} }}); \
+         const refusing = (how) => how === 'refuse' || how === 'deploying'; \
          window.fetch = async (url, o) => {{ const hold = holding && o?.method === {} && re.test(String(url)); if (hold) holding = false; held.inflight++; \
-         try {{ if (hold && before && (await wait()) === 'refuse') return refused(); const r = await real(url, o); if (hold && !before && (await wait()) === 'refuse') return refused(); return r; }} \
+         try {{ let how; if (hold && before && refusing(how = await wait())) return refused(how); const r = await real(url, o); if (hold && !before && refusing(how = await wait())) return refused(how); return r; }} \
          finally {{ held.inflight--; held.quiet = performance.now(); }} }}; return true; }})()",
         js(re),
         at == Hold::Request,
+        js(DEPLOYING),
         js(method)
     )
 }
+
+/// A deploy going out's answer (503 `deploying`), as the router gives it,
+/// naming the two releases a page shows no one (docs/api.md).
+const DEPLOYING: &str = r#"{"error":"deploying","message":"a deploy is going out; try again in a few seconds (a call from release dev reached release another-release-a-test-hook)"}"#;
+/// What the shell says of a deploy going out, wherever it says it.
+const UPDATING: &str = "Updating — back in a moment";
 
 /// Once a held call (`hold`) is let go: none of the page's calls under
 /// way, and none for half a second.
@@ -5087,10 +5295,10 @@ fn groups_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person
     let both = js(&format!("Reader, {}", me.first_title));
     let listed = b.until(
         page,
-        &format!("document.querySelector({})?.textContent === {both} && document.querySelector({})?.textContent === {both} && document.querySelectorAll({}).length === 2", js(&format!("{row} .label")), js(&format!("{row} .chat-agent")), js(&format!("{row} .chat-face .avatar-stack .agent-avatar"))),
+        &format!("document.querySelector({})?.textContent === {both} && ({HEROES}).find((h) => h.name === 'Reader')?.chats.includes({})", js(&format!("{row} .label")), js(&group)),
         wait,
     );
-    s.ok("a group chat made elsewhere lists among their chats, by its title, its row naming both its agents (the lead first) with their faces stacked", listed, b.eval(page, "document.getElementById('chats').innerText")?);
+    s.ok("a group chat made elsewhere lists by its title in its lead's section (the Reader's, the first added)", listed, b.eval(page, "document.getElementById('chats').innerText")?);
     let r = shell(api, me.session, "GET", &format!("/api/f/{group}/members"), None, &[])?;
     let members: Vec<&str> = r.body["members"].as_array().into_iter().flatten().filter(|m| m["kind"] == "agent").filter_map(|m| m["principal"].as_str()).collect();
     s.ok("its members are the two agents, the lead added first", members == [lead.as_str(), other.as_str()], &r);
@@ -5178,7 +5386,7 @@ fn groups_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person
     s.ok("Unarchive, from its ⋯, brings it back", unarchived && back, "");
 
     // the phone's picture below is of the Reader's chat
-    b.click(page, &format!("#chats [data-key={}]", js(&format!("chat:{}", own_named(api, me.session, "reader-chat")?))))?;
+    click_chat(b, page, &own_named(api, me.session, "reader-chat")?)?;
     Ok(())
 }
 
@@ -5203,7 +5411,7 @@ fn say_in(s: &Suite, b: &mut Browser, page: &Page, host: &str, text: &str) -> bo
     s.eventually(std::time::Duration::from_secs(30), || b.eval_in_frame(page, host, &typed).ok() == Some(Value::Bool(true)))
 }
 
-/// Unread (docs/api.md, The shell): a chat not open counts on its row what
+/// Unread (docs/api.md, Control API): a chat not open counts on its row what
 /// came since its person saw it, as their list does; opening it marks it
 /// seen, here and in their list; and the open chat counts nothing as its
 /// messages come. The first agent's chat, while the Reader's is open.
@@ -5229,7 +5437,7 @@ fn unread_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person
         json!({ "before": before, "now": unread_of(api, me.session, &first), "badge": b.eval(page, &format!("{row}?.querySelector('.unread')?.textContent ?? null"))? }),
     );
     // opened: seen, here and in their list
-    b.click(page, &format!("#chats [data-key={}]", js(&format!("chat:{first}"))))?;
+    click_chat(b, page, &first)?;
     let gone = b.until(page, &format!("{row} && !{row}.querySelector('.unread')"), wait);
     let cleared = s.eventually(wait, || unread_of(api, me.session, &first) == 0);
     s.ok("opening it marks it seen: its badge goes, and their list counts nothing on it", gone && cleared, json!({ "unread": unread_of(api, me.session, &first) }));
@@ -5240,12 +5448,12 @@ fn unread_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person
     let shown = s.eventually(wait, || b.eval_in_frame(page, &first, "document.body.innerText").ok().and_then(|v| v.as_str().map(|t| t.matches(more).count() >= 2)).unwrap_or(false));
     let none = s.eventually(wait, || unread_of(api, me.session, &first) == 0) && b.eval(page, &format!("!{row}.querySelector('.unread')"))? == true;
     s.ok("the chat open, on screen, counts nothing as its messages come (marked seen again)", sent && answered && shown && none, json!({ "unread": unread_of(api, me.session, &first) }));
-    b.click(page, &format!("#chats [data-key={}]", js(&format!("chat:{reader_chat}"))))?;
+    click_chat(b, page, reader_chat)?;
     b.until(page, &format!("document.getElementById('chat-title').textContent === 'Reader' && {}", js(reader_chat) + " === [...document.querySelectorAll('#frames iframe')].find((f) => !f.hidden)?.dataset.fragment"), wait);
     Ok(())
 }
 
-/// A new chat (docs/api.md, The shell, the launcher): from the Reader's
+/// A new chat: from the Reader's
 /// chat, the launcher's Enter makes a chat with the person's one agent
 /// (not the open chat's), labelled beside its own (`<first>-chat-2`), the
 /// words posted whole as its first message: one record though the first
@@ -5318,57 +5526,56 @@ fn new_chat_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Pers
         answered && titled && manifest.body["meta"]["title"] == title.as_str() && first_row == format!("chat:{fresh}").as_str(),
         json!({ "title": manifest.body["meta"]["title"], "want": title, "first": first_row }),
     );
-    // New chat with the open chat's agent (here their main agent's): an
-    // empty chat with it; asked again before anything is said, that one
-    let line = "(() => { const r = document.getElementById('sidebar-start-chat'); return r.hidden ? null : r.getAttribute('aria-label'); })()";
-    let named_main = b.eval(page, line)? == json!(format!("New chat with {}", me.first_title));
-    b.click(page, "#sidebar-start-chat")?;
+    // their main agent's hero's New chat (Paul, 2026-10-31: a hero's menu
+    // starts a chat with its agent): an empty chat with it; asked again
+    // before anything is said there, that one
+    let main_hero = format!("#chats [data-key={}]", js(&format!("agent:{}", own_named(api, me.session, me.first)?)));
+    let reader_hero = format!("#chats [data-key={}]", js(&format!("agent:{}", own_named(api, me.session, "reader")?)));
+    let new_chat = |b: &mut Browser, hero: &str| -> Result<bool> {
+        b.click(page, hero)?;
+        let open = b.until(page, "!document.getElementById('menu').hidden && document.getElementById('menu').classList.contains('agent-menu')", wait);
+        Ok(open && b.eval(page, "(() => { const i = [...document.querySelectorAll('#menu button')].find((b) => b.textContent === 'New chat'); i?.click(); return !!i; })()")? == true)
+    };
+    let started = new_chat(b, &main_hero)?;
     let blank = b.until(page, "document.getElementById('chat-title').textContent === 'New chat'", wait);
     let third = own_named(api, me.session, &format!("{own_chat}-3"))?;
     let empty = s.eventually(wait, || b.eval_in_frame(page, &third, "!!document.querySelector('#messages .empty h2') && !document.querySelector('#messages .msg')").ok() == Some(Value::Bool(true)));
     let _ = b.screenshot(page, &shots.join("desktop-new-chat.png"));
-    b.click(page, "#sidebar-start-chat")?;
+    let again_started = new_chat(b, &main_hero)?;
     let again = b.until(page, &format!("document.getElementById('chat-title').textContent === 'New chat' && [...document.querySelectorAll('#frames iframe')].find((f) => !f.hidden)?.dataset.fragment === {}", js(&third)), wait);
     let made = chats_with(&own_chat);
     s.ok(
-        "New chat names the open chat's agent (their main agent's here), and opens an empty chat with it; asked again before anything is said there, it opens that one, not another",
-        named_main && blank && empty && again && open_chat(b, page) == third && made.len() == before.len() + 2,
+        "their main agent's hero starts an empty chat with it; asked again before anything is said there, it opens that one, not another",
+        started && blank && empty && again_started && again && open_chat(b, page) == third && made.len() == before.len() + 2,
         json!({ "chats": made }),
     );
-    // from the Reader's chat it names the Reader, and its chip lists their
-    // agents (the one it names marked), each its face, name and role: their
-    // main agent picked, the empty chat with it opens again, not another
-    b.click(page, &format!("#chats [data-key={}]", js(&format!("chat:{reader_chat}"))))?;
+    // from the Reader's chat, their main agent's New chat opens that empty
+    // chat again, not another
+    click_chat(b, page, reader_chat)?;
     b.until(page, "document.getElementById('chat-title').textContent === 'Reader'", wait);
-    let named_reader = b.until(page, &format!("{line} === 'New chat with Reader' && document.querySelector('#new-chat-agent .name')?.textContent === 'Reader'"), wait);
-    b.click(page, "#new-chat-agent .agent-pick")?;
-    b.until(page, "!document.getElementById('menu').hidden", wait);
-    let listed = b.eval(page, "[...document.querySelectorAll('#menu button')].map((b) => [b.querySelector('.name')?.textContent ?? null, !!b.querySelector('.agent-avatar'), b.getAttribute('aria-current') === 'true'])")?;
     for scheme in ["light", "dark"] {
         b.color_scheme(page, scheme)?;
-        let _ = b.screenshot(page, &shots.join(format!("desktop-new-chat-pick-{scheme}.png")));
+        let _ = b.screenshot(page, &shots.join(format!("desktop-sections-{scheme}.png")));
     }
     b.color_scheme(page, "light")?;
-    let picked = b.eval(page, &format!("(() => {{ const i = [...document.querySelectorAll('#menu button')].find((b) => b.querySelector('.name')?.textContent === {}); i?.click(); return !!i; }})()", js(me.first_title)))? == true;
-    let row_opened = b.until(page, "document.getElementById('chat-title').textContent === 'New chat'", wait);
+    let picked = new_chat(b, &main_hero)?;
+    let row_opened = b.until(page, &format!("document.getElementById('chat-title').textContent === 'New chat' && [...document.querySelectorAll('#frames iframe')].find((f) => !f.hidden)?.dataset.fragment === {}", js(&third)), wait);
     let made = chats_with(&own_chat);
     s.ok(
-        "from the Reader's chat, New chat names the Reader; its chip lists their agents with their faces, the Reader marked, and their main agent picked opens that empty chat again, not another",
-        named_reader && listed == json!([[me.first_title, true, false], ["Reader", true, true]]) && picked && row_opened && open_chat(b, page) == third && made.len() == before.len() + 2,
-        json!({ "listed": listed, "chats": made }),
+        "from the Reader's chat, their main agent's New chat opens its empty chat again, not another",
+        picked && row_opened && open_chat(b, page) == third && made.len() == before.len() + 2,
+        json!({ "chats": made }),
     );
-    // from that empty chat of their main agent's, the Reader picked: a chat
-    // with the Reader, never that one (a blank chat is its own agent's)
-    b.click(page, "#new-chat-agent .agent-pick")?;
-    b.until(page, "!document.getElementById('menu').hidden", wait);
-    let picked = b.eval(page, "(() => { const i = [...document.querySelectorAll('#menu button')].find((b) => b.querySelector('.name')?.textContent === 'Reader'); i?.click(); return !!i; })()")? == true;
+    // from that empty chat of their main agent's, the Reader's New chat: a
+    // chat with the Reader, never that one (a blank chat is its own agent's)
+    let picked = new_chat(b, &reader_hero)?;
     let moved = b.until(page, &format!("document.getElementById('chat-title').textContent === 'New chat' && [...document.querySelectorAll('#frames iframe')].find((f) => !f.hidden)?.dataset.fragment !== {}", js(&third)), wait);
     let readers = open_chat(b, page);
     let members = shell(api, me.session, "GET", &format!("/api/f/{readers}/members"), None, &[])?;
     let agents: Vec<Value> = members.body["members"].as_array().into_iter().flatten().filter(|m| m["kind"] == "agent").map(|m| m["principal"].clone()).collect();
     let reader_id = agent_ids(api, me.session, &["reader"])?.remove(0);
     s.ok(
-        "from their main agent's empty chat, the Reader picked makes a new chat with the Reader alone, never that one",
+        "from their main agent's empty chat, the Reader's New chat makes a new chat with the Reader alone, never that one",
         picked && moved && readers != third && agents == vec![json!(reader_id)],
         json!({ "opened": readers, "agents": agents }),
     );
@@ -5376,7 +5583,7 @@ fn new_chat_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Pers
     anyhow::ensure!(r.status == 200, "the Reader's new chat archived: {r}");
     let own = own_named(api, me.session, &own_chat)?;
     s.ok("the agent's own chat keeps its label, apart from the new ones", label_of(&own) == own_chat && label_of(&fresh) == format!("{own_chat}-2"), json!([own, fresh]));
-    b.click(page, &format!("#chats [data-key={}]", js(&format!("chat:{reader_chat}"))))?;
+    click_chat(b, page, reader_chat)?;
     b.until(page, "document.getElementById('chat-title').textContent === 'Reader'", wait);
     Ok(())
 }
@@ -5575,7 +5782,7 @@ const PASTE_FILE: &str = "(() => { const d = new DataTransfer(); d.items.add(new
 /// opened, the message is still posted; settings, then Back, and the
 /// making refused: a notice, the words in the launcher's next opening,
 /// sent from there.
-fn launch_late_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person, reader_chat: &str) -> Result<()> {
+fn launch_late_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person, reader_chat: &str, shots: &std::path::Path) -> Result<()> {
     let wait = std::time::Duration::from_secs(30);
     let own_chat = format!("{}-chat", me.first);
     let says = |chat: &str, text: &str| said_in(api, me, chat, text);
@@ -5613,7 +5820,7 @@ fn launch_late_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &P
     anyhow::ensure!(titled(b, &blank), "the blank chat titled from its message");
 
     // the launcher's own file, its upload held; a file chosen in the chat it
-    // opened meanwhile; then the upload refused
+    // opened meanwhile; then the upload refused, a deploy going out (#769)
     let said = "Sort the attached atlases by the year each was printed";
     let before = new_chats();
     b.click(page, "#sidebar-new-chat")?;
@@ -5628,15 +5835,16 @@ fn launch_late_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &P
     let ready = fresh && s.eventually(wait, || b.eval_in_frame(page, &made, COMPOSER_READY).ok() == Some(Value::Bool(true)));
     let picked = ready && b.eval_in_frame(page, &made, PICK_FILE)? == json!(1);
     std::thread::sleep(std::time::Duration::from_secs(1));
-    b.eval(page, "(window.__held.release?.('refuse'), true)")?;
-    let reopened = b.until(page, &format!("{opened} && document.getElementById('search-status').textContent.includes(\"wasn't sent\")"), wait);
-    let seen = b.eval(page, "({ words: document.getElementById('workspace-search').value, files: document.querySelectorAll('#search-files .search-file').length })")?;
+    b.eval(page, "(window.__held.release?.('deploying'), true)")?;
+    let reopened = b.until(page, &format!("{opened} && document.getElementById('search-status').textContent === {}", js(&format!("Your message wasn't sent. {UPDATING}"))), wait);
+    let seen = b.eval(page, "({ words: document.getElementById('workspace-search').value, files: document.querySelectorAll('#search-files .search-file').length, said: document.getElementById('search-status').textContent })")?;
+    let _ = b.screenshot(page, &shots.join("launcher-upload-deploying.png"));
     let kept = if fresh { chips(b, &made) } else { Value::Null };
     let still = b.eval(page, &shows(&made))?;
     b.eval(page, "(window.__held.restore(), true)")?;
     s.ok(
-        "a file chosen in the chat the launcher opened, while the launcher's own file uploads, stays in its composer when that upload is refused; the launcher opens again over it on its words and file, saying it wasn't sent",
-        open && pasted && held && fresh && picked && reopened && seen == json!({ "words": said, "files": 1 }) && kept == json!(1) && still == true,
+        "a file chosen in the chat the launcher opened, while the launcher's own file uploads, stays in its composer when a deploy refuses that upload; the launcher opens again over it on its words and file, saying it wasn't sent: Updating, no release named",
+        open && pasted && held && fresh && picked && reopened && seen["words"] == said && seen["files"] == 1 && kept == json!(1) && still == true,
         json!({ "made": made, "seen": seen, "chips": kept }),
     );
     b.eval(page, submit)?;
@@ -5798,7 +6006,7 @@ fn fresh_shown(b: &mut Browser, page: &Page, before: &[String]) -> Option<String
     (!shown.is_empty() && !before.contains(&shown)).then_some(shown)
 }
 
-/// The launcher as a person uses it (docs/api.md, The launcher). Its input
+/// The launcher as a person uses it. Its input
 /// is one line at rest and as words are typed; Shift+Enter is a new line,
 /// which it grows to, and a long prompt grows it to 200 px, then it
 /// scrolls. Files dropped on it or pasted into it are chips under its words
@@ -6638,7 +6846,7 @@ fn apps_sharing_refresh_ui(s: &mut Suite, b: &mut Browser, page: &Page, app: &st
     Ok(())
 }
 
-/// The Apps page (docs/api.md, The shell; #587), from the sidebar's Apps:
+/// The Apps page (#587), from the sidebar's Apps:
 /// the owner's app listed (no chat or skills), with its card and who has
 /// access; a kind this build does not know is listed as Other; its Dock
 /// switch takes it off the dock and back, moving only as the list does;
@@ -6853,88 +7061,90 @@ fn extra_agent(api: &Api, session: &str, label: &str, title: &str, job: &str) ->
     Ok((agent, chat, id))
 }
 
-/// What New chat's chip is: its element, whether it shows a caret, and
-/// the name it says.
-const CHIP: &str = "(() => { const c = document.querySelector('#new-chat-agent .agent-pick'); return c ? { tag: c.tagName, caret: !!c.querySelector('svg'), name: c.querySelector('.name')?.textContent ?? null } : null; })()";
+/// The sidebar's sections (Paul, 2026-10-31: one per agent of theirs, its
+/// hero then its chats): each hero's name, its face's colour, its fragment
+/// (its key), and the chats under it, in order, up to the next hero or Shared.
+const HEROES: &str = "(() => { const out = []; for (const e of document.getElementById('chats').children) { \
+    if (e.classList.contains('agent-hero')) out.push({ name: e.querySelector('.title')?.textContent ?? null, face: e.querySelector('.agent-avatar')?.style.getPropertyValue('--agent-color') || null, fragment: e.dataset.key.slice(6), chats: [] }); \
+    else if (e.dataset.key === 'head:shared') break; \
+    else if (e.dataset.key?.startsWith('chat:') && out.length) out.at(-1).chats.push(e.dataset.key.slice(5)); } return out; })()";
 
-/// Several agents (Paul, 2026-10-30: one of them main, one UI for any
-/// number). With one agent, New chat's chip names it, with no caret, and
-/// opens nothing (`one`, read before the second was made); another agent
-/// made elsewhere (the CLI, an agent) gives it its caret and its list with
-/// no reload, and its chat lists by its face and name. Picked on the chip,
-/// it gets a new chat with it alone. Renamed elsewhere, its chat's row and
-/// the chip's list follow with no reload, and once it is renamed back
-/// nothing the shell draws says the name it had.
+/// What an agent's hero's menu offers (opened, read and closed again): the
+/// hero `hero` names (its `[data-key]` selector).
+fn hero_menu(b: &mut Browser, page: &Page, hero: &str) -> Result<Vec<String>> {
+    b.click(page, hero)?;
+    b.until(page, "!document.getElementById('menu').hidden && document.getElementById('menu').classList.contains('agent-menu')", std::time::Duration::from_secs(5));
+    let items = strings(&b.eval(page, "[...document.querySelectorAll('#menu button')].map((b) => b.textContent)")?);
+    b.press(page, "Escape", false)?;
+    b.until(page, "document.getElementById('menu').hidden", std::time::Duration::from_secs(5));
+    Ok(items)
+}
+
+/// Several agents (Paul, 2026-10-31: the sidebar is a section per agent,
+/// one UI for any number). With one agent, it is one section: its hero, its
+/// chats under it (`one`, read before the second was made); another agent
+/// made elsewhere (the CLI, an agent) adds its own section after the main
+/// agent's, with no reload, its chat under its hero. Each hero shows its
+/// agent's face in that agent's colour; a row shows none. A hero's menu
+/// starts a new chat with its agent alone. Renamed elsewhere, its hero
+/// follows with no reload, in its place, and once it is renamed back nothing
+/// the shell draws says the name it had.
 #[allow(clippy::too_many_arguments)]
 fn agents_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &str, first_title: &str, one: &Value, first_chat: &str, reader: &str, reader_chat: &str, shots: &std::path::Path) -> Result<()> {
     let wait = std::time::Duration::from_secs(30);
     let agent_wait = std::time::Duration::from_secs(120);
     let chat_row = |name: &str| format!("#chats [data-key={}]", js(&format!("chat:{name}")));
-    let listed = b.until(page, &format!("(({{ tag, caret, name }}) => tag === 'BUTTON' && caret && name === {})({CHIP} ?? {{}}) && !!document.querySelector({})", js(first_title), js(&chat_row(reader_chat))), agent_wait);
+    let hero = |fragment: &str| format!("#chats [data-key={}]", js(&format!("agent:{fragment}")));
+    let both = js(&format!("{first_title},Reader"));
+    let listed = b.until(page, &format!("({HEROES}).map((h) => h.name).join() === {both} && ({HEROES})[1].chats.includes({})", js(reader_chat)), agent_wait);
+    let heroes = b.eval(page, HEROES)?;
     let _ = b.screenshot(page, &shots.join("desktop-agents.png"));
+    let first_name = |h: &Value| h["name"].as_str().map(str::to_string);
     s.ok(
-        "with one agent, New chat's chip names it, with no caret, and opens nothing; another agent made elsewhere gives it its caret with no reload, and its chat lists among their chats",
-        one == &json!({ "tag": "SPAN", "caret": false, "name": first_title }) && listed,
-        json!({ "one": one, "two": b.eval(page, CHIP)?, "chats": b.eval(page, "document.getElementById('chats').innerText")? }),
+        "with one agent, the sidebar is its section, its hero naming it over its chats; another agent made elsewhere adds its own section after the main agent's, with no reload, its chat under its hero",
+        one.as_array().is_some_and(|l| l.len() == 1 && first_name(&l[0]).as_deref() == Some(first_title) && l[0]["chats"].as_array().is_some_and(|c| c.contains(&json!(first_chat))))
+            && listed
+            && heroes[0]["chats"].as_array().is_some_and(|c| c.contains(&json!(first_chat))),
+        json!({ "one": one, "two": heroes, "chats": b.eval(page, "document.getElementById('chats').innerText")? }),
     );
-    // each chat's row says whose it is first: its agent's face, in that
-    // agent's colour (its identity's), and its name; then the chat's own name
-    let reader_id = agent_ids(api, session, &["reader"])?.remove(0);
-    let reader_color = b.eval(page, &format!("import('/__shell/agent-color.js').then((m) => m.colorOf({}))", js(&reader_id)))?;
-    let faces = b.eval(
-        page,
-        &format!(
-            "(() => {{ const color = (e) => e?.style.getPropertyValue('--agent-color') || null; const q = (row, sel) => document.querySelector(`${{row}} ${{sel}}`); \
-             const seen = (row) => ({{ face: color(q(row, '.chat-face .agent-avatar')), who: q(row, '.chat-agent')?.textContent ?? null, chat: q(row, '.chat-what .label')?.textContent ?? null }}); \
-             const rows = [...document.querySelectorAll('#chats .chat-row')]; \
-             return {{ every: rows.length > 1 && rows.every((r) => r.classList.contains('two') && r.firstElementChild?.classList.contains('chat-face')), main: color(document.querySelector('#new-chat-agent .agent-avatar')), \
-             reader: {}, mainChat: seen({}), readerChat: seen({}) }}; }})()",
-            reader_color,
-            js(&chat_row(first_chat)),
-            js(&chat_row(reader_chat))
-        ),
-    )?;
+    // each hero shows its agent's face, in that agent's colour (its
+    // identity's); the rows under it show none
+    let first_label = label_of(first_chat).trim_end_matches("-chat").to_string();
+    let ids = agent_ids(api, session, &[first_label.as_str(), "reader"])?;
+    let colour = |b: &mut Browser, id: &str| b.eval(page, &format!("import('/__shell/agent-color.js').then((m) => m.colorOf({}))", js(id)));
+    let (main_colour, reader_colour) = (colour(b, &ids[0])?, colour(b, &ids[1])?);
+    let faceless = b.eval(page, "!document.querySelector('#chats .chat-row .agent-avatar')")?;
     s.ok(
-        "each chat's row says whose it is, then its own name: their first chat their main agent's face and name, the Reader's chat the Reader's",
-        faces["every"] == true
-            && faces["main"].is_string()
-            && faces["mainChat"] == json!({ "face": faces["main"], "who": first_title, "chat": FIRST_CHAT })
-            && faces["reader"].is_string()
-            && faces["readerChat"] == json!({ "face": faces["reader"], "who": "Reader", "chat": "Reader" }),
-        &faces,
+        "each hero shows its agent's face in that agent's colour, and their chats' rows show none",
+        heroes[0]["face"] == main_colour && heroes[1]["face"] == reader_colour && main_colour.is_string() && faceless == true,
+        json!({ "heroes": heroes, "main": main_colour, "reader": reader_colour }),
     );
-    // picked on the chip (from their main agent's chat, which it names),
-    // a new chat with it alone, never with the main agent
-    let picked = b.eval(page, "(document.querySelector('#new-chat-agent .agent-pick').click(), true)")? == true
-        && b.until(page, "!document.getElementById('menu').hidden", wait)
-        && b.eval(page, "(() => { const i = [...document.querySelectorAll('#menu button')].find((b) => b.querySelector('.name')?.textContent === 'Reader'); i?.click(); return !!i; })()")? == true;
+    // its hero's New chat: a new chat with it alone, never with the main agent
+    b.click(page, &hero(reader))?;
+    let menu = b.until(page, "!document.getElementById('menu').hidden && document.getElementById('menu').classList.contains('agent-menu')", wait);
+    let offered = strings(&b.eval(page, "[...document.querySelectorAll('#menu button')].map((b) => b.textContent)")?);
+    let picked = menu && b.eval(page, "(() => { const i = [...document.querySelectorAll('#menu button')].find((b) => b.textContent === 'New chat'); i?.click(); return !!i; })()")? == true;
     let opened = b.until(page, "document.getElementById('chat-title').textContent === 'New chat'", wait);
     let made = own_named(api, session, "reader-chat-2")?;
     let members = shell(api, session, "GET", &format!("/api/f/{made}/members"), None, &[])?;
-    let agents: Vec<(Value, Value)> = members.body["members"].as_array().into_iter().flatten().filter(|m| m["kind"] == "agent").map(|m| (m["principal"].clone(), m["role"].clone())).collect();
+    let agents: Vec<Value> = members.body["members"].as_array().into_iter().flatten().filter(|m| m["kind"] == "agent").map(|m| m["principal"].clone()).collect();
     s.ok(
-        "picked on New chat's chip, the Reader gets a new chat with it alone, labelled as its",
-        picked && opened && open_chat(b, page) == made && agents == vec![(json!(reader_id), json!("editor"))],
-        json!({ "made": made, "agents": agents }),
+        "the Reader's hero opens its menu (New chat, Rename, its profile, its screen), and its New chat makes a chat with it alone, labelled as its",
+        offered == ["New chat", "Rename…", "Its profile", "Its screen"] && picked && opened && open_chat(b, page) == made && agents == vec![json!(ids[1])],
+        json!({ "offered": offered, "made": made, "agents": agents }),
     );
     // let go, so the newest chats below are the ones they make
     let r = shell(api, session, "PUT", &format!("/api/fragments/{made}/archived"), Some(&json!({ "archived": true })), &[])?;
     anyhow::ensure!(r.status == 200 && b.until(page, &format!("!document.querySelector({})", js(&chat_row(&made))), wait), "its new chat archived: {r}");
-    // renamed elsewhere: its chat's row and the chip's list follow; renamed
-    // back, no copy of the other
-    let its_chat = format!("document.querySelector({})", js(&format!("{} .chat-agent", chat_row(reader_chat))));
-    let named = |b: &mut Browser, name: &str| b.until(page, &format!("{its_chat}?.textContent === {}", js(name)), wait);
+    // renamed elsewhere: its hero follows, in its place; renamed back, no copy of the other
+    let named = |b: &mut Browser, name: &str| b.until(page, &format!("({HEROES}).map((h) => h.name).join() === {}", js(&format!("{first_title},{name}"))), wait);
     let renamed = retitle(api, session, reader, Some("Ingrid"))? && named(b, "Ingrid");
-    b.click(page, "#new-chat-agent .agent-pick")?;
-    b.until(page, "!document.getElementById('menu').hidden", wait);
-    let listed = b.eval(page, "[...document.querySelectorAll('#menu button .name')].map((n) => n.textContent)")?;
-    b.press(page, "Escape", false)?;
     let back = retitle(api, session, reader, Some("Reader"))? && named(b, "Reader");
     let hits = b.eval(page, &format!("({OLD_NAME_SWEEP})({})", js("Ingrid")))?;
     s.ok(
-        "renamed elsewhere, its chat's row and New chat's list follow with no reload; renamed back, nothing the shell draws says the name it had",
-        renamed && listed == json!([first_title, "Ingrid"]) && back && hits == json!([]),
-        json!({ "renamed": renamed, "listed": listed, "back": back, "hits": hits }),
+        "renamed elsewhere, its hero follows with no reload, its section where it was; renamed back, nothing the shell draws says the name it had",
+        renamed && back && hits == json!([]),
+        json!({ "renamed": renamed, "back": back, "hits": hits }),
     );
     Ok(())
 }
@@ -6961,17 +7171,17 @@ fn add_agent_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session:
     let opened = made && b.until(page, &format!("location.pathname === '/' && document.getElementById('chat-title').textContent === {} && [...document.querySelectorAll('#frames iframe')].find((f) => !f.hidden)?.dataset.fragment === {}", js(FIRST_CHAT), js(&chat)), wait);
     // its frame opened for the making's steps (its card, gone once it is ready)
     let card = opened && b.eval(page, &format!("[...document.querySelectorAll('#frames iframe')].find((f) => f.dataset.fragment === {})?.dataset.src.includes('setup%3D1') ?? false", js(&chat)))? == true;
-    let row = format!("document.querySelector({})", js(&format!("#chats [data-key={}]", js(&format!("chat:{chat}")))));
-    let tag = format!("({row}?.querySelector('.role-tag')?.textContent ?? null)");
-    let listed = b.until(page, &format!("{row}?.querySelector('.chat-agent')?.textContent === 'Wren' && {tag} === 'editor'"), agent_wait);
+    let listed = b.until(page, &format!("({HEROES}).some((h) => h.name === 'Wren' && h.chats.includes({}))", js(&chat)), agent_wait);
     let agent = own_named(api, session, "wren")?;
+    // its role: its list row's (its fragment.json's `meta.role`), which the sidebar shows none of
+    let role = || own_row_of(api, session, &agent)["agentRole"].clone();
     let id = agent_ids(api, session, &["wren"])?.remove(0);
     let (hello, seen) = said_hello(s, api, session, &chat, &id, agent_wait);
     let job = shell(api, session, "GET", &format!("/api/f/{agent}/file?path=SOUL.md"), None, &[])?.text;
     let _ = b.screenshot(page, &shots.join("desktop-agent-added.png"));
     s.ok(
-        "Add agent, in Settings (a name and a role): its chat opens at once, for the making's steps; once made, its row names it with its role's tag, it says hello first, and its job names no role",
-        offered && card && listed && hello && !job.is_empty() && !job.contains("editor"),
+        "Add agent, in Settings (a name and a role): its chat opens at once, for the making's steps; once made, its own section's hero names it over that chat, its role is its list row's, it says hello first, and its job names no role",
+        offered && card && listed && role() == json!("editor") && hello && !job.is_empty() && !job.contains("editor"),
         json!({ "chat": chat, "hello": seen, "job": job }),
     );
     // its role, edited in Settings, then taken away
@@ -6980,13 +7190,13 @@ fn add_agent_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session:
     b.until(page, &format!("{field}?.value === 'editor'"), wait);
     let set = |b: &mut Browser, role: &str| b.eval(page, &format!("(() => {{ const f = {field}; f.value = {}; f.dispatchEvent(new Event('change')); return true; }})()", js(role)));
     set(b, "copy editor")?;
-    let edited = b.until(page, &format!("{tag} === 'copy editor'"), wait);
+    let edited = s.eventually(wait, || role() == json!("copy editor"));
     set(b, "")?;
-    let gone = b.until(page, &format!("{tag} === null && {row}?.querySelector('.chat-agent')?.textContent === 'Wren'"), wait);
+    let gone = s.eventually(wait, || role().is_null()) && b.until(page, &format!("({HEROES}).some((h) => h.name === 'Wren')"), wait);
     s.ok(
-        "its role edited in Settings is its row's tag, with no reload; taken away, the tag goes",
+        "its role edited in Settings is its list row's, with no reload; taken away, the row says none, and its hero stays",
         edited && gone,
-        json!({ "tag": b.eval(page, &tag)?, "role": own_row_of(api, session, &agent)["agentRole"] }),
+        json!({ "role": role() }),
     );
     Ok(())
 }
@@ -7171,7 +7381,7 @@ fn roster_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person
     let (reader, first) = (ids[0].clone(), ids[1].clone());
     let chat = own_named(api, me.session, "reader-chat")?;
     let host = chat.clone();
-    b.click(page, &format!("#chats [data-key={}]", js(&format!("chat:{chat}"))))?;
+    click_chat(b, page, &chat)?;
     let want = json!([{ "agent": reader, "outside": false }, { "agent": first, "outside": true }]);
     let listed = mentions_until(s, b, page, &host, "@", &want, wait);
     let placeholder = b.eval_in_frame(page, &host, "document.getElementById('text')?.placeholder ?? null").unwrap_or(Value::Null);
@@ -7324,7 +7534,7 @@ fn roster_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person
     if composed {
         b.eval_in_frame(page, &chosen, "(() => { const t = document.getElementById('text'); t.value = ''; t.dispatchEvent(new Event('input', { bubbles: true })); return true; })()")?;
     }
-    b.click(page, &format!("#chats [data-key={}]", js(&format!("chat:{chat}"))))?;
+    click_chat(b, page, &chat)?;
     Ok(())
 }
 

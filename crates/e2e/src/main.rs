@@ -77,6 +77,10 @@ enum Shape {
     /// price of its own) and nothing else changed: a row an operator adds,
     /// with no version to raise (#451).
     OneKeyMore,
+    /// As `Plain`, its embeddings slot pinned at another version
+    /// (`repinned_models`): another space, as a deployment that moved its
+    /// embeddings model is.
+    EmbeddingsRepinned,
 }
 
 /// Finite Private's key on a node shaped as Finite's (`Shape::FinitePrivate`):
@@ -96,6 +100,20 @@ pub fn plain_models() -> Value {
         "cheap": { "provider": "workers_ai", "model": fragment_core::models::CHEAP_MODEL, "label": RECOMMENDED_LABEL },
         "medium": { "provider": "workers_ai", "model": fragment_core::models::MEDIUM_MODEL, "label": STANDARD_LABEL }
     })
+}
+
+/// `plain_models`, its embeddings slot the default model pinned at a
+/// version (`Shape::EmbeddingsRepinned`): the same vectors in name, another
+/// space, which no index of the plain node's holds.
+pub fn repinned_models() -> Value {
+    let mut models = plain_models();
+    models["embeddings"] = json!({
+        "provider": "workers_ai",
+        "model": fragment_core::embed::MODEL_DEFAULT,
+        "dimensions": fragment_core::embed::DIMENSIONS_DEFAULT,
+        "version": "e2e-2",
+    });
+    models
 }
 
 /// Tinfoil's key on a node shaped as the private tier (`Shape::PrivateTier`):
@@ -332,11 +350,11 @@ pub struct Suite {
     hosted_rules: bool,
     /// The preview a hosted run targets (`None`: the local node).
     preview: Option<api::Preview>,
-    /// A hosted run's candidate image (`--candidate`, the canary: docs/
-    /// computers.md, "Stable and canary"): the real-agent sections' new
-    /// computers run it from their first start, and agent-restart's restart
-    /// upgrades into it and back. `None`: the deployment's default.
-    pub candidate: Option<String>,
+    /// A hosted run's upgrade (`--upgrade-from`: docs/computers.md,
+    /// "Preview and production"): agent-restart's computer starts on this
+    /// image, then upgrades into the deployment's default and back. `None`:
+    /// its restart restarts it on the default.
+    pub upgrade_from: Option<String>,
     /// A dry run's plan (`Some`: nothing runs, each section is planned).
     plan: Option<Vec<Planned>>,
     /// What the run's APIs share: the levers' secret, and (hosted) its
@@ -404,8 +422,6 @@ pub struct Suite {
     project: PathBuf,
     /// The next node's shape (`start_as_browsers_see_it`).
     shape: Shape,
-    /// The search service the next node names (the search section's).
-    pub search: Option<devstack::SearchVars>,
     /// Whether the containers the run's nodes left are removed
     /// (`remove_containers`): at its end, or as it drops.
     containers_removed: bool,
@@ -642,6 +658,15 @@ impl Suite {
         started
     }
 
+    /// Starts the node with its embeddings in another space
+    /// (`Shape::EmbeddingsRepinned`).
+    pub fn start_repinned(&mut self) -> Result<Api> {
+        self.shape = Shape::EmbeddingsRepinned;
+        let started = self.start(false);
+        self.shape = Shape::Plain;
+        started
+    }
+
     /// Starts the node with one operator key more in its catalog
     /// (`Shape::OneKeyMore`).
     pub fn start_with_a_key_more(&mut self) -> Result<Api> {
@@ -691,6 +716,7 @@ impl Suite {
                 Shape::FinitePrivate => Some(finite_private_models(&self.ai.node().url).to_string()),
                 Shape::PrivateTier => Some(private_tier_models(&self.ai.node().url).to_string()),
                 Shape::Plain | Shape::TwoSites | Shape::SellsNothing | Shape::OneKeyMore => Some(plain_models().to_string()),
+                Shape::EmbeddingsRepinned => Some(repinned_models().to_string()),
             },
             model_keys: {
                 let key = |slot: &str, name: &str, value: &str| devstack::ModelKey { slot: slot.into(), name: name.into(), value: value.into() };
@@ -718,7 +744,6 @@ impl Suite {
                 api_key: WORKOS_KEY.into(),
                 api_url: Some(self.workos.node().url.clone()),
             }),
-            search: self.search.clone(),
             stripe: (self.shape != Shape::SellsNothing).then(|| devstack::StripeVars {
                 key: STRIPE_KEY.into(),
                 webhook_secret: STRIPE_WEBHOOK.into(),
@@ -728,7 +753,7 @@ impl Suite {
             }),
             platform_url: match self.shape {
                 Shape::TwoSites => format!("http://{SUFFIX}:{}", self.port),
-                Shape::Plain | Shape::FinitePrivate | Shape::PrivateTier | Shape::SellsNothing | Shape::OneKeyMore => format!("http://127.0.0.1:{}", self.port),
+                Shape::Plain | Shape::FinitePrivate | Shape::PrivateTier | Shape::SellsNothing | Shape::OneKeyMore | Shape::EmbeddingsRepinned => format!("http://127.0.0.1:{}", self.port),
             },
             operators: Some(
                 std::iter::once(&self.operator).chain(self.wiper.as_ref()).map(|k| fragment_core::npub::encode(k.pubkey_hex())).collect::<Vec<_>>().join(","),
@@ -777,7 +802,7 @@ impl Suite {
     fn suffix(&self) -> &'static str {
         match self.shape {
             Shape::TwoSites => BOATS,
-            Shape::Plain | Shape::FinitePrivate | Shape::PrivateTier | Shape::SellsNothing | Shape::OneKeyMore => SUFFIX,
+            Shape::Plain | Shape::FinitePrivate | Shape::PrivateTier | Shape::SellsNothing | Shape::OneKeyMore | Shape::EmbeddingsRepinned => SUFFIX,
         }
     }
 
@@ -1139,7 +1164,7 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
         rung,
         hosted_rules: rehearse.is_some(),
         preview: None,
-        candidate: None,
+        upgrade_from: None,
         plan: None,
         shared,
         owners: RefCell::new(BTreeMap::new()),
@@ -1173,7 +1198,6 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
         scratch,
         project,
         shape: Shape::Plain,
-        search: None,
         containers_removed: false,
     };
     if let Some(k) = s.shard {

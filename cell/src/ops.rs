@@ -1,4 +1,4 @@
-//! Calling an operation (docs/MODEL.md, Operations): the supervisor checks
+//! Calling an operation (docs/api.md, Apps): the supervisor checks
 //! the caller's role against the operation's declared role, bounds the
 //! input, and runs it in the `app` facet, where a mutation and its ledger
 //! row commit together. Callers who hold only the `public` floor (visitors
@@ -376,7 +376,7 @@ impl FragmentCell {
         bounded(Answered { result: ran.result, replayed })
     }
 
-    /// An ephemeral mutation (docs/MODEL.md): the facet runs it in its own
+    /// An ephemeral mutation (docs/api.md, Apps): the facet runs it in its own
     /// transaction and keeps no ledger row, so there is no pending row, no
     /// `ops` record, and nothing to settle after a crash; the same id runs
     /// again. It has no effects (their outbox is the ledger row): the facet
@@ -420,12 +420,16 @@ impl FragmentCell {
 
     /// `POST /api/test/fragment {fragment, op, …}`, the router's, on fleets
     /// with test hooks only: the levers the e2e pulls on one fragment
-    /// (docs/api.md, `FRAGMENT_TEST_SECRET`).
+    /// (docs/api.md, Test levers).
     pub(crate) async fn test_fragment(&self, body: &Value) -> CellResult<Value> {
         assert!(self.cfg.test_hooks, "the route answers only on fleets with test hooks");
         if body["op"] == "ended" {
             // an ended life's cleanup, which outlives it (ended.rs)
             return self.ended_view();
+        }
+        if body["op"] == "search-index" {
+            // a life's search index, an ended life's too (searchable.rs)
+            return self.search_index_lever(body).await;
         }
         self.name()?;
         let ms = || body["ms"].as_i64().filter(|ms| *ms >= 0).ok_or_else(|| CellError::invalid("ms is a duration"));
@@ -461,9 +465,10 @@ impl FragmentCell {
                 self.schedule().await?;
                 json!({ "aged": ms, "invites": aged })
             }
-            Some(lever @ ("fail-deliveries" | "fail-outbox" | "fail-triggers" | "drop-effects" | "fail-meter-acks" | "fail-after-paid" | "fail-cards")) => {
+            Some(lever @ ("fail-deliveries" | "fail-outbox" | "fail-triggers" | "drop-effects" | "fail-meter-acks" | "fail-after-paid" | "fail-cards" | "fail-search-index")) => {
                 let key = match lever {
                     "fail-cards" => MetaKey::TestFailCards,
+                    "fail-search-index" => MetaKey::TestFailSearchIndex,
                     "fail-deliveries" => MetaKey::TestFailDeliveries,
                     "fail-outbox" => MetaKey::TestFailOutbox,
                     "fail-triggers" => MetaKey::TestFailTriggers,

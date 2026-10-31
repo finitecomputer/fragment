@@ -11,8 +11,11 @@
 //! through the deployment's gateway), priced in neurons by its tiles and
 //! steps (fragment_core::media). A generated image is a file written to
 //! `main` (a blob when 1 MiB or more), so it syncs to folders like anything
-//! else. Video steps are refused until they run on Cloudflare (the debt
-//! ledger).
+//! else. A video is HappyHorse 1.0 from Cloudflare's model catalog, on the
+//! same transport (a third party's, which the gateway pays for by Unified
+//! Billing): its answer names the video's URL, which the step reads and
+//! writes to `main` as an image is; a deployment whose tiers are private
+//! makes none (`Models::video_refused`).
 //!
 //! Who pays (docs/cloudflare-v1.md, decision 26): every paid step bills the
 //! fragment's owner, on their ledger, capped when the run's principal is
@@ -39,7 +42,7 @@ use fragment_core::decide;
 use fragment_core::media;
 use fragment_core::models::{self as bounds, Answer, Bounded, Stream};
 use fragment_core::price::Usage;
-use fragment_core::steps::{AiText, Step};
+use fragment_core::steps::{AiText, AiVideo, Step};
 use fragment_core::{blob, npub};
 use fragment_proto::limits;
 use futures_util::StreamExt;
@@ -290,9 +293,80 @@ impl FragmentCell {
                 out["mediaType"] = kept["mediaType"].clone();
                 Ok(out)
             }
-            // nothing is charged: no call is made
-            Step::AiVideo {} => Err(permanent(media::Refusal::VideoOff.message())),
+            Step::AiVideo(video) => self.step_video(run, index, video).await,
             other => unreachable!("only AI steps are performed here, not {}", other.kind()),
+        }
+    }
+
+    /// `job.ai.video`: checked (a deployment whose tiers are private makes
+    /// none), gated, called, and kept with its charge as soon as the model
+    /// answers with its video's URL: its seconds at its resolution, as the
+    /// catalog bills it. Then the video is read from that URL and written
+    /// as an image is. A step tried again after its call answered reads
+    /// the URL it kept and never makes the video again, nor charges it
+    /// again; an answer that is no completed video is charged nothing,
+    /// said aloud.
+    async fn step_video(&self, run: &RunRow, index: u32, video: &AiVideo) -> Result<Value, StepFail> {
+        let call = media::video_call(video).map_err(|why| permanent(why.message()))?;
+        let cfg = crate::config::Config::from_env(&self.env);
+        if let Some(why) = cfg.models.video_refused() {
+            return Err(permanent(why));
+        }
+        let p = self.paying(run, index)?;
+        let url = match self.kept(&p.key)? {
+            Some(kept) => {
+                self.reused(&p, &kept);
+                kept.result["url"].as_str().ok_or_else(|| retry(CellError::host("a kept video names its URL")))?.to_string()
+            }
+            None => {
+                self.gate(&p).await?;
+                let (status, bytes, log_id) = crate::models::run(&self.env, media::VIDEO_MODEL, &call.input, &p.owner, p.agent.as_deref()).await.map_err(retry)?;
+                if status != 200 {
+                    return Err(model_failure(status, &bytes));
+                }
+                let url = match media::video_url(&bytes) {
+                    Ok(url) => url,
+                    Err(fault) => {
+                        // it answered with no video: what it made is unknown, charged nothing, said aloud
+                        self.event("ai.video-refused", &format!("{}: {}; charged nothing", p.reference, fault.message()), json!({ "ref": p.reference, "logId": log_id }));
+                        console_error!("{}", json!({ "event": "ledger.unknown-usage", "ref": p.reference, "logId": log_id, "why": "the video's answer was no completed video: charged nothing" }));
+                        return Err(permanent(fault.message()));
+                    }
+                };
+                let kept = json!({ "url": url, "seconds": call.seconds, "resolution": call.resolution.input() });
+                self.keep(&p, &kept, Some(call.usage()), log_id.as_deref()).await?;
+                // test fleets: a failure after the paid call (bug 2's), which the retry survives
+                self.test_countdown(MetaKey::TestFailAfterPaid, "the step failed after its paid call").map_err(retry)?;
+                url
+            }
+        };
+        let made = media::video_of(self.read_video(&url, cfg.ai_url.is_some()).await?).map_err(|fault| permanent(fault.message()))?;
+        let length_ms = made.length_ms;
+        let mut out = self.store_media(run, index, &video.path, made.bytes).await?;
+        out["mediaType"] = json!(media::VIDEO_MEDIA_TYPE);
+        out["lengthMs"] = json!(length_ms);
+        Ok(out)
+    }
+
+    /// The video at the URL the model answered, at most
+    /// `media::VIDEO_MAX_BYTES` (read no further): https alone, or http to
+    /// the dev stack's and the e2e's fake (`plain`). Gone (404, 410) is for
+    /// good; a refusal that passes (429, 5xx) or a read that breaks is the
+    /// step's to try again.
+    async fn read_video(&self, url: &str, plain: bool) -> Result<Vec<u8>, StepFail> {
+        if !(url.starts_with("https://") || (plain && url.starts_with("http://"))) {
+            return Err(permanent(media::AnswerFault::NoVideo.message()));
+        }
+        let mut resp = Fetch::Url(Url::parse(url).map_err(|_| permanent(media::AnswerFault::NoVideo.message()))?).send().await.map_err(|e| StepFail::Retry(format!("the video's URL did not answer: {e}")))?;
+        match resp.status_code() {
+            200 => {}
+            404 | 410 => return Err(permanent("the video this step made is gone from its URL (it is kept for a while): replay the run to make it again")),
+            status @ (429 | 500..=599) => return Err(StepFail::Retry(format!("the video's URL answered {status}"))),
+            status => return Err(permanent(format!("the video's URL answered {status}"))),
+        }
+        match crate::cs::read_answer(&mut resp, media::VIDEO_MAX_BYTES).await.map_err(retry)? {
+            (_, true) => Err(permanent(media::AnswerFault::VideoTooLarge.message())),
+            (bytes, false) => Ok(bytes),
         }
     }
 

@@ -141,7 +141,7 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     anyhow::ensure!(r.status == 200 && seq_before == 2, "channel setup: {r} (feed at {seq_before})");
     let code_before = api.status(&owner, &stored)?.body["code"].clone();
     anyhow::ensure!(code_before["operations"]["save"]["kind"] == "mutation" && code_before["operations"]["save"]["description"] == "Save texts to the feed.", "code setup: {code_before}");
-    // a person's search, archiving and dock (principal.rs), and a chat's search outbox (search.rs)
+    // a person's search, archiving, dock and pins (principal.rs), and a chat's search outbox (search.rs)
     let talk = s.named(&api, &owner, "restart-talk")?;
     let r = api.create_with(&owner, json!({ "name": talk, "template": "chat" }))?;
     anyhow::ensure!(r.status == 200, "chat setup: {r}");
@@ -154,8 +154,10 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     let r = api.signed(&owner, "PUT", &format!("/api/fragments/{talk}/archived"), Some(&json!({ "archived": true })))?;
     // and their dock (#587): an app of theirs taken off it
     let docked = api.signed(&owner, "PUT", &format!("/api/fragments/{stored}/dock"), Some(&json!({ "dock": false })))?;
+    // and their pins (Paul, 2026-10-31): the chat pinned
+    let pinned = api.signed(&owner, "PUT", &format!("/api/fragments/{talk}/pinned"), Some(&json!({ "pinned": true })))?;
     let searched = s.eventually(Duration::from_secs(30), || found(&api, "kale") == 1);
-    anyhow::ensure!(said && r.status == 200 && docked.status == 200 && searched, "search setup: {r} {docked}");
+    anyhow::ensure!(said && r.status == 200 && docked.status == 200 && pinned.status == 200 && searched, "search setup: {r} {docked} {pinned}");
     // sharing: an invite waiting, and who has access as the access view says it
     let invitee = format!("restart-invitee-{}@e2e.test", &Keys::generate().pubkey_hex()[..8]);
     let r = api.signed(&owner, "POST", &format!("/api/f/{name}/invites"), Some(&json!({ "email": invitee, "role": "viewer" })))?;
@@ -366,6 +368,8 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     s.ok("and their archiving holds", held, &r);
     let off = r.body["fragments"].as_array().is_some_and(|l| l.iter().any(|f| f["name"] == stored.as_str() && f["dock"] == false));
     s.ok("and the app they took off their dock is off it still", off, &r);
+    let pin_held = r.body["fragments"].as_array().is_some_and(|l| l.iter().any(|f| f["name"] == talk.as_str() && f["pinned"] == true));
+    s.ok("and the chat they pinned is pinned still", pin_held, &r);
     let r = say(&api, "k2", "kale and chard")?;
     let next = s.eventually(Duration::from_secs(30), || found(&api, "kale") == 2);
     s.ok("and a chat's new message reaches it: its search outbox goes on", r.status == 200 && next, &r);

@@ -63,6 +63,12 @@ pub(super) fn turn_of(agent: &str, fragment: &str, channel: &str, seq: i64) -> S
     hex::encode(&Sha256::digest(format!("{agent}|{fragment}/{channel}/{seq}").as_bytes())[..12])
 }
 
+/// The id of the turn that continues `cut`, a turn a restart cut, as
+/// docs/chat-records.md defines it.
+pub(super) fn continuation_of(cut: &str) -> String {
+    hex::encode(&Sha256::digest(format!("continue\0{cut}").as_bytes())[..12])
+}
+
 /// The work records of one turn.
 pub(super) fn work_of(recs: &[Value], turn: &str) -> Vec<Value> {
     recs.iter().filter(|r| r["body"]["turn"] == turn).cloned().collect()
@@ -72,16 +78,6 @@ pub(super) fn work_of(recs: &[Value], turn: &str) -> Vec<Value> {
 /// (docs/chat-records.md): the platform posts one when the agent is added.
 pub(super) fn told(api: &Api, owner: &crate::Keys, agent: &str, fragment: &str) -> Vec<Value> {
     records(api, owner, agent, "tasks").into_iter().filter(|r| r["body"]["kind"] == "joined" && r["body"]["fragment"] == fragment).collect()
-}
-
-/// A hosted round's candidate (`--candidate`: docs/computers.md, "Stable
-/// and canary"): the computer `id`, made asleep, pinned to it before its
-/// first start, so its section runs on the candidate. None: nothing.
-pub(super) fn on_candidate(s: &mut Suite, api: &Api, owner: &crate::Keys, id: &str) -> Result<()> {
-    let Some(image) = s.candidate.clone() else { return Ok(()) };
-    let r = api.signed(owner, "PUT", &format!("/api/computers/{id}/image"), Some(&json!({ "image": image })))?;
-    s.ok(&format!("its computer is pinned to the candidate, {image}, before its first start"), r.status == 200 && r.body["image"] == image.as_str() && r.body["phase"] == "asleep", &r);
-    Ok(())
 }
 
 /// A view's notice of `kind` (docs/computers.md, "What its owner is told"),
@@ -110,7 +106,7 @@ fn said_something(reply: &Value) -> bool {
 }
 
 /// What a second run of a turn cannot hide, where the fakes count it
-/// (docs/durable-computers.md): the model
+/// (docs/computers.md, Durability, P1): the model
 /// fake's calls, its owner's ledger's model and key rows, and the
 /// computer's uses. A run again posts records that replay the first's (the
 /// same ids and bodies) or are refused, so a count of records sees nothing.
@@ -154,7 +150,7 @@ const HOSTED_SAVED_AFTER_WORK: Duration = Duration::from_secs(fragment_core::com
 /// and at its sleep (the hosted rung of the stub's save checks).
 const HELD_AWAKE: &str = "its turn's end is saved awake, and its guest answered the hold (held)";
 
-/// The save checks (docs/durable-computers.md, step 1), each skipped off
+/// The save checks (docs/computers.md, "Saves and what a wake restores"), each skipped off
 /// the stub and the fakes.
 const SAVE_CHECKS: [&str; 7] = [
     "awake and idle after a turn, it has a save newer than the turn, held",
@@ -166,7 +162,7 @@ const SAVE_CHECKS: [&str; 7] = [
     "a save that then works lets it sleep, and its view says no more of it",
 ];
 
-/// Its saves,  docs/durable-computers.md: a turn's end
+/// Its saves (docs/computers.md, Lifecycle): a turn's end
 /// saves it awake, an always-on computer is saved, a failed save keeps
 /// its container (the lever's `fail-saves`), and one that works sleeps it.
 /// Starts awake, ends asleep. Answers how many replies of its agent it
@@ -355,7 +351,7 @@ fn bound_checks(s: &mut Suite, api: &Api, c: &Crashing) -> Result<()> {
 
 /// The crash checks, each skipped off the stub and the fakes. The ones
 /// marked P1 pass once the bridge claims each turn on `work` before it runs
-/// it (docs/durable-computers.md, P1): until then a crash's restore
+/// it (docs/computers.md, Durability, P1): until then a crash's restore
 /// runs every turn since the save again.
 const CRASH_CHECKS: [&str; 10] = [
     "asleep, it is no computer to kill, and the lever refuses what it does not have",
@@ -367,7 +363,7 @@ const CRASH_CHECKS: [&str; 10] = [
     "a crash wakes it from its last save, and nothing that started runs again (P1)",
     "its wake says what it restored: after the kill, a rollback is counted",
     "a turn cut by a crash ends once, as an error, and its model was called once (P1)",
-    "and the next message is answered, told once what the crash cut, from the journal (P5)",
+    "the cut turn is continued once, by the computer, told what the crash cut, from the journal; the messages after it are answered, told nothing (P5, phase 4)",
 ];
 
 /// Who the crash checks act as, and on what.
@@ -382,7 +378,7 @@ struct Crashing<'a> {
 }
 
 /// A crash, by the lever's kill, of a computer the stub runs, with the
-/// fakes counting runs (docs/durable-computers.md): the
+/// fakes counting runs (docs/computers.md, Durability): the
 /// owner's sleep (the save), a wake, a model turn and a key turn, the kill,
 /// one more message; then a turn cut by a second kill. Starts and ends
 /// awake. Answers how many replies of its agent it added.
@@ -473,17 +469,24 @@ fn crash_checks(s: &mut Suite, api: &Api, c: &Crashing, say: &dyn Fn(u32, &str) 
         ended && ends.len() == 1 && ends[0]["body"]["outcome"] == "error" && replied(seq_of(&cut)).is_none() && s.ai.chats().len() == called + 1,
         format!("{} model calls since; {}", s.ai.chats().len() - called, json!(work_of(&records(api, c.owner, c.chat, "work"), &cut_turn))),
     );
-    // told once what the crash cut (P5): the stub echoes the bridge's note
-    // after its reply, built from the chat's journal
+    // the cut turn is continued in its place, before the next message: said
+    // by the computer and told once what the crash cut (P5; the stub echoes
+    // the bridge's note after its reply, built from the chat's journal)
     let text_of = |r: &crate::api::Reply| replied(seq_of(r)).and_then(|r| r["body"]["text"].as_str().map(str::to_string)).unwrap_or_default();
     let once_more = say(55, "and once more")?;
     let answered_again = s.eventually(c.wake, || replied(seq_of(&once_more)).is_some());
+    let continuation = continuation_of(&cut_turn);
+    let continued: Vec<String> = agent_replies(&records(api, c.owner, c.chat, "chat"), c.identity).iter().filter(|r| r["body"]["turn"] == continuation.as_str()).filter_map(|r| r["body"]["text"].as_str().map(str::to_string)).collect();
     let (told, then) = (text_of(&next), text_of(&once_more));
-    let told_once = told.contains("(told: Your previous turn in this chat was cut short") && told.contains("It was answering: “think slowly, cut by a crash”") && answered_again && !then.contains("(told:");
-    s.ok(CRASH_CHECKS[9], answered && told_once, json!([told, then]));
+    let told_once = matches!(continued.as_slice(), [t] if t.starts_with("echo: [your computer] I restarted while you were working") && t.contains("(told: Your previous turn in this chat was cut short") && t.contains("It was answering: “think slowly, cut by a crash”"))
+        && answered_again
+        && !told.contains("(told:")
+        && !then.contains("(told:");
+    s.ok(CRASH_CHECKS[9], answered && told_once, json!([continued, told, then]));
     // its replies: the think, the fetch, after the crash, after the cut, the
-    // one after (and the cut turn's, where a crash's restore ran it again)
-    let added = [&think, &fetch, &after, &cut, &next, &once_more].iter().filter(|r| replied(seq_of(r)).is_some()).count();
+    // one after (and the cut turn's, where a crash's restore ran it again),
+    // and the cut turn's continuation's
+    let added = [&think, &fetch, &after, &cut, &next, &once_more].iter().filter(|r| replied(seq_of(r)).is_some()).count() + continued.len();
     Ok(added)
 }
 
@@ -544,7 +547,7 @@ const RECOVERY_CHECKS: [&str; 12] = [
 ];
 
 /// What its owner is told, and the way back to working (
-/// docs/durable-computers.md, with the platform's notices): a sleep
+/// docs/computers.md, "What its owner is told"): a sleep
 /// whose save fails tells them at once, a restart (asked twice) goes back to
 /// the last save and says so until seen, the bound puts it to sleep unsaved
 /// when it said, and the wake after is told once. Starts and ends awake.
@@ -1373,7 +1376,6 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.signed(&owner, "POST", "/api/computers", Some(&json!({})))?;
     let id = r.body["computer"].as_str().unwrap_or("").to_string();
     s.ok("a person makes their computer, asleep", r.status == 200 && id.starts_with("computer:") && r.body["phase"] == "asleep", &r);
-    on_candidate(s, api, &owner, &id)?;
     // The stub's scripted runtime (images/stub) answers its commands ("tool
     // please", "slow…", "fetch …", "think …") and echoes the rest; the
     // deployment's own image (our Hermes) answers as its real model does.

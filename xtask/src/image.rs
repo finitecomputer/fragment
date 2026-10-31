@@ -2,7 +2,7 @@
 //! registry of the account `CLOUDFLARE_ACCOUNT_ID` names (wrangler acts
 //! with `CLOUDFLARE_API_TOKEN`), and named by the digest the registry
 //! holds: the reference a deploy config pins it at (deploy.rs,
-//! `pinned_ok`; docs/computers.md, "Stable and canary"). The Image
+//! `pinned_ok`; docs/computers.md, "Preview and production"). The Image
 //! workflow (.github/workflows/image.yml) runs it by hand on a runner, so
 //! a round needs no machine of anyone's; anywhere Docker runs, it works the
 //! same way.
@@ -13,7 +13,7 @@
 //!   push` on the pinned Node.
 //! - `copy <image> --from <reference> --repository <name> --tag <tag>
 //!   [--summary <file>]` builds nothing: it copies an image another
-//!   account's registry holds (a canary the preview proved), byte for
+//!   account's registry holds (the image the preview proved), byte for
 //!   byte, so its digest is the one the round proved. The source's
 //!   account and token are `FROM_CLOUDFLARE_ACCOUNT_ID` and
 //!   `FROM_CLOUDFLARE_API_TOKEN` (Containers on that account).
@@ -344,19 +344,18 @@ fn pinned_of(repo_digests: &str, account: &str, repository: &str) -> Result<Stri
 
 /// What a run says it made (and, with `--summary`, writes as Markdown):
 /// the reference, readable with the account as `<account>`, and whole in
-/// its line of a deploy config's `computers.images`: a push's as the
-/// canary, a copy's (a promotion's) as stable. A runner masks the account
-/// in that line, as it is the environment's secret: it is the config's own
-/// `account_id`.
+/// its line of a deploy config's `computers.images`, under the image's own
+/// name. A runner masks the account in that line, as it is the
+/// environment's secret: it is the config's own `account_id`.
 fn summary(req: &Request, reference: &str) -> String {
     let readable = |r: &str, account: &str| r.replacen(account, "<account>", 1);
-    let canary = format!("{}-canary", req.image);
-    let (done, from, line, other) = match &req.from {
-        None => ("pushed", String::new(), canary.as_str(), req.image),
-        Some(s) => ("copied", format!("From `{}`, its digest unchanged.\n\n", readable(&s.reference, &s.account)), req.image, canary.as_str()),
+    let (done, from) = match &req.from {
+        None => ("pushed", String::new()),
+        Some(s) => ("copied", format!("From `{}`, its digest unchanged.\n\n", readable(&s.reference, &s.account))),
     };
+    let line = req.image;
     format!(
-        "### {} {done} as {}:{}\n\n{from}`{}`\n\nIts line in the deploy config's `computers.images`, the account the config's `account_id` (as `\"{other}\"`'s, the same `image`; docs/computers.md, \"One round\"):\n\n```jsonc\n\"{line}\": {{ \"image\": \"{reference}\" }},\n```\n",
+        "### {} {done} as {}:{}\n\n{from}`{}`\n\nIts line in the deploy config's `computers.images`, the account the config's `account_id` (docs/computers.md, \"Preview and production\"):\n\n```jsonc\n\"{line}\": {{ \"image\": \"{reference}\" }},\n```\n",
         req.image,
         req.repository,
         req.tag,
@@ -507,8 +506,8 @@ mod tests {
     }
 
     /// The summary names the reference readably and whole, in the line a
-    /// deploy config takes (one `deploy.rs` parses as a pinned image): a
-    /// push's as the canary, a copy's as stable, saying where it came from.
+    /// deploy config takes (one `deploy.rs` parses as a pinned image), under
+    /// the image's own name, a copy's saying where it came from.
     #[test]
     fn the_summary_is_the_line_a_config_takes() {
         let line_of = |text: &str, name: &str| -> serde_json::Value {
@@ -521,7 +520,7 @@ mod tests {
         let reference = format!("registry.cloudflare.com/{ACCOUNT}/fragment-preview-computer-hermes-canary@sha256:{digest}");
         let text = summary(&p, &reference);
         assert!(text.starts_with("### hermes pushed as fragment-preview-computer-hermes-canary:r9") && text.contains(&format!("`registry.cloudflare.com/<account>/fragment-preview-computer-hermes-canary@sha256:{digest}`")), "{text}");
-        assert_eq!(line_of(&text, "hermes-canary")["hermes-canary"]["image"], reference.as_str());
+        assert_eq!(line_of(&text, "hermes")["hermes"]["image"], reference.as_str());
         let from = format!("registry.cloudflare.com/{PREVIEW}/fragment-preview-computer-hermes-canary@sha256:{digest}");
         let c = parse(&args(&["copy", "hermes", "--from", &from, "--repository", "fragment-computer-hermes", "--tag", "r9"]), &all).unwrap();
         let reference = format!("registry.cloudflare.com/{ACCOUNT}/fragment-computer-hermes@sha256:{digest}");

@@ -8,6 +8,9 @@
 //!   answers the turn's message: a reply part;
 //! - a step is a tool call's end, which our image's plugin says on the
 //!   activity socket (`activity_connection`); progress text is none;
+//! - a call the model asked for is its intent (`turn.call`), which the
+//!   plugin says on that socket before Hermes runs any call of the
+//!   response (Hermes' `post_api_request`);
 //! - a `send` answering nothing that starts with a notice glyph (`💾`,
 //!   `⚠️`, `⏳`, …: `wire::NOTICES`) is a notice (`Event::Notice`), with a
 //!   turn running or not (its review comes after its turn's `✅`);
@@ -119,6 +122,10 @@ pub struct RelayConfig {
 
 pub struct Relay {
     pub config: RelayConfig,
+    /// Its port, already bound to `config.listen` (the bridge's start binds
+    /// it): a port picked and let go before a bind may be another's by
+    /// then, so the relay binds nothing itself.
+    pub listener: std::net::TcpListener,
 }
 
 /// A file Hermes may fetch, or one it uploaded.
@@ -155,6 +162,7 @@ impl MediaTable {
 /// once fetched (or refused): the answer to `request` on `conn`.
 enum Wire {
     Activity { conn: u64, working: bool },
+    Call { turn: String, call: crate::records::Call },
     Tool { turn: String, step: Step },
     Connected { conn: u64, tx: mpsc::Sender<Message> },
     Frame { conn: u64, text: String },
@@ -280,13 +288,14 @@ impl Runtime for Relay {
     }
 
     fn run(self: Box<Self>, io: RuntimeIo) -> RuntimeFuture {
-        Box::pin(run(self.config, io))
+        let Relay { config, listener } = *self;
+        Box::pin(run(config, listener, io))
     }
 }
 
-async fn run(cfg: RelayConfig, mut io: RuntimeIo) -> Result<(), RuntimeError> {
+async fn run(cfg: RelayConfig, listener: std::net::TcpListener, mut io: RuntimeIo) -> Result<(), RuntimeError> {
     std::fs::create_dir_all(&cfg.media_dir).map_err(|e| RuntimeError::Setup(format!("{}: {e}", cfg.media_dir.display())))?;
-    let listener = tokio::net::TcpListener::bind(cfg.listen).await.map_err(|e| RuntimeError::Setup(format!("listen {}: {e}", cfg.listen)))?;
+    let listener = listener.set_nonblocking(true).and_then(|()| tokio::net::TcpListener::from_std(listener)).map_err(|e| RuntimeError::Setup(format!("listen {}: {e}", cfg.listen)))?;
     crate::ev!("relay.listening", { "listen": cfg.listen.to_string() });
     let media = Arc::new(Mutex::new(MediaTable::default()));
     let (wire_tx, mut wire_rx) = mpsc::channel::<Wire>(256);
@@ -472,8 +481,9 @@ async fn connection(ws: net::ServerWs, wire_tx: mpsc::Sender<Wire>, conn: u64) {
 
 /// The gateway's runtime work and tool steps, authenticated as it is. A
 /// socket alone holds nothing: `{"working": true}` holds until `false`, its
-/// close, or 30 s without a frame or ping; a tool call's end
-/// (`wire::observed_tool`) is a step. Each frame is answered once the loop
+/// close, or 30 s without a frame or ping; a call the model asked for
+/// (`wire::asked_call`) is its intent, and a call's end
+/// (`wire::observed_tool`) its step. Each frame is answered once the loop
 /// has it, so its hook returns only then, before Hermes can end the turn.
 async fn activity_connection(ws: net::ServerWs, wire_tx: mpsc::Sender<Wire>, conn: u64) {
     let (mut sink, mut stream) = ws.split();
@@ -488,6 +498,9 @@ async fn activity_connection(ws: net::ServerWs, wire_tx: mpsc::Sender<Wire>, con
                     if let Some(working) = v.as_ref().and_then(|v| v.get("working")).and_then(Value::as_bool) {
                         let _ = wire_tx.send(Wire::Activity { conn, working }).await;
                         Message::text("working")
+                    } else if let Some((turn, call)) = v.as_ref().and_then(wire::asked_call) {
+                        let _ = wire_tx.send(Wire::Call { turn, call }).await;
+                        Message::text("called")
                     } else if let Some((turn, step)) = v.as_ref().and_then(wire::observed_tool) {
                         let _ = wire_tx.send(Wire::Tool { turn, step }).await;
                         Message::text("observed")
@@ -700,6 +713,7 @@ impl Loop {
 
     async fn wire(&mut self, w: Wire) {
         match w {
+            Wire::Call { turn, call } => self.emit(Event::Called { turn, call }).await,
             Wire::Tool { turn, step } => self.step(&turn, step).await,
             Wire::Activity { conn, working } => {
                 if working {

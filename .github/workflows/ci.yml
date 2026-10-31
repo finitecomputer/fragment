@@ -1,13 +1,20 @@
 # fragment CI on Linux: `cargo xtask check` (every first-party JavaScript
 # file through `node --check` on the pinned Node, host tests and clippy on
 # host and wasm, warnings denied), and `cargo xtask e2e`: the cell under
-# `wrangler dev` (workerd), with fakes only at the vendor boundaries
-# (docs/cloudflare-v1.md, phase 2). The celld e2e on macOS is at tag
-# celld-final.
+# `wrangler dev` (workerd), with fakes only at the vendor boundaries.
+# The celld e2e on macOS is at tag celld-final.
 #
 # The e2e runs in four shards (crates/e2e/src/lanes/mod.rs, SHARDS: every
 # section in exactly one, a host test checks), each on a runner of its own
 # with its own build and node; the `e2e` job is green when every shard is.
+#
+# A pull request's run is `check` alone: its e2e runs in the merge queue,
+# on the very tree that merges, which master's ruleset requires `check` and
+# `e2e` of before anything lands (Paul, 2026-10-31). Its `e2e` check passes
+# through, saying so. The label `full-e2e` on a pull request runs the
+# shards on its runs too (adding it starts one), for a change that deserves
+# them before it queues; a run by hand (workflow_dispatch) runs them on a
+# branch's head.
 #
 # Caches are restored on every run and saved only from master's pushes (a
 # PR reads master's, and so does production's). `check`'s Rust cache is
@@ -39,6 +46,8 @@ on:
   push:
     branches: [master, production]
   pull_request:
+    # the default three, and `labeled`: adding `full-e2e` runs the shards
+    types: [opened, synchronize, reopened, labeled]
   merge_group:
     types: [checks_requested]
   workflow_dispatch:
@@ -202,14 +211,17 @@ jobs:
 
   e2e-shard:
     name: e2e shard ${{ matrix.shard }}/4
-    # on every run but a push or merge group whose tree a run proved
-    # (`proven`, which skips on every other run: `!cancelled()` keeps its
-    # skip from skipping this), and never after `proven` fails
+    # on every run but a pull request's without the `full-e2e` label (its
+    # e2e is the merge queue's) and a push or merge group whose tree a run
+    # proved (`proven`, which skips on every other run: `!cancelled()` keeps
+    # its skip from skipping this), and never after `proven` fails
     needs: proven
-    if: ${{ !cancelled() && (needs.proven.result == 'skipped' || (needs.proven.result == 'success' && needs.proven.outputs.proven == 'false')) }}
+    if: >-
+      ${{ !cancelled()
+      && (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-e2e'))
+      && (needs.proven.result == 'skipped' || (needs.proven.result == 'success' && needs.proven.outputs.proven == 'false')) }}
     runs-on: ubuntu-latest
-    # shard 1 builds the search service's image (below) when search/ moved
-    timeout-minutes: ${{ matrix.shard == 1 && 50 || 20 }}
+    timeout-minutes: 20
     env:
       # xtask/src/build.rs, WORKER_BUILD_VERSION
       WORKER_BUILD_VERSION: 0.8.5
@@ -236,28 +248,6 @@ jobs:
         with:
           save: ${{ matrix.shard == 1 && github.event_name == 'push' && github.ref == 'refs/heads/master' }}
           worker-build-version: ${{ env.WORKER_BUILD_VERSION }}
-      # The search service's image (search/Dockerfile) for the `search`
-      # section, on shard 1 alone, which runs it: loaded into Docker as the
-      # section names it, its layers BuildKit's in the Actions cache (scope
-      # e2e-search). An unchanged search/ is its layers fetched; a changed
-      # one compiles LanceDB here (about 25 minutes on a runner), hence
-      # shard 1's longer limit.
-      - if: matrix.shard == 1
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        env:
-          DOCKER_BUILD_SUMMARY: false
-          DOCKER_BUILD_RECORD_UPLOAD: false
-        with:
-          builder: ${{ steps.build.outputs.builder }}
-          context: search
-          file: search/Dockerfile
-          platforms: linux/amd64
-          provenance: false
-          load: true
-          tags: fragment-search:e2e
-          build-args: JOBS=4
-          cache-from: type=gha,scope=e2e-search
-          cache-to: type=gha,scope=e2e-search,mode=max,ignore-error=true
       # one shard's sections on a fresh node; the run's scratch (each node
       # boot's log, the lanes' screenshots) is kept when a check fails, and
       # uploaded below
@@ -282,10 +272,12 @@ jobs:
 
   # The check named `e2e`, which pull requests and merge groups require:
   # green when every shard is (a re-run's, by each shard's latest attempt),
-  # or when `proven` found a run that proved this tree, so none ran. It
-  # runs whatever came before it, unless the run was cancelled: a required
-  # check that skips reads as green, so a `proven` that failed, or shards
-  # that skipped or failed, make it red, never skipped.
+  # or when `proven` found a run that proved this tree, so none ran, or on
+  # a pull request without `full-e2e`, whose e2e the merge queue runs (a
+  # merge group is never one: its `e2e` is the real one). It runs whatever
+  # came before it, unless the run was cancelled: a required check that
+  # skips reads as green, so a `proven` that failed, or shards that were to
+  # run and skipped or failed, make it red, never skipped.
   e2e:
     needs: [proven, e2e-shard]
     if: ${{ !cancelled() }}
@@ -298,8 +290,10 @@ jobs:
           PROVEN: ${{ needs.proven.result == 'success' && needs.proven.outputs.proven == 'true' }}
           PROVEN_RESULT: ${{ needs.proven.result }}
           SHARDS: ${{ needs.e2e-shard.result }}
+          QUEUED: ${{ github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'full-e2e') }}
         run: |
           if [ "$PROVEN" = true ]; then echo "a run that proved this tree ran its e2e (\`proven\`'s log names it): none ran here"; exit 0; fi
+          if [ "$QUEUED" = true ]; then echo "a pull request's e2e runs in the merge queue, on the tree that merges, before it lands; the label full-e2e runs it here too"; exit 0; fi
           test "$SHARDS" = success || { echo "the shards did not all pass (shards: $SHARDS; proven: $PROVEN_RESULT): their logs, or proven's, say why"; exit 1; }
       # The tree every shard tested, for `proven`: GITHUB_SHA's (a pull
       # request's merge commit, a merge group's head, a push's head),
@@ -572,7 +566,7 @@ jobs:
           INPUT_KEY: ${{ needs.preview-image.outputs.key }}
         run: |
           test -n "$DIGEST" && test -n "$INPUT_KEY" || { echo "::error::preview image resolution is missing; no deploy"; exit 1; }
-          printf '### Resolved preview image\n\nInputs: `%s`\n\nDigest: `%s`\n\nDefault `hermes` and compatibility name `hermes-canary` both use this digest.\n' "$INPUT_KEY" "$DIGEST" >> "$GITHUB_STEP_SUMMARY"
+          printf '### Resolved preview image\n\nInputs: `%s`\n\nDigest: `%s`\n\n`hermes` uses this digest.\n' "$INPUT_KEY" "$DIGEST" >> "$GITHUB_STEP_SUMMARY"
       # green only when every object class answers this commit's release
       # (`git rev-parse --short=12 HEAD`) at /healthz/objects; a deploy that
       # cannot be finished or verified rolls back, and fails (rollout.rs)
@@ -676,3 +670,25 @@ jobs:
             echo "deleted: $id $rest"
             gh api -X DELETE "repos/$GITHUB_REPOSITORY/actions/caches/$id"
           done
+      # A pull request's or a merge group's cache is that ref's alone, which
+      # no other run reads, and every save here is master's (each cache's
+      # `save-if`, `cache-to` or `save` says so): an entry such a ref holds
+      # is waste, as the search image's layers were (2026-10-31: 8.8 GB of
+      # 12.8, every queue run writing 800 MB more). Deleted here: those
+      # refs' entries alone, never master's or production's, nor any other
+      # branch's (xtask/src/ci_caches.rs runs this step against fixtures).
+      - name: delete pull requests' and merge groups' caches
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api --paginate -X GET "repos/$GITHUB_REPOSITORY/actions/caches" -f per_page=100 \
+            | jq -r '.actions_caches[] | select(.ref | test("^refs/pull/[0-9]+/merge$") or startswith("refs/heads/gh-readonly-queue/")) | "\(.id) \(.ref) \(.key)"' \
+            | while read -r id ref key; do
+                case "$ref" in
+                  refs/pull/*/merge | refs/heads/gh-readonly-queue/*) ;;
+                  *) echo "::error::not a pull request's or merge group's ref: $ref"; exit 1 ;;
+                esac
+                echo "deleted: $id $ref $key"
+                gh api -X DELETE "repos/$GITHUB_REPOSITORY/actions/caches/$id"
+              done

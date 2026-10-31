@@ -12,6 +12,14 @@ path = "src/lib.rs"
 name = "fragment-bridge"
 path = "src/main.rs"
 
+# Test-only: Claude Code's wire, recorded and replayed (tests/claude.rs).
+# The images build it with the package and copy only the bridge.
+[[bin]]
+name = "fake-claude"
+path = "tests/support/fake_claude.rs"
+test = false
+doc = false
+
 [dependencies]
 base64.workspace = true
 bytes.workspace = true

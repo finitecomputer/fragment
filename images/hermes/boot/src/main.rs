@@ -625,7 +625,7 @@ fn write_credentials(a: &Agent, home: &Path, ids: Option<(u32, u32)>) {
 /// its terminal's cwd), and its home, its temp files and its desktop
 /// browser's profile in it, each linked from where Hermes keeps one in the
 /// profile, so what its tools write is the work the computer saves on its
-/// own (step 2 of docs/durable-computers.md). A `home` or scratch that had
+/// own (docs/computers.md, "Data and the restore gate"). A `home` or scratch that had
 /// something in it is set aside, unmoved (`hermes::link_into_work`); a
 /// browser profile that is a directory already stays where it is.
 fn work_dirs(profile: &Path, a: &Agent, ids: Option<(u32, u32)>) {
@@ -1107,8 +1107,8 @@ fn start_gateway(home: &Path) -> Option<u32> {
 ///   process of this start (PIDs repeat in a fresh namespace: the gateway
 ///   is PID 7 each time), so Hermes would wait out its five-minute TTL.
 /// - Each turn a restart cut is closed in its session, with Hermes' own
-///   failed-turn boundary (`hermes::CLOSE_CUT_TURNS`, docs/durable-
-///   computers.md P5): left open, Hermes would join the next message to the
+///   failed-turn boundary (`hermes::CLOSE_CUT_TURNS`, docs/computers.md,
+///   Durability, P5): left open, Hermes would join the next message to the
 ///   cut request, and its model would do it again.
 ///
 /// As the `hermes` user, so the files keep their owner.
