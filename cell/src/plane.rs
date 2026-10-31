@@ -486,7 +486,7 @@ impl FragmentCell {
         if let Some(t) = self.meta(MetaKey::DoorTemplate)? {
             if fragment_core::door::blessed_template(&loader_id) != Some(t.as_str()) {
                 self.del_meta(MetaKey::DoorTemplate)?;
-                self.unbind_door("its code is no longer its connector's").await?;
+                self.unbind_door("its code is no longer its connector's")?;
                 self.event("door.unmade", &format!("ran code that is not the {t} connector's: never a door again"), json!({ "template": t, "code": loader_id }));
             }
         }
