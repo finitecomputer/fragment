@@ -123,7 +123,7 @@ fn a_person_serves_a_fragments_tools_over_stdio() {
     assert_eq!(answers.iter().map(|a| a["id"].as_i64().unwrap_or(0)).collect::<Vec<_>>(), [1, 2, 3, 4, 5], "{answers:?}");
     assert_eq!(answers[0]["result"]["protocolVersion"], "2025-06-18");
     let tools: Vec<&str> = answers[1]["result"]["tools"].as_array().unwrap().iter().filter_map(|t| t["name"].as_str()).collect();
-    assert_eq!(tools, ["fail", "list"], "read-only: the described queries");
+    assert_eq!(tools, ["fail", "list", "fragment-search"], "read-only: the described queries, and a reader's search");
     assert_eq!(answers[2]["result"]["structuredContent"], json!({ "todos": [] }));
     assert_eq!((&answers[3]["result"]["isError"], &answers[3]["result"]["structuredContent"]["error"]["code"]), (&json!(true), &json!("app_failed")));
     assert!(answers[4]["error"]["message"].as_str().is_some_and(|m| m.contains("--write")), "{}", answers[4]);
@@ -147,7 +147,7 @@ fn an_agent_serves_a_fragments_tools_over_stdio() {
     let answers = session(command, &messages());
     std::fs::remove_dir_all(&home).ok();
     let tools: Vec<&str> = answers[1]["result"]["tools"].as_array().unwrap().iter().filter_map(|t| t["name"].as_str()).collect();
-    assert_eq!(tools, ["add", "fail", "list"], "--write: the described mutation too");
+    assert_eq!(tools, ["add", "fail", "list", "fragment-search"], "--write: the described mutation too");
     assert_eq!(answers[4]["result"]["structuredContent"]["error"]["code"], "not_found", "the write was sent, and the host's refusal is the tool's error: {}", answers[4]);
     let seen = seen.lock().unwrap();
     assert_eq!(seen.iter().filter(|r| r.0 == "POST").count(), 3, "list, fail, add: {seen:?}");

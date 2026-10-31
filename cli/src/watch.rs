@@ -317,7 +317,7 @@ fn watch_url(host: &str, signer: &crate::api::Signer, name: &str, view: Option<&
         Some(t) => format!("/f/{name}/__watch?view={t}"),
         None => format!("/f/{name}/__watch"),
     };
-    format!("{ws}{}", signer.path(&path))
+    format!("{ws}{}", signer.path("GET", &path))
 }
 
 /// the cell's change channel: frames arrive per remote mutation; reconnect
@@ -379,7 +379,7 @@ fn now_utc() -> String {
 pub fn follow_channel(client: &Client, name: &str, channel: &str, after: i64) -> Result<()> {
     use fragment_proto::live::{Cursor, LiveIn, LiveOut, Subscribe};
     use tungstenite::client::IntoClientRequest;
-    let http = client.url(&format!("/f/{name}/__live"));
+    let http = client.url("GET", &format!("/f/{name}/__live"));
     let ws_url = http.replacen("http", "ws", 1);
     let subscribe = |after: i64| LiveIn::Subscribe(Subscribe { channel: channel.to_string(), from: Cursor::After(after) }).encode();
     let mut last = after;

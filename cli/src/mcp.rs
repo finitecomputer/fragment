@@ -16,6 +16,12 @@
 //! computer's egress signs it as the agent (`FRAGMENT_AS_AGENT`). A call
 //! the platform refuses is the tool's error, carrying the platform's own
 //! error (its `ErrorBody`: code, status and message).
+//!
+//! Beside its operations, a reader (a viewer up) has one tool more:
+//! `fragment-search` (search.rs), fragments' indexes searched as one, this
+//! fragment's unless its `in` names others. Its arguments are the search
+//! route's question (docs/api.md, "Search across fragments"), and its name
+//! is none an operation can have.
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, Read, Write};
@@ -315,7 +321,11 @@ impl Server<'_> {
             "ping" => Ok(json!({})),
             "tools/list" => {
                 self.read()?;
-                Ok(json!({ "tools": tools(&self.operations, self.role, self.write) }))
+                let mut tools = tools(&self.operations, self.role, self.write);
+                if self.role >= Role::Viewer {
+                    tools.push(crate::search::tool());
+                }
+                Ok(json!({ "tools": tools }))
             }
             "tools/call" => self.call(params),
             other => Err(RpcError::new(METHOD_NOT_FOUND, format!("no method {other:?}: this server serves tools (initialize, ping, tools/list, tools/call)"))),
@@ -335,6 +345,24 @@ impl Server<'_> {
         Ok(())
     }
 
+    /// The `fragment-search` tool's call: the question its arguments are,
+    /// asked of this fragment's index unless `in` names others.
+    fn search(&self, mut input: Value) -> Result<Value, RpcError> {
+        if input.get("in").is_none() {
+            let full = self.client.fragment(&self.fragment).unwrap_or_else(|_| self.fragment.clone());
+            input["in"] = json!([full]);
+        }
+        let asked: fragment_proto::search::Across = serde_json::from_value(input)
+            .map_err(|e| RpcError::new(INVALID_PARAMS, format!("{}'s arguments are its question ({{q, in?, limit?, mode?, fields?, after?, before?}}): {e}", crate::search::TOOL)))?;
+        let answer = answered(self.client.post_json("/api/search", &asked)).and_then(|body| {
+            serde_json::from_slice::<Value>(&body).map_err(|e| Failed { code: Code::ServerError.as_str().into(), status: None, message: format!("the platform's answer is no search's: {e}") })
+        });
+        Ok(match answer {
+            Ok(found) => called(&found),
+            Err(f) => json!({ "content": [{ "type": "text", "text": format!("{}: {}", f.code, f.message) }], "structuredContent": { "error": f.json() }, "isError": true }),
+        })
+    }
+
     fn call(&mut self, params: &Value) -> Result<Value, RpcError> {
         let name = params.get("name").and_then(Value::as_str).ok_or_else(|| RpcError::new(INVALID_PARAMS, "tools/call names its tool (params.name)"))?;
         let input = match params.get("arguments") {
@@ -342,6 +370,9 @@ impl Server<'_> {
             Some(args @ Value::Object(_)) => args.clone(),
             Some(_) => return Err(RpcError::new(INVALID_PARAMS, "a tool's arguments are an object: its operation's input")),
         };
+        if name == crate::search::TOOL {
+            return self.search(input);
+        }
         // a tool the client knows and this server does not: deployed since
         if !self.operations.contains_key(name) {
             self.read()?;
@@ -495,7 +526,7 @@ mod tests {
         assert_eq!((init["serverInfo"]["name"].as_str(), init["serverInfo"]["title"].as_str()), (Some("fragment"), Some(NAME)));
         assert!(init["instructions"].as_str().is_some_and(|i| i.contains(NAME) && i.contains("--write") && i.contains("(editor)")), "{init}");
         assert_eq!(answers[1], json!({ "jsonrpc": "2.0", "id": 2, "result": {} }), "ping");
-        assert_eq!(names(&answers[2]), ["find", "list"], "read-only: the described queries the caller may call, whose input is an object");
+        assert_eq!(names(&answers[2]), ["find", "list", crate::search::TOOL], "read-only: the described queries the caller may call, whose input is an object, and a reader's search");
         let tools = answers[2]["result"]["tools"].as_array().unwrap();
         let list = json!({ "name": "list", "description": "Every todo.", "inputSchema": { "type": "object" }, "annotations": { "readOnlyHint": true, "openWorldHint": false } });
         assert_eq!(tools[1], list, "no input declared: any object");
@@ -529,7 +560,7 @@ mod tests {
         // with --write: the described mutations and jobs too
         let answers = session(&client, NAME, true, &[initialize(1, "2025-06-18"), request(2, "tools/list", json!({})), call(3, "add", json!({ "text": "eggs" })), call(4, "add", json!({}))]);
         assert!(answers[0]["result"]["instructions"].as_str().is_some_and(|i| i.contains("change it")), "{}", answers[0]);
-        assert_eq!(names(&answers[1]), ["add", "digest", "find", "list"]);
+        assert_eq!(names(&answers[1]), ["add", "digest", "find", "list", crate::search::TOOL]);
         let add = &answers[1]["result"]["tools"][0];
         assert_eq!(add["annotations"], json!({ "readOnlyHint": false, "idempotentHint": false, "openWorldHint": false }), "{add}");
         assert_eq!(answers[2]["result"]["structuredContent"], json!({ "id": 7 }));
@@ -543,11 +574,11 @@ mod tests {
     fn the_callers_role_bounds_the_tools() {
         let (owner, _) = host("owner");
         let client = Client::new(&owner.url, crate::auth::fixed(7));
-        assert_eq!(names(&session(&client, NAME, false, &[request(1, "tools/list", json!({}))])[0]), ["find", "list", "secret"]);
+        assert_eq!(names(&session(&client, NAME, false, &[request(1, "tools/list", json!({}))])[0]), ["find", "list", "secret", crate::search::TOOL]);
         let (viewer, seen) = host("viewer");
         let client = Client::new(&viewer.url, crate::auth::fixed(7));
         let answers = session(&client, NAME, true, &[request(1, "tools/list", json!({})), call(2, "add", json!({ "text": "x" })), call(3, "secret", json!({}))]);
-        assert_eq!(names(&answers[0]), ["find", "list"], "a viewer's --write adds nothing an editor calls");
+        assert_eq!(names(&answers[0]), ["find", "list", crate::search::TOOL], "a viewer's --write adds nothing an editor calls");
         assert!(answers[1]["error"]["message"].as_str().is_some_and(|m| m.contains("needs the editor role, and you are a viewer")), "{}", answers[1]);
         assert!(answers[2]["error"]["message"].as_str().is_some_and(|m| m.contains("needs the owner role")), "{}", answers[2]);
         assert!(seen.lock().unwrap().iter().all(|r| r.0 == "GET"), "nothing was called");
@@ -643,5 +674,71 @@ mod tests {
         assert_eq!(tool("j", &job, Role::Editor, false), Err(NotTool::Writes));
         assert_eq!(tool("j", &job, Role::Editor, true).map(|t| t["annotations"]["openWorldHint"].clone()), Ok(json!(true)), "a job may reach the world");
         assert_eq!(tool("q", &OpDecl { description: None, ..op(None) }, Role::Owner, true), Err(NotTool::Undescribed));
+    }
+
+    /// Goal: a reader has the `fragment-search` tool beside the
+    /// operations: this fragment's index searched unless its `in` names
+    /// others, its answer as the route's, a refusal the tool's error with
+    /// the platform's code, an argument the route does not take refused
+    /// before anything is sent; a caller with no role has no such tool.
+    #[test]
+    fn a_reader_searches_through_one_tool_more() {
+        let seen: Seen = Arc::new(Mutex::new(Vec::new()));
+        let log = Arc::clone(&seen);
+        let reader = FakeHost::start(
+            0,
+            Arc::new(move |r: &Request| {
+                let body: Value = serde_json::from_slice(&r.body).unwrap_or(Value::Null);
+                log.lock().unwrap().push((r.method.clone(), r.path.clone(), body.clone(), None));
+                match (r.method.as_str(), r.path.as_str()) {
+                    ("GET", p) if p == format!("/api/f/{NAME}/status") => Response::json(200, &status("viewer")),
+                    ("POST", "/api/search") if body["q"] == "boom" => Response::json(403, &json!({ "error": "forbidden", "message": "viewers and up" })),
+                    ("POST", "/api/search") => Response::json(200, &json!({ "semantic": "on", "fragments": [{ "name": NAME, "state": "searched" }], "results": [{
+                        "fragment": NAME, "rank": 1, "source": "notes/a.md", "section": "s0", "revision": "r1", "title": "Trip", "snippet": "the harbour lantern", "score": 0.03, "signals": ["lexical"] }] })),
+                    _ => Response::json(404, &json!({ "error": "not_found", "message": "no such route" })),
+                }
+            }),
+        )
+        .expect("start the fake host");
+        let client = Client::new(&reader.url, crate::auth::fixed(7));
+        let answers = session(
+            &client,
+            NAME,
+            false,
+            &[
+                call(1, crate::search::TOOL, json!({ "q": "harbour lantern" })),
+                call(2, crate::search::TOOL, json!({ "q": "lantern", "in": ["notes--m4p7", NAME] })),
+                call(3, crate::search::TOOL, json!({ "q": "boom" })),
+                call(4, crate::search::TOOL, json!({ "q": "x", "order": "newest" })),
+            ],
+        );
+        assert_eq!(answers[0]["result"]["structuredContent"]["results"][0]["fragment"], NAME, "{}", answers[0]);
+        assert_eq!(answers[2]["result"]["isError"], true);
+        assert_eq!(answers[2]["result"]["structuredContent"]["error"]["code"], "forbidden");
+        assert_eq!(answers[3]["error"]["code"], INVALID_PARAMS, "{}", answers[3]);
+        let asked: Vec<Value> = seen.lock().unwrap().iter().filter(|r| r.1 == "/api/search").map(|r| r.2.clone()).collect();
+        assert_eq!(asked.len(), 3, "the refused argument sent nothing");
+        assert_eq!((asked[0]["in"].clone(), asked[1]["in"].clone()), (json!([NAME]), json!(["notes--m4p7", NAME])), "this fragment unless named");
+        // an agent acting for someone asks as them: `for`, as `fragment search` does
+        let pairs: Arc<Mutex<Vec<Option<String>>>> = Arc::default();
+        let log = Arc::clone(&pairs);
+        let egress = FakeHost::start(
+            0,
+            Arc::new(move |r: &Request| match (r.method.as_str(), r.path.as_str()) {
+                ("GET", _) => Response::json(200, &status("viewer")),
+                _ => {
+                    log.lock().unwrap().push(r.pairs.iter().find(|(k, _)| k == "for").map(|(_, v)| v.clone()));
+                    Response::json(200, &json!({ "semantic": "on", "fragments": [{ "name": NAME, "state": "denied" }], "results": [] }))
+                }
+            }),
+        )
+        .expect("start the fake host");
+        let agent = Client::new(&egress.url, crate::api::Signer::Agent(crate::api::AgentMode { agent: "juniper--k3x9".into(), acting_for: Some("id:paul".into()) }));
+        let answered = session(&agent, NAME, false, &[call(1, crate::search::TOOL, json!({ "q": "lantern" }))]);
+        assert_eq!(answered[0]["result"]["structuredContent"]["fragments"][0]["state"], "denied", "{}", answered[0]);
+        assert_eq!(*pairs.lock().unwrap(), [Some("id:paul".to_string())]);
+        let (stranger, _) = host("public");
+        let client = Client::new(&stranger.url, crate::auth::fixed(7));
+        assert!(!names(&session(&client, NAME, false, &[request(1, "tools/list", json!({}))])[0]).contains(&crate::search::TOOL), "no reader, no search");
     }
 }
