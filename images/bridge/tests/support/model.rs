@@ -247,8 +247,7 @@ fn stalls(body: &Value) -> bool {
 
 /// How long a call waits whose last user message says `take your time`: past
 /// Hermes' 0.3 s progress poll, so a quick tool's step is sent before the
-/// turn's next call ends it (docs/technical-debt-ledger.md, "A quick tool's
-/// step can be lost in Hermes").
+/// turn's next call ends it.
 pub const UNHURRIED_MS: u64 = 1_000;
 
 fn unhurried(body: &Value) -> bool {
@@ -341,7 +340,7 @@ pub fn answer(body: &Value) -> (String, Option<Value>) {
     // P6, as a real turn runs before its card: `prepare the approvals
     // proof` checks the draft in `PREPARE_STEPS` terminal calls, each with
     // its words first (each a second long: Hermes sends a quick tool's
-    // step late or not at all, docs/technical-debt-ledger.md), then says
+    // step late or not at all), then says
     // its plan at length and asks its card (a
     // clarify, Publish or Keep private). Its effect (`approval-effects`)
     // only for Publish: answered live (the clarify's result), or late (a
