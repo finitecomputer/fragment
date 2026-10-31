@@ -27,6 +27,7 @@ import { createAgentSettings } from "./agent-settings.js";
 import { createConnections, createAgentHomes, createSimplex } from "./connections.js";
 import { el, section, line, actionLine, createSettings } from "./settings.js";
 import { createLauncher } from "./launcher.js";
+import { createThreads } from "./threads.js";
 
 const $ = (id) => document.getElementById(id);
 const CURRENT = "shell.chat.v1";
@@ -811,14 +812,24 @@ addEventListener("resize", () => closeMenu(true));
 
 const watching = { on: false, socket: null, wait: 1000, timer: null, settle: null };
 const listLive = () => watching.socket?.readyState === WebSocket.OPEN;
-const { renderHeading, renderChats, loadInvites, primaryAgent, newChatAgent, markSeen } = createChatList({
+const { renderHeading, renderChats, loadInvites, primaryAgent, newChatAgent, ownAgents, markSeen } = createChatList({
   api, ui: { $, el, patch, agentFace, mark, notice },
   data: { byName, own, chats, shown, titleOf, chatTitle: (name) => chatTitle(name), homeMark: (f) => homeMark(f), isGroup, agentOfChat: (name) => agentOfChat(name), agentsOf,
-    agents: () => state.agents, allFragments: () => state.fragments, computer: () => state.computer, isGuest: () => state.guest, personId: () => state.me?.id },
+    agents: () => state.agents, allFragments: () => state.fragments, computer: () => state.computer, isGuest: () => state.guest, personId: () => state.me?.id,
+    isThread: (f) => threads.isPair(f), waitingOn: (name) => threads.waitingOn(name), renderThreads: () => threads.render() },
   selection: { current: () => state.current, page: () => state.page, getFrame: (name) => state.frames.get(name) },
   menus: { menuOwner: () => menuFor, openMenu, shareItem, archiveItem },
   navigation: { newChat, rename: (name) => rename(name), openChat, openApp, openScreen, leaveSidebar, seg },
   listLive, load, invites: () => state.invites, setInvites: (v) => { state.invites = v; },
+});
+
+// Delegation threads: a line each over the chat an agent asked from, its
+// pair chat its transcript (threads.js)
+const threads = createThreads({
+  $, el, patch, api, seg, avatar,
+  data: { byName, own, chats, titleOf, labelOf, agentFace, ownAgents, current: () => state.current, page: () => state.page },
+  navigation: { openChat, leaveSidebar },
+  rendered: () => renderChats(),
 });
 
 // The identity of the person's own agent a direct chat is with (its row's
@@ -1497,6 +1508,7 @@ async function load(changed = false) {
     state.agents = new Map((state.computer?.agents ?? []).map((a) => [a.identity, a]));
   }
   renderChats();
+  threads.refresh().catch(() => {});
   renderApps();
   appsPage.listed().catch(() => {});
   renderHeading();

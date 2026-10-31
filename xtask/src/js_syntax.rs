@@ -225,6 +225,7 @@ mod tests {
             ("cell/shell/launcher.js", Some(InputType::Module)),
             ("cell/shell/settings.js", Some(InputType::Module)),
             ("cell/shell/chat-list.js", Some(InputType::Module)),
+            ("cell/shell/threads.js", Some(InputType::Module)),
             ("cell/shell/session-refresh.js", Some(InputType::Module)),
             ("cell/shell/onboarding.js", Some(InputType::Module)),
             ("cell/shell/computer.js", Some(InputType::Module)),

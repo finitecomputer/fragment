@@ -6,7 +6,7 @@ export const newestChat = (a, b) => (b.previewAt ?? Infinity) - (a.previewAt ?? 
 
 export function createChatList({ api, ui, data, selection, menus, navigation, listLive, load, invites, setInvites }) {
   const { $, el, patch, agentFace, mark, notice } = ui;
-  const { byName, own, chats, shown, titleOf, chatTitle, homeMark, isGroup, agentOfChat, agentsOf, agents, allFragments, computer, isGuest, personId } = data;
+  const { byName, own, chats, shown, titleOf, chatTitle, homeMark, isGroup, agentOfChat, agentsOf, agents, allFragments, computer, isGuest, personId, isThread, waitingOn, renderThreads } = data;
   const { current, page, getFrame } = selection;
   const { menuOwner, openMenu, shareItem, archiveItem } = menus;
   const { newChat, rename, openChat, openApp, openScreen, leaveSidebar, seg } = navigation;
@@ -143,8 +143,11 @@ export function createChatList({ api, ui, data, selection, menus, navigation, li
     // one agent's role (its `meta.role`, on its row in the list), as a tag
     const role = theirs.length === 1 ? byName(theirs[0].fragment)?.agentRole : null;
     if (role) who.append(el("span", "role-tag", role));
-    // what it is doing here, while it is, in place of when
+    // what it is doing here, while it is, else whom it waits on (a thread
+    // asked from here: threads.js), in place of when
+    const waits = doing ? null : waitingOn(f.name);
     if (doing) who.append(el("span", `agent-doing ${doing.doing}`, DOING_SAYS[doing.doing]));
+    else if (waits) who.append(el("span", "agent-doing waiting", `Waiting on ${titleOf(waits.fragment)}`));
     else if (f.previewAt) who.append(saidAt(f.previewAt));
     const what = el("span", "chat-what");
     what.append(...marks);
@@ -218,7 +221,9 @@ export function createChatList({ api, ui, data, selection, menus, navigation, li
     }
     const mine = new Map(ownAgents().map((a) => [a.identity, a]));
     const seen = [];
-    const rows = shown(chats()).sort(newestChat).map((f) => {
+    // a delegation thread's chat is no chat of the list: its line, over the
+    // chat it was asked from, opens it (threads.js)
+    const rows = shown(chats()).filter((f) => !isThread(f)).sort(newestChat).map((f) => {
       const theirs = agentsOf(f.name).map((id) => mine.get(id)).filter(Boolean);
       const doing = doingIn(f, theirs.map((a) => a.identity));
       seen.push(...doing);
@@ -227,6 +232,7 @@ export function createChatList({ api, ui, data, selection, menus, navigation, li
     doingAgain(seen);
     dayAgain();
     patch($("chats"), rows.length ? rows : [el("div", "empty-row", chats().length ? "Every chat is archived" : isGuest() ? "Chats shared with you show here" : "Your chats will appear here")]);
+    renderThreads();
   }
 
   // ---- invites: shared by email, and theirs only once they accept (decision 63) ----
@@ -364,5 +370,5 @@ export function createChatList({ api, ui, data, selection, menus, navigation, li
       archiveItem(name),
     ]);
   }
-  return { renderHeading, renderChats, loadInvites, primaryAgent, newChatAgent, markSeen };
+  return { renderHeading, renderChats, loadInvites, primaryAgent, newChatAgent, ownAgents, markSeen };
 }

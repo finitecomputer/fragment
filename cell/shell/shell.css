@@ -763,6 +763,21 @@ button.agent-pick:hover { background: var(--bg-hover); }
 .chat-who .agent-doing { font-size: 11px; font-weight: 600; }
 .chat-who .agent-doing.working { color: var(--success); }
 .chat-who .agent-doing.you { color: var(--accent-blue); }
+/* the open chat's delegation threads, a line each over it (threads.js) */
+.threads { display: flex; flex: none; flex-direction: column; gap: 4px; padding: 0 16px 8px; }
+.thread { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.thread-open { display: flex; flex: 1; align-items: center; gap: 8px; min-width: 0; height: 32px; padding: 0 12px 0 6px; border: 1px solid var(--border); border-radius: 999px; background: var(--bg-sidebar); color: var(--text-primary); font-size: 13px; text-align: left; }
+.thread-open:hover { background: var(--bg-hover); }
+.thread-open .agent-avatar { width: 20px; height: 20px; }
+.thread-who { flex: none; font-weight: 600; }
+.thread-what { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-secondary); }
+.thread-state, .thread-took { flex: none; font-size: 11.5px; color: var(--text-tertiary); }
+.thread-state { font-weight: 600; }
+.thread-state.working { color: var(--success); }
+.thread-state.you { color: var(--accent-blue); }
+.thread-state.lost { color: var(--danger-text); }
+.thread-stop { flex: none; height: 32px; padding: 0 12px; border: 1px solid var(--border-strong); border-radius: 999px; background: none; color: var(--text-primary); font-size: 13px; }
+.thread-stop:disabled { opacity: .55; }
 /* one agent's role (its `meta.role`), a tag beside its name */
 .role-tag { flex: 0 4 auto; min-width: 24px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 0 6px; border-radius: 999px; background: var(--bg-active); color: var(--text-secondary); font-size: 11px; font-weight: 500; line-height: 16px; }
 .chat-row.active .role-tag { background: var(--bg-window); }
