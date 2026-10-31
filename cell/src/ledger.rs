@@ -188,7 +188,7 @@ pub trait Route: Serialize + DeserializeOwned {
 #[serde(deny_unknown_fields)]
 pub struct Done {}
 
-/// May this spend start (docs/ledger.md, `may_spend`)? The whole question
+/// May this spend start (docs/ledger.md, "The gate")? The whole question
 /// when the payer owns the fragment (or there is none); when another
 /// person owns it, that owner's ledger answers `FragmentOpen` too.
 #[derive(Debug, Serialize, Deserialize)]

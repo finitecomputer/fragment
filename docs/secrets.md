@@ -1,410 +1,120 @@
 # Secrets
 
-Status: agreed with Paul 2026-09-23 (design; built across phases 2, 4,
-and 5; computers' secrets went with them at the cut, tag `celld-final`).
-The deployment's own secrets moved from files to its Cloudflare Secrets
-Store on 2026-10-05 (Paul: "let's just get this done right"; below).
-Principle: **every secret has one home, and code holds a
-capability, never a key.**
+Every secret has one home, and code holds a capability, never a key. A
+secret is never in git, a log, an answer, a page, a command line or a
+channel record, and is never printed. Rotating one means changing it in
+its home; everything that uses it reads it from there.
 
-## Where secrets live
+## Where each lives
 
-Each secret is stored in the cell that owns it, encrypted at rest, and
-nowhere else. Sealing is `crates/core/src/seal.rs`, used by
-`cell/src/keys.rs`: the key is HKDF-SHA256 of the
-deployment's host secret salted with **the sealing Durable Object's class
-and id**, so a value opens only in the object that sealed it; it is
-AES-256-GCM sealed as `w2.<key id>.<nonce‖ciphertext>`, where the key id
-names which host secret sealed it. The host secret is a Secrets Store
-secret bound to the platform Worker as `HOST_SECRET`: an app's isolate
-gets an env the platform builds. Rotating it is by name (below): the new one bound as
-`HOST_SECRET` and the old as `HOST_SECRET_PREVIOUS`; values sealed under
-the old one still open, and come back resealed, which the cell stores.
-
-| Secret | Home |
-|---|---|
-| A person's GitHub token, other personal keys | the person's own cell |
-| A person's own key for an `own` provider of the catalog (docs/computers.md) | their computer's cell (one computer per person for now, decision 13), sealed for it; set and removed by the person (`PUT`/`DELETE /api/connections/{provider}/key`), opened only to swap it in. One with a sign-in (OpenRouter's, decision 60) is never pasted: the provider makes it when the person connects from settings, the platform exchanges the sign-in's code for it and the computer seals it at once; it is in no answer, no page and no log, and the guest holds only its placeholder. Revoking it is the person's, at the provider |
-| A sign-in to an own key's provider under way | its PKCE verifier, sealed in the person's computer's cell under the nonce's hash for at most 10 minutes, deleted when the provider sends the browser back (once) or when it expires (`fragment_core::own_signin`) |
-| A key an app needs (a third-party API key, a webhook signing key) | the fragment's supervisor |
-| The deployment's host secret, the code.storage org key, WorkOS's client id and API key, the key of each model the route runs on an OpenAI-compatible API (the platform's OpenRouter key, or Finite Private's; decision 61), the operator's keys a computer's swap sends (decision 37) | the account's Cloudflare Secrets Store, each bound to the Workers by name (below), never a Worker variable, a Worker secret, a file, or an app's env. Workers AI's models and images need none: the Worker's AI binding is pre-authenticated (spike S4) |
-| A preview's test secret (`FRAGMENT_TEST_SECRET`, below) | a file on the deploying machine, uploaded as a Worker secret of a branch's platform Worker |
-| An operator key (a wipe's: docs/api.md, Operators) | a file on the operator's machine, its secret's 64 hex (`fragment operator key <file>` makes it, 0600, and prints only its npub); the deployment holds its npub alone (`operators`), never the secret. The hosted e2e's is named on its command line (`--operator-key-file`, below) |
-| A fragment's own nostr key, an agent's nostr key | made in their cell and kept sealed for it; opened only to sign (an agent's NIP-98 headers) |
-| A person's connections (Google, …) | WorkOS Pipes holds and refreshes them; a computer's swap asks Pipes for its short-lived token on each call and holds none (decision 22). A computer's guest holds only placeholders (docs/computers.md) |
-| A connection's OAuth client secret | `CONNECTION_SECRET_<PROVIDER>` in Cloudflare Secrets Store, read only by `cell/src/keys.rs`. The deployment row's `key` names that store secret. It must match the client configured in Pipes; Fragment exchanges codes only after browser/session binding, then imports the grant (docs/pipes-browser-binding.md) |
-| The key computers' placeholders are tagged with | derived from the host secret (HKDF-SHA256, its own salt), never stored or provisioned apart: in the platform Worker alone, never in a container. Rotating the host secret rotates every placeholder (guests read theirs again within seconds; tags under `HOST_SECRET_PREVIOUS` still verify during a rotation) |
-| A browser's sessions (the platform's, and one per fragment origin) | the registry cell, as SHA-256 hashes of random tokens; the tokens live only in HttpOnly cookies |
-
-Never in git, a log, a command line, or a channel record. Rotating a secret means changing it in its home; everything that
-uses it reads it from there.
-
-## The deployment's secrets: its Secrets Store
-
-The secrets the Workers read live in the account's Cloudflare Secrets
-Store (open beta: one store per account, 100 secrets, values up to
-64 KiB, and a value once saved is never given back, by the API or the
-dashboard). The deployment's config (`deploy/example.jsonc`) names each
-by its store name; `cargo xtask deploy` binds each to the Workers under a
-name fixed in code (`fragment_core::secrets_store`) and reads no value:
-
-| Config field | Bound as | To |
+| Secret | Home | Set and rotated by |
 |---|---|---|
-| `host_secret` | `HOST_SECRET` | the platform Worker |
-| `host_secret_previous` (while a rotation runs) | `HOST_SECRET_PREVIOUS` | the platform Worker |
-| `codestorage.private_key` | `CODESTORAGE_KEY` | the platform Worker |
-| `workos.client_id`, `workos.api_key` | `WORKOS_CLIENT`, `WORKOS_KEY` | the platform Worker |
-| `stripe.key`, `stripe.webhook_secret` (seats sold: docs/billing.md) | `STRIPE_KEY` (the account's restricted key), `STRIPE_WEBHOOK` (this deployment's endpoint's signing secret; a branch whose deploy makes its own endpoint binds none, and its deploy uploads the endpoint's as the Worker secret `FRAGMENT_STRIPE_WEBHOOK`: decision 58) | the platform Worker |
-| `search.token` (the search service's bearer token: search/README.md) | `SEARCH_TOKEN`, sent only to `search.url` | the platform Worker |
-| a model's `key` (`models.<name>.key`: a slot of the model route on an OpenAI-compatible API) | `MODEL_KEY_<NAME>` (`cheap` → `MODEL_KEY_CHEAP`), one binding a slot, though two slots may name one secret (Finite's tiers name `fragment-openrouter-key`) | the platform Worker |
-| a provider's `key` (an operator key) | `OPERATOR_KEY_<NAME>` (`perplexity` → `OPERATOR_KEY_PERPLEXITY`) | the platform Worker |
+| The deployment's own: the host secret, the code.storage org key, WorkOS's client id and API key, Stripe's restricted key and webhook secret, the search service's token, each model slot's key on an OpenAI-compatible API, each operator key, each connection's OAuth client secret | the account's Cloudflare Secrets Store, bound to the platform Worker by name (below) | Paul, or the coordinating session, with `cargo xtask secret`; deleting one is Paul's alone |
+| A fragment's secret (an app's API key, a webhook signing key) | the fragment's Durable Object, sealed | its editors (docs/api.md), who may set and list secrets but never read one; a connector's, its owner alone (`cell/src/doors.rs`) |
+| A person's own key for an `own` provider | their computer's Durable Object, sealed | the person; one with a sign-in is exchanged by the platform and sealed at once, never pasted; revoking it is the person's, at the provider |
+| A sign-in under way (its PKCE verifier) | sealed in the computer (an own key's) or the registry (a connection's), until used or ten minutes pass | no one |
+| A fragment's nostr key (an agent's too) and its push key | made and sealed in the fragment's Durable Object, opened only to sign | no one |
+| A person's connections (Google, …) | WorkOS Pipes, which holds and refreshes them; a computer's swap asks it for a short-lived token on each call (decision 22) | the person (docs/pipes-browser-binding.md) |
+| Browser sessions | the registry, as SHA-256 hashes; the tokens only in HttpOnly cookies | no one |
+| The DNS token, a preview's test secret, the Stripe key xtask uses | files on the deploying machine, named by path in the config (Files, below) | Paul |
+| An operator key (a wipe's) | a file on the operator's machine (below) | its operator |
 
-- **Reading.** `cell/src/keys.rs` is the one place they are read.
-  A value read is kept per isolate for **at most 60 seconds**
-  (`secrets_store::CACHE_MS_MAX`, `Cache`), then read again: a value set
-  again in the store is in use in every warm isolate within a minute,
-  with no deploy. For that minute an isolate may still use the value
-  before it, which every secret here allows (a vendor's old key works
-  until the vendor revokes it; the host secret rotates by name). A
-  binding whose secret the store lacks is an error where it is read
-  (`HostFailed`); there is no fallback to a Worker secret or a variable.
-- **Before a deploy.** It lists the store (read-only) before it builds or
-  makes anything, and refuses when a secret the config names is not
-  there, naming each, the field naming it, and the `cargo xtask secret
-  set` that fixes it. The test secret is the only Worker secret a deploy
-  still uploads (`--secrets-file`, a branch's alone).
-- **Setting.** Through wrangler on the pinned Node
-  (`crates/devstack/src/store.rs`), never with `--value`: a value is
-  never on a command line, in output, or in a file outside a run's own
-  scratch.
+A computer's guest holds only placeholders (docs/computers.md). A
+placeholder's tag is an HMAC of (computer, agent, provider) under a key
+derived from the host secret and never stored, so one that leaks works
+only from that computer's egress, toward that provider.
 
-  ```
-  cargo xtask secret set <name> --config <file>              # wrangler's hidden prompt
-  printf %s "$VALUE" | cargo xtask secret set <name> --config <file>   # or standard input
-  cargo xtask secret set <name> --config <file> --from-file <path>   # a file's contents, once
-  cargo xtask secret gen <name> --config <file>              # 32 random bytes as hex, made here
-  cargo xtask secret list --config <file>                    # names and times, never values
-  ```
+## How code reaches a secret
 
-  The store is the account's one (the config's `account_id`): `set` and
-  `gen` make it, named `fragment`, when there is none, and say so; `list`
-  says there is none and makes nothing. `set` updates a secret already
-  there (but for the config's host secret, below); `gen` makes new
-  secrets only. They answer one line, `<name>: created in the account's
-  Secrets Store fragment (<id>)` (or `updated`; `gen` adds `(32 random
-  bytes as hex, made here and never shown)`). `list` answers the store's
-  secrets, each name with its created and modified times, then whether
-  the config names any it lacks. There is no `rm`: deleting a secret is
-  irreversible, and Paul's, with `wrangler secrets-store secret delete`
-  or on the dashboard. `--local <state dir>` in place of `--config` acts
-  on wrangler's local store instead (`cell/.wrangler/state` is `cargo
-  xtask dev`'s).
-- **Rotating a key** (code.storage's, WorkOS's, an operator key): `cargo
-  xtask secret set <its name> --config <file>` with the new value; warm
-  isolates use it within a minute, no deploy. Revoke the old one at its
-  vendor after that minute.
-- **Rotating the host secret** is by name, never in place: every value at
-  rest is sealed under it, and a store gives no value back, so one set
-  again in place would leave them unopenable (`set` refuses the config's
-  `host_secret` and `host_secret_previous` once they exist, and `gen`
-  never replaces anything). Make a new one, `cargo xtask secret gen
-  fragment-host-secret-<date> --config <file>`; in the config, name it as
-  `host_secret` and the one before as `host_secret_previous`; deploy.
-  Values sealed under the old one open, come back resealed, and are
-  stored so as they are read; once that has run its course, remove
-  `host_secret_previous` and deploy again (the old secret stays in the
-  store until Paul deletes it).
-- **Dev and the e2e** bind the same names (`store::Bound::conventional`,
-  `deploy/example.jsonc`'s) in wrangler's local store, in the node's own
-  state directory (`cell/.wrangler/state`; the e2e's
-  `target/e2e/<run>/cell/.wrangler/state`), never `--remote`: devstack
-  seeds it with the values it makes (its host secret, the code.storage
-  fake's org key, the WorkOS fake's client and key, the e2e's test
-  operator keys) before the node starts, once per state (a stamp beside
-  it records what was seeded), and `cargo xtask dev --clean` clears it
-  with the rest of the state.
+- **Sealed at rest** by `crates/core/src/seal.rs` through
+  `cell/src/keys.rs`: AES-256-GCM under a key HKDF'd from the host secret
+  and salted with the sealing Durable Object's class and id, so a value
+  opens only where it was sealed.
+- **`cell/src/keys.rs` is the one place a store secret is read**, through
+  a per-isolate cache (`secrets_store::CACHE_MS_MAX`): a value set again
+  is in use within a minute, with no deploy. A binding whose secret the
+  store lacks is an error; nothing falls back to a Worker secret or
+  variable.
+- **App code holds no key.** It runs in a loader isolate whose env the
+  platform builds (`js::app_env`), so it names no deployment secret. A
+  job's `job.fetch` names a fragment secret as `{{NAME}}` in a header or
+  in its URL's path or query, and the platform fills it as the request
+  leaves, over https and only toward a host the secret names
+  (`fragment_core::secrets::may_fill`). A value filled into a URL that
+  would change its scheme, host, port, path segments or query parameters
+  is not sent, and a failure's message and the answer name it as its
+  placeholder again (`fill_url`, `redact`). Its hosts are set only with
+  its value, so an editor who cannot read a value cannot send it anywhere
+  its setter did not mean.
+- **Agents hold no key.** Model calls go through the platform's model
+  route, which adds a deployment key toward that API alone; operator keys
+  and connections are swapped in at the computer's egress.
 
-**Three secrets stay local files**, named by path in the config, and are no
-store secrets:
+## The Secrets Store
 
-- `dns_token_file`: the deploying machine's own Cloudflare DNS token,
-  which xtask itself uses to make the deployment's DNS record. No Worker
-  reads it.
-- `test_secret_file`: a preview's test levers' secret (below). The hosted
-  e2e runner must send its value, and a store never gives one back; so
-  it is a file, uploaded as the Worker secret `FRAGMENT_TEST_SECRET` on a
-  branch deploy.
-- `stripe.key_file`: the Stripe account's restricted key (the store's
-  `stripe.key` holds it for the Worker), which xtask itself uses: `xtask
-  stripe check|setup`, and on a branch deploy to make the branch's own
-  webhook endpoint, whose signing secret (Stripe gives it once, as it
-  makes the endpoint) is uploaded as the Worker secret
-  `FRAGMENT_STRIPE_WEBHOOK` (decision 58). Never printed.
+The deployment's config names each secret by its store name. `cargo
+xtask deploy` binds it under a name fixed in `fragment_core::secrets_store`,
+reads no value, and refuses before building when the store lacks one the
+config names. The only Worker secrets a deploy uploads are a branch's
+test secret and its own Stripe webhook secret (decision 58).
 
-**On CI's deploy** (.github/workflows/ci.yml, `deploy`) the deploying
-machine is a runner, which holds no file of its own. Its GitHub
-environment (`preview` or `production`) holds the secrets
-`CLOUDFLARE_API_TOKEN`, which wrangler deploys with and which the job
-also writes to `~/.config/fragment/secrets/cloudflare-api-token` as the
-DNS token, and the preview's `PREVIEW_TEST_SECRET`, which it writes to
-`~/.config/fragment/secrets/preview-test-secret`, each 0600, for that
-job alone. The config it deploys from is no secret: it holds names and
-paths alone, each secret named by its store name, never a value; it
-names those two paths, and no `stripe.key_file`, which a runner lacks.
-It is the environment's file in the private repo
-finitecomputer/fragment-deploy (`preview.jsonc` or `production.jsonc`,
-at the root of its `main`), kept out of this public repo and its logs,
-and readable and editable by the team, as a GitHub secret, never read
-back, was not. The job checks it out at `main` as it stands then, with
-the environment's secret `DEPLOY_REPO_TOKEN` (a fine-grained token with
-Contents · Read on that repo alone, which the checkout does not keep),
-refuses to go on without the token or the file, and prints the commit
-it deploys from, never the contents. So a change to a config is a
-commit there, which the environment's next deploy takes: the preview's
-at master's next green push, or a re-run of its `deploy` job;
-production's only at a deploy of Paul's, his next move of `production`
-or his re-run of its `deploy` job.
-`CLOUDFLARE_ACCOUNT_ID` is **required on preview**: ci.yml's automatic
-`preview-image` job resolves/builds in that account's registry using the
-same environment's `CLOUDFLARE_API_TOKEN` (Containers access). The merge
-queue's image build (preview-image.yml) uses an environment of its own,
-`preview-image`, whose deployment branch policy admits only master's
-queue (`gh-readonly-queue/master/*`): its `CLOUDFLARE_API_TOKEN` is a
-token with the preview account's Containers · Edit permission alone, so
-code in the queue can push an image and nothing else (no Worker, no DNS,
-no deploy config), and its `CLOUDFLARE_ACCOUNT_ID` is the preview's. Production's
-deploy still makes it optional but recommended for masking; the manual
-Image workflow requires it for either environment. It is kept as a
-GitHub secret so the runner masks it wherever it appears
-in the job's logs, so the account id in wrangler's and xtask's output
-(registry paths, URLs) is `***`. Paul sets them in the repository's
-environment settings. Preview's image job passes only the digest and
-input key to deploy: an output containing the masked account ID would
-be suppressed as a secret. Deploy reconstructs its pinned reference
-using its config's account, overrides both preview image names in memory,
-and records the key and digest in its job summary. No write token for
-fragment-deploy is needed; production's config pins remain manual.
+Values go in only through `cargo xtask secret set|gen|list`
+(xtask/src/secret.rs): from wrangler's hidden prompt, standard input, or
+a file read once, never `--value`. There is no `rm`: deleting a secret is
+irreversible, and Paul's. Dev and the e2e bind the same names in
+wrangler's local store, which devstack seeds.
 
-**On the Image workflow** (.github/workflows/image.yml, run by hand:
-`cargo xtask image push|copy`) the job runs in the same environment, for
-its secrets alone: `CLOUDFLARE_API_TOKEN`, which wrangler pushes with
-(its Containers · Edit), and `CLOUDFLARE_ACCOUNT_ID`, required there, as
-it names the registry the image goes to; masked as on the deploy, in the
-run's summary too, which names the reference. A copy into production
-(its promotion, docs/computers.md, "Production") reads two more of
-production's: `PREVIEW_REGISTRY_TOKEN`, a token of the preview's account
-(Account · Containers · Read, as it only pulls; Edit if the API refuses
-Read the pull credentials), which the copy mints its credentials for
-the preview's registry with, and `PREVIEW_ACCOUNT_ID`, that account,
-named as a secret so it is masked as the other account is. Each copy
-mints registry credentials for each side as wrangler mints its own
-(`wrangler containers registries credentials`, 15 minutes, pull for the
-source, push and pull for production's), never printed, and hands them
-to skopeo on its standard input, which keeps each login in a file of its
-own (mode 600, under `target/image-copy`, mode 700), removed as the try
-ends. It reads no deploy config; a push's Docker login, which wrangler
-makes, keeps its registry credentials of 15 minutes on the runner.
+**Rotating a key**: `secret set` it again, then revoke the old one at its
+vendor once a minute has passed.
 
-## Placeholders and the operator's keys (Paul, 2026-10-04)
+### Rotating the host secret
 
-A computer's guest is given each credential its agent may use as a
-placeholder in a standard environment variable
-(`PERPLEXITY_API_KEY=fck_perplexity_<tag>`; docs/computers.md). The
-placeholder is not a secret: its tag is an HMAC of (computer, agent
-fragment, provider) under the tag key above, so it names its agent and
-works only from that computer's egress, toward its provider's own hosts.
-A guest that prints one, or a provider that echoes one, leaks nothing
-usable. The intercept adds the real credential and logs the provider
-only, never a tag or a value.
+By name, never in place: every value at rest is sealed under it and the
+store gives no value back, so `set` refuses the config's host secrets.
+Make a new one (`cargo xtask secret gen fragment-host-secret-<date>`),
+name it `host_secret` and the old one `host_secret_previous` in the
+config, and deploy. Values sealed under the old one open, and are
+resealed as they are read; placeholder tags under it still verify. Once
+that has run its course, remove `host_secret_previous` and deploy again.
 
-The operator's keys are store secrets, each named by its catalog row's
-`key` (`deploy/example.jsonc`, `deploy/e2e.jsonc`) and bound as
-`OPERATOR_KEY_<NAME>`. The platform's four are Paul's to set (`cargo
-xtask secret set <name> --config <file>`, which prompts):
+## Files
 
-| Key | Store secret | Bound as |
-|---|---|---|
-| Perplexity | `fragment-perplexity-api-key` | `OPERATOR_KEY_PERPLEXITY` |
-| Google Places | `fragment-google-places-api-key` | `OPERATOR_KEY_GOOGLE_PLACES` |
-| xAI | `fragment-xai-api-key` | `OPERATOR_KEY_XAI` |
-| ElevenLabs | `fragment-elevenlabs-api-key` | `OPERATOR_KEY_ELEVENLABS` |
+Three secrets are files named by path in a config, because xtask itself
+uses them or the store would never give them back: `dns_token_file`,
+`test_secret_file` (below), and `stripe.key_file` (xtask's Stripe calls).
 
-A deploy whose store lacks one stops before anything changes, naming the
-command that sets it. Rotating one: set it again; the swap reads it
-through the minute's cache, so it is in use within a minute, with no
-deploy. The local e2e and dev use test values of their own, in the local
-store, sent only to the upstream fake.
+CI's runners hold no files of their own. Each GitHub environment
+(`preview`, `production`) holds `CLOUDFLARE_API_TOKEN` (also written as
+the DNS token file), `DEPLOY_REPO_TOKEN` (read-only on
+finitecomputer/fragment-deploy, whose configs hold names and paths,
+never a value), `CLOUDFLARE_ACCOUNT_ID` (a secret so that logs mask it)
+and the preview's `PREVIEW_TEST_SECRET`; production's also holds
+`PREVIEW_REGISTRY_TOKEN` and `PREVIEW_ACCOUNT_ID` for copying an image
+from the preview's registry. The merge queue's image build has an
+environment of its own, `preview-image`, open only to master's queue
+(`gh-readonly-queue/master/*`), whose token has the preview account's
+Containers permission alone. Paul sets them. Registry credentials the
+image jobs mint are never printed.
 
-## The platform's OpenRouter key (Paul, 2026-10-15; decision 61)
+## The test secret
 
-Finite's own deployment runs its tiers on GLM-5.3 Flash through
-OpenRouter, on one key of the platform's OpenRouter account (`sk-or-v1-`
-and hex; its credit pays every call, which the price book charges back to
-each payer). The deployment holds it as the store secret
-`fragment-openrouter-key`, which its config names for each slot that runs
-there (`models.cheap.key`, `models.medium.key`), bound as
-`MODEL_KEY_CHEAP` and `MODEL_KEY_MEDIUM`. It is not a person's own
-OpenRouter key (decision 60: their computer's, swapped in for their own
-models, paid by their account).
-
-- **Setting it** is Paul's: make the key in the platform's OpenRouter
-  account (its settings' API keys, a credit limit on it as a backstop, and
-  zero data retention also on in the account's privacy settings, which
-  `provider.zdr` in the slots' `body` enforces per call anyway), then
-  `cargo xtask secret set fragment-openrouter-key --config <the
-  deployment's config>`, which prompts for it (or reads standard input, or
-  `--from-file`, once).
-- **Its use**, refusal and rotation are as Finite Private's below: read
-  by `keys.rs` as a call leaves for `<base_url>/chat/completions`, its
-  bearer token there and nowhere else; a deploy whose config names it
-  refuses to go on while the store lacks it; `secret set` again rotates
-  it within a minute, then revoke the old one at OpenRouter. A key
-  OpenRouter refuses (401), or an account out of credit (its 402), falls
-  back to Workers AI, every call until it is fixed, each logged aloud as
-  `model.platform-key` (the coordinator for Paul, 2026-10-15).
-- **Its routing** is the slots' `body`, not a secret: it is in the cell's
-  `FRAGMENT_MODELS` (docs/computers.md, Models).
-
-## Finite Private's key (Paul, 2026-10-14; decision 61)
-
-Finite's own deployment can run its tiers on Finite Private (its config's
-other alternative, deploy/example.jsonc), whose limiter
-lets in a key finite.computer issues (`fpk_live_` and 64 hex; finite-mono
-keeps only its SHA-256). The deployment holds it as the store secret
-`fragment-finite-private-key`, which its config names for each slot that
-runs there (`models.cheap.key`, `models.medium.key`), bound as
-`MODEL_KEY_CHEAP` and `MODEL_KEY_MEDIUM`.
-
-- **Setting it** is Paul's, once finite-mono has issued the key
-  (cloudflare-v1.md, decision 61, the ask): `cargo xtask secret set
-  fragment-finite-private-key --config <the deployment's config>`, which
-  prompts for it (or reads standard input, or `--from-file`, once).
-- **Its use.** `cell/src/keys.rs` reads it (`model_key`) as a call
-  leaves for `<base_url>/chat/completions`, its bearer token there and
-  nowhere else; no log, answer or page carries it. A deploy whose config
-  names it refuses to go on while the store lacks it, naming that
-  command once for both slots.
-- **Rotating it**: finite-mono issues a new key (its admin's rotate),
-  `secret set` it again; warm isolates use it within a minute, with no
-  deploy; then finite-mono revokes the old one. Until a value is set, or
-  if it is revoked, a call's 401 from the limiter falls back to Workers
-  AI and is logged aloud (`model.platform-key`; 2026-10-15, superseding
-  the 2026-10-14 rule that it was the call's).
-- **A preview** names no `models` (deploy/e2e.jsonc), so it needs no
-  key, and its tiers run on Workers AI. The local e2e's
-  `finite-private` section binds a test value in its local store (one
-  for Finite Private's slot and OpenRouter's), which only the model fake
-  takes.
-
-## Tinfoil's key (Paul, 2026-10-22)
-
-The private tier (deploy/example.jsonc's third alternative) runs its
-fallback on Tinfoil's DeepSeek V4.1 Flash, on the platform's own Tinfoil
-account and one key of it (`tk_…`): the store secret
-`fragment-tinfoil-api-key`, which its config names for that slot
-(`models.fallback.key`), bound as `MODEL_KEY_FALLBACK`.
-
-- **Setting it** is Paul's: make the key in the Tinfoil account's
-  dashboard (a key's own spend cap, `max_cost`, as a backstop), then
-  `cargo xtask secret set fragment-tinfoil-api-key --config <the
-  deployment's config>`, which prompts for it (or reads standard input,
-  or `--from-file`, once).
-- **Its use**, refusal and rotation are as Finite Private's above: read
-  by `keys.rs` as a call leaves for `<base_url>/chat/completions`, its
-  bearer token there and nowhere else. It is the fallback's, so a call
-  it refuses (401, or the account's balance spent, 402) has no try left:
-  its refusal is the call's, and it is logged aloud as
-  `model.platform-key`.
-- **The e2e's** private tier binds a test value of its own beside
-  Finite Private's, which the model fake takes for Tinfoil's model alone.
-
-## The test secret (previews and the local e2e)
-
-The hosted e2e (`cargo xtask e2e --hosted`, crates/e2e/src/hosted.rs)
-proves a branch deployment on its real vendors without real accounts:
-its people sign in through the deployment's test levers (docs/api.md,
-Test levers), which exist only where a test secret is.
-
-- **Its home.** A file named in the deployment's config,
-  `test_secret_file` (32 random bytes or more, as text: `openssl rand
-  -hex 32`), and no store secret: the runner sends its value, which a
-  store never gives back. `cargo xtask deploy` uploads it as
-  the Worker secret `FRAGMENT_TEST_SECRET` for a `--branch` deploy only:
-  a config of a deployment of its own (production: `platform_host` and
-  `fragment_suffix`) that names one is refused before anything is read,
-  and the cell honours none on such a deployment if one is set by hand
-  (it logs `levers.refused`). The local e2e makes one per run, in its
-  `.dev.vars`.
-- **Its use.** The hosted e2e reads the same file and sends it in the
-  `x-fragment-test-secret` header of `/api/test/*` requests, to the
-  platform's host only (never to a fragment's host, where app code reads
-  the headers). Never on a command line (the suite takes the file's
-  path), in a log, or in a report.
-- **What it opens.** Without it a lever is the 404 any missing route is.
-  With it, on a preview: e2e people only (`<name>@e2e.test`, under an
-  issuer of their own, so never a real person), seats whose paid calls
-  are capped at what the run lends them (none unless asked); levers on
-  `e2e-…` fragments and e2e people's ledgers only; no registry lever.
-  A preview makes at most 1000 e2e people and lends them at most 2000
-  paid calls a day, so a secret that leaked spends that much, and
-  touches no one real. Rotate it by changing the file and deploying the
-  branch again; take it away with `wrangler secret delete
-  FRAGMENT_TEST_SECRET --name fragment-<branch>` (removing
-  `test_secret_file` from the config leaves the Worker secret as it was).
+A preview's test levers (docs/api.md, Test levers) exist only where a
+test secret is. Its home is the config's `test_secret_file` (32 random
+bytes or more), uploaded as the Worker secret `FRAGMENT_TEST_SECRET` on a
+`--branch` deploy only: a deployment of its own refuses one at deploy and
+honours none at run time. The hosted e2e sends it in
+`x-fragment-test-secret` to the platform's host alone. It reaches only
+e2e people (`<name>@e2e.test`) and `e2e-…` fragments, within a daily
+limit, so one that leaked touches no one real. Rotate it by changing the
+file and deploying the branch. Dropping the file from the config leaves
+the Worker secret as it was: remove it with `wrangler secret delete
+FRAGMENT_TEST_SECRET --name fragment-<branch>`.
 
 ## Operator keys (a wipe's)
 
-An operator wipes a person (docs/api.md, Operators) by signing with a key
-the deployment's `operators` lists (`FRAGMENT_OPERATORS`, a Worker
-variable: public keys only). One no person holds is the one to wipe with:
-the wipe never removes it, as it removes the keys of whom it wipes.
-
-- **Its home.** A file on the operator's machine, holding the key's
-  secret (64 hex) and nothing else, 0600: `fragment operator key <file>`
-  makes it (and refuses a path that exists) and prints its npub, which
-  goes in the deployment's config (`operators`) and reaches the Worker on
-  the next deploy. The CLI reads it by path (`--key-file`, or
-  `FRAGMENT_OPERATOR_KEY_FILE`); never on a command line, in a log, or in
-  a report.
-- **The hosted e2e's** is a file `cargo xtask e2e --hosted …
-  --operator-key-file <file>` names (Paul's machine:
-  `~/.config/finite-next/secrets/e2e-operator-key`), its npub in the e2e
-  preview's config's `operators`; the runner reads it by path and wipes
-  only the e2e people it signed in. The config names no file (a key is
-  its holder's), and the deploy reads and uploads nothing of it.
-- **Rotating** one: make a new file, list its npub, deploy, then take the
-  old npub out and deploy again. A key that leaked wipes anyone until its
-  npub is taken out of `operators`.
-
-## How code uses a secret
-
-- **App code** (the facet) has no network and no keys. It runs in an
-  isolate of its own from the Worker Loader, with an env the platform
-  builds that holds only `FILES` and `globalOutbound: null`
-  (`cell/src/js.rs`), so no author code names a deployment secret (the
-  e2e's `keys` section deploys an app that looks through its env and its
-  global scope for one). It asks the platform through a capability
-  ("draw an image", "fetch this API with secret X"), and the platform
-  adds the credential on the way out: a job's `job.fetch` names a secret
-  as `{{NAME}}` in a header, or in its URL's path or query (an API that
-  takes its key there: Telegram's bot token, `bot{{TOKEN}}/`), and the
-  supervisor opens it only as the request leaves (`step_fetch` in `cell/src/jobs.rs`, the one egress
-  point), and only toward a host the secret names, over https
-  (`fragment_core::secrets::may_fill`; `secret_hosts`, beside
-  `secrets`). A URL's is checked against the URL's host as written, then
-  put in percent-encoded (`fill_url`: all but unreserved bytes and `:`),
-  and a value that would change the request's scheme, host, port, path
-  segments or query parameters (`..`, say) is not sent; a failure's
-  message, and the answer's headers and body, name it as its placeholder
-  again, so a vendor that echoes its URL hands the code no plaintext. Its hosts are set with its value and only with it, so an
-  editor, who may set and list secrets but never read one, cannot send
-  a value someone else set anywhere they did not mean it to go: the
-  code's authority ends at the secret's hosts. `job.ai.*` steps name no key: text goes through the model route
-  and images through the Worker's AI binding (cell/src/ai.rs, models.rs),
-  and the platform adds a model's key where one is needed (below).
-- **Agents in cells** call models through the platform's model route
-  (cell/src/models.rs), and hold no key: the Worker's AI binding is
-  pre-authenticated, a model on an OpenAI-compatible API (OpenRouter's,
-  Finite Private's) gets the deployment's key for it from `keys.rs` as the call
-  leaves, toward that API alone, and the payer's ledger meters each call.
-
+The deployment lists operators' npubs (`operators`), never their
+secrets. An operator's key is a file of 64 hex, 0600, that `fragment
+operator key <file>` makes, read by path (`--key-file` or
+`FRAGMENT_OPERATOR_KEY_FILE`). To rotate one, make a new one, list its
+npub and deploy, then remove the old npub and deploy. A key that leaked
+wipes anyone until its npub is removed.

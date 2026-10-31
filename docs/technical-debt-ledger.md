@@ -1542,8 +1542,8 @@ fragment.club until cutover (decisions 34–35).
 - **Risk:** the CDP client is ours to keep speaking Browser Rendering's
   session routes as `@cloudflare/puppeteer` does; a change there fails
   every try (`card.failed`) while the pages serve on. The deployment pays
-  the concurrent-browser charge quick actions do not have (docs/ledger.md,
-  Assumptions).
+  the concurrent-browser charge quick actions do not have
+  (crates/core/src/price.rs, `DEFAULT_BROWSER`).
 - **First proof:** `card.failed` events on a preview whose message is a
   CDP or session error.
 - **Delete when:** a quick action reports what the page said as it
