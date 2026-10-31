@@ -288,7 +288,8 @@ changes or removes the owner). Every other agent's sharing request is
 403, saying why: one acting as itself or for anyone else, one its owner
 holds (at any hold), and one on a fragment its owner does not own (an
 editor's agent shares nothing there). Deleting a fragment and setting
-its cap are 403 for every agent, whomever it acts for. What an agent
+its cap are 403 for every agent, whomever it acts for, as is sharing a
+connector (An agent's doors, below). What an agent
 shares names it: the member's `addedBy` and the invite's `createdBy` are
 the agent, and each change's event (`member.set`, `member.removed`,
 `invite.created`, `invite.revoked`, `visibility`, `tokens.rotated`)
@@ -369,9 +370,8 @@ address it is served at, below), and that face is what is shown:
 - the share sheet and the access view (an agent's `title`), and an
   export (its members' `title`);
 - its computer's runtime: our Hermes image tells the agent its name at
-  every turn, and names it in Bot Mode by its title (docs/computers.md,
-  "Its name, in our Hermes image" and "Bot Mode in our Hermes image").
-  Bot Mode has no picture;
+  every turn, and its teammates its title (docs/computers.md, "Its name,
+  in our Hermes image" and "Teammates in our Hermes image");
 - its owner's SimpleX app: the bridge names the agent's SimpleX profile
   by its title, which the core sends to the linked app (docs/bridge.md,
   "SimpleX"). It has no picture either.
@@ -1320,6 +1320,8 @@ shell's Apps page shows it, one row a fragment, each with its Share…
 | `PUT /api/f/{name}/secrets/{KEY}` | editor | `{value, hosts}` (`PutSecret`: a value of at most 64 KiB, and 1 to 8 hosts it may go to, each as a URL names it, `api.example.com`: no scheme, port, path, or wildcard) → `{ok, name, hosts}`; the value sealed (AES-256-GCM, key HKDF'd from the host secret salted with the fragment's Durable Object, its class and id: `keys::scope`, `fragment_core::seal`; docs/secrets.md), its hosts in place of the ones before. `job.fetch` fills it only toward one of its hosts (on any port), over https (`fragment_core::secrets::may_fill`), in a request that sets no `Host`, `Forwarded`, or `X-Forwarded-Host` header (`ROUTING_HEADERS`). Its hosts change only with its value, so no editor widens where a value goes without holding it. They are its editors' to know: the `secret.set` event (every viewer reads the event log) and a refused fetch's error name no host. A secret set before secrets named hosts fills nowhere until set again |
 | `GET /api/f/{name}/secrets` | editor | → `{secrets: [{name, hosts}]}` (`SecretList`); values never leave |
 | `DELETE /api/f/{name}/secrets/{KEY}` | editor | → `{ok, removed}` |
+| `GET /api/f/{name}/door` | its owner | → `{bound: {door, agent}}`, or `{bound: null}`: the agent whose hosted door it is (An agent's doors, below) |
+| `POST /api/f/{name}/door` | its owner, in person (never an agent, whomever it acts for) | `{act: "link", agent}` binds this fragment as `agent`'s hosted door (An agent's doors, below) → `{door, agent, relayed}`; `{act: "unlink"}` lets it go → `{ok}`. 403 when the fragment runs no blessed template named for a connector the deployment allows, or the agent is not its owner's; 400 for another `act` |
 | `GET /api/f/{name}/storage-token` | editor | → `{token, repo, api, expiresAt}`: ES256, this repo, `git:read`+`git:write`, 15 minutes. Asked through a computer's egress on a local fleet (its code.storage at a loopback address), `api` is the egress's (docs/computers.md, The fragment API) |
 | `POST /api/f/{name}/refresh` | editor | → `{ok, refs: {main: {pin, moved} \| {absent}, live: ...}}`, once a live that moved is installed (`fragment deploy` asks it). A writer to the repo asks this after its push (the CLI does), and the platform follows its own moves itself: code.storage's push webhooks are not taken. A fragment reads the branches it has no pin for once, on its first request (a name made again keeps its repo); after that a move arrives by this or the poll backstop, and a site with nothing deployed answers 404 without asking code.storage |
 | `POST /api/f/{name}/files` | editor | `{files: [{path, text \| base64} \| {path, delete: true}], message?, key?}` → `{commit}`: one commit to main, as a sync makes (at most 16 files, 400 past that, and 1 MiB of their decoded bytes in a body of at most 2 MiB, 413 past either; paths relative, no `.` or `..`). The same `key` from the same person answers the first commit again. An agent fragment's `avatar.png` that is no picture (400) or past 256 KiB (413) is refused and nothing is committed (Identities, "An agent's name and picture"). A write of what main holds already commits nothing (code.storage makes no empty commit: its 412) and answers main's tip. Main's pin moves at once; live does not |
@@ -1343,7 +1345,7 @@ shell's Apps page shows it, one row a fragment, each with its Share…
 | `PUT /api/f/{name}/schedules/{id}` | editor | `{paused}` → `{schedule}`: paused, or resumed from its next minute after now (past the owner's overdraft, a resume is 402); the same again answers the same |
 | `DELETE /api/f/{name}/schedules/{id}` | editor | → `{ok, removed}`: it fires no more; one that is not there is 404 |
 | `GET /api/f/{name}/database?table=&offset=` | the owner (never an agent: an agent's owner reads as a viewer, and an agent acts at most as an editor) | its app's database, as the platform code in its facet reads it (`__dump`, cell/platform.mjs), for an export (Export, below). With no `table`, `{schema: [{type, name, table, sql}], tables}`: each table's, index's, view's and trigger's statement in the order SQLite made them, a virtual table's shadow tables and the platform's operation ledger (`_fragment_ops`) left out, and the tables whose rows it holds. With one, `{table, offset, rows, next}`: at most 1000 of its rows from `offset`, each a JSON object of its columns (a blob `{"$base64"}`), about 4 MiB of their JSON at most (the first whatever its size), `next` the offset after them or `null` at the end; a table not in the schema is 404. Without app code, 404 `no_code`. It loads the app's code, as a query does (its dynamic worker, metered) |
-| `POST /api/f/{name}/inbox` | the inbox token | token in `x-fragment-inbox-token` or `?t=`; a JSON body `{source?, payload}` (any other JSON, or text, is the payload), at most 64 KiB → `{ok, seq, runs}`. Bad token 403; 1000 pending, 429 |
+| `POST /api/f/{name}/inbox` | the inbox token, or the secret its code's `inbox` names (Apps) | token in `x-fragment-inbox-token` or `?t=` (or, when its code names an inbox secret, that header holding it, and no token: 403 otherwise); a JSON body `{source?, payload}` (any other JSON, or text, is the payload), at most 64 KiB → `{ok, seq, runs}`. Bad token 403; 1000 pending, 429 |
 | `POST /api/f/{name}/subscriptions` | a member who may read the channel | `{channel, url}` → `{id, channel, url}`: each new record of the channel is POSTed to `url` through the delivery queue as `{type: "record", fragment, channel, record}` (unsigned: the URL is the subscriber's capability; egress-checked; at most 32 a fragment; a 404 or 410 drops it; a removed member's go with it) |
 | `GET /api/f/{name}/subscriptions` | a member (the owner sees all) | → `{subscriptions: [{id, principal, channel, url, createdAt}]}` |
 | `DELETE /api/f/{name}/subscriptions/{id}` | its subscriber, or the owner | → `{ok, removed}` |
@@ -1453,6 +1455,17 @@ the code the fragment's own.
   "run": op}` (a move of `main` changing a matching path; `*`, `**`, `?`,
   a trailing `/`). The operation must be a mutation or a job an editor
   may call.
+- `inbox` (optional): `{"header": "x-telegram-bot-api-secret-token",
+  "secret": "TELEGRAM_WEBHOOK_SECRET"}`, how its inbox knows a delivery:
+  only with that header (lower case; never `x-fragment-*`, `cookie`,
+  `host`, `authorization` or `content-type`) holding the fragment's secret
+  of that name, compared in constant time; its inbox token, which its
+  editors read, then admits nothing, and before the secret is set nothing
+  is taken. A webhook that signs with a secret the sender was given (a
+  bot's `secret_token`) reaches an app so: a delivery is forged only by
+  whoever may set that secret, its editors (on a connector, its owner
+  alone: An agent's doors), never by one who reads the inbox token. A
+  fragment on a blessed template declares none of its own.
 
 `app.mjs` exports `class App extends DurableObject` with one method per
 operation, each called `(input, call)`: `call.principal` (an identity,
@@ -2613,9 +2626,16 @@ and the AI steps (`job.ai.*`), all above:
   step is a replay). Calling a job starts it: `{run, status}`, one hop
   deeper.
 - `job.fetch(url, {method, headers, body})` → `{status, ok, headers,
-  text(), json()}`: the app's one way out. `{{NAME}}` in a header value
+  text(), json()}`: the app's one way out. `{{NAME}}` in a header value,
+  or in the URL's path or query (`https://api.telegram.org/bot{{TOKEN}}/getMe`),
   is the fragment's secret `NAME`, added by the platform at the egress
-  point; the app never holds it. It is filled only toward one of the
+  point; the app never holds it. A URL's is percent-encoded as it goes
+  in (all but unreserved bytes and `:`), and a value that would change
+  where the request goes (its host, port, path segments or query
+  parameters) fails the step, sending nothing; the answer comes back with
+  each one named as its placeholder again (a redirect's `location`, an
+  error page that echoes its URL). A URL that names no secret's name
+  (`{{id}}`, an app's own) goes as written. It is filled only toward one of the
   hosts the secret names, over https (a dev fleet's local fakes over
   http too); a fetch elsewhere fails its step, naming the secret and
   the host. http(s) only; loopback, private, and
@@ -2641,6 +2661,8 @@ and the AI steps (`job.ai.*`), all above:
   any). Each is a step, so a run reads what was true when it first took
   it, again on a retry.
 
+`job.door` is a connector's binding while it is an open door (An agent's
+doors, below), else null.
 `job.principal`, `job.role`, `job.run`, and `job.attempt` say who and
 which; `job.via` how the run started (`call`, `job`, `cron`, `channel`,
 `files`), and `job.fragment` the fragment's name. The method re-runs from the top at every step with the results so
@@ -2776,6 +2798,8 @@ API answers on the platform's host):
 | `GET __channel/{channel}?after=\|before=&limit=` | the channel's readers: the same page and exclusive cursors as `GET /api/f/{name}/channels/{channel}`, using this origin's session or share link |
 | `POST __op/{op}` | a browser's call: `application/json` `{id, input}`; a signed-in browser (`fragment_site`) calls as its person; an unsigned caller gets an anonymous principal cookie; callers holding only `public` get 60 calls a minute each, 600 per fragment (a page's live views re-run over `__live`, outside this) |
 | `POST __op/channels/{channel}` | a browser's post (`fragment.post`), through the call's door and its checks: `{id, input}` with the record's body as `input` → `{result: record, replayed}`, as `POST /api/f/{name}/channels/{channel}` answers it; a post spends the public budget as a call does (no operation name holds a `/`) |
+| `PUT __secrets/{KEY}` | an editor's session: `PUT /api/f/{name}/secrets/{KEY}`'s body and answer (`{value, hosts}` → `{ok, name, hosts}`; `application/json` only, so no cross-site form sets one), from its own page: a connector's bot token pasted where only the platform keeps it. Written, never read back; the `secret.set` event logs it |
+| `GET __door`, `POST __door` | its owner's session: `GET` and `POST /api/f/{name}/door`'s, from a connector's own page (a `POST` as `application/json`) |
 | `__signin`, `__signout` | this origin's session (Sign-in, above) |
 | `__fragment.js` | the browser library (below) |
 | `__fragment.css` | the platform's stylesheet (below), for a page that links it |
@@ -3348,8 +3372,8 @@ instead of another. The agent's own chat, `<label>-chat` (the first
 run's, titled "Your first chat": below), is titled on its own as any
 chat is, never by its agent: its row names the agent above it, and
 Rename in a chat's ⋯ renames that chat alone, as Settings' Agents
-renames the agent alone (Identities, "An agent's name and picture"). It is the one `fragment ask` and Hermes'
-Bot Mode find, by its label.
+renames the agent alone (Identities, "An agent's name and picture"). It
+is the one `fragment ask` finds, by its label.
 An agent shows its picture, where it has one, in place of its tinted
 image wherever the shell draws it (the sidebar, a chat's mark, the
 launcher, Settings). A chat still
@@ -3596,6 +3620,71 @@ viewport shorter than the layout viewport, whose bottom Safari may pan
 into view above the keyboard), so the composer sits just above the
 keyboard, not an inset's height above it.
 
+### A fragment's search
+
+A fragment's own full-text and semantic index (cell/src/searchable.rs;
+fragment_proto::search). It is the search service's (search/README.md),
+beside the deployment, `FRAGMENT_SEARCH_URL` with `SEARCH_TOKEN`. A
+deployment that names none answers these routes 404. It is opt-in: nothing
+is held for a fragment until an editor writes a source.
+
+| method & path | who | body → answer |
+| --- | --- | --- |
+| `POST /api/f/{name}/search/upsert` | an editor | `{source, revision, replaces?, title?, at?, fields?, sections: [{id, text, heading?, context?, at?, location?: {from, to}}]}` → `{source, revision, written, chunks}` |
+| `POST /api/f/{name}/search/delete` | an editor | `{source}` → `{source, deleted}` |
+| `GET /api/f/{name}/search/sources?after=&limit=` | an editor | → `{sources: [{source, revision, at, chunks}], next}`, ascending by source, `limit` 1 to 1000 |
+| `GET /api/f/{name}/search/status` | a reader | → `{exists, sources, chunks, bytes, semantic, space, forgetting}` |
+| `POST /api/f/{name}/search` | a reader | `{q, limit?, mode?, fields?, after?, before?}` → `{results: [{rank, source, section, revision, title, heading?, context?, at?, location?, snippet, score, signals}], semantic}` |
+
+- **The index.** One a fragment's life: the service's table of its scope
+  (its identity, its incarnation, `members`), which no caller names.
+  Whoever reads the fragment reads its index.
+- **A source is written whole.** An app's writer (an import, a job) sends
+  a source's sections, and they replace whatever it held, in one commit.
+  - The same `(source, revision)` again writes nothing.
+  - `replaces` is a compare-and-set: the write happens only if the
+    source's revision now is it (`""`: if it has none), else 409
+    `conflict` naming `current`.
+- **Limits**, refused 400 (413 past the body) before anything is embedded
+  or sent:
+  - at most 2,000 sections, each 1 to 8,000 characters of text, its `id`
+    at most 64 bytes;
+  - a source at most 512 bytes, a revision 128;
+  - at most 4 `fields` of `a-z`, `0-9` and `_` names and 64-byte values;
+  - a body at most 4 MiB.
+- **Embedding.** Each section is cut into chunks its embeddings slot reads
+  whole (docs/api.md, Models: its `max_input_tokens`, as the embeddings
+  route bounds an input's tokens; nothing is cut away), and each chunk's
+  input (its title, context and heading, then its text) is embedded once.
+  - A chunk whose input the index holds already is not embedded again, so
+    a conversation that grew embeds its new turns alone.
+  - A write is paid for by the fragment's owner, a question by its asker
+    (an agent's owner).
+  - An anonymous reader's question is searched by its words alone, as is
+    everything on a deployment that embeds nothing (`semantic: "off"`:
+    its tiers are private and its embeddings slot is not).
+- **Search** is by words (BM25F over title, heading, context and text) and
+  by meaning (the question's vector by cosine). Each section is ranked by
+  its best chunk and fused by reciprocal rank.
+  - `mode` is `hybrid` (the default), `lexical` or `semantic`.
+  - `fields` filters by every field named; `after` and `before` by a
+    section's `at`.
+  - A hit's `snippet` is at most 300 bytes of its best chunk; `signals`
+    says which found it.
+- **Deletes follow the files.** A source named by one of the fragment's
+  paths is forgotten when a move of main deletes that file. It is gone
+  from every answer at once (`forgetting` counts what the alarm still has
+  to send) and from the service's store within minutes. A write of the
+  source after sends its forget first, however long its retry would wait
+  (the write is refused 502 if it cannot), and one source is sent one
+  thing at a time, so no forget lands after a later write.
+- **A life's index goes with it.** A deleted or wiped fragment's index is
+  ended with its database and blobs (ended.rs): dropped, and never written
+  again, by a write sent before the end and landing after it too. A write
+  whose fragment was deleted while it waited (on its embedding, or the
+  service) is refused 404 and marks nothing of a life made again under
+  the name.
+
 ### Search (decision 9; docs/cloudflare-v1.md, lesson 12)
 
 Search is FTS5 in the person's `Principal` cell (principal.rs), a
@@ -3824,6 +3913,40 @@ through one (`fragment_core::door`):
   `relayed.sig`) within ten minutes of now (`at`, ms). Anything else that
   says `relayed` is 403: the agent's own key signs no such record. An
   app's operation or job publishes none (400).
+
+- **A hosted door** is a connector fragment of its owner's, made from the
+  platform's blessed connector template named for a connector the
+  deployment allows (`telegram`; `blessed::CONNECTORS`). What it publishes
+  as its owner's must be their words alone, so:
+  - **no one but its owner edits it**, from its making: every other caller,
+    an agent acting for its owner included, is at most a viewer there (no
+    one else sets its secrets, writes its files or pages, deploys its code
+    or calls an editor's operation; its own triggered runs keep theirs),
+    and no member is given more than viewer there (an editor's role, set
+    or invited, is 400; an agent making it for its owner joins as a
+    viewer), so its members list shows the role that counts;
+  - **no one but its owner shares it**, in person: an agent's sharing
+    request there (members, invites, visibility, rotation) is 403
+    whomever it acts for, and its status shows an agent no share link;
+  - **its code is the platform's**: an install of any other code (a fork,
+    another template, none) makes it no door again, for good, and lets its
+    binding go (`door.unmade`);
+  - **only its owner binds it, in person** (`POST /api/f/{name}/door`, or
+    `__door` from its page), never an agent, whomever it acts for; the
+    agent's fragment confirms it is theirs and an agent, and records it
+    (`door.hosted`), and the agent joins the connector as a viewer if it
+    was no member (its chat's `chat` and `work` take its posts).
+  Bound, its app (a job step or a mutation) may publish records in its
+  own channels whose `relayed` is exactly `{via: <door>, for: <owner>,
+  agent}`, unsigned: the platform knows which fragment publishes, and
+  tells its jobs (`job.door`: that `relayed`, and `to`, the agent's
+  identity, or null while it is no open door). Each publish and each
+  fetch asks the deployment's connectors again; while it is bound and its
+  door is shut, its jobs' fetches are refused too. An unlink lets the
+  binding go; its agent stays a viewer of its chat (a chat's own agent is
+  not removed), told nothing more through it. Its binding is the
+  connector's (`meta` `door_actor`), so several connectors, each its own
+  chat, may be doors of one agent.
 
 The door's key lives on the agent fragment (its `meta`), its ticket
 beside it; a fragment deleted takes them with it. An agent has one such

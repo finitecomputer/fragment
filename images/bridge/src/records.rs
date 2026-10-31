@@ -116,10 +116,10 @@ pub enum Task {
     /// (another agent of this computer in it would miss the new one).
     Joined { fragment: Option<String> },
     /// The answer to a question the agent asked another (`answer`): a turn
-    /// in `chat`, told `text` by that agent (its `name`), `hop` hand-offs
-    /// deep; `refused`: the question was never taken, and the turn never
-    /// runs.
-    Answer { chat: String, text: String, name: String, hop: u32, refused: bool },
+    /// in `chat`, told `text` by that agent (`by`, its `name`), `hop`
+    /// hand-offs deep; `refused`: the question was never taken, and the
+    /// turn never runs.
+    Answer { chat: String, text: String, by: String, name: String, hop: u32, refused: bool },
     Other,
 }
 
@@ -387,8 +387,9 @@ pub fn task(body: &Value) -> Task {
                 Some(Value::Bool(b)) => Some(*b),
                 Some(_) => None,
             };
-            match (text_field(o, "chat"), text_field(o, "text"), text_field(o, "name"), hop, refused) {
-                (Some(chat), Some(text), Some(name), Some(hop), Some(refused)) if fragment_name_ok(&chat) && !name.trim().is_empty() && name.len() <= limits::ANSWER_NAME_MAX_BYTES => Task::Answer { chat, text, name, hop, refused },
+            let by = text_field(o, "by").filter(|b| is_identity(b) && b.len() <= 128);
+            match (text_field(o, "chat"), text_field(o, "text"), by, text_field(o, "name"), hop, refused) {
+                (Some(chat), Some(text), Some(by), Some(name), Some(hop), Some(refused)) if fragment_name_ok(&chat) && !name.trim().is_empty() && name.len() <= limits::ANSWER_NAME_MAX_BYTES => Task::Answer { chat, text, by, name, hop, refused },
                 _ => Task::Other,
             }
         }
@@ -581,6 +582,9 @@ pub struct ToolEvidence {
     pub tool_call_id: String,
     pub status: ToolStatus,
     pub duration_ms: u64,
+    /// The model response whose calls were running (`Call::response`), when
+    /// its runtime says: it pairs the step with that response's calls alone.
+    pub response: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -609,8 +613,56 @@ pub fn turn_step(turn: &str, n: u32, s: &Step) -> Value {
         body["tool_call_id"] = json!(e.tool_call_id);
         body["status"] = json!(e.status);
         body["duration_ms"] = json!(e.duration_ms);
+        if let Some(r) = &e.response {
+            assert!(valid_post_id(r), "a response's id is a post id: {r}");
+            body["response"] = json!(r);
+        }
     }
     body
+}
+
+/// A tool call the model asked for, before it runs, as its runtime says
+/// so (our Hermes image: `post_api_request`, before Hermes runs any call
+/// of the response; Claude Code: its `tool_use`). Asked is no more than
+/// that: its runtime may refuse it, and only its step (`turn.step`, of the
+/// same response) says it ended. One a cut turn asked for and never ended
+/// may or may not have run (note.rs).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Call {
+    /// The model response that asked for it: an id its runtime gives each
+    /// response once (a post id), the same when the call is said again.
+    pub response: String,
+    /// Its place among that response's calls, from 0.
+    pub position: u32,
+    /// The provider's id of the call (a post id). It is no call's identity:
+    /// some providers name every response's first call `call_0`, and one
+    /// may reuse an id across a batch.
+    pub tool_call_id: String,
+    pub tool: String,
+    pub args: String,
+    pub category: Category,
+}
+
+/// A call's record id: one per turn, response and place in it, so a call
+/// said again (a frame's replay) is one record, and a provider's id reused
+/// by a later response is another call. Hashed into the record's (a
+/// response's id runs long); the body keeps the response.
+pub fn call_id(turn: &str, response: &str, position: u32) -> String {
+    let h = hex(&Sha256::digest(format!("{response}\0{position}").as_bytes()));
+    work_id(turn, &format!("call:{}", &h[..24]))
+}
+
+pub fn turn_call(turn: &str, c: &Call) -> Value {
+    assert!(valid_post_id(&c.response) && valid_post_id(&c.tool_call_id), "a call's ids are post ids: {} {}", c.response, c.tool_call_id);
+    json!({
+        "kind": "turn.call",
+        "turn": turn,
+        "response": c.response,
+        "tool_call_id": c.tool_call_id,
+        "tool": cut(&c.tool, limits::STEP_TOOL_MAX_CHARS),
+        "category": c.category.as_str(),
+        "args": cut_or_empty(&c.args, limits::STEP_ARGS_MAX_CHARS),
+    })
 }
 
 /// A turn asking `asks` something to answer in words: their next message
@@ -988,8 +1040,8 @@ mod tests {
     fn tasks_read() {
         assert_eq!(task(&json!({ "kind": "routine", "text": "water", "chat": "c--k3x9" })), Task::Routine { text: "water".into(), chat: "c--k3x9".into() });
         assert_eq!(task(&json!({ "kind": "joined", "fragment": "c--k3x9" })), Task::Joined { fragment: Some("c--k3x9".into()) });
-        let answer = json!({ "kind": "answer", "chat": "home--k3x9", "text": "t", "name": "Rowan", "hop": 2 });
-        assert_eq!(task(&answer), Task::Answer { chat: "home--k3x9".into(), text: "t".into(), name: "Rowan".into(), hop: 2, refused: false });
+        let answer = json!({ "kind": "answer", "chat": "home--k3x9", "text": "t", "by": "npub1rowan", "name": "Rowan", "hop": 2 });
+        assert_eq!(task(&answer), Task::Answer { chat: "home--k3x9".into(), text: "t".into(), by: "npub1rowan".into(), name: "Rowan".into(), hop: 2, refused: false });
         let mut refused = answer.clone();
         refused["refused"] = json!(true);
         assert!(matches!(task(&refused), Task::Answer { refused: true, .. }));
@@ -1000,7 +1052,7 @@ mod tests {
             assert!(written["name"].as_str().unwrap().len() <= limits::ANSWER_NAME_MAX_BYTES);
             assert!(matches!(task(&written), Task::Answer { .. }), "{long}");
         }
-        for (key, bad) in [("chat", json!("Home Chat")), ("name", json!(" ")), ("name", json!("a".repeat(201))), ("hop", json!(-1)), ("text", json!(null)), ("refused", json!("yes"))] {
+        for (key, bad) in [("chat", json!("Home Chat")), ("by", json!("rowan")), ("by", json!(null)), ("name", json!(" ")), ("name", json!("a".repeat(201))), ("hop", json!(-1)), ("text", json!(null)), ("refused", json!("yes"))] {
             let mut broken = answer.clone();
             broken[key] = bad;
             assert_eq!(task(&broken), Task::Other, "{key}");

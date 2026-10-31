@@ -112,7 +112,7 @@ Bodies are JSON. `api.rs` has one method for each.
 | `GET /api/computer` (no agent) | | `{computer, owner, image, agents: [{fragment, identity, name, owner}]}`; at start, then every minute, and within a second of a change to the ready file (below); `?simplex=1` when the image names a SimpleX core (below, "SimpleX") |
 | `GET /api/computer/relay?host=&port=` (no agent), WebSocket | | the XFTP relay (docs/computers.md): one per connection a SimpleX core makes to a host and port the view's `relay` names, through the cores' proxy (`src/simplex/socks.rs`), its bytes piped both ways |
 | `GET /api/computer/keepalive` (no agent), WebSocket | | held according to "Runtime work outside a turn", below; pinged every `BRIDGE_KEEPALIVE_PING_MS` (15 s), and opened again after twice that with nothing heard, since a deploy can cut the platform's side of it with no close reaching here (#557) |
-| `GET /api/fragments?for=<owner>` | | `{fragments: [{name, kind, owned, title}]}`: its owner's, as the agent reaches them: its own chat with them found by its label (`api::bot_chat`), as a routine with no chat fires |
+| `GET /api/fragments?for=<owner>` | | `{fragments: [{name, kind, owned, title}]}`: its owner's, as the agent reaches them: its own chat with them found by its label (`api::own_chat`), as a routine with no chat fires |
 | `POST /api/fragments?for=<owner>` | `{name, template: "chat", title}` | the agent's SimpleX chat, made for its owner by the name its link chose, when its link is bound; 409, made already (then `GET /api/f/{chat}/members` says whether it is the agent's and its owner's: below, "SimpleX") |
 | `GET /api/f/{agent}/file?path=agent.json` | | its home (`api::Home`), read as a routine with no chat fires (docs/api.md, "An agent's home"); none (404) is its own chat. Its `runtime` (above, "Which runtime runs an agent"), with every read of the computer; none (404) names none |
 | `GET /api/f/{agent}/status` | | `{title}`: the agent's name (docs/api.md, "An agent's name and picture"), read every 10 s while its SimpleX core runs (below, "SimpleX") |
@@ -273,9 +273,8 @@ within 3 s.
 A person's agents hand work to each other in a chat they share, by
 `@name` in a reply (the bridge stamps its `to`), or by a message one posts
 itself naming the other in `to` (`fragment ask`, cli/src/ask.rs; in our
-Hermes image, a bot's `message_agent` too, which the image posts into the
-other's own chat that way: docs/computers.md, "Bot Mode in our Hermes
-image"). The bridge that answers decides whether it is a turn, and how
+Hermes image, its `fragment_ask` tool: docs/computers.md, "Teammates in
+our Hermes image"). The bridge that answers decides whether it is a turn, and how
 deep (docs/chat-records.md, "An agent's reply"):
 
 - **The hop is counted here, not read.** A record by an agent of this
@@ -404,11 +403,12 @@ Waiting on a person alone never holds it.
 
 The image's `fragment-activity` plugin uses Hermes v0.21.7's supported
 hooks: `subagent_start` and `subagent_stop` for its children,
-`pre_llm_call` and `post_tool_call` for the person's turns' steps (below).
+`pre_llm_call`, `post_api_request` and `post_tool_call` for the person's
+turns' calls and steps (below).
 Its one `ws://<bridge listen>/relay/activity` socket, authenticated by the
 gateway's normal Relay bearer token (`gateway.relay.auth.make_token`),
-carries both. The bridge answers each frame (`working`, `observed`, or
-`refused`) once its loop has it, and the hook returns only then, so the
+carries both. The bridge answers each frame (`working`, `called`,
+`observed`, or `refused`) once its loop has it, and the hook returns only then, so the
 parent's end cannot release a hold first, nor a step come after its
 turn's end.
 
@@ -443,6 +443,33 @@ progress showed), its `excerpt` a command's exit code, never its output or
 error text. A call whose end is not observed (no hook, a lost socket) is
 no step: delivery is best effort, each frame sent at most once, and
 nothing is guessed.
+
+A call's intent comes before it runs: each call of a model's response, as
+Hermes' `post_api_request` hands its `assistant_message` (fired in
+`normalize_model_response`, before `run_tool_round` runs any of them;
+Hermes runs them all before it asks the model again; read from v0.21.7
+and v0.22.5). Hermes has no supported "call started" hook: `pre_tool_call`
+is a policy gate that runs before Hermes' own refusals and blocks a call
+whose hook is slow (`plugins.hook_callback_timeout`), so no observer of
+ours sits there. The plugin names each response that asks for calls once
+(its gateway's life, random, and a count: `<life>-<n>`) and says each call
+(`{"turn", "response", "call": {position, tool_call_id, tool, args}}`,
+answered `called`); the engine records it on `work` as a `turn.call`
+(docs/chat-records.md), one record per turn, response and place
+(`records::call_id`), so a frame said again is one record. The provider's
+id is no call's identity: some providers name every response's first call
+`call_0`, and Hermes renames a call after saying it (`run_tool_round`
+de-duplicates the ids a session used before, `call_0_d2`, splits
+composite ones and rewrites some providers'). A call's end names the
+turn's latest response (`"response"` on its frame), and a step pairs with
+a call of that response alone: by id, else by its tool and arguments, one
+step to one call. Asked is all a call's record says: a refusal may still
+stop the call, and only its step says it ended. A turn a restart cut is
+told, first, each call it asked for that no step ended: each may or may
+not have run (note.rs). The record is posted as soon as the lane can,
+after the hook is answered, so it trails the call's start by the lane's
+milliseconds; a call whose intent never landed is told as before, by its
+steps alone.
 
 Files from delegated completion use the same path: `send_media` accepts an
 upload or a fetched provider URL after the parent ends and posts a reply
@@ -1059,10 +1086,6 @@ get_chat_info`.
   Stop is. `/new` resets the session under the chat's own key (Hermes'
   `_handle_reset_command`: a new session id, the key the same; the
   overlay's `approvals.destructive_slash_confirm: false` asks nothing).
-  In an agent's own chat the image's Bot Chat hook titles the new session
-  `Bot Chat` as the next turn starts (docs/computers.md, "Bot Mode in our
-  Hermes image"); until then the keeper holds the session before, still
-  titled and the chat's, so a teammate's message still reaches the chat.
   `/model` and `/reasoning` change the chat's session alone: `--global`
   (and `reasoning`'s `show`, `hide`, which write the gateway's display
   settings) are refused.

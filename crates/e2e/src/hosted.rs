@@ -295,6 +295,7 @@ fn offers(hosted: &Hosted) -> Offers {
 /// secret in `shared`.
 fn suite(only: Option<Vec<String>>, except: Vec<String>, hosted: &Hosted, shared: Arc<api::Run>, cli: PathBuf, scratch: PathBuf) -> Suite {
     Suite {
+        search: None,
         only,
         except,
         shard: None,

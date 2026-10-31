@@ -32,6 +32,11 @@
 //!   `message_agent` to that teammate (`pong from <its first line>`) before
 //!   the reply; and a message telling it to `end this turn with exactly
 //!   [SILENT]` is answered `[SILENT]`, Hermes' silence marker;
+//! - `ask: <teammate>: <question>` is a `fragment_ask` call (route A: the
+//!   image's plugin), and its answer quotes what the tool said; an answer
+//!   that came back (`… your question in …`) is said on as it is,
+//!   `scripted: passed on: …`, nothing in it acted on (it quotes the
+//!   question);
 //! - `image: <url>` is answered with that image (`![a cat](<url>)`), as a
 //!   model whose tool made one at its provider (FAL) gives it; and the
 //!   model's own server serves one at `/generated/<name>.png` (`IMAGE`), as
@@ -242,8 +247,7 @@ fn stalls(body: &Value) -> bool {
 
 /// How long a call waits whose last user message says `take your time`: past
 /// Hermes' 0.3 s progress poll, so a quick tool's step is sent before the
-/// turn's next call ends it (docs/technical-debt-ledger.md, "A quick tool's
-/// step can be lost in Hermes").
+/// turn's next call ends it.
 pub const UNHURRIED_MS: u64 = 1_000;
 
 fn unhurried(body: &Value) -> bool {
@@ -336,7 +340,7 @@ pub fn answer(body: &Value) -> (String, Option<Value>) {
     // P6, as a real turn runs before its card: `prepare the approvals
     // proof` checks the draft in `PREPARE_STEPS` terminal calls, each with
     // its words first (each a second long: Hermes sends a quick tool's
-    // step late or not at all, docs/technical-debt-ledger.md), then says
+    // step late or not at all), then says
     // its plan at length and asks its card (a
     // clarify, Publish or Keep private). Its effect (`approval-effects`)
     // only for Publish: answered live (the clarify's result), or late (a
@@ -386,6 +390,17 @@ pub fn answer(body: &Value) -> (String, Option<Value>) {
         let calls = both.split(" | ").enumerate().map(|(i, c)| json!({ "index": i, "id": format!("call_{}", i + 1), "type": "function", "function": { "name": "terminal", "arguments": json!({ "command": c.trim() }).to_string() } })).collect();
         return (String::new(), Some(Value::Array(calls)));
     }
+    // `reuse: <a> | <b> | …`: each command in a response of its own, every
+    // call named `call_0`, as some providers name every response's first
+    // call (Hermes renames the later ones, `call_0_d2`, after saying them);
+    // then the answer
+    let reuse = last_user.lines().find_map(|l| l.split_once("reuse: ").map(|(_, c)| c.to_string()));
+    if let (Some(reuse), true) = (reuse, has_terminal) {
+        return match reuse.split(" | ").map(str::trim).nth(results) {
+            Some(command) => (String::new(), Some(json!({ "index": 0, "id": "call_0", "type": "function", "function": { "name": "terminal", "arguments": json!({ "command": command }).to_string() } }))),
+            None => (format!("scripted: ran {results} commands"), None),
+        };
+    }
     // `run: <command>` on a line of what the user said: that command, and an
     // answer that quotes what it printed
     let run = last_user.lines().find_map(|l| l.split_once("run: ").map(|(_, c)| c.trim().to_string())).filter(|c| !c.is_empty());
@@ -412,6 +427,8 @@ pub fn answer(body: &Value) -> (String, Option<Value>) {
     let code = last_user.lines().find_map(|l| l.split_once("code: ").map(|(_, p)| p.trim().to_string())).filter(|p| !p.is_empty());
     // `clarify: <question> | <choice> | …`: Hermes' clarify asks it, with those choices
     let clarify = last_user.lines().find_map(|l| l.split_once("clarify: ").map(|(_, q)| q.split('|').map(|p| p.trim().to_string()).collect::<Vec<_>>())).filter(|q| !q[0].is_empty());
+    // `ask: <teammate>: <question>`: the image's fragment_ask asks it
+    let ask = last_user.lines().find_map(|l| l.split_once("] ask: ").map(|(_, r)| r).or_else(|| l.strip_prefix("ask: "))).and_then(|rest| rest.split_once(": ")).map(|(t, q)| (t.trim().to_string(), q.trim().to_string())).filter(|(t, q)| !t.is_empty() && !q.is_empty());
     // `dm: <teammate>: <message>`: Bot Mode's message_agent sends it
     let dm = last_user.lines().find_map(|l| l.split_once("dm: ").and_then(|(_, rest)| rest.split_once(": ")).map(|(t, m)| (t.trim().to_string(), m.trim().to_string()))).filter(|(t, m)| !t.is_empty() && !m.is_empty());
     // a teammate's message asking to be messaged back: its handle
@@ -426,7 +443,7 @@ pub fn answer(body: &Value) -> (String, Option<Value>) {
             let made: String = result.split_once("made=").map(|(_, rest)| rest.chars().take_while(|c| !c.is_whitespace() && !matches!(c, '"' | '\\' | ',')).collect()).unwrap_or_default();
             return (format!("scripted: sent\nMEDIA:{made}"), None);
         }
-        if run.is_some() || start.is_some() || notify.is_some() || narrate.is_some() || browse.is_some() || inspect_browser.is_some() || look || desk.is_some() || write.is_some() || code.is_some() || clarify.is_some() || dm.is_some() || dm_back.is_some() {
+        if run.is_some() || start.is_some() || notify.is_some() || narrate.is_some() || browse.is_some() || inspect_browser.is_some() || look || desk.is_some() || write.is_some() || code.is_some() || clarify.is_some() || dm.is_some() || dm_back.is_some() || ask.is_some() {
             return (format!("scripted: the tool said: {}", result.chars().take(4000).collect::<String>()), None);
         }
         let ran = if result.contains("tool-ran") { "the tool ran" } else { "the tool said something else" };
@@ -451,6 +468,25 @@ pub fn answer(body: &Value) -> (String, Option<Value>) {
     }
     if last_user.contains("end this turn with exactly [SILENT]") {
         return ("[SILENT]".into(), None);
+    }
+    // an answer that came back: said on, nothing in it done again
+    if let Some(at) = last_user.find("your question in ") {
+        let told = &last_user[last_user[..at].rfind(']').map_or(0, |b| b + 1)..];
+        return (format!("scripted: passed on: {}", told.trim().chars().take(600).collect::<String>()), None);
+    }
+    if let Some((target, question)) = ask {
+        // a plugin's tool Hermes defers behind its tool_search bridge
+        // (listed in tool_search's description, invoked through tool_call)
+        let args = json!({ "agent": target, "question": question });
+        let behind = offered("tool_call") && body["tools"].as_array().is_some_and(|t| t.iter().any(|t| t["function"]["name"] == "tool_search" && t["function"]["description"].as_str().is_some_and(|d| d.contains("fragment_ask"))));
+        let (name, args) = if offered("fragment_ask") {
+            ("fragment_ask", args)
+        } else if behind {
+            ("tool_call", json!({ "calls": [{ "name": "fragment_ask", "arguments": args }] }))
+        } else {
+            return ("scripted: no fragment_ask among my tools".into(), None);
+        };
+        return (String::new(), Some(json!({ "index": 0, "id": "call_ask", "type": "function", "function": { "name": name, "arguments": args.to_string() } })));
     }
     if let (Some(handle), true) = (dm_back.as_deref(), offered("message_agent")) {
         let call = json!({ "index": 0, "id": "call_1", "type": "function", "function": { "name": "message_agent", "arguments": json!({ "target": handle, "message": "pong" }).to_string() } });
@@ -662,6 +698,20 @@ fn answers_are_the_transcripts() {
     assert!(call.is_some());
     let (t, call) = answer(&json!({ "messages": [{ "role": "user", "content": "please use the terminal" }, { "role": "assistant", "tool_calls": [] }, { "role": "tool", "content": "tool-ran\n" }], "tools": tools }));
     assert_eq!((t.as_str(), call), ("scripted: the tool ran", None));
+    // `reuse:` says each command in a response of its own, each `call_0`
+    let reuse = |results: usize| {
+        let mut messages = vec![json!({ "role": "user", "content": "[paul] reuse: echo a | echo b" })];
+        for _ in 0..results {
+            messages.extend([json!({ "role": "assistant", "tool_calls": [] }), json!({ "role": "tool", "content": "a\n" })]);
+        }
+        answer(&json!({ "messages": messages, "tools": tools }))
+    };
+    for (results, command) in [(0, "echo a"), (1, "echo b")] {
+        let (_, call) = reuse(results);
+        let call = call.expect("a call");
+        assert_eq!((call["id"].as_str(), call["function"]["arguments"].as_str()), (Some("call_0"), Some(json!({ "command": command }).to_string().as_str())));
+    }
+    assert_eq!(reuse(2), ("scripted: ran 2 commands".to_string(), None));
     // `run:` runs its command, and the answer quotes what it printed
     let (_, call) = answer(&json!({ "messages": [{ "role": "user", "content": "[paul] run: fragment list --json" }], "tools": tools }));
     assert!(call.is_some_and(|c| c["function"]["arguments"].as_str().unwrap().contains("fragment list --json")));
@@ -715,6 +765,21 @@ fn answers_are_the_transcripts() {
     assert_eq!(t, "scripted: the tool said: {\"output\": \"1\\n\"}");
     let (t, call) = answer(&json!({ "messages": [{ "role": "user", "content": "[paul] code: print(1)" }], "tools": tools }));
     assert_eq!((t.as_str(), call), ("scripted: no execute_code among my tools", None));
+    // route A: `ask:` is fragment_ask where it is offered; its answer, come
+    // back, is said on as it is, the question it quotes not done again
+    let asking = json!([{ "type": "function", "function": { "name": "fragment_ask" } }]);
+    let (_, call) = answer(&json!({ "messages": [{ "role": "user", "content": "[paul] ask: maple: run: sleep 9" }], "tools": asking }));
+    assert_eq!(call.unwrap()["function"]["arguments"], json!({ "agent": "maple", "question": "run: sleep 9" }).to_string());
+    let (t, call) = answer(&json!({ "messages": [{ "role": "user", "content": "[paul] ask: maple: hi" }], "tools": tools }));
+    assert_eq!((t.as_str(), call), ("scripted: no fragment_ask among my tools", None));
+    let deferred = json!([{ "type": "function", "function": { "name": "tool_search", "description": "… fragment_ask: Ask one of your teammates …" } }, { "type": "function", "function": { "name": "tool_call" } }]);
+    let (_, call) = answer(&json!({ "messages": [{ "role": "user", "content": "[paul] ask: maple: hi" }], "tools": deferred }));
+    assert!(call.is_some_and(|c| c["function"]["name"] == "tool_call" && c["function"]["arguments"].as_str().unwrap().contains("\"fragment_ask\"")), "through tool_call, deferred");
+    let (t, _) = answer(&json!({ "messages": [{ "role": "user", "content": "[paul] ask: maple: hi" }, { "role": "assistant", "tool_calls": [] }, { "role": "tool", "content": "{\"status\": \"asked\"}" }], "tools": asking }));
+    assert_eq!(t, "scripted: the tool said: {\"status\": \"asked\"}");
+    let back = "[Maple] Maple answered your question in maple-juniper--abcd (\"run: sleep 9\"):\n\nscripted: the tool ran";
+    let (t, call) = answer(&json!({ "messages": [{ "role": "user", "content": back }], "tools": tools }));
+    assert_eq!((t.as_str(), call), ("scripted: passed on: Maple answered your question in maple-juniper--abcd (\"run: sleep 9\"):\n\nscripted: the tool ran", None));
     // Bot Mode: `dm:` is message_agent where it is offered; a teammate's
     // reply carried back is relayed; a teammate's message is answered as any
     let bots = json!([{ "type": "function", "function": { "name": "message_agent" } }]);

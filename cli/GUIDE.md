@@ -907,7 +907,7 @@ An agent's name and picture are its agent fragment's: its title
 (`fragment.json`'s `meta.title`) and its `avatar.png` (a PNG, JPEG, WebP
 or GIF of at most 256 KiB), as live has them. Every page shows the agent
 by them (your shell, its chats, the share sheet, push notifications),
-and so does its runtime (Hermes' Bot Mode), within seconds of a change:
+and so does its runtime (its teammates are told it), within seconds of a change:
 
 ```
 fragment agent juniper--k3x9 --name Frank          # its name

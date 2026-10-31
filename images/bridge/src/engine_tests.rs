@@ -288,6 +288,42 @@ fn ev(e: &mut Engine, event: Event, now: u64) -> Step {
     answered(e, s, now)
 }
 
+/// Goal (phase 4): a call the model asked for is recorded on `work` as it
+/// is said, before it runs: its intent alone (an open reply stays open, and
+/// nothing is shown run). Its record is its turn's, response's and place's:
+/// a provider's id reused by a later response (`call_0`, every response)
+/// is another record. Replay: said again, it posts the same record, which
+/// the platform keeps once. Invalid: one about no running turn, or whose
+/// ids are no post ids, records nothing. Its bound is the steps', counting
+/// every call said.
+#[test]
+fn a_call_is_recorded_before_it_runs() {
+    let a = agent("juniper");
+    let v = view(&[&a]);
+    let mut e = engine(std::slice::from_ref(&a));
+    let t = started(&said(&mut e, &a, &v, 1, "npub1paul", json!({ "text": "ship it" }), T0)).expect("a turn").turn;
+    let call = |response: &str, id: &str, args: &str| records::Call { response: response.into(), position: 0, tool_call_id: id.into(), tool: "terminal".into(), args: args.into(), category: records::Category::Shell };
+    assert!(posts(&e.step(heard(Event::Reply { turn: t.clone(), part: 1, text: "On it.".into() }), T0 + 1)).is_empty());
+    let s = e.step(heard(Event::Called { turn: t.clone(), call: call("r1", "call_0", "ls") }), T0 + 2);
+    assert_eq!(posts(&s), vec![(records::call_id(&t, "r1", 0), records::turn_call(&t, &call("r1", "call_0", "ls")))], "its intent alone: the reply before it stays open");
+    assert!(s.dirty, "its count is kept");
+    let again = e.step(heard(Event::Called { turn: t.clone(), call: call("r1", "call_0", "ls") }), T0 + 3);
+    assert_eq!(posts(&again), posts(&s), "the same record again");
+    for args in ["make deploy", "ls"] {
+        let later = posts(&e.step(heard(Event::Called { turn: t.clone(), call: call("r2", "call_0", args) }), T0 + 3));
+        assert_eq!(later, vec![(records::call_id(&t, "r2", 0), records::turn_call(&t, &call("r2", "call_0", args)))], "a later response's call_0 is another");
+        assert_ne!(later[0].0, posts(&s)[0].0);
+    }
+    assert!(posts(&e.step(heard(Event::Called { turn: t.clone(), call: call("r3", "has space", "ls") }), T0 + 4)).is_empty());
+    assert!(posts(&e.step(heard(Event::Called { turn: t.clone(), call: call("has space", "call_0", "ls") }), T0 + 4)).is_empty());
+    assert!(posts(&e.step(heard(Event::Called { turn: "nope".into(), call: call("r3", "call_0", "ls") }), T0 + 5)).is_empty(), "no running turn");
+    let more: usize = (0..limits::STEPS_PER_TURN_MAX + 5).map(|i| posts(&e.step(heard(Event::Called { turn: t.clone(), call: call(&format!("m{i}"), "call_0", "ls") }), T0 + 6)).len()).sum();
+    assert_eq!(more, limits::STEPS_PER_TURN_MAX as usize - 6, "200 calls a turn, every one said counted");
+    // its step still ends it as before, the open reply posted first
+    let step = ToolStep { tool: "terminal".into(), args: "make deploy".into(), ok: true, excerpt: String::new(), category: records::Category::Shell, evidence: None };
+    assert_eq!(kinds(&e.step(heard(Event::Step { turn: t.clone(), step }), T0 + 7)), vec!["reply", "turn.step"]);
+}
+
 /// Goal: a person's message to the lead starts exactly one turn, which is
 /// handed to the runtime with who asked, and keeps the computer awake.
 #[test]
@@ -1721,10 +1757,10 @@ fn a_question_is_answered_back_where_it_was_asked() {
     assert_eq!(*body, json!({ "kind": "answer", "chat": HOME, "text": text, "by": "npub1rowan", "name": "Rowan", "asked": { "fragment": "talk--k3x9", "seq": 1 }, "turn": t.turn, "outcome": "idle", "hop": 2 }), "called by its name, as its chat shows it");
     assert!(e.state().turns.is_empty(), "let go once its end and its answer are posted");
 
-    // juniper's bridge reads it: a turn at home, its owner's, told by rowan
+    // juniper's bridge reads it: a turn at home, asked as rowan
     let a = read(&mut e, &juniper, &juniper.fragment, answer_task(1, &juniper.identity, body.clone()), None, T0 + 7);
     let woke = started(&a).expect("juniper's answer turn");
-    assert_eq!((woke.fragment.as_str(), woke.text.as_str(), woke.asker.as_str(), woke.asker_name.as_str()), (HOME, text, "npub1paul", "Rowan"));
+    assert_eq!((woke.fragment.as_str(), woke.text.as_str(), woke.asker.as_str(), woke.asker_name.as_str()), (HOME, text, "npub1rowan", "Rowan"), "named as the agent that answered");
     assert_eq!(woke.turn, records::turn_id(&juniper.fragment, &juniper.fragment, "tasks", 1));
     assert_eq!(e.state().turns[&woke.turn].hop, 2, "no shallower than the turn that answered");
     assert!(e.state().agent_turns.contains_key(HOME), "it spends its chat's budget");
@@ -1814,6 +1850,43 @@ fn every_end_of_an_asked_turn_answers() {
     let s = read(&mut e, &rowan, "talk--k3x9", question(100, "q"), Some(&talk), T0);
     assert_eq!(kinds(&s), vec!["turn.start", "turn.end", "answer"], "refused, and said so");
     assert_eq!((&answers(&s)[0].2["refused"], &answers(&s)[0].2["error"]), (&json!(true), &json!(REFUSED_QUEUED)));
+}
+
+/// Goal (Paul, 2026-10-30): an answer's turn is asked as the agent that
+/// answered (its identity, its name), and is still its owner's business in
+/// the chat it runs in: their Stop stops it, and a question it asks in
+/// words waits for them (`turn.asked` says so), their next message its
+/// answer, never a turn of its own; it is not ended as a question to an
+/// agent. Invalid: another person's Stop, and the answering agent's words.
+#[test]
+fn an_answers_turn_is_its_answerers_and_its_owners_to_stop_and_answer() {
+    let (rowan, juniper) = (agent("rowan"), agent("juniper"));
+    let mut home = view(&[&juniper]);
+    home.names.insert("npub1rowan".into(), "Rowan".into());
+    let mut e = engine(&[rowan.clone(), juniper.clone()]);
+    let answer = |seq: u64| answer_task(seq, &juniper.identity, json!({ "kind": "answer", "chat": HOME, "text": "Rowan answered your question in talk--k3x9 (\"q\"):\n\nWhich garden?", "by": "npub1rowan", "name": "Rowan", "asked": { "fragment": "talk--k3x9", "seq": seq }, "turn": format!("t{seq}"), "outcome": "idle", "hop": 2 }));
+    let said = |e: &mut Engine, seq: u64, who: &str, body: Value| read(e, &juniper, HOME, rec(seq, who, body), Some(&home), T0);
+
+    // Stop: skyler's is passed over, paul's stops it
+    let t = started(&read(&mut e, &juniper, &juniper.fragment, answer(1), None, T0)).expect("the answer's turn").turn;
+    assert_eq!(e.state().turns[&t].asker, "npub1rowan");
+    let s = said(&mut e, 1, "npub1skyler", json!({ "kind": "stop", "turn": t }));
+    assert!(commands(&s).is_empty(), "not skyler's: {:?}", s.effects);
+    let s = said(&mut e, 2, "npub1paul", json!({ "kind": "stop", "turn": t }));
+    assert!(commands(&s).contains(&Command::Stop { turn: t.clone() }), "its owner's Stop: {:?}", s.effects);
+    ev(&mut e, Event::End { turn: t, outcome: Outcome::Stopped }, T0);
+
+    // a question in words: it waits for paul, whose next message answers it
+    let t = started(&read(&mut e, &juniper, &juniper.fragment, answer(2), None, T0)).expect("the answer's turn").turn;
+    ev(&mut e, Event::Reply { turn: t.clone(), part: 1, text: "Which garden do you mean?".into() }, T0);
+    let s = ev(&mut e, Event::Asked { turn: t.clone() }, T0);
+    assert!(!commands(&s).contains(&Command::Forget { turn: t.clone() }), "not ended as a question to an agent: {:?}", s.effects);
+    assert!(posts(&s).iter().any(|(_, b)| b["kind"] == "turn.asked" && b["asks"] == "npub1paul"), "the chat is told it waits for paul: {:?}", posts(&s));
+    let s = said(&mut e, 3, "npub1rowan", json!({ "text": "the back one", "to": ["npub1juniper"] }));
+    assert!(!commands(&s).iter().any(|c| matches!(c, Command::Tell { .. })), "the answering agent's words are not its answer: {:?}", s.effects);
+    let s = said(&mut e, 4, "npub1paul", json!({ "text": "the back one" }));
+    assert!(commands(&s).iter().any(|c| matches!(c, Command::Tell { turn, by, .. } if *turn == t && by == "npub1paul")), "paul's are: {:?}", s.effects);
+    assert!(started(&s).is_none(), "and start no turn of their own");
 }
 
 /// Goal (#717's re-review): an ask's turn (one with a return) that asks

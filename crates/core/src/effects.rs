@@ -69,8 +69,9 @@ pub enum Effect {
 /// which are the platform's), never to one that says `from` (its records
 /// are its posters' own: a member of that kind, posting as itself; an
 /// app's record would be named for whoever called it), with a valid kind
-/// and a bounded body.
-pub fn check_record(channel: &str, kind: &str, body: &Value, declared: &BTreeMap<String, ChannelDecl>) -> Result<(), String> {
+/// and a bounded body. It relays no one (`relayed`), unless the fragment is
+/// a hosted door (`hosted`) and it says exactly what that door relays.
+pub fn check_record(channel: &str, kind: &str, body: &Value, declared: &BTreeMap<String, ChannelDecl>, hosted: Option<&crate::door::Hosted>) -> Result<(), String> {
     if BUILTIN_CHANNELS.contains(&channel) {
         return Err(format!("channel {channel:?} is the platform's; an app publishes to the channels its fragment.json declares"));
     }
@@ -83,8 +84,8 @@ pub fn check_record(channel: &str, kind: &str, body: &Value, declared: &BTreeMap
     if !valid_kind(kind) {
         return Err("kind must match ^[a-z][a-z0-9._-]{0,63}$".into());
     }
-    if crate::door::relays(body) {
-        return Err("a record that relays its agent's owner (`relayed`) is posted through that agent's door, never published by an app".into());
+    if crate::door::relays(body) && hosted.is_none_or(|h| body["relayed"] != h.relayed()) {
+        return Err("a record that relays its agent's owner (`relayed`) is posted through that agent's door: an app publishes one only as the connector its owner bound as that door, `relayed` exactly {via, for, agent}".into());
     }
     let size = body.to_string().len();
     if size > limits::RECORD_BODY_MAX_BYTES {
@@ -108,13 +109,13 @@ fn only(obj: &Map<String, Value>, keys: &[&str]) -> Result<(), String> {
     }
 }
 
-fn decode_one(v: &Value, declared: &BTreeMap<String, ChannelDecl>) -> Result<Effect, String> {
+fn decode_one(v: &Value, declared: &BTreeMap<String, ChannelDecl>, hosted: Option<&crate::door::Hosted>) -> Result<Effect, String> {
     let obj = v.as_object().ok_or("an effect is an object")?;
     if obj.contains_key("channel") {
         only(obj, &["channel", "kind", "body"])?;
         let (channel, kind) = (string(obj, "channel")?, string(obj, "kind")?);
         let body = obj.get("body").ok_or("body is missing")?;
-        check_record(channel, kind, body, declared)?;
+        check_record(channel, kind, body, declared, hosted)?;
         Ok(Effect::Record { channel: channel.to_string(), kind: kind.to_string(), body: body.clone() })
     } else if obj.contains_key("file") {
         only(obj, &["file", "text", "base64"])?;
@@ -143,7 +144,7 @@ fn decode_one(v: &Value, declared: &BTreeMap<String, ChannelDecl>) -> Result<Eff
 
 /// Decodes what a committed mutation asked for, all or nothing: one
 /// refusal refuses every effect, before any is applied.
-pub fn decode(effects: &Value, declared: &BTreeMap<String, ChannelDecl>) -> Result<Vec<Effect>, String> {
+pub fn decode(effects: &Value, declared: &BTreeMap<String, ChannelDecl>, hosted: Option<&crate::door::Hosted>) -> Result<Vec<Effect>, String> {
     let list = effects.as_array().ok_or("a mutation's effects are an array")?;
     if list.len() > limits::EFFECTS_MAX {
         return Err(format!("a mutation has at most {} effects, not {}", limits::EFFECTS_MAX, list.len()));
@@ -151,7 +152,7 @@ pub fn decode(effects: &Value, declared: &BTreeMap<String, ChannelDecl>) -> Resu
     let mut out = Vec::with_capacity(list.len());
     let (mut files, mut file_bytes) = (0usize, 0usize);
     for (i, v) in list.iter().enumerate() {
-        let effect = decode_one(v, declared).map_err(|why| format!("effect {i}: {why}"))?;
+        let effect = decode_one(v, declared, hosted).map_err(|why| format!("effect {i}: {why}"))?;
         if let Effect::File { bytes, .. } = &effect {
             files += 1;
             file_bytes += bytes.as_ref().map_or(0, Vec::len);
@@ -180,7 +181,7 @@ mod tests {
     }
 
     fn refusal(effects: Value) -> String {
-        decode(&effects, &declared()).expect_err("refused")
+        decode(&effects, &declared(), None).expect_err("refused")
     }
 
     const SHA: &str = "4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393";
@@ -196,6 +197,7 @@ mod tests {
                 { "push": "*", "payload": { "title": "t" } },
             ]),
             &declared(),
+            None,
         )
         .unwrap();
         assert_eq!(got[0], Effect::Record { channel: "room".into(), kind: "said".into(), body: json!({ "text": "hi" }) });
@@ -204,7 +206,7 @@ mod tests {
         assert_eq!(got[2], Effect::File { path: at("b.bin"), bytes: Some(vec![0, 159, 146, 150]) });
         assert_eq!(got[3], Effect::File { path: at("gone.txt"), bytes: None });
         assert_eq!(got[4], Effect::Push { who: "*".into(), payload: json!({ "title": "t" }) });
-        assert!(decode(&json!([]), &declared()).unwrap().is_empty());
+        assert!(decode(&json!([]), &declared(), None).unwrap().is_empty());
     }
 
     #[test]
@@ -219,8 +221,8 @@ mod tests {
         let body = json!({ "blob": "x".repeat(limits::RECORD_BODY_MAX_BYTES) });
         assert!(refusal(json!([{ "channel": "room", "kind": "k", "body": body }])).contains(&limits::RECORD_BODY_MAX_BYTES.to_string()));
         // the job step's check is this one
-        assert!(check_record("room", "k", &json!("x".repeat(100)), &declared()).is_ok());
-        assert!(check_record("inbox", "k", &Value::Null, &declared()).is_err());
+        assert!(check_record("room", "k", &json!("x".repeat(100)), &declared(), None).is_ok());
+        assert!(check_record("inbox", "k", &Value::Null, &declared(), None).is_err());
     }
 
     /// Goal: a channel that says `from` holds only its posters' own records
@@ -232,23 +234,47 @@ mod tests {
         let mut channels = declared();
         channels.insert("work".into(), ChannelDecl { read: Role::Viewer, post: Some(Role::Editor), signed_in: false, from: Some(fragment_proto::IdentityKind::Agent), listed: None });
         channels.insert("notes".into(), ChannelDecl { read: Role::Viewer, post: Some(Role::Editor), signed_in: false, from: None, listed: None });
-        let refused = check_record("work", "turn.step", &json!({ "turn": "t" }), &channels).expect_err("an app's record on an agents' channel");
+        let refused = check_record("work", "turn.step", &json!({ "turn": "t" }), &channels, None).expect_err("an app's record on an agents' channel");
         assert!(refused.contains("agent members only"), "{refused}");
-        assert!(decode(&json!([{ "channel": "work", "kind": "turn.step", "body": {} }]), &channels).is_err(), "a mutation's effect is refused there");
-        assert!(check_record("notes", "note", &json!({}), &channels).is_ok(), "a channel without from takes an app's record");
+        assert!(decode(&json!([{ "channel": "work", "kind": "turn.step", "body": {} }]), &channels, None).is_err(), "a mutation's effect is refused there");
+        assert!(check_record("notes", "note", &json!({}), &channels, None).is_ok(), "a channel without from takes an app's record");
         // nor does an app relay an agent's owner: that is a door's post alone (door.rs)
         let relayed = json!({ "text": "yes", "relayed": { "via": "simplex", "for": "npub1paul" } });
-        assert!(check_record("notes", "note", &relayed, &channels).is_err_and(|e| e.contains("door")), "a job step's record that relays");
-        assert!(decode(&json!([{ "channel": "notes", "kind": "message", "body": relayed }]), &channels).is_err(), "a mutation's effect that relays");
+        assert!(check_record("notes", "note", &relayed, &channels, None).is_err_and(|e| e.contains("door")), "a job step's record that relays");
+        assert!(decode(&json!([{ "channel": "notes", "kind": "message", "body": relayed }]), &channels, None).is_err(), "a mutation's effect that relays");
+    }
+
+    /// Goal: a hosted door's fragment publishes a record relaying its owner
+    /// to its agent, `relayed` exactly its own, as a job step or a
+    /// mutation's effect; any other (another door, agent or person, signed,
+    /// a field more) is refused, and unbound, every one.
+    #[test]
+    fn a_hosted_door_publishes_exactly_what_it_relays() {
+        let h = crate::door::Hosted { door: "telegram".into(), agent: "juniper--k3x9".into(), owner: "npub1paul".into() };
+        let ok = json!({ "text": "hi from telegram", "to": ["npub1juniper"], "relayed": h.relayed() });
+        assert_eq!(ok["relayed"], json!({ "via": "telegram", "for": "npub1paul", "agent": "juniper--k3x9" }));
+        assert!(check_record("room", "message", &ok, &declared(), Some(&h)).is_ok());
+        assert!(decode(&json!([{ "channel": "room", "kind": "message", "body": ok }]), &declared(), Some(&h)).is_ok());
+        assert!(check_record("room", "message", &ok, &declared(), None).is_err(), "unbound: none");
+        for (k, v) in [("via", json!("simplex")), ("agent", json!("maple--k3x9")), ("for", json!("npub1skyler")), ("sig", json!("ab".repeat(64))), ("at", json!(1))] {
+            let mut bad = ok.clone();
+            bad["relayed"][k] = v.clone();
+            assert!(check_record("room", "message", &bad, &declared(), Some(&h)).is_err(), "{k}: {v}");
+            assert!(decode(&json!([{ "channel": "room", "kind": "message", "body": bad }]), &declared(), Some(&h)).is_err(), "{k}: {v}");
+        }
+        assert_eq!(crate::door::blessed_template("blessed:telegram@0f1e2d"), Some("telegram"));
+        for id in ["app:0f1e2d", "blessed:telegram", "telegram@0f1e2d", ""] {
+            assert_eq!(crate::door::blessed_template(id), None, "{id}");
+        }
     }
 
     #[test]
     fn counts_are_bounded_before_any_effect() {
         let one = json!({ "channel": "room", "kind": "k", "body": null });
         let at_limit = Value::Array(vec![one.clone(); limits::EFFECTS_MAX]);
-        assert_eq!(decode(&at_limit, &declared()).unwrap().len(), limits::EFFECTS_MAX);
+        assert_eq!(decode(&at_limit, &declared(), None).unwrap().len(), limits::EFFECTS_MAX);
         let over = Value::Array(vec![one; limits::EFFECTS_MAX + 1]);
-        assert!(decode(&over, &declared()).unwrap_err().contains(&limits::EFFECTS_MAX.to_string()));
+        assert!(decode(&over, &declared(), None).unwrap_err().contains(&limits::EFFECTS_MAX.to_string()));
         let files: Vec<Value> = (0..=limits::FILE_WRITES_MAX).map(|i| json!({ "file": format!("f{i}.txt"), "text": "x" })).collect();
         assert!(refusal(Value::Array(files)).contains(&format!("at most {} files", limits::FILE_WRITES_MAX)));
         let half = "x".repeat(limits::FILE_WRITE_MAX_BYTES / 2 + 1);
@@ -290,7 +316,7 @@ mod tests {
     #[test]
     fn pushes_and_shapes() {
         assert!(refusal(json!([{ "push": "w".repeat(limits::PUSH_WHO_MAX_CHARS + 1), "payload": {} }])).contains("who"));
-        assert!(decode(&json!([{ "push": "\u{e9}".repeat(limits::PUSH_WHO_MAX_CHARS), "payload": {} }]), &declared()).is_ok());
+        assert!(decode(&json!([{ "push": "\u{e9}".repeat(limits::PUSH_WHO_MAX_CHARS), "payload": {} }]), &declared(), None).is_ok());
         let big = json!({ "body": "x".repeat(webpush::PAYLOAD_MAX_BYTES) });
         assert!(refusal(json!([{ "push": "*", "payload": big }])).contains("push payload"));
         assert!(refusal(json!({ "channel": "room" })).contains("an array"));
