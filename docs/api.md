@@ -2799,6 +2799,7 @@ API answers on the platform's host):
 | `GET __channel/{channel}?after=\|before=&limit=` | the channel's readers: the same page and exclusive cursors as `GET /api/f/{name}/channels/{channel}`, using this origin's session or share link |
 | `POST __op/{op}` | a browser's call: `application/json` `{id, input}`; a signed-in browser (`fragment_site`) calls as its person; an unsigned caller gets an anonymous principal cookie; callers holding only `public` get 60 calls a minute each, 600 per fragment (a page's live views re-run over `__live`, outside this) |
 | `POST __op/channels/{channel}` | a browser's post (`fragment.post`), through the call's door and its checks: `{id, input}` with the record's body as `input` → `{result: record, replayed}`, as `POST /api/f/{name}/channels/{channel}` answers it; a post spends the public budget as a call does (no operation name holds a `/`) |
+| `PUT __secrets/{KEY}` | an editor's session: `PUT /api/f/{name}/secrets/{KEY}`'s body and answer (`{value, hosts}` → `{ok, name, hosts}`; `application/json` only, so no cross-site form sets one), from its own page: a connector's bot token pasted where only the platform keeps it. Written, never read back; the `secret.set` event logs it |
 | `GET __door`, `POST __door` | its owner's session: `GET` and `POST /api/f/{name}/door`'s, from a connector's own page (a `POST` as `application/json`) |
 | `__signin`, `__signout` | this origin's session (Sign-in, above) |
 | `__fragment.js` | the browser library (below) |
