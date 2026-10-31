@@ -23,8 +23,14 @@ const bytesOf = (v) => new TextEncoder().encode(JSON.stringify(v)).length;
 const cutTo = (text, max) => ([...text].length > max ? `${[...text].slice(0, max - 1).join("")}…` : text);
 
 export function historyOf(c, key, archive) {
-  const said = (c.messages ?? []).filter((m) => (m.role === "user" || m.role === "assistant") && typeof m.text === "string" && m.text.trim() && !m.summary && !m.tool_calls?.length);
-  const summary = [...(c.messages ?? [])].reverse().find((m) => m.summary && typeof m.text === "string" && m.text.trim())?.text ?? "";
+  const all = c.messages ?? [];
+  const isSaid = (m) => (m.role === "user" || m.role === "assistant") && typeof m.text === "string" && m.text.trim() && !m.summary && !m.tool_calls?.length;
+  const said = all.filter(isSaid);
+  // the last summary covers what was said before it: the card holds it,
+  // then the newest of what was said after it (the rest counted `earlier`)
+  const last = all.findLastIndex((m) => m.summary && typeof m.text === "string" && m.text.trim());
+  const summary = last >= 0 ? all[last].text : "";
+  const after = all.slice(last + 1).filter(isSaid);
   const base = {
     kind: "history", title: cutTo(c.title || "Untitled", HISTORY_LIMITS.title), archive, key, started_at: c.started_at, ended_at: c.ended_at,
     ...(summary ? { summary: cutTo(summary, HISTORY_LIMITS.summary) } : {}), messages: [], earlier: said.length,
@@ -34,7 +40,7 @@ export function historyOf(c, key, archive) {
   // the newest that fit, oldest first: each adds its JSON and a comma
   let size = bytesOf(base);
   const tail = [];
-  for (const m of [...said].reverse()) {
+  for (const m of [...after].reverse()) {
     if (tail.length >= HISTORY_LIMITS.messages) break;
     const one = { role: m.role, at: m.at, text: cutTo(m.text.trim(), HISTORY_LIMITS.text) };
     const more = bytesOf(one) + (tail.length ? 1 : 0);
