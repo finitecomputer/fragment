@@ -156,6 +156,21 @@ A turn a restart cut is picked up again by itself, once, so nobody types
   runtime is asked to rerun a call.
 - A state holding one is format 4, which an older bridge sets aside.
 
+### A late message is told its age
+
+Paul (2026-10-31): an agent handed a message late (a backlog after an
+outage, a restart or a sleep) is told how old it is, and judges whether
+it is still wanted; nothing is cut off. The engine keeps each turn's
+cause time (`Turn::said_at`), and a turn handed at least
+`MESSAGE_AGE_TOLD_MS` (5 minutes, five pre-wake holds: past an ordinary
+claim, cold wake or queue) after it carries one plain line
+(`TurnStart::age`, `note::age`), which the driver puts first in its
+note, before a card's or a cut turn's: "This message was sent about 3
+hours ago, and is only reaching you now. If it may no longer be wanted,
+check before acting on it." A continuation is told the age of what its
+cut turn answered. A routine (its message says its hour), a command,
+and a state from before keep or tell none.
+
 ### What a rollback forgot
 
 A computer can go back to an older save (docs/computers.md, "What its
