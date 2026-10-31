@@ -377,7 +377,7 @@ templates/sessions/README.md):
 Any other `kind` on `chat` is the page's own and is never a message.
 
 **Search.** A person's message and an agent's reply are what the
-shell's search finds (docs/api.md, The shell, Search): a body whose
+shell's search finds (docs/api.md, Search): a body whose
 `kind` is absent or `"message"`, by its `text` alone (its first 4 KiB).
 No other record here is searched, Stop, prompt answers, commands and
 everything on `work` included.
@@ -651,13 +651,13 @@ message's waiting line at once (its agent starting up, or being waited
 for), as the page that sent it would.
 
 **The launcher's chat.** The shell's launcher loads a chat as it posts
-its first message, with `?sent=1` (docs/api.md, The launcher): the page
+its first message, with `?sent=1` (cell/shell/launcher.js): the page
 then never shows a new chat's start, only that message once it is here,
 and its waiting line under it.
 
 **The first run.** The shell opens its person's first chat before their
-first agent is in it (`?setup=1`; docs/api.md, "The first run, in its
-chat"). The page then shows a card above the chat, "Setting up your
+first agent is in it (`?setup=1`; docs/api.md, The shell). The page
+then shows a card above the chat, "Setting up your
 agent", with the steps the shell sends with its roster (`setup: {steps:
 [{text, state}], error}`, at most 6 steps of 120 characters, `state`
 one of `done`, `doing`, `todo`, `failed`): what the platform says of

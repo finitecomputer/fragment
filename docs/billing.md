@@ -636,8 +636,8 @@ settings page)").
     reaching the ledger, a moment after (at most 30 s). A seat that does
     not come (a Checkout not theirs, or unpaid) is said, with Try again
     and Choose a seat.
-  - *Then the first agent, in its chat* (docs/api.md, "The first run, in
-    its chat"; Skyler's design, Paul, 2026-10-13): the chat opens at
+  - *Then the first agent, in its chat* (docs/api.md, The shell;
+    Skyler's design, Paul, 2026-10-13): the chat opens at
     once with a card of the making as the platform says it (the agent
     made, in the chat, its computer's phase); the person may type at
     once, and send once the agent is in the chat. Each thing is made

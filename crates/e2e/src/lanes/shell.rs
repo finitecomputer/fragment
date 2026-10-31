@@ -5203,7 +5203,7 @@ fn say_in(s: &Suite, b: &mut Browser, page: &Page, host: &str, text: &str) -> bo
     s.eventually(std::time::Duration::from_secs(30), || b.eval_in_frame(page, host, &typed).ok() == Some(Value::Bool(true)))
 }
 
-/// Unread (docs/api.md, The shell): a chat not open counts on its row what
+/// Unread (docs/api.md, Control API): a chat not open counts on its row what
 /// came since its person saw it, as their list does; opening it marks it
 /// seen, here and in their list; and the open chat counts nothing as its
 /// messages come. The first agent's chat, while the Reader's is open.
@@ -5245,7 +5245,7 @@ fn unread_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person
     Ok(())
 }
 
-/// A new chat (docs/api.md, The shell, the launcher): from the Reader's
+/// A new chat: from the Reader's
 /// chat, the launcher's Enter makes a chat with the person's one agent
 /// (not the open chat's), labelled beside its own (`<first>-chat-2`), the
 /// words posted whole as its first message: one record though the first
@@ -5798,7 +5798,7 @@ fn fresh_shown(b: &mut Browser, page: &Page, before: &[String]) -> Option<String
     (!shown.is_empty() && !before.contains(&shown)).then_some(shown)
 }
 
-/// The launcher as a person uses it (docs/api.md, The launcher). Its input
+/// The launcher as a person uses it. Its input
 /// is one line at rest and as words are typed; Shift+Enter is a new line,
 /// which it grows to, and a long prompt grows it to 200 px, then it
 /// scrolls. Files dropped on it or pasted into it are chips under its words
@@ -6638,7 +6638,7 @@ fn apps_sharing_refresh_ui(s: &mut Suite, b: &mut Browser, page: &Page, app: &st
     Ok(())
 }
 
-/// The Apps page (docs/api.md, The shell; #587), from the sidebar's Apps:
+/// The Apps page (#587), from the sidebar's Apps:
 /// the owner's app listed (no chat or skills), with its card and who has
 /// access; a kind this build does not know is listed as Other; its Dock
 /// switch takes it off the dock and back, moving only as the list does;

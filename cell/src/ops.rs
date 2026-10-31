@@ -420,7 +420,7 @@ impl FragmentCell {
 
     /// `POST /api/test/fragment {fragment, op, …}`, the router's, on fleets
     /// with test hooks only: the levers the e2e pulls on one fragment
-    /// (docs/api.md, `FRAGMENT_TEST_SECRET`).
+    /// (docs/api.md, Test levers).
     pub(crate) async fn test_fragment(&self, body: &Value) -> CellResult<Value> {
         assert!(self.cfg.test_hooks, "the route answers only on fleets with test hooks");
         if body["op"] == "ended" {
