@@ -163,6 +163,14 @@ pub fn fill_url(url: &Url, mut value: impl FnMut(&str) -> Result<String, String>
     Ok(filled)
 }
 
+/// `text` with each opened secret (by name: its value) named as its
+/// placeholder again, as it went into a URL (`url_encoded`) and as it is:
+/// what goes back to a job of a fetch whose URL held secrets (a failure's
+/// message, an answer that echoes its URL).
+pub fn redact(text: String, opened: &std::collections::BTreeMap<String, String>) -> String {
+    opened.iter().fold(text, |t, (name, secret)| t.replace(&url_encoded(secret), &format!("{{{{{name}}}}}")).replace(secret.as_str(), &format!("{{{{{name}}}}}")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -268,5 +276,19 @@ mod tests {
         let host = url("https://{{HOST}}.example.com/x");
         assert!(url_placeholders(&host).is_empty());
         assert_eq!(fill_url(&host, |_| unreachable!()).unwrap(), host);
+    }
+
+    /// Goal: what goes back to a job names a URL's secret as its placeholder,
+    /// whether the answer or the failure echoes it encoded or as it is.
+    #[test]
+    fn a_urls_secret_goes_back_as_its_placeholder() {
+        let opened = std::collections::BTreeMap::from([("TOKEN".to_string(), "123:a/b c".to_string())]);
+        let encoded = url_encoded("123:a/b c");
+        assert_eq!(encoded, "123:a%2Fb%20c");
+        let failed = format!("api.telegram.org: fetch failed: TypeError: Fetch API cannot load: https://api.telegram.org/bot{encoded}/getMe");
+        assert_eq!(redact(failed, &opened), "api.telegram.org: fetch failed: TypeError: Fetch API cannot load: https://api.telegram.org/bot{{TOKEN}}/getMe");
+        assert_eq!(redact("location: /bot123:a/b c/x".to_string(), &opened), "location: /bot{{TOKEN}}/x");
+        assert_eq!(redact("nothing here".to_string(), &opened), "nothing here");
+        assert_eq!(redact("123:a/b c".to_string(), &std::collections::BTreeMap::new()), "123:a/b c", "nothing opened, nothing named");
     }
 }
