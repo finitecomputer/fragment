@@ -4,7 +4,9 @@
 //! whatever its text, before anything is made, and holds a summary then
 //! what was said after it; one chat a (source, agent), named from both, so
 //! a Continue cut short at any step, or whose answer was lost, or asked
-//! again from another tab, is finished in that chat, never another; the
+//! again from another tab, is finished in that chat, never another, and its
+//! control says Open only for a chat finished (one cut short, pressed
+//! again, here or in another tab, is finished, not just opened); the
 //! agent offered first is the import's own by name, an archived chat's lead
 //! one, else the person's main one; and an archived chat's history is made
 //! from its records. The e2e's sessions-ui section runs the same file in
@@ -17,9 +19,9 @@ use fragment_devstack as devstack;
 use serde_json::Value;
 
 /// The platform as Continue meets it: the person's fragments (each with its
-/// agents, as their list has them), files, records and members, each step
-/// able to fail once before it acts (`fail`) or after it acted with its
-/// answer lost (`lose`). A post checks its body's size as the cell does, and
+/// agents, as their list has them, or none yet while the list lags:
+/// `lagging`), files, records and members, each step able to fail once
+/// before it acts (`fail`) or after it acted with its answer lost (`lose`). A post checks its body's size as the cell does, and
 /// ids as the cell does: the same id and body answer the record again,
 /// another body is 409.
 const WORLD: &str = r##"
@@ -35,7 +37,7 @@ const err = (status, message) => Object.assign(new Error(message), { status });
 const AGENTS = [["npub1datastar", "datastar-pro--k3x9", "Datastar Pro"], ["npub1juniper", "juniper--m4n5", "Juniper"]];
 
 function world(conversation, extra = []) {
-  const w = { fragments: new Map([[ARCHIVE, { role: "owner", kind: "sessions", agents: [] }]]), files: new Map(), records: new Map(), creates: 0, posts: 0, fail: {}, lose: {} };
+  const w = { fragments: new Map([[ARCHIVE, { role: "owner", kind: "sessions", agents: [] }]]), files: new Map(), records: new Map(), creates: 0, posts: 0, fail: {}, lose: {}, lagging: false };
   for (const [identity, fragment, title] of AGENTS) w.fragments.set(fragment, { role: "owner", kind: "agent", title, agents: [identity] });
   for (const [name, f] of extra) w.fragments.set(name, f);
   w.files.set(`${ARCHIVE}:sessions/${KEY}.json`, JSON.stringify(conversation));
@@ -103,15 +105,31 @@ function world(conversation, extra = []) {
   return w;
 }
 
+// An element as the control uses one: its text, classes, data, children
+// and handlers; a select's value its first option's until set.
+function element(tag, cls, text) {
+  const classes = new Set(cls ? cls.split(" ") : []);
+  const e = {
+    tag, children: [], dataset: {}, textContent: text ?? "", value: "", disabled: false, title: "", isConnected: true,
+    classList: { add: (c) => classes.add(c), remove: (c) => classes.delete(c), contains: (c) => classes.has(c) },
+    setAttribute() {},
+    append(...kids) {
+      e.children.push(...kids);
+      if (tag === "select" && !e.value) e.value = kids[0]?.value ?? "";
+    },
+  };
+  return e;
+}
+
 // a tab of the shell: its own module, a store of its own (another browser,
 // unless shared)
 function tab(w, store = storeOf(), main = "npub1datastar") {
   const t = { notices: [], opened: [] };
   t.c = createContinue({
     api: w.api,
-    ui: { el: () => ({}), notice: (title, words) => t.notices.push([title, words]) },
+    ui: { el: element, notice: (title, words) => t.notices.push([title, words]) },
     data: {
-      allFragments: () => [...w.fragments].map(([name, f]) => ({ name, ...f })),
+      allFragments: () => [...w.fragments].map(([name, f]) => ({ name, ...f, agents: w.lagging && f.kind === "chat" ? [] : f.agents })),
       agents: () => new Map(AGENTS.map(([identity, fragment]) => [identity, { identity, fragment }])),
       primaryAgent: () => ({ identity: main }),
       titleOf: (name) => w.fragments.get(name)?.title ?? name,
@@ -134,6 +152,20 @@ const said = (n, text) => Array.from({ length: n }, (_, i) => ({ role: i % 2 ? "
 const conversation = (messages, summary, agent = "Juniper") => ({ id: "c1", title: "Beans", agent, started_at: "2026-10-01T09:00:00.000Z", ended_at: "2026-10-01T10:00:00.000Z", messages: [...(summary ? [{ role: "user", summary: true, text: summary }] : []), ...messages] });
 const SOURCE = { archive: ARCHIVE, key: KEY };
 const chats = (w) => [...w.fragments].filter(([, f]) => f.kind === "chat").map(([n]) => n);
+// a tab's control for `source`, its agent picked, settled: what it says,
+// and a press of it, waited for
+const settle = () => new Promise((r) => setTimeout(r, 5));
+async function control(t, source, agent) {
+  const box = t.c.continueControl(source);
+  await settle();
+  const [go, pick] = box.children;
+  if (pick && agent) {
+    pick.value = agent;
+    pick.onchange();
+    await settle();
+  }
+  return { says: () => go.textContent, press: async () => { await go.onclick(); await settle(); } };
+}
 "##;
 
 const CASES: &str = r##"
@@ -231,7 +263,56 @@ for (const [name, set] of [
   w.fail.member = 503;
   await t.c.continueInto(SOURCE, "npub1juniper");
   const made = await t.c.continueInto(SOURCE, "npub1juniper");
-  check("a name another's fragment holds gives way to one at random, the same on a try again, then let go", made && made !== taken && w.creates === 1 && (await t.c.continued(SOURCE, "npub1juniper")) === null && JSON.stringify(store.get("shell.continue.pending.v1", {})) === "{}", { made, taken, creates: w.creates });
+  check("a name another's fragment holds gives way to one at random, the same on a try again, then let go (this page finished it, so finds it)", made && made !== taken && w.creates === 1 && (await t.c.continued(SOURCE, "npub1juniper")) === made && JSON.stringify(store.get("shell.continue.pending.v1", {})) === "{}", { made, taken, creates: w.creates });
+}
+
+// ---- the control: Open only for a chat finished (Alex on #866); one cut
+// short says Continue, here and in another tab (a reload), and pressed
+// again, there, is finished in that chat, never only opened
+for (const [name, set, complete] of [
+  ["the history's post fails after the chat", (w) => (w.fail.history = 503), false],
+  ["the agent's add fails after the chat and its history", (w) => (w.fail.member = 503), false],
+  ["the create's answer is lost (the chat was made)", (w) => (w.lose.create = true), false],
+  ["the history's answer is lost (it was posted)", (w) => (w.lose.history = true), false],
+  ["the agent's add's answer is lost (it was added: every step done)", (w) => (w.lose.member = true), true],
+]) {
+  const w = world(conversation(said(4, "hello")));
+  set(w);
+  const here = tab(w);
+  const c = await control(here, SOURCE, "npub1juniper");
+  const before = c.says();
+  await c.press();
+  const cut = c.says();
+  // the agent is added last, after the history: in the chat only once every step is done
+  const cutChat = chats(w)[0];
+  const agentAtCut = !!w.fragments.get(cutChat)?.agents.includes("npub1juniper");
+  const reloaded = tab(w);
+  const r = await control(reloaded, SOURCE, "npub1juniper");
+  const there = r.says();
+  await r.press();
+  const chat = chats(w)[0];
+  const ready = w.records.get(chat)?.length === 1 && w.records.get(chat)[0].body.kind === "history" && w.fragments.get(chat).agents.includes("npub1juniper");
+  check(
+    `the control, when ${name}: it says ${complete ? "Open" : "Continue"} here and after a reload, and pressed there, the chat is finished and opened, none other made`,
+    before === "Continue with" && cut === (complete ? "Open" : "Continue with") && agentAtCut === complete && there === cut && ready && chats(w).length === 1 && w.creates === 1 && w.posts === 1 && reloaded.opened.at(-1) === chat && r.says() === "Open",
+    { before, cut, agentAtCut, there, after: r.says(), chats: chats(w), creates: w.creates, posts: w.posts, records: w.records.get(chat)?.length ?? 0, agents: w.fragments.get(chat)?.agents },
+  );
+  // pressed again where it was cut short: that chat, finished, nothing posted twice
+  await c.press();
+  check(`the control, when ${name}: pressed again where it was cut short, the same chat, nothing made or posted again`, here.opened.at(-1) === chat && w.creates === 1 && w.posts === 1 && chats(w).length === 1, { opened: here.opened, creates: w.creates, posts: w.posts });
+}
+{
+  // the list names a chat's agent a moment after it joins: the page that
+  // finished it says Open at once; another, Continue, which opens that chat
+  const w = world(conversation(said(4, "hello")));
+  w.lagging = true;
+  const here = tab(w);
+  const c = await control(here, SOURCE, "npub1juniper");
+  await c.press();
+  const other = await control(tab(w), SOURCE, "npub1juniper");
+  const there = other.says();
+  await other.press();
+  check("the list not yet naming its agent: the page that finished it says Open; another says Continue, and pressed, opens that chat, nothing made again", c.says() === "Open" && there === "Continue with" && w.creates === 1 && w.posts === 1 && chats(w).length === 1, { here: c.says(), there, creates: w.creates });
 }
 
 // ---- who it was with, and an archived chat's history

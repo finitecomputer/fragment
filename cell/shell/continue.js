@@ -132,14 +132,30 @@ export function createContinue({
     return primaryAgent()?.identity ?? mine[0]?.identity ?? null;
   }
 
-  // the chat a Continue of `source` with `agent` made, as the person's list
-  // has it, or null
+  // the chats a Continue on this page finished, by source and agent: the
+  // list names a chat's agent a moment after it joins
+  const finished = new Map();
+  // The chat a Continue of `source` with `agent` finished, or null: the
+  // person's own chat of its name with the agent in it, as their list has
+  // it (adding the agent is its last step, after its history), or one this
+  // page finished. A chat made by a Continue cut short is none (Alex on
+  // #866): Continue again finishes it (`continueInto`), never just opens it;
+  // so is one the person later took the agent out of, which Continue puts
+  // back, as they asked of that agent. A chat found finished lets go of the
+  // name kept for it (`PENDING`).
   async function continued(source, agent) {
     const fragment = computerAgents().get(agent)?.fragment;
     if (!fragment) return null;
-    const pending = store.get(PENDING, {})[slotOf(source, agent)];
-    const names = [await nameFor(source, agent, chatBase(fragment)), pending].filter(Boolean);
-    return names.find((n) => allFragments().some((f) => f.name === n && f.kind === "chat" && f.role === "owner")) ?? null;
+    const slot = slotOf(source, agent);
+    const pending = store.get(PENDING, {});
+    const names = [await nameFor(source, agent, chatBase(fragment)), pending[slot], finished.get(slot)].filter(Boolean);
+    const done = (f) => f.kind === "chat" && f.role === "owner" && (f.agents?.includes(agent) || finished.get(slot) === f.name);
+    const found = names.find((n) => allFragments().some((f) => f.name === n && done(f))) ?? null;
+    if (found && pending[slot] === found) {
+      delete pending[slot];
+      store.set(PENDING, pending);
+    }
+    return found;
   }
 
   // whether the chat named `name` is this Continue's: the person's own, its
@@ -210,6 +226,7 @@ export function createContinue({
       await api("POST", `/api/f/${seg(name)}/channels/chat`, { id: "history", body }).catch((e) => (e.status === 409 ? null : Promise.reject(e)));
       // adding it wakes its computer (the platform's `joined`)
       await api("PUT", `/api/f/${seg(name)}/members/${seg(agent)}`, { role: "editor" });
+      finished.set(slot, name);
       remember(null);
       await loadList();
       openChat(name);
@@ -228,8 +245,8 @@ export function createContinue({
 
   // "Continue with [agent ▾]": one line, for a History row or the archive's
   // ask; "Continue" alone when the person has one agent, "Open" once the
-  // chosen agent's chat of this source is made. `done(name)` once its chat
-  // is open.
+  // chosen agent's chat of this source is finished (`continued`). `done(name)`
+  // once its chat is open.
   function continueControl(source, done = () => {}) {
     const box = el("div", "continue-control");
     const go = el("button", "continue-go", "Continue");
