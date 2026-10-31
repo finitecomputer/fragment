@@ -312,7 +312,7 @@ fn a_photo(fake: &Fake, chat: &str, dir: &std::path::Path) -> (Value, std::path:
     let sha = records::hex(&<sha2::Sha256 as sha2::Digest>::digest(&bytes));
     fake.with(|w| w.fragments.get_mut(chat).unwrap().blobs.insert(sha.clone(), ("image/png".into(), bytes.clone())));
     let at = dir.join("media").join(&sha);
-    let told = format!("[paul sent a file with this answer: 'basil.png' (image/png). It is on your computer at: {}]", at.display());
+    let told = format!("[paul sent a file: 'basil.png' (image/png). It is on your computer at: {}]", at.display());
     (json!({ "sha256": sha, "size": bytes.len(), "type": "image/png", "name": "basil.png" }), at, told)
 }
 

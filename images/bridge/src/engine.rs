@@ -91,8 +91,36 @@ use crate::limits;
 use crate::records::{self, AttachmentRef, Cause, Closed, CommandSaid, Message, NoticeCategory, Outcome, PromptOption, Record, Said, Task};
 use crate::runtime::{Agent, Attached, Command, Event, How, LocalFile, MenuItem, TurnStart};
 
-/// The state file's format. 2: one life per turn (no `handed` phase).
-pub const STATE_VERSION: u32 = 2;
+/// The state file's formats. 2: one life per turn (no `handed` phase). 3:
+/// a turn holding an ask's return (`Turn::ret`) and the answer it owes,
+/// which a bridge before asks cannot read: it sets such a state aside
+/// (driver.rs, `load`), as it does any format not its own, and the journal
+/// says which turns ran. A state holding no return is written as 2, so a
+/// rollback past asks keeps every other state.
+pub const STATE_VERSION: u32 = 3;
+pub const STATE_VERSIONS: [u32; 2] = [2, STATE_VERSION];
+
+/// The format a state is written as (`STATE_VERSION`'s).
+fn version_of(state: &State) -> u32 {
+    if state.turns.values().any(|t| t.ret.is_some()) {
+        STATE_VERSION
+    } else {
+        2
+    }
+}
+
+/// Why an agent's hand-off is refused a turn past the hops (an ask, which
+/// is answered so; any other is let go).
+pub fn refused_deep() -> String {
+    format!("agents handed this on {} times without a person, the most they may", limits::HOPS_MAX)
+}
+
+/// What an ask's turn that asks back in words is told at once: its asker
+/// is an agent, which cannot answer it (`Event::Asked`). Its `seq` names
+/// no record (the bridge's own words): Relay's message id for it is the
+/// turn's and this.
+pub const ASKED_BACK: &str = "No answer is coming: you were asked by another agent, which cannot answer questions here. Answer as best you can with what you have, and say what you would need.";
+pub const ASKED_BACK_SEQ: u64 = u64::MAX;
 
 /// Why a turn an earlier life claimed is ended.
 pub const LOST: &str = "lost when the computer restarted";
@@ -145,7 +173,7 @@ pub struct State {
 
 impl Default for State {
     fn default() -> State {
-        State { version: STATE_VERSION, boot: 0, cursors: BTreeMap::new(), turns: BTreeMap::new(), admitted: 0, said: 0, agent_turns: BTreeMap::new() }
+        State { version: 2, boot: 0, cursors: BTreeMap::new(), turns: BTreeMap::new(), admitted: 0, said: 0, agent_turns: BTreeMap::new() }
     }
 }
 
@@ -176,6 +204,27 @@ pub enum Phase {
 pub struct Owed {
     pub id: String,
     pub body: Value,
+    /// Posted as this agent on its own fragment's `tasks`, not on the turn's
+    /// chat's `work`: the answer to an ask (`Return`), which wakes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to: Option<String>,
+}
+
+/// Where an asked turn's answer goes (`Message::return_to`): the asking
+/// agent of this computer, whose own `tasks` it is posted on, and the chat
+/// its answer's turn runs in; what the asked agent is called (its name as
+/// its chat showed it when asked: its agent fragment's title); and what the
+/// turn said so far, which it carries (its replies but interim ones, at
+/// most `ANSWER_TEXT_MAX_BYTES`), with how many files it sent.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Return {
+    pub agent: String,
+    pub chat: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub said: String,
+    #[serde(default, skip_serializing_if = "u32_is_zero")]
+    pub files: u32,
 }
 
 /// The platform's answer to a claim (`Effect::Claim`).
@@ -284,6 +333,9 @@ pub struct Turn {
     /// the card's turn (cards.rs, `Fresh::note`; `TurnStart::note`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// It answers an ask: its end owes the answer too (`Return`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ret: Option<Return>,
     #[serde(skip)]
     pub open: Option<OpenReply>,
 }
@@ -375,10 +427,11 @@ pub enum Effect {
     /// before the answer finds it answered live, and rebuilds nothing
     /// (cards.rs).
     Fence { agent: String, fragment: String, turn: String, prompt: String, id: String, body: Value },
-    /// One of a turn's last records on `work` (its end; and its start, for
-    /// a turn that never ran), kept in the state until the lane is done
-    /// with it and says so (`Input::Posted`).
-    Owed { agent: String, fragment: String, turn: String, id: String, body: Value },
+    /// One of a turn's last records (on `work`: its end, and its start for a
+    /// turn that never ran; on its asking agent's own `tasks`: its answer),
+    /// kept in the state until the lane is done with it and says so
+    /// (`Input::Posted`).
+    Owed { agent: String, fragment: String, channel: &'static str, turn: String, id: String, body: Value },
     /// The chat's draft for a turn (`None` stops it).
     Draft { agent: String, fragment: String, turn: String, text: Option<String> },
     Runtime(Command),
@@ -505,8 +558,8 @@ fn label(fragment: &str) -> &str {
 
 impl Engine {
     /// An engine over a loaded state, in the life `life` (this process's,
-    /// 32 lowercase hex). It checks the state agrees with itself; then
-    /// `recover` must run before any other step.
+    /// 32 lowercase hex). It checks the state agrees with itself; then its
+    /// agents (`Input::Agents`) and `recover` come before any other step.
     pub fn new(state: State, settings: Settings, life: &str) -> Result<Engine, Corrupt> {
         assert!(records::valid_life(life), "a life is 32 lowercase hex: {life}");
         check(&state)?;
@@ -632,6 +685,12 @@ impl Engine {
             self.out.push(Effect::Keepalive(busy));
         }
         assert!(self.state.turns.len() <= limits::TURNS_OPEN_MAX, "admission bounds the open turns");
+        // the format it holds: 3 only while a turn holds a return
+        let version = version_of(&self.state);
+        if version != self.state.version {
+            self.state.version = version;
+            self.dirty = true;
+        }
         for id in &self.claiming {
             assert!(self.state.turns.get(id).is_some_and(|t| t.phase == Phase::Queued), "a turn being claimed is held, queued: {id}");
         }
@@ -647,9 +706,14 @@ impl Engine {
         self.out.push(Effect::Post { agent: agent.to_string(), fragment: fragment.to_string(), channel, id, body, files });
     }
 
-    /// Posts a record the turn keeps owing until the lane is done with it.
+    /// Posts a record the turn keeps owing until the lane is done with it:
+    /// on its chat's `work` as its agent, or an answer as the agent it is for.
     fn owe(&mut self, agent: &str, fragment: &str, turn: &str, o: Owed) {
-        self.out.push(Effect::Owed { agent: agent.to_string(), fragment: fragment.to_string(), turn: turn.to_string(), id: o.id, body: o.body });
+        let (agent, fragment, channel) = match &o.to {
+            Some(to) => (to.as_str(), to.as_str(), records::TASKS),
+            None => (agent, fragment, records::WORK),
+        };
+        self.out.push(Effect::Owed { agent: agent.to_string(), fragment: fragment.to_string(), channel, turn: turn.to_string(), id: o.id, body: o.body });
     }
 
     fn draft(&mut self, agent: &str, fragment: &str, turn: &str, text: Option<String>) {
@@ -768,7 +832,7 @@ impl Engine {
                 // a question another turn asks meanwhile
                 let cause = Cause { fragment: fragment.to_string(), channel: records::CHAT.to_string(), seq };
                 let id = records::turn_id(agent, fragment, records::CHAT, seq);
-                let m = Message { text: fresh.text, to: vec![a.identity.clone()], attachments: Vec::new(), turn: None, hop: 0, reply_to: None };
+                let m = Message { text: fresh.text, to: vec![a.identity.clone()], attachments: Vec::new(), turn: None, hop: 0, reply_to: None, return_to: None };
                 self.admit(&a, fragment, cause, at, &asker, name(&asker), &m, 0, Ask::Message);
                 if let Some(t) = self.state.turns.get_mut(&id).filter(|t| t.phase == Phase::Queued) {
                     t.note = Some(fresh.note);
@@ -868,7 +932,7 @@ impl Engine {
         for (_, id, phase) in mine {
             crate::ev!("turn.stopped", { "turn": id, "phase": format!("{phase:?}").to_lowercase(), "by": "command" });
             match phase {
-                Phase::Queued => self.end_unrun(&id, Outcome::Stopped),
+                Phase::Queued => self.end_unrun(&id, Outcome::Stopped, false),
                 _ => self.stop_running(agent, fragment, &id),
             }
         }
@@ -883,6 +947,21 @@ impl Engine {
                 self.admit(agent, &chat, cause, record.at, &owner, "your routine".into(), &m, 0, Ask::Routine);
             }
             Task::Joined { fragment } => self.out.push(Effect::Discover { agent: agent.fragment.clone(), joined: fragment }),
+            // Only its own bridge answers it (as itself, `owe_answer`): a
+            // turn its owner's business in that chat, as a routine's is, and
+            // no fewer hops deep than the turn that answered, so a callback
+            // resets no depth and spends that chat's budget.
+            Task::Answer { chat, text, name, hop, refused } if record.principal == agent.identity => {
+                let cause = Cause { fragment: agent.fragment.clone(), channel: record.channel.clone(), seq: record.seq };
+                let m = Message { text: text.clone(), ..Message::default() };
+                let owner = agent.owner.clone();
+                // a refused question's answer is a turn that never runs, its
+                // end saying why: no runtime hears it, so nothing asks again
+                let ask = if refused { Ask::Refused(&text) } else { Ask::Message };
+                let hop = if refused { 0 } else { hop.clamp(1, limits::HOPS_MAX) };
+                self.admit(agent, &chat, cause, record.at, &owner, name, &m, hop, ask);
+            }
+            Task::Answer { .. } => crate::ev!("task.ignored", { "agent": agent.fragment, "seq": record.seq, "why": "only the agent's own bridge posts its answers" }),
             Task::Other => {}
         }
     }
@@ -895,7 +974,10 @@ impl Engine {
                 return None;
             }
             let hop = self.hop_of(fragment, principal, m.turn.as_deref(), m.hop);
-            if hop > limits::HOPS_MAX {
+            // an ask past the cap is still a turn, refused (`admit`), so its
+            // answer says why; any other hand-off past it is let go
+            let asks = m.return_to.is_some() && self.agents.iter().any(|a| a.identity == principal);
+            if hop > limits::HOPS_MAX && !asks {
                 crate::ev!("handoff.too_deep", { "agent": agent.fragment, "fragment": fragment, "from": principal, "hop": hop, "claimed": m.hop });
                 return None;
             }
@@ -992,6 +1074,8 @@ impl Engine {
         let waiting = self.state.turns.values().filter(|t| t.agent == agent.fragment && t.fragment == fragment && t.phase == Phase::Queued).count();
         let refusal = if let Ask::Refused(why) = ask {
             Some(why.to_string())
+        } else if hop > limits::HOPS_MAX {
+            Some(refused_deep())
         } else if hop > 0 && !self.agent_turn_allowed(fragment, at) {
             Some(refused_budget())
         } else if waiting >= limits::QUEUED_PER_CHAT_MAX {
@@ -1001,6 +1085,15 @@ impl Engine {
         } else {
             None
         };
+        // an ask's answer goes back only to another agent of this computer,
+        // whose own `tasks` its bridge posts it on; a refused one's too,
+        // which says why and wakes no one (`owe_answer`)
+        let ret = m.return_to.as_ref().and_then(|chat| {
+            let asking = self.agents.iter().find(|a| a.identity == asker && a.fragment != agent.fragment)?;
+            // as its chat shows it, else its label while that is unread
+            let name = self.views.get(fragment).and_then(|v| v.names.get(&agent.identity)).cloned().unwrap_or_else(|| agent.name.clone());
+            Some(Return { agent: asking.fragment.clone(), chat: chat.clone(), name, said: String::new(), files: 0 })
+        });
         self.state.admitted += 1;
         let turn = Turn {
             id: id.clone(),
@@ -1027,6 +1120,7 @@ impl Engine {
             command: matches!(ask, Ask::Command | Ask::Refused(_)),
             reply_to: m.reply_to,
             note: None,
+            ret,
             open: None,
         };
         self.dirty = true;
@@ -1035,7 +1129,8 @@ impl Engine {
             let outcome = Outcome::Error(why);
             if self.state.turns.len() < limits::TURNS_OPEN_MAX {
                 self.state.turns.insert(id.clone(), turn);
-                self.end_unrun(&id, outcome);
+                // refused at admission: its answer runs nothing
+                self.end_unrun(&id, outcome, true);
             } else {
                 // Past the bound of turns held, its two records are posted
                 // and not kept: a crash before they land loses them.
@@ -1059,21 +1154,80 @@ impl Engine {
     /// every turn does, and it is kept until both are answered. When
     /// another life claimed it, the first is a 409, and so is the second if
     /// that life ended it.
-    fn end_unrun(&mut self, id: &str, outcome: Outcome) {
+    fn end_unrun(&mut self, id: &str, outcome: Outcome, refused: bool) {
         self.claiming.remove(id);
         let agent = self.state.turns[id].agent.clone();
         let identity = self.agent(&agent).expect("a held turn's agent is on this computer").identity.clone();
         let life = self.life.clone();
         let t = self.state.turns.get_mut(id).expect("held");
         assert_eq!(t.phase, Phase::Queued, "a turn ends unrun only from the queue");
-        let start = Owed { id: records::work_id(id, "start"), body: records::turn_start(id, &t.asker, &identity, &t.cause, &life) };
-        let end = Owed { id: records::work_id(id, "end"), body: records::turn_end(id, &outcome) };
+        let start = Owed { id: records::work_id(id, "start"), body: records::turn_start(id, &t.asker, &identity, &t.cause, &life), to: None };
+        let end = Owed { id: records::work_id(id, "end"), body: records::turn_end(id, &outcome), to: None };
         t.phase = Phase::Ended;
         t.owed = vec![start.clone(), end.clone()];
         let fragment = t.fragment.clone();
         self.dirty = true;
         self.owe(&agent, &fragment, id, start);
         self.owe(&agent, &fragment, id, end);
+        self.owe_answer(id, &outcome, refused);
+    }
+
+    /// An ended turn that answers an ask owes its answer too: posted as its
+    /// asking agent on that agent's own `tasks` (`records::answer`, under
+    /// `answer_id`, so any life's is the one record), which starts that
+    /// agent's turn in the chat it asked from. Its outcome is its end's: a
+    /// cut turn is answered `lost`, never run again for a better answer. A
+    /// question refused at admission (past the hops or the chat's budget,
+    /// its queue full) is answered `refused`: a turn there that never runs,
+    /// so its asker's owner sees why, and no answer asks again.
+    fn owe_answer(&mut self, id: &str, outcome: &Outcome, refused: bool) {
+        let t = &self.state.turns[id];
+        let Some(r) = t.ret.clone() else { return };
+        assert_eq!(t.phase, Phase::Ended, "only an ended turn answers");
+        if self.agent(&r.agent).is_none() {
+            crate::ev!("answer.dropped", { "turn": id, "why": "its asking agent left this computer" });
+            return;
+        }
+        let by = self.agent(&t.agent).expect("a held turn's agent is on this computer");
+        let text = match outcome {
+            Outcome::Error(why) if refused => records::refused_text(&r.name, &t.fragment, &t.text, why),
+            _ => records::answer_text(&r.name, &t.fragment, &t.text, &r.said, r.files, outcome),
+        };
+        let hop = t.hop.saturating_add(1).min(limits::HOPS_MAX);
+        let body = records::answer(&r.chat, &text, &by.identity, &r.name, &t.cause, id, outcome, hop, refused);
+        let o = Owed { id: records::answer_id(id), body, to: Some(r.agent.clone()) };
+        let (agent, fragment) = (t.agent.clone(), t.fragment.clone());
+        self.state.turns.get_mut(id).expect("held").owed.push(o.clone());
+        self.dirty = true;
+        crate::ev!("answer.owed", { "turn": id, "to": r.agent, "chat": r.chat });
+        self.owe(&agent, &fragment, id, o);
+    }
+
+    /// A turn that may not run here (refused its claim, or its agent gone
+    /// from its chat) is let go, unless it answers an ask: then it ends,
+    /// owing that answer (`why`), so the asking agent hears it never ran.
+    fn let_go(&mut self, id: &str, why: &str) {
+        self.claiming.remove(id);
+        let t = self.state.turns.get_mut(id).expect("held");
+        self.dirty = true;
+        if t.phase == Phase::Ended {
+            // what it owes its chat goes; its answer goes elsewhere
+            t.owed.retain(|o| o.to.is_some());
+        }
+        if t.phase == Phase::Ended || t.ret.is_none() {
+            if t.owed.is_empty() {
+                self.state.turns.remove(id);
+            }
+            return;
+        }
+        t.phase = Phase::Ended;
+        t.owed.clear();
+        t.prompts.clear();
+        t.asking = false;
+        self.owe_answer(id, &Outcome::Error(why.to_string()), false);
+        if self.state.turns[id].owed.is_empty() {
+            self.state.turns.remove(id);
+        }
     }
 
     /// The lane is done with one of a turn's owed records; a turn that owes
@@ -1148,7 +1302,7 @@ impl Engine {
                 // It owes its end as lost (a 409 itself when that life ended
                 // it, and let go then like any answered end).
                 let t = self.state.turns.get_mut(id).expect("checked");
-                let end = Owed { id: records::work_id(id, "end"), body: records::turn_end(id, &Outcome::Error(LOST.into())) };
+                let end = Owed { id: records::work_id(id, "end"), body: records::turn_end(id, &Outcome::Error(LOST.into())), to: None };
                 t.phase = Phase::Ended;
                 t.owed = vec![end.clone()];
                 let (agent, fragment) = (t.agent.clone(), t.fragment.clone());
@@ -1164,13 +1318,15 @@ impl Engine {
                 }
                 assert!(newest.len() <= limits::NOTE_FORGOTTEN_MAX, "a note names its newest forgotten turns");
                 self.owe(&agent, &fragment, id, end);
+                self.owe_answer(id, &Outcome::Error(LOST.into()), false);
                 self.pump(&agent, &fragment);
             }
             ClaimAnswer::Refused => {
-                let t = self.state.turns.remove(id).expect("checked");
-                self.dirty = true;
-                crate::ev!("turn.dropped", { "turn": id, "agent": t.agent, "why": "the agent may not post on the chat's work" });
-                self.pump(&t.agent, &t.fragment);
+                let t = &self.state.turns[id];
+                let (agent, fragment) = (t.agent.clone(), t.fragment.clone());
+                crate::ev!("turn.dropped", { "turn": id, "agent": agent, "why": "the agent may not post on the chat's work" });
+                self.let_go(id, &format!("it may not answer in {fragment}"));
+                self.pump(&agent, &fragment);
             }
             ClaimAnswer::Unanswered => crate::ev!("claim.unanswered", { "turn": id }),
         }
@@ -1304,7 +1460,7 @@ impl Engine {
             Phase::Queued => {
                 // Never run here (a claim in flight is answered to no one).
                 crate::ev!("turn.stopped", { "turn": id, "phase": "queued" });
-                self.end_unrun(&id, Outcome::Stopped);
+                self.end_unrun(&id, Outcome::Stopped, false);
                 self.pump(&agent.fragment, fragment);
             }
             Phase::Ended => crate::ev!("stop.ignored", { "turn": id, "why": "it is over" }),
@@ -1445,7 +1601,7 @@ impl Engine {
     fn runtime(&mut self, event: Event) {
         let turn_of = |e: &Event| -> Option<String> {
             match e {
-                Event::Draft { turn, .. } | Event::Reply { turn, .. } | Event::Attachment { turn, .. } | Event::Retract { turn, .. } => Some(turn.clone()),
+                Event::Draft { turn, .. } | Event::Reply { turn, .. } | Event::Attachment { turn, .. } | Event::Retract { turn, .. } | Event::Interim { turn, .. } => Some(turn.clone()),
                 Event::Step { turn, .. } | Event::Prompt { turn, .. } | Event::Asked { turn } | Event::End { turn, .. } => Some(turn.clone()),
                 Event::Connected(_) | Event::Working(_) | Event::Say { .. } | Event::Notice { .. } => None,
             }
@@ -1472,6 +1628,11 @@ impl Engine {
                 let t = &self.state.turns[&turn];
                 let (agent, fragment) = (t.agent.clone(), t.fragment.clone());
                 self.draft(&agent, &fragment, &turn, Some(records::cut_bytes(&text, limits::DRAFT_TEXT_MAX_BYTES)));
+            }
+            Event::Interim { turn, part } => {
+                if self.state.turns[&turn].open.as_ref().is_some_and(|o| o.part == part) {
+                    self.seal(&turn, true);
+                }
             }
             Event::Reply { turn, part, text } => self.reply(&turn, part, Some(text), None),
             Event::Attachment { turn, part, file } => self.reply(&turn, part, None, Some(file)),
@@ -1504,6 +1665,19 @@ impl Engine {
                 // chat is told whose answer it waits for (`turn.asked`, once
                 // a question: the part asking it is in its id)
                 self.seal(&turn, false);
+                // an ask's turn (one with a return) asks back an agent, whose
+                // words never answer it (`said`: hop 0's alone), so it would
+                // wait out its bound: it is told at once, in words (its
+                // runtime's question wants words: a clarify lets go of
+                // nothing else), that no answer is coming, and goes on to
+                // answer as best it can. A plain hand-off waits as before.
+                let t = &self.state.turns[&turn];
+                if t.ret.is_some() {
+                    crate::ev!("turn.asked_back", { "turn": turn });
+                    let (by, by_name) = (t.asker.clone(), t.asker_name.clone());
+                    self.out.push(Effect::Runtime(Command::Tell { turn, seq: ASKED_BACK_SEQ, by, by_name, text: ASKED_BACK.into(), attached: None }));
+                    return;
+                }
                 let t = self.state.turns.get_mut(&turn).expect("checked");
                 if !t.asking {
                     t.asking = true;
@@ -1612,6 +1786,20 @@ impl Engine {
         if interim {
             t.interim += 1;
         }
+        // what an asked turn says, its answer carries back (its interim
+        // words are narration, not the answer)
+        if let Some(r) = t.ret.as_mut().filter(|_| !interim) {
+            r.files = r.files.saturating_add(u32::try_from(open.files.len()).expect("a reply's files are bounded"));
+            if !open.text.trim().is_empty() && r.said.len() < limits::ANSWER_TEXT_MAX_BYTES {
+                if !r.said.is_empty() {
+                    r.said.push_str("\n\n");
+                }
+                // no control characters: an answer's body stays within the
+                // platform's bound once its text is escaped
+                r.said.extend(open.text.trim().chars().filter(|c| !c.is_control() || matches!(c, '\n' | '\t')));
+                r.said = records::cut_bytes(&r.said, limits::ANSWER_TEXT_MAX_BYTES);
+            }
+        }
         self.dirty = true;
         let (agent, fragment, n, hop) = (t.agent.clone(), t.fragment.clone(), t.replies, t.hop);
         // A reply that names another agent of the chat hands off to it.
@@ -1668,7 +1856,7 @@ impl Engine {
         assert!(t.active(), "a turn's run ends once: {id} is {:?}", t.phase);
         // a live answer still held goes with it: the runtime never had it
         let prompts = std::mem::take(&mut t.prompts);
-        let end = Owed { id: records::work_id(id, "end"), body: records::turn_end(id, &outcome) };
+        let end = Owed { id: records::work_id(id, "end"), body: records::turn_end(id, &outcome), to: None };
         t.phase = Phase::Ended;
         t.owed = vec![end.clone()];
         // over, it asks nothing: its asker's next message is a turn
@@ -1687,6 +1875,7 @@ impl Engine {
             self.post(&agent, &fragment, records::WORK, records::work_id(id, &format!("pc:{}", p.id)), records::turn_prompt_closed(id, &p.id, unanswered, None), Vec::new());
         }
         self.owe(&agent, &fragment, id, end);
+        self.owe_answer(id, &outcome, false);
         self.draft(&agent, &fragment, id, None);
         self.pump(&agent, &fragment);
     }
@@ -1745,13 +1934,11 @@ impl Engine {
     fn gone(&mut self, agent: &str, fragment: &str) {
         let ids: Vec<String> = self.state.turns.values().filter(|t| t.agent == agent && t.fragment == fragment).map(|t| t.id.clone()).collect();
         for id in ids {
-            let t = self.state.turns.remove(&id).expect("listed");
-            self.claiming.remove(&id);
-            self.dirty = true;
             crate::ev!("turn.dropped", { "turn": id, "why": "the agent is no longer in this fragment" });
-            if t.active() {
-                self.out.push(Effect::Runtime(Command::Forget { turn: id }));
+            if self.state.turns[&id].active() {
+                self.out.push(Effect::Runtime(Command::Forget { turn: id.clone() }));
             }
+            self.let_go(&id, &format!("it is no longer in {fragment}"));
         }
         self.noticed.retain(|n| !(n.agent == agent && n.fragment == fragment));
         self.views.remove(fragment);
@@ -1765,8 +1952,11 @@ fn answers_to(agent: &Agent, word: &str) -> bool {
 
 /// A loaded state agrees with itself, or is corrupt.
 pub fn check(state: &State) -> Result<(), Corrupt> {
-    if state.version != STATE_VERSION {
-        return Err(Corrupt(format!("state version {} is not {STATE_VERSION}", state.version)));
+    if !STATE_VERSIONS.contains(&state.version) {
+        return Err(Corrupt(format!("state version {} is none of {STATE_VERSIONS:?}", state.version)));
+    }
+    if state.version < version_of(state) {
+        return Err(Corrupt(format!("state version {} holds an ask's return", state.version)));
     }
     if state.turns.len() > limits::TURNS_OPEN_MAX {
         return Err(Corrupt(format!("{} open turns is past the bound", state.turns.len())));
@@ -1801,15 +1991,25 @@ pub fn check(state: &State) -> Result<(), Corrupt> {
         if ended == t.owed.is_empty() {
             return Err(Corrupt(format!("turn {id} is {:?} and owes {} records", t.phase, t.owed.len())));
         }
-        if t.owed.len() > 2 {
-            return Err(Corrupt(format!("turn {id} owes {} records: at most its start and its end", t.owed.len())));
+        if t.owed.len() > 3 {
+            return Err(Corrupt(format!("turn {id} owes {} records: at most its start, its end and its answer", t.owed.len())));
         }
         let own = format!("wk:{id}:");
-        if let Some(o) = t.owed.iter().find(|o| !o.id.starts_with(&own) || o.body["turn"] != id.as_str()) {
+        let ours = |o: &Owed| match &o.to {
+            None => o.id.starts_with(&own),
+            Some(to) => o.id == records::answer_id(id) && t.ret.as_ref().is_some_and(|r| &r.agent == to),
+        };
+        if let Some(o) = t.owed.iter().find(|o| !ours(o) || o.body["turn"] != id.as_str()) {
             return Err(Corrupt(format!("turn {id} owes {}, not one of its own", o.id)));
         }
         if t.routine && t.hop != 0 {
             return Err(Corrupt(format!("turn {id} is a routine at hop {}", t.hop)));
+        }
+        if let Some(r) = &t.ret {
+            let whole = records::fragment_name_ok(&r.agent) && records::fragment_name_ok(&r.chat) && !r.name.trim().is_empty();
+            if !whole || r.said.len() > limits::ANSWER_TEXT_MAX_BYTES {
+                return Err(Corrupt(format!("turn {id}'s return is not one an ask makes")));
+            }
         }
     }
     if state.agent_turns.len() > limits::AGENT_TURN_CHATS_MAX {

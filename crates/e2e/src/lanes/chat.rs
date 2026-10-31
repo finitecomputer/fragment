@@ -513,7 +513,8 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("the owner, signed in on the chat's page, may write", ready && role == "owner" && chrome.eval(&page, "!document.getElementById('text').disabled")? == true, &role);
     let named = format!("document.title === {} && document.getElementById('text').placeholder === {}", js(&capital(&label)), js(&format!("Message {}", capital(&label))));
     s.ok("it names the chat by its agent, and the composer says whom it messages", shows(&mut chrome, &page, &named), chrome.eval(&page, "[document.title, document.getElementById('text').placeholder]")?);
-    s.ok("a new chat shows its empty start", chrome.eval(&page, "!!document.querySelector('.empty .agent-avatar.large')")? == true, "");
+    // drawn once its history is read, a moment after the composer is ready
+    s.ok("a new chat shows its empty start", shows(&mut chrome, &page, "!!document.querySelector('.empty .agent-avatar.large')"), "");
 
     // the page notes every draft it shows, as a person would see them
     chrome.eval(
@@ -1276,11 +1277,18 @@ fn alerts_in_frame(s: &mut Suite, api: &Api, chrome: &mut Browser, owner: &Keys,
         read && on && holds == json!({ "scope": scope, "worker": format!("{platform}/__shell/alerts-sw.js"), "key": key }),
         json!({ "was": was, "holds": holds, "key": key, "banner": banner }),
     );
-    // its worker, as a push service would reach it
+    // its worker, as a push service would reach it. What it shows is read
+    // once its `showNotification` has finished (`__shown` counts them), never
+    // while one is under way: Chrome's getNotifications drops from its store
+    // a notification stored but not yet on display when it asks, for good
+    // (PlatformNotificationContextImpl, its synchronization), so a read
+    // racing a show saw none, ever (CI runs 40945637639, 41065331125)
     let notified = format!("navigator.serviceWorker.getRegistration({}).then((r) => (r ? r.getNotifications() : [])).then((l) => l.map((n) => ({{ title: n.title, body: n.body, tag: n.tag }})))", js(&scope));
     let registration = chrome.registration_id(&shell, &scope)?;
+    let worker = chrome.worker("/__shell/alerts-sw.js")?;
+    chrome.eval(&worker, "(() => { const r = self.registration; const real = r.showNotification.bind(r); self.__shown = 0; r.showNotification = (...a) => real(...a).finally(() => { self.__shown += 1; }); return true; })()")?;
     chrome.deliver_push(&shell, &platform, &registration, &push)?;
-    let shown = s.eventually(wait, || chrome.eval(&shell, &notified).ok().is_some_and(|v| v.as_array().is_some_and(|l| !l.is_empty())));
+    let shown = chrome.until(&worker, "self.__shown === 1", wait);
     let seen = chrome.eval(&shell, &notified)?;
     s.ok(
         "a push to it, its person signed in, shows under the chat: its title and words, its tag the chat's, whatever the push said",
@@ -1291,11 +1299,10 @@ fn alerts_in_frame(s: &mut Suite, api: &Api, chrome: &mut Browser, owner: &Keys,
     chrome.eval(&shell, &closing)?;
     // the platform unable to say who is signed in (its answer refused to
     // the worker): only that something came, and the alerts stay
-    let worker = chrome.worker("/__shell/alerts-sw.js")?;
     chrome.block(&worker, &["*/api/identities/me*"])?;
     chrome.deliver_push(&shell, &platform, &registration, &push)?;
     let unsure = json!([{ "title": "Finite", "body": "Something new in one of your chats", "tag": chat }]);
-    let kept_back = s.eventually(wait, || chrome.eval(&shell, &notified).ok().as_ref() == Some(&unsure));
+    let kept_back = chrome.until(&worker, "self.__shown === 2", wait) && chrome.eval(&shell, &notified)? == unsure;
     let seen = chrome.eval(&shell, &notified)?;
     let stays = chrome.eval(&shell, &held)?["scope"] == scope.as_str();
     chrome.block(&worker, &[])?;

@@ -296,6 +296,19 @@ impl RegistryCell {
             twice(),
         )?;
         self.end_access(identity)?;
+        // out of every org's content at once, by the operator who wiped them
+        #[derive(Deserialize)]
+        struct By {
+            by: String,
+        }
+        let by = self.row::<By>("SELECT by FROM wipes WHERE identity = ?", vec![identity.into()])?.ok_or_else(|| CellError::host("a wipe's row went missing"))?;
+        self.content_wiped(identity, &by.by)?;
+        // test fleets: fail this step here, its orgs' content written, so a
+        // run again shows it changes nothing twice (`TestHook::FailWipeRows`)
+        if self.fail_wipe_rows.get() > 0 {
+            self.fail_wipe_rows.set(self.fail_wipe_rows.get() - 1);
+            return Err(CellError::host("a test hook failed the wipe's rows after its orgs' content"));
+        }
         self.exec(&format!("DELETE FROM consents WHERE {THEIRS}"), theirs(identity))?;
         self.exec(&format!("DELETE FROM agent_fragments WHERE {THEIRS}"), theirs(identity))?;
         // their disconnects' fences, named by the sign-ins going next

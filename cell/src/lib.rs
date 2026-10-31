@@ -664,9 +664,10 @@ fn command_body<T: serde::de::DeserializeOwned>(body: &[u8], what: &str) -> Cell
 /// `/api/ledger…` (docs/ledger.md; docs/api.md, Ledger): `GET` reads the
 /// signer's (an agent's: its owner's); the deployment's operators grant
 /// credit and set a person's plan and overdraft, the person named by email
-/// or identity, and grant an org's own credit, named `org:<org id>`. A
-/// seat's state has one writer, the registry (docs/billing.md): an
-/// operator comps or ends a seat through it.
+/// or identity, and grant an org's own credit and set its budget, named
+/// `org:<org id>` (orgs pay out of band: Paul, 2026-10-30). A seat's state
+/// has one writer, the registry (docs/billing.md): an operator comps or
+/// ends a seat through it.
 async fn ledger_route(mut req: Request, env: &Env, cfg: &Config, url: &Url, rest: &[&str]) -> CellResult<Response> {
     let body = read_body(&mut req, limits::BODY_MAX_BYTES).await?;
     if let (Method::Get, []) = (req.method(), rest) {
@@ -681,7 +682,7 @@ async fn ledger_route(mut req: Request, env: &Env, cfg: &Config, url: &Url, rest
     let person = match *person {
         "me" => op.clone(),
         id if npub::is_identity(id) => id.to_string(),
-        // an org's own credit (decision 66): only a grant takes, an org that is
+        // an org's own credit and budget (decisions 66 and 68), an org that is
         // there (its ledger refuses a plan or an overdraft)
         id if id.starts_with(fragment_core::ledger::org::ORG_LEDGER_PREFIX) => match fragment_core::ledger::org::Payer::parse(id) {
             Some(fragment_core::ledger::org::Payer::Org(org)) => {
@@ -693,8 +694,12 @@ async fn ledger_route(mut req: Request, env: &Env, cfg: &Config, url: &Url, rest
         email if fragment_core::mail::valid_address(email) => ask_registry(env, &calls::Lookup { who: email.to_string() }).await?.id,
         other => return Err(CellError::invalid(format!("{other:?} is not an email, an identity (an npub), `org:<org id>`, or `me`"))),
     };
-    // each command is the operators' log's too (docs/api.md, Operators)
-    let note = |detail: String| registry::admin::Note { by: op.clone(), action: format!("ledger-{command}"), target: person.clone(), detail };
+    // each command is the operators' log's too (docs/api.md, Operators);
+    // an org's, its governance log's, written before its ledger takes it
+    // (`registry::content::org_noted`), its body checked as its ledger will
+    let note = |id: &str, detail: String| registry::admin::Note { by: op.clone(), action: format!("ledger-{command}"), target: person.clone(), detail, request: Some(id.to_string()) };
+    let org = person.starts_with(fragment_core::ledger::org::ORG_LEDGER_PREFIX);
+    let refused = |why: fragment_core::ledger::Refused| CellError::from(ledger::LedgerError::from(why));
     match *command {
         "grant" => {
             let mut g: fragment_proto::ledger::GrantCredit = command_body(&body, "grant")?;
@@ -703,26 +708,49 @@ async fn ledger_route(mut req: Request, env: &Env, cfg: &Config, url: &Url, rest
                 return Err(CellError::invalid(format!("a grant's `by` is the operator who signs it ({op})")));
             }
             g.id = commanded("grant", &g.id)?;
+            let noted = note(&g.id, format!("{} micros: {}", g.micros, g.why));
+            if org {
+                if let Some(why) = fragment_core::ledger::grant_invalid(&g) {
+                    return Err(refused(why));
+                }
+                ask_registry(env, &noted).await?;
+            }
             let answer = ledger::ask(env, &person, &g).await?;
-            ask_registry(env, &note(format!("{} micros: {}", g.micros, g.why))).await?;
+            if !org {
+                ask_registry(env, &noted).await?;
+            }
             json_answer(&answer)
         }
         "plan" => {
             let mut c: fragment_proto::ledger::SetPlan = command_body(&body, "plan")?;
             c.id = commanded("plan", &c.id)?;
             let answer = ledger::ask(env, &person, &c).await?;
-            ask_registry(env, &note(format!("{:?}", c.plan))).await?;
+            ask_registry(env, &note(&c.id, format!("{:?}", c.plan))).await?;
             json_answer(&answer)
         }
         "overdraft" => {
             let mut c: fragment_proto::ledger::SetOverdraft = command_body(&body, "overdraft")?;
             c.id = commanded("overdraft", &c.id)?;
             let answer = ledger::ask(env, &person, &c).await?;
-            ask_registry(env, &note(format!("{} micros", c.micros))).await?;
+            ask_registry(env, &note(&c.id, format!("{} micros", c.micros))).await?;
             json_answer(&answer)
         }
+        // an org's monthly budget (decision 68), an operator's while orgs
+        // pay out of band (a person's ledger refuses it: 403)
+        "budget" => {
+            let mut c: fragment_proto::ledger::OrgBudget = command_body(&body, "budget")?;
+            c.id = commanded("budget", &c.id)?;
+            if !org {
+                return Err(refused(fragment_core::ledger::Refused::OrgsOnly));
+            }
+            if let Some(why) = fragment_core::ledger::org::budget_invalid(&c) {
+                return Err(refused(why));
+            }
+            ask_registry(env, &note(&c.id, format!("{} micros", c.micros))).await?;
+            json_answer(&ledger::ask(env, &person, &c).await?)
+        }
         // a seat is the registry's alone: an operator comps or ends one there (`/api/admin/seats`)
-        other => Err(CellError::new(ErrorCode::NotFound, format!("no ledger command {other:?}: grant, plan, or overdraft (a seat is comped or ended at /api/admin/seats)"))),
+        other => Err(CellError::new(ErrorCode::NotFound, format!("no ledger command {other:?}: grant, plan, overdraft, or an org's budget (a seat is comped or ended at /api/admin/seats)"))),
     }
 }
 
@@ -1288,7 +1316,7 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
         }
         (_, ["api", "orgs", org, rest @ ..]) => {
             let (org, rest) = (org.to_string(), rest.to_vec());
-            orgs::named(req, env, cfg, &url, &org, &rest).await
+            orgs::named(req, env, &url, &org, &rest).await
         }
         (_, ["api", "admin", rest @ ..]) => {
             let rest = rest.to_vec();

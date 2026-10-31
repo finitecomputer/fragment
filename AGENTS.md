@@ -39,6 +39,8 @@ platform concept.
 - `images/`: a separate Rust workspace (bridge, stub, Hermes).
 - `.github/workflows/`: CI, image promotion and CLI releases. Read the
   relevant workflow and xtask module for mechanics and flags.
+  Released CLIs warn on stderr when finite.chat advertises a newer
+  published version (`cli/src/notice.rs`).
 
 ## Commands
 
