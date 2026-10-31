@@ -932,9 +932,14 @@ hold, interrupt, questions).
   the hold never tears one; a torn last line, restored, is skipped.
 - **A turn** is one user message: its note, quote, asker and files as
   Relay's are, in words. Text deltas are the draft; each text block a reply
-  part; each tool's result a step with its call's id and status; its
-  `result` its end (`success` idle, else the error it says, a sign-in or a
-  plan's limit in its own words).
+  part; each `tool_use` its intent (`turn.call`: its assistant message the
+  response, its place there; one said again is one call); each tool's
+  result a step with its call's id, status and response; its `result` its
+  end (`success` idle, else the error it says, a sign-in or a plan's limit
+  in its own words). Claude Code writes a call's `assistant` line before it
+  runs the call, one content block a line, but the tool may start before
+  the bridge reads it, so the record trails the call's start by
+  milliseconds, as Hermes' does. `AskUserQuestion` is its card, no call.
 - **No technical approvals:** tools run with permissions bypassed.
   `AskUserQuestion` alone still asks the host (`can_use_tool`): each
   question a card (`<tool_use_id>-q<n>`), its options and "Other" in
@@ -955,14 +960,22 @@ hold, interrupt, questions).
   `a_let_go_turn_whose_interrupt_goes_unanswered_has_its_process_replaced`,
   composed scripts in tests/claude-composed/, each failing without it).
 - **A crash** (the computer's death) leaves the cut call open in the
-  transcript. The next turn resumes the session, and Claude Code itself
-  tells its model the call's outcome is unknown, with no cut-turn patch
-  of ours; the bridge's note says what the chat saw.
+  transcript. The cut turn is continued once ("A cut turn is continued
+  once", above), resuming the session: Claude Code itself tells its model
+  the call's outcome is unknown, with no cut-turn patch of ours, and the
+  bridge's note names the call, asked for and never ended, as one that may
+  or may not have run. Recorded with Haiku 5.5, the continuation checked
+  what the call had left, found its process still running (a tool's
+  process may outlive the bridge), and waited for it rather than run it
+  again.
 - **Its menu:** `new` (the chat's next session) and `stop`.
 - Proven against `fake-claude` replaying Claude Code's wire as it spoke,
   recorded with Haiku 5.5 (tests/claude.rs, tests/claude/: a reply, a tool
-  step, a card, Stop, a session resumed by a new bridge and `/new`, and a
-  crash mid-tool), and in its own unit tests.
+  step and its intent, a card, Stop, a session resumed by a new bridge and
+  `/new`, and a crash mid-tool continued), and in its own unit tests. The
+  recorder keeps no machine in a recording: its init's paths dropped, its
+  working directory, home and user's name replaced, and a tool input's
+  streamed pieces (which can split a path) emptied.
 
 ## Hermes' Relay, as the bridge speaks it
 

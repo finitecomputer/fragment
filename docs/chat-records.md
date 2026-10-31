@@ -463,7 +463,8 @@ only `ok`, which was true even for a call that failed. `response` (since
 Part `call:<24 hex of SHA-256 of its response, a NUL, and its place in
 it>` (since 2026-10-31): a tool call the model asked for, recorded before
 it runs, as its runtime says so (our Hermes image's: its
-`post_api_request`, before Hermes runs any call of the response;
+`post_api_request`, before Hermes runs any call of the response; Claude
+Code's: its `tool_use`, its assistant message the response;
 docs/bridge.md). `response` names the model response that asked for it,
 once (at most 128 of a post id's characters); its place there makes it
 one call. `tool_call_id` is the provider's, which is no call's identity:
