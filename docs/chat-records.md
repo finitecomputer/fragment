@@ -102,7 +102,9 @@ until a reply of that turn replaces it.
   including its words before a tool call, which are posted before that
   call's step.
 - `interim: true` marks words its turn went on working after: words
-  before a tool call that does more than update memory. The push leaves
+  before a tool call that does more than update memory. Words before a
+  call that only updates memory wait: they are the turn's answer if it
+  ends next, else interim, so a turn never answers twice (#729). The push leaves
   an interim reply out; a page shows it as any reply. A turn posts at
   most 64 replies that are not interim and, counted apart, 200 interim
   ones, so narration never costs the answer.
