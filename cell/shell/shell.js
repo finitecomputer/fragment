@@ -1622,6 +1622,8 @@ async function start(open) {
   else if (pick) openChat(pick);
   else if (state.guest) guestHome(mine.offer);
   else notice("No chats yet", "Make an agent to start.");
+  // an Add a reload cut short goes on from what it made (`resumeFirstRun`)
+  if (!settings) resumeFirstRun().catch(() => {});
   // an invite waits, and nothing it shares is open yet: a phone's sidebar,
   // where it is answered, shows over the page
   if (!settings && !pick && state.invites.length && layout.narrow) layout.show("left");
