@@ -324,6 +324,67 @@ fn a_call_is_recorded_before_it_runs() {
     assert_eq!(kinds(&e.step(heard(Event::Step { turn: t.clone(), step }), T0 + 7)), vec!["reply", "turn.step"]);
 }
 
+/// Goal (FIN-236, Paul 2026-10-31: "Yes, show the age"): a message handed
+/// long after it was said is told its age first, so its agent can judge
+/// whether it is still wanted. Valid: a fresh one is told nothing. Late:
+/// one said 3 hours before it is handed. Replay: read again, it starts
+/// nothing more. Restart: one queued as a life ends is told its age by
+/// the next, from the time the state kept; a state from before kept none,
+/// and tells none. A cut turn's continuation is told what it answered.
+#[test]
+fn a_late_message_is_told_its_age() {
+    let a = agent("juniper");
+    let v = view(&[&a]);
+    let (minute, hour) = (60_000_u64, 3_600_000_u64);
+    let now = T0 + 10 * hour;
+    let record = |seq: u64, at: u64| Record { channel: "chat".into(), seq, at: i64::try_from(at).expect("a time"), principal: "npub1paul".into(), kind: "message".into(), body: json!({ "text": "ship it" }) };
+    let say = |e: &mut Engine, seq: u64, at: u64, now: u64| {
+        let s = e.step(Input::Record { agent: a.fragment.clone(), fragment: "talk--k3x9".into(), record: record(seq, at), view: Some(v.clone()), since: 0 }, now);
+        answered(e, s, now)
+    };
+    let late = |ago: &str| Some(format!("This message was sent about {ago} ago, and is only reaching you now. If it may no longer be wanted, check before acting on it."));
+
+    let mut e = engine(std::slice::from_ref(&a));
+    let fresh = started(&say(&mut e, 1, now - 2_000, now)).expect("handed");
+    assert_eq!(fresh.note, None, "fresh: nothing");
+    let mut e = engine(std::slice::from_ref(&a));
+    let s = say(&mut e, 1, now - 3 * hour, now);
+    assert_eq!(started(&s).expect("handed").note, late("3 hours"));
+    assert!(started(&say(&mut e, 1, now - 3 * hour, now + 1)).is_none(), "replay: read again, nothing more");
+
+    // restart: queued as the life ends (its runtime gone), handed by the next
+    let mut e = engine(std::slice::from_ref(&a));
+    e.step(heard(Event::Connected(false)), now);
+    assert!(started(&say(&mut e, 1, now - 1_000, now)).is_none(), "queued");
+    let saved = e.state().clone();
+    let next_life = |state: State, at: u64| {
+        let mut n = Engine::new(state, Settings::default(), "fedcba9876543210fedcba9876543210").expect("whole").with_runtime(crate::runtime::DEFAULT, &[]);
+        n.step(Input::Agents(vec![a.clone()]), at);
+        let r = n.recover(at);
+        assert!(started(&r).is_none());
+        let s = n.step(heard(Event::Connected(true)), at);
+        started(&answered(&mut n, s, at)).expect("handed").note
+    };
+    assert_eq!(next_life(saved.clone(), now + 12 * minute), late("12 minutes"), "from the time its state kept");
+    let mut before = serde_json::to_value(&saved).expect("a state");
+    for t in before["turns"].as_object_mut().expect("turns").values_mut() {
+        t.as_object_mut().expect("a turn").remove("said_at");
+    }
+    assert_eq!(next_life(serde_json::from_value(before).expect("a state from before"), now + 12 * minute), None, "a state from before tells none");
+
+    // a cut turn's continuation is told the age of what it answered
+    let mut e = engine(std::slice::from_ref(&a));
+    let cut = started(&say(&mut e, 1, now - 2 * hour, now)).expect("handed").turn;
+    let mut n = Engine::new(e.state().clone(), Settings::default(), "fedcba9876543210fedcba9876543210").expect("whole").with_runtime(crate::runtime::DEFAULT, &[]);
+    n.step(Input::Agents(vec![a.clone()]), now + minute);
+    n.recover(now + minute);
+    n.step(heard(Event::Connected(true)), now + minute);
+    let s = n.step(Input::Posted { turn: cut.clone(), id: records::work_id(&cut, "end"), kept: true }, now + minute);
+    let continued = started(&answered(&mut n, s, now + minute)).expect("its continuation, handed");
+    assert_eq!(continued.continues.as_deref(), Some(cut.as_str()));
+    assert_eq!(continued.note.as_deref(), Some("What that turn was answering was sent about 2 hours ago. If it may no longer be wanted, check before acting on it."));
+}
+
 /// Goal: a person's message to the lead starts exactly one turn, which is
 /// handed to the runtime with who asked, and keeps the computer awake.
 #[test]
@@ -2272,7 +2333,9 @@ impl World {
                     let claim = self.journal.work(&ts.turn, "turn.start").into_iter().next();
                     self.runs.push((self.lives, ts.turn.clone()));
                     self.claims_at_run.push((self.lives, ts.turn.clone(), claim));
-                    assert!(ts.note.is_none(), "the engine names the claim; the driver reads the note");
+                    // the engine names the claim and tells a late message its
+                    // age; the driver reads the note
+                    assert!(ts.note.as_deref().is_none_or(|n| n.ends_with("If it may no longer be wanted, check before acting on it.")), "{:?}", ts.note);
                     let note = if ts.fragment == CHAT { self.journal.note(&ts.agent.identity, ts.claim_seq, ts.continues.as_deref()) } else { None };
                     if let Some(cut) = &ts.continues {
                         self.continued.push((ts.turn.clone(), ts.asker_name.clone(), ts.text.clone(), cut.clone()));

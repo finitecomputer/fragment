@@ -351,6 +351,11 @@ pub struct Turn {
     /// `STEPS_PER_TURN_MAX`'s bound. A state from before holds none.
     #[serde(default, skip_serializing_if = "u32_is_zero")]
     pub calls: u32,
+    /// When its cause was said (the platform's time, ms; a continuation's,
+    /// its cut turn's): handed long after, it is told its age (note.rs,
+    /// `age`). A state from before holds none, and tells none.
+    #[serde(default, skip_serializing_if = "i64_is_zero")]
+    pub said_at: i64,
     pub prompts: Vec<Prompt>,
     pub stop_requested: bool,
     /// What an ended turn still owes `work`, in the order posted.
@@ -617,6 +622,10 @@ pub fn cursor_key(agent: &str, fragment: &str, channel: &str) -> String {
 /// A count that is nothing, kept out of the state file (so a state with
 /// none reads as an older bridge's did).
 fn u32_is_zero(n: &u32) -> bool {
+    *n == 0
+}
+
+fn i64_is_zero(n: &i64) -> bool {
     *n == 0
 }
 
@@ -1230,6 +1239,7 @@ impl Engine {
             replies: 0,
             interim: 0,
             calls: 0,
+            said_at: at,
             last_part: 0,
             prompts: Vec::new(),
             stop_requested: false,
@@ -1426,6 +1436,7 @@ impl Engine {
             replies: 0,
             interim: 0,
             calls: 0,
+            said_at: cut.said_at,
             last_part: 0,
             prompts: Vec::new(),
             stop_requested: false,
@@ -1585,6 +1596,12 @@ impl Engine {
         t.phase = Phase::Running;
         t.last_ms = now;
         self.dirty = true;
+        // a message handed long after it was said is told its age first
+        let age = crate::note::age(t.said_at, now, t.routine || t.command, t.continues.is_some());
+        let note = match (age, t.note.clone()) {
+            (Some(age), Some(note)) => Some(records::cut_bytes(&format!("{age}\n\n{note}"), limits::NOTE_MAX_BYTES)),
+            (age, note) => age.or(note),
+        };
         let start = TurnStart {
             turn: id.to_string(),
             agent: a,
@@ -1598,7 +1615,7 @@ impl Engine {
             files: Vec::new(),
             routine: t.routine,
             claim_seq,
-            note: t.note.clone(),
+            note,
             forgotten,
             forgotten_more,
             command: t.command,

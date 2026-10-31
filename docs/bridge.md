@@ -643,6 +643,34 @@ again by itself, so nobody types "continue", and never run twice.
   tests/bridge.rs's restart cases, and with the real Hermes in
   `a_turn_cut_while_its_tool_runs_is_continued_once` (tests/docker.rs).
 
+## A late message is told its age
+
+Paul (2026-10-31, FIN-236): when an agent is handed a message late (a
+backlog after an outage, a restart or a sleep), it is told how old the
+message is, so it can judge whether it is still wanted. There is no cutoff:
+the agent decides.
+
+- **When.** The engine keeps each turn's cause time (`Turn::said_at`, the
+  platform's `at` of its record). A turn handed at least
+  `MESSAGE_AGE_TOLD_MS` (5 minutes) after that time is told its age, first
+  in its note (`TurnStart::note`, so every runtime hands it on as it hands
+  the note). Five minutes is five times a pre-wake's hold, past an ordinary
+  claim, cold wake or queue, so the line marks a real wait and isn't
+  noise.
+- **What.** One line, in plain words (`note::age`): "This message was sent
+  about 3 hours ago, and is only reaching you now. If it may no longer be
+  wanted, check before acting on it." Minutes under two hours, hours under
+  two days, then days. A cut turn's continuation is told the age of what
+  that turn was answering instead.
+- **Not told.** A routine (its message says its hour), a command, and a
+  turn whose state kept no time (one from before this). The age is the
+  bridge's clock against the platform's record time; it is computed as the
+  turn is handed, in any life, from the saved time.
+- Proven in `note::a_late_message_is_told_its_age` and
+  `engine_tests::a_late_message_is_told_its_age`: fresh, late, its bound,
+  the exempt, a replay, a restart from the saved time, a state from
+  before, and a continuation.
+
 ## What a rollback forgot
 
 A computer that went back to an older save (a crash, an unsaved stop, a
