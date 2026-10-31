@@ -120,13 +120,19 @@ sent.
   saying how many it left out. Its fields are `kind`, `origin` and
   `source`; a section's context its source and agent, its location the
   places of its first and last message.
-- **Reconciled, each import.** After its writes, an import reads search's
-  sources and writes each conversation whose sha256 (its index entry's)
-  is not the revision search holds, and deletes each conversation's
-  source the archive no longer has. So an import that writes nothing puts
-  search right too, and an archive made before its host had search is
-  searched from its next import. A host without search, or one that
-  cannot be reached, is said and skipped: the import stands.
+- **Reconciled, each import, with the archive as it stands then.** After
+  its writes, an import reads search's sources and the archive at main's
+  head (its indexes, and the files changed since them: another import may
+  have written meanwhile), and writes each conversation whose sha256 is
+  not the revision search holds, its bytes read at that head and its
+  revision theirs. Each write names the revision it replaces, as search
+  was read holding it, so another import's write since is never written
+  over (it is left as it is, counted `overtaken`). Nothing is deleted: the
+  platform forgets a conversation's source when a move of main deletes its
+  file. So an import that writes nothing puts search right too, and an
+  archive made before its host had search is searched from its next
+  import. A host without search, or one that cannot be reached, is said
+  and skipped: the import stands.
 
 ## Where they come from
 

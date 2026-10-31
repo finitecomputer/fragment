@@ -267,7 +267,7 @@ pub fn run(c: &Client, sub: SessionCmd) -> Result<Imported> {
     for e in written.entries.values() {
         *holds.entry(e.kind.as_str()).or_default() += 1;
     }
-    let search = search::sync(c, &archive, &spool, &written.entries);
+    let search = search::sync(c, &archive, &spool);
     let refused = std::mem::take(&mut spool.refused);
     Ok(Imported { archive, made, added: written.added, updated: written.updated, unchanged: written.unchanged, refused, problems, holds, search })
 }
@@ -571,8 +571,11 @@ pub fn print(r: &Imported) {
     );
     match &r.search {
         search::Searched::Skipped { why } => println!("Search: skipped ({why}); the next import puts it right."),
-        search::Searched::Written { written, deleted, unchanged, left_out, refused, refused_count } => {
-            println!("Search: {written} written, {deleted} removed, {unchanged} up to date.");
+        search::Searched::Written { written, unchanged, overtaken, left_out, refused, refused_count } => {
+            println!("Search: {written} written, {unchanged} up to date.");
+            if *overtaken > 0 {
+                println!("  {overtaken} written meanwhile by another import, left as it wrote them.");
+            }
             for one in refused {
                 println!("  not searchable: {} ({})", one.id, one.why);
             }
@@ -923,16 +926,16 @@ mod tests {
     fn an_import_puts_its_archives_search_right() {
         let (mock, c) = archive();
         let upserts = || mock.take_requests("").get("POST upsert").copied().unwrap_or(0);
-        let off = write(&c, NAME, &spooled(vec![session("a", Kind::Chat, "2026-10-01T09:00:00Z", &["hello", "hi"])])).unwrap();
-        let skipped = search::sync(&c, NAME, &spooled(vec![]), &off.entries);
+        write(&c, NAME, &spooled(vec![session("a", Kind::Chat, "2026-10-01T09:00:00Z", &["hello", "hi"])])).unwrap();
+        let skipped = search::sync(&c, NAME, &spooled(vec![]));
         assert!(matches!(&skipped, search::Searched::Skipped { why } if why.contains("no search")), "{skipped:?}");
 
         mock.enable_search(NAME);
         let spool = spooled(vec![session("a", Kind::Chat, "2026-10-01T09:00:00Z", &["hello", "hi"]), session("r", Kind::Cron, "2026-10-02T06:00:00Z", &["digest"])]);
-        let w = write(&c, NAME, &spool).unwrap();
+        write(&c, NAME, &spool).unwrap();
         upserts();
-        let s = search::sync(&c, NAME, &spool, &w.entries);
-        assert!(matches!(s, search::Searched::Written { written: 2, deleted: 0, unchanged: 0, .. }), "{s:?}");
+        let s = search::sync(&c, NAME, &spool);
+        assert!(matches!(s, search::Searched::Written { written: 2, unchanged: 0, overtaken: 0, .. }), "{s:?}");
         let held = |source: &str| mock.search_index(NAME, |ix| ix.sources.get(source).cloned()).flatten();
         let a = held("sessions/hermes-a.json").expect("a is searched");
         assert_eq!(a.revision, sha(&file_of(session("a", Kind::Chat, "2026-10-01T09:00:00Z", &["hello", "hi"]))));
@@ -940,27 +943,80 @@ mod tests {
         assert_eq!(a.fields["kind"], "chat");
         assert_eq!(upserts(), 2);
 
-        let again = search::sync(&c, NAME, &spooled(vec![]), &write(&c, NAME, &spool).unwrap().entries);
+        write(&c, NAME, &spool).unwrap();
+        let again = search::sync(&c, NAME, &spooled(vec![]));
         assert!(matches!(again, search::Searched::Written { written: 0, unchanged: 2, .. }), "{again:?}");
         assert_eq!(upserts(), 0, "a replay writes nothing");
 
         let later = spooled(vec![session("a", Kind::Chat, "2026-10-03T09:00:00Z", &["hello", "hi", "and peas?"])]);
-        let w = write(&c, NAME, &later).unwrap();
-        assert!(matches!(search::sync(&c, NAME, &later, &w.entries), search::Searched::Written { written: 1, unchanged: 1, .. }));
+        write(&c, NAME, &later).unwrap();
+        assert!(matches!(search::sync(&c, NAME, &later), search::Searched::Written { written: 1, unchanged: 1, .. }));
         assert_eq!(held("sessions/hermes-a.json").unwrap().sections.len(), 2);
 
         mock.search_index(NAME, |ix| ix.sources.clear());
         mock.external_commit(NAME, "main", &[(session::session_path("hermes-r").as_str(), None)], "a conversation removed");
-        let w = write(&c, NAME, &spooled(vec![])).unwrap();
+        write(&c, NAME, &spooled(vec![])).unwrap();
         let other = fragment_fakes::search::Held { revision: "1".into(), title: None, at: None, fields: BTreeMap::new(), sections: vec![] };
         mock.search_index(NAME, |ix| {
             ix.sources.insert("sessions/hermes-gone.json".into(), other.clone());
             ix.sources.insert("notes/x.md".into(), other);
         });
-        let repaired = search::sync(&c, NAME, &spooled(vec![]), &w.entries);
-        assert!(matches!(repaired, search::Searched::Written { written: 1, deleted: 1, unchanged: 0, .. }), "{repaired:?}");
-        assert!(held("sessions/hermes-a.json").is_some() && held("sessions/hermes-gone.json").is_none(), "read again from the archive, the gone one deleted");
-        assert!(held("notes/x.md").is_some(), "a source not the archive's conversation is left as it is");
+        let repaired = search::sync(&c, NAME, &spooled(vec![]));
+        assert!(matches!(repaired, search::Searched::Written { written: 1, unchanged: 0, .. }), "{repaired:?}");
+        assert!(held("sessions/hermes-a.json").is_some(), "read again from the archive");
+        assert!(held("sessions/hermes-gone.json").is_some() && held("notes/x.md").is_some(), "nothing deleted: the platform forgets a source when its file goes");
+    }
+
+    /// Goal: an import that pauses between its writes and its search, while
+    /// another writes after it and puts search right, undoes nothing of the
+    /// other's search: no older copy written back over a newer one, no
+    /// conversation the other added removed. Method: import A writes `a`
+    /// and pauses; B writes a newer `a` and a new `b`, then its search; A's
+    /// search then.
+    #[test]
+    fn an_import_overtaken_undoes_nothing_of_a_later_ones_search() {
+        let (mock, c) = archive();
+        mock.enable_search(NAME);
+        let first = || session("a", Kind::Chat, "2026-10-01T09:00:00Z", &["hello"]);
+        let newer = || session("a", Kind::Chat, "2026-10-03T09:00:00Z", &["hello", "and peas?"]);
+        let added = || session("b", Kind::Chat, "2026-10-03T10:00:00Z", &["beans"]);
+        let held = |source: &str| mock.search_index(NAME, |ix| ix.sources.get(source).map(|h| h.revision.clone())).flatten();
+        let a_spool = spooled(vec![first()]);
+        write(&c, NAME, &a_spool).unwrap();
+        let b_spool = spooled(vec![newer(), added()]);
+        write(&c, NAME, &b_spool).unwrap();
+        search::sync(&c, NAME, &b_spool);
+        let resumed = search::sync(&c, NAME, &a_spool);
+        assert_eq!(held("sessions/hermes-a.json"), Some(sha(&file_of(newer()))), "no older copy written back: {resumed:?}");
+        assert_eq!(held("sessions/hermes-b.json"), Some(sha(&file_of(added()))), "no conversation the other added removed: {resumed:?}");
+    }
+
+    /// Goal: a conversation another import wrote to search between this
+    /// one's reading search and writing it is left as the other wrote it:
+    /// this one's write names the revision it read (`replaces`), and is
+    /// refused and counted overtaken. Method: search read holding `a`'s
+    /// first copy; another import's newer copy written to the archive and
+    /// search since; this import's write of the first copy then.
+    #[test]
+    fn a_write_overtaken_leaves_the_others_as_it_wrote_it() {
+        let (mock, c) = archive();
+        mock.enable_search(NAME);
+        let first = || session("a", Kind::Chat, "2026-10-01T09:00:00Z", &["hello"]);
+        let newer = || session("a", Kind::Chat, "2026-10-03T09:00:00Z", &["hello", "and peas?"]);
+        let spool = spooled(vec![first()]);
+        write(&c, NAME, &spool).unwrap();
+        search::sync(&c, NAME, &spool);
+        let read = sha(&file_of(first()));
+        let other = spooled(vec![newer()]);
+        write(&c, NAME, &other).unwrap();
+        search::sync(&c, NAME, &other);
+        let storage = CodeStorage::connect(&c, NAME).unwrap();
+        let head = storage.branch_head(MAIN).unwrap().unwrap();
+        let entry = spool.entries["hermes-a"].clone();
+        let wrote = search::write_one(&c, NAME, &spool, &storage, &Blobs::new(&c, NAME), &head, "hermes-a", &entry, &read).unwrap();
+        assert_eq!(wrote, search::Wrote::Overtaken);
+        let now = mock.search_index(NAME, |ix| ix.sources["sessions/hermes-a.json"].revision.clone()).unwrap();
+        assert_eq!(now, sha(&file_of(newer())), "the other's write stands");
     }
 
     /// Goal: a newer copy of a conversation replaces the one held, and an

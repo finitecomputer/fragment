@@ -48,11 +48,12 @@ fn refused(status: u16, message: &str) -> Response {
     Response::json(status, &json!({ "error": code, "message": message }))
 }
 
-/// An upsert's body, checked as the cell checks it.
-fn upsert_of(body: &[u8]) -> Result<(String, Held), String> {
+/// An upsert's body, checked as the cell checks it: its source, the
+/// revision it replaces (`replaces`), and what it holds.
+fn upsert_of(body: &[u8]) -> Result<(String, Option<String>, Held), String> {
     let up: Upsert = serde_json::from_slice(body).map_err(|e| format!("the body is no upsert: {e}"))?;
     searchable::check(&up)?;
-    Ok((up.source, Held { revision: up.revision, title: up.title, at: up.at, fields: up.fields, sections: up.sections }))
+    Ok((up.source, up.replaces, Held { revision: up.revision, title: up.title, at: up.at, fields: up.fields, sections: up.sections }))
 }
 
 impl Index {
@@ -63,11 +64,21 @@ impl Index {
                 if req.body.len() > UPSERT_MAX_BYTES {
                     return refused(413, &format!("an upsert is at most {UPSERT_MAX_BYTES} bytes"));
                 }
-                let (source, held) = match upsert_of(&req.body) {
+                let (source, replaces, held) = match upsert_of(&req.body) {
                     Ok(u) => u,
                     Err(why) => return refused(400, &why),
                 };
-                let changed = self.sources.get(&source).is_none_or(|h| h.revision != held.revision);
+                // as the service: the same revision again writes nothing; else
+                // one naming another revision than the source's is refused
+                let current = self.sources.get(&source).map(|h| h.revision.clone());
+                if current.as_deref() != Some(held.revision.as_str()) {
+                    if let Some(r) = replaces {
+                        if (r.is_empty() && current.is_some()) || (!r.is_empty() && current.as_deref() != Some(r.as_str())) {
+                            return Response::json(409, &json!({ "error": "conflict", "message": "the source's revision is not the one this replaces", "current": current }));
+                        }
+                    }
+                }
+                let changed = current.as_deref() != Some(held.revision.as_str());
                 let sections = held.sections.len();
                 if changed {
                     self.written += 1;
@@ -132,6 +143,16 @@ mod tests {
         assert_eq!(post(&mut ix, "upsert", &up("sessions/b.json", "1", &["t0", "t1"])).1["written"], false);
         assert_eq!(post(&mut ix, "upsert", &up("sessions/b.json", "2", &["t0"])).1["chunks"], 1);
         assert_eq!(ix.sources["sessions/b.json"].sections.len(), 1, "an upsert replaces its source's sections");
+        let mut stale = up("sessions/b.json", "3", &["t0"]);
+        stale["replaces"] = json!("1");
+        assert_eq!(post(&mut ix, "upsert", &stale), (409, json!({ "error": "conflict", "message": "the source's revision is not the one this replaces", "current": "2" })));
+        stale["replaces"] = json!("2");
+        assert_eq!(post(&mut ix, "upsert", &stale).1["written"], true, "one naming the source's revision is written");
+        let mut fresh = up("sessions/new.json", "1", &["t0"]);
+        fresh["replaces"] = json!("");
+        assert_eq!(post(&mut ix, "upsert", &fresh).1["written"], true, "\"\" replaces none");
+        assert_eq!(post(&mut ix, "upsert", &fresh).1["written"], false, "the same revision again writes nothing, whatever it replaces");
+        ix.sources.remove("sessions/new.json");
         for s in ["sessions/a.json", "sessions/c.json"] {
             post(&mut ix, "upsert", &up(s, "1", &["t0"]));
         }

@@ -1,30 +1,39 @@
 //! An archive's conversations into the platform's search, written by the
 //! import that holds their bytes (fragment_core::session_search makes each
 //! one's sections) through the search write API: `GET
-//! /api/f/{name}/search/sources`, `POST …/search/upsert` and `…/delete`.
+//! /api/f/{name}/search/sources` and `POST …/search/upsert`.
 //!
-//! After an import's writes, the archive's search is reconciled with what
-//! it holds: each conversation whose sha256 (its index entry's) is not the
-//! revision search holds for its file is written, and each of the archive's
-//! sources search holds that the archive no longer does is deleted. So an
-//! import that writes nothing still puts search right, and an archive made
-//! before its host had search is searched from its next import. A host
-//! without search (its routes 404), or one that cannot be reached, is said
-//! and skipped: the import stands.
+//! After an import's writes, the archive's search is reconciled with the
+//! archive **as it stands then**, not as this import left it: another
+//! import may have written since (newer copies, conversations of its own).
+//! Its indexes at main's head say each conversation's sha256, and its files
+//! changed since them are read (`held`, `found`); each conversation whose
+//! sha256 is not the revision search holds for its file is written, its
+//! bytes read at that head and its revision theirs. Each write names the
+//! revision it replaces, as search was read holding it (`replaces`), so a
+//! write another import made since is never written over: that one is
+//! left as it is (`overtaken`). Nothing is deleted here: the platform
+//! forgets a conversation's source when a move of main deletes its file
+//! (cell/src/searchable.rs), and what this import did not see is no
+//! evidence of a file gone. So an import that writes nothing still puts
+//! search right, and an archive made before its host had search is
+//! searched from its next import. A host without search (its routes 404),
+//! or one that cannot be reached, is said and skipped: the import stands.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::Result;
+use fragment_core::blob;
 use fragment_core::session::{self, Entry, Session};
 use fragment_core::{searchable, session_search};
-use fragment_proto::search::{Delete, SOURCES_PAGE_MAX};
+use fragment_proto::search::SOURCES_PAGE_MAX;
 use serde::{Deserialize, Serialize};
 
 use super::{said_id, Spool};
 use crate::api::{encode_q, Client};
 use crate::blobs::Blobs;
-use crate::codestorage::{CodeStorage, MAIN};
+use crate::codestorage::CodeStorage;
 
 /// Sources one listing asks for (the API's most).
 const PAGE: usize = SOURCES_PAGE_MAX;
@@ -43,8 +52,10 @@ pub enum Searched {
     Skipped { why: String },
     Written {
         written: usize,
-        deleted: usize,
         unchanged: usize,
+        /// Conversations another import wrote to search between this one's
+        /// reading it and writing them: left as that one wrote them.
+        overtaken: usize,
         /// Sections past search's limits, left out of their conversations.
         left_out: usize,
         /// Conversations search refused or could not take, each with why
@@ -87,30 +98,53 @@ fn listed(c: &Client, name: &str) -> std::result::Result<BTreeMap<String, String
     Err(format!("search lists more than {} sources", PAGES_MAX * PAGE))
 }
 
-/// `name`'s search put right with `entries` (every conversation it holds
-/// after the import), each read from `spool` when the import holds it, else
-/// from the archive.
-pub fn sync(c: &Client, name: &str, spool: &Spool, entries: &BTreeMap<String, Entry>) -> Searched {
+/// One conversation's write: its sections the limits left out, or
+/// another's write since this import read search.
+#[derive(Debug, PartialEq)]
+pub(super) enum Wrote {
+    Written(usize),
+    Overtaken,
+}
+
+/// The archive at main's head as it stands now: the head, and each
+/// conversation its `sessions/` holds, by key, as its indexes describe it
+/// or, where they may not, as its file is (`found`).
+fn archive_now(c: &Client, name: &str, storage: &CodeStorage, blobs: &Blobs) -> Result<(Option<String>, BTreeMap<String, Entry>)> {
+    let h = super::held(storage, blobs)?;
+    let found: BTreeMap<String, Entry> = super::found(c, name, storage, &h, &BTreeMap::new())?.into_iter().map(|e| (e.key.clone(), e)).collect();
+    let entries = h.stored.keys().filter_map(|k| found.get(k).or_else(|| h.indexed.get(k)).map(|e| (k.clone(), e.clone()))).collect();
+    Ok((h.head, entries))
+}
+
+/// `name`'s search put right with the archive as it stands now, each
+/// conversation read from `spool` when the import holds those bytes, else
+/// from the archive at the head read.
+pub fn sync(c: &Client, name: &str, spool: &Spool) -> Searched {
     let held = match listed(c, name) {
         Ok(held) => held,
         Err(why) => return Searched::Skipped { why },
     };
-    let todo: Vec<(&String, &Entry)> = entries.iter().filter(|(k, e)| held.get(&session::session_path(k)) != Some(&e.sha256)).collect();
-    let gone: Vec<&String> = held.keys().filter(|s| session::key_of_path(s).is_some_and(|k| !entries.contains_key(k))).collect();
     let storage = match CodeStorage::connect(c, name) {
         Ok(s) => s,
         Err(e) => return Searched::Skipped { why: format!("{e:#}") },
     };
+    let (head, entries) = match archive_now(c, name, &storage, &Blobs::new(c, name)) {
+        Ok(now) => now,
+        Err(e) => return Searched::Skipped { why: format!("reading the archive: {e:#}") },
+    };
+    let Some(head) = head else { return Searched::Written { written: 0, unchanged: 0, overtaken: 0, left_out: 0, refused: Vec::new(), refused_count: 0 } };
+    let todo: Vec<(&String, &Entry)> = entries.iter().filter(|(k, e)| held.get(&session::session_path(k)) != Some(&e.sha256)).collect();
     // a refusal that would be every one's (not allowed, no route): stop
     let stop = AtomicBool::new(false);
-    let write = |todo: &[(&String, &Entry)]| -> Vec<std::result::Result<usize, (String, String)>> {
+    let write = |todo: &[(&String, &Entry)]| -> Vec<std::result::Result<Wrote, (String, String)>> {
         let blobs = Blobs::new(c, name);
         let mut out = Vec::new();
         for (key, e) in todo {
             if stop.load(Ordering::Relaxed) {
                 break;
             }
-            out.push(write_one(c, name, spool, &storage, &blobs, key, e).map_err(|(status, why)| {
+            let replaces = held.get(&session::session_path(key)).map_or("", String::as_str);
+            out.push(write_one(c, name, spool, &storage, &blobs, &head, key, e, replaces).map_err(|(status, why)| {
                 if matches!(status, Some(401 | 403 | 404)) {
                     stop.store(true, Ordering::Relaxed);
                 }
@@ -124,13 +158,14 @@ pub fn sync(c: &Client, name: &str, spool: &Spool, entries: &BTreeMap<String, En
         let writers: Vec<_> = todo.chunks(per).map(|part| scope.spawn(move || write(part))).collect();
         writers.into_iter().flat_map(|w| w.join().unwrap_or_else(|_| vec![Err(("a writer".into(), "panicked".into()))])).collect()
     });
-    let (mut written, mut left_out, mut refused, mut refused_count) = (0, 0, Vec::new(), 0);
+    let (mut written, mut overtaken, mut left_out, mut refused, mut refused_count) = (0, 0, 0, Vec::new(), 0);
     for r in results {
         match r {
-            Ok(left) => {
+            Ok(Wrote::Written(left)) => {
                 written += 1;
                 left_out += left;
             }
+            Ok(Wrote::Overtaken) => overtaken += 1,
             Err((id, why)) => {
                 refused_count += 1;
                 if refused.len() < REFUSED_SAID {
@@ -143,47 +178,32 @@ pub fn sync(c: &Client, name: &str, spool: &Spool, entries: &BTreeMap<String, En
         let why = refused.first().map_or_else(String::new, |r| r.why.clone());
         return Searched::Skipped { why: format!("search refused this archive's writes: {why}") };
     }
-    let mut deleted = 0;
-    for source in gone {
-        match c.post_json_by_id(&format!("/api/f/{name}/search/delete"), &Delete { source: source.clone() }) {
-            Ok(r) if r.ok() => deleted += 1,
-            Ok(r) => {
-                refused_count += 1;
-                if refused.len() < REFUSED_SAID {
-                    refused.push(super::RefusedOne { id: said_id(source), why: format!("its delete: {}", r.refusal().msg) });
-                }
-            }
-            Err(e) => {
-                refused_count += 1;
-                if refused.len() < REFUSED_SAID {
-                    refused.push(super::RefusedOne { id: said_id(source), why: format!("its delete: {e:#}") });
-                }
-            }
-        }
-    }
-    Searched::Written { written, deleted, unchanged: entries.len() - todo.len(), left_out, refused, refused_count }
+    Searched::Written { written, unchanged: entries.len() - todo.len(), overtaken, left_out, refused, refused_count }
 }
 
-/// One conversation written: its sections left out, or the status of a
-/// refusal (when search answered) and why.
-fn write_one(c: &Client, name: &str, spool: &Spool, storage: &CodeStorage, blobs: &Blobs, key: &str, e: &Entry) -> std::result::Result<usize, (Option<u16>, String)> {
+/// One conversation written, its bytes as the import spooled them when
+/// they are the archive's at `head`, else read at `head`; its revision their
+/// own sha256, written only over `replaces` (the revision search was read
+/// holding, `""` for none). A refusal says its status (when search
+/// answered) and why.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn write_one(c: &Client, name: &str, spool: &Spool, storage: &CodeStorage, blobs: &Blobs, head: &str, key: &str, e: &Entry, replaces: &str) -> std::result::Result<Wrote, (Option<u16>, String)> {
     let path = session::session_path(key);
     let bytes = if spool.entries.get(key).is_some_and(|s| s.sha256 == e.sha256) {
         std::fs::read(spool.path(key)).map_err(|err| (None, format!("reading it back: {err}")))?
     } else {
-        read(storage, blobs, &path).map_err(|err| (None, format!("reading it: {err:#}")))?
+        storage.read_file(&path, head).map_err(anyhow::Error::new).and_then(|b| blobs.resolve(b)).map_err(|err| (None, format!("reading it: {err:#}")))?
     };
     let s: Session = serde_json::from_slice(&bytes).map_err(|err| (None, format!("it is no conversation: {err}")))?;
-    let indexed = session_search::upsert_of(&path, &e.sha256, &s);
+    let mut indexed = session_search::upsert_of(&path, &blob::sha256_hex(&bytes), &s);
+    indexed.upsert.replaces = Some(replaces.to_string());
     // what the platform would refuse is refused here, unsent
     searchable::check(&indexed.upsert).map_err(|why| (None, why))?;
     match c.post_json_by_id(&format!("/api/f/{name}/search/upsert"), &indexed.upsert) {
-        Ok(r) if r.ok() => Ok(indexed.left),
+        Ok(r) if r.ok() => Ok(Wrote::Written(indexed.left)),
+        // another import's write since this one read search: theirs stands
+        Ok(r) if r.status == 409 => Ok(Wrote::Overtaken),
         Ok(r) => Err((Some(r.status), r.refusal().msg)),
         Err(err) => Err((None, format!("{err:#}"))),
     }
-}
-
-fn read(storage: &CodeStorage, blobs: &Blobs, path: &str) -> Result<Vec<u8>> {
-    blobs.resolve(storage.read_file(path, MAIN)?)
 }
