@@ -165,7 +165,8 @@ home"; before 2026-10-26, its own chat with them):
   which its sender's app gave it), so a message the agent's core reads
   again (a catch-up, a rollback) is one record. The record's principal is
   the agent's: it says what it relays, never as its owner.
-- `relayed.via` is `simplex`, the only way; `relayed.for` is the agent's
+- `relayed.via` is the door it came through, a connector's id
+  (`simplex` today; docs/api.md, "An agent's doors"); `relayed.for` is the agent's
   owner; `relayed.agent` the agent fragment whose door it came through;
   `at` and `sig` its door's signature (docs/api.md, "An agent's doors"):
   **the platform takes no relayed record without it**, so one the agent's
@@ -173,15 +174,19 @@ home"; before 2026-10-26, its own chat with them):
   app publishes none. A voice message (or a photo, a file) is its attachment (a voice
   message is `audio/mp4`, as SimpleX's apps record one), its text none or
   its caption; one that could not be carried says so in its text.
-- **The agent's own bridge honors it**, and nothing else does: while that
-  agent's SimpleX link is bound, a record the agent itself posted with a
-  `relayed` for its owner, through its own door, is its owner's message to it, asked as its owner
-  (by their name; their Stop stops it; it answers a question asked of
-  them). A
-  `relayed` from anyone else (a person, another agent), for anyone else,
-  by another way, or while unlinked, is what the record would be without
-  it: the agent's own words starting nothing, a person's message, a
-  hand-off.
+- **The agent's own bridge honors it**, and nothing else does: a record
+  with a `relayed` for its owner, through its own door (any door's id),
+  carried by the agent itself or by a key that is none of the chat's
+  members (a connector chat's own), is its owner's message to it, asked as its owner (by their
+  name; their Stop stops it; it answers a question asked of them),
+  whether or not a SimpleX link is bound on its computer: the platform
+  took it only through a door its owner opened, and closing the door
+  stops new ones, not those it took. A `relayed` for anyone else, through
+  another agent's door, of a `via` that is no door's id, or carried by
+  another member of the chat, is what the record would be without it: the
+  agent's own words starting nothing, a person's message, a hand-off.
+  The chat shows it as its owner's, "via" its door, once the members say
+  its poster is the owner's agent or none of the chat's members.
 - **What the agent says in its SimpleX chat goes to its owner's SimpleX
   app** once posted, while linked, whatever started its turn (their
   SimpleX message, their words typed there on the web, a routine, a

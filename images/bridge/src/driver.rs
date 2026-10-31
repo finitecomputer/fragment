@@ -776,6 +776,7 @@ impl ViewCache {
         let mut members = api.members(&agent.fragment, fragment).await?;
         members.sort_by(|a, b| (a.added_at, &a.principal).cmp(&(b.added_at, &b.principal)));
         self.view.agents = members.iter().filter(|m| m.kind == "agent").map(|m| m.principal.clone()).collect();
+        self.view.people = members.iter().filter(|m| m.kind != "agent").map(|m| m.principal.clone()).collect();
         self.since = members.iter().find(|m| m.principal == agent.identity).map(|m| m.added_at).unwrap_or(0);
         // Who to name, at most `PEOPLE_MAX` (one `__people`): the writer whose
         // record asked first, then its people, then its other agents (an

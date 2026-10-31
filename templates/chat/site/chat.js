@@ -652,10 +652,15 @@ export function mount(root) {
   const waiting = (t) => [...t.prompts.values()].some((p) => !t.closed.has(p.prompt) && !expired(p));
   // a turn waiting on its asker's words (`turn.asked`): until they say
   // something to the chat after it, or the turn goes on or ends
-  // A relayed message (docs/chat-records.md): its owner's words, said over
-  // SimpleX, posted by their agent. It is theirs, "via SimpleX", once the
-  // members say its poster is that person's agent; until then, or from any
-  // other poster, it is the poster's own.
+  // A relayed message (docs/chat-records.md): its owner's words, said
+  // through one of their agent's doors (SimpleX, Telegram, …), posted by
+  // that agent. It is theirs, "via" that door, once the members say its
+  // poster is that person's agent; until then, or from any other poster, it
+  // is the poster's own.
+  // a door's id, as the platform's (a connector's), and what to call it
+  const doorId = (v) => typeof v === "string" && /^[a-z](?:[a-z0-9]|-(?=[a-z0-9])){0,31}$/.test(v);
+  const DOOR_NAMES = { simplex: "SimpleX", telegram: "Telegram" };
+  const doorName = (v) => DOOR_NAMES[v] ?? v;
   const relayedOwner = (m) => (m.relayed && state.members.some((x) => x.principal === m.relayed.by && x.kind === "agent" && x.owner === m.relayed.for) ? m.relayed.for : null);
   const speaker = (m) => relayedOwner(m) ?? m.principal;
   const waitsOnWords = (t) => running(t) && !!t.asked && !state.chat.some((m) => speaker(m) === t.asked.asks && !m.turn && m.at >= t.asked.at);
@@ -721,9 +726,9 @@ export function mount(root) {
     if (body.kind !== undefined && body.kind !== "message") return;
     const turn = typeof body.turn === "string" ? body.turn : null;
     const replyTo = Number.isInteger(body.reply_to) && body.reply_to > 0 ? body.reply_to : null;
-    // a message an agent relays from its owner's SimpleX app (shown as theirs: `speaker`)
+    // a message an agent relays from its owner through a door (shown as theirs: `speaker`)
     const r = body.relayed;
-    const relayed = !turn && r && typeof r === "object" && r.via === "simplex" && typeof r.for === "string" && r.for.startsWith("npub1") ? { for: r.for, by: record.principal } : null;
+    const relayed = !turn && r && typeof r === "object" && doorId(r.via) && typeof r.for === "string" && r.for.startsWith("npub1") ? { for: r.for, by: record.principal, via: r.via } : null;
     state.chat.push({ seq: record.seq, at: record.at, n, principal: record.principal, text: typeof body.text === "string" ? body.text : "", command: null, turn, to, attachments: attachmentsOf(body), replyTo, post: sentIds.get(record.seq) ?? null, relayed });
     if (caughtUp && !stuck && !historical && record.seq > latestSeq) newMessages++;
     latestSeq = Math.max(latestSeq, record.seq);
@@ -1184,7 +1189,7 @@ export function mount(root) {
   function messageNode(entry) {
     // a relayed message shows as its owner's, saying how they sent it
     const owner = relayedOwner(entry);
-    const m = owner ? { ...entry, principal: owner, via: "SimpleX" } : entry;
+    const m = owner ? { ...entry, principal: owner, via: doorName(entry.relayed.via) } : entry;
     const w = who(m.principal);
     const mine = m.principal === state.me?.principal;
     const key = `m:${m.seq}`;
@@ -1291,7 +1296,7 @@ export function mount(root) {
       label.append("Queued");
       actions.append(label);
     }
-    // said elsewhere (its owner's SimpleX app), and relayed here
+    // said elsewhere (through its agent's door), and relayed here
     if (m.via) actions.append(el("span", "via", `via ${m.via}`));
     // sent once the platform has its record: until then it says so, no time
     actions.append(m.sending ? el("span", "time", "Sending…") : el("span", "time", time(m.at)));

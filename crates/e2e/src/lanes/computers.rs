@@ -863,7 +863,7 @@ fn relay_checks(s: &mut Suite, api: &Api, owner: &crate::Keys, fetched: &dyn Fn(
 /// door's key, never by the agent's own, which signs every request its
 /// tools make; the owner's unlink closes the door at once. The replies it
 /// adds.
-fn door_checks(s: &mut Suite, api: &Api, c: &Doors, fetched: &dyn Fn(&Suite, u32, &str) -> Result<String>) -> Result<usize> {
+fn door_checks(s: &mut Suite, api: &Api, c: &Doors, fetched: &dyn Fn(&Suite, u32, &str) -> Result<String>, wake: Duration) -> Result<usize> {
     let path = format!("/api/computers/{}/agents/{}/door", c.id, c.agent);
     let ticket = |who: &crate::Keys, act: &str| api.signed(who, "POST", &path, Some(&json!({ "door": "simplex", "act": act })));
     let r = ticket(c.stranger, "link")?;
@@ -914,11 +914,20 @@ fn door_checks(s: &mut Suite, api: &Api, c: &Doors, fetched: &dyn Fn(&Suite, u32
         said.starts_with("door said ") && relayed["body"]["relayed"]["via"] == "simplex" && relayed["body"]["relayed"]["for"] == c.owner_id && relayed["body"]["relayed"]["sig"].is_string(),
         json!({ "said": said, "record": relayed }),
     );
+    // its owner's words, as theirs: the agent answers them as its owner's
+    // message, though no SimpleX core runs on the stub (the bridge takes a
+    // relayed record the platform took, linked here or not)
+    let echo = |text: &str| agent_replies(&records(api, c.owner, c.chat, "chat"), c.identity).into_iter().find(|r| r["body"]["text"].as_str().is_some_and(|t| t.starts_with("echo: ") && t.ends_with(&format!("] {text}"))));
+    let answered = s.eventually(wake, || echo("hi from my phone").is_some());
+    let turn = echo("hi from my phone").map(|r| r["body"]["turn"].clone()).unwrap_or_default();
+    let start = records(api, c.owner, c.chat, "work").into_iter().find(|r| r["body"]["kind"] == "turn.start" && r["body"]["turn"] == turn).unwrap_or_default();
+    s.ok("its agent answers it as its owner's message, with no SimpleX core on its computer", answered && start["body"]["asker"] == c.owner_id, json!({ "turn.start": start }));
     let other = fetched(s, 405, "door other signed by another key")?;
     s.ok("with its door open, one signed by any other key is still refused", other.starts_with("door refused: 403"), &other);
     let pending = ticket(c.owner, "link")?;
     let still = fetched(s, 408, "door say while a new link waits")?;
-    s.ok("a door live before stays open while its owner starts another link, until that one is redeemed", pending.status == 200 && still.starts_with("door said "), json!({ "pending": pending.status, "said": still }));
+    let heard = s.eventually(wake, || echo("while a new link waits").is_some());
+    s.ok("a door live before stays open while its owner starts another link, until that one is redeemed", pending.status == 200 && still.starts_with("door said ") && heard, json!({ "pending": pending.status, "said": still }));
     // the deployment turns SimpleX off (its `connectors` without it: here
     // the test lever's stand-in, on this agent's fragment alone): no link,
     // no ticket made before redeemed, nothing the door open before signs
@@ -940,7 +949,8 @@ fn door_checks(s: &mut Suite, api: &Api, c: &Doors, fetched: &dyn Fn(&Suite, u32
     anyhow::ensure!(r.status == 200, "the connectors lever: {r}");
     let r = ticket(c.owner, "link")?;
     s.ok("SimpleX on again, its owner is given a link ticket", r.status == 200 && r.body["act"] == "link", &r);
-    Ok(11)
+    // two of them its owner's words, each answered
+    Ok(13)
 }
 
 /// The route's models by their ids, through the intercept (Paul,
@@ -1608,7 +1618,7 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
             replies_so_far += codestorage_through_egress(s, api, &owner, &agent, &fetched)?;
         }
         let doors = Doors { owner: &owner, owner_id: &owner_id, stranger: &stranger, id: &id, agent: &agent_name, chat: &chat_name, identity: &identity };
-        replies_so_far += door_checks(s, api, &doors, &fetched)?;
+        replies_so_far += door_checks(s, api, &doors, &fetched, wake)?;
         replies_so_far += relay_checks(s, api, &owner, &fetched)?;
     } else {
         // a real runtime called its model to answer at all: each call went
