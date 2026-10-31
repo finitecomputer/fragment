@@ -545,20 +545,82 @@ fn steps_split_replies() {
     let end = ev(&mut e, Event::End { turn: turn.clone(), outcome: Outcome::Idle }, T0 + 6);
     assert_eq!(posts(&end)[0], (records::reply_id(&turn, 2), json!({ "text": "Found it.", "turn": turn })), "the answer, no interim one");
     // an answer said beside a call that only updates memory (Hermes sends
-    // nothing after it) is the turn's answer, not interim
+    // nothing after it) is the turn's answer, not interim, once it ends
     let t3 = started(&said(&mut e, &a, &v, 3, "npub1paul", json!({ "text": "remember this" }), T0 + 7)).expect("started").turn;
     ev(&mut e, Event::Reply { turn: t3.clone(), part: 1, text: "Noted: you like tomatoes.".into() }, T0 + 8);
     let memory = ToolStep { tool: "memory".into(), args: "tomatoes".into(), ok: true, excerpt: String::new(), category: crate::records::Category::Memory, evidence: None };
     let m = ev(&mut e, Event::Step { turn: t3.clone(), step: memory }, T0 + 9);
-    assert_eq!(posts(&m)[0], (records::reply_id(&t3, 1), json!({ "text": "Noted: you like tomatoes.", "turn": t3 })));
+    assert_eq!(kinds(&m), vec!["turn.step"], "held: the turn may yet go on");
     let end3 = ev(&mut e, Event::End { turn: t3.clone(), outcome: Outcome::Idle }, T0 + 10);
-    assert_eq!(kinds(&end3), vec!["turn.end"], "nothing said again");
+    assert_eq!(posts(&end3)[0], (records::reply_id(&t3, 1), json!({ "text": "Noted: you like tomatoes.", "turn": t3 })), "its answer");
+    assert_eq!(kinds(&end3), vec!["reply", "turn.end"]);
     // a retracted part never posts
     let t2 = started(&said(&mut e, &a, &v, 4, "npub1paul", json!({ "text": "again" }), T0 + 11)).expect("started").turn;
     ev(&mut e, Event::Reply { turn: t2.clone(), part: 1, text: "oops".into() }, T0 + 12);
     ev(&mut e, Event::Retract { turn: t2.clone(), part: 1 }, T0 + 13);
     let end2 = ev(&mut e, Event::End { turn: t2.clone(), outcome: Outcome::Stopped }, T0 + 14);
     assert_eq!(kinds(&end2), vec!["turn.end"]);
+}
+
+/// Goal (#729): words held at a call that only updates memory are the
+/// turn's one answer if it ends next, and interim (no second push, no
+/// second message to SimpleX) whatever else comes first: more words, the
+/// issue's race (a step, its words late, then the memory call), a step, a
+/// card, or a question. Replay: a held part said again changes nothing.
+#[test]
+fn words_held_at_a_memory_call_are_the_answer_only_if_the_turn_ends() {
+    let a = agent("juniper");
+    let v = view(&[&a]);
+    let mut e = engine(std::slice::from_ref(&a));
+    let memory = || ToolStep { tool: "memory".into(), args: "tomatoes".into(), ok: true, excerpt: String::new(), category: crate::records::Category::Memory, evidence: None };
+    let terminal = || ToolStep { tool: "terminal".into(), args: "ls".into(), ok: true, excerpt: String::new(), category: crate::records::Category::Shell, evidence: None };
+    let replies = |s: &Step| posts(s).into_iter().filter(|(_, b)| b.get("kind").is_none()).map(|(_, b)| b).collect::<Vec<_>>();
+    let mut seq = 0;
+    let mut turn = |e: &mut Engine, now: u64| {
+        seq += 1;
+        started(&said(e, &a, &v, seq, "npub1paul", json!({ "text": "go" }), now)).expect("started").turn
+    };
+
+    // more words: the held ones are interim, the last the answer
+    for race in [false, true] {
+        let t = turn(&mut e, T0);
+        if race {
+            // the issue's order: a step, its words late, then the memory call
+            ev(&mut e, Event::Step { turn: t.clone(), step: terminal() }, T0 + 1);
+        }
+        ev(&mut e, Event::Reply { turn: t.clone(), part: 1, text: "Let me check that.".into() }, T0 + 2);
+        assert_eq!(replies(&ev(&mut e, Event::Step { turn: t.clone(), step: memory() }, T0 + 3)), Vec::<Value>::new(), "held");
+        let replay = ev(&mut e, Event::Reply { turn: t.clone(), part: 1, text: "Let me check that.".into() }, T0 + 4);
+        assert!(replies(&replay).is_empty(), "replay: said again, still held");
+        let next = ev(&mut e, Event::Reply { turn: t.clone(), part: 2, text: "Here's what I found.".into() }, T0 + 5);
+        assert_eq!(replies(&next), vec![json!({ "text": "Let me check that.", "turn": t, "interim": true })], "race {race}");
+        let end = ev(&mut e, Event::End { turn: t.clone(), outcome: Outcome::Idle }, T0 + 6);
+        assert_eq!(replies(&end), vec![json!({ "text": "Here's what I found.", "turn": t })], "race {race}: one answer");
+    }
+    // a step after it: interim, before that step
+    let t = turn(&mut e, T0 + 10);
+    ev(&mut e, Event::Reply { turn: t.clone(), part: 1, text: "Noted.".into() }, T0 + 11);
+    ev(&mut e, Event::Step { turn: t.clone(), step: memory() }, T0 + 12);
+    let s = ev(&mut e, Event::Step { turn: t.clone(), step: terminal() }, T0 + 13);
+    assert_eq!(kinds(&s), vec!["reply", "turn.step"]);
+    assert_eq!(replies(&s), vec![json!({ "text": "Noted.", "turn": t, "interim": true })]);
+    ev(&mut e, Event::End { turn: t.clone(), outcome: Outcome::Idle }, T0 + 14);
+    // a card after it: interim
+    let t = turn(&mut e, T0 + 20);
+    ev(&mut e, Event::Reply { turn: t.clone(), part: 1, text: "Noted.".into() }, T0 + 21);
+    ev(&mut e, Event::Step { turn: t.clone(), step: memory() }, T0 + 22);
+    let options = vec![PromptOption { id: "once".into(), label: "Allow".into(), style: None, words: false }];
+    let card = ev(&mut e, Event::Prompt { turn: t.clone(), prompt: "p1".into(), text: "Run it?".into(), options, ttl_ms: None }, T0 + 23);
+    assert_eq!(replies(&card), vec![json!({ "text": "Noted.", "turn": t, "interim": true })]);
+    ev(&mut e, Event::End { turn: t.clone(), outcome: Outcome::Idle }, T0 + 24);
+    // a question after it: the held words interim, the question not
+    let t = turn(&mut e, T0 + 30);
+    ev(&mut e, Event::Reply { turn: t.clone(), part: 1, text: "Noted.".into() }, T0 + 31);
+    ev(&mut e, Event::Step { turn: t.clone(), step: memory() }, T0 + 32);
+    let q = ev(&mut e, Event::Reply { turn: t.clone(), part: 2, text: "Which color?".into() }, T0 + 33);
+    assert_eq!(replies(&q), vec![json!({ "text": "Noted.", "turn": t, "interim": true })]);
+    let asked = ev(&mut e, Event::Asked { turn: t.clone() }, T0 + 34);
+    assert_eq!(replies(&asked), vec![json!({ "text": "Which color?", "turn": t })]);
 }
 
 /// Goal (Alex's review of #584: 64 narrated tool calls spent the turn's
@@ -1802,7 +1864,7 @@ fn a_question_is_answered_back_where_it_was_asked() {
     let t = started(&s).expect("rowan's turn");
     assert_eq!((t.asker.as_str(), t.text.as_str()), ("npub1juniper", "What is the weather?"), "a message like any");
     assert_eq!(e.state().turns[&t.turn].hop, 1);
-    assert_eq!(e.state().turns[&t.turn].ret, Some(Return { agent: juniper.fragment.clone(), chat: HOME.into(), name: "Rowan".into(), said: String::new(), files: 0 }));
+    assert_eq!(e.state().turns[&t.turn].ret, Some(Return { agent: juniper.fragment.clone(), chat: HOME.into(), name: "Rowan".into(), said: String::new(), files: 0, narrated: String::new() }));
     // juniper's turn ends: the answer needs no one waiting
     ev(&mut e, Event::End { turn: asking, outcome: Outcome::Idle }, T0 + 2);
 
@@ -1895,6 +1957,46 @@ fn a_question_refused_past_the_turns_bound_is_answered() {
     assert_eq!(e.state.turns.len(), limits::TURNS_OPEN_MAX, "none kept");
     let again = e.step(Input::Record { agent: rowan.fragment.clone(), fragment: "talk--k3x9".into(), record: question(2, "Build it?"), view: Some(talk.clone()), since: 0 }, T0 + 2);
     assert!(posts(&again).is_empty(), "replay: {:?}", again.effects);
+}
+
+/// Goal (#720): an asked turn that answered and then worked (its words
+/// before a tool call, interim, and nothing after it) is answered with
+/// those words, never "said nothing"; one that said more after its work
+/// is answered with that alone, as before; one that said nothing is
+/// answered so. Restart: its narration is the state's (a state from before
+/// holds none, and reads).
+#[test]
+fn an_answer_said_before_its_work_is_the_answer() {
+    let (rowan, juniper) = (agent("rowan"), agent("juniper"));
+    let talk = view(&[&rowan, &juniper]);
+    let mut e = engine(&[rowan.clone(), juniper.clone()]);
+    let work = || ToolStep { tool: "terminal".into(), args: "make".into(), ok: true, excerpt: String::new(), category: crate::records::Category::Shell, evidence: None };
+    let answered_with = |e: &mut Engine, seq: u64, said: &[&str], then_said: Option<&str>| -> String {
+        let t = started(&read(e, &rowan, "talk--k3x9", question(seq, "Build it?"), Some(&talk), T0 + seq * 10)).expect("rowan's turn").turn;
+        for (i, words) in said.iter().enumerate() {
+            ev(e, Event::Reply { turn: t.clone(), part: u32::try_from(i + 1).unwrap(), text: (*words).into() }, T0 + seq * 10 + 1);
+            ev(e, Event::Step { turn: t.clone(), step: work() }, T0 + seq * 10 + 2);
+        }
+        if let Some(last) = then_said {
+            ev(e, Event::Reply { turn: t.clone(), part: u32::try_from(said.len() + 1).unwrap(), text: last.into() }, T0 + seq * 10 + 3);
+        }
+        let end = ev(e, Event::End { turn: t, outcome: Outcome::Idle }, T0 + seq * 10 + 4);
+        answers(&end).remove(0).2["text"].as_str().unwrap().to_string()
+    };
+    let head = "talk--k3x9 (\"Build it?\")";
+    assert_eq!(answered_with(&mut e, 1, &["Done: it built.", "Cleaning up."], None), format!("rowan answered your question in {head}:\n\nDone: it built.\n\nCleaning up."), "its words before its work");
+    assert_eq!(answered_with(&mut e, 2, &["Building."], Some("It built.")), format!("rowan answered your question in {head}:\n\nIt built."), "what it said after, alone");
+    assert_eq!(answered_with(&mut e, 3, &[], None), format!("rowan finished your question in {head} and said nothing."));
+    // restart: the state keeps its narration; one from before reads without
+    let t = started(&read(&mut e, &rowan, "talk--k3x9", question(4, "Build it?"), Some(&talk), T0 + 50)).expect("rowan's turn").turn;
+    ev(&mut e, Event::Reply { turn: t.clone(), part: 1, text: "Done.".into() }, T0 + 51);
+    ev(&mut e, Event::Step { turn: t.clone(), step: work() }, T0 + 52);
+    let saved = serde_json::to_value(e.state()).unwrap();
+    assert_eq!(saved["turns"][&t]["ret"]["narrated"], "Done.");
+    let mut before = saved.clone();
+    before["turns"][&t]["ret"].as_object_mut().unwrap().remove("narrated");
+    let old: State = serde_json::from_value(before).expect("a state from before reads");
+    assert_eq!(old.turns[&t].ret.as_ref().map(|r| r.narrated.as_str()), Some(""));
 }
 
 /// Goal: an answer says how the asked turn ended, and a turn is never run
