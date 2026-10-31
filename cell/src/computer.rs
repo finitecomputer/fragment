@@ -2183,8 +2183,8 @@ impl ComputerCell {
             }
             // an operator's view of it (orgs.rs, the person page): the whole
             // references of the image it runs and of the one its next start
-            // runs, which a promotion copies (docs/computers.md, "Stable and
-            // canary"); its owner's view names their versions alone
+            // runs, which a promotion copies (docs/computers.md, "Preview and
+            // production"); its owner's view names their versions alone
             "computer/references" => {
                 self.must(MetaKey::Id)?;
                 self.look_and_tell().await;

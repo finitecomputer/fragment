@@ -1,7 +1,7 @@
 //! The operators' admin (docs/api.md, Operators; decision 59): people and
 //! orgs a page at a time, searched by email; a person's page with their
 //! ledger and computer; their computer pinned to another image and back
-//! (a canary: docs/computers.md, "Stable and canary"); billing's health; a
+//! (docs/computers.md, "Preview and production"); billing's health; a
 //! trial mailed; and the log of what operators did. An operator key no person holds reaches it, as a
 //! wipe's does; no one else. Its page, `/admin`, is an operator's session's
 //! alone: to anyone else it is the 404 of a path that is not there. Valid
@@ -52,7 +52,7 @@ pub fn admin(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("no one by that npub is 404", missing.status == 404, &missing);
 
     // ---- a person's computer pinned by an operator (docs/computers.md,
-    // "Stable and canary"): onto another image, and back
+    // "Preview and production"): onto another image, and back
     let pin = |keys: &Keys, image: &str| api.signed(keys, "PUT", &format!("/api/admin/people/{ivy_id}/computer/image"), Some(&json!({ "image": image })));
     let none_yet = pin(&operator, "stub")?;
     s.ok("an operator's pin of a person with no computer yet is 404", none_yet.status == 404, &none_yet);
