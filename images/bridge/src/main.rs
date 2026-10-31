@@ -8,7 +8,7 @@
 //! fragment-bridge version
 //! ```
 //!
-//! Its settings are environment variables (docs/bridge.md lists them);
+//! Its settings are environment variables (docs/bridge.md, "Settings");
 //! secrets are files named by path, never values.
 
 use std::net::SocketAddr;
