@@ -193,3 +193,72 @@ pub struct Forwarded {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vector: Option<String>,
 }
+
+/// Fragments one question across fragments asks, at most.
+pub const IN_MAX: usize = 32;
+/// Hits a question across fragments asks each one for, at least: the
+/// merge's depth (fragment_core::across::asked_limit).
+pub const ASKED_MIN: usize = 20;
+
+/// `POST /api/search`: one question, asked of several fragments' own
+/// indexes as the signer (docs/api.md, "Search across fragments").
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Across {
+    pub q: String,
+    /// The fragments asked, each named in full.
+    #[serde(rename = "in")]
+    pub fragments: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+    #[serde(default)]
+    pub mode: Mode,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub fields: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before: Option<String>,
+}
+
+/// How a fragment asked answered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Reached {
+    /// Its index was searched (its hits may be none).
+    Searched,
+    /// It holds no index: no source was ever written.
+    NoIndex,
+    /// The signer may not read it.
+    Denied,
+    /// There is no such fragment.
+    Missing,
+    /// It did not answer, or refused for another reason (`message`).
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Asked {
+    pub name: String,
+    pub state: Reached,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+/// A hit, and the fragment it is from.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FromFragment {
+    pub fragment: String,
+    #[serde(flatten)]
+    pub hit: Hit,
+}
+
+/// The answer across fragments: the hits merged, best first, and how each
+/// fragment asked answered, in the order asked.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FoundAcross {
+    pub results: Vec<FromFragment>,
+    pub fragments: Vec<Asked>,
+    /// `on` when the question was searched by its meaning too.
+    pub semantic: String,
+}
