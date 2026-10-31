@@ -166,6 +166,24 @@ jobs:
         working-directory: images
     steps:
       - uses: actions/checkout@v4
+      # ubuntu-24.04's image from 20261018 is a 72 GB root with 12 GB free
+      # once the lane's test binary is built, which its two images (6.4 GB)
+      # and their build cache (2.7 GB) all but fill: run 41249649091's tests
+      # ran out of disk. The lane uses none of the image's Android, .NET,
+      # Haskell, Swift or CodeQL, nor its cached Docker images: they go first.
+      - name: free the disk
+        working-directory: .
+        run: |
+          df -h /
+          lsblk -o NAME,SIZE,TYPE,MOUNTPOINT
+          sudo dmsetup status 2>/dev/null || true
+          sudo du -sh /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift /opt/hostedtoolcache/CodeQL 2>/dev/null || true
+          docker system df
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift /opt/hostedtoolcache/CodeQL
+          docker image prune -af > /dev/null
+          df -h /
+          # the root's use every 5 seconds, whose peak `disk, after` says
+          nohup sh -c 'while :; do df -B1M --output=used / | tail -1; sleep 5; done' > "$RUNNER_TEMP/disk-used" 2>&1 &
       - uses: dtolnay/rust-toolchain@stable
       # the check job's cache, read only
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -185,8 +203,10 @@ jobs:
       - name: build the Hermes image
         working-directory: .
         run: docker build --platform linux/amd64 -f images/hermes/Dockerfile -t fragment-hermes:test .
+      # the tests build only the lab image, from the Hermes image: the
+      # builds' cache goes before them
       - name: disk, built
-        run: docker system df; df -h /
+        run: docker system df; docker builder prune -af > /dev/null; df -h /
       - name: the Docker lane
         run: cargo test -p fragment-bridge --test docker --locked -- --ignored --show-output
         env:
@@ -194,7 +214,7 @@ jobs:
           RUST_BACKTRACE: "1"
       - if: always()
         name: disk, after
-        run: df -h /
+        run: docker system df; df -h /; echo "peak: $(sort -n "$RUNNER_TEMP/disk-used" | tail -1) MiB used"
       # each container's log (Container's drop) and the tests' own
       - if: failure()
         uses: actions/upload-artifact@v4
