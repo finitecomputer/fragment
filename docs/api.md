@@ -2616,9 +2616,16 @@ and the AI steps (`job.ai.*`), all above:
   step is a replay). Calling a job starts it: `{run, status}`, one hop
   deeper.
 - `job.fetch(url, {method, headers, body})` → `{status, ok, headers,
-  text(), json()}`: the app's one way out. `{{NAME}}` in a header value
+  text(), json()}`: the app's one way out. `{{NAME}}` in a header value,
+  or in the URL's path or query (`https://api.telegram.org/bot{{TOKEN}}/getMe`),
   is the fragment's secret `NAME`, added by the platform at the egress
-  point; the app never holds it. It is filled only toward one of the
+  point; the app never holds it. A URL's is percent-encoded as it goes
+  in (all but unreserved bytes and `:`), and a value that would change
+  where the request goes (its host, port, path segments or query
+  parameters) fails the step, sending nothing; the answer comes back with
+  each one named as its placeholder again (a redirect's `location`, an
+  error page that echoes its URL). A URL that names no secret's name
+  (`{{id}}`, an app's own) goes as written. It is filled only toward one of the
   hosts the secret names, over https (a dev fleet's local fakes over
   http too); a fetch elsewhere fails its step, naming the secret and
   the host. http(s) only; loopback, private, and
