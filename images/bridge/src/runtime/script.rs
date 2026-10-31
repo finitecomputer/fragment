@@ -87,8 +87,9 @@
 //!   (only the agent's own key's, as every request of its is); one signed
 //!   by a key that is no door's; `door bind <fragment>`: the agent asking,
 //!   for its owner, to bind that connector as its own door; `door poke
-//!   <fragment> <secret|files|token>`: the agent asking, for its owner, to
-//!   do an editor's thing there (`Api::poke`). The reply is `door linked`,
+//!   <fragment> <secret|files|token|seen|propose> [itself]`: the agent
+//!   asking, for its owner (or as itself), to do an editor's thing there
+//!   (`Api::poke`). The reply is `door linked`,
 //!   `door said <seq>`, `door bound`, `door poked <what>`, or `door
 //!   refused: <why>`;
 //! - `ask <agent> <words>`: another agent of its computer asked `<words>`
@@ -518,9 +519,10 @@ async fn door(agent: &crate::runtime::Agent, chat: &str, rest: &str) -> Result<S
         return Ok("door bound".into());
     }
     if verb == "poke" {
-        let (fragment, what) = said.trim().split_once(' ').ok_or("say `door poke <fragment> <secret|files|token>`")?;
-        api.poke(&agent.fragment, &agent.owner, fragment, what.trim()).await.map_err(|e| e.to_string())?;
-        return Ok(format!("door poked {}", what.trim()));
+        let words: Vec<&str> = said.split_whitespace().collect();
+        let [fragment, what, rest @ ..] = &words[..] else { return Err("say `door poke <fragment> <secret|files|token|seen|propose> [itself]`".into()) };
+        api.poke(&agent.fragment, &agent.owner, fragment, what, rest == ["itself"]).await.map_err(|e| e.to_string())?;
+        return Ok(format!("door poked {what}"));
     }
     if verb == "link" {
         let ticket: Ticket = serde_json::from_str(said.trim()).map_err(|e| format!("not a ticket: {e}"))?;
