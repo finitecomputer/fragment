@@ -595,10 +595,12 @@ pub fn secrets(s: &mut Suite, api: &Api) -> Result<()> {
     let token = "123456:page-set-never-shown";
     let site = |keys: &Keys| -> Result<String> { Ok(format!("fragment_site={}", super::signin::site_cookie(api, &api.sign_in(&Api::email_of(keys))?, &name)?)) };
     let (editor_site, viewer_site) = (site(&owner)?, site(&viewer)?);
-    let page_put = |cookie: &str, content_type: &str| {
-        let body = json!({ "value": token, "hosts": ["api.telegram.org"] });
-        api.call(api::Call { method: "PUT", url: api.site_url(&name, "__secrets/BOT_TOKEN"), body: Some(body.to_string().into_bytes()), content_type: Some(content_type), cookie: Some(cookie.to_string()), ..api::Call::default() })
+    let page_put_from = |cookie: &str, content_type: &str, site: Option<&str>, value: &str| {
+        let body = json!({ "value": value, "hosts": ["api.telegram.org"] });
+        let extra = site.map(|s| vec![("sec-fetch-site", s.to_string()), ("sec-fetch-mode", "cors".to_string()), ("sec-fetch-dest", "empty".to_string())]).unwrap_or_default();
+        api.call(api::Call { method: "PUT", url: api.site_url(&name, "__secrets/BOT_TOKEN"), body: Some(body.to_string().into_bytes()), content_type: Some(content_type), cookie: Some(cookie.to_string()), extra, ..api::Call::default() })
     };
+    let page_put = |cookie: &str, content_type: &str| page_put_from(cookie, content_type, None, token);
     let r = page_put(&editor_site, "application/json")?;
     s.ok("an editor sets a secret from its page, as the API sets it, its value in no answer", r.status == 200 && r.body["hosts"] == json!(["api.telegram.org"]) && !r.text.contains(token), &r);
     let r = page_put(&viewer_site, "application/json")?;
@@ -612,5 +614,18 @@ pub fn secrets(s: &mut Suite, api: &Api) -> Result<()> {
         listed.body["secrets"].as_array().is_some_and(|l| l.iter().any(|x| x == &json!({ "name": "BOT_TOKEN", "hosts": ["api.telegram.org"] }))) && events.text.contains("secret.set") && !listed.text.contains(token) && !events.text.contains(token),
         format!("{listed} {events}"),
     );
+    // as a browser sends it: its own page's (same-origin) sets it; another
+    // site's, or a sibling origin's, carries no session here and sets none
+    let r = page_put_from(&editor_site, "application/json", Some("same-origin"), "123456:from-its-own-page")?;
+    s.ok("its own page's call (same-origin) sets it", r.status == 200, &r);
+    for from in ["cross-site", "same-site"] {
+        let r = page_put_from(&editor_site, "application/json", Some(from), "123456:from-elsewhere")?;
+        s.ok(&format!("a {from} call with its editor's cookie sets nothing"), matches!(r.status, 401 | 403), &r);
+    }
+    let set = api.signed(&owner, "GET", &format!("/api/f/{name}/events"), None)?;
+    let set_count = set.text.matches("secret.set").count();
+    let r = page_put_from(&editor_site, "application/json", Some("cross-site"), "123456:from-elsewhere")?;
+    let after = api.signed(&owner, "GET", &format!("/api/f/{name}/events"), None)?;
+    s.ok("and changes no secret (no secret.set event)", r.status != 200 && after.text.matches("secret.set").count() == set_count, &r);
     Ok(())
 }
