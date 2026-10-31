@@ -86,9 +86,11 @@
 //!   that key signs, posted on this chat; one with no door's signature
 //!   (only the agent's own key's, as every request of its is); one signed
 //!   by a key that is no door's; `door bind <fragment>`: the agent asking,
-//!   for its owner, to bind that connector as its own door. The reply is
-//!   `door linked`, `door said <seq>`, `door bound`, or `door refused:
-//!   <why>`;
+//!   for its owner, to bind that connector as its own door; `door poke
+//!   <fragment> <secret|files|token>`: the agent asking, for its owner, to
+//!   do an editor's thing there (`Api::poke`). The reply is `door linked`,
+//!   `door said <seq>`, `door bound`, `door poked <what>`, or `door
+//!   refused: <why>`;
 //! - `ask <agent> <words>`: another agent of its computer asked `<words>`
 //!   with the fragment CLI, `fragment ask --return-to <this chat>`, as the
 //!   agent acting for its owner, as our Hermes image's `fragment_ask` runs
@@ -514,6 +516,11 @@ async fn door(agent: &crate::runtime::Agent, chat: &str, rest: &str) -> Result<S
     if verb == "bind" {
         api.bind_door(&agent.fragment, &agent.owner, said.trim()).await.map_err(|e| e.to_string())?;
         return Ok("door bound".into());
+    }
+    if verb == "poke" {
+        let (fragment, what) = said.trim().split_once(' ').ok_or("say `door poke <fragment> <secret|files|token>`")?;
+        api.poke(&agent.fragment, &agent.owner, fragment, what.trim()).await.map_err(|e| e.to_string())?;
+        return Ok(format!("door poked {}", what.trim()));
     }
     if verb == "link" {
         let ticket: Ticket = serde_json::from_str(said.trim()).map_err(|e| format!("not a ticket: {e}"))?;
