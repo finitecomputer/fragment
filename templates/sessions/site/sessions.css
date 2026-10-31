@@ -13,3 +13,6 @@
 .sessions small { display: block; overflow: hidden; color: var(--text-secondary); font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
 details.kind { margin: 8px 0; }
 details.kind > summary { cursor: pointer; color: var(--text-secondary); font-size: 14px; padding: 6px 0; }
+.archive-continue { margin-top: 12px; min-height: 32px; padding: 6px 14px; border: 1px solid var(--border-strong); border-radius: 999px; background: var(--bg-card); color: var(--text-primary); font: inherit; font-size: 13px; cursor: pointer; }
+.archive-continue:hover { background: var(--bg-hover); }
+.archive-continue[hidden] { display: none; }

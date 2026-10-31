@@ -265,6 +265,12 @@ a.attachment-chip:hover { color: var(--text-primary); background: var(--bg-activ
 .message-error { display: flex; align-items: baseline; gap: 10px; max-width: 100%; font-size: 12px; color: var(--text-secondary); overflow-wrap: anywhere; }
 .message-retry { border: 0; background: none; color: var(--accent-blue); font: inherit; padding: 2px; }
 
+/* a chat continued from the Session Archive (chat.js, historyNode): what was said there, quieter, then where it goes on */
+.history-block { margin: 8px 0 28px; }
+.history-block .msg { opacity: .78; }
+.history-head, .history-foot { margin: 12px 0; text-align: center; color: var(--text-tertiary); font-size: 12px; }
+.history-foot { padding-top: 14px; border-top: 1px solid var(--border); }
+
 /* a turn's steps (chat.js, stepsNode): a quiet timeline of its tool steps
    alone (what the agent says is a reply, between its cards). No box, one
    quiet line for its head; under it one rule, from which its steps hang,
