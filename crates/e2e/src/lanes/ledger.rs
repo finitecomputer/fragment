@@ -1129,7 +1129,8 @@ fn embeddings_route(s: &mut Suite, api: &Api, wait: Duration) -> Result<()> {
     let mut refused = Vec::new();
     for (body, why) in [
         (json!({ "input": vec!["x"; fragment_core::embed::INPUTS_MAX + 1] }), "1 to 100 inputs"),
-        (json!({ "input": ["ok", "word ".repeat(400)] }), "past the embeddings slot's 512 tokens"),
+        // 1,400 bytes of numbers: BGE-M3 reads 773 tokens, the bound 1,403
+        (json!({ "input": ["ok", "1,2,3,4,5,6,7,8,9,0\n".repeat(70)] }), "input 1 may be 1403 tokens, past the embeddings slot's 512"),
         (json!({ "input": [" "] }), "has no embedding"),
         (json!({ "input": [1, 2] }), "token arrays are not taken"),
         (json!({ "input": "x", "dimensions": 256 }), "not cut to 256"),
