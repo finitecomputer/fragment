@@ -346,8 +346,12 @@ reaches it (`withheld`).
   its transcript is on disk, and its process stops once idle.
 - **A turn** is one user message: its note, quote, asker and files in
   words. Text deltas are the draft, each text block a reply part, each
-  tool's result a step, and its `result` its end (a sign-in or a plan's
-  limit in Claude Code's own words).
+  `tool_use` its call's intent (`turn.call`: its assistant message the
+  response, its place there), each tool's result a step naming that
+  response, and its `result` its end (a sign-in or a plan's limit in
+  Claude Code's own words). Claude Code writes a call's line before it
+  runs it, but the tool may start before the bridge reads the line, so
+  the intent trails its start by milliseconds, as Hermes' does.
 - **No technical approvals:** tools run with permissions bypassed.
   `AskUserQuestion` alone asks: each question a card
   (`<tool_use_id>-q<n>`), its options and "Other" in words; an unanswered
@@ -355,9 +359,11 @@ reaches it (`withheld`).
 - **Stop** is Claude Code's interrupt. A turn the bridge lets go of is
   interrupted and its output dropped until its `result`, or its process
   replaced past `DRAIN_MS_DEFAULT`: one turn's words are never another's.
-- **A crash** leaves the cut call open in the transcript; the resumed
-  session tells its model the call's outcome is unknown, and the bridge's
-  note says what the chat saw.
+- **A crash** leaves the cut call open in the transcript. The cut turn is
+  continued once, in the resumed session, which tells its model the
+  call's outcome is unknown; the bridge's note names the call as one that
+  may or may not have run (recorded with Haiku 5.5: it found the call
+  still running and waited, never running it again).
 - **Its menu:** `new` (the chat's next session) and `stop`.
 
 ## Hermes' Relay
