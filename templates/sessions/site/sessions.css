@@ -16,3 +16,6 @@ details.kind > summary { cursor: pointer; color: var(--text-secondary); font-siz
 .archive-continue { margin-top: 12px; min-height: 32px; padding: 6px 14px; border: 1px solid var(--border-strong); border-radius: 999px; background: var(--bg-card); color: var(--text-primary); font: inherit; font-size: 13px; cursor: pointer; }
 .archive-continue:hover { background: var(--bg-hover); }
 .archive-continue[hidden] { display: none; }
+.msg .archive-file { display: block; margin-top: 6px; }
+.msg img.archive-file { max-width: min(360px, 100%); border-radius: 10px; }
+.msg.user img.archive-file { margin-left: auto; }
