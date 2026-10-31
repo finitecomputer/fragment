@@ -267,7 +267,9 @@ impl FragmentCell {
         let chunks = rules::chunked(&up, self.cfg.models.embeddings.max_input_tokens);
         let mut vectors: HashMap<String, String> = HashMap::new();
         // at most twice: once more, embedding all, when the index lost a
-        // vector it said it held (a write in between took it)
+        // vector it said it held (a write in between took it); `cleared`,
+        // whether either emptied an index of another space first
+        let mut cleared_before = false;
         for attempt in 0..2 {
             if let Some(space) = &space {
                 let hashes: Vec<&str> = chunks.iter().map(|c| c.hash.as_str()).collect::<HashSet<_>>().into_iter().collect();
@@ -285,27 +287,34 @@ impl FragmentCell {
             self.search_same_life(life)?;
             match wrote {
                 Wrote::Written { written, chunks, cleared } => {
+                    let cleared = cleared || cleared_before;
                     if cleared {
                         // the deployment's embeddings moved: the index is
                         // written again from its sources, starting with this one
                         console_log!("{}", json!({ "event": "search.space-changed", "fragment": facts.name, "now": space }));
                     }
-                    return json_response(&json!({ "source": up.source, "revision": up.revision, "written": written, "chunks": chunks }));
+                    return json_response(&json!({ "source": up.source, "revision": up.revision, "written": written, "chunks": chunks, "cleared": cleared }));
                 }
-                Wrote::Conflict { current } => {
-                    let body = json!({ "error": ErrorCode::Conflict, "message": "the source's revision is not the one this replaces", "current": current });
+                Wrote::Conflict { current, cleared } => {
+                    let body = json!({ "error": ErrorCode::Conflict, "message": "the source's revision is not the one this replaces", "current": current, "cleared": cleared || cleared_before });
                     return Ok(Response::from_json(&body)?.with_status(409));
                 }
-                Wrote::MissingVectors if attempt == 0 => {}
-                Wrote::MissingVectors => break,
-                Wrote::Full { chunks } => {
+                Wrote::MissingVectors { cleared } => {
+                    cleared_before |= cleared;
+                    if attempt > 0 {
+                        break;
+                    }
+                }
+                Wrote::Full { chunks, cleared } => {
                     let message = format!("this fragment's index holds {chunks} chunks, at most {}: split its sources across fragments", index::CHUNKS_MAX);
-                    return Err(CellError::new(ErrorCode::StorageFull, message));
+                    let body = json!({ "error": ErrorCode::StorageFull, "message": message, "cleared": cleared || cleared_before });
+                    return Ok(Response::from_json(&body)?.with_status(507));
                 }
                 Wrote::Ended => return Err(CellError::new(ErrorCode::NotFound, "this fragment was deleted while the source was written")),
             }
         }
-        Err(CellError::new(ErrorCode::UpstreamFailed, "the index lost vectors it held twice: try again"))
+        let body = json!({ "error": ErrorCode::UpstreamFailed, "message": "the index lost vectors it held twice: try again", "cleared": cleared_before });
+        Ok(Response::from_json(&body)?.with_status(502))
     }
 
     /// `POST /api/search/delete` (an editor): a source, gone.

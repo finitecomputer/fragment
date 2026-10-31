@@ -64,11 +64,18 @@ indexing, hint?}`.
   run's steps. A batch claims its pages (for two minutes), so runs side by
   side take different pages and nothing is read or embedded twice: any
   member may start `changed` (the page does when the index is behind), and
-  one with nothing left to do takes two steps. Each path is marked at a
-  generation, so a read overtaken by a newer mark is read again. A page
-  whose bytes hash the same is not written again; one `main` deletes, the
-  platform forgets. More than 200 paths in one move, or an index of an
-  older shape (`FORMAT`, which drops the app's old tables), read every file
+  one with nothing left to do takes two steps. A batch that fails lets go
+  of its claims; a run that finds the rest held waits out one claim, then
+  takes what a batch that died left. Each path is marked at a generation,
+  and a new mark keeps a batch's claim: one batch at a time reads a page,
+  and a read overtaken by a newer mark is read again. Each write is a
+  compare-and-set on the revision the index holds (`pages.revision`), so a
+  batch whose claim lapsed never writes over a newer one. A page whose
+  bytes hash the same is not written again; one `main` deletes is taken
+  out. More than 200 paths in one move, or an index of an older shape
+  (`FORMAT`, which drops the app's old tables), read every file again;
+  `reindex {full: true}` (an editor's), or a write the index answers
+  `cleared` (its embedding model changed and it emptied), writes every page
   again.
 - **Behind its files**, a search answers `indexing: true` and a `hint`
   naming the job that finishes it, and the page says so.

@@ -747,7 +747,7 @@ so are the limits named here.
 
 | method & path | who | body → answer |
 | --- | --- | --- |
-| `POST /api/f/{name}/search/upsert` | an editor | `Upsert {source, revision, replaces?, title?, at?, fields?, sections: [{id, text, heading?, context?, at?, location?: {from, to}}]}` → `{source, revision, written, chunks}` |
+| `POST /api/f/{name}/search/upsert` | an editor | `Upsert {source, revision, replaces?, title?, at?, fields?, sections: [{id, text, heading?, context?, at?, location?: {from, to}}]}` → `{source, revision, written, chunks, cleared}` (`cleared`: this write emptied an index of another embeddings space first, so its other sources are to be written again; a refusal that may follow such a clear, 409 `conflict` or 507 `storage_full`, says `cleared` too) |
 | `POST /api/f/{name}/search/delete` | an editor | `{source}` → `{source, deleted}` |
 | `GET /api/f/{name}/search/sources?after=&limit=` | an editor | → `{sources: [{source, revision, at?, chunks}], next}`, by source, at most `SOURCES_PAGE_MAX` |
 | `GET /api/f/{name}/search/status` | a viewer | → `{exists, sources, chunks, bytes, space, chunks_split, chunks_max, semantic, forgetting}` |

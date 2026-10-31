@@ -103,6 +103,10 @@ export class Search extends WorkerEntrypoint {
       const e = new Error(answer.message || `search.${op} answered ${resp.status}`);
       e.code = answer.error ?? null;
       e.status = resp.status;
+      // a compare-and-set's: the revision the index holds, and whether the
+      // write emptied an index of another embeddings space first
+      e.current = answer.current ?? null;
+      e.cleared = answer.cleared === true;
       throw e;
     }
     return answer;

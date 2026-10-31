@@ -113,13 +113,26 @@ pub(crate) enum Wrote {
     /// `chunks`; `cleared`, the index held another space's and was
     /// emptied first.
     Written { written: bool, chunks: usize, cleared: bool },
-    /// `replaces` is not the source's revision now.
-    Conflict { current: Option<String> },
+    /// `replaces` is not the source's revision now. Here and below,
+    /// `cleared` as above: a clear comes first, so a refused write may
+    /// follow one, and its writer is told so it writes every source again.
+    Conflict {
+        current: Option<String>,
+        #[serde(default)]
+        cleared: bool,
+    },
     /// A chunk sent without its vector is one the index no longer holds
     /// (a write in between took it): sent again, embedded.
-    MissingVectors,
+    MissingVectors {
+        #[serde(default)]
+        cleared: bool,
+    },
     /// Past `CHUNKS_MAX`, with `chunks` held.
-    Full { chunks: u64 },
+    Full {
+        chunks: u64,
+        #[serde(default)]
+        cleared: bool,
+    },
     /// Its life ended: nothing is written.
     Ended,
 }
@@ -506,14 +519,14 @@ impl Parts {
         if let Some(r) = &w.replaces {
             let matches = if r.is_empty() { current_revision.is_none() } else { current_revision.as_deref() == Some(r.as_str()) };
             if !matches {
-                return Ok(Wrote::Conflict { current: current_revision });
+                return Ok(Wrote::Conflict { current: current_revision, cleared });
             }
         }
         let new: usize = w.sections.iter().map(|s| s.chunks.len()).sum();
         let old = current.first().and_then(|r| r["chunks"].as_u64()).unwrap_or(0);
         let total = self.chunks()?.saturating_sub(old) + new as u64;
         if total > CHUNKS_MAX {
-            return Ok(Wrote::Full { chunks: self.chunks()? });
+            return Ok(Wrote::Full { chunks: self.chunks()?, cleared });
         }
         // each vector, held: its own, or this index's of its hash (read
         // before the source's old chunks go, which may hold it)
@@ -540,7 +553,7 @@ impl Parts {
             missing.dedup();
             let found = if cleared { HashMap::new() } else { self.held(&missing)? };
             if missing.iter().any(|h| !found.contains_key(*h) && !vectors.contains_key(*h)) {
-                return Ok(Wrote::MissingVectors);
+                return Ok(Wrote::MissingVectors { cleared });
             }
             vectors.extend(found);
         }
