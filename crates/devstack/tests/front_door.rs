@@ -9,7 +9,8 @@
 //!
 //! The second burst is sent at an instant (its connections opened first):
 //! `GAPS_MS` after the first burst's last answer, about the runtime's 5 s.
-//! The front door must lose nothing there. What wrangler's proxy loses is
+//! The front door must answer every request there 200 (a 500, any other
+//! status or a closed connection fails). What wrangler's proxy loses is
 //! printed, not held to: its window is a few milliseconds wide and moves
 //! with the machine. A node started from a shell lost 25 to 60 of 192
 //! PUTs in each such sweep (2026-10-30), and CI's nodes logged the loss
@@ -122,8 +123,10 @@ fn said(answers: &[Answer]) -> String {
     format!("{counts:?}")
 }
 
+/// Requests not answered 200: a 500, another status, or a connection
+/// closed with no answer.
 fn lost(answers: &[Answer]) -> usize {
-    answers.iter().filter(|a| **a == Answer::Status(500)).count()
+    answers.iter().filter(|a| **a != Answer::Status(200)).count()
 }
 
 #[test]
@@ -151,12 +154,12 @@ fn the_front_door_loses_no_request_wranglers_proxy_does() {
             let (answers, _) = burst(port, "PUT", Some(last + gap));
             println!("{gap:?} on, {through}: {}", said(&answers));
             match through {
-                "front door" => assert_eq!(lost(&answers), 0, "the front door lost a PUT: {}", said(&answers)),
+                "front door" => assert_eq!(lost(&answers), 0, "every PUT through the front door is answered 200: {}", said(&answers)),
                 _ => through_proxy += lost(&answers),
             }
         }
     }
     node.stop().expect("the node stops");
     std::fs::remove_dir_all(&project).ok();
-    println!("wrangler's proxy lost {through_proxy} PUTs in {} sweeps; the front door none", GAPS_MS.len());
+    println!("wrangler's proxy left {through_proxy} PUTs unanswered 200 in {} sweeps; the front door none", GAPS_MS.len());
 }

@@ -680,6 +680,14 @@ pub struct Node {
 /// runtime's address (front.rs): it does so at once, in the next lines.
 const RUNTIME_NAMED_WAIT: Duration = Duration::from_secs(30);
 
+/// Set in VS Code's JavaScript Debug Terminal, it turns wrangler's
+/// inspector off (wrangler 4.145.0's `inspectorEnabled`), and with it the
+/// only lines that name the runtime's address (front.rs). Nothing here
+/// attaches to that debugger anyway: its loader comes through
+/// `NODE_OPTIONS`, which no JavaScript process here inherits
+/// (`node::VARS_CLEARED`). So wrangler never gets it.
+const WRANGLER_VARS_CLEARED: [&str; 1] = ["VSCODE_INSPECTOR_OPTIONS"];
+
 impl Node {
     pub fn start(tools: &Tools, opts: &NodeOptions) -> Result<(Node, Duration)> {
         let config = local_config(&opts.project);
@@ -703,6 +711,9 @@ impl Node {
         cmd.current_dir(&opts.project)
             .env("WRANGLER_LOG_PATH", &opts.log_dir)
             .env("WRANGLER_REGISTRY_PATH", opts.project.join(".wrangler/registry"));
+        for var in WRANGLER_VARS_CLEARED {
+            cmd.env_remove(var);
+        }
         if opts.own_group {
             cmd.process_group(0);
         }

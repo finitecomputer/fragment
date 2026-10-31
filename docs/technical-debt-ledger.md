@@ -701,14 +701,19 @@ fragment.club until cutover (decisions 34–35).
   the port). A node runs with `--log-level debug` always, front.rs reads
   its output for those lines, and a connection opened during a restart
   waits for the next address (at most 90 s), as wrangler's proxy holds a
-  request. A start whose runtime is never named fails, saying so.
+  request. A start whose runtime is never named fails, saying so. The
+  lines come from wrangler's inspector, which an inherited
+  `VSCODE_INSPECTOR_OPTIONS` (VS Code's JavaScript Debug Terminal) turns
+  off, so wrangler never gets that variable.
 - **Risk:** the lines are wrangler's internals, at the pinned version. A
   wrangler that no longer writes them fails every node's start (loudly:
   no client falls back to the proxy's path). Debug output makes a node's
   log larger, `xtask dev`'s included.
 - **First proof:** a node start failing with "did not name its runtime's
-  address", or `cargo test -p fragment-devstack --test front_door --
-  --ignored` losing a PUT through the front door.
+  address", `cargo test -p fragment-devstack --test front_door --
+  --ignored` answering a PUT through the front door with anything but
+  200, or `--test debug_terminal` (started and reloaded with that
+  variable set) failing.
 - **Delete when:** wrangler's proxy stops losing requests to its pool
   (the upstream issue: a pool that lets an idle connection go before
   the runtime closes it, or asks again a request no byte of which was
