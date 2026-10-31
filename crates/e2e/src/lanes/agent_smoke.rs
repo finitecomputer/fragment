@@ -51,7 +51,7 @@ use super::computers::{agent_replies, lever, phase, turn_of, work_of, QUEUE_DRAI
 use super::jobs::records;
 use super::ledger::entries;
 use crate::api::{now_s, Api, Call, Socket};
-use crate::browser::{Browser, Lease, Page};
+use crate::browser::{Browser, Lease, Page, Watched};
 use crate::{Need, Suite};
 
 pub const SECTION: &str = "agent-smoke";
@@ -423,11 +423,164 @@ fn ticket(api: &Api, owner: &Keys, id: &str, agent: &str) -> Result<String> {
     Ok(r.body["url"].as_str().unwrap_or("").to_string())
 }
 
-/// `agent`'s screen's page through a new ticket, connected or not by `PAGE`.
-pub(super) fn open_screen(chrome: &mut Browser, api: &Api, owner: &Keys, id: &str, agent: &str) -> Result<(Page, bool)> {
-    let page = chrome.open(&ticket(api, owner, id, agent)?)?;
+/// `agent`'s screen's page through a new ticket, connected or not by
+/// `PAGE`, and what it said as it loaded (`loading`), for a FAIL's detail:
+/// watched until then (past it, its socket's every frame would be kept).
+pub(super) fn open_screen(chrome: &mut Browser, api: &Api, owner: &Keys, id: &str, agent: &str) -> Result<(Page, bool, Value)> {
+    let url = ticket(api, owner, id, agent)?;
+    let secret = ticket_secret(&url).context("a ticket's URL carries its secret (`/__ticket?t=…`)")?.to_string();
+    let page = chrome.open_watched(&url)?;
     let connected = chrome.until(&page, CONNECTED, PAGE);
-    Ok((page, connected))
+    let said = loading(chrome, &page, &secret)?;
+    Ok((page, connected, said))
+}
+
+/// The one-time secret a ticket's URL carries (`/__ticket?t=<secret>&next=…`).
+fn ticket_secret(url: &str) -> Option<&str> {
+    let (_, query) = url.split_once("/__ticket?")?;
+    query.split('&').find_map(|kv| kv.strip_prefix("t=")).filter(|t| !t.is_empty())
+}
+
+/// The requests a FAIL's detail lists at most (the screen's page makes
+/// about 40: itself, noVNC's modules, its two sockets), and what of each
+/// string it keeps.
+const REQUESTS_MAX: usize = 100;
+const BODY_MAX: usize = 300;
+
+/// What a watched page said as it loaded (`said_loading`), its watching
+/// then stopped; each error's answer read while it was watched (no body
+/// is kept past it).
+fn loading(chrome: &mut Browser, page: &Page, secret: &str) -> Result<Value> {
+    let errors: Vec<(Request, String)> = requests(&chrome.watched(page)?.events)
+        .into_iter()
+        .filter(|r| r.status.is_some_and(|s| s >= 400))
+        .take(REQUESTS_MAX)
+        .map(|r| {
+            let body = chrome.response_body(page, &r.id).unwrap_or_default();
+            (r, body)
+        })
+        .collect();
+    let w = chrome.unwatch(page)?;
+    Ok(said_loading(&w, &errors, secret))
+}
+
+/// What a page said as it loaded: each request and its answer; each
+/// error's answer (`errors`: its request and body), whose body says who
+/// refused it (the cell's port, or the computer's screen server), with the
+/// edge's id for it (`cf-ray`, in the Worker's logs); its console, its
+/// exceptions, and what the browser logged. Its ticket's `secret`, which
+/// signs a browser in until it is redeemed or expires, is said as
+/// `<ticket>` wherever it appears (a failed ticket's URL in the browser's
+/// log, its text, a body), before any string is cut to `BODY_MAX`.
+fn said_loading(w: &Watched, errors: &[(Request, String)], secret: &str) -> Value {
+    assert!(!secret.is_empty(), "a ticket's secret is something to hide");
+    let clean = |text: &str| -> String { text.replace(secret, "<ticket>").chars().take(BODY_MAX).collect() };
+    let of = |method: &str, said: fn(&Value) -> String| -> Vec<String> { w.events.iter().filter(|e| e["method"] == method).map(|e| clean(&said(&e["params"]))).collect() };
+    let console = |p: &Value| {
+        let args = p["args"].as_array().into_iter().flatten().map(|a| a["value"].as_str().map(str::to_string).unwrap_or_else(|| a["description"].as_str().map_or_else(|| a["value"].to_string(), str::to_string)));
+        format!("{}: {}", p["type"].as_str().unwrap_or(""), args.collect::<Vec<_>>().join(" "))
+    };
+    let exception = |p: &Value| {
+        let d = &p["exceptionDetails"];
+        d["exception"]["description"].as_str().or(d["text"].as_str()).unwrap_or("").to_string()
+    };
+    let logged = |p: &Value| format!("{}: {} {}", p["entry"]["level"].as_str().unwrap_or(""), p["entry"]["text"].as_str().unwrap_or(""), p["entry"]["url"].as_str().unwrap_or(""));
+    let errors: Vec<Value> = errors.iter().map(|(r, body)| json!({ "request": clean(&r.said()), "ray": r.ray, "body": clean(body) })).collect();
+    json!({
+        "requests": requests(&w.events).iter().take(REQUESTS_MAX).map(|r| clean(&r.said())).collect::<Vec<_>>(),
+        "errors": errors,
+        "console": of("Runtime.consoleAPICalled", console),
+        "exceptions": of("Runtime.exceptionThrown", exception),
+        "log": of("Log.entryAdded", logged),
+        "dropped": w.dropped,
+    })
+}
+
+/// One request a page made, or one socket it opened, as its `Network`
+/// events say it.
+#[derive(Debug, Clone, PartialEq)]
+struct Request {
+    id: String,
+    /// `GET /p/6080/novnc/core/rfb.js`, or `socket /p/6080/control?…`.
+    what: String,
+    status: Option<u16>,
+    /// Why it failed (`net::ERR_…`), as Chrome says it.
+    failed: Option<String>,
+    closed: bool,
+    /// The edge's id for its answer (`cf-ray`).
+    ray: Option<String>,
+}
+
+impl Request {
+    /// `GET /p/6080/x.js 200`, `… failed net::ERR_…`, `… no answer`.
+    fn said(&self) -> String {
+        let mut answer: Vec<String> = self.status.iter().map(u16::to_string).chain(self.failed.iter().map(|why| format!("failed {why}"))).collect();
+        if answer.is_empty() {
+            answer.push("no answer".into());
+        }
+        if self.closed {
+            answer.push("closed".into());
+        }
+        format!("{} {}", self.what, answer.join(", "))
+    }
+}
+
+/// A page's requests and sockets, in the order it made them, from its
+/// `Network` events. A redirect is one request id sent again: each hop is
+/// a request of its own, answered by the redirect's status.
+fn requests(events: &[Value]) -> Vec<Request> {
+    // its URL past its origin; a ticket's query (its one-time secret) not said
+    fn path(url: &str) -> String {
+        let past = url.split_once("://").map_or(url, |(_, rest)| rest);
+        let path = past.find('/').map_or("/", |i| &past[i..]);
+        let path = match path.split_once('?') {
+            Some((p, _)) if p.ends_with("/__ticket") => p,
+            _ => path,
+        };
+        path.chars().take(200).collect()
+    }
+    fn ray(response: &Value) -> Option<String> {
+        response["headers"].as_object()?.iter().find(|(k, _)| k.eq_ignore_ascii_case("cf-ray")).and_then(|(_, v)| v.as_str().map(str::to_string))
+    }
+    fn newest<'a>(all: &'a mut [Request], id: &str) -> Option<&'a mut Request> {
+        all.iter_mut().rev().find(|r| r.id == id)
+    }
+    let status = |response: &Value| response["status"].as_u64().and_then(|s| u16::try_from(s).ok());
+    let mut all: Vec<Request> = vec![];
+    // bounded by the events: each is read once
+    for e in events {
+        let p = &e["params"];
+        let id = p["requestId"].as_str().unwrap_or("");
+        let made = |what: String| Request { id: id.to_string(), what, status: None, failed: None, closed: false, ray: None };
+        match e["method"].as_str().unwrap_or("") {
+            "Network.requestWillBeSent" => {
+                if let (Some(hop), false) = (newest(&mut all, id), p["redirectResponse"].is_null()) {
+                    hop.status = status(&p["redirectResponse"]);
+                    hop.ray = ray(&p["redirectResponse"]);
+                }
+                all.push(made(format!("{} {}", p["request"]["method"].as_str().unwrap_or("GET"), path(p["request"]["url"].as_str().unwrap_or("")))));
+            }
+            "Network.webSocketCreated" => all.push(made(format!("socket {}", path(p["url"].as_str().unwrap_or(""))))),
+            "Network.responseReceived" | "Network.webSocketHandshakeResponseReceived" => {
+                if let Some(r) = newest(&mut all, id) {
+                    r.status = status(&p["response"]);
+                    r.ray = ray(&p["response"]);
+                }
+            }
+            "Network.loadingFailed" | "Network.webSocketFrameError" => {
+                if let Some(r) = newest(&mut all, id) {
+                    r.failed = p["errorText"].as_str().or(p["errorMessage"].as_str()).map(str::to_string);
+                }
+            }
+            "Network.webSocketClosed" => {
+                if let Some(r) = newest(&mut all, id) {
+                    r.closed = true;
+                }
+            }
+            _ => {}
+        }
+    }
+    all
 }
 
 /// Hermes' profile for an agent fragment (the bridge's `wire::profile`, for
@@ -785,7 +938,7 @@ pub fn agent_smoke(s: &mut Suite, api: &Api) -> Result<()> {
 /// opened again after it closed shows it.
 #[allow(clippy::too_many_arguments)]
 fn screen_checks(s: &mut Suite, c: &Chat, chrome: &mut Browser, api: &Api, keys: &Keys, id: &str, browsing: &str, shots: &Path) -> Result<String> {
-    let (open, connected) = open_screen(chrome, api, keys, id, &c.agent)?;
+    let (open, connected, loaded) = open_screen(chrome, api, keys, id, &c.agent)?;
     let before = connected.then(|| within(FOLLOW, || Frame::read(chrome, &open))).flatten();
     let shows = chrome.eval(&open, "[document.getElementById('screen')?.dataset.agent, document.title]").unwrap_or_default();
     // a tab of its own: no page of the platform's tells it the agent's name,
@@ -793,7 +946,7 @@ fn screen_checks(s: &mut Suite, c: &Chat, chrome: &mut Browser, api: &Api, keys:
     s.ok(
         "the screen's page (a ticket, in Chrome) shows its chat's agent's, connects to that agent's desktop and draws a frame",
         connected && before.is_some() && shows[0] == c.agent.as_str() && shows[1] == "Screen",
-        json!({ "status": status(chrome, &open), "shows": shows, "frame": describe(&before) }),
+        json!({ "status": status(chrome, &open), "shows": shows, "frame": describe(&before), "loading": loaded }),
     );
     let _ = chrome.screenshot(&open, &shots.join("1-desktop-before.png"));
     let browsed = c.say("smoke-4", browsing)?;
@@ -827,27 +980,27 @@ fn screen_checks(s: &mut Suite, c: &Chat, chrome: &mut Browser, api: &Api, keys:
         json!({ "status": status(chrome, &open), "before": describe(&before), "now": describe(&Frame::read(chrome, &open)) }),
     );
     // a page opened now: connected, drawn, not blank; and Take over
-    let (now, connected) = open_screen(chrome, api, keys, id, &c.agent)?;
+    let (now, connected, loaded) = open_screen(chrome, api, keys, id, &c.agent)?;
     let drawn = connected.then(|| within(FOLLOW, || Frame::read(chrome, &now).filter(|f| !f.blank()))).flatten();
     let _ = chrome.screenshot(&now, &shots.join("3-opened-now.png"));
     s.ok(
         "opened now, the screen's page connects (its websockify socket) and draws a frame that is not blank (pixels sampled)",
         drawn.is_some(),
-        json!({ "status": status(chrome, &now), "frame": describe(&Frame::read(chrome, &now)) }),
+        json!({ "status": status(chrome, &now), "frame": describe(&Frame::read(chrome, &now)), "loading": loaded }),
     );
     let taken = connected && chrome.eval(&now, "(document.getElementById('control').click(), true)").is_ok() && chrome.until(&now, "document.body.dataset.state === 'mine'", Duration::from_secs(20));
     s.ok("Take over gives the person the screen (its control socket grants control: the agent's lease)", taken, status(chrome, &now));
     // every page closed, then the screen opened again
     chrome.close(open)?;
     chrome.close(now)?;
-    let (again, connected) = open_screen(chrome, api, keys, id, &c.agent)?;
+    let (again, connected, loaded) = open_screen(chrome, api, keys, id, &c.agent)?;
     let same = |f: &Frame| new_frame(f) && drawn.as_ref().is_none_or(|d| f.unlike(d) <= SAME);
     let shown = connected.then(|| within(FOLLOW, || Frame::read(chrome, &again).filter(same))).flatten();
     let _ = chrome.screenshot(&again, &shots.join("4-opened-again.png"));
     s.ok(
         "closed and opened again, the screen shows the browser: connected, a light page over the desktop, the frame it showed before it closed",
         shown.is_some(),
-        json!({ "status": status(chrome, &again), "before": describe(&drawn), "now": describe(&Frame::read(chrome, &again)), "desktop": describe(&before) }),
+        json!({ "status": status(chrome, &again), "before": describe(&drawn), "now": describe(&Frame::read(chrome, &again)), "desktop": describe(&before), "loading": loaded }),
     );
     chrome.close(again)?;
     Ok(browsed)
@@ -932,6 +1085,84 @@ mod tests {
         assert_eq!(terminal_calls(r#"a = terminal("ls (x)"); b = terminal(command='rm -rf "y\'z"', timeout=5) c"#), [r#""ls (x)""#, r#"command='rm -rf "y\'z"', timeout=5"#]);
         assert_eq!(terminal_calls("no call here"), Vec::<&str>::new());
         assert_eq!((previewed("a + 2 commands"), previewed("a + b"), previewed("x + 1 command y")), ("a", "a + b", "x + 1 command y"));
+    }
+
+    /// Goal: a screen's page that never ran says why: each request with
+    /// its answer (a status, a failure, or none yet), each socket, and the
+    /// edge's id for an answer; a ticket's secret never. Method: the
+    /// `Network` events Chrome sends, a ticket's redirect, a module
+    /// refused, one failed and one never answered among them.
+    #[test]
+    fn a_page_says_each_request_and_its_answer() {
+        let at = |path: &str| format!("https://c-1--preview.finite.build{path}");
+        let sent = |id: &str, path: &str| json!({ "method": "Network.requestWillBeSent", "params": { "requestId": id, "request": { "method": "GET", "url": at(path) } } });
+        let answered = |id: &str, status: u16, ray: &str| json!({ "method": "Network.responseReceived", "params": { "requestId": id, "response": { "status": status, "headers": { "CF-Ray": ray } } } });
+        let mut redirected = sent("1", "/p/6080/?agent=a--k3x9");
+        redirected["params"]["redirectResponse"] = json!({ "status": 303, "headers": { "cf-ray": "r1" } });
+        let events = [
+            sent("1", "/__ticket?t=one-time-secret&next=/p/6080/?agent=a--k3x9"),
+            redirected,
+            answered("1", 200, "r2"),
+            sent("2", "/p/6080/novnc/core/rfb.js"),
+            answered("2", 502, "r3"),
+            sent("3", "/p/6080/novnc/core/util/logging.js"),
+            json!({ "method": "Network.loadingFailed", "params": { "requestId": "3", "errorText": "net::ERR_HTTP2_PROTOCOL_ERROR" } }),
+            sent("4", "/p/6080/novnc/core/websock.js"),
+            json!({ "method": "Network.webSocketCreated", "params": { "requestId": "5", "url": "wss://c-1--preview.finite.build/p/6080/control?viewer=v&agent=a--k3x9" } }),
+            json!({ "method": "Network.webSocketHandshakeResponseReceived", "params": { "requestId": "5", "response": { "status": 101, "headers": {} } } }),
+            json!({ "method": "Network.webSocketClosed", "params": { "requestId": "5" } }),
+            json!({ "method": "Runtime.consoleAPICalled", "params": { "type": "log", "args": [] } }),
+        ];
+        let all = requests(&events);
+        let said: Vec<String> = all.iter().map(Request::said).collect();
+        assert_eq!(
+            said,
+            [
+                "GET /__ticket 303",
+                "GET /p/6080/?agent=a--k3x9 200",
+                "GET /p/6080/novnc/core/rfb.js 502",
+                "GET /p/6080/novnc/core/util/logging.js failed net::ERR_HTTP2_PROTOCOL_ERROR",
+                "GET /p/6080/novnc/core/websock.js no answer",
+                "socket /p/6080/control?viewer=v&agent=a--k3x9 101, closed",
+            ]
+        );
+        assert_eq!(all.iter().map(|r| r.ray.as_deref()).collect::<Vec<_>>(), [Some("r1"), Some("r2"), Some("r3"), None, None, None], "each hop its own edge id, its header named in any case");
+        assert!(!format!("{all:?}").contains("one-time-secret"), "a ticket's secret is never said");
+        // an event for a request it never saw sent is no request
+        assert!(requests(&[answered("9", 500, "r9")]).is_empty());
+    }
+
+    /// Goal: a FAIL's detail never says a ticket's secret, which signs a
+    /// browser in until it is redeemed or expires (a ticket whose first
+    /// navigation failed is still good). Method: a failed ticket, its URL in
+    /// the browser's log, its text, the console, an exception and an error's
+    /// body, one long enough that a cut before the secret was hidden would
+    /// keep part of it; then the whole detail, as `Suite::fail` prints it,
+    /// read for any piece of the secret.
+    #[test]
+    fn a_page_says_nothing_of_its_ticket() {
+        let secret = "0123456789abcdef".repeat(3);
+        let url = format!("https://c-1--preview.finite.build/__ticket?t={secret}&next=%2Fp%2F6080%2F%3Fagent%3Da--k3x9");
+        assert_eq!(ticket_secret(&url), Some(secret.as_str()));
+        assert_eq!(ticket_secret("https://c-1--preview.finite.build/__ticket?next=%2F"), None, "a ticket's URL with no secret");
+        assert_eq!(ticket_secret("https://c-1--preview.finite.build/__ticket?t=&next=%2F"), None);
+        let events = vec![
+            json!({ "method": "Network.requestWillBeSent", "params": { "requestId": "1", "request": { "method": "GET", "url": url } } }),
+            json!({ "method": "Network.loadingFailed", "params": { "requestId": "1", "errorText": format!("net::ERR_FAILED {url}") } }),
+            json!({ "method": "Log.entryAdded", "params": { "entry": { "level": "error", "text": format!("Failed to load resource: {url}"), "url": url } } }),
+            json!({ "method": "Runtime.consoleAPICalled", "params": { "type": "error", "args": [{ "type": "string", "value": format!("opened {url}") }] } }),
+            json!({ "method": "Runtime.exceptionThrown", "params": { "exceptionDetails": { "text": "Uncaught", "exception": { "description": format!("Error: {url}") } } } }),
+        ];
+        let w = Watched { events, dropped: 0 };
+        let refused = Request { id: "1".into(), what: format!("GET {url}"), status: Some(502), failed: None, closed: false, ray: Some("r1".into()) };
+        let body = format!("{}{secret}", "x".repeat(BODY_MAX - 20));
+        let said = said_loading(&w, &[(refused, body)], &secret).to_string();
+        for piece in secret.as_bytes().windows(12) {
+            let piece = std::str::from_utf8(piece).expect("hex");
+            assert!(!said.contains(piece), "the detail says {piece:?} of the ticket's secret: {said}");
+        }
+        assert!(said.contains("error: Failed to load resource: https://c-1--preview.finite.build/__ticket?t=<ticket>&next="), "the log says the ticket was what failed: {said}");
+        assert!(said.contains("GET /__ticket failed net::ERR_FAILED"), "{said}");
     }
 
     /// The page's sample parses; nothing drawn yet is no frame.
