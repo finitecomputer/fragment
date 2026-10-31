@@ -622,6 +622,9 @@ fn operator_client(host: &Option<String>, verbose: bool, key_file: Option<&std::
     }
 }
 
+/// The ids a wake's failure names (every one, and why, is on stderr).
+const WAKE_NAMED_MAX: usize = 20;
+
 /// An admin call's answer as JSON, or its refusal.
 fn admin_answer(c: &api::Client, resp: api::Resp) -> Result<Value> {
     c.call_as::<Value>(resp)
@@ -1466,20 +1469,26 @@ fn run(cli: Cli) -> Result<()> {
                 let woke = c.post_json_by_id(&format!("/api/admin/objects/{class}/wake"), &json!({ "id": id })).and_then(|r| admin_answer(&c, r));
                 if let Err(e) = woke {
                     eprintln!("{class} {id}: {e:#}");
-                    refused.push(json!({ "id": id, "error": format!("{e:#}") }));
+                    refused.push(*id);
                 }
                 if !j && (n + 1) % 500 == 0 {
                     eprintln!("{} of {}", n + 1, ids.len());
                 }
             }
-            let v = json!({ "class": class, "asked": ids.len(), "ready": ids.len() - refused.len(), "refused": refused });
-            if refused.is_empty() {
-                json_exit(j, &v);
-            }
-            println!("{} of {} {class} objects ready", ids.len() - refused.len(), ids.len());
+            let ready = ids.len() - refused.len();
             if !refused.is_empty() {
-                return Err(anyhow!("{} {class} objects did not wake", refused.len()));
+                // stdout holds one line: with --json, main's failure envelope
+                // alone (each refusal is on stderr, above)
+                if !j {
+                    println!("{ready} of {} {class} objects ready", ids.len());
+                }
+                let named = refused.iter().take(WAKE_NAMED_MAX).copied().collect::<Vec<_>>().join(", ");
+                let more = refused.len().saturating_sub(WAKE_NAMED_MAX);
+                let more = if more > 0 { format!(", and {more} more") } else { String::new() };
+                return Err(anyhow!("{} of {} {class} objects did not wake (each, and why, on stderr): {named}{more}", refused.len(), ids.len()));
             }
+            json_exit(j, &json!({ "class": class, "asked": ids.len(), "ready": ready }));
+            println!("{ready} of {} {class} objects ready", ids.len());
             return Ok(());
         }
         Cmd::Operator { sub: OperatorCmd::Credit { org, usd, why, id, key_file } } => {
