@@ -7,7 +7,7 @@ export function createChatList({ api, ui, data, selection, menus, navigation, li
   const { $, el, patch, agentFace, notice } = ui;
   const { byName, own, chats, shown, titleOf, chatTitle, homeMark, isGroup, agentOfChat, agentsOf, agents, allFragments, computer, isGuest, personId, isThread, waitingOn, renderThreads } = data;
   const { current, page, getFrame } = selection;
-  const { menu, menuEdge, menuOwner, openMenu, shareItem, archiveItem } = menus;
+  const { menu, menuEdge, menuOwner, openMenu, closeMenu, shareItem, archiveItem } = menus;
   const { newChat, rename, openChat, openApp, openScreen, leaveSidebar, seg } = navigation;
   // ---- chats: one flat list, newest first, the open one in the middle column ----
   function renderHeading() {
@@ -212,15 +212,36 @@ export function createChatList({ api, ui, data, selection, menus, navigation, li
     row.onclick = () => openAgentMenu(agent, row);
     return row;
   }
-  // An agent's menu: a new chat with it, its name, its profile, its screen.
+  // An agent's menu: where it is doing something (each chat opens; read as
+  // it opens, not from when its hero was drawn), a new chat with it, its
+  // name, its profile and its screen. Its hero is first scrolled up enough
+  // for the menu to hang below it in the window, as far as the list scrolls.
+  const DOING_LISTED = 5;
   function openAgentMenu(agent, trigger) {
-    openMenu(trigger, [
+    const doing = agent.identity ? chats().flatMap((f) => doingIn(f, [agent.identity])).sort(pressing).slice(0, DOING_LISTED) : [];
+    const items = [
+      ...doing.map((x) => ({ icon: "agent", text: `${DOING_SAYS[x.doing]} in ${titleOf(x.chat)}`, onClick: () => { openChat(x.chat); leaveSidebar(); } })),
       ...(agent.identity && !isGuest() ? [{ icon: "newChat", text: "New chat", onClick: () => { newChat(agent.identity); leaveSidebar(); } }] : []),
       { icon: "rename", text: "Rename…", onClick: () => rename(agent.fragment) },
       { icon: "agent", text: "Its profile", onClick: () => openApp(agent.fragment) },
       ...(computer() ? [{ icon: "screen", text: "Its screen", onClick: () => openScreen(agent.fragment) }] : []),
-    ]);
+    ];
+    const nav = $("chats");
+    const short = items.length * 34 + 16 - (innerHeight - trigger.getBoundingClientRect().bottom - 8);
+    const room = Math.min(short, nav.scrollHeight - nav.clientHeight - nav.scrollTop);
+    if (room > 0 && menuOwner()?.button !== trigger) {
+      scrolledForMenu = true;
+      nav.scrollTop += room;
+    }
+    openMenu(trigger, items);
   }
+  // A hero's menu hangs from it where it was: the list scrolled by the
+  // person (not for the menu's room, above), it closes.
+  let scrolledForMenu = false;
+  $("chats").addEventListener("scroll", () => {
+    if (scrolledForMenu) scrolledForMenu = false;
+    else if (menuOwner()?.button.classList.contains("agent-hero")) closeMenu(true);
+  }, { passive: true });
   // A section's chats: its five newest (and the open one, wherever it is),
   // then More, which shows the rest, and Less, which folds them again.
   const SECTION_CHATS = 5;

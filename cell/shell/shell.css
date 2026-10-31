@@ -755,7 +755,9 @@ iframe[data-blocked] { display: none; }
    when, then the chat's own name */
 /* a section per agent (chat-list.js): its hero, the original pill (face,
    name, what it is doing), then its chats; More unfolds the rest; Shared last */
-#chats { flex: 0 1 auto; min-height: 0; max-height: none; }
+/* the sections take the sidebar's room and scroll in it; Apps and Settings stay at its foot.
+   A list of ellipsized rows never scrolls sideways (its pills' rim kept inside it) */
+#chats { flex: 1 1 auto; min-height: 0; max-height: none; overflow-x: hidden; padding-inline: 2px; }
 #chats .agent-hero { --edge-light: 0; flex: none; gap: 10px; height: 48px; margin: 10px 0 2px; padding: 8px 13px; border: 1px solid transparent; border-radius: 999px; background: var(--bg-sidebar); }
 #chats .agent-hero:first-child { margin-top: 2px; }
 #chats .agent-hero:hover { background: var(--bg-active); }
@@ -827,7 +829,7 @@ iframe[data-blocked] { display: none; }
 .invite-actions button { height: 28px; padding: 0 12px; border: 1px solid var(--border-strong); border-radius: 999px; background: none; color: var(--text-primary); font-size: 12px; font-weight: 600; }
 .invite-actions .invite-accept { border-color: transparent; background: var(--text-primary); color: var(--bg-window); }
 .invite-actions button:disabled { opacity: .55; cursor: default; }
-#chats { gap: 2px; padding: 0 0 6px; }
+#chats { gap: 2px; padding-bottom: 6px; }
 /* a chat's row (chat-list.js `chatRow`): its name and how long ago, then what
    its agent is doing or its newest message's first line; its ⋯ in the time's
    place on hover and focus, always on touch */

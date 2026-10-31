@@ -764,9 +764,12 @@ function animateMenu(opening) {
   cancelMenuMotion();
   if (reducedMotion.matches) { if (!opening) finishMenuClose(); return; }
   const id = menuMotionId;
+  // a hero's menu hangs over the rows below it: it scales, never fades, so
+  // they never show through it
+  const solid = (node) => node === menuFor.button || (node === menu && menu.classList.contains("agent-menu"));
   menuAnimations = menuParts.map(({ node, origin }, i) => node.animate(opening
-    ? springFrames(t => ({ opacity: node === menuFor.button ? 1 : Math.min(1, t), transform: `scale(${.97 + .03 * t})`, transformOrigin: origin }))
-    : [{ ...current[i], transformOrigin: origin }, { opacity: node === menuFor.button ? 1 : 0, transform: node === menuFor.button ? "scale(1)" : "scale(.97)", transformOrigin: origin }],
+    ? springFrames(t => ({ opacity: solid(node) ? 1 : Math.min(1, t), transform: `scale(${.97 + .03 * t})`, transformOrigin: origin }))
+    : [{ ...current[i], transformOrigin: origin }, { opacity: solid(node) ? 1 : 0, transform: node === menuFor.button ? "scale(1)" : "scale(.97)", transformOrigin: origin }],
   { duration: opening ? 280 : 160, easing: opening ? "linear" : "cubic-bezier(.4, 0, 1, 1)", fill: "both" }));
   Promise.all(menuAnimations.map(a => a.finished)).then(() => {
     if (id !== menuMotionId) return;
@@ -857,7 +860,7 @@ const { renderHeading, renderChats, loadInvites, primaryAgent, newChatAgent, own
     agents: () => state.agents, allFragments: () => state.fragments, computer: () => state.computer, isGuest: () => state.guest, personId: () => state.me?.id,
     isThread: (f) => threads.isPair(f), waitingOn: (name) => threads.waitingOn(name), renderThreads: () => threads.render() },
   selection: { current: () => state.current, page: () => state.page, getFrame: (name) => state.frames.get(name) },
-  menus: { menu, menuEdge, menuOwner: () => menuFor, openMenu, shareItem, archiveItem },
+  menus: { menu, menuEdge, menuOwner: () => menuFor, openMenu, closeMenu, shareItem, archiveItem },
   navigation: { newChat, rename: (name) => rename(name), openChat, openApp, openScreen, leaveSidebar, seg },
   listLive, load, invites: () => state.invites, setInvites: (v) => { state.invites = v; },
 });
