@@ -496,6 +496,17 @@ fn javascript_parses(root: &Path) -> Result<()> {
     Ok(())
 }
 
+/// The shell's JavaScript tests pass (`*.test.mjs`, xtask/src/js_syntax.rs),
+/// on the same pinned Node.
+fn javascript_tests(root: &Path) -> Result<()> {
+    let node = devstack::node::locate(&root.join(devstack::TOOLS_DIR))?;
+    let files = js_syntax::files(root)?;
+    let tests = js_syntax::tests(&files);
+    js_syntax::test(&node, &root.join(devstack::CACHE_DIR), root, &tests)?;
+    println!("JavaScript: {} test files pass (node --test on Node v{})", tests.len(), devstack::node::NODE_VERSION);
+    Ok(())
+}
+
 /// No first-party JavaScript turns a string into markup
 /// (xtask/src/html_sinks.rs): text becomes DOM only by the DOM's own
 /// constructors, so no file or message can script a fragment's origin.
@@ -527,6 +538,7 @@ fn check() -> Result<()> {
     let copies: Vec<(&str, String)> = copies.into_iter().collect::<Result<_>>()?;
     skill_installs_release(&read("cli/SKILL.md")?, &read(".github/workflows/release.yml")?, &copies)?;
     javascript_parses(&root)?;
+    javascript_tests(&root)?;
     run(Command::new("cargo").args(["test", "--workspace", "--all-features"]).current_dir(&root))?;
     run(Command::new("cargo")
         .args(["clippy", "--workspace", "--all-targets", "--all-features", "--", "-D", "warnings"])
