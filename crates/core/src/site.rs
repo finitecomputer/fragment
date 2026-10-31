@@ -521,7 +521,7 @@ mod tests {
     fn cookies_and_og() {
         assert_eq!(cookie("a=1; fragview=tok; b=2", "fragview"), Some("tok"));
         assert_eq!(cookie("a=1", "fragview"), None);
-        let meta = Meta { title: Some("T<x>".into()), description: None, image: None };
+        let meta = Meta { title: Some("T<x>".into()), role: None, description: None, image: None };
         let out = inject_og("<html><head></head></html>", "n", &meta, "https://n/__preview.svg");
         assert!(out.contains(r#"og:title" content="T&lt;x&gt;""#) && out.contains("__preview.svg"));
         assert_eq!(inject_og(&out, "n", &meta, "x"), out);
@@ -531,7 +531,7 @@ mod tests {
         // its title as every reader shows it: trimmed; none, or only spaces,
         // its label; its name in full, when that is its title, as such
         let og = |title: Option<&str>| {
-            let meta = Meta { title: title.map(str::to_string), description: None, image: None };
+            let meta = Meta { title: title.map(str::to_string), role: None, description: None, image: None };
             let out = inject_og("<head></head>", "juniper--k3x9", &meta, "x");
             out.split(r#"og:title" content=""#).nth(1).and_then(|r| r.split('"').next()).unwrap_or("").to_string()
         };

@@ -1978,6 +1978,18 @@ mod tests {
         }
     }
 
+    /// Every deploy, and its rollback (wrangler reads the config for
+    /// both), asks Cloudflare to move each object onto the new code at
+    /// once (docs/MODEL.md, "Calls between releases").
+    #[test]
+    fn every_object_takes_the_deploys_code_at_once() {
+        let own = deployment(Some("fragment.club"), Some("fragment.boats"));
+        for (d, branch) in [(&own, None), (&deployment(None, None), Some("p5"))] {
+            let cell = worker_config(d, &names(d, branch).unwrap(), "0f0e0d0c", &test_release(), &devstack::repo_root()).unwrap();
+            assert_eq!(cell["durable_objects"]["code_update_strategy"], json!({ "mode": "immediate" }), "{branch:?}");
+        }
+    }
+
     /// A field gone in a hard cut is refused, never deployed without:
     /// OpenRouter's key, and the secrets' files the store replaced (a
     /// provider's among them).

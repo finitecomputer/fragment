@@ -2230,7 +2230,7 @@ mod tests {
         let p8 = posts.try_recv().expect("8 posted");
         assert!(p8.inbound.item == 8 && p8.file.is_some() && p8.note.is_none());
         // 7 never does: cancelled at the core, posted once with a note
-        m.files_overdue(t0 + Duration::from_millis(FILE_WAIT_MS + 1_000));
+        m.files_overdue(all_overdue(t0));
         assert!(m.slots[f].files.is_empty());
         assert_eq!(cmds(&mut sent), ["/fcancel 7"]);
         let p7 = posts.try_recv().expect("7 posted");
@@ -2267,6 +2267,13 @@ mod tests {
 
     fn voice(item: i64, path: Option<&str>) -> Inbound {
         Inbound { id: format!("m{item}"), kind: "voice".into(), text: String::new(), at: "2026-10-25T17:00:00Z".into(), item, file: Some(wire::FileRef { id: item, name: "voice.m4a".into(), size: 9_000, path: path.map(str::to_string) }) }
+    }
+
+    /// An instant past `FILE_WAIT_MS` for every file forwarded so far, and
+    /// no earlier than `after`: a file's wait counts from its forward, on
+    /// the real clock, however long the forwards took (a write each).
+    fn all_overdue(after: Instant) -> Instant {
+        after.max(Instant::now()) + Duration::from_millis(FILE_WAIT_MS)
     }
 
     /// The core's commands sent so far: (corrId, line).
@@ -2421,7 +2428,7 @@ mod tests {
         // given up on, then done anyway: deleted; its catch-up posts the note
         let t0 = Instant::now();
         m.forward(f, voice(7, None));
-        m.files_overdue(t0 + Duration::from_millis(FILE_WAIT_MS + 1_000));
+        m.files_overdue(all_overdue(t0));
         assert!(posts.try_recv().is_ok_and(|p| p.inbound.item == 7 && p.note.is_some()));
         std::fs::write(files.join("voice_7.m4a"), b"late").expect("a file");
         m.file_event(f, &Resp::FileDone { file: 7, path: "voice_7.m4a".into() });
@@ -2669,7 +2676,7 @@ mod tests {
         drop(sent_lines(&mut sent));
         let core = m.slots.get_mut(f).expect("its slot").core.take();
         m.slots.get_mut(f).expect("its slot").up = false;
-        t += Duration::from_millis(FILE_WAIT_MS + 1_000);
+        t = all_overdue(t);
         m.files_overdue(t);
         assert!(posts.try_recv().is_ok_and(|p| p.inbound.item == 7 && p.note.is_some()), "its note, once");
         assert_eq!(m.slots[f].saved.abandoned.get(&7), Some(&Abandoned::Cancelling));
@@ -2732,7 +2739,7 @@ mod tests {
             for id in &batch {
                 m.forward(f, voice(*id, None));
             }
-            t += Duration::from_millis(FILE_WAIT_MS + 1_000);
+            t = all_overdue(t);
             m.files_overdue(t);
             for (corr, line) in sent_lines(&mut sent) {
                 if line.starts_with("/fcancel") {
@@ -2790,7 +2797,7 @@ mod tests {
                 for id in &batch {
                     m.forward(f, voice(*id, None));
                 }
-                t += Duration::from_millis(FILE_WAIT_MS + 1_000);
+                t = all_overdue(t);
                 m.files_overdue(t);
                 for (corr, line) in sent_lines(&mut sent) {
                     if line.starts_with("/fcancel") {
