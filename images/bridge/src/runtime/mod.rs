@@ -23,6 +23,7 @@
 //! names none. Its turns go to that runtime, and that runtime's menu is its
 //! commands (docs/bridge.md, "Which runtime runs an agent").
 
+pub mod claude;
 pub mod relay;
 pub mod script;
 
