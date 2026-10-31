@@ -3853,7 +3853,8 @@ through one (`fragment_core::door`):
   identity, or null while it is no open door). Each publish and each
   fetch asks the deployment's connectors again; while it is bound and its
   door is shut, its jobs' fetches are refused too. An unlink lets the
-  binding go and takes back the membership it gave. Its binding is the
+  binding go; its agent stays a viewer of its chat (a chat's own agent is
+  not removed), told nothing more through it. Its binding is the
   connector's (`meta` `door_actor`), so several connectors, each its own
   chat, may be doors of one agent.
 
