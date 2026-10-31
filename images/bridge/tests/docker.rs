@@ -89,7 +89,7 @@ enum Runtime {
     /// which Hermes reads as "in a container": to start Chromium with
     /// `--no-sandbox --disable-dev-shm-usage` (p5, 2026-10-05: the agent's
     /// browser died for want of `/dev/shm`), and for the rest of its
-    /// container guesses (docs/computers.md). Without it Hermes takes this
+    /// container guesses (`hermes::RUNTIME_ENV`). Without it Hermes takes this
     /// for a host.
     Hosted,
 }
@@ -384,7 +384,7 @@ async fn the_hermes_image() {
     assert!(c.exec(&["curl", "-sf", "-o", "/dev/null", "http://127.0.0.1:6080/novnc/core/rfb.js"]));
     assert!(!c.exec(&["curl", "-sf", "-o", "/dev/null", "http://127.0.0.1:6080/websockify"]));
     assert!(c.exec(&["test", "-f", "/data/hermes/profiles/juniper--k3x9/SOUL.md"]), "the agent's repo is in its profile");
-    // the seam (step 2 of docs/durable-computers.md): its work is its own
+    // the seam (docs/computers.md, "Data and the restore gate"): its work is its own
     assert!(c.exec(&["test", "-d", "/data/work/juniper--k3x9/browser-profile"]), "its work directory, with its browser's profile");
     assert_eq!(c.exec_out(&["readlink", "/data/hermes/profiles/juniper--k3x9/bot-desktop/browser-profile"]).trim(), "/data/work/juniper--k3x9/browser-profile", "Hermes' browser profile is a link into its work");
     assert!(c.exec(&["grep", "-q", "Juniper", "/data/hermes/profiles/juniper--k3x9/SOUL.md"]));
@@ -638,8 +638,7 @@ async fn the_hermes_image() {
     }
 }
 
-// ---- saves under the hold (docs/computers.md, "The hold";
-// docs/durable-computers.md) ----
+// ---- saves under the hold (docs/computers.md, "The hold") ----
 
 /// The platform's hold of `/data`, as the Computer DO makes it, in a
 /// running container: its answer (`held`, within 20 s) and what it names
@@ -1273,7 +1272,7 @@ fn changed(before: &BTreeMap<String, String>, after: &BTreeMap<String, String>) 
 
 /// What Hermes' gateway writes on its own timers, which the hold cannot
 /// quiet (its gateway is not paused: P2), and which the save keeps as it
-/// reads it (docs/durable-computers.md, "What changes under the hold"): each
+/// reads it (docs/computers.md, "What changes under the hold"): each
 /// file replaced whole (a temp file beside it, fsynced, renamed over it, so
 /// a save has the old or the new, never a mix), appended (a log), an empty
 /// lock, or a copy only a broken config would read; and those temp files as
@@ -2192,7 +2191,7 @@ async fn tool_said(fake: &Fake, chat: &str, c: &Container, text: &str) -> String
     fake.with(|w| reply(w, &turn)).and_then(|r| r["text"].as_str().map(str::to_string)).unwrap_or_default()
 }
 
-/// Goal (the seam, step 2 of docs/durable-computers.md): a temp file an
+/// Goal (the seam: docs/computers.md, "Data and the restore gate"): a temp file an
 /// agent's tools make is its work (`/data/work/<profile>/tmp`), saved with
 /// it, never Hermes' home. Hermes points every child's `TMPDIR` at its
 /// home's `cache/scratch` (`hermes_constants.apply_scratch_tmp_env`), for an
@@ -3505,7 +3504,7 @@ const REFRESH: &str = "import json\nfrom hermes_cli import model_catalog as m\ne
 /// Goal: Hermes' model-catalog refresh, which wrote four caches in its home
 /// whenever its timer landed inside a hold (2026-10-07), writes nothing in
 /// our image, held or not: `model_catalog.enabled: false` in the managed
-/// overlay (docs/durable-computers.md, "What changes under the hold"); and a
+/// overlay (docs/computers.md, "What changes under the hold"); and a
 /// wake from a save whose catalog caches are torn answers as any other, so
 /// a torn cache never breaks Hermes on wake.
 /// Method: Hermes held; the watcher's own refresh forced inside the hold,

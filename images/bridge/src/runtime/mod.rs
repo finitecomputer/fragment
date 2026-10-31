@@ -276,7 +276,7 @@ pub struct TurnStart {
     /// when the platform's answer did not say.
     pub claim_seq: Option<u64>,
     /// What the runtime tells the agent before the message, once
-    /// (docs/durable-computers.md, P5): its turn before this one in this
+    /// (docs/computers.md, Durability, P5): its turn before this one in this
     /// chat was cut by a restart, what that turn was asked, the steps and
     /// replies the journal recorded of it, and to check what was done before
     /// doing any of it again. Built from the chat's journal alone

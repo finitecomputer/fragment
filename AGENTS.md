@@ -14,9 +14,8 @@ platform concept.
   and why; keep it short. New runtime, template or vendor knowledge
   belongs in an image, template or skill, not the platform.
 - `docs/MODEL.md`: the authority map ("Where each fact lives").
-- Contracts: `docs/api.md` (wire), `docs/computers.md` (image),
+- Contracts: `docs/api.md` (wire), `docs/computers.md` (image, durability),
   `docs/bridge.md` (bridge), `docs/chat-records.md` (chat records),
-  `docs/durable-computers.md` (durability, including outstanding work),
   `docs/secrets.md` (secret custody), `docs/ledger.md` (usage),
   `docs/billing.md` (orgs and Stripe), `docs/hermes-relay.md` (runtime).
 - `docs/published-fragments.md`: primitives that must stay expressible.
