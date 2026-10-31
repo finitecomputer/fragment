@@ -438,7 +438,8 @@ impl FragmentCell {
     }
 
     /// Whether `signed` is a member here whose membership counts no more:
-    /// an org's fragment's row at an epoch their place there has left.
+    /// an org's fragment's row of someone out of its org, or from before
+    /// they came in again (`fence`).
     fn fenced_out(&self, signed: &crate::routed::Signed) -> CellResult<bool> {
         Ok(self.member_role(&signed.id)?.is_some() && self.fenced_role(signed)?.is_none())
     }

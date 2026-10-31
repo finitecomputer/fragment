@@ -131,20 +131,12 @@ fn opt(v: Option<&str>) -> SqlStorageValue {
     v.map_or(SqlStorageValue::Null, |s| s.into())
 }
 
-/// A member's epoch as its column holds it: an org's fragment's, or NULL.
-fn epoch_value(epoch: Option<u64>) -> SqlStorageValue {
-    epoch.map_or(SqlStorageValue::Null, |e| SqlStorageValue::Integer(i64::try_from(e).expect("an epoch fits SQLite's integers")))
-}
-
 /// Who changes a fragment's sharing in one request, and with what role.
 struct Actor {
     /// Whether they administer who is in and how it is shared: a person's
     /// fragment's owner, or their agent sharing for them; an org's, one of
     /// its content admins, as themselves (decisions 69 to 71). Never a role.
     admin: bool,
-    /// An org's content admin's epoch there: what they add of their own
-    /// (themselves, their agents) comes in at it.
-    epoch: Option<u64>,
     /// Who made the change: members' `added_by`, invites' `created_by`,
     /// the events' `by`.
     by: String,
@@ -394,12 +386,12 @@ impl FragmentCell {
             (IdentityKind::Person, Some(org)) => {
                 assert!(signed.acting_for.is_none(), "a person acts as themselves (the router refuses `for` from one)");
                 let place = signed.org_place(org).filter(|p| p.admin);
-                Ok(Actor { admin: place.is_some(), epoch: place.map(|p| p.epoch), by: signed.id.clone(), for_owner: None })
+                Ok(Actor { admin: place.is_some(), by: signed.id.clone(), for_owner: None })
             }
             (IdentityKind::Agent, Some(_)) => Err(CellError::new(ErrorCode::Forbidden, "an org's fragment is shared by its content admins, each as themselves: no agent shares it")),
             (IdentityKind::Person, None) => {
                 assert!(signed.acting_for.is_none(), "a person acts as themselves (the router refuses `for` from one)");
-                Ok(Actor { admin: self.member_role(&signed.id)? == Some(Role::Owner), epoch: None, by: signed.id.clone(), for_owner: None })
+                Ok(Actor { admin: self.member_role(&signed.id)? == Some(Role::Owner), by: signed.id.clone(), for_owner: None })
             }
             (IdentityKind::Agent, None) => {
                 self.agents_share()?;
@@ -414,7 +406,7 @@ impl FragmentCell {
                     Ok(role) => {
                         assert_eq!(role, Role::Owner, "an agent shares with its owner's ownership");
                         let owner = owner.expect("an agent that shares acts for its owner").to_string();
-                        Ok(Actor { admin: true, epoch: None, by: signed.id.clone(), for_owner: Some(owner) })
+                        Ok(Actor { admin: true, by: signed.id.clone(), for_owner: Some(owner) })
                     }
                     Err(refusal) => Err(CellError::new(ErrorCode::Forbidden, refusal.message())),
                 }
@@ -588,27 +580,27 @@ impl FragmentCell {
     }
 
     /// Of `principals`, the members here whose rows count no more (Alex's
-    /// review): in an org's fragment, a row whose epoch is not its person's
-    /// place's in the org now (an agent's row: its person's), offboarded
-    /// since or not back yet. What a request carries decides its own
+    /// review): in an org's fragment, a row of someone not in its org now
+    /// (an agent's row: its person), or added before they came in again
+    /// (`fragment_core::governance::counts`: a rehire starts fresh). What a request carries decides its own
     /// standing (`fence`); this decides where none does, for its
     /// deliveries, its members' lists and an admission. One registry read
     /// (`PlacesNow`); a person's fragment, and anyone with no row: none.
     pub(crate) async fn stale_members(&self, principals: &[String]) -> CellResult<std::collections::BTreeSet<String>> {
         let mut stale = std::collections::BTreeSet::new();
         let Some(org) = self.owner()?.org().map(str::to_string) else { return Ok(stale) };
-        // each member's row: its epoch, and whose place it counts by
-        let mut rows: Vec<(String, String, Option<u64>)> = vec![];
+        // each member's row: when it was added, and whose place it counts by
+        let mut rows: Vec<(String, String, i64)> = vec![];
         for p in principals {
             if rows.iter().any(|r| &r.0 == p) {
                 continue;
             }
-            if let Some(r) = self.rows("SELECT kind, owner, epoch FROM members WHERE principal = ?", vec![p.as_str().into()])?.first() {
+            if let Some(r) = self.rows("SELECT kind, owner, added_at FROM members WHERE principal = ?", vec![p.as_str().into()])?.first() {
                 let person = match (r["kind"].as_str(), r["owner"].as_str()) {
                     (Some("agent"), Some(owner)) => owner.to_string(),
                     _ => p.clone(),
                 };
-                rows.push((p.clone(), person, r["epoch"].as_u64()));
+                rows.push((p.clone(), person, r["added_at"].as_i64().unwrap_or(0)));
             }
         }
         if rows.is_empty() {
@@ -619,8 +611,9 @@ impl FragmentCell {
         people.dedup();
         assert!(people.len() <= crate::registry::content::PLACES_ASKED_MAX, "a batch of members is bounded");
         let now = crate::ask_registry(&self.env, &crate::registry::content::PlacesNow { org, people }).await?;
-        for (principal, person, epoch) in rows {
-            if epoch.is_none() || now.get(&person).copied() != epoch {
+        for (principal, person, added_at) in rows {
+            let place = now.get(&person).map(|since| fragment_core::governance::Place { admin: false, since: *since });
+            if !fragment_core::governance::counts(place, added_at) {
                 stale.insert(principal);
             }
         }
@@ -654,7 +647,7 @@ impl FragmentCell {
     /// In an org's fragment, `person`'s rows and their agents' that count no
     /// more (`stale_members`) are revoked grants: taken away, as a removal
     /// takes them, before anything admits them again, so it admits them
-    /// afresh, at their place now, and an ordinary member's way back is
+    /// afresh, from their place now, and an ordinary member's way back is
     /// still their own yes to an invite (Alex's review). Its event says so.
     pub(crate) async fn revoke_stale(&self, person: &str) -> CellResult<()> {
         if self.owner()?.org().is_none() {
@@ -674,22 +667,15 @@ impl FragmentCell {
         Ok(())
     }
 
-    /// `who`'s epoch in `org`'s content (an agent: its person's), as they
-    /// come into this, one of its fragments: the registry enrolls them,
+    /// `who` (an agent: its person) in `org`'s content as they come into
+    /// this, one of its fragments: the registry enrolls one not in it yet,
     /// refused for an invite made before they last left (`invited_at`).
-    pub(crate) async fn enrolled(&self, org: &str, who: &Identity, invited_at: Option<i64>) -> CellResult<u64> {
+    pub(crate) async fn enrolled(&self, org: &str, who: &Identity, invited_at: Option<i64>) -> CellResult<()> {
         let person = match who.kind {
             IdentityKind::Person => who.id.clone(),
             IdentityKind::Agent => who.owner.clone().ok_or_else(|| CellError::host("an agent has its owner"))?,
         };
-        let enroll = crate::registry::content::Enroll { org: org.to_string(), person, invited_at };
-        Ok(crate::ask_registry(&self.env, &enroll).await?.epoch)
-    }
-
-    /// A member's epoch here (an org's fragment's), if any.
-    fn member_epoch(&self, principal: &str) -> CellResult<Option<u64>> {
-        let rows = self.rows("SELECT epoch FROM members WHERE principal = ?", vec![principal.into()])?;
-        Ok(rows.first().and_then(|r| r["epoch"].as_u64()))
+        crate::ask_registry(&self.env, &crate::registry::content::Enroll { org: org.to_string(), person, invited_at }).await
     }
 
     pub(crate) async fn set_member(&self, caller: &Caller, who: &str, body: SetRole) -> CellResult<Response> {
@@ -708,12 +694,11 @@ impl FragmentCell {
     /// e2e shares with people without mailing each an invite to accept.
     pub(crate) async fn lever_member(&self, who: &str, role: Role) -> CellResult<Member> {
         let target = self.named(who).await?;
-        // an org's: at the person's place there now (a test's, named whole)
-        let epoch = match self.owner()?.org() {
-            Some(org) => Some(self.enrolled(org, &target, None).await?),
-            None => None,
-        };
-        let actor = Actor { admin: true, epoch, by: self.owner()?.name(), for_owner: None };
+        // an org's: in its content first (a test's, named whole)
+        if let Some(org) = self.owner()?.org() {
+            self.enrolled(org, &target, None).await?;
+        }
+        let actor = Actor { admin: true, by: self.owner()?.name(), for_owner: None };
         self.put_member(&actor, &target, SetRole { role }, true).await
     }
 
@@ -725,7 +710,7 @@ impl FragmentCell {
     /// test's `lever`.
     async fn put_member(&self, actor: &Actor, target: &Identity, body: SetRole, lever: bool) -> CellResult<Member> {
         // an org's: rows from before the person's place now are no grant
-        // (a returning admin's own add comes in afresh, at their epoch)
+        // (a returning admin's own add comes in afresh)
         let person = match target.kind {
             IdentityKind::Agent => target.owner.clone().ok_or_else(|| CellError::host("an agent has its owner"))?,
             IdentityKind::Person => target.id.clone(),
@@ -736,8 +721,8 @@ impl FragmentCell {
             return Err(refusal(true, why));
         }
         // added at once: its owner's own agents; an org's, a content admin
-        // themselves or their own agents, at their epoch there (decision
-        // 71: they may give themselves access, which their event shows)
+        // themselves or their own agents (decision 71: they may give
+        // themselves access, which their event shows)
         let owner = self.owner()?;
         let own = match &owner {
             fragment_core::owner::Owner::Person(p) => target.owner.as_deref() == Some(p.as_str()),
@@ -760,12 +745,8 @@ impl FragmentCell {
         self.room_for(u64::from(current.is_none()))?;
         let by = actor.by.as_str();
         let now = js::now_ms();
-        let epoch = match owner.org() {
-            Some(_) => Some(actor.epoch.ok_or_else(|| CellError::host("an org's fragment's member comes in at an epoch"))?),
-            None => None,
-        };
         self.exec(
-            "INSERT INTO members (principal, role, added_by, added_at, kind, owner, epoch) VALUES (?, ?, ?, ?, ?, ?, ?)
+            "INSERT INTO members (principal, role, added_by, added_at, kind, owner) VALUES (?, ?, ?, ?, ?, ?)
              ON CONFLICT (principal) DO UPDATE SET role = excluded.role",
             vec![
                 target.id.as_str().into(),
@@ -774,7 +755,6 @@ impl FragmentCell {
                 SqlStorageValue::Integer(now),
                 target.kind.as_str().into(),
                 opt(target.owner.as_deref()),
-                epoch.map_or(SqlStorageValue::Null, |e| SqlStorageValue::Integer(e as i64)),
             ],
         )?;
         let row = self.rows(&format!("SELECT {MEMBER_COLUMNS} FROM members WHERE principal = ?"), vec![target.id.as_str().into()])?;
@@ -805,7 +785,7 @@ impl FragmentCell {
             // a person's agents in with them take their role (decision 64)
             if target.kind == IdentityKind::Person && self.entity_of(&target.id)?.is_some() {
                 let agents = self.entity_agents(&target.id)?;
-                self.agents_join(&target.id, &agents, body.role, self.member_epoch(&target.id)?)?;
+                self.agents_join(&target.id, &agents, body.role)?;
             }
         }
         // the agent's list holds this fragment before its computer is told
@@ -831,7 +811,7 @@ impl FragmentCell {
         let actor = match is_self {
             // its owner leaving is refused as theirs to ask (400), not as
             // someone who may not (an org's fragment has no owner member)
-            true => Actor { admin: self.member_role(&me)? == Some(Role::Owner), epoch: None, by: me.clone(), for_owner: None },
+            true => Actor { admin: self.member_role(&me)? == Some(Role::Owner), by: me.clone(), for_owner: None },
             false => self.sharer(caller)?,
         };
         let current = self.member_role(&target)?;
@@ -1059,20 +1039,17 @@ impl FragmentCell {
         self.name()?;
         assert!(npub::is_identity(&claim.identity), "the registry names a person by their npub");
         self.drop_spent_invites().await?;
-        // an org's: they come into its content as they come in here, at
-        // their epoch there (an invite from before they last left admits
-        // no one); asked first, so what follows is read after it
-        let epoch = match self.owner()?.org() {
-            Some(org) => {
-                let invited = self.rows("SELECT created_at FROM invites WHERE email = ?", vec![claim.email.as_str().into()])?;
-                let Some(at) = invited.first().and_then(|r| r["created_at"].as_i64()) else {
-                    return Err(CellError::new(ErrorCode::NotFound, "no invite waits on that email"));
-                };
-                let person = Identity { id: claim.identity.clone(), kind: IdentityKind::Person, owner: None, held: None, orgs: vec![] };
-                Some(self.enrolled(org, &person, Some(at)).await?)
-            }
-            None => None,
-        };
+        // an org's: they come into its content as they come in here (an
+        // invite from before they last left admits no one); asked first, so
+        // what follows is read after it
+        if let Some(org) = self.owner()?.org() {
+            let invited = self.rows("SELECT created_at FROM invites WHERE email = ?", vec![claim.email.as_str().into()])?;
+            let Some(at) = invited.first().and_then(|r| r["created_at"].as_i64()) else {
+                return Err(CellError::new(ErrorCode::NotFound, "no invite waits on that email"));
+            };
+            let person = Identity { id: claim.identity.clone(), kind: IdentityKind::Person, owner: None, held: None, orgs: vec![] };
+            self.enrolled(org, &person, Some(at)).await?;
+        }
         let rows = self.rows("SELECT role, created_by FROM invites WHERE email = ?", vec![claim.email.as_str().into()])?;
         let Some(row) = rows.first() else {
             return Err(CellError::new(ErrorCode::NotFound, "no invite waits on that email"));
@@ -1094,9 +1071,9 @@ impl FragmentCell {
         let now = if kept { current.expect("kept is a role held") } else { role };
         if !kept {
             self.exec(
-                "INSERT INTO members (principal, role, added_by, added_at, kind, epoch) VALUES (?, ?, ?, ?, 'person', ?)
-                 ON CONFLICT (principal) DO UPDATE SET role = excluded.role, epoch = excluded.epoch",
-                vec![who.into(), role.as_str().into(), by.as_str().into(), SqlStorageValue::Integer(js::now_ms()), epoch_value(epoch)],
+                "INSERT INTO members (principal, role, added_by, added_at, kind) VALUES (?, ?, ?, ?, 'person')
+                 ON CONFLICT (principal) DO UPDATE SET role = excluded.role",
+                vec![who.into(), role.as_str().into(), by.as_str().into(), SqlStorageValue::Integer(js::now_ms())],
             )?;
             self.index_change(who, Some(role))?;
             self.event("member.joined", &format!("{who} joined as {}, invited by email, with their agents", role.as_str()), json!({ "principal": who, "role": role, "by": by }));
@@ -1105,7 +1082,7 @@ impl FragmentCell {
             }
         }
         if !owner {
-            self.agents_join(who, agents, now, epoch)?;
+            self.agents_join(who, agents, now)?;
         }
         self.flush_index().await;
         self.flush_joined().await;
@@ -1131,7 +1108,7 @@ impl FragmentCell {
     /// them (the person's says "with their agents"), nor does the sheet
     /// (share.rs `with_their_person`). The caller made the room. Bounded:
     /// a person has at most `AGENTS_PER_OWNER_MAX` agents.
-    fn agents_join(&self, person: &str, agents: &[String], role: Role, epoch: Option<u64>) -> CellResult<()> {
+    fn agents_join(&self, person: &str, agents: &[String], role: Role) -> CellResult<()> {
         assert!(agents.len() as u64 <= limits::AGENTS_PER_OWNER_MAX, "a person has a bounded number of agents");
         assert!(matches!(role, Role::Viewer | Role::Editor), "an agent is in at its person's role, never owner (R17)");
         let now = js::now_ms();
@@ -1142,9 +1119,9 @@ impl FragmentCell {
                 continue;
             }
             self.exec(
-                "INSERT INTO members (principal, role, added_by, added_at, kind, owner, epoch) VALUES (?, ?, ?, ?, 'agent', ?, ?)
-                 ON CONFLICT (principal) DO UPDATE SET role = excluded.role, epoch = excluded.epoch",
-                vec![agent.as_str().into(), role.as_str().into(), person.into(), SqlStorageValue::Integer(now), person.into(), epoch_value(epoch)],
+                "INSERT INTO members (principal, role, added_by, added_at, kind, owner) VALUES (?, ?, ?, ?, 'agent', ?)
+                 ON CONFLICT (principal) DO UPDATE SET role = excluded.role",
+                vec![agent.as_str().into(), role.as_str().into(), person.into(), SqlStorageValue::Integer(now), person.into()],
             )?;
             self.index_change(agent, Some(role))?;
             match current {
@@ -1208,7 +1185,7 @@ impl FragmentCell {
         let role = self.member_role(person)?.expect("a person in is a member");
         let agents = [agent.to_string()];
         self.room_for(self.not_members(&agents)?)?;
-        self.agents_join(person, &agents, role, self.member_epoch(person)?)?;
+        self.agents_join(person, &agents, role)?;
         self.flush_index().await;
         self.flush_joined().await;
         Ok(json!({ "joined": true }))

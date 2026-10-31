@@ -285,9 +285,11 @@ pub(crate) enum MetaKey {
     /// When a create in progress claimed the name (the claim expires).
     ClaimedAt,
     /// When the fragment was created, its incarnation: a fragment exists
-    /// once it has this row, written last. (Who owns it is its
-    /// `ownership` row's: `owner`.)
+    /// once it has this row, written last.
     CreatedAt,
+    /// Who owns it, by name (`fragment_core::owner::Owner`): the identity
+    /// of the person who made it, or `org:<id>` (decisions 66 to 71).
+    Owner,
     /// The fragment's own key.
     Npub,
     /// Its secret key, sealed for this cell.
@@ -426,6 +428,7 @@ impl MetaKey {
             MetaKey::ClaimedAt => "claimed_at",
             MetaKey::CreatedAt => "created_at",
             MetaKey::AppFacet => "app_facet",
+            MetaKey::Owner => "owner",
             MetaKey::Npub => "npub",
             MetaKey::FragmentSecret => "fragment_secret",
             MetaKey::Visibility => "visibility",
@@ -698,31 +701,18 @@ impl FragmentCell {
         })
     }
 
-    /// Who owns it (decisions 66 to 71): its `ownership` row, the one
-    /// record of it. Its name (`Owner::name`) is its payer's ledger and its
-    /// owner's list.
+    /// Who owns it (decisions 66 to 71): its `owner` meta row, the one
+    /// record of it, a person's identity or `org:<id>` (`Owner::name`),
+    /// which names its payer's ledger and its owner's list. Never created
+    /// (or deleted): 404, as `name` answers, so a request's standing read
+    /// first never makes it a 500.
     pub(crate) fn owner(&self) -> CellResult<Owner> {
-        #[derive(serde::Deserialize)]
-        struct Row {
-            kind: String,
-            owner: String,
+        let [created, owner] = self.metas([MetaKey::CreatedAt, MetaKey::Owner])?;
+        match (created, owner) {
+            (None, _) => Err(not_created()),
+            (Some(_), None) => Err(missing(MetaKey::Owner)),
+            (Some(_), Some(name)) => Owner::parse(&name).ok_or_else(|| CellError::host(format!("its owner row names {name:?}"))),
         }
-        // one that refuses its schema from before Fragment step 4 (it still
-        // ends: schema.rs) is its person's, in its `owner` meta row
-        if self.schema.refused() && self.count("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name = 'ownership'")? == 0 {
-            let owner = self.rows("SELECT value FROM meta WHERE key = 'owner'", vec![])?.first().and_then(|r| r["value"].as_str().map(str::to_string));
-            return Ok(Owner::Person(owner.ok_or_else(|| CellError::host("a fragment from before step 4 has no owner meta row"))?));
-        }
-        let rows: Vec<Row> = self.typed("SELECT kind, owner FROM ownership WHERE one = 1", vec![])?;
-        let Some(row) = rows.into_iter().next() else {
-            // never created (or deleted): 404, as `name` answers, so a
-            // request's standing read first never makes it a 500
-            return Err(match self.meta(MetaKey::CreatedAt)? {
-                None => not_created(),
-                Some(_) => CellError::host("a created fragment has no ownership row"),
-            });
-        };
-        Owner::from_row(&row.kind, &row.owner).ok_or_else(|| CellError::host(format!("its ownership row names {} {:?}", row.kind, row.owner)))
     }
 
     pub(crate) fn visibility(&self) -> CellResult<Visibility> {
@@ -731,7 +721,7 @@ impl FragmentCell {
     }
 
     /// The signer's own membership, as it counts now (`fence`): an org's
-    /// fragment's only at their place's epoch there.
+    /// fragment's only while they are in its org, and only from then.
     pub(crate) fn fenced_role(&self, signed: &Signed) -> CellResult<Option<Role>> {
         let fence = self.fence(Some(signed))?;
         let rows = self.rows(&format!("SELECT role FROM members WHERE principal = ? AND {fence}"), vec![signed.id.as_str().into()])?;
@@ -822,16 +812,16 @@ impl FragmentCell {
 
     /// What a member row must hold to count for `signed` (decisions 69 to
     /// 71), as a SQL condition on `members`. A person's fragment counts
-    /// every row (`1`: its queries as before Fragment step 4, so one that
-    /// refuses its schema still answers as it ends); an org's, a row only at
-    /// the epoch of the signer's place in its content now (an agent's: its
-    /// person's), the registry's answer at this request, so an offboarded
-    /// person's rows open nothing from the moment they are (`0` with no
-    /// place). Never a cached answer. A number, never a caller's text.
+    /// every row (`1`); an org's, a row only while the signer is in its org
+    /// (an agent: its person) and only one added since they came in
+    /// (`fragment_core::governance::counts`), the registry's answer at this
+    /// request: an offboarded person's rows open nothing from the moment
+    /// they are (`0` with no place), and a rehire's from before never do.
+    /// Never a cached answer. A number, never a caller's text.
     pub(crate) fn fence(&self, signed: Option<&Signed>) -> CellResult<String> {
         Ok(match self.owner()? {
             Owner::Person(_) => "1".to_string(),
-            Owner::Org(org) => signed.and_then(|s| s.org_place(&org)).map_or_else(|| "0".to_string(), |p| format!("epoch = {}", p.epoch)),
+            Owner::Org(org) => signed.and_then(|s| s.org_place(&org)).map_or_else(|| "0".to_string(), |p| format!("added_at >= {}", p.since)),
         })
     }
 
@@ -1234,14 +1224,14 @@ impl FragmentCell {
     async fn create(&self, caller: &Caller, body: CreateFragment, org: Option<String>) -> CellResult<Response> {
         let maker = self.caller_id(caller)?.to_string();
         // an org's maker is one of its content admins, as themselves, who
-        // comes in as its editor at their epoch (decisions 69 to 71); the
-        // router checked them, and what they carry says so again here
-        let (owner, epoch) = match org {
-            None => (Owner::Person(maker.clone()), None),
+        // comes in as its editor (decisions 69 to 71); the router checked
+        // them, and what they carry says so again here
+        let owner = match org {
+            None => Owner::Person(maker.clone()),
             Some(org) => {
                 let signed = caller.signed.as_ref().filter(|s| s.kind == IdentityKind::Person && s.acting_for.is_none());
-                let place = signed.and_then(|s| s.org_place(&org)).filter(|p| p.admin).ok_or_else(|| CellError::new(ErrorCode::Forbidden, "only an org's content admins make its fragments"))?;
-                (Owner::Org(org), Some(place.epoch))
+                signed.and_then(|s| s.org_place(&org)).filter(|p| p.admin).ok_or_else(|| CellError::new(ErrorCode::Forbidden, "only an org's content admins make its fragments"))?;
+                Owner::Org(org)
             }
         };
         if !valid_fragment_name(&body.name) {
@@ -1305,11 +1295,9 @@ impl FragmentCell {
         let (view_token, inbox_token) = (js::random_hex::<12>(), js::random_hex::<16>());
         let poll_at = (now + self.cfg.poll_interval_ms).to_string();
         let created_at = now.to_string();
-        self.exec(
-            "INSERT INTO ownership (one, kind, owner, generation) VALUES (1, ?, ?, 1)",
-            vec![owner.kind().into(), owner.id().into()],
-        )?;
+        let owner_name = owner.name();
         for (k, v) in [
+            (MetaKey::Owner, owner_name.as_str()),
             (MetaKey::Npub, fragment_npub.as_str()),
             (MetaKey::FragmentSecret, sealed.as_str()),
             (MetaKey::Visibility, visibility.as_str()),
@@ -1324,10 +1312,10 @@ impl FragmentCell {
         ] {
             self.set_meta(k, v)?;
         }
-        // its owner, a person; or an org's maker, its editor at their epoch
-        let role = if epoch.is_some() { Role::Editor } else { Role::Owner };
+        // its owner, a person; or an org's maker, its editor
+        let role = if owner.org().is_some() { Role::Editor } else { Role::Owner };
         self.exec(
-            "INSERT INTO members (principal, role, added_by, added_at, kind, owner, epoch) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO members (principal, role, added_by, added_at, kind, owner) VALUES (?, ?, ?, ?, ?, ?)",
             vec![
                 maker.as_str().into(),
                 role.as_str().into(),
@@ -1335,7 +1323,6 @@ impl FragmentCell {
                 SqlStorageValue::Integer(now),
                 caller.kind().map_or(SqlStorageValue::Null, |k| k.as_str().into()),
                 caller.owner().map_or(SqlStorageValue::Null, |o| o.into()),
-                epoch.map_or(SqlStorageValue::Null, |e| SqlStorageValue::Integer(e as i64)),
             ],
         )?;
         if let Some(t) = &body.template {

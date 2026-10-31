@@ -1433,8 +1433,9 @@ pub struct Identity {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub held: Option<Role>,
     /// The orgs whose content a person is in now (an agent: its owner's),
-    /// each at its epoch (decisions 69 to 71), as the registry answers at
-    /// each request: an org's fragment counts their membership only at it.
+    /// each since when (decisions 69 to 71), as the registry answers at
+    /// each request: an org's fragment counts their membership only while
+    /// they are in, and only from then.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub orgs: Vec<OrgPlace>,
 }
@@ -1451,7 +1452,9 @@ impl Identity {
 #[serde(rename_all = "camelCase")]
 pub struct OrgPlace {
     pub org: String,
-    pub epoch: u64,
+    /// Since when they are in it (ms): an org's fragment counts a member
+    /// row only from then (`fragment_core::governance::counts`).
+    pub since: i64,
     /// One of its content admins (an agent's carries none).
     #[serde(default)]
     pub admin: bool,

@@ -481,7 +481,7 @@ pub(crate) async fn create_fragment(env: &Env, cfg: &Config, url: &Url, mut crea
         None => maker.id.clone(),
     };
     may_create(env, &payer).await?;
-    let extra: Vec<(&'static str, String)> = org.iter().map(|o| (fragment::ORG_HEADER, o.clone())).collect();
+    let extra: Vec<(String, String)> = org.iter().map(|o| (fragment::ORG_HEADER.to_string(), o.clone())).collect();
     let drawn = names.len() > 1;
     let mut made = None;
     // bounded: at most NAME_DRAWS names

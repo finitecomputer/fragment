@@ -431,13 +431,14 @@ impl RegistryCell {
 
     /// `who` with the places they hold now in orgs' content (decisions 69
     /// to 71; an agent, its owner's, as an admin of none): what a request
-    /// carries to an org's fragment, which counts a membership only at its
-    /// epoch. One indexed read; nothing for someone in no org's content.
+    /// carries to an org's fragment, which counts a membership only while
+    /// they are in, and only from then (`since`). One indexed read; nothing
+    /// for someone in no org's content.
     pub(super) fn placed(&self, mut who: Identity) -> CellResult<Identity> {
         #[derive(Deserialize)]
         struct Row {
             org: String,
-            epoch: u64,
+            since: i64,
             admin: i64,
         }
         let person = match who.kind {
@@ -449,11 +450,11 @@ impl RegistryCell {
         };
         // bounded: the orgs whose content one person said yes to
         let rows = self.rows::<Row>(
-            "SELECT org, epoch, admin FROM org_content WHERE person = ? AND active = 1 ORDER BY org LIMIT ?",
+            "SELECT org, since, admin FROM org_content WHERE person = ? ORDER BY org LIMIT ?",
             vec![person.into(), SqlStorageValue::Integer(fragment_core::governance::ORGS_PER_PERSON_MAX as i64)],
         )?;
         let agent = who.kind == IdentityKind::Agent;
-        who.orgs = rows.into_iter().map(|r| OrgPlace { org: r.org, epoch: r.epoch, admin: r.admin != 0 && !agent }).collect();
+        who.orgs = rows.into_iter().map(|r| OrgPlace { org: r.org, since: r.since, admin: r.admin != 0 && !agent }).collect();
         Ok(who)
     }
 
