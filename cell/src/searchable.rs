@@ -268,8 +268,8 @@ impl FragmentCell {
                 }
                 Wrote::MissingVectors if attempt == 0 => {}
                 Wrote::MissingVectors => break,
-                Wrote::Full { chunks } => {
-                    let message = format!("this fragment's index holds {chunks} chunks, at most {}: split its sources across fragments", index::CHUNKS_MAX);
+                Wrote::Full { chunks, max } => {
+                    let message = format!("this fragment's index holds {chunks} chunks, at most {max}: split its sources across fragments");
                     return Err(CellError::new(ErrorCode::StorageFull, message));
                 }
                 Wrote::Ended => return Err(CellError::new(ErrorCode::NotFound, "this fragment was deleted while the source was written")),
@@ -492,7 +492,8 @@ impl FragmentCell {
     /// The lever `search-index` (ops.rs, test fleets): the index of this
     /// life, or of the life `incarnation` (an ended one's too), as it
     /// holds; `hold` true or false holds its next writes before they are
-    /// written (each counted, `held`), or lets them go.
+    /// written (each counted, `held`), or lets them go; `chunks_max` lowers
+    /// the chunks it takes.
     pub(crate) async fn search_index_lever(&self, body: &serde_json::Value) -> CellResult<serde_json::Value> {
         let incarnation = match body["incarnation"].as_i64() {
             Some(i) => i,
@@ -502,6 +503,9 @@ impl FragmentCell {
         let mut ask = json!({});
         if let Some(hold) = body["hold"].as_bool() {
             ask["hold"] = json!(hold);
+        }
+        if !body["chunks_max"].is_null() {
+            ask["chunks_max"] = body["chunks_max"].clone();
         }
         let index: serde_json::Value = self.search_index(&scope, "test", &ask).await?;
         Ok(json!({ "incarnation": incarnation, "index": index }))
