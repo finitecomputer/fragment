@@ -141,6 +141,8 @@ pub const NOTE_MAX_BYTES: usize = 4096;
 /// so the line marks a message that waited through an outage, a long
 /// restart or a backlog, and is not noise the agent learns to skip.
 pub const MESSAGE_AGE_TOLD_MS: u64 = 5 * 60_000;
+/// That line, at most (its longest, a continuation's in days, is under 150).
+pub const AGE_NOTE_MAX_BYTES: usize = 256;
 pub const NOTE_ASKED_MAX_CHARS: usize = 300;
 pub const NOTE_LATE_ASKED_MAX_CHARS: usize = 1500;
 pub const NOTE_TOOL_MAX_CHARS: usize = 40;

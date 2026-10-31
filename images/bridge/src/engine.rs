@@ -1596,12 +1596,10 @@ impl Engine {
         t.phase = Phase::Running;
         t.last_ms = now;
         self.dirty = true;
-        // a message handed long after it was said is told its age first
+        // a message handed long after it was said is told its age (the
+        // driver puts it first in the note); its own note stays a card's,
+        // which takes the cut note's place (driver.rs, `note_for`)
         let age = crate::note::age(t.said_at, now, t.routine || t.command, t.continues.is_some());
-        let note = match (age, t.note.clone()) {
-            (Some(age), Some(note)) => Some(records::cut_bytes(&format!("{age}\n\n{note}"), limits::NOTE_MAX_BYTES)),
-            (age, note) => age.or(note),
-        };
         let start = TurnStart {
             turn: id.to_string(),
             agent: a,
@@ -1615,7 +1613,8 @@ impl Engine {
             files: Vec::new(),
             routine: t.routine,
             claim_seq,
-            note,
+            note: t.note.clone(),
+            age,
             forgotten,
             forgotten_more,
             command: t.command,

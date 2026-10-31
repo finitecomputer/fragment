@@ -172,7 +172,13 @@ impl World {
 
     /// Appends a record and sends it to every socket live on its channel.
     pub fn append(&mut self, fragment: &str, channel: &str, principal: &str, body: Value) -> Value {
-        let at = self.now();
+        self.append_aged(fragment, channel, principal, body, 0)
+    }
+
+    /// `append`, its time `ago_ms` before now: a message that waited (an
+    /// outage's backlog).
+    pub fn append_aged(&mut self, fragment: &str, channel: &str, principal: &str, body: Value, ago_ms: i64) -> Value {
+        let at = self.now() - ago_ms;
         let f = self.fragments.get_mut(fragment).expect("a fragment of the fake");
         let c = f.channels.get_mut(channel).expect("a channel of the fragment");
         let seq = c.records.len() as u64 + 1;
@@ -383,6 +389,12 @@ impl Fake {
     /// `principal` says `body` in `fragment`'s `chat`.
     pub fn say(&self, fragment: &str, principal: &str, body: Value) -> Value {
         self.with(|w| w.append(fragment, "chat", principal, body))
+    }
+
+    /// `say`, as said `ago` before now: one that waited.
+    pub fn say_aged(&self, fragment: &str, principal: &str, body: Value, ago: std::time::Duration) -> Value {
+        let ago = i64::try_from(ago.as_millis()).expect("an age");
+        self.with(|w| w.append_aged(fragment, "chat", principal, body, ago))
     }
 
     /// Closes every live and keepalive socket, as a deploy does.

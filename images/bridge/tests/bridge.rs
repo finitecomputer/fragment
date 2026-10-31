@@ -1782,6 +1782,47 @@ async fn the_turn_after_a_cut_one_is_told_what_was_cut() {
     assert!(told.windows(2).all(|p| p[0] == p[1]), "the journal's note of the cut, whatever state woke: {told:#?}");
 }
 
+/// Goal (FIN-236; Alex on #853): a late message's age goes first in what
+/// its turn is told, before what was cut, never in its place (a turn's
+/// own note means a card's, which takes the cut note's place). A cut
+/// turn's continuation is told the age of what it answered, then what was
+/// cut; a message after a cut turn that waited on its card (so was not
+/// continued) is told its own age, then what was cut.
+#[tokio::test]
+async fn a_late_messages_age_comes_before_what_was_cut() {
+    for continued in [true, false] {
+        let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+        let chat = fake.chat("talk", &["juniper"]);
+        let dir = support::dir(&format!("aged-{continued}"));
+        let cfg = support::config(&fake.url(), &dir, support::settings());
+        let pace = Duration::from_millis(100);
+        let hours = |h: u64| Duration::from_secs(h * 3_600);
+        let bridge = support::start_killable(cfg.clone(), support::script_paced(pace));
+        following(&fake, 2).await;
+        let cut_text = if continued { "a slow tool please" } else { "something risky" };
+        let said = fake.say_aged(&chat, &person("paul"), json!({ "text": cut_text }), hours(2));
+        let cut = turn_of("juniper", &chat, seq(&said));
+        fake.until(WAIT, "the cut turn under way", |w| if continued { w.bodies(&chat, "work", "turn.step").iter().any(|s| s["turn"] == cut.as_str()) && w.drafts.iter().any(|d| d.2 == cut) } else { w.bodies(&chat, "work", "turn.prompt").iter().any(|p| p["turn"] == cut.as_str()) }).await;
+        bridge.kill().await;
+        fake.until(WAIT, "its sockets closed", |w| w.live_sockets() == 0).await;
+        let bridge = support::start_killable(cfg, support::script_paced(pace));
+        let told = if continued {
+            records::continuation_id(&cut)
+        } else {
+            let next = fake.say_aged(&chat, &person("paul"), json!({ "text": "good morning" }), hours(3));
+            turn_of("juniper", &chat, seq(&next))
+        };
+        fake.until(WAIT, "the told turn's end", |w| !ends_of(w, &chat, &told).is_empty()).await;
+        let note = fake.with(|w| replies(w, &chat).into_iter().find(|r| r["turn"] == told.as_str()).and_then(|r| r["text"].as_str().map(str::to_string)).unwrap_or_default());
+        let note = note.split_once("\n\n(told: ").map(|(_, n)| n.trim_end_matches(')').to_string()).unwrap_or_else(|| panic!("{continued}: told something: {note:?}"));
+        let age = if continued { "What that turn was answering was sent about 2 hours ago." } else { "This message was sent about 3 hours ago, and is only reaching you now." };
+        let (first, rest) = note.split_once("\n\n").unwrap_or_else(|| panic!("{continued}: its age, then what was cut: {note}"));
+        assert_eq!(first, format!("{age} If it may no longer be wanted, check before acting on it."), "{continued}: {note}");
+        assert!(rest.starts_with("Your previous turn in this chat was cut short") && rest.contains(&format!("It was answering: “{cut_text}”")), "{continued}: what was cut, after its age: {note}");
+        bridge.stop().await;
+    }
+}
+
 /// Goal : a turn whose run ended, but whose end a crash kept from the
 /// platform (its posts failing, the lane retrying, when the bridge dies),
 /// ends once and as itself: the state kept it, owing its end, and the next

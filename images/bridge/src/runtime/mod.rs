@@ -286,6 +286,11 @@ pub struct TurnStart {
     /// echoes it. It also says what the agent no longer remembers of this
     /// chat (`forgotten`).
     pub note: Option<String>,
+    /// How old its message is, in plain words, when it is handed long after
+    /// it was said (crate::note, `age`): the driver puts it first in
+    /// `note`, before a card's or a cut turn's. Its own field, as `note`
+    /// set by the engine means a card's, in the cut note's place.
+    pub age: Option<String>,
     /// The agent's turns in this chat that another life ran since the
     /// `/data` this life restored (their claims answered 409: a rollback
     /// sent the cursor back), the newest at most `NOTE_FORGOTTEN_MAX`, and

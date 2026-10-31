@@ -326,8 +326,9 @@ fn a_call_is_recorded_before_it_runs() {
 
 /// Goal (FIN-236, Paul 2026-10-31: "Yes, show the age"): a message handed
 /// long after it was said is told its age first, so its agent can judge
-/// whether it is still wanted. Valid: a fresh one is told nothing. Late:
-/// one said 3 hours before it is handed. Replay: read again, it starts
+/// whether it is still wanted (`TurnStart::age`, never its note, which a
+/// card's takes). Valid: a fresh one is told nothing. Late: one said 3
+/// hours before it is handed. Replay: read again, it starts
 /// nothing more. Restart: one queued as a life ends is told its age by
 /// the next, from the time the state kept; a state from before kept none,
 /// and tells none. A cut turn's continuation is told what it answered.
@@ -346,10 +347,11 @@ fn a_late_message_is_told_its_age() {
 
     let mut e = engine(std::slice::from_ref(&a));
     let fresh = started(&say(&mut e, 1, now - 2_000, now)).expect("handed");
-    assert_eq!(fresh.note, None, "fresh: nothing");
+    assert_eq!((fresh.age, fresh.note), (None, None), "fresh: nothing");
     let mut e = engine(std::slice::from_ref(&a));
     let s = say(&mut e, 1, now - 3 * hour, now);
-    assert_eq!(started(&s).expect("handed").note, late("3 hours"));
+    let late_one = started(&s).expect("handed");
+    assert_eq!((late_one.age, late_one.note), (late("3 hours"), None), "its age, never in the note a card's takes");
     assert!(started(&say(&mut e, 1, now - 3 * hour, now + 1)).is_none(), "replay: read again, nothing more");
 
     // restart: queued as the life ends (its runtime gone), handed by the next
@@ -363,7 +365,7 @@ fn a_late_message_is_told_its_age() {
         let r = n.recover(at);
         assert!(started(&r).is_none());
         let s = n.step(heard(Event::Connected(true)), at);
-        started(&answered(&mut n, s, at)).expect("handed").note
+        started(&answered(&mut n, s, at)).expect("handed").age
     };
     assert_eq!(next_life(saved.clone(), now + 12 * minute), late("12 minutes"), "from the time its state kept");
     let mut before = serde_json::to_value(&saved).expect("a state");
@@ -382,7 +384,8 @@ fn a_late_message_is_told_its_age() {
     let s = n.step(Input::Posted { turn: cut.clone(), id: records::work_id(&cut, "end"), kept: true }, now + minute);
     let continued = started(&answered(&mut n, s, now + minute)).expect("its continuation, handed");
     assert_eq!(continued.continues.as_deref(), Some(cut.as_str()));
-    assert_eq!(continued.note.as_deref(), Some("What that turn was answering was sent about 2 hours ago. If it may no longer be wanted, check before acting on it."));
+    assert_eq!(continued.age.as_deref(), Some("What that turn was answering was sent about 2 hours ago. If it may no longer be wanted, check before acting on it."));
+    assert_eq!(continued.note, None, "the cut note is the driver's to read");
 }
 
 /// Goal: a person's message to the lead starts exactly one turn, which is
@@ -2333,9 +2336,7 @@ impl World {
                     let claim = self.journal.work(&ts.turn, "turn.start").into_iter().next();
                     self.runs.push((self.lives, ts.turn.clone()));
                     self.claims_at_run.push((self.lives, ts.turn.clone(), claim));
-                    // the engine names the claim and tells a late message its
-                    // age; the driver reads the note
-                    assert!(ts.note.as_deref().is_none_or(|n| n.ends_with("If it may no longer be wanted, check before acting on it.")), "{:?}", ts.note);
+                    assert!(ts.note.is_none(), "the engine names the claim; the driver reads the note");
                     let note = if ts.fragment == CHAT { self.journal.note(&ts.agent.identity, ts.claim_seq, ts.continues.as_deref()) } else { None };
                     if let Some(cut) = &ts.continues {
                         self.continued.push((ts.turn.clone(), ts.asker_name.clone(), ts.text.clone(), cut.clone()));

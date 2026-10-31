@@ -330,7 +330,9 @@ pub fn age(said_at: i64, now: u64, exempt: bool, continues: bool) -> Option<Stri
         _ => format!("{} days", minutes / 1440),
     };
     let what = if continues { format!("What that turn was answering was sent about {ago} ago.") } else { format!("This message was sent about {ago} ago, and is only reaching you now.") };
-    Some(format!("{what} If it may no longer be wanted, check before acting on it."))
+    let line = format!("{what} If it may no longer be wanted, check before acting on it.");
+    assert!(line.len() <= limits::AGE_NOTE_MAX_BYTES, "an age is one short line: {line}");
+    Some(line)
 }
 
 /// The calls a turn asked for and never heard the end of, on one line:
