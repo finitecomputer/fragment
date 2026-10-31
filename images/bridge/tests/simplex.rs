@@ -879,7 +879,7 @@ async fn reply_files_go_out_through_the_relay() {
     let mut lab = Lab::up("relay");
     let mut person = lab.start_on_presets("person").await;
     let fake = support::fake::Fake::start("0.0.0.0:0", &["juniper"]).await;
-    let chat = fake.chat_named("juniper-chat--h6j7", &["juniper"]);
+    let _own = fake.chat_named("juniper-chat--h6j7", &["juniper"]);
     let hosts: Vec<String> = ["simplex.im", "simplexonflux.com"].iter().flat_map(|d| (1..=6).map(move |n| format!("xftp{n}.{d}"))).collect();
     let mut to = std::collections::BTreeMap::new();
     for h in &hosts {
@@ -901,6 +901,9 @@ async fn reply_files_go_out_through_the_relay() {
     c.state_until(Duration::from_secs(180), "linked", |v| v["phase"] == "linked").await;
     let at_person = person.wait(Duration::from_secs(120), |e| tag(e) == "contactConnected").await["contact"]["contactId"].as_i64().expect("the agent, at the person's");
     received(&mut person, Duration::from_secs(60), |got| got.iter().any(|t| t.contains("You're linked"))).await;
+    // the owner's messages and the agent's replies are its SimpleX chat's
+    fake.until(30_000, "its SimpleX chat made for its owner", |w| w.made.len() == 1).await;
+    let chat = fake.with(|w| w.made[0].clone());
     let t0 = Instant::now();
     say(&mut person, at_person, "speak and draw").await;
     reply_files_arrive(&lab, &mut person, &fake, &chat, &c).await;
