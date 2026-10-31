@@ -89,7 +89,9 @@ fn runtime() -> Box<dyn Runtime> {
                     Some(_) => fail("BRIDGE_MEDIA_LOCAL is `allow`, or unset"),
                 },
             };
-            Box::new(Relay { config })
+            // bound here, at the start: a port in use says so at once
+            let listener = std::net::TcpListener::bind(listen).unwrap_or_else(|e| fail(&format!("listen {listen}: {e}")));
+            Box::new(Relay { config, listener })
         }
         "script" => Box::new(Script { config: ScriptConfig { pace: Duration::from_millis(parse_ms("BRIDGE_SCRIPT_PACE_MS", 40)), scratch: PathBuf::from(env_or("BRIDGE_SCRIPT_SCRATCH", "/tmp/bridge-script")), data: PathBuf::from(env_or("BRIDGE_SCRIPT_DATA", "/data")) } }),
         other => fail(&format!("BRIDGE_RUNTIME {other:?} is neither relay nor script")),
