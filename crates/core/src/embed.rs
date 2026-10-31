@@ -49,8 +49,10 @@ pub const DIMENSIONS_MAX: u32 = 4096;
 /// (`max_input_tokens`): BGE-M3's on Workers AI (AI Search's model table,
 /// read 2026-10-30), the fewest of the models it might run.
 pub const MAX_INPUT_TOKENS_DEFAULT: u32 = 512;
-/// A slot's `max_input_tokens`, at most.
+/// A slot's `max_input_tokens`, at most, and at least: a window holds a
+/// title and any character (`CHAR_TOKENS_MAX`) beside some words.
 pub const MAX_INPUT_TOKENS_MAX: u32 = 32_768;
+pub const MAX_INPUT_TOKENS_MIN: u32 = 128;
 /// A slot's `version`, at most: a tag the deployment pins, not prose.
 pub const VERSION_MAX_BYTES: usize = 32;
 /// Inputs one call embeds, at most (Workers AI's text embedding models take
@@ -64,6 +66,9 @@ pub const BODY_MAX_BYTES: usize = 1024 * 1024;
 /// tokens (BGE-M3's `<s>` and `</s>`, BERT's `[CLS]` and `[SEP]`) and the
 /// word marker SentencePiece puts before the first word.
 pub const OVERHEAD_TOKENS: u32 = 3;
+/// The most tokens one character is read as (`char_tokens_max`): U+FDFA,
+/// whose NFKD is eighteen Arabic letters and spaces, 33 bytes.
+pub const CHAR_TOKENS_MAX: u32 = 33;
 /// Bytes a token is estimated at, to charge a call whose API reports no
 /// tokens: an estimate (BGE-M3 reads about four bytes of English prose a
 /// token, fewer of numbers or punctuation), never a bound.
@@ -152,7 +157,11 @@ pub fn slot_of(models: &mut Value) -> Result<Slot, String> {
     };
     let max_input_tokens = match o.remove("max_input_tokens") {
         None => MAX_INPUT_TOKENS_DEFAULT,
-        Some(v) => v.as_u64().filter(|n| (1..=u64::from(MAX_INPUT_TOKENS_MAX)).contains(n)).map(|n| n as u32).ok_or_else(|| format!("models.embeddings: max_input_tokens is the tokens of an input its model reads, 1 to {MAX_INPUT_TOKENS_MAX}, not {v}"))?,
+        Some(v) => v
+            .as_u64()
+            .filter(|n| (u64::from(MAX_INPUT_TOKENS_MIN)..=u64::from(MAX_INPUT_TOKENS_MAX)).contains(n))
+            .map(|n| n as u32)
+            .ok_or_else(|| format!("models.embeddings: max_input_tokens is the tokens of an input its model reads, {MAX_INPUT_TOKENS_MIN} to {MAX_INPUT_TOKENS_MAX}, not {v}"))?,
     };
     let private = match o.remove("private") {
         None => false,
@@ -390,6 +399,7 @@ mod tests {
             (json!({ "provider": "workers_ai", "model": "@cf/baai/bge-m3", "dimensions": 1024, "version": "a b" }), "version"),
             (json!({ "provider": "workers_ai", "model": "@cf/baai/bge-m3", "dimensions": 1024, "private": "yes" }), "private"),
             (json!({ "provider": "workers_ai", "model": "@cf/baai/bge-m3", "dimensions": 1024, "max_input_tokens": 0 }), "max_input_tokens"),
+            (json!({ "provider": "workers_ai", "model": "@cf/baai/bge-m3", "dimensions": 1024, "max_input_tokens": 127 }), "128 to"),
             (json!({ "provider": "workers_ai", "model": "@cf/baai/bge-m3", "dimensions": 1024, "images": true }), "images"),
             (json!({ "provider": "openai", "base_url": "https://x.example/v1", "model": "m", "dimensions": 8, "body": {} }), "body"),
             (json!("bge"), "an object"),
@@ -473,9 +483,15 @@ mod tests {
         assert_eq!(char_tokens_max('a'), 1);
         assert_eq!(char_tokens_max('é'), 3, "e and a combining accent");
         assert_eq!(char_tokens_max('ﬁ'), 3, "its own bytes: NFKD's fi is two");
-        assert_eq!(char_tokens_max('ﷺ'), 33, "NFKD: eighteen characters");
+        assert_eq!(char_tokens_max('ﷺ'), CHAR_TOKENS_MAX, "NFKD: eighteen characters");
         assert_eq!(char_tokens_max('한'), 9, "three jamo");
         assert_eq!(tokens_max(""), u64::from(OVERHEAD_TOKENS));
+    }
+
+    #[test]
+    fn no_character_is_read_as_more_than_char_tokens_max() {
+        let most = (0..=0x10FFFF).filter_map(char::from_u32).map(char_tokens_max).max();
+        assert_eq!(most, Some(CHAR_TOKENS_MAX));
     }
 
     #[test]
