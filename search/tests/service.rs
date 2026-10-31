@@ -297,7 +297,12 @@ async fn the_api_needs_the_token() {
     assert_eq!((status, refused["error"].clone()), (400, json!("invalid")));
     assert_eq!(call("GET", "/v1/BAD/status", auth.clone(), None).await.0, 400);
     assert_eq!(call("GET", "/v1/f-a/nothing", auth.clone(), None).await.0, 404);
-    assert_eq!(call("DELETE", "/v1/f-a", auth, None).await.1["dropped"], true);
+    assert_eq!(call("DELETE", "/v1/f-a", auth.clone(), None).await.1["dropped"], true);
+    let upsert = json!({ "source": "s/a", "revision": "r1", "space": null, "sections": [{ "id": "t0", "chunks": [{ "text": "lantern", "hash": hash("lantern") }] }] });
+    assert_eq!(call("POST", "/v1/f-a/upsert", auth.clone(), Some(upsert.clone())).await.0, 200, "a dropped scope is written again");
+    assert_eq!(call("POST", "/v1/f-a/end", auth.clone(), None).await.1, json!({ "ended": true, "dropped": true }));
+    let (status, gone) = call("POST", "/v1/f-a/upsert", auth, Some(upsert)).await;
+    assert_eq!((status, gone["error"].clone()), (410, json!("ended")), "an ended one never is");
 }
 
 /// The same on an S3-compatible store (R2, or MinIO on a machine of one's
@@ -511,4 +516,29 @@ async fn a_failed_pass_is_retried() {
     .await;
     m.wait_for(|m| !m.pending).await.unwrap();
     assert!(!holds(&d, word(7).as_bytes()));
+}
+
+#[tokio::test]
+async fn an_ended_scope_is_never_written_again() {
+    let d = dir("ended");
+    {
+        let s = store(&d).await;
+        s.upsert(SCOPE, up("sessions/a.json", "r1", harbour())).await.unwrap();
+        assert!(s.end(SCOPE).await.unwrap());
+        assert!(!s.end(SCOPE).await.unwrap(), "ending it again ends nothing more");
+        // a write dispatched before the end, arriving after it
+        assert!(matches!(s.upsert(SCOPE, up("sessions/a.json", "r2", harbour())).await, Err(Error::Ended)));
+        assert_eq!(s.status(SCOPE).await.unwrap()["exists"], false);
+        assert!(!s.delete(SCOPE, "sessions/a.json").await.unwrap());
+        // a scope ended before it was ever written
+        assert!(!s.end("f-never-1-members").await.unwrap());
+        assert!(matches!(s.upsert("f-never-1-members", up("sessions/a.json", "r1", harbour())).await, Err(Error::Ended)));
+    }
+    let s = store(&d).await;
+    assert!(matches!(s.upsert(SCOPE, up("sessions/a.json", "r1", harbour())).await, Err(Error::Ended)), "after a restart too");
+    assert!(!holds(&d, b"lantern"), "its table is gone");
+    // a drop (a new space) is not an end: the scope is written again
+    s.upsert("f-other-1-members", up("sessions/a.json", "r1", harbour())).await.unwrap();
+    assert!(s.drop_table("f-other-1-members").await.unwrap());
+    assert!(s.upsert("f-other-1-members", up("sessions/a.json", "r1", harbour())).await.unwrap().written);
 }

@@ -34,6 +34,7 @@ fn failed(e: Error) -> Reply {
         Error::Conflict { current } => reply(StatusCode::CONFLICT, &json!({ "error": "conflict", "message": "the source's revision is not the one this replaces", "current": current })),
         Error::SpaceChanged { current } => reply(StatusCode::CONFLICT, &json!({ "error": "space_changed", "message": "the table's vectors are in another space: drop it and write it again", "current": current })),
         Error::MissingVectors(hashes) => reply(StatusCode::CONFLICT, &json!({ "error": "missing_vectors", "message": "chunks name no vector, and the table has none of their hashes", "hashes": hashes })),
+        Error::Ended => refused(StatusCode::GONE, "ended", "this scope was ended: it is never written again"),
         Error::Full => refused(StatusCode::INSUFFICIENT_STORAGE, "full", format!("a table holds at most {} chunks", api::TABLE_ROWS_MAX)),
         Error::Engine(m) => {
             eprintln!("{}", json!({ "event": "search.engine-error", "error": m }));
@@ -138,6 +139,7 @@ impl Service {
                 done(store.search(&scope, s).await.map(|results| json!({ "results": results })))
             }
             (Method::DELETE, "") => done(store.drop_table(&scope).await.map(|dropped| json!({ "dropped": dropped }))),
+            (Method::POST, "end") => done(store.end(&scope).await.map(|dropped| json!({ "ended": true, "dropped": dropped }))),
             _ => Err(Box::new(refused(StatusCode::NOT_FOUND, "not_found", "no such operation"))),
         }
     }
