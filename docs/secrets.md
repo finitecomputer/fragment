@@ -56,6 +56,10 @@ only from that computer's egress, toward that provider.
   the same contract over its session), so a connector's page takes a
   pasted token, and makes a webhook's secret in the browser, without
   either passing through app code or a model.
+- **No deployment traces its fetches**: a Workers trace records each
+  fetch's URL and query, which may carry a secret filled at the egress,
+  so `cargo xtask deploy` pins `observability.traces` off beside its logs
+  (#814).
 - **Agents hold no key.** Model calls go through the platform's model
   route, which adds a deployment key toward that API alone; operator keys
   and connections are swapped in at the computer's egress.

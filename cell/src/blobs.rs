@@ -24,6 +24,7 @@ use worker::*;
 use crate::error::{CellError, CellResult};
 use crate::fragment::{json_response, Caller, FragmentCell, MetaKey};
 use crate::js;
+use fragment_core::gather::Gathered;
 
 /// A pointer file's size: 126 bytes plus the digits of the size it names.
 const POINTER_MIN_BYTES: u64 = 126;
@@ -184,7 +185,7 @@ impl FragmentCell {
 
     /// Every pointer at a pin: path → the size of the bytes it names.
     pub(crate) fn pointer_sizes(&self, which: &str) -> CellResult<std::collections::BTreeMap<String, u64>> {
-        Ok(self.pointers_at(which)?.into_iter().map(|(path, (_, size))| (path, size)).collect())
+        Ok(self.pointers_at(which)?.into_iter().map(|(path, (_, size))| (path, size)).gathered())
     }
 
     /// Every pointer at a pin: path → (the SHA-256 of the bytes it names, their size).
@@ -193,7 +194,7 @@ impl FragmentCell {
             .rows("SELECT path, sha, size FROM pointers WHERE ref = ?", vec![which.into()])?
             .into_iter()
             .filter_map(|r| Some((r["path"].as_str()?.to_string(), (r["sha"].as_str()?.to_string(), r["size"].as_u64()?))))
-            .collect())
+            .gathered())
     }
 
     /// After a pin moved: re-reads the changed paths that could be pointers.

@@ -110,11 +110,19 @@ pub fn sessions_ui(s: &mut Suite, api: &Api) -> Result<()> {
     b.set_cookie(&format!("{}/", api.base), "fragment_session", &session)?;
     let page = b.open(&format!("{}/settings", api.base))?;
     b.viewport(&page, 1400, 900, false)?;
-    let listed = b.until(&page, "document.querySelectorAll('#archive:not([hidden]) #archive-rows .row').length === 2", wait);
-    let rows = b.eval(&page, "[...document.querySelectorAll('#archive-rows .row')].map((r) => r.textContent)")?;
-    s.ok("the shell lists the archive's chats under Session Archive, newest first", listed && rows == json!(["A long letter", "Beans"]), &rows);
+    // History lists them, imported, newest first
+    let imported = "document.querySelectorAll('.history-row[data-kind=\"imported\"]')";
+    // the shell started (its layout shown, the link with it)
+    b.until(&page, "!document.getElementById('layout').hidden && !!document.getElementById('history-link')?.offsetParent", wait);
+    b.click(&page, "#history-link")?;
+    b.until(&page, "!!document.querySelector('.history-filter[data-filter=\"imported\"]')?.offsetParent", wait);
+    b.click(&page, ".history-filter[data-filter=\"imported\"]")?;
+    let listed = b.until(&page, &format!("{imported}.length === 2"), wait);
+    let rows = b.eval(&page, &format!("[...{imported}].map((r) => r.querySelector('.history-line .label').textContent)"))?;
+    s.ok("History lists the archive's chats as imported, newest first", listed && rows == json!(["A long letter", "Beans"]), &rows);
+    let beans = ".history-row[data-key=\"imported:hermes-e2e_beans\"]";
 
-    b.click(&page, "#archive-rows [data-key=\"archived:hermes-e2e_beans\"]")?;
+    b.click(&page, &format!("{beans} .history-open"))?;
     let opened = b.until(&page, "document.getElementById('chat-title').textContent === 'Beans' && document.getElementById('chat-options').hidden", wait);
     let frame = "?s=hermes-e2e_beans";
     let drawn = s.eventually(wait, || b.eval_in_frame(&page, frame, "document.querySelectorAll('.msg').length === 2").is_ok_and(|v| v == true));
@@ -137,7 +145,7 @@ pub fn sessions_ui(s: &mut Suite, api: &Api) -> Result<()> {
     let folded = s.eventually(wait, || {
         b.eval_in_frame(&page, &name, "[...document.querySelectorAll('details.kind')].map((d) => [d.open, d.querySelector('summary').textContent]).join('|') === 'false,Scheduled runs (1)'").is_ok_and(|v| v == true)
     });
-    let headed = b.until(&page, "document.getElementById('chat-title').textContent === 'Session Archive' && !document.querySelector('#archive-rows .row.active')", wait);
+    let headed = b.until(&page, "document.getElementById('chat-title').textContent === 'Session Archive'", wait);
     s.ok(
         "the archive's own list shows its chats and folds its scheduled runs away, and the shell's heading follows it there",
         folded && headed,
@@ -145,10 +153,16 @@ pub fn sessions_ui(s: &mut Suite, api: &Api) -> Result<()> {
     );
     b.screenshot(&page, &shots.join("list.png"))?;
 
-    // Continue: a chat with their agent, its history first
-    b.click(&page, "#archive-rows [data-key=\"archived:hermes-e2e_beans\"]")?;
+    // Continue: the shell asks with which agent (one here: "Continue"), and
+    // makes a chat with it, its history first
+    b.click(&page, "#history-link")?;
+    b.until(&page, &format!("!!document.querySelector('{beans} .history-open')"), wait);
+    b.click(&page, &format!("{beans} .history-open"))?;
     let offered = s.eventually(wait, || b.eval_in_frame(&page, frame, "document.querySelector('.archive-continue:not([hidden])')?.textContent === 'Continue'").is_ok_and(|v| v == true));
     b.eval_in_frame(&page, frame, "(document.querySelector('.archive-continue').click(), true)")?;
+    let asked = b.until(&page, "document.querySelector('dialog.continue-ask[open] .continue-go')?.textContent === 'Continue'", wait);
+    b.screenshot(&page, &shots.join("continue-ask.png"))?;
+    b.eval(&page, "(document.querySelector('dialog.continue-ask .continue-go').click(), true)")?;
     let me = api.identity(&keys)?;
     let mut chat = String::new();
     let made = s.eventually(wait, || {
@@ -165,7 +179,7 @@ pub fn sessions_ui(s: &mut Suite, api: &Api) -> Result<()> {
     let tail: Vec<&str> = first["body"]["messages"].as_array().into_iter().flatten().filter_map(|m| m["text"].as_str()).collect();
     s.ok(
         "Continue makes a chat with the person's agent, titled as the conversation, whose first record is its history, theirs",
-        offered && made && first["body"]["kind"] == "history" && first["principal"] == me.as_str() && tail == ["plant beans?", "in spring"] && first["body"]["key"] == "hermes-e2e_beans",
+        offered && asked && made && first["body"]["kind"] == "history" && first["principal"] == me.as_str() && tail == ["plant beans?", "in spring"] && first["body"]["key"] == "hermes-e2e_beans",
         &first,
     );
     let shown = s.eventually(wait, || b.eval_in_frame(&page, &chat, "document.querySelector('.history-block .history-head')?.textContent?.startsWith('From “Beans”') ?? false").is_ok_and(|v| v == true));
@@ -181,16 +195,24 @@ pub fn sessions_ui(s: &mut Suite, api: &Api) -> Result<()> {
         !reply.is_empty()
     });
     s.ok(
-        "the agent is told what was said there at its first turn in the chat, as a note",
-        said.status == 200 && answered && reply.contains("(told: This chat goes on from a conversation your owner had with you before they moved here, “Beans”") && reply.contains("Your owner: plant beans?\nYou: in spring"),
+        "the agent is told what was said there at its first turn in the chat, as a note, whose words they were",
+        // this agent is not named as the conversation's was (Juniper): the
+        // note says whose words they were, never "you"
+        said.status == 200 && answered && reply.contains("(told: This chat goes on from a conversation your owner had with Juniper before they moved here, “Beans”") && reply.contains("Your owner: plant beans?\nJuniper: in spring"),
         &reply,
     );
 
-    // the archive offers that chat now
-    let linked = api.signed(&keys, "GET", &format!("/api/f/{name}/file?path=continued/hermes-e2e_beans.json"), None)?;
-    b.click(&page, "#archive-rows [data-key=\"archived:hermes-e2e_beans\"]")?;
-    let again = s.eventually(wait, || b.eval_in_frame(&page, frame, "document.querySelector('.archive-continue:not([hidden])')?.textContent === 'Open the chat'").is_ok_and(|v| v == true));
-    s.ok("the archive keeps the chat it was continued in, and offers it", linked.body["chat"] == chat.as_str() && again, &linked.body);
+    // History offers that chat now (one a conversation and agent), its row's
+    // Continue an Open, and opens it
+    b.click(&page, "#history-link")?;
+    let control = format!("{beans} .continue-control .continue-go");
+    let open = b.until(&page, &format!("document.querySelector({control:?})?.textContent === 'Open'"), wait);
+    b.screenshot(&page, &shots.join("history-open.png"))?;
+    b.click(&page, &control)?;
+    let reopened = b.until(&page, &format!("[...document.querySelectorAll('#frames iframe')].find((f) => !f.hidden)?.dataset.fragment === {chat:?}"), wait);
+    let listed = api.signed(&keys, "GET", "/api/fragments", None)?;
+    let beans = listed.body["fragments"].as_array().into_iter().flatten().filter(|f| f["kind"] == "chat" && f["title"] == "Beans").count();
+    s.ok("Continue asked again offers the chat it made with that agent, and opens it, making none other", open && reopened && beans == 1, beans);
     Ok(())
 }
 

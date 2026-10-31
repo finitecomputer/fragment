@@ -15,12 +15,14 @@ import { colorOf } from "./agent-color.js";
 import { icon } from "./icons.js";
 import { appArt, openIconSheet } from "./app-icon.js";
 import { createAppsPage } from "./apps-page.js";
+import { createHistoryPage } from "./history-page.js";
 import { createTitles } from "./fragment-title.js";
 import { createLayout, store, reducedMotion, springFrames } from "./layout.js";
 import { createViewer } from "./viewer.js";
 import { seatGives } from "./billing.js";
 import { createChatList, newestChat } from "./chat-list.js";
 import { createSessionArchive } from "./session-archive.js";
+import { createContinue } from "./continue.js";
 import { createSessionRefresh } from "./session-refresh.js";
 import { createOnboarding } from "./onboarding.js";
 import { createComputer } from "./computer.js";
@@ -74,7 +76,7 @@ const promptDeck = { hand: APP_PROMPTS.map((_, i) => i).slice(0, PROMPT_HAND), d
 // failed (what an earlier one said stays: a failure is not "none");
 // invites: those waiting on their emails, theirs to answer (`GET /api/invites`);
 // seat: theirs, as Settings last read it (`GET /api/seat`'s; none unread)
-const state = { me: null, guest: false, fragments: [], invites: [], computer: null, agents: new Map(), computerFailed: false, current: store.get(CURRENT, null), frames: new Map(), page: null, seat: null };
+const state = { me: null, guest: false, fragments: [], invites: [], computer: null, agents: new Map(), computerFailed: false, current: store.get(CURRENT, null), frames: new Map(), page: null, seat: null, desktopEmpty: false };
 
 // ---- the API, as this page calls it: the person's platform session ----
 class ApiError extends Error {
@@ -304,8 +306,11 @@ function frameOf(src, title, name = null) {
 // navigation it makes once it does (frameOf)
 const unready = new WeakMap();
 // A frame sent to `src`: at once, or, its origin not known yet, once it is.
-function go(frame, src) {
+// `replace`: in place of the page it shows, adding nothing to the tab's
+// history (a cross-origin frame's `location.replace` is one it may call).
+function go(frame, src, replace = false) {
   if (unready.has(frame)) unready.set(frame, src);
+  else if (replace && frame.contentWindow) frame.contentWindow.location.replace(new URL(src, location.href).href);
   else frame.src = src;
 }
 
@@ -858,7 +863,7 @@ addEventListener("resize", () => closeMenu(true));
 
 const watching = { on: false, socket: null, wait: 1000, timer: null, settle: null };
 const listLive = () => watching.socket?.readyState === WebSocket.OPEN;
-const { renderHeading, renderChats, loadInvites, primaryAgent, newChatAgent, ownAgents, markSeen, edgeAgain } = createChatList({
+const { renderHeading, renderChats, loadInvites, primaryAgent, newChatAgent, askedAgent, ownAgents, markSeen, edgeAgain } = createChatList({
   api, ui: { $, el, patch, agentFace, mark, notice },
   data: { byName, own, chats, shown, titleOf, chatTitle: (name) => (byName(name)?.kind === "sessions" ? sessionArchive.title() : chatTitle(name)), homeMark: (f) => homeMark(f), isGroup, agentOfChat: (name) => agentOfChat(name), agentsOf,
     agents: () => state.agents, allFragments: () => state.fragments, computer: () => state.computer, isGuest: () => state.guest, personId: () => state.me?.id,
@@ -868,11 +873,18 @@ const { renderHeading, renderChats, loadInvites, primaryAgent, newChatAgent, own
   navigation: { newChat, rename: (name) => rename(name), openChat, openApp, openScreen, leaveSidebar, seg },
   listLive, load, invites: () => state.invites, setInvites: (v) => { state.invites = v; },
 });
-const sessionArchive = createSessionArchive({
-  api, ui: { $, el, patch, renderHeading: () => renderHeading(), notice },
-  data: { allFragments: () => state.fragments, own, seg, primaryAgent: () => primaryAgent(), agents: () => state.agents, chatLabel: (agent) => chatLabel(agent) },
-  selection: { current: () => state.current, page: () => state.page, getFrame: (name) => state.frames.get(name) },
+// Continue: a conversation (an import, an archived chat) as a new chat with
+// an agent of the person's choosing (continue.js)
+const continuing = createContinue({
+  api, ui: { el, notice },
+  data: { allFragments: () => state.fragments, agents: () => state.agents, primaryAgent: () => primaryAgent(), titleOf, seg, chatBase: (agent) => chatBase(agent) },
   navigation: { openChat, leaveSidebar }, load: () => load(), store,
+});
+const sessionArchive = createSessionArchive({
+  api, ui: { renderHeading: () => renderHeading() },
+  data: { allFragments: () => state.fragments, own, seg },
+  selection: { getFrame: (name) => state.frames.get(name) },
+  navigation: { openChat, leaveSidebar }, continuing, store, changed: () => historyPage.render(),
 });
 
 // Delegation threads: a line each over the chat an agent asked from, its
@@ -924,17 +936,22 @@ function openChat(name, push = true, path = null) {
   $("layout").classList.remove("settings-view");
   $("settings-page").hidden = true;
   leaveApps();
+  leaveHistory();
   $("frames").hidden = false;
   state.current = name;
   store.set(CURRENT, name);
   hideNotice();
   const made = !state.frames.has(name);
   chatFrame(name, path ?? undefined);
-  if (path && !made) go(state.frames.get(name), framed(name, path));
+  // a frame shown before goes to the page asked in place of the one it
+  // showed, so Back goes to the view before (History), not to that page
+  if (path && !made) go(state.frames.get(name), framed(name, path), true);
   for (const [n, frame] of state.frames) frame.hidden = n !== name;
   renderHeading();
   renderChats();
-  sessionArchive.render();
+  // the ways to ask for an app ask the open chat's agent
+  renderDesktopEmpty();
+  for (const lede of document.querySelectorAll(".app-prompts-lede")) namePromptsLede(lede);
   markSeen();
   prewake();
   navigated();
@@ -1052,12 +1069,15 @@ function renderApps() {
 }
 // A desktop with no apps says what lands there. A seat's also offers the
 // hand of ways to ask their agent for one (`promptHand`), each put in
-// their chat's composer as the dock's Add's are.
-function renderDesktopEmpty(empty) {
+// their chat's composer as the dock's Add's are: the agent the open chat's
+// prompt goes to (`askedAgent`), drawn again as another chat opens, its
+// name following renames (`named`).
+function renderDesktopEmpty(empty = state.desktopEmpty) {
+  state.desktopEmpty = empty;
   const box = $("desktop-empty");
-  const primary = primaryAgent();
-  const asks = empty && !state.guest && !!primary?.identity;
-  const sig = JSON.stringify([empty, state.guest, asks && titleOf(primary.fragment)]);
+  const asked = askedAgent();
+  const asks = empty && !state.guest && !!asked?.identity;
+  const sig = JSON.stringify([empty, state.guest, asks && asked.fragment]);
   box.hidden = !empty;
   if (box.dataset.sig === sig) return;
   box.dataset.sig = sig;
@@ -1065,7 +1085,7 @@ function renderDesktopEmpty(empty) {
   if (!empty) return;
   box.append(el("p", "desktop-empty-title", state.guest ? "Apps shared with you land here" : "Your apps land here"));
   if (!asks) return;
-  box.append(el("p", "desktop-empty-text", `Ask ${titleOf(primary.fragment)} for one:`));
+  box.append(named(el("p", "desktop-empty-text"), asked.fragment, (who) => `Ask ${who} for one:`));
   box.append(...promptHand("desktop-suggestions", "desktop-suggestion"));
 }
 // An app's window, at `path` (a link's, from a chat). One its row has not
@@ -1253,7 +1273,10 @@ const UNTITLED = "New chat";
 const TITLE_MAX_CHARS = 48;
 // A chat's label: its agent's, `-chat` and a number (`maple-chat-2`), short
 // enough for any deployment's hosts with four digits' room.
-const chatLabel = (agent) => freeLabel(`${labelOf(agent).slice(0, LABEL_ROOM - "-chat-9999".length).replace(/-+$/, "")}-chat`);
+// an agent's chats' label, before freeLabel numbers it (Continue's names
+// add a hash to it: continue.js)
+const chatBase = (agent) => `${labelOf(agent).slice(0, LABEL_ROOM - "-chat-9999".length).replace(/-+$/, "")}-chat`;
+const chatLabel = (agent) => freeLabel(chatBase(agent));
 // An untitled chat with only this agent that no one has said anything in
 // yet is the one to open again, not another.
 const blank = (identity) => chats().find((f) => own(f) && !f.archived && f.title === UNTITLED && !f.preview && agentsOf(f.name).length === 1 && agentsOf(f.name)[0] === identity);
@@ -1367,11 +1390,18 @@ function rollPrompts() {
     dealTo(list);
   }
 }
+const promptsLede = (who) => `${who} makes an app from a message. Say who it's for and what it does: start from one of these, make it yours, then send it.`;
+// The Add window's first line names the agent its prompts ask
+// (`askedAgent`), named again as another chat opens.
+function namePromptsLede(node) {
+  const asked = askedAgent();
+  if (asked) named(node, asked.fragment, promptsLede);
+  else node.textContent = promptsLede("Your agent");
+  return node;
+}
 function showPrompts() {
-  const primary = primaryAgent();
   const box = el("div", "app-prompts");
-  const lede = (who) => `${who} makes an app from a message. Say who it's for and what it does: start from one of these, make it yours, then send it.`;
-  box.append(primary ? named(el("p", "app-prompts-lede"), primary.fragment, lede) : el("p", "app-prompts-lede", lede("Your agent")));
+  box.append(namePromptsLede(el("p", "app-prompts-lede")));
   box.append(...promptHand("app-prompt-list", "app-prompt"));
   show({ key: "prompts", title: "Ask for an app", icon: paneIcon("plus"), body: box, persist: false });
 }
@@ -1451,10 +1481,12 @@ function computerIs(v) {
 }
 
 // ---- where the page is: `/` its chats, `/settings` its settings, `/apps`
-// its apps, `/welcome` a new person's welcome; each view says so in the
-// address, so a reload or a link stays put ----
+// its apps, `/history` every chat they have had, `/welcome` a new person's
+// welcome; each view says so in the address, so a reload or a link stays
+// put ----
 const SETTINGS = "/settings";
 const APPS = "/apps";
+const HISTORY = "/history";
 const WELCOME = "/welcome";
 function at(path) {
   if (location.pathname !== path) history.pushState(null, "", path);
@@ -1463,6 +1495,7 @@ addEventListener("popstate", () => {
   const shown = !$("layout").hidden;
   if (shown && location.pathname === SETTINGS) openSettings(false).catch((e) => notice("Settings did not open", e.message));
   else if (shown && location.pathname === APPS) openApps(false);
+  else if (shown && location.pathname === HISTORY) openHistory(false);
   else if (shown && location.pathname === "/" && byName(state.current)) openChat(state.current, false);
   else startOrWait();
 });
@@ -1492,6 +1525,7 @@ function openApps(push = true) {
   $("layout").classList.add("settings-view");
   $("frames").hidden = true;
   $("settings-page").hidden = true;
+  leaveHistory();
   $("apps-page").hidden = false;
   renderHeading();
   renderChats();
@@ -1505,6 +1539,38 @@ function leaveApps() {
 }
 $("apps-link").onclick = () => openApps();
 
+// ---- the History page (history-page.js): every chat the person has had,
+// archived and imported ones too, and its search, in the work area as the
+// Apps page is ----
+const historyPage = createHistoryPage($("history-page"), {
+  api, el, icon, seg, mark: (name, size) => mark(name, size), chats, isThread: (f) => threads.isPair(f), own, chatTitle: (name) => chatTitle(name),
+  agentsOf, agents: () => state.agents, titleOf,
+  archive: { name: () => sessionArchive.archive(), entries: () => sessionArchive.entries(), openSession: (key) => sessionArchive.openSession(key) },
+  continueControl: (source) => continuing.continueControl(source),
+  openChat, leaveSidebar,
+});
+function openHistory(push = true) {
+  if (push) at(HISTORY);
+  if (state.page !== "History") views++;
+  hideNotice();
+  state.page = "History";
+  $("layout").classList.add("settings-view");
+  $("frames").hidden = true;
+  $("settings-page").hidden = true;
+  leaveApps();
+  $("history-page").hidden = false;
+  renderHeading();
+  renderChats();
+  leaveSidebar();
+  historyPage.open();
+}
+// a chat, settings or apps in its place
+function leaveHistory() {
+  $("history-page").hidden = true;
+  historyPage.close();
+}
+$("history-link").onclick = () => openHistory();
+
 const settings = createSettings({
   api, $, seg,
   account: { person: () => state.me, setPerson: (p) => { state.me = p; }, isGuest: () => state.guest, setGuest,
@@ -1517,6 +1583,7 @@ const settings = createSettings({
       $("layout").classList.add("settings-view");
       $("frames").hidden = true;
       leaveApps();
+      leaveHistory();
     },
     entered: () => { renderHeading(); renderChats(); leaveSidebar(); } },
   notices: { hideNotice, noticeCurrent: (gen) => gen === noticeGen, notice },
@@ -1607,6 +1674,7 @@ async function load(changed = false) {
   sessionArchive.load().catch(() => {});
   renderApps();
   appsPage.listed().catch(() => {});
+  historyPage.render();
   renderHeading();
   renderComputer();
   rosterChanged();
@@ -1685,6 +1753,15 @@ const refresh = createSessionRefresh({
 });
 const { heard, navigated, reopenWindows, release, DEPLOYED } = refresh;
 const frameOfWindow = (win) => [...state.frames.values()].find((f) => f.contentWindow === win);
+// A chat's page says the person sent a message there (`said`): a chat they
+// archived comes back to their sidebar, as an email thread does once it is
+// written in again (the History page; Paul, 2026-10-31). Their own flag,
+// of the frame's own chat.
+addEventListener("message", (event) => {
+  if (event.data?.fragment !== "said") return;
+  const name = frameOfWindow(event.source)?.dataset.fragment;
+  if (name && byName(name)?.kind === "chat" && byName(name).archived) setArchived(name, false);
+});
 addEventListener("message", (event) => {
   const d = event.data;
   if (d?.fragment !== "agents?" && d?.fragment !== "busy") return;
@@ -1723,12 +1800,13 @@ async function start(open) {
   // of theirs (not the deployment's plan) may reach their ledger a moment
   // after it is given: its first run waits for it (`seatFirst`)
   // settings or the Apps page, as the address asks
-  const settings = !open && (location.pathname === SETTINGS || location.pathname === APPS);
+  const settings = !open && [SETTINGS, APPS, HISTORY].includes(location.pathname);
   if (!open && !settings && await owesFirstAgent()) return creatingAgent(mine?.seat ? {} : null);
   if (!state.fragments.length && !state.invites.length && !open && !settings && state.guest) return welcome();
   showLayout();
   const pick = open ?? (byName(state.current) ? state.current : (shown(chats())[0] ?? chats()[0])?.name);
   if (settings && location.pathname === APPS) openApps(false);
+  else if (settings && location.pathname === HISTORY) openHistory(false);
   else if (settings) await openSettings(false);
   else if (pick) openChat(pick);
   else if (state.guest) guestHome(mine.offer);

@@ -1703,7 +1703,7 @@ is what other parties rely on.
 
 | method & path (platform origin) | what |
 | --- | --- |
-| `GET /`, `/settings`, `/apps`, `/welcome` | the shell's page, for anyone; signed out it offers Sign Up and Sign In (`/auth/login?screen_hint=…`, back to the same address). It reads `/welcome?trial=<code>`, `/welcome?checkout=<id>\|canceled`, `/settings?pack=<id>\|canceled` (Billing) and `/?chat=<name>` |
+| `GET /`, `/settings`, `/apps`, `/history`, `/welcome` | the shell's page, for anyone; signed out it offers Sign Up and Sign In (`/auth/login?screen_hint=…`, back to the same address). It reads `/welcome?trial=<code>`, `/welcome?checkout=<id>\|canceled`, `/settings?pack=<id>\|canceled` (Billing) and `/?chat=<name>` |
 | `GET /about`, `/privacy`, `/terms` | static pages, for anyone |
 | `GET /admin` | the operators' page (Operators: the admin) |
 | `GET /share/<name>` | the share sheet (Sharing) |
@@ -1734,11 +1734,12 @@ platform's origin (the `__live` hello's `platform`).
 | `{fragment: "open-launcher"}` | the focused frame of a listed fragment → the shell | opens the launcher |
 | `{fragment: "alerts?", nonce}`, `{fragment: "alerts", nonce, on, key?}` | a frame of one of the person's chats → the shell | A chat's alerts are the shell's, below |
 | `{fragment: "busy", busy}` | a chat → the shell | whether it holds what no storage keeps (files chosen, a memo, a message on its way or failed, …): the shell does not reload under it |
+| `{fragment: "said"}` | a chat → the shell | the person's message was sent there: a chat they archived is unarchived (`PUT /api/fragments/{name}/archived`), back in their sidebar |
 | `{fragment: "forget-draft"}` | the shell → each chat, before signing out | the chat drops its stored draft → `{fragment: "draft-forgotten"}` |
 | `{fragment: "theme", mode, mobile}` | the shell → a frame | its light or dark mode, and whether it is laid out for a phone |
 | `{fragment: "screen", agent, name}`, `{fragment: "simplex", agent, name}` | the shell → a port's page | the agent's name, as it loads and on a rename |
 | `{fragment: "simplex", agent, want: "link" \| "unlink", home?}` | a SimpleX link page Settings framed, for its own agent → the shell | → `{fragment: "simplex", agent, for, ticket?, error?, home?, homeError?}`: a door ticket (An agent's doors); a link's `home` sets its home (An agent's home), an unlink's takes it back |
-| `{fragment: "session-archive", key \| continue \| chat}` | the person's session archive's frame → the shell | `key` the conversation it shows (`null` its list); `continue` a conversation to pick up as a new chat with their main agent; `chat` a chat of theirs to open |
+| `{fragment: "session-archive", key \| continue}` | the person's session archive's frame → the shell | `key` the conversation it shows (`null` its list); `continue` a conversation to pick up as a new chat: the shell asks with which of their agents (its picker), or opens the chat one made of it |
 | `{fragment: "signin-blocked", name, why?}` | a fragment's `__signin`, or `/auth/frame`'s note → the parent | Frame sessions |
 | `{fragment: "open-chat", name}` | the alerts worker → an open shell | opens the chat |
 

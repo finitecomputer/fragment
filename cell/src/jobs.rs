@@ -67,6 +67,7 @@ use crate::error::{CellError, CellResult};
 use crate::fragment::{json_response, missing, Caller, FragmentCell, MetaKey};
 use crate::ops::{Invocation, JOB_ID_PREFIX};
 use crate::{js, keys};
+use fragment_core::gather::Gathered;
 
 /// Set by the Workflow on its callbacks; the router never sets or passes it.
 pub const JOB_HEADER: &str = "x-fragment-job";
@@ -1031,7 +1032,7 @@ impl FragmentCell {
         if answer.cut {
             return Err(permanent(format!("{host} answered more than {max} bytes; a fetch reads at most that")));
         }
-        let out_headers: Map<String, Value> = answer.headers.entries().map(|(k, v)| (k.to_ascii_lowercase(), Value::String(redact(v)))).collect();
+        let out_headers: Map<String, Value> = answer.headers.entries().map(|(k, v)| (k.to_ascii_lowercase(), Value::String(redact(v)))).gathered();
         Ok(json!({ "status": status, "headers": out_headers, "body": redact(String::from_utf8_lossy(&answer.body).into_owned()) }))
     }
 
@@ -1169,7 +1170,7 @@ impl FragmentCell {
             .rows("SELECT op, cron, next_at FROM schedules", vec![])?
             .iter()
             .map(|r| ((r["op"].as_str().unwrap_or("").to_string(), r["cron"].as_str().unwrap_or("").to_string()), r["next_at"].as_i64().unwrap_or(0)))
-            .collect();
+            .gathered();
         self.exec("DELETE FROM schedules", vec![])?;
         let now = js::now_ms();
         for (i, t) in triggers.iter().enumerate() {
@@ -1391,7 +1392,7 @@ impl FragmentCell {
     pub(crate) fn triggers_api(&self, caller: &Caller) -> CellResult<Response> {
         self.require(caller, false, Role::Viewer)?;
         let next: BTreeMap<i64, i64> =
-            self.rows("SELECT idx, next_at FROM schedules", vec![])?.iter().filter_map(|r| Some((r["idx"].as_i64()?, r["next_at"].as_i64()?))).collect();
+            self.rows("SELECT idx, next_at FROM schedules", vec![])?.iter().filter_map(|r| Some((r["idx"].as_i64()?, r["next_at"].as_i64()?))).gathered();
         let paused = self.paused_ops()?;
         let triggers: Vec<Value> = self
             .triggers()?

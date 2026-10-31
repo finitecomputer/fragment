@@ -27,6 +27,7 @@ pub mod search_index;
 pub mod facet;
 pub mod form;
 pub mod frames;
+pub mod gather;
 pub mod glob;
 pub mod governance;
 pub mod icon;

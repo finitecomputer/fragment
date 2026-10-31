@@ -70,6 +70,7 @@ use crate::config::Config;
 use crate::error::{CellError, CellResult};
 use crate::fragment::{body_json, json_response};
 use crate::js;
+use fragment_core::gather::Gathered;
 
 /// The marker an internal route's caller carries (routed.rs `marker`): the
 /// router never passes it.
@@ -2314,7 +2315,7 @@ impl ComputerCell {
             "computer/connections" => {
                 let mut b: SetConnections = body_json(&mut req).await?;
                 if let Some(list) = b.connections.as_mut() {
-                    list.sort();
+                    list.sort_unstable();
                     list.dedup();
                     if let Some(c) = list.iter().find(|c| self.cfg.providers.get(c).is_none()) {
                         let offered: Vec<&str> = self.cfg.providers.providers().iter().map(|p| p.name.as_str()).collect();
@@ -3167,7 +3168,7 @@ async fn egress_api(mut req: Request, env: &Env, ctx: &Context, computer: &str, 
         // a place held at its computer, the shim's `ComputerEgress` pipes it
         // (entry.mjs `relay`), told how by these headers, which it alone reads
         p if p == fragment_core::relay::ROUTE => {
-            let q: BTreeMap<String, String> = url.query_pairs().into_owned().collect();
+            let q: BTreeMap<String, String> = url.query_pairs().into_owned().gathered();
             let (host, port) = fragment_core::relay::target(&Config::from_env(env).connectors, q.get("host").map_or("", String::as_str), q.get("port").map_or("", String::as_str)).map_err(|r| CellError::new(ErrorCode::Forbidden, r.message()))?;
             if !req.headers().get("upgrade")?.is_some_and(|u| u.eq_ignore_ascii_case("websocket")) {
                 return Err(CellError::invalid("a relay is a WebSocket"));

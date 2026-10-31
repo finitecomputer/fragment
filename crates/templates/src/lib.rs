@@ -112,7 +112,7 @@ pub fn shell_page(text: &str, release: &str, deployed: Option<u64>) -> String {
 /// each with its content type: of the rest of cell/shell/, its pages are
 /// served at their own paths, and its credits and licenses not at all.
 #[cfg(feature = "platform")]
-const SHELL_PUBLISHED: [(&str, &str); 47] = [
+const SHELL_PUBLISHED: [(&str, &str); 49] = [
     // the cell's server-rendered pages' base look (share.rs `sheet_html`),
     // on the platform's origin and, as /__sheet.css, on a fragment's
     ("sheet.css", "text/css; charset=utf-8"),
@@ -143,6 +143,8 @@ const SHELL_PUBLISHED: [(&str, &str); 47] = [
     ("app-icon.js", "text/javascript; charset=utf-8"),
     // the Apps page: each app's dock, card, icon and who has access
     ("apps-page.js", "text/javascript; charset=utf-8"),
+    // the History page: every chat they have had, and its search
+    ("history-page.js", "text/javascript; charset=utf-8"),
     ("activity.js", "text/javascript; charset=utf-8"),
     ("fragment-title.js", "text/javascript; charset=utf-8"),
     ("tooltips.js", "text/javascript; charset=utf-8"),
@@ -153,6 +155,7 @@ const SHELL_PUBLISHED: [(&str, &str); 47] = [
     ("chat-list.js", "text/javascript; charset=utf-8"),
     // the Session Archive under the chats (templates/sessions/README.md)
     ("session-archive.js", "text/javascript; charset=utf-8"),
+    ("continue.js", "text/javascript; charset=utf-8"),
     // delegation threads: a line each over the chat an agent asked from
     ("threads.js", "text/javascript; charset=utf-8"),
     ("session-refresh.js", "text/javascript; charset=utf-8"),
@@ -202,7 +205,7 @@ pub mod blessed;
 #[cfg(feature = "platform")]
 pub fn release_files() -> Vec<&'static File> {
     let templates = blessed::BLESSED.iter().filter_map(|n| blessed::template(n)).chain(CATALOG);
-    let all = templates.flat_map(|t| t.files.iter()).chain(SHELL).chain(BROWSER.iter().copied()).chain([&SKILL_MD, &GUIDE_MD]);
+    let all = templates.flat_map(|t| t.files.iter()).chain(SHELL).chain(BROWSER.iter().copied()).chain([&SKILL_MD, &GUIDE_MD, &EXPORT_README]);
     let mut seen = std::collections::BTreeSet::new();
     all.filter(|f| seen.insert(f.sha256)).collect()
 }
@@ -309,6 +312,7 @@ pub(crate) mod tests {
         assert!(SHELL.windows(2).all(|w| w[0].path < w[1].path), "the shell's files are in path order");
         check("cli/SKILL.md", &SKILL_MD, &std::fs::read(repo().join("cli/SKILL.md")).unwrap());
         check("cli/GUIDE.md", &GUIDE_MD, &std::fs::read(repo().join("cli/GUIDE.md")).unwrap());
+        check("crates/core/src/export_readme.md", &EXPORT_README, &std::fs::read(repo().join("crates/core/src/export_readme.md")).unwrap());
         assert!(shell("index.html").is_some() && shell("shell.js").is_some() && shell("nope.js").is_none());
         let count = |dir: &str| walkdir(&repo().join(dir));
         assert_eq!(SHELL.len(), count("cell/shell"), "every file of the shell is indexed");
