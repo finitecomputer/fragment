@@ -360,9 +360,10 @@ templates/sessions/README.md):
 - Posted by the chat's owner, the shell's Continue, with the id
   `history`, before the agent joins: the chat's first record. It holds
   the conversation's last summary (`summary`, at most 8,000 characters)
-  and the newest of what the person and the agent said, oldest first
-  (`messages`, at most 40, each at most 4,000 characters), with how many
-  came before them (`earlier`), bounded as a whole by its body's bytes
+  and the newest of what the person and the agent said after it (the
+  summary covers what came before), oldest first (`messages`, at most 40,
+  each at most 4,000 characters), with how many others the conversation
+  holds (`earlier`), bounded as a whole by its body's bytes
   (63 KiB of JSON, under a record's 64 KiB, whatever the text: the newest
   that fit; a summary too large for it alone is cut) before the chat is
   made (cell/shell/session-archive.js, `historyOf`). `archive` and `key`
