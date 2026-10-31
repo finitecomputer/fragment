@@ -678,7 +678,7 @@ inbox's, which takes its token. `{name}` is a fragment's name in full.
 | `PUT /api/f/{name}/schedules/{id}` | editor | `{paused}` → `{schedule}`; a resume past the overdraft 402 |
 | `DELETE /api/f/{name}/schedules/{id}` | editor | → `{ok, removed}`; none 404 |
 | `GET /api/f/{name}/database?table=&offset=` | the owner (never an agent) | its app's database, for an export (`__dump`, cell/platform.mjs). No `table`: `{schema: [{type, name, table, sql}], tables}`, the platform's own tables left out. A `table`: `{table, offset, rows, next}`, at most 1000 rows and about 4 MiB from `offset`, each a JSON object (a blob `{"$base64"}`); not in the schema 404. No app code: 404 `no_code` |
-| `POST /api/f/{name}/inbox` | the inbox token | in `x-fragment-inbox-token` or `?t=`; JSON `{source?, payload}` (any other JSON, or text, is the payload), at most 64 KiB → `{ok, seq, runs}`. Bad token 403; `INBOX_PENDING_MAX` pending 429 |
+| `POST /api/f/{name}/inbox` | the inbox token, or the secret its code's `inbox` names (Apps) | the token in `x-fragment-inbox-token` or `?t=`, or, when its code names an inbox secret, that header holding it (and no token: 403 otherwise); JSON `{source?, payload}` (any other JSON, or text, is the payload), at most 64 KiB → `{ok, seq, runs}`. Bad token 403; `INBOX_PENDING_MAX` pending 429 |
 | `POST /api/f/{name}/subscriptions` | a member who may read the channel | `{channel, url}` → `{id, channel, url}`: each new record POSTed to `url` as `{type: "record", fragment, channel, record}` (unsigned: the URL is the capability; egress-checked; at most 32 a fragment; a 404 or 410 drops it; a removed member's go). `{channel, wake: true}` in place of `url`, from a computer's egress alone (400 from anywhere else), wakes its computer instead (docs/computers.md) |
 | `GET /api/f/{name}/subscriptions` | a member (the owner sees all) | → `{subscriptions: [{id, principal, channel, url, createdAt}]}` |
 | `DELETE /api/f/{name}/subscriptions/{id}` | its subscriber, or the owner | → `{ok, removed}` |
@@ -840,6 +840,15 @@ agent, or carrying code, keeps the last good code and says to fork it.
   "person" | "agent"}` (each new record, of that kind's members only with
   `from`); `{"files": "notes/**", "run": op}` (a move of `main` changing a
   matching path: `*`, `**`, `?`, a trailing `/`).
+- `inbox` (optional): `{"header": "x-telegram-bot-api-secret-token",
+  "secret": "TELEGRAM_WEBHOOK_SECRET"}`: the inbox takes a delivery only
+  with that header (lower case; never `x-fragment-*`, `cookie`, `host`,
+  `authorization` or `content-type`) holding the fragment's secret of
+  that name, compared in constant time; the inbox token then admits
+  nothing, and nothing is taken before the secret is set. So a delivery
+  is forged only by whoever may set that secret (its editors; on a
+  connector, its owner alone), never by a reader of the inbox token. A
+  fragment on a blessed template declares none.
 
 `app.mjs` exports `class App extends DurableObject` with a method per
 operation, called `(input, call)`: `call.principal` (an identity, `anon:…`,

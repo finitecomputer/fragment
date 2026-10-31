@@ -472,15 +472,13 @@ versions serving for a while, would refuse between them for that while.
 
 **A deploy is done when every object class answers it.** `cargo xtask
 deploy` asks `/healthz/objects` (docs/api.md, Health) until each class
-admits the new release, for 7 minutes, past Cloudflare's default five
-minutes of a busy object's old code, which the limit still covers while
-`immediate` proves itself on the preview's deploys (on 2026-10-24 a
-throwaway Worker found the setting ignored, and production's Registry,
-three computers and their agents' fragments refused the new Worker for
-five minutes; on 2026-10-30 it was honoured). One it cannot finish or
-verify goes back to the version live
-before it (`wrangler rollback`, its objects then left to Cloudflare's
-restart, which the same wait covers), unless that release's schema is
+admits the new release, for 90 s: objects take its code at once
+(`immediate`, above; each of the preview's first ten deploys under it
+answered in 0 s), and a busy object Cloudflare held on its old code for
+its default five minutes, as it did before, fails the deploy loudly
+rather than refusing calls that long. One it cannot finish or verify
+goes back to the version live before it (`wrangler rollback`, verified
+the same way), unless that release's schema is
 not its own (Schemas, above): the job fails either way, never green over
 a mix (xtask/src/rollout.rs).
 What outlives a
