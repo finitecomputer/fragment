@@ -2068,7 +2068,7 @@ fn an_answer_owed_survives_a_restart_and_a_forged_one_is_corrupt() {
     assert!(check(&forged).is_err());
 }
 
-// ---- across lives (docs/durable-computers.md) ----
+// ---- across lives (docs/computers.md, Durability) ----
 //
 // The engine inside a model of what is around it: the platform's channels
 // with their replay and 409 rule (the journal), the lane that posts to them

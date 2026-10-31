@@ -1,4 +1,4 @@
-//! The note a turn carries after a cut one (docs/durable-computers.md, P5):
+//! The note a turn carries after a cut one (docs/computers.md, Durability, P5):
 //! the first turn an agent runs in a chat after one of its turns there was
 //! ended as lost (a restart cut it; P1, one life per turn, never runs it
 //! again) is told so, with what that turn was asked, the steps and replies
