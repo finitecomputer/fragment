@@ -750,7 +750,6 @@ Still Paul's, before the slices that need them:
 ## Not in v1
 
 - Annual plans, team trials, and invoices paid by bank transfer.
-- Fragments owned by an org.
 - WorkOS Organizations and SSO (an enterprise's directory can map onto
   our orgs later).
 - Several orgs per person.

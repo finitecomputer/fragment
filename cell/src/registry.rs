@@ -30,7 +30,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 
 use fragment_core::{blob, npub, registry};
-use fragment_proto::{limits, ErrorCode, Identity, IdentityKind, IdentityView, KeyView, Reason, Role};
+use fragment_proto::{limits, ErrorCode, Identity, IdentityKind, IdentityView, KeyView, OrgPlace, Reason, Role};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -234,7 +234,7 @@ struct KeyHolderRow {
 /// fault.
 fn joined_identity(id: String, kind: Option<IdentityKind>, owner: Option<String>, held: Option<Role>, named_by: &str) -> CellResult<Identity> {
     match kind {
-        Some(kind) => Ok(Identity { id, kind, owner, held }),
+        Some(kind) => Ok(Identity { id, kind, owner, held, orgs: vec![] }),
         None => Err(CellError::host(format!("{named_by} names a missing identity {id}"))),
     }
 }
@@ -350,7 +350,7 @@ impl RegistryCell {
 
     fn identity(&self, id: &str) -> CellResult<Option<Identity>> {
         let row = self.row::<IdentityRow>("SELECT kind, owner, held FROM identities WHERE id = ?", vec![id.into()])?;
-        Ok(row.map(|r| Identity { id: id.to_string(), kind: r.kind, owner: r.owner, held: r.held }))
+        Ok(row.map(|r| Identity { id: id.to_string(), kind: r.kind, owner: r.owner, held: r.held, orgs: vec![] }))
     }
 
     /// An identity a request names: missing, it is 404.
@@ -429,8 +429,36 @@ impl RegistryCell {
                 npub::encode(key)
             ))),
             Some(row) if row.revoked_at.is_some() => Err(unauthenticated(format!("the key {} was revoked", npub::encode(key)))),
-            Some(row) => joined_identity(row.identity, row.kind, row.owner, row.held, &format!("the key {key}")),
+            Some(row) => self.placed(joined_identity(row.identity, row.kind, row.owner, row.held, &format!("the key {key}"))?),
         }
+    }
+
+    /// `who` with the places they hold now in orgs' content (decisions 69
+    /// to 71; an agent, its owner's, as an admin of none): what a request
+    /// carries to an org's fragment, which counts a membership only at its
+    /// epoch. One indexed read; nothing for someone in no org's content.
+    pub(super) fn placed(&self, mut who: Identity) -> CellResult<Identity> {
+        #[derive(Deserialize)]
+        struct Row {
+            org: String,
+            epoch: u64,
+            admin: i64,
+        }
+        let person = match who.kind {
+            IdentityKind::Person => who.id.clone(),
+            IdentityKind::Agent => match &who.owner {
+                Some(owner) => owner.clone(),
+                None => return Ok(who),
+            },
+        };
+        // bounded: the orgs whose content one person said yes to
+        let rows = self.rows::<Row>(
+            "SELECT org, epoch, admin FROM org_content WHERE person = ? AND active = 1 ORDER BY org LIMIT ?",
+            vec![person.into(), SqlStorageValue::Integer(fragment_core::governance::ORGS_PER_PERSON_MAX as i64)],
+        )?;
+        let agent = who.kind == IdentityKind::Agent;
+        who.orgs = rows.into_iter().map(|r| OrgPlace { org: r.org, epoch: r.epoch, admin: r.admin != 0 && !agent }).collect();
+        Ok(who)
     }
 
     /// What a page shows of identities as names: a person's picture, and
@@ -532,7 +560,7 @@ impl RegistryCell {
             "INSERT INTO keys (key, identity, added_at, added_by) VALUES (?, ?, ?, ?)",
             vec![key.into(), id.as_str().into(), SqlStorageValue::Integer(now), added_by.into()],
         )?;
-        Ok(Identity { id, kind, owner: owner.map(str::to_string), held: None })
+        Ok(Identity { id, kind, owner: owner.map(str::to_string), held: None, orgs: vec![] })
     }
 
     fn register_agent(&self, b: RegisterAgent) -> CellResult<IdentityView> {

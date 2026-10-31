@@ -212,7 +212,15 @@ kind, body, op_id}`, append-only, with a per-channel retention policy.
   made a member of someone else's fragment but by their own yes to an
   invite (decision 63: a direct add is the owner's own agents), which
   brings their agents in beside them as one entity (decision 64: their
-  role theirs, in and out together). Members name
+  role theirs, in and out together). A fragment is owned by a person or
+  by an org (decisions 66 to 71: its `ownership` row). An org's is
+  administered by the org's content admins, each as themselves, a
+  capability apart from any role, never an agent's; they may give
+  themselves access, which its events show. Its members are fenced by
+  their org epoch: a member row counts only at the epoch of their place
+  in the org's content as the registry answers each request, so an
+  offboarding takes effect at their next request, before anything is
+  cleaned up. Members name
   identities, so replacing a key rewrites no grant. Each identity's list
   of fragments is an index in its own `Principal` cell, fed from the
   fragment's outbox. A request sends at most one round of the outbox (32
@@ -283,7 +291,8 @@ Every change is checked against this table.
 | Secrets | the Durable Object that owns each, sealed for it; the deployment's own in its Secrets Store (docs/secrets.md) | never in a repo, a log, a command line, or an app's env |
 | Orgs, their admins and seats (held by an npub, or pending on an email; comped or paid) | the registry (docs/billing.md) | a seat holder's plan and standing on their ledger, and their computer's always-on, are pushed from it: one queued row a person, pushed one at a time by its alarm, each read fresh as it goes, so the newest push is of the newest state. The ledger keeps the seat in the registry's order (`SetSeat.seq`), refusing an older one as stale and naming its own, which the registry's next order passes; always-on carries no order (the one row a person orders it), and a computer made later asks for a push as it is made, its making failing when it cannot. The registry is the seat's one writer: operators comp and end seats through it (the ledger's `seat` command went 2026-10-16); an operator's `plan` command is the debt ledger's |
 | An org's own credit and monthly budget (decisions 66 to 68) | its ledger (`org:<id>`), a person's machine with no plan, seat, included credit or overdraft | nowhere: operators credit it and set its budget (orgs pay out of band), the person invoiced named in its governance log, and its billing admins read it |
-| An org's content: its people, its content admins, the admins' places offered, and its governance log (decisions 69 to 71) | the registry (`org_content`, `org_content_offers`, `org_governance`; rules in `fragment_core::governance`), apart from its billing's `org_members` | none yet: a seat or a billing admin's place gives none of it; each change is written with its log entry in one transaction; an offer is accepted only while its grounds hold; an org with anyone in its content, or an operator's credit or payer named, outlives its billing |
+| Who owns a fragment (decisions 66 to 71): a person or an org, and its owner generation | the fragment's `ownership` row (its `owner` meta row went with Fragment step 4) | its name (`Owner::name`: an npub, or `org:<id>`) names its payer's ledger and the list its owner's row goes to (an org's, its inventory: the `Principal` of that name); status's `owner` shows it and `ownerRef` says which; nothing parses the name for who may act |
+| An org's content: its people (each at an epoch), its content admins, the admins' places offered, and its governance log (decisions 69 to 71) | the registry (`org_content`, `org_content_offers`, `org_governance`; rules in `fragment_core::governance`), apart from its billing's `org_members` | a person's places now ride every resolution of their identity (`Identity::orgs`, an agent's its owner's), which an org's fragment checks its member rows' epochs against at each request, and the registry's answer of who is in now (`PlacesNow`) where no request carries it (its deliveries, its members' lists, an admission); each change is written with its log entry in one transaction; an offer is accepted only while its grounds hold; an org with anyone in its content, or an operator's credit or payer named, outlives its billing |
 | Whether a person is a guest (decision 49) | their seat in the registry and, holding none, their ledger's plan (`fragment_core::org::guest`) | `GET /api/seat`'s `guest`, decided at each ask: the shell, its Billing and its welcome read it alone |
 | What is sold: a seat's and a pack's price, the credit a seat includes | core's constants (`fragment_core::stripe`, `ledger::included`) | Stripe's Prices, which Checkout refuses at any other amount; every page shows them from `GET /api/seat`'s `offer` |
 | A subscription's status, items and periods; an org's Stripe customer | Stripe (docs/billing.md) | the registry's copy (`orgs`) is written only from a subscription fetched from Stripe (a Checkout's return, a webhook, the daily reconcile), never from an event's own copy; a newer subscription replaces one only once it has ended, and an older event changes nothing |

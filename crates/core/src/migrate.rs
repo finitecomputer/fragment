@@ -108,7 +108,7 @@ macro_rules! step {
 
 pub const FRAGMENT: Class = Class {
     name: "Fragment",
-    steps: &[step!("baseline", "fragment/0001_baseline.sql"), step!("listed", "fragment/0002_listed.sql"), step!("record_schedules", "fragment/0003_record_schedules.sql")],
+    steps: &[step!("baseline", "fragment/0001_baseline.sql"), step!("listed", "fragment/0002_listed.sql"), step!("record_schedules", "fragment/0003_record_schedules.sql"), step!("ownership", "fragment/0004_ownership.sql")],
     variants: &[Variant {
         name: "members",
         sql: "CREATE TABLE members ( principal TEXT PRIMARY KEY, role TEXT NOT NULL, added_by TEXT NOT NULL, added_at INTEGER NOT NULL, kind TEXT, owner TEXT, people_only INTEGER NOT NULL DEFAULT 0)",
@@ -129,6 +129,7 @@ pub const REGISTRY: Class = Class {
         step!("connection_accounts", "registry/0006_connection_accounts.sql"),
         step!("public_addresses", "registry/0007_public_addresses.sql"),
         step!("org_content", "registry/0008_org_content.sql"),
+        step!("org_content_epochs", "registry/0009_org_content_epochs.sql"),
     ],
     variants: &[],
     kept: &[],

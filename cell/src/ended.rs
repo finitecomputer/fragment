@@ -185,11 +185,11 @@ impl FragmentCell {
     /// `end_life`, its agent recorded to leave its computer and the
     /// registry's names (`agent`), or not (a wipe's, which empties both).
     fn end(&self, agent: bool) -> CellResult<Ended> {
-        let [name, created_at, owner, npub, version, identity, computer] =
-            self.metas([MetaKey::Name, MetaKey::CreatedAt, MetaKey::Owner, MetaKey::Npub, MetaKey::IndexVersion, MetaKey::AgentIdentity, MetaKey::Computer])?;
+        let [name, created_at, npub, version, identity, computer] =
+            self.metas([MetaKey::Name, MetaKey::CreatedAt, MetaKey::Npub, MetaKey::IndexVersion, MetaKey::AgentIdentity, MetaKey::Computer])?;
         let name = name.ok_or_else(|| missing(MetaKey::Name))?;
         let incarnation: i64 = created_at.and_then(|c| c.parse().ok()).ok_or_else(|| missing(MetaKey::CreatedAt))?;
-        let owner = owner.ok_or_else(|| missing(MetaKey::Owner))?;
+        let owner = self.owner()?.name();
         let npub = npub.ok_or_else(|| missing(MetaKey::Npub))?;
         // newer than every change this life sent: each list takes it
         let version = version.and_then(|v| v.parse::<i64>().ok()).unwrap_or(0) + 1;
@@ -200,13 +200,14 @@ impl FragmentCell {
              ON CONFLICT (incarnation) DO NOTHING",
             vec![SqlStorageValue::Integer(incarnation), name.as_str().into(), npub.into(), facet.as_str().into(), now.clone(), now.clone()],
         )?;
-        // every member's list, and any a change still waits for (a member
-        // removed whose list was not told yet)
+        // every member's list, its owner's (an org's is no member's), and
+        // any a change still waits for (a member removed whose list was not
+        // told yet)
         self.exec(
             "INSERT INTO ended_index (incarnation, principal, version, next_at)
-             SELECT ?, principal, ?, ? FROM (SELECT principal FROM members UNION SELECT principal FROM index_outbox) WHERE true
+             SELECT ?, principal, ?, ? FROM (SELECT principal FROM members UNION SELECT principal FROM index_outbox UNION SELECT ?) WHERE true
              ON CONFLICT (incarnation, principal) DO NOTHING",
-            vec![SqlStorageValue::Integer(incarnation), SqlStorageValue::Integer(version), now],
+            vec![SqlStorageValue::Integer(incarnation), SqlStorageValue::Integer(version), now, owner.as_str().into()],
         )?;
         // an agent fragment's agent, whose key was this life's alone: it
         // ran on its owner's one computer (decision 13), named while it is
@@ -608,7 +609,11 @@ impl FragmentCell {
                 if b.agents.len() as u64 > limits::AGENTS_PER_OWNER_MAX {
                     return Err(CellError::invalid(format!("wipe/end names at most {} agents", limits::AGENTS_PER_OWNER_MAX)));
                 }
-                let [created_at, owner, name] = self.metas([MetaKey::CreatedAt, MetaKey::Owner, MetaKey::Name])?;
+                let [created_at, name] = self.metas([MetaKey::CreatedAt, MetaKey::Name])?;
+                let owner = match created_at {
+                    Some(_) => Some(self.owner()?.name()),
+                    None => None,
+                };
                 let ended = match (created_at, owner) {
                     (None, _) => false,
                     (Some(_), Some(owner)) if owner == b.owner => {
@@ -620,8 +625,8 @@ impl FragmentCell {
                         }
                         true
                     }
-                    (Some(_), Some(_)) => return Err(CellError::new(ErrorCode::Forbidden, format!("{} is someone else's: a wipe ends only its person's", name.unwrap_or_default()))),
-                    (Some(_), None) => return Err(missing(MetaKey::Owner)),
+                    // an org's fragment too: a person's wipe never ends what an org owns
+                    (Some(_), _) => return Err(CellError::new(ErrorCode::Forbidden, format!("{} is someone else's: a wipe ends only its person's", name.unwrap_or_default()))),
                 };
                 // the lists the wipe empties itself: tried once (just now, or
                 // by an earlier call or pass), never waited on
@@ -650,7 +655,7 @@ impl FragmentCell {
                 // the browsers they asked pushes for here, member or not
                 let pushes = self.rows("DELETE FROM push_subs WHERE principal = ? RETURNING id", vec![b.principal.as_str().into()])?.len();
                 // as themselves: leaving is any member's own (members.rs)
-                let identity = Identity { id: b.principal.clone(), kind: b.kind, owner: None, held: None };
+                let identity = Identity { id: b.principal.clone(), kind: b.kind, owner: None, held: None, orgs: vec![] };
                 let url = url::Url::parse("https://fragment.internal/wipe/leave").expect("a constant URL parses");
                 let caller = Caller { signed: Some(Signed::new(identity, None)), unresolved: None, url, site: false };
                 let left = match self.remove_member(&caller, "me").await {

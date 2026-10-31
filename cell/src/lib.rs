@@ -439,22 +439,26 @@ fn named_identity(who: &str) -> CellResult<Option<String>> {
 /// names a label) is drawn again.
 const NAME_DRAWS: usize = 3;
 
-/// Makes a fragment for a person: the API's create (the shell's catalog
-/// calls it), the one door every fragment is made through (an agent's or a
-/// template's included). It is named in full by its caller, or from a
-/// label with a random suffix (decision 47). An agent makes one for its
-/// owner: the owner's (billed to them, in their list), with the agent an
-/// editor of it. Its maker's ledger is asked first: a guest makes none
-/// (Paul, 2026-10-03), nor does someone whose fragments are read-only past
-/// the overdraft.
-pub(crate) async fn create_fragment(env: &Env, cfg: &Config, url: &Url, mut create: CreateFragment, principal: Signed) -> CellResult<Response> {
-    let (maker, agent) = match principal.kind {
-        IdentityKind::Person => (principal, None),
-        IdentityKind::Agent => {
+/// Makes a fragment for a person, or for an org (`org`): the API's create
+/// (the shell's catalog calls it), the one door every fragment is made
+/// through (an agent's or a template's included). It is named in full by
+/// its caller, or from a label with a random suffix (decision 47). An agent
+/// makes one for its owner: the owner's (billed to them, in their list),
+/// with the agent an editor of it. An org's is made by one of its content
+/// admins, as themselves, its editor (decisions 66 to 71). Its payer's
+/// ledger is asked first: a guest makes none (Paul, 2026-10-03), nor does
+/// someone whose fragments are read-only past the overdraft, nor an org
+/// with no credit.
+pub(crate) async fn create_fragment(env: &Env, cfg: &Config, url: &Url, mut create: CreateFragment, principal: Signed, org: Option<String>) -> CellResult<Response> {
+    let (maker, agent) = match (principal.kind, &org) {
+        (IdentityKind::Person, None) => (principal, None),
+        (IdentityKind::Agent, None) => {
             let owner = principal.owner.clone().ok_or_else(|| CellError::host(format!("{} {} has no owner", principal.kind.as_str(), principal.id)))?;
-            let identity = fragment_proto::Identity { id: owner, kind: IdentityKind::Person, owner: None, held: None };
+            let identity = fragment_proto::Identity { id: owner, kind: IdentityKind::Person, owner: None, held: None, orgs: vec![] };
             (Signed::new(identity, None), Some(principal.identity.id))
         }
+        (IdentityKind::Person, Some(org)) if principal.acting_for.is_none() && principal.org_place(org).is_some_and(|p| p.admin) => (principal, None),
+        (_, Some(_)) => return Err(CellError::new(ErrorCode::Forbidden, "only an org's content admins make its fragments, each as themselves")),
     };
     assert_eq!(maker.kind, IdentityKind::Person, "a fragment is a person's: an agent's maker is its owner");
     // the names to try, in turn: the one asked for, or draws from a label
@@ -470,7 +474,12 @@ pub(crate) async fn create_fragment(env: &Env, cfg: &Config, url: &Url, mut crea
     };
     // its host is one DNS label, its mark included: refused, never cut
     fragment_core::names::host_fits(&names[0], cfg.host_label_suffix()).map_err(CellError::invalid)?;
-    may_create(env, &maker.id).await?;
+    let payer = match &org {
+        Some(org) => fragment_core::ledger::org::Payer::Org(org.clone()).name(),
+        None => maker.id.clone(),
+    };
+    may_create(env, &payer).await?;
+    let extra: Vec<(&'static str, String)> = org.iter().map(|o| (fragment::ORG_HEADER, o.clone())).collect();
     let drawn = names.len() > 1;
     let mut made = None;
     // bounded: at most NAME_DRAWS names
@@ -480,7 +489,7 @@ pub(crate) async fn create_fragment(env: &Env, cfg: &Config, url: &Url, mut crea
         // a fresh request: nothing of the caller's but what the router decided
         let bare = Request::new(url.as_str(), Method::Post)?;
         let routed = Routed { name: create.name.clone(), url: url.clone(), signed: Some(maker.clone()), credential: None };
-        let answer = forward(env, &bare, bytes_body(body), Forward { routed, inner: "/create".into(), extra: vec![] }).await?;
+        let answer = forward(env, &bare, bytes_body(body), Forward { routed, inner: "/create".into(), extra: extra.clone() }).await?;
         // a drawn name someone holds already: draw again
         if drawn && answer.status_code() == ErrorCode::AlreadyExists.status() {
             continue;
@@ -1221,7 +1230,7 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
             if principal.acting_for.as_ref().is_some_and(|asker| principal.owner.as_ref() != Some(asker)) {
                 return Err(CellError::new(ErrorCode::Forbidden, "an agent makes fragments for its owner, in its owner's turns only"));
             }
-            create_fragment(env, cfg, &url, create, principal).await
+            create_fragment(env, cfg, &url, create, principal, None).await
         }
         (Method::Get, ["api", "fragments", "watch"]) => watch_list(&req, env, cfg, &url).await,
         // who has access to each fragment the signer owns (share.rs)
@@ -1316,7 +1325,7 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
         }
         (_, ["api", "orgs", org, rest @ ..]) => {
             let (org, rest) = (org.to_string(), rest.to_vec());
-            orgs::named(req, env, &url, &org, &rest).await
+            orgs::named(req, env, cfg, &url, &org, &rest).await
         }
         (_, ["api", "admin", rest @ ..]) => {
             let rest = rest.to_vec();
