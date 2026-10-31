@@ -770,16 +770,6 @@ iframe[data-blocked] { display: none; }
 #chats .more-row { min-height: 28px; padding-top: 4px; padding-bottom: 4px; color: var(--text-tertiary); font-size: 13px; }
 #chats .more-row:hover { color: var(--text-secondary); }
 .section-head { margin: 14px 8px 4px; color: var(--text-tertiary); font-size: 12px; font-weight: 600; }
-#chats .chat-row.two { align-items: flex-start; padding: 7px 8px; }
-.chat-face { display: inline-flex; flex: none; width: 26px; height: 26px; margin-top: 1px; }
-.chat-face > .agent-avatar { width: 26px; height: 26px; }
-.chat-lines { display: flex; flex: 1; flex-direction: column; gap: 1px; min-width: 0; }
-.chat-who, .chat-what { display: flex; align-items: center; gap: 6px; min-width: 0; }
-.chat-agent { flex: 0 1 auto; min-width: 40px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-primary); font-size: 13px; font-weight: 600; line-height: 18px; }
-.chat-who time, .chat-who .agent-doing { flex: none; margin-left: auto; color: var(--text-tertiary); font-size: 11.5px; line-height: 18px; }
-.chat-who .agent-doing { font-size: 11px; font-weight: 600; }
-.chat-who .agent-doing.working { color: var(--success); }
-.chat-who .agent-doing.you { color: var(--accent-blue); }
 /* the open chat's delegation threads, a line each over it (threads.js) */
 .threads { display: flex; flex: none; flex-direction: column; gap: 4px; padding: 0 16px 8px; }
 .thread { display: flex; align-items: center; gap: 6px; min-width: 0; }
@@ -797,9 +787,6 @@ iframe[data-blocked] { display: none; }
 .thread-stop:disabled { opacity: .55; }
 /* one agent's role (its `meta.role`), a tag beside its name */
 .role-tag { flex: 0 4 auto; min-width: 24px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 0 6px; border-radius: 999px; background: var(--bg-active); color: var(--text-secondary); font-size: 11px; font-weight: 500; line-height: 16px; }
-.chat-row.active .role-tag { background: var(--bg-window); }
-.chat-what .label { color: var(--text-secondary); font-size: 13px; line-height: 18px; }
-.chat-what .unread { height: 18px; min-width: 18px; font-size: 10.5px; line-height: 18px; }
 /* the launcher, its search and its key (chat-list.js `LAUNCHER_KEY`); on a
    touch screen with no finer pointer, the search alone */
 .sidebar-new-chat { --edge-light: 0; display: inline-flex; align-items: center; gap: 6px; width: auto; min-width: 32px; height: 32px; padding: 0 9px; border: 1px solid transparent; border-radius: 999px; background: transparent; }
@@ -834,8 +821,26 @@ iframe[data-blocked] { display: none; }
 .invite-actions .invite-accept { border-color: transparent; background: var(--text-primary); color: var(--bg-window); }
 .invite-actions button:disabled { opacity: .55; cursor: default; }
 #chats { gap: 2px; padding: 0 0 6px; }
-#chats .chat-row { width: 100%; min-height: 32px; padding: 4px 10px; font-size: 14px; color: var(--text-secondary); }
+/* a chat's row (chat-list.js `chatRow`): its name and how long ago, then what
+   its agent is doing or its newest message's first line; its ⋯ in the time's
+   place on hover and focus, always on touch */
+#chats .chat-row { position: relative; width: 100%; min-height: 0; padding: 0; color: var(--text-secondary); }
 #chats .chat-row.active { color: var(--text-primary); }
+.chat-open { display: flex; flex: 1; flex-direction: column; gap: 1px; min-width: 0; padding: 6px 10px; border: 0; border-radius: inherit; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.chat-line, .chat-sub { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.chat-line .label { color: var(--text-primary); font-size: 14px; line-height: 19px; }
+.chat-line time { flex: none; margin-left: auto; color: var(--text-tertiary); font-size: 11.5px; line-height: 19px; }
+.chat-sub { min-height: 17px; color: var(--text-tertiary); font-size: 12.5px; line-height: 17px; }
+.chat-preview { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-sub .agent-doing { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; font-weight: 600; }
+.chat-sub .agent-doing.working { color: var(--success); }
+.chat-sub .agent-doing.you { color: var(--accent-blue); }
+.chat-sub .unread { height: 17px; min-width: 17px; font-size: 10.5px; line-height: 17px; }
+.row-more { position: absolute; top: 4px; right: 6px; display: none; place-items: center; width: 26px; height: 22px; padding: 0; border: 0; border-radius: 6px; background: none; color: var(--text-secondary); font-size: 15px; line-height: 1; cursor: pointer; }
+.row-more:hover, .row-more[aria-expanded="true"] { background: var(--bg-active); color: var(--text-primary); }
+#chats .chat-row:hover .row-more, #chats .chat-row:focus-within .row-more, .row-more[aria-expanded="true"] { display: grid; }
+#chats .chat-row:hover .chat-line time, #chats .chat-row:focus-within .chat-line time, #chats .chat-row:has(.row-more[aria-expanded="true"]) .chat-line time { visibility: hidden; }
+@media (hover: none) { .row-more { display: grid; } .chat-line time { visibility: hidden; } }
 @media (max-width: 760px) {
   .sidebar-top { min-height: 32px; }
   .sidebar-new-chat { position: fixed; z-index: 12; right: 24px; bottom: calc(24px + env(safe-area-inset-bottom, 0px)); justify-content: center; width: 56px; height: 56px; padding: 0; border: 0; background: #fff; color: #202020; box-shadow: 0 4px 16px rgba(0,0,0,.18), 0 0 0 1px rgba(0,0,0,.06); }
@@ -844,7 +849,7 @@ iframe[data-blocked] { display: none; }
   .sidebar-new-chat svg { width: 24px; height: 24px; }
   .sidebar .settings { min-height: 56px; margin-right: 72px; }
   #chats { gap: 0; margin-right: -10px; padding-right: 10px; scrollbar-gutter: stable; }
-  #chats .chat-row { min-height: 44px; padding-top: 10px; padding-bottom: 10px; }
+  #chats .chat-row .chat-open { padding-top: 9px; padding-bottom: 9px; }
 }
 .viewer { position: relative; isolation: isolate; }
 .viewer::before { content: ""; position: absolute; z-index: -1; inset: auto 0 0; height: 140px; background: linear-gradient(to top, rgba(0,0,0,.34), rgba(0,0,0,.14) 45%, transparent); pointer-events: none; }

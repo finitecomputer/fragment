@@ -4,10 +4,10 @@ import { avatar } from "./agent-identity.js";
 export const newestChat = (a, b) => (b.previewAt ?? Infinity) - (a.previewAt ?? Infinity) || (a.name < b.name ? -1 : 1);
 
 export function createChatList({ api, ui, data, selection, menus, navigation, listLive, load, invites, setInvites }) {
-  const { $, el, patch, agentFace, mark, notice } = ui;
+  const { $, el, patch, agentFace, notice } = ui;
   const { byName, own, chats, shown, titleOf, chatTitle, homeMark, isGroup, agentOfChat, agentsOf, agents, allFragments, computer, isGuest, personId, isThread, waitingOn, renderThreads } = data;
   const { current, page, getFrame } = selection;
-  const { openMenu, shareItem, archiveItem } = menus;
+  const { menuOwner, openMenu, shareItem, archiveItem } = menus;
   const { newChat, rename, openChat, openApp, openScreen, leaveSidebar, seg } = navigation;
   // ---- chats: one flat list, newest first, the open one in the middle column ----
   function renderHeading() {
@@ -112,66 +112,68 @@ export function createChatList({ api, ui, data, selection, menus, navigation, li
     const next = Math.min(...doing.map((x) => x.until));
     if (Number.isFinite(next)) doingTimer = setTimeout(renderChats, Math.max(1000, next - Date.now()));
   }
-  // When a chat's newest message was said, as its row says it: today's
-  // time, then "Yesterday", a weekday within the week, else its date.
-  function saidAt(at) {
-    const d = new Date(at), now = new Date();
-    const day = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
-    const days = Math.round((day(now) - day(d)) / 86_400_000);
-    const t = el("time", null,
-      days <= 0 ? d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })
-      : days === 1 ? "Yesterday"
-      : days < 7 ? d.toLocaleDateString([], { weekday: "short" })
-      : d.toLocaleDateString([], { month: "short", day: "numeric", ...(d.getFullYear() === now.getFullYear() ? {} : { year: "numeric" }) }));
-    t.dateTime = d.toISOString();
-    return t;
-  }
-  // A chat's row, its agent first (Paul, 2026-10-30: it reads as talking to
-  // agents, not as threads piling up): whose chat it is (its agents' faces,
-  // a group's stacked, their names, one agent's role) and what it is doing
-  // there, else when its newest message was said; then the chat's own name
-  // and its marks. A chat with none of the person's agents (someone
-  // else's) is its name alone.
-  function chatRow(f, theirs, doing) {
-    const active = f.name === current() && !page();
-    const row = el("button", `row chat-row${active ? " active" : ""}`);
-    row.type = "button";
-    row.dataset.key = `chat:${f.name}`;
-    row.setAttribute("aria-current", active ? "page" : "false");
-    row.onclick = () => { openChat(f.name); leaveSidebar(); };
-    const marks = [el("span", "label", chatTitle(f.name)), ...homeMark(f), ...unreadMark(f)];
-    if (!theirs.length) {
-      row.append(...marks);
-      return row;
+  // How long ago a chat's newest message was said, as its row says it: now,
+  // minutes, hours, days within the week, else its date; with how long until
+  // that says something else.
+  function ago(at, now) {
+    const ms = Math.max(0, now - at);
+    const steps = [[60_000, null], [3_600_000, 60_000, "m"], [86_400_000, 3_600_000, "h"], [7 * 86_400_000, 86_400_000, "d"]];
+    for (const [under, unit, suffix] of steps) {
+      if (ms >= under) continue;
+      if (!unit) return ["now", under - ms];
+      const n = Math.floor(ms / unit);
+      return [`${n}${suffix}`, (n + 1) * unit - ms];
     }
-    const face = el("span", "chat-face");
-    face.append(mark(f.name));
-    const who = el("span", "chat-who");
-    who.append(el("span", "chat-agent", theirs.map((a) => titleOf(a.fragment)).join(", ")));
-    // one agent's role (its `meta.role`, on its row in the list), as a tag
-    const role = theirs.length === 1 ? byName(theirs[0].fragment)?.agentRole : null;
-    if (role) who.append(el("span", "role-tag", role));
-    // what it is doing here, while it is, else whom it waits on (a thread
-    // asked from here: threads.js), in place of when
-    const waits = doing ? null : waitingOn(f.name);
-    if (doing) who.append(el("span", `agent-doing ${doing.doing}`, DOING_SAYS[doing.doing]));
-    else if (waits) who.append(el("span", "agent-doing waiting", `Waiting on ${titleOf(waits.fragment)}`));
-    else if (f.previewAt) who.append(saidAt(f.previewAt));
-    const what = el("span", "chat-what");
-    what.append(...marks);
-    const lines = el("span", "chat-lines");
-    lines.append(who, what);
-    row.classList.add("two");
-    row.append(face, lines);
-    return row;
+    const d = new Date(at);
+    return [d.toLocaleDateString([], { month: "short", day: "numeric", ...(d.getFullYear() === new Date(now).getFullYear() ? {} : { year: "numeric" }) }), Infinity];
   }
-  // A row's day ("2:14 PM", then "Yesterday") moves at midnight: the
-  // sidebar is drawn again then.
-  let dayTimer = 0;
-  function dayAgain() {
-    clearTimeout(dayTimer);
-    const now = new Date();
-    dayTimer = setTimeout(renderChats, new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1).getTime() - now.getTime() + 1000);
+  // The sidebar is drawn again as the first row's time says something else.
+  let agoTimer = 0;
+  function agoAgain(next) {
+    clearTimeout(agoTimer);
+    if (Number.isFinite(next)) agoTimer = setTimeout(renderChats, Math.max(1000, next));
+  }
+  // A chat's row (Paul, 2026-10-31): its name, and how long ago its newest
+  // message was said; under it what its agent is doing there, while it is,
+  // else whom it waits on (a thread asked from here: threads.js), else that
+  // message's first line. Its section names its agent. Its ⋯ (in the
+  // time's place on hover, always on touch) renames or archives it.
+  function chatRow(f, doing, now) {
+    const active = f.name === current() && !page();
+    const row = el("div", `row chat-row${active ? " active" : ""}`);
+    row.dataset.key = `chat:${f.name}`;
+    const open = el("button", "chat-open");
+    open.type = "button";
+    open.setAttribute("aria-current", active ? "page" : "false");
+    open.onclick = () => { openChat(f.name); leaveSidebar(); };
+    const line = el("span", "chat-line");
+    line.append(el("span", "label", chatTitle(f.name)), ...homeMark(f));
+    let next = Infinity;
+    if (f.previewAt) {
+      const [said, until] = ago(f.previewAt, now);
+      const t = el("time", null, said);
+      t.dateTime = new Date(f.previewAt).toISOString();
+      line.append(t);
+      next = until;
+    }
+    const sub = el("span", "chat-sub");
+    const waits = doing ? null : waitingOn(f.name);
+    if (doing) sub.append(el("span", `agent-doing ${doing.doing}`, DOING_SAYS[doing.doing]));
+    else if (waits) sub.append(el("span", "agent-doing waiting", `Waiting on ${titleOf(waits.fragment)}`));
+    else sub.append(el("span", "chat-preview", f.preview ?? ""));
+    sub.append(...unreadMark(f));
+    open.append(line, sub);
+    const more = el("button", "row-more", "⋯");
+    more.type = "button";
+    more.title = "Rename or archive";
+    more.setAttribute("aria-label", `${chatTitle(f.name)}: rename or archive`);
+    more.setAttribute("aria-haspopup", "menu");
+    more.setAttribute("aria-controls", "menu");
+    const shownMore = $("chats").querySelector(`[data-key="${CSS.escape(row.dataset.key)}"] .row-more`);
+    more.setAttribute("aria-expanded", String(!!shownMore && menuOwner()?.button === shownMore));
+    more.onclick = () => openMenu(more, [{ icon: "rename", text: "Rename…", onClick: () => rename(f.name) }, archiveItem(f.name)]);
+    row.append(open, more);
+    return [row, next];
   }
   // Whom the launcher's new chat is with unless the person picks another
   // (Paul, 2026-10-30): the open chat's agent (a group's lead) when it is one
@@ -256,11 +258,15 @@ export function createChatList({ api, ui, data, selection, menus, navigation, li
       }
     }
     const seen = [];
+    const now = Date.now();
+    let next = Infinity;
     const rowOf = (f) => {
-      const theirs = agentsOf(f.name).map((id) => ids.get(id)).filter(Boolean);
-      const doing = doingIn(f, theirs.map((a) => a.identity));
+      const theirs = agentsOf(f.name).filter((id) => ids.has(id));
+      const doing = doingIn(f, theirs);
       seen.push(...doing);
-      return chatRow(f, theirs, doing[0]);
+      const [row, until] = chatRow(f, doing[0], now);
+      next = Math.min(next, until);
+      return row;
     };
     const rows = [];
     for (const [key, { agent, chats: list }] of sections) {
@@ -276,7 +282,7 @@ export function createChatList({ api, ui, data, selection, menus, navigation, li
     }
     if (!rows.some((r) => r.dataset.key.startsWith("chat:"))) rows.push(el("div", "empty-row", chats().length ? "Every chat is archived" : isGuest() ? "Chats shared with you show here" : "Your chats will appear here"));
     doingAgain(seen);
-    dayAgain();
+    agoAgain(next);
     patch($("chats"), rows);
     renderThreads();
   }
