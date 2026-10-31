@@ -49,7 +49,7 @@ use super::computers::{agent_replies, lever, phase, turn_of, work_of, QUEUE_DRAI
 use super::jobs::records;
 use super::ledger::entries;
 use crate::api::{now_s, Api, Call, Socket};
-use crate::browser::{Browser, Lease, Page};
+use crate::browser::{Browser, Lease, Page, Watched};
 use crate::{Need, Suite};
 
 pub const SECTION: &str = "agent-smoke";
@@ -425,33 +425,55 @@ fn ticket(api: &Api, owner: &Keys, id: &str, agent: &str) -> Result<String> {
 /// `PAGE`, and what it said as it loaded (`loading`), for a FAIL's detail:
 /// watched until then (past it, its socket's every frame would be kept).
 pub(super) fn open_screen(chrome: &mut Browser, api: &Api, owner: &Keys, id: &str, agent: &str) -> Result<(Page, bool, Value)> {
-    let page = chrome.open_watched(&ticket(api, owner, id, agent)?)?;
+    let url = ticket(api, owner, id, agent)?;
+    let secret = ticket_secret(&url).context("a ticket's URL carries its secret (`/__ticket?t=…`)")?.to_string();
+    let page = chrome.open_watched(&url)?;
     let connected = chrome.until(&page, CONNECTED, PAGE);
-    let said = loading(chrome, &page)?;
+    let said = loading(chrome, &page, &secret)?;
     Ok((page, connected, said))
 }
 
+/// The one-time secret a ticket's URL carries (`/__ticket?t=<secret>&next=…`).
+fn ticket_secret(url: &str) -> Option<&str> {
+    let (_, query) = url.split_once("/__ticket?")?;
+    query.split('&').find_map(|kv| kv.strip_prefix("t=")).filter(|t| !t.is_empty())
+}
+
 /// The requests a FAIL's detail lists at most (the screen's page makes
-/// about 40: itself, noVNC's modules, its two sockets), and what of an
-/// error's answer it keeps.
+/// about 40: itself, noVNC's modules, its two sockets), and what of each
+/// string it keeps.
 const REQUESTS_MAX: usize = 100;
 const BODY_MAX: usize = 300;
 
-/// What a watched page said as it loaded, its watching then stopped: each
-/// request and its answer; each error's answer, whose body says who
-/// refused it (the cell's port, or the computer's screen server), with the
-/// edge's id for it (`cf-ray`, in the Worker's logs); its console, its
-/// exceptions, and what the browser logged.
-fn loading(chrome: &mut Browser, page: &Page) -> Result<Value> {
-    // read while the page is watched: no body is kept past it
-    let errors: Vec<Value> = requests(&chrome.watched(page)?.events)
+/// What a watched page said as it loaded (`said_loading`), its watching
+/// then stopped; each error's answer read while it was watched (no body
+/// is kept past it).
+fn loading(chrome: &mut Browser, page: &Page, secret: &str) -> Result<Value> {
+    let errors: Vec<(Request, String)> = requests(&chrome.watched(page)?.events)
         .into_iter()
         .filter(|r| r.status.is_some_and(|s| s >= 400))
         .take(REQUESTS_MAX)
-        .map(|r| json!({ "request": r.said(), "ray": r.ray, "body": chrome.response_body(page, &r.id).unwrap_or_default().chars().take(BODY_MAX).collect::<String>() }))
+        .map(|r| {
+            let body = chrome.response_body(page, &r.id).unwrap_or_default();
+            (r, body)
+        })
         .collect();
     let w = chrome.unwatch(page)?;
-    let of = |method: &str, said: fn(&Value) -> String| -> Vec<String> { w.events.iter().filter(|e| e["method"] == method).map(|e| said(&e["params"]).chars().take(BODY_MAX).collect()).collect() };
+    Ok(said_loading(&w, &errors, secret))
+}
+
+/// What a page said as it loaded: each request and its answer; each
+/// error's answer (`errors`: its request and body), whose body says who
+/// refused it (the cell's port, or the computer's screen server), with the
+/// edge's id for it (`cf-ray`, in the Worker's logs); its console, its
+/// exceptions, and what the browser logged. Its ticket's `secret`, which
+/// signs a browser in until it is redeemed or expires, is said as
+/// `<ticket>` wherever it appears (a failed ticket's URL in the browser's
+/// log, its text, a body), before any string is cut to `BODY_MAX`.
+fn said_loading(w: &Watched, errors: &[(Request, String)], secret: &str) -> Value {
+    assert!(!secret.is_empty(), "a ticket's secret is something to hide");
+    let clean = |text: &str| -> String { text.replace(secret, "<ticket>").chars().take(BODY_MAX).collect() };
+    let of = |method: &str, said: fn(&Value) -> String| -> Vec<String> { w.events.iter().filter(|e| e["method"] == method).map(|e| clean(&said(&e["params"]))).collect() };
     let console = |p: &Value| {
         let args = p["args"].as_array().into_iter().flatten().map(|a| a["value"].as_str().map(str::to_string).unwrap_or_else(|| a["description"].as_str().map_or_else(|| a["value"].to_string(), str::to_string)));
         format!("{}: {}", p["type"].as_str().unwrap_or(""), args.collect::<Vec<_>>().join(" "))
@@ -461,14 +483,15 @@ fn loading(chrome: &mut Browser, page: &Page) -> Result<Value> {
         d["exception"]["description"].as_str().or(d["text"].as_str()).unwrap_or("").to_string()
     };
     let logged = |p: &Value| format!("{}: {} {}", p["entry"]["level"].as_str().unwrap_or(""), p["entry"]["text"].as_str().unwrap_or(""), p["entry"]["url"].as_str().unwrap_or(""));
-    Ok(json!({
-        "requests": requests(&w.events).iter().take(REQUESTS_MAX).map(Request::said).collect::<Vec<_>>(),
+    let errors: Vec<Value> = errors.iter().map(|(r, body)| json!({ "request": clean(&r.said()), "ray": r.ray, "body": clean(body) })).collect();
+    json!({
+        "requests": requests(&w.events).iter().take(REQUESTS_MAX).map(|r| clean(&r.said())).collect::<Vec<_>>(),
         "errors": errors,
         "console": of("Runtime.consoleAPICalled", console),
         "exceptions": of("Runtime.exceptionThrown", exception),
         "log": of("Log.entryAdded", logged),
         "dropped": w.dropped,
-    }))
+    })
 }
 
 /// One request a page made, or one socket it opened, as its `Network`
@@ -1105,6 +1128,39 @@ mod tests {
         assert!(!format!("{all:?}").contains("one-time-secret"), "a ticket's secret is never said");
         // an event for a request it never saw sent is no request
         assert!(requests(&[answered("9", 500, "r9")]).is_empty());
+    }
+
+    /// Goal: a FAIL's detail never says a ticket's secret, which signs a
+    /// browser in until it is redeemed or expires (a ticket whose first
+    /// navigation failed is still good). Method: a failed ticket, its URL in
+    /// the browser's log, its text, the console, an exception and an error's
+    /// body, one long enough that a cut before the secret was hidden would
+    /// keep part of it; then the whole detail, as `Suite::fail` prints it,
+    /// read for any piece of the secret.
+    #[test]
+    fn a_page_says_nothing_of_its_ticket() {
+        let secret = "0123456789abcdef".repeat(3);
+        let url = format!("https://c-1--preview.finite.build/__ticket?t={secret}&next=%2Fp%2F6080%2F%3Fagent%3Da--k3x9");
+        assert_eq!(ticket_secret(&url), Some(secret.as_str()));
+        assert_eq!(ticket_secret("https://c-1--preview.finite.build/__ticket?next=%2F"), None, "a ticket's URL with no secret");
+        assert_eq!(ticket_secret("https://c-1--preview.finite.build/__ticket?t=&next=%2F"), None);
+        let events = vec![
+            json!({ "method": "Network.requestWillBeSent", "params": { "requestId": "1", "request": { "method": "GET", "url": url } } }),
+            json!({ "method": "Network.loadingFailed", "params": { "requestId": "1", "errorText": format!("net::ERR_FAILED {url}") } }),
+            json!({ "method": "Log.entryAdded", "params": { "entry": { "level": "error", "text": format!("Failed to load resource: {url}"), "url": url } } }),
+            json!({ "method": "Runtime.consoleAPICalled", "params": { "type": "error", "args": [{ "type": "string", "value": format!("opened {url}") }] } }),
+            json!({ "method": "Runtime.exceptionThrown", "params": { "exceptionDetails": { "text": "Uncaught", "exception": { "description": format!("Error: {url}") } } } }),
+        ];
+        let w = Watched { events, dropped: 0 };
+        let refused = Request { id: "1".into(), what: format!("GET {url}"), status: Some(502), failed: None, closed: false, ray: Some("r1".into()) };
+        let body = format!("{}{secret}", "x".repeat(BODY_MAX - 20));
+        let said = said_loading(&w, &[(refused, body)], &secret).to_string();
+        for piece in secret.as_bytes().windows(12) {
+            let piece = std::str::from_utf8(piece).expect("hex");
+            assert!(!said.contains(piece), "the detail says {piece:?} of the ticket's secret: {said}");
+        }
+        assert!(said.contains("error: Failed to load resource: https://c-1--preview.finite.build/__ticket?t=<ticket>&next="), "the log says the ticket was what failed: {said}");
+        assert!(said.contains("GET /__ticket failed net::ERR_FAILED"), "{said}");
     }
 
     /// The page's sample parses; nothing drawn yet is no frame.
