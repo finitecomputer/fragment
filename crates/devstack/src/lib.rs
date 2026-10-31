@@ -902,14 +902,16 @@ mod tests {
         assert_eq!(env("WRANGLER_SEND_METRICS"), Some(PathBuf::from("false")));
     }
 
-    /// A picked port is below the kernel's ephemeral range, and free: it binds.
+    /// A picked port is below the kernel's ephemeral range. It was free as
+    /// it was picked (`free_port` binds it to see); binding it again here
+    /// would test only that no other process took it since, which nothing
+    /// can promise on a shared machine (this test once failed so).
     #[test]
-    fn a_picked_port_is_free_and_below_the_ephemeral_range() {
+    fn a_picked_port_is_below_the_ephemeral_range() {
         let ephemeral = ephemeral_ports_from().expect("the ephemeral range");
         for _ in 0..32 {
             let port = free_port().expect("a free port");
             assert!((PICKED_PORTS_FROM..ephemeral).contains(&port), "{port} is below {ephemeral}");
-            TcpListener::bind(("127.0.0.1", port)).expect("the picked port binds");
         }
     }
 
