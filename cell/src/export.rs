@@ -51,6 +51,7 @@ use crate::principal::PrincipalCell;
 use crate::registry::calls::{self, By};
 use crate::routed::{Routed, Signed};
 use crate::{ask_registry, js, read_body};
+use fragment_core::gather::Gathered;
 
 /// A request to start or read one carries no body.
 const BODY_MAX_BYTES: usize = 1024;
@@ -896,7 +897,7 @@ impl PrincipalCell {
             self.upload_part(&mut run, last).await?;
         }
         let kept = self.rows_of::<Value>("SELECT part, etag FROM export_parts WHERE export = ?", vec![run.id.as_str().into()])?;
-        let mut parts: BTreeMap<u32, String> = kept.iter().filter_map(|p| Some((p["part"].as_u64()? as u32, p["etag"].as_str()?.to_string()))).collect();
+        let mut parts: BTreeMap<u32, String> = kept.iter().filter_map(|p| Some((p["part"].as_u64()? as u32, p["etag"].as_str()?.to_string()))).gathered();
         parts.extend(run.new_parts.iter().cloned());
         let parts: Vec<(u16, String)> = parts.into_iter().filter(|(n, _)| *n <= run.job.parts).map(|(n, e)| (n as u16, e)).collect();
         if parts.len() as u32 != run.job.parts {
@@ -978,7 +979,8 @@ impl PrincipalCell {
                 At::Plan => self.plan(run).await?,
                 At::Owners { next } => self.owners(run, next, deadline).await?,
                 At::Readme => {
-                    self.entry(run, &core::readme_path(), core::README.as_bytes(), false).await?;
+                    let readme = crate::assets::read(&self.env, &fragment_templates::EXPORT_README).await?;
+                    self.entry(run, &core::readme_path(), &readme, false).await?;
                     run.job.at = At::Manifest;
                 }
                 At::Manifest => {

@@ -533,7 +533,7 @@ impl Catalog {
             if let Some(h) = p.hosts.iter().find(|h| !valid_host(h)) {
                 return Err(CatalogError::Hosts { provider, why: format!("{h:?} is not a lower-case host name") });
             }
-            p.hosts.sort();
+            p.hosts.sort_unstable();
             p.hosts.dedup();
             check_placements(p).map_err(|why| CatalogError::Placement { provider: provider.clone(), why })?;
             if p.env.is_empty() || p.env.len() > ENV_MAX {
@@ -609,7 +609,7 @@ impl Catalog {
     /// Every host any provider names, each once: what the swap intercepts.
     pub fn hosts(&self) -> Vec<String> {
         let mut hosts: Vec<String> = self.providers.iter().flat_map(|p| p.hosts.iter().cloned()).collect();
-        hosts.sort();
+        hosts.sort_unstable();
         hosts.dedup();
         hosts
     }
@@ -618,7 +618,7 @@ impl Catalog {
     /// given (so an image can pass them all through, whichever it holds).
     pub fn env_names(&self) -> Vec<String> {
         let mut names: Vec<String> = self.providers.iter().flat_map(|p| p.env.iter().cloned()).collect();
-        names.sort();
+        names.sort_unstable();
         names
     }
 

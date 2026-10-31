@@ -549,6 +549,7 @@ fn check() -> Result<()> {
         .current_dir(&root))?;
     run(Command::new("cargo")
         .args(["clippy", "--target", "wasm32-unknown-unknown", "--", "-D", "warnings"])
+        .env("CARGO_ENCODED_RUSTFLAGS", build::CELL_TARGET_FLAGS.join("\x1f"))
         .current_dir(Path::new(&devstack::cell_dir())))
 }
 

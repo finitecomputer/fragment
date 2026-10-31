@@ -70,6 +70,7 @@ use serde_json::{json, Map, Value};
 
 use crate::price::{ModelPrice, PriceBook, TokenPrices, Usage};
 use crate::steps::AiText;
+use crate::gather::Gathered;
 
 /// GLM-5.3 Flash and DeepSeek V4 Flash, as Workers AI's catalog names
 /// them: each id once, each role below naming its model.
@@ -301,7 +302,7 @@ pub const CLIENT_KEYS: [&str; 14] = [
 /// and the model's `id`.
 pub fn openai_request(input: &Value, id: &str, body: Option<&Map<String, Value>>) -> Value {
     let input = input.as_object().expect("a bounded input is an object");
-    let mut request: Map<String, Value> = input.iter().filter(|(k, _)| CLIENT_KEYS.contains(&k.as_str())).map(|(k, v)| (k.clone(), v.clone())).collect();
+    let mut request: Map<String, Value> = input.iter().filter(|(k, _)| CLIENT_KEYS.contains(&k.as_str())).map(|(k, v)| (k.clone(), v.clone())).gathered();
     for (k, v) in body.into_iter().flatten() {
         assert!(!ROUTE_KEYS.contains(&k.as_str()), "a slot's body names none of the route's keys (`check`)");
         request.insert(k.clone(), v.clone());

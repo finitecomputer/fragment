@@ -205,7 +205,7 @@ pub mod blessed;
 #[cfg(feature = "platform")]
 pub fn release_files() -> Vec<&'static File> {
     let templates = blessed::BLESSED.iter().filter_map(|n| blessed::template(n)).chain(CATALOG);
-    let all = templates.flat_map(|t| t.files.iter()).chain(SHELL).chain(BROWSER.iter().copied()).chain([&SKILL_MD, &GUIDE_MD]);
+    let all = templates.flat_map(|t| t.files.iter()).chain(SHELL).chain(BROWSER.iter().copied()).chain([&SKILL_MD, &GUIDE_MD, &EXPORT_README]);
     let mut seen = std::collections::BTreeSet::new();
     all.filter(|f| seen.insert(f.sha256)).collect()
 }
@@ -312,6 +312,7 @@ pub(crate) mod tests {
         assert!(SHELL.windows(2).all(|w| w[0].path < w[1].path), "the shell's files are in path order");
         check("cli/SKILL.md", &SKILL_MD, &std::fs::read(repo().join("cli/SKILL.md")).unwrap());
         check("cli/GUIDE.md", &GUIDE_MD, &std::fs::read(repo().join("cli/GUIDE.md")).unwrap());
+        check("crates/core/src/export_readme.md", &EXPORT_README, &std::fs::read(repo().join("crates/core/src/export_readme.md")).unwrap());
         assert!(shell("index.html").is_some() && shell("shell.js").is_some() && shell("nope.js").is_none());
         let count = |dir: &str| walkdir(&repo().join(dir));
         assert_eq!(SHELL.len(), count("cell/shell"), "every file of the shell is indexed");

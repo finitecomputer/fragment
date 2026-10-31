@@ -514,6 +514,7 @@ mod tests {
         }
         f.write("cli/SKILL.md", "skill\n");
         f.write("cli/GUIDE.md", "guide\n");
+        f.write("crates/core/src/export_readme.md", "readme\n");
         let manifest = ["--manifest-path", "crates/templates/Cargo.toml"];
         let platform = ["--manifest-path", "crates/templates/Cargo.toml", "--features", "platform"];
         f.commit();
