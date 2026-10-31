@@ -2196,7 +2196,7 @@ Embeddings (fragment_core::embed; the search stack's model):
   run and the space their vectors are in, `{provider, model, dimensions,
   version?, max_input_tokens?, private?}` (`key` and `price` as any slot
   on an OpenAI-compatible API names them; `max_input_tokens`, the tokens
-  of an input its model reads, 512 unnamed). Unnamed, BGE-M3 on Workers
+  of an input its model reads, 128 to 32,768, 512 unnamed). Unnamed, BGE-M3 on Workers
   AI (`@cf/baai/bge-m3`, 1,024 dimensions, its 512-token window); a
   self-hosted deployment names a model on its own
   machines, an OpenAI-compatible `POST <base_url>/embeddings`. It is no
