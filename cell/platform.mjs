@@ -272,6 +272,8 @@ class Job {
     // how the run started (call, job, cron, channel, files), and where
     this.via = meta.via;
     this.fragment = meta.fragment;
+    // a connector's door, while it is one: {relayed, to} (docs/api.md, "An agent's doors")
+    this.door = meta.door ?? null;
     this.#channels = new Set(meta.channels || []);
     this.#results = results;
     this.#onStep = onStep;

@@ -669,6 +669,8 @@ impl FragmentCell {
                     "via": run.via.as_str(),
                     "fragment": self.name()?,
                     "channels": self.declared_channels()?.keys().collect::<Vec<_>>(),
+                    // a connector's binding, its door's (doors.rs), or null
+                    "door": self.job_door()?,
                 });
                 let results: Vec<Value> = results.iter().map(|r| serde_json::to_value(r).expect("a step result serializes")).collect();
                 let answer = facet.call("__job", &[op.as_str().into(), input, meta, Value::Array(results)]).await.map_err(|e| match e.code {
@@ -985,12 +987,19 @@ impl FragmentCell {
         for name in &in_url {
             opened.insert(name.clone(), self.fill(name, &url).await?);
         }
-        let url = fragment_core::secrets::fill_url(&url, |name| opened.get(name).cloned().ok_or_else(|| format!("{{{{{name}}}}} unopened"))).map_err(|why| match why {
-            fragment_core::secrets::UrlUnfilled::Value(why) => permanent(why),
-            fragment_core::secrets::UrlUnfilled::Moved => permanent("a secret's value would change where this fetch goes (its host, or its path's segments or query's parameters): it is not sent"),
-        })?;
-        // what a failure says names the URL's secrets as the job wrote them
-        let redact = |message: String| opened.iter().fold(message, |m, (name, secret)| m.replace(&fragment_core::secrets::url_encoded(secret), &format!("{{{{{name}}}}}")).replace(secret.as_str(), &format!("{{{{{name}}}}}")));
+        // a URL that names no secret goes as the job wrote it
+        let url = if opened.is_empty() {
+            url
+        } else {
+            fragment_core::secrets::fill_url(&url, |name| opened.get(name).cloned().ok_or_else(|| format!("{{{{{name}}}}} unopened"))).map_err(|why| match why {
+                fragment_core::secrets::UrlUnfilled::Value(why) => permanent(why),
+                fragment_core::secrets::UrlUnfilled::Moved => permanent("a secret's value would change where this fetch goes (its host, or its path's segments or query's parameters): it is not sent"),
+            })?
+        };
+        // what goes back to the job names the URL's secrets as it wrote them:
+        // a failure's message, and an answer that echoes its URL (a redirect's
+        // `location`, an error page)
+        let redact = |text: String| opened.iter().fold(text, |m, (name, secret)| m.replace(&fragment_core::secrets::url_encoded(secret), &format!("{{{{{name}}}}}")).replace(secret.as_str(), &format!("{{{{{name}}}}}")));
         if !matches!(method, Method::Get | Method::Head) && !f.headers.keys().any(|k| k.eq_ignore_ascii_case(IDEMPOTENCY_HEADER)) {
             let key = format!("{}-s{index}", self.run_key(run.id).map_err(|e| StepFail::Retry(e.message))?);
             headers.set(IDEMPOTENCY_HEADER, &key).map_err(|e| permanent(e.to_string()))?;
@@ -1017,8 +1026,8 @@ impl FragmentCell {
         if answer.cut {
             return Err(permanent(format!("{host} answered more than {max} bytes; a fetch reads at most that")));
         }
-        let out_headers: Map<String, Value> = answer.headers.entries().map(|(k, v)| (k.to_ascii_lowercase(), Value::String(v))).collect();
-        Ok(json!({ "status": status, "headers": out_headers, "body": String::from_utf8_lossy(&answer.body) }))
+        let out_headers: Map<String, Value> = answer.headers.entries().map(|(k, v)| (k.to_ascii_lowercase(), Value::String(redact(v)))).collect();
+        Ok(json!({ "status": status, "headers": out_headers, "body": redact(String::from_utf8_lossy(&answer.body).into_owned()) }))
     }
 
     /// `job.publish(channel, body, kind)`: keyed by (run, step), so a
