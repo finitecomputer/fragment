@@ -1,5 +1,4 @@
-//! Jobs, triggers, and the inbox (docs/MODEL.md, Operations; phase 2
-//! slice D).
+//! Jobs, triggers, and the inbox (docs/api.md, Jobs and triggers).
 //!
 //! A **run** is one execution of an operation outside a request: a job
 //! someone called, or a mutation or job a trigger started. Each run is a

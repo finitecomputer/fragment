@@ -3,7 +3,7 @@
 //! container as `api.fragment.internal` and `model.fragment.internal`
 //! (`--add-host …:host-gateway`), as the Computer DO's intercepts would be.
 //!
-//! Lower rung, labeled so (docs/cloudflare-v1.md, Evaluation): the real
+//! Lower rung, labeled so: the real
 //! images and the real Hermes, but local Docker in place of Containers, and
 //! fakes at the platform's boundary.
 //!

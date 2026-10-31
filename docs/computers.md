@@ -1121,8 +1121,7 @@ expires within 30 days. The container application is the deployment's
     failing, 502: each falls back to Workers AI. Its own
     deadlines: 120 s to a first byte, 600 s of a stream's silence.
   - **Its limit** is its key's grant's: weighted tokens in a 5-hour
-    window, no rate in calls, shared by every call the deployment makes
-    (cloudflare-v1.md, decision 61, sizes it).
+    window, no rate in calls, shared by every call the deployment makes.
 
   **A slot's `images`.** Either kind of slot may say `"images": true`:
   its model reads images. Only the fallback's is read, for now: a
@@ -1363,7 +1362,7 @@ expires within 30 days. The container application is the deployment's
   is charged after its answer at what the model counted (decision 62).
 - `POST http://model.fragment.internal/v1/audio/transcriptions`,
   OpenAI's multipart shape with `model` `whisper`: a voice memo
-  transcribed (decision 9, its status). It is the platform's
+  transcribed (decision 9). It is the platform's
   transcription route as the agent: Workers AI's Whisper, at most 10 MiB
   of audio, metered to the agent's owner at 46.63 neurons a minute of
   audio (docs/api.md, Models).

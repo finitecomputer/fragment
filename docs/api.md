@@ -190,8 +190,8 @@ answers; requests may use either); the router asks the registry which
 identity holds it, live, on every signed request to the control API,
 and passes the fragment both. A key no one registered, or a revoked one,
 is 401; when the registry cannot answer, a signed request is 503
-`registry_unavailable`, never let through (docs/finite-integration.md,
-rule 7). Control routes need NIP-98; site requests may carry it. A site
+`registry_unavailable`, never let through (docs/cloudflare-v1.md,
+R15, rule 7). Control routes need NIP-98; site requests may carry it. A site
 request's signature (checked by the router: a bad one is 401) or session
 cookie is resolved only when the answer depends on who is asking: a page
 or a file that everyone who may see the fragment gets alike (a `public`
@@ -1487,7 +1487,7 @@ row, and no `ops` record, so the same id runs again, with any input
 (never 409 or a replay), and it may not publish, push, or write files
 (422, rolled back: their outbox is the ledger row); its writes, the
 role and schema checks, the 16 MiB cap, and the live views' change
-signal stay (docs/MODEL.md). For a "latest value" write sent often,
+signal stay. For a "latest value" write sent often,
 whose ids would fill the database within the week. A query's
 or a mutation's result is at most 1 MiB of JSON
 (`limits::RESULT_MAX_BYTES`) of whole characters: a larger one is refused
@@ -2441,7 +2441,7 @@ book | paid-calls {max} | legacy-seat {seat, seq} | fail-grants {times}}`.
 A seat is what lets a person create (decisions 49 and 51):
 `seat_always_on` ($200, a computer that stays awake unless its holder
 lets it sleep), the one seat sold, or `seat` (a computer that sleeps), an
-operator's comp only since 2026-10-15 (decision 25's status). A body
+operator's comp only since 2026-10-15 (decision 25). A body
 that names a kind to buy (Checkout's, an org admin's seat, a trial code)
 takes `seat_always_on`, its default; `seat` is 400 (not sold). Every seat is in an org, the one
 who pays; a person is in at most one org and holds at most one seat. An

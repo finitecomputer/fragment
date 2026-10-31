@@ -22,8 +22,6 @@ platform concept.
 - `docs/published-fragments.md`: primitives that must stay expressible.
 - `docs/technical-debt-ledger.md`: the only place shortcuts may live;
   include the condition for removing each one.
-- `docs/finite-integration.md`: integration concerns and their current
-  stand-ins; update the relevant row when changing one.
 - Engineering style: `/Users/futurepaul/dev/finite/engineering-style/engineering-style.md`
   on the Mac: hard cuts, limits, release assertions, typed errors, and
   valid/invalid/replay/restart tests. Tooling is Rust.

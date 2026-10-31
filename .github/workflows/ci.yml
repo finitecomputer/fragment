@@ -1,9 +1,8 @@
 # fragment CI on Linux: `cargo xtask check` (every first-party JavaScript
 # file through `node --check` on the pinned Node, host tests and clippy on
 # host and wasm, warnings denied), and `cargo xtask e2e`: the cell under
-# `wrangler dev` (workerd), with fakes only at the vendor boundaries
-# (docs/cloudflare-v1.md, phase 2). The celld e2e on macOS is at tag
-# celld-final.
+# `wrangler dev` (workerd), with fakes only at the vendor boundaries.
+# The celld e2e on macOS is at tag celld-final.
 #
 # The e2e runs in four shards (crates/e2e/src/lanes/mod.rs, SHARDS: every
 # section in exactly one, a host test checks), each on a runner of its own
