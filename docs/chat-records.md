@@ -474,8 +474,9 @@ id `hello`, asking the agent to say hello. So the agent speaks first.
 - The agent takes it as a turn in `chat`, asked as the agent that
   answered (`by`, called `name`), and its owner's to stop as a routine
   is. `text` names the question and carries what the asked turn said
-  (its replies but interim ones, bounded); `outcome` and `error` are its
-  end's.
+  (its replies but interim ones, bounded; its interim ones when it said
+  nothing else, as a turn that answered and then worked: #720);
+  `outcome` and `error` are its end's.
 - The turn is `hop` hand-offs deep, one past the turn that answered, and
   spends `chat`'s budget. `refused`: the question was never taken, and
   this turn is recorded refused, never run.

@@ -49,7 +49,8 @@ computer's own:
   `/f/{f}/__live` socket;
 - what it writes: `POST …/channels/chat`, `…/channels/work` and its own
   `…/channels/tasks` (an ask's answer), `PUT …/channels/chat/draft`,
-  `PUT` and `GET …/blobs/{sha256}`;
+  `PUT` and `GET …/blobs/{sha256}` (an upload refused, as a viewer's in
+  a connector's chat, sends the reply's words alone, saying so);
 - for its owner: `GET` and `POST /api/fragments?for=` (its home, its
   SimpleX chat), and on its own fragment `GET …/status` (its name) and
   `GET …/file?path=agent.json` (its home and runtime).

@@ -1864,7 +1864,7 @@ fn a_question_is_answered_back_where_it_was_asked() {
     let t = started(&s).expect("rowan's turn");
     assert_eq!((t.asker.as_str(), t.text.as_str()), ("npub1juniper", "What is the weather?"), "a message like any");
     assert_eq!(e.state().turns[&t.turn].hop, 1);
-    assert_eq!(e.state().turns[&t.turn].ret, Some(Return { agent: juniper.fragment.clone(), chat: HOME.into(), name: "Rowan".into(), by: rowan.identity.clone(), said: String::new(), files: 0 }));
+    assert_eq!(e.state().turns[&t.turn].ret, Some(Return { agent: juniper.fragment.clone(), chat: HOME.into(), name: "Rowan".into(), by: rowan.identity.clone(), said: String::new(), files: 0, narrated: String::new() }));
     // juniper's turn ends: the answer needs no one waiting
     ev(&mut e, Event::End { turn: asking, outcome: Outcome::Idle }, T0 + 2);
 
@@ -2018,6 +2018,46 @@ fn an_asked_turn_answers_after_its_agent_leaves() {
     started(&read(&mut e, &rowan, "talk--k3x9", question(1, "Build it?"), Some(&talk), T0)).expect("rowan's turn");
     let both = e.step(Input::Agents(vec![]), T0 + 1);
     assert!(answers(&both).is_empty() && e.state().turns.is_empty(), "no one to answer: {:?}", both.effects);
+}
+
+/// Goal (#720): an asked turn that answered and then worked (its words
+/// before a tool call, interim, and nothing after it) is answered with
+/// those words, never "said nothing"; one that said more after its work
+/// is answered with that alone, as before; one that said nothing is
+/// answered so. Restart: its narration is the state's (a state from before
+/// holds none, and reads).
+#[test]
+fn an_answer_said_before_its_work_is_the_answer() {
+    let (rowan, juniper) = (agent("rowan"), agent("juniper"));
+    let talk = view(&[&rowan, &juniper]);
+    let mut e = engine(&[rowan.clone(), juniper.clone()]);
+    let work = || ToolStep { tool: "terminal".into(), args: "make".into(), ok: true, excerpt: String::new(), category: crate::records::Category::Shell, evidence: None };
+    let answered_with = |e: &mut Engine, seq: u64, said: &[&str], then_said: Option<&str>| -> String {
+        let t = started(&read(e, &rowan, "talk--k3x9", question(seq, "Build it?"), Some(&talk), T0 + seq * 10)).expect("rowan's turn").turn;
+        for (i, words) in said.iter().enumerate() {
+            ev(e, Event::Reply { turn: t.clone(), part: u32::try_from(i + 1).unwrap(), text: (*words).into() }, T0 + seq * 10 + 1);
+            ev(e, Event::Step { turn: t.clone(), step: work() }, T0 + seq * 10 + 2);
+        }
+        if let Some(last) = then_said {
+            ev(e, Event::Reply { turn: t.clone(), part: u32::try_from(said.len() + 1).unwrap(), text: last.into() }, T0 + seq * 10 + 3);
+        }
+        let end = ev(e, Event::End { turn: t, outcome: Outcome::Idle }, T0 + seq * 10 + 4);
+        answers(&end).remove(0).2["text"].as_str().unwrap().to_string()
+    };
+    let head = "talk--k3x9 (\"Build it?\")";
+    assert_eq!(answered_with(&mut e, 1, &["Done: it built.", "Cleaning up."], None), format!("rowan answered your question in {head}:\n\nDone: it built.\n\nCleaning up."), "its words before its work");
+    assert_eq!(answered_with(&mut e, 2, &["Building."], Some("It built.")), format!("rowan answered your question in {head}:\n\nIt built."), "what it said after, alone");
+    assert_eq!(answered_with(&mut e, 3, &[], None), format!("rowan finished your question in {head} and said nothing."));
+    // restart: the state keeps its narration; one from before reads without
+    let t = started(&read(&mut e, &rowan, "talk--k3x9", question(4, "Build it?"), Some(&talk), T0 + 50)).expect("rowan's turn").turn;
+    ev(&mut e, Event::Reply { turn: t.clone(), part: 1, text: "Done.".into() }, T0 + 51);
+    ev(&mut e, Event::Step { turn: t.clone(), step: work() }, T0 + 52);
+    let saved = serde_json::to_value(e.state()).unwrap();
+    assert_eq!(saved["turns"][&t]["ret"]["narrated"], "Done.");
+    let mut before = saved.clone();
+    before["turns"][&t]["ret"].as_object_mut().unwrap().remove("narrated");
+    let old: State = serde_json::from_value(before).expect("a state from before reads");
+    assert_eq!(old.turns[&t].ret.as_ref().map(|r| r.narrated.as_str()), Some(""));
 }
 
 /// Goal: an answer says how the asked turn ended, and a turn is never run
