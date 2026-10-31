@@ -5,7 +5,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { knowledgeIn, knownAt } from "../shell/launcher.js";
+import { knowledgeIn, knownAt, knownOf } from "../shell/launcher.js";
 
 const row = (name, kind, archived = false) => ({ name, kind, ...(archived ? { archived } : {}) });
 
@@ -29,4 +29,25 @@ test("a brain's page opens in the desktop at that page; an archive's conversatio
   assert.deepEqual(knownAt({ source: "sessions/hermes-20260930_101500_rb12cd.json" }, "sessions"), { chat: "/?s=hermes-20260930_101500_rb12cd" });
   // a source of the archive that is no conversation: its list
   assert.deepEqual(knownAt({ source: "index/chat.json" }, "sessions"), { chat: "/" });
+});
+
+// Alex on #885: the answer comes (200) though a fragment of it failed; that
+// is said, never taken for nothing found.
+const asked = (name, state, message) => ({ name, state, ...(message ? { message } : {}) });
+const hit = (fragment) => ({ fragment, source: "wiki/a.md", title: "A", snippet: "a" });
+
+test("every fragment failed: no hits, each named as not searched", () => {
+  const k = knownOf({ results: [], fragments: [asked("product--c3d4", "failed", "the index did not answer"), asked("sales--p6q7", "failed", "refused")], semantic: "on" });
+  assert.deepEqual(k, { hits: [], unsearched: [{ name: "product--c3d4", message: "the index did not answer" }, { name: "sales--p6q7", message: "refused" }] });
+});
+
+test("some failed, some answered: the hits, and the failed ones named beside them", () => {
+  const k = knownOf({ results: [hit("product--c3d4")], fragments: [asked("product--c3d4", "searched"), asked("sales--p6q7", "failed")], semantic: "on" });
+  assert.deepEqual(k.hits.map((h) => h.fragment), ["product--c3d4"]);
+  assert.deepEqual(k.unsearched, [{ name: "sales--p6q7", message: "" }]);
+});
+
+test("all searched, nothing found, or no index yet: no failure to say (and a fragment gone since is none either)", () => {
+  assert.deepEqual(knownOf({ results: [], fragments: [asked("product--c3d4", "searched"), asked("archive--j2k3", "no_index"), asked("gone--x2y3", "missing"), asked("theirs--z4a5", "denied")], semantic: "on" }), { hits: [], unsearched: [] });
+  assert.deepEqual(knownOf({}), { hits: [], unsearched: [] });
 });

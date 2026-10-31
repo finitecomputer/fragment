@@ -6226,11 +6226,19 @@ const LAUNCHER_STATUS_GEOMETRY: &str = "(() => { const status = document.getElem
 /// brain's page holding the words shows under Knowledge (its title and
 /// section, its snippet, the brain's name), and pressed opens the brain at
 /// that page. Failure: the fan-out refused, Knowledge says so alone and the
-/// start row stays.
+/// start row stays; and an answer that came though a fragment of it failed
+/// (Alex on #885) names that fragment, beside the hits of the rest, or
+/// alone, never as nothing found; one searched and holding nothing shows
+/// no Knowledge.
 fn knowledge_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person, shots: &std::path::Path) -> Result<()> {
     let wait = std::time::Duration::from_secs(30);
     // what the page asks of `POST /api/search`, each body kept
-    const ASKS: &str = "(() => { if (window.__knowledge) return true; window.__knowledge = []; const real = window.fetch; window.fetch = (url, o) => { if (url === '/api/search' && o?.method === 'POST') window.__knowledge.push(JSON.parse(o.body)); return real(url, o); }; return true; })()";
+    const ASKS: &str = "(() => { if (window.__knowledge) return true; window.__knowledge = []; window.__answers = []; const real = window.fetch; window.fetch = async (url, o) => { const r = await real(url, o); \
+        if (url === '/api/search' && o?.method === 'POST') { window.__knowledge.push(JSON.parse(o.body)); r.clone().json().then((a) => window.__answers.push(a), () => window.__answers.push(null)); } return r; }; return true; })()";
+    // the next knowledge answer as the platform gives it, `change` (a
+    // function of it) done to it first: a fragment of it failing
+    let doctor_once = |change: &str| format!("(() => {{ const real = window.fetch; window.fetch = async (url, o) => {{ if (url !== '/api/search' || o?.method !== 'POST') return real(url, o); window.fetch = real; \
+        const a = await (await real(url, o)).json(); ({change})(a); return new Response(JSON.stringify(a), {{ status: 200, headers: {{ 'content-type': 'application/json' }} }}); }}; return true; }})()");
     let launch = |b: &mut Browser, words: &str| -> Result<bool> {
         b.eval(page, "(document.getElementById('search-dialog').open && document.getElementById('search-dialog').close(), true)")?;
         b.eval(page, "(document.getElementById('sidebar-new-chat').click(), true)")?;
@@ -6288,6 +6296,26 @@ fn knowledge_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Per
     let failed = b.until(page, "document.querySelector('.search-known-failed')?.textContent.startsWith('Not searched')", wait);
     let rest = b.eval(page, "!!document.querySelector('#search-results .search-start') && document.getElementById('search-status').textContent === ''")?;
     s.ok("the knowledge question refused, Knowledge says it was not searched and the rest stands", failed && rest == true, b.eval(page, "document.getElementById('search-results').innerText")?);
+    // the answer came, a fragment of it failed: the hits, and that one named
+    b.eval(page, &doctor_once(&format!("(a) => a.fragments.push({{ name: {}, state: 'failed', message: 'the index did not answer' }})", js(&old))))?;
+    launch(b, "ferry timetable")?;
+    let mixed = b.until(page, &format!("!!document.querySelector({}) && document.querySelector('.search-known-failed')?.textContent === 'Not searched: Old notes'", js(&row)), wait);
+    s.ok("an answer that came though one fragment failed shows the others' hits and names the one not searched", mixed, b.eval(page, "document.getElementById('search-results').innerText")?);
+    // every fragment of it failed: no hits, each named, never nothing found
+    b.eval(page, &doctor_once("(a) => { a.results = []; a.fragments = a.fragments.map((f) => ({ ...f, state: 'failed', message: 'the index did not answer' })); }"))?;
+    launch(b, "ferry timetable")?;
+    let all_failed = b.until(page, "document.querySelector('.search-known-failed')?.textContent === 'Not searched: Field notes' && !document.querySelector('.search-known .search-result')", wait);
+    let not_none = b.eval(page, "document.getElementById('search-status').textContent !== 'Nothing found.'")?;
+    s.ok("an answer whose every fragment failed names them as not searched, no hits, and never says nothing was found", all_failed && not_none == true, b.eval(page, "document.getElementById('search-results').innerText")?);
+    // every fragment searched, none holding the words (the meaning leg finds
+    // the nearest whatever is asked, so the answer is made so): no Knowledge
+    let answered = b.eval(page, "window.__answers.length")?.as_u64().unwrap_or(0);
+    b.eval(page, &doctor_once("(a) => { a.results = []; }"))?;
+    launch(b, "ferry timetable")?;
+    let came = b.until(page, &format!("window.__answers.length > {answered}"), wait);
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let quiet = b.eval(page, "(() => { const a = window.__answers.at(-1); return a?.fragments.every((f) => f.state === 'searched') && !document.querySelector('.search-known'); })()")?;
+    s.ok("an answer every fragment searched with no hits shows no Knowledge", came && quiet == true, b.eval(page, "window.__answers.at(-1)?.fragments ?? null")?);
     b.eval(page, "(document.getElementById('search-dialog').close(), true)")?;
     // the brains go, so the desktop is as the steps after it expect: empty
     for name in [&notes, &old] {

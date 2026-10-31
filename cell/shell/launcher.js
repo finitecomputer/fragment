@@ -57,6 +57,18 @@ const KNOWLEDGE_WAIT_MS = 400;
 // (not ones they archived), as `fragment search --all` asks them, in their
 // list's order, KNOWLEDGE_IN_MAX at most.
 export const knowledgeIn = (fragments) => fragments.filter((f) => (f.kind === "brain" || f.kind === "sessions") && !f.archived).map((f) => f.name).slice(0, KNOWLEDGE_IN_MAX);
+// What a knowledge answer says (`POST /api/search`'s `FoundAcross`): its
+// hits, and the fragments it could not search, which Knowledge names
+// (Alex on #885): one whose `state` is `failed` (its index did not answer,
+// or refused), though the answer itself came. One with no index yet
+// (`no_index`), or searched and holding nothing, is no failure; one denied
+// or missing has left the person's list since it was read.
+export function knownOf(answer) {
+  return {
+    hits: answer?.results ?? [],
+    unsearched: (answer?.fragments ?? []).filter((f) => f.state === "failed").map((f) => ({ name: f.name, message: f.message ?? "" })),
+  };
+}
 // Where a knowledge hit opens: a Session Archive's conversation in the
 // middle column, read-only (`/?s=<key>`, session-archive.js; its list when
 // the source is no conversation of it); any other fragment's page (a
@@ -97,7 +109,8 @@ export function createLauncher(shell) {
   let typing = null;
   // The last answers to the words typed: the person's search (`found`), and
   // their knowledge's (`known`: null, nothing to ask; `{pending}`, asked or
-  // about to be; `{hits}`; `{failed}`), each drawn as it comes, the second
+  // about to be; `{hits, unsearched}` (`knownOf`); `{failed}`, the question
+  // refused whole), each drawn as it comes, the second
   // in a box of its own (`knownBox`) so its answer leaves the rows above it,
   // and the one focused, as they are.
   let found = { fragments: [], messages: [] };
@@ -212,16 +225,22 @@ export function createLauncher(shell) {
     drawn = { count, waiting };
     renderKnown();
   }
-  // What they know, below the rest, once it has answered; "Nothing found."
-  // only once both have, and neither found anything.
+  // What they know, below the rest, once it has answered: its hits, and
+  // what was not searched (the question refused, or a fragment of it that
+  // failed), said there alone. "Nothing found." only once both have
+  // answered, all of it searched, and neither found anything.
   function renderKnown() {
     const results = $("search-results");
     const hits = (known?.hits ?? []).filter((h) => byName(h.fragment));
-    const rows = hits.length ? [el("h3", null, "Knowledge"), ...hits.map(knownRow)] : known?.failed ? [el("h3", null, "Knowledge"), el("p", "search-known-failed", `Not searched: ${known.failed}`)] : [];
+    const unsearched = known?.unsearched ?? [];
+    const failed = known?.failed ? `Not searched: ${known.failed}` : unsearched.length ? `Not searched: ${unsearched.map((u) => titleOf(u.name)).join(", ")}` : "";
+    const note = failed && el("p", "search-known-failed", failed);
+    if (note && unsearched.length) note.title = unsearched.map((u) => `${titleOf(u.name)}: ${u.message}`).join("\n");
+    const rows = hits.length || note ? [el("h3", null, "Knowledge"), ...hits.map(knownRow), ...(note ? [note] : [])] : [];
     knownBox.replaceChildren(...rows);
     if (rows.length && input.value.trim()) results.append(knownBox);
     else knownBox.remove();
-    const none = !drawn.count && !hits.length && !known?.pending && !canLaunch() && !drawn.waiting;
+    const none = !drawn.count && !hits.length && !failed && !known?.pending && !canLaunch() && !drawn.waiting;
     $("search-status").textContent = [launchError, input.value.trim() && none ? "Nothing found." : ""].filter(Boolean).join(" ");
     fitSearch();
   }
@@ -384,7 +403,7 @@ export function createLauncher(shell) {
     }
     let answer;
     try {
-      answer = { hits: (await api("POST", "/api/search", { q: words.join("").trim(), in: names, limit: KNOWLEDGE_SHOWN })).results ?? [] };
+      answer = knownOf(await api("POST", "/api/search", { q: words.join("").trim(), in: names, limit: KNOWLEDGE_SHOWN }));
     } catch (e) {
       answer = { failed: e.message };
     }
