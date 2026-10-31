@@ -53,6 +53,22 @@ const KNOWLEDGE_Q_MAX_BYTES = 1024;
 const KNOWLEDGE_SHOWN = 5;
 const KNOWLEDGE_WAIT_MS = 400;
 
+// What the knowledge question asks: the person's brains and Session Archive
+// (not ones they archived), as `fragment search --all` asks them, in their
+// list's order, KNOWLEDGE_IN_MAX at most.
+export const knowledgeIn = (fragments) => fragments.filter((f) => (f.kind === "brain" || f.kind === "sessions") && !f.archived).map((f) => f.name).slice(0, KNOWLEDGE_IN_MAX);
+// Where a knowledge hit opens: a Session Archive's conversation in the
+// middle column, read-only (`/?s=<key>`, session-archive.js; its list when
+// the source is no conversation of it); any other fragment's page (a
+// brain's) in the desktop, at that page (its viewer's hash route).
+export function knownAt(hit, kind) {
+  if (kind === "sessions") {
+    const key = hit.source.match(/^sessions\/(.+)\.json$/)?.[1];
+    return { chat: key ? `/?s=${encodeURIComponent(key)}` : "/" };
+  }
+  return { app: `/#/${encodeURIComponent(hit.source)}` };
+}
+
 /**
  * Makes the launcher, its dialog `#search-dialog` (index.html), and opens it
  * from `#sidebar-new-chat`, `#new-chat` and ⌘K. `shell`: the shell's
@@ -119,10 +135,9 @@ export function createLauncher(shell) {
   // column, read-only (`/?s=<key>`, session-archive.js).
   function openKnown(hit) {
     closeSearch();
-    if (byName(hit.fragment)?.kind === "sessions") {
-      const key = hit.source.match(/^sessions\/(.+)\.json$/)?.[1];
-      openChat(hit.fragment, true, key ? `/?s=${encodeURIComponent(key)}` : "/");
-    } else openApp(hit.fragment, `/#/${encodeURIComponent(hit.source)}`);
+    const at = knownAt(hit, byName(hit.fragment)?.kind);
+    if (at.chat) openChat(hit.fragment, true, at.chat);
+    else openApp(hit.fragment, at.app);
     leaveSidebar();
   }
   function knownRow(hit) {
@@ -357,13 +372,10 @@ export function createLauncher(shell) {
       }
     }
   }
-  // What the person knows: their brains and Session Archive (not ones they
-  // archived), as `fragment search --all` asks them, at most
-  // KNOWLEDGE_IN_MAX, in the order their list has them; none, nothing asked.
-  const knowledgeIn = () => state.fragments.filter((f) => (f.kind === "brain" || f.kind === "sessions") && !f.archived).map((f) => f.name).slice(0, KNOWLEDGE_IN_MAX);
+  // What the person knows (`knowledgeIn`); none, nothing asked.
   async function searchKnowledge() {
     const mine = ++knowAsked;
-    const names = knowledgeIn();
+    const names = knowledgeIn(state.fragments);
     const words = [...input.value.trim()];
     while (new TextEncoder().encode(words.join("")).length > KNOWLEDGE_Q_MAX_BYTES) words.pop();
     if (!names.length || !words.join("").trim()) {
@@ -527,7 +539,7 @@ export function createLauncher(shell) {
     ++knowAsked;
     clearTimeout(knowing);
     found = { fragments: [], messages: [] };
-    known = input.value.trim() && knowledgeIn().length ? { pending: true } : null;
+    known = input.value.trim() && knowledgeIn(state.fragments).length ? { pending: true } : null;
     renderFound();
     if (input.value.trim()) {
       typing = setTimeout(search, 150);
