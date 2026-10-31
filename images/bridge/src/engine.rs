@@ -1419,9 +1419,13 @@ impl Engine {
             order: cut.order,
             phase: Phase::Queued,
             last_ms: self.now,
+            // its own bounds, as any turn's: they bound the records under a
+            // turn's id (the rest counted, not posted), not its work, and a
+            // continuation is never continued
             steps: 0,
             replies: 0,
             interim: 0,
+            calls: 0,
             last_part: 0,
             prompts: Vec::new(),
             stop_requested: false,

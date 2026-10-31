@@ -3158,7 +3158,10 @@ async fn a_turn_cut_while_its_tool_runs_is_continued_once() {
     assert_eq!(again, 0, "the cut command is never run again: the model saw {saw:#?}");
     let (asked, _) = asked_with(&calls, "I restarted while you were working").unwrap_or_else(|| panic!("a model request for the continuation; it saw {saw:#?}"));
     assert!(asked.starts_with("[Recent channel messages]\n"), "its note first: {asked:?}");
-    for said in ["Your previous turn in this chat was cut short", &format!("It was answering: “run: {command}”"), "[New message]\n[your computer] I restarted while you were working"] {
+    // the cut command, asked for and never ended (its intent, phase 4's
+    // first half), named as one that may or may not have run
+    let unended = format!("check before running any again: terminal {command}");
+    for said in ["Your previous turn in this chat was cut short", &format!("It was answering: “run: {command}”"), &unended, "[New message]\n[your computer] I restarted while you were working"] {
         assert!(asked.contains(said), "{said:?} in the model's request: {asked:?}");
     }
 }

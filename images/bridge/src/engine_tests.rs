@@ -3154,6 +3154,11 @@ fn a_cut_turn_is_continued_once() {
     w.start(None);
     let cut = w.say("npub1paul", "deploy the site");
     w.answer_all();
+    // it asks for every call its bound records, then runs one
+    let call = |n: u32| records::Call { response: format!("r{n}"), position: 0, tool_call_id: "call_0".into(), tool: "terminal".into(), args: "make deploy".into(), category: records::Category::Shell };
+    for n in 0..limits::STEPS_PER_TURN_MAX {
+        w.step(heard(Event::Called { turn: cut.clone(), call: call(n) }));
+    }
     w.did(&cut, "terminal", "make deploy");
     w.answer_all();
     let state = w.latest();
@@ -3162,6 +3167,10 @@ fn a_cut_turn_is_continued_once() {
     w.answer_all();
     let c = records::continuation_id(&cut);
     assert_eq!((w.runs_of(&cut), w.runs_of(&c)), (1, 1), "the cut turn never again; its continuation once");
+    // its own bounds: a call it asks for is recorded, the cut turn's spent
+    w.step(heard(Event::Called { turn: c.clone(), call: call(0) }));
+    w.answer_all();
+    assert_eq!(w.journal.work(&c, "turn.call").len(), 1, "its intent recorded");
     assert!(w.note_of(&c).is_some_and(|n| n.contains("“deploy the site”") && n.contains("terminal make deploy")), "told what was cut");
     assert_eq!(w.journal.work(&c, "turn.notice"), vec![records::turn_notice(&c, NoticeCategory::Info, CONTINUE_NOTICE)]);
     // the continuation is cut in its turn: it is never continued

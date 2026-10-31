@@ -176,6 +176,9 @@ async fn a_reused_call_id_is_another_call_across_a_crash() {
         assert_eq!(said(&mut observer, &frame.to_string()).await, "called");
     }
     fake.until(10_000, "the three intents recorded", |w| w.bodies(&chat, "work", "turn.call").len() >= 3).await;
+    // cut while it waits on its card: never continued (its answer is its
+    // next turn), so the next message is told what was cut
+    fake.until(10_000, "its card", |w| !w.bodies(&chat, "work", "turn.prompt").is_empty()).await;
     bridge.kill().await;
     drop(observer);
     fake.until(10_000, "its sockets closed", |w| w.live_sockets() == 0).await;
