@@ -9,6 +9,7 @@ step Fragment 2 listed 464da803484efc23
 step Fragment 3 record_schedules 90308e727fc4ce8b
 step Fragment 4 search_forget 06450019092243ac
 step Fragment 5 ended_search aad1c18c55f08519
+step Fragment 6 installed_forward_only ca46b28bd2c487d0
 step Registry 1 baseline fd5a79e5c834a15d
 step Registry 2 connection_signins e9d1f862c2e3e4ed
 step Registry 3 trial_hold_attempts 07e123e05a049abe

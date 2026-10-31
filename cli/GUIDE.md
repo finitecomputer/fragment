@@ -490,7 +490,11 @@ export class App extends DurableObject {
   `job.ai.video({prompt, path, duration, resolution, aspect_ratio})` makes
   an MP4 (HappyHorse 1.0: 3 to 15 seconds, 5 by default; `720p` or
   `1080p`) written to `path`, which ends in `.mp4`; none where your
-  models are private. You pay for them, from your ledger (below). GLM
+  models are private. You pay for them, from your ledger (below): an
+  image about a tenth of a cent, a video $0.14 a second at 720p and
+  $0.28 at 1080p, plus the platform's fee and margin. Before you build a
+  fragment that makes images or videos, tell the person what each costs
+  and that its owner pays for every one anyone makes in it. GLM
   can spend a small `max_tokens` thinking: `reasoning_effort` is `low`
   unless you ask for `high`. A text step
   answers `{text, message, finish_reason, model, tier, usage, timing}`
@@ -838,9 +842,9 @@ invites, visibility, and tokens.
 You pay for what is yours: your fragments' hosting (requests, storage, a
 code version's day) and their AI (`job.ai`), whoever started the run, and
 your agents' model calls, whoever asked them. A seat includes credit
-each month; operators grant more. A paid step reserves its worst case
-first, and one your ledger cannot cover is held, saying why: replay it
-after a top-up or next month.
+each month; operators grant more. A paid step is charged once it
+answers; one started when your ledger is out of credit is held, saying
+why: replay it after a top-up or next month.
 
 - At zero, agents and AI stop; your fragments keep serving and taking
   writes.

@@ -35,7 +35,7 @@ use serde_json::{json, Value};
 
 use sha2::{Digest, Sha256};
 
-use super::jobs::records;
+use super::jobs::{events, records};
 use super::ledger::{charged, entries, quiet};
 use crate::api::{Api, Call, Socket};
 use super::credentials::{model_checks, placeholder, swap_checks, Swapping, MODEL_CHECKS, SWAP_CHECKS};
@@ -1049,25 +1049,49 @@ fn telegram_checks(s: &mut Suite, api: &Api, c: &Doors, fetched: &dyn Fn(&Suite,
         json!({ "role": role_of(c.identity), "sent": tg.sent() }),
     );
 
-    // a fork lets its binding go for good: its own code, then the template
-    // again, and it is no door
+    // its own template deployed again (a title its owner gave it) is still
+    // the connector: its secrets stay
+    let secrets = || -> Vec<String> {
+        let r = api.signed(c.owner, "GET", &format!("/api/f/{name}/secrets"), None).ok();
+        r.and_then(|r| r.body["secrets"].as_array().map(|a| a.iter().filter_map(|s| s["name"].as_str().map(str::to_string)).collect())).unwrap_or_default()
+    };
+    let installed = |s: &Suite, tip: &str| s.eventually(wake, || api.status(c.owner, &name).is_ok_and(|r| r.body["code"]["sha"] == tip));
+    let ours = ["TELEGRAM_BOT_TOKEN", "TELEGRAM_WEBHOOK_SECRET"];
+    s.commit(&made.body, &[("fragment.json", Some(br#"{"template":"telegram","meta":{"title":"My Telegram"}}"#.as_slice()))]);
+    let tip = s.deploy(&made.body);
+    let again = installed(s, &tip);
+    s.ok("its own template deployed again is still the connector, its secrets kept", again && secrets() == ours, json!({ "installed": again, "secrets": secrets() }));
+
+    // a fork lets its binding go for good, and its secrets (Paul,
+    // 2026-10-31: the new code, and its editors, send none of them): its own
+    // code, then the template again, and it is no door, with none back
     let r = api.signed(c.owner, "POST", &format!("/api/f/{name}/door"), Some(&json!({ "act": "link", "agent": c.agent })))?;
     anyhow::ensure!(r.status == 200, "bound again: {r}");
     let own = br#"import { DurableObject } from "cloudflare:workers";
 export class App extends DurableObject { noop() { return {}; } }
 "#;
     s.commit(&made.body, &[("fragment.json", Some(br#"{"operations":{"noop":{"kind":"mutation"}}}"#.as_slice())), ("app.mjs", Some(own.as_slice()))]);
-    s.deploy(&made.body);
+    let tip = s.deploy(&made.body);
+    let forked = installed(s, &tip);
     let unmade = s.eventually(wake, || api.signed(c.owner, "GET", &format!("/api/f/{name}/door"), None).is_ok_and(|r| r.body["bound"].is_null()));
+    let event = events(api, c.owner, &name).into_iter().find(|e| e["kind"] == "door.unmade");
+    s.ok(
+        "a fork unmakes it and removes its secrets, its event naming them",
+        forked && unmade && secrets().is_empty() && event.as_ref().is_some_and(|e| e["data"]["secrets"] == json!(ours)),
+        json!({ "secrets": secrets(), "event": event }),
+    );
     s.commit(&made.body, &[("fragment.json", Some(br#"{"template":"telegram"}"#.as_slice())), ("app.mjs", None)]);
-    s.deploy(&made.body);
+    let tip = s.deploy(&made.body);
+    let back = installed(s, &tip);
+    // its webhook's secret gone, its inbox takes no delivery at all, the
+    // old secret's or none (403), so nothing comes to publish
     let r = api.signed(c.owner, "POST", &format!("/api/f/{name}/door"), Some(&json!({ "act": "link", "agent": c.agent })))?;
-    let later = ran(&deliver(Telegram::message(30, PAUL, "Paul", "after the fork"), Some(HOOK2))?);
+    let later = deliver(Telegram::message(30, PAUL, "Paul", "after the fork"), Some(HOOK2))?;
     let published = records(api, c.owner, &name, "chat").iter().any(|r| r["body"]["text"] == "after the fork");
     s.ok(
-        "a fork lets its binding go, and with its template again it is no door: nothing it publishes is its owner's",
-        unmade && r.status == 403 && r.text.contains("is no connector") && later["output"]["ignored"] == "not linked" && !published,
-        json!({ "bind": r.body, "run": later }),
+        "with its template again it is no door, and its secrets do not come back: its inbox takes no delivery, nothing published",
+        back && r.status == 403 && r.text.contains("is no connector") && later.status == 403 && later.text.contains("bad inbox secret") && !published && secrets().is_empty(),
+        json!({ "bind": r.body, "delivery": later.status, "secrets": secrets() }),
     );
     Ok(pokes)
 }
