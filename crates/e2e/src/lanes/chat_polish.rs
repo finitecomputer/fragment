@@ -605,13 +605,15 @@ pub(super) fn calls_card(s: &mut Suite, api: &Api, owner: &Keys, chrome: &mut Br
     super::shows(chrome, &page, &format!("!!{} && {}.classList.contains('running')", line("make deploy"), line("make deploy")));
     chrome.screenshot(&page, &shots.join("frame-5-next-call.png"))?;
     post(5, json!({ "kind": "turn.end", "turn": "calls", "outcome": "error", "error": "lost when the computer restarted" }))?;
-    chrome.eval(&page, &format!("(() => {{ const d = {card}; if (d) d.open = true; return true; }})()"))?;
     let deploy = line("make deploy");
     s.ok(
         "once its turn ended (cut by a restart), a call no step ended may have run: nothing reads as running, and the head says how long it worked",
         super::shows(chrome, &page, &format!("(() => {{ const d = {deploy}; const h = {card}.querySelector('summary'); return !!d && d.classList.contains('maybe') && d.querySelector('.step-verb')?.textContent === 'May have run' && !{card}.querySelector('.step.running, .step-since, .shimmer, .step-dot') && /^Worked for /.test(h.textContent); }})()")),
         chrome.eval(&page, &format!("{card}?.outerHTML ?? ''"))?,
     );
+    // folded once it ended, as any card: opened, as a person opens it
+    chrome.eval(&page, &format!("(() => {{ {card}.querySelector('summary').click(); return true; }})()"))?;
+    super::shows(chrome, &page, &format!("{card}.open"));
     chrome.screenshot(&page, &shots.join("desktop-ended.png"))?;
     chrome.screenshot(&page, &shots.join("frame-6-cut.png"))?;
     println!("      (calls-card screenshots in {})", shots.display());
