@@ -35,12 +35,12 @@ pub fn check(a: &Across) -> Result<(), String> {
     if a.fragments.is_empty() || a.fragments.len() > wire::IN_MAX {
         return Err(format!("in names 1 to {} fragments, not {}", wire::IN_MAX, a.fragments.len()));
     }
-    let mut seen = std::collections::HashSet::new();
-    for f in &a.fragments {
+    for (i, f) in a.fragments.iter().enumerate() {
         if !valid_fragment_name(f) {
             return Err(format!("in names fragments in full, <label>--<suffix>, not {f:?}"));
         }
-        if !seen.insert(f.as_str()) {
+        // at most `IN_MAX`: a look back is cheaper than a set's code
+        if a.fragments[..i].contains(f) {
             return Err(format!("{f} is named twice"));
         }
     }
@@ -111,6 +111,14 @@ pub struct Placed {
     pub score: f64,
 }
 
+/// `keys` in `cmp`'s order. One comparator type for every sort here: each
+/// closure given to a sort compiles a quicksort of its own into the cell's
+/// Wasm (5.5 KB each).
+fn sorted(mut keys: Vec<usize>, cmp: &dyn Fn(usize, usize) -> std::cmp::Ordering) -> Vec<usize> {
+    keys.sort_unstable_by(|&a, &b| cmp(a, b));
+    keys
+}
+
 /// The best `limit` of `answers` (each fragment's hits, in the order
 /// asked), best first.
 pub fn merge(answers: &[Vec<Legs>], limit: usize) -> Vec<Placed> {
@@ -120,10 +128,13 @@ pub fn merge(answers: &[Vec<Legs>], limit: usize) -> Vec<Placed> {
         let l = all[k].2;
         l.lexical.or((l.cosine.is_none()).then_some(l.rank))
     };
-    let mut semantic: Vec<usize> = (0..all.len()).filter(|&k| all[k].2.cosine.is_some()).collect();
-    semantic.sort_by(|&a, &b| cosine(b).total_cmp(&cosine(a)).then(all[a].2.rank.cmp(&all[b].2.rank)).then(all[a].0.cmp(&all[b].0)));
-    let mut lexical: Vec<usize> = (0..all.len()).filter(|&k| by_words(k).is_some()).collect();
-    lexical.sort_by(|&a, &b| by_words(a).cmp(&by_words(b)).then(cosine(b).total_cmp(&cosine(a))).then(all[a].0.cmp(&all[b].0)));
+    let semantic: Vec<usize> = (0..all.len()).filter(|&k| all[k].2.cosine.is_some()).collect();
+    // every order below ends at the hit's own place, so no two compare equal
+    // and an unstable sort is exact
+    let place = |a: usize, b: usize| all[a].0.cmp(&all[b].0).then(all[a].1.cmp(&all[b].1));
+    let semantic = sorted(semantic, &|a, b| cosine(b).total_cmp(&cosine(a)).then(all[a].2.rank.cmp(&all[b].2.rank)).then(place(a, b)));
+    let lexical: Vec<usize> = (0..all.len()).filter(|&k| by_words(k).is_some()).collect();
+    let lexical = sorted(lexical, &|a, b| by_words(a).cmp(&by_words(b)).then(cosine(b).total_cmp(&cosine(a))).then(place(a, b)));
     let mut score = vec![0.0; all.len()];
     for list in [&lexical, &semantic] {
         for (place, &k) in list.iter().enumerate() {
@@ -131,8 +142,7 @@ pub fn merge(answers: &[Vec<Legs>], limit: usize) -> Vec<Placed> {
         }
     }
     assert!(score.iter().all(|&s| s > 0.0), "every hit is in one list at least");
-    let mut order: Vec<usize> = (0..all.len()).collect();
-    order.sort_by(|&a, &b| score[b].total_cmp(&score[a]).then(all[a].2.rank.cmp(&all[b].2.rank)).then(all[a].0.cmp(&all[b].0)));
+    let mut order = sorted((0..all.len()).collect(), &|a, b| score[b].total_cmp(&score[a]).then(all[a].2.rank.cmp(&all[b].2.rank)).then(place(a, b)));
     order.truncate(limit);
     order.into_iter().map(|k| Placed { fragment: all[k].0, hit: all[k].1, score: score[k] }).collect()
 }
