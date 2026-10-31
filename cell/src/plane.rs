@@ -475,7 +475,7 @@ impl FragmentCell {
                 self.icon_shown(manifest.kind())?
             }
         };
-        self.face_is(manifest.kind(), manifest.title(), shown.as_deref())?;
+        self.face_is(manifest.kind(), manifest.title(), manifest.role(), shown.as_deref())?;
         let Some(source) = source else {
             self.exec("DELETE FROM code", vec![])?;
             // no operations to run, so nothing for a trigger to start

@@ -214,6 +214,40 @@ to the hop it claims, at least 1. This is the image's rule, on ordinary
 records: the platform holds no chat record (docs/cloudflare-v1.md, the
 rule).
 
+**An ask** (`fragment ask --return-to`): an agent's message to another
+agent of its computer whose answer comes back to it, as a turn of its own,
+in the chat it asked from, however long the answer takes and whether or
+not the asking agent still runs. Any harness on a computer asks so,
+through the CLI; the bridge does the rest, and the answer reaches the
+runtime as any turn does.
+
+```json
+{ "text": "What's on Friday?", "to": ["npub1<asked>"], "return_to": "<chat it asked from>" }
+```
+
+- The question is a message like any (its asked agent's turn, its replies
+  in this chat); `return_to` is the whole of the return, in the same
+  record. A bridge before asks answers it as a plain message.
+- Honored only from another agent of the answering bridge's own computer
+  (a person's, or another computer's agent's, is a plain message).
+- Once that turn is over its bridge posts the **answer**, as the asking
+  agent, on that agent's own `tasks` (below), with the turn's end, kept
+  with the turn until both are posted (again by the next life, under the
+  same id and body; an answer, its question's only delivery, is tried
+  until the platform answers it). Its outcome is the turn's end's: a turn
+  a restart cut, or another life ran, is answered `error` "lost when the
+  computer restarted", never run again for a better one; one its agent
+  may not run where it was asked (its claim refused, or it left the chat),
+  `error` saying so. One that asks back in words is told at once, in
+  words, that no answer is coming (its asker is an agent, whose words
+  never answer it), and goes on to answer as best it can; a plain
+  hand-off that asks back waits as any turn does.
+- A question refused as it comes (past the hops, where any other
+  hand-off is let go; past the chat's budget; its queue full) is a turn
+  that never runs, and is answered `refused`: a turn of the asking
+  agent's in its chat that never runs either, its end saying why, so its
+  owner sees it there and no answer asks again.
+
 **A chat's budget.** The agents of a chat start at most 20 turns of each
 other in 5 minutes (`AGENT_TURNS_PER_CHAT_MAX`, `AGENT_TURNS_WINDOW_MS`),
 counted by the causing records' own times and kept in each bridge's
@@ -296,6 +330,39 @@ for them).
   after a restart starts nothing twice; one waiting its turn waits again
   in the next life, still a command.
 
+**History** (a chat continued from its person's Session Archive:
+templates/sessions/README.md):
+
+```json
+{ "kind": "history", "title": "Beans", "archive": "sessions--k3x9", "key": "hermes-20261001_090000_ab12cd",
+  "started_at": "2026-10-01T09:00:00.000Z", "ended_at": "2026-10-04T09:00:00.000Z",
+  "summary": "…", "messages": [{ "role": "user", "at": "…", "text": "…" }], "earlier": 12 }
+```
+
+- Posted by the chat's owner, the shell's Continue, with the id
+  `history`, before the agent joins: the chat's first record. It holds
+  the conversation's last summary (`summary`, at most 8,000 characters)
+  and the newest of what the person and the agent said, oldest first
+  (`messages`, at most 40, each at most 4,000 characters), with how many
+  came before them (`earlier`), bounded as a whole by its body's bytes
+  (63 KiB of JSON, under a record's 64 KiB, whatever the text: the newest
+  that fit; a summary too large for it alone is cut) before the chat is
+  made (cell/shell/session-archive.js, `historyOf`). `archive` and `key`
+  name the whole conversation's file.
+- Continue's steps (the chat, made by a name the shell chooses and keeps
+  first; this record; the agent's membership; the archive's
+  `continued/<key>.json`) can each be taken again: a Continue cut short,
+  or whose answer was lost, is finished by the next one in the same chat,
+  and one asked of a conversation already continued opens that chat.
+- The page shows its owner's first one above the chat, read-only: where
+  it came from, the summary folded, the messages as the chat's own look.
+  Anyone else's is shown by nothing.
+- The bridge hands its owner's to the agent once, at its first turn in
+  the chat: as the turn's read-only note (`TurnStart::note`, Relay's
+  `context`), the agent's own words said as "you", and where the rest is
+  (images/bridge `note::history`). It starts no turn, and a bridge or a
+  page from before it reads it as nothing.
+
 Any other `kind` on `chat` is the page's own and is never a message.
 
 **Search.** A person's message and an agent's reply are what the
@@ -333,7 +400,8 @@ computer (docs/computers.md, the hold).
 
 ```json
 { "kind": "turn.step", "turn": "…", "step": 1, "tool": "terminal",
-  "category": "shell", "args": "ls -la", "ok": true, "excerpt": "…", "text": "…" }
+  "category": "shell", "args": "ls -la", "ok": true, "excerpt": "…", "text": "…",
+  "tool_call_id": "call_…", "status": "completed", "duration_ms": 120 }
 ```
 
 Part `<step>`, from 1: one tool call. `tool` (the runtime's own name for
@@ -354,6 +422,17 @@ handed to another agent), `memory` (what it remembers, changed), or
 as `other`, its `tool` in words. The bridge's runtime says which (our
 Hermes image's: one table of Hermes' tools, docs/bridge.md).
 
+`tool_call_id`, `status` and `duration_ms` (since 2026-10-30): the call
+as its runtime observed its end (our Hermes image's: its `post_tool_call`,
+docs/bridge.md), its id there (at most 128 characters), how it ended
+(`completed`, `failed`, `timed_out`, `cancelled` or `blocked`) and how
+long it ran; `ok` is true for `completed` alone. A step with them is a
+call that ended, so a page never shows it running, and names how it
+ended when it did not complete ("Timed out running"). `excerpt` is then a
+command's exit code (`Exit code: 7`) or empty: never its output. A step
+without them (an older bridge's, read from its runtime's progress) says
+only `ok`, which was true even for a call that failed.
+
 ```json
 { "kind": "turn.prompt", "turn": "…", "prompt": "<prompt>",
   "text": "Make your recipe app public, so anyone with its link can open it?",
@@ -371,10 +450,9 @@ optional (`primary`, `danger`). An option with `"words": true` is
 answered in words (a clarify's "Other": docs/bridge.md, Relay): a field
 on the card, whose answer carries what was typed (`text`, above), so
 nothing asks for it after. Only `asks` may answer, until
-`expiresAt` (ms). An open card keeps its computer awake until it is
-answered or expires (docs/bridge.md, "A card keeps its computer awake"),
-so it expires with its runtime there, and its turn ends as the runtime
-ends it.
+`expiresAt` (ms). A restart leaves unexpired cards answerable. An answer
+whose original turn is gone starts a fresh turn with its question and
+chosen answer (docs/bridge.md, "A card outlives its turn").
 
 ```json
 { "kind": "turn.prompt.closed", "turn": "…", "prompt": "<prompt>",
@@ -384,10 +462,13 @@ ends it.
 Part `pc:<prompt>`. `outcome` is `answered` (with `option` and `by`, and
 `text` for an option answered in words: typed on the card, or the owner's
 message that answered it, its files' names when it had no words),
-`expired` (no answer by `expiresAt`, or the computer restarted while it
-waited, as an owner's sleep or a crash does: Hermes cannot resume a turn
-across a restart, and the agent's next turn is told the card was cut
-with it), or `stopped`.
+`expired` (no answer by `expiresAt`), `stopped`, or `history_unavailable`
+(a late answer whose card's journal could not be read whole: shown as
+“Not acted on: ask again”; nothing ran). A card answered late, its turn
+gone, also records `answerSeq`, the answer's seq on `chat`: the fresh turn
+it started is the answer's, and only such a closure lets that answer
+rebuild it after a restart (docs/bridge.md, "A card outlives its turn");
+one answered live names none, and is final.
 
 ```json
 { "kind": "turn.asked", "turn": "…", "asks": "npub1…" }
@@ -479,6 +560,14 @@ naming it; a page reads it at `__blob/<sha256>`. At most 8 a record, 25
 MiB each. The record keeps the file while the channel keeps the record
 (docs/api.md, Blobs); an upload no record names goes after the grace
 period.
+
+Before handing a turn to Hermes, the bridge downloads its attachments to
+`/tmp/bridge-media/<sha256>` by default and names each original filename,
+MIME type and local path in file notes after the new message's words.
+The agent can copy or edit these originals with its tools, including when the model sees an
+image's pixels directly. These scratch paths are local to the running
+computer and are not stored in the chat record; copy files into the app
+or work to keep them across a sleep (docs/bridge.md).
 
 **A voice memo** is an attachment whose `type` is audio. The page records
 one (MediaRecorder) and sends it as the recorder made it: `audio/webm`
@@ -858,6 +947,30 @@ run's default agent too): asked to say hello there, who it is and what
 it will do (its job is its `SOUL.md`), it speaks first, and the chat
 holds no message of its person's before it (cell/shell/shell.js,
 `hello`).
+
+```json
+{ "kind": "answer", "chat": "<chat it asked from>", "text": "Rowan answered your question in <chat> (\"…\"):\n\n…",
+  "by": "npub1<asked>", "name": "Rowan", "asked": { "fragment": "<chat>", "seq": 12 }, "turn": "<asked turn>",
+  "outcome": "idle", "error": "…", "hop": 2, "refused": true }
+```
+
+An ask's answer ("An ask", above): posted by the asking agent's own
+bridge, as the agent, with the id `an:<asked turn>`, so one question has
+one answer whatever life posts it. The agent takes it as a turn in `chat`,
+its owner's business there as a routine is (their Stop stops it, a
+question it asks is theirs), told `text` by the agent that answered
+(`name`, its name as its chat showed it). `text` names the question
+(its first 300 bytes) and carries what the asked turn said (its replies
+but interim ones, at most 16 KiB, and how many files it sent; the replies
+stay whole where it was asked); `outcome` and `error` are its end's. The
+turn is `hop` hand-offs deep: one past the turn that answered, at most 3,
+so an answer resets no depth, and it spends `chat`'s budget. `refused`:
+the question was never taken, and the turn is recorded refused, never
+run (its end says why). `name` is at most 200 bytes, cut as it is
+written. An answer is taken however late it is first read (an hour's
+backlog skips a routine, never an answer: its claim keeps it to one
+run). Only the agent's own key's answer is taken; its owner's, or
+another agent's, is passed over.
 
 Only the agent fragment itself (its cron, the platform's `joined`: a
 principal that is no identity) and the agent's owner ask anything on

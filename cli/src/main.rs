@@ -7,6 +7,7 @@ mod codestorage;
 mod mcp;
 mod notice;
 mod operator;
+mod session;
 mod sync;
 mod watch;
 
@@ -323,7 +324,7 @@ enum Cmd {
     /// a chat of the two of you and your owner, made the first time (a
     /// person: their direct chat with it), or in --chat; prints the chat
     /// and the question's record. Its answer comes in that chat; --wait
-    /// prints it
+    /// prints it; --return-to brings it back to you as a new turn
     Ask {
         /// The agent: its label or fragment (`fred`, `fred--k3x9`), or its identity
         agent: String,
@@ -337,6 +338,11 @@ enum Cmd {
         /// 150, under an agent's terminal's own 180 s; at most 1800)
         #[arg(long, value_name = "SECS", num_args = 0..=1, default_missing_value = "150")]
         wait: Option<u64>,
+        /// An agent's: once the asked agent's turn is over, its answer comes
+        /// back to this chat (the one you ask from) as a new turn of yours,
+        /// however long it takes and whether or not you still run
+        #[arg(long, value_name = "CHAT", conflicts_with = "wait")]
+        return_to: Option<String>,
         /// The question's post id (a retry with the same --id posts nothing again)
         #[arg(long)]
         id: Option<String>,
@@ -379,6 +385,11 @@ enum Cmd {
     Schedule {
         #[command(subcommand)]
         sub: ScheduleCmd,
+    },
+    /// An agent's past conversations, in your Session Archive
+    Session {
+        #[command(subcommand)]
+        sub: session::SessionCmd,
     },
     /// Write one text file to main through the platform (no folder, no git):
     /// what an agent on a computer uses. `fragment deploy` puts it live.
@@ -1789,6 +1800,11 @@ fn run(cli: Cli) -> Result<()> {
             json_exit(j, &result);
             println!("{}: {}", result["name"].as_str().unwrap_or(&name), result["title"].as_str().unwrap_or(&title));
         }
+        Cmd::Session { sub } => {
+            let imported = session::run(&c, sub)?;
+            json_exit(j, &imported);
+            session::print(&imported);
+        }
         Cmd::Icon { sub } => {
             let result = apps::icon(&c, sub, !j)?;
             json_exit(j, &result);
@@ -2260,9 +2276,9 @@ fn run(cli: Cli) -> Result<()> {
                 eprintln!("(replayed: post {id} had already appended this record)");
             }
         }
-        Cmd::Ask { agent, text, chat, wait, id } => {
+        Cmd::Ask { agent, text, chat, wait, return_to, id } => {
             let id = id.unwrap_or_else(|| format!("ask-{:016x}", rand::random::<u64>()));
-            let v = ask::ask(&c, &agent, &text, chat.as_deref(), wait, id)?;
+            let v = ask::ask(&c, &agent, &text, chat.as_deref(), wait, return_to.as_deref(), id)?;
             json_exit(j, &v);
             println!("asked {} in {} (record {})", v.asked.shown(), v.chat, v.record["seq"]);
             for who in &v.added {
@@ -2286,7 +2302,10 @@ fn run(cli: Cli) -> Result<()> {
                     }
                 }
                 (None, Some(s)) => println!("no answer in {s} s: it comes in {} (`fragment channel {} chat --after {}`)", v.chat, v.chat, v.record["seq"]),
-                (None, None) => println!("its answer comes in {} (`--wait` waits for it)", v.chat),
+                (None, None) => match &v.return_to {
+                    Some(home) => println!("its answer comes back to {home} as a new turn of yours once {} is done", v.asked.shown()),
+                    None => println!("its answer comes in {} (`--wait` waits for it)", v.chat),
+                },
             }
         }
         Cmd::Channel { name, channel: None, .. } => {

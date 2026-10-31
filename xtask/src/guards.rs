@@ -167,17 +167,22 @@ mod tests {
     /// drifts from them silently: proto's `LISTED_FRESH_MS` and
     /// `LISTED_UNREAD_MAX`, and the bridge's `TURN_IDLE_MS_MAX` and
     /// `PROMPT_TTL_MS_DEFAULT` (images/bridge/src/limits.rs: images/ is a
-    /// workspace of its own, so its file is read). Method: each copy and
+    /// workspace of its own, so its file is read); and Settings' proto's
+    /// `ROLE_MAX_CHARS` and the cell's computer's `AGENTS_MAX`. Method: each copy and
     /// each Rust source, read and evaluated.
     #[test]
     fn the_shell_copies_its_limits() {
         let root = crate::devstack::repo_root();
-        let shell = std::fs::read_to_string(root.join("cell/shell/shell.js")).expect("the shell reads");
+        let shell = std::fs::read_to_string(root.join("cell/shell/chat-list.js")).expect("the shell reads");
         let bridge = std::fs::read_to_string(root.join("images/bridge/src/limits.rs")).expect("the bridge's limits read");
         assert_eq!(constant(&shell, "const", "LISTED_FRESH_MS", " = "), fragment_proto::limits::LISTED_FRESH_MS);
         assert_eq!(constant(&shell, "const", "UNREAD_MAX", " = "), i64::from(fragment_proto::limits::LISTED_UNREAD_MAX));
         for name in ["TURN_IDLE_MS_MAX", "PROMPT_TTL_MS_DEFAULT"] {
             assert_eq!(constant(&shell, "const", name, " = "), constant(&bridge, "pub const", name, ": u64 = "), "the shell's {name} is the bridge's");
         }
+        let settings = std::fs::read_to_string(root.join("cell/shell/agent-settings.js")).expect("the shell's agent settings read");
+        let computer = std::fs::read_to_string(root.join("cell/src/computer.rs")).expect("the cell's computer reads");
+        assert_eq!(constant(&settings, "const", "ROLE_MAX_CHARS", " = "), fragment_proto::limits::ROLE_MAX_CHARS as i64);
+        assert_eq!(constant(&settings, "const", "AGENTS_MAX", " = "), constant(&computer, "const", "AGENTS_MAX", ": u64 = "), "the shell's AGENTS_MAX is a computer's");
     }
 }

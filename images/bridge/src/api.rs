@@ -79,6 +79,16 @@ impl std::fmt::Display for ApiError {
 }
 
 /// `GET /api/computer`.
+/// What a fragment is called, from its status: its title, and an agent
+/// fragment's role (docs/api.md, "An agent's name and picture").
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct Face {
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default, rename = "agentRole")]
+    pub role: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Computer {
     pub computer: String,
@@ -583,13 +593,13 @@ impl Api {
     /// its live `fragment.json` last said (none when it names none). An
     /// agent's own is its name (docs/api.md, "An agent's name and picture").
     pub async fn title(&self, agent: &str, fragment: &str) -> Result<Option<String>, ApiError> {
-        #[derive(Deserialize)]
-        struct A {
-            #[serde(default)]
-            title: Option<String>,
-        }
-        let a: A = self.json(Method::GET, &format!("/api/f/{}/status", name(fragment)?), Some(agent), None).await?;
-        Ok(a.title)
+        Ok(self.face(agent, fragment).await?.title)
+    }
+
+    /// `GET /api/f/{name}/status`'s title and, an agent fragment's, its role
+    /// (`agentRole`; none from a platform before roles).
+    pub async fn face(&self, agent: &str, fragment: &str) -> Result<Face, ApiError> {
+        self.json(Method::GET, &format!("/api/f/{}/status", name(fragment)?), Some(agent), None).await
     }
 
     /// `GET /api/f/{name}/channels`.
@@ -658,6 +668,15 @@ impl Api {
     /// `GET /api/f/{name}/channels/{channel}?after=&limit=`.
     pub async fn records(&self, agent: &str, fragment: &str, channel: &str, after: u64, limit: u32) -> Result<Page, ApiError> {
         self.json(Method::GET, &format!("/api/f/{}/channels/{}?after={after}&limit={limit}", name(fragment)?, encode(channel)), Some(agent), None).await
+    }
+
+    /// A recovery page, capped by the lookup's remaining byte budget before
+    /// collecting the body. The byte count includes JSON/wire overhead.
+    pub async fn history_records(&self, agent: &str, fragment: &str, channel: &str, after: u64, limit: u32, bytes: usize) -> Result<(Page, usize), ApiError> {
+        let path = format!("/api/f/{}/channels/{}?after={after}&limit={limit}", name(fragment)?, encode(channel));
+        let body = self.call(Method::GET, &path, Some(agent), None, bytes.min(limits::ANSWER_MAX_BYTES)).await?;
+        let page = serde_json::from_slice(&body).map_err(|e| ApiError::Decode(format!("{path}: {e}")))?;
+        Ok((page, body.len()))
     }
 
     /// `POST /api/f/{name}/channels/{channel} {id, body}` → `{record,

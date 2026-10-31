@@ -27,7 +27,9 @@ destination, or, without that metadata, Accept preferring HTML to JSON)
 gets a small “Updating — back in a moment” HTML page instead of the JSON:
 still 503, with `Retry-After: 3` and `Cache-Control: no-store`, reloading
 after three seconds by meta refresh. Fetches and JSON clients keep the
-JSON refusal. `cargo xtask e2e` proves every route. The TypeScript runtime this replaced was deleted
+JSON refusal; the shell's page, one of them, says the same words in its
+place, names the releases only in its console, and asks again by
+itself. `cargo xtask e2e` proves every route. The TypeScript runtime this replaced was deleted
 (its contract is in git history, last at `35f5e18`). The desktop and the
 personal agent's chat went at the cut (docs/cloudflare-v1.md, decision
 33; their contract is at the tag `celld-final`); computers came back
@@ -373,6 +375,17 @@ address it is served at, below), and that face is what is shown:
 - its owner's SimpleX app: the bridge names the agent's SimpleX profile
   by its title, which the core sends to the linked app (docs/bridge.md,
   "SimpleX"). It has no picture either.
+
+Its **role** ("chief of staff", Paul, 2026-10-30: several agents, each
+with a name and a role) is its fragment's `meta.role`, at most 48
+characters (`limits::ROLE_MAX_CHARS`; one past it, or no string, makes the
+manifest invalid, refused at its install as a long title is), the one
+source of it: the install puts it in the fragment's face beside its
+title, trimmed (a role of only spaces is none, `fragment_core::face::role`),
+so its owner's list and its status carry it (`agentRole`) live, as they carry its name,
+and the shell shows it as a tag beside the name. Only an agent fragment's
+face carries one. It is written as its name is (below), never copied
+into its job.
 
 Its label (`juniper` of `juniper--k3x9`) stays its `name` in a profile
 and its computer's view: the word that `@mentions` it, and its runtime's
@@ -1285,16 +1298,16 @@ shell's Apps page shows it, one row a fragment, each with its Share…
 | method & path | who | body → answer |
 | --- | --- | --- |
 | `POST /api/fragments` | a person, not a guest; an agent for its owner (the fragment is the owner's, billed to them, with its maker an editor)
- | `{label | name, visibility?, template?, title?}`: a label, which the platform names with a random suffix, or a name in full (Names, above) → `{name, npub, owner, visibility, viewToken, inboxToken, repo, canonical}` (`name` in full). A name whose host label (its name, and a branch's mark) would pass 63 bytes is 400 `invalid_request`, saying why, and nothing is made (Names, above). Its maker's ledger is asked first (`Spend::Create`): a guest's create is 403 `forbidden`, "guests can't create fragments: …" (Paul, 2026-10-03: a fragment's hosting bills its owner, and a guest pays for nothing; a guest still edits fragments shared with them), however it is asked (a template's, an agent's for its owner, the shell's catalog), and nothing is made; past the overdraft it is 402 `budget_used_up` (the maker's fragments are read-only). A ledger that does not answer refuses none. `visibility` defaults to `link`, but to `members` for a chat or an agent (its SOUL and memories: Paul, 2026-10-13; `Visibility::made_from`). The fragment's own key is made in its cell and kept sealed for it. The cell creates (or, for a name its owner deleted before, finds) the code.storage repo, named for its owner (Names, above). With `template` (`blank`, `todo`, `inbox`, `calories`, `doc`; any other is 400 and nothing is made), the template's files are main's first commit (its `fragment.json` stamped with the fragment's name, and `title`, if given, as its `meta.title`) and live at once: the create answers once they are (one seed at a time: the alarm, armed during the create, seeds only a template still to land); one that fails to land is retried by the fragment's alarm (`template.failed` events). `agent`, `chat`, `brain`, `skills` are blessed (decision 40), named and not copied: main's first commit is `{"template", "meta": {title}}`, and the platform's release serves the rest (Apps; a brain: templates/brain/README.md). `notes` is the CLI's only (`fragment new --template notes`). A `title` (1 to 120 characters) needs a `template` (400 without one): a fragment made bare says its title in its own `fragment.json`. |
+ | `{label | name, visibility?, template?, title?}`: a label, which the platform names with a random suffix, or a name in full (Names, above) → `{name, npub, owner, visibility, viewToken, inboxToken, repo, canonical}` (`name` in full). A name whose host label (its name, and a branch's mark) would pass 63 bytes is 400 `invalid_request`, saying why, and nothing is made (Names, above). Its maker's ledger is asked first (`Spend::Create`): a guest's create is 403 `forbidden`, "guests can't create fragments: …" (Paul, 2026-10-03: a fragment's hosting bills its owner, and a guest pays for nothing; a guest still edits fragments shared with them), however it is asked (a template's, an agent's for its owner, the shell's catalog), and nothing is made; past the overdraft it is 402 `budget_used_up` (the maker's fragments are read-only). A ledger that does not answer refuses none. `visibility` defaults to `link`, but to `members` for a chat, an agent (its SOUL and memories: Paul, 2026-10-13) or a session archive (`Visibility::made_from`). The fragment's own key is made in its cell and kept sealed for it. The cell creates (or, for a name its owner deleted before, finds) the code.storage repo, named for its owner (Names, above). With `template` (`blank`, `todo`, `inbox`, `calories`, `doc`; any other is 400 and nothing is made), the template's files are main's first commit (its `fragment.json` stamped with the fragment's name, and `title`, if given, as its `meta.title`) and live at once: the create answers once they are (one seed at a time: the alarm, armed during the create, seeds only a template still to land); one that fails to land is retried by the fragment's alarm (`template.failed` events). `agent`, `chat`, `brain`, `skills`, `sessions` are blessed (decision 40), named and not copied: main's first commit is `{"template", "meta": {title}}`, and the platform's release serves the rest (Apps; a brain: templates/brain/README.md; a person's session archive, which `fragment session import` makes: templates/sessions/README.md). `notes` is the CLI's only (`fragment new --template notes`). A `title` (1 to 120 characters) needs a `template` (400 without one): a fragment made bare says its title in its own `fragment.json`. |
 | `PUT /api/fragments/{name}/archived` | any signer, for a fragment they hold a role on | `{archived: bool}` → `{name, archived}`: the signer's own view of it (the shell leaves it out of its sidebar; search still finds it), kept in their list's row and nowhere else, so no one else's list or the fragment changes. The same again answers the same. A bare label names nothing (404: a fragment is named in full); a fragment they hold no role on, or none of that name, is 404; a name that is none, or a body without a boolean `archived`, 400. It goes when they leave the fragment (back in, it is not archived), or the fragment is made again. Not honored for `for` |
 | `PUT /api/fragments/{name}/dock` | any signer, for a fragment they hold a role on | `{dock: bool}` → `{name, dock}` (`Docked`): whether the signer's dock shows it (the shell's dock shows their apps, kind `app` or `brain`, less the archived and those taken off it; The shell, below), their own view as archiving is: kept in their list's row and nowhere else, so no one else's list or the fragment changes, and told to their list's sockets (`changed`). Every fragment is on it until they take it off (#587), so a list from before the choice keeps every app where it was; archiving still leaves an app off the dock, whatever this says. The same again answers the same. A bare label names nothing (404, as for archiving); a fragment they hold no role on, or none of that name, is 404; a name that is none, or a body without a boolean `dock`, 400. It goes when they leave the fragment (back in, it is on the dock), or the fragment is made again. Not honored for `for` |
 | `PUT /api/fragments/{name}/seen` | any signer, for a fragment they hold a role on | no body → `{name, unread: 0}` (`Seen`): the signer has seen its messages, up to the newest their search holds (Search, below), so their row counts none `unread` until another comes; kept beside their list's row and nowhere else, so no one else's list or the fragment changes. The place never goes back: the same again answers the same and tells no page; a mark that moved it tells the signer's list sockets (`changed`). A bare label names nothing (404, as for archiving); a fragment they hold no role on, or none of that name, is 404; a name that is none, or any body, 400. It goes when they leave the fragment (back in, every message it still logs for them is unread), or the fragment is made again. Not honored for `for` |
 | `GET /api/search?q=` | any signer | → `{fragments: [ListedFragment], messages: [{fragment, channel, seq, at, snippet}]}` (`SearchAnswer`): the signer's fragments whose title or label hold every word of `q`, then the messages that do, newest first, from fragments they hold a role on now, archived ones included (The shell, Search, below). `q` once, at most 256 bytes and 8 words (400 past either, or without it). Not honored for `for` |
-| `GET /api/fragments` | any signer | → `{fragments: [{name, role, kind, title?, picture?, agents?, preview?, previewAt?, unread?, sharing?, archived?, dock?, listed?}]}` (`archived: true` on the ones the signer archived; `dock: false` on the ones they took off their dock, `PUT …/dock` above, left out on the rest, which a client reads as on it); `kind`, what its live `fragment.json` says it is (`app`, `chat`, `agent`, `brain` or `skills`; an app until it says), which a client reads, here as in `status` and `GET /api/access`, as `other` when it does not know it (a newer platform's: proto's `FragmentKind::Other`, the rest of the row kept), so a new kind breaks no shipped CLI or image; no kind is ever named `other`, and a `fragment.json` naming a kind the platform does not know is an invalid one (`status.code.error`, Apps, below); `picture`, an agent fragment's only: where its picture is served (Identities, "An agent's name and picture"), as its last install said; `agents`: its agent members, the first added (a chat's lead) first, at most 16 (`LISTED_AGENTS_MAX`), as the fragment last sent them (an agent's joining or leaving sends every row; a row sent before rows named them has none until it is sent again); `preview`, a chat's only: the first line with words of its newest message the signer's search holds (Search, below), at most 160 bytes, none when it holds none; `previewAt`, with `preview`: when that message was said (ms since the epoch, as a record's `at`); `unread`, a chat's only: its messages the signer's search holds after the last they marked seen (`PUT …/seen`, above; all of them before any mark), at most 100 (`LISTED_UNREAD_MAX`), left out at 0; a search entry names no author, so a message of the signer's own counts until they mark it; `sharing` on the signer's own fragments only: `{visibility, members, guests, invites}` (guests: members who are neither the owner nor an agent of theirs; invites: those waiting on an email, as of that change, absent in a row sent before they were counted; an invite met, revoked, or run out is such a change, the last sent by the fragment's alarm at its expiry), as the fragment last sent it with a change to its members, invites or visibility (who they are: `GET /api/access`, below); an agent's `?for=<id>`: the fragments that identity holds a role on where the agent or its owner is a member too, each with the role the agent acts with there for it (`fragment_core::access::listed_role`; a call decides again) and `owned: true` on those that identity owns, with none of that identity's `listed`; `listed`: what its members are doing, each member's newest record of a kind one of its channels lists that the signer's role there may read, the newest first, at most 16 (Listed records, below), left out when there are none |
+| `GET /api/fragments` | any signer | → `{fragments: [{name, role, kind, title?, picture?, agents?, preview?, previewAt?, unread?, sharing?, archived?, dock?, listed?}]}` (`archived: true` on the ones the signer archived; `dock: false` on the ones they took off their dock, `PUT …/dock` above, left out on the rest, which a client reads as on it); `kind`, what its live `fragment.json` says it is (`app`, `chat`, `agent`, `brain`, `skills` or `sessions`; an app until it says), which a client reads, here as in `status` and `GET /api/access`, as `other` when it does not know it (a newer platform's: proto's `FragmentKind::Other`, the rest of the row kept), so a new kind breaks no shipped CLI or image; no kind is ever named `other`, and a `fragment.json` naming a kind the platform does not know is an invalid one (`status.code.error`, Apps, below); `picture`, an agent fragment's only: where its picture is served (Identities, "An agent's name and picture"), as its last install said; `agentRole`, an agent fragment's only: its role, its `fragment.json`'s `meta.role` trimmed (none when it says nothing), as its last install said (the same section); `agents`: its agent members, the first added (a chat's lead) first, at most 16 (`LISTED_AGENTS_MAX`), as the fragment last sent them (an agent's joining or leaving sends every row; a row sent before rows named them has none until it is sent again); `preview`, a chat's only: the first line with words of its newest message the signer's search holds (Search, below), at most 160 bytes, none when it holds none; `previewAt`, with `preview`: when that message was said (ms since the epoch, as a record's `at`); `unread`, a chat's only: its messages the signer's search holds after the last they marked seen (`PUT …/seen`, above; all of them before any mark), at most 100 (`LISTED_UNREAD_MAX`), left out at 0; a search entry names no author, so a message of the signer's own counts until they mark it; `sharing` on the signer's own fragments only: `{visibility, members, guests, invites}` (guests: members who are neither the owner nor an agent of theirs; invites: those waiting on an email, as of that change, absent in a row sent before they were counted; an invite met, revoked, or run out is such a change, the last sent by the fragment's alarm at its expiry), as the fragment last sent it with a change to its members, invites or visibility (who they are: `GET /api/access`, below); an agent's `?for=<id>`: the fragments that identity holds a role on where the agent or its owner is a member too, each with the role the agent acts with there for it (`fragment_core::access::listed_role`; a call decides again) and `owned: true` on those that identity owns, with none of that identity's `listed`; `listed`: what its members are doing, each member's newest record of a kind one of its channels lists that the signer's role there may read, the newest first, at most 16 (Listed records, below), left out when there are none |
 | `GET /api/access` | a person (not an agent) | → who may open each fragment they own, by email (Sharing, "Who has access to what") |
 | `GET /api/fragments/watch` | any signer; the shell with its session (below) | a WebSocket, upgraded; anything else is 400. It answers `{type: "hello"}`, then `{type: "changed"}` each time the signer's list changes: a fragment made, shared with them, changed (its title, kind, agents, sharing, their role), left or deleted, their archiving or their dock, and a chat's message new to their search (its preview) (principal.rs, Watching); and `{type: "invited"}` each time the invites waiting on their emails change (one made, renewed or revoked: `GET /api/invites`, Invites by email). A frame names nothing: the page reads `GET /api/fragments` again with its own credential, so a socket that outlives its session learns only that something changed. The platform session counts only on the platform's host with the platform's exact `Origin` (a browser names its page on every upgrade; a fragment's page, one site with the platform, is refused like no one: 401). A list holds `LIST_WATCHERS_MAX` (16) at once; one more is 429. It reads nothing from the client. Not honored for `for` |
 | `DELETE /api/f/{name}` | the owner (never an agent) | → `{ok, deleted}` once the fragment is gone: from then it is 404 to everyone, its owner's list no longer has it, and its name can be made again. Its other members' lists, the app's database and the blobs go after, by the fragment's alarm (seconds; each part retried, backing off, until done: one that fails ten tries in a row, or is refused, is held and tried daily, its last error kept, as the `ended` lever shows), so a delete answers as soon at `MEMBERS_MAX` members as at one: it tells at most one round of lists itself (32 at once). An agent fragment's agent leaves its computer with them (`computer/unassign`, that agent alone: its owner's agents, a chat's @ roster and Settings run it no more, nor does its guest, and it is counted in the computer's cap no more; its owner's list is told) and the registry names it by the fragment no more (Identities, "An agent's name and picture"; its identity stays, its key held by no one); a computer gone (its owner's wipe) is done. A fragment made again meanwhile under the name is untouched by the old one's cleanup: a new agent of its own, assigned again, keeps its place, and its lists' rows show its own face (none until it has one: an app, untitled), never the ended life's. The repo stays |
-| `GET /api/f/{name}/status` | viewer | → `{name, kind, title?, npub, owner, role, visibility, repo, pins: {main, live}, counts: {files, events, members}, code: {sha, id, operations: {<op>: {kind, role, input?, ephemeral?, description?}}, error}, viewToken (its owner, or their agent sharing for them), inboxToken (editor), urls: {canonical, platform}, blobMinBytes, page}`; `kind` and `title` are what it is and its title as its members' lists show them (an app, and no title, until it says); `viewToken` is the share link's token, its owner's to give, as the share sheet has it: a member asks them (2026-10-13); `code.sha` is the live commit installed and `code.id` the code that runs (`app:<hash>` of its `app.mjs` and `applib/`, or a blessed template's `blessed:<template>@<release>`); `code.operations` are the installed manifest's, each as it declared them (Apps, below; `input`, `ephemeral` and `description` absent when it gave none); `urls.platform` is the platform's own origin, for links a person opens (a client in a computer calls an internal host); `page` is `{live, at, errors: [{kind, text, source}], dropped}`, what the page reported as its preview card's shot loaded it (Cards, below), absent before the first |
+| `GET /api/f/{name}/status` | viewer | → `{name, kind, title?, agentRole?, npub, owner, role, visibility, repo, pins: {main, live}, counts: {files, events, members}, code: {sha, id, operations: {<op>: {kind, role, input?, ephemeral?, description?}}, error}, viewToken (its owner, or their agent sharing for them), inboxToken (editor), urls: {canonical, platform}, blobMinBytes, page}`; `kind`, `title` and `agentRole` are what it is, its title and an agent's role as its members' lists show them (an app, and no title, until it says); `viewToken` is the share link's token, its owner's to give, as the share sheet has it: a member asks them (2026-10-13); `code.sha` is the live commit installed and `code.id` the code that runs (`app:<hash>` of its `app.mjs` and `applib/`, or a blessed template's `blessed:<template>@<release>`); `code.operations` are the installed manifest's, each as it declared them (Apps, below; `input`, `ephemeral` and `description` absent when it gave none); `urls.platform` is the platform's own origin, for links a person opens (a client in a computer calls an internal host); `page` is `{live, at, errors: [{kind, text, source}], dropped}`, what the page reported as its preview card's shot loaded it (Cards, below), absent before the first |
 | `GET /api/f/{name}/manifest` | viewer | → `fragment.json` at main (404 when there is none) |
 | `GET /api/f/{name}/members` | viewer | → `{members: [{principal, role, addedBy, addedAt, kind, owner?}]}` (`owner`: an agent member's) |
 | `PUT /api/f/{name}/members/{id\|npub\|email}` | owner, or their agent for them | `{role: viewer\|editor}` (any other field is 400) → the member: added, or their role changed (the one call that changes a role); a key names the identity holding it, an email the person who signs in as it (404 when no one registered it, or signs in as it: `POST invites` mails them). A new member this way is one of the owner's own agents alone: anyone else is 403, saying to invite them by email (decision 63; Invites by email, above). A person's role is the role of their agents in with them, which follows it; such an agent's own is 400 (decision 64). A person's share is theirs and their agents' (Paul, 2026-10-13: "all the pubkeys under the umbrella of this email"): each of their agents acts there for them with at most its cap (R17); an agent added by its npub is that agent alone. A chat's own agent (its lead, the first agent added) is never set below `editor` (400, saying why): its replies and steps post there. A new member that is an agent running on a computer is announced to it: `joined` on its agent fragment's `tasks`, and a wake (Computers, below) |
@@ -1347,8 +1360,8 @@ and `app.mjs` (at most 1 MiB, `limits::SOURCE_MAX_BYTES`; with
 all) from the live commit. A live commit with an invalid `fragment.json`
 keeps the last good code and says why in `status.code.error`.
 
-A fragment on a blessed template (`agent`, `chat`, `brain`, `skills`:
-`fragment_templates::blessed::BLESSED`; docs/cloudflare-v1.md, decision
+A fragment on a blessed template (`agent`, `chat`, `brain`, `skills`,
+`sessions`: `fragment_templates::blessed::BLESSED`; docs/cloudflare-v1.md, decision
 40) names it in `fragment.json` (`template`) and runs the
 platform release's manifest (with its own `meta` over the template's),
 site, and code: the template's `app.mjs` and `applib/`, when it carries
@@ -2176,6 +2189,53 @@ model an agent runs by its id (Paul, 2026-10-20: the agent's page said
 | `POST /api/models/v1/chat/completions[?fragment=<name>]` | an agent (`for` names whom it acts for) | an OpenAI chat completion, `model` a tier, `vision`, `fallback`, or one of their models' ids (`x-fragment-tier` its tier, optional) → the model's answer in OpenAI's shape: JSON, or with `stream: true` server-sent events, usage once on a last chunk with no choices |
 | `POST /api/models/v1/audio/transcriptions` | an agent | an OpenAI transcription, `multipart/form-data`: `file` (the audio, at most 10 MiB), `model` `whisper`, and optional `language` (ISO-639-1), `prompt` and `response_format` (`json`, the default, or `text`) → `{"text": …}`, or the text alone |
 | `POST /api/models/v1/decide[?fragment=<name>]` | an agent (`for` names whom it acts for) | a decision, `{model?, input, questions, media?}`, its media inline → `{model, answers, usage}` (Decisions, above) |
+| `POST /api/models/v1/embeddings[?fragment=<name>]` | an agent (`for` names whom it acts for) | OpenAI's embeddings request, `{input, model?, dimensions?, encoding_format?}` → `{object: "list", data: [{object, index, embedding}], model, usage, space: {model, dimensions, version}}` (Embeddings, below) |
+
+Embeddings (fragment_core::embed; the search stack's model):
+- **The slot.** A deployment's `models.embeddings`: where its embeddings
+  run and the space their vectors are in, `{provider, model, dimensions,
+  version?, max_input_tokens?, private?}` (`key` and `price` as any slot
+  on an OpenAI-compatible API names them; `max_input_tokens`, the tokens
+  of an input its model reads, 128 to 32,768, 512 unnamed). Unnamed, BGE-M3 on Workers
+  AI (`@cf/baai/bge-m3`, 1,024 dimensions, its 512-token window); a
+  self-hosted deployment names a model on its own
+  machines, an OpenAI-compatible `POST <base_url>/embeddings`. It is no
+  chat slot: no call names it as one, no route falls back to it, and it
+  runs no chat slot's model.
+- **One space.** Every answer names its `space`, and every vector is the
+  slot's length and unit length (a dot product is a cosine). An answer
+  with a vector of any other length, or another count than was asked, is
+  never passed on: 502, and charged (it was paid for). A change of the
+  slot's model, dimensions or version is a new space: vectors of two are
+  never compared, so what keeps vectors re-embeds them.
+- **Private.** A deployment whose tiers are private embeds only on a
+  slot marked private (`"private": true`: a confidential API, never
+  Workers AI or OpenRouter), as Finite Private never falls back to a
+  model that is not: without one, every call is refused 403, saying why,
+  and the deployment's search answers by words alone. Its deploy is not
+  refused.
+- **Refusals before anything is sent.** `input` other than a string or 1
+  to 100 strings (token arrays included), an empty one, one that might
+  be past the slot's window (`embed::tokens_max`, a bound for any
+  tokenizer: a byte a token or more, each character counted at its
+  longest decomposition, and 3 for the model's own; 509 bytes of ASCII for
+  BGE-M3's 512; nothing is cut, so a caller splits a long text, as the
+  search capability embeds a section's chunks),
+  `model` other than `embeddings` or the slot's model, `dimensions` other
+  than the slot's (vectors are never cut), and `encoding_format` other
+  than `float` (the default) or `base64` (each vector's little-endian
+  float32s, as OpenAI's SDKs ask) are refused 400. A body past 1 MiB is
+  413.
+- **Metering.** Charged after the answer at its input tokens, at the
+  slot's model's row of the book (BGE-M3's $0.012 a million; a
+  self-hosted slot's own `price`): the tokens the API reports, else, as
+  Workers AI reports none for embeddings, estimated from the input at a
+  token every 3 bytes (a price, not the window: English prose is about 4
+  bytes a token, numbers fewer).
+- **Who pays, and what is kept.** As a chat call: the agent's owner, under
+  `fragment`'s cap when it names one; only the usage, on the ledger. The
+  model's refusal is charged nothing and passed through. Its computer's
+  intercept takes it as `POST /v1/embeddings`.
 
 Transcription (decision 9, as Paul changed it on 2026-10-07: a voice
 memo is one the agent transcribes itself, through this route):
@@ -2751,7 +2811,7 @@ API answers on the platform's host):
 | path | |
 | --- | --- |
 | `/`, `/<page>` | `site/` in the live commit (`index.html` for directories); Open Graph tags from `fragment.json`'s `meta` |
-| `__file?path=` | a content file from live, else main; an agent fragment's from main, else live (its job, its `agent.json`, its memories: its computer's sync writes them to main and never deploys, `images/hermes/boot/src/sync.rs`, so its page shows them as the agent and its owner left them, with no deploy) |
+| `__file?path=` | a content file from live, else main; an agent fragment's from main, else live (its job, its `agent.json`, its memories: its computer's sync writes them to main and never deploys, `images/hermes/boot/src/sync.rs`, so its page shows them as the agent and its owner left them, with no deploy), and so a session archive's (its imports write main and never deploy) |
 | `__preview.svg` | the placeholder preview image |
 | `__blob/{sha256}` | one of this fragment's blobs (Blobs, above), `GET` or `HEAD`, viewers and up (on a `public` fragment too: whoever holds only `public` is refused): its bytes as the type its upload declared (ranges answer 206), `Cache-Control: private, max-age=31536000, immutable`, `X-Content-Type-Options: nosniff`, and an `ETag` of the hash; another fragment's hash is 404. `PUT` uploads one from the fragment's own page, as `PUT /api/f/{name}/blobs/{sha256}` does (editors; the body streamed and hashed on the way, bytes that are not what the hash says 400; a declared `content-length`, at most 256 MiB, else 400 or 413) → `{ok, sha, size, stored}` (`stored: false`: it was there); its `content-type` is the type it is served as. As for any write on this host, only the page's own cookies count (`fetched`): another fragment's page uploads as no one (401) |
 | `__members` | viewers and up (the share link too): `{members: [{principal, role, addedBy, addedAt, kind, owner?}]}`, the first added first, as `GET /api/f/{name}/members` answers it (a chat's agents, its lead the first agent added) |
@@ -2764,7 +2824,7 @@ API answers on the platform's host):
 | `__fragment.css` | the platform's stylesheet (below), for a page that links it |
 | `__markdown.js` | the platform's markdown renderer, a module any page may import: `markdown(text, options)` → a DocumentFragment and `inline(parent, text, options)`, markdown to DOM only, never to markup (HTML in the text is text; nesting stops at 32). Its caller decides where links go (`resolve(target, kind)` → `{href, path?}` or null), which pictures show (`image(src, kind)` → `{src, href?}` or null), how a code block looks (`code(text, lang)`), and whether every newline breaks a line (`breaks`); whatever they answer, links stay http(s), mailto or relative and pictures http(s) or relative. The files viewer, the chat and the notes viewer render with it |
 | `__people?id=…&id=…` | anyone who can see the fragment: `{profiles: {<id>: {kind, email?, picture, name?, fragment?, title?}}}` for up to 64 identities (a person's `email` only for a member, and only when the asker is a member too: decision 48; a picture is an absolute platform URL; an agent made from an agent fragment, a computer's, has that `fragment`, its label as its `name`, which `@mentions` it, and its fragment's `title` and `picture`, which it shows by: Identities, "An agent's name and picture"); an id the registry does not hold is left out |
-| `__files` | the files viewer, the platform's page (`__files.js`, `__files.css`): the content files (live and main) as a tree beside a reader (markdown with `[[wikilinks]]`, other text with line numbers, pictures, downloads), reading each through `__file`, following `__watch` where it may; asked for `application/json`, the list it reads, `{type: "files", count, files: [{path, size}]}` (a path on both is the one `__file` reads: live's, an agent's main's). Framed, the reader's bar asks the page around it to open a file as a pane (`postMessage({fragment: "open", url, title})`) |
+| `__files` | the files viewer, the platform's page (`__files.js`, `__files.css`): the content files (live and main) as a tree beside a reader (markdown with `[[wikilinks]]`, other text with line numbers, pictures, downloads), reading each through `__file`, following `__watch` where it may; asked for `application/json`, the list it reads, `{type: "files", count, files: [{path, size}]}` (a path on both is the one `__file` reads: live's, an agent's or a session archive's main's). Framed, the reader's bar asks the page around it to open a file as a pane (`postMessage({fragment: "open", url, title})`) |
 | `__live` | WebSocket, anyone who can see the fragment: channel subscriptions from a cursor, presence, change signals, queries (below) |
 | `__watch` | WebSocket, viewers and up (the share link, or a signed upgrade): `{type: "hello", ref, sha}`, then `{type: "changed", ref: "main", sha, paths}` per external move of main |
 | anything else | the app's `fetch`, when it has one |
@@ -3128,9 +3188,13 @@ others", which shows it; a pack's Checkout's return,
 what their standing stops, their computer and agents (each agent's
 Rename, which opens the shell's own name dialog, and its picture: Add or
 Change, from a file the browser draws again at most 512 px square when
-it is past 256 KiB or no PNG, JPEG, WebP or GIF, and Remove; each written
-and put live as Identities, "An agent's name and picture", says, the row
-following the list as it changes), their skills (decision 17: the
+it is past 256 KiB or no PNG, JPEG, WebP or GIF, and Remove; and its
+Role, a field (its `meta.role`, empty for none); each written and put
+live as Identities, "An agent's name and picture", says, the row
+following the list as it changes; then, while their computer runs fewer
+than 16, Add agent: a name and a role, made as the first run makes its
+agent, in its own chat, which opens with the making's steps, and its
+hello first; its job says no role, which its runtime tells it), their skills (decision 17: the
 managed set, read from their skills fragment's files by category, and
 each agent's own, from its fragment's `skills/`; the shell makes the
 skills fragment, kind `skills`, at setup beside their default agent),
@@ -3195,10 +3259,16 @@ Anything else needs a signature as before. Adding a key still needs a
 key.
 
 Its sidebar is the person's list, one read (Skyler, 2026-10-12; Paul,
-2026-10-13): their **one agent** above (their first, the one the first
-run makes: the first their computer took, as its view lists its agents in
-the order it took them; a menu of New chat, Rename, its profile and its
-screen), saying what it is doing (below), then the **invites** waiting on
+2026-10-13; Paul, 2026-10-30: several agents, one of them main): beside
+its brand the launcher (below), a search and its key ("⌘K", "Ctrl K" off
+a Mac, the search alone on a touch screen with no finer pointer); then
+**New chat with** the agent its chip names: the open chat's (a group's
+lead) when it is one of theirs, else their **main agent** (their first,
+the one the first run makes: the first their computer took, as its view
+lists its agents in the order it took them). With more than one agent the
+chip lists them all (each one's face, name and role, the one it names
+marked), and the one picked gets that new chat alone; with one, it names
+it and opens nothing. Then the **invites** waiting on
 their emails, each its title, who invited them and to edit or view it,
 with Accept and Decline (decision 63; `GET /api/invites`, read as the
 page starts, as its list's socket opens and on its `invited`; Invites by
@@ -3212,9 +3282,14 @@ said yet above them all), less the ones they archived (`PUT
 are the desktop's: a dock of their icons and titles under the viewer's
 windows, less the archived and those they took off it (`PUT
 /api/fragments/{name}/dock`, above; search still finds them), then Add, open beside the chat on a
-desktop's width, a sheet from the bottom on a phone. Any other agents of
-theirs are in no list (a setting may offer more than one later); a chat
-with one of them is a chat, listed and found as any other. **Add teaches
+desktop's width, a sheet from the bottom on a phone. A chat with any of
+their agents is a chat, listed and found as any other. Its row is two
+lines, its agent first (Paul, 2026-10-30: it reads as talking to agents,
+not as threads piling up): its agents' faces (a group's stacked, as the
+launcher shows them), their names, and when its newest message was said
+(`previewAt`: today's time, "Yesterday", a weekday within the week, else
+its date), then the chat's own title, its unread count and its home's
+bell; a chat with none of their agents is its title alone. **Add teaches
 how to ask for an app** (Paul, 2026-10-14: "rather than spawning generic
 apps we teach the user how to prompt for new apps"): a window of ways to
 ask, each saying who the app is for and what it does, `…` the part to
@@ -3228,7 +3303,7 @@ shuffled again when it runs out; a reload deals the first three again).
 They are suggestions: nothing is made, sent or shown as if it were.
 Pressed, one goes into the composer of the person's chat, selected at its
 `…`, for them to change and send: the chat open, if it is their own; else
-their agent's newest chat, or a new one with it (New chat, below). On a
+their main agent's newest chat, or a new one with it (New chat, below). On a
 phone the desktop's sheet closes on it. The shell puts it there with
 `postMessage({fragment: "compose", text})` to that chat's frame, at the
 fragment's own origin, once the page in it has asked `agents?` (below;
@@ -3251,18 +3326,43 @@ that wait is closed, and so opened again.
 records, below: each agent's newest record of a turn's kind on a chat's
 `work`), so it is live on the same socket and reads no chat. The shell
 reads a turn as the chat's page does: `turn.start`, `turn.step` or
-`turn.prompt.closed` is Working, an open card (`turn.prompt`) is Waiting
-for you (its owner answers its cards), a question (`turn.asked`) is
-Waiting for you when it `asks` them and Waiting when it asks someone else,
-and `turn.end` is nothing. The agent's row says the most pressing (for
-you, then waiting, then working), and its menu names up to five chats
-where it is so ("Waiting for you in Garden talk"), each opening it. It
-says nothing while their computer is not awake (its turns stop with it)
-or the page's socket is shut (it would not hear the change), nor of a
+`turn.prompt.closed` `answered` (its listed `outcome`) is Working, an
+open card (`turn.prompt`) is Waiting for you (its owner answers its
+cards), a question (`turn.asked`) is Waiting for you when it `asks` them
+and Waiting when it asks someone else, and `turn.end`, or a card closed
+any other way, is nothing. Each chat's row says it in place of its time:
+its agents' most pressing (for you, then waiting, then working). It
+says nothing but an open card while their computer is not awake (its
+turns stop with it; a card outlives them: docs/bridge.md), nor anything
+while the page's socket is shut (it would not hear the change), nor of a
 record past the bridge's own bound on a turn that says nothing (15
 minutes working, an hour waiting, each a minute more for the list's own
 lag). A message waiting for its turn has no record yet, so queued is not
 said.
+**Delegation threads** (Paul, 2026-10-30; cell/shell/threads.js): when
+one of their agents asks another (`fragment ask --return-to`:
+docs/chat-records.md, "An ask"), the asked agent's turn runs in the two
+agents' chat with their owner, a **pair chat**: one of theirs with exactly
+two of their agents, labelled as `fragment ask` labels their pair. It
+leaves the chat list (a group chat of theirs otherwise named stays), and
+the chat it was asked from shows each thread as one line over it: the
+asked agent's face and name, the first line of what was asked, its state
+(Asked, Working, Needs you while a card of its waits for them, Done,
+Stopped, Lost for any other end, the error its title), how long it has
+run, and, while it runs, Stop: its owner's `stop` command in the pair
+chat (`{kind: "command", command: "stop", to}`, with the id
+`stop:<turn>`), since the person's own Stop there is its asker's, an
+agent's. A line opens the pair chat, its transcript. It stays until its
+answer has come: the answer on its asker's `tasks` (`an:<asked turn>`) and
+the asker's turn of it in the asking chat, ended; so a thread stopped or
+lost is said, never dropped. The asking chat's row says "Waiting on
+<agent>" in place of its time while one runs. Nothing is kept for it: its
+state is the pair chat's listed records, and what was asked, when, where
+its answer goes and how its turn ended are its newest records (`before=`,
+100 of `chat`, 400 of `work`), read again only when its row says a message
+came, or a turn started or ended; an ended thread's answer is looked for
+(the asker's newest 100 of `tasks`, the asking chat's 400 of `work`) when
+the asking chat's row says the same.
 A chat's row shows its `unread` as a count ("99+" at the list's bound),
 but the open chat's: the chat shown in the middle column, while the page
 is on screen, is marked seen (`PUT /api/fragments/{name}/seen`) as it
@@ -3281,19 +3381,17 @@ its member list, as its row names them (`agents`), never its name; the
 launcher's results stack their avatars, each in its identity's colour
 (the chat page's FNV-1a choice), and its ⋯ offers each one's profile and
 screen. The open chat's ⋯ renames it, invites people, and archives it.
-**New chat** (the agent's menu in the sidebar, the row below the agent
-there, for a seat once its agent is made, and the launcher) starts
-another chat with the person's agent: a chat fragment on
+**New chat** (the sidebar's, for a seat once its agent is made, and the
+launcher, each with the agent it names) starts another chat with the agent: a chat fragment on
 the `chat` template labelled `<agent's label>-chat-<n>`, titled "New
 chat", the agent added as an editor (which wakes its computer). Its
 context is its own (an agent's runtime keys its session by its chat). An
 untitled one with that agent where nothing has been said yet opens again
 instead of another. The agent's own chat, `<label>-chat` (the first
 run's, titled "Your first chat": below), is titled on its own as any
-chat is, never by its agent: the sidebar names the agent above it, and
-Rename in a chat's ⋯ renames that chat alone, as Rename in the agent's
-menu and Settings' Agents rename the agent alone (Identities, "An
-agent's name and picture"). It is the one `fragment ask` and Hermes'
+chat is, never by its agent: its row names the agent above it, and
+Rename in a chat's ⋯ renames that chat alone, as Settings' Agents
+renames the agent alone (Identities, "An agent's name and picture"). It is the one `fragment ask` and Hermes'
 Bot Mode find, by its label.
 An agent shows its picture, where it has one, in place of its tinted
 image wherever the shell draws it (the sidebar, a chat's mark, the
@@ -3387,7 +3485,7 @@ by the worker (never by a page), else one opens at `/?chat=<chat>`. A
 frame of anything else, or a message from another origin, is answered
 nothing.
 
-**The launcher** (the sidebar's +, a phone's top bar +, and ⌘K or
+**The launcher** (the sidebar's search, a phone's top bar +, and ⌘K or
 Ctrl K, from the chat's frame too: `{fragment: "open-launcher"}`, taken
 only from the focused frame of a listed fragment at its own origin;
 cell/shell/launcher.js) is one input over the desktop's landscape.
@@ -3396,7 +3494,9 @@ first 8 words and 256 bytes): the
 chats and apps whose title or label hold them, then the messages, newest
 first, archived ones marked. A chat found opens in the middle column, an
 app in the desktop, a message its chat. For a seat whose agent is made,
-Enter (or the first row, "Start a new chat with <agent>") makes a new
+Enter (or the first row, "Start a new chat with <agent>": the agent
+**New chat** names, and with more than one agent a pick of another
+beside it, for this launch alone) makes a new
 chat with it as **New chat** does and posts the words whole as its first
 message (`POST /api/f/{chat}/channels/chat`, the person's), with an id
 kept until it is sent, so trying again after an answer that was lost is

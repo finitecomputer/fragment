@@ -28,7 +28,7 @@ impl FragmentCell {
             return Err(CellError::new(ErrorCode::Forbidden, "only the owner or their agent acting for them claims an address"));
         }
         self.writable().await?;
-        if matches!(self.kind()?, FragmentKind::Chat | FragmentKind::Agent | FragmentKind::Skills) {
+        if matches!(self.kind()?, FragmentKind::Chat | FragmentKind::Agent | FragmentKind::Skills | FragmentKind::Sessions) {
             return Err(CellError::invalid("a public address is for an app or a brain"));
         }
         let label = body["label"].as_str().ok_or_else(|| CellError::invalid("name the public address"))?;

@@ -1339,6 +1339,7 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
         (Method::Get, ["api", "models", "v1", "models"]) => models::list_route(req, env, &url).await,
         (Method::Post, ["api", "models", "v1", "audio", "transcriptions"]) => models::transcription_route(req, env, &url, ctx).await,
         (Method::Post, ["api", "models", "v1", "decide"]) => models::decide_route(req, env, &url, ctx).await,
+        (Method::Post, ["api", "models", "v1", "embeddings"]) => models::embeddings_route(req, env, &url, ctx).await,
         (Method::Get, ["api", "identities", id, "picture"]) => picture(env, id).await,
         // an operator's wipe of a person (wipe.rs): GET its dry run, POST it
         (Method::Get | Method::Post, ["api", "people", person, "wipe"]) => {

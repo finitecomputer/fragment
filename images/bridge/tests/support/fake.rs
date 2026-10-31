@@ -92,10 +92,22 @@ pub struct World {
     /// While down every request is 503 and every upgrade refused.
     pub down: bool,
     pub fail_posts: u32,
+    /// The next posts on this channel (any fragment's) that would append a
+    /// record: refused 503 before it is appended (`false`), or appended
+    /// and answered 503, the answer lost (`true`). A retry of one appended
+    /// is a replay, as ever.
+    pub fail_channel: Option<(String, u32, bool)>,
     /// The next this many `GET /api/computer` and `GET /api/fragments`
     /// answer 503, as a platform that failed one read does.
     pub fail_computer_reads: u32,
     pub fail_lists: u32,
+    /// The next this many reads of a page of 100 records (a note's, or a
+    /// late card answer's) answer 503, as a deploying platform does.
+    pub fail_history_reads: u32,
+    /// While set, every post of a card's closure (`turn.prompt.closed`)
+    /// answers 503, as a deploying platform does; counted.
+    pub fail_closures: bool,
+    pub refused_closures: u32,
     /// Fragments whose `GET …/channels` answers 500, every time.
     pub broken: Vec<String>,
     /// Each post to a `work` channel (a claim, among others) is answered
@@ -702,6 +714,10 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
             w.fragments.get_mut(&fragment).unwrap().subscriptions.push(s.clone());
             answer(StatusCode::OK, s)
         }
+        (Method::GET, ["channels", _]) if w.fail_history_reads > 0 && query(&q, "limit").first().is_some_and(|l| *l == "100") => {
+            w.fail_history_reads -= 1;
+            refuse(StatusCode::SERVICE_UNAVAILABLE, "deploying")
+        }
         (Method::GET, ["channels", channel]) => {
             let Some(c) = f.channels.get(*channel) else { return refuse(StatusCode::NOT_FOUND, "no such channel") };
             let after: u64 = query(&q, "after").first().and_then(|a| a.parse().ok()).unwrap_or(0);
@@ -737,13 +753,30 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
                 }
                 return refuse(StatusCode::CONFLICT, "that id was posted with another body");
             }
+            if w.fail_closures && body["kind"] == "turn.prompt.closed" {
+                w.refused_closures += 1;
+                return refuse(StatusCode::SERVICE_UNAVAILABLE, "deploying");
+            }
             if w.fail_posts > 0 {
                 w.fail_posts -= 1;
                 return refuse(StatusCode::SERVICE_UNAVAILABLE, "a failed post, as asked");
             }
+            let lost = match &mut w.fail_channel {
+                Some((c, n, after)) if *c == channel && *n > 0 => {
+                    *n -= 1;
+                    Some(*after)
+                }
+                _ => None,
+            };
+            if lost == Some(false) {
+                return refuse(StatusCode::SERVICE_UNAVAILABLE, "a failed post on this channel, as asked");
+            }
             let record = w.append(&fragment, &channel, &me, body.clone());
             let seq = record["seq"].as_u64().unwrap();
             w.fragments.get_mut(&fragment).unwrap().channels.get_mut(&channel).unwrap().ids.insert(id, (seq, body));
+            if lost == Some(true) {
+                return refuse(StatusCode::SERVICE_UNAVAILABLE, "appended, and the answer lost, as asked");
+            }
             answer(StatusCode::OK, json!({ "record": record, "replayed": false }))
         }
         (Method::PUT, ["channels", channel, "draft"]) => {

@@ -1306,6 +1306,7 @@ impl PrincipalCell {
                     kind: serde_json::from_value(face["kind"].clone()).unwrap_or_default(),
                     title: face["title"].as_str().map(str::to_string),
                     picture: face["picture"].as_str().map(str::to_string),
+                    agent_role: face["role"].as_str().map(str::to_string),
                     agents: vec![],
                     preview: None,
                     preview_at: None,

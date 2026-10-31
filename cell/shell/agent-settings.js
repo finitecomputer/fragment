@@ -2,8 +2,13 @@ import { avatar } from "./agent-identity.js";
 import { providerName } from "./connections.js";
 
 export const DEFAULT_AGENT_TIER = "cheap";
+// An agent's role, at most (proto's `ROLE_MAX_CHARS`), and the agents one
+// computer runs (the cell's `AGENTS_MAX`): copies, each held to its source
+// by a host test (xtask/src/guards.rs, `the_shell_copies_its_limits`).
+const ROLE_MAX_CHARS = 48;
+const AGENTS_MAX = 16;
 
-export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, agents, named, rename, load, nameScreen, renderNames, computer, homePicker }) {
+export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, agents, named, rename, load, nameScreen, renderNames, computer, homePicker, addAgent }) {
   // ---- an agent's name and picture (docs/api.md, "An agent's name and
   // picture"): its agent fragment's title and its avatar.png, written and
   // put live as any of its files are (POST …/files, then …/deploy). Every
@@ -140,6 +145,82 @@ export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, 
     agentJsonWrites.set(agent, written);
     return written;
   }
+  // ---- an agent's role (its fragment.json's `meta.role`; Paul, 2026-10-30):
+  // the tag its chats' rows show beside its name, one source, written and
+  // put live as its name is; a role taken away is none. The rows follow the
+  // list, never this field. ----
+  async function setRole(agent, role) {
+    const manifest = await api("GET", `/api/f/${seg(agent)}/manifest`);
+    const meta = { ...(manifest.meta ?? {}) };
+    if (role) meta.role = role;
+    else delete meta.role;
+    manifest.meta = meta;
+    await api("POST", `/api/f/${seg(agent)}/files`, { message: role ? "its role" : "no role", files: [{ path: "fragment.json", text: JSON.stringify(manifest, null, 2) + "\n" }] });
+    await api("POST", `/api/f/${seg(agent)}/deploy`, {});
+  }
+  function roleField(a, said) {
+    const field = el("input", "agent-role");
+    field.type = "text";
+    field.maxLength = ROLE_MAX_CHARS;
+    field.placeholder = "e.g. chief of staff";
+    field.dataset.roleFor = a.fragment;
+    field.value = byName(a.fragment)?.agentRole ?? "";
+    named(field, a.fragment, (t) => `${t}'s role`, "aria-label");
+    field.onchange = async () => {
+      const role = field.value.trim();
+      field.disabled = true;
+      said.textContent = "Saving…";
+      try {
+        await setRole(a.fragment, role);
+        said.textContent = "Saved.";
+        await load();
+      } catch (e) {
+        said.textContent = e.message;
+        field.value = byName(a.fragment)?.agentRole ?? "";
+      } finally {
+        field.disabled = false;
+      }
+    };
+    const label = settingLabel("Role", field);
+    label.classList.add("agent-role-label");
+    return label;
+  }
+  // ---- another agent (Paul, 2026-10-30): its name and role, then it is
+  // made as the first was, in its own chat (onboarding.js `addAgent`),
+  // which opens. None past what one computer runs. ----
+  function addAgentForm() {
+    if (agents().size >= AGENTS_MAX) return [];
+    const form = el("form", "agent-add");
+    const name = el("input", "agent-add-name");
+    name.type = "text";
+    name.maxLength = 48;
+    name.placeholder = "Name";
+    name.setAttribute("aria-label", "New agent's name");
+    const role = el("input", "agent-add-role");
+    role.type = "text";
+    role.maxLength = ROLE_MAX_CHARS;
+    role.placeholder = "Role, e.g. dev";
+    role.setAttribute("aria-label", "New agent's role");
+    const add = el("button", "quiet", "Add agent");
+    add.type = "submit";
+    const said = el("p", "muted agent-face-said");
+    said.hidden = true;
+    form.onsubmit = async (event) => {
+      event.preventDefault();
+      if (!name.value.trim()) return name.focus();
+      add.disabled = true;
+      try {
+        await addAgent({ name: name.value.trim(), role: role.value.trim() });
+      } catch (e) {
+        said.textContent = e.message;
+        said.hidden = false;
+      } finally {
+        add.disabled = false;
+      }
+    };
+    form.append(name, role, add);
+    return [form, said];
+  }
   function agentSettings(a, row, modeled) {
     const box = el("div", "agent-setting");
     box.dataset.agent = a.fragment;
@@ -152,7 +233,7 @@ export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, 
     // names (Private, Standard) or a model of a provider the person
     // connected; whether there is one, with a single route, is the agent's
     // own tier's to say (once agent.json is read)
-    const picks = [...modelPickers(a, modeled, read, write, said), ...homePicker(a, said)];
+    const picks = [roleField(a, said), ...modelPickers(a, modeled, read, write, said), ...homePicker(a, said)];
     box.append(row, ...picks, said);
     return box;
   }
@@ -325,5 +406,5 @@ export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, 
     read.then(show);
     return [fastRow, deepRow];
   }
-  return { faceControls, renderAgentFaces, agentSettings, agentJson, writeAgentJson, savePick, settingLabel, modelOption };
+  return { faceControls, renderAgentFaces, agentSettings, addAgentForm, agentJson, writeAgentJson, savePick, settingLabel, modelOption };
 }

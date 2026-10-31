@@ -92,7 +92,8 @@ upgrade re-reads it, and the real-Hermes lane
   v0.21.5, each sent only when advertised:
   - `send {chat_id, content, reply_to, metadata}`: a reply when it
     answers a message (`reply_to`, or `metadata.reply_to_message_id`, or
-    a final's `metadata.notify`), else tool progress or a notice;
+    a final's `metadata.notify`), else tool progress (off in our image)
+    or a notice;
   - `edit {message_id, content}`: the whole text again;
   - `delete`, `typing`, `react {message_id, emoji, remove}`;
   - `draft {draft_id, content, final}`: a reply streaming; for any
@@ -112,7 +113,8 @@ upgrade re-reads it, and the real-Hermes lane
     Hermes sends the link as text;
   - `get_chat_info`, `thread_create`, `thread_rename`;
   - `task_card`, `task_card_stop`: only for Slack chats
-    (`gateway/run_turn.py`), so Relay's own steps are progress text;
+    (`gateway/run_turn.py`), so our image's steps come from its tool hooks
+    (below);
   - `follow_up`: Discord's interaction tokens.
 - The connector: `interrupt_inbound {session_key, chat_id}`: Stop, for
   `agent:<profile>:relay:group:<chat_id>` (never a `/stop` message: one
@@ -159,8 +161,12 @@ in words as anything but text (an open `clarify` is the base adapter's
 translates both, keeping the glyphs); a tool step as anything but
 progress text (`task_card` is Slack's alone). Hermes' supported hooks
 (`gateway/hooks.py`: `agent:start`, `agent:step`, `agent:end`; plugins'
-`pre_tool_call`, `post_tool_call`) have all three, but outside Relay:
-the bridge would need a channel of its own beside it.
+`pre_llm_call`, `post_tool_call`) have all three, but outside Relay: our
+image's plugin says a tool call's end (its id, its outcome `ok`, `error`,
+`timeout`, `cancelled` or `blocked`, how long it ran) on the bridge's
+authenticated local `/relay/activity` socket, a channel beside Relay with
+no order to it (docs/bridge.md, "Runtime work outside a turn"); its
+progress is off.
 
 ## Hermes' settings (images/hermes)
 
@@ -172,7 +178,7 @@ group_sessions_per_user: false     # one session per chat, "[name] …" each mes
 gateway: {multiplex_profiles: true}
 onboarding: {profile_build: "off"}
 streaming: {enabled: true, transport: "draft"}
-display: {busy_input_mode: "queue", tool_progress: "all", tool_progress_grouping: "accumulate", tool_preview_length: 140, long_running_notifications: false, interim_assistant_messages: false}
+display: {busy_input_mode: "queue", tool_progress: "off", long_running_notifications: false, interim_assistant_messages: false}   # steps are observed (docs/bridge.md)
 platforms: {relay: {gateway_restart_notification: false}}
 approvals: {mode: "off", timeout: 3600, destructive_slash_confirm: false}   # nothing technical asks (docs/computers.md)
 agent: {disabled_toolsets: ["cronjob"], clarify_timeout: 3600}   # its routines are fragment cron (decision 38)

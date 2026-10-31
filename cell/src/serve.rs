@@ -436,9 +436,10 @@ impl FragmentCell {
                 if !req.headers().get("accept")?.is_some_and(|a| a.contains("application/json")) {
                     return Ok(Response::ok(files_page(name))?.with_headers(headers("text/html; charset=utf-8", "no-store")?));
                 }
-                // a path on both is the one `__file` reads (live's; an agent's, main's)
+                // a path on both is the one `__file` reads (live's; an agent's
+                // or a session archive's, main's)
                 let mut sizes = std::collections::BTreeMap::new();
-                let last_wins = if self.kind()? == fragment_proto::FragmentKind::Agent { ["live", "main"] } else { ["main", "live"] };
+                let last_wins = if self.main_first()? { ["live", "main"] } else { ["main", "live"] };
                 for which in last_wins {
                     let blobs = self.pointer_sizes(which)?;
                     for r in self.tree_rows(which)?.into_iter().filter(|r| !site::is_machinery(&r.path)) {
@@ -464,8 +465,10 @@ impl FragmentCell {
                 // reads from there. An agent's files (its job, its settings,
                 // its memories) are main's first: its computer's sync writes
                 // them there and never deploys (images/hermes/boot/src/
-                // sync.rs), so live keeps the job of its last deploy.
-                let first = if self.kind()? == fragment_proto::FragmentKind::Agent { ["main", "live"] } else { ["live", "main"] };
+                // sync.rs), so live keeps the job of its last deploy. So are a
+                // session archive's: its imports write main and never deploy
+                // (templates/sessions/README.md).
+                let first = if self.main_first()? { ["main", "live"] } else { ["live", "main"] };
                 let found = match self.tree_row(first[0], &p)? {
                     Some(row) => Some((first[0], row)),
                     None => self.tree_row(first[1], &p)?.map(|row| (first[1], row)),

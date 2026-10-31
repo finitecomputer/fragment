@@ -359,6 +359,19 @@ A direct manifest lookup resolves only that tag; a definite missing
 manifest authorizes a build, and other registry errors stop the job.
 Input tags are not overwritten by CI.
 
+Master's merge queue builds it first. Each merge group runs
+`.github/workflows/preview-image.yml`, which resolves the group's inputs
+the same way and, when neither `inputs-<key>` nor `queue-<key>` is
+there, builds, pushes and prepares `queue-<key>`. A group's head is the
+commit master then moves to, so that push's `preview-image` waits for the
+queue's run of its very commit when it is still going, then copies
+`queue-<key>` to `inputs-<key>` by digest (its layers are already in the
+repository) and finds it prepared. Master's job is the only writer of an
+input tag; the queue's runs only ever push queue tags, never deploy, and
+are not required checks. Their environment, `preview-image`, holds a
+token with the preview account's Containers permission alone
+(docs/secrets.md).
+
 An absent tag builds with BuildKit's persistent Actions cache (one
 master-only `preview-hermes` scope, `mode=max`), then pushes and prepares
 the image on Cloudflare's network. The Dockerfile's CLI stage copies only
@@ -1785,9 +1798,12 @@ settings and state):
   and the fragment API, with the chat records of docs/chat-records.md.
   Its core names no runtime; `relay` (Hermes' Relay) and `script` (a
   deterministic agent) are its two runtimes.
-- `images/stub`: the bridge with `script`, and a screen page. 9.6 MB; a
-  local start follows its chats in 0.3 s. The platform's own lanes run
-  against it.
+- `images/stub`: the bridge with `script`, the fragment CLI (its agents
+  ask each other with it, `ask <agent> <words>`, as our Hermes image's
+  do; built from the CLI's inputs alone, its dependencies a layer of their
+  own, unoptimized), and a screen page. 9.6 MB and a 17 MB CLI; a local
+  start follows its chats in 0.3 s. The platform's own lanes run against
+  it.
 - `images/hermes`: Hermes v0.21.7's desktop image, `hermes-boot`, the
   bridge as Hermes' Relay connector, the screen. The base is pinned by
   digest to v0.21.7's release build (its versioned tag
@@ -2171,12 +2187,17 @@ is a test's shorter one).
 
 Beside how to ask, every agent is told on every turn in our chats that a
 file someone attaches is already on its computer (`hermes::FILES`, after
-`hermes::ASKING` in `platform_hints.relay`; 2026-10-22): Hermes' relay
-adapter downloads each attachment before the turn into the profile's
-scratch, which Hermes prunes once a day unused, and the note before the
-message names its path (an image's after `image_url:`); nothing else
-told the agent it was a file it could use. Copied into its work, it is
-kept. Its browser tools have no upload, so to put one on a website it
+`hermes::ASKING` in `platform_hints.relay`; 2026-10-22). The bridge names
+each original filename, MIME type and local path after the new message's
+words: `/tmp/bridge-media/<sha256>` by default. The files are already
+downloaded before the turn, including images given natively to the model.
+They are scratch, lost at a sleep; copy them into the app or work to keep
+them. Hermes also caches each in the profile's `cache/scratch` as
+`relay_media_<random>.<ext>`; its own hints differ between image and
+document input and lose original names. Native images still carry pixels
+and Hermes' cache-path hint. The bridge's note gives tools a consistent
+mapping independent of that vision routing. Its browser tools have no
+upload, so to put one on a website it
 clicks the site's upload button with them, then types the path into
 the file dialog on its desktop with `computer_use`. The `fragment`
 skill's first page says the same (`computer.md`, "Files your owner sends
@@ -2213,6 +2234,14 @@ name: its `SOUL.md` is its job (the shell's first agent's names none),
 and Hermes' Bot Mode tells it its `@handle` alone. An agent made before
 this whose `SOUL.md` still says its old name is told its name all the
 same; its owner, or the agent, may take the name out of its job.
+
+Its **role** (its agent fragment's `meta.role`, its status's `agentRole`:
+docs/api.md, "An agent's name and picture") is told the same way, read
+with its title: "Your role is chief of staff: what your owner made you
+for, as it is now." between its name and its owner's home, and none when
+it has none, so an edit reaches its next turn. Its `profile.yaml`'s
+description, what its teammates read it does in Hermes' roster, is its
+role, else its job's first line. Its job never copies the role.
 
 ### Bot Mode in our Hermes image
 

@@ -343,17 +343,14 @@ pub const ASKING: &str = "You are in a Fragment chat, and its people are not tec
 
 /// What every agent is told of the files people attach in our chats, beside
 /// `ASKING` on every turn (2026-10-22: nothing told it an attachment is a
-/// file it can use). Hermes' relay adapter downloads each attachment before
-/// the turn into the scratch it moves to the profile's cache
-/// (`relay_media_<random>.<ext>`; Hermes prunes what sits a day unused:
-/// its `SCRATCH_MAX_IDLE_HOURS`, 24), and the turn's text names that path
-/// only in its note before the message: an image's as `vision_analyze`'s
-/// `image_url:`, a document's as where it is "saved at". Its browser tools
+/// file it can use). The bridge downloads originals into its media scratch
+/// and names each file, MIME and path after the message's words,
+/// independent of Hermes' cache hints and image routing. Its browser tools
 /// have no upload: a site's upload button opens the file dialog on its
 /// desktop, where `computer_use` types the path. The `fragment` skill's
 /// first page (`computer.md`, "Files your owner sends you") says the same
 /// at more length.
-pub const FILES: &str = "A file someone attaches in this chat is already on your computer: the note before their message names its path. It is cleared after a day, so copy it into your work to keep it. To put it on a website, click the site's upload button with your browser tools, then type its full path into the file dialog on your desktop with computer_use and press Enter.";
+pub const FILES: &str = "Chat attachments are already on your computer. The attachment note names each file, its type and its local path under /tmp/bridge-media. Use that path with your tools to copy or edit the original; copy it into your app or work to keep it across a sleep. To put it on a website, click the site's upload button with your browser tools, then type its full path into the file dialog on your desktop with computer_use and press Enter.";
 
 /// What every agent is told of the files it sends in our chats, after
 /// `FILES` on every turn (Paul, 2026-10-23: asked for a PDF in the chat,
@@ -404,18 +401,14 @@ pub fn managed_config(disabled_plugins: &[String], card_timeout_s: u64, screen_i
     y.push_str("onboarding:\n  profile_build: \"off\"\n");
     // A reply streams as Relay `draft` frames (the chat's drafts); its final is one send.
     y.push_str("streaming:\n  enabled: true\n  transport: \"draft\"\n");
-    // The bridge hands one message of a chat at a time; tool progress is one growing
-    // message, each line a step. No interim messages: the model's text beside a tool
-    // call is no message of its own (Hermes' default for a platform it has no tier
-    // for, as `relay`, is to send each as one). Hermes reads `display` for a turn
-    // from the profile's config with this overlay merged over it (its
-    // `_load_gateway_config`, under the profile's scope). A step's preview is as
-    // long as the bridge keeps a step's arguments (Hermes cuts it at 40 when
-    // unset: its `_preview_cap`).
-    y.push_str(&format!(
-        "display:\n  busy_input_mode: \"queue\"\n  tool_progress: \"all\"\n  tool_progress_grouping: \"accumulate\"\n  tool_preview_length: {}\n  long_running_notifications: false\n  interim_assistant_messages: false\n",
-        fragment_bridge::limits::STEP_ARGS_MAX_CHARS
-    ));
+    // The bridge hands one message of a chat at a time. No tool progress: a step is
+    // a tool call's end, which the image's plugin says (`fragment-activity`), never
+    // its progress text. No interim messages: the model's text beside a tool call
+    // is no message of its own (Hermes' default for a platform it has no tier for,
+    // as `relay`, is to send each as one). Hermes reads `display` for a turn from
+    // the profile's config with this overlay merged over it (its
+    // `_load_gateway_config`, under the profile's scope).
+    y.push_str("display:\n  busy_input_mode: \"queue\"\n  tool_progress: \"off\"\n  long_running_notifications: false\n  interim_assistant_messages: false\n");
     y.push_str("platforms:\n  relay:\n    gateway_restart_notification: false\n");
     // No technical approvals (Paul, 2026-10-14: its people are not technical,
     // and a question about a command makes no sense to them; finite-mono ran
@@ -501,6 +494,16 @@ pub fn told_name(name: &str) -> String {
     format!("Your name is {name}: your agent fragment's title, as it is now. If an earlier message or your memory calls you something else, you have been renamed since, and {name} is your name.")
 }
 
+/// What tells an agent its role (its agent fragment's `meta.role`, its
+/// status's `agentRole`: docs/api.md, "An agent's name and picture"; Paul,
+/// 2026-10-30), beside its name, at every turn, as its name is told: one
+/// source, so a role its owner edits reaches its next turn, nothing
+/// restarted, and its job (`SOUL.md`) never copies it.
+pub fn told_role(role: &str) -> String {
+    let role = role.replace("${", "$ {");
+    format!("Your role is {role}: what your owner made you for, as it is now.")
+}
+
 /// What tells an agent where its owner's home is (docs/api.md, "An agent's
 /// home": its `agent.json`'s `home`), beside its name, at every turn: the
 /// chat by its label (the session context names a chat so: `group: <label>`),
@@ -518,9 +521,13 @@ pub fn told_home(agent_fragment: &str, home: Home) -> String {
     format!("Your owner's home is {at}: a routine you schedule without --chat (a reminder, a check to report on) runs there.")
 }
 
-/// An agent's `agent.system_prompt`: its name, then its owner's home.
-pub fn told(name: &str, agent_fragment: &str, home: Home) -> String {
-    format!("{} {}", told_name(name), told_home(agent_fragment, home))
+/// An agent's `agent.system_prompt`: its name, its role when it has one,
+/// then its owner's home.
+pub fn told(name: &str, role: Option<&str>, agent_fragment: &str, home: Home) -> String {
+    match role {
+        Some(role) => format!("{} {} {}", told_name(name), told_role(role), told_home(agent_fragment, home)),
+        None => format!("{} {}", told_name(name), told_home(agent_fragment, home)),
+    }
 }
 
 /// An agent's profile config: its name and its owner's home (`told`), its model, through
@@ -538,14 +545,14 @@ pub fn told(name: &str, agent_fragment: &str, home: Home) -> String {
 /// `_HERMES_PROVIDER_ENV_BLOCKLIST`), so the terminal also sources the
 /// profile's credentials file (`credentials_sh`) as its shell starts.
 #[allow(clippy::too_many_arguments)]
-pub fn profile_config(agent: &Agent, name: &str, home: Home, main: &MainModel, reasoning: Reasoning, route: &Route, credential_env: &[String], credentials_file: &Path) -> String {
+pub fn profile_config(agent: &Agent, name: &str, role: Option<&str>, home: Home, main: &MainModel, reasoning: Reasoning, route: &Route, credential_env: &[String], credentials_file: &Path) -> String {
     let base = route.base.trim_end_matches('/');
     let reasoning = main.reasoning(reasoning, route);
     let mut y = String::new();
-    y.push_str(&format!("# Written by hermes-boot for {} (model {}) at every boot, and when its model, its reasoning, its name or its home changes.\n", agent.fragment, main.name()));
-    // its name and its home, at every turn; a tier's guidance, a text tier's one retry
+    y.push_str(&format!("# Written by hermes-boot for {} (model {}) at every boot, and when its model, its reasoning, its name, its role or its home changes.\n", agent.fragment, main.name()));
+    // its name, its role and its home, at every turn; a tier's guidance, a text tier's one retry
     // and its reasoning (below) beside it, in its one `agent` mapping
-    y.push_str(&format!("agent:\n  system_prompt: {}\n", q(&told(name, &agent.fragment, home))));
+    y.push_str(&format!("agent:\n  system_prompt: {}\n", q(&told(name, role, &agent.fragment, home))));
     // A tier agent's prompt is the one its tiers were validated on, named
     // `cheap` and `medium` (canary rounds 1 to 4): Hermes adds guidance for
     // a model's family by a substring of its name, and named by its id a
@@ -1227,11 +1234,11 @@ mod tests {
     fn its_config_tells_the_agent_its_name() {
         let creds = Path::new("/c.sh");
         for main in [Tier::Cheap.into(), Tier::Medium.into(), Tier::High.into()] {
-            let c = profile_config(&agent(), "Juniper", Home::Chat, &main, DEFAULT_REASONING, &route("http://m"), &[], creds);
+            let c = profile_config(&agent(), "Juniper", None, Home::Chat, &main, DEFAULT_REASONING, &route("http://m"), &[], creds);
             assert!(c.contains("\nagent:\n  system_prompt: \"Your name is Juniper: your agent fragment's title, as it is now. "), "{c}");
             assert_eq!(c.matches("\nagent:\n").count(), 1, "one `agent` mapping: {c}");
         }
-        let named = |name: &str| profile_config(&agent(), name, Home::Chat, &Tier::Medium.into(), DEFAULT_REASONING, &route("http://m"), &[], creds);
+        let named = |name: &str| profile_config(&agent(), name, None, Home::Chat, &Tier::Medium.into(), DEFAULT_REASONING, &route("http://m"), &[], creds);
         let renamed = named("Frank");
         assert!(renamed.contains("Your name is Frank: ") && renamed.contains("and Frank is your name.") && !renamed.contains("Juniper"), "{renamed}");
         assert_ne!(renamed, named("Juniper"));
@@ -1239,6 +1246,14 @@ mod tests {
         let odd = named("a\"b\n${FRAGMENT_TOKEN}");
         assert!(odd.contains("  system_prompt: \"Your name is a\\\"b\\n$ {FRAGMENT_TOKEN}: "), "one scalar, its `${{` broken apart: {odd}");
         assert!(!told_name("${A}${B}").contains("${"), "{}", told_name("${A}${B}"));
+        // its role, beside its name and before its home, followed as it changes;
+        // none, no line of it
+        let roled = |role: Option<&str>| profile_config(&agent(), "Juniper", role, Home::Chat, &Tier::Medium.into(), DEFAULT_REASONING, &route("http://m"), &[], creds);
+        let dev = roled(Some("dev"));
+        assert!(dev.contains("and Juniper is your name. Your role is dev: what your owner made you for, as it is now. Your owner's home is"), "{dev}");
+        assert_ne!(dev, roled(Some("editor")), "a new role is a new config");
+        assert!(!roled(None).contains("Your role"), "{}", roled(None));
+        assert!(!told_role("${A}").contains("${"), "{}", told_role("${A}"));
     }
 
     /// Goal (Paul, 2026-10-16): a profile names each tier's model by the id
@@ -1282,7 +1297,7 @@ mod tests {
         let (own_main, _) = MainModel::of(&own, Tier::Cheap, Some(&OwnModel { provider: "openrouter".into(), id: "anthropic/claude-sonnet-5.5".into() }));
         assert!(matches!(own_main, MainModel::Own { .. }));
         for (main, a) in [(Tier::Cheap.into(), agent()), (Tier::Medium.into(), agent()), (Tier::High.into(), agent()), (own_main, own)] {
-            let config = |r: Reasoning| profile_config(&a, "Juniper", Home::Chat, &main, r, &route("http://m"), &[], creds);
+            let config = |r: Reasoning| profile_config(&a, "Juniper", None, Home::Chat, &main, r, &route("http://m"), &[], creds);
             for r in [Reasoning::Low, Reasoning::High, Reasoning::Max] {
                 let p = config(r);
                 let expected = if matches!(main, MainModel::Own { .. }) { r } else { Reasoning::High };
@@ -1293,7 +1308,7 @@ mod tests {
             }
             assert_eq!(config(Reasoning::Low) == config(Reasoning::High), matches!(main, MainModel::Tier(_)), "only an owner's model follows its personal reasoning setting");
         }
-        let fresh = profile_config(&agent(), "Juniper", Home::Chat, &Tier::of(None, false).into(), Reasoning::of(None), &route("http://m"), &[], creds);
+        let fresh = profile_config(&agent(), "Juniper", None, Home::Chat, &Tier::of(None, false).into(), Reasoning::of(None), &route("http://m"), &[], creds);
         assert!(fresh.contains("\n  reasoning_effort: \"high\"\n"), "a new agent, with no agent.json, thinks hard: {fresh}");
         let m = managed_config(&[], CARD_TIMEOUT_S, crate::desktop::IDLE_STOP_MS);
         assert!(!m.contains("reasoning"), "a profile's own, never the overlay's, which would win over it: {m}");
@@ -1306,11 +1321,11 @@ mod tests {
     #[test]
     fn a_new_agents_profile_defaults_to_cheap() {
         let tier = Tier::of(None, false);
-        let config = profile_config(&agent(), "Juniper", Home::Chat, &tier.into(), DEFAULT_REASONING, &route("http://model.fragment.internal"), &[], Path::new("/c.sh"));
+        let config = profile_config(&agent(), "Juniper", None, Home::Chat, &tier.into(), DEFAULT_REASONING, &route("http://model.fragment.internal"), &[], Path::new("/c.sh"));
         assert!(config.contains("  default: \"z-ai/glm-5.3-flash\"\n"), "{config}");
         assert!(config.contains("  default_headers:\n    x-fragment-agent: \"juniper--k3x9\"\n    x-fragment-tier: \"cheap\"\n"), "{config}");
         let named = Route::new("http://model.fragment.internal", None);
-        let config = profile_config(&agent(), "Juniper", Home::Chat, &tier.into(), DEFAULT_REASONING, &named, &[], Path::new("/c.sh"));
+        let config = profile_config(&agent(), "Juniper", None, Home::Chat, &tier.into(), DEFAULT_REASONING, &named, &[], Path::new("/c.sh"));
         assert!(config.contains("  default: \"cheap\"\n") && config.contains("    model: \"fallback\"\n"), "{config}");
     }
 
@@ -1325,7 +1340,7 @@ mod tests {
                 "medium": {"fallback": FALLBACK_ID, "vision": FALLBACK_ID, "reasoning": "high", "deep": {"id": "deepseek/deepseek-v4.1-flash", "reasoning": "max", "fallback": FALLBACK_ID}}
             }
         });
-        let config = |ids: &serde_json::Value, main: MainModel| profile_config(&agent(), "Juniper", Home::Chat, &main, Reasoning::Low, &Route::new("http://m", Some(&serde_json::from_value(ids.clone()).unwrap())), &[], Path::new("/c.sh"));
+        let config = |ids: &serde_json::Value, main: MainModel| profile_config(&agent(), "Juniper", None, Home::Chat, &main, Reasoning::Low, &Route::new("http://m", Some(&serde_json::from_value(ids.clone()).unwrap())), &[], Path::new("/c.sh"));
         for (tier, deep, fallback) in [(Tier::Cheap, "deepseek-v4-1-flash", CHEAP_ID), (Tier::Medium, "deepseek/deepseek-v4.1-flash", FALLBACK_ID)] {
             let p = config(&ids, tier.into());
             let delegation = p.split("\ndelegation:\n").nth(1).unwrap().split("\nskills:").next().unwrap();
@@ -1342,7 +1357,7 @@ mod tests {
         let p = config(&ids, own);
         assert!(p.contains("  reasoning_effort: \"low\"\n") && p.contains("delegation:\n  max_concurrent_children: 3\n"));
         assert!(p.contains("  model: \"someone/model\"\n") && p.contains("  fallback_providers: []\n"), "BYO inherits its own Fast, never the platform's Deep: {p}");
-        let old = profile_config(&agent(), "Juniper", Home::Chat, &Tier::Cheap.into(), Reasoning::Low, &route("http://m"), &[], Path::new("/c.sh"));
+        let old = profile_config(&agent(), "Juniper", None, Home::Chat, &Tier::Cheap.into(), Reasoning::Low, &route("http://m"), &[], Path::new("/c.sh"));
         assert!(!old.contains("  request_overrides:"), "old cells retain parent inheritance: {old}");
     }
 
@@ -1377,18 +1392,18 @@ mod tests {
     #[test]
     fn a_tiers_prompt_is_the_tiers_whatever_its_models_family() {
         let creds = Path::new("/c.sh");
-        let off = format!("\nagent:\n  system_prompt: {}\n  tool_use_enforcement: false\n  execution_guidance: false\n", q(&told("Juniper", "juniper--k3x9", Home::Chat)));
+        let off = format!("\nagent:\n  system_prompt: {}\n  tool_use_enforcement: false\n  execution_guidance: false\n", q(&told("Juniper", None, "juniper--k3x9", Home::Chat)));
         for tier in [Tier::Cheap, Tier::Medium, Tier::High] {
-            let p = profile_config(&agent(), "Juniper", Home::Chat, &tier.into(), DEFAULT_REASONING, &route("http://model.fragment.internal"), &[], creds);
+            let p = profile_config(&agent(), "Juniper", None, Home::Chat, &tier.into(), DEFAULT_REASONING, &route("http://model.fragment.internal"), &[], creds);
             assert!(p.contains(&off), "the {} tier's guidance is its tier's, beside its name: {p}", tier.name());
             assert_eq!(p.matches("\nagent:\n").count(), 1, "one `agent` mapping: {p}");
         }
         let mut own = agent();
         own.credentials.push(fragment_bridge::runtime::Credential { model_base: Some("https://openrouter.ai/api/v1".into()), ..credential("openrouter", &[], "fcx_openrouter_a1") });
         let (own_main, _) = MainModel::of(&own, Tier::Cheap, Some(&OwnModel { provider: "openrouter".into(), id: "z-ai/glm-5.3".into() }));
-        let p = profile_config(&own, "Juniper", Home::Chat, &own_main, DEFAULT_REASONING, &route("http://model.fragment.internal"), &[], creds);
+        let p = profile_config(&own, "Juniper", None, Home::Chat, &own_main, DEFAULT_REASONING, &route("http://model.fragment.internal"), &[], creds);
         assert!(matches!(own_main, MainModel::Own { .. }) && p.contains("  default: \"z-ai/glm-5.3\"\n"), "{p}");
-        assert!(p.contains(&format!("\nagent:\n  system_prompt: {}\n", q(&told("Juniper", "juniper--k3x9", Home::Chat)))) && p.matches("\nagent:\n").count() == 1, "its name alone in its `agent` mapping: {p}");
+        assert!(p.contains(&format!("\nagent:\n  system_prompt: {}\n", q(&told("Juniper", None, "juniper--k3x9", Home::Chat)))) && p.matches("\nagent:\n").count() == 1, "its name alone in its `agent` mapping: {p}");
         assert!(!p.contains("tool_use_enforcement") && !p.contains("execution_guidance"), "an owner's own model's guidance is Hermes' to choose: {p}");
         let m = managed_config(&[], CARD_TIMEOUT_S, crate::desktop::IDLE_STOP_MS);
         assert!(!m.contains("tool_use_enforcement") && !m.contains("execution_guidance"), "a profile's own, never the overlay's: {m}");
@@ -1429,7 +1444,7 @@ mod tests {
         // message of its own, for every platform (none names `relay`)
         let display: Vec<&str> = m.lines().skip_while(|l| *l != "display:").skip(1).take_while(|l| l.starts_with("  ")).collect();
         assert!(display.contains(&"  interim_assistant_messages: false"), "no interim messages, under display: {m}");
-        assert!(display.contains(&"  tool_preview_length: 140"), "a step's preview as long as the bridge keeps its arguments: {m}");
+        assert!(display.contains(&"  tool_progress: \"off\""), "no progress text: steps are observed, under display: {m}");
         assert!(!m.contains("\n  platforms:"), "no platform's display setting overrides it: {m}");
         // a test's shorter card, held within the bridge's bounds: an
         // approval's wait and a clarify's both
@@ -1442,15 +1457,15 @@ mod tests {
         assert!(short.contains("\napprovals:\n  mode: \"off\"\n  timeout: 20\n") && short.contains("\nagent:\n  disabled_toolsets: [\"cronjob\"]\n  clarify_timeout: 20\n"), "{short}");
         assert!(managed_config(&[], 20, 30_000).contains("  idle_stop_minutes: 0.5\n"), "a test's shorter idle bound, in Hermes' minutes");
         let creds = Path::new("/data/hermes/profiles/juniper--k3x9/credentials.sh");
-        let p = profile_config(&agent(), "Juniper", Home::Chat, &Tier::Medium.into(), DEFAULT_REASONING, &route("http://model.fragment.internal/"), &[], creds);
+        let p = profile_config(&agent(), "Juniper", None, Home::Chat, &Tier::Medium.into(), DEFAULT_REASONING, &route("http://model.fragment.internal/"), &[], creds);
         assert!(p.contains("base_url: \"http://model.fragment.internal/v1\""), "{p}");
         assert!(p.contains("default: \"@cf/zai-org/glm-5.3\"") && p.contains("    x-fragment-tier: \"medium\"\n"), "its tier's model by its id, its tier said: {p}");
         assert!(p.contains("x-fragment-agent: \"juniper--k3x9\""), "every model call names its agent");
-        let h = profile_config(&agent(), "Juniper", Home::Chat, &Tier::High.into(), DEFAULT_REASONING, &route("http://model.fragment.internal"), &[], creds);
+        let h = profile_config(&agent(), "Juniper", None, Home::Chat, &Tier::High.into(), DEFAULT_REASONING, &route("http://model.fragment.internal"), &[], creds);
         assert!(h.contains("provider: \"anthropic\"") && h.contains("/anthropic\"") && h.contains("default: \"high\""), "{h}");
         // its eyes: the route's vision model, OpenAI's shape, whatever its tier
         let vision = "  vision:\n    provider: \"custom\"\n    base_url: \"http://model.fragment.internal/v1\"\n    model: \"vision\"\n    api_key: \"fragment-model\"\n";
-        for (tier, config) in [("medium", &p), ("high", &h), ("cheap", &profile_config(&agent(), "Juniper", Home::Chat, &Tier::Cheap.into(), DEFAULT_REASONING, &route("http://model.fragment.internal"), &[], creds))] {
+        for (tier, config) in [("medium", &p), ("high", &h), ("cheap", &profile_config(&agent(), "Juniper", None, Home::Chat, &Tier::Cheap.into(), DEFAULT_REASONING, &route("http://model.fragment.internal"), &[], creds))] {
             assert!(config.contains(vision), "the {tier} tier's screenshots go to the route's vision model: {config}");
             assert!(config.contains("plugins:\n  enabled: [fragment-skill-fork, fragment-deploy-wait, fragment-activity, fragment-native-images]\nauxiliary:\n  background_review: { enabled: true }\n"), "the {tier} tier reviews memory, forks external skills, waits for deployment preflight and holds delegated work: {config}");
             assert!(!config.contains("curator:"), "the separate periodic curator keeps Hermes' defaults: {config}");
@@ -1463,11 +1478,11 @@ mod tests {
         assert!(!m.contains("api_key") && !m.contains("openai"), "the overlay names no agent, so a call outside a profile names none either: {m}");
         // a text tier's stall: Hermes' own stale detector, one retry, then the route's `fallback` as the agent
         let fallback = "fallback_providers:\n  - provider: \"custom\"\n    base_url: \"http://model.fragment.internal/v1\"\n    model: \"@cf/zai-org/glm-5.3-flash\"\n    api_key: \"agent:juniper--k3x9\"\n";
-        let c = profile_config(&agent(), "Juniper", Home::Chat, &Tier::Cheap.into(), DEFAULT_REASONING, &route("http://model.fragment.internal"), &[], creds);
+        let c = profile_config(&agent(), "Juniper", None, Home::Chat, &Tier::Cheap.into(), DEFAULT_REASONING, &route("http://model.fragment.internal"), &[], creds);
         for (tier, id, config) in [("cheap", CHEAP_ID, &c), ("medium", MEDIUM_ID, &p)] {
             assert!(config.contains(fallback), "the {tier} tier falls back to the route's fallback model, by its id: {config}");
             assert!(config.contains(&format!("providers:\n  custom:\n    models:\n      \"{id}\":\n        stale_timeout_seconds: 20\n")), "its own model's stale timeout alone: {config}");
-            assert!(config.contains(&format!("\nagent:\n  system_prompt: {}\n  tool_use_enforcement: false\n  execution_guidance: false\n  api_max_retries: 1\n", q(&told("Juniper", "juniper--k3x9", Home::Chat)))), "one retry, beside its name and its guidance: {config}");
+            assert!(config.contains(&format!("\nagent:\n  system_prompt: {}\n  tool_use_enforcement: false\n  execution_guidance: false\n  api_max_retries: 1\n", q(&told("Juniper", None, "juniper--k3x9", Home::Chat)))), "one retry, beside its name and its guidance: {config}");
             assert!(!config.contains("\"vision\":\n        stale_timeout_seconds"), "vision keeps Hermes' default: {config}");
         }
         // each tier's stall falls back within its route (Paul, 2026-10-24), by its route's fallback's id
@@ -1475,7 +1490,7 @@ mod tests {
         let tier_route = |fallback: &str| fragment_bridge::api::TierRoute { label: None, private: false, fallback: fallback.into(), vision: FALLBACK_ID.into(), reasoning: None, deep: None };
         routed.ids.routes = Some(Box::new(fragment_bridge::api::TierRoutes { cheap: tier_route("deepseek-v4-1-flash"), medium: tier_route("@cf/example/standard-fallback") }));
         for (tier, want) in [(Tier::Cheap, "deepseek-v4-1-flash"), (Tier::Medium, "@cf/example/standard-fallback")] {
-            let config = profile_config(&agent(), "Juniper", Home::Chat, &tier.into(), DEFAULT_REASONING, &routed, &[], creds);
+            let config = profile_config(&agent(), "Juniper", None, Home::Chat, &tier.into(), DEFAULT_REASONING, &routed, &[], creds);
             let stall = format!("fallback_providers:\n  - provider: \"custom\"\n    base_url: \"http://model.fragment.internal/v1\"\n    model: \"{want}\"\n    api_key: \"agent:juniper--k3x9\"\n");
             assert!(config.contains(&stall), "the {tier:?} tier's stall falls back to its route's fallback: {config}");
             assert!(config.contains(vision), "its eyes are still the route's `vision`, its tier said: {config}");
@@ -1484,7 +1499,7 @@ mod tests {
         // a fallback that is the tier's own model is none (#527): one id, one server, asked again
         let mut own = route("http://model.fragment.internal");
         own.ids.routes = Some(Box::new(fragment_bridge::api::TierRoutes { cheap: tier_route(CHEAP_ID), medium: tier_route(FALLBACK_ID) }));
-        let (cheap, medium) = (profile_config(&agent(), "Juniper", Home::Chat, &Tier::Cheap.into(), DEFAULT_REASONING, &own, &[], creds), profile_config(&agent(), "Juniper", Home::Chat, &Tier::Medium.into(), DEFAULT_REASONING, &own, &[], creds));
+        let (cheap, medium) = (profile_config(&agent(), "Juniper", None, Home::Chat, &Tier::Cheap.into(), DEFAULT_REASONING, &own, &[], creds), profile_config(&agent(), "Juniper", None, Home::Chat, &Tier::Medium.into(), DEFAULT_REASONING, &own, &[], creds));
         assert!(!cheap.contains("fallback_providers") && cheap.contains("stale_timeout_seconds: 20"), "no switch to its own model, its patience kept: {cheap}");
         assert!(medium.contains(&format!("model: {}\n    api_key", q(FALLBACK_ID))), "another model stays its switch: {medium}");
         let mut unrouted = route("http://model.fragment.internal");
@@ -1515,10 +1530,9 @@ mod tests {
     }
 
     /// Goal (2026-10-22): every agent is told, on every turn in our chats,
-    /// that a file someone attaches is already on its computer, where the
-    /// note before the message names its path (an image's after
-    /// `image_url:`, as Hermes' note says it), that it is cleared after a
-    /// day, and how to put it on a website (a site's upload button with
+    /// that a file someone attaches is already on its computer, its
+    /// original path, name and type, copying it into the app or work to
+    /// survive a sleep, and how to put it on a website (its upload button with
     /// its browser tools, then the path typed into its desktop's file dialog
     /// with computer_use), in plain words; and the `fragment` skill's first
     /// page says the same at more length. Method: the overlay's relay hint
@@ -1528,14 +1542,14 @@ mod tests {
         let m = managed_config(&[], CARD_TIMEOUT_S, crate::desktop::IDLE_STOP_MS);
         assert_eq!(relay_hint(), format!("{ASKING}\n\n{FILES}\n\n{SENDING}\n\n{SIMPLEX}\n\n{DELEGATING}"));
         assert!(m.contains(&format!("    append: {}\n", q(&relay_hint()))), "its files beside how to ask, in the relay's hint: {m}");
-        for said in ["already on your computer", "the note before their message names its path", "cleared after a day", "copy it into your work", "upload button with your browser tools", "full path into the file dialog on your desktop with computer_use", "press Enter"] {
+        for said in ["already on your computer", "each file, its type and its local path under /tmp/bridge-media", "tools to copy or edit the original", "copy it into your app or work", "across a sleep", "upload button with your browser tools", "full path into the file dialog on your desktop with computer_use", "press Enter"] {
             assert!(FILES.contains(said), "{said}: {FILES}");
         }
         assert!(!FILES.contains(['`', '\n', '$']) && FILES.len() < 500, "one plain paragraph, nothing Hermes would expand: {FILES}");
         let page = include_str!("computer.md");
         let section = page.split("\n## ").find(|s| s.starts_with("Files your owner sends you\n")).expect("computer.md has the section");
         let section = section.split_whitespace().collect::<Vec<_>>().join(" ");
-        for said in ["already on your computer", "the note before their message names its path", "after a day", "copy it into your work", "upload button with your browser tools", "file dialog on your desktop", "computer_use", "press Enter"] {
+        for said in ["already on your computer", "original name, type and local path", "/tmp/bridge-media", "copy or edit", "app or work", "across a sleep", "upload button with your browser tools", "file dialog on your desktop", "computer_use", "press Enter"] {
             assert!(section.contains(said), "computer.md, \"Files your owner sends you\", says {said}: {section}");
         }
     }
@@ -1591,7 +1605,7 @@ mod tests {
     #[test]
     fn its_config_tells_the_agent_where_its_owner_is_reached() {
         let creds = Path::new("/c.sh");
-        let config = |home: Home| profile_config(&agent(), "Juniper", home, &Tier::Cheap.into(), DEFAULT_REASONING, &route("http://m"), &[], creds);
+        let config = |home: Home| profile_config(&agent(), "Juniper", None, home, &Tier::Cheap.into(), DEFAULT_REASONING, &route("http://m"), &[], creds);
         assert_eq!(told_home("juniper--k3x9", Home::Chat), "Your owner's home is your chat juniper-chat: a routine you schedule without --chat (a reminder, a check to report on) runs there.");
         assert_eq!(told_home("juniper--k3x9", Home::Simplex), "Your owner's home is their SimpleX, your chat juniper-simplex, which reaches their phone: a routine you schedule without --chat (a reminder, a check to report on) runs there.");
         for home in [Home::Chat, Home::Simplex] {
@@ -1631,7 +1645,7 @@ mod tests {
         let (own_main, _) = MainModel::of(&own, Tier::Cheap, Some(&OwnModel { provider: "openrouter".into(), id: "anthropic/claude-sonnet-5.5".into() }));
         assert!(matches!(own_main, MainModel::Own { .. }));
         for (main, a) in [(Tier::Cheap.into(), agent()), (Tier::Medium.into(), agent()), (Tier::High.into(), agent()), (own_main, own)] {
-            let p = profile_config(&a, "Juniper", Home::Chat, &main, DEFAULT_REASONING, &route("http://model.fragment.internal"), &[], creds);
+            let p = profile_config(&a, "Juniper", None, Home::Chat, &main, DEFAULT_REASONING, &route("http://model.fragment.internal"), &[], creds);
             for overlaid in ["command_allowlist", "approvals:", "security:", "platform_hints:", "clarify_timeout"] {
                 assert!(!p.contains(overlaid), "the overlay's alone, never the {} profile's: {p}", main.name());
             }
@@ -1705,7 +1719,7 @@ mod tests {
         assert_eq!(pins.get("HERMES_SKIP_CHMOD"), Some(&"1"));
         assert!(PROFILE_DIRS.contains(&"home"), "every profile has its home: {PROFILE_DIRS:?}");
         let creds = Path::new("/data/hermes/profiles/juniper--k3x9/credentials.sh");
-        let written = [managed_config(&["platforms/discord".into()], CARD_TIMEOUT_S, crate::desktop::IDLE_STOP_MS), default_config("http://m"), profile_config(&agent(), "Juniper", Home::Chat, &Tier::Medium.into(), DEFAULT_REASONING, &route("http://m"), &[], creds), gateway_env("127.0.0.1:1", "c", &"s".repeat(32))];
+        let written = [managed_config(&["platforms/discord".into()], CARD_TIMEOUT_S, crate::desktop::IDLE_STOP_MS), default_config("http://m"), profile_config(&agent(), "Juniper", None, Home::Chat, &Tier::Medium.into(), DEFAULT_REASONING, &route("http://m"), &[], creds), gateway_env("127.0.0.1:1", "c", &"s".repeat(32))];
         for (name, _) in RUNTIME_ENV {
             let key = name.strip_prefix("TERMINAL_").unwrap_or(name).to_ascii_lowercase();
             assert!(written.iter().all(|w| !w.contains(name) && !w.contains(&format!("{key}:"))), "{name} is the boot's environment's alone: {written:#?}");
@@ -1793,7 +1807,7 @@ mod tests {
             ("perplexity", "PERPLEXITY_API_KEY", "web:\n  search_backend: \"perplexity\"\n"),
         ] {
             let mut a = agent();
-            let write = |a: &Agent| profile_config(a, "Juniper", Home::Chat, &Tier::Cheap.into(), DEFAULT_REASONING, &route("http://m"), &[env.into()], Path::new("/c.sh"));
+            let write = |a: &Agent| profile_config(a, "Juniper", None, Home::Chat, &Tier::Cheap.into(), DEFAULT_REASONING, &route("http://m"), &[env.into()], Path::new("/c.sh"));
             let absent = write(&a);
             assert!(!absent.contains(selection), "catalog alone never selects {provider}");
             a.credentials.push(credential(provider, &[env], &format!("fck_{provider}_{}", "a".repeat(32))));
@@ -1807,7 +1821,7 @@ mod tests {
         for (provider, env) in [("perplexity", "PERPLEXITY_API_KEY"), ("firecrawl", "FIRECRAWL_API_KEY"), ("xai", "XAI_API_KEY")] {
             a.credentials.push(credential(provider, &[env], &format!("fck_{provider}_{}", "a".repeat(32))));
         }
-        let config = profile_config(&a, "Juniper", Home::Chat, &Tier::Cheap.into(), DEFAULT_REASONING, &route("http://m"), &[], Path::new("/c.sh"));
+        let config = profile_config(&a, "Juniper", None, Home::Chat, &Tier::Cheap.into(), DEFAULT_REASONING, &route("http://m"), &[], Path::new("/c.sh"));
         assert!(config.contains("  search_backend: \"firecrawl\"\n"), "Firecrawl wins over Perplexity");
         assert!(!config.contains("\"xai\""), "X search is a separate native tool, never a web backend");
         assert!(profile_env(&a).contains("XAI_API_KEY=fck_xai_"));
@@ -1843,7 +1857,7 @@ mod tests {
         assert_eq!(why, None);
         assert_eq!(main.name(), "openrouter:anthropic/claude-sonnet-5.5");
         assert_eq!(MainModel::of(&a, Tier::Medium, None), (MainModel::Tier(Tier::Medium), None), "none named: its tier");
-        let p = profile_config(&a, "Juniper", Home::Chat, &main, DEFAULT_REASONING, &route("http://model.fragment.internal"), &["OPENROUTER_API_KEY".into()], Path::new("/c.sh"));
+        let p = profile_config(&a, "Juniper", None, Home::Chat, &main, DEFAULT_REASONING, &route("http://model.fragment.internal"), &["OPENROUTER_API_KEY".into()], Path::new("/c.sh"));
         let want = format!("model:\n  provider: \"custom\"\n  base_url: \"https://openrouter.ai/api/v1\"\n  default: \"anthropic/claude-sonnet-5.5\"\n  api_key: \"fck_openrouter_{tag}\"\n  default_headers:\n    x-fragment-agent: \"juniper--k3x9\"\n");
         assert!(p.contains(&want), "{p}");
         assert!(!p.contains("context_length"), "its provider says its context: {p}");
@@ -1866,7 +1880,7 @@ mod tests {
             let (main, why) = MainModel::of(a, Tier::Cheap, OwnModel::of(json).as_ref());
             assert_eq!(why, None);
             let (main, unused) = main.with_deep(a, OwnModel::deep_of(json));
-            (profile_config(a, "Juniper", Home::Chat, &main, Reasoning::of(Some(json)), &route("http://m"), &[], Path::new("/c.sh")), unused)
+            (profile_config(a, "Juniper", None, Home::Chat, &main, Reasoning::of(Some(json)), &route("http://m"), &[], Path::new("/c.sh")), unused)
         };
         let json = br#"{"model":{"provider":"openrouter","id":"fast","deep":{"provider":"other","id":"deep","reasoning":"max"}},"reasoning":"low"}"#;
         let (config, unused) = write(&a, json);
@@ -1920,7 +1934,7 @@ mod tests {
         let s = credentials_sh(&a);
         assert!(s.contains(&format!("\nexport PERPLEXITY_API_KEY='fck_perplexity_{tag}'\n")), "{s}");
         let env = ["GOOGLE_OAUTH_ACCESS_TOKEN".to_string(), "PERPLEXITY_API_KEY".to_string(), "XAI_API_KEY".to_string()];
-        let p = profile_config(&a, "Juniper", Home::Chat, &Tier::Medium.into(), DEFAULT_REASONING, &route("http://model.fragment.internal"), &env, Path::new("/c.sh"));
+        let p = profile_config(&a, "Juniper", None, Home::Chat, &Tier::Medium.into(), DEFAULT_REASONING, &route("http://model.fragment.internal"), &env, Path::new("/c.sh"));
         assert!(p.contains("env_passthrough: [\"FRAGMENT_AS_AGENT\", \"FRAGMENT_FOR\", \"GOOGLE_OAUTH_ACCESS_TOKEN\"]"), "{p}");
     }
 
@@ -1931,7 +1945,7 @@ mod tests {
         let mut env: Vec<String> = PROVIDER_ENV_BLOCKLIST.lines().map(str::to_string).collect();
         assert!(env.len() > 300, "the full pinned policy, not just today's offered providers");
         env.extend(["AUXILIARY_TEST_API_KEY", "AUXILIARY_TEST_BASE_URL", "GATEWAY_RELAY_TEST_TOKEN", "GATEWAY_RELAY_TEST_SECRET", "GATEWAY_RELAY_TEST_KEY", "GOOGLE_OAUTH_ACCESS_TOKEN", "X_API_BEARER_TOKEN"].map(str::to_string));
-        let p = profile_config(&agent(), "Juniper", Home::Chat, &Tier::Medium.into(), DEFAULT_REASONING, &route("http://model.fragment.internal"), &env, Path::new("/c.sh"));
+        let p = profile_config(&agent(), "Juniper", None, Home::Chat, &Tier::Medium.into(), DEFAULT_REASONING, &route("http://model.fragment.internal"), &env, Path::new("/c.sh"));
         let passed = p.lines().find(|l| l.starts_with("  env_passthrough:")).unwrap();
         assert_eq!(passed, "  env_passthrough: [\"FRAGMENT_AS_AGENT\", \"FRAGMENT_FOR\", \"GOOGLE_OAUTH_ACCESS_TOKEN\", \"X_API_BEARER_TOKEN\"]");
     }
@@ -1950,7 +1964,7 @@ mod tests {
             credential("d", &["A_KEY"], &format!("fck_d_{tag}")),
         ];
         assert_eq!(credential_vars(&a), vec![("A_KEY".to_string(), format!("fck_a_{tag}"))]);
-        let p = profile_config(&a, "Juniper", Home::Chat, &Tier::Medium.into(), DEFAULT_REASONING, &route("http://m"), &["FRAGMENT_FOR".into(), "HERMES_HOME".into(), "A_KEY".into()], Path::new("/c.sh"));
+        let p = profile_config(&a, "Juniper", None, Home::Chat, &Tier::Medium.into(), DEFAULT_REASONING, &route("http://m"), &["FRAGMENT_FOR".into(), "HERMES_HOME".into(), "A_KEY".into()], Path::new("/c.sh"));
         assert!(p.contains("env_passthrough: [\"FRAGMENT_AS_AGENT\", \"FRAGMENT_FOR\", \"A_KEY\"]"), "{p}");
         assert!(!credentials_sh(&a).contains("rm -rf"));
     }

@@ -129,7 +129,7 @@ impl Skip {
 pub fn is_app(kind: FragmentKind) -> Result<(), Skip> {
     match kind {
         // a kind this build does not know (a newer platform's) has none
-        FragmentKind::Chat | FragmentKind::Agent | FragmentKind::Skills | FragmentKind::Other => Err(Skip::NotAnApp),
+        FragmentKind::Chat | FragmentKind::Agent | FragmentKind::Skills | FragmentKind::Sessions | FragmentKind::Other => Err(Skip::NotAnApp),
         FragmentKind::App | FragmentKind::Brain => Ok(()),
     }
 }
@@ -1082,7 +1082,7 @@ mod tests {
     fn who_is_shot_and_as_whom() {
         use FragmentKind::*;
         use Visibility::*;
-        for kind in [Chat, Agent, Skills, Other] {
+        for kind in [Chat, Agent, Skills, Sessions, Other] {
             assert_eq!(is_app(kind), Err(Skip::NotAnApp));
             for v in [Public, Link, Members] {
                 assert_eq!(visitor(kind, v), Err(Skip::NotAnApp));

@@ -7,6 +7,9 @@ description = "Starts and stops the local fragment stack (`wrangler dev` for cel
 
 [dependencies]
 anyhow = "1"
+# the front door's request lines (src/framing.rs): each head of what it
+# passes, read as it passes; already in the lock beneath reqwest
+httparse = "1.10"
 fragment-core = { path = "../core" }
 fragment-proto = { path = "../proto" }
 serde_json = "1"

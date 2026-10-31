@@ -1,7 +1,10 @@
 //! The `script` runtime: a deterministic agent that answers from rules, so
 //! the platform's lanes run with no agent runtime at all (the stub image,
 //! and the proof that the platform holds nothing Hermes-specific). Each
-//! turn is a pure function of its message:
+//! turn is a pure function of its message. A rule is said by a word of it
+//! that starts with the rule's (past an opening bracket, parenthesis or
+//! quote: `slowly`, `[SILENT]`), never by text inside a word, so what a
+//! command carries (a token, a URL) says no rule by chance (`says`):
 //!
 //! - default: two drafts, then the reply `echo: [<asker>] <text>`;
 //! - `tool`: its words before a tool call (`Let me look.`), a reply of
@@ -84,6 +87,14 @@
 //!   (only the agent's own key's, as every request of its is); one signed
 //!   by a key that is no door's. The reply is `door linked`, `door said
 //!   <seq>`, or `door refused: <why>`;
+//! - `ask <agent> <words>`: another agent of its computer asked `<words>`
+//!   with the fragment CLI, `fragment ask --return-to <this chat>`, as the
+//!   agent acting for its owner, as our Hermes image's `fragment_ask` runs
+//!   it: the question posted in the two agents' chat with their owner, and
+//!   its answer back here once that agent's turn is over, as a turn of this
+//!   agent's own (docs/chat-records.md, "An ask"). Its post id is the
+//!   turn's, so a turn read again asks once. The reply: `asked <its name>`,
+//!   or `ask refused: <why>`;
 //! - a message with attachments: the reply names them;
 //! - a turn told something first (`TurnStart::note`: its agent's turn before
 //!   it in the chat was cut by a restart): the reply ends with
@@ -415,6 +426,37 @@ async fn schedule(agent: &crate::runtime::Agent, chat: &str, rest: &str) -> Stri
     asked.unwrap_or_else(|e| format!("schedule refused: {e}"))
 }
 
+/// The fragment CLI the stub image carries (images/stub/Dockerfile).
+const CLI: &str = "/usr/local/bin/fragment";
+/// An ask is a few platform calls (who may be asked, their chat, made the
+/// first time, its post): at most this long.
+const ASK_WAIT: Duration = Duration::from_secs(60);
+
+/// `ask <agent> <words>`: the module's list.
+async fn ask_another(agent: &crate::runtime::Agent, chat: &str, turn: &str, rest: &str) -> String {
+    let Some((who, words)) = rest.trim().split_once(char::is_whitespace) else {
+        return "say `ask <agent> <words>`".into();
+    };
+    let run = tokio::process::Command::new(CLI)
+        .args(["--json", "ask", "--return-to", chat, "--id", &format!("ask-{turn}"), "--", who, words.trim()])
+        .env("FRAGMENT_AS_AGENT", &agent.fragment)
+        .env("FRAGMENT_FOR", &agent.owner)
+        .kill_on_drop(true)
+        .output();
+    let out = match tokio::time::timeout(ASK_WAIT, run).await {
+        Ok(Ok(out)) => out,
+        Ok(Err(e)) => return format!("ask refused: the CLI did not run ({e})"),
+        Err(_) => return format!("ask refused: no answer in {} s", ASK_WAIT.as_secs()),
+    };
+    let said: serde_json::Value = String::from_utf8_lossy(&out.stdout).lines().last().and_then(|l| serde_json::from_str(l).ok()).unwrap_or_default();
+    if said["ok"] != true {
+        let why = said["error"]["message"].as_str().map(str::to_string).unwrap_or_else(|| String::from_utf8_lossy(&out.stderr).chars().take(300).collect());
+        return format!("ask refused: {why}");
+    }
+    let asked = &said["data"]["asked"];
+    format!("asked {}", asked["title"].as_str().or(asked["name"].as_str()).unwrap_or(who))
+}
+
 /// The door keys `door link` made, by agent, for the process's life.
 static DOORS: std::sync::Mutex<BTreeMap<String, crate::simplex::door::Key>> = std::sync::Mutex::new(BTreeMap::new());
 
@@ -679,6 +721,13 @@ async fn ask(events: &mpsc::Sender<Event>, rx: &mut mpsc::Receiver<Heard>, turn:
     }
 }
 
+/// Whether `text` says the rule `key`: one of its words starts with it, past
+/// an opening bracket, parenthesis or quote. A storage token's JWT, carried
+/// by a `fetch`, once held "tOoL" and made that turn a tool turn (#778's CI).
+fn says(text: &str, key: &str) -> bool {
+    text.split_whitespace().any(|w| w.trim_start_matches(['[', '(', '"', '\'']).starts_with(key))
+}
+
 async fn turn(cfg: ScriptConfig, ts: TurnStart, mut rx: mpsc::Receiver<Heard>, events: mpsc::Sender<Event>) {
     let id = ts.turn.clone();
     let emit = |e: Event| {
@@ -694,11 +743,11 @@ async fn turn(cfg: ScriptConfig, ts: TurnStart, mut rx: mpsc::Receiver<Heard>, e
         emit(Event::End { turn: id, outcome: Outcome::Idle }).await;
         return;
     }
-    if text.contains("fail") {
+    if says(&text, "fail") {
         emit(Event::End { turn: id, outcome: Outcome::Error("the script was asked to fail".into()) }).await;
         return;
     }
-    if text.contains("silent") {
+    if says(&text, "silent") {
         emit(Event::End { turn: id, outcome: Outcome::Idle }).await;
         return;
     }
@@ -741,6 +790,9 @@ async fn turn(cfg: ScriptConfig, ts: TurnStart, mut rx: mpsc::Receiver<Heard>, e
     if let Some(rest) = ts.text.strip_prefix("schedule ") {
         reply = schedule(&ts.agent, &ts.fragment, rest).await;
     }
+    if let Some(rest) = ts.text.strip_prefix("ask ") {
+        reply = ask_another(&ts.agent, &ts.fragment, &id, rest).await;
+    }
     if let Some(rest) = ts.text.strip_prefix("relay ") {
         reply = relay(&ts.agent.fragment, rest).await.unwrap_or_else(|e| format!("relay failed: {e}"));
     }
@@ -760,15 +812,15 @@ async fn turn(cfg: ScriptConfig, ts: TurnStart, mut rx: mpsc::Receiver<Heard>, e
         };
     }
     let mut part = 1;
-    if text.contains("tool") {
+    if says(&text, "tool") {
         // its words before the call, a reply of their own, then the step
         emit(Event::Reply { turn: id.clone(), part, text: "Let me look.".into() }).await;
         part += 1;
-        let step = Step { tool: "search".into(), args: ts.text.chars().take(40).collect(), ok: true, excerpt: "3 results".into(), category: Category::Web };
+        let step = Step { tool: "search".into(), args: ts.text.chars().take(40).collect(), ok: true, excerpt: "3 results".into(), category: Category::Web, evidence: None };
         emit(Event::Step { turn: id.clone(), step }).await;
     }
-    if text.contains("approve") || text.contains("risky") {
-        emit(Event::Step { turn: id.clone(), step: Step { tool: "terminal".into(), args: "rm -rf ./scratch".into(), ok: true, excerpt: String::new(), category: Category::Shell } }).await;
+    if says(&text, "approve") || says(&text, "risky") {
+        emit(Event::Step { turn: id.clone(), step: Step { tool: "terminal".into(), args: "rm -rf ./scratch".into(), ok: true, excerpt: String::new(), category: Category::Shell, evidence: None } }).await;
         let options = vec![
             PromptOption { id: "once".into(), label: "Allow once".into(), style: Some("primary".into()), words: false },
             PromptOption { id: "deny".into(), label: "Deny".into(), style: Some("danger".into()), words: false },
@@ -844,7 +896,7 @@ async fn turn(cfg: ScriptConfig, ts: TurnStart, mut rx: mpsc::Receiver<Heard>, e
     if text.split_whitespace().any(|w| w == "notice") {
         emit(Event::Notice { agent: ts.agent.fragment.clone(), fragment: ts.fragment.clone(), category: NoticeCategory::Info, text: "Compressing context".into() }).await;
     }
-    let drafts = if text.contains("slow") { 20 } else { 2 };
+    let drafts = if says(&text, "slow") { 20 } else { 2 };
     for i in 1..=drafts {
         let cut = reply.chars().count() * i / (drafts + 1);
         emit(Event::Draft { turn: id.clone(), text: reply.chars().take(cut.max(1)).collect() }).await;
@@ -854,7 +906,7 @@ async fn turn(cfg: ScriptConfig, ts: TurnStart, mut rx: mpsc::Receiver<Heard>, e
         }
     }
     emit(Event::Reply { turn: id.clone(), part, text: reply }).await;
-    if text.contains("draw") {
+    if says(&text, "draw") {
         let path = cfg.scratch.join(format!("{id}-drawing.txt"));
         let body = format!("a drawing for {}\n", ts.asker_name);
         if tokio::fs::write(&path, &body).await.is_ok() {
@@ -892,6 +944,18 @@ mod tests {
         assert_eq!(fetch_words("fetch http://a.test/x with fck_p_00 as basic api").unwrap(), ("http://a.test/x", "fck_p_00", Place::Basic("api")));
         for bad in ["fetch http://a.test/x", "fetch http://a.test/x with", "fetch http://a.test/x with $K in", "fetch http://a.test/x with $K as basic"] {
             assert!(fetch_words(bad).is_err(), "{bad}");
+        }
+    }
+
+    /// A rule is a word said, never text a word carries: `slowly` and
+    /// `[SILENT]` say theirs; a token or a URL with one inside says none.
+    #[test]
+    fn a_rule_is_a_word_said_never_text_inside_one() {
+        for (text, key) in [("tool please", "tool"), ("please use the terminal slowly", "slow"), ("end this turn with exactly [silent]", "silent"), ("do\nthe risky thing", "risky"), ("(approve this)", "approve"), ("the message that fails", "fail")] {
+            assert!(says(text, key), "{text} says {key}");
+        }
+        for (text, key) in [("fetch http://a.test/x with eyjhbgcioijfuzi1nij9.untoolfail.sig", "tool"), ("fetch http://a.test/x with eyjhbgcioijfuzi1nij9.untoolfail.sig", "fail"), ("fetch http://a.test/tools/x with k", "tool"), ("withdrawn", "draw"), ("its -tool", "tool")] {
+            assert!(!says(text, key), "{text} does not say {key}");
         }
     }
 
