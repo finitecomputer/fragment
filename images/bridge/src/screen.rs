@@ -88,7 +88,10 @@ impl Target {
 
 #[derive(Debug, Clone)]
 pub struct ScreenConfig {
-    pub listen: SocketAddr,
+    /// Its port, already bound (the bridge's start binds it): a port picked
+    /// and let go before a bind may be another's by then, so the screen
+    /// binds nothing itself.
+    pub listener: Arc<std::net::TcpListener>,
     /// The page and its files.
     pub dir: PathBuf,
     /// The image's screens file (screens.rs): each agent's display and its
@@ -376,8 +379,9 @@ impl Shared {
 }
 
 pub async fn serve(cfg: ScreenConfig, agents: Agents, simplex: crate::simplex::http::Simplex, stop: watch::Receiver<bool>) -> Result<(), String> {
-    let listener = tokio::net::TcpListener::bind(cfg.listen).await.map_err(|e| format!("screen listen {}: {e}", cfg.listen))?;
-    crate::ev!("screen.listening", { "listen": cfg.listen.to_string(), "screensFile": cfg.screens_file.as_ref().map(|p| p.display().to_string()) });
+    let listener = cfg.listener.try_clone().and_then(|l| l.set_nonblocking(true).and_then(|()| tokio::net::TcpListener::from_std(l))).map_err(|e| format!("screen listen: {e}"))?;
+    let listen = listener.local_addr().map_err(|e| format!("screen listen: {e}"))?;
+    crate::ev!("screen.listening", { "listen": listen.to_string(), "screensFile": cfg.screens_file.as_ref().map(|p| p.display().to_string()) });
     let screens_file = cfg.screens_file.clone().map(|p| Mutex::new(Screens::new(p)));
     let shared = Arc::new(Shared { cfg, agents, screens_file, by_agent: Mutex::new(HashMap::new()), simplex });
     tokio::spawn(tick(shared.clone(), stop.clone()));
