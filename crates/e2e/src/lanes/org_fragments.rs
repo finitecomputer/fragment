@@ -272,6 +272,34 @@ pub fn org_fragments(s: &mut Suite, api: &Api) -> Result<()> {
         json!([ben_out.body, ben_fenced.status, ben_back.body, regrant.body, ben_reads.status]),
     );
 
+    // a rehire's new agent inherits nothing from before (Alex's review): in
+    // A, offboarded, back in the org by a fresh invite to B, she makes an
+    // agent while A is still on her list; neither it nor she opens A. An
+    // active member's new agent comes in beside them, as before
+    let eve = api.person()?;
+    let eve_id = api.identity(&eve)?;
+    invite(&name, &eve)?;
+    let eve_in = accept(&name, &eve)?;
+    let eve_out = api.signed(&ada, "POST", &format!("{root}/offboard"), Some(&json!({ "id": "eve-1", "person": eve_id })))?;
+    invite(&name2, &eve)?;
+    let eve_back = accept(&name2, &eve)?;
+    let still_listed = !super::posts::row_of(api, &eve, &name).is_null();
+    let reg = "/api/identities";
+    let eve_hand = Keys::generate();
+    let eve_made = api.signed(&eve, "POST", reg, Some(&json!({ "kind": "agent", "proof": api.proof(&eve_hand, "POST", reg, &eve) })))?;
+    let agent_in_a = api.signed(&eve_hand, "GET", &format!("/api/f/{name}/status"), None)?;
+    let eve_in_a = api.signed(&eve, "GET", &format!("/api/f/{name}/status"), None)?;
+    let eve_in_b = api.signed(&eve, "GET", &format!("/api/f/{name2}/status"), None)?;
+    let ada_hand = Keys::generate();
+    let ada_made = api.signed(&ada, "POST", reg, Some(&json!({ "kind": "agent", "proof": api.proof(&ada_hand, "POST", reg, &ada) })))?;
+    let ada_agent_in_a = api.signed(&ada_hand, "GET", &format!("/api/f/{name}/status"), None)?;
+    s.ok(
+        "a rehire's new agent inherits nothing of a membership from before: neither it nor its person opens the old fragment (403), though it was still on her list; an active member's new agent comes in beside them",
+        eve_in.status == 200 && eve_out.status == 200 && eve_back.status == 200 && still_listed && eve_made.status == 200
+            && agent_in_a.status == 403 && eve_in_a.status == 403 && eve_in_b.status == 200 && ada_made.status == 200 && ada_agent_in_a.status == 200,
+        json!({ "agentInA": [agent_in_a.status, agent_in_a.body.clone()], "eveInA": eve_in_a.status, "eveInB": eve_in_b.status, "adaAgentInA": [ada_agent_in_a.status, ada_agent_in_a.body.clone()], "listed": still_listed }),
+    );
+
     // org_admin_cannot_bypass_cap: its budget stops its admin's AI steps too
     let tight = api.signed(&s.operator, "POST", &format!("/api/ledger/{ledger}/budget"), Some(&json!({ "id": "b2", "micros": 1 })))?;
     let _ = api.unsigned("POST", "/api/test/ledger", Some(&json!({ "identity": ledger, "op": "forget-gate" })));

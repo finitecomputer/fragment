@@ -1112,6 +1112,13 @@ impl FragmentCell {
         assert!(agents.len() as u64 <= limits::AGENTS_PER_OWNER_MAX, "a person has a bounded number of agents");
         assert!(matches!(role, Role::Viewer | Role::Editor), "an agent is in at its person's role, never owner (R17)");
         let now = js::now_ms();
+        // an org's: an agent's grant is its person's, never newer (the fence
+        // counts a row from when it was added): their row's time, not now
+        let org = self.owner()?.org().is_some();
+        let added_at = match org {
+            true => self.rows("SELECT added_at FROM members WHERE principal = ?", vec![person.into()])?.first().and_then(|r| r["added_at"].as_i64()).ok_or_else(|| CellError::host("an agent joins beside its person's row"))?,
+            false => now,
+        };
         let mut joined = false;
         for agent in agents {
             let current = self.member_role(agent)?;
@@ -1120,8 +1127,8 @@ impl FragmentCell {
             }
             self.exec(
                 "INSERT INTO members (principal, role, added_by, added_at, kind, owner) VALUES (?, ?, ?, ?, 'agent', ?)
-                 ON CONFLICT (principal) DO UPDATE SET role = excluded.role",
-                vec![agent.as_str().into(), role.as_str().into(), person.into(), SqlStorageValue::Integer(now), person.into()],
+                 ON CONFLICT (principal) DO UPDATE SET role = excluded.role, added_at = CASE WHEN ? THEN excluded.added_at ELSE members.added_at END",
+                vec![agent.as_str().into(), role.as_str().into(), person.into(), SqlStorageValue::Integer(added_at), person.into(), SqlStorageValue::Integer(i64::from(org))],
             )?;
             self.index_change(agent, Some(role))?;
             match current {
@@ -1179,6 +1186,9 @@ impl FragmentCell {
         if !npub::is_identity(person) || !npub::is_identity(agent) {
             return Err(CellError::invalid("members/agent names identities"));
         }
+        // an org's: their membership is fenced first (Alex's review), so a
+        // row from before an offboarding grants their new agent nothing
+        self.revoke_stale(person).await?;
         if self.entity_of(person)?.as_deref() != Some(person) {
             return Ok(json!({ "joined": false }));
         }
