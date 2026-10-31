@@ -5,6 +5,23 @@ Each entry names where it was observed, the risk, the first proof that
 would show it biting, and the condition that deletes it. An entry
 without a delete condition is unfinished design, not debt.
 
+## Every call still carries its release's deploy time
+
+- **Observed:** the removal of `restart_soon`, 2026-10-31: an object of a
+  release before it read `x-fragment-release-deployed` to restart onto a
+  newer caller's release; no release reads it now (objects take a
+  deploy's code at once, `immediate`).
+- **Shortcut:** `routed::stamp` still sets it on every call into an
+  object, and `fragment_core::release::DEPLOYED` keeps its name, so a
+  release before this one, still live during a deploy or rolled back to,
+  meets the header it expects.
+- **Risk:** none beyond a header's bytes on each internal call.
+- **First proof:** none: nothing reads it.
+- **Delete when:** no release from before the removal can be live: the
+  removal has reached production, and a rollback past it is no longer
+  allowed (the deploy after that). Then drop the header from `stamp`,
+  the constant, and MODEL.md's truth-map row.
+
 ## Two imports into one session archive at once agree last-writer-wins
 
 - **Observed:** `fragment session import` (templates/sessions/README.md),
