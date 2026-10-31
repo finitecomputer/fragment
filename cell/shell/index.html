@@ -45,12 +45,14 @@
     <aside class="sidebar" id="sidebar">
       <div class="sidebar-top">
         <div class="brand" id="brand">Finite.Computer</div>
-        <button class="icon-button sidebar-new-chat" id="sidebar-new-chat" type="button" title="Search or start a new chat" aria-label="Search or start a new chat"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button>
+        <!-- the launcher (⌘K, or Ctrl K: chat-list.js names its key) -->
+        <button class="icon-button sidebar-new-chat" id="sidebar-new-chat" type="button" title="Search or start a new chat" aria-label="Search or start a new chat"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg><span class="launcher-key" id="launcher-key" aria-hidden="true"></span></button>
       </div>
-      <div class="sidebar-agent-toolbar">
-        <div id="primary-agent"></div>
+      <!-- a new chat, with the agent its chip names (chat-list.js `renderStart`) -->
+      <div class="sidebar-start" id="sidebar-start" hidden>
+        <button class="row sidebar-start-chat" id="sidebar-start-chat" type="button" hidden><span class="label">New chat with</span></button>
+        <span class="new-chat-agent" id="new-chat-agent"></span>
       </div>
-      <button class="row sidebar-start-chat" id="sidebar-start-chat" type="button" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.4 2.6a1 1 0 0 1 3 3l-9 9a2 2 0 0 1-.85.5l-2.87.84a.5.5 0 0 1-.62-.62l.84-2.87a2 2 0 0 1 .5-.85z"/></svg><span class="label">New chat</span></button>
       <!-- the invites waiting on the person's emails, each theirs to accept
            or decline (shell.js renderInvites; docs/api.md, Invites by email) -->
       <section class="invites" id="invites" aria-label="Invites" hidden></section>

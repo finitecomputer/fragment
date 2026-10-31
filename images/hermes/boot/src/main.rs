@@ -688,8 +688,8 @@ async fn write_profile(api: &Api, a: &Agent, home: &Path, ids: Option<(u32, u32)
     work_dirs(&dir, a, ids);
     // Which agent this profile is: what retiring it later reads.
     let _ = std::fs::write(dir.join(".fragment-agent"), &a.fragment);
-    let title = read_title(api, a).await;
-    let main = write_config(api, a, &dir, ids, route, credential_env, high_on, &title).await;
+    let face = read_face(api, a).await;
+    let main = write_config(api, a, &dir, ids, route, credential_env, high_on, &face).await;
     // who the agent is and its credentials, for Hermes and its terminal (the
     // fragment CLI, the skills' helpers, any SDK): written whole each time,
     // after the config
@@ -697,7 +697,7 @@ async fn write_profile(api: &Api, a: &Agent, home: &Path, ids: Option<(u32, u32)
     let synced = sync::round(api, a, &dir, &own).await;
     // its Bot Mode identity (its title, its job's first line), and the hook
     // that titles its own chat's session Bot Chat (bots.rs)
-    write_identity(a, &dir, ids, &title);
+    write_identity(a, &dir, ids, &face);
     match bots::link_hook(&dir, Path::new(&format!("{OPT}/{}", bots::HOOK))) {
         Ok(()) => chown(&dir.join("hooks"), ids),
         Err(e) => ev!("profile.hook_failed", { "agent": a.fragment, "error": e.to_string() }),
@@ -708,14 +708,14 @@ async fn write_profile(api: &Api, a: &Agent, home: &Path, ids: Option<(u32, u32)
     }
 }
 
-/// An agent's agent fragment's title, its name (docs/api.md, "An agent's
-/// name and picture"), as its status says it now (`Ok(None)`: it has none):
-/// read once for both files written from it, its config (`write_config`)
-/// and its Bot Mode identity (`write_identity`). Unread, it is said, and
-/// each file stays as it was, or, with none yet, names the agent by its
-/// name on the computer.
-async fn read_title(api: &Api, a: &Agent) -> Result<Option<String>, ()> {
-    api.title(&a.fragment, &a.fragment).await.map_err(|e| ev!("profile.title_unread", { "agent": a.fragment, "error": e.to_string() }))
+/// An agent's agent fragment's title and role, its name and what it does
+/// (docs/api.md, "An agent's name and picture"), as its status says them
+/// now (none: it has none): read once for both files written from them,
+/// its config (`write_config`) and its Bot Mode identity
+/// (`write_identity`). Unread, it is said, and each file stays as it was,
+/// or, with none yet, names the agent by its name on the computer.
+async fn read_face(api: &Api, a: &Agent) -> Result<fragment_bridge::api::Face, ()> {
+    api.face(&a.fragment, &a.fragment).await.map_err(|e| ev!("profile.title_unread", { "agent": a.fragment, "error": e.to_string() }))
 }
 
 /// An agent's profile config (`hermes::profile_config`), from its
@@ -731,24 +731,24 @@ async fn read_title(api: &Api, a: &Agent) -> Result<Option<String>, ()> {
 /// unread keeps it the same way. Answers the model it names, or none if it
 /// was left as it was.
 #[allow(clippy::too_many_arguments)]
-async fn write_config(api: &Api, a: &Agent, dir: &Path, ids: Option<(u32, u32)>, route: &hermes::Route, credential_env: &[String], high_on: bool, title: &Result<Option<String>, ()>) -> Option<hermes::MainModel> {
+async fn write_config(api: &Api, a: &Agent, dir: &Path, ids: Option<(u32, u32)>, route: &hermes::Route, credential_env: &[String], high_on: bool, face: &Result<fragment_bridge::api::Face, ()>) -> Option<hermes::MainModel> {
     let config = dir.join("config.yaml");
     let answer = api.file(&a.fragment, &a.fragment, "agent.json", fragment_bridge::api::AGENT_JSON_MAX_BYTES).await;
     let tier = hermes::Tier::read(&answer, high_on).or_else(|| {
         ev!("profile.tier_unread", { "agent": a.fragment, "error": answer.as_ref().err().map(ToString::to_string), "configKept": config.exists() });
         (!config.exists()).then_some(hermes::DEFAULT_TIER)
     })?;
-    let name = match title {
-        Ok(t) => bots::name(a, t.as_deref()),
+    let (name, role) = match face {
+        Ok(f) => (bots::name(a, f.title.as_deref()), f.role.as_deref().map(str::trim).filter(|r| !r.is_empty())),
         Err(()) if config.exists() => return None,
-        Err(()) => bots::name(a, None),
+        Err(()) => (bots::name(a, None), None),
     };
     let own = answer.as_ref().ok().and_then(|b| hermes::OwnModel::of(b));
     let (main, unused) = hermes::MainModel::of(a, tier, own.as_ref());
     let (main, deep_unused) = main.with_deep(a, answer.as_ref().ok().and_then(|b| hermes::OwnModel::deep_of(b)));
     let reasoning = main.reasoning(hermes::Reasoning::of(answer.as_ref().ok().map(|b| b.as_ref())), route);
     let home = fragment_bridge::api::Home::of(answer.as_ref().ok().map(|b| b.as_ref()));
-    let text = hermes::profile_config(a, name, home, &main, reasoning, route, credential_env, &dir.join(hermes::CREDENTIALS_FILE));
+    let text = hermes::profile_config(a, name, role, home, &main, reasoning, route, credential_env, &dir.join(hermes::CREDENTIALS_FILE));
     if std::fs::read_to_string(&config).ok().as_deref() != Some(text.as_str()) {
         write_whole(&config, &text, ids);
         if let (Some(own), Some(why)) = (&own, &unused) {
@@ -762,23 +762,23 @@ async fn write_config(api: &Api, a: &Agent, dir: &Path, ids: Option<(u32, u32)>,
 
 /// An agent's Bot Mode identity (bots.rs, `profile_yaml`): its agent
 /// fragment's title, its name everywhere (docs/api.md, "An agent's name and
-/// picture"), as `read_title` read it, and its job's first line from its
-/// SOUL.md as the sync left it. Written when it changed: at its boot, as
+/// picture"), as `read_face` read it, and its role there, else its job's
+/// first line from its SOUL.md as the sync left it. Written when it changed: at its boot, as
 /// a sync pulls its job, and as its owner or the agent renames it (read
 /// again with its model, every `HERMES_BOOT_MODEL_MS`), nothing restarted:
 /// Hermes reads `profile.yaml` again as it uses it. A title unread leaves
 /// the file as it was, or, with none yet, names it by its name on the
 /// computer. Bot Mode has no picture (Hermes v0.21.6 reads a profile's
 /// title, display name and description alone).
-fn write_identity(a: &Agent, dir: &Path, ids: Option<(u32, u32)>, title: &Result<Option<String>, ()>) {
+fn write_identity(a: &Agent, dir: &Path, ids: Option<(u32, u32)>, face: &Result<fragment_bridge::api::Face, ()>) {
     let path = dir.join("profile.yaml");
-    let title = match title {
-        Ok(title) => title.as_deref(),
+    let (title, role) = match face {
+        Ok(f) => (f.title.as_deref(), f.role.as_deref()),
         Err(()) if path.exists() => return,
-        Err(()) => None,
+        Err(()) => (None, None),
     };
     let soul = std::fs::read_to_string(dir.join("SOUL.md")).ok();
-    let yaml = bots::profile_yaml(a, title, soul.as_deref());
+    let yaml = bots::profile_yaml(a, title, role, soul.as_deref());
     if std::fs::read_to_string(&path).ok().as_deref() != Some(yaml.as_str()) {
         write_whole(&path, &yaml, ids);
         ev!("profile.identity", { "agent": a.fragment, "title": title });
@@ -1021,8 +1021,8 @@ async fn follow_agents(api: &Api, change: &agents::Change, now: &[Agent], home: 
     let high_on = env("FRAGMENT_HIGH_TIER").as_deref() == Some("on");
     for a in &change.credentials {
         write_credentials(a, home, ids);
-        let title = read_title(api, a).await;
-        write_config(api, a, &hermes::profile_dir(home, &a.fragment), ids, route, credential_env, high_on, &title).await;
+        let face = read_face(api, a).await;
+        write_config(api, a, &hermes::profile_dir(home, &a.fragment), ids, route, credential_env, high_on, &face).await;
         ev!("profile.credentials", { "agent": a.fragment, "providers": a.credentials.iter().map(|c| c.provider.clone()).collect::<Vec<_>>() });
     }
     if !change.added.is_empty() {
@@ -1385,8 +1385,8 @@ async fn boot_main() {
                             route = hermes::Route::new(&model, c.models.as_ref());
                             ev!("profile.model_ids", { "ids": route.ids });
                             for a in agents.iter().filter(|a| c.agents.iter().any(|n| n.fragment == a.fragment)) {
-                                let title = read_title(&api, a).await;
-                                write_config(&api, a, &hermes::profile_dir(&home, &a.fragment), ids, &route, &credential_env, high_on, &title).await;
+                                let face = read_face(&api, a).await;
+                                write_config(&api, a, &hermes::profile_dir(&home, &a.fragment), ids, &route, &credential_env, high_on, &face).await;
                             }
                         }
                         let change = agents::diff(&agents, &c.agents);
@@ -1413,9 +1413,9 @@ async fn boot_main() {
                 last_models = Instant::now();
                 for a in &agents {
                     let dir = hermes::profile_dir(&home, &a.fragment);
-                    let title = read_title(&api, a).await;
-                    write_config(&api, a, &dir, ids, &route, &credential_env, high_on, &title).await;
-                    write_identity(a, &dir, ids, &title);
+                    let face = read_face(&api, a).await;
+                    write_config(&api, a, &dir, ids, &route, &credential_env, high_on, &face).await;
+                    write_identity(a, &dir, ids, &face);
                 }
             }
             if last_sync.elapsed() > Duration::from_millis(sync_every) {
@@ -1426,7 +1426,7 @@ async fn boot_main() {
                         Ok(d) if d != sync::Done::default() => {
                             // its job may have changed: its Bot Mode description with it
                             if d.pulled > 0 {
-                                write_identity(a, &dir, ids, &read_title(&api, a).await);
+                                write_identity(a, &dir, ids, &read_face(&api, a).await);
                             }
                             ev!("sync.round", { "agent": a.fragment, "pulled": d.pulled, "pushed": d.pushed, "conflicts": d.conflicts, "deleted": d.deleted })
                         }

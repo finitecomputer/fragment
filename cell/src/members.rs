@@ -191,11 +191,11 @@ impl FragmentCell {
     }
 
     /// What its members' lists show of it, at each install of live: its
-    /// kind and title, an agent's picture (and its agents, read as each row
-    /// is sent). A change is sent to every member's list (at most
+    /// kind and title, an agent's role and picture (and its agents, read as
+    /// each row is sent). A change is sent to every member's list (at most
     /// `MEMBERS_MAX`) and its owner's, as an agent's joining or leaving is.
-    pub(crate) fn face_is(&self, kind: FragmentKind, title: Option<&str>, picture: Option<&str>) -> CellResult<()> {
-        let face = face(kind, title, picture);
+    pub(crate) fn face_is(&self, kind: FragmentKind, title: Option<&str>, role: Option<&str>, picture: Option<&str>) -> CellResult<()> {
+        let face = face(kind, title, role, picture);
         if self.meta(MetaKey::Face)?.as_deref() == Some(face.as_str()) {
             return Ok(());
         }
@@ -721,6 +721,13 @@ impl FragmentCell {
         Ok(face.and_then(|f| f["title"].as_str().map(str::to_string)).filter(|t| !t.is_empty()))
     }
 
+    /// An agent fragment's role, as its face keeps it (`face`): none for
+    /// any other fragment.
+    pub(crate) fn agent_role(&self) -> CellResult<Option<String>> {
+        let face: Option<Value> = self.meta(MetaKey::Face)?.and_then(|f| serde_json::from_str(&f).ok());
+        Ok(face.and_then(|f| f["role"].as_str().map(str::to_string)))
+    }
+
     /// Shares it with whoever signs in as `body.email` (decisions 48 and
     /// 63): the invite waits on the email here, and the registry keeps it
     /// against the email and mails them, for their yes, which makes them a
@@ -1189,13 +1196,18 @@ fn secret_hosts(given: &[String]) -> CellResult<Vec<String>> {
 }
 
 /// A fragment's face as its members' lists keep it (`MetaKey::Face`): an
-/// agent fragment's with its picture's address, when it has one. Its kind
-/// is a manifest's, which names only kinds this release knows: the
-/// fallback a newer platform's kind reads as is never stored as one.
-pub(crate) fn face(kind: FragmentKind, title: Option<&str>, picture: Option<&str>) -> String {
+/// agent fragment's with its role and its picture's address, when it has
+/// them. Its kind is a manifest's, which names only kinds this release
+/// knows: the fallback a newer platform's kind reads as is never stored as
+/// one.
+pub(crate) fn face(kind: FragmentKind, title: Option<&str>, role: Option<&str>, picture: Option<&str>) -> String {
     assert_ne!(kind, FragmentKind::Other, "a face's kind is its manifest's, one this release knows");
     // a title of nothing but spaces is none: every reader then falls back alike
     let mut face = json!({ "kind": kind, "title": fragment_core::face::title(title) });
+    // a role is an agent's alone: the tag beside its name
+    if let Some(r) = fragment_core::face::role(role).filter(|_| kind == FragmentKind::Agent) {
+        face["role"] = json!(r);
+    }
     if let Some(p) = picture {
         face["picture"] = json!(p);
     }
