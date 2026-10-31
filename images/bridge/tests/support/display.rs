@@ -10,7 +10,7 @@
 use std::sync::{Arc, Mutex};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{TcpListener, TcpSocket, TcpStream};
 
 /// Its framebuffer's size.
 const W: u16 = 4;
@@ -23,6 +23,23 @@ pub struct Display {
     task: tokio::task::JoinHandle<()>,
 }
 
+/// A display that is down (`Display::down`).
+pub struct Down {
+    pub port: u16,
+    socket: TcpSocket,
+}
+
+impl Down {
+    /// Starts it on its port, naming its desktop `name`.
+    pub fn start(self, name: &str) -> Display {
+        Display::serve(self.socket.listen(1024).expect("the display listens"), name)
+    }
+
+    pub fn target(&self) -> String {
+        format!("tcp:127.0.0.1:{}", self.port)
+    }
+}
+
 impl Drop for Display {
     fn drop(&mut self) {
         self.task.abort();
@@ -30,9 +47,22 @@ impl Drop for Display {
 }
 
 impl Display {
-    /// Listens on `port` (0: any), naming its desktop `name`.
-    pub async fn start(port: u16, name: &str) -> Display {
-        let listener = TcpListener::bind(("127.0.0.1", port)).await.expect("the display listens");
+    /// Listens on a port of its own, naming its desktop `name`.
+    pub async fn start(name: &str) -> Display {
+        Display::serve(TcpListener::bind("127.0.0.1:0").await.expect("the display listens"), name)
+    }
+
+    /// A display that is down, on a port of its own (`Down::start` starts
+    /// it there): its port bound and not listening, so a dial is refused
+    /// and no other socket takes the port meanwhile, as one picked and let
+    /// go may be another's by then.
+    pub fn down() -> Down {
+        let socket = TcpSocket::new_v4().unwrap();
+        socket.bind("127.0.0.1:0".parse().unwrap()).expect("a port for the display");
+        Down { port: socket.local_addr().unwrap().port(), socket }
+    }
+
+    fn serve(listener: TcpListener, name: &str) -> Display {
         let port = listener.local_addr().unwrap().port();
         let pointers = Arc::new(Mutex::new(Vec::new()));
         let (seen, name) = (pointers.clone(), name.to_string());
@@ -47,11 +77,6 @@ impl Display {
             }
         });
         Display { port, pointers, task }
-    }
-
-    /// A free port on loopback, for a display started later on it.
-    pub async fn free_port() -> u16 {
-        TcpListener::bind("127.0.0.1:0").await.unwrap().local_addr().unwrap().port()
     }
 
     pub fn target(&self) -> String {

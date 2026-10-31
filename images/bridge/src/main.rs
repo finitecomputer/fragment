@@ -13,6 +13,7 @@
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use fragment_bridge::driver::{self, Config};
@@ -116,7 +117,16 @@ fn screen_config() -> Option<screen::ScreenConfig> {
     }
     let screens_file = env("BRIDGE_SCREENS_FILE").map(PathBuf::from);
     let start = env("BRIDGE_SCREEN_START").map(|s| s.split_whitespace().map(str::to_string).collect());
-    Some(screen::ScreenConfig { listen, dir: PathBuf::from(env_or("BRIDGE_SCREEN_DIR", "/opt/fragment/screen")), screens_file, start })
+    // bound here, at the start; a port in use leaves the bridge without a
+    // screen, as a screen that fails does (driver.rs), not without agents
+    let listener = match std::net::TcpListener::bind(listen) {
+        Ok(l) => Arc::new(l),
+        Err(e) => {
+            ev!("screen.failed", { "error": format!("screen listen {listen}: {e}") });
+            return None;
+        }
+    };
+    Some(screen::ScreenConfig { listener, dir: PathBuf::from(env_or("BRIDGE_SCREEN_DIR", "/opt/fragment/screen")), screens_file, start })
 }
 
 /// `BRIDGE_SIMPLEX_BIN` and the rest: SimpleX, when the image names its

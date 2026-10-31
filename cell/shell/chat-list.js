@@ -1,13 +1,25 @@
 import { avatar } from "./agent-identity.js";
+import { icon } from "./icons.js";
 
 // Newest first, with a newly made chat (no preview yet) before older ones.
 export const newestChat = (a, b) => (b.previewAt ?? Infinity) - (a.previewAt ?? Infinity) || (a.name < b.name ? -1 : 1);
+// A section's order: the person's pinned chats first, then the rest, each
+// the newest first (Paul, 2026-10-31).
+export const pinnedFirst = (a, b) => Number(!!b.pinned) - Number(!!a.pinned) || newestChat(a, b);
+// What a section shows of its chats (in `pinnedFirst`'s order): all of
+// them unfolded; else its first `max`, pinned ones among them, and the open
+// one wherever it is. `more`: whether it has more than `max` (More, Less).
+export function sectionShown(list, { unfolded = false, current = null, max = 5 } = {}) {
+  const sorted = [...list].sort(pinnedFirst);
+  const shown = unfolded ? sorted : sorted.filter((f, i) => i < max || f.name === current);
+  return { shown, more: sorted.length > max };
+}
 
 export function createChatList({ api, ui, data, selection, menus, navigation, listLive, load, invites, setInvites }) {
   const { $, el, patch, agentFace, notice } = ui;
   const { byName, own, chats, shown, titleOf, chatTitle, homeMark, isGroup, agentOfChat, agentsOf, agents, allFragments, computer, isGuest, personId, isThread, waitingOn, renderThreads } = data;
   const { current, page, getFrame } = selection;
-  const { menu, menuEdge, menuOwner, openMenu, closeMenu, shareItem, archiveItem } = menus;
+  const { menu, menuEdge, menuOwner, openMenu, closeMenu, shareItem, archiveItem, pinItem } = menus;
   const { newChat, rename, openChat, openApp, openScreen, leaveSidebar, seg } = navigation;
   // ---- chats: one flat list, newest first, the open one in the middle column ----
   function renderHeading() {
@@ -148,6 +160,12 @@ export function createChatList({ api, ui, data, selection, menus, navigation, li
     open.onclick = () => { openChat(f.name); leaveSidebar(); };
     const line = el("span", "chat-line");
     line.append(el("span", "label", chatTitle(f.name)), ...homeMark(f));
+    if (f.pinned) {
+      const pin = el("span", "pin-mark");
+      pin.title = "Pinned";
+      pin.append(icon("pin"));
+      line.append(pin);
+    }
     let next = Infinity;
     if (f.previewAt) {
       const [said, until] = ago(f.previewAt, now);
@@ -165,13 +183,13 @@ export function createChatList({ api, ui, data, selection, menus, navigation, li
     open.append(line, sub);
     const more = el("button", "row-more", "⋯");
     more.type = "button";
-    more.title = "Rename or archive";
-    more.setAttribute("aria-label", `${chatTitle(f.name)}: rename or archive`);
+    more.title = "Pin, rename or archive";
+    more.setAttribute("aria-label", `${chatTitle(f.name)}: pin, rename or archive`);
     more.setAttribute("aria-haspopup", "menu");
     more.setAttribute("aria-controls", "menu");
     const shownMore = $("chats").querySelector(`[data-key="${CSS.escape(row.dataset.key)}"] .row-more`);
     more.setAttribute("aria-expanded", String(!!shownMore && menuOwner()?.button === shownMore));
-    more.onclick = () => openMenu(more, [{ icon: "rename", text: "Rename…", onClick: () => rename(f.name) }, archiveItem(f.name)]);
+    more.onclick = () => openMenu(more, [pinItem(f.name), { icon: "rename", text: "Rename…", onClick: () => rename(f.name) }, archiveItem(f.name)]);
     row.append(open, more);
     return [row, next];
   }
@@ -247,15 +265,15 @@ export function createChatList({ api, ui, data, selection, menus, navigation, li
     if (scrolledForMenu) scrolledForMenu = false;
     else if (menuOwner()?.button.classList.contains("agent-hero")) closeMenu(true);
   }, { passive: true });
-  // A section's chats: its five newest (and the open one, wherever it is),
-  // then More, which shows the rest, and Less, which folds them again.
-  const SECTION_CHATS = 5;
+  // A section's chats (`sectionShown`): its first five, pinned ones first,
+  // and the open one wherever it is; then More, which shows the rest, and
+  // Less, which folds them again.
   const unfolded = new Set();
   function sectionRows(key, list, rowOf) {
     const open = unfolded.has(key);
-    const shown = open ? list : list.filter((f, i) => i < SECTION_CHATS || (f.name === current() && !page()));
+    const { shown, more: many } = sectionShown(list, { unfolded: open, current: page() ? null : current() });
     const rows = shown.map(rowOf);
-    if (list.length > SECTION_CHATS) {
+    if (many) {
       const more = el("button", "row more-row", open ? "Less" : "More");
       more.type = "button";
       more.dataset.key = `more:${key}`;
