@@ -4,6 +4,8 @@
 // chat's look: what the person and the agent said, and the agent's tool
 // calls, their results and its reasoning folded into steps, as a chat
 // folds them. Everything is read from the archive's own files (`__file`).
+// Framed by the shell, a conversation offers Continue (the shell makes a
+// chat of it with the person's agent), or the chat it was continued in.
 import { renderMarkdown } from "./markdown.js";
 import { icon } from "./icons.js";
 
@@ -11,6 +13,10 @@ const KINDS = [["chat", "Chats"], ["cron", "Scheduled runs"], ["subagent", "Side
 const KIND_ONE = { chat: "Chat", cron: "Scheduled run", subagent: "Side task" };
 // a conversation's key, as the archive files one (fragment_core::session::key)
 const KEY = /^[a-z][a-z0-9]{0,31}-[A-Za-z0-9._-]{1,140}$/;
+
+// the shell framing this page: its origin, from the theme it sends
+let shell = null;
+const toShell = (message) => shell && window.parent.postMessage({ fragment: "session-archive", ...message }, shell);
 
 const el = (tag, cls, text) => {
   const e = document.createElement(tag);
@@ -167,6 +173,13 @@ async function reader(page, key) {
   head.append(el("h1", null, c.title || "Untitled"));
   const about = [c.kind !== "chat" ? KIND_ONE[c.kind] : "", when(c.started_at, c.ended_at), c.with ? `with ${c.with}` : ""].filter(Boolean).join(" · ");
   if (about) head.append(el("p", null, about));
+  // Continue, or the chat it was continued in: the shell's to do
+  const continued = await file(`continued/${key}.json`);
+  const go = el("button", "archive-continue", continued?.chat ? "Open the chat" : "Continue");
+  go.type = "button";
+  go.hidden = !shell;
+  go.onclick = () => toShell(continued?.chat ? { chat: continued.chat } : { continue: key });
+  head.append(go);
   page.replaceChildren(head, ...conversation(c));
 }
 
@@ -176,7 +189,10 @@ function main() {
     if (e.data?.fragment !== "theme") return;
     if (e.data.mode === "light" || e.data.mode === "dark") document.documentElement.dataset.theme = e.data.mode;
     // the shell framing it: which conversation this shows, for its heading
-    if (e.source === window.parent && window.parent !== window) window.parent.postMessage({ fragment: "session-archive", key }, e.origin);
+    if (e.source !== window.parent || window.parent === window) return;
+    shell = e.origin;
+    toShell({ key });
+    for (const b of document.querySelectorAll(".archive-continue")) b.hidden = false;
   });
   const page = document.getElementById("page");
   (key ? reader(page, key) : list(page)).catch(() => page.replaceChildren(el("p", "muted", "This didn't load. Reload to try again.")));

@@ -1410,7 +1410,8 @@ impl RuntimeLane {
                     // a late card answer's turn's own note first (engine.rs `hand`)
                     let notes: Vec<String> = [ts.note.take(), note].into_iter().flatten().collect();
                     ts.note = (!notes.is_empty()).then(|| notes.join("\n\n"));
-                    assert!(ts.note.as_ref().is_none_or(|n| n.len() <= 2 * limits::NOTE_MAX_BYTES + 2), "a turn's notes are bounded");
+                    // (its own, a card's turn, in the cut note's place: `note_for`)
+                    assert!(ts.note.as_ref().is_none_or(|n| n.len() <= limits::HISTORY_NOTE_MAX_BYTES + 2 * limits::NOTE_MAX_BYTES + 4), "a turn's notes are bounded");
                     ts.quote = quote;
                 }
                 if to_runtime.send(c).await.is_err() {
@@ -1562,20 +1563,42 @@ async fn card_history(api: &Api, agent: &Agent, fragment: &str, record: &Record)
     Ok(crate::history::Journal { work, chat, cause: said })
 }
 
-/// The note a turn carries (note.rs): what a restart cut of the agent's
-/// turn before it in the chat (`cut_note`), and what its runtime does not
-/// remember of the chat (`forgotten_note`), each from the chat's journal,
-/// together at most twice a note's bound. `None` when there is neither, or
+/// The note a turn carries (note.rs): at the agent's first turn in a chat
+/// continued from its owner's Session Archive, what was said there
+/// (`history_note`, at most `HISTORY_NOTE_MAX_BYTES`); what a restart cut
+/// of the agent's turn before it in the chat (`cut_note`); and what its
+/// runtime does not remember of the chat (`forgotten_note`), each from the
+/// chat's journal, the last two together at most twice a note's bound. `None` when there is neither, or
 /// the journal did not answer: a turn is never held back for its note. A
 /// late card answer's turn carries its card's turn as its note already
 /// (`TurnStart::note`), in the cut note's place: that turn is the one a
 /// restart cut, most often, and is told once.
 async fn note_for(api: &Api, ts: &TurnStart) -> Option<String> {
     let cut = async { if ts.note.is_some() { None } else { cut_note(api, ts).await } };
-    let (cut, forgot) = tokio::join!(cut, forgotten_note(api, ts));
-    let note = [cut, forgot].into_iter().flatten().collect::<Vec<_>>().join("\n\n");
-    assert!(note.len() <= 2 * limits::NOTE_MAX_BYTES + 2, "a turn's notes are bounded");
+    let (history, cut, forgot) = tokio::join!(history_note(api, ts), cut, forgotten_note(api, ts));
+    let note = [history, cut, forgot].into_iter().flatten().collect::<Vec<_>>().join("\n\n");
+    assert!(note.len() <= limits::HISTORY_NOTE_MAX_BYTES + 2 * limits::NOTE_MAX_BYTES + 4, "a turn's notes are bounded");
     (!note.is_empty()).then_some(note)
+}
+
+/// What a chat continued from its owner's Session Archive was (note.rs,
+/// `history`), at the agent's first turn there: no turn of its own started
+/// in the chat before this one's claim (its `work` read back to the
+/// channel's start), and the chat's first records hold its owner's
+/// `history`. `None` otherwise, or when the chat did not answer.
+async fn history_note(api: &Api, ts: &TurnStart) -> Option<String> {
+    let claim = ts.claim_seq?;
+    let (agent, chat, me) = (ts.agent.fragment.as_str(), ts.fragment.as_str(), ts.agent.identity.as_str());
+    let unread = |e: Unavailable| crate::ev!("note.unread", { "turn": ts.turn, "history": true, "error": e.why() });
+    let started = |rs: &[Record]| rs.iter().any(|r| r.principal == me && r.body["kind"] == "turn.start");
+    let (work, from_start) = read_back(api, agent, chat, records::WORK, claim, started, &mut Budget::default()).await.map_err(unread).ok()?;
+    if started(&work) || !from_start {
+        return None;
+    }
+    let first = api.records(agent, chat, records::CHAT, 0, limits::HISTORY_SCAN_RECORDS).await.map_err(|e| unread(e.into())).ok()?;
+    let text = first.records.iter().find_map(|r| note::history(r, &ts.agent.owner))?;
+    crate::ev!("note", { "turn": ts.turn, "history": true, "bytes": text.len() });
+    Some(text)
 }
 
 /// What the agent no longer remembers of the chat (note.rs, "forgotten"):
