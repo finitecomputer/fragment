@@ -3102,8 +3102,8 @@ async fn a_card_answered_after_a_sleep_starts_one_fresh_turn() {
     within(&x.fake, &x.chat, &c, 180_000, "the card after its steps", |w| !x.cards(w, &asked).is_empty()).await;
     x.fake.with(|w| {
         let steps = w.bodies(&x.chat, "work", "turn.step").into_iter().filter(|s| s["turn"] == asked).count();
-        // Hermes may send a quick tool's step late or not at all
-        // (docs/technical-debt-ledger.md): most of them, then
+        // Hermes may send a quick tool's step late or not at all: most of
+        // them, then
         assert!(steps >= support::model::PREPARE_STEPS / 2, "a real turn's steps before its card: {steps}; the model saw {:#?}", x.model_saw(0));
         assert!(w.bodies(&x.chat, "chat", "reply").iter().any(|r| r["turn"] == asked && r["text"].as_str().is_some_and(|t| t.len() > 1000)), "and its long plan");
     });
