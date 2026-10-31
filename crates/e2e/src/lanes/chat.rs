@@ -866,7 +866,7 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     // nothing answered twice, and the computer goes back to sleep
     let turns: Vec<String> = records(api, &owner, &chat_name, "work").iter().filter(|r| r["body"]["kind"] == "turn.start").filter_map(|r| r["body"]["turn"].as_str().map(str::to_string)).collect();
     let once: std::collections::BTreeSet<&String> = turns.iter().collect();
-    s.ok("every message the page sent was one turn (the one that answered a card, none)", turns.len() == 12 && once.len() == turns.len(), json!(turns));
+    s.ok("every message the page sent was one turn (the one that answered a card, none)", turns.len() == 13 && once.len() == turns.len(), json!(turns));
     let first_turn = turn_of(&agent_name, &chat_name, "chat", sent["seq"].as_i64().unwrap_or(0));
     s.ok("the first of them the turn of the page's first message", turns.first() == Some(&first_turn), json!({ "first": first_turn, "turns": turns }));
 
