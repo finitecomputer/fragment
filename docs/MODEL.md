@@ -172,7 +172,8 @@ two versions), and done when every object class answers it within 90 s
 Cloudflare holds on its old code fails the deploy loudly, rather than
 refusing calls that long. One it cannot finish or verify goes back to
 the version before (`wrangler rollback`, verified the same way), unless
-that release's schema is not its own; the job fails either way, never
+that release's schema (its steps, and its last Durable Object migration)
+is not its own; the job fails either way, never
 green over a mix. A platform page outlives a
 deploy too, and reloads once the platform's release differs from its own
 (docs/api.md, The shell, "A new release").

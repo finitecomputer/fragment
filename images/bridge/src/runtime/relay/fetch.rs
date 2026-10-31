@@ -3,7 +3,7 @@
 //! hands back `https://….fal.media/…`, and Hermes sends a reply's image
 //! links so). Its connector contract takes a `source_url` that is a local
 //! upload or "an already-public URL (passed through)": the bridge fetches
-//! it, so it is the chat's blob as an uploaded file is (docs/bridge.md).
+//! it, so it is the chat's blob as an uploaded file is.
 //!
 //! Only what a page may show, from where the public may serve it: `https`;
 //! a host whose every address is public (never this computer's own, its
