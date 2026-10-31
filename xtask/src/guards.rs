@@ -94,8 +94,8 @@ mod tests {
     /// the schema lock holds: no statement of the cell's makes, alters or
     /// drops a table, an index or a trigger, but the test levers that plant
     /// the shapes the runner must tell apart (schema.rs, its
-    /// `schema-unversion` dropping what later steps made, and a list's
-    /// `before-searched`). A `CREATE TABLE IF NOT EXISTS` in a module, as
+    /// `schema-unversion` dropping what later steps made, columns too, and
+    /// a list's `before-searched`). A `CREATE TABLE IF NOT EXISTS` in a module, as
     /// every object's schema was until 2026-10-19, never reaches an object
     /// made before it. Method: the cell's source, read.
     #[test]
@@ -107,7 +107,7 @@ mod tests {
                 *found.entry(file).or_default() += n;
             }
         }
-        let levers = BTreeMap::from([("principal.rs".to_string(), 2), ("schema.rs".to_string(), 7)]);
+        let levers = BTreeMap::from([("principal.rs".to_string(), 2), ("schema.rs".to_string(), 8)]);
         assert_eq!(found, levers, "a schema changes by a step of its class's (crates/core/src/migrate.rs says how), not in the cell");
     }
 
@@ -126,7 +126,7 @@ mod tests {
         let files = cell_sources();
         assert_eq!(uses(&files, "durable_object("), only("routed.rs", 1), "an object is reached through routed::send alone");
         assert_eq!(uses(&files, "fetch_with_request("), only("routed.rs", 1), "and called there alone, stamped");
-        let objects = [("fragment.rs", "FragmentCell"), ("registry.rs", "RegistryCell"), ("principal.rs", "PrincipalCell"), ("ledger.rs", "LedgerCell"), ("computer.rs", "ComputerCell")];
+        let objects = [("fragment.rs", "FragmentCell"), ("registry.rs", "RegistryCell"), ("principal.rs", "PrincipalCell"), ("ledger.rs", "LedgerCell"), ("computer.rs", "ComputerCell"), ("search_index.rs", "SearchIndexCell")];
         for (file, class) in objects {
             let text = &files[file];
             let at = text.find(&format!("impl DurableObject for {class} {{")).unwrap_or_else(|| panic!("{class} is a Durable Object"));
@@ -143,7 +143,7 @@ mod tests {
         assert_eq!(uses(&files, "routed::probed(&req, "), checked, "and answers a probe once, there");
         let entry = std::fs::read_to_string(crate::devstack::repo_root().join("cell/entry.mjs")).expect("entry.mjs reads");
         let code: Vec<&str> = entry.lines().filter(|l| !l.trim_start().starts_with("//")).collect();
-        assert_eq!(code.iter().filter(|l| l.contains(" extends DurableObject {")).count(), objects.len(), "the platform's objects are the five checked above");
+        assert_eq!(code.iter().filter(|l| l.contains(" extends DurableObject {")).count(), objects.len(), "the platform's objects are the six checked above");
         let made: Vec<&&str> = code.iter().filter(|l| l.contains("InternalRoute.request(")).collect();
         assert!(made.len() >= 3 && made.iter().all(|l| l.contains("InternalRoute.request(this.env, ") || l.contains("InternalRoute.request(env, ")), "the JavaScript's internal calls are stamped from its env: {made:?}");
         let called: Vec<&&str> = code.iter().filter(|l| l.contains("getByName(")).collect();
@@ -166,9 +166,11 @@ mod tests {
     /// drifts from them silently: proto's `LISTED_FRESH_MS` and
     /// `LISTED_UNREAD_MAX`, and the bridge's `TURN_IDLE_MS_MAX` and
     /// `PROMPT_TTL_MS_DEFAULT` (images/bridge/src/limits.rs: images/ is a
-    /// workspace of its own, so its file is read); and Settings' proto's
-    /// `ROLE_MAX_CHARS` and the cell's computer's `AGENTS_MAX`. Method: each copy and
-    /// each Rust source, read and evaluated.
+    /// workspace of its own, so its file is read); Settings' proto's
+    /// `ROLE_MAX_CHARS` and the cell's computer's `AGENTS_MAX`; and the
+    /// launcher's knowledge question's proto `search::IN_MAX` and
+    /// `QUERY_MAX_BYTES`. Method: each copy and each Rust source, read and
+    /// evaluated.
     #[test]
     fn the_shell_copies_its_limits() {
         let root = crate::devstack::repo_root();
@@ -183,5 +185,8 @@ mod tests {
         let computer = std::fs::read_to_string(root.join("cell/src/computer.rs")).expect("the cell's computer reads");
         assert_eq!(constant(&settings, "const", "ROLE_MAX_CHARS", " = "), fragment_proto::limits::ROLE_MAX_CHARS as i64);
         assert_eq!(constant(&settings, "const", "AGENTS_MAX", " = "), constant(&computer, "const", "AGENTS_MAX", ": u64 = "), "the shell's AGENTS_MAX is a computer's");
+        let launcher = std::fs::read_to_string(root.join("cell/shell/launcher.js")).expect("the shell's launcher reads");
+        assert_eq!(constant(&launcher, "const", "KNOWLEDGE_IN_MAX", " = "), fragment_proto::search::IN_MAX as i64);
+        assert_eq!(constant(&launcher, "const", "KNOWLEDGE_Q_MAX_BYTES", " = "), fragment_proto::search::QUERY_MAX_BYTES as i64);
     }
 }

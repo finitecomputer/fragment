@@ -34,18 +34,14 @@
 //! Nothing is held before a paid call (decision 62): a spend asks the
 //! cell's cached gate (`may_spend`, `fragment_open`; `gate`), and what it
 //! used is metered after it, once by its reference. A head kept before
-//! (2026-10-21) that names holds loads, and its holds are retired as it
-//! does (`retire_holds`): forgiven, never charged (what they held was
-//! never drawn), each one's reservation entry ended as released, so a
-//! release rolled back to one before reads a ledger with no hold and no
-//! held entry.
+//! (2026-10-21) may still name holds and a book: both are read past, its
+//! holds forgiven (what they held was never drawn).
 //!
 //! The ledger keeps no price book (decision 62): every call into a
 //! person's ledger comes from its own release (the deploy-skew guard), so
 //! a batch is priced with the book that release configured, passed in
 //! (`meter`), and each book a ledger priced with is kept once as a
-//! command, `book:<digest>`, for the audit, beside each row's version. A
-//! head kept before names its book too: read past.
+//! command, `book:<digest>`, for the audit, beside each row's version.
 //!
 //! Zero (decision 27): at a balance of zero or less, agents stop (no
 //! turns, no wakes, no AI steps). Fragments keep taking writes down to the
@@ -411,9 +407,7 @@ pub enum Entry {
     Row { row: MeterRow, priced: Priced, charge: i64, book: u32 },
     /// A reservation of the releases before decision 62 (held, settled or
     /// released), kept as it was written: never charged here, a row under
-    /// its reference another body, forgotten by its time as any. Written
-    /// back only to end a held one as released (`Ledger::retire_holds`), in
-    /// the shape those releases read.
+    /// its reference another body, forgotten by its time as any.
     Before(serde_json::Value),
 }
 
@@ -472,11 +466,6 @@ impl Entry {
             Entry::Row { charge, .. } => Some(*charge),
             Entry::Before(_) => None,
         }
-    }
-
-    /// A reservation from before still held (no `end`).
-    pub fn held_before(&self) -> bool {
-        matches!(self, Entry::Before(v) if v["end"].is_null())
     }
 }
 
@@ -572,7 +561,7 @@ impl Store for Memory {
 
     fn spends(&self, month: Month, limit: usize) -> Vec<(String, i64)> {
         let mut all: Vec<(String, i64)> = self.spent.get(&month).map(|m| m.iter().map(|(f, s)| (f.clone(), *s)).collect()).unwrap_or_default();
-        all.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        all.sort_unstable_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
         all.truncate(limit);
         all
     }
@@ -763,10 +752,9 @@ fn allowed(standing: Standing, spend: Spend) -> Result<(), Refused> {
     }
 }
 
-/// A payer's ledger: the head of its state (see the module's docs). A
-/// head kept before decision 62 names its `book` too: read past (the
-/// fields a head does not name are let go), and written with the book of
-/// the release writing it (`written`), for a rollback.
+/// A payer's ledger: the head of its state (see the module's docs). The
+/// fields a head kept before names that this one does not (`holds`,
+/// `book`) are let go.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Ledger {
     money: Money,
@@ -776,34 +764,6 @@ pub struct Ledger {
     /// own row of the budget (`bind_org`).
     #[serde(skip)]
     org: Option<org::OrgTerms>,
-    /// The reservations the releases before decision 62 held, by their
-    /// references as a head of theirs names them, until `retire_holds`
-    /// forgives them (the first thing done with a head read); written as
-    /// an empty map, so a release rolled back to one of those, which
-    /// requires the map, reads a head this one wrote.
-    #[serde(default)]
-    holds: OldHolds,
-}
-
-/// A head's `holds` (`Ledger::holds`): the references a head read names,
-/// and an empty map written. Goes once no release that requires the map
-/// can be deployed again (the debt ledger).
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-struct OldHolds(Vec<String>);
-
-impl Serialize for OldHolds {
-    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        use serde::ser::SerializeMap;
-        assert!(self.0.is_empty(), "a head's old holds are retired before it is written");
-        s.serialize_map(Some(0))?.end()
-    }
-}
-
-impl<'de> Deserialize<'de> for OldHolds {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<OldHolds, D::Error> {
-        let held = BTreeMap::<String, serde::de::IgnoredAny>::deserialize(d)?;
-        Ok(OldHolds(held.into_keys().collect()))
-    }
 }
 
 impl Ledger {
@@ -821,7 +781,7 @@ impl Ledger {
             read_only: false,
             totals: Totals::default(),
         };
-        let ledger = Ledger { money, org: None, holds: OldHolds::default() };
+        let ledger = Ledger { money, org: None };
         ledger.assert_valid();
         ledger
     }
@@ -923,20 +883,6 @@ impl Ledger {
         self.money.totals
     }
 
-    /// The head as a release writes it: with `book`, the book it charges
-    /// with, which no release since decision 62 reads, but one rolled back
-    /// to before it requires (its `book`), so a head written here reads
-    /// there. Goes once no such release can be deployed again.
-    pub fn written(&self, book: &PriceBook) -> String {
-        #[derive(Serialize)]
-        struct Head<'a> {
-            #[serde(flatten)]
-            ledger: &'a Ledger,
-            book: &'a PriceBook,
-        }
-        serde_json::to_string(&Head { ledger: self, book }).expect("a head serializes")
-    }
-
     /// When the Durable Object's alarm should run `sweep` next: once a
     /// `SWEEP_EVERY_MS`, to forget what is past `REF_KEEP_MS`.
     pub fn next_sweep_ms(&self, now_ms: i64) -> i64 {
@@ -970,27 +916,6 @@ impl Ledger {
         if self.org.is_some() {
             org::assert_valid(&self.money);
         }
-        assert!(self.holds.0.is_empty(), "a head's old holds are retired as it is read");
-    }
-
-    /// Retires the holds a head kept before decision 62 names, the first
-    /// thing done with a head read: forgiven, never charged (what they
-    /// held was never drawn from the balance), and each one's reservation
-    /// entry, still held, ended as released, in the shape those releases
-    /// read and in the transaction that writes the head back without
-    /// them. So both this release and one rolled back to before read a
-    /// ledger with no hold and no held entry, and a replay of a forgiven
-    /// reference stays refused for its time. Answers how many it retired.
-    pub fn retire_holds(&mut self, store: &mut impl Store) -> usize {
-        let held = std::mem::take(&mut self.holds.0);
-        // bounded: a head held at most 256 (the releases before's HOLDS_MAX)
-        for reference in &held {
-            if let Some(Entry::Before(mut v)) = store.entry(reference).filter(Entry::held_before) {
-                v["end"] = serde_json::json!({ "end": "released" });
-                store.put_entry(reference, Entry::Before(v));
-            }
-        }
-        held.len()
     }
 
     // Commands: each idempotent by its id.

@@ -89,10 +89,18 @@
       // The identity registry: one object for the deployment (registry.rs).
       { "name": "REGISTRY", "class_name": "Registry" },
       // A person's usage ledger: one object per person (ledger.rs).
-      { "name": "LEDGER", "class_name": "Ledger" }
+      { "name": "LEDGER", "class_name": "Ledger" },
+      // A fragment life's search index: one object per life (search_index.rs).
+      { "name": "SEARCH_INDEX", "class_name": "SearchIndex" }
     ]
   },
   // Restarted at the move to Cloudflare: nothing on celld migrates
-  // (docs/cloudflare-v1.md, decision 33).
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Fragment", "Principal", "Registry", "Ledger", "Computer"] }]
+  // (docs/cloudflare-v1.md, decision 33). A class added here is a deploy
+  // no rollback crosses (Cloudflare's rule for a class's lifecycle); its
+  // schema steps change the release's schema, so the rollout goes forward
+  // only too (xtask/src/rollout.rs).
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["Fragment", "Principal", "Registry", "Ledger", "Computer"] },
+    { "tag": "v2", "new_sqlite_classes": ["SearchIndex"] }
+  ]
 }

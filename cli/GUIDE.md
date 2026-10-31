@@ -65,10 +65,11 @@ does what that needs when the computer sets:
   own; the computer's egress signs it as that agent, which then holds
   exactly its grants.
 - `FRAGMENT_FOR=<npub>`, optional: the person the agent acts for (its
-  owner), named as `for` on a fragment's routes and the fragment list,
-  the routes that honor it. The agent then holds that person's role,
-  never above it (and never above an editor): `fragment list` lists their
-  fragments, and what `fragment create` makes is theirs, the agent its
+  owner), named as `for` on a fragment's routes, the fragment list and
+  `fragment search`, the routes that honor it. The agent then holds that
+  person's role, never above it (and never above an editor): `fragment
+  list` lists their fragments, `fragment search` searches only what they
+  may read, and what `fragment create` makes is theirs, the agent its
   editor.
 - The host is `--host`, else `FRAGMENT_HOST`, else the computer's
   `FRAGMENT_API` (`http://api.fragment.internal`), never the config's or
@@ -225,7 +226,7 @@ lists their templates:
 folder, from the platform's own templates: one of `blank`, `todo`,
 `inbox`, `calories`, `doc` is copied in as its first commit (`notes` is
 `new`'s and `init`'s alone); a blessed one, `agent`, `chat`, `brain`,
-`skills`, `sessions`, runs the platform's current release and is named in its
+`skills`, `sessions`, `telegram`, runs the platform's current release and is named in its
 `fragment.json`. Either way `--title` gives it its own title, its
 `fragment.json`'s `meta.title`, over the template's. Any other is
 refused, naming them.
@@ -486,9 +487,16 @@ export class App extends DurableObject {
   path, steps})`. Text runs on a tier, `model: "cheap"` (the default) or
   `"medium"`; an image is a JPEG (FLUX.1 [schnell], 1 to 8 `steps`, 4 by
   default) written to `path` on `main`, which ends in `.jpg` or `.jpeg`.
-  You pay for them, from your ledger (below). `job.ai.video` is off until
-  videos run on Cloudflare. GLM can spend a small `max_tokens` thinking:
-  `reasoning_effort` is `low` unless you ask for `high`. A text step
+  `job.ai.video({prompt, path, duration, resolution, aspect_ratio})` makes
+  an MP4 (HappyHorse 1.0: 3 to 15 seconds, 5 by default; `720p` or
+  `1080p`) written to `path`, which ends in `.mp4`; none where your
+  models are private. You pay for them, from your ledger (below): an
+  image about a tenth of a cent, a video $0.14 a second at 720p and
+  $0.28 at 1080p, plus the platform's fee and margin. Before you build a
+  fragment that makes images or videos, tell the person what each costs
+  and that its owner pays for every one anyone makes in it. GLM
+  can spend a small `max_tokens` thinking: `reasoning_effort` is `low`
+  unless you ask for `high`. A text step
   answers `{text, message, finish_reason, model, tier, usage, timing}`
   (`timing`: `{first_ms, ms, model, calls, tries}`). It takes OpenAI's
   `tools` (at most 64, each `{type: "function", function: {name,
@@ -722,6 +730,34 @@ fragment channel my-thing                                      # list channels
 fragment channel my-thing activity --follow                     # the backlog a page at a time, then new records, as JSON lines
 ```
 
+## Searching fragments
+
+Fragments with a search index (docs/api.md, "A fragment's search": an
+app's sources, such as your Session Archive's conversations) are searched
+by their words and their meaning, several as one, by anyone who may read
+each:
+
+```
+fragment search "what did we decide about the ferry" --in my-sessions         # one fragment
+fragment search "launch readiness" --in executive,research,delivery         # a parent brain and its sources, as one
+fragment search "launch" --all                                               # your brains and Session Archive (32 at most, by name)
+fragment search ferry --in my-sessions --mode lexical --limit 5              # words alone; hybrid (default), semantic
+fragment search ferry --in my-sessions --field kind=chat --after 2026-10-01
+fragment search ferry --in my-sessions --json    # {results: [{fragment, rank, source, section, …, snippet}], fragments: [{name, state}], semantic}
+```
+
+- Each result is a section of one of their sources (a conversation's
+  turn, a page's part), best first across all the fragments, named by
+  its fragment, with its source, section, title and heading, and a
+  snippet of its best part.
+- Each fragment is asked as you, exactly as if you asked it alone: one
+  you may not read is `denied`, one with no index `no_index`, and is
+  said after the results (`fragments` in `--json`). Nothing is copied
+  between them.
+- Your question is embedded once on the platform's model, paid by you;
+  with `--mode lexical`, or on a deployment that embeds nothing, it is
+  searched by its words alone (`semantic: off`).
+
 ## Your operations as tools (MCP)
 
 `fragment mcp <name>` is an MCP server over stdio: another agent (Claude
@@ -758,6 +794,11 @@ codex mcp add my-thing -- fragment mcp my-thing              # Codex (or in ~/.c
   call that got no answer says `unavailable`, or `outcome_unknown` when
   it may have run: `fragment call <name> <op> --id <id>` finds out, and
   never runs it twice.
+- A reader has one tool more, `fragment-search` (a name no operation can
+  have): fragments' indexes searched as one, this fragment's unless its
+  `in` names others. Its arguments are `fragment search`'s question,
+  `{q, in?, limit?, mode?, fields?, after?, before?}`, and its result is
+  `fragment search --json`'s.
 - One server serves one fragment: add one for each. Claude desktop
   takes one in its config's `mcpServers`: `{"my-thing": {"command":
   "/Users/<you>/.local/bin/fragment", "args": ["mcp", "my-thing"]}}` (a
@@ -801,9 +842,9 @@ invites, visibility, and tokens.
 You pay for what is yours: your fragments' hosting (requests, storage, a
 code version's day) and their AI (`job.ai`), whoever started the run, and
 your agents' model calls, whoever asked them. A seat includes credit
-each month; operators grant more. A paid step reserves its worst case
-first, and one your ledger cannot cover is held, saying why: replay it
-after a top-up or next month.
+each month; operators grant more. A paid step is charged once it
+answers; one started when your ledger is out of credit is held, saying
+why: replay it after a top-up or next month.
 
 - At zero, agents and AI stop; your fragments keep serving and taking
   writes.
@@ -1039,6 +1080,7 @@ fragment drafts <name>                   fragment rollback <name> [--to <sha>]
 fragment rm <name>                       fragment guide|skill
 fragment ask <agent> <text> [--chat C] [--wait [S] | --return-to CHAT] [--id ID]
 fragment mcp <name> [--write]            # its described operations as an MCP server's tools, over stdio
+fragment search "<query>" --in <name>[,<name>…] | --all  [--limit N] [--mode hybrid|lexical|semantic] [--field K=V]… [--after T] [--before T]
 fragment agent [<agent>] [--name N] [--picture FILE | --no-picture]
 fragment schedule add [<name>] --cron "<m h dom mon dow>" --channel C --record JSON
 fragment schedule add [<name>] --cron "<m h dom mon dow>" --routine TEXT [--chat C]   # an agent's routine, on its tasks; no --chat: its owner's home
@@ -1053,6 +1095,7 @@ fragment operator comp <email> [--kind seat|always-on] [--org O] [--key-file F]
 fragment operator uncomp <seat> [--key-file F]
 fragment operator trials [--name N [--days D] [--capacity C] | --send <id> --to <email>] [--key-file F]
 fragment operator health [--key-file F]
+fragment operator wake <class> <ids-file> [--key-file F]   # start objects by Cloudflare's ids, schemas made current
 fragment operator log [--before N] [--key-file F]
 fragment operator credit <org> <usd> --why W --id REF [--key-file F]
 fragment operator budget <org> <usd> [--id I] [--key-file F]

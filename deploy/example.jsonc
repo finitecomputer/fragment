@@ -139,10 +139,6 @@
   // `completion` with OpenRouter's fee (docs/ledger.md, OpenRouter's price),
   // so trying another model is a change to this file alone. A slot there
   // without one is refused.
-  // A search service (search/README.md; docs/api.md, "A fragment's
-  // search"): where it listens and its bearer token's name in the store.
-  // Unnamed, the deployment has no search.
-  // "search": { "url": "https://search.example.internal", "token": "fragment-search-token" },
   "models": {
     "cheap": { "provider": "openai", "base_url": "https://openrouter.ai/api/v1",
                "key": "fragment-openrouter-key", "model": "z-ai/glm-5.3-flash",
@@ -253,7 +249,8 @@
   },
   // The connectors: the doors its people may open (docs/computers.md,
   // "Connector policy"), [{id, relayTargets: [{host, port}]}]. Omitted: the
-  // cell's default, SimpleX with its twelve XFTP hosts on 443. [] is the
+  // cell's default, SimpleX with its twelve XFTP hosts on 443, and Telegram
+  // (a connector fragment, no relay). [] is the
   // kill switch: no connector may be linked, redeemed or relayed (an
   // unlink still works), and no computer relay opens.
   // "connectors": [{ "id": "simplex", "relayTargets": [{ "host": "xftp1.simplex.im", "port": 443 }] }],

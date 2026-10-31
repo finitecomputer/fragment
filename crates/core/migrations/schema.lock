@@ -8,6 +8,8 @@ step Fragment 1 baseline 6f010c0c276b4871
 step Fragment 2 listed 464da803484efc23
 step Fragment 3 record_schedules 90308e727fc4ce8b
 step Fragment 4 search_forget 06450019092243ac
+step Fragment 5 ended_search aad1c18c55f08519
+step Fragment 6 installed_forward_only ca46b28bd2c487d0
 step Registry 1 baseline fd5a79e5c834a15d
 step Registry 2 connection_signins e9d1f862c2e3e4ed
 step Registry 3 trial_hold_attempts 07e123e05a049abe
@@ -19,9 +21,11 @@ step Registry 8 org_content 67159e5ef6e0243b
 step Principal 1 baseline 28b4d4bf3f8cdb71
 step Principal 2 listed 09e5aab70c4f7f61
 step Principal 3 memberships_dock 607987fd7686be8b
+step Principal 4 memberships_pinned e55965f09c24b2e1
 step Ledger 1 baseline 6d5c6ebad64a53b2
 step Computer 1 baseline 0f429c07654198e6
 step Computer 2 agent_accounts 55b329a8b0da4bbd
+step SearchIndex 1 baseline 500e1cc281039770
 
 Fragment table blobs: CREATE TABLE blobs ( sha TEXT PRIMARY KEY, size INTEGER NOT NULL, uploaded_at INTEGER NOT NULL, seen_at INTEGER NOT NULL, mime TEXT)
 Fragment table charges: CREATE TABLE charges ( ref TEXT PRIMARY KEY, run INTEGER NOT NULL, micros INTEGER NOT NULL, held INTEGER NOT NULL, at INTEGER NOT NULL)
@@ -37,7 +41,7 @@ Fragment index code_triggers_on: CREATE INDEX code_triggers_on ON code_triggers 
 Fragment table delivery_outbox: CREATE TABLE delivery_outbox ( id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL CHECK (kind IN ('record', 'push')), sub INTEGER, channel TEXT, seq INTEGER, who TEXT, body TEXT, after_sub INTEGER NOT NULL DEFAULT 0, upto_sub INTEGER NOT NULL DEFAULT 0, attempts INTEGER NOT NULL DEFAULT 0, next_at INTEGER NOT NULL)
 Fragment index delivery_outbox_due: CREATE INDEX delivery_outbox_due ON delivery_outbox (next_at)
 Fragment index delivery_outbox_waiting: CREATE INDEX delivery_outbox_waiting ON delivery_outbox (id) WHERE attempts > 0
-Fragment table ended: CREATE TABLE ended ( incarnation INTEGER PRIMARY KEY, name TEXT NOT NULL, npub TEXT NOT NULL, facet TEXT NOT NULL, ended_at INTEGER NOT NULL, stored INTEGER NOT NULL DEFAULT 1, attempts INTEGER NOT NULL DEFAULT 0, next_at INTEGER NOT NULL)
+Fragment table ended: CREATE TABLE ended ( incarnation INTEGER PRIMARY KEY, name TEXT NOT NULL, npub TEXT NOT NULL, facet TEXT NOT NULL, ended_at INTEGER NOT NULL, stored INTEGER NOT NULL DEFAULT 1, attempts INTEGER NOT NULL DEFAULT 0, next_at INTEGER NOT NULL, search INTEGER NOT NULL DEFAULT 0)
 Fragment table ended_agents: CREATE TABLE ended_agents ( incarnation INTEGER PRIMARY KEY, identity TEXT NOT NULL, computer TEXT, attempts INTEGER NOT NULL DEFAULT 0, next_at INTEGER NOT NULL)
 Fragment table ended_errors: CREATE TABLE ended_errors ( incarnation INTEGER NOT NULL, part TEXT NOT NULL, error TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (incarnation, part))
 Fragment table ended_index: CREATE TABLE ended_index ( incarnation INTEGER NOT NULL, principal TEXT NOT NULL, version INTEGER NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, next_at INTEGER NOT NULL, PRIMARY KEY (incarnation, principal))
@@ -159,7 +163,7 @@ Principal table export_parts: CREATE TABLE export_parts (export TEXT NOT NULL, p
 Principal table export_tail: CREATE TABLE export_tail (export TEXT NOT NULL, n INTEGER NOT NULL, bytes BLOB NOT NULL, PRIMARY KEY (export, n))
 Principal table exports: CREATE TABLE exports ( id TEXT PRIMARY KEY, person TEXT NOT NULL, state TEXT NOT NULL, started_at INTEGER NOT NULL, ready_at INTEGER, expires_at INTEGER, size INTEGER, error TEXT, job TEXT, upload TEXT, requests INTEGER NOT NULL DEFAULT 0, downloads INTEGER NOT NULL DEFAULT 0, gone_at INTEGER, metered INTEGER NOT NULL DEFAULT 0)
 Principal table listed: CREATE TABLE listed (fragment TEXT PRIMARY KEY, records TEXT NOT NULL)
-Principal table memberships: CREATE TABLE memberships ( fragment TEXT PRIMARY KEY, role TEXT, incarnation INTEGER NOT NULL, version INTEGER NOT NULL, sharing TEXT, face TEXT, archived INTEGER NOT NULL DEFAULT 0, searched TEXT, dock INTEGER NOT NULL DEFAULT 1)
+Principal table memberships: CREATE TABLE memberships ( fragment TEXT PRIMARY KEY, role TEXT, incarnation INTEGER NOT NULL, version INTEGER NOT NULL, sharing TEXT, face TEXT, archived INTEGER NOT NULL DEFAULT 0, searched TEXT, dock INTEGER NOT NULL DEFAULT 1, pinned INTEGER NOT NULL DEFAULT 0)
 Principal table search_entries: CREATE TABLE search_entries ( id INTEGER PRIMARY KEY, fragment TEXT NOT NULL, n INTEGER NOT NULL, channel TEXT NOT NULL, seq INTEGER NOT NULL, at INTEGER NOT NULL, text TEXT NOT NULL, UNIQUE (fragment, n))
 Principal index search_entries_at: CREATE INDEX search_entries_at ON search_entries (at, id)
 Principal trigger search_entries_added: CREATE TRIGGER search_entries_added AFTER INSERT ON search_entries BEGIN INSERT INTO search_text (rowid, text) VALUES (new.id, new.text); END
@@ -189,3 +193,13 @@ Computer table sessions: CREATE TABLE sessions (hash TEXT PRIMARY KEY, identity 
 Computer table tickets: CREATE TABLE tickets (hash TEXT PRIMARY KEY, port INTEGER NOT NULL, identity TEXT NOT NULL, expires_at INTEGER NOT NULL)
 Computer table uses: CREATE TABLE uses (month INTEGER NOT NULL, provider TEXT NOT NULL, agent TEXT NOT NULL, calls INTEGER NOT NULL, micros INTEGER NOT NULL, PRIMARY KEY (month, provider, agent))
 Computer table wiped: CREATE TABLE wiped (at INTEGER NOT NULL)
+
+SearchIndex table chunk_words: CREATE VIRTUAL TABLE chunk_words USING fts5( title, heading, context, body, content = '', contentless_delete = 1, tokenize = 'unicode61 remove_diacritics 2')
+SearchIndex table chunks: CREATE TABLE chunks (id INTEGER PRIMARY KEY, section INTEGER NOT NULL, hash TEXT NOT NULL, body TEXT NOT NULL)
+SearchIndex index chunks_hash: CREATE INDEX chunks_hash ON chunks (hash)
+SearchIndex index chunks_section: CREATE INDEX chunks_section ON chunks (section)
+SearchIndex table meta: CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)
+SearchIndex table sections: CREATE TABLE sections ( id INTEGER PRIMARY KEY, source TEXT NOT NULL, section TEXT NOT NULL, heading TEXT, context TEXT NOT NULL, at TEXT, location TEXT)
+SearchIndex index sections_source: CREATE INDEX sections_source ON sections (source)
+SearchIndex table sources: CREATE TABLE sources ( source TEXT PRIMARY KEY, revision TEXT NOT NULL, title TEXT NOT NULL, at TEXT, fields TEXT NOT NULL, chunks INTEGER NOT NULL)
+SearchIndex table vectors: CREATE TABLE vectors (chunk INTEGER PRIMARY KEY, code BLOB NOT NULL, q BLOB NOT NULL)

@@ -312,6 +312,29 @@ fn steps(cut: &Cut) -> Option<String> {
     Some(format!("Its steps, as recorded: {}", steps.join("; ")))
 }
 
+/// How long ago a turn's message was said, in plain words, when it is
+/// handed at least `MESSAGE_AGE_TOLD_MS` after it (an outage, a restart, a
+/// sleep, a backlog), so its agent can judge whether it is still wanted;
+/// `None` sooner, for a time unknown (`said_at` 0), or for a routine or a
+/// command (`exempt`: a routine's message says its hour). A continuation
+/// (`continues`) is told the age of what its cut turn was answering.
+pub fn age(said_at: i64, now: u64, exempt: bool, continues: bool) -> Option<String> {
+    let late = i64::try_from(now).ok()?.checked_sub(said_at)?;
+    if said_at <= 0 || exempt || late < i64::try_from(limits::MESSAGE_AGE_TOLD_MS).ok()? {
+        return None;
+    }
+    let minutes = late / 60_000;
+    let ago = match minutes {
+        ..120 => format!("{minutes} minutes"),
+        120..2880 => format!("{} hours", minutes / 60),
+        _ => format!("{} days", minutes / 1440),
+    };
+    let what = if continues { format!("What that turn was answering was sent about {ago} ago.") } else { format!("This message was sent about {ago} ago, and is only reaching you now.") };
+    let line = format!("{what} If it may no longer be wanted, check before acting on it.");
+    assert!(line.len() <= limits::AGE_NOTE_MAX_BYTES, "an age is one short line: {line}");
+    Some(line)
+}
+
 /// The calls a turn asked for and never heard the end of, on one line:
 /// each may or may not have run (the computer stopped while it ran, or
 /// before), at most `NOTE_STEPS_MAX`, the rest counted.
@@ -430,10 +453,18 @@ pub fn history(r: &Record, owner: &str) -> Option<String> {
     let named = |k: &str, ok: fn(u8) -> bool| Some(field(b, k)).filter(|v| !v.is_empty() && v.len() <= 160 && v.bytes().all(ok));
     let archive = named("archive", |c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-');
     let key = named("key", |c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'_' | b'-'));
+    // an archived chat of theirs (`chat`), or an import's; with another
+    // agent (`agent`, its name), or with this one
+    let chat = named("chat", |c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-');
+    let other = Some(short("agent", 120)).filter(|a| !a.trim().is_empty());
+    let with = other.as_deref().unwrap_or("you");
+    let moved = if chat.is_some() { "" } else { " before they moved here" };
     let mut head = vec![format!(
-        "This chat goes on from a conversation your owner had with you before they moved here, “{title}”{when}. It is read-only history: what was said there, not new messages."
+        "This chat goes on from a conversation your owner had with {with}{moved}, “{title}”{when}. It is read-only history: what was said there, not new messages."
     )];
-    if let (Some(a), Some(k)) = (archive, key) {
+    if let Some(c) = chat {
+        head.push(format!("All of it is in their chat {c}."));
+    } else if let (Some(a), Some(k)) = (archive, key) {
         head.push(format!("All of it is in their Session Archive: `fragment sync {a} --dir <folder> --mode pull`, then sessions/{k}.json."));
     }
     let summary = field(b, "summary").trim();
@@ -448,7 +479,7 @@ pub fn history(r: &Record, owner: &str) -> Option<String> {
             let text = m["text"].as_str().map(str::trim).filter(|t| !t.is_empty())?;
             let who = match m["role"].as_str() {
                 Some("user") => "Your owner",
-                Some("assistant") => "You",
+                Some("assistant") => other.as_deref().unwrap_or("You"),
                 _ => return None,
             };
             Some(format!("{who}: {}", records::cut_bytes(text, limits::HISTORY_NOTE_MAX_BYTES / 4)))
@@ -470,7 +501,8 @@ pub fn history(r: &Record, owner: &str) -> Option<String> {
     let dropped = earlier + (said.len() - kept.len()) as u64;
     let mut text = head;
     if !kept.is_empty() {
-        let before = if dropped > 0 { format!(" ({dropped} earlier ones are in the archive)") } else { String::new() };
+        let place = if chat.is_some() { "that chat" } else { "the archive" };
+        let before = if dropped > 0 { format!(" ({dropped} earlier ones are in {place})") } else { String::new() };
         text.push_str(&format!("\n\nIts last messages, oldest first{before}:\n"));
         text.push_str(&kept.iter().map(|l| l.as_str()).collect::<Vec<_>>().join("\n"));
     }
@@ -548,6 +580,25 @@ mod tests {
         assert!(big.contains("Your owner: 39 ") && !big.contains("Your owner: 0 ") && big.contains("earlier ones are in the archive"), "the newest kept");
     }
 
+    /// Goal: a history continued with another agent than the one the
+    /// conversation was with (`agent`) tells this one whose words they
+    /// were, never "you"; one from an archived chat (`chat`) says that chat
+    /// is where the rest is. Valid: both; a history saying neither reads as
+    /// before.
+    #[test]
+    fn a_history_says_whose_words_and_where_the_rest_is() {
+        let body = json!({ "kind": "history", "title": "Beans", "chat": "fred-chat--k3x9", "agent": "Fred", "started_at": "2026-10-01T09:00:00.000Z", "earlier": 2,
+            "messages": [{ "role": "user", "text": "plant beans?" }, { "role": "assistant", "text": "in spring" }] });
+        let text = history(&history_record("npub1paul", body), "npub1paul").expect("its owner's history");
+        assert!(text.starts_with("This chat goes on from a conversation your owner had with Fred, “Beans” (2026-10-01)."), "{text}");
+        assert!(text.contains("All of it is in their chat fred-chat--k3x9."), "{text}");
+        assert!(text.ends_with("(2 earlier ones are in that chat):\nYour owner: plant beans?\nFred: in spring"), "{text}");
+        assert!(!text.contains("You:") && !text.contains("moved here") && !text.contains("fragment sync"), "{text}");
+        let imported = json!({ "kind": "history", "title": "Beans", "archive": "sessions--k3x9", "key": "hermes-ab", "agent": "Juniper", "messages": [{ "role": "assistant", "text": "hi" }] });
+        let text = history(&history_record("npub1paul", imported), "npub1paul").unwrap();
+        assert!(text.contains("had with Juniper before they moved here") && text.ends_with("Juniper: hi") && text.contains("sessions/hermes-ab.json"), "{text}");
+    }
+
     fn step(tool: &str, args: &str, ok: bool) -> Step {
         Step { tool: tool.into(), args: args.into(), ok, excerpt: String::new(), category: crate::records::Category::Shell, evidence: None }
     }
@@ -561,6 +612,28 @@ mod tests {
 
     fn call(response: &str, position: u32, id: &str, tool: &str, args: &str) -> crate::records::Call {
         crate::records::Call { response: response.into(), position, tool_call_id: id.into(), tool: tool.into(), args: args.into(), category: crate::records::Category::Shell }
+    }
+
+    /// Goal (FIN-236): a message handed at least `MESSAGE_AGE_TOLD_MS` after
+    /// it was said is told its age in plain words; sooner, or a routine's or
+    /// a command's (`exempt`), or a time unknown (0, or one ahead of the
+    /// clock), none. A continuation is told what its cut turn answered.
+    #[test]
+    fn a_late_message_is_told_its_age() {
+        let (minute, now) = (60_000_i64, 100 * 86_400_000_u64);
+        let at = |late: i64| i64::try_from(now).expect("a time") - late;
+        let bound = i64::try_from(limits::MESSAGE_AGE_TOLD_MS).expect("a bound");
+        let told = |late: i64| age(at(late), now, false, false);
+        assert_eq!(told(1_000), None, "fresh");
+        assert_eq!(told(bound - 1), None, "under the bound");
+        let then = " If it may no longer be wanted, check before acting on it.";
+        for (late, ago) in [(bound, "5 minutes"), (119 * minute, "119 minutes"), (3 * 60 * minute + 59_000, "3 hours"), (47 * 60 * minute, "47 hours"), (3 * 1440 * minute, "3 days")] {
+            assert_eq!(told(late), Some(format!("This message was sent about {ago} ago, and is only reaching you now.{then}")), "{late} ms");
+        }
+        assert_eq!(age(at(2 * 60 * minute), now, false, true), Some(format!("What that turn was answering was sent about 2 hours ago.{then}")));
+        assert_eq!(age(at(3 * 60 * minute), now, true, false), None, "a routine's or a command's");
+        assert_eq!(age(0, now, false, false), None, "a time unknown");
+        assert_eq!(age(at(-minute), now, false, false), None, "a time ahead of the clock");
     }
 
     /// Goal (phase 4): a cut turn's note names, first, each call it asked

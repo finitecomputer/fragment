@@ -123,6 +123,10 @@ fn continued(t: &Turn) -> bool {
     t.continues.is_none() && !t.stop_requested && t.ret.is_none() && !t.command
 }
 
+/// Why an asked turn of an agent that left this computer never answered:
+/// its asker is told so (`set_agents`).
+pub const LEFT: &str = "it was taken off this computer before it finished";
+
 /// Why an agent's hand-off is refused a turn past the hops (an ask, which
 /// is answered so; any other is let go).
 pub fn refused_deep() -> String {
@@ -248,18 +252,43 @@ pub struct Owed {
 /// Where an asked turn's answer goes (`Message::return_to`): the asking
 /// agent of this computer, whose own `tasks` it is posted on, and the chat
 /// its answer's turn runs in; what the asked agent is called (its name as
-/// its chat showed it when asked: its agent fragment's title); and what the
-/// turn said so far, which it carries (its replies but interim ones, at
-/// most `ANSWER_TEXT_MAX_BYTES`), with how many files it sent.
+/// its chat showed it when asked: its agent fragment's title) and who it is
+/// (`by`); and what the turn said so far, which it carries (its replies but
+/// interim ones, at most `ANSWER_TEXT_MAX_BYTES`), with how many files it
+/// sent.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Return {
     pub agent: String,
     pub chat: String,
     pub name: String,
+    /// The asked agent's identity, who its answer is by: kept, as its agent
+    /// may leave this computer before it answers, unknown to the next life
+    /// (`set_agents`). A state from before holds none, and its agent's is
+    /// read from the roster (`owe_answer`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub by: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub said: String,
     #[serde(default, skip_serializing_if = "u32_is_zero")]
     pub files: u32,
+    /// Its interim words (narration), the answer's when it said nothing
+    /// else. A state from before holds none.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub narrated: String,
+}
+
+/// `text` added to what an answer carries (`into`), a paragraph of its
+/// own, with no control characters (an answer's body stays within the
+/// platform's bound once its text is escaped), within its bound.
+fn said_more(into: &mut String, text: &str) {
+    if text.trim().is_empty() || into.len() >= limits::ANSWER_TEXT_MAX_BYTES {
+        return;
+    }
+    if !into.is_empty() {
+        into.push_str("\n\n");
+    }
+    into.extend(text.trim().chars().filter(|c| !c.is_control() || matches!(c, '\n' | '\t')));
+    *into = records::cut_bytes(into, limits::ANSWER_TEXT_MAX_BYTES);
 }
 
 /// The platform's answer to a claim (`Effect::Claim`).
@@ -314,6 +343,11 @@ pub struct OpenReply {
     pub part: u32,
     pub text: String,
     pub files: Vec<LocalFile>,
+    /// Said before a call that only updates memory (housekeeping): the
+    /// turn's answer if the turn ends next (Hermes sends nothing after
+    /// one), else interim, whatever seals it (more words, a step, a card),
+    /// so a turn never answers twice (#729).
+    pub held: bool,
 }
 
 /// A turn the bridge admitted.
@@ -351,6 +385,11 @@ pub struct Turn {
     /// `STEPS_PER_TURN_MAX`'s bound. A state from before holds none.
     #[serde(default, skip_serializing_if = "u32_is_zero")]
     pub calls: u32,
+    /// When its cause was said (the platform's time, ms; a continuation's,
+    /// its cut turn's): handed long after, it is told its age (note.rs,
+    /// `age`). A state from before holds none, and tells none.
+    #[serde(default, skip_serializing_if = "i64_is_zero")]
+    pub said_at: i64,
     pub prompts: Vec<Prompt>,
     pub stop_requested: bool,
     /// What an ended turn still owes `work`, in the order posted.
@@ -620,6 +659,10 @@ fn u32_is_zero(n: &u32) -> bool {
     *n == 0
 }
 
+fn i64_is_zero(n: &i64) -> bool {
+    *n == 0
+}
+
 fn label(fragment: &str) -> &str {
     fragment.split('.').next().unwrap_or(fragment)
 }
@@ -825,9 +868,41 @@ impl Engine {
 
     fn set_agents(&mut self, agents: Vec<Agent>) {
         assert!(agents.len() <= limits::AGENTS_MAX, "the driver bounds the agents it reads");
-        self.agents = agents;
+        let leaving = std::mem::replace(&mut self.agents, agents);
+        // an asked turn of an agent gone from this computer (leaving now, or
+        // first seen gone by a life's start, before which it knows no one)
+        // still answers its asker, when the asker stays (#722): one not over
+        // ends here, its answer saying why, by the agent its return names
+        // (`Return::by`); its chat's records go with it (its key does), and
+        // its answer, the asker's to post, is kept
+        let answering: Vec<String> = self.state.turns.values().filter(|t| self.agent(&t.agent).is_none() && t.ret.as_ref().is_some_and(|r| self.agent(&r.agent).is_some())).map(|t| t.id.clone()).collect();
+        for id in answering {
+            self.claiming.remove(&id);
+            self.dirty = true;
+            if self.state.turns[&id].active() {
+                self.tell_runtime(&id, Command::Forget { turn: id.clone() });
+            }
+            let t = self.state.turns.get_mut(&id).expect("listed");
+            // a turn held from before its return kept who it is by learns it
+            // from the roster its agent leaves (a start's is none)
+            if let Some(r) = t.ret.as_mut().filter(|r| r.by.is_empty()) {
+                r.by = leaving.iter().find(|a| a.fragment == t.agent).map(|a| a.identity.clone()).unwrap_or_default();
+            }
+            if t.phase != Phase::Ended {
+                t.phase = Phase::Ended;
+                t.owed.clear();
+                t.prompts.clear();
+                t.asking = false;
+                self.owe_answer(&id, &Outcome::Error(LEFT.into()), false);
+            }
+            self.state.turns.get_mut(&id).expect("listed").owed.retain(|o| o.to.is_some());
+            crate::ev!("turn.answer_kept", { "turn": id, "why": "its agent left this computer; its asker stays" });
+        }
         let gone: Vec<String> = self.state.turns.values().filter(|t| self.agent(&t.agent).is_none()).map(|t| t.id.clone()).collect();
         for id in gone {
+            if self.state.turns[&id].owed.iter().any(|o| o.to.is_some()) {
+                continue; // its answer, kept until posted (`posted`)
+            }
             let t = self.state.turns.remove(&id).expect("listed");
             self.claiming.remove(&id);
             self.dirty = true;
@@ -1209,7 +1284,7 @@ impl Engine {
             let asking = self.agents.iter().find(|a| a.identity == asker && a.fragment != agent.fragment)?;
             // as its chat shows it, else its label while that is unread
             let name = self.views.get(fragment).and_then(|v| v.names.get(&agent.identity)).cloned().unwrap_or_else(|| agent.name.clone());
-            Some(Return { agent: asking.fragment.clone(), chat: chat.clone(), name, said: String::new(), files: 0 })
+            Some(Return { agent: asking.fragment.clone(), chat: chat.clone(), name, by: agent.identity.clone(), said: String::new(), files: 0, narrated: String::new() })
         });
         self.state.admitted += 1;
         let turn = Turn {
@@ -1230,6 +1305,7 @@ impl Engine {
             replies: 0,
             interim: 0,
             calls: 0,
+            said_at: at,
             last_part: 0,
             prompts: Vec::new(),
             stop_requested: false,
@@ -1252,12 +1328,18 @@ impl Engine {
                 // refused at admission: its answer runs nothing
                 self.end_unrun(&id, outcome, true);
             } else {
-                // Past the bound of turns held, its two records are posted
-                // and not kept: a crash before they land loses them.
+                // Past the bound of turns held, its records (its start and
+                // end, and a question's answer, so the asker hears it was
+                // refused) are posted and not kept: a crash before they land
+                // loses them.
                 crate::ev!("owed.unkept", { "turn": id, "why": "the computer holds as many turns as it may" });
                 let start = records::turn_start(&id, asker, &agent.identity, &turn.cause, &self.life);
                 self.post(&agent.fragment, fragment, records::WORK, records::work_id(&id, "start"), start, Vec::new());
                 self.post(&agent.fragment, fragment, records::WORK, records::work_id(&id, "end"), records::turn_end(&id, &outcome), Vec::new());
+                if let Some(answer) = self.answer_of(&id, &turn, &outcome, true) {
+                    let asker = answer.to.expect("an answer's asker");
+                    self.post(&asker, &asker, records::TASKS, answer.id, answer.body, Vec::new());
+                }
             }
             return;
         }
@@ -1302,25 +1384,39 @@ impl Engine {
     /// so its asker's owner sees why, and no answer asks again.
     fn owe_answer(&mut self, id: &str, outcome: &Outcome, refused: bool) {
         let t = &self.state.turns[id];
-        let Some(r) = t.ret.clone() else { return };
         assert_eq!(t.phase, Phase::Ended, "only an ended turn answers");
-        if self.agent(&r.agent).is_none() {
-            crate::ev!("answer.dropped", { "turn": id, "why": "its asking agent left this computer" });
-            return;
-        }
-        let by = self.agent(&t.agent).expect("a held turn's agent is on this computer");
-        let text = match outcome {
-            Outcome::Error(why) if refused => records::refused_text(&r.name, &t.fragment, &t.text, why),
-            _ => records::answer_text(&r.name, &t.fragment, &t.text, &r.said, r.files, outcome),
-        };
-        let hop = t.hop.saturating_add(1).min(limits::HOPS_MAX);
-        let body = records::answer(&r.chat, &text, &by.identity, &r.name, &t.cause, id, outcome, hop, refused);
-        let o = Owed { id: records::answer_id(id), body, to: Some(r.agent.clone()) };
+        let Some(o) = self.answer_of(id, t, outcome, refused) else { return };
+        let r = t.ret.clone().expect("an answer's turn returns");
         let (agent, fragment) = (t.agent.clone(), t.fragment.clone());
         self.state.turns.get_mut(id).expect("held").owed.push(o.clone());
         self.dirty = true;
         crate::ev!("answer.owed", { "turn": id, "to": r.agent, "chat": r.chat });
         self.owe(&agent, &fragment, id, o);
+    }
+
+    /// The answer a question's turn (`t`, its id `id`) owes its asking
+    /// agent, on that agent's own `tasks`, by the agent its return names
+    /// (`Return::by`): what it said, or why it was refused; none for no
+    /// question, an asker no longer on this computer, or an agent no one
+    /// names any more (a turn from before `by`, its agent gone).
+    fn answer_of(&self, id: &str, t: &Turn, outcome: &Outcome, refused: bool) -> Option<Owed> {
+        let r = t.ret.as_ref()?;
+        if self.agent(&r.agent).is_none() {
+            crate::ev!("answer.dropped", { "turn": id, "why": "its asking agent left this computer" });
+            return None;
+        }
+        let Some(by) = Some(r.by.clone()).filter(|b| !b.is_empty()).or_else(|| self.agent(&t.agent).map(|a| a.identity.clone())) else {
+            crate::ev!("answer.dropped", { "turn": id, "why": "its agent left this computer before its return kept who it is" });
+            return None;
+        };
+        let text = match outcome {
+            Outcome::Error(why) if refused => records::refused_text(&r.name, &t.fragment, &t.text, why),
+            // what it said, else its narration (it answered, then worked)
+            _ => records::answer_text(&r.name, &t.fragment, &t.text, if r.said.trim().is_empty() { &r.narrated } else { &r.said }, r.files, outcome),
+        };
+        let hop = t.hop.saturating_add(1).min(limits::HOPS_MAX);
+        let body = records::answer(&r.chat, &text, &by, &r.name, &t.cause, id, outcome, hop, refused);
+        Some(Owed { id: records::answer_id(id), body, to: Some(r.agent.clone()) })
     }
 
     /// A turn that may not run here (refused its claim, or its agent gone
@@ -1353,10 +1449,10 @@ impl Engine {
     /// The lane is done with one of a turn's owed records; a turn that owes
     /// none is let go. Done means answered (appended, a replay, or refused:
     /// a 409 is another life's end of the turn, a 403/404 a chat it may no
-    /// longer post in) or given up after the lane's tries (docs/bridge.md:
-    /// `POST_TRIES_MAX`, with jitter, on a transport error, 429 or 5xx), so
-    /// a record that keeps failing holds its turn for one life's tries at
-    /// most, then goes.
+    /// longer post in) or given up after the lane's tries
+    /// (`limits::POST_TRIES_MAX`, with jitter, on a transport error, 429 or
+    /// 5xx), so a record that keeps failing holds its turn for one life's
+    /// tries at most, then goes.
     fn posted(&mut self, id: &str, post: &str, kept: bool) {
         let Some(t) = self.state.turns.get_mut(id) else {
             crate::ev!("owed.stale", { "turn": id, "id": post, "why": "no turn held by that id" });
@@ -1426,6 +1522,7 @@ impl Engine {
             replies: 0,
             interim: 0,
             calls: 0,
+            said_at: cut.said_at,
             last_part: 0,
             prompts: Vec::new(),
             stop_requested: false,
@@ -1585,6 +1682,10 @@ impl Engine {
         t.phase = Phase::Running;
         t.last_ms = now;
         self.dirty = true;
+        // a message handed long after it was said is told its age (the
+        // driver puts it first in the note); its own note stays a card's,
+        // which takes the cut note's place (driver.rs, `note_for`)
+        let age = crate::note::age(t.said_at, now, t.routine || t.command, t.continues.is_some());
         let start = TurnStart {
             turn: id.to_string(),
             agent: a,
@@ -1599,6 +1700,7 @@ impl Engine {
             routine: t.routine,
             claim_seq,
             note: t.note.clone(),
+            age,
             forgotten,
             forgotten_more,
             command: t.command,
@@ -1918,10 +2020,16 @@ impl Engine {
             Event::Step { turn, step } => {
                 // the words before a tool call are a reply, posted before
                 // its step; the turn works on after them, so they are
-                // interim (its push leaves them out), unless the call only
-                // updates its memory: an answer said beside housekeeping is
-                // the turn's answer (Hermes sends nothing after it)
-                self.seal(&turn, step.category != records::Category::Memory);
+                // interim (its push leaves them out). Before a call that
+                // only updates its memory they are held open: the turn's
+                // answer if it ends next, interim if it goes on (`seal`)
+                if step.category == records::Category::Memory {
+                    if let Some(open) = self.state.turns.get_mut(&turn).expect("checked").open.as_mut() {
+                        open.held = true;
+                    }
+                } else {
+                    self.seal(&turn, true);
+                }
                 let t = self.state.turns.get_mut(&turn).expect("checked");
                 t.steps = t.steps.saturating_add(1);
                 self.dirty = true;
@@ -2043,6 +2151,9 @@ impl Engine {
         let view = self.views.get(&self.state.turns[id].fragment).cloned().unwrap_or_default();
         let t = self.state.turns.get_mut(id).expect("sealing a held turn");
         let Some(open) = t.open.take() else { return };
+        // words held at a memory call: the turn went on after them (`end`
+        // lets them go as its answer)
+        let interim = interim || open.held;
         t.last_part = t.last_part.max(open.part);
         let empty = open.text.trim().is_empty() && open.files.is_empty();
         // interim replies have a bound of their own, so narration never
@@ -2058,18 +2169,15 @@ impl Engine {
         if interim {
             t.interim += 1;
         }
-        // what an asked turn says, its answer carries back (its interim
-        // words are narration, not the answer)
-        if let Some(r) = t.ret.as_mut().filter(|_| !interim) {
-            r.files = r.files.saturating_add(u32::try_from(open.files.len()).expect("a reply's files are bounded"));
-            if !open.text.trim().is_empty() && r.said.len() < limits::ANSWER_TEXT_MAX_BYTES {
-                if !r.said.is_empty() {
-                    r.said.push_str("\n\n");
-                }
-                // no control characters: an answer's body stays within the
-                // platform's bound once its text is escaped
-                r.said.extend(open.text.trim().chars().filter(|c| !c.is_control() || matches!(c, '\n' | '\t')));
-                r.said = records::cut_bytes(&r.said, limits::ANSWER_TEXT_MAX_BYTES);
+        // what an asked turn says, its answer carries back; its interim
+        // words are narration, kept apart: the answer only when it said
+        // nothing else (it answered, then worked: #720)
+        if let Some(r) = t.ret.as_mut() {
+            if interim {
+                said_more(&mut r.narrated, &open.text);
+            } else {
+                r.files = r.files.saturating_add(u32::try_from(open.files.len()).expect("a reply's files are bounded"));
+                said_more(&mut r.said, &open.text);
             }
         }
         self.dirty = true;
@@ -2123,6 +2231,10 @@ impl Engine {
     /// Unexpired cards outlive the run, except an explicit Stop. Their
     /// later answers are reconstructed from the journal as fresh turns.
     fn end(&mut self, id: &str, outcome: Outcome, unanswered: Closed) {
+        // words held at a memory call, with nothing after them: the answer
+        if let Some(open) = self.state.turns.get_mut(id).and_then(|t| t.open.as_mut()) {
+            open.held = false;
+        }
         self.seal(id, false);
         let t = self.state.turns.get_mut(id).expect("ending a held turn");
         assert!(t.active(), "a turn's run ends once: {id} is {:?}", t.phase);

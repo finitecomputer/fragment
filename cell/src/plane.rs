@@ -30,6 +30,7 @@ use crate::cs::Cs;
 use crate::error::{CellError, CellResult};
 use crate::fragment::{json_response, missing, Caller, Facts, FragmentCell, MetaKey};
 use crate::js;
+use fragment_core::gather::Gathered;
 
 /// Platform code that runs in the facet around the author's App class.
 pub const PLATFORM_JS: &str = include_str!("../platform.mjs");
@@ -273,7 +274,7 @@ impl FragmentCell {
         }
         let entries = cs.tree(&repo, &to).await?;
         let prior: BTreeMap<String, Indexed> =
-            self.tree_rows(which)?.into_iter().map(|r| (r.path, Indexed { size: r.size, mode: r.mode, last_commit: r.last_commit })).collect();
+            self.tree_rows(which)?.into_iter().map(|r| (r.path, Indexed { size: r.size, mode: r.mode, last_commit: r.last_commit })).gathered();
         let diff = tree::diff(&prior, &entries);
         let paths = diff.paths();
         let sizes: std::collections::HashMap<&str, u64> = entries.iter().map(|e| (e.path.as_str(), e.size)).collect();
@@ -459,6 +460,17 @@ impl FragmentCell {
             },
             _ => None,
         };
+        // Installed triggers start their runs in the step that installs, so
+        // the owner's standing (which blocks them past the overdraft) is
+        // read before it, and only when there are any.
+        let read_only = match manifest.triggers.iter().any(|t| matches!(t.on, TriggerOn::Installed(_))) {
+            true => self.read_only().await?,
+            false => None,
+        };
+        // From here to the end nothing awaits, so what this install writes,
+        // the runs it starts, and the pin it follows (`follow`; a blessed
+        // one's release) commit as one: an install cut short leaves none of
+        // them and is done again whole, its runs started once.
         match &manifest.meta {
             Some(meta) => self.set_meta(MetaKey::MetaLive, &serde_json::to_string(meta).expect("meta serializes"))?,
             None => self.del_meta(MetaKey::MetaLive)?,
@@ -485,12 +497,16 @@ impl FragmentCell {
             None => self.del_meta(MetaKey::InboxSecret)?,
         }
         // a connector that installs other code (a fork, another template, none)
-        // is no door from then on, nor its owner's alone to edit (doors.rs)
+        // is no door from then on, nor its owner's alone to edit (doors.rs),
+        // and keeps none of its secrets (Paul, 2026-10-31): what its owner set
+        // while it was theirs alone (its bot's token, its webhook's secret) is
+        // not the new code's, nor its editors', to send
         if let Some(t) = self.meta(MetaKey::DoorTemplate)? {
             if fragment_core::door::blessed_template(&loader_id) != Some(t.as_str()) {
                 self.del_meta(MetaKey::DoorTemplate)?;
                 self.unbind_door("its code is no longer its connector's")?;
-                self.event("door.unmade", &format!("ran code that is not the {t} connector's: never a door again"), json!({ "template": t, "code": loader_id }));
+                let secrets = self.drop_secrets()?;
+                self.event("door.unmade", &format!("ran code that is not the {t} connector's: never a door again, its secrets removed ({})", secrets.len()), json!({ "template": t, "code": loader_id, "secrets": secrets }));
             }
         }
         let Some(source) = source else {
@@ -540,7 +556,7 @@ impl FragmentCell {
             ),
             json!({ "sha": sha, "code": loader_id, "operations": manifest.operations.keys().collect::<Vec<_>>() }),
         );
-        Ok(())
+        self.fire_installed(&manifest.triggers, sha, &loader_id, read_only)
     }
 
     /// The live commit's `app.mjs` and `applib/` modules, and their
@@ -775,7 +791,7 @@ impl FragmentCell {
                 };
                 (which, v)
             })
-            .collect();
+            .gathered();
         json_response(&json!({ "ok": true, "refs": refs }))
     }
 
@@ -810,7 +826,7 @@ impl FragmentCell {
         self.ensure_pins(&mut facts).await?;
         let blobs = self.pointers_at("main")?;
         let rows = self.tree_rows("main")?;
-        let release = self.release_data(&rows.iter().map(|r| r.path.as_str()).collect())?;
+        let release = self.release_data(&rows.iter().map(|r| r.path.as_str()).gathered())?;
         let mut files: Vec<Value> = rows
             .into_iter()
             .map(|r| {
@@ -826,7 +842,8 @@ impl FragmentCell {
             .collect();
         // a blessed template's data, beneath the fragment's own files (decision 40)
         files.extend(release.iter().map(|d| json!({ "path": d.path, "size": d.size, "mode": "100644", "lastCommitSha": blessed::data_version(d), "machinery": false, "release": true })));
-        files.sort_by(|a, b| a["path"].as_str().cmp(&b["path"].as_str()));
+        // each path once (`release_data` leaves out the fragment's own), so no order of equals to keep
+        files.sort_unstable_by(|a, b| a["path"].as_str().cmp(&b["path"].as_str()));
         json_response(&json!({ "ref": facts.pin_main, "files": files }))
     }
 
@@ -910,7 +927,7 @@ impl FragmentCell {
 
     /// The installed operations (from the live commit); none without code.
     pub(crate) fn operations(&self) -> CellResult<BTreeMap<String, OpDecl>> {
-        self.typed::<OpRow>(&format!("{OPS} ORDER BY o.op"), vec![])?.into_iter().map(op_decl).collect()
+        self.typed::<OpRow>(&format!("{OPS} ORDER BY o.op"), vec![])?.into_iter().map(op_decl).try_gathered()
     }
 
     /// The declared operation, or why there is none: no code, or no such
@@ -942,7 +959,7 @@ impl FragmentCell {
 
     /// The app channels the live code declares.
     pub(crate) fn declared_channels(&self) -> CellResult<BTreeMap<String, ChannelDecl>> {
-        self.typed::<ChannelRow>(&format!("{CHANNELS} ORDER BY c.channel"), vec![])?.into_iter().map(channel_decl).collect()
+        self.typed::<ChannelRow>(&format!("{CHANNELS} ORDER BY c.channel"), vec![])?.into_iter().map(channel_decl).try_gathered()
     }
 
     /// An app channel the live code declares (who reads it, who may post
@@ -952,8 +969,7 @@ impl FragmentCell {
         Ok(rows.into_iter().next().map(channel_decl).transpose()?.map(|(_, d)| d))
     }
 
-    /// The installed triggers, in their manifest's order (a cron trigger's
-    /// schedule is keyed by that index).
+    /// The installed triggers this release knows, in their manifest's order.
     pub(crate) fn triggers(&self) -> CellResult<Vec<TriggerDecl>> {
         let rows: Vec<TriggerRow> = self.typed("SELECT idx, kind, target, run, from_kind FROM code_triggers ORDER BY idx", vec![])?;
         let mut out = Vec::with_capacity(rows.len());
@@ -961,7 +977,14 @@ impl FragmentCell {
             if row.idx != i64::try_from(i).expect("triggers are few") {
                 return Err(stored(&format!("trigger {i}"), format!("it is stored at index {}", row.idx)));
             }
-            let on = TriggerOn::from_parts(&row.kind, row.target).ok_or_else(|| stored(&format!("trigger {i}"), format!("kind {:?}", row.kind)))?;
+            // This release tolerates what the next writes: a kind it does
+            // not know (a later release's, read after a rollback) starts
+            // nothing and is listed nowhere, so a new kind needs no
+            // forward-only step (FIN-328's needed one).
+            let Some(on) = TriggerOn::from_parts(&row.kind, row.target) else {
+                console_warn!("{}", json!({ "event": "trigger.unknown", "idx": row.idx, "kind": row.kind, "run": row.run }));
+                continue;
+            };
             let from = match row.from_kind.as_deref() {
                 None => None,
                 Some(k) => Some(IdentityKind::parse(k).ok_or_else(|| stored(&format!("trigger {i}"), format!("from {k:?}")))?),

@@ -204,7 +204,9 @@ fn marker(path: &str) -> CellResult<Option<(&'static str, &'static str)>> {
         Ok(Some((crate::members::CLAIM_HEADER, "1")))
     } else if path.starts_with("wipe/") {
         Ok(Some((crate::wipe::WIPE_HEADER, "1")))
-    } else if path.starts_with("test/") {
+    } else if path.starts_with("test/") || path.starts_with("index/") {
+        // a search index is called by its fragment's supervisor alone:
+        // the router never names one
         Ok(None)
     } else {
         Err(CellError::host(format!("{path} is not an internal route")))
@@ -212,8 +214,9 @@ fn marker(path: &str) -> CellResult<Option<(&'static str, &'static str)>> {
 }
 
 /// A call into a fragment's supervisor from inside the platform: `path`
-/// (`job/advance`, `cap/files/read`, `deliver/report`, `test/keys`) with a
-/// JSON body, marked as that route expects.
+/// (`job/advance`, `cap/files/read`, `deliver/report`, `test/keys`), or
+/// into its search index (`index/search`), with a JSON body, marked as
+/// that route expects.
 pub(crate) fn internal_request(path: &str, body: &str) -> CellResult<Request> {
     let headers = Headers::new();
     headers.set("content-type", "application/json")?;
@@ -263,8 +266,19 @@ enum Sent {
 }
 
 async fn sent(env: &Env, binding: &str, name: &str, req: Request) -> CellResult<Sent> {
+    let stub = namespace(env, binding)?.get_by_name(name)?;
+    sent_to(env, binding, name, stub, req).await
+}
+
+/// The objects of `binding`, reached here alone (xtask guards.rs).
+fn namespace(env: &Env, binding: &str) -> CellResult<worker::ObjectNamespace> {
+    Ok(env.durable_object(binding)?)
+}
+
+/// `sent`, to the object `stub` is (`name` says which, in a refusal's words).
+async fn sent_to(env: &Env, binding: &str, name: &str, stub: worker::Stub, req: Request) -> CellResult<Sent> {
     stamp(&req, env)?;
-    let mut resp = env.durable_object(binding)?.get_by_name(name)?.fetch_with_request(req).await?;
+    let mut resp = stub.fetch_with_request(req).await?;
     // an app's answer passed through with the mark would only be its own
     // request's refusal, as `serve::REFUSAL`'s would
     let Some(theirs) = resp.headers().get(release::REFUSED)?.filter(|_| resp.status_code() == 503) else {
@@ -345,12 +359,13 @@ const PROBE_HEADER: &str = "x-fragment-probe";
 /// at a deploy), and an object of each other class named for the probe, a
 /// name no fragment, person or computer has (`__`). One that never existed
 /// is made by the probe, its schema's steps run and nothing more.
-const PROBED: [(&str, &str, &str); 5] = [
+const PROBED: [(&str, &str, &str); 6] = [
     ("Registry", "REGISTRY", crate::registry::NAME),
     ("Principal", "PRINCIPAL", "__probe"),
     ("Ledger", "LEDGER", "__probe"),
     ("Fragment", "FRAGMENT", "__probe"),
     ("Computer", "COMPUTER", "__probe"),
+    ("SearchIndex", "SEARCH_INDEX", "__probe"),
 ];
 
 /// An object's answer to a deploy's probe, the second thing its `fetch`
@@ -367,6 +382,57 @@ pub(crate) fn probed(req: &Request, schema: &crate::schema::Schema) -> worker::R
     }
 }
 
+/// The request a deploy's probe of an object asks (`probed`).
+fn probe_request() -> CellResult<Request> {
+    let headers = Headers::new();
+    headers.set(PROBE_HEADER, "1")?;
+    let mut init = RequestInit::new();
+    init.with_method(Method::Get).with_headers(headers);
+    Ok(Request::new_with_init(&format!("https://probe.internal{PROBE_PATH}"), &init)?)
+}
+
+/// The object an operator wakes (`wake`), by the id Cloudflare lists it
+/// under: 64 lowercase hex digits.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Wake {
+    id: String,
+}
+
+/// An operator's wake of one platform object (`POST /api/admin/objects/
+/// {class}/wake`; docs/api.md, Operators): it starts as any call starts
+/// it, its schema made current (an object made before versions adopted at
+/// step 1, or refused), and answers as a deploy's probe does (`probed`):
+/// `{class, id, ready: true}`, or its refusal (`schema_refused`, naming
+/// it and why; `deploying` from another release). Asked again, it answers the
+/// same and runs nothing. It exists for the objects no call has started
+/// since versions came (docs/technical-debt-ledger.md), and goes with them.
+pub(crate) async fn wake(env: &Env, class: &str, Wake { id }: Wake) -> CellResult<serde_json::Value> {
+    let Some((class, binding, _)) = PROBED.iter().find(|(c, _, _)| c.eq_ignore_ascii_case(class)).copied() else {
+        let classes: Vec<&str> = PROBED.iter().map(|(c, _, _)| *c).collect();
+        return Err(CellError::invalid(format!("no class {class:?}: one of {}", classes.join(", "))));
+    };
+    if id.len() != 64 || !id.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+        return Err(CellError::invalid("an object's id is 64 lowercase hex digits"));
+    }
+    // Cloudflare refuses an id of another namespace (another class, another
+    // account's) here, before any object is made
+    let ns = namespace(env, binding)?;
+    let id = ns.id_from_string(&id).map_err(|_| CellError::invalid(format!("{id} is no {class} object's id")))?;
+    let named = id.to_string();
+    match sent_to(env, binding, &named, id.get_stub()?, probe_request()?).await? {
+        Sent::Answered(resp) if resp.status_code() == 200 => Ok(serde_json::json!({ "class": class, "id": named, "ready": true })),
+        Sent::Answered(mut resp) => {
+            let status = resp.status_code();
+            match resp.json::<ErrorBody>().await {
+                Ok(b) => Err(CellError::new(b.error, b.message)),
+                Err(_) => Err(CellError::host(format!("{class} {named} answered its wake {status}"))),
+            }
+        }
+        Sent::Refused(e, _) => Err(e),
+    }
+}
+
 /// `GET /healthz/objects` (docs/api.md, Health): this Worker's release,
 /// and what each class's probe object (`PROBED`) answered it, asked once
 /// each, at once: `{"release", "objects": {<class>: {"release"} |
@@ -377,14 +443,7 @@ pub(crate) fn probed(req: &Request, schema: &crate::schema::Schema) -> worker::R
 /// each ask is answered before anything else an object does, as cheaply as
 /// the refusal any call of another release gets.
 pub(crate) async fn objects(env: &Env, cfg: &Config) -> CellResult<Response> {
-    let ask = |binding: &'static str, name: &'static str| async move {
-        let headers = Headers::new();
-        headers.set(PROBE_HEADER, "1")?;
-        let mut init = RequestInit::new();
-        init.with_method(Method::Get).with_headers(headers);
-        let req = Request::new_with_init(&format!("https://probe.internal{PROBE_PATH}"), &init)?;
-        sent(env, binding, name, req).await
-    };
+    let ask = |binding: &'static str, name: &'static str| async move { sent(env, binding, name, probe_request()?).await };
     let answers = futures_util::future::join_all(PROBED.iter().map(|(_, binding, name)| ask(binding, name))).await;
     let mut objects = serde_json::Map::new();
     let mut all = true;

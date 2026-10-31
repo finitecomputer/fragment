@@ -439,7 +439,7 @@ impl Index {
     /// left out), newest first, then by key.
     pub fn of(kind: Kind, entries: &BTreeMap<String, Entry>) -> Index {
         let mut sessions: Vec<Entry> = entries.values().filter(|e| e.kind == kind).cloned().collect();
-        sessions.sort_by(|a, b| b.when().cmp(&a.when()).then_with(|| a.key.cmp(&b.key)));
+        sessions.sort_unstable_by(|a, b| b.when().cmp(&a.when()).then_with(|| a.key.cmp(&b.key)));
         Index { format: FORMAT.to_string(), kind, sessions }
     }
 

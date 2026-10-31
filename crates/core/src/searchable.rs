@@ -1,18 +1,16 @@
-//! A fragment's search, as the cell makes it of the search service
-//! (search/README.md; docs/api.md, A fragment's search). Pure: the cell checks who asks,
-//! embeds and calls.
+//! A fragment's search (docs/api.md, A fragment's search), as the cell
+//! makes it. Pure: the cell checks who asks, embeds and calls its index.
 //!
-//! A fragment's index is the service's table of its scope (`scope`): its
-//! identity and incarnation, and its read scope (`members`: whatever its
-//! readers may read). An app writes sources (fragment_proto::search), each
+//! A fragment life's index is a `SearchIndex` object named by its scope
+//! (`scope`): its identity and incarnation, and its read scope
+//! (`members`: whatever its readers may read). An app writes sources (fragment_proto::search), each
 //! a set of sections; the cell cuts each section into chunks its embedding
 //! model reads whole (`chunks`, at most the slot's window: nothing is cut
 //! away), and names each chunk's embedding input by its sha256 (`Chunk`),
-//! so a vector the table already holds is reused, not bought again.
+//! so a vector the index already holds is reused, not bought again.
 
 use crate::embed;
 use fragment_proto::search::{self as wire, Upsert};
-use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 
 /// The read scope every index has today: what a fragment's readers read.
@@ -239,54 +237,8 @@ pub fn chunked(up: &Upsert, window: u32) -> Vec<Chunk> {
     out
 }
 
-/// The service's upsert (search/README.md): `up`'s sections and their
-/// chunks, each with its vector when it has one (base64 float32s), in
-/// `space` (`None`: words alone).
-pub fn service_upsert(up: &Upsert, chunks: &[Chunk], vectors: &std::collections::HashMap<String, String>, space: Option<&Value>) -> Value {
-    let mut sections: Vec<Value> = Vec::with_capacity(up.sections.len());
-    for (i, s) in up.sections.iter().enumerate() {
-        let cs: Vec<Value> = chunks
-            .iter()
-            .filter(|c| c.section == i)
-            .map(|c| match vectors.get(&c.hash) {
-                Some(v) => json!({ "text": c.text, "hash": c.hash, "vector": v }),
-                None => json!({ "text": c.text, "hash": c.hash }),
-            })
-            .collect();
-        let mut o = Map::new();
-        o.insert("id".into(), json!(s.id));
-        if let Some(h) = &s.heading {
-            o.insert("heading".into(), json!(h));
-        }
-        o.insert("context".into(), json!(s.context));
-        if let Some(a) = &s.at {
-            o.insert("at".into(), json!(a));
-        }
-        if let Some(l) = &s.location {
-            o.insert("location".into(), json!(l));
-        }
-        o.insert("chunks".into(), Value::Array(cs));
-        sections.push(Value::Object(o));
-    }
-    let mut o = Map::new();
-    o.insert("source".into(), json!(up.source));
-    o.insert("revision".into(), json!(up.revision));
-    if let Some(r) = &up.replaces {
-        o.insert("replaces".into(), json!(r));
-    }
-    if let Some(t) = &up.title {
-        o.insert("title".into(), json!(t));
-    }
-    if let Some(a) = &up.at {
-        o.insert("at".into(), json!(a));
-    }
-    o.insert("fields".into(), json!(up.fields));
-    o.insert("space".into(), space.cloned().unwrap_or(Value::Null));
-    o.insert("sections".into(), Value::Array(sections));
-    Value::Object(o)
-}
-
-/// A vector as the service takes it: little-endian float32s, base64.
+/// A vector as a question carries it to the index: little-endian
+/// float32s, base64.
 pub fn vector_b64(v: &[f32]) -> String {
     use base64::Engine;
     base64::engine::general_purpose::STANDARD.encode(v.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>())
@@ -296,6 +248,7 @@ pub fn vector_b64(v: &[f32]) -> String {
 mod tests {
     use super::*;
     use fragment_proto::search::{Location, Section};
+    use serde_json::json;
 
     fn up(sections: Vec<Section>) -> Upsert {
         Upsert { source: "sessions/a.json".into(), revision: "r1".into(), replaces: None, title: Some("Trip".into()), at: None, fields: Default::default(), sections }
@@ -376,18 +329,5 @@ mod tests {
             let joined: Vec<&str> = cs.iter().filter(|c| c.section == i).map(|c| c.text.as_str()).collect();
             assert_eq!(words(&joined.join(" ")), words(&t.text), "nothing of section {i} is left out");
         }
-    }
-
-    #[test]
-    fn the_service_is_sent_each_chunk_once() {
-        let u = up(vec![section("t0", "hello there")]);
-        let cs = chunked(&u, 512);
-        let vectors = [(cs[0].hash.clone(), vector_b64(&[1.0, 0.0]))].into();
-        let body = service_upsert(&u, &cs, &vectors, Some(&json!({ "model": "m", "dimensions": 2 })));
-        assert_eq!(body["sections"][0]["chunks"][0]["text"], "hello there");
-        assert!(body["sections"][0]["chunks"][0]["vector"].is_string());
-        let words = service_upsert(&u, &cs, &Default::default(), None);
-        assert_eq!(words["space"], Value::Null);
-        assert!(words["sections"][0]["chunks"][0].get("vector").is_none());
     }
 }

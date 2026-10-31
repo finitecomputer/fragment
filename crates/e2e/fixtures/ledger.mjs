@@ -32,6 +32,10 @@ export class App extends DurableObject {
     return await job.ai.image({ prompt, path, steps });
   }
 
+  async film({ prompt, path }, job) {
+    return await job.ai.video({ prompt, path });
+  }
+
   // anyone who can see the fragment may call it; its owner pays
   async ask({ text }, job) {
     return await job.ai.text({ prompt: text });

@@ -37,7 +37,7 @@ use tokio::process::{Child, ChildStdin};
 use tokio::sync::mpsc;
 
 use super::{Agent, Command, Event, How, MenuItem, Runtime, RuntimeError, RuntimeFuture, RuntimeIo, TurnStart};
-use crate::records::{self, Category, Outcome, PromptOption, Step, ToolEvidence, ToolStatus};
+use crate::records::{self, Call, Category, Outcome, PromptOption, Step, ToolEvidence, ToolStatus};
 
 /// Its owners' commands: a new conversation, and Stop.
 pub const MENU: &[MenuItem] = &[
@@ -251,8 +251,13 @@ struct Turn {
     retried: bool,
     part: u32,
     draft: String,
-    /// Tool calls made and not answered: name, input, when.
-    calls: HashMap<String, (String, Value, Instant)>,
+    /// Tool calls made and not answered: name, input, when, and the model
+    /// response (its assistant message) that asked for it.
+    calls: HashMap<String, (String, Value, Instant, String)>,
+    /// The response whose calls were said last, and the place its next
+    /// takes: Claude Code says each of a message's blocks on a line of its
+    /// own, its message's id on each.
+    said: Option<(String, u32)>,
     asked: Vec<Asked>,
     stopping: bool,
 }
@@ -303,7 +308,7 @@ async fn session(cfg: ClaudeConfig, key: (String, String), generations: Arc<Mute
                         if let Err(e) = write(&mut p.stdin, &user_message(&message)).await {
                             crate::ev!("claude.write", { "turn": ts.turn, "error": e.to_string() });
                         }
-                        turn = Some(Turn { id: ts.turn.clone(), agent: ts.agent.clone(), message: (!started).then_some(message), retried: false, part: 1, draft: String::new(), calls: HashMap::new(), asked: Vec::new(), stopping: false });
+                        turn = Some(Turn { id: ts.turn.clone(), agent: ts.agent.clone(), message: (!started).then_some(message), retried: false, part: 1, draft: String::new(), calls: HashMap::new(), said: None, asked: Vec::new(), stopping: false });
                     }
                     ToSession::Stop(id) if turn.as_ref().is_some_and(|t| t.id == id) => {
                         // interrupted, it ends stopped at its own `result`
@@ -606,7 +611,22 @@ async fn on_line(t: &mut Turn, v: &Value, p: &mut Proc, events: &mpsc::Sender<Ev
                     }
                     "tool_use" => {
                         let id = b["id"].as_str().unwrap_or("").to_string();
-                        t.calls.insert(id, (b["name"].as_str().unwrap_or("").to_string(), b["input"].clone(), Instant::now()));
+                        if t.calls.contains_key(&id) {
+                            continue; // said again: one call
+                        }
+                        let name = b["name"].as_str().unwrap_or("").to_string();
+                        let response = v["message"]["id"].as_str().unwrap_or("").to_string();
+                        let position = place(&mut t.said, &response);
+                        // its intent (`turn.call`), as Claude Code says it,
+                        // before its result: the line comes before the tool
+                        // runs, though the tool may start before the bridge
+                        // reads it (docs/bridge.md). A question is its card.
+                        if name != "AskUserQuestion" && records::valid_post_id(&response) && records::valid_post_id(&id) {
+                            let (args, category) = shown(&name, &b["input"]);
+                            let call = Call { response: response.clone(), position, tool_call_id: id.clone(), tool: name.clone(), args, category };
+                            let _ = events.send(Event::Called { turn: t.id.clone(), call }).await;
+                        }
+                        t.calls.insert(id, (name, b["input"].clone(), Instant::now(), response));
                     }
                     _ => {}
                 }
@@ -615,14 +635,14 @@ async fn on_line(t: &mut Turn, v: &Value, p: &mut Proc, events: &mpsc::Sender<Ev
         "user" if top => {
             for b in v["message"]["content"].as_array().into_iter().flatten().filter(|b| b["type"] == "tool_result") {
                 let id = b["tool_use_id"].as_str().unwrap_or("").to_string();
-                let Some((name, input, at)) = t.calls.remove(&id) else { continue };
+                let Some((name, input, at, response)) = t.calls.remove(&id) else { continue };
                 if name == "AskUserQuestion" {
                     continue;
                 }
                 let failed = b["is_error"] == true;
                 let status = if failed && t.stopping { ToolStatus::Cancelled } else if failed { ToolStatus::Failed } else { ToolStatus::Completed };
                 let (args, category) = shown(&name, &input);
-                let step = Step { tool: name, args, ok: !failed, excerpt: String::new(), category, evidence: Some(ToolEvidence { tool_call_id: id, status, duration_ms: u64::try_from(at.elapsed().as_millis()).unwrap_or(u64::MAX), response: None }) };
+                let step = Step { tool: name, args, ok: !failed, excerpt: String::new(), category, evidence: Some(ToolEvidence { tool_call_id: id, status, duration_ms: u64::try_from(at.elapsed().as_millis()).unwrap_or(u64::MAX), response: records::valid_post_id(&response).then_some(response) }) };
                 let _ = events.send(Event::Step { turn: t.id.clone(), step }).await;
             }
         }
@@ -674,6 +694,18 @@ fn error_of(v: &Value) -> String {
     match said {
         Some(s) => records::cut(s, 300),
         None => format!("Claude Code ended the turn: {}", v["subtype"].as_str().unwrap_or("an error")),
+    }
+}
+
+/// A call's place in its response: one after the last call said, when that
+/// was the same response's, else the first.
+fn place(said: &mut Option<(String, u32)>, response: &str) -> u32 {
+    match said {
+        Some((r, next)) if r == response => std::mem::replace(next, *next + 1),
+        said => {
+            *said = Some((response.to_string(), 1));
+            0
+        }
     }
 }
 
@@ -782,7 +814,7 @@ mod tests {
     #[test]
     fn its_words_stream_as_the_draft() {
         let agent = Agent { fragment: "juniper--k3x9".into(), identity: "npub1j".into(), name: "juniper".into(), owner: "npub1paul".into(), credentials: vec![], key: None, runtime: Some("claude".into()) };
-        let mut t = Turn { id: "t".into(), agent, message: None, retried: false, part: 1, draft: "stale".into(), calls: HashMap::new(), asked: Vec::new(), stopping: false };
+        let mut t = Turn { id: "t".into(), agent, message: None, retried: false, part: 1, draft: "stale".into(), calls: HashMap::new(), said: None, asked: Vec::new(), stopping: false };
         assert_eq!(drafted(&mut t, &json!({ "type": "content_block_start", "content_block": { "type": "text" } })), None);
         assert_eq!(drafted(&mut t, &json!({ "type": "content_block_delta", "delta": { "type": "text_delta", "text": "hel" } })).as_deref(), Some("hel"));
         assert_eq!(drafted(&mut t, &json!({ "type": "content_block_delta", "delta": { "type": "thinking_delta", "thinking": "hm" } })), None);
@@ -797,6 +829,16 @@ mod tests {
         assert_eq!(shown("Edit", &json!({ "file_path": "/a/b.rs" })), ("/a/b.rs".into(), Category::Write));
         assert_eq!(shown("WebFetch", &json!({ "url": "https://x.y" })).1, Category::Web);
         assert_eq!(shown("Other", &json!({ "k": 1 })).1, Category::Other);
+    }
+
+    /// Goal (phase 4): each call Claude Code says is placed in its response
+    /// (its assistant message), whose blocks come a line each: the next of
+    /// the same message one further, another message's first at 0.
+    #[test]
+    fn a_calls_place_in_its_response() {
+        let mut said = None;
+        let places: Vec<u32> = ["msg_a", "msg_a", "msg_a", "msg_b", "msg_c", "msg_c"].iter().map(|r| place(&mut said, r)).collect();
+        assert_eq!(places, [0, 1, 2, 0, 0, 1]);
     }
 
     /// Goal: a turn's message carries its note, its quote, who said it and
@@ -825,6 +867,7 @@ mod tests {
             quote: Some(super::super::Quote { id: "q".into(), text: "earlier".into(), own: true }),
             simplex: false,
             continues: None,
+            age: None,
         };
         assert_eq!(message(&ts), "[Recent channel messages]\nthe turn before was cut\n\n[New message]\n[Replying to your previous message: \"earlier\"]\n[paul] hi\n[paul sent a file: 'a.png' (image/png). It is on your computer at: /tmp/m/a.png]");
     }

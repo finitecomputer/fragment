@@ -70,6 +70,7 @@ use serde_json::{json, Map, Value};
 
 use crate::price::{ModelPrice, PriceBook, TokenPrices, Usage};
 use crate::steps::AiText;
+use crate::gather::Gathered;
 
 /// GLM-5.3 Flash and DeepSeek V4 Flash, as Workers AI's catalog names
 /// them: each id once, each role below naming its model.
@@ -301,7 +302,7 @@ pub const CLIENT_KEYS: [&str; 14] = [
 /// and the model's `id`.
 pub fn openai_request(input: &Value, id: &str, body: Option<&Map<String, Value>>) -> Value {
     let input = input.as_object().expect("a bounded input is an object");
-    let mut request: Map<String, Value> = input.iter().filter(|(k, _)| CLIENT_KEYS.contains(&k.as_str())).map(|(k, v)| (k.clone(), v.clone())).collect();
+    let mut request: Map<String, Value> = input.iter().filter(|(k, _)| CLIENT_KEYS.contains(&k.as_str())).map(|(k, v)| (k.clone(), v.clone())).gathered();
     for (k, v) in body.into_iter().flatten() {
         assert!(!ROUTE_KEYS.contains(&k.as_str()), "a slot's body names none of the route's keys (`check`)");
         request.insert(k.clone(), v.clone());
@@ -800,6 +801,16 @@ impl Models {
     pub fn embeddings_refused(&self) -> Option<String> {
         let private_tier = [Tier::Cheap, Tier::Medium].iter().any(|t| self.slot_private(t.as_str()));
         (private_tier && !self.embeddings.private).then(|| "this deployment's tiers are private and its embeddings slot is not: nothing is embedded rather than sent to a model that is not private (name a private embeddings slot)".to_string())
+    }
+
+    /// Why this deployment makes no videos, if it does not: a tier is
+    /// private, and the video model (crate::media::VIDEO_MODEL, a third
+    /// party's through the gateway) is not: zero data retention is not
+    /// confidential inference. As with embeddings, a prompt is not sent to
+    /// a model that is not private (Paul, 2026-10-22).
+    pub fn video_refused(&self) -> Option<String> {
+        let private_tier = [Tier::Cheap, Tier::Medium].iter().any(|t| self.slot_private(t.as_str()));
+        private_tier.then(|| "this deployment's tiers are private and its video model is not: a video's prompt is not sent to a model that is not private".to_string())
     }
 
     /// `book` with each slot's own price (`Upstream::own_price`: its list
@@ -3553,5 +3564,21 @@ mod tests {
         v["embeddings"] = json!({ "provider": "openai", "base_url": "https://embed.example/v1", "model": "BAAI/bge-m3", "dimensions": 1024, "private": true, "price": { "input": 0, "output": 0 } });
         let private = Models::parse(Some(&v.to_string()), &book, false).unwrap();
         assert_eq!(private.embeddings_refused(), None);
+    }
+
+    /// Goal: a deployment whose tiers are private makes no videos, as it
+    /// embeds nothing on a slot that is not private: no catalog video model
+    /// is. Method: the defaults (no private tier) make them; Finite's shape
+    /// (Private's tier private) refuses them, saying why, whatever its
+    /// embeddings slot.
+    #[test]
+    fn a_private_deployment_makes_no_videos() {
+        let book = PriceBook::defaults();
+        assert_eq!(Models::defaults().video_refused(), None);
+        let mut v = per_route();
+        let finite = Models::parse(Some(&v.to_string()), &book, false).unwrap();
+        assert!(finite.video_refused().is_some_and(|why| why.contains("not private")), "Private's tier is private");
+        v["embeddings"] = json!({ "provider": "openai", "base_url": "https://embed.example/v1", "model": "BAAI/bge-m3", "dimensions": 1024, "private": true, "price": { "input": 0, "output": 0 } });
+        assert!(Models::parse(Some(&v.to_string()), &book, false).unwrap().video_refused().is_some(), "a private embeddings slot makes no private video model");
     }
 }

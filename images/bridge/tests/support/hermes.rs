@@ -97,6 +97,11 @@ use fragment_bridge::runtime::relay::wire;
 pub struct Seen {
     /// Each inbound event, in order (prompt answers too).
     pub heard: Vec<Value>,
+    /// Each message whose turn is under way: past its startup bracket, its
+    /// own `👀` answered. A test that speaks for a turn from outside (its
+    /// calls on the activity socket) waits for this, not `heard`: a step
+    /// before the bracket's `✅` makes that `✅` the turn's end.
+    pub begun: Vec<String>,
     /// Successful dials, and close codes heard.
     pub dials: u64,
     pub closes: Vec<u16>,
@@ -181,6 +186,13 @@ impl Hermes {
                 }
                 match dial(addr, &id, &secret).await {
                     Ok(ws) => {
+                        // A dial can land after its death: a test holds its
+                        // bridge's port between lives, so a dial waits for
+                        // the next life rather than being refused. Its
+                        // container's sockets are gone with it: it says nothing.
+                        if s.lock().unwrap().dead {
+                            return;
+                        }
                         backoff = 50;
                         s.lock().unwrap().dials += 1;
                         serve(s.clone(), ws, addr, id.clone(), secret.clone()).await;
@@ -424,6 +436,7 @@ async fn turn(gw: &Gateway, event: Value, mut rx: mpsc::UnboundedReceiver<Heard>
     gw.act(react("✅", false)).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
     gw.act(react("👀", false)).await;
+    gw.seen.lock().unwrap().begun.push(mid.clone());
     let message = event["text"].as_str().unwrap_or("").trim_start_matches('\u{200b}').to_string();
     if message.contains("observed boundary") {
         // A tool call's end on the activity socket, and the words said

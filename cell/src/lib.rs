@@ -27,6 +27,7 @@
 //! The suffix's own name, when the platform is elsewhere, sends a browser
 //! to the platform.
 
+mod across;
 mod ai;
 mod address;
 mod assets;
@@ -71,6 +72,7 @@ mod schedules;
 mod schema;
 mod search;
 mod searchable;
+mod search_index;
 mod runs_on;
 mod serve;
 mod share;
@@ -115,8 +117,8 @@ const PASSED_HEADERS: [&str; 9] =
 /// Durable Object accepts the upgrade the client asked for.
 const WEBSOCKET_HEADERS: [&str; 4] = ["sec-websocket-key", "sec-websocket-version", "sec-websocket-protocol", "sec-websocket-extensions"];
 
-/// `PUT /api/fragments/{name}/archived`'s body, `{archived}`, and
-/// `…/dock`'s, `{dock}`, are a few bytes.
+/// `PUT /api/fragments/{name}/archived`'s body, `{archived}`, `…/dock`'s,
+/// `{dock}`, and `…/pinned`'s, `{pinned}`, are a few bytes.
 const OWN_VIEW_BODY_MAX_BYTES: usize = 1024;
 /// `PUT /api/fragments/{name}/seen` takes no body: what is read of one, to
 /// refuse it.
@@ -290,7 +292,7 @@ pub(crate) fn acting_for(url: &Url) -> CellResult<Option<String>> {
 
 /// Where `for` is honored (`signer_for`: docs/api.md, Principals and
 /// access), as a refusal elsewhere says it.
-pub(crate) const FOR_HONORED: &str = "`for` is honored on a fragment's routes (/api/f/…), /api/fragments and the model routes (/api/models/…) only";
+pub(crate) const FOR_HONORED: &str = "`for` is honored on a fragment's routes (/api/f/…), a search across fragments (POST /api/search), /api/fragments and the model routes (/api/models/…) only";
 
 /// The signer of a request that must be signed, resolved, with the body
 /// the router read. It acts as itself: a `for` is refused here
@@ -634,7 +636,7 @@ async fn reachable(env: &Env, agent: &Signed, asker: &str) -> CellResult<Fragmen
             // archiving and their dock) stays theirs, as do the listed
             // records their role reads: the agent's capped role may read less
             let owned = f.role == Role::Owner;
-            access::listed_role(Some(f.role), cap).map(|role| ListedFragment { role, sharing: None, preview: None, preview_at: None, unread: 0, archived: false, dock: true, owned, listed: vec![], ..f })
+            access::listed_role(Some(f.role), cap).map(|role| ListedFragment { role, sharing: None, preview: None, preview_at: None, unread: 0, archived: false, dock: true, pinned: false, owned, listed: vec![], ..f })
         })
         .collect();
     Ok(FragmentList { fragments })
@@ -1202,8 +1204,9 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
             None => Err(CellError::new(ErrorCode::NotFound, format!("no shell file {}", file.join("/")))),
         },
         // the shell, for everyone: signed out it asks them to sign in;
-        // `/settings` opens its settings, `/apps` the person's apps, `/welcome` a new person's welcome
-        (Method::Get, [""] | ["settings"] | ["apps"] | ["welcome"]) => shell::page(&req, env, cfg, &url).await,
+        // `/settings` opens its settings, `/apps` the person's apps, `/history`
+        // every chat they have had, `/welcome` a new person's welcome
+        (Method::Get, [""] | ["settings"] | ["apps"] | ["history"] | ["welcome"]) => shell::page(&req, env, cfg, &url).await,
         // the operators' admin page: to anyone else, the 404 below
         (Method::Get, ["admin"]) => shell::admin_page(&req, env, cfg, &url).await,
         // Finite's about page, privacy policy and terms, for anyone (signed out too)
@@ -1279,6 +1282,19 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
             let put = Request::new_with_init("https://principal.internal/dock", &init)?;
             crate::routed::send(env, "PRINCIPAL", &who.identity.id, put).await
         }
+        // whether the signer pinned a fragment of theirs (principal.rs):
+        // their own view again, as archiving is
+        (Method::Put, ["api", "fragments", name, "pinned"]) => {
+            let body = read_body(&mut req, OWN_VIEW_BODY_MAX_BYTES).await?;
+            let set: fragment_proto::SetPinned = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+            let who = signer(env, &req, &url, &body).await?;
+            let name = named_fragment(name)?;
+            let inner = json!({ "fragment": name, "pinned": set.pinned }).to_string();
+            let mut init = RequestInit::new();
+            init.with_method(Method::Put).with_body(Some(inner.into()));
+            let put = Request::new_with_init("https://principal.internal/pinned", &init)?;
+            crate::routed::send(env, "PRINCIPAL", &who.identity.id, put).await
+        }
         // the signer has seen a chat's messages (principal.rs): their own
         // view again, so their row counts none of them unread
         (Method::Put, ["api", "fragments", name, "seen"]) => {
@@ -1307,6 +1323,9 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
             let search = Request::new(inner.as_str(), Method::Get)?;
             crate::routed::send(env, "PRINCIPAL", &who.identity.id, search).await
         }
+        // one question asked of several fragments' indexes, as the signer
+        // (across.rs): the meta-brain's search
+        (Method::Post, ["api", "search"]) => across::route(req, env, cfg, &url, ctx).await,
         // a person's export of everything that is theirs (export.rs)
         (_, ["api", "export", rest @ ..]) => {
             let rest = rest.to_vec();

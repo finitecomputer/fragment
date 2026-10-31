@@ -1136,6 +1136,12 @@ pub struct ListedFragment {
     /// older platform, reads as on it.
     #[serde(default = "on_the_dock", skip_serializing_if = "is_on_the_dock")]
     pub dock: bool,
+    /// The signer pinned it: their own view, not the fragment's (`PUT
+    /// /api/fragments/{name}/pinned`; the shell's sidebar shows it first in
+    /// its section). Left out while false, so a row from an older platform
+    /// reads as not pinned.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pinned: bool,
     /// An agent's list `for` someone: whether that someone owns it (beside
     /// the role the agent acts with there), as no name says any more.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -1167,6 +1173,20 @@ pub struct Archived {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SetDock {
     pub dock: bool,
+}
+
+/// `PUT /api/fragments/{name}/pinned`: the signer's own choice of whether
+/// a fragment they hold a role on is pinned in their sidebar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetPinned {
+    pub pinned: bool,
+}
+
+/// Its answer: the fragment, and whether it is pinned now.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Pinned {
+    pub name: String,
+    pub pinned: bool,
 }
 
 /// Its answer: the fragment, and whether it is on their dock now.
@@ -1879,16 +1899,22 @@ pub enum TriggerOn {
     Channel(String),
     /// A move of `main` that changes a path matching this pattern.
     Files(String),
+    /// Each install of new code: a deploy that moves `live`, or a blessed
+    /// template's changed release re-installed. Always `true` (the
+    /// manifest refuses any other value).
+    Installed(bool),
 }
 
 impl TriggerOn {
     /// What starts it, and on what: `("cron", schedule)`, `("channel",
-    /// channel)`, or `("files", pattern)`; the names are its wire keys.
+    /// channel)`, `("files", pattern)`, or `("installed", "")`; the names
+    /// are its wire keys.
     pub fn parts(&self) -> (&'static str, &str) {
         match self {
             TriggerOn::Cron(c) => ("cron", c),
             TriggerOn::Channel(c) => ("channel", c),
             TriggerOn::Files(f) => ("files", f),
+            TriggerOn::Installed(_) => ("installed", ""),
         }
     }
 
@@ -1897,6 +1923,7 @@ impl TriggerOn {
             "cron" => Some(TriggerOn::Cron(target)),
             "channel" => Some(TriggerOn::Channel(target)),
             "files" => Some(TriggerOn::Files(target)),
+            "installed" => Some(TriggerOn::Installed(true)),
             _ => None,
         }
     }
@@ -1945,8 +1972,13 @@ impl RunStatus {
 }
 
 /// How a run started: someone's call, another run's step, or a trigger.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+///
+/// This release tolerates what the next writes: a `via` it does not know
+/// (a trigger kind a later release added, read after a rollback, or by an
+/// older CLI) is `Unknown`, shown as written and taken as a trigger's, so
+/// a new kind needs no forward-only step (FIN-328's needed one).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "String", into = "String")]
 pub enum Via {
     Call,
     /// A step of another run called it (`trigger` names the parent run).
@@ -1954,30 +1986,42 @@ pub enum Via {
     Cron,
     Channel,
     Files,
+    Installed,
+    Unknown(String),
 }
 
 impl Via {
-    pub fn as_str(self) -> &'static str {
+    const KNOWN: [Via; 6] = [Via::Call, Via::Job, Via::Cron, Via::Channel, Via::Files, Via::Installed];
+
+    pub fn as_str(&self) -> &str {
         match self {
             Via::Call => "call",
             Via::Job => "job",
             Via::Cron => "cron",
             Via::Channel => "channel",
             Via::Files => "files",
+            Via::Installed => "installed",
+            Via::Unknown(s) => s,
         }
-    }
-
-    pub fn parse(s: &str) -> Option<Via> {
-        [Via::Call, Via::Job, Via::Cron, Via::Channel, Via::Files].into_iter().find(|v| v.as_str() == s)
     }
 
     /// Started by a trigger: these runs act as the fragment, pause with
-    /// their operation, and count toward its hourly ceiling.
-    pub fn triggered(self) -> bool {
-        match self {
-            Via::Call | Via::Job => false,
-            Via::Cron | Via::Channel | Via::Files => true,
-        }
+    /// their operation, and count toward its hourly ceiling. One this
+    /// release does not know is a trigger's: calls and jobs are known.
+    pub fn triggered(&self) -> bool {
+        !matches!(self, Via::Call | Via::Job)
+    }
+}
+
+impl From<String> for Via {
+    fn from(s: String) -> Via {
+        Via::KNOWN.into_iter().find(|v| v.as_str() == s).unwrap_or(Via::Unknown(s))
+    }
+}
+
+impl From<Via> for String {
+    fn from(v: Via) -> String {
+        v.as_str().to_string()
     }
 }
 
@@ -2127,7 +2171,7 @@ fn write_canonical(v: &Value, out: &mut String) {
     match v {
         Value::Object(map) => {
             let mut keys: Vec<&String> = map.keys().collect();
-            keys.sort();
+            keys.sort_unstable();
             out.push('{');
             for (i, k) in keys.iter().enumerate() {
                 if i > 0 {
@@ -2289,6 +2333,9 @@ mod tests {
             assert_eq!(TriggerOn::from_parts(kind, target.to_string()), Some(on.clone()));
             assert_eq!(serde_json::to_value(&on).unwrap(), serde_json::json!({ kind: target }));
         }
+        let installed = TriggerOn::Installed(true);
+        assert_eq!(TriggerOn::from_parts("installed", String::new()), Some(installed.clone()));
+        assert_eq!(serde_json::to_value(&installed).unwrap(), serde_json::json!({ "installed": true }));
         assert_eq!(TriggerOn::from_parts("webhook", "x".into()), None);
     }
 
@@ -2414,11 +2461,11 @@ mod tests {
         fn value(v: &impl Serialize) -> Value {
             serde_json::to_value(v).unwrap()
         }
-        let listed = FragmentList { fragments: vec![ListedFragment { name: "notes-k3x9".into(), role: Role::Owner, kind: FragmentKind::App, title: None, picture: None, agent_role: None, agents: vec![], preview: None, preview_at: None, unread: 0, sharing: None, archived: false, dock: true, owned: false, listed: vec![] }] };
+        let listed = FragmentList { fragments: vec![ListedFragment { name: "notes-k3x9".into(), role: Role::Owner, kind: FragmentKind::App, title: None, picture: None, agent_role: None, agents: vec![], preview: None, preview_at: None, unread: 0, sharing: None, archived: false, dock: true, pinned: false, owned: false, listed: vec![] }] };
         assert_eq!(value(&listed), serde_json::json!({ "fragments": [{ "name": "notes-k3x9", "role": "owner", "kind": "app" }] }));
         let sharing = Sharing { visibility: Visibility::Link, members: 3, guests: 1, invites: Some(2) };
         let listed = FragmentList {
-            fragments: vec![ListedFragment { name: "todo-k3x9".into(), role: Role::Owner, kind: FragmentKind::Chat, title: Some("Todo".into()), picture: None, agent_role: None, agents: vec!["npub1juniper".into()], preview: Some("hi".into()), preview_at: Some(1_760_000_000_000), unread: 3, sharing: Some(sharing), archived: true, dock: true, owned: false, listed: vec![ListedRecord { channel: "work".into(), principal: "npub1juniper".into(), kind: "turn.asked".into(), fields: [("asks".to_string(), "npub1me".to_string())].into(), at: 1_760_000_000_001 }] }],
+            fragments: vec![ListedFragment { name: "todo-k3x9".into(), role: Role::Owner, kind: FragmentKind::Chat, title: Some("Todo".into()), picture: None, agent_role: None, agents: vec!["npub1juniper".into()], preview: Some("hi".into()), preview_at: Some(1_760_000_000_000), unread: 3, sharing: Some(sharing), archived: true, dock: true, pinned: false, owned: false, listed: vec![ListedRecord { channel: "work".into(), principal: "npub1juniper".into(), kind: "turn.asked".into(), fields: [("asks".to_string(), "npub1me".to_string())].into(), at: 1_760_000_000_001 }] }],
         };
         assert_eq!(
             value(&listed),
@@ -2435,6 +2482,17 @@ mod tests {
         let off = ListedFragment { dock: false, ..read.clone() };
         assert_eq!(value(&off), serde_json::json!({ "name": "notes-k3x9", "role": "viewer", "kind": "app", "dock": false }));
         assert_eq!(serde_json::from_value::<ListedFragment>(value(&off)).unwrap(), off);
+        // a row not pinned leaves the flag out, and one without it (an older
+        // platform's) reads back not pinned; one pinned says so (Paul, 2026-10-31)
+        assert!(!read.pinned);
+        let pinned = ListedFragment { pinned: true, ..read.clone() };
+        assert_eq!(value(&pinned), serde_json::json!({ "name": "notes-k3x9", "role": "viewer", "kind": "app", "pinned": true }));
+        assert_eq!(serde_json::from_value::<ListedFragment>(value(&pinned)).unwrap(), pinned);
+        assert_eq!(value(&SetPinned { pinned: true }), serde_json::json!({ "pinned": true }));
+        assert_eq!(value(&Pinned { name: "notes-k3x9".into(), pinned: false }), serde_json::json!({ "name": "notes-k3x9", "pinned": false }));
+        for refused in [serde_json::json!({}), serde_json::json!({ "pinned": "yes" }), serde_json::json!({ "pinned": null })] {
+            assert!(serde_json::from_value::<SetPinned>(refused.clone()).is_err(), "{refused}");
+        }
         assert_eq!(value(&SetDock { dock: false }), serde_json::json!({ "dock": false }));
         assert_eq!(value(&Docked { name: "notes-k3x9".into(), dock: true }), serde_json::json!({ "name": "notes-k3x9", "dock": true }));
         for refused in [serde_json::json!({}), serde_json::json!({ "dock": "no" }), serde_json::json!({ "dock": null })] {
@@ -2517,15 +2575,29 @@ mod tests {
         assert_eq!(serde_json::to_value(&r).unwrap(), serde_json::json!({ "inboxToken": "i", "viewToken": "v", "rotated": ["view"] }));
     }
 
+    /// Goal: a `via` a later release writes is read, listed and kept as
+    /// written (a rollback's object, an older CLI). Method: a run whose via
+    /// no release knows yet reads as `Unknown`, a trigger's, and writes
+    /// back unchanged.
+    #[test]
+    fn a_via_from_a_later_release_reads_as_written() {
+        let future = Via::from("webhook".to_string());
+        assert_eq!(future, Via::Unknown("webhook".into()));
+        assert!(future.triggered(), "a via this release does not know is a trigger's");
+        let wire = serde_json::json!({ "id": 7, "op": "tick", "via": "webhook", "principal": "npub1x", "status": "succeeded", "attempt": 1, "depth": 0, "createdAt": 1 });
+        let run: Run = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(run.via.as_str(), "webhook");
+        assert_eq!(serde_json::to_value(&run).unwrap(), wire, "and it lists as written");
+    }
+
     #[test]
     fn stored_states_read_back_as_they_serialize() {
-        for v in [Via::Call, Via::Job, Via::Cron, Via::Channel, Via::Files] {
-            assert_eq!(Via::parse(v.as_str()), Some(v));
-            assert_eq!(serde_json::to_value(v).unwrap(), v.as_str());
+        for v in Via::KNOWN {
+            assert_eq!(Via::from(v.as_str().to_string()), v);
+            assert_eq!(serde_json::to_value(&v).unwrap(), v.as_str());
         }
-        assert_eq!(Via::parse("inbox"), None);
         assert!(!Via::Call.triggered() && !Via::Job.triggered());
-        assert!(Via::Cron.triggered() && Via::Channel.triggered() && Via::Files.triggered());
+        assert!(Via::Cron.triggered() && Via::Channel.triggered() && Via::Files.triggered() && Via::Installed.triggered());
         for t in [Tier::Cheap, Tier::Medium, Tier::High] {
             assert_eq!(Tier::parse(t.as_str()), Some(t));
             assert_eq!(serde_json::to_value(t).unwrap(), t.as_str());

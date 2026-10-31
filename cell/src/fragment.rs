@@ -345,8 +345,10 @@ pub(crate) enum MetaKey {
     /// The channels its people's search holds, as the rows last named
     /// them (search.rs `search_fence`): a JSON array of names.
     Searched,
-    /// Whether the search service holds this life's sources (searchable.rs):
-    /// written at its first upsert; a push's deletes are then forgotten.
+    /// Whether this life may have written its search index (searchable.rs):
+    /// set before its first upsert is sent. Unset, a search answers
+    /// `indexed: false` waking no index; set, a push's deletes are
+    /// forgotten, and the life's end ends its index.
     Search,
     /// Why live's code was not installed.
     CodeError,
@@ -408,6 +410,9 @@ pub(crate) enum MetaKey {
     /// Test fleets only: how many more card shots open a page nothing
     /// serves, so they fail (`fail-cards`).
     TestFailCards,
+    /// Test fleets only: how many more calls into its search index fail
+    /// before they are sent (`fail-search-index`): the index out of reach.
+    TestFailSearchIndex,
     /// Test fleets only: the connector policy its doors ask in place of the
     /// deployment's (`connectors`), so a run turns one off and on again.
     TestConnectors,
@@ -477,6 +482,7 @@ impl MetaKey {
             MetaKey::StorageSampledAt => "storage_sampled_at",
             MetaKey::Cards => "cards",
             MetaKey::TestFailCards => "test_fail_cards",
+            MetaKey::TestFailSearchIndex => "test_fail_search_index",
             MetaKey::TestConnectors => "test_connectors",
             MetaKey::Icon => "icon",
             MetaKey::IconMakings => "icon_makings",
@@ -978,6 +984,12 @@ impl FragmentCell {
                 self.create(&caller, body).await
             }
             (Method::Delete, ["delete"]) => self.delete(&caller).await,
+            // a question the platform embedded once, for many fragments:
+            // the router maps no outside path here (searchable.rs)
+            (Method::Post, ["search", "asked"]) => {
+                let asked = body_json(&mut req).await?;
+                self.search_asked(&caller, asked).await
+            }
             (Method::Get, ["api", "status"]) => self.status(&caller),
             (Method::Get, ["api", "address"]) => self.address(&caller).await,
             (Method::Put, ["api", "address"]) => {

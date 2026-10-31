@@ -11,7 +11,8 @@
 //     own agent and turn, so an answer to one agent's card is never another
 //     agent's that reused its prompt id; id `pr:<a hash of the three>`).
 //   - `work`: an agent's progress, which only the chat's agents post
-//     (`"from": "agent"`): `turn.start`, `turn.step`, `turn.prompt`,
+//     (`"from": "agent"`): `turn.start`, `turn.call` (a tool call asked
+//     for, before it runs), `turn.step` (one ended), `turn.prompt`,
 //     `turn.prompt.closed`, `turn.end`.
 //
 // The page follows both (`subscribe`, from near their ends), and the chat's
@@ -146,9 +147,11 @@ const NOTICE_ICON = { info: "info", warning: "alert", memory: "brain" };
 /// it runs (`now`) or once it ran ("Failed running", for `ok: false`;
 /// "Timed out running", for its `status`); the
 /// verb ends as it joins its arguments ("Searched the web for") unless it
-/// stands alone (`joined` false: an icon's name).
+/// stands alone (`joined` false: an icon's name). A call whose turn ended
+/// with no step for it (`maybe`) may have run: no more is known.
 export function stepSays(s, now = false, joined = true) {
   const args = typeof s.args === "string" ? s.args : "";
+  if (s.maybe) return { icon: Object.hasOwn(STEP_SAYS, s.category) ? STEP_SAYS[s.category][0] : "wrench", verb: "May have run", args };
   const failed = Object.hasOwn(ENDED, s.status) ? `${ENDED[s.status]} ` : s.ok === false ? "Failed " : "";
   if (!Object.hasOwn(STEP_SAYS, s.category)) {
     const tool = typeof s.tool === "string" && s.tool ? s.tool : "a tool";
@@ -633,11 +636,33 @@ export function mount(root) {
   function turnOf(agent, id) {
     const key = turnKey(agent, id);
     if (!state.turns.has(key)) {
-      state.turns.set(key, { key, id, agent, asker: null, cause: null, startAt: null, lastAt: null, lastN: 0, steps: new Map(), prompts: new Map(), closed: new Map(), notices: new Map(), asked: null, end: null });
+      state.turns.set(key, { key, id, agent, asker: null, cause: null, startAt: null, lastAt: null, lastN: 0, steps: new Map(), calls: new Map(), prompts: new Map(), closed: new Map(), notices: new Map(), asked: null, end: null });
     }
     return state.turns.get(key);
   }
   const started = (t) => t.startAt !== null;
+  // The calls a turn asked for (`turn.call`, recorded before each ran) that
+  // no step ended: a step ends a call of its own response (any, for a step
+  // that names none), by its `tool_call_id`, else (its runtime renamed the
+  // call) by its tool and arguments; one step to one call, the first still
+  // open (docs/chat-records.md).
+  function unended(t) {
+    if (!t.calls.size) return [];
+    const open = [...t.calls.values()].sort((a, b) => a.n - b.n);
+    const steps = [...t.steps.values()];
+    const paired = new Set();
+    const rules = [(c, s) => typeof s.tool_call_id === "string" && c.tool_call_id === s.tool_call_id, (c, s) => c.tool === s.tool && c.args === s.args];
+    for (const same of rules) {
+      for (const s of steps) {
+        if (paired.has(s)) continue;
+        const i = open.findIndex((c) => (s.response === undefined || c.response === s.response) && same(c, s));
+        if (i < 0) continue;
+        open.splice(i, 1);
+        paired.add(s);
+      }
+    }
+    return open;
+  }
   // A card by its turn and its prompt: prompt ids are each agent's own, so
   // two agents' cards may share one.
   const cardKey = (turnKey, prompt) => `${turnKey}:${prompt}`;
@@ -763,7 +788,8 @@ export function mount(root) {
     // of, only the turn of that id its own poster began (`turn.start`):
     // one agent's records never touch another's turn.
     const t = turnOf(record.principal, b.turn);
-    const field = `${t.key}:${b.kind}:${b.step ?? b.prompt ?? ""}`;
+    // (a call is one record: its own seq)
+    const field = `${t.key}:${b.kind}:${b.kind === "turn.call" ? record.seq : b.step ?? b.prompt ?? ""}`;
     if ((workLatest.get(field) ?? 0) > record.seq) return;
     workLatest.set(field, record.seq);
     const n = record.seq;
@@ -780,6 +806,8 @@ export function mount(root) {
       if (state.pending && b.cause?.channel === "chat" && b.cause?.seq === state.pending.seq) state.pending = null;
     } else if (b.kind === "turn.step" && Number.isInteger(b.step)) {
       t.steps.set(b.step, { ...b, at: record.at, n });
+    } else if (b.kind === "turn.call" && typeof b.tool === "string") {
+      t.calls.set(record.seq, { ...b, at: record.at, n });
     } else if (b.kind === "turn.notice" && typeof b.text === "string" && b.text.trim()) {
       t.notices.set(record.seq, { text: b.text, category: Object.hasOwn(NOTICE_ICON, b.category) ? b.category : "info", at: record.at, n, seq: record.seq });
     } else if (b.kind === "turn.prompt" && typeof b.prompt === "string") {
@@ -849,10 +877,15 @@ export function mount(root) {
     // each turn's replies, by its agent: the words an older bridge kept on a
     // step that its turn also replied with show once, as the reply
     const replies = new Map();
+    // each turn's calls no step ended, as many as there are, and when it
+    // last said something
+    const open = new Map();
+    const lastSaid = new Map();
     for (const m of state.chat) {
       items.push({ at: m.at, n: m.n, type: "message", m });
       if (!m.turn) continue;
       const key = turnKey(m.principal, m.turn);
+      lastSaid.set(key, Math.max(lastSaid.get(key) ?? -Infinity, m.at));
       if (!replies.has(key)) replies.set(key, []);
       replies.get(key).push(m.text.trim());
     }
@@ -866,6 +899,24 @@ export function mount(root) {
         const said = typeof s.text === "string" ? s.text.trim() : "";
         if (said && !repliedWith(replies.get(t.key) ?? [], said)) items.push({ at: s.at, n: s.n - 0.5, type: "said", t, s, text: said });
         items.push({ at: s.at, n: s.n, type: "step", t, s });
+      }
+      // a call no step ended: while its turn works (and waits on no one),
+      // one of its latest response's is running, its live line after all
+      // the turn said (its words before the call are a reply the step
+      // comes after); any other may have run (a runtime ends a response's
+      // calls before it asks again), shown where it was asked for, as is
+      // every one once the turn ended
+      const calls = unended(t);
+      const latest = [...t.calls.values()].reduce((a, c) => (!a || c.n > a.n ? c : a), null)?.response;
+      const live = running(t);
+      const now = live ? calls.filter((c) => c.response === latest) : [];
+      open.set(t.key, now.length);
+      const after = Math.max(t.lastAt, lastSaid.get(t.key) ?? -Infinity);
+      for (const c of calls) {
+        const runs = now.includes(c);
+        if (runs && (waiting(t) || waitsOnWords(t))) continue;
+        const s = { ...c, step: `c${c.n}`, call: true, maybe: !runs };
+        items.push(runs ? { at: after, n: Number.MAX_SAFE_INTEGER - now.length + now.indexOf(c), type: "step", t, s } : { at: c.at, n: c.n, type: "step", t, s });
       }
       for (const p of t.prompts.values()) items.push({ at: p.at, n: p.n, type: "prompt", t, p });
       for (const x of t.notices.values()) items.push({ at: x.at, n: x.n, type: "notice", t, x });
@@ -882,7 +933,8 @@ export function mount(root) {
       else if (isAgent(d.principal)) items.push({ at: t?.lastAt ?? Infinity, n: (t?.lastN ?? 0) + 0.5, type: "draft", key, d });
     }
     for (const t of state.turns.values()) {
-      if (running(t) && !state.drafts.has(t.key) && !waiting(t)) items.push({ at: t.lastAt, n: t.lastN + 0.5, type: waitsOnWords(t) ? "asked" : "working", t });
+      // (a live call's card says it works)
+      if (running(t) && !state.drafts.has(t.key) && !waiting(t) && !(open.get(t.key) && !waitsOnWords(t))) items.push({ at: t.lastAt, n: t.lastN + 0.5, type: waitsOnWords(t) ? "asked" : "working", t });
     }
     if (state.pending) items.push({ at: state.pending.at, n: state.pending.n + 0.5, type: "working", t: null });
     for (const m of state.sending.values()) items.push({ at: m.at, n: m.n, type: "message", m });
@@ -1165,7 +1217,10 @@ export function mount(root) {
       const box = el("section", "history-block");
       const day = (at) => (typeof at === "string" && at ? new Date(at).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" }) : "");
       const when = [day(b.started_at), day(b.ended_at)].filter((d, i, all) => d && all.indexOf(d) === i).join(" – ");
-      box.append(el("p", "history-head", [`From “${typeof b.title === "string" ? b.title : "an earlier chat"}”`, when].filter(Boolean).join(" · ")));
+      // from an import (`archive`, `key`) or an archived chat (`chat`); `agent`:
+      // who it was with, when not this chat's agent
+      const from = typeof b.title === "string" ? b.title : "an earlier chat";
+      box.append(el("p", "history-head", [`From “${from}”`, typeof b.agent === "string" && b.agent ? `with ${b.agent}` : "", when].filter(Boolean).join(" · ")));
       if (typeof b.summary === "string" && b.summary.trim()) {
         const d = el("details", "tools");
         const s = el("summary");
@@ -1175,7 +1230,7 @@ export function mount(root) {
         d.append(s, detail);
         box.append(d);
       }
-      if (Number.isInteger(b.earlier) && b.earlier > 0) box.append(el("p", "history-head", `${b.earlier} earlier ${b.earlier === 1 ? "message" : "messages"} in your Session Archive`));
+      if (Number.isInteger(b.earlier) && b.earlier > 0) box.append(el("p", "history-head", `${b.earlier} earlier ${b.earlier === 1 ? "message" : "messages"} ${typeof b.chat === "string" ? `in “${from}”` : "in your Session Archive"}`));
       for (const m of Array.isArray(b.messages) ? b.messages : []) {
         if (typeof m?.text !== "string" || !m.text.trim()) continue;
         const msg = el("div", `msg ${m.role === "user" ? "user mine" : "agent"}`);
@@ -1408,6 +1463,7 @@ export function mount(root) {
   // Each live card's head counts the time its turn has worked.
   setInterval(() => {
     for (const n of $("messages").querySelectorAll(".tools [data-since]")) n.textContent = `Working for ${took(Date.now() - Number(n.dataset.since))}`;
+    for (const n of $("messages").querySelectorAll(".tools [data-running-since]")) n.textContent = took(Date.now() - Number(n.dataset.runningSince));
   }, 1000);
   // Where a card's work ends: the first record of its own turn after its
   // last step (a reply, a card, a notice, its next step), else the turn's
@@ -1428,7 +1484,8 @@ export function mount(root) {
   }
   function stepsNode(t, steps) {
     const key = `s:${t.key}:${steps[0].step}`;
-    const live = running(t) && steps[steps.length - 1].n === t.lastN;
+    const last = steps[steps.length - 1];
+    const live = running(t) && (last.n === t.lastN || (last.call && !last.maybe));
     const agent = profiles.get(t.agent)?.fragment ?? null;
     const until = live ? null : cardEnd(t, steps);
     const sig = JSON.stringify([steps, live, agent, until]);
@@ -1440,7 +1497,7 @@ export function mount(root) {
         d.dataset.turn = t.id;
         d.style.setProperty("--step-agent", colorOf(t.agent));
         // the turn's first card counts from its start, any later one from its first step
-        const first = Math.min(...[...t.steps.values()].map((s) => s.at));
+        const first = Math.min(...[...t.steps.values(), ...steps].map((s) => s.at));
         const from = steps[0].at === first ? t.startAt : steps[0].at;
         const summary = el("summary");
         if (live) {
@@ -1461,7 +1518,7 @@ export function mount(root) {
         // the step it is on now: the last of a card its turn works in, unless
         // it failed (a runtime's progress may say `ok` before its result) or
         // is a call's observed end (`status`: it ran already)
-        const lines = steps.map((s, i) => stepLine(t, s, live && i === steps.length - 1 && s.ok !== false && !s.status, agent));
+        const lines = steps.map((s, i) => stepLine(t, s, (live && i === steps.length - 1 && s.ok !== false && !s.status) || (live && s.call && !s.maybe), agent));
         d.dataset.lines = String(lines.length);
         d.append(summary, ...lines);
         // a line come since the last draw arrives as the ones before it step back
@@ -1502,14 +1559,14 @@ export function mount(root) {
   // alone would say so).
   function stepLine(t, s, now, agent) {
     const says = stepSays(s, now);
-    const step = el("div", `step${s.ok === false ? " error" : ""}${now ? " running" : ""}`);
+    const step = el("div", `step${s.ok === false ? " error" : ""}${now ? " running" : ""}${s.maybe ? " maybe" : ""}`);
     const known = Object.hasOwn(STEP_SAYS, s.category);
     step.dataset.category = known ? s.category : "other";
     const opens = !!(says.args || s.excerpt);
     const line = el(opens ? "button" : "div", "step-name");
     const label = el("span", "step-label");
     const glyph = icon(says.icon);
-    if (known && says.args && s.ok !== false) {
+    if (known && says.args && s.ok !== false && !s.maybe) {
       glyph.removeAttribute("aria-hidden");
       glyph.setAttribute("role", "img");
       glyph.setAttribute("aria-label", stepSays(s, now, false).verb);
@@ -1519,6 +1576,12 @@ export function mount(root) {
       args.title = says.args;
       args.dataset.short = args.textContent;
       label.append(args);
+    }
+    // a call running now: for how long, since it was asked for
+    if (s.call && now) {
+      const since = el("span", "step-since", took(Date.now() - s.at));
+      since.dataset.runningSince = String(s.at);
+      label.append(since);
     }
     line.append(glyph, label);
     step.append(line);
@@ -2574,6 +2637,7 @@ export function mount(root) {
         await fragment.post("chat", body, { id });
         unsent = null;
         $("banner").hidden = true;
+        tellSaid();
         return;
       }
       const to = addressed(text);
@@ -2605,6 +2669,7 @@ export function mount(root) {
       renderQuoting();
       $("banner").hidden = true;
       expectTurn(record, to, text);
+      tellSaid();
     } catch (err) {
       if (!input.value) input.value = typed;
       for (const f of files) f.uploading = false;
@@ -2615,6 +2680,13 @@ export function mount(root) {
       grow();
       input.focus();
     }
+  }
+
+  // The shell that frames this page is told the person sent a message here
+  // (`{fragment: "said"}`): a chat they archived comes back to their
+  // sidebar (docs/api.md, The shell's messages).
+  function tellSaid() {
+    if (framed && state.me) window.parent.postMessage({ fragment: "said" }, state.me.platform);
   }
 
   // Someone signed in, in a chat with an agent: a turn starts on it soon

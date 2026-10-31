@@ -190,7 +190,7 @@ pub fn canonical(v: &Value, out: &mut String) {
     match v {
         Value::Object(m) => {
             let mut keys: Vec<&String> = m.keys().collect();
-            keys.sort();
+            keys.sort_unstable();
             out.push('{');
             for (i, k) in keys.into_iter().enumerate() {
                 if i > 0 {

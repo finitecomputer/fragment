@@ -1174,6 +1174,16 @@ impl FragmentCell {
         }
         json_response(&json!({ "ok": true, "removed": removed }))
     }
+
+    /// Every secret it holds let go, their names answered: a connector's,
+    /// as it is unmade (plane.rs), since what its owner set there (a bot's
+    /// token, a webhook's secret) is not the new code's to use.
+    pub(crate) fn drop_secrets(&self) -> CellResult<Vec<String>> {
+        let names: Vec<String> = self.rows("SELECT name FROM secrets ORDER BY name", vec![])?.iter().filter_map(|r| r["name"].as_str().map(str::to_string)).collect();
+        self.exec("DELETE FROM secrets", vec![])?;
+        self.exec("DELETE FROM secret_hosts", vec![])?;
+        Ok(names)
+    }
 }
 
 /// The hosts a `PUT secrets` names, each as a URL names it, without
@@ -1193,7 +1203,7 @@ fn secret_hosts(given: &[String]) -> CellResult<Vec<String>> {
             hosts.push(host);
         }
     }
-    hosts.sort();
+    hosts.sort_unstable();
     assert!(!hosts.is_empty() && hosts.len() <= limits::SECRET_HOSTS_MAX, "a secret's hosts are within their bounds");
     Ok(hosts)
 }

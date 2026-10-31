@@ -57,6 +57,7 @@ use crate::fragment::json_response;
 use crate::keys::PipesAccount;
 use crate::registry::calls::SubjectOf;
 use crate::routed::Signed;
+use fragment_core::gather::Gathered;
 
 /// An own key, at most (a provider's API key is far shorter).
 pub use fragment_core::own_signin::OWN_KEY_MAX_BYTES;
@@ -145,7 +146,7 @@ pub async fn connection_states(
 /// `accounts`) to choose one for a swap: each of a connection's that takes
 /// several, in order (computer.rs `connection_token`).
 pub fn held_of(cfg: &Config, listed: &BTreeMap<String, Vec<PipesAccount>>) -> BTreeMap<String, Vec<Held>> {
-    listed.iter().filter(|(p, _)| cfg.providers.get(p).is_some_and(|p| p.several())).map(|(p, l)| (p.clone(), accounts::held(l))).collect()
+    listed.iter().filter(|(p, _)| cfg.providers.get(p).is_some_and(|p| p.several())).map(|(p, l)| (p.clone(), accounts::held(l))).gathered()
 }
 
 /// `provider`'s accounts of the person signed in as `who`, as their list

@@ -19,13 +19,16 @@ use support::hermes::Hermes;
 const WAIT: u64 = 10_000;
 const SECRET: &str = "0123456789abcdef0123456789abcdef";
 
-fn free_port() -> SocketAddr {
-    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    l.local_addr().unwrap()
+/// A port of the test's own, bound for as long as it is held: each life of
+/// its bridge listens on a clone (`relay`), so no other socket takes the
+/// port before the first life or between two, as one picked and let go may.
+fn bound_port() -> std::net::TcpListener {
+    std::net::TcpListener::bind("127.0.0.1:0").unwrap()
 }
 
-fn relay(listen: SocketAddr, dir: &std::path::Path) -> Box<Relay> {
-    Box::new(Relay { config: RelayConfig { listen, gateway_id: "computer-test".into(), secret: SECRET.into(), media_dir: dir.join("relay-media"), media_local: true } })
+fn relay(port: &std::net::TcpListener, dir: &std::path::Path) -> Box<Relay> {
+    let listen = port.local_addr().unwrap();
+    Box::new(Relay { config: RelayConfig { listen, gateway_id: "computer-test".into(), secret: SECRET.into(), media_dir: dir.join("relay-media"), media_local: true }, listener: port.try_clone().unwrap() })
 }
 
 fn replies(w: &World, chat: &str) -> Vec<Value> {
@@ -35,8 +38,9 @@ fn replies(w: &World, chat: &str) -> Vec<Value> {
 async fn setup(name: &str, agents: &[&str]) -> (Fake, support::Running, Hermes, std::path::PathBuf) {
     let fake = Fake::start("127.0.0.1:0", agents).await;
     let dir = support::dir(name);
-    let listen = free_port();
-    let bridge = support::start(support::config(&fake.url(), &dir, support::settings()), relay(listen, &dir));
+    let port = bound_port();
+    let listen = port.local_addr().unwrap();
+    let bridge = support::start(support::config(&fake.url(), &dir, support::settings()), relay(&port, &dir));
     let hermes = Hermes::spawn(listen, "computer-test", SECRET);
     (fake, bridge, hermes, dir)
 }
@@ -120,9 +124,10 @@ async fn a_routine_may_say_nothing() {
     let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
     let chat = fake.chat("talk", &["juniper"]);
     let dir = support::dir("relay-silent");
-    let listen = free_port();
+    let port = bound_port();
+    let listen = port.local_addr().unwrap();
     let cfg = support::config(&fake.url(), &dir, support::settings());
-    let bridge = support::start(cfg.clone(), relay(listen, &dir));
+    let bridge = support::start(cfg.clone(), relay(&port, &dir));
     let hermes = Hermes::spawn(listen, "computer-test", SECRET);
     fake.until(WAIT, "the bridge to follow", |w| w.live_sockets() >= 2).await;
     let routine = |text: &str| {
@@ -154,7 +159,7 @@ async fn a_routine_may_say_nothing() {
     bridge.stop().await;
 
     // restart: the next life runs the silent routine no more
-    let bridge = support::start(cfg, relay(listen, &dir));
+    let bridge = support::start(cfg, relay(&port, &dir));
     let after = hermes.after(listen, "computer-test", SECRET);
     let next = routine("feed the cat");
     fake.until(WAIT, "the next routine's reply", |w| !answer(w, &next).is_empty()).await;
@@ -206,8 +211,9 @@ async fn hermes_notices_are_notices() {
 /// and lingers not. A step whose words do not come within `STEP_HOLD_MS`
 /// posts, and the words after it. Words before a work call are `interim`
 /// (the chat's push leaves them out); an answer said only beside a
-/// housekeeping call (Hermes sends nothing after it) is the turn's one
-/// reply, not interim. Method: the scripted gateway's orders.
+/// housekeeping call (Hermes sends nothing after it) is held until the turn
+/// ends, then its one reply, not interim (#729). Method: the scripted
+/// gateway's orders.
 #[tokio::test]
 async fn text_beside_a_tool_call_is_a_reply_of_its_own() {
     let (fake, bridge, _hermes, _dir) = setup("relay-narrate", &["juniper"]).await;
@@ -231,7 +237,7 @@ async fn text_beside_a_tool_call_is_a_reply_of_its_own() {
             assert!(steps[0]["body"].get("text").is_none(), "{text}: the words are no part of the step: {steps:?}");
             if text.contains("only") {
                 assert_eq!(bodies, vec![json!({ "text": words, "turn": turn })], "{text}: its one reply, its answer, not interim");
-                assert!(at(&replies[0]) < at(&steps[0]), "{text}: the answer, then the step");
+                assert!(at(&steps[0]) < at(&replies[0]), "{text}: the step, then the answer, held until the turn ended with nothing after it (#729)");
             } else if text.contains("stalled") {
                 assert_eq!(bodies, vec![json!({ "text": words, "turn": turn }), json!({ "text": answer(text), "turn": turn })], "{text}: the words, whole, then the answer");
                 assert!(at(&steps[0]) < at(&replies[0]), "{text}: the step waited its bound, then posted, its words after it");
@@ -512,9 +518,10 @@ async fn an_expired_card_ends_its_turn_and_the_next_message_is_answered() {
     let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
     let chat = fake.chat("talk", &["juniper"]);
     let dir = support::dir("relay-expired");
-    let listen = free_port();
+    let port = bound_port();
+    let listen = port.local_addr().unwrap();
     let cfg = support::config(&fake.url(), &dir, card_settings());
-    let bridge = support::start_killable(cfg.clone(), relay(listen, &dir));
+    let bridge = support::start_killable(cfg.clone(), relay(&port, &dir));
     let hermes = Hermes::spawn(listen, "computer-test", SECRET);
     // Hermes' approval timeout is the card's life (the image sets both)
     hermes.with(|s| s.approval_ms = CARD_MS);
@@ -541,7 +548,7 @@ async fn an_expired_card_ends_its_turn_and_the_next_message_is_answered() {
         // the next message wakes it: no hold, its /data as it slept
         let next = say("good morning");
         support::unhold(&dir);
-        let bridge = support::start_killable(cfg, relay(listen, &dir));
+        let bridge = support::start_killable(cfg, relay(&port, &dir));
         let woken = hermes.after_boot(listen, "computer-test", SECRET);
         (bridge, woken, next)
     } else {
@@ -582,9 +589,10 @@ async fn a_turn_cut_by_a_restart_is_told_and_never_folded() {
     let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
     let chat = fake.chat("talk", &["juniper"]);
     let dir = support::dir("relay-cut-told");
-    let listen = free_port();
+    let port = bound_port();
+    let listen = port.local_addr().unwrap();
     let cfg = support::config(&fake.url(), &dir, support::settings());
-    let bridge = support::start_killable(cfg.clone(), relay(listen, &dir));
+    let bridge = support::start_killable(cfg.clone(), relay(&port, &dir));
     let hermes = Hermes::spawn(listen, "computer-test", SECRET);
     fake.until(WAIT, "the bridge to follow", |w| w.live_sockets() >= 2).await;
     let say = |text: &str| records::turn_id("juniper--k3x9", &chat, "chat", fake.say(&chat, &person("paul"), json!({ "text": text }))["seq"].as_u64().unwrap());
@@ -599,7 +607,7 @@ async fn a_turn_cut_by_a_restart_is_told_and_never_folded() {
     // the next message wakes it, its /data as it slept
     let next = say("good morning");
     support::unhold(&dir);
-    let bridge = support::start_killable(cfg, relay(listen, &dir));
+    let bridge = support::start_killable(cfg, relay(&port, &dir));
     let woken = hermes.after_boot(listen, "computer-test", SECRET);
     fake.until(WAIT, "the next message's turn to end", |w| !work_of(w, &chat, &next, "turn.end").is_empty()).await;
     let after = say("and after that");
@@ -635,8 +643,9 @@ async fn a_turn_cut_by_a_restart_is_told_and_never_folded() {
 async fn a_message_behind_an_expired_card_is_answered() {
     let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
     let dir = support::dir("relay-expired-behind");
-    let listen = free_port();
-    let bridge = support::start(support::config(&fake.url(), &dir, card_settings()), relay(listen, &dir));
+    let port = bound_port();
+    let listen = port.local_addr().unwrap();
+    let bridge = support::start(support::config(&fake.url(), &dir, card_settings()), relay(&port, &dir));
     let hermes = Hermes::spawn(listen, "computer-test", SECRET);
     hermes.with(|s| s.approval_ms = CARD_MS);
     let chat = fake.chat("talk", &["juniper"]);
@@ -896,9 +905,10 @@ async fn an_image_sent_by_url_is_fetched() {
     // a bridge not set for local servers: plain http, and a local address, are refused
     let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
     let dir = support::dir("relay-image-url-public");
-    let listen = free_port();
+    let port = bound_port();
+    let listen = port.local_addr().unwrap();
     let config = RelayConfig { listen, gateway_id: "computer-test".into(), secret: SECRET.into(), media_dir: dir.join("relay-media"), media_local: false };
-    let bridge = support::start(support::config(&fake.url(), &dir, support::settings()), Box::new(Relay { config }));
+    let bridge = support::start(support::config(&fake.url(), &dir, support::settings()), Box::new(Relay { config, listener: port }));
     let _hermes = Hermes::spawn(listen, "computer-test", SECRET);
     let chat = fake.chat("talk", &["juniper"]);
     fake.until(WAIT, "the bridge to follow", |w| w.live_sockets() >= 2).await;
@@ -1081,7 +1091,8 @@ async fn hermes_hears_each_message_once_across_a_rollback() {
     let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
     let chat = fake.chat("talk", &["juniper"]);
     let dir = support::dir("relay-rollback");
-    let listen = free_port();
+    let port = bound_port();
+    let listen = port.local_addr().unwrap();
     let cfg = support::config(&fake.url(), &dir, support::settings());
     let hermes = Hermes::spawn(listen, "computer-test", SECRET);
     let ended = |w: &World, turn: &str| w.bodies(&chat, "work", "turn.end").iter().any(|e| e["turn"] == turn);
@@ -1090,7 +1101,7 @@ async fn hermes_hears_each_message_once_across_a_rollback() {
         records::turn_id("juniper--k3x9", &chat, "chat", said["seq"].as_u64().unwrap())
     };
 
-    let bridge = support::start_killable(cfg.clone(), relay(listen, &dir));
+    let bridge = support::start_killable(cfg.clone(), relay(&port, &dir));
     fake.until(WAIT, "the bridge to follow", |w| w.live_sockets() >= 2).await;
     let t1 = say("one");
     fake.until(WAIT, "one's end", |w| ended(w, &t1)).await;
@@ -1101,7 +1112,7 @@ async fn hermes_hears_each_message_once_across_a_rollback() {
     fake.until(WAIT, "its sockets closed", |w| w.live_sockets() == 0).await;
 
     support::restore_state(&dir, &saved);
-    let bridge = support::start_killable(cfg, relay(listen, &dir));
+    let bridge = support::start_killable(cfg, relay(&port, &dir));
     let t3 = say("three");
     fake.until(WAIT, "three's end, Hermes dialing the new life", |w| ended(w, &t3)).await;
     hermes.with(|s| {
@@ -1120,8 +1131,9 @@ async fn a_wrong_token_is_refused() {
     let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
     let chat = fake.chat("talk", &["juniper"]);
     let dir = support::dir("relay-refused");
-    let listen = free_port();
-    let bridge = support::start(support::config(&fake.url(), &dir, support::settings()), relay(listen, &dir));
+    let port = bound_port();
+    let listen = port.local_addr().unwrap();
+    let bridge = support::start(support::config(&fake.url(), &dir, support::settings()), relay(&port, &dir));
     let impostor = Hermes::spawn(listen, "computer-test", "not-the-secret-not-the-secret-00");
     fake.until(WAIT, "the bridge to follow", |w| w.live_sockets() >= 2).await;
     fake.say(&chat, &person("paul"), json!({ "text": "hi" }));

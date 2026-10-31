@@ -15,19 +15,22 @@ use support::hermes::Hermes;
 
 const SECRET: &str = "0123456789abcdef0123456789abcdef";
 
-fn free_port() -> std::net::SocketAddr {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    listener.local_addr().unwrap()
+/// A port of the test's own, bound for as long as it is held: each life of
+/// its bridge listens on a clone (`relay`), so no other socket takes the
+/// port before the first life or between two, as one picked and let go may.
+fn bound_port() -> std::net::TcpListener {
+    std::net::TcpListener::bind("127.0.0.1:0").unwrap()
 }
 
-fn relay(listen: std::net::SocketAddr, dir: &std::path::Path) -> Box<Relay> {
-    Box::new(Relay { config: RelayConfig { listen, gateway_id: "activity-test".into(), secret: SECRET.into(), media_dir: dir.join("media"), media_local: true } })
+fn relay(port: &std::net::TcpListener, dir: &std::path::Path) -> Box<Relay> {
+    let listen = port.local_addr().unwrap();
+    Box::new(Relay { config: RelayConfig { listen, gateway_id: "activity-test".into(), secret: SECRET.into(), media_dir: dir.join("media"), media_local: true }, listener: port.try_clone().unwrap() })
 }
 
 fn start(fake: &Fake, name: &str) -> (std::net::SocketAddr, support::Running) {
     let dir = support::dir(name);
-    let listen = free_port();
-    (listen, support::start(support::config(&fake.url(), &dir, support::settings()), relay(listen, &dir)))
+    let port = bound_port();
+    (port.local_addr().unwrap(), support::start(support::config(&fake.url(), &dir, support::settings()), relay(&port, &dir)))
 }
 
 async fn dial(listen: std::net::SocketAddr, secret: &str) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>> {
@@ -88,9 +91,9 @@ async fn an_observed_end_is_a_step_and_a_disconnect_invents_none() {
     observer.next().await.unwrap().unwrap();
     let asked = fake.say(&chat, &person("paul"), json!({ "text": "use a tool slow without observations" }));
     let turn = fragment_bridge::records::turn_id("juniper--k3x9", &chat, "chat", asked["seq"].as_u64().unwrap());
-    // a call ends in a turn Hermes holds, so only once the turn reached it
-    // (its `turn.start` is posted before the relay hands it on)
-    support::until(10_000, "the turn reached Hermes", || hermes.with(|s| !s.heard.is_empty())).await;
+    // a call ends in a turn Hermes runs, so only once its turn is under way
+    // (past its startup bracket, whose `✅` a step before it would make the end)
+    support::until(10_000, "the turn under way in Hermes", || hermes.with(|s| !s.begun.is_empty())).await;
     let end = json!({ "turn": turn, "tool": "terminal", "args": "make", "excerpt": "Exit code: 7", "tool_call_id": "call-failed", "status": "failed", "duration_ms": 2 });
     assert_eq!(said(&mut observer, &end.to_string()).await, "observed");
     drop(observer);
@@ -120,7 +123,7 @@ async fn a_call_asked_for_is_recorded_before_its_end() {
     observer.next().await.unwrap().unwrap();
     let asked = fake.say(&chat, &person("paul"), json!({ "text": "use a tool slow without observations" }));
     let turn = fragment_bridge::records::turn_id("juniper--k3x9", &chat, "chat", asked["seq"].as_u64().unwrap());
-    support::until(10_000, "the turn reached Hermes", || hermes.with(|s| !s.heard.is_empty())).await;
+    support::until(10_000, "the turn under way in Hermes", || hermes.with(|s| !s.begun.is_empty())).await;
     let call = json!({ "turn": turn, "response": "f00d-1", "call": { "position": 0, "tool_call_id": "call-deploy", "tool": "terminal", "args": "make deploy" } });
     assert_eq!(said(&mut observer, &call.to_string()).await, "called");
     assert_eq!(said(&mut observer, &call.to_string()).await, "called", "said again");
@@ -157,9 +160,10 @@ async fn a_reused_call_id_is_another_call_across_a_crash() {
     let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
     let chat = fake.chat("talk", &["juniper"]);
     let dir = support::dir("asked-reused");
-    let listen = free_port();
+    let port = bound_port();
+    let listen = port.local_addr().unwrap();
     let cfg = support::config(&fake.url(), &dir, support::settings());
-    let bridge = support::start_killable(cfg.clone(), relay(listen, &dir));
+    let bridge = support::start_killable(cfg.clone(), relay(&port, &dir));
     let hermes = Hermes::spawn(listen, "activity-test", SECRET);
     fake.until(10_000, "chat followed", |w| w.live_sockets() >= 2).await;
     let mut observer = dial(listen, SECRET).await;
@@ -167,7 +171,7 @@ async fn a_reused_call_id_is_another_call_across_a_crash() {
     // a turn that runs until its card is answered, so a crash cuts it
     let asked = fake.say(&chat, &person("paul"), json!({ "text": "ship it, something risky" }));
     let turn = fragment_bridge::records::turn_id("juniper--k3x9", &chat, "chat", asked["seq"].as_u64().unwrap());
-    support::until(10_000, "the turn reached Hermes", || hermes.with(|s| !s.heard.is_empty())).await;
+    support::until(10_000, "the turn under way in Hermes", || hermes.with(|s| !s.begun.is_empty())).await;
     let call = |response: &str, position: u32, id: &str, args: &str| json!({ "turn": turn, "response": response, "call": { "position": position, "tool_call_id": id, "tool": "terminal", "args": args } });
     assert_eq!(said(&mut observer, &call("f00d-1", 0, "call_0", "ls").to_string()).await, "called");
     let end = json!({ "turn": turn, "tool": "terminal", "args": "ls", "excerpt": "Exit code: 0", "tool_call_id": "call_0", "status": "completed", "duration_ms": 3, "response": "f00d-1" });
@@ -182,7 +186,7 @@ async fn a_reused_call_id_is_another_call_across_a_crash() {
     bridge.kill().await;
     drop(observer);
     fake.until(10_000, "its sockets closed", |w| w.live_sockets() == 0).await;
-    let bridge = support::start_killable(cfg, relay(listen, &dir));
+    let bridge = support::start_killable(cfg, relay(&port, &dir));
     let woken = hermes.after_boot(listen, "activity-test", SECRET);
     let next = fake.say(&chat, &person("paul"), json!({ "text": "good morning" }));
     let next = fragment_bridge::records::turn_id("juniper--k3x9", &chat, "chat", next["seq"].as_u64().unwrap());

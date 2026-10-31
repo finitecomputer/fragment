@@ -97,7 +97,11 @@ async sort({ sha256, type }, job) {
 - An image is a JPEG written to a path ending in `.jpg` or `.jpeg`, served
   from the fragment like any file. There is no image editing, no masks and
   no reference images: text to image only.
-- Video steps are off until they run on Cloudflare.
+- A video (`job.ai.video({prompt, path, duration, resolution,
+  aspect_ratio})`) is an MP4 written to a path ending in `.mp4`: text to
+  video only, 3 to 15 seconds (5 by default), `720p` or `1080p`. It is
+  charged by the second, and refused where the deployment's models are
+  private.
 - `job.ai.text` takes OpenAI's `messages`, `tools` and `tool_choice`, and
   answers `{text, message, finish_reason, timing, …}`: a job runs its own
   tool loop (on `finish_reason: "tool_calls"`, push `message`, run each of
@@ -106,9 +110,9 @@ async sort({ sha256, type }, job) {
   turn}` the reply streams into that channel's draft, and the record you
   publish with the same `turn` replaces it. `fragment guide`, AI, has a
   worked example.
-- Every step bills the fragment's owner, reserved before it runs; one the
-  ledger cannot cover is held, saying why. Each fragment has a monthly cap
-  ($5 unless set: `fragment cap garden 10`).
+- Every step bills the fragment's owner, charged once it answers; one
+  started when the ledger is out of credit is held, saying why. Each
+  fragment has a monthly cap ($5 unless set: `fragment cap garden 10`).
 
 ## Outside APIs
 
@@ -140,6 +144,20 @@ provides.
 - The page collects input and renders results.
 - A job calls the model or the API and records what it got.
 - The page follows a channel, or re-runs a query, to show it.
+
+## Cost Guardrail
+
+Before you build a fragment that makes images or videos, tell the person
+what each one costs and that its owner pays for every one anyone makes
+in it:
+
+- an image: about a tenth of a cent;
+- a video: $0.14 a second at 720p, $0.28 at 1080p, plus the platform's
+  fee and margin. A 5-second clip is about a dollar, so the fragment's
+  $5 cap covers only a few.
+
+Make media when someone asks for it. A schedule or a trigger that makes
+it needs the person's yes to what that costs.
 
 ## Publish Guardrail
 

@@ -103,6 +103,10 @@ has none of it.
   call. Never twice, never a continuation's, and never one its asker
   stopped or one that waited on its person (docs/bridge.md, "A cut turn
   is continued once").
+- **A late message is told its age** (Paul, 2026-10-31). An agent
+  handed a message late (a backlog after an outage, a restart or a
+  sleep) is told how old it is, and judges whether it is still wanted;
+  nothing is cut off (docs/bridge.md, "A late message is told its age").
 - **P6, a card outlives its turn.** A sleep or a restart may cut a turn
   under its card. The card stays answerable until it expires; a late
   answer starts one fresh turn, claimed by the answer, with the card's
@@ -142,8 +146,6 @@ Not built either:
   linked account holds the protocol's state, so it never rewinds.
   Deferred (Paul, 2026-10-05: "too much of a lift for now"); SimpleX runs
   on an always-on computer meanwhile (decision 32).
-- **A backlog's age**: chat messages have no age limit after a long
-  outage (routines have an hour). Undecided.
 
 ## What its owner is told
 
@@ -437,7 +439,8 @@ The deployment's `connectors` (`FRAGMENT_CONNECTORS`;
 and the exact endpoints a computer's relay carries for each: `[{id,
 relayTargets: [{host, port}]}]`, each an exact public DNS name on a
 nonzero port. Absent, the cell's default: `simplex`, with `relay::HOSTS`
-on 443. `[]` is the kill switch: no door is linked, redeemed or checked,
+on 443, and `telegram` (a hosted connector, templates/telegram: no
+relay). `[]` is the kill switch: no door is linked, redeemed or checked,
 and no relay opens; an owner may still unlink. A computer's relay offer
 and admission read the same policy, for the connectors its agents are
 allowed; the relay's bounds stay the computer's.

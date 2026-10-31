@@ -67,6 +67,7 @@ use crate::error::{CellError, CellResult};
 use crate::fragment::{json_response, missing, Caller, FragmentCell, MetaKey};
 use crate::ops::{Invocation, JOB_ID_PREFIX};
 use crate::{js, keys};
+use fragment_core::gather::Gathered;
 
 /// Set by the Workflow on its callbacks; the router never sets or passes it.
 pub const JOB_HEADER: &str = "x-fragment-job";
@@ -185,7 +186,8 @@ fn run_row(r: &Value) -> RunRow {
     let row = RunRow {
         id: int("id"),
         op: text("op").to_string(),
-        via: Via::parse(text("via")).unwrap_or_else(|| panic!("runs.via is one the cell writes: {r}")),
+        // a via a later release writes reads as written (Via::Unknown)
+        via: Via::from(text("via").to_string()),
         trigger: r["trigger"].as_str().map(str::to_string),
         principal: text("principal").to_string(),
         role: Role::parse(text("role")).unwrap_or_else(|| panic!("runs.role is a role: {r}")),
@@ -868,7 +870,7 @@ impl FragmentCell {
                 self.step_write(run, index, &w.path, Some(bytes), w.expect).await
             }
             Step::FilesRemove { path, expect } => self.step_write(run, index, &path, None, expect).await,
-            ai @ (Step::AiText(_) | Step::AiDecide(_) | Step::AiImage(_) | Step::AiVideo {}) => {
+            ai @ (Step::AiText(_) | Step::AiDecide(_) | Step::AiImage(_) | Step::AiVideo(_)) => {
                 self.step_ai(run, index, &ai, tried).await
             }
             // what the fragment's own page reads, read for its code: who is
@@ -973,11 +975,15 @@ impl FragmentCell {
             }
         }
         let headers = Headers::new();
+        // every value it fills, a header's or the URL's, is named as its
+        // placeholder in what goes back to the job (`redact`, below)
+        let mut filled = BTreeMap::new();
         for (k, given) in &f.headers {
             let mut value = given.clone();
             for name in placeholders(given) {
                 let secret = self.fill(name, &url).await?;
                 value = value.replace(&format!("{{{{{name}}}}}"), &secret);
+                filled.insert(name.to_string(), secret);
             }
             headers.set(k, &value).map_err(|e| permanent(format!("header {k}: {e}")))?;
         }
@@ -995,10 +1001,12 @@ impl FragmentCell {
                 fragment_core::secrets::UrlUnfilled::Moved => permanent("a secret's value would change where this fetch goes (its host, or its path's segments or query's parameters): it is not sent"),
             })?
         };
-        // what goes back to the job names the URL's secrets as it wrote them:
-        // a failure's message, and an answer that echoes its URL (a redirect's
-        // `location`, an error page)
-        let redact = |text: String| fragment_core::secrets::redact(text, &opened);
+        // what goes back to the job names each secret it filled as the job
+        // wrote it, however the vendor spelled it: a failure's message, and
+        // an answer that echoes the request (a redirect's `location`, an
+        // error page, a debug echo of its headers)
+        filled.extend(opened);
+        let redact = |text: String| fragment_core::secrets::redact(text, &filled);
         if !matches!(method, Method::Get | Method::Head) && !f.headers.keys().any(|k| k.eq_ignore_ascii_case(IDEMPOTENCY_HEADER)) {
             let key = format!("{}-s{index}", self.run_key(run.id).map_err(|e| StepFail::Retry(e.message))?);
             headers.set(IDEMPOTENCY_HEADER, &key).map_err(|e| permanent(e.to_string()))?;
@@ -1025,7 +1033,7 @@ impl FragmentCell {
         if answer.cut {
             return Err(permanent(format!("{host} answered more than {max} bytes; a fetch reads at most that")));
         }
-        let out_headers: Map<String, Value> = answer.headers.entries().map(|(k, v)| (k.to_ascii_lowercase(), Value::String(redact(v)))).collect();
+        let out_headers: Map<String, Value> = answer.headers.entries().map(|(k, v)| (k.to_ascii_lowercase(), Value::String(redact(v)))).gathered();
         Ok(json!({ "status": status, "headers": out_headers, "body": redact(String::from_utf8_lossy(&answer.body).into_owned()) }))
     }
 
@@ -1135,6 +1143,27 @@ impl FragmentCell {
         Ok(())
     }
 
+    /// Starts the runs an install of new code triggers, in the step that
+    /// installs it (plane.rs `install_code`): one install, one run each,
+    /// however often what installs it is asked again. Blocked when
+    /// `read_only` (the owner's standing, read before the install).
+    pub(crate) fn fire_installed(&self, triggers: &[TriggerDecl], sha: &str, code: &str, read_only: Option<Why>) -> CellResult<()> {
+        for t in triggers.iter().filter(|t| matches!(t.on, TriggerOn::Installed(_))) {
+            self.start_run(NewRun {
+                op: &t.run,
+                via: Via::Installed,
+                trigger: Some(code.to_string()),
+                principal: &self.own_key()?,
+                role: Role::Editor,
+                depth: self.commit_depth(Some(sha))?,
+                call: None,
+                input: json!({ "ref": "live", "commit": sha, "code": code }),
+                owner_read_only: read_only,
+            })?;
+        }
+        Ok(())
+    }
+
     /// After code is installed: an operation it does not have loses its
     /// pause and its breaker (one of that name later starts clean). Only
     /// installed code says an operation is gone; a live commit with no app
@@ -1163,7 +1192,7 @@ impl FragmentCell {
             .rows("SELECT op, cron, next_at FROM schedules", vec![])?
             .iter()
             .map(|r| ((r["op"].as_str().unwrap_or("").to_string(), r["cron"].as_str().unwrap_or("").to_string()), r["next_at"].as_i64().unwrap_or(0)))
-            .collect();
+            .gathered();
         self.exec("DELETE FROM schedules", vec![])?;
         let now = js::now_ms();
         for (i, t) in triggers.iter().enumerate() {
@@ -1384,18 +1413,24 @@ impl FragmentCell {
     /// `GET /api/f/<name>/triggers`
     pub(crate) fn triggers_api(&self, caller: &Caller) -> CellResult<Response> {
         self.require(caller, false, Role::Viewer)?;
-        let next: BTreeMap<i64, i64> =
-            self.rows("SELECT idx, next_at FROM schedules", vec![])?.iter().filter_map(|r| Some((r["idx"].as_i64()?, r["next_at"].as_i64()?))).collect();
+        // keyed as sync_schedules keys them, not by position: triggers()
+        // leaves out a kind this release does not know
+        let next: BTreeMap<(String, String), i64> = self
+            .rows("SELECT op, cron, next_at FROM schedules", vec![])?
+            .iter()
+            .filter_map(|r| Some(((r["op"].as_str()?.to_string(), r["cron"].as_str()?.to_string()), r["next_at"].as_i64()?)))
+            .gathered();
         let paused = self.paused_ops()?;
         let triggers: Vec<Value> = self
             .triggers()?
             .into_iter()
-            .enumerate()
-            .map(|(i, t)| {
+            .map(|t| {
                 let mut v = serde_json::to_value(&t).expect("a trigger serializes");
                 v["paused"] = json!(paused.contains(&t.run));
-                if let Some(at) = next.get(&(i as i64)) {
-                    v["nextAt"] = json!(at);
+                if let TriggerOn::Cron(expr) = &t.on {
+                    if let Some(at) = next.get(&(t.run.clone(), expr.clone())) {
+                        v["nextAt"] = json!(at);
+                    }
                 }
                 v
             })

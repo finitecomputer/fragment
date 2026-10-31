@@ -601,7 +601,14 @@ export function createSimplex({ api, el, section, actionLine, named, seg, comput
     if (jump) jump.hidden = s.hidden;
     if (s.hidden) return;
     const agents = c.agents ?? [];
-    s.append(el("p", "muted", "Message your agents from SimpleX Chat, a private messenger for your phone. Your messages are encrypted between your SimpleX app and your computer."));
+    // what it is, a word each (Paul, 2026-10-31), beside Telegram's
+    // "Less secure" (templates/telegram): not in the heading, which names
+    // its nav link
+    const tags = el("div", "connector-tags");
+    const secure = el("span", "role-tag connector-tag", "Secure");
+    secure.title = "End-to-end encrypted to your computer";
+    tags.append(el("span", "role-tag connector-tag", "Experimental"), secure);
+    s.append(tags, el("p", "muted", "Message your agents from SimpleX Chat, a private messenger for your phone. Your messages are encrypted between your SimpleX app and your computer."));
     if (!agents.length) {
       s.append(el("p", "muted", "Make an agent first."));
       return;

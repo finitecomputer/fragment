@@ -223,16 +223,18 @@ unfinished design, not debt.
   computers swapping one key, and a sign-in's computer is found from its
   bound state alone, never the URL, with the H3 checks run against it.
 
-## Connections are untried against real WorkOS Pipes
+## An imported connection's refresh is unproven
 
-- **Shortcut:** connection sign-ins (cell/src/connections.rs) and their
-  state (cell/src/keys.rs `pipes_state`) have answered only the fake.
-- **Risk:** Pipes answers otherwise, or imported tokens never refresh;
-  consent links the old REST path issued stay valid.
-- **Delete when:** the browser-bound flow is reviewed, deployed by Paul
-  and proven in controlled staging (docs/pipes-browser-binding.md),
-  imported-token refresh and a connected account's state included.
-  Enabling providers needs its own authorization.
+- **Shortcut:** a connection's tokens are imported into Pipes once
+  (cell/src/connections.rs), and Pipes is trusted to refresh them with
+  the OAuth client the deployment's WorkOS integration uses
+  (docs/pipes-browser-binding.md). Preview and production connect Google
+  so, but no test or check shows a refresh: the e2e's Pipes is a fake.
+- **Risk:** a connection stops answering swaps once its first access
+  token expires (Google's live an hour), and reads `needs_reauthorization`.
+- **Delete when:** a connection made through the browser-bound flow is
+  seen answering a swap more than an hour after it was made, on preview
+  or production.
 
 ## An agent's sync and deploy reach code.storage directly
 
@@ -298,18 +300,6 @@ unfinished design, not debt.
 - **Delete when:** a call is charged from OpenRouter's reported cost,
   the fee and margin on it.
 
-## A ledger's head carries `holds` and a `book` for a rollback
-
-- **Shortcut:** heads are written for releases before decision 62
-  (`fragment_core::ledger` `OldHolds`, `Ledger::written`,
-  `retire_holds`).
-- **Risk:** none; dead weight that reads as if it meant something.
-- **Delete when:** no release before decision 62 can be deployed again
-  (Paul agreeing) and no head holds any: drop `OldHolds`,
-  `retire_holds`, `written`'s book, and the
-  `a_head_written_here_reads_in_the_release_before` and
-  `a_rollback_finds_no_hold_and_no_held_entry` tests.
-
 ## A paid call's charge is best effort
 
 - **Shortcut:** billing never interrupts a call (decision 62), so model
@@ -367,14 +357,18 @@ unfinished design, not debt.
   it writes (refused for good, so it replays after a top-up), with an
   e2e check; the platform's own records stay.
 
-## Video steps are off
+## A video step's call waits on its model, unpolled
 
-- **Shortcut:** `job.ai.video` is refused
-  (`fragment_core::media::Refusal::VideoOff`): Workers AI has no video.
-- **Risk:** a fragment that made videos (meatproxy) cannot.
-- **Delete when:** a video model runs on Cloudflare, metered from its
-  usage, with an e2e check that a video is drawn, stored and charged; or
-  Paul drops videos, and `job.ai.video` goes with this entry.
+- **Shortcut:** `job.ai.video` is one call of the AI binding
+  (cell/src/ai.rs `step_video`), which answers when the video is made;
+  the model catalog names no request to poll.
+- **Risk:** a video whose making outlasts a Workflow step's try (5
+  minutes, cell/entry.mjs) is tried again before its answer is kept, and
+  may be made, and billed by the catalog, twice. A step tried again
+  after its answer was kept never calls again.
+- **Delete when:** the catalog answers a request id a step can poll (one
+  step starts it, the next ones poll, as the celld era's did), or a
+  step's try outlasts the model's longest making, with an e2e check.
 
 ## An icon's drawings skip the AI Gateway
 
@@ -498,11 +492,13 @@ unfinished design, not debt.
 
 - **Shortcut:** `fragment_core::migrate::adopt` takes an object from
   before 2026-10-19 whose tables are step 1's (`Class::variants`); any
-  other refuses every call (`schema_refused`).
+  other refuses every call (`schema_refused`). An operator's wake
+  (`POST /api/admin/objects/{class}/wake`) starts one no call has.
 - **Risk:** such objects stay refused; a Registry refuses everything.
-- **Delete when:** the deployments made before 2026-10-19 (the e2e
-  preview, p5, preview.finite.build) are reset or retired, or those
-  objects deleted (Paul's call).
+- **Delete when:** every object of the deployments made before
+  2026-10-19 (preview.finite.build, finite.chat) has been woken by
+  `fragment operator wake`, each answering ready; `adopt` and the wake
+  route then go together.
 
 ## An app facet's operation ledger has no schema version
 

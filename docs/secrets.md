@@ -9,8 +9,8 @@ its home; everything that uses it reads it from there.
 
 | Secret | Home | Set and rotated by |
 |---|---|---|
-| The deployment's own: the host secret, the code.storage org key, WorkOS's client id and API key, Stripe's restricted key and webhook secret, the search service's token, each model slot's key on an OpenAI-compatible API, each operator key, each connection's OAuth client secret | the account's Cloudflare Secrets Store, bound to the platform Worker by name (below) | Paul, or the coordinating session, with `cargo xtask secret`; deleting one is Paul's alone |
-| A fragment's secret (an app's API key, a webhook signing key) | the fragment's Durable Object, sealed | its editors (docs/api.md), who may set and list secrets but never read one; a connector's, its owner alone (`cell/src/doors.rs`) |
+| The deployment's own: the host secret, the code.storage org key, WorkOS's client id and API key, Stripe's restricted key and webhook secret, each model slot's key on an OpenAI-compatible API, each operator key, each connection's OAuth client secret | the account's Cloudflare Secrets Store, bound to the platform Worker by name (below) | Paul, or the coordinating session, with `cargo xtask secret`; deleting one is Paul's alone |
+| A fragment's secret (an app's API key, a webhook signing key) | the fragment's Durable Object, sealed | its editors (docs/api.md), who may set and list secrets but never read one; a connector's, its owner alone (`cell/src/doors.rs`), and removed when it installs other code (a fork: Paul, 2026-10-31) |
 | A person's own key for an `own` provider | their computer's Durable Object, sealed | the person; one with a sign-in is exchanged by the platform and sealed at once, never pasted; revoking it is the person's, at the provider |
 | A sign-in under way (its PKCE verifier) | sealed in the computer (an own key's) or the registry (a connection's), until used or ten minutes pass | no one |
 | A fragment's nostr key (an agent's too) and its push key | made and sealed in the fragment's Durable Object, opened only to sign | no one |
@@ -42,14 +42,24 @@ only from that computer's egress, toward that provider.
   leaves, over https and only toward a host the secret names
   (`fragment_core::secrets::may_fill`). A value filled into a URL that
   would change its scheme, host, port, path segments or query parameters
-  is not sent, and a failure's message and the answer name it as its
-  placeholder again (`fill_url`, `redact`). Its hosts are set only with
+  is not sent (`fill_url`). A failure's message and the answer name every
+  value the fetch filled, a header's or the URL's, as its placeholder
+  again, in each form a vendor writes one back in, character by
+  character: as it is, its UTF-8 percent-encoded (either hex case, once or
+  twice), JSON-escaped (`\u` past ASCII and surrogate pairs, a control
+  character's short escape such as `\n`, also within JSON), as HTML character references; and in base64 for a value of 12
+  bytes or more, itself in any of those forms (`redact`; #814). A value that comes back compressed, hashed or
+  cut in pieces by the vendor is past what matching text can name. Its hosts are set only with
   its value, so an editor who cannot read a value cannot send it anywhere
   its setter did not mean. An editor sets one through the API (`fragment
   secret set`) or from the fragment's own page (`PUT __secrets/{KEY}`,
   the same contract over its session), so a connector's page takes a
   pasted token, and makes a webhook's secret in the browser, without
   either passing through app code or a model.
+- **No deployment traces its fetches**: a Workers trace records each
+  fetch's URL and query, which may carry a secret filled at the egress,
+  so `cargo xtask deploy` pins `observability.traces` off beside its logs
+  (#814).
 - **Agents hold no key.** Model calls go through the platform's model
   route, which adds a deployment key toward that API alone; operator keys
   and connections are swapped in at the computer's egress.

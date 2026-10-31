@@ -359,7 +359,7 @@ pub fn cleanup_note(left: &[fragment_proto::wipe::Cleaning]) -> String {
 /// each once, all counted, the first `NAMES_SHOWN_MAX` shown.
 pub fn listed(names: impl IntoIterator<Item = String>) -> Listed {
     let mut all: Vec<String> = names.into_iter().collect();
-    all.sort();
+    all.sort_unstable();
     all.dedup();
     let count = all.len() as u64;
     let more = all.len() > NAMES_SHOWN_MAX;

@@ -254,10 +254,11 @@ async fn a_reply_is_not_held_behind_its_drafts_interval() {
 }
 
 /// Goal (Paul, 2026-10-24: everything the agent says is a reply in the
-/// chat): a tool call is a step on `work`; the words the agent said before
-/// it are a reply of their own, posted before the step and marked
-/// `interim` (its turn worked on after them), never the step's; the turn's
-/// answer is a reply after it.
+/// chat): a tool call is a step on `work`, said first as asked for
+/// (`turn.call`, before it runs); the words the agent said before it are a
+/// reply of their own, posted before the step and marked `interim` (its
+/// turn worked on after them), never the step's; the turn's answer is a
+/// reply after it.
 #[tokio::test]
 async fn tool_steps() {
     let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
@@ -275,7 +276,9 @@ async fn tool_steps() {
         assert!(steps[0].get("text").is_none(), "the words are no part of the step: {}", steps[0]);
         assert_eq!((&steps[0]["category"], &steps[0]["args"]), (&json!("web"), &json!("use a tool")), "what it does, and its preview");
         let ids: Vec<String> = w.records(&chat, "work").iter().map(|r| r["body"]["kind"].as_str().unwrap_or("").to_string()).collect();
-        assert_eq!(ids, vec!["turn.start", "commands", "turn.step", "turn.end"]);
+        assert_eq!(ids, vec!["turn.start", "commands", "turn.call", "turn.step", "turn.end"], "its call said before it ran, then its end");
+        let call = w.bodies(&chat, "work", "turn.call").remove(0);
+        assert_eq!((&call["tool"], &call["args"], &call["category"], &call["tool_call_id"]), (&json!("search"), &json!("use a tool"), &json!("web"), &json!("call-search")), "{call}");
         let replies: Vec<Value> = w.records(&chat, "chat").into_iter().filter(|r| r["body"]["turn"] == turn).collect();
         let bodies: Vec<Value> = replies.iter().map(|r| r["body"].clone()).collect();
         assert_eq!(bodies, vec![json!({ "text": "Let me look.", "turn": turn, "interim": true }), json!({ "text": "echo: [paul] use a tool", "turn": turn })], "its words, then its answer");
@@ -1780,6 +1783,47 @@ async fn the_turn_after_a_cut_one_is_told_what_was_cut() {
         bridge.stop().await;
     }
     assert!(told.windows(2).all(|p| p[0] == p[1]), "the journal's note of the cut, whatever state woke: {told:#?}");
+}
+
+/// Goal (FIN-236; Alex on #853): a late message's age goes first in what
+/// its turn is told, before what was cut, never in its place (a turn's
+/// own note means a card's, which takes the cut note's place). A cut
+/// turn's continuation is told the age of what it answered, then what was
+/// cut; a message after a cut turn that waited on its card (so was not
+/// continued) is told its own age, then what was cut.
+#[tokio::test]
+async fn a_late_messages_age_comes_before_what_was_cut() {
+    for continued in [true, false] {
+        let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+        let chat = fake.chat("talk", &["juniper"]);
+        let dir = support::dir(&format!("aged-{continued}"));
+        let cfg = support::config(&fake.url(), &dir, support::settings());
+        let pace = Duration::from_millis(100);
+        let hours = |h: u64| Duration::from_secs(h * 3_600);
+        let bridge = support::start_killable(cfg.clone(), support::script_paced(pace));
+        following(&fake, 2).await;
+        let cut_text = if continued { "a slow tool please" } else { "something risky" };
+        let said = fake.say_aged(&chat, &person("paul"), json!({ "text": cut_text }), hours(2));
+        let cut = turn_of("juniper", &chat, seq(&said));
+        fake.until(WAIT, "the cut turn under way", |w| if continued { w.bodies(&chat, "work", "turn.step").iter().any(|s| s["turn"] == cut.as_str()) && w.drafts.iter().any(|d| d.2 == cut) } else { w.bodies(&chat, "work", "turn.prompt").iter().any(|p| p["turn"] == cut.as_str()) }).await;
+        bridge.kill().await;
+        fake.until(WAIT, "its sockets closed", |w| w.live_sockets() == 0).await;
+        let bridge = support::start_killable(cfg, support::script_paced(pace));
+        let told = if continued {
+            records::continuation_id(&cut)
+        } else {
+            let next = fake.say_aged(&chat, &person("paul"), json!({ "text": "good morning" }), hours(3));
+            turn_of("juniper", &chat, seq(&next))
+        };
+        fake.until(WAIT, "the told turn's end", |w| !ends_of(w, &chat, &told).is_empty()).await;
+        let note = fake.with(|w| replies(w, &chat).into_iter().find(|r| r["turn"] == told.as_str()).and_then(|r| r["text"].as_str().map(str::to_string)).unwrap_or_default());
+        let note = note.split_once("\n\n(told: ").map(|(_, n)| n.trim_end_matches(')').to_string()).unwrap_or_else(|| panic!("{continued}: told something: {note:?}"));
+        let age = if continued { "What that turn was answering was sent about 2 hours ago." } else { "This message was sent about 3 hours ago, and is only reaching you now." };
+        let (first, rest) = note.split_once("\n\n").unwrap_or_else(|| panic!("{continued}: its age, then what was cut: {note}"));
+        assert_eq!(first, format!("{age} If it may no longer be wanted, check before acting on it."), "{continued}: {note}");
+        assert!(rest.starts_with("Your previous turn in this chat was cut short") && rest.contains(&format!("It was answering: “{cut_text}”")), "{continued}: what was cut, after its age: {note}");
+        bridge.stop().await;
+    }
 }
 
 /// Goal : a turn whose run ended, but whose end a crash kept from the

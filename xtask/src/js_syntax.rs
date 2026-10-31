@@ -61,8 +61,9 @@ const SHELL: &str = "cell/shell/shell.js";
 /// A test file's name ends so (`node --test`'s own default).
 const TEST_SUFFIX: &str = ".test.mjs";
 /// The shell's tests, which a walk must find: the chat page's control.js's,
-/// onboarding.js's and threads.js's.
-const SHELL_TESTS: [&str; 3] = ["cell/shell-tests/chat-control.test.mjs", "cell/shell-tests/onboarding.test.mjs", "cell/shell-tests/threads.test.mjs"];
+/// chat-list.js's (its sections, and whom the ways to ask for an app ask),
+/// history-page.js's, launcher.js's Knowledge, onboarding.js's and threads.js's.
+const SHELL_TESTS: [&str; 7] = ["cell/shell-tests/asked-agent.test.mjs", "cell/shell-tests/chat-control.test.mjs", "cell/shell-tests/chat-list.test.mjs", "cell/shell-tests/history-page.test.mjs", "cell/shell-tests/launcher-knowledge.test.mjs", "cell/shell-tests/onboarding.test.mjs", "cell/shell-tests/threads.test.mjs"];
 
 /// How Node is told to parse a file (`--input-type`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

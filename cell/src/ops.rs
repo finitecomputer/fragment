@@ -427,6 +427,10 @@ impl FragmentCell {
             // an ended life's cleanup, which outlives it (ended.rs)
             return self.ended_view();
         }
+        if body["op"] == "search-index" {
+            // a life's search index, an ended life's too (searchable.rs)
+            return self.search_index_lever(body).await;
+        }
         self.name()?;
         let ms = || body["ms"].as_i64().filter(|ms| *ms >= 0).ok_or_else(|| CellError::invalid("ms is a duration"));
         Ok(match body["op"].as_str() {
@@ -461,9 +465,10 @@ impl FragmentCell {
                 self.schedule().await?;
                 json!({ "aged": ms, "invites": aged })
             }
-            Some(lever @ ("fail-deliveries" | "fail-outbox" | "fail-triggers" | "drop-effects" | "fail-meter-acks" | "fail-after-paid" | "fail-cards")) => {
+            Some(lever @ ("fail-deliveries" | "fail-outbox" | "fail-triggers" | "drop-effects" | "fail-meter-acks" | "fail-after-paid" | "fail-cards" | "fail-search-index")) => {
                 let key = match lever {
                     "fail-cards" => MetaKey::TestFailCards,
+                    "fail-search-index" => MetaKey::TestFailSearchIndex,
                     "fail-deliveries" => MetaKey::TestFailDeliveries,
                     "fail-outbox" => MetaKey::TestFailOutbox,
                     "fail-triggers" => MetaKey::TestFailTriggers,
@@ -553,6 +558,19 @@ impl FragmentCell {
                 let ms = ms()?;
                 self.trim_writes_before(js::now_ms() + ms - crate::files::WRITES_KEPT_MS)?;
                 json!({ "aged": ms })
+            }
+            Some("future-rows") => {
+                // a trigger and a run as a later release may write them, a
+                // kind and a via this one does not know: trigger 0 becomes
+                // one, and a finished run is one
+                let triggers = self.rows("UPDATE code_triggers SET kind = 'future' WHERE idx = 0 RETURNING idx", vec![])?.len();
+                let now = SqlStorageValue::Integer(js::now_ms());
+                let run = self.rows(
+                    "INSERT INTO runs (op, via, principal, role, depth, input, status, attempt, created_at, finished_at)
+                     VALUES ('tick', 'future', ?, 'editor', 0, '{}', 'succeeded', 1, ?, ?) RETURNING id",
+                    vec![self.own_key()?.into(), now.clone(), now],
+                )?;
+                json!({ "triggers": triggers, "run": run.first().and_then(|r| r["id"].as_i64()) })
             }
             Some("legacy-member-kind") => {
                 // a member row from before `members.kind` (2026-09-24): its

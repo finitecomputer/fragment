@@ -838,10 +838,10 @@ pub fn cli(s: &mut Suite, api: &Api) -> Result<()> {
     let wrote = mcp(true, &[("say", json!({ "text": "from mcp" }))])?;
     let said = api.signed(&keys, "GET", &format!("/api/f/{name}/channels/room"), None)?;
     s.ok(
-        "fragment mcp serves the described queries over stdio, signed with the CLI's key: a call answers, a refused one is the tool's error with the platform's code, and a write without --write is refused",
+        "fragment mcp serves the described queries over stdio, and a reader's search, signed with the CLI's key: a call answers, a refused one is the tool's error with the platform's code, and a write without --write is refused",
         read.len() == 5
             && read[0]["result"]["serverInfo"]["title"] == name.as_str()
-            && tools(&read[1]) == ["count", "measure"]
+            && tools(&read[1]) == ["count", "measure", "fragment-search"]
             && read[2]["result"]["structuredContent"]["n"].is_u64()
             && read[3]["result"]["isError"] == true
             && read[3]["result"]["structuredContent"]["error"]["code"] == "invalid_request"
@@ -851,7 +851,7 @@ pub fn cli(s: &mut Suite, api: &Api) -> Result<()> {
     );
     s.ok(
         "with --write it serves the described mutation too, and a call of it runs once",
-        tools(&wrote[1]) == ["count", "measure", "say"]
+        tools(&wrote[1]) == ["count", "measure", "say", "fragment-search"]
             && wrote[2]["result"]["structuredContent"]["id"].is_u64()
             && said.body["records"].as_array().is_some_and(|r| r.iter().filter(|r| r["body"]["text"] == "from mcp").count() == 1),
         json!({ "mcp": wrote, "room": said.body }),

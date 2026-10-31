@@ -7,6 +7,7 @@ mod codestorage;
 mod mcp;
 mod notice;
 mod operator;
+mod search;
 mod session;
 mod sync;
 mod watch;
@@ -210,7 +211,7 @@ enum Cmd {
         #[arg(long, default_value = "30")]
         limit: u64,
     },
-    /// List a fragment's triggers (cron, channel, files) and what is paused
+    /// List a fragment's triggers (cron, channel, files, installed) and what is paused
     Triggers { name: String },
     /// The deployment's operators: an operator key, wiping a person, and
     /// the admin (people, orgs, comped seats, trial codes, billing's
@@ -297,6 +298,37 @@ enum Cmd {
     Blob {
         #[command(subcommand)]
         sub: BlobCmd,
+    },
+    /// Search fragments' own indexes by their words and their meaning, as
+    /// one (a reader's, in each): each result a section of one of their
+    /// sources, best first, named by its fragment, with a snippet. `--json`
+    /// also says how each fragment answered
+    Search {
+        /// What to find, in words
+        query: String,
+        /// The fragments to search (`--in parent,research,delivery`; one is
+        /// `--in notes`)
+        #[arg(long = "in", value_delimiter = ',', required_unless_present = "all", conflicts_with = "all")]
+        fragments: Vec<String>,
+        /// Your brains and your Session Archive (not the ones you
+        /// archived), 32 at most, by name
+        #[arg(long)]
+        all: bool,
+        /// How many results, at most (1 to 50; 10 unnamed)
+        #[arg(long)]
+        limit: Option<usize>,
+        /// By words and meaning (the default), words alone, or meaning alone
+        #[arg(long, value_parser = ["hybrid", "lexical", "semantic"])]
+        mode: Option<String>,
+        /// Only sources with this field (`--field kind=chat`); each named is required
+        #[arg(long = "field", value_name = "NAME=VALUE")]
+        fields: Vec<String>,
+        /// Only sections at or after this time (RFC 3339)
+        #[arg(long)]
+        after: Option<String>,
+        /// Only sections before this time
+        #[arg(long)]
+        before: Option<String>,
     },
     /// Serve a fragment's described operations as tools to an MCP client
     /// (Claude Code, Codex) over stdio: its queries, and with --write its
@@ -529,6 +561,17 @@ enum OperatorCmd {
         #[arg(long)]
         key_file: Option<PathBuf>,
     },
+    /// Start platform objects by the ids Cloudflare lists them under, each
+    /// as a call would, its schema made current (one made before versioned
+    /// schemas adopted): says which refused, and how many are ready
+    Wake {
+        /// Registry, Principal, Ledger, Fragment or Computer
+        class: String,
+        /// A file of their ids, one a line
+        ids: PathBuf,
+        #[arg(long)]
+        key_file: Option<PathBuf>,
+    },
     /// What operators did, newest first
     Log {
         #[arg(long)]
@@ -610,6 +653,9 @@ fn operator_client(host: &Option<String>, verbose: bool, key_file: Option<&std::
         None => require_client(host, verbose),
     }
 }
+
+/// The ids a wake's failure names (every one, and why, is on stderr).
+const WAKE_NAMED_MAX: usize = 20;
 
 /// An admin call's answer as JSON, or its refusal.
 fn admin_answer(c: &api::Client, resp: api::Resp) -> Result<Value> {
@@ -1442,6 +1488,41 @@ fn run(cli: Cli) -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&v)?);
             return Ok(());
         }
+        Cmd::Operator { sub: OperatorCmd::Wake { class, ids, key_file } } => {
+            if class.is_empty() || !class.bytes().all(|b| b.is_ascii_alphabetic()) {
+                return Err(usage("a class: Registry, Principal, Ledger, Fragment or Computer"));
+            }
+            let c = operator_client(&cli.host, cli.verbose, key_file.as_deref())?;
+            let text = std::fs::read_to_string(&ids).with_context(|| format!("reading {}", ids.display()))?;
+            let ids: Vec<&str> = text.split_whitespace().collect();
+            let mut refused = Vec::new();
+            for (n, id) in ids.iter().enumerate() {
+                // a wake asked again runs nothing: retried as a read is
+                let woke = c.post_json_by_id(&format!("/api/admin/objects/{class}/wake"), &json!({ "id": id })).and_then(|r| admin_answer(&c, r));
+                if let Err(e) = woke {
+                    eprintln!("{class} {id}: {e:#}");
+                    refused.push(*id);
+                }
+                if !j && (n + 1) % 500 == 0 {
+                    eprintln!("{} of {}", n + 1, ids.len());
+                }
+            }
+            let ready = ids.len() - refused.len();
+            if !refused.is_empty() {
+                // stdout holds one line: with --json, main's failure envelope
+                // alone (each refusal is on stderr, above)
+                if !j {
+                    println!("{ready} of {} {class} objects ready", ids.len());
+                }
+                let named = refused.iter().take(WAKE_NAMED_MAX).copied().collect::<Vec<_>>().join(", ");
+                let more = refused.len().saturating_sub(WAKE_NAMED_MAX);
+                let more = if more > 0 { format!(", and {more} more") } else { String::new() };
+                return Err(anyhow!("{} of {} {class} objects did not wake (each, and why, on stderr): {named}{more}", refused.len(), ids.len()));
+            }
+            json_exit(j, &json!({ "class": class, "asked": ids.len(), "ready": ready }));
+            println!("{ready} of {} {class} objects ready", ids.len());
+            return Ok(());
+        }
         Cmd::Operator { sub: OperatorCmd::Credit { org, usd, why, id, key_file } } => {
             let c = operator_client(&cli.host, cli.verbose, key_file.as_deref())?;
             let org = org_id(&org)?;
@@ -1981,6 +2062,7 @@ fn run(cli: Cli) -> Result<()> {
                 let on = ["cron", "channel", "files"]
                     .iter()
                     .find_map(|k| t[*k].as_str().map(|v| format!("{k} {v}")))
+                    .or_else(|| (t["installed"] == true).then(|| "installed".to_string()))
                     .unwrap_or_default();
                 let next = t["nextAt"].as_u64().map(|n| format!("\tnext {} UTC", chrono_like(n / 1000))).unwrap_or_default();
                 let paused = if t["paused"].as_bool().unwrap_or(false) { "\tPAUSED" } else { "" };
@@ -2247,6 +2329,26 @@ fn run(cli: Cli) -> Result<()> {
             if v.replayed {
                 eprintln!("(replayed: operation {id} had already run)");
             }
+        }
+        Cmd::Search { query, fragments, all, limit, mode, fields, after, before } => {
+            let fragments = match all {
+                true => {
+                    let (names, left) = search::all(&c.call_as(c.get("/api/fragments")?)?);
+                    if names.is_empty() {
+                        return Err(usage("--all found no brain or Session Archive of yours to search: name some with --in"));
+                    }
+                    if left > 0 {
+                        eprintln!("(searching the first {} by name; {left} more left out: name them with --in)", names.len());
+                    }
+                    names
+                }
+                false => fragments,
+            };
+            let mode = mode.map(|m| serde_json::from_value(json!(m)).expect("clap took one of the modes"));
+            let asked = search::across(query, fragments, limit, mode, &fields, after, before).map_err(usage)?;
+            let answer = search::search(&c, asked)?;
+            json_exit(j, &answer);
+            search::print(&answer);
         }
         Cmd::Blob { sub: BlobCmd::Put { name, file } } => {
             let bytes = std::fs::read(&file).with_context(|| format!("reading {}", file.display()))?;

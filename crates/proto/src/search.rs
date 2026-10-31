@@ -116,13 +116,149 @@ pub struct Hit {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub location: Option<Value>,
     pub snippet: String,
+    /// Its fused score: reciprocal rank fusion (k = 60) of the legs below.
     pub score: f64,
     pub signals: Vec<String>,
+    /// Where the words leg found it, if it did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lexical: Option<Lexical>,
+    /// Where the meaning leg found it, if it did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic: Option<Semantic>,
+}
+
+/// A section's place in the words leg: its rank there (from 1) and its
+/// best chunk's BM25, higher better, by this fragment's own statistics
+/// (so not comparable across fragments).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Lexical {
+    pub rank: usize,
+    pub bm25: f64,
+}
+
+/// A section's place in the meaning leg: its rank there (from 1) and its
+/// best chunk's cosine with the question, as `SCHEME` estimates it:
+/// comparable across fragments whose answers name the same space.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Semantic {
+    pub rank: usize,
+    pub cosine: f64,
+}
+
+/// How every index holds a vector: each component as int8 at the one
+/// scale 127/0.25 (so a dot product over 508² is a cosine), and its sign
+/// bit, which the first pass reads.
+pub const SCHEME: &str = "i8x508+sign";
+
+/// What a deployment's vectors mean: its embeddings model, their
+/// dimensions, and the version it names, if any.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Space {
+    pub model: String,
+    pub dimensions: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Found {
     pub results: Vec<Hit>,
-    /// `on`, or `off`: this deployment embeds nothing, so words alone.
+    /// `on`, or `off`: words alone answered (this deployment embeds
+    /// nothing, the question was not embedded, or the index holds vectors
+    /// of another space until its sources are written again).
+    pub semantic: String,
+    /// Whether this life ever wrote its index: `false`, nothing was asked
+    /// of it, and `results` is empty.
+    pub indexed: bool,
+    /// The space of the cosines, and `SCHEME`: both, whenever this
+    /// deployment embeds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub space: Option<Space>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheme: Option<String>,
+}
+
+/// A question the platform embedded already, for one fragment of many
+/// (`POST /search/asked`, a supervisor's route the router never maps):
+/// searched by `vector` (the deployment's space, little-endian float32,
+/// base64), never embedded again, so its asker pays once; with none, by
+/// its words alone.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Forwarded {
+    pub query: Query,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vector: Option<String>,
+}
+
+/// Fragments one question across fragments asks, at most.
+pub const IN_MAX: usize = 32;
+/// Hits a question across fragments asks each one for, at least: the
+/// merge's depth (fragment_core::across::asked_limit).
+pub const ASKED_MIN: usize = 20;
+
+/// `POST /api/search`: one question, asked of several fragments' own
+/// indexes as the signer (docs/api.md, "Search across fragments").
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Across {
+    pub q: String,
+    /// The fragments asked, each named in full.
+    #[serde(rename = "in")]
+    pub fragments: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+    #[serde(default)]
+    pub mode: Mode,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub fields: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before: Option<String>,
+}
+
+/// How a fragment asked answered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Reached {
+    /// Its index was searched (its hits may be none).
+    Searched,
+    /// It holds no index: no source was ever written.
+    NoIndex,
+    /// The signer may not read it.
+    Denied,
+    /// There is no such fragment.
+    Missing,
+    /// It did not answer, or refused for another reason (`message`).
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Asked {
+    pub name: String,
+    pub state: Reached,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+/// A hit, and the fragment it is from.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FromFragment {
+    pub fragment: String,
+    #[serde(flatten)]
+    pub hit: Hit,
+}
+
+/// The answer across fragments: the hits merged, best first, and how each
+/// fragment asked answered, in the order asked.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FoundAcross {
+    pub results: Vec<FromFragment>,
+    pub fragments: Vec<Asked>,
+    /// `on` when the question was searched by its meaning too.
     pub semantic: String,
 }

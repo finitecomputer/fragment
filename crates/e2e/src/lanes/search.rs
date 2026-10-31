@@ -1,158 +1,34 @@
-//! A fragment's search (docs/api.md, "A fragment's search"): the search
-//! service itself (search/, its image in Docker on a disk store), the node
-//! started naming it, the Workers AI fake embedding. An editor writes a
-//! source whole, chunked and embedded once; a reader finds it by its words
-//! and its meaning; a replay and a grown source embed nothing again; a
-//! stale write is refused; limits are checked before anything is sent; a
-//! viewer only reads, a stranger neither, and a member removed reads
-//! nothing more; a push that deletes a source's file forgets it, and a
-//! forget the service's outage held back, or one past a pass's hundred,
-//! never lands after the source's next write; a write held at its
-//! embedding, or at the service's door, while its fragment is deleted and
-//! made again writes nothing to either life; the service restarted still
-//! holds what was written; a deleted fragment's index goes with it; and a
-//! deployment whose tiers are private, with no private embeddings slot,
-//! indexes by words alone.
+//! A fragment's search (docs/api.md, "A fragment's search"): each life's
+//! index a `SearchIndex` object of its own, the Workers AI fake embedding.
+//! A fragment that wrote nothing answers `indexed: false`, embedding
+//! nothing; an editor writes a source whole, chunked and embedded once; a
+//! reader finds it by its words and its meaning, each hit placed in each
+//! leg, the index's int8 dot product Wasm SIMD's; a replay and a grown
+//! source embed nothing again; a stale write is refused; limits are
+//! checked before anything is sent; a viewer only
+//! reads, a stranger neither, and a member removed reads nothing more; a
+//! push that deletes a source's file forgets it, and a forget the index's
+//! outage held back, or one past a pass's hundred, never lands after the
+//! source's next write; a write held at its embedding, or at the index
+//! itself, while its fragment is deleted and made again writes nothing to
+//! either life; an index takes writes up to its cap, a source replaced at
+//! capacity counted once; a deleted fragment's index is ended, its rows
+//! gone; the node restarted still holds what was written; restarted with
+//! its embeddings in another space, an index answers by words alone until
+//! a write empties it; and a deployment whose tiers are private, with no
+//! private embeddings slot, indexes by words alone.
 
-use std::collections::BTreeSet;
-use std::process::Command;
-use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use fragment_nip98::Keys;
 use serde_json::{json, Value};
 
+use super::ledger::lever;
 use crate::api::Api;
 use crate::Suite;
 
-const IMAGE: &str = "fragment-search:e2e";
 const MODEL: &str = fragment_core::embed::MODEL_DEFAULT;
-
-/// The service's container, removed however the section ends.
-struct Service {
-    name: String,
-    url: String,
-    port: String,
-}
-
-/// Between the node and the service: every call forwarded, but an upsert
-/// held while `hold` is on (counted, `held`), until `release`: a write the
-/// cell sent that the service has not taken yet.
-struct Door {
-    server: fragment_fakes::http::Server,
-    gate: Arc<(Mutex<Gate>, Condvar)>,
-}
-
-#[derive(Default)]
-struct Gate {
-    holding: bool,
-    held: usize,
-}
-
-impl Door {
-    fn open(to: &str) -> Result<Door> {
-        use fragment_fakes::http::{Request, Response, Server};
-        let gate: Arc<(Mutex<Gate>, Condvar)> = Arc::default();
-        let g = Arc::clone(&gate);
-        let (to, client) = (to.to_string(), reqwest::blocking::Client::new());
-        let server = Server::start(
-            0,
-            Arc::new(move |req: &Request| {
-                if req.path.ends_with("/upsert") {
-                    let (lock, changed) = &*g;
-                    let mut gate = lock.lock().expect("the door");
-                    if gate.holding {
-                        gate.held += 1;
-                        while gate.holding {
-                            gate = changed.wait(gate).expect("the door");
-                        }
-                    }
-                }
-                let Ok(mut url) = reqwest::Url::parse(&format!("{to}{}", req.path)) else { return Response::json(400, &json!({ "error": "path" })) };
-                if !req.pairs.is_empty() {
-                    url.query_pairs_mut().extend_pairs(&req.pairs);
-                }
-                let method = reqwest::Method::from_bytes(req.method.as_bytes()).unwrap_or(reqwest::Method::GET);
-                let mut call = client.request(method, url).body(req.body.clone());
-                for h in ["authorization", "content-type"] {
-                    if let Some(v) = req.header(h) {
-                        call = call.header(h, v);
-                    }
-                }
-                match call.send() {
-                    Ok(r) => {
-                        let status = r.status().as_u16();
-                        Response::bytes(status, "application/json", r.bytes().map(|b| b.to_vec()).unwrap_or_default())
-                    }
-                    Err(e) => Response::json(502, &json!({ "error": "unreachable", "message": e.to_string() })),
-                }
-            }),
-        )?;
-        Ok(Door { server, gate })
-    }
-
-    fn hold(&self) {
-        self.gate.0.lock().expect("the door").holding = true;
-    }
-
-    fn held(&self) -> usize {
-        self.gate.0.lock().expect("the door").held
-    }
-
-    fn release(&self) {
-        self.gate.0.lock().expect("the door").holding = false;
-        self.gate.1.notify_all();
-    }
-}
-
-impl Drop for Service {
-    fn drop(&mut self) {
-        let _ = Command::new("docker").args(["rm", "-f", &self.name]).output();
-    }
-}
-
-fn docker(args: &[&str]) -> Result<String> {
-    let out = Command::new("docker").args(args).output().context("docker")?;
-    anyhow::ensure!(out.status.success(), "docker {}: {}", args.join(" "), String::from_utf8_lossy(&out.stderr));
-    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
-}
-
-/// The service's image (built from search/ unless CI built it before the
-/// run), started on a disk store of its container's own.
-fn start(token: &str) -> Result<Service> {
-    if docker(&["image", "inspect", IMAGE]).is_err() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../search");
-        docker(&["build", "--platform", "linux/amd64", "-t", IMAGE, root.to_str().context("a path")?])?;
-    }
-    let name = format!("fragment-search-e2e-{}", std::process::id());
-    let _ = docker(&["rm", "-f", &name]);
-    // a port of its own, named: a restart keeps it (`-p 127.0.0.1:0:…` would move)
-    let port = std::net::TcpListener::bind("127.0.0.1:0")?.local_addr()?.port().to_string();
-    docker(&["run", "-d", "--name", &name, "-p", &format!("127.0.0.1:{port}:8080"), "-e", "SEARCH_STORAGE=/tmp/search", "-e", &format!("SEARCH_TOKEN={token}"), IMAGE])?;
-    let service = Service { name, url: format!("http://127.0.0.1:{port}"), port: port.clone() };
-    for _ in 0..100 {
-        if healthy(&port) {
-            return Ok(service);
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    anyhow::bail!("the search service did not answer its health check")
-}
-
-/// Whether the service on `port` answers its health check.
-fn healthy(port: &str) -> bool {
-    use std::io::{Read, Write};
-    let Ok(mut stream) = std::net::TcpStream::connect(format!("127.0.0.1:{port}")) else { return false };
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
-    let mut answer = String::new();
-    stream.write_all(b"GET /healthz HTTP/1.0\r\nhost: search\r\n\r\n").is_ok() && stream.read_to_string(&mut answer).is_ok() && answer.starts_with("HTTP/1.") && answer.split_whitespace().nth(1) == Some("200")
-}
-
-/// The tables the service's store holds now.
-fn tables(service: &Service) -> BTreeSet<String> {
-    docker(&["exec", &service.name, "ls", "/tmp/search"]).map(|out| out.lines().map(str::to_string).collect()).unwrap_or_default()
-}
 
 /// How many texts the embeddings model was asked for since `from`.
 fn embedded(s: &Suite, from: usize) -> usize {
@@ -170,17 +46,39 @@ fn turns() -> Value {
     ])
 }
 
-pub fn search(s: &mut Suite, _: &Api) -> Result<()> {
-    if !s.section("search", &[crate::Need::Node, crate::Need::LocalDocker, crate::Need::Levers, crate::Need::Fakes]) {
+/// The index of `name`'s life `incarnation` (its live one's, none named),
+/// as it holds: `{incarnation, index: {exists, ended, sources, chunks, held, …}}`.
+fn index_of(api: &Api, name: &str, incarnation: Option<i64>, hold: Option<bool>) -> Result<Value> {
+    let mut extra = json!({});
+    if let Some(i) = incarnation {
+        extra["incarnation"] = json!(i);
+    }
+    if let Some(h) = hold {
+        extra["hold"] = json!(h);
+    }
+    let r = lever(api, name, "search-index", extra)?;
+    anyhow::ensure!(r.status == 200, "{name}'s search index: {r}");
+    Ok(r.body)
+}
+
+/// Whether a life's index ended with nothing left in it.
+fn ended_empty(index: &Value) -> bool {
+    index["index"]["ended"] == true && index["index"]["sources"] == 0 && index["index"]["chunks"] == 0
+}
+
+pub fn search(s: &mut Suite, api: &Api) -> Result<()> {
+    if !s.section("search", &[crate::Need::Node, crate::Need::Levers, crate::Need::Fakes]) {
         return Ok(());
     }
-    let token = Keys::generate().pubkey_hex()[..40].to_string();
-    let service = start(&token)?;
-    let door = Door::open(&service.url)?;
+    let (owner, name) = checks(s, api)?;
+    // ---- the node restarted holds what was written
     s.stop()?;
-    s.search = Some(fragment_devstack::SearchVars { url: door.server.url.clone(), token: token.clone() });
-    let checked = match s.start(false) {
-        Ok(api) => checks(s, &api, &service, &door),
+    let api = s.start(false)?;
+    let found = api.signed(&owner, "POST", &format!("/api/f/{name}/search"), Some(&json!({ "q": "ferry friday" })))?;
+    s.ok("the node restarted, what was written is searched still", found.status == 200 && found.body["results"][0]["section"] == "t2", &found);
+    s.stop()?;
+    let moved = match s.start_repinned() {
+        Ok(api) => moved_checks(s, &api, &owner, &name),
         Err(e) => Err(e),
     };
     s.stop()?;
@@ -189,31 +87,53 @@ pub fn search(s: &mut Suite, _: &Api) -> Result<()> {
         Err(e) => Err(e),
     };
     s.stop()?;
-    s.search = None;
-    drop(service);
     s.start(false)?;
-    checked.and(private)
+    moved.and(private)
+}
+
+/// On the node restarted with its embeddings in another space: `name`'s
+/// index, written in the space before, is searched by its words alone
+/// until a write empties it (a refused one too), and is written again.
+fn moved_checks(s: &mut Suite, api: &Api, owner: &Keys, name: &str) -> Result<()> {
+    let path = |route: &str| format!("/api/f/{name}/search{route}");
+    let before = api.signed(owner, "POST", &path(""), Some(&json!({ "q": "ferry friday" })))?;
+    let held = api.signed(owner, "GET", &path("/status"), None)?;
+    let mut stale = upsert("sessions/a.json", "r9", turns());
+    stale["replaces"] = json!("r2");
+    let refused = api.signed(owner, "POST", &path("/upsert"), Some(&stale))?;
+    let emptied = api.signed(owner, "GET", &path("/status"), None)?;
+    let nothing = api.signed(owner, "POST", &path(""), Some(&json!({ "q": "ferry friday" })))?;
+    let mut fresh = upsert("sessions/a.json", "r3", turns());
+    fresh["replaces"] = json!("");
+    let again = api.signed(owner, "POST", &path("/upsert"), Some(&fresh))?;
+    let found = api.signed(owner, "POST", &path(""), Some(&json!({ "q": "harbour lantern audit" })))?;
+    s.ok(
+        "embeddings moved to another space: the index of the space before answers by its words alone (semantic off); the first write in the new one empties it first, a compare-and-set it then refuses (409, naming none) included; questions find nothing until its sources are written again, then by words and meaning",
+        before.status == 200 && before.body["semantic"] == "off" && before.body["results"][0]["section"] == "t2" && before.body["results"][0].get("semantic").is_none()
+            && held.body["sources"].as_u64().is_some_and(|n| n > 0) && held.body["space"].get("version").is_none()
+            && refused.status == 409 && refused.body["error"] == "conflict" && refused.body["current"].is_null()
+            && emptied.body["sources"] == 0 && emptied.body["chunks"] == 0 && emptied.body["space"]["version"] == "e2e-2"
+            && nothing.status == 200 && nothing.body["results"] == json!([])
+            && again.status == 200 && again.body["written"] == true
+            && found.body["semantic"] == "on" && found.body["results"][0]["section"] == "t0" && found.body["results"][0]["signals"] == json!(["lexical", "semantic"]),
+        json!({ "before": before.body, "held": held.body, "refused": refused.body, "emptied": emptied.body, "nothing": nothing.body, "found": found.body }),
+    );
+    Ok(())
 }
 
 /// A fragment labelled `label`, made by `owner`, its index made by a
-/// first write: its name, and its table's.
-fn life(s: &Suite, api: &Api, owner: &Keys, service: &Service, label: &str) -> Result<(String, String)> {
+/// first write: its name, and its life.
+fn life(s: &Suite, api: &Api, owner: &Keys, label: &str) -> Result<(String, i64)> {
     let created = s.create(api, owner, label)?;
     let name = created["name"].as_str().context("its name")?;
-    let before = tables(service);
     let w = api.signed(owner, "POST", &format!("/api/f/{name}/search/upsert"), Some(&upsert("notes/a.md", "r1", json!([{ "id": "t0", "text": "Person: the first life's note" }]))))?;
     anyhow::ensure!(w.status == 200, "{name}'s first write: {w}");
-    let made: Vec<String> = tables(service).difference(&before).cloned().collect();
-    anyhow::ensure!(made.len() == 1, "{name}'s table: {made:?}");
-    Ok((name.to_string(), made[0].clone()))
+    let index = index_of(api, name, None, None)?;
+    anyhow::ensure!(index["index"]["chunks"] == 1, "{name}'s index: {index}");
+    Ok((name.to_string(), index["incarnation"].as_i64().context("its life")?))
 }
 
-/// A table's tombstone, as the service names it once its scope ended.
-fn tombstone(table: &str) -> String {
-    format!("{}.ended.lance", table.trim_end_matches(".lance"))
-}
-
-fn checks(s: &mut Suite, api: &Api, service: &Service, door: &Door) -> Result<()> {
+fn checks(s: &mut Suite, api: &Api) -> Result<(Keys, String)> {
     let wait = Duration::from_secs(60);
     let owner = api.person()?;
     let reader = api.person()?;
@@ -225,6 +145,16 @@ fn checks(s: &mut Suite, api: &Api, service: &Service, door: &Door) -> Result<()
     anyhow::ensure!(r.status == 200, "a viewer: {r}");
     s.ai.clear_script();
 
+    // ---- a fragment that wrote nothing has no index: nothing found, nothing embedded
+    let calls = s.ai.calls().len();
+    let none = api.signed(&reader, "POST", &path(""), Some(&json!({ "q": "harbour lantern audit" })))?;
+    let status = api.signed(&reader, "GET", &path("/status"), None)?;
+    s.ok(
+        "a fragment that never wrote a source answers a search empty, indexed false, embedding nothing; its status says it holds nothing",
+        none.status == 200 && none.body["indexed"] == false && none.body["results"] == json!([]) && embedded(s, calls) == 0 && status.status == 200 && status.body["exists"] == false,
+        json!({ "found": none.body, "status": status.body }),
+    );
+
     // ---- an editor writes a source whole; a reader finds it, by words and by meaning
     let calls = s.ai.calls().len();
     let w = api.signed(&owner, "POST", &path("/upsert"), Some(&upsert("sessions/a.json", "r1", turns())))?;
@@ -233,21 +163,32 @@ fn checks(s: &mut Suite, api: &Api, service: &Service, door: &Door) -> Result<()
     let found = api.signed(&reader, "POST", &path(""), Some(&json!({ "q": "harbour lantern audit" })))?;
     let asked = s.ai.calls()[calls..].iter().any(|c| c.model == MODEL && c.body["text"] == json!(["harbour lantern audit"]));
     let hit = &found.body["results"][0];
+    let cosine = hit["semantic"]["cosine"].as_f64().unwrap_or(f64::NAN);
     let status = api.signed(&reader, "GET", &path("/status"), None)?;
     s.ok(
-        "an editor's source is written whole, its sections embedded on the deployment's slot; a reader finds its section by its words and its meaning, the question embedded as theirs, with its location; its status counts it",
+        "an editor's source is written whole, its sections embedded on the deployment's slot; a reader finds its section by its words and its meaning, the question embedded as theirs, with its location and its place in each leg; the answer names its space and scheme; its status counts it",
         w.status == 200 && w.body["written"] == true && wrote == 2
-            && found.status == 200 && found.body["semantic"] == "on" && hit["source"] == "sessions/a.json" && hit["section"] == "t0"
-            && hit["signals"] == json!(["lexical", "semantic"]) && hit["location"] == json!({ "from": 0, "to": 1 }) && asked
-            && status.body["sources"] == 1 && status.body["semantic"] == "on",
+            && found.status == 200 && found.body["semantic"] == "on" && found.body["indexed"] == true
+            && found.body["scheme"] == fragment_proto::search::SCHEME && found.body["space"]["model"] == MODEL
+            && hit["source"] == "sessions/a.json" && hit["section"] == "t0" && hit["signals"] == json!(["lexical", "semantic"]) && hit["location"] == json!({ "from": 0, "to": 1 })
+            && hit["lexical"]["rank"] == 1 && hit["lexical"]["bm25"].as_f64().is_some_and(|b| b > 0.0) && hit["semantic"]["rank"].as_u64().is_some_and(|r| r >= 1) && (-1.01..=1.01).contains(&cosine)
+            && asked && status.body["sources"] == 1 && status.body["chunks"] == 2 && status.body["semantic"] == "on" && status.body.get("ended").is_none(),
         json!({ "write": w.body, "embedded": wrote, "found": found.body, "status": status.body }),
+    );
+
+    // ---- the index's int8 dot product is Wasm SIMD's, and agrees with the scalar one
+    let index = index_of(api, &name, None, None)?;
+    s.ok(
+        "the cell is built for Wasm SIMD, and its index's int8 dot product (SIMD's) agrees with the scalar one, in the Wasm a deploy ships",
+        index["index"]["simd"]["built"] == true && index["index"]["simd"]["agrees"] == true,
+        &index,
     );
 
     // ---- a replay writes and embeds nothing; a grown source embeds only its new turn
     let calls = s.ai.calls().len();
     let again = api.signed(&owner, "POST", &path("/upsert"), Some(&upsert("sessions/a.json", "r1", turns())))?;
     let mut grown = turns();
-    grown.as_array_mut().unwrap().push(json!({ "id": "t2", "text": "Person: book the ferry for friday" }));
+    grown.as_array_mut().context("turns")?.push(json!({ "id": "t2", "text": "Person: book the ferry for friday" }));
     let more = api.signed(&owner, "POST", &path("/upsert"), Some(&upsert("sessions/a.json", "r2", grown)))?;
     s.ok(
         "the same revision again writes nothing and embeds nothing; a grown source embeds its new turn alone, its others' vectors the index's own",
@@ -306,28 +247,26 @@ fn checks(s: &mut Suite, api: &Api, service: &Service, door: &Door) -> Result<()
             && status.is_some_and(|x| x.body["forgetting"] == 0 && x.body["sources"] == 1)
     });
     s.ok(
-        "a push that deletes a source's file forgets the source: gone from search, from its sources and from the service, with no write of the app's",
+        "a push that deletes a source's file forgets the source: gone from search, from its sources and from the index, with no write of the app's",
         d.status == 200 && held.body["results"][0]["source"] == "sessions/d.json" && forgotten,
         json!({ "held": held.body }),
     );
 
-    // ---- a forget the service's outage held back goes before its source's next write
+    // ---- a forget the index's outage held back goes before its source's next write
     let e = upsert("sessions/e.json", "r1", json!([{ "id": "t0", "text": "Person: the walrus ledger" }]));
     s.commit(&created, &[("sessions/e.json", Some(b"{}".as_slice()))]);
     let first = api.signed(&owner, "POST", &path("/upsert"), Some(&e))?;
-    docker(&["stop", &service.name])?;
+    // its next two calls into the index fail: the forget's, and the read's
+    let out = lever(api, &name, "fail-search-index", json!({ "times": 2 }))?;
     s.commit(&created, &[("sessions/e.json", None)]);
-    // a read sends what is due: the service down, the forget waits its retry
     let down = api.signed(&owner, "GET", &path("/sources"), None)?;
-    docker(&["start", &service.name])?;
-    let up_again = s.eventually(wait, || healthy(&service.port));
     let restored = upsert("sessions/e.json", "r2", json!([{ "id": "t0", "text": "Person: the walrus ledger, restored" }]));
     let back = api.signed(&owner, "POST", &path("/upsert"), Some(&restored))?;
     let found = api.signed(&owner, "POST", &path(""), Some(&json!({ "q": "walrus ledger", "mode": "lexical" })))?;
     let status = api.signed(&owner, "GET", &path("/status"), None)?;
     s.ok(
-        "a forget the service's outage held back is sent before its source's next write: written again during its retry's wait, the source is found at once, and nothing is left to forget it",
-        first.status == 200 && down.status != 200 && up_again && back.status == 200 && back.body["written"] == true
+        "a forget the index's outage held back is sent before its source's next write: written again during its retry's wait, the source is found at once, and nothing is left to forget it",
+        first.status == 200 && out.status == 200 && down.status != 200 && back.status == 200 && back.body["written"] == true
             && found.body["results"][0]["source"] == "sessions/e.json" && found.body["results"][0]["revision"] == "r2" && status.body["forgetting"] == 0,
         json!({ "down": down.status, "back": back.body, "found": found.body, "status": status.body }),
     );
@@ -353,66 +292,82 @@ fn checks(s: &mut Suite, api: &Api, service: &Service, door: &Door) -> Result<()
 
     // ---- a write held at its embedding while its fragment is deleted and made again
     let late = |text: &str| upsert("notes/b.md", "r1", json!([{ "id": "t0", "text": text }]));
-    let (a, table_a) = life(s, api, &owner, service, "search-life-a")?;
+    let (a, life_a) = life(s, api, &owner, "search-life-a")?;
     s.ai.hold_embeddings();
     let calls = s.ai.calls().len();
     let (wrote, waiting, deleted, ended, remade) = std::thread::scope(|scope| {
         let wrote = scope.spawn(|| api.signed(&owner, "POST", &format!("/api/f/{a}/search/upsert"), Some(&late("Person: the late wombat"))));
         let waiting = s.eventually(wait, || embedded(s, calls) > 0);
         let deleted = api.signed(&owner, "DELETE", &format!("/api/f/{a}"), None);
-        let ended = s.eventually(wait, || tables(service).contains(&tombstone(&table_a)) && !tables(service).contains(&table_a));
+        let ended = s.eventually(wait, || index_of(api, &a, Some(life_a), None).is_ok_and(|i| ended_empty(&i)));
         let remade = s.create(api, &owner, &a);
         s.ai.release_embeddings();
         (wrote.join().expect("the write's thread"), waiting, deleted, ended, remade)
     });
     s.ai.release_embeddings();
     let (wrote, deleted, remade) = (wrote?, deleted?, remade?);
+    let old = index_of(api, &a, Some(life_a), None)?;
     let now = api.signed(&owner, "GET", &format!("/api/f/{a}/search/status"), None)?;
     s.ok(
-        "a write held at its embedding while its fragment is deleted and made again under its name writes nothing: refused 404, the ended life's index gone for good, the new life's empty",
-        waiting && deleted.status == 200 && ended && remade["name"] == a.as_str() && wrote.status == 404
-            && !tables(service).contains(&table_a) && now.status == 200 && now.body["exists"] == false,
-        json!({ "wrote": wrote.body, "now": now.body, "tables": tables(service) }),
+        "a write held at its embedding while its fragment is deleted and made again under its name writes nothing: refused 404, the ended life's index ended and empty for good, the new life's empty",
+        waiting && deleted.status == 200 && ended && remade["name"] == a.as_str() && wrote.status == 404 && ended_empty(&old) && now.status == 200 && now.body["exists"] == false,
+        json!({ "wrote": wrote.body, "old": old, "now": now.body }),
     );
 
-    // ---- a write held at the service's door while its fragment is deleted and made again
-    let (b, table_b) = life(s, api, &owner, service, "search-life-b")?;
-    door.hold();
-    let (wrote, held, deleted, ended, remade) = std::thread::scope(|scope| {
+    // ---- a write held at the index itself while its fragment is deleted and made again
+    let (b, life_b) = life(s, api, &owner, "search-life-b")?;
+    index_of(api, &b, None, Some(true))?;
+    let (wrote, held, deleted, ended, remade, released) = std::thread::scope(|scope| {
         let wrote = scope.spawn(|| api.signed(&owner, "POST", &format!("/api/f/{b}/search/upsert"), Some(&late("Person: the held pangolin"))));
-        let held = s.eventually(wait, || door.held() >= 1);
+        let held = s.eventually(wait, || index_of(api, &b, Some(life_b), None).is_ok_and(|i| i["index"]["held"] == 1));
         let deleted = api.signed(&owner, "DELETE", &format!("/api/f/{b}"), None);
-        let ended = s.eventually(wait, || tables(service).contains(&tombstone(&table_b)) && !tables(service).contains(&table_b));
+        let ended = s.eventually(wait, || index_of(api, &b, Some(life_b), None).is_ok_and(|i| ended_empty(&i)));
         let remade = s.create(api, &owner, &b);
-        door.release();
-        (wrote.join().expect("the write's thread"), held, deleted, ended, remade)
+        let released = index_of(api, &b, Some(life_b), Some(false));
+        (wrote.join().expect("the write's thread"), held, deleted, ended, remade, released)
     });
-    door.release();
-    let (wrote, deleted, remade) = (wrote?, deleted?, remade?);
+    let (wrote, deleted, remade, released) = (wrote?, deleted?, remade?, released?);
+    let old = index_of(api, &b, Some(life_b), None)?;
     let now = api.signed(&owner, "GET", &format!("/api/f/{b}/search/status"), None)?;
     let found = api.signed(&owner, "POST", &format!("/api/f/{b}/search"), Some(&json!({ "q": "pangolin" })))?;
     s.ok(
-        "a write the cell sent that the service takes only after its fragment was deleted and made again lands on an ended index: refused, never made again, the new life's index empty",
-        held && deleted.status == 200 && ended && remade["name"] == b.as_str() && wrote.status == 404
-            && !tables(service).contains(&table_b) && now.body["exists"] == false && found.body["results"] == json!([]),
-        json!({ "wrote": wrote.body, "now": now.body, "found": found.body, "tables": tables(service) }),
+        "a write the cell sent that its index takes only after the fragment was deleted and made again lands on an ended index: refused, nothing written to it, the new life's index empty",
+        held && deleted.status == 200 && ended && remade["name"] == b.as_str() && released["index"]["held"] == 1 && wrote.status == 404
+            && ended_empty(&old) && now.body["exists"] == false && found.body["results"] == json!([]) && found.body["indexed"] == false,
+        json!({ "wrote": wrote.body, "old": old, "now": now.body, "found": found.body }),
     );
 
-    // ---- the service restarted holds what was written
-    docker(&["restart", &service.name])?;
-    let back = s.eventually(wait, || api.signed(&owner, "POST", &path(""), Some(&json!({ "q": "ferry friday" }))).is_ok_and(|r| r.body["results"][0]["section"] == "t2"));
-    s.ok("the search service restarted, what was written is searched still", back, json!({}));
+    // ---- an index holds up to its cap; a source written again at capacity counts once
+    let created_full = s.create(api, &owner, "search-full")?;
+    let full = created_full["name"].as_str().context("its name")?.to_string();
+    let write = |source: &str, revision: &str, n: usize| {
+        let sections: Vec<Value> = (0..n).map(|i| json!({ "id": format!("t{i}"), "text": format!("Person: note {i} of {revision}") })).collect();
+        api.signed(&owner, "POST", &format!("/api/f/{full}/search/upsert"), Some(&upsert(source, revision, json!(sections))))
+    };
+    let first = write("notes/a.md", "r1", 1)?;
+    let capped = lever(api, &full, "search-index", json!({ "chunks_max": 3 }))?;
+    let at_cap = write("notes/b.md", "r1", 2)?;
+    let past = write("notes/c.md", "r1", 1)?;
+    let same_size = write("notes/b.md", "r2", 2)?;
+    let larger = write("notes/b.md", "r3", 3)?;
+    let status = api.signed(&owner, "GET", &format!("/api/f/{full}/search/status"), None)?;
+    let listed = api.signed(&owner, "GET", &format!("/api/f/{full}/search/sources"), None)?;
+    let revisions: Vec<(String, String)> = listed.body["sources"].as_array().into_iter().flatten().map(|x| (x["source"].as_str().unwrap_or("").to_string(), x["revision"].as_str().unwrap_or("").to_string())).collect();
+    s.ok(
+        "an index takes writes up to its cap (lowered to 3 chunks here) and refuses one past it, 507 storage_full, holding what it held; a source written again at capacity counts once: as large it is taken, larger refused, its revision before kept",
+        first.status == 200 && capped.status == 200 && at_cap.status == 200 && past.status == 507 && past.body["error"] == "storage_full"
+            && same_size.status == 200 && larger.status == 507 && status.body["chunks"] == 3 && status.body["chunks_max"] == 3
+            && revisions == [("notes/a.md".to_string(), "r1".to_string()), ("notes/b.md".to_string(), "r2".to_string())],
+        json!({ "past": past.body, "larger": larger.body, "status": status.body, "sources": revisions }),
+    );
 
-    // ---- a deleted fragment's index is dropped with it
-    let doomed = s.create(api, &owner, "doomed")?;
-    let doomed_name = doomed["name"].as_str().context("its name")?.to_string();
-    let before = tables(service);
-    let w = api.signed(&owner, "POST", &format!("/api/f/{doomed_name}/search/upsert"), Some(&upsert("notes/a.md", "r1", turns())))?;
-    let made: Vec<String> = tables(service).difference(&before).cloned().collect();
-    let deleted = api.signed(&owner, "DELETE", &format!("/api/f/{doomed_name}"), None)?;
-    let dropped = made.len() == 1 && s.eventually(wait, || !tables(service).contains(&made[0]));
-    s.ok("a deleted fragment's index is dropped from the service's store with its other data", w.status == 200 && deleted.status == 200 && dropped, json!({ "made": made, "now": tables(service) }));
-    Ok(())
+    // ---- a deleted fragment's index is ended with it, its rows gone
+    let (doomed, life_d) = life(s, api, &owner, "doomed")?;
+    let w = api.signed(&owner, "POST", &format!("/api/f/{doomed}/search/upsert"), Some(&upsert("sessions/a.json", "r1", turns())))?;
+    let deleted = api.signed(&owner, "DELETE", &format!("/api/f/{doomed}"), None)?;
+    let dropped = s.eventually(wait, || index_of(api, &doomed, Some(life_d), None).is_ok_and(|i| ended_empty(&i)));
+    s.ok("a deleted fragment's index is ended with its other data, its sources and chunks gone", w.status == 200 && deleted.status == 200 && dropped, json!({ "write": w.body }));
+    Ok((owner, name))
 }
 
 /// On a node whose tiers are private, with no private embeddings slot: by
@@ -425,9 +380,11 @@ fn private_checks(s: &mut Suite, api: &Api) -> Result<()> {
     let w = api.signed(&owner, "POST", &format!("/api/f/{name}/search/upsert"), Some(&upsert("sessions/a.json", "r1", turns())))?;
     let found = api.signed(&owner, "POST", &format!("/api/f/{name}/search"), Some(&json!({ "q": "harbour lantern" })))?;
     let embeds = s.ai.calls()[calls..].iter().filter(|c| c.model == MODEL).count();
+    let hit = &found.body["results"][0];
     s.ok(
-        "a deployment whose tiers are private and whose embeddings slot is not indexes and searches by words alone: written, found, semantic off, nothing sent to embed",
-        w.status == 200 && found.status == 200 && found.body["semantic"] == "off" && found.body["results"][0]["signals"] == json!(["lexical"]) && embeds == 0,
+        "a deployment whose tiers are private and whose embeddings slot is not indexes and searches by words alone: written, found, semantic off, no space or scheme, nothing sent to embed",
+        w.status == 200 && found.status == 200 && found.body["semantic"] == "off" && found.body.get("space").is_none() && found.body.get("scheme").is_none()
+            && hit["signals"] == json!(["lexical"]) && hit.get("semantic").is_none() && hit["lexical"]["rank"] == 1 && embeds == 0,
         json!({ "write": w.body, "found": found.body, "embeds": embeds }),
     );
     Ok(())

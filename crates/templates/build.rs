@@ -5,8 +5,8 @@
 // into the assets, and the e2e). They are one `Template` per directory
 // under templates/ (every file but src/, which holds sources of committed
 // bundles) and `ALL`; the shell's files (cell/shell/, `SHELL`); and the
-// shared browser files (cell/, `BROWSER`) and agent docs (cli/SKILL.md,
-// cli/GUIDE.md). Each template's release, a
+// shared browser files (cell/, `BROWSER`), agent docs (cli/SKILL.md,
+// cli/GUIDE.md) and an export's README (crates/core/src/export_readme.md). Each template's release, a
 // hash of its paths and bytes, is made here, so a cell that never holds
 // the bytes names it all the same.
 //
@@ -71,7 +71,7 @@ fn main() {
     let repo = fs::canonicalize(Path::new(&manifest).join("../..")).expect("the repo");
     let tdir = repo.join("templates");
     let shell = repo.join("cell/shell");
-    let docs = [("SKILL_MD", repo.join("cli/SKILL.md")), ("GUIDE_MD", repo.join("cli/GUIDE.md"))];
+    let docs = [("SKILL_MD", repo.join("cli/SKILL.md")), ("GUIDE_MD", repo.join("cli/GUIDE.md")), ("EXPORT_README", repo.join("crates/core/src/export_readme.md"))];
     let browser = [
         ("CLIENT_JS", "client.mjs"),
         ("CLIENT_CSS", "fragment.css"),

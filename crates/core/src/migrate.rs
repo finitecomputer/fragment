@@ -1,6 +1,6 @@
 //! Versioned schemas for the platform's own Durable Objects: `Fragment`'s
-//! supervisor, `Registry`, `Principal`, `Ledger` and `Computer` (an app
-//! facet's SQLite is its author's). Each class declares its steps in
+//! supervisor, `Registry`, `Principal`, `Ledger`, `Computer` and
+//! `SearchIndex` (an app facet's SQLite is its author's). Each class declares its steps in
 //! order, one SQL file each under `crates/core/migrations/<class>/`. An
 //! object keeps the steps it took in its `_schema` table, one row each
 //! (the step's number, name and SHA-256, whether it ran or was adopted,
@@ -108,7 +108,14 @@ macro_rules! step {
 
 pub const FRAGMENT: Class = Class {
     name: "Fragment",
-    steps: &[step!("baseline", "fragment/0001_baseline.sql"), step!("listed", "fragment/0002_listed.sql"), step!("record_schedules", "fragment/0003_record_schedules.sql"), step!("search_forget", "fragment/0004_search_forget.sql")],
+    steps: &[
+        step!("baseline", "fragment/0001_baseline.sql"),
+        step!("listed", "fragment/0002_listed.sql"),
+        step!("record_schedules", "fragment/0003_record_schedules.sql"),
+        step!("search_forget", "fragment/0004_search_forget.sql"),
+        step!("ended_search", "fragment/0005_ended_search.sql"),
+        step!("installed_forward_only", "fragment/0006_installed_forward_only.sql"),
+    ],
     variants: &[Variant {
         name: "members",
         sql: "CREATE TABLE members ( principal TEXT PRIMARY KEY, role TEXT NOT NULL, added_by TEXT NOT NULL, added_at INTEGER NOT NULL, kind TEXT, owner TEXT, people_only INTEGER NOT NULL DEFAULT 0)",
@@ -136,7 +143,7 @@ pub const REGISTRY: Class = Class {
 
 pub const PRINCIPAL: Class = Class {
     name: "Principal",
-    steps: &[step!("baseline", "principal/0001_baseline.sql"), step!("listed", "principal/0002_listed.sql"), step!("memberships_dock", "principal/0003_memberships_dock.sql")],
+    steps: &[step!("baseline", "principal/0001_baseline.sql"), step!("listed", "principal/0002_listed.sql"), step!("memberships_dock", "principal/0003_memberships_dock.sql"), step!("memberships_pinned", "principal/0004_memberships_pinned.sql")],
     variants: &[],
     kept: &["wiped"],
 };
@@ -145,8 +152,12 @@ pub const LEDGER: Class = Class { name: "Ledger", steps: &[step!("baseline", "le
 
 pub const COMPUTER: Class = Class { name: "Computer", steps: &[step!("baseline", "computer/0001_baseline.sql"), step!("agent_accounts", "computer/0002_agent_accounts.sql")], variants: &[], kept: &["wiped"] };
 
+/// A fragment life's search index: its end releases its storage whole
+/// (`deleteAll`), so it keeps nothing.
+pub const SEARCH_INDEX: Class = Class { name: "SearchIndex", steps: &[step!("baseline", "searchindex/0001_baseline.sql")], variants: &[], kept: &[] };
+
 /// Every platform class, as the lock lists them.
-pub const CLASSES: [&Class; 5] = [&FRAGMENT, &REGISTRY, &PRINCIPAL, &LEDGER, &COMPUTER];
+pub const CLASSES: [&Class; 6] = [&FRAGMENT, &REGISTRY, &PRINCIPAL, &LEDGER, &COMPUTER, &SEARCH_INDEX];
 
 /// What the runner needs of an object's SQLite: statements run, and rows
 /// read, each an object of its columns. The cell's is the object's
@@ -701,6 +712,33 @@ mod tests {
         assert_eq!(list.count("SELECT COUNT(*) FROM memberships"), 0);
     }
 
+    /// Goal: the person's pins are step 4 of the Principal's (Paul,
+    /// 2026-10-31; cell/src/principal.rs): a list at version 3 with rows
+    /// migrates to 4, keeps them, and pins none, its archiving and its dock
+    /// as they were; a row the cell writes as it does (no `pinned` named) is
+    /// not pinned, and one pinned reads so; the restart after runs nothing; a
+    /// wipe's `remake` keeps the column. Method: the list's first three steps
+    /// alone, an archived row and one off the dock, then its class as declared.
+    #[test]
+    fn the_pin_is_step_four_of_a_list() {
+        let list = Lite::new();
+        let known = PRINCIPAL.steps.len() as u32;
+        assert_eq!(migrated(&list, &Class { steps: &PRINCIPAL.steps[..3], ..PRINCIPAL }, 1), Ok(Ran::Made { version: 3 }));
+        list.exec("INSERT INTO memberships (fragment, role, incarnation, version, archived, dock) VALUES ('todo--k3x9', 'owner', 1, 1, 0, 0), ('old--k3x9', 'viewer', 1, 1, 1, 1)").expect("two rows");
+        assert_eq!(PRINCIPAL.steps[3].name, "memberships_pinned");
+        assert_eq!(migrated(&list, &PRINCIPAL, 2), Ok(Ran::Migrated { from: 3, version: known }));
+        assert_eq!(list.count("SELECT COUNT(*) FROM memberships WHERE pinned = 0"), 2, "none is pinned by the step");
+        assert_eq!(list.count("SELECT COUNT(*) FROM memberships WHERE (fragment = 'todo--k3x9' AND dock = 0) OR (fragment = 'old--k3x9' AND archived = 1)"), 2, "its archiving and its dock stay as they were");
+        list.exec("INSERT INTO memberships (fragment, role, incarnation, version, archived, searched) VALUES ('new--k3x9', 'owner', 2, 1, 0, '[]')").expect("a row as the cell writes one");
+        list.exec("UPDATE memberships SET pinned = 1 WHERE fragment = 'todo--k3x9'").expect("pinned");
+        assert_eq!(list.count("SELECT COUNT(*) FROM memberships WHERE pinned = 1"), 1, "a new row is not pinned; one pinned is");
+        assert_eq!(migrated(&list, &PRINCIPAL, 3), Ok(Ran::Current { version: known }), "a restart runs nothing");
+        assert_eq!(list.count("SELECT COUNT(*) FROM memberships WHERE fragment = 'todo--k3x9' AND pinned = 1"), 1, "and the pin holds");
+        remake(&list, &PRINCIPAL).expect("a wipe's remake");
+        assert!(list.columns("memberships").contains(&"pinned".to_string()), "a wiped list's rows have the column still");
+        assert_eq!(list.count("SELECT COUNT(*) FROM memberships"), 0);
+    }
+
     /// Goal: #369's `fenced` columns (its `columns.rs` adds them if missing
     /// as objects start) are ordinary steps, as the module doc shows: a
     /// Registry and a Computer at their baseline, rows in them, take them
@@ -840,7 +878,8 @@ mod tests {
         commits.sort();
         assert_eq!(commits, ["035ee8e8", "33e323cd", "76adcb35", "7b84dcd3", "e62d9991"]);
         for commit in &commits {
-            for class in CLASSES {
+            // a class made since versions has no object from before them
+            for class in CLASSES.into_iter().filter(|c| c.name != SEARCH_INDEX.name) {
                 let ddl = std::fs::read_to_string(root.join(commit).join(format!("{}.sql", class.name.to_ascii_lowercase()))).expect("a class's schema");
                 let db = Lite::new();
                 db.exec(&ddl).expect("as it ran");

@@ -3,6 +3,7 @@
 //! runs it as wasm and the host tests it.
 
 pub mod access;
+pub mod across;
 pub mod address;
 pub mod backoff;
 pub mod blob;
@@ -23,9 +24,11 @@ pub mod egress;
 pub mod export;
 pub mod face;
 pub mod searchable;
+pub mod search_index;
 pub mod facet;
 pub mod form;
 pub mod frames;
+pub mod gather;
 pub mod glob;
 pub mod governance;
 pub mod icon;
