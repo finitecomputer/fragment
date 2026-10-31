@@ -282,6 +282,7 @@ exec /opt/hermes/bin/hermes "$@"
 EOF
 COPY images/hermes/preload.py /opt/fragment/preload.py
 COPY images/hermes/tool_keys.py /opt/fragment/tool_keys.py
+COPY images/hermes/tool_threads.py /opt/fragment/tool_threads.py
 COPY images/hermes/deploy_wait.py /opt/fragment/deploy_wait.py
 COPY images/hermes/hooks /opt/fragment/hooks
 COPY --from=plugin /opt/hermes/plugins/fragment-skill-fork /opt/hermes/plugins/fragment-skill-fork
