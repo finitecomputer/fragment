@@ -630,10 +630,11 @@ inbox's, which takes its token. `{name}` is a fragment's name in full.
 | method & path | who | body → answer |
 | --- | --- | --- |
 | `POST /api/fragments` | a person who is not a guest; an agent for its owner (the owner's, billed to them, its maker an editor) | `{label \| name, visibility?, template?, title?}` (Names) → `{name, npub, owner, visibility, viewToken, inboxToken, repo, canonical}`. A guest is 403 `forbidden` (`Spend::Create`), however asked, and past the overdraft 402 `budget_used_up`; a ledger that does not answer refuses none. `visibility` defaults to `link`, but `members` for a chat, an agent or a session archive (`Visibility::made_from`). The fragment's own key is made in its cell, sealed. With `template` (`blank`, `todo`, `inbox`, `calories`, `doc`; any other is 400 and nothing is made), the template's files are main's first commit (its `fragment.json` stamped with the name, and `title`) and live once the create answers; one that fails to land is retried by the alarm (`template.failed`). `agent`, `chat`, `brain`, `skills`, `sessions` are blessed (decision 40): main's first commit is `{"template", "meta": {title}}`, and the release serves the rest (Apps; a session archive, which `fragment session import` makes: templates/sessions/README.md). `notes` is the CLI's only. A `title` (1 to `TITLE_MAX_CHARS`) needs a `template` (400) |
-| `GET /api/fragments` | any signer | → `{fragments: [ListedFragment {name, role, kind, title?, picture?, agentRole?, agents?, preview?, previewAt?, unread?, sharing?, archived?, dock?, listed?}]}`. `kind` is `app`, `chat`, `agent`, `brain`, `skills` or `sessions` (a client reads an unknown one as `other`: `FragmentKind::Other`); `picture` an agent's face or an app's icon; `agentRole` an agent's role (An agent's name and picture); `agents` its agent members, the first added first, at most `LISTED_AGENTS_MAX`; `preview` (at most `LISTED_PREVIEW_MAX_BYTES`) and `previewAt`, a chat's newest message their search holds (Search); `unread`, a chat's messages after their last `seen`, at most `LISTED_UNREAD_MAX`, absent at 0; `sharing`, their own fragments' `{visibility, members, guests, invites}`; `archived: true` and `dock: false` their own choices; `listed`, what its members are doing (Listed records). An agent's `?for=<id>`: the fragments that identity holds a role on where the agent or its owner is a member, each with the role the agent acts with there for it and `owned: true` on that identity's own, without `listed` |
+| `GET /api/fragments` | any signer | → `{fragments: [ListedFragment {name, role, kind, title?, picture?, agentRole?, agents?, preview?, previewAt?, unread?, sharing?, archived?, dock?, pinned?, listed?}]}`. `kind` is `app`, `chat`, `agent`, `brain`, `skills` or `sessions` (a client reads an unknown one as `other`: `FragmentKind::Other`); `picture` an agent's face or an app's icon; `agentRole` an agent's role (An agent's name and picture); `agents` its agent members, the first added first, at most `LISTED_AGENTS_MAX`; `preview` (at most `LISTED_PREVIEW_MAX_BYTES`) and `previewAt`, a chat's newest message their search holds (Search); `unread`, a chat's messages after their last `seen`, at most `LISTED_UNREAD_MAX`, absent at 0; `sharing`, their own fragments' `{visibility, members, guests, invites}`; `archived: true`, `dock: false` and `pinned: true` their own choices; `listed`, what its members are doing (Listed records). An agent's `?for=<id>`: the fragments that identity holds a role on where the agent or its owner is a member, each with the role the agent acts with there for it and `owned: true` on that identity's own, without `listed` |
 | `GET /api/fragments/watch` | any signer; the shell's session with the platform's exact `Origin` | a WebSocket: `{type: "hello"}`, then `{type: "changed"}` whenever their list changes, and `{type: "invited"}` whenever the invites waiting on them change. Frames name nothing: the page reads again with its own credential. A fragment's page is refused like no one (401). At most `LIST_WATCHERS_MAX` a list (429). Not for `for` |
 | `PUT /api/fragments/{name}/archived` | any signer with a role on it | `{archived: bool}` → `{name, archived}`: their own view, in their list's row only. It goes when they leave, or the fragment is made again. No role, none, or a bare label 404; a bad body 400. Not for `for` |
 | `PUT /api/fragments/{name}/dock` | the same | `{dock: bool}` → `Docked {name, dock}`: whether their dock shows it, as archiving is (every fragment is on it until taken off); their list's sockets are told. Not for `for` |
+| `PUT /api/fragments/{name}/pinned` | the same | `{pinned: bool}` → `Pinned {name, pinned}`: whether they pinned it, as archiving is (nothing is pinned until pinned); their list's sockets are told. It goes when they leave, or the fragment is made again. Not for `for` |
 | `PUT /api/fragments/{name}/seen` | the same | no body → `Seen {name, unread: 0}`: they have seen its messages up to the newest their search holds; it never goes back. Any body 400. Not for `for` |
 | `GET /api/search?q=` | any signer | → `SearchAnswer {fragments: [ListedFragment], messages: [{fragment, channel, seq, at, snippet}]}` (Search). `q` once, at most `SEARCH_QUERY_MAX_BYTES` and `SEARCH_QUERY_WORDS_MAX` words (400). Not for `for` |
 | `GET /api/access` | a person | Sharing, "Who has access to what" |
@@ -738,39 +739,58 @@ what a kind means.
 
 ### A fragment's search
 
-A fragment's own full-text and semantic index, kept by the search service
-beside the deployment (search/README.md; cell/src/searchable.rs). A
-deployment that names none (`FRAGMENT_SEARCH_URL`) answers these 404.
-Shapes are `fragment_proto::search`'s, and so are the limits named here.
+A fragment's own full-text and semantic index: a `SearchIndex` object of
+each life's own (cell/src/search_index.rs), which its supervisor alone
+calls (cell/src/searchable.rs). Shapes are `fragment_proto::search`'s, and
+so are the limits named here.
 
 | method & path | who | body → answer |
 | --- | --- | --- |
 | `POST /api/f/{name}/search/upsert` | an editor | `Upsert {source, revision, replaces?, title?, at?, fields?, sections: [{id, text, heading?, context?, at?, location?: {from, to}}]}` → `{source, revision, written, chunks}` |
 | `POST /api/f/{name}/search/delete` | an editor | `{source}` → `{source, deleted}` |
-| `GET /api/f/{name}/search/sources?after=&limit=` | an editor | → `{sources: [{source, revision, at, chunks}], next}`, by source, at most `SOURCES_PAGE_MAX` |
-| `GET /api/f/{name}/search/status` | a viewer | → `{exists, sources, chunks, bytes, semantic, space, forgetting}` |
-| `POST /api/f/{name}/search` | a viewer | `Query {q, limit?, mode?, fields?, after?, before?}` → `Found {results: [{rank, source, section, revision, title, heading?, context?, at?, location?, snippet, score, signals}], semantic}` |
+| `GET /api/f/{name}/search/sources?after=&limit=` | an editor | → `{sources: [{source, revision, at?, chunks}], next}`, by source, at most `SOURCES_PAGE_MAX` |
+| `GET /api/f/{name}/search/status` | a viewer | → `{exists, sources, chunks, bytes, space, chunks_split, chunks_max, semantic, forgetting}` |
+| `POST /api/f/{name}/search` | a viewer | `Query {q, limit?, mode?, fields?, after?, before?}` → `Found {results: [{rank, source, section, revision, title, heading?, context?, at?, location?, snippet, score, signals, lexical?: {rank, bm25}, semantic?: {rank, cosine}}], semantic, indexed, space?, scheme?}` |
 
 - **One index a fragment's life**, which no caller names; whoever reads
-  the fragment searches it. Nothing is held until an editor writes.
-- **A source is written whole**: its sections replace what it held. The
-  same `(source, revision)` again writes nothing; `replaces` is a
-  compare-and-set on its revision (`""`: none yet), else 409 `conflict`
-  naming `current`.
+  the fragment searches it. Nothing is held until an editor writes: until
+  then a search answers `indexed: false` and no results, embedding
+  nothing.
+- **A source is written whole**, in one transaction: its sections replace
+  what it held. The same `(source, revision)` again writes nothing;
+  `replaces` is a compare-and-set on its revision (`""`: none yet), else
+  409 `conflict` naming `current`.
 - **Bounds**, refused 400 (413 past `UPSERT_MAX_BYTES`) before anything is
   sent: `SECTIONS_MAX`, `TEXT_MAX_CHARS`, `SECTION_ID_MAX_BYTES`,
-  `SOURCE_MAX_BYTES`, `REVISION_MAX_BYTES`; at most 4 `fields`.
+  `SOURCE_MAX_BYTES`, `REVISION_MAX_BYTES`; at most 4 `fields`. An index
+  holds at most `chunks_max` chunks (507 `storage_full` past it); past
+  `chunks_split` a search slows: split the sources across child fragments.
 - **Embedding** is the deployment's embeddings slot's (Models), each
-  section cut into chunks the slot reads whole. A write is paid for by the
-  fragment's owner, a question by its asker (an agent's owner). An
-  anonymous question, and every one on a deployment that embeds nothing
-  (`semantic: "off"`), is searched by its words alone.
-- **Search** is by words and by meaning, fused by rank: `mode` `hybrid`
-  (the default), `lexical` or `semantic`; `fields` filters by each field
-  named, `after` and `before` by a section's `at`.
+  section cut into chunks the slot reads whole, a chunk the index holds
+  never embedded again. A write is paid for by the fragment's owner, a
+  question by its asker (an agent's owner). An anonymous question, and
+  every one on a deployment that embeds nothing (`semantic: "off"`), is
+  searched by its words alone. An index holds one `space`'s vectors: a
+  write in another (the deployment's model changed) empties it first,
+  and its apps write their sources again.
+- **Search** is by words (BM25 by field: title, heading, context, text)
+  and by meaning (vectors held as `scheme` names, `i8x508+sign`), each
+  section ranked by its best chunk and the legs fused by rank: `mode`
+  `hybrid` (the default), `lexical` or `semantic`; `fields` filters by
+  each field named, `after` and `before` by a section's `at`. A hit's
+  `lexical` and `semantic` are its rank and score in each leg; cosines of
+  answers naming one `space` and `scheme` compare across fragments.
+- **Many fragments at once**: the platform's own route embeds a question
+  once and asks each fragment's supervisor at `POST /search/asked`
+  (`Forwarded {query, vector?}`), which the router maps no outside path
+  to. It is never embedded again, and answers as `POST …/search`.
 - **Deletes follow the files**: a source named by one of the fragment's
   paths is forgotten when a move of main deletes that file, gone from every
-  answer at once. A deleted or wiped fragment's index ends with it.
+  answer at once. A deleted chunk's words leave the index's segments at
+  its next fold (an hour after); SQLite's freed pages and Cloudflare's 30
+  days of point-in-time recovery may keep its bytes that long. A deleted
+  or wiped fragment's index ends with it: released whole, and never
+  written again, by a write landing late too.
 
 ## Apps
 
