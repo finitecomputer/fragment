@@ -270,8 +270,10 @@ a turn:
   turn in the chat it asked from. The owed record is the delivery: it is
   retried under one id until the platform answers it, and nothing waits
   or is held awake for it. An asked agent taken off the computer still
-  answers an asker that stays: a turn not over ends, its answer saying
-  so (`LEFT`), and an answer not yet landed is kept (#722).
+  answers an asker that stays, also when the bridge first sees it gone at
+  a start: a turn not over ends, its answer saying so (`LEFT`), and an
+  answer not yet landed is kept. The asked agent's identity is kept with
+  the turn (`Return::by`), so the answer is by it once it is gone (#722).
 - **`tasks` is the agent's own.** A routine or `joined` starts anything
   only from the agent fragment's own key or its owner. Another of the
   owner's agents, which may post there, is passed over.

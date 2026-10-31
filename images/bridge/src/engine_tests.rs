@@ -1802,7 +1802,7 @@ fn a_question_is_answered_back_where_it_was_asked() {
     let t = started(&s).expect("rowan's turn");
     assert_eq!((t.asker.as_str(), t.text.as_str()), ("npub1juniper", "What is the weather?"), "a message like any");
     assert_eq!(e.state().turns[&t.turn].hop, 1);
-    assert_eq!(e.state().turns[&t.turn].ret, Some(Return { agent: juniper.fragment.clone(), chat: HOME.into(), name: "Rowan".into(), said: String::new(), files: 0 }));
+    assert_eq!(e.state().turns[&t.turn].ret, Some(Return { agent: juniper.fragment.clone(), chat: HOME.into(), name: "Rowan".into(), by: rowan.identity.clone(), said: String::new(), files: 0 }));
     // juniper's turn ends: the answer needs no one waiting
     ev(&mut e, Event::End { turn: asking, outcome: Outcome::Idle }, T0 + 2);
 
@@ -1862,8 +1862,13 @@ fn a_question_is_answered_back_where_it_was_asked() {
 /// to forget it) and answered that its agent left; one over whose answer
 /// had not landed keeps that answer, posted as the asker, and nothing of
 /// its chat's (its agent's key is gone). Restart: a life from that state
-/// owes the answer again. Invalid: a plain turn of the leaving agent, or
-/// one whose asker leaves too, is dropped as before.
+/// owes the answer again; and a life that first sees the agent gone (its
+/// roster, read at its start, no longer names it) answers a saved turn,
+/// queued or running, all the same, by the agent its return names. A turn
+/// held from before its return kept who it is by learns it from the roster
+/// it leaves. Invalid: a plain turn of the leaving agent, or one whose
+/// asker leaves too, is dropped as before; so is one from before first
+/// seen gone at a start, whose agent nothing names any more.
 #[test]
 fn an_asked_turn_answers_after_its_agent_leaves() {
     let (rowan, juniper) = (agent("rowan"), agent("juniper"));
@@ -1877,7 +1882,7 @@ fn an_asked_turn_answers_after_its_agent_leaves() {
     assert_eq!(owed.len(), 1, "{:?}", left.effects);
     let (by, on, body) = &owed[0];
     assert_eq!((by.as_str(), on.as_str()), (juniper.fragment.as_str(), juniper.fragment.as_str()), "posted as juniper, on its own tasks");
-    assert_eq!((&body["outcome"], &body["error"]), (&json!("error"), &json!(LEFT)), "{body}");
+    assert_eq!((&body["outcome"], &body["error"], &body["by"]), (&json!("error"), &json!(LEFT), &json!(rowan.identity)), "{body}");
     assert!(posts(&left).iter().all(|(_, b)| b["kind"] == "answer"), "nothing of talk's: {:?}", posts(&left));
     let landed = e.step(Input::Posted { turn: t.clone(), id: records::answer_id(&t), kept: true }, T0 + 2);
     assert!(landed.dirty && e.state().turns.is_empty(), "let go once its answer landed");
@@ -1898,6 +1903,49 @@ fn an_asked_turn_answers_after_its_agent_leaves() {
     let owed = answers(&again);
     assert_eq!(owed.len(), 1, "owed again: {:?}", again.effects);
     assert!(owed[0].2["text"].as_str().is_some_and(|t| t.contains("Built.")), "{:?}", owed[0].2);
+
+    // first seen gone by a life's start (Alex on #877): the driver reads the
+    // roster before it recovers, and the life before knew rowan
+    let life = "fedcba9876543210fedcba9876543210";
+    for running in [true, false] {
+        let mut e = engine(&[rowan.clone(), juniper.clone()]);
+        let t = if running {
+            started(&read(&mut e, &rowan, "talk--k3x9", question(1, "Build it?"), Some(&talk), T0)).expect("rowan's turn").turn
+        } else {
+            e.step(Input::Record { agent: rowan.fragment.clone(), fragment: "talk--k3x9".into(), record: question(1, "Build it?"), view: Some(talk.clone()), since: 0 }, T0);
+            records::turn_id(&rowan.fragment, "talk--k3x9", "chat", 1)
+        };
+        assert_eq!(e.state().turns[&t].phase, if running { Phase::Running } else { Phase::Queued });
+        let mut next = Engine::new(e.state().clone(), Settings::default(), life).expect("whole").with_runtime(crate::runtime::DEFAULT, &[]);
+        let roster = next.step(Input::Agents(vec![juniper.clone()]), T0 + 1);
+        let recovered = next.recover(T0 + 1);
+        let owed: Vec<_> = answers(&roster).into_iter().chain(answers(&recovered)).collect();
+        assert!(!owed.is_empty(), "running {running}: {:?} {:?}", roster.effects, recovered.effects);
+        for (by, on, body) in &owed {
+            assert_eq!((by.as_str(), on.as_str()), (juniper.fragment.as_str(), juniper.fragment.as_str()), "running {running}");
+            assert_eq!((&body["turn"], &body["error"], &body["by"], &body["name"]), (&json!(t), &json!(LEFT), &json!(rowan.identity), &json!(rowan.name)), "running {running}: {body}");
+        }
+        assert!(posts(&roster).iter().chain(&posts(&recovered)).all(|(_, b)| b["kind"] == "answer"), "nothing of talk's: {:?} {:?}", posts(&roster), posts(&recovered));
+        next.step(Input::Posted { turn: t.clone(), id: records::answer_id(&t), kept: true }, T0 + 2);
+        assert!(next.state().turns.is_empty(), "let go once its answer landed: {:?}", next.state().turns);
+    }
+
+    // from before its return kept who it is by: learned from the roster it
+    // leaves; first seen gone at a start, it is known to nothing
+    let from_before = |e: &mut Engine, t: &str| e.state.turns.get_mut(t).and_then(|t| t.ret.as_mut()).expect("an asked turn").by.clear();
+    let mut e = engine(&[rowan.clone(), juniper.clone()]);
+    let t = started(&read(&mut e, &rowan, "talk--k3x9", question(1, "Build it?"), Some(&talk), T0)).expect("rowan's turn").turn;
+    from_before(&mut e, &t);
+    let left = e.step(Input::Agents(vec![juniper.clone()]), T0 + 1);
+    assert_eq!(answers(&left).iter().map(|(_, _, b)| b["by"].clone()).collect::<Vec<_>>(), vec![json!(rowan.identity)], "{:?}", left.effects);
+    let mut e = engine(&[rowan.clone(), juniper.clone()]);
+    let t = started(&read(&mut e, &rowan, "talk--k3x9", question(1, "Build it?"), Some(&talk), T0)).expect("rowan's turn").turn;
+    from_before(&mut e, &t);
+    let mut next = Engine::new(e.state().clone(), Settings::default(), life).expect("whole").with_runtime(crate::runtime::DEFAULT, &[]);
+    let roster = next.step(Input::Agents(vec![juniper.clone()]), T0 + 1);
+    let recovered = next.recover(T0 + 1);
+    assert!(answers(&roster).is_empty() && answers(&recovered).is_empty(), "no one to say it is by: {:?}", roster.effects);
+    assert!(next.state().turns.is_empty(), "dropped as before: {:?}", next.state().turns);
 
     // invalid: a plain turn of the leaving agent, or one whose asker leaves too
     let mut e = engine(&[rowan.clone(), juniper.clone()]);

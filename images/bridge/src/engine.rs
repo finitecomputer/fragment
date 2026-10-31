@@ -252,14 +252,21 @@ pub struct Owed {
 /// Where an asked turn's answer goes (`Message::return_to`): the asking
 /// agent of this computer, whose own `tasks` it is posted on, and the chat
 /// its answer's turn runs in; what the asked agent is called (its name as
-/// its chat showed it when asked: its agent fragment's title); and what the
-/// turn said so far, which it carries (its replies but interim ones, at
-/// most `ANSWER_TEXT_MAX_BYTES`), with how many files it sent.
+/// its chat showed it when asked: its agent fragment's title) and who it is
+/// (`by`); and what the turn said so far, which it carries (its replies but
+/// interim ones, at most `ANSWER_TEXT_MAX_BYTES`), with how many files it
+/// sent.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Return {
     pub agent: String,
     pub chat: String,
     pub name: String,
+    /// The asked agent's identity, who its answer is by: kept, as its agent
+    /// may leave this computer before it answers, unknown to the next life
+    /// (`set_agents`). A state from before holds none, and its agent's is
+    /// read from the roster (`owe_answer`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub by: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub said: String,
     #[serde(default, skip_serializing_if = "u32_is_zero")]
@@ -838,13 +845,14 @@ impl Engine {
 
     fn set_agents(&mut self, agents: Vec<Agent>) {
         assert!(agents.len() <= limits::AGENTS_MAX, "the driver bounds the agents it reads");
-        // an asked turn of an agent leaving this computer still answers its
-        // asker, when the asker stays (#722): one not over ends here, its
-        // answer saying why, owed while the leaving agent is still known
-        // (its name, its identity); its chat's records go with it (its key
-        // does), and its answer, the asker's to post, is kept
-        let staying = |fragment: &str| agents.iter().any(|a| a.fragment == fragment);
-        let answering: Vec<String> = self.state.turns.values().filter(|t| !staying(&t.agent) && t.ret.as_ref().is_some_and(|r| staying(&r.agent))).map(|t| t.id.clone()).collect();
+        let leaving = std::mem::replace(&mut self.agents, agents);
+        // an asked turn of an agent gone from this computer (leaving now, or
+        // first seen gone by a life's start, before which it knows no one)
+        // still answers its asker, when the asker stays (#722): one not over
+        // ends here, its answer saying why, by the agent its return names
+        // (`Return::by`); its chat's records go with it (its key does), and
+        // its answer, the asker's to post, is kept
+        let answering: Vec<String> = self.state.turns.values().filter(|t| self.agent(&t.agent).is_none() && t.ret.as_ref().is_some_and(|r| self.agent(&r.agent).is_some())).map(|t| t.id.clone()).collect();
         for id in answering {
             self.claiming.remove(&id);
             self.dirty = true;
@@ -852,6 +860,11 @@ impl Engine {
                 self.tell_runtime(&id, Command::Forget { turn: id.clone() });
             }
             let t = self.state.turns.get_mut(&id).expect("listed");
+            // a turn held from before its return kept who it is by learns it
+            // from the roster its agent leaves (a start's is none)
+            if let Some(r) = t.ret.as_mut().filter(|r| r.by.is_empty()) {
+                r.by = leaving.iter().find(|a| a.fragment == t.agent).map(|a| a.identity.clone()).unwrap_or_default();
+            }
             if t.phase != Phase::Ended {
                 t.phase = Phase::Ended;
                 t.owed.clear();
@@ -862,7 +875,6 @@ impl Engine {
             self.state.turns.get_mut(&id).expect("listed").owed.retain(|o| o.to.is_some());
             crate::ev!("turn.answer_kept", { "turn": id, "why": "its agent left this computer; its asker stays" });
         }
-        self.agents = agents;
         let gone: Vec<String> = self.state.turns.values().filter(|t| self.agent(&t.agent).is_none()).map(|t| t.id.clone()).collect();
         for id in gone {
             if self.state.turns[&id].owed.iter().any(|o| o.to.is_some()) {
@@ -1249,7 +1261,7 @@ impl Engine {
             let asking = self.agents.iter().find(|a| a.identity == asker && a.fragment != agent.fragment)?;
             // as its chat shows it, else its label while that is unread
             let name = self.views.get(fragment).and_then(|v| v.names.get(&agent.identity)).cloned().unwrap_or_else(|| agent.name.clone());
-            Some(Return { agent: asking.fragment.clone(), chat: chat.clone(), name, said: String::new(), files: 0 })
+            Some(Return { agent: asking.fragment.clone(), chat: chat.clone(), name, by: agent.identity.clone(), said: String::new(), files: 0 })
         });
         self.state.admitted += 1;
         let turn = Turn {
@@ -1349,13 +1361,16 @@ impl Engine {
             crate::ev!("answer.dropped", { "turn": id, "why": "its asking agent left this computer" });
             return;
         }
-        let by = self.agent(&t.agent).expect("a held turn's agent is on this computer");
+        let Some(by) = Some(r.by.clone()).filter(|b| !b.is_empty()).or_else(|| self.agent(&t.agent).map(|a| a.identity.clone())) else {
+            crate::ev!("answer.dropped", { "turn": id, "why": "its agent left this computer before its return kept who it is" });
+            return;
+        };
         let text = match outcome {
             Outcome::Error(why) if refused => records::refused_text(&r.name, &t.fragment, &t.text, why),
             _ => records::answer_text(&r.name, &t.fragment, &t.text, &r.said, r.files, outcome),
         };
         let hop = t.hop.saturating_add(1).min(limits::HOPS_MAX);
-        let body = records::answer(&r.chat, &text, &by.identity, &r.name, &t.cause, id, outcome, hop, refused);
+        let body = records::answer(&r.chat, &text, &by, &r.name, &t.cause, id, outcome, hop, refused);
         let o = Owed { id: records::answer_id(id), body, to: Some(r.agent.clone()) };
         let (agent, fragment) = (t.agent.clone(), t.fragment.clone());
         self.state.turns.get_mut(id).expect("held").owed.push(o.clone());
