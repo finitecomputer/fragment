@@ -670,6 +670,15 @@ impl Api {
         self.json(Method::GET, &format!("/api/f/{}/channels/{}?after={after}&limit={limit}", name(fragment)?, encode(channel)), Some(agent), None).await
     }
 
+    /// A recovery page, capped by the lookup's remaining byte budget before
+    /// collecting the body. The byte count includes JSON/wire overhead.
+    pub async fn history_records(&self, agent: &str, fragment: &str, channel: &str, after: u64, limit: u32, bytes: usize) -> Result<(Page, usize), ApiError> {
+        let path = format!("/api/f/{}/channels/{}?after={after}&limit={limit}", name(fragment)?, encode(channel));
+        let body = self.call(Method::GET, &path, Some(agent), None, bytes.min(limits::ANSWER_MAX_BYTES)).await?;
+        let page = serde_json::from_slice(&body).map_err(|e| ApiError::Decode(format!("{path}: {e}")))?;
+        Ok((page, body.len()))
+    }
+
     /// `POST /api/f/{name}/channels/{channel} {id, body}` → `{record,
     /// replayed}`: `replayed` when the id was posted before (with this
     /// body), and the record's seq (the first post's, for a replay).

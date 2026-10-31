@@ -80,11 +80,7 @@
 //!   both: an answer's files go with it. It is a running turn of this
 //!   life: a restart ends it as lost, and that message, read by the next
 //!   life, is a turn of its own.
-//! - The computer is kept awake while a turn waits to run, runs, or waits
-//!   on its card (at most the card's life), so a card expires with its
-//!   runtime there and its turn ends as the runtime ends it, never cut by an
-//!   idle sleep (docs/bridge.md, "A card keeps its computer awake": a cut
-//!   one left Hermes to meet the next message with the cut request).
+//! - Wakefulness follows docs/bridge.md, including runtime activity.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
@@ -192,8 +188,7 @@ pub enum Phase {
     /// Its claim was answered as this life's, and the runtime has it (a
     /// restart ends it: one life per turn).
     Running,
-    /// Waiting on a prompt's answer, or its expiry: the computer is kept
-    /// awake for it.
+    /// Waiting on a prompt's answer, or its expiry; eligible for idle sleep.
     Waiting,
     /// Over (run and ended, or ended without running: refused, stopped
     /// while it waited, or another life's), and its last records are owed
@@ -262,6 +257,18 @@ pub struct Prompt {
     pub words: Vec<String>,
     pub expires_at: u64,
     pub closed: bool,
+    /// Its owner's answer, held from the runtime until its closure is on
+    /// `work` (`Effect::Fence`). A restart ends its turn, so never kept.
+    #[serde(skip)]
+    pub held: Option<Held>,
+}
+
+/// A live answer held from the runtime (`Prompt::held`): its card's
+/// closure, posted again until the platform answers it, and the answer.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Held {
+    pub closed: Value,
+    pub answer: Command,
 }
 
 /// The reply a turn is writing: shown as the chat's draft, posted once a
@@ -322,6 +329,10 @@ pub struct Turn {
     /// The seq on `chat` of the message its message quotes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply_to: Option<u64>,
+    /// What it is told before its message, for a late card answer's turn:
+    /// the card's turn (cards.rs, `Fresh::note`; `TurnStart::note`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
     /// It answers an ask: its end owes the answer too (`Return`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ret: Option<Return>,
@@ -376,7 +387,14 @@ pub enum Input {
     /// A record from before `since` (ms; when the agent joined the chat) is
     /// history: its cursor passes it, and it starts nothing.
     Record { agent: String, fragment: String, record: Record, view: Option<ChatView>, since: i64 },
+    /// An owner's answer to a card of the agent's that no running turn
+    /// held, with the chat's journal read for it (`work` back to the card's
+    /// turn, `chat` back to the card, the turn's cause), or why it could
+    /// not be, finally (`Engine::card_record`).
+    CardRecord { agent: String, fragment: String, record: Record, view: Option<ChatView>, since: i64, history: Result<crate::history::Journal, crate::history::Unavailable> },
     Runtime(Event),
+    /// The platform's answer to a live answer's closure (`Effect::Fence`).
+    Fenced { turn: String, prompt: String, answer: ClaimAnswer },
     /// The platform's answer to a turn's claim.
     Claimed { turn: String, answer: ClaimAnswer },
     /// The lane is done with an owed record (`Effect::Owed`): answered
@@ -403,6 +421,12 @@ pub enum Effect {
     /// its fragment's order unless the computer is held, and answered back
     /// as `Input::Claimed`. The runtime hears of the turn only after.
     Claim { agent: String, fragment: String, turn: String, id: String, body: Value },
+    /// A live card answer's closure on `work`, posted in its fragment's
+    /// order and answered back as `Input::Fenced`: the runtime has the
+    /// answer only once the journal holds it, so a life rolled back to
+    /// before the answer finds it answered live, and rebuilds nothing
+    /// (cards.rs).
+    Fence { agent: String, fragment: String, turn: String, prompt: String, id: String, body: Value },
     /// One of a turn's last records (on `work`: its end, and its start for a
     /// turn that never ran; on its asking agent's own `tasks`: its answer),
     /// kept in the state until the lane is done with it and says so
@@ -457,6 +481,9 @@ pub struct Engine {
     /// Turns whose claim is posted and not answered yet: queued in the
     /// state, so a crash leaves them for the next life to claim.
     claiming: BTreeSet<String>,
+    /// Live answers' closures posted and not answered yet, by turn and
+    /// prompt (`Effect::Fence`): one not answered is posted again at a tick.
+    fencing: BTreeSet<(String, String)>,
     agents: Vec<Agent>,
     views: HashMap<String, ChatView>,
     keepalive: bool,
@@ -543,6 +570,7 @@ impl Engine {
             connected: false,
             working: false,
             claiming: BTreeSet::new(),
+            fencing: BTreeSet::new(),
             agents: Vec::new(),
             views: HashMap::new(),
             keepalive: false,
@@ -628,8 +656,10 @@ impl Engine {
         match input {
             Input::Agents(agents) => self.set_agents(agents),
             Input::Record { agent, fragment, record, view, since } => self.record(&agent, &fragment, record, view, since),
+            Input::CardRecord { agent, fragment, record, view, since, history } => self.card_record(&agent, &fragment, record, view, since, history),
             Input::Runtime(event) => self.runtime(event),
             Input::Claimed { turn, answer } => self.claimed(&turn, answer),
+            Input::Fenced { turn, prompt, answer } => self.fenced(&turn, &prompt, answer),
             Input::Posted { turn, id } => self.posted(&turn, &id),
             Input::Tick => self.tick(),
             Input::Gone { agent, fragment } => self.gone(&agent, &fragment),
@@ -649,9 +679,7 @@ impl Engine {
     }
 
     fn finish(&mut self) -> Step {
-        // a turn waiting on its card holds the computer too, until the card
-        // is answered or expires: an idle sleep would cut it
-        let busy = self.working || self.state.turns.values().any(|t| matches!(t.phase, Phase::Queued | Phase::Running | Phase::Waiting));
+        let busy = self.working || self.state.turns.values().any(|t| t.phase == Phase::Queued || (t.phase == Phase::Running && !t.asking));
         if busy != self.keepalive {
             self.keepalive = busy;
             self.out.push(Effect::Keepalive(busy));
@@ -762,6 +790,69 @@ impl Engine {
             }
             _ => {}
         }
+    }
+
+    /// An owner's answer to a card of the agent's that no running turn of
+    /// this life held when its follower read it (driver.rs `feed`), with
+    /// the journal read for it, or why it could not be (final: never a
+    /// failed read, which its follower reads again). The card's first answer starts a
+    /// fresh turn, caused by the answer itself, told the card's turn as
+    /// its note (cards.rs); a card that cannot be rebuilt is closed
+    /// `history_unavailable` and starts nothing. Either way the cursor
+    /// passes the answer, as it passes any record.
+    fn card_record(&mut self, agent: &str, fragment: &str, record: Record, view: Option<ChatView>, since: i64, history: Result<crate::history::Journal, crate::history::Unavailable>) {
+        let Some(a) = self.agent(agent).cloned() else { return };
+        if record.seq <= self.state.cursors.get(&cursor_key(agent, fragment, &record.channel)).copied().unwrap_or(0) {
+            return;
+        }
+        let Said::PromptResponse { prompt, card, .. } = records::said(&record.body) else { unreachable!("the driver sends a card's answer alone") };
+        // a turn of this life holds it after all (it was read as the turn
+        // asked): the card's answer, as any is
+        let held = self.state.turns.values().any(|t| t.active() && t.agent == agent && t.fragment == fragment && card.as_ref().is_none_or(|c| c.agent == a.identity && c.turn == t.id) && t.prompts.iter().any(|p| p.id == prompt));
+        if held || record.at < since {
+            self.record(agent, fragment, record, view, since);
+            return;
+        }
+        if let Some(v) = &view {
+            self.views.insert(fragment.to_string(), v.clone());
+        }
+        let names = self.views.get(fragment).map(|v| v.names.clone()).unwrap_or_default();
+        let name = |p: &str| names.get(p).cloned().unwrap_or_else(|| "someone".into());
+        let resolved = history.and_then(|j| crate::cards::resolve(&a, &record, &j.work, &j.chat, j.cause.as_ref(), name, self.now));
+        let (seq, at, asker) = (record.seq, record.at, record.principal.clone());
+        self.record(agent, fragment, record, view, since);
+        match resolved {
+            Ok(None) => {}
+            Ok(Some(r)) => {
+                let turn = r.closed["turn"].as_str().expect("a closure names its turn").to_string();
+                crate::ev!("card.late", { "agent": agent, "fragment": fragment, "seq": seq, "turn": turn, "outcome": r.closed["outcome"], "fresh": r.fresh.is_some() });
+                self.post(agent, fragment, records::WORK, records::work_id(&turn, &format!("pc:{prompt}")), r.closed, Vec::new());
+                let Some(fresh) = r.fresh else { return };
+                // admitted as the answer's own turn, never Tell or Other for
+                // a question another turn asks meanwhile
+                let cause = Cause { fragment: fragment.to_string(), channel: records::CHAT.to_string(), seq };
+                let id = records::turn_id(agent, fragment, records::CHAT, seq);
+                let m = Message { text: fresh.text, to: vec![a.identity.clone()], attachments: Vec::new(), turn: None, hop: 0, reply_to: None, return_to: None };
+                self.admit(&a, fragment, cause, at, &asker, name(&asker), &m, 0, Ask::Message);
+                if let Some(t) = self.state.turns.get_mut(&id).filter(|t| t.phase == Phase::Queued) {
+                    t.note = Some(fresh.note);
+                }
+            }
+            Err(why) => {
+                crate::ev!("card.unavailable", { "agent": agent, "fragment": fragment, "seq": seq, "why": why.why() });
+                // closed on the card's own turn; an answer that names no
+                // card has no turn to close
+                if let Some(c) = card {
+                    self.post(agent, fragment, records::WORK, records::work_id(&c.turn, &format!("pc:{prompt}")), records::turn_prompt_closed(&c.turn, &prompt, Closed::Unavailable, None), Vec::new());
+                }
+            }
+        }
+    }
+
+    /// The prompts this life's running turns hold open, by agent and chat:
+    /// their answers are theirs, read with no journal (driver.rs `feed`).
+    pub fn held(&self) -> BTreeSet<(String, String, String)> {
+        self.state.turns.values().filter(|t| t.active()).flat_map(|t| t.prompts.iter().filter(|p| !p.closed).map(|p| (t.agent.clone(), t.fragment.clone(), p.id.clone()))).collect()
     }
 
     fn said(&mut self, agent: &Agent, fragment: &str, record: &Record) {
@@ -1028,6 +1119,7 @@ impl Engine {
             asking: false,
             command: matches!(ask, Ask::Command | Ask::Refused(_)),
             reply_to: m.reply_to,
+            note: None,
             ret,
             open: None,
         };
@@ -1281,7 +1373,7 @@ impl Engine {
             files: Vec::new(),
             routine: t.routine,
             claim_seq,
-            note: None,
+            note: t.note.clone(),
             forgotten,
             forgotten_more,
             command: t.command,
@@ -1426,7 +1518,7 @@ impl Engine {
             return;
         }
         let p = self.state.turns[&id].prompts.iter().find(|p| p.id == prompt).expect("found");
-        if p.closed {
+        if p.closed || p.expires_at <= self.now {
             crate::ev!("prompt.ignored", { "turn": id, "prompt": prompt, "why": "already closed: the first answer won" });
             return;
         }
@@ -1440,24 +1532,68 @@ impl Engine {
 
     /// An open prompt of turn `id` answered with `option` by `principal`:
     /// closed, its card saying `shown` (the words, typed on it or sent as a
-    /// message), the runtime given `words` and the files `attached`; the
-    /// turn runs on once none of its prompts is open.
+    /// message), the runtime given `words` and the files `attached` once
+    /// the closure is on `work` (`fenced`); the turn runs on once none of
+    /// its prompts is open. The closure names no `answerSeq`: a card
+    /// answered live never starts a fresh turn (cards.rs), however far back
+    /// a `/data` goes, and the runtime acts on no answer the journal does
+    /// not hold.
     #[allow(clippy::too_many_arguments)]
     fn answered(&mut self, agent: &str, fragment: &str, id: &str, prompt: &str, option: &str, principal: &str, shown: Option<String>, words: Option<String>, attached: Option<Attached>, seq: u64) {
         let now = self.now;
+        let closed = records::turn_prompt_closed(id, prompt, Closed::Answered, Some((option, principal, shown.as_deref())));
+        let answer = Command::Answer { turn: id.to_string(), prompt: prompt.to_string(), option: Some(option.to_string()), seq, by: principal.to_string(), words: words.clone(), attached };
         let t = self.state.turns.get_mut(id).expect("an open turn's");
         let p = t.prompts.iter_mut().find(|p| p.id == prompt).expect("its prompt");
         assert!(!p.closed, "a prompt is answered once");
         p.closed = true;
+        p.held = Some(Held { closed: closed.clone(), answer });
         if t.prompts.iter().all(|p| p.closed) && t.phase == Phase::Waiting {
             t.phase = Phase::Running;
         }
         t.last_ms = now;
         self.dirty = true;
         crate::ev!("prompt.answered", { "turn": id, "prompt": prompt, "option": option, "words": words.is_some() });
-        let closed = records::turn_prompt_closed(id, prompt, Closed::Answered, Some((option, principal, shown.as_deref())));
-        self.post(agent, fragment, records::WORK, records::work_id(id, &format!("pc:{prompt}")), closed, Vec::new());
-        self.out.push(Effect::Runtime(Command::Answer { turn: id.to_string(), prompt: prompt.to_string(), option: Some(option.to_string()), seq, by: principal.to_string(), words, attached }));
+        self.fence(agent, fragment, id, prompt, closed);
+    }
+
+    fn fence(&mut self, agent: &str, fragment: &str, turn: &str, prompt: &str, body: Value) {
+        self.fencing.insert((turn.to_string(), prompt.to_string()));
+        let id = records::work_id(turn, &format!("pc:{prompt}"));
+        self.out.push(Effect::Fence { agent: agent.to_string(), fragment: fragment.to_string(), turn: turn.to_string(), prompt: prompt.to_string(), id, body });
+    }
+
+    /// The platform's answer to a live answer's closure: on `work` (or a
+    /// replay of it), the runtime has the answer; another body under its id
+    /// (409) or a chat the agent may no longer post in, its wait ends with
+    /// no answer, as at an expiry; no answer at all, it is posted again at
+    /// the next tick, the answer held meanwhile, which is no sign of life: a
+    /// platform that answers none for a turn's idle bound ends the turn,
+    /// the answer never acted on.
+    fn fenced(&mut self, turn: &str, prompt: &str, answer: ClaimAnswer) {
+        self.fencing.remove(&(turn.to_string(), prompt.to_string()));
+        let now = self.now;
+        let Some(t) = self.state.turns.get_mut(turn).filter(|t| t.active() && t.prompts.iter().any(|p| p.id == prompt && p.held.is_some())) else {
+            crate::ev!("fence.stale", { "turn": turn, "prompt": prompt, "why": "no running turn holds its answer" });
+            return;
+        };
+        if answer != ClaimAnswer::Unanswered {
+            t.last_ms = now;
+        }
+        let p = t.prompts.iter_mut().find(|p| p.id == prompt).expect("found");
+        let answer = match answer {
+            ClaimAnswer::Unanswered => {
+                crate::ev!("fence.unanswered", { "turn": turn, "prompt": prompt });
+                return;
+            }
+            ClaimAnswer::Ours { .. } => p.held.take().expect("held").answer,
+            ClaimAnswer::Theirs | ClaimAnswer::Refused => {
+                p.held = None;
+                crate::ev!("fence.refused", { "turn": turn, "prompt": prompt, "why": "its closure is not this answer's to post" });
+                Command::Answer { turn: turn.to_string(), prompt: prompt.to_string(), option: None, seq: 0, by: String::new(), words: None, attached: None }
+            }
+        };
+        self.out.push(Effect::Runtime(answer));
     }
 
     // ---- the runtime ----
@@ -1703,7 +1839,7 @@ impl Engine {
         let expires_at = self.now + ttl;
         let t = self.state.turns.get_mut(id).expect("checked");
         let Some(owner) = self.agents.iter().find(|a| a.fragment == t.agent).map(|a| a.owner.clone()) else { return };
-        t.prompts.push(Prompt { id: prompt.clone(), options: options.iter().map(|o| o.id.clone()).collect(), words: options.iter().filter(|o| o.words).map(|o| o.id.clone()).collect(), expires_at, closed: false });
+        t.prompts.push(Prompt { id: prompt.clone(), options: options.iter().map(|o| o.id.clone()).collect(), words: options.iter().filter(|o| o.words).map(|o| o.id.clone()).collect(), expires_at, closed: false, held: None });
         t.phase = Phase::Waiting;
         self.dirty = true;
         let (agent, fragment) = (t.agent.clone(), t.fragment.clone());
@@ -1711,15 +1847,14 @@ impl Engine {
         self.post(&agent, &fragment, records::WORK, records::work_id(id, &format!("p:{prompt}")), records::turn_prompt(id, &prompt, &text, &options, &owner, expires_at), Vec::new());
     }
 
-    /// The turn is over: its last reply, its open prompts closed as
-    /// `unanswered`, its end, and its chat's next turn.
-    /// The turn's run is over: its last reply, its open prompts closed as
-    /// `unanswered`, its end (owed: kept with the turn until answered), and
-    /// its chat's next turn.
+    /// The run is over: seal its reply and owe its end, then pump the chat.
+    /// Unexpired cards outlive the run, except an explicit Stop. Their
+    /// later answers are reconstructed from the journal as fresh turns.
     fn end(&mut self, id: &str, outcome: Outcome, unanswered: Closed) {
         self.seal(id, false);
         let t = self.state.turns.get_mut(id).expect("ending a held turn");
         assert!(t.active(), "a turn's run ends once: {id} is {:?}", t.phase);
+        // a live answer still held goes with it: the runtime never had it
         let prompts = std::mem::take(&mut t.prompts);
         let end = Owed { id: records::work_id(id, "end"), body: records::turn_end(id, &outcome), to: None };
         t.phase = Phase::Ended;
@@ -1734,7 +1869,9 @@ impl Engine {
             self.ended.pop_front();
         }
         crate::ev!("turn.end", { "turn": id, "agent": agent, "fragment": fragment, "outcome": match &outcome { Outcome::Idle => "idle", Outcome::Stopped => "stopped", Outcome::Error(_) => "error" } });
-        for p in prompts.iter().filter(|p| !p.closed) {
+        self.fencing.retain(|(t, _)| t != id);
+        let now = self.now;
+        for p in prompts.iter().filter(|p| !p.closed && (outcome == Outcome::Stopped || p.expires_at <= now)) {
             self.post(&agent, &fragment, records::WORK, records::work_id(id, &format!("pc:{}", p.id)), records::turn_prompt_closed(id, &p.id, unanswered, None), Vec::new());
         }
         self.owe(&agent, &fragment, id, end);
@@ -1776,6 +1913,18 @@ impl Engine {
         for id in quiet {
             self.out.push(Effect::Runtime(Command::Forget { turn: id.clone() }));
             self.end(&id, Outcome::Error("the agent stopped answering".into()), Closed::Expired);
+        }
+        // a live answer whose closure was not answered: posted again
+        let unfenced: Vec<(String, String, String, String, Value)> = self
+            .state
+            .turns
+            .values()
+            .filter(|t| t.active())
+            .flat_map(|t| t.prompts.iter().filter_map(|p| p.held.as_ref().map(|h| (t.agent.clone(), t.fragment.clone(), t.id.clone(), p.id.clone(), h.closed.clone()))))
+            .filter(|(_, _, turn, prompt, _)| !self.fencing.contains(&(turn.clone(), prompt.clone())))
+            .collect();
+        for (agent, fragment, turn, prompt, body) in unfenced {
+            self.fence(&agent, &fragment, &turn, &prompt, body);
         }
         // A claim left unanswered (no answer, or the computer held) is
         // claimed again.
@@ -1834,6 +1983,9 @@ pub fn check(state: &State) -> Result<(), Corrupt> {
         }
         if t.interim > t.replies {
             return Err(Corrupt(format!("turn {id} posted {} interim replies of {}", t.interim, t.replies)));
+        }
+        if t.note.as_ref().is_some_and(|n| n.len() > limits::NOTE_MAX_BYTES) {
+            return Err(Corrupt(format!("turn {id}'s note is past a note's bound")));
         }
         let ended = t.phase == Phase::Ended;
         if ended == t.owed.is_empty() {
