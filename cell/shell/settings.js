@@ -47,7 +47,7 @@ export function createSettings({ api, $, seg, account, navigation, notices, sect
   const { at, path: SETTINGS, isOpen, enter, entered } = navigation;
   const { hideNotice, noticeCurrent, notice } = notices;
   const { computerSection, connectionsSection, simplexSection } = sections;
-  const { getComputer, getAgents, faceControls, agentSettings, renderAgentFaces, paintHomes } = agents;
+  const { getComputer, getAgents, faceControls, agentSettings, addAgentForm, renderAgentFaces, paintHomes } = agents;
   // ---- settings: the person's account, credit, computer and agents ----
   const usd = (micros) => (micros / 1_000_000).toLocaleString(undefined, { style: "currency", currency: "USD" });
   // what a standing short of `ok` stops, and why (crates/core/src/ledger.rs `Refused`)
@@ -322,7 +322,7 @@ export function createSettings({ api, $, seg, account, navigation, notices, sect
       name.dataset.agentFace = a.fragment;
       const [actions, said] = faceControls(a);
       return [agentSettings(a, actionLine(name, actions, row), modeled), said];
-    }) : [el("p", "muted", "None yet.")]));
+    }) : [el("p", "muted", "None yet.")]), ...(mine.length ? addAgentForm() : []));
     const connections = connectionsSection(linked, uses);
     const skills = await skillsSection();
     if (lost()) return;

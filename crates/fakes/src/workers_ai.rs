@@ -19,6 +19,12 @@
 //! the prompt (`image_bytes`), with no usage: Workers AI prices an image by
 //! its tiles and steps, which the cell counts itself.
 //!
+//! BGE-M3 (fragment_core::embed's model unnamed) answers its text
+//! embeddings as the binding does, `{shape, data, pooling}` with no usage,
+//! each vector the fake's own (`embedding`: words hashed, unit length);
+//! the OpenAI-compatible face answers `POST /v1/embeddings` for
+//! `OPENAI_EMBEDDING_MODEL` the same vectors in OpenAI's shape, with usage.
+//!
 //! An icon (fragment_core::icon) is made of three calls here:
 //! - its subject, GLM-5.3 Flash asked with the icon's own system message
 //!   (`icon::subject_input`): named as its maker's hint asked, else
@@ -189,6 +195,45 @@ fn on_openrouter(model: &str) -> bool {
 pub const OPENAI_BODY_MAX_BYTES: usize = 2 * 1024 * 1024;
 /// Its path.
 pub const OPENAI_PATH: &str = "/v1/chat/completions";
+/// Its embeddings' path (a self-hosted deployment's embeddings slot, on a
+/// model of its own).
+pub const EMBEDDINGS_PATH: &str = "/v1/embeddings";
+/// The model its embeddings face serves, BGE-M3 as a self-hosted
+/// deployment names it (fragment_core::embed).
+pub const OPENAI_EMBEDDING_MODEL: &str = "BAAI/bge-m3";
+/// The length of the fake's embeddings, BGE-M3's, on either face.
+pub const EMBEDDING_DIMENSIONS: usize = fragment_core::embed::DIMENSIONS_DEFAULT as usize;
+
+/// A text's embedding as the fake makes it: its words (lowercased runs of
+/// letters and digits) hashed into signed buckets, unit length, so texts
+/// sharing words are near and others near orthogonal. No model's space:
+/// the e2e's, to check that vectors come back where they were sent.
+pub fn embedding(text: &str, dims: usize) -> Vec<f32> {
+    use sha2::Digest;
+    let mut v = vec![0f32; dims];
+    for word in text.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()) {
+        let h = sha2::Sha256::digest(word.to_lowercase().as_bytes());
+        let n = u64::from_le_bytes(h[..8].try_into().expect("8 bytes"));
+        v[(n % dims as u64) as usize] += if n >> 63 == 0 { 1.0 } else { -1.0 };
+    }
+    let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm == 0.0 {
+        v[0] = 1.0;
+        return v;
+    }
+    v.iter_mut().for_each(|x| *x /= norm);
+    v
+}
+
+/// The texts an embeddings call asks for: Workers AI's `text` or OpenAI's
+/// `input`, a string or strings.
+fn texts_of(v: &Value) -> Option<Vec<String>> {
+    match v {
+        Value::String(t) => Some(vec![t.clone()]),
+        Value::Array(a) => a.iter().map(|t| t.as_str().map(str::to_string)).collect(),
+        _ => None,
+    }
+}
 
 /// Which of the fake's faces a call came to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -917,6 +962,9 @@ fn answer(s: &mut State, req: &Request) -> Response {
     if req.path == OPENAI_PATH {
         return openai_answer(s, req);
     }
+    if req.path == EMBEDDINGS_PATH {
+        return openai_embeddings(s, req);
+    }
     let Some(model) = req.path.strip_prefix("/run/").map(crate::http::decode) else { return problem(404, "no such route") };
     if req.method != "POST" {
         return problem(405, "the binding runs a model with a POST");
@@ -943,6 +991,9 @@ fn answer(s: &mut State, req: &Request) -> Response {
     if model == TRANSCRIBE_MODEL {
         return transcription_answer(&body, &log_id);
     }
+    if model == fragment_core::embed::MODEL_DEFAULT {
+        return embeddings_answer(&body, &log_id);
+    }
     if let Some(decides) = DecisionModel::of_id(&model) {
         return decision_answer(s, decides, &body, &log_id);
     }
@@ -965,12 +1016,8 @@ fn openai_answer(s: &mut State, req: &Request) -> Response {
     if req.body.len() > OPENAI_BODY_MAX_BYTES {
         return limiter_error(413, "invalid_request_error", "payload_too_large", "length limit exceeded");
     }
-    let presented = authorization.as_deref().and_then(|a| a.strip_prefix("Bearer ")).map(str::trim);
-    let wanted = s.model_keys.iter().find(|(m, _)| *m == model).map(|(_, k)| k.as_str()).or(s.key.as_deref());
-    match (presented, wanted) {
-        (None, _) => return limiter_error(401, "invalid_api_key", "missing_authorization", "Finite Private API key is required."),
-        (Some(p), Some(k)) if p == k => {}
-        (Some(_), _) => return limiter_error(401, "usage_limit", "invalid_api_key", "Finite Private API key is invalid or revoked."),
+    if let Some(refused) = unkeyed(s, &model, authorization.as_deref()) {
+        return refused;
     }
     if !OPENAI_MODELS.contains(&model.as_str()) {
         return limiter_error(400, "invalid_request_error", "unsupported_model", "The requested model is not available through Finite Private.");
@@ -986,6 +1033,50 @@ fn openai_answer(s: &mut State, req: &Request) -> Response {
         return limiter_error(400, "invalid_request_error", "invalid_request", &why);
     }
     chat_answer(s, Face::OpenAi, &model, &body)
+}
+
+/// The limiter's 401 for a call to `model` without the key the test let in
+/// for it, or none when it carries that key.
+fn unkeyed(s: &State, model: &str, authorization: Option<&str>) -> Option<Response> {
+    let presented = authorization.and_then(|a| a.strip_prefix("Bearer ")).map(str::trim);
+    let wanted = s.model_keys.iter().find(|(m, _)| *m == model).map(|(_, k)| k.as_str()).or(s.key.as_deref());
+    match (presented, wanted) {
+        (None, _) => Some(limiter_error(401, "invalid_api_key", "missing_authorization", "Finite Private API key is required.")),
+        (Some(p), Some(k)) if p == k => None,
+        (Some(_), _) => Some(limiter_error(401, "usage_limit", "invalid_api_key", "Finite Private API key is invalid or revoked.")),
+    }
+}
+
+/// Workers AI's text embeddings (BGE-M3's schema): `{text}` in, `{shape,
+/// data, pooling}` out, no usage (Workers AI reports none for them).
+fn embeddings_answer(input: &Value, log_id: &str) -> Response {
+    let Some(texts) = texts_of(&input["text"]) else { return problem(400, "Type mismatch of '/text', not a string or an array of strings") };
+    let data: Vec<Vec<f32>> = texts.iter().map(|t| embedding(t, EMBEDDING_DIMENSIONS)).collect();
+    Response::json(200, &json!({ "shape": [data.len(), EMBEDDING_DIMENSIONS], "data": data, "pooling": "cls" })).with_header("cf-aig-log-id", log_id)
+}
+
+/// The OpenAI-compatible face's embeddings: `{model, input}` in, OpenAI's
+/// `{object, data: [{object, index, embedding}], model, usage}` out, its
+/// tokens a word each; keyed and failed by the same levers as its chat.
+fn openai_embeddings(s: &mut State, req: &Request) -> Response {
+    let body: Value = serde_json::from_slice(&req.body).unwrap_or(Value::Null);
+    let model = body["model"].as_str().unwrap_or_default().to_string();
+    let authorization = req.header("authorization").map(str::to_string);
+    s.calls.push(AiCall { face: Face::OpenAi, model: model.clone(), body: body.clone(), metadata: Value::Null, affinity: None, authorization: authorization.clone() });
+    if let Some(refused) = unkeyed(s, &model, authorization.as_deref()) {
+        return refused;
+    }
+    if model != OPENAI_EMBEDDING_MODEL {
+        return limiter_error(400, "invalid_request_error", "unsupported_model", "The requested model is not available here.");
+    }
+    if let Some(Some(status)) = s.failures.pop_front() {
+        return failure(Face::OpenAi, status);
+    }
+    let Some(texts) = texts_of(&body["input"]) else { return limiter_error(400, "invalid_request_error", "invalid_request", "input is a string or strings") };
+    s.answers += 1;
+    let tokens: usize = texts.iter().map(|t| t.split_whitespace().count().max(1)).sum();
+    let data: Vec<Value> = texts.iter().enumerate().map(|(index, t)| json!({ "object": "embedding", "index": index, "embedding": embedding(t, EMBEDDING_DIMENSIONS) })).collect();
+    Response::json(200, &json!({ "object": "list", "data": data, "model": model, "usage": { "prompt_tokens": tokens, "total_tokens": tokens } }))
 }
 
 /// A chat call's answer on `face`, from the test's levers or as it would.

@@ -255,10 +255,11 @@ export function createOnboarding({ api, ui, account, fragments, computer, naviga
   // 2026-10-13: nothing fake or optimistic): a step is done once its call
   // answered, the computer's phase is its view's, and nothing is said in the
   // agent's name. Nothing of it is kept in this browser: a reload reads the
-  // list again (`owesFirstAgent`) and goes on from what was made.
+  // list again (`owesFirstAgent`, `resumeAdd`) and goes on from what was made.
   const SETUP_WAIT_MS = 4 * 60_000;
-  // the first run while it runs, or after it failed (Try again, in its chat):
-  // { label, title, chat, made, joined, ready, error }; null otherwise
+  // the first run or an Add while it runs, or after it failed (Try again, in
+  // its chat): { label, title, role, job, added, agent, written, chat, made,
+  // joined, ready, error }; null otherwise
   let setup = null;
   let setupRun = null;
   // What the first run's chat shows of it (the roster's `setup`, to that
@@ -327,7 +328,8 @@ export function createOnboarding({ api, ui, account, fragments, computer, naviga
   // Try again's, or the list's socket's) and each arrival home (`openChat`,
   // the one way there), while the person is at home, and after it too (they
   // may have gone to Settings meanwhile: then their way back asks it). Owed,
-  // it is made once (`creatingAgent`).
+  // it is made once (`creatingAgent`); not owed, an Add a reload cut short
+  // goes on (`resumeAdd`), as the shell's start asks too.
   let firstRunPutOff = false;
   async function resumeFirstRun() {
     if (!atHome()) return;
@@ -335,12 +337,69 @@ export function createOnboarding({ api, ui, account, fragments, computer, naviga
     const owed = await owesFirstAgent();
     if (!atHome()) firstRunPutOff = true;
     else if (owed) creatingAgent();
+    else await resumeAdd();
   }
-  // Each step reuses what an earlier try made, including a create whose
-  // response was lost. The chat's frame opens once: a draft in it stays put.
+  // A making a reload cut short once the first agent is made (Settings'
+  // Add agent): a chat of theirs, `<label>-chat`, with no message yet (its
+  // page sends nothing before its agent is in it), and their agent
+  // `<label>`. Not yet in it, it is made on from there, named as it was:
+  // Add made its agent, its job and its role before its chat (`makeAgent`).
+  // In it, only its hello may be missing: it is posted again (the same
+  // record), once a page. Put off, as the first run is, while a read failed.
+  const helloAgain = new Set();
+  async function resumeAdd() {
+    if (setup || isGuest()) return;
+    if (reads().listFailed || reads().updating || computerFailed()) {
+      firstRunPutOff = true;
+      return;
+    }
+    for (const chat of chats().filter((f) => own(f) && /-chat$/.test(labelOf(f.name)) && !f.previewAt && !f.listed?.length)) {
+      const label = labelOf(chat.name).slice(0, -"-chat".length);
+      const agent = allFragments().find((f) => f.kind === "agent" && own(f) && labelOf(f.name) === label);
+      if (!agent) continue;
+      const id = [...agents().values()].find((a) => a.fragment === agent.name)?.identity;
+      // made, in another chat of this label (this one a create's whose answer was lost)
+      if (id && chats().some((c) => c !== chat && own(c) && labelOf(c.name) === labelOf(chat.name) && (c.agents ?? []).includes(id))) continue;
+      let joined = !!id && (chat.agents ?? []).includes(id);
+      if (id && !joined) {
+        // asked of the chat: a row may not name its agents yet
+        const members = await api("GET", `/api/f/${seg(chat.name)}/members`).catch(() => null);
+        if (!members) continue;
+        joined = (members.members ?? []).some((m) => m.principal === id);
+      }
+      if (joined) {
+        if (!helloAgain.has(chat.name)) {
+          helloAgain.add(chat.name);
+          hello(agent.name, chat.name).catch(() => helloAgain.delete(chat.name));
+        }
+        continue;
+      }
+      if (setup) return;
+      setup = { label, title: titleOf(agent.name), role: null, job: addedJob, added: true, agent: agent.name, written: false, chat: null, made: false, joined: false, ready: false, error: null };
+      return creatingAgent();
+    }
+  }
+  // Another agent's job (Settings' Add agent): what it does is its role
+  // (its `meta.role`, which its runtime tells it), never copied here.
+  const addedJob = (owner) => `You are one of ${owner}'s agents. Help with whatever they ask, in your role. The first time you talk, say hello briefly and ask what they'd like to start with.\n`;
+  // Another agent, named and given a role by its person (Settings' Agents,
+  // Add; Paul, 2026-10-30), made as the first is but for its order: the
+  // agent with its job and role, then its own chat, open at once, the
+  // making's steps in it, then its hello (`resumeAdd` goes on after a
+  // reload). One making at a time: one under way, or failed and waiting for
+  // Try again in its chat, is the one to finish first. An agent of theirs
+  // of this name on no computer and with no chat of its own (an Add cut
+  // short before its chat, or one made elsewhere) is the one made on.
+  function addAgent({ name, role }) {
+    if (setup) return Promise.reject(new Error("Another agent is being made: finish it in its chat first."));
+    const placed = new Set([...agents().values()].map((a) => a.fragment));
+    const left = allFragments().find((f) => f.kind === "agent" && own(f) && titleOf(f.name) === name && !placed.has(f.name) && !agentsOwnChat(f.name));
+    setup = { label: left ? labelOf(left.name) : freeLabel(slug(name)), title: name, role: role || null, job: addedJob, added: true, agent: left?.name ?? null, written: false, chat: null, made: false, joined: false, ready: false, error: null };
+    return creatingAgent();
+  }
+  // The first run's agent, named as an earlier try named it, if one did.
   async function defaultAgent() {
     await load();
-    const owner = person().email || "your person";
     if (!setup) {
       // an earlier try's names, by what it made: its agent, else its chat's
       // label (the chat's title is its own)
@@ -348,10 +407,18 @@ export function createOnboarding({ api, ui, account, fragments, computer, naviga
       const chat = agent ? null : chats().find(unjoined);
       const earlier = agent ? labelOf(agent.fragment) : chat ? labelOf(chat.name).slice(0, -"-chat".length) : null;
       const title = agent ? titleOf(agent.fragment) : (earlier && nameOfLabel(earlier)) || pickName();
-      setup = { label: earlier ?? freeLabel(slug(title)), title, chat: null, made: false, joined: false, ready: false, error: null };
+      setup = { label: earlier ?? freeLabel(slug(title)), title, role: null, job: firstSoul, added: false, agent: null, written: false, chat: null, made: false, joined: false, ready: false, error: null };
     }
+    return makeAgent();
+  }
+  // An agent and its own chat, as `setup` names them (the first run's, and
+  // Settings' Add agent's): each step reuses what an earlier try made,
+  // including a create whose response was lost. The chat's frame opens
+  // once: a draft in it stays put.
+  async function makeAgent() {
     setupChanged({ error: null });
-    const { title, label } = setup;
+    const { label } = setup;
+    if (setup.added) await agentWritten();
     const chatName = allFragments().find((f) => f.kind === "chat" && own(f) && labelOf(f.name) === `${label}-chat`)?.name ??
       (await api("POST", "/api/fragments", { label: `${label}-chat`, template: "chat", title: FIRST_CHAT })).name;
     setupChanged({ chat: chatName });
@@ -364,29 +431,43 @@ export function createOnboarding({ api, ui, account, fragments, computer, naviga
     // Finish both before offering Retry: no previous create is left in flight.
     for (const result of prepared) if (result.status === "rejected") throw result.reason;
     const computer = prepared[1].value;
-    let agent = allFragments().find((f) => f.kind === "agent" && own(f) && labelOf(f.name) === label);
-    if (!agent) agent = await api("POST", "/api/fragments", { label, template: "agent", title });
-    const assigned = await api("PUT", `/api/computers/${seg(computer.computer)}/agents/${seg(agent.name)}`, {});
-    const id = assigned.agents.find((a) => a.fragment === agent.name)?.identity;
+    const agent = await agentWritten();
+    const assigned = await api("PUT", `/api/computers/${seg(computer.computer)}/agents/${seg(agent)}`, {});
+    const id = assigned.agents.find((a) => a.fragment === agent)?.identity;
     if (!id) throw new Error("its computer did not take it");
-    // its job and tier, written once: an agent already set up keeps its own
-    const written = await api("GET", `/api/f/${seg(agent.name)}/file?path=agent.json`).then(() => true, (e) => { if (e.status === 404) return false; throw e; });
-    if (!written) {
-      await api("POST", `/api/f/${agent.name}/files`, {
-        key: "agent-default",
-        message: "the default agent",
-        files: [{ path: "SOUL.md", text: firstSoul(owner) }, { path: "agent.json", text: JSON.stringify({ tier: DEFAULT_AGENT_TIER }, null, 2) + "\n" }],
-      });
-    }
-    await api("POST", `/api/f/${agent.name}/deploy`, {});
+    await api("POST", `/api/f/${agent}/deploy`, {});
     setupChanged({ made: true });
     // its joining is what lets the chat's page send (and wakes its computer)
     await api("PUT", `/api/f/${chatName}/members/${seg(id)}`, { role: "editor" });
     setupChanged({ joined: true });
-    await hello(agent.name, chatName);
+    await hello(agent, chatName);
     api("POST", `/api/computers/${seg(computer.computer)}/wake`, {}).then(computerIs).catch(() => {});
     await load();
     return { chat: chatName, id, computer: computer.computer };
+  }
+  // Its agent fragment's name: made unless a try made it (`setup.agent`, else
+  // found by its label), with its job, tier and role written once (an agent
+  // already set up keeps its own).
+  async function agentWritten() {
+    const { label, title, job } = setup;
+    let agent = setup.agent ?? allFragments().find((f) => f.kind === "agent" && own(f) && labelOf(f.name) === label)?.name;
+    if (!agent) agent = (await api("POST", "/api/fragments", { label, template: "agent", title })).name;
+    setupChanged({ agent });
+    if (setup.written) return agent;
+    const written = await api("GET", `/api/f/${seg(agent)}/file?path=agent.json`).then(() => true, (e) => { if (e.status === 404) return false; throw e; });
+    if (!written) {
+      const owner = person().email || "your person";
+      const files = [{ path: "SOUL.md", text: job(owner) }, { path: "agent.json", text: JSON.stringify({ tier: DEFAULT_AGENT_TIER }, null, 2) + "\n" }];
+      // its role, beside its name in its fragment.json (`meta.role`)
+      if (setup.role) {
+        const manifest = await api("GET", `/api/f/${seg(agent)}/manifest`);
+        manifest.meta = { ...(manifest.meta ?? {}), role: setup.role };
+        files.push({ path: "fragment.json", text: JSON.stringify(manifest, null, 2) + "\n" });
+      }
+      await api("POST", `/api/f/${agent}/files`, { key: "agent-default", message: "its job", files });
+    }
+    setupChanged({ written: true });
+    return agent;
   }
   // Ready: its computer awake, and the agent following its chat (its wake
   // subscription, which its guest makes as it follows: the chat's owner sees
@@ -478,7 +559,7 @@ export function createOnboarding({ api, ui, account, fragments, computer, naviga
       },
     );
   }
-  return { signIn, showLayout, welcome, switchForm, noSeatSaid, setupFor, owesFirstAgent, resumeFirstRun, creatingAgent,
+  return { signIn, showLayout, welcome, switchForm, noSeatSaid, setupFor, owesFirstAgent, resumeFirstRun, creatingAgent, addAgent,
     setupChat: () => setup?.chat ?? null,
     setupState: () => setup && [setup.chat, setupFor(setup.chat)],
     setupPending: () => setup && !setup.joined,

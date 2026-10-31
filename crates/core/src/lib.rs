@@ -17,6 +17,7 @@ pub mod cron;
 pub mod decide;
 pub mod door;
 pub mod effects;
+pub mod embed;
 pub mod ended;
 pub mod egress;
 pub mod export;
