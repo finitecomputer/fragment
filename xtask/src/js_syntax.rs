@@ -24,6 +24,12 @@
 //! well under a second. One process parsing them all would start once, but
 //! a module's parse error in-process (`vm.SourceTextModule`) names no
 //! line; `--check`'s report does.
+//!
+//! Its tests: each `*.test.mjs` of them (cell/shell-tests/), run by the
+//! same Node's own runner (`node --test`), no package needed. A shell
+//! module that is handed what it calls (onboarding.js) is tried there
+//! against a fake of what it calls, in milliseconds: a call cut short and
+//! the page reloaded at each step, as the e2e cannot cut them (#763 review).
 
 use std::collections::BTreeSet;
 use std::io::Write;
@@ -51,6 +57,10 @@ pub const PROCESSES_MAX: usize = 8;
 /// The file whose duplicate `const` this pass exists for: a walk that
 /// misses it is broken, not clean.
 const SHELL: &str = "cell/shell/shell.js";
+/// A test file's name ends so (`node --test`'s own default).
+const TEST_SUFFIX: &str = ".test.mjs";
+/// The tests of onboarding.js, which a walk must find.
+const ONBOARDING_TEST: &str = "cell/shell-tests/onboarding.test.mjs";
 
 /// How Node is told to parse a file (`--input-type`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -164,6 +174,21 @@ pub fn check(node: &Node, cache: &Path, root: &Path, files: &[(String, InputType
     Ok(())
 }
 
+/// The tests among `files` (`*.test.mjs`).
+pub fn tests(files: &[(String, InputType)]) -> Vec<&str> {
+    files.iter().map(|(path, _)| path.as_str()).filter(|path| path.ends_with(TEST_SUFFIX)).collect()
+}
+
+/// `node --test` on them, all in one run (its report names each test).
+pub fn test(node: &Node, cache: &Path, root: &Path, tests: &[&str]) -> Result<()> {
+    assert!(tests.contains(&ONBOARDING_TEST), "a walk that misses {ONBOARDING_TEST} is broken, not clean");
+    // the shell's modules are modules with no `type` to say so (the shell
+    // serves them as such): Node parses them as such, and would say so
+    let status = node.command(cache)?.args(["--test", "--disable-warning=MODULE_TYPELESS_PACKAGE_JSON"]).args(tests).current_dir(root).status().context("start node --test")?;
+    ensure!(status.success(), "JavaScript tests failed (node --test on Node v{NODE_VERSION}): {status}");
+    Ok(())
+}
+
 /// One file's `node --check`: `None` when it parses, else Node's report
 /// with the file named.
 fn check_one(node: &Node, cache: &Path, root: &Path, path: &str, kind: InputType) -> Result<Option<String>> {
@@ -254,6 +279,7 @@ mod tests {
         let found = files(&devstack::repo_root()).expect("the repo's walk");
         let kind = |path: &str| found.iter().find(|(p, _)| p == path).map(|(_, k)| *k);
         assert_eq!(kind("cell/shell/shell.js"), Some(InputType::Module));
+        assert!(tests(&found).contains(&ONBOARDING_TEST));
         // the launcher, a module shell.js imports
         assert_eq!(kind("cell/shell/launcher.js"), Some(InputType::Module));
         assert_eq!(kind("templates/todo/app.mjs"), Some(InputType::Module));
