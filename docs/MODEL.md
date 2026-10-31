@@ -444,12 +444,17 @@ alone (`<sha>-dirty-<second>`). Dev and the e2e run one build in one
   release deployed after its own restarts (`release::restarts`;
   `ctx.abort()` from a timer 50 ms on: `routed::restart_soon`), and the
   caller's next ask meets its next instance, the new release's (during
-  a deferral too, on 2026-10-30). It costs what a reset does. An object
-  restarts so at most once in an isolate (which runs one release): one
-  Cloudflare starts again on the code before refuses, as it would have,
-  until Cloudflare's own restart. A call from a release deployed before
-  the object's, at the same second, or naming no time restarts
-  nothing.
+  a deferral too, on 2026-10-30). It costs what a reset does. The
+  restart's reason names the release that restarted
+  (`release::restart_reason`): a call of another release it ends, which
+  it refused before acting (the timer runs late under load, as the
+  caller's next ask arrives), is asked again as a refusal is
+  (`routed::sent`); one of its own release may have acted, and fails. An
+  object restarts so at most once in an isolate (which runs one
+  release): one Cloudflare starts again on the code before refuses, as
+  it would have, until Cloudflare's own restart. A call from a release
+  deployed before the object's, at the same second, or naming no time
+  restarts nothing.
 
 Both directions refuse alike: an old caller at a new object will not be
 admitted from that isolate, and its asks run out; a new caller at an old

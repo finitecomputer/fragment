@@ -1189,7 +1189,7 @@ impl FragmentCell {
             // which sets it from the same manifest)
             if let Ok(Ok(m)) = crate::assets::blessed_manifest(&self.env, t).await {
                 let title = body.title.as_deref().map(str::trim).or(m.title());
-                self.set_meta(MetaKey::Face, &crate::members::face(m.kind(), title, None))?;
+                self.set_meta(MetaKey::Face, &crate::members::face(m.kind(), title, m.role(), None))?;
             }
         }
         self.index_change(&owner, Some(Role::Owner))?;
@@ -1238,6 +1238,7 @@ impl FragmentCell {
         json_response(&FragmentStatus {
             kind: self.kind()?,
             title: self.title()?,
+            agent_role: self.agent_role()?,
             npub: npub.ok_or_else(|| missing(MetaKey::Npub))?,
             owner: npub::display(&owner.ok_or_else(|| missing(MetaKey::Owner))?),
             role,

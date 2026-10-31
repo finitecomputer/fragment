@@ -29,7 +29,8 @@
 # production's to production. A push of a tree a green run already
 # tested (master's, for production; for master, its merge queue's or its
 # pull request's, when master had not moved since) skips the shards
-# (`proven`, below).
+# (`proven`, below), and so does a merge group into master whose tree a
+# green run already tested.
 name: ci
 
 on:
@@ -48,8 +49,9 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  # A push to master or production: whether a run of this workflow (by its
-  # id, not its name) already proved what it holds. A job can only need
+  # A push to master or production, or a merge group into master: whether
+  # a run of this workflow (by its id, not its name) already proved what it
+  # holds. A job can only need
   # jobs of its own run, so without this a promotion tested again, for 20
   # minutes, what master's run had (Paul, 2026-10-20), and a merge what its
   # pull request's run had (Paul, 2026-10-23). What a run proves is a tree:
@@ -76,10 +78,17 @@ jobs:
   #   against the base they will land on; moving master rebuilds the
   #   group. Neither another base's queue nor a fork can prove it.
   #
-  # Proven, the e2e's shards skip and `deploy` runs once `check` is green;
-  # otherwise (a hotfix pushed straight to production, master moved since
-  # the pull request's run, a run red or still running) they run as on any
-  # push. Should this job fail, nothing after it runs and nothing deploys.
+  # A merge group into master is held to master's rules: its head is the
+  # merge commit master will move to (the group's last pull request's head
+  # its second parent), so it is proven exactly when that push would be.
+  # Same tree, same files: the proving run ran this very workflow and these
+  # very tests.
+  #
+  # Proven, the e2e's shards skip, `e2e` is green on the proof, and `deploy`
+  # runs once `check` is green; otherwise (a hotfix pushed straight to
+  # production, master moved since the pull request's run, a run red or
+  # still running) they run as on any push. Should this job fail, no shard
+  # runs, `e2e` is red, and nothing merges or deploys.
   #
   # `check` runs on every push, proven or not: besides the tree's own
   # checks it holds the tree's schema lock to the one at what the push
@@ -91,8 +100,11 @@ jobs:
   # its last deploy can hold a step its new commit lost (a hotfix's, lost
   # in a merge back), which no run of master's checked against. `check`
   # takes about two minutes, beside `proven`; the shards are the 15 to 20.
+  # A merge group's `check` holds the lock to the group's exact base.
   proven:
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/production')
+    if: >-
+      ${{ (github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/production'))
+      || (github.event_name == 'merge_group' && github.event.merge_group.base_ref == 'refs/heads/master') }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -106,8 +118,14 @@ jobs:
       - id: ask
         env:
           GH_TOKEN: ${{ github.token }}
+          # the branch this lands on: a push's own, a merge group's base
+          ONTO: ${{ github.event_name == 'merge_group' && github.event.merge_group.base_ref || github.ref }}
         run: |
           set -euo pipefail
+          case "$ONTO" in
+            refs/heads/master | refs/heads/production) ;;
+            *) echo "::error::$GITHUB_EVENT_NAME lands on $ONTO, which no rule here proves"; exit 1 ;;
+          esac
           repo=repos/$GITHUB_REPOSITORY
           workflow=$(gh api "$repo/actions/runs/$GITHUB_RUN_ID" --jq .workflow_id)
           commit=$(gh api "$repo/git/commits/$GITHUB_SHA")
@@ -115,7 +133,7 @@ jobs:
           merged=$(jq -r 'if (.parents | length) == 2 then .parents[1].sha else "" end' <<< "$commit")
           echo "$GITHUB_SHA's tree is $tree${merged:+; it merges $merged}"
           ids=$(gh api -X GET "$repo/actions/artifacts" -f name="tested-tree-$tree" -f per_page=100 --jq '.artifacts[].workflow_run.id')
-          if [ "$GITHUB_REF" = refs/heads/production ]; then
+          if [ "$ONTO" = refs/heads/production ]; then
             ids+=$'\n'$(gh api -X GET "$repo/actions/workflows/$workflow/runs" -f head_sha="$GITHUB_SHA" -f branch=master -f event=push -f per_page=100 --jq '.workflow_runs[].id')
           fi
           for id in $(sort -u <<< "$ids"); do
@@ -126,15 +144,15 @@ jobs:
             if jq -e --arg r "$GITHUB_REPOSITORY" '.event == "push" and .head_branch == "master" and .head_repository.full_name == $r' <<< "$run" > /dev/null; then
               [ "$head" = "$GITHUB_SHA" ] || [ "$(gh api "$repo/git/commits/$head" --jq .tree.sha)" = "$tree" ] || continue
               why="master's run of $head proved this tree"
-            elif [ "$GITHUB_REF" = refs/heads/master ] && [ -n "$merged" ] && jq -e --arg h "$merged" '.event == "pull_request" and .head_sha == $h' <<< "$run" > /dev/null; then
+            elif [ "$ONTO" = refs/heads/master ] && [ -n "$merged" ] && jq -e --arg h "$merged" '.event == "pull_request" and .head_sha == $h' <<< "$run" > /dev/null; then
               why="the run of the pull request this merges, at its head $head, proved this tree"
-            elif [ "$GITHUB_REF" = refs/heads/master ] && jq -e --arg r "$GITHUB_REPOSITORY" '.event == "merge_group" and .head_repository.full_name == $r and (.head_branch | startswith("gh-readonly-queue/master/"))' <<< "$run" > /dev/null; then
+            elif [ "$ONTO" = refs/heads/master ] && jq -e --arg r "$GITHUB_REPOSITORY" '.event == "merge_group" and .head_repository.full_name == $r and (.head_branch | startswith("gh-readonly-queue/master/"))' <<< "$run" > /dev/null; then
               [ "$(gh api "$repo/git/commits/$head" --jq .tree.sha)" = "$tree" ] || continue
               why="master's merge queue run of $head proved this tree"
             else
               continue
             fi
-            echo "$why: deploying $GITHUB_SHA without testing it again"
+            echo "$why: $GITHUB_SHA's e2e need not run again"
             echo proven=true >> "$GITHUB_OUTPUT"
             exit 0
           done
@@ -182,9 +200,9 @@ jobs:
 
   e2e-shard:
     name: e2e shard ${{ matrix.shard }}/4
-    # on every run but a push whose tree a run proved (`proven`, which
-    # skips on every other run: `!cancelled()` keeps its skip from skipping
-    # this), and never after `proven` fails
+    # on every run but a push or merge group whose tree a run proved
+    # (`proven`, which skips on every other run: `!cancelled()` keeps its
+    # skip from skipping this), and never after `proven` fails
     needs: proven
     if: ${{ !cancelled() && (needs.proven.result == 'skipped' || (needs.proven.result == 'success' && needs.proven.outputs.proven == 'false')) }}
     runs-on: ubuntu-latest
@@ -340,19 +358,27 @@ jobs:
           path: target/e2e/
           retention-days: 7
 
-  # the check named `e2e`: green when every shard is (a re-run's, by each
-  # shard's latest attempt). It runs whenever the shards were to run,
-  # whatever they did (unless the run was cancelled), so a red or skipped
-  # shard makes it red; it skips with them alone.
+  # The check named `e2e`, which pull requests and merge groups require:
+  # green when every shard is (a re-run's, by each shard's latest attempt),
+  # or when `proven` found a run that proved this tree, so none ran. It
+  # runs whatever came before it, unless the run was cancelled: a required
+  # check that skips reads as green, so a `proven` that failed, or shards
+  # that skipped or failed, make it red, never skipped.
   e2e:
     needs: [proven, e2e-shard]
-    if: ${{ !cancelled() && (needs.proven.result == 'skipped' || (needs.proven.result == 'success' && needs.proven.outputs.proven == 'false')) }}
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
       contents: read # the tested commit's tree, through the API
     steps:
-      - run: test "${{ needs.e2e-shard.result }}" = success || { echo "a shard's job failed (${{ needs.e2e-shard.result }}); its log says where"; exit 1; }
+      - env:
+          PROVEN: ${{ needs.proven.result == 'success' && needs.proven.outputs.proven == 'true' }}
+          PROVEN_RESULT: ${{ needs.proven.result }}
+          SHARDS: ${{ needs.e2e-shard.result }}
+        run: |
+          if [ "$PROVEN" = true ]; then echo "a run that proved this tree ran its e2e (\`proven\`'s log names it): none ran here"; exit 0; fi
+          test "$SHARDS" = success || { echo "the shards did not all pass (shards: $SHARDS; proven: $PROVEN_RESULT): their logs, or proven's, say why"; exit 1; }
       # The tree every shard tested, for `proven`: GITHUB_SHA's (a pull
       # request's merge commit, a merge group's head, a push's head),
       # which each checked out,
@@ -362,7 +388,9 @@ jobs:
       # A re-run's replaces its own. Recording is a saving, not a test: a
       # step of it that fails warns and leaves the run as green as its
       # shards, unrecorded (a push of its tree is then tested again).
+      # Only shards that ran here record: a proven run's proof is another's.
       - id: tree
+        if: needs.e2e-shard.result == 'success'
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
@@ -386,13 +414,17 @@ jobs:
   # Master follows one image, keyed by its inputs rather than its commit.
   # A registry tag preserves the digest across cache eviction and re-runs;
   # a changed cell or shell never builds a new image. Prepare it before
-  # deploy can start. This job never changes the running Worker.
+  # deploy can start. This job never changes the running Worker. The merge
+  # queue builds and prepares a group's image ahead (preview-image.yml),
+  # which this job copies to its input tag; it builds only when neither
+  # is there.
   preview-image:
     if: github.event_name == 'push' && github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     # Build/push plus prepare.rs's 40-minute preparation limit.
     timeout-minutes: 65
     permissions:
+      actions: read # the merge queue's image build of this commit, through the API
       contents: read
     environment: preview
     # Share the manual Image workflow's publication lock: two cold builds
@@ -424,10 +456,28 @@ jobs:
           path: target/tools
           key: node-${{ runner.os }}-${{ hashFiles('crates/devstack/src/node_release.rs') }}
       - run: command -v skopeo > /dev/null || { sudo apt-get update -q && sudo apt-get install -y -q skopeo; }
+      # A merge group's head is the commit master moves to, so the queue's
+      # image run for this very commit, when one is still going, is
+      # building these inputs: wait for it rather than build them beside
+      # it. It ends within its own 65 minutes; past 30, or if it failed,
+      # this job resolves and builds as it would without it.
+      - name: wait for the merge queue's image build of this commit
+        timeout-minutes: 30
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          run=$(gh api -X GET "repos/$GITHUB_REPOSITORY/actions/workflows/preview-image.yml/runs" -f head_sha="$GITHUB_SHA" -f event=merge_group -f per_page=1 --jq '.workflow_runs[0] // empty | "\(.id) \(.html_url)"')
+          [ -n "$run" ] || { echo "the merge queue built no image for $GITHUB_SHA"; exit 0; }
+          id=${run%% *}
+          echo "the merge queue's image run for $GITHUB_SHA: ${run#* }"
+          until [ "$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$id" --jq .status)" = completed ]; do sleep 15; done
+          echo "it ended: $(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$id" --jq .conclusion)"
       - id: probe
         run: |
           cargo xtask image preview --output "$RUNNER_TEMP/preview-image.json"
-          echo "build=$(jq -r '.digest == null' "$RUNNER_TEMP/preview-image.json")" >> "$GITHUB_OUTPUT"
+          echo "build=$(jq -r .build "$RUNNER_TEMP/preview-image.json")" >> "$GITHUB_OUTPUT"
       - id: buildx
         if: steps.probe.outputs.build == 'true'
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
