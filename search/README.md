@@ -118,6 +118,7 @@ The environment:
 | `SEARCH_STORAGE_<OPTION>` | each of the store's options, its name lowercased (`SEARCH_STORAGE_AWS_ENDPOINT` → `aws_endpoint`) |
 | `SEARCH_TOKEN` | the bearer token, at least 32 bytes |
 | `SEARCH_LISTEN` | `0.0.0.0:8080` unless named |
+| `<any of these>_FILE` | the value read from that file instead (a secret mounted in, as Docker's are): `SEARCH_TOKEN_FILE`, `SEARCH_STORAGE_AWS_SECRET_ACCESS_KEY_FILE` |
 
 ### Self-hosted, beside celld
 
@@ -190,8 +191,11 @@ This covers limits, fusion and snippets, then the service on a directory:
 ```sh
 SEARCH_TEST_STORAGE=s3://<bucket>/test SEARCH_TEST_STORAGE_AWS_ENDPOINT=… \
 SEARCH_TEST_STORAGE_AWS_ACCESS_KEY_ID=… SEARCH_TEST_STORAGE_AWS_SECRET_ACCESS_KEY=… \
-SEARCH_TEST_STORAGE_AWS_REGION=… cargo test --release --test service on_an_object_store -- --ignored
+SEARCH_TEST_STORAGE_AWS_REGION=… cargo test --release --test service on_an_object_store -- --ignored --nocapture
 ```
+
+Each key may be a file instead (`SEARCH_TEST_STORAGE_AWS_SECRET_ACCESS_KEY_FILE=<path>`, mode 600), so it is
+never on a command line. The test prints how long each step took.
 
 It has passed against SeaweedFS's S3 gateway; R2's turn comes with the
 capability (it is a paid store).
