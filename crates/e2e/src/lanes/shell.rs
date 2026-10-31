@@ -1199,7 +1199,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     let _ = s.eventually(wait, || b.eval_in_frame(&page, &reader_chat, "!!document.querySelector('.msg.agent:not(.streaming)')").ok() == Some(Value::Bool(true)));
     unread_ui(s, api, &mut b, &page, &me, &reader_chat, &shots)?;
     new_chat_ui(s, api, &mut b, &page, &me, &reader_chat, &shots)?;
-    launch_late_ui(s, api, &mut b, &page, &me, &reader_chat)?;
+    launch_late_ui(s, api, &mut b, &page, &me, &reader_chat, &shots)?;
     launch_straight_ui(s, api, &mut b, &page, &me, &reader_chat)?;
     launch_geometry_ui(s, &mut b, &page, &shots)?;
 
@@ -1248,6 +1248,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     b.eval(&page, &format!("({icon}?.dispatchEvent(new PointerEvent('pointerleave')), true)"))?;
     let _ = b.screenshot(&page, &shots.join("desktop-app.png"));
     icon_ui(s, &mut b, &page, &groceries, &shots)?;
+    deploying_uploads_ui(s, &mut b, &page, &groceries, &shots)?;
     compose_elsewhere_ui(s, api, &mut b, &page, &session, &asked_in, &groceries)?;
     open_beside_ui(s, api, &mut b, &page, &me, &groceries, &shots)?;
     app_policy_ui(s, api, &mut b, &page, &groceries)?;
@@ -3255,6 +3256,60 @@ addEventListener('DOMContentLoaded', () => {
 });
 "#;
 
+/// A deploy going out as a person uploads (#769): an app's icon, chosen in
+/// its sheet, and their own picture, in Settings. Each upload is answered
+/// with the deploy's refusal (`hold`'s `deploying`, the router's 503), and
+/// each says Updating where its failure is said, naming no release (the
+/// launcher's file: `launch_late_ui`).
+fn deploying_uploads_ui(s: &mut Suite, b: &mut Browser, page: &Page, app: &str, shots: &std::path::Path) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    let photo = shots.join("icon-photo.jpg");
+    std::fs::write(&photo, super::icons::photo())?;
+    let no_release = "!document.body.innerText.includes('reached release')";
+
+    // the app's icon, from its window's More, Icon…
+    let item = "[...document.querySelectorAll('#menu [role=menuitem]')].find((b) => b.textContent === 'Icon…')";
+    b.eval(page, "([...document.querySelectorAll('#stack .pane button[aria-label=More]')].pop()?.click(), true)")?;
+    let offered = b.until(page, &format!("!!{item}"), wait);
+    b.eval(page, &format!("({item}?.click(), true)"))?;
+    let sheet = offered && b.until(page, "!!document.querySelector('dialog.icon-sheet[open]')", wait);
+    b.eval(page, &hold("PUT", &format!("/api/f/{app}/icon$"), Hold::Request))?;
+    b.choose_files(page, "dialog.icon-sheet input[type=file]", &[&photo])?;
+    let held = b.until(page, "!!window.__held.release", wait);
+    b.eval(page, "(window.__held.release('deploying'), true)")?;
+    let said = format!("The icon was not uploaded: {UPDATING}");
+    let told = b.until(page, &format!("(__icons.state().said ?? '') === {} && {no_release}", js(&said)), wait);
+    let _ = b.screenshot(page, &shots.join("icon-upload-deploying.png"));
+    s.ok(
+        "an app's icon uploaded as a deploy goes out: its sheet says it was not uploaded, Updating, naming no release",
+        sheet && held && told,
+        b.eval(page, "__icons.state().said")?,
+    );
+    b.eval(page, "(window.__held.restore(), __icons.sheet()?.querySelector('.icon-done')?.click(), true)")?;
+    b.until(page, "!document.querySelector('dialog.icon-sheet')", wait);
+
+    // their own picture, in Settings
+    let input = "#settings-page label.picture input[type=file]";
+    b.eval(page, "(document.getElementById('settings').click(), true)")?;
+    let open = b.until(page, &format!("location.pathname === '/settings' && !!document.querySelector({})", js(input)), wait);
+    b.eval(page, &hold("PUT", "/api/identities/me/picture$", Hold::Request))?;
+    b.choose_files(page, input, &[&photo])?;
+    let held = b.until(page, "!!window.__held.release", wait);
+    b.eval(page, "(window.__held.release('deploying'), true)")?;
+    let line = "document.querySelector('#settings-page label.picture span')";
+    let told = b.until(page, &format!("{line}?.textContent === {} && {no_release}", js(UPDATING)), wait);
+    b.eval(page, &format!("({line}?.scrollIntoView({{ block: 'center' }}), true)"))?;
+    let _ = b.screenshot(page, &shots.join("picture-upload-deploying.png"));
+    s.ok(
+        "their own picture uploaded as a deploy goes out: Settings says Updating where the picture is, naming no release",
+        open && held && told,
+        b.eval(page, &format!("{line}?.textContent ?? null"))?,
+    );
+    b.eval(page, "(window.__held.restore(), history.back(), true)")?;
+    b.until(page, "location.pathname !== '/settings'", wait);
+    Ok(())
+}
+
 /// The shell's chat column with a chat open, and the band's line.
 const CHAT_AND_LINE: &str = "!document.getElementById('layout').hidden && !!document.querySelector('#frames iframe:not([hidden])') && ";
 
@@ -3922,7 +3977,8 @@ pub(super) enum Hold {
 /// The shell's next `method` call whose path matches `re` (a regular
 /// expression's source) held at `at` until `window.__held.release()`;
 /// let go with `release('refuse')`, it is answered as a failing network's
-/// is (a 503 with a message), never sent if it was held before it was.
+/// is (a 503 with a message), and with `release('deploying')` as a deploy
+/// going out answers (`DEPLOYING`), never sent if it was held before it was.
 /// Every call counted while it is under way (`inflight`), and when the
 /// last one ended (`quiet`), so a check can wait for what the held call let
 /// go to finish (`HELD_SETTLED`); `restore()` puts the page's fetch back.
@@ -3931,15 +3987,23 @@ pub(super) fn hold(method: &str, re: &str, at: Hold) -> String {
         "(() => {{ const real = window.fetch; const re = new RegExp({}); const before = {}; let holding = true; \
          const held = window.__held = {{ release: null, inflight: 0, quiet: performance.now(), restore: () => {{ window.fetch = real; }} }}; \
          const wait = () => new Promise((go) => {{ held.release = go; }}); \
-         const refused = () => new Response(JSON.stringify({{ error: 'unavailable', message: 'refused for the test' }}), {{ status: 503, headers: {{ 'content-type': 'application/json' }} }}); \
+         const refused = (how) => new Response(how === 'deploying' ? {} : JSON.stringify({{ error: 'unavailable', message: 'refused for the test' }}), {{ status: 503, headers: {{ 'content-type': 'application/json' }} }}); \
+         const refusing = (how) => how === 'refuse' || how === 'deploying'; \
          window.fetch = async (url, o) => {{ const hold = holding && o?.method === {} && re.test(String(url)); if (hold) holding = false; held.inflight++; \
-         try {{ if (hold && before && (await wait()) === 'refuse') return refused(); const r = await real(url, o); if (hold && !before && (await wait()) === 'refuse') return refused(); return r; }} \
+         try {{ let how; if (hold && before && refusing(how = await wait())) return refused(how); const r = await real(url, o); if (hold && !before && refusing(how = await wait())) return refused(how); return r; }} \
          finally {{ held.inflight--; held.quiet = performance.now(); }} }}; return true; }})()",
         js(re),
         at == Hold::Request,
+        js(DEPLOYING),
         js(method)
     )
 }
+
+/// A deploy going out's answer (503 `deploying`), as the router gives it,
+/// naming the two releases a page shows no one (docs/api.md).
+const DEPLOYING: &str = r#"{"error":"deploying","message":"a deploy is going out; try again in a few seconds (a call from release dev reached release another-release-a-test-hook)"}"#;
+/// What the shell says of a deploy going out, wherever it says it.
+const UPDATING: &str = "Updating — back in a moment";
 
 /// Once a held call (`hold`) is let go: none of the page's calls under
 /// way, and none for half a second.
@@ -5624,7 +5688,7 @@ const PASTE_FILE: &str = "(() => { const d = new DataTransfer(); d.items.add(new
 /// opened, the message is still posted; settings, then Back, and the
 /// making refused: a notice, the words in the launcher's next opening,
 /// sent from there.
-fn launch_late_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person, reader_chat: &str) -> Result<()> {
+fn launch_late_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person, reader_chat: &str, shots: &std::path::Path) -> Result<()> {
     let wait = std::time::Duration::from_secs(30);
     let own_chat = format!("{}-chat", me.first);
     let says = |chat: &str, text: &str| said_in(api, me, chat, text);
@@ -5662,7 +5726,7 @@ fn launch_late_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &P
     anyhow::ensure!(titled(b, &blank), "the blank chat titled from its message");
 
     // the launcher's own file, its upload held; a file chosen in the chat it
-    // opened meanwhile; then the upload refused
+    // opened meanwhile; then the upload refused, a deploy going out (#769)
     let said = "Sort the attached atlases by the year each was printed";
     let before = new_chats();
     b.click(page, "#sidebar-new-chat")?;
@@ -5677,15 +5741,16 @@ fn launch_late_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &P
     let ready = fresh && s.eventually(wait, || b.eval_in_frame(page, &made, COMPOSER_READY).ok() == Some(Value::Bool(true)));
     let picked = ready && b.eval_in_frame(page, &made, PICK_FILE)? == json!(1);
     std::thread::sleep(std::time::Duration::from_secs(1));
-    b.eval(page, "(window.__held.release?.('refuse'), true)")?;
-    let reopened = b.until(page, &format!("{opened} && document.getElementById('search-status').textContent.includes(\"wasn't sent\")"), wait);
-    let seen = b.eval(page, "({ words: document.getElementById('workspace-search').value, files: document.querySelectorAll('#search-files .search-file').length })")?;
+    b.eval(page, "(window.__held.release?.('deploying'), true)")?;
+    let reopened = b.until(page, &format!("{opened} && document.getElementById('search-status').textContent === {}", js(&format!("Your message wasn't sent. {UPDATING}"))), wait);
+    let seen = b.eval(page, "({ words: document.getElementById('workspace-search').value, files: document.querySelectorAll('#search-files .search-file').length, said: document.getElementById('search-status').textContent })")?;
+    let _ = b.screenshot(page, &shots.join("launcher-upload-deploying.png"));
     let kept = if fresh { chips(b, &made) } else { Value::Null };
     let still = b.eval(page, &shows(&made))?;
     b.eval(page, "(window.__held.restore(), true)")?;
     s.ok(
-        "a file chosen in the chat the launcher opened, while the launcher's own file uploads, stays in its composer when that upload is refused; the launcher opens again over it on its words and file, saying it wasn't sent",
-        open && pasted && held && fresh && picked && reopened && seen == json!({ "words": said, "files": 1 }) && kept == json!(1) && still == true,
+        "a file chosen in the chat the launcher opened, while the launcher's own file uploads, stays in its composer when a deploy refuses that upload; the launcher opens again over it on its words and file, saying it wasn't sent: Updating, no release named",
+        open && pasted && held && fresh && picked && reopened && seen["words"] == said && seen["files"] == 1 && kept == json!(1) && still == true,
         json!({ "made": made, "seen": seen, "chips": kept }),
     );
     b.eval(page, submit)?;
