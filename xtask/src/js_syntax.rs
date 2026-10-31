@@ -60,9 +60,9 @@ pub const PROCESSES_MAX: usize = 8;
 const SHELL: &str = "cell/shell/shell.js";
 /// A test file's name ends so (`node --test`'s own default).
 const TEST_SUFFIX: &str = ".test.mjs";
-/// The shell's tests, which a walk must find: onboarding.js's and
-/// threads.js's.
-const SHELL_TESTS: [&str; 2] = ["cell/shell-tests/onboarding.test.mjs", "cell/shell-tests/threads.test.mjs"];
+/// The shell's tests, which a walk must find: the chat page's control.js's,
+/// onboarding.js's and threads.js's.
+const SHELL_TESTS: [&str; 3] = ["cell/shell-tests/chat-control.test.mjs", "cell/shell-tests/onboarding.test.mjs", "cell/shell-tests/threads.test.mjs"];
 
 /// How Node is told to parse a file (`--input-type`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
