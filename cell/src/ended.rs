@@ -198,10 +198,16 @@ impl FragmentCell {
         let facet = self.app_facet()?;
         let now = SqlStorageValue::Integer(js::now_ms());
         self.exec(
-            "INSERT INTO ended (incarnation, name, npub, facet, ended_at, next_at, search) VALUES (?, ?, ?, ?, ?, ?, ?)
+            "INSERT INTO ended (incarnation, name, npub, facet, ended_at, next_at) VALUES (?, ?, ?, ?, ?, ?)
              ON CONFLICT (incarnation) DO NOTHING",
-            vec![SqlStorageValue::Integer(incarnation), name.as_str().into(), npub.into(), facet.as_str().into(), now.clone(), now.clone(), SqlStorageValue::Integer(i64::from(search.is_some()))],
+            vec![SqlStorageValue::Integer(incarnation), name.as_str().into(), npub.into(), facet.as_str().into(), now.clone(), now.clone()],
         )?;
+        // its search index, if it may have written one, ends with it
+        // (searchable.rs); recorded where step 5 made the column (an object
+        // that refuses its schema still ends, its tables as they are)
+        if search.is_some() && self.ended_records_search()? {
+            self.exec("UPDATE ended SET search = 1 WHERE incarnation = ?", vec![SqlStorageValue::Integer(incarnation)])?;
+        }
         // every member's list, and any a change still waits for (a member
         // removed whose list was not told yet)
         self.exec(
@@ -346,12 +352,24 @@ impl FragmentCell {
         }
     }
 
+    /// Whether its ended lives record their search indexes (`ended.search`,
+    /// Fragment step 5): an object that refuses its schema may hold step
+    /// 1's `ended`, and ends all the same.
+    fn ended_records_search(&self) -> CellResult<bool> {
+        Ok(!self.rows("SELECT 1 FROM pragma_table_info('ended') WHERE name = 'search'", vec![])?.is_empty())
+    }
+
     /// Deletes the app facet's database and the blobs of each ended life
     /// due, at most `BLOB_PAGES_PER_PASS` pages of blobs each: one with
     /// more is due again at once.
     async fn clear_ended(&self) {
+        let search = match self.ended_records_search() {
+            Ok(true) => "search",
+            Ok(false) => "0 AS search",
+            Err(e) => return console_error!("the ended lives did not read ({:?}): {}", e.code, e.message),
+        };
         let due: Vec<Stored> = match self.typed(
-            "SELECT incarnation, name, npub, facet, attempts, search FROM ended WHERE stored = 1 AND next_at <= ? ORDER BY next_at LIMIT ?",
+            &format!("SELECT incarnation, name, npub, facet, attempts, {search} FROM ended WHERE stored = 1 AND next_at <= ? ORDER BY next_at LIMIT ?"),
             vec![SqlStorageValue::Integer(js::now_ms()), SqlStorageValue::Integer(CLEARED_PER_PASS)],
         ) {
             Ok(due) => due,
