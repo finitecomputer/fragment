@@ -201,6 +201,13 @@ file is the newer word, and decision 18 points here.
   back to; its words are calmer ("Your computer restarted. Changes on it
   since 4:04 AM weren't kept. Your chats are all here."). Its guest still
   reads a rollback. docs/computers.md, "What its owner is told".
+- **A cut turn is continued once (phase 4, 2026-10-31).** Paul: nobody
+  should type "continue". A turn a restart cut, whose lost end lands as
+  this life's own, is queued once more in its place as its continuation:
+  said by the computer, told what was cut (each call it asked for with no
+  end among it, once the intent records land), never rerunning a call,
+  and never continued twice (docs/bridge.md, "A cut turn is continued
+  once").
 - **An update is told, never forced (2026-10-09).** Paul: every deploy
   needed him to restart his computer, which a person would not know to
   do. A computer awake on another image than its next start runs (the

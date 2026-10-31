@@ -557,6 +557,49 @@ second call of the cut command, no card again, an answer, and the model's
 request ends with the note and the message after the boundary. Whether a
 real model, so told, checks before it redoes is a hosted run's to see.
 
+## A cut turn is continued once
+
+Durability phase 4 (Paul, 2026-10-31): a turn a restart cut is picked up
+again by itself, so nobody types "continue", and never run twice.
+
+- **Which.** A turn this life ended as lost: at its start, one an earlier
+  life was running (`recover`), or at its claim, one another life claimed
+  (409). It is continued once its lost end lands on `work` as this life's
+  own (appended, or a replay of this body: `Input::Posted`'s `kept`). A
+  life that ran the turn to its end posted that end first, so this one's
+  is refused (409) and nothing is continued: a rolled-back disk never
+  continues a turn that finished.
+- **Not continued.** An ask's turn (its asker is answered `lost`), a
+  command, a turn this life knows was waiting on its person (asking in
+  words, or on a card: their answer is its next turn, above, "A card
+  outlives its turn (P6)"), and a continuation itself: one continuation,
+  and a continuation a restart cuts is told to the turn after it, as any
+  cut turn is (Pi's restart limit, ending visibly). A state older than
+  the turn cannot know it waited on its person; its continuation may ask
+  again.
+- **What it is.** A turn queued in the cut turn's place (its order),
+  with its cause, asker and depth, whose id is the cut turn's
+  continuation's (`records::continuation_id`), so its claim makes it one
+  run in any life. It is said by the computer, never as its asker's words
+  (`[your computer] I restarted while you were working …`,
+  `engine::CONTINUE_TEXT`), and carries the cut turn's note by its id
+  (`TurnStart::continues`; driver.rs, `cut_note`), whatever ran between:
+  what it was asked, its steps and replies, and to check before redoing
+  anything. Its runtime is never asked to rerun a call: Claude Code tells
+  its model a cut call's outcome is unknown, and Hermes' cut session is
+  closed at boot (above). The chat is shown it as it starts
+  (`turn.notice`, `CONTINUE_NOTICE`).
+- **Bounds.** Past its chat's queue or the computer's turns it is not
+  admitted, and said so in the log (`turn.uncontinued`).
+- A state holding a continuation, or a turn to be continued, is format 4,
+  which a bridge before continuations sets aside.
+- Proven in `a_cut_turn_is_continued_once`,
+  `a_claim_another_life_holds_ends_the_turn` and the simulation's
+  continuation invariants (engine_tests.rs: continued once, never a
+  continuation's continuation, only a turn the journal ended as lost),
+  tests/bridge.rs's restart cases, and with the real Hermes in
+  `a_turn_cut_while_its_tool_runs_is_continued_once` (tests/docker.rs).
+
 ## What a rollback forgot
 
 A computer that went back to an older save (a crash, an unsaved stop, a

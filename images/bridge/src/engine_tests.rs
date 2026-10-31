@@ -239,7 +239,7 @@ fn answered(e: &mut Engine, mut s: Step, now: u64) -> Step {
     }
     let owed: Vec<(String, String)> = s.effects.iter().filter_map(|x| match x { Effect::Owed { turn, id, .. } => Some((turn.clone(), id.clone())), _ => None }).collect();
     for (turn, id) in owed {
-        let more = e.step(Input::Posted { turn, id }, now);
+        let more = e.step(Input::Posted { turn, id, kept: true }, now);
         s.dirty |= more.dirty;
         s.effects.extend(more.effects);
     }
@@ -365,7 +365,7 @@ fn a_reply_streams_then_posts() {
     let t = &e.state().turns[&turn];
     assert_eq!((t.phase, t.owed.len()), (Phase::Ended, 1));
     assert!(e.step(heard(Event::Draft { turn: turn.clone(), text: "late".into() }), T0 + 4).effects.is_empty(), "an ended turn hears its runtime no more");
-    let done = e.step(Input::Posted { turn: turn.clone(), id: records::work_id(&turn, "end") }, T0 + 4);
+    let done = e.step(Input::Posted { turn: turn.clone(), id: records::work_id(&turn, "end"), kept: true }, T0 + 4);
     assert!(done.dirty && done.effects.is_empty());
     assert!(e.state().turns.is_empty(), "let go once its end is answered");
     // replay: a late event for the ended turn is dropped
@@ -765,7 +765,7 @@ fn turns_another_life_ran_are_told_once_to_the_next_turn() {
             let owed: Vec<(String, String)> = r.effects.iter().filter_map(|x| match x { Effect::Owed { turn, id, .. } => Some((turn.clone(), id.clone())), _ => None }).collect();
             for (turn, id) in owed {
                 // a 409 too: that life ended it
-                e.step(Input::Posted { turn, id }, T0 + 1);
+                e.step(Input::Posted { turn, id, kept: false }, T0 + 1);
             }
         }
         claims
@@ -1894,7 +1894,7 @@ fn a_state_owing_an_answer_is_one_an_older_bridge_sets_aside() {
     let mut e = engine(&[rowan.clone(), juniper.clone()]);
     assert_eq!(e.state().version, 2, "no return: the older format");
     let t = started(&read(&mut e, &rowan, "talk--k3x9", question(1, "q"), Some(&talk), T0)).expect("running");
-    assert_eq!(e.state().version, STATE_VERSION, "a return held: format 3");
+    assert_eq!(e.state().version, 3, "a return held: format 3");
     let end = e.step(heard(Event::End { turn: t.turn.clone(), outcome: Outcome::Idle }), T0);
     let owing = serde_json::to_value(e.state()).unwrap();
     assert!(owing["turns"][&t.turn]["owed"].as_array().unwrap().iter().any(|o| o["id"].as_str().is_some_and(|i| i.starts_with("an:"))), "it owes its answer");
@@ -2029,10 +2029,17 @@ impl Journal {
     /// The note a turn claimed at `claim` (a seq on `work`) carries, read
     /// from the journal as the driver reads it (driver.rs, `note_for`): the
     /// cut turn it tells of, and its text.
-    fn note(&self, agent: &str, claim: Option<u64>) -> Option<(String, String)> {
+    fn note(&self, agent: &str, claim: Option<u64>, continues: Option<&str>) -> Option<(String, String)> {
         let work = self.channel(CHAT, records::WORK);
         let before = &work[..usize::try_from(claim? - 1).expect("a seq")];
-        let crate::note::Before::Cut(cut) = crate::note::previous(before, agent, true) else { return None };
+        // a continuation is told of the turn it continues, by its id
+        let cut = match continues {
+            Some(c) => crate::note::turn(before, agent, c)?,
+            None => {
+                let crate::note::Before::Cut(cut) = crate::note::previous(before, agent, true) else { return None };
+                cut
+            }
+        };
         let chat = self.channel(CHAT, records::CHAT);
         let asked = chat.iter().find(|r| r.seq == cut.cause.seq).and_then(crate::note::asked);
         Some((cut.turn.clone(), crate::note::text(&cut, asked.as_deref(), &crate::note::replies(chat, agent, &cut.turn))))
@@ -2095,6 +2102,9 @@ struct World {
     /// the journal before the claim the engine names: the cut turn it tells
     /// of, and its text.
     notes: Vec<(String, Option<(String, String)>)>,
+    /// Each continuation run: its turn, who it is said by, what it says,
+    /// and the cut turn it continues.
+    continued: Vec<(String, String, String, String)>,
     held: BTreeMap<String, Held>,
     /// Each message told to a turn as its answer, in order.
     tells: Vec<Told>,
@@ -2123,6 +2133,7 @@ impl World {
             runs: Vec::new(),
             claims_at_run: Vec::new(),
             notes: Vec::new(),
+            continued: Vec::new(),
             held: BTreeMap::new(),
             tells: Vec::new(),
             conflicts_on_chat: Vec::new(),
@@ -2226,7 +2237,10 @@ impl World {
                     self.runs.push((self.lives, ts.turn.clone()));
                     self.claims_at_run.push((self.lives, ts.turn.clone(), claim));
                     assert!(ts.note.is_none(), "the engine names the claim; the driver reads the note");
-                    let note = if ts.fragment == CHAT { self.journal.note(&ts.agent.identity, ts.claim_seq) } else { None };
+                    let note = if ts.fragment == CHAT { self.journal.note(&ts.agent.identity, ts.claim_seq, ts.continues.as_deref()) } else { None };
+                    if let Some(cut) = &ts.continues {
+                        self.continued.push((ts.turn.clone(), ts.asker_name.clone(), ts.text.clone(), cut.clone()));
+                    }
                     self.notes.push((ts.turn.clone(), note));
                     self.held.insert(ts.turn.clone(), Held::default());
                 }
@@ -2314,7 +2328,9 @@ impl World {
         match e {
             Effect::Claim { turn, .. } => self.step(Input::Claimed { turn: turn.clone(), answer }),
             Effect::Fence { turn, prompt, .. } => self.step(Input::Fenced { turn: turn.clone(), prompt: prompt.clone(), answer }),
-            Effect::Owed { turn, id, .. } => self.step(Input::Posted { turn: turn.clone(), id: id.clone() }),
+            // this life's on the journal when appended or replayed, not
+            // another life's (409)
+            Effect::Owed { turn, id, .. } => self.step(Input::Posted { turn: turn.clone(), id: id.clone(), kept: matches!(answer, ClaimAnswer::Ours { .. }) }),
             _ => {}
         }
     }
@@ -2380,7 +2396,7 @@ impl World {
             Effect::Owed { turn, id, .. } => {
                 self.lane.pop_front();
                 self.given_up.push(id.clone());
-                self.step(Input::Posted { turn: turn.clone(), id: id.clone() });
+                self.step(Input::Posted { turn: turn.clone(), id: id.clone(), kept: false });
             }
             Effect::Post { id, .. } => {
                 self.lane.pop_front();
@@ -2506,6 +2522,14 @@ impl World {
             .collect()
     }
 
+    /// Another life's end of `turn`, already on `work`: that life ran it to
+    /// its end, so this life's lost end is refused (409).
+    fn ended_by_another_life(&mut self, turn: &str) {
+        let lead = self.lead().clone();
+        let body = records::turn_end(turn, &Outcome::Idle);
+        assert_eq!(self.journal.post(CHAT, records::WORK, &lead.identity, &records::work_id(turn, "end"), &body), Answer::Appended);
+    }
+
     /// Another life's claim of `turn` (the turn of chat record `seq`),
     /// already on `work`.
     fn claimed_by_another_life(&mut self, turn: &str, seq: u64) {
@@ -2563,11 +2587,35 @@ impl World {
                 return Err(format!("Tell: life {} told message {} to {} and ran it as {own} too", t.life, t.seq, t.turn));
             }
         }
-        // P5: a cut turn is told of once at most, by a turn after it, and only
-        // a turn the journal ended as lost is told of
+        // Phase 4: a continuation is its cut turn's, runs once at most (the
+        // runs above), is never continued itself, and a turn is continued
+        // only when the journal ended it as lost and nothing else: a turn
+        // another life ended is never continued
+        for (c, _, _, cut) in &self.continued {
+            if *c != records::continuation_id(cut) {
+                return Err(format!("C: {c} ran as the continuation of {cut}, which it is not"));
+            }
+            if self.continued.iter().any(|(_, _, _, other)| other == c) {
+                return Err(format!("C: the continuation {c} was continued itself"));
+            }
+            let ends = self.ends(cut);
+            if ends.iter().any(|e| e["error"] != crate::engine::LOST) || ends.is_empty() {
+                return Err(format!("C: {cut} was continued, but the journal ended it {ends:?}"));
+            }
+        }
+        // P5: a cut turn is told of once at most by the journal's rule (the
+        // turn after it), and once more to its own continuation (phase 4: it
+        // is told of the turn it continues, whatever ran between); only a
+        // turn the journal ended as lost is told of
         let mut told_of: BTreeSet<&str> = BTreeSet::new();
         for (turn, note) in &self.notes {
             let Some((cut, _)) = note else { continue };
+            if *turn == records::continuation_id(cut) {
+                if !self.ends(cut).iter().any(|e| e["error"] == crate::engine::LOST) {
+                    return Err(format!("P5: {turn} continues {cut}, which did not end as lost: {:?}", self.ends(cut)));
+                }
+                continue;
+            }
             if cut == turn || !told_of.insert(cut.as_str()) {
                 return Err(format!("P5: {turn} was told of {cut}, already told or itself: {:?}", self.notes.iter().filter(|(_, n)| n.is_some()).collect::<Vec<_>>()));
             }
@@ -2703,24 +2751,46 @@ fn a_turn_starts_only_once_its_claim_is_answered() {
 }
 
 /// Goal : a claim another life holds (409) is never run here; the
-/// turn gets its one end, and the next message runs.
+/// turn gets its one end, and the next message runs. Phase 4: that life
+/// left it with no end (a restart cut it), so this life's lost end lands
+/// as its own, and the turn is continued once before the next message,
+/// said by the computer (never as its asker's words) and told what was
+/// cut. One that life ended (its end on `work`) refuses this end (409),
+/// and is not continued.
 #[test]
 fn a_claim_another_life_holds_ends_the_turn() {
-    let mut w = World::new(&["juniper"]);
-    let t = w.turn_of(1);
-    w.claimed_by_another_life(&t, 1);
-    w.start(None);
-    assert_eq!(w.say("npub1paul", "one"), t);
-    w.answer_one();
-    assert_eq!(w.runs_of(&t), 0, "another life's turn is never run here");
-    w.answer_all();
-    let ends = w.ends(&t);
-    assert_eq!(ends.len(), 1, "one end: {ends:?}");
-    assert_eq!((ends[0]["outcome"].as_str(), ends[0]["error"].as_str()), (Some("error"), Some("lost when the computer restarted")));
-    assert!(w.engine().state().turns.is_empty(), "forgotten");
-    let next = w.say("npub1paul", "two");
-    w.answer_all();
-    assert_eq!(w.runs_of(&next), 1, "the next message runs");
+    for ended in [false, true] {
+        let mut w = World::new(&["juniper"]);
+        let t = w.turn_of(1);
+        w.claimed_by_another_life(&t, 1);
+        if ended {
+            w.ended_by_another_life(&t);
+        }
+        w.start(None);
+        assert_eq!(w.say("npub1paul", "one"), t);
+        w.answer_one();
+        assert_eq!(w.runs_of(&t), 0, "another life's turn is never run here");
+        w.answer_all();
+        let ends = w.ends(&t);
+        assert_eq!(ends.len(), 1, "one end: {ends:?}");
+        let c = records::continuation_id(&t);
+        if ended {
+            assert_eq!(ends[0]["outcome"], "idle", "that life's own end");
+            assert_eq!(w.runs_of(&c), 0, "a turn that life ended is not continued");
+        } else {
+            assert_eq!((ends[0]["outcome"].as_str(), ends[0]["error"].as_str()), (Some("error"), Some("lost when the computer restarted")));
+            assert_eq!(w.runs_of(&c), 1, "continued once");
+            assert_eq!(w.continued, vec![(c.clone(), CONTINUE_ASKER.to_string(), CONTINUE_TEXT.to_string(), t.clone())]);
+            assert!(w.note_of(&c).is_some_and(|n| n.contains("“one”")), "told what was cut");
+            assert_eq!(w.journal.work(&c, "turn.notice").len(), 1, "shown as it starts");
+            w.end(&c, Outcome::Idle);
+            w.answer_all();
+        }
+        assert!(w.engine().state().turns.is_empty(), "forgotten");
+        let next = w.say("npub1paul", "two");
+        w.answer_all();
+        assert_eq!(w.runs_of(&next), 1, "the next message runs");
+    }
 }
 
 /// Goal (P1): a claim the platform refuses (403 or 404: the agent left the
@@ -2898,6 +2968,17 @@ fn a_question_cut_by_a_restart_is_lost_and_its_answer_runs_once() {
         w.answer_all();
         assert_eq!(w.runs_of(&asked), 1, "{wake}: never run again");
         assert_eq!(w.ends(&asked), vec![json!({ "kind": "turn.end", "turn": asked, "outcome": "error", "error": LOST })], "{wake}: ended once, as lost");
+        // phase 4: a turn this life knows waited on its person is not
+        // continued (their answer is its next turn); a state older than the
+        // turn cannot know it asked, so it is continued once
+        let c = records::continuation_id(&asked);
+        if wake == "latest" {
+            assert_eq!(w.runs_of(&c), 0, "{wake}: not continued");
+        } else {
+            assert_eq!(w.runs_of(&c), 1, "{wake}: continued once");
+            w.end(&c, Outcome::Idle);
+            w.answer_all();
+        }
         let answer = w.say("npub1paul", "Fernando");
         w.answer_all();
         assert!(w.tells.is_empty(), "{wake}: never told to a turn of another life");
@@ -2950,8 +3031,9 @@ impl Rng {
     }
 }
 
-/// Goal (P5): the first turn the agent runs in the chat after one of its
-/// turns there ended as lost carries a note, built from the journal alone:
+/// Goal (P5, and phase 4's continuation): the first turn the agent runs in
+/// the chat after one of its turns there ended as lost (its continuation,
+/// queued in its place) carries a note, built from the journal alone:
 /// what the cut turn was asked, the steps it recorded, what it had replied,
 /// and that a restart cut it. The turn after carries none (said once), also
 /// after a rollback that reads the noted turn's message again; and the note
@@ -2986,13 +3068,20 @@ fn the_turn_after_a_lost_one_carries_the_note_once() {
         w.answer_all();
         assert_eq!(w.ends(&cut).len(), 1, "{wake}: the cut turn ended once");
         assert_eq!(w.ends(&cut)[0]["error"], LOST, "{wake}");
-        let kept = w.latest();
-        let next = w.say("npub1paul", "good morning");
-        w.answer_all();
-        let note = w.note_of(&next).unwrap_or_else(|| panic!("{wake}: the turn after the lost one carries its note"));
+        // phase 4: the cut turn is continued once, whatever state woke, and
+        // its continuation is the turn after it: it carries the note
+        let c = records::continuation_id(&cut);
+        assert_eq!(w.runs_of(&c), 1, "{wake}: continued once");
+        let note = w.note_of(&c).unwrap_or_else(|| panic!("{wake}: the continuation carries the cut turn's note"));
         for said in ["cut short", "computer restarted", "Check what it already did", "“do the risky thing”", "terminal ls /tmp (ok); terminal rm -rf /tmp/x (ok)", "It had replied: “Checking first.”"] {
             assert!(note.contains(said), "{wake}: {said:?} in {note}");
         }
+        w.end(&c, Outcome::Idle);
+        w.answer_all();
+        let kept = w.latest();
+        let next = w.say("npub1paul", "good morning");
+        w.answer_all();
+        assert_eq!(w.note_of(&next), None, "{wake}: said once, by the continuation");
         w.end(&next, Outcome::Idle);
         w.answer_all();
         let after = w.say("npub1paul", "and after that");
@@ -3015,6 +3104,75 @@ fn the_turn_after_a_lost_one_carries_the_note_once() {
     assert!(notes.windows(2).all(|p| p[0] == p[1]), "the journal's note, whatever state woke: {notes:#?}");
 }
 
+/// Goal (durability phase 4): a turn a restart cut is continued once, so
+/// nobody types "continue". Valid: its continuation is queued in its place,
+/// said by the computer, carries the cut turn's note and is shown as it
+/// starts. Restart: a continuation a restart cuts in its turn is never
+/// continued (Pi's restart limit, ending visibly): the turn after it is told
+/// of it, by the journal's rule. Invalid: a turn this life knows waited on
+/// its card, or a command, is not continued. Replay: its lost end answered
+/// again continues nothing more.
+#[test]
+fn a_cut_turn_is_continued_once() {
+    let mut w = World::new(&["juniper"]);
+    w.start(None);
+    let cut = w.say("npub1paul", "deploy the site");
+    w.answer_all();
+    w.did(&cut, "terminal", "make deploy");
+    w.answer_all();
+    let state = w.latest();
+    w.crash(false);
+    w.start(state);
+    w.answer_all();
+    let c = records::continuation_id(&cut);
+    assert_eq!((w.runs_of(&cut), w.runs_of(&c)), (1, 1), "the cut turn never again; its continuation once");
+    assert!(w.note_of(&c).is_some_and(|n| n.contains("“deploy the site”") && n.contains("terminal make deploy")), "told what was cut");
+    assert_eq!(w.journal.work(&c, "turn.notice"), vec![records::turn_notice(&c, NoticeCategory::Info, CONTINUE_NOTICE)]);
+    // the continuation is cut in its turn: it is never continued
+    let state = w.latest();
+    w.crash(false);
+    w.start(state);
+    w.answer_all();
+    assert_eq!(w.ends(&c).len(), 1, "the continuation ends once");
+    assert_eq!(w.ends(&c)[0]["error"], LOST);
+    assert_eq!(w.runs_of(&records::continuation_id(&c)), 0, "a continuation is never continued");
+    let next = w.say("npub1paul", "status?");
+    w.answer_all();
+    assert!(w.note_of(&next).is_some_and(|n| n.contains("cut short")), "the turn after a cut continuation is told of it");
+    w.end(&next, Outcome::Idle);
+    w.settle();
+    w.check().unwrap();
+
+    // invalid: a turn this life knows waited on its card is not continued
+    let mut w = World::new(&["juniper"]);
+    w.start(None);
+    let carded = w.say("npub1paul", "risky");
+    w.answer_all();
+    w.ask(&carded);
+    w.answer_all();
+    let state = w.latest();
+    w.crash(false);
+    w.start(state);
+    w.answer_all();
+    assert_eq!(w.runs_of(&records::continuation_id(&carded)), 0, "its answer is its next turn");
+
+    // invalid: a command is not continued; replay: its lost end answered
+    // again continues nothing
+    let a = agent("juniper");
+    let mut e = commanded(std::slice::from_ref(&a), LIFE);
+    let v = view(&[&a]);
+    let s = said(&mut e, &a, &v, 1, "npub1paul", json!({ "kind": "command", "command": "usage" }), T0);
+    let ran = started(&s).expect("a command's turn");
+    let mut next = Engine::new(e.state().clone(), Settings::default(), "fedcba9876543210fedcba9876543210").expect("whole").with_runtime(crate::runtime::DEFAULT, crate::runtime::script::MENU);
+    next.step(Input::Agents(vec![a.clone()]), T0 + 1);
+    let r = next.recover(T0 + 1);
+    let end = r.effects.iter().find_map(|x| match x { Effect::Owed { turn, id, .. } if *turn == ran.turn => Some(id.clone()), _ => None }).expect("its lost end");
+    let posted = next.step(Input::Posted { turn: ran.turn.clone(), id: end.clone(), kept: true }, T0 + 2);
+    assert!(!posted.effects.iter().any(|x| matches!(x, Effect::Claim { .. })), "a command is not continued: {posted:?}");
+    let again = next.step(Input::Posted { turn: ran.turn.clone(), id: end, kept: true }, T0 + 3);
+    assert_eq!(again, Step::default(), "answered again: nothing");
+}
+
 /// Seeds the simulation runs, events in each, and messages said in each.
 const SIM_SEEDS: u64 = 120;
 const SIM_EVENTS: usize = 400;
@@ -3034,6 +3192,8 @@ struct Reached {
     /// Answers of questions refused at admission, and posts the lane gave up.
     answered_refused: usize,
     given_up: usize,
+    /// Cut turns continued (phase 4).
+    continued: usize,
 }
 
 /// One history: events chosen by `seed`, the invariants checked after each,
@@ -3168,7 +3328,7 @@ fn simulate(seed: u64, asking: bool) -> Result<Reached, String> {
     let answered_lost = answers.iter().filter(|r| r.body["error"] == LOST).count();
     let answers_cut = answers.iter().filter(|r| w.ends(&records::turn_id("juniper--k3x9", "juniper--k3x9", records::TASKS, r.seq)).iter().any(|e| e["error"] == LOST)).count();
     let answered_refused = answers.iter().filter(|r| r.body["refused"] == true).count();
-    Ok(Reached { told: w.tells.len(), told_then_run, answered: answers.len(), answered_lost, answers_cut, answered_refused, given_up: w.given_up.len() })
+    Ok(Reached { told: w.tells.len(), told_then_run, answered: answers.len(), answered_lost, answers_cut, answered_refused, given_up: w.given_up.len(), continued: w.continued.len() })
 }
 
 /// Goal : any history of messages, answers lost and late, runs,
@@ -3185,8 +3345,9 @@ fn any_history_of_crashes_and_rollbacks_keeps_the_invariants() {
     let histories: Vec<Result<Reached, String>> = (0..SIM_SEEDS).map(|seed| simulate(seed, false)).collect();
     let failures: Vec<String> = histories.iter().filter_map(|h| h.clone().err()).collect();
     assert!(failures.is_empty(), "{} of {SIM_SEEDS} histories broke an invariant; the first:\n{}", failures.len(), failures.iter().take(5).cloned().collect::<Vec<_>>().join("\n"));
-    let reached = histories.iter().filter_map(|h| h.as_ref().ok()).fold(Reached::default(), |a, r| Reached { told: a.told + r.told, told_then_run: a.told_then_run + r.told_then_run, ..Reached::default() });
+    let reached = histories.iter().filter_map(|h| h.as_ref().ok()).fold(Reached::default(), |a, r| Reached { told: a.told + r.told, told_then_run: a.told_then_run + r.told_then_run, continued: a.continued + r.continued, ..Reached::default() });
     assert!(reached.told > 0 && reached.told_then_run > 0, "the histories answer questions in words, and a rollback reads some answers again: {reached:?}");
+    assert!(reached.continued > 0, "the histories continue cut turns: {reached:?}");
 }
 
 /// Goal: the same histories with one agent asking another to be answered
