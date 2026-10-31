@@ -301,8 +301,11 @@ function frameOf(src, title, name = null) {
 // navigation it makes once it does (frameOf)
 const unready = new WeakMap();
 // A frame sent to `src`: at once, or, its origin not known yet, once it is.
-function go(frame, src) {
+// `replace`: in place of the page it shows, adding nothing to the tab's
+// history (a cross-origin frame's `location.replace` is one it may call).
+function go(frame, src, replace = false) {
   if (unready.has(frame)) unready.set(frame, src);
+  else if (replace && frame.contentWindow) frame.contentWindow.location.replace(new URL(src, location.href).href);
   else frame.src = src;
 }
 
@@ -928,7 +931,9 @@ function openChat(name, push = true, path = null) {
   hideNotice();
   const made = !state.frames.has(name);
   chatFrame(name, path ?? undefined);
-  if (path && !made) go(state.frames.get(name), framed(name, path));
+  // a frame shown before goes to the page asked in place of the one it
+  // showed, so Back goes to the view before (History), not to that page
+  if (path && !made) go(state.frames.get(name), framed(name, path), true);
   for (const [n, frame] of state.frames) frame.hidden = n !== name;
   renderHeading();
   renderChats();
