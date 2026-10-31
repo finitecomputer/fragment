@@ -201,11 +201,18 @@ fn telegram_page(s: &mut Suite, api: &Api, owner: &Keys, session: &str) -> Resul
     anyhow::ensure!(r.status == 200, "a Telegram connector: {r}");
     b.set_cookie(&format!("{}/", api.base), "fragment_session", session)?;
     let page = b.open(&api.site_url(&name, "__signin?return=/"))?;
-    let drawn = b.until(&page, "document.querySelectorAll('.telegram .connector-tag').length === 2", std::time::Duration::from_secs(15));
+    // it starts, every module it imports served (Alex's review: the chat's
+    // `control.js`): the chat's page live and its composer open to its
+    // owner, the still-loading line gone, and its setup drawn from its state
+    let started = b.until(
+        &page,
+        "document.getElementById('say')?.dataset.ready === '1' && !document.getElementById('text').disabled && !document.getElementById('still-loading') && document.querySelectorAll('.telegram .connector-tag').length === 2",
+        std::time::Duration::from_secs(15),
+    );
     let tags = b.eval(&page, "[document.querySelector('.telegram-head strong')?.textContent, ...[...document.querySelectorAll('.telegram .connector-tag')].map((t) => [t.textContent, t.title])]")?;
     s.ok(
-        "the Telegram connector's page marks it experimental and less secure (Telegram's servers read it), a word each",
-        drawn && tags == json!(["Connect Telegram", ["Experimental", ""], ["Less secure", "Telegram's servers can read these messages"]]),
+        "the Telegram connector's page starts, its chat live and its setup drawn, and marks it experimental and less secure (Telegram's servers read it), a word each",
+        started && tags == json!(["Connect Telegram", ["Experimental", ""], ["Less secure", "Telegram's servers can read these messages"]]),
         &tags,
     );
     b.close(page)?;
