@@ -653,10 +653,16 @@ fn flags_of(models: &mut Value, key: &str, means: &str) -> Result<[bool; 4], Str
 /// slot its agents' calls reach (`Models::reached`) is private; and no slot
 /// on Workers AI or OpenRouter is marked private. Refused, naming the slot
 /// to change and why the tier's agents reach it.
+/// Whether `upstream` keeps what it is sent where a private slot may not:
+/// Workers AI's, or OpenRouter's.
+fn open(upstream: &Upstream) -> bool {
+    matches!(upstream, Upstream::WorkersAi { .. }) || matches!(upstream, Upstream::Openai { base_url, .. } if on_openrouter(base_url))
+}
+
 fn private_closed(models: &Models) -> Result<(), String> {
-    for (slot, upstream) in models.all_slots() {
-        let open = matches!(upstream, Upstream::WorkersAi { .. }) || matches!(upstream, Upstream::Openai { base_url, .. } if on_openrouter(base_url));
-        if models.slot_private(slot) && open {
+    for (slot, upstream) in models.all_slots().into_iter().chain([(crate::embed::EMBEDDINGS, &models.embeddings.upstream)]) {
+        let private = if slot == crate::embed::EMBEDDINGS { models.embeddings.private } else { models.slot_private(slot) };
+        if private && open(upstream) {
             return Err(format!("models.{slot}: Workers AI and OpenRouter are not private: only a confidential API (Finite Private's, Tinfoil's) is marked private"));
         }
     }
@@ -784,6 +790,16 @@ impl Models {
         }
         private_closed(&models)?;
         Ok(models)
+    }
+
+    /// Why this deployment embeds nothing, if it does not: a tier is
+    /// private and its embeddings slot is not (Paul's rule: Finite Private
+    /// never falls back to a model that is not private, so content is not
+    /// sent to one to be embedded either). Its deploy is not refused: its
+    /// search answers by words alone.
+    pub fn embeddings_refused(&self) -> Option<String> {
+        let private_tier = [Tier::Cheap, Tier::Medium].iter().any(|t| self.slot_private(t.as_str()));
+        (private_tier && !self.embeddings.private).then(|| "this deployment's tiers are private and its embeddings slot is not: nothing is embedded rather than sent to a model that is not private (name a private embeddings slot)".to_string())
     }
 
     /// `book` with each slot's own price (`Upstream::own_price`: its list
@@ -3520,5 +3536,22 @@ mod tests {
             let err = Models::parse(Some(config), &book, false).unwrap_err();
             assert!(err.contains("models.embeddings") && err.contains(why), "{err}");
         }
+        let err = Models::parse(Some(r#"{"embeddings": {"provider": "workers_ai", "model": "@cf/baai/bge-m3", "dimensions": 1024, "private": true}}"#), &book, false).unwrap_err();
+        assert!(err.contains("models.embeddings: Workers AI and OpenRouter are not private"), "{err}");
+    }
+
+    /// Goal: a deployment whose tiers are private embeds nothing on a slot
+    /// that is not (Paul's rule), and deploys anyway. Method: Private and
+    /// Standard's config, with and without a private embeddings slot.
+    #[test]
+    fn a_private_deployment_embeds_privately_or_not_at_all() {
+        let book = PriceBook::defaults();
+        assert_eq!(Models::defaults().embeddings_refused(), None);
+        let mut v = per_route();
+        let finite = Models::parse(Some(&v.to_string()), &book, false).unwrap();
+        assert!(finite.embeddings_refused().is_some_and(|why| why.contains("not private")), "Private's tier is private");
+        v["embeddings"] = json!({ "provider": "openai", "base_url": "https://embed.example/v1", "model": "BAAI/bge-m3", "dimensions": 1024, "private": true, "price": { "input": 0, "output": 0 } });
+        let private = Models::parse(Some(&v.to_string()), &book, false).unwrap();
+        assert_eq!(private.embeddings_refused(), None);
     }
 }
