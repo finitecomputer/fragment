@@ -48,6 +48,12 @@ So a record read twice is one turn, and two agents answering one message
 are two turns. When the runtime says something with no turn running, that
 is a turn of its own, numbered by the bridge's life and counter.
 
+A turn a restart cut may be followed by its **continuation**, a turn of
+its own: its id is the first 24 hex digits of SHA-256 of `continue`, a
+NUL and the cut turn's id; it has the cut turn's `cause` and asker, and
+a `turn.notice` (part `continued`) as it starts (docs/bridge.md, "A cut
+turn is continued once").
+
 One turn of an agent runs in a chat at a time; the rest wait in order, at
 most 16. A turn's records are its `turn.start` on `work` (its claim), any
 number of steps, replies, cards and their closings, `turn.asked` and

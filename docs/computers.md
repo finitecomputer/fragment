@@ -164,7 +164,7 @@ the bridge), what its person saw before 2026-10-08, and what they see now:
 | **A slow or failed start** (fewer than three) | tried again in 5, 10 s | first run's "taking longer than usual" / nothing | the same (passing) |
 | **At zero credit, or a guest**: no wake starts | the ledger refuses (402, 403) | Settings' credit warning and `why` / unanswered | the same; the refusal's `why` now goes once a start comes up (it stayed for good); a restart is refused the same way |
 | **A deploy that changes its image** (the common update: the same name, a new image) | the deploy pushes it; awake, it keeps the image it started on until its next sleep or a restart | nothing: it ran the old image until it slept, and its owner restarted it to be sure | an `update` notice while it is awake and no turn runs: an update is ready, Restart (about a minute; its chats and work kept), or Later; nothing while it sleeps or is asleep, since its next start takes it. Settings shows the version it runs and the latest |
-| **A pin to another image** (a canary, a rollback: below, "Stable and canary") | its owner's pin, or an operator's | the update pill (pinned to the default, then a sleep and a wake) | the `update` notice while it is awake on the old image; nothing asleep, since its next start takes it (the pill went with the renamed default it served) |
+| **A pin to another image** (an operator's, an upgrade check's, a rollback: below, "Preview and production") | its owner's pin, or an operator's | the update pill (pinned to the default, then a sleep and a wake) | the `update` notice while it is awake on the old image; nothing asleep, since its next start takes it (the pill went with the renamed default it served) |
 
 **The notices** (`notices` in the owner's view, `fragment_core::computer::notices`,
 proto's `ComputerNotice`), the most pressing first, each derived from the
@@ -287,10 +287,9 @@ for days.
   version it runs (`9f86d081884c`; asleep, the one it starts on)
   and, running an older one, the latest.
 
-A default is never renamed (a promotion moves the name: below, "Stable
-and canary"), so the shell's update pill, which pinned a computer to a
-renamed default, went (2026-10-13): pinned to a canary, its person would
-have been offered stable as an update.
+A default is never renamed (a promotion moves the name's digest: below,
+"Preview and production"), so the shell's update pill, which pinned a
+computer to a renamed default, went (2026-10-13).
 
 **Does use extend the bound? No: it never stops a computer in use.** A
 computer is stopped for its bound only at a sleep, and a sleep is tried
@@ -339,11 +338,11 @@ address; `FRAGMENT_SUPPORT_URL`, given with `GET /api/computers` as
 one, the notice shows the computer's id and the platform's words, to give
 whoever runs it.
 
-## Stable and canary
+## Preview and production
 
-**Preview is the canary; production is stable** (Paul, 2026-10-29).
-Preview has one image, following master. Production keeps a digest
-promoted by hand after a full round. This does not force-restart an awake
+**There's preview and there's prod** (Paul, 2026-10-31). One image name,
+`hermes`. Preview runs master's image; production runs the digest
+preview proved, promoted by Paul. Neither force-restarts an awake
 computer: as with every image change, its owner sees an update, its next
 Restart or sleep/wake takes it, and an always-on computer is only told.
 
@@ -353,7 +352,8 @@ Every master push starts ci.yml's `preview-image` beside its checks.
 `cargo xtask image preview` hashes git's path, mode and blob records for
 Hermes' image inputs, never the commit or a clock. It resolves
 `inputs-<key>` in the existing preview repository
-`fragment-preview-computer-hermes-canary`. A tag already there is reused
+`fragment-preview-computer-hermes-canary` (named for the canary preview
+once ran; a new name would build every image again). A tag already there is reused
 at its manifest's digest, even after BuildKit's layer cache was evicted.
 A direct manifest lookup resolves only that tag; a definite missing
 manifest authorizes a build, and other registry errors stop the job.
@@ -386,12 +386,12 @@ path (xtask/src/prepare.rs, rollout.rs).
 
 A green push deploys with the digest it resolved for **that checkout's
 inputs**, not a moving `latest` tag. The deploy applies it in memory to
-`hermes` (the default) and `hermes-canary` (a compatibility name). There
-is no separate stable/canary state on preview. A name stays: a computer
-pinned to `hermes-canary` still has an image to start, the same as
-`hermes`. Neither the private config nor people's pin records are
-rewritten. An unexpected third image name refuses the override: migrate
-its pins before removing it.
+`hermes`, the default. Another image the config names (an upgrade check's
+starting image, below) stays at the digest the config pins it to.
+Neither the private config nor people's pin records are rewritten. A
+computer pinned to a name the deployment no longer has has no image to
+start: move its pins (`fragment operator pin <npub> hermes`) before a
+name goes.
 
 `fragment-deploy/preview.jsonc` still supplies deployment settings; its
 image lines no longer record the image CI runs. The **deploy job's
@@ -401,8 +401,8 @@ name the effective pinned reference. `fragment operator person <npub>`
 names the whole running and next references (`references.running`,
 `references.next`); Settings shows the digest's first 12 hex digits.
 `image.yml` can still be run by hand for preview: it resolves/prepares
-the same input-keyed image. It does not create a separate canary or
-change the running preview; the next CI deploy takes its checkout's key.
+the same input-keyed image. It does not change the running preview; the
+next CI deploy takes its checkout's key.
 
 **What changes a version** (Paul, 2026-10-14: "changes to the cells, or
 frontend, that don't change the hermes image shouldn't require a hermes
@@ -448,8 +448,6 @@ digest in its own account's registry. CI's production deploy reads those
 pins as they stand: there is no automatic image build or override. Only
 Paul moves `production`; its CI rules are unchanged (a successful master
 push, preview deploy included, proves its tree; otherwise full tests).
-Other deployments can still name distinct `hermes` and `hermes-canary`
-images, and `--candidate` still selects the latter for hosted runs.
 
 A promotion copies the exact preview digest a round proved into
 production's registry, byte for byte (`cargo xtask image copy`, skopeo's
@@ -482,11 +480,10 @@ v0.21.7 happens to change neither state.db's schema 31 nor config version
 ### One round before production
 
 1. **Master ships the image to preview automatically.** Record the input
-   key and digest from that successful deploy's summary. Every preview
-   computer is a canary; there is no operator pinning group or second
-   promotion within preview. Awake computers take Restart, sleeping ones
-   take their next wake. Record the actual running reference of the
-   computers being watched, since a later master push may advance preview.
+   key and digest from that successful deploy's summary. Awake computers
+   take Restart, sleeping ones their next wake. Record the actual running
+   reference of the computers being watched, since a later master push
+   may advance preview.
 2. **Exercise lived-in computers.** An old chat continues; a new chat
    recalls a memory; skills are listed and used; a routine fires; the
    screen and Take over work; Google answers; a teammate's ask is answered back; Settings
@@ -497,18 +494,18 @@ v0.21.7 happens to change neither state.db's schema 31 nor config version
 3. **Run the hosted lanes on preview**, followed by `--sweep`:
    `cargo xtask e2e --hosted --config <preview config> --branch preview
    --only computers,agent-restart,agent-smoke,agent-ask,bot-mode
-   --max-paid-calls 190`. Omit `--candidate`: on preview both names resolve
-   to the default, so selecting it is redundant. This proves restart on
-   the current image, not an upgrade/rollback between different images.
-4. **Prove the production upgrade on a production-shaped test branch**
-   (deployment approved by Paul): its default `hermes` is production's
-   current stable digest in that account's registry, and `hermes-canary`
-   is the recorded preview digest. Keep these pins fixed for the round.
-   Run hosted `--candidate hermes-canary --only
-   computers,agent-restart,agent-smoke,agent-ask,bot-mode
-   --max-paid-calls 190`, then without `--candidate`, `--only
-   computers,agent-restart --max-paid-calls 50`, each followed by `--sweep`.
-   `--candidate` retains its existing upgrade/rollback behavior here.
+   --max-paid-calls 190`.
+4. **Prove the upgrade from production's image.** Name production's
+   current digest beside `hermes` in the preview config, as an image of
+   its own: `"production": { "image": "registry.cloudflare.com/<account>/fragment-preview-computer-hermes-canary@sha256:<digest>" }`
+   (the preview's registry holds it, as a promotion copied it from there
+   byte for byte). Let the next deploy take it, and run
+   `--upgrade-from production --only agent-restart
+   --max-paid-calls 16`, then `--sweep`. Its computer starts on
+   production's image, answers and is given a word, is pinned to `hermes`
+   (the update), restarts onto it from its own save and names the word,
+   then is pinned back (the rollback) and names it once more. Remove the
+   `production` line once no computer is pinned to it.
 5. **Soak the recorded image for 24 hours**, with watched computers woken
    on it and having answered a turn, and hosted runs green. A later image
    is a different round; do not promote whichever happens to be latest.
@@ -828,7 +825,7 @@ expires within 30 days. The container application is the deployment's
   - `GET /api/computer/keepalive` (a WebSocket): while it is open the
     computer stays awake. Hold it while busy, and while a turn waits on
     its card, until the card is answered or expires (decision 42 as
-    amended; docs/bridge.md, "A card outlives its turn"). It
+    amended; docs/bridge.md, "A card keeps its computer awake"). It
     answers `{"type":"ping"}` with `{"type":"pong"}`: a deploy can cut
     the platform's side of it with no close reaching the guest (#557),
     and the platform then counts it closed, so a guest still busy pings
@@ -896,7 +893,7 @@ expires within 30 days. The container application is the deployment's
   added to a fragment).
   The list comes from `GET /api/fragments` and `GET /api/f/{name}/channels`
   as the agent, read again every 5 minutes and on `joined`, and within
-  seconds when a read of it fails (the bridge's backoff, images/bridge/src/driver.rs):
+  seconds when a read of it fails (the bridge's backoff, docs/bridge.md):
   until a start's first listing, nothing is followed; the agents
   themselves from `GET /api/computer`, read again every minute (the
   bridge), or every 3 s (our Hermes image, below).
@@ -1874,7 +1871,7 @@ settings and state):
   is its next turn's, read with the rest of `agent.json` every 10 s and
   written only when it changed; a running turn keeps the prompt it
   started with, and nothing restarts. Hermes' own home channel is set
-  nowhere (images/hermes/boot/src/hermes.rs, `gateway_env`).
+  nowhere (docs/hermes-relay.md, "Hermes' settings").
 
   Its work (the seam, above): each agent's is `/data/work/<profile>`.
   Its profile's config makes it the terminal's working directory
@@ -2422,7 +2419,7 @@ and how a runtime finds them, is the image's.
 - **The fragment CLI** is in the image (`/usr/local/bin/fragment`, built
   from `cli/` with the image: the Hermes image's build context is the
   repo's root, and its CLI stage copies only what the CLI builds from:
-  "Stable and canary", above). Each profile's `.env` names its agent and its owner
+  "Preview and production", above). Each profile's `.env` names its agent and its owner
   (`FRAGMENT_AS_AGENT`, `FRAGMENT_FOR`), and its config passes those two to
   its terminal (`terminal.env_passthrough`, scoped to the profile under the
   one gateway), so a command in an agent's terminal acts as that agent:
@@ -2687,14 +2684,13 @@ for a host) and finds the same `HOME`, `~` and modes.
   running from its newest save, the restart's own and held, from the image
   and not a snapshot, with no rollback; the same press again restarts
   nothing; and its agent answers after it, nothing left to tell its owner.
-  Given a round's candidate (`--candidate`), that restart is the upgrade:
-  pinned to the candidate awake after a reply that gave it a word, told
-  an update is ready, restarted onto the candidate's version from its own
-  save, and the same chat names the word; then pinned back, told again,
-  restarted onto the default's version, and the word named once more
-  (the rollback). The candidate's other real-agent sections (agent-smoke,
-  agent-ask, bot-mode) and the hosted `computers` start their computers on
-  it.
+  Given an image to upgrade from (`--upgrade-from`, production's digest
+  the preview config names), that restart is the upgrade: its computer
+  starts on that image, is pinned to the default awake after a reply
+  that gave it a word, told an update is ready, restarted onto the
+  default's version from its own save, and the same chat names the word;
+  then pinned back, told again, restarted onto the image it started on,
+  and the word named once more (the rollback).
 - The e2e's `wipe` section (crates/e2e/src/lanes/wipe.rs): a computer
   whose `/data` holds a file its agent wrote and a save, wiped with its
   owner (its first step alone, then across a node's crash): no computer

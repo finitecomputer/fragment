@@ -111,8 +111,8 @@ fresh one; one that contradicts itself is refused.
 On SIGTERM the bridge exits within `SHUTDOWN_MS_MAX`. When it starts
 again, every turn its state holds that is not queued was an earlier
 life's. Each ends as lost (`lost when the computer restarted`, its
-unexpired cards left answerable) and never runs again. Queued turns are
-claimed like any other.
+unexpired cards left answerable) and never runs again, though it may be
+continued (below). Queued turns are claimed like any other.
 
 ### The turn after a cut one is told
 
@@ -130,6 +130,26 @@ the cut request. Two parts close this:
 - Before the gateway starts, our image's `hermes-boot` closes each cut
   turn in its Hermes session (`hermes::CLOSE_CUT_TURNS`), so the next
   message is a user message of its own.
+
+### A cut turn is continued once
+
+A turn a restart cut is picked up again by itself, once, so nobody types
+"continue" and nothing runs twice (`engine.rs`, `continue_turn`).
+
+- **Which**: a turn this life ended as lost, once that end lands on
+  `work` as this life's own. A life that ran the turn to its end posted
+  that end first, so this one's is refused and nothing is continued.
+- **Not continued**: an ask's turn (its asker is answered `lost`), a
+  command, a turn its asker stopped (a Stop is never undone), one waiting
+  on its person (their answer is its next turn), and a continuation: a
+  cut continuation is told to the turn after it, as any cut turn is.
+- **What it is**: a turn queued in the cut turn's place, with its cause,
+  asker and depth, its id the cut turn's `records::continuation_id`, so
+  its claim makes it one run in any life. The computer says it
+  (`CONTINUE_TEXT`), never as its asker's words, and it carries the cut
+  turn's note; the chat is told as it starts (`CONTINUE_NOTICE`). No
+  runtime is asked to rerun a call.
+- A state holding one is format 4, which an older bridge sets aside.
 
 ### What a rollback forgot
 
