@@ -358,6 +358,8 @@ export function createOnboarding({ api, ui, account, fragments, computer, naviga
       const agent = allFragments().find((f) => f.kind === "agent" && own(f) && labelOf(f.name) === label);
       if (!agent) continue;
       const id = [...agents().values()].find((a) => a.fragment === agent.name)?.identity;
+      // made, in another chat of this label (this one a create's whose answer was lost)
+      if (id && chats().some((c) => c !== chat && own(c) && labelOf(c.name) === labelOf(chat.name) && (c.agents ?? []).includes(id))) continue;
       let joined = !!id && (chat.agents ?? []).includes(id);
       if (id && !joined) {
         // asked of the chat: a row may not name its agents yet
