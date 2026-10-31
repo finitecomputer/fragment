@@ -35,12 +35,12 @@
 //!    asked again with backoff for `FINISH_LIMIT`.
 //! 4. Verified: the platform's `/healthz/objects` asked until every object
 //!    class answers the new release (docs/api.md, Health), for
-//!    `VERIFY_LIMIT`, longer than the five minutes Cloudflare's default
-//!    holds a busy object on its old code (measured 2026-10-21, and
-//!    2026-10-24 on a throwaway Worker, which found `code_update_strategy`
-//!    ignored then). The Worker asks for `immediate` (cell/wrangler.jsonc;
-//!    honoured on 2026-10-30: 0.6 s), and the limit stays until the
-//!    preview's deploys show it holds.
+//!    `VERIFY_LIMIT`. Every object takes a deploy's code at once (the
+//!    Worker asks for `immediate`: cell/wrangler.jsonc), so the limit is
+//!    far past what a deploy takes (0 s on each of the preview's first ten
+//!    deploys under it) and short of the five minutes Cloudflare's default
+//!    held a busy object on its old code: should Cloudflare hold one again,
+//!    the deploy is rolled back, red, never silently refused for minutes.
 //! 5. When it cannot be finished or verified, the release before is
 //!    deployed again (`wrangler rollback` to its version), and verified
 //!    the same way; unless the new release's schema is not the one before
@@ -71,10 +71,11 @@ pub(crate) const FINISH_LIMIT: Duration = Duration::from_secs(10 * 60);
 pub(crate) const OBSERVE_LIMIT: Duration = Duration::from_secs(3 * 60);
 const FINISH_PAUSE_FIRST: Duration = Duration::from_secs(10);
 const FINISH_PAUSE_MAX: Duration = Duration::from_secs(60);
-/// How long the platform has to answer a release at every object class:
-/// past Cloudflare's default five minutes of a busy object's old code,
-/// until `immediate` (cell/wrangler.jsonc) has held on the preview.
-pub(crate) const VERIFY_LIMIT: Duration = Duration::from_secs(7 * 60);
+/// How long the platform has to answer a release at every object class.
+/// Objects take a deploy's code at once (`immediate`, cell/wrangler.jsonc):
+/// each of the preview's first ten deploys under it answered in 0 s, each
+/// deploy before it that was not held in 11 s at most (2026-10-27 to 31).
+pub(crate) const VERIFY_LIMIT: Duration = Duration::from_secs(90);
 /// The pause between two probes, and how often a wait says where it is.
 const PROBE_PAUSE: Duration = Duration::from_secs(5);
 const SAY_EVERY: Duration = Duration::from_secs(30);
@@ -668,12 +669,25 @@ mod tests {
 
     #[test]
     fn objects_held_on_old_code_within_the_limit_end_all_new() {
-        // Cloudflare's five minutes: 60 probes 5 s apart
+        // a minute: 12 probes 5 s apart
         let mut w = World::new(OLD, NEW, Some(SCHEMA));
-        w.lag = Some(60);
+        w.lag = Some(12);
         assert_eq!(deploy(&mut w), Outcome::Deployed);
         assert_eq!(w.ends(), (NEW.into(), NEW.into()));
-        assert_eq!(count(&w, "probe"), 61);
+        assert_eq!(count(&w, "probe"), 13);
+    }
+
+    /// Cloudflare's deferred five minutes (60 probes 5 s apart), should it
+    /// hold a busy object on its old code again whatever `immediate` asks:
+    /// past the limit, so the deploy is rolled back and says so, never
+    /// green over minutes of refusals.
+    #[test]
+    fn objects_held_for_cloudflares_five_minutes_are_rolled_back() {
+        let mut w = World::new(OLD, NEW, Some(SCHEMA));
+        w.lag = Some(60);
+        let out = deploy(&mut w);
+        assert!(matches!(&out, Outcome::RolledBack { to, .. } if to == OLD), "{out:?}");
+        assert_eq!(w.ends(), (OLD.into(), OLD.into()));
     }
 
     #[test]
@@ -681,7 +695,7 @@ mod tests {
         let mut w = World::new(OLD, NEW, Some(SCHEMA));
         w.lag = None;
         let out = deploy(&mut w);
-        assert!(matches!(&out, Outcome::RolledBack { to, why } if to == OLD && why.contains("Registry runs 0e9bc7b36e5c") && why.contains("7m00s")), "{out:?}");
+        assert!(matches!(&out, Outcome::RolledBack { to, why } if to == OLD && why.contains("Registry runs 0e9bc7b36e5c") && why.contains("1m30s")), "{out:?}");
         assert_eq!(w.ends(), (OLD.into(), OLD.into()), "the objects held on the old release meet it again");
         assert_eq!(count(&w, "probe") as u128, VERIFY_LIMIT.as_millis() / PROBE_PAUSE.as_millis() + 2, "bounded: the limit's probes, and the rollback's one");
     }

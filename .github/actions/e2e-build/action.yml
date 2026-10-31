@@ -2,10 +2,10 @@
 # built into BuildKit's builder, and `cargo xtask e2e --build-only` (the
 # cell, the CLI and the suite, and the computer images the node's boot
 # builds), with this commit's builds saved for the runs after it when
-# `save` says so. ci.yml's shards run it before their sections, and on a
-# master push whose shards skip (`proven`), `e2e-build` runs it alone, so
-# every pull request and merge group still starts from master's newest
-# build.
+# `save` says so, and, when `search` says so, the search service's image.
+# ci.yml's shards run it before their sections, and on a master push whose
+# shards skip (`proven`), `e2e-build` runs it alone, so every pull request
+# and merge group still starts from master's newest build and layers.
 name: e2e build
 description: the e2e's caches, its stub image and its build, saved when asked
 inputs:
@@ -15,6 +15,10 @@ inputs:
   worker-build-version:
     description: worker-build's version (xtask/src/build.rs, WORKER_BUILD_VERSION)
     required: true
+  search:
+    description: "'true' to build the search service's image too (the shard that runs `search`, and master's `e2e-build`)"
+    required: false
+    default: "false"
 outputs:
   builder:
     description: the BuildKit builder the stub image was built in, for BUILDX_BUILDER
@@ -156,3 +160,29 @@ runs:
       with:
         path: target/tools
         key: ${{ steps.node.outputs.cache-primary-key }}
+    # The search service's image (search/Dockerfile) for the `search`
+    # section, loaded into Docker as the section names it. Its layers are
+    # BuildKit's in the Actions cache (scope e2e-search), saved, as the
+    # stub's, only when asked to save: master's, which every run can read,
+    # and not a merge group's or a pull request's, which no other run reads
+    # (on 2026-10-31 every queue run compiled LanceDB, 19 to 28 minutes,
+    # from caches only queue and pull request refs held). An unchanged
+    # search/ is its layers fetched; a changed one compiles LanceDB (about
+    # 25 minutes on a runner). Last, after the saves: a failed search build
+    # still leaves master's builds saved.
+    - if: inputs.search == 'true'
+      uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+      env:
+        DOCKER_BUILD_SUMMARY: "false"
+        DOCKER_BUILD_RECORD_UPLOAD: "false"
+      with:
+        builder: ${{ steps.buildx.outputs.name }}
+        context: search
+        file: search/Dockerfile
+        platforms: linux/amd64
+        provenance: false
+        load: true
+        tags: fragment-search:e2e
+        build-args: JOBS=4
+        cache-from: type=gha,scope=e2e-search
+        cache-to: ${{ inputs.save == 'true' && 'type=gha,scope=e2e-search,mode=max,ignore-error=true' || '' }}

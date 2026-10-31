@@ -55,15 +55,11 @@ fn unfinished_chunked(api: &Api, path: &str, total: usize, wait: Duration) -> Re
 }
 
 /// Whether an answer to an unfinished chunked body refused it as it
-/// arrived: the router's 413, or, under `wrangler dev`, the local proxy's
-/// 500 when the Worker answered before the upload ended (miniflare's
-/// "Network connection lost": the Worker stopped reading; Cloudflare's
-/// edge has no such proxy, and the hosted lane wants the 413 itself).
+/// arrived: the router's 413. (A local node's port reaches its runtime
+/// through the front door, past wrangler's proxy, whose 500 "Network
+/// connection lost" once stood in for it.)
 fn refused_as_it_arrived(answer: Option<&str>) -> bool {
-    answer.is_some_and(|a| {
-        let line = a.lines().next().unwrap_or("");
-        line.contains(" 413 ") || (line.contains(" 500 ") && a.contains("Network connection lost") && a.contains("miniflare"))
-    })
+    answer.is_some_and(|a| a.lines().next().unwrap_or("").contains(" 413 "))
 }
 
 pub fn auth(s: &mut Suite, api: &Api) -> Result<()> {
