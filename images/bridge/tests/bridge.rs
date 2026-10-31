@@ -103,6 +103,77 @@ async fn a_reply() {
     bridge.stop().await;
 }
 
+/// A runtime that answers each turn with what it heard, in its own words,
+/// so which runtime ran a turn shows in its reply.
+struct Heard;
+
+impl fragment_bridge::runtime::Runtime for Heard {
+    fn name(&self) -> &'static str {
+        "heard"
+    }
+
+    fn run(self: Box<Self>, mut io: fragment_bridge::runtime::RuntimeIo) -> fragment_bridge::runtime::RuntimeFuture {
+        use fragment_bridge::runtime::{Command, Event};
+        Box::pin(async move {
+            let _ = io.events.send(Event::Connected(true)).await;
+            let mut shutdown = io.shutdown.clone();
+            // bounded by the bridge: ends at its shutdown, or when it drops its sender
+            loop {
+                tokio::select! {
+                    c = io.commands.recv() => match c {
+                        Some(Command::Start(ts)) => {
+                            let _ = io.events.send(Event::Reply { turn: ts.turn.clone(), part: 1, text: format!("heard: {}", ts.text) }).await;
+                            let _ = io.events.send(Event::End { turn: ts.turn, outcome: records::Outcome::Idle }).await;
+                        }
+                        Some(_) => {}
+                        None => return Ok(()),
+                    },
+                    _ = fragment_bridge::net::stopped(&mut shutdown) => return Ok(()),
+                }
+            }
+        })
+    }
+}
+
+/// Goal: each agent runs on the runtime its `agent.json` names, read as the
+/// bridge starts: Juniper's names none (the default, here the scripted
+/// agent), Rowan's names `heard`, and Sage's names `claude`, which this
+/// bridge does not run, so Sage's turn is refused saying so and nothing
+/// answers it. Restart: the next life reads them again.
+#[tokio::test]
+async fn each_agent_runs_on_the_runtime_its_agent_json_names() {
+    use fragment_bridge::runtime::{Runtimes, DEFAULT};
+    let fake = Fake::start("127.0.0.1:0", &["juniper", "rowan", "sage"]).await;
+    fake.with(|w| {
+        w.fragments.get_mut("rowan--k3x9").expect("rowan's fragment").files.insert("agent.json".into(), bytes::Bytes::from(r#"{"tier":"cheap","runtime":"heard"}"#));
+        w.fragments.get_mut("sage--k3x9").expect("sage's fragment").files.insert("agent.json".into(), bytes::Bytes::from(r#"{"runtime":"claude"}"#));
+    });
+    let (j, r, s) = (fake.chat("j-talk", &["juniper"]), fake.chat("r-talk", &["rowan"]), fake.chat("s-talk", &["sage"]));
+    let dir = support::dir("runtimes");
+    let runtimes = || Runtimes::new().with(DEFAULT, support::script()).with("heard", Box::new(Heard));
+    let bridge = support::start_runtimes(support::config(&fake.url(), &dir, support::settings()), runtimes());
+    following(&fake, 6).await;
+    for chat in [&j, &r, &s] {
+        fake.say(chat, &person("paul"), json!({ "text": "hi" }));
+    }
+    fake.until(WAIT, "each turn ended", |w| [&j, &r, &s].iter().all(|c| !w.bodies(c, "work", "turn.end").is_empty())).await;
+    fake.with(|w| {
+        assert_eq!(replies(w, &j)[0]["text"], "echo: [paul] hi", "the default runtime");
+        assert_eq!(replies(w, &r)[0]["text"], "heard: hi", "the runtime its agent.json names");
+        assert!(replies(w, &s).is_empty(), "no runtime answers for a runtime this bridge lacks");
+        assert_eq!(w.bodies(&s, "work", "turn.end")[0]["error"], "this computer doesn't run claude agents");
+    });
+    bridge.stop().await;
+
+    // restart: the same state, read again
+    let bridge = support::start_runtimes(support::config(&fake.url(), &dir, support::settings()), runtimes());
+    following(&fake, 6).await;
+    fake.say(&r, &person("paul"), json!({ "text": "again" }));
+    fake.until(WAIT, "rowan's second answer", |w| replies(w, &r).len() == 2).await;
+    fake.with(|w| assert_eq!(replies(w, &r)[1]["text"], "heard: again"));
+    bridge.stop().await;
+}
+
 /// Goal: a first start makes the bridge's state directory, and so `/data`,
 /// at once, though it has read nothing of the platform yet and run no turn,
 /// so a sleep then has a `/data` to save (the platform's save fails on a
@@ -1101,7 +1172,7 @@ async fn a_routine_waits_for_its_simplex_chat() {
     // its chat made by its name (its poster's `ensure_chat`; no core runs here to start one): the routine runs there
     let bridge = support::start(config(), support::script());
     let api = fragment_bridge::api::Api::new(&fake.url()).expect("an address");
-    let juniper = fragment_bridge::runtime::Agent { fragment: "juniper--k3x9".into(), identity: "npub1juniper".into(), name: "juniper".into(), owner: "npub1paul".into(), credentials: vec![], key: None };
+    let juniper = fragment_bridge::runtime::Agent { fragment: "juniper--k3x9".into(), identity: "npub1juniper".into(), name: "juniper".into(), owner: "npub1paul".into(), credentials: vec![], key: None, runtime: None };
     run::ensure_chat(&api, &juniper, &simplex).await.expect("made");
     fake.until(WAIT, "the routine in its SimpleX chat", |w| said(w, &simplex).len() == 1).await;
     bridge.stop().await;
@@ -1133,7 +1204,7 @@ async fn its_simplex_chat_is_made_once_by_its_name() {
     fake.add_member(&theirs, "npub1skyler", "owner");
     let left = fake.chat_named("juniper-simplex--s5t6", &[]);
     let api = fragment_bridge::api::Api::new(&fake.url()).expect("an address");
-    let juniper = fragment_bridge::runtime::Agent { fragment: "juniper--k3x9".into(), identity: "npub1juniper".into(), name: "juniper".into(), owner: "npub1paul".into(), credentials: vec![], key: None };
+    let juniper = fragment_bridge::runtime::Agent { fragment: "juniper--k3x9".into(), identity: "npub1juniper".into(), name: "juniper".into(), owner: "npub1paul".into(), credentials: vec![], key: None, runtime: None };
     let chat = "juniper-simplex--w9x2";
     ensure_chat(&api, &juniper, chat).await.expect("made");
     fake.with(|w| {
@@ -1436,7 +1507,7 @@ async fn a_corrupt_state_is_refused() {
     std::fs::create_dir_all(dir.join("bridge")).unwrap();
     std::fs::write(dir.join("bridge/state.json"), b"{\"version\": 1, \"nonsense\": true").unwrap();
     let (_stop, rx) = tokio::sync::watch::channel(false);
-    let r = fragment_bridge::driver::run(support::config(&fake.url(), &dir, support::settings()), support::script(), rx).await;
+    let r = fragment_bridge::driver::run(support::config(&fake.url(), &dir, support::settings()), support::script().into(), rx).await;
     assert!(matches!(r, Err(fragment_bridge::driver::BridgeError::Corrupt(_))), "{r:?}");
     assert!(dir.join("bridge/state.json").exists(), "left as it was, for a person to read");
 }

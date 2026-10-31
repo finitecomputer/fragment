@@ -325,10 +325,12 @@ mod tests {
     }
 
     /// Each read is seen before it is passed on: whenever `seen` runs, the
-    /// far end has had every byte before that read, and none of it. So a
-    /// request is recorded before the runtime can answer it (Alex's review
-    /// of #748: a fast answer to a request not yet recorded was dropped,
-    /// the next answers each said as the request before's).
+    /// far end has none of that read. So a request is recorded before the
+    /// runtime can answer it (Alex's review of #748: a fast answer to a
+    /// request not yet recorded was dropped, the next answers each said as
+    /// the request before's). Bytes passed on before may still be on their
+    /// way (the sender holds small writes while an ACK is out: CI's runners
+    /// held 36 KB once), so only bytes past those seen are early.
     #[test]
     fn a_read_is_seen_before_it_is_passed_on() {
         let (mut client, from) = pair();
@@ -338,7 +340,7 @@ mod tests {
             let (mut passed, mut arrived, mut early) = (0, 0, Vec::new());
             copy(from, to, |bytes| {
                 arrived += drain(&mut far);
-                if arrived != passed {
+                if arrived > passed {
                     early.push((passed, arrived));
                 }
                 passed += bytes.len();

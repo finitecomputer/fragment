@@ -17,6 +17,10 @@ pub const ANSWER_MAX_BYTES: usize = 2 * 1024 * 1024;
 /// thrash.
 pub const AGENTS_MAX: usize = 32;
 
+/// The runtimes one bridge runs, at most (`runtime::Runtimes`): one per kind
+/// of agent its image carries (Hermes today; Claude Code and Codex in view).
+pub const RUNTIMES_MAX: usize = 4;
+
 /// The fragments one agent follows (its chats, and its own fragment), at
 /// most: each is a socket held open while awake, and the platform allows a
 /// principal 8 sockets on one fragment and 32 subscriptions per fragment.

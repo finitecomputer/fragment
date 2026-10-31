@@ -863,7 +863,7 @@ fn relay_checks(s: &mut Suite, api: &Api, owner: &crate::Keys, fetched: &dyn Fn(
 /// door's key, never by the agent's own, which signs every request its
 /// tools make; the owner's unlink closes the door at once. The replies it
 /// adds.
-fn door_checks(s: &mut Suite, api: &Api, c: &Doors, fetched: &dyn Fn(&Suite, u32, &str) -> Result<String>) -> Result<usize> {
+fn door_checks(s: &mut Suite, api: &Api, c: &Doors, fetched: &dyn Fn(&Suite, u32, &str) -> Result<String>, wake: Duration) -> Result<usize> {
     let path = format!("/api/computers/{}/agents/{}/door", c.id, c.agent);
     let ticket = |who: &crate::Keys, act: &str| api.signed(who, "POST", &path, Some(&json!({ "door": "simplex", "act": act })));
     let r = ticket(c.stranger, "link")?;
@@ -914,11 +914,20 @@ fn door_checks(s: &mut Suite, api: &Api, c: &Doors, fetched: &dyn Fn(&Suite, u32
         said.starts_with("door said ") && relayed["body"]["relayed"]["via"] == "simplex" && relayed["body"]["relayed"]["for"] == c.owner_id && relayed["body"]["relayed"]["sig"].is_string(),
         json!({ "said": said, "record": relayed }),
     );
+    // its owner's words, as theirs: the agent answers them as its owner's
+    // message, though no SimpleX core runs on the stub (the bridge takes a
+    // relayed record the platform took, linked here or not)
+    let echo = |text: &str| agent_replies(&records(api, c.owner, c.chat, "chat"), c.identity).into_iter().find(|r| r["body"]["text"].as_str().is_some_and(|t| t.starts_with("echo: ") && t.ends_with(&format!("] {text}"))));
+    let answered = s.eventually(wake, || echo("hi from my phone").is_some());
+    let turn = echo("hi from my phone").map(|r| r["body"]["turn"].clone()).unwrap_or_default();
+    let start = records(api, c.owner, c.chat, "work").into_iter().find(|r| r["body"]["kind"] == "turn.start" && r["body"]["turn"] == turn).unwrap_or_default();
+    s.ok("its agent answers it as its owner's message, with no SimpleX core on its computer", answered && start["body"]["asker"] == c.owner_id, json!({ "turn.start": start }));
     let other = fetched(s, 405, "door other signed by another key")?;
     s.ok("with its door open, one signed by any other key is still refused", other.starts_with("door refused: 403"), &other);
     let pending = ticket(c.owner, "link")?;
     let still = fetched(s, 408, "door say while a new link waits")?;
-    s.ok("a door live before stays open while its owner starts another link, until that one is redeemed", pending.status == 200 && still.starts_with("door said "), json!({ "pending": pending.status, "said": still }));
+    let heard = s.eventually(wake, || echo("while a new link waits").is_some());
+    s.ok("a door live before stays open while its owner starts another link, until that one is redeemed", pending.status == 200 && still.starts_with("door said ") && heard, json!({ "pending": pending.status, "said": still }));
     // the deployment turns SimpleX off (its `connectors` without it: here
     // the test lever's stand-in, on this agent's fragment alone): no link,
     // no ticket made before redeemed, nothing the door open before signs
@@ -940,7 +949,21 @@ fn door_checks(s: &mut Suite, api: &Api, c: &Doors, fetched: &dyn Fn(&Suite, u32
     anyhow::ensure!(r.status == 200, "the connectors lever: {r}");
     let r = ticket(c.owner, "link")?;
     s.ok("SimpleX on again, its owner is given a link ticket", r.status == 200 && r.body["act"] == "link", &r);
-    Ok(11)
+    // a hosted door (cell/src/doors.rs): only its owner, in person, binds a
+    // fragment running the connector's template named for the door
+    let bind = |who: &crate::Keys, body: Value| api.signed(who, "POST", &format!("/api/f/{}/door", c.chat), Some(&body));
+    let r = bind(c.stranger, json!({ "act": "link", "agent": c.agent }))?;
+    s.ok("no one but its owner binds a fragment as their agent's door", matches!(r.status, 403 | 404), &r);
+    let r = bind(c.owner, json!({ "act": "link", "agent": c.agent }))?;
+    s.ok("a fragment not made from a connector's template (this chat, its own code) is no door", r.status == 403 && r.text.contains("is no connector"), &r);
+    let r = bind(c.owner, json!({ "act": "open", "agent": c.agent }))?;
+    s.ok("a binding's act is link or unlink", r.status == 400, &r);
+    let r = bind(c.owner, json!({ "act": "unlink" }))?;
+    s.ok("its owner's unlink of a fragment bound as no door is no error", r.status == 200 && r.body["ok"] == true, &r);
+    let agent = fetched(s, 409, &format!("door bind {}", c.chat))?;
+    s.ok("the agent binds no fragment as its own door, acting for its owner", agent.starts_with("door refused: 403") && agent.contains("in person"), &agent);
+    // two of them its owner's words, each answered
+    Ok(14)
 }
 
 /// The route's models by their ids, through the intercept (Paul,
@@ -1608,7 +1631,7 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
             replies_so_far += codestorage_through_egress(s, api, &owner, &agent, &fetched)?;
         }
         let doors = Doors { owner: &owner, owner_id: &owner_id, stranger: &stranger, id: &id, agent: &agent_name, chat: &chat_name, identity: &identity };
-        replies_so_far += door_checks(s, api, &doors, &fetched)?;
+        replies_so_far += door_checks(s, api, &doors, &fetched, wake)?;
         replies_so_far += relay_checks(s, api, &owner, &fetched)?;
     } else {
         // a real runtime called its model to answer at all: each call went
@@ -1726,6 +1749,28 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     replies_so_far += 1;
     let led = s.eventually(wake, || agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).len() == replies_so_far);
     s.ok("unmentioned, the lead answers", led && agent_replies(&records(api, &owner, &chat_name, "chat"), &maple_id).len() == 1, "");
+
+    // an ask (docs/chat-records.md, "An ask") with the CLI the stub carries,
+    // as our Hermes image's agents ask: the lead asks the second agent; the
+    // question is in the two agents' chat with their owner, answered there,
+    // and the answer comes back here as a turn of the lead's own
+    let label = "an agent asks another with the CLI its image carries: the question in the two agents' chat with their owner (its return_to this chat), answered there, and the answer back here as the asker's own turn";
+    if scripted {
+        let said = fetched(s, 22, &format!("ask {maple_label} what is the time"))?;
+        replies_so_far += 1;
+        let answer = |r: &Value| r["body"]["text"].as_str().is_some_and(|t| t.contains(" answered your question in "));
+        let answered = s.eventually(wake, || agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).iter().any(answer));
+        replies_so_far += 1;
+        let listed = api.signed(&owner, "GET", "/api/fragments", None)?.body;
+        let both = |f: &Value| f["agents"].as_array().is_some_and(|a| a.len() == 2 && a.iter().any(|x| x == identity.as_str()) && a.iter().any(|x| x == maple_id.as_str()));
+        let pair = listed["fragments"].as_array().into_iter().flatten().find(|f| f["kind"] == "chat" && f["name"] != chat_name.as_str() && both(f)).and_then(|f| f["name"].as_str()).unwrap_or("").to_string();
+        let asked = if pair.is_empty() { vec![] } else { records(api, &owner, &pair, "chat") };
+        let question = asked.iter().any(|r| r["principal"] == identity.as_str() && r["body"]["to"][0] == maple_id.as_str() && r["body"]["return_to"] == chat_name.as_str());
+        let echoed = agent_replies(&asked, &maple_id).len() == 1;
+        s.ok(label, said.starts_with("asked ") && question && echoed && answered, json!({ "said": said, "pair": pair, "asked": asked.iter().map(|r| &r["body"]).collect::<Vec<_>>() }));
+    } else {
+        s.skip(label, "it needs the stub's scripted runtime");
+    }
 
     // a placeholder names its agent, not whoever sends it: the second
     // agent's, sent by the lead, is the second's (a person's agents are not

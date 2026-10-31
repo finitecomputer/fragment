@@ -82,7 +82,9 @@ async fn an_observed_end_is_a_step_and_a_disconnect_invents_none() {
     observer.next().await.unwrap().unwrap();
     let asked = fake.say(&chat, &person("paul"), json!({ "text": "use a tool slow without observations" }));
     let turn = fragment_bridge::records::turn_id("juniper--k3x9", &chat, "chat", asked["seq"].as_u64().unwrap());
-    fake.until(10_000, "turn started", |w| !w.bodies(&chat, "work", "turn.start").is_empty()).await;
+    // a call ends in a turn Hermes holds, so only once the turn reached it
+    // (its `turn.start` is posted before the relay hands it on)
+    support::until(10_000, "the turn reached Hermes", || hermes.with(|s| !s.heard.is_empty())).await;
     let end = json!({ "turn": turn, "tool": "terminal", "args": "make", "excerpt": "Exit code: 7", "tool_call_id": "call-failed", "status": "failed", "duration_ms": 2 });
     assert_eq!(said(&mut observer, &end.to_string()).await, "observed");
     drop(observer);

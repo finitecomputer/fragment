@@ -7,6 +7,7 @@
 step Fragment 1 baseline 6f010c0c276b4871
 step Fragment 2 listed 464da803484efc23
 step Fragment 3 record_schedules 90308e727fc4ce8b
+step Fragment 4 search_forget 06450019092243ac
 step Registry 1 baseline fd5a79e5c834a15d
 step Registry 2 connection_signins e9d1f862c2e3e4ed
 step Registry 3 trial_hold_attempts 07e123e05a049abe
@@ -71,6 +72,7 @@ Fragment table runs: CREATE TABLE runs ( id INTEGER PRIMARY KEY AUTOINCREMENT, o
 Fragment index runs_call: CREATE UNIQUE INDEX runs_call ON runs (principal, call_id) WHERE call_id IS NOT NULL
 Fragment index runs_status: CREATE INDEX runs_status ON runs (status, op)
 Fragment table schedules: CREATE TABLE schedules (idx INTEGER PRIMARY KEY, op TEXT NOT NULL, cron TEXT NOT NULL, next_at INTEGER NOT NULL)
+Fragment table search_forget: CREATE TABLE search_forget (source TEXT PRIMARY KEY, next_at INTEGER NOT NULL)
 Fragment table search_log: CREATE TABLE search_log ( n INTEGER PRIMARY KEY AUTOINCREMENT, channel TEXT NOT NULL, seq INTEGER NOT NULL, at INTEGER NOT NULL, text TEXT NOT NULL)
 Fragment table search_outbox: CREATE TABLE search_outbox ( principal TEXT PRIMARY KEY, sent INTEGER NOT NULL, attempts INTEGER NOT NULL, next_at INTEGER)
 Fragment index search_outbox_due: CREATE INDEX search_outbox_due ON search_outbox (next_at)

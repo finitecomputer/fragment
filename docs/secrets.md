@@ -55,6 +55,7 @@ name fixed in code (`fragment_core::secrets_store`) and reads no value:
 | `codestorage.private_key` | `CODESTORAGE_KEY` | the platform Worker |
 | `workos.client_id`, `workos.api_key` | `WORKOS_CLIENT`, `WORKOS_KEY` | the platform Worker |
 | `stripe.key`, `stripe.webhook_secret` (seats sold: docs/billing.md) | `STRIPE_KEY` (the account's restricted key), `STRIPE_WEBHOOK` (this deployment's endpoint's signing secret; a branch whose deploy makes its own endpoint binds none, and its deploy uploads the endpoint's as the Worker secret `FRAGMENT_STRIPE_WEBHOOK`: decision 58) | the platform Worker |
+| `search.token` (the search service's bearer token: search/README.md) | `SEARCH_TOKEN`, sent only to `search.url` | the platform Worker |
 | a model's `key` (`models.<name>.key`: a slot of the model route on an OpenAI-compatible API) | `MODEL_KEY_<NAME>` (`cheap` → `MODEL_KEY_CHEAP`), one binding a slot, though two slots may name one secret (Finite's tiers name `fragment-openrouter-key`) | the platform Worker |
 | a provider's `key` (an operator key) | `OPERATOR_KEY_<NAME>` (`perplexity` → `OPERATOR_KEY_PERPLEXITY`) | the platform Worker |
 
@@ -385,11 +386,17 @@ the wipe never removes it, as it removes the keys of whom it wipes.
   global scope for one). It asks the platform through a capability
   ("draw an image", "fetch this API with secret X"), and the platform
   adds the credential on the way out: a job's `job.fetch` names a secret
-  as `{{NAME}}` in a header, and the supervisor opens it only as the
-  request leaves (`step_fetch` in `cell/src/jobs.rs`, the one egress
+  as `{{NAME}}` in a header, or in its URL's path or query (an API that
+  takes its key there: Telegram's bot token, `bot{{TOKEN}}/`), and the
+  supervisor opens it only as the request leaves (`step_fetch` in `cell/src/jobs.rs`, the one egress
   point), and only toward a host the secret names, over https
   (`fragment_core::secrets::may_fill`; `secret_hosts`, beside
-  `secrets`). Its hosts are set with its value and only with it, so an
+  `secrets`). A URL's is checked against the URL's host as written, then
+  put in percent-encoded (`fill_url`: all but unreserved bytes and `:`),
+  and a value that would change the request's scheme, host, port, path
+  segments or query parameters (`..`, say) is not sent; a failure's
+  message, and the answer's headers and body, name it as its placeholder
+  again, so a vendor that echoes its URL hands the code no plaintext. Its hosts are set with its value and only with it, so an
   editor, who may set and list secrets but never read one, cannot send
   a value someone else set anywhere they did not mean it to go: the
   code's authority ends at the secret's hosts. `job.ai.*` steps name no key: text goes through the model route

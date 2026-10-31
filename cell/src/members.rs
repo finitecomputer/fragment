@@ -357,8 +357,8 @@ impl FragmentCell {
     /// Who shares in this request (Paul, 2026-10-04): a person, with their
     /// own membership; an agent, with its owner's role when
     /// `access::agent_shares` lends it, and refused with why (403) when it
-    /// does not. An agent's own membership never shares (it is at most
-    /// `AGENT_ROLE_MAX`). The router refused what it could tell from who
+    /// does not, and on a connector always (`agents_share`). An agent's own
+    /// membership never shares (it is at most `AGENT_ROLE_MAX`). The router refused what it could tell from who
     /// the agent is; this decides again, so a path it read otherwise
     /// gains nothing.
     fn sharer(&self, caller: &Caller) -> CellResult<Actor> {
@@ -372,6 +372,7 @@ impl FragmentCell {
                 Ok(Actor { role: self.member_role(&signed.id)?, by: signed.id.clone(), for_owner: None })
             }
             IdentityKind::Agent => {
+                self.agents_share()?;
                 let owner = signed.owner.as_deref();
                 let for_owner = owner.is_some() && signed.acting_for.as_deref() == owner;
                 let sharer = access::Sharer { for_owner, held: signed.held };
@@ -559,6 +560,7 @@ impl FragmentCell {
                 IdentityKind::Agent => "someone else's agent joins with its owner: invite its owner by email instead (the share sheet's Add, `fragment members add <name> <email>`); once they accept, their agents act there for them",
             }));
         }
+        self.connector_role(body.role)?;
         if current.is_some() && body.role < Role::Editor && self.chat_agent()?.as_deref() == Some(target.id.as_str()) {
             return Err(refusal(true, CHAT_AGENT_STAYS_EDITOR));
         }
@@ -742,6 +744,7 @@ impl FragmentCell {
         if !matches!(body.role, Role::Viewer | Role::Editor) {
             return Err(CellError::invalid("an invite grants viewer or editor"));
         }
+        self.connector_role(body.role)?;
         let email = body.email.trim().to_ascii_lowercase();
         if !fragment_core::mail::valid_address(&email) {
             return Err(CellError::invalid(format!("{email:?} is not an email")));

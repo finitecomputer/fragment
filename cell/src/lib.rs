@@ -39,6 +39,7 @@ mod connections;
 mod channels;
 mod computer;
 mod deliveries;
+mod doors;
 mod ended;
 mod cs;
 mod error;
@@ -69,6 +70,7 @@ mod routed;
 mod schedules;
 mod schema;
 mod search;
+mod searchable;
 mod runs_on;
 mod serve;
 mod share;
@@ -491,11 +493,13 @@ pub(crate) async fn create_fragment(env: &Env, cfg: &Config, url: &Url, mut crea
     let made = made.ok_or_else(|| CellError::new(ErrorCode::AlreadyExists, format!("{NAME_DRAWS} names drawn for this label were all taken: try again")))?;
     if let (Some(agent), 200) = (agent, made.status_code()) {
         let put = Request::new(url.as_str(), Method::Put)?;
-        let role = serde_json::to_vec(&json!({ "role": "editor" })).map_err(|e| CellError::host(e.to_string()))?;
+        // a connector has no editor but its owner: its maker's agent views it (doors.rs)
+        let connector = create.template.as_deref().is_some_and(|t| fragment_templates::blessed::CONNECTORS.contains(&t));
+        let role = serde_json::to_vec(&json!({ "role": if connector { "viewer" } else { "editor" } })).map_err(|e| CellError::host(e.to_string()))?;
         let routed = Routed { name: create.name.clone(), url: url.clone(), signed: Some(maker), credential: None };
         let mut added = forward(env, &put, bytes_body(role), Forward { routed, inner: format!("/api/members/{agent}"), extra: vec![] }).await?;
         if added.status_code() != 200 {
-            return Err(CellError::host(format!("{} was made, but its agent was not made an editor: {}", create.name, added.text().await.unwrap_or_default())));
+            return Err(CellError::host(format!("{} was made, but its agent was not made a member: {}", create.name, added.text().await.unwrap_or_default())));
         }
     }
     Ok(made)
@@ -1382,7 +1386,9 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
                 (_, [] | [""]) => return Err(CellError::new(ErrorCode::NotFound, format!("no route {path}"))),
                 _ => format!("/api/{}", rest.join("/")),
             };
-            let body = read_body(&mut req, limits::BODY_MAX_BYTES).await?;
+            // a search source is written whole, so its upsert's body is larger
+            let max = if rest == ["search", "upsert"] { fragment_proto::search::UPSERT_MAX_BYTES } else { limits::BODY_MAX_BYTES };
+            let body = read_body(&mut req, max).await?;
             // the inbox takes its token instead of a signature
             let mut extra = vec![];
             let principal = match inner.as_str() {

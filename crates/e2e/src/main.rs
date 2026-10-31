@@ -404,6 +404,8 @@ pub struct Suite {
     project: PathBuf,
     /// The next node's shape (`start_as_browsers_see_it`).
     shape: Shape,
+    /// The search service the next node names (the search section's).
+    pub search: Option<devstack::SearchVars>,
     /// Whether the containers the run's nodes left are removed
     /// (`remove_containers`): at its end, or as it drops.
     containers_removed: bool,
@@ -716,6 +718,7 @@ impl Suite {
                 api_key: WORKOS_KEY.into(),
                 api_url: Some(self.workos.node().url.clone()),
             }),
+            search: self.search.clone(),
             stripe: (self.shape != Shape::SellsNothing).then(|| devstack::StripeVars {
                 key: STRIPE_KEY.into(),
                 webhook_secret: STRIPE_WEBHOOK.into(),
@@ -1170,6 +1173,7 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
         scratch,
         project,
         shape: Shape::Plain,
+        search: None,
         containers_removed: false,
     };
     if let Some(k) = s.shard {

@@ -65,6 +65,42 @@ takes from its agents' owners, each with how the bridge carries it
 
 Another runtime is another module here, or a bridge of its own.
 
+### Which runtime runs an agent
+
+A bridge runs one or more runtimes (`runtime::Runtimes`, at most
+`RUNTIMES_MAX`), each by the name agents give it. An agent runs on the one
+its `agent.json` `runtime` names, `hermes` when it names none
+(`runtime::DEFAULT`; Paul, 2026-10-30). `BRIDGE_RUNTIME` is the module run
+for `hermes`: Relay in our Hermes image, the scripted agent standing in for
+it in the stub's.
+
+- **Read as the computer is read**: at start, every minute, and as the
+  ready file changes (`driver::with_runtimes`). A file that does not read
+  keeps what it named last. At start, the bridge waits until every agent's
+  file has answered, as it waits for the computer. An agent first seen
+  mid-life whose file does not read is left out until it does, as an agent
+  not ready is. Its records wait on the platform.
+- **Each runtime holds only its own agents.** A turn is claimed only while
+  its agent's runtime says it can take one (`Connected`, per runtime). A
+  runtime's `Working` keeps the computer awake on its own. Its menu is its
+  agents' commands.
+- **A turn stays with the runtime it was handed to.** Its Stop, answers and
+  Forget go there, and an event about it from any other runtime is stale.
+  Which runtime has a turn is kept in memory only: a restart ends every
+  running turn anyway (one life per turn).
+- **A runtime the bridge does not run is refused, never substituted.** An
+  agent naming one (an image without Claude, a name that is no runtime's)
+  has each turn refused with both its records, its end saying "this
+  computer doesn't run claude agents", and an ask's answer says so too.
+  Proven in `each_agent_runs_on_its_runtime`,
+  `a_runtime_down_holds_only_its_agents`,
+  `a_runtime_this_bridge_lacks_refuses_its_turns`,
+  `each_agent_takes_its_runtimes_commands` and
+  `any_runtimes_work_holds_the_computer` (engine_tests.rs), and
+  `each_agent_runs_on_the_runtime_its_agent_json_names` (tests/bridge.rs:
+  two runtimes in one bridge, a missing one, a restart).
+- A runtime that ends ends the bridge, as one alone always did.
+
 ## The routes it calls
 
 Every request goes to `FRAGMENT_API` (`http://api.fragment.internal`)
@@ -76,9 +112,9 @@ Bodies are JSON. `api.rs` has one method for each.
 | `GET /api/computer` (no agent) | | `{computer, owner, image, agents: [{fragment, identity, name, owner}]}`; at start, then every minute, and within a second of a change to the ready file (below); `?simplex=1` when the image names a SimpleX core (below, "SimpleX") |
 | `GET /api/computer/relay?host=&port=` (no agent), WebSocket | | the XFTP relay (docs/computers.md): one per connection a SimpleX core makes to a host and port the view's `relay` names, through the cores' proxy (`src/simplex/socks.rs`), its bytes piped both ways |
 | `GET /api/computer/keepalive` (no agent), WebSocket | | held according to "Runtime work outside a turn", below; pinged every `BRIDGE_KEEPALIVE_PING_MS` (15 s), and opened again after twice that with nothing heard, since a deploy can cut the platform's side of it with no close reaching here (#557) |
-| `GET /api/fragments?for=<owner>` | | `{fragments: [{name, kind, owned, title}]}`: its owner's, as the agent reaches them: its own chat with them found by its label (`api::bot_chat`), as a routine with no chat fires |
+| `GET /api/fragments?for=<owner>` | | `{fragments: [{name, kind, owned, title}]}`: its owner's, as the agent reaches them: its own chat with them found by its label (`api::own_chat`), as a routine with no chat fires |
 | `POST /api/fragments?for=<owner>` | `{name, template: "chat", title}` | the agent's SimpleX chat, made for its owner by the name its link chose, when its link is bound; 409, made already (then `GET /api/f/{chat}/members` says whether it is the agent's and its owner's: below, "SimpleX") |
-| `GET /api/f/{agent}/file?path=agent.json` | | its home (`api::Home`), read as a routine with no chat fires (docs/api.md, "An agent's home"); none (404) is its own chat |
+| `GET /api/f/{agent}/file?path=agent.json` | | its home (`api::Home`), read as a routine with no chat fires (docs/api.md, "An agent's home"); none (404) is its own chat. Its `runtime` (above, "Which runtime runs an agent"), with every read of the computer; none (404) names none |
 | `GET /api/f/{agent}/status` | | `{title}`: the agent's name (docs/api.md, "An agent's name and picture"), read every 10 s while its SimpleX core runs (below, "SimpleX") |
 | `GET /api/fragments` | | `{fragments: [{name, role}]}`: what the agent follows, listed at start, on a `joined` of it (as the agent the engine runs, no read of the computer first), and every 5 minutes. A listing a read of which fails with no answer, a 429 or a 5xx is asked again after a jittered backoff (from 1 s, at most 30 s) until it answers: the list, or only the fragments whose channels did not read; what was found meanwhile is followed, so one fragment that fails keeps the agent from no other. One listing an agent at a time: a newer one takes the place of one under way |
 | `GET /api/f/{f}/channels` | | `{channels: [{name, post, seq}]}`: a postable `chat` is a chat; the agent's own `tasks` |
@@ -117,7 +153,7 @@ on a computer.
 | `BRIDGE_HOLD` | `/run/computer/hold` | while this file exists the bridge claims no turn (the platform's hold before every save; looked at before each claim's every try) |
 | `BRIDGE_HELD` | `/run/computer/held` | the bridge's answer to the hold: it writes this file while the hold exists and no claim's try is in flight, and removes it otherwise (looked at every 100 ms). An image with more to quiet than the bridge names another file and answers the platform itself |
 | `BRIDGE_HELD_LEAVE_OUT` | none | what the save may leave out, written into the answer one per line (whitespace between here): gitignore patterns relative to `/data`, of letters, digits and `._-/*?[]`, at most 16 (docs/computers.md, "The hold"). The stub names `*.scratch` |
-| `BRIDGE_RUNTIME` | `relay` | `relay` or `script` |
+| `BRIDGE_RUNTIME` | `relay` | `relay` or `script`: the runtime agents that name none run (`hermes`) |
 | `BRIDGE_STATE_DIR` | `/data/bridge` | its state; made as it starts (past the restore gate), so a first start has a `/data` to save |
 | `BRIDGE_AGENTS_FILE` | | the agents the image has made ready (`src/ready.rs`): `{"agents": [fragment]}`, written whole and renamed into place. Set, the bridge runs only those of `GET /api/computer`'s, in the platform's order, and reads the computer again within a second of the file's change; missing, no agent is ready; one that does not read keeps the set before it. Unset, every agent the platform lists (the stub). Our Hermes image's is `/var/lib/fragment-run/agents.json`, written once each new agent's profile is whole (docs/computers.md) |
 | `BRIDGE_MEDIA_DIR` | `/tmp/bridge-media` | attachments, scratch |
@@ -230,9 +266,8 @@ within 3 s.
 A person's agents hand work to each other in a chat they share, by
 `@name` in a reply (the bridge stamps its `to`), or by a message one posts
 itself naming the other in `to` (`fragment ask`, cli/src/ask.rs; in our
-Hermes image, a bot's `message_agent` too, which the image posts into the
-other's own chat that way: docs/computers.md, "Bot Mode in our Hermes
-image"). The bridge that answers decides whether it is a turn, and how
+Hermes image, its `fragment_ask` tool: docs/computers.md, "Teammates in
+our Hermes image"). The bridge that answers decides whether it is a turn, and how
 deep (docs/chat-records.md, "An agent's reply"):
 
 - **The hop is counted here, not read.** A record by an agent of this
@@ -966,10 +1001,6 @@ get_chat_info`.
   Stop is. `/new` resets the session under the chat's own key (Hermes'
   `_handle_reset_command`: a new session id, the key the same; the
   overlay's `approvals.destructive_slash_confirm: false` asks nothing).
-  In an agent's own chat the image's Bot Chat hook titles the new session
-  `Bot Chat` as the next turn starts (docs/computers.md, "Bot Mode in our
-  Hermes image"); until then the keeper holds the session before, still
-  titled and the chat's, so a teammate's message still reaches the chat.
   `/model` and `/reasoning` change the chat's session alone: `--global`
   (and `reasoning`'s `show`, `hide`, which write the gateway's display
   settings) are refused.

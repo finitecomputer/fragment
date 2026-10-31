@@ -1188,6 +1188,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     agents_ui(s, api, &mut b, &page, &session, &first_title, &one, &chat, &reader, &reader_chat, &shots)?;
     let (hello, seen) = said_hello(s, api, &session, &reader_chat, &reader_id, agent_wait);
     anyhow::ensure!(hello, "the Reader's hello: {seen:?}");
+    threads_ui(s, api, &mut b, &page, &session, &chat, &reader_id, &shots)?;
 
     // what came to a chat not open, and another chat with the Reader (its
     // hello shown once it is open: no frame of it before)
@@ -4718,9 +4719,14 @@ const SIDEBAR_LIVE_WAIT: std::time::Duration = std::time::Duration::from_secs(5)
 /// deploys it through the API. Valid: both tabs list it within a few
 /// seconds, with no reload, and its card once the platform shoots it; the
 /// first tab's open chat is not reloaded, and the rows it showed are the
-/// same elements (patched in place). Then the same for an app someone
-/// else shares with them, one deleted elsewhere, and one archived in the
-/// other tab.
+/// same elements (patched in place), but those that now show something
+/// else: drawn again showing the same, a row is the bug (`patch` keeps a
+/// row only when it is the same). What else may change meanwhile is real:
+/// the agent this registers comes in beside its person in the chats shared
+/// with them (decision 44), so "Their chat"'s row gains its face, sent when
+/// the list next sends that row. Then the same for an app someone else
+/// shares with them, one deleted elsewhere, and one archived in the other
+/// tab.
 fn sidebar_live(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &str, shots: &std::path::Path) -> Result<()> {
     let wait = std::time::Duration::from_secs(30);
     let me = super::signin::who(api, session)?["id"].as_str().unwrap_or("").to_string();
@@ -4734,7 +4740,7 @@ fn sidebar_live(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session:
     let marked = b.eval(
         page,
         "(() => { const f = [...document.querySelectorAll('#frames iframe')].find((f) => !f.hidden); window.__loads = 0; f?.addEventListener('load', () => window.__loads++); \
-         window.__open = f?.dataset.fragment ?? null; const rows = [...document.querySelectorAll('#chats .row[data-key], #apps [data-key]')]; window.__said = {}; window.__drawn = {}; rows.forEach((r) => { r.__kept = true; window.__said[r.dataset.key] = r.textContent; window.__drawn[r.dataset.key] = r.outerHTML; }); return rows.length; })()",
+         window.__open = f?.dataset.fragment ?? null; const rows = [...document.querySelectorAll('#chats .row[data-key], #apps [data-key]')]; window.__drawn = {}; rows.forEach((r) => { r.__kept = true; window.__drawn[r.dataset.key] = r.outerHTML; }); return rows.length; })()",
     )?;
     let row = |name: &str| format!("document.querySelector({})", js(&format!("#apps [data-key={}]", js(&format!("app:{name}")))));
     let both = |b: &mut Browser, expr: &str| b.until(page, expr, SIDEBAR_LIVE_WAIT) && b.until(&second, expr, SIDEBAR_LIVE_WAIT);
@@ -4770,12 +4776,12 @@ fn sidebar_live(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session:
     let kept = b.eval(
         page,
         "(() => { const f = [...document.querySelectorAll('#frames iframe')].find((f) => !f.hidden); return { loads: window.__loads, open: f?.dataset.fragment ?? null, was: window.__open, \
-         kept: [...document.querySelectorAll('#chats .row[data-key], #apps [data-key]')].filter((r) => r.__kept || (r.dataset.key in window.__said && r.textContent !== window.__said[r.dataset.key])).length, \
-         lost: Object.keys(window.__said).flatMap((k) => { const r = [...document.querySelectorAll('#chats .row[data-key], #apps [data-key]')].find((x) => x.dataset.key === k); \
-           return !r ? [{ key: k, gone: true }] : r.__kept || r.textContent !== window.__said[k] ? [] : [{ key: k, was: window.__drawn[k], now: r.outerHTML }]; }) }; })()",
+         kept: [...document.querySelectorAll('#chats .row[data-key], #apps [data-key]')].filter((r) => r.__kept || (r.dataset.key in window.__drawn && r.outerHTML !== window.__drawn[r.dataset.key])).length, \
+         lost: Object.keys(window.__drawn).flatMap((k) => { const r = [...document.querySelectorAll('#chats .row[data-key], #apps [data-key]')].find((x) => x.dataset.key === k); \
+           return !r ? [{ key: k, gone: true }] : r.__kept || r.outerHTML !== window.__drawn[k] ? [] : [{ key: k, drawn: r.outerHTML }]; }) }; })()",
     )?;
     s.ok(
-        "the open chat stays open, its frame not reloaded, and the rows shown before are the same elements (patched in place), but those that now say something else (an agent's work done)",
+        "the open chat stays open, its frame not reloaded, and the rows shown before are the same elements (patched in place), but those that now show something else (an agent's work done, a face come in)",
         kept["loads"] == 0 && kept["open"] == kept["was"] && !kept["open"].is_null() && kept["kept"] == marked && marked.as_i64().is_some_and(|n| n > 0),
         json!({ "kept": kept, "marked": marked }),
     );
@@ -6982,6 +6988,137 @@ fn add_agent_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session:
         edited && gone,
         json!({ "tag": b.eval(page, &tag)?, "role": own_row_of(api, session, &agent)["agentRole"] }),
     );
+    Ok(())
+}
+
+/// Delegation threads (Paul, 2026-10-30; threads.js). Their first agent,
+/// told in their first chat to ask the Reader (the stub's `ask`, `fragment
+/// ask --return-to` with the CLI it carries), asks it in the two agents'
+/// chat with their owner, which leaves the chat list. Over the first chat,
+/// one line: the Reader, the first line of what was asked, its state and
+/// how long, and Stop; its row waits on the Reader. Asked for a card, the
+/// thread needs them; its line opens the pair chat. Stopped, it says so
+/// until the first agent has answered there (the answer quotes the
+/// question, so its own turn asks a card too, answered here); cut by a
+/// restart, it says Lost until then; asked plainly, it is done and its
+/// line gone once the answer is in.
+#[allow(clippy::too_many_arguments)]
+fn threads_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &str, chat: &str, reader_id: &str, shots: &std::path::Path) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    let agent_wait = std::time::Duration::from_secs(120);
+    // their first agent: their first chat's
+    let members = shell(api, session, "GET", &format!("/api/f/{chat}/members"), None, &[])?;
+    let first_id = members.body["members"].as_array().into_iter().flatten().find(|m| m["kind"] == "agent").and_then(|m| m["principal"].as_str()).unwrap_or("").to_string();
+    open_row(b, page, chat, wait)?;
+    let say = |id: &str, body: Value| shell(api, session, "POST", &format!("/api/f/{chat}/channels/chat"), Some(&json!({ "id": id, "body": body })), &[]);
+    let line = "(() => { const t = [...document.querySelectorAll('#threads .thread')].pop(); return t ? { who: t.querySelector('.thread-who')?.textContent, what: t.querySelector('.thread-what')?.textContent, state: t.dataset.state, took: t.querySelector('.thread-took')?.textContent, stop: !!t.querySelector('.thread-stop') } : null; })()";
+    let state_is = |b: &mut Browser, state: &str| b.until(page, &format!("({line})?.state === {}", js(state)), agent_wait);
+    let gone = |b: &mut Browser| b.until(page, "document.getElementById('threads').hidden && !document.querySelector('#threads .thread')", agent_wait);
+    // a card of its own in the first chat (its words quote "approve"), not
+    // answered yet: answered
+    let answered_cards = std::cell::RefCell::new(Vec::<Value>::new());
+    let answer_own = |s: &Suite| -> Result<bool> {
+        let card = || {
+            let work = shell(api, session, "GET", &format!("/api/f/{chat}/channels/work?before={}&limit=200", i64::MAX), None, &[]).map(|r| r.body["records"].as_array().cloned().unwrap_or_default()).unwrap_or_default();
+            let closed: Vec<Value> = work.iter().filter(|r| r["body"]["kind"] == "turn.prompt.closed").map(|r| r["body"]["prompt"].clone()).chain(answered_cards.borrow().iter().cloned()).collect();
+            // a card of a turn that ended (a restart's cut) waits on nothing
+            let ended: Vec<Value> = work.iter().filter(|r| r["body"]["kind"] == "turn.end").map(|r| r["body"]["turn"].clone()).collect();
+            work.into_iter().rev().find(|r| r["body"]["kind"] == "turn.prompt" && r["principal"] == first_id.as_str() && !closed.contains(&r["body"]["prompt"]) && !ended.contains(&r["body"]["turn"]))
+        };
+        let mut open = None;
+        let asked = s.eventually(agent_wait, || {
+            open = card();
+            open.is_some()
+        });
+        let Some(c) = open.filter(|_| asked) else { return Ok(false) };
+        let prompt = c["body"]["prompt"].as_str().unwrap_or("").to_string();
+        answered_cards.borrow_mut().push(c["body"]["prompt"].clone());
+        let r = say(&format!("pr:{}:{}", c["body"]["turn"].as_str().unwrap_or(""), prompt), json!({ "kind": "prompt_response", "prompt": prompt, "option": "once", "agent": c["principal"], "turn": c["body"]["turn"] }))?;
+        Ok(r.status == 200)
+    };
+
+    // asked plainly: done, its line gone once the answer is in
+    say("thread-0", json!({ "text": "ask reader what is the time" }))?;
+    let replied = s.eventually(agent_wait, || replies(api, session, chat, &first_id, "answered your question") >= 1);
+    let then_gone = gone(b);
+    let said: Vec<Value> = shell(api, session, "GET", &format!("/api/f/{chat}/channels/chat?before={}&limit=6", i64::MAX), None, &[])?.body["records"].as_array().cloned().unwrap_or_default().into_iter().map(|r| r["body"]["text"].clone()).collect();
+    s.ok("asked plainly, the answer comes back as its asker's own turn, and no line stays once it is in", replied && then_gone, json!({ "said": said }));
+
+    // asked for a card: it needs them; one line, its row waiting on the Reader
+    say("thread-1", json!({ "text": "ask reader approve the plan" }))?;
+    let needs = state_is(b, "you");
+    let seen = b.eval(page, line)?;
+    let pair = shell(api, session, "GET", "/api/fragments", None, &[])?.body["fragments"].as_array().into_iter().flatten()
+        .find(|f| f["kind"] == "chat" && f["agents"].as_array().is_some_and(|a| a.len() == 2 && a.iter().any(|x| x == reader_id) && a.iter().any(|x| x == first_id.as_str())) && f["name"] != chat)
+        .and_then(|f| f["name"].as_str()).unwrap_or("").to_string();
+    let row = format!("document.querySelector({})", js(&format!("#chats [data-key={}]", js(&format!("chat:{chat}")))));
+    let unlisted = !pair.is_empty() && b.eval(page, &format!("!document.querySelector({})", js(&format!("#chats [data-key={}]", js(&format!("chat:{pair}"))))))? == true;
+    // its asker's own turn that asked waits on a card too (its words hold
+    // "approve"), which the row says first: answered, the row waits on the Reader
+    let asked_done = answer_own(s)?;
+    let waits = asked_done && b.until(page, &format!("{row}?.querySelector('.agent-doing')?.textContent === 'Waiting on Reader'"), wait);
+    let _ = b.screenshot(page, &shots.join("desktop-thread.png"));
+    s.ok(
+        "asked for a card: one line over the asking chat, the Reader, what was asked, Needs you while its card waits, how long, and Stop; the chat's row waits on the Reader; its pair chat leaves the list",
+        needs && seen["who"] == "Reader" && seen["what"] == "approve the plan" && seen["took"].as_str().is_some_and(|t| t.ends_with('m')) && seen["stop"] == true && unlisted && waits,
+        json!({ "line": seen, "pair": pair, "unlisted": unlisted, "row": b.eval(page, &format!("{row}?.textContent ?? null"))? }),
+    );
+    // its line opens the pair chat (its transcript), the card there
+    b.click(page, "#threads .thread-open")?;
+    let opened = b.until(page, &format!("[...document.querySelectorAll('#frames iframe')].find((f) => !f.hidden)?.dataset.fragment === {}", js(&pair)), wait);
+    open_row(b, page, chat, wait)?;
+    s.ok("its line opens its pair chat, its transcript", opened, &pair);
+    // Stop: stopped, said until the answer is in, then gone. The answer's
+    // turn here is asked as the Reader (Paul, 2026-10-30) and is its
+    // owner's to stop (control.js): while it waits on a card of its own
+    // (its words quote "approve"), the chat's own Stop names it, and stops it
+    b.click(page, "#threads .thread-stop")?;
+    let stopped = state_is(b, "stopped");
+    let work = || shell(api, session, "GET", &format!("/api/f/{chat}/channels/work?before={}&limit=200", i64::MAX), None, &[]).map(|r| r.body["records"].as_array().cloned().unwrap_or_default()).unwrap_or_default();
+    let mut start = Value::Null;
+    let carded = s.eventually(agent_wait, || {
+        let w = work();
+        start = w.iter().rev().find(|r| r["principal"] == first_id.as_str() && r["body"]["kind"] == "turn.start" && r["body"]["cause"]["channel"] == "tasks").cloned().unwrap_or_default();
+        let turn = &start["body"]["turn"];
+        turn.is_string() && w.iter().any(|r| r["body"]["kind"] == "turn.prompt" && r["body"]["turn"] == *turn) && !w.iter().any(|r| r["body"]["kind"] == "turn.end" && r["body"]["turn"] == *turn)
+    });
+    let turn = start["body"]["turn"].as_str().unwrap_or("").to_string();
+    let named = format!("(() => {{ const b = document.getElementById('stop'); return !!b && !b.hidden && !b.disabled && b.dataset.turn === {}; }})()", js(&turn));
+    let stoppable = carded && s.eventually(wait, || b.eval_in_frame(page, chat, &named).ok() == Some(json!(true)));
+    if stoppable {
+        b.eval_in_frame(page, chat, "(document.getElementById('stop').click(), true)")?;
+    }
+    let ended = stoppable && s.eventually(agent_wait, || work().iter().any(|r| r["body"]["kind"] == "turn.end" && r["body"]["turn"] == turn.as_str() && r["body"]["outcome"] == "stopped"));
+    let me = super::signin::who(api, session)?["id"].as_str().unwrap_or("").to_string();
+    let said = shell(api, session, "GET", &format!("/api/f/{chat}/channels/chat?before={}&limit=20", i64::MAX), None, &[])?.body["records"].as_array().cloned().unwrap_or_default();
+    let by_owner = said.iter().any(|r| r["body"]["kind"] == "stop" && r["body"]["turn"] == turn.as_str() && r["principal"] == me.as_str());
+    let then_gone = gone(b);
+    s.ok("Stop stops it: its line says Stopped until its asker's turn of the answer has ended in the chat, then goes", stopped && ended && then_gone, json!({ "stopped": stopped, "ended": ended }));
+    s.ok(
+        "that turn, asked as the Reader, is its owner's: the chat's Stop names it while its card waits, and stops it",
+        carded && start["body"]["asker"] == reader_id && stoppable && ended && by_owner,
+        json!({ "start": start, "stoppable": stoppable, "ended": ended, "byOwner": by_owner }),
+    );
+
+    // cut by a restart: Lost, said until the answer is in (its asker's turn
+    // that asked was cut too, its card closed: its answer's turn's alone)
+    say("thread-2", json!({ "text": "ask reader approve once more" }))?;
+    let needs = state_is(b, "you");
+    let computer = shell(api, session, "GET", "/api/computers", None, &[])?.body["computers"][0]["computer"].as_str().unwrap_or("").to_string();
+    let killed = super::computers::lever(api, &computer, "kill")?;
+    let lost = killed.status == 200 && state_is(b, "lost");
+    let _ = b.screenshot(page, &shots.join("desktop-thread-lost.png"));
+    let answered = answer_own(s)?;
+    let then_gone = gone(b);
+    s.ok("cut by a restart, its line says Lost (never dropped) until its asker has answered in the chat, then goes", needs && lost && answered && then_gone, json!({ "needs": needs, "killed": killed.status, "lost": lost, "answered": answered, "gone": then_gone, "line": b.eval(page, line)? }));
+    // the restart's own notice ("Your computer restarted…"), seen, so the checks after it start from none
+    let told = "document.querySelector('#computer-notices .computer-notice[data-kind=went_back] [data-action=seen]')";
+    let notices = shell(api, session, "GET", &format!("/api/computers/{computer}"), None, &[])?.body["notices"].clone();
+    if notices.as_array().is_some_and(|l| l.iter().any(|n| n["kind"] == "went_back")) && b.until(page, &format!("!!{told}"), wait) {
+        b.eval(page, &format!("({told}.click(), true)"))?;
+        b.until(page, "!document.querySelector('#computer-notices .computer-notice[data-kind=went_back]')", wait);
+    }
+
     Ok(())
 }
 
