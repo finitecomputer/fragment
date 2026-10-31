@@ -60,6 +60,7 @@ fn runtimes() -> Runtimes {
         state_dir: PathBuf::from(env_or("BRIDGE_CLAUDE_STATE_DIR", "/data/bridge/claude")),
         model: env("BRIDGE_CLAUDE_MODEL"),
         idle: Duration::from_millis(parse_ms("BRIDGE_CLAUDE_IDLE_MS", 300_000)),
+        drain: Duration::from_millis(fragment_bridge::runtime::claude::DRAIN_MS_DEFAULT),
         run_as,
     };
     r.with("claude", Box::new(Claude { config }))

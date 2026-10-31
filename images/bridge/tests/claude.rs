@@ -15,6 +15,11 @@
 //! Recording uses the signed-in user's own `CLAUDE_CONFIG_DIR` (default
 //! `~/.claude`, or `FRAGMENT_CLAUDE_RECORD_CONFIG`), never a copy of their
 //! login, and isolated from their settings and MCP servers.
+//!
+//! An interleaving no live run makes on cue (a turn's late output after the
+//! bridge let it go) is a composed script instead, written by hand from
+//! recorded lines' shapes (tests/claude-composed/<scenario>/): replayed
+//! alike, never recorded.
 
 mod support;
 
@@ -29,6 +34,9 @@ use support::fake::{person, Fake, World};
 
 /// The recordings, one directory a scenario.
 const RECORDINGS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/claude");
+
+/// The composed scripts, one directory a scenario.
+const COMPOSED: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/claude-composed");
 
 /// The real `claude` to record with, when recording.
 fn recording() -> Option<PathBuf> {
@@ -53,18 +61,31 @@ struct Scenario {
     dir: PathBuf,
     bin: PathBuf,
     config_dir: PathBuf,
+    settings: fragment_bridge::engine::Settings,
+    drain: Duration,
 }
 
 impl Scenario {
+    /// A recorded scenario: recorded again when recording.
     async fn new(name: &'static str) -> Scenario {
+        Scenario::open(name, Path::new(RECORDINGS).join(name), recording(), support::settings(), Duration::from_millis(fragment_bridge::runtime::claude::DRAIN_MS_DEFAULT)).await
+    }
+
+    /// A composed scenario: always replayed, its bridge's turns let go of
+    /// after `turn_idle_ms` quiet, and a let-go turn given `drain` to end.
+    async fn composed(name: &'static str, turn_idle_ms: u64, drain: Duration) -> Scenario {
+        let settings = fragment_bridge::engine::Settings { turn_idle_ms, ..support::settings() };
+        Scenario::open(name, Path::new(COMPOSED).join(name), None, settings, drain).await
+    }
+
+    async fn open(name: &'static str, script: PathBuf, recording: Option<PathBuf>, settings: fragment_bridge::engine::Settings, drain: Duration) -> Scenario {
         let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
         fake.with(|w| {
             w.fragments.get_mut("juniper--k3x9").expect("its fragment").files.insert("agent.json".into(), bytes::Bytes::from(r#"{"runtime":"claude"}"#));
         });
         let chat = fake.chat("talk", &["juniper"]);
         let dir = support::dir(&format!("claude-{name}"));
-        let script = Path::new(RECORDINGS).join(name);
-        let (mode, config_dir) = match recording() {
+        let (mode, config_dir) = match recording {
             Some(real) => {
                 let _ = std::fs::remove_dir_all(&script);
                 let config = std::env::var_os("FRAGMENT_CLAUDE_RECORD_CONFIG").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(std::env::var("HOME").expect("HOME")).join(".claude"));
@@ -88,7 +109,7 @@ impl Scenario {
         let bin = bin_dir.join("claude");
         std::fs::copy(env!("CARGO_BIN_EXE_fake-claude"), &bin).expect("fake-claude copied");
         std::fs::write(bin_dir.join("fake-claude.json"), mode.to_string()).expect("its mode");
-        Scenario { name, fake, chat, dir, bin, config_dir }
+        Scenario { name, fake, chat, dir, bin, config_dir, settings, drain }
     }
 
     fn runtimes(&self) -> Runtimes {
@@ -100,6 +121,7 @@ impl Scenario {
                 state_dir: self.dir.join("claude-state"),
                 model: Some("claude-haiku-5-5".into()),
                 idle: Duration::from_secs(60),
+                drain: self.drain,
                 run_as: None,
             },
         };
@@ -107,7 +129,7 @@ impl Scenario {
     }
 
     fn start(&self) -> support::Running {
-        support::start_runtimes(support::config(&self.fake.url(), &self.dir, support::settings()), self.runtimes())
+        support::start_runtimes(support::config(&self.fake.url(), &self.dir, self.settings), self.runtimes())
     }
 
     /// The agent's working directory, where its tools run.
@@ -277,7 +299,7 @@ async fn a_session_outlives_its_process_and_new_starts_another() {
 async fn a_crash_mid_tool_is_told_never_rerun() {
     let s = Scenario::new("crash").await;
     std::fs::write(s.work().join("slow.py"), SLOW).expect("slow.py");
-    let bridge = support::start_killable_runtimes(support::config(&s.fake.url(), &s.dir, support::settings()), s.runtimes());
+    let bridge = support::start_killable_runtimes(support::config(&s.fake.url(), &s.dir, s.settings), s.runtimes());
     s.following().await;
     s.say(json!({ "text": RUN_SLOW }));
     if recording().is_some() {
@@ -297,6 +319,51 @@ async fn a_crash_mid_tool_is_told_never_rerun() {
     assert_eq!(ends.last().expect("its end")["outcome"], "idle", "{ends:?}");
     let steps = s.with(|w| w.bodies(&s.chat, "work", "turn.step"));
     assert!(steps.iter().all(|st| st["args"] != "python3 slow.py"), "the cut call is never run again: {steps:?}");
+    bridge.stop().await;
+    s.done();
+}
+
+/// The bridge lets a turn go (here: it went quiet past its bound) while
+/// the next message waits, then hands that one at once. Goal: the let-go
+/// turn's late output, still to come from its process, is never the next
+/// turn's: it says nothing, and the next turn gets its own words and end
+/// alone. Script: Claude Code is slow to answer the interrupt (0.5 s, while
+/// the next message is handed at once; under the turns' 1.5 s bound, so the
+/// next turn's wait on it is no quiet past it), then sends the let-go turn's tool
+/// result, words and `result` before it reads the next message (Alex's
+/// review of #812).
+#[tokio::test]
+async fn a_let_go_turns_late_output_is_never_the_next_turns() {
+    let s = Scenario::composed("late-output", 1_500, Duration::from_secs(5)).await;
+    let bridge = s.start();
+    s.following().await;
+    s.say(json!({ "text": "Run a long command" }));
+    s.say(json!({ "text": "And this, next" }));
+    s.ended(2, "both turns' ends").await;
+    let ends = s.ends();
+    assert_eq!((ends[0]["outcome"].as_str(), ends[0]["error"].as_str()), (Some("error"), Some("the agent stopped answering")), "{ends:?}");
+    assert_eq!(ends[1]["outcome"], "idle", "{ends:?}");
+    assert_eq!(s.replies(), vec!["The next turn's own answer".to_string()], "the let-go turn's late words are no one's");
+    assert!(s.with(|w| w.bodies(&s.chat, "work", "turn.step")).is_empty(), "the let-go turn's tool is no step");
+    bridge.stop().await;
+    s.done();
+}
+
+/// As above, but the interrupt is never answered (a hung process): past
+/// `drain` the process is replaced, and the next turn resumes the session
+/// in a new one, answering with its own words alone.
+#[tokio::test]
+async fn a_let_go_turn_whose_interrupt_goes_unanswered_has_its_process_replaced() {
+    let s = Scenario::composed("unanswered-interrupt", 1_500, Duration::from_millis(500)).await;
+    let bridge = s.start();
+    s.following().await;
+    s.say(json!({ "text": "Run a long command" }));
+    s.say(json!({ "text": "And this, next" }));
+    s.ended(2, "both turns' ends").await;
+    let ends = s.ends();
+    assert_eq!(ends[0]["error"], "the agent stopped answering", "{ends:?}");
+    assert_eq!(ends[1]["outcome"], "idle", "{ends:?}");
+    assert_eq!(s.replies(), vec!["The next turn's own answer".to_string()]);
     bridge.stop().await;
     s.done();
 }

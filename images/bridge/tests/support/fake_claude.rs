@@ -18,7 +18,8 @@
 //! - `{"mode": "replay", "script": <dir>}`: plays `<dir>/<n>.jsonl`, the
 //!   next one no process played yet, back: each `in` waits for the next
 //!   line of its input, which must be of the same kind (else it exits 3,
-//!   saying what it expected); each `out` is written; `exit` exits. A
+//!   saying what it expected); each `out` is written; `sleep_ms` (a
+//!   composed script's, never recorded) pauses; `exit` exits. A
 //!   session is as Claude Code keeps one: `--session-id` of one whose
 //!   transcript is there, and `--resume` of one that is not, fail as the
 //!   real one does, and its first message makes its transcript.
@@ -196,6 +197,9 @@ fn replay(args: &[String], script: &Path) {
         } else if let Some(v) = l.get("out") {
             writeln!(stdout, "{v}").expect("written");
             stdout.flush().expect("flushed");
+        } else if let Some(ms) = l.get("sleep_ms").and_then(serde_json::Value::as_u64) {
+            // a composed script's pause: Claude Code slow to answer
+            std::thread::sleep(std::time::Duration::from_millis(ms));
         } else if let Some(code) = l.get("exit") {
             std::process::exit(i32::try_from(code.as_i64().unwrap_or(0)).unwrap_or(1));
         }

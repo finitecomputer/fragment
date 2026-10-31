@@ -57,6 +57,12 @@ const STDERR_TAIL_MAX_BYTES: usize = 2 * 1024;
 /// before it is killed (its tools are stopped by its interrupt first).
 const EXIT_GRACE_MS: u64 = 1_000;
 
+/// How long a turn the bridge let go of is given to end on its process
+/// once interrupted (`retire_turn`), before the process is replaced: an
+/// interrupt answers within a second or two (the spike), and the next turn
+/// waits on it.
+pub const DRAIN_MS_DEFAULT: u64 = 10_000;
+
 #[derive(Debug, Clone)]
 pub struct ClaudeConfig {
     /// The unmodified `claude`, as Anthropic publishes it.
@@ -72,6 +78,9 @@ pub struct ClaudeConfig {
     pub model: Option<String>,
     /// A session's process stops after this long with no turn.
     pub idle: Duration,
+    /// How long a turn let go of is given to end on its process before the
+    /// process is replaced (`retire_turn`; `DRAIN_MS_DEFAULT`).
+    pub drain: Duration,
     /// The user and group it runs as (`uid`, `gid`): the agents' own, never
     /// root, which Claude Code refuses to bypass permissions as. None: the
     /// bridge's.
@@ -246,7 +255,6 @@ struct Turn {
     calls: HashMap<String, (String, Value, Instant)>,
     asked: Vec<Asked>,
     stopping: bool,
-    forgotten: bool,
 }
 
 async fn session(cfg: ClaudeConfig, key: (String, String), generations: Arc<Mutex<Generations>>, mut rx: mpsc::Receiver<ToSession>, events: mpsc::Sender<Event>) {
@@ -263,12 +271,14 @@ async fn session(cfg: ClaudeConfig, key: (String, String), generations: Arc<Mute
         tokio::select! {
             m = rx.recv() => {
                 let Some(m) = m else { break };
-                let forget = matches!(m, ToSession::Forget(_));
                 match m {
                     ToSession::Start(ts) => {
+                        // the bridge runs one turn of an agent in a chat at a
+                        // time, so one still here was let go of: it ends on its
+                        // process before this one starts there
                         if let Some(t) = turn.take() {
-                            // the bridge runs one turn of an agent in a chat at a time
                             crate::ev!("claude.overlap", { "turn": ts.turn, "running": t.id });
+                            retire_turn(&mut proc, &mut requests, cfg.drain, &t.id).await;
                         }
                         if ts.command {
                             let outcome = command(&ts, &gen_key, &generations, &mut proc, &events).await;
@@ -293,18 +303,22 @@ async fn session(cfg: ClaudeConfig, key: (String, String), generations: Arc<Mute
                         if let Err(e) = write(&mut p.stdin, &user_message(&message)).await {
                             crate::ev!("claude.write", { "turn": ts.turn, "error": e.to_string() });
                         }
-                        turn = Some(Turn { id: ts.turn.clone(), agent: ts.agent.clone(), message: (!started).then_some(message), retried: false, part: 1, draft: String::new(), calls: HashMap::new(), asked: Vec::new(), stopping: false, forgotten: false });
+                        turn = Some(Turn { id: ts.turn.clone(), agent: ts.agent.clone(), message: (!started).then_some(message), retried: false, part: 1, draft: String::new(), calls: HashMap::new(), asked: Vec::new(), stopping: false });
                     }
-                    ToSession::Stop(id) | ToSession::Forget(id) if turn.as_ref().is_some_and(|t| t.id == id) => {
-                        // both interrupt it; only a Stop ends it as stopped,
-                        // and a forgotten one says nothing more
-                        let t = turn.as_mut().expect("checked");
-                        t.stopping = true;
-                        t.forgotten |= forget;
+                    ToSession::Stop(id) if turn.as_ref().is_some_and(|t| t.id == id) => {
+                        // interrupted, it ends stopped at its own `result`
+                        turn.as_mut().expect("checked").stopping = true;
                         if let Some(p) = proc.as_mut() {
                             requests += 1;
-                            let _ = write(&mut p.stdin, &json!({ "type": "control_request", "request_id": format!("stop-{requests}"), "request": { "subtype": "interrupt" } })).await;
+                            let _ = write(&mut p.stdin, &interrupt(requests)).await;
                         }
+                    }
+                    ToSession::Forget(id) if turn.as_ref().is_some_and(|t| t.id == id) => {
+                        // the bridge ended it: it says nothing more, and ends
+                        // on its process before the next turn starts there
+                        let t = turn.take().expect("checked");
+                        retire_turn(&mut proc, &mut requests, cfg.drain, &t.id).await;
+                        idle_since = Instant::now();
                     }
                     ToSession::Answer { turn: id, prompt, option, words } if turn.as_ref().is_some_and(|t| t.id == id) => {
                         let t = turn.as_mut().expect("checked");
@@ -360,10 +374,8 @@ async fn session(cfg: ClaudeConfig, key: (String, String), generations: Arc<Mute
                                 }
                             }
                             let t = turn.take().expect("checked");
-                            if !t.forgotten {
-                                let why = if stderr.trim().is_empty() { "Claude Code stopped unexpectedly".to_string() } else { format!("Claude Code stopped: {}", records::cut(stderr.trim(), 300)) };
-                                let _ = events.send(Event::End { turn: t.id, outcome: if t.stopping { Outcome::Stopped } else { Outcome::Error(why) } }).await;
-                            }
+                            let why = if stderr.trim().is_empty() { "Claude Code stopped unexpectedly".to_string() } else { format!("Claude Code stopped: {}", records::cut(stderr.trim(), 300)) };
+                            let _ = events.send(Event::End { turn: t.id, outcome: if t.stopping { Outcome::Stopped } else { Outcome::Error(why) } }).await;
                         }
                         idle_since = Instant::now();
                     }
@@ -522,6 +534,44 @@ async fn next_line(proc: &mut Option<Proc>) -> Option<String> {
     }
 }
 
+/// Claude Code's interrupt, the `n`th this session asked for.
+fn interrupt(n: u64) -> Value {
+    json!({ "type": "control_request", "request_id": format!("stop-{n}"), "request": { "subtype": "interrupt" } })
+}
+
+/// A turn the bridge let go of (`Forget`: it went quiet past its bound, or
+/// its agent left), or one a Start found still running, ends on its
+/// process before any other turn starts there: interrupted, its remaining
+/// output read and dropped until its `result`. One that gives no `result`
+/// within `drain` (an interrupt unanswered, a process hung) has its process
+/// replaced, stopped and killed past a grace, and the next turn resumes the
+/// session in a new one. So one turn's words and end are never another's
+/// (Alex's review of #812). Holds the session's other commands meanwhile,
+/// as the next turn's start must wait.
+async fn retire_turn(proc: &mut Option<Proc>, requests: &mut u64, drain: Duration, turn: &str) {
+    let Some(p) = proc.as_mut() else { return };
+    *requests += 1;
+    let _ = write(&mut p.stdin, &interrupt(*requests)).await;
+    let lines = &mut p.lines;
+    let ended = tokio::time::timeout(drain, async {
+        // bounded by the drain's timeout, or the process's output ending
+        while let Some(line) = lines.recv().await {
+            if serde_json::from_str::<Value>(&line).is_ok_and(|v| v["type"] == "result") {
+                return true;
+            }
+        }
+        false
+    })
+    .await
+    .unwrap_or(false);
+    crate::ev!("claude.retired", { "turn": turn, "ended": ended });
+    if !ended {
+        if let Some(p) = proc.take() {
+            stop(p).await;
+        }
+    }
+}
+
 /// A session's process stops: its input closes (it finishes and exits),
 /// and past a grace it is killed.
 async fn stop(mut p: Proc) {
@@ -538,7 +588,7 @@ async fn on_line(t: &mut Turn, v: &Value, p: &mut Proc, events: &mpsc::Sender<Ev
     // a subagent's own stream is its tool call's, never the turn's words
     let top = v["parent_tool_use_id"].is_null();
     match v["type"].as_str().unwrap_or("") {
-        "stream_event" if top && !t.forgotten => {
+        "stream_event" if top => {
             if let Some(text) = drafted(t, &v["event"]) {
                 let _ = events.send(Event::Draft { turn: t.id.clone(), text }).await;
             }
@@ -549,7 +599,7 @@ async fn on_line(t: &mut Turn, v: &Value, p: &mut Proc, events: &mpsc::Sender<Ev
                     "text" => {
                         let text = b["text"].as_str().unwrap_or("").to_string();
                         t.draft.clear();
-                        if !t.forgotten && !text.trim().is_empty() {
+                        if !text.trim().is_empty() {
                             let _ = events.send(Event::Reply { turn: t.id.clone(), part: t.part, text }).await;
                             t.part += 1;
                         }
@@ -566,7 +616,7 @@ async fn on_line(t: &mut Turn, v: &Value, p: &mut Proc, events: &mpsc::Sender<Ev
             for b in v["message"]["content"].as_array().into_iter().flatten().filter(|b| b["type"] == "tool_result") {
                 let id = b["tool_use_id"].as_str().unwrap_or("").to_string();
                 let Some((name, input, at)) = t.calls.remove(&id) else { continue };
-                if t.forgotten || name == "AskUserQuestion" {
+                if name == "AskUserQuestion" {
                     continue;
                 }
                 let failed = b["is_error"] == true;
@@ -579,7 +629,7 @@ async fn on_line(t: &mut Turn, v: &Value, p: &mut Proc, events: &mpsc::Sender<Ev
         "control_request" => {
             let r = &v["request"];
             let request = v["request_id"].as_str().unwrap_or("").to_string();
-            if r["subtype"] == "can_use_tool" && r["tool_name"] == "AskUserQuestion" && !t.forgotten {
+            if r["subtype"] == "can_use_tool" && r["tool_name"] == "AskUserQuestion" {
                 ask(t, &request, r, events).await;
             } else if r["subtype"] == "can_use_tool" {
                 // nothing else asks a person here (no technical approvals)
@@ -589,16 +639,14 @@ async fn on_line(t: &mut Turn, v: &Value, p: &mut Proc, events: &mpsc::Sender<Ev
             }
         }
         "result" => {
-            if !t.forgotten {
-                let outcome = if t.stopping {
-                    Outcome::Stopped
-                } else if v["subtype"] == "success" && v["is_error"] != true {
-                    Outcome::Idle
-                } else {
-                    Outcome::Error(error_of(v))
-                };
-                let _ = events.send(Event::End { turn: t.id.clone(), outcome }).await;
-            }
+            let outcome = if t.stopping {
+                Outcome::Stopped
+            } else if v["subtype"] == "success" && v["is_error"] != true {
+                Outcome::Idle
+            } else {
+                Outcome::Error(error_of(v))
+            };
+            let _ = events.send(Event::End { turn: t.id.clone(), outcome }).await;
             return true;
         }
         _ => {}
@@ -734,7 +782,7 @@ mod tests {
     #[test]
     fn its_words_stream_as_the_draft() {
         let agent = Agent { fragment: "juniper--k3x9".into(), identity: "npub1j".into(), name: "juniper".into(), owner: "npub1paul".into(), credentials: vec![], key: None, runtime: Some("claude".into()) };
-        let mut t = Turn { id: "t".into(), agent, message: None, retried: false, part: 1, draft: "stale".into(), calls: HashMap::new(), asked: Vec::new(), stopping: false, forgotten: false };
+        let mut t = Turn { id: "t".into(), agent, message: None, retried: false, part: 1, draft: "stale".into(), calls: HashMap::new(), asked: Vec::new(), stopping: false };
         assert_eq!(drafted(&mut t, &json!({ "type": "content_block_start", "content_block": { "type": "text" } })), None);
         assert_eq!(drafted(&mut t, &json!({ "type": "content_block_delta", "delta": { "type": "text_delta", "text": "hel" } })).as_deref(), Some("hel"));
         assert_eq!(drafted(&mut t, &json!({ "type": "content_block_delta", "delta": { "type": "thinking_delta", "thinking": "hm" } })), None);

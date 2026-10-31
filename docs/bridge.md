@@ -864,7 +864,18 @@ hold, interrupt, questions).
 - **Stop** is Claude Code's interrupt, which stops the running tool. Its
   tools run in process groups of their own, so a lone kill of `claude`
   would leave them running: a session stops by closing its input, and is
-  killed only past a grace.
+  killed only past a grace. A stopped turn ends at its own `result`.
+- **A turn let go of is over on its process before the next starts
+  there.** The bridge ends a turn itself (quiet past its bound, its agent
+  gone) and hands the chat's next at once, while Claude Code may still
+  be writing the first. So the first is interrupted and its remaining
+  output read and dropped until its `result`. Given none within
+  `DRAIN_MS_DEFAULT` (10 s), its process is replaced, and the next turn
+  resumes the session in a new one: one turn's words and end are never
+  another's (`retire_turn`; Alex's review of #812;
+  `a_let_go_turns_late_output_is_never_the_next_turns` and
+  `a_let_go_turn_whose_interrupt_goes_unanswered_has_its_process_replaced`,
+  composed scripts in tests/claude-composed/, each failing without it).
 - **A crash** (the computer's death) leaves the cut call open in the
   transcript. The next turn resumes the session, and Claude Code itself
   tells its model the call's outcome is unknown, with no cut-turn patch
