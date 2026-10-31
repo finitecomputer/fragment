@@ -114,6 +114,7 @@ pub const FRAGMENT: Class = Class {
         step!("record_schedules", "fragment/0003_record_schedules.sql"),
         step!("search_forget", "fragment/0004_search_forget.sql"),
         step!("ended_search", "fragment/0005_ended_search.sql"),
+        step!("making", "fragment/0006_making.sql"),
     ],
     variants: &[Variant {
         name: "members",
