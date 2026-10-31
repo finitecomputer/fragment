@@ -359,6 +359,19 @@ A direct manifest lookup resolves only that tag; a definite missing
 manifest authorizes a build, and other registry errors stop the job.
 Input tags are not overwritten by CI.
 
+Master's merge queue builds it first. Each merge group runs
+`.github/workflows/preview-image.yml`, which resolves the group's inputs
+the same way and, when neither `inputs-<key>` nor `queue-<key>` is
+there, builds, pushes and prepares `queue-<key>`. A group's head is the
+commit master then moves to, so that push's `preview-image` waits for the
+queue's run of its very commit when it is still going, then copies
+`queue-<key>` to `inputs-<key>` by digest (its layers are already in the
+repository) and finds it prepared. Master's job is the only writer of an
+input tag; the queue's runs only ever push queue tags, never deploy, and
+are not required checks. Their environment, `preview-image`, holds a
+token with the preview account's Containers permission alone
+(docs/secrets.md).
+
 An absent tag builds with BuildKit's persistent Actions cache (one
 master-only `preview-hermes` scope, `mode=max`), then pushes and prepares
 the image on Cloudflare's network. The Dockerfile's CLI stage copies only
