@@ -4,6 +4,16 @@ import { icon } from "./icons.js";
 // Newest first, with a newly made chat (no preview yet) before older ones.
 export const newestChat = (a, b) => (b.previewAt ?? Infinity) - (a.previewAt ?? Infinity) || (a.name < b.name ? -1 : 1);
 
+// Whom the ways to ask for an app ask (the desktop's, the dock's Add's),
+// as their words name it (Paul, 2026-10-31: an agent's chosen name, every
+// surface): a prompt goes into the open chat when it is the person's own
+// (shell.js `promptChat`), so that chat's agent of theirs, the lead first;
+// else their main agent's chat, so their main agent.
+export function askedAgentOf({ open, own, agentsOf, mine, main }) {
+  if (open?.kind !== "chat" || !own(open)) return main;
+  return agentsOf(open.name).map((id) => mine.find((a) => a.identity === id)).find(Boolean) ?? main;
+}
+
 export function createChatList({ api, ui, data, selection, menus, navigation, listLive, load, invites, setInvites }) {
   const { $, el, patch, agentFace, mark, notice } = ui;
   const { byName, own, chats, shown, titleOf, chatTitle, homeMark, isGroup, agentOfChat, agentsOf, agents, allFragments, computer, isGuest, personId, isThread, waitingOn, renderThreads } = data;
@@ -379,5 +389,6 @@ export function createChatList({ api, ui, data, selection, menus, navigation, li
       archiveItem(name),
     ]);
   }
-  return { renderHeading, renderChats, loadInvites, primaryAgent, newChatAgent, ownAgents, markSeen };
+  const askedAgent = () => askedAgentOf({ open: current() && !page() ? byName(current()) : null, own, agentsOf, mine: ownAgents(), main: primaryAgent() });
+  return { renderHeading, renderChats, loadInvites, primaryAgent, newChatAgent, askedAgent, ownAgents, markSeen };
 }
