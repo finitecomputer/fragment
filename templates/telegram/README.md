@@ -42,8 +42,8 @@ the owner's setup above it (`site/telegram.js`).
   interim words) to the paired chat, in at most four messages, while the
   door is open. Unlinked, or turned off by the deployment, nothing is
   relayed or sent (the inbox still keeps what Telegram delivers, as any
-  inbox does); unlinked, Telegram is told so, and the membership the
-  link gave goes.
+  inbox does); unlinked, Telegram is told so, and the agent stays a
+  viewer of the chat, its words there going nowhere else.
 - **What it is not:** end-to-end encrypted (Telegram's servers, and the
   platform, carry the text), a group bot, or a carrier of files and voice:
   the agent, a viewer here, attaches no file (its reply says it could
