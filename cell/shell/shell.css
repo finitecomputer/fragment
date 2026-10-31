@@ -746,15 +746,6 @@ iframe[data-blocked] { display: none; }
 /* The person's agents in their chats' rows, a flat list of them, and an
    app dock on the desktop. */
 /* a new chat, with the agent its chip names (chat-list.js `renderStart`) */
-.sidebar-start { display: flex; flex: none; align-items: center; gap: 4px; margin: 4px 0 8px; }
-.sidebar-start-chat { flex: none; padding-right: 4px; color: var(--text-secondary); }
-.sidebar-start-chat:hover { color: var(--text-primary); }
-.agent-pick { display: inline-flex; flex: 0 1 auto; align-items: center; gap: 5px; min-width: 0; height: 28px; padding: 0 8px 0 3px; border: 1px solid var(--border-strong); border-radius: 999px; background: var(--bg-window); color: var(--text-primary); font-size: 13.5px; font-weight: 600; }
-.new-chat-agent { display: flex; min-width: 0; }
-.agent-pick .agent-avatar { width: 20px; height: 20px; }
-.agent-pick .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.agent-pick svg { flex: none; width: 12px; height: 12px; color: var(--text-tertiary); stroke-width: 2.4; }
-button.agent-pick:hover { background: var(--bg-hover); }
 /* a menu's agent (shell.js `openMenu`): its face, its name, its role */
 .menu .agent-avatar { width: 22px; height: 22px; }
 .menu .name { font-weight: 600; font-size: 13.5px; }
@@ -762,6 +753,23 @@ button.agent-pick:hover { background: var(--bg-hover); }
 .menu button[aria-current="true"] { background: var(--bg-hover); }
 /* a chat's row, two lines (chat-list.js `chatRow`): whose chat it is and
    when, then the chat's own name */
+/* a section per agent (chat-list.js): its hero, the original pill (face,
+   name, what it is doing), then its chats; More unfolds the rest; Shared last */
+#chats { flex: 0 1 auto; min-height: 0; max-height: none; }
+#chats .agent-hero { flex: none; gap: 10px; height: 48px; margin: 10px 0 2px; padding: 8px 13px; border-radius: 999px; }
+#chats .agent-hero:first-child { margin-top: 2px; }
+#chats .agent-hero:hover { background: var(--bg-active); }
+#chats .agent-hero:disabled { opacity: 1; cursor: default; }
+.agent-hero-face { display: flex; flex: none; }
+.agent-hero-face .agent-avatar { width: 26px; height: 26px; }
+.agent-hero-named { display: flex; flex: 1; flex-direction: column; justify-content: center; min-width: 0; }
+.agent-hero-named .title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-primary); font-size: 14px; }
+.agent-hero .agent-doing { font-size: 11px; font-weight: 600; line-height: 14px; color: var(--text-tertiary); }
+.agent-hero .agent-doing.working { color: var(--success); }
+.agent-hero .agent-doing.you { color: var(--accent-blue); }
+#chats .more-row { min-height: 28px; padding-top: 4px; padding-bottom: 4px; color: var(--text-tertiary); font-size: 13px; }
+#chats .more-row:hover { color: var(--text-secondary); }
+.section-head { margin: 14px 8px 4px; color: var(--text-tertiary); font-size: 12px; font-weight: 600; }
 #chats .chat-row.two { align-items: flex-start; padding: 7px 8px; }
 .chat-face { display: inline-flex; flex: none; width: 26px; height: 26px; margin-top: 1px; }
 .chat-face > .agent-avatar { width: 26px; height: 26px; }

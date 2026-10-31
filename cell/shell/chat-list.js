@@ -1,5 +1,4 @@
 import { avatar } from "./agent-identity.js";
-import { icon } from "./icons.js";
 
 // Newest first, with a newly made chat (no preview yet) before older ones.
 export const newestChat = (a, b) => (b.previewAt ?? Infinity) - (a.previewAt ?? Infinity) || (a.name < b.name ? -1 : 1);
@@ -8,7 +7,7 @@ export function createChatList({ api, ui, data, selection, menus, navigation, li
   const { $, el, patch, agentFace, mark, notice } = ui;
   const { byName, own, chats, shown, titleOf, chatTitle, homeMark, isGroup, agentOfChat, agentsOf, agents, allFragments, computer, isGuest, personId, isThread, waitingOn, renderThreads } = data;
   const { current, page, getFrame } = selection;
-  const { menuOwner, openMenu, shareItem, archiveItem } = menus;
+  const { openMenu, shareItem, archiveItem } = menus;
   const { newChat, rename, openChat, openApp, openScreen, leaveSidebar, seg } = navigation;
   // ---- chats: one flat list, newest first, the open one in the middle column ----
   function renderHeading() {
@@ -174,9 +173,9 @@ export function createChatList({ api, ui, data, selection, menus, navigation, li
     const now = new Date();
     dayTimer = setTimeout(renderChats, new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1).getTime() - now.getTime() + 1000);
   }
-  // Whom a new chat is with unless the person picks another (Paul,
-  // 2026-10-30): the open chat's agent (a group's lead) when it is one of
-  // theirs, else their main agent.
+  // Whom the launcher's new chat is with unless the person picks another
+  // (Paul, 2026-10-30): the open chat's agent (a group's lead) when it is one
+  // of theirs, else their main agent.
   function newChatAgent() {
     const mine = ownAgents();
     const open = current() && !page() ? agentsOf(current()).map((id) => mine.find((a) => a.identity === id)).find(Boolean) : null;
@@ -184,42 +183,53 @@ export function createChatList({ api, ui, data, selection, menus, navigation, li
   }
   // The launcher's key, as the person's keyboard names it.
   const LAUNCHER_KEY = /Mac|iPhone|iPad|iPod/.test(navigator.userAgentData?.platform ?? navigator.platform ?? "") ? "⌘K" : "Ctrl K";
-  // "New chat with" and the agent it is with (`newChatAgent`), its chip;
-  // with more than one agent, the chip lists them all, and the one picked
-  // gets that chat alone. A guest makes no chat.
-  function renderStart() {
-    const agent = newChatAgent();
-    const start = $("sidebar-start-chat");
-    start.hidden = !agent?.identity || isGuest();
-    $("sidebar-start").hidden = start.hidden;
-    if (start.hidden) return patch($("new-chat-agent"), []);
+  // An agent's hero (Paul, 2026-10-31: the sidebar is a section per agent):
+  // its face, its name, and under it what it is doing in any of its chats
+  // (the most pressing), real state only. It starts a new chat with it.
+  function hero(agent, doing) {
+    const says = DOING_SAYS[doing?.doing];
     const name = titleOf(agent.fragment);
-    start.setAttribute("aria-label", `New chat with ${name}`);
-    start.onclick = () => newChat(agent.identity);
-    const many = ownAgents().length > 1;
-    const chip = el(many ? "button" : "span", "agent-pick");
-    chip.dataset.key = `${agent.fragment} ${many}`;
-    chip.append(avatar(agentFace(agent.fragment, agent.identity)), el("span", "name", name));
-    if (many) {
-      chip.type = "button";
-      chip.setAttribute("aria-label", `${name}: pick another agent`);
-      chip.setAttribute("aria-haspopup", "menu");
-      chip.setAttribute("aria-controls", "menu");
-      const shown = $("new-chat-agent").firstElementChild;
-      chip.setAttribute("aria-expanded", String(!!shown && menuOwner()?.button === shown));
-      chip.append(icon("caret"));
-      chip.onclick = () => openMenu(chip, ownAgents().map((a) => ({
-        face: avatar(agentFace(a.fragment, a.identity)),
-        text: titleOf(a.fragment),
-        tag: byName(a.fragment)?.agentRole,
-        current: a.identity === newChatAgent()?.identity,
-        onClick: () => newChat(a.identity),
-      })));
-    }
-    patch($("new-chat-agent"), [chip]);
+    const row = el("button", "row agent-hero");
+    row.type = "button";
+    row.dataset.key = `agent:${agent.fragment}`;
+    row.title = `New chat with ${name}`;
+    row.setAttribute("aria-label", `New chat with ${name}${says ? `, ${says.toLowerCase()}` : ""}`);
+    row.disabled = !agent.identity || isGuest();
+    const face = el("span", "agent-hero-face");
+    face.append(avatar(agentFace(agent.fragment, agent.identity), "small"));
+    const named = el("span", "agent-hero-named");
+    named.append(el("strong", "title", name));
+    if (says) named.append(el("span", `agent-doing ${doing.doing}`, says));
+    row.append(face, named);
+    row.onclick = () => { newChat(agent.identity); leaveSidebar(); };
+    return row;
   }
+  // A section's chats: its five newest (and the open one, wherever it is),
+  // then More, which shows the rest, and Less, which folds them again.
+  const SECTION_CHATS = 5;
+  const unfolded = new Set();
+  function sectionRows(key, list, rowOf) {
+    const open = unfolded.has(key);
+    const shown = open ? list : list.filter((f, i) => i < SECTION_CHATS || (f.name === current() && !page()));
+    const rows = shown.map(rowOf);
+    if (list.length > SECTION_CHATS) {
+      const more = el("button", "row more-row", open ? "Less" : "More");
+      more.type = "button";
+      more.dataset.key = `more:${key}`;
+      more.setAttribute("aria-expanded", String(open));
+      more.onclick = () => { if (open) unfolded.delete(key); else unfolded.add(key); renderChats(); };
+      rows.push(more);
+    }
+    return rows;
+  }
+  // The sidebar's chats, a section per agent of the person's (Paul,
+  // 2026-10-31): their main agent first, then the others as their computer
+  // took them, an order nothing reshuffles; each its hero, then its chats
+  // (a chat goes under its lead agent, else the first of theirs in it, else
+  // their main agent), the newest first. Chats someone else shared with them
+  // are the last section, Shared. Before their computer is read, their main
+  // agent's fragment heads theirs.
   function renderChats() {
-    renderStart();
     // the launcher: a guest's searches; a seat's also starts a chat
     const launcherLabel = isGuest() ? "Search chats and apps" : "Search or start a new chat";
     $("launcher-key").textContent = LAUNCHER_KEY;
@@ -228,19 +238,46 @@ export function createChatList({ api, ui, data, selection, menus, navigation, li
       $(id).dataset.tooltip = `${launcherLabel} (${LAUNCHER_KEY})`;
       $(id).setAttribute("aria-label", launcherLabel);
     }
-    const mine = new Map(ownAgents().map((a) => [a.identity, a]));
-    const seen = [];
+    const mine = ownAgents();
+    const ids = new Map(mine.map((a) => [a.identity, a]));
+    const sections = new Map(mine.map((a) => [a.identity, { agent: a, chats: [] }]));
+    const main = primaryAgent();
+    if (!mine.length && main) sections.set(main.fragment, { agent: main, chats: [] });
+    const first = sections.keys().next().value;
+    const loose = [], shared = [];
     // a delegation thread's chat is no chat of the list: its line, over the
     // chat it was asked from, opens it (threads.js)
-    const rows = shown(chats()).filter((f) => !isThread(f)).sort(newestChat).map((f) => {
-      const theirs = agentsOf(f.name).map((id) => mine.get(id)).filter(Boolean);
+    for (const f of shown(chats()).filter((x) => !isThread(x)).sort(newestChat)) {
+      if (!own(f)) shared.push(f);
+      else {
+        const lead = agentsOf(f.name).find((id) => ids.has(id)) ?? first;
+        if (lead === undefined) loose.push(f);
+        else sections.get(lead).chats.push(f);
+      }
+    }
+    const seen = [];
+    const rowOf = (f) => {
+      const theirs = agentsOf(f.name).map((id) => ids.get(id)).filter(Boolean);
       const doing = doingIn(f, theirs.map((a) => a.identity));
       seen.push(...doing);
       return chatRow(f, theirs, doing[0]);
-    });
+    };
+    const rows = [];
+    for (const [key, { agent, chats: list }] of sections) {
+      const doing = agent.identity ? chats().flatMap((f) => doingIn(f, [agent.identity])).sort(pressing) : [];
+      seen.push(...doing);
+      rows.push(hero(agent, doing[0]), ...sectionRows(key, list, rowOf));
+    }
+    rows.push(...sectionRows("own", loose, rowOf));
+    if (shared.length) {
+      const head = el("div", "section-head", "Shared");
+      head.dataset.key = "head:shared";
+      rows.push(head, ...sectionRows("shared", shared, rowOf));
+    }
+    if (!rows.some((r) => r.dataset.key.startsWith("chat:"))) rows.push(el("div", "empty-row", chats().length ? "Every chat is archived" : isGuest() ? "Chats shared with you show here" : "Your chats will appear here"));
     doingAgain(seen);
     dayAgain();
-    patch($("chats"), rows.length ? rows : [el("div", "empty-row", chats().length ? "Every chat is archived" : isGuest() ? "Chats shared with you show here" : "Your chats will appear here")]);
+    patch($("chats"), rows);
     renderThreads();
   }
 
