@@ -71,6 +71,13 @@ at most 16. A turn's records, in order:
    (and a notice may follow the end: `turn.notice`, below);
 3. `turn.end` on `work`.
 
+A turn a restart cut may be followed by its **continuation** (since
+2026-10-31): a turn of its own, whose id is not its cause's but the first
+24 hex characters of the SHA-256 of `continue`, a NUL and the cut turn's
+id, with the cut turn's `cause` and asker, and a
+`turn.notice` (part `continued`) as it starts (docs/bridge.md, "A cut turn
+is continued once").
+
 Every turn has both its start and its end, one of each: a turn refused
 (too many waiting) or stopped while it waited posts its `turn.start` and
 then its `turn.end`, and runs nothing. The bridge keeps a turn until its
@@ -377,7 +384,7 @@ templates/sessions/README.md):
 Any other `kind` on `chat` is the page's own and is never a message.
 
 **Search.** A person's message and an agent's reply are what the
-shell's search finds (docs/api.md, Search): a body whose
+shell's search finds (docs/api.md, The shell, Search): a body whose
 `kind` is absent or `"message"`, by its `text` alone (its first 4 KiB).
 No other record here is searched, Stop, prompt answers, commands and
 everything on `work` included.
@@ -675,13 +682,13 @@ message's waiting line at once (its agent starting up, or being waited
 for), as the page that sent it would.
 
 **The launcher's chat.** The shell's launcher loads a chat as it posts
-its first message, with `?sent=1` (cell/shell/launcher.js): the page
+its first message, with `?sent=1` (docs/api.md, The launcher): the page
 then never shows a new chat's start, only that message once it is here,
 and its waiting line under it.
 
 **The first run.** The shell opens its person's first chat before their
-first agent is in it (`?setup=1`; docs/api.md, The shell). The page
-then shows a card above the chat, "Setting up your
+first agent is in it (`?setup=1`; docs/api.md, "The first run, in its
+chat"). The page then shows a card above the chat, "Setting up your
 agent", with the steps the shell sends with its roster (`setup: {steps:
 [{text, state}], error}`, at most 6 steps of 120 characters, `state`
 one of `done`, `doing`, `todo`, `failed`): what the platform says of
