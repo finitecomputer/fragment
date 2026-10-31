@@ -122,6 +122,10 @@ pub struct RelayConfig {
 
 pub struct Relay {
     pub config: RelayConfig,
+    /// Its port, already bound to `config.listen` (the bridge's start binds
+    /// it): a port picked and let go before a bind may be another's by
+    /// then, so the relay binds nothing itself.
+    pub listener: std::net::TcpListener,
 }
 
 /// A file Hermes may fetch, or one it uploaded.
@@ -284,13 +288,14 @@ impl Runtime for Relay {
     }
 
     fn run(self: Box<Self>, io: RuntimeIo) -> RuntimeFuture {
-        Box::pin(run(self.config, io))
+        let Relay { config, listener } = *self;
+        Box::pin(run(config, listener, io))
     }
 }
 
-async fn run(cfg: RelayConfig, mut io: RuntimeIo) -> Result<(), RuntimeError> {
+async fn run(cfg: RelayConfig, listener: std::net::TcpListener, mut io: RuntimeIo) -> Result<(), RuntimeError> {
     std::fs::create_dir_all(&cfg.media_dir).map_err(|e| RuntimeError::Setup(format!("{}: {e}", cfg.media_dir.display())))?;
-    let listener = tokio::net::TcpListener::bind(cfg.listen).await.map_err(|e| RuntimeError::Setup(format!("listen {}: {e}", cfg.listen)))?;
+    let listener = listener.set_nonblocking(true).and_then(|()| tokio::net::TcpListener::from_std(listener)).map_err(|e| RuntimeError::Setup(format!("listen {}: {e}", cfg.listen)))?;
     crate::ev!("relay.listening", { "listen": cfg.listen.to_string() });
     let media = Arc::new(Mutex::new(MediaTable::default()));
     let (wire_tx, mut wire_rx) = mpsc::channel::<Wire>(256);

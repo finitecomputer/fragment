@@ -67,6 +67,7 @@ Every change is checked against this table.
 | Manifest and declared operations | `fragment.json` in git | the cell's copy at the pin; an invalid one keeps the last good and says why (`status.code.error`) |
 | Members, roles, invites | the fragment's supervisor | grants and revokes transactional, each in `events`; the registry's copy of an invite waiting on an email (decision 63) is a pointer the fragment overrules |
 | Cell state (supervisor tables, the operation ledger, channels, the app's SQL) | the Durable Objects' own storage | none |
+| A fragment's search index | what its app writes (`…/search/upsert`), held in a `SearchIndex` object of the life's own (docs/api.md, A fragment's search) | a projection its app writes again whole when asked (a new embeddings space empties it); the supervisor holds who reads it, the forgets still to send, and whether the life wrote one (`MetaKey::Search`) |
 | A platform object's schema | its class's steps, `crates/core/migrations/<class>/` (Schemas, below) | each object's `_schema`, which refuses code whose steps differ; `schema.lock`, which `cargo xtask check` holds the tree to |
 | The release a call between objects was made by | the caller's `FRAGMENT_DEPLOY_ID` (Calls between releases, below) | stamped on each call and checked first by the object; never stored. Its deploy time (`FRAGMENT_DEPLOYED_AT`) is stamped too, read by no release (the debt ledger) |
 | The release a platform page runs | the page as answered (its `fragment-release` meta), and each answer's `x-fragment-deploy` | the page reloads once they differ, at a safe moment, never in a loop (docs/api.md, The shell, "A new release") |
@@ -172,7 +173,8 @@ two versions), and done when every object class answers it within 90 s
 Cloudflare holds on its old code fails the deploy loudly, rather than
 refusing calls that long. One it cannot finish or verify goes back to
 the version before (`wrangler rollback`, verified the same way), unless
-that release's schema is not its own; the job fails either way, never
+that release's schema (its steps, and its last Durable Object migration)
+is not its own; the job fails either way, never
 green over a mix. A platform page outlives a
 deploy too, and reloads once the platform's release differs from its own
 (docs/api.md, The shell, "A new release").

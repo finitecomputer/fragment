@@ -117,7 +117,7 @@ fn still_loading_in_frame(s: &mut Suite, api: &Api, chrome: &mut Browser, chat: 
     let ready = format!("document.getElementById('say')?.dataset.ready === '1' && !{line}");
     let shell = chrome.open(&format!("{}/", api.base))?;
     chrome.viewport(&shell, 1280, 860, false)?;
-    let row = format!("#chats [data-key={}]", js(&format!("chat:{chat}")));
+    let row = format!("#chats [data-key={}] .chat-open", js(&format!("chat:{chat}")));
     let listed = chrome.until(&shell, &format!("!document.getElementById('layout').hidden && !!document.querySelector({})", js(&row)), wait);
     chrome.eval(&shell, &format!("(document.querySelector({})?.click(), window.__shellStays = true, true)", js(&row)))?;
     let framed = s.eventually(wait, || chrome.eval_in_frame(&shell, chat, &ready).ok() == Some(Value::Bool(true)));
@@ -180,7 +180,7 @@ fn mic_in_frame(s: &mut Suite, api: &Api, chrome: &mut Browser, chat: &str) -> R
     let wait = Duration::from_secs(30);
     let shell = chrome.open(&format!("{}/", api.base))?;
     chrome.viewport(&shell, 1280, 860, false)?;
-    let row = format!("#chats [data-key={}]", js(&format!("chat:{chat}")));
+    let row = format!("#chats [data-key={}] .chat-open", js(&format!("chat:{chat}")));
     let listed = chrome.until(&shell, &format!("!document.getElementById('layout').hidden && !!document.querySelector({})", js(&row)), wait);
     chrome.eval(&shell, &format!("(document.querySelector({})?.click(), true)", js(&row)))?;
     let ready = "document.getElementById('say')?.dataset.ready === '1'";
@@ -1200,7 +1200,7 @@ fn framing_shell(s: &mut Suite, api: &Api, chrome: &mut Browser, chat: &str, scr
     let wait = Duration::from_secs(30);
     let shell = chrome.open_with_script(&format!("{}/", api.base), script)?;
     chrome.viewport(&shell, 1280, 860, false)?;
-    let row = format!("#chats [data-key={}]", js(&format!("chat:{chat}")));
+    let row = format!("#chats [data-key={}] .chat-open", js(&format!("chat:{chat}")));
     let listed = chrome.until(&shell, &format!("!document.getElementById('layout').hidden && !!document.querySelector({})", js(&row)), wait);
     chrome.eval(&shell, &format!("(document.querySelector({})?.click(), true)", js(&row)))?;
     let ready = "document.getElementById('say')?.dataset.ready === '1'";

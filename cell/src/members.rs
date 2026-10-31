@@ -612,7 +612,7 @@ impl FragmentCell {
         assert!(people.len() <= crate::registry::content::PLACES_ASKED_MAX, "a batch of members is bounded");
         let now = crate::ask_registry(&self.env, &crate::registry::content::PlacesNow { org, people }).await?;
         for (principal, person, added_at) in rows {
-            let place = now.get(&person).map(|since| fragment_core::governance::Place { admin: false, since: *since });
+            let place = now.iter().find(|(p, _)| *p == person).map(|(_, since)| fragment_core::governance::Place { admin: false, since: *since });
             if !fragment_core::governance::counts(place, added_at) {
                 stale.insert(principal);
             }

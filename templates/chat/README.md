@@ -15,8 +15,8 @@ serves the rest. `fragment.json` declares them (`kind: "chat"`):
   agent of the chat posts on `chat`: it pushes the reply to the chat's
   people who are not looking at it.
 
-docs/chat-records.md is the contract its page and code read and write,
-and says how the page lays a chat out. The page is `site/`: `index.html`,
+docs/chat-records.md is the contract its page and code read and write.
+The page is `site/`: `index.html`,
 `chat.js` (the chat, its voice memos, `/` commands, Reply, Steer
 and "Notify me"), `control.js` (whose a turn is to stop, command and
 answer: its asker's, or for a routine's or an answer's, its agent's

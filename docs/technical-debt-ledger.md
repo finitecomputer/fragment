@@ -223,16 +223,18 @@ unfinished design, not debt.
   computers swapping one key, and a sign-in's computer is found from its
   bound state alone, never the URL, with the H3 checks run against it.
 
-## Connections are untried against real WorkOS Pipes
+## An imported connection's refresh is unproven
 
-- **Shortcut:** connection sign-ins (cell/src/connections.rs) and their
-  state (cell/src/keys.rs `pipes_state`) have answered only the fake.
-- **Risk:** Pipes answers otherwise, or imported tokens never refresh;
-  consent links the old REST path issued stay valid.
-- **Delete when:** the browser-bound flow is reviewed, deployed by Paul
-  and proven in controlled staging (docs/pipes-browser-binding.md),
-  imported-token refresh and a connected account's state included.
-  Enabling providers needs its own authorization.
+- **Shortcut:** a connection's tokens are imported into Pipes once
+  (cell/src/connections.rs), and Pipes is trusted to refresh them with
+  the OAuth client the deployment's WorkOS integration uses
+  (docs/pipes-browser-binding.md). Preview and production connect Google
+  so, but no test or check shows a refresh: the e2e's Pipes is a fake.
+- **Risk:** a connection stops answering swaps once its first access
+  token expires (Google's live an hour), and reads `needs_reauthorization`.
+- **Delete when:** a connection made through the browser-bound flow is
+  seen answering a swap more than an hour after it was made, on preview
+  or production.
 
 ## An agent's sync and deploy reach code.storage directly
 
@@ -297,18 +299,6 @@ unfinished design, not debt.
 - **Risk:** people are overcharged, cached input most.
 - **Delete when:** a call is charged from OpenRouter's reported cost,
   the fee and margin on it.
-
-## A ledger's head carries `holds` and a `book` for a rollback
-
-- **Shortcut:** heads are written for releases before decision 62
-  (`fragment_core::ledger` `OldHolds`, `Ledger::written`,
-  `retire_holds`).
-- **Risk:** none; dead weight that reads as if it meant something.
-- **Delete when:** no release before decision 62 can be deployed again
-  (Paul agreeing) and no head holds any: drop `OldHolds`,
-  `retire_holds`, `written`'s book, and the
-  `a_head_written_here_reads_in_the_release_before` and
-  `a_rollback_finds_no_hold_and_no_held_entry` tests.
 
 ## A paid call's charge is best effort
 
@@ -553,16 +543,6 @@ unfinished design, not debt.
 - **Risk:** others see an agent's old name until it speaks.
 - **Delete when:** a fragment's pages hear its agents' face changes (an
   agent fragment's install telling the chats it is in).
-
-## A chat's transcript is the platform's reading of the chat template's records
-
-- **Shortcut:** `fragment_core::export::transcript_part` reads one
-  template's records, a design bug by the platform rule
-  (docs/cloudflare-v1.md).
-- **Risk:** a change to the records' shape leaves transcripts behind.
-- **Delete when:** the chat template renders its own transcript (a
-  query the export asks, paged), or Paul lets the platform read the
-  records' shape (then it moves to the special-case inventory).
 
 ## The effects sweep has no fault-injection test
 

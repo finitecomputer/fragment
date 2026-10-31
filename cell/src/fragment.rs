@@ -59,7 +59,7 @@ use fragment_core::access::{self, Decision, Purpose, Standing};
 use fragment_core::npub;
 use fragment_core::owner::Owner;
 use fragment_proto::{
-    limits, valid_fragment_name, CodeStatus, Counts, CreateFragment, Created, ErrorCode, FragmentKind, FragmentStatus, IdentityKind, OwnerRef, Pins, Role,
+    limits, valid_fragment_name, CodeStatus, Counts, CreateFragment, Created, ErrorCode, FragmentStatus, IdentityKind, OwnerRef, Pins, Role,
     Urls, Visibility,
 };
 use fragment_templates::blessed;
@@ -349,8 +349,10 @@ pub(crate) enum MetaKey {
     /// The channels its people's search holds, as the rows last named
     /// them (search.rs `search_fence`): a JSON array of names.
     Searched,
-    /// Whether the search service holds this life's sources (searchable.rs):
-    /// written at its first upsert; a push's deletes are then forgotten.
+    /// Whether this life may have written its search index (searchable.rs):
+    /// set before its first upsert is sent. Unset, a search answers
+    /// `indexed: false` waking no index; set, a push's deletes are
+    /// forgotten, and the life's end ends its index.
     Search,
     /// Why live's code was not installed.
     CodeError,
@@ -412,6 +414,9 @@ pub(crate) enum MetaKey {
     /// Test fleets only: how many more card shots open a page nothing
     /// serves, so they fail (`fail-cards`).
     TestFailCards,
+    /// Test fleets only: how many more calls into its search index fail
+    /// before they are sent (`fail-search-index`): the index out of reach.
+    TestFailSearchIndex,
     /// Test fleets only: the connector policy its doors ask in place of the
     /// deployment's (`connectors`), so a run turns one off and on again.
     TestConnectors,
@@ -481,6 +486,7 @@ impl MetaKey {
             MetaKey::StorageSampledAt => "storage_sampled_at",
             MetaKey::Cards => "cards",
             MetaKey::TestFailCards => "test_fail_cards",
+            MetaKey::TestFailSearchIndex => "test_fail_search_index",
             MetaKey::TestConnectors => "test_connectors",
             MetaKey::Icon => "icon",
             MetaKey::IconMakings => "icon_makings",
@@ -1056,6 +1062,12 @@ impl FragmentCell {
                 self.create(&caller, body, org).await
             }
             (Method::Delete, ["delete"]) => self.delete(&caller).await,
+            // a question the platform embedded once, for many fragments:
+            // the router maps no outside path here (searchable.rs)
+            (Method::Post, ["search", "asked"]) => {
+                let asked = body_json(&mut req).await?;
+                self.search_asked(&caller, asked).await
+            }
             (Method::Get, ["api", "status"]) => self.status(&caller),
             (Method::Get, ["api", "address"]) => self.address(&caller).await,
             (Method::Put, ["api", "address"]) => {
@@ -1258,13 +1270,8 @@ impl FragmentCell {
             return Err(CellError::invalid(format!("no template {t:?}; the templates are {}", names.join(", "))));
         }
         // an org owns apps and brains: a person's agents, chats and skills stay theirs
-        if let (Owner::Org(_), Some(Ok(Ok(m)))) = (&owner, match body.template.as_deref().filter(|t| blessed::template(t).is_some()) {
-            Some(t) => Some(crate::assets::blessed_manifest(&self.env, t).await),
-            None => None,
-        }) {
-            if matches!(m.kind(), FragmentKind::Agent | FragmentKind::Chat | FragmentKind::Skills) {
-                return Err(CellError::invalid(format!("an org owns apps and brains; a {} stays a person's own", m.kind().as_str())));
-            }
+        if let (Owner::Org(_), Some(t)) = (&owner, body.template.as_deref().filter(|t| blessed::PERSONS_OWN.contains(t))) {
+            return Err(CellError::invalid(format!("an org owns apps and brains; a {t} stays a person's own")));
         }
         if let Some(title) = &body.title {
             if body.template.is_none() {

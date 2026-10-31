@@ -27,6 +27,12 @@ include!("blessed_names.rs");
 /// (cell/src/doors.rs).
 pub const CONNECTORS: &[&str] = &[];
 
+/// The blessed templates that stay a person's own (decisions 66 to 71): an
+/// org owns apps and brains, never an agent, a chat or skills. The cell
+/// refuses an org's fragment of one by its name, with no manifest to read;
+/// `every_blessed_template_runs` holds this to their kinds.
+pub const PERSONS_OWN: [&str; 3] = ["agent", "chat", "skills"];
+
 /// A blessed template, when `name` is one: named statics, never
 /// `crate::ALL`, so a binary links only the index of the templates it
 /// names (the cell carries the blessed ones and not `notes`).
@@ -200,6 +206,8 @@ mod tests {
             let Some(t) = template(name) else { panic!("{name} is blessed but not under templates/") };
             let m = manifest(name, &bytes_of(t, manifest_file(name).unwrap())).unwrap();
             assert!(m.kind.is_some(), "{name} names its kind");
+            let persons = matches!(m.kind(), fragment_proto::FragmentKind::Agent | fragment_proto::FragmentKind::Chat | fragment_proto::FragmentKind::Skills);
+            assert_eq!(PERSONS_OWN.contains(&name), persons, "{name}: a person's own exactly when its kind is an agent's, a chat's or skills'");
             assert!(m.template.is_none(), "{name} names no template itself");
             assert!(site_file(name, "site/index.html").is_some(), "{name} has a page");
             assert_eq!(release(name), Some(t.release), "its release is the build's hash of its files");

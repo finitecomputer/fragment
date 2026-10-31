@@ -14,11 +14,10 @@ platform concept.
   and why; keep it short. New runtime, template or vendor knowledge
   belongs in an image, template or skill, not the platform.
 - `docs/MODEL.md`: the authority map ("Where each fact lives").
-- Contracts: `docs/api.md` (wire), `docs/computers.md` (image),
+- Contracts: `docs/api.md` (wire), `docs/computers.md` (image, durability),
   `docs/bridge.md` (bridge), `docs/chat-records.md` (chat records),
-  `docs/durable-computers.md` (durability, including outstanding work),
   `docs/secrets.md` (secret custody), `docs/ledger.md` (usage),
-  `docs/billing.md` (orgs and Stripe), `docs/hermes-relay.md` (runtime).
+  `docs/billing.md` (orgs and Stripe).
 - `docs/published-fragments.md`: primitives that must stay expressible.
 - `docs/technical-debt-ledger.md`: the only place shortcuts may live;
   include the condition for removing each one.
@@ -35,9 +34,10 @@ platform concept.
   `crates/fakes`, `crates/devstack`, `crates/e2e`: local vendor fakes and harness.
 - `templates/`: fragment templates; `applib/`: reusable app code.
 - `images/`: a separate Rust workspace (bridge, stub, Hermes).
-- `search/`: the search service (LanceDB on R2, S3 or a disk;
-  `search/README.md`); `bench/search/`: the benchmark that chose it. Each a
-  separate Rust workspace (`cargo test --release`).
+- `bench/search/`: the benchmark behind each fragment's search index
+  (`cell/src/search_index.rs`, FIN-310), a separate Rust workspace
+  (`cargo test --release`). The LanceDB service it also measured is the
+  tag `search-service-lancedb`.
 - `.github/workflows/`: CI, image promotion and CLI releases. Read the
   relevant workflow and xtask module for mechanics and flags.
   Released CLIs warn on stderr when finite.chat advertises a newer
