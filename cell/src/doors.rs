@@ -43,21 +43,19 @@ struct Binding {
     agent: String,
     /// The agent's identity, which a relayed record is `to`.
     identity: String,
-    /// Whether binding made the agent a member (an unlink undoes it).
-    added: bool,
 }
 
 impl Binding {
     fn read(stored: &str) -> CellResult<Binding> {
         let parts: Vec<&str> = stored.split(' ').collect();
-        let [door, agent, identity, added] = parts[..] else {
-            return Err(CellError::host(format!("its door binding {stored:?} is not `<door> <agent> <identity> <added>`")));
+        let [door, agent, identity] = parts[..] else {
+            return Err(CellError::host(format!("its door binding {stored:?} is not `<door> <agent> <identity>`")));
         };
-        Ok(Binding { door: door.into(), agent: agent.into(), identity: identity.into(), added: added == "1" })
+        Ok(Binding { door: door.into(), agent: agent.into(), identity: identity.into() })
     }
 
     fn stored(&self) -> String {
-        format!("{} {} {} {}", self.door, self.agent, self.identity, if self.added { 1 } else { 0 })
+        format!("{} {} {}", self.door, self.agent, self.identity)
     }
 }
 
@@ -153,16 +151,13 @@ impl FragmentCell {
         Ok(self.open_binding()?.is_none().then(|| format!("this connector is bound as a {door} door that is shut: the deployment no longer allows it, or its code is no longer the connector's")))
     }
 
-    /// Its binding let go (an unlink, or other code installed): the member
-    /// its binding added leaves with it.
-    pub(crate) async fn unbind_door(&self, why: &str) -> CellResult<()> {
+    /// Its binding let go (an unlink, or other code installed). Its agent
+    /// stays a viewer of its chat (a chat's own agent is not removed): it
+    /// relays and sends nothing for it from then on (`job.door` is null).
+    pub(crate) fn unbind_door(&self, why: &str) -> CellResult<()> {
         let Some(stored) = self.meta(MetaKey::DoorActor)? else { return Ok(()) };
         let b = Binding::read(&stored)?;
         self.del_meta(MetaKey::DoorActor)?;
-        if b.added && self.member_role(&b.identity)?.is_some() {
-            let as_owner = self.as_owner()?;
-            self.remove_member(&as_owner, &b.identity).await?;
-        }
         self.event("door.unbound", why, json!({ "door": b.door, "agent": b.agent }));
         Ok(())
     }
@@ -181,7 +176,7 @@ impl FragmentCell {
         match text("act") {
             "link" => {}
             "unlink" => {
-                self.unbind_door("no longer its owner's agent's door").await?;
+                self.unbind_door("no longer its owner's agent's door")?;
                 return Ok(json!({ "ok": true }));
             }
             _ => return Err(CellError::invalid("act: link or unlink")),
@@ -198,16 +193,15 @@ impl FragmentCell {
         // the agent's fragment says it is theirs, and an agent, and records it
         let asked = json!({ "owner": owner, "door": door, "actor": self.name()? });
         let identity = crate::fragment::ask(&self.env, agent, "computer/door-actor", &asked).await?["identity"].as_str().map(str::to_string).ok_or_else(|| CellError::host("the agent fragment named no identity"))?;
-        // another agent bound before: its binding, and the membership it gave, go first
+        // another agent bound before: its binding goes first
         if self.meta(MetaKey::DoorActor)?.is_some() {
-            self.unbind_door("bound to another of its owner's agents").await?;
+            self.unbind_door("bound to another of its owner's agents")?;
         }
-        let added = self.member_role(&identity)?.is_none();
-        if added {
+        if self.member_role(&identity)?.is_none() {
             let as_owner = self.as_owner()?;
             self.set_member(&as_owner, &identity, SetRole { role: Role::Viewer }).await?;
         }
-        let b = Binding { door, agent: agent.into(), identity, added };
+        let b = Binding { door, agent: agent.into(), identity };
         self.set_meta(MetaKey::DoorActor, &b.stored())?;
         self.event("door.bound", &format!("its owner's agent {agent}'s {} door", b.door), json!({ "door": b.door, "agent": agent, "identity": b.identity }));
         Ok(json!({ "door": b.door, "agent": agent, "relayed": Hosted { door: b.door.clone(), agent: agent.into(), owner: npub::display(&owner) }.relayed() }))
