@@ -1857,6 +1857,59 @@ fn a_question_is_answered_back_where_it_was_asked() {
     assert!(posts(&a)[1].1["error"].as_str().is_some_and(|e| e.starts_with(&format!("Rowan wasn't asked: {}. (Your question in talk--k3x9: \"And the day after?\")", refused_deep()))), "the reason first: {:?}", posts(&a));
 }
 
+/// Goal (#722): an asked turn whose agent leaves this computer still
+/// answers its asker, who stays: one running is let go (its runtime told
+/// to forget it) and answered that its agent left; one over whose answer
+/// had not landed keeps that answer, posted as the asker, and nothing of
+/// its chat's (its agent's key is gone). Restart: a life from that state
+/// owes the answer again. Invalid: a plain turn of the leaving agent, or
+/// one whose asker leaves too, is dropped as before.
+#[test]
+fn an_asked_turn_answers_after_its_agent_leaves() {
+    let (rowan, juniper) = (agent("rowan"), agent("juniper"));
+    let talk = view(&[&rowan, &juniper]);
+    // running when rowan leaves
+    let mut e = engine(&[rowan.clone(), juniper.clone()]);
+    let t = started(&read(&mut e, &rowan, "talk--k3x9", question(1, "Build it?"), Some(&talk), T0)).expect("rowan's turn").turn;
+    let left = e.step(Input::Agents(vec![juniper.clone()]), T0 + 1);
+    assert_eq!(commands(&left), vec![Command::Forget { turn: t.clone() }]);
+    let owed = answers(&left);
+    assert_eq!(owed.len(), 1, "{:?}", left.effects);
+    let (by, on, body) = &owed[0];
+    assert_eq!((by.as_str(), on.as_str()), (juniper.fragment.as_str(), juniper.fragment.as_str()), "posted as juniper, on its own tasks");
+    assert_eq!((&body["outcome"], &body["error"]), (&json!("error"), &json!(LEFT)), "{body}");
+    assert!(posts(&left).iter().all(|(_, b)| b["kind"] == "answer"), "nothing of talk's: {:?}", posts(&left));
+    let landed = e.step(Input::Posted { turn: t.clone(), id: records::answer_id(&t), kept: true }, T0 + 2);
+    assert!(landed.dirty && e.state().turns.is_empty(), "let go once its answer landed");
+
+    // over, its answer not yet landed: kept, and owed again by the next life
+    let mut e = engine(&[rowan.clone(), juniper.clone()]);
+    let t = started(&read(&mut e, &rowan, "talk--k3x9", question(1, "Build it?"), Some(&talk), T0)).expect("rowan's turn").turn;
+    ev(&mut e, Event::Reply { turn: t.clone(), part: 1, text: "Built.".into() }, T0 + 1);
+    let ended = e.step(heard(Event::End { turn: t.clone(), outcome: Outcome::Idle }), T0 + 2);
+    assert_eq!(answers(&ended).len(), 1, "its answer owed, not yet landed");
+    e.step(Input::Agents(vec![juniper.clone()]), T0 + 3);
+    let kept = &e.state().turns[&t];
+    assert_eq!((kept.phase, kept.owed.len()), (Phase::Ended, 1), "its answer alone: {:?}", kept.owed);
+    assert_eq!(kept.owed[0].to.as_deref(), Some(juniper.fragment.as_str()));
+    let mut next = Engine::new(e.state().clone(), Settings::default(), "fedcba9876543210fedcba9876543210").expect("whole").with_runtime(crate::runtime::DEFAULT, &[]);
+    next.step(Input::Agents(vec![juniper.clone()]), T0 + 4);
+    let again = next.recover(T0 + 4);
+    let owed = answers(&again);
+    assert_eq!(owed.len(), 1, "owed again: {:?}", again.effects);
+    assert!(owed[0].2["text"].as_str().is_some_and(|t| t.contains("Built.")), "{:?}", owed[0].2);
+
+    // invalid: a plain turn of the leaving agent, or one whose asker leaves too
+    let mut e = engine(&[rowan.clone(), juniper.clone()]);
+    started(&read(&mut e, &rowan, "talk--k3x9", rec(1, "npub1paul", json!({ "text": "hi" })), Some(&talk), T0)).expect("a plain turn");
+    let dropped = e.step(Input::Agents(vec![juniper.clone()]), T0 + 1);
+    assert!(answers(&dropped).is_empty() && e.state().turns.is_empty(), "{:?}", dropped.effects);
+    let mut e = engine(&[rowan.clone(), juniper.clone()]);
+    started(&read(&mut e, &rowan, "talk--k3x9", question(1, "Build it?"), Some(&talk), T0)).expect("rowan's turn");
+    let both = e.step(Input::Agents(vec![]), T0 + 1);
+    assert!(answers(&both).is_empty() && e.state().turns.is_empty(), "no one to answer: {:?}", both.effects);
+}
+
 /// Goal: an answer says how the asked turn ended, and a turn is never run
 /// again for a better one: one another life claimed is answered lost; one
 /// cut by a restart is answered lost; one stopped while it waited, stopped;

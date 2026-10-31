@@ -123,6 +123,10 @@ fn continued(t: &Turn) -> bool {
     t.continues.is_none() && !t.stop_requested && t.ret.is_none() && !t.command
 }
 
+/// Why an asked turn of an agent that left this computer never answered:
+/// its asker is told so (`set_agents`).
+pub const LEFT: &str = "it was taken off this computer before it finished";
+
 /// Why an agent's hand-off is refused a turn past the hops (an ask, which
 /// is answered so; any other is let go).
 pub fn refused_deep() -> String {
@@ -834,9 +838,36 @@ impl Engine {
 
     fn set_agents(&mut self, agents: Vec<Agent>) {
         assert!(agents.len() <= limits::AGENTS_MAX, "the driver bounds the agents it reads");
+        // an asked turn of an agent leaving this computer still answers its
+        // asker, when the asker stays (#722): one not over ends here, its
+        // answer saying why, owed while the leaving agent is still known
+        // (its name, its identity); its chat's records go with it (its key
+        // does), and its answer, the asker's to post, is kept
+        let staying = |fragment: &str| agents.iter().any(|a| a.fragment == fragment);
+        let answering: Vec<String> = self.state.turns.values().filter(|t| !staying(&t.agent) && t.ret.as_ref().is_some_and(|r| staying(&r.agent))).map(|t| t.id.clone()).collect();
+        for id in answering {
+            self.claiming.remove(&id);
+            self.dirty = true;
+            if self.state.turns[&id].active() {
+                self.tell_runtime(&id, Command::Forget { turn: id.clone() });
+            }
+            let t = self.state.turns.get_mut(&id).expect("listed");
+            if t.phase != Phase::Ended {
+                t.phase = Phase::Ended;
+                t.owed.clear();
+                t.prompts.clear();
+                t.asking = false;
+                self.owe_answer(&id, &Outcome::Error(LEFT.into()), false);
+            }
+            self.state.turns.get_mut(&id).expect("listed").owed.retain(|o| o.to.is_some());
+            crate::ev!("turn.answer_kept", { "turn": id, "why": "its agent left this computer; its asker stays" });
+        }
         self.agents = agents;
         let gone: Vec<String> = self.state.turns.values().filter(|t| self.agent(&t.agent).is_none()).map(|t| t.id.clone()).collect();
         for id in gone {
+            if self.state.turns[&id].owed.iter().any(|o| o.to.is_some()) {
+                continue; // its answer, kept until posted (`posted`)
+            }
             let t = self.state.turns.remove(&id).expect("listed");
             self.claiming.remove(&id);
             self.dirty = true;
