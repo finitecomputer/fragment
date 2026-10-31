@@ -769,13 +769,15 @@ state is persisted as a chat record. It posts:
   composer says so (`Juniper is working: a message waits its turn`), and
   the message is marked queued until its turn starts (no `turn.start`
   names it while a turn of its agent that started before it runs; one
-  sent to the turn's asker just after the turn's own reply is taken for
-  that turn's answer, unmarked). For the agent's owner, when its menu has
+  sent by whoever answers the turn, just after the turn's own reply, is
+  taken for that turn's answer, unmarked). For the agent's owner, when its menu has
   `steer`, words typed then offer Steer beside Send: the words as
   `/steer`, into the running turn now;
-- Stop, `{kind: "stop", turn}` with the id `stop:<turn>`, from the turn's
-  asker while it runs (the send circle is Stop then, until they type: then
-  it sends);
+- Stop, `{kind: "stop", turn}` with the id `stop:<turn>`, from whoever
+  stops the turn (its asker, or for a routine's or an answer's, its
+  agent's owner: Stop, above; the page's control.js) while it runs (the
+  send circle is Stop then, until they type: then it sends), and their
+  commands go to that turn's agent;
 - a prompt's answer with the id `pr:<prompt>`, with `text` for an option
   answered in words;
 - a voice memo (Attachments, above): the composer's mic records until it
