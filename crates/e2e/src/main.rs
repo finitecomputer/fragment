@@ -749,7 +749,6 @@ impl Suite {
             // each boot's log, in this run's scratch: a FAIL comes with the
             // node's side of it, the logs of a node a lane killed included
             log_dir: self.scratch.clone(),
-            node_logs: true,
             // a crash kills wrangler and workerd as one
             own_group: true,
         };

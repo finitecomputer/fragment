@@ -1,0 +1,158 @@
+# The e2e's build on a runner (ci.yml): its caches restored, the stub image
+# built into BuildKit's builder, and `cargo xtask e2e --build-only` (the
+# cell, the CLI and the suite, and the computer images the node's boot
+# builds), with this commit's builds saved for the runs after it when
+# `save` says so. ci.yml's shards run it before their sections, and on a
+# master push whose shards skip (`proven`), `e2e-build` runs it alone, so
+# every pull request and merge group still starts from master's newest
+# build.
+name: e2e build
+description: the e2e's caches, its stub image and its build, saved when asked
+inputs:
+  save:
+    description: "'true' to save this commit's builds, the tools and the stub's layers (master's pushes only: a branch's caches are its own)"
+    required: true
+  worker-build-version:
+    description: worker-build's version (xtask/src/build.rs, WORKER_BUILD_VERSION)
+    required: true
+outputs:
+  builder:
+    description: the BuildKit builder the stub image was built in, for BUILDX_BUILDER
+    value: ${{ steps.buildx.outputs.name }}
+  js-cache-hit:
+    description: whether the JavaScript caches' key was restored whole
+    value: ${{ steps.js.outputs.cache-hit }}
+  js-cache-key:
+    description: the JavaScript caches' key, to save it under after a run
+    value: ${{ steps.js.outputs.cache-primary-key }}
+runs:
+  using: composite
+  steps:
+    - id: rust
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        targets: wasm32-unknown-unknown
+    # the e2e build's tools: cargo's home (the registry, and worker-build
+    # in ~/.cargo/bin; its version is in the key) and what worker-build
+    # fetches (wasm-bindgen at the lockfile's version, wasm-opt, esbuild).
+    # Saved when asked, even from a red run; `deploy` restores it (its key
+    # shared, not the job's: the same inputs there). Its builds are the
+    # next step's.
+    - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      with:
+        shared-key: e2e-tools-worker-build-${{ inputs.worker-build-version }}
+        workspaces: |
+          . -> target
+          cell -> target
+        cache-targets: false
+        cache-directories: ~/.cache/worker-build
+        cache-on-failure: true
+        save-if: ${{ inputs.save == 'true' }}
+    # The e2e's builds, our own crates' with them: xtask (target/debug),
+    # the CLI and the suite (target/release), and the cell's wasm32 builds
+    # (cell/target), as the newest master commit that saved them left
+    # them (below), with the record of the tree they were built from
+    # (target/built-tree). After this rust-cache's, which may clean the
+    # target directories as it restores.
+    - id: builds
+      uses: actions/cache/restore@v4
+      with:
+        path: |
+          target/built-tree
+          target/debug
+          target/release
+          cell/target
+        key: e2e-builds-${{ runner.os }}-${{ steps.rust.outputs.cachekey }}-${{ github.sha }}
+        restore-keys: e2e-builds-${{ runner.os }}-${{ steps.rust.outputs.cachekey }}-
+    # The checkout's mtimes, before any cargo build (xtask/src/stamp.rs,
+    # which says how, compiled alone for it): every file and directory
+    # now, newer than any build restored, then each the record holds as
+    # the checkout does at the time since which it has, so cargo takes as
+    # built what was built from this very content, and nothing else
+    # (another feature set's build, kept from an older tree). The record
+    # goes into the state directory with this build's start, for the
+    # record saved below: only a build that succeeded saves one.
+    - shell: bash
+      run: |
+        rustc --edition 2021 -O -o "$RUNNER_TEMP/stamp" xtask/src/stamp.rs
+        "$RUNNER_TEMP/stamp" restore target/built-tree "$RUNNER_TEMP/stamp-state"
+    # no setup-node: xtask fetches the pinned Node into target/tools
+    # (crates/devstack/src/node_release.rs, checked by its SHA-256) and
+    # runs its own npm ci; the runner's node is never used. A new pin is
+    # a new key.
+    - id: node
+      uses: actions/cache/restore@v4
+      with:
+        path: target/tools
+        key: node-${{ runner.os }}-${{ hashFiles('crates/devstack/src/node_release.rs') }}
+    # what the JavaScript caches (target/cache): npm's tarballs, wrangler's
+    # own, and the Chrome for Testing Browser Rendering downloads, which
+    # the lockfile's miniflare names
+    - id: js
+      uses: actions/cache/restore@v4
+      with:
+        path: target/cache
+        key: js-cache-${{ runner.os }}-${{ hashFiles('crates/devstack/src/node_release.rs', 'package-lock.json') }}
+    - shell: bash
+      env:
+        WORKER_BUILD_VERSION: ${{ inputs.worker-build-version }}
+      run: worker-build --version | grep -qF "$WORKER_BUILD_VERSION" || cargo install worker-build --version "$WORKER_BUILD_VERSION" --locked
+    # The stub image's layers (images/stub/Dockerfile), BuildKit's, in the
+    # Actions cache (scope e2e-stub), built first and here, where a build
+    # can read and write that cache: into a builder of BuildKit's own
+    # (setup-buildx's), whose cache the builds after it find every step in,
+    # xtask's beside the Rust and the node's boot (wrangler's): their
+    # `docker build` goes to it by BUILDX_BUILDER (below), as it would
+    # otherwise to the Docker engine's own builder, which has none of
+    # these layers (`buildx use` does not move `docker build`). An
+    # unchanged bridge (images/bridge,
+    # images/hermes/boot, the images' manifest and lock: about one master
+    # commit in eight changes one) is its layers fetched in seconds, not
+    # its bridge compiled (about 100 s alone, 250 beside the Rust); a
+    # changed one compiles here, before the Rust rather than beside it.
+    # Its CLI stage (the fragment CLI its agents ask with) is the same:
+    # cached until the CLI or a crate it builds from changes, then built
+    # beside the bridge's stage. The context is the repo's root, cut to
+    # what the images build from (.dockerignore).
+    # Saved when asked, every stage's layers (mode=max: the build stage's
+    # base too, 345 MB in all, each layer kept once by its digest).
+    - id: buildx
+      uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+    - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+      env:
+        # no job summary, and no build record artifact
+        DOCKER_BUILD_SUMMARY: "false"
+        DOCKER_BUILD_RECORD_UPLOAD: "false"
+      with:
+        context: .
+        file: images/stub/Dockerfile
+        platforms: linux/amd64
+        provenance: false
+        cache-from: type=gha,scope=e2e-stub
+        cache-to: ${{ inputs.save == 'true' && 'type=gha,scope=e2e-stub,mode=max,ignore-error=true' || '' }}
+    # the cell, the CLI and the suite, and the computer images the
+    # node's boot builds (xtask/src/build.rs), all at once
+    - shell: bash
+      env:
+        BUILDX_BUILDER: ${{ steps.buildx.outputs.name }}
+      run: cargo xtask e2e --build-only
+    # this commit's builds, with the tree they were built from, for the
+    # runs after it, when asked (a red e2e's too: its build was green),
+    # unless this commit's are kept already (a re-run)
+    - if: inputs.save == 'true' && steps.builds.outputs.cache-hit != 'true'
+      shell: bash
+      run: '"$RUNNER_TEMP/stamp" record target/built-tree "$RUNNER_TEMP/stamp-state"'
+    - if: inputs.save == 'true' && steps.builds.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: |
+          target/built-tree
+          target/debug
+          target/release
+          cell/target
+        key: ${{ steps.builds.outputs.cache-primary-key }}
+    - if: inputs.save == 'true' && steps.node.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: target/tools
+        key: ${{ steps.node.outputs.cache-primary-key }}
