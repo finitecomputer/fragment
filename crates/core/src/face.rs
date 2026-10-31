@@ -60,6 +60,12 @@ pub fn title(title: Option<&str>) -> Option<&str> {
     title.map(str::trim).filter(|t| !t.is_empty())
 }
 
+/// An agent's role as its face keeps it (`meta.role`), as its title is:
+/// trimmed when it says anything, else none, so no reader shows a blank tag.
+pub fn role(role: Option<&str>) -> Option<&str> {
+    self::title(role)
+}
+
 /// What an agent is called in the platform's own words (the CLI's, and any
 /// fragment's Open Graph title, `site::inject_og`, which its page reads):
 /// its name (`title`), else its fragment's label, which `@mentions` it.
