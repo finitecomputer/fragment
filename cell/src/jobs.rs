@@ -974,11 +974,15 @@ impl FragmentCell {
             }
         }
         let headers = Headers::new();
+        // every value it fills, a header's or the URL's, is named as its
+        // placeholder in what goes back to the job (`redact`, below)
+        let mut filled = BTreeMap::new();
         for (k, given) in &f.headers {
             let mut value = given.clone();
             for name in placeholders(given) {
                 let secret = self.fill(name, &url).await?;
                 value = value.replace(&format!("{{{{{name}}}}}"), &secret);
+                filled.insert(name.to_string(), secret);
             }
             headers.set(k, &value).map_err(|e| permanent(format!("header {k}: {e}")))?;
         }
@@ -996,10 +1000,12 @@ impl FragmentCell {
                 fragment_core::secrets::UrlUnfilled::Moved => permanent("a secret's value would change where this fetch goes (its host, or its path's segments or query's parameters): it is not sent"),
             })?
         };
-        // what goes back to the job names the URL's secrets as it wrote them:
-        // a failure's message, and an answer that echoes its URL (a redirect's
-        // `location`, an error page)
-        let redact = |text: String| fragment_core::secrets::redact(text, &opened);
+        // what goes back to the job names each secret it filled as the job
+        // wrote it, however the vendor spelled it: a failure's message, and
+        // an answer that echoes the request (a redirect's `location`, an
+        // error page, a debug echo of its headers)
+        filled.extend(opened);
+        let redact = |text: String| fragment_core::secrets::redact(text, &filled);
         if !matches!(method, Method::Get | Method::Head) && !f.headers.keys().any(|k| k.eq_ignore_ascii_case(IDEMPOTENCY_HEADER)) {
             let key = format!("{}-s{index}", self.run_key(run.id).map_err(|e| StepFail::Retry(e.message))?);
             headers.set(IDEMPOTENCY_HEADER, &key).map_err(|e| permanent(e.to_string()))?;

@@ -119,7 +119,7 @@ mod prepare;
 #[cfg(test)]
 mod markdown_dom;
 #[cfg(test)]
-mod session_archive_js;
+mod continue_js;
 mod rollout;
 mod schema_lock;
 // CI's freshness of its cached builds, compiled by itself with rustc

@@ -1,8 +1,9 @@
 //! The shell (docs/cloudflare-v1.md, decisions 6–12): the platform's one
-//! page, at `/`, `/settings`, `/apps` and `/welcome`, Finite's about page, privacy
-//! policy and terms at `/about`, `/privacy` and `/terms`, and its files at
-//! `/__shell/<file>`, the release's (cell/shell/), read from its Static
-//! Assets (assets.rs). It holds no key: its script calls the API with
+//! page, at `/`, `/settings`, `/apps`, `/history` and `/welcome`, Finite's
+//! about page, privacy policy and terms at `/about`, `/privacy` and
+//! `/terms`, and its files at `/__shell/<file>`, the release's
+//! (cell/shell/), read from its Static Assets (assets.rs). It holds no
+//! key: its script calls the API with
 //! the person's platform session (lib.rs `shell_session`) and frames their
 //! fragments, each signed in on its own origin by the platform's frame mint.
 //!
@@ -89,12 +90,13 @@ fn frame_src(cfg: &Config, url: &Url) -> String {
     format!("'self' {platform} {scheme}://*.{}{port}", cfg.host_suffix)
 }
 
-/// `GET /`, `GET /settings`, `GET /apps` and `GET /welcome`: the shell's page, for
-/// anyone (signed out, it asks them to sign in; the shell opens the view
-/// its path names), naming the release that answers it and when it was
-/// deployed (`fragment_templates::shell_page`): its script reloads at a
-/// safe moment once a later answer names another, and Settings ends with
-/// both (docs/api.md, The shell). A few KiB, read whole to fill it.
+/// `GET /`, `GET /settings`, `GET /apps`, `GET /history` and `GET /welcome`:
+/// the shell's page, for anyone (signed out, it asks them to sign in; the
+/// shell opens the view its path names), naming the release that answers
+/// it and when it was deployed (`fragment_templates::shell_page`): its
+/// script reloads at a safe moment once a later answer names another, and
+/// Settings ends with both (docs/api.md, The shell). A few KiB, read whole
+/// to fill it.
 pub async fn page(req: &Request, env: &Env, cfg: &Config, url: &Url) -> CellResult<Response> {
     // its bytes are checked against their hash as they are read: UTF-8, as the release's index.html is
     let bytes = crate::assets::read(env, page_file("index.html")).await?;

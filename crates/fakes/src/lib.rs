@@ -13,6 +13,7 @@ pub mod mail;
 pub mod openrouter;
 pub mod push;
 pub mod stripe;
+pub mod telegram;
 pub mod upstream;
 pub mod workers_ai;
 pub mod workos;
