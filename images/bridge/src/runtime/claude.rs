@@ -824,6 +824,7 @@ mod tests {
             reply_to: None,
             quote: Some(super::super::Quote { id: "q".into(), text: "earlier".into(), own: true }),
             simplex: false,
+            continues: None,
         };
         assert_eq!(message(&ts), "[Recent channel messages]\nthe turn before was cut\n\n[New message]\n[Replying to your previous message: \"earlier\"]\n[paul] hi\n[paul sent a file: 'a.png' (image/png). It is on your computer at: /tmp/m/a.png]");
     }
