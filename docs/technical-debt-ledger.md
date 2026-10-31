@@ -498,11 +498,13 @@ unfinished design, not debt.
 
 - **Shortcut:** `fragment_core::migrate::adopt` takes an object from
   before 2026-10-19 whose tables are step 1's (`Class::variants`); any
-  other refuses every call (`schema_refused`).
+  other refuses every call (`schema_refused`). An operator's wake
+  (`POST /api/admin/objects/{class}/wake`) starts one no call has.
 - **Risk:** such objects stay refused; a Registry refuses everything.
-- **Delete when:** the deployments made before 2026-10-19 (the e2e
-  preview, p5, preview.finite.build) are reset or retired, or those
-  objects deleted (Paul's call).
+- **Delete when:** every object of the deployments made before
+  2026-10-19 (preview.finite.build, finite.chat) has been woken by
+  `fragment operator wake`, each answering ready; `adopt` and the wake
+  route then go together.
 
 ## An app facet's operation ledger has no schema version
 

@@ -529,6 +529,17 @@ enum OperatorCmd {
         #[arg(long)]
         key_file: Option<PathBuf>,
     },
+    /// Start platform objects by the ids Cloudflare lists them under, each
+    /// as a call would, its schema made current (one made before versioned
+    /// schemas adopted): says which refused, and how many are ready
+    Wake {
+        /// Registry, Principal, Ledger, Fragment or Computer
+        class: String,
+        /// A file of their ids, one a line
+        ids: PathBuf,
+        #[arg(long)]
+        key_file: Option<PathBuf>,
+    },
     /// What operators did, newest first
     Log {
         #[arg(long)]
@@ -1440,6 +1451,35 @@ fn run(cli: Cli) -> Result<()> {
             let v = admin_answer(&c, c.get("/api/admin/health")?)?;
             json_exit(j, &v);
             println!("{}", serde_json::to_string_pretty(&v)?);
+            return Ok(());
+        }
+        Cmd::Operator { sub: OperatorCmd::Wake { class, ids, key_file } } => {
+            if class.is_empty() || !class.bytes().all(|b| b.is_ascii_alphabetic()) {
+                return Err(usage("a class: Registry, Principal, Ledger, Fragment or Computer"));
+            }
+            let c = operator_client(&cli.host, cli.verbose, key_file.as_deref())?;
+            let text = std::fs::read_to_string(&ids).with_context(|| format!("reading {}", ids.display()))?;
+            let ids: Vec<&str> = text.split_whitespace().collect();
+            let mut refused = Vec::new();
+            for (n, id) in ids.iter().enumerate() {
+                // a wake asked again runs nothing: retried as a read is
+                let woke = c.post_json_by_id(&format!("/api/admin/objects/{class}/wake"), &json!({ "id": id })).and_then(|r| admin_answer(&c, r));
+                if let Err(e) = woke {
+                    eprintln!("{class} {id}: {e:#}");
+                    refused.push(json!({ "id": id, "error": format!("{e:#}") }));
+                }
+                if !j && (n + 1) % 500 == 0 {
+                    eprintln!("{} of {}", n + 1, ids.len());
+                }
+            }
+            let v = json!({ "class": class, "asked": ids.len(), "ready": ids.len() - refused.len(), "refused": refused });
+            if refused.is_empty() {
+                json_exit(j, &v);
+            }
+            println!("{} of {} {class} objects ready", ids.len() - refused.len(), ids.len());
+            if !refused.is_empty() {
+                return Err(anyhow!("{} {class} objects did not wake", refused.len()));
+            }
             return Ok(());
         }
         Cmd::Operator { sub: OperatorCmd::Credit { org, usd, why, id, key_file } } => {
