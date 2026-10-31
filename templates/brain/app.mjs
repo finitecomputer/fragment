@@ -21,9 +21,12 @@
 // steps. Each write and delete carries its batch's generation as a fence,
 // and the index refuses one below the last it took for the page, so a
 // batch that read a page before a newer one wrote or deleted it never
-// lands over that. A page whose bytes did not change is not written again, unless
-// a rebuild (an editor's full pass, or an index its embedding model
-// emptied) writes every page; one main deletes leaves the index.
+// lands over that. Every page a batch takes is written through its fence,
+// its bytes unchanged too: the index writes (and embeds) nothing for a
+// revision it holds, but takes the newer fence, so an older batch's write
+// still on its way is refused. A full pass (an editor's, or an index its
+// embedding model emptied) takes every page; one main deletes leaves the
+// index.
 //
 // The viewer (site/) is the notes template's, reading api/tree and
 // api/file here, with a search box of the brain's own beside it.
@@ -130,10 +133,9 @@ export class App extends DurableObject {
       });
     }
     sql.exec("CREATE TABLE IF NOT EXISTS changes (id INTEGER PRIMARY KEY CHECK (id = 1), at INTEGER NOT NULL, paths TEXT NOT NULL)");
-    // a marked path: its newest mark's generation, a batch's claim on it
-    // (when, and which batch), and whether it is written whatever its hash
-    sql.exec(`CREATE TABLE IF NOT EXISTS dirty (
-      path TEXT PRIMARY KEY, gen INTEGER NOT NULL, claimed INTEGER, by TEXT, force INTEGER NOT NULL DEFAULT 0)`);
+    // a marked path: its newest mark's generation, and a batch's claim on
+    // it (when, and which batch)
+    sql.exec("CREATE TABLE IF NOT EXISTS dirty (path TEXT PRIMARY KEY, gen INTEGER NOT NULL, claimed INTEGER, by TEXT)");
     // a page as last written (its hash) or left out (`skipped`, why)
     sql.exec(`CREATE TABLE IF NOT EXISTS pages (
       path TEXT PRIMARY KEY, wiki TEXT NOT NULL, title TEXT NOT NULL, hash TEXT NOT NULL,
@@ -170,11 +172,8 @@ export class App extends DurableObject {
 
   // `path` marked at `gen`. A batch's claim on it stays: that batch, done,
   // lets it go to be read again, so one batch at a time reads a page.
-  #dirty(path, gen, force = false) {
-    this.ctx.storage.sql.exec(
-      "INSERT INTO dirty (path, gen, force) VALUES (?, ?, ?) ON CONFLICT (path) DO UPDATE SET gen = excluded.gen, force = MAX(force, excluded.force)",
-      path, gen, force ? 1 : 0,
-    );
+  #dirty(path, gen) {
+    this.ctx.storage.sql.exec("INSERT INTO dirty (path, gen) VALUES (?, ?) ON CONFLICT (path) DO UPDATE SET gen = excluded.gen", path, gen);
   }
 
   // ---- the index, kept by the file trigger (or a member's start) ----
@@ -185,12 +184,10 @@ export class App extends DurableObject {
   // batch that died left.
   async changed(input = {}, job) {
     const paths = (Array.isArray(input.paths) ? input.paths : []).filter((p) => typeof p === "string").slice(0, PATHS_MAX);
-    // `full` writes every page again, whatever its hash (a rebuild); more
-    // paths than a mark takes reads every file again
-    const force = input.full === true;
-    const full = force || (Number.isSafeInteger(input.more) && input.more > 0);
+    // `full` (or more paths than a mark takes) reads every file again
+    const full = input.full === true || (Number.isSafeInteger(input.more) && input.more > 0);
     const hop = Number.isSafeInteger(input.hop) && input.hop > 0 ? input.hop : 0;
-    const marked = await job.call("mark", { paths, full, force });
+    const marked = await job.call("mark", { paths, full });
     let last = { claimed: 0, pending: 0 };
     let steps = 0;
     let waited = false;
@@ -210,16 +207,15 @@ export class App extends DurableObject {
   }
 
   // The paths that moved, each at a new generation; `full`, an editor's (or
-  // a trigger's), asks for every file to be read again, and `force` for
-  // every page to be written again. Open pages re-run last_change after a
-  // trigger's mark, and refresh their tree.
-  mark({ paths = [], full = false, force = false }, call) {
+  // a trigger's), asks for every file to be read again. Open pages re-run
+  // last_change after a trigger's mark, and refresh their tree.
+  mark({ paths = [], full = false }, call) {
     const sql = this.ctx.storage.sql;
     const gen = this.#bump("gen");
     const mine = paths.filter(indexable);
     for (const p of mine) this.#dirty(p, gen);
     const may = editor(call.role);
-    if (full && may) this.#set("full", force || this.#get("full") === "force" ? "force" : "all");
+    if (full && may) this.#set("full", "1");
     if (may) {
       sql.exec(
         "INSERT INTO changes (id, at, paths) VALUES (1, ?, ?) ON CONFLICT (id) DO UPDATE SET at = excluded.at, paths = excluded.paths",
@@ -231,19 +227,19 @@ export class App extends DurableObject {
   }
 
   // One batch: up to `BATCH` marked files no other batch holds, claimed,
-  // read at main and written to the index. `full` (an editor's) writes every
-  // page again. `claimed` 0: nothing was left for it. A batch that fails
+  // read at main and written to the index. `full` (an editor's) reads every
+  // file again. `claimed` 0: nothing was left for it. A batch that fails
   // lets go of what it holds, for the next to take at once.
   async reindex({ full = false } = {}, call) {
     const sql = this.ctx.storage.sql;
-    if (full === true && editor(call?.role)) this.#set("full", "force");
+    if (full === true && editor(call?.role)) this.#set("full", "1");
     if (this.#get("full") !== null) await this.#markAll();
     const now = Date.now();
     const by = crypto.randomUUID();
     const rows = sql.exec(
       `UPDATE dirty SET claimed = ?, by = ? WHERE path IN
          (SELECT path FROM dirty WHERE claimed IS NULL OR claimed < ? ORDER BY path LIMIT ?)
-       RETURNING path, gen, force`,
+       RETURNING path, gen`,
       now, by, now - CLAIM_MS, BATCH,
     ).toArray();
     const done = { indexed: 0, unchanged: 0, removed: 0, skipped: 0, stale: 0 };
@@ -256,17 +252,15 @@ export class App extends DurableObject {
     return { ...done, claimed: rows.length, pending: this.#pending() };
   }
 
-  // A full pass: every markdown file at main, and every page that left it
-  // (each written again, if forced).
+  // A full pass: every markdown file at main, and every page that left it.
   async #markAll() {
-    const force = this.#get("full") === "force";
     const listed = (await this.files.list("")).map((f) => f.path).filter(indexable);
     const sql = this.ctx.storage.sql;
     this.ctx.storage.transactionSync(() => {
       const gen = this.#bump("gen");
       const have = new Set(listed);
       const gone = sql.exec("SELECT path FROM pages").toArray().map((r) => r.path).filter((p) => !have.has(p));
-      for (const p of [...listed, ...gone]) this.#dirty(p, gen, force);
+      for (const p of [...listed, ...gone]) this.#dirty(p, gen);
       this.#unset("full");
     });
   }
@@ -303,17 +297,18 @@ export class App extends DurableObject {
   // The index was emptied (its embedding model changed): every page is
   // written again.
   #cleared() {
-    this.#set("full", "force");
+    this.#set("full", "1");
   }
 
   // One page, as main holds it now, by the batch `by` that claimed it at
-  // `gen`: written to the index when its bytes changed (or `force`), taken
-  // out when it is gone, each at fence `gen`. Answers what happened to it.
+  // `gen`: written to the index (which writes nothing for a revision it
+  // holds), or taken out when it is gone, each at fence `gen`. Answers what
+  // happened to it.
   // Marked again while it was read, it stays marked, its claim let go, and
   // a batch reads it again; taken by another batch (this one's claim
   // lapsed), that batch decides, and the fences keep this one's effects
   // from landing over its.
-  async #index({ path, gen, force }, by) {
+  async #index({ path, gen }, by) {
     const sql = this.ctx.storage.sql;
     const prior = sql.exec("SELECT hash FROM pages WHERE path = ?", path).toArray()[0] ?? null;
     const listed = indexable(path) ? ((await this.files.list(path)).find((f) => f.path === path) ?? null) : null;
@@ -324,10 +319,7 @@ export class App extends DurableObject {
     let outcome;
     let page = { title: stem(path), sections: [], truncated: false };
     let why = null;
-    // a page left out for room is tried again at its next pass
-    let retry = false;
-    if (!force && prior?.hash === hash) outcome = "unchanged";
-    else if (listed === null) {
+    if (listed === null) {
       // gone, or no longer searched: out of the index, its tombstone kept
       // (the platform forgets a file main deletes too)
       outcome = !(await this.#remove(path, gen)) ? "stale" : prior === null ? "unchanged" : "removed";
@@ -342,32 +334,31 @@ export class App extends DurableObject {
       } else if (outcome === "full") {
         outcome = "skipped";
         why = "the index is full: split this brain into child brains";
-        retry = true;
       }
     }
+    // a revision the index held already is no write
+    const told = outcome === "held" ? "unchanged" : outcome;
     return this.ctx.storage.transactionSync(() => {
       const row = sql.exec("SELECT gen, by FROM dirty WHERE path = ?", path).toArray()[0];
-      if (row?.by !== by) return outcome;
+      if (row?.by !== by) return told;
       if (row.gen === gen) sql.exec("DELETE FROM dirty WHERE path = ?", path);
       else sql.exec("UPDATE dirty SET claimed = NULL, by = NULL WHERE path = ?", path);
-      if (outcome === "unchanged" || outcome === "stale") return outcome;
+      if (outcome === "unchanged" || outcome === "stale") return told;
       if (outcome === "removed") {
         sql.exec("DELETE FROM pages WHERE path = ?", path);
         this.#bump("writes");
-        return outcome;
+        return told;
       }
       const written = outcome === "indexed" || outcome === "held";
       sql.exec(
         `INSERT INTO pages (path, wiki, title, hash, bytes, sections, skipped, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (path) DO UPDATE SET wiki = excluded.wiki, title = excluded.title, hash = excluded.hash,
            bytes = excluded.bytes, sections = excluded.sections, skipped = excluded.skipped, at = excluded.at`,
-        path, wikiOf(path), page.title, retry ? `full:${hash}` : hash, listed.size,
+        path, wikiOf(path), page.title, hash, listed.size,
         written ? page.sections.length : 0, why, Date.now(),
       );
-      // a revision the index held already is no write
-      if (outcome === "held") return "unchanged";
-      this.#bump("writes");
-      return outcome;
+      if (outcome !== "held") this.#bump("writes");
+      return told;
     });
   }
 

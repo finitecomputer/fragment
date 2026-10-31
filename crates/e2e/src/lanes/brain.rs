@@ -10,8 +10,9 @@
 //! the same files again change nothing; the index survives a restart and
 //! follows the next change; an asset's blob, named by its source note, is
 //! served; an index behind its files says so, and a member's page starts
-//! its job; and the page (the notes viewer and the brain's search) loads
-//! for a member.
+//! its job; the page (the notes viewer and the brain's search) loads for a
+//! member; and a page grown past 1 MiB leaves the index by the brain's own
+//! fenced delete, while a delete a newer writer fenced is stale, no failure.
 
 #[path = "brain_parent.rs"]
 mod parent;
@@ -118,6 +119,8 @@ const SOLAR: &str = "garden/wiki/solar-panels.md";
 const CAFE: &str = "garden/raw/2026-10-03-cafe-solaire.md";
 const NOTE: &str = "garden/raw/roof-survey.md";
 const ASSET: &str = "garden/raw/assets/roof-survey.bin";
+const GROWS: &str = "garden/wiki/anemometer.md";
+const GUST: &str = "garden/wiki/gust.md";
 
 pub fn brain(s: &mut Suite, api: &Api) -> Result<()> {
     // the code.storage fake (a pointer read back), a restart, Chrome
@@ -430,6 +433,46 @@ pub fn brain(s: &mut Suite, api: &Api) -> Result<()> {
         "a brain's page shows its <img onerror>, <script>, <svg onload> and javascript: links as their text, and runs none of it",
         shown && chrome.eval(&tab, "(() => { const c = document.getElementById('content'); return window.__ran === undefined && !c.querySelector('img,script,svg,iframe,a[href^=\"javascript\" i]') && c.textContent.includes('<img src=x onerror='); })()")? == true,
         chrome.eval(&tab, "JSON.stringify({ ran: window.__ran ?? null, text: document.getElementById('content')?.innerText.slice(0, 400) })")?,
+    );
+
+    // a page that grows past 1 MiB leaves the index: no file left main, so the
+    // platform forgets nothing, and only the brain's fenced delete takes it out
+    // (across the capability, its source whole). Last here: a newer writer's
+    // fence, set through the owner's API as a batch that took the page after
+    // this one's claim lapsed would, stays for the life.
+    write(&dir, GROWS, b"# Anemometer\n\nAn anemometer on the ridge counts the wind.\n")?;
+    write(&dir, GUST, b"# Gust\n\nThe strongest gust this winter.\n")?;
+    let out = s.cli(api, &home, &["sync", &name, "--dir", &dir_s]);
+    let small = s.eventually(WAIT, || {
+        index(api, &keys, &name)["pending"] == 0
+            && search(api, &keys, &name, json!({ "q": "anemometer" })).is_ok_and(|r| found(&r).first().is_some_and(|f| f.0 == GROWS))
+            && search(api, &keys, &name, json!({ "q": "strongest gust" })).is_ok_and(|r| found(&r).first().is_some_and(|f| f.0 == GUST))
+    });
+    anyhow::ensure!(out.status.success() && small, "the two small pages indexed: {}", index(api, &keys, &name));
+    let newer = json!({
+        "source": GUST, "revision": "newer", "title": "Gust", "fields": { "wiki": "garden" },
+        "sections": [{ "id": "s0", "text": "A newer writer's gale." }], "fence": 1u64 << 40,
+    });
+    let newer = api.signed(&keys, "POST", &format!("/api/f/{name}/search/upsert"), Some(&newer))?;
+    anyhow::ensure!(newer.status == 200, "the newer writer's write: {newer}");
+    write(&dir, GROWS, "An anemometer on the ridge counts the wind.\n".repeat(25_000).as_bytes())?;
+    write(&dir, GUST, "The strongest gust this winter.\n".repeat(35_000).as_bytes())?;
+    let out = s.cli(api, &home, &["sync", &name, "--dir", &dir_s]);
+    let skipped = s.eventually(WAIT, || {
+        index(api, &keys, &name)["skipped"].as_array().is_some_and(|l| l.iter().any(|x| x["path"] == GROWS && x["why"].as_str().is_some_and(|w| w.contains("1 MiB"))))
+    });
+    let gone = search(api, &keys, &name, json!({ "q": "anemometer" }))?;
+    s.ok(
+        "a page grown past 1 MiB (a blob, still at main) is taken out of the index by the brain's fenced delete, and listed as skipped",
+        out.status.success() && skipped && gone.status == 200 && found(&gone).iter().all(|f| f.0 != GROWS),
+        json!({ "index": index(api, &keys, &name), "anemometer": gone.body }),
+    );
+    let done = s.eventually(WAIT, || index(api, &keys, &name)["pending"] == 0);
+    let stands = search(api, &keys, &name, json!({ "q": "gale" }))?;
+    s.ok(
+        "a delete below a newer writer's fence is refused across the capability whole: the brain counts it stale, fails nothing, and the newer write stands",
+        done && found(&stands).first().is_some_and(|f| f.0 == GUST),
+        json!({ "index": index(api, &keys, &name), "gale": stands.body }),
     );
     parent::run(s, api, &keys)?;
     Ok(())

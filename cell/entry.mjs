@@ -116,7 +116,11 @@ export class Search extends WorkerEntrypoint {
   }
 
   upsert(source) { return this.#answer("upsert", source); }
-  delete(source) { return this.#answer("delete", { source: String(source) }); }
+  // `{source, fence?}`, or a source's name alone
+  delete(d) {
+    const asked = typeof d === "string" ? { source: d } : { source: String(d?.source), fence: d?.fence };
+    return this.#answer("delete", asked);
+  }
   query(question) { return this.#answer("query", question); }
   status() { return this.#answer("status", {}); }
 }

@@ -71,12 +71,14 @@ indexing, hint?}`.
   and a read overtaken by a newer mark is read again. Each write and
   delete carries its batch's generation as a fence (docs/api.md, "A
   fragment's search"), so a batch whose claim lapsed never lands a write
-  or a delete over a newer batch's. A page whose
-  bytes hash the same is not written again; one `main` deletes is taken
-  out. More than 200 paths in one move, or an index of an older shape
-  (`FORMAT`, which drops the app's old tables), read every file again;
+  or a delete over a newer batch's. Every page a batch takes is written
+  through its fence, its bytes unchanged too: the index writes (and
+  embeds) nothing for a revision it holds, but takes the newer fence, so
+  an older batch's write still on its way is refused. A page `main` deletes
+  is taken out, its tombstone kept. More than 200 paths in one move, an
+  index of an older shape (`FORMAT`, which drops the app's old tables),
   `reindex {full: true}` (an editor's), or a write the index answers
-  `cleared` (its embedding model changed and it emptied), writes every page
+  `cleared` (its embedding model changed and it emptied) take every page
   again.
 - **Behind its files**, a search answers `indexing: true` and a `hint`
   naming the job that finishes it, and the page says so.

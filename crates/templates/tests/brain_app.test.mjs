@@ -6,8 +6,9 @@
 // (`{answer}` or a plain `{error}`, thrown on the app's side as
 // cell/platform.mjs throws it). Each test sets up an interleaving the
 // platform allows (Alex's reviews of #869): batches side by side, a claim
-// that lapses, a page deleted or made while read, an index emptied by an
-// embeddings change, a batch that fails.
+// that lapses, a page deleted or made while read, a newer batch that finds
+// the same bytes as the last it wrote, an index emptied by an embeddings
+// change, a batch that fails.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { register } from "node:module";
@@ -131,7 +132,7 @@ function index() {
       }
       const written = sources.get(src.source)?.revision !== src.revision;
       if (src.fence !== undefined) fences.set(src.source, Math.max(stored ?? 0, src.fence));
-      ix.writes++;
+      if (written) ix.writes++;
       sources.set(src.source, { revision: src.revision, text: src.sections.map((s) => s.text).join("\n") });
       return { answer: { source: src.source, revision: src.revision, written, chunks: src.sections.length, cleared } };
     },
@@ -373,4 +374,61 @@ it("a delete whose claim lapsed never takes out the page a newer batch wrote", a
   const after = await settle(app);
   assert.equal(ix.text("w/a.md"), "again", "the page made again stays");
   assert.equal(after.pending, 0);
+});
+
+// A newer batch that finds the bytes the brain last wrote (an edit
+// reverted, a page deleted and made again the same) still writes them
+// through its fence, so an older batch's effect lands under it, whether it
+// lands before the newer batch's or after.
+it("a write whose claim lapsed never lands over a revert, whichever finishes first", async (t) => {
+  const tick = clock(t);
+  for (const stale of ["before", "after"]) {
+    const { app, fs, ix } = await brain({ "w/a.md": "# A\n\nfirst" });
+    fs.at.set("w/a.md", "# A\n\nsecond");
+    mark(app, "w/a.md");
+    const openA = fs.gate("read:w/a.md");
+    const a = app.reindex({}, EDITOR); // reads "second", and waits past its claim
+    await new Promise((r) => setImmediate(r));
+    fs.at.set("w/a.md", "# A\n\nfirst");
+    mark(app, "w/a.md");
+    tick(CLAIM_MS + 1);
+    const openB = fs.gate("read:w/a.md");
+    const b = app.reindex({}, EDITOR); // takes the lapsed claim, reads "first" again, and waits
+    await new Promise((r) => setImmediate(r));
+    const [first, second] = stale === "before" ? [[openA, a], [openB, b]] : [[openB, b], [openA, a]];
+    first[0]();
+    await first[1];
+    second[0]();
+    await second[1];
+    const after = await settle(app);
+    assert.equal(ix.text("w/a.md"), "first", `the stale write landed ${stale} the newer batch`);
+    assert.equal(after.pending, 0);
+  }
+});
+
+it("a delete whose claim lapsed never takes out a page made again the same, whichever finishes first", async (t) => {
+  const tick = clock(t);
+  for (const stale of ["before", "after"]) {
+    const { app, fs, ix } = await brain({ "w/a.md": "# A\n\nfirst" });
+    fs.at.delete("w/a.md");
+    ix.forget("w/a.md");
+    mark(app, "w/a.md");
+    const letGo = ix.holdDelete();
+    const a = app.reindex({}, EDITOR); // finds it gone, and its delete waits past its claim
+    await new Promise((r) => setImmediate(r));
+    fs.at.set("w/a.md", "# A\n\nfirst");
+    mark(app, "w/a.md");
+    tick(CLAIM_MS + 1);
+    const openB = fs.gate("read:w/a.md");
+    const b = app.reindex({}, EDITOR); // takes the lapsed claim, reads the same bytes, and waits
+    await new Promise((r) => setImmediate(r));
+    const [first, second] = stale === "before" ? [[letGo, a], [openB, b]] : [[openB, b], [letGo, a]];
+    first[0]();
+    await first[1];
+    second[0]();
+    await second[1];
+    const after = await settle(app);
+    assert.equal(ix.text("w/a.md"), "first", `the stale delete landed ${stale} the newer batch`);
+    assert.equal(after.pending, 0);
+  }
 });
