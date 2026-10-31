@@ -35,6 +35,8 @@ struct Hit {
     authorization: String,
     hops: String,
     idempotency: String,
+    /// Its query's `k`, if any.
+    key: String,
     /// JSON bodies (a delivery's), else null.
     body: Value,
 }
@@ -57,10 +59,14 @@ impl Upstream {
                 authorization: header("authorization"),
                 hops: header("x-fragment-hops"),
                 idempotency: header("idempotency-key"),
+                key: req.query.get("k").cloned().unwrap_or_default(),
                 body: serde_json::from_slice(&req.body).unwrap_or(Value::Null),
             });
             match req.path.as_str() {
                 "/data" => Response::json(200, &json!({ "items": ["alpha", "beta"] })),
+                p if p.starts_with("/keyed/") => Response::json(200, &json!({ "items": ["keyed"] })),
+                // an answer that echoes the URL it was asked at
+                p if p.starts_with("/echo/") => Response::json(302, &json!({ "asked": p })).with_header("location", p),
                 "/once" => Response::json(200, &json!({ "items": ["once"] })),
                 "/flaky" if flaky.fetch_add(1, Ordering::SeqCst) < 2 => Response::json(503, &json!({ "error": "busy" })),
                 "/flaky" => Response::json(200, &json!({ "items": ["gamma"] })),
@@ -231,6 +237,25 @@ pub fn jobs(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("the secret appears in no run, record, or event", !everything.contains(SECRET), "the secret leaked");
     let ops = records(api, &owner, &name, "ops");
     s.ok("the step's mutation is ledgered under the run's step id", ops.iter().any(|o| o["body"] == json!({ "op": "save", "id": format!("job:{id}:1") })), json!(ops));
+    // a secret in the URL's path and query, where an API takes it (a bot
+    // token's place: Telegram's), filled as a header's is
+    let keyed = json!({ "url": upstream.url("/keyed/bot{{API_KEY}}/data?k={{API_KEY}}") });
+    let r = api.op(&owner, &name, "digest", "d-url", keyed.clone())?;
+    let keyed_run = settle(api, &owner, &name, started(&r), &["succeeded", "held"], long);
+    let hits = upstream.hits(&format!("/keyed/bot{SECRET}/data"));
+    s.ok(
+        "a secret in a fetch's URL path and query is filled at the egress point, as one segment's and one value's bytes",
+        keyed_run["status"] == "succeeded" && hits.len() == 1 && hits[0].key == SECRET,
+        json!({ "run": keyed_run, "hits": format!("{hits:?}") }),
+    );
+    s.ok("its run names the URL as the job wrote it, never the secret", keyed_run["input"] == keyed && !keyed_run.to_string().contains(SECRET), &keyed_run);
+    let r = api.op(&owner, &name, "probe", "probe-echo", json!({ "url": upstream.url("/echo/{{API_KEY}}/x") }))?;
+    let echoed = settle(api, &owner, &name, started(&r), &["succeeded", "held"], long);
+    s.ok(
+        "an answer that echoes a URL's secret (a redirect's location) reaches the job naming it as the job wrote it",
+        echoed["status"] == "succeeded" && echoed["output"]["location"] == "/echo/{{API_KEY}}/x" && !echoed.to_string().contains(SECRET) && upstream.hits(&format!("/echo/{SECRET}/x")).len() == 1,
+        &echoed,
+    );
 
     // a step that fails for now is retried; one that keeps failing is the job's to catch
     let r = api.op(&owner, &name, "digest", "d3", json!({ "url": upstream.url("/flaky") }))?;
@@ -328,7 +353,7 @@ pub fn jobs(s: &mut Suite, api: &Api) -> Result<()> {
         format!("{keys:?}"),
     );
     let r = api.signed(&owner, "GET", &format!("/api/f/{name}/runs?op=digest"), None)?;
-    s.ok("runs filter by operation, newest first", r.body["runs"].as_array().is_some_and(|a| a.len() == 2 && a[0]["id"].as_i64() > a[1]["id"].as_i64()), &r);
+    s.ok("runs filter by operation, newest first", r.body["runs"].as_array().is_some_and(|a| a.len() == 3 && a[0]["id"].as_i64() > a[1]["id"].as_i64() && a[1]["id"].as_i64() > a[2]["id"].as_i64()), &r);
 
     // a long job: each step's answer is kept by the cell, and the body
     // reads all of them back, in order, at every step
@@ -475,6 +500,20 @@ fn secret_hosts(s: &mut Suite, api: &Api, owner: &Keys, upstream: &Upstream) -> 
         &cleartext,
     );
     s.ok("and neither reached anything", upstream.hits("/data").len() == reached, upstream.hits("/data").len() - reached);
+    // a URL's secret: checked against its host as its header's is, and
+    // never let change where the request goes
+    let r = api.op(owner, &name, "digest", "url-elsewhere", json!({ "url": upstream.url("/keyed/{{API_KEY}}/x").replace("127.0.0.1", "localhost") }))?;
+    let elsewhere = settle(api, owner, &name, started(&r), &["succeeded", "held"], long);
+    s.ok("a secret in the URL toward a host it does not name fills nothing, and fails its step", elsewhere["status"] == "held" && elsewhere["error"].as_str().is_some_and(|e| e.contains("may not go to this request's host")), &elsewhere);
+    let r = set_secret(api, owner, &name, "..", &["127.0.0.1"])?;
+    anyhow::ensure!(r.status == 200, "secret value: {r}");
+    let r = api.op(owner, &name, "digest", "url-moved", json!({ "url": upstream.url("/keyed/{{API_KEY}}/x") }))?;
+    let moved = settle(api, owner, &name, started(&r), &["succeeded", "held"], long);
+    s.ok(
+        "a secret whose value would change where the fetch goes (a `..` segment) is not sent, and fails its step",
+        moved["status"] == "held" && moved["error"].as_str().is_some_and(|e| e.contains("would change where this fetch goes")) && upstream.hits("/keyed/x").is_empty() && upstream.hits("/x").is_empty(),
+        &moved,
+    );
     Ok(())
 }
 
