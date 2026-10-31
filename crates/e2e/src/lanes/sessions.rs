@@ -20,7 +20,7 @@ use crate::Suite;
 /// The old Finite's export's chats, as its export.py writes them: a chat,
 /// a chat large enough to be a blob, a month's scheduled runs, and a chat
 /// past what a conversation may hold.
-fn export(root: &Path) -> Result<()> {
+pub(super) fn export(root: &Path) -> Result<()> {
     export_with(root, false)
 }
 
@@ -258,6 +258,12 @@ pub fn sessions(s: &mut Suite, api: &Api) -> Result<()> {
         "an export's chats are imported into an archive made for its person, the one past the limit refused alone",
         first["made"] == true && first["added"] == 3 && refused == ["e2e_huge"] && first["holds"] == json!({ "chat": 2, "cron": 1, "subagent": 0 }),
         &first,
+    );
+    // every fragment has its search (the search section checks what it holds)
+    s.ok(
+        "the import writes its archive's search, one source each conversation it keeps",
+        first["search"]["state"] == "written" && first["search"]["written"] == 3 && first["search"]["refused_count"] == 0,
+        &first["search"],
     );
     let status = api.status(&keys, &name)?;
     let listed = api.signed(&keys, "GET", "/api/fragments", None)?;

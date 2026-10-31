@@ -883,7 +883,10 @@ from Hermes' database) replaces the older; an older copy never does. It says wha
 already had, and what it left out and why: at most 18,000 conversations
 and 1 GiB an archive (an import past either adds nothing), 8 MiB a
 conversation. A tool's output and an agent's reasoning are cut to 2,000
-characters; what was said, never. An agent runs it for its owner (into
+characters; what was said, never. Each import also writes the archive's
+search, a section a turn of each conversation, and puts it right when it
+has fallen behind (on a host without search yet, it says so and skips
+it). An agent runs it for its owner (into
 their archive, never one of its own), and so reads it: `fragment sync
 <archive> --dir ~/archive --mode pull`, then your own tools over
 `~/archive/sessions/`. A conversation's file (format
