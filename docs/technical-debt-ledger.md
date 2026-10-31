@@ -298,18 +298,6 @@ unfinished design, not debt.
 - **Delete when:** a call is charged from OpenRouter's reported cost,
   the fee and margin on it.
 
-## A ledger's head carries `holds` and a `book` for a rollback
-
-- **Shortcut:** heads are written for releases before decision 62
-  (`fragment_core::ledger` `OldHolds`, `Ledger::written`,
-  `retire_holds`).
-- **Risk:** none; dead weight that reads as if it meant something.
-- **Delete when:** no release before decision 62 can be deployed again
-  (Paul agreeing) and no head holds any: drop `OldHolds`,
-  `retire_holds`, `written`'s book, and the
-  `a_head_written_here_reads_in_the_release_before` and
-  `a_rollback_finds_no_hold_and_no_held_entry` tests.
-
 ## A paid call's charge is best effort
 
 - **Shortcut:** billing never interrupts a call (decision 62), so model
@@ -555,16 +543,6 @@ unfinished design, not debt.
 - **Risk:** others see an agent's old name until it speaks.
 - **Delete when:** a fragment's pages hear its agents' face changes (an
   agent fragment's install telling the chats it is in).
-
-## A chat's transcript is the platform's reading of the chat template's records
-
-- **Shortcut:** `fragment_core::export::transcript_part` reads one
-  template's records, a design bug by the platform rule
-  (docs/cloudflare-v1.md).
-- **Risk:** a change to the records' shape leaves transcripts behind.
-- **Delete when:** the chat template renders its own transcript (a
-  query the export asks, paged), or Paul lets the platform read the
-  records' shape (then it moves to the special-case inventory).
 
 ## The effects sweep has no fault-injection test
 

@@ -2,8 +2,8 @@
 //! core speaks only these commands and events; each runtime translates them
 //! into its own protocol. Two ship here:
 //!
-//! - `relay`: Hermes' Relay (docs/hermes-relay.md). Hermes dials the
-//!   bridge, which is its connector.
+//! - `relay`: Hermes' Relay (docs/bridge.md, "Hermes' Relay"). Hermes
+//!   dials the bridge, which is its connector.
 //! - `script`: a deterministic scripted agent (the stub image), so the
 //!   platform's lanes run without any agent runtime at all.
 //!

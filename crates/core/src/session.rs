@@ -351,6 +351,7 @@ impl Session {
             reader: self.reader,
             kind: self.kind,
             title: self.title.clone(),
+            agent: self.agent.clone(),
             source: self.source.clone(),
             with: self.with.clone(),
             started_at: self.started_at.clone(),
@@ -376,6 +377,11 @@ pub struct Entry {
     pub reader: u32,
     pub kind: Kind,
     pub title: String,
+    /// The agent it was with, as its origin named it (`Session::agent`): a
+    /// reader offers to continue it with the person's agent of that name.
+    /// An entry an import made before it says none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -736,6 +742,26 @@ mod tests {
         assert_eq!((e.key.as_str(), e.messages, e.preview.as_str()), ("hermes-20261001_090000_ab12cd", 3, "Plan the garden with beans"));
         assert_eq!(serde_json::from_slice::<Session>(&bytes).unwrap(), n, "its file reads back as itself");
         assert_eq!(n.file(), bytes, "and the same conversation makes the same bytes");
+    }
+
+    /// Goal: an index entry names its conversation's agent (what a reader
+    /// offers to continue it with, by name), and an entry from before it
+    /// did still reads. Valid: with an agent, without one; an older index's
+    /// entry with none.
+    #[test]
+    fn an_entry_names_its_conversations_agent() {
+        let mut s = chat("20261001_090000_ab12cd", vec![said("user", "2026-10-01T09:00:00Z", "hello")]);
+        s.agent = Some("Juniper".into());
+        let (e, _) = filed(s.clone());
+        assert_eq!(e.agent.as_deref(), Some("Juniper"));
+        let json = serde_json::to_value(&e).unwrap();
+        assert_eq!(json["agent"], "Juniper");
+        s.agent = None;
+        let (none, _) = filed(s);
+        assert!(serde_json::to_value(&none).unwrap().get("agent").is_none(), "an entry with none says nothing");
+        let mut older = json;
+        older.as_object_mut().unwrap().remove("agent");
+        assert_eq!(serde_json::from_value::<Entry>(older).unwrap().agent, None, "an older index's entry reads");
     }
 
     /// Goal: a cut is said once, whoever cut it. Valid: a text cut here or
