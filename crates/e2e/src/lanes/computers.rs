@@ -970,9 +970,9 @@ fn telegram_checks(s: &mut Suite, api: &Api, c: &Doors, fetched: &dyn Fn(&Suite,
     let made_editor = api.signed(c.owner, "PUT", &format!("/api/f/{name}/members/{}", c.identity), Some(&json!({ "role": "editor" })))?;
     let said = fetched(s, 435, &format!("door poke {name} secret itself"))?;
     pokes += 1;
+    // (it stays an editor member: a chat's own agent is not demoted, and here
+    // it acts as a viewer whatever its membership says)
     s.ok("the agent its owner made an editor, as itself, is refused its secrets too", made_editor.status == 200 && said.starts_with("door refused: 403"), &said);
-    let r = api.signed(c.owner, "PUT", &format!("/api/f/{name}/members/{}", c.identity), Some(&json!({ "role": "viewer" })))?;
-    anyhow::ensure!(r.status == 200, "the agent a viewer again: {r}");
 
     // its owner rotates the webhook's secret: the old one takes nothing
     let r = api.signed(c.owner, "PUT", &format!("/api/f/{name}/secrets/TELEGRAM_WEBHOOK_SECRET"), Some(&json!({ "value": HOOK2, "hosts": ["127.0.0.1"] })))?;
@@ -991,7 +991,7 @@ fn telegram_checks(s: &mut Suite, api: &Api, c: &Doors, fetched: &dyn Fn(&Suite,
     anyhow::ensure!(policy(Value::Null)?.status == 200, "the connectors lever");
 
     // unlinked from its page (its owner's session there): the door is shut
-    // at once, and Telegram is told; its agent stays a viewer of its chat,
+    // at once, and Telegram is told; its agent stays a member of its chat,
     // and what it says there goes nowhere else
     let session = api.sign_in(&Api::email_of(c.owner))?;
     let site = format!("fragment_site={}", super::signin::site_cookie(api, &session, &name)?);
@@ -1010,8 +1010,8 @@ fn telegram_checks(s: &mut Suite, api: &Api, c: &Doors, fetched: &dyn Fn(&Suite,
     let typed = api.signed(c.owner, "POST", &format!("/api/f/{name}/channels/chat"), Some(&json!({ "id": "typed-after-unlink", "body": { "text": "typed after the unlink" } })))?;
     let answered = s.eventually(wake, || agent_replies(&records(api, c.owner, &name, "chat"), c.identity).iter().any(|r| r["body"]["text"].as_str().is_some_and(|t| t.contains("typed after the unlink"))));
     s.ok(
-        "its agent, still a viewer there, answers on the web, and nothing goes to Telegram",
-        typed.status == 200 && role_of(c.identity) == Some(json!("viewer")) && answered && sent("typed after the unlink").is_none(),
+        "its agent, still a member there, answers on the web, and nothing goes to Telegram",
+        typed.status == 200 && role_of(c.identity).is_some() && answered && sent("typed after the unlink").is_none(),
         json!({ "role": role_of(c.identity), "sent": tg.sent() }),
     );
 
