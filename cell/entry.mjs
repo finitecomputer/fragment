@@ -44,6 +44,16 @@ export class Ledger extends DurableObject {
   alarm(info) { return this.rs.alarm(info); }
 }
 
+// A fragment life's search index (search_index.rs): its supervisor calls it.
+export class SearchIndex extends DurableObject {
+  constructor(ctx, env) {
+    super(ctx, env);
+    this.rs = new rs.SearchIndexCell(ctx, env);
+  }
+  fetch(request) { return this.rs.fetch(request); }
+  alarm(info) { return this.rs.alarm(info); }
+}
+
 export class Registry extends DurableObject {
   constructor(ctx, env) {
     super(ctx, env);

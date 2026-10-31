@@ -94,8 +94,8 @@ mod tests {
     /// the schema lock holds: no statement of the cell's makes, alters or
     /// drops a table, an index or a trigger, but the test levers that plant
     /// the shapes the runner must tell apart (schema.rs, its
-    /// `schema-unversion` dropping what later steps made, and a list's
-    /// `before-searched`). A `CREATE TABLE IF NOT EXISTS` in a module, as
+    /// `schema-unversion` dropping what later steps made, columns too, and
+    /// a list's `before-searched`). A `CREATE TABLE IF NOT EXISTS` in a module, as
     /// every object's schema was until 2026-10-19, never reaches an object
     /// made before it. Method: the cell's source, read.
     #[test]
@@ -107,7 +107,7 @@ mod tests {
                 *found.entry(file).or_default() += n;
             }
         }
-        let levers = BTreeMap::from([("principal.rs".to_string(), 2), ("schema.rs".to_string(), 7)]);
+        let levers = BTreeMap::from([("principal.rs".to_string(), 2), ("schema.rs".to_string(), 8)]);
         assert_eq!(found, levers, "a schema changes by a step of its class's (crates/core/src/migrate.rs says how), not in the cell");
     }
 
@@ -126,7 +126,7 @@ mod tests {
         let files = cell_sources();
         assert_eq!(uses(&files, "durable_object("), only("routed.rs", 1), "an object is reached through routed::send alone");
         assert_eq!(uses(&files, "fetch_with_request("), only("routed.rs", 1), "and called there alone, stamped");
-        let objects = [("fragment.rs", "FragmentCell"), ("registry.rs", "RegistryCell"), ("principal.rs", "PrincipalCell"), ("ledger.rs", "LedgerCell"), ("computer.rs", "ComputerCell")];
+        let objects = [("fragment.rs", "FragmentCell"), ("registry.rs", "RegistryCell"), ("principal.rs", "PrincipalCell"), ("ledger.rs", "LedgerCell"), ("computer.rs", "ComputerCell"), ("search_index.rs", "SearchIndexCell")];
         for (file, class) in objects {
             let text = &files[file];
             let at = text.find(&format!("impl DurableObject for {class} {{")).unwrap_or_else(|| panic!("{class} is a Durable Object"));
@@ -143,7 +143,7 @@ mod tests {
         assert_eq!(uses(&files, "routed::probed(&req, "), checked, "and answers a probe once, there");
         let entry = std::fs::read_to_string(crate::devstack::repo_root().join("cell/entry.mjs")).expect("entry.mjs reads");
         let code: Vec<&str> = entry.lines().filter(|l| !l.trim_start().starts_with("//")).collect();
-        assert_eq!(code.iter().filter(|l| l.contains(" extends DurableObject {")).count(), objects.len(), "the platform's objects are the five checked above");
+        assert_eq!(code.iter().filter(|l| l.contains(" extends DurableObject {")).count(), objects.len(), "the platform's objects are the six checked above");
         let made: Vec<&&str> = code.iter().filter(|l| l.contains("InternalRoute.request(")).collect();
         assert!(made.len() >= 3 && made.iter().all(|l| l.contains("InternalRoute.request(this.env, ") || l.contains("InternalRoute.request(env, ")), "the JavaScript's internal calls are stamped from its env: {made:?}");
         let called: Vec<&&str> = code.iter().filter(|l| l.contains("getByName(")).collect();

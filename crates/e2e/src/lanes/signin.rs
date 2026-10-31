@@ -236,7 +236,7 @@ fn deploying_cases(s: &mut Suite, api: &Api) -> Result<()> {
 /// `cargo xtask deploy` asks until every object class answers its release:
 /// the Registry's skew hook stands in for an object of another release.
 fn probe_cases(s: &mut Suite, api: &Api) -> Result<()> {
-    let classes = ["Registry", "Principal", "Ledger", "Fragment", "Computer"];
+    let classes = ["Registry", "Principal", "Ledger", "Fragment", "Computer", "SearchIndex"];
     let probe = || api.unsigned("GET", "/healthz/objects", None);
     // valid: every class's probe object admits the Worker's release, its schema ready
     let r = probe()?;

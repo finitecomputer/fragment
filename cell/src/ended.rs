@@ -169,6 +169,8 @@ struct Stored {
     npub: String,
     facet: String,
     attempts: i64,
+    /// It may have written its search index (searchable.rs).
+    search: i64,
 }
 
 impl FragmentCell {
@@ -185,8 +187,8 @@ impl FragmentCell {
     /// `end_life`, its agent recorded to leave its computer and the
     /// registry's names (`agent`), or not (a wipe's, which empties both).
     fn end(&self, agent: bool) -> CellResult<Ended> {
-        let [name, created_at, owner, npub, version, identity, computer] =
-            self.metas([MetaKey::Name, MetaKey::CreatedAt, MetaKey::Owner, MetaKey::Npub, MetaKey::IndexVersion, MetaKey::AgentIdentity, MetaKey::Computer])?;
+        let [name, created_at, owner, npub, version, identity, computer, search] =
+            self.metas([MetaKey::Name, MetaKey::CreatedAt, MetaKey::Owner, MetaKey::Npub, MetaKey::IndexVersion, MetaKey::AgentIdentity, MetaKey::Computer, MetaKey::Search])?;
         let name = name.ok_or_else(|| missing(MetaKey::Name))?;
         let incarnation: i64 = created_at.and_then(|c| c.parse().ok()).ok_or_else(|| missing(MetaKey::CreatedAt))?;
         let owner = owner.ok_or_else(|| missing(MetaKey::Owner))?;
@@ -196,9 +198,9 @@ impl FragmentCell {
         let facet = self.app_facet()?;
         let now = SqlStorageValue::Integer(js::now_ms());
         self.exec(
-            "INSERT INTO ended (incarnation, name, npub, facet, ended_at, next_at) VALUES (?, ?, ?, ?, ?, ?)
+            "INSERT INTO ended (incarnation, name, npub, facet, ended_at, next_at, search) VALUES (?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT (incarnation) DO NOTHING",
-            vec![SqlStorageValue::Integer(incarnation), name.as_str().into(), npub.into(), facet.as_str().into(), now.clone(), now.clone()],
+            vec![SqlStorageValue::Integer(incarnation), name.as_str().into(), npub.into(), facet.as_str().into(), now.clone(), now.clone(), SqlStorageValue::Integer(i64::from(search.is_some()))],
         )?;
         // every member's list, and any a change still waits for (a member
         // removed whose list was not told yet)
@@ -349,7 +351,7 @@ impl FragmentCell {
     /// more is due again at once.
     async fn clear_ended(&self) {
         let due: Vec<Stored> = match self.typed(
-            "SELECT incarnation, name, npub, facet, attempts FROM ended WHERE stored = 1 AND next_at <= ? ORDER BY next_at LIMIT ?",
+            "SELECT incarnation, name, npub, facet, attempts, search FROM ended WHERE stored = 1 AND next_at <= ? ORDER BY next_at LIMIT ?",
             vec![SqlStorageValue::Integer(js::now_ms()), SqlStorageValue::Integer(CLEARED_PER_PASS)],
         ) {
             Ok(due) => due,
@@ -358,8 +360,11 @@ impl FragmentCell {
         for s in due {
             let cleared = async {
                 js::delete_app_facet(&self.raw, &s.facet).await?;
-                // its search index, with its database (searchable.rs)
-                self.search_drop(s.incarnation).await?;
+                // its search index, with its database, if it wrote one
+                // (searchable.rs): a life that never did wakes none
+                if s.search == 1 {
+                    self.search_drop(s.incarnation).await?;
+                }
                 self.delete_blobs_under(&format!("{}/", s.npub), BLOB_PAGES_PER_PASS).await
             }
             .await;

@@ -45,13 +45,6 @@ use fragment_devstack as devstack;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SearchDeploy {
-    url: String,
-    token: String,
-}
-
 /// A deployment's settings (its config file). Unknown keys are refused, so
 /// a misspelt one never silently does nothing.
 #[derive(Deserialize)]
@@ -107,11 +100,6 @@ struct Deployment {
     /// model or body the cell would refuse is refused before a deploy, as
     /// is an OpenAI-compatible API without a key, and slots past a Workers
     /// variable's 5 KB.
-    /// Its search service (search/README.md), when it has one: where the
-    /// service listens, `url`, and its token's name in the store, `token`
-    /// (`FRAGMENT_SEARCH_URL`, `SEARCH_TOKEN`). None: no search.
-    #[serde(default)]
-    search: Option<SearchDeploy>,
     models: Option<Value>,
     /// A new person's plan: `guest` (the default), `seat`, or `seat_always_on`.
     default_plan: Option<String>,
@@ -393,7 +381,6 @@ fn bound_for(d: &Deployment, branch: Option<&str>) -> Result<devstack::store::Bo
         operator_keys,
         connection_secrets,
         model_keys,
-        search_token: d.search.as_ref().map(|s| s.token.clone()),
     })
 }
 
@@ -421,9 +408,6 @@ fn named_secrets(b: &devstack::store::Bound) -> Vec<(String, &str)> {
             Some((field, _)) => field.push_str(&format!(", models.{slot}.key")),
             None => named.push((format!("models.{slot}.key"), name.as_str())),
         }
-    }
-    if let Some(name) = &b.search_token {
-        named.push(("search.token".into(), name.as_str()));
     }
     for (provider, name) in &b.operator_keys {
         named.push((format!("providers: {provider}'s key"), name.as_str()));
@@ -1331,11 +1315,6 @@ fn worker_config(d: &Deployment, n: &Names, store_id: &str, release: &Release, r
     if let (Some(models), _) = models_of(d)? {
         v.insert("FRAGMENT_MODELS".into(), Value::String(models.to_string()));
     }
-    if let Some(s) = &d.search {
-        let host = s.url.strip_prefix("https://").unwrap_or("");
-        anyhow::ensure!(!host.is_empty() && !s.url.contains('?') && !s.url.ends_with('/'), "search.url is the service's https URL, no query or trailing /: {}", s.url);
-        v.insert("FRAGMENT_SEARCH_URL".into(), json!(s.url));
-    }
     if let Some(computers) = &d.computers {
         v.insert("FRAGMENT_COMPUTER_IMAGE".into(), json!(computers.default_image));
         if let Some(ms) = computers.unsaved_max_ms {
@@ -1609,7 +1588,6 @@ mod tests {
             operators: vec![],
             ai_gateway: None,
             models: None,
-            search: None,
             default_plan: None,
             support_url: None,
             mail_from: None,
@@ -2215,29 +2193,6 @@ mod tests {
             let why = format!("{:#}", load(&config_file("mail-invalid", &v)).err().unwrap());
             assert!(why.contains("mail_from:"), "{why}");
         }
-    }
-
-    /// A deployment's search service (search/README.md): its URL in the
-    /// cell's variables, its token bound by name and nowhere else; a URL
-    /// that is not https, or ends in /, refused before anything is built.
-    #[test]
-    fn a_deployments_search_is_its_url_and_its_token() {
-        let mut d = load(&devstack::repo_root().join("deploy/example.jsonc")).unwrap();
-        d.search = Some(SearchDeploy { url: "https://search.example.internal".into(), token: "fragment-search-token".into() });
-        let n = names(&d, Some("p5")).unwrap();
-        let cell = worker_config(&d, &n, "0f0e0d0c", &test_release(), &devstack::repo_root()).unwrap();
-        assert_eq!(cell["vars"]["FRAGMENT_SEARCH_URL"], "https://search.example.internal");
-        let bindings: Vec<(&str, &str)> = cell["secrets_store_secrets"].as_array().unwrap().iter().map(|b| (b["binding"].as_str().unwrap(), b["secret_name"].as_str().unwrap())).collect();
-        assert!(bindings.contains(&("SEARCH_TOKEN", "fragment-search-token")), "{bindings:?}");
-        assert!(!cell.to_string().contains("FRAGMENT_SEARCH_TOKEN"), "the token is a binding, never a variable");
-        assert!(named_secrets(&bound(&d).unwrap()).iter().any(|(field, name)| field == "search.token" && *name == "fragment-search-token"));
-        for bad in ["http://search.example.internal", "https://search.example.internal/", "https://"] {
-            d.search = Some(SearchDeploy { url: bad.into(), token: "fragment-search-token".into() });
-            assert!(worker_config(&d, &n, "0f0e0d0c", &test_release(), &devstack::repo_root()).is_err(), "{bad}");
-        }
-        d.search = None;
-        let cell = worker_config(&d, &n, "0f0e0d0c", &test_release(), &devstack::repo_root()).unwrap();
-        assert!(cell["vars"].get("FRAGMENT_SEARCH_URL").is_none(), "unnamed: no search");
     }
 
     /// Finite's own deployment's `models` (deploy/example.jsonc; decision

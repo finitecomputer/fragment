@@ -3622,25 +3622,27 @@ keyboard, not an inset's height above it.
 
 ### A fragment's search
 
-A fragment's own full-text and semantic index (cell/src/searchable.rs;
-fragment_proto::search). It is the search service's (search/README.md),
-beside the deployment, `FRAGMENT_SEARCH_URL` with `SEARCH_TOKEN`. A
-deployment that names none answers these routes 404. It is opt-in: nothing
+A fragment's own full-text and semantic index (cell/src/searchable.rs,
+cell/src/search_index.rs; fragment_proto::search). It is opt-in: nothing
 is held for a fragment until an editor writes a source.
 
 | method & path | who | body → answer |
 | --- | --- | --- |
 | `POST /api/f/{name}/search/upsert` | an editor | `{source, revision, replaces?, title?, at?, fields?, sections: [{id, text, heading?, context?, at?, location?: {from, to}}]}` → `{source, revision, written, chunks}` |
 | `POST /api/f/{name}/search/delete` | an editor | `{source}` → `{source, deleted}` |
-| `GET /api/f/{name}/search/sources?after=&limit=` | an editor | → `{sources: [{source, revision, at, chunks}], next}`, ascending by source, `limit` 1 to 1000 |
-| `GET /api/f/{name}/search/status` | a reader | → `{exists, sources, chunks, bytes, semantic, space, forgetting}` |
-| `POST /api/f/{name}/search` | a reader | `{q, limit?, mode?, fields?, after?, before?}` → `{results: [{rank, source, section, revision, title, heading?, context?, at?, location?, snippet, score, signals}], semantic}` |
+| `GET /api/f/{name}/search/sources?after=&limit=` | an editor | → `{sources: [{source, revision, at?, chunks}], next}`, ascending by source, `limit` 1 to 1000 |
+| `GET /api/f/{name}/search/status` | a reader | → `{exists, sources, chunks, bytes, space, chunks_split, chunks_max, semantic, forgetting}` |
+| `POST /api/f/{name}/search` | a reader | `{q, limit?, mode?, fields?, after?, before?}` → `{results: [{rank, source, section, revision, title, heading?, context?, at?, location?, snippet, score, signals, lexical?: {rank, bm25}, semantic?: {rank, cosine}}], semantic, indexed, space?, scheme?}` |
 
-- **The index.** One a fragment's life: the service's table of its scope
-  (its identity, its incarnation, `members`), which no caller names.
-  Whoever reads the fragment reads its index.
+- **The index.** One a fragment's life: a `SearchIndex` Durable Object of
+  its own, named by the life's scope (its identity, its incarnation,
+  `members`), which no caller names and only the fragment's supervisor
+  calls. Whoever reads the fragment reads its index. A life that never
+  wrote a source has none: a search answers `indexed: false` and no
+  results, embedding nothing.
 - **A source is written whole.** An app's writer (an import, a job) sends
-  a source's sections, and they replace whatever it held, in one commit.
+  a source's sections, and they replace whatever it held, in one
+  transaction: a search sees one revision or the other.
   - The same `(source, revision)` again writes nothing.
   - `replaces` is a compare-and-set: the write happens only if the
     source's revision now is it (`""`: if it has none), else 409
@@ -3652,6 +3654,10 @@ is held for a fragment until an editor writes a source.
   - a source at most 512 bytes, a revision 128;
   - at most 4 `fields` of `a-z`, `0-9` and `_` names and 64-byte values;
   - a body at most 4 MiB.
+  - An index holds at most 50,000 chunks (`chunks_max`): a write past it
+    is 507 `storage_full`. Past 25,000 (`chunks_split`) a search slows
+    (about 15 ms warm at 25,000): split the sources across child
+    fragments, which the meta-brain searches together.
 - **Embedding.** Each section is cut into chunks its embeddings slot reads
   whole (docs/api.md, Models: its `max_input_tokens`, as the embeddings
   route bounds an input's tokens; nothing is cut away), and each chunk's
@@ -3663,27 +3669,51 @@ is held for a fragment until an editor writes a source.
   - An anonymous reader's question is searched by its words alone, as is
     everything on a deployment that embeds nothing (`semantic: "off"`:
     its tiers are private and its embeddings slot is not).
-- **Search** is by words (BM25F over title, heading, context and text) and
-  by meaning (the question's vector by cosine). Each section is ranked by
-  its best chunk and fused by reciprocal rank.
+  - An index holds one space's vectors (the deployment's embeddings
+    model, `space`): written in another (the deployment's model changed),
+    it is emptied first, and its sources are written again by their apps.
+    Until then a question is searched by its words alone.
+- **Search** is by words (FTS5's BM25, by field: title 4, heading 3,
+  context 2, text 1) and by meaning. Each section is ranked by its best
+  chunk in each leg, and the legs fused by reciprocal rank (k = 60).
   - `mode` is `hybrid` (the default), `lexical` or `semantic`.
   - `fields` filters by every field named; `after` and `before` by a
-    section's `at`.
+    section's `at` (its own, else its source's).
   - A hit's `snippet` is at most 300 bytes of its best chunk; `signals`
-    says which found it.
+    says which legs found it, and `lexical` and `semantic` its rank in
+    each (from 1) and its best chunk's score there: `bm25`, higher better,
+    by this fragment's statistics alone; `cosine`, as `scheme` estimates
+    it.
+  - **Vectors** are held as `scheme` names (`i8x508+sign`): each component
+    of the unit vector as int8 at the one scale 508, and its sign. The
+    meaning leg reads every chunk's signs against the question, then
+    reranks the best 3% (at least 100) by int8: on BGE-M3 it keeps 0.98
+    of exact float's top 10. Cosines of answers that name one `space` and
+    `scheme` compare across fragments.
 - **Deletes follow the files.** A source named by one of the fragment's
   paths is forgotten when a move of main deletes that file. It is gone
   from every answer at once (`forgetting` counts what the alarm still has
-  to send) and from the service's store within minutes. A write of the
-  source after sends its forget first, however long its retry would wait
-  (the write is refused 502 if it cannot), and one source is sent one
-  thing at a time, so no forget lands after a later write.
+  to send) and from the index within minutes. A write of the source after
+  sends its forget first, however long its retry would wait (the write is
+  refused 502 if it cannot), and one source is sent one thing at a time,
+  so no forget lands after a later write.
+- **What deleted means.** A deleted chunk leaves every answer in its
+  write's transaction, and the words index's segments at the index's next
+  fold (an hour after). SQLite's freed pages keep its bytes until reused,
+  and Cloudflare keeps 30 days of every object's history (point-in-time
+  recovery): a deleted source is gone from Cloudflare's copies within 30
+  days.
 - **A life's index goes with it.** A deleted or wiped fragment's index is
-  ended with its database and blobs (ended.rs): dropped, and never written
-  again, by a write sent before the end and landing after it too. A write
-  whose fragment was deleted while it waited (on its embedding, or the
-  service) is refused 404 and marks nothing of a life made again under
-  the name.
+  ended with its database and blobs (ended.rs): its storage released
+  whole, and never written again, by a write sent before the end and
+  landing after it too. A write whose fragment was deleted while it
+  waited (on its embedding, or the index) is refused 404 and marks
+  nothing of a life made again under the name.
+- **Many fragments at once** (the meta-brain): the platform's own route
+  embeds a question once and asks each fragment's supervisor at
+  `POST /search/asked {query, vector?}`, a route the router maps no
+  outside path to (`fragment_proto::search::Forwarded`). It is searched
+  by that vector, never embedded again, and answers as `POST …/search`.
 
 ### Search (decision 9; docs/cloudflare-v1.md, lesson 12)
 

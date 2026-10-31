@@ -1,6 +1,6 @@
 //! Versioned schemas for the platform's own Durable Objects: `Fragment`'s
-//! supervisor, `Registry`, `Principal`, `Ledger` and `Computer` (an app
-//! facet's SQLite is its author's). Each class declares its steps in
+//! supervisor, `Registry`, `Principal`, `Ledger`, `Computer` and
+//! `SearchIndex` (an app facet's SQLite is its author's). Each class declares its steps in
 //! order, one SQL file each under `crates/core/migrations/<class>/`. An
 //! object keeps the steps it took in its `_schema` table, one row each
 //! (the step's number, name and SHA-256, whether it ran or was adopted,
@@ -108,7 +108,13 @@ macro_rules! step {
 
 pub const FRAGMENT: Class = Class {
     name: "Fragment",
-    steps: &[step!("baseline", "fragment/0001_baseline.sql"), step!("listed", "fragment/0002_listed.sql"), step!("record_schedules", "fragment/0003_record_schedules.sql"), step!("search_forget", "fragment/0004_search_forget.sql")],
+    steps: &[
+        step!("baseline", "fragment/0001_baseline.sql"),
+        step!("listed", "fragment/0002_listed.sql"),
+        step!("record_schedules", "fragment/0003_record_schedules.sql"),
+        step!("search_forget", "fragment/0004_search_forget.sql"),
+        step!("ended_search", "fragment/0005_ended_search.sql"),
+    ],
     variants: &[Variant {
         name: "members",
         sql: "CREATE TABLE members ( principal TEXT PRIMARY KEY, role TEXT NOT NULL, added_by TEXT NOT NULL, added_at INTEGER NOT NULL, kind TEXT, owner TEXT, people_only INTEGER NOT NULL DEFAULT 0)",
@@ -145,8 +151,12 @@ pub const LEDGER: Class = Class { name: "Ledger", steps: &[step!("baseline", "le
 
 pub const COMPUTER: Class = Class { name: "Computer", steps: &[step!("baseline", "computer/0001_baseline.sql"), step!("agent_accounts", "computer/0002_agent_accounts.sql")], variants: &[], kept: &["wiped"] };
 
+/// A fragment life's search index: its end releases its storage whole
+/// (`deleteAll`), so it keeps nothing.
+pub const SEARCH_INDEX: Class = Class { name: "SearchIndex", steps: &[step!("baseline", "searchindex/0001_baseline.sql")], variants: &[], kept: &[] };
+
 /// Every platform class, as the lock lists them.
-pub const CLASSES: [&Class; 5] = [&FRAGMENT, &REGISTRY, &PRINCIPAL, &LEDGER, &COMPUTER];
+pub const CLASSES: [&Class; 6] = [&FRAGMENT, &REGISTRY, &PRINCIPAL, &LEDGER, &COMPUTER, &SEARCH_INDEX];
 
 /// What the runner needs of an object's SQLite: statements run, and rows
 /// read, each an object of its columns. The cell's is the object's
@@ -840,7 +850,8 @@ mod tests {
         commits.sort();
         assert_eq!(commits, ["035ee8e8", "33e323cd", "76adcb35", "7b84dcd3", "e62d9991"]);
         for commit in &commits {
-            for class in CLASSES {
+            // a class made since versions has no object from before them
+            for class in CLASSES.into_iter().filter(|c| c.name != SEARCH_INDEX.name) {
                 let ddl = std::fs::read_to_string(root.join(commit).join(format!("{}.sql", class.name.to_ascii_lowercase()))).expect("a class's schema");
                 let db = Lite::new();
                 db.exec(&ddl).expect("as it ran");
