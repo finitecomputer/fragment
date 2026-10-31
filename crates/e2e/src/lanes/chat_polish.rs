@@ -581,6 +581,12 @@ pub(super) fn calls_card(s: &mut Suite, api: &Api, owner: &Keys, chrome: &mut Br
         chrome.eval(&page, &format!("(() => {{ const b = {build}; return !!b && b.classList.contains('maybe') && !b.classList.contains('running') && b.querySelector('.step-verb')?.textContent === 'May have run' && !b.querySelector('.step-since') && !b.querySelector('.shimmer'); }})()"))? == true,
         chrome.eval(&page, &format!("{build}?.outerHTML ?? ''"))?,
     );
+    // its frames, a second apart as its time counts (for a person: the
+    // lifecycle, stitched as they like)
+    for i in 1..=3 {
+        chrome.screenshot(&page, &shots.join(format!("frame-{i}-running.png")))?;
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    }
     chrome.screenshot(&page, &shots.join("desktop-running.png"))?;
     super::fit(chrome, &page, 375, 800, true)?;
     s.ok("on a phone the live line stays one line, its time beside it", super::shows(chrome, &page, &format!("(() => {{ const t = {test}; const a = t.querySelector('.step-args'); const h = Number.parseFloat(getComputedStyle(a).lineHeight); return a.clientHeight <= h + 1 && t.querySelector('.step-since').getClientRects().length === 1; }})()")), "");
@@ -593,9 +599,11 @@ pub(super) fn calls_card(s: &mut Suite, api: &Api, owner: &Keys, chrome: &mut Br
         super::shows(chrome, &page, &format!("(() => {{ const steps = [...{card}.querySelectorAll(':scope > .step')].filter((s) => s.querySelector('.step-args')?.textContent === 'npm test'); return steps.length === 1 && !steps[0].classList.contains('running') && !steps[0].querySelector('.step-since') && steps[0].querySelector('.step-name > svg')?.getAttribute('aria-label') === 'Ran'; }})()")),
         chrome.eval(&page, &format!("{card}?.outerHTML ?? ''"))?,
     );
+    chrome.screenshot(&page, &shots.join("frame-4-step.png"))?;
     // cut by a restart: nothing reads as running once it ended
     post(4, call("r3", "make deploy"))?;
     super::shows(chrome, &page, &format!("!!{} && {}.classList.contains('running')", line("make deploy"), line("make deploy")));
+    chrome.screenshot(&page, &shots.join("frame-5-next-call.png"))?;
     post(5, json!({ "kind": "turn.end", "turn": "calls", "outcome": "error", "error": "lost when the computer restarted" }))?;
     chrome.eval(&page, &format!("(() => {{ const d = {card}; if (d) d.open = true; return true; }})()"))?;
     let deploy = line("make deploy");
@@ -605,6 +613,7 @@ pub(super) fn calls_card(s: &mut Suite, api: &Api, owner: &Keys, chrome: &mut Br
         chrome.eval(&page, &format!("{card}?.outerHTML ?? ''"))?,
     );
     chrome.screenshot(&page, &shots.join("desktop-ended.png"))?;
+    chrome.screenshot(&page, &shots.join("frame-6-cut.png"))?;
     println!("      (calls-card screenshots in {})", shots.display());
     chrome.close(page)?;
     let r = api.signed(owner, "DELETE", &format!("{add}/{}", fragment_core::npub::encode(hand.pubkey_hex())), None)?;

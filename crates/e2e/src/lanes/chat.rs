@@ -583,6 +583,7 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     let ran = "[...document.querySelectorAll('details.tools .step[data-category=\"web\"]')].filter((s) => s.querySelector('.step-args')?.textContent === 'a slow tool please')";
     let replaced = shows(&mut chrome, &page, &format!("{ran}.length === 1 && !{ran}[0].classList.contains('running') && !{ran}[0].querySelector('.step-since') && {ran}[0].querySelector('.step-result')?.textContent === '3 results' && {}", replied("a slow tool please")));
     s.ok("its step then takes its place: one line, done, its result kept", replaced, chrome.eval(&page, "document.getElementById('messages').innerText")?);
+    let _ = chrome.screenshot(&page, &shots.join("desktop-call-ran.png"));
 
     // every card open, for the screenshots: what each step says
     let open_cards = "(() => { const cards = [...document.querySelectorAll('details.tools')]; cards.forEach((d) => (d.open = true)); cards.at(-1)?.scrollIntoView({ block: 'center' }); return true; })()";
