@@ -219,20 +219,17 @@ mod tests {
     }
 
     /// images.yml's Docker lane runs on a change to any input of the image
-    /// (#715): each is in its `docker` filter, and in the paths that start
-    /// the workflow on a push and a pull request (`images/**` covers images/).
+    /// (#715): each is in its `docker` filter. The workflow itself starts on
+    /// every change (no `paths` filter of its own: a required check that
+    /// never starts never reports).
     #[test]
     fn the_docker_lane_watches_every_input() {
         let root = devstack::repo_root();
         let workflow = fs::read_to_string(root.join(".github/workflows/images.yml")).unwrap();
-        let starts: Vec<_> = workflow.lines().filter(|l| l.trim_start().starts_with("paths: [")).collect();
-        assert_eq!(starts.len(), 2, "a push's paths and a pull request's");
+        assert!(!workflow.lines().any(|l| l.trim_start().starts_with("paths:")), "the workflow starts on every change; its jobs decide");
         for input in INPUTS {
             let glob = if root.join(input).is_dir() { format!("{input}/**") } else { input.to_string() };
             assert!(workflow.lines().any(|l| l.trim() == format!("- {glob}")), "the docker filter lacks {glob}");
-            for paths in &starts {
-                assert!(paths.contains(&format!("\"{glob}\"")) || (input.starts_with("images/") && paths.contains("\"images/**\"")), "a start's paths lack {glob}: {paths}");
-            }
         }
     }
 
