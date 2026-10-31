@@ -3145,9 +3145,13 @@ others", which shows it; a pack's Checkout's return,
 what their standing stops, their computer and agents (each agent's
 Rename, which opens the shell's own name dialog, and its picture: Add or
 Change, from a file the browser draws again at most 512 px square when
-it is past 256 KiB or no PNG, JPEG, WebP or GIF, and Remove; each written
-and put live as Identities, "An agent's name and picture", says, the row
-following the list as it changes), their skills (decision 17: the
+it is past 256 KiB or no PNG, JPEG, WebP or GIF, and Remove; and its
+Role, a field (its `meta.role`, empty for none); each written and put
+live as Identities, "An agent's name and picture", says, the row
+following the list as it changes; then, while their computer runs fewer
+than 16, Add agent: a name and a role, made as the first run makes its
+agent, in its own chat, which opens with the making's steps, and its
+hello first; its job says no role, which its runtime tells it), their skills (decision 17: the
 managed set, read from their skills fragment's files by category, and
 each agent's own, from its fragment's `skills/`; the shell makes the
 skills fragment, kind `skills`, at setup beside their default agent),

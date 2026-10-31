@@ -851,9 +851,9 @@ const agentOfChat = (name) => state.agents.get(chatAgentOf(name))?.fragment ?? n
 // is titled on its own, as any chat ("Your first chat": FIRST_CHAT), and
 // never by its agent: the agent's name is its fragment's alone.
 const agentsOwnChat = (agent) => chats().find((f) => own(f) && labelOf(f.name) === `${labelOf(agent)}-chat`) ?? null;
-const { faceControls, renderAgentFaces, agentSettings, agentJson, writeAgentJson, savePick, settingLabel, modelOption } = createAgentSettings({
+const { faceControls, renderAgentFaces, agentSettings, addAgentForm, agentJson, writeAgentJson, savePick, settingLabel, modelOption } = createAgentSettings({
   api, el, seg, byName, agentFace, titleOf, agents: () => state.agents, named, rename: (name) => rename(name), load, nameScreen, renderNames,
-  computer: () => state.computer, homePicker: (a, said) => homePicker(a, said),
+  computer: () => state.computer, homePicker: (a, said) => homePicker(a, said), addAgent: (spec) => onboarding.addAgent(spec),
 });
 const { chatTitle, homeMark, loadHomes, homePicker, paintHomes, setHome } = createAgentHomes({
   el, icon, named, actionLine, settingLabel, modelOption, savePick,
@@ -1453,7 +1453,7 @@ const settings = createSettings({
     entered: () => { renderHeading(); renderChats(); leaveSidebar(); } },
   notices: { hideNotice, noticeCurrent: (gen) => gen === noticeGen, notice },
   sections: { computerSection, connectionsSection: (...args) => connectionsSection(...args), simplexSection },
-  agents: { getComputer: () => state.computer, getAgents: () => state.agents, faceControls, agentSettings, renderAgentFaces, paintHomes },
+  agents: { getComputer: () => state.computer, getAgents: () => state.agents, faceControls, agentSettings, addAgentForm, renderAgentFaces, paintHomes },
   releaseInfo: () => ({ mine: release.mine, deployed: DEPLOYED }), beginWrite: () => { writing++; return () => { writing--; }; },
   heard: (r) => heard(r), allFragments: () => state.fragments, own, freeLabel, load, named, openApp,
 });
@@ -1659,6 +1659,8 @@ async function start(open) {
   else if (pick) openChat(pick);
   else if (state.guest) guestHome(mine.offer);
   else notice("No chats yet", "Make an agent to start.");
+  // an Add a reload cut short goes on from what it made (`resumeFirstRun`)
+  if (!settings) resumeFirstRun().catch(() => {});
   // an invite waits, and nothing it shares is open yet: a phone's sidebar,
   // where it is answered, shows over the page
   if (!settings && !pick && state.invites.length && layout.narrow) layout.show("left");
