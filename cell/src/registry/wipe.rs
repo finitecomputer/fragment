@@ -176,7 +176,7 @@ impl RegistryCell {
                 agents.push(a.id);
             }
         }
-        agents.sort();
+        agents.sort_unstable();
         assert!(agents.len() as u64 <= limits::AGENTS_PER_OWNER_MAX * 2, "a person's agents are bounded");
         let agent_fragments = self
             .rows::<FragmentRow>(

@@ -30,6 +30,7 @@ use crate::cs::Cs;
 use crate::error::{CellError, CellResult};
 use crate::fragment::{json_response, missing, Caller, Facts, FragmentCell, MetaKey};
 use crate::js;
+use fragment_core::gather::Gathered;
 
 /// Platform code that runs in the facet around the author's App class.
 pub const PLATFORM_JS: &str = include_str!("../platform.mjs");
@@ -273,7 +274,7 @@ impl FragmentCell {
         }
         let entries = cs.tree(&repo, &to).await?;
         let prior: BTreeMap<String, Indexed> =
-            self.tree_rows(which)?.into_iter().map(|r| (r.path, Indexed { size: r.size, mode: r.mode, last_commit: r.last_commit })).collect();
+            self.tree_rows(which)?.into_iter().map(|r| (r.path, Indexed { size: r.size, mode: r.mode, last_commit: r.last_commit })).gathered();
         let diff = tree::diff(&prior, &entries);
         let paths = diff.paths();
         let sizes: std::collections::HashMap<&str, u64> = entries.iter().map(|e| (e.path.as_str(), e.size)).collect();
@@ -786,7 +787,7 @@ impl FragmentCell {
                 };
                 (which, v)
             })
-            .collect();
+            .gathered();
         json_response(&json!({ "ok": true, "refs": refs }))
     }
 
@@ -821,7 +822,7 @@ impl FragmentCell {
         self.ensure_pins(&mut facts).await?;
         let blobs = self.pointers_at("main")?;
         let rows = self.tree_rows("main")?;
-        let release = self.release_data(&rows.iter().map(|r| r.path.as_str()).collect())?;
+        let release = self.release_data(&rows.iter().map(|r| r.path.as_str()).gathered())?;
         let mut files: Vec<Value> = rows
             .into_iter()
             .map(|r| {
@@ -837,7 +838,8 @@ impl FragmentCell {
             .collect();
         // a blessed template's data, beneath the fragment's own files (decision 40)
         files.extend(release.iter().map(|d| json!({ "path": d.path, "size": d.size, "mode": "100644", "lastCommitSha": blessed::data_version(d), "machinery": false, "release": true })));
-        files.sort_by(|a, b| a["path"].as_str().cmp(&b["path"].as_str()));
+        // each path once (`release_data` leaves out the fragment's own), so no order of equals to keep
+        files.sort_unstable_by(|a, b| a["path"].as_str().cmp(&b["path"].as_str()));
         json_response(&json!({ "ref": facts.pin_main, "files": files }))
     }
 
@@ -921,7 +923,7 @@ impl FragmentCell {
 
     /// The installed operations (from the live commit); none without code.
     pub(crate) fn operations(&self) -> CellResult<BTreeMap<String, OpDecl>> {
-        self.typed::<OpRow>(&format!("{OPS} ORDER BY o.op"), vec![])?.into_iter().map(op_decl).collect()
+        self.typed::<OpRow>(&format!("{OPS} ORDER BY o.op"), vec![])?.into_iter().map(op_decl).try_gathered()
     }
 
     /// The declared operation, or why there is none: no code, or no such
@@ -953,7 +955,7 @@ impl FragmentCell {
 
     /// The app channels the live code declares.
     pub(crate) fn declared_channels(&self) -> CellResult<BTreeMap<String, ChannelDecl>> {
-        self.typed::<ChannelRow>(&format!("{CHANNELS} ORDER BY c.channel"), vec![])?.into_iter().map(channel_decl).collect()
+        self.typed::<ChannelRow>(&format!("{CHANNELS} ORDER BY c.channel"), vec![])?.into_iter().map(channel_decl).try_gathered()
     }
 
     /// An app channel the live code declares (who reads it, who may post

@@ -33,6 +33,7 @@ use crate::error::{CellError, CellResult};
 use crate::fragment::{as_themselves, decide, decode_segment, json_response, Caller, Facts, FragmentCell, MetaKey};
 use crate::js;
 use crate::routed::Credential;
+use fragment_core::gather::Gathered;
 
 /// Marks a site request's refusal (401, 403) as the platform's, never an
 /// app's answer: the router answers a browser's navigation to one as a
@@ -471,7 +472,7 @@ impl FragmentCell {
                 }
                 // beneath them, its blessed template's data (decision 40)
                 let release: Vec<(String, u64)> = {
-                    let own: std::collections::BTreeSet<&str> = sizes.keys().map(String::as_str).collect();
+                    let own: std::collections::BTreeSet<&str> = sizes.keys().map(String::as_str).gathered();
                     self.release_data(&own)?.into_iter().map(|d| (d.path.to_string(), d.size)).collect()
                 };
                 sizes.extend(release);
