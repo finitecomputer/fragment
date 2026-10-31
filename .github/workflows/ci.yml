@@ -694,3 +694,25 @@ jobs:
             echo "deleted: $id $rest"
             gh api -X DELETE "repos/$GITHUB_REPOSITORY/actions/caches/$id"
           done
+      # A pull request's or a merge group's cache is that ref's alone, which
+      # no other run reads, and every save here is master's (each cache's
+      # `save-if`, `cache-to` or `save` says so): an entry such a ref holds
+      # is waste, as the search image's layers were (2026-10-31: 8.8 GB of
+      # 12.8, every queue run writing 800 MB more). Deleted here: those
+      # refs' entries alone, never master's or production's, nor any other
+      # branch's (xtask/src/ci_caches.rs runs this step against fixtures).
+      - name: delete pull requests' and merge groups' caches
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api --paginate -X GET "repos/$GITHUB_REPOSITORY/actions/caches" -f per_page=100 \
+            | jq -r '.actions_caches[] | select(.ref | test("^refs/pull/[0-9]+/merge$") or startswith("refs/heads/gh-readonly-queue/")) | "\(.id) \(.ref) \(.key)"' \
+            | while read -r id ref key; do
+                case "$ref" in
+                  refs/pull/*/merge | refs/heads/gh-readonly-queue/*) ;;
+                  *) echo "::error::not a pull request's or merge group's ref: $ref"; exit 1 ;;
+                esac
+                echo "deleted: $id $ref $key"
+                gh api -X DELETE "repos/$GITHUB_REPOSITORY/actions/caches/$id"
+              done
