@@ -7063,13 +7063,37 @@ fn threads_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &
     let opened = b.until(page, &format!("[...document.querySelectorAll('#frames iframe')].find((f) => !f.hidden)?.dataset.fragment === {}", js(&pair)), wait);
     open_row(b, page, chat, wait)?;
     s.ok("its line opens its pair chat, its transcript", opened, &pair);
-    // Stop: stopped, said until the answer is in, then gone (its answer's
-    // turn waits on a card of its own too, its words quoting "approve")
+    // Stop: stopped, said until the answer is in, then gone. The answer's
+    // turn here is asked as the Reader (Paul, 2026-10-30) and is its
+    // owner's to stop (control.js): while it waits on a card of its own
+    // (its words quote "approve"), the chat's own Stop names it, and stops it
     b.click(page, "#threads .thread-stop")?;
     let stopped = state_is(b, "stopped");
-    let answered = answer_own(s)?;
+    let work = || shell(api, session, "GET", &format!("/api/f/{chat}/channels/work?before={}&limit=200", i64::MAX), None, &[]).map(|r| r.body["records"].as_array().cloned().unwrap_or_default()).unwrap_or_default();
+    let mut start = Value::Null;
+    let carded = s.eventually(agent_wait, || {
+        let w = work();
+        start = w.iter().rev().find(|r| r["principal"] == first_id.as_str() && r["body"]["kind"] == "turn.start" && r["body"]["cause"]["channel"] == "tasks").cloned().unwrap_or_default();
+        let turn = &start["body"]["turn"];
+        turn.is_string() && w.iter().any(|r| r["body"]["kind"] == "turn.prompt" && r["body"]["turn"] == *turn) && !w.iter().any(|r| r["body"]["kind"] == "turn.end" && r["body"]["turn"] == *turn)
+    });
+    let turn = start["body"]["turn"].as_str().unwrap_or("").to_string();
+    let named = format!("(() => {{ const b = document.getElementById('stop'); return !!b && !b.hidden && !b.disabled && b.dataset.turn === {}; }})()", js(&turn));
+    let stoppable = carded && s.eventually(wait, || b.eval_in_frame(page, chat, &named).ok() == Some(json!(true)));
+    if stoppable {
+        b.eval_in_frame(page, chat, "(document.getElementById('stop').click(), true)")?;
+    }
+    let ended = stoppable && s.eventually(agent_wait, || work().iter().any(|r| r["body"]["kind"] == "turn.end" && r["body"]["turn"] == turn.as_str() && r["body"]["outcome"] == "stopped"));
+    let me = super::signin::who(api, session)?["id"].as_str().unwrap_or("").to_string();
+    let said = shell(api, session, "GET", &format!("/api/f/{chat}/channels/chat?before={}&limit=20", i64::MAX), None, &[])?.body["records"].as_array().cloned().unwrap_or_default();
+    let by_owner = said.iter().any(|r| r["body"]["kind"] == "stop" && r["body"]["turn"] == turn.as_str() && r["principal"] == me.as_str());
     let then_gone = gone(b);
-    s.ok("Stop stops it: its line says Stopped until its asker has answered in the chat, then goes", stopped && answered && then_gone, json!({ "stopped": stopped, "answered": answered }));
+    s.ok("Stop stops it: its line says Stopped until its asker's turn of the answer has ended in the chat, then goes", stopped && ended && then_gone, json!({ "stopped": stopped, "ended": ended }));
+    s.ok(
+        "that turn, asked as the Reader, is its owner's: the chat's Stop names it while its card waits, and stops it",
+        carded && start["body"]["asker"] == reader_id && stoppable && ended && by_owner,
+        json!({ "start": start, "stoppable": stoppable, "ended": ended, "byOwner": by_owner }),
+    );
 
     // cut by a restart: Lost, said until the answer is in (its asker's turn
     // that asked was cut too, its card closed: its answer's turn's alone)

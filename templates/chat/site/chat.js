@@ -49,6 +49,7 @@
 
 import * as fragment from "./__fragment.js";
 import { colorOf } from "./agent-color.js";
+import { controlledBy, controllerOf, running } from "./control.js";
 import { icon } from "./icons.js";
 import { inline, renderMarkdown } from "./markdown.js";
 import { renderAttachments as renderMessageAttachments } from "./media.js";
@@ -561,8 +562,9 @@ export function mount(root) {
     return [...here, ...state.roster.map((r) => r.identity).filter((id) => !here.includes(id))];
   };
   const lead = () => chatAgents()[0] ?? [...state.turns.values()].find(started)?.agent ?? null;
-  // this page's person's turn running now, the newest
-  const myTurn = () => [...state.turns.values()].filter((t) => running(t) && t.asker && t.asker === state.me?.principal).sort((a, b) => b.startAt - a.startAt)[0] ?? null;
+  // this page's person's turn running now, the newest: theirs to stop and
+  // command (an answer come back is its agent's owner's: control.js)
+  const myTurn = () => controlledBy(state.turns.values(), state.members, state.me?.principal);
   // an agent's turn running in the chat, whoever asked it
   const workingOn = (agent) => [...state.turns.values()].find((t) => running(t) && t.agent === agent) ?? null;
   // whom a command goes to: the agent working for this person, else the lead
@@ -646,7 +648,6 @@ export function mount(root) {
       t.lastN = n;
     }
   }
-  const running = (t) => t.startAt !== null && !t.end;
   const expired = (p) => Number.isFinite(p.expiresAt) && Date.now() > p.expiresAt;
   // a turn waiting on a person: its open card says so, not a working line
   const waiting = (t) => [...t.prompts.values()].some((p) => !t.closed.has(p.prompt) && !expired(p));
@@ -1213,7 +1214,7 @@ export function mount(root) {
       if (!running(t) || !targets.includes(t.agent) || t.startAt > m.at) return false;
       // it answered the turn's card: it waits for nothing
       if (answeredCard(t, m)) return false;
-      if (t.asker !== m.principal) return true;
+      if (controllerOf(t, state.members) !== m.principal) return true;
       // Chat and work have independent sequence cursors. Compare their
       // times so loading older work cannot change whether a reply waits.
       const said = Math.max(-1, ...state.chat.filter((r) => r.turn === t.id && r.principal === t.agent && r.seq < m.seq).map((r) => r.at));

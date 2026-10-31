@@ -1,0 +1,4 @@
+name: fragment-ask
+version: 1.0.0
+description: Ask another of your owner's agents something; its answer comes back to this chat as a new message.
+provides_tools: [fragment_ask]

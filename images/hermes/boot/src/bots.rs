@@ -66,31 +66,33 @@ pub fn name<'a>(agent: &'a Agent, title: Option<&'a str>) -> &'a str {
     [title.unwrap_or(""), agent.name.as_str()].into_iter().map(str::trim).find(|n| !n.is_empty()).unwrap_or_else(|| label(&agent.fragment))
 }
 
-/// An agent's `profile.yaml`: Hermes' profile metadata, which its roster
-/// reads (each teammate's name and role, `_profile_role`) and which marks
-/// the install as Bot-Mode-managed (`ui_meta.hermes-bots`). Its name, its
-/// display name and its bot's title, is its agent fragment's title (`title`:
-/// "Juniper", as the shell titles it), else its name on the computer, else
-/// its fragment's label: Hermes signs its messages to teammates with it
-/// (`Message from 🤖 Juniper (@juniper-k3x9): …`). Its description is its
-/// role (its agent fragment's `meta.role`, as its status says it), else its
-/// job's first line (`description`): what its teammates read it does.
-/// Written whole at every boot, for an agent assigned while the computer
-/// runs, and when a sync pulls its job.
+/// What an agent does, as its teammates read it: its role (its agent
+/// fragment's `meta.role`, as its status says it), else its job's first
+/// line (`description`).
+pub fn about(role: Option<&str>, soul: Option<&str>) -> String {
+    role.map(str::trim).filter(|r| !r.is_empty()).map(description).or_else(|| soul.map(description)).unwrap_or_default()
+}
+
+/// An agent's `profile.yaml`: Hermes' profile metadata, its name (its
+/// agent fragment's title, "Juniper", as the shell titles it; else its
+/// name on the computer, else its fragment's label) and what it does
+/// (`about`: its role, else its job's first line). It marks no profile a
+/// Bot Mode bot (`ui_meta.hermes-bots`): Hermes' Bot Mode protocol is off
+/// (hermes.rs, `managed_config`), and the mark gone changes the capability
+/// fingerprint of each Bot Chat's stored prompt, so Hermes rebuilds that
+/// prompt once, without the protocol, keeping its history. Written whole
+/// at every boot, for an agent assigned while the computer runs, and when
+/// a sync pulls its job.
 pub fn profile_yaml(agent: &Agent, title: Option<&str>, role: Option<&str>, soul: Option<&str>) -> String {
     let name = name(agent, title);
-    let about = role.map(str::trim).filter(|r| !r.is_empty()).map(description).or_else(|| soul.map(description)).unwrap_or_default();
+    let about = about(role, soul);
     let mut y = format!(
-        "# Written by hermes-boot for {}, from its agent fragment, and written again as that changes: its Bot Mode identity (images/hermes/boot/src/bots.rs). Never edit it: rename the agent with `fragment agent --name`.\n",
+        "# Written by hermes-boot for {}, from its agent fragment, and written again as that changes (images/hermes/boot/src/bots.rs). Never edit it: rename the agent with `fragment agent --name`.\n",
         agent.fragment
     );
     y.push_str(&format!("display_name: {}\n", q(name)));
     if !about.is_empty() {
         y.push_str(&format!("description: {}\n", q(&about)));
-    }
-    y.push_str(&format!("ui_meta:\n  hermes-bots:\n    title: {}\n", q(name)));
-    if !about.is_empty() {
-        y.push_str(&format!("    description: {}\n", q(&about)));
     }
     y
 }
@@ -232,31 +234,31 @@ mod tests {
         assert_eq!(description(&wide).chars().count(), DESCRIPTION_MAX_CHARS, "cut on a character, never inside one");
     }
 
-    /// Valid: name (its fragment's title), title and description, each a
-    /// YAML double-quoted scalar (a JSON string) whatever it holds; with no
-    /// job, no description; with no title, its name on the computer; with
-    /// neither, the label. Replay: the same agent writes the same bytes.
+    /// Valid: name (its fragment's title) and description, each a YAML
+    /// double-quoted scalar (a JSON string) whatever it holds; with no job,
+    /// no description; with no title, its name on the computer; with
+    /// neither, the label. Invalid: no Bot Mode mark (its protocol is off).
+    /// Replay: the same agent writes the same bytes.
     #[test]
-    fn a_profile_says_who_the_bot_is() {
+    fn a_profile_says_who_the_agent_is() {
         let y = profile_yaml(&agent("juniper", "juniper"), Some("Juniper"), None, Some("You tend the garden: \"weeds\" first.\n"));
         assert_eq!(
             y,
-            "# Written by hermes-boot for juniper--k3x9, from its agent fragment, and written again as that changes: its Bot Mode identity (images/hermes/boot/src/bots.rs). Never edit it: rename the agent with `fragment agent --name`.\n\
+            "# Written by hermes-boot for juniper--k3x9, from its agent fragment, and written again as that changes (images/hermes/boot/src/bots.rs). Never edit it: rename the agent with `fragment agent --name`.\n\
              display_name: \"Juniper\"\n\
-             description: \"You tend the garden: \\\"weeds\\\" first.\"\n\
-             ui_meta:\n  hermes-bots:\n    title: \"Juniper\"\n    description: \"You tend the garden: \\\"weeds\\\" first.\"\n"
+             description: \"You tend the garden: \\\"weeds\\\" first.\"\n"
         );
         assert_eq!(y, profile_yaml(&agent("juniper", "juniper"), Some("Juniper"), None, Some("You tend the garden: \"weeds\" first.\n")));
         let untitled = profile_yaml(&agent("juniper", "juniper"), Some(" "), None, None);
         assert!(untitled.contains("display_name: \"juniper\"\n"), "no title: its name on the computer: {untitled}");
         let bare = profile_yaml(&agent("fred", " "), None, None, None);
-        assert!(bare.contains("display_name: \"fred\"\n") && bare.contains("    title: \"fred\"\n") && !bare.contains("description"), "{bare}");
+        assert!(bare.contains("display_name: \"fred\"\n") && !bare.contains("description") && !bare.contains("hermes-bots"), "{bare}");
         let odd = profile_yaml(&agent("x", "x"), Some("a: b\n# c"), None, Some("line: one"));
         assert!(odd.contains("display_name: \"a: b\\n# c\"\n"), "a name is one scalar, never more YAML: {odd}");
         assert!(GATEWAY_PROFILE_YAML.contains("description: ") && !GATEWAY_PROFILE_YAML.contains("hermes-bots"), "the gateway is no bot");
-        // renamed (its fragment's title), the bot is its new name alone
+        // renamed (its fragment's title), the agent is its new name alone
         let renamed = profile_yaml(&agent("juniper", "juniper"), Some("Frank"), None, Some("You tend the garden.\n"));
-        assert!(renamed.contains("display_name: \"Frank\"\n") && renamed.contains("    title: \"Frank\"\n") && !renamed.contains("\"Juniper\""), "{renamed}");
+        assert!(renamed.contains("display_name: \"Frank\"\n") && !renamed.contains("\"Juniper\""), "{renamed}");
         // its role, when it has one, is what its teammates read it does
         let roled = profile_yaml(&agent("juniper", "juniper"), Some("Juniper"), Some(" chief of staff "), Some("You tend the garden.\n"));
         assert!(roled.contains("\ndescription: \"chief of staff\"\n") && !roled.contains("garden"), "{roled}");

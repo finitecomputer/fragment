@@ -269,7 +269,8 @@ agent could not finish. A person's message is never counted, nor refused.
 ```
 
 Only the turn's asker stops it (the person whose message started it; for
-a routine, the agent's owner). Without `turn`, the asker's running turn.
+a routine, or an ask's answer, the agent's owner). Without `turn`, the
+asker's running turn.
 From anyone else it is ignored. A waiting turn named by Stop never runs.
 
 **A prompt's answer:**
@@ -773,13 +774,15 @@ state is persisted as a chat record. It posts:
   composer says so (`Juniper is working: a message waits its turn`), and
   the message is marked queued until its turn starts (no `turn.start`
   names it while a turn of its agent that started before it runs; one
-  sent to the turn's asker just after the turn's own reply is taken for
-  that turn's answer, unmarked). For the agent's owner, when its menu has
+  sent by whoever answers the turn, just after the turn's own reply, is
+  taken for that turn's answer, unmarked). For the agent's owner, when its menu has
   `steer`, words typed then offer Steer beside Send: the words as
   `/steer`, into the running turn now;
-- Stop, `{kind: "stop", turn}` with the id `stop:<turn>`, from the turn's
-  asker while it runs (the send circle is Stop then, until they type: then
-  it sends);
+- Stop, `{kind: "stop", turn}` with the id `stop:<turn>`, from whoever
+  stops the turn (its asker, or for a routine's or an answer's, its
+  agent's owner: Stop, above; the page's control.js) while it runs (the
+  send circle is Stop then, until they type: then it sends), and their
+  commands go to that turn's agent;
 - a prompt's answer with the id `pr:<prompt>`, with `text` for an option
   answered in words;
 - a voice memo (Attachments, above): the composer's mic records until it
@@ -961,10 +964,11 @@ holds no message of its person's before it (cell/shell/shell.js,
 
 An ask's answer ("An ask", above): posted by the asking agent's own
 bridge, as the agent, with the id `an:<asked turn>`, so one question has
-one answer whatever life posts it. The agent takes it as a turn in `chat`,
-its owner's business there as a routine is (their Stop stops it, a
-question it asks is theirs), told `text` by the agent that answered
-(`name`, its name as its chat showed it). `text` names the question
+one answer whatever life posts it. The agent takes it as a turn in `chat`
+asked as the agent that answered (`by`, called `name`, its name as its
+chat showed it: what the runtime is told it is from; Paul, 2026-10-30),
+told `text`, and its owner's business there as a routine is: their Stop
+stops it, and a question it asks in words waits for them. `text` names the question
 (its first 300 bytes) and carries what the asked turn said (its replies
 but interim ones, at most 16 KiB, and how many files it sent; the replies
 stay whole where it was asked); `outcome` and `error` are its end's. The
