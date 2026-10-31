@@ -56,10 +56,8 @@ pub enum Step {
     AiDecide(Value),
     #[serde(rename = "ai.image")]
     AiImage(AiImage),
-    /// `job.ai.video`: refused, whatever it asks, until videos run on
-    /// Cloudflare (crate::media).
     #[serde(rename = "ai.video")]
-    AiVideo {},
+    AiVideo(AiVideo),
     /// `job.members()`: the fragment's members, as its page's `__members`
     /// lists them (the first added first).
     #[serde(rename = "members")]
@@ -189,6 +187,26 @@ pub struct AiImage {
     pub steps: Option<u32>,
 }
 
+/// `job.ai.video`: an MP4 made by the one video model (crate::media),
+/// written to `main` at `path`, in the shape meatproxy's took (`prompt`,
+/// `path`, `duration`, `resolution`, `aspect_ratio`). A key it does not take
+/// (a model) is refused, not ignored: there is no other model.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AiVideo {
+    pub prompt: String,
+    pub path: String,
+    /// Seconds (crate::media: 5 unless named, 3 to 15).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration: Option<u32>,
+    /// `720p` or `1080p` (720p unless named).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution: Option<String>,
+    /// `16:9` unless named (crate::media's list).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aspect_ratio: Option<String>,
+}
+
 impl Step {
     /// A step from the kind and args the Workflow carries, decoded without
     /// rebuilding their JSON; the error says what does not fit.
@@ -215,7 +233,7 @@ impl Step {
             Step::AiText(_) => "ai.text",
             Step::AiDecide(_) => "ai.decide",
             Step::AiImage(_) => "ai.image",
-            Step::AiVideo {} => "ai.video",
+            Step::AiVideo(_) => "ai.video",
             Step::Members {} => "members",
             Step::People { .. } => "people",
             Step::Presence {} => "presence",
@@ -283,7 +301,7 @@ mod tests {
             ),
             ("ai.decide", json!({ "input": "chips", "questions": { "snack": { "type": "predicate", "instructions": "Is this a snack?" } } })),
             ("ai.image", json!({ "prompt": "a cat", "path": "cat.jpg", "steps": 6 })),
-            ("ai.video", json!({})),
+            ("ai.video", json!({ "prompt": "waves", "path": "v.mp4", "duration": 6, "resolution": "1080p", "aspect_ratio": "9:16" })),
             ("members", json!({})),
             ("people", json!({ "ids": ["id:00112233445566778899aabbccddeeff"] })),
             ("presence", json!({})),
@@ -314,11 +332,9 @@ mod tests {
         assert_eq!((f.method.as_str(), f.body.as_deref()), ("post", Some("{}")));
         let Ok(Step::AiImage(i)) = step("ai.image", json!({ "prompt": "p", "path": "a.jpg" })) else { panic!() };
         assert_eq!(i.steps, None, "the model's own default unless named");
-        assert_eq!(
-            step("ai.video", json!({ "prompt": "waves", "path": "v.mp4", "duration": 6 })),
-            Ok(Step::AiVideo {}),
-            "a video's args are not read: it is refused whatever it asks"
-        );
+        // meatproxy's shape: a prompt, a path and a duration, the rest the model's defaults
+        let Ok(Step::AiVideo(v)) = step("ai.video", json!({ "prompt": "waves", "path": "v.mp4", "duration": 6 })) else { panic!() };
+        assert_eq!((v.duration, v.resolution, v.aspect_ratio), (Some(6), None, None));
         let Ok(Step::AiText(t)) = step("ai.text", json!({ "model": "cheap", "messages": [{ "role": "user", "content": "hi" }], "extra": true })) else { panic!() };
         assert_eq!((t.prompt, t.messages.map(|m| m.len())), (None, Some(1)), "a key the platform does not read is ignored");
         let Ok(Step::AiText(t)) = step("ai.text", json!({ "prompt": "hi" })) else { panic!() };
@@ -343,6 +359,9 @@ mod tests {
         refused("ai.image", json!({ "prompt": "p", "path": "a.jpg", "model": "google/gemini-3.1-flash-lite-image" }), "unknown field `model`");
         refused("ai.image", json!({ "prompt": "p", "path": "a.jpg", "steps": -1 }), "invalid value");
         refused("ai.video.start", json!({ "prompt": "p" }), "unknown variant `ai.video.start`");
+        refused("ai.video", json!({ "path": "v.mp4" }), "missing field `prompt`");
+        refused("ai.video", json!({ "prompt": "p", "path": "v.mp4", "model": "minimax/hailuo-3-max" }), "unknown field `model`");
+        refused("ai.video", json!({ "prompt": "p", "path": "v.mp4", "duration": "6" }), "invalid type");
         refused("fetch", json!({ "url": "https://x/", "method": "GET", "headers": { "n": 1 } }), "invalid type");
         refused("publish", json!({ "channel": "feed", "body": {} }), "missing field `kind`");
         refused("push", json!({ "payload": {} }), "missing field `who`");

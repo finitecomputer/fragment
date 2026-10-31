@@ -4,14 +4,22 @@
 //! metered on the payer's ledger in the neurons Workers AI prices it at:
 //! its 512×512 tiles and its diffusion steps (`price::Usage::Neurons`). A
 //! step is charged after its call at the image it got, its tiles read from
-//! the JPEG's own header. Videos are off until they run on Cloudflare
-//! (the debt ledger): `job.ai.video` is refused, saying so.
+//! the JPEG's own header.
+//!
+//! A video (`job.ai.video`) is HappyHorse 1.0 text-to-video, a third-party
+//! model of Cloudflare's catalog called through the same binding and
+//! gateway, which pays for it by Unified Billing. Its answer names the
+//! video's URL, which the cell reads (`VIDEO_MAX_BYTES` at most, an MP4
+//! whose length reads from its header: `mp4_duration_ms`). It is charged
+//! as the catalog bills it, its seconds at its resolution's price a second
+//! (`VideoCall::usage`), as soon as the model answers with its URL: a read
+//! that fails after it never makes the video again.
 
 use base64::Engine;
 use serde_json::{json, Value};
 
 use crate::price::Usage;
-use crate::steps::AiImage;
+use crate::steps::{AiImage, AiVideo};
 
 /// The image model, by its Workers AI catalog id (its catalog entry,
 /// 2026-10-03: `cloudflare-docs` `workers-ai-models/flux-1-schnell.json`).
@@ -44,8 +52,16 @@ pub enum Refusal {
     /// A path that does not end in `.jpg` or `.jpeg`: the model draws
     /// JPEGs, and a file is served by its extension (bug 5).
     Path,
-    /// `job.ai.video`: videos are off until they run on Cloudflare.
-    VideoOff,
+    /// A video's prompt that is empty or over `VIDEO_PROMPT_MAX_CHARS`.
+    VideoPrompt,
+    /// A video's duration outside `DURATION_MIN_S` to `DURATION_MAX_S`.
+    Duration,
+    /// A video's resolution other than `720p` or `1080p`.
+    Resolution,
+    /// A video's aspect ratio outside `ASPECT_RATIOS`.
+    AspectRatio,
+    /// A video's path that does not end in `.mp4`: the model makes MP4s.
+    VideoPath,
 }
 
 impl Refusal {
@@ -55,7 +71,11 @@ impl Refusal {
             Refusal::Prompt => format!("ai.image's prompt is 1 to {PROMPT_MAX_CHARS} characters"),
             Refusal::Steps => format!("ai.image's steps is 1 to {STEPS_MAX} ({STEPS_DEFAULT} unless named)"),
             Refusal::Path => "ai.image draws a JPEG: its path ends in .jpg or .jpeg".into(),
-            Refusal::VideoOff => "video steps are off until they run on Cloudflare".into(),
+            Refusal::VideoPrompt => format!("ai.video's prompt is 1 to {VIDEO_PROMPT_MAX_CHARS} characters"),
+            Refusal::Duration => format!("ai.video's duration is {DURATION_MIN_S} to {DURATION_MAX_S} seconds ({DURATION_DEFAULT_S} unless named)"),
+            Refusal::Resolution => "ai.video's resolution is 720p or 1080p (720p unless named)".into(),
+            Refusal::AspectRatio => format!("ai.video's aspect_ratio is one of {} ({} unless named)", ASPECT_RATIOS.join(", "), ASPECT_RATIOS[0]),
+            Refusal::VideoPath => "ai.video makes an MP4: its path ends in .mp4".into(),
         }
     }
 }
@@ -69,6 +89,12 @@ pub enum AnswerFault {
     TooLarge,
     /// Not a JPEG whose size reads from its header.
     NotJpeg,
+    /// A video's answer that is not a completed video at an http(s) URL.
+    NoVideo,
+    /// A video over `VIDEO_MAX_BYTES`.
+    VideoTooLarge,
+    /// Not an MP4 whose length reads from its header (`mp4_duration_ms`).
+    NotMp4,
 }
 
 impl AnswerFault {
@@ -77,6 +103,9 @@ impl AnswerFault {
             AnswerFault::NoImage => "the model's answer has no image".into(),
             AnswerFault::TooLarge => format!("the model's image is over {IMAGE_MAX_BYTES} bytes"),
             AnswerFault::NotJpeg => "the model's image is not a JPEG whose size reads".into(),
+            AnswerFault::NoVideo => "the model's answer is no completed video".into(),
+            AnswerFault::VideoTooLarge => format!("the model's video is over {VIDEO_MAX_BYTES} bytes"),
+            AnswerFault::NotMp4 => "the model's video is not an MP4 whose length reads".into(),
         }
     }
 }
@@ -276,6 +305,189 @@ pub fn jpeg_whole(b: &[u8]) -> bool {
     false
 }
 
+// ---- videos
+
+/// The video model, by its catalog id: Alibaba's HappyHorse 1.0
+/// text-to-video, third-party, through the AI Gateway (Unified Billing),
+/// with zero data retention (its catalog entry, 2026-10-31:
+/// developers.cloudflare.com/ai/models/alibaba/hh1-t2v; its 1.1 keeps
+/// what it is sent, so it is not this one).
+pub const VIDEO_MODEL: &str = "alibaba/hh1-t2v";
+/// What it makes: an MP4.
+pub const VIDEO_MEDIA_TYPE: &str = "video/mp4";
+/// Its input's bounds, from its catalog's schema: a prompt of 1 to 2500
+/// characters, 3 to 15 seconds, and its ratios.
+pub const VIDEO_PROMPT_MAX_CHARS: usize = 2500;
+pub const DURATION_MIN_S: u32 = 3;
+pub const DURATION_MAX_S: u32 = 15;
+pub const DURATION_DEFAULT_S: u32 = 5;
+pub const ASPECT_RATIOS: [&str; 5] = ["16:9", "9:16", "1:1", "4:3", "3:4"];
+/// The largest video read from its URL: 15 seconds of 1080p is tens of
+/// MiB, and the Durable Object holds it whole once.
+pub const VIDEO_MAX_BYTES: usize = 64 * 1024 * 1024;
+/// The longest a video's header may say it runs: past the model's 15
+/// seconds with room for a frame's rounding, a length that is no video's.
+pub const VIDEO_LENGTH_MAX_MS: u64 = (DURATION_MAX_S as u64 + 1) * 1000;
+
+/// A video's resolution, as its model names it, and the row its price is
+/// kept under in the book.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Resolution {
+    P720,
+    P1080,
+}
+
+impl Resolution {
+    /// As the model's input names it.
+    pub fn input(self) -> &'static str {
+        match self {
+            Resolution::P720 => "720P",
+            Resolution::P1080 => "1080P",
+        }
+    }
+
+    /// The book's row its seconds are priced by (`crate::price`'s
+    /// `DEFAULT_MODELS`): a model row, its output a millisecond of video.
+    pub fn priced_as(self) -> &'static str {
+        match self {
+            Resolution::P720 => "alibaba/hh1-t2v@720P",
+            Resolution::P1080 => "alibaba/hh1-t2v@1080P",
+        }
+    }
+}
+
+/// A video step, checked: the model's input, and the seconds and the
+/// resolution its price counts.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VideoCall {
+    pub input: Value,
+    pub seconds: u32,
+    pub resolution: Resolution,
+}
+
+/// The call a video step makes, or why it is refused.
+pub fn video_call(step: &AiVideo) -> Result<VideoCall, Refusal> {
+    let chars = step.prompt.chars().count();
+    if chars == 0 || chars > VIDEO_PROMPT_MAX_CHARS {
+        return Err(Refusal::VideoPrompt);
+    }
+    let duration = step.duration.unwrap_or(DURATION_DEFAULT_S);
+    if !(DURATION_MIN_S..=DURATION_MAX_S).contains(&duration) {
+        return Err(Refusal::Duration);
+    }
+    let resolution = match step.resolution.as_deref().map(str::to_ascii_lowercase).as_deref() {
+        None | Some("720p") => Resolution::P720,
+        Some("1080p") => Resolution::P1080,
+        Some(_) => return Err(Refusal::Resolution),
+    };
+    let ratio = step.aspect_ratio.as_deref().unwrap_or(ASPECT_RATIOS[0]);
+    if !ASPECT_RATIOS.contains(&ratio) {
+        return Err(Refusal::AspectRatio);
+    }
+    if !step.path.to_ascii_lowercase().ends_with(".mp4") {
+        return Err(Refusal::VideoPath);
+    }
+    let input = json!({ "prompt": step.prompt, "duration": duration, "resolution": resolution.input(), "ratio": ratio, "watermark": false });
+    Ok(VideoCall { input, seconds: duration, resolution })
+}
+
+impl VideoCall {
+    /// What the video costs: its seconds at its resolution, as the catalog
+    /// bills a second of it, in its model row's output, one millisecond one
+    /// unit. No usage kind of its own: every release's ledger and outbox
+    /// store and price a model's tokens already, and one without this row
+    /// charges it nothing (decision 62).
+    pub fn usage(&self) -> Usage {
+        Usage::Tokens { model: self.resolution.priced_as().into(), input: 0, cached_input: 0, cache_write: 0, output: u64::from(self.seconds) * 1000 }
+    }
+}
+
+/// The video's URL in the model's answer: `{state: "Completed", result:
+/// {video}}`, as the binding answers a third-party model raw (its catalog's
+/// output), or `{video}` alone. A state other than completed, or a URL that
+/// is not http(s), is no video.
+pub fn video_url(answer: &[u8]) -> Result<String, AnswerFault> {
+    let v: Value = serde_json::from_slice(answer).map_err(|_| AnswerFault::NoVideo)?;
+    if v.get("state").is_some_and(|state| state != "Completed") {
+        return Err(AnswerFault::NoVideo);
+    }
+    let url = v["result"]["video"].as_str().or_else(|| v["video"].as_str()).ok_or(AnswerFault::NoVideo)?;
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return Err(AnswerFault::NoVideo);
+    }
+    Ok(url.to_string())
+}
+
+/// A video the model made: its bytes and its length.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Video {
+    pub bytes: Vec<u8>,
+    pub length_ms: u64,
+}
+
+/// The video read from its URL, if it is one the platform keeps: at most
+/// `VIDEO_MAX_BYTES`, an MP4 whose length reads from its header.
+pub fn video_of(bytes: Vec<u8>) -> Result<Video, AnswerFault> {
+    if bytes.len() > VIDEO_MAX_BYTES {
+        return Err(AnswerFault::VideoTooLarge);
+    }
+    let length_ms = mp4_duration_ms(&bytes).ok_or(AnswerFault::NotMp4)?;
+    Ok(Video { bytes, length_ms })
+}
+
+/// One ISO media box at `at` in `b`: its type and its contents' range, or
+/// `None` when its header does not read or it runs past `end`.
+fn mp4_box(b: &[u8], at: usize, end: usize) -> Option<([u8; 4], std::ops::Range<usize>)> {
+    let head = b.get(at..at.checked_add(8)?)?;
+    let size = u32::from_be_bytes([head[0], head[1], head[2], head[3]]) as u64;
+    let kind = [head[4], head[5], head[6], head[7]];
+    let (header, size) = match size {
+        // to the end of its container
+        0 => (8, (end - at) as u64),
+        // a 64-bit size follows the type
+        1 => (16, u64::from_be_bytes(b.get(at + 8..at + 16)?.try_into().ok()?)),
+        n => (8, n),
+    };
+    let stop = at.checked_add(usize::try_from(size).ok()?)?;
+    (size >= header as u64 && stop <= end).then_some((kind, at + header..stop))
+}
+
+/// An MP4's length in milliseconds, rounded up: its movie header's
+/// (`moov`/`mvhd`) duration over its timescale. `None` when the bytes are
+/// no MP4 (an `ftyp` box first), its boxes do not read, or its length is
+/// zero, unknown or past `VIDEO_LENGTH_MAX_MS`.
+pub fn mp4_duration_ms(b: &[u8]) -> Option<u64> {
+    let (first, _) = mp4_box(b, 0, b.len())?;
+    if &first != b"ftyp" {
+        return None;
+    }
+    let find = |kind: &[u8; 4], within: std::ops::Range<usize>| -> Option<std::ops::Range<usize>> {
+        let mut at = within.start;
+        // bounded: each box read moves `at` forward at least its 8-byte header
+        while at < within.end {
+            let (k, body) = mp4_box(b, at, within.end)?;
+            if &k == kind {
+                return Some(body);
+            }
+            at = body.end;
+        }
+        None
+    };
+    let mvhd = find(b"mvhd", find(b"moov", 0..b.len())?)?;
+    let m = b.get(mvhd)?;
+    // version 0: 32-bit times; 1: 64-bit; after its version and flags
+    let (timescale, duration) = match *m.first()? {
+        0 => (u32::from_be_bytes(m.get(12..16)?.try_into().ok()?), u64::from(u32::from_be_bytes(m.get(16..20)?.try_into().ok()?))),
+        1 => (u32::from_be_bytes(m.get(20..24)?.try_into().ok()?), u64::from_be_bytes(m.get(24..32)?.try_into().ok()?)),
+        _ => return None,
+    };
+    if timescale == 0 || duration == 0 || duration == u64::from(u32::MAX) || duration == u64::MAX {
+        return None;
+    }
+    let ms = (u128::from(duration) * 1000).div_ceil(u128::from(timescale));
+    u64::try_from(ms).ok().filter(|ms| *ms <= VIDEO_LENGTH_MAX_MS)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -366,6 +578,119 @@ mod tests {
         zero[sof + 6] = 0;
         assert!(!jpeg_whole(&zero), "a frame of no height");
         assert!(!jpeg_whole(b"\x89PNG\r\n\x1a\n"));
+    }
+
+    fn video(args: Value) -> AiVideo {
+        match Step::from_parts("ai.video", args) {
+            Ok(Step::AiVideo(v)) => v,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// An MP4 whose movie header says `duration` at `timescale` (version
+    /// 0's 32-bit fields, or version 1's 64-bit), `pad` bytes of media data
+    /// before it, as a muxer that writes `moov` last does.
+    pub(crate) fn mp4(timescale: u32, duration: u64, version: u8, pad: usize) -> Vec<u8> {
+        let boxed = |kind: &[u8; 4], body: &[u8]| [&((body.len() + 8) as u32).to_be_bytes()[..], kind, body].concat();
+        let mut mvhd = vec![version, 0, 0, 0];
+        if version == 0 {
+            mvhd.extend([0; 8]);
+            mvhd.extend(timescale.to_be_bytes());
+            mvhd.extend((duration as u32).to_be_bytes());
+        } else {
+            mvhd.extend([0; 16]);
+            mvhd.extend(timescale.to_be_bytes());
+            mvhd.extend(duration.to_be_bytes());
+        }
+        mvhd.extend([0; 80]);
+        let moov = boxed(b"moov", &boxed(b"mvhd", &mvhd));
+        [boxed(b"ftyp", b"isom\0\0\0\0isomiso2mp41"), boxed(b"mdat", &vec![7; pad]), moov].concat()
+    }
+
+    /// Goal: a video step's input is the catalog's, in meatproxy's shape,
+    /// its length, resolution and ratio defaulted and bounded, its path an
+    /// MP4's. Method: valid and invalid steps, each bound at and past its
+    /// edge.
+    #[test]
+    fn a_video_step_is_checked_before_it_calls() {
+        let call = video_call(&video(json!({ "prompt": "waves", "path": "video/waves.mp4" }))).unwrap();
+        assert_eq!(call.input, json!({ "prompt": "waves", "duration": 5, "resolution": "720P", "ratio": "16:9", "watermark": false }));
+        assert_eq!(call.resolution, Resolution::P720);
+        let call = video_call(&video(json!({ "prompt": "waves", "path": "V.MP4", "duration": 15, "resolution": "1080P", "aspect_ratio": "9:16" }))).unwrap();
+        assert_eq!((call.input["duration"].clone(), call.input["ratio"].clone(), call.resolution), (json!(15), json!("9:16"), Resolution::P1080));
+        assert!(video_call(&video(json!({ "prompt": "é".repeat(VIDEO_PROMPT_MAX_CHARS), "path": "v.mp4", "duration": 3 }))).is_ok(), "characters, not bytes");
+        let refused = |args: Value| video_call(&video(args)).unwrap_err();
+        assert_eq!(refused(json!({ "prompt": "", "path": "v.mp4" })), Refusal::VideoPrompt);
+        assert_eq!(refused(json!({ "prompt": "é".repeat(VIDEO_PROMPT_MAX_CHARS + 1), "path": "v.mp4" })), Refusal::VideoPrompt);
+        assert_eq!(refused(json!({ "prompt": "p", "path": "v.mp4", "duration": 2 })), Refusal::Duration);
+        assert_eq!(refused(json!({ "prompt": "p", "path": "v.mp4", "duration": 16 })), Refusal::Duration);
+        assert_eq!(refused(json!({ "prompt": "p", "path": "v.mp4", "resolution": "768p" })), Refusal::Resolution, "the old model's resolution is no longer one");
+        assert_eq!(refused(json!({ "prompt": "p", "path": "v.mp4", "aspect_ratio": "21:9" })), Refusal::AspectRatio);
+        assert_eq!(refused(json!({ "prompt": "p", "path": "v.mov" })), Refusal::VideoPath);
+    }
+
+    /// Goal: a video costs its seconds at its resolution's price a second,
+    /// so the book charges the catalog's list price. Method: five seconds
+    /// (unnamed) at 720P lists at $0.70, at 1080P at $1.40, and fifteen at
+    /// 1080P at $4.20.
+    #[test]
+    fn a_video_costs_its_seconds_at_its_resolution() {
+        let at = |args: Value| video_call(&video(args)).unwrap();
+        let book = PriceBook::defaults();
+        let five = at(json!({ "prompt": "p", "path": "v.mp4" }));
+        assert_eq!(five.usage(), Usage::Tokens { model: "alibaba/hh1-t2v@720P".into(), input: 0, cached_input: 0, cache_write: 0, output: 5_000 });
+        assert_eq!(book.price(&five.usage()).unwrap().list, 700_000, "$0.14 a second");
+        assert_eq!(book.price(&at(json!({ "prompt": "p", "path": "v.mp4", "resolution": "1080p" })).usage()).unwrap().list, 1_400_000, "$0.28 a second");
+        let longest = at(json!({ "prompt": "p", "path": "v.mp4", "resolution": "1080p", "duration": DURATION_MAX_S }));
+        assert_eq!(book.price(&longest.usage()).unwrap().list, 4_200_000);
+        assert!(longest.usage().validate().is_ok());
+    }
+
+    /// Goal: the video's URL reads from the binding's raw answer, and only
+    /// a completed one's. Method: the catalog's shape, the bare one, and
+    /// each fault.
+    #[test]
+    fn the_videos_url_reads_from_the_models_answer() {
+        let url = "https://examples.aig.cloudflare.com/alibaba/hh1-t2v/v.mp4";
+        let raw = json!({ "state": "Completed", "result": { "video": url }, "gatewayMetadata": { "keySource": "Unified" } }).to_string();
+        assert_eq!(video_url(raw.as_bytes()), Ok(url.to_string()));
+        assert_eq!(video_url(json!({ "video": url }).to_string().as_bytes()), Ok(url.to_string()));
+        for bad in [json!({ "state": "Failed", "result": { "video": url } }), json!({ "state": "Running" }), json!({ "result": {} }), json!({ "video": "ftp://x/v.mp4" }), json!({ "video": 7 })] {
+            assert_eq!(video_url(bad.to_string().as_bytes()), Err(AnswerFault::NoVideo), "{bad}");
+        }
+        assert_eq!(video_url(b"not json"), Err(AnswerFault::NoVideo));
+    }
+
+    /// Goal: an MP4's length reads from its movie header wherever its
+    /// boxes put it, rounded up to the millisecond; anything else is no
+    /// length. Method: both header versions, `moov` after `mdat`, a 64-bit
+    /// box size, and truncated, foreign, empty and absurd ones.
+    #[test]
+    fn an_mp4s_length_reads_from_its_header() {
+        assert_eq!(mp4_duration_ms(&mp4(1000, 5_000, 0, 64)), Some(5_000));
+        assert_eq!(mp4_duration_ms(&mp4(90_000, 450_000, 1, 0)), Some(5_000), "version 1");
+        assert_eq!(mp4_duration_ms(&mp4(600, 3_001, 0, 0)), Some(5_002), "a part millisecond rounds up");
+        let whole = mp4(1000, 6_000, 0, 1024);
+        // the same MP4, its mdat box's size in 64 bits
+        let (ftyp, rest) = whole.split_at(whole.windows(4).position(|w| w == b"mdat").unwrap() - 4);
+        let (mdat, moov) = rest.split_at(8 + 1024);
+        let wide = [ftyp, &1u32.to_be_bytes(), b"mdat", &((mdat.len() + 8) as u64).to_be_bytes(), &mdat[8..], moov].concat();
+        assert_eq!(mp4_duration_ms(&wide), Some(6_000), "a 64-bit box size");
+        for n in [0, 4, 12, whole.len() - 1] {
+            assert_eq!(mp4_duration_ms(&whole[..n]), None, "cut at {n}");
+        }
+        assert_eq!(mp4_duration_ms(&mp4(0, 5_000, 0, 0)), None, "no timescale");
+        assert_eq!(mp4_duration_ms(&mp4(1000, 0, 0, 0)), None, "no length");
+        assert_eq!(mp4_duration_ms(&mp4(1000, u64::from(u32::MAX), 0, 0)), None, "an unknown length");
+        assert_eq!(mp4_duration_ms(&mp4(1000, VIDEO_LENGTH_MAX_MS + 1, 1, 0)), None, "past any video's");
+        assert_eq!(mp4_duration_ms(&mp4(1000, 5_000, 2, 0)), None, "an unknown header version");
+        let mut no_ftyp = mp4(1000, 5_000, 0, 0);
+        no_ftyp[4..8].copy_from_slice(b"free");
+        assert_eq!(mp4_duration_ms(&no_ftyp), None, "no ftyp first");
+        assert_eq!(mp4_duration_ms(&jpeg(16, 16)), None);
+        assert_eq!(video_of(mp4(1000, 5_000, 0, 0)).map(|v| v.length_ms), Ok(5_000));
+        assert_eq!(video_of(b"\x00\x00\x00\x08free".to_vec()), Err(AnswerFault::NotMp4));
+        assert_eq!(video_of(vec![0; VIDEO_MAX_BYTES + 1]), Err(AnswerFault::VideoTooLarge));
     }
 
     fn image(args: Value) -> AiImage {
@@ -469,8 +794,11 @@ mod tests {
     /// Every refusal says why, the video's in the words the platform owes.
     #[test]
     fn refusals_say_why() {
-        assert_eq!(Refusal::VideoOff.message(), "video steps are off until they run on Cloudflare");
         assert!(Refusal::Path.message().contains(".jpg"));
+        assert!(Refusal::VideoPath.message().contains(".mp4"));
+        assert!(Refusal::Duration.message().contains("3 to 15 seconds"));
+        assert!(Refusal::AspectRatio.message().contains("16:9, 9:16, 1:1, 4:3, 3:4"));
+        assert!(AnswerFault::VideoTooLarge.message().contains(&VIDEO_MAX_BYTES.to_string()));
         assert!(AnswerFault::TooLarge.message().contains(&IMAGE_MAX_BYTES.to_string()));
     }
 }

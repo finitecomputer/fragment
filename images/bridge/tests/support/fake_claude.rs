@@ -23,6 +23,9 @@
 //!   session is as Claude Code keeps one: `--session-id` of one whose
 //!   transcript is there, and `--resume` of one that is not, fail as the
 //!   real one does, and its first message makes its transcript.
+//!
+//! In either mode each line it is given is appended to `heard.jsonl` beside
+//! it, as it came: what a test reads of what Claude Code was told.
 
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
@@ -39,6 +42,13 @@ fn main() {
         Some("replay") => replay(&args, Path::new(cfg["script"].as_str().expect("script"))),
         other => panic!("fake-claude: no mode {other:?}"),
     }
+}
+
+/// A line it was given, appended to `heard.jsonl` beside it.
+fn heard(line: &str) {
+    let path = std::env::current_exe().expect("its own path").with_file_name("heard.jsonl");
+    let mut f = std::fs::OpenOptions::new().create(true).append(true).open(path).expect("heard.jsonl");
+    writeln!(f, "{line}").expect("written");
 }
 
 /// The next `<n>.jsonl` in `dir` no process has taken (made empty, so the
@@ -96,6 +106,7 @@ fn record(args: &[String], real: &Path, out: &Path) {
     let input = std::thread::spawn(move || {
         // bounded by its input: ends when the bridge closes it
         for line in std::io::stdin().lock().lines().map_while(Result::ok) {
+            heard(&line);
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
                 put(&log_in, serde_json::json!({ "in": scrub(v) }));
             }
@@ -126,7 +137,11 @@ fn record(args: &[String], real: &Path, out: &Path) {
 }
 
 /// A recorded line, without the machine it was recorded on: its init's
-/// directories and sockets dropped, and its home directory `~` elsewhere.
+/// directories and sockets dropped; a tool input's streamed pieces emptied
+/// (the bridge reads the whole input from its `assistant` line, and a piece
+/// can split a path past scrubbing); its working directory (where its tools
+/// ran) the image's, `/data/work/<agent>`; its home directory `~`; and its
+/// user's name, as a word (a listing's owner), `user`.
 fn scrub(mut v: serde_json::Value) -> serde_json::Value {
     if v["type"] == "system" && v["subtype"] == "init" {
         if let Some(o) = v.as_object_mut() {
@@ -135,10 +150,40 @@ fn scrub(mut v: serde_json::Value) -> serde_json::Value {
             }
         }
     }
-    match std::env::var("HOME") {
-        Ok(home) if !home.is_empty() => serde_json::from_str(&v.to_string().replace(&home, "~")).unwrap_or(v),
-        _ => v,
+    if v["type"] == "stream_event" && v["event"]["delta"]["type"] == "input_json_delta" {
+        v["event"]["delta"]["partial_json"] = serde_json::Value::String(String::new());
     }
+    let mut text = v.to_string();
+    if let Ok(cwd) = std::env::current_dir() {
+        let name = cwd.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        text = text.replace(&cwd.to_string_lossy().to_string(), &format!("/data/work/{name}"));
+    }
+    let home = std::env::var("HOME").unwrap_or_default();
+    if !home.is_empty() {
+        text = text.replace(&home, "~");
+    }
+    let user = std::path::Path::new(&home).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    if user.len() >= 3 {
+        text = whole_word(&text, &user, "user");
+    }
+    serde_json::from_str(&text).unwrap_or(v)
+}
+
+/// `text` with each `word` that stands alone (no letter, digit, `_` or `-`
+/// either side) as `with`.
+fn whole_word(text: &str, word: &str, with: &str) -> String {
+    let part = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '-');
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    // bounded by `text`: each pass moves past one match
+    while let Some(i) = rest.find(word) {
+        let (before, after) = (rest[..i].chars().next_back(), rest[i + word.len()..].chars().next());
+        out.push_str(&rest[..i]);
+        out.push_str(if part(before) || part(after) { word } else { with });
+        rest = &rest[i + word.len()..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// The value of `--<flag>` among `args`.
@@ -188,6 +233,7 @@ fn replay(args: &[String], script: &Path) {
     for l in &lines {
         if let Some(expected) = l.get("in") {
             let Some(Ok(line)) = input.next() else { std::process::exit(0) };
+            heard(&line);
             let got: serde_json::Value = serde_json::from_str(&line).unwrap_or(serde_json::Value::Null);
             if kind(&got) != kind(expected) {
                 eprintln!("fake-claude: recording {n} expected `{}`, got `{}`", kind(expected), kind(&got));
