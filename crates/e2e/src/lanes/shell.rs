@@ -1099,11 +1099,11 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("reloaded mid-run, the shell goes on from what was made (the same chat, no other), and Send turns on once the platform has the agent in it", resumed && sendable && joined.len() == 1, json!({ "agents": joined }));
     let ready = s.eventually(agent_wait, || b.eval_in_frame(&page, &host, "!document.querySelector('.setup-card') && document.getElementById('note').textContent === ''").ok() == Some(Value::Bool(true)));
     s.ok("once the agent follows its chat, the card goes", ready, "");
-    let row = b.eval(&page, "document.querySelector('#sidebar-agent .title')?.textContent ?? null")?;
+    let row = b.eval(&page, "document.querySelector('#new-chat-agent .name')?.textContent ?? null")?;
     let list = shell(api, &session, "GET", "/api/fragments", None, &[])?;
     let owned = |kind: &str| list.body["fragments"].as_array().into_iter().flatten().filter(|f| f["kind"] == kind && f["role"] == "owner").count();
     s.ok(
-        "the sidebar shows their one agent, named, and the run made one agent and one chat, though it was tried twice and reloaded",
+        "the sidebar's New chat names their one agent, and the run made one agent and one chat, though it was tried twice and reloaded",
         row.as_str().is_some_and(|t| !t.is_empty()) && owned("agent") == 1 && owned("chat") == 1,
         json!({ "agent": row, "agents": owned("agent"), "chats": owned("chat") }),
     );
@@ -1180,22 +1180,12 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     let _ = b.screenshot(&page, &shots.join("desktop-chat.png"));
     doing_ui(s, api, &mut b, &page, &session, &chat, &shots)?;
 
-    // another agent of theirs, made elsewhere (the CLI, or an agent): the
-    // shell has no list of agents (one agent: Paul, 2026-10-13), so it
-    // stays out of the sidebar, while its chat is a chat like any other
+    // another agent of theirs, made elsewhere (the CLI, or an agent): a row
+    // of its own under their main agent, and its chat a chat like any other
     let first_title = row.as_str().unwrap_or("").to_string();
-    let (_, reader_chat, reader_id) = extra_agent(api, &session, "reader", "Reader", "keep my reading list")?;
-    let reader_row = format!("document.querySelector({})", js(&format!("#chats [data-key={}]", js(&format!("chat:{reader_chat}")))));
-    let one = b.until(
-        &page,
-        &format!("document.querySelectorAll('#primary-agent .sidebar-agent').length === 1 && document.querySelector('#sidebar-agent .title')?.textContent === {} && !!{reader_row}", js(&first_title)),
-        agent_wait,
-    );
-    s.ok(
-        "another agent of theirs stays out of the sidebar, which shows their one agent (the first), and its chat lists among their chats",
-        one,
-        b.eval(&page, "({ agent: document.getElementById('primary-agent').innerText, chats: document.getElementById('chats').innerText })")?,
-    );
+    let one = b.eval(&page, CHIP)?;
+    let (reader, reader_chat, reader_id) = extra_agent(api, &session, "reader", "Reader", "keep my reading list")?;
+    agents_ui(s, api, &mut b, &page, &session, &first_title, &one, &chat, &reader, &reader_chat, &shots)?;
     let (hello, seen) = said_hello(s, api, &session, &reader_chat, &reader_id, agent_wait);
     anyhow::ensure!(hello, "the Reader's hello: {seen:?}");
 
@@ -2238,7 +2228,7 @@ fn faces_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person,
     let renamed = b.until(
         page,
         &format!(
-            "document.querySelector('#sidebar-agent .title')?.textContent === 'Frank' && document.querySelector({face})?.textContent === 'Frank' && document.querySelector({own_row})?.textContent === {first_chat} && document.querySelector({screen})?.textContent === \"Open Frank's screen\"",
+            "document.querySelector('#new-chat-agent .name')?.textContent === 'Frank' && document.querySelector({face})?.textContent === 'Frank' && document.querySelector({own_row})?.textContent === {first_chat} && document.querySelector({screen})?.textContent === \"Open Frank's screen\"",
             first_chat = js(FIRST_CHAT)
         ),
         wait,
@@ -2247,7 +2237,7 @@ fn faces_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person,
     s.ok(
         "Settings' Agents renames the person's agent: its name shows in the sidebar, its settings row and its screen's button, with no reload, and its first chat's row keeps the chat's own title; its job says the new name where it said the old",
         asked && renamed && rewritten == job_of("Frank"),
-        b.eval(page, &format!("({{ pill: document.querySelector('#sidebar-agent .title')?.textContent, row: document.querySelector({face})?.textContent, chat: document.querySelector({own_row})?.textContent, screen: document.querySelector({screen})?.textContent }})"))?,
+        b.eval(page, &format!("({{ chip: document.querySelector('#new-chat-agent .name')?.textContent, row: document.querySelector({face})?.textContent, chat: document.querySelector({own_row})?.textContent, screen: document.querySelector({screen})?.textContent }})"))?,
     );
     // a picture, from a file
     let orange = super::faces::orange();
@@ -2256,7 +2246,7 @@ fn faces_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person,
     b.choose_files(page, &format!("[data-picture-for={}]", js(&agent)), &[&file])?;
     let path = super::faces::picture_path(&id, &orange);
     let loaded = |sel: &str| format!("(() => {{ const i = document.querySelector({}); return !!i && i.getAttribute('src') === {} && i.complete && i.naturalWidth === 16; }})()", js(sel), js(&path));
-    let pictured = b.until(page, &format!("{} && {}", loaded("#sidebar-agent img"), loaded(&format!("[data-agent-face={}] img", js(&agent)))), wait);
+    let pictured = b.until(page, &format!("{} && {}", loaded("#new-chat-agent img"), loaded(&format!("[data-agent-face={}] img", js(&agent)))), wait);
     let offers = b.eval(page, &format!("({{ label: document.querySelector('[data-picture-label={a}]')?.textContent, remove: !document.querySelector('[data-picture-remove={a}]')?.hidden }})", a = js(&agent)))?;
     s.ok(
         "and gives it a picture from a file: the sidebar and its row show it in its image's place, loaded, and the row offers Change and Remove",
@@ -2293,7 +2283,7 @@ fn faces_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person,
         b.until(page, &pane, wait) && s.eventually(wait, || b.eval_in_frame(page, &screen_at, "document.title").ok() == Some(json!(format!("{name}'s screen"))))
     };
     let screen_said = |b: &mut Browser| json!({ "window": b.eval(page, &format!("document.querySelector({screen_pane})?.textContent ?? null")).ok(), "page": b.eval_in_frame(page, &screen_at, "document.title").ok() });
-    b.click(page, "#sidebar-agent")?;
+    b.click(page, "#chat-options")?;
     let opened = menu_item(b, page, "Its screen")?;
     let named = opened && screen_named(s, b, "Frank");
     s.ok("its screen's window and page name it by its name, never its label", named, json!({ "label": me.first, "shown": screen_said(b) }));
@@ -2301,7 +2291,7 @@ fn faces_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person,
     // deploy): the sidebar and the chat's page follow; the chat's own title
     // is the chat's, and stays
     let wrote = rename_by_cli(s, api, &cli, &agent, "Frankie") && job_now() == job_of("Frankie");
-    let followed = b.until(page, "document.querySelector('#sidebar-agent .title')?.textContent === 'Frankie'", wait);
+    let followed = b.until(page, "document.querySelector('#new-chat-agent .name')?.textContent === 'Frankie'", wait);
     let in_frame = s.eventually(wait, || b.eval_in_frame(page, chat, "document.getElementById('head-label')?.textContent === 'Frankie'").ok() == Some(Value::Bool(true)));
     let kept = b.eval(page, &format!("({{ row: document.querySelector({own_row})?.textContent ?? null, header: document.getElementById('chat-title').textContent }})"))?;
     let listed = own_row_of(api, me.session, chat);
@@ -2316,11 +2306,11 @@ fn faces_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person,
     // closed (its address names the agent too, as its page's frame does)
     b.eval(page, &format!("(document.querySelector({screen_pane})?.closest('.pane')?.querySelector('button[aria-label=Close]')?.click(), true)"))?;
     b.until(page, &format!("!document.querySelector({screen_pane})"), wait);
-    // its page (its menu's Its profile): its new name, and no old one
+    // its page (its chat's ⋯, Its profile): its new name, and no old one
     // anywhere on it (its job says the new one); the model it runs, its
     // tier's (agent.json's `cheap`), by its id as their computer's view
     // names it
-    b.click(page, "#sidebar-agent")?;
+    b.click(page, "#chat-options")?;
     let profile = menu_item(b, page, "Its profile")?;
     let mut seen = Value::Null;
     // its own origin's frame (a screen's names it in its address too)
@@ -2348,7 +2338,7 @@ fn faces_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person,
     // surface that copies a name once fails here, wherever it is.
     b.eval(page, &format!("(document.querySelector({})?.click(), true)", js(&format!("#stack .pane[data-key={}] button[aria-label=Files]", js(&format!("app:{agent}"))))))?;
     let files_open = b.until(page, &format!("!!document.querySelector({})", js(&format!("#stack .pane[data-key={}]", js(&format!("tree:{agent}"))))), wait);
-    b.click(page, "#sidebar-agent")?;
+    b.click(page, "#chat-options")?;
     let screen_open = menu_item(b, page, "Its screen")? && screen_named(s, b, "Frankie");
     b.click(page, "#settings")?;
     let drawn = b.until(page, &format!("location.pathname === '/settings' && document.querySelector({face})?.textContent === 'Frankie'"), wait);
@@ -2403,7 +2393,7 @@ fn faces_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person,
     );
     open_row(b, page, chat, wait)?;
     // Rename asks for what it renames: the chat's name in the chat's ⋯, the
-    // agent's in its menu, each alone
+    // agent's in Settings' Agents, each alone
     let asked_for = |b: &mut Browser, open: &str| -> Result<Value> {
         b.click(page, open)?;
         menu_item(b, page, "Rename…")?;
@@ -2414,9 +2404,15 @@ fn faces_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person,
         Ok(said)
     };
     let chats_own = asked_for(b, "#chat-options")?;
-    let agents_own = asked_for(b, "#sidebar-agent")?;
+    b.click(page, "#settings")?;
+    b.until(page, &format!("!!document.querySelector({rename})"), wait);
+    b.eval(page, &format!("(document.querySelector({rename}).click(), true)"))?;
+    b.until(page, "document.getElementById('rename-agent').open", wait);
+    let agents_own = b.eval(page, "({ title: document.getElementById('rename-title').textContent, value: document.getElementById('agent-name').value })")?;
+    b.eval(page, "(document.getElementById('rename-cancel').click(), true)")?;
+    b.until(page, "!document.getElementById('rename-agent').open", wait);
     s.ok(
-        "Rename… in the first chat's ⋯ names the chat (\"Name this chat\", its own title), and in the agent's menu the agent (\"Name your agent\", its name)",
+        "Rename… in the first chat's ⋯ names the chat (\"Name this chat\", its own title), and Settings' Rename the agent (\"Name your agent\", its name)",
         chats_own == json!({ "title": "Name this chat", "value": FIRST_CHAT }) && agents_own == json!({ "title": "Name your agent", "value": "Rosalind" }),
         json!({ "chat": chats_own, "agent": agents_own }),
     );
@@ -2454,7 +2450,7 @@ fn faces_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person,
     let remove = js(&format!("[data-picture-remove={}]", js(&agent)));
     b.until(page, &format!("!!document.querySelector({remove}) && !document.querySelector({remove}).hidden"), wait);
     b.eval(page, &format!("(document.querySelector({remove}).click(), true)"))?;
-    let gone = b.until(page, &format!("!document.querySelector('#sidebar-agent img') && !document.querySelector('[data-agent-face={a}] img') && document.querySelector('[data-picture-label={a}]')?.textContent === 'Add a picture'", a = js(&agent)), wait);
+    let gone = b.until(page, &format!("!document.querySelector('#new-chat-agent img') && !document.querySelector('[data-agent-face={a}] img') && document.querySelector('[data-picture-label={a}]')?.textContent === 'Add a picture'", a = js(&agent)), wait);
     let none = super::faces::fetched(api, &format!("/api/identities/{id}/picture"))?;
     s.ok("Remove takes its picture away: no picture in the sidebar or its row, which offers Add again, and none at its address", gone && none.status == 404, none.status);
     // its colour, by its identity (the agent template's agent-color.js, which
@@ -2462,9 +2458,10 @@ fn faces_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person,
     // sidebar and on its chat's page; agent.json names none
     let tint = "(e) => e?.style.getPropertyValue('--agent-color') ?? null";
     let want = b.eval(page, &format!("import('/__shell/agent-color.js').then((m) => m.colorOf({}))", js(&id)))?;
-    let sidebar = b.eval(page, &format!("({tint})(document.querySelector('#sidebar-agent .agent-avatar'))"))?;
+    let sidebar = b.eval(page, &format!("({tint})(document.querySelector('#new-chat-agent .agent-avatar'))"))?;
+    open_row(b, page, chat, wait)?;
     let in_chat = s.eventually(wait, || b.eval_in_frame(page, chat, &format!("({tint})(document.querySelector('#head-marks .agent-avatar'))")).ok() == Some(want.clone()));
-    b.click(page, "#sidebar-agent")?;
+    b.click(page, "#chat-options")?;
     let profile = menu_item(b, page, "Its profile")?;
     let on_page = profile && s.eventually(wait, || b.eval_in_frame(page, &agent, &format!("({tint})(document.getElementById('avatar'))")).ok() == Some(want.clone()));
     let settings = shell(api, me.session, "GET", &format!("/api/f/{agent}/file?path=agent.json"), None, &[])?;
@@ -3077,19 +3074,25 @@ fn open_failing(b: &mut Browser, api: &Api, path: &str, before: &str) -> Result<
     Ok(page)
 }
 
-/// What their agent's menu offers, opened from its pill and closed again.
+/// What the shell offers of their agent: its New chat's label (none while
+/// it is hidden), then, with a chat open, what its ⋯ offers (opened and
+/// closed again).
 fn agent_menu(b: &mut Browser, page: &Page) -> Result<Vec<String>> {
-    b.click(page, "#sidebar-agent")?;
-    b.until(page, "!document.getElementById('menu').hidden", std::time::Duration::from_secs(5));
-    let items = b.eval(page, "[...document.querySelectorAll('#menu button')].map((b) => b.textContent)")?;
-    b.press(page, "Escape", false)?;
-    Ok(strings(&items))
+    let start = b.eval(page, "(() => { const s = document.getElementById('sidebar-start-chat'); return s.hidden ? null : s.getAttribute('aria-label'); })()")?;
+    let mut offered: Vec<String> = start.as_str().map(str::to_string).into_iter().collect();
+    if b.eval(page, "!document.getElementById('chat-options').hidden")? == true {
+        b.click(page, "#chat-options")?;
+        b.until(page, "!document.getElementById('menu').hidden", std::time::Duration::from_secs(5));
+        offered.extend(strings(&b.eval(page, "[...document.querySelectorAll('#menu button')].map((b) => b.textContent)")?));
+        b.press(page, "Escape", false)?;
+    }
+    Ok(offered)
 }
 
-/// Whether an agent's menu knows the agent and its computer: a new chat
-/// with it (its identity, from the computer's view) and its screen.
+/// Whether the shell knows the agent (its identity, from the computer's
+/// view): a new chat with it, and, with its chat open, its screen there.
 fn knows_agent(menu: &[String]) -> bool {
-    ["New chat", "Its screen"].iter().all(|item| menu.iter().any(|m| m == item))
+    menu.first().is_some_and(|m| m.starts_with("New chat with ")) && (menu.len() == 1 || menu.iter().any(|m| m.ends_with("screen")))
 }
 
 /// A read of the computer that fails, the shell open (#437: a blip or a
@@ -3097,7 +3100,7 @@ fn knows_agent(menu: &[String]) -> bool {
 /// change their list's socket tells the page (an archive that changes
 /// nothing) has it read again, and its read of the computer fails: the
 /// band keeps the update it told and adds "Couldn't refresh your computer"
-/// with Try again, and their agent's menu still knows it. Try again, the
+/// with Try again, and the shell still knows their agent. Try again, the
 /// reads let through: the line goes, the update stays.
 fn refresh_failed_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &str, fragment: &str, shots: &std::path::Path) -> Result<()> {
     let wait = std::time::Duration::from_secs(30);
@@ -3109,7 +3112,7 @@ fn refresh_failed_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, ses
     let menu = agent_menu(b, page)?;
     let _ = b.screenshot(page, &shots.join("computer-refresh-failed.png"));
     s.ok(
-        "a read of the computer that fails is not \"no computer\": the update it told stays, with \"Couldn't refresh your computer\" and Try again, and their agent's menu still offers a new chat with it and its screen",
+        "a read of the computer that fails is not \"no computer\": the update it told stays, with \"Couldn't refresh your computer\" and Try again, and New chat still names their agent and its chat's ⋯ its screen",
         r.status == 200 && failed && knows_agent(&menu),
         json!({ "said": said, "menu": menu, "reads": b.eval(page, "window.__computerReads")? }),
     );
@@ -3182,6 +3185,11 @@ fn deploying_read_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, ses
 /// its sidebar's chrome shown and no release named on it (the console
 /// names them), starts again by itself, and fills in once the refusals
 /// stop, with no click. Local only: a preview's Registry is shared.
+///
+/// What the page shows is read as the notice first says Updating, in the
+/// page (`DEPLOY_SEEN`), not by a later look: the layout once fitted its
+/// columns while hidden and showed its sidebar a frame after the rest,
+/// which a look a moment later missed or met by chance.
 fn deploying_start_ui(s: &mut Suite, api: &Api, b: &mut Browser) -> Result<()> {
     if api.signs_in_by_levers() {
         return Ok(());
@@ -3192,39 +3200,57 @@ fn deploying_start_ui(s: &mut Suite, api: &Api, b: &mut Browser) -> Result<()> {
         anyhow::ensure!(r.status == 200, "setting release skew: {r}");
         Ok(())
     };
-    // what the page asked for its person, and what its console said
-    let heard = |b: &mut Browser, page: &Page| -> Result<(usize, Vec<String>)> {
-        let events = b.watched(page)?.events;
-        let asks = events.iter().filter(|e| e["method"] == "Network.requestWillBeSent" && e["params"]["request"]["url"].as_str().is_some_and(|u| u.ends_with("/api/identities/me"))).count();
-        let said = events.iter().filter(|e| e["method"] == "Runtime.consoleAPICalled").flat_map(|e| e["params"]["args"].as_array().cloned().unwrap_or_default()).filter_map(|a| a["value"].as_str().map(str::to_string)).collect();
-        Ok((asks, said))
-    };
     skew(100)?;
-    let page = b.open_watched(&format!("{}/", api.base))?;
-    // the desktop's layout, its sidebar shown, as the lane's own page has
+    // (the page's first refusal comes after the router's asks, 1.75 s at
+    // least: the viewport is the desktop's long before it)
+    let page = b.open_with_script(&format!("{}/", api.base), DEPLOY_SEEN)?;
     b.viewport(&page, 1280, 800, false)?;
-    let notice = "document.getElementById('notice')";
-    let updating = b.until(&page, &format!("!document.getElementById('layout').hidden && !{notice}.hidden && {notice}.innerText.trim() === 'Updating — back in a moment'"), wait);
-    let chrome = b.eval(&page, "['settings', 'apps-link'].every((id) => document.getElementById(id)?.checkVisibility()) && !document.body.innerText.includes('reached release')")?;
-    let again = s.eventually(wait, || heard(b, &page).is_ok_and(|(asks, _)| asks >= 2));
-    let (asks, said) = heard(b, &page)?;
-    let logged = said.iter().any(|t| t.contains("reached release"));
-    let still = b.eval(&page, &format!("{notice}.innerText.trim() === 'Updating — back in a moment'"))?;
+    let seen = "window.__deploySeen";
+    let updating = b.until(&page, &format!("!!{seen}.first"), wait);
+    let again = b.until(&page, &format!("{seen}.asks >= 2"), wait);
+    let first = b.eval(&page, &format!("{seen}.first"))?;
+    let logged = b.eval(&page, &format!("{seen}.logged.some((t) => t.includes('reached release'))"))?;
+    let still = b.eval(&page, "document.getElementById('notice').innerText.trim() === 'Updating — back in a moment'")?;
     s.ok(
-        "a page that starts as a deploy goes out says Updating in its place (not \"No chats yet\"), its sidebar's chrome kept and no release on the page (the console names them), and starts again by itself",
-        updating && chrome == true && again && logged && still == true,
-        json!({ "updating": updating, "chrome": chrome, "again": again, "logged": logged, "notice": b.eval(&page, &format!("{notice}.innerText"))?, "asks": asks, "console": said }),
+        "a page that starts as a deploy goes out says Updating in its place (not \"No chats yet\"), its sidebar's chrome shown with it and no release on the page (the console names them), and starts again by itself",
+        updating && first["layout"] == true && first["chrome"] == true && first["released"] == false && again && logged == true && still == true,
+        json!({ "first": first, "again": again, "logged": logged, "seen": b.eval(&page, seen)? }),
     );
     skew(0)?;
+    let notice = "document.getElementById('notice')";
     let filled = b.until(&page, &format!("{notice}.hidden && !!document.querySelector('#chats .chat-row') && !document.getElementById('frames').hidden"), wait);
     s.ok(
         "once calls are admitted, the page fills in by itself: its chats, the chat open, no notice",
         filled,
-        json!({ "notice": b.eval(&page, &format!("{notice}.hidden ? null : {notice}.innerText"))?, "asks": heard(b, &page)?.0 }),
+        json!({ "notice": b.eval(&page, &format!("{notice}.hidden ? null : {notice}.innerText"))?, "asks": b.eval(&page, &format!("{seen}.asks"))? }),
     );
     b.close(page)?;
     Ok(())
 }
+
+/// Installed before the shell's page runs (`deploying_start_ui`): what the
+/// page shows at the moment its notice first says Updating (its layout
+/// shown, its sidebar's Settings and Apps visible, any release on it),
+/// read by a MutationObserver as the notice changes, before anything is
+/// drawn; what its console said; and how often it asked who its person is.
+const DEPLOY_SEEN: &str = r#"
+window.__deploySeen = { first: null, logged: [], asks: 0 };
+const info = console.info;
+console.info = (...a) => { window.__deploySeen.logged.push(a.join(' ')); info.apply(console, a); };
+const ask = window.fetch;
+window.fetch = (url, o) => { if (String(url).endsWith('/api/identities/me')) window.__deploySeen.asks++; return ask(url, o); };
+addEventListener('DOMContentLoaded', () => {
+  const notice = document.getElementById('notice');
+  new MutationObserver(() => {
+    if (window.__deploySeen.first || notice.hidden || notice.innerText.trim() !== 'Updating — back in a moment') return;
+    window.__deploySeen.first = {
+      layout: !document.getElementById('layout').hidden,
+      chrome: ['settings', 'apps-link'].every((id) => document.getElementById(id)?.checkVisibility()),
+      released: document.body.innerText.includes('reached release'),
+    };
+  }).observe(notice, { attributes: true, childList: true, subtree: true, characterData: true });
+});
+"#;
 
 /// The shell's chat column with a chat open, and the band's line.
 const CHAT_AND_LINE: &str = "!document.getElementById('layout').hidden && !!document.querySelector('#frames iframe:not([hidden])') && ";
@@ -3258,7 +3284,7 @@ fn refresh_failed_start_ui(s: &mut Suite, api: &Api, b: &mut Browser, shots: &st
     std::thread::sleep(settle);
     let made = b.eval(&page, MADE)?;
     s.ok(
-        "Try again reads it: the line goes, their agent's menu offers a new chat with it and its screen, and still nothing is made",
+        "Try again reads it: the line goes, New chat names their agent and its chat's ⋯ its screen, and still nothing is made",
         read && knows_agent(&menu) && made["makingSaid"] == false && made["makes"] == 0,
         json!({ "menu": menu, "made": made }),
     );
@@ -4706,7 +4732,7 @@ fn sidebar_live(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session:
     let marked = b.eval(
         page,
         "(() => { const f = [...document.querySelectorAll('#frames iframe')].find((f) => !f.hidden); window.__loads = 0; f?.addEventListener('load', () => window.__loads++); \
-         window.__open = f?.dataset.fragment ?? null; const rows = [...document.querySelectorAll('#chats .row[data-key], #apps [data-key]')]; rows.forEach((r) => { r.__kept = true; }); return rows.length; })()",
+         window.__open = f?.dataset.fragment ?? null; const rows = [...document.querySelectorAll('#chats .row[data-key], #apps [data-key]')]; window.__said = {}; rows.forEach((r) => { r.__kept = true; window.__said[r.dataset.key] = r.textContent; }); return rows.length; })()",
     )?;
     let row = |name: &str| format!("document.querySelector({})", js(&format!("#apps [data-key={}]", js(&format!("app:{name}")))));
     let both = |b: &mut Browser, expr: &str| b.until(page, expr, SIDEBAR_LIVE_WAIT) && b.until(&second, expr, SIDEBAR_LIVE_WAIT);
@@ -4742,10 +4768,10 @@ fn sidebar_live(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session:
     let kept = b.eval(
         page,
         "(() => { const f = [...document.querySelectorAll('#frames iframe')].find((f) => !f.hidden); return { loads: window.__loads, open: f?.dataset.fragment ?? null, was: window.__open, \
-         kept: [...document.querySelectorAll('#chats .row[data-key], #apps [data-key]')].filter((r) => r.__kept).length }; })()",
+         kept: [...document.querySelectorAll('#chats .row[data-key], #apps [data-key]')].filter((r) => r.__kept || (r.dataset.key in window.__said && r.textContent !== window.__said[r.dataset.key])).length }; })()",
     )?;
     s.ok(
-        "the open chat stays open, its frame not reloaded, and the rows shown before are the same elements (patched in place)",
+        "the open chat stays open, its frame not reloaded, and the rows shown before are the same elements (patched in place), but those that now say something else (an agent's work done)",
         kept["loads"] == 0 && kept["open"] == kept["was"] && !kept["open"].is_null() && kept["kept"] == marked && marked.as_i64().is_some_and(|n| n > 0),
         json!({ "kept": kept, "marked": marked }),
     );
@@ -4955,23 +4981,21 @@ fn said_hello(s: &Suite, api: &Api, session: &str, chat: &str, agent: &str, wait
 /// asked for a card (`approve`) and then a question in words (`ask-me`),
 /// each answered as the person, the row watched in Chrome throughout.
 fn doing_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &str, chat: &str, shots: &std::path::Path) -> Result<()> {
-    let wait = std::time::Duration::from_secs(30);
     let agent_wait = std::time::Duration::from_secs(120);
-    let doing = "(document.querySelector('#sidebar-agent .agent-doing')?.textContent ?? null)";
+    // what its chat's row says, in place of its time
+    let row = format!("document.querySelector({})", js(&format!("#chats [data-key={}]", js(&format!("chat:{chat}")))));
+    let doing = format!("({row}?.querySelector('.agent-doing')?.textContent ?? null)");
+    let doing = doing.as_str();
     let say = |id: &str, body: Value| shell(api, session, "POST", &format!("/api/f/{chat}/channels/chat"), Some(&json!({ "id": id, "body": body })), &[]);
     let quiet = b.until(page, &format!("{doing} === null"), agent_wait);
-    anyhow::ensure!(quiet, "the agent's row says it is doing something before it is asked anything: {}", b.eval(page, doing)?);
+    anyhow::ensure!(quiet, "its chat's row says the agent is doing something before it is asked anything: {}", b.eval(page, doing)?);
 
     // a card waits for the person: its owner answers it
     let r = say("doing-card", json!({ "text": "approve this, please" }))?;
     anyhow::ensure!(r.status == 200, "asking for a card: {r}");
     let waiting = b.until(page, &format!("{doing} === 'Waiting for you'"), agent_wait);
     let _ = b.screenshot(page, &shots.join("desktop-agent-waiting.png"));
-    let label = b.eval(page, "document.getElementById('sidebar-agent')?.getAttribute('aria-label') ?? null")?;
-    b.click(page, "#sidebar-agent")?;
-    let menu = format!("[...document.querySelectorAll('#menu button')].some((b) => b.textContent === {})", js(&format!("Waiting for you in {FIRST_CHAT}")));
-    let listed = b.until(page, &menu, wait);
-    b.press(page, "Escape", false)?;
+    let said = b.eval(page, &format!("{row}?.textContent ?? null"))?;
     let work = shell(api, session, "GET", &format!("/api/f/{chat}/channels/work?after=0&limit=1000"), None, &[])?;
     let card = work.body["records"].as_array().into_iter().flatten().rev().find(|r| r["body"]["kind"] == "turn.prompt").cloned().unwrap_or_default();
     let prompt = card["body"]["prompt"].as_str().unwrap_or("").to_string();
@@ -4979,9 +5003,9 @@ fn doing_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &st
     let r = say(&format!("pr:{prompt}"), answer)?;
     let cleared = r.status == 200 && b.until(page, &format!("{doing} === null"), agent_wait);
     s.ok(
-        "while its card waits, their agent's row says \"Waiting for you\" with no reload (and says so to a screen reader), its menu names the chat, and once it is answered the row says nothing",
-        waiting && label.as_str().is_some_and(|l| l.contains("waiting for you")) && listed && cleared,
-        json!({ "waiting": waiting, "label": label, "menu": listed, "prompt": prompt, "cleared": cleared, "row": b.eval(page, doing)? }),
+        "while its card waits, its chat's row says \"Waiting for you\" in place of its time, with no reload (in its text, so to a screen reader too), and once it is answered it says nothing",
+        waiting && said.as_str().is_some_and(|t| t.contains("Waiting for you")) && cleared,
+        json!({ "waiting": waiting, "said": said, "prompt": prompt, "cleared": cleared, "row": b.eval(page, doing)? }),
     );
 
     // a question in words waits on whoever asked it: the person
@@ -5050,8 +5074,13 @@ fn groups_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person
         anyhow::ensure!(r.status == 200, "a member of the group: {r}");
     }
     let row = format!("#chats [data-key={}]", js(&format!("chat:{group}")));
-    let listed = b.until(page, &format!("document.querySelector({})?.textContent === {}", js(&row), js(&format!("Reader, {}", me.first_title))), wait);
-    s.ok("a group chat made elsewhere lists among their chats, by its title", listed, b.eval(page, "document.getElementById('chats').innerText")?);
+    let both = js(&format!("Reader, {}", me.first_title));
+    let listed = b.until(
+        page,
+        &format!("document.querySelector({})?.textContent === {both} && document.querySelector({})?.textContent === {both} && document.querySelectorAll({}).length === 2", js(&format!("{row} .label")), js(&format!("{row} .chat-agent")), js(&format!("{row} .chat-face .avatar-stack .agent-avatar"))),
+        wait,
+    );
+    s.ok("a group chat made elsewhere lists among their chats, by its title, its row naming both its agents (the lead first) with their faces stacked", listed, b.eval(page, "document.getElementById('chats').innerText")?);
     let r = shell(api, me.session, "GET", &format!("/api/f/{group}/members"), None, &[])?;
     let members: Vec<&str> = r.body["members"].as_array().into_iter().flatten().filter(|m| m["kind"] == "agent").filter_map(|m| m["principal"].as_str()).collect();
     s.ok("its members are the two agents, the lead added first", members == [lead.as_str(), other.as_str()], &r);
@@ -5212,11 +5241,11 @@ fn unread_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person
 /// words posted whole as its first message: one record though the first
 /// answer was lost and it was sent again (its id, kept); its first message
 /// titles it (48 characters at most) and the agent answers there. Nothing
-/// typed starts nothing. New chat, from the agent's menu, opens an empty
-/// chat with it; asked again before anything is said there, that one, not
-/// another; so does the New chat row below the agent, in the sidebar
-/// (screenshots light and dark). The agent's own chat keeps its label (`fragment ask`, after,
-/// finds it).
+/// typed starts nothing. New chat (with the open chat's agent) opens an
+/// empty chat with it; asked again before anything is said there, that
+/// one, not another; from another agent's chat, its chip's pick of the
+/// first does the same (screenshots light and dark). The agent's own chat
+/// keeps its label (`fragment ask`, after, finds it).
 fn new_chat_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person, reader_chat: &str, shots: &std::path::Path) -> Result<()> {
     let wait = std::time::Duration::from_secs(30);
     let agent_wait = std::time::Duration::from_secs(120);
@@ -5235,11 +5264,17 @@ fn new_chat_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Pers
     std::thread::sleep(std::time::Duration::from_secs(1));
     let nothing = chats_with(&own_chat) == before && b.eval(page, "document.getElementById('search-dialog').open")? == true;
     s.ok("the launcher opens on its input, and with nothing typed, Enter starts nothing", open && nothing, json!({ "before": before, "now": chats_with(&own_chat) }));
-    // words: the first row starts a chat with their agent
+    // words: the first row starts a chat with the agent New chat names (from
+    // the Reader's chat, the Reader), and beside it their agents (the main
+    // one first) to pick another for this launch: here, their main agent
     let said = "Plan my reading for October: three novels and one history of maps";
     b.eval(page, &fill("#workspace-search", said))?;
-    let offered = b.until(page, &format!("document.querySelector('#search-results .search-start')?.textContent.includes({})", js(&format!("Start a new chat with {}", me.first_title))), wait);
+    let start_says = |b: &mut Browser, name: &str| b.until(page, &format!("document.querySelector('#search-results .search-start')?.textContent.includes({})", js(&format!("Start a new chat with {name}"))), wait);
+    let readers = start_says(b, "Reader");
+    let picks = b.eval(page, "[...document.querySelectorAll('#search-results .search-agent option')].map((o) => o.textContent)")?;
     let _ = b.screenshot(page, &shots.join("desktop-launcher.png"));
+    b.eval(page, &format!("(() => {{ const p = document.querySelector('#search-results .search-agent'); p.value = {}; p.dispatchEvent(new Event('change')); return true; }})()", js(&first_id)))?;
+    let offered = readers && picks == json!([me.first_title, "Reader"]) && start_says(b, me.first_title);
     // its first answer lost: the platform has the record, the page is told it failed
     b.eval(
         page,
@@ -5258,7 +5293,7 @@ fn new_chat_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Pers
     let members = shell(api, me.session, "GET", &format!("/api/f/{fresh}/members"), None, &[])?;
     let agents: Vec<(Value, Value)> = members.body["members"].as_array().into_iter().flatten().filter(|m| m["kind"] == "agent").map(|m| (m["principal"].clone(), m["role"].clone())).collect();
     s.ok(
-        "from the Reader's chat, Enter makes a chat with their agent (not the open chat's), labelled beside its own, and posts the words once, though the first answer was lost and it was sent again",
+        "from the Reader's chat the launcher offers a new chat with the Reader, or another of their agents; their main agent picked, Enter makes a chat with it, labelled beside its own, and posts the words once, though the first answer was lost and it was sent again",
         offered && lost && opened && shows == fresh && agents == vec![(json!(first_id), json!("editor"))] && sent == 1,
         json!({ "status": status, "shows": shows, "fresh": fresh, "agents": agents, "sent": sent }),
     );
@@ -5273,40 +5308,62 @@ fn new_chat_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Pers
         answered && titled && manifest.body["meta"]["title"] == title.as_str() && first_row == format!("chat:{fresh}").as_str(),
         json!({ "title": manifest.body["meta"]["title"], "want": title, "first": first_row }),
     );
-    // New chat, from their agent's menu: an empty chat with it; asked again before anything is said, that one
-    b.click(page, "#sidebar-agent")?;
-    let picked = menu_item(b, page, "New chat")?;
+    // New chat with the open chat's agent (here their main agent's): an
+    // empty chat with it; asked again before anything is said, that one
+    let line = "(() => { const r = document.getElementById('sidebar-start-chat'); return r.hidden ? null : r.getAttribute('aria-label'); })()";
+    let named_main = b.eval(page, line)? == json!(format!("New chat with {}", me.first_title));
+    b.click(page, "#sidebar-start-chat")?;
     let blank = b.until(page, "document.getElementById('chat-title').textContent === 'New chat'", wait);
     let third = own_named(api, me.session, &format!("{own_chat}-3"))?;
     let empty = s.eventually(wait, || b.eval_in_frame(page, &third, "!!document.querySelector('#messages .empty h2') && !document.querySelector('#messages .msg')").ok() == Some(Value::Bool(true)));
     let _ = b.screenshot(page, &shots.join("desktop-new-chat.png"));
-    b.click(page, &format!("#chats [data-key={}]", js(&format!("chat:{reader_chat}"))))?;
-    b.until(page, "document.getElementById('chat-title').textContent === 'Reader'", wait);
-    b.click(page, "#sidebar-agent")?;
-    let again = menu_item(b, page, "New chat")? && b.until(page, "document.getElementById('chat-title').textContent === 'New chat'", wait);
+    b.click(page, "#sidebar-start-chat")?;
+    let again = b.until(page, &format!("document.getElementById('chat-title').textContent === 'New chat' && [...document.querySelectorAll('#frames iframe')].find((f) => !f.hidden)?.dataset.fragment === {}", js(&third)), wait);
     let made = chats_with(&own_chat);
     s.ok(
-        "New chat, from their agent's menu, opens an empty chat with it; asked again before anything is said there, it opens that one, not another",
-        picked && blank && empty && again && open_chat(b, page) == third && made.len() == before.len() + 2,
+        "New chat names the open chat's agent (their main agent's here), and opens an empty chat with it; asked again before anything is said there, it opens that one, not another",
+        named_main && blank && empty && again && open_chat(b, page) == third && made.len() == before.len() + 2,
         json!({ "chats": made }),
     );
-    // New chat, the row below their agent: the menu's, one click from the top
+    // from the Reader's chat it names the Reader, and its chip lists their
+    // agents (the one it names marked), each its face, name and role: their
+    // main agent picked, the empty chat with it opens again, not another
     b.click(page, &format!("#chats [data-key={}]", js(&format!("chat:{reader_chat}"))))?;
     b.until(page, "document.getElementById('chat-title').textContent === 'Reader'", wait);
-    let row_shown = b.eval(page, "(() => { const r = document.getElementById('sidebar-start-chat'); const top = document.getElementById('primary-agent').getBoundingClientRect(); const at = r.getBoundingClientRect(); return !r.hidden && at.height > 0 && at.top >= top.bottom && r.textContent === 'New chat'; })()")?;
+    let named_reader = b.until(page, &format!("{line} === 'New chat with Reader' && document.querySelector('#new-chat-agent .name')?.textContent === 'Reader'"), wait);
+    b.click(page, "#new-chat-agent .agent-pick")?;
+    b.until(page, "!document.getElementById('menu').hidden", wait);
+    let listed = b.eval(page, "[...document.querySelectorAll('#menu button')].map((b) => [b.querySelector('.name')?.textContent ?? null, !!b.querySelector('.agent-avatar'), b.getAttribute('aria-current') === 'true'])")?;
     for scheme in ["light", "dark"] {
         b.color_scheme(page, scheme)?;
-        let _ = b.screenshot(page, &shots.join(format!("desktop-new-chat-row-{scheme}.png")));
+        let _ = b.screenshot(page, &shots.join(format!("desktop-new-chat-pick-{scheme}.png")));
     }
     b.color_scheme(page, "light")?;
-    b.click(page, "#sidebar-start-chat")?;
+    let picked = b.eval(page, &format!("(() => {{ const i = [...document.querySelectorAll('#menu button')].find((b) => b.querySelector('.name')?.textContent === {}); i?.click(); return !!i; }})()", js(me.first_title)))? == true;
     let row_opened = b.until(page, "document.getElementById('chat-title').textContent === 'New chat'", wait);
     let made = chats_with(&own_chat);
     s.ok(
-        "New chat, the row below their agent, does as its menu's: from the Reader's chat it opens that empty chat again, not another",
-        row_shown == true && row_opened && open_chat(b, page) == third && made.len() == before.len() + 2,
-        json!({ "shown": row_shown, "chats": made }),
+        "from the Reader's chat, New chat names the Reader; its chip lists their agents with their faces, the Reader marked, and their main agent picked opens that empty chat again, not another",
+        named_reader && listed == json!([[me.first_title, true, false], ["Reader", true, true]]) && picked && row_opened && open_chat(b, page) == third && made.len() == before.len() + 2,
+        json!({ "listed": listed, "chats": made }),
     );
+    // from that empty chat of their main agent's, the Reader picked: a chat
+    // with the Reader, never that one (a blank chat is its own agent's)
+    b.click(page, "#new-chat-agent .agent-pick")?;
+    b.until(page, "!document.getElementById('menu').hidden", wait);
+    let picked = b.eval(page, "(() => { const i = [...document.querySelectorAll('#menu button')].find((b) => b.querySelector('.name')?.textContent === 'Reader'); i?.click(); return !!i; })()")? == true;
+    let moved = b.until(page, &format!("document.getElementById('chat-title').textContent === 'New chat' && [...document.querySelectorAll('#frames iframe')].find((f) => !f.hidden)?.dataset.fragment !== {}", js(&third)), wait);
+    let readers = open_chat(b, page);
+    let members = shell(api, me.session, "GET", &format!("/api/f/{readers}/members"), None, &[])?;
+    let agents: Vec<Value> = members.body["members"].as_array().into_iter().flatten().filter(|m| m["kind"] == "agent").map(|m| m["principal"].clone()).collect();
+    let reader_id = agent_ids(api, me.session, &["reader"])?.remove(0);
+    s.ok(
+        "from their main agent's empty chat, the Reader picked makes a new chat with the Reader alone, never that one",
+        picked && moved && readers != third && agents == vec![json!(reader_id)],
+        json!({ "opened": readers, "agents": agents }),
+    );
+    let r = shell(api, me.session, "PUT", &format!("/api/fragments/{readers}/archived"), Some(&json!({ "archived": true })), &[])?;
+    anyhow::ensure!(r.status == 200, "the Reader's new chat archived: {r}");
     let own = own_named(api, me.session, &own_chat)?;
     s.ok("the agent's own chat keeps its label, apart from the new ones", label_of(&own) == own_chat && label_of(&fresh) == format!("{own_chat}-2"), json!([own, fresh]));
     b.click(page, &format!("#chats [data-key={}]", js(&format!("chat:{reader_chat}"))))?;
@@ -5369,11 +5426,13 @@ fn said_in(api: &Api, me: &Person, chat: &str, text: &str) -> Vec<Value> {
         .unwrap_or_default()
 }
 
-/// The person's new chats with their agent (`<first>-chat-<n>`).
+/// The person's new chats with any of their agents (`<agent>-chat-<n>`:
+/// New chat names the open chat's agent, so a launch from the Reader's
+/// chat makes one with the Reader).
 fn new_chats(api: &Api, me: &Person) -> Vec<String> {
-    let prefix = format!("{}-chat-", me.first);
+    let made = |n: &str| label_of(n).rsplit_once("-chat-").is_some_and(|(_, k)| k.parse::<u32>().is_ok());
     shell(api, me.session, "GET", "/api/fragments", None, &[])
-        .map(|r| r.body["fragments"].as_array().into_iter().flatten().filter_map(|f| f["name"].as_str()).filter(|n| label_of(n).starts_with(&prefix)).map(str::to_string).collect())
+        .map(|r| r.body["fragments"].as_array().into_iter().flatten().filter_map(|f| f["name"].as_str()).filter(|n| made(n)).map(str::to_string).collect())
         .unwrap_or_default()
 }
 
@@ -6782,6 +6841,92 @@ fn extra_agent(api: &Api, session: &str, label: &str, title: &str, job: &str) ->
     let hello = call("POST", &format!("/api/f/{agent}/channels/tasks"), json!({ "id": "hello", "body": { "kind": "routine", "chat": chat, "text": "You were just made: say hello." } }))?;
     anyhow::ensure!(joined.status == 200 && hello.status == 200, "it joins its chat: {joined} {hello}");
     Ok((agent, chat, id))
+}
+
+/// What New chat's chip is: its element, whether it shows a caret, and
+/// the name it says.
+const CHIP: &str = "(() => { const c = document.querySelector('#new-chat-agent .agent-pick'); return c ? { tag: c.tagName, caret: !!c.querySelector('svg'), name: c.querySelector('.name')?.textContent ?? null } : null; })()";
+
+/// Several agents (Paul, 2026-10-30: one of them main, one UI for any
+/// number). With one agent, New chat's chip names it, with no caret, and
+/// opens nothing (`one`, read before the second was made); another agent
+/// made elsewhere (the CLI, an agent) gives it its caret and its list with
+/// no reload, and its chat lists by its face and name. Picked on the chip,
+/// it gets a new chat with it alone. Renamed elsewhere, its chat's row and
+/// the chip's list follow with no reload, and once it is renamed back
+/// nothing the shell draws says the name it had.
+#[allow(clippy::too_many_arguments)]
+fn agents_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &str, first_title: &str, one: &Value, first_chat: &str, reader: &str, reader_chat: &str, shots: &std::path::Path) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    let agent_wait = std::time::Duration::from_secs(120);
+    let chat_row = |name: &str| format!("#chats [data-key={}]", js(&format!("chat:{name}")));
+    let listed = b.until(page, &format!("(({{ tag, caret, name }}) => tag === 'BUTTON' && caret && name === {})({CHIP} ?? {{}}) && !!document.querySelector({})", js(first_title), js(&chat_row(reader_chat))), agent_wait);
+    let _ = b.screenshot(page, &shots.join("desktop-agents.png"));
+    s.ok(
+        "with one agent, New chat's chip names it, with no caret, and opens nothing; another agent made elsewhere gives it its caret with no reload, and its chat lists among their chats",
+        one == &json!({ "tag": "SPAN", "caret": false, "name": first_title }) && listed,
+        json!({ "one": one, "two": b.eval(page, CHIP)?, "chats": b.eval(page, "document.getElementById('chats').innerText")? }),
+    );
+    // each chat's row says whose it is first: its agent's face, in that
+    // agent's colour (its identity's), and its name; then the chat's own name
+    let reader_id = agent_ids(api, session, &["reader"])?.remove(0);
+    let reader_color = b.eval(page, &format!("import('/__shell/agent-color.js').then((m) => m.colorOf({}))", js(&reader_id)))?;
+    let faces = b.eval(
+        page,
+        &format!(
+            "(() => {{ const color = (e) => e?.style.getPropertyValue('--agent-color') || null; const q = (row, sel) => document.querySelector(`${{row}} ${{sel}}`); \
+             const seen = (row) => ({{ face: color(q(row, '.chat-face .agent-avatar')), who: q(row, '.chat-agent')?.textContent ?? null, chat: q(row, '.chat-what .label')?.textContent ?? null }}); \
+             const rows = [...document.querySelectorAll('#chats .chat-row')]; \
+             return {{ every: rows.length > 1 && rows.every((r) => r.classList.contains('two') && r.firstElementChild?.classList.contains('chat-face')), main: color(document.querySelector('#new-chat-agent .agent-avatar')), \
+             reader: {}, mainChat: seen({}), readerChat: seen({}) }}; }})()",
+            reader_color,
+            js(&chat_row(first_chat)),
+            js(&chat_row(reader_chat))
+        ),
+    )?;
+    s.ok(
+        "each chat's row says whose it is, then its own name: their first chat their main agent's face and name, the Reader's chat the Reader's",
+        faces["every"] == true
+            && faces["main"].is_string()
+            && faces["mainChat"] == json!({ "face": faces["main"], "who": first_title, "chat": FIRST_CHAT })
+            && faces["reader"].is_string()
+            && faces["readerChat"] == json!({ "face": faces["reader"], "who": "Reader", "chat": "Reader" }),
+        &faces,
+    );
+    // picked on the chip (from their main agent's chat, which it names),
+    // a new chat with it alone, never with the main agent
+    let picked = b.eval(page, "(document.querySelector('#new-chat-agent .agent-pick').click(), true)")? == true
+        && b.until(page, "!document.getElementById('menu').hidden", wait)
+        && b.eval(page, "(() => { const i = [...document.querySelectorAll('#menu button')].find((b) => b.querySelector('.name')?.textContent === 'Reader'); i?.click(); return !!i; })()")? == true;
+    let opened = b.until(page, "document.getElementById('chat-title').textContent === 'New chat'", wait);
+    let made = own_named(api, session, "reader-chat-2")?;
+    let members = shell(api, session, "GET", &format!("/api/f/{made}/members"), None, &[])?;
+    let agents: Vec<(Value, Value)> = members.body["members"].as_array().into_iter().flatten().filter(|m| m["kind"] == "agent").map(|m| (m["principal"].clone(), m["role"].clone())).collect();
+    s.ok(
+        "picked on New chat's chip, the Reader gets a new chat with it alone, labelled as its",
+        picked && opened && open_chat(b, page) == made && agents == vec![(json!(reader_id), json!("editor"))],
+        json!({ "made": made, "agents": agents }),
+    );
+    // let go, so the newest chats below are the ones they make
+    let r = shell(api, session, "PUT", &format!("/api/fragments/{made}/archived"), Some(&json!({ "archived": true })), &[])?;
+    anyhow::ensure!(r.status == 200 && b.until(page, &format!("!document.querySelector({})", js(&chat_row(&made))), wait), "its new chat archived: {r}");
+    // renamed elsewhere: its chat's row and the chip's list follow; renamed
+    // back, no copy of the other
+    let its_chat = format!("document.querySelector({})", js(&format!("{} .chat-agent", chat_row(reader_chat))));
+    let named = |b: &mut Browser, name: &str| b.until(page, &format!("{its_chat}?.textContent === {}", js(name)), wait);
+    let renamed = retitle(api, session, reader, Some("Ingrid"))? && named(b, "Ingrid");
+    b.click(page, "#new-chat-agent .agent-pick")?;
+    b.until(page, "!document.getElementById('menu').hidden", wait);
+    let listed = b.eval(page, "[...document.querySelectorAll('#menu button .name')].map((n) => n.textContent)")?;
+    b.press(page, "Escape", false)?;
+    let back = retitle(api, session, reader, Some("Reader"))? && named(b, "Reader");
+    let hits = b.eval(page, &format!("({OLD_NAME_SWEEP})({})", js("Ingrid")))?;
+    s.ok(
+        "renamed elsewhere, its chat's row and New chat's list follow with no reload; renamed back, nothing the shell draws says the name it had",
+        renamed && listed == json!([first_title, "Ingrid"]) && back && hits == json!([]),
+        json!({ "renamed": renamed, "listed": listed, "back": back, "hits": hits }),
+    );
+    Ok(())
 }
 
 /// The person's agents (the computer's), by fragment label: their identities.

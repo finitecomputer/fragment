@@ -1492,7 +1492,7 @@ export function mount(root) {
     // only the card's asker's answer counts here, as only theirs counts to the agent
     const card = cardKey(t.key, p.prompt);
     const sent = state.answering.get(card) ?? state.answers.get(card)?.get(p.asks) ?? state.answers.get(p.prompt)?.get(p.asks) ?? null;
-    const gone = !closed && (expired(p) || !!t.end);
+    const gone = !closed && (expired(p) || t.end?.outcome === "stopped");
     const mayAnswer = !!state.me && p.asks === state.me.principal && !closed && !gone;
     const asks = who(p.asks);
     const by = closed?.by ? who(closed.by).name : "";
@@ -1510,6 +1510,7 @@ export function mount(root) {
         const label = (id) => p.options.find((o) => o.id === id)?.label ?? id;
         const answered = typeof closed?.text === "string" && closed.text ? closed.text : label(closed?.option);
         if (closed?.outcome === "answered") card.append(outcome("answered", "check", `${answered}${by ? ` · ${by}` : ""}`));
+        else if (closed?.outcome === "history_unavailable") card.append(outcome("stopped", "stopped", "Not acted on: ask again"));
         else if (closed?.outcome === "expired") card.append(outcome("expired", "clock", "Expired: no answer in time"));
         else if (closed) card.append(outcome("stopped", "stopped", "Stopped"));
         else if (gone) card.append(outcome("expired", "clock", t.end ? "Closed" : "Expired: no answer in time"));

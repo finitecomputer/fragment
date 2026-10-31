@@ -1,13 +1,14 @@
 import { avatar } from "./agent-identity.js";
+import { icon } from "./icons.js";
 
 // Newest first, with a newly made chat (no preview yet) before older ones.
 export const newestChat = (a, b) => (b.previewAt ?? Infinity) - (a.previewAt ?? Infinity) || (a.name < b.name ? -1 : 1);
 
 export function createChatList({ api, ui, data, selection, menus, navigation, listLive, load, invites, setInvites }) {
-  const { $, el, patch, agentFace, notice } = ui;
+  const { $, el, patch, agentFace, mark, notice } = ui;
   const { byName, own, chats, shown, titleOf, chatTitle, homeMark, isGroup, agentOfChat, agentsOf, agents, allFragments, computer, isGuest, personId } = data;
   const { current, page, getFrame } = selection;
-  const { menu, menuEdge, menuOwner, openMenu, shareItem, archiveItem } = menus;
+  const { menuOwner, openMenu, shareItem, archiveItem } = menus;
   const { newChat, rename, openChat, openApp, openScreen, leaveSidebar, seg } = navigation;
   // ---- chats: one flat list, newest first, the open one in the middle column ----
   function renderHeading() {
@@ -36,14 +37,16 @@ export function createChatList({ api, ui, data, selection, menus, navigation, li
     b.setAttribute("aria-label", n >= UNREAD_MAX ? "More than 99 unread" : `${n} unread`);
     return [b];
   }
-  // The person's one agent (Paul, 2026-10-13: "just one", a setting later):
-  // their first, the one the first run makes (`defaultAgent`): the first
-  // their computer took (its view lists its agents in the order it took
-  // them), or, before it took one, their agent fragment. New chats are with
-  // it. Any other agents they have stay out of the sidebar; their chats are
-  // chats, so they list and search as any other.
+  // The person's agents: those of their computer's that are theirs, in the
+  // order it took them (its view's order).
+  const ownAgents = () => [...agents().values()].filter((a) => byName(a.fragment)?.role === "owner");
+  // Their main agent (Paul, 2026-10-30: several agents, one of them main):
+  // their first, the one the first run makes (`defaultAgent`), or, before
+  // their computer took one, their agent fragment. New chats are with it
+  // unless the person picks another agent's New chat; the sidebar shows it
+  // first, and each of their other agents on a row of its own below it.
   function primaryAgent() {
-    const first = [...agents().values()].find((a) => byName(a.fragment)?.role === "owner");
+    const first = ownAgents()[0];
     if (first) return { fragment: first.fragment, identity: first.identity };
     const f = allFragments().find((x) => x.kind === "agent" && own(x));
     return f ? { fragment: f.name, identity: null } : null;
@@ -52,20 +55,24 @@ export function createChatList({ api, ui, data, selection, menus, navigation, li
   // (docs/api.md, "Listed records"): each agent's newest record of a turn's
   // kind on a chat's `work` (docs/chat-records.md), which the shell reads as
   // the chat's page reads a turn. Started, a step, or a card answered is
-  // working; a card open waits for the person (its owner answers its cards);
-  // a question waits on whoever it asks (`asks`); an end is nothing. A
-  // message waiting for its turn has no record yet, so queued is not said.
-  // None while their computer is not awake (its turns stop with it) or this
-  // page's list socket is shut (it would not hear the change), and none past
-  // the bridge's own bound on a turn that says nothing (15 minutes; a turn
-  // waiting on someone waits as long as a card, an hour), each a minute more
-  // for the list's own lag. Those three are copies, named as their sources
-  // name them (proto's limits; images/bridge/src/limits.rs), each held to its
-  // source by a host test (xtask/src/guards.rs, `the_shell_copies_its_limits`).
+  // working (a card closed any other way starts nothing: nothing); a card
+  // open waits for the person (its owner answers its cards); a question
+  // waits on whoever it asks (`asks`); an end is nothing. A message waiting
+  // for its turn has no record yet, so queued is not said.
+  // Working and waiting on someone else are none while their computer is
+  // not awake (its turns stop with it); a card open still waits for them,
+  // as it outlives its turn and its computer (docs/bridge.md, "A card
+  // outlives its turn"). None while this page's list socket is shut (it
+  // would not hear the change), and none past the bridge's own bound on a
+  // turn that says nothing (15 minutes; a turn waiting on someone waits as
+  // long as a card, an hour), each a minute more for the list's own lag.
+  // Those three are copies, named as their sources name them (proto's
+  // limits; images/bridge/src/limits.rs), each held to its source by a host
+  // test (xtask/src/guards.rs, `the_shell_copies_its_limits`).
   // The list's turn kinds are the chat's records (docs/chat-records.md):
   // the shell reads them as the bridge writes them. A listed field's
-  // value is any text an agent wrote (up to 128 characters): `asks` is only
-  // compared with the person's id here, never shown; what is shown is these
+  // value is any text an agent wrote (up to 128 characters): `asks` and
+  // `outcome` are only compared here, never shown; what is shown is these
   // words and the chat's title, as text (`el`'s textContent), never markup.
   const DOING_SAYS = { you: "Waiting for you", waiting: "Waiting", working: "Working" };
   const DOING_ORDER = Object.keys(DOING_SAYS);
@@ -74,27 +81,28 @@ export function createChatList({ api, ui, data, selection, menus, navigation, li
   const TURN_IDLE_MS_MAX = 15 * 60_000;
   const PROMPT_TTL_MS_DEFAULT = 60 * 60_000;
   const DOING_QUIET_MS = { working: TURN_IDLE_MS_MAX + LISTED_FRESH_MS, waiting: PROMPT_TTL_MS_DEFAULT + LISTED_FRESH_MS };
-  // the chats its menu names, at most
-  const DOING_LISTED = 5;
   // the list socket (`watchList`, below): declared here, as the sidebar reads it
 
-  // The chats where agent `identity` is doing something, the most pressing
-  // first (waiting for the person, then on someone, then working), the
-  // newest first within each; each with when it stops counting (`until`).
-  function doingChats(identity) {
-    if (!identity || !listLive() || computer()?.phase !== "awake") return [];
+  // The most pressing first (waiting for the person, then on someone, then
+  // working), the newest first within each.
+  const pressing = (x, y) => DOING_ORDER.indexOf(x.doing) - DOING_ORDER.indexOf(y.doing) || y.at - x.at;
+  // What agents `who` (identities) are doing in chat `f`, the most pressing
+  // first, each with when it stops counting (`until`).
+  function doingIn(f, who) {
+    if (!who.length || !listLive()) return [];
+    const awake = computer()?.phase === "awake";
     const now = Date.now();
     const out = [];
-    for (const f of chats()) {
-      for (const r of f.listed ?? []) {
-        const kind = r.channel === "work" && r.principal === identity ? DOING_OF_KIND[r.kind] : undefined;
-        if (!kind) continue;
-        const doing = kind === "asked" ? (r.fields?.asks === personId() ? "you" : "waiting") : kind;
-        const until = r.at + DOING_QUIET_MS[doing === "working" ? "working" : "waiting"];
-        if (until > now) out.push({ chat: f.name, doing, at: r.at, until });
-      }
+    for (const r of f.listed ?? []) {
+      const kind = r.channel === "work" && who.includes(r.principal) ? DOING_OF_KIND[r.kind] : undefined;
+      if (!kind) continue;
+      if (r.kind === "turn.prompt.closed" && r.fields?.outcome !== "answered") continue;
+      if (!awake && r.kind !== "turn.prompt") continue;
+      const doing = kind === "asked" ? (r.fields?.asks === personId() ? "you" : "waiting") : kind;
+      const until = r.at + DOING_QUIET_MS[doing === "working" ? "working" : "waiting"];
+      if (until > now) out.push({ chat: f.name, doing, at: r.at, until });
     }
-    return out.sort((x, y) => DOING_ORDER.indexOf(x.doing) - DOING_ORDER.indexOf(y.doing) || y.at - x.at);
+    return out.sort(pressing);
   }
   // The sidebar says it again as the first of what it shows stops counting.
   let doingTimer = 0;
@@ -103,53 +111,128 @@ export function createChatList({ api, ui, data, selection, menus, navigation, li
     const next = Math.min(...doing.map((x) => x.until));
     if (Number.isFinite(next)) doingTimer = setTimeout(renderChats, Math.max(1000, next - Date.now()));
   }
-  function renderChats() {
-    const primary = primaryAgent();
-    const agentRows = [];
-    if (primary) {
-      const doing = doingChats(primary.identity);
-      doingAgain(doing);
-      const says = DOING_SAYS[doing[0]?.doing];
-      const row = el("button", "agent-heading sidebar-agent");
-      row.id = "sidebar-agent";
-      row.type = "button";
-      row.dataset.key = primary.fragment;
-      row.setAttribute("aria-label", `${titleOf(primary.fragment)}${says ? `, ${says.toLowerCase()}` : ""}: your agent's menu`);
-      row.setAttribute("aria-haspopup", "menu");
-      row.setAttribute("aria-controls", "menu");
-      row.setAttribute("aria-expanded", String(!!menuOwner() && menuOwner().button === $("sidebar-agent")));
-      const face = el("span", "sidebar-agent-mark");
-      face.append(avatar(agentFace(primary.fragment, primary.identity), "small"));
-      // its name, and under it what it is doing, so the name keeps its room
-      const named = el("span", "sidebar-agent-named");
-      named.append(el("strong", "title", titleOf(primary.fragment)));
-      if (says) named.append(el("span", `agent-doing ${doing[0].doing}`, says));
-      row.append(face, named);
-      row.onclick = () => openPrimaryMenu(row);
-      agentRows.push(row);
+  // When a chat's newest message was said, as its row says it: today's
+  // time, then "Yesterday", a weekday within the week, else its date.
+  function saidAt(at) {
+    const d = new Date(at), now = new Date();
+    const day = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+    const days = Math.round((day(now) - day(d)) / 86_400_000);
+    const t = el("time", null,
+      days <= 0 ? d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })
+      : days === 1 ? "Yesterday"
+      : days < 7 ? d.toLocaleDateString([], { weekday: "short" })
+      : d.toLocaleDateString([], { month: "short", day: "numeric", ...(d.getFullYear() === now.getFullYear() ? {} : { year: "numeric" }) }));
+    t.dateTime = d.toISOString();
+    return t;
+  }
+  // A chat's row, its agent first (Paul, 2026-10-30: it reads as talking to
+  // agents, not as threads piling up): whose chat it is (its agents' faces,
+  // a group's stacked, their names, one agent's role) and what it is doing
+  // there, else when its newest message was said; then the chat's own name
+  // and its marks. A chat with none of the person's agents (someone
+  // else's) is its name alone.
+  function chatRow(f, theirs, doing) {
+    const active = f.name === current() && !page();
+    const row = el("button", `row chat-row${active ? " active" : ""}`);
+    row.type = "button";
+    row.dataset.key = `chat:${f.name}`;
+    row.setAttribute("aria-current", active ? "page" : "false");
+    row.onclick = () => { openChat(f.name); leaveSidebar(); };
+    const marks = [el("span", "label", chatTitle(f.name)), ...homeMark(f), ...unreadMark(f)];
+    if (!theirs.length) {
+      row.append(...marks);
+      return row;
     }
-    patch($("primary-agent"), agentRows);
-    // another chat with it, one click from the top (its menu's New chat too)
-    const startChat = $("sidebar-start-chat");
-    startChat.hidden = !primary?.identity || isGuest();
-    startChat.onclick = () => newChat(primary.identity);
+    const face = el("span", "chat-face");
+    face.append(mark(f.name));
+    const who = el("span", "chat-who");
+    who.append(el("span", "chat-agent", theirs.map((a) => titleOf(a.fragment)).join(", ")));
+    // one agent's role (its `meta.role`, on its row in the list), as a tag
+    const role = theirs.length === 1 ? byName(theirs[0].fragment)?.agentRole : null;
+    if (role) who.append(el("span", "role-tag", role));
+    // what it is doing here, while it is, in place of when
+    if (doing) who.append(el("span", `agent-doing ${doing.doing}`, DOING_SAYS[doing.doing]));
+    else if (f.previewAt) who.append(saidAt(f.previewAt));
+    const what = el("span", "chat-what");
+    what.append(...marks);
+    const lines = el("span", "chat-lines");
+    lines.append(who, what);
+    row.classList.add("two");
+    row.append(face, lines);
+    return row;
+  }
+  // A row's day ("2:14 PM", then "Yesterday") moves at midnight: the
+  // sidebar is drawn again then.
+  let dayTimer = 0;
+  function dayAgain() {
+    clearTimeout(dayTimer);
+    const now = new Date();
+    dayTimer = setTimeout(renderChats, new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1).getTime() - now.getTime() + 1000);
+  }
+  // Whom a new chat is with unless the person picks another (Paul,
+  // 2026-10-30): the open chat's agent (a group's lead) when it is one of
+  // theirs, else their main agent.
+  function newChatAgent() {
+    const mine = ownAgents();
+    const open = current() && !page() ? agentsOf(current()).map((id) => mine.find((a) => a.identity === id)).find(Boolean) : null;
+    return open ?? primaryAgent();
+  }
+  // The launcher's key, as the person's keyboard names it.
+  const LAUNCHER_KEY = /Mac|iPhone|iPad|iPod/.test(navigator.userAgentData?.platform ?? navigator.platform ?? "") ? "⌘K" : "Ctrl K";
+  // "New chat with" and the agent it is with (`newChatAgent`), its chip;
+  // with more than one agent, the chip lists them all, and the one picked
+  // gets that chat alone. A guest makes no chat.
+  function renderStart() {
+    const agent = newChatAgent();
+    const start = $("sidebar-start-chat");
+    start.hidden = !agent?.identity || isGuest();
+    $("sidebar-start").hidden = start.hidden;
+    if (start.hidden) return patch($("new-chat-agent"), []);
+    const name = titleOf(agent.fragment);
+    start.setAttribute("aria-label", `New chat with ${name}`);
+    start.onclick = () => newChat(agent.identity);
+    const many = ownAgents().length > 1;
+    const chip = el(many ? "button" : "span", "agent-pick");
+    chip.dataset.key = `${agent.fragment} ${many}`;
+    chip.append(avatar(agentFace(agent.fragment, agent.identity)), el("span", "name", name));
+    if (many) {
+      chip.type = "button";
+      chip.setAttribute("aria-label", `${name}: pick another agent`);
+      chip.setAttribute("aria-haspopup", "menu");
+      chip.setAttribute("aria-controls", "menu");
+      const shown = $("new-chat-agent").firstElementChild;
+      chip.setAttribute("aria-expanded", String(!!shown && menuOwner()?.button === shown));
+      chip.append(icon("caret"));
+      chip.onclick = () => openMenu(chip, ownAgents().map((a) => ({
+        face: avatar(agentFace(a.fragment, a.identity)),
+        text: titleOf(a.fragment),
+        tag: byName(a.fragment)?.agentRole,
+        current: a.identity === newChatAgent()?.identity,
+        onClick: () => newChat(a.identity),
+      })));
+    }
+    patch($("new-chat-agent"), [chip]);
+  }
+  function renderChats() {
+    renderStart();
     // the launcher: a guest's searches; a seat's also starts a chat
     const launcherLabel = isGuest() ? "Search chats and apps" : "Search or start a new chat";
+    $("launcher-key").textContent = LAUNCHER_KEY;
     for (const id of ["sidebar-new-chat", "new-chat"]) {
-      $(id).title = `${launcherLabel} (⌘K)`;
-      $(id).dataset.tooltip = `${launcherLabel} (⌘K)`;
+      $(id).title = `${launcherLabel} (${LAUNCHER_KEY})`;
+      $(id).dataset.tooltip = `${launcherLabel} (${LAUNCHER_KEY})`;
       $(id).setAttribute("aria-label", launcherLabel);
     }
+    const mine = new Map(ownAgents().map((a) => [a.identity, a]));
+    const seen = [];
     const rows = shown(chats()).sort(newestChat).map((f) => {
-      const active = f.name === current() && !page();
-      const row = el("button", `row chat-row${active ? " active" : ""}`);
-      row.type = "button";
-      row.dataset.key = `chat:${f.name}`;
-      row.setAttribute("aria-current", active ? "page" : "false");
-      row.append(el("span", "label", chatTitle(f.name)), ...homeMark(f), ...unreadMark(f));
-      row.onclick = () => { openChat(f.name); leaveSidebar(); };
-      return row;
+      const theirs = agentsOf(f.name).map((id) => mine.get(id)).filter(Boolean);
+      const doing = doingIn(f, theirs.map((a) => a.identity));
+      seen.push(...doing);
+      return chatRow(f, theirs, doing[0]);
     });
+    doingAgain(seen);
+    dayAgain();
     patch($("chats"), rows.length ? rows : [el("div", "empty-row", chats().length ? "Every chat is archived" : isGuest() ? "Chats shared with you show here" : "Your chats will appear here")]);
   }
 
@@ -208,52 +291,29 @@ export function createChatList({ api, ui, data, selection, menus, navigation, li
     };
     return b;
   }
-  // The agent's own menu: where it is doing something (each chat opens),
-  // another chat with it, its name, its profile and its screen. A chat's own
-  // (Rename, Invite, Archive) is the chat's ⋯. What it is doing is read as
-  // it opens, not from when its row was drawn.
-  function openPrimaryMenu(trigger) {
-    const primary = primaryAgent();
-    if (!primary) return;
-    openMenu(trigger, [
-      ...doingChats(primary.identity)
-        .slice(0, DOING_LISTED)
-        .map((x) => ({ icon: "agent", text: `${DOING_SAYS[x.doing]} in ${titleOf(x.chat)}`, onClick: () => { openChat(x.chat); leaveSidebar(); } })),
-      ...(primary.identity && !isGuest() ? [{ icon: "newChat", text: "New chat", onClick: () => newChat(primary.identity) }] : []),
-      { icon: "rename", text: "Rename…", onClick: () => rename(primary.fragment) },
-      { icon: "agent", text: "Its profile", onClick: () => openApp(primary.fragment) },
-      ...(computer() ? [{ icon: "screen", text: "Its screen", onClick: () => openScreen(primary.fragment) }] : []),
-    ]);
-  }
   // Match the chat composer's edge reflection, including its 64px falloff.
-  // Follow the pointer across the sidebar and its fixed-position agent menu.
   const sidebarHoverPointer = matchMedia("(hover: hover) and (pointer: fine)");
   let sidebarEdgeFrame = 0;
   let sidebarEdgePointer = null;
-  const sidebarEdgeControls = () => $("sidebar").querySelectorAll(".sidebar-agent, .sidebar-new-chat");
-  // Keep transient styles off the rendered pill so roster updates preserve its node.
-  const expandedAgentEdge = control => control.id === "sidebar-agent" && !menu.hidden && menu.classList.contains("agent-menu");
-  const sidebarEdgeSurface = control => expandedAgentEdge(control) ? menuEdge : control.id === "sidebar-agent" ? $("primary-agent") : control;
+  const sidebarEdgeControls = () => $("sidebar").querySelectorAll(".sidebar-new-chat");
   function clearSidebarEdge() {
     cancelAnimationFrame(sidebarEdgeFrame);
     sidebarEdgeFrame = 0;
-    for (const control of sidebarEdgeControls()) sidebarEdgeSurface(control).style.setProperty("--edge-light", "0");
+    for (const control of sidebarEdgeControls()) control.style.setProperty("--edge-light", "0");
   }
   function updateSidebarEdge() {
     if (!sidebarEdgePointer || !sidebarHoverPointer.matches) return;
     for (const control of sidebarEdgeControls()) {
-      const bounds = control.getBoundingClientRect();
-      const rect = { left: bounds.left, top: bounds.top, width: bounds.width, height: expandedAgentEdge(control) ? menu.getBoundingClientRect().bottom - bounds.top : bounds.height };
+      const rect = control.getBoundingClientRect();
       const x = sidebarEdgePointer.x - rect.left, y = sidebarEdgePointer.y - rect.top;
       const radius = Math.min(rect.width / 2, rect.height / 2, parseFloat(getComputedStyle(control).borderTopLeftRadius));
       const qx = Math.abs(x - rect.width / 2) - rect.width / 2 + radius;
       const qy = Math.abs(y - rect.height / 2) - rect.height / 2 + radius;
       const distance = Math.max(0, Math.hypot(Math.max(qx, 0), Math.max(qy, 0)) + Math.min(Math.max(qx, qy), 0) - radius);
       const proximity = Math.max(0, 1 - distance / 64);
-      const surface = sidebarEdgeSurface(control);
-      surface.style.setProperty("--edge-x", `${x}px`);
-      surface.style.setProperty("--edge-y", `${y}px`);
-      surface.style.setProperty("--edge-light", String(proximity * proximity));
+      control.style.setProperty("--edge-x", `${x}px`);
+      control.style.setProperty("--edge-y", `${y}px`);
+      control.style.setProperty("--edge-light", String(proximity * proximity));
     }
   }
   document.addEventListener("pointermove", event => {
@@ -289,7 +349,8 @@ export function createChatList({ api, ui, data, selection, menus, navigation, li
   document.addEventListener("visibilitychange", markSeen);
   // The open chat's ⋯: its name, its people, its agents' profiles and
   // screens, and archiving. New chats are the launcher's, with the person's
-  // one agent (`primaryAgent`), whichever chat is open.
+  // main agent (`primaryAgent`), whichever chat is open, and each agent's
+  // menu's, with that agent.
   $("chat-options").onclick = () => openChatMenu(current(), $("chat-options"));
   function openChatMenu(name, trigger) {
     const group = isGroup(name);
@@ -310,5 +371,5 @@ export function createChatList({ api, ui, data, selection, menus, navigation, li
       archiveItem(name),
     ]);
   }
-  return { renderHeading, renderChats, loadInvites, primaryAgent, markSeen, updateSidebarEdge };
+  return { renderHeading, renderChats, loadInvites, primaryAgent, newChatAgent, markSeen };
 }

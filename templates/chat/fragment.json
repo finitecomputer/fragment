@@ -6,7 +6,7 @@
       "read": "viewer", "post": "editor", "from": "agent",
       "listed": {
         "kinds": ["turn.start", "turn.step", "turn.prompt", "turn.prompt.closed", "turn.asked", "turn.end"],
-        "fields": ["asks"]
+        "fields": ["asks", "outcome"]
       }
     }
   },

@@ -242,11 +242,11 @@ pub fn bot_mode(s: &mut Suite, api: &Api) -> Result<()> {
         // Maple's screen, where she opened the app, is checked; Juniper's,
         // a desktop she never used (started for its first viewer), only shot
         for (agent, file, checked) in [(&maple, "maple-screen.png", true), (&juniper, "juniper-screen.png", false)] {
-            let (page, connected) = open_screen(&mut b, api, &keys, &id, agent)?;
+            let (page, connected, loaded) = open_screen(&mut b, api, &keys, &id, agent)?;
             std::thread::sleep(Duration::from_secs(5));
             let _ = b.screenshot(&page, &evidence.join(file));
             if checked {
-                s.ok(&format!("{agent}'s screen connects (its browser shows the app: the evidence's shot)"), connected, file);
+                s.ok(&format!("{agent}'s screen connects (its browser shows the app: the evidence's shot)"), connected, json!({ "shot": file, "loading": loaded }));
             } else {
                 println!("      ({agent}'s screen connected: {connected})");
             }

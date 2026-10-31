@@ -258,6 +258,12 @@ pub fn narrated() -> String {
     format!("scripted: here is what I found so far, before I run it. {}", more.trim_end())
 }
 
+/// The terminal calls `prepare the approvals proof` makes before its card,
+/// and the id of its effect's call (Publish), which a test counts in the
+/// model's calls: a rolled-back `/data` forgets the file it writes.
+pub const PREPARE_STEPS: usize = 6;
+pub const APPROVAL_EFFECT: &str = "call_approval_effect";
+
 /// What `write: <path>` has Hermes' write_file put there.
 pub const WRITTEN: &str = "written by the agent\n";
 /// How long the model's server takes to serve `/generated/slow-…png`.
@@ -327,11 +333,47 @@ pub fn answer(body: &Value) -> (String, Option<Value>) {
         }
         return ("scripted: delegate_task is not offered".into(), None);
     }
+    // P6, as a real turn runs before its card: `prepare the approvals
+    // proof` checks the draft in `PREPARE_STEPS` terminal calls, each with
+    // its words first (each a second long: Hermes sends a quick tool's
+    // step late or not at all, docs/technical-debt-ledger.md), then says
+    // its plan at length and asks its card (a
+    // clarify, Publish or Keep private). Its effect (`approval-effects`)
+    // only for Publish: answered live (the clarify's result), or late (a
+    // fresh turn whose message is the answer: cards.rs).
+    let results = messages.iter().rev().take_while(|m| m["role"] != "user").filter(|m| m["role"] == "tool").count();
+    let effect = || json!({ "index": 0, "id": APPROVAL_EFFECT, "type": "function", "function": { "name": "terminal", "arguments": json!({ "command": "echo published >> /data/work/juniper--k3x9/approval-effects" }).to_string() } });
+    if last_user.contains("prepare the approvals proof") && has_terminal {
+        if results < PREPARE_STEPS {
+            let call = json!({ "index": 0, "id": format!("call_prepare_{results}"), "type": "function", "function": { "name": "terminal", "arguments": json!({ "command": format!("sleep 1 && echo checked part {results} of the draft >> /data/work/juniper--k3x9/prepared") }).to_string() } });
+            return (format!("Checking part {results} of the draft before I publish anything."), Some(call));
+        }
+        if results == PREPARE_STEPS {
+            let args = json!({ "questions": [{ "question": "Publish the approvals proof?", "choices": ["Publish", "Keep private"] }] });
+            let call = json!({ "index": 0, "id": "call_prepare_ask", "type": "function", "function": { "name": "clarify", "arguments": args.to_string() } });
+            return (narrated(), Some(call));
+        }
+        // the clarify's result names every choice offered, and the one chosen
+        if results == PREPARE_STEPS + 1 && tool_result.as_deref().unwrap_or("").contains("\"user_response\": \"Publish") {
+            return (String::new(), Some(effect()));
+        }
+        return ("scripted: done with the approvals proof".into(), None);
+    }
+    // the card's question as Hermes asked it (with its "skip" line), and
+    // the option as Hermes labels it ("Publish (Recommended)")
+    if let Some(chose) = last_user.split_once("Answer to your earlier question “Publish the approvals proof?").and_then(|(_, rest)| rest.split_once("”: ")).map(|(_, c)| c.trim().to_string()) {
+        if tool_result.is_some() {
+            return ("scripted: published the approvals proof".into(), None);
+        }
+        if chose.starts_with("Publish") {
+            return (String::new(), Some(effect()));
+        }
+        return (format!("scripted: kept it private ({chose})"), None);
+    }
     // `use the terminal twice`: a quick command, then, at once, one that
     // sleeps 2 s (the second's progress line comes within Hermes' 1.5 s edit
     // interval of the first's, as a real model's quick second call does),
     // then the answer
-    let results = messages.iter().rev().take_while(|m| m["role"] != "user").filter(|m| m["role"] == "tool").count();
     if last_user.contains("use the terminal twice") && has_terminal && results < 2 {
         let command = if results == 0 { "echo first-ran" } else { "sleep 2 && echo tool-ran" };
         let call = json!({ "index": 0, "id": format!("call_{}", results + 1), "type": "function", "function": { "name": "terminal", "arguments": json!({ "command": command }).to_string() } });

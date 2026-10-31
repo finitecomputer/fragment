@@ -18,6 +18,7 @@ use anyhow::{bail, Context, Result};
 
 pub mod built;
 pub mod containers;
+mod framing;
 mod front;
 pub mod node;
 mod node_release;
@@ -658,9 +659,8 @@ fn boot_log(dir: &Path, port: u16) -> Result<(PathBuf, fs::File)> {
 /// wrangler's output, each line as it comes: into the boot's log `out`, and
 /// heard by the front door (front.rs), which learns that wrangler is gone
 /// once both streams end.
-fn hear(child: &mut Child, out: fs::File, heard: Arc<front::Heard>) -> Result<()> {
+fn hear(child: &mut Child, out: Arc<Mutex<fs::File>>, heard: Arc<front::Heard>) -> Result<()> {
     use std::io::{BufRead, BufReader, Read};
-    let out = Arc::new(Mutex::new(out));
     let open = Arc::new(std::sync::atomic::AtomicUsize::new(2));
     let streams: [Box<dyn Read + Send>; 2] = [Box::new(child.stdout.take().context("wrangler's stdout")?), Box::new(child.stderr.take().context("wrangler's stderr")?)];
     for stream in streams {
@@ -750,9 +750,11 @@ impl Node {
             bail!("{} is not there: configure the fleet first (Fleet::configure)", config.display());
         }
         let (log, out) = boot_log(&opts.log_dir, opts.port)?;
+        // wrangler's lines and the front door's requests, one file
+        let out = Arc::new(Mutex::new(out));
         // the node's port, held before wrangler starts (front.rs)
         let heard = Arc::new(front::Heard::default());
-        let front = front::Front::bind(opts.port, heard.clone())?;
+        let front = front::Front::bind(opts.port, heard.clone(), out.clone())?;
         let proxied = free_port()?;
         let mut cmd = tools.wrangler()?;
         cmd.arg("dev").arg("-c").arg(&config);
