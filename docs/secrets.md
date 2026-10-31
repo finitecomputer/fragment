@@ -391,7 +391,12 @@ the wipe never removes it, as it removes the keys of whom it wipes.
   supervisor opens it only as the request leaves (`step_fetch` in `cell/src/jobs.rs`, the one egress
   point), and only toward a host the secret names, over https
   (`fragment_core::secrets::may_fill`; `secret_hosts`, beside
-  `secrets`). A URL's is checked against the URL's host as written, then
+  `secrets`). An editor sets one through the API (`fragment secret
+  set`) or from the fragment's own page (`PUT __secrets/{KEY}`, the
+  same contract over its session: a connector's page takes a pasted
+  token, and makes a webhook's secret with the browser's
+  `crypto.getRandomValues`, so neither passes through app code or a
+  model). A URL's is checked against the URL's host as written, then
   put in percent-encoded (`fill_url`: all but unreserved bytes and `:`),
   and a value that would change the request's scheme, host, port, path
   segments or query parameters (`..`, say) is not sent; a failure's

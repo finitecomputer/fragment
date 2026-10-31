@@ -3,7 +3,7 @@
 //! private, link-local, Fly's `.internal` and `.flycast` names) unless the
 //! fleet allows local egress (dev and e2e, which call local fakes). The
 //! check is on the URL: a public name that resolves to a private address
-//! is the fleet's outbound firewall's to stop (docs/technical-debt-ledger.md).
+//! is the fleet's outbound firewall's to stop.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 

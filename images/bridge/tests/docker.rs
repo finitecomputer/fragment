@@ -2573,12 +2573,40 @@ async fn steps_say_what_they_do() {
     let command = "echo a-command-that-runs-well-past-forty-characters-0123456789";
     let path = "/data/work/juniper--k3x9/a-file-whose-path-runs-past-forty-characters.txt";
     let code = "print('a script whose one line runs well past forty characters')";
+    // phase 4: each step's call was recorded as asked for before it, by
+    // Hermes' post_api_request, under the response its step names (its own
+    // id, or Hermes' rename of it: `call_0_d2`), with its tool and preview
+    let recorded_before = |turn: &str, said: &str| {
+        fake.with(|w| {
+            let work: Vec<serde_json::Value> = w.records(&chat, "work").into_iter().filter(|r| r["body"]["turn"] == turn).collect();
+            for (i, step) in work.iter().enumerate().filter(|(_, r)| r["body"]["kind"] == "turn.step") {
+                let response = &step["body"]["response"];
+                assert!(response.is_string(), "{said:?}: the image's step names its response: {step}");
+                let call = work[..i].iter().find(|r| r["body"]["kind"] == "turn.call" && r["body"]["response"] == *response && r["body"]["tool"] == step["body"]["tool"] && r["body"]["args"] == step["body"]["args"]);
+                assert!(call.is_some(), "{said:?}: the call of step {step} recorded before it, under its response; work: {work:#?}");
+            }
+        })
+    };
     for (said, want) in [(format!("run: {command}"), ("terminal", "shell", command)), (format!("write: {path}"), ("write_file", "write", path)), (format!("code: {code}"), ("execute_code", "shell", code))] {
         let turn = asked(&fake, &chat, &c, &said, ended).await;
         let got = fake.with(|w| steps(w, &turn));
         eprintln!("steps: {said:?} is {got:?}");
         assert!(got.iter().any(|(tool, category, args)| (tool.as_str(), category.as_str(), args.as_str()) == want), "{said:?}: a step {want:?}, its preview whole; got {got:?}");
+        recorded_before(&turn, &said);
     }
+    // phase 4 (Alex on #823): three responses of one turn each name their
+    // call `call_0`, the last two the same command: each is a call of its
+    // own, recorded under its response, which its step names
+    let said = "reuse: echo first-of-three | echo again-of-three | echo again-of-three";
+    let turn = asked(&fake, &chat, &c, said, ended).await;
+    recorded_before(&turn, said);
+    fake.with(|w| {
+        let calls: Vec<serde_json::Value> = w.bodies(&chat, "work", "turn.call").into_iter().filter(|b| b["turn"] == turn).collect();
+        let shown: Vec<(&str, &str)> = calls.iter().map(|c| (c["tool_call_id"].as_str().unwrap_or(""), c["args"].as_str().unwrap_or(""))).collect();
+        assert_eq!(shown, [("call_0", "echo first-of-three"), ("call_0", "echo again-of-three"), ("call_0", "echo again-of-three")], "each call its own record: {calls:#?}");
+        let responses: std::collections::HashSet<&str> = calls.iter().filter_map(|c| c["response"].as_str()).collect();
+        assert_eq!(responses.len(), 3, "each its own response's: {calls:#?}");
+    });
 }
 
 /// Goal (Paul on production, 2026-10-24: an agent's words mid-turn were
@@ -3063,6 +3091,9 @@ async fn a_turn_cut_by_a_restart_is_closed_and_told() {
         assert!(asked.contains(said), "{said:?} in the model's request: {asked:?}");
     }
     assert!(!asked.contains(&format!("[paul] {CARD_ASKED}")), "the cut request is never joined to it: {asked:?}");
+    // phase 4: the call it was cut in (its clarify, asked for and never
+    // ended) is named first, as one that may or may not have run
+    assert!(asked.contains("It had started these and never heard back, so each may or may not have run") && asked.contains("clarify"), "the cut call named: {asked:?}");
     assert_eq!(before_role, "assistant", "the cut turn is closed before it (Hermes' failed-turn boundary; {closed}): {before:?}");
     let (asked_after, _) = asked_with(&calls, "and after that").expect("a request for the message after");
     assert!(!asked_after.contains("cut short"), "the turn after is told nothing: {asked_after:?}");
@@ -3102,8 +3133,8 @@ async fn a_card_answered_after_a_sleep_starts_one_fresh_turn() {
     within(&x.fake, &x.chat, &c, 180_000, "the card after its steps", |w| !x.cards(w, &asked).is_empty()).await;
     x.fake.with(|w| {
         let steps = w.bodies(&x.chat, "work", "turn.step").into_iter().filter(|s| s["turn"] == asked).count();
-        // Hermes may send a quick tool's step late or not at all
-        // (docs/technical-debt-ledger.md): most of them, then
+        // Hermes may send a quick tool's step late or not at all: most of
+        // them, then
         assert!(steps >= support::model::PREPARE_STEPS / 2, "a real turn's steps before its card: {steps}; the model saw {:#?}", x.model_saw(0));
         assert!(w.bodies(&x.chat, "chat", "reply").iter().any(|r| r["turn"] == asked && r["text"].as_str().is_some_and(|t| t.len() > 1000)), "and its long plan");
     });
