@@ -4,8 +4,9 @@
 // chat's look: what the person and the agent said, and the agent's tool
 // calls, their results and its reasoning folded into steps, as a chat
 // folds them. Everything is read from the archive's own files (`__file`).
-// Framed by the shell, a conversation offers Continue (the shell makes a
-// chat of it with the person's agent), or the chat it was continued in.
+// Framed by the shell, a conversation offers Continue: the shell asks with
+// which of the person's agents, and makes a chat of it with that one (or
+// opens the chat it made before).
 import { renderMarkdown } from "./markdown.js";
 import { icon } from "./icons.js";
 
@@ -196,12 +197,11 @@ async function reader(page, key) {
   head.append(el("h1", null, c.title || "Untitled"));
   const about = [c.kind !== "chat" ? KIND_ONE[c.kind] : "", when(c.started_at, c.ended_at), c.with ? `with ${c.with}` : ""].filter(Boolean).join(" · ");
   if (about) head.append(el("p", null, about));
-  // Continue, or the chat it was continued in: the shell's to do
-  const continued = await file(`continued/${key}.json`);
-  const go = el("button", "archive-continue", continued?.chat ? "Open the chat" : "Continue");
+  // Continue: the shell asks with which agent (or opens the chat one made)
+  const go = el("button", "archive-continue", "Continue");
   go.type = "button";
   go.hidden = !shell;
-  go.onclick = () => toShell(continued?.chat ? { chat: continued.chat } : { continue: key });
+  go.onclick = () => toShell({ continue: key });
   head.append(go);
   page.replaceChildren(head, ...conversation(c));
 }

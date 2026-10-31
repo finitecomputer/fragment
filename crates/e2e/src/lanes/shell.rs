@@ -1281,6 +1281,8 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
 
     // both agents in one chat, search, and archiving, as the person uses them
     groups_ui(s, api, &mut b, &page, &me, &shots)?;
+    // every chat they have had, in History
+    history_ui(s, api, &mut b, &page, &me, &shots)?;
     // the person's agents in any chat's @, and one asking another
     roster_ui(s, api, &mut b, &page, &me, &shots)?;
     ask_cli(s, api, &me)?;
@@ -1370,6 +1372,14 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     b.eval(&page, "(document.getElementById('build-prompt').value += 'kept as typed', true)")?;
     let on = super::computers::lever_with(api, &simplex_id, json!({ "op": "simplex", "on": true }))?;
     let shown = b.until(&page, "(() => { const s = document.querySelector('#settings-simplex:not([hidden])'); return !!s && /always-on plan/.test(s.innerText) && !!document.querySelector('.settings-nav-link[data-section=settings-simplex]:not([hidden])'); })()", wait);
+    // marked what it is, a word each (Paul, 2026-10-31), its nav link still
+    // its name alone
+    let tags = b.eval(&page, "[[...document.querySelectorAll('#settings-simplex .connector-tag')].map((t) => [t.textContent, t.title]), document.querySelector('.settings-nav-link[data-section=settings-simplex]')?.textContent]")?;
+    s.ok(
+        "settings mark SimpleX experimental and secure (end to end), a word each, its nav link still \"SimpleX\"",
+        tags == json!([[["Experimental", ""], ["Secure", "End-to-end encrypted to your computer"]], "SimpleX"]),
+        &tags,
+    );
     let kept = b.eval(&page, "location.pathname === '/settings' && document.getElementById('build-prompt').value.endsWith('kept as typed')")?;
     let off = super::computers::lever_with(api, &simplex_id, json!({ "op": "simplex", "on": false }))?;
     let hidden = b.until(&page, "!!document.querySelector('#settings-simplex[hidden]') && !document.querySelector('.settings-nav-link[data-section=settings-simplex]:not([hidden])')", wait);
@@ -5409,6 +5419,87 @@ fn say_in(s: &Suite, b: &mut Browser, page: &Page, host: &str, text: &str) -> bo
         js(text)
     );
     s.eventually(std::time::Duration::from_secs(30), || b.eval_in_frame(page, host, &typed).ok() == Some(Value::Bool(true)))
+}
+
+/// History (cell/shell/history-page.js; Paul, 2026-10-31): every chat the
+/// person has had, the newest first, with its search. Valid: a continued
+/// chat (its history card alone) is listed with the card's time and newest
+/// words; archived, it is under Archived with its chip, and gone from the
+/// sidebar; its title filters it at once, and a word only its messages
+/// hold finds it through the person's search, its snippet shown; it opens
+/// in the middle column and one Back is History again. Invalid: a chat
+/// nothing was said in is not listed, and words nothing holds say so.
+/// Replay: a message the person sends in the archived chat brings it back
+/// to their sidebar. Restart: a reload at `/history` stays there.
+fn history_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person, shots: &std::path::Path) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    let first_id = agent_ids(api, me.session, &[me.first])?.remove(0);
+    let made = |label: &str, title: &str| -> Result<String> {
+        let r = shell(api, me.session, "POST", "/api/fragments", Some(&json!({ "label": label, "template": "chat", "title": title })), &[])?;
+        let name = r.body["name"].as_str().unwrap_or_default().to_string();
+        shell(api, me.session, "PUT", &format!("/api/f/{name}/members/{first_id}"), Some(&json!({ "role": "editor" })), &[])?;
+        Ok(name)
+    };
+    // a chat continued (Continue's, as continue.js makes one): its history card alone
+    let bread = made(&format!("{}-chat-bread", me.first), "Bread notes")?;
+    let card = json!({ "kind": "history", "title": "Bread notes", "archive": "e2e", "key": "e2e-bread", "messages": [{ "role": "user", "text": "When do I bake?" }, { "role": "assistant", "text": "Once the starter doubles within six hours." }], "earlier": 0 });
+    let posted = shell(api, me.session, "POST", &format!("/api/f/{bread}/channels/chat"), Some(&json!({ "id": "history", "body": card })), &[])?;
+    // a chat nothing was said in
+    let unused = made(&format!("{}-chat-unused", me.first), "Never used")?;
+    b.click(page, "#history-link")?;
+    let row = |name: &str| format!("document.querySelector({})", js(&format!(".history-row[data-key={}]", js(&format!("chat:{name}")))));
+    let listed = b.until(page, &format!("location.pathname === '/history' && !document.getElementById('history-page').hidden && {}?.innerText.includes('Once the starter doubles') && !!{}?.querySelector('time')?.dateTime", row(&bread), row(&bread)), wait);
+    let unlisted = b.eval(page, &format!("!{}", row(&unused)))?;
+    s.ok(
+        "History lists a continued chat with its card's time and newest words, and not a chat nothing was said in",
+        posted.status == 200 && listed && unlisted == true,
+        json!({ "row": b.eval(page, &format!("{}?.innerText ?? null", row(&bread)))?, "unused": unlisted }),
+    );
+    // archived: under Archived, with its chip, and gone from the sidebar
+    shell(api, me.session, "PUT", &format!("/api/fragments/{bread}/archived"), Some(&json!({ "archived": true })), &[])?;
+    b.click(page, ".history-filter[data-filter=\"archived\"]")?;
+    let archived = b.until(page, &format!("{}?.querySelector('.history-chip')?.textContent === 'Archived' && [...document.querySelectorAll('.history-row')].every((r) => r.querySelector('.history-chip')) && !document.querySelector({})", row(&bread), js(&format!("#chats [data-key={}]", js(&format!("chat:{bread}"))))), wait);
+    let _ = b.screenshot(page, &shots.join("desktop-history-archived.png"));
+    s.ok("archived, it is under Archived with its chip, and gone from the sidebar", archived, json!({ "rows": b.eval(page, "[...document.querySelectorAll('.history-row')].map((r) => r.innerText)")? }));
+    b.click(page, ".history-filter[data-filter=\"all\"]")?;
+    // its title filters it at once; words nothing holds say so
+    b.eval(page, &fill(".history-search input", "bread no"))?;
+    let titled = b.until(page, &format!("document.querySelectorAll('.history-row').length === 1 && !!{}", row(&bread)), wait);
+    b.eval(page, &fill(".history-search input", "zqxjv nothing"))?;
+    let none = b.until(page, "document.querySelector('.history-empty')?.textContent === 'Nothing found for “zqxjv nothing”'", wait);
+    b.eval(page, &fill(".history-search input", ""))?;
+    s.ok("its title filters History as it is typed, and words nothing holds say so", titled && none, json!({ "list": b.eval(page, "document.querySelector('.history-list').innerText")? }));
+    // opened from History, then one Back: History again
+    b.click(page, &format!(".history-row[data-key={}] .history-open", js(&format!("chat:{bread}"))))?;
+    let opened = b.until(page, &format!("location.pathname === '/' && document.getElementById('history-page').hidden && document.getElementById('chat-title').textContent === 'Bread notes' && [...document.querySelectorAll('#frames iframe')].find((f) => !f.hidden)?.dataset.fragment === {}", js(&bread)), wait);
+    b.eval(page, "(history.back(), true)")?;
+    let back = b.until(page, "location.pathname === '/history' && !document.getElementById('history-page').hidden", wait);
+    s.ok("a chat opens from History in the middle column, and one Back is History again", opened && back, json!({ "at": b.eval(page, "location.pathname")? }));
+    // a message sent in the archived chat brings it back to the sidebar
+    b.click(page, &format!(".history-row[data-key={}] .history-open", js(&format!("chat:{bread}"))))?;
+    let said = "the rye wants a warmer spot";
+    let sent = say_in(s, b, page, &bread, said);
+    let back_in_list = s.eventually(wait, || {
+        shell(api, me.session, "GET", "/api/fragments", None, &[]).ok().and_then(|r| r.body["fragments"].as_array().and_then(|l| l.iter().find(|f| f["name"] == bread.as_str()).map(|f| f["archived"] != true))).unwrap_or(false)
+    });
+    let in_sidebar = b.until(page, &format!("!!document.querySelector({})", js(&format!("#chats [data-key={}]", js(&format!("chat:{bread}"))))), wait);
+    s.ok("a message the person sends in a chat they archived brings it back to their sidebar", sent && back_in_list && in_sidebar, json!({ "sent": sent, "unarchived": back_in_list, "sidebar": in_sidebar }));
+    // a word only its messages hold: found by the person's search, its snippet shown
+    b.click(page, "#history-link")?;
+    b.eval(page, &fill(".history-search input", "warmer"))?;
+    let found = b.until(page, &format!("{}?.querySelector('.history-preview.found')?.textContent.includes('warmer')", row(&bread)), wait);
+    let _ = b.screenshot(page, &shots.join("desktop-history-search.png"));
+    b.eval(page, &fill(".history-search input", ""))?;
+    s.ok("a word only a chat's messages hold finds it in History, its snippet shown", found, json!({ "list": b.eval(page, "document.querySelector('.history-list').innerText")? }));
+    // a reload at /history stays there
+    b.eval(page, "(window.__before_reload = true, true)")?;
+    b.reload(page)?;
+    let stays = b.until(page, &format!("!window.__before_reload && location.pathname === '/history' && !document.getElementById('history-page').hidden && !!{}", row(&bread)), wait);
+    s.ok("a reload at /history opens History again", stays, json!({ "at": b.eval(page, "location.pathname")? }));
+    // the rest of the lane goes on from a chat
+    b.click(page, &format!(".history-row[data-key={}] .history-open", js(&format!("chat:{bread}"))))?;
+    b.until(page, "location.pathname === '/'", wait);
+    Ok(())
 }
 
 /// Unread (docs/api.md, Control API): a chat not open counts on its row what
