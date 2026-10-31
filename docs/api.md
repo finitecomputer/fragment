@@ -1320,7 +1320,8 @@ shell's Apps page shows it, one row a fragment, each with its Share…
 | `PUT /api/f/{name}/secrets/{KEY}` | editor | `{value, hosts}` (`PutSecret`: a value of at most 64 KiB, and 1 to 8 hosts it may go to, each as a URL names it, `api.example.com`: no scheme, port, path, or wildcard) → `{ok, name, hosts}`; the value sealed (AES-256-GCM, key HKDF'd from the host secret salted with the fragment's Durable Object, its class and id: `keys::scope`, `fragment_core::seal`; docs/secrets.md), its hosts in place of the ones before. `job.fetch` fills it only toward one of its hosts (on any port), over https (`fragment_core::secrets::may_fill`), in a request that sets no `Host`, `Forwarded`, or `X-Forwarded-Host` header (`ROUTING_HEADERS`). Its hosts change only with its value, so no editor widens where a value goes without holding it. They are its editors' to know: the `secret.set` event (every viewer reads the event log) and a refused fetch's error name no host. A secret set before secrets named hosts fills nowhere until set again |
 | `GET /api/f/{name}/secrets` | editor | → `{secrets: [{name, hosts}]}` (`SecretList`); values never leave |
 | `DELETE /api/f/{name}/secrets/{KEY}` | editor | → `{ok, removed}` |
-| `GET /api/f/{name}/storage-token` | editor | → `{token, repo, api, expiresAt}`: ES256, this repo, `git:read`+`git:write`, 15 minutes. Asked through a computer's egress on a local fleet (its code.storage at a loopback address), `api` is the egress's (docs/computers.md, The fragment API) |
+| `GET /api/f/{name}/storage-token` | editor | → `{token, repo, api, expiresAt}`: ES256, this repo, `git:read`+`git:write`, 15 minutes. Asked through a computer's egress on a local fleet (its code.storage at a loopback address), `api` is the egress's (docs/computers.md, The fragment API). An org's fragment's is the same shape but reaches its repo through the platform: `api` is its route to it, and `token` a capability it seals for itself (An org's fragments, "Its repo, through the platform") |
+| `* /api/f/{name}/codestorage/api/repos/{repo}/{endpoint}` | an org's fragment's storage token's holder (`Authorization: Bearer`), asked again each call | its repo, through the platform: `GET branch`, `files/metadata`, `file` and `commits`, and `POST commit-pack` and `restore-commit` (a write while its ledger takes writes), as code.storage answers them, bodies streamed; its own repo alone (another, or another call: 404). A token not this fragment's, another life's or past its time is 401; one whose holder may write here no more is 403 |
 | `POST /api/f/{name}/refresh` | editor | → `{ok, refs: {main: {pin, moved} \| {absent}, live: ...}}`, once a live that moved is installed (`fragment deploy` asks it). A writer to the repo asks this after its push (the CLI does), and the platform follows its own moves itself: code.storage's push webhooks are not taken. A fragment reads the branches it has no pin for once, on its first request (a name made again keeps its repo); after that a move arrives by this or the poll backstop, and a site with nothing deployed answers 404 without asking code.storage |
 | `POST /api/f/{name}/files` | editor | `{files: [{path, text \| base64} \| {path, delete: true}], message?, key?}` → `{commit}`: one commit to main, as a sync makes (at most 16 files, 400 past that, and 1 MiB of their decoded bytes in a body of at most 2 MiB, 413 past either; paths relative, no `.` or `..`). The same `key` from the same person answers the first commit again. An agent fragment's `avatar.png` that is no picture (400) or past 256 KiB (413) is refused and nothing is committed (Identities, "An agent's name and picture"). A write of what main holds already commits nothing (code.storage makes no empty commit: its 412) and answers main's tip. Main's pin moves at once; live does not |
 | `POST /api/f/{name}/deploy` | editor | `{note?}` → `{live, canonical}`: live to main's tip; `fragment deploy` asks it after its sync, so every deploy is this one (a first deploy makes the branch; later ones fast-forward it, and after a rollback take main's files whole: a restore commit, or one of their merge base and then the merge, since code.storage merges three ways), guarded against a live that moved meanwhile and made under the fragment's plane lock, so neither step's push pins the files live holds between them; the app installs from it at once |
@@ -2593,9 +2594,17 @@ cap (403). A person's agent working in it bills that person (decision
   add) takes it away first and admits them afresh, at their epoch now, an
   ordinary member still by their own yes. An agent there acts `for` its
   own person alone.
-- **No storage token.** A token writes the repo for its 15 minutes
-  whatever happens to its holder, so an org's fragment hands out none
-  (403): its files change through the platform's own routes.
+- **Its repo, through the platform.** A code.storage token writes the
+  repo for its 15 minutes whatever happens to its holder, so an org's
+  fragment's storage token is a capability it seals for itself (whose,
+  this life, 15 minutes), and its `api` the platform's route to its repo
+  (`/api/f/{name}/codestorage`, Files above): the same shape, so a CLI of
+  any release syncs, deploys and rolls back through it. Each call asks
+  again whether its holder may write there now, as a request of theirs
+  would be decided (an offboarding, or a removal, refuses the next call),
+  and only the CLI's calls go on, to its own repo, with the fragment's own
+  token. Through a computer's egress the guest's token goes on as it
+  came, unsigned, its `api` the egress's.
 
 | method & path | who | body → answer |
 | --- | --- | --- |

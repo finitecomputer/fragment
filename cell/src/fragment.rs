@@ -24,6 +24,7 @@
 //!   POST   /api/rotate                    owner
 //!   PUT    /api/secrets/<KEY>  GET /api/secrets  DELETE /api/secrets/<KEY>   editor
 //!   GET    /api/storage-token             editor
+//!   *      /api/codestorage/api/repos/…   an org's: its storage token's holder, asked again each call
 //!   POST   /api/refresh                   editor
 //!   GET    /api/files  /api/file?path=   viewer
 //!   PUT    /api/blobs/<sha256>            editor (the body, streamed and hashed)
@@ -518,6 +519,10 @@ impl Facts {
 /// Names the org a create is for: set by the router alone
 /// (`create_org_fragment`), which never passes a caller's own headers.
 pub(crate) const ORG_HEADER: &str = "x-fragment-org";
+
+/// The storage token a call through an org's fragment's repo route carries
+/// (its `Authorization: Bearer`): set by the router alone, on that route.
+pub(crate) const STORAGE_TOKEN_HEADER: &str = "x-fragment-storage-token";
 
 pub(crate) fn missing(key: MetaKey) -> CellError {
     CellError::host(format!("a created fragment has no {}", key.key()))
@@ -1077,6 +1082,15 @@ impl FragmentCell {
             (Method::Get, ["api", "secrets"]) => self.list_secrets(&caller),
             (Method::Delete, ["api", "secrets", key]) => self.delete_secret(&caller, key),
             (Method::Get, ["api", "storage-token"]) => self.storage_token(&caller).await,
+            // an org's fragment's repo, through the platform: the router's
+            // header carries the storage token it minted (plane.rs `proxy`)
+            (_, ["api", "codestorage", rest @ ..]) => {
+                let sealed = req.headers().get(STORAGE_TOKEN_HEADER)?;
+                let rest: Vec<String> = rest.iter().map(|s| s.to_string()).collect();
+                // the client's query, as the router was asked it
+                let query = caller.url.query().map(str::to_string);
+                self.proxy(&mut req, &rest, query, sealed).await
+            }
             (Method::Post, ["api", "refresh"]) => self.refresh(&caller).await,
             (Method::Get, ["api", "files"]) => self.files(&caller).await,
             (Method::Post, ["api", "files"]) => {
