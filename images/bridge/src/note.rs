@@ -353,10 +353,18 @@ pub fn history(r: &Record, owner: &str) -> Option<String> {
     let named = |k: &str, ok: fn(u8) -> bool| Some(field(b, k)).filter(|v| !v.is_empty() && v.len() <= 160 && v.bytes().all(ok));
     let archive = named("archive", |c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-');
     let key = named("key", |c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'_' | b'-'));
+    // an archived chat of theirs (`chat`), or an import's; with another
+    // agent (`agent`, its name), or with this one
+    let chat = named("chat", |c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-');
+    let other = Some(short("agent", 120)).filter(|a| !a.trim().is_empty());
+    let with = other.as_deref().unwrap_or("you");
+    let moved = if chat.is_some() { "" } else { " before they moved here" };
     let mut head = vec![format!(
-        "This chat goes on from a conversation your owner had with you before they moved here, “{title}”{when}. It is read-only history: what was said there, not new messages."
+        "This chat goes on from a conversation your owner had with {with}{moved}, “{title}”{when}. It is read-only history: what was said there, not new messages."
     )];
-    if let (Some(a), Some(k)) = (archive, key) {
+    if let Some(c) = chat {
+        head.push(format!("All of it is in their chat {c}."));
+    } else if let (Some(a), Some(k)) = (archive, key) {
         head.push(format!("All of it is in their Session Archive: `fragment sync {a} --dir <folder> --mode pull`, then sessions/{k}.json."));
     }
     let summary = field(b, "summary").trim();
@@ -371,7 +379,7 @@ pub fn history(r: &Record, owner: &str) -> Option<String> {
             let text = m["text"].as_str().map(str::trim).filter(|t| !t.is_empty())?;
             let who = match m["role"].as_str() {
                 Some("user") => "Your owner",
-                Some("assistant") => "You",
+                Some("assistant") => other.as_deref().unwrap_or("You"),
                 _ => return None,
             };
             Some(format!("{who}: {}", records::cut_bytes(text, limits::HISTORY_NOTE_MAX_BYTES / 4)))
@@ -393,7 +401,8 @@ pub fn history(r: &Record, owner: &str) -> Option<String> {
     let dropped = earlier + (said.len() - kept.len()) as u64;
     let mut text = head;
     if !kept.is_empty() {
-        let before = if dropped > 0 { format!(" ({dropped} earlier ones are in the archive)") } else { String::new() };
+        let place = if chat.is_some() { "that chat" } else { "the archive" };
+        let before = if dropped > 0 { format!(" ({dropped} earlier ones are in {place})") } else { String::new() };
         text.push_str(&format!("\n\nIts last messages, oldest first{before}:\n"));
         text.push_str(&kept.iter().map(|l| l.as_str()).collect::<Vec<_>>().join("\n"));
     }
@@ -469,6 +478,25 @@ mod tests {
         let big = history(&history_record("npub1paul", json!({ "kind": "history", "title": "Long", "messages": long })), "npub1paul").unwrap();
         assert!(big.len() <= limits::HISTORY_NOTE_MAX_BYTES, "{}", big.len());
         assert!(big.contains("Your owner: 39 ") && !big.contains("Your owner: 0 ") && big.contains("earlier ones are in the archive"), "the newest kept");
+    }
+
+    /// Goal: a history continued with another agent than the one the
+    /// conversation was with (`agent`) tells this one whose words they
+    /// were, never "you"; one from an archived chat (`chat`) says that chat
+    /// is where the rest is. Valid: both; a history saying neither reads as
+    /// before.
+    #[test]
+    fn a_history_says_whose_words_and_where_the_rest_is() {
+        let body = json!({ "kind": "history", "title": "Beans", "chat": "fred-chat--k3x9", "agent": "Fred", "started_at": "2026-10-01T09:00:00.000Z", "earlier": 2,
+            "messages": [{ "role": "user", "text": "plant beans?" }, { "role": "assistant", "text": "in spring" }] });
+        let text = history(&history_record("npub1paul", body), "npub1paul").expect("its owner's history");
+        assert!(text.starts_with("This chat goes on from a conversation your owner had with Fred, “Beans” (2026-10-01)."), "{text}");
+        assert!(text.contains("All of it is in their chat fred-chat--k3x9."), "{text}");
+        assert!(text.ends_with("(2 earlier ones are in that chat):\nYour owner: plant beans?\nFred: in spring"), "{text}");
+        assert!(!text.contains("You:") && !text.contains("moved here") && !text.contains("fragment sync"), "{text}");
+        let imported = json!({ "kind": "history", "title": "Beans", "archive": "sessions--k3x9", "key": "hermes-ab", "agent": "Juniper", "messages": [{ "role": "assistant", "text": "hi" }] });
+        let text = history(&history_record("npub1paul", imported), "npub1paul").unwrap();
+        assert!(text.contains("had with Juniper before they moved here") && text.ends_with("Juniper: hi") && text.contains("sessions/hermes-ab.json"), "{text}");
     }
 
     fn step(tool: &str, args: &str, ok: bool) -> Step {

@@ -1165,7 +1165,10 @@ export function mount(root) {
       const box = el("section", "history-block");
       const day = (at) => (typeof at === "string" && at ? new Date(at).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" }) : "");
       const when = [day(b.started_at), day(b.ended_at)].filter((d, i, all) => d && all.indexOf(d) === i).join(" – ");
-      box.append(el("p", "history-head", [`From “${typeof b.title === "string" ? b.title : "an earlier chat"}”`, when].filter(Boolean).join(" · ")));
+      // from an import (`archive`, `key`) or an archived chat (`chat`); `agent`:
+      // who it was with, when not this chat's agent
+      const from = typeof b.title === "string" ? b.title : "an earlier chat";
+      box.append(el("p", "history-head", [`From “${from}”`, typeof b.agent === "string" && b.agent ? `with ${b.agent}` : "", when].filter(Boolean).join(" · ")));
       if (typeof b.summary === "string" && b.summary.trim()) {
         const d = el("details", "tools");
         const s = el("summary");
@@ -1175,7 +1178,7 @@ export function mount(root) {
         d.append(s, detail);
         box.append(d);
       }
-      if (Number.isInteger(b.earlier) && b.earlier > 0) box.append(el("p", "history-head", `${b.earlier} earlier ${b.earlier === 1 ? "message" : "messages"} in your Session Archive`));
+      if (Number.isInteger(b.earlier) && b.earlier > 0) box.append(el("p", "history-head", `${b.earlier} earlier ${b.earlier === 1 ? "message" : "messages"} ${typeof b.chat === "string" ? `in “${from}”` : "in your Session Archive"}`));
       for (const m of Array.isArray(b.messages) ? b.messages : []) {
         if (typeof m?.text !== "string" || !m.text.trim()) continue;
         const msg = el("div", `msg ${m.role === "user" ? "user mine" : "agent"}`);

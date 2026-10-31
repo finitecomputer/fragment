@@ -155,6 +155,7 @@ const SHELL_PUBLISHED: [(&str, &str); 48] = [
     ("chat-list.js", "text/javascript; charset=utf-8"),
     // the Session Archive under the chats (templates/sessions/README.md)
     ("session-archive.js", "text/javascript; charset=utf-8"),
+    ("continue.js", "text/javascript; charset=utf-8"),
     // delegation threads: a line each over the chat an agent asked from (docs/api.md, The shell)
     ("threads.js", "text/javascript; charset=utf-8"),
     ("session-refresh.js", "text/javascript; charset=utf-8"),

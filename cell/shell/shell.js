@@ -22,6 +22,7 @@ import { createViewer } from "./viewer.js";
 import { seatGives } from "./billing.js";
 import { createChatList, newestChat } from "./chat-list.js";
 import { createSessionArchive } from "./session-archive.js";
+import { createContinue } from "./continue.js";
 import { createSessionRefresh } from "./session-refresh.js";
 import { createOnboarding } from "./onboarding.js";
 import { createComputer } from "./computer.js";
@@ -868,11 +869,18 @@ const { renderHeading, renderChats, loadInvites, primaryAgent, newChatAgent, own
   navigation: { newChat, rename: (name) => rename(name), openChat, openApp, openScreen, leaveSidebar, seg },
   listLive, load, invites: () => state.invites, setInvites: (v) => { state.invites = v; },
 });
+// Continue: a conversation (an import, an archived chat) as a new chat with
+// an agent of the person's choosing (continue.js)
+const continuing = createContinue({
+  api, ui: { el, notice },
+  data: { allFragments: () => state.fragments, agents: () => state.agents, primaryAgent: () => primaryAgent(), titleOf, seg, chatBase: (agent) => chatBase(agent) },
+  navigation: { openChat, leaveSidebar }, load: () => load(), store,
+});
 const sessionArchive = createSessionArchive({
-  api, ui: { renderHeading: () => renderHeading(), notice },
-  data: { allFragments: () => state.fragments, own, seg, primaryAgent: () => primaryAgent(), agents: () => state.agents, chatLabel: (agent) => chatLabel(agent) },
+  api, ui: { renderHeading: () => renderHeading() },
+  data: { allFragments: () => state.fragments, own, seg },
   selection: { getFrame: (name) => state.frames.get(name) },
-  navigation: { openChat, leaveSidebar }, load: () => load(), store, changed: () => historyPage.render(),
+  navigation: { openChat, leaveSidebar }, continuing, store, changed: () => historyPage.render(),
 });
 
 // Delegation threads: a line each over the chat an agent asked from, its
@@ -1255,7 +1263,10 @@ const UNTITLED = "New chat";
 const TITLE_MAX_CHARS = 48;
 // A chat's label: its agent's, `-chat` and a number (`maple-chat-2`), short
 // enough for any deployment's hosts with four digits' room.
-const chatLabel = (agent) => freeLabel(`${labelOf(agent).slice(0, LABEL_ROOM - "-chat-9999".length).replace(/-+$/, "")}-chat`);
+// an agent's chats' label, before freeLabel numbers it (Continue's names
+// add a hash to it: continue.js)
+const chatBase = (agent) => `${labelOf(agent).slice(0, LABEL_ROOM - "-chat-9999".length).replace(/-+$/, "")}-chat`;
+const chatLabel = (agent) => freeLabel(chatBase(agent));
 // An untitled chat with only this agent that no one has said anything in
 // yet is the one to open again, not another.
 const blank = (identity) => chats().find((f) => own(f) && !f.archived && f.title === UNTITLED && !f.preview && agentsOf(f.name).length === 1 && agentsOf(f.name)[0] === identity);
@@ -1513,6 +1524,7 @@ const historyPage = createHistoryPage($("history-page"), {
   api, el, icon, seg, mark: (name, size) => mark(name, size), chats, isThread: (f) => threads.isPair(f), own, chatTitle: (name) => chatTitle(name),
   agentsOf, agents: () => state.agents, titleOf,
   archive: { name: () => sessionArchive.archive(), entries: () => sessionArchive.entries(), openSession: (key) => sessionArchive.openSession(key) },
+  continueControl: (source) => continuing.continueControl(source),
   openChat, leaveSidebar,
 });
 function openHistory(push = true) {

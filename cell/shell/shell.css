@@ -957,3 +957,17 @@ iframe[data-blocked] { display: none; }
 .icon-pick[aria-busy=true] { outline: 2px dashed var(--border-strong); outline-offset: 2px; }
 .icon-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 18px; }
 .icon-actions button:first-child { margin-right: auto; }
+
+/* ---- Continue (continue.js): "Continue with [agent ▾]", one line, compact
+   enough for the end of a 40px History row; and the dialog the archive's
+   page asks for it in. */
+.continue-control { display: inline-flex; align-items: center; gap: 0; height: 28px; max-width: 100%; flex: none; border: 1px solid var(--border-strong); border-radius: 999px; background: var(--bg-card); overflow: hidden; font: 13px/1 var(--font-sans); }
+.continue-control button.continue-go { height: 100%; padding: 0 12px; border: 0; background: none; color: var(--text-primary); white-space: nowrap; cursor: pointer; }
+.continue-control button.continue-go:hover:not(:disabled) { background: var(--bg-hover); }
+.continue-control select.continue-agent { height: 100%; min-width: 0; max-width: 160px; padding: 0 26px 0 10px; border: 0; border-left: 1px solid var(--border); background: none; color: var(--text-secondary); font: inherit; text-overflow: ellipsis; cursor: pointer; }
+.continue-control.busy { opacity: .6; }
+.continue-control button.continue-go:disabled { cursor: default; }
+.continue-ask { padding: 20px 22px; width: min(380px, calc(100vw - 32px)); border: 1px solid var(--border-strong); border-radius: 16px; background: var(--bg-card); color: var(--text-primary); }
+.continue-ask::backdrop { background: rgba(0,0,0,.5); }
+.continue-ask .continue-title { margin: 0 0 14px; font-size: 15px; overflow-wrap: anywhere; }
+.continue-ask .continue-close { display: block; margin: 16px 0 0 auto; padding: 6px 12px; border: 1px solid var(--border); border-radius: 9px; background: var(--surface-muted); color: var(--text-secondary); font-size: 13px; }

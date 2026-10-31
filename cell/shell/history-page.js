@@ -267,7 +267,9 @@ export function createHistoryPage(page, h) {
   // Continue with an agent of theirs: an archived chat's, or an imported
   // one's, made once and kept
   function controlOf(r) {
-    const source = r.kind === "imported" ? { archive: h.archive.name(), key: r.entry.key } : r.archived ? { chat: r.name } : null;
+    // an import names its agent as its index does (null: unknown, so its
+    // file is not read for it: continue.js `defaultAgent`)
+    const source = r.kind === "imported" ? { archive: h.archive.name(), key: r.entry.key, agent: r.entry.agent ?? null } : r.archived ? { chat: r.name } : null;
     if (!source || !h.continueControl) return null;
     if (!controls.has(r.key)) controls.set(r.key, h.continueControl(source));
     return controls.get(r.key);

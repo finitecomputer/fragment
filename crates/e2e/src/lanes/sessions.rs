@@ -145,10 +145,14 @@ pub fn sessions_ui(s: &mut Suite, api: &Api) -> Result<()> {
     );
     b.screenshot(&page, &shots.join("list.png"))?;
 
-    // Continue: a chat with their agent, its history first
+    // Continue: the shell asks with which agent (one here: "Continue"), and
+    // makes a chat with it, its history first
     b.click(&page, "#archive-rows [data-key=\"archived:hermes-e2e_beans\"]")?;
     let offered = s.eventually(wait, || b.eval_in_frame(&page, frame, "document.querySelector('.archive-continue:not([hidden])')?.textContent === 'Continue'").is_ok_and(|v| v == true));
     b.eval_in_frame(&page, frame, "(document.querySelector('.archive-continue').click(), true)")?;
+    let asked = b.until(&page, "document.querySelector('dialog.continue-ask[open] .continue-go')?.textContent === 'Continue'", wait);
+    b.screenshot(&page, &shots.join("continue-ask.png"))?;
+    b.eval(&page, "(document.querySelector('dialog.continue-ask .continue-go').click(), true)")?;
     let me = api.identity(&keys)?;
     let mut chat = String::new();
     let made = s.eventually(wait, || {
@@ -165,7 +169,7 @@ pub fn sessions_ui(s: &mut Suite, api: &Api) -> Result<()> {
     let tail: Vec<&str> = first["body"]["messages"].as_array().into_iter().flatten().filter_map(|m| m["text"].as_str()).collect();
     s.ok(
         "Continue makes a chat with the person's agent, titled as the conversation, whose first record is its history, theirs",
-        offered && made && first["body"]["kind"] == "history" && first["principal"] == me.as_str() && tail == ["plant beans?", "in spring"] && first["body"]["key"] == "hermes-e2e_beans",
+        offered && asked && made && first["body"]["kind"] == "history" && first["principal"] == me.as_str() && tail == ["plant beans?", "in spring"] && first["body"]["key"] == "hermes-e2e_beans",
         &first,
     );
     let shown = s.eventually(wait, || b.eval_in_frame(&page, &chat, "document.querySelector('.history-block .history-head')?.textContent?.startsWith('From “Beans”') ?? false").is_ok_and(|v| v == true));
@@ -186,11 +190,16 @@ pub fn sessions_ui(s: &mut Suite, api: &Api) -> Result<()> {
         &reply,
     );
 
-    // the archive offers that chat now
-    let linked = api.signed(&keys, "GET", &format!("/api/f/{name}/file?path=continued/hermes-e2e_beans.json"), None)?;
+    // asked again, it offers that chat (one a conversation and agent), and opens it
     b.click(&page, "#archive-rows [data-key=\"archived:hermes-e2e_beans\"]")?;
-    let again = s.eventually(wait, || b.eval_in_frame(&page, frame, "document.querySelector('.archive-continue:not([hidden])')?.textContent === 'Open the chat'").is_ok_and(|v| v == true));
-    s.ok("the archive keeps the chat it was continued in, and offers it", linked.body["chat"] == chat.as_str() && again, &linked.body);
+    s.eventually(wait, || b.eval_in_frame(&page, frame, "!!document.querySelector('.archive-continue:not([hidden])')").is_ok_and(|v| v == true));
+    b.eval_in_frame(&page, frame, "(document.querySelector('.archive-continue').click(), true)")?;
+    let open = b.until(&page, "document.querySelector('dialog.continue-ask[open] .continue-go')?.textContent === 'Open'", wait);
+    b.eval(&page, "(document.querySelector('dialog.continue-ask[open] .continue-go').click(), true)")?;
+    let reopened = b.until(&page, &format!("!document.querySelector('dialog.continue-ask[open]') && [...document.querySelectorAll('#frames iframe')].find((f) => !f.hidden)?.dataset.fragment === {chat:?}"), wait);
+    let listed = api.signed(&keys, "GET", "/api/fragments", None)?;
+    let beans = listed.body["fragments"].as_array().into_iter().flatten().filter(|f| f["kind"] == "chat" && f["title"] == "Beans").count();
+    s.ok("Continue asked again offers the chat it made with that agent, and opens it, making none other", open && reopened && beans == 1, beans);
     Ok(())
 }
 
