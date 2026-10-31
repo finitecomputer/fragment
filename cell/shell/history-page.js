@@ -4,12 +4,19 @@
 // because you know you can always search it"). It lists:
 // - their chats, live and archived (the list's `archived`), and those
 //   shared with them; a delegation thread's chat is its thread's line
-//   (threads.js), not a chat of its own here;
+//   (threads.js), not a chat of its own here, and a chat nothing was ever
+//   said in is no history (its first record, below);
 // - their Session Archive's conversations (session-archive.js: its
 //   index), each opening read-only as the archive's page shows it.
 // A row says its title, whom it was with (its agent's face and name;
 // "Imported" for the archive's), when it was last said, and "Archived" on
 // the ones the person archived. All, Archived and Imported filter it.
+// A chat whose list row says nothing was said there yet (no `previewAt`:
+// a continued chat holds its history card alone until its agent speaks)
+// has its first record read, once while its row is the same: a history
+// card gives its time and its newest words, a message its time and first
+// line, and none leaves it out. Until it is read it is not listed: no
+// row shows without its time, nor sorts as the newest for want of one.
 // The search box filters by title as it is typed, and asks the person's
 // search (`GET /api/search`) for the messages that hold its words: each
 // chat found there once, with its newest snippet under it. The archive's
@@ -22,7 +29,7 @@
 // is given (continue.js: Continue with an agent of theirs).
 //
 // The shell owns the page's place and its helpers (`h`): `api`, `el`,
-// `icon`, `mark` (a chat's face), `chats`, `isThread`, `own`, `chatTitle`,
+// `icon`, `seg`, `mark` (a chat's face), `chats`, `isThread`, `own`, `chatTitle`,
 // `agentsOf`, `agents` (the person's own, by identity), `titleOf`,
 // `archive` ({name, entries, openSession}), `openChat`, `leaveSidebar` and
 // `continueControl`.
@@ -34,6 +41,9 @@ const HINT_MAX_BYTES = 256;
 const SEARCH_WAIT_MS = 250;
 // the rows drawn at first, and again with each Show more
 const ROWS_STEP = 100;
+// chats whose first record is read at once, and at most per drawing
+const FIRSTS_AT_ONCE = 4;
+const FIRSTS_MAX = 32;
 const FILTERS = [["all", "All"], ["archived", "Archived"], ["imported", "Imported"]];
 
 const wordsOf = (q) => q.toLowerCase().split(/\s+/).filter(Boolean);
@@ -46,6 +56,16 @@ export function hintOf(q) {
 // An imported conversation's time: when it was last said, else begun
 // (the archive's UTC times; README's "Times are UTC").
 const importedAt = (e) => Date.parse(e.ended_at ?? e.started_at ?? "") || 0;
+const firstLine = (text) => (typeof text === "string" ? text.split("\n").map((l) => l.trim()).find(Boolean) ?? "" : "");
+// What a chat's first record says of it (docs/chat-records.md): a history
+// card its time and its newest words (else its summary's), a message its
+// time and its first line; anything else its time alone.
+export function firstOf(record) {
+  if (!record) return null;
+  const b = record.body;
+  if (b?.kind === "history") return { at: record.at, line: firstLine(b.messages?.at(-1)?.text) || firstLine(b.summary) };
+  return { at: record.at, line: firstLine(typeof b === "string" ? b : b?.text) };
+}
 // When a row was last said, as History says it: the time today, else the
 // day, with its year when it is not this one.
 export function when(at, now = Date.now()) {
@@ -77,10 +97,8 @@ export function historyRows({ chats, entries, filter = "all", q = "", found = ne
       rows.push({ kind: "imported", key: `imported:${e.key}`, at: importedAt(e), entry: e, title: e.title || "Untitled", snippet });
     }
   }
-  // a chat made now (no message yet) first, as the sidebar has it; an
-  // import that says no time, last
-  const rank = (r) => r.at || (r.kind === "chat" ? Infinity : 0);
-  return rows.sort((a, b) => rank(b) - rank(a) || (a.key < b.key ? -1 : 1));
+  // one that says no time last, never the newest
+  return rows.sort((a, b) => (b.at || 0) - (a.at || 0) || (a.key < b.key ? -1 : 1));
 }
 
 export function createHistoryPage(page, h) {
@@ -93,6 +111,11 @@ export function createHistoryPage(page, h) {
   const search = { q: "", asked: 0, timer: 0, found: new Map(), foundImported: new Map(), failed: "" };
   // each row's Continue, kept across drawings (what it is doing is its own)
   const controls = new Map();
+  // a chat with nothing said yet: its first record as read, by name, with
+  // its list row as it was then (`row`), read again once that changes
+  // (`first`: {at, line}; null for none; undefined while it is read)
+  const firsts = new Map();
+  let reading = 0;
   let parts = null;
 
   function build() {
@@ -178,6 +201,26 @@ export function createHistoryPage(page, h) {
     }, SEARCH_WAIT_MS);
   }
 
+  // The first records of the chats that need them, a few at a time; each
+  // answer draws the page again. One that failed is read again only once
+  // its row changes, or the page opens again.
+  function readFirsts(list) {
+    for (const f of list) {
+      if (reading >= FIRSTS_AT_ONCE) return;
+      const row = JSON.stringify(f);
+      if (firsts.get(f.name)?.row === row) continue;
+      firsts.set(f.name, { row, first: undefined });
+      reading++;
+      h.api("GET", `/api/f/${h.seg(f.name)}/channels/chat?after=0&limit=1`)
+        .then((r) => { if (firsts.get(f.name)?.row === row) firsts.set(f.name, { row, first: firstOf(r.records?.[0]) }); })
+        .catch(() => { if (firsts.get(f.name)?.row === row) firsts.set(f.name, { row, first: null, failed: true }); })
+        .finally(() => {
+          reading--;
+          render();
+        });
+    }
+  }
+
   // whom a chat was with: its lead agent's name, when it is one of the
   // person's own; a chat shared with them says so
   function withWhom(f) {
@@ -252,9 +295,14 @@ export function createHistoryPage(page, h) {
   function render() {
     if (!shown) return;
     if (!parts) build();
-    const chats = h.chats().filter((f) => !h.isThread(f)).map((f) => ({
-      name: f.name, title: h.chatTitle(f.name), at: f.previewAt, archived: !!f.archived, preview: f.preview ?? "", with: withWhom(f),
-    }));
+    const all = h.chats().filter((f) => !h.isThread(f));
+    const unsaid = all.filter((f) => !f.previewAt);
+    readFirsts(unsaid.filter((f) => firsts.get(f.name)?.row !== JSON.stringify(f)).slice(0, FIRSTS_MAX));
+    const chats = all.flatMap((f) => {
+      const first = f.previewAt ? null : firsts.get(f.name)?.first;
+      if (!f.previewAt && !first?.at) return [];
+      return [{ name: f.name, title: h.chatTitle(f.name), at: f.previewAt ?? first.at, archived: !!f.archived, preview: f.preview ?? first.line, with: withWhom(f) }];
+    });
     const entries = h.archive.name() ? h.archive.entries() : [];
     const searched = hintOf(q) === search.q;
     const rows = historyRows({ chats, entries, filter, q, ...(searched ? { found: search.found, foundImported: search.foundImported } : {}) });
@@ -276,6 +324,8 @@ export function createHistoryPage(page, h) {
   return {
     open() {
       shown = true;
+      // what failed to be read is read again
+      for (const [name, f] of firsts) if (f.failed) firsts.delete(name);
       render();
       parts.input.focus({ preventScroll: true });
     },

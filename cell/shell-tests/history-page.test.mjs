@@ -7,16 +7,25 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { historyRows, hintOf, when } from "../shell/history-page.js";
+import { firstOf, historyRows, hintOf, when } from "../shell/history-page.js";
 
 const chat = (name, at, extra = {}) => ({ name, title: name, at, archived: false, ...extra });
 const entry = (key, ended_at, extra = {}) => ({ key, title: key, ended_at, preview: "", ...extra });
 const keys = (rows) => rows.map((r) => r.key);
-const chats = [chat("trip", 30), chat("taxes", 10, { archived: true }), chat("made-now", undefined)];
+const chats = [chat("trip", 30), chat("taxes", 10, { archived: true }), chat("no-time", undefined)];
 const entries = [entry("old-talk", "1970-01-01T00:00:00.020Z", { preview: "about the garden" }), entry("no-time", undefined)];
 
-test("every chat and import, the newest first: a chat with no message yet first, an import with no time last", () => {
-  assert.deepEqual(keys(historyRows({ chats, entries })), ["chat:made-now", "chat:trip", "imported:old-talk", "chat:taxes", "imported:no-time"]);
+test("every chat and import, the newest first; one that says no time last, never the newest", () => {
+  assert.deepEqual(keys(historyRows({ chats, entries })), ["chat:trip", "imported:old-talk", "chat:taxes", "chat:no-time", "imported:no-time"]);
+});
+
+test("a chat's first record: a history card's time and newest words, a message's first line, none nothing", () => {
+  const card = { at: 7, body: { kind: "history", title: "t", summary: "the summary\nmore", messages: [{ role: "user", text: "first" }, { role: "assistant", text: "\n  the last words\nand more" }] } };
+  assert.deepEqual(firstOf(card), { at: 7, line: "the last words" });
+  assert.deepEqual(firstOf({ at: 8, body: { kind: "history", summary: "only a summary", messages: [] } }), { at: 8, line: "only a summary" });
+  assert.deepEqual(firstOf({ at: 9, body: { text: "hello there\nsecond" } }), { at: 9, line: "hello there" });
+  assert.deepEqual(firstOf({ at: 10, body: { kind: "stop", turn: "x" } }), { at: 10, line: "" });
+  assert.equal(firstOf(undefined), null);
 });
 
 test("Archived lists the archived chats alone; Imported, the archive's conversations alone", () => {

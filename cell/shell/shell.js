@@ -1505,7 +1505,7 @@ $("apps-link").onclick = () => openApps();
 // archived and imported ones too, and its search, in the work area as the
 // Apps page is ----
 const historyPage = createHistoryPage($("history-page"), {
-  api, el, icon, mark: (name, size) => mark(name, size), chats, isThread: (f) => threads.isPair(f), own, chatTitle: (name) => chatTitle(name),
+  api, el, icon, seg, mark: (name, size) => mark(name, size), chats, isThread: (f) => threads.isPair(f), own, chatTitle: (name) => chatTitle(name),
   agentsOf, agents: () => state.agents, titleOf,
   archive: { name: () => sessionArchive.archive(), entries: () => sessionArchive.entries(), openSession: (key) => sessionArchive.openSession(key) },
   openChat, leaveSidebar,
