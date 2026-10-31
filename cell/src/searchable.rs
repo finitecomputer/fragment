@@ -22,8 +22,17 @@
 //! `search_forget` in the move's turn, deleted from the service by the
 //! alarm it arms (and before a search), a failure tried again later, and
 //! left out of every answer until it is gone.
-//! A life's index is dropped when the life ends (ended.rs), with its
-//! database and blobs.
+//!
+//! One source is sent one thing at a time (`Sending`): a write of a
+//! source waits for a forget of it in flight, and sends any still to send
+//! before itself, whenever it is due, or is refused; so no forget ever
+//! lands after a later write.
+//!
+//! A life's index is ended when the life ends (ended.rs), with its
+//! database and blobs: the service refuses every write to it after (`end`,
+//! search/README.md), one sent before and landing after too. A write
+//! checks the life after each wait (`search_life`), so one the end
+//! overtook writes nothing, and marks nothing of the next life.
 
 use std::collections::{HashMap, HashSet};
 
@@ -114,12 +123,73 @@ struct Forget {
     source: String,
 }
 
+/// One source held: while it is, nothing else sends it to the service.
+struct Sending<'a> {
+    cell: &'a FragmentCell,
+    source: String,
+    guard: Option<futures_util::lock::OwnedMutexGuard<()>>,
+}
+
+impl Drop for Sending<'_> {
+    fn drop(&mut self) {
+        drop(self.guard.take());
+        // the last holder, with no one waiting, takes the entry out
+        let mut sending = self.cell.search_sending.borrow_mut();
+        if sending.get(&self.source).is_some_and(|lock| std::sync::Arc::strong_count(lock) == 1) {
+            sending.remove(&self.source);
+        }
+    }
+}
+
 impl FragmentCell {
     /// This life's index: its scope on the service.
     fn search_scope(&self) -> CellResult<String> {
+        Ok(rules::scope(&self.state.id().to_string(), self.search_life()?))
+    }
+
+    /// This life (its incarnation): a write checks it is still the one it
+    /// began in after each wait, as the fragment may have been deleted
+    /// (or wiped, or made again) meanwhile.
+    fn search_life(&self) -> CellResult<i64> {
         let [created] = self.metas([MetaKey::CreatedAt])?;
-        let created = created.and_then(|c| c.parse::<i64>().ok()).ok_or_else(|| crate::fragment::missing(MetaKey::CreatedAt))?;
-        Ok(rules::scope(&self.state.id().to_string(), created))
+        created.and_then(|c| c.parse::<i64>().ok()).ok_or_else(|| crate::fragment::missing(MetaKey::CreatedAt))
+    }
+
+    fn search_same_life(&self, life: i64) -> CellResult<()> {
+        let [created] = self.metas([MetaKey::CreatedAt])?;
+        if created.and_then(|c| c.parse::<i64>().ok()) != Some(life) {
+            return Err(CellError::new(ErrorCode::NotFound, "this fragment was deleted while the source was written"));
+        }
+        Ok(())
+    }
+
+    /// Waits for, then holds, `source`.
+    async fn search_hold(&self, source: &str) -> Sending<'_> {
+        let lock = self.search_sending.borrow_mut().entry(source.to_string()).or_default().clone();
+        let guard = lock.lock_owned().await;
+        Sending { cell: self, source: source.to_string(), guard: Some(guard) }
+    }
+
+    /// Holds `source` if nothing else does.
+    fn search_try_hold(&self, source: &str) -> Option<Sending<'_>> {
+        let lock = self.search_sending.borrow_mut().entry(source.to_string()).or_default().clone();
+        let guard = lock.try_lock_owned()?;
+        Some(Sending { cell: self, source: source.to_string(), guard: Some(guard) })
+    }
+
+    /// `source`'s forget, if one waits (due or not): sent now, held, before
+    /// a write of it. The write is refused if it cannot be.
+    async fn search_forget_first(&self, svc: &Service, scope: &str, source: &str) -> CellResult<()> {
+        if self.rows("SELECT 1 FROM search_forget WHERE source = ?", vec![source.into()])?.is_empty() {
+            return Ok(());
+        }
+        let (status, answer) = svc.call(Method::Post, &format!("/v1/{scope}/delete"), Some(&json!({ "source": source }))).await?;
+        if status != 200 {
+            let why = answer["message"].as_str().unwrap_or("the search service refused");
+            return Err(CellError::new(ErrorCode::UpstreamFailed, format!("its file's deletion is not yet out of the index ({why}): try again")));
+        }
+        self.exec("DELETE FROM search_forget WHERE source = ?", vec![source.into()])?;
+        Ok(())
     }
 
     /// The space this deployment's vectors are in, or none: it embeds
@@ -156,9 +226,13 @@ impl FragmentCell {
         self.admit(&facts, caller, false, Role::Editor)?;
         rules::check(&up).map_err(CellError::invalid)?;
         let svc = Service::of(&self.env, self.cfg.search_url.as_deref()).await?;
-        let scope = self.search_scope()?;
-        // a write of a path forgotten meanwhile goes after the forgetting
-        self.search_drain(&svc, &scope).await;
+        let life = self.search_life()?;
+        let scope = rules::scope(&self.state.id().to_string(), life);
+        // the source, held to its end: a forget of it in flight lands
+        // first, and one still to send is sent first
+        let _held = self.search_hold(&up.source).await;
+        self.search_same_life(life)?;
+        self.search_forget_first(&svc, &scope, &up.source).await?;
         let [owner] = self.metas([MetaKey::Owner])?;
         let owner = owner.ok_or_else(|| crate::fragment::missing(MetaKey::Owner))?;
         let who = asker(caller);
@@ -182,8 +256,12 @@ impl FragmentCell {
                 let todo: Vec<&rules::Chunk> = chunks.iter().filter(|c| !held.contains(c.hash.as_str()) && !vectors.contains_key(&c.hash) && seen.insert(c.hash.as_str())).collect();
                 vectors.extend(self.search_embed(&todo, &owner, who.agent.as_deref(), &fragment).await?);
             }
+            // the life it began in, still: else nothing is sent
+            self.search_same_life(life)?;
             let body = rules::service_upsert(&up, &chunks, &vectors, space.as_ref());
             let (status, answer) = svc.call(Method::Post, &format!("/v1/{scope}/upsert"), Some(&body)).await?;
+            // and after: an end that overtook it refused it, or dropped it
+            self.search_same_life(life)?;
             match (status, answer["error"].as_str()) {
                 (200, _) => {
                     self.set_meta(MetaKey::Search, "1")?;
@@ -204,6 +282,7 @@ impl FragmentCell {
                     }
                 }
                 (409, Some("missing_vectors")) if attempt == 0 => vectors.clear(),
+                (410, Some("ended")) => return Err(CellError::new(ErrorCode::NotFound, "this fragment was deleted while the source was written")),
                 _ => return Err(refused(status, &answer)),
             }
         }
@@ -217,11 +296,15 @@ impl FragmentCell {
             return Err(CellError::invalid(format!("source is 1 to {} bytes", wire::SOURCE_MAX_BYTES)));
         }
         let svc = Service::of(&self.env, self.cfg.search_url.as_deref()).await?;
-        let scope = self.search_scope()?;
+        let life = self.search_life()?;
+        let scope = rules::scope(&self.state.id().to_string(), life);
+        let _held = self.search_hold(&d.source).await;
+        self.search_same_life(life)?;
         let (status, answer) = svc.call(Method::Post, &format!("/v1/{scope}/delete"), Some(&json!({ "source": d.source }))).await?;
         if status != 200 {
             return Err(refused(status, &answer));
         }
+        self.search_same_life(life)?;
         self.exec("DELETE FROM search_forget WHERE source = ?", vec![d.source.as_str().into()])?;
         json_response(&json!({ "source": d.source, "deleted": answer["deleted"] }))
     }
@@ -377,6 +460,14 @@ impl FragmentCell {
             Err(e) => return console_error!("{}", json!({ "event": "search.forget-unread", "error": e.message })),
         };
         for f in due {
+            // held, so a write of it waits; held already, it is a write's,
+            // which sends it first, or another pass's
+            let Some(_held) = self.search_try_hold(&f.source) else { continue };
+            match self.rows("SELECT 1 FROM search_forget WHERE source = ?", vec![f.source.as_str().into()]) {
+                Ok(rows) if rows.is_empty() => continue,
+                Ok(_) => {}
+                Err(e) => return console_error!("{}", json!({ "event": "search.forget-unread", "error": e.message })),
+            }
             match svc.call(Method::Post, &format!("/v1/{scope}/delete"), Some(&json!({ "source": f.source }))).await {
                 Ok((200, _)) => {
                     if let Err(e) = self.exec("DELETE FROM search_forget WHERE source = ?", vec![f.source.as_str().into()]) {
@@ -395,13 +486,13 @@ impl FragmentCell {
         }
     }
 
-    /// An ended life's index dropped (ended.rs), if the deployment
-    /// searches: a life that never wrote one drops nothing.
+    /// An ended life's index ended (ended.rs), if the deployment searches:
+    /// dropped, and never written again, by a write landing late too.
     pub(crate) async fn search_drop(&self, incarnation: i64) -> CellResult<()> {
         let Some(url) = self.cfg.search_url.as_deref() else { return Ok(()) };
         let svc = Service::of(&self.env, Some(url)).await?;
         let scope = rules::scope(&self.state.id().to_string(), incarnation);
-        let (status, answer) = svc.call(Method::Delete, &format!("/v1/{scope}"), None).await?;
+        let (status, answer) = svc.call(Method::Post, &format!("/v1/{scope}/end"), None).await?;
         if status != 200 {
             return Err(refused(status, &answer));
         }

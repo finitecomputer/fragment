@@ -97,6 +97,9 @@ pub struct FragmentCell {
     pub(crate) swept: Cell<bool>,
     /// The ledger ids a call or a sweep is settling now (channels.rs).
     pub(crate) settling: RefCell<BTreeMap<String, Arc<futures_util::lock::Mutex<()>>>>,
+    /// The search sources a write or a forget is sending now
+    /// (searchable.rs): one at a time a source.
+    pub(crate) search_sending: RefCell<BTreeMap<String, Arc<futures_util::lock::Mutex<()>>>>,
     /// How the app facet starts (ops.rs `app_loader`).
     pub(crate) app: js::AppLoader,
     /// What this activation knows of its live sockets (live.rs).
@@ -141,6 +144,7 @@ impl DurableObject for FragmentCell {
             rate: RefCell::new(rate),
             swept: Cell::new(false),
             settling: RefCell::default(),
+            search_sending: RefCell::default(),
             app,
             live: RefCell::default(),
             meter_armed: Cell::new(-1),

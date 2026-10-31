@@ -3589,9 +3589,9 @@ is held for a fragment until an editor writes a source.
   - at most 4 `fields` of `a-z`, `0-9` and `_` names and 64-byte values;
   - a body at most 4 MiB.
 - **Embedding.** Each section is cut into chunks its embeddings slot reads
-  whole (docs/api.md, Models: its `max_input_tokens`; nothing is cut
-  away), and each chunk's input (its title, context and heading, then its
-  text) is embedded once.
+  whole (docs/api.md, Models: its `max_input_tokens`, as the embeddings
+  route bounds an input's tokens; nothing is cut away), and each chunk's
+  input (its title, context and heading, then its text) is embedded once.
   - A chunk whose input the index holds already is not embedded again, so
     a conversation that grew embeds its new turns alone.
   - A write is paid for by the fragment's owner, a question by its asker
@@ -3610,9 +3610,16 @@ is held for a fragment until an editor writes a source.
 - **Deletes follow the files.** A source named by one of the fragment's
   paths is forgotten when a move of main deletes that file. It is gone
   from every answer at once (`forgetting` counts what the alarm still has
-  to send) and from the service's store within minutes.
+  to send) and from the service's store within minutes. A write of the
+  source after sends its forget first, however long its retry would wait
+  (the write is refused 502 if it cannot), and one source is sent one
+  thing at a time, so no forget lands after a later write.
 - **A life's index goes with it.** A deleted or wiped fragment's index is
-  dropped with its database and blobs (ended.rs).
+  ended with its database and blobs (ended.rs): dropped, and never written
+  again, by a write sent before the end and landing after it too. A write
+  whose fragment was deleted while it waited (on its embedding, or the
+  service) is refused 404 and marks nothing of a life made again under
+  the name.
 
 ### Search (decision 9; docs/cloudflare-v1.md, lesson 12)
 
