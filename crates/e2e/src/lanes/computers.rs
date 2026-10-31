@@ -832,6 +832,246 @@ struct Doors<'a> {
     identity: &'a str,
 }
 
+/// The Telegram connector (templates/telegram), end to end, on the stub
+/// agent and Telegram's fake: its owner's setup (the bot's token and the
+/// webhook's secret as its secrets, `connect`), pairing (a single-use link
+/// whose account its owner confirms), the door (its owner binds it to their
+/// agent, which joins as a viewer); then a direct message from the paired
+/// account reaches the agent as its owner's (asked as them), and the
+/// agent's reply goes back to Telegram, its interim words not, its file
+/// named. Only its owner's words are its owner's: the agent, acting for its
+/// owner, sets none of its secrets, writes it no page, gets no token to
+/// push its code, and shares it no way (visibility, invite, share link),
+/// as it still shares its owner's other fragments; a delivery without the webhook's secret, a stranger's
+/// message, an update again, a message while the deployment has it off, and
+/// one once its owner unlinked it (from its page) reach no one; and a fork
+/// lets its binding go for good. Answers the replies its agent's pokes made
+/// in the lane's own chat.
+fn telegram_checks(s: &mut Suite, api: &Api, c: &Doors, fetched: &dyn Fn(&Suite, u32, &str) -> Result<String>, wake: Duration) -> Result<usize> {
+    use fragment_fakes::telegram::{Telegram, BOT_USERNAME};
+    const TOKEN: &str = "7001000:e2e-telegram-bot-token";
+    const HOOK: &str = "e2e5ec4e7a9f0b1c2d3e4f5061728394a5b6c7d8e9f00112233445566778899a";
+    const HOOK2: &str = "e2e7a0b1c2d3e4f5061728394a5b6c7d8e9f00112233445566778899aabbccdd";
+    const PAUL: i64 = 424_242;
+    const STRANGER: i64 = 999_001;
+    let tg = Telegram::start(TOKEN)?;
+    let name = s.named(api, c.owner, "telegram")?;
+    let made = api.create_with(c.owner, json!({ "name": name, "template": "telegram" }))?;
+    anyhow::ensure!(made.status == 200, "making the Telegram connector: {made}");
+    s.owned(&made.body, c.owner);
+    // its secrets as its owner's page sets them (`__secrets`), toward the fake's host
+    for (key, value) in [("TELEGRAM_BOT_TOKEN", TOKEN), ("TELEGRAM_WEBHOOK_SECRET", HOOK)] {
+        let r = api.signed(c.owner, "PUT", &format!("/api/f/{name}/secrets/{key}"), Some(&json!({ "value": value, "hosts": ["127.0.0.1"] })))?;
+        anyhow::ensure!(r.status == 200, "its secret {key}: {r}");
+    }
+    let state = || api.op(c.owner, &name, "state", "state", json!({})).map(|r| r.body["result"].clone()).unwrap_or_default();
+    let r = api.op(c.owner, &name, "connect", "connect", json!({ "platform": api.base, "api": tg.url }))?;
+    let connected = s.eventually(wake, || state()["bot"]["username"] == BOT_USERNAME);
+    let inbox = format!("{}/api/f/{name}/inbox", api.base);
+    s.ok(
+        "its owner's connect checks the bot's token and points its webhook at the chat's inbox, with the webhook's secret",
+        r.status == 200 && connected && tg.webhook() == Some((inbox.clone(), HOOK.into())),
+        json!({ "connect": r.body, "state": state(), "webhook": tg.webhook() }),
+    );
+    // Telegram's deliveries, as it makes them: each answers the runs it started
+    let deliver = |update: Value, secret: Option<&str>| {
+        let extra = secret.map(|v| vec![("x-telegram-bot-api-secret-token", v.to_string())]).unwrap_or_default();
+        api.call(Call { method: "POST", url: inbox.clone(), body: Some(update.to_string().into_bytes()), content_type: Some("application/json"), extra, ..Call::default() })
+    };
+    let ran = |r: &crate::api::Reply| super::jobs::settle(api, c.owner, &name, r.body["runs"][0].as_i64().unwrap_or(0), &["succeeded", "held"], wake);
+
+    // two accounts answering one link (one of them a member's choosing, who
+    // read its nonce in the inbox): no one is proposed, and its owner pairs again
+    let r = api.op(c.owner, &name, "pair", "pair-raced", json!({}))?;
+    let raced = r.body["result"]["link"].as_str().unwrap_or("").rsplit("start=").next().unwrap_or("").to_string();
+    let first = ran(&deliver(Telegram::message(10, STRANGER, "Paul", &format!("/start {raced}")), Some(HOOK))?);
+    let second = ran(&deliver(Telegram::message(11, PAUL, "Paul", &format!("/start {raced}")), Some(HOOK))?);
+    s.ok(
+        "two accounts answering one pairing link propose no one",
+        first["output"]["proposed"] == true && second["output"]["conflict"] == true && state()["pairing"].is_null() && state()["paired"].is_null(),
+        json!({ "first": first, "second": second, "state": state() }),
+    );
+    // pairing: a single-use link, the account that answers it proposed, its owner confirming
+    let r = api.op(c.owner, &name, "pair", "pair", json!({}))?;
+    let link = r.body["result"]["link"].as_str().unwrap_or("").to_string();
+    let nonce = link.rsplit("start=").next().unwrap_or("").to_string();
+    s.ok("its owner's pair makes a link that opens the bot", r.status == 200 && link.starts_with(&format!("https://t.me/{BOT_USERNAME}?start=")) && nonce.len() == 32, &r);
+    let wrong = deliver(Telegram::message(1, STRANGER, "Mallory", &format!("/start {}", "0".repeat(32))), Some(HOOK))?;
+    let wrong_run = ran(&wrong);
+    let answered = deliver(Telegram::message(2, PAUL, "Paul", &format!("/start {nonce}")), Some(HOOK))?;
+    let answered_run = ran(&answered);
+    let st = state();
+    s.ok(
+        "the account that answers its link is proposed, not paired; another nonce proposes no one",
+        wrong_run["output"]["proposed"] == false && answered_run["output"]["proposed"] == true && st["pairing"]["candidate"]["user"] == PAUL && st["paired"].is_null(),
+        json!({ "wrong": wrong_run, "answered": answered_run, "state": st }),
+    );
+    let r = api.op(c.stranger, &name, "confirm", "confirm", json!({ "user": PAUL }))?;
+    s.ok("no one else confirms it", matches!(r.status, 403 | 404), &r);
+    let r = api.op(c.owner, &name, "confirm", "confirm", json!({ "user": PAUL }))?;
+    s.ok("its owner confirms it, and it is paired", r.status == 200 && state()["paired"]["name"] == "Paul", &r);
+    let again = ran(&deliver(Telegram::message(3, STRANGER, "Mallory", &format!("/start {nonce}")), Some(HOOK))?);
+    s.ok("its link, used, pairs no one else", again["output"]["proposed"] == false && state()["paired"]["name"] == "Paul", json!({ "run": again, "state": state() }));
+    let r = deliver(Telegram::message(4, PAUL, "Paul", "forged"), None)?;
+    s.ok("a delivery without the webhook's secret is refused, and starts nothing", r.status == 403, &r);
+
+    // the door: its owner binds it to their agent, which joins it as a viewer
+    let r = api.signed(c.owner, "POST", &format!("/api/f/{name}/door"), Some(&json!({ "act": "link", "agent": c.agent })))?;
+    let bound = api.signed(c.owner, "GET", &format!("/api/f/{name}/door"), None)?;
+    let role_of = |id: &str| api.signed(c.owner, "GET", &format!("/api/f/{name}/members"), None).ok().and_then(|m| m.body["members"].as_array().and_then(|l| l.iter().find(|x| x["principal"] == id).map(|x| x["role"].clone())));
+    s.ok(
+        "its owner binds it as their agent's telegram door, and the agent joins it as a viewer",
+        r.status == 200 && r.body["door"] == "telegram" && r.body["agent"] == c.agent && bound.body["bound"] == json!({ "door": "telegram", "agent": c.agent }) && role_of(c.identity) == Some(json!("viewer")),
+        format!("{r} {bound} {:?}", role_of(c.identity)),
+    );
+
+    // a direct message from the paired account: their words to their agent,
+    // asked as them, and its reply back to Telegram
+    let r = deliver(Telegram::message(5, PAUL, "Paul", "hello from telegram"), Some(HOOK))?;
+    let run = ran(&r);
+    let relayed = records(api, c.owner, &name, "chat").into_iter().find(|r| r["body"]["text"] == "hello from telegram").unwrap_or_default();
+    s.ok(
+        "a direct message from the paired account is published in the chat as its owner's, to their agent, through its telegram door",
+        run["output"]["relayed"] == true && relayed["body"]["relayed"] == json!({ "via": "telegram", "for": c.owner_id, "agent": c.agent }) && relayed["body"]["to"] == json!([c.identity]),
+        json!({ "run": run, "record": relayed }),
+    );
+    let sent = |text: &str| tg.sent().into_iter().find(|m| m["chat_id"] == PAUL && m["text"].as_str().is_some_and(|t| t.contains(text)));
+    let replied = s.eventually(wake, || sent("hello from telegram").is_some());
+    let reply = agent_replies(&records(api, c.owner, &name, "chat"), c.identity).into_iter().find(|r| r["body"]["text"].as_str().is_some_and(|t| t.contains("hello from telegram"))).unwrap_or_default();
+    let start = records(api, c.owner, &name, "work").into_iter().find(|r| r["body"]["kind"] == "turn.start" && r["body"]["turn"] == reply["body"]["turn"]).unwrap_or_default();
+    s.ok(
+        "its agent answers it asked as its owner, and the reply goes back to Telegram",
+        replied && start["body"]["asker"] == c.owner_id,
+        json!({ "sent": tg.sent(), "reply": reply, "turn.start": start }),
+    );
+    let stranger = ran(&deliver(Telegram::message(6, STRANGER, "Mallory", "let me in"), Some(HOOK))?);
+    let twice = ran(&deliver(Telegram::message(5, PAUL, "Paul", "hello from telegram"), Some(HOOK))?);
+    s.ok(
+        "a stranger's message reaches no one, and an update Telegram sends again is taken once",
+        stranger["output"]["ignored"] == "not its owner's" && twice["output"]["ignored"] == "taken already",
+        json!({ "stranger": stranger, "twice": twice }),
+    );
+    // its words before a tool call stay in the chat; a reply's file, which a
+    // viewer cannot upload, is named in its words
+    deliver(Telegram::message(12, PAUL, "Paul", "tool please"), Some(HOOK))?;
+    let tooled = s.eventually(wake, || sent("tool please").is_some());
+    s.ok("its agent's interim words are not sent to Telegram, its answer is", tooled && sent("Let me look.").is_none(), json!(tg.sent()));
+    deliver(Telegram::message(13, PAUL, "Paul", "draw me something"), Some(HOOK))?;
+    let named = s.eventually(wake, || sent("could not be attached").is_some());
+    s.ok("a reply whose file a viewer cannot attach goes with its words, saying so", named, json!(tg.sent()));
+
+    // only its owner edits it: the agent, acting for its owner, sets none of
+    // its secrets (it would know the webhook's and forge a delivery), writes
+    // it no page (one its owner opened would run as them), gets no token to
+    // push its code (a code swap would rewrite its pairing)
+    let mut pokes = 0;
+    for (n, what) in [(430, "secret"), (431, "files"), (432, "token"), (433, "seen"), (434, "propose")] {
+        let said = fetched(s, n, &format!("door poke {name} {what}"))?;
+        pokes += 1;
+        s.ok(&format!("the agent, acting for its owner, is refused an editor's {what} on its owner's connector"), said.starts_with("door refused: 403"), &said);
+    }
+    // nor shares it, as it shares its owner's other fragments (Paul,
+    // 2026-10-04): a share link would show its chat, Telegram's words
+    // included, to whoever holds it
+    for (n, what) in [(436, "visibility"), (437, "invite"), (438, "rotate")] {
+        let said = fetched(s, n, &format!("door poke {name} {what}"))?;
+        pokes += 1;
+        s.ok(&format!("the agent, acting for its owner, is refused the sharer's {what} on its owner's connector"), said.starts_with("door refused: 403") && said.contains("shares a connector"), &said);
+    }
+    let said = fetched(s, 439, &format!("door poke {name} status"))?;
+    pokes += 1;
+    s.ok("the agent, acting for its owner, is shown no share link of its owner's connector", said == "door poked status", &said);
+    // on another fragment of its owner's, no connector, it still shares
+    // for them
+    let plain = s.named(api, c.owner, "plain")?;
+    s.create(api, c.owner, &plain)?;
+    let r = api.signed(c.owner, "PUT", &format!("/api/f/{plain}/members/{}", c.identity), Some(&json!({ "role": "viewer" })))?;
+    anyhow::ensure!(r.status == 200, "the agent a viewer of its owner's fragment: {r}");
+    let mut shared = vec![];
+    for (n, what) in [(440, "visibility"), (441, "invite"), (442, "rotate"), (443, "status")] {
+        shared.push(fetched(s, n, &format!("door poke {plain} {what}"))?);
+        pokes += 1;
+    }
+    s.ok(
+        "on its owner's other fragment, no connector, the agent acting for them sets its visibility, invites, renews its share link and is shown it",
+        shared[..2] == ["door poked visibility", "door poked invite"] && shared[2..] == ["door poked rotate, its share link shown", "door poked status, its share link shown"],
+        json!(shared),
+    );
+    // nor, as itself, a viewer of it; and no one is made more than a viewer
+    // of a connector, so its members list says the role that counts
+    let made_editor = api.signed(c.owner, "PUT", &format!("/api/f/{name}/members/{}", c.identity), Some(&json!({ "role": "editor" })))?;
+    let said = fetched(s, 435, &format!("door poke {name} secret itself"))?;
+    pokes += 1;
+    s.ok(
+        "no one is made an editor of a connector, and its agent, as itself, is refused its secrets too",
+        made_editor.status == 400 && made_editor.text.contains("no editor but its owner") && role_of(c.identity) == Some(json!("viewer")) && said.starts_with("door refused: 403"),
+        format!("{made_editor} {said}"),
+    );
+
+    // its owner rotates the webhook's secret: the old one takes nothing
+    let r = api.signed(c.owner, "PUT", &format!("/api/f/{name}/secrets/TELEGRAM_WEBHOOK_SECRET"), Some(&json!({ "value": HOOK2, "hosts": ["127.0.0.1"] })))?;
+    let old = deliver(Telegram::message(21, PAUL, "Paul", "with the old secret"), Some(HOOK))?;
+    let new = ran(&deliver(Telegram::message(22, PAUL, "Paul", "with the new secret"), Some(HOOK2))?);
+    s.ok("its owner rotates the webhook's secret: the old one is refused, the new one taken", r.status == 200 && old.status == 403 && new["output"]["relayed"] == true, json!({ "old": old.status, "new": new }));
+
+    // the deployment turns Telegram off (here the test lever's stand-in, on
+    // this connector): what comes is published nowhere, nothing is sent
+    let policy = |p: Value| api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "connectors", "policy": p })));
+    anyhow::ensure!(policy(json!([{ "id": "simplex" }]))?.status == 200, "the connectors lever");
+    let before = tg.sent().len();
+    let off = ran(&deliver(Telegram::message(20, PAUL, "Paul", "while it is off"), Some(HOOK2))?);
+    let published = records(api, c.owner, &name, "chat").iter().any(|r| r["body"]["text"] == "while it is off");
+    s.ok("with Telegram off, its owner's message is published nowhere and nothing is sent", off["output"]["ignored"] == "not linked" && !published && tg.sent().len() == before, json!({ "run": off, "sent": tg.sent() }));
+    anyhow::ensure!(policy(Value::Null)?.status == 200, "the connectors lever");
+
+    // unlinked from its page (its owner's session there): the door is shut
+    // at once, and Telegram is told; its agent stays a viewer of its chat,
+    // and what it says there goes nowhere else
+    let session = api.sign_in(&Api::email_of(c.owner))?;
+    let site = format!("fragment_site={}", super::signin::site_cookie(api, &session, &name)?);
+    let page = |method: &'static str, body: Option<Value>| {
+        api.call(Call { method, url: api.site_url(&name, "__door"), body: body.map(|b| b.to_string().into_bytes()), content_type: Some("application/json"), cookie: Some(site.clone()), ..Call::default() })
+    };
+    let unlinked = page("POST", Some(json!({ "act": "unlink" })))?;
+    let seen = page("GET", None)?;
+    let after = ran(&deliver(Telegram::message(7, PAUL, "Paul", "after the unlink"), Some(HOOK2))?);
+    let published = records(api, c.owner, &name, "chat").iter().any(|r| r["body"]["text"] == "after the unlink");
+    s.ok(
+        "unlinked from its page, its owner's next message is published nowhere, and Telegram is told so",
+        unlinked.status == 200 && seen.body["bound"].is_null() && after["output"]["ignored"] == "not linked" && !published && sent("This chat isn't linked to your agent.").is_some(),
+        json!({ "unlink": unlinked.body, "bound": seen.body, "run": after, "sent": tg.sent() }),
+    );
+    let typed = api.signed(c.owner, "POST", &format!("/api/f/{name}/channels/chat"), Some(&json!({ "id": "typed-after-unlink", "body": { "text": "typed after the unlink" } })))?;
+    let answered = s.eventually(wake, || agent_replies(&records(api, c.owner, &name, "chat"), c.identity).iter().any(|r| r["body"]["text"].as_str().is_some_and(|t| t.contains("typed after the unlink"))));
+    s.ok(
+        "its agent, still a viewer there, answers on the web, and nothing goes to Telegram",
+        typed.status == 200 && role_of(c.identity) == Some(json!("viewer")) && answered && sent("typed after the unlink").is_none(),
+        json!({ "role": role_of(c.identity), "sent": tg.sent() }),
+    );
+
+    // a fork lets its binding go for good: its own code, then the template
+    // again, and it is no door
+    let r = api.signed(c.owner, "POST", &format!("/api/f/{name}/door"), Some(&json!({ "act": "link", "agent": c.agent })))?;
+    anyhow::ensure!(r.status == 200, "bound again: {r}");
+    let own = br#"import { DurableObject } from "cloudflare:workers";
+export class App extends DurableObject { noop() { return {}; } }
+"#;
+    s.commit(&made.body, &[("fragment.json", Some(br#"{"operations":{"noop":{"kind":"mutation"}}}"#.as_slice())), ("app.mjs", Some(own.as_slice()))]);
+    s.deploy(&made.body);
+    let unmade = s.eventually(wake, || api.signed(c.owner, "GET", &format!("/api/f/{name}/door"), None).is_ok_and(|r| r.body["bound"].is_null()));
+    s.commit(&made.body, &[("fragment.json", Some(br#"{"template":"telegram"}"#.as_slice())), ("app.mjs", None)]);
+    s.deploy(&made.body);
+    let r = api.signed(c.owner, "POST", &format!("/api/f/{name}/door"), Some(&json!({ "act": "link", "agent": c.agent })))?;
+    let later = ran(&deliver(Telegram::message(30, PAUL, "Paul", "after the fork"), Some(HOOK2))?);
+    let published = records(api, c.owner, &name, "chat").iter().any(|r| r["body"]["text"] == "after the fork");
+    s.ok(
+        "a fork lets its binding go, and with its template again it is no door: nothing it publishes is its owner's",
+        unmade && r.status == 403 && r.text.contains("is no connector") && later["output"]["ignored"] == "not linked" && !published,
+        json!({ "bind": r.body, "run": later }),
+    );
+    Ok(pokes)
+}
+
 /// The XFTP relay (fragment_core::relay), through the stub's `relay`
 /// commands: a host it does not carry is refused before anything is
 /// opened, and an app's answer that carries the relay's own headers (an
@@ -881,9 +1121,9 @@ fn door_checks(s: &mut Suite, api: &Api, c: &Doors, fetched: &dyn Fn(&Suite, u32
         t.status == 200 && t.body["act"] == "link" && t.body["agent"] == c.agent && t.body["computer"] == c.id && signed && within,
         &t,
     );
-    let r = api.signed(c.owner, "POST", &path, Some(&json!({ "door": "telegram", "act": "link" })))?;
+    let r = api.signed(c.owner, "POST", &path, Some(&json!({ "door": "signal", "act": "link" })))?;
     s.ok("a door the deployment's connectors do not name is refused its link ticket, by the platform", r.status == 403 && r.text.contains("does not allow"), &r);
-    let r = api.signed(c.owner, "POST", &path, Some(&json!({ "door": "telegram", "act": "unlink" })))?;
+    let r = api.signed(c.owner, "POST", &path, Some(&json!({ "door": "signal", "act": "unlink" })))?;
     s.ok("and may still be unlinked: an owner closes a door the deployment no longer allows", r.status == 200 && r.body["act"] == "unlink", &r);
     let r = api.signed(c.owner, "POST", &path, Some(&json!({ "door": "../simplex", "act": "link" })))?;
     s.ok("a door that is no connector's id is 400", r.status == 400, &r);
@@ -1634,6 +1874,9 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         }
         let doors = Doors { owner: &owner, owner_id: &owner_id, stranger: &stranger, id: &id, agent: &agent_name, chat: &chat_name, identity: &identity };
         replies_so_far += door_checks(s, api, &doors, &fetched, wake)?;
+        if fakes {
+            replies_so_far += telegram_checks(s, api, &doors, &fetched, wake)?;
+        }
         replies_so_far += relay_checks(s, api, &owner, &fetched)?;
     } else {
         // a real runtime called its model to answer at all: each call went
