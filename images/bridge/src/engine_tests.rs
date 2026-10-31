@@ -3173,6 +3173,96 @@ fn a_cut_turn_is_continued_once() {
     assert_eq!(again, Step::default(), "answered again: nothing");
 }
 
+/// Goal (durability phase 4; Alex on #830): a turn its asker stopped is
+/// never continued, wherever the Stop falls against a restart. Restart: a
+/// Stop accepted while the turn ran, asked in words or waited on its card
+/// (a Stop answers both; the turn runs on until its runtime ends it), then
+/// a restart before that end: its lost end continues nothing, nor does the
+/// next life's replay of it. A Stop said after the restart, before the
+/// lost end lands (the page still shows the turn running): in the life
+/// whose state ran it, and in one rolled back to before its claim (another
+/// life's, answered `Theirs`). Valid: a Stop naming a cut turn whose
+/// continuation runs stops that.
+#[test]
+fn a_stopped_turn_is_never_continued() {
+    let stop = |w: &mut World, turn: &str| {
+        w.say_body("npub1paul", json!({ "kind": "stop", "turn": turn }));
+        w.answer_all();
+    };
+    for how in ["running", "asking in words", "waiting on its card"] {
+        let mut w = World::new(&["juniper"]);
+        w.start(None);
+        let t = w.say("npub1paul", "deploy the site");
+        w.answer_all();
+        match how {
+            "asking in words" => w.ask_in_words(&t),
+            "waiting on its card" => w.ask(&t),
+            _ => {}
+        }
+        w.answer_all();
+        stop(&mut w, &t);
+        assert!(w.held[&t].stop, "{how}: its runtime is told to stop");
+        let state = w.latest();
+        w.crash(false);
+        w.start(state);
+        let owing = w.latest();
+        w.answer_all();
+        // replay: a life from before that end's answer posts it again
+        w.crash(false);
+        w.start(owing);
+        w.answer_all();
+        assert_eq!(w.ends(&t).len(), 1, "{how}: it ends once");
+        assert_eq!(w.runs_of(&records::continuation_id(&t)), 0, "{how}: a stopped turn is never continued");
+        w.check().unwrap();
+    }
+
+    // a Stop after the restart, before its lost end lands
+    let mut w = World::new(&["juniper"]);
+    w.start(None);
+    let t = w.say("npub1paul", "deploy the site");
+    w.answer_all();
+    let state = w.latest();
+    w.crash(false);
+    w.start(state);
+    stop(&mut w, &t);
+    assert_eq!(w.runs_of(&records::continuation_id(&t)), 0, "stopped before its lost end was this life's");
+    w.check().unwrap();
+
+    // the same, in a life rolled back to before its claim: another life's
+    let mut w = World::new(&["juniper"]);
+    w.start_unconnected(None);
+    let t = w.say("npub1paul", "deploy the site");
+    let queued = w.latest();
+    w.connect();
+    w.answer_all();
+    assert_eq!(w.runs_of(&t), 1);
+    w.crash(false);
+    w.start(queued);
+    assert!(w.answer_one(), "its claim, answered Theirs");
+    stop(&mut w, &t);
+    assert_eq!(w.runs_of(&t), 1, "never run again");
+    assert_eq!(w.runs_of(&records::continuation_id(&t)), 0, "stopped before its lost end was this life's");
+    w.check().unwrap();
+
+    // valid: a cut turn's Stop stops the continuation running in its place
+    let mut w = World::new(&["juniper"]);
+    w.start(None);
+    let t = w.say("npub1paul", "deploy the site");
+    w.answer_all();
+    let state = w.latest();
+    w.crash(false);
+    w.start(state);
+    w.answer_all();
+    let c = records::continuation_id(&t);
+    assert_eq!(w.runs_of(&c), 1);
+    stop(&mut w, &t);
+    assert!(w.held[&c].stop, "its continuation is told to stop");
+    w.end(&c, Outcome::Stopped);
+    w.settle();
+    assert_eq!(w.ends(&c)[0]["outcome"], "stopped", "{:?}", w.ends(&c));
+    w.check().unwrap();
+}
+
 /// Seeds the simulation runs, events in each, and messages said in each.
 const SIM_SEEDS: u64 = 120;
 const SIM_EVENTS: usize = 400;

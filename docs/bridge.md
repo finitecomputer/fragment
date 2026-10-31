@@ -570,13 +570,20 @@ again by itself, so nobody types "continue", and never run twice.
   is refused (409) and nothing is continued: a rolled-back disk never
   continues a turn that finished.
 - **Not continued.** An ask's turn (its asker is answered `lost`), a
-  command, a turn this life knows was waiting on its person (asking in
-  words, or on a card: their answer is its next turn, above, "A card
-  outlives its turn (P6)"), and a continuation itself: one continuation,
+  command, a turn its asker stopped, a turn this life knows was waiting
+  on its person (asking in words, or on a card: their answer is its next
+  turn, above, "A card outlives its turn (P6)"), and a continuation
+  itself: one continuation,
   and a continuation a restart cuts is told to the turn after it, as any
   cut turn is (Pi's restart limit, ending visibly). A state older than
   the turn cannot know it waited on its person; its continuation may ask
   again.
+- **A Stop is never undone.** A Stop this life accepted (`stop_requested`)
+  holds through a restart before the runtime's end, its question or card
+  included (a Stop answers them). One said after the restart, before the
+  lost end lands (the page still shows the turn running; a rolled-back
+  life reads it again), cancels the continuation; one naming a cut turn
+  whose continuation is queued or running stops that.
 - **What it is.** A turn queued in the cut turn's place (its order),
   with its cause, asker and depth, whose id is the cut turn's
   continuation's (`records::continuation_id`), so its claim makes it one
@@ -594,6 +601,7 @@ again by itself, so nobody types "continue", and never run twice.
 - A state holding a continuation, or a turn to be continued, is format 4,
   which a bridge before continuations sets aside.
 - Proven in `a_cut_turn_is_continued_once`,
+  `a_stopped_turn_is_never_continued`,
   `a_claim_another_life_holds_ends_the_turn` and the simulation's
   continuation invariants (engine_tests.rs: continued once, never a
   continuation's continuation, only a turn the journal ended as lost),

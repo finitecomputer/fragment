@@ -206,8 +206,8 @@ file is the newer word, and decision 18 points here.
   this life's own, is queued once more in its place as its continuation:
   said by the computer, told what was cut (each call it asked for with no
   end among it, once the intent records land), never rerunning a call,
-  and never continued twice (docs/bridge.md, "A cut turn is continued
-  once").
+  never continued twice, and never once its asker stopped it
+  (docs/bridge.md, "A cut turn is continued once").
 - **An update is told, never forced (2026-10-09).** Paul: every deploy
   needed him to restart his computer, which a person would not know to
   do. A computer awake on another image than its next start runs (the

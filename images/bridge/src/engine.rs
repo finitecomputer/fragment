@@ -116,10 +116,11 @@ fn version_of(state: &State) -> u32 {
 }
 
 /// A turn a restart cut may be continued (`Engine::continue_turn`): never
-/// a continuation (one continuation, ending visibly), an ask's turn (its
-/// asker is answered `lost`) or a command.
+/// a continuation (one continuation, ending visibly), one its asker stopped
+/// (a Stop this life accepted: the work is cancelled, never picked up
+/// again), an ask's turn (its asker is answered `lost`) or a command.
 fn continued(t: &Turn) -> bool {
-    t.continues.is_none() && t.ret.is_none() && !t.command
+    t.continues.is_none() && !t.stop_requested && t.ret.is_none() && !t.command
 }
 
 /// Why an agent's hand-off is refused a turn past the hops (an ask, which
@@ -1671,10 +1672,13 @@ impl Engine {
             .turns
             .values()
             .filter(|t| t.agent == agent.fragment && t.fragment == fragment)
-            .find(|t| match named {
-                Some(id) => t.id == id,
+            .filter(|t| match named {
+                // a cut turn's Stop is its continuation's too (a page that
+                // showed the cut turn running names it)
+                Some(id) => t.id == id || t.continues.as_deref() == Some(id),
                 None => t.active(),
             })
+            .min_by_key(|t| t.phase == Phase::Ended)
             .map(|t| (t.id.clone(), self.who_answers(t), t.phase));
         let Some((id, answers, phase)) = target else {
             crate::ev!("stop.ignored", { "agent": agent.fragment, "fragment": fragment, "why": "no such turn" });
@@ -1691,7 +1695,18 @@ impl Engine {
                 self.end_unrun(&id, Outcome::Stopped, false);
                 self.pump(&agent.fragment, fragment);
             }
-            Phase::Ended => crate::ev!("stop.ignored", { "turn": id, "why": "it is over" }),
+            Phase::Ended => {
+                // a restart cut it, and its lost end is not yet this life's
+                // (`posted`): stopped, it is never continued
+                let t = self.state.turns.get_mut(&id).expect("found");
+                if t.continue_after {
+                    t.continue_after = false;
+                    self.dirty = true;
+                    crate::ev!("turn.uncontinued", { "turn": id, "why": "its asker stopped it" });
+                } else {
+                    crate::ev!("stop.ignored", { "turn": id, "why": "it is over" });
+                }
+            }
             Phase::Running | Phase::Waiting => self.stop_running(&agent.fragment, fragment, &id),
         }
     }
