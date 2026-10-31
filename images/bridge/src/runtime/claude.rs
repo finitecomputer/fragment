@@ -622,7 +622,7 @@ async fn on_line(t: &mut Turn, v: &Value, p: &mut Proc, events: &mpsc::Sender<Ev
                 let failed = b["is_error"] == true;
                 let status = if failed && t.stopping { ToolStatus::Cancelled } else if failed { ToolStatus::Failed } else { ToolStatus::Completed };
                 let (args, category) = shown(&name, &input);
-                let step = Step { tool: name, args, ok: !failed, excerpt: String::new(), category, evidence: Some(ToolEvidence { tool_call_id: id, status, duration_ms: u64::try_from(at.elapsed().as_millis()).unwrap_or(u64::MAX) }) };
+                let step = Step { tool: name, args, ok: !failed, excerpt: String::new(), category, evidence: Some(ToolEvidence { tool_call_id: id, status, duration_ms: u64::try_from(at.elapsed().as_millis()).unwrap_or(u64::MAX), response: None }) };
                 let _ = events.send(Event::Step { turn: t.id.clone(), step }).await;
             }
         }
