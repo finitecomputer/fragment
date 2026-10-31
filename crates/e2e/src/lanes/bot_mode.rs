@@ -1,20 +1,21 @@
-//! Hermes' Bot Mode with two real agents (docs/computers.md, "Bot Mode in
-//! our Hermes image"): on a branch preview, a Hermes computer running two
-//! agents of one person, their real model, and Chrome. The hosted lane runs
-//! it by name (`cargo xtask e2e --hosted … --only bot-mode`); a local run
-//! never has a real agent (needs.rs `RealAgent`): the images' Docker lane
-//! runs the same path on the scripted model (`bots_message_each_other`).
+//! Two real agents asking each other (docs/computers.md, "Teammates in our
+//! Hermes image"; docs/chat-records.md, "An ask"): on a branch preview, a
+//! Hermes computer running two agents of one person, their real model, and
+//! Chrome. The hosted lane runs it by name (`cargo xtask e2e --hosted …
+//! --only bot-mode`); a local run never has a real agent (needs.rs
+//! `RealAgent`): the images' Docker lane runs the same path on the scripted
+//! model (`teammates_ask_each_other`).
 //!
 //! An e2e person gets two agents, each made as the shell makes one (its
 //! fragment, its SOUL, its own chat `<label>-chat`): Juniper, who talks
 //! with them, and Maple, who builds apps. Each is said hello to in its own
-//! chat, its Bot Chat. Then Juniper is asked to have Maple make and publish
-//! a todo app and show it in her browser: Juniper's turn runs
-//! `message_agent`; the image posts the message into Maple's chat as
-//! Juniper, naming Maple; Maple's turn there makes the app, which goes
-//! live, and opens it on her desktop; and her answer comes back to Juniper,
-//! who tells the person in her own chat, once: what either says after (a
-//! second relay, an acknowledgement) is counted as redundant. Both agents
+//! chat. Then Juniper is asked to have Maple make and publish a todo app
+//! and show it in her browser: Juniper's turn runs `fragment_ask`, which
+//! asks Maple in a chat of the two and their owner, made for it; Maple's
+//! turn there makes the app, which goes live, and opens it on her desktop;
+//! and her answer comes back to Juniper as a new turn of hers, who tells
+//! the person in her own chat, once: what either says after (a second
+//! relay, an acknowledgement) is counted as redundant. Both agents
 //! are on the tier the shell makes one on. Both chats and both screens are
 //! shot for the evidence (Maple's screen checked to connect). Then the
 //! computer sleeps (`--sweep` deletes the run's `e2e-<run>-` fragments).
@@ -129,7 +130,6 @@ pub fn bot_mode(s: &mut Suite, api: &Api) -> Result<()> {
     let skills = api.create_with(&keys, json!({ "label": s.name("skills"), "template": "skills" }))?;
     let made = api.signed(&keys, "POST", "/api/computers", Some(&json!({})))?;
     let id = made.body["computer"].as_str().unwrap_or("").to_string();
-    super::computers::on_candidate(s, api, &keys, &id)?;
     let (juniper, juniper_id, jchat) = agent(api, &keys, &id, &s.name("juniper"), "Juniper", &format!("You are Juniper, {email}'s agent. You talk with {email} and hand building work to your teammates.\n"))?;
     let (maple, maple_id, mchat) = agent(api, &keys, &id, &s.name("maple"), "Maple", &format!("You are Maple, {email}'s builder. You make and publish small web apps (fragments) with the fragment CLI, and show them in the browser on your desktop.\n"))?;
     let _ = api.signed(&keys, "POST", &format!("/api/computers/{id}/wake"), Some(&json!({})));
@@ -153,7 +153,7 @@ pub fn bot_mode(s: &mut Suite, api: &Api) -> Result<()> {
         return Ok(());
     }
 
-    // each agent's first turn in its own chat, its Bot Chat
+    // each agent's first turn in its own chat
     for (chat, agent, n) in [(&mchat, &maple, "1"), (&jchat, &juniper, "2")] {
         let (hello, _) = say(api, &keys, chat, agent, &format!("bot-hello-{n}"), "hello")?;
         let end = within(REPLY, || ended(api, &keys, chat, &hello));
@@ -164,34 +164,46 @@ pub fn bot_mode(s: &mut Suite, api: &Api) -> Result<()> {
     let calls = paid(api, &owner_id);
     let app_label = s.name("todo");
     let ask = format!(
-        "Use message_agent to ask Maple to make me a todo app from the todo template called {app_label}, deploy it, and open it in the browser on her desktop. Then tell me what she says when she answers."
+        "Use fragment_ask to ask Maple to make me a todo app from the todo template called {app_label}, deploy it, and open it in the browser on her desktop. Then tell me what she says when she answers."
     );
     let (turn, asked_at) = say(api, &keys, &jchat, &juniper, "bot-ask", &ask)?;
     let t1 = Instant::now();
     let jend = within(REPLY, || ended(api, &keys, &jchat, &turn));
     let jwork: Vec<Value> = work_of(&records(api, &keys, &jchat, "work"), &turn).into_iter().map(|r| r["body"].clone()).collect();
-    // a step's tool is as Hermes' progress line names it (`message_agent...`)
-    let messaged = jwork.iter().any(|w| w["kind"] == "turn.step" && w["tool"].as_str().is_some_and(|t| t.starts_with("message_agent")));
-    s.ok("asked to, Juniper's turn runs message_agent (model-dependent)", messaged && jend.is_some(), json!({ "work": jwork }));
+    // a step's tool is as Hermes' progress line names it (`fragment_ask...`)
+    let messaged = jwork.iter().any(|w| w["kind"] == "turn.step" && w["tool"].as_str().is_some_and(|t| t.starts_with("fragment_ask")));
+    s.ok("asked to, Juniper's turn runs fragment_ask (model-dependent)", messaged && jend.is_some(), json!({ "work": jwork }));
 
-    // the message, in Maple's own chat, as Juniper's, naming Maple
-    let handed = within(REPLY, || records(api, &keys, &mchat, "chat").into_iter().find(|r| r["principal"] == juniper_id.as_str() && r["body"]["to"] == json!([maple_id])));
-    println!("      (asked to Juniper's message in Maple's chat: {:.1?})", t1.elapsed());
+    // the question, in a chat of the two made for it, as Juniper's, naming
+    // Maple, to come back to Juniper's chat
+    let theirs = || -> Option<String> {
+        let listed = api.signed(&keys, "GET", "/api/fragments", None).ok()?;
+        let both = |chat: &str| {
+            let members = api.signed(&keys, "GET", &format!("/api/f/{chat}/members"), None).map(|r| r.body["members"].to_string()).unwrap_or_default();
+            members.contains(juniper_id.as_str()) && members.contains(maple_id.as_str())
+        };
+        listed.body["fragments"].as_array()?.iter().filter(|f| f["kind"] == "chat").filter_map(|f| f["name"].as_str()).find(|n| *n != jchat && *n != mchat && both(n)).map(str::to_string)
+    };
+    let handed = within(REPLY, || {
+        let pair = theirs()?;
+        records(api, &keys, &pair, "chat").into_iter().find(|r| r["principal"] == juniper_id.as_str() && r["body"]["to"] == json!([maple_id])).map(|r| (pair, r))
+    });
+    println!("      (asked to Juniper's question in their chat: {:.1?})", t1.elapsed());
     s.ok(
-        "the message is in Maple's own chat, posted as Juniper and naming Maple, with Hermes' attribution",
-        handed.as_ref().is_some_and(|r| r["body"]["text"].as_str().is_some_and(|t| t.starts_with("Message from"))),
-        handed.clone().unwrap_or(Value::Null),
+        "the question is in a chat of the two, posted as Juniper and naming Maple, to come back to Juniper's chat",
+        handed.as_ref().is_some_and(|(_, r)| r["body"]["return_to"] == jchat.as_str()),
+        handed.as_ref().map(|(_, r)| r.clone()).unwrap_or(Value::Null),
     );
-    let Some(handed) = handed else {
+    let Some((pair, handed)) = handed else {
         let _ = api.signed(&keys, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({})));
         return Ok(());
     };
-    let mturn = turn_of(&maple, &mchat, "chat", handed["seq"].as_i64().unwrap_or(0));
-    let mend = within(WORK, || ended(api, &keys, &mchat, &mturn));
-    let mwork: Vec<Value> = work_of(&records(api, &keys, &mchat, "work"), &mturn).into_iter().map(|r| r["body"].clone()).collect();
-    let manswer: Vec<String> = agent_replies(&records(api, &keys, &mchat, "chat"), &maple_id).into_iter().filter(|r| r["body"]["turn"] == mturn.as_str()).filter_map(|r| r["body"]["text"].as_str().map(str::to_string)).collect();
+    let mturn = turn_of(&maple, &pair, "chat", handed["seq"].as_i64().unwrap_or(0));
+    let mend = within(WORK, || ended(api, &keys, &pair, &mturn));
+    let mwork: Vec<Value> = work_of(&records(api, &keys, &pair, "work"), &mturn).into_iter().map(|r| r["body"].clone()).collect();
+    let manswer: Vec<String> = agent_replies(&records(api, &keys, &pair, "chat"), &maple_id).into_iter().filter(|r| r["body"]["turn"] == mturn.as_str()).filter_map(|r| r["body"]["text"].as_str().map(str::to_string)).collect();
     println!("      (Maple's turn: {:.1?}, steps {:?})", t1.elapsed(), mwork.iter().filter(|w| w["kind"] == "turn.step").map(|w| w["tool"].clone()).collect::<Vec<_>>());
-    s.ok("Maple takes it as a turn of hers in her chat, and answers there (model-dependent)", mend.is_some() && !manswer.is_empty(), json!({ "end": mend, "answer": manswer }));
+    s.ok("Maple takes it as a turn of hers in their chat, and answers there (model-dependent)", mend.is_some() && !manswer.is_empty(), json!({ "end": mend, "answer": manswer }));
     let live = within(REPLY, || live_app(api, &keys, &app_label));
     s.ok(&format!("the app {app_label} is theirs and live (model-dependent)"), live.is_some(), live.clone().unwrap_or(Value::Null));
 
@@ -204,7 +216,7 @@ pub fn bot_mode(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("Maple's answer comes back to Juniper, who tells the person in her own chat (model-dependent)", told.is_some(), told.clone().unwrap_or_default());
 
     // each says the answer once: Juniper relays it once in her chat, and
-    // Maple says nothing more in hers after answering (what they said
+    // Maple says nothing more in theirs after answering (what they said
     // after it is counted, once both chats have been quiet a while)
     if told.is_some() {
         std::thread::sleep(SETTLE);
@@ -213,13 +225,13 @@ pub fn bot_mode(s: &mut Suite, api: &Api) -> Result<()> {
         agent_replies(&records(api, &keys, chat, "chat"), agent).into_iter().filter(|r| r["body"]["turn"] != not && r["seq"].as_i64().is_some_and(|q| q > since)).filter_map(|r| r["body"]["text"].as_str().map(str::to_string)).collect()
     };
     let relays = after(&jchat, &juniper_id, asked_at, &turn);
-    let more = after(&mchat, &maple_id, handed["seq"].as_i64().unwrap_or(0), &mturn);
-    let back = mwork.iter().filter(|w| w["kind"] == "turn.step" && w["tool"].as_str().is_some_and(|t| t.starts_with("message_agent"))).count();
+    let more = after(&pair, &maple_id, handed["seq"].as_i64().unwrap_or(0), &mturn);
+    let back = mwork.iter().filter(|w| w["kind"] == "turn.step" && w["tool"].as_str().is_some_and(|t| t.starts_with("fragment_ask"))).count();
     let redundant = relays.len().saturating_sub(1) + more.len();
-    println!("      (after the ask: Juniper said {} in her chat, 1 wanted; Maple said {} more in hers, 0 wanted; Maple messaged Juniper back {back} times; {redundant} redundant)", relays.len(), more.len());
+    println!("      (after the ask: Juniper said {} in her chat, 1 wanted; Maple said {} more in theirs, 0 wanted; Maple asked Juniper back {back} times; {redundant} redundant)", relays.len(), more.len());
     let line = |t: &String| t.chars().take(160).collect::<String>().replace('\n', " ");
     println!("      (Juniper's: {:?}; Maple's more: {:?})", relays.iter().map(line).collect::<Vec<_>>(), more.iter().map(line).collect::<Vec<_>>());
-    s.ok("each says the answer once: Juniper relays it once, and Maple says nothing more (model-dependent)", relays.len() == 1 && more.is_empty(), json!({ "juniper": relays, "maple": more, "mapleMessagedBack": back }));
+    s.ok("each says the answer once: Juniper relays it once, and Maple says nothing more (model-dependent)", relays.len() == 1 && more.is_empty(), json!({ "juniper": relays, "maple": more, "mapleAskedBack": back }));
 
     // both chats, and both screens, as the person sees them
     let mut shots = vec![];

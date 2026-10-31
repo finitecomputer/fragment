@@ -23,7 +23,7 @@
 //!   `limits::LISTED_UNREAD_MAX`). A chat they never marked counts every
 //!   entry it holds. Kept beside the row, never on it (a table of its own,
 //!   which an older list gains as it starts: docs/technical-debt-ledger.md,
-//!   "Objects made before a column"), and gone with their entries when they
+//!   "Objects made before versioned schemas"), and gone with their entries when they
 //!   leave the fragment, or it is made again. An entry names no author, so a
 //!   message of their own sent from elsewhere counts too.
 //! - **Search** (docs/cloudflare-v1.md, decision 9 and lesson 12): the text
@@ -290,7 +290,7 @@ impl DurableObject for PrincipalCell {
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {
-        if let Some(refused) = crate::routed::refused(&req, crate::routed::Own::of(crate::config::Config::from_env(&self.env)), &self.raw)? {
+        if let Some(refused) = crate::routed::refused(&req, &crate::config::Config::from_env(&self.env).deploy_id)? {
             return Ok(refused);
         }
         if let Some(probed) = crate::routed::probed(&req, &self.schema)? {

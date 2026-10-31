@@ -2,7 +2,8 @@
 //! runtime to the fragment API (docs/computers.md).
 //!
 //! ```text
-//! fragment-bridge run      the bridge (BRIDGE_RUNTIME=relay|script), and
+//! fragment-bridge run      the bridge (BRIDGE_RUNTIME=relay|script, run for
+//!                          every agent that names no other runtime), and
 //!                          its screens on BRIDGE_SCREEN_LISTEN
 //! fragment-bridge version
 //! ```
@@ -18,7 +19,8 @@ use fragment_bridge::driver::{self, Config};
 use fragment_bridge::engine::Settings;
 use fragment_bridge::runtime::relay::{Relay, RelayConfig};
 use fragment_bridge::runtime::script::{Script, ScriptConfig};
-use fragment_bridge::runtime::Runtime;
+use fragment_bridge::runtime::claude::{Claude, ClaudeConfig};
+use fragment_bridge::runtime::{Runtime, Runtimes};
 use fragment_bridge::{ev, limits, screen};
 
 fn env(name: &str) -> Option<String> {
@@ -41,6 +43,31 @@ fn parse_ms(name: &str, default: u64) -> u64 {
     }
 }
 
+/// The runtimes the bridge runs: the default (`runtime()`), and Claude Code
+/// for agents whose `agent.json` names `claude`, only where the image sets
+/// `BRIDGE_CLAUDE_BIN` (docs/bridge.md, "The Claude runtime").
+fn runtimes() -> Runtimes {
+    let r = Runtimes::from(runtime());
+    let Some(bin) = env("BRIDGE_CLAUDE_BIN") else { return r };
+    let run_as = env("BRIDGE_CLAUDE_USER").map(|u| {
+        let (uid, gid) = u.split_once(':').unwrap_or_else(|| fail("BRIDGE_CLAUDE_USER is uid:gid"));
+        (uid.parse().unwrap_or_else(|_| fail("BRIDGE_CLAUDE_USER's uid is a number")), gid.parse().unwrap_or_else(|_| fail("BRIDGE_CLAUDE_USER's gid is a number")))
+    });
+    let config = ClaudeConfig {
+        bin: PathBuf::from(bin),
+        config_dir: PathBuf::from(env_or("BRIDGE_CLAUDE_CONFIG_DIR", "/data/claude")),
+        work_dir: PathBuf::from(env_or("BRIDGE_CLAUDE_WORK_DIR", "/data/work")),
+        state_dir: PathBuf::from(env_or("BRIDGE_CLAUDE_STATE_DIR", "/data/bridge/claude")),
+        model: env("BRIDGE_CLAUDE_MODEL"),
+        idle: Duration::from_millis(parse_ms("BRIDGE_CLAUDE_IDLE_MS", 300_000)),
+        drain: Duration::from_millis(fragment_bridge::runtime::claude::DRAIN_MS_DEFAULT),
+        run_as,
+    };
+    r.with("claude", Box::new(Claude { config }))
+}
+
+/// The runtime agents that name none run (`runtime::DEFAULT`): Hermes'
+/// Relay, or the stub's scripted agent standing in for it.
 fn runtime() -> Box<dyn Runtime> {
     match env_or("BRIDGE_RUNTIME", "relay").as_str() {
         "relay" => {
@@ -155,7 +182,7 @@ async fn main() {
                 simplex: simplex_config(),
             };
             ev!("bridge.boot", { "computer": env("FRAGMENT_COMPUTER"), "image": env("FRAGMENT_IMAGE"), "restorePending": cfg.restore_pending, "agentsFile": cfg.agents_file.as_ref().map(|p| p.display().to_string()), "simplex": cfg.simplex.is_some() });
-            let ran = driver::run(cfg, runtime(), stop).await;
+            let ran = driver::run(cfg, runtimes(), stop).await;
             // its SimpleX cores stopped and reaped first, within the shutdown's bound
             fragment_bridge::simplex::run::stop_cores(Duration::from_millis(limits::SHUTDOWN_MS_MAX / 2)).await;
             match ran {

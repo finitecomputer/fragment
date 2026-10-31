@@ -609,6 +609,14 @@ fn org_credit(s: &mut Suite, api: &Api) -> Result<()> {
         moved.push(answer(api, who, r.body["seat"]["id"].as_str().unwrap_or(""), "accept")?.status);
     }
     let control_gone = s.eventually(PUSHED, || api.signed(&s.operator, "GET", &format!("/api/admin/orgs/{yorg}"), None).is_ok_and(|r| r.status == 404));
+    // a billing admin adds people to the org as its content admins do (Paul,
+    // 2026-10-31): a seat accepted there puts its holder in its content,
+    // the join logged as theirs
+    let content = api.signed(&s.operator, "GET", &format!("/api/admin/orgs/{org}/content"), None)?.body;
+    let zed_id = api.identity(&zed)?;
+    let in_content = content["people"].as_array().is_some_and(|p| p.iter().any(|x| x["person"] == zed_id.as_str() && x["admin"] == false));
+    let joined = content["log"].as_array().is_some_and(|l| l.iter().any(|e| e["action"] == "joined" && e["subject"] == zed_id.as_str() && e["detail"]["by"] == "seat"));
+    s.ok("a seat a billing admin offered, accepted, puts its holder in the org's content, the join logged as theirs", in_content && joined, &content);
     let kept = api.signed(&s.operator, "GET", &format!("/api/admin/orgs/{zorg}"), None)?;
     let none_yet = api.signed(&s.operator, "GET", &format!("/api/admin/orgs/{zorg}/ledger"), None)?;
     s.ok(

@@ -101,7 +101,6 @@ pub(crate) struct OffboardCall {
     pub by: By,
     pub org: String,
     pub person: String,
-    pub expected_epoch: u64,
     pub request: String,
 }
 
@@ -112,9 +111,9 @@ impl Call for OffboardCall {
 
 /// `POST /content/enroll`: `person` comes into `org`'s content as they
 /// come into one of its fragments (their yes to an invite of `invited_at`,
-/// or a content admin's own add): their epoch there, the fragment's to
-/// bind their membership to. Platform code's alone (a fragment's). An
-/// invite made before they last left admits them no more.
+/// or a content admin's own add), if not in it already. Platform code's
+/// alone (a fragment's). An invite made before they last left admits them
+/// no more.
 #[derive(Serialize, Deserialize)]
 pub(crate) struct Enroll {
     pub org: String,
@@ -122,18 +121,13 @@ pub(crate) struct Enroll {
     pub invited_at: Option<i64>,
 }
 
-#[derive(Serialize, Deserialize)]
-pub(crate) struct Enrolled {
-    pub epoch: u64,
-}
-
 impl Call for Enroll {
     const PATH: &'static str = "/content/enroll";
-    type Answer = Enrolled;
+    type Answer = ();
 }
 
 /// `POST /content/places`: which of `people` are in `org`'s content now,
-/// each at their epoch: what an org's fragment checks its retained member
+/// each since when: what an org's fragment checks its retained member
 /// rows against where no request carries the person's place (its
 /// deliveries, its members' lists, an admission; Alex's review).
 /// Platform code's alone (a fragment's).
@@ -145,7 +139,7 @@ pub(crate) struct PlacesNow {
 
 impl Call for PlacesNow {
     const PATH: &'static str = "/content/places";
-    type Answer = std::collections::BTreeMap<String, u64>;
+    type Answer = std::collections::BTreeMap<String, i64>;
 }
 
 /// The people a fragment asks about at once, at most: a batch of its
@@ -219,43 +213,43 @@ impl Tx {
         Ok(self.row::<Row>("SELECT admin FROM org_content WHERE org = ? AND person = ?", vec![org.into(), person.into()])?.map(|r| r.admin != 0))
     }
 
-    /// `person`'s place in `org`'s content, and when they last left it.
-    fn place_of(&self, org: &str, person: &str) -> CellResult<Option<(Place, Option<i64>)>> {
+    /// `person`'s place in `org`'s content, if they are in it.
+    fn place_of(&self, org: &str, person: &str) -> CellResult<Option<Place>> {
         #[derive(Deserialize)]
         struct Row {
-            epoch: u64,
-            active: i64,
             admin: i64,
-            left_at: Option<i64>,
+            since: i64,
         }
-        let row = self.row::<Row>("SELECT epoch, active, admin, left_at FROM org_content WHERE org = ? AND person = ?", vec![org.into(), person.into()])?;
-        Ok(row.map(|r| (Place { epoch: r.epoch, active: r.active != 0, admin: r.admin != 0 }, r.left_at)))
+        let row = self.row::<Row>("SELECT admin, since FROM org_content WHERE org = ? AND person = ?", vec![org.into(), person.into()])?;
+        Ok(row.map(|r| Place { admin: r.admin != 0, since: r.since }))
     }
 
-    /// `person`'s place written, `left_at` now when they leave, and the
-    /// bound on the orgs' content they are in at once when they come in.
-    fn write_place(&self, org: &str, person: &str, was: Option<Place>, p: Place, now: i64) -> CellResult<()> {
-        if p.active && !was.is_some_and(|w| w.active) {
-            let places = self.count("SELECT COUNT(*) AS n FROM org_content WHERE person = ? AND active = 1", vec![person.into()])?;
+    /// When `person` was last offboarded from `org`'s content, if ever: its
+    /// governance log's entry (an offer or an invite made before it admits
+    /// them no more).
+    fn left_at(&self, org: &str, person: &str) -> CellResult<Option<i64>> {
+        #[derive(Deserialize)]
+        struct Row {
+            at: Option<i64>,
+        }
+        let row = self.row::<Row>("SELECT MAX(at) AS at FROM org_governance WHERE org = ? AND action = 'offboarded' AND subject = ?", vec![org.into(), person.into()])?;
+        Ok(row.and_then(|r| r.at))
+    }
+
+    /// `person` in `org`'s content from `now` (an admin, if `admin`), or,
+    /// in it already, made an admin when `admin`; a newcomer within the
+    /// bound on the orgs' content a person is in at once.
+    fn join(&self, org: &str, person: &str, admin: bool, now: i64) -> CellResult<()> {
+        if self.place_of(org, person)?.is_none() {
+            let places = self.count("SELECT COUNT(*) AS n FROM org_content WHERE person = ?", vec![person.into()])?;
             if places >= governance::ORGS_PER_PERSON_MAX {
                 return Err(CellError::invalid(format!("a person is in at most {} orgs' content", governance::ORGS_PER_PERSON_MAX)));
             }
         }
-        let left = was.is_some_and(|w| w.active) && !p.active;
         self.exec(
-            "INSERT INTO org_content (org, person, epoch, active, admin, since, left_at) VALUES (?, ?, ?, ?, ?, ?, NULL)
-             ON CONFLICT (org, person) DO UPDATE SET epoch = excluded.epoch, active = excluded.active, admin = excluded.admin,
-               since = CASE WHEN org_content.active = 0 AND excluded.active = 1 THEN excluded.since ELSE org_content.since END,
-               left_at = CASE WHEN ? THEN excluded.since ELSE org_content.left_at END",
-            vec![
-                org.into(),
-                person.into(),
-                SqlStorageValue::Integer(i64::try_from(p.epoch).expect("an epoch fits SQLite's integers")),
-                SqlStorageValue::Integer(i64::from(p.active)),
-                SqlStorageValue::Integer(i64::from(p.admin)),
-                SqlStorageValue::Integer(now),
-                SqlStorageValue::Integer(i64::from(left)),
-            ],
+            "INSERT INTO org_content (org, person, admin, since) VALUES (?, ?, ?, ?)
+             ON CONFLICT (org, person) DO UPDATE SET admin = MAX(org_content.admin, excluded.admin)",
+            vec![org.into(), person.into(), SqlStorageValue::Integer(i64::from(admin)), SqlStorageValue::Integer(now)],
         )
     }
 
@@ -263,8 +257,14 @@ impl Tx {
         self.count("SELECT COUNT(*) AS n FROM org_content WHERE org = ? AND admin = 1", vec![org.into()])
     }
 
+    /// Whether `org` has had content admins (none: 0): one now, or a place
+    /// accepted ever (its log). Who pays offers its first while none. Its
+    /// seat holders, in its content too (`seat_taken`), are no admins.
     fn people(&self, org: &str) -> CellResult<u64> {
-        self.count("SELECT COUNT(*) AS n FROM org_content WHERE org = ?", vec![org.into()])
+        self.count(
+            "SELECT (SELECT COUNT(*) FROM org_content WHERE org = ?1 AND admin = 1) + (SELECT COUNT(*) FROM org_governance WHERE org = ?1 AND action = 'admin-accepted') AS n",
+            vec![org.into()],
+        )
     }
 
     /// `org`'s offers past their time, marked expired.
@@ -554,9 +554,8 @@ impl RegistryCell {
                     let now_is = Now { people: tx.people(&org)?, admins: tx.admins(&org)?, offerer_stands };
                     governance::grounds_hold(grounds, now_is).map_err(refused)?;
                     // made before they last left: it admits them no more
-                    let was = tx.place_of(&org, &person)?;
-                    let place = governance::accepted(was.map(|w| w.0), was.and_then(|w| w.1), o.offered_at).map_err(refused)?;
-                    tx.write_place(&org, &person, was.map(|w| w.0), place, now)?;
+                    governance::accepted(tx.left_at(&org, &person)?, o.offered_at).map_err(refused)?;
+                    tx.join(&org, &person, true, now)?;
                 }
                 tx.exec(
                     "UPDATE org_content_offers SET answer = ?, answered_by = ?, answered_at = ? WHERE id = ? AND answer IS NULL",
@@ -648,15 +647,13 @@ impl RegistryCell {
     fn person_view(&self, org: &str, person: &str) -> CellResult<ContentPerson> {
         #[derive(Deserialize)]
         struct Row {
-            epoch: u64,
-            active: i64,
             admin: i64,
             since: i64,
         }
         let r = self
-            .row::<Row>("SELECT epoch, active, admin, since FROM org_content WHERE org = ? AND person = ?", vec![org.into(), person.into()])?
+            .row::<Row>("SELECT admin, since FROM org_content WHERE org = ? AND person = ?", vec![org.into(), person.into()])?
             .ok_or_else(|| refused(Refusal::NotIn))?;
-        Ok(ContentPerson { person: person.to_string(), email: self.email_now(person)?, epoch: r.epoch, active: r.active != 0, admin: r.admin != 0, since: r.since })
+        Ok(ContentPerson { person: person.to_string(), email: self.email_now(person)?, admin: r.admin != 0, since: r.since })
     }
 
     fn offboard(&self, b: OffboardCall) -> CellResult<ContentPerson> {
@@ -677,37 +674,52 @@ impl RegistryCell {
                 if tx.place(&org, &actor)? != Some(true) {
                     return Err(refused(Refusal::NotAdmin));
                 }
-                let (was, _) = tx.place_of(&org, &person)?.ok_or_else(|| refused(Refusal::NotIn))?;
-                let next = governance::offboarded(was, b.expected_epoch, tx.admins(&org)?).map_err(refused)?;
-                tx.write_place(&org, &person, Some(was), next, now)?;
+                governance::offboarded(tx.place_of(&org, &person)?, tx.admins(&org)?).map_err(refused)?;
+                // out of it at once: what its fragments granted them counts no more
+                tx.exec("DELETE FROM org_content WHERE org = ? AND person = ?", vec![org.as_str().into(), person.as_str().into()])?;
                 let withdrawn = tx.retire_offers(&org, &person, &actor, now)?;
-                tx.govern(&org, Logged { request: &request, actor: &actor, action: "offboarded", subject: Some(&person), detail: json!({ "from": was.epoch, "to": next.epoch, "withdrawn": withdrawn }) }, now)
+                tx.govern(&org, Logged { request: &request, actor: &actor, action: "offboarded", subject: Some(&person), detail: json!({ "withdrawn": withdrawn }) }, now)
             }
         })?;
         console_log!("{}", json!({ "event": "org.offboarded", "org": org.id, "person": b.person }));
-        self.person_view(&org.id, &b.person)
+        Ok(ContentPerson { email: self.email_now(&b.person)?, person: b.person, admin: false, since: js::now_ms() })
     }
 
-    fn places_now(&self, b: PlacesNow) -> CellResult<std::collections::BTreeMap<String, u64>> {
+    fn places_now(&self, b: PlacesNow) -> CellResult<std::collections::BTreeMap<String, i64>> {
         if b.people.len() > PLACES_ASKED_MAX {
             return Err(CellError::invalid(format!("at most {PLACES_ASKED_MAX} people's places at once")));
         }
         #[derive(Deserialize)]
         struct Row {
             person: String,
-            epoch: u64,
+            since: i64,
         }
         let mut now = std::collections::BTreeMap::new();
         // bounded: PLACES_ASKED_MAX keyed reads
         for person in &b.people {
-            if let Some(r) = self.row::<Row>("SELECT person, epoch FROM org_content WHERE org = ? AND person = ? AND active = 1", vec![b.org.as_str().into(), person.as_str().into()])? {
-                now.insert(r.person, r.epoch);
+            if let Some(r) = self.row::<Row>("SELECT person, since FROM org_content WHERE org = ? AND person = ?", vec![b.org.as_str().into(), person.as_str().into()])? {
+                now.insert(r.person, r.since);
             }
         }
         Ok(now)
     }
 
-    fn enroll_content(&self, b: Enroll) -> CellResult<Enrolled> {
+    /// A person who said yes to a seat in `org` is in its content too
+    /// (Paul, 2026-10-31: its billing admins add people, as its content
+    /// admins do); one in it already, as they are. Logged as theirs.
+    pub(super) fn seat_taken(&self, org: &str, person: &str) -> CellResult<()> {
+        let (org, person) = (org.to_string(), person.to_string());
+        self.atomically(move |tx| {
+            if tx.place_of(&org, &person)?.is_some() {
+                return Ok(());
+            }
+            let now = js::now_ms();
+            tx.join(&org, &person, false, now)?;
+            tx.govern(&org, Logged { request: &format!("join:{person}:{now}"), actor: &person, action: "joined", subject: Some(&person), detail: json!({ "by": "seat" }) }, now)
+        })
+    }
+
+    fn enroll_content(&self, b: Enroll) -> CellResult<()> {
         let org = self.content_org(&b.org)?;
         if !npub::is_identity(&b.person) {
             return Err(CellError::invalid("enroll names a person by identity"));
@@ -716,14 +728,13 @@ impl RegistryCell {
             let org = org.id.clone();
             move |tx| {
                 let now = js::now_ms();
-                let was = tx.place_of(&org, &b.person)?;
-                let (place, joins) = governance::enrolled(was.map(|w| w.0), was.and_then(|w| w.1), b.invited_at).map_err(refused)?;
+                let (place, joins) = governance::enrolled(tx.place_of(&org, &b.person)?, tx.left_at(&org, &b.person)?, b.invited_at, now).map_err(refused)?;
                 if joins {
-                    tx.write_place(&org, &b.person, was.map(|w| w.0), place, now)?;
-                    let request = format!("join:{}:{}", b.person, place.epoch);
-                    tx.govern(&org, Logged { request: &request, actor: &b.person, action: "joined", subject: Some(&b.person), detail: json!({ "epoch": place.epoch }) }, now)?;
+                    tx.join(&org, &b.person, false, now)?;
+                    let request = format!("join:{}:{}", b.person, place.since);
+                    tx.govern(&org, Logged { request: &request, actor: &b.person, action: "joined", subject: Some(&b.person), detail: json!({}) }, now)?;
                 }
-                Ok(Enrolled { epoch: place.epoch })
+                Ok(())
             }
         })
     }
@@ -739,19 +750,17 @@ impl RegistryCell {
         #[derive(Deserialize)]
         struct Person {
             person: String,
-            epoch: u64,
-            active: i64,
             admin: i64,
             since: i64,
             email: Option<String>,
         }
         // bounded: a page of the people who said yes to it
         let people = self.rows::<Person>(
-            "SELECT c.person, c.epoch, c.active, c.admin, c.since, (SELECT email FROM subjects s WHERE s.identity = c.person ORDER BY signed_in_at DESC LIMIT 1) AS email
+            "SELECT c.person, c.admin, c.since, (SELECT email FROM subjects s WHERE s.identity = c.person ORDER BY signed_in_at DESC LIMIT 1) AS email
              FROM org_content c WHERE c.org = ? ORDER BY c.since, c.person LIMIT 1000",
             vec![org.id.as_str().into()],
         )?;
-        let people = people.into_iter().map(|p| ContentPerson { person: p.person, email: p.email, epoch: p.epoch, active: p.active != 0, admin: p.admin != 0, since: p.since }).collect();
+        let people = people.into_iter().map(|p| ContentPerson { person: p.person, email: p.email, admin: p.admin != 0, since: p.since }).collect();
         let offers = self.rows::<OfferRow>(
             &format!("SELECT {OFFER_COLUMNS} FROM org_content_offers WHERE org = ? AND answer IS NULL AND expires_at > ? ORDER BY offered_at, id"),
             vec![org.id.as_str().into(), SqlStorageValue::Integer(js::now_ms())],
@@ -826,20 +835,22 @@ impl RegistryCell {
         })
     }
 
-    /// Whether `org` holds what outlives its billing: anyone in its content
-    /// (decision 69), or credit an operator gave it or a payer they named
-    /// (orgs pay out of band: Paul, 2026-10-30), so it is never dropped
-    /// with it, nor its credit stranded.
+    /// Whether `org` holds what outlives its billing: a content admin it
+    /// has had (decision 69: the only way it owns fragments, which outlive
+    /// it), or credit an operator gave it or a payer they named (orgs pay
+    /// out of band: Paul, 2026-10-30), so it is never dropped with it, nor
+    /// its credit stranded. Its seat holders alone, in its content too
+    /// (`seat_taken`), keep nothing.
     pub(super) fn has_content(&self, org: &str) -> CellResult<bool> {
-        let people = self.count("SELECT COUNT(*) AS n FROM org_content WHERE org = ?", vec![org.into()])?;
-        let funded = self.count("SELECT COUNT(*) AS n FROM org_governance WHERE org = ? AND action IN ('ledger-grant', 'payer-named')", vec![org.into()])?;
-        Ok(people + funded > 0)
+        Ok(self.count("SELECT COUNT(*) AS n FROM org_governance WHERE org = ? AND action IN ('admin-accepted', 'ledger-grant', 'payer-named')", vec![org.into()])? > 0)
     }
 
-    /// An org dropped with no one in its content: its offers go with it,
-    /// in the drop's turn, so none names an org that is not there.
+    /// An org dropped with nothing that outlives it: its offers, and its
+    /// content's rows (its seat holders'), go with it, in the drop's turn,
+    /// so none names an org that is not there.
     pub(super) fn content_dropped(&self, org: &str) -> CellResult<()> {
-        self.exec("DELETE FROM org_content_offers WHERE org = ?", vec![org.into()])
+        self.exec("DELETE FROM org_content_offers WHERE org = ?", vec![org.into()])?;
+        self.exec("DELETE FROM org_content WHERE org = ?", vec![org.into()])
     }
 
     /// A wiped person, in every org's content: an admin no more, and their
@@ -852,10 +863,9 @@ impl RegistryCell {
         struct Row {
             org: String,
         }
-        // bounded: the orgs whose content they were in. Each is its own
+        // bounded: the orgs whose content they said yes to. Each is its own
         // change, done once: a wipe whose step failed after some (Alex's
-        // review) is run again, and finds those done by their entries. Out
-        // at a raised epoch, as an offboarding is, if they were still in
+        // review) is run again, and finds those done by their entries
         for r in self.rows::<Row>("SELECT org FROM org_content WHERE person = ?", vec![person.into()])? {
             let (person, operator) = (person.to_string(), operator.to_string());
             self.atomically(move |tx| {
@@ -864,10 +874,7 @@ impl RegistryCell {
                     return Ok(());
                 }
                 let now = js::now_ms();
-                let (was, _) = tx.place_of(&r.org, &person)?.ok_or_else(|| CellError::host("a place just read is not there"))?;
-                if was.active {
-                    tx.write_place(&r.org, &person, Some(was), Place { epoch: was.epoch + 1, active: false, admin: false }, now)?;
-                }
+                tx.exec("UPDATE org_content SET admin = 0 WHERE org = ? AND person = ?", vec![r.org.as_str().into(), person.as_str().into()])?;
                 let withdrawn = tx.retire_offers(&r.org, &person, &operator, now)?;
                 tx.govern(&r.org, Logged { request: &request, actor: &operator, action: "wiped", subject: Some(&person), detail: json!({ "withdrawn": withdrawn }) }, now)
             })?;

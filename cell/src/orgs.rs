@@ -150,7 +150,7 @@ pub(crate) async fn org(mut req: Request, env: &Env, cfg: &Config, url: &Url, re
 /// its first), answered by whoever signs in with the email (`POST
 /// content-admin-offers/<offer>/accept|decline`; theirs are `GET
 /// /api/orgs/offers`); `DELETE content-admin-offers/<offer>`, `DELETE
-/// content-admins/<person>`, `POST offboard {id, person, expectedEpoch}`
+/// content-admins/<person>`, `POST offboard {id, person}`
 /// and `GET content?before=` (its content admins). Its fragments: `POST
 /// fragments` (a create's body; its content admins make one, `members`
 /// unless named) and `GET fragments`, its inventory (its content admins).
@@ -191,7 +191,7 @@ pub(crate) async fn named(mut req: Request, env: &Env, cfg: &Config, url: &Url, 
         (Method::Get, ["content"]) => json_answer(&ask_registry(env, &ContentOf { by: Some(by), org: org.to_string(), before: before(url)? }).await?),
         (Method::Post, ["offboard"]) => {
             let b: Offboard = body(&bytes)?;
-            json_answer(&ask_registry(env, &OffboardCall { by, org: org.to_string(), person: b.person, expected_epoch: b.expected_epoch, request: b.id }).await?)
+            json_answer(&ask_registry(env, &OffboardCall { by, org: org.to_string(), person: b.person, request: b.id }).await?)
         }
         // its fragments (decisions 66 to 71): made by its content admins,
         // each as themselves, its editor; owned and paid for by the org
@@ -374,8 +374,8 @@ async fn person_page(env: &Env, person: &str) -> CellResult<serde_json::Value> {
 }
 
 /// An operator pins a person's computer to another of the deployment's
-/// images (docs/computers.md, "Stable and canary"): onto the canary, or
-/// back. As its owner's pin is, its next start runs it, and awake on
+/// images (docs/computers.md, "Preview and production"), or back to its
+/// default. As its owner's pin is, its next start runs it, and awake on
 /// another, its owner is told an update is ready. Logged as `pin`.
 async fn pin(env: &Env, by: &str, person: &str, bytes: &[u8]) -> CellResult<serde_json::Value> {
     if !fragment_core::npub::is_identity(person) {

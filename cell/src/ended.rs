@@ -359,6 +359,8 @@ impl FragmentCell {
         for s in due {
             let cleared = async {
                 js::delete_app_facet(&self.raw, &s.facet).await?;
+                // its search index, with its database (searchable.rs)
+                self.search_drop(s.incarnation).await?;
                 self.delete_blobs_under(&format!("{}/", s.npub), BLOB_PAGES_PER_PASS).await
             }
             .await;

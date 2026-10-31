@@ -100,6 +100,9 @@ pub struct FragmentCell {
     pub(crate) swept: Cell<bool>,
     /// The ledger ids a call or a sweep is settling now (channels.rs).
     pub(crate) settling: RefCell<BTreeMap<String, Arc<futures_util::lock::Mutex<()>>>>,
+    /// The search sources a write or a forget is sending now
+    /// (searchable.rs): one at a time a source.
+    pub(crate) search_sending: RefCell<BTreeMap<String, Arc<futures_util::lock::Mutex<()>>>>,
     /// How the app facet starts (ops.rs `app_loader`).
     pub(crate) app: js::AppLoader,
     /// What this activation knows of its live sockets (live.rs).
@@ -144,6 +147,7 @@ impl DurableObject for FragmentCell {
             rate: RefCell::new(rate),
             swept: Cell::new(false),
             settling: RefCell::default(),
+            search_sending: RefCell::default(),
             app,
             live: RefCell::default(),
             meter_armed: Cell::new(-1),
@@ -157,7 +161,7 @@ impl DurableObject for FragmentCell {
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {
-        if let Some(refused) = crate::routed::refused(&req, crate::routed::Own::of(self.cfg), &self.raw)? {
+        if let Some(refused) = crate::routed::refused(&req, &self.cfg.deploy_id)? {
             return Ok(refused);
         }
         if let Some(probed) = crate::routed::probed(&req, &self.schema)? {
@@ -282,9 +286,11 @@ pub(crate) enum MetaKey {
     /// When a create in progress claimed the name (the claim expires).
     ClaimedAt,
     /// When the fragment was created, its incarnation: a fragment exists
-    /// once it has this row, written last. (Who owns it is its
-    /// `ownership` row's: `owner`.)
+    /// once it has this row, written last.
     CreatedAt,
+    /// Who owns it, by name (`fragment_core::owner::Owner`): the identity
+    /// of the person who made it, or `org:<id>` (decisions 66 to 71).
+    Owner,
     /// The fragment's own key.
     Npub,
     /// Its secret key, sealed for this cell.
@@ -343,6 +349,9 @@ pub(crate) enum MetaKey {
     /// The channels its people's search holds, as the rows last named
     /// them (search.rs `search_fence`): a JSON array of names.
     Searched,
+    /// Whether the search service holds this life's sources (searchable.rs):
+    /// written at its first upsert; a push's deletes are then forgotten.
+    Search,
     /// Why live's code was not installed.
     CodeError,
     /// When the blob collection runs next.
@@ -374,6 +383,18 @@ pub(crate) enum MetaKey {
     /// The link ticket made last, until redeemed or past its time
     /// (`<door> <nonce> <exp>`).
     DoorTicket,
+    /// A connector fragment's binding as one of its owner's agent's doors
+    /// (`<door> <agent fragment>`), set and cleared by its owner in person
+    /// (doors.rs; fragment_core::door::Hosted).
+    DoorActor,
+    /// The installed code's inbox secret (`<header> <SECRET>`): its inbox
+    /// takes a delivery only with that header holding that secret, and its
+    /// inbox token admits nothing (fragment_core::manifest::InboxDecl).
+    InboxSecret,
+    /// The blessed connector template it was made from (`blessed::
+    /// CONNECTORS`), while it runs no other code: no one but its owner edits
+    /// it, and only then may it be a door (doors.rs).
+    DoorTemplate,
     /// The next time a page may pre-wake the computers its channels wake.
     PrewakeAt,
     /// Test fleets only: how many more paid AI steps fail just after their
@@ -408,6 +429,7 @@ impl MetaKey {
             MetaKey::ClaimedAt => "claimed_at",
             MetaKey::CreatedAt => "created_at",
             MetaKey::AppFacet => "app_facet",
+            MetaKey::Owner => "owner",
             MetaKey::Npub => "npub",
             MetaKey::FragmentSecret => "fragment_secret",
             MetaKey::Visibility => "visibility",
@@ -433,6 +455,7 @@ impl MetaKey {
             MetaKey::ListedSentAt => "listed_sent_at",
             MetaKey::ListedDue => "listed_due",
             MetaKey::Searched => "searched",
+            MetaKey::Search => "search",
             MetaKey::CodeError => "code_error",
             MetaKey::BlobsGcAt => "blobs_gc_at",
             MetaKey::Vapid => "vapid",
@@ -447,6 +470,9 @@ impl MetaKey {
             MetaKey::AgentIdentity => "agent_identity",
             MetaKey::Door => "door",
             MetaKey::DoorTicket => "door_ticket",
+            MetaKey::DoorActor => "door_actor",
+            MetaKey::InboxSecret => "inbox_secret",
+            MetaKey::DoorTemplate => "door_template",
             MetaKey::PrewakeAt => "prewake_at",
             MetaKey::TestFailAfterPaid => "test_fail_after_paid",
             MetaKey::TestFailMeterAcks => "test_fail_meter_acks",
@@ -680,31 +706,18 @@ impl FragmentCell {
         })
     }
 
-    /// Who owns it (decisions 66 to 71): its `ownership` row, the one
-    /// record of it. Its name (`Owner::name`) is its payer's ledger and its
-    /// owner's list.
+    /// Who owns it (decisions 66 to 71): its `owner` meta row, the one
+    /// record of it, a person's identity or `org:<id>` (`Owner::name`),
+    /// which names its payer's ledger and its owner's list. Never created
+    /// (or deleted): 404, as `name` answers, so a request's standing read
+    /// first never makes it a 500.
     pub(crate) fn owner(&self) -> CellResult<Owner> {
-        #[derive(serde::Deserialize)]
-        struct Row {
-            kind: String,
-            owner: String,
+        let [created, owner] = self.metas([MetaKey::CreatedAt, MetaKey::Owner])?;
+        match (created, owner) {
+            (None, _) => Err(not_created()),
+            (Some(_), None) => Err(missing(MetaKey::Owner)),
+            (Some(_), Some(name)) => Owner::parse(&name).ok_or_else(|| CellError::host(format!("its owner row names {name:?}"))),
         }
-        // one that refuses its schema from before Fragment step 4 (it still
-        // ends: schema.rs) is its person's, in its `owner` meta row
-        if self.schema.refused() && self.count("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name = 'ownership'")? == 0 {
-            let owner = self.rows("SELECT value FROM meta WHERE key = 'owner'", vec![])?.first().and_then(|r| r["value"].as_str().map(str::to_string));
-            return Ok(Owner::Person(owner.ok_or_else(|| CellError::host("a fragment from before step 4 has no owner meta row"))?));
-        }
-        let rows: Vec<Row> = self.typed("SELECT kind, owner FROM ownership WHERE one = 1", vec![])?;
-        let Some(row) = rows.into_iter().next() else {
-            // never created (or deleted): 404, as `name` answers, so a
-            // request's standing read first never makes it a 500
-            return Err(match self.meta(MetaKey::CreatedAt)? {
-                None => not_created(),
-                Some(_) => CellError::host("a created fragment has no ownership row"),
-            });
-        };
-        Owner::from_row(&row.kind, &row.owner).ok_or_else(|| CellError::host(format!("its ownership row names {} {:?}", row.kind, row.owner)))
     }
 
     pub(crate) fn visibility(&self) -> CellResult<Visibility> {
@@ -713,7 +726,7 @@ impl FragmentCell {
     }
 
     /// The signer's own membership, as it counts now (`fence`): an org's
-    /// fragment's only at their place's epoch there.
+    /// fragment's only while they are in its org, and only from then.
     pub(crate) fn fenced_role(&self, signed: &Signed) -> CellResult<Option<Role>> {
         let fence = self.fence(Some(signed))?;
         let rows = self.rows(&format!("SELECT role FROM members WHERE principal = ? AND {fence}"), vec![signed.id.as_str().into()])?;
@@ -734,7 +747,8 @@ impl FragmentCell {
             return Ok(Standing { member: None, owns_member_agent: false, link, signed: false, cap: None, held: None });
         };
         if let Some(signed) = caller.signed.as_ref().filter(|s| s.acting_for.is_some()) {
-            return self.standing_for(signed, link);
+            let standing = self.standing_for(signed, link)?;
+            return self.only_owner_edits(caller, standing);
         }
         #[derive(serde::Deserialize)]
         struct Row {
@@ -762,7 +776,7 @@ impl FragmentCell {
                 member = member.map(|m| m.min(held));
             }
         }
-        Ok(Standing { member, owns_member_agent: member.is_none() && row.agent != 0, link, signed: true, cap: None, held: None })
+        self.only_owner_edits(caller, Standing { member, owns_member_agent: member.is_none() && row.agent != 0, link, signed: true, cap: None, held: None })
     }
 
     /// An agent acting for someone (decision R17), in one statement:
@@ -803,16 +817,16 @@ impl FragmentCell {
 
     /// What a member row must hold to count for `signed` (decisions 69 to
     /// 71), as a SQL condition on `members`. A person's fragment counts
-    /// every row (`1`: its queries as before Fragment step 4, so one that
-    /// refuses its schema still answers as it ends); an org's, a row only at
-    /// the epoch of the signer's place in its content now (an agent's: its
-    /// person's), the registry's answer at this request, so an offboarded
-    /// person's rows open nothing from the moment they are (`0` with no
-    /// place). Never a cached answer. A number, never a caller's text.
+    /// every row (`1`); an org's, a row only while the signer is in its org
+    /// (an agent: its person) and only one added since they came in
+    /// (`fragment_core::governance::counts`), the registry's answer at this
+    /// request: an offboarded person's rows open nothing from the moment
+    /// they are (`0` with no place), and a rehire's from before never do.
+    /// Never a cached answer. A number, never a caller's text.
     pub(crate) fn fence(&self, signed: Option<&Signed>) -> CellResult<String> {
         Ok(match self.owner()? {
             Owner::Person(_) => "1".to_string(),
-            Owner::Org(org) => signed.and_then(|s| s.org_place(&org)).map_or_else(|| "0".to_string(), |p| format!("epoch = {}", p.epoch)),
+            Owner::Org(org) => signed.and_then(|s| s.org_place(&org)).map_or_else(|| "0".to_string(), |p| format!("added_at >= {}", p.since)),
         })
     }
 
@@ -1080,6 +1094,11 @@ impl FragmentCell {
                 self.put_secret(&caller, key, bytes).await
             }
             (Method::Get, ["api", "secrets"]) => self.list_secrets(&caller),
+            (Method::Get, ["api", "door"]) => json_response(&self.door_binding(&caller)?),
+            (Method::Post, ["api", "door"]) => {
+                let body: Value = body_json(&mut req).await?;
+                json_response(&self.bind_door(&caller, &body).await?)
+            }
             (Method::Delete, ["api", "secrets", key]) => self.delete_secret(&caller, key),
             (Method::Get, ["api", "storage-token"]) => self.storage_token(&caller).await,
             // an org's fragment's repo, through the platform: the router's
@@ -1176,6 +1195,20 @@ impl FragmentCell {
             (Method::Delete, ["api", "schedules", id]) => self.remove_schedule(&caller, id),
             // its app's database, for its owner (export.rs)
             (Method::Get, ["api", "database"]) => self.database(&caller, query("table"), query("offset")).await,
+            (Method::Post, ["api", "search"]) => {
+                let q = body_json(&mut req).await?;
+                self.search_query(&caller, q).await
+            }
+            (Method::Post, ["api", "search", "upsert"]) => {
+                let up = body_json(&mut req).await?;
+                self.search_upsert(&caller, up).await
+            }
+            (Method::Post, ["api", "search", "delete"]) => {
+                let d = body_json(&mut req).await?;
+                self.search_delete(&caller, d).await
+            }
+            (Method::Get, ["api", "search", "sources"]) => self.search_sources(&caller, query("after"), query("limit")).await,
+            (Method::Get, ["api", "search", "status"]) => self.search_status(&caller).await,
             (Method::Post, ["api", "subscriptions"]) => {
                 let body: Value = body_json(&mut req).await?;
                 self.subscribe(&caller, &body)
@@ -1183,13 +1216,20 @@ impl FragmentCell {
             (Method::Get, ["api", "subscriptions"]) => self.subscriptions(&caller),
             (Method::Delete, ["api", "subscriptions", id]) => self.unsubscribe(&caller, id),
             (Method::Post, ["api", "inbox"]) => {
-                let token = match req.headers().get("x-fragment-inbox-token")? {
-                    Some(t) => t,
-                    None => query("t").unwrap_or_default(),
+                // its code's inbox secret, else its inbox token
+                let given = match self.meta(MetaKey::InboxSecret)? {
+                    Some(declared) => {
+                        let (header, secret) = declared.split_once(' ').ok_or_else(|| CellError::host(format!("its inbox secret {declared:?} is not `<header> <SECRET>`")))?;
+                        crate::jobs::Admits::Secret { header: header.into(), name: secret.into(), given: req.headers().get(header)?.unwrap_or_default() }
+                    }
+                    None => crate::jobs::Admits::Token(match req.headers().get("x-fragment-inbox-token")? {
+                        Some(t) => t,
+                        None => query("t").unwrap_or_default(),
+                    }),
                 };
                 let hops = req.headers().get(crate::jobs::HOPS_HEADER)?.and_then(|h| h.parse().ok()).unwrap_or(0);
                 let body = req.bytes().await?;
-                self.inbox(&token, hops, &body).await
+                self.inbox(given, hops, &body).await
             }
             _ => Err(CellError::new(ErrorCode::NotFound, format!("no route {} {path}", req.method().as_ref()))),
         }
@@ -1198,14 +1238,14 @@ impl FragmentCell {
     async fn create(&self, caller: &Caller, body: CreateFragment, org: Option<String>) -> CellResult<Response> {
         let maker = self.caller_id(caller)?.to_string();
         // an org's maker is one of its content admins, as themselves, who
-        // comes in as its editor at their epoch (decisions 69 to 71); the
-        // router checked them, and what they carry says so again here
-        let (owner, epoch) = match org {
-            None => (Owner::Person(maker.clone()), None),
+        // comes in as its editor (decisions 69 to 71); the router checked
+        // them, and what they carry says so again here
+        let owner = match org {
+            None => Owner::Person(maker.clone()),
             Some(org) => {
                 let signed = caller.signed.as_ref().filter(|s| s.kind == IdentityKind::Person && s.acting_for.is_none());
-                let place = signed.and_then(|s| s.org_place(&org)).filter(|p| p.admin).ok_or_else(|| CellError::new(ErrorCode::Forbidden, "only an org's content admins make its fragments"))?;
-                (Owner::Org(org), Some(place.epoch))
+                signed.and_then(|s| s.org_place(&org)).filter(|p| p.admin).ok_or_else(|| CellError::new(ErrorCode::Forbidden, "only an org's content admins make its fragments"))?;
+                Owner::Org(org)
             }
         };
         if !valid_fragment_name(&body.name) {
@@ -1269,11 +1309,9 @@ impl FragmentCell {
         let (view_token, inbox_token) = (js::random_hex::<12>(), js::random_hex::<16>());
         let poll_at = (now + self.cfg.poll_interval_ms).to_string();
         let created_at = now.to_string();
-        self.exec(
-            "INSERT INTO ownership (one, kind, owner, generation) VALUES (1, ?, ?, 1)",
-            vec![owner.kind().into(), owner.id().into()],
-        )?;
+        let owner_name = owner.name();
         for (k, v) in [
+            (MetaKey::Owner, owner_name.as_str()),
             (MetaKey::Npub, fragment_npub.as_str()),
             (MetaKey::FragmentSecret, sealed.as_str()),
             (MetaKey::Visibility, visibility.as_str()),
@@ -1288,10 +1326,10 @@ impl FragmentCell {
         ] {
             self.set_meta(k, v)?;
         }
-        // its owner, a person; or an org's maker, its editor at their epoch
-        let role = if epoch.is_some() { Role::Editor } else { Role::Owner };
+        // its owner, a person; or an org's maker, its editor
+        let role = if owner.org().is_some() { Role::Editor } else { Role::Owner };
         self.exec(
-            "INSERT INTO members (principal, role, added_by, added_at, kind, owner, epoch) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO members (principal, role, added_by, added_at, kind, owner) VALUES (?, ?, ?, ?, ?, ?)",
             vec![
                 maker.as_str().into(),
                 role.as_str().into(),
@@ -1299,11 +1337,14 @@ impl FragmentCell {
                 SqlStorageValue::Integer(now),
                 caller.kind().map_or(SqlStorageValue::Null, |k| k.as_str().into()),
                 caller.owner().map_or(SqlStorageValue::Null, |o| o.into()),
-                epoch.map_or(SqlStorageValue::Null, |e| SqlStorageValue::Integer(e as i64)),
             ],
         )?;
         if let Some(t) = &body.template {
             self.set_meta(MetaKey::TemplatePending, t)?;
+            // a connector's: its owner's alone to edit from its making (doors.rs)
+            if blessed::CONNECTORS.contains(&t.as_str()) {
+                self.set_meta(MetaKey::DoorTemplate, t)?;
+            }
             if let Some(title) = &body.title {
                 self.set_meta(MetaKey::TemplateTitle, title.trim())?;
             }
@@ -1463,6 +1504,7 @@ impl FragmentCell {
         }
         self.flush_index().await;
         self.flush_search().await;
+        self.search_forget_due().await;
         self.flush_joined().await;
         if let Err(e) = self.seed().await {
             self.event("template.failed", &e.message, json!({ "code": e.code }));
@@ -1591,7 +1633,7 @@ impl FragmentCell {
             self.set_meta(MetaKey::PollAt, &poll_at.to_string())?;
         }
         let outbox = self.rows("SELECT MIN(next_at) AS at FROM index_outbox", vec![])?.first().and_then(|r| r["at"].as_i64());
-        let due = [outbox, self.listed_due_at()?, self.search_due_at()?, self.joined_due_at()?, self.runs_due_at()?, self.pending_due_at()?, self.outbox_due_at()?, self.meter_due_at()?, self.card_due_at()?, self.invites_due_at()?, ended, also];
+        let due = [outbox, self.listed_due_at()?, self.search_due_at()?, self.search_forget_due_at()?, self.joined_due_at()?, self.runs_due_at()?, self.pending_due_at()?, self.outbox_due_at()?, self.meter_due_at()?, self.card_due_at()?, self.invites_due_at()?, ended, also];
 
         let at = due.into_iter().flatten().fold(poll_at, i64::min).max(js::now_ms() + min_ms);
         self.state.storage().set_alarm(ScheduledTime::new(js_sys::Date::new(&JsValue::from_f64(at as f64)))).await?;

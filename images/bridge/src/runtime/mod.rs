@@ -15,9 +15,15 @@
 //! once, and hears back. It never talks to the fragment API: the bridge
 //! downloads a turn's attachments before handing it, and uploads a reply's.
 //! A turn is handed only in the life that claimed it (docs/chat-records.md,
-//! `turn.start`), and a turn is claimed only while the runtime says it can
-//! take one (`Event::Connected`).
+//! `turn.start`), and a turn is claimed only while its agent's runtime says
+//! it can take one (`Event::Connected`).
+//!
+//! A bridge runs one or more runtimes (`Runtimes`), each by the name agents
+//! give it: an agent's `agent.json` `runtime` (`named`), `DEFAULT` when it
+//! names none. Its turns go to that runtime, and that runtime's menu is its
+//! commands (docs/bridge.md, "Which runtime runs an agent").
 
+pub mod claude;
 pub mod relay;
 pub mod script;
 
@@ -28,6 +34,68 @@ use std::pin::Pin;
 use tokio::sync::{mpsc, watch};
 
 use crate::records::{PromptOption, Step};
+
+/// The runtime an agent whose `agent.json` names none runs (Paul,
+/// 2026-10-30: "`runtime: hermes` default").
+pub const DEFAULT: &str = "hermes";
+
+/// A runtime's name, as agents give it: `^[a-z0-9-]{1,32}$`.
+pub fn valid_name(s: &str) -> bool {
+    (1..=32).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
+/// The runtime an agent's `agent.json` names (its `runtime`), from its bytes
+/// as the platform answered them (none: there is no file). `None`: it names
+/// none, so it runs `DEFAULT`; a file that is not JSON names none, as its
+/// `home` does (`api::Home::of`). A value that is no runtime's name (not a
+/// string, or not `valid_name`) is kept as it is, cut to 64 bytes: no
+/// runtime is run by it, so the agent's turns are refused saying so, never
+/// handed to the default.
+pub fn named(agent_json: Option<&[u8]>) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_slice(agent_json?).ok()?;
+    match &v["runtime"] {
+        serde_json::Value::Null => None,
+        serde_json::Value::String(s) => Some(crate::records::cut_bytes(s, 64)),
+        other => Some(crate::records::cut_bytes(&other.to_string(), 64)),
+    }
+}
+
+/// The runtimes a bridge runs, each with the name agents give it, in the
+/// order they start: at most `limits::RUNTIMES_MAX`, each name once.
+pub struct Runtimes(Vec<(String, Box<dyn Runtime>)>);
+
+impl Runtimes {
+    pub fn new() -> Runtimes {
+        Runtimes(Vec::new())
+    }
+
+    /// Adds `runtime`, run for the agents that name `name`.
+    pub fn with(mut self, name: &str, runtime: Box<dyn Runtime>) -> Runtimes {
+        assert!(valid_name(name), "a runtime's name: {name:?}");
+        assert!(self.0.iter().all(|(n, _)| n != name), "a runtime is run once: {name}");
+        assert!(self.0.len() < crate::limits::RUNTIMES_MAX, "a bridge runs at most {} runtimes", crate::limits::RUNTIMES_MAX);
+        self.0.push((name.to_string(), runtime));
+        self
+    }
+
+    pub fn into_inner(self) -> Vec<(String, Box<dyn Runtime>)> {
+        assert!(!self.0.is_empty(), "a bridge runs a runtime");
+        self.0
+    }
+}
+
+impl Default for Runtimes {
+    fn default() -> Runtimes {
+        Runtimes::new()
+    }
+}
+
+/// One runtime, run for the agents that name none (`DEFAULT`).
+impl From<Box<dyn Runtime>> for Runtimes {
+    fn from(runtime: Box<dyn Runtime>) -> Runtimes {
+        Runtimes::new().with(DEFAULT, runtime)
+    }
+}
 
 /// An agent the computer runs (`GET /api/computer`'s `agents`).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -53,6 +121,10 @@ pub struct Agent {
     /// before doors, which starts no link.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
+    /// The runtime it runs on, as its `agent.json` names it (`named`): none,
+    /// `DEFAULT`. Never the platform's: the driver reads it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<String>,
 }
 
 /// One credential of an agent's (`GET /api/computer`'s `agents[].credentials`).
@@ -235,6 +307,10 @@ pub struct TurnStart {
     /// turn. Relay tells its agent so in that chat's session
     /// (`relay::wire::SIMPLEX_TOPIC`).
     pub simplex: bool,
+    /// It continues the turn named, which a restart cut (engine.rs,
+    /// `continue_turn`): its note is that turn's, by its id (driver.rs,
+    /// `cut_note`); said by the computer, never as its asker's words.
+    pub continues: Option<String>,
 }
 
 /// What the bridge asks of a runtime.
@@ -297,7 +373,10 @@ pub enum Event {
     Attachment { turn: String, part: u32, file: LocalFile },
     /// Reply `part` taken back before it was posted.
     Retract { turn: String, part: u32 },
-    /// A tool call.
+    /// A tool call the model asked for, before it runs (`records::Call`):
+    /// its intent, recorded so a turn cut while it ran is told of it.
+    Called { turn: String, call: crate::records::Call },
+    /// A tool call, ended.
     Step { turn: String, step: Step },
     /// A question with buttons; the turn waits for its answer.
     Prompt { turn: String, prompt: String, text: String, options: Vec<PromptOption>, ttl_ms: Option<u64> },
@@ -364,6 +443,36 @@ mod tests {
 
     fn file(name: &str, at: &str) -> LocalFile {
         LocalFile { path: PathBuf::from(at), media_type: "image/png".into(), name: name.into(), size: 1 }
+    }
+
+    /// Goal: an agent's runtime is its `agent.json`'s `runtime`. Absent (no
+    /// file, no field, `null`, a file that is not JSON): it names none, and
+    /// runs the default. Anything else is kept as its name, cut to 64 bytes,
+    /// so a value that is no runtime's is refused, never run as the default.
+    #[test]
+    fn an_agents_runtime_is_what_its_agent_json_names() {
+        assert_eq!(named(None), None);
+        assert_eq!(named(Some(b"{\"tier\":\"cheap\"}")), None);
+        assert_eq!(named(Some(b"{\"runtime\":null}")), None);
+        assert_eq!(named(Some(b"not json")), None);
+        assert_eq!(named(Some(b"{\"runtime\":\"claude\"}")).as_deref(), Some("claude"));
+        assert_eq!(named(Some(b"{\"runtime\":7}")).as_deref(), Some("7"));
+        let long = format!("{{\"runtime\":\"{}\"}}", "x".repeat(100));
+        assert_eq!(named(Some(long.as_bytes())).map(|n| n.len()), Some(64));
+        assert!(valid_name(DEFAULT) && valid_name("codex") && !valid_name("Claude") && !valid_name("") && !valid_name(&"a".repeat(33)));
+    }
+
+    /// Goal: a bridge runs each runtime once, by a valid name, at most
+    /// `RUNTIMES_MAX`; one runtime alone is the default's.
+    #[test]
+    fn runtimes_are_named_once() {
+        let script = || -> Box<dyn Runtime> { Box::new(script::Script { config: script::ScriptConfig { pace: std::time::Duration::ZERO, scratch: PathBuf::from("/tmp/x"), data: PathBuf::from("/tmp/y") } }) };
+        let one: Runtimes = script().into();
+        assert_eq!(one.into_inner().iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(), vec![DEFAULT]);
+        assert!(std::panic::catch_unwind(|| Runtimes::new().with("a", script()).with("a", script())).is_err(), "twice");
+        assert!(std::panic::catch_unwind(|| Runtimes::new().with("No", script())).is_err(), "not a name");
+        let full = (0..crate::limits::RUNTIMES_MAX).fold(Runtimes::new(), |r, i| r.with(&format!("r{i}"), script()));
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| full.with("more", script()))).is_err(), "past the bound");
     }
 
     /// Goal: an answer's words name each file sent with it and where it is

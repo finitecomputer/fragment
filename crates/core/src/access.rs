@@ -1,4 +1,4 @@
-//! Who may do what (docs/MODEL.md, Principals and membership).
+//! Who may do what (docs/api.md, Principals and access).
 //!
 //! A caller's role in a fragment is their membership role if they have
 //! one. Otherwise it comes from the fragment's visibility: a public

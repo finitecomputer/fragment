@@ -715,11 +715,11 @@ impl FragmentCell {
     /// failure). Each new record starts the runs its channel triggers, one
     /// hop deeper than the mutation.
     pub(crate) async fn apply(&self, p: &Pending, effects: &Value) -> CellResult<Settled> {
-        let declared = match self.declared_channels() {
-            Ok(d) => d,
+        let (declared, hosted) = match self.declared_channels().and_then(|d| Ok((d, self.hosted_door()?))) {
+            Ok(both) => both,
             Err(e) => return self.after_failure(p, e).await,
         };
-        let list = match effects::decode(effects, &declared) {
+        let list = match effects::decode(effects, &declared, hosted.as_ref()) {
             Ok(list) => list,
             Err(why) => return self.refuse(p, &why),
         };

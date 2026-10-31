@@ -343,6 +343,10 @@ impl RegistryCell {
         }
         let mine = self.member_of(&who.id)?.ok_or_else(|| CellError::host("an accepted offer leaves its person in no org"))?;
         assert_eq!(mine.org, offer.org, "an accepted offer's org is its person's");
+        // in its content too (content.rs `seat_taken`): never the seat's undoing
+        if let Err(e) = self.seat_taken(&offer.org, &who.id) {
+            console_error!("{}", json!({ "event": "org.seat-content", "org": offer.org, "error": e.message }));
+        }
         self.my_seat(&who.id)
     }
 

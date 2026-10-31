@@ -659,7 +659,9 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
         w.fragments.insert(name.to_string(), f);
         w.made.push(name.to_string());
         w.append(&agent, "tasks", &me, json!({ "kind": "joined", "fragment": name }));
-        return answer(StatusCode::OK, json!({ "name": name, "owner": owner }));
+        // the platform's `Created`, whole (the CLI reads it so)
+        let made = json!({ "name": name, "owner": owner, "npub": format!("npub1{}", name.replace('-', "")), "visibility": "members", "viewToken": "", "inboxToken": "", "repo": "", "canonical": format!("http://{name}.fake") });
+        return answer(StatusCode::OK, made);
     }
     if p.as_slice() == ["api", "fragments"] {
         let mut w = world.lock().unwrap();
@@ -694,6 +696,23 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
         (Method::GET, ["channels"]) => {
             let list: Vec<Value> = f.channels.iter().map(|(n, c)| json!({ "name": n, "read": "viewer", "post": c.post, "seq": c.records.len() })).collect();
             answer(StatusCode::OK, json!({ "channels": list }))
+        }
+        // a member added (`fragment ask` adds the agent it asks), as the
+        // platform adds one: an agent of the computer is told so on its own
+        // `tasks` (`joined`), so its bridge follows the chat at once
+        (Method::PUT, ["members", who]) if matches!(role.as_str(), "editor" | "owner") => {
+            let v: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+            let (who, added) = (who.to_string(), v["role"].as_str().unwrap_or("viewer").to_string());
+            let agent_fragment = w.computer["agents"].as_array().and_then(|l| l.iter().find(|a| a["identity"] == who.as_str())).and_then(|a| a["fragment"].as_str()).map(str::to_string);
+            let at = w.now();
+            let f = w.fragments.get_mut(&fragment).unwrap();
+            if !f.members.iter().any(|m| m.principal == who) {
+                f.members.push(Member { principal: who.clone(), role: added.clone(), kind: if agent_fragment.is_some() { "agent" } else { "person" }.into(), added_at: at });
+                if let Some(a) = agent_fragment {
+                    w.append(&a, "tasks", &who, json!({ "kind": "joined", "fragment": fragment }));
+                }
+            }
+            answer(StatusCode::OK, json!({ "principal": who, "role": added }))
         }
         (Method::GET, ["members"]) => {
             let list: Vec<Value> = f.members.iter().map(|m| json!({ "principal": m.principal, "role": m.role, "kind": m.kind, "addedAt": m.added_at, "addedBy": "npub1paul" })).collect();

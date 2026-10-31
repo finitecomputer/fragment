@@ -39,6 +39,7 @@ mod connections;
 mod channels;
 mod computer;
 mod deliveries;
+mod doors;
 mod ended;
 mod cs;
 mod error;
@@ -69,6 +70,7 @@ mod routed;
 mod schedules;
 mod schema;
 mod search;
+mod searchable;
 mod runs_on;
 mod serve;
 mod share;
@@ -222,7 +224,7 @@ pub(crate) fn authenticate(req: &Request, url: &Url, payload: Payload<'_>) -> Ce
 /// the body, and the answer are one definition both ends compile against).
 /// Its refusals pass through; not reaching it, a failure inside it, or an
 /// answer that does not decode is `registry_unavailable`: nothing signed
-/// is decided without it (docs/finite-integration.md, rule 7). A registry
+/// is decided without it (docs/cloudflare-v1.md, R15, rule 7). A registry
 /// of another release refuses the call before it reads it, and is asked
 /// again a few times, then is `deploying` (routed.rs, `send_again`): a
 /// deploy going out never has one release act and the other read its
@@ -479,7 +481,7 @@ pub(crate) async fn create_fragment(env: &Env, cfg: &Config, url: &Url, mut crea
         None => maker.id.clone(),
     };
     may_create(env, &payer).await?;
-    let extra: Vec<(&'static str, String)> = org.iter().map(|o| (fragment::ORG_HEADER, o.clone())).collect();
+    let extra: Vec<(String, String)> = org.iter().map(|o| (fragment::ORG_HEADER.to_string(), o.clone())).collect();
     let drawn = names.len() > 1;
     let mut made = None;
     // bounded: at most NAME_DRAWS names
@@ -500,11 +502,13 @@ pub(crate) async fn create_fragment(env: &Env, cfg: &Config, url: &Url, mut crea
     let made = made.ok_or_else(|| CellError::new(ErrorCode::AlreadyExists, format!("{NAME_DRAWS} names drawn for this label were all taken: try again")))?;
     if let (Some(agent), 200) = (agent, made.status_code()) {
         let put = Request::new(url.as_str(), Method::Put)?;
-        let role = serde_json::to_vec(&json!({ "role": "editor" })).map_err(|e| CellError::host(e.to_string()))?;
+        // a connector has no editor but its owner: its maker's agent views it (doors.rs)
+        let connector = create.template.as_deref().is_some_and(|t| fragment_templates::blessed::CONNECTORS.contains(&t));
+        let role = serde_json::to_vec(&json!({ "role": if connector { "viewer" } else { "editor" } })).map_err(|e| CellError::host(e.to_string()))?;
         let routed = Routed { name: create.name.clone(), url: url.clone(), signed: Some(maker), credential: None };
         let mut added = forward(env, &put, bytes_body(role), Forward { routed, inner: format!("/api/members/{agent}"), extra: vec![] }).await?;
         if added.status_code() != 200 {
-            return Err(CellError::host(format!("{} was made, but its agent was not made an editor: {}", create.name, added.text().await.unwrap_or_default())));
+            return Err(CellError::host(format!("{} was made, but its agent was not made a member: {}", create.name, added.text().await.unwrap_or_default())));
         }
     }
     Ok(made)
@@ -868,14 +872,21 @@ fn check_name(name: &str) -> CellResult<()> {
     }
 }
 
+/// Headers an inbox delivery passes on at most, besides the inbox's token
+/// and hop count (`manifest::inbox_header_ok`): read in name order, so
+/// high enough that Cloudflare's own (`cf-…`, a few dozen at most) never
+/// crowd out a webhook's `x-…`; their bytes are Cloudflare's to bound.
+const INBOX_HEADERS_MAX: usize = 100;
+
 /// A request for a fragment's supervisor: what the router decided, and
 /// where it goes inside.
 struct Forward {
     routed: Routed,
     /// The inner path; the query string travels only in `routed.url`.
     inner: String,
-    /// Headers this route passes on purpose (the inbox's token and hop count).
-    extra: Vec<(&'static str, String)>,
+    /// Headers this route passes on purpose (the inbox's token, hop count,
+    /// and the headers an inbox may read its secret from).
+    extra: Vec<(String, String)>,
 }
 
 /// A blob upload declares its length, at most `limits::BLOB_MAX_BYTES`:
@@ -1051,7 +1062,7 @@ async fn site(mut req: Request, env: &Env, cfg: &Config, url: &Url, name: &str, 
         Some(_) => req.inner().body().map(worker::wasm_bindgen::JsValue::from),
         None => bytes_body(body),
     };
-    let extra = identity.map(|id| vec![(address::IDENTITY_HEADER, id.to_string())]).unwrap_or_default();
+    let extra = identity.map(|id| vec![(address::IDENTITY_HEADER.to_string(), id.to_string())]).unwrap_or_default();
     let mut resp = forward(env, &req, body, Forward { routed, inner: format!("/serve/{rest}"), extra }).await?;
     // the fragment's own refusal, never its app's answer
     if resp.headers().has(serve::REFUSAL)? {
@@ -1387,7 +1398,7 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
         (_, ["api", "f", name, "codestorage", rest @ ..]) => {
             let name = named_fragment(name)?;
             let token = req.headers().get("authorization")?.and_then(|a| a.strip_prefix("Bearer ").map(str::to_string));
-            let extra = token.map(|t| (fragment::STORAGE_TOKEN_HEADER, t)).into_iter().collect();
+            let extra = token.map(|t| (fragment::STORAGE_TOKEN_HEADER.to_string(), t)).into_iter().collect();
             let body = req.inner().body().map(worker::wasm_bindgen::JsValue::from);
             let routed = Routed { name, url: url.clone(), signed: None, credential: None };
             forward(env, &req, body, Forward { routed, inner: format!("/api/codestorage/{}", rest.join("/")), extra }).await
@@ -1402,15 +1413,22 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
                 (_, [] | [""]) => return Err(CellError::new(ErrorCode::NotFound, format!("no route {path}"))),
                 _ => format!("/api/{}", rest.join("/")),
             };
-            let body = read_body(&mut req, limits::BODY_MAX_BYTES).await?;
+            // a search source is written whole, so its upsert's body is larger
+            let max = if rest == ["search", "upsert"] { fragment_proto::search::UPSERT_MAX_BYTES } else { limits::BODY_MAX_BYTES };
+            let body = read_body(&mut req, max).await?;
             // the inbox takes its token instead of a signature
             let mut extra = vec![];
             let principal = match inner.as_str() {
                 "/api/inbox" => {
                     for k in ["x-fragment-inbox-token", jobs::HOPS_HEADER] {
                         if let Some(v) = req.headers().get(k)? {
-                            extra.push((k, v));
+                            extra.push((k.to_string(), v));
                         }
+                    }
+                    // a webhook's own secret header, whichever its code names
+                    // (`inbox`): none the platform's objects trust
+                    for (k, v) in req.headers().entries().filter(|(k, _)| fragment_core::manifest::inbox_header_ok(k)).take(INBOX_HEADERS_MAX) {
+                        extra.push((k, v));
                     }
                     None
                 }

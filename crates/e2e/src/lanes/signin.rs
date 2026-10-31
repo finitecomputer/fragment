@@ -232,63 +232,6 @@ fn deploying_cases(s: &mut Suite, api: &Api) -> Result<()> {
     Ok(())
 }
 
-/// A deploy going out, as Cloudflare does it: an object it keeps busy
-/// keeps the release before for minutes (on the preview, 2026-10-21, for
-/// about five after 7 of 17 deploys, its refusals of the new release's
-/// calls the business that kept it). So an object that refuses a call
-/// from a release deployed after its own restarts (fragment_core::release
-/// `restarts`), and the router's next ask meets its next instance, the new
-/// release's; one deployed before its own (an old Worker at a new object)
-/// is refused and restarts nothing. The registry stands for both
-/// (`skewFor` with `deployed`), each through the check every call meets,
-/// on the one call a person's `GET /api/identities/me` makes of it
-/// (`/view`); a restart is told by its hooks and counts going with it (in
-/// memory, its instance's).
-fn restart_cases(s: &mut Suite, api: &Api) -> Result<()> {
-    let asks = fragment_core::release::ASKS as u64;
-    let session = api.sign_in("restart@e2e.test")?;
-    let me = |api: &Api| {
-        api.call(Call {
-            method: "GET",
-            url: format!("{}/api/identities/me", api.base),
-            cookie: Some(format!("fragment_session={session}")),
-            extra: vec![("x-fragment-shell", "1".into()), ("sec-fetch-site", "same-origin".into())],
-            ..Call::default()
-        })
-    };
-    let skew = |times: u64, deployed: u64| -> Result<()> {
-        let r = api.unsigned("POST", "/api/test/registry", Some(&json!({ "skewFor": { "path": "/view", "times": times, "deployed": deployed } })))?;
-        anyhow::ensure!(r.status == 200 && r.body["skewFor"]["times"] == times && r.body["skewFor"]["deployed"] == deployed, "the skewFor test hook: {r}");
-        Ok(())
-    };
-    // invalid: a registry deployed after the caller's release (at the last
-    // second there is) refuses its every ask, and stays the instance it was
-    skew(asks, u64::MAX)?;
-    let (_, skewed) = registry_counts(api)?;
-    let refused = me(api)?;
-    let (_, skewed_after) = registry_counts(api)?;
-    s.ok(
-        "an object of a release deployed after the caller's refuses its every ask (503 deploying) and does not restart: the caller is the one a deploy replaced",
-        refused.status == 503 && refused.code() == Some(ErrorCode::Deploying) && skewed_after - skewed == asks,
-        format!("refused {} of {asks} asks, the same instance's count: {refused}", skewed_after - skewed),
-    );
-    // valid: a registry deployed before it (at 0), with far more refusals
-    // set than the router asks, restarts at its first, and the next ask is
-    // answered
-    skew(fragment_core::release::ASKS as u64 * 25, 0)?;
-    let answered = me(api)?;
-    let (calls, skewed_now) = registry_counts(api)?;
-    s.ok(
-        "an object of a release deployed before the caller's restarts at its first refusal, and the router's next ask meets its next instance: the person's call is answered, the refusals set for 100 asks gone with the old instance",
-        answered.status == 200 && answered.body["email"] == "restart@e2e.test" && skewed_now == 0,
-        format!("since the restart: {calls} calls, {skewed_now} refused: {answered}"),
-    );
-    // replay: the restarted registry answers again, nothing set on it
-    let again = me(api)?;
-    s.ok("and the same call again is answered at once, by the same new instance", again.status == 200 && registry_counts(api)?.1 == 0, &again);
-    Ok(())
-}
-
 /// A deploy's probe, `GET /healthz/objects` (docs/api.md, Health), which
 /// `cargo xtask deploy` asks until every object class answers its release:
 /// the Registry's skew hook stands in for an object of another release.
@@ -305,7 +248,7 @@ fn probe_cases(s: &mut Suite, api: &Api) -> Result<()> {
     );
     // invalid: an object of another release refuses it, and the probe names
     // that object and its release, the others answering as before
-    let skew = api.unsigned("POST", "/api/test/registry", Some(&json!({ "skewFor": { "path": "/__probe", "times": 1, "deployed": u64::MAX } })))?;
+    let skew = api.unsigned("POST", "/api/test/registry", Some(&json!({ "skewFor": { "path": "/__probe", "times": 1 } })))?;
     anyhow::ensure!(skew.status == 200, "the skewFor test hook: {skew}");
     let r = probe()?;
     s.ok(
@@ -517,7 +460,6 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
         &r,
     );
     deploying_cases(s, api)?;
-    restart_cases(s, api)?;
     probe_cases(s, api)?;
     let r = api.unsigned("GET", "/auth/login?invitation_token=Z1uX3Rbw_cIl-5fIG", None)?;
     s.ok("an invitation's token rides along to WorkOS (it lets its invitee sign up)", r.header("location").contains("&invitation_token=Z1uX3Rbw_cIl-5fIG"), &r);
@@ -944,8 +886,8 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
     }
     s.ok("nor does a fragment origin's sign-in", escaped.is_empty(), format!("{escaped:?}"));
 
-    // the browser and the CLI decide alike, and as the model says (docs/MODEL.md,
-    // Visibility): public, link, members; a page, a file, the file list, an app
+    // the browser and the CLI decide alike, and as the model says (docs/api.md,
+    // Principals and access): public, link, members; a page, a file, the file list, an app
     // route (which sees who is asking), operations
     let member_f2 = site_cookie(api, &member_session, &f)?;
     let outsider_f = site_cookie(api, &outsider_session, &f)?;

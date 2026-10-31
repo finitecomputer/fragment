@@ -1,5 +1,4 @@
-//! Jobs, triggers, and the inbox (docs/MODEL.md, Operations; phase 2
-//! slice D).
+//! Jobs, triggers, and the inbox (docs/api.md, Jobs and triggers).
 //!
 //! A **run** is one execution of an operation outside a request: a job
 //! someone called, or a mutation or job a trigger started. Each run is a
@@ -308,6 +307,13 @@ struct FinishCall {
     run: i64,
     attempt: u32,
     error: String,
+}
+
+/// What admits a delivery to a fragment's inbox: its inbox token, or, when
+/// its code names an inbox secret (`InboxSecret`), that header holding it.
+pub(crate) enum Admits {
+    Token(String),
+    Secret { header: String, name: String, given: String },
 }
 
 impl FragmentCell {
@@ -662,6 +668,8 @@ impl FragmentCell {
                     "via": run.via.as_str(),
                     "fragment": self.name()?,
                     "channels": self.declared_channels()?.keys().collect::<Vec<_>>(),
+                    // a connector's binding, its door's (doors.rs), or null
+                    "door": self.job_door()?,
                 });
                 let results: Vec<Value> = results.iter().map(|r| serde_json::to_value(r).expect("a step result serializes")).collect();
                 let answer = facet.call("__job", &[op.as_str().into(), input, meta, Value::Array(results)]).await.map_err(|e| match e.code {
@@ -913,15 +921,37 @@ impl FragmentCell {
         }
     }
 
-    /// `job.fetch(url, init)`: the fragment's one way out. Header values
-    /// may name secrets as `{{NAME}}`; they are opened here, at the egress
-    /// point, and never reach the app. A step is performed at least once (a
+    /// `job.fetch(url, init)`: the fragment's one way out. Header values,
+    /// and the URL's path and query, may name secrets as `{{NAME}}`; they
+    /// are opened here, at the egress point, and never reach the app (a
+    /// failure's message names a URL's secrets as their placeholders). A step is performed at least once (a
     /// crash after the request, before its answer is kept, sends it again),
     /// so a request that may change something names its step in an
     /// `Idempotency-Key`, the same on every try and replay, unless the job
     /// named its own: a vendor that honours the header acts on it once.
+    /// Secret `name`'s value, for a fetch to `url`: a secret's name, set,
+    /// for that host.
+    async fn fill(&self, name: &str, url: &url::Url) -> Result<String, StepFail> {
+        if !valid_secret_name(name) {
+            return Err(permanent(format!("{{{{{name}}}}} is not a secret name (^[A-Z][A-Z0-9_]*$)")));
+        }
+        // its hosts and its sealed value read in one statement, so the value
+        // opened is the one those hosts were set with
+        let stored = self
+            .stored_secret(name)
+            .map_err(|e| StepFail::Retry(e.message))?
+            .ok_or_else(|| permanent(format!("no secret named {name} (set it with `fragment secret set <fragment> {name} --to <the API's host>`)")))?;
+        fragment_core::secrets::may_fill(&stored.hosts, url, self.cfg.egress_local).map_err(|why| permanent(why.message(name)))?;
+        let secret = self.open_secret(name, &stored.sealed).await.map_err(|e| StepFail::Retry(e.message))?;
+        String::from_utf8(secret).map_err(|_| permanent(format!("secret {name} is not UTF-8 text")))
+    }
+
     async fn step_fetch(&self, run: &RunRow, index: u32, f: Fetch) -> Result<Value, StepFail> {
         let url = egress::check(&f.url, self.cfg.egress_local).map_err(permanent)?;
+        // a connector bound as a door that is shut sends nothing (doors.rs)
+        if let Some(why) = self.door_shut().map_err(|e| StepFail::Retry(e.message))? {
+            return Err(permanent(why));
+        }
         let method = match f.method.to_ascii_uppercase().as_str() {
             "GET" => Method::Get,
             "POST" => Method::Post,
@@ -934,9 +964,10 @@ impl FragmentCell {
         if f.headers.len() > FETCH_HEADERS_MAX {
             return Err(permanent(format!("at most {FETCH_HEADERS_MAX} headers")));
         }
+        let in_url = fragment_core::secrets::url_placeholders(&url);
         // a request carrying a secret goes to its URL's host, the one its
         // secrets' hosts are checked against, and to no host a header names
-        if f.headers.values().any(|v| !placeholders(v).is_empty()) {
+        if !in_url.is_empty() || f.headers.values().any(|v| !placeholders(v).is_empty()) {
             if let Some(h) = fragment_core::secrets::routing_header(f.headers.keys().map(String::as_str)) {
                 return Err(permanent(format!("a fetch that carries a secret goes to its URL's host alone: it sets no {h} header")));
             }
@@ -945,22 +976,29 @@ impl FragmentCell {
         for (k, given) in &f.headers {
             let mut value = given.clone();
             for name in placeholders(given) {
-                if !valid_secret_name(name) {
-                    return Err(permanent(format!("{{{{{name}}}}} is not a secret name (^[A-Z][A-Z0-9_]*$)")));
-                }
-                // its hosts and its sealed value read in one statement, so
-                // the value opened is the one those hosts were set with
-                let stored = self
-                    .stored_secret(name)
-                    .map_err(|e| StepFail::Retry(e.message))?
-                    .ok_or_else(|| permanent(format!("no secret named {name} (set it with `fragment secret set <fragment> {name} --to <the API's host>`)")))?;
-                fragment_core::secrets::may_fill(&stored.hosts, &url, self.cfg.egress_local).map_err(|why| permanent(why.message(name)))?;
-                let secret = self.open_secret(name, &stored.sealed).await.map_err(|e| StepFail::Retry(e.message))?;
-                let secret = String::from_utf8(secret).map_err(|_| permanent(format!("secret {name} is not UTF-8 text")))?;
+                let secret = self.fill(name, &url).await?;
                 value = value.replace(&format!("{{{{{name}}}}}"), &secret);
             }
             headers.set(k, &value).map_err(|e| permanent(format!("header {k}: {e}")))?;
         }
+        // the URL's own: checked against its host as it stands, then filled
+        let mut opened = BTreeMap::new();
+        for name in &in_url {
+            opened.insert(name.clone(), self.fill(name, &url).await?);
+        }
+        // a URL that names no secret goes as the job wrote it
+        let url = if opened.is_empty() {
+            url
+        } else {
+            fragment_core::secrets::fill_url(&url, |name| opened.get(name).cloned().ok_or_else(|| format!("{{{{{name}}}}} unopened"))).map_err(|why| match why {
+                fragment_core::secrets::UrlUnfilled::Value(why) => permanent(why),
+                fragment_core::secrets::UrlUnfilled::Moved => permanent("a secret's value would change where this fetch goes (its host, or its path's segments or query's parameters): it is not sent"),
+            })?
+        };
+        // what goes back to the job names the URL's secrets as it wrote them:
+        // a failure's message, and an answer that echoes its URL (a redirect's
+        // `location`, an error page)
+        let redact = |text: String| fragment_core::secrets::redact(text, &opened);
         if !matches!(method, Method::Get | Method::Head) && !f.headers.keys().any(|k| k.eq_ignore_ascii_case(IDEMPOTENCY_HEADER)) {
             let key = format!("{}-s{index}", self.run_key(run.id).map_err(|e| StepFail::Retry(e.message))?);
             headers.set(IDEMPOTENCY_HEADER, &key).map_err(|e| permanent(e.to_string()))?;
@@ -976,10 +1014,10 @@ impl FragmentCell {
             }
             init.with_body(Some(JsValue::from_str(&body)));
         }
-        let req = Request::new_with_init(url.as_str(), &init).map_err(|e| permanent(e.to_string()))?;
+        let req = Request::new_with_init(url.as_str(), &init).map_err(|e| permanent(redact(e.to_string())))?;
         let host = url.host_str().unwrap_or("").to_string();
         let max = limits::FETCH_RESPONSE_MAX_BYTES;
-        let answer = crate::cs::fetch_all(req, Duration::from_millis(limits::FETCH_TIMEOUT_MS), max).await.map_err(|e| StepFail::Retry(format!("{host}: {}", e.message)))?;
+        let answer = crate::cs::fetch_all(req, Duration::from_millis(limits::FETCH_TIMEOUT_MS), max).await.map_err(|e| StepFail::Retry(redact(format!("{host}: {}", e.message))))?;
         let status = answer.status;
         if status == 429 || status >= 500 {
             return Err(StepFail::Retry(format!("{host} answered {status}")));
@@ -987,8 +1025,8 @@ impl FragmentCell {
         if answer.cut {
             return Err(permanent(format!("{host} answered more than {max} bytes; a fetch reads at most that")));
         }
-        let out_headers: Map<String, Value> = answer.headers.entries().map(|(k, v)| (k.to_ascii_lowercase(), Value::String(v))).collect();
-        Ok(json!({ "status": status, "headers": out_headers, "body": String::from_utf8_lossy(&answer.body) }))
+        let out_headers: Map<String, Value> = answer.headers.entries().map(|(k, v)| (k.to_ascii_lowercase(), Value::String(redact(v)))).collect();
+        Ok(json!({ "status": status, "headers": out_headers, "body": redact(String::from_utf8_lossy(&answer.body).into_owned()) }))
     }
 
     /// `job.publish(channel, body, kind)`: keyed by (run, step), so a
@@ -997,7 +1035,7 @@ impl FragmentCell {
     async fn step_publish(&self, run: &RunRow, index: u32, channel: &str, kind: &str, body: Value) -> Result<Value, StepFail> {
         let retry = |e: CellError| StepFail::Retry(e.message);
         // the one check a mutation's records meet too
-        fragment_core::effects::check_record(channel, kind, &body, &self.declared_channels().map_err(retry)?).map_err(permanent)?;
+        fragment_core::effects::check_record(channel, kind, &body, &self.declared_channels().map_err(retry)?, self.hosted_door().map_err(retry)?.as_ref()).map_err(permanent)?;
         let key = format!("{JOB_ID_PREFIX}{}", run.id);
         let (record, appended) = self.append_once(channel, &run.principal, kind, &body, &key, i64::from(index)).map_err(retry)?;
         self.published(&record, appended, run.depth + 1, &mut js::Laps::start()).await.map_err(retry)?;
@@ -1369,10 +1407,22 @@ impl FragmentCell {
     /// appended to the `inbox` channel; the operations it triggers run with
     /// the record. Records whose runs have not succeeded are pending; past
     /// the cap a post is refused, so overload is a 429, not memory.
-    pub(crate) async fn inbox(&self, token: &str, hops: u32, body: &[u8]) -> CellResult<Response> {
+    pub(crate) async fn inbox(&self, given: Admits, hops: u32, body: &[u8]) -> CellResult<Response> {
         self.name()?;
-        if !crate::serve::eq_ct(token, &self.must(MetaKey::InboxToken)?) {
-            return Err(CellError::new(ErrorCode::Forbidden, "bad inbox token (x-fragment-inbox-token, or ?t=)"));
+        match given {
+            Admits::Token(token) => {
+                if !crate::serve::eq_ct(&token, &self.must(MetaKey::InboxToken)?) {
+                    return Err(CellError::new(ErrorCode::Forbidden, "bad inbox token (x-fragment-inbox-token, or ?t=)"));
+                }
+            }
+            Admits::Secret { header, name, given } => {
+                let refused = || CellError::new(ErrorCode::Forbidden, format!("bad inbox secret ({header}): this inbox takes a delivery only with its secret there"));
+                let stored = self.stored_secret(&name)?.ok_or_else(refused)?;
+                let value = self.open_secret(&name, &stored.sealed).await?;
+                if given.is_empty() || !crate::serve::eq_ct(&given, &String::from_utf8_lossy(&value)) {
+                    return Err(refused());
+                }
+            }
         }
         // a delivery to the inbox is a write
         self.writable().await?;

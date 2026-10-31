@@ -103,12 +103,7 @@ impl FragmentCell {
             return Err(CellError::invalid("door: a connector's id (1 to 32 lower-case letters, digits and single dashes)"));
         }
         let (owner, agent) = (self.owner()?.person().ok_or_else(|| CellError::host("an agent fragment is a person's"))?.to_string(), self.name()?);
-        // a test fleet's lever may stand in for the deployment's (`connectors`)
-        let lever = match self.meta(MetaKey::TestConnectors)? {
-            Some(p) => Some(fragment_core::connectors::Policy::parse(&p).map_err(|e| CellError::host(format!("the connectors lever: {e}")))?),
-            None => None,
-        };
-        let policy = lever.as_ref().unwrap_or(&self.cfg.connectors);
+        let policy = self.connector_policy()?;
         policy.authorize(&owner, &agent, door, action).map_err(|why| CellError::new(ErrorCode::Forbidden, format!("door {door} {why}")))
     }
 
@@ -259,6 +254,19 @@ impl FragmentCell {
                 }
                 Ok(json!({ "ok": true }))
             }
+            // a connector fragment of its owner's, bound as one of its doors
+            // by them (doors.rs): it is theirs, and an agent, and says so
+            "door-actor" => {
+                let text = |k: &str| body[k].as_str().unwrap_or("");
+                if self.must(MetaKey::Owner)? != text("owner") {
+                    return Err(CellError::new(ErrorCode::Forbidden, "only the agent's owner binds a connector as its door"));
+                }
+                let identity = self.meta(MetaKey::AgentIdentity)?.ok_or_else(|| CellError::new(ErrorCode::Forbidden, "that fragment is no agent that has run on a computer"))?;
+                self.door_allowed(text("door"), Action::Link)?;
+                let actor = text("actor");
+                self.event("door.hosted", &format!("its {} door is {actor}, bound by its owner", text("door")), json!({ "door": text("door"), "actor": actor }));
+                Ok(json!({ "identity": identity }))
+            }
             "subscribe" => {
                 let b: Subscribe = serde_json::from_value(body.clone()).map_err(|e| CellError::invalid(format!("body: {e}")))?;
                 if !valid_channel_name(&b.channel) {
@@ -391,7 +399,7 @@ impl FragmentCell {
 
     /// The fragment's owner as a caller, for what the platform does on the
     /// owner's behalf here (adding the agent as a member).
-    fn as_owner(&self) -> CellResult<crate::fragment::Caller> {
+    pub(crate) fn as_owner(&self) -> CellResult<crate::fragment::Caller> {
         let owner = self.owner()?.person().ok_or_else(|| CellError::host("an agent fragment is a person's"))?.to_string();
         let identity = fragment_proto::Identity { id: owner, kind: IdentityKind::Person, owner: None, held: None, orgs: vec![] };
         let signed = crate::routed::Signed::new(identity, None);

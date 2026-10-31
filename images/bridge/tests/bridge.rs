@@ -103,6 +103,77 @@ async fn a_reply() {
     bridge.stop().await;
 }
 
+/// A runtime that answers each turn with what it heard, in its own words,
+/// so which runtime ran a turn shows in its reply.
+struct Heard;
+
+impl fragment_bridge::runtime::Runtime for Heard {
+    fn name(&self) -> &'static str {
+        "heard"
+    }
+
+    fn run(self: Box<Self>, mut io: fragment_bridge::runtime::RuntimeIo) -> fragment_bridge::runtime::RuntimeFuture {
+        use fragment_bridge::runtime::{Command, Event};
+        Box::pin(async move {
+            let _ = io.events.send(Event::Connected(true)).await;
+            let mut shutdown = io.shutdown.clone();
+            // bounded by the bridge: ends at its shutdown, or when it drops its sender
+            loop {
+                tokio::select! {
+                    c = io.commands.recv() => match c {
+                        Some(Command::Start(ts)) => {
+                            let _ = io.events.send(Event::Reply { turn: ts.turn.clone(), part: 1, text: format!("heard: {}", ts.text) }).await;
+                            let _ = io.events.send(Event::End { turn: ts.turn, outcome: records::Outcome::Idle }).await;
+                        }
+                        Some(_) => {}
+                        None => return Ok(()),
+                    },
+                    _ = fragment_bridge::net::stopped(&mut shutdown) => return Ok(()),
+                }
+            }
+        })
+    }
+}
+
+/// Goal: each agent runs on the runtime its `agent.json` names, read as the
+/// bridge starts: Juniper's names none (the default, here the scripted
+/// agent), Rowan's names `heard`, and Sage's names `claude`, which this
+/// bridge does not run, so Sage's turn is refused saying so and nothing
+/// answers it. Restart: the next life reads them again.
+#[tokio::test]
+async fn each_agent_runs_on_the_runtime_its_agent_json_names() {
+    use fragment_bridge::runtime::{Runtimes, DEFAULT};
+    let fake = Fake::start("127.0.0.1:0", &["juniper", "rowan", "sage"]).await;
+    fake.with(|w| {
+        w.fragments.get_mut("rowan--k3x9").expect("rowan's fragment").files.insert("agent.json".into(), bytes::Bytes::from(r#"{"tier":"cheap","runtime":"heard"}"#));
+        w.fragments.get_mut("sage--k3x9").expect("sage's fragment").files.insert("agent.json".into(), bytes::Bytes::from(r#"{"runtime":"claude"}"#));
+    });
+    let (j, r, s) = (fake.chat("j-talk", &["juniper"]), fake.chat("r-talk", &["rowan"]), fake.chat("s-talk", &["sage"]));
+    let dir = support::dir("runtimes");
+    let runtimes = || Runtimes::new().with(DEFAULT, support::script()).with("heard", Box::new(Heard));
+    let bridge = support::start_runtimes(support::config(&fake.url(), &dir, support::settings()), runtimes());
+    following(&fake, 6).await;
+    for chat in [&j, &r, &s] {
+        fake.say(chat, &person("paul"), json!({ "text": "hi" }));
+    }
+    fake.until(WAIT, "each turn ended", |w| [&j, &r, &s].iter().all(|c| !w.bodies(c, "work", "turn.end").is_empty())).await;
+    fake.with(|w| {
+        assert_eq!(replies(w, &j)[0]["text"], "echo: [paul] hi", "the default runtime");
+        assert_eq!(replies(w, &r)[0]["text"], "heard: hi", "the runtime its agent.json names");
+        assert!(replies(w, &s).is_empty(), "no runtime answers for a runtime this bridge lacks");
+        assert_eq!(w.bodies(&s, "work", "turn.end")[0]["error"], "this computer doesn't run claude agents");
+    });
+    bridge.stop().await;
+
+    // restart: the same state, read again
+    let bridge = support::start_runtimes(support::config(&fake.url(), &dir, support::settings()), runtimes());
+    following(&fake, 6).await;
+    fake.say(&r, &person("paul"), json!({ "text": "again" }));
+    fake.until(WAIT, "rowan's second answer", |w| replies(w, &r).len() == 2).await;
+    fake.with(|w| assert_eq!(replies(w, &r)[1]["text"], "heard: again"));
+    bridge.stop().await;
+}
+
 /// Goal: a first start makes the bridge's state directory, and so `/data`,
 /// at once, though it has read nothing of the platform yet and run no turn,
 /// so a sleep then has a `/data` to save (the platform's save fails on a
@@ -154,6 +225,31 @@ async fn streaming_drafts_then_the_final() {
         let texts: Vec<&str> = w.drafts.iter().filter(|d| d.2 == turn).filter_map(|d| d.3.as_deref()).collect();
         assert!(texts.iter().all(|t| "echo: [paul] tell me a long story please".starts_with(t)), "each draft is the reply so far: {texts:?}");
     });
+    bridge.stop().await;
+}
+
+/// Goal: a reply is never held behind its turn's drafts. Drafts go at most
+/// one a `DRAFT_INTERVAL_MS`; a draft that would wait out its interval
+/// while its turn's reply is already behind it is moot, so the reply goes
+/// at once (it waited up to the interval, and a teammate's answer, in its
+/// asker's lane, overtook it: the Docker lane's `teammates_ask_each_other`).
+/// The reply streams in drafts 1 ms apart, so it all comes within one
+/// interval of its first draft.
+#[tokio::test]
+async fn a_reply_is_not_held_behind_its_drafts_interval() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    let chat = fake.chat("talk", &["juniper"]);
+    let dir = support::dir("drafts-moot");
+    let bridge = support::start(support::config(&fake.url(), &dir, support::settings()), support::script_paced(Duration::from_millis(1)));
+    following(&fake, 2).await;
+    let said = fake.say(&chat, &person("paul"), json!({ "text": "tell me a long story please" }));
+    let turn = turn_of("juniper", &chat, seq(&said));
+    fake.until(WAIT, "its first draft", |w| w.drafts.iter().any(|d| d.2 == turn && d.3.is_some())).await;
+    let drafted = Instant::now();
+    fake.until(WAIT, "its reply", |w| replies(w, &chat).iter().any(|r| r["turn"] == turn)).await;
+    let held = drafted.elapsed();
+    // held, it came the whole interval after; seen within half of it, it was not
+    assert!(held < Duration::from_millis(fragment_bridge::limits::DRAFT_INTERVAL_MS / 2), "its reply came {held:?} after its first draft, not held for the interval");
     bridge.stop().await;
 }
 
@@ -453,17 +549,32 @@ async fn a_question_cut_by_a_crash_is_lost_and_its_answer_is_a_turn() {
 
         let bridge = support::start_killable(cfg, support::counting(support::script(), &runs));
         fake.until(WAIT, "the cut turn's end", |w| !ends_of(w, &chat, &turn).is_empty()).await;
+        // phase 4: the state the crash left knows the turn waited on its
+        // person (their answer is its next turn): not continued; an older
+        // state, or none, cannot know it asked: continued once, first
+        let cont = records::continuation_id(&turn);
+        let continued = wakes != "during";
+        if continued {
+            fake.until(WAIT, "its continuation's end", |w| !ends_of(w, &chat, &cont).is_empty()).await;
+        }
         let answer = said_and_ended(&fake, &chat, "Fernando").await;
-        assert_eq!(runs.all(), vec![turn.clone(), answer.clone()], "{wakes}: the asking turn ran once, and the answer is a turn of its own");
+        let want = if continued { vec![turn.clone(), cont.clone(), answer.clone()] } else { vec![turn.clone(), answer.clone()] };
+        assert_eq!(runs.all(), want, "{wakes}: the asking turn ran once, and the answer is a turn of its own");
         fake.with(|w| {
             assert_eq!(ends_of(w, &chat, &turn), vec![json!({ "kind": "turn.end", "turn": turn, "outcome": "error", "error": "lost when the computer restarted" })], "{wakes}: one end, as lost");
             let r = replies(w, &chat);
-            assert_eq!(r.len(), 2, "{wakes}: the question, then the answer's own reply: {r:?}");
+            assert_eq!(r.len(), if continued { 3 } else { 2 }, "{wakes}: the question, its continuation's, then the answer's own reply: {r:?}");
             assert_eq!(r[0], json!({ "text": "What should I call it?", "turn": turn }), "{wakes}");
-            // the answer's turn is the first after the cut one: told of it (P5)
-            let text = r[1]["text"].as_str().unwrap_or("");
-            assert_eq!(r[1]["turn"], json!(answer), "{wakes}");
-            assert!(text.starts_with("echo: [paul] Fernando\n\n(told: Your previous turn in this chat was cut short") && text.contains("It was answering: “name my plant, ask-me”") && text.contains("It had replied: “What should I call it?”"), "{wakes}: {text}");
+            // the first turn after the cut one is told of it (P5): its
+            // continuation, else the answer's
+            let told = &r[1];
+            let text = told["text"].as_str().unwrap_or("");
+            let said = if continued { "echo: [your computer] I restarted" } else { "echo: [paul] Fernando" };
+            assert_eq!(told["turn"], json!(if continued { &cont } else { &answer }), "{wakes}");
+            assert!(text.starts_with(said) && text.contains("(told: Your previous turn in this chat was cut short") && text.contains("It was answering: “name my plant, ask-me”") && text.contains("It had replied: “What should I call it?”"), "{wakes}: {text}");
+            if continued {
+                assert_eq!(r[2], json!({ "text": "echo: [paul] Fernando", "turn": answer }), "{wakes}: told once");
+            }
             assert_eq!(ends_of(w, &chat, &answer), vec![json!({ "kind": "turn.end", "turn": answer, "outcome": "idle" })], "{wakes}");
         });
         bridge.stop().await;
@@ -536,8 +647,12 @@ async fn catch_up_after_a_restart_without_a_duplicate() {
         let end = w.bodies(&chat, "work", "turn.end").into_iter().find(|e| e["turn"] == ts).expect("the slow turn ended");
         assert_eq!(end["outcome"], "error");
         assert!(!replies(w, &chat).iter().any(|r| r["turn"] == ts), "never run again");
-        assert_eq!(replies(w, &chat).len(), 2, "one and two, once each");
-        assert_eq!(w.bodies(&chat, "work", "turn.start").len(), 3, "three turns, each started once");
+        // phase 4: continued once, by the computer, before two
+        let cont = records::continuation_id(&ts);
+        let r = replies(w, &chat);
+        assert_eq!(r.len(), 3, "one, the slow turn's continuation, and two, once each: {r:?}");
+        assert!(r[1]["turn"] == cont.as_str() && r[1]["text"].as_str().is_some_and(|t| t.starts_with("echo: [your computer] I restarted")), "{r:?}");
+        assert_eq!(w.bodies(&chat, "work", "turn.start").len(), 4, "four turns, each started once");
     });
     // and a second restart, with nothing new, starts nothing
     bridge.stop().await;
@@ -545,7 +660,7 @@ async fn catch_up_after_a_restart_without_a_duplicate() {
     following(&fake, 2).await;
     tokio::time::sleep(Duration::from_millis(500)).await;
     fake.with(|w| {
-        assert_eq!(w.bodies(&chat, "work", "turn.start").len(), 3);
+        assert_eq!(w.bodies(&chat, "work", "turn.start").len(), 4, "nothing more");
         let subs = &w.fragments[&chat].subscriptions;
         assert_eq!(subs.len(), 1, "one wake subscription, however many boots: {subs:?}");
         assert_eq!(subs[0]["wake"], true);
@@ -1101,7 +1216,7 @@ async fn a_routine_waits_for_its_simplex_chat() {
     // its chat made by its name (its poster's `ensure_chat`; no core runs here to start one): the routine runs there
     let bridge = support::start(config(), support::script());
     let api = fragment_bridge::api::Api::new(&fake.url()).expect("an address");
-    let juniper = fragment_bridge::runtime::Agent { fragment: "juniper--k3x9".into(), identity: "npub1juniper".into(), name: "juniper".into(), owner: "npub1paul".into(), credentials: vec![], key: None };
+    let juniper = fragment_bridge::runtime::Agent { fragment: "juniper--k3x9".into(), identity: "npub1juniper".into(), name: "juniper".into(), owner: "npub1paul".into(), credentials: vec![], key: None, runtime: None };
     run::ensure_chat(&api, &juniper, &simplex).await.expect("made");
     fake.until(WAIT, "the routine in its SimpleX chat", |w| said(w, &simplex).len() == 1).await;
     bridge.stop().await;
@@ -1133,7 +1248,7 @@ async fn its_simplex_chat_is_made_once_by_its_name() {
     fake.add_member(&theirs, "npub1skyler", "owner");
     let left = fake.chat_named("juniper-simplex--s5t6", &[]);
     let api = fragment_bridge::api::Api::new(&fake.url()).expect("an address");
-    let juniper = fragment_bridge::runtime::Agent { fragment: "juniper--k3x9".into(), identity: "npub1juniper".into(), name: "juniper".into(), owner: "npub1paul".into(), credentials: vec![], key: None };
+    let juniper = fragment_bridge::runtime::Agent { fragment: "juniper--k3x9".into(), identity: "npub1juniper".into(), name: "juniper".into(), owner: "npub1paul".into(), credentials: vec![], key: None, runtime: None };
     let chat = "juniper-simplex--w9x2";
     ensure_chat(&api, &juniper, chat).await.expect("made");
     fake.with(|w| {
@@ -1436,7 +1551,7 @@ async fn a_corrupt_state_is_refused() {
     std::fs::create_dir_all(dir.join("bridge")).unwrap();
     std::fs::write(dir.join("bridge/state.json"), b"{\"version\": 1, \"nonsense\": true").unwrap();
     let (_stop, rx) = tokio::sync::watch::channel(false);
-    let r = fragment_bridge::driver::run(support::config(&fake.url(), &dir, support::settings()), support::script(), rx).await;
+    let r = fragment_bridge::driver::run(support::config(&fake.url(), &dir, support::settings()), support::script().into(), rx).await;
     assert!(matches!(r, Err(fragment_bridge::driver::BridgeError::Corrupt(_))), "{r:?}");
     assert!(dir.join("bridge/state.json").exists(), "left as it was, for a person to read");
 }
@@ -1547,7 +1662,8 @@ async fn a_lost_state_runs_nothing_twice() {
 
 /// Goal : a turn a crash cut short ends once, as an error, and is
 /// never run again, whether the next life wakes with the state from before
-/// the turn, the state the crash left (the turn running), or none.
+/// the turn, the state the crash left (the turn running), or none; it is
+/// continued once (phase 4), before the next message.
 #[tokio::test]
 async fn a_turn_cut_by_a_crash_ends_once_whatever_state_wakes() {
     for wakes in ["before", "during", "none"] {
@@ -1576,12 +1692,24 @@ async fn a_turn_cut_by_a_crash_ends_once_whatever_state_wakes() {
 
         let bridge = support::start_killable(cfg, support::counting(support::script_paced(pace), &runs));
         let t3 = said_and_ended(&fake, &chat, "after").await;
-        assert_eq!(runs.all(), vec![t1.clone(), ts.clone(), t3.clone()], "{wakes}: the cut turn ran once, in the life it was cut in");
+        // phase 4: continued once, whatever state woke. Queued in its place
+        // once this life's lost end lands; from an older state that is after
+        // the cut turn's 409, so what came after may run first
+        let cont = records::continuation_id(&ts);
+        fake.until(WAIT, "its continuation's end", |w| !ends_of(w, &chat, &cont).is_empty()).await;
+        let ran = runs.all();
+        assert_eq!(ran[..2], [t1.clone(), ts.clone()], "{wakes}: the cut turn ran once, in the life it was cut in");
+        let mut rest = ran[2..].to_vec();
+        rest.sort();
+        let mut want = vec![cont.clone(), t3.clone()];
+        want.sort();
+        assert_eq!(rest, want, "{wakes}: then its continuation once, and the next message once");
         fake.with(|w| {
             let ends = ends_of(w, &chat, &ts);
             assert_eq!(ends.len(), 1, "{wakes}: one end");
             assert_eq!(ends[0]["outcome"], "error", "{wakes}: ended as lost: {ends:?}");
             assert!(!replies(w, &chat).iter().any(|r| r["turn"] == ts.as_str()), "{wakes}: a cut turn gives no answer");
+            assert_eq!(ends_of(w, &chat, &cont)[0]["outcome"], "idle", "{wakes}: its continuation answers");
             assert_eq!(ends_of(w, &chat, &t3)[0]["outcome"], "idle", "{wakes}: the next message is answered");
         });
         bridge.stop().await;
@@ -1623,14 +1751,18 @@ async fn the_turn_after_a_cut_one_is_told_what_was_cut() {
         }
 
         let bridge = support::start_killable(cfg, support::counting(support::script_paced(pace), &runs));
+        // phase 4: the cut turn's continuation is the turn after it
+        let cont = records::continuation_id(&cut);
+        fake.until(WAIT, "its continuation's end", |w| !ends_of(w, &chat, &cont).is_empty()).await;
         let next = said_and_ended(&fake, &chat, "good morning").await;
         let after = said_and_ended(&fake, &chat, "and after").await;
-        assert_eq!(runs.all(), vec![one, cut.clone(), next.clone(), after.clone()], "{wakes}: each ran once");
+        assert_eq!(runs.all(), vec![one, cut.clone(), cont.clone(), next.clone(), after.clone()], "{wakes}: each ran once");
         let note = fake.with(|w| {
             assert_eq!(ends_of(w, &chat, &cut)[0]["error"], "lost when the computer restarted", "{wakes}");
             let text = |turn: &str| replies(w, &chat).into_iter().find(|r| r["turn"] == turn).and_then(|r| r["text"].as_str().map(str::to_string)).unwrap_or_default();
-            let next = text(&next);
-            let note = next.strip_prefix("echo: [paul] good morning\n\n(told: ").and_then(|n| n.strip_suffix(')')).unwrap_or_else(|| panic!("{wakes}: the turn after the cut one is told of it: {next:?}")).to_string();
+            let told = text(&cont);
+            let note = told.split_once("\n\n(told: ").and_then(|(said, n)| said.starts_with("echo: [your computer] I restarted").then_some(n)).and_then(|n| n.strip_suffix(')')).unwrap_or_else(|| panic!("{wakes}: the cut turn's continuation is told of it: {told:?}")).to_string();
+            assert_eq!(text(&next), "echo: [paul] good morning", "{wakes}: said once, to the continuation");
             for said in ["Your previous turn in this chat was cut short: your computer restarted before it finished.", "Check what it already did before you do any of it again", "It was answering: “a slow tool please”", "Its steps, as recorded: search a slow tool please (ok)"] {
                 assert!(note.contains(said), "{wakes}: {said:?} in {note}");
             }

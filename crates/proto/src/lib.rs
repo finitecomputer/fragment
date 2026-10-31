@@ -565,6 +565,9 @@ pub enum ErrorCode {
     AlreadyExists,
     /// 409: this operation id was used with a different input.
     ConflictingBody,
+    /// 409: a write's precondition no longer holds (a search source's
+    /// revision is not the one the write replaces).
+    Conflict,
     /// 413: a body, input, or result is over its limit.
     TooLarge,
     /// 422: the author's code refused or failed.
@@ -576,7 +579,7 @@ pub enum ErrorCode {
     /// 502: code.storage (or another service the platform calls) failed.
     UpstreamFailed,
     /// 503: the identity registry did not answer; nothing signed is
-    /// decided without it (docs/finite-integration.md, rule 7).
+    /// decided without it (docs/cloudflare-v1.md, R15, rule 7).
     RegistryUnavailable,
     /// 402: the paying person's ledger refused the spend (no credit, a
     /// fragment's cap, a read-only overdraft; the message says which:
@@ -614,7 +617,7 @@ impl ErrorCode {
             ErrorCode::Unauthenticated => 401,
             ErrorCode::Forbidden => 403,
             ErrorCode::NotFound | ErrorCode::UnknownOperation | ErrorCode::NoCode => 404,
-            ErrorCode::AlreadyExists | ErrorCode::ConflictingBody => 409,
+            ErrorCode::AlreadyExists | ErrorCode::ConflictingBody | ErrorCode::Conflict => 409,
             ErrorCode::TooLarge => 413,
             ErrorCode::AppFailed => 422,
             ErrorCode::RateLimited => 429,
@@ -1027,7 +1030,7 @@ pub struct FragmentStatus {
     pub counts: Counts,
     pub code: CodeStatus,
     /// The share link's token: its owner's alone (and their agent's,
-    /// sharing for them), as the share sheet shows it. A member does not
+    /// sharing for them, but on a connector), as the share sheet shows it. A member does not
     /// share by link: they ask its owner.
     pub view_token: Option<String>,
     /// Editors and up see the inbox token.
@@ -1386,7 +1389,7 @@ impl Tier {
 /// The tier agents and AI steps run on unless they name another.
 pub const DEFAULT_TIER: Tier = Tier::Cheap;
 
-/// What an identity is (docs/finite-integration.md). A fragment's own key
+/// What an identity is (docs/cloudflare-v1.md, R15). A fragment's own key
 /// stays the fragment's and is not registered. An agent has a designated
 /// owner, a person.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1430,8 +1433,9 @@ pub struct Identity {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub held: Option<Role>,
     /// The orgs whose content a person is in now (an agent: its owner's),
-    /// each at its epoch (decisions 69 to 71), as the registry answers at
-    /// each request: an org's fragment counts their membership only at it.
+    /// each since when (decisions 69 to 71), as the registry answers at
+    /// each request: an org's fragment counts their membership only while
+    /// they are in, and only from then.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub orgs: Vec<OrgPlace>,
 }
@@ -1448,7 +1452,9 @@ impl Identity {
 #[serde(rename_all = "camelCase")]
 pub struct OrgPlace {
     pub org: String,
-    pub epoch: u64,
+    /// Since when they are in it (ms): an org's fragment counts a member
+    /// row only from then (`fragment_core::governance::counts`).
+    pub since: i64,
     /// One of its content admins (an agent's carries none).
     #[serde(default)]
     pub admin: bool,
@@ -1725,7 +1731,7 @@ pub struct OpDecl {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input: Option<Value>,
     /// A mutation whose calls leave no ledger row (`"ephemeral": true`):
-    /// no replay (the same id runs again) and no effects (docs/MODEL.md).
+    /// no replay (the same id runs again) and no effects (docs/api.md, Apps).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub ephemeral: bool,
     /// What it does, in plain text, for a person or an agent choosing it
@@ -2190,6 +2196,7 @@ pub mod export;
 pub mod ledger;
 pub mod live;
 pub mod org;
+pub mod search;
 pub mod wipe;
 
 #[cfg(test)]

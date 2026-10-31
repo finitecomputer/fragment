@@ -7,7 +7,7 @@
 //! themselves access, which its events show), a member who is not one does
 //! not, and no agent does. An offboarding fences a member at once, at
 //! every request, before anything is cleaned up; an invite from before it
-//! admits no one, and a new one admits them at their raised epoch. A batch
+//! admits no one, and a new one admits them afresh. A batch
 //! whose acknowledgement is lost, sent again after a restart, bills the
 //! org once. It hands out no storage token, and its admin deletes it.
 
@@ -182,15 +182,15 @@ pub fn org_fragments(s: &mut Suite, api: &Api) -> Result<()> {
     invite(&name2, &cal)?;
     let place = |who: &str| api.signed(&ada, "GET", &format!("{root}/content"), None).ok().and_then(|r| r.body["people"].as_array().and_then(|p| p.iter().find(|x| x["person"] == who).cloned())).unwrap_or(Value::Null);
     let before = place(&cal_id);
-    let out = api.signed(&ada, "POST", &format!("{root}/offboard"), Some(&json!({ "id": "cal-1", "person": cal_id, "expectedEpoch": 1 })))?;
+    let out = api.signed(&ada, "POST", &format!("{root}/offboard"), Some(&json!({ "id": "cal-1", "person": cal_id })))?;
     let fenced_read = api.signed(&cal, "GET", &format!("/api/f/{name}/status"), None)?;
     let fenced_write = api.op(&cal, &name, "log_food", "f2", json!({ "who": "cal", "food": "a pear", "calories": 100 }))?;
     let fenced_sub = api.signed(&cal, "POST", &format!("/api/f/{name}/subscriptions"), Some(&json!({ "channel": "replies", "url": "https://example.com/hook" })))?;
     let still_listed = api.signed(&ada, "GET", &format!("/api/f/{name}/members"), None)?.body["members"].as_array().is_some_and(|m| m.iter().any(|x| x["principal"] == cal_id.as_str()));
     s.ok(
         "an org's member is fenced at every request the moment they are offboarded, before anything is cleaned up (their row is still there): no read, no write, no subscription (403); a member who is no admin invites no one (403)",
-        cal_in.status == 200 && cal_reads.status == 200 && cal_writes.status == 200 && not_admin.status == 403 && before["epoch"] == 1
-            && out.status == 200 && out.body["epoch"] == 2 && out.body["active"] == false
+        cal_in.status == 200 && cal_reads.status == 200 && cal_writes.status == 200 && not_admin.status == 403 && before["person"] == cal_id.as_str()
+            && out.status == 200 && place(&cal_id).is_null()
             && fenced_read.status == 403 && fenced_write.status == 403 && fenced_sub.status == 403 && still_listed,
         json!([cal_in.body, out.body, fenced_read.body, fenced_write.body, fenced_sub.body]),
     );
@@ -223,7 +223,7 @@ pub fn org_fragments(s: &mut Suite, api: &Api) -> Result<()> {
         json!({ "heard": replies(s) - heard, "calRow": cal_row, "run": ran["status"] }),
     );
 
-    // an invite from before they left admits no one; a new one admits them at the raised epoch
+    // an invite from before they left admits no one; a new one admits them afresh
     let stale = accept(&name2, &cal)?;
     let restarted;
     let api = if s.runs("org-fragments", &[Need::Node]) {
@@ -249,23 +249,25 @@ pub fn org_fragments(s: &mut Suite, api: &Api) -> Result<()> {
     let stale_again = accept(&name2, &cal)?;
     let in_name2 = api.signed(&ada, "GET", &format!("/api/f/{name2}/members"), None)?.body["members"].as_array().is_some_and(|m| m.iter().any(|x| x["principal"] == cal_id.as_str()));
     s.ok(
-        "offboard_fence_survives_restart: an invite from before they left admits them no more (403); after a restart they are still fenced; a new invite, with their old row still there, admits them at their raised epoch; back in, the invite from before still admits no one",
-        stale.status == 403 && held.status == 403 && renewed.status == 200 && back.status == 200 && reads.status == 200 && place(&cal_id)["epoch"] == 2 && place(&cal_id)["active"] == true
+        "offboard_fence_survives_restart: an invite from before they left admits them no more (403); after a restart they are still fenced; a new invite, with their old row still there, admits them afresh; back in, the invite from before still admits no one",
+        stale.status == 403 && held.status == 403 && renewed.status == 200 && back.status == 200 && reads.status == 200 && !place(&cal_id).is_null()
             && stale_again.status != 200 && !in_name2
             && later.status == 200 && later_heard && !cal_later.iter().any(|p| p["title"] == "after the cleanup"),
         json!([stale.body, held.body, renewed.body, back.body, reads.body["role"], [stale_again.status, stale_again.body.clone()]]),
     );
 
-    // a returning admin's own add, nothing cleaned up first: in afresh, at their epoch now
-    let ben_out = api.signed(&ada, "POST", &format!("{root}/offboard"), Some(&json!({ "id": "ben-1", "person": ben_id, "expectedEpoch": 1 })))?;
+    // a returning admin's own add, nothing cleaned up first: in afresh
+    let ben_out = api.signed(&ada, "POST", &format!("{root}/offboard"), Some(&json!({ "id": "ben-1", "person": ben_id })))?;
     let ben_fenced = api.signed(&ben, "GET", &format!("/api/f/{name}/status"), None)?;
     let to_ben = api.signed(&ada, "POST", &format!("{root}/content-admin-offers"), Some(&json!({ "id": "ben-2", "email": Api::email_of(&ben) })))?;
     let ben_back = api.signed(&ben, "POST", &format!("{root}/content-admin-offers/{}/accept", to_ben.body["id"].as_str().unwrap_or("")), Some(&json!({})))?;
+    // back in, his row from before opens nothing (a rehire starts fresh: Paul, 2026-10-31)
+    let ben_fresh = api.signed(&ben, "GET", &format!("/api/f/{name}/status"), None)?;
     let regrant = api.signed(&ben, "PUT", &format!("/api/f/{name}/members/{ben_id}"), Some(&json!({ "role": "viewer" })))?;
     let ben_reads = api.signed(&ben, "GET", &format!("/api/f/{name}/status"), None)?;
     s.ok(
-        "a content admin offboarded and appointed again gives themselves access again, their row from before no grant: they read it at their epoch now",
-        ben_out.status == 200 && ben_fenced.status == 403 && ben_back.status == 200 && regrant.status == 200 && ben_reads.status == 200 && place(&ben_id)["epoch"] == 2,
+        "a content admin offboarded and appointed again starts fresh: their row from before opens nothing (403) until they give themselves access again, then they read it",
+        ben_out.status == 200 && ben_fenced.status == 403 && ben_back.status == 200 && ben_fresh.status == 403 && regrant.status == 200 && ben_reads.status == 200 && place(&ben_id)["admin"] == true,
         json!([ben_out.body, ben_fenced.status, ben_back.body, regrant.body, ben_reads.status]),
     );
 
@@ -311,7 +313,7 @@ pub fn org_fragments(s: &mut Suite, api: &Api) -> Result<()> {
     let all = refused.iter().all(|(_, r, status)| r.status == *status);
     s.ok("and through it, refused: each says why", all, json!(refused.iter().map(|(w, r, _)| json!([w, r.status, r.body])).collect::<Vec<_>>()));
     // the token held past its holder's offboarding opens nothing from then
-    let dee_out = api.signed(&ada, "POST", &format!("{root}/offboard"), Some(&json!({ "id": "dee-1", "person": dee_id, "expectedEpoch": 1 })))?;
+    let dee_out = api.signed(&ada, "POST", &format!("{root}/offboard"), Some(&json!({ "id": "dee-1", "person": dee_id })))?;
     let after = through("GET", &proxied, &repo, "/branch?name=main", &token)?;
     let cli_after = s.cli(api, &home, &["sync", &name, "--dir", &dir_s, "--mode", "pull"]);
     s.ok(
