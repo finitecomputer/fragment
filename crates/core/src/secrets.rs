@@ -167,35 +167,42 @@ pub fn fill_url(url: &Url, mut value: impl FnMut(&str) -> Result<String, String>
 /// placeholder again: what goes back to a job of a fetch that carried
 /// secrets (a failure's message, an answer that echoes its request). A
 /// vendor may write a value back in an encoding of its own, so each is
-/// named in every form below, each of its bytes in any of them
-/// (`spelled`, `byte_forms`):
+/// named in every form below, each of its characters in any of them
+/// (`spelled`, `char_forms`):
 /// - as it is;
-/// - percent-encoded, in either hex case, once or twice (`%3A`, `%3a`,
-///   `%253A`: a URL inside a URL's query), and a space as `+` (a form's);
-/// - as a JSON string escapes it (`\/`, `\"`, `\\`, `\u003a` in
-///   either case), once or within another JSON string (`\\u003a`: an
-///   error that quotes JSON);
-/// - as HTML escapes it (`&#58;`, `&#x3A;`, `&amp;`, `&quot;`, …);
+/// - its UTF-8 bytes percent-encoded, in either hex case, once or twice
+///   (`%3A`, `%3a`, `%C3%A9`, `%253A`: a URL inside a URL's query), and a
+///   space as `+` (a form's);
+/// - as a JSON string escapes it (`\/`, `\"`, `\\`, `:`, `é`, a
+///   surrogate pair past the first plane, in either hex case), once or
+///   within another JSON string (`\\u003a`: an error that quotes JSON);
+/// - as an HTML character reference (`&#58;`, `&#x3A;`, `&#233;`, `&amp;`);
 ///
-/// and base64-encoded in a longer blob, in either alphabet at any of its
+/// and its base64 inside a longer blob, in either alphabet at any of its
 /// three alignments (`base64_spellings`: an `Authorization: Basic` echo's),
-/// for a value of 12 bytes or more, whose base64 is no chance match. A value
-/// that comes back some other way (compressed, hashed, encrypted, cut in
-/// pieces by the vendor) is past what matching text can name.
+/// itself in any of those forms (JSON's `\/` in a serialized blob), for a
+/// value of 12 bytes or more, whose base64 is no chance match. A value that
+/// comes back some other way (compressed, hashed, encrypted, cut in pieces
+/// by the vendor) is past what matching text can name.
 pub fn redact(text: String, opened: &std::collections::BTreeMap<String, String>) -> String {
-    // longest first: a value inside another is named as the other
-    let mut secrets: Vec<(&str, &[u8])> = opened.iter().filter(|(_, v)| !v.is_empty()).map(|(n, v)| (n.as_str(), v.as_bytes())).collect();
-    if secrets.is_empty() {
+    // each value, and its base64 cores: what a spelling may spell; longest
+    // first, so a value inside another is named as the other
+    let mut wanted: Vec<(&str, String)> = Vec::new();
+    for (name, value) in opened.iter().filter(|(_, v)| !v.is_empty()) {
+        wanted.push((name.as_str(), value.clone()));
+        wanted.extend(base64_spellings(value.as_bytes()).into_iter().map(|core| (name.as_str(), core)));
+    }
+    if wanted.is_empty() {
         return text;
     }
-    secrets.sort_by_key(|(_, v)| std::cmp::Reverse(v.len()));
+    wanted.sort_by_key(|(_, v)| std::cmp::Reverse(v.len()));
     let placeholder = |name: &str| format!("{{{{{name}}}}}");
     let bytes = text.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
     // bounded by the text: each pass moves past one byte or one spelling
     'text: while i < bytes.len() {
-        for (name, value) in &secrets {
+        for (name, value) in &wanted {
             if let Some(end) = spelled(bytes, i, value) {
                 out.extend_from_slice(placeholder(name).as_bytes());
                 i = end;
@@ -205,29 +212,23 @@ pub fn redact(text: String, opened: &std::collections::BTreeMap<String, String>)
         out.push(bytes[i]);
         i += 1;
     }
-    // a spelling starts at a character (a value is UTF-8, and every other
-    // form is ASCII) and ends after one, so what is left is UTF-8
-    let mut text = String::from_utf8(out).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
-    for (name, value) in &secrets {
-        for form in base64_spellings(value) {
-            text = text.replace(&form, &placeholder(name));
-        }
-    }
-    text
+    // a spelling starts at a character (a value's first byte is one, and
+    // every other form is ASCII) and ends after one, so what is left is UTF-8
+    String::from_utf8(out).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
 }
 
-/// Where `value` ends if `text` spells it from `at`, each byte in any form
-/// `byte_forms` knows (the longest such spelling), or none. The forms in
-/// play at once are few (a byte's spellings that start alike), so the set
-/// of places a spelling may have reached stays small.
-fn spelled(text: &[u8], at: usize, value: &[u8]) -> Option<usize> {
+/// Where `value` ends if `text` spells it from `at`, each character in any
+/// form `char_forms` knows (the longest such spelling), or none. The forms
+/// in play at once are few (a character's spellings that start alike), so
+/// the set of places a spelling may have reached stays small.
+fn spelled(text: &[u8], at: usize, value: &str) -> Option<usize> {
     let mut reach = vec![at];
-    for &b in value {
+    for c in value.chars() {
         let mut next: Vec<usize> = Vec::new();
         for &p in &reach {
-            for n in byte_forms(&text[p..], b) {
-                if !next.contains(&(p + n)) {
-                    next.push(p + n);
+            for end in char_forms(text, p, c) {
+                if !next.contains(&end) {
+                    next.push(end);
                 }
             }
         }
@@ -239,15 +240,39 @@ fn spelled(text: &[u8], at: usize, value: &[u8]) -> Option<usize> {
     reach.into_iter().max()
 }
 
-/// The lengths of each spelling of the byte `b` that `text` starts with
-/// (`redact`'s forms).
+/// Where each spelling of the character `c` that `text` holds at `at`
+/// ends: its UTF-8 bytes, each in any form `byte_forms` knows; its JSON
+/// escape (`json_escape`); its HTML character reference (`html_reference`).
+fn char_forms(text: &[u8], at: usize, c: char) -> Vec<usize> {
+    let mut buf = [0u8; 4];
+    let mut reach = vec![at];
+    for &b in c.encode_utf8(&mut buf).as_bytes() {
+        let mut next: Vec<usize> = Vec::new();
+        for &p in &reach {
+            for n in byte_forms(&text[p..], b) {
+                if !next.contains(&(p + n)) {
+                    next.push(p + n);
+                }
+            }
+        }
+        reach = next;
+        if reach.is_empty() {
+            break;
+        }
+    }
+    reach.extend(json_escape(&text[at..], c).map(|n| at + n));
+    reach.extend(html_reference(&text[at..], c).map(|n| at + n));
+    reach
+}
+
+/// The lengths of each spelling of the byte `b` that `text` starts with:
+/// as it is, percent-encoded (once or twice), a form's `+` for a space,
+/// and JSON's escapes of `/`, `"` and `\` (`redact`'s forms).
 fn byte_forms(text: &[u8], b: u8) -> impl Iterator<Item = usize> {
-    let hex = |s: &[u8]| -> Option<u32> { (!s.is_empty() && s.iter().all(u8::is_ascii_hexdigit)).then(|| std::str::from_utf8(s).ok().and_then(|s| u32::from_str_radix(s, 16).ok())).flatten() };
     let is = |s: Option<&[u8]>, f: &dyn Fn(&[u8]) -> bool| s.is_some_and(f);
     let code = u32::from(b);
     // a JSON escape's backslashes, escaped once more within another JSON
-    // string: `\/` is `\\/` or `\\\/` there, `\"` is `\\\"`, `\u003a`
-    // is `\\u003a`, `\\` is `\\\\`
+    // string: `\/` is `\\/` or `\\\/` there, `\"` is `\\\"`, `\\` is `\\\\`
     let slashes = text.iter().take(4).take_while(|&&c| c == b'\\').count();
     [
         (text.first() == Some(&b)).then_some(1),
@@ -256,33 +281,59 @@ fn byte_forms(text: &[u8], b: u8) -> impl Iterator<Item = usize> {
         is(text.get(..5), &|s| s.starts_with(b"%25") && hex(&s[3..]) == Some(code)).then_some(5),
         (b"/\"".contains(&b) && (1..=3).contains(&slashes) && text.get(slashes) == Some(&b)).then_some(slashes + 1),
         (b == b'\\' && (slashes == 2 || slashes == 4)).then_some(slashes),
-        (b.is_ascii() && (1..=2).contains(&slashes) && text.get(slashes) == Some(&b'u') && text.get(slashes + 1..slashes + 5).and_then(hex) == Some(code)).then_some(slashes + 5),
-        html_entity(text, b),
     ]
     .into_iter()
     .flatten()
 }
 
-/// The length of an HTML character reference for the ASCII byte `b` that
-/// `text` starts with (`&#58;`, `&#x3a;`, or a named one), if it does.
-fn html_entity(text: &[u8], b: u8) -> Option<usize> {
-    if text.first() != Some(&b'&') || !b.is_ascii() {
+/// `s`'s value as hex digits, none for no digits or another character.
+fn hex(s: &[u8]) -> Option<u32> {
+    (!s.is_empty() && s.iter().all(u8::is_ascii_hexdigit)).then(|| std::str::from_utf8(s).ok().and_then(|s| u32::from_str_radix(s, 16).ok())).flatten()
+}
+
+/// The length of a JSON escape of `c` that `text` starts with: `\u` and
+/// its UTF-16 code unit in either hex case, a surrogate pair for a
+/// character past the first plane, each escape's backslash once or twice
+/// (within another JSON string); none if it does not.
+fn json_escape(text: &[u8], c: char) -> Option<usize> {
+    let mut units = [0u16; 2];
+    let units = c.encode_utf16(&mut units);
+    let slashes = text.iter().take(3).take_while(|&&b| b == b'\\').count();
+    if !(1..=2).contains(&slashes) {
         return None;
     }
-    // the longest reference read: `&#x` and six digits, and its `;`
-    let end = text.iter().take(12).position(|&c| c == b';')?;
-    let digits = |s: &[u8], radix: u32| (!s.is_empty() && s.iter().all(|c| c.is_ascii_digit() || (radix == 16 && c.is_ascii_hexdigit()))).then(|| std::str::from_utf8(s).ok().and_then(|s| u32::from_str_radix(s, radix).ok())).flatten();
+    let mut at = 0;
+    for &unit in units.iter() {
+        let escape = text.get(at..at + slashes + 5)?;
+        if !escape[..slashes].iter().all(|&b| b == b'\\') || escape[slashes] != b'u' || hex(&escape[slashes + 1..]) != Some(u32::from(unit)) {
+            return None;
+        }
+        at += slashes + 5;
+    }
+    Some(at)
+}
+
+/// The length of an HTML character reference to `c` that `text` starts
+/// with (`&#233;`, `&#xE9;`, or a named one of an ASCII character), if it
+/// does.
+fn html_reference(text: &[u8], c: char) -> Option<usize> {
+    if text.first() != Some(&b'&') {
+        return None;
+    }
+    // the longest reference read: `&#x`, seven digits (leading zeros), `;`
+    let end = text.iter().take(12).position(|&b| b == b';')?;
+    let digits = |s: &[u8], radix: u32| (!s.is_empty() && s.iter().all(|d| d.is_ascii_digit() || (radix == 16 && d.is_ascii_hexdigit()))).then(|| std::str::from_utf8(s).ok().and_then(|s| u32::from_str_radix(s, radix).ok())).flatten();
     let code = match &text[1..end] {
         [b'#', b'x' | b'X', hex @ ..] => digits(hex, 16)?,
         [b'#', dec @ ..] => digits(dec, 10)?,
-        b"amp" => u32::from(b'&'),
-        b"quot" => u32::from(b'"'),
-        b"apos" => u32::from(b'\''),
-        b"lt" => u32::from(b'<'),
-        b"gt" => u32::from(b'>'),
+        b"amp" => u32::from('&'),
+        b"quot" => u32::from('"'),
+        b"apos" => u32::from('\''),
+        b"lt" => u32::from('<'),
+        b"gt" => u32::from('>'),
         _ => return None,
     };
-    (code == u32::from(b)).then_some(end + 1)
+    (code == u32::from(c)).then_some(end + 1)
 }
 
 /// A base64 spelling shorter than this many characters is not named: a
@@ -436,15 +487,33 @@ mod tests {
         pub fn twice(v: &str) -> String {
             upper(v).replace('%', "%25")
         }
+        /// Each character but a letter or digit as `\u` and its UTF-16 code
+        /// units (`/` as `\/`), as an ASCII-escaping serializer writes it.
         pub fn json(v: &str) -> String {
-            v.bytes().map(|b| match b { b'/' => "\\/".to_string(), b if b.is_ascii_alphanumeric() => (b as char).to_string(), b => format!("\\u{:04x}", b) }).collect()
+            v.chars()
+                .map(|c| match c {
+                    '/' => "\\/".to_string(),
+                    c if c.is_ascii_alphanumeric() => c.to_string(),
+                    c => c.encode_utf16(&mut [0; 2]).iter().map(|u| format!("\\u{u:04x}")).collect(),
+                })
+                .collect()
+        }
+        /// `json`, its escapes' hex in upper case.
+        pub fn json_upper(v: &str) -> String {
+            v.chars()
+                .map(|c| match c {
+                    '/' => "\\/".to_string(),
+                    c if c.is_ascii_alphanumeric() => c.to_string(),
+                    c => c.encode_utf16(&mut [0; 2]).iter().map(|u| format!("\\u{u:04X}")).collect(),
+                })
+                .collect()
         }
         /// JSON-escaped within another JSON string (an error that quotes JSON).
         pub fn json_twice(v: &str) -> String {
             json(v).replace('\\', "\\\\")
         }
         pub fn html(v: &str) -> String {
-            v.bytes().enumerate().map(|(i, b)| if b.is_ascii_alphanumeric() { (b as char).to_string() } else if i % 2 == 0 { format!("&#{b};") } else { format!("&#X{b:x};") }).collect()
+            v.chars().enumerate().map(|(i, c)| if c.is_ascii_alphanumeric() { c.to_string() } else if i % 2 == 0 { format!("&#{};", u32::from(c)) } else { format!("&#X{:x};", u32::from(c)) }).collect()
         }
         /// `v` inside a blob of `lead` bytes before it and some after.
         pub fn base64(v: &str, lead: usize, url_safe: bool) -> String {
@@ -454,6 +523,16 @@ mod tests {
             } else {
                 base64::engine::general_purpose::STANDARD.encode(blob)
             }
+        }
+        /// That blob as a JSON serializer that escapes `/` writes it.
+        pub fn base64_in_json(v: &str, lead: usize, url_safe: bool) -> String {
+            base64(v, lead, url_safe).replace('/', "\\/")
+        }
+        /// `value` as an ASCII-escaping JSON serializer writes it inside an
+        /// object (`ensure_ascii`): serde_json's text, every character past
+        /// ASCII then escaped as `\u` code units.
+        pub fn serialized(value: &str) -> String {
+            serde_json::to_string(&serde_json::json!({ "echo": value })).unwrap().chars().map(|c| if c.is_ascii() { c.to_string() } else { c.encode_utf16(&mut [0; 2]).iter().map(|u| format!("\\u{u:04x}")).collect() }).collect()
         }
     }
 
@@ -495,6 +574,35 @@ mod tests {
         assert_eq!(redact("q=x+y+z+2&r=x%20y%20z".to_string(), &spaced), "q={{B}}&r={{A}}");
 
         // invalid: a near miss, cut escapes and a short value's base64
+        // Alex's review of #871: base64 inside JSON (its `/` escaped), and a
+        // character past ASCII as a JSON or HTML escape, the first plane's
+        // and a surrogate pair's alike, as serializers write them
+        let named_one = |value: &str, text: String| redact(text, &std::collections::BTreeMap::from([("K".to_string(), value.to_string())]));
+        assert_eq!(named_one("abc???def???ghi", r#"{"echo":"YWJjPz8\/ZGVmPz8\/Z2hp"}"#.to_string()), r#"{"echo":"{{K}}"}"#, "base64 in JSON");
+        assert_eq!(named_one("clé-0123456789", r#"{"echo":"cl\u00e9-0123456789"}"#.to_string()), r#"{"echo":"{{K}}"}"#, "a JSON escape past ASCII");
+        for value in ["clé-0123456789", "key😀0123456789", "中文-token-0123", "ß:/+=0123456789"] {
+            for (how, spelled) in [
+                ("as it is", value.to_string()),
+                ("its UTF-8 percent-encoded", spell::upper(value)),
+                ("JSON-escaped", spell::json(value)),
+                ("upper-case JSON escapes", spell::json_upper(value)),
+                ("JSON-escaped within JSON", spell::json_twice(value)),
+                ("HTML references", spell::html(value)),
+            ] {
+                let told = named_one(value, format!("[{spelled}]"));
+                assert_eq!(told, "[{{K}}]", "{value:?} {how}: {spelled}");
+            }
+            let serialized = spell::serialized(value);
+            assert_eq!(named_one(value, serialized.clone()), r#"{"echo":"{{K}}"}"#, "{value:?} as an ASCII-escaping serializer writes it: {serialized}");
+            for lead in 0..3 {
+                for url_safe in [false, true] {
+                    let blob = spell::base64_in_json(value, lead, url_safe);
+                    let told = named_one(value, format!("{{\"auth\":\"{blob}\"}}"));
+                    assert!(told.contains("{{K}}") && !told.contains(&blob), "{value:?} base64 in JSON at {lead}, url-safe {url_safe}: {blob} → {told}");
+                }
+            }
+        }
+
         let near = token.replace('5', "6");
         assert_eq!(named(near.clone()), near, "a near miss is no secret");
         for cut in ["123456789%3", "123456789\\u00", "123456789&#5", "%", "&", "\\", "&#x;", "&#;", "&#xzz;"] {
@@ -515,11 +623,12 @@ mod tests {
 
     /// Goal (#814): across many token shapes and every spelling, nothing of
     /// a value is left to read, and its placeholder takes its place.
-    /// Method: tokens of 12 to 64 bytes over a token's alphabet (letters,
-    /// digits, `:/+=-_.~` and a space), a deterministic generator.
+    /// Method: tokens of 12 to 64 characters over a token's alphabet
+    /// (letters, digits, `:/+=-_.~`, a space, and `é ß 中 😀` past ASCII), a
+    /// deterministic generator.
     #[test]
     fn no_spelling_of_any_token_shape_is_left() {
-        let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789:/+=-_.~ ";
+        let alphabet: Vec<char> = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789:/+=-_.~ éß中😀".chars().collect();
         let mut seed: u64 = 0x5eed;
         let mut next = |n: usize| {
             seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
@@ -527,12 +636,14 @@ mod tests {
         };
         for _ in 0..300 {
             let len = 12 + next(53);
-            let token: String = (0..len).map(|_| alphabet[next(alphabet.len())] as char).collect();
+            let token: String = (0..len).map(|_| alphabet[next(alphabet.len())]).collect();
             let opened = std::collections::BTreeMap::from([("T".to_string(), token.clone())]);
             let mut spellings = vec![token.clone(), url_encoded(&token), spell::upper(&token), spell::lower(&token), spell::every_byte(&token), spell::twice(&token), spell::json(&token), spell::json_twice(&token), spell::html(&token)];
+            spellings.push(spell::serialized(&token));
             for lead in 0..3 {
                 spellings.push(spell::base64(&token, lead, false));
                 spellings.push(spell::base64(&token, lead, true));
+                spellings.push(spell::base64_in_json(&token, lead, false));
             }
             for spelled in spellings {
                 let told = redact(format!("before {spelled} after"), &opened);

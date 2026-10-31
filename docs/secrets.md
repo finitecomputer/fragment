@@ -44,10 +44,11 @@ only from that computer's egress, toward that provider.
   would change its scheme, host, port, path segments or query parameters
   is not sent (`fill_url`). A failure's message and the answer name every
   value the fetch filled, a header's or the URL's, as its placeholder
-  again, in each form a vendor writes one back in: as it is,
-  percent-encoded (either hex case, once or twice), JSON-escaped (also
-  within JSON), HTML-escaped, and in base64 for a value of 12 bytes or
-  more (`redact`; #814). A value that comes back compressed, hashed or
+  again, in each form a vendor writes one back in, character by
+  character: as it is, its UTF-8 percent-encoded (either hex case, once or
+  twice), JSON-escaped (`\u` past ASCII and surrogate pairs, also within
+  JSON), as HTML character references; and in base64 for a value of 12
+  bytes or more, itself in any of those forms (`redact`; #814). A value that comes back compressed, hashed or
   cut in pieces by the vendor is past what matching text can name. Its hosts are set only with
   its value, so an editor who cannot read a value cannot send it anywhere
   its setter did not mean. An editor sets one through the API (`fragment
