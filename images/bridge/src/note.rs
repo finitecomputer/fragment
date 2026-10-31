@@ -193,33 +193,75 @@ pub fn text(cut: &Cut, asked: Option<&str>, replies: &[String]) -> String {
     if let Some(a) = asked.filter(|a| !a.trim().is_empty()) {
         lines.push(format!("It was answering: {}", quoted(a, limits::NOTE_ASKED_MAX_CHARS)));
     }
-    if !cut.steps.is_empty() {
-        let mut steps: Vec<String> = cut
-            .steps
-            .iter()
-            .map(|s| {
-                let args = s.args.split_whitespace().collect::<Vec<_>>().join(" ");
-                let args = if args.is_empty() { String::new() } else { format!(" {}", records::cut(&args, limits::NOTE_ARGS_MAX_CHARS)) };
-                let tool = if s.tool.trim().is_empty() { "a step".to_string() } else { records::cut(&s.tool, limits::NOTE_TOOL_MAX_CHARS) };
-                format!("{tool}{args} ({})", if s.ok { "ok" } else { "failed" })
-            })
-            .collect();
-        if cut.steps_total > cut.steps.len() {
-            steps.push(format!("and {} more", cut.steps_total - cut.steps.len()));
-        }
-        lines.push(format!("Its steps, as recorded: {}", steps.join("; ")));
-    }
+    lines.extend(steps(cut));
     for c in &cut.cards {
         let closed = c.closed.as_deref().unwrap_or("unanswered");
         lines.push(format!("It asked: {} ({closed})", quoted(&c.text, limits::NOTE_CARD_MAX_CHARS)));
     }
-    let shown = replies.len().min(limits::NOTE_REPLIES_MAX);
-    for r in &replies[replies.len() - shown..] {
-        lines.push(format!("It had replied: {}", quoted(r, limits::NOTE_REPLY_MAX_CHARS)));
-    }
+    lines.extend(replied(replies));
     let note = records::cut_bytes(&lines.join("\n"), limits::NOTE_MAX_BYTES);
     assert!(note.len() <= limits::NOTE_MAX_BYTES, "a note is bounded");
     note
+}
+
+/// The turn `turn` of the agent's, as `work` holds it from its start on;
+/// `None` when its start is not among the records, or names no cause.
+pub fn turn(work: &[Record], agent: &str, turn: &str) -> Option<Cut> {
+    let i = work.iter().position(|r| own(r, agent, "turn.start").is_some_and(|b| b["turn"] == turn))?;
+    cut(&work[i..], agent, turn, &work[i].body, work[i].at)
+}
+
+/// What a fresh turn from a late answer to its card is told (cards.rs),
+/// bounded (`NOTE_MAX_BYTES`): that the card's turn ended before the
+/// answer and is not resumed, and to check what it did before doing any of
+/// it again; who asked it what (`by`: their name; the request cut to
+/// `NOTE_LATE_ASKED_MAX_CHARS`, said so); its steps; its last replies.
+/// Context, not the person's words: Relay hands it as the inbound's
+/// read-only `context`, as it hands `text`.
+pub fn late(cut: &Cut, by: &str, asked: Option<&str>, replies: &[String]) -> String {
+    let mut lines = vec![
+        "The message below answers a question your earlier turn in this chat asked. That turn ended before the answer came and is not resumed: this is a new turn. Check what it already did before you do any of it again, and don't ask the question again.".to_string(),
+    ];
+    match asked.filter(|a| !a.trim().is_empty()) {
+        Some(a) => {
+            let one_line = a.split_whitespace().collect::<Vec<_>>().join(" ");
+            let more = one_line.chars().count() > limits::NOTE_LATE_ASKED_MAX_CHARS;
+            lines.push(format!("It was answering {by}: {}{}", quoted(a, limits::NOTE_LATE_ASKED_MAX_CHARS), if more { " (the rest is cut)" } else { "" }));
+        }
+        None => lines.push(format!("It was answering {by}; what they asked is not in this chat's record.")),
+    }
+    lines.extend(steps(cut));
+    lines.extend(replied(replies));
+    let note = records::cut_bytes(&lines.join("\n"), limits::NOTE_MAX_BYTES);
+    assert!(note.len() <= limits::NOTE_MAX_BYTES, "a note is bounded");
+    note
+}
+
+/// A turn's steps on one line: at most `NOTE_STEPS_MAX`, the rest counted.
+fn steps(cut: &Cut) -> Option<String> {
+    if cut.steps.is_empty() {
+        return None;
+    }
+    let mut steps: Vec<String> = cut
+        .steps
+        .iter()
+        .map(|s| {
+            let args = s.args.split_whitespace().collect::<Vec<_>>().join(" ");
+            let args = if args.is_empty() { String::new() } else { format!(" {}", records::cut(&args, limits::NOTE_ARGS_MAX_CHARS)) };
+            let tool = if s.tool.trim().is_empty() { "a step".to_string() } else { records::cut(&s.tool, limits::NOTE_TOOL_MAX_CHARS) };
+            format!("{tool}{args} ({})", if s.ok { "ok" } else { "failed" })
+        })
+        .collect();
+    if cut.steps_total > cut.steps.len() {
+        steps.push(format!("and {} more", cut.steps_total - cut.steps.len()));
+    }
+    Some(format!("Its steps, as recorded: {}", steps.join("; ")))
+}
+
+/// A turn's last `NOTE_REPLIES_MAX` replies, a line each.
+fn replied(replies: &[String]) -> impl Iterator<Item = String> + '_ {
+    let shown = replies.len().min(limits::NOTE_REPLIES_MAX);
+    replies[replies.len() - shown..].iter().map(|r| format!("It had replied: {}", quoted(r, limits::NOTE_REPLY_MAX_CHARS)))
 }
 
 /// One of the agent's turns in a chat that another life ran since the
@@ -287,6 +329,79 @@ pub fn forgotten_text(items: &[Forgot], more: u32) -> String {
     note
 }
 
+/// The note a chat continued from its owner's Session Archive carries at
+/// its agent's first turn there (docs/chat-records.md, "History"): the
+/// conversation it goes on from, what was summarized of it, and the newest
+/// of what was said, the agent's own as "you" (it is the same agent, moved
+/// here), and where the whole of it is. From the `history` record `r` alone,
+/// and only its owner's (`owner`, the agent's owner): anyone else's tells
+/// nothing. At most `HISTORY_NOTE_MAX_BYTES`, the oldest messages dropped
+/// first.
+pub fn history(r: &Record, owner: &str) -> Option<String> {
+    let b = &r.body;
+    if r.principal != owner || b["kind"] != "history" {
+        return None;
+    }
+    let short = |k: &str, max: usize| records::cut(field(b, k), max);
+    let day = |k: &str| field(b, k).get(..10).filter(|d| d.bytes().all(|c| c.is_ascii_digit() || c == b'-')).map(str::to_string);
+    let when = match (day("started_at"), day("ended_at")) {
+        (Some(a), Some(z)) if a != z => format!(" ({a} to {z})"),
+        (Some(d), _) | (None, Some(d)) => format!(" ({d})"),
+        (None, None) => String::new(),
+    };
+    let title = Some(short("title", 120)).filter(|t| !t.is_empty()).unwrap_or_else(|| "an earlier chat".into());
+    let named = |k: &str, ok: fn(u8) -> bool| Some(field(b, k)).filter(|v| !v.is_empty() && v.len() <= 160 && v.bytes().all(ok));
+    let archive = named("archive", |c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-');
+    let key = named("key", |c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'_' | b'-'));
+    let mut head = vec![format!(
+        "This chat goes on from a conversation your owner had with you before they moved here, “{title}”{when}. It is read-only history: what was said there, not new messages."
+    )];
+    if let (Some(a), Some(k)) = (archive, key) {
+        head.push(format!("All of it is in their Session Archive: `fragment sync {a} --dir <folder> --mode pull`, then sessions/{k}.json."));
+    }
+    let summary = field(b, "summary").trim();
+    if !summary.is_empty() {
+        head.push(format!("What came before, as it was summarized then:\n{}", records::cut_bytes(summary, limits::HISTORY_NOTE_MAX_BYTES / 3)));
+    }
+    let said: Vec<String> = b["messages"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|m| {
+            let text = m["text"].as_str().map(str::trim).filter(|t| !t.is_empty())?;
+            let who = match m["role"].as_str() {
+                Some("user") => "Your owner",
+                Some("assistant") => "You",
+                _ => return None,
+            };
+            Some(format!("{who}: {}", records::cut_bytes(text, limits::HISTORY_NOTE_MAX_BYTES / 4)))
+        })
+        .collect();
+    let earlier = b["earlier"].as_u64().unwrap_or(0);
+    let head = head.join("\n\n");
+    // the newest that fit beside the head, oldest first
+    let mut room = limits::HISTORY_NOTE_MAX_BYTES.saturating_sub(head.len() + 200);
+    let mut kept: Vec<&String> = Vec::new();
+    for line in said.iter().rev() {
+        if line.len() + 1 > room {
+            break;
+        }
+        room -= line.len() + 1;
+        kept.push(line);
+    }
+    kept.reverse();
+    let dropped = earlier + (said.len() - kept.len()) as u64;
+    let mut text = head;
+    if !kept.is_empty() {
+        let before = if dropped > 0 { format!(" ({dropped} earlier ones are in the archive)") } else { String::new() };
+        text.push_str(&format!("\n\nIts last messages, oldest first{before}:\n"));
+        text.push_str(&kept.iter().map(|l| l.as_str()).collect::<Vec<_>>().join("\n"));
+    }
+    let text = records::cut_bytes(&text, limits::HISTORY_NOTE_MAX_BYTES);
+    assert!(text.len() <= limits::HISTORY_NOTE_MAX_BYTES, "a history note is bounded");
+    Some(text)
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -323,8 +438,41 @@ mod tests {
         }
     }
 
+    fn history_record(by: &str, body: Value) -> Record {
+        Record { channel: "chat".into(), seq: 1, at: 10, principal: by.into(), kind: "message".into(), body }
+    }
+
+    /// Goal: a chat continued from its owner's Session Archive tells its
+    /// agent what was said there, its own words as "you", and where the
+    /// rest is. Invalid: anyone else's history, another kind. Bounded: the
+    /// oldest messages give way first.
+    #[test]
+    fn a_continued_chat_tells_its_agent_its_history() {
+        let body = json!({ "kind": "history", "title": "Beans", "archive": "sessions--k3x9", "key": "hermes-20261001_ab", "started_at": "2026-10-01T09:00:00.000Z",
+            "ended_at": "2026-10-04T09:00:00.000Z", "summary": "We planned the beds.", "earlier": 3,
+            "messages": [{ "role": "user", "text": "plant beans?" }, { "role": "assistant", "text": "in spring" }, { "role": "system", "text": "skipped" }] });
+        let text = history(&history_record("npub1paul", body.clone()), "npub1paul").expect("its owner's history");
+        assert!(text.contains("“Beans” (2026-10-01 to 2026-10-04)"), "{text}");
+        assert!(text.contains("`fragment sync sessions--k3x9 --dir <folder> --mode pull`, then sessions/hermes-20261001_ab.json"), "{text}");
+        assert!(text.contains("summarized then:\nWe planned the beds."), "{text}");
+        assert!(text.ends_with("Its last messages, oldest first (3 earlier ones are in the archive):\nYour owner: plant beans?\nYou: in spring"), "{text}");
+        assert_eq!(history(&history_record("npub1mallory", body.clone()), "npub1paul"), None, "only its owner's");
+        let mut message = body.clone();
+        message["kind"] = json!("message");
+        assert_eq!(history(&history_record("npub1paul", message), "npub1paul"), None);
+        // a name that is no archive's or key's leaves the pointer out
+        let mut odd = body.clone();
+        odd["archive"] = json!("../x");
+        assert!(!history(&history_record("npub1paul", odd), "npub1paul").unwrap().contains("fragment sync"));
+        // past its bound, the newest messages are kept and the rest counted
+        let long: Vec<Value> = (0..40).map(|i| json!({ "role": "user", "text": format!("{i} {}", "w".repeat(2_000)) })).collect();
+        let big = history(&history_record("npub1paul", json!({ "kind": "history", "title": "Long", "messages": long })), "npub1paul").unwrap();
+        assert!(big.len() <= limits::HISTORY_NOTE_MAX_BYTES, "{}", big.len());
+        assert!(big.contains("Your owner: 39 ") && !big.contains("Your owner: 0 ") && big.contains("earlier ones are in the archive"), "the newest kept");
+    }
+
     fn step(tool: &str, args: &str, ok: bool) -> Step {
-        Step { tool: tool.into(), args: args.into(), ok, excerpt: String::new(), category: crate::records::Category::Shell }
+        Step { tool: tool.into(), args: args.into(), ok, excerpt: String::new(), category: crate::records::Category::Shell, evidence: None }
     }
 
     /// Goal (P5): the turn after a cut one is told of it, with its steps and

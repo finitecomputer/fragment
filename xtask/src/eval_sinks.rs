@@ -66,8 +66,9 @@ use std::path::Path;
 use anyhow::{ensure, Context, Result};
 
 /// Where runtime code is: what ships or runs for people.
-pub const RUNTIME: [(&str, &str); 8] = [
+pub const RUNTIME: [(&str, &str); 9] = [
     ("cell/", "the Worker: its Rust, entry.mjs and the platform's JavaScript, and the shell"),
+    ("search/", "the search service, an image the platform runs"),
     ("templates/", "the templates' apps, sites and skills, which fragments and computers run"),
     ("images/", "the computer images: the bridge, Hermes' boot, plugins and hooks, the screen pages"),
     ("cli/", "the CLI"),
@@ -78,7 +79,8 @@ pub const RUNTIME: [(&str, &str); 8] = [
 ];
 
 /// The repo's other directories, each with why its code is not runtime code.
-pub const NOT_RUNTIME: [(&str, &str); 8] = [
+pub const NOT_RUNTIME: [(&str, &str); 9] = [
+    ("bench/", "benchmarks, run by hand on a machine of one's own"),
     ("crates/e2e/", "the e2e, which drives Chrome by Runtime.evaluate (crates/e2e/src/browser.rs)"),
     ("crates/fakes/", "the vendors' fakes, for dev and the e2e"),
     ("crates/devstack/", "the dev stack, for dev and the e2e"),

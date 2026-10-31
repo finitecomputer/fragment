@@ -1,7 +1,8 @@
-//! The `Ledger` cell (docs/ledger.md): one Durable Object per person,
-//! named by their identity (an npub), running the usage ledger's state
-//! machine (`fragment_core::ledger`) over its own SQLite. The caller
-//! decides who pays a row and asks that person's ledger, which keys on
+//! The `Ledger` cell (docs/ledger.md): one Durable Object per payer,
+//! named by a person's identity (an npub) or `org:<id>` (an org's,
+//! decision 66: `fragment_core::ledger::org`), running the usage ledger's
+//! state machine (`fragment_core::ledger`) over its own SQLite. The caller
+//! decides who pays a row and asks that payer's ledger, which keys on
 //! nothing else (docs/cloudflare-v1.md, decision 36).
 //!
 //! The head (plan, seat, balance) is kept whole as one
@@ -45,8 +46,9 @@ use std::cell::{Cell, RefCell};
 
 use fragment_core::ledger::gate::Gate;
 use fragment_core::price::PriceBook;
+use fragment_core::ledger::org::Payer;
 use fragment_core::ledger::{self as core, BatchRecord, CommandRecord, Entry, Ledger, Month, Refused, Spend, Store};
-use fragment_proto::ledger::{GrantCredit, LedgerStatus, Plan, SeatState, SetFragmentCap, SetOverdraft, SetPlan, SetSeat, Why};
+use fragment_proto::ledger::{GrantCredit, LedgerStatus, OrgBudget, OrgLedgerStatus, Plan, SeatState, SetFragmentCap, SetOverdraft, SetPlan, SetSeat, Why};
 use fragment_proto::ErrorCode;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -58,8 +60,8 @@ use crate::config::Config;
 use crate::error::{CellError, CellResult};
 use crate::js;
 
-/// The person a ledger call is for; only platform code sets it, and the
-/// ledger keeps the first it is told and refuses another.
+/// The payer a ledger call is for (`Payer::name`); only platform code sets
+/// it, and the ledger keeps the first it is told and refuses another.
 pub const PAYER_HEADER: &str = "x-fragment-payer";
 /// The configured default plan's command id: applied once, as a new
 /// person's ledger is made.
@@ -69,6 +71,8 @@ const TEST_ENTRIES_MAX: i64 = 500;
 /// Test fleets: the longest a slowed ledger waits before each answer
 /// (`TestHook::Slow`).
 const TEST_SLOW_MAX_MS: u64 = 30_000;
+/// The grants a test fails at once, at most (`fail-grants`).
+const TEST_FAIL_GRANTS_MAX: u32 = 10;
 /// The meta key of a capped ledger's paid calls (`TestHook::PaidCalls`).
 const PAID_CALLS_MAX: &str = "test_paid_calls_max";
 /// How long a gate waits on a ledger it has no fresh answer from: a few
@@ -97,6 +101,8 @@ pub struct LedgerCell {
     /// Test fleets: how long it waits before each answer but a lever's
     /// (`TestHook::Slow`; this activation's alone).
     slow_ms: Cell<u64>,
+    /// Test fleets: the next grants to fail before they are taken.
+    fail_grants: Cell<u32>,
     /// Its schema as it started (schema.rs): ready, or refused.
     schema: crate::schema::Schema,
 }
@@ -109,7 +115,7 @@ impl DurableObject for LedgerCell {
         let schema = crate::schema::Schema::start(&raw, sql.clone(), &fragment_core::migrate::LEDGER, &state.id().to_string());
         let wiped = schema.wiped(&sql);
         let cfg = Config::from_env(&env);
-        LedgerCell { state, raw, cfg, armed: Cell::new(None), wiped: Cell::new(wiped), slow_ms: Cell::new(0), schema }
+        LedgerCell { state, raw, cfg, armed: Cell::new(None), wiped: Cell::new(wiped), slow_ms: Cell::new(0), fail_grants: Cell::new(0), schema }
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {
@@ -206,6 +212,11 @@ pub struct FragmentOpen {
 #[serde(deny_unknown_fields)]
 pub struct Status {}
 
+/// An org's ledger now.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OrgStatus {}
+
 /// Fleets with levers only (`FRAGMENT_TEST_SECRET`; cell/src/levers.rs):
 /// move this ledger's clock (`clock {offsetMs}`), run its sweep now
 /// (`sweep`), list the references under a prefix (`entries {prefix}`),
@@ -223,7 +234,10 @@ pub struct Status {}
 /// (`slow {ms}`, at most `TEST_SLOW_MAX_MS`, 0 to end it: a slow or far
 /// ledger, which no paid call waits on past the gate's wait), or make the
 /// gate of its isolate (and, through the router's lever, the router's)
-/// forget what it heard (`forget-gate`).
+/// forget what it heard (`forget-gate`), or fail its next `times` grants
+/// before it takes them (`fail-grants {times}`, at most
+/// `TEST_FAIL_GRANTS_MAX`, 0 to end it: a ledger not reached once the
+/// router recorded an org's grant, which its retry completes).
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "kebab-case")]
 pub enum TestHook {
@@ -241,6 +255,9 @@ pub enum TestHook {
         ms: u64,
     },
     ForgetGate,
+    FailGrants {
+        times: u32,
+    },
 }
 
 impl Route for core::Meter {
@@ -286,6 +303,16 @@ impl Route for SetFragmentCap {
 impl Route for Status {
     const PATH: &'static str = "/status";
     type Answer = LedgerStatus;
+}
+
+impl Route for OrgStatus {
+    const PATH: &'static str = "/org-status";
+    type Answer = OrgLedgerStatus;
+}
+
+impl Route for OrgBudget {
+    const PATH: &'static str = "/org-budget";
+    type Answer = Done;
 }
 
 impl Route for TestHook {
@@ -458,6 +485,16 @@ impl Store for SqlStore {
         rows.into_iter().map(|r| (r.fragment, r.micros)).collect()
     }
 
+    fn month_spent(&self, month: Month) -> i64 {
+        #[derive(Deserialize)]
+        struct Row {
+            micros: i64,
+        }
+        // bounded by the payer's fragments: one row each a month
+        let rows: Vec<Row> = self.rows("SELECT COALESCE(SUM(micros), 0) AS micros FROM spend WHERE month = ?", vec![SqlStorageValue::Integer(month.0.into())]);
+        rows.first().map_or(0, |r| r.micros)
+    }
+
     fn cap(&self, fragment: &str) -> Option<i64> {
         #[derive(Deserialize)]
         struct Row {
@@ -489,12 +526,26 @@ impl Store for SqlStore {
     }
 }
 
-/// The head as this cell keeps it, or a new person's: a guest with no
-/// credit (`Ledger::new`), then the deployment's default plan for new
-/// people (decision 25: `FRAGMENT_DEFAULT_PLAN`).
+/// The head as this cell keeps it, bound as an org's when its name is an
+/// org's (`Ledger::bind_org`), or a new one: an org's, with no credit
+/// (`Ledger::new_org`), or a person's, a guest with no credit
+/// (`Ledger::new`), then the deployment's default plan for new people
+/// (decision 25: `FRAGMENT_DEFAULT_PLAN`).
 fn head(store: &mut SqlStore, cfg: &Config, now_ms: i64) -> CellResult<Ledger> {
+    // an org's terms are never in its head (an older release's sweep
+    // rewrites the head it reads): that it is an org's is its name, kept
+    // as its first call named it, and its budget a row of its own
+    let payer: Vec<Json> = store.rows("SELECT value FROM meta WHERE key = 'payer'", vec![]);
+    let budget: Vec<Json> = store.rows("SELECT value FROM meta WHERE key = 'org_budget'", vec![]);
     let rows: Vec<Json> = store.rows("SELECT ledger AS value FROM head WHERE id = 1", vec![]);
     store.checked()?;
+    let org = match payer.first().and_then(|p| Payer::parse(&p.value)) {
+        Some(Payer::Org(_)) => {
+            let budget = budget.first().map(|b| b.value.parse::<i64>().map_err(|e| CellError::host(format!("the org's budget row: {e}")))).transpose()?;
+            Some(core::org::OrgTerms::of(budget.unwrap_or(0)))
+        }
+        _ => None,
+    };
     if let Some(row) = rows.into_iter().next() {
         let mut ledger: Ledger = serde_json::from_str(&row.value).map_err(|e| CellError::host(format!("the ledger's head does not read as it was written: {e}")))?;
         // a head of the releases before decision 62: its holds forgiven,
@@ -503,8 +554,14 @@ fn head(store: &mut SqlStore, cfg: &Config, now_ms: i64) -> CellResult<Ledger> {
         if retired > 0 {
             console_log!("{}", json!({ "event": "ledger.holds-retired", "retired": retired }));
         }
+        if let Some(terms) = org {
+            ledger.bind_org(terms);
+        }
         ledger.assert_valid();
         return Ok(ledger);
+    }
+    if org.is_some() {
+        return Ok(Ledger::new_org(now_ms));
     }
     let mut ledger = Ledger::new(now_ms);
     if cfg.default_plan != Plan::Guest {
@@ -515,8 +572,15 @@ fn head(store: &mut SqlStore, cfg: &Config, now_ms: i64) -> CellResult<Ledger> {
 }
 
 /// Writes the head back, with the book this release charges with
-/// (`Ledger::written`: for a rollback to a release that kept its own).
+/// (`Ledger::written`: for a rollback to a release that kept its own), and
+/// an org's budget in its own row, which no head's rewrite touches.
 fn save(store: &SqlStore, ledger: &Ledger, book: &PriceBook) {
+    if let Some(terms) = ledger.org_terms() {
+        store.exec(
+            "INSERT INTO meta (key, value) VALUES ('org_budget', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+            vec![terms.budget().to_string().into()],
+        );
+    }
     store.exec(
         "INSERT INTO head (id, ledger) VALUES (1, ?) ON CONFLICT (id) DO UPDATE SET ledger = excluded.ledger",
         vec![ledger.written(book).into()],
@@ -608,7 +672,7 @@ impl LedgerCell {
             return Err(Failed::Refused(Refused::Wiped));
         }
         self.schema.ready()?;
-        let payer = req.headers().get(PAYER_HEADER)?.filter(|p| fragment_core::npub::is_identity(p)).ok_or_else(|| CellError::host("a ledger call names its payer"))?;
+        let payer = req.headers().get(PAYER_HEADER)?.filter(|p| Payer::parse(p).is_some()).ok_or_else(|| CellError::host("a ledger call names its payer"))?;
         match self.meta("payer")? {
             None => self.set_meta("payer", &payer)?,
             Some(p) if p != payer => return Err(CellError::host(format!("this ledger is {p}'s, not {payer}'s")).into()),
@@ -649,6 +713,10 @@ impl LedgerCell {
             }
             <GrantCredit as Route>::PATH => {
                 let c: GrantCredit = decode(&body)?;
+                if self.fail_grants.get() > 0 {
+                    self.fail_grants.set(self.fail_grants.get() - 1);
+                    return Err(CellError::host("a test's failed grant (`fail-grants`): nothing taken").into());
+                }
                 reply(done(self.mutate(move |l, s, now| l.grant(s, &c, now)).await?))
             }
             <SetPlan as Route>::PATH => {
@@ -670,7 +738,17 @@ impl LedgerCell {
             Status::PATH => {
                 let Status {} = decode(&body)?;
                 let book = &self.cfg.book;
-                reply(self.mutate(move |l, s, now| Ok(l.status(s, now, book))).await?)
+                reply(self.mutate(move |l, s, now| if l.is_org() { Err(Refused::PersonsOnly) } else { Ok(l.status(s, now, book)) }).await?)
+            }
+            OrgStatus::PATH => {
+                let OrgStatus {} = decode(&body)?;
+                let Some(Payer::Org(org)) = Payer::parse(&payer) else { return Err(Failed::Refused(Refused::OrgsOnly)) };
+                let book = &self.cfg.book;
+                reply(self.mutate(move |l, s, now| l.org_status(&org, s, now, book)).await?)
+            }
+            <OrgBudget as Route>::PATH => {
+                let c: OrgBudget = decode(&body)?;
+                reply(done(self.mutate(move |l, s, now| l.set_budget(s, &c, now)).await?))
             }
             TestHook::PATH if self.cfg.test_hooks => self.test_hook(decode(&body)?).await,
             p => Err(CellError::new(ErrorCode::NotFound, format!("no route {p}")).into()),
@@ -753,6 +831,10 @@ impl LedgerCell {
             TestHook::ForgetGate => {
                 forget_gate();
                 Ok(json!({ "forgot": true }))
+            }
+            TestHook::FailGrants { times } => {
+                self.fail_grants.set(times.min(TEST_FAIL_GRANTS_MAX));
+                Ok(json!({ "failGrants": self.fail_grants.get() }))
             }
             TestHook::PaidCalls { max } => {
                 let max = match max {
@@ -849,7 +931,7 @@ pub async fn ask<R: Route>(env: &Env, payer: &str, request: &R) -> Result<R::Ans
 /// to a budget, and a copy per route type costs it): route `path`'s
 /// answer, as bytes, or its refusal.
 async fn asked(env: &Env, payer: &str, path: &str, body: String) -> Result<Vec<u8>, LedgerError> {
-    assert!(fragment_core::npub::is_identity(payer), "a ledger is a person's, named by their identity");
+    assert!(Payer::parse(payer).is_some(), "a ledger is a payer's, named as `Payer::name` names it");
     let headers = Headers::new();
     headers.set(PAYER_HEADER, payer)?;
     headers.set("content-type", "application/json")?;

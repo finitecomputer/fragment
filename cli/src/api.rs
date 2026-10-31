@@ -557,6 +557,7 @@ pub fn send_retrying(build: impl Fn() -> reqwest::blocking::RequestBuilder, repl
         // the body is read here too: an answer cut off mid-body is as
         // lost as one that never came
         let answer = build().send().and_then(|resp| {
+            crate::notice::heard(resp.url().host_str(), resp.headers().get("x-fragment-cli").and_then(|v| v.to_str().ok()));
             let status = resp.status().as_u16();
             resp.bytes().map(|b| (status, b.to_vec()))
         });

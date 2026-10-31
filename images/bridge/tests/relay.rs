@@ -51,8 +51,8 @@ fn card_settings() -> fragment_bridge::engine::Settings {
 }
 
 /// Goal: Hermes' turn reaches the chat as the bridge's records: its tool
-/// progress lines as steps, its draft frames as the chat's drafts, its
-/// final send as the reply, its reactions as the turn's end.
+/// calls' ends as steps, its draft frames as the chat's drafts, its final
+/// send as the reply, its reactions as the turn's end.
 #[tokio::test]
 async fn a_reply_with_steps_and_drafts() {
     let (fake, bridge, hermes, _dir) = setup("relay-reply", &["juniper"]).await;
@@ -63,10 +63,10 @@ async fn a_reply_with_steps_and_drafts() {
     fake.until(WAIT, "the turn's end", |w| !w.bodies(&chat, "work", "turn.end").is_empty()).await;
     fake.with(|w| {
         assert_eq!(replies(w, &chat), vec![json!({ "text": "echo: [paul] use a tool please", "turn": turn })]);
-        // each line its tool, what it does, and the call's preview, whether
-        // Hermes names the tool or says its friendly verb
+        // each call its tool, what it does, and its preview; its progress
+        // text is no step
         let steps: Vec<(String, String, String)> = w.bodies(&chat, "work", "turn.step").iter().map(|s| (s["tool"].as_str().unwrap().into(), s["category"].as_str().unwrap().into(), s["args"].as_str().unwrap().into())).collect();
-        assert_eq!(steps, vec![("terminal".into(), "shell".into(), "`ls`".into()), ("web_search".into(), "web".into(), "x".into())]);
+        assert_eq!(steps, vec![("terminal".into(), "shell".into(), "ls".into()), ("web_search".into(), "web".into(), "x".into())]);
         let reply = "echo: [paul] use a tool please";
         let partial = w.drafts.iter().filter(|d| d.2 == turn).filter_map(|d| d.3.as_deref()).any(|t| t.len() < reply.len() && reply.starts_with(t));
         assert!(partial, "Hermes' draft frames are the chat's drafts: {:?}", w.drafts);
@@ -264,7 +264,7 @@ async fn an_approval_through_the_relay() {
     let options: Vec<&str> = p["options"].as_array().unwrap().iter().map(|o| o["id"].as_str().unwrap()).collect();
     assert_eq!(options, vec!["once", "session", "deny"]);
     tokio::time::sleep(Duration::from_millis(300)).await;
-    fake.with(|w| assert_eq!((w.keepalive_open, w.keepalive_log.clone()), (1, vec![true]), "the card holds the computer awake"));
+    fake.with(|w| assert_eq!((w.keepalive_open, w.keepalive_log.clone()), (0, vec![true, false]), "the card releases the computer"));
     fake.say(&chat, &person("paul"), json!({ "kind": "prompt_response", "prompt": p["prompt"], "option": "once" }));
     fake.until(WAIT, "the reply", |w| !replies(w, &chat).is_empty()).await;
     fake.with(|w| {
@@ -411,7 +411,7 @@ async fn a_card_answered_by_a_message_through_the_relay() {
     fake.until(WAIT, "the chat told whose answer it waits for", |w| !work_of(w, &chat, &again, "turn.asked").is_empty()).await;
     fake.say(&chat, &person("paul"), json!({ "attachments": [{ "sha256": sha, "size": bytes.len(), "type": "image/png", "name": "basil.png" }] }));
     fake.until(WAIT, "the second turn's end", |w| !work_of(w, &chat, &again, "turn.end").is_empty()).await;
-    let told = format!("[paul sent a file with this answer: 'basil.png' (image/png). It is on your computer at: {}]", dir.join("media").join(&sha).display());
+    let told = format!("[paul sent a file: 'basil.png' (image/png). It is on your computer at: {}]", dir.join("media").join(&sha).display());
     hermes.with(|s| assert_eq!(s.heard.last().map(|e| e["text"].clone()), Some(json!(told)), "where the file is, in its answer's words: {:?}", s.heard));
     fake.with(|w| assert_eq!(w.bodies(&chat, "work", "turn.start").len(), 2, "the answer started no turn"));
     assert_eq!(std::fs::read(dir.join("media").join(&sha)).expect("the file"), b"a photo of basil");
@@ -505,11 +505,8 @@ fn work_of(w: &World, chat: &str, turn: &str, kind: &str) -> Vec<Value> {
 /// keepalive go while the card waits, the computer is put to sleep as the DO
 /// does it (the hold, its answer, the container gone, Hermes with it) and
 /// woken from its state by the next message, after the card's `expiresAt`;
-/// otherwise it stays awake through the expiry. The scripted Hermes keeps
-/// its session as v0.21.5 does: a turn cut before its reply leaves its
-/// message the session's last, and the next message is folded into it. On
-/// master the keepalive is let go (decision 42), the sleep cuts the turn,
-/// and the next message asks the cut approval again.
+/// otherwise it stays awake through the expiry. As in the real image,
+/// after_boot closes the cut turn in the scripted Hermes session.
 #[tokio::test]
 async fn an_expired_card_ends_its_turn_and_the_next_message_is_answered() {
     let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
@@ -545,7 +542,7 @@ async fn an_expired_card_ends_its_turn_and_the_next_message_is_answered() {
         let next = say("good morning");
         support::unhold(&dir);
         let bridge = support::start_killable(cfg, relay(listen, &dir));
-        let woken = hermes.after(listen, "computer-test", SECRET);
+        let woken = hermes.after_boot(listen, "computer-test", SECRET);
         (bridge, woken, next)
     } else {
         fake.until(WAIT, "the card expired, awake, and its turn's end", |w| !work_of(w, &chat, &risky, "turn.prompt.closed").is_empty() && !work_of(w, &chat, &risky, "turn.end").is_empty()).await;
@@ -565,7 +562,7 @@ async fn an_expired_card_ends_its_turn_and_the_next_message_is_answered() {
         assert_eq!(answer, Some(json!("echo: [paul] good morning")), "the next message is answered, and only it");
         assert_eq!(work_of(w, &chat, &next, "turn.end")[0]["outcome"], "idle");
     });
-    assert!(!let_go, "the card held the computer awake: an idle sleep under it is what cut its turn");
+    assert!(let_go, "waiting on a card permits idle sleep");
     hermes.with(|s| assert!(s.session.is_empty(), "nothing is left unanswered in its session: {:?}", s.session));
     bridge.stop().await;
 }
@@ -620,7 +617,7 @@ async fn a_turn_cut_by_a_restart_is_told_and_never_folded() {
         let n = heard(&next);
         assert_eq!(n["text"], "good morning", "the message's words alone: {n}");
         let note = n["context"][0]["text"].as_str().unwrap_or_else(|| panic!("the note, as the inbound's context: {n}"));
-        for said in ["Your previous turn in this chat was cut short: your computer restarted before it finished.", "Check what it already did before you do any of it again", "It was answering: “something risky”", "It asked: “⚠️ **Dangerous command** `rm -rf x`” (expired)"] {
+        for said in ["Your previous turn in this chat was cut short: your computer restarted before it finished.", "Check what it already did before you do any of it again", "It was answering: “something risky”", "It asked: “⚠️ **Dangerous command** `rm -rf x`” (unanswered)"] {
             assert!(note.contains(said), "{said:?} in {note}");
         }
         assert!(heard(&after).get("context").is_none(), "the turn after is told nothing: {}", heard(&after));
@@ -751,19 +748,46 @@ async fn two_profiles_on_one_gateway() {
 /// uploads and sends is the chat's blob on its reply.
 #[tokio::test]
 async fn media_both_ways() {
-    let (fake, bridge, _hermes, _dir) = setup("relay-media", &["juniper"]).await;
+    let (fake, bridge, hermes, dir) = setup("relay-media", &["juniper"]).await;
     let chat = fake.chat("talk", &["juniper"]);
+    let turn_of = |r: &Value| records::turn_id("juniper--k3x9", &chat, "chat", r["seq"].as_u64().unwrap());
+    let reply_of = |w: &World, turn: &str| replies(w, &chat).into_iter().find(|r| r["turn"] == turn && r.get("attachments").is_none());
     let bytes = bytes::Bytes::from_static(b"twelve bytes");
     let sha = records::hex(&<sha2::Sha256 as sha2::Digest>::digest(&bytes));
     fake.with(|w| w.fragments.get_mut(&chat).unwrap().blobs.insert(sha.clone(), ("image/png".into(), bytes.clone())));
     fake.until(WAIT, "the bridge to follow", |w| w.live_sockets() >= 2).await;
-    fake.say(&chat, &person("paul"), json!({ "text": "look", "attachments": [{ "sha256": sha, "size": 12, "type": "image/png", "name": "a.png" }] }));
-    fake.until(WAIT, "its reply", |w| replies(w, &chat).len() == 1).await;
-    fake.with(|w| assert!(replies(w, &chat)[0]["text"].as_str().unwrap().ends_with("[media: 1 files, 12 bytes]"), "{:?}", replies(w, &chat)));
-    fake.say(&chat, &person("paul"), json!({ "text": "send media" }));
-    fake.until(WAIT, "a reply with a file", |w| replies(w, &chat).iter().any(|r| r.get("attachments").is_some())).await;
+    let turn = turn_of(&fake.say(&chat, &person("paul"), json!({ "text": "look", "attachments": [{ "sha256": sha, "size": 12, "type": "image/png", "name": "a.png" }] })));
+    fake.until(WAIT, "its reply", |w| reply_of(w, &turn).is_some()).await;
+    fake.with(|w| assert!(reply_of(w, &turn).unwrap()["text"].as_str().unwrap().ends_with("[media: 1 files, 12 bytes]"), "{:?}", replies(w, &chat)));
+    let note = format!("[paul sent a file: 'a.png' (image/png). It is on your computer at: {}]", dir.join("media").join(&sha).display());
+    hermes.with(|s| {
+        let event = s.heard.last().unwrap();
+        assert_eq!(event["text"], format!("look\n{note}"), "the caption precedes its file note");
+        assert!(event.get("context").is_none(), "a file belongs to the new message");
+        assert_eq!(s.handed.last().unwrap().1, format!("[paul] look\n{note}"));
+    });
+    // A second message with the same blob reuses the downloaded original.
+    let reads = || fake.with(|w| w.calls.iter().filter(|c| c.ends_with(&format!("/blobs/{sha}"))).count());
+    let before = reads();
+    let turn = turn_of(&fake.say(&chat, &person("paul"), json!({ "text": "look again", "attachments": [{ "sha256": sha, "size": 12, "type": "image/png", "name": "a.png" }] })));
+    fake.until(WAIT, "the repeated file's reply", |w| reply_of(w, &turn).is_some()).await;
+    assert_eq!(reads(), before, "no second download");
+    hermes.with(|s| assert_eq!(s.heard.last().unwrap()["text"], format!("look again\n{note}")));
+    // A file alone is a new message too, with its name, type and path.
+    let turn = turn_of(&fake.say(&chat, &person("paul"), json!({ "text": "", "attachments": [{ "sha256": sha, "size": 12, "type": "image/png", "name": "a.png" }] })));
+    fake.until(WAIT, "the file-only message's reply", |w| reply_of(w, &turn).is_some()).await;
+    hermes.with(|s| {
+        assert_eq!(s.heard.last().unwrap()["text"], note);
+        assert!(s.heard.last().unwrap().get("context").is_none());
+        assert_eq!(s.handed.last().unwrap().1, format!("[paul] {note}"));
+    });
+    let turn = turn_of(&fake.say(&chat, &person("paul"), json!({ "text": "an unread file", "attachments": [{ "sha256": "f".repeat(64), "size": 12, "type": "application/pdf", "name": "missing.pdf" }] })));
+    fake.until(WAIT, "the message survives an unread file", |w| reply_of(w, &turn).is_some()).await;
+    hermes.with(|s| assert_eq!(s.heard.last().unwrap()["text"], "an unread file\n[paul also sent 1 file that could not be read]"));
+    let turn = turn_of(&fake.say(&chat, &person("paul"), json!({ "text": "send media" })));
+    fake.until(WAIT, "a reply with a file", |w| replies(w, &chat).iter().any(|r| r["turn"] == turn && r.get("attachments").is_some())).await;
     fake.with(|w| {
-        let r = replies(w, &chat).into_iter().find(|r| r.get("attachments").is_some()).unwrap();
+        let r = replies(w, &chat).into_iter().find(|r| r["turn"] == turn && r.get("attachments").is_some()).unwrap();
         assert_eq!(r["text"], "a cat");
         assert_eq!(r["attachments"][0]["name"], "cat.png");
         assert!(w.fragments[&chat].blobs.contains_key(r["attachments"][0]["sha256"].as_str().unwrap()));
@@ -1014,7 +1038,7 @@ async fn a_file_fetched_while_words_are_awaited_keeps_the_order() {
                 })
                 .collect();
             let answer = format!("reply echo: [paul] narrate twice late words-picture:{url} pause:{pause} - said");
-            let want = vec!["turn.start".to_string(), format!("reply {} cat.png interim", support::hermes::NARRATION), "turn.step `echo 1`".into(), format!("reply {} - interim", support::hermes::SECOND_NARRATION), "turn.step `echo 2`".into(), answer, "turn.end".into()];
+            let want = vec!["turn.start".to_string(), format!("reply {} cat.png interim", support::hermes::NARRATION), "turn.step echo 1".into(), format!("reply {} - interim", support::hermes::SECOND_NARRATION), "turn.step echo 2".into(), answer, "turn.end".into()];
             assert_eq!(seen, want, "pause {pause}");
         });
     }
@@ -1163,6 +1187,56 @@ async fn commands_said_as_they_are() {
         assert!(w.bodies(&chat, "work", "turn.step").iter().all(|s| s["turn"] != ts.as_str()), "nor its steps");
         assert_eq!(reply_of(w, &ts).unwrap()["text"], "echo: [paul] slow please");
         assert_eq!(w.bodies(&chat, "work", "turn.start").len(), 4, "usage, the typed one, the quote, the slow one: the steer and the side question are no turns");
+    });
+    bridge.stop().await;
+}
+
+/// Goal: a tool call's end and the words said before the call come on two
+/// sockets, with no order between them, and the turn still says which of
+/// its words are its answer. An end that comes first, before even a draft
+/// of those words, makes neither them the answer nor a lone answer interim;
+/// the answer streaming while another call ends leaves them interim (the
+/// review of #664: they were posted as the answer); and past the 200 steps
+/// a turn posts, each call still makes the words before it interim (the
+/// review: they were posted as answers, and 64 of them cost the turn its
+/// answer). Method: the scripted gateway's `observed boundary` turns.
+#[tokio::test]
+async fn words_and_steps_out_of_order_keep_the_answer() {
+    let (fake, bridge, _hermes, _dir) = setup("observer-boundary", &["juniper"]).await;
+    let chat = fake.chat("talk", &["juniper"]);
+    fake.until(WAIT, "chat followed", |w| w.live_sockets() >= 2).await;
+    let (first, second) = (support::hermes::NARRATION, support::hermes::SECOND_NARRATION);
+    // each turn's replies, whether each is interim, and how many steps it posts
+    for (text, want, steps) in [
+        ("observed boundary", vec![("the final answer", false)], 1),
+        ("observed boundary with words", vec![(first, true), ("the final answer", false)], 1),
+        ("observed boundary with words streamed", vec![(first, true), ("the final answer", false)], 2),
+        ("observed boundary many", vec![(first, true), (second, true), ("the final answer", false)], fragment_bridge::limits::STEPS_PER_TURN_MAX as usize),
+    ] {
+        let said = fake.say(&chat, &person("paul"), json!({ "text": text }));
+        let turn = records::turn_id("juniper--k3x9", &chat, "chat", said["seq"].as_u64().unwrap());
+        fake.until(WAIT, "the turn's end", |w| w.bodies(&chat, "work", "turn.end").iter().any(|r| r["turn"] == turn)).await;
+        fake.with(|w| {
+            let got: Vec<(String, bool)> = w.bodies(&chat, "chat", "reply").iter().filter(|r| r["turn"] == turn).map(|r| (r["text"].as_str().unwrap().to_string(), r["interim"] == true)).collect();
+            assert_eq!(got, want.iter().map(|(t, i)| (t.to_string(), *i)).collect::<Vec<_>>(), "{text}");
+            assert_eq!(w.bodies(&chat, "work", "turn.step").iter().filter(|r| r["turn"] == turn).count(), steps, "{text}");
+        });
+    }
+    bridge.stop().await;
+}
+
+/// Goal: Hermes' progress text is no step, sent and edited as it is, when
+/// no call's end is observed (a hard cut: nothing reads it).
+#[tokio::test]
+async fn progress_without_observations_is_no_step() {
+    let (fake, bridge, _hermes, _dir) = setup("no-progress-parser", &["juniper"]).await;
+    let chat = fake.chat("talk", &["juniper"]);
+    fake.until(WAIT, "chat followed", |w| w.live_sockets() >= 2).await;
+    fake.say(&chat, &person("paul"), json!({ "text": "use a tool without observations" }));
+    fake.until(WAIT, "turn ended", |w| !w.bodies(&chat, "work", "turn.end").is_empty()).await;
+    fake.with(|w| {
+        assert!(w.bodies(&chat, "work", "turn.step").is_empty());
+        assert_eq!(replies(w, &chat).len(), 1);
     });
     bridge.stop().await;
 }

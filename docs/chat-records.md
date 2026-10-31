@@ -331,6 +331,39 @@ for them).
   after a restart starts nothing twice; one waiting its turn waits again
   in the next life, still a command.
 
+**History** (a chat continued from its person's Session Archive:
+templates/sessions/README.md):
+
+```json
+{ "kind": "history", "title": "Beans", "archive": "sessions--k3x9", "key": "hermes-20261001_090000_ab12cd",
+  "started_at": "2026-10-01T09:00:00.000Z", "ended_at": "2026-10-04T09:00:00.000Z",
+  "summary": "…", "messages": [{ "role": "user", "at": "…", "text": "…" }], "earlier": 12 }
+```
+
+- Posted by the chat's owner, the shell's Continue, with the id
+  `history`, before the agent joins: the chat's first record. It holds
+  the conversation's last summary (`summary`, at most 8,000 characters)
+  and the newest of what the person and the agent said, oldest first
+  (`messages`, at most 40, each at most 4,000 characters), with how many
+  came before them (`earlier`), bounded as a whole by its body's bytes
+  (63 KiB of JSON, under a record's 64 KiB, whatever the text: the newest
+  that fit; a summary too large for it alone is cut) before the chat is
+  made (cell/shell/session-archive.js, `historyOf`). `archive` and `key`
+  name the whole conversation's file.
+- Continue's steps (the chat, made by a name the shell chooses and keeps
+  first; this record; the agent's membership; the archive's
+  `continued/<key>.json`) can each be taken again: a Continue cut short,
+  or whose answer was lost, is finished by the next one in the same chat,
+  and one asked of a conversation already continued opens that chat.
+- The page shows its owner's first one above the chat, read-only: where
+  it came from, the summary folded, the messages as the chat's own look.
+  Anyone else's is shown by nothing.
+- The bridge hands its owner's to the agent once, at its first turn in
+  the chat: as the turn's read-only note (`TurnStart::note`, Relay's
+  `context`), the agent's own words said as "you", and where the rest is
+  (images/bridge `note::history`). It starts no turn, and a bridge or a
+  page from before it reads it as nothing.
+
 Any other `kind` on `chat` is the page's own and is never a message.
 
 **Search.** A person's message and an agent's reply are what the
@@ -368,7 +401,8 @@ computer (docs/computers.md, the hold).
 
 ```json
 { "kind": "turn.step", "turn": "…", "step": 1, "tool": "terminal",
-  "category": "shell", "args": "ls -la", "ok": true, "excerpt": "…", "text": "…" }
+  "category": "shell", "args": "ls -la", "ok": true, "excerpt": "…", "text": "…",
+  "tool_call_id": "call_…", "status": "completed", "duration_ms": 120 }
 ```
 
 Part `<step>`, from 1: one tool call. `tool` (the runtime's own name for
@@ -389,6 +423,17 @@ handed to another agent), `memory` (what it remembers, changed), or
 as `other`, its `tool` in words. The bridge's runtime says which (our
 Hermes image's: one table of Hermes' tools, docs/bridge.md).
 
+`tool_call_id`, `status` and `duration_ms` (since 2026-10-30): the call
+as its runtime observed its end (our Hermes image's: its `post_tool_call`,
+docs/bridge.md), its id there (at most 128 characters), how it ended
+(`completed`, `failed`, `timed_out`, `cancelled` or `blocked`) and how
+long it ran; `ok` is true for `completed` alone. A step with them is a
+call that ended, so a page never shows it running, and names how it
+ended when it did not complete ("Timed out running"). `excerpt` is then a
+command's exit code (`Exit code: 7`) or empty: never its output. A step
+without them (an older bridge's, read from its runtime's progress) says
+only `ok`, which was true even for a call that failed.
+
 ```json
 { "kind": "turn.prompt", "turn": "…", "prompt": "<prompt>",
   "text": "Make your recipe app public, so anyone with its link can open it?",
@@ -406,10 +451,9 @@ optional (`primary`, `danger`). An option with `"words": true` is
 answered in words (a clarify's "Other": docs/bridge.md, Relay): a field
 on the card, whose answer carries what was typed (`text`, above), so
 nothing asks for it after. Only `asks` may answer, until
-`expiresAt` (ms). An open card keeps its computer awake until it is
-answered or expires (docs/bridge.md, "A card keeps its computer awake"),
-so it expires with its runtime there, and its turn ends as the runtime
-ends it.
+`expiresAt` (ms). A restart leaves unexpired cards answerable. An answer
+whose original turn is gone starts a fresh turn with its question and
+chosen answer (docs/bridge.md, "A card outlives its turn").
 
 ```json
 { "kind": "turn.prompt.closed", "turn": "…", "prompt": "<prompt>",
@@ -419,10 +463,13 @@ ends it.
 Part `pc:<prompt>`. `outcome` is `answered` (with `option` and `by`, and
 `text` for an option answered in words: typed on the card, or the owner's
 message that answered it, its files' names when it had no words),
-`expired` (no answer by `expiresAt`, or the computer restarted while it
-waited, as an owner's sleep or a crash does: Hermes cannot resume a turn
-across a restart, and the agent's next turn is told the card was cut
-with it), or `stopped`.
+`expired` (no answer by `expiresAt`), `stopped`, or `history_unavailable`
+(a late answer whose card's journal could not be read whole: shown as
+“Not acted on: ask again”; nothing ran). A card answered late, its turn
+gone, also records `answerSeq`, the answer's seq on `chat`: the fresh turn
+it started is the answer's, and only such a closure lets that answer
+rebuild it after a restart (docs/bridge.md, "A card outlives its turn");
+one answered live names none, and is final.
 
 ```json
 { "kind": "turn.asked", "turn": "…", "asks": "npub1…" }
@@ -514,6 +561,14 @@ naming it; a page reads it at `__blob/<sha256>`. At most 8 a record, 25
 MiB each. The record keeps the file while the channel keeps the record
 (docs/api.md, Blobs); an upload no record names goes after the grace
 period.
+
+Before handing a turn to Hermes, the bridge downloads its attachments to
+`/tmp/bridge-media/<sha256>` by default and names each original filename,
+MIME type and local path in file notes after the new message's words.
+The agent can copy or edit these originals with its tools, including when the model sees an
+image's pixels directly. These scratch paths are local to the running
+computer and are not stored in the chat record; copy files into the app
+or work to keep them across a sleep (docs/bridge.md).
 
 **A voice memo** is an attachment whose `type` is audio. The page records
 one (MediaRecorder) and sends it as the recorder made it: `audio/webm`

@@ -302,8 +302,14 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         !calls.is_empty() && calls.iter().all(|c| c.model.contains("flash") && c.metadata["agent_id"].is_string()),
         json!(calls.iter().map(|c| json!({ "model": c.model, "metadata": c.metadata })).collect::<Vec<_>>()),
     );
-    let aig = super::ledger::entries(api, &owner_id, "aig:");
-    s.ok("and each is charged on its owner's ledger", !aig.is_empty() && aig.iter().all(|e| super::ledger::charged(e).is_some()), json!(aig));
+    // a call is charged after its answer, through the ledger's queue (meter.rs
+    // `charge`), whose batch waits up to a second: each call's row, once there
+    let mut aig = Vec::new();
+    let charged = s.eventually(TURN, || {
+        aig = super::ledger::entries(api, &owner_id, "aig:");
+        aig.len() >= calls.len() && aig.iter().all(|e| super::ledger::charged(e).is_some())
+    });
+    s.ok("and each is charged on its owner's ledger", charged && !aig.is_empty(), json!({ "calls": calls.len(), "entries": aig }));
 
     // a tool step, then the answer that names it
     let r = say(2, "run: echo tool-ran")?;
@@ -319,26 +325,30 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     );
     s.ok("and its answer names the tool's result", reply_of(&tooled).is_some_and(|t| t.contains("the tool ran: ") && t.contains("tool-ran")), json!(reply_of(&tooled)));
 
-    // a model's text beside its tool call (Paul on p5, 2026-10-05: one
-    // message got two replies, the model's narration of its call, then the
-    // answer): the turn's one reply is its answer, the call a step on work,
-    // and the narration never a message of its own
+    // Everything the agent says is retained (docs/chat-records.md, since
+    // 2026-10-24), but pre-tool narration is interim, never a second final
+    // answer or push. An instant tool must not race that classification.
     let r = say(20, "narrate: echo narrated-ran")?;
     let narrated = turn_for(&r);
     s.eventually(TURN, || ended(&narrated).is_some());
-    let replies: Vec<String> = agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).into_iter().filter(|r| r["body"]["turn"] == narrated.as_str()).filter_map(|r| r["body"]["text"].as_str().map(str::to_string)).collect();
+    let parts: Vec<Value> = agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).into_iter().filter(|r| r["body"]["turn"] == narrated.as_str()).collect();
+    let replies: Vec<&str> = parts.iter().filter(|r| r["body"]["interim"] != true).filter_map(|r| r["body"]["text"].as_str()).collect();
+    let interim: Vec<&str> = parts.iter().filter(|r| r["body"]["interim"] == true).filter_map(|r| r["body"]["text"].as_str()).collect();
     let steps: Vec<Value> = work_of(&records(api, &owner, &chat_name, "work"), &narrated).into_iter().filter(|r| r["body"]["kind"] == "turn.step").collect();
     s.ok(
-        "a model's narration beside its tool call is no reply of its own: the turn's one reply is its answer, the call one step on work",
-        replies.len() == 1
+        "a model's pre-tool narration is interim; its one final reply is the answer and its call one truthful step on work",
+        interim == [fragment_fakes::workers_ai::NARRATION]
+            && replies.len() == 1
             && replies[0].contains("the tool ran: ")
             && replies[0].contains("narrated-ran")
             && !replies.iter().any(|t| t.contains(fragment_fakes::workers_ai::NARRATION))
             && steps.len() == 1
             && steps[0]["body"]["tool"] == "terminal"
+            && steps[0]["body"]["status"] == "completed"
+            && steps[0]["body"]["ok"] == true
             && steps[0]["body"]["args"].as_str().is_some_and(|a| a.contains("echo narrated-ran"))
             && ended(&narrated) == Some(json!("idle")),
-        json!({ "replies": replies, "steps": steps, "ended": ended(&narrated) }),
+        json!({ "parts": parts, "replies": replies, "steps": steps, "ended": ended(&narrated) }),
     );
 
     // its screen, the agent's desktop not used yet; after the steps above:
@@ -779,13 +789,18 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         maple_reply(&looked).is_some_and(|t| t.contains("the screen: I see an image, a ")),
         json!({ "reply": maple_reply(&looked), "work": work_of(&records(api, &owner, &grove_name, "work"), &looked) }),
     );
-    let vision_entries: Vec<Value> = super::ledger::entries(api, &owner_id, "aig:")
-        .into_iter()
-        .filter(|e| e["entry"]["row"]["agent"] == maple_id.as_str() && super::ledger::usage(e)["model"] == fragment_core::models::VISION_MODEL_DEFAULT)
-        .collect();
+    // charged after their answers, through the ledger's queue: once there
+    let mut vision_entries: Vec<Value> = Vec::new();
+    let metered = s.eventually(TURN, || {
+        vision_entries = super::ledger::entries(api, &owner_id, "aig:")
+            .into_iter()
+            .filter(|e| e["entry"]["row"]["agent"] == maple_id.as_str() && super::ledger::usage(e)["model"] == fragment_core::models::VISION_MODEL_DEFAULT)
+            .collect();
+        vision_entries.len() >= looks.len() && vision_entries.iter().all(|e| super::ledger::charged(e).is_some())
+    });
     s.ok(
         "each vision call is metered to the agent's owner, as the agent, charged at the vision model's price",
-        vision_entries.len() >= looks.len() && !looks.is_empty() && vision_entries.iter().all(|e| super::ledger::charged(e).is_some()),
+        metered && !looks.is_empty(),
         json!(vision_entries),
     );
 

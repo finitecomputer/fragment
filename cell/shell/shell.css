@@ -147,6 +147,15 @@ body.resizing-row, body.resizing-row * { cursor: row-resize !important; }
 .sheet { max-height: calc(var(--vh) - 32px - env(safe-area-inset-top, 0px)); overflow-y: auto; overscroll-behavior: contain; }
 .sheet iframe { display: block; width: 100%; height: 26rem; max-height: none; border: 0; }
 .empty-row { font-size: 13px; color: var(--text-tertiary); padding: 6px 8px; }
+/* the Session Archive (session-archive.js): a quiet heading that folds its rows */
+.archive { display: flex; flex-direction: column; gap: 1px; margin: 8px 0; }
+.archive-toggle { display: flex; align-items: center; gap: 4px; width: fit-content; padding: 4px 8px; border: 0; background: none; font: 600 12px/1.4 var(--font-sans); color: var(--text-tertiary); cursor: pointer; }
+.archive-toggle:hover { color: var(--text-secondary); }
+.archive-toggle svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; transition: transform .14s; }
+.archive-toggle[aria-expanded="true"] svg { transform: rotate(90deg); }
+.archive .rows { max-height: 24vh; }
+.archive-row .label { color: var(--text-secondary); }
+.archive-row.active .label, .archive-all .label { color: var(--text-primary); }
 .spacer { flex: 1; }
 
 /* ---- chat column ---- */
@@ -288,9 +297,6 @@ body.reordering iframe { pointer-events: none; }
 .row .home-mark svg { width: 14px; height: 14px; stroke-width: 1.8; }
 .row .unread { flex: none; min-width: 20px; height: 20px; padding: 0 6px; border-radius: 999px; background: var(--accent-blue); color: var(--bg-window); font: 700 11px/20px var(--font-sans); text-align: center; }
 .topbar { min-height: 76px; gap: 10px; }
-.agent-heading { display: flex; align-items: center; gap: 10px; min-width: 0; max-width: 60%; padding: 8px 13px; border: 1px solid var(--border); border-radius: 999px; color: var(--text-primary); background: var(--bg-sidebar); }
-.agent-heading:hover { background: var(--bg-active); }
-.agent-heading > svg { color: var(--text-icon); width: var(--icon-size); height: var(--icon-size); }
 .frames { border-top: 0; }
 .rename-agent { padding: 28px; width: min(400px, calc(100vw - 32px)); border: 1px solid var(--border-strong); border-radius: 18px; background: var(--bg-card); color: var(--text-primary); }
 .rename-agent::backdrop { background: rgba(0,0,0,.5); }
@@ -303,7 +309,7 @@ body.reordering iframe { pointer-events: none; }
 .rename-actions button[type=submit] { background: var(--text-primary); color: var(--bg-window); }
 .rename-actions button[type=submit]:disabled { opacity: .45; }
 button:focus-visible, .rename-agent input:focus-visible { outline: 2px solid var(--accent-blue); outline-offset: 3px; }
-@media (max-width: 760px) { .topbar { min-height: 64px; padding: 8px; gap: 5px; } .agent-heading { max-width: none; flex: 1; padding: 6px 10px; } .topbar .grow { display: none; } }
+@media (max-width: 760px) { .topbar { min-height: 64px; padding: 8px; gap: 5px; } .topbar .grow { display: none; } }
 
 /* Small, flat favicon-style app marks. */
 .app-icon { --app-color: #8f88bc; display: inline-grid; place-items: center; width: 16px; height: 16px; border-radius: 3px; background: var(--app-color); color: #fff; flex: none; overflow: hidden; }
@@ -361,6 +367,10 @@ button:focus-visible, .rename-agent input:focus-visible { outline: 2px solid var
 .search-status { flex: none; margin: 0; padding: 10px 18px 14px; font-size: 12px; color: var(--text-secondary); background: transparent; }
 .search-result .meta { flex: none; }
 .search-enter { display: flex; align-items: center; }
+/* the start row's agent, with more than one (launcher.js `withPick`) */
+.search-start-row { display: flex; align-items: center; gap: 8px; }
+.search-start-row .search-start { flex: 1; min-width: 0; }
+.search-agent { flex: none; max-width: 40%; height: 30px; padding: 0 8px; border: 1px solid var(--border-strong); border-radius: 999px; background: var(--bg-window); color: var(--text-primary); font: 600 13px var(--font-sans); }
 .search-message .agent-preview { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
 /* the launcher's files (launcher.js, launchFiles): rows of chips under its words, scrolling when the viewport leaves less room */
 .search-files { display: flex; flex: 0 1 auto; flex-wrap: wrap; min-height: 0; overflow-y: auto; gap: 8px; padding: 0 18px 14px 18px; }
@@ -383,7 +393,7 @@ button:focus-visible, .rename-agent input:focus-visible { outline: 2px solid var
    on top (shell.js `mark`); sized by the room it stands in */
 .avatar-stack { --stack: 40px; --dot: calc(var(--stack) * .66); position: relative; display: inline-block; width: var(--stack); height: var(--stack); flex: none; }
 .avatar-stack.small { --stack: 26px; }
-#chats .avatar-stack { --stack: 36px; }
+#chats .avatar-stack { --stack: 26px; }
 .search-result .avatar-stack { --stack: 32px; }
 .avatar-stack[data-count="3"] { --dot: calc(var(--stack) * .56); }
 .avatar-stack > .agent-avatar, #chats .avatar-stack > .agent-avatar, .search-result .avatar-stack > .agent-avatar {
@@ -599,6 +609,11 @@ iframe[data-blocked] { display: none; }
 .settings-section select.agent-model { width: min(320px, 62%); height: 36px; min-width: 0; padding: 0 34px 0 15px; appearance: none; -webkit-appearance: none; border: 1px solid var(--border-strong); border-radius: 999px; background: var(--bg-active); color: var(--text-primary); font-size: 13px; font-weight: 600; text-overflow: ellipsis; cursor: pointer; }
 .settings-section select.agent-model:hover { background: var(--bg-hover); }
 .settings-section select.agent-model:disabled { opacity: .55; cursor: default; }
+/* Settings' Agents: an agent's role, and another agent to add (agent-settings.js) */
+.agent-role-label::after { content: none; }
+.settings-section input.agent-role { width: min(320px, 62%); height: 36px; }
+.agent-add { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 14px 0 4px; }
+.agent-add input { flex: 1 1 140px; min-width: 0; }
 .agent-mode-picks { display: flex; gap: 8px; width: min(460px, 74%); min-width: 0; }
 .agent-mode-picks select.agent-model { width: 100%; flex: 1; }
 .agent-mode-picks select.agent-effort { flex: 0 0 86px; }
@@ -728,33 +743,66 @@ iframe[data-blocked] { display: none; }
 .billing-offer { padding: 8px 0 10px; border-bottom: 1px solid var(--border-strong); }
 .billing-offer p { margin: 0 0 6px; }
 
-/* One agent, a quiet list of conversations, and an app dock on the desktop. */
-.sidebar-agent-toolbar { --edge-light: 0; display: flex; align-items: center; flex: none; margin: 6px 0 8px; }
-#primary-agent { flex: 1; min-width: 0; }
-.sidebar-start-chat { flex: none; margin: 0 0 8px; color: var(--text-secondary); }
+/* The person's agents in their chats' rows, a flat list of them, and an
+   app dock on the desktop. */
+/* a new chat, with the agent its chip names (chat-list.js `renderStart`) */
+.sidebar-start { display: flex; flex: none; align-items: center; gap: 4px; margin: 4px 0 8px; }
+.sidebar-start-chat { flex: none; padding-right: 4px; color: var(--text-secondary); }
 .sidebar-start-chat:hover { color: var(--text-primary); }
-#primary-agent .sidebar-agent { flex-direction: row; justify-content: flex-start; gap: 10px; width: 100%; max-width: 100%; height: 48px; font-size: 14px; padding: 8px 13px; border-radius: 999px; background: var(--bg-sidebar); }
-#primary-agent .sidebar-agent:hover { background: var(--bg-active); }
-#primary-agent .sidebar-agent[aria-expanded="true"] { border-radius: 24px 24px 0 0; background: var(--bg-sidebar); }
-.sidebar-agent[aria-expanded="true"]::before, .sidebar-agent[aria-expanded="true"]::after { opacity: 0; }
-.menu.agent-menu { --edge-light: 0; min-width: 0; padding: 4px 8px 10px; border: 0; border-radius: 0 0 24px 24px; background: var(--bg-sidebar); box-shadow: none; overflow-y: auto; }
-.menu.agent-menu button { min-height: 34px; border-radius: 8px; font-size: 13px; }
-.sidebar-agent .title { flex: 1; text-align: left; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.sidebar-agent-mark { display: flex; flex: none; }
-/* its name, and under it what it is doing, as its chats' rows in the list say */
-.sidebar-agent-named { display: flex; flex: 1; flex-direction: column; justify-content: center; min-width: 0; }
-.sidebar-agent-named .title { flex: none; }
-.sidebar-agent .agent-doing { font-size: 11px; font-weight: 600; line-height: 14px; text-align: left; color: var(--text-tertiary); }
-.sidebar-agent .agent-doing.working { color: var(--success); }
-.sidebar-agent .agent-doing.you { color: var(--accent-blue); }
-.sidebar-agent-mark .agent-avatar { width: 26px; height: 26px; }
-.sidebar-new-chat { --edge-light: 0; width: 32px; height: 32px; border: 1px solid transparent; border-radius: 50%; background: transparent; }
+.agent-pick { display: inline-flex; flex: 0 1 auto; align-items: center; gap: 5px; min-width: 0; height: 28px; padding: 0 8px 0 3px; border: 1px solid var(--border-strong); border-radius: 999px; background: var(--bg-window); color: var(--text-primary); font-size: 13.5px; font-weight: 600; }
+.new-chat-agent { display: flex; min-width: 0; }
+.agent-pick .agent-avatar { width: 20px; height: 20px; }
+.agent-pick .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-pick svg { flex: none; width: 12px; height: 12px; color: var(--text-tertiary); stroke-width: 2.4; }
+button.agent-pick:hover { background: var(--bg-hover); }
+/* a menu's agent (shell.js `openMenu`): its face, its name, its role */
+.menu .agent-avatar { width: 22px; height: 22px; }
+.menu .name { font-weight: 600; font-size: 13.5px; }
+.menu .role-tag { margin-left: auto; }
+.menu button[aria-current="true"] { background: var(--bg-hover); }
+/* a chat's row, two lines (chat-list.js `chatRow`): whose chat it is and
+   when, then the chat's own name */
+#chats .chat-row.two { align-items: flex-start; padding: 7px 8px; }
+.chat-face { display: inline-flex; flex: none; width: 26px; height: 26px; margin-top: 1px; }
+.chat-face > .agent-avatar { width: 26px; height: 26px; }
+.chat-lines { display: flex; flex: 1; flex-direction: column; gap: 1px; min-width: 0; }
+.chat-who, .chat-what { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.chat-agent { flex: 0 1 auto; min-width: 40px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-primary); font-size: 13px; font-weight: 600; line-height: 18px; }
+.chat-who time, .chat-who .agent-doing { flex: none; margin-left: auto; color: var(--text-tertiary); font-size: 11.5px; line-height: 18px; }
+.chat-who .agent-doing { font-size: 11px; font-weight: 600; }
+.chat-who .agent-doing.working { color: var(--success); }
+.chat-who .agent-doing.you { color: var(--accent-blue); }
+/* the open chat's delegation threads, a line each over it (threads.js) */
+.threads { display: flex; flex: none; flex-direction: column; gap: 4px; padding: 0 16px 8px; }
+.thread { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.thread-open { display: flex; flex: 1; align-items: center; gap: 8px; min-width: 0; height: 32px; padding: 0 12px 0 6px; border: 1px solid var(--border); border-radius: 999px; background: var(--bg-sidebar); color: var(--text-primary); font-size: 13px; text-align: left; }
+.thread-open:hover { background: var(--bg-hover); }
+.thread-open .agent-avatar { width: 20px; height: 20px; }
+.thread-who { flex: none; font-weight: 600; }
+.thread-what { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-secondary); }
+.thread-state, .thread-took { flex: none; font-size: 11.5px; color: var(--text-tertiary); }
+.thread-state { font-weight: 600; }
+.thread-state.working { color: var(--success); }
+.thread-state.you { color: var(--accent-blue); }
+.thread-state.lost { color: var(--danger-text); }
+.thread-stop { flex: none; height: 32px; padding: 0 12px; border: 1px solid var(--border-strong); border-radius: 999px; background: none; color: var(--text-primary); font-size: 13px; }
+.thread-stop:disabled { opacity: .55; }
+/* one agent's role (its `meta.role`), a tag beside its name */
+.role-tag { flex: 0 4 auto; min-width: 24px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 0 6px; border-radius: 999px; background: var(--bg-active); color: var(--text-secondary); font-size: 11px; font-weight: 500; line-height: 16px; }
+.chat-row.active .role-tag { background: var(--bg-window); }
+.chat-what .label { color: var(--text-secondary); font-size: 13px; line-height: 18px; }
+.chat-what .unread { height: 18px; min-width: 18px; font-size: 10.5px; line-height: 18px; }
+/* the launcher, its search and its key (chat-list.js `LAUNCHER_KEY`); on a
+   touch screen with no finer pointer, the search alone */
+.sidebar-new-chat { --edge-light: 0; display: inline-flex; align-items: center; gap: 6px; width: auto; min-width: 32px; height: 32px; padding: 0 9px; border: 1px solid transparent; border-radius: 999px; background: transparent; }
 .sidebar-new-chat:hover { background: transparent; }
 .sidebar-new-chat:disabled { opacity: .45; cursor: default; }
-.sidebar-agent, .sidebar-new-chat { position: relative; border-color: transparent; }
-.sidebar-agent:focus-visible, .sidebar-new-chat:focus-visible, #new-chat:focus-visible, .search-dialog button:focus-visible { outline: 1px solid var(--border-strong); outline-offset: 2px; }
+.launcher-key { color: var(--text-tertiary); font: 500 12px/1 var(--font-sans); white-space: nowrap; }
+@media (pointer: coarse) and (not (any-pointer: fine)) { .launcher-key { display: none; } .sidebar-new-chat { padding: 0; } }
+.sidebar-new-chat { position: relative; border-color: transparent; }
+.sidebar-new-chat:focus-visible, #new-chat:focus-visible, .search-dialog button:focus-visible { outline: 1px solid var(--border-strong); outline-offset: 2px; }
 /* The composer's pointer-following reflection, with no resting outline. */
-.sidebar-agent::before, .sidebar-agent::after, .sidebar-new-chat::before, .sidebar-new-chat::after, .agent-menu-edge::before, .agent-menu-edge::after {
+.sidebar-new-chat::before, .sidebar-new-chat::after {
   content: ""; position: absolute; inset: -1px; z-index: 1; border-radius: inherit; padding: 1px; pointer-events: none;
   background: radial-gradient(180px circle at var(--edge-x, 50%) var(--edge-y, 50%), rgba(255,255,255,.65), rgba(255,255,255,.16) 45%, transparent 100%);
   -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
@@ -762,11 +810,9 @@ iframe[data-blocked] { display: none; }
   -webkit-mask-composite: xor; mask-composite: exclude;
   opacity: var(--edge-light); transition: opacity 160ms ease-out;
 }
-.agent-menu-edge { position: fixed; z-index: 21; pointer-events: none; border-radius: 24px; --edge-light: 0; }
-.agent-menu-edge::before, .agent-menu-edge::after { inset: 0; border-radius: inherit; box-sizing: border-box; }
-.sidebar-agent::after, .sidebar-new-chat::after, .agent-menu-edge::after { filter: blur(2px); opacity: calc(var(--edge-light) * .35); }
+.sidebar-new-chat::after { filter: blur(2px); opacity: calc(var(--edge-light) * .35); }
 @media (prefers-reduced-motion: reduce) {
-  .sidebar-agent::before, .sidebar-agent::after, .sidebar-new-chat::before, .sidebar-new-chat::after, .agent-menu-edge::before, .agent-menu-edge::after { transition: none; }
+  .sidebar-new-chat::before, .sidebar-new-chat::after { transition: none; }
 }
 /* an invite waiting on the person's email, above their chats: what it
    shares, who invited them and as what, Accept and Decline (shell.js renderInvites) */
@@ -784,7 +830,8 @@ iframe[data-blocked] { display: none; }
 #chats .chat-row.active { color: var(--text-primary); }
 @media (max-width: 760px) {
   .sidebar-top { min-height: 32px; }
-  .sidebar-new-chat { position: fixed; z-index: 12; right: 24px; bottom: calc(24px + env(safe-area-inset-bottom, 0px)); width: 56px; height: 56px; border: 0; background: #fff; color: #202020; box-shadow: 0 4px 16px rgba(0,0,0,.18), 0 0 0 1px rgba(0,0,0,.06); }
+  .sidebar-new-chat { position: fixed; z-index: 12; right: 24px; bottom: calc(24px + env(safe-area-inset-bottom, 0px)); justify-content: center; width: 56px; height: 56px; padding: 0; border: 0; background: #fff; color: #202020; box-shadow: 0 4px 16px rgba(0,0,0,.18), 0 0 0 1px rgba(0,0,0,.06); }
+  .launcher-key { display: none; }
   .sidebar-new-chat:hover { background: #f3f3f3; }
   .sidebar-new-chat svg { width: 24px; height: 24px; }
   .sidebar .settings { min-height: 56px; margin-right: 72px; }

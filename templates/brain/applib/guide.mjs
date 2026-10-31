@@ -126,6 +126,67 @@ pages were skipped and why (a page of 1 MiB or more is not indexed: split
 it). The index is the brain's own, rebuilt from its files; a sync is all
 it needs.
 
+## A parent brain (the meta-brain convention)
+
+A parent is an ordinary brain curated from child fragments, useful when
+one executive overview draws on several department brains. References
+grant no access. Synthesis publishes to the parent's audience: create it
+with --visibility members, and keep everyone who can read it (including
+its owner and agents) within every child's audience. Check this before
+refreshing or changing sharing. Source names and citations disclose too.
+
+Keep these ordinary files in the parent's wiki, for example executive/:
+
+- datasets/sources.json: a list of full child names and selected paths:
+      [{"fragment":"research--a1b2","paths":["team/wiki/launch.md"]},
+       {"fragment":"delivery--c3d4","paths":["team/wiki/launch.md"]}]
+- datasets/incorporated.json: the last successfully published revisions
+  and page dependencies, keyed by child name:
+      {"research--a1b2":{"revision":"<main SHA actually read>",
+        "pages":["team/wiki/launch.md"],"outputs":["executive/wiki/launch.md"]}}
+- wiki/launch.md: synthesis with status (current, stale or withdrawn),
+  sources naming child, path and revision, and readable source links.
+  For example: "Research and delivery both target November. Sources:
+  [Research](https://<child-origin>/#/team/wiki/launch.md), main <SHA>;
+  [Delivery](https://<other-child-origin>/#/team/wiki/launch.md), main <SHA>."
+  Links open today's page; the cited SHA records what was read. Each
+  child has its own read time, not a common snapshot.
+
+Refresh only when asked, as the agent with viewer access to children and
+editor access to the parent:
+
+1. Read the parent's source list, incorporated file and existing outputs
+   from the fragment, even after a restart. Reconcile current child state
+   against them; a local working copy or a missed notification is no
+   authority. Never acquire editor access just to sync a child.
+2. Read each child's status pin (GET /api/f/<child>/status, pins.main),
+   selected files (GET /api/f/<child>/file?path=...), then its status pin
+   again. Require successful reads and equal nonempty pins; otherwise
+   discard the attempt and retry from status, with a bounded retry count.
+   If it keeps moving, report incomplete refresh and mark affected pages
+   stale. Only record a revision whose files you actually read.
+3. Synthesize into stable output paths, citing each child page and its
+   verified revision. Update existing pages, index and log rather than
+   appending duplicate summaries. Publish outputs and incorporated.json
+   together in one file batch (POST /api/f/<parent>/files, at most 16
+   files / 1 MiB); split larger work into independently consistent batches.
+   On an uncertain write result, reread the parent before retrying. An
+   unchanged source revision with matching outputs needs no new write.
+4. Reconcile removals too: a deleted source page withdraws its dependent
+   claims. If a child becomes unreadable, mark dependent pages stale or
+   withdrawn and report incomplete coverage; never regenerate from cached
+   copies. Withdraw the text when it should no longer be disclosed. Access
+   revocation cannot recall old git versions, chats, exports or downloads.
+
+For questions spanning children, call each child's existing search as the
+reader (fragment call <child> search --input '{"q":"launch","limit":10}').
+Bound the source count and results; group by source, report denied or
+unavailable sources and pending indexes, and don't compare BM25 ranks
+across brains. Reopen pages with the pin check before citing them. Search
+snippets, answers and the chat receiving them need the same audience
+check. The parent's browser search covers only its own synthesis. Child
+references and a parent's job confer no reader credentials.
+
 ## Rules
 
 - Raw is immutable; synthesis lives in wiki/.

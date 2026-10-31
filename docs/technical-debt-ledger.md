@@ -5,6 +5,40 @@ Each entry names where it was observed, the risk, the first proof that
 would show it biting, and the condition that deletes it. An entry
 without a delete condition is unfinished design, not debt.
 
+## Two imports into one session archive at once agree last-writer-wins
+
+- **Observed:** `fragment session import` (templates/sessions/README.md),
+  2026-10-30: each conversation's file goes up as an upsert on whatever
+  head main has, and only the indexes' commit is made again on a head
+  another writer moved.
+- **Shortcut:** two imports of the same conversation at once (the same
+  person running it twice, on two machines) keep the last one's file,
+  and an index entry may name the other's copy (its `sha256` and
+  `ended_at`) when the two are the same size; one of another size is
+  listed by its file at the next import (`found`, cli/src/session).
+- **Risk:** a stale entry makes the next import of that conversation
+  compare against the wrong copy: it may skip a newer copy once, or write
+  the same one again. Nothing is lost: the file is one of the two copies.
+- **First proof:** an archive whose entry's `sha256` is not its file's.
+- **Delete when:** each batch's commit is made again from main as the
+  indexes' is (read the entries of the conversations it writes, keep the
+  newer), or the archive moves to an app whose mutation writes both.
+
+## A paid org pack is still credited, though none is sold
+
+- **Observed:** #736 review, 2026-10-30: orgs now pay out of band and an
+  operator credits them (decision 66), so no org pack is opened any more.
+  But preview sold one in Stripe's sandbox from #716 until #736 deployed.
+- **Shortcut:** `pack_paid` (`cell/src/billing.rs`) still grants a
+  Checkout whose `fragment_payer` names its org's ledger, once by its
+  Checkout, so one paid after that deploy (its return, or a webhook
+  Stripe sends again) is credited and not lost.
+- **Risk:** none beyond the read: nothing opens such a Checkout.
+- **First proof:** a webhook for such a Checkout that fails its grant
+  (Stripe's dashboard shows it retried).
+- **Delete when:** three days (Stripe's retries) have passed since #736
+  deployed to preview; a Checkout itself expires after 31 minutes.
+
 ## Hermes' explicit auxiliary vision overrides native image routing
 
 - **Observed:** #505 and the decision 65 probe (2026-10-29): all four
@@ -663,6 +697,49 @@ fragment.club until cutover (decisions 34–35).
   workerd drain at shutdown: then `scope_images`, `remove`, and their
   calls in the e2e and `xtask dev` go. Moving the wrangler pin checks it.
 
+## A local node's port is a front door of ours, past wrangler's proxy
+
+- **Observed:** 2026-10-30, CI's e2e flakes. `wrangler dev` (4.145.0,
+  workerd 1.20260930) answers on its port through its ProxyWorker, a
+  Durable Object in a second workerd that pools its connections to the
+  runtime running the Worker. That runtime closes a connection idle 5 s,
+  and a request the proxy writes onto one as it closes is lost: a GET or
+  HEAD it asks again, anything else it answers 500 "Network connection
+  lost" (a test's PUT, run 40341674686; a CLI approval's POST,
+  40404853530; triggers' inbox, 40980576877). A node started from a
+  shell lost 25 to 60 of 192 PUTs sent on fresh connections 4.985 s
+  after a burst. Pages' module requests also went unanswered behind it
+  under load (the chat's fit, #704's and #707's shell reloads), which a
+  Worker of a few lines reproduced under wrangler and never with Chrome
+  sent straight to the runtime (0 of 1,882 loads). So the node's port
+  is `crates/devstack/src/front.rs`: each connection a client opens
+  passed byte for byte to the runtime, nothing pooled between them.
+- **Shortcut:** wrangler names the runtime's address only in its debug
+  output, where its proxy is told of each start and restart
+  (`reloadStart`, then `reloadComplete` with the address; a restart moves
+  the port). A node runs with `--log-level debug` always, front.rs reads
+  its output for those lines, and a connection opened during a restart
+  waits for the next address (at most 90 s), as wrangler's proxy holds a
+  request. A start whose runtime is never named fails, saying so. The
+  lines come from wrangler's inspector, which an inherited
+  `VSCODE_INSPECTOR_OPTIONS` (VS Code's JavaScript Debug Terminal) turns
+  off, so wrangler never gets that variable.
+- **Risk:** the lines are wrangler's internals, at the pinned version. A
+  wrangler that no longer writes them fails every node's start (loudly:
+  no client falls back to the proxy's path). Debug output makes a node's
+  log larger, `xtask dev`'s included.
+- **First proof:** a node start failing with "did not name its runtime's
+  address", `cargo test -p fragment-devstack --test front_door --
+  --ignored` answering a PUT through the front door with anything but
+  200, or `--test debug_terminal` (started and reloaded with that
+  variable set) failing.
+- **Delete when:** wrangler's proxy stops losing requests to its pool
+  (the upstream issue: a pool that lets an idle connection go before
+  the runtime closes it, or asks again a request no byte of which was
+  answered), or the local node runs Miniflare itself with its own port,
+  no proxy between: then front.rs, the debug level and the readers in
+  `Node::start` go.
+
 ## The cell signs code.storage tokens for any repo a fragment names
 
 - **Observed:** H1, and in the cell since phase 2 (`cell/src/keys.rs`).
@@ -1098,70 +1175,6 @@ fragment.club until cutover (decisions 34–35).
   as expecting no reply, and Hermes' own silence ends a turn the bridge
   can read; proven by the real-Hermes lane.
 
-## Hermes' tool steps are its progress text
-
-- **Observed:** phase 4. v0.21.5 sends `task_card` only for Slack chats,
-  so a Relay turn's steps are the lines of its progress message: a tool's
-  name and its preview, `ok` always true, no excerpt of its result.
-- **Risk:** a step card cannot say a tool failed or what it returned; a
-  change to the progress lines' format changes the cards.
-- **First proof:** phase 5's chat template showing a failed tool as ok.
-- **Delete when:** Hermes sends structured tool events (task cards, or
-  their like) to Relay connectors other than Slack's, and the relay
-  runtime maps them, proven by the real-Hermes lane's step assertions.
-
-## A quick tool's step can be lost in Hermes
-
-- **Observed:** the Docker rung's `the_hermes_image`, twice, warm.
-  Hermes v0.21.5's progress sender (`gateway/run_turn_runner.py`,
-  `TurnRunner.send_progress_messages`) takes a tool's progress line from
-  its queue every 0.3 s; when the turn's cleanup cancels it, it edits a
-  progress message it already sent but never sends a first one. A turn
-  that ends before the sender's next poll after its tool starts sends no
-  progress line at all, as a message or in a draft (its one draft is the
-  answer's), so the relay runtime has no step to record; a probe of that
-  code in the image lost 21 of 48 lines whose turns ended within 0.35 s
-  of their tool's start. The scripted model answers at once and `echo` is
-  quick: the failing turns took about 350 ms, and a passing one sent its
-  line 65 ms before its answer. So the rung's terminal command sleeps 2 s
-  first (`images/bridge/tests/support/model.rs`). The e2e's `hermes` lane
-  runs `run: echo tool-ran` through the Workers AI fake and has the same
-  race, so far unseen.
-- **Risk:** a real turn whose tool and next model call take under 0.3 s
-  together shows its answer with no step. Rare with a real model, whose
-  next call alone is slower.
-- **First proof:** a Hermes turn with a tool call in its session and no
-  `turn.step` on work.
-- **Delete when:** Hermes sends what its progress queue holds when its
-  sender is cancelled (or the entry above goes), proven by the Docker
-  rung with an instant command.
-
-## The Hermes image patches Hermes' progress sender
-
-- **Observed:** the hosted `agent-smoke` (2026-10-06): asked to list
-  fragments with the CLI, 2 runs of 3 recorded only the skill read's step
-  though the reply named the fragments a terminal call listed. Hermes
-  v0.21.5's progress sender (`gateway/run_turn_runner.py`,
-  `TurnRunner.send_progress_messages`) edits at most every 1.5 s: a line
-  that comes sooner waits out the interval, then the sender goes back to
-  its queue and sends that line only with a newer one. A tool call within
-  1.5 s of the last progress line that is its turn's last (a skill read,
-  then a quick model call to the terminal) is never sent, and the next
-  text segment's new-message marker clears it. A probe of that code in
-  the image (the sender driven with a scripted queue) lost the line in
-  each such order and sent it once the patch removes the loop's
-  `continue` after the wait; the Docker rung's `use the terminal twice`
-  turn proves the patched image. The image applies it with Python before
-  its bytecode step (`images/hermes/Dockerfile`), and the build fails if
-  the loop no longer reads as it did.
-- **Risk:** a Hermes release changes the loop: the build fails (loudly).
-  Edits stay at most one per 1.5 s; the patch only stops a held line
-  from waiting for a newer one.
-- **First proof:** the first Hermes upgrade after v0.21.5.
-- **Delete when:** upstream sends a held progress line once its edit
-  interval passes, proven by the Docker rung's `use the terminal twice`
-  turn on an unpatched image.
-
 ## The screen writes Hermes' lease file, not through Hermes
 
 - **Observed:** 2026-10-07 (`images/bridge/src/lease.rs`,
@@ -1321,6 +1334,28 @@ fragment.club until cutover (decisions 34–35).
 - **First proof:** the Docker profile test against the next pinned image.
 - **Delete when:** Hermes' direct native image path uses an explicit SDK
   client from its active profile scope, including the result worker.
+
+## Hermes' tool workers can take an ended thread's interrupt
+
+- **Observed:** #776, 2026-10-30: the real-Hermes Docker lane's
+  `fragment list` came back "[Command interrupted]" (exit 130) in 0.08 s.
+  Hermes v0.21.7 keys a tool's interrupt by thread id. When a turn starts
+  while a background memory review runs, it cancels the review by its
+  thread's id, and the review may have just ended. A new thread usually has
+  the last ended one's id, and `_registered_tool_worker` clears a worker's
+  bit only as it ends. So the next tool worker reads that bit as its own.
+- **Stand-in:** the image's `tool_threads.py`, installed by its preload,
+  clears a tool worker's bit as it starts, before it is registered for
+  interrupts, so no real interrupt can have set it yet.
+- **Risk:** the adapter replaces a pinned upstream private function that
+  `tool_executor` and `terminal_approval_batch` look up at each call; an
+  upstream change could bypass it. The adapter doesn't cover other threads
+  that read their own bit (the execution thread already clears its bit as a
+  turn starts), or an interrupt that lands after the next worker started.
+- **First proof:** the Docker test `hermes_tool_workers_start_clean` runs
+  pinned Hermes' worker on recycled ids, with and without the adapter.
+- **Delete when:** upstream's `_registered_tool_worker` starts its worker
+  clean: that test's first assertion fails, saying so.
 
 ## Hermes keeps its providers' variable names from its terminal
 
@@ -1509,31 +1544,6 @@ fragment.club until cutover (decisions 34–35).
 - **Delete when:** `rollback`'s default target is the commit live served
   before its tip (skipping a deploy's first step), or code.storage merges
   with the source's tree.
-
-## An open card keeps its computer awake, and any other restart under it still loses its card
-
-- **Observed:** 2026-10-05, Paul on p5 missed an approval card's hour and
-  his agent stopped answering: the idle sleep under the card cut its
-  turn, and Hermes folded every later message into the cut request,
-  asking its approval again. The bridge now holds the keepalive while a
-  turn waits on its card (images/bridge/src/engine.rs, `finish`;
-  docs/bridge.md, "A card keeps its computer awake"), the P6 stopgap
-  Paul agreed (docs/durable-computers.md). The fold itself is closed by
-  P5 (2026-10-06: the boot closes a cut turn in Hermes' session, and the
-  next turn is told what was cut; `a_turn_cut_by_a_restart_is_closed_and_told`
-  in images/bridge/tests/docker.rs).
-- **Risk:** an unanswered card costs its life awake (an hour by default;
-  a runtime may ask up to `PROMPT_TTL_MS_MAX`, a day). A restart for any
-  other reason while a card is open (an owner's sleep, a crash, a deploy,
-  an image pinned) still cuts the turn and closes its card `expired`
-  before its `expiresAt`: the owner's answer has no turn to go to (docs/durable-computers.md).
-- **First proof:** a computer's awake time dominated by turns waiting on
-  cards; or an owner who answers a card after a restart and sees nothing
-  happen.
-- **Delete when:** P6 lands: a card outlives its turn (a late answer
-  starts a new turn, told what was cut), so the keepalive can be let go
-  while a card waits again, proven on the real-Hermes lane by a sleep
-  under a card whose answer, after the wake, is acted on once.
 
 ## Preview cards drive Browser Rendering over a CDP client of our own
 

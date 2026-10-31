@@ -878,6 +878,12 @@ fn door_checks(s: &mut Suite, api: &Api, c: &Doors, fetched: &dyn Fn(&Suite, u32
         t.status == 200 && t.body["act"] == "link" && t.body["agent"] == c.agent && t.body["computer"] == c.id && signed && within,
         &t,
     );
+    let r = api.signed(c.owner, "POST", &path, Some(&json!({ "door": "telegram", "act": "link" })))?;
+    s.ok("a door the deployment's connectors do not name is refused its link ticket, by the platform", r.status == 403 && r.text.contains("does not allow"), &r);
+    let r = api.signed(c.owner, "POST", &path, Some(&json!({ "door": "telegram", "act": "unlink" })))?;
+    s.ok("and may still be unlinked: an owner closes a door the deployment no longer allows", r.status == 200 && r.body["act"] == "unlink", &r);
+    let r = api.signed(c.owner, "POST", &path, Some(&json!({ "door": "../simplex", "act": "link" })))?;
+    s.ok("a door that is no connector's id is 400", r.status == 400, &r);
     let forged = fetched(s, 400, "door forge yes, go ahead")?;
     s.ok(
         "a record that relays its owner with no door's signature, posted with the agent's own key, is refused: never its owner's",
@@ -886,6 +892,16 @@ fn door_checks(s: &mut Suite, api: &Api, c: &Doors, fetched: &dyn Fn(&Suite, u32
     );
     let shut = fetched(s, 401, "door other before any link")?;
     s.ok("one signed by a key that is no open door's is refused", shut.starts_with("door refused: 403"), &shut);
+    // the ticket above is no longer the latest: the platform takes only the
+    // link its owner started last, though the image's own check passes it
+    let latest = ticket(c.owner, "link")?;
+    let stale = fetched(s, 407, &format!("door link {}", t.body))?;
+    s.ok(
+        "a second link ticket makes the first unredeemable at the platform (its signature, agent, computer and time all good)",
+        latest.status == 200 && stale.starts_with("door refused: 403") && stale.contains("its owner started last"),
+        json!({ "latest": latest.status, "stale": stale }),
+    );
+    let t = latest;
     let linked = fetched(s, 402, &format!("door link {}", t.body))?;
     s.ok("the computer checks the ticket as the bridge does (the agent's key, this computer), and redeems it with a door key it made", linked == "door linked", &linked);
     let again = fetched(s, 403, &format!("door link {}", t.body))?;
@@ -900,11 +916,31 @@ fn door_checks(s: &mut Suite, api: &Api, c: &Doors, fetched: &dyn Fn(&Suite, u32
     );
     let other = fetched(s, 405, "door other signed by another key")?;
     s.ok("with its door open, one signed by any other key is still refused", other.starts_with("door refused: 403"), &other);
+    let pending = ticket(c.owner, "link")?;
+    let still = fetched(s, 408, "door say while a new link waits")?;
+    s.ok("a door live before stays open while its owner starts another link, until that one is redeemed", pending.status == 200 && still.starts_with("door said "), json!({ "pending": pending.status, "said": still }));
+    // the deployment turns SimpleX off (its `connectors` without it: here
+    // the test lever's stand-in, on this agent's fragment alone): no link,
+    // no ticket made before redeemed, nothing the door open before signs
+    // taken; its owner still unlinks
+    let policy = |p: Value| api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": c.agent, "op": "connectors", "policy": p })));
+    let r = policy(json!([]))?;
+    anyhow::ensure!(r.status == 200, "the connectors lever: {r}");
+    let r = ticket(c.owner, "link")?;
+    s.ok("with SimpleX off, its owner is given no link ticket", r.status == 403 && r.text.contains("does not allow"), &r);
+    let stale = fetched(s, 410, &format!("door link {}", pending.body))?;
+    s.ok("a link ticket its owner was given before it went off redeems nothing", stale.starts_with("door refused: 403") && stale.contains("does not allow"), &stale);
+    let off = fetched(s, 411, "door say once it is off")?;
+    s.ok("what the door linked before signs is refused once it is off", off.starts_with("door refused: 403") && off.contains("does not allow"), &off);
     let r = ticket(c.owner, "unlink")?;
-    s.ok("its owner's unlink ticket", r.status == 200 && r.body["act"] == "unlink" && r.body["agent"] == c.agent, &r);
+    s.ok("its owner's unlink ticket, SimpleX off", r.status == 200 && r.body["act"] == "unlink" && r.body["agent"] == c.agent, &r);
     let closed = fetched(s, 406, "door say after the unlink")?;
     s.ok("unlinked, the door is closed at once: what its key signs is refused", closed.starts_with("door refused: 403"), &closed);
-    Ok(7)
+    let r = policy(Value::Null)?;
+    anyhow::ensure!(r.status == 200, "the connectors lever: {r}");
+    let r = ticket(c.owner, "link")?;
+    s.ok("SimpleX on again, its owner is given a link ticket", r.status == 200 && r.body["act"] == "link", &r);
+    Ok(11)
 }
 
 /// The route's models by their ids, through the intercept (Paul,
@@ -1691,6 +1727,28 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     let led = s.eventually(wake, || agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).len() == replies_so_far);
     s.ok("unmentioned, the lead answers", led && agent_replies(&records(api, &owner, &chat_name, "chat"), &maple_id).len() == 1, "");
 
+    // an ask (docs/chat-records.md, "An ask") with the CLI the stub carries,
+    // as our Hermes image's agents ask: the lead asks the second agent; the
+    // question is in the two agents' chat with their owner, answered there,
+    // and the answer comes back here as a turn of the lead's own
+    let label = "an agent asks another with the CLI its image carries: the question in the two agents' chat with their owner (its return_to this chat), answered there, and the answer back here as the asker's own turn";
+    if scripted {
+        let said = fetched(s, 22, &format!("ask {maple_label} what is the time"))?;
+        replies_so_far += 1;
+        let answer = |r: &Value| r["body"]["text"].as_str().is_some_and(|t| t.contains(" answered your question in "));
+        let answered = s.eventually(wake, || agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).iter().any(answer));
+        replies_so_far += 1;
+        let listed = api.signed(&owner, "GET", "/api/fragments", None)?.body;
+        let both = |f: &Value| f["agents"].as_array().is_some_and(|a| a.len() == 2 && a.iter().any(|x| x == identity.as_str()) && a.iter().any(|x| x == maple_id.as_str()));
+        let pair = listed["fragments"].as_array().into_iter().flatten().find(|f| f["kind"] == "chat" && f["name"] != chat_name.as_str() && both(f)).and_then(|f| f["name"].as_str()).unwrap_or("").to_string();
+        let asked = if pair.is_empty() { vec![] } else { records(api, &owner, &pair, "chat") };
+        let question = asked.iter().any(|r| r["principal"] == identity.as_str() && r["body"]["to"][0] == maple_id.as_str() && r["body"]["return_to"] == chat_name.as_str());
+        let echoed = agent_replies(&asked, &maple_id).len() == 1;
+        s.ok(label, said.starts_with("asked ") && question && echoed && answered, json!({ "said": said, "pair": pair, "asked": asked.iter().map(|r| &r["body"]).collect::<Vec<_>>() }));
+    } else {
+        s.skip(label, "it needs the stub's scripted runtime");
+    }
+
     // a placeholder names its agent, not whoever sends it: the second
     // agent's, sent by the lead, is the second's (a person's agents are not
     // fenced: decision 44); removed from the computer, its tags are refused
@@ -1794,17 +1852,19 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     let version = || api.call(Call { method: "GET", url: format!("{origin}/p/6080/version.txt"), keys: Some(&owner), ..Call::default() }).map(|r| r.text.trim().to_string()).unwrap_or_default();
     let r = api.signed(&owner, "PUT", &format!("/api/computers/{id}/image"), Some(&json!({ "image": "no-such-image" })))?;
     s.ok("an image the deployment does not have is refused", r.status == 400, &r);
-    const PINS: [&str; 10] = [
+    const PINS: [&str; 12] = [
         "it runs its first build, the version its next start runs: no update to tell",
         "the next build is pinned",
         "awake on the first, its owner is told an update is ready: the version its next start runs, not the one it runs",
         "it keeps running the build it started with until it sleeps",
-        "not while a turn runs: its card waiting holds the keepalive, and no update is told",
+        "while a model call runs, its keepalive suppresses the update notice",
         "the turn over, the update is told again",
         "Later puts that version off: told no more; again, the same; another version, or none, is refused; no one else's",
         "restarted, it runs the next build (an upgrade): its version the latest, nothing to tell",
         "with its /data restored: it answers anew, and nothing runs twice",
         "the first build pinned again, an update is told again: a version other than the one put off",
+        "while a card waits only on its owner, the keepalive is released and the update is told",
+        "the card answered, its turn finishes and the update remains available",
     ];
     if !scripted {
         for label in PINS.iter().chain(&["asleep, no update is told: its next start takes it", "woken, it runs the first build again (a rollback)"]) {
@@ -1821,13 +1881,37 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         s.ok(PINS[1], r.status == 200 && r.body["image"] == "stub-next", &r);
         s.ok(PINS[2], !latest.is_empty() && notice(&r.body, "update") == json!({ "kind": "update", "version": latest }) && r.body["version"] == first["version"] && first["version"] != latest.as_str(), &r);
         s.ok(PINS[3], version() == "1", version());
-        // a turn waiting on its card holds the keepalive (docs/bridge.md)
+        // Hold a real model call at the vendor boundary so the running
+        // turn, rather than a question waiting on a person, suppresses the
+        // update. The call is observed before its keepalive is checked.
+        if fakes {
+            let called = s.ai.chats().len();
+            s.ai.delay_next(&[15_000]);
+            let said = say(15, "think while an update is ready")?;
+            let turn = turn_of(&agent_name, &chat_name, "chat", said.body["record"]["seq"].as_i64().unwrap_or(0));
+            let running = s.eventually(wake, || s.ai.chats().len() > called && lever(api, &id, "saves").is_ok_and(|r| r.body["keepalives"].as_u64().is_some_and(|n| n > 0)));
+            let work = work_of(&records(api, &owner, &chat_name, "work"), &turn);
+            let mid = view();
+            s.ok(PINS[4], running && work.iter().any(|r| r["body"]["kind"] == "turn.start") && !work.iter().any(|r| r["body"]["kind"] == "turn.end") && mid["phase"] == "awake" && notice(&mid, "update").is_null(), json!({ "work": work, "view": mid }));
+            let completed = s.eventually(wake, || work_of(&records(api, &owner, &chat_name, "work"), &turn).iter().any(|r| r["body"]["kind"] == "turn.end") && agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).iter().any(|r| r["body"]["turn"] == turn.as_str()));
+            replies_so_far += 1;
+            let again = s.eventually(Duration::from_secs(15), || notice(&view(), "update")["version"] == latest.as_str());
+            s.ok(PINS[5], completed && again, view());
+        } else {
+            for label in &PINS[4..=5] {
+                s.skip(label, "it needs the local model fake to hold a running call");
+            }
+        }
+        // Person-waiting is deliberately idle under P6, even though the
+        // card's turn has not ended. Its owner may take the update now.
         let said = say(14, "approve this one too, please")?;
         let turn = turn_of(&agent_name, &chat_name, "chat", said.body["record"]["seq"].as_i64().unwrap_or(0));
         let asked = s.eventually(wake, || work_of(&records(api, &owner, &chat_name, "work"), &turn).iter().any(|r| r["body"]["kind"] == "turn.prompt"));
+        let released = s.eventually(Duration::from_secs(15), || lever(api, &id, "saves").is_ok_and(|r| r.body["keepalives"] == 0) && notice(&view(), "update")["version"] == latest.as_str());
         let held = lever(api, &id, "saves").map(|r| r.body["keepalives"].clone()).unwrap_or(Value::Null);
+        let work = work_of(&records(api, &owner, &chat_name, "work"), &turn);
         let mid = view();
-        s.ok(PINS[4], asked && held.as_u64().is_some_and(|n| n > 0) && mid["phase"] == "awake" && notice(&mid, "update").is_null(), json!({ "keepalives": held, "view": mid }));
+        s.ok(PINS[10], asked && released && held == 0 && !work.iter().any(|r| r["body"]["kind"] == "turn.end") && mid["phase"] == "awake" && notice(&mid, "update")["version"] == latest.as_str(), json!({ "keepalives": held, "work": work, "view": mid }));
         let card = work_of(&records(api, &owner, &chat_name, "work"), &turn).into_iter().find(|r| r["body"]["kind"] == "turn.prompt").unwrap_or_default();
         let prompt = card["body"]["prompt"].as_str().unwrap_or("").to_string();
         let answer = json!({ "id": format!("pr:{prompt}"), "body": { "kind": "prompt_response", "prompt": prompt, "option": "once", "agent": card["principal"], "turn": card["body"]["turn"] } });
@@ -1835,7 +1919,7 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         let approved = s.eventually(wake, || agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).iter().any(|r| r["body"]["turn"] == turn.as_str()));
         replies_so_far += 1;
         let again = s.eventually(Duration::from_secs(15), || notice(&view(), "update")["version"] == latest.as_str());
-        s.ok(PINS[5], approved && again, view());
+        s.ok(PINS[11], approved && again, view());
         let later = |who: &crate::Keys, v: &str| api.signed(who, "POST", &format!("/api/computers/{id}/notices/later"), Some(&json!({ "version": v })));
         let (once, twice) = (later(&owner, &latest)?, later(&owner, &latest)?);
         let (running, malformed, none) = (later(&owner, first["version"].as_str().unwrap_or(""))?, later(&owner, "not a version")?, api.signed(&owner, "POST", &format!("/api/computers/{id}/notices/later"), Some(&json!({})))?);

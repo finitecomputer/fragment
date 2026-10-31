@@ -389,6 +389,9 @@ pub(crate) enum MetaKey {
     /// Test fleets only: how many more card shots open a page nothing
     /// serves, so they fail (`fail-cards`).
     TestFailCards,
+    /// Test fleets only: the connector policy its doors ask in place of the
+    /// deployment's (`connectors`), so a run turns one off and on again.
+    TestConnectors,
     /// Its icon's SHA-256: one of its blobs, a PNG (icon.rs).
     Icon,
     /// When its last icon makings started (ms, a JSON array, oldest
@@ -451,6 +454,7 @@ impl MetaKey {
             MetaKey::StorageSampledAt => "storage_sampled_at",
             MetaKey::Cards => "cards",
             MetaKey::TestFailCards => "test_fail_cards",
+            MetaKey::TestConnectors => "test_connectors",
             MetaKey::Icon => "icon",
             MetaKey::IconMakings => "icon_makings",
         }
@@ -1185,7 +1189,7 @@ impl FragmentCell {
             // which sets it from the same manifest)
             if let Ok(Ok(m)) = crate::assets::blessed_manifest(&self.env, t).await {
                 let title = body.title.as_deref().map(str::trim).or(m.title());
-                self.set_meta(MetaKey::Face, &crate::members::face(m.kind(), title, None))?;
+                self.set_meta(MetaKey::Face, &crate::members::face(m.kind(), title, m.role(), None))?;
             }
         }
         self.index_change(&owner, Some(Role::Owner))?;
@@ -1234,6 +1238,7 @@ impl FragmentCell {
         json_response(&FragmentStatus {
             kind: self.kind()?,
             title: self.title()?,
+            agent_role: self.agent_role()?,
             npub: npub.ok_or_else(|| missing(MetaKey::Npub))?,
             owner: npub::display(&owner.ok_or_else(|| missing(MetaKey::Owner))?),
             role,

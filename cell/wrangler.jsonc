@@ -69,13 +69,18 @@
       "class_name": "Computer",
       "scheduling_policy": "durable_object",
       "images": {
-        "stub": { "dockerfile": "../images/stub/Dockerfile", "build_context": "../images" },
+        "stub": { "dockerfile": "../images/stub/Dockerfile", "build_context": ".." },
         // the next build of the same image: the e2e's upgrade and rollback
-        "stub-next": { "dockerfile": "../images/stub/Dockerfile", "build_context": "../images", "build_vars": { "STUB_VERSION": "2" } }
+        "stub-next": { "dockerfile": "../images/stub/Dockerfile", "build_context": "..", "build_vars": { "STUB_VERSION": "2" } }
       }
     }
   ],
   "durable_objects": {
+    // Every object takes a deploy's code as it lands, an active one reset
+    // onto it: Cloudflare's default (deferred, 300 s) kept a busy object on
+    // the code before for five minutes, refusing the new Worker's calls
+    // (docs/MODEL.md, "Calls between releases").
+    "code_update_strategy": { "mode": "immediate" },
     "bindings": [
       // One per computer (computer.rs).
       { "name": "COMPUTER", "class_name": "Computer" },

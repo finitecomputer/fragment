@@ -18,16 +18,19 @@ import { createAppsPage } from "./apps-page.js";
 import { createTitles } from "./fragment-title.js";
 import { createLayout, store, reducedMotion, springFrames } from "./layout.js";
 import { createViewer } from "./viewer.js";
-import { billingSections, returnSaid, returning, seatGives, seatOffer } from "./billing.js";
-import { dataSection } from "./exports.js";
+import { seatGives } from "./billing.js";
+import { createChatList, newestChat } from "./chat-list.js";
+import { createSessionArchive } from "./session-archive.js";
+import { createSessionRefresh } from "./session-refresh.js";
+import { createOnboarding } from "./onboarding.js";
+import { createComputer } from "./computer.js";
+import { createAgentSettings } from "./agent-settings.js";
+import { createConnections, createAgentHomes, createSimplex } from "./connections.js";
+import { el, section, line, actionLine, createSettings } from "./settings.js";
 import { createLauncher } from "./launcher.js";
+import { createThreads } from "./threads.js";
 
 const $ = (id) => document.getElementById(id);
-// New agents run on the cheap tier: GLM-5.3 Flash, DeepSeek V4 Flash its fallback (Paul, 2026-10-09).
-const DEFAULT_AGENT_TIER = "cheap";
-// A new agent's name, when its maker names none (Paul, 2026-10-03): the
-// beige boxes of an alternate 1990s, never a real one's.
-const NAMES = ["XBT-2000", "Starfire 40K", "Turbo Quasar 486", "Novatron DX", "Hyperion 9000", "Cobalt Prism 66", "Megastation LX", "Orbitron 3D", "Datastar Pro", "Pulsar 360", "Zephyr XL", "Titan MX", "Vortex 7", "Nimbus 4K", "Galaxion SE", "Powerframe 99"];
 const CURRENT = "shell.chat.v1";
 // How to ask an agent for an app (Paul, 2026-10-14: "rather than spawning
 // generic apps we teach the user how to prompt for new apps"): each says
@@ -71,14 +74,7 @@ const promptDeck = { hand: APP_PROMPTS.map((_, i) => i).slice(0, PROMPT_HAND), d
 // failed (what an earlier one said stays: a failure is not "none");
 // invites: those waiting on their emails, theirs to answer (`GET /api/invites`);
 // seat: theirs, as Settings last read it (`GET /api/seat`'s; none unread)
-const state = { me: null, guest: false, fragments: [], invites: [], computer: null, agents: new Map(), computerFailed: false, current: store.get(CURRENT, null), frames: new Map(), page: null, seat: null, homes: new Map() };
-
-function el(tag, cls, text) {
-  const e = document.createElement(tag);
-  if (cls) e.className = cls;
-  if (text !== undefined) e.textContent = text;
-  return e;
-}
+const state = { me: null, guest: false, fragments: [], invites: [], computer: null, agents: new Map(), computerFailed: false, current: store.get(CURRENT, null), frames: new Map(), page: null, seat: null };
 
 // ---- the API, as this page calls it: the person's platform session ----
 class ApiError extends Error {
@@ -90,6 +86,10 @@ class ApiError extends Error {
     this.reason = reason ?? null;
   }
 }
+// What the page says while a deploy goes out (503 `deploying`: docs/MODEL.md,
+// "Calls between releases"), as the platform's updating page does: the
+// refusal's releases are an operator's, for the console alone
+const UPDATING = "Updating — back in a moment";
 // this page's writes still going: a reload for a new release waits for them
 let writing = 0;
 async function api(method, path, body) {
@@ -101,6 +101,10 @@ async function api(method, path, body) {
     const r = await fetch(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body), credentials: "same-origin" });
     heard(r);
     const out = await r.json().catch(() => ({}));
+    if (r.status === 503 && out.error === "deploying") {
+      console.info(`${method} ${path}:`, out.message);
+      throw new ApiError(r.status, out.error, UPDATING);
+    }
     if (!r.ok) throw new ApiError(r.status, out.error, out.message || r.statusText, out.reason);
     return out;
   } finally {
@@ -321,8 +325,7 @@ addEventListener("message", (event) => {
   const href = d.why === "signed-out" ? `/auth/login?return=${encodeURIComponent(location.pathname)}` : `/auth/fragment?name=${encodeURIComponent(d.name)}&return=/`;
   frame.dataset.blocked = d.why;
   // no chat's page is in it: it holds nothing, and is busy with nothing
-  greeted.delete(frame);
-  busyFrames.delete(frame);
+  refresh.resetFrame(frame);
   const allow = el("a", "allow", go);
   Object.assign(allow, { href, target, rel: "noopener" });
   const notice = el("div", "notice");
@@ -336,8 +339,7 @@ addEventListener("focus", () => {
   for (const frame of document.querySelectorAll("iframe[data-blocked]")) {
     delete frame.dataset.blocked;
     blockedNote(frame)?.remove();
-    greeted.delete(frame);
-    busyFrames.delete(frame);
+    refresh.resetFrame(frame);
     go(frame, frame.dataset.src);
   }
 });
@@ -449,7 +451,7 @@ let rosterSent = "";
 function rosterChanged() {
   // the first run's chat named too: its steps are the same before it is
   // named, and a chat already open (`readAgain`) hears them only then
-  const now = JSON.stringify([roster(), state.computer?.models, setup && [setup.chat, setupFor(setup.chat)]]);
+  const now = JSON.stringify([roster(), state.computer?.models, onboarding.setupState()]);
   if (now === rosterSent) return;
   rosterSent = now;
   const live = new Set([...document.querySelectorAll("iframe[data-fragment]")].map((f) => f.contentWindow));
@@ -477,7 +479,7 @@ addEventListener("message", async (event) => {
   }
   if (event.origin !== origin || frame.contentWindow !== event.source) return;
   if (d.fragment === "retry-setup") {
-    if (name === setup?.chat && setup.error) creatingAgent();
+    onboarding.retrySetup(name);
     return;
   }
   if (d.fragment === "agents?") {
@@ -725,10 +727,6 @@ sheet.onclose = () => {
 
 // ---- one menu, for whichever button asked ----
 const menu = $("menu");
-const menuEdge = el("div", "agent-menu-edge");
-menuEdge.hidden = true;
-menuEdge.setAttribute("aria-hidden", "true");
-document.body.append(menuEdge);
 let menuFor = null;
 let menuClosing = false;
 let menuAnimations = [];
@@ -745,13 +743,10 @@ function finishMenuClose() {
   menuFor.button.setAttribute("aria-expanded", "false");
   menuFor = null;
   menu.hidden = true;
-  menuEdge.hidden = true;
+  // a closed menu keeps nothing it said (a name renamed since, among them)
+  menu.replaceChildren();
   menu.inert = false;
   menuClosing = false;
-  menu.classList.remove("agent-menu");
-  menu.style.removeProperty("width");
-  menu.style.removeProperty("max-height");
-  updateSidebarEdge();
 }
 function animateMenu(opening) {
   const current = menuParts.map(({ node }) => ({ opacity: getComputedStyle(node).opacity, transform: getComputedStyle(node).transform }));
@@ -778,6 +773,9 @@ function closeMenu(immediate = false) {
 reducedMotion.addEventListener("change", () => {
   if (reducedMotion.matches) { if (menuClosing) finishMenuClose(); else cancelMenuMotion(); }
 });
+// `items`: each `{icon, text, onClick}`, or an agent's `{face, text, tag?,
+// current?}`: its face in the icon's place, its role a tag, and whether it
+// is the one picked now.
 function openMenu(button, items) {
   const again = menuFor?.button === button && !menuClosing;
   if (again) return closeMenu();
@@ -787,37 +785,20 @@ function openMenu(button, items) {
     const b = el("button");
     b.type = "button";
     b.setAttribute("role", "menuitem");
-    b.replaceChildren(icon(it.icon));
-    b.append(it.text);
+    b.replaceChildren(it.face ?? icon(it.icon));
+    b.append(it.face ? el("span", "name", it.text) : it.text);
+    if (it.tag) b.append(el("span", "role-tag", it.tag));
+    if (it.current) b.setAttribute("aria-current", "true");
     b.onclick = () => { closeMenu(); it.onClick(); };
     return b;
   }));
   button.setAttribute("aria-expanded", "true");
-  const attached = button.id === "sidebar-agent";
-  menu.classList.toggle("agent-menu", attached);
   menu.hidden = false;
   const r = button.getBoundingClientRect();
-  if (attached) {
-    menu.style.width = `${r.width}px`;
-    menu.style.maxHeight = `${Math.max(0, innerHeight - r.bottom - 8)}px`;
-    menu.style.top = `${r.bottom - 1}px`;
-    menu.style.left = `${r.left}px`;
-    menuEdge.style.left = `${r.left}px`;
-    menuEdge.style.top = `${r.top}px`;
-    menuEdge.style.width = `${r.width}px`;
-    menuEdge.style.height = `${menu.getBoundingClientRect().bottom - r.top}px`;
-    menuEdge.hidden = false;
-  } else {
-    menu.style.top = `${Math.min(r.bottom + 4, innerHeight - menu.offsetHeight - 8)}px`;
-    menu.style.left = `${Math.max(8, Math.min(r.left, innerWidth - menu.offsetWidth - 8))}px`;
-  }
+  menu.style.top = `${Math.min(r.bottom + 4, innerHeight - menu.offsetHeight - 8)}px`;
+  menu.style.left = `${Math.max(8, Math.min(r.left, innerWidth - menu.offsetWidth - 8))}px`;
   menu.querySelector("button")?.focus();
-  updateSidebarEdge();
-  const bounds = attached ? menuEdge.getBoundingClientRect() : menu.getBoundingClientRect();
-  menuParts = (attached ? [menu, button, menuEdge] : [menu]).map(node => {
-    const rect = node.getBoundingClientRect();
-    return { node, origin: `${bounds.left + bounds.width / 2 - rect.left}px ${bounds.top + bounds.height / 2 - rect.top}px` };
-  });
+  menuParts = [{ node: menu, origin: "50% 50%" }];
   animateMenu(true);
 }
 addEventListener("pointerdown", (e) => { if (menuFor && !menu.contains(e.target) && !menuFor.button.contains(e.target)) closeMenu(); });
@@ -838,311 +819,34 @@ addEventListener("keydown", (e) => {
 addEventListener("blur", closeMenu);
 addEventListener("resize", () => closeMenu(true));
 
-// ---- chats: one flat list, newest first, the open one in the middle column ----
-function renderHeading() {
-  const open = state.current && byName(state.current) && !state.page;
-  $("chat-heading").hidden = !open;
-  $("page-title").hidden = !state.page;
-  $("page-title").textContent = state.page ?? "";
-  $("new-chat").hidden = !open || state.guest || !primaryAgent()?.identity;
-  $("chat-options").hidden = !open;
-  if (!open) return;
-  const title = chatTitle(state.current);
-  $("chat-title").textContent = title;
-  $("chat-title").title = title;
-  const frame = state.frames.get(state.current);
-  if (frame) frame.setAttribute("aria-label", title);
-}
-// A chat's unread, as its row shows them: none on the open one (it is
-// being seen), and past the count's bound "99+" (the list counts at most
-// UNREAD_MAX: proto's `LISTED_UNREAD_MAX`, held to it by a host test,
-// xtask/src/guards.rs `the_shell_copies_its_limits`).
-const UNREAD_MAX = 100;
-function unreadMark(f) {
-  const n = f.name === state.current && !state.page ? 0 : f.unread ?? 0;
-  if (!n) return [];
-  const b = el("span", "unread", n >= UNREAD_MAX ? "99+" : String(n));
-  b.setAttribute("aria-label", n >= UNREAD_MAX ? "More than 99 unread" : `${n} unread`);
-  return [b];
-}
-// The person's one agent (Paul, 2026-10-13: "just one", a setting later):
-// their first, the one the first run makes (`defaultAgent`): the first
-// their computer took (its view lists its agents in the order it took
-// them), or, before it took one, their agent fragment. New chats are with
-// it. Any other agents they have stay out of the sidebar; their chats are
-// chats, so they list and search as any other.
-function primaryAgent() {
-  const first = [...state.agents.values()].find((a) => byName(a.fragment)?.role === "owner");
-  if (first) return { fragment: first.fragment, identity: first.identity };
-  const f = state.fragments.find((x) => x.kind === "agent" && own(x));
-  return f ? { fragment: f.name, identity: null } : null;
-}
-// What the person's agents are doing, from their chats' rows in the list
-// (docs/api.md, "Listed records"): each agent's newest record of a turn's
-// kind on a chat's `work` (docs/chat-records.md), which the shell reads as
-// the chat's page reads a turn. Started, a step, or a card answered is
-// working; a card open waits for the person (its owner answers its cards);
-// a question waits on whoever it asks (`asks`); an end is nothing. A
-// message waiting for its turn has no record yet, so queued is not said.
-// None while their computer is not awake (its turns stop with it) or this
-// page's list socket is shut (it would not hear the change), and none past
-// the bridge's own bound on a turn that says nothing (15 minutes; a turn
-// waiting on someone waits as long as a card, an hour), each a minute more
-// for the list's own lag. Those three are copies, named as their sources
-// name them (proto's limits; images/bridge/src/limits.rs), each held to its
-// source by a host test (xtask/src/guards.rs, `the_shell_copies_its_limits`).
-// The list's turn kinds are the chat's records (docs/chat-records.md):
-// the shell reads them as the bridge writes them. A listed field's
-// value is any text an agent wrote (up to 128 characters): `asks` is only
-// compared with the person's id here, never shown; what is shown is these
-// words and the chat's title, as text (`el`'s textContent), never markup.
-const DOING_SAYS = { you: "Waiting for you", waiting: "Waiting", working: "Working" };
-const DOING_ORDER = Object.keys(DOING_SAYS);
-const DOING_OF_KIND = { "turn.start": "working", "turn.step": "working", "turn.prompt.closed": "working", "turn.prompt": "you", "turn.asked": "asked" };
-const LISTED_FRESH_MS = 60_000;
-const TURN_IDLE_MS_MAX = 15 * 60_000;
-const PROMPT_TTL_MS_DEFAULT = 60 * 60_000;
-const DOING_QUIET_MS = { working: TURN_IDLE_MS_MAX + LISTED_FRESH_MS, waiting: PROMPT_TTL_MS_DEFAULT + LISTED_FRESH_MS };
-// the chats its menu names, at most
-const DOING_LISTED = 5;
-// the list socket (`watchList`, below): declared here, as the sidebar reads it
 const watching = { on: false, socket: null, wait: 1000, timer: null, settle: null };
 const listLive = () => watching.socket?.readyState === WebSocket.OPEN;
-// The chats where agent `identity` is doing something, the most pressing
-// first (waiting for the person, then on someone, then working), the
-// newest first within each; each with when it stops counting (`until`).
-function doingChats(identity) {
-  if (!identity || !listLive() || state.computer?.phase !== "awake") return [];
-  const now = Date.now();
-  const out = [];
-  for (const f of chats()) {
-    for (const r of f.listed ?? []) {
-      const kind = r.channel === "work" && r.principal === identity ? DOING_OF_KIND[r.kind] : undefined;
-      if (!kind) continue;
-      const doing = kind === "asked" ? (r.fields?.asks === state.me?.id ? "you" : "waiting") : kind;
-      const until = r.at + DOING_QUIET_MS[doing === "working" ? "working" : "waiting"];
-      if (until > now) out.push({ chat: f.name, doing, at: r.at, until });
-    }
-  }
-  return out.sort((x, y) => DOING_ORDER.indexOf(x.doing) - DOING_ORDER.indexOf(y.doing) || y.at - x.at);
-}
-// The sidebar says it again as the first of what it shows stops counting.
-let doingTimer = 0;
-function doingAgain(doing) {
-  clearTimeout(doingTimer);
-  const next = Math.min(...doing.map((x) => x.until));
-  if (Number.isFinite(next)) doingTimer = setTimeout(renderChats, Math.max(1000, next - Date.now()));
-}
-// Newest first: a chat by when its newest message was said (its row's
-// `previewAt`); one with nothing said yet (just made) above them all.
-const newest = (a, b) => (b.previewAt ?? Infinity) - (a.previewAt ?? Infinity) || (a.name < b.name ? -1 : 1);
-function renderChats() {
-  const primary = primaryAgent();
-  const agentRows = [];
-  if (primary) {
-    const doing = doingChats(primary.identity);
-    doingAgain(doing);
-    const says = DOING_SAYS[doing[0]?.doing];
-    const row = el("button", "agent-heading sidebar-agent");
-    row.id = "sidebar-agent";
-    row.type = "button";
-    row.dataset.key = primary.fragment;
-    row.setAttribute("aria-label", `${titleOf(primary.fragment)}${says ? `, ${says.toLowerCase()}` : ""}: your agent's menu`);
-    row.setAttribute("aria-haspopup", "menu");
-    row.setAttribute("aria-controls", "menu");
-    row.setAttribute("aria-expanded", String(!!menuFor && menuFor.button === $("sidebar-agent")));
-    const face = el("span", "sidebar-agent-mark");
-    face.append(avatar(agentFace(primary.fragment, primary.identity), "small"));
-    // its name, and under it what it is doing, so the name keeps its room
-    const named = el("span", "sidebar-agent-named");
-    named.append(el("strong", "title", titleOf(primary.fragment)));
-    if (says) named.append(el("span", `agent-doing ${doing[0].doing}`, says));
-    row.append(face, named);
-    row.onclick = () => openPrimaryMenu(row);
-    agentRows.push(row);
-  }
-  patch($("primary-agent"), agentRows);
-  // another chat with it, one click from the top (its menu's New chat too)
-  const startChat = $("sidebar-start-chat");
-  startChat.hidden = !primary?.identity || state.guest;
-  startChat.onclick = () => newChat(primary.identity);
-  // the launcher: a guest's searches; a seat's also starts a chat
-  const launcherLabel = state.guest ? "Search chats and apps" : "Search or start a new chat";
-  for (const id of ["sidebar-new-chat", "new-chat"]) {
-    $(id).title = `${launcherLabel} (⌘K)`;
-    $(id).dataset.tooltip = `${launcherLabel} (⌘K)`;
-    $(id).setAttribute("aria-label", launcherLabel);
-  }
-  const rows = shown(chats()).sort(newest).map((f) => {
-    const active = f.name === state.current && !state.page;
-    const row = el("button", `row chat-row${active ? " active" : ""}`);
-    row.type = "button";
-    row.dataset.key = `chat:${f.name}`;
-    row.setAttribute("aria-current", active ? "page" : "false");
-    row.append(el("span", "label", chatTitle(f.name)), ...homeMark(f), ...unreadMark(f));
-    row.onclick = () => { openChat(f.name); leaveSidebar(); };
-    return row;
-  });
-  patch($("chats"), rows.length ? rows : [el("div", "empty-row", chats().length ? "Every chat is archived" : state.guest ? "Chats shared with you show here" : "Your chats will appear here")]);
-}
-
-// ---- invites: shared by email, and theirs only once they accept (decision 63) ----
-// The invites waiting on the emails the person signs in with, above their
-// chats: what each shares, who shared it, and as what, with Accept and
-// Decline. Read as the page starts, as its list's socket opens, and when
-// the socket says they changed (`invited`: one made, renewed or taken
-// back). Accepted, it is in their list, and opens; declined, it goes.
-const invitesRead = { asked: 0, shown: 0 };
-async function loadInvites() {
-  const mine = ++invitesRead.asked;
-  // failed, what was read before stays: a failure is not "none"
-  const got = await api("GET", "/api/invites").catch(() => null);
-  if (!got || mine < invitesRead.shown) return;
-  invitesRead.shown = mine;
-  state.invites = got.invites ?? [];
-  renderInvites();
-}
-function renderInvites() {
-  const rows = state.invites.map((i) => {
-    const box = el("div", "invite");
-    box.dataset.key = `invite:${i.fragment}`;
-    box.dataset.invite = i.fragment;
-    const may = i.role === "editor" ? "edit" : "view";
-    box.append(el("strong", "invite-title", i.title), el("span", "invite-from", `${i.from ?? "Someone"} invited you to ${may} it`));
-    const actions = el("div", "invite-actions");
-    actions.append(inviteButton(i, "accept", "Accept"), inviteButton(i, "decline", "Decline"));
-    box.append(actions);
-    return box;
-  });
-  patch($("invites"), rows);
-  $("invites").hidden = !rows.length;
-}
-// What it shares opens as its kind does: a chat in the middle, else a window.
-const openShared = (name) => (byName(name)?.kind === "chat" ? openChat(name) : openApp(name));
-function inviteButton(invite, verb, text) {
-  const b = el("button", `invite-${verb}`, text);
-  b.type = "button";
-  b.onclick = async () => {
-    const both = [...b.parentElement.children];
-    for (const x of both) x.disabled = true;
-    try {
-      await api("POST", `/api/invites/${seg(invite.fragment)}/${verb}`, {});
-      await Promise.all([load(), loadInvites()]);
-      if (verb === "accept") { openShared(invite.fragment); leaveSidebar(); }
-    } catch (e) {
-      // gone (taken back, answered in another tab, run out): read again, and
-      // one theirs already (accepted elsewhere) opens
-      await Promise.all([load(), loadInvites()]).catch(() => {});
-      if (e.status === 404 && verb === "accept" && byName(invite.fragment)) return openShared(invite.fragment);
-      const gone = e.status === 404 ? "It isn't open any more: it was taken back, answered, or ran out." : "Try again in a moment.";
-      notice(verb === "accept" ? "The invite wasn't accepted" : "The invite wasn't declined", gone);
-      for (const x of both) x.disabled = false;
-    }
-  };
-  return b;
-}
-// The agent's own menu: where it is doing something (each chat opens),
-// another chat with it, its name, its profile and its screen. A chat's own
-// (Rename, Invite, Archive) is the chat's ⋯. What it is doing is read as
-// it opens, not from when its row was drawn.
-function openPrimaryMenu(trigger) {
-  const primary = primaryAgent();
-  if (!primary) return;
-  openMenu(trigger, [
-    ...doingChats(primary.identity)
-      .slice(0, DOING_LISTED)
-      .map((x) => ({ icon: "agent", text: `${DOING_SAYS[x.doing]} in ${titleOf(x.chat)}`, onClick: () => { openChat(x.chat); leaveSidebar(); } })),
-    ...(primary.identity && !state.guest ? [{ icon: "newChat", text: "New chat", onClick: () => newChat(primary.identity) }] : []),
-    { icon: "rename", text: "Rename…", onClick: () => rename(primary.fragment) },
-    { icon: "agent", text: "Its profile", onClick: () => openApp(primary.fragment) },
-    ...(state.computer ? [{ icon: "screen", text: "Its screen", onClick: () => openScreen(primary.fragment) }] : []),
-  ]);
-}
-// Match the chat composer's edge reflection, including its 64px falloff.
-// Follow the pointer across the sidebar and its fixed-position agent menu.
-const sidebarHoverPointer = matchMedia("(hover: hover) and (pointer: fine)");
-let sidebarEdgeFrame = 0;
-let sidebarEdgePointer = null;
-const sidebarEdgeControls = () => $("sidebar").querySelectorAll(".sidebar-agent, .sidebar-new-chat");
-// Keep transient styles off the rendered pill so roster updates preserve its node.
-const expandedAgentEdge = control => control.id === "sidebar-agent" && !menu.hidden && menu.classList.contains("agent-menu");
-const sidebarEdgeSurface = control => expandedAgentEdge(control) ? menuEdge : control.id === "sidebar-agent" ? $("primary-agent") : control;
-function clearSidebarEdge() {
-  cancelAnimationFrame(sidebarEdgeFrame);
-  sidebarEdgeFrame = 0;
-  for (const control of sidebarEdgeControls()) sidebarEdgeSurface(control).style.setProperty("--edge-light", "0");
-}
-function updateSidebarEdge() {
-  if (!sidebarEdgePointer || !sidebarHoverPointer.matches) return;
-  for (const control of sidebarEdgeControls()) {
-    const bounds = control.getBoundingClientRect();
-    const rect = { left: bounds.left, top: bounds.top, width: bounds.width, height: expandedAgentEdge(control) ? menu.getBoundingClientRect().bottom - bounds.top : bounds.height };
-    const x = sidebarEdgePointer.x - rect.left, y = sidebarEdgePointer.y - rect.top;
-    const radius = Math.min(rect.width / 2, rect.height / 2, parseFloat(getComputedStyle(control).borderTopLeftRadius));
-    const qx = Math.abs(x - rect.width / 2) - rect.width / 2 + radius;
-    const qy = Math.abs(y - rect.height / 2) - rect.height / 2 + radius;
-    const distance = Math.max(0, Math.hypot(Math.max(qx, 0), Math.max(qy, 0)) + Math.min(Math.max(qx, qy), 0) - radius);
-    const proximity = Math.max(0, 1 - distance / 64);
-    const surface = sidebarEdgeSurface(control);
-    surface.style.setProperty("--edge-x", `${x}px`);
-    surface.style.setProperty("--edge-y", `${y}px`);
-    surface.style.setProperty("--edge-light", String(proximity * proximity));
-  }
-}
-document.addEventListener("pointermove", event => {
-  if (!sidebarHoverPointer.matches || event.pointerType === "touch") return;
-  sidebarEdgePointer = { x: event.clientX, y: event.clientY };
-  if (sidebarEdgeFrame) return;
-  sidebarEdgeFrame = requestAnimationFrame(() => {
-    sidebarEdgeFrame = 0;
-    updateSidebarEdge();
-  });
+const { renderHeading, renderChats, loadInvites, primaryAgent, newChatAgent, ownAgents, markSeen } = createChatList({
+  api, ui: { $, el, patch, agentFace, mark, notice },
+  data: { byName, own, chats, shown, titleOf, chatTitle: (name) => (byName(name)?.kind === "sessions" ? sessionArchive.title() : chatTitle(name)), homeMark: (f) => homeMark(f), isGroup, agentOfChat: (name) => agentOfChat(name), agentsOf,
+    agents: () => state.agents, allFragments: () => state.fragments, computer: () => state.computer, isGuest: () => state.guest, personId: () => state.me?.id,
+    isThread: (f) => threads.isPair(f), waitingOn: (name) => threads.waitingOn(name), renderThreads: () => threads.render() },
+  selection: { current: () => state.current, page: () => state.page, getFrame: (name) => state.frames.get(name) },
+  menus: { menuOwner: () => menuFor, openMenu, shareItem, archiveItem },
+  navigation: { newChat, rename: (name) => rename(name), openChat, openApp, openScreen, leaveSidebar, seg },
+  listLive, load, invites: () => state.invites, setInvites: (v) => { state.invites = v; },
 });
-document.addEventListener("pointerleave", clearSidebarEdge);
-sidebarHoverPointer.addEventListener("change", clearSidebarEdge);
-addEventListener("blur", clearSidebarEdge);
-// The open chat, on screen, is seen (`PUT /api/fragments/{name}/seen`): its
-// row counts nothing unread, here and in the person's other tabs and
-// devices (their list tells them). Asked again whenever the list counts
-// more on it (a reply that came while it was open), never while this page
-// is hidden; one ask at a time.
-let marking = null;
-function markSeen() {
-  const f = byName(state.current);
-  if (!f || state.page || document.hidden || !f.unread || marking === f.name) return;
-  marking = f.name;
-  api("PUT", `/api/fragments/${seg(f.name)}/seen`)
-    .then(() => {
-      f.unread = 0;
-      renderChats();
-    })
-    .catch(() => {})
-    .finally(() => { marking = null; });
-}
-document.addEventListener("visibilitychange", markSeen);
-// The open chat's ⋯: its name, its people, its agents' profiles and
-// screens, and archiving. New chats are the launcher's, with the person's
-// one agent (`primaryAgent`), whichever chat is open.
-$("chat-options").onclick = () => openChatMenu(state.current, $("chat-options"));
-function openChatMenu(name, trigger) {
-  const group = isGroup(name);
-  const agent = agentOfChat(name);
-  // a group's agents each have a profile; a direct chat's agent has one
-  const profiles = group
-    ? agentsOf(name).map((id) => state.agents.get(id)?.fragment).filter(Boolean).map((a) => ({ icon: "agent", text: `${titleOf(a)}'s profile`, onClick: () => openApp(a) }))
-    : agent ? [{ icon: "agent", text: "Its profile", onClick: () => openApp(agent) }] : [];
-  // each agent's own desktop: a group's agents each have one to pick from
-  const screens = !state.computer ? [] : group
-    ? agentsOf(name).map((id) => state.agents.get(id)?.fragment).filter(Boolean).map((a) => ({ icon: "screen", text: `${titleOf(a)}'s screen`, onClick: () => openScreen(a) }))
-    : agent ? [{ icon: "screen", text: "Its screen", onClick: () => openScreen(agent) }] : [];
-  openMenu(trigger, [
-    { icon: "rename", text: "Rename…", onClick: () => rename(name) },
-    shareItem(name),
-    ...profiles,
-    ...screens,
-    archiveItem(name),
-  ]);
-}
+const sessionArchive = createSessionArchive({
+  api, ui: { $, el, patch, renderHeading: () => renderHeading(), notice },
+  data: { allFragments: () => state.fragments, own, seg, primaryAgent: () => primaryAgent(), agents: () => state.agents, chatLabel: (agent) => chatLabel(agent) },
+  selection: { current: () => state.current, page: () => state.page, getFrame: (name) => state.frames.get(name) },
+  navigation: { openChat, leaveSidebar }, load: () => load(), store,
+});
+
+// Delegation threads: a line each over the chat an agent asked from, its
+// pair chat its transcript (threads.js)
+const threads = createThreads({
+  $, el, patch, api, seg, avatar,
+  data: { byName, own, chats, titleOf, labelOf, agentFace, ownAgents, current: () => state.current, page: () => state.page },
+  navigation: { openChat, leaveSidebar },
+  rendered: () => renderChats(),
+});
+
 // The identity of the person's own agent a direct chat is with (its row's
 // one agent, or the agent its label is for while its row names none:
 // `agentsOf`); null for a group, or a chat with someone else's agent.
@@ -1159,103 +863,23 @@ const agentOfChat = (name) => state.agents.get(chatAgentOf(name))?.fragment ?? n
 // is titled on its own, as any chat ("Your first chat": FIRST_CHAT), and
 // never by its agent: the agent's name is its fragment's alone.
 const agentsOwnChat = (agent) => chats().find((f) => own(f) && labelOf(f.name) === `${labelOf(agent)}-chat`) ?? null;
-// An agent's SimpleX chat: the person's chat labelled `<label>-simplex`,
-// which the agent's computer makes for them as its SimpleX is linked, and
-// which mirrors their SimpleX app both ways (docs/bridge.md, "SimpleX").
-// Titled "SimpleX" (`SIMPLEX_TITLE`), it is shown as "<agent> · SimpleX":
-// its title is its own, never the agent's name, which a rename changes.
-const SIMPLEX_TITLE = "SimpleX";
-// (with the agent in it: a chat of its label an earlier agent left is none)
-const simplexChatOf = (agent) => {
-  const id = [...state.agents.values()].find((a) => a.fragment === agent)?.identity;
-  return chats().find((f) => own(f) && labelOf(f.name) === `${labelOf(agent)}-simplex` && !!id && (f.agents ?? []).includes(id)) ?? null;
-};
-const simplexAgentOf = (name) => [...state.agents.values()].find((a) => simplexChatOf(a.fragment)?.name === name)?.fragment ?? null;
-function chatTitle(name) {
-  const agent = byName(name)?.title === SIMPLEX_TITLE ? simplexAgentOf(name) : null;
-  return agent ? `${titleOf(agent)} · ${SIMPLEX_TITLE}` : titleOf(name);
-}
-// ---- an agent's home: where it reaches its person (Paul, 2026-10-26):
-// its own chat, or its SimpleX chat, as its agent.json's `home` says
-// (`"simplex"`; absent, its chat). Its routines without a chat run there,
-// and its computer tells it so (docs/api.md, "An agent's home").
-// One value per agent, `state.homes`, which the sidebar's bell and
-// Settings' pick both render from (`homeIs`): read from agent.json while
-// unknown (`readHome`), and set by each write that lands (`setHome`: a pick,
-// a link's box, an unlink), each through the agent's one writer. A read is
-// let go when a write began or ended after it was asked (`homeWrites`), so
-// it never undoes one. One that fails leaves it unknown and says so in
-// Settings, with Try again (`homeUnread`); Settings shown read it again. ----
-const homeWrites = new Map();
-const homeReads = new Set();
-const homeUnread = new Set();
-const wrote = (agent) => homeWrites.set(agent, (homeWrites.get(agent) ?? 0) + 1);
-function readHome(agent) {
-  if (homeReads.has(agent)) return;
-  homeReads.add(agent);
-  if (homeUnread.delete(agent)) paintHomes();
-  const asked = homeWrites.get(agent) ?? 0;
-  agentJson(agent)
-    .catch((e) => (e.status === 404 ? {} : null))
-    .then((j) => {
-      homeReads.delete(agent);
-      if ((homeWrites.get(agent) ?? 0) !== asked) return;
-      if (j) return homeIs(agent, j.home);
-      homeUnread.add(agent);
-      paintHomes();
-    });
-}
-function loadHomes() {
-  for (const a of state.agents.values()) {
-    if (!state.homes.has(a.fragment) && own(byName(a.fragment) ?? {})) readHome(a.fragment);
-  }
-  paintHomes();
-}
-function homeIs(agent, home) {
-  state.homes.set(agent, home === "simplex" ? "simplex" : "chat");
-  renderChats();
-  paintHomes();
-}
-// the chat an agent's home names: its SimpleX chat when picked and there,
-// else its own chat
-const homeChatOf = (agent) => (state.homes.get(agent) === "simplex" && simplexChatOf(agent)) || agentsOwnChat(agent);
-function homeMark(f) {
-  const agent = [...state.agents.values()].find((a) => state.homes.has(a.fragment) && homeChatOf(a.fragment)?.name === f.name)?.fragment;
-  if (!agent) return [];
-  const m = el("span", "home-mark");
-  m.replaceChildren(icon("bell"));
-  m.title = `${titleOf(agent)} reaches you here`;
-  m.setAttribute("role", "img");
-  m.setAttribute("aria-label", m.title);
-  return [m];
-}
-// Its home set on agent.json as it is now, through its writer whatever is
-// shown (`writeAgentJson`: nothing written when it is so already), then
-// shown; a write that fails has it read again.
-async function setHome(agent, simplex) {
-  wrote(agent);
-  try {
-    await writeAgentJson(agent, (next) => {
-      if ((next.home === "simplex") === simplex) return null;
-      if (simplex) next.home = "simplex";
-      else delete next.home;
-      return `its home: ${simplex ? "its SimpleX chat" : "its chat"}`;
-    });
-  } catch (e) {
-    wrote(agent);
-    homeReads.delete(agent);
-    readHome(agent);
-    throw e;
-  }
-  wrote(agent);
-  homeIs(agent, simplex ? "simplex" : null);
-}
+const { faceControls, renderAgentFaces, agentSettings, addAgentForm, agentJson, writeAgentJson, savePick, settingLabel, modelOption } = createAgentSettings({
+  api, el, seg, byName, agentFace, titleOf, agents: () => state.agents, named, rename: (name) => rename(name), load, nameScreen, renderNames,
+  computer: () => state.computer, homePicker: (a, said) => homePicker(a, said), addAgent: (spec) => onboarding.addAgent(spec),
+});
+const { chatTitle, homeMark, loadHomes, homePicker, paintHomes, setHome } = createAgentHomes({
+  el, icon, named, actionLine, settingLabel, modelOption, savePick,
+  agents: () => state.agents, chats, own, labelOf, byName, titleOf, agentsOwnChat,
+  agentJson: (agent) => agentJson(agent), writeAgentJson, renderChats,
+});
 
 // Each time the middle column is given a view (a chat, settings): a
 // launch's late answer changes the screen only if none was given since
 // (launcher.js).
 let views = 0;
-function openChat(name, push = true) {
+// `path`: the page of it to show (the session archive's list, or one of
+// its conversations: session-archive.js), its frame sent there.
+function openChat(name, push = true, path = null) {
   if (!byName(name)) return;
   views++;
   if (push) at("/");
@@ -1267,15 +891,18 @@ function openChat(name, push = true) {
   state.current = name;
   store.set(CURRENT, name);
   hideNotice();
-  chatFrame(name);
+  const made = !state.frames.has(name);
+  chatFrame(name, path ?? undefined);
+  if (path && !made) go(state.frames.get(name), framed(name, path));
   for (const [n, frame] of state.frames) frame.hidden = n !== name;
   renderHeading();
   renderChats();
+  sessionArchive.render();
   markSeen();
   prewake();
   navigated();
   // home: a first run a failed read put off goes on from here too
-  if (firstRunPutOff) resumeFirstRun();
+  if (onboarding.putOff()) resumeFirstRun();
 }
 
 // A chat's frame, made once and kept.
@@ -1541,107 +1168,15 @@ function nameScreen(frame) {
   } catch {}
 }
 
-// ---- an agent's SimpleX: its link page, a port of its computer's own
-// origin as its screen is, through a ticket (docs/bridge.md, "SimpleX"):
-// the one-time QR code, and whom it is linked to ----
-async function openSimplex(agent) {
-  if (!state.computer?.simplex || !agent) return;
-  try {
-    const t = await api("POST", `/api/computers/${seg(state.computer.computer)}/ports/6080/ticket`, { path: `/simplex/?agent=${encodeURIComponent(agent)}` });
-    const frame = named(frameOf(t.url, `${titleOf(agent)} on SimpleX`), agent, (n) => `${n} on SimpleX`, "aria-label");
-    frame.dataset.simplex = agent;
-    frame.addEventListener("load", () => nameSimplex(frame));
-    show({ key: `simplex:${agent}`, title: titleOf(agent), subtitle: "SimpleX", icon: paneIcon("link"), body: frame, persist: false });
-  } catch (e) {
-    notice("SimpleX did not open", e.message);
-  }
-}
-// Its page knows the agent by its label: told its name as it loads, and
-// again on a rename (`renderNames`), as a screen is (`nameScreen`).
-function nameSimplex(frame) {
-  const agent = frame.dataset.simplex;
-  try {
-    frame.contentWindow?.postMessage({ fragment: "simplex", agent, name: titleOf(agent) }, new URL(frame.dataset.src).origin);
-  } catch {}
-}
-// The link page asks for a ticket to link or unlink its agent (`{fragment:
-// "simplex", agent, want}`): only a pane of Settings' onto its computer's
-// port, for its own agent. The platform makes it for the agent's owner
-// alone, signed (an unlink's closes the agent's door at once), and the
-// page hands it to the computer, which takes nothing else (docs/api.md,
-// "An agent's doors"). A link's ask may say whether the agent is to reach
-// its person there (`home`: the page asks as the link starts, yes by
-// default), which sets its home as the ticket is made (`setHome`); an
-// unlink's takes its home back to its own chat.
-addEventListener("message", async (e) => {
-  const m = e.data;
-  if (m?.fragment !== "simplex" || !["link", "unlink"].includes(m.want) || !state.computer?.simplex) return;
-  const frame = [...document.querySelectorAll("iframe[data-simplex]")].find((f) => f.contentWindow === e.source);
-  if (!frame || frame.dataset.simplex !== m.agent || e.origin !== new URL(frame.dataset.src).origin) return;
-  const reply = { fragment: "simplex", agent: m.agent, for: m.want };
-  try {
-    reply.ticket = await api("POST", `/api/computers/${seg(state.computer.computer)}/agents/${seg(m.agent)}/door`, { door: "simplex", act: m.want });
-  } catch (err) {
-    reply.error = err.message;
-  }
-  const home = m.want === "link" ? (typeof m.home === "boolean" ? m.home : null) : false;
-  if (reply.ticket && home !== null) {
-    await setHome(m.agent, home).then(() => { reply.home = home; }, (err) => { reply.homeError = err.message; });
-  }
-  frame.contentWindow?.postMessage(reply, e.origin);
+const { simplexSection, refreshSimplex, nameSimplex } = createSimplex({
+  api, el, section, actionLine, named, seg, computer: () => state.computer, getSeat: () => state.seat,
+  titleOf, frameOf, show, paneIcon, notice, setHome,
 });
-// Settings' SimpleX: each agent's link, on an always-on computer. Only on
-// a computer whose image does SimpleX (its view's `simplex`: its bridge
-// said so); on any other, the section is hidden, nav link and all. It
-// follows the view while Settings are shown (`refreshSimplex`), with
-// nothing else on the page redrawn.
-function simplexSection() {
-  const s = section("SimpleX");
-  s.id = "settings-simplex";
-  fillSimplex(s);
-  return s;
-}
-const simplexKey = (c) => JSON.stringify([!!c?.simplex, !!c?.alwaysOn, (c?.agents ?? []).map((a) => a.fragment), state.seat?.good, state.seat?.kind, state.seat?.sleeps]);
 // Their seat as an action answered it (Billing's sleep choice, #609's
 // review): what Settings' SimpleX says follows it at once.
 function seatIs(seat) {
   state.seat = seat;
   refreshSimplex();
-}
-// A computer's view read again (its list's socket told of a change): the
-// section shown, changed or hidden as the view now says.
-function refreshSimplex() {
-  const s = document.getElementById("settings-simplex");
-  if (s && s.dataset.key !== simplexKey(state.computer)) fillSimplex(s);
-}
-function fillSimplex(s) {
-  const c = state.computer;
-  s.replaceChildren(...s.querySelectorAll(":scope > h2"));
-  s.dataset.key = simplexKey(c);
-  s.hidden = !c?.simplex;
-  const jump = document.querySelector('.settings-nav-link[data-section="settings-simplex"]');
-  if (jump) jump.hidden = s.hidden;
-  if (s.hidden) return;
-  const agents = c.agents ?? [];
-  s.append(el("p", "muted", "Message your agents from SimpleX Chat, a private messenger for your phone. Your messages are encrypted between your SimpleX app and your computer."));
-  if (!agents.length) {
-    s.append(el("p", "muted", "Make an agent first."));
-    return;
-  }
-  if (!c.alwaysOn) {
-    // an always-on seat whose holder let its computer sleep (Billing's
-    // checkbox) is told how to take it back; anyone else, what keeps it on
-    const seat = state.seat;
-    const chose = seat?.good && seat.kind === "seat_always_on" && seat.sleeps;
-    s.append(el("p", "muted", chose ? 'SimpleX needs your computer to stay on. Untick "Let my computer sleep when nothing is open" in Billing.' : "SimpleX works while your computer stays on, which the always-on plan does."));
-    return;
-  }
-  for (const a of agents) {
-    const open = el("button", "row", "Set up");
-    open.type = "button";
-    open.onclick = () => openSimplex(a.fragment);
-    s.append(actionLine(named(el("span"), a.fragment), open));
-  }
 }
 
 // ---- making the agent: its fragment, its computer, its chat (decision 10, 16) ----
@@ -1659,21 +1194,6 @@ function freeLabel(base) {
     if (!taken.has(l) && !taken.has(`${l}-chat`) && !taken.has(`${l}-simplex`)) return l;
   }
 }
-function pickName() {
-  const taken = new Set(state.fragments.map((f) => titleOf(f.name)));
-  const free = NAMES.filter((n) => !taken.has(n));
-  return free.length ? free[Math.floor(Math.random() * free.length)] : `Unit ${state.fragments.length + 1}`;
-}
-// The agent speaks first: a routine on its own `tasks`, which its computer
-// takes as a turn in its chat asked by its owner (docs/chat-records.md,
-// `tasks`), so its chat opens with its hello and no message of the
-// person's. Posted once it is in the chat, where its turn posts; its id
-// makes a retry the same record.
-const hello = (agent, chat) =>
-  api("POST", `/api/f/${agent}/channels/tasks`, {
-    id: "hello",
-    body: { kind: "routine", chat, text: "You were just made, and this is your chat with the person you work for. Say hello in a sentence or two: who you are, and what you will do for them (your SOUL.md). Start no work until they answer." },
-  });
 // ---- another chat with an agent: a fresh start (its context is the chat's:
 // a runtime keys an agent's session by its chat), titled from its first
 // message unless renamed. Its own chat (`<label>-chat`) stays its own. ----
@@ -1686,6 +1206,18 @@ const chatLabel = (agent) => freeLabel(`${labelOf(agent).slice(0, LABEL_ROOM - "
 // An untitled chat with only this agent that no one has said anything in
 // yet is the one to open again, not another.
 const blank = (identity) => chats().find((f) => own(f) && !f.archived && f.title === UNTITLED && !f.preview && agentsOf(f.name).length === 1 && agentsOf(f.name)[0] === identity);
+// A chat's first message with words, from its records (docs/chat-records.md:
+// a body with text and no kind but "message"), or undefined.
+const firstSaid = (records) => (records ?? []).map((x) => (typeof x.body === "string" ? x.body : (x.body?.kind ?? "message") === "message" ? x.body?.text : null)).find((t) => typeof t === "string" && t.trim());
+// Whether a chat the list shows blank is blank still, asked of the chat: the
+// list as last read may not show a message said a moment ago (this page's
+// own launch, read again only once its socket is told; another tab's), and
+// the next launch went into that chat, the person's new message beside the
+// one before (CI's "settings, then Back", runs 40898440541 and #743's).
+async function stillBlank(name) {
+  const r = await api("GET", `/api/f/${seg(name)}/channels/chat?after=0&limit=20`);
+  return !firstSaid(r.records);
+}
 let starting = false;
 // `open: false` makes it (or finds the blank one) without opening it: the
 // launcher opens it itself, as it posts its first message.
@@ -1695,6 +1227,8 @@ async function newChat(identity, { quiet = false, open = true } = {}) {
   starting = true;
   try {
     let name = blank(identity)?.name;
+    // one that cannot be asked is not taken: a new chat is made
+    if (name && !(await stillBlank(name).catch(() => false))) name = null;
     if (!name) {
       const chat = await api("POST", "/api/fragments", { label: chatLabel(agent.fragment), template: "chat", title: UNTITLED });
       // adding it wakes its computer (the platform's `joined`)
@@ -1724,7 +1258,7 @@ async function titleFromFirst(name) {
   try {
     const r = await api("GET", `/api/f/${seg(name)}/channels/chat?after=0&limit=20`);
     // a message is a body with text and no kind but "message" (docs/chat-records.md)
-    const said = (r.records ?? []).map((x) => (typeof x.body === "string" ? x.body : (x.body?.kind ?? "message") === "message" ? x.body?.text : null)).find((t) => typeof t === "string" && t.trim());
+    const said = firstSaid(r.records);
     if (!said) return titling.delete(name);
     const words = said.trim().split("\n").find((l) => l.trim()).replace(/\s+/g, " ").trim();
     const title = [...words].length > TITLE_MAX_CHARS ? `${[...words].slice(0, TITLE_MAX_CHARS - 1).join("").trimEnd()}…` : words;
@@ -1797,7 +1331,7 @@ async function promptChat() {
   if (open && open.kind === "chat" && own(open)) return open.name;
   const primary = primaryAgent();
   if (!primary?.identity) return null;
-  const theirs = shown(chats()).filter((f) => own(f) && agentsOf(f.name).includes(primary.identity)).sort(newest)[0];
+  const theirs = shown(chats()).filter((f) => own(f) && agentsOf(f.name).includes(primary.identity)).sort(newestChat)[0];
   return theirs?.name ?? (await newChat(primary.identity, { quiet: true })) ?? null;
 }
 // A prompt waiting for its chat's page to ask `agents?` (a frame just
@@ -1832,42 +1366,24 @@ function composeIn(name, text) {
 }
 
 // The same display-name editor for chats, agents and Apps.
-const { retitle, rename } = createTitles({ $, api, seg, byName, titleOf, reload: () => load(), heard, ApiError });
+const { retitle, rename } = createTitles({ $, api, seg, byName, titleOf, reload: () => load(), heard: (r) => heard(r), ApiError });
 
 // ---- the launcher (launcher.js): one input for starting a chat or finding one again ----
 const launcher = createLauncher({
-  $, el, api, ApiError, seg, state, byName, isChat, titleOf, chatTitle, mark, iconOf, primaryAgent, agentsOwnChat, UNTITLED,
-  openChat, openApp, chatFrame, composeIn, newChat, leaveSidebar, closeMenu, notice, prewake, originOf,
+  $, el, api, ApiError, seg, state, byName, isChat, titleOf, chatTitle, mark, iconOf, primaryAgent, newChatAgent, agentsOwnChat, UNTITLED,
+  openChat, openApp, chatFrame, composeIn, newChat, leaveSidebar, closeMenu, notice, prewake: () => prewake(), originOf,
   views: () => views,
-  busy: (name) => busyFrames.has(state.frames.get(name)),
-  setupChat: () => setup?.chat ?? null,
+  busy: (name) => refresh.isBusy(state.frames.get(name)),
+  setupChat: () => onboarding.setupChat(),
 });
 
-// ---- the computer: awake while the person is here, and its updates ----
-let woke = 0;
-// asking for a wake as the person arrives or focuses a chat hides the
-// computer's start (decision 39's pre-wake, from the shell)
-// The person's computer, made once (making it again is the same one:
-// docs/api.md).
-let making = null;
-function computerOf() {
-  making ??= api("POST", "/api/computers", {}).then((c) => { state.computer = c; return c; });
-  making.catch(() => { making = null; });
-  return making;
-}
-// A computer that won't start is not woken by the person's presence: its
-// starts kept failing, so the next is theirs to ask for (Restart, in its
-// notice), never one every visit pays for unasked. While the first run
-// makes the agent, its computer starts once it is in its chat (the
-// platform's `joined`), with the agent assigned, not before.
-function prewake() {
-  if (setup && !setup.joined) return;
-  const c = state.computer;
-  if (!c || document.hidden || Date.now() - woke < 60_000 || ["awake", "starting", "wont_wake"].includes(c.phase)) return;
-  woke = Date.now();
-  api("POST", `/api/computers/${seg(c.computer)}/wake`, {}).then(computerIs).catch(() => {});
-}
-document.addEventListener("visibilitychange", prewake);
+const { computerOf, prewake, renderComputer, restartComputer, computerSection } = createComputer({
+  api, el, seg, named, section, line, actionLine, computer: () => state.computer,
+  agents: () => state.agents, computerFailed: () => state.computerFailed,
+  support: () => state.support, setupPending: () => onboarding.setupPending(),
+  made: (c) => { state.computer = c; }, computerIs, reopenSettings, openScreen,
+  reads: () => reads, load,
+});
 // The computer as the platform last answered: shown at once.
 function computerIs(v) {
   if (!v?.computer) return;
@@ -1878,167 +1394,6 @@ function computerIs(v) {
   refreshSimplex();
 }
 
-// ---- what the person should know of their computer (docs/computers.md,
-// "What its owner is told"): the view's notices, the most pressing first,
-// each in plain words with the one way back to working. Its computer tells
-// this page's list socket when they change, so they show while there is
-// still time. Times are the person's own clock. ----
-const clock = (ms) => {
-  const d = new Date(ms);
-  const today = d.toDateString() === new Date().toDateString();
-  const time = d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
-  return today ? time : `${d.toLocaleDateString([], { month: "short", day: "numeric" })}, ${time}`;
-};
-// why a computer won't start, in plain words (the platform's own words
-// stay beside them, for whoever helps)
-function wontStart(why) {
-  if (/not ready within/.test(why)) return "It didn't finish starting within a few minutes.";
-  if (/kept stopping/.test(why)) return "It kept stopping as soon as it started.";
-  if (/check/.test(why)) return "Its saved files didn't pass their check.";
-  if (/restore|archive|backup/i.test(why)) return "Its save couldn't be restored.";
-  return "It couldn't start.";
-}
-// a restart the person asked for in this page, and of which start: a
-// computer that still won't start after one says where to get help
-let restarted = 0;
-function noticeRow(n) {
-  const row = el("div", "computer-notice");
-  row.dataset.kind = n.kind;
-  const copy = el("div", "notice-copy");
-  const actions = el("div", "notice-actions");
-  const say = (title, text, detail) => {
-    copy.append(el("strong", null, title), el("p", null, text));
-    if (detail) copy.append(el("p", "notice-detail", detail));
-  };
-  const restart = (label) => {
-    const b = el("button", "primary", label);
-    b.type = "button";
-    b.dataset.action = "restart";
-    b.onclick = () => restartComputer(b);
-    actions.append(b);
-  };
-  if (n.kind === "wont_wake") {
-    row.classList.add("warn");
-    const again = restarted && state.computer?.generation > restarted;
-    say(
-      again ? "Your computer still won't start" : "Your computer won't start",
-      `${wontStart(n.why)} Your agents can't answer until it does.${again ? " If restarting again doesn't help, get help and give them the details below." : ""}`,
-      `${state.computer?.computer ?? ""}: ${n.why}`,
-    );
-    restart(again ? "Try again" : "Restart");
-    if (again && state.support) {
-      const help = el("a", null, "Get help");
-      help.href = state.support;
-      help.target = "_blank";
-      help.rel = "noopener";
-      actions.append(help);
-    }
-  } else if (n.kind === "unsaved") {
-    row.classList.add("warn");
-    const then = n.save ? "starts again from that save" : "starts again with nothing kept";
-    const stop = n.stopsAt ? ` If it still can't by ${clock(n.stopsAt)}, it stops and ${then}.` : "";
-    say("Your computer can't save right now", `It hasn't saved since ${clock(n.since)}, so what its agents did after that isn't kept yet. It keeps trying.${stop} Restarting tries to save first.`, n.why);
-    restart("Restart now");
-  } else if (n.kind === "went_back") {
-    // told only when something was done on it after that save (a stop
-    // that lost nothing tells nothing), so it says what went, calmly
-    const since = n.save && n.savedAt ? clock(n.savedAt) : null;
-    const back = n.pending
-      ? (since ? `When it starts again, changes on it since ${since} won't be there.` : "Nothing on it was saved yet, so it will start fresh.")
-      : (since ? `Changes on it since ${since} weren't kept.` : "Nothing on it was saved yet, so it started fresh.");
-    say(n.pending ? "Your computer stopped" : "Your computer restarted", `${back} Your chats are all here.`);
-    const ok = el("button", null, "OK");
-    ok.type = "button";
-    ok.dataset.action = "seen";
-    ok.onclick = () => sawNotice(n.life, ok);
-    actions.append(ok);
-  } else if (n.kind === "update") {
-    // told only between turns, never restarted behind their back; an
-    // always-on computer never sleeps, so never updates by itself
-    const itself = state.computer?.alwaysOn ? "" : " It also updates by itself the next time your computer sleeps.";
-    say("An update is ready for your computer", `Restart to get it — about a minute; your chats and work are kept.${itself}`);
-    restart("Restart");
-    const later = el("button", null, "Later");
-    later.type = "button";
-    later.dataset.action = "later";
-    later.onclick = () => updateLater(n.version, later);
-    actions.append(later);
-  } else if (n.kind === "deploying") {
-    copy.append(el("strong", null, "Updating — back in a moment"));
-  } else if (n.kind === "refresh") {
-    copy.append(el("strong", null, state.computerFailed ? "Couldn't refresh your computer" : "Couldn't refresh your apps"));
-    const again = el("button", "primary", "Try again");
-    again.type = "button";
-    again.dataset.action = "refresh";
-    again.onclick = () => readAgain(again);
-    actions.append(again);
-  } else return null;
-  row.append(copy, actions);
-  return row;
-}
-// a read of it that failed (a blip, a 5xx) says so first, over what the
-// last read said, with Try again; a confirmed deploy waits by itself
-function renderComputer() {
-  const box = $("computer-notices");
-  const rows = [...(reads.updating ? [{ kind: "deploying" }] : state.computerFailed || reads.listFailed ? [{ kind: "refresh" }] : []), ...(state.computer?.notices ?? [])].map(noticeRow).filter(Boolean);
-  box.replaceChildren(...rows);
-  box.hidden = !rows.length;
-}
-// Try again: the list and the computer read again (`load`, which goes on
-// with what the failure put off). The list's read failing too, the line
-// stays, to try again.
-async function readAgain(button) {
-  button.disabled = true;
-  reads.since = null;
-  reads.wait = 3000;
-  await load().catch(() => {});
-  button.disabled = false;
-}
-// Restart: the computer saves if it can, then starts fresh from its newest
-// good save. It names the start the person saw, so pressed twice (or in two
-// tabs) it restarts once. What went wrong is said beside the button.
-async function restartComputer(button) {
-  const c = state.computer;
-  if (!c) return;
-  const buttons = [...document.querySelectorAll("[data-action=restart]")];
-  for (const b of buttons) b.disabled = true;
-  const label = button.textContent;
-  button.textContent = "Restarting…";
-  try {
-    restarted = c.generation || 0;
-    computerIs(await api("POST", `/api/computers/${seg(c.computer)}/restart`, { generation: c.generation || 0 }));
-    await reopenSettings();
-  } catch (e) {
-    button.textContent = label;
-    const said = button.parentElement.querySelector(".form-error") ?? el("p", "form-error");
-    said.textContent = `It did not restart: ${e.message}`;
-    button.parentElement.append(said);
-  } finally {
-    for (const b of buttons) b.disabled = false;
-  }
-}
-// The person read what a start went back to: told no more, anywhere.
-async function sawNotice(life, button) {
-  const c = state.computer;
-  if (!c) return;
-  button.disabled = true;
-  try {
-    computerIs(await api("POST", `/api/computers/${seg(c.computer)}/notices/seen`, { life }));
-  } catch {
-    computerIs(await api("GET", `/api/computers/${seg(c.computer)}`).catch(() => null));
-  }
-}
-// Later: this update is told no more, anywhere, until another is ready.
-async function updateLater(version, button) {
-  const c = state.computer;
-  if (!c) return;
-  button.disabled = true;
-  try {
-    computerIs(await api("POST", `/api/computers/${seg(c.computer)}/notices/later`, { version }));
-  } catch {
-    computerIs(await api("GET", `/api/computers/${seg(c.computer)}`).catch(() => null));
-  }
-}
 // ---- where the page is: `/` its chats, `/settings` its settings, `/apps`
 // its apps, `/welcome` a new person's welcome; each view says so in the
 // address, so a reload or a link stays put ----
@@ -2053,7 +1408,7 @@ addEventListener("popstate", () => {
   if (shown && location.pathname === SETTINGS) openSettings(false).catch((e) => notice("Settings did not open", e.message));
   else if (shown && location.pathname === APPS) openApps(false);
   else if (shown && location.pathname === "/" && byName(state.current)) openChat(state.current, false);
-  else start().catch((e) => notice("This page did not load", e.message));
+  else startOrWait();
 });
 
 // ---- the Apps page (apps-page.js): every fragment of theirs but chats
@@ -2094,1684 +1449,49 @@ function leaveApps() {
 }
 $("apps-link").onclick = () => openApps();
 
-// ---- settings: the person's account, credit, computer and agents ----
-const usd = (micros) => (micros / 1_000_000).toLocaleString(undefined, { style: "currency", currency: "USD" });
-// what a standing short of `ok` stops, and why (crates/core/src/ledger.rs `Refused`)
-const STOPPED = { agents_stopped: "Your agents are stopped", read_only: "Your fragments are read-only, and your agents are stopped" };
-// a computer's phase, as a person reads it (proto's `ComputerPhase`)
-const PHASE = { asleep: "Asleep", starting: "Starting", awake: "Awake", sleeping: "Going to sleep", wont_wake: "Won't start" };
-const WHY = {
-  seat_canceled: "the seat was canceled",
-  no_credit: "the credit is used up; adding credit starts them again",
-  overdrawn: "the balance reached the overdraft; credit that brings it above zero ends it",
-};
-// The CLI's one-line install, for macOS and Linux (cli/SKILL.md's: `cargo
-// xtask check` holds the two to each other and to the release's assets),
-// and a coding agent's skill, in Claude Code's folder: behind settings'
-// "Install it yourself", for whoever wants them (a coding agent given the
-// prompt reads /llms.txt and installs it itself).
-const INSTALL = "mkdir -p ~/.local/bin && curl -fsSL https://github.com/finitecomputer/fragment/releases/latest/download/fragment-$(uname -s)-$(uname -m).tar.gz | tar -xzf - -C ~/.local/bin";
-const SKILL = "mkdir -p ~/.claude/skills/fragment && fragment skill > ~/.claude/skills/fragment/SKILL.md";
-function section(title, ...children) {
-  const s = el("section", "settings-section");
-  s.append(el("h2", null, title), ...children);
-  return s;
-}
-function line(label, value, action) {
-  const p = el(action ? "div" : "p", action ? "settings-line settings-line-with-action" : "settings-line");
-  const key = el("span", "settings-key", label);
-  const text = el("span", "settings-value", value);
-  if (action) {
-    const info = el("div", "settings-info");
-    info.append(key, text);
-    const control = el("div", "settings-control");
-    control.append(action);
-    p.append(info, control);
-  } else p.append(key, text);
-  return p;
-}
-function actionLine(label, ...actions) {
-  const row = el("div", "settings-line settings-action-line");
-  const key = el("span", "settings-key");
-  key.append(label);
-  const control = el("div", "settings-control");
-  control.append(...actions);
-  row.append(key, control);
-  return row;
-}
-// Finite's privacy policy and terms (`/privacy`, `/terms`), small and
-// muted, each in a tab of its own, at the end of Settings' Account (the
-// first run's footer, index.html, has About, Contact and these)
-function legalLinks() {
-  const p = el("p", "muted legal-links");
-  const pages = [["/privacy", "Privacy"], ["/terms", "Terms"]];
-  pages.forEach(([href, text], i) => {
-    const a = el("a", null, text);
-    a.href = href;
-    a.target = "_blank";
-    a.rel = "noopener";
-    p.append(...(i ? [" · ", a] : [a]));
-  });
-  return p;
-}
-// The release this page is (`release.mine`, its commit linked on GitHub,
-// the repo being public), when it was deployed, and the version its
-// computer runs, small and muted at the end of Settings: what whoever
-// looks is looking at (Paul, 2026-10-24). None on an unfilled page.
-const COMMIT = /^[0-9a-f]{7,40}$/;
-function releaseLine(c) {
-  if (!release.mine) return [];
-  const p = el("p", "muted settings-release");
-  p.dataset.release = release.mine;
-  let id = release.mine;
-  if (COMMIT.test(id)) {
-    id = el("a", null, release.mine);
-    id.href = `https://github.com/finitecomputer/fragment/commit/${release.mine}`;
-    id.target = "_blank";
-    id.rel = "noopener";
-  }
-  p.append("Release ", id);
-  if (DEPLOYED) {
-    const at = new Date(DEPLOYED * 1000);
-    const t = el("time", null, at.toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }));
-    t.dateTime = at.toISOString();
-    p.append(" · ", t);
-  }
-  const v = c?.version ?? c?.latest;
-  if (v) p.append(` · Computer ${v}`);
-  return [p];
-}
-// a sentence whose `quoted` parts are code
-function say(text) {
-  const p = el("p");
-  text.split("`").forEach((part, i) => p.append(i % 2 ? el("code", null, part) : part));
-  return p;
-}
-function renderSettingsPage(page, sections) {
-  const layout = el("div", "settings-layout");
-  const nav = el("nav", "settings-nav");
-  nav.setAttribute("aria-label", "Settings sections");
-  nav.append(el("span", "settings-nav-title", "Settings"));
-  const content = el("div", "settings-content");
-  const intro = el("header", "settings-intro");
-  intro.append(el("h1", null, "Settings"), el("p", null, state.guest ? "Manage your account and billing." : "Manage your account, your computer, and the tools your agents use."));
-  content.append(intro);
-  const links = [];
-  sections.forEach((section, index) => {
-    const heading = section.querySelector(":scope > h2");
-    if (heading) {
-      if (!section.id) section.id = `settings-section-${index}`;
-      heading.tabIndex = -1;
-      const jump = el("button", "settings-nav-link", heading.textContent);
-      jump.type = "button";
-      // a hidden section (SimpleX on an image without it) hides its link too
-      jump.dataset.section = section.id;
-      jump.hidden = section.hidden;
-      jump.onclick = () => {
-        section.scrollIntoView({ behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "start" });
-        heading.focus({ preventScroll: true });
-      };
-      nav.append(jump);
-      links.push([section, jump]);
-    }
-    content.append(section);
-  });
-  layout.append(nav, content);
-  page.replaceChildren(layout);
-  page.onscroll = () => {
-    const visible = links.filter(([section]) => !section.hidden);
-    const top = page.getBoundingClientRect().top + page.clientTop + 130;
-    const current = [...visible].reverse().find(([section]) => section.getBoundingClientRect().top <= top)?.[1] ?? visible[0]?.[1];
-    if (current === nav.querySelector('[aria-current="location"]')) return;
-    for (const [, button] of links) {
-      if (button === current) button.setAttribute("aria-current", "location");
-      else button.removeAttribute("aria-current");
-    }
-    if (current) {
-      const button = current.getBoundingClientRect();
-      const bounds = nav.getBoundingClientRect();
-      if (button.left < bounds.left) nav.scrollLeft -= bounds.left - button.left;
-      else if (button.right > bounds.right) nav.scrollLeft += button.right - bounds.right;
-    }
-  };
-  page.onscroll();
-}
-// Each load of settings is numbered, and only the latest renders, while
-// settings are shown: an older one that answers last (an action's reload, a
-// second press, Back) read older state, and is dropped (#441).
-let settingsLoads = 0;
-// Each visit to settings, from another page (never a reload of them): an
-// action's failure is said only in the visit it was pressed in (#439).
-let visits = 0;
-// `failed`: what the action that asked for this load says once it renders
-// (a failure's notice, [title, text]).
-async function openSettings(push = true, failed = null) {
-  const ticket = ++settingsLoads;
-  const lost = () => ticket !== settingsLoads || state.page !== "Settings";
-  if (push) at(SETTINGS);
-  // settings render with no notice: one of the page they came from stays
-  // there, an action that worked takes its earlier failure's away, and
-  // one that failed says so once this load renders, if nothing newer (a
-  // load, a page, a notice) has come since it began
-  const gen = hideNotice();
-  const tell = () => {
-    if (failed && gen === noticeGen) notice(...failed);
-  };
-  if (state.page !== "Settings") {
-    visits++;
-    views++;
-  }
-  state.page = "Settings";
-  $("layout").classList.add("settings-view");
-  $("frames").hidden = true;
-  leaveApps();
-  const page = $("settings-page");
-  page.hidden = false;
-  // in the loaded page's own layout, so nothing moves as it loads
-  renderSettingsPage(page, [el("p", "muted settings-loading", "Loading…")]);
-  renderHeading();
-  renderChats();
-  leaveSidebar();
-  // a credit pack's Checkout returning, before the ledger is read (its
-  // settlement every load awaits, said by the one that renders)
-  const billingHelpers = { api, el, section, line, actionLine, usd, reopen: () => reopenSettings(), noSeatSaid, switchForm, support: state.support, seatIs };
-  const back = await returning(billingHelpers);
-  if (lost()) return;
-  const [ledger, mySeat, linked, uses] = await Promise.all([
-    api("GET", "/api/ledger").catch(() => null),
-    api("GET", "/api/seat").catch(() => null),
-    api("GET", "/api/connections").catch(() => null),
-    state.computer ? api("GET", `/api/computers/${seg(state.computer.computer)}/uses`).catch(() => null) : null,
-  ]);
-  if (lost()) return;
-  if (mySeat) setGuest(mySeat.guest);
-  state.seat = mySeat?.seat ?? null;
-  const emails = (state.me.subjects ?? []).map((x) => x.email).filter(Boolean);
-  // who is signed in (their latest sign-in's email), signing out, and
-  // another account: a seat may wait under another email
-  const signout = el("form");
-  signout.method = "post";
-  signout.action = "/auth/logout";
-  const out = el("button", "quiet", "Sign out");
-  out.type = "submit";
-  signout.append(out);
-  const ways = el("span", "settings-actions");
-  ways.append(signout, switchForm(SETTINGS));
-  const who = line("Signed in as", "", ways);
-  who.classList.add("settings-who", "settings-stack");
-  who.querySelector(".settings-value").append(state.me.email ? el("strong", null, state.me.email) : "—");
-  const id = line("Identity", state.me.id);
-  id.lastChild.classList.add("mono");
-  const account = section("Account", who, id);
-  // a picture: PNG, JPEG, WebP or GIF, at most 256 KiB (PUT /api/identities/me/picture)
-  const picture = el("label", "quiet picture");
-  const shown = el("img");
-  shown.alt = "";
-  shown.hidden = !state.me.picture;
-  if (state.me.picture) shown.src = state.me.picture;
-  const file = el("input");
-  file.type = "file";
-  file.accept = "image/png,image/jpeg,image/webp,image/gif";
-  file.hidden = true;
-  picture.append(shown, el("span", null, state.me.picture ? "Change your picture" : "Add a picture"), file);
-  file.onchange = async () => {
-    const f = file.files?.[0];
-    if (!f) return;
-    writing++;
-    let r;
-    try {
-      r = await fetch("/api/identities/me/picture", { method: "PUT", headers: { "x-fragment-shell": "1", "content-type": f.type }, body: f, credentials: "same-origin" });
-      heard(r);
-    } finally {
-      writing--;
-    }
-    if (r.ok) {
-      state.me = await api("GET", "/api/identities/me");
-      reopenSettings();
-    } else picture.querySelector("span").textContent = (await r.json().catch(() => ({}))).message || "That picture was not taken";
-  };
-  account.append(actionLine("Picture", picture));
-  // their sign-ins, when they linked several before linking went (off
-  // until WorkOS offers an account picker: docs/api.md, Sign-in)
-  if (emails.length > 1) account.append(line("Sign-ins", emails.join(", ")));
-  account.append(legalLinks());
-  // the person's seat, credit and org (billing.js), and why agents stop
-  const billing = await billingSections(billingHelpers, ledger, mySeat, back);
-  if (lost()) return;
-  // a guest has no agents to stop, nor a computer, skills or connections
-  // for them, nor apps to publish: a seat to get comes first, then who they
-  // are, then everything that is theirs, to download (what is shared with
-  // them, named); Your data is built only by a load that renders, as it
-  // reads its export again while one builds
-  if (state.guest) {
-    returnSaid(back);
-    renderSettingsPage(page, [...billing, account, dataSection({ api, el, section, line, actionLine, isOpen: () => state.page === "Settings" }), ...releaseLine(null)]);
-    return tell();
-  }
-  const standing = ledger?.standing?.standing;
-  if (standing && standing !== "ok") {
-    billing[0].append(el("p", "settings-warning", [STOPPED[standing] ?? "Your agents are stopped", WHY[ledger.standing.why]].filter(Boolean).join(": ") + "."));
-  }
-  const c = state.computer;
-  // the version it runs (asleep: the one it starts on), and the latest when
-  // it runs an older one (docs/computers.md, "What its owner is told")
-  const behind = !!(c?.version && c.latest && c.version !== c.latest);
-  const computer = section(
-    "Computer",
-    ...(c
-      ? [
-          line("State", PHASE[c.phase] ?? c.phase),
-          line("Version", c.version ?? c.latest ?? c.image),
-          ...(behind
-            ? [line("Latest version", c.latest), el("p", "muted", `Restart to get the latest version.${c.alwaysOn ? "" : " It also updates by itself the next time your computer sleeps."}`)]
-            : []),
-          ...(c.why ? [el("p", "settings-warning", c.why)] : []),
-        ]
-      : // never read: a failed read is not "none" (shown again once one answers: `load`)
-        [el("p", "muted", state.computerFailed ? "Couldn't load your computer." : "Your computer starts with your first agent.")]),
-  );
-  // each agent's own desktop
-  const screens = [];
-  for (const a of c ? state.agents.values() : []) {
-    const screen = named(el("button", "quiet"), a.fragment, (t) => `Open ${t}'s screen`);
-    screen.type = "button";
-    screen.dataset.screenFor = a.fragment;
-    screen.onclick = () => openScreen(a.fragment);
-    screens.push(screen);
-  }
-  if (screens.length) computer.append(actionLine("Screens", ...screens));
-  // the way back to working when something is wrong with it: asked once
-  // more before it cuts what its agents are doing
-  if (c) {
-    computer.append(el("p", "muted", "Restarting saves your computer if it can, then starts it fresh from that save. Anything its agents are doing stops."));
-    const row = el("span", "settings-actions");
-    const go = el("button", "quiet", "Restart computer");
-    go.type = "button";
-    go.dataset.action = "restart-ask";
-    go.onclick = () => {
-      const sure = el("button", "quiet", "Restart now");
-      sure.type = "button";
-      sure.dataset.action = "restart";
-      sure.onclick = () => restartComputer(sure);
-      const cancel = el("button", "quiet", "Cancel");
-      cancel.type = "button";
-      cancel.onclick = () => row.replaceChildren(go);
-      row.replaceChildren(sure, cancel);
-    };
-    row.append(go);
-    computer.append(actionLine("Restart", row));
-  }
-  const agents = section("Agents");
-  const mine = [...state.agents.values()];
-  // the models a provider the person connected offers (its own credit pays)
-  const modeled = (linked?.providers ?? []).filter((p) => p.models?.length && p.state === "set");
-  if (mine.length && modeled.length) agents.append(say("Each agent runs on the platform's own model, included in your credit, unless you pick one of a provider you connected, which your account there pays for."));
-  agents.append(...(mine.length ? mine.flatMap((a) => {
-    const row = el("button", "row", "Open");
-    row.type = "button";
-    row.onclick = () => openApp(a.fragment);
-    const name = el("span", "settings-agent-name");
-    name.dataset.agentFace = a.fragment;
-    const [actions, said] = faceControls(a);
-    return [agentSettings(a, actionLine(name, actions, row), modeled), said];
-  }) : [el("p", "muted", "None yet.")]));
-  const connections = connectionsSection(linked, uses);
-  const skills = await skillsSection();
-  if (lost()) return;
-  returnSaid(back);
-  renderSettingsPage(page, [account, ...billing, computer, agents, skills, connections, simplexSection(), buildSection(), dataSection({ api, el, section, line, actionLine, isOpen: () => state.page === "Settings" }), ...releaseLine(c)]);
-  renderAgentFaces();
-  // a home read that answered while these were built shown now they are in
-  paintHomes();
-  tell();
-}
-// An action's reload of settings, only while they are shown: an answer that
-// comes once the person has gone to a chat leaves them there, and says
-// nothing there (#439). `failed`: openSettings'.
-async function reopenSettings(failed = null) {
-  if (state.page === "Settings") await openSettings(false, failed);
-}
-
-// Building with a coding agent: one prompt that names this platform's
-// /llms.txt (its handoff: the install, `fragment login --host` here, the
-// manual), copied into Claude Code or Codex with what to build. The
-// install line stays, folded, for whoever runs it themselves.
-function buildSection() {
-  const prompt = el("textarea", "build-prompt");
-  prompt.id = "build-prompt";
-  prompt.rows = 3;
-  prompt.spellcheck = false;
-  prompt.setAttribute("aria-label", "A prompt for your coding agent");
-  prompt.value = `Read ${location.origin}/llms.txt and help me build: `;
-  const copy = el("button", "quiet", "Copy");
-  copy.type = "button";
-  copy.dataset.action = "copy-prompt";
-  // a clipboard that refuses (no permission, a webview's, none at all) is
-  // said under the prompt, which is selected to copy by hand; Copy stays
-  // Copy, to try again (#438)
-  const said = el("p", "form-error");
-  said.id = "build-prompt-said";
-  said.setAttribute("role", "status");
-  said.hidden = true;
-  // each press, numbered: one that answers after a newer press changes
-  // nothing (that one says how it went)
-  let presses = 0;
-  copy.onclick = async () => {
-    const mine = ++presses;
-    said.hidden = true;
-    try {
-      await navigator.clipboard.writeText(prompt.value);
-    } catch {
-      if (mine !== presses) return;
-      copy.textContent = "Copy";
-      said.textContent = "Couldn't copy it. The prompt is selected: copy it yourself (Ctrl+C, or ⌘C on a Mac).";
-      said.hidden = false;
-      prompt.focus();
-      prompt.select();
-      return;
-    }
-    if (mine !== presses) return;
-    copy.textContent = "Copied";
-    setTimeout(() => {
-      if (mine === presses) copy.textContent = "Copy";
-    }, 1500);
-  };
-  const actions = el("div", "settings-actions");
-  actions.append(copy);
-  const yourself = el("details", "settings-install");
-  yourself.append(
-    el("summary", null, "Install it yourself"),
-    say("On macOS or Linux (on Windows, in WSL), then pair it with you:"),
-    el("pre", "command", `${INSTALL}\nfragment login --host ${location.origin}`),
-    say("To give Claude Code its skill:"),
-    el("pre", "command", SKILL),
-  );
-  return section(
-    "Build with Claude Code or Codex",
-    say("Paste this into your coding agent and finish the sentence: it sets up the `fragment` command line itself, and you approve it here once."),
-    prompt,
-    actions,
-    said,
-    yourself,
-  );
-}
-
-// ---- an agent's name and picture (docs/api.md, "An agent's name and
-// picture"): its agent fragment's title and its avatar.png, written and
-// put live as any of its files are (POST …/files, then …/deploy). Every
-// page and the platform show it by them; the rows here follow the list. ----
-const AGENT_PICTURE = "avatar.png";
-// What the platform takes (fragment_core::face): a PNG, JPEG, WebP or GIF
-// of at most 256 KiB. A larger one, or any other image the browser reads,
-// is drawn again at most PICTURE_PX square: a PNG, else a JPEG, that fits.
-const PICTURE_MAX_BYTES = 256 * 1024;
-const PICTURE_PX = 512;
-async function pictureOf(file) {
-  if (file.size <= PICTURE_MAX_BYTES && /^image\/(png|jpeg|webp|gif)$/.test(file.type)) return file;
-  let bitmap;
-  try {
-    bitmap = await createImageBitmap(file);
-  } catch {
-    throw new Error("That file is not a picture: choose a PNG, JPEG, WebP or GIF.");
-  }
-  const scale = Math.min(1, PICTURE_PX / Math.max(bitmap.width, bitmap.height));
-  const canvas = el("canvas");
-  canvas.width = Math.max(1, Math.round(bitmap.width * scale));
-  canvas.height = Math.max(1, Math.round(bitmap.height * scale));
-  canvas.getContext("2d").drawImage(bitmap, 0, 0, canvas.width, canvas.height);
-  for (const [type, quality] of [["image/png"], ["image/jpeg", 0.9], ["image/jpeg", 0.7]]) {
-    const blob = await new Promise((done) => canvas.toBlob(done, type, quality));
-    if (blob && blob.size <= PICTURE_MAX_BYTES) return blob;
-  }
-  throw new Error("That picture stays over 256 KiB however it is drawn: choose a smaller one.");
-}
-async function base64Of(blob) {
-  const bytes = new Uint8Array(await blob.arrayBuffer());
-  let text = "";
-  for (let i = 0; i < bytes.length; i += 0x8000) text += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
-  return btoa(text);
-}
-// The agent's picture from `file`, or none (null), put live.
-async function setPicture(agent, file) {
-  const write = file ? { path: AGENT_PICTURE, base64: await base64Of(await pictureOf(file)) } : { path: AGENT_PICTURE, delete: true };
-  await api("POST", `/api/f/${seg(agent)}/files`, { message: file ? "its picture" : "no picture", files: [write] });
-  await api("POST", `/api/f/${seg(agent)}/deploy`, {});
-}
-// An agent's row's Rename, its picture (Add, Change, Remove), and a line
-// that says what they did or why not.
-function faceControls(a) {
-  const said = el("p", "muted agent-face-said");
-  said.hidden = true;
-  const tell = (text) => {
-    said.textContent = text;
-    said.hidden = !text;
-  };
-  const renameIt = el("button", "quiet", "Rename");
-  renameIt.type = "button";
-  renameIt.dataset.renameAgent = a.fragment;
-  renameIt.onclick = () => rename(a.fragment);
-  const picture = el("label", "quiet picture");
-  const label = el("span");
-  label.dataset.pictureLabel = a.fragment;
-  const file = el("input");
-  file.type = "file";
-  file.accept = "image/png,image/jpeg,image/webp,image/gif";
-  file.dataset.pictureFor = a.fragment;
-  file.hidden = true;
-  picture.append(label, file);
-  const remove = el("button", "quiet", "Remove picture");
-  remove.type = "button";
-  remove.dataset.pictureRemove = a.fragment;
-  const change = async (chosen) => {
-    for (const b of [renameIt, remove, file]) b.disabled = true;
-    tell(chosen ? "Saving its picture…" : "Taking its picture away…");
-    try {
-      await setPicture(a.fragment, chosen);
-      tell("");
-      await load();
-    } catch (e) {
-      tell(e.message);
-    } finally {
-      for (const b of [renameIt, remove, file]) b.disabled = false;
-      file.value = "";
-    }
-  };
-  file.onchange = () => file.files?.[0] && change(file.files[0]);
-  remove.onclick = () => change(null);
-  const actions = el("span", "agent-face-actions");
-  actions.append(renameIt, picture, remove);
-  return [actions, said];
-}
-// Settings' agent rows as the list says now: each one's face and name, and
-// whether it has a picture to change or remove; and its open screens. The
-// names its other controls carry are `named`'s.
-function renderAgentFaces() {
-  for (const f of document.querySelectorAll("iframe[data-screen]")) nameScreen(f);
-  for (const name of document.querySelectorAll("[data-agent-face]")) {
-    const fragment = name.dataset.agentFace;
-    const id = [...state.agents.values()].find((a) => a.fragment === fragment)?.identity ?? null;
-    const face = agentFace(fragment, id);
-    const shown = JSON.stringify([face.picture, titleOf(fragment)]);
-    if (name.dataset.shown === shown) continue;
-    name.dataset.shown = shown;
-    name.replaceChildren(avatar(face, "small"), titleOf(fragment));
-  }
-  for (const label of document.querySelectorAll("[data-picture-label]")) label.textContent = byName(label.dataset.pictureLabel)?.picture ? "Change picture" : "Add a picture";
-  for (const remove of document.querySelectorAll("[data-picture-remove]")) remove.hidden = !byName(remove.dataset.pictureRemove)?.picture;
-  renderNames();
-}
-
-// ---- an agent's settings in Settings' Agents: its row, then its
-// agent.json's picks, read once for them all. Each pick is written as the
-// others are, one write at a time (each reads what the one before wrote),
-// and put live, as its name and picture are: its computer reads main, its
-// page live (`__file`), and both then say the same. Its computer reads
-// agent.json again within seconds and runs its next turn so. A pick is
-// written only onto agent.json as it is now, read just before (none there,
-// 404, is nothing to keep): a read that fails otherwise writes nothing and
-// says so, so no other setting of the agent (its tier, its model) is lost.
-const agentJson = (agent) => api("GET", `/api/f/${seg(agent)}/file?path=agent.json`);
-const UNREAD_SETTINGS = "Couldn't read this agent's settings, so nothing was changed. Try again.";
-// One write of an agent's agent.json at a time, each on what the one before
-// wrote: `change` sets its pick on what agent.json holds now (its tier
-// kept), and says what changed.
-const agentJsonWrites = new Map();
-function writeAgentJson(agent, change) {
-  const written = (agentJsonWrites.get(agent) ?? Promise.resolve()).catch(() => {}).then(async () => {
-    const now = await agentJson(agent).catch((e) => {
-      if (e.status === 404) return {};
-      throw new Error(UNREAD_SETTINGS);
-    });
-    const next = { ...now, tier: now.tier ?? DEFAULT_AGENT_TIER };
-    const message = change(next);
-    // (none: as it is already, so nothing written)
-    if (message === null) return;
-    await api("POST", `/api/f/${seg(agent)}/files`, { message, files: [{ path: "agent.json", text: JSON.stringify(next, null, 2) + "\n" }] });
-    await api("POST", `/api/f/${seg(agent)}/deploy`, {});
-  });
-  agentJsonWrites.set(agent, written);
-  return written;
-}
-function agentSettings(a, row, modeled) {
-  const box = el("div", "agent-setting");
-  box.dataset.agent = a.fragment;
-  const said = el("span", "muted agent-model-said");
-  // what the picks show: agent.json, none (404: the defaults), or unread (null)
-  const read = agentJson(a.fragment).catch((e) => (e.status === 404 ? {} : null));
-  read.then((j) => { if (j === null) said.textContent = "Couldn't read this agent's settings: reload to see them."; });
-  const write = (change) => writeAgentJson(a.fragment, change);
-  // the model pick: when there may be a choice, a route the deployment
-  // names (Private, Standard) or a model of a provider the person
-  // connected; whether there is one, with a single route, is the agent's
-  // own tier's to say (once agent.json is read)
-  const picks = [...modelPickers(a, modeled, read, write, said), ...homePicker(a, said)];
-  box.append(row, ...picks, said);
-  return box;
-}
-// a pick (`value`) being written (`written`), said under its agent's
-// settings; one not written shows again what agent.json holds (`was`)
-async function savePick(pick, value, said, written, saved = "Saved: its next message uses it.") {
-  pick.disabled = true;
-  delete pick.dataset.saved;
-  said.textContent = "Saving…";
-  try {
-    await written;
-    said.textContent = saved;
-    pick.dataset.saved = value;
-    pick.dataset.was = value;
-    return true;
-  } catch (e) {
-    said.textContent = e.message;
-    pick.value = pick.dataset.was ?? "";
-    return false;
-  } finally {
-    pick.disabled = false;
-  }
-}
-function settingLabel(key, pick) {
-  const label = el("label", "agent-model-label");
-  label.append(el("span", "settings-key", key), pick);
-  return label;
-}
-function modelOption(value, text) {
-  const o = el("option", null, text);
-  o.value = value;
-  return o;
-}
-
-// ---- an agent's model: its agent.json's `model` ({provider, id}), a model
-// of a provider the person connected, or none: its `tier`'s (`medium`, else
-// the default: `high` is off, decision 23), as their computer's view names
-// it (the deployment's `models`). A tier the deployment labels is a route
-// a person picks (Paul, 2026-10-24: "Private (recommended)", "Standard"):
-// each labelled tier is offered by its label and its model's id, and
-// picked, it is the agent's `tier`, its own model gone. None labelled, the
-// agent's own tier is shown by its name and its model's id, as before.
-// Vision and voice notes stay on the platform's own models.
-const TIER = { cheap: "Cheap", medium: "Medium" };
-const tierOf = (tier) => (tier === "medium" ? "medium" : DEFAULT_AGENT_TIER);
-const routesOffered = () => {
-  const routes = state.computer?.models?.routes;
-  return routes ? ["cheap", "medium"].filter((t) => routes[t]?.label) : [];
-};
-const tierName = (tier) => {
-  const t = tierOf(tier);
-  const id = state.computer?.models?.[t];
-  const label = state.computer?.models?.routes?.[t]?.label;
-  if (label) return id ? `${label} · ${id}` : label;
-  return id ? `${TIER[t]} (${id})` : TIER[t];
-};
-// a route's value: no provider's name has a colon (a model's is `provider id`)
-const routeValue = (tier) => `route:${tierOf(tier)}`;
-const modelValue = (provider, id) => `${provider} ${id}`;
-// BYO keeps the legacy model + reasoning as Fast. Deep is an optional
-// nested choice, ignored by old images; without one it inherits Fast.
-const REASONING = [["low", "Low"], ["high", "High"], ["max", "Max"]];
-const effortOf = (value, fallback = "high") => REASONING.some(([v]) => v === value) ? value : fallback;
-function ownChoice(value) {
-  if (typeof value?.provider !== "string" || typeof value?.id !== "string") return null;
-  const { provider, id } = value;
-  if (!provider.length || provider.length > 32 || /[^a-z0-9-]/.test(provider)) return null;
-  if (!id.length || id.length > 128 || /[^A-Za-z0-9._:/@-]/.test(id)) return null;
-  return { provider, id };
-}
-function ownModes(j) {
-  const fast = ownChoice(j?.model);
-  if (!fast) return null;
-  const reasoning = effortOf(j.reasoning);
-  const saved = j.model.deep;
-  const deep = ownChoice({ ...saved, provider: saved?.provider === undefined ? fast.provider : saved.provider });
-  return { fast: { ...fast, reasoning }, deep: deep ? { ...deep, reasoning: effortOf(saved.reasoning, reasoning) } : { ...fast, reasoning } };
-}
-function modelPickers(a, modeled, read, write, said) {
-  const offered = routesOffered();
-  const fast = el("select", "agent-model"), deep = el("select", "agent-model");
-  fast.dataset.modelFor = deep.dataset.deepModelFor = a.fragment;
-  const effort = (mode) => {
-    const pick = el("select", "agent-model agent-effort");
-    pick.dataset[mode === "Fast" ? "reasoningFor" : "deepReasoningFor"] = a.fragment;
-    named(pick, a.fragment, (t) => `${t}'s ${mode} reasoning`, "aria-label");
-    for (const [value, text] of REASONING) pick.append(modelOption(value, text));
-    return pick;
-  };
-  const fastEffort = effort("Fast"), deepEffort = effort("Deep");
-  const row = (key, model, level) => {
-    const line = el("div", "agent-model-label");
-    const picks = el("span", "agent-mode-picks");
-    picks.append(model, level);
-    line.append(el("span", "settings-key", key), picks);
-    return line;
-  };
-  const fastRow = row("Model", fast, fastEffort), deepRow = row("Deep", deep, deepEffort);
-  deepRow.classList.add("has-modes");
-  deepRow.hidden = fastEffort.hidden = true;
-  const controls = [fast, deep, fastEffort, deepEffort];
-  for (const pick of controls) pick.disabled = true;
-  named(deep, a.fragment, (t) => `${t}'s Deep model`, "aria-label");
-  const fill = (pick, choice, tier, routes) => {
-    pick.replaceChildren();
-    if (routes) pick.append(...(offered.length ? offered.map((t) => modelOption(routeValue(t), tierName(t))) : [modelOption("", tierName(tier))]));
-    for (const p of modeled) {
-      const group = el("optgroup");
-      group.label = `${providerName(p.provider)} (your account)`;
-      for (const m of p.models) group.append(modelOption(modelValue(p.provider, m.id), m.name));
-      pick.append(group);
-    }
-    const value = choice ? modelValue(choice.provider, choice.id) : routes && offered.length ? routeValue(tier) : "";
-    if (value && ![...pick.options].some((o) => o.value === value)) pick.append(modelOption(value, choice ? choice.id : tierName(tier)));
-    pick.value = pick.dataset.was = value;
-  };
-  const show = (j) => {
-    const modes = ownModes(j);
-    fill(fast, modes?.fast, j?.tier, true);
-    fill(deep, modes?.deep, j?.tier, false);
-    fastEffort.value = fastEffort.dataset.was = modes?.fast.reasoning ?? "high";
-    deepEffort.value = deepEffort.dataset.was = modes?.deep.reasoning ?? "high";
-    fastEffort.hidden = deepRow.hidden = !modes;
-    fastRow.classList.toggle("has-modes", !!modes);
-    fastRow.querySelector(".settings-key").textContent = modes ? "Fast" : "Model";
-    fastRow.hidden = !modes && modeled.length === 0 && fast.options.length < 2;
-    named(fast, a.fragment, (t) => `${t}'s ${modes ? "Fast model" : "model"}`, "aria-label");
-    for (const pick of controls) { pick.disabled = j === null; pick.dataset.read = "1"; }
-  };
-  const choose = async (pick, change) => {
-    let applied;
-    const value = pick.value;
-    const written = write((next) => { const message = change(next, value); applied = next; return message; });
-    if (await savePick(pick, value, said, written)) show(applied);
-  };
-  const requireOwn = (next) => {
-    const modes = ownModes(next);
-    if (!modes) throw new Error("The model changed. Reload these settings and try again.");
-    return modes;
-  };
-  fast.onchange = () => choose(fast, (next, value) => {
-    if (!value || value.startsWith("route:")) {
-      if (value) next.tier = tierOf(value.slice(6));
-      delete next.model;
-      return `its route: ${state.computer?.models?.routes?.[next.tier]?.label ?? next.tier}`;
-    }
-    const [provider, id] = value.split(" ");
-    const choice = ownChoice({ provider, id });
-    if (!choice) return null;
-    const modes = ownModes(next);
-    const prior = modes ? next.model : {};
-    next.model = { ...prior, ...choice, deep: { ...prior.deep, ...(modes?.deep ?? { ...choice, reasoning: effortOf(next.reasoning) }) } };
-    return `its Fast model: ${id}`;
-  });
-  deep.onchange = () => choose(deep, (next, value) => {
-    const modes = requireOwn(next);
-    const [provider, id] = value.split(" ");
-    const choice = ownChoice({ provider, id });
-    if (!choice) return null;
-    next.model.deep = { ...next.model.deep, ...modes.deep, ...choice };
-    return `its Deep model: ${id}`;
-  });
-  for (const [mode, pick] of [["Fast", fastEffort], ["Deep", deepEffort]]) pick.onchange = () => choose(pick, (next, value) => {
-    const modes = requireOwn(next);
-    next.model.deep = { ...next.model.deep, ...modes.deep };
-    if (mode === "Fast") next.reasoning = effortOf(value);
-    else next.model.deep.reasoning = effortOf(value);
-    return `its ${mode} reasoning: ${value}`;
-  });
-  read.then(show);
-  return [fastRow, deepRow];
-}
-
-// ---- where an agent reaches its person (its home, above): its own chat,
-// or its SimpleX chat once it has one. Always shown, so where its
-// reminders go is never a guess: read again while unknown, and a read that
-// failed says so under it, with Try again. ----
-const homeUnreadLines = new WeakMap();
-function homePicker(a, said) {
-  const pick = el("select", "agent-model");
-  pick.dataset.homeFor = a.fragment;
-  named(pick, a.fragment, (t) => `Where ${t} reaches you`, "aria-label");
-  pick.disabled = true;
-  pick.onchange = async () => {
-    const value = pick.value;
-    pick.dataset.saving = "1";
-    await savePick(pick, value, said, setHome(a.fragment, value === "simplex"), "Saved.");
-    delete pick.dataset.saving;
-    paintHome(pick);
-  };
-  const again = el("button", "quiet", "Try again");
-  again.type = "button";
-  again.onclick = () => readHome(a.fragment);
-  const unread = actionLine(el("span", "muted", "Couldn't read where it reaches you."), again);
-  unread.dataset.homeUnread = a.fragment;
-  homeUnreadLines.set(pick, unread);
-  paintHome(pick);
-  if (!state.homes.has(a.fragment)) readHome(a.fragment);
-  return [settingLabel("Reaches you in", pick), unread];
-}
-// A home pick shows its agent's home as the shell knows it (`state.homes`),
-// with its own chat and, once it has one, its SimpleX chat to pick; while
-// its home is unknown it waits (or says its read failed), and while its own
-// pick saves it is left be.
-function paintHome(pick) {
-  const agent = pick.dataset.homeFor;
-  const home = state.homes.get(agent);
-  const unread = homeUnreadLines.get(pick);
-  if (unread) unread.hidden = Boolean(home) || !homeUnread.has(agent);
-  if (!home || pick.dataset.saving) return;
-  const chat = agentsOwnChat(agent);
-  const options = [modelOption("", chat ? chatTitle(chat.name) : "Its chat")];
-  if (home === "simplex" || simplexChatOf(agent)) options.push(modelOption("simplex", SIMPLEX_TITLE));
-  pick.replaceChildren(...options);
-  pick.value = pick.dataset.was = home === "simplex" ? "simplex" : "";
-  pick.disabled = false;
-  pick.dataset.read = "1";
-}
-const paintHomes = () => document.querySelectorAll("select[data-home-for]").forEach(paintHome);
-
-// ---- connections (decisions 22, 37 and 44): every provider the platform
-// offers, one row each: what it is, its state, which of the person's agents
-// may use it (all by default; a list narrows one agent), and this month's
-// calls by each agent, with an operator key's cost. Their agents use them
-// through the computer's swap, each with a placeholder of its own.
-const PROVIDER_KIND = { connection: "Your account", operator: "The platform's key", own: "Your key" };
-const PROVIDER_STATE = {
-  connected: "Connected",
-  needs_reauthorization: "Needs reauthorization",
-  not_connected: "Not connected",
-  offered: "Offered",
-  set: "Key set",
-  not_set: "No key yet",
-};
-// a provider's name for people: google-places is Google Places, xai xAI
-const PROVIDER_NAMES = { xai: "xAI", elevenlabs: "ElevenLabs", openrouter: "OpenRouter" };
-const providerName = (p) => PROVIDER_NAMES[p] ?? p.replace(/(^|-)([a-z])/g, (_, d, l) => `${d ? " " : ""}${l.toUpperCase()}`);
-// a connection's scope for people, by its last path segment (Google's
-// https://www.googleapis.com/auth/<name>), else that segment itself; the
-// list never names a sign-in scope as missing
-const SCOPE_NAMES = {
-  "gmail.readonly": "Gmail (read)",
-  "gmail.modify": "Gmail (manage)",
-  "gmail.send": "Gmail (send)",
-  drive: "Drive",
-  spreadsheets: "Sheets",
-  documents: "Docs",
-  calendar: "Calendar",
-  "contacts.readonly": "Contacts",
-};
-const scopeName = (scope) => {
-  const last = scope.split("/").pop();
-  return SCOPE_NAMES[last] ?? last;
-};
-// micro-dollars, to a hundredth of a cent under a dollar (a call is often less than a cent)
-const money = (micros) => (micros / 1_000_000).toLocaleString(undefined, { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: micros < 1_000_000 ? 4 : 2 });
-// Connect: a window opened by the press itself, before any await, and only
-// then sent to the provider's page (#442): one opened once the authorize
-// call answers is a popup Safari blocks, as Chrome does once the press is
-// 5 s old. One attempt at a time: each start replaces the browser's one
-// binding cookie. The section reads again when the person comes back to it
-// (`focus`), never by watching `w.closed`: the shell's COOP has that read
-// true once the window is at the provider, still open. `body`, where the
-// person connects several accounts: `{add: true}` for another, `{account}`
-// for one of theirs again.
-function connectButton(p, label, said, body = {}) {
-  const go = el("button", "quiet", label);
-  go.type = "button";
-  go.onclick = async () => {
-    const w = window.open("", "_blank", "popup,width=520,height=720");
-    if (!w) {
-      said.textContent = "Your browser blocked the window. Allow pop-ups for this site, then try again.";
-      return;
-    }
-    go.disabled = true;
-    said.textContent = "";
-    try {
-      const { url } = await api("POST", `/api/connections/${encodeURIComponent(p.provider)}/authorize`, body);
-      w.location = url;
-      addEventListener("focus", () => reopenSettings().catch(() => {}), { once: true });
-    } catch (e) {
-      w.close();
-      said.textContent = e.message;
-    } finally {
-      go.disabled = false;
-    }
-  };
-  return go;
-}
-// The own keys whose last Disconnect or Remove did not go through, each
-// with the visit of settings it was pressed in: said in their row by
-// whichever load of settings renders in that visit, while the row still
-// has the key, until the next press; in another visit, never (#439).
-const unremoved = new Map();
-// Disconnect: the account goes from Pipes, so no agent's call gets its token
-// again, and its grant is revoked at the provider where the platform can;
-// when it could not, settings says where the person removes it themselves.
-// Of several accounts, the one `account` is.
-function disconnectButton(p, said, account = null) {
-  const off = el("button", "quiet", "Disconnect");
-  off.type = "button";
-  off.dataset.action = "disconnect";
-  const which = account ? `?account=${encodeURIComponent(account.id)}` : "";
-  off.onclick = async () => {
-    off.disabled = true;
-    said.textContent = "";
-    let revoked;
-    try {
-      ({ revoked } = await api("DELETE", `/api/connections/${encodeURIComponent(p.provider)}${which}`));
-    } catch (e) {
-      said.textContent = e.message;
-      off.disabled = false;
-      return;
-    }
-    const name = providerName(p.provider);
-    await reopenSettings(revoked ? null : [`${name} is disconnected`, `Your agents can no longer use it. ${name} may still list this platform's access to your account: remove it in your ${name} account's security settings.`]).catch(() => {});
-  };
-  return off;
-}
-// What the person left unticked when they connected an account, in words.
-const notAllowed = (missing) => el("span", "provider-detail provider-missing", `Not allowed: ${[...new Set(missing.map(scopeName))].join(", ")}`);
-// An account of several, for people: its label, or the provider's name.
-const accountLabel = (p, a) => a.account ?? `A ${providerName(p.provider)} account`;
-// A connection that takes several accounts: each of the person's, oldest
-// first, with its label and state, what it was not allowed with a
-// Reconnect to add (that account), and its own Disconnect. One whose
-// disconnect did not finish (Pipes holds it still) says so, with
-// Disconnect again, and nothing else.
-function accountsList(p) {
-  const list = el("div", "provider-accounts");
-  for (const a of p.accounts) {
-    const item = el("div", "provider-account-row");
-    item.dataset.accountId = a.id;
-    item.dataset.state = a.disconnecting ? "disconnecting" : a.state;
-    const head = el("div", "provider-head");
-    const who = el("div", "provider-identity");
-    const stateName = a.disconnecting ? "Disconnecting didn't finish" : PROVIDER_STATE[a.state] ?? a.state;
-    who.append(el("span", "provider-account", accountLabel(p, a)), el("span", `provider-state ${a.disconnecting ? "disconnecting" : a.state}`, stateName));
-    const actions = el("div", "settings-actions");
-    const said = el("span", "muted provider-detail provider-said");
-    const details = [];
-    if (a.disconnecting) {
-      const again = disconnectButton(p, said, a);
-      again.textContent = "Disconnect again";
-      actions.append(again);
-      head.append(who, actions);
-      item.append(head, said);
-      list.append(item);
-      continue;
-    }
-    if (a.state !== "connected") actions.append(connectButton(p, "Connect again", said, { account: a.id }));
-    if (a.state === "connected" && a.missing?.length) {
-      const again = connectButton(p, "Reconnect to add", said, { account: a.id });
-      again.dataset.action = "reconnect";
-      actions.append(again);
-      details.push(notAllowed(a.missing));
-    }
-    actions.append(disconnectButton(p, said, a));
-    head.append(who, actions);
-    item.append(head, ...details, said);
-    list.append(item);
-  }
-  return list;
-}
-// Which of the person's accounts an agent uses there: Default (the oldest
-// connected) first, then each of theirs, its state said where it is not
-// connected, and the agent's saved pick as it is stored, gone or not, so
-// a pick the platform refuses (one to reconnect) is never shown as another.
-// Shown with two or more accounts, or a saved pick to change.
-function accountPick(p, a, theirs) {
-  const pick = el("select", "provider-account-pick");
-  pick.dataset.agent = a.fragment;
-  named(pick, a.fragment, (t) => `${t}'s ${providerName(p.provider)} account`, "aria-label");
-  const option = (value, text) => {
-    const o = el("option", "", text);
-    o.value = value;
-    pick.append(o);
-  };
-  const first = theirs.find((c) => c.state === "connected");
-  option("", first ? `Default (${accountLabel(p, first)})` : "Default");
-  for (const c of theirs) option(c.id, c.state === "connected" ? accountLabel(p, c) : `${accountLabel(p, c)} (needs reconnecting)`);
-  const mine = a.accounts?.[p.provider];
-  if (mine && !theirs.some((c) => c.id === mine)) option(mine, "An account no longer connected (the default is used)");
-  pick.value = mine ?? "";
-  pick.onchange = async () => {
-    const visit = visits;
-    pick.disabled = true;
-    // Default is no pick: the agent follows it
-    const account = pick.value || null;
-    let refused = null;
-    try {
-      computerIs(await api("PUT", `/api/computers/${seg(state.computer.computer)}/agents/${seg(a.fragment)}/accounts/${encodeURIComponent(p.provider)}`, { account }));
-      state.agents = new Map((state.computer?.agents ?? []).map((x) => [x.identity, x]));
-    } catch (e) {
-      refused = e;
-    }
-    await reopenSettings(refused && visit === visits ? ["That was not changed", refused.message] : null);
-  };
-  return pick;
-}
-function connectionsSection(linked, uses) {
-  const s = section("Connections");
-  s.id = "settings-connections";
-  const offered = linked?.providers ?? [];
-  if (!offered.length) {
-    s.append(el("p", "muted", linked ? "This platform offers none yet." : "Your connections could not be read."));
-    return s;
-  }
-  s.append(el("p", "muted", "Your agents use these through their computer, which adds each credential on the way out. None is ever on the computer."));
-  const agents = state.computer?.agents ?? [];
-  for (const p of offered) {
-    const row = el("div", "provider");
-    row.dataset.provider = p.provider;
-    row.dataset.kind = p.kind;
-    row.dataset.state = p.state;
-    const head = el("div", "provider-head");
-    const identity = el("div", "provider-identity");
-    // an own key signed in to is the person's account there, its models theirs to pick
-    const kind = p.signIn ? (p.models?.length ? "Your account: its models for your agents" : "Your account") : PROVIDER_KIND[p.kind] ?? p.kind;
-    identity.append(el("span", "provider-name", providerName(p.provider)), el("span", "provider-kind", kind));
-    const stateName = p.signIn ? (p.state === "set" ? "Connected" : "Not connected") : PROVIDER_STATE[p.state] ?? p.state;
-    const st = el("span", `provider-state ${p.state}`, stateName);
-    identity.append(st);
-    // which account a connection is: the person's sign-in here may be another
-    // (of several, each is named in its own row)
-    const several = Array.isArray(p.accounts);
-    if (p.account && !several) {
-      const account = el("span", "provider-account", p.account);
-      account.dataset.account = p.account;
-      identity.append(account);
-    }
-    head.append(identity);
-    row.append(head);
-    // the deployment's word on it (its catalog row's note), connected or not
-    if (p.note) row.append(el("span", "muted provider-detail provider-note", p.note));
-    const actions = el("div", "settings-actions");
-    const details = [];
-    // what a Connect press says: a blocked window, or a start refused; and
-    // a Disconnect or Remove that did not go through
-    const said = el("span", "muted provider-detail provider-said");
-    // Disconnect or Remove: settings then reload, and the row they show says
-    // whether the key is still there; one that failed says so in it
-    const removeKey = (button) => async () => {
-      const visit = visits;
-      button.disabled = true;
-      unremoved.delete(p.provider);
-      try {
-        await api("DELETE", `/api/connections/${encodeURIComponent(p.provider)}/key`);
-      } catch {
-        // kept only while its visit is the one shown: an older visit's
-        // answer never replaces a newer one's
-        if (visit === visits && state.page === "Settings") unremoved.set(p.provider, visit);
-      }
-      await reopenSettings();
-    };
-    if (p.kind === "connection" && p.state !== "connected" && !(several && p.accounts.some((a) => !a.disconnecting))) {
-      actions.append(connectButton(p, p.state === "needs_reauthorization" ? "Connect again" : "Connect", said));
-      details.push(said);
-    }
-    // of several, another while the platform takes more; each account is
-    // reconnected and disconnected in its own row
-    // theirs to use: none they disconnected (which Pipes may hold still)
-    const theirs = several ? p.accounts.filter((a) => !a.disconnecting) : [];
-    if (several && theirs.length && theirs.length < (p.accountsMax ?? 1)) {
-      const add = connectButton(p, `Add another ${providerName(p.provider)} account`, said, { add: true });
-      add.dataset.action = "add-account";
-      actions.append(add);
-      details.push(said);
-    }
-    // what the person left unticked when they connected it: a reconnect
-    // asks for it again (the provider keeps what they allowed before)
-    if (!several && p.kind === "connection" && p.state === "connected" && p.missing?.length) {
-      const again = connectButton(p, "Reconnect to add", said);
-      again.dataset.action = "reconnect";
-      actions.append(again);
-      details.push(notAllowed(p.missing), said);
-    }
-    if (!several && p.kind === "connection" && p.state !== "not_connected") {
-      actions.append(disconnectButton(p, said));
-      if (!details.includes(said)) details.push(said);
-    }
-    if (p.kind === "own" && p.signIn) {
-      // connected through the provider's own page (never a key pasted here):
-      // it makes a key of the person's, which their computer keeps sealed
-      if (p.state !== "set") {
-        const go = connectButton(p, "Connect", said);
-        go.dataset.action = "sign-in";
-        actions.append(go);
-        details.push(said);
-        if (p.models?.length) details.push(el("span", "muted provider-detail", `Your ${providerName(p.provider)} account pays for its models; then pick one for an agent under Agents.`));
-      } else {
-        const off = el("button", "quiet", "Disconnect");
-        off.type = "button";
-        off.dataset.action = "disconnect";
-        off.onclick = removeKey(off);
-        const manage = el("a", "quiet", `Revoke the key at ${providerName(p.provider)}`);
-        manage.href = p.signIn.manage;
-        manage.target = "_blank";
-        manage.rel = "noopener";
-        actions.append(off, manage);
-      }
-    } else if (p.kind === "own") {
-      const form = el("form", "provider-key");
-      const input = el("input");
-      input.type = "password";
-      input.autocomplete = "off";
-      input.placeholder = p.state === "set" ? "Replace your key" : `Your ${providerName(p.provider)} key`;
-      const save = el("button", "quiet", "Save");
-      save.type = "submit";
-      form.append(input, save);
-      form.onsubmit = async (e) => {
-        e.preventDefault();
-        save.disabled = true;
-        try {
-          await api("PUT", `/api/connections/${encodeURIComponent(p.provider)}/key`, { key: input.value });
-          await reopenSettings();
-        } catch (err) {
-          save.textContent = err.message;
-          save.disabled = false;
-        }
-      };
-      actions.append(form);
-      if (p.state === "set") {
-        const remove = el("button", "quiet", "Remove");
-        remove.type = "button";
-        remove.dataset.action = "remove-key";
-        remove.onclick = removeKey(remove);
-        actions.append(remove);
-      }
-    }
-    if (p.state === "set" && unremoved.get(p.provider) === visits) {
-      said.textContent = "That didn't go through. Try again.";
-      details.push(said);
-    } else unremoved.delete(p.provider);
-    if (p.kind === "operator" && p.price) {
-      details.push(el("span", "muted provider-detail", `${money(p.price.micros / p.price.per)} a call at list, metered to your credit`));
-    }
-    if (actions.childElementCount) head.append(actions);
-    row.append(...details);
-    if (several && p.accounts.length) row.append(accountsList(p));
-    // which agents may use it: all by default; one narrowed to a list uses
-    // those; of two or more accounts, or a pick saved, which each uses
-    if (agents.length) {
-      const who = el("div", "provider-agents");
-      who.append(el("span", "settings-key", "Agents"));
-      for (const a of agents) {
-        const allowed = a.connections == null || a.connections.includes(p.provider);
-        const chip = named(el("button", "chip"), a.fragment);
-        chip.type = "button";
-        chip.dataset.agent = a.fragment;
-        chip.setAttribute("aria-pressed", String(allowed));
-        named(chip, a.fragment, (t) => (allowed ? `${t} may use it: press to take it away` : `${t} may not use it: press to let it`), "title");
-        chip.onclick = async () => {
-          const visit = visits;
-          chip.disabled = true;
-          const all = offered.map((x) => x.provider);
-          const now = a.connections ?? all;
-          const next = allowed ? now.filter((x) => x !== p.provider) : [...new Set([...now, p.provider])];
-          const list = all.every((x) => next.includes(x)) ? null : next;
-          let refused = null;
-          try {
-            computerIs(await api("PUT", `/api/computers/${seg(state.computer.computer)}/agents/${seg(a.fragment)}/connections`, { connections: list }));
-            state.agents = new Map((state.computer?.agents ?? []).map((x) => [x.identity, x]));
-          } catch (e) {
-            refused = e;
-          }
-          // a failure is said by the reload, in the visit it was pressed in,
-          // while the agent may use it or not as before (a newer press may
-          // have changed it since)
-          const was = state.agents.get(a.identity) ?? a;
-          const unchanged = (was.connections == null || was.connections.includes(p.provider)) === allowed;
-          await reopenSettings(refused && unchanged && visit === visits ? ["That was not changed", refused.message] : null);
-        };
-        who.append(chip);
-        if (allowed && several && (theirs.length >= 2 || a.accounts?.[p.provider])) who.append(accountPick(p, a, theirs));
-      }
-      row.append(who);
-    }
-    // this month's calls through the swap, by agent, and an operator key's cost
-    const mine = (uses?.uses ?? []).filter((u) => u.provider === p.provider);
-    const used = el("div", "provider-uses");
-    used.append(el("span", "settings-key", uses?.month ? `In ${uses.month}` : "This month"));
-    if (!mine.length) used.append(el("span", "muted", "No calls yet"));
-    for (const u of mine) {
-      const calls = `${u.calls} ${u.calls === 1 ? "call" : "calls"}`;
-      const item = named(el("span", "use"), u.agent, (t) => `${t}: ${p.kind === "operator" ? `${calls}, ${money(u.micros)}` : calls}`);
-      item.dataset.use = u.agent;
-      item.dataset.calls = String(u.calls);
-      item.dataset.micros = String(u.micros);
-      used.append(item);
-    }
-    row.append(used);
-    s.append(row);
-  }
-  return s;
-}
-
-// ---- skills (decision 17): the managed set, the person's skills fragment's
-// (the platform's release, which their computers install for every agent),
-// by category, and each agent's own (its fragment's skills/, which win on a
-// name). Both read as the agents' computers read them: the fragments' files.
-// A skill is skills/<category>/<name>/SKILL.md, or skills/<name>/SKILL.md.
-function skillsIn(paths) {
-  const out = [];
-  for (const path of paths) {
-    const parts = path.split("/");
-    if (parts[0] !== "skills" || parts[parts.length - 1] !== "SKILL.md") continue;
-    if (parts.length === 4) out.push({ category: parts[1], name: parts[2] });
-    else if (parts.length === 3) out.push({ category: "", name: parts[1] });
-  }
-  return out.sort((a, b) => a.category.localeCompare(b.category) || a.name.localeCompare(b.name));
-}
-const skillsFragmentOf = () => state.fragments.find((f) => f.kind === "skills" && own(f));
-// The person's skills fragment, made from the blessed template when they
-// have none: at setup, as their default agent is, or from settings' Skills
-// for a person without one (deleted, or set up before 2026-10-03).
-async function skillsFragment() {
-  const have = skillsFragmentOf();
-  if (have) return have.name;
-  const made = await api("POST", "/api/fragments", { label: freeLabel("skills"), template: "skills" });
-  await load();
-  return made.name;
-}
-function skillNames(list) {
-  const value = el("span", "settings-value");
-  list.forEach((s, i) => {
-    if (i) value.append(", ");
-    const name = el("span", "skill", s.name);
-    name.dataset.skill = s.name;
-    value.append(name);
-  });
-  return value;
-}
-async function skillsSection() {
-  const s = section("Skills");
-  s.id = "settings-skills";
-  const filesOf = (name) => api("GET", `/api/f/${name}/files`).then((v) => (v.files ?? []).map((f) => f.path)).catch(() => null);
-  const mine = skillsFragmentOf();
-  if (!mine) {
-    const add = el("button", "quiet", "Add the managed skills");
-    add.type = "button";
-    add.onclick = () => skillsFragment().then(() => reopenSettings()).catch((e) => { add.textContent = e.message; });
-    s.append(el("p", "muted", "Your agents have no managed skills yet."), actionLine("Managed skills", add));
-  } else {
-    const paths = await filesOf(mine.name);
-    if (!paths) s.append(el("p", "muted", "Your skills could not be read."));
-    else {
-      const groups = new Map();
-      for (const k of skillsIn(paths)) groups.set(k.category, [...(groups.get(k.category) ?? []), k]);
-      s.dataset.fragment = mine.name;
-      s.append(...[...groups].map(([category, list]) => {
-        const row = el("p", "settings-line");
-        row.dataset.category = category || "general";
-        row.append(el("span", "settings-key", (category || "general").replace(/-/g, " ")), skillNames(list));
-        return row;
-      }));
-      const open = el("button", "quiet", "Open your skills");
-      open.type = "button";
-      open.onclick = () => openApp(mine.name);
-      s.append(actionLine("Managed skills", open));
-    }
-  }
-  // each agent's own skills, from its fragment
-  const agents = state.fragments.filter((f) => f.kind === "agent" && own(f));
-  const owns = await Promise.all(agents.map((a) => filesOf(a.name)));
-  agents.forEach((a, i) => {
-    const row = el("p", "settings-line");
-    row.dataset.agent = a.name;
-    const list = skillsIn(owns[i] ?? []);
-    row.append(named(el("span", "settings-key"), a.name, (t) => `${t}'s own`), list.length ? skillNames(list) : el("span", "settings-value muted", owns[i] ? "None yet" : "Not read"));
-    s.append(row);
-  });
-  return s;
-}
+const settings = createSettings({
+  api, $, seg,
+  account: { person: () => state.me, setPerson: (p) => { state.me = p; }, isGuest: () => state.guest, setGuest,
+    setSeat: (seat) => { state.seat = seat; }, support: () => state.support, seatIs,
+    switchForm: (...args) => switchForm(...args), noSeatSaid: () => noSeatSaid() },
+  navigation: { at, path: SETTINGS, isOpen: () => state.page === "Settings",
+    enter: () => {
+      if (state.page !== "Settings") views++;
+      state.page = "Settings";
+      $("layout").classList.add("settings-view");
+      $("frames").hidden = true;
+      leaveApps();
+    },
+    entered: () => { renderHeading(); renderChats(); leaveSidebar(); } },
+  notices: { hideNotice, noticeCurrent: (gen) => gen === noticeGen, notice },
+  sections: { computerSection, connectionsSection: (...args) => connectionsSection(...args), simplexSection },
+  agents: { getComputer: () => state.computer, getAgents: () => state.agents, faceControls, agentSettings, addAgentForm, renderAgentFaces, paintHomes },
+  releaseInfo: () => ({ mine: release.mine, deployed: DEPLOYED }), beginWrite: () => { writing++; return () => { writing--; }; },
+  heard: (r) => heard(r), allFragments: () => state.fragments, own, freeLabel, load, named, openApp,
+});
+function openSettings(push = true, failed = null) { return settings.openSettings(push, failed); }
+function reopenSettings(failed = null) { return settings.reopenSettings(failed); }
+function skillsFragment() { return settings.skillsFragment(); }
 $("settings").onclick = () => openSettings().catch((e) => notice("Settings did not open", e.message));
 
-// ---- first run: sign in, a seat, then the default agent is made
-// (decision 10); it never goes through settings ----
-// Match the chat composer's rim reflection, including its 64px approach
-// and rounded corners, on every first-run card (Skyler's onboarding design,
-// 2026-10-22). Listen once: firstRun replaces only the card's children.
-const splashPointer = matchMedia("(hover: hover) and (pointer: fine)");
-let splashEdgeFrame = 0;
-let splashEdgePointer = null;
-function clearSplashEdge() {
-  cancelAnimationFrame(splashEdgeFrame);
-  splashEdgeFrame = 0;
-  $("first-run-card").style.setProperty("--edge-light", "0");
-}
-$("first-run").addEventListener("pointermove", (event) => {
-  if (!splashPointer.matches || event.pointerType === "touch") return;
-  splashEdgePointer = { x: event.clientX, y: event.clientY };
-  if (splashEdgeFrame) return;
-  splashEdgeFrame = requestAnimationFrame(() => {
-    splashEdgeFrame = 0;
-    const card = $("first-run-card");
-    const rect = card.getBoundingClientRect();
-    const x = splashEdgePointer.x - rect.left;
-    const y = splashEdgePointer.y - rect.top;
-    const radius = parseFloat(getComputedStyle(card).borderRadius);
-    const qx = Math.abs(x - rect.width / 2) - rect.width / 2 + radius;
-    const qy = Math.abs(y - rect.height / 2) - rect.height / 2 + radius;
-    const distance = Math.max(0, Math.hypot(Math.max(qx, 0), Math.max(qy, 0)) + Math.min(Math.max(qx, qy), 0) - radius);
-    const proximity = Math.max(0, 1 - distance / 64);
-    card.style.setProperty("--edge-x", `${x}px`);
-    card.style.setProperty("--edge-y", `${y}px`);
-    card.style.setProperty("--edge-light", String(proximity * proximity));
-  });
+const { connectionsSection } = createConnections({
+  api, el, section, named, seg, computer: () => state.computer, getAgents: () => state.agents,
+  computerIs: (v) => {
+    computerIs(v);
+    state.agents = new Map((state.computer?.agents ?? []).map((x) => [x.identity, x]));
+  },
+  visitOf: () => settings.visit(), isOpen: () => state.page === "Settings", reopenSettings,
 });
-$("first-run").addEventListener("pointerleave", clearSplashEdge);
-$("first-run").addEventListener("scroll", clearSplashEdge, { passive: true });
-addEventListener("blur", clearSplashEdge);
-addEventListener("resize", clearSplashEdge);
-// The two ways the shell is first drawn (its first run's card, here, and
-// its layout, `showLayout`) take away "Still loading…" (index.html), so it
-// is never said beside the shell, and is said while nothing is drawn: its
-// scripts not come, or their first answers.
-function firstRun(...children) {
-  $("still-loading")?.remove();
-  clearSplashEdge();
-  stopCardStep();
-  $("layout").hidden = true;
-  $("first-run").hidden = false;
-  $("first-run-year").textContent = String(new Date().getFullYear());
-  $("first-run-card").replaceChildren(...children);
-}
-// One step of the first run's card to another, in place (the welcome's
-// seat and its trial code: billing.js seatOffer): the card's height moves
-// from the one to the other and the new step's parts rise in, as Skyler's
-// design moves them; at once with reduced motion. Focus that was in the
-// card goes to the new step's heading.
-let cardMotion = { run: 0, animations: [] };
-function stopCardStep() {
-  cardMotion.run++;
-  for (const a of cardMotion.animations) a.cancel();
-  cardMotion.animations = [];
-  $("first-run-card").classList.remove("moving");
-}
-async function cardStep(from, to) {
-  const card = $("first-run-card");
-  const before = card.getBoundingClientRect().height;
-  const focused = card.contains(document.activeElement);
-  stopCardStep();
-  const run = cardMotion.run;
-  from.hidden = true;
-  to.hidden = false;
-  const heading = to.querySelector("h1");
-  if (focused && heading) {
-    heading.tabIndex = -1;
-    heading.focus({ preventScroll: true });
-  }
-  if (!before || matchMedia("(prefers-reduced-motion: reduce)").matches) return;
-  const after = card.getBoundingClientRect().height;
-  const ease = "cubic-bezier(.22, 1, .36, 1)";
-  card.classList.add("moving");
-  cardMotion.animations = [
-    card.animate([{ height: `${before}px` }, { height: `${after}px` }], { duration: 520, easing: ease }),
-    ...[...to.children].map((part, i) => part.animate([{ opacity: 0, transform: "translateY(9px)" }, { opacity: 1, transform: "none" }], { duration: 380, delay: 65 + Math.min(i, 8) * 45, easing: ease, fill: "backwards" })),
-  ];
-  await Promise.all(cardMotion.animations.map((a) => a.finished.catch(() => {})));
-  if (run === cardMotion.run) stopCardStep();
-}
-function showLayout() {
-  $("still-loading")?.remove();
-  $("first-run").hidden = true;
-  $("layout").hidden = false;
-}
-const PITCH = "Welcome to Finite";
-const SUBTITLE = "Superintelligent agents for you and your organization";
-function signIn() {
-  // back to this view, with what its address carries (a mailed trial's
-  // code), whichever screen of AuthKit's each opens on. Sign In is a
-  // sign-in, not a switch: one WorkOS answers from a session it holds in
-  // the browser comes back here too, as that account.
-  const back = location.pathname + location.search;
-  const go = el("a", "primary", "Sign Up");
-  go.href = `/auth/login?screen_hint=sign-up&return=${encodeURIComponent(back)}`;
-  const other = el("a", "secondary splash-secondary", "Sign In");
-  other.href = `/auth/login?screen_hint=sign-in&return=${encodeURIComponent(back)}`;
-  firstRun(el("h1", null, PITCH), el("p", null, SUBTITLE), go, other);
-}
-// "Use another account" (`POST /auth/switch`, docs/api.md, Sign-in), back
-// to `back`: WorkOS keeps its own sign-in in the browser (clearing this
-// site's data leaves it), and Sign in comes back as that account without
-// asking. A switch ends this session here, if there is one, and that one
-// there (whose logout comes back to the platform's root, not `back`), so
-// the next sign-in asks who is signing in. A form: the shell's
-// `form-action 'self'` lets the browser leave for WorkOS only from the
-// page its answer is.
-function switchForm(back, cls = "quiet") {
-  const other = el("form");
-  other.method = "post";
-  other.action = `/auth/switch?return=${encodeURIComponent(back)}`;
-  const use = el("button", cls, "Use another account");
-  use.type = "submit";
-  other.append(use);
-  return other;
-}
-// Who is signed in, wherever someone is told they have no seat (a guest:
-// `GET /api/seat`): a browser's autofill can sign someone in as an email
-// their seat is not under, a new guest, whose seat waits under the other
-// (2026-10-20, in production). The email is their latest sign-in's.
-function noSeatSaid() {
-  const p = el("p", "no-seat");
-  if (state.me.email) p.append("You're signed in as ", el("strong", null, state.me.email), ". ");
-  p.append("This account has no seat. If your team gave you a seat under another email, use another account.");
-  return p;
-}
-// A new person's welcome (docs/billing.md, "The shell"): what this is, the
-// one seat and a trial code, then Stripe's Checkout, whose return comes
-// back here (`?checkout=<session>`, or `?checkout=canceled`), as a mailed
-// trial's link does (`?trial=<code>`). Someone who is no guest (a seat
-// bought, an org's claimed at sign-in, or the deployment's plan) goes home,
-// or on to the first agent; a guest is offered the seat, whatever they
-// own (one whose seat ended keeps their chats).
-async function welcome() {
-  const q = new URLSearchParams(location.search);
-  const back = q.get("checkout");
-  const paid = back && back !== "canceled" ? back : null;
-  const goHome = () => {
-    history.replaceState(null, "", "/");
-    return start();
-  };
-  if (paid && chats().some(own)) {
-    // a seat paid for again: applied, then home
-    await api("POST", `/api/billing/sessions/${encodeURIComponent(paid)}`, {}).catch(() => {});
-    return goHome();
-  }
-  if (paid) return creatingAgent({ session: paid });
-  const mine = await api("GET", "/api/seat").catch(() => null);
-  if (mine) setGuest(mine.guest);
-  if (!state.guest) return chats().some(own) ? goHome() : creatingAgent(mine?.seat ? {} : null);
-  history.replaceState(null, "", WELCOME);
-  // LATER (fbfc's import; not built): "Import your finite.computer agent",
-  // a choice beside the seats for someone moving their agent here. Its
-  // place is kept, hidden, until the import is built.
-  const imports = el("button", "plan", "Import your finite.computer agent");
-  imports.type = "button";
-  imports.dataset.slot = "import";
-  imports.hidden = true;
-  // who is signed in, and another account (back here, its trial code kept),
-  // under whichever step the card shows
-  const trial = q.get("trial");
-  const foot = el("div", "welcome-foot");
-  foot.append(noSeatSaid(), switchForm(trial ? `${WELCOME}?trial=${encodeURIComponent(trial)}` : WELCOME, "text"));
-  // someone shared something with them first, or invited them: it is still
-  // theirs to open, or to answer
-  if (state.fragments.length || state.invites.length) {
-    const home = el("a", "text", "Not now");
-    home.href = "/";
-    foot.append(home);
-  }
-  const out = el("form");
-  out.method = "post";
-  out.action = "/auth/logout";
-  const leave = el("button", "text", "Sign out");
-  leave.type = "submit";
-  out.append(leave);
-  foot.append(out);
-  const canceled = el("div", "ticket");
-  canceled.append(el("p", null, "Checkout was canceled: nothing was bought."));
-  const top = [el("h1", null, PITCH), el("p", null, SUBTITLE), ...(back === "canceled" ? [canceled] : [])];
-  firstRun(...seatOffer({ api, el, step: cardStep }, mine, trial, top), imports, foot);
-}
-// A seat before the first agent. Checkout's return names its session,
-// applied at once (whatever Stripe's webhook's timing; again, it changes
-// nothing) and kept in the address until its seat holds, so a reload
-// applies it again. Then the seat's plan reaches the ledger from the
-// registry, a moment after, and the first run's creates are a seat's.
-// Bounded: SEAT_WAIT_MS.
-const SEAT_WAIT_MS = 30_000;
-async function seated(session) {
-  if (session) {
-    // a refusal said plainly, with what to do (Try again retries it; the
-    // platform's words go to the console, for us)
-    const mine = await api("POST", `/api/billing/sessions/${encodeURIComponent(session)}`, {}).catch((e) => {
-      console.warn("A seat's Checkout return was not applied:", e);
-      throw new Error(
-        e.status === 404
-          ? "This payment wasn't found. Choose a seat to start again."
-          : "We couldn't confirm your payment yet. If you were charged, try again in a moment.",
-      );
-    });
-    if (!mine.seat?.good) throw new Error("Your payment has not reached us yet: try again in a moment.");
-    history.replaceState(null, "", "/");
-  }
-  const t0 = Date.now();
-  for (;;) {
-    const ledger = await api("GET", "/api/ledger").catch(() => null);
-    if (ledger && ledger.plan !== "guest") return;
-    if (Date.now() - t0 > SEAT_WAIT_MS) throw new Error("Your seat has not reached your account yet: try again in a moment.");
-    await new Promise((r) => setTimeout(r, 500));
-  }
-}
-// The first agent (Paul, 2026-10-03: no question asked): the person's
-// default agent, in charge, made with its computer and its chat. The chat
-// is made first and opens at once (Skyler, 2026-10-12), so they may write
-// while the rest is made; its page sends only once the agent is a member
-// (a message from before its joining starts nothing: docs/chat-records.md).
-// What the chat shows of the making is the platform's word alone (Paul,
-// 2026-10-13: nothing fake or optimistic): a step is done once its call
-// answered, the computer's phase is its view's, and nothing is said in the
-// agent's name. Nothing of it is kept in this browser: a reload reads the
-// list again (`owesFirstAgent`) and goes on from what was made.
-const SETUP_WAIT_MS = 4 * 60_000;
-// the first run while it runs, or after it failed (Try again, in its chat):
-// { label, title, chat, made, joined, ready, error }; null otherwise
-let setup = null;
-let setupRun = null;
-// What the first run's chat shows of it (the roster's `setup`, to that
-// chat's frame alone): each step done, being done, not yet, or failed,
-// and what failed.
-function setupFor(name) {
-  if (!setup || setup.chat !== name) return null;
-  // its name as the list says it once it is made (renamed meanwhile, the new one)
-  const made = state.fragments.find((f) => f.kind === "agent" && own(f) && labelOf(f.name) === setup.label);
-  const t = made ? titleOf(made.name) : setup.title;
-  const step = (text, done, now) => ({ text, state: done ? "done" : !now ? "todo" : setup.error ? "failed" : "doing" });
-  return {
-    steps: [
-      step(setup.made ? `${t} is made` : `Making ${t}`, setup.made, !setup.made),
-      step(setup.joined ? `${t} is in this chat` : `Adding ${t} to this chat`, setup.joined, setup.made && !setup.joined),
-      step(setup.ready ? `${t} is ready` : state.computer?.phase === "awake" ? `${t} is starting on its computer` : `Its computer: ${PHASE[state.computer?.phase] ?? "not made yet"}`, setup.ready, setup.joined && !setup.ready),
-    ],
-    error: setup.error,
-  };
-}
-function setupChanged(change) {
-  Object.assign(setup, change);
-  rosterChanged();
-}
-// Its job (its SOUL.md, written once: an agent already set up keeps its
-// own), never its name: that is its agent fragment's title alone, which a
-// rename changes (Paul, 2026-10-16: renamed, its job still said the old one).
-const firstSoul = (owner) => `You are ${owner}'s default agent: the first one they talk to, and in charge of the rest. Help with whatever they ask. When a job would be better as an app, or as an agent of its own, say so and offer to set it up. The first time you talk, say hello briefly and ask what they'd like to start with.\n`;
-// Its chat's own title (Paul, 2026-10-16), never the agent's name, which the
-// sidebar shows above it.
-const FIRST_CHAT = "Your first chat";
-// The name of NAMES an earlier try's label was made from (`freeLabel(slug(name))`,
-// maybe with its `-<n>`), so a retry names its agent as that try would have.
-const nameOfLabel = (label) => NAMES.find((n) => new RegExp(`^${slug(n)}(-[0-9]+)?$`).test(label));
-// a chat an earlier try made before its agent: theirs, `<label>-chat`, no agent in it
-const unjoined = (f) => own(f) && !f.agents?.length && /-chat$/.test(labelOf(f.name));
-// Whether the first run is owed, from the platform alone: a seat's person
-// with no agent of theirs in a chat of their own. No chats at all; or only
-// the chat an earlier try made; or their agent not on their computer, or
-// not a member of its own chat (asked of the chat: a row may not name its
-// agents yet). With chats, and their computer's read failed, their agents
-// are unknown, not none: the question is put off until a read answers
-// (`resumeFirstRun`).
-async function owesFirstAgent() {
-  if (state.guest) return false;
-  if (reads.listFailed || reads.updating) {
-    firstRunPutOff = true;
-    return false;
-  }
-  if (!chats().length) return true;
-  if (state.computerFailed) {
-    firstRunPutOff = true;
-    return false;
-  }
-  if (chats().some((f) => own(f) && (f.agents ?? []).some((id) => state.agents.has(id)))) return false;
-  const agent = primaryAgent();
-  if (!agent) return chats().every(unjoined);
-  const { identity: id } = agent;
-  const itsChat = agentsOwnChat(agent.fragment);
-  if (!id || !itsChat) return true;
-  const members = await api("GET", `/api/f/${seg(itsChat.name)}/members`).catch(() => null);
-  return !!members && !(members.members ?? []).some((m) => m.principal === id);
-}
-// The first run's question, put off while their computer could not be read
-// (`owesFirstAgent`), is asked again by each read that answers (`load`:
-// Try again's, or the list's socket's) and each arrival home (`openChat`,
-// the one way there), while the person is at home, and after it too (they
-// may have gone to Settings meanwhile: then their way back asks it). Owed,
-// it is made once (`creatingAgent`).
-let firstRunPutOff = false;
-const atHome = () => location.pathname === "/" && !state.page;
-async function resumeFirstRun() {
-  if (!atHome()) return;
-  firstRunPutOff = false;
-  const owed = await owesFirstAgent();
-  if (!atHome()) firstRunPutOff = true;
-  else if (owed) creatingAgent();
-}
-// Each step reuses what an earlier try made, including a create whose
-// response was lost. The chat's frame opens once: a draft in it stays put.
-async function defaultAgent() {
-  await load();
-  const owner = state.me.email || "your person";
-  if (!setup) {
-    // an earlier try's names, by what it made: its agent, else its chat's
-    // label (the chat's title is its own)
-    const agent = primaryAgent();
-    const chat = agent ? null : chats().find(unjoined);
-    const earlier = agent ? labelOf(agent.fragment) : chat ? labelOf(chat.name).slice(0, -"-chat".length) : null;
-    const title = agent ? titleOf(agent.fragment) : (earlier && nameOfLabel(earlier)) || pickName();
-    setup = { label: earlier ?? freeLabel(slug(title)), title, chat: null, made: false, joined: false, ready: false, error: null };
-  }
-  setupChanged({ error: null });
-  const { title, label } = setup;
-  const chatName = state.fragments.find((f) => f.kind === "chat" && own(f) && labelOf(f.name) === `${label}-chat`)?.name ??
-    (await api("POST", "/api/fragments", { label: `${label}-chat`, template: "chat", title: FIRST_CHAT })).name;
-  setupChanged({ chat: chatName });
-  await load();
-  if (!state.frames.has(chatName)) openChat(chatName);
 
-  // These can run together once the chat is on screen. The computer is
-  // assigned before it wakes, with the agent's configuration deployed.
-  const prepared = await Promise.allSettled([skillsFragment(), computerOf()]);
-  // Finish both before offering Retry: no previous create is left in flight.
-  for (const result of prepared) if (result.status === "rejected") throw result.reason;
-  const computer = prepared[1].value;
-  let agent = state.fragments.find((f) => f.kind === "agent" && own(f) && labelOf(f.name) === label);
-  if (!agent) agent = await api("POST", "/api/fragments", { label, template: "agent", title });
-  const assigned = await api("PUT", `/api/computers/${seg(computer.computer)}/agents/${seg(agent.name)}`, {});
-  const id = assigned.agents.find((a) => a.fragment === agent.name)?.identity;
-  if (!id) throw new Error("its computer did not take it");
-  // its job and tier, written once: an agent already set up keeps its own
-  const written = await api("GET", `/api/f/${seg(agent.name)}/file?path=agent.json`).then(() => true, (e) => { if (e.status === 404) return false; throw e; });
-  if (!written) {
-    await api("POST", `/api/f/${agent.name}/files`, {
-      key: "agent-default",
-      message: "the default agent",
-      files: [{ path: "SOUL.md", text: firstSoul(owner) }, { path: "agent.json", text: JSON.stringify({ tier: DEFAULT_AGENT_TIER }, null, 2) + "\n" }],
-    });
-  }
-  await api("POST", `/api/f/${agent.name}/deploy`, {});
-  setupChanged({ made: true });
-  // its joining is what lets the chat's page send (and wakes its computer)
-  await api("PUT", `/api/f/${chatName}/members/${seg(id)}`, { role: "editor" });
-  setupChanged({ joined: true });
-  await hello(agent.name, chatName);
-  api("POST", `/api/computers/${seg(computer.computer)}/wake`, {}).then(computerIs).catch(() => {});
-  await load();
-  return { chat: chatName, id, computer: computer.computer };
-}
-// Ready: its computer awake, and the agent following its chat (its wake
-// subscription, which its guest makes as it follows: the chat's owner sees
-// it). The computer as it answered is shown at once (its phase, in the chat).
-async function agentReady({ chat, id, computer }) {
-  const [c, subs] = await Promise.all([
-    api("GET", "/api/computers").then((v) => v.computers?.find((x) => x.computer === computer)),
-    api("GET", `/api/f/${chat}/subscriptions`),
-  ]);
-  computerIs(c);
-  // a wake refused (its owner's credit) is said, not waited out
-  if (c?.why && c.phase !== "awake") throw Object.assign(new Error(c.why), { refused: true });
-  return c?.phase === "awake" && (subs.subscriptions ?? []).some((x) => x.wake && x.principal === id && x.channel === "chat");
-}
-// `seat` (`{session?}`): a seat comes first (`seatFirst`), then the agent.
-function creatingAgent(seat = null) {
-  if (seat) return seatFirst(seat);
-  if (setupRun) return setupRun;
-  history.replaceState(null, "", "/");
-  showLayout();
-  // until its chat is made, the middle column says what is being made
-  if (!setup?.chat || !state.frames.has(setup.chat)) notice("Making your agent…");
-  setupRun = (async () => {
-    const made = await defaultAgent();
-    const t0 = Date.now();
-    for (;;) {
-      let ready = false;
-      try {
-        ready = await agentReady(made);
-      } catch (e) {
-        if (e.refused) throw e;
-      }
-      if (ready) break;
-      if (Date.now() - t0 > SETUP_WAIT_MS) throw new Error("Its computer is taking longer than usual to start. What you send waits for it; Try again looks again.");
-      await new Promise((r) => setTimeout(r, 1500));
-    }
-    setupChanged({ ready: true });
-    setup = null;
-    rosterChanged();
-    await load();
-  })().catch((err) => {
-    if (setup) setupChanged({ error: err.message || "It did not answer." });
-    if (!setup?.chat || !state.frames.has(setup.chat)) {
-      const retry = el("button", "primary", "Try again");
-      retry.type = "button";
-      retry.onclick = () => creatingAgent();
-      notice("Your agent could not start", err.message, retry);
-    }
-  }).finally(() => { setupRun = null; });
-  return setupRun;
-}
-// A seat before the first agent (the welcome's: a Checkout's return, or a
-// seat given whose plan is on its way): the welcome's card says it is
-// being set up until the platform says it holds (`seated`; Checkout's
-// return stays in the address until then, so a reload applies it again),
-// then the agent is made in its chat (`creatingAgent`). Refused, it says
-// why, with Try again and Choose a seat (the welcome's seats again).
-function seatFirst(seat) {
-  const step = el("li", "doing", "Setting up your seat");
-  const list = el("ol", "creating-steps ticket");
-  list.append(step);
-  const error = el("p", "form-error");
-  error.hidden = true;
-  const retry = el("button", "primary", "Try again");
-  retry.type = "button";
-  retry.hidden = true;
-  retry.onclick = () => creatingAgent(seat);
-  const choose = el("button", "text", "Choose a seat");
-  choose.type = "button";
-  choose.hidden = true;
-  choose.onclick = () => {
-    history.replaceState(null, "", WELCOME);
-    welcome().catch((e) => notice("This page did not load", e.message));
-  };
-  firstRun(el("h1", null, "Setting up your seat…"), list, error, retry, choose);
-  seated(seat.session).then(
-    () => {
-      step.className = "done";
-      // a seat now, as the ledger said: the shell offers what a seat makes
-      setGuest(false);
-      return creatingAgent();
-    },
-    (err) => {
-      step.className = "failed";
-      error.textContent = err.message;
-      error.hidden = false;
-      retry.hidden = false;
-      choose.hidden = false;
-    },
-  );
-}
+const onboarding = createOnboarding({
+  api, ui: { $, el, notice },
+  account: { person: () => state.me, isGuest: () => state.guest, setGuest, hasInvites: () => state.invites.length },
+  fragments: { allFragments: () => state.fragments, chats, own, labelOf, titleOf, primaryAgent, agentsOwnChat, freeLabel, slug, seg },
+  computer: { computerView: () => state.computer, computerFailed: () => state.computerFailed, agents: () => state.agents, computerOf, computerIs },
+  navigation: { start, openChat, atHome: () => location.pathname === "/" && !state.page, hasFrame: (name) => state.frames.has(name), welcomePath: WELCOME },
+  reads: () => reads, load, skillsFragment, rosterChanged,
+});
+const { signIn, showLayout, welcome, switchForm, noSeatSaid, setupFor, owesFirstAgent, resumeFirstRun, creatingAgent } = onboarding;
 
 // ---- the person's things, read again whenever they may have changed ----
 // One read of their list is the sidebar: each chat's row names its agents
@@ -3822,6 +1542,8 @@ async function load(changed = false) {
     state.agents = new Map((state.computer?.agents ?? []).map((a) => [a.identity, a]));
   }
   renderChats();
+  threads.refresh().catch(() => {});
+  sessionArchive.load().catch(() => {});
   renderApps();
   appsPage.listed().catch(() => {});
   renderHeading();
@@ -3835,7 +1557,7 @@ async function load(changed = false) {
   for (const f of chats()) if (own(f) && f.title === UNTITLED && f.preview) titleFromFirst(f.name);
   // answered, it goes on with what a failure put off, whoever asked
   if (computers && unknown) reopenSettings().catch(() => {});
-  if (list && computers && firstRunPutOff) resumeFirstRun();
+  if (list && computers && onboarding.putOff()) resumeFirstRun();
   const touched = changed ? new Set(state.fragments.filter((f) => before.get(f.name) !== JSON.stringify(f)).map((f) => f.name)) : null;
   cardsLoad.wait = 0;
   loadCards(touched).catch(() => {});
@@ -3894,114 +1616,13 @@ document.addEventListener("visibilitychange", () => {
   if (!document.hidden && watching.on && !watching.socket) watchList();
 });
 
-// ---- a new release: the page reloads itself at a safe moment ----
-// A page outlives a deploy: a home screen's app or a tab left open runs the
-// shell, and its chats' pages, of the release it loaded with while the
-// platform under it moves on (Paul's phone, 2026-10-20: after the day's
-// deploys one chat would not load in the home screen's app, and did in a
-// tab of its own, until the app was quit). So the page names the release
-// that answered it (index.html's meta, `RELEASE`), every answer of the
-// platform names its own (`x-fragment-deploy`), and once one names another
-// the page reloads whole, its chats' and apps' frames with it, where it
-// was (its path, its chat, its apps' windows): while it is hidden, or at
-// the person's next move (a chat or an app opened). Words typed in a chat
-// are its page's to keep (in its own origin's storage, as its person's),
-// so they survive this reload as any other; so the shell reloads only
-// when no chat's page says it is busy with what no storage keeps (files
-// chosen, a voice memo, a message on its way or one that failed, a quote
-// chosen: `{fragment: "busy", busy}`,
-// told as it changes), and none of this page's own dialogs, menu, fields
-// typed in, prompts on their way or writes still going hold it. Nothing
-// is asked at the moment of the reload, so nothing can change between an
-// answer and the reload; it is decided a moment after the page hid or the
-// person moved, so what a page posted just before is heard, and a page
-// busy as the reload is under way stops it (`reloadWhenSafe`, its one
-// window left). Each release is reloaded for at most
-// RELEASE_TRIES times, RELEASE_AGAIN_MS apart (a reload can still meet the
-// old release), and the release a reload left is no reason to reload for
-// RELEASE_LEFT_MS (a deploy's old side answers for a while). The page asks
-// for itself (`HEAD /healthz`) as it is hidden or shown again, comes back
-// from the back-forward cache or comes online, at most once a
-// RELEASE_LOOK_MS; it hears every answer it reads.
-const RELEASE_ID = /^[A-Za-z0-9._-]{1,64}$/;
-const RELEASE_HEADER = "x-fragment-deploy";
-const RELEASE_LOOK_MS = 60_000;
-const RELEASE_LEFT_MS = 10 * 60_000;
-const RELEASE_TRIES = 3;
-const RELEASE_AGAIN_MS = 60_000;
-const WINDOWS_KEPT_MAX = 16;
-// a click that opens a chat from the launcher closes its dialog first
-const NAVIGATED_SETTLE_MS = 400;
-// and the page hidden, a moment for what a chat's page posted just before to be heard
-const RELOAD_SETTLE_MS = 100;
-// signing out waits at most this long for the chats' pages to let their drafts go
-const FORGET_WAIT_MS = 1_000;
-const RELOADED_KEY = "shell.release.v1"; // {from, to, at, tries}: this tab's last reload for a release
-const WINDOWS_KEY = "shell.windows.v2"; // {who, windows: [{name, path}]}: the app windows to open again
-// this tab's own storage, which a reload keeps
-const tab = {
-  get(key, fallback) { try { return JSON.parse(sessionStorage.getItem(key)) ?? fallback; } catch { return fallback; } },
-  set(key, value) { try { sessionStorage.setItem(key, JSON.stringify(value)); return true; } catch { return false; } },
-  drop(key) { try { sessionStorage.removeItem(key); } catch {} },
-};
-// #403's, which kept chats' words here and named no person: let go
-tab.drop("shell.unsent.v1");
-tab.drop("shell.windows.v1");
-const RELEASE = document.querySelector('meta[name="fragment-release"]')?.content ?? "";
-// when it was deployed, seconds (its other meta; none: empty, or unfilled)
-const DEPLOYED_META = document.querySelector('meta[name="fragment-release-deployed"]')?.content ?? "";
-const DEPLOYED = /^\d{1,12}$/.test(DEPLOYED_META) ? Number(DEPLOYED_META) : null;
-// mine: the release this page is (none, an unfilled page: it never reloads);
-// next: the release it waits to reload for
-const release = { mine: RELEASE_ID.test(RELEASE) ? RELEASE : null, next: null, lookedAt: 0, reloading: false };
-
-// An answer of the platform's, heard: one naming a release to reload for
-// is waited on, and reloaded for at once while the page is hidden.
-function heard(r) {
-  const id = r.headers.get(RELEASE_HEADER);
-  if (!release.mine || !id || id === release.mine || id === release.next || !RELEASE_ID.test(id) || !reloadsFor(id)) return;
-  release.next = id;
-  // what it waits for, for whoever looks (the e2e, a person's devtools)
-  document.documentElement.dataset.releaseNext = id;
-  if (document.hidden) reloadWhenSafe("hidden");
-}
-function lastReload() {
-  const r = tab.get(RELOADED_KEY, null);
-  return r && typeof r.from === "string" && typeof r.to === "string" && Number.isFinite(r.at) && Number.isInteger(r.tries) ? r : null;
-}
-// Whether another release is one to reload for: not the one this tab's
-// last reload left while that deploy may still be going out, nor one it
-// reloaded for and still is not, RELEASE_TRIES times or within
-// RELEASE_AGAIN_MS of the last.
-function reloadsFor(id) {
-  const last = lastReload();
-  if (!last) return true;
-  const since = Date.now() - last.at;
-  if (id === last.from && since < RELEASE_LEFT_MS) return false;
-  return !(id === last.to && (last.tries >= RELEASE_TRIES || since < RELEASE_AGAIN_MS));
-}
-
-// the fields of this page the person typed in
-const TYPED = new Set(["text", "search", "email", "url", "tel", "password", "number"]);
-const typedIn = new Set();
-document.addEventListener("input", (e) => {
-  const f = e.target;
-  if (f instanceof HTMLTextAreaElement || (f instanceof HTMLInputElement && TYPED.has(f.type))) typedIn.add(f);
-}, true);
-// What this page itself holds that a reload would lose.
-function shellHolds() {
-  for (const f of typedIn) if (!f.isConnected) typedIn.delete(f);
-  const typed = [...typedIn].some((f) => f.value.trim() && f.getClientRects().length > 0);
-  return typed || !!document.querySelector("dialog[open]") || !menu.hidden || writing > 0 || composing.size > 0 || launcher.holds() || starting;
-}
-
-// The chats' frames whose page said hello (`agents?`, which the chat's
-// page sends as it starts), and those of them that say they are busy with
-// what no storage keeps. A hello is a new page, busy with nothing yet; a
-// frame sent elsewhere (a sign-in it could not make, tried again) is
-// neither. A page in a frame that says so wrongly only holds a reload back.
-const greeted = new WeakSet();
-const busyFrames = new WeakSet();
+const refresh = createSessionRefresh({
+  held: () => !menu.hidden || writing > 0 || composing.size > 0 || launcher.holds() || starting,
+  getFrames: () => state.frames.values(), personId: () => state.me?.id,
+  viewerKeys: () => viewer.keys, validFragment: (name) => FRAGMENT_NAME.test(name), openApp, originOf,
+  endAlerts: () => { alertsEnded = true; }, dropAlerts,
+});
+const { heard, navigated, reopenWindows, release, DEPLOYED } = refresh;
 const frameOfWindow = (win) => [...state.frames.values()].find((f) => f.contentWindow === win);
 addEventListener("message", (event) => {
   const d = event.data;
@@ -4009,124 +1630,14 @@ addEventListener("message", (event) => {
   const frame = frameOfWindow(event.source);
   if (!frame) return;
   if (d.fragment === "agents?") {
-    greeted.add(frame);
-    busyFrames.delete(frame);
+    refresh.greet(frame);
   } else if (d.busy === true) {
-    busyFrames.add(frame);
+    refresh.busy(frame, true);
     // busy as the reload is under way (a file picked, a memo begun, a
     // message failed while its answer was slow): the reload is stopped
-    if (release.reloading) stopReload();
-  } else busyFrames.delete(frame);
+
+  } else refresh.busy(frame, false);
 });
-const chatsBusy = () => [...state.frames.values()].some((f) => f.isConnected && busyFrames.has(f));
-
-// Reloads for `release.next` if nothing holds it: as the page is hidden
-// (`moment` "hidden"), and as the person opens a chat or an app
-// ("navigated"). Decided in a task of its own a moment later
-// (RELOAD_SETTLE_MS, NAVIGATED_SETTLE_MS), so what a chat's page posted
-// just before is heard first; nothing is asked or awaited. A chat's page
-// that says it is busy as the reload is under way stops it (`stopReload`).
-// What is left: a page that becomes busy once the new page has begun to
-// come in (its answer committed) is gone with it. That window opens only
-// while the page is hidden, or as the person themselves moves in it.
-function reloadWhenSafe(moment) {
-  if (!release.next || release.reloading) return;
-  setTimeout(() => {
-    if ((moment === "hidden" && !document.hidden) || !release.next || release.reloading || chatsBusy() || shellHolds()) return;
-    const last = lastReload();
-    const tries = last?.to === release.next ? last.tries + 1 : 1;
-    if (!tab.set(WINDOWS_KEY, { who: state.me?.id ?? null, windows: openWindows() }) || !tab.set(RELOADED_KEY, { from: release.mine, to: release.next, at: Date.now(), tries })) return;
-    release.reloading = { last };
-    location.reload();
-  }, moment === "navigated" ? NAVIGATED_SETTLE_MS : RELOAD_SETTLE_MS);
-}
-// The reload under way, stopped (`window.stop`), as if it had not begun:
-// the tab's last reload as it was, no windows kept; `release.next` waits
-// on for the next safe moment.
-function stopReload() {
-  const { last } = release.reloading;
-  window.stop();
-  release.reloading = false;
-  if (last) tab.set(RELOADED_KEY, last);
-  else tab.drop(RELOADED_KEY);
-  tab.drop(WINDOWS_KEY);
-}
-// The app windows open, each at the page it opened (`openApp`).
-function openWindows() {
-  return viewer.keys.filter((k) => k.startsWith("app:")).slice(0, WINDOWS_KEPT_MAX).map((key) => {
-    const src = document.querySelector(`#stack .pane[data-key="${CSS.escape(key)}"] iframe`)?.dataset.src ?? "";
-    return { name: key.slice("app:".length), path: new URL(src, location.origin).searchParams.get("return") || "/" };
-  });
-}
-// The windows the reload kept, taken as the page loads (a later reload by
-// hand opens none), and open again once its chat is, for the person who
-// had them open (on settings, which fill the work area, they are let go).
-const keptWindows = tab.get(WINDOWS_KEY, null);
-tab.drop(WINDOWS_KEY);
-function reopenWindows(settings) {
-  if (settings || keptWindows?.who !== state.me?.id || !Array.isArray(keptWindows?.windows)) return;
-  for (const w of keptWindows.windows.slice(0, WINDOWS_KEPT_MAX)) {
-    if (typeof w?.name === "string" && FRAGMENT_NAME.test(w.name) && typeof w.path === "string" && w.path.startsWith("/")) openApp(w.name, w.path);
-  }
-}
-
-// Signing out, or in with another account, ends the tab's person: what was
-// kept for them goes first, its windows here, each chat page's draft
-// (`{fragment: "forget-draft"}`, answered `draft-forgotten`, waited for at
-// most FORGET_WAIT_MS) and their chats' alerts (`dropAlerts`, as long),
-// then the form goes. A draft of theirs a page not open here keeps is
-// never shown to anyone else (its page gives a draft back only to its own
-// person) and goes when someone else opens it.
-document.addEventListener("submit", (e) => {
-  const form = e.target;
-  if (!(form instanceof HTMLFormElement) || !/^\/auth\/(logout|switch)(\?|$)/.test(form.getAttribute("action") ?? "")) return;
-  tab.drop(WINDOWS_KEY);
-  const frames = [...state.frames.values()].filter((f) => f.isConnected && greeted.has(f));
-  e.preventDefault();
-  alertsEnded = true;
-  const dropped = Promise.race([dropAlerts(), new Promise((done) => setTimeout(done, FORGET_WAIT_MS))]);
-  Promise.all([frames.length ? forgetDrafts(frames) : null, dropped]).then(() => HTMLFormElement.prototype.submit.call(form));
-}, true);
-function forgetDrafts(frames) {
-  return new Promise((done) => {
-    const left = new Set(frames.map((f) => f.contentWindow));
-    const timer = setTimeout(() => finish(), FORGET_WAIT_MS);
-    const forgotten = (event) => {
-      if (event.data?.fragment === "draft-forgotten" && left.delete(event.source) && !left.size) finish();
-    };
-    const finish = () => {
-      clearTimeout(timer);
-      removeEventListener("message", forgotten);
-      done();
-    };
-    addEventListener("message", forgotten);
-    for (const f of frames) originOf(f.dataset.fragment).then((origin) => f.contentWindow?.postMessage({ fragment: "forget-draft" }, origin), () => {});
-  });
-}
-
-// the person opened a chat or an app: once the click has settled
-function navigated() {
-  reloadWhenSafe("navigated");
-}
-// Asks the platform which release it is now (`HEAD /healthz`), at most
-// once a RELEASE_LOOK_MS; then, hidden, reloads if it may.
-async function lookForRelease() {
-  if (!release.next && release.mine && Date.now() - release.lookedAt >= RELEASE_LOOK_MS) {
-    release.lookedAt = Date.now();
-    try {
-      heard(await fetch("/healthz", { method: "HEAD", cache: "no-store" }));
-    } catch {
-      // offline (a phone just woken): its coming online asks again
-      release.lookedAt = 0;
-      return;
-    }
-  }
-  if (document.hidden) reloadWhenSafe("hidden");
-}
-document.addEventListener("visibilitychange", () => lookForRelease());
-addEventListener("pagehide", () => reloadWhenSafe("hidden"));
-addEventListener("pageshow", (e) => { if (e.persisted) lookForRelease(); });
-addEventListener("online", () => lookForRelease());
 
 async function start(open) {
   let me;
@@ -4138,6 +1649,9 @@ async function start(open) {
   }
   state.me = me;
   const [, mine] = await Promise.all([load(), api("GET", "/api/seat").catch(() => null), loadInvites()]);
+  // a deploy refused their list (`load` throws any other failure): what
+  // they have is unknown, not nothing, so the page waits as it starts
+  if (reads.listFailed) throw new ApiError(503, "deploying", UPDATING);
   setGuest(!!mine?.guest);
   watchList();
   if (!open && location.pathname === WELCOME) return welcome();
@@ -4158,6 +1672,8 @@ async function start(open) {
   else if (pick) openChat(pick);
   else if (state.guest) guestHome(mine.offer);
   else notice("No chats yet", "Make an agent to start.");
+  // an Add a reload cut short goes on from what it made (`resumeFirstRun`)
+  if (!settings) resumeFirstRun().catch(() => {});
   // an invite waits, and nothing it shares is open yet: a phone's sidebar,
   // where it is answered, shows over the page
   if (!settings && !pick && state.invites.length && layout.narrow) layout.show("left");
@@ -4198,7 +1714,28 @@ if (alerted) {
   state.current = alerted;
   history.replaceState(null, "", "/");
 }
-start().catch((e) => {
-  showLayout();
-  notice("This page did not load", e.message);
-});
+// A deploy going out as the page starts (503 `deploying`): it says
+// Updating where the page goes, and starts again by itself as reads wait
+// (3 s doubling to 30 s, for READ_DEPLOY_WAIT_MS), then offers Try again;
+// any other failure is said as it is.
+const starts = { since: null, wait: 3000, timer: null };
+function startOrWait() {
+  clearTimeout(starts.timer);
+  start().then(() => { starts.since = null; starts.wait = 3000; }, (e) => {
+    showLayout();
+    const deploying = e.status === 503 && e.code === "deploying";
+    if (deploying) starts.since ??= Date.now();
+    if (!deploying) return notice("This page did not load", e.message);
+    if (Date.now() - starts.since >= READ_DEPLOY_WAIT_MS) {
+      starts.since = null;
+      starts.wait = 3000;
+      const again = el("button", "primary", "Try again");
+      again.onclick = () => { again.disabled = true; startOrWait(); };
+      return notice("This page did not load", null, again);
+    }
+    notice(UPDATING);
+    starts.timer = setTimeout(startOrWait, starts.wait);
+    starts.wait = Math.min(starts.wait * 2, 30_000);
+  });
+}
+startOrWait();
