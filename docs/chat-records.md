@@ -473,8 +473,12 @@ more: a refusal may still stop it, and only a `turn.step` of the same
 runtime renamed the call before running it) the one with the same `tool`
 and `args`. `tool`, `args` and `category` as a step's. At most 200 a turn.
 The note a turn cut by a restart carries names each call it asked for
-with no step, as one that may or may not have run. Pages show none of
-them yet; an older bridge posts none.
+with no step, as one that may or may not have run. A page shows a call
+no step ended (since 2026-10-31, #725): while its turn runs and waits on
+no one, one of the turn's latest response is running, the last line of
+its card, what it does and for how long since its record; any other, and
+every one once the turn ended, may have run, said so in words where it
+was asked for. Its step takes its place. An older bridge posts none.
 
 ```json
 { "kind": "turn.prompt", "turn": "…", "prompt": "<prompt>",

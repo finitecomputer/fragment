@@ -306,6 +306,8 @@ button.step-name:hover, button.step-name:focus-visible { color: var(--text-secon
 .step-verb { flex: none; }
 .step-args { display: block; flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .step.running .step-name { color: var(--text-secondary); }
+.step-since { flex: none; color: var(--text-tertiary); font-variant-numeric: tabular-nums; }
+.step.maybe .step-verb { color: var(--text-secondary); }
 .step.error .step-name, .step.error .step-result { color: var(--step-failed); }
 /* a step opened: its whole arguments, then what came of it */
 .step-detail { margin: 4px 0 6px 20px; padding: 10px 12px; border-radius: 8px; background: var(--chat-code); }
