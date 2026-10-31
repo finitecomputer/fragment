@@ -182,8 +182,17 @@ fn pass(client: TcpStream, heard: &Heard) {
     // small writes (a socket's frames, a response's head) go at once
     let _ = client.set_nodelay(true);
     let _ = runtime.set_nodelay(true);
-    let (Ok(client_in), Ok(runtime_in)) = (client.try_clone(), runtime.try_clone()) else { return };
-    let up = thread::Builder::new().name("front-up".into()).spawn(move || copy(client_in, runtime));
+    let (Ok(client_in), Ok(runtime_in), Ok(runtime_end)) = (client.try_clone(), runtime.try_clone(), runtime.try_clone()) else { return };
+    // the client's end done (closed, or failed), the runtime's is closed
+    // whole, as a proxy does once its client goes: workerd keeps a
+    // connection it is only half-closed on, and so would this thread
+    // waiting on it (a reload's dropped streams and sockets, by the
+    // thousand). A client that half-closes and waits for its answer gets
+    // none; no client here does.
+    let up = thread::Builder::new().name("front-up".into()).spawn(move || {
+        copy(client_in, runtime);
+        let _ = runtime_end.shutdown(Shutdown::Both);
+    });
     copy(runtime_in, client);
     if let Ok(up) = up {
         let _ = up.join();
@@ -201,6 +210,7 @@ fn copy(mut from: TcpStream, mut to: TcpStream) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Read;
 
     const NAMED: &str = r#"[InspectorProxyWorker] handleProxyControllerIncomingMessage {"type":"reloadComplete","proxyData":{"userWorkerUrl":{"protocol":"http:","hostname":"127.0.0.1","port":"43765"},"userWorkerInspectorUrl":{"protocol":"ws:","hostname":"127.0.0.1","port":"43153","pathname":"/core:user:fragment"},"headers":{"MF-Proxy-Shared-Secret":"05346fd5"},"liveReload":false}}"#;
 
@@ -235,5 +245,46 @@ mod tests {
         assert_eq!(heard.running(Some(39825), Duration::from_millis(10)), None, "refused there, and nothing newer");
         heard.ended();
         assert_eq!(heard.running(None, Duration::from_secs(5)), None, "gone: no wait");
+    }
+
+    /// A client that goes, from a runtime that keeps the connection open and
+    /// silent after it (workerd does so for a WebSocket whose client closed,
+    /// half-closed or not): the pass ends, and lets the connection go. Before,
+    /// each such pass waited on the runtime for good, a thread and two sockets
+    /// a closed socket: a repro of reloads, each closing two WebSockets, held
+    /// 28,000 in ten minutes, until connections were reset.
+    #[test]
+    fn a_client_that_goes_ends_its_pass_though_the_runtime_stays() {
+        use std::sync::mpsc;
+        let runtime = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let heard = Heard::default();
+        heard.line(NAMED.replace("43765", &runtime.local_addr().unwrap().port().to_string()).as_bytes());
+        let (stay, done) = mpsc::channel::<()>();
+        thread::spawn(move || {
+            let (mut s, _) = runtime.accept().unwrap();
+            let mut buf = [0; 1024];
+            let n = s.read(&mut buf).unwrap();
+            assert!(buf[..n].ends_with(b"\r\n\r\n"), "a request");
+            s.write_all(b"HTTP/1.1 101 Switching Protocols\r\nupgrade: websocket\r\nconnection: Upgrade\r\n\r\n").unwrap();
+            // the client's end seen, the connection kept, and nothing said
+            while s.read(&mut buf).is_ok_and(|n| n > 0) {}
+            let _ = done.recv();
+        });
+        let front = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let at = front.local_addr().unwrap();
+        let (passed_tx, passed) = mpsc::channel();
+        thread::spawn(move || {
+            pass(front.accept().unwrap().0, &heard);
+            passed_tx.send(()).unwrap();
+        });
+        let mut client = TcpStream::connect(at).unwrap();
+        client.write_all(b"GET /ws HTTP/1.1\r\nhost: x\r\nupgrade: websocket\r\nconnection: Upgrade\r\n\r\n").unwrap();
+        let mut answer = [0; 12];
+        client.read_exact(&mut answer).unwrap();
+        assert_eq!(&answer, b"HTTP/1.1 101");
+        drop(client);
+        // bounded only so a failure says so rather than hanging the suite
+        assert_eq!(passed.recv_timeout(Duration::from_secs(10)), Ok(()), "the pass ended");
+        drop(stay);
     }
 }
