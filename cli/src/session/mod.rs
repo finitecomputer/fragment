@@ -17,6 +17,7 @@
 
 mod chats;
 mod hermes;
+mod search;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -84,6 +85,8 @@ pub struct Imported {
     pub problems: Vec<String>,
     /// What the archive holds now, by kind.
     pub holds: BTreeMap<&'static str, usize>,
+    /// What it did to the archive's search (search.rs).
+    pub search: search::Searched,
 }
 
 #[derive(Debug, Serialize)]
@@ -264,8 +267,9 @@ pub fn run(c: &Client, sub: SessionCmd) -> Result<Imported> {
     for e in written.entries.values() {
         *holds.entry(e.kind.as_str()).or_default() += 1;
     }
+    let search = search::sync(c, &archive, &spool, &written.entries);
     let refused = std::mem::take(&mut spool.refused);
-    Ok(Imported { archive, made, added: written.added, updated: written.updated, unchanged: written.unchanged, refused, problems, holds })
+    Ok(Imported { archive, made, added: written.added, updated: written.updated, unchanged: written.unchanged, refused, problems, holds, search })
 }
 
 /// Where a path a person names reads from.
@@ -565,6 +569,21 @@ pub fn print(r: &Imported) {
         noun(r.holds["cron"], "scheduled run", "scheduled runs"),
         noun(r.holds["subagent"], "side task", "side tasks")
     );
+    match &r.search {
+        search::Searched::Skipped { why } => println!("Search: skipped ({why}); the next import puts it right."),
+        search::Searched::Written { written, deleted, unchanged, left_out, refused, refused_count } => {
+            println!("Search: {written} written, {deleted} removed, {unchanged} up to date.");
+            for one in refused {
+                println!("  not searchable: {} ({})", one.id, one.why);
+            }
+            if *refused_count > refused.len() {
+                println!("  and {} more not searchable.", refused_count - refused.len());
+            }
+            if *left_out > 0 {
+                println!("  {} sections past search's limits left out.", left_out);
+            }
+        }
+    }
 }
 
 /// A fresh folder in the system's temporary place (a test's).
@@ -893,6 +912,55 @@ mod tests {
         }
         clear_stale_spools(&tmp);
         assert!(!stale.exists() && fresh.exists() && other.exists());
+    }
+
+    /// Goal: an import leaves its archive's search holding each of its
+    /// conversations as it is, and nothing else of the archive's: valid,
+    /// replay, update, an index lost (repaired from the archive's own
+    /// files), a conversation gone, and a host without search (skipped, the
+    /// import standing). Method: the search fake behind the host's routes.
+    #[test]
+    fn an_import_puts_its_archives_search_right() {
+        let (mock, c) = archive();
+        let upserts = || mock.take_requests("").get("POST upsert").copied().unwrap_or(0);
+        let off = write(&c, NAME, &spooled(vec![session("a", Kind::Chat, "2026-10-01T09:00:00Z", &["hello", "hi"])])).unwrap();
+        let skipped = search::sync(&c, NAME, &spooled(vec![]), &off.entries);
+        assert!(matches!(&skipped, search::Searched::Skipped { why } if why.contains("no search")), "{skipped:?}");
+
+        mock.enable_search(NAME);
+        let spool = spooled(vec![session("a", Kind::Chat, "2026-10-01T09:00:00Z", &["hello", "hi"]), session("r", Kind::Cron, "2026-10-02T06:00:00Z", &["digest"])]);
+        let w = write(&c, NAME, &spool).unwrap();
+        upserts();
+        let s = search::sync(&c, NAME, &spool, &w.entries);
+        assert!(matches!(s, search::Searched::Written { written: 2, deleted: 0, unchanged: 0, .. }), "{s:?}");
+        let held = |source: &str| mock.search_index(NAME, |ix| ix.sources.get(source).cloned()).flatten();
+        let a = held("sessions/hermes-a.json").expect("a is searched");
+        assert_eq!(a.revision, sha(&file_of(session("a", Kind::Chat, "2026-10-01T09:00:00Z", &["hello", "hi"]))));
+        assert_eq!(a.sections[0]["text"], "Person: hello\nAgent: hi");
+        assert_eq!(a.fields["kind"], "chat");
+        assert_eq!(upserts(), 2);
+
+        let again = search::sync(&c, NAME, &spooled(vec![]), &write(&c, NAME, &spool).unwrap().entries);
+        assert!(matches!(again, search::Searched::Written { written: 0, unchanged: 2, .. }), "{again:?}");
+        assert_eq!(upserts(), 0, "a replay writes nothing");
+
+        let later = spooled(vec![session("a", Kind::Chat, "2026-10-03T09:00:00Z", &["hello", "hi", "and peas?"])]);
+        let w = write(&c, NAME, &later).unwrap();
+        assert!(matches!(search::sync(&c, NAME, &later, &w.entries), search::Searched::Written { written: 1, unchanged: 1, .. }));
+        assert_eq!(held("sessions/hermes-a.json").unwrap().sections.len(), 2);
+
+        mock.search_index(NAME, |ix| ix.sources.clear());
+        mock.external_commit(NAME, "main", &[(session::session_path("hermes-r").as_str(), None)], "a conversation removed");
+        let w = write(&c, NAME, &spooled(vec![])).unwrap();
+        let other = fragment_fakes::search::Held { revision: "1".into(), title: None, at: None, fields: BTreeMap::new(), sections: vec![] };
+        mock.search_index(NAME, |ix| {
+            ix.sources.insert("sessions/hermes-gone.json".into(), other.clone());
+            ix.sources.insert("notes/x.md".into(), other);
+        });
+        let repaired = search::sync(&c, NAME, &spooled(vec![]), &w.entries);
+        assert!(matches!(repaired, search::Searched::Written { written: 1, deleted: 1, unchanged: 0, .. }), "{repaired:?}");
+        assert!(held("sessions/hermes-a.json").is_some() && held("sessions/hermes-gone.json").is_none(), "read again from the archive, the gone one deleted");
+        assert!(held("notes/x.md").is_some(), "a source not the archive's conversation is left as it is");
     }
 
     /// Goal: a newer copy of a conversation replaces the one held, and an

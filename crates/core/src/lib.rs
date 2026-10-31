@@ -56,6 +56,7 @@ pub mod seal;
 pub mod search;
 pub mod secrets;
 pub mod session;
+pub mod session_search;
 pub mod secrets_store;
 pub mod webpush;
 pub mod site;
