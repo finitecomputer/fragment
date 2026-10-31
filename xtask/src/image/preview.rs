@@ -219,21 +219,69 @@ mod tests {
     }
 
     /// images.yml's Docker lane runs on a change to any input of the image
-    /// (#715): each is in its `docker` filter, and in the paths that start
-    /// the workflow on a push and a pull request (`images/**` covers images/).
+    /// (#715): each is in its `docker` filter. The workflow itself starts on
+    /// every change (no `paths` filter of its own: a required check that
+    /// never starts never reports).
     #[test]
     fn the_docker_lane_watches_every_input() {
         let root = devstack::repo_root();
         let workflow = fs::read_to_string(root.join(".github/workflows/images.yml")).unwrap();
-        let starts: Vec<_> = workflow.lines().filter(|l| l.trim_start().starts_with("paths: [")).collect();
-        assert_eq!(starts.len(), 2, "a push's paths and a pull request's");
+        assert!(!workflow.lines().any(|l| l.trim_start().starts_with("paths:")), "the workflow starts on every change; its jobs decide");
         for input in INPUTS {
             let glob = if root.join(input).is_dir() { format!("{input}/**") } else { input.to_string() };
             assert!(workflow.lines().any(|l| l.trim() == format!("- {glob}")), "the docker filter lacks {glob}");
-            for paths in &starts {
-                assert!(paths.contains(&format!("\"{glob}\"")) || (input.starts_with("images/") && paths.contains("\"images/**\"")), "a start's paths lack {glob}: {paths}");
+        }
+    }
+
+    /// images.yml's `check` runs on a change to anything the images'
+    /// workspace compiles in: images/, and each file outside it that one of
+    /// its sources includes (`include_str!`, `include_bytes!`), each in
+    /// the `check` filter, itself or under a `/**` of it.
+    #[test]
+    fn the_images_check_watches_what_it_compiles() {
+        let root = devstack::repo_root();
+        let workflow = fs::read_to_string(root.join(".github/workflows/images.yml")).unwrap();
+        let lines: Vec<&str> = workflow.lines().collect();
+        let at = lines.iter().position(|l| l.trim() == "check:" && l.starts_with("            ")).expect("the `check` filter");
+        let globs: Vec<&str> = lines[at + 1..].iter().map(|l| l.trim()).take_while(|l| l.starts_with("- ") || l.starts_with('#')).filter_map(|l| l.strip_prefix("- ")).collect();
+        assert!(globs.contains(&"images/**"), "{globs:?}");
+        let covered = |path: &str| globs.iter().any(|g| *g == path || g.strip_suffix("/**").is_some_and(|dir| path.starts_with(&format!("{dir}/"))));
+        let images = root.join("images");
+        let mut sources = vec![];
+        let mut dirs = vec![images.clone()];
+        // bounded by the images workspace's tree, its build output left out
+        while let Some(dir) = dirs.pop() {
+            for entry in fs::read_dir(&dir).unwrap().flatten() {
+                let path = entry.path();
+                if path.is_dir() && entry.file_name() != "target" {
+                    dirs.push(path);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    sources.push(path);
+                }
             }
         }
+        let mut outside = 0;
+        for source in sources {
+            let text = fs::read_to_string(&source).unwrap();
+            for macro_ in ["include_str!(\"", "include_bytes!(\""] {
+                for (at, _) in text.match_indices(macro_) {
+                    let rest = &text[at + macro_.len()..];
+                    let named = &rest[..rest.find('"').unwrap()];
+                    let full = std::path::absolute(source.parent().unwrap().join(named)).unwrap();
+                    let normal: std::path::PathBuf = full.components().fold(std::path::PathBuf::new(), |mut p, c| {
+                        if c == std::path::Component::ParentDir { p.pop(); } else { p.push(c); }
+                        p
+                    });
+                    let Ok(from_root) = normal.strip_prefix(&root) else { panic!("{} includes {named}, outside the repo", source.display()) };
+                    let path = from_root.to_string_lossy().replace('\\', "/");
+                    if !path.starts_with("images/") {
+                        outside += 1;
+                    }
+                    assert!(covered(&path), "{} includes {path}, which the `check` filter does not watch", source.display());
+                }
+            }
+        }
+        assert!(outside > 0, "the images' sources include files outside images/ (as of 2026-10-31)");
     }
 
     /// Found manifests keep their actual bytes' digest. Only an explicit

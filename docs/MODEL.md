@@ -165,6 +165,10 @@ release was deployed (`release::DEPLOYED`), which no release reads now
   until its asks run out.
 - **What outlives a deploy is not a call.** A queue message or a stored
   row one release writes, the next reads, so its shape stays readable.
+  A release tolerates what the next writes where it can: a run's `via`
+  it does not know reads as written, and a trigger kind it does not know
+  starts nothing. A value an older release cannot read makes its release
+  forward only, by a schema step (Fragment step 6, FIN-328).
 
 A deploy is all at once (a gradual deployment would refuse between its
 two versions), and done when every object class answers it within 90 s
