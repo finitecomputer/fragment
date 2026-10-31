@@ -2020,6 +2020,46 @@ fn an_asked_turn_answers_after_its_agent_leaves() {
     assert!(answers(&both).is_empty() && e.state().turns.is_empty(), "no one to answer: {:?}", both.effects);
 }
 
+/// Goal (#730): a question refused because this computer already holds as
+/// many turns as it may (`TURNS_OPEN_MAX`) is answered so, posted as its
+/// asker on its own `tasks`, beside its start and end: none of the three
+/// kept (the bound is the state's). Replay: the question read again
+/// starts and answers nothing more.
+#[test]
+fn a_question_refused_past_the_turns_bound_is_answered() {
+    let (rowan, juniper) = (agent("rowan"), agent("juniper"));
+    let talk = view(&[&rowan, &juniper]);
+    let mut e = engine(&[rowan.clone(), juniper.clone()]);
+    let t = started(&read(&mut e, &rowan, "talk--k3x9", rec(1, "npub1paul", json!({ "text": "hi" })), Some(&talk), T0)).expect("a turn").turn;
+    // held to the bound: ended turns, each owing a record not yet answered
+    // (each a turn of another chat's records, past its cursor)
+    let held = e.state.turns[&t].clone();
+    let busy = "busy--k3x9";
+    for n in e.state.turns.len()..limits::TURNS_OPEN_MAX {
+        let seq = n as u64 + 1;
+        let id = records::turn_id(&rowan.fragment, busy, "chat", seq);
+        let cause = Cause { fragment: busy.into(), channel: "chat".into(), seq };
+        let owed = vec![Owed { id: records::work_id(&id, "end"), body: records::turn_end(&id, &Outcome::Idle), to: None }];
+        e.state.turns.insert(id.clone(), Turn { id, cause, phase: Phase::Ended, owed, ..held.clone() });
+        e.state.cursors.insert(cursor_key(&rowan.fragment, busy, "chat"), seq);
+    }
+    check(&e.state).expect("held whole");
+    let s = e.step(Input::Record { agent: rowan.fragment.clone(), fragment: "talk--k3x9".into(), record: question(2, "Build it?"), view: Some(talk.clone()), since: 0 }, T0 + 1);
+    assert!(started(&s).is_none(), "no turn runs");
+    let refused = records::turn_id(&rowan.fragment, "talk--k3x9", "chat", 2);
+    let answer = s.effects.iter().find_map(|x| match x {
+        Effect::Post { agent, fragment, channel, id, body, .. } if body["kind"] == "answer" => Some((agent.clone(), fragment.clone(), *channel, id.clone(), body.clone())),
+        _ => None,
+    });
+    let (by, on, channel, id, body) = answer.unwrap_or_else(|| panic!("its answer: {:?}", s.effects));
+    assert_eq!((by.as_str(), on.as_str(), channel, id), (juniper.fragment.as_str(), juniper.fragment.as_str(), records::TASKS, records::answer_id(&refused)), "as juniper, on its own tasks");
+    assert_eq!((&body["refused"], &body["error"]), (&json!(true), &json!(REFUSED_BUSY)), "{body}");
+    assert_eq!(kinds(&s), vec!["turn.start", "turn.end", "answer"]);
+    assert_eq!(e.state.turns.len(), limits::TURNS_OPEN_MAX, "none kept");
+    let again = e.step(Input::Record { agent: rowan.fragment.clone(), fragment: "talk--k3x9".into(), record: question(2, "Build it?"), view: Some(talk.clone()), since: 0 }, T0 + 2);
+    assert!(posts(&again).is_empty(), "replay: {:?}", again.effects);
+}
+
 /// Goal (#720): an asked turn that answered and then worked (its words
 /// before a tool call, interim, and nothing after it) is answered with
 /// those words, never "said nothing"; one that said more after its work

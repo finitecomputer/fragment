@@ -73,6 +73,7 @@ fragment create <label> --template todo          # one with no folder: blank|tod
 fragment write <name> site/index.html --from index.html     # one text file to main
 fragment deploy <name>                           # main goes live: the site and the app
 fragment mcp <name> [--write]                    # its described operations as an MCP server's tools
+fragment search "what was decided" --in a,b     # fragments' indexes, by words and meaning, as one (a reader's)
 fragment agent <agent> --name Frank --picture frank.jpg   # an agent's name and picture (an agent: its own, no <agent>)
 ```
 
@@ -155,4 +156,5 @@ codex mcp add groceries -- fragment mcp groceries             # Codex
 ```
 
 `fragment list` shows what your person has. An operation without a
-`description` is no tool: describe the ones a model should use.
+`description` is no tool: describe the ones a model should use. A
+reader has one tool more, `fragment-search`.

@@ -1328,12 +1328,18 @@ impl Engine {
                 // refused at admission: its answer runs nothing
                 self.end_unrun(&id, outcome, true);
             } else {
-                // Past the bound of turns held, its two records are posted
-                // and not kept: a crash before they land loses them.
+                // Past the bound of turns held, its records (its start and
+                // end, and a question's answer, so the asker hears it was
+                // refused) are posted and not kept: a crash before they land
+                // loses them.
                 crate::ev!("owed.unkept", { "turn": id, "why": "the computer holds as many turns as it may" });
                 let start = records::turn_start(&id, asker, &agent.identity, &turn.cause, &self.life);
                 self.post(&agent.fragment, fragment, records::WORK, records::work_id(&id, "start"), start, Vec::new());
                 self.post(&agent.fragment, fragment, records::WORK, records::work_id(&id, "end"), records::turn_end(&id, &outcome), Vec::new());
+                if let Some(answer) = self.answer_of(&id, &turn, &outcome, true) {
+                    let asker = answer.to.expect("an answer's asker");
+                    self.post(&asker, &asker, records::TASKS, answer.id, answer.body, Vec::new());
+                }
             }
             return;
         }
@@ -1378,15 +1384,30 @@ impl Engine {
     /// so its asker's owner sees why, and no answer asks again.
     fn owe_answer(&mut self, id: &str, outcome: &Outcome, refused: bool) {
         let t = &self.state.turns[id];
-        let Some(r) = t.ret.clone() else { return };
         assert_eq!(t.phase, Phase::Ended, "only an ended turn answers");
+        let Some(o) = self.answer_of(id, t, outcome, refused) else { return };
+        let r = t.ret.clone().expect("an answer's turn returns");
+        let (agent, fragment) = (t.agent.clone(), t.fragment.clone());
+        self.state.turns.get_mut(id).expect("held").owed.push(o.clone());
+        self.dirty = true;
+        crate::ev!("answer.owed", { "turn": id, "to": r.agent, "chat": r.chat });
+        self.owe(&agent, &fragment, id, o);
+    }
+
+    /// The answer a question's turn (`t`, its id `id`) owes its asking
+    /// agent, on that agent's own `tasks`, by the agent its return names
+    /// (`Return::by`): what it said, or why it was refused; none for no
+    /// question, an asker no longer on this computer, or an agent no one
+    /// names any more (a turn from before `by`, its agent gone).
+    fn answer_of(&self, id: &str, t: &Turn, outcome: &Outcome, refused: bool) -> Option<Owed> {
+        let r = t.ret.as_ref()?;
         if self.agent(&r.agent).is_none() {
             crate::ev!("answer.dropped", { "turn": id, "why": "its asking agent left this computer" });
-            return;
+            return None;
         }
         let Some(by) = Some(r.by.clone()).filter(|b| !b.is_empty()).or_else(|| self.agent(&t.agent).map(|a| a.identity.clone())) else {
             crate::ev!("answer.dropped", { "turn": id, "why": "its agent left this computer before its return kept who it is" });
-            return;
+            return None;
         };
         let text = match outcome {
             Outcome::Error(why) if refused => records::refused_text(&r.name, &t.fragment, &t.text, why),
@@ -1395,12 +1416,7 @@ impl Engine {
         };
         let hop = t.hop.saturating_add(1).min(limits::HOPS_MAX);
         let body = records::answer(&r.chat, &text, &by, &r.name, &t.cause, id, outcome, hop, refused);
-        let o = Owed { id: records::answer_id(id), body, to: Some(r.agent.clone()) };
-        let (agent, fragment) = (t.agent.clone(), t.fragment.clone());
-        self.state.turns.get_mut(id).expect("held").owed.push(o.clone());
-        self.dirty = true;
-        crate::ev!("answer.owed", { "turn": id, "to": r.agent, "chat": r.chat });
-        self.owe(&agent, &fragment, id, o);
+        Some(Owed { id: records::answer_id(id), body, to: Some(r.agent.clone()) })
     }
 
     /// A turn that may not run here (refused its claim, or its agent gone
