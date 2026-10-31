@@ -28,7 +28,8 @@ Every path but `GET /healthz` takes the deployment's token as
 | `GET /v1/{scope}/sources?after=&limit=` | → `{sources: [{source, revision, at, chunks}], next}`, ascending by source |
 | `GET /v1/{scope}/status` | → `{exists, chunks, sources, bytes, space, semantic, version}` |
 | `POST /v1/{scope}/search` | `{q?, vector?, space?, limit?, mode?, fields?, after?, before?}` → `{results}` |
-| `DELETE /v1/{scope}` | → `{dropped}` |
+| `DELETE /v1/{scope}` | → `{dropped}`: its table, made again by a write (a new space's) |
+| `POST /v1/{scope}/end` | → `{ended, dropped}`: its table, and every write after it refused 410 `ended`, a write sent before it and arriving after included (a scope is one life of one fragment) |
 
 A scope is 1 to 128 of `a-z`, `0-9`, `-` and `_`, starting with a letter
 or digit.
