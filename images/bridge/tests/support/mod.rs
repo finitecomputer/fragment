@@ -108,7 +108,7 @@ impl Running {
     }
 
     /// Kills it, as a crash does: every task ends where it is (its sockets
-    /// close, its listener's port is free), nothing is flushed, and the
+    /// close; a port the test holds stays the test's), nothing is flushed, and the
     /// state file is as its last step wrote it (written whole and renamed,
     /// so a crash leaves the old state or the new). Only a bridge started
     /// with `start_killable`: one on the test's runtime leaves its tasks
