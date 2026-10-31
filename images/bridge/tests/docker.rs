@@ -3402,9 +3402,19 @@ async fn bots_message_each_other() {
     assert_eq!(bot_chat_of(&c, "maple--k3x9")["key"], "agent:maple--k3x9:relay:group:maple-chat--z8w6/maple--k3x9", "maple's Bot Chat is her own chat's session");
     let hooked = c.exec_out(&["readlink", "/data/hermes/profiles/maple--k3x9/hooks/fragment-bot-chat"]);
     assert_eq!(hooked.trim(), "/opt/fragment/hooks/fragment-bot-chat");
+    // the keeper holds maple's Bot Chat as its live owner once her first
+    // turn has made it (botmode.py `owned`). A message sent before then is
+    // handed to a background delivery, not that owner (#639).
+    let owned = |logs: &str, agent: &str| logs.lines().filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok()).any(|e| e["event"] == "botmode.owned" && e["agent"] == agent);
+    let t = Instant::now();
+    // bounded: three minutes
+    while !owned(&c.logs(), "maple--k3x9") {
+        assert!(t.elapsed() < Duration::from_secs(180), "the keeper to hold maple's Bot Chat: {}", told(&fake, &jchat, &c));
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
 
     // juniper, asked in her Bot Chat, messages maple
-    let reply = |w: &support::fake::World, chat: &str, turn: &str| w.bodies(chat, "chat", "reply").into_iter().find(|r| r["turn"] == turn).and_then(|r| r["text"].as_str().map(str::to_string));
+    let reply =|w: &support::fake::World, chat: &str, turn: &str| w.bodies(chat, "chat", "reply").into_iter().find(|r| r["turn"] == turn).and_then(|r| r["text"].as_str().map(str::to_string));
     let jturn = asked(&fake, &jchat, &c, "dm: maple: ping from juniper", |w, turn| reply(w, &jchat, turn).is_some()).await;
     let ack = fake.with(|w| reply(w, &jchat, &jturn)).unwrap_or_default();
     eprintln!("bots: juniper's message_agent said: {}", ack.chars().take(400).collect::<String>());

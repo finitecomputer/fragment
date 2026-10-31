@@ -33,9 +33,14 @@
 
 const base = new URL("./", import.meta.url);
 
+// A deploy going out (503 `deploying`) says what the platform's updating
+// page says; the releases its message names are an operator's, for the
+// console. Nothing was done, so the same call again is safe.
 export class FragmentError extends Error {
   constructor(status, body) {
-    super((body && body.message) || `http ${status}`);
+    const deploying = status === 503 && body && body.error === "deploying";
+    if (deploying) console.info("fragment:", body.message);
+    super(deploying ? "Updating — back in a moment" : (body && body.message) || `http ${status}`);
     this.status = status;
     this.code = body && body.error;
   }

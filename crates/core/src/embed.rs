@@ -12,9 +12,11 @@
 //! unit length, so a dot product is a cosine whichever API made it.
 //!
 //! A slot reads at most `max_input_tokens` of an input (its model's
-//! window; BGE-M3's on Workers AI is 512): an input past it is refused,
-//! never cut, so its caller splits a long text (the search capability
-//! embeds a section's chunks). A deployment whose tiers are private embeds
+//! window; the slot unnamed declares 512): an input that might be past it
+//! is refused, never cut, so its caller splits a long text (the search
+//! capability embeds a section's chunks). Its tokens are bounded without
+//! its model's tokenizer (`tokens_max`), a bound that holds for every
+//! tokenizer an embeddings model runs, not an average. A deployment whose tiers are private embeds
 //! only on a slot marked private (Paul's rule: Finite Private never falls
 //! back to a model that is not; `Models::embeddings_refused`).
 //!
@@ -22,10 +24,10 @@
 //! row in the price book (BGE-M3's on Workers AI; a self-hosted slot names
 //! its own `price`, as any OpenAI-compatible slot does). An API that
 //! reports its tokens is charged them; Workers AI's embedding models report
-//! none, so theirs are counted from the input (`estimated_tokens`): never
-//! fewer than the model read.
+//! none, so theirs are estimated from the input (`estimated_tokens`).
 
 use base64::Engine;
+use icu_normalizer::DecomposingNormalizerBorrowed;
 use serde::Serialize;
 use serde_json::{json, Map, Value};
 
@@ -54,16 +56,17 @@ pub const VERSION_MAX_BYTES: usize = 32;
 /// Inputs one call embeds, at most (Workers AI's text embedding models take
 /// a batch of 100).
 pub const INPUTS_MAX: usize = 100;
-/// One input, at most, whatever its slot's window: a slot's own is its
-/// `max_input_tokens` counted at `ESTIMATE_BYTES_A_TOKEN` (`Slot::
-/// max_input_bytes`).
-pub const INPUT_MAX_BYTES: usize = 32 * 1024;
-/// A call's body, at most: `INPUTS_MAX` inputs a third of `INPUT_MAX_BYTES`
-/// each, about a search upsert's batch.
+/// A call's body, at most: `INPUTS_MAX` inputs of 10 KiB each, about a
+/// search upsert's batch. An input is at most `MAX_INPUT_TOKENS_MAX` bytes
+/// (`tokens_max` counts a byte a token or more).
 pub const BODY_MAX_BYTES: usize = 1024 * 1024;
-/// Bytes a token is counted as when the API reports none: BGE-M3's
-/// tokenizer reads about four characters of English a token, and a
-/// character is a byte or more, so this never counts fewer than it read.
+/// Tokens a window holds beside its text's own: a model's two special
+/// tokens (BGE-M3's `<s>` and `</s>`, BERT's `[CLS]` and `[SEP]`) and the
+/// word marker SentencePiece puts before the first word.
+pub const OVERHEAD_TOKENS: u32 = 3;
+/// Bytes a token is estimated at, to charge a call whose API reports no
+/// tokens: an estimate (BGE-M3 reads about four bytes of English prose a
+/// token, fewer of numbers or punctuation), never a bound.
 pub const ESTIMATE_BYTES_A_TOKEN: usize = 3;
 
 /// Where a deployment's embeddings run, and the space their vectors are in.
@@ -97,12 +100,35 @@ impl Slot {
     pub fn space(&self) -> Space<'_> {
         Space { model: self.upstream.model(), dimensions: self.dimensions, version: self.version.as_deref() }
     }
+}
 
-    /// An input's most bytes: its window's tokens at `ESTIMATE_BYTES_A_TOKEN`
-    /// a token (an English token is about four), within `INPUT_MAX_BYTES`.
-    pub fn max_input_bytes(&self) -> usize {
-        (self.max_input_tokens as usize * ESTIMATE_BYTES_A_TOKEN).min(INPUT_MAX_BYTES)
+/// The most tokens `c` is read as, by any tokenizer an embeddings model
+/// runs: the UTF-8 bytes of the longest of `c`, its canonical decomposition
+/// (NFD) and its compatibility decomposition (NFKD).
+///
+/// Why: a tokenizer first normalizes its text (not at all, NFC or NFD,
+/// NFKC or NFKD), then reads it in tokens of at least a character
+/// (SentencePiece, WordPiece) or a byte (byte-level BPE, SentencePiece's
+/// byte fallback), and a character is a byte or more. Composing never
+/// lengthens UTF-8 (every canonical pair checked), so no normalization
+/// makes `c` more bytes than this. Checked against BGE-M3's own tokenizer
+/// for every code point, in runs, spaced and after a letter (never over,
+/// equal at worst); its NFKC turns "ﷺ", 3 bytes, into 18 characters.
+pub fn char_tokens_max(c: char) -> u32 {
+    if c.is_ascii() {
+        return 1;
     }
+    let mut buf = [0u8; 4];
+    let one = c.encode_utf8(&mut buf);
+    let nfd = DecomposingNormalizerBorrowed::new_nfd().normalize(one).len();
+    let nfkd = DecomposingNormalizerBorrowed::new_nfkd().normalize(one).len();
+    one.len().max(nfd).max(nfkd) as u32
+}
+
+/// The most tokens `text` is read as, a model's own included: its
+/// characters' `char_tokens_max` and `OVERHEAD_TOKENS`. At least its bytes.
+pub fn tokens_max(text: &str) -> u64 {
+    text.chars().map(|c| u64::from(char_tokens_max(c))).sum::<u64>() + u64::from(OVERHEAD_TOKENS)
 }
 
 /// A deployment's `models.embeddings`, taken off `models` (the default when
@@ -168,7 +194,7 @@ pub enum Refusal {
     Input,
     Empty,
     TooMany(usize),
-    TooLong { index: usize, tokens: u32, bytes: usize },
+    TooLong { index: usize, window: u32, tokens: u64 },
     Model(String),
     Dimensions(u64),
     Format(String),
@@ -180,7 +206,7 @@ impl Refusal {
             Refusal::Input => "input is a string or an array of strings (token arrays are not taken)".into(),
             Refusal::Empty => "an input is some text: an empty one has no embedding".into(),
             Refusal::TooMany(n) => format!("a call embeds 1 to {INPUTS_MAX} inputs, not {n}"),
-            Refusal::TooLong { index, tokens, bytes } => format!("input {index} is past the embeddings slot's {tokens} tokens ({bytes} bytes, a token counted every {ESTIMATE_BYTES_A_TOKEN}): split it, as nothing is cut"),
+            Refusal::TooLong { index, window, tokens } => format!("input {index} may be {tokens} tokens, past the embeddings slot's {window}: split it, as nothing is cut"),
             Refusal::Model(m) => format!("model is {EMBEDDINGS} or the embeddings slot's own model, not {m:?}"),
             Refusal::Dimensions(d) => format!("dimensions is the slot's own when named: this deployment's vectors are not cut to {d}"),
             Refusal::Format(f) => format!("encoding_format is float or base64, not {f:?}"),
@@ -189,8 +215,8 @@ impl Refusal {
 }
 
 /// `body` (OpenAI's embeddings request), checked against `slot`: `input`
-/// one string or 1 to `INPUTS_MAX` of them, each 1 to the slot's
-/// `max_input_bytes`;
+/// one string or 1 to `INPUTS_MAX` of them, each some text of at most the
+/// slot's `max_input_tokens` (`tokens_max`);
 /// `model`, when named, `embeddings` or the slot's model; `dimensions`,
 /// when named, the slot's; `encoding_format` float (unnamed) or base64.
 /// Nothing else of the client's is read, and nothing of it is sent on.
@@ -203,8 +229,9 @@ pub fn bound(body: &Value, slot: &Slot) -> Result<Bounded, Refusal> {
     if inputs.is_empty() || inputs.len() > INPUTS_MAX {
         return Err(Refusal::TooMany(inputs.len()));
     }
-    if let Some(index) = inputs.iter().position(|t| t.len() > slot.max_input_bytes()) {
-        return Err(Refusal::TooLong { index, tokens: slot.max_input_tokens, bytes: slot.max_input_bytes() });
+    let window = slot.max_input_tokens;
+    if let Some((index, tokens)) = inputs.iter().map(|t| tokens_max(t)).enumerate().find(|&(_, n)| n > u64::from(window)) {
+        return Err(Refusal::TooLong { index, window, tokens });
     }
     if inputs.iter().any(|t| t.trim().is_empty()) {
         return Err(Refusal::Empty);
@@ -300,14 +327,14 @@ fn unit(mut v: Vec<f32>) -> Option<Vec<f32>> {
     Some(v)
 }
 
-/// Tokens counted from the inputs (`ESTIMATE_BYTES_A_TOKEN`), for an API
-/// that reports none.
+/// Tokens estimated from the inputs (`ESTIMATE_BYTES_A_TOKEN`), to charge a
+/// call whose API reports none: a price, not the window (`tokens_max`).
 pub fn estimated_tokens(inputs: &[String]) -> u64 {
     inputs.iter().map(|t| t.len().div_ceil(ESTIMATE_BYTES_A_TOKEN) as u64).sum()
 }
 
 /// The call's usage: the input tokens its API reported (OpenAI's
-/// `usage.prompt_tokens`), else counted (`estimated_tokens`), at the slot's
+/// `usage.prompt_tokens`), else estimated (`estimated_tokens`), at the slot's
 /// model.
 pub fn usage_of(slot: &Slot, inputs: &[String], response: &Value) -> Option<Usage> {
     let tokens = response["usage"]["prompt_tokens"].as_u64().filter(|&n| n > 0).unwrap_or_else(|| estimated_tokens(inputs));
@@ -356,7 +383,7 @@ mod tests {
         assert_eq!(slot_of(&mut json!({})).unwrap(), Slot::default());
         let s = openai_slot();
         assert_eq!(s.space(), Space { model: "BAAI/bge-m3", dimensions: 3, version: Some("2024-01") });
-        assert!(s.private && s.max_input_bytes() == 8192 * ESTIMATE_BYTES_A_TOKEN && Slot::default().max_input_bytes() == 1536);
+        assert!(s.private && s.max_input_tokens == 8192 && Slot::default().max_input_tokens == MAX_INPUT_TOKENS_DEFAULT);
         for (row, why) in [
             (json!({ "provider": "workers_ai", "model": "@cf/baai/bge-m3" }), "dimensions"),
             (json!({ "provider": "workers_ai", "model": "@cf/baai/bge-m3", "dimensions": 0 }), "dimensions"),
@@ -382,13 +409,73 @@ mod tests {
         assert_eq!(refused(json!({ "input": [1, 2] })), Refusal::Input);
         assert_eq!(refused(json!({ "input": [] })), Refusal::TooMany(0));
         assert_eq!(refused(json!({ "input": vec!["x"; INPUTS_MAX + 1] })), Refusal::TooMany(INPUTS_MAX + 1));
-        assert_eq!(refused(json!({ "input": ["ok", "x".repeat(1537)] })), Refusal::TooLong { index: 1, tokens: 512, bytes: 1536 });
-        assert!(bound(&json!({ "input": "x".repeat(1536) }), &s).is_ok(), "a window's bytes exactly");
+        assert_eq!(refused(json!({ "input": ["ok", "x".repeat(510)] })), Refusal::TooLong { index: 1, window: 512, tokens: 513 });
+        assert!(bound(&json!({ "input": "x".repeat(509) }), &s).is_ok(), "a window's tokens exactly");
         assert_eq!(refused(json!({ "input": " " })), Refusal::Empty);
         assert_eq!(refused(json!({ "input": "x", "model": "cheap" })), Refusal::Model("cheap".into()));
         assert_eq!(refused(json!({ "input": "x", "dimensions": 256 })), Refusal::Dimensions(256));
         assert_eq!(refused(json!({ "input": "x", "encoding_format": "int8" })), Refusal::Format("int8".into()));
         assert!(Refusal::TooMany(0).message().contains("1 to 100"));
+    }
+
+    /// Each text's tokens as BGE-M3 reads them, `<s>` and `</s>` included:
+    /// counted by its tokenizer.json (BAAI/bge-m3, sha256 21106b6d…dd08)
+    /// with Hugging Face tokenizers 0.21, nothing truncated.
+    fn bge_m3_read() -> Vec<(String, u64)> {
+        let tight = "|a|b|c|\n".repeat(64);
+        vec![
+            ("1,2,3,4,5,6,7,8,9,0\n".repeat(70), 773),
+            ("The release plan keeps every agent running while the cell rolls forward, and a failed check rolls it back before anyone notices. ".repeat(4), 115),
+            ("x".repeat(509), 172),
+            ("{\"k\":[1,2,3]}".repeat(40), 402),
+            (tight[..508].to_string(), 511),
+            (tight[..509].to_string(), 512),
+            (tight[..510].to_string(), 513),
+            ("搜索索引在每次写入后更新，删除的内容不会再出现。".repeat(6), 99),
+            ("検索の索引は書き込みのたびに更新されます。".repeat(6), 81),
+            ("검색 색인은 쓰기마다 갱신되고 삭제된 내용은 다시 나타나지 않습니다. ".repeat(4), 75),
+            ("يتم تحديث فهرس البحث بعد كل كتابة. ".repeat(6), 63),
+            ("खोज सूचकांक हर लेखन के बाद अद्यतन होता है। ".repeat(5), 68),
+            ("Поисковый индекс обновляется после каждой записи. ".repeat(5), 58),
+            ("Ἐν ἀρχῇ ἦν ὁ λόγος. ".repeat(10), 143),
+            ("😀🚀👩\u{200d}👩\u{200d}👧\u{200d}👦🇺🇸".repeat(15), 167),
+            ("ﷺ".repeat(30), 122),
+            ("ﬁ".repeat(120), 122),
+            ("e\u{301}".repeat(120), 122),
+        ]
+    }
+
+    #[test]
+    fn the_window_holds_on_real_tokens() {
+        for (text, read) in bge_m3_read() {
+            assert!(tokens_max(&text) >= read, "{read} tokens read, at most {} bounded: {text:?}", tokens_max(&text));
+        }
+        // An average bytes a token is no bound: 1,400 bytes of numbers is 773
+        // tokens, and 90 bytes of "ﷺ" 122.
+        let numbers = "1,2,3,4,5,6,7,8,9,0\n".repeat(70);
+        assert!(numbers.len().div_ceil(ESTIMATE_BYTES_A_TOKEN) < 773);
+        assert!("ﷺ".repeat(30).len() < 122);
+        let s = Slot::default();
+        assert_eq!(bound(&json!({ "input": numbers }), &s).unwrap_err(), Refusal::TooLong { index: 0, window: 512, tokens: 1403 });
+        assert_eq!(bound(&json!({ "input": "ﷺ".repeat(30) }), &s).unwrap_err(), Refusal::TooLong { index: 0, window: 512, tokens: 993 });
+        // At the window exactly, where BGE-M3 reads as many as are bounded.
+        let tight = "|a|b|c|\n".repeat(64);
+        assert!(bound(&json!({ "input": &tight[..509] }), &s).is_ok());
+        assert_eq!(bound(&json!({ "input": &tight[..510] }), &s).unwrap_err(), Refusal::TooLong { index: 0, window: 512, tokens: 513 });
+        let multilingual = "Поисковый индекс обновляется после каждой записи. ".repeat(5);
+        assert_eq!(tokens_max(&multilingual), 488);
+        assert!(bound(&json!({ "input": multilingual }), &Slot { max_input_tokens: 488, ..Slot::default() }).is_ok());
+        assert!(bound(&json!({ "input": multilingual }), &Slot { max_input_tokens: 487, ..Slot::default() }).is_err());
+    }
+
+    #[test]
+    fn a_character_is_read_as_its_longest_form() {
+        assert_eq!(char_tokens_max('a'), 1);
+        assert_eq!(char_tokens_max('é'), 3, "e and a combining accent");
+        assert_eq!(char_tokens_max('ﬁ'), 3, "its own bytes: NFKD's fi is two");
+        assert_eq!(char_tokens_max('ﷺ'), 33, "NFKD: eighteen characters");
+        assert_eq!(char_tokens_max('한'), 9, "three jamo");
+        assert_eq!(tokens_max(""), u64::from(OVERHEAD_TOKENS));
     }
 
     #[test]
@@ -414,11 +501,11 @@ mod tests {
     }
 
     #[test]
-    fn usage_is_reported_or_never_undercounted() {
+    fn usage_is_reported_or_estimated() {
         let inputs = vec!["abcdefg".to_string(), "hi".to_string()];
         let reported = usage_of(&openai_slot(), &inputs, &json!({ "usage": { "prompt_tokens": 9 } })).unwrap();
         assert_eq!(reported, Usage::Tokens { model: "BAAI/bge-m3".into(), input: 9, cached_input: 0, cache_write: 0, output: 0 });
-        // 7 bytes is 3 tokens counted, 2 bytes 1: never fewer than a 4-byte token reads
+        // 7 bytes is 3 tokens estimated, 2 bytes 1
         let counted = usage_of(&Slot::default(), &inputs, &json!({ "data": [] })).unwrap();
         assert_eq!(counted, Usage::Tokens { model: MODEL_DEFAULT.into(), input: 4, cached_input: 0, cache_write: 0, output: 0 });
     }

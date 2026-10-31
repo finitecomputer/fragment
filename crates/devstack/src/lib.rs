@@ -11,13 +11,14 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 
 pub mod built;
 pub mod containers;
+mod front;
 pub mod node;
 mod node_release;
 pub mod signals;
@@ -259,9 +260,43 @@ impl Tools {
     }
 }
 
-/// A free local port.
+/// The lowest port `free_port` picks.
+const PICKED_PORTS_FROM: u16 = 20_000;
+/// Ports `free_port` tries before it gives up.
+const PICK_TRIES_MAX: u32 = 64;
+
+/// A free local port, for a process to bind a moment later (wrangler's
+/// node, its inspector, Chrome's DevTools), picked at random below the
+/// kernel's ephemeral range. The kernel numbers its own ports from that
+/// range alone: a connection's local end, any bind to port 0 (workerd's
+/// sockets inside wrangler), Docker's published ports. A port the kernel
+/// handed out for the asking (`bind(":0")`) was free only until then, and
+/// one of those took it before wrangler's bind (`bind(): Address already in
+/// use` at a node's boot, in CI runs 40148072254 and 40937119767); a node
+/// started again keeps its port, free while it is down. Below the range,
+/// only a process that names the port can take it.
 pub fn free_port() -> Result<u16> {
-    Ok(TcpListener::bind("127.0.0.1:0")?.local_addr()?.port())
+    let ephemeral = ephemeral_ports_from()?;
+    anyhow::ensure!(ephemeral > PICKED_PORTS_FROM + 1024, "the kernel's ephemeral ports start at {ephemeral}, leaving none to pick below them from {PICKED_PORTS_FROM}");
+    for _ in 0..PICK_TRIES_MAX {
+        let r = u16::from_str_radix(&random_hex(2), 16).expect("four hex digits");
+        let port = PICKED_PORTS_FROM + r % (ephemeral - PICKED_PORTS_FROM);
+        if TcpListener::bind(("127.0.0.1", port)).is_ok() {
+            return Ok(port);
+        }
+    }
+    bail!("no free port in {PICK_TRIES_MAX} tries between {PICKED_PORTS_FROM} and {ephemeral}")
+}
+
+/// The first port of the kernel's ephemeral range: Linux's
+/// `ip_local_port_range` (32768 by default), macOS's 49152.
+fn ephemeral_ports_from() -> Result<u16> {
+    if cfg!(target_os = "macos") {
+        return Ok(49_152);
+    }
+    let range = fs::read_to_string("/proc/sys/net/ipv4/ip_local_port_range").context("read the kernel's ephemeral port range")?;
+    let first = range.split_whitespace().next().context("an empty ip_local_port_range")?;
+    first.parse().with_context(|| format!("ip_local_port_range starts at {first:?}"))
 }
 
 /// Writes a project's `.dev.vars` (dotenv, one line per value, mode 600).
@@ -588,10 +623,10 @@ pub struct NodeOptions {
     /// (`Fleet::configure`; `clear_state` before that discards the state).
     pub project: PathBuf,
     pub port: u16,
-    /// Where each boot's log goes (`node-<port>-<boot>.log`).
+    /// Where each boot's log goes (`node-<port>-<boot>.log`): wrangler's
+    /// own debug logs beside the Worker's output, always, as the front
+    /// door reads the runtime's address there (front.rs).
     pub log_dir: PathBuf,
-    /// wrangler's own debug logs in the log, beside the Worker's output.
-    pub node_logs: bool,
     /// A process group of its own, so the e2e crashes wrangler and workerd
     /// as one. `xtask dev` keeps it in the terminal's, so Ctrl-C reaches it
     /// as it reaches xtask: in a group of its own, it outlived a Ctrl-C,
@@ -618,6 +653,32 @@ fn boot_log(dir: &Path, port: u16) -> Result<(PathBuf, fs::File)> {
         }
     }
     bail!("{} holds {BOOT_LOGS_MAX} logs of nodes on :{port} already; clear it", dir.display())
+}
+
+/// wrangler's output, each line as it comes: into the boot's log `out`, and
+/// heard by the front door (front.rs), which learns that wrangler is gone
+/// once both streams end.
+fn hear(child: &mut Child, out: fs::File, heard: Arc<front::Heard>) -> Result<()> {
+    use std::io::{BufRead, BufReader, Read};
+    let out = Arc::new(Mutex::new(out));
+    let open = Arc::new(std::sync::atomic::AtomicUsize::new(2));
+    let streams: [Box<dyn Read + Send>; 2] = [Box::new(child.stdout.take().context("wrangler's stdout")?), Box::new(child.stderr.take().context("wrangler's stderr")?)];
+    for stream in streams {
+        let (out, heard, open) = (out.clone(), heard.clone(), open.clone());
+        std::thread::Builder::new().name("node-log".into()).spawn(move || {
+            let mut stream = BufReader::new(stream);
+            let mut line = Vec::new();
+            while stream.read_until(b'\n', &mut line).is_ok_and(|n| n > 0) {
+                let _ = out.lock().unwrap_or_else(PoisonError::into_inner).write_all(&line);
+                heard.line(&line);
+                line.clear();
+            }
+            if open.fetch_sub(1, std::sync::atomic::Ordering::SeqCst) == 1 {
+                heard.ended();
+            }
+        })?;
+    }
+    Ok(())
 }
 
 /// Where a project's local state lives: its Durable Objects' SQLite, R2,
@@ -655,7 +716,9 @@ pub fn kill_nodes() {
 
 /// One `wrangler dev` process, which runs workerd as its child: in a
 /// process group of its own (`NodeOptions::own_group`), so a crash kills
-/// both, or in the terminal's.
+/// both, or in the terminal's. Its port is its front door's (front.rs),
+/// which passes each connection to the runtime, past wrangler's own proxy
+/// (on a port of wrangler's, which no client is given).
 pub struct Node {
     child: Child,
     own_group: bool,
@@ -664,7 +727,21 @@ pub struct Node {
     /// This boot's log.
     pub log: PathBuf,
     reaped: bool,
+    /// Dropped after the node is killed (`Drop`): its port let go last.
+    _front: front::Front,
 }
+
+/// How long after wrangler says it is ready it may take to name its
+/// runtime's address (front.rs): it does so at once, in the next lines.
+const RUNTIME_NAMED_WAIT: Duration = Duration::from_secs(30);
+
+/// Set in VS Code's JavaScript Debug Terminal, it turns wrangler's
+/// inspector off (wrangler 4.145.0's `inspectorEnabled`), and with it the
+/// only lines that name the runtime's address (front.rs). Nothing here
+/// attaches to that debugger anyway: its loader comes through
+/// `NODE_OPTIONS`, which no JavaScript process here inherits
+/// (`node::VARS_CLEARED`). So wrangler never gets it.
+const WRANGLER_VARS_CLEARED: [&str; 1] = ["VSCODE_INSPECTOR_OPTIONS"];
 
 impl Node {
     pub fn start(tools: &Tools, opts: &NodeOptions) -> Result<(Node, Duration)> {
@@ -673,17 +750,25 @@ impl Node {
             bail!("{} is not there: configure the fleet first (Fleet::configure)", config.display());
         }
         let (log, out) = boot_log(&opts.log_dir, opts.port)?;
+        // the node's port, held before wrangler starts (front.rs)
+        let heard = Arc::new(front::Heard::default());
+        let front = front::Front::bind(opts.port, heard.clone())?;
+        let proxied = free_port()?;
         let mut cmd = tools.wrangler()?;
         cmd.arg("dev").arg("-c").arg(&config);
-        cmd.args(["--ip", "127.0.0.1", "--port", &opts.port.to_string()]);
+        cmd.args(["--ip", "127.0.0.1", "--port", &proxied.to_string()]);
         cmd.args(["--inspector-port", &free_port()?.to_string()]);
         cmd.arg("--persist-to").arg(state_dir(&opts.project));
-        cmd.args(["--show-interactive-dev-session=false", "--log-level", if opts.node_logs { "debug" } else { "log" }]);
+        // debug: the runtime's address is named there alone (front.rs)
+        cmd.args(["--show-interactive-dev-session=false", "--log-level", "debug"]);
         // its own dev registry: a crashed node's entries (or another
         // stack's Workers of the same names) never stand in for its own
         cmd.current_dir(&opts.project)
             .env("WRANGLER_LOG_PATH", &opts.log_dir)
             .env("WRANGLER_REGISTRY_PATH", opts.project.join(".wrangler/registry"));
+        for var in WRANGLER_VARS_CLEARED {
+            cmd.env_remove(var);
+        }
         if opts.own_group {
             cmd.process_group(0);
         }
@@ -693,17 +778,18 @@ impl Node {
             // group or has already refused it
             let mut live = LIVE.lock().unwrap_or_else(PoisonError::into_inner);
             anyhow::ensure!(!live.ending, "this process is ending (a signal): no node starts");
-            let child = cmd.stdout(out.try_clone()?).stderr(out).stdin(Stdio::null()).spawn()?;
+            let mut child = cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).stdin(Stdio::null()).spawn()?;
+            hear(&mut child, out, heard.clone())?;
             if opts.own_group {
                 assert!(live.groups.len() < LIVE_NODES_MAX, "a process runs at most {LIVE_NODES_MAX} nodes at once");
                 live.groups.push(child.id());
             }
             child
         };
-        let mut node = Node { child, own_group: opts.own_group, base: format!("http://127.0.0.1:{}", opts.port), port: opts.port, log: log.clone(), reaped: false };
+        let mut node = Node { child, own_group: opts.own_group, base: format!("http://127.0.0.1:{}", opts.port), port: opts.port, log: log.clone(), reaped: false, _front: front };
         loop {
             let text = fs::read(&log).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
-            if text.contains(&format!("Ready on http://127.0.0.1:{}", opts.port)) {
+            if text.contains(&format!("Ready on http://127.0.0.1:{proxied}")) {
                 break;
             }
             if let Some(status) = node.child.try_wait()? {
@@ -715,7 +801,12 @@ impl Node {
             }
             std::thread::sleep(Duration::from_millis(50));
         }
-        assert!(TcpStream::connect(("127.0.0.1", opts.port)).is_ok(), "a ready node listens");
+        // fails loudly: never the proxy's path instead
+        let Some(runtime) = heard.named(RUNTIME_NAMED_WAIT) else {
+            let text = fs::read(&log).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
+            bail!("wrangler dev said it was ready on :{proxied} but did not name its runtime's address in {RUNTIME_NAMED_WAIT:?} (its debug output's reloadComplete, front.rs reads it; a wrangler that no longer says so needs front.rs changed):\n{text}");
+        };
+        assert!(TcpStream::connect(("127.0.0.1", runtime)).is_ok(), "the runtime wrangler named listens");
         Ok((node, t0.elapsed()))
     }
 
@@ -828,6 +919,17 @@ mod tests {
         assert_eq!(env("XDG_CACHE_HOME"), Some(root.join("target/cache")));
         assert_eq!(env("WRANGLER_CACHE_DIR"), Some(root.join("target/cache/wrangler")));
         assert_eq!(env("WRANGLER_SEND_METRICS"), Some(PathBuf::from("false")));
+    }
+
+    /// A picked port is below the kernel's ephemeral range, and free: it binds.
+    #[test]
+    fn a_picked_port_is_free_and_below_the_ephemeral_range() {
+        let ephemeral = ephemeral_ports_from().expect("the ephemeral range");
+        for _ in 0..32 {
+            let port = free_port().expect("a free port");
+            assert!((PICKED_PORTS_FROM..ephemeral).contains(&port), "{port} is below {ephemeral}");
+            TcpListener::bind(("127.0.0.1", port)).expect("the picked port binds");
+        }
     }
 
     /// Comments go, strings keep what looks like one, and the result is JSON.

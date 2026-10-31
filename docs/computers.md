@@ -359,6 +359,19 @@ A direct manifest lookup resolves only that tag; a definite missing
 manifest authorizes a build, and other registry errors stop the job.
 Input tags are not overwritten by CI.
 
+Master's merge queue builds it first. Each merge group runs
+`.github/workflows/preview-image.yml`, which resolves the group's inputs
+the same way and, when neither `inputs-<key>` nor `queue-<key>` is
+there, builds, pushes and prepares `queue-<key>`. A group's head is the
+commit master then moves to, so that push's `preview-image` waits for the
+queue's run of its very commit when it is still going, then copies
+`queue-<key>` to `inputs-<key>` by digest (its layers are already in the
+repository) and finds it prepared. Master's job is the only writer of an
+input tag; the queue's runs only ever push queue tags, never deploy, and
+are not required checks. Their environment, `preview-image`, holds a
+token with the preview account's Containers permission alone
+(docs/secrets.md).
+
 An absent tag builds with BuildKit's persistent Actions cache (one
 master-only `preview-hermes` scope, `mode=max`), then pushes and prepares
 the image on Cloudflare's network. The Dockerfile's CLI stage copies only
@@ -2218,6 +2231,14 @@ name: its `SOUL.md` is its job (the shell's first agent's names none),
 and Hermes' Bot Mode tells it its `@handle` alone. An agent made before
 this whose `SOUL.md` still says its old name is told its name all the
 same; its owner, or the agent, may take the name out of its job.
+
+Its **role** (its agent fragment's `meta.role`, its status's `agentRole`:
+docs/api.md, "An agent's name and picture") is told the same way, read
+with its title: "Your role is chief of staff: what your owner made you
+for, as it is now." between its name and its owner's home, and none when
+it has none, so an edit reaches its next turn. Its `profile.yaml`'s
+description, what its teammates read it does in Hermes' roster, is its
+role, else its job's first line. Its job never copies the role.
 
 ### Bot Mode in our Hermes image
 

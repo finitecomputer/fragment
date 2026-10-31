@@ -55,6 +55,9 @@ pub mod limits {
     /// name), in characters: in its manifest, given at its create, or
     /// written by `fragment agent --name`.
     pub const TITLE_MAX_CHARS: usize = 120;
+    /// An agent's role (its `fragment.json`'s `meta.role`: "chief of
+    /// staff"), in characters: a tag beside its name, so a few words.
+    pub const ROLE_MAX_CHARS: usize = 48;
     /// CPU per call into author code.
     pub const APP_CPU_MS: u32 = 30_000;
     /// Subrequests per call into author code.
@@ -1003,6 +1006,10 @@ pub struct FragmentStatus {
     pub kind: FragmentKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// An agent fragment's role, as its face says it (`ListedFragment`'s
+    /// `agent_role`): what its runtime tells it it does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_role: Option<String>,
     pub npub: String,
     pub owner: String,
     /// The caller's role.
@@ -1086,6 +1093,11 @@ pub struct ListedFragment {
     /// (`/api/f/<name>/icon?v=…`, docs/api.md, Icons).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub picture: Option<String>,
+    /// An agent fragment's role (its live `fragment.json`'s `meta.role`,
+    /// trimmed; none when it says nothing), as its last install said: the
+    /// tag the shell shows beside its name. Never any other fragment's.
+    #[serde(default, rename = "agentRole", skip_serializing_if = "Option::is_none")]
+    pub agent_role: Option<String>,
     /// Its agent members, the first added (a chat's lead) first, at most
     /// `limits::LISTED_AGENTS_MAX`, as the fragment last said.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -2396,11 +2408,11 @@ mod tests {
         fn value(v: &impl Serialize) -> Value {
             serde_json::to_value(v).unwrap()
         }
-        let listed = FragmentList { fragments: vec![ListedFragment { name: "notes-k3x9".into(), role: Role::Owner, kind: FragmentKind::App, title: None, picture: None, agents: vec![], preview: None, preview_at: None, unread: 0, sharing: None, archived: false, dock: true, owned: false, listed: vec![] }] };
+        let listed = FragmentList { fragments: vec![ListedFragment { name: "notes-k3x9".into(), role: Role::Owner, kind: FragmentKind::App, title: None, picture: None, agent_role: None, agents: vec![], preview: None, preview_at: None, unread: 0, sharing: None, archived: false, dock: true, owned: false, listed: vec![] }] };
         assert_eq!(value(&listed), serde_json::json!({ "fragments": [{ "name": "notes-k3x9", "role": "owner", "kind": "app" }] }));
         let sharing = Sharing { visibility: Visibility::Link, members: 3, guests: 1, invites: Some(2) };
         let listed = FragmentList {
-            fragments: vec![ListedFragment { name: "todo-k3x9".into(), role: Role::Owner, kind: FragmentKind::Chat, title: Some("Todo".into()), picture: None, agents: vec!["npub1juniper".into()], preview: Some("hi".into()), preview_at: Some(1_760_000_000_000), unread: 3, sharing: Some(sharing), archived: true, dock: true, owned: false, listed: vec![ListedRecord { channel: "work".into(), principal: "npub1juniper".into(), kind: "turn.asked".into(), fields: [("asks".to_string(), "npub1me".to_string())].into(), at: 1_760_000_000_001 }] }],
+            fragments: vec![ListedFragment { name: "todo-k3x9".into(), role: Role::Owner, kind: FragmentKind::Chat, title: Some("Todo".into()), picture: None, agent_role: None, agents: vec!["npub1juniper".into()], preview: Some("hi".into()), preview_at: Some(1_760_000_000_000), unread: 3, sharing: Some(sharing), archived: true, dock: true, owned: false, listed: vec![ListedRecord { channel: "work".into(), principal: "npub1juniper".into(), kind: "turn.asked".into(), fields: [("asks".to_string(), "npub1me".to_string())].into(), at: 1_760_000_000_001 }] }],
         };
         assert_eq!(
             value(&listed),

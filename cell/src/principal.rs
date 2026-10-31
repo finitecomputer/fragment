@@ -179,6 +179,9 @@ struct Face {
     /// An agent fragment's picture's address.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     picture: Option<String>,
+    /// An agent fragment's role (its `meta.role`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    role: Option<String>,
     /// Its agent members, the first added first (`limits::LISTED_AGENTS_MAX`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     agents: Vec<String>,
@@ -848,7 +851,7 @@ fn listed(r: Listed) -> CellResult<ListedFragment> {
         None => None,
     };
     let face = r.face.as_deref().and_then(|f| serde_json::from_str::<Face>(f).ok());
-    let (kind, title, picture, agents) = face.map_or((FragmentKind::App, None, None, Vec::new()), |f| (f.kind, f.title, f.picture, f.agents));
+    let (kind, title, picture, agent_role, agents) = face.map_or((FragmentKind::App, None, None, None, Vec::new()), |f| (f.kind, f.title, f.picture, f.role, f.agents));
     let preview = r.said.as_deref().map(search::preview).filter(|p| !p.is_empty()).map(str::to_string);
     let preview_at = preview.as_ref().and(r.said_at);
     let unread = u32::try_from(r.unread).ok().filter(|n| *n <= limits::LISTED_UNREAD_MAX);
@@ -859,5 +862,5 @@ fn listed(r: Listed) -> CellResult<ListedFragment> {
         None => vec![],
     };
     assert!(listed.len() <= limits::LISTED_POSTERS_MAX, "a row carries what it took, a bounded number");
-    Ok(ListedFragment { name: r.name, role: r.role, kind, title, picture, agents, preview, preview_at, unread, sharing, archived: r.archived != 0, dock: r.dock != 0, owned: false, listed })
+    Ok(ListedFragment { name: r.name, role: r.role, kind, title, picture, agent_role, agents, preview, preview_at, unread, sharing, archived: r.archived != 0, dock: r.dock != 0, owned: false, listed })
 }
