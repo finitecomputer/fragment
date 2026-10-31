@@ -251,14 +251,26 @@ fn paid(api: &Api, identity: &str) -> usize {
 /// `execute_code` step whose script calls Hermes' `terminal(...)` with it
 /// (`from hermes_tools import terminal; terminal("ls -l …")`, as canary
 /// round 5's agent ran every command): either is the agent running it. A
-/// step's arguments are Hermes' preview of its call, cut at the bridge's
-/// `STEP_ARGS_MAX_CHARS`: a call cut short is read to the cut.
+/// step's arguments are Hermes' preview of its call
+/// (`agent.display.build_tool_preview`), cut at 140 with `...`: a call cut
+/// short is read to the cut, and a command of several is its first (past a
+/// `cd` and its like, without redirections) and how many more, which is
+/// read as that first alone (`previewed`): the others are not in the step.
 pub(super) fn ran(step: &Value, is: impl Fn(&str) -> bool) -> bool {
-    let args = step["args"].as_str().unwrap_or("");
+    let args = previewed(step["args"].as_str().unwrap_or(""));
     match step["tool"].as_str() {
         Some("terminal") => is(args),
         Some("execute_code") => terminal_calls(args).into_iter().any(is),
         _ => false,
+    }
+}
+
+/// A preview's command: `ls -l x + 2 commands` is `ls -l x`.
+fn previewed(args: &str) -> &str {
+    let count = |more: &str| more.strip_suffix(" commands").or_else(|| more.strip_suffix(" command")).is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+    match args.rsplit_once(" + ") {
+        Some((first, more)) if count(more) => first,
+        _ => args,
     }
 }
 
@@ -884,9 +896,9 @@ mod tests {
 
     /// Goal: a check that the agent ran a command takes it from its
     /// terminal, or from a script that calls its terminal with it; nothing
-    /// else is a command run. Method: canary round 5's steps, as the bridge
-    /// said them (Hermes' previews: lines joined, cut at 140 with `...`),
-    /// and the scripts a check must not read as one.
+    /// else is a command run. Method: canary round 5's calls, as a step now
+    /// says them (Hermes' `build_tool_preview` of each, at 140, which
+    /// v0.21.7 gave), and the calls a check must not read as one.
     #[test]
     fn a_command_runs_in_its_terminal_or_a_script_calling_it() {
         let step = |tool: &str, args: &str| json!({ "kind": "turn.step", "tool": tool, "args": args, "ok": true });
@@ -897,6 +909,14 @@ mod tests {
         assert!(ran(&step("execute_code", r#"from hermes_tools import terminal r1 = terminal("ls -l e2e-d2715e-todo.txt", workdir="/data/work/e2e-d2715e-agent--aymc") print("R1:", r1..."#), listed));
         let deleted = |cmd: &str| cmd.contains("rm -rf") && cmd.contains("e2e-d2715e-scratch");
         assert!(ran(&step("terminal", "rm -rf ~/e2e-d2715e-scratch-backups"), deleted));
+        // a command of several: its first, past a `cd`, without the count
+        let asked = |cmd: &str| cmd.ends_with("fragment ask juniper hi");
+        assert!(ran(&step("terminal", "fragment ask juniper hi"), asked), "`cd /data/work/x && fragment ask juniper hi`");
+        let made = |cmd: &str| cmd.ends_with("mkdir -p ~/e2e-d2715e-scratch");
+        assert!(ran(&step("terminal", "mkdir -p ~/e2e-d2715e-scratch + 1 command"), made));
+        assert!(!ran(&step("terminal", "ls -la ~/e2e-d2715e-scratch-backups + 1 command"), deleted), "`ls -la …; du -sh …`");
+        assert!(!ran(&step("terminal", "echo hi + 1 command"), |cmd| cmd.contains("command")), "the count is no command");
+        assert!(!ran(&step("execute_code", "import fragment + 1 command"), fragment), "a script split at its `;` shows only its first part");
         assert!(ran(&step("execute_code", r#"from hermes_tools import terminal r = terminal("rm -rf ~/e2e-d2715e-scratch-backups && ls -la ~/e2e-d2715e-scr..."#), deleted), "a call cut short, read to the cut");
         // round 5's look before the delete it was asked for: no rm ran
         assert!(!ran(&step("execute_code", r#"from hermes_tools import terminal r = terminal("ls -la ~/e2e-d2715e-scratch-backups 2>&1; du -sh ~/e2e-d2715e-scratch-backups 2>/dev/null..."#), deleted));
@@ -909,6 +929,7 @@ mod tests {
         assert!(ran(&step("execute_code", r#"terminal("echo ')' && fragment list")"#), fragment));
         assert_eq!(terminal_calls(r#"a = terminal("ls (x)"); b = terminal(command='rm -rf "y\'z"', timeout=5) c"#), [r#""ls (x)""#, r#"command='rm -rf "y\'z"', timeout=5"#]);
         assert_eq!(terminal_calls("no call here"), Vec::<&str>::new());
+        assert_eq!((previewed("a + 2 commands"), previewed("a + b"), previewed("x + 1 command y")), ("a", "a + b", "x + 1 command y"));
     }
 
     /// The page's sample parses; nothing drawn yet is no frame.

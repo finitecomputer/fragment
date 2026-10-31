@@ -42,7 +42,7 @@ struct Buy {
 const META_TRIAL: &str = "fragment_trial";
 
 #[derive(Serialize)]
-pub(crate) struct Checkout {
+struct Checkout {
     url: String,
     session: String,
 }
@@ -163,11 +163,10 @@ async fn session_of(env: &Env, cfg: &Config, stripe_cfg: &StripeConfig, plan: &C
 }
 
 /// `POST /api/billing/packs {member?}`: a Checkout for a $25 credit pack
-/// (decision 55), for the buyer's own ledger or an org member's; or, from
-/// `POST /api/orgs/<org>/billing/pack`, for the org's own (decision 66).
-pub(crate) async fn pack(env: &Env, cfg: &Config, by: By, member: Option<String>, org: Option<String>) -> CellResult<Checkout> {
+/// (decision 55), for the buyer's own ledger or an org member's.
+async fn pack(env: &Env, cfg: &Config, by: By, member: Option<String>) -> CellResult<Checkout> {
     let stripe_cfg = cfg.stripe()?;
-    let plan = ask_registry(env, &PackBegin { by, member, org }).await?;
+    let plan = ask_registry(env, &PackBegin { by, member }).await?;
     let stripe = crate::stripe::client(env, cfg).await?;
     let found: List<Price> = stripe.get(&format!("/v1/prices?lookup_keys[]={}&active=true", core_stripe::PACK_LOOKUP_KEY)).await?;
     let price = found.data.into_iter().next().ok_or_else(|| CellError::host(format!("Stripe has no active price {}: run `cargo xtask stripe setup`", core_stripe::PACK_LOOKUP_KEY)))?;
@@ -186,14 +185,9 @@ pub(crate) async fn pack(env: &Env, cfg: &Config, by: By, member: Option<String>
         .push("expires_at", (js::now_ms() / 1000 + CHECKOUT_TTL_S).to_string())
         .push(format!("metadata[{META_DEPLOYMENT}]"), deployment)
         .push(format!("metadata[{META_ORG}]"), plan.org.clone())
+        .push(format!("metadata[{META_PERSON}]"), plan.person.clone())
         .push(format!("metadata[{META_BUYER}]"), plan.buyer.clone())
         .push(format!("metadata[{META_PACK}]"), (core_stripe::PACK_CENTS / 100).to_string());
-    form = match &plan.person {
-        Some(person) => form.push(format!("metadata[{META_PERSON}]"), person.clone()),
-        // the org's own: a release that knows no org ledger finds no person
-        // to grant, and fails it, so Stripe sends it again
-        None => form.push(format!("metadata[{META_PAYER}]"), Payer::Org(plan.org.clone()).name()),
-    };
     if stripe_cfg.tax {
         form = form.push("automatic_tax[enabled]", "true");
     }
@@ -205,16 +199,17 @@ pub(crate) async fn pack(env: &Env, cfg: &Config, by: By, member: Option<String>
     Ok(Checkout { url, session: session.id })
 }
 
-/// A paid pack's credit on its person's ledger, or its org's, once by its
-/// Checkout: the payer its metadata named when the buyer opened it, so a
-/// pack paid after they left their org still credits it.
+/// A paid pack's credit on its person's ledger, once by its Checkout; or
+/// on its org's, a pack of an org's own opened while orgs bought them
+/// (preview, 2026-10-30), so one paid since is credited still (the debt
+/// ledger).
 async fn pack_paid(env: &Env, session: &CheckoutSession) -> CellResult<bool> {
-    let payer = match (session.metadata.get(META_PAYER), session.metadata.get(META_PERSON)) {
+    let person = match (session.metadata.get(META_PAYER), session.metadata.get(META_PERSON)) {
         (Some(org), None) => match (Payer::parse(org), session.metadata.get(META_ORG)) {
-            (Some(Payer::Org(id)), Some(named)) if id == *named => org.clone(),
+            (Some(Payer::Org(id)), Some(named)) if id == *named => org,
             _ => return Err(CellError::host(format!("{}'s {META_PAYER} is no ledger of its org", session.id))),
         },
-        (None, Some(person)) if fragment_core::npub::is_identity(person) => person.clone(),
+        (None, Some(person)) if fragment_core::npub::is_identity(person) => person,
         _ => return Err(CellError::host(format!("{} names no person and no org to grant", session.id))),
     };
     let grant = GrantCredit {
@@ -223,7 +218,7 @@ async fn pack_paid(env: &Env, session: &CheckoutSession) -> CellResult<bool> {
         by: "stripe".into(),
         why: format!("a ${} credit pack (Stripe Checkout {})", core_stripe::PACK_CENTS / 100, session.id),
     };
-    crate::ledger::ask(env, &payer, &grant).await.map_err(|e| CellError::new(e.code, format!("{payer}'s ledger: {}", e.message)))?;
+    crate::ledger::ask(env, person, &grant).await.map_err(|e| CellError::new(e.code, format!("{person}'s ledger: {}", e.message)))?;
     Ok(true)
 }
 
@@ -337,7 +332,7 @@ pub(crate) async fn route(mut req: Request, env: &Env, cfg: &Config, url: &Url, 
             }
             let b: Buying = serde_json::from_slice(&bytes).map_err(|e| CellError::invalid(format!("body: {e}")))?;
             let by = by(env, &req, url, &bytes)?;
-            json_answer(&pack(env, cfg, by, b.member, None).await?)
+            json_answer(&pack(env, cfg, by, b.member).await?)
         }
         (Method::Post, ["portal"]) => {
             let by = by(env, &req, url, &bytes)?;

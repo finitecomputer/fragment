@@ -367,7 +367,8 @@ computer (docs/computers.md, the hold).
 
 ```json
 { "kind": "turn.step", "turn": "…", "step": 1, "tool": "terminal",
-  "category": "shell", "args": "ls -la", "ok": true, "excerpt": "…", "text": "…" }
+  "category": "shell", "args": "ls -la", "ok": true, "excerpt": "…", "text": "…",
+  "tool_call_id": "call_…", "status": "completed", "duration_ms": 120 }
 ```
 
 Part `<step>`, from 1: one tool call. `tool` (the runtime's own name for
@@ -387,6 +388,17 @@ handed to another agent), `memory` (what it remembers, changed), or
 (`ls -la`), and a step with another or none (one from before steps said)
 as `other`, its `tool` in words. The bridge's runtime says which (our
 Hermes image's: one table of Hermes' tools, docs/bridge.md).
+
+`tool_call_id`, `status` and `duration_ms` (since 2026-10-30): the call
+as its runtime observed its end (our Hermes image's: its `post_tool_call`,
+docs/bridge.md), its id there (at most 128 characters), how it ended
+(`completed`, `failed`, `timed_out`, `cancelled` or `blocked`) and how
+long it ran; `ok` is true for `completed` alone. A step with them is a
+call that ended, so a page never shows it running, and names how it
+ended when it did not complete ("Timed out running"). `excerpt` is then a
+command's exit code (`Exit code: 7`) or empty: never its output. A step
+without them (an older bridge's, read from its runtime's progress) says
+only `ok`, which was true even for a call that failed.
 
 ```json
 { "kind": "turn.prompt", "turn": "…", "prompt": "<prompt>",
@@ -513,6 +525,14 @@ naming it; a page reads it at `__blob/<sha256>`. At most 8 a record, 25
 MiB each. The record keeps the file while the channel keeps the record
 (docs/api.md, Blobs); an upload no record names goes after the grace
 period.
+
+Before handing a turn to Hermes, the bridge downloads its attachments to
+`/tmp/bridge-media/<sha256>` by default and names each original filename,
+MIME type and local path in file notes after the new message's words.
+The agent can copy or edit these originals with its tools, including when the model sees an
+image's pixels directly. These scratch paths are local to the running
+computer and are not stored in the chat record; copy files into the app
+or work to keep them across a sleep (docs/bridge.md).
 
 **A voice memo** is an attachment whose `type` is audio. The page records
 one (MediaRecorder) and sends it as the recorder made it: `audio/webm`
