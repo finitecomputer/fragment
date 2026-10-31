@@ -554,16 +554,6 @@ unfinished design, not debt.
 - **Delete when:** a fragment's pages hear its agents' face changes (an
   agent fragment's install telling the chats it is in).
 
-## A chat's transcript is the platform's reading of the chat template's records
-
-- **Shortcut:** `fragment_core::export::transcript_part` reads one
-  template's records, a design bug by the platform rule
-  (docs/cloudflare-v1.md).
-- **Risk:** a change to the records' shape leaves transcripts behind.
-- **Delete when:** the chat template renders its own transcript (a
-  query the export asks, paged), or Paul lets the platform read the
-  records' shape (then it moves to the special-case inventory).
-
 ## The effects sweep has no fault-injection test
 
 - **Shortcut:** effects pending across a crash are settled by the next
