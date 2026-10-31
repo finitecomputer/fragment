@@ -860,7 +860,7 @@ const { renderHeading, renderChats, loadInvites, primaryAgent, newChatAgent, own
     agents: () => state.agents, allFragments: () => state.fragments, computer: () => state.computer, isGuest: () => state.guest, personId: () => state.me?.id,
     isThread: (f) => threads.isPair(f), waitingOn: (name) => threads.waitingOn(name), renderThreads: () => threads.render() },
   selection: { current: () => state.current, page: () => state.page, getFrame: (name) => state.frames.get(name) },
-  menus: { menu, menuEdge, menuOwner: () => menuFor, openMenu, closeMenu, shareItem, archiveItem },
+  menus: { menu, menuEdge, menuOwner: () => menuFor, openMenu, closeMenu, shareItem, archiveItem, pinItem },
   navigation: { newChat, rename: (name) => rename(name), openChat, openApp, openScreen, leaveSidebar, seg },
   listLive, load, invites: () => state.invites, setInvites: (v) => { state.invites = v; },
 });
@@ -1103,6 +1103,20 @@ function openApp(name, path = "/") {
 const iconHelpers = { api, reload: () => load() };
 
 // ---- archiving: the person's own view (their list's row), not the fragment's ----
+// Pinned, a chat heads its section of the sidebar (Paul, 2026-10-31): the
+// person's own view of it, as archiving is (`PUT …/pinned`).
+function pinItem(name) {
+  const pinned = !!byName(name)?.pinned;
+  return { icon: "pin", text: pinned ? "Unpin" : "Pin", onClick: () => setPinned(name, !pinned) };
+}
+async function setPinned(name, pinned) {
+  try {
+    await api("PUT", `/api/fragments/${seg(name)}/pinned`, { pinned });
+    await load();
+  } catch (e) {
+    notice(pinned ? "It was not pinned" : "It was not unpinned", e.message);
+  }
+}
 function archiveItem(name) {
   const archived = !!byName(name)?.archived;
   return { icon: "archive", text: archived ? "Unarchive" : "Archive", onClick: () => setArchived(name, !archived) };

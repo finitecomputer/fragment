@@ -136,7 +136,7 @@ pub const REGISTRY: Class = Class {
 
 pub const PRINCIPAL: Class = Class {
     name: "Principal",
-    steps: &[step!("baseline", "principal/0001_baseline.sql"), step!("listed", "principal/0002_listed.sql"), step!("memberships_dock", "principal/0003_memberships_dock.sql")],
+    steps: &[step!("baseline", "principal/0001_baseline.sql"), step!("listed", "principal/0002_listed.sql"), step!("memberships_dock", "principal/0003_memberships_dock.sql"), step!("memberships_pinned", "principal/0004_memberships_pinned.sql")],
     variants: &[],
     kept: &["wiped"],
 };
@@ -698,6 +698,33 @@ mod tests {
         assert_eq!(list.count("SELECT COUNT(*) FROM memberships WHERE fragment = 'todo--k3x9' AND dock = 0"), 1, "and the choice holds");
         remake(&list, &PRINCIPAL).expect("a wipe's remake");
         assert!(list.columns("memberships").contains(&"dock".to_string()), "a wiped list's rows have the column still");
+        assert_eq!(list.count("SELECT COUNT(*) FROM memberships"), 0);
+    }
+
+    /// Goal: the person's pins are step 4 of the Principal's (Paul,
+    /// 2026-10-31; cell/src/principal.rs): a list at version 3 with rows
+    /// migrates to 4, keeps them, and pins none, its archiving and its dock
+    /// as they were; a row the cell writes as it does (no `pinned` named) is
+    /// not pinned, and one pinned reads so; the restart after runs nothing; a
+    /// wipe's `remake` keeps the column. Method: the list's first three steps
+    /// alone, an archived row and one off the dock, then its class as declared.
+    #[test]
+    fn the_pin_is_step_four_of_a_list() {
+        let list = Lite::new();
+        let known = PRINCIPAL.steps.len() as u32;
+        assert_eq!(migrated(&list, &Class { steps: &PRINCIPAL.steps[..3], ..PRINCIPAL }, 1), Ok(Ran::Made { version: 3 }));
+        list.exec("INSERT INTO memberships (fragment, role, incarnation, version, archived, dock) VALUES ('todo--k3x9', 'owner', 1, 1, 0, 0), ('old--k3x9', 'viewer', 1, 1, 1, 1)").expect("two rows");
+        assert_eq!(PRINCIPAL.steps[3].name, "memberships_pinned");
+        assert_eq!(migrated(&list, &PRINCIPAL, 2), Ok(Ran::Migrated { from: 3, version: known }));
+        assert_eq!(list.count("SELECT COUNT(*) FROM memberships WHERE pinned = 0"), 2, "none is pinned by the step");
+        assert_eq!(list.count("SELECT COUNT(*) FROM memberships WHERE (fragment = 'todo--k3x9' AND dock = 0) OR (fragment = 'old--k3x9' AND archived = 1)"), 2, "its archiving and its dock stay as they were");
+        list.exec("INSERT INTO memberships (fragment, role, incarnation, version, archived, searched) VALUES ('new--k3x9', 'owner', 2, 1, 0, '[]')").expect("a row as the cell writes one");
+        list.exec("UPDATE memberships SET pinned = 1 WHERE fragment = 'todo--k3x9'").expect("pinned");
+        assert_eq!(list.count("SELECT COUNT(*) FROM memberships WHERE pinned = 1"), 1, "a new row is not pinned; one pinned is");
+        assert_eq!(migrated(&list, &PRINCIPAL, 3), Ok(Ran::Current { version: known }), "a restart runs nothing");
+        assert_eq!(list.count("SELECT COUNT(*) FROM memberships WHERE fragment = 'todo--k3x9' AND pinned = 1"), 1, "and the pin holds");
+        remake(&list, &PRINCIPAL).expect("a wipe's remake");
+        assert!(list.columns("memberships").contains(&"pinned".to_string()), "a wiped list's rows have the column still");
         assert_eq!(list.count("SELECT COUNT(*) FROM memberships"), 0);
     }
 
