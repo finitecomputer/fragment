@@ -3227,7 +3227,9 @@ found there is listed once, its newest snippet in place of its first
 words; a search that fails says so above the rows and filters by title
 alone. A hundred rows show, then Show more. A row opens its chat in the
 middle column, or an import read-only as its archive's page shows it
-(`/?s=<key>`).
+(`/?s=<key>`). A message the person sends in a chat they archived brings
+it back to their sidebar: its page says so (`{fragment: "said"}`, below)
+and the shell sends `PUT /api/fragments/{name}/archived` `false`.
 
 The row's title, icon and preview open the app; its address is visible
 beside an open-in-new-tab link. The pencil edits the display name inline,
@@ -3592,7 +3594,10 @@ storage for the frame keeps no draft). Only that person gets it back: a
 draft of anyone else's is let go as the page loads, and signing out or
 Use another account first asks each chat's page to let its draft go
 (`{fragment: "forget-draft"}`, answered `{fragment: "draft-forgotten"}`,
-waited for at most a second), then sends the form. **Nothing else is
+waited for at most a second), then sends the form. A chat's page tells
+the shell each time the person's message is sent there (`{fragment:
+"said"}`), which brings a chat they archived back to their sidebar
+(History, above). **Nothing else is
 lost**: a chat's page tells the shell, as it changes, whether it is busy
 with what no storage keeps (`{fragment: "busy", busy}`: files chosen, a
 voice memo, a message on its way or one that failed (its Retry, a retry

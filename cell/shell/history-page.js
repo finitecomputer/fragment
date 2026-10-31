@@ -16,7 +16,8 @@
 // conversations are matched by their titles and first words alone until
 // the archive is searched too (#774), through `h.archive.search` (q →
 // [{key, snippet}]) once it has one.
-// Opening a row opens it in the middle column.
+// Opening a row opens it in the middle column; a message the person sends
+// in a chat they archived brings it back to the sidebar (shell.js, `said`).
 // Archived and imported rows end with `h.continueControl(source)` once it
 // is given (continue.js: Continue with an agent of theirs).
 //

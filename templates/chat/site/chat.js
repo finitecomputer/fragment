@@ -2574,6 +2574,7 @@ export function mount(root) {
         await fragment.post("chat", body, { id });
         unsent = null;
         $("banner").hidden = true;
+        tellSaid();
         return;
       }
       const to = addressed(text);
@@ -2605,6 +2606,7 @@ export function mount(root) {
       renderQuoting();
       $("banner").hidden = true;
       expectTurn(record, to, text);
+      tellSaid();
     } catch (err) {
       if (!input.value) input.value = typed;
       for (const f of files) f.uploading = false;
@@ -2615,6 +2617,13 @@ export function mount(root) {
       grow();
       input.focus();
     }
+  }
+
+  // The shell that frames this page is told the person sent a message here
+  // (`{fragment: "said"}`): a chat they archived comes back to their
+  // sidebar (docs/api.md, The shell's History).
+  function tellSaid() {
+    if (framed && state.me) window.parent.postMessage({ fragment: "said" }, state.me.platform);
   }
 
   // Someone signed in, in a chat with an agent: a turn starts on it soon

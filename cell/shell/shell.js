@@ -1709,6 +1709,15 @@ const refresh = createSessionRefresh({
 });
 const { heard, navigated, reopenWindows, release, DEPLOYED } = refresh;
 const frameOfWindow = (win) => [...state.frames.values()].find((f) => f.contentWindow === win);
+// A chat's page says the person sent a message there (`said`): a chat they
+// archived comes back to their sidebar, as an email thread does once it is
+// written in again (the History page; Paul, 2026-10-31). Their own flag,
+// of the frame's own chat.
+addEventListener("message", (event) => {
+  if (event.data?.fragment !== "said") return;
+  const name = frameOfWindow(event.source)?.dataset.fragment;
+  if (name && byName(name)?.kind === "chat" && byName(name).archived) setArchived(name, false);
+});
 addEventListener("message", (event) => {
   const d = event.data;
   if (d?.fragment !== "agents?" && d?.fragment !== "busy") return;
