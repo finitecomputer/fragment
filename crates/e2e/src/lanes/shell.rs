@@ -1762,8 +1762,9 @@ fn release_steps(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session
     };
     // a person's press on a row or a button, as a script's click (its
     // handler, wherever a pointer would be): whether it was there
+    // pressed as the person would: a chat past its section's five after its More
     let press = |b: &mut Browser, selector: &str| -> Result<bool> {
-        Ok(b.eval(page, &format!("(() => {{ const e = document.querySelector({}); e?.click(); return !!e; }})()", js(selector)))? == true)
+        Ok(b.eval(page, &format!("(() => {{ const e = document.querySelector({s}) ?? ({UNFOLD}, document.querySelector({s})); e?.click(); return !!e; }})()", s = js(selector)))? == true)
     };
     // a negative check's look: past the shell's own wait after a press (0.4 s)
     let quiet = std::time::Duration::from_secs(3);
@@ -1772,7 +1773,8 @@ fn release_steps(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session
     let meta = |id: &str| format!("document.querySelector('meta[name=fragment-release]')?.content === {}", js(id));
     let shown = |name: &str| format!("[...document.querySelectorAll('#frames iframe')].find((f) => !f.hidden)?.dataset.fragment === {}", js(name));
     let window = format!("!!document.querySelector({})", js(&format!("#stack .pane[data-key=\"app:{app}\"] iframe")));
-    let row = |name: &str| format!("#chats [data-key={}]", js(&format!("chat:{name}")));
+    // a chat's row's button (the row opens by it)
+    let row = |name: &str| format!("#chats [data-key={}] .chat-open", js(&format!("chat:{name}")));
     let composer = |b: &mut Browser| b.eval_in_frame(page, chat, "({ text: document.getElementById('text')?.value ?? null, files: document.querySelectorAll('#attachments .attachment-chip').length })").unwrap_or(Value::Null);
     let ready = |s: &Suite, b: &mut Browser| s.eventually(wait, || b.eval_in_frame(page, chat, COMPOSER_READY).ok() == Some(Value::Bool(true)));
     let me_id = super::signin::who(api, session)?["id"].as_str().unwrap_or("").to_string();
