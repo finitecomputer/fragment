@@ -11,7 +11,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::Sha256;
 
-use crate::records::{valid_post_id, Category, NoticeCategory, PromptOption, Step, ToolEvidence, ToolStatus};
+use crate::records::{valid_post_id, Call, Category, NoticeCategory, PromptOption, Step, ToolEvidence, ToolStatus};
 
 /// The contract this connector speaks.
 pub const CONTRACT_VERSION: u64 = 1;
@@ -660,9 +660,48 @@ pub fn observed_tool(v: &Value) -> Option<(String, Step)> {
     Some((o.turn, Step { category: category_of(&o.tool), ok: o.status == ToolStatus::Completed, tool: o.tool, args: o.args, excerpt: o.excerpt, evidence: Some(evidence) }))
 }
 
+/// A tool call the model asked for, as our image's `fragment-activity`
+/// plugin hears it (Hermes' `post_api_request`, before Hermes runs any call
+/// of its response) on the activity socket: its turn (Hermes' message id,
+/// ours), the call's id, tool and preview (Hermes' own display helper's).
+#[derive(Deserialize)]
+struct Asked {
+    turn: String,
+    call: AskedCall,
+}
+
+#[derive(Deserialize)]
+struct AskedCall {
+    tool_call_id: String,
+    tool: String,
+    #[serde(default)]
+    args: String,
+}
+
+/// The call an asked frame says the model wants, and its turn: its intent,
+/// before it runs (`turn.call`).
+pub fn asked_call(v: &Value) -> Option<(String, Call)> {
+    let a = Asked::deserialize(v).ok()?;
+    if !valid_post_id(&a.turn) || a.call.tool.is_empty() || !valid_post_id(&a.call.tool_call_id) {
+        return None;
+    }
+    Some((a.turn, Call { category: category_of(&a.call.tool), tool: a.call.tool, args: a.call.args, tool_call_id: a.call.tool_call_id }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A call the model asked for is its turn, id, tool and preview; one
+    /// with no turn, no tool or an id that is no post id is none.
+    #[test]
+    fn an_asked_call() {
+        let (turn, call) = asked_call(&json!({ "turn": "abc123", "call": { "tool_call_id": "call_9", "tool": "terminal", "args": "make deploy" } })).expect("a call");
+        assert_eq!((turn.as_str(), call.tool_call_id.as_str(), call.tool.as_str(), call.args.as_str(), call.category), ("abc123", "call_9", "terminal", "make deploy", Category::Shell));
+        for bad in [json!({ "call": { "tool_call_id": "c", "tool": "t" } }), json!({ "turn": "t", "call": { "tool_call_id": "c", "tool": "" } }), json!({ "turn": "t", "call": { "tool_call_id": "has space", "tool": "t" } }), json!({ "turn": "t", "tool_call_id": "c", "tool": "t", "status": "ok" })] {
+            assert!(asked_call(&bad).is_none(), "{bad}");
+        }
+    }
 
     /// A question in words is an open clarify (`❓`, as Hermes' base
     /// adapter sends it, with or without numbered choices) or the prompt to

@@ -97,3 +97,39 @@ async fn an_observed_end_is_a_step_and_a_disconnect_invents_none() {
     drop(hermes);
     bridge.stop().await;
 }
+
+/// Goal (phase 4): a call the model asked for, said on the socket before
+/// it runs, is answered `called` and recorded as its turn's `turn.call`,
+/// before its end's `turn.step` (the same `tool_call_id`). Invalid: a call
+/// with no tool, or an id that is no post id, is refused and recorded
+/// nowhere. Replay: said twice, it is one record.
+#[tokio::test]
+async fn a_call_asked_for_is_recorded_before_its_end() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    let (listen, bridge) = start(&fake, "asked-calls");
+    let hermes = Hermes::spawn(listen, "activity-test", SECRET);
+    let chat = fake.chat("talk", &["juniper"]);
+    fake.until(10_000, "chat followed", |w| w.live_sockets() >= 2).await;
+    let mut observer = dial(listen, SECRET).await;
+    observer.next().await.unwrap().unwrap();
+    let asked = fake.say(&chat, &person("paul"), json!({ "text": "use a tool slow without observations" }));
+    let turn = fragment_bridge::records::turn_id("juniper--k3x9", &chat, "chat", asked["seq"].as_u64().unwrap());
+    support::until(10_000, "the turn reached Hermes", || hermes.with(|s| !s.heard.is_empty())).await;
+    let call = json!({ "turn": turn, "call": { "tool_call_id": "call-deploy", "tool": "terminal", "args": "make deploy" } });
+    assert_eq!(said(&mut observer, &call.to_string()).await, "called");
+    assert_eq!(said(&mut observer, &call.to_string()).await, "called", "said again");
+    for bad in [json!({ "turn": turn, "call": { "tool_call_id": "call-x", "tool": "" } }), json!({ "turn": turn, "call": { "tool_call_id": "has space", "tool": "terminal" } })] {
+        assert_eq!(said(&mut observer, &bad.to_string()).await, "refused", "{bad}");
+    }
+    let end = json!({ "turn": turn, "tool": "terminal", "args": "make deploy", "excerpt": "Exit code: 0", "tool_call_id": "call-deploy", "status": "completed", "duration_ms": 9 });
+    assert_eq!(said(&mut observer, &end.to_string()).await, "observed");
+    fake.until(10_000, "turn ended", |w| !w.bodies(&chat, "work", "turn.end").is_empty()).await;
+    let work = fake.with(|w| w.records(&chat, "work"));
+    let kinds: Vec<&str> = work.iter().filter_map(|r| r["body"]["kind"].as_str()).filter(|k| *k == "turn.call" || *k == "turn.step").collect();
+    assert_eq!(kinds, vec!["turn.call", "turn.step"], "one intent, then its end");
+    let calls = fake.with(|w| w.bodies(&chat, "work", "turn.call"));
+    assert_eq!(calls, vec![json!({ "kind": "turn.call", "turn": turn, "tool_call_id": "call-deploy", "tool": "terminal", "category": "shell", "args": "make deploy" })]);
+    drop(observer);
+    drop(hermes);
+    bridge.stop().await;
+}

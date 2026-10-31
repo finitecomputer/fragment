@@ -288,6 +288,34 @@ fn ev(e: &mut Engine, event: Event, now: u64) -> Step {
     answered(e, s, now)
 }
 
+/// Goal (phase 4): a call the model asked for is recorded on `work` as it
+/// is said, before it runs: its intent alone (an open reply stays open, and
+/// nothing is shown run). Replay: said again, it posts the same record (its
+/// id is the call's), which the platform keeps once. Invalid: one about no
+/// running turn, or whose id is no post id, records nothing. Its bound is
+/// the steps', counting every call said.
+#[test]
+fn a_call_is_recorded_before_it_runs() {
+    let a = agent("juniper");
+    let v = view(&[&a]);
+    let mut e = engine(std::slice::from_ref(&a));
+    let t = started(&said(&mut e, &a, &v, 1, "npub1paul", json!({ "text": "ship it" }), T0)).expect("a turn").turn;
+    let call = |id: &str| records::Call { tool_call_id: id.into(), tool: "terminal".into(), args: "make deploy".into(), category: records::Category::Shell };
+    assert!(posts(&e.step(heard(Event::Reply { turn: t.clone(), part: 1, text: "On it.".into() }), T0 + 1)).is_empty());
+    let s = e.step(heard(Event::Called { turn: t.clone(), call: call("c1") }), T0 + 2);
+    assert_eq!(posts(&s), vec![(records::call_id(&t, "c1"), records::turn_call(&t, &call("c1")))], "its intent alone: the reply before it stays open");
+    assert!(s.dirty, "its count is kept");
+    let again = e.step(heard(Event::Called { turn: t.clone(), call: call("c1") }), T0 + 3);
+    assert_eq!(posts(&again), posts(&s), "the same record again");
+    assert!(posts(&e.step(heard(Event::Called { turn: t.clone(), call: call("has space") }), T0 + 4)).is_empty());
+    assert!(posts(&e.step(heard(Event::Called { turn: "nope".into(), call: call("c2") }), T0 + 5)).is_empty(), "no running turn");
+    let more: usize = (0..limits::STEPS_PER_TURN_MAX + 5).map(|i| posts(&e.step(heard(Event::Called { turn: t.clone(), call: call(&format!("m{i}")) }), T0 + 6)).len()).sum();
+    assert_eq!(more, limits::STEPS_PER_TURN_MAX as usize - 3, "200 calls a turn, every one said counted");
+    // its step still ends it as before, the open reply posted first
+    let step = ToolStep { tool: "terminal".into(), args: "make deploy".into(), ok: true, excerpt: String::new(), category: records::Category::Shell, evidence: None };
+    assert_eq!(kinds(&e.step(heard(Event::Step { turn: t.clone(), step }), T0 + 7)), vec!["reply", "turn.step"]);
+}
+
 /// Goal: a person's message to the lead starts exactly one turn, which is
 /// handed to the runtime with who asked, and keeps the computer awake.
 #[test]

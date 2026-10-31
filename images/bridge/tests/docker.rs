@@ -2578,6 +2578,20 @@ async fn steps_say_what_they_do() {
         let got = fake.with(|w| steps(w, &turn));
         eprintln!("steps: {said:?} is {got:?}");
         assert!(got.iter().any(|(tool, category, args)| (tool.as_str(), category.as_str(), args.as_str()) == want), "{said:?}: a step {want:?}, its preview whole; got {got:?}");
+        // phase 4: each step's call was recorded as asked for before it,
+        // by Hermes' post_api_request, with its tool and preview
+        fake.with(|w| {
+            let work: Vec<serde_json::Value> = w.records(&chat, "work").into_iter().filter(|r| r["body"]["turn"] == turn).collect();
+            for (i, step) in work.iter().enumerate().filter(|(_, r)| r["body"]["kind"] == "turn.step") {
+                // by its id, or by what it does: Hermes renames a call whose
+                // id its session used before (`call_1_d2`) after saying it
+                let id = &step["body"]["tool_call_id"];
+                let same = |r: &&serde_json::Value| r["body"]["kind"] == "turn.call" && (r["body"]["tool_call_id"] == *id || (r["body"]["tool"] == step["body"]["tool"] && r["body"]["args"] == step["body"]["args"]));
+                let call = work[..i].iter().find(same);
+                let call = call.unwrap_or_else(|| panic!("{said:?}: the call of step {step} recorded before it; work: {work:#?}"));
+                assert_eq!((&call["body"]["tool"], &call["body"]["args"]), (&step["body"]["tool"], &step["body"]["args"]), "its intent says what its step does");
+            }
+        });
     }
 }
 
@@ -3063,6 +3077,9 @@ async fn a_turn_cut_by_a_restart_is_closed_and_told() {
         assert!(asked.contains(said), "{said:?} in the model's request: {asked:?}");
     }
     assert!(!asked.contains(&format!("[paul] {CARD_ASKED}")), "the cut request is never joined to it: {asked:?}");
+    // phase 4: the call it was cut in (its clarify, asked for and never
+    // ended) is named first, as one that may or may not have run
+    assert!(asked.contains("It had started these and never heard back, so each may or may not have run") && asked.contains("clarify"), "the cut call named: {asked:?}");
     assert_eq!(before_role, "assistant", "the cut turn is closed before it (Hermes' failed-turn boundary; {closed}): {before:?}");
     let (asked_after, _) = asked_with(&calls, "and after that").expect("a request for the message after");
     assert!(!asked_after.contains("cut short"), "the turn after is told nothing: {asked_after:?}");

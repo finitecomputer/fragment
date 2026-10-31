@@ -1,4 +1,5 @@
-"""Hermes owns the children; one socket carries their work and tool steps.
+"""Hermes owns the children; one socket carries their work, and each tool
+call's intent and end.
 
 The supported lifecycle hooks identify each child by its session id. Nothing
 is saved: a gateway exit closes the socket, and a new process has no children.
@@ -31,6 +32,7 @@ def register(ctx):
     ctx.register_hook("subagent_start", child_started)
     ctx.register_hook("subagent_stop", child_stopped)
     ctx.register_hook("pre_llm_call", turn_started)
+    ctx.register_hook("post_api_request", tools_asked)
     ctx.register_hook("post_tool_call", tool_finished)
 
 
@@ -147,6 +149,50 @@ def turn_started(*, turn_id=None, **kwargs):
         _turns[turn_id] = turn
         while len(_turns) > _TURNS_MAX:
             del _turns[next(iter(_turns))]
+
+
+def _field(obj, name):
+    """An OpenAI-shaped message's field, whether Hermes hands an object or a dict."""
+    return obj.get(name) if isinstance(obj, dict) else getattr(obj, name, None)
+
+
+# The calls one response may say, at most (a model's parallel calls).
+_CALLS_MAX = 32
+
+
+def tools_asked(*, turn_id=None, assistant_message=None, **kwargs):
+    # Each tool call of a model's response, said before Hermes runs any of
+    # them: Hermes fires post_api_request in normalize_model_response, before
+    # run_tool_round (agent/conversation_loop.py, v0.21.7 and v0.22.5). Its
+    # intent: asked, which a refusal may still stop; only its end says it
+    # ran. A turn not the person's (the memory review's, a delegated child's)
+    # is none of ours, as for its end.
+    with _condition:
+        turn = _turns.get(turn_id)
+    calls = (_field(assistant_message, "tool_calls") if assistant_message is not None else None) or []
+    if turn is None or not calls:
+        return
+    from agent.display import build_tool_preview
+    for call in list(calls)[:_CALLS_MAX]:
+        call_id, function = _field(call, "id"), _field(call, "function")
+        name = _field(function, "name") if function is not None else None
+        if not isinstance(call_id, str) or not call_id or not isinstance(name, str) or not name:
+            continue
+        raw = _field(function, "arguments")
+        try:
+            args = json.loads(raw) if isinstance(raw, str) and len(raw) <= 65536 else (raw if isinstance(raw, dict) else {})
+        except ValueError:
+            args = {}
+        try:
+            preview = build_tool_preview(name, args if isinstance(args, dict) else {}, max_len=140) or ""
+        except Exception:
+            preview = ""
+        frame = {"turn": turn, "call": {"tool_call_id": call_id[:128], "tool": name[:140], "args": preview}}
+        with _condition:
+            # Answered before Hermes runs the call; unanswered, it runs anyway
+            # (an observer never holds the agent back).
+            if _send(frame) != "called":
+                _log.warning("A tool call's intent was not recorded")
 
 
 def tool_finished(*, tool_name=None, args=None, tool_call_id=None, turn_id=None,

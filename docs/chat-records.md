@@ -445,6 +445,22 @@ without them (an older bridge's, read from its runtime's progress) says
 only `ok`, which was true even for a call that failed.
 
 ```json
+{ "kind": "turn.call", "turn": "…", "tool_call_id": "call_…", "tool": "terminal",
+  "category": "shell", "args": "make deploy" }
+```
+
+Part `call:<24 hex of the call's id's SHA-256>` (since 2026-10-31): a
+tool call the model asked for, recorded before it runs, as its runtime
+says so (our Hermes image's: its `post_api_request`, before Hermes runs
+any call of the response; docs/bridge.md). Its intent, no more: a refusal
+may still stop it, and only its `turn.step` says it ended: the one with the
+same `tool_call_id`, else (its runtime renamed the call before running it)
+the one with the same `tool` and `args`. `tool`, `args` and `category` as a step's. At most 200 a turn.
+The note a turn cut by a restart carries names each call it asked for
+with no step, as one that may or may not have run. Pages show none of
+them yet; an older bridge posts none.
+
+```json
 { "kind": "turn.prompt", "turn": "…", "prompt": "<prompt>",
   "text": "Make your recipe app public, so anyone with its link can open it?",
   "options": [ { "id": "c0", "label": "Yes, make it public", "style": "primary" },

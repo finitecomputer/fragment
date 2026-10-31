@@ -614,6 +614,41 @@ pub fn turn_step(turn: &str, n: u32, s: &Step) -> Value {
     body
 }
 
+/// A tool call the model asked for, before it runs, as its runtime says
+/// so (our Hermes image: `post_api_request`, before Hermes runs any call
+/// of the response; Claude Code: its `tool_use`). Asked is no more than
+/// that: its runtime may refuse it, and only its step (`turn.step`, the
+/// same `tool_call_id`) says it ended. One a cut turn asked for and never
+/// ended may or may not have run (note.rs).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Call {
+    /// The runtime's id of the call (at most 128 of `valid_post_id`'s).
+    pub tool_call_id: String,
+    pub tool: String,
+    pub args: String,
+    pub category: Category,
+}
+
+/// A call's record id: one per turn and call, so a call said twice (a
+/// runtime's retry) is one record. Its id is hashed into the record's
+/// (a provider's call ids run long); the body keeps it whole.
+pub fn call_id(turn: &str, tool_call_id: &str) -> String {
+    let h = hex(&Sha256::digest(tool_call_id.as_bytes()));
+    work_id(turn, &format!("call:{}", &h[..24]))
+}
+
+pub fn turn_call(turn: &str, c: &Call) -> Value {
+    assert!(valid_post_id(&c.tool_call_id), "a call's id is a post id: {}", c.tool_call_id);
+    json!({
+        "kind": "turn.call",
+        "turn": turn,
+        "tool_call_id": c.tool_call_id,
+        "tool": cut(&c.tool, limits::STEP_TOOL_MAX_CHARS),
+        "category": c.category.as_str(),
+        "args": cut_or_empty(&c.args, limits::STEP_ARGS_MAX_CHARS),
+    })
+}
+
 /// A turn asking `asks` something to answer in words: their next message
 /// to the agent in the chat is the answer.
 pub fn turn_asked(turn: &str, asks: &str) -> Value {
