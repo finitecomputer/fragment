@@ -28,6 +28,26 @@ const INBOX_FILES: [(&str, &[u8]); 4] = [
     ("README.md", include_bytes!("../../../../templates/inbox/README.md")),
 ];
 
+/// Each of `values` as vendors write a value back (#814): each byte
+/// percent-encoded in lower-case hex, JSON-escaped, JSON-escaped within
+/// JSON, as HTML character references, and in base64.
+fn spellings(values: &[&str]) -> Vec<String> {
+    use base64::Engine;
+    let json = |v: &str| v.bytes().map(|b| format!("\\u{b:04x}")).collect::<String>();
+    values
+        .iter()
+        .flat_map(|v| {
+            [
+                v.bytes().map(|b| format!("%{b:02x}")).collect::<String>(),
+                json(v),
+                json(v).replace('\\', "\\\\"),
+                v.bytes().map(|b| format!("&#{b};")).collect::<String>(),
+                base64::engine::general_purpose::STANDARD.encode(v),
+            ]
+        })
+        .collect()
+}
+
 /// A request the upstream got.
 #[derive(Debug, Clone)]
 struct Hit {
@@ -67,6 +87,9 @@ impl Upstream {
                 p if p.starts_with("/keyed/") => Response::json(200, &json!({ "items": ["keyed"] })),
                 // an answer that echoes the URL it was asked at
                 p if p.starts_with("/echo/") => Response::json(302, &json!({ "asked": p })).with_header("location", p),
+                // one that writes the request's path and authorization back
+                // as vendors spell them (`spellings`), a line each
+                p if p.starts_with("/spell/") => Response::bytes(200, "text/plain", spellings(&[&p["/spell/".len()..], &header("authorization")]).join("\n").into_bytes()),
                 "/once" => Response::json(200, &json!({ "items": ["once"] })),
                 "/flaky" if flaky.fetch_add(1, Ordering::SeqCst) < 2 => Response::json(503, &json!({ "error": "busy" })),
                 "/flaky" => Response::json(200, &json!({ "items": ["gamma"] })),
@@ -255,6 +278,16 @@ pub fn jobs(s: &mut Suite, api: &Api) -> Result<()> {
         "an answer that echoes a URL's secret (a redirect's location) reaches the job naming it as the job wrote it",
         echoed["status"] == "succeeded" && echoed["output"]["location"] == "/echo/{{API_KEY}}/x" && !echoed.to_string().contains(SECRET) && upstream.hits(&format!("/echo/{SECRET}/x")).len() == 1,
         &echoed,
+    );
+    // a vendor that writes the secret back in spellings of its own (#814)
+    let r = api.op(&owner, &name, "spell", "spell-1", json!({ "url": upstream.url("/spell/{{API_KEY}}") }))?;
+    let spelled = settle(api, &owner, &name, started(&r), &["succeeded", "held"], long);
+    let text = spelled["output"]["text"].as_str().unwrap_or("");
+    let forms = spellings(&[SECRET, &format!("Bearer {SECRET}")]);
+    s.ok(
+        "an answer that writes a secret back as a vendor spells it (percent-encoded in lower-case hex, JSON-escaped, within JSON, as HTML, in base64), the URL's and the header's alike, reaches the job naming it as its placeholder",
+        spelled["status"] == "succeeded" && text.lines().count() == forms.len() && text.lines().all(|l| l.contains("{{API_KEY}}")) && forms.iter().all(|f| !text.contains(f.as_str())) && !spelled.to_string().contains(SECRET),
+        &spelled,
     );
 
     // a step that fails for now is retried; one that keeps failing is the job's to catch
