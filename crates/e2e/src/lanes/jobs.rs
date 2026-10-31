@@ -128,7 +128,7 @@ fn runs(api: &Api, keys: &Keys, name: &str, query: &str) -> Vec<Value> {
 }
 
 /// The newest 500 events.
-fn events(api: &Api, keys: &Keys, name: &str) -> Vec<Value> {
+pub(super) fn events(api: &Api, keys: &Keys, name: &str) -> Vec<Value> {
     let last = api
         .signed(keys, "GET", &format!("/api/f/{name}/channels"), None)
         .ok()

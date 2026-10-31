@@ -1856,8 +1856,9 @@ nor speak through one (`fragment_core::door`):
   minutes of `at` (ms). Anything else saying `relayed` is 403; an app's
   operation or job publishes none (400), but a hosted door's.
 - **A hosted door** is a fragment made from a blessed connector template
-  (`blessed::CONNECTORS`; none ships yet) that has never run other code
-  (another install unbinds it for good, `door.unmade`). Only its owner
+  (`blessed::CONNECTORS`: `telegram`, templates/telegram) that has never
+  run other code (another install unbinds it for good and removes its
+  secrets, `door.unmade`). Only its owner
   edits or shares it: anyone else, an agent for its owner included, is at
   most a viewer there, an editor's role for anyone is 400, and its status
   shows an agent no share link. Only its owner, in person, binds it (`POST
