@@ -59,6 +59,12 @@ const COMMIT_TRIES: u32 = 5;
 /// Conversations' files read at once when the indexes are made again from
 /// `sessions/` (after an import that stopped before its indexes).
 const READERS: usize = 8;
+/// Commits of main read back from its head for the indexes' last one
+/// (`held`): an import makes at most this many commits of conversations
+/// before its indexes', so one cut off before them is within it. Past it
+/// (other writers' commits too), every file is read.
+const COMMITS_WALKED: u64 = 100;
+const _: () = assert!((session::SESSIONS_MAX / BATCH_FILES) as u64 + 2 <= COMMITS_WALKED);
 /// An id said in a refusal, at most (it is refused for being odd: escaped).
 const SAID_ID_MAX_CHARS: usize = 80;
 
@@ -257,11 +263,20 @@ fn archive(c: &Client) -> Result<(String, bool)> {
 }
 
 /// The archive at one head of main: what its indexes list, and each file
-/// `sessions/` holds, by key, with its size in git (a blob's pointer's).
+/// `sessions/` holds, by key.
 struct Held {
     head: Option<String>,
     indexed: BTreeMap<String, Entry>,
-    stored: BTreeMap<String, u64>,
+    stored: BTreeMap<String, Stored>,
+}
+
+struct Stored {
+    /// Its size in git (a blob's pointer's).
+    size: u64,
+    /// Changed in a commit after the indexes were last written (or that
+    /// commit is past `COMMITS_WALKED`): an import cut off before them, or
+    /// another writer, changed it since, so they may not describe it.
+    since: bool,
 }
 
 impl Held {
@@ -275,7 +290,27 @@ fn held(storage: &CodeStorage, blobs: &Blobs) -> Result<Held> {
     let Some(rev) = head.clone() else { return Ok(Held { head, indexed: BTreeMap::new(), stored: BTreeMap::new() }) };
     let listed = storage.list_files(&rev)?;
     let paths: BTreeSet<&str> = listed.entries.iter().map(|e| e.path.as_str()).collect();
-    let stored = listed.entries.iter().filter_map(|e| session::key_of_path(e.path.as_str()).map(|k| (k.to_string(), e.size))).collect();
+    // The indexes' last commit was made after its import read every file of
+    // main as it was then: a file last changed no later is one they
+    // describe, and one changed in a commit after it may be any copy (its
+    // size the same or not), so it is read. A file's last commit, with its
+    // path, names its bytes (code.storage lists it).
+    let index_paths: BTreeSet<String> = Kind::ALL.iter().map(|k| session::index_path(*k)).collect();
+    let index_commits: BTreeSet<&str> = listed.entries.iter().filter(|e| index_paths.contains(e.path.as_str())).map(|e| e.last_commit_sha.as_str()).collect();
+    let since: Option<BTreeSet<String>> = if index_commits.is_empty() {
+        Some(BTreeSet::new())
+    } else {
+        let commits = storage.list_commits(&rev, COMMITS_WALKED)?;
+        commits.iter().position(|c| index_commits.contains(c.sha.as_str())).map(|at| commits[..at].iter().map(|c| c.sha.clone()).collect())
+    };
+    let stored = listed
+        .entries
+        .iter()
+        .filter_map(|e| {
+            let since = since.as_ref().is_none_or(|s| s.contains(&e.last_commit_sha));
+            session::key_of_path(e.path.as_str()).map(|k| (k.to_string(), Stored { size: e.size, since }))
+        })
+        .collect();
     let mut indexed = BTreeMap::new();
     for kind in Kind::ALL {
         let path = session::index_path(kind);
@@ -295,23 +330,25 @@ fn held(storage: &CodeStorage, blobs: &Blobs) -> Result<Held> {
 }
 
 /// The entry of each conversation whose file in `sessions/` the indexes
-/// do not describe: one they lack, or name another copy than (its size in
-/// git is not their entry's, or, for a blob, its pointer names other
-/// bytes): an import that stopped before its indexes. One this run wrote is
-/// its entry as written, whatever the indexes say (the indexes' commit lost
-/// its race, or its answer); any other is read from its file, `READERS` at
-/// once.
+/// may not describe: one they lack, one changed since they were last
+/// written (`Stored::since`: an import that stopped before its indexes,
+/// whatever its size), or one they name another copy than (its size in git
+/// is not their entry's, or, for a blob, its pointer names other bytes).
+/// One this run wrote is its entry as written, whatever the indexes say
+/// (the indexes' commit lost its race, or its answer); any other is read
+/// from its file, `READERS` at once.
 fn found(c: &Client, name: &str, storage: &CodeStorage, h: &Held, written: &BTreeMap<String, Entry>) -> Result<Vec<Entry>> {
     let rev = h.head.as_deref().unwrap_or(MAIN);
     let mut out: Vec<Entry> = written.values().filter(|e| h.stored.contains_key(&e.key)).cloned().collect();
     // each file its index entry may not describe, and the entry a blob's
     // pointer must name to describe it
     let mut unread: Vec<(&String, Option<&Entry>)> = Vec::new();
-    for (key, size) in &h.stored {
+    for (key, Stored { size, since }) in &h.stored {
         if written.contains_key(key) {
             continue;
         }
         match h.indexed.get(key) {
+            Some(_) if *since => unread.push((key, None)),
             Some(e) if *size == e.bytes => {}
             Some(e) if *size as usize <= blob::POINTER_MAX_BYTES && e.bytes as usize >= blob::BLOB_MIN_BYTES => unread.push((key, Some(e))),
             _ => unread.push((key, None)),
@@ -572,6 +609,58 @@ mod tests {
         let packs = mock.requests(NAME, "POST commit-pack");
         assert_eq!(write(&c, NAME, &spooled(vec![])).unwrap().entries.len(), 3);
         assert_eq!(mock.requests(NAME, "POST commit-pack"), packs, "then nothing is left to put right");
+    }
+
+    /// Goal: an import cut off after its conversations' commit and before
+    /// its indexes' leaves nothing a later import trusts, whatever the
+    /// copies' sizes: an import of nothing else (a restart, nothing held
+    /// from the run before) puts the indexes right, the new conversation
+    /// and the updated one, and an older copy imported after never replaces
+    /// the newer. Method: through the writer, a chat; then an update of the
+    /// same length and a new chat, the indexes' commit beaten every try (the
+    /// fake's sabotage); an empty import; then a copy between the two.
+    #[test]
+    fn an_import_cut_off_before_its_indexes_is_put_right_whatever_the_sizes() {
+        let (mock, c) = archive();
+        let first = || session("a", Kind::Chat, "2026-10-01T09:00:00Z", &["hellp"]);
+        let third = || session("a", Kind::Chat, "2026-10-03T09:00:00Z", &["hello"]);
+        let second = || session("a", Kind::Chat, "2026-10-02T09:00:00Z", &["hellq"]);
+        let new = || session("b", Kind::Chat, "2026-10-03T10:00:00Z", &["new"]);
+        let size = |s: Session| file_of(s).len();
+        assert!(size(first()) == size(third()) && size(second()) == size(third()), "the same size: only their bytes tell them apart");
+        let a_path = session::session_path("hermes-a");
+        write(&c, NAME, &spooled(vec![first()])).unwrap();
+
+        mock.sabotage_commit_packs_after(1, COMMIT_TRIES);
+        assert!(write(&c, NAME, &spooled(vec![third(), new()])).is_err(), "cut off before its indexes");
+        assert_eq!(mock.file_at(NAME, "main", &a_path), Some(file_of(third())), "its conversations landed");
+        assert_eq!(index(&mock, Kind::Chat), [("hermes-a".to_string(), sha(&file_of(first())))], "its indexes did not");
+
+        let repaired = write(&c, NAME, &spooled(vec![])).unwrap();
+        assert_eq!((repaired.added, repaired.updated, repaired.entries.len()), (0, 0, 2));
+        assert_eq!(index(&mock, Kind::Chat), [("hermes-b".to_string(), sha(&file_of(new()))), ("hermes-a".to_string(), sha(&file_of(third())))], "an import of nothing puts them right");
+
+        let between = write(&c, NAME, &spooled(vec![second()])).unwrap();
+        assert_eq!((between.updated, between.unchanged), (0, 1), "a copy older than the one held");
+        assert_eq!(mock.file_at(NAME, "main", &a_path), Some(file_of(third())), "the newer copy stays");
+        assert_eq!(index(&mock, Kind::Chat)[1], ("hermes-a".to_string(), sha(&file_of(third()))));
+    }
+
+    /// Goal: when the indexes' last commit is further back than an import
+    /// looks, every file is read, so a copy of the same size is still found.
+    /// Method: an update of the same length, then more of another writer's
+    /// commits than `COMMITS_WALKED`.
+    #[test]
+    fn past_the_commits_walked_every_file_is_read() {
+        let (mock, c) = archive();
+        write(&c, NAME, &spooled(vec![session("a", Kind::Chat, "2026-10-01T09:00:00Z", &["hellp"])])).unwrap();
+        let later = file_of(session("a", Kind::Chat, "2026-10-03T09:00:00Z", &["hello"]));
+        mock.external_commit(NAME, "main", &[(session::session_path("hermes-a").as_str(), Some(&later))], "an update cut off before its indexes");
+        for i in 0..COMMITS_WALKED {
+            mock.external_commit(NAME, "main", &[("notes.md", Some(format!("{i}").as_bytes()))], "another writer");
+        }
+        write(&c, NAME, &spooled(vec![])).unwrap();
+        assert_eq!(index(&mock, Kind::Chat), [("hermes-a".to_string(), sha(&later))]);
     }
 
     /// Goal: a commit that loses its race, or whose answer is lost, is made
