@@ -1072,7 +1072,7 @@ fn door_checks(s: &mut Suite, api: &Api, c: &Doors, fetched: &dyn Fn(&Suite, u32
     let r = bind(c.stranger, json!({ "act": "link", "agent": c.agent }))?;
     s.ok("no one but its owner binds a fragment as their agent's door", matches!(r.status, 403 | 404), &r);
     let r = bind(c.owner, json!({ "act": "link", "agent": c.agent }))?;
-    s.ok("a fragment on no connector's template (this chat, its own code) is no door", r.status == 403 && r.text.contains("no connector's template"), &r);
+    s.ok("a fragment not made from a connector's template (this chat, its own code) is no door", r.status == 403 && r.text.contains("is no connector"), &r);
     let r = bind(c.owner, json!({ "act": "open", "agent": c.agent }))?;
     s.ok("a binding's act is link or unlink", r.status == 400, &r);
     let r = bind(c.owner, json!({ "act": "unlink" }))?;

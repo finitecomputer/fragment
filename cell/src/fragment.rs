@@ -380,6 +380,10 @@ pub(crate) enum MetaKey {
     /// takes a delivery only with that header holding that secret, and its
     /// inbox token admits nothing (fragment_core::manifest::InboxDecl).
     InboxSecret,
+    /// The blessed connector template it was made from (`blessed::
+    /// CONNECTORS`), while it runs no other code: no one but its owner edits
+    /// it, and only then may it be a door (doors.rs).
+    DoorTemplate,
     /// The next time a page may pre-wake the computers its channels wake.
     PrewakeAt,
     /// Test fleets only: how many more paid AI steps fail just after their
@@ -456,6 +460,7 @@ impl MetaKey {
             MetaKey::DoorTicket => "door_ticket",
             MetaKey::DoorActor => "door_actor",
             MetaKey::InboxSecret => "inbox_secret",
+            MetaKey::DoorTemplate => "door_template",
             MetaKey::PrewakeAt => "prewake_at",
             MetaKey::TestFailAfterPaid => "test_fail_after_paid",
             MetaKey::TestFailMeterAcks => "test_fail_meter_acks",
@@ -700,7 +705,8 @@ impl FragmentCell {
             return Ok(Standing { member: None, owns_member_agent: false, link, signed: false, cap: None, held: None });
         };
         if let Some(signed) = caller.signed.as_ref().filter(|s| s.acting_for.is_some()) {
-            return self.standing_for(signed, link);
+            let standing = self.standing_for(signed, link)?;
+            return self.only_owner_edits(caller, standing);
         }
         #[derive(serde::Deserialize)]
         struct Row {
@@ -727,7 +733,7 @@ impl FragmentCell {
                 member = member.map(|m| m.min(held));
             }
         }
-        Ok(Standing { member, owns_member_agent: member.is_none() && row.agent != 0, link, signed: true, cap: None, held: None })
+        self.only_owner_edits(caller, Standing { member, owns_member_agent: member.is_none() && row.agent != 0, link, signed: true, cap: None, held: None })
     }
 
     /// An agent acting for someone (decision R17), in one statement:
@@ -1202,6 +1208,10 @@ impl FragmentCell {
         )?;
         if let Some(t) = &body.template {
             self.set_meta(MetaKey::TemplatePending, t)?;
+            // a connector's: its owner's alone to edit from its making (doors.rs)
+            if blessed::CONNECTORS.contains(&t.as_str()) {
+                self.set_meta(MetaKey::DoorTemplate, t)?;
+            }
             if let Some(title) = &body.title {
                 self.set_meta(MetaKey::TemplateTitle, title.trim())?;
             }
