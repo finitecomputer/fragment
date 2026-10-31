@@ -999,7 +999,7 @@ impl FragmentCell {
         // what goes back to the job names the URL's secrets as it wrote them:
         // a failure's message, and an answer that echoes its URL (a redirect's
         // `location`, an error page)
-        let redact = |text: String| opened.iter().fold(text, |m, (name, secret)| m.replace(&fragment_core::secrets::url_encoded(secret), &format!("{{{{{name}}}}}")).replace(secret.as_str(), &format!("{{{{{name}}}}}")));
+        let redact = |text: String| fragment_core::secrets::redact(text, &opened);
         if !matches!(method, Method::Get | Method::Head) && !f.headers.keys().any(|k| k.eq_ignore_ascii_case(IDEMPOTENCY_HEADER)) {
             let key = format!("{}-s{index}", self.run_key(run.id).map_err(|e| StepFail::Retry(e.message))?);
             headers.set(IDEMPOTENCY_HEADER, &key).map_err(|e| permanent(e.to_string()))?;
