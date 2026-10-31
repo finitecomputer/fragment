@@ -87,7 +87,6 @@ pub fn org_fragments(s: &mut Suite, api: &Api) -> Result<()> {
         ("nor does its admin's agent (403)", api.signed(&hand, "POST", &format!("{root}/fragments"), Some(&json!({ "label": s.name("orgy") })))?, 403),
         ("nor lists its inventory (403)", api.signed(&ben, "GET", &format!("{root}/fragments"), None)?, 403),
         ("an agent fragment is a person's (400)", api.signed(&ada, "POST", &format!("{root}/fragments"), Some(&json!({ "label": s.name("orgagent"), "template": "agent" })))?, 400),
-        ("its editor gets no storage token: an offboarding could not take one back (403)", api.signed(&ada, "GET", &format!("/api/f/{name}/storage-token"), None)?, 403),
         ("its cap is no one's to change: its admin's neither (403)", api.signed(&ada, "PUT", &format!("/api/f/{name}/cap"), Some(&json!({ "id": "c1", "micros": 50_000_000 })))?, 403),
         ("a fragment never made has no owner to read: its channels are 404, not 500", api.signed(&ada, "GET", &format!("/api/f/{}/channels", s.named(api, &ada, "nevermade")?), None)?, 404),
     ];
@@ -270,6 +269,57 @@ pub fn org_fragments(s: &mut Suite, api: &Api) -> Result<()> {
         json!([ben_out.body, ben_fenced.status, ben_back.body, regrant.body, ben_reads.status]),
     );
 
+    // its repo, through the platform: an editor's storage token names the
+    // platform's route to it, a capability the fragment sealed, and the
+    // CLI syncs through it as through code.storage; each call asks again
+    let home = s.dir("org-cli");
+    s.login(api, &home);
+    let dee = s.cli_keys(&home).context("the CLI logged in")?;
+    let dee_id = api.identity(&dee)?;
+    let dee_email = crate::cli_email(&fragment_core::npub::encode(dee.pubkey_hex()))?;
+    api.signed(&ada, "POST", &format!("/api/f/{name}/invites"), Some(&json!({ "email": dee_email, "role": "editor" })))?;
+    let dee_in = accept(&name, &dee)?;
+    let minted = api.signed(&dee, "GET", &format!("/api/f/{name}/storage-token"), None)?;
+    let token = minted.body["token"].as_str().unwrap_or("").to_string();
+    let repo = minted.body["repo"].as_str().unwrap_or("").to_string();
+    let proxied = minted.body["api"].as_str().unwrap_or("").to_string();
+    let through = |method: &'static str, base: &str, repo: &str, path: &str, bearer: &str| {
+        let url = format!("{base}/api/repos/{}{path}", crate::api::url_enc(repo).replace('/', "%2F"));
+        api.call(Call { method, url, extra: vec![("authorization", format!("Bearer {bearer}"))], ..Call::default() })
+    };
+    let head = through("GET", &proxied, &repo, "/branch?name=main", &token)?;
+    let dir = s.dir("org-cli-sync");
+    let dir_s = dir.to_str().context("a utf-8 path")?.to_string();
+    let pulled = s.cli(api, &home, &["sync", &name, "--dir", &dir_s, "--mode", "pull"]);
+    std::fs::write(dir.join("notes.md"), "through the platform")?;
+    let pushed = s.cli(api, &home, &["sync", &name, "--dir", &dir_s, "--mode", "push"]);
+    let landed = s.fake.file_at(&repo, "main", "notes.md") == Some(b"through the platform".to_vec());
+    s.ok(
+        "an org's fragment's editor's storage token names the platform's route to its repo, and the CLI pulls and pushes through it",
+        dee_in.status == 200 && minted.status == 200 && proxied.ends_with(&format!("/api/f/{name}/codestorage")) && head.status == 200
+            && pulled.status.success() && pushed.status.success() && landed,
+        json!({ "minted": minted.body["api"], "head": [head.status, head.body.clone()], "pull": String::from_utf8_lossy(&pulled.stderr), "push": String::from_utf8_lossy(&pushed.stderr) }),
+    );
+    let other_base = proxied.replace(&name, &name2);
+    let refused = [
+        ("no storage token (401)", through("GET", &proxied, &repo, "/branch?name=main", "")?, 401),
+        ("one this fragment never sealed (401)", through("GET", &proxied, &repo, "/branch?name=main", "w2.x.AAAA")?, 401),
+        ("its token on another of the org's fragments (401)", through("GET", &other_base, &repo, "/branch?name=main", &token)?, 401),
+        ("another repo (404)", through("GET", &proxied, "other/repo", "/branch?name=main", &token)?, 404),
+        ("a call the CLI never makes (404)", through("POST", &proxied, &repo, "/branch", &token)?, 404),
+    ];
+    let all = refused.iter().all(|(_, r, status)| r.status == *status);
+    s.ok("and through it, refused: each says why", all, json!(refused.iter().map(|(w, r, _)| json!([w, r.status, r.body])).collect::<Vec<_>>()));
+    // the token held past its holder's offboarding opens nothing from then
+    let dee_out = api.signed(&ada, "POST", &format!("{root}/offboard"), Some(&json!({ "id": "dee-1", "person": dee_id, "expectedEpoch": 1 })))?;
+    let after = through("GET", &proxied, &repo, "/branch?name=main", &token)?;
+    let cli_after = s.cli(api, &home, &["sync", &name, "--dir", &dir_s, "--mode", "pull"]);
+    s.ok(
+        "offboarded, a storage token held from before opens nothing through the platform at once (403), and the CLI is refused",
+        dee_out.status == 200 && after.status == 403 && !cli_after.status.success(),
+        json!([after.status, after.body, String::from_utf8_lossy(&cli_after.stderr)]),
+    );
+
     // org_admin_cannot_bypass_cap: its budget stops its admin's AI steps too
     let tight = api.signed(&s.operator, "POST", &format!("/api/ledger/{ledger}/budget"), Some(&json!({ "id": "b2", "micros": 1 })))?;
     let _ = api.unsigned("POST", "/api/test/ledger", Some(&json!({ "identity": ledger, "op": "forget-gate" })));
@@ -288,6 +338,8 @@ pub fn org_fragments(s: &mut Suite, api: &Api) -> Result<()> {
         api.op(&ada, &name, "today", &format!("q{n}"), json!({}))?;
     }
     lever(api, &name, "meter-now", json!({ "sample": false }))?;
+    // a storage token minted before the restart opens its repo after it
+    let held = api.signed(&ada, "GET", &format!("/api/f/{name}/storage-token"), None)?.body["token"].as_str().unwrap_or("").to_string();
     let restarted;
     let api = if s.runs("org-fragments", &[Need::Node]) {
         s.stop()?;
@@ -296,6 +348,8 @@ pub fn org_fragments(s: &mut Suite, api: &Api) -> Result<()> {
     } else {
         api
     };
+    let reopened = through("GET", &proxied, &repo, "/branch?name=main", &held)?;
+    s.ok("a storage token through the platform, minted before a restart, opens its repo after it", reopened.status == 200, json!([reopened.status, reopened.body]));
     lever(api, &name, "meter-now", json!({ "sample": false, "resend": true }))?;
     let acked = s.eventually(Duration::from_secs(60), || lever(api, &name, "meter", json!({})).is_ok_and(|r| r.body["batches"] == json!([]) && r.body["rows"] == json!([])));
     let new: Vec<Value> = entries(api, &ledger, &format!("req:{name}@")).into_iter().filter(|e| !had.contains(e)).collect();

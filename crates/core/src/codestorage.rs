@@ -400,6 +400,39 @@ pub fn nothing_to_commit(body: &[u8]) -> bool {
     serde_json::from_slice::<Value>(body).is_ok_and(|v| v["result"]["status"] == "precondition_failed" && v["result"]["message"] == "no changes to commit")
 }
 
+/// An org's fragment's repo, through the platform (docs/api.md, "Its repo,
+/// through the platform"): the code.storage calls an editor's client makes
+/// (the CLI's, `cli/src/codestorage.rs`), and whether each writes. Any
+/// other is no route: the proxy forwards these alone, to its own repo.
+pub fn proxied(method: &str, endpoint: &str) -> Option<bool> {
+    match (method, endpoint) {
+        ("GET", "branch" | "files/metadata" | "file" | "commits") => Some(false),
+        ("POST", "commit-pack" | "restore-commit") => Some(true),
+        _ => None,
+    }
+}
+
+/// What a proxy's capability says, sealed by the fragment that minted it
+/// (it opens there alone): whose it is, which of the fragment's lives, and
+/// until when. It is no grant by itself: each call through the proxy asks
+/// again whether its holder may still write there.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Capability {
+    pub principal: String,
+    pub incarnation: String,
+    pub expires_at: i64,
+}
+
+impl Capability {
+    /// Why it no longer opens anything (another life's, or past its time).
+    pub fn refused(&self, incarnation: &str, now_ms: i64) -> Option<&'static str> {
+        if self.incarnation != incarnation {
+            return Some("a capability of another life of this fragment");
+        }
+        (now_ms >= self.expires_at).then_some("a capability past its time: ask for another")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     /// A local fleet's code.storage, at a loopback address, is reached
@@ -592,5 +625,21 @@ mod tests {
         assert!(line.ends_with('\n') && line.lines().count() == 1, "{line:?}");
         let v: Value = serde_json::from_str(line.trim()).unwrap();
         assert_eq!((v["metadata"]["base_ref"].as_str(), v["metadata"]["expected_target_sha"].as_str()), (Some(base.as_str()), Some(live.as_str())));
+    }
+
+    /// The proxy forwards the CLI's calls alone, each knowing whether it
+    /// writes; a capability opens nothing of another life or past its time.
+    #[test]
+    fn the_proxy_forwards_the_clis_calls_alone() {
+        for (method, endpoint, writes) in [("GET", "branch", false), ("GET", "files/metadata", false), ("GET", "file", false), ("GET", "commits", false), ("POST", "commit-pack", true), ("POST", "restore-commit", true)] {
+            assert_eq!(proxied(method, endpoint), Some(writes), "{method} {endpoint}");
+        }
+        for (method, endpoint) in [("POST", "branch"), ("DELETE", "file"), ("GET", "commit-pack"), ("POST", "branches"), ("GET", ""), ("POST", "../repos")] {
+            assert_eq!(proxied(method, endpoint), None, "{method} {endpoint}");
+        }
+        let c = Capability { principal: "npub1a".into(), incarnation: "100".into(), expires_at: 1_000 };
+        assert_eq!(c.refused("100", 999), None);
+        assert!(c.refused("100", 1_000).is_some(), "past its time");
+        assert!(c.refused("101", 10).is_some(), "another life");
     }
 }

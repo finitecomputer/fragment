@@ -793,7 +793,11 @@ expires within 30 days. The container application is the deployment's
   as its `api`, which the egress sends on to the fake as it came, the
   guest's token with it. On a deployment the guest reaches code.storage
   itself (docs/technical-debt-ledger.md, "An agent's sync and deploy
-  reach code.storage directly").
+  reach code.storage directly"). An org's fragment's storage token names
+  the platform's route to its repo; minted through the egress, it names
+  `http://api.fragment.internal/api/f/<fragment>/codestorage`, and the
+  egress sends each call there on as it came, the guest's token (the
+  grant, asked again at each call) unsigned and its body streamed.
 - `x-fragment-agent: <agent fragment name>` says which of its agents the
   request acts as. The intercept refuses an agent not assigned to this
   computer, then signs the request (NIP-98) as that agent's identity.
