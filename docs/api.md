@@ -3296,6 +3296,30 @@ record past the bridge's own bound on a turn that says nothing (15
 minutes working, an hour waiting, each a minute more for the list's own
 lag). A message waiting for its turn has no record yet, so queued is not
 said.
+**Delegation threads** (Paul, 2026-10-30; cell/shell/threads.js): when
+one of their agents asks another (`fragment ask --return-to`:
+docs/chat-records.md, "An ask"), the asked agent's turn runs in the two
+agents' chat with their owner, a **pair chat**: one of theirs with exactly
+two of their agents, labelled as `fragment ask` labels their pair. It
+leaves the chat list (a group chat of theirs otherwise named stays), and
+the chat it was asked from shows each thread as one line over it: the
+asked agent's face and name, the first line of what was asked, its state
+(Asked, Working, Needs you while a card of its waits for them, Done,
+Stopped, Lost for any other end, the error its title), how long it has
+run, and, while it runs, Stop: its owner's `stop` command in the pair
+chat (`{kind: "command", command: "stop", to}`, with the id
+`stop:<turn>`), since the person's own Stop there is its asker's, an
+agent's. A line opens the pair chat, its transcript. It stays until its
+answer has come: the answer on its asker's `tasks` (`an:<asked turn>`) and
+the asker's turn of it in the asking chat, ended; so a thread stopped or
+lost is said, never dropped. The asking chat's row says "Waiting on
+<agent>" in place of its time while one runs. Nothing is kept for it: its
+state is the pair chat's listed records, and what was asked, when, where
+its answer goes and how its turn ended are its newest records (`before=`,
+100 of `chat`, 400 of `work`), read again only when its row says a message
+came, or a turn started or ended; an ended thread's answer is looked for
+(the asker's newest 100 of `tasks`, the asking chat's 400 of `work`) when
+the asking chat's row says the same.
 A chat's row shows its `unread` as a count ("99+" at the list's bound),
 but the open chat's: the chat shown in the middle column, while the page
 is on screen, is marked seen (`PUT /api/fragments/{name}/seen`) as it

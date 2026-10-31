@@ -27,9 +27,10 @@
 //!
 //! Its tests: each `*.test.mjs` of them (cell/shell-tests/), run by the
 //! same Node's own runner (`node --test`), no package needed. A shell
-//! module that is handed what it calls (onboarding.js) is tried there
-//! against a fake of what it calls, in milliseconds: a call cut short and
-//! the page reloaded at each step, as the e2e cannot cut them (#763 review).
+//! module that is handed what it calls (onboarding.js, threads.js) is
+//! tried there against a fake of what it calls, in milliseconds: a call
+//! cut short and the page reloaded at each step (#763 review), the list's
+//! sends ordered (#779 review), as the e2e cannot cut or order them.
 
 use std::collections::BTreeSet;
 use std::io::Write;
@@ -59,8 +60,9 @@ pub const PROCESSES_MAX: usize = 8;
 const SHELL: &str = "cell/shell/shell.js";
 /// A test file's name ends so (`node --test`'s own default).
 const TEST_SUFFIX: &str = ".test.mjs";
-/// The tests of onboarding.js, which a walk must find.
-const ONBOARDING_TEST: &str = "cell/shell-tests/onboarding.test.mjs";
+/// The shell's tests, which a walk must find: onboarding.js's and
+/// threads.js's.
+const SHELL_TESTS: [&str; 2] = ["cell/shell-tests/onboarding.test.mjs", "cell/shell-tests/threads.test.mjs"];
 
 /// How Node is told to parse a file (`--input-type`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -181,7 +183,7 @@ pub fn tests(files: &[(String, InputType)]) -> Vec<&str> {
 
 /// `node --test` on them, all in one run (its report names each test).
 pub fn test(node: &Node, cache: &Path, root: &Path, tests: &[&str]) -> Result<()> {
-    assert!(tests.contains(&ONBOARDING_TEST), "a walk that misses {ONBOARDING_TEST} is broken, not clean");
+    assert!(SHELL_TESTS.iter().all(|t| tests.contains(t)), "a walk that misses one of {SHELL_TESTS:?} is broken, not clean");
     // the shell's modules are modules with no `type` to say so (the shell
     // serves them as such): Node parses them as such, and would say so
     let status = node.command(cache)?.args(["--test", "--disable-warning=MODULE_TYPELESS_PACKAGE_JSON"]).args(tests).current_dir(root).status().context("start node --test")?;
@@ -250,6 +252,7 @@ mod tests {
             ("cell/shell/launcher.js", Some(InputType::Module)),
             ("cell/shell/settings.js", Some(InputType::Module)),
             ("cell/shell/chat-list.js", Some(InputType::Module)),
+            ("cell/shell/threads.js", Some(InputType::Module)),
             ("cell/shell/session-refresh.js", Some(InputType::Module)),
             ("cell/shell/onboarding.js", Some(InputType::Module)),
             ("cell/shell/computer.js", Some(InputType::Module)),
@@ -279,7 +282,7 @@ mod tests {
         let found = files(&devstack::repo_root()).expect("the repo's walk");
         let kind = |path: &str| found.iter().find(|(p, _)| p == path).map(|(_, k)| *k);
         assert_eq!(kind("cell/shell/shell.js"), Some(InputType::Module));
-        assert!(tests(&found).contains(&ONBOARDING_TEST));
+        assert_eq!(tests(&found), SHELL_TESTS);
         // the launcher, a module shell.js imports
         assert_eq!(kind("cell/shell/launcher.js"), Some(InputType::Module));
         assert_eq!(kind("templates/todo/app.mjs"), Some(InputType::Module));
