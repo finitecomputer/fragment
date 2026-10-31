@@ -411,11 +411,12 @@ impl Entry {
 
     /// Whether this copy of a conversation should replace `held`: it was
     /// last said later, or as late by a better read of it (a reader that
-    /// shows it as its origin did, or one fixed since: `reader`). An older
-    /// copy (an earlier export of it) never replaces a newer one, nor an
-    /// equal read one as late.
+    /// shows it as its origin did, or one fixed since: `reader`), or as
+    /// late by as good a read holding more of its files (`media`: one
+    /// missing before, found since). An older copy (an earlier export of
+    /// it) never replaces a newer one, nor an equal one as late.
     pub fn newer(&self, held: &Entry) -> bool {
-        (self.when(), self.reader) > (held.when(), held.reader)
+        (self.when(), self.reader, self.media) > (held.when(), held.reader, held.media)
     }
 }
 

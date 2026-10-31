@@ -343,9 +343,17 @@ templates/sessions/README.md):
   `history`, before the agent joins: the chat's first record. It holds
   the conversation's last summary (`summary`, at most 8,000 characters)
   and the newest of what the person and the agent said, oldest first
-  (`messages`, at most 40, each at most 4,000 characters and all 24,000),
-  with how many came before them (`earlier`). `archive` and `key` name
-  the whole conversation's file.
+  (`messages`, at most 40, each at most 4,000 characters), with how many
+  came before them (`earlier`), bounded as a whole by its body's bytes
+  (63 KiB of JSON, under a record's 64 KiB, whatever the text: the newest
+  that fit; a summary too large for it alone is cut) before the chat is
+  made (cell/shell/session-archive.js, `historyOf`). `archive` and `key`
+  name the whole conversation's file.
+- Continue's steps (the chat, made by a name the shell chooses and keeps
+  first; this record; the agent's membership; the archive's
+  `continued/<key>.json`) can each be taken again: a Continue cut short,
+  or whose answer was lost, is finished by the next one in the same chat,
+  and one asked of a conversation already continued opens that chat.
 - The page shows its owner's first one above the chat, read-only: where
   it came from, the summary folded, the messages as the chat's own look.
   Anyone else's is shown by nothing.
@@ -550,6 +558,14 @@ naming it; a page reads it at `__blob/<sha256>`. At most 8 a record, 25
 MiB each. The record keeps the file while the channel keeps the record
 (docs/api.md, Blobs); an upload no record names goes after the grace
 period.
+
+Before handing a turn to Hermes, the bridge downloads its attachments to
+`/tmp/bridge-media/<sha256>` by default and names each original filename,
+MIME type and local path in file notes after the new message's words.
+The agent can copy or edit these originals with its tools, including when the model sees an
+image's pixels directly. These scratch paths are local to the running
+computer and are not stored in the chat record; copy files into the app
+or work to keep them across a sleep (docs/bridge.md).
 
 **A voice memo** is an attachment whose `type` is audio. The page records
 one (MediaRecorder) and sends it as the recorder made it: `audio/webm`

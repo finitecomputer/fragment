@@ -77,6 +77,9 @@ const CUT_READ_CHARS: usize = 2 * TOOL_TEXT_MAX_CHARS;
 const ARGUMENTS_READ_CHARS: usize = 2 * ARGUMENTS_MAX_CHARS;
 /// A session's `model_config`, in bytes (it holds only markers here).
 const CONFIG_READ_BYTES: usize = 4096;
+/// What a row read holds besides its strings' bytes (`MessageRow` itself),
+/// counted toward what its conversation may hold, so empty rows count too.
+const ROW_HELD_BYTES: usize = std::mem::size_of::<MessageRow>();
 
 /// Hermes' end reasons after which a child with the same routing key is a
 /// new conversation (`_RESET_END_REASONS`, hermes_state_common.py).
@@ -271,6 +274,15 @@ struct MessageRow {
     model_only: bool,
 }
 
+impl MessageRow {
+    /// What it holds, counted toward its conversation's bound: itself and
+    /// every string it read.
+    fn held(&self) -> usize {
+        let len = |s: &Option<String>| s.as_ref().map_or(0, String::len);
+        ROW_HELD_BYTES + self.role.len() + len(&self.content) + len(&self.tool_call_id) + len(&self.tool_calls) + len(&self.tool_name) + len(&self.reasoning) + len(&self.display_kind)
+    }
+}
+
 /// The key one message is known by across a compaction's copies of it
 /// (`_display_dedupe_key`): an assistant's tool calls by their ids, so a
 /// copy whose arguments a prune cut is still the same call; any other
@@ -424,7 +436,7 @@ fn messages(rows: Vec<MessageRow>) -> Vec<Message> {
 /// as it is read. What it could not read, each in a sentence (the rest is
 /// read); a database too large, or under `own` (this platform computer's
 /// Hermes home, when the CLI acts as its agent), is refused.
-pub fn read(path: &Path, spool: &mut Spool, own: Option<&Path>) -> Result<Vec<String>> {
+pub fn read(path: &Path, spool: &mut Spool, own: Option<&Path>) -> Result<()> {
     if let Some(home) = own {
         refuse_own(path, home)?;
     }
@@ -512,11 +524,24 @@ fn structured(c: &str) -> String {
     format!("(CASE WHEN substr(CAST({c} AS BLOB), 1, 6) = X'006A736F6E3A' THEN CAST(substr(CAST({c} AS BLOB), 7) AS TEXT) WHEN substr(CAST({c} AS BLOB), 1, 1) = X'5B' THEN {c} END)")
 }
 
+/// Whether the JSON list `j` is a list of typed parts: not empty, each an
+/// object whose `type` is a string. An element that is no object (the
+/// strings of a person's `["red", "blue"]`) is never handed to an object's
+/// JSON function, which fails on it and with it the row (`CASE` is
+/// evaluated in order; `AND` and `OR` need not be).
+fn typed_parts(j: &str) -> String {
+    format!(
+        "(json_array_length({j}) > 0 AND (SELECT count(*) FROM json_each({j}) p \
+           WHERE (CASE WHEN p.type = 'object' THEN json_type(p.value, '$.type') END) IS NOT 'text') = 0)"
+    )
+}
+
 /// What a conversation keeps of a message's content `c`, at most `chars`
-/// of each text: of structured content (valid JSON: a list of parts, each
-/// with a type; or a string), its text parts and each medium's type, never
-/// its data (a picture's base64), as `\0json:` and that JSON (`content_text`
-/// reads it); anything else as it is, at most `bytes` (`bounded`).
+/// of each text: of structured content (valid JSON: a list of typed parts,
+/// `typed_parts`; or a string), its text parts and each medium's type,
+/// never its data (a picture's base64), as `\0json:` and that JSON
+/// (`content_text` reads it); anything else (a list that is no parts
+/// among it) as it is, at most `bytes` (`bounded`).
 fn kept_content(c: &str, chars: usize, bytes: usize) -> String {
     let j = structured(c);
     let parts = format!(
@@ -524,7 +549,7 @@ fn kept_content(c: &str, chars: usize, bytes: usize) -> String {
            THEN json_object('type', 'text', 'text', substr(json_extract(p.value, '$.text'), 1, {chars})) \
            ELSE json_object('type', json_extract(p.value, '$.type')) END) FROM json_each({j}) p)"
     );
-    let typed = format!("(SELECT count(*) FROM json_each({j}) p WHERE json_type(p.value, '$.type') IS NOT 'text') = 0");
+    let typed = typed_parts(&j);
     let raw = bounded(c, bytes);
     format!(
         "CASE WHEN {j} IS NULL THEN {raw} WHEN NOT json_valid({j}) THEN {raw} \
@@ -539,23 +564,26 @@ fn kept_content(c: &str, chars: usize, bytes: usize) -> String {
 /// parts', or its own.
 fn kept_length(c: &str) -> String {
     let j = structured(c);
+    let own = format!("length(CAST({c} AS BLOB))");
+    let typed = typed_parts(&j);
     format!(
-        "CASE WHEN {j} IS NOT NULL AND json_valid({j}) AND json_type({j}) = 'array' \
-         THEN (SELECT coalesce(sum(length(CAST(json_extract(p.value, '$.text') AS BLOB))), 0) FROM json_each({j}) p) \
-         ELSE length(CAST({c} AS BLOB)) END"
+        "CASE WHEN {j} IS NULL THEN {own} WHEN NOT json_valid({j}) THEN {own} WHEN json_type({j}) IS NOT 'array' THEN {own} \
+           WHEN {typed} THEN (SELECT coalesce(sum(length(CAST(json_extract(p.value, '$.text') AS BLOB))), 0) FROM json_each({j}) p) \
+           ELSE {own} END"
     )
 }
 
 /// What a conversation keeps of a row's `tool_calls` `t`: each call's ids,
-/// its name, the start of its arguments and their whole length (`chars`);
-/// NULL when it is no list.
+/// its name, the start of its arguments and their whole length (`chars`),
+/// of each entry that is an object (`WHERE` is applied before the row's
+/// values are made); NULL when it is no list.
 fn kept_calls(t: &str) -> String {
     format!(
         "CASE WHEN {t} IS NULL OR NOT json_valid({t}) THEN NULL ELSE CASE json_type({t}) WHEN 'array' THEN \
            (SELECT json_group_array(json_object('id', json_extract(c.value, '$.id'), 'call_id', json_extract(c.value, '$.call_id'), \
              'function', json_object('name', json_extract(c.value, '$.function.name'), \
                'arguments', substr(json_extract(c.value, '$.function.arguments'), 1, {ARGUMENTS_READ_CHARS})), \
-             'chars', length(json_extract(c.value, '$.function.arguments')))) FROM json_each({t}) c) \
+             'chars', length(json_extract(c.value, '$.function.arguments')))) FROM json_each({t}) c WHERE c.type = 'object') \
          END END"
     )
 }
@@ -587,11 +615,10 @@ fn metadata(raw: Option<String>) -> Option<Value> {
 
 const SESSION_COLUMNS: [&str; 13] = ["id", "source", "session_key", "display_name", "model", "model_config", "parent_session_id", "started_at", "ended_at", "end_reason", "title", "last_activity_at", "profile_name"];
 
-fn read_in(db: &Connection, spool: &mut Spool) -> Result<Vec<String>> {
+fn read_in(db: &Connection, spool: &mut Spool) -> Result<()> {
     let session_cols = columns(db, "sessions")?;
     let m = columns(db, "messages")?;
     anyhow::ensure!(session_cols.contains("id") && m.contains("session_id"), "its sessions and messages tables are not Hermes'");
-    let mut problems = Vec::new();
     let count: i64 = db.query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get(0))?;
     if count as usize > SESSIONS_READ_MAX {
         return Err(anyhow::Error::new(crate::api::CodedError {
@@ -661,6 +688,8 @@ fn read_in(db: &Connection, spool: &mut Spool) -> Result<Vec<String>> {
         let parent = root.parent.as_deref().and_then(|p| at.get(p)).map(|&i| &rows[i]);
         let mut found = Vec::new();
         let mut held = 0usize;
+        // why a session of it could not be read whole: then none of it is
+        let mut failed: Option<String> = None;
         'chain: for &i in &chain {
             let read = q.query_map([&rows[i].id], |r| {
                 let v = |i: usize| r.get::<_, Sql>(i);
@@ -696,19 +725,19 @@ fn read_in(db: &Connection, spool: &mut Spool) -> Result<Vec<String>> {
             let rows_read = match read {
                 Ok(it) => it,
                 Err(e) => {
-                    problems.push(format!("the messages of session {}: {e}", super::said_id(&rows[i].id)));
-                    continue;
+                    failed = Some(format!("session {}: {e}", super::said_id(&rows[i].id)));
+                    break 'chain;
                 }
             };
             for m in rows_read {
                 match m {
                     Ok(m) => {
-                        held += m.content.as_ref().map_or(0, String::len) + m.tool_calls.as_ref().map_or(0, String::len) + m.reasoning.as_ref().map_or(0, String::len);
+                        held += m.held();
                         found.push(m);
                     }
                     Err(e) => {
-                        problems.push(format!("a message of session {}: {e}", super::said_id(&rows[i].id)));
-                        continue;
+                        failed = Some(format!("session {}: {e}", super::said_id(&rows[i].id)));
+                        break 'chain;
                     }
                 }
                 // a conversation whose kept rows pass twice what one may
@@ -717,6 +746,10 @@ fn read_in(db: &Connection, spool: &mut Spool) -> Result<Vec<String>> {
                     break 'chain;
                 }
             }
+        }
+        if let Some(why) = failed {
+            spool.refused.push(super::RefusedOne { id: super::said_id(&root.id), why: format!("it could not be read whole ({why})") });
+            continue;
         }
         if held > 2 * SESSION_MAX_BYTES {
             spool.refused.push(super::RefusedOne { id: super::said_id(&root.id), why: session::Refused::TooLarge(held).to_string() });
@@ -741,7 +774,7 @@ fn read_in(db: &Connection, spool: &mut Spool) -> Result<Vec<String>> {
             messages: messages(found),
         })?;
     }
-    Ok(problems)
+    Ok(())
 }
 
 #[cfg(test)]
@@ -772,14 +805,14 @@ pub(crate) mod tests {
         spool.entries.keys().map(|k| serde_json::from_slice(&std::fs::read(spool.path(k)).unwrap()).unwrap()).collect()
     }
 
-    fn read_path(path: &Path) -> (Spool, Vec<Session>, Vec<String>) {
+    fn read_path(path: &Path) -> (Spool, Vec<Session>) {
         let mut spool = Spool::new(BTreeSet::new()).unwrap();
-        let problems = read(path, &mut spool, None).unwrap();
+        read(path, &mut spool, None).unwrap();
         let sessions = spooled(&spool);
-        (spool, sessions, problems)
+        (spool, sessions)
     }
 
-    fn read_sql(sql: &str) -> (Spool, Vec<Session>, Vec<String>) {
+    fn read_sql(sql: &str) -> (Spool, Vec<Session>) {
         let path = super::super::tempdir().join("state.db");
         database(&path, sql);
         read_path(&path)
@@ -793,6 +826,83 @@ pub(crate) mod tests {
         all.iter().find(|s| s.id == id)
     }
 
+    /// Goal: text that is a JSON list but no list of typed parts (a person's
+    /// `["red", "blue"]`, a mixed list, an empty one) is kept as the text it
+    /// is, with the messages around it, and typed parts still read as
+    /// text; a call list of anything but objects drops its odd entries, not
+    /// the conversation. Valid and invalid lists, a call list of strings.
+    #[test]
+    fn json_lists_that_are_no_parts_are_kept_as_text() {
+        let (spool, all) = read_sql(
+            r#"
+            INSERT INTO sessions VALUES ('s1','cli',NULL,NULL,'m',NULL,NULL,100,200,NULL,'Lists',NULL,NULL);
+            INSERT INTO messages (session_id,role,content,timestamp) VALUES ('s1','user','before',110);
+            INSERT INTO messages (session_id,role,content,timestamp) VALUES ('s1','user','["red", "blue"]',111);
+            INSERT INTO messages (session_id,role,content,timestamp) VALUES ('s1','assistant','[{"type":"text","text":"x"}, "y"]',112);
+            INSERT INTO messages (session_id,role,content,timestamp) VALUES ('s1','user','[]',113);
+            INSERT INTO messages (session_id,role,content,timestamp) VALUES ('s1','tool','[1, [2], null]',114);
+            INSERT INTO messages (session_id,role,content,timestamp) VALUES ('s1','user',char(0) || 'json:[{"type":"text","text":"look"},{"type":"image_url","image_url":{"url":"data:image/png;base64,AAAA"}}]',115);
+            INSERT INTO messages (session_id,role,content,tool_calls,timestamp) VALUES ('s1','assistant','calling','["web", {"id":"c1","function":{"name":"web","arguments":"{}"}}]',116);
+            INSERT INTO messages (session_id,role,content,timestamp) VALUES ('s1','assistant','after',117);
+            "#,
+        );
+        assert!(spool.refused.is_empty(), "{:?}", spool.refused.iter().map(|r| &r.why).collect::<Vec<_>>());
+        let s = by_id(&all, "s1").expect("the conversation");
+        assert_eq!(
+            texts(s),
+            ["user:before", "user:[\"red\", \"blue\"]", "assistant:[{\"type\":\"text\",\"text\":\"x\"}, \"y\"]", "user:[]", "tool:[1, [2], null]", "user:look\n[image]", "assistant:calling", "assistant:after"]
+        );
+        assert_eq!(s.messages[6].tool_calls.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["web"], "the call that is one");
+    }
+
+    /// Goal: a conversation SQLite cannot read whole is refused whole (its
+    /// root's session or a continuation's), never kept as the part read
+    /// before the failure, and the next conversation is read. Method: a
+    /// view of the messages whose content fails for one row, in a
+    /// continuation of one conversation; a second conversation beside it.
+    #[test]
+    fn a_conversation_that_cannot_be_read_whole_is_refused_whole() {
+        let path = super::super::tempdir().join("state.db");
+        let db = Connection::open(&path).unwrap();
+        db.execute_batch(&SCHEMA.replace("CREATE TABLE messages ", "CREATE TABLE stored ")).unwrap();
+        db.execute_batch(
+            r#"
+            CREATE VIEW messages AS SELECT id, session_id, role,
+                CASE WHEN content = 'unreadable' THEN json_extract('not json', '$') ELSE content END AS content,
+                tool_call_id, tool_calls, tool_name, timestamp, reasoning, reasoning_content, _compressed_summary, active, compacted, display_kind, display_metadata
+              FROM stored;
+            INSERT INTO sessions VALUES ('s1','cli',NULL,NULL,'m',NULL,NULL,100,200,'compression','Cut',NULL,NULL);
+            INSERT INTO sessions VALUES ('s2','cli',NULL,NULL,'m','{}','s1',200,300,NULL,NULL,NULL,NULL);
+            INSERT INTO sessions VALUES ('ok','cli',NULL,NULL,'m',NULL,NULL,400,500,NULL,'Fine',NULL,NULL);
+            INSERT INTO stored (session_id,role,content,timestamp) VALUES ('s1','user','before',110);
+            INSERT INTO stored (session_id,role,content,timestamp) VALUES ('s2','user','unreadable',210);
+            INSERT INTO stored (session_id,role,content,timestamp) VALUES ('s2','user','after',220);
+            INSERT INTO stored (session_id,role,content,timestamp) VALUES ('ok','user','hello',410);
+            "#,
+        )
+        .unwrap();
+        drop(db);
+        let (spool, all) = read_path(&path);
+        assert_eq!(all.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), ["ok"], "{all:#?}");
+        assert_eq!(spool.refused.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), ["s1"]);
+        assert!(spool.refused[0].why.contains("could not be read"), "{:?}", spool.refused[0].why);
+    }
+
+    /// Goal: every row a conversation reads counts toward what it may hold,
+    /// so rows with nothing in them cannot pass the bound. Method: a
+    /// session of more empty rows than the bound has room for.
+    #[test]
+    fn empty_rows_count_toward_what_a_conversation_holds() {
+        let rows = 2 * SESSION_MAX_BYTES / ROW_HELD_BYTES + 10;
+        let (spool, all) = read_sql(&format!(
+            "INSERT INTO sessions VALUES ('e','cli',NULL,NULL,'m',NULL,NULL,100,200,NULL,'Empty',NULL,NULL);
+             WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < {rows})
+             INSERT INTO messages (session_id,role,content,timestamp) SELECT 'e','assistant',NULL,100 FROM n;"
+        ));
+        assert!(all.is_empty());
+        assert_eq!(spool.refused.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), ["e"]);
+    }
+
     /// Goal: a conversation Hermes compressed twice is one conversation,
     /// its messages once each in the order Hermes wrote them. Method: a
     /// root, a continuation that compressed again, and its continuation;
@@ -802,7 +912,7 @@ pub(crate) mod tests {
     /// one of them its metadata double-encoded as an older Hermes wrote it.
     #[test]
     fn a_compressed_conversation_is_one_with_each_message_once() {
-        let (_, all, problems) = read_sql(
+        let (spool, all) = read_sql(
             r#"
             INSERT INTO sessions VALUES ('s1','telegram','tg:1','Ann','m1',NULL,NULL,100,200,'compression','Garden',NULL,'juniper');
             INSERT INTO sessions VALUES ('s2','telegram','tg:1','Ann','m1','{}','s1',200,300,'compression',NULL,NULL,'juniper');
@@ -821,7 +931,7 @@ and peas?',210,1,'hidden');
             INSERT INTO messages (session_id,role,content,timestamp) VALUES ('s3','user','thanks',400);
             "#,
         );
-        assert!(problems.is_empty(), "{problems:?}");
+        assert!(spool.refused.is_empty(), "{:?}", spool.refused.iter().map(|r| &r.why).collect::<Vec<_>>());
         let chats: Vec<&Session> = all.iter().filter(|s| s.kind == Kind::Chat).collect();
         assert_eq!(chats.len(), 1, "{all:#?}");
         let c = chats[0];
@@ -851,7 +961,7 @@ and peas?',210,1,'hidden');
     /// compressed is one conversation of its own.
     #[test]
     fn branches_resets_runs_and_side_tasks_are_what_hermes_says() {
-        let (_, all, _) = read_sql(
+        let (_, all) = read_sql(
             r#"
             INSERT INTO sessions VALUES ('root','cli','k',NULL,NULL,NULL,NULL,100,200,'compression',NULL,NULL,NULL);
             INSERT INTO sessions VALUES ('cont','cli','k',NULL,NULL,'{}','root',200,NULL,NULL,NULL,NULL,NULL);
@@ -888,7 +998,7 @@ and peas?',210,1,'hidden');
     #[test]
     fn stored_content_reads_as_text_and_calls() {
         let long = "r".repeat(TOOL_TEXT_MAX_CHARS * 5);
-        let (_, all, _) = read_sql(&format!(
+        let (_, all) = read_sql(&format!(
             r#"
             INSERT INTO sessions VALUES ('s','cli',NULL,NULL,NULL,NULL,NULL,1,NULL,NULL,NULL,NULL,NULL);
             INSERT INTO messages (session_id,role,content,timestamp) VALUES ('s','user',char(0) || 'json:[{{"type":"text","text":"see"}},{{"type":"image_url","image_url":{{"url":"data:x"}}}}]',2);
@@ -912,7 +1022,7 @@ and peas?',210,1,'hidden');
     /// and a database past what an import reads is refused whole.
     #[test]
     fn too_much_is_refused() {
-        let (spool, all, _) = read_sql(&format!(
+        let (spool, all) = read_sql(&format!(
             r#"
             INSERT INTO sessions VALUES ('big','cli',NULL,NULL,NULL,NULL,NULL,1,NULL,NULL,NULL,NULL,NULL);
             INSERT INTO sessions VALUES ('small','cli',NULL,NULL,NULL,NULL,NULL,2,NULL,NULL,NULL,NULL,NULL);
@@ -950,7 +1060,7 @@ and peas?',210,1,'hidden');
         )
         .unwrap();
         drop(db);
-        let (_, all, _) = read_path(&path);
+        let (_, all) = read_path(&path);
         assert_eq!(texts(&all[0]), ["user:hi"]);
         let other = dir.join("other.db");
         Connection::open(&other).unwrap().execute_batch("CREATE TABLE t (x)").unwrap();
@@ -989,7 +1099,7 @@ and peas?',210,1,'hidden');
         }
         let refused: Vec<bool> = [root.join("state.db"), sibling.join("state.db"), mine.join("state.db"), elsewhere.clone()].iter().map(|p| refuse_own(p, &mine).is_err()).collect();
         assert_eq!(refused, [true, true, true, false]);
-        let (_, all, _) = read_path(&mine.join("state.db"));
+        let (_, all) = read_path(&mine.join("state.db"));
         assert!(all.is_empty(), "a person's own Hermes reads, refused by nothing");
         let mut spool = Spool::new(BTreeSet::new()).unwrap();
         assert!(read(&mine.join("state.db"), &mut spool, Some(&mine)).is_err());
@@ -1015,8 +1125,8 @@ and peas?',210,1,'hidden');
         }
         sql += "INSERT INTO messages (session_id,role,content,timestamp) VALUES ('s','user','[1, 2]',200);";
         sql += "INSERT INTO messages (session_id,role,content,timestamp) VALUES ('s','user',char(0) || 'json:\"[not parts]\"',201);";
-        let (spool, all, problems) = read_sql(&sql);
-        assert!(problems.is_empty() && spool.refused.is_empty(), "{problems:?} {:?}", spool.refused.iter().map(|r| &r.why).collect::<Vec<_>>());
+        let (spool, all) = read_sql(&sql);
+        assert!(spool.refused.is_empty(), "{:?}", spool.refused.iter().map(|r| &r.why).collect::<Vec<_>>());
         let s = &all[0];
         assert_eq!(s.messages[0].text.as_deref(), Some("Screenshot taken\n[image]"));
         assert_eq!(s.messages[1].text.as_deref(), Some("meal 0\n[image]"));
@@ -1109,8 +1219,8 @@ for table in ("sessions", "messages"):
         let path = super::super::tempdir().join("state.db");
         // its other tables (a prompt's hash) left out: their keys are not this test's
         Connection::open(&path).unwrap().execute_batch(&format!("PRAGMA foreign_keys = OFF;\n{FIXTURE}")).unwrap();
-        let (_, all, problems) = read_path(&path);
-        assert!(problems.is_empty(), "{problems:?}");
+        let (spool, all) = read_path(&path);
+        assert!(spool.refused.is_empty(), "{:?}", spool.refused.iter().map(|r| &r.why).collect::<Vec<_>>());
         let kinds: Vec<(&str, Kind, usize)> = all.iter().map(|s| (s.id.as_str(), s.kind, s.parts.len())).collect();
         assert_eq!(
             kinds,

@@ -425,26 +425,37 @@ alone (`<sha>-dirty-<second>`). Dev and the e2e run one build in one
   That additive image contract permits a bounded image-side wait without
   replaying a model call that may have run; ordinary routed waits stay
   the same.
-- **An object behind restarts.** A deploy restarts every object onto
-  its code, but Cloudflare holds one it keeps busy on the code before:
-  on the preview on 2026-10-21, after 7 of its 17 deploys, a busy
-  object (the Registry, a computer, its agent fragment) ran the release
-  before for 283 to 297 seconds, refusing every call of the new one
-  while those refusals kept it busy (two more met one for 5 and 38
-  seconds, until it went idle); every client-visible 503 of that day
-  was in those windows (up to 340 a deploy, most of them agents'
-  calls). So an object that refuses a call from a release deployed
-  after its own restarts (`release::restarts`; `ctx.abort()` from a
-  timer 50 ms on: `routed::restart_soon`), and the caller's next ask
-  meets its next instance, the new release's. It is that restart
-  brought forward, and costs what it costs: the requests the instance
-  is answering end, its sockets close (their pages reconnect), an alarm
-  running is run again, and a computer's container runs on (the next
-  instance adopts it). An object restarts so at most once in an isolate
-  (which runs one release): one Cloudflare starts again on the code
-  before refuses, as it would have, until Cloudflare's own restart. A
-  call from a release deployed before the object's, at the same second,
-  or naming no time restarts nothing.
+- **Every object takes a deploy's code at once.** Cloudflare's default
+  defers it: an active object keeps the code before until it
+  hibernates, for up to 300 s. On the preview a busy object (the
+  Registry, a computer, its agent fragment) so ran the release before
+  for about five minutes after many deploys (283 to 297 s on
+  2026-10-21; 7 of 40 deploys 2026-10-27 to 30), refusing every call of
+  the new one, most of them agents' calls. So the Worker asks for
+  `immediate` (`durable_objects.code_update_strategy`,
+  cell/wrangler.jsonc, for every class): an active object resets onto
+  the new code as the deploy lands (on a throwaway Worker on 2026-10-30,
+  0.6 s after `wrangler deploy` ended, against 10.8 s under a 10 s
+  deferral). A reset costs what any restart does: the requests the
+  instance is answering end (one that touches storage fails), its
+  sockets close (their pages reconnect; a hibernated object's stay open
+  and wake on the new code), an alarm running is run again, and a
+  computer's container runs on (the next instance adopts it).
+- **An object behind restarts.** An object that refuses a call from a
+  release deployed after its own restarts (`release::restarts`;
+  `ctx.abort()` from a timer 50 ms on: `routed::restart_soon`), and the
+  caller's next ask meets its next instance, the new release's (during
+  a deferral too, on 2026-10-30). It costs what a reset does. The
+  restart's reason names the release that restarted
+  (`release::restart_reason`): a call of another release it ends, which
+  it refused before acting (the timer runs late under load, as the
+  caller's next ask arrives), is asked again as a refusal is
+  (`routed::sent`); one of its own release may have acted, and fails. An
+  object restarts so at most once in an isolate (which runs one
+  release): one Cloudflare starts again on the code before refuses, as
+  it would have, until Cloudflare's own restart. A call from a release
+  deployed before the object's, at the same second, or naming no time
+  restarts nothing.
 
 Both directions refuse alike: an old caller at a new object will not be
 admitted from that isolate, and its asks run out; a new caller at an old
@@ -459,13 +470,13 @@ versions serving for a while, would refuse between them for that while.
 
 **A deploy is done when every object class answers it.** `cargo xtask
 deploy` asks `/healthz/objects` (docs/api.md, Health) until each class
-admits the new release, for 7 minutes, past Cloudflare's five minutes of
-a busy object's old code (on 2026-10-24 a throwaway Worker's busy object
-took a deploy's code 300 s after it, whatever wrangler's
-`code_update_strategy` asked, immediate or a 5 s delay; and production's
-Registry, three computers and their agents' fragments, whose restarts
-came back on the old code that day, refused the new Worker for that
-long). One it cannot finish or verify goes back to the version live
+admits the new release, for 7 minutes, past Cloudflare's default five
+minutes of a busy object's old code, which the limit still covers while
+`immediate` proves itself on the preview's deploys (on 2026-10-24 a
+throwaway Worker found the setting ignored, and production's Registry,
+three computers and their agents' fragments refused the new Worker for
+five minutes; on 2026-10-30 it was honoured). One it cannot finish or
+verify goes back to the version live
 before it (`wrangler rollback`, its objects then left to Cloudflare's
 restart, which the same wait covers), unless that release's schema is
 not its own (Schemas, above): the job fails either way, never green over

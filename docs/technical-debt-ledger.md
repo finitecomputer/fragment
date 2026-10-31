@@ -715,6 +715,49 @@ fragment.club until cutover (decisions 34–35).
   workerd drain at shutdown: then `scope_images`, `remove`, and their
   calls in the e2e and `xtask dev` go. Moving the wrangler pin checks it.
 
+## A local node's port is a front door of ours, past wrangler's proxy
+
+- **Observed:** 2026-10-30, CI's e2e flakes. `wrangler dev` (4.145.0,
+  workerd 1.20260930) answers on its port through its ProxyWorker, a
+  Durable Object in a second workerd that pools its connections to the
+  runtime running the Worker. That runtime closes a connection idle 5 s,
+  and a request the proxy writes onto one as it closes is lost: a GET or
+  HEAD it asks again, anything else it answers 500 "Network connection
+  lost" (a test's PUT, run 40341674686; a CLI approval's POST,
+  40404853530; triggers' inbox, 40980576877). A node started from a
+  shell lost 25 to 60 of 192 PUTs sent on fresh connections 4.985 s
+  after a burst. Pages' module requests also went unanswered behind it
+  under load (the chat's fit, #704's and #707's shell reloads), which a
+  Worker of a few lines reproduced under wrangler and never with Chrome
+  sent straight to the runtime (0 of 1,882 loads). So the node's port
+  is `crates/devstack/src/front.rs`: each connection a client opens
+  passed byte for byte to the runtime, nothing pooled between them.
+- **Shortcut:** wrangler names the runtime's address only in its debug
+  output, where its proxy is told of each start and restart
+  (`reloadStart`, then `reloadComplete` with the address; a restart moves
+  the port). A node runs with `--log-level debug` always, front.rs reads
+  its output for those lines, and a connection opened during a restart
+  waits for the next address (at most 90 s), as wrangler's proxy holds a
+  request. A start whose runtime is never named fails, saying so. The
+  lines come from wrangler's inspector, which an inherited
+  `VSCODE_INSPECTOR_OPTIONS` (VS Code's JavaScript Debug Terminal) turns
+  off, so wrangler never gets that variable.
+- **Risk:** the lines are wrangler's internals, at the pinned version. A
+  wrangler that no longer writes them fails every node's start (loudly:
+  no client falls back to the proxy's path). Debug output makes a node's
+  log larger, `xtask dev`'s included.
+- **First proof:** a node start failing with "did not name its runtime's
+  address", `cargo test -p fragment-devstack --test front_door --
+  --ignored` answering a PUT through the front door with anything but
+  200, or `--test debug_terminal` (started and reloaded with that
+  variable set) failing.
+- **Delete when:** wrangler's proxy stops losing requests to its pool
+  (the upstream issue: a pool that lets an idle connection go before
+  the runtime closes it, or asks again a request no byte of which was
+  answered), or the local node runs Miniflare itself with its own port,
+  no proxy between: then front.rs, the debug level and the readers in
+  `Node::start` go.
+
 ## The cell signs code.storage tokens for any repo a fragment names
 
 - **Observed:** H1, and in the cell since phase 2 (`cell/src/keys.rs`).
@@ -1309,6 +1352,28 @@ fragment.club until cutover (decisions 34–35).
 - **First proof:** the Docker profile test against the next pinned image.
 - **Delete when:** Hermes' direct native image path uses an explicit SDK
   client from its active profile scope, including the result worker.
+
+## Hermes' tool workers can take an ended thread's interrupt
+
+- **Observed:** #776, 2026-10-30: the real-Hermes Docker lane's
+  `fragment list` came back "[Command interrupted]" (exit 130) in 0.08 s.
+  Hermes v0.21.7 keys a tool's interrupt by thread id. When a turn starts
+  while a background memory review runs, it cancels the review by its
+  thread's id, and the review may have just ended. A new thread usually has
+  the last ended one's id, and `_registered_tool_worker` clears a worker's
+  bit only as it ends. So the next tool worker reads that bit as its own.
+- **Stand-in:** the image's `tool_threads.py`, installed by its preload,
+  clears a tool worker's bit as it starts, before it is registered for
+  interrupts, so no real interrupt can have set it yet.
+- **Risk:** the adapter replaces a pinned upstream private function that
+  `tool_executor` and `terminal_approval_batch` look up at each call; an
+  upstream change could bypass it. The adapter doesn't cover other threads
+  that read their own bit (the execution thread already clears its bit as a
+  turn starts), or an interrupt that lands after the next worker started.
+- **First proof:** the Docker test `hermes_tool_workers_start_clean` runs
+  pinned Hermes' worker on recycled ids, with and without the adapter.
+- **Delete when:** upstream's `_registered_tool_worker` starts its worker
+  clean: that test's first assertion fails, saying so.
 
 ## Hermes keeps its providers' variable names from its terminal
 

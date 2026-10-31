@@ -36,8 +36,10 @@ use super::{said_id, Spool};
 pub const FORMAT: &str = "finite-chat-archive/1";
 /// The origin its conversations are keyed under: Hermes', whose ids they are.
 pub const ORIGIN: &str = "hermes";
-/// Which read this is (`Session::reader`).
-pub const READER: u32 = 10;
+/// Which read this is (`Session::reader`): 11 reads the files messages
+/// held (`attachments`), which 10 read none of, so it replaces 10's copy
+/// of a conversation as late.
+pub const READER: u32 = 11;
 /// The largest of its files read: a month's runs share one, and a chat's
 /// holds its pictures' base64 as Hermes stored them (read through, never
 /// held whole: the module's doc).
@@ -172,6 +174,8 @@ pub fn read(root: &Path, spool: &mut Spool) -> Result<Vec<String>> {
                 continue;
             };
             match session(h, &listed, index.agent.as_deref()) {
+                // a kind not asked for: none of its files are read
+                Ok((s, _)) if !spool.wants(s.kind) => {}
                 Ok((mut s, files)) => {
                     media(root, &mut s, files, spool, &mut problems)?;
                     spool.add(s)?;
@@ -382,6 +386,27 @@ pub(crate) mod tests {
         assert_eq!(c.messages[1].attachments.len(), 1, "a file two messages hold");
         assert_eq!(s.media.len(), 1, "is kept once");
         assert_eq!(std::fs::read(&s.media[&format!("media/{sha}.png")]).unwrap(), png);
+    }
+
+    /// Goal: a conversation of a kind not asked for has none of its files
+    /// read. Method: the export with a picture on its chat, read for its
+    /// scheduled runs alone.
+    #[test]
+    fn a_kind_not_asked_for_has_no_files_read() {
+        let root = super::super::tempdir();
+        export(&root);
+        let png = b"\x89PNG fake bytes";
+        std::fs::create_dir_all(root.join("chats/media")).unwrap();
+        std::fs::write(root.join("chats/media/plot.png"), png).unwrap();
+        let chat_path = root.join("chats/sessions/c1.json");
+        let mut chat: Value = serde_json::from_slice(&std::fs::read(&chat_path).unwrap()).unwrap();
+        chat["messages"][0]["attachments"] = json!([{ "name": "plot.png", "media_type": "image/png", "size": png.len(), "sha256": fragment_core::blob::sha256_hex(png), "path": "media/plot.png" }]);
+        std::fs::write(&chat_path, chat.to_string()).unwrap();
+        let mut s = Spool::new(BTreeSet::from([Kind::Cron])).unwrap();
+        let problems = read(&root, &mut s).unwrap();
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(s.entries.keys().collect::<Vec<_>>(), ["hermes-r1"]);
+        assert!(s.media.is_empty(), "the chat's picture is not read");
     }
 
     /// Goal: an export is read only inside its `chats/`, and what it cannot

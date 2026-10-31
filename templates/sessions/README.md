@@ -22,7 +22,7 @@ import reads are cli/src/session/.
   | `format` | `session-archive/1` |
   | `id` | its id where it came from (Hermes': the session it began as) |
   | `origin` | where it came from: `hermes` |
-  | `reader` | which read made it: 10 the old Finite's export, 20 Hermes' own database (a later, better or fixed read takes a higher number: An import) |
+  | `reader` | which read made it: 11 the old Finite's export (10 before it read the files messages held), 20 Hermes' own database (a later, better or fixed read takes a higher number: An import) |
   | `agent` | the agent it was with, as its origin named it (optional) |
   | `kind` | `chat` (a person's conversation with the agent), `cron` (a scheduled job's run), `subagent` (a side task the agent ran) |
   | `title` | its own, else the first line its person said (80 characters), else `Untitled` |
@@ -68,8 +68,14 @@ fragment's is.
   origin's stores) is found by its key and replaced only by a newer copy
   of it: one last said later, or as late from a better read (a higher
   `reader`: a reader fixed since, so its fixes reach archives made
-  before). The same bytes, an older copy, or one as late from a read no
-  better, write nothing.
+  before), or as late from as good a read holding more of its files (one
+  missing before, found since). The same bytes, an older copy, or one as
+  late from a read no better, write nothing.
+- **Files go with what keeps them.** A message's file is read only for a
+  conversation of a kind the import asks for; it counts toward the
+  archive's bytes with the conversation that keeps it, and goes up only
+  with a conversation written: none of a refused conversation's, nor of a
+  copy set aside for a newer one (the import's own or the archive's).
 - **Conversations first, then the indexes.** An import writes its new and
   newer conversations a batch a commit (at most 256 files and 16 MiB of
   them), then every index they change in one last commit, made from main
@@ -139,13 +145,16 @@ the file's sha256, and one section a turn (fragment_core::session_search).
   `hermes-v0.21.7.sql`): a conversation is a session and the ones Hermes
   continued it in each time it compressed, as Hermes' own session list
   joins them; its messages are what Hermes shows a person, each once. A
-  better read than the export's (20 to 10), which kept a compression's
+  better read than the export's (20 to 11), which kept a compression's
   copied tail twice. Bounded by what is kept: SQLite hands over only a
   message's text parts and a mark for each medium (never a picture's
   data), each call's id, name and the start of its arguments, and a
-  tool's output and reasoning their cut's worth; a conversation whose
-  kept rows pass twice its limit is refused alone, and a database of more
-  than 200,000 sessions whole. On a platform computer (the CLI as its
+  tool's output and reasoning their cut's worth (a list that is no list
+  of typed parts, as a person's `["red", "blue"]`, kept as the text it
+  is); a conversation whose kept rows (each row counted, empty or not)
+  pass twice its limit is refused alone, and so is one SQLite cannot read
+  whole, never kept as the part read; a database of more than 200,000
+  sessions is refused whole. On a platform computer (the CLI as its
   agent) its own databases (its Hermes root's, any profile's) are
   refused: their conversations are chats here already.
 
