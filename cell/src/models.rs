@@ -731,11 +731,16 @@ pub(crate) enum Embedding {
 
 /// `inputs` (bounded: `embed::bound`) embedded on the deployment's
 /// embeddings slot, metered to `payer` as a model call is (`gate`, then
-/// charged after its answer at its input tokens). An answer that is not
+/// charged after its answer at its input tokens); refused, 403, on a
+/// deployment that embeds nothing (`Models::embeddings_refused`: its tiers
+/// are private and its slot is not). An answer that is not
 /// the slot's (another count, another length) is charged, as it was paid
 /// for, and refused 502: a vector of another space is never passed on.
 pub(crate) async fn embedded(env: &Env, inputs: &[String], payer: &str, agent: Option<&str>, fragment: Option<&InFragment<'_>>, after: &dyn Background) -> CellResult<Embedding> {
     let cfg = Config::from_env(env);
+    if let Some(why) = cfg.models.embeddings_refused() {
+        return Err(CellError::new(ErrorCode::Forbidden, why));
+    }
     let slot = &cfg.models.embeddings;
     let mut charge = gate(env, payer, agent, fragment, slot.upstream.model(), embed::EMBEDDINGS).await?;
     let request = embed::request(slot, inputs);

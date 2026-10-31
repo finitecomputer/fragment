@@ -11,6 +11,13 @@
 //! length than the slot's is refused (`answer`), never passed on. Each is
 //! unit length, so a dot product is a cosine whichever API made it.
 //!
+//! A slot reads at most `max_input_tokens` of an input (its model's
+//! window; BGE-M3's on Workers AI is 512): an input past it is refused,
+//! never cut, so its caller splits a long text (the search capability
+//! embeds a section's chunks). A deployment whose tiers are private embeds
+//! only on a slot marked private (Paul's rule: Finite Private never falls
+//! back to a model that is not; `Models::embeddings_refused`).
+//!
 //! A call is charged after its answer, at its input tokens, at its model's
 //! row in the price book (BGE-M3's on Workers AI; a self-hosted slot names
 //! its own `price`, as any OpenAI-compatible slot does). An API that
@@ -36,14 +43,20 @@ pub const MODEL_DEFAULT: &str = "@cf/baai/bge-m3";
 pub const DIMENSIONS_DEFAULT: u32 = 1024;
 /// A slot's dimensions, at most.
 pub const DIMENSIONS_MAX: u32 = 4096;
+/// The tokens of an input a slot reads unless it names its own
+/// (`max_input_tokens`): BGE-M3's on Workers AI (AI Search's model table,
+/// read 2026-10-30), the fewest of the models it might run.
+pub const MAX_INPUT_TOKENS_DEFAULT: u32 = 512;
+/// A slot's `max_input_tokens`, at most.
+pub const MAX_INPUT_TOKENS_MAX: u32 = 32_768;
 /// A slot's `version`, at most: a tag the deployment pins, not prose.
 pub const VERSION_MAX_BYTES: usize = 32;
 /// Inputs one call embeds, at most (Workers AI's text embedding models take
 /// a batch of 100).
 pub const INPUTS_MAX: usize = 100;
-/// One input, at most: a search section is 8,000 characters (the brain's
-/// `SECTION_MAX_CHARS`), and a model reads its window's first tokens of a
-/// longer one.
+/// One input, at most, whatever its slot's window: a slot's own is its
+/// `max_input_tokens` counted at `ESTIMATE_BYTES_A_TOKEN` (`Slot::
+/// max_input_bytes`).
 pub const INPUT_MAX_BYTES: usize = 32 * 1024;
 /// A call's body, at most: `INPUTS_MAX` inputs a third of `INPUT_MAX_BYTES`
 /// each, about a search upsert's batch.
@@ -59,6 +72,11 @@ pub struct Slot {
     pub upstream: Upstream,
     pub dimensions: u32,
     pub version: Option<String>,
+    /// The tokens of an input its model reads.
+    pub max_input_tokens: u32,
+    /// Its model is private: confidential inference that keeps nothing
+    /// (a slot's `"private": true`, as a chat slot's; never Workers AI's).
+    pub private: bool,
 }
 
 /// The vector space a slot's answers are in: compare only vectors of one.
@@ -71,7 +89,7 @@ pub struct Space<'a> {
 
 impl Default for Slot {
     fn default() -> Slot {
-        Slot { upstream: Upstream::WorkersAi { model: MODEL_DEFAULT.into() }, dimensions: DIMENSIONS_DEFAULT, version: None }
+        Slot { upstream: Upstream::WorkersAi { model: MODEL_DEFAULT.into() }, dimensions: DIMENSIONS_DEFAULT, version: None, max_input_tokens: MAX_INPUT_TOKENS_DEFAULT, private: false }
     }
 }
 
@@ -79,11 +97,19 @@ impl Slot {
     pub fn space(&self) -> Space<'_> {
         Space { model: self.upstream.model(), dimensions: self.dimensions, version: self.version.as_deref() }
     }
+
+    /// An input's most bytes: its window's tokens at `ESTIMATE_BYTES_A_TOKEN`
+    /// a token (an English token is about four), within `INPUT_MAX_BYTES`.
+    pub fn max_input_bytes(&self) -> usize {
+        (self.max_input_tokens as usize * ESTIMATE_BYTES_A_TOKEN).min(INPUT_MAX_BYTES)
+    }
 }
 
 /// A deployment's `models.embeddings`, taken off `models` (the default when
 /// unnamed): an `Upstream` with its `dimensions` (required: the space is
-/// the deployment's to say, never guessed) and an optional `version`.
+/// the deployment's to say, never guessed), an optional `version`, its
+/// window (`max_input_tokens`, `MAX_INPUT_TOKENS_DEFAULT` unnamed) and
+/// whether it is private.
 /// Where it runs is checked as every slot's is (`Models::parse`).
 pub fn slot_of(models: &mut Value) -> Result<Slot, String> {
     let Some(mut row) = models.as_object_mut().and_then(|m| m.remove(EMBEDDINGS)) else { return Ok(Slot::default()) };
@@ -98,7 +124,16 @@ pub fn slot_of(models: &mut Value) -> Result<Slot, String> {
         Some(Value::String(v)) if crate::price::printable(&v, VERSION_MAX_BYTES) => Some(v),
         Some(other) => return Err(format!("models.embeddings: version is the tag its model is pinned at (1 to {VERSION_MAX_BYTES} printable characters), not {other}")),
     };
-    for key in ["images", "private", "fallback", "label", "vision", "reasoning", "max_tokens", "deep"] {
+    let max_input_tokens = match o.remove("max_input_tokens") {
+        None => MAX_INPUT_TOKENS_DEFAULT,
+        Some(v) => v.as_u64().filter(|n| (1..=u64::from(MAX_INPUT_TOKENS_MAX)).contains(n)).map(|n| n as u32).ok_or_else(|| format!("models.embeddings: max_input_tokens is the tokens of an input its model reads, 1 to {MAX_INPUT_TOKENS_MAX}, not {v}"))?,
+    };
+    let private = match o.remove("private") {
+        None => false,
+        Some(Value::Bool(b)) => b,
+        Some(other) => return Err(format!("models.embeddings: private is true (its model is private: confidential inference that keeps nothing) or false, not {other}")),
+    };
+    for key in ["images", "fallback", "label", "vision", "reasoning", "max_tokens", "deep"] {
         if o.contains_key(key) {
             return Err(format!("models.embeddings: {key} is a chat slot's, not an embeddings slot's"));
         }
@@ -107,7 +142,7 @@ pub fn slot_of(models: &mut Value) -> Result<Slot, String> {
     if let Upstream::Openai { body: Some(_), .. } = &upstream {
         return Err("models.embeddings: body is a chat slot's (an API's own fields for its chat completions)".into());
     }
-    Ok(Slot { upstream, dimensions, version })
+    Ok(Slot { upstream, dimensions, version, max_input_tokens, private })
 }
 
 /// How the client reads its vectors: OpenAI's `encoding_format`.
@@ -133,7 +168,7 @@ pub enum Refusal {
     Input,
     Empty,
     TooMany(usize),
-    TooLong(usize),
+    TooLong { index: usize, tokens: u32, bytes: usize },
     Model(String),
     Dimensions(u64),
     Format(String),
@@ -145,7 +180,7 @@ impl Refusal {
             Refusal::Input => "input is a string or an array of strings (token arrays are not taken)".into(),
             Refusal::Empty => "an input is some text: an empty one has no embedding".into(),
             Refusal::TooMany(n) => format!("a call embeds 1 to {INPUTS_MAX} inputs, not {n}"),
-            Refusal::TooLong(i) => format!("input {i} is past {INPUT_MAX_BYTES} bytes"),
+            Refusal::TooLong { index, tokens, bytes } => format!("input {index} is past the embeddings slot's {tokens} tokens ({bytes} bytes, a token counted every {ESTIMATE_BYTES_A_TOKEN}): split it, as nothing is cut"),
             Refusal::Model(m) => format!("model is {EMBEDDINGS} or the embeddings slot's own model, not {m:?}"),
             Refusal::Dimensions(d) => format!("dimensions is the slot's own when named: this deployment's vectors are not cut to {d}"),
             Refusal::Format(f) => format!("encoding_format is float or base64, not {f:?}"),
@@ -154,7 +189,8 @@ impl Refusal {
 }
 
 /// `body` (OpenAI's embeddings request), checked against `slot`: `input`
-/// one string or 1 to `INPUTS_MAX` of them, each 1 to `INPUT_MAX_BYTES`;
+/// one string or 1 to `INPUTS_MAX` of them, each 1 to the slot's
+/// `max_input_bytes`;
 /// `model`, when named, `embeddings` or the slot's model; `dimensions`,
 /// when named, the slot's; `encoding_format` float (unnamed) or base64.
 /// Nothing else of the client's is read, and nothing of it is sent on.
@@ -167,8 +203,8 @@ pub fn bound(body: &Value, slot: &Slot) -> Result<Bounded, Refusal> {
     if inputs.is_empty() || inputs.len() > INPUTS_MAX {
         return Err(Refusal::TooMany(inputs.len()));
     }
-    if let Some(i) = inputs.iter().position(|t| t.len() > INPUT_MAX_BYTES) {
-        return Err(Refusal::TooLong(i));
+    if let Some(index) = inputs.iter().position(|t| t.len() > slot.max_input_bytes()) {
+        return Err(Refusal::TooLong { index, tokens: slot.max_input_tokens, bytes: slot.max_input_bytes() });
     }
     if inputs.iter().any(|t| t.trim().is_empty()) {
         return Err(Refusal::Empty);
@@ -311,7 +347,7 @@ mod tests {
     use super::*;
 
     fn openai_slot() -> Slot {
-        let mut models = json!({ "embeddings": { "provider": "openai", "base_url": "http://127.0.0.1:8080/v1", "model": "BAAI/bge-m3", "dimensions": 3, "version": "2024-01", "price": { "input": 0, "output": 0 } } });
+        let mut models = json!({ "embeddings": { "provider": "openai", "base_url": "http://127.0.0.1:8080/v1", "model": "BAAI/bge-m3", "dimensions": 3, "version": "2024-01", "max_input_tokens": 8192, "private": true, "price": { "input": 0, "output": 0 } } });
         slot_of(&mut models).unwrap()
     }
 
@@ -320,11 +356,14 @@ mod tests {
         assert_eq!(slot_of(&mut json!({})).unwrap(), Slot::default());
         let s = openai_slot();
         assert_eq!(s.space(), Space { model: "BAAI/bge-m3", dimensions: 3, version: Some("2024-01") });
+        assert!(s.private && s.max_input_bytes() == 8192 * ESTIMATE_BYTES_A_TOKEN && Slot::default().max_input_bytes() == 1536);
         for (row, why) in [
             (json!({ "provider": "workers_ai", "model": "@cf/baai/bge-m3" }), "dimensions"),
             (json!({ "provider": "workers_ai", "model": "@cf/baai/bge-m3", "dimensions": 0 }), "dimensions"),
             (json!({ "provider": "workers_ai", "model": "@cf/baai/bge-m3", "dimensions": 1024, "version": "a b" }), "version"),
-            (json!({ "provider": "workers_ai", "model": "@cf/baai/bge-m3", "dimensions": 1024, "private": true }), "private"),
+            (json!({ "provider": "workers_ai", "model": "@cf/baai/bge-m3", "dimensions": 1024, "private": "yes" }), "private"),
+            (json!({ "provider": "workers_ai", "model": "@cf/baai/bge-m3", "dimensions": 1024, "max_input_tokens": 0 }), "max_input_tokens"),
+            (json!({ "provider": "workers_ai", "model": "@cf/baai/bge-m3", "dimensions": 1024, "images": true }), "images"),
             (json!({ "provider": "openai", "base_url": "https://x.example/v1", "model": "m", "dimensions": 8, "body": {} }), "body"),
             (json!("bge"), "an object"),
         ] {
@@ -343,7 +382,8 @@ mod tests {
         assert_eq!(refused(json!({ "input": [1, 2] })), Refusal::Input);
         assert_eq!(refused(json!({ "input": [] })), Refusal::TooMany(0));
         assert_eq!(refused(json!({ "input": vec!["x"; INPUTS_MAX + 1] })), Refusal::TooMany(INPUTS_MAX + 1));
-        assert_eq!(refused(json!({ "input": ["ok", "x".repeat(INPUT_MAX_BYTES + 1)] })), Refusal::TooLong(1));
+        assert_eq!(refused(json!({ "input": ["ok", "x".repeat(1537)] })), Refusal::TooLong { index: 1, tokens: 512, bytes: 1536 });
+        assert!(bound(&json!({ "input": "x".repeat(1536) }), &s).is_ok(), "a window's bytes exactly");
         assert_eq!(refused(json!({ "input": " " })), Refusal::Empty);
         assert_eq!(refused(json!({ "input": "x", "model": "cheap" })), Refusal::Model("cheap".into()));
         assert_eq!(refused(json!({ "input": "x", "dimensions": 256 })), Refusal::Dimensions(256));

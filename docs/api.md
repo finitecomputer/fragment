@@ -2194,9 +2194,11 @@ model an agent runs by its id (Paul, 2026-10-20: the agent's page said
 Embeddings (fragment_core::embed; the search stack's model):
 - **The slot.** A deployment's `models.embeddings`: where its embeddings
   run and the space their vectors are in, `{provider, model, dimensions,
-  version?}` (`key` and `price` as any slot on an OpenAI-compatible API
-  names them). Unnamed, BGE-M3 on Workers AI (`@cf/baai/bge-m3`, 1,024
-  dimensions); a self-hosted deployment names a model on its own
+  version?, max_input_tokens?, private?}` (`key` and `price` as any slot
+  on an OpenAI-compatible API names them; `max_input_tokens`, the tokens
+  of an input its model reads, 512 unnamed). Unnamed, BGE-M3 on Workers
+  AI (`@cf/baai/bge-m3`, 1,024 dimensions, its 512-token window); a
+  self-hosted deployment names a model on its own
   machines, an OpenAI-compatible `POST <base_url>/embeddings`. It is no
   chat slot: no call names it as one, no route falls back to it, and it
   runs no chat slot's model.
@@ -2206,8 +2208,17 @@ Embeddings (fragment_core::embed; the search stack's model):
   never passed on: 502, and charged (it was paid for). A change of the
   slot's model, dimensions or version is a new space: vectors of two are
   never compared, so what keeps vectors re-embeds them.
+- **Private.** A deployment whose tiers are private embeds only on a
+  slot marked private (`"private": true`: a confidential API, never
+  Workers AI or OpenRouter), as Finite Private never falls back to a
+  model that is not: without one, every call is refused 403, saying why,
+  and the deployment's search answers by words alone. Its deploy is not
+  refused.
 - **Refusals before anything is sent.** `input` other than a string or 1
-  to 100 strings (token arrays included), an empty one, one past 32 KiB,
+  to 100 strings (token arrays included), an empty one, one past the
+  slot's window (its `max_input_tokens` at a token every 3 bytes: 1,536
+  bytes for BGE-M3's 512; nothing is cut, so a caller splits a long
+  text, as the search capability embeds a section's chunks),
   `model` other than `embeddings` or the slot's model, `dimensions` other
   than the slot's (vectors are never cut), and `encoding_format` other
   than `float` (the default) or `base64` (each vector's little-endian

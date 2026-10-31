@@ -159,7 +159,10 @@
     // /embeddings (Hugging Face's TEI, say), at the price it names:
     //   "embeddings": { "provider": "openai", "base_url": "https://embed.example.internal/v1",
     //                   "key": "fragment-embeddings-key", "model": "BAAI/bge-m3",
-    //                   "dimensions": 1024, "version": "1", "price": { "input": 0, "output": 0 } }
+    //                   "dimensions": 1024, "version": "1", "max_input_tokens": 8192,
+    //                   "price": { "input": 0, "output": 0 } }
+    // (a deployment whose tiers are private embeds only on a slot marked
+    // "private": true, a confidential API: without one, it embeds nothing)
   },
   // Or its tiers on Finite Private, Finite's GLM-5.3 Flash on Tinfoil (its
   // key, `fpk_live_…`, issued by finite.computer; decision 61, 2026-10-14):

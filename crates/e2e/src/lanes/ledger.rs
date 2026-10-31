@@ -1129,6 +1129,7 @@ fn embeddings_route(s: &mut Suite, api: &Api, wait: Duration) -> Result<()> {
     let mut refused = Vec::new();
     for (body, why) in [
         (json!({ "input": vec!["x"; fragment_core::embed::INPUTS_MAX + 1] }), "1 to 100 inputs"),
+        (json!({ "input": ["ok", "word ".repeat(400)] }), "past the embeddings slot's 512 tokens"),
         (json!({ "input": [" "] }), "has no embedding"),
         (json!({ "input": [1, 2] }), "token arrays are not taken"),
         (json!({ "input": "x", "dimensions": 256 }), "not cut to 256"),
@@ -1138,7 +1139,7 @@ fn embeddings_route(s: &mut Suite, api: &Api, wait: Duration) -> Result<()> {
         refused.push((r.status == 400 && r.message().contains(why), r.status, r.message().to_string()));
     }
     s.ok(
-        "too many inputs, an empty one, tokens for text, another length and a chat model are refused, 400, saying why, nothing sent or charged",
+        "too many inputs, one past the slot's window (nothing is cut), an empty one, tokens for text, another length and a chat model are refused, 400, saying why, nothing sent or charged",
         refused.iter().all(|(ok, _, _)| *ok) && s.ai.calls().len() == calls && aig().len() == before,
         format!("{refused:?}"),
     );
