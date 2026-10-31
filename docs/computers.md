@@ -2232,6 +2232,14 @@ and Hermes' Bot Mode tells it its `@handle` alone. An agent made before
 this whose `SOUL.md` still says its old name is told its name all the
 same; its owner, or the agent, may take the name out of its job.
 
+Its **role** (its agent fragment's `meta.role`, its status's `agentRole`:
+docs/api.md, "An agent's name and picture") is told the same way, read
+with its title: "Your role is chief of staff: what your owner made you
+for, as it is now." between its name and its owner's home, and none when
+it has none, so an edit reaches its next turn. Its `profile.yaml`'s
+description, what its teammates read it does in Hermes' roster, is its
+role, else its job's first line. Its job never copies the role.
+
 ### Bot Mode in our Hermes image
 
 Hermes' Bot Mode is on: each agent is a bot, and in its Bot Chat it has
