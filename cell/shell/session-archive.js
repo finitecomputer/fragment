@@ -80,11 +80,13 @@ export function createSessionArchive({
 
   // its chats whose words hold `q`, as `foundSessions` says them; none
   // without an archive, or on a host without search (404). Any other
-  // failure is the caller's to say.
+  // failure is the caller's to say. By their words alone (`lexical`), as
+  // History filters the person's own chats: a search by meaning answers
+  // its nearest whatever they hold, so it would filter out none.
   async function search(q) {
     const name = read.name;
     if (!name) return [];
-    const found = await api("POST", `/api/f/${seg(name)}/search`, { q, limit: SEARCH_LIMIT, fields: { kind: "chat" } }).catch((e) => (e.status === 404 ? null : Promise.reject(e)));
+    const found = await api("POST", `/api/f/${seg(name)}/search`, { q, limit: SEARCH_LIMIT, mode: "lexical", fields: { kind: "chat" } }).catch((e) => (e.status === 404 ? null : Promise.reject(e)));
     return foundSessions(found?.results);
   }
 
