@@ -61,6 +61,9 @@ const RETRY_MAX: Duration = Duration::from_secs(15 * 60);
 const SWEEP_TRIES: u32 = 3;
 /// Table names the sweep lists at a time.
 const SWEEP_PAGE: u32 = 1000;
+/// An ended scope's tombstone: a table of no rows named for it, which no
+/// scope's name can be (`api::valid_scope` has no dot).
+const ENDED: &str = ".ended";
 /// A table's vectors get an index (IVF_FLAT, by cosine) past this many
 /// chunks; below it a search compares them all (bench/search: exact at 17k
 /// chunks in milliseconds).
@@ -77,6 +80,8 @@ pub enum Error {
     SpaceChanged { current: Option<Space> },
     /// Chunks named no vector, and the table has none of their hashes.
     MissingVectors(Vec<String>),
+    /// The scope was ended (`end`): it is never written again.
+    Ended,
     Full,
     Engine(String),
 }
@@ -304,7 +309,7 @@ impl Store {
                     continue;
                 }
             };
-            for name in &names {
+            for name in names.iter().filter(|n| !n.ends_with(ENDED)) {
                 for tried in 1..=SWEEP_TRIES {
                     match self.entry(name).await {
                         Ok(_) => break,
@@ -374,6 +379,11 @@ impl Store {
             return Err(Error::SpaceChanged { current: entry.space.clone() });
         }
         let mut writes = entry.writes.lock().await;
+        if writes.dropped {
+            // dropped while this waited: made again, unless it was ended
+            drop(writes);
+            return Box::pin(self.upsert(scope, up)).await;
+        }
         let table = &entry.table;
         let current = revision_of(table, &up.source).await?;
         let version = table.version().await?;
@@ -419,6 +429,9 @@ impl Store {
             drop(tables);
             return Box::pin(self.upsert(scope, up)).await;
         }
+        if self.ended(scope).await? {
+            return Err(Error::Ended);
+        }
         if up.replaces.as_deref().is_some_and(|r| !r.is_empty()) {
             return Err(Error::Conflict { current: None });
         }
@@ -440,6 +453,9 @@ impl Store {
         }
         let Some(entry) = self.entry(scope).await? else { return Ok(false) };
         let mut writes = entry.writes.lock().await;
+        if writes.dropped {
+            return Ok(false);
+        }
         let filter = format!("source = {}", quote(source));
         if entry.table.count_rows(Some(filter.clone())).await? == 0 {
             return Ok(false);
@@ -550,14 +566,43 @@ impl Store {
         Ok(fuse(&legs, &s.q, limit))
     }
 
+    /// `scope`'s table dropped; written again, it is made again (a new
+    /// space's).
     pub async fn drop_table(&self, scope: &str) -> Result<bool> {
         let mut tables = self.tables.lock().await;
+        self.dropped(&mut tables, scope).await
+    }
+
+    /// `scope` ended: its tombstone made, then its table dropped, so no
+    /// write makes it again, however late it comes (one sent before the
+    /// end, say). Its life is over: a scope is one life of one fragment.
+    pub async fn end(&self, scope: &str) -> Result<bool> {
+        let mut tables = self.tables.lock().await;
+        let tombstone = Arc::new(Schema::new(vec![Field::new("scope", DataType::Utf8, false)]));
+        match self.db.create_empty_table(format!("{scope}{ENDED}"), tombstone).execute().await {
+            Ok(_) | Err(lancedb::Error::TableAlreadyExists { .. }) => {}
+            Err(e) => return Err(e.into()),
+        }
+        self.dropped(&mut tables, scope).await
+    }
+
+    async fn dropped(&self, tables: &mut HashMap<String, Arc<Entry>>, scope: &str) -> Result<bool> {
         if let Some(e) = tables.remove(scope) {
+            // a write waiting for it finds it dropped (`upsert`)
             e.writes.lock().await.dropped = true;
             e.maintenance.send_modify(|m| m.pending = false);
         }
         match self.db.drop_table(scope, &[]).await {
             Ok(()) => Ok(true),
+            Err(lancedb::Error::TableNotFound { .. }) => Ok(false),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Whether `scope` was ended (`end`).
+    async fn ended(&self, scope: &str) -> Result<bool> {
+        match self.db.open_table(format!("{scope}{ENDED}")).execute().await {
+            Ok(_) => Ok(true),
             Err(lancedb::Error::TableNotFound { .. }) => Ok(false),
             Err(e) => Err(e.into()),
         }
