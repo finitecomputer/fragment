@@ -978,7 +978,8 @@ impl PrincipalCell {
                 At::Plan => self.plan(run).await?,
                 At::Owners { next } => self.owners(run, next, deadline).await?,
                 At::Readme => {
-                    self.entry(run, &core::readme_path(), core::README.as_bytes(), false).await?;
+                    let readme = crate::assets::read(&self.env, &fragment_templates::EXPORT_README).await?;
+                    self.entry(run, &core::readme_path(), &readme, false).await?;
                     run.job.at = At::Manifest;
                 }
                 At::Manifest => {
