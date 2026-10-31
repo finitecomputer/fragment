@@ -97,6 +97,15 @@ impl FragmentCell {
         Ok(standing)
     }
 
+    /// A role a member may be given here: on a connector, viewer at most, so
+    /// its members list says the role that counts (`only_owner_edits`).
+    pub(crate) fn connector_role(&self, role: Role) -> CellResult<()> {
+        if role > Role::Viewer && self.meta(MetaKey::DoorTemplate)?.is_some() {
+            return Err(CellError::invalid("a connector has no editor but its owner: add them as a viewer"));
+        }
+        Ok(())
+    }
+
     /// Its binding, while it is a door now: made from the template it runs
     /// unforked, and allowed by the deployment.
     fn open_binding(&self) -> CellResult<Option<Binding>> {
