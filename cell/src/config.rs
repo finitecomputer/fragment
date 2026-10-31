@@ -100,6 +100,10 @@ pub struct Config {
     /// AI binding's input to `<url>/run/<model>` instead (a fake at the
     /// vendor boundary, labeled so: models.rs) and needs no gateway.
     pub ai_url: Option<String>,
+    /// `FRAGMENT_SEARCH_URL`: the search service (search/README.md;
+    /// searchable.rs), beside the deployment, called with `SEARCH_TOKEN`;
+    /// none: this deployment has no search, and its routes answer 404.
+    pub search_url: Option<String>,
     /// `FRAGMENT_MAIL_FROM`: a bare address or unquoted `Name <address>`
     /// (the deploy config's `mail_from`), on a domain onboarded to Email
     /// Sending; none: the deployment sends no mail (mail.rs).
@@ -354,6 +358,7 @@ impl Config {
                 assert!(id != "default", "AI_GATEWAY_ID names the deployment's own gateway: `default` makes one that logs (spike S4)");
             }),
             ai_url: var(env, "FRAGMENT_AI_URL").map(|u| u.trim_end_matches('/').to_string()),
+            search_url: var(env, "FRAGMENT_SEARCH_URL").map(|u| u.trim_end_matches('/').to_string()),
             mail_from: env.var("FRAGMENT_MAIL_FROM").ok().map(|f| {
                 fragment_core::mail::Sender::parse(&f.to_string()).unwrap_or_else(|e| panic!("FRAGMENT_MAIL_FROM: {e}"))
             }),

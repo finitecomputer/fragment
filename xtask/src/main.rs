@@ -283,6 +283,7 @@ fn dev(args: &[String]) -> Result<()> {
         default_plan: Some("seat".into()),
         delivery_retry_s: None,
         workos: Some(workos),
+        search: None,
         stripe: Some(devstack::StripeVars {
             key: DEV_STRIPE_KEY.into(),
             webhook_secret: DEV_STRIPE_WEBHOOK.into(),

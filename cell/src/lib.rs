@@ -69,6 +69,7 @@ mod routed;
 mod schedules;
 mod schema;
 mod search;
+mod searchable;
 mod runs_on;
 mod serve;
 mod share;
@@ -1382,7 +1383,9 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
                 (_, [] | [""]) => return Err(CellError::new(ErrorCode::NotFound, format!("no route {path}"))),
                 _ => format!("/api/{}", rest.join("/")),
             };
-            let body = read_body(&mut req, limits::BODY_MAX_BYTES).await?;
+            // a search source is written whole, so its upsert's body is larger
+            let max = if rest == ["search", "upsert"] { fragment_proto::search::UPSERT_MAX_BYTES } else { limits::BODY_MAX_BYTES };
+            let body = read_body(&mut req, max).await?;
             // the inbox takes its token instead of a signature
             let mut extra = vec![];
             let principal = match inner.as_str() {
