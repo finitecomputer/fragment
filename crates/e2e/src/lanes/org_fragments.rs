@@ -19,7 +19,7 @@ use serde_json::{json, Value};
 
 use super::jobs::{settle, started};
 use super::ledger::{charged, entries, lever};
-use crate::api::{Api, Reply};
+use crate::api::{Api, Call, Reply};
 use crate::{Need, Suite};
 
 /// How long a run, a meter's flush or a list's row may take here.
@@ -124,7 +124,16 @@ pub fn org_fragments(s: &mut Suite, api: &Api) -> Result<()> {
     // each seen to work while they are in
     let mut manifest: Value = serde_json::from_str(include_str!("../../../../templates/calories/fragment.json"))?;
     manifest["channels"]["notes"] = json!({ "read": "viewer", "post": "viewer", "listed": { "kinds": ["note"], "fields": ["text"] } });
-    let files = json!([{ "path": "fragment.json", "text": serde_json::to_string_pretty(&manifest)? }]);
+    manifest["operations"]["notify"] = json!({
+        "kind": "mutation", "role": "editor", "description": "Pushes a title to the browsers subscribed under a tag (`*`: all).",
+        "input": { "type": "object", "required": ["title", "who"], "additionalProperties": false, "properties": { "title": { "type": "string", "maxLength": 100 }, "who": { "type": "string", "maxLength": 100 } } }
+    });
+    let app = include_str!("../../../../templates/calories/app.mjs").replacen(
+        "export class App extends DurableObject {\n",
+        "export class App extends DurableObject {\n  notify({ title, who }, call) {\n    call.push(who, { title });\n    return { ok: true };\n  }\n\n",
+        1,
+    );
+    let files = json!([{ "path": "fragment.json", "text": serde_json::to_string_pretty(&manifest)? }, { "path": "app.mjs", "text": app }]);
     let wrote = api.signed(&ada, "POST", &format!("/api/f/{name}/files"), Some(&json!({ "key": "listed-notes", "message": "a listed channel", "files": files })))?;
     let deployed = api.signed(&ada, "POST", &format!("/api/f/{name}/deploy"), Some(&json!({})))?;
     let note = |id: &str, text: &str| api.signed(&ada, "POST", &format!("/api/f/{name}/channels/notes"), Some(&json!({ "id": id, "body": { "kind": "note", "text": text } })));
@@ -132,16 +141,41 @@ pub fn org_fragments(s: &mut Suite, api: &Api) -> Result<()> {
     let hook = format!("{}/notify", s.push.url);
     let subs = [&cal, &ada].map(|k| api.signed(k, "POST", &format!("/api/f/{name}/subscriptions"), Some(&json!({ "channel": "replies", "url": hook }))));
     let replies = |s: &Suite| s.push.notified().iter().filter(|f| f["fragment"] == name.as_str() && f["channel"] == "replies").count();
+    // held on the queue (Alex's review): a webhook of theirs and browsers
+    // of theirs (an arbitrary tag, and their identity's) that fail while
+    // they are in, so what is queued to them waits for a retry; an active
+    // member's browsers under the same tags; and one of theirs under a tag
+    // nothing pushes to until their row from before is cleaned up
+    s.push.fail_hook("cal-held", 1000);
+    let held = api.signed(&cal, "POST", &format!("/api/f/{name}/subscriptions"), Some(&json!({ "channel": "replies", "url": format!("{}/notify/cal-held", s.push.url) })))?;
+    let browser = |who: &Keys, id: &str, tag: &str, seed: u8| {
+        let sub = s.push.subscribe(id, seed);
+        let body = json!({ "who": tag, "endpoint": sub.endpoint, "p256dh": sub.p256dh, "auth": sub.auth });
+        api.call(Call { method: "POST", url: api.site_url(&name, "__push-sub"), body: Some(body.to_string().into_bytes()), content_type: Some("application/json"), keys: Some(who), ..Call::default() })
+    };
+    let browsers = [
+        browser(&cal, "cal-tagged", "updates", 21)?,
+        browser(&cal, "cal-self", &cal_id, 22)?,
+        browser(&ada, "ada-tagged", "updates", 23)?,
+        browser(&cal, "cal-later", "later", 24)?,
+        browser(&ada, "ada-later", "later", 25)?,
+    ];
+    s.push.fail("cal-tagged", 1000);
+    s.push.fail("cal-self", 1000);
     let heard = replies(s);
     let noted = note("n1", "before they left")?;
     let r = api.op(&ada, &name, "summarize", "s-in", json!({}))?;
     settle(api, &ada, &name, started(&r), &["succeeded", "held"], WAIT);
     let both_heard = s.eventually(WAIT, || replies(s) == heard + 2);
     let listed_in = s.eventually(WAIT, || lists(&cal, "before they left"));
+    let pushed = [("p-tagged", "updates"), ("p-self", cal_id.as_str())].map(|(id, who)| api.op(&ada, &name, "notify", id, json!({ "title": "while in", "who": who })));
+    let active_heard = s.eventually(WAIT, || s.push.received("ada-tagged").iter().any(|p| p["title"] == "while in"));
     s.ok(
-        "while in, a member's list carries a listed channel's newest note, and their webhook hears its replies (beside its admin's)",
-        wrote.status == 200 && deployed.status == 200 && noted.status == 200 && subs.iter().all(|r| r.as_ref().is_ok_and(|r| r.status == 200)) && both_heard && listed_in,
-        json!([wrote.body, deployed.body, noted.body, replies(s) - heard]),
+        "while in, a member's list carries a listed channel's newest note, and their webhook hears its replies (beside its admin's); their failing webhook and browsers hold what is queued to them, while an active member's browser hears the push",
+        wrote.status == 200 && deployed.status == 200 && noted.status == 200 && subs.iter().all(|r| r.as_ref().is_ok_and(|r| r.status == 200)) && both_heard && listed_in
+            && held.status == 200 && browsers.iter().all(|r| r.status == 200) && pushed.iter().all(|r| r.as_ref().is_ok_and(|r| r.status == 200)) && active_heard
+            && s.push.hooked("cal-held").is_empty() && s.push.received("cal-tagged").is_empty() && s.push.received("cal-self").is_empty(),
+        json!([wrote.body, deployed.body, noted.body, replies(s) - heard, browsers.iter().map(|r| r.status).collect::<Vec<_>>()]),
     );
     // a second fragment of the org's, an invite to it waiting as they leave
     let made2 = api.signed(&ada, "POST", &format!("{root}/fragments"), Some(&json!({ "label": s.name("orgnotes"), "template": "calories" })))?;
@@ -160,6 +194,19 @@ pub fn org_fragments(s: &mut Suite, api: &Api) -> Result<()> {
             && out.status == 200 && out.body["epoch"] == 2 && out.body["active"] == false
             && fenced_read.status == 403 && fenced_write.status == 403 && fenced_sub.status == 403 && still_listed,
         json!([cal_in.body, out.body, fenced_read.body, fenced_write.body, fenced_sub.body]),
+    );
+    // what was held on the queue for them, retried once their endpoints
+    // answer, is refused before it is sent: each such subscription ends,
+    // its event says so, and nothing reaches them (Alex's review)
+    let fenced_events = || api.signed(&ada, "GET", &format!("/api/f/{name}/events?tail=200"), None).map(|r| r.text.matches("\"subscription.fenced\"").count()).unwrap_or(0);
+    s.push.fail_hook("cal-held", 0);
+    s.push.fail("cal-tagged", 0);
+    s.push.fail("cal-self", 0);
+    let refused = s.eventually(WAIT, || fenced_events() >= 3);
+    s.ok(
+        "offboarded, what was held on the queue for them (a record to their webhook, a push to their browsers under a tag and under their identity) is refused at its retry: nothing reaches them, each subscription ended",
+        refused && s.push.hooked("cal-held").is_empty() && s.push.received("cal-tagged").is_empty() && s.push.received("cal-self").is_empty(),
+        json!({ "fenced": fenced_events(), "hook": s.push.hooked("cal-held"), "tagged": s.push.received("cal-tagged"), "self": s.push.received("cal-self") }),
     );
     // nor by what reaches them unasked: their webhook from before hears no
     // new reply (its admin's does, in the same batch), and their list takes
@@ -191,6 +238,12 @@ pub fn org_fragments(s: &mut Suite, api: &Api) -> Result<()> {
     // invited back with nothing cleaned up first: their row from before is
     // no grant, so the invite is theirs to accept (Alex's review)
     let renewed = invite(&name, &cal)?;
+    // their row from before cleaned up by that invite, a push to a tag a
+    // browser of theirs from before is under reaches the active member's
+    // browser alone: a missing row is no grant either
+    let later = api.op(&ada, &name, "notify", "p-later", json!({ "title": "after the cleanup", "who": "later" }))?;
+    let later_heard = s.eventually(WAIT, || s.push.received("ada-later").iter().any(|p| p["title"] == "after the cleanup"));
+    let cal_later = s.push.received("cal-later");
     let back = accept(&name, &cal)?;
     let reads = api.signed(&cal, "GET", &format!("/api/f/{name}/status"), None)?;
     // back in by that one, the invite from before they left still admits no one
@@ -199,7 +252,8 @@ pub fn org_fragments(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok(
         "offboard_fence_survives_restart: an invite from before they left admits them no more (403); after a restart they are still fenced; a new invite, with their old row still there, admits them at their raised epoch; back in, the invite from before still admits no one",
         stale.status == 403 && held.status == 403 && renewed.status == 200 && back.status == 200 && reads.status == 200 && place(&cal_id)["epoch"] == 2 && place(&cal_id)["active"] == true
-            && stale_again.status != 200 && !in_name2,
+            && stale_again.status != 200 && !in_name2
+            && later.status == 200 && later_heard && !cal_later.iter().any(|p| p["title"] == "after the cleanup"),
         json!([stale.body, held.body, renewed.body, back.body, reads.body["role"], [stale_again.status, stale_again.body.clone()]]),
     );
 

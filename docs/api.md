@@ -2580,10 +2580,15 @@ cap (403). A person's agent working in it bills that person (decision
   request, a socket at its next frame after its minute's re-check, before
   their rows are cleaned up. What reaches them unasked is fenced too, by
   the registry's answer of who is in now (`PlacesNow`, one read a batch):
-  a delivery to a subscription of theirs (a webhook, a computer's wake, a
-  browser's push) is not sent and their subscriptions end, queued retries
-  too, and their list's row is taken away rather than sent a newer copy
-  (its listed records). A row from before their place now is no grant:
+  a delivery to a subscription of someone who may read it no more (a
+  webhook, a computer's wake, a browser's push under any tag, decided by
+  who subscribed) is not sent and the subscription ends, and the queue's
+  consumer asks the fragment again before each send and retry of an org's
+  delivery (`deliver/authorize`), sending nothing it cannot ask. Who may
+  is decided as a request of theirs would be: by a membership that counts
+  now (a stale or missing row is none) or else the fragment's visibility.
+  Their list's row is taken away rather than sent a newer copy (its
+  listed records). A row from before their place now is no grant:
   whatever admits them again (an invite, its yes, a content admin's own
   add) takes it away first and admits them afresh, at their epoch now, an
   ordinary member still by their own yes. An agent there acts `for` its

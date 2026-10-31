@@ -43,6 +43,7 @@
 //!   PUT    /api/cap                       owner: the fragment's monthly cap on the owner's ledger (meter.rs)
 //!   POST   /cap/files/read|list|stat      the app facet's `Files` capability (files.rs); never routed from outside
 //!   POST   /deliver/report                the delivery consumer (deliveries.rs); never routed from outside
+//!   POST   /deliver/authorize             the same, before an org's fragment's delivery is sent
 //!   GET    /api/card                      viewer: the preview card's JPEG (card.rs)
 //!   POST   /api/card  PUT /api/card       editor: a shot again; an upload as the card (card.rs)
 //!   POST   /meter/acked  /meter/whose     the ledger queue's consumer, and the model route (meter.rs); never routed from outside
@@ -924,10 +925,14 @@ impl FragmentCell {
             let bytes = req.bytes().await?;
             return json_response(&self.job_callback(&step, &bytes).await?);
         }
-        if path == "/deliver/report" {
+        if path == "/deliver/report" || path == "/deliver/authorize" {
             // Only the delivery consumer sets the header; the router never passes it.
             if req.headers().get(crate::deliveries::REPORT_HEADER)?.is_none() {
                 return Err(CellError::new(ErrorCode::NotFound, format!("no route {path}")));
+            }
+            if path == "/deliver/authorize" {
+                let ask = body_json(&mut req).await?;
+                return json_response(&self.delivery_authorize(&ask).await?);
             }
             let report = body_json(&mut req).await?;
             return json_response(&self.delivery_report(&report)?);

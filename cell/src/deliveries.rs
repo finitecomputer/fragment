@@ -24,7 +24,7 @@
 use std::time::Duration;
 
 use fragment_core::webpush::Tokens;
-use fragment_proto::{limits, ErrorCode};
+use fragment_proto::{limits, ErrorCode, Role};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use worker::*;
@@ -148,6 +148,11 @@ pub struct Delivery {
     /// The push or channel subscription it goes to (dropped on 404 or 410).
     #[serde(default)]
     pub sub: Option<i64>,
+    /// An org's fragment's: the consumer asks it before each send, retries
+    /// too, whether its subscriber may still be sent it (`authorized`;
+    /// Alex's review), and sends nothing it cannot ask.
+    #[serde(default)]
+    pub fenced: bool,
 }
 
 impl Delivery {
@@ -155,7 +160,7 @@ impl Delivery {
     pub(crate) fn json(fragment: &str, incarnation: &str, kind: DeliveryKind, url: String, body: &str, sub: Option<i64>) -> Delivery {
         let (fragment, incarnation) = (fragment.to_string(), incarnation.to_string());
         let body = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, body);
-        Delivery { fragment, incarnation, kind, url, headers: vec![("content-type".into(), "application/json".into())], body, sub }
+        Delivery { fragment, incarnation, kind, url, headers: vec![("content-type".into(), "application/json".into())], body, sub, fenced: false }
     }
 }
 
@@ -200,9 +205,11 @@ impl FragmentCell {
         rows.sort_by_key(|r| r["id"].as_i64());
         let (Ok(fragment), Ok(incarnation)) = (self.must(MetaKey::Name), self.must(MetaKey::CreatedAt)) else { return drained };
         let mut failed = false;
-        // an org's: a subscriber offboarded since is sent nothing more, and
-        // their subscription ends (Alex's review), queued retries too; not
-        // knowing who is, its records wait (`fenced_subs`)
+        // an org's: a subscriber who may read it no more is sent nothing,
+        // their subscription ended (Alex's review); not knowing who may,
+        // its records wait (`fenced_subs`). What it queues carries the
+        // flag the consumer asks again by (`authorized`)
+        let org = self.owner().is_ok_and(|o| o.org().is_some());
         let fenced = match self.fenced_subs(&rows).await {
             Ok(fenced) => fenced,
             Err(e) => {
@@ -224,7 +231,10 @@ impl FragmentCell {
                 Pending::Record { sub, .. } if fenced.contains(&sub) => self.outbox_done(id),
                 Pending::Record { sub, channel, seq } => match self.record_delivery(sub, &channel, seq, &fragment, &incarnation) {
                     Ok(Some(d)) if d.url.starts_with(WAKE_PREFIX) => wakes.push(Wake { id, attempts, computer: d.url, channel, seq }),
-                    Ok(Some(d)) => singles.push((id, attempts, d)),
+                    Ok(Some(mut d)) => {
+                        d.fenced = org;
+                        singles.push((id, attempts, d));
+                    }
                     Ok(None) => self.outbox_done(id),
                     Err(e) => self.outbox_failed(&mut failed, id, attempts, &e.message),
                 },
@@ -307,7 +317,7 @@ impl FragmentCell {
         let mut tokens = Tokens::new(&vapid, &self.cfg.platform_url, js::now_ms() / 1000);
         for _ in 0..PUSH_BATCHES_MAX {
             let subs = match self.rows(
-                "SELECT id, who, endpoint, p256dh, auth FROM push_subs WHERE id > ? AND id <= ? AND (? = '*' OR who = ?) ORDER BY id LIMIT ?",
+                "SELECT id, principal, endpoint, p256dh, auth FROM push_subs WHERE id > ? AND id <= ? AND (? = '*' OR who = ?) ORDER BY id LIMIT ?",
                 vec![SqlStorageValue::Integer(after), SqlStorageValue::Integer(upto), who.as_str().into(), who.as_str().into(), SqlStorageValue::Integer(QUEUE_BATCH as i64)],
             ) {
                 Ok(s) => s,
@@ -317,14 +327,26 @@ impl FragmentCell {
                 return self.outbox_done(id);
             };
             assert!(last > after, "a push's cursor moves forward");
-            // an org's: no browser of someone offboarded since is pushed to
-            let whose: Vec<String> = subs.iter().filter_map(|s| s["who"].as_str().map(str::to_string)).collect();
-            let stale = match self.stale_members(&whose).await {
-                Ok(stale) => stale,
+            // an org's: no browser of a subscriber who may see it no more
+            // is pushed to, whatever its tag, and its subscription ends
+            // (Alex's review); the consumer asks again before each send
+            let asks: Vec<(String, Role)> = subs.iter().map(|s| (s["principal"].as_str().unwrap_or("").to_string(), Role::Public)).collect();
+            let may = match self.receivers(&asks).await {
+                Ok(may) => may,
                 Err(e) => return self.outbox_failed(failed, id, attempts, &e.message),
             };
-            let subs: Vec<Value> = subs.into_iter().filter(|s| !s["who"].as_str().is_some_and(|w| stale.contains(w))).collect();
-            let deliveries = self.push_deliveries(&mut tokens, &subs, &payload, fragment, incarnation);
+            let mut kept = Vec::with_capacity(subs.len());
+            for (sub, may) in subs.into_iter().zip(may) {
+                match may {
+                    true => kept.push(sub),
+                    false => {
+                        let _ = self.exec("DELETE FROM push_subs WHERE id = ?", vec![SqlStorageValue::Integer(sub["id"].as_i64().expect("push_subs.id"))]);
+                    }
+                }
+            }
+            let subs = kept;
+            let org = self.owner().is_ok_and(|o| o.org().is_some());
+            let deliveries: Vec<Delivery> = self.push_deliveries(&mut tokens, &subs, &payload, fragment, incarnation).into_iter().map(|d| Delivery { fenced: org, ..d }).collect();
             if let Err(e) = self.enqueue(&deliveries).await {
                 return self.outbox_failed(failed, id, attempts, &e.message);
             }
@@ -338,35 +360,62 @@ impl FragmentCell {
         let _ = self.exec("DELETE FROM delivery_outbox WHERE id = ?", vec![SqlStorageValue::Integer(id)]);
     }
 
-    /// Of the claimed rows' record subscriptions, those whose subscriber's
-    /// membership counts no more (an org's fragment: `stale_members`),
-    /// each such subscriber's subscriptions ended as a removal ends them.
-    /// A person's fragment: none, and no registry read.
+    /// Of the claimed rows' record subscriptions, those whose subscriber
+    /// may read its channel no more (an org's fragment: `receivers`), each
+    /// ended as it is found. A person's fragment: none, and no registry
+    /// read.
     async fn fenced_subs(&self, rows: &[Value]) -> CellResult<std::collections::BTreeSet<i64>> {
         let mut fenced = std::collections::BTreeSet::new();
         if self.owner()?.org().is_none() {
             return Ok(fenced);
         }
         // bounded: DRAIN_ROWS rows
-        let mut by_sub: Vec<(i64, String)> = vec![];
+        let mut subs: Vec<i64> = vec![];
+        let mut asks: Vec<(String, Role)> = vec![];
         for row in rows {
-            if let Pending::Record { sub, .. } = decode(row) {
+            if let Pending::Record { sub, channel, .. } = decode(row) {
                 if let Some(who) = self.rows("SELECT principal FROM subs WHERE id = ?", vec![SqlStorageValue::Integer(sub)])?.first().and_then(|r| r["principal"].as_str().map(str::to_string)) {
-                    by_sub.push((sub, who));
+                    // a channel no longer declared reads at no one's role
+                    let read = self.channel_read_role(&channel).unwrap_or(Role::Owner);
+                    subs.push(sub);
+                    asks.push((who, read));
                 }
             }
         }
-        let whose: Vec<String> = by_sub.iter().map(|(_, w)| w.clone()).collect();
-        let stale = self.stale_members(&whose).await?;
-        for (sub, who) in by_sub {
-            if stale.contains(&who) {
+        for (sub, may) in subs.into_iter().zip(self.receivers(&asks).await?) {
+            if !may {
+                self.exec("DELETE FROM subs WHERE id = ?", vec![SqlStorageValue::Integer(sub)])?;
                 fenced.insert(sub);
             }
         }
-        for who in &stale {
-            self.drop_subscriptions(who)?;
-        }
         Ok(fenced)
+    }
+
+    /// `POST /deliver/authorize` from the consumer, before it sends an org's
+    /// fragment's queued delivery (`Delivery::fenced`), a retry too: whether
+    /// its subscription is still this life's and its subscriber may still
+    /// be sent it (`receivers`; Alex's review). One that may not is ended.
+    pub(crate) async fn delivery_authorize(&self, ask: &Authorize) -> CellResult<Value> {
+        if Some(ask.incarnation.as_str()) != self.meta(MetaKey::CreatedAt)?.as_deref() {
+            return Ok(json!({ "send": false }));
+        }
+        let Some(sub) = ask.sub else { return Ok(json!({ "send": false })) };
+        let (table, row) = match ask.kind {
+            DeliveryKind::Record => ("subs", self.rows("SELECT principal, channel FROM subs WHERE id = ?", vec![SqlStorageValue::Integer(sub)])?),
+            DeliveryKind::Push => ("push_subs", self.rows("SELECT principal FROM push_subs WHERE id = ?", vec![SqlStorageValue::Integer(sub)])?),
+        };
+        let Some(row) = row.first() else { return Ok(json!({ "send": false })) };
+        let read = match row["channel"].as_str() {
+            Some(channel) => self.channel_read_role(channel).unwrap_or(Role::Owner),
+            None => Role::Public,
+        };
+        let principal = row["principal"].as_str().unwrap_or("").to_string();
+        let may = self.receivers(&[(principal, read)]).await?.first().copied().unwrap_or(false);
+        if !may {
+            self.exec(&format!("DELETE FROM {table} WHERE id = ?"), vec![SqlStorageValue::Integer(sub)])?;
+            self.event("subscription.fenced", &format!("a queued {} delivery's subscriber may read it no more: not sent, its subscription ended", ask.kind.as_str()), json!({ "kind": ask.kind.as_str(), "sub": sub }));
+        }
+        Ok(json!({ "send": may }))
     }
 
     /// A row the queue did not take: it waits, or after its last try it
@@ -415,6 +464,15 @@ impl FragmentCell {
         }
         Ok(json!({ "ok": true }))
     }
+}
+
+/// What the consumer asks a fragment before it sends one of its fenced
+/// deliveries (`POST /deliver/authorize`).
+#[derive(Serialize, Deserialize)]
+pub(crate) struct Authorize {
+    incarnation: String,
+    kind: DeliveryKind,
+    sub: Option<i64>,
 }
 
 /// What the consumer tells a fragment about one of its deliveries
@@ -520,13 +578,36 @@ async fn consume_one(raw: RawMessage, env: &Env, cfg: &Config, dead: bool) {
         message.ack();
         return;
     }
-    match send(env, d).await {
-        Ok(None) => message.ack(),
-        Ok(Some(_)) | Err(_) => {
-            // no attempt count in workers-rs 0.8.5: the delay grows with the message's age
-            let age_s = ((js::now_ms() - message.timestamp().as_millis() as i64) / 1000).max(0) as u32;
-            let delay = age_s.clamp(cfg.delivery_retry_s, cfg.delivery_retry_max_s);
-            message.retry_with_options(&QueueRetryOptionsBuilder::new().with_delay_seconds(delay).build());
+    // an org's fragment's: asked first, each send and retry alike; one it
+    // may not send is dropped, and one it cannot ask waits (fails closed)
+    let retry = |message: &Message<Delivery>| {
+        // no attempt count in workers-rs 0.8.5: the delay grows with the message's age
+        let age_s = ((js::now_ms() - message.timestamp().as_millis() as i64) / 1000).max(0) as u32;
+        let delay = age_s.clamp(cfg.delivery_retry_s, cfg.delivery_retry_max_s);
+        message.retry_with_options(&QueueRetryOptionsBuilder::new().with_delay_seconds(delay).build());
+    };
+    if d.fenced {
+        match authorized(env, d).await {
+            Ok(true) => {}
+            Ok(false) => return message.ack(),
+            Err(_) => return retry(&message),
         }
     }
+    match send(env, d).await {
+        Ok(None) => message.ack(),
+        Ok(Some(_)) | Err(_) => retry(&message),
+    }
+}
+
+/// Whether the fragment says its fenced delivery `d` may be sent now
+/// (`POST /deliver/authorize`).
+async fn authorized(env: &Env, d: &Delivery) -> Result<bool> {
+    let body = serde_json::to_string(&Authorize { incarnation: d.incarnation.clone(), kind: d.kind, sub: d.sub }).map_err(|e| Error::RustError(e.to_string()))?;
+    let req = crate::routed::internal_request("deliver/authorize", &body).map_err(|e| Error::RustError(e.message))?;
+    let mut resp = crate::routed::send(env, "FRAGMENT", &d.fragment, req).await.map_err(|e| Error::RustError(e.message))?;
+    if resp.status_code() != 200 {
+        return Err(Error::RustError(format!("the fragment answered {}", resp.status_code())));
+    }
+    let answer: Value = resp.json().await?;
+    Ok(answer["send"] == true)
 }
