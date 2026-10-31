@@ -460,7 +460,41 @@ pub fn jobs(s: &mut Suite, api: &Api) -> Result<()> {
         &list,
     );
     secret_hosts(s, api, &owner, &upstream)?;
+    inbox_secret(s, api, &owner)?;
     channel_run_inputs(s, api, &owner)
+}
+
+/// Goal: an inbox whose code names a secret header (a webhook's own, as
+/// Telegram's is) takes a delivery only with that header holding that
+/// secret, and its inbox token, which its editors read, admits nothing.
+/// Method: the jobs fixture naming one; deliveries before its secret is
+/// set, with its token, with a wrong value, and with its secret.
+fn inbox_secret(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
+    const HOOK: &str = "hook-e2e-4b1d93c0";
+    let long = Duration::from_secs(40);
+    let (name, c) = jobs_fragment(s, api, owner, "inbox-secret", |m| m["inbox"] = json!({ "header": "x-hook-secret", "secret": "HOOK" }))?;
+    let token = c["inboxToken"].as_str().unwrap_or("").to_string();
+    let post = |extra: Vec<(&str, String)>| {
+        let body = json!({ "source": "hook", "payload": { "items": ["hooked"] } });
+        api.call(Call { method: "POST", url: format!("{}/api/f/{name}/inbox", api.base), body: Some(body.to_string().into_bytes()), content_type: Some("application/json"), extra, ..Call::default() })
+    };
+    let r = post(vec![("x-hook-secret", HOOK.into())])?;
+    s.ok("an inbox whose secret is not set takes nothing", r.status == 403 && r.text.contains("x-hook-secret"), &r);
+    let r = api.signed(owner, "PUT", &format!("/api/f/{name}/secrets/HOOK"), Some(&json!({ "value": HOOK, "hosts": ["api.telegram.org"] })))?;
+    anyhow::ensure!(r.status == 200, "the inbox's secret: {r}");
+    let r = post(vec![("x-fragment-inbox-token", token.clone())])?;
+    s.ok("its inbox token, which its editors read, admits nothing", r.status == 403, &r);
+    let r = post(vec![("x-hook-secret", format!("{HOOK}x"))])?;
+    s.ok("a wrong value in its header admits nothing", r.status == 403 && !r.text.contains(HOOK), &r);
+    let r = post(vec![("x-hook-secret", HOOK.into())])?;
+    let run = settle(api, owner, &name, r.body["runs"][0].as_i64().unwrap_or(0), &["succeeded", "held"], long);
+    let items = api.op(owner, &name, "items", "q", json!({}))?;
+    s.ok(
+        "with its secret in that header, a delivery is taken and its trigger runs",
+        r.status == 200 && run["status"] == "succeeded" && items.body["result"] == json!([{ "text": "hooked", "source": "hook" }]),
+        json!({ "post": r.body, "run": run, "items": items.body }),
+    );
+    Ok(())
 }
 
 /// Goal: a secret goes only to the hosts it names, over https (a local

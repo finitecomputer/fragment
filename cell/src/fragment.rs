@@ -383,6 +383,10 @@ pub(crate) enum MetaKey {
     /// (`<door> <agent fragment>`), set and cleared by its owner in person
     /// (doors.rs; fragment_core::door::Hosted).
     DoorActor,
+    /// The installed code's inbox secret (`<header> <SECRET>`): its inbox
+    /// takes a delivery only with that header holding that secret, and its
+    /// inbox token admits nothing (fragment_core::manifest::InboxDecl).
+    InboxSecret,
     /// The blessed connector template it was made from (`blessed::
     /// CONNECTORS`), while it runs no other code: no one but its owner edits
     /// it, and only then may it be a door (doors.rs).
@@ -463,6 +467,7 @@ impl MetaKey {
             MetaKey::Door => "door",
             MetaKey::DoorTicket => "door_ticket",
             MetaKey::DoorActor => "door_actor",
+            MetaKey::InboxSecret => "inbox_secret",
             MetaKey::DoorTemplate => "door_template",
             MetaKey::PrewakeAt => "prewake_at",
             MetaKey::TestFailAfterPaid => "test_fail_after_paid",
@@ -1124,13 +1129,20 @@ impl FragmentCell {
             (Method::Get, ["api", "subscriptions"]) => self.subscriptions(&caller),
             (Method::Delete, ["api", "subscriptions", id]) => self.unsubscribe(&caller, id),
             (Method::Post, ["api", "inbox"]) => {
-                let token = match req.headers().get("x-fragment-inbox-token")? {
-                    Some(t) => t,
-                    None => query("t").unwrap_or_default(),
+                // its code's inbox secret, else its inbox token
+                let given = match self.meta(MetaKey::InboxSecret)? {
+                    Some(declared) => {
+                        let (header, secret) = declared.split_once(' ').ok_or_else(|| CellError::host(format!("its inbox secret {declared:?} is not `<header> <SECRET>`")))?;
+                        crate::jobs::Admits::Secret { header: header.into(), name: secret.into(), given: req.headers().get(header)?.unwrap_or_default() }
+                    }
+                    None => crate::jobs::Admits::Token(match req.headers().get("x-fragment-inbox-token")? {
+                        Some(t) => t,
+                        None => query("t").unwrap_or_default(),
+                    }),
                 };
                 let hops = req.headers().get(crate::jobs::HOPS_HEADER)?.and_then(|h| h.parse().ok()).unwrap_or(0);
                 let body = req.bytes().await?;
-                self.inbox(&token, hops, &body).await
+                self.inbox(given, hops, &body).await
             }
             _ => Err(CellError::new(ErrorCode::NotFound, format!("no route {} {path}", req.method().as_ref()))),
         }
