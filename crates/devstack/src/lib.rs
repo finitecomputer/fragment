@@ -688,8 +688,10 @@ static LIVE: Mutex<Live> = Mutex::new(Live { ending: false, groups: Vec::new() }
 pub fn kill_nodes() {
     let mut live = LIVE.lock().unwrap_or_else(PoisonError::into_inner);
     live.ending = true;
+    // each still unreaped: a node strikes its group under this lock before
+    // it reaps its leader (`Node::reap`)
     for group in live.groups.drain(..) {
-        let _ = Command::new("kill").args(["-KILL", "--", &format!("-{group}")]).stderr(Stdio::null()).status();
+        let _ = kill_group(group);
     }
 }
 
@@ -773,8 +775,8 @@ impl Node {
             if text.contains(&format!("Ready on http://127.0.0.1:{proxied}")) {
                 break;
             }
-            if let Some(status) = node.child.try_wait()? {
-                node.reaped = true;
+            if exited_unreaped(node.child.id(), false)? {
+                let status = node.reap()?;
                 bail!("wrangler dev exited ({status}) before it was ready:\n{text}");
             }
             if t0.elapsed() > READY_TIMEOUT {
@@ -805,16 +807,15 @@ impl Node {
     pub fn stop(mut self) -> Result<()> {
         self.signal_group("-INT")?;
         let t0 = Instant::now();
-        while self.child.try_wait()?.is_none() {
+        while !exited_unreaped(self.child.id(), false)? {
             if t0.elapsed() > STOP_TIMEOUT {
                 self.kill();
                 bail!("wrangler dev did not stop within {STOP_TIMEOUT:?}");
             }
             std::thread::sleep(Duration::from_millis(50));
         }
-        self.reaped = true;
         // workerd may outlive wrangler by a moment; the port must be free for the next node
-        self.kill_group();
+        self.reap()?;
         Ok(())
     }
 
@@ -826,46 +827,156 @@ impl Node {
 
     /// Waits for `wrangler dev` to exit (the foreground `xtask dev`).
     pub fn wait(mut self) -> Result<std::process::ExitStatus> {
+        exited_unreaped(self.child.id(), true)?;
+        self.reap()
+    }
+
+    /// Reaps wrangler, which has exited and is not yet reaped (a zombie,
+    /// whose process group id stays this node's while it is one): first
+    /// its group's other processes SIGKILLed (workerd may outlive it), and
+    /// the group struck from `LIVE`, under its lock, so `kill_nodes` never
+    /// signals a group id the kernel is free to give another (#768).
+    fn reap(&mut self) -> Result<std::process::ExitStatus> {
+        assert!(!self.reaped, "a node is reaped once");
+        let mut live = LIVE.lock().unwrap_or_else(PoisonError::into_inner);
+        if self.own_group {
+            kill_group(self.child.id())?;
+            live.groups.retain(|g| *g != self.child.id());
+        }
+        // a zombie's: at once
         let status = self.child.wait()?;
         self.reaped = true;
-        self.kill_group();
         Ok(status)
     }
 
-    /// SIGKILL to its group, when it has one of its own (workerd may outlive
-    /// wrangler in it). Without one there is no group to reach, and a
-    /// reaped process's id is never signalled.
-    fn kill_group(&self) {
-        if self.own_group {
-            let _ = Command::new("kill").args(["-KILL", "--", &format!("-{}", self.child.id())]).stderr(Stdio::null()).status();
-        }
-    }
-
+    /// SIGKILL to wrangler and its group, a crash's, then reaped as `reap`.
     fn kill(&mut self) {
         if !self.reaped {
-            self.kill_group();
+            if self.own_group {
+                let _ = kill_group(self.child.id());
+            }
             let _ = self.child.kill();
-            let _ = self.child.wait();
-            self.reaped = true;
+            if exited_unreaped(self.child.id(), true).is_ok() {
+                let _ = self.reap();
+            }
+        }
+    }
+}
+
+/// SIGKILL to the process group `leader` leads, only while `leader` is a
+/// child of this process not yet reaped (alive, or a zombie), so the group
+/// id is still its own: a reaped one's may be another's by now, and is
+/// refused, unsignalled (`ECHILD`).
+fn kill_group(leader: u32) -> std::io::Result<()> {
+    exited_unreaped(leader, false)?;
+    let _ = Command::new("kill").args(["-KILL", "--", &format!("-{leader}")]).stderr(Stdio::null()).status();
+    Ok(())
+}
+
+/// Whether the child `pid` has exited, leaving it unreaped (`WNOWAIT`: a
+/// zombie, whose group id stays reserved); `block` waits for it.
+fn exited_unreaped(pid: u32, block: bool) -> std::io::Result<bool> {
+    let pid = libc::id_t::from(pid);
+    let flags = libc::WEXITED | libc::WNOWAIT | if block { 0 } else { libc::WNOHANG };
+    // bounded: a signal's interruption is tried again, and a child exits once
+    loop {
+        // SAFETY: waitid writes only `info`; WNOWAIT leaves the child for its `wait`
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        if unsafe { libc::waitid(libc::P_PID, pid, &mut info, flags) } == 0 {
+            // with WNOHANG and the child running, waitid leaves its pid 0
+            #[cfg(target_os = "linux")]
+            let exited = unsafe { info.si_pid() } != 0;
+            #[cfg(not(target_os = "linux"))]
+            let exited = info.si_pid != 0;
+            return Ok(exited);
+        }
+        let e = std::io::Error::last_os_error();
+        if e.kind() != std::io::ErrorKind::Interrupted {
+            return Err(e);
         }
     }
 }
 
 impl Drop for Node {
-    /// An early error must not leave a node holding the port. A reaped
-    /// leader's group id is never signalled but by `stop` and `wait`, right
-    /// after it exits, while workerd may still hold the group.
+    /// An early error must not leave a node holding the port. A group id is
+    /// signalled only while its leader is unreaped (`reap`, `kill`).
     fn drop(&mut self) {
         self.kill();
-        if self.own_group {
-            LIVE.lock().unwrap_or_else(PoisonError::into_inner).groups.retain(|g| *g != self.child.id());
-        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A node of `script` (`sh -c`) in a process group of its own, as
+    /// `start` makes wrangler's, listed live, its front on a free port; and
+    /// the pid the script prints first (a process of its group).
+    fn scripted_node(script: &str) -> (Node, u32) {
+        let mut child = Command::new("sh").args(["-c", script]).process_group(0).stdout(Stdio::piped()).stdin(Stdio::null()).spawn().unwrap();
+        let mut line = String::new();
+        std::io::BufRead::read_line(&mut std::io::BufReader::new(child.stdout.take().unwrap()), &mut line).unwrap();
+        let member: u32 = line.trim().parse().unwrap();
+        LIVE.lock().unwrap().groups.push(child.id());
+        let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let log = std::env::temp_dir().join(format!("devstack-node-{}.log", child.id()));
+        let file = Arc::new(Mutex::new(fs::File::create(&log).unwrap()));
+        let front = front::Front::bind(port, Arc::new(front::Heard::default()), file).unwrap();
+        (Node { child, own_group: true, base: format!("http://127.0.0.1:{port}"), port, log, reaped: false, _front: front }, member)
+    }
+
+    /// Whether `pid` runs (a zombie does not).
+    fn runs(pid: u32) -> bool {
+        let out = Command::new("ps").args(["-o", "stat=", "-p", &pid.to_string()]).output().unwrap();
+        let stat = String::from_utf8_lossy(&out.stdout);
+        !stat.trim().is_empty() && !stat.trim().starts_with('Z')
+    }
+
+    fn gone(pid: u32) {
+        let t0 = Instant::now();
+        // bounded: five seconds for a SIGKILL to land
+        while runs(pid) {
+            assert!(t0.elapsed() < Duration::from_secs(5), "{pid} still runs");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// Goal (#768): a node's process group is signalled only while its
+    /// leader is a child not yet reaped, so its group id is still the
+    /// node's: `stop` and `wait` wait for wrangler without reaping it,
+    /// SIGKILL its group (a process that outlives it, as workerd may),
+    /// strike the group from the live ones, and only then reap it. A
+    /// reaped leader's group is refused, unsignalled.
+    #[test]
+    fn a_nodes_group_is_signalled_only_while_its_leader_is_unreaped() {
+        // stop: its member ignores the SIGINT that ends its leader
+        let (node, member) = scripted_node("(trap '' INT; exec sleep 60) & echo $!; exec sleep 60");
+        let leader = node.child.id();
+        node.stop().unwrap();
+        gone(member);
+        assert!(!LIVE.lock().unwrap().groups.contains(&leader), "struck from the live groups");
+        // wait: its leader exits at once, its member still running
+        let (node, member) = scripted_node("sleep 60 & echo $!");
+        let leader = node.child.id();
+        assert!(node.wait().unwrap().success());
+        gone(member);
+        assert!(!LIVE.lock().unwrap().groups.contains(&leader));
+
+        // waiting without reaping: it stays a child to reap, its exit kept
+        let mut child = Command::new("sh").args(["-c", "exit 3"]).process_group(0).spawn().unwrap();
+        assert!(exited_unreaped(child.id(), true).unwrap());
+        assert!(exited_unreaped(child.id(), false).unwrap(), "asked again: still unreaped");
+        assert_eq!(child.wait().unwrap().code(), Some(3));
+        // reaped, its group id is no longer its: refused, unsignalled
+        assert!(exited_unreaped(child.id(), false).is_err());
+        assert!(kill_group(child.id()).is_err(), "a reaped leader's group is never signalled");
+        // running: not yet exited
+        let mut running = Command::new("sleep").arg("60").process_group(0).spawn().unwrap();
+        assert!(!exited_unreaped(running.id(), false).unwrap());
+        kill_group(running.id()).unwrap();
+        assert!(exited_unreaped(running.id(), true).unwrap());
+        running.wait().unwrap();
+    }
 
     /// A node started again on its port gets a log of its own, numbered
     /// after the last, and the earlier boot's log keeps what it holds.
