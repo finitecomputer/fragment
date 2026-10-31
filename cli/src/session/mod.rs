@@ -120,14 +120,56 @@ pub struct Spool {
     bytes: u64,
     kinds: BTreeSet<Kind>,
     refused: Vec<RefusedOne>,
+    /// The files messages held, by their archive path (`media_path`), each
+    /// once, spooled beside the conversations, and their bytes (`add_media`).
+    media: BTreeMap<String, PathBuf>,
+    media_bytes: u64,
+    /// The files each conversation kept names, by key: what goes up with
+    /// it, when it is written.
+    attached: BTreeMap<String, BTreeSet<String>>,
 }
+
+/// The bytes of files an import spools, at most: the files of
+/// conversations it keeps count toward the archive (`session::within`);
+/// this bounds the rest it reads on the way (a refused conversation's, a
+/// copy set aside for a newer one's).
+const SPOOL_MEDIA_MAX_BYTES: u64 = 2 * session::ARCHIVE_MAX_BYTES;
 
 impl Spool {
     fn new(kinds: BTreeSet<Kind>) -> Result<Spool> {
         clear_stale_spools(&std::env::temp_dir());
         let dir = std::env::temp_dir().join(format!("{SPOOL_PREFIX}{}-{:016x}", std::process::id(), rand::random::<u64>()));
         std::fs::create_dir_all(&dir).with_context(|| format!("making {}", dir.display()))?;
-        Ok(Spool { dir, entries: BTreeMap::new(), bytes: 0, kinds, refused: Vec::new() })
+        std::fs::create_dir_all(dir.join("media")).with_context(|| format!("making {}", dir.display()))?;
+        Ok(Spool { dir, entries: BTreeMap::new(), bytes: 0, kinds, refused: Vec::new(), media: BTreeMap::new(), media_bytes: 0, attached: BTreeMap::new() })
+    }
+
+    /// Whether an import keeps conversations of `kind` (`--kind`).
+    pub fn wants(&self, kind: Kind) -> bool {
+        self.kinds.is_empty() || self.kinds.contains(&kind)
+    }
+
+    /// A file a message held, its bytes checked against `a` (its hash and
+    /// size): spooled once; `false` when they are not what it names (the
+    /// message keeps it as a name alone). It counts toward the archive with
+    /// the conversation that keeps it (`add`), and goes up only with one
+    /// written (`write`).
+    pub fn add_media(&mut self, a: &session::Attachment, bytes: &[u8]) -> Result<bool> {
+        if bytes.len() as u64 != a.size || blob::sha256_hex(bytes) != a.sha256 {
+            return Ok(false);
+        }
+        let path = session::media_path(&a.sha256, &a.name);
+        if self.media.contains_key(&path) {
+            return Ok(true);
+        }
+        if self.media_bytes + a.size > SPOOL_MEDIA_MAX_BYTES {
+            bail!(CodedError { code: Code::TooLarge, msg: format!("the files its messages hold pass {} GiB", SPOOL_MEDIA_MAX_BYTES >> 30) });
+        }
+        let at = self.dir.join("media").join(&a.sha256);
+        std::fs::write(&at, bytes).with_context(|| format!("spooling {path}"))?;
+        self.media_bytes += a.size;
+        self.media.insert(path, at);
+        Ok(true)
     }
 
     fn path(&self, key: &str) -> PathBuf {
@@ -138,26 +180,30 @@ impl Spool {
     /// the format refuses is said, and the rest go on), the newer of two
     /// copies of one kept. An import past an archive's limits stops here.
     pub fn add(&mut self, s: Session) -> Result<()> {
-        if !self.kinds.is_empty() && !self.kinds.contains(&s.kind) {
+        if !self.wants(s.kind) {
             return Ok(());
         }
         let id = s.id.clone();
-        let (entry, bytes) = match s.normalized().filed() {
+        let s = s.normalized();
+        let files: BTreeSet<String> = s.messages.iter().flat_map(|m| &m.attachments).map(|a| a.path.clone()).collect();
+        let (entry, bytes) = match s.filed() {
             Ok(filed) => filed,
             Err(why) => {
                 self.refused.push(RefusedOne { id: said_id(&id), why: why.to_string() });
                 return Ok(());
             }
         };
+        // a conversation counts its files' bytes too (`Entry::media`)
         let replaced = match self.entries.get(&entry.key) {
             Some(held) if !entry.newer(held) => return Ok(()),
-            Some(held) => held.bytes,
+            Some(held) => held.bytes + held.media,
             None => 0,
         };
-        let count = self.entries.len() + usize::from(replaced == 0 && !self.entries.contains_key(&entry.key));
-        session::within(count, self.bytes - replaced + entry.bytes).map_err(too_much)?;
+        let count = self.entries.len() + usize::from(!self.entries.contains_key(&entry.key));
+        session::within(count, self.bytes - replaced + entry.bytes + entry.media).map_err(too_much)?;
         std::fs::write(self.path(&entry.key), &bytes).with_context(|| format!("spooling {}", entry.key))?;
-        self.bytes = self.bytes - replaced + entry.bytes;
+        self.bytes = self.bytes - replaced + entry.bytes + entry.media;
+        self.attached.insert(entry.key.clone(), files);
         self.entries.insert(entry.key.clone(), entry);
         Ok(())
     }
@@ -270,6 +316,8 @@ struct Held {
     head: Option<String>,
     indexed: BTreeMap<String, Entry>,
     stored: BTreeMap<String, Stored>,
+    /// The files `media/` holds, by path.
+    media: BTreeSet<String>,
 }
 
 struct Stored {
@@ -289,7 +337,7 @@ impl Held {
 
 fn held(storage: &CodeStorage, blobs: &Blobs) -> Result<Held> {
     let head = storage.branch_head(MAIN)?;
-    let Some(rev) = head.clone() else { return Ok(Held { head, indexed: BTreeMap::new(), stored: BTreeMap::new() }) };
+    let Some(rev) = head.clone() else { return Ok(Held { head, indexed: BTreeMap::new(), stored: BTreeMap::new(), media: BTreeSet::new() }) };
     let listed = storage.list_files(&rev)?;
     let paths: BTreeSet<&str> = listed.entries.iter().map(|e| e.path.as_str()).collect();
     // The indexes' last commit was made after its import read every file of
@@ -313,6 +361,7 @@ fn held(storage: &CodeStorage, blobs: &Blobs) -> Result<Held> {
             session::key_of_path(e.path.as_str()).map(|k| (k.to_string(), Stored { size: e.size, since }))
         })
         .collect();
+    let media = paths.iter().filter(|p| p.starts_with("media/")).map(|p| p.to_string()).collect();
     let mut indexed = BTreeMap::new();
     for kind in Kind::ALL {
         let path = session::index_path(kind);
@@ -328,7 +377,7 @@ fn held(storage: &CodeStorage, blobs: &Blobs) -> Result<Held> {
         };
         indexed.extend(index.sessions.into_iter().filter(|e| e.kind == kind).map(|e| (e.key.clone(), e)));
     }
-    Ok(Held { head, indexed, stored })
+    Ok(Held { head, indexed, stored, media })
 }
 
 /// The entry of each conversation whose file in `sessions/` the indexes
@@ -406,28 +455,34 @@ fn write(c: &Client, name: &str, spool: &Spool) -> Result<Written> {
     let (added, updated, unchanged) = (merge.added, merge.updated, merge.unchanged);
     let mut head = h.head;
 
-    // the conversations, a batch a commit
+    // the files the conversations hold that the archive lacks, then the
+    // conversations, a batch a commit: a file is there before what names it
+    // (of the conversations written alone: a copy set aside, or refused,
+    // sends none)
+    let named: BTreeSet<&String> = merge.writes.keys().filter_map(|k| spool.attached.get(k)).flatten().collect();
+    let files: Vec<(String, &PathBuf)> = named.into_iter().filter(|p| !h.media.contains(*p)).filter_map(|p| spool.media.get(p).map(|at| (p.clone(), at))).collect();
+    let conversations = merge.writes.iter().map(|(key, at)| (session::session_path(key), at));
     let mut batch: Vec<Change> = Vec::new();
     let mut batch_bytes = 0;
-    let total = merge.writes.len();
+    let total = files.len() + merge.writes.len();
     let mut sent = 0;
-    for (key, path) in &merge.writes {
+    for (repo_path, path) in files.into_iter().chain(conversations) {
         let stored = blobs.store(std::fs::read(path).with_context(|| format!("reading back {}", path.display()))?)?;
         batch_bytes += stored.len();
-        batch.push(Change::Upsert { path: RepoPath::parse(&session::session_path(key)).map_err(|e| anyhow!("{e}"))?, bytes: stored });
+        batch.push(Change::Upsert { path: RepoPath::parse(&repo_path).map_err(|e| anyhow!("{e}"))?, bytes: stored });
         if batch.len() >= BATCH_FILES || batch_bytes >= BATCH_BYTES {
             sent += batch.len();
-            head = commit(&storage, &author, head, &format!("session import: {sent} of {total} conversations"), &batch)?;
+            head = commit(&storage, &author, head, &format!("session import: {sent} of {total} files"), &batch)?;
             (batch, batch_bytes) = (Vec::new(), 0);
         }
     }
     if !batch.is_empty() {
-        head = commit(&storage, &author, head, &format!("session import: {total} conversations"), &batch)?;
+        head = commit(&storage, &author, head, &format!("session import: {total} files"), &batch)?;
     }
     let written: BTreeMap<String, Entry> = merge.entries.iter().filter(|(k, _)| merge.writes.contains_key(*k)).map(|(k, e)| (k.clone(), e.clone())).collect();
     let indexes = Indexes { c, name, storage: &storage, author: &author };
     let (entries, indexed) = indexes.write(head, merge.entries, merge.indexes, &written)?;
-    if !merge.writes.is_empty() || indexed {
+    if total > 0 || indexed {
         crate::sync::refresh_pins(c, name);
     }
     Ok(Written { added, updated, unchanged, entries })
@@ -691,6 +746,114 @@ mod tests {
         let w = write(&c, NAME, &spooled(vec![session("b", Kind::Chat, "2026-10-03T09:00:00Z", &["b"])])).unwrap();
         assert_eq!(w.added, 1);
         assert_eq!(keys(&mock, Kind::Chat), ["hermes-b", "hermes-a"]);
+    }
+
+    /// Goal: the files conversations hold go up with them, before them,
+    /// each once, and an import that holds them already sends none again.
+    #[test]
+    fn a_conversations_files_go_up_once() {
+        let (mock, c) = archive();
+        let png = b"\x89PNG fake bytes".to_vec();
+        let a = session::Attachment { name: "plot.png".into(), media_type: "image/png".into(), size: png.len() as u64, sha256: blob::sha256_hex(&png), path: String::new() };
+        let with = |id: &str| {
+            let mut s = session(id, Kind::Chat, "2026-10-01T09:00:00Z", &["a picture"]);
+            s.messages[0].attachments = vec![a.clone()];
+            s
+        };
+        let mut spool = spooled(vec![with("a"), with("b")]);
+        assert!(spool.add_media(&a, &png).unwrap());
+        assert!(!spool.add_media(&session::Attachment { size: 3, ..a.clone() }, &png).unwrap(), "bytes that are not what it names are refused");
+        let packs = mock.requests(NAME, "POST commit-pack");
+        write(&c, NAME, &spool).unwrap();
+        let path = session::media_path(&a.sha256, &a.name);
+        assert_eq!(mock.file_at(NAME, "main", &path), Some(png.clone()));
+        assert_eq!(mock.requests(NAME, "POST commit-pack") - packs, 2, "the file and the conversations in one commit, the indexes in another");
+        let mut again = spooled(vec![with("c")]);
+        again.add_media(&a, &png).unwrap();
+        let packs = mock.requests(NAME, "POST commit-pack");
+        write(&c, NAME, &again).unwrap();
+        assert_eq!(mock.requests(NAME, "POST commit-pack") - packs, 2, "a conversation and its index, and no file again");
+        assert_eq!(mock.paths(NAME, "main").iter().filter(|p| p.starts_with("media/")).count(), 1);
+    }
+
+    fn picture(n: u8) -> (session::Attachment, Vec<u8>) {
+        let png = format!("\u{89}PNG fake bytes {n}").into_bytes();
+        (session::Attachment { name: format!("plot{n}.png"), media_type: "image/png".into(), size: png.len() as u64, sha256: blob::sha256_hex(&png), path: String::new() }, png)
+    }
+
+    fn holding(mut s: Session, a: &session::Attachment) -> Session {
+        s.messages[0].attachments = vec![a.clone()];
+        s
+    }
+
+    fn media_held(mock: &crate::mockcs::MockServer) -> Vec<String> {
+        mock.paths(NAME, "main").into_iter().filter(|p| p.starts_with("media/")).collect()
+    }
+
+    /// Goal: only the files of conversations an import writes go up, and
+    /// only theirs count toward the archive's bytes: never those of a
+    /// conversation it refused, nor of a copy it set aside for a newer one
+    /// (its own, or the archive's). Method: a chat with a picture; two
+    /// copies of another, the older with a picture; a refused one with a
+    /// picture; then an older copy of an archived conversation, with one.
+    #[test]
+    fn only_the_files_of_conversations_written_go_up() {
+        let (mock, c) = archive();
+        let [(p1, b1), (p2, b2), (p3, b3), (p4, b4)] = [picture(1), picture(2), picture(3), picture(4)];
+        let mut spool = spooled(vec![
+            holding(session("a", Kind::Chat, "2026-10-01T09:00:00Z", &["kept"]), &p1),
+            holding(session("b", Kind::Chat, "2026-10-01T09:00:00Z", &["older"]), &p2),
+            session("b", Kind::Chat, "2026-10-02T09:00:00Z", &["newer", "copy"]),
+            holding(session("\u{1b}odd", Kind::Chat, "2026-10-01T09:00:00Z", &["refused"]), &p3),
+        ]);
+        for (a, bytes) in [(&p1, &b1), (&p2, &b2), (&p3, &b3)] {
+            assert!(spool.add_media(a, bytes).unwrap());
+        }
+        let counted: u64 = spool.entries.values().map(|e| e.bytes + e.media).sum();
+        assert_eq!(spool.bytes, counted, "the bytes counted are the kept conversations' and their files'");
+        write(&c, NAME, &spool).unwrap();
+        assert_eq!(media_held(&mock), [session::media_path(&p1.sha256, &p1.name)]);
+
+        let mut older = spooled(vec![holding(session("b", Kind::Chat, "2026-10-01T09:00:00Z", &["older"]), &p4)]);
+        older.add_media(&p4, &b4).unwrap();
+        let w = write(&c, NAME, &older).unwrap();
+        assert_eq!((w.updated, w.unchanged), (0, 1));
+        assert_eq!(media_held(&mock).len(), 1, "an older copy's file stays out");
+    }
+
+    /// Goal: a read that holds more of a conversation's files than the one
+    /// archived updates it, an older history never replaces a newer, and
+    /// the same read again writes nothing. Method: a chat archived by the
+    /// export's reader before files (10); the same, read by today's (11)
+    /// with its picture's file missing; then with it found; then again;
+    /// then an older copy holding it.
+    #[test]
+    fn a_read_with_more_of_its_files_updates_the_conversation() {
+        let (mock, c) = archive();
+        let (p, bytes) = picture(1);
+        let at = "2026-10-01T09:00:00Z";
+        let read_now = |s: Session| Session { reader: chats::READER, ..s };
+        write(&c, NAME, &spooled(vec![session("a", Kind::Chat, at, &["look"])])).unwrap();
+        let missing = write(&c, NAME, &spooled(vec![read_now(session("a", Kind::Chat, at, &["look"]))])).unwrap();
+        assert_eq!(missing.updated, 1, "a better read replaces the one before");
+        let mut found = spooled(vec![read_now(holding(session("a", Kind::Chat, at, &["look"]), &p))]);
+        found.add_media(&p, &bytes).unwrap();
+        let w = write(&c, NAME, &found).unwrap();
+        assert_eq!(w.updated, 1, "a file found since updates it");
+        let file: Session = serde_json::from_slice(&mock.file_at(NAME, "main", &session::session_path("hermes-a")).unwrap()).unwrap();
+        assert_eq!(file.messages[0].attachments.len(), 1);
+        assert_eq!(media_held(&mock), [session::media_path(&p.sha256, &p.name)]);
+
+        let packs = mock.requests(NAME, "POST commit-pack");
+        let mut again = spooled(vec![read_now(holding(session("a", Kind::Chat, at, &["look"]), &p))]);
+        again.add_media(&p, &bytes).unwrap();
+        assert_eq!(write(&c, NAME, &again).unwrap().unchanged, 1);
+        assert_eq!(mock.requests(NAME, "POST commit-pack"), packs, "the same read again writes nothing");
+
+        write(&c, NAME, &spooled(vec![read_now(session("a", Kind::Chat, "2026-10-03T09:00:00Z", &["look", "later"]))])).unwrap();
+        let mut older = spooled(vec![read_now(holding(session("a", Kind::Chat, at, &["look"]), &p))]);
+        older.add_media(&p, &bytes).unwrap();
+        assert_eq!(write(&c, NAME, &older).unwrap().unchanged, 1, "an older history with more files never replaces a newer");
     }
 
     /// Goal: a conversation's file is indexed as it is stored, however the

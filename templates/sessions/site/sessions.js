@@ -103,14 +103,36 @@ function folded(title, text) {
   return d;
 }
 
-function said(role, text) {
+// a message's files, as the archive keeps them (`media/<sha256>.<ext>`)
+const MEDIA = /^media\/[0-9a-f]{64}\.[a-z0-9]{1,8}$/;
+const filesOf = (m) => (Array.isArray(m.attachments) ? m.attachments.filter((a) => typeof a?.path === "string" && MEDIA.test(a.path)) : []);
+
+// a file a message held: a picture shown, anything else to open
+function fileNode(a) {
+  const src = `__file?path=${encodeURIComponent(a.path)}`;
+  if (typeof a.media_type === "string" && a.media_type.startsWith("image/")) {
+    const img = el("img", "archive-file");
+    img.src = src;
+    img.alt = a.name ?? "";
+    img.loading = "lazy";
+    return img;
+  }
+  const link = el("a", "archive-file", a.name || "File");
+  link.href = src;
+  link.download = a.name || "";
+  return link;
+}
+
+function said(role, text, files = []) {
   const m = el("div", `msg ${role === "user" ? "user mine" : "agent"}`);
-  if (role === "user") m.append(el("div", "bubble", text));
-  else {
+  if (role === "user") {
+    if (text) m.append(el("div", "bubble", text));
+  } else if (text) {
     const md = el("div", "md");
     md.append(renderMarkdown(text));
     m.append(md);
   }
+  m.append(...files.map(fileNode));
   return m;
 }
 
@@ -134,17 +156,18 @@ function conversation(c) {
     dated(m.at);
     const text = typeof m.text === "string" && m.text.trim() ? m.text : "";
     const calls = Array.isArray(m.tool_calls) ? m.tool_calls : [];
+    const files = filesOf(m);
     if (m.summary) {
       flush();
       out.push(folded("Earlier, summarized", text));
-    } else if (m.role === "user" && text && !calls.length) {
+    } else if (m.role === "user" && (text || files.length) && !calls.length) {
       flush();
-      out.push(said("user", text));
+      out.push(said("user", text, files));
     } else if (m.role === "assistant") {
       if (m.reasoning) work.push({ verb: "Thought", detail: m.reasoning });
-      if (text) {
+      if (text || files.length) {
         flush();
-        out.push(said("assistant", text));
+        out.push(said("assistant", text, files));
       }
       for (const call of calls) work.push({ verb: call.name || "tool", args: call.arguments || "" });
     } else if (m.role === "tool") {

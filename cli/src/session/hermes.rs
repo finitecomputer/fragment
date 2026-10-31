@@ -399,6 +399,9 @@ fn message(m: &MessageRow, text: Option<String>, summary: bool) -> Message {
         tool_calls: calls,
         reasoning: m.reasoning.clone(),
         summary,
+        // what a message held stays a mark in its text: v0.21.7 keeps no
+        // file's bytes in a row (`_durable_content`), and its caches go in a day
+        attachments: Vec::new(),
     }
 }
 
