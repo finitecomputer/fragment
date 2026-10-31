@@ -104,20 +104,23 @@ pub fn placeholders(v: &str) -> Vec<&str> {
     names
 }
 
-/// A URL's part a secret may fill: its path, query and fragment, after
-/// its scheme, host and port (`url::Position::BeforePath`), with `{{` and
+/// A URL's part a secret may fill: its path and query, after its scheme,
+/// host and port (`url::Position::BeforePath`) and before its fragment,
+/// which is the client's and never sent, with `{{` and
 /// `}}` as the parser kept them (raw in a query, `%7B%7B` in a path) read
 /// as braces, so a placeholder is found wherever the job wrote it.
 fn fillable(url: &Url) -> String {
-    let tail = &url[url::Position::BeforePath..];
+    let tail = &url[url::Position::BeforePath..url::Position::AfterQuery];
     ["%7B", "%7b"].iter().fold(tail.to_string(), |t, b| t.replace(b, "{")).replace("%7D", "}").replace("%7d", "}")
 }
 
 /// The secret names a URL refers to as `{{NAME}}` in its path or query
 /// (a job's fetch: `https://api.telegram.org/bot{{TOKEN}}/sendMessage`).
-/// Never in its scheme, host or port, where a brace does not parse.
+/// Never in its scheme, host or port, nor what is no secret's name
+/// (`{{id}}`, a template's, an app's own): those stay as written, as they
+/// went before URLs held secrets.
 pub fn url_placeholders(url: &Url) -> Vec<String> {
-    placeholders(&fillable(url)).into_iter().map(str::to_string).collect()
+    placeholders(&fillable(url)).into_iter().filter(|n| fragment_proto::valid_secret_name(n)).map(str::to_string).collect()
 }
 
 /// A secret's value as it goes into a URL: every byte but the unreserved
@@ -150,7 +153,7 @@ pub fn fill_url(url: &Url, mut value: impl FnMut(&str) -> Result<String, String>
         let v = value(&name).map_err(UrlUnfilled::Value)?;
         tail = tail.replace(&format!("{{{{{name}}}}}"), &url_encoded(&v));
     }
-    let filled = Url::parse(&format!("{}{tail}", &url[..url::Position::BeforePath])).map_err(|_| UrlUnfilled::Moved)?;
+    let filled = Url::parse(&format!("{}{tail}{}", &url[..url::Position::BeforePath], &url[url::Position::AfterQuery..])).map_err(|_| UrlUnfilled::Moved)?;
     let segments = |u: &Url| u.path_segments().map_or(0, Iterator::count);
     let pairs = |u: &Url| u.query_pairs().count();
     let same = filled.scheme() == url.scheme() && filled.host() == url.host() && filled.port_or_known_default() == url.port_or_known_default() && segments(&filled) == segments(url) && pairs(&filled) == pairs(url);
@@ -256,6 +259,11 @@ mod tests {
         let plain = url("https://api.example.com/v1/x?k=v");
         assert!(url_placeholders(&plain).is_empty());
         assert_eq!(fill_url(&plain, |_| unreachable!()).unwrap(), plain);
+        // what is no secret's name stays as written; a fragment is never filled
+        let own = url("https://api.example.com/items/{{id}}?q=%7B%7Bx%7D%7D#{{TOKEN}}");
+        assert!(url_placeholders(&own).is_empty(), "{:?}", url_placeholders(&own));
+        let kept = fill_url(&url("https://api.example.com/{{S}}/x#frag"), |_| Ok("v".to_string())).unwrap();
+        assert_eq!(kept.as_str(), "https://api.example.com/v/x#frag");
         // a placeholder before the path is no placeholder: the host stays as written
         let host = url("https://{{HOST}}.example.com/x");
         assert!(url_placeholders(&host).is_empty());
