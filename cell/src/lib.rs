@@ -39,6 +39,7 @@ mod connections;
 mod channels;
 mod computer;
 mod deliveries;
+mod doors;
 mod ended;
 mod cs;
 mod error;
@@ -491,11 +492,13 @@ pub(crate) async fn create_fragment(env: &Env, cfg: &Config, url: &Url, mut crea
     let made = made.ok_or_else(|| CellError::new(ErrorCode::AlreadyExists, format!("{NAME_DRAWS} names drawn for this label were all taken: try again")))?;
     if let (Some(agent), 200) = (agent, made.status_code()) {
         let put = Request::new(url.as_str(), Method::Put)?;
-        let role = serde_json::to_vec(&json!({ "role": "editor" })).map_err(|e| CellError::host(e.to_string()))?;
+        // a connector has no editor but its owner: its maker's agent views it (doors.rs)
+        let connector = create.template.as_deref().is_some_and(|t| fragment_templates::blessed::CONNECTORS.contains(&t));
+        let role = serde_json::to_vec(&json!({ "role": if connector { "viewer" } else { "editor" } })).map_err(|e| CellError::host(e.to_string()))?;
         let routed = Routed { name: create.name.clone(), url: url.clone(), signed: Some(maker), credential: None };
         let mut added = forward(env, &put, bytes_body(role), Forward { routed, inner: format!("/api/members/{agent}"), extra: vec![] }).await?;
         if added.status_code() != 200 {
-            return Err(CellError::host(format!("{} was made, but its agent was not made an editor: {}", create.name, added.text().await.unwrap_or_default())));
+            return Err(CellError::host(format!("{} was made, but its agent was not made a member: {}", create.name, added.text().await.unwrap_or_default())));
         }
     }
     Ok(made)

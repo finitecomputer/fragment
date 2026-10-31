@@ -662,6 +662,8 @@ impl FragmentCell {
                     "via": run.via.as_str(),
                     "fragment": self.name()?,
                     "channels": self.declared_channels()?.keys().collect::<Vec<_>>(),
+                    // a connector's binding, its door's (doors.rs), or null
+                    "door": self.job_door()?,
                 });
                 let results: Vec<Value> = results.iter().map(|r| serde_json::to_value(r).expect("a step result serializes")).collect();
                 let answer = facet.call("__job", &[op.as_str().into(), input, meta, Value::Array(results)]).await.map_err(|e| match e.code {
@@ -922,6 +924,10 @@ impl FragmentCell {
     /// named its own: a vendor that honours the header acts on it once.
     async fn step_fetch(&self, run: &RunRow, index: u32, f: Fetch) -> Result<Value, StepFail> {
         let url = egress::check(&f.url, self.cfg.egress_local).map_err(permanent)?;
+        // a connector bound as a door that is shut sends nothing (doors.rs)
+        if let Some(why) = self.door_shut().map_err(|e| StepFail::Retry(e.message))? {
+            return Err(permanent(why));
+        }
         let method = match f.method.to_ascii_uppercase().as_str() {
             "GET" => Method::Get,
             "POST" => Method::Post,
@@ -997,7 +1003,7 @@ impl FragmentCell {
     async fn step_publish(&self, run: &RunRow, index: u32, channel: &str, kind: &str, body: Value) -> Result<Value, StepFail> {
         let retry = |e: CellError| StepFail::Retry(e.message);
         // the one check a mutation's records meet too
-        fragment_core::effects::check_record(channel, kind, &body, &self.declared_channels().map_err(retry)?).map_err(permanent)?;
+        fragment_core::effects::check_record(channel, kind, &body, &self.declared_channels().map_err(retry)?, self.hosted_door().map_err(retry)?.as_ref()).map_err(permanent)?;
         let key = format!("{JOB_ID_PREFIX}{}", run.id);
         let (record, appended) = self.append_once(channel, &run.principal, kind, &body, &key, i64::from(index)).map_err(retry)?;
         self.published(&record, appended, run.depth + 1, &mut js::Laps::start()).await.map_err(retry)?;

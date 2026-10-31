@@ -21,6 +21,12 @@ use fragment_proto::limits;
 
 include!("blessed_names.rs");
 
+/// The blessed templates that are hosted doors (docs/api.md, "An agent's
+/// doors"): a fragment made from one is its owner's alone to edit, and may
+/// be bound as their agent's door of its name while it runs no other code
+/// (cell/src/doors.rs).
+pub const CONNECTORS: &[&str] = &[];
+
 /// A blessed template, when `name` is one: named statics, never
 /// `crate::ALL`, so a binary links only the index of the templates it
 /// names (the cell carries the blessed ones and not `notes`).
@@ -276,6 +282,12 @@ mod tests {
         for p in ["SOUL.md", "site/chat.js", "lib/x.mjs", "applib/notes.md", "app.js", "x/app.mjs"] {
             assert!(!is_code(p), "{p}");
         }
+    }
+
+    /// Every hosted door's template is a blessed one, named.
+    #[test]
+    fn every_connector_is_blessed() {
+        assert!(CONNECTORS.iter().all(|c| BLESSED.contains(c) && template(c).is_some()), "{CONNECTORS:?}");
     }
 
     /// The named statics are the templates under templates/ of those names,

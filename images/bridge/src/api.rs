@@ -792,6 +792,15 @@ impl Api {
         self.json(Method::DELETE, &format!("/api/f/{}/schedules/{id}?for={}", name(fragment)?, encode(owner)), Some(agent), None).await
     }
 
+    /// `POST /api/f/{name}/door?for=`: the agent asking, for its owner, to
+    /// bind a connector as its own door, which the platform refuses whomever
+    /// an agent acts for (docs/api.md, "An agent's doors"): the script's
+    /// `door bind` asks it, for the platform's lanes.
+    pub async fn bind_door(&self, agent: &str, owner: &str, fragment: &str) -> Result<Value, ApiError> {
+        let body = json!({ "act": "link", "agent": agent });
+        self.json(Method::POST, &format!("/api/f/{}/door?for={}", name(fragment)?, encode(owner)), Some(agent), Some(body)).await
+    }
+
     /// `GET /f/{name}/__live`, as the agent.
     pub async fn live(&self, agent: &str, fragment: &str) -> Result<ClientWs, String> {
         let fragment = name(fragment).map_err(|e| e.to_string())?;

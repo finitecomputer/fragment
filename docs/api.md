@@ -288,7 +288,8 @@ changes or removes the owner). Every other agent's sharing request is
 403, saying why: one acting as itself or for anyone else, one its owner
 holds (at any hold), and one on a fragment its owner does not own (an
 editor's agent shares nothing there). Deleting a fragment and setting
-its cap are 403 for every agent, whomever it acts for. What an agent
+its cap are 403 for every agent, whomever it acts for, as is sharing a
+connector (An agent's doors, below). What an agent
 shares names it: the member's `addedBy` and the invite's `createdBy` are
 the agent, and each change's event (`member.set`, `member.removed`,
 `invite.created`, `invite.revoked`, `visibility`, `tokens.rotated`)
@@ -1319,6 +1320,8 @@ shell's Apps page shows it, one row a fragment, each with its Share…
 | `PUT /api/f/{name}/secrets/{KEY}` | editor | `{value, hosts}` (`PutSecret`: a value of at most 64 KiB, and 1 to 8 hosts it may go to, each as a URL names it, `api.example.com`: no scheme, port, path, or wildcard) → `{ok, name, hosts}`; the value sealed (AES-256-GCM, key HKDF'd from the host secret salted with the fragment's Durable Object, its class and id: `keys::scope`, `fragment_core::seal`; docs/secrets.md), its hosts in place of the ones before. `job.fetch` fills it only toward one of its hosts (on any port), over https (`fragment_core::secrets::may_fill`), in a request that sets no `Host`, `Forwarded`, or `X-Forwarded-Host` header (`ROUTING_HEADERS`). Its hosts change only with its value, so no editor widens where a value goes without holding it. They are its editors' to know: the `secret.set` event (every viewer reads the event log) and a refused fetch's error name no host. A secret set before secrets named hosts fills nowhere until set again |
 | `GET /api/f/{name}/secrets` | editor | → `{secrets: [{name, hosts}]}` (`SecretList`); values never leave |
 | `DELETE /api/f/{name}/secrets/{KEY}` | editor | → `{ok, removed}` |
+| `GET /api/f/{name}/door` | its owner | → `{bound: {door, agent}}`, or `{bound: null}`: the agent whose hosted door it is (An agent's doors, below) |
+| `POST /api/f/{name}/door` | its owner, in person (never an agent, whomever it acts for) | `{act: "link", agent}` binds this fragment as `agent`'s hosted door (An agent's doors, below) → `{door, agent, relayed}`; `{act: "unlink"}` lets it go → `{ok}`. 403 when the fragment runs no blessed template named for a connector the deployment allows, or the agent is not its owner's; 400 for another `act` |
 | `GET /api/f/{name}/storage-token` | editor | → `{token, repo, api, expiresAt}`: ES256, this repo, `git:read`+`git:write`, 15 minutes. Asked through a computer's egress on a local fleet (its code.storage at a loopback address), `api` is the egress's (docs/computers.md, The fragment API) |
 | `POST /api/f/{name}/refresh` | editor | → `{ok, refs: {main: {pin, moved} \| {absent}, live: ...}}`, once a live that moved is installed (`fragment deploy` asks it). A writer to the repo asks this after its push (the CLI does), and the platform follows its own moves itself: code.storage's push webhooks are not taken. A fragment reads the branches it has no pin for once, on its first request (a name made again keeps its repo); after that a move arrives by this or the poll backstop, and a site with nothing deployed answers 404 without asking code.storage |
 | `POST /api/f/{name}/files` | editor | `{files: [{path, text \| base64} \| {path, delete: true}], message?, key?}` → `{commit}`: one commit to main, as a sync makes (at most 16 files, 400 past that, and 1 MiB of their decoded bytes in a body of at most 2 MiB, 413 past either; paths relative, no `.` or `..`). The same `key` from the same person answers the first commit again. An agent fragment's `avatar.png` that is no picture (400) or past 256 KiB (413) is refused and nothing is committed (Identities, "An agent's name and picture"). A write of what main holds already commits nothing (code.storage makes no empty commit: its 412) and answers main's tip. Main's pin moves at once; live does not |
@@ -2640,6 +2643,8 @@ and the AI steps (`job.ai.*`), all above:
   any). Each is a step, so a run reads what was true when it first took
   it, again on a retry.
 
+`job.door` is a connector's binding while it is an open door (An agent's
+doors, below), else null.
 `job.principal`, `job.role`, `job.run`, and `job.attempt` say who and
 which; `job.via` how the run started (`call`, `job`, `cron`, `channel`,
 `files`), and `job.fragment` the fragment's name. The method re-runs from the top at every step with the results so
@@ -2775,6 +2780,7 @@ API answers on the platform's host):
 | `GET __channel/{channel}?after=\|before=&limit=` | the channel's readers: the same page and exclusive cursors as `GET /api/f/{name}/channels/{channel}`, using this origin's session or share link |
 | `POST __op/{op}` | a browser's call: `application/json` `{id, input}`; a signed-in browser (`fragment_site`) calls as its person; an unsigned caller gets an anonymous principal cookie; callers holding only `public` get 60 calls a minute each, 600 per fragment (a page's live views re-run over `__live`, outside this) |
 | `POST __op/channels/{channel}` | a browser's post (`fragment.post`), through the call's door and its checks: `{id, input}` with the record's body as `input` → `{result: record, replayed}`, as `POST /api/f/{name}/channels/{channel}` answers it; a post spends the public budget as a call does (no operation name holds a `/`) |
+| `GET __door`, `POST __door` | its owner's session: `GET` and `POST /api/f/{name}/door`'s, from a connector's own page (a `POST` as `application/json`) |
 | `__signin`, `__signout` | this origin's session (Sign-in, above) |
 | `__fragment.js` | the browser library (below) |
 | `__fragment.css` | the platform's stylesheet (below), for a page that links it |
@@ -3823,6 +3829,40 @@ through one (`fragment_core::door`):
   `relayed.sig`) within ten minutes of now (`at`, ms). Anything else that
   says `relayed` is 403: the agent's own key signs no such record. An
   app's operation or job publishes none (400).
+
+- **A hosted door** is a connector fragment of its owner's, made from the
+  platform's blessed connector template named for a connector the
+  deployment allows (`telegram`; `blessed::CONNECTORS`). What it publishes
+  as its owner's must be their words alone, so:
+  - **no one but its owner edits it**, from its making: every other caller,
+    an agent acting for its owner included, is at most a viewer there (no
+    one else sets its secrets, writes its files or pages, deploys its code
+    or calls an editor's operation; its own triggered runs keep theirs),
+    and no member is given more than viewer there (an editor's role, set
+    or invited, is 400; an agent making it for its owner joins as a
+    viewer), so its members list shows the role that counts;
+  - **no one but its owner shares it**, in person: an agent's sharing
+    request there (members, invites, visibility, rotation) is 403
+    whomever it acts for, and its status shows an agent no share link;
+  - **its code is the platform's**: an install of any other code (a fork,
+    another template, none) makes it no door again, for good, and lets its
+    binding go (`door.unmade`);
+  - **only its owner binds it, in person** (`POST /api/f/{name}/door`, or
+    `__door` from its page), never an agent, whomever it acts for; the
+    agent's fragment confirms it is theirs and an agent, and records it
+    (`door.hosted`), and the agent joins the connector as a viewer if it
+    was no member (its chat's `chat` and `work` take its posts).
+  Bound, its app (a job step or a mutation) may publish records in its
+  own channels whose `relayed` is exactly `{via: <door>, for: <owner>,
+  agent}`, unsigned: the platform knows which fragment publishes, and
+  tells its jobs (`job.door`: that `relayed`, and `to`, the agent's
+  identity, or null while it is no open door). Each publish and each
+  fetch asks the deployment's connectors again; while it is bound and its
+  door is shut, its jobs' fetches are refused too. An unlink lets the
+  binding go; its agent stays a viewer of its chat (a chat's own agent is
+  not removed), told nothing more through it. Its binding is the
+  connector's (`meta` `door_actor`), so several connectors, each its own
+  chat, may be doors of one agent.
 
 The door's key lives on the agent fragment (its `meta`), its ticket
 beside it; a fragment deleted takes them with it. An agent has one such
