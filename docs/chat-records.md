@@ -412,7 +412,8 @@ computer (docs/computers.md, the hold).
 ```json
 { "kind": "turn.step", "turn": "…", "step": 1, "tool": "terminal",
   "category": "shell", "args": "ls -la", "ok": true, "excerpt": "…", "text": "…",
-  "tool_call_id": "call_…", "status": "completed", "duration_ms": 120 }
+  "tool_call_id": "call_…", "status": "completed", "duration_ms": 120,
+  "response": "…" }
 ```
 
 Part `<step>`, from 1: one tool call. `tool` (the runtime's own name for
@@ -442,7 +443,30 @@ call that ended, so a page never shows it running, and names how it
 ended when it did not complete ("Timed out running"). `excerpt` is then a
 command's exit code (`Exit code: 7`) or empty: never its output. A step
 without them (an older bridge's, read from its runtime's progress) says
-only `ok`, which was true even for a call that failed.
+only `ok`, which was true even for a call that failed. `response` (since
+2026-10-31): the model response whose calls were running, as its
+`turn.call`s name it; an older image's step has none.
+
+```json
+{ "kind": "turn.call", "turn": "…", "response": "…", "tool_call_id": "call_…",
+  "tool": "terminal", "category": "shell", "args": "make deploy" }
+```
+
+Part `call:<24 hex of SHA-256 of its response, a NUL, and its place in
+it>` (since 2026-10-31): a tool call the model asked for, recorded before
+it runs, as its runtime says so (our Hermes image's: its
+`post_api_request`, before Hermes runs any call of the response;
+docs/bridge.md). `response` names the model response that asked for it,
+once (at most 128 of a post id's characters); its place there makes it
+one call. `tool_call_id` is the provider's, which is no call's identity:
+some providers name every response's first call `call_0`. Its intent, no
+more: a refusal may still stop it, and only a `turn.step` of the same
+`response` says it ended: the one with the same `tool_call_id`, else (its
+runtime renamed the call before running it) the one with the same `tool`
+and `args`. `tool`, `args` and `category` as a step's. At most 200 a turn.
+The note a turn cut by a restart carries names each call it asked for
+with no step, as one that may or may not have run. Pages show none of
+them yet; an older bridge posts none.
 
 ```json
 { "kind": "turn.prompt", "turn": "…", "prompt": "<prompt>",

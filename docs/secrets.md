@@ -45,7 +45,11 @@ only from that computer's egress, toward that provider.
   is not sent, and a failure's message and the answer name it as its
   placeholder again (`fill_url`, `redact`). Its hosts are set only with
   its value, so an editor who cannot read a value cannot send it anywhere
-  its setter did not mean.
+  its setter did not mean. An editor sets one through the API (`fragment
+  secret set`) or from the fragment's own page (`PUT __secrets/{KEY}`,
+  the same contract over its session), so a connector's page takes a
+  pasted token, and makes a webhook's secret in the browser, without
+  either passing through app code or a model.
 - **Agents hold no key.** Model calls go through the platform's model
   route, which adds a deployment key toward that API alone; operator keys
   and connections are swapped in at the computer's egress.

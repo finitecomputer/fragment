@@ -322,6 +322,10 @@ pub struct Turn {
     /// no part of `REPLIES_PER_TURN_MAX`. A state from before holds none.
     #[serde(default, skip_serializing_if = "u32_is_zero")]
     pub interim: u32,
+    /// Tool calls it asked for (`turn.call`), recorded or not: they share
+    /// `STEPS_PER_TURN_MAX`'s bound. A state from before holds none.
+    #[serde(default, skip_serializing_if = "u32_is_zero")]
+    pub calls: u32,
     pub prompts: Vec<Prompt>,
     pub stop_requested: bool,
     /// What an ended turn still owes `work`, in the order posted.
@@ -1186,6 +1190,7 @@ impl Engine {
             steps: 0,
             replies: 0,
             interim: 0,
+            calls: 0,
             last_part: 0,
             prompts: Vec::new(),
             stop_requested: false,
@@ -1715,7 +1720,7 @@ impl Engine {
         let turn_of = |e: &Event| -> Option<String> {
             match e {
                 Event::Draft { turn, .. } | Event::Reply { turn, .. } | Event::Attachment { turn, .. } | Event::Retract { turn, .. } | Event::Interim { turn, .. } => Some(turn.clone()),
-                Event::Step { turn, .. } | Event::Prompt { turn, .. } | Event::Asked { turn } | Event::End { turn, .. } => Some(turn.clone()),
+                Event::Called { turn, .. } | Event::Step { turn, .. } | Event::Prompt { turn, .. } | Event::Asked { turn } | Event::End { turn, .. } => Some(turn.clone()),
                 Event::Connected(_) | Event::Working(_) | Event::Say { .. } | Event::Notice { .. } => None,
             }
         };
@@ -1760,6 +1765,19 @@ impl Engine {
                     t.open = None;
                     let (agent, fragment) = (t.agent.clone(), t.fragment.clone());
                     self.draft(&agent, &fragment, &turn, None);
+                }
+            }
+            Event::Called { turn, call } => {
+                // its intent, on `work` before the call runs (as soon as the
+                // lane posts it: the runtime goes on once told it was heard),
+                // so a turn cut while it ran is told of it (note.rs). Asked
+                // is all it says: no reply is sealed, nothing is shown run.
+                let t = self.state.turns.get_mut(&turn).expect("checked");
+                t.calls = t.calls.saturating_add(1);
+                self.dirty = true;
+                if t.calls <= limits::STEPS_PER_TURN_MAX && records::valid_post_id(&call.response) && records::valid_post_id(&call.tool_call_id) {
+                    let (agent, fragment) = (t.agent.clone(), t.fragment.clone());
+                    self.post(&agent, &fragment, records::WORK, records::call_id(&turn, &call.response, call.position), records::turn_call(&turn, &call), Vec::new());
                 }
             }
             Event::Step { turn, step } => {
