@@ -147,6 +147,15 @@ body.resizing-row, body.resizing-row * { cursor: row-resize !important; }
 .sheet { max-height: calc(var(--vh) - 32px - env(safe-area-inset-top, 0px)); overflow-y: auto; overscroll-behavior: contain; }
 .sheet iframe { display: block; width: 100%; height: 26rem; max-height: none; border: 0; }
 .empty-row { font-size: 13px; color: var(--text-tertiary); padding: 6px 8px; }
+/* the Session Archive (session-archive.js): a quiet heading that folds its rows */
+.archive { display: flex; flex-direction: column; gap: 1px; margin: 8px 0; }
+.archive-toggle { display: flex; align-items: center; gap: 4px; width: fit-content; padding: 4px 8px; border: 0; background: none; font: 600 12px/1.4 var(--font-sans); color: var(--text-tertiary); cursor: pointer; }
+.archive-toggle:hover { color: var(--text-secondary); }
+.archive-toggle svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; transition: transform .14s; }
+.archive-toggle[aria-expanded="true"] svg { transform: rotate(90deg); }
+.archive .rows { max-height: 24vh; }
+.archive-row .label { color: var(--text-secondary); }
+.archive-row.active .label, .archive-all .label { color: var(--text-primary); }
 .spacer { flex: 1; }
 
 /* ---- chat column ---- */

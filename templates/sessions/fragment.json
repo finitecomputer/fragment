@@ -1,0 +1,7 @@
+{
+  "kind": "sessions",
+  "meta": {
+    "title": "Session Archive",
+    "description": "The conversations you had with an agent elsewhere, brought in with fragment session import: a file a conversation, an index a kind."
+  }
+}

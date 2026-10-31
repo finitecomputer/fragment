@@ -4735,7 +4735,7 @@ fn sidebar_live(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session:
     let marked = b.eval(
         page,
         "(() => { const f = [...document.querySelectorAll('#frames iframe')].find((f) => !f.hidden); window.__loads = 0; f?.addEventListener('load', () => window.__loads++); \
-         window.__open = f?.dataset.fragment ?? null; const rows = [...document.querySelectorAll('#chats .row[data-key], #apps [data-key]')]; window.__said = {}; rows.forEach((r) => { r.__kept = true; window.__said[r.dataset.key] = r.textContent; }); return rows.length; })()",
+         window.__open = f?.dataset.fragment ?? null; const rows = [...document.querySelectorAll('#chats .row[data-key], #apps [data-key]')]; window.__said = {}; window.__drawn = {}; rows.forEach((r) => { r.__kept = true; window.__said[r.dataset.key] = r.textContent; window.__drawn[r.dataset.key] = r.outerHTML; }); return rows.length; })()",
     )?;
     let row = |name: &str| format!("document.querySelector({})", js(&format!("#apps [data-key={}]", js(&format!("app:{name}")))));
     let both = |b: &mut Browser, expr: &str| b.until(page, expr, SIDEBAR_LIVE_WAIT) && b.until(&second, expr, SIDEBAR_LIVE_WAIT);
@@ -4771,7 +4771,9 @@ fn sidebar_live(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session:
     let kept = b.eval(
         page,
         "(() => { const f = [...document.querySelectorAll('#frames iframe')].find((f) => !f.hidden); return { loads: window.__loads, open: f?.dataset.fragment ?? null, was: window.__open, \
-         kept: [...document.querySelectorAll('#chats .row[data-key], #apps [data-key]')].filter((r) => r.__kept || (r.dataset.key in window.__said && r.textContent !== window.__said[r.dataset.key])).length }; })()",
+         kept: [...document.querySelectorAll('#chats .row[data-key], #apps [data-key]')].filter((r) => r.__kept || (r.dataset.key in window.__said && r.textContent !== window.__said[r.dataset.key])).length, \
+         lost: Object.keys(window.__said).flatMap((k) => { const r = [...document.querySelectorAll('#chats .row[data-key], #apps [data-key]')].find((x) => x.dataset.key === k); \
+           return !r ? [{ key: k, gone: true }] : r.__kept || r.textContent !== window.__said[k] ? [] : [{ key: k, was: window.__drawn[k], now: r.outerHTML }]; }) }; })()",
     )?;
     s.ok(
         "the open chat stays open, its frame not reloaded, and the rows shown before are the same elements (patched in place), but those that now say something else (an agent's work done)",

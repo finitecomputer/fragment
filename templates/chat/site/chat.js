@@ -371,6 +371,7 @@ export function mount(root) {
     me: null, // { id, principal, role } once the socket said hello
     members: [], // the fragment's members (`__members`), the first added first
     chat: [], // messages, commands and replies, in seq order: { seq, at, n, principal, text, command, turn, to, attachments, replyTo }
+    history: null, // the chat's first `history` record, as its poster wrote it: { seq, principal, body } (shown only its owner's)
     seen: new Set(), // the chat's seqs taken
     turns: new Map(), // `turnKey(agent, turn)` -> its records (`turnOf`)
     drafts: new Map(), // `turnKey(poster, turn)` -> { principal, turn, text, at }: a reply as it streams
@@ -710,6 +711,12 @@ export function mount(root) {
       want(record.principal);
       return schedule();
     }
+    // a chat continued from its person's Session Archive: what was said
+    // there, above the chat (docs/chat-records.md, "History")
+    if (body.kind === "history") {
+      if (!state.history || n < state.history.seq) state.history = { seq: n, principal: record.principal, body };
+      return schedule();
+    }
     // Stop shows as how its turn ended; any other kind is a page's own
     if (body.kind !== undefined && body.kind !== "message") return;
     const turn = typeof body.turn === "string" ? body.turn : null;
@@ -825,6 +832,9 @@ export function mount(root) {
   // line) after its last record, and a turn's consecutive steps as one card ----
   function timeline() {
     const items = [];
+    // the history its owner continued it from, before everything
+    const h = state.history;
+    if (h && state.members.some((m) => m.principal === h.principal && m.role === "owner")) items.push({ at: -Infinity, n: 0, type: "history", h });
     // each turn's replies, by its agent: the words an older bridge kept on a
     // step that its turn also replied with show once, as the reply
     const replies = new Map();
@@ -923,6 +933,8 @@ export function mount(root) {
         return draftNode(it.key, it.d);
       case "asked":
         return askedNode(it.t);
+      case "history":
+        return historyNode(it.h);
       default:
         return workingNode(it.t);
     }
@@ -1130,6 +1142,43 @@ export function mount(root) {
       input.placeholder = "Write your first message…";
       $("note").textContent = "Send turns on once your agent is in this chat.";
     } else if (setup) $("note").textContent = "";
+  }
+
+  // What a chat continued from the Session Archive was: where it came from,
+  // its summary folded, and the newest of what was said, as the chat's own
+  // messages look; then the line it goes on from. Read-only, never quoted.
+  function historyNode(h) {
+    const b = h.body;
+    const key = `h:${h.seq}`;
+    return [key, cached(key, JSON.stringify(b), () => {
+      const box = el("section", "history-block");
+      const day = (at) => (typeof at === "string" && at ? new Date(at).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" }) : "");
+      const when = [day(b.started_at), day(b.ended_at)].filter((d, i, all) => d && all.indexOf(d) === i).join(" – ");
+      box.append(el("p", "history-head", [`From “${typeof b.title === "string" ? b.title : "an earlier chat"}”`, when].filter(Boolean).join(" · ")));
+      if (typeof b.summary === "string" && b.summary.trim()) {
+        const d = el("details", "tools");
+        const s = el("summary");
+        s.append(el("span", null, "Earlier, summarized"), icon("chevron", "chev"));
+        const detail = el("div", "step-detail");
+        detail.append(el("pre", null, b.summary));
+        d.append(s, detail);
+        box.append(d);
+      }
+      if (Number.isInteger(b.earlier) && b.earlier > 0) box.append(el("p", "history-head", `${b.earlier} earlier ${b.earlier === 1 ? "message" : "messages"} in your Session Archive`));
+      for (const m of Array.isArray(b.messages) ? b.messages : []) {
+        if (typeof m?.text !== "string" || !m.text.trim()) continue;
+        const msg = el("div", `msg ${m.role === "user" ? "user mine" : "agent"}`);
+        if (m.role === "user") msg.append(el("div", "bubble", m.text));
+        else {
+          const md = el("div", "md");
+          md.append(renderMarkdown(m.text));
+          msg.append(md);
+        }
+        box.append(msg);
+      }
+      box.append(el("p", "history-foot", "Continued here"));
+      return box;
+    })];
   }
 
   function messageNode(entry) {
@@ -1492,7 +1541,7 @@ export function mount(root) {
     // only the card's asker's answer counts here, as only theirs counts to the agent
     const card = cardKey(t.key, p.prompt);
     const sent = state.answering.get(card) ?? state.answers.get(card)?.get(p.asks) ?? state.answers.get(p.prompt)?.get(p.asks) ?? null;
-    const gone = !closed && (expired(p) || !!t.end);
+    const gone = !closed && (expired(p) || t.end?.outcome === "stopped");
     const mayAnswer = !!state.me && p.asks === state.me.principal && !closed && !gone;
     const asks = who(p.asks);
     const by = closed?.by ? who(closed.by).name : "";
@@ -1510,6 +1559,7 @@ export function mount(root) {
         const label = (id) => p.options.find((o) => o.id === id)?.label ?? id;
         const answered = typeof closed?.text === "string" && closed.text ? closed.text : label(closed?.option);
         if (closed?.outcome === "answered") card.append(outcome("answered", "check", `${answered}${by ? ` · ${by}` : ""}`));
+        else if (closed?.outcome === "history_unavailable") card.append(outcome("stopped", "stopped", "Not acted on: ask again"));
         else if (closed?.outcome === "expired") card.append(outcome("expired", "clock", "Expired: no answer in time"));
         else if (closed) card.append(outcome("stopped", "stopped", "Stopped"));
         else if (gone) card.append(outcome("expired", "clock", t.end ? "Closed" : "Expired: no answer in time"));

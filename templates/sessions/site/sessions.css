@@ -1,0 +1,18 @@
+/* The session archive's page: a chat's look (chat.css, the chat
+   template's own) with the little it adds: its list, a conversation's
+   head, and the day between messages. */
+.archive-head { margin: 8px 0 24px; }
+.archive-head h1 { margin: 0 0 4px; font-size: 18px; font-weight: 600; line-height: 1.35; overflow-wrap: anywhere; }
+.archive-head p, .muted { margin: 0; color: var(--text-tertiary); font-size: 13px; }
+.archive-head .back { display: inline-block; margin-bottom: 14px; color: var(--text-secondary); font-size: 13px; text-decoration: none; }
+.archive-head .back:hover { color: var(--text-primary); }
+.day { margin: 28px 0 8px; text-align: center; color: var(--text-tertiary); font-size: 12px; }
+.sessions { list-style: none; margin: 0 0 20px; padding: 0; }
+.sessions a { display: block; padding: 9px 4px; border-bottom: 1px solid var(--border); color: var(--text-primary); text-decoration: none; }
+.sessions a:hover strong { text-decoration: underline; }
+.sessions small { display: block; overflow: hidden; color: var(--text-secondary); font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+details.kind { margin: 8px 0; }
+details.kind > summary { cursor: pointer; color: var(--text-secondary); font-size: 14px; padding: 6px 0; }
+.archive-continue { margin-top: 12px; min-height: 32px; padding: 6px 14px; border: 1px solid var(--border-strong); border-radius: 999px; background: var(--bg-card); color: var(--text-primary); font: inherit; font-size: 13px; cursor: pointer; }
+.archive-continue:hover { background: var(--bg-hover); }
+.archive-continue[hidden] { display: none; }

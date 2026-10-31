@@ -34,6 +34,9 @@ ignore = "=0.4.25"
 notify = "=8.2.0"
 notify-debouncer-full = "=0.7.0"
 fs2 = "=0.4.3"
+# Hermes' session database (`fragment session import`), read-only; the
+# bundled SQLite, as crates/core's host side pins it
+rusqlite = { version = "0.40", default-features = false, features = ["bundled"] }
 tungstenite = { version = "=0.29.0", features = ["rustls-tls-webpki-roots", "rustls-tls-native-roots"] }
 
 

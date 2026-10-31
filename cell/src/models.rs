@@ -90,7 +90,7 @@ use std::pin::Pin;
 use fragment_core::ledger::{MeterRow, Spend};
 use fragment_core::models::{self as bounds, Bounded, Model, Named, Stream, Tried, Tries, Upstream};
 use fragment_core::price::Usage;
-use fragment_core::{decide, multipart, transcribe};
+use fragment_core::{decide, embed, multipart, transcribe};
 use fragment_proto::{valid_fragment_name, ErrorCode, IdentityKind, Tier};
 use futures_util::future::LocalBoxFuture;
 use futures_util::StreamExt;
@@ -499,24 +499,25 @@ struct Metadata {
 async fn transport(env: &Env, cfg: &Config, model: Model<'_>, input: &Value, meta: &Metadata) -> CellResult<Response> {
     match model.upstream {
         Upstream::WorkersAi { model } => workers_ai(env, cfg, model, input, meta).await,
-        Upstream::Openai { base_url, model: id, body, .. } => openai(env, model.slot, base_url, &bounds::openai_request(input, id, body.as_ref())).await,
+        Upstream::Openai { base_url, model: id, body, .. } => openai(env, model.slot, base_url, "/chat/completions", &bounds::openai_request(input, id, body.as_ref())).await,
     }
 }
 
 /// Makes a bounded call on an OpenAI-compatible API: `body` (the input, the
-/// slot's own fields and the model's id: `openai_request`), POSTed to
-/// `<base_url>/chat/completions` with the key bound for the call's slot
-/// (`keys::model_key`) as its bearer token, and nothing of the client's
-/// or of the payer's. A key the deployment does not bind is a model not
-/// reached (its call falls back), said in the log without it.
-async fn openai(env: &Env, slot: &str, base_url: &str, body: &Value) -> CellResult<Response> {
+/// slot's own fields and the model's id: `openai_request`; an embeddings
+/// call's `embed::request`), POSTed to `<base_url><path>` with the key
+/// bound for the call's slot (`keys::model_key`) as its bearer token, and
+/// nothing of the client's or of the payer's. A key the deployment does
+/// not bind is a model not reached (its call falls back), said in the log
+/// without it.
+async fn openai(env: &Env, slot: &str, base_url: &str, path: &str, body: &Value) -> CellResult<Response> {
     let key = crate::keys::model_key(env, slot).await?;
     let h = Headers::new();
     h.set("content-type", "application/json")?;
     h.set("authorization", &format!("Bearer {key}"))?;
     let mut init = RequestInit::new();
     init.with_method(Method::Post).with_headers(h).with_body(Some(body.to_string().into()));
-    let req = Request::new_with_init(&format!("{base_url}/chat/completions"), &init)?;
+    let req = Request::new_with_init(&format!("{base_url}{path}"), &init)?;
     Fetch::Request(req).send().await.map_err(|e| CellError::new(ErrorCode::UpstreamFailed, format!("the model did not answer: {e}")))
 }
 
@@ -700,6 +701,80 @@ pub(crate) async fn decide_route(mut req: Request, env: &Env, url: &Url, after: 
 
 /// What a decision's log lines name it (`Charge::name`).
 const DECIDE: &str = "decide";
+
+/// `POST /api/models/v1/embeddings[?fragment=<name>]`: an agent's
+/// embeddings (fragment_core::embed), OpenAI's shape, on the deployment's
+/// embeddings slot; its caller, payer and fragment `route`'s. Checked
+/// before anything is sent (`embed::bound`), charged after its answer at
+/// its input tokens, and answered with its vectors' space.
+pub(crate) async fn embeddings_route(mut req: Request, env: &Env, url: &Url, after: &dyn Background) -> CellResult<Response> {
+    let body = read_body(&mut req, embed::BODY_MAX_BYTES).await?;
+    let caller = caller(env, &req, url, &body).await?;
+    let asked: Value = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+    drop(body);
+    let slot = &Config::from_env(env).models.embeddings;
+    let bounded = embed::bound(&asked, slot).map_err(|why| CellError::invalid(why.message()))?;
+    drop(asked);
+    match embedded(env, &bounded.inputs, &caller.owner, Some(&caller.agent), caller.in_fragment().as_ref(), after).await? {
+        Embedding::Vectors { vectors, usage } => Ok(Response::from_json(&embed::reply(slot, bounded.format, &vectors, usage.as_ref()))?),
+        Embedding::Refused { status, text } => passed(status, text),
+    }
+}
+
+/// What an embeddings call came to: the inputs' vectors (unit length, in
+/// the slot's space) and the usage charged for them, or the model's
+/// refusal as it came (it used nothing, and nothing is charged).
+pub(crate) enum Embedding {
+    Vectors { vectors: Vec<Vec<f32>>, usage: Option<Usage> },
+    Refused { status: u16, text: String },
+}
+
+/// `inputs` (bounded: `embed::bound`) embedded on the deployment's
+/// embeddings slot, metered to `payer` as a model call is (`gate`, then
+/// charged after its answer at its input tokens); refused, 403, on a
+/// deployment that embeds nothing (`Models::embeddings_refused`: its tiers
+/// are private and its slot is not). An answer that is not
+/// the slot's (another count, another length) is charged, as it was paid
+/// for, and refused 502: a vector of another space is never passed on.
+pub(crate) async fn embedded(env: &Env, inputs: &[String], payer: &str, agent: Option<&str>, fragment: Option<&InFragment<'_>>, after: &dyn Background) -> CellResult<Embedding> {
+    let cfg = Config::from_env(env);
+    if let Some(why) = cfg.models.embeddings_refused() {
+        return Err(CellError::new(ErrorCode::Forbidden, why));
+    }
+    let slot = &cfg.models.embeddings;
+    let mut charge = gate(env, payer, agent, fragment, slot.upstream.model(), embed::EMBEDDINGS).await?;
+    let request = embed::request(slot, inputs);
+    let meta = Metadata { user_id: opaque(payer), agent_id: agent.map(opaque) };
+    let answered = match &slot.upstream {
+        Upstream::WorkersAi { model } => workers_ai(env, cfg, model, &request, &meta).await,
+        Upstream::Openai { base_url, .. } => openai(env, embed::EMBEDDINGS, base_url, "/embeddings", &request).await,
+    };
+    drop(request);
+    // not reached: it used nothing, and nothing is charged
+    let mut upstream = answered?;
+    charge.first_ms = Some(js::now_ms() - charge.t0);
+    let status = upstream.status_code();
+    let log_id = upstream.headers().get("cf-aig-log-id")?;
+    if status != 200 {
+        return Ok(Embedding::Refused { status, text: bounded_text(&mut upstream).await });
+    }
+    let bytes = match read_whole(&mut upstream).await {
+        Ok(b) => b,
+        Err(e) => {
+            // what it used is unknown
+            charge.later(after, None, log_id);
+            return Err(e);
+        }
+    };
+    let response: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    drop(bytes);
+    let usage = embed::usage_of(slot, inputs, &response);
+    charge.later(after, usage.clone(), log_id);
+    match embed::answer(slot, inputs.len(), &response) {
+        Ok(vectors) => Ok(Embedding::Vectors { vectors, usage }),
+        Err(fault) => Err(CellError::new(ErrorCode::UpstreamFailed, format!("{}: the call is charged", fault.message()))),
+    }
+}
 
 /// `POST /api/models/v1/audio/transcriptions`: an agent's transcription
 /// (the module's doc), signed by the agent; OpenAI's multipart shape, its

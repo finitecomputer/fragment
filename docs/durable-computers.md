@@ -27,9 +27,23 @@ file is the newer word, and decision 18 points here.
   Hermes' lifecycle hooks hold a local authenticated activity socket
   while children run (docs/bridge.md, "Runtime work outside a turn").
   This is live runtime state, never saved: a restarted gateway has no
-  children from its previous process. Waiting only on a person will stop
-  holding with P6 (#627); this change leaves the existing card hold alone.
+  children from its previous process. The shared wakefulness rule is: hold
+  while a turn is queued or running, or a delegated child is running; never
+  while only waiting on a person.
 
+- **Approvals outlive a restart (P6, #627).** A restart ends the old
+  turn, leaving unexpired cards answerable. A late answer starts one fresh
+  turn: its message the answer, the card's turn (what it was asked, its
+  steps and replies) its read-only note, all from the chat's journal, so
+  the same with no bridge state; its claim is the answer's, so it runs
+  once. No old turn resumes. A failed read is read again; a journal that
+  cannot be read whole closes the card `history_unavailable` and starts
+  nothing; a card answered live never runs again after a rollback.
+  docs/bridge.md, "A card outlives its turn"; the real-image proofs are
+  `a_card_answered_after_a_sleep_starts_one_fresh_turn` and
+  `a_card_answered_live_runs_once_after_a_rollback` in
+  images/bridge/tests/docker.rs. A sleep there is a save and a restore;
+  a hosted run's real sleep and wake is still owed.
 - **One life per turn (P1, #137).** A turn runs only in the life of the
   bridge that wrote its `turn.start` to `work`, and only once that post
   is answered. A rolled-back or lost `/data` runs no turn twice; a turn
@@ -391,10 +405,5 @@ its restart and rollback protocol is in docs/bridge.md, "SimpleX".
 
 ## Deferred, with the recommendation
 
-- **P6, approvals outlive a restart:** for now, an open approval card
-  holds the keepalive until it is answered or expires (decision 42
-  changes; built 2026-10-05, after Paul's missed card on p5:
-  docs/bridge.md, "A card keeps its computer awake"); later, a late
-  answer starts a new turn.
 - **A backlog's age:** chat messages have no age limit after a long
   outage (routines have an hour). Decide before production.

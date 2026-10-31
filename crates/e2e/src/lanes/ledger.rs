@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use fragment_core::price::{PriceBook, Usage};
-use fragment_fakes::workers_ai::{heard as fake_heard, image_bytes, spoken_wav, Used, IMAGE_MODEL, TRANSCRIBE_MODEL};
+use fragment_fakes::workers_ai::{embedding as fake_embedding, heard as fake_heard, image_bytes, spoken_wav, Used, EMBEDDING_DIMENSIONS, IMAGE_MODEL, TRANSCRIBE_MODEL};
 use fragment_nip98::Keys;
 use serde_json::{json, Value};
 
@@ -54,6 +54,8 @@ const MODEL_ROUTE: &str = "/api/models/v1/chat/completions";
 const MODELS_ROUTE: &str = "/api/models/v1/models";
 /// Its transcriptions (decision 9).
 const TRANSCRIBE_ROUTE: &str = "/api/models/v1/audio/transcriptions";
+/// The model route's embeddings (fragment_core::embed).
+const EMBEDDINGS_ROUTE: &str = "/api/models/v1/embeddings";
 /// A voice memo as each browser's recorder makes it (the chat template's
 /// `MEMO_TYPES`, WebM first; docs/chat-records.md, "A voice memo"):
 /// Chrome's and Firefox's (and Safari's since 18.4) WebM/Opus with no
@@ -709,6 +711,7 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
     vision(s, api, wait)?;
     transcription(s, api, wait)?;
     decisions_route(s, api, wait)?;
+    embeddings_route(s, api, wait)?;
     let r = api.signed(&owner, "POST", route, Some(&chat(false)))?;
     s.ok("a person does not call the model route (an agent does, for whom its owner pays)", r.status == 403, &r);
     let elsewhere = s.named(api, &visitor, "ledger-elsewhere")?;
@@ -1073,6 +1076,78 @@ fn decisions_route(s: &mut Suite, api: &Api, wait: Duration) -> Result<()> {
     let settled = s.eventually(wait, || aig().len() == before + 1 && settled_at(priced));
     s.ok("an answer that does not answer what was asked is 502, and charged: it was paid for", r.status == 502 && r.message().contains("question set") && settled, json!({ "status": r.status, "message": r.message() }));
     let r = api.signed(&owner, "POST", DECIDE_ROUTE, Some(&asked))?;
+    s.ok("a person does not call it (an agent does, for whom its owner pays)", r.status == 403, &r);
+    Ok(())
+}
+
+/// The model route's embeddings (fragment_core::embed): OpenAI's shape on
+/// the deployment's embeddings slot, BGE-M3 on Workers AI unnamed (the
+/// fake's vectors: words hashed), each unit length, its answer naming its
+/// space; charged on the agent's owner's ledger after it, at the input
+/// tokens counted from what it sent (Workers AI reports none); refused
+/// past its bounds before anything is sent or charged, its model's own
+/// refusal passed through uncharged, and refused for a person.
+fn embeddings_route(s: &mut Suite, api: &Api, wait: Duration) -> Result<()> {
+    use base64::Engine;
+    use fragment_core::embed::{estimated_tokens, MODEL_DEFAULT};
+    let owner = api.person()?;
+    let owner_id = api.identity(&owner)?;
+    let hand = &Keys::generate();
+    let reg = "/api/identities";
+    let r = api.signed(&owner, "POST", reg, Some(&json!({ "kind": "agent", "proof": api.proof(hand, "POST", reg, &owner) })))?;
+    anyhow::ensure!(r.status == 200, "an agent of the owner's: {r}");
+    let owner_id = owner_id.as_str();
+    let aig = || entries(api, owner_id, "aig:");
+    let settled_at = |charge: i64| aig().iter().any(|e| charged(e) == Some(charge));
+    let texts = ["the harbour lantern audit", "an audit of the harbour lantern", "quarterly tax forms"].map(String::from);
+    let dot = |a: &[f32], b: &[f32]| a.iter().zip(b).map(|(x, y)| x * y).sum::<f32>();
+    s.ai.clear_script();
+    let (calls, before) = (s.ai.calls().len(), quiet(api, owner_id, "aig:"));
+    let r = api.signed(hand, "POST", EMBEDDINGS_ROUTE, Some(&json!({ "input": texts, "model": "embeddings" })))?;
+    let call = s.ai.calls().get(calls).cloned();
+    let vectors: Vec<Vec<f32>> = r.body["data"].as_array().into_iter().flatten().map(|d| d["embedding"].as_array().into_iter().flatten().filter_map(Value::as_f64).map(|x| x as f32).collect()).collect();
+    let theirs = vectors.len() == texts.len() && vectors.iter().zip(&texts).all(|(v, t)| v.len() == EMBEDDING_DIMENSIONS && dot(v, &fake_embedding(t, EMBEDDING_DIMENSIONS)) > 0.9999);
+    let near = theirs && dot(&vectors[0], &vectors[1]) > dot(&vectors[0], &vectors[2]);
+    let counted = estimated_tokens(&texts);
+    let priced = charge(&tokens(MODEL_DEFAULT, counted, 0, 0));
+    let settled = s.eventually(wait, || aig().len() == before + 1 && settled_at(priced));
+    s.ok(
+        "an agent's embeddings run on BGE-M3 unless the deployment names another, come back unit length in order, named by their space, and are charged on its owner's ledger at the tokens counted from what it sent",
+        r.status == 200 && theirs && near && r.body["space"] == json!({ "model": MODEL_DEFAULT, "dimensions": 1024, "version": null }) && r.body["usage"]["prompt_tokens"] == counted
+            && call.as_ref().is_some_and(|c| c.model == MODEL_DEFAULT && c.body == json!({ "text": texts }) && c.authorization.is_none()) && settled,
+        json!({ "status": r.status, "space": r.body["space"], "usage": r.body["usage"], "entries": aig() }),
+    );
+    let r = api.signed(hand, "POST", EMBEDDINGS_ROUTE, Some(&json!({ "input": "the harbour lantern audit", "encoding_format": "base64" })))?;
+    let bytes = r.body["data"][0]["embedding"].as_str().and_then(|b| base64::engine::general_purpose::STANDARD.decode(b).ok()).unwrap_or_default();
+    let decoded: Vec<f32> = bytes.as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes(*c)).collect();
+    s.ok(
+        "base64, as OpenAI's SDKs ask, is each vector's little-endian float32s",
+        r.status == 200 && decoded.len() == EMBEDDING_DIMENSIONS && dot(&decoded, &fake_embedding(&texts[0], EMBEDDING_DIMENSIONS)) > 0.9999,
+        json!({ "status": r.status, "bytes": bytes.len() }),
+    );
+    let (calls, before) = (s.ai.calls().len(), quiet(api, owner_id, "aig:"));
+    let mut refused = Vec::new();
+    for (body, why) in [
+        (json!({ "input": vec!["x"; fragment_core::embed::INPUTS_MAX + 1] }), "1 to 100 inputs"),
+        // 1,400 bytes of numbers: BGE-M3 reads 773 tokens, the bound 1,403
+        (json!({ "input": ["ok", "1,2,3,4,5,6,7,8,9,0\n".repeat(70)] }), "input 1 may be 1403 tokens, past the embeddings slot's 512"),
+        (json!({ "input": [" "] }), "has no embedding"),
+        (json!({ "input": [1, 2] }), "token arrays are not taken"),
+        (json!({ "input": "x", "dimensions": 256 }), "not cut to 256"),
+        (json!({ "input": "x", "model": "cheap" }), "model is embeddings"),
+    ] {
+        let r = api.signed(hand, "POST", EMBEDDINGS_ROUTE, Some(&body))?;
+        refused.push((r.status == 400 && r.message().contains(why), r.status, r.message().to_string()));
+    }
+    s.ok(
+        "too many inputs, one past the slot's window (nothing is cut), an empty one, tokens for text, another length and a chat model are refused, 400, saying why, nothing sent or charged",
+        refused.iter().all(|(ok, _, _)| *ok) && s.ai.calls().len() == calls && aig().len() == before,
+        format!("{refused:?}"),
+    );
+    s.ai.fail_next(&[429]);
+    let r = api.signed(hand, "POST", EMBEDDINGS_ROUTE, Some(&json!({ "input": "x" })))?;
+    s.ok("the model's refusal is passed through, and nothing is charged", r.status == 429 && aig().len() == before, json!({ "status": r.status, "entries": aig() }));
+    let r = api.signed(&owner, "POST", EMBEDDINGS_ROUTE, Some(&json!({ "input": "x" })))?;
     s.ok("a person does not call it (an agent does, for whom its owner pays)", r.status == 403, &r);
     Ok(())
 }

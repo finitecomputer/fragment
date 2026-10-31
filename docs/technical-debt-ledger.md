@@ -5,6 +5,25 @@ Each entry names where it was observed, the risk, the first proof that
 would show it biting, and the condition that deletes it. An entry
 without a delete condition is unfinished design, not debt.
 
+## Two imports into one session archive at once agree last-writer-wins
+
+- **Observed:** `fragment session import` (templates/sessions/README.md),
+  2026-10-30: each conversation's file goes up as an upsert on whatever
+  head main has, and only the indexes' commit is made again on a head
+  another writer moved.
+- **Shortcut:** two imports of the same conversation at once (the same
+  person running it twice, on two machines) keep the last one's file,
+  and an index entry may name the other's copy (its `sha256` and
+  `ended_at`) when the two are the same size; one of another size is
+  listed by its file at the next import (`found`, cli/src/session).
+- **Risk:** a stale entry makes the next import of that conversation
+  compare against the wrong copy: it may skip a newer copy once, or write
+  the same one again. Nothing is lost: the file is one of the two copies.
+- **First proof:** an archive whose entry's `sha256` is not its file's.
+- **Delete when:** each batch's commit is made again from main as the
+  indexes' is (read the entries of the conversations it writes, keep the
+  newer), or the archive moves to an app whose mutation writes both.
+
 ## A paid org pack is still credited, though none is sold
 
 - **Observed:** #736 review, 2026-10-30: orgs now pay out of band and an
@@ -1525,31 +1544,6 @@ fragment.club until cutover (decisions 34–35).
 - **Delete when:** `rollback`'s default target is the commit live served
   before its tip (skipping a deploy's first step), or code.storage merges
   with the source's tree.
-
-## An open card keeps its computer awake, and any other restart under it still loses its card
-
-- **Observed:** 2026-10-05, Paul on p5 missed an approval card's hour and
-  his agent stopped answering: the idle sleep under the card cut its
-  turn, and Hermes folded every later message into the cut request,
-  asking its approval again. The bridge now holds the keepalive while a
-  turn waits on its card (images/bridge/src/engine.rs, `finish`;
-  docs/bridge.md, "A card keeps its computer awake"), the P6 stopgap
-  Paul agreed (docs/durable-computers.md). The fold itself is closed by
-  P5 (2026-10-06: the boot closes a cut turn in Hermes' session, and the
-  next turn is told what was cut; `a_turn_cut_by_a_restart_is_closed_and_told`
-  in images/bridge/tests/docker.rs).
-- **Risk:** an unanswered card costs its life awake (an hour by default;
-  a runtime may ask up to `PROMPT_TTL_MS_MAX`, a day). A restart for any
-  other reason while a card is open (an owner's sleep, a crash, a deploy,
-  an image pinned) still cuts the turn and closes its card `expired`
-  before its `expiresAt`: the owner's answer has no turn to go to (docs/durable-computers.md).
-- **First proof:** a computer's awake time dominated by turns waiting on
-  cards; or an owner who answers a card after a restart and sees nothing
-  happen.
-- **Delete when:** P6 lands: a card outlives its turn (a late answer
-  starts a new turn, told what was cut), so the keepalive can be let go
-  while a card waits again, proven on the real-Hermes lane by a sleep
-  under a card whose answer, after the wake, is acted on once.
 
 ## Preview cards drive Browser Rendering over a CDP client of our own
 

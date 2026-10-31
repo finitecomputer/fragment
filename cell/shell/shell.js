@@ -20,6 +20,7 @@ import { createLayout, store, reducedMotion, springFrames } from "./layout.js";
 import { createViewer } from "./viewer.js";
 import { seatGives } from "./billing.js";
 import { createChatList, newestChat } from "./chat-list.js";
+import { createSessionArchive } from "./session-archive.js";
 import { createSessionRefresh } from "./session-refresh.js";
 import { createOnboarding } from "./onboarding.js";
 import { createComputer } from "./computer.js";
@@ -822,13 +823,19 @@ const watching = { on: false, socket: null, wait: 1000, timer: null, settle: nul
 const listLive = () => watching.socket?.readyState === WebSocket.OPEN;
 const { renderHeading, renderChats, loadInvites, primaryAgent, newChatAgent, ownAgents, markSeen } = createChatList({
   api, ui: { $, el, patch, agentFace, mark, notice },
-  data: { byName, own, chats, shown, titleOf, chatTitle: (name) => chatTitle(name), homeMark: (f) => homeMark(f), isGroup, agentOfChat: (name) => agentOfChat(name), agentsOf,
+  data: { byName, own, chats, shown, titleOf, chatTitle: (name) => (byName(name)?.kind === "sessions" ? sessionArchive.title() : chatTitle(name)), homeMark: (f) => homeMark(f), isGroup, agentOfChat: (name) => agentOfChat(name), agentsOf,
     agents: () => state.agents, allFragments: () => state.fragments, computer: () => state.computer, isGuest: () => state.guest, personId: () => state.me?.id,
     isThread: (f) => threads.isPair(f), waitingOn: (name) => threads.waitingOn(name), renderThreads: () => threads.render() },
   selection: { current: () => state.current, page: () => state.page, getFrame: (name) => state.frames.get(name) },
   menus: { menuOwner: () => menuFor, openMenu, shareItem, archiveItem },
   navigation: { newChat, rename: (name) => rename(name), openChat, openApp, openScreen, leaveSidebar, seg },
   listLive, load, invites: () => state.invites, setInvites: (v) => { state.invites = v; },
+});
+const sessionArchive = createSessionArchive({
+  api, ui: { $, el, patch, renderHeading: () => renderHeading(), notice },
+  data: { allFragments: () => state.fragments, own, seg, primaryAgent: () => primaryAgent(), agents: () => state.agents, chatLabel: (agent) => chatLabel(agent) },
+  selection: { current: () => state.current, page: () => state.page, getFrame: (name) => state.frames.get(name) },
+  navigation: { openChat, leaveSidebar }, load: () => load(), store,
 });
 
 // Delegation threads: a line each over the chat an agent asked from, its
@@ -870,7 +877,9 @@ const { chatTitle, homeMark, loadHomes, homePicker, paintHomes, setHome } = crea
 // launch's late answer changes the screen only if none was given since
 // (launcher.js).
 let views = 0;
-function openChat(name, push = true) {
+// `path`: the page of it to show (the session archive's list, or one of
+// its conversations: session-archive.js), its frame sent there.
+function openChat(name, push = true, path = null) {
   if (!byName(name)) return;
   views++;
   if (push) at("/");
@@ -882,10 +891,13 @@ function openChat(name, push = true) {
   state.current = name;
   store.set(CURRENT, name);
   hideNotice();
-  chatFrame(name);
+  const made = !state.frames.has(name);
+  chatFrame(name, path ?? undefined);
+  if (path && !made) go(state.frames.get(name), framed(name, path));
   for (const [n, frame] of state.frames) frame.hidden = n !== name;
   renderHeading();
   renderChats();
+  sessionArchive.render();
   markSeen();
   prewake();
   navigated();
@@ -1531,6 +1543,7 @@ async function load(changed = false) {
   }
   renderChats();
   threads.refresh().catch(() => {});
+  sessionArchive.load().catch(() => {});
   renderApps();
   appsPage.listed().catch(() => {});
   renderHeading();

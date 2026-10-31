@@ -18,6 +18,7 @@ use anyhow::{bail, Context, Result};
 
 pub mod built;
 pub mod containers;
+mod framing;
 mod front;
 pub mod node;
 mod node_release;
@@ -637,9 +638,8 @@ fn boot_log(dir: &Path, port: u16) -> Result<(PathBuf, fs::File)> {
 /// wrangler's output, each line as it comes: into the boot's log `out`, and
 /// heard by the front door (front.rs), which learns that wrangler is gone
 /// once both streams end.
-fn hear(child: &mut Child, out: fs::File, heard: Arc<front::Heard>) -> Result<()> {
+fn hear(child: &mut Child, out: Arc<Mutex<fs::File>>, heard: Arc<front::Heard>) -> Result<()> {
     use std::io::{BufRead, BufReader, Read};
-    let out = Arc::new(Mutex::new(out));
     let open = Arc::new(std::sync::atomic::AtomicUsize::new(2));
     let streams: [Box<dyn Read + Send>; 2] = [Box::new(child.stdout.take().context("wrangler's stdout")?), Box::new(child.stderr.take().context("wrangler's stderr")?)];
     for stream in streams {
@@ -729,9 +729,11 @@ impl Node {
             bail!("{} is not there: configure the fleet first (Fleet::configure)", config.display());
         }
         let (log, out) = boot_log(&opts.log_dir, opts.port)?;
+        // wrangler's lines and the front door's requests, one file
+        let out = Arc::new(Mutex::new(out));
         // the node's port, held before wrangler starts (front.rs)
         let heard = Arc::new(front::Heard::default());
-        let front = front::Front::bind(opts.port, heard.clone())?;
+        let front = front::Front::bind(opts.port, heard.clone(), out.clone())?;
         let proxied = free_port()?;
         let mut cmd = tools.wrangler()?;
         cmd.arg("dev").arg("-c").arg(&config);
@@ -900,14 +902,16 @@ mod tests {
         assert_eq!(env("WRANGLER_SEND_METRICS"), Some(PathBuf::from("false")));
     }
 
-    /// A picked port is below the kernel's ephemeral range, and free: it binds.
+    /// A picked port is below the kernel's ephemeral range. It was free as
+    /// it was picked (`free_port` binds it to see); binding it again here
+    /// would test only that no other process took it since, which nothing
+    /// can promise on a shared machine (this test once failed so).
     #[test]
-    fn a_picked_port_is_free_and_below_the_ephemeral_range() {
+    fn a_picked_port_is_below_the_ephemeral_range() {
         let ephemeral = ephemeral_ports_from().expect("the ephemeral range");
         for _ in 0..32 {
             let port = free_port().expect("a free port");
             assert!((PICKED_PORTS_FROM..ephemeral).contains(&port), "{port} is below {ephemeral}");
-            TcpListener::bind(("127.0.0.1", port)).expect("the picked port binds");
         }
     }
 
