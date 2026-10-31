@@ -139,7 +139,8 @@ pub(crate) struct PlacesNow {
 
 impl Call for PlacesNow {
     const PATH: &'static str = "/content/places";
-    type Answer = std::collections::BTreeMap<String, i64>;
+    /// Each one in it, and since when (a list: a map's code costs the Wasm more).
+    type Answer = Vec<(String, i64)>;
 }
 
 /// The people a fragment asks about at once, at most: a batch of its
@@ -685,7 +686,7 @@ impl RegistryCell {
         Ok(ContentPerson { email: self.email_now(&b.person)?, person: b.person, admin: false, since: js::now_ms() })
     }
 
-    fn places_now(&self, b: PlacesNow) -> CellResult<std::collections::BTreeMap<String, i64>> {
+    fn places_now(&self, b: PlacesNow) -> CellResult<Vec<(String, i64)>> {
         if b.people.len() > PLACES_ASKED_MAX {
             return Err(CellError::invalid(format!("at most {PLACES_ASKED_MAX} people's places at once")));
         }
@@ -694,11 +695,11 @@ impl RegistryCell {
             person: String,
             since: i64,
         }
-        let mut now = std::collections::BTreeMap::new();
+        let mut now = Vec::with_capacity(b.people.len());
         // bounded: PLACES_ASKED_MAX keyed reads
         for person in &b.people {
             if let Some(r) = self.row::<Row>("SELECT person, since FROM org_content WHERE org = ? AND person = ?", vec![b.org.as_str().into(), person.as_str().into()])? {
-                now.insert(r.person, r.since);
+                now.push((r.person, r.since));
             }
         }
         Ok(now)

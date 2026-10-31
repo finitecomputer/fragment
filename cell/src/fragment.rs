@@ -58,7 +58,7 @@ use fragment_core::access::{self, Decision, Purpose, Standing};
 use fragment_core::npub;
 use fragment_core::owner::Owner;
 use fragment_proto::{
-    limits, valid_fragment_name, CodeStatus, Counts, CreateFragment, Created, ErrorCode, FragmentKind, FragmentStatus, IdentityKind, OwnerRef, Pins, Role,
+    limits, valid_fragment_name, CodeStatus, Counts, CreateFragment, Created, ErrorCode, FragmentStatus, IdentityKind, OwnerRef, Pins, Role,
     Urls, Visibility,
 };
 use fragment_templates::blessed;
@@ -1256,13 +1256,8 @@ impl FragmentCell {
             return Err(CellError::invalid(format!("no template {t:?}; the templates are {}", names.join(", "))));
         }
         // an org owns apps and brains: a person's agents, chats and skills stay theirs
-        if let (Owner::Org(_), Some(Ok(Ok(m)))) = (&owner, match body.template.as_deref().filter(|t| blessed::template(t).is_some()) {
-            Some(t) => Some(crate::assets::blessed_manifest(&self.env, t).await),
-            None => None,
-        }) {
-            if matches!(m.kind(), FragmentKind::Agent | FragmentKind::Chat | FragmentKind::Skills) {
-                return Err(CellError::invalid(format!("an org owns apps and brains; a {} stays a person's own", m.kind().as_str())));
-            }
+        if let (Owner::Org(_), Some(t)) = (&owner, body.template.as_deref().filter(|t| blessed::PERSONS_OWN.contains(t))) {
+            return Err(CellError::invalid(format!("an org owns apps and brains; a {t} stays a person's own")));
         }
         if let Some(title) = &body.title {
             if body.template.is_none() {
