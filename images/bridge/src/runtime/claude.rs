@@ -539,13 +539,8 @@ async fn on_line(t: &mut Turn, v: &Value, p: &mut Proc, events: &mpsc::Sender<Ev
     let top = v["parent_tool_use_id"].is_null();
     match v["type"].as_str().unwrap_or("") {
         "stream_event" if top && !t.forgotten => {
-            let e = &v["event"];
-            if e["type"] == "content_block_start" && e["content_block"]["type"] == "text" {
-                t.draft.clear();
-            }
-            if e["type"] == "content_block_delta" && e["delta"]["type"] == "text_delta" {
-                t.draft.push_str(e["delta"]["text"].as_str().unwrap_or(""));
-                let _ = events.send(Event::Draft { turn: t.id.clone(), text: t.draft.clone() }).await;
+            if let Some(text) = drafted(t, &v["event"]) {
+                let _ = events.send(Event::Draft { turn: t.id.clone(), text }).await;
             }
         }
         "assistant" if top => {
@@ -609,6 +604,19 @@ async fn on_line(t: &mut Turn, v: &Value, p: &mut Proc, events: &mpsc::Sender<Ev
         _ => {}
     }
     false
+}
+
+/// A streamed event of the model's answer: a text block's start clears the
+/// draft, and each piece of its text grows it (the draft so far, to show).
+fn drafted(t: &mut Turn, e: &Value) -> Option<String> {
+    if e["type"] == "content_block_start" && e["content_block"]["type"] == "text" {
+        t.draft.clear();
+    }
+    if e["type"] == "content_block_delta" && e["delta"]["type"] == "text_delta" {
+        t.draft.push_str(e["delta"]["text"].as_str().unwrap_or(""));
+        return Some(t.draft.clone());
+    }
+    None
 }
 
 /// What a failed turn's `result` says, in a person's words where it has
@@ -719,6 +727,19 @@ mod tests {
         for n in ["PATH", "HOME", "GOOGLE_OAUTH_ACCESS_TOKEN", "FRAGMENT_API"] {
             assert!(!withheld(n), "{n}");
         }
+    }
+
+    /// Goal: the model's words stream as the draft: each text block starts
+    /// one, each piece of its text grows it, and nothing else touches it.
+    #[test]
+    fn its_words_stream_as_the_draft() {
+        let agent = Agent { fragment: "juniper--k3x9".into(), identity: "npub1j".into(), name: "juniper".into(), owner: "npub1paul".into(), credentials: vec![], key: None, runtime: Some("claude".into()) };
+        let mut t = Turn { id: "t".into(), agent, message: None, retried: false, part: 1, draft: "stale".into(), calls: HashMap::new(), asked: Vec::new(), stopping: false, forgotten: false };
+        assert_eq!(drafted(&mut t, &json!({ "type": "content_block_start", "content_block": { "type": "text" } })), None);
+        assert_eq!(drafted(&mut t, &json!({ "type": "content_block_delta", "delta": { "type": "text_delta", "text": "hel" } })).as_deref(), Some("hel"));
+        assert_eq!(drafted(&mut t, &json!({ "type": "content_block_delta", "delta": { "type": "thinking_delta", "thinking": "hm" } })), None);
+        assert_eq!(drafted(&mut t, &json!({ "type": "content_block_delta", "delta": { "type": "text_delta", "text": "lo" } })).as_deref(), Some("hello"));
+        assert_eq!(drafted(&mut t, &json!({ "type": "message_stop" })), None);
     }
 
     /// Goal: a tool call shows what it was called with, and its kind.

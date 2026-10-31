@@ -146,8 +146,10 @@ impl Scenario {
     }
 }
 
-/// Goal: a message is answered by Claude Code: its words stream as the
-/// chat's draft, then post as the turn's reply, and the turn ends idle.
+/// Goal: a message is answered by Claude Code: its words post as the
+/// turn's reply, and the turn ends idle. (That they stream as the draft is
+/// claude.rs's `its_words_stream_as_the_draft`: a replay comes at once, and
+/// the driver paces drafts and drops one a reply overtakes.)
 #[tokio::test]
 async fn a_reply() {
     let s = Scenario::new("reply").await;
@@ -157,7 +159,6 @@ async fn a_reply() {
     s.ended(1, "the turn's end").await;
     assert!(s.replies().iter().any(|r| r.to_lowercase().contains("hello")), "{:?}", s.replies());
     assert_eq!(s.ends()[0]["outcome"], "idle");
-    assert!(s.with(|w| w.drafts.iter().any(|d| d.3.as_deref().is_some_and(|t| t.to_lowercase().contains("hello")))), "its words streamed as a draft");
     bridge.stop().await;
     s.done();
 }
