@@ -220,8 +220,9 @@ page's id is `pr:<first 32 hex digits of SHA-256 of "<agent>
 
 - Posted by the chat's owner (the shell's Continue) with the id
   `history`, before the agent joins: the chat's first record. It holds
-  the conversation's last summary and its newest messages, oldest first,
-  with how many came before them (`earlier`), bounded to fit one record
+  the conversation's last summary and the newest messages said after it
+  (the summary covers what came before), oldest first, with how many
+  others the conversation holds (`earlier`), bounded to fit one record
   (cell/shell/session-archive.js, `historyOf`). `archive` and `key` name
   the whole conversation's file.
 - Only its owner's counts. The page shows it above the chat. The bridge

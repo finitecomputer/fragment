@@ -80,6 +80,11 @@ with its default. What an image sets:
   each agent's screen (`screen.rs`, `screens.rs`, `lease.rs`).
 - `BRIDGE_SIMPLEX_BIN`: SimpleX's core (below). Unset, nothing of SimpleX
   runs.
+- `BRIDGE_CLAUDE_BIN`: the person's own unmodified `claude` (below, "The
+  Claude runtime"), run as `BRIDGE_CLAUDE_USER` (`uid:gid`, never root),
+  its config, work and state under `/data`. Unset, as in every image
+  today, an agent whose `agent.json` names `claude` has its turns refused,
+  saying so.
 
 ## State, and what it never does twice
 
@@ -327,6 +332,33 @@ the core's bot API on loopback.
   reaches root, and a core's bot API listens on loopback (the debt
   ledger, "SimpleX retains the computer's root trust and rewindable
   state").
+
+## The Claude runtime
+
+`runtime/claude.rs`: the person's own unmodified `claude`, signed in with
+their own plan, driven over its stream-json wire as Anthropic's Agent SDK
+drives it. The bridge never sits between it and Anthropic: no proxy, base
+URL or key, and no `ANTHROPIC_*` or `CLAUDE_CODE_*` variable of anyone's
+reaches it (`withheld`).
+
+- **A session per agent and chat**, its id derived from the two and the
+  chat's `/new` count, so every life names the same one. It resumes when
+  its transcript is on disk, and its process stops once idle.
+- **A turn** is one user message: its note, quote, asker and files in
+  words. Text deltas are the draft, each text block a reply part, each
+  tool's result a step, and its `result` its end (a sign-in or a plan's
+  limit in Claude Code's own words).
+- **No technical approvals:** tools run with permissions bypassed.
+  `AskUserQuestion` alone asks: each question a card
+  (`<tool_use_id>-q<n>`), its options and "Other" in words; an unanswered
+  card refuses the call.
+- **Stop** is Claude Code's interrupt. A turn the bridge lets go of is
+  interrupted and its output dropped until its `result`, or its process
+  replaced past `DRAIN_MS_DEFAULT`: one turn's words are never another's.
+- **A crash** leaves the cut call open in the transcript; the resumed
+  session tells its model the call's outcome is unknown, and the bridge's
+  note says what the chat saw.
+- **Its menu:** `new` (the chat's next session) and `stop`.
 
 ## Hermes' Relay
 

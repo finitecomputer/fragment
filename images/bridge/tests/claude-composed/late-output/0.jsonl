@@ -1,0 +1,13 @@
+{"args":["--session-id","00000000-0000-4000-8000-000000000001"]}
+{"in":{"type":"user"}}
+{"out":{"type":"system","subtype":"init","session_id":"00000000-0000-4000-8000-000000000001"}}
+{"out":{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_lateA","name":"Bash","input":{"command":"python3 slow.py"}}]},"parent_tool_use_id":null}}
+{"in":{"type":"control_request","request":{"subtype":"interrupt"}}}
+{"sleep_ms":500}
+{"out":{"type":"control_response","response":{"subtype":"success","request_id":"stop-1","response":{"still_queued":[]}}}}
+{"out":{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_lateA","content":"interrupted","is_error":true}]},"parent_tool_use_id":null}}
+{"out":{"type":"assistant","message":{"content":[{"type":"text","text":"The let-go turn's late words"}]},"parent_tool_use_id":null}}
+{"out":{"type":"result","subtype":"error_during_execution","is_error":true,"result":null}}
+{"in":{"type":"user"}}
+{"out":{"type":"assistant","message":{"content":[{"type":"text","text":"The next turn's own answer"}]},"parent_tool_use_id":null}}
+{"out":{"type":"result","subtype":"success","is_error":false,"result":"The next turn's own answer"}}

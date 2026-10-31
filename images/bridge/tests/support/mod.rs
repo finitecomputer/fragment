@@ -2,7 +2,7 @@
 //! scripted Hermes, and a bridge run in process (stopped and started again
 //! over the same state, as a restart does; or killed, as a crash does).
 //!
-//! The tools of the failure cases (docs/durable-computers.md):
+//! The tools of the failure cases (docs/computers.md, Durability):
 //!
 //! - `Running::kill`: an abrupt stop. A bridge from `start_killable` runs on
 //!   a tokio runtime of its own, and a kill shuts that runtime down: every
@@ -87,10 +87,15 @@ pub fn start_runtimes(cfg: Config, runtimes: fragment_bridge::runtime::Runtimes)
 
 /// A bridge on a runtime of its own, which `kill` shuts down whole.
 pub fn start_killable(cfg: Config, runtime: Box<dyn Runtime>) -> Running {
+    start_killable_runtimes(cfg, runtime.into())
+}
+
+/// `start_killable`, running several runtimes.
+pub fn start_killable_runtimes(cfg: Config, runtimes: fragment_bridge::runtime::Runtimes) -> Running {
     fragment_bridge::log::set_quiet(std::env::var("BRIDGE_TEST_LOG").is_err());
     let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).thread_name("bridge").enable_all().build().expect("a runtime for the bridge");
     let (stop, rx) = watch::channel(false);
-    let handle = rt.spawn(driver::run(cfg, runtime.into(), rx));
+    let handle = rt.spawn(driver::run(cfg, runtimes, rx));
     Running { stop, handle: Some(handle), runtime: Some(rt) }
 }
 

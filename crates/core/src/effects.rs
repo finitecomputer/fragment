@@ -1,5 +1,5 @@
 //! A mutation's effects, decoded and checked before any is applied
-//! (docs/MODEL.md, Operations). Platform code in the app facet checks the
+//! (docs/api.md, Apps). Platform code in the app facet checks the
 //! same rules first, so an author sees a refusal while the mutation can
 //! still roll back; but that code shares a realm with the author's, which
 //! can patch whatever it relies on, so this is the check that holds. Job

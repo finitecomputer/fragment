@@ -134,6 +134,19 @@ for (const [name, c] of [
   check(`${name}: Continue makes one chat, its history posted, its agent in it`, w.creates === 1 && w.posts === 1 && w.members.size === 1 && t.opened.length === 1 && !t.notices.length, { creates: w.creates, posts: w.posts, notices: t.notices });
 }
 {
+  // a summary covers what was said before it: the card holds it, then what
+  // was said after it, never what it summarized
+  const c = { id: "c1", title: "Beans", messages: [
+    { role: "user", at: "2026-10-01T09:00:00.000Z", text: "before one" },
+    { role: "assistant", at: "2026-10-01T09:00:01.000Z", text: "before two" },
+    { role: "user", at: "2026-10-02T09:00:00.000Z", text: "what we said before", summary: true },
+    { role: "user", at: "2026-10-02T09:00:01.000Z", text: "after one" },
+    { role: "assistant", at: "2026-10-02T09:00:02.000Z", text: "after two" },
+  ] };
+  const h = historyOf(c, "hermes-c1", ARCHIVE);
+  check("a summary is followed by what was said after it alone, the rest counted earlier", h.summary === "what we said before" && JSON.stringify(h.messages.map((m) => m.text)) === JSON.stringify(["after one", "after two"]) && h.earlier === 2, h);
+}
+{
   const c = conversation(said(3, "short"), "earlier, summarized");
   const h = historyOf(c, "hermes-c1", ARCHIVE);
   check("a short conversation is kept whole, with its summary", h.messages.length === 3 && h.earlier === 0 && h.summary === "earlier, summarized", h);
