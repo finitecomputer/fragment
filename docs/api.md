@@ -2215,10 +2215,12 @@ Embeddings (fragment_core::embed; the search stack's model):
   and the deployment's search answers by words alone. Its deploy is not
   refused.
 - **Refusals before anything is sent.** `input` other than a string or 1
-  to 100 strings (token arrays included), an empty one, one past the
-  slot's window (its `max_input_tokens` at a token every 3 bytes: 1,536
-  bytes for BGE-M3's 512; nothing is cut, so a caller splits a long
-  text, as the search capability embeds a section's chunks),
+  to 100 strings (token arrays included), an empty one, one that might
+  be past the slot's window (`embed::tokens_max`, a bound for any
+  tokenizer: a byte a token or more, each character counted at its
+  longest decomposition, and 3 for the model's own; 509 bytes of ASCII for
+  BGE-M3's 512; nothing is cut, so a caller splits a long text, as the
+  search capability embeds a section's chunks),
   `model` other than `embeddings` or the slot's model, `dimensions` other
   than the slot's (vectors are never cut), and `encoding_format` other
   than `float` (the default) or `base64` (each vector's little-endian
@@ -2227,8 +2229,9 @@ Embeddings (fragment_core::embed; the search stack's model):
 - **Metering.** Charged after the answer at its input tokens, at the
   slot's model's row of the book (BGE-M3's $0.012 a million; a
   self-hosted slot's own `price`): the tokens the API reports, else, as
-  Workers AI reports none for embeddings, counted from the input at a
-  token every 3 bytes, never fewer than the model read.
+  Workers AI reports none for embeddings, estimated from the input at a
+  token every 3 bytes (a price, not the window: English prose is about 4
+  bytes a token, numbers fewer).
 - **Who pays, and what is kept.** As a chat call: the agent's owner, under
   `fragment`'s cap when it names one; only the usage, on the ledger. The
   model's refusal is charged nothing and passed through. Its computer's
