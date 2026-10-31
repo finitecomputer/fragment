@@ -200,6 +200,20 @@ impl FragmentCell {
         rows.sort_by_key(|r| r["id"].as_i64());
         let (Ok(fragment), Ok(incarnation)) = (self.must(MetaKey::Name), self.must(MetaKey::CreatedAt)) else { return drained };
         let mut failed = false;
+        // an org's: a subscriber offboarded since is sent nothing more, and
+        // their subscription ends (Alex's review), queued retries too; not
+        // knowing who is, its records wait (`fenced_subs`)
+        let fenced = match self.fenced_subs(&rows).await {
+            Ok(fenced) => fenced,
+            Err(e) => {
+                for row in rows.iter().filter(|r| matches!(decode(r), Pending::Record { .. })) {
+                    let (id, attempts) = (row["id"].as_i64().expect("delivery_outbox.id"), row["attempts"].as_i64().expect("delivery_outbox.attempts"));
+                    self.outbox_failed(&mut failed, id, attempts, &e.message);
+                }
+                let _ = self.schedule().await;
+                return drained;
+            }
+        };
         // records go a queue batch at a time; each push goes on its own;
         // each wake goes to its computer
         let mut singles: Vec<(i64, i64, Delivery)> = vec![];
@@ -207,6 +221,7 @@ impl FragmentCell {
         for row in &rows {
             let (id, attempts) = (row["id"].as_i64().expect("delivery_outbox.id"), row["attempts"].as_i64().expect("delivery_outbox.attempts"));
             match decode(row) {
+                Pending::Record { sub, .. } if fenced.contains(&sub) => self.outbox_done(id),
                 Pending::Record { sub, channel, seq } => match self.record_delivery(sub, &channel, seq, &fragment, &incarnation) {
                     Ok(Some(d)) if d.url.starts_with(WAKE_PREFIX) => wakes.push(Wake { id, attempts, computer: d.url, channel, seq }),
                     Ok(Some(d)) => singles.push((id, attempts, d)),
@@ -292,7 +307,7 @@ impl FragmentCell {
         let mut tokens = Tokens::new(&vapid, &self.cfg.platform_url, js::now_ms() / 1000);
         for _ in 0..PUSH_BATCHES_MAX {
             let subs = match self.rows(
-                "SELECT id, endpoint, p256dh, auth FROM push_subs WHERE id > ? AND id <= ? AND (? = '*' OR who = ?) ORDER BY id LIMIT ?",
+                "SELECT id, who, endpoint, p256dh, auth FROM push_subs WHERE id > ? AND id <= ? AND (? = '*' OR who = ?) ORDER BY id LIMIT ?",
                 vec![SqlStorageValue::Integer(after), SqlStorageValue::Integer(upto), who.as_str().into(), who.as_str().into(), SqlStorageValue::Integer(QUEUE_BATCH as i64)],
             ) {
                 Ok(s) => s,
@@ -302,6 +317,13 @@ impl FragmentCell {
                 return self.outbox_done(id);
             };
             assert!(last > after, "a push's cursor moves forward");
+            // an org's: no browser of someone offboarded since is pushed to
+            let whose: Vec<String> = subs.iter().filter_map(|s| s["who"].as_str().map(str::to_string)).collect();
+            let stale = match self.stale_members(&whose).await {
+                Ok(stale) => stale,
+                Err(e) => return self.outbox_failed(failed, id, attempts, &e.message),
+            };
+            let subs: Vec<Value> = subs.into_iter().filter(|s| !s["who"].as_str().is_some_and(|w| stale.contains(w))).collect();
             let deliveries = self.push_deliveries(&mut tokens, &subs, &payload, fragment, incarnation);
             if let Err(e) = self.enqueue(&deliveries).await {
                 return self.outbox_failed(failed, id, attempts, &e.message);
@@ -314,6 +336,37 @@ impl FragmentCell {
 
     fn outbox_done(&self, id: i64) {
         let _ = self.exec("DELETE FROM delivery_outbox WHERE id = ?", vec![SqlStorageValue::Integer(id)]);
+    }
+
+    /// Of the claimed rows' record subscriptions, those whose subscriber's
+    /// membership counts no more (an org's fragment: `stale_members`),
+    /// each such subscriber's subscriptions ended as a removal ends them.
+    /// A person's fragment: none, and no registry read.
+    async fn fenced_subs(&self, rows: &[Value]) -> CellResult<std::collections::BTreeSet<i64>> {
+        let mut fenced = std::collections::BTreeSet::new();
+        if self.owner()?.org().is_none() {
+            return Ok(fenced);
+        }
+        // bounded: DRAIN_ROWS rows
+        let mut by_sub: Vec<(i64, String)> = vec![];
+        for row in rows {
+            if let Pending::Record { sub, .. } = decode(row) {
+                if let Some(who) = self.rows("SELECT principal FROM subs WHERE id = ?", vec![SqlStorageValue::Integer(sub)])?.first().and_then(|r| r["principal"].as_str().map(str::to_string)) {
+                    by_sub.push((sub, who));
+                }
+            }
+        }
+        let whose: Vec<String> = by_sub.iter().map(|(_, w)| w.clone()).collect();
+        let stale = self.stale_members(&whose).await?;
+        for (sub, who) in by_sub {
+            if stale.contains(&who) {
+                fenced.insert(sub);
+            }
+        }
+        for who in &stale {
+            self.drop_subscriptions(who)?;
+        }
+        Ok(fenced)
     }
 
     /// A row the queue did not take: it waits, or after its last try it

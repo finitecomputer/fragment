@@ -300,20 +300,33 @@ impl FragmentCell {
             )
             .unwrap_or_default();
         assert!(due.len() as i64 <= INDEX_FLUSH_MAX, "a flush sends a bounded batch");
+        // an org's: a member offboarded since is sent no more of it, its
+        // row taken from their list instead (Alex's review); not knowing
+        // who is, it sends nothing now, and the alarm tries again
+        let named: Vec<String> = due.iter().filter(|r| r["role"].is_string()).filter_map(|r| r["principal"].as_str().map(str::to_string)).collect();
+        let stale = match self.stale_members(&named).await {
+            Ok(stale) => stale,
+            Err(e) => {
+                console_error!("{name}: who is in its org now was not read ({:?}): {}", e.code, e.message);
+                let _ = self.schedule().await;
+                return;
+            }
+        };
         let mut batch = Vec::with_capacity(due.len());
         for row in &due {
             let principal = row["principal"].as_str().unwrap_or("").to_string();
             let version = row["version"].as_i64().unwrap_or(0);
+            let role = if stale.contains(&principal) { Value::Null } else { row["role"].clone() };
             let mut body = json!({
                 "fragment": name,
-                "role": row["role"],
+                "role": role,
                 "incarnation": incarnation.parse::<i64>().unwrap_or(0),
                 "version": version,
             });
             // every row a role names: the channels searched, the
             // fragment's face and its agents, and the listed records of the
             // channels its role reads, as they are now
-            if let Some(role) = row["role"].as_str().and_then(Role::parse) {
+            if let Some(role) = body["role"].as_str().and_then(Role::parse) {
                 body["searched"] = json!(searched);
                 body["listed"] = json!(fragment_core::listed::for_role(&listed, role));
                 if let Ok(Some(face)) = self.meta(MetaKey::Face) {
@@ -323,7 +336,7 @@ impl FragmentCell {
             }
             // the owner's row: the sharing now, which no later change undoes
             // (a later one sends a newer version, made after it)
-            if principal == owner && row["role"].is_string() {
+            if principal == owner && body["role"].is_string() {
                 match self.sharing_counts() {
                     Ok(sharing) => body["sharing"] = json!(sharing),
                     Err(e) => console_error!("{name}: its sharing did not read ({:?}): {}", e.code, e.message),
@@ -542,6 +555,100 @@ impl FragmentCell {
         Ok(now)
     }
 
+    /// `gone`'s memberships taken away, each as a removal takes it: its
+    /// row, its listed records, its subscriptions, its computer's place,
+    /// its list's row and its sockets (an agent's owner's too, who has no
+    /// standing of their own left). Bounded: one person and their agents.
+    fn revoke(&self, gone: &[String]) -> CellResult<()> {
+        assert!(gone.len() as u64 <= 1 + limits::AGENTS_PER_OWNER_MAX, "one person and their agents");
+        let mut agents_left = false;
+        for who in gone {
+            let removed = self.rows("DELETE FROM members WHERE principal = ? RETURNING owner, kind", vec![who.as_str().into()])?;
+            agents_left |= removed.first().is_some_and(|r| r["kind"] == "agent");
+            self.listed_left(who)?;
+            self.drop_subscriptions(who)?;
+            self.agent_removed(who)?;
+            self.index_change(who, None)?;
+            self.close_sockets(&format!("p:{who}"), "membership revoked");
+            // an agent's owner who read through it, and has no standing of their own now
+            if let Some(owner) = removed.first().and_then(|r| r["owner"].as_str()) {
+                let still = self.member_role(owner)?.is_some() || !self.rows("SELECT principal FROM members WHERE owner = ? LIMIT 1", vec![owner.into()])?.is_empty();
+                if !still {
+                    self.close_sockets(&format!("p:{owner}"), "their agent's membership was revoked");
+                }
+            }
+        }
+        self.sharing_changed()?;
+        // every list's row names the agents left
+        if agents_left {
+            self.reindex()?;
+        }
+        Ok(())
+    }
+
+    /// Of `principals`, the members here whose rows count no more (Alex's
+    /// review): in an org's fragment, a row whose epoch is not its person's
+    /// place's in the org now (an agent's row: its person's), offboarded
+    /// since or not back yet. What a request carries decides its own
+    /// standing (`fence`); this decides where none does, for its
+    /// deliveries, its members' lists and an admission. One registry read
+    /// (`PlacesNow`); a person's fragment, and anyone with no row: none.
+    pub(crate) async fn stale_members(&self, principals: &[String]) -> CellResult<std::collections::BTreeSet<String>> {
+        let mut stale = std::collections::BTreeSet::new();
+        let Some(org) = self.owner()?.org().map(str::to_string) else { return Ok(stale) };
+        // each member's row: its epoch, and whose place it counts by
+        let mut rows: Vec<(String, String, Option<u64>)> = vec![];
+        for p in principals {
+            if rows.iter().any(|r| &r.0 == p) {
+                continue;
+            }
+            if let Some(r) = self.rows("SELECT kind, owner, epoch FROM members WHERE principal = ?", vec![p.as_str().into()])?.first() {
+                let person = match (r["kind"].as_str(), r["owner"].as_str()) {
+                    (Some("agent"), Some(owner)) => owner.to_string(),
+                    _ => p.clone(),
+                };
+                rows.push((p.clone(), person, r["epoch"].as_u64()));
+            }
+        }
+        if rows.is_empty() {
+            return Ok(stale);
+        }
+        let mut people: Vec<String> = rows.iter().map(|r| r.1.clone()).collect();
+        people.sort();
+        people.dedup();
+        assert!(people.len() <= crate::registry::content::PLACES_ASKED_MAX, "a batch of members is bounded");
+        let now = crate::ask_registry(&self.env, &crate::registry::content::PlacesNow { org, people }).await?;
+        for (principal, person, epoch) in rows {
+            if epoch.is_none() || now.get(&person).copied() != epoch {
+                stale.insert(principal);
+            }
+        }
+        Ok(stale)
+    }
+
+    /// In an org's fragment, `person`'s rows and their agents' that count no
+    /// more (`stale_members`) are revoked grants: taken away, as a removal
+    /// takes them, before anything admits them again, so it admits them
+    /// afresh, at their place now, and an ordinary member's way back is
+    /// still their own yes to an invite (Alex's review). Its event says so.
+    pub(crate) async fn revoke_stale(&self, person: &str) -> CellResult<()> {
+        if self.owner()?.org().is_none() {
+            return Ok(());
+        }
+        let theirs: Vec<String> = self
+            .rows("SELECT principal FROM members WHERE principal = ? OR owner = ?", vec![person.into(), person.into()])?
+            .iter()
+            .filter_map(|r| r["principal"].as_str().map(str::to_string))
+            .collect();
+        let stale: Vec<String> = self.stale_members(&theirs).await?.into_iter().collect();
+        if stale.is_empty() {
+            return Ok(());
+        }
+        self.revoke(&stale)?;
+        self.event("member.fenced", &format!("{} was offboarded from its org since they came in: what they held here is taken away", npub::display(person)), json!({ "principal": npub::display(person), "revoked": stale.len() }));
+        Ok(())
+    }
+
     /// `who`'s epoch in `org`'s content (an agent: its person's), as they
     /// come into this, one of its fragments: the registry enrolls them,
     /// refused for an invite made before they last left (`invited_at`).
@@ -592,6 +699,13 @@ impl FragmentCell {
     /// them"): anyone else joins by their own yes to an invite, but for a
     /// test's `lever`.
     async fn put_member(&self, actor: &Actor, target: &Identity, body: SetRole, lever: bool) -> CellResult<Member> {
+        // an org's: rows from before the person's place now are no grant
+        // (a returning admin's own add comes in afresh, at their epoch)
+        let person = match target.kind {
+            IdentityKind::Agent => target.owner.clone().ok_or_else(|| CellError::host("an agent has its owner"))?,
+            IdentityKind::Person => target.id.clone(),
+        };
+        self.revoke_stale(&person).await?;
         let current = self.member_role(&target.id)?;
         if let Some(why) = access::refuse_set_role(actor.admin, current, body.role) {
             return Err(refusal(true, why));
@@ -714,29 +828,7 @@ impl FragmentCell {
         if !is_self && gone.iter().any(|g| lead.as_deref() == Some(g.as_str())) {
             return Err(refusal(actor.admin, CHAT_AGENT_STAYS));
         }
-        let mut agents_left = false;
-        // bounded: one person and their agents
-        for who in &gone {
-            let removed = self.rows("DELETE FROM members WHERE principal = ? RETURNING owner, kind", vec![who.as_str().into()])?;
-            agents_left |= removed.first().is_some_and(|r| r["kind"] == "agent");
-            self.listed_left(who)?;
-            self.drop_subscriptions(who)?;
-            self.agent_removed(who)?;
-            self.index_change(who, None)?;
-            self.close_sockets(&format!("p:{who}"), "membership revoked");
-            // an agent's owner who read through it, and has no standing of their own now
-            if let Some(owner) = removed.first().and_then(|r| r["owner"].as_str()) {
-                let still = self.member_role(owner)?.is_some() || !self.rows("SELECT principal FROM members WHERE owner = ? LIMIT 1", vec![owner.into()])?.is_empty();
-                if !still {
-                    self.close_sockets(&format!("p:{owner}"), "their agent's membership was revoked");
-                }
-            }
-        }
-        self.sharing_changed()?;
-        // every list's row names the agents left
-        if agents_left {
-            self.reindex()?;
-        }
+        self.revoke(&gone)?;
         let principal = npub::display(entity.as_deref().unwrap_or(&target));
         let how = match (is_self, gone.len() > 1) {
             (true, true) => "left, with their agents",
@@ -808,6 +900,8 @@ impl FragmentCell {
         // an invite adds someone; it never changes a member's role
         match self.named(&email).await {
             Ok(person) => {
+                // an org's member offboarded since holds nothing to be in by
+                self.revoke_stale(&person.id).await?;
                 if let Some(role) = self.member_role(&person.id)? {
                     return Err(CellError::invalid(already_in(&email, role)));
                 }
@@ -959,6 +1053,8 @@ impl FragmentCell {
         let role = row["role"].as_str().and_then(Role::parse).ok_or_else(|| CellError::host("invites.role"))?;
         let by = row["created_by"].as_str().unwrap_or_default().to_string();
         let who = claim.identity.as_str();
+        // what they held from before an offboarding is no grant: they come in afresh
+        self.revoke_stale(who).await?;
         let current = self.member_role(who)?;
         let kept = current.is_some_and(|c| c >= role);
         // the owner is in already, with their agents as they chose them

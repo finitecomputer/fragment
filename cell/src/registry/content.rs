@@ -132,6 +132,26 @@ impl Call for Enroll {
     type Answer = Enrolled;
 }
 
+/// `POST /content/places`: which of `people` are in `org`'s content now,
+/// each at their epoch: what an org's fragment checks its retained member
+/// rows against where no request carries the person's place (its
+/// deliveries, its members' lists, an admission; Alex's review).
+/// Platform code's alone (a fragment's).
+#[derive(Serialize, Deserialize)]
+pub(crate) struct PlacesNow {
+    pub org: String,
+    pub people: Vec<String>,
+}
+
+impl Call for PlacesNow {
+    const PATH: &'static str = "/content/places";
+    type Answer = std::collections::BTreeMap<String, u64>;
+}
+
+/// The people a fragment asks about at once, at most: a batch of its
+/// members (`limits::MEMBERS_MAX`).
+pub(crate) const PLACES_ASKED_MAX: usize = fragment_proto::limits::MEMBERS_MAX;
+
 /// `POST /content/payer`: an operator (the router checked them) names the
 /// person an org's credit is invoiced to: its governance log's record of
 /// who pays, an org paying out of band (Paul, 2026-10-30). It gives them no
@@ -668,6 +688,25 @@ impl RegistryCell {
         self.person_view(&org.id, &b.person)
     }
 
+    fn places_now(&self, b: PlacesNow) -> CellResult<std::collections::BTreeMap<String, u64>> {
+        if b.people.len() > PLACES_ASKED_MAX {
+            return Err(CellError::invalid(format!("at most {PLACES_ASKED_MAX} people's places at once")));
+        }
+        #[derive(Deserialize)]
+        struct Row {
+            person: String,
+            epoch: u64,
+        }
+        let mut now = std::collections::BTreeMap::new();
+        // bounded: PLACES_ASKED_MAX keyed reads
+        for person in &b.people {
+            if let Some(r) = self.row::<Row>("SELECT person, epoch FROM org_content WHERE org = ? AND person = ? AND active = 1", vec![b.org.as_str().into(), person.as_str().into()])? {
+                now.insert(r.person, r.epoch);
+            }
+        }
+        Ok(now)
+    }
+
     fn enroll_content(&self, b: Enroll) -> CellResult<Enrolled> {
         let org = self.content_org(&b.org)?;
         if !npub::is_identity(&b.person) {
@@ -846,6 +885,7 @@ impl RegistryCell {
             OffboardCall::PATH => reply::<OffboardCall>(body(bytes).and_then(|b| self.offboard(b))),
             ContentOf::PATH => reply::<ContentOf>(body(bytes).and_then(|b| self.content_of(b))),
             Enroll::PATH => reply::<Enroll>(body(bytes).and_then(|b| self.enroll_content(b))),
+            PlacesNow::PATH => reply::<PlacesNow>(body(bytes).and_then(|b| self.places_now(b))),
             NominatePayer::PATH => reply::<NominatePayer>(body(bytes).and_then(|b| self.nominate_payer(b))),
             _ => return None,
         })

@@ -279,10 +279,14 @@ pub fn accepted(place: Option<Place>, left_at: Option<i64>, offered_at: i64) -> 
 /// fragments, by their yes to an invite made at `invited_at` (none: a
 /// content admin's own add): their place, and whether it is new to them.
 pub fn enrolled(place: Option<Place>, left_at: Option<i64>, invited_at: Option<i64>) -> Result<(Place, bool), Refusal> {
+    // an invite from before they last left admits no one, though they came
+    // back since by another (Alex's review): checked before their place
+    if invited_at.zip(left_at).is_some_and(|(invited, left)| invited < left) {
+        return Err(Refusal::LeftSince);
+    }
     match place {
         None => Ok((Place { epoch: 1, active: true, admin: false }, true)),
         Some(p) if p.active => Ok((p, false)),
-        Some(_) if invited_at.zip(left_at).is_some_and(|(invited, left)| invited < left) => Err(Refusal::LeftSince),
         Some(p) => Ok((Place { active: true, admin: false, ..p }, true)),
     }
 }
@@ -392,6 +396,11 @@ mod tests {
         assert_eq!(enrolled(Some(out), Some(left), Some(left + 1)), Ok((Place { epoch: 2, active: true, admin: false }, true)));
         assert_eq!(accepted(Some(out), Some(left), left + 1), Ok(Place { epoch: 2, active: true, admin: true }));
         assert_eq!(enrolled(None, None, Some(T)), Ok((IN, true)));
+        // back in by a fresh invite elsewhere, an invite from before they
+        // left admits them no more: their place active again changes nothing
+        let back = enrolled(Some(out), Some(left), Some(left + 1)).unwrap().0;
+        assert_eq!(enrolled(Some(back), Some(left), Some(T)), Err(Refusal::LeftSince));
+        assert_eq!(enrolled(Some(back), Some(left), Some(left + 2)), Ok((back, false)));
         assert_eq!(enrolled(Some(IN), None, None), Ok((IN, false)), "in already: their epoch, nothing new");
     }
 

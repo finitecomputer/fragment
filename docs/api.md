@@ -2529,7 +2529,8 @@ platform's own, and a replay answers as its first did.
   once: their membership in every one of the org's fragments counts no
   more from their next request (An org's fragments, below), before
   anything there is cleaned up, and an invite or an offer made before it
-  admits them no more. Coming back is a new yes, at the raised epoch.
+  admits them no more, though they came back since by another. Coming
+  back is a new yes, at the raised epoch.
   Offboarding deletes, exports and transfers nothing (decision 70).
 - **It outlives its billing.** An org with anyone in its content, or that
   an operator credited or named a payer for, is never dropped when its
@@ -2577,8 +2578,16 @@ cap (403). A person's agent working in it bills that person (decision
   content is at its epoch, as the registry answers each request (an
   agent's, its owner's): an offboarding fences them at their next
   request, a socket at its next frame after its minute's re-check, before
-  their rows are cleaned up. An agent there acts `for` its own person
-  alone.
+  their rows are cleaned up. What reaches them unasked is fenced too, by
+  the registry's answer of who is in now (`PlacesNow`, one read a batch):
+  a delivery to a subscription of theirs (a webhook, a computer's wake, a
+  browser's push) is not sent and their subscriptions end, queued retries
+  too, and their list's row is taken away rather than sent a newer copy
+  (its listed records). A row from before their place now is no grant:
+  whatever admits them again (an invite, its yes, a content admin's own
+  add) takes it away first and admits them afresh, at their epoch now, an
+  ordinary member still by their own yes. An agent there acts `for` its
+  own person alone.
 - **No storage token.** A token writes the repo for its 15 minutes
   whatever happens to its holder, so an org's fragment hands out none
   (403): its files change through the platform's own routes.

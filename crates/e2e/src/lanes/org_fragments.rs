@@ -39,6 +39,10 @@ pub fn org_fragments(s: &mut Suite, api: &Api) -> Result<()> {
     let ledger = format!("org:{org}");
     let offer = api.signed(&s.operator, "POST", &format!("/api/admin/orgs/{org}/content-admin-offers"), Some(&json!({ "id": "first", "email": Api::email_of(&ada) })))?;
     let took = api.signed(&ada, "POST", &format!("{root}/content-admin-offers/{}/accept", offer.body["id"].as_str().unwrap_or("")), Some(&json!({})))?;
+    // the fleet's operator, a person who holds its key (as the ledger lane
+    // makes them; approving it again changes nothing)
+    let op_session = api.sign_in("operator@e2e.test")?;
+    let _ = api.approve(&op_session, &s.operator);
     let op = api.identity(&s.operator)?;
     let grant = api.signed(&s.operator, "POST", &format!("/api/ledger/{ledger}/grant"), Some(&json!({ "id": "fund", "micros": 20_000_000, "by": op, "why": "an org's fragments" })))?;
     let budget = api.signed(&s.operator, "POST", &format!("/api/ledger/{ledger}/budget"), Some(&json!({ "id": "b1", "micros": 10_000_000 })))?;
@@ -115,6 +119,30 @@ pub fn org_fragments(s: &mut Suite, api: &Api) -> Result<()> {
     let cal_reads = api.signed(&cal, "GET", &format!("/api/f/{name}/status"), None)?;
     let cal_writes = api.op(&cal, &name, "log_food", "f1", json!({ "who": "cal", "food": "an apple", "calories": 95 }))?;
     let not_admin = invite(&name, &ben).and_then(|_| api.signed(&cal, "POST", &format!("/api/f/{name}/invites"), Some(&json!({ "email": "x@e2e.test", "role": "viewer" }))))?;
+    // what reaches a member without their asking (Alex's review): a channel
+    // listed on its members' rows, and a webhook of theirs on its replies,
+    // each seen to work while they are in
+    let mut manifest: Value = serde_json::from_str(include_str!("../../../../templates/calories/fragment.json"))?;
+    manifest["channels"]["notes"] = json!({ "read": "viewer", "post": "viewer", "listed": { "kinds": ["note"], "fields": ["text"] } });
+    let files = json!([{ "path": "fragment.json", "text": serde_json::to_string_pretty(&manifest)? }]);
+    let wrote = api.signed(&ada, "POST", &format!("/api/f/{name}/files"), Some(&json!({ "key": "listed-notes", "message": "a listed channel", "files": files })))?;
+    let deployed = api.signed(&ada, "POST", &format!("/api/f/{name}/deploy"), Some(&json!({})))?;
+    let note = |id: &str, text: &str| api.signed(&ada, "POST", &format!("/api/f/{name}/channels/notes"), Some(&json!({ "id": id, "body": { "kind": "note", "text": text } })));
+    let lists = |who: &Keys, text: &str| super::posts::listed_of(api, who, &name).iter().any(|(_, _, _, f)| f["text"] == text);
+    let hook = format!("{}/notify", s.push.url);
+    let subs = [&cal, &ada].map(|k| api.signed(k, "POST", &format!("/api/f/{name}/subscriptions"), Some(&json!({ "channel": "replies", "url": hook }))));
+    let replies = |s: &Suite| s.push.notified().iter().filter(|f| f["fragment"] == name.as_str() && f["channel"] == "replies").count();
+    let heard = replies(s);
+    let noted = note("n1", "before they left")?;
+    let r = api.op(&ada, &name, "summarize", "s-in", json!({}))?;
+    settle(api, &ada, &name, started(&r), &["succeeded", "held"], WAIT);
+    let both_heard = s.eventually(WAIT, || replies(s) == heard + 2);
+    let listed_in = s.eventually(WAIT, || lists(&cal, "before they left"));
+    s.ok(
+        "while in, a member's list carries a listed channel's newest note, and their webhook hears its replies (beside its admin's)",
+        wrote.status == 200 && deployed.status == 200 && noted.status == 200 && subs.iter().all(|r| r.as_ref().is_ok_and(|r| r.status == 200)) && both_heard && listed_in,
+        json!([wrote.body, deployed.body, noted.body, replies(s) - heard]),
+    );
     // a second fragment of the org's, an invite to it waiting as they leave
     let made2 = api.signed(&ada, "POST", &format!("{root}/fragments"), Some(&json!({ "label": s.name("orgnotes"), "template": "calories" })))?;
     let name2 = made2.body["name"].as_str().context("the org's second fragment")?.to_string();
@@ -133,6 +161,21 @@ pub fn org_fragments(s: &mut Suite, api: &Api) -> Result<()> {
             && fenced_read.status == 403 && fenced_write.status == 403 && fenced_sub.status == 403 && still_listed,
         json!([cal_in.body, out.body, fenced_read.body, fenced_write.body, fenced_sub.body]),
     );
+    // nor by what reaches them unasked: their webhook from before hears no
+    // new reply (its admin's does, in the same batch), and their list takes
+    // no new listed note, its row of the fragment gone (its admin's has it)
+    let heard = replies(s);
+    let r = api.op(&ada, &name, "summarize", "s-out", json!({}))?;
+    let ran = settle(api, &ada, &name, started(&r), &["succeeded", "held"], WAIT);
+    let admins_heard = s.eventually(WAIT, || replies(s) > heard);
+    let noted = note("n2", "after they left")?;
+    let admin_lists = s.eventually(WAIT, || lists(&ada, "after they left"));
+    let cal_row = super::posts::row_of(api, &cal, &name);
+    s.ok(
+        "offboarded, a member's webhook from before hears none of its new replies though its admin's does, and their list takes no new listed note: its row of the fragment goes",
+        ran["status"] == "succeeded" && admins_heard && replies(s) == heard + 1 && noted.status == 200 && admin_lists && !lists(&cal, "after they left") && cal_row.is_null(),
+        json!({ "heard": replies(s) - heard, "calRow": cal_row, "run": ran["status"] }),
+    );
 
     // an invite from before they left admits no one; a new one admits them at the raised epoch
     let stale = accept(&name2, &cal)?;
@@ -145,13 +188,32 @@ pub fn org_fragments(s: &mut Suite, api: &Api) -> Result<()> {
         api
     };
     let held = api.signed(&cal, "GET", &format!("/api/f/{name}/status"), None)?;
-    let renewed = api.signed(&ada, "DELETE", &format!("/api/f/{name}/members/{cal_id}"), None).and_then(|_| invite(&name, &cal))?;
+    // invited back with nothing cleaned up first: their row from before is
+    // no grant, so the invite is theirs to accept (Alex's review)
+    let renewed = invite(&name, &cal)?;
     let back = accept(&name, &cal)?;
     let reads = api.signed(&cal, "GET", &format!("/api/f/{name}/status"), None)?;
+    // back in by that one, the invite from before they left still admits no one
+    let stale_again = accept(&name2, &cal)?;
+    let in_name2 = api.signed(&ada, "GET", &format!("/api/f/{name2}/members"), None)?.body["members"].as_array().is_some_and(|m| m.iter().any(|x| x["principal"] == cal_id.as_str()));
     s.ok(
-        "offboard_fence_survives_restart: an invite from before they left admits them no more (403); after a restart they are still fenced; a new invite admits them at their raised epoch",
-        stale.status == 403 && held.status == 403 && renewed.status == 200 && back.status == 200 && reads.status == 200 && place(&cal_id)["epoch"] == 2 && place(&cal_id)["active"] == true,
-        json!([stale.body, held.body, back.body, reads.body["role"]]),
+        "offboard_fence_survives_restart: an invite from before they left admits them no more (403); after a restart they are still fenced; a new invite, with their old row still there, admits them at their raised epoch; back in, the invite from before still admits no one",
+        stale.status == 403 && held.status == 403 && renewed.status == 200 && back.status == 200 && reads.status == 200 && place(&cal_id)["epoch"] == 2 && place(&cal_id)["active"] == true
+            && stale_again.status != 200 && !in_name2,
+        json!([stale.body, held.body, renewed.body, back.body, reads.body["role"], [stale_again.status, stale_again.body.clone()]]),
+    );
+
+    // a returning admin's own add, nothing cleaned up first: in afresh, at their epoch now
+    let ben_out = api.signed(&ada, "POST", &format!("{root}/offboard"), Some(&json!({ "id": "ben-1", "person": ben_id, "expectedEpoch": 1 })))?;
+    let ben_fenced = api.signed(&ben, "GET", &format!("/api/f/{name}/status"), None)?;
+    let to_ben = api.signed(&ada, "POST", &format!("{root}/content-admin-offers"), Some(&json!({ "id": "ben-2", "email": Api::email_of(&ben) })))?;
+    let ben_back = api.signed(&ben, "POST", &format!("{root}/content-admin-offers/{}/accept", to_ben.body["id"].as_str().unwrap_or("")), Some(&json!({})))?;
+    let regrant = api.signed(&ben, "PUT", &format!("/api/f/{name}/members/{ben_id}"), Some(&json!({ "role": "viewer" })))?;
+    let ben_reads = api.signed(&ben, "GET", &format!("/api/f/{name}/status"), None)?;
+    s.ok(
+        "a content admin offboarded and appointed again gives themselves access again, their row from before no grant: they read it at their epoch now",
+        ben_out.status == 200 && ben_fenced.status == 403 && ben_back.status == 200 && regrant.status == 200 && ben_reads.status == 200 && place(&ben_id)["epoch"] == 2,
+        json!([ben_out.body, ben_fenced.status, ben_back.body, regrant.body, ben_reads.status]),
     );
 
     // org_admin_cannot_bypass_cap: its budget stops its admin's AI steps too
