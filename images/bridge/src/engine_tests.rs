@@ -96,7 +96,7 @@ fn rec(seq: u64, principal: &str, body: Value) -> Record {
 }
 
 fn view(agents: &[&Agent]) -> ChatView {
-    let mut v = ChatView { agents: agents.iter().map(|a| a.identity.clone()).collect(), ..ChatView::default() };
+    let mut v = ChatView { agents: agents.iter().map(|a| a.identity.clone()).collect(), people: vec!["npub1paul".into(), "npub1skyler".into()], ..ChatView::default() };
     v.names.insert("npub1paul".into(), "paul".into());
     v.names.insert("npub1skyler".into(), "skyler".into());
     v
@@ -3141,7 +3141,7 @@ fn a_relayed_record_is_its_owners_through_any_door_never_another_agents() {
     let mut telegram = mine("from telegram");
     telegram["relayed"]["via"] = json!("telegram");
     owners(&mut e, 2, &a.identity, telegram.clone());
-    // carried by a key that is none of the chat's agents: a hosted connector
+    // carried by a key that is none of the chat's members: a hosted connector
     owners(&mut e, 3, "npub1telegramconnector", telegram);
     // posted by its owner with the mark: their own message
     owners(&mut e, 4, "npub1paul", mine("paul typed this"));
@@ -3159,9 +3159,14 @@ fn a_relayed_record_is_its_owners_through_any_door_never_another_agents() {
     let mut bad = mine("bad door");
     bad["relayed"]["via"] = json!("../simplex");
     assert!(started(&said(&mut e, &a, &v, 9, &a.identity, bad, T0 + 30)).is_none());
+    // carried by a person of the chat (the platform refuses that post; read
+    // here as theirs all the same): their own message, never its owner's
+    let t = started(&said(&mut e, &a, &v, 10, "npub1skyler", mine("skyler's, not paul's"), T0 + 30)).expect("skyler's message, a turn");
+    assert_eq!(t.asker, "npub1skyler", "asked by skyler, never as paul");
+    ev(&mut e, Event::End { turn: t.turn.clone(), outcome: Outcome::Idle }, T0 + 30);
     // carried by another agent of the chat: a hand-off at most, never its owner's
-    assert!(started(&said(&mut e, &b, &v, 10, &a.identity, mine("juniper's, not maple's"), T0 + 31)).is_none(), "not to maple at all");
-    let s = said(&mut e, &a, &v, 11, &b.identity, mine("a hand-off"), T0 + 32);
+    assert!(started(&said(&mut e, &b, &v, 11, &a.identity, mine("juniper's, not maple's"), T0 + 31)).is_none(), "not to maple at all");
+    let s = said(&mut e, &a, &v, 12, &b.identity, mine("a hand-off"), T0 + 32);
     let t = started(&s).expect("from maple to juniper: a hand-off");
     assert_eq!(t.asker, b.identity, "asked by maple, never as its owner");
 }

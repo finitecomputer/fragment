@@ -65,6 +65,8 @@ impl Upstream {
             match req.path.as_str() {
                 "/data" => Response::json(200, &json!({ "items": ["alpha", "beta"] })),
                 p if p.starts_with("/keyed/") => Response::json(200, &json!({ "items": ["keyed"] })),
+                // an answer that echoes the URL it was asked at
+                p if p.starts_with("/echo/") => Response::json(302, &json!({ "asked": p })).with_header("location", p),
                 "/once" => Response::json(200, &json!({ "items": ["once"] })),
                 "/flaky" if flaky.fetch_add(1, Ordering::SeqCst) < 2 => Response::json(503, &json!({ "error": "busy" })),
                 "/flaky" => Response::json(200, &json!({ "items": ["gamma"] })),
@@ -247,6 +249,13 @@ pub fn jobs(s: &mut Suite, api: &Api) -> Result<()> {
         json!({ "run": keyed_run, "hits": format!("{hits:?}") }),
     );
     s.ok("its run names the URL as the job wrote it, never the secret", keyed_run["input"] == keyed && !keyed_run.to_string().contains(SECRET), &keyed_run);
+    let r = api.op(&owner, &name, "probe", "probe-echo", json!({ "url": upstream.url("/echo/{{API_KEY}}/x") }))?;
+    let echoed = settle(api, &owner, &name, started(&r), &["succeeded", "held"], long);
+    s.ok(
+        "an answer that echoes a URL's secret (a redirect's location) reaches the job naming it as the job wrote it",
+        echoed["status"] == "succeeded" && echoed["output"]["location"] == "/echo/{{API_KEY}}/x" && !echoed.to_string().contains(SECRET) && upstream.hits(&format!("/echo/{SECRET}/x")).len() == 1,
+        &echoed,
+    );
 
     // a step that fails for now is retried; one that keeps failing is the job's to catch
     let r = api.op(&owner, &name, "digest", "d3", json!({ "url": upstream.url("/flaky") }))?;
