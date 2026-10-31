@@ -74,9 +74,14 @@ pub fn config(api: &str, state: &Path, settings: Settings) -> Config {
 /// it from the start (its posts and its runtime's frames interleave with
 /// the fakes' work on one thread); stopped with `stop`.
 pub fn start(cfg: Config, runtime: Box<dyn Runtime>) -> Running {
+    start_runtimes(cfg, runtime.into())
+}
+
+/// `start`, running several runtimes, each for the agents that name it.
+pub fn start_runtimes(cfg: Config, runtimes: fragment_bridge::runtime::Runtimes) -> Running {
     fragment_bridge::log::set_quiet(std::env::var("BRIDGE_TEST_LOG").is_err());
     let (stop, rx) = watch::channel(false);
-    let handle = tokio::spawn(driver::run(cfg, runtime, rx));
+    let handle = tokio::spawn(driver::run(cfg, runtimes, rx));
     Running { stop, handle: Some(handle), runtime: None }
 }
 
@@ -85,7 +90,7 @@ pub fn start_killable(cfg: Config, runtime: Box<dyn Runtime>) -> Running {
     fragment_bridge::log::set_quiet(std::env::var("BRIDGE_TEST_LOG").is_err());
     let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).thread_name("bridge").enable_all().build().expect("a runtime for the bridge");
     let (stop, rx) = watch::channel(false);
-    let handle = rt.spawn(driver::run(cfg, runtime, rx));
+    let handle = rt.spawn(driver::run(cfg, runtime.into(), rx));
     Running { stop, handle: Some(handle), runtime: Some(rt) }
 }
 

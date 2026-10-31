@@ -2,7 +2,8 @@
 //! runtime to the fragment API (docs/computers.md).
 //!
 //! ```text
-//! fragment-bridge run      the bridge (BRIDGE_RUNTIME=relay|script), and
+//! fragment-bridge run      the bridge (BRIDGE_RUNTIME=relay|script, run for
+//!                          every agent that names no other runtime), and
 //!                          its screens on BRIDGE_SCREEN_LISTEN
 //! fragment-bridge version
 //! ```
@@ -41,6 +42,8 @@ fn parse_ms(name: &str, default: u64) -> u64 {
     }
 }
 
+/// The runtime agents that name none run (`runtime::DEFAULT`): Hermes'
+/// Relay, or the stub's scripted agent standing in for it.
 fn runtime() -> Box<dyn Runtime> {
     match env_or("BRIDGE_RUNTIME", "relay").as_str() {
         "relay" => {
@@ -155,7 +158,7 @@ async fn main() {
                 simplex: simplex_config(),
             };
             ev!("bridge.boot", { "computer": env("FRAGMENT_COMPUTER"), "image": env("FRAGMENT_IMAGE"), "restorePending": cfg.restore_pending, "agentsFile": cfg.agents_file.as_ref().map(|p| p.display().to_string()), "simplex": cfg.simplex.is_some() });
-            let ran = driver::run(cfg, runtime(), stop).await;
+            let ran = driver::run(cfg, runtime().into(), stop).await;
             // its SimpleX cores stopped and reaped first, within the shutdown's bound
             fragment_bridge::simplex::run::stop_cores(Duration::from_millis(limits::SHUTDOWN_MS_MAX / 2)).await;
             match ran {

@@ -42,7 +42,7 @@ use crate::net::Backoff;
 use crate::note;
 use crate::ready::Ready;
 use crate::records::{self, AttachmentRef, Cause, Record};
-use crate::runtime::{Agent, Command, Event, LocalFile, Quote, Runtime, RuntimeIo, TurnStart};
+use crate::runtime::{Agent, Command, Event, LocalFile, Quote, RuntimeIo, Runtimes, TurnStart};
 use crate::screen::{self, Named, ScreenConfig};
 
 /// What the bridge is given.
@@ -268,7 +268,7 @@ fn named(agents: &[Agent]) -> Vec<Named> {
 }
 
 /// Runs the bridge until `stop` turns true.
-pub async fn run(cfg: Config, runtime: Box<dyn Runtime>, stop: watch::Receiver<bool>) -> Result<(), BridgeError> {
+pub async fn run(cfg: Config, runtimes: Runtimes, stop: watch::Receiver<bool>) -> Result<(), BridgeError> {
     // The screen's page answers from the start (a viewer's port wakes the
     // computer, and waits for it); its sockets wait for the agents, which
     // are told only past the restore gate, so no lease under `/data` is
@@ -316,29 +316,38 @@ pub async fn run(cfg: Config, runtime: Box<dyn Runtime>, stop: watch::Receiver<b
     }
     let state = load(&cfg.state_dir)?;
     let life = new_life()?;
-    let mut engine = Engine::new(state, cfg.settings, &life).map_err(|c| BridgeError::Corrupt(c.0))?.with_menu(runtime.menu());
+    let mut engine = Engine::new(state, cfg.settings, &life).map_err(|c| BridgeError::Corrupt(c.0))?;
 
     let (inbox_tx, mut inbox) = mpsc::channel::<Msg>(limits::INBOX_MAX);
-    let (cmd_tx, cmd_rx) = mpsc::channel::<Command>(256);
-    let (event_tx, mut event_rx) = mpsc::channel::<Event>(1024);
     let (keep_tx, keep_rx) = watch::channel(false);
     let shared = Arc::new(Shared::default());
 
-    // The runtime starts at once (Hermes dials it while the bridge reads the
-    // platform), and its events go to the inbox.
-    let name = runtime.name();
-    let mut runtime_task = tokio::spawn(runtime.run(RuntimeIo { commands: cmd_rx, events: event_tx, shutdown: stop.clone() }));
-    {
+    // Each runtime starts at once (Hermes dials it while the bridge reads
+    // the platform), and its events go to the inbox, named by it. The
+    // bridge lives as long as every one of them: one that ends ends it.
+    let mut to_runtime = BTreeMap::new();
+    let mut runtime_tasks = Vec::new();
+    let mut runs = Vec::new();
+    for (serves, runtime) in runtimes.into_inner() {
+        engine = engine.with_runtime(&serves, runtime.menu());
+        let (cmd_tx, cmd_rx) = mpsc::channel::<Command>(256);
+        let (event_tx, mut event_rx) = mpsc::channel::<Event>(1024);
+        let name = runtime.name();
+        runs.push(json!({ "serves": serves, "runtime": name }));
+        let task = tokio::spawn(runtime.run(RuntimeIo { commands: cmd_rx, events: event_tx, shutdown: stop.clone() }));
+        runtime_tasks.push(Box::pin(async move { (name, task.await) }));
+        to_runtime.insert(serves.clone(), cmd_tx);
         let inbox_tx = inbox_tx.clone();
         tokio::spawn(async move {
             // bounded by the runtime: ends when it drops its sender
-            while let Some(e) = event_rx.recv().await {
-                if inbox_tx.send(Msg::Input(Input::Runtime(e))).await.is_err() {
+            while let Some(event) = event_rx.recv().await {
+                if inbox_tx.send(Msg::Input(Input::Runtime { runtime: serves.clone(), event })).await.is_err() {
                     return;
                 }
             }
         });
     }
+    let mut runtime_ended = futures_util::future::select_all(runtime_tasks);
 
     // The agents, before any record: a turn is handed to an agent it names.
     // With a ready file, only those the image made ready (ready.rs).
@@ -350,9 +359,11 @@ pub async fn run(cfg: Config, runtime: Box<dyn Runtime>, stop: watch::Receiver<b
         Some(r) => crate::ready::gate(agents, r.agents()),
         None => agents,
     };
+    // each agent's runtime as its `agent.json` named it last (`with_runtimes`)
+    let runtime_names: RuntimeNames = Arc::new(Mutex::new(HashMap::new()));
     let computer = tokio::select! {
-        c = ask_until(&api, cfg.simplex.is_some(), stop.clone()) => c,
-        r = &mut runtime_task => return runtime_result(r, name),
+        c = ask_until(&api, cfg.simplex.is_some(), &runtime_names, stop.clone()) => c,
+        ((name, r), _, _) = &mut runtime_ended => return runtime_result(r, name),
     };
     let Some(mut computer) = computer else { return Ok(()) };
     let listed = computer.agents.len();
@@ -361,10 +372,10 @@ pub async fn run(cfg: Config, runtime: Box<dyn Runtime>, stop: watch::Receiver<b
     if let Some(h) = &simplex {
         h.computer(computer.clone(), computer.agents.clone());
     }
-    crate::ev!("bridge.start", { "computer": computer.computer, "agents": computer.agents.len(), "listed": listed, "gated": ready.is_some(), "runtime": name, "boot": engine.state().boot + 1, "life": life });
+    crate::ev!("bridge.start", { "computer": computer.computer, "agents": computer.agents.len(), "listed": listed, "gated": ready.is_some(), "runtimes": runs, "boot": engine.state().boot + 1, "life": life });
 
     let lanes = Lanes::new(api.clone(), stop.clone(), Claims { inbox: inbox_tx.clone(), hold: cfg.hold.clone(), in_flight: claims_in_flight, simplex: simplex.clone() });
-    let runtime_lane = RuntimeLane::spawn(api.clone(), cmd_tx, cfg.media_dir.clone());
+    let runtime_lanes: BTreeMap<String, RuntimeLane> = to_runtime.into_iter().map(|(serves, tx)| (serves, RuntimeLane::spawn(api.clone(), tx, cfg.media_dir.clone()))).collect();
     tokio::spawn(keepalive(api.clone(), keep_rx, cfg.keepalive_ping, stop.clone()));
     let follows = Follows { api: api.clone(), inbox: inbox_tx.clone(), shared: shared.clone(), stop: stop.clone(), running: Arc::new(Mutex::new(HashMap::new())), discovering: Mutex::new(HashMap::new()), last: Mutex::new(HashMap::new()) };
 
@@ -387,7 +398,7 @@ pub async fn run(cfg: Config, runtime: Box<dyn Runtime>, stop: watch::Receiver<b
                 Effect::Fence { agent, fragment, turn, prompt, id, body } => lanes.push(&fragment, Job::Fence { agent, turn, prompt, id, body }),
                 Effect::Owed { agent, fragment, channel, turn, id, body } => lanes.push(&fragment, Job::Owed { agent, channel, turn, id, body }),
                 Effect::Draft { agent, fragment, turn, text } => lanes.push(&fragment, Job::Draft { agent, turn, text }),
-                Effect::Runtime(c) => runtime_lane.push(c),
+                Effect::Runtime { runtime, command } => runtime_lanes.get(&runtime).expect("the engine names only the runtimes it was given").push(command),
                 Effect::Keepalive(on) => {
                     crate::ev!("keepalive", { "hold": on });
                     let _ = keep_tx.send(on);
@@ -486,10 +497,10 @@ pub async fn run(cfg: Config, runtime: Box<dyn Runtime>, stop: watch::Receiver<b
                 let ready_changed = ready.as_mut().is_some_and(Ready::refresh);
                 if ready_changed || computer_read.elapsed() >= Duration::from_millis(limits::COMPUTER_EVERY_MS) {
                     computer_read = Instant::now();
-                    reread(&api, cfg.simplex.is_some(), &inbox_tx);
+                    reread(&api, cfg.simplex.is_some(), &runtime_names, &inbox_tx);
                 }
             }
-            r = &mut runtime_task => break runtime_result(r, name),
+            ((name, r), _, _) = &mut runtime_ended => break runtime_result(r, name),
         }
     };
     crate::ev!("bridge.stop", { "ok": result.is_ok() });
@@ -506,13 +517,52 @@ fn runtime_result(r: Result<Result<(), crate::runtime::RuntimeError>, tokio::tas
 
 /// Reads `GET /api/computer` in a task of its own (a slow platform never
 /// holds the engine), into the inbox.
-fn reread(api: &Api, simplex: bool, inbox: &mpsc::Sender<Msg>) {
-    let (api, inbox) = (api.clone(), inbox.clone());
+fn reread(api: &Api, simplex: bool, names: &RuntimeNames, inbox: &mpsc::Sender<Msg>) {
+    let (api, names, inbox) = (api.clone(), names.clone(), inbox.clone());
     tokio::spawn(async move {
         if let Some(c) = ask_once(&api, simplex).await {
+            let (c, _) = with_runtimes(&api, c, &names).await;
             let _ = inbox.send(Msg::Computer(c)).await;
         }
     });
+}
+
+/// Each agent's runtime as its `agent.json` named it last (`None`: it names
+/// none), by agent fragment: at most the agents the computer lists.
+type RuntimeNames = Arc<Mutex<HashMap<String, Option<String>>>>;
+
+/// The computer's agents, each with the runtime its `agent.json` names
+/// (`runtime::named`; no file names none), read as the computer is: at
+/// start, every minute, and as the ready file changes. One whose file does
+/// not read keeps what it named last; one never read is left out (counted
+/// in the second value), as an agent not ready is, so no turn of it goes to
+/// a runtime it does not name. An agent's runtime changes within a minute.
+async fn with_runtimes(api: &Api, mut c: api::Computer, names: &RuntimeNames) -> (api::Computer, usize) {
+    let reads = c.agents.iter().map(|a| async move { (a.fragment.clone(), api.file(&a.fragment, &a.fragment, "agent.json", api::AGENT_JSON_MAX_BYTES).await) });
+    let read = futures_util::future::join_all(reads).await;
+    let mut named = names.lock().expect("runtime names");
+    for (agent, r) in read {
+        let now = match r {
+            Ok(b) => crate::runtime::named(Some(&b)),
+            Err(e) if e.status() == Some(404) => None,
+            Err(e) => {
+                crate::ev!("runtime.unread", { "agent": agent, "error": e.to_string() });
+                continue;
+            }
+        };
+        if named.get(&agent) != Some(&now) {
+            crate::ev!("agent.runtime", { "agent": agent, "runtime": now.as_deref().unwrap_or(crate::runtime::DEFAULT) });
+        }
+        named.insert(agent, now);
+    }
+    named.retain(|agent, _| c.agents.iter().any(|a| &a.fragment == agent));
+    let listed = c.agents.len();
+    c.agents.retain(|a| named.contains_key(&a.fragment));
+    for a in &mut c.agents {
+        a.runtime = named[&a.fragment].clone();
+    }
+    let unread = listed - c.agents.len();
+    (c, unread)
 }
 
 async fn ask_once(api: &Api, simplex: bool) -> Option<api::Computer> {
@@ -525,13 +575,18 @@ async fn ask_once(api: &Api, simplex: bool) -> Option<api::Computer> {
     }
 }
 
-/// `GET /api/computer` until it answers.
-async fn ask_until(api: &Api, simplex: bool, stop: watch::Receiver<bool>) -> Option<api::Computer> {
+/// `GET /api/computer`, and each agent's runtime, until all answer: at
+/// start no agent is left out for a runtime not read (its turns the state
+/// holds would be let go as if it had left).
+async fn ask_until(api: &Api, simplex: bool, names: &RuntimeNames, stop: watch::Receiver<bool>) -> Option<api::Computer> {
     let mut backoff = Backoff::default();
     // bounded by the platform's answer, or `stop`
     loop {
         if let Some(c) = ask_once(api, simplex).await {
-            return Some(c);
+            let (c, unread) = with_runtimes(api, c, names).await;
+            if unread == 0 {
+                return Some(c);
+            }
         }
         if !backoff.wait(stop.clone()).await {
             return None;
@@ -1368,6 +1423,9 @@ struct RuntimeLane {
 }
 
 impl RuntimeLane {
+    /// One runtime's lane: a turn's commands all go to one runtime, so they
+    /// keep the engine's order, and a runtime slow to read its commands
+    /// holds no other's.
     fn spawn(api: Api, to_runtime: mpsc::Sender<Command>, media_dir: PathBuf) -> RuntimeLane {
         let (tx, mut rx) = mpsc::unbounded_channel::<Command>();
         tokio::spawn(async move {
@@ -1813,7 +1871,7 @@ mod tests {
         assert_eq!(for_simplex(records::CHAT, &reply(true), 0), None, "interim: the chat's alone");
         assert_eq!(for_simplex(records::CHAT, &records::reply("", "t1", &[], 0, false), 1).as_deref(), Some(""), "a file alone goes");
         assert_eq!(for_simplex(records::CHAT, &records::reply(" ", "t1", &[], 0, false), 0), None, "nothing said");
-        let agent = crate::runtime::Agent { fragment: "juniper--k3x9".into(), identity: "npub1juniper".into(), name: "juniper".into(), owner: "npub1paul".into(), credentials: vec![], key: None };
+        let agent = crate::runtime::Agent { fragment: "juniper--k3x9".into(), identity: "npub1juniper".into(), name: "juniper".into(), owner: "npub1paul".into(), credentials: vec![], key: None, runtime: None };
         assert_eq!(for_simplex(records::CHAT, &records::relayed_message("hi from my phone", &agent, records::VIA_SIMPLEX, &[]), 0), None, "its owner's own, from the phone");
         let option = |id: &str, label: &str, words: bool| records::PromptOption { id: id.into(), label: label.into(), style: None, words };
         let card = records::turn_prompt("t1", "c-1", "What should I plant?", &[option("c0", "Basil", false), option("c1", "Mint", false), option("other", "Something else", true)], "npub1paul", 1);
@@ -1850,7 +1908,7 @@ mod tests {
     /// own; anything else the agent posted is its own.
     #[test]
     fn a_relayed_message_quoted_is_its_owners() {
-        let agent = crate::runtime::Agent { fragment: "juniper--k3x9".into(), identity: "npub1juniper".into(), name: "juniper".into(), owner: "npub1paul".into(), credentials: vec![], key: None };
+        let agent = crate::runtime::Agent { fragment: "juniper--k3x9".into(), identity: "npub1juniper".into(), name: "juniper".into(), owner: "npub1paul".into(), credentials: vec![], key: None, runtime: None };
         let relayed = records::relayed_message("hi from my phone", &agent, records::VIA_SIMPLEX, &[]);
         assert!(!own_words("npub1juniper", &relayed, &agent), "its owner's, relayed");
         assert!(own_words("npub1juniper", &json!({ "text": "a reply", "turn": "t1" }), &agent));
