@@ -1972,8 +1972,13 @@ impl RunStatus {
 }
 
 /// How a run started: someone's call, another run's step, or a trigger.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+///
+/// This release tolerates what the next writes: a `via` it does not know
+/// (a trigger kind a later release added, read after a rollback, or by an
+/// older CLI) is `Unknown`, shown as written and taken as a trigger's, so
+/// a new kind needs no forward-only step (FIN-328's needed one).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "String", into = "String")]
 pub enum Via {
     Call,
     /// A step of another run called it (`trigger` names the parent run).
@@ -1982,10 +1987,13 @@ pub enum Via {
     Channel,
     Files,
     Installed,
+    Unknown(String),
 }
 
 impl Via {
-    pub fn as_str(self) -> &'static str {
+    const KNOWN: [Via; 6] = [Via::Call, Via::Job, Via::Cron, Via::Channel, Via::Files, Via::Installed];
+
+    pub fn as_str(&self) -> &str {
         match self {
             Via::Call => "call",
             Via::Job => "job",
@@ -1993,20 +2001,27 @@ impl Via {
             Via::Channel => "channel",
             Via::Files => "files",
             Via::Installed => "installed",
+            Via::Unknown(s) => s,
         }
-    }
-
-    pub fn parse(s: &str) -> Option<Via> {
-        [Via::Call, Via::Job, Via::Cron, Via::Channel, Via::Files, Via::Installed].into_iter().find(|v| v.as_str() == s)
     }
 
     /// Started by a trigger: these runs act as the fragment, pause with
-    /// their operation, and count toward its hourly ceiling.
-    pub fn triggered(self) -> bool {
-        match self {
-            Via::Call | Via::Job => false,
-            Via::Cron | Via::Channel | Via::Files | Via::Installed => true,
-        }
+    /// their operation, and count toward its hourly ceiling. One this
+    /// release does not know is a trigger's: calls and jobs are known.
+    pub fn triggered(&self) -> bool {
+        !matches!(self, Via::Call | Via::Job)
+    }
+}
+
+impl From<String> for Via {
+    fn from(s: String) -> Via {
+        Via::KNOWN.into_iter().find(|v| v.as_str() == s).unwrap_or(Via::Unknown(s))
+    }
+}
+
+impl From<Via> for String {
+    fn from(v: Via) -> String {
+        v.as_str().to_string()
     }
 }
 
@@ -2560,13 +2575,27 @@ mod tests {
         assert_eq!(serde_json::to_value(&r).unwrap(), serde_json::json!({ "inboxToken": "i", "viewToken": "v", "rotated": ["view"] }));
     }
 
+    /// Goal: a `via` a later release writes is read, listed and kept as
+    /// written (a rollback's object, an older CLI). Method: a run whose via
+    /// no release knows yet reads as `Unknown`, a trigger's, and writes
+    /// back unchanged.
+    #[test]
+    fn a_via_from_a_later_release_reads_as_written() {
+        let future = Via::from("webhook".to_string());
+        assert_eq!(future, Via::Unknown("webhook".into()));
+        assert!(future.triggered(), "a via this release does not know is a trigger's");
+        let wire = serde_json::json!({ "id": 7, "op": "tick", "via": "webhook", "principal": "npub1x", "status": "succeeded", "attempt": 1, "depth": 0, "createdAt": 1 });
+        let run: Run = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(run.via.as_str(), "webhook");
+        assert_eq!(serde_json::to_value(&run).unwrap(), wire, "and it lists as written");
+    }
+
     #[test]
     fn stored_states_read_back_as_they_serialize() {
-        for v in [Via::Call, Via::Job, Via::Cron, Via::Channel, Via::Files, Via::Installed] {
-            assert_eq!(Via::parse(v.as_str()), Some(v));
-            assert_eq!(serde_json::to_value(v).unwrap(), v.as_str());
+        for v in Via::KNOWN {
+            assert_eq!(Via::from(v.as_str().to_string()), v);
+            assert_eq!(serde_json::to_value(&v).unwrap(), v.as_str());
         }
-        assert_eq!(Via::parse("inbox"), None);
         assert!(!Via::Call.triggered() && !Via::Job.triggered());
         assert!(Via::Cron.triggered() && Via::Channel.triggered() && Via::Files.triggered() && Via::Installed.triggered());
         for t in [Tier::Cheap, Tier::Medium, Tier::High] {

@@ -186,7 +186,8 @@ fn run_row(r: &Value) -> RunRow {
     let row = RunRow {
         id: int("id"),
         op: text("op").to_string(),
-        via: Via::parse(text("via")).unwrap_or_else(|| panic!("runs.via is one the cell writes: {r}")),
+        // a via a later release writes reads as written (Via::Unknown)
+        via: Via::from(text("via").to_string()),
         trigger: r["trigger"].as_str().map(str::to_string),
         principal: text("principal").to_string(),
         role: Role::parse(text("role")).unwrap_or_else(|| panic!("runs.role is a role: {r}")),
@@ -1406,18 +1407,24 @@ impl FragmentCell {
     /// `GET /api/f/<name>/triggers`
     pub(crate) fn triggers_api(&self, caller: &Caller) -> CellResult<Response> {
         self.require(caller, false, Role::Viewer)?;
-        let next: BTreeMap<i64, i64> =
-            self.rows("SELECT idx, next_at FROM schedules", vec![])?.iter().filter_map(|r| Some((r["idx"].as_i64()?, r["next_at"].as_i64()?))).gathered();
+        // keyed as sync_schedules keys them, not by position: triggers()
+        // leaves out a kind this release does not know
+        let next: BTreeMap<(String, String), i64> = self
+            .rows("SELECT op, cron, next_at FROM schedules", vec![])?
+            .iter()
+            .filter_map(|r| Some(((r["op"].as_str()?.to_string(), r["cron"].as_str()?.to_string()), r["next_at"].as_i64()?)))
+            .gathered();
         let paused = self.paused_ops()?;
         let triggers: Vec<Value> = self
             .triggers()?
             .into_iter()
-            .enumerate()
-            .map(|(i, t)| {
+            .map(|t| {
                 let mut v = serde_json::to_value(&t).expect("a trigger serializes");
                 v["paused"] = json!(paused.contains(&t.run));
-                if let Some(at) = next.get(&(i as i64)) {
-                    v["nextAt"] = json!(at);
+                if let TriggerOn::Cron(expr) = &t.on {
+                    if let Some(at) = next.get(&(t.run.clone(), expr.clone())) {
+                        v["nextAt"] = json!(at);
+                    }
                 }
                 v
             })

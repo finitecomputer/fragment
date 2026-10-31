@@ -965,8 +965,7 @@ impl FragmentCell {
         Ok(rows.into_iter().next().map(channel_decl).transpose()?.map(|(_, d)| d))
     }
 
-    /// The installed triggers, in their manifest's order (a cron trigger's
-    /// schedule is keyed by that index).
+    /// The installed triggers this release knows, in their manifest's order.
     pub(crate) fn triggers(&self) -> CellResult<Vec<TriggerDecl>> {
         let rows: Vec<TriggerRow> = self.typed("SELECT idx, kind, target, run, from_kind FROM code_triggers ORDER BY idx", vec![])?;
         let mut out = Vec::with_capacity(rows.len());
@@ -974,7 +973,14 @@ impl FragmentCell {
             if row.idx != i64::try_from(i).expect("triggers are few") {
                 return Err(stored(&format!("trigger {i}"), format!("it is stored at index {}", row.idx)));
             }
-            let on = TriggerOn::from_parts(&row.kind, row.target).ok_or_else(|| stored(&format!("trigger {i}"), format!("kind {:?}", row.kind)))?;
+            // This release tolerates what the next writes: a kind it does
+            // not know (a later release's, read after a rollback) starts
+            // nothing and is listed nowhere, so a new kind needs no
+            // forward-only step (FIN-328's needed one).
+            let Some(on) = TriggerOn::from_parts(&row.kind, row.target) else {
+                console_warn!("{}", json!({ "event": "trigger.unknown", "idx": row.idx, "kind": row.kind, "run": row.run }));
+                continue;
+            };
             let from = match row.from_kind.as_deref() {
                 None => None,
                 Some(k) => Some(IdentityKind::parse(k).ok_or_else(|| stored(&format!("trigger {i}"), format!("from {k:?}")))?),
