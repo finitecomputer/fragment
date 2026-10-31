@@ -36,9 +36,11 @@ fn dir(name: &str) -> Dir {
     Dir(d)
 }
 
-/// Maintenance at once after a write, keeping no old version.
+/// Maintenance at once after a write, keeping a version a second after
+/// the next is made, for the reads a test makes meanwhile (the service's
+/// is a minute).
 fn fast() -> Timing {
-    Timing { after: Duration::from_millis(10), keep: Duration::ZERO }
+    Timing { after: Duration::from_millis(10), keep: Duration::from_secs(1) }
 }
 
 async fn store(d: &Path) -> Arc<Store> {
@@ -471,9 +473,9 @@ async fn a_low_fraction_delete_leaves_the_store_files() {
 #[tokio::test]
 async fn a_delete_while_maintenance_runs_gets_a_pass_of_its_own() {
     let d = dir("between");
-    // a pass keeps the versions it made younger than a second, so the
-    // first leaves maintenance pending
-    let s = store_with(&d, Timing { after: Duration::from_millis(10), keep: Duration::from_secs(1) }).await;
+    // a pass keeps the versions current a second ago, so the first leaves
+    // maintenance pending
+    let s = store(&d).await;
     twenty(&s).await;
     let mut m = s.maintenance(SCOPE).await.unwrap();
     assert!(s.delete(SCOPE, "sessions/07.json").await.unwrap());
