@@ -8,8 +8,10 @@
 //! to its owner's SimpleX app (groundwork: nothing runs it yet).
 
 pub mod api;
+pub mod cards;
 pub mod driver;
 pub mod engine;
+pub mod history;
 pub mod lease;
 pub mod limits;
 pub mod log;

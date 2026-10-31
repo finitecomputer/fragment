@@ -284,7 +284,7 @@ pub struct PriceBook {
 /// clef-flash, clef and clef-omni, read 2026-10-14): input tokens only,
 /// media counted as input, no output charge and no cache, so a cached or
 /// written token is an input token's price.
-pub const DEFAULT_MODELS: [(&str, TokenPrices); 9] = [
+pub const DEFAULT_MODELS: [(&str, TokenPrices); 10] = [
     // $0.15 in, $0.03 cached, $0.50 out per million tokens (the cheap tier's, and vision)
     ("@cf/zai-org/glm-5.3-flash", TokenPrices { input: 150_000, cached_input: 30_000, cache_write: 150_000, output: 500_000 }),
     // Finite Private's (Finite's tiers' by config), at Workers AI's GLM-5.3 Flash's
@@ -303,6 +303,9 @@ pub const DEFAULT_MODELS: [(&str, TokenPrices); 9] = [
     clef(Model::ClefFlash),
     clef(Model::Clef),
     clef(Model::ClefOmni),
+    // BGE-M3's embeddings (the route's embeddings slot unnamed, crate::embed),
+    // $0.012 a million input tokens, nothing out
+    (crate::embed::MODEL_DEFAULT, TokenPrices { input: 12_000, cached_input: 12_000, cache_write: 12_000, output: 0 }),
 ];
 
 /// OpenRouter's fee on the credits that pay for its calls: 5.5% of a card
@@ -683,7 +686,7 @@ mod tests {
         let book = PriceBook::defaults();
         assert_eq!(book.validate(), Ok(()));
         assert_eq!(book.version, 7);
-        assert_eq!(book.models.len(), 9);
+        assert_eq!(book.models.len(), 10);
         assert_eq!((book.margin_bp, book.credits_fee_bp), (5_000, 500));
     }
 

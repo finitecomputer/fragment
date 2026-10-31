@@ -450,10 +450,9 @@ optional (`primary`, `danger`). An option with `"words": true` is
 answered in words (a clarify's "Other": docs/bridge.md, Relay): a field
 on the card, whose answer carries what was typed (`text`, above), so
 nothing asks for it after. Only `asks` may answer, until
-`expiresAt` (ms). An open card keeps its computer awake until it is
-answered or expires (docs/bridge.md, "A card keeps its computer awake"),
-so it expires with its runtime there, and its turn ends as the runtime
-ends it.
+`expiresAt` (ms). A restart leaves unexpired cards answerable. An answer
+whose original turn is gone starts a fresh turn with its question and
+chosen answer (docs/bridge.md, "A card outlives its turn").
 
 ```json
 { "kind": "turn.prompt.closed", "turn": "…", "prompt": "<prompt>",
@@ -463,10 +462,13 @@ ends it.
 Part `pc:<prompt>`. `outcome` is `answered` (with `option` and `by`, and
 `text` for an option answered in words: typed on the card, or the owner's
 message that answered it, its files' names when it had no words),
-`expired` (no answer by `expiresAt`, or the computer restarted while it
-waited, as an owner's sleep or a crash does: Hermes cannot resume a turn
-across a restart, and the agent's next turn is told the card was cut
-with it), or `stopped`.
+`expired` (no answer by `expiresAt`), `stopped`, or `history_unavailable`
+(a late answer whose card's journal could not be read whole: shown as
+“Not acted on: ask again”; nothing ran). A card answered late, its turn
+gone, also records `answerSeq`, the answer's seq on `chat`: the fresh turn
+it started is the answer's, and only such a closure lets that answer
+rebuild it after a restart (docs/bridge.md, "A card outlives its turn");
+one answered live names none, and is final.
 
 ```json
 { "kind": "turn.asked", "turn": "…", "asks": "npub1…" }
