@@ -324,7 +324,7 @@ COPY --from=novnc /novnc/vendor /opt/fragment/screen/novnc/vendor
 # every user may write, each its own inside), never in /data: npm turns it on
 # at every start, under TMPDIR, which Hermes points into its home
 # (`cache/scratch`), so Hermes' own `npx --version` probes rewrote a file the
-# save keeps while the computer was held (docs/durable-computers.md, "What
+# save keeps while the computer was held (docs/computers.md, "What
 # changes under the hold"). A cache a start rebuilds.
 FROM scratch
 COPY --from=hermes / /

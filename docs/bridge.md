@@ -183,7 +183,7 @@ each chat's budget of agent turns ("Agents asking each other", below). It
 is a cache. The authority on which turns have started is the chat's `work`
 channel, which never goes back in time, so `/data` restored from any
 earlier save, or lost, costs reads and runs nothing twice
-(docs/durable-computers.md, P1).
+(docs/computers.md, Durability, P1).
 
 - **One life per turn.** Each bridge process is a life, with 128 random
   bits of its own, never written to `/data`. A turn is run only by the
@@ -549,7 +549,7 @@ request: Hermes keeps a turn's message as its session's last until the
 turn answers, and joins the next message to it (two user messages in a
 row are one), so its model was handed `[paul] do the risky thing\n\n[paul]
 good morning` and did the risky thing again (P5 of
-docs/durable-computers.md). Two
+docs/computers.md, Durability). Two
 parts close it:
 
 - **The note (every runtime).** The first turn an agent runs in a chat

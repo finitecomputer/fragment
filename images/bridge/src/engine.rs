@@ -9,8 +9,8 @@
 //! said; the chat's `work` channel owns which turns have started (the
 //! journal); the runtime owns the in-flight turn; the bridge only
 //! translates. Its state is a cache: lost, or restored from any earlier
-//! save, it costs reads, never a second run (docs/durable-computers.md,
-//! one life per turn).
+//! save, it costs reads, never a second run (docs/computers.md,
+//! Durability, P1).
 //!
 //! Its rules, in one place:
 //! - A record is admitted once in a life: the cursor of its `(agent,

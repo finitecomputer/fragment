@@ -338,13 +338,13 @@ speaking Cloudflare's APIs) returns once this product works.
     The agent's self is in its fragment. (The Hermes image streamed
     Hermes' SQLite with Litestream, for disaster recovery, to an S3
     endpoint the platform gave every computer over its own R2 prefix,
-    until the saves in docs/durable-computers.md replaced it. Its replicas were never read, no
+    until the saves in docs/computers.md, Durability, replaced it. Its replicas were never read, no
     restore drill existed, and a restore would have put a `state.db` of
     seconds ago into a `/data` of the last save. The saves themselves now
     carry Hermes' databases whole. The endpoint went after it, #156: no
     image used it.)
 
-    *The design of record is now docs/durable-computers.md (Paul,
+    *The design of record is now docs/computers.md, Durability (Paul,
     2026-10-05): A+ now, toward E; messengers outside the computer (F).*
 
     *Status (2026-10-05, #136 and #137).* The hold, the snapshot as a
@@ -352,7 +352,7 @@ speaking Cloudflare's APIs) returns once this product works.
     A rolled-back or lost `/data` no longer runs a turn again: a turn runs
     only in the life that claimed it on `work` (lesson 2's journal).
 
-    *Status (2026-10-05, step 1 of docs/durable-computers.md, which is the
+    *Status (2026-10-05, step 1 of docs/computers.md, Durability, which is the
     newer word here).* "Every few minutes while written" became: `/data`
     is saved when a computer's work ends (its last keepalive closes, 30 s
     settle), every 15 minutes while it stays busy, and at every sleep, an
@@ -848,8 +848,8 @@ speaking Cloudflare's APIs) returns once this product works.
     wins. While a turn waits on an approval, the bridge drops its busy
     flag, so the computer can sleep instead of billing for hours. An
     answer that arrives after a sleep resumes the turn, or the card says
-    it expired. *Amended 2026-10-05 (docs/durable-computers.md, P6 for
-    now):* an open card holds the busy flag until it is answered or
+    it expired. *Amended 2026-10-05 (docs/computers.md, Durability,
+    P6):* an open card holds the busy flag until it is answered or
     expires, at most its life (an hour). A sleep under it cut the turn,
     and Hermes met the next message with the cut command asked again
     (docs/bridge.md, "A card keeps its computer awake").

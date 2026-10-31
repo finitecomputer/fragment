@@ -1529,7 +1529,7 @@ async fn the_restore_gate_holds() {
     bridge.stop().await;
 }
 
-// ---- crashes and rollbacks (docs/durable-computers.md, one life per turn). Counted in runs (support::Runs: each turn the runtime was given),
+// ---- crashes and rollbacks (docs/computers.md, Durability, P1). Counted in runs (support::Runs: each turn the runtime was given),
 // never in records: a second run's posts are replays of the first's, or
 // 409s. A negative is proved by a later positive, never by a sleep: turns
 // of a chat run in order, and a new life reads the old records before the

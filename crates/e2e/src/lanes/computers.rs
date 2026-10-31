@@ -110,7 +110,7 @@ fn said_something(reply: &Value) -> bool {
 }
 
 /// What a second run of a turn cannot hide, where the fakes count it
-/// (docs/durable-computers.md): the model
+/// (docs/computers.md, Durability, P1): the model
 /// fake's calls, its owner's ledger's model and key rows, and the
 /// computer's uses. A run again posts records that replay the first's (the
 /// same ids and bodies) or are refused, so a count of records sees nothing.
@@ -154,7 +154,7 @@ const HOSTED_SAVED_AFTER_WORK: Duration = Duration::from_secs(fragment_core::com
 /// and at its sleep (the hosted rung of the stub's save checks).
 const HELD_AWAKE: &str = "its turn's end is saved awake, and its guest answered the hold (held)";
 
-/// The save checks (docs/durable-computers.md, step 1), each skipped off
+/// The save checks (docs/computers.md, "Saves and what a wake restores"), each skipped off
 /// the stub and the fakes.
 const SAVE_CHECKS: [&str; 7] = [
     "awake and idle after a turn, it has a save newer than the turn, held",
@@ -166,7 +166,7 @@ const SAVE_CHECKS: [&str; 7] = [
     "a save that then works lets it sleep, and its view says no more of it",
 ];
 
-/// Its saves,  docs/durable-computers.md: a turn's end
+/// Its saves (docs/computers.md, Lifecycle): a turn's end
 /// saves it awake, an always-on computer is saved, a failed save keeps
 /// its container (the lever's `fail-saves`), and one that works sleeps it.
 /// Starts awake, ends asleep. Answers how many replies of its agent it
@@ -355,7 +355,7 @@ fn bound_checks(s: &mut Suite, api: &Api, c: &Crashing) -> Result<()> {
 
 /// The crash checks, each skipped off the stub and the fakes. The ones
 /// marked P1 pass once the bridge claims each turn on `work` before it runs
-/// it (docs/durable-computers.md, P1): until then a crash's restore
+/// it (docs/computers.md, Durability, P1): until then a crash's restore
 /// runs every turn since the save again.
 const CRASH_CHECKS: [&str; 10] = [
     "asleep, it is no computer to kill, and the lever refuses what it does not have",
@@ -382,7 +382,7 @@ struct Crashing<'a> {
 }
 
 /// A crash, by the lever's kill, of a computer the stub runs, with the
-/// fakes counting runs (docs/durable-computers.md): the
+/// fakes counting runs (docs/computers.md, Durability): the
 /// owner's sleep (the save), a wake, a model turn and a key turn, the kill,
 /// one more message; then a turn cut by a second kill. Starts and ends
 /// awake. Answers how many replies of its agent it added.
@@ -544,7 +544,7 @@ const RECOVERY_CHECKS: [&str; 12] = [
 ];
 
 /// What its owner is told, and the way back to working (
-/// docs/durable-computers.md, with the platform's notices): a sleep
+/// docs/computers.md, "What its owner is told"): a sleep
 /// whose save fails tells them at once, a restart (asked twice) goes back to
 /// the last save and says so until seen, the bound puts it to sleep unsaved
 /// when it said, and the wake after is told once. Starts and ends awake.
