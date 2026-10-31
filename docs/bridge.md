@@ -275,6 +275,8 @@ a turn:
   a start: a turn not over ends, its answer saying so (`LEFT`), and an
   answer not yet landed is kept. The asked agent's identity is kept with
   the turn (`Return::by`), so the answer is by it once it is gone (#722).
+  A turn saved before `by` was kept, whose agent is first seen gone at a
+  start, has no one to be by and goes unanswered, as before.
 - **`tasks` is the agent's own.** A routine or `joined` starts anything
   only from the agent fragment's own key or its owner. Another of the
   owner's agents, which may post there, is passed over.
