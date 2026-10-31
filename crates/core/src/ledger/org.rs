@@ -231,7 +231,7 @@ mod tests {
     /// The head and store written and read back, as the Durable Object's
     /// are across a restart: an org's bound again from its terms as kept.
     fn restarted(ledger: &Ledger, store: &Memory) -> (Ledger, Memory) {
-        let mut head: Ledger = serde_json::from_str(&ledger.written(&PriceBook::defaults())).unwrap();
+        let mut head: Ledger = serde_json::from_str(&serde_json::to_string(ledger).unwrap()).unwrap();
         if let Some(terms) = ledger.org_terms() {
             head.bind_org(OrgTerms::of(terms.budget()));
         }
@@ -251,13 +251,13 @@ mod tests {
         l.set_budget(&mut s, &budget("b1", 10 * USD), T0).unwrap();
         let book = PriceBook::defaults();
         let kept_budget = l.org_terms().unwrap().budget();
-        let written: serde_json::Value = serde_json::from_str(&l.written(&book)).unwrap();
+        let written = serde_json::to_value(&l).unwrap();
         assert!(written.get("org").is_none(), "the head names nothing of an org's: {written}");
         // the older release's head: the fields it knows, rewritten whole
-        let old: serde_json::Value = serde_json::json!({ "money": written["money"], "holds": written["holds"], "book": written["book"] });
+        let old: serde_json::Value = serde_json::json!({ "money": written["money"], "holds": {}, "book": book });
         let mut forward: Ledger = serde_json::from_value(old).unwrap();
         forward.sweep(&mut s, T0 + 2 * DAY_MS);
-        let mut forward: Ledger = serde_json::from_str(&forward.written(&book)).unwrap();
+        let mut forward: Ledger = serde_json::from_value(serde_json::to_value(&forward).unwrap()).unwrap();
         forward.bind_org(OrgTerms::of(kept_budget));
         let status = forward.org_status(ORG, &s, T0 + 2 * DAY_MS, &book).unwrap();
         assert_eq!((status.balance_micros, status.budget_micros, status.standing), (25 * USD, 10 * USD, Standing::Ok));
