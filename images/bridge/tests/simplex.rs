@@ -766,6 +766,10 @@ async fn two_cores_started_together_are_each_their_agents() {
         c.state_of_until(agent, Duration::from_secs(60), "linked and running again", |v| v["phase"] == "linked" && v["running"] == true).await;
     }
     assert_eq!(c.cores(), 2);
+    let started = c.events("simplex.core_started");
+    println!("both cores at the start: {started:?}");
+    assert_eq!(started.len(), 2, "each core started once, at the bridge's start");
+    assert!(c.events("simplex.api_unreached").is_empty() && c.events("simplex.core_exited").is_empty(), "each reached, none ended");
     for (label, contact) in ["juniper", "fred"].iter().zip(&contacts) {
         say(&mut person, *contact, &format!("for {label}")).await;
     }
