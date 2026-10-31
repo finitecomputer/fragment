@@ -497,12 +497,16 @@ impl FragmentCell {
             None => self.del_meta(MetaKey::InboxSecret)?,
         }
         // a connector that installs other code (a fork, another template, none)
-        // is no door from then on, nor its owner's alone to edit (doors.rs)
+        // is no door from then on, nor its owner's alone to edit (doors.rs),
+        // and keeps none of its secrets (Paul, 2026-10-31): what its owner set
+        // while it was theirs alone (its bot's token, its webhook's secret) is
+        // not the new code's, nor its editors', to send
         if let Some(t) = self.meta(MetaKey::DoorTemplate)? {
             if fragment_core::door::blessed_template(&loader_id) != Some(t.as_str()) {
                 self.del_meta(MetaKey::DoorTemplate)?;
                 self.unbind_door("its code is no longer its connector's")?;
-                self.event("door.unmade", &format!("ran code that is not the {t} connector's: never a door again"), json!({ "template": t, "code": loader_id }));
+                let secrets = self.drop_secrets()?;
+                self.event("door.unmade", &format!("ran code that is not the {t} connector's: never a door again, its secrets removed ({})", secrets.len()), json!({ "template": t, "code": loader_id, "secrets": secrets }));
             }
         }
         let Some(source) = source else {

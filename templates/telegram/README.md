@@ -13,8 +13,10 @@ the owner's setup above it (`site/telegram.js`).
   writes its pages, deploys its code or calls an operation of an
   editor's; nor does anyone else share it (no agent sets its visibility,
   members or invites, or holds its share link, whomever it acts for); and
-  a fork, or any other code, makes it no door again, for good. So no one but its owner, and Telegram, holds what makes its words
-  theirs.
+  a fork, or any other code, makes it no door again, for good, and
+  removes its secrets (its bot's token and webhook's secret are not the
+  new code's to send). So no one but its owner, and Telegram, holds what
+  makes its words theirs.
 - **Setup, its owner's, on its page:** the bot's token, pasted (from
   @BotFather), and a webhook secret the browser makes, each set as this
   fragment's secret toward `api.telegram.org` (`PUT __secrets/{KEY}`:
