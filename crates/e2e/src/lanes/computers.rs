@@ -991,7 +991,8 @@ fn telegram_checks(s: &mut Suite, api: &Api, c: &Doors, fetched: &dyn Fn(&Suite,
     anyhow::ensure!(policy(Value::Null)?.status == 200, "the connectors lever");
 
     // unlinked from its page (its owner's session there): the door is shut
-    // at once, the membership it gave taken back, and Telegram is told
+    // at once, and Telegram is told; its agent stays a viewer of its chat,
+    // and what it says there goes nowhere else
     let session = api.sign_in(&Api::email_of(c.owner))?;
     let site = format!("fragment_site={}", super::signin::site_cookie(api, &session, &name)?);
     let page = |method: &'static str, body: Option<Value>| {
@@ -1002,9 +1003,16 @@ fn telegram_checks(s: &mut Suite, api: &Api, c: &Doors, fetched: &dyn Fn(&Suite,
     let after = ran(&deliver(Telegram::message(7, PAUL, "Paul", "after the unlink"), Some(HOOK2))?);
     let published = records(api, c.owner, &name, "chat").iter().any(|r| r["body"]["text"] == "after the unlink");
     s.ok(
-        "unlinked from its page, the agent is no member, its owner's next message is published nowhere, and Telegram is told so",
-        unlinked.status == 200 && seen.body["bound"].is_null() && role_of(c.identity).is_none() && after["output"]["ignored"] == "not linked" && !published && sent("This chat isn't linked to your agent.").is_some(),
+        "unlinked from its page, its owner's next message is published nowhere, and Telegram is told so",
+        unlinked.status == 200 && seen.body["bound"].is_null() && after["output"]["ignored"] == "not linked" && !published && sent("This chat isn't linked to your agent.").is_some(),
         json!({ "unlink": unlinked.body, "bound": seen.body, "run": after, "sent": tg.sent() }),
+    );
+    let typed = api.signed(c.owner, "POST", &format!("/api/f/{name}/channels/chat"), Some(&json!({ "id": "typed-after-unlink", "body": { "text": "typed after the unlink" } })))?;
+    let answered = s.eventually(wake, || agent_replies(&records(api, c.owner, &name, "chat"), c.identity).iter().any(|r| r["body"]["text"].as_str().is_some_and(|t| t.contains("typed after the unlink"))));
+    s.ok(
+        "its agent, still a viewer there, answers on the web, and nothing goes to Telegram",
+        typed.status == 200 && role_of(c.identity) == Some(json!("viewer")) && answered && sent("typed after the unlink").is_none(),
+        json!({ "role": role_of(c.identity), "sent": tg.sent() }),
     );
 
     // a fork lets its binding go for good: its own code, then the template
