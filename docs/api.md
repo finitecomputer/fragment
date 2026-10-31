@@ -2647,6 +2647,8 @@ and the AI steps (`job.ai.*`), all above:
   any). Each is a step, so a run reads what was true when it first took
   it, again on a retry.
 
+`job.door` is a connector's binding while it is an open door (An agent's
+doors, below), else null.
 `job.principal`, `job.role`, `job.run`, and `job.attempt` say who and
 which; `job.via` how the run started (`call`, `job`, `cron`, `channel`,
 `files`), and `job.fragment` the fragment's name. The method re-runs from the top at every step with the results so
@@ -3832,20 +3834,30 @@ through one (`fragment_core::door`):
   says `relayed` is 403: the agent's own key signs no such record. An
   app's operation or job publishes none (400).
 
-- **A hosted door** is a connector fragment of its owner's, running the
-  platform's blessed template named for a connector the deployment allows
-  (`telegram`), which they bind as one of their agent's doors (`POST
-  /api/f/{name}/door`, or `__door` from its page), in person; the agent's
-  fragment confirms it is theirs and an agent, and records it
-  (`door.hosted`), and the agent becomes an editor of the connector if it
-  is not a member (its chat's `work` takes its turns). Bound, its app (a
-  job step or a mutation) may publish records in its own channels whose
-  `relayed` is exactly `{via: <door>, for: <owner>, agent}`, unsigned:
-  the platform knows which fragment publishes. Each publish asks the
-  deployment's connectors again; a fork of its template (its code its
-  own) or an unbind shuts the door at once, and while it is bound and
-  shut its jobs' fetches are refused too: it sends nothing on its
-  owner's behalf. Its binding is the
+- **A hosted door** is a connector fragment of its owner's, made from the
+  platform's blessed connector template named for a connector the
+  deployment allows (`telegram`; `blessed::CONNECTORS`). What it publishes
+  as its owner's must be their words alone, so:
+  - **no one but its owner edits it**, from its making: every other caller,
+    an agent acting for its owner included, is at most a viewer there (no
+    one else sets its secrets, writes its files or pages, deploys its code
+    or calls an editor's operation; its own triggered runs keep theirs);
+  - **its code is the platform's**: an install of any other code (a fork,
+    another template, none) makes it no door again, for good, and lets its
+    binding go (`door.unmade`);
+  - **only its owner binds it, in person** (`POST /api/f/{name}/door`, or
+    `__door` from its page), never an agent, whomever it acts for; the
+    agent's fragment confirms it is theirs and an agent, and records it
+    (`door.hosted`), and the agent joins the connector as a viewer if it
+    was no member (its chat's `chat` and `work` take its posts).
+  Bound, its app (a job step or a mutation) may publish records in its
+  own channels whose `relayed` is exactly `{via: <door>, for: <owner>,
+  agent}`, unsigned: the platform knows which fragment publishes, and
+  tells its jobs (`job.door`: that `relayed`, and `to`, the agent's
+  identity, or null while it is no open door). Each publish and each
+  fetch asks the deployment's connectors again; while it is bound and its
+  door is shut, its jobs' fetches are refused too. An unlink lets the
+  binding go and takes back the membership it gave. Its binding is the
   connector's (`meta` `door_actor`), so several connectors, each its own
   chat, may be doors of one agent.
 

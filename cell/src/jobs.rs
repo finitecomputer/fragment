@@ -662,6 +662,8 @@ impl FragmentCell {
                     "via": run.via.as_str(),
                     "fragment": self.name()?,
                     "channels": self.declared_channels()?.keys().collect::<Vec<_>>(),
+                    // a connector's binding, its door's (doors.rs), or null
+                    "door": self.job_door()?,
                 });
                 let results: Vec<Value> = results.iter().map(|r| serde_json::to_value(r).expect("a step result serializes")).collect();
                 let answer = facet.call("__job", &[op.as_str().into(), input, meta, Value::Array(results)]).await.map_err(|e| match e.code {

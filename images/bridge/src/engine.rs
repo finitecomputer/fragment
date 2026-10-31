@@ -367,6 +367,8 @@ pub struct ChatView {
     /// The agents among its members, in the order they were added: the
     /// first is the lead.
     pub agents: Vec<String>,
+    /// The people among its members.
+    pub people: Vec<String>,
     /// What to call its writers, by identity.
     pub names: BTreeMap<String, String>,
 }
@@ -858,10 +860,12 @@ impl Engine {
     }
 
     /// Whether `record` relays `agent`'s owner through `agent`'s own door,
-    /// carried by the agent itself or by none of the chat's other agents (a
-    /// hosted connector publishes as its own fragment's key).
+    /// carried by the agent itself or by a key that is none of the chat's
+    /// members (a hosted connector publishes as its own fragment's key), as
+    /// the chat's page reads it.
     fn relayed_for(&self, agent: &Agent, fragment: &str, record: &Record) -> bool {
-        let carrier = record.principal == agent.identity || !self.views.get(fragment).is_some_and(|v| v.agents.contains(&record.principal));
+        let member = |v: &ChatView| v.agents.contains(&record.principal) || v.people.contains(&record.principal);
+        let carrier = record.principal == agent.identity || self.views.get(fragment).is_some_and(|v| !member(v));
         carrier && records::relayed(&record.body).is_some_and(|r| r.for_ == agent.owner && r.agent == agent.fragment)
     }
 
