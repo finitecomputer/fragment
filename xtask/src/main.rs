@@ -26,13 +26,13 @@
 //!                    nothing), then --no-build (runs what the build left)
 //!   e2e --hosted --config <file> --branch <name> [--only … | --except …]
 //!       [--dry-run | --sweep] [--max-paid-calls <n>] [--operator-key-file <file>]
-//!       [--candidate <image>]
+//!       [--upgrade-from <image>]
 //!                    the suite against that branch deployment on its real vendors
 //!                    (crates/e2e/src/hosted.rs); --dry-run prints its plan;
 //!                    --operator-key-file names an operator key the config's
-//!                    operators list (its `wipe` section's); --candidate names
-//!                    the config's canary, which the real-agent sections run
-//!                    and agent-restart upgrades into and back
+//!                    operators list (its `wipe` section's); --upgrade-from
+//!                    names a config's image agent-restart's computer starts
+//!                    on, upgrades from into the default, and goes back to
 //!   check            every first-party JavaScript file parses (node --check;
 //!                    xtask/src/js_syntax.rs) and none turns a string into
 //!                    markup (xtask/src/html_sinks.rs), no runtime code runs

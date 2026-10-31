@@ -161,6 +161,13 @@ on a computer.
 | `BRIDGE_PROMPT_TTL_MS` | 3 600 000 | a card's life unless the runtime says |
 | `BRIDGE_TURN_IDLE_MS` | 900 000 | a running turn this quiet ends as an error |
 | `BRIDGE_KEEPALIVE_PING_MS` | 15 000 | how often the keepalive pings; silent twice that, it is opened again (#557) |
+| `BRIDGE_CLAUDE_BIN` | | the person's own unmodified `claude`: set, agents whose `agent.json` names `claude` run on it (below, "Claude Code, as the bridge speaks it"); unset (every image today), there is no such runtime and their turns are refused saying so |
+| `BRIDGE_CLAUDE_USER` | | `uid:gid` it runs as: the agents' user, never root, which Claude Code refuses to bypass permissions as |
+| `BRIDGE_CLAUDE_CONFIG_DIR` | `/data/claude` | its `CLAUDE_CONFIG_DIR`: the person's sign-in and the sessions' transcripts, saved with `/data` |
+| `BRIDGE_CLAUDE_WORK_DIR` | `/data/work` | each agent's working directory is `<dir>/<agent fragment>` |
+| `BRIDGE_CLAUDE_STATE_DIR` | `/data/bridge/claude` | each chat's `/new` count (`sessions.json`) |
+| `BRIDGE_CLAUDE_MODEL` | | `--model`; unset, the account's own default |
+| `BRIDGE_CLAUDE_IDLE_MS` | 300 000 | a session's `claude` stops this long after its last turn |
 | `BRIDGE_RELAY_LISTEN` | `127.0.0.1:8650` | where Hermes dials |
 | `BRIDGE_RELAY_SECRET_FILE` | required for `relay` | the per-boot secret (32+ characters) |
 | `GATEWAY_RELAY_ID` | `fragment-computer` | the gateway id both sides name |
@@ -585,6 +592,57 @@ second call of the cut command, no card again, an answer, and the model's
 request ends with the note and the message after the boundary. Whether a
 real model, so told, checks before it redoes is a hosted run's to see.
 
+## A cut turn is continued once
+
+Durability phase 4 (Paul, 2026-10-31): a turn a restart cut is picked up
+again by itself, so nobody types "continue", and never run twice.
+
+- **Which.** A turn this life ended as lost: at its start, one an earlier
+  life was running (`recover`), or at its claim, one another life claimed
+  (409). It is continued once its lost end lands on `work` as this life's
+  own (appended, or a replay of this body: `Input::Posted`'s `kept`). A
+  life that ran the turn to its end posted that end first, so this one's
+  is refused (409) and nothing is continued: a rolled-back disk never
+  continues a turn that finished.
+- **Not continued.** An ask's turn (its asker is answered `lost`), a
+  command, a turn its asker stopped, a turn this life knows was waiting
+  on its person (asking in words, or on a card: their answer is its next
+  turn, above, "A card outlives its turn (P6)"), and a continuation
+  itself: one continuation,
+  and a continuation a restart cuts is told to the turn after it, as any
+  cut turn is (Pi's restart limit, ending visibly). A state older than
+  the turn cannot know it waited on its person; its continuation may ask
+  again.
+- **A Stop is never undone.** A Stop this life accepted (`stop_requested`)
+  holds through a restart before the runtime's end, its question or card
+  included (a Stop answers them). One said after the restart, before the
+  lost end lands (the page still shows the turn running; a rolled-back
+  life reads it again), cancels the continuation; one naming a cut turn
+  whose continuation is queued or running stops that.
+- **What it is.** A turn queued in the cut turn's place (its order),
+  with its cause, asker and depth, whose id is the cut turn's
+  continuation's (`records::continuation_id`), so its claim makes it one
+  run in any life. It is said by the computer, never as its asker's words
+  (`[your computer] I restarted while you were working …`,
+  `engine::CONTINUE_TEXT`), and carries the cut turn's note by its id
+  (`TurnStart::continues`; driver.rs, `cut_note`), whatever ran between:
+  what it was asked, its steps and replies, and to check before redoing
+  anything. Its runtime is never asked to rerun a call: Claude Code tells
+  its model a cut call's outcome is unknown, and Hermes' cut session is
+  closed at boot (above). The chat is shown it as it starts
+  (`turn.notice`, `CONTINUE_NOTICE`).
+- **Bounds.** Past its chat's queue or the computer's turns it is not
+  admitted, and said so in the log (`turn.uncontinued`).
+- A state holding a continuation, or a turn to be continued, is format 4,
+  which a bridge before continuations sets aside.
+- Proven in `a_cut_turn_is_continued_once`,
+  `a_stopped_turn_is_never_continued`,
+  `a_claim_another_life_holds_ends_the_turn` and the simulation's
+  continuation invariants (engine_tests.rs: continued once, never a
+  continuation's continuation, only a turn the journal ended as lost),
+  tests/bridge.rs's restart cases, and with the real Hermes in
+  `a_turn_cut_while_its_tool_runs_is_continued_once` (tests/docker.rs).
+
 ## What a rollback forgot
 
 A computer that went back to an older save (a crash, an unsaved stop, a
@@ -855,6 +913,56 @@ page's code, which another page cannot fetch. The platform's half (the
 ticket's signature, its one redeeming, refusing a relayed record the
 agent's own key or any other signs, and the unlink closing the door) is
 the `computers` lane's door checks, through the stub's `door` commands.
+
+## Claude Code, as the bridge speaks it
+
+`runtime/claude.rs`, behind `BRIDGE_CLAUDE_BIN`: the person's own
+unmodified `claude`, signed in with their own plan, driven over its
+stream-json wire as Anthropic's Agent SDK drives it. The bridge never sits
+between it and Anthropic: no proxy, base URL or key, and no `ANTHROPIC_*` or
+`CLAUDE_CODE_*` variable of anyone's reaches it (`withheld`). Read from
+Claude Code 2.1.312 and spiked on 2026-10-30 (crash, resume, copy under the
+hold, interrupt, questions).
+
+- **A session per agent and chat**, its id derived from the two and the
+  chat's `/new` count, so every life names the same one. Its process starts
+  at the session's first turn, resuming it when its transcript is on disk
+  (else naming it new; a start refused either way is tried once the other
+  way), and stops once idle. Transcripts are whole lines, so a save under
+  the hold never tears one; a torn last line, restored, is skipped.
+- **A turn** is one user message: its note, quote, asker and files as
+  Relay's are, in words. Text deltas are the draft; each text block a reply
+  part; each tool's result a step with its call's id and status; its
+  `result` its end (`success` idle, else the error it says, a sign-in or a
+  plan's limit in its own words).
+- **No technical approvals:** tools run with permissions bypassed.
+  `AskUserQuestion` alone still asks the host (`can_use_tool`): each
+  question a card (`<tool_use_id>-q<n>`), its options and "Other" in
+  words; an unanswered card refuses the call, saying no one answered.
+- **Stop** is Claude Code's interrupt, which stops the running tool. Its
+  tools run in process groups of their own, so a lone kill of `claude`
+  would leave them running: a session stops by closing its input, and is
+  killed only past a grace. A stopped turn ends at its own `result`.
+- **A turn let go of is over on its process before the next starts
+  there.** The bridge ends a turn itself (quiet past its bound, its agent
+  gone) and hands the chat's next at once, while Claude Code may still
+  be writing the first. So the first is interrupted and its remaining
+  output read and dropped until its `result`. Given none within
+  `DRAIN_MS_DEFAULT` (10 s), its process is replaced, and the next turn
+  resumes the session in a new one: one turn's words and end are never
+  another's (`retire_turn`; Alex's review of #812;
+  `a_let_go_turns_late_output_is_never_the_next_turns` and
+  `a_let_go_turn_whose_interrupt_goes_unanswered_has_its_process_replaced`,
+  composed scripts in tests/claude-composed/, each failing without it).
+- **A crash** (the computer's death) leaves the cut call open in the
+  transcript. The next turn resumes the session, and Claude Code itself
+  tells its model the call's outcome is unknown, with no cut-turn patch
+  of ours; the bridge's note says what the chat saw.
+- **Its menu:** `new` (the chat's next session) and `stop`.
+- Proven against `fake-claude` replaying Claude Code's wire as it spoke,
+  recorded with Haiku 5.5 (tests/claude.rs, tests/claude/: a reply, a tool
+  step, a card, Stop, a session resumed by a new bridge and `/new`, and a
+  crash mid-tool), and in its own unit tests.
 
 ## Hermes' Relay, as the bridge speaks it
 

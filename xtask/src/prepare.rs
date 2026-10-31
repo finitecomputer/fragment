@@ -34,8 +34,8 @@ pub(crate) const IMAGE_LIMIT: Duration = Duration::from_secs(40 * 60);
 const POLL: Duration = Duration::from_secs(5);
 /// How often a wait says how long it has waited.
 const SAY_EVERY: Duration = Duration::from_secs(60);
-/// The most images one wait asks about: a config names a stable and a
-/// canary.
+/// The most images one wait asks about: a config names its default, and
+/// at most a few more (an upgrade's starting image).
 pub(crate) const IMAGES_MAX: usize = 16;
 
 /// What Cloudflare answers about an image's preparation.
@@ -235,7 +235,7 @@ pub(crate) mod tests {
     }
 
     const STABLE: &str = "registry.cloudflare.com/0123456789abcdef0123456789abcdef/fragment-computer-hermes@sha256:5b8481f0bb8913e37832d0d6544a28eafdbbded347b38d7a3774fcf3444524b6";
-    const CANARY: &str = "registry.cloudflare.com/0123456789abcdef0123456789abcdef/fragment-computer-hermes@sha256:0a022c96d88a451a3243f04eb53448e6f656cd4d218a76453ac4ebfdbca64f84";
+    const NEXT: &str = "registry.cloudflare.com/0123456789abcdef0123456789abcdef/fragment-computer-hermes@sha256:0a022c96d88a451a3243f04eb53448e6f656cd4d218a76453ac4ebfdbca64f84";
 
     #[test]
     fn an_image_ready_at_once_is_asked_once() {
@@ -246,19 +246,19 @@ pub(crate) mod tests {
 
     #[test]
     fn a_pending_image_is_asked_again_until_it_is_ready() {
-        let mut api = Scripted::with(CANARY, vec![Ok(Preparation::Pending), Ok(Preparation::Pending), Ok(Preparation::Pending), Ok(Preparation::Ready)]);
+        let mut api = Scripted::with(NEXT, vec![Ok(Preparation::Pending), Ok(Preparation::Pending), Ok(Preparation::Pending), Ok(Preparation::Ready)]);
         let mut clock = Fake::default();
-        until_ready(&mut api, &mut clock, &[CANARY], DEPLOY_LIMIT).unwrap();
+        until_ready(&mut api, &mut clock, &[NEXT], DEPLOY_LIMIT).unwrap();
         assert_eq!((api.asked.len(), clock.now()), (4, 3 * POLL));
     }
 
     #[test]
     fn an_image_still_pending_at_the_limit_is_refused_and_asked_no_more() {
         // 2026-10-24: round 11's copy, pending for wrangler's whole 15 minutes
-        let mut api = Scripted::with(CANARY, vec![Ok(Preparation::Pending)]);
+        let mut api = Scripted::with(NEXT, vec![Ok(Preparation::Pending)]);
         let mut clock = Fake::default();
-        let e = until_ready(&mut api, &mut clock, &[CANARY], DEPLOY_LIMIT).unwrap_err().to_string();
-        assert!(e.contains("still being prepared") && e.contains(CANARY) && e.contains("20m00s"), "{e}");
+        let e = until_ready(&mut api, &mut clock, &[NEXT], DEPLOY_LIMIT).unwrap_err().to_string();
+        assert!(e.contains("still being prepared") && e.contains(NEXT) && e.contains("20m00s"), "{e}");
         assert_eq!(clock.now(), DEPLOY_LIMIT, "it waits the limit and no longer");
         assert_eq!(api.asked.len() as u128, DEPLOY_LIMIT.as_millis() / POLL.as_millis(), "an ask each POLL, none at the deadline");
     }
@@ -271,13 +271,13 @@ pub(crate) mod tests {
         // after it
         let clock = Fake::default();
         let mut api = Scripted::with(STABLE, vec![Ok(Preparation::Pending); 239].into_iter().chain([Ok(Preparation::Ready)]).collect());
-        api.answers.insert(CANARY.into(), vec![Ok(Preparation::Ready)].into());
+        api.answers.insert(NEXT.into(), vec![Ok(Preparation::Ready)].into());
         api.clock = clock.clone();
         let slow = Duration::from_secs(29);
-        let e = until_ready(&mut SlowAfter { inner: &mut api, after: 239, slow }, &mut clock.clone(), &[STABLE, CANARY], DEPLOY_LIMIT).unwrap_err().to_string();
+        let e = until_ready(&mut SlowAfter { inner: &mut api, after: 239, slow }, &mut clock.clone(), &[STABLE, NEXT], DEPLOY_LIMIT).unwrap_err().to_string();
         assert!(e.contains("only after") && e.contains(STABLE), "{e}");
         assert!(api.started.iter().all(|t| *t < DEPLOY_LIMIT), "no ask starts at or after the deadline: {:?}", api.started.last());
-        assert!(!api.asked.contains(&CANARY.to_string()), "nor for the next image");
+        assert!(!api.asked.contains(&NEXT.to_string()), "nor for the next image");
         assert!(clock.now() < DEPLOY_LIMIT + slow + POLL, "it ends with the ask that crossed it: {:?}", clock.now());
 
         // slow pending answers: the pause before the next ask is cut to what
@@ -338,19 +338,19 @@ pub(crate) mod tests {
     #[test]
     fn every_image_is_ready_within_one_limit_and_each_is_asked_once_ready() {
         let mut api = Scripted::with(STABLE, vec![Ok(Preparation::Ready)]);
-        api.answers.insert(CANARY.into(), vec![Ok(Preparation::Pending); 10].into_iter().chain([Ok(Preparation::Ready)]).collect());
+        api.answers.insert(NEXT.into(), vec![Ok(Preparation::Pending); 10].into_iter().chain([Ok(Preparation::Ready)]).collect());
         let mut clock = Fake::default();
-        // a stable and a canary at one digest (between rounds) are one image
-        until_ready(&mut api, &mut clock, &[STABLE, CANARY, STABLE], DEPLOY_LIMIT).unwrap();
+        // two names at one digest are one image
+        until_ready(&mut api, &mut clock, &[STABLE, NEXT, STABLE], DEPLOY_LIMIT).unwrap();
         assert_eq!(api.asked.iter().filter(|i| *i == STABLE).count(), 1);
-        assert_eq!(api.asked.iter().filter(|i| *i == CANARY).count(), 11);
+        assert_eq!(api.asked.iter().filter(|i| *i == NEXT).count(), 11);
 
         // the limit is the whole wait's: a second image pending past it is refused
         let mut api = Scripted::with(STABLE, vec![Ok(Preparation::Pending); 200].into_iter().chain([Ok(Preparation::Ready)]).collect());
-        api.answers.insert(CANARY.into(), vec![Ok(Preparation::Pending)].into());
+        api.answers.insert(NEXT.into(), vec![Ok(Preparation::Pending)].into());
         let mut clock = Fake::default();
-        let e = until_ready(&mut api, &mut clock, &[STABLE, CANARY], DEPLOY_LIMIT).unwrap_err().to_string();
-        assert!(e.contains(CANARY), "{e}");
+        let e = until_ready(&mut api, &mut clock, &[STABLE, NEXT], DEPLOY_LIMIT).unwrap_err().to_string();
+        assert!(e.contains(NEXT), "{e}");
         assert_eq!(clock.now(), DEPLOY_LIMIT);
     }
 

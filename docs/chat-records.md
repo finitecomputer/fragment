@@ -71,6 +71,13 @@ at most 16. A turn's records, in order:
    (and a notice may follow the end: `turn.notice`, below);
 3. `turn.end` on `work`.
 
+A turn a restart cut may be followed by its **continuation** (since
+2026-10-31): a turn of its own, whose id is not its cause's but the first
+24 hex characters of the SHA-256 of `continue`, a NUL and the cut turn's
+id, with the cut turn's `cause` and asker, and a
+`turn.notice` (part `continued`) as it starts (docs/bridge.md, "A cut turn
+is continued once").
+
 Every turn has both its start and its end, one of each: a turn refused
 (too many waiting) or stopped while it waited posts its `turn.start` and
 then its `turn.end`, and runs nothing. The bridge keeps a turn until its
@@ -353,9 +360,10 @@ templates/sessions/README.md):
 - Posted by the chat's owner, the shell's Continue, with the id
   `history`, before the agent joins: the chat's first record. It holds
   the conversation's last summary (`summary`, at most 8,000 characters)
-  and the newest of what the person and the agent said, oldest first
-  (`messages`, at most 40, each at most 4,000 characters), with how many
-  came before them (`earlier`), bounded as a whole by its body's bytes
+  and the newest of what the person and the agent said after it (the
+  summary covers what came before), oldest first (`messages`, at most 40,
+  each at most 4,000 characters), with how many others the conversation
+  holds (`earlier`), bounded as a whole by its body's bytes
   (63 KiB of JSON, under a record's 64 KiB, whatever the text: the newest
   that fit; a summary too large for it alone is cut) before the chat is
   made (cell/shell/session-archive.js, `historyOf`). `archive` and `key`

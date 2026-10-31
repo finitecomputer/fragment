@@ -23,6 +23,7 @@
 //! names none. Its turns go to that runtime, and that runtime's menu is its
 //! commands (docs/bridge.md, "Which runtime runs an agent").
 
+pub mod claude;
 pub mod relay;
 pub mod script;
 
@@ -306,6 +307,10 @@ pub struct TurnStart {
     /// turn. Relay tells its agent so in that chat's session
     /// (`relay::wire::SIMPLEX_TOPIC`).
     pub simplex: bool,
+    /// It continues the turn named, which a restart cut (engine.rs,
+    /// `continue_turn`): its note is that turn's, by its id (driver.rs,
+    /// `cut_note`); said by the computer, never as its asker's words.
+    pub continues: Option<String>,
 }
 
 /// What the bridge asks of a runtime.

@@ -149,8 +149,8 @@ struct Computers {
     /// context, relative to the repo: `images/hermes/Dockerfile`, `.`, as the
     /// Hermes image carries the CLI and builds from the repo root; and its
     /// build variables), or kept at a digest the account's registry holds
-    /// (`{"image": …@sha256:…}`): the stable image a canary is ahead of
-    /// (docs/computers.md, "Stable and canary").
+    /// (`{"image": …@sha256:…}`), as every image a CI deploy runs is
+    /// (docs/computers.md, "Preview and production").
     images: BTreeMap<String, Image>,
     /// How long a computer whose sleep's save keeps failing stays awake
     /// before it sleeps unsaved (`FRAGMENT_COMPUTER_UNSAVED_MAX_MS`; thirty
@@ -684,22 +684,19 @@ fn args(rest: &[String]) -> Result<Args> {
     Ok(Args { config: config.ok_or_else(usage)?, branch, pinned_only, preview_image_digest })
 }
 
-/// Override only the preview's in-memory image lines. Keep the old name
-/// answering for computers pinned to it; there is one preview image now.
-/// Other config (including production's file) is neither rewritten nor
-/// published. The resulting pins pass the normal preflight and rollout.
+/// Override only the preview's in-memory `hermes`, its default, with
+/// master's image. Any other image its config names (an upgrade check's
+/// starting image: `--upgrade-from`, docs/computers.md "Preview and
+/// production") stays at the digest the config pins it to. Other config
+/// (including production's file) is neither rewritten nor published. The
+/// resulting pins pass the normal preflight and rollout.
 fn preview_image(d: &mut Deployment, digest: &str) -> Result<()> {
     let reference = format!("{REGISTRY}/{}/{}@{digest}", d.account_id, crate::image::preview::REPOSITORY);
     anyhow::ensure!(pinned_ok(&reference, &d.account_id), "preview image must be sha256:<64 lowercase hex digits>");
     let computers = d.computers.as_mut().context("preview config has no computers")?;
-    // Fail on an unexpected name rather than silently leaving some pins
-    // behind on a separate preview image.
-    anyhow::ensure!(computers.images.keys().all(|n| matches!(n.as_str(), "hermes" | "hermes-canary")), "preview has an image other than hermes or hermes-canary; migrate its pins before following master");
     computers.default_image = "hermes".into();
-    for name in ["hermes", "hermes-canary"] {
-        computers.images.insert(name.into(), Image::Pinned(Pinned { image: reference.clone() }));
-    }
-    println!("preview follows master's image: {reference} (hermes and hermes-canary)");
+    computers.images.insert("hermes".into(), Image::Pinned(Pinned { image: reference.clone() }));
+    println!("preview follows master's image: {reference} (hermes)");
     Ok(())
 }
 
@@ -714,7 +711,7 @@ fn pinned_only(d: &Deployment) -> Result<()> {
     let built: Vec<&str> = d.computers.iter().flat_map(|c| &c.images).filter(|(_, i)| matches!(i, Image::Built(_))).map(|(name, _)| name.as_str()).collect();
     if !built.is_empty() {
         bail!(
-            "--pinned-only builds no image, and this config builds {} from the tree: pin each at a digest this account's registry holds ({REGISTRY}/{}/<repository>@sha256:<64 hex>; docs/computers.md, \"Stable and canary\"), or deploy it without --pinned-only where Docker runs",
+            "--pinned-only builds no image, and this config builds {} from the tree: pin each at a digest this account's registry holds ({REGISTRY}/{}/<repository>@sha256:<64 hex>; docs/computers.md, \"Preview and production\"), or deploy it without --pinned-only where Docker runs",
             built.join(", "),
             d.account_id
         );
@@ -1338,19 +1335,20 @@ fn worker_config(d: &Deployment, n: &Names, store_id: &str, release: &Release, r
 
 /// `cargo xtask e2e --hosted --config <file> --branch <b> [--only … |
 /// --except …] [--dry-run | --sweep [<run>] | --sweep-all] [--max-paid-calls
-/// <n>] [--candidate <image>]`: the suite's
+/// <n>] [--upgrade-from <image>]`: the suite's
 /// own arguments for that branch deployment, from its config: the zone, the
 /// test secret's file (named, never read here), and what the deployment
 /// offers (computers, models). A deployment of its own is refused: the
-/// hosted lane runs on a preview. A candidate is one of the config's
-/// images other than its default (docs/computers.md, "Stable and canary").
+/// hosted lane runs on a preview. `--upgrade-from` names one of the
+/// config's images other than its default, the one an upgrade starts from
+/// (docs/computers.md, "Preview and production").
 pub fn hosted_e2e_args(rest: &[String]) -> Result<Vec<String>> {
     let usage = || {
         anyhow::anyhow!(
-            "usage: cargo xtask e2e --hosted --config <file> --branch <name> [--only <section>[,...] | --except <section>[,...]] [--dry-run | --sweep [<run>] | --sweep-all] [--max-paid-calls <n>] [--operator-key-file <file>] [--candidate <image>]"
+            "usage: cargo xtask e2e --hosted --config <file> --branch <name> [--only <section>[,...] | --except <section>[,...]] [--dry-run | --sweep [<run>] | --sweep-all] [--max-paid-calls <n>] [--operator-key-file <file>] [--upgrade-from <image>]"
         )
     };
-    let (mut config, mut branch, mut passed, mut operator_key_file, mut candidate) = (None, None, vec![], None, None);
+    let (mut config, mut branch, mut passed, mut operator_key_file, mut upgrade_from) = (None, None, vec![], None, None);
     let mut it = rest.iter().peekable();
     // bounded: each pass takes one argument at least
     while let Some(a) = it.next() {
@@ -1361,7 +1359,7 @@ pub fn hosted_e2e_args(rest: &[String]) -> Result<Vec<String>> {
             // an operator key's file (`fragment operator key` makes one): the
             // runner reads it by path; the deployment lists its npub
             "--operator-key-file" => operator_key_file = Some(PathBuf::from(it.next().ok_or_else(usage)?)),
-            "--candidate" => candidate = Some(it.next().ok_or_else(usage)?.clone()),
+            "--upgrade-from" => upgrade_from = Some(it.next().ok_or_else(usage)?.clone()),
             "--only" | "--except" | "--max-paid-calls" => {
                 passed.push(a.clone());
                 passed.push(it.next().ok_or_else(usage)?.clone());
@@ -1394,13 +1392,13 @@ pub fn hosted_e2e_args(rest: &[String]) -> Result<Vec<String>> {
     if !offers.is_empty() {
         args.extend(["--offers".to_string(), offers.join(",")]);
     }
-    // a round's candidate: an image of the config's that new computers do
-    // not start on, or there is nothing to try
-    if let Some(image) = candidate {
-        let c = d.computers.as_ref().context("--candidate names one of the deployment's computer images: its config has no `computers`")?;
-        anyhow::ensure!(c.images.contains_key(&image), "--candidate {image:?} is not one of the config's images ({})", c.images.keys().cloned().collect::<Vec<_>>().join(", "));
-        anyhow::ensure!(image != c.default_image, "--candidate {image:?} is the default image, which the hosted lane runs anyway: name the canary");
-        args.extend(["--candidate".to_string(), image]);
+    // an upgrade's starting image: one of the config's that new computers
+    // do not start on, or there is nothing to upgrade from
+    if let Some(image) = upgrade_from {
+        let c = d.computers.as_ref().context("--upgrade-from names one of the deployment's computer images: its config has no `computers`")?;
+        anyhow::ensure!(c.images.contains_key(&image), "--upgrade-from {image:?} is not one of the config's images ({})", c.images.keys().cloned().collect::<Vec<_>>().join(", "));
+        anyhow::ensure!(image != c.default_image, "--upgrade-from {image:?} is the default image, which an upgrade goes to: name the image it starts from");
+        args.extend(["--upgrade-from".to_string(), image]);
     }
     args.extend(passed);
     Ok(args)
@@ -1700,17 +1698,17 @@ mod tests {
         v["operators"] = json!([]);
         let path = config_file("hosted-args-operator-unlisted", &v);
         assert!(args(&["--hosted", "--config", path.to_str().unwrap(), "--branch", "p5", "--operator-key-file", "/k"]).is_err(), "a key among no operators");
-        // a round's candidate: one of the config's images, not its default
-        let candidate = |v: &Value, test: &str, image: &str| {
+        // an upgrade's starting image: one of the config's images, not its default
+        let upgrade_from = |v: &Value, test: &str, image: &str| {
             let path = config_file(test, v);
-            args(&["--hosted", "--config", path.to_str().unwrap(), "--branch", "p5", "--candidate", image, "--only", "agent-restart"])
+            args(&["--hosted", "--config", path.to_str().unwrap(), "--branch", "p5", "--upgrade-from", image, "--only", "agent-restart"])
         };
-        assert!(candidate(&v, "hosted-args-candidate-no-computers", "hermes-canary").is_err(), "a deployment that makes no computers");
+        assert!(upgrade_from(&v, "hosted-args-upgrade-no-computers", "production").is_err(), "a deployment that makes no computers");
         let build = json!({ "dockerfile": "images/hermes/Dockerfile", "build_context": "." });
-        v["computers"] = json!({ "default_image": "hermes", "images": { "hermes": build, "hermes-canary": build } });
-        assert_eq!(candidate(&v, "hosted-args-candidate", "hermes-canary").unwrap(), with(&["--offers", "computers", "--candidate", "hermes-canary", "--only", "agent-restart"]));
-        assert!(candidate(&v, "hosted-args-candidate-default", "hermes").is_err(), "the default is what runs anyway");
-        assert!(candidate(&v, "hosted-args-candidate-unknown", "stub-next").is_err(), "an image the config does not name");
+        v["computers"] = json!({ "default_image": "hermes", "images": { "hermes": build, "production": build } });
+        assert_eq!(upgrade_from(&v, "hosted-args-upgrade", "production").unwrap(), with(&["--offers", "computers", "--upgrade-from", "production", "--only", "agent-restart"]));
+        assert!(upgrade_from(&v, "hosted-args-upgrade-default", "hermes").is_err(), "the default is what an upgrade goes to");
+        assert!(upgrade_from(&v, "hosted-args-upgrade-unknown", "stub-next").is_err(), "an image the config does not name");
         // production: a deployment of its own runs no hosted lane
         v["platform_host"] = json!("fragment.club");
         v["fragment_suffix"] = json!("fragment.boats");
@@ -2038,8 +2036,8 @@ mod tests {
         assert!(checked(deployment(None, None)).is_ok());
     }
 
-    /// Stable kept at its digest beside a canary built from the tree
-    /// (docs/computers.md, "Stable and canary"): the pinned image is given
+    /// An image kept at its digest beside one built from the tree
+    /// (docs/computers.md, "Preview and production"): the pinned image is given
     /// to wrangler as it is, nothing to build, and the built one with its
     /// paths made the repo's; a pinned image that is not a digest in this
     /// account's registry is refused before anything is built, and so is an
@@ -2052,13 +2050,13 @@ mod tests {
         let digest = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08";
         let stable = format!("registry.cloudflare.com/{account}/fragment-preview-hermes@sha256:{digest}");
         let built = json!({ "dockerfile": "images/hermes/Dockerfile", "build_context": "." });
-        v["computers"]["images"] = json!({ "hermes": { "image": stable }, "hermes-canary": built });
+        v["computers"]["images"] = json!({ "hermes": { "image": stable }, "next": built });
         let d = load(&config_file("pinned-stable", &v)).unwrap();
         let cell = worker_config(&d, &names(&d, Some("preview")).unwrap(), "0f0e0d0c", &test_release(), &devstack::repo_root()).unwrap();
         let images = &cell["containers"][0]["images"];
         assert_eq!(images["hermes"], json!({ "image": stable }), "kept as it is: nothing to build");
-        assert_eq!(images["hermes-canary"]["dockerfile"], json!(devstack::repo_root().join("images/hermes/Dockerfile")));
-        assert_eq!(images["hermes-canary"]["build_context"], json!(devstack::repo_root().join(".")));
+        assert_eq!(images["next"]["dockerfile"], json!(devstack::repo_root().join("images/hermes/Dockerfile")));
+        assert_eq!(images["next"]["build_context"], json!(devstack::repo_root().join(".")));
         assert_eq!(cell["vars"]["FRAGMENT_COMPUTER_IMAGE"], "hermes", "new computers start on stable");
         assert_eq!(pinned_images(&d), vec![stable.as_str()], "the deploy waits for the pinned image alone: wrangler prepares the one it builds");
         assert!(pinned_images(&deployment(None, None)).is_empty(), "no computers, no image to wait for");
@@ -2090,7 +2088,7 @@ mod tests {
     /// Goal: CI's deploy (`--pinned-only`) builds no image. Method: the
     /// deploy itself, on a config whose DNS token's file is not there, so
     /// that a deploy that gets past its first checks stops at reading it.
-    /// Invalid: a canary built from the tree beside a pinned stable, refused
+    /// Invalid: an image built from the tree beside a pinned one, refused
     /// naming it before that read (and deployed by hand without the flag);
     /// the flag on a teardown. Valid: every image at its digest, or no
     /// computers.
@@ -2109,12 +2107,12 @@ mod tests {
         };
         let read_the_token = "read the secret file";
 
-        v["computers"]["images"] = json!({ "hermes": stable, "hermes-canary": built });
-        let refused = deploy_with(&v, "pinned-only-canary-built", &["--pinned-only"]);
-        assert!(refused.contains("--pinned-only builds no image, and this config builds hermes-canary from the tree") && !refused.contains(read_the_token), "{refused}");
+        v["computers"]["images"] = json!({ "hermes": stable, "next": built });
+        let refused = deploy_with(&v, "pinned-only-built", &["--pinned-only"]);
+        assert!(refused.contains("--pinned-only builds no image, and this config builds next from the tree") && !refused.contains(read_the_token), "{refused}");
         assert!(deploy_with(&v, "pinned-only-by-hand", &[]).contains(read_the_token), "without the flag it goes on");
 
-        v["computers"]["images"] = json!({ "hermes": stable, "hermes-canary": stable });
+        v["computers"]["images"] = json!({ "hermes": stable, "next": stable });
         assert!(deploy_with(&v, "pinned-only-pinned", &["--pinned-only"]).contains(read_the_token), "every image at its digest");
         v.as_object_mut().unwrap().remove("computers");
         assert!(deploy_with(&v, "pinned-only-no-computers", &["--pinned-only"]).contains(read_the_token), "no computers, no image");
@@ -2125,8 +2123,9 @@ mod tests {
     }
 
     /// Only a pinned preview deploy may override its images. The normal
-    /// config stays unchanged on disk; both names survive and resolve to
-    /// the same account-local digest in the Worker's effective config.
+    /// config stays unchanged on disk; `hermes`, the default, resolves to
+    /// master's account-local digest in the Worker's effective config, and
+    /// another image the config pins (an upgrade's starting one) is kept.
     #[test]
     fn preview_has_one_image_and_production_keeps_its_pins() {
         let digest = format!("sha256:{}", "ab".repeat(32));
@@ -2151,21 +2150,22 @@ mod tests {
         pinned_only(&d).unwrap();
         let c = d.computers.as_ref().unwrap();
         assert_eq!(c.default_image, "hermes");
-        assert_eq!(c.images.len(), 2);
         let expected = format!("{REGISTRY}/{}/{}@{digest}", d.account_id, crate::image::preview::REPOSITORY);
-        for name in ["hermes", "hermes-canary"] {
-            assert_eq!(serde_json::to_value(&c.images[name]).unwrap(), json!({"image": expected}));
-        }
+        assert_eq!(serde_json::to_value(&c.images["hermes"]).unwrap(), json!({"image": expected}));
         let worker = worker_config(&d, &names(&d, Some("preview")).unwrap(), "0f0e0d0c", &test_release(), &devstack::repo_root()).unwrap();
         assert_eq!(worker["vars"]["FRAGMENT_COMPUTER_IMAGE"], "hermes");
         assert_eq!(worker["containers"][0]["images"]["hermes"], json!({"image": expected}));
-        assert_eq!(worker["containers"][0]["images"]["hermes-canary"], json!({"image": expected}));
         // Replaying the same resolution leaves the effective config alone.
+        let before = pinned_images(&d).into_iter().map(str::to_string).collect::<Vec<_>>();
         preview_image(&mut d, &digest).unwrap();
-        let images = pinned_images(&d);
-        assert_eq!(images, vec![expected.as_str(), expected.as_str()]);
-        d.computers.as_mut().unwrap().images.insert("forgotten-pin".into(), Image::Pinned(Pinned {image: expected}));
-        assert!(preview_image(&mut d, &digest).is_err());
+        assert_eq!(pinned_images(&d), before);
+        // an upgrade's starting image, pinned by the config, stays as pinned
+        let production = format!("{REGISTRY}/{}/fragment-computer-hermes@sha256:{}", d.account_id, "cd".repeat(32));
+        d.computers.as_mut().unwrap().images.insert("production".into(), Image::Pinned(Pinned { image: production.clone() }));
+        preview_image(&mut d, &digest).unwrap();
+        let c = d.computers.as_ref().unwrap();
+        assert_eq!(serde_json::to_value(&c.images["production"]).unwrap(), json!({"image": production}));
+        assert_eq!(serde_json::to_value(&c.images["hermes"]).unwrap(), json!({"image": expected}));
     }
 
     /// The deployment's mail: its `mail_from` is the cell's

@@ -567,7 +567,7 @@ jobs:
           INPUT_KEY: ${{ needs.preview-image.outputs.key }}
         run: |
           test -n "$DIGEST" && test -n "$INPUT_KEY" || { echo "::error::preview image resolution is missing; no deploy"; exit 1; }
-          printf '### Resolved preview image\n\nInputs: `%s`\n\nDigest: `%s`\n\nDefault `hermes` and compatibility name `hermes-canary` both use this digest.\n' "$INPUT_KEY" "$DIGEST" >> "$GITHUB_STEP_SUMMARY"
+          printf '### Resolved preview image\n\nInputs: `%s`\n\nDigest: `%s`\n\n`hermes` uses this digest.\n' "$INPUT_KEY" "$DIGEST" >> "$GITHUB_STEP_SUMMARY"
       # green only when every object class answers this commit's release
       # (`git rev-parse --short=12 HEAD`) at /healthz/objects; a deploy that
       # cannot be finished or verified rolls back, and fails (rollout.rs)

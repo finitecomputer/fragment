@@ -350,8 +350,8 @@ async fn person_page(env: &Env, person: &str) -> CellResult<serde_json::Value> {
 }
 
 /// An operator pins a person's computer to another of the deployment's
-/// images (docs/computers.md, "Stable and canary"): onto the canary, or
-/// back. As its owner's pin is, its next start runs it, and awake on
+/// images (docs/computers.md, "Preview and production"), or back to its
+/// default. As its owner's pin is, its next start runs it, and awake on
 /// another, its owner is told an update is ready. Logged as `pin`.
 async fn pin(env: &Env, by: &str, person: &str, bytes: &[u8]) -> CellResult<serde_json::Value> {
     if !fragment_core::npub::is_identity(person) {
