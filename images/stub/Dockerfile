@@ -23,13 +23,34 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
  && cargo build --release --locked -p fragment-bridge \
  && cp target/release/fragment-bridge /fragment-bridge
 
-# The fragment CLI (cli/), static, as our Hermes image builds it: its
-# stage's lines are the Hermes image's (images/hermes/Dockerfile says why
-# each), cached by the same ids, and xtask's host test
-# `the_cli_stage_copies_what_the_cli_builds_from` reads both.
+# The fragment CLI (cli/), static, its agents ask each other with. Its
+# dependencies first, built from the manifests and the lock alone (each of
+# our crates an empty source, the templates' build script none), so the
+# layer that holds them is reused until a dependency changes, and a change
+# to our own crates (the CLI, core, proto) rebuilds only them; then our
+# crates, whole. Its target is the layers' own (no cache mount), so CI's
+# BuildKit cache keeps the dependencies' build. Unoptimized: the stub's
+# agents make a few calls with it, and it builds in a third of the time.
+# Its inputs are the CLI's alone, as our Hermes image's CLI stage is (that
+# one says why each), and xtask's host test
+# `the_cli_stage_copies_what_the_cli_builds_from` keeps them so.
 FROM rust:1.99-alpine AS cli
 WORKDIR /src
+ENV CARGO_PROFILE_RELEASE_OPT_LEVEL=0
 COPY Cargo.toml Cargo.lock ./
+COPY cli/Cargo.toml cli/Cargo.toml
+COPY crates/core/Cargo.toml crates/core/Cargo.toml
+COPY crates/nip98/Cargo.toml crates/nip98/Cargo.toml
+COPY crates/proto/Cargo.toml crates/proto/Cargo.toml
+COPY crates/templates/Cargo.toml crates/templates/Cargo.toml
+COPY crates/devstack/Cargo.toml crates/devstack/Cargo.toml
+COPY crates/e2e/Cargo.toml crates/e2e/Cargo.toml
+COPY crates/fakes/Cargo.toml crates/fakes/Cargo.toml
+COPY xtask/Cargo.toml xtask/Cargo.toml
+RUN --mount=type=cache,id=stub-cli-registry,target=/usr/local/cargo/registry \
+    for m in crates/core crates/nip98 crates/proto crates/templates crates/devstack crates/e2e crates/fakes xtask; do mkdir -p "$m/src" && : > "$m/src/lib.rs"; done \
+ && mkdir -p cli/src && echo 'fn main() {}' > cli/src/main.rs && echo 'fn main() {}' > crates/templates/build.rs \
+ && cargo build --release --locked -p fragment-cli
 COPY cli cli
 COPY crates/core crates/core
 COPY crates/nip98 crates/nip98
@@ -41,14 +62,8 @@ COPY templates/doc templates/doc
 COPY templates/inbox templates/inbox
 COPY templates/notes templates/notes
 COPY templates/todo templates/todo
-COPY crates/devstack/Cargo.toml crates/devstack/Cargo.toml
-COPY crates/e2e/Cargo.toml crates/e2e/Cargo.toml
-COPY crates/fakes/Cargo.toml crates/fakes/Cargo.toml
-COPY xtask/Cargo.toml xtask/Cargo.toml
-RUN --mount=type=cache,id=cli-registry,target=/usr/local/cargo/registry \
-    --mount=type=cache,id=cli-target,target=/src/target \
-    for m in crates/devstack crates/e2e crates/fakes xtask; do mkdir -p "$m/src" && : > "$m/src/lib.rs"; done \
- && find cli crates templates -type f -exec touch {} + \
+RUN --mount=type=cache,id=stub-cli-registry,target=/usr/local/cargo/registry \
+    find cli crates templates -type f -exec touch {} + \
  && cargo build --release --locked -p fragment-cli \
  && mkdir -p /out && cp target/release/fragment /out/
 
