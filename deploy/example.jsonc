@@ -68,8 +68,8 @@
   // (`fragment_seat_always_on_month`, `fragment_credit_pack`; `cargo xtask
   // stripe setup` makes them). Leave it out and seats are
   // comped by operators only. The key is a restricted key of the account's
-  // (Customers, Checkout Sessions, Subscriptions and portal sessions
-  // written; Products and Prices read); the webhook secret is this
+  // (Customers, Checkout Sessions, Subscriptions, invoice items and portal
+  // sessions written; Products and Prices read); the webhook secret is this
   // deployment's own endpoint's, which takes exactly
   // `fragment_core::stripe::EVENTS`. `portal` is the deployment's own
   // portal configuration, never the account's default (finite-mono's).

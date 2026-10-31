@@ -994,9 +994,8 @@ Paul: "before we go live, we'll need stripe billing", with trials as
 finite-mono has them, organizations with central billing, and an admin
 dashboard; the Stripe account is finite-mono's. docs/billing.md is the
 design; Paul took its recommendations whole ("I agree with your
-recommendations"). Built on 2026-10-08 (docs/billing.md, "Build order",
-slices 4 to 9: cell/src/billing.rs, stripe.rs, orgs.rs); going live is
-Paul's (its slice 10).
+recommendations"). Built on 2026-10-08 (cell/src/billing.rs, stripe.rs, orgs.rs); going
+live is Paul's.
 
 51. **Anyone may buy a seat, and an org is who pays.** A guest buys a
     seat through Stripe Checkout; no invite is needed (payment is the

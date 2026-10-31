@@ -102,6 +102,8 @@ use anyhow::{bail, Context, Result};
 use fragment_devstack as devstack;
 
 mod build;
+#[cfg(test)]
+mod ci_caches;
 mod cloudflare;
 mod cli_release;
 mod deploy;
