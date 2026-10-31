@@ -189,6 +189,29 @@ async fn tool_steps() {
     bridge.stop().await;
 }
 
+/// Goal: what a command carries says no rule of the stub's: a `fetch` whose
+/// token holds "tOoL" and "fAiL" (as a storage token's JWT once did, #778's
+/// CI) is a fetch's turn alone, no tool step, no error, one reply.
+#[tokio::test]
+async fn a_token_says_no_rule() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    let chat = fake.chat("talk", &["juniper"]);
+    let dir = support::dir("token-rule");
+    let bridge = support::start(support::config(&fake.url(), &dir, support::settings()), support::script());
+    following(&fake, 2).await;
+    let said = fake.say(&chat, &person("paul"), json!({ "text": "fetch http://127.0.0.1:9/x with eyJhbGciOiJFUzI1NiJ9.unTOoLfAiLx.sig" }));
+    let turn = turn_of("juniper", &chat, seq(&said));
+    fake.until(WAIT, "the turn's end", |w| !w.bodies(&chat, "work", "turn.end").is_empty()).await;
+    fake.with(|w| {
+        assert!(w.bodies(&chat, "work", "turn.step").is_empty(), "no tool step");
+        let end = w.bodies(&chat, "work", "turn.end");
+        assert_eq!(end[0]["outcome"], "idle", "no error: {end:?}");
+        let replies: Vec<Value> = w.records(&chat, "chat").into_iter().filter(|r| r["body"]["turn"] == turn).map(|r| r["body"].clone()).collect();
+        assert!(replies.len() == 1 && replies[0]["text"].as_str().is_some_and(|t| t.starts_with("fetch")), "the fetch's one reply: {replies:?}");
+    });
+    bridge.stop().await;
+}
+
 /// Goal: a runtime's notices are its turn's `turn.notice`s, before its end
 /// and after it (the stub's `notice`: as Hermes sends its review once the
 /// turn is done), never a step nor a reply.
@@ -312,7 +335,7 @@ fn a_photo(fake: &Fake, chat: &str, dir: &std::path::Path) -> (Value, std::path:
     let sha = records::hex(&<sha2::Sha256 as sha2::Digest>::digest(&bytes));
     fake.with(|w| w.fragments.get_mut(chat).unwrap().blobs.insert(sha.clone(), ("image/png".into(), bytes.clone())));
     let at = dir.join("media").join(&sha);
-    let told = format!("[paul sent a file with this answer: 'basil.png' (image/png). It is on your computer at: {}]", at.display());
+    let told = format!("[paul sent a file: 'basil.png' (image/png). It is on your computer at: {}]", at.display());
     (json!({ "sha256": sha, "size": bytes.len(), "type": "image/png", "name": "basil.png" }), at, told)
 }
 

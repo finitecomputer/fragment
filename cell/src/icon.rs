@@ -81,7 +81,8 @@ impl FragmentCell {
     /// row that fails waits for the alarm, as any index change's).
     async fn show_icon(&self) -> CellResult<()> {
         let (kind, title) = self.shown_as()?;
-        self.face_is(kind, title.as_deref(), self.icon_shown(kind)?.as_deref())?;
+        // an icon is never an agent's (`icon_taker`), and a role is an agent's alone
+        self.face_is(kind, title.as_deref(), None, self.icon_shown(kind)?.as_deref())?;
         self.flush_index().await;
         Ok(())
     }

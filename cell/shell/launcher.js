@@ -8,8 +8,9 @@
 // archived ones included): a chat found opens in the middle column, an app
 // in the desktop, a message its chat. Enter sends those exact words, and
 // the files dropped or pasted beside them, as the first message of a new
-// chat with their agent (`primaryAgent`), one record however often it is
-// tried (its id, kept). A request for an app is a message like any other:
+// chat with the agent the sidebar's New chat names (`newChatAgent`: the
+// open chat's, else their main agent), or the one picked on its row, one
+// record however often it is tried (its id, kept). A request for an app is a message like any other:
 // their agent makes it. Before their agent runs, the words go to their
 // first chat's composer instead (`firstChat`).
 //
@@ -41,7 +42,7 @@ const HINT_MAX_BYTES = 256;
  * from `#sidebar-new-chat`, `#new-chat` and ⌘K. `shell`: the shell's
  * helpers it uses, as shell.js names them (`$`, `el`, `api`, `ApiError`,
  * `seg`, `state`, `byName`, `isChat`, `titleOf`, `chatTitle`, `mark`,
- * `iconOf`, `primaryAgent`, `agentsOwnChat`, `UNTITLED`, `openChat`,
+ * `iconOf`, `primaryAgent`, `newChatAgent`, `agentsOwnChat`, `UNTITLED`, `openChat`,
  * `openApp`, `chatFrame`, `composeIn`, `newChat`, `leaveSidebar`,
  * `closeMenu`, `notice`, `prewake`, `originOf`), and three it reads late:
  * `views()` (how many views the middle column has been given: `openChat`
@@ -55,7 +56,7 @@ const HINT_MAX_BYTES = 256;
  * not sent yet (a reload for a new release waits for it).
  */
 export function createLauncher(shell) {
-  const { $, el, api, ApiError, seg, state, byName, isChat, titleOf, chatTitle, mark, iconOf, primaryAgent, agentsOwnChat, UNTITLED } = shell;
+  const { $, el, api, ApiError, seg, state, byName, isChat, titleOf, chatTitle, mark, iconOf, primaryAgent, newChatAgent, agentsOwnChat, UNTITLED } = shell;
   const { openChat, openApp, chatFrame, composeIn, newChat, leaveSidebar, closeMenu, notice, prewake, originOf } = shell;
   const input = $("workspace-search");
   const dialog = $("search-dialog");
@@ -63,6 +64,8 @@ export function createLauncher(shell) {
   let asked = 0;
   let typing = null;
   let searchIdentity = null;
+  // The agent the person picked for this launch, over `newChatAgent`'s.
+  let launchPick = null;
   let searchTrigger = null;
   let launching = false;
   let closingSearch = false;
@@ -119,7 +122,7 @@ export function createLauncher(shell) {
       enter.replaceChildren(icon("cornerDownLeft"));
       action.append(glyph, copy, enter);
       action.onclick = startFromSearch;
-      results.append(action);
+      results.append(waiting ? action : withPick(action, copy.firstElementChild));
     }
     const groups = [
       ["Chats", fragments.filter((f) => f.kind === "chat").map((f) => foundRow(f.name, f.preview ?? ""))],
@@ -143,10 +146,34 @@ export function createLauncher(shell) {
     fitSearch();
   }
 
-  // The person's agent, asked again each time (their computer's agents may
-  // arrive after the launcher opened); kept while a send is on its way.
+  // With more than one agent, the start row's pick of whom the new chat is
+  // with (its label says so), for this launch alone; with one, the row.
+  function withPick(action, label) {
+    const mine = [...state.agents.values()].filter((a) => byName(a.fragment)?.role === "owner");
+    if (mine.length < 2) return action;
+    const pick = el("select", "search-agent");
+    pick.setAttribute("aria-label", "Agent");
+    for (const a of mine) {
+      const o = el("option", null, titleOf(a.fragment));
+      o.value = a.identity;
+      pick.append(o);
+    }
+    pick.value = searchIdentity;
+    pick.disabled = launching;
+    pick.onchange = () => {
+      launchPick = pick.value;
+      canLaunch();
+      label.textContent = `Start a new chat with ${titleOf(state.agents.get(searchIdentity).fragment)}`;
+    };
+    const row = el("div", "search-start-row");
+    row.append(action, pick);
+    return row;
+  }
+  // The person's agent for a new chat (`newChatAgent`, or the one picked),
+  // asked again each time (their computer's agents may arrive after the
+  // launcher opened); kept while a send is on its way.
   function canLaunch() {
-    if (!launching) searchIdentity = primaryAgent()?.identity ?? null;
+    if (!launching) searchIdentity = (state.agents.has(launchPick) ? launchPick : newChatAgent()?.identity) ?? null;
     return !state.guest && !!searchIdentity && state.agents.has(searchIdentity);
   }
   // Before their agent runs (its first run, or its computer not read yet),
@@ -268,6 +295,8 @@ export function createLauncher(shell) {
     if (dialog.open || launching) return;
     closeMenu(true);
     searchTrigger = trigger;
+    // a pick is one launch's: one not sent yet keeps its own
+    launchPick = pendingLaunch?.identity ?? null;
     input.value = text ?? pendingLaunch?.text ?? firstChatDraft ?? "";
     firstChatDraft = null;
     updateSearch();

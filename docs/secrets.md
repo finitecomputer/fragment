@@ -165,7 +165,13 @@ production's only at a deploy of Paul's, his next move of `production`
 or his re-run of its `deploy` job.
 `CLOUDFLARE_ACCOUNT_ID` is **required on preview**: ci.yml's automatic
 `preview-image` job resolves/builds in that account's registry using the
-same environment's `CLOUDFLARE_API_TOKEN` (Containers access). Production's
+same environment's `CLOUDFLARE_API_TOKEN` (Containers access). The merge
+queue's image build (preview-image.yml) uses an environment of its own,
+`preview-image`, whose deployment branch policy admits only master's
+queue (`gh-readonly-queue/master/*`): its `CLOUDFLARE_API_TOKEN` is a
+token with the preview account's Containers · Edit permission alone, so
+code in the queue can push an image and nothing else (no Worker, no DNS,
+no deploy config), and its `CLOUDFLARE_ACCOUNT_ID` is the preview's. Production's
 deploy still makes it optional but recommended for masking; the manual
 Image workflow requires it for either environment. It is kept as a
 GitHub secret so the runner masks it wherever it appears

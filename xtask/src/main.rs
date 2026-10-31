@@ -60,10 +60,12 @@
 //!                    rather than keeping it at its digest
 //!                    --preview-image-digest requires --branch preview
 //!                    --pinned-only, and changes only its in-memory pins
-//!   image preview --output <file> [--build | --dry-run] [--summary <file>]
-//!                    resolve master's input-keyed Hermes image, or build
-//!                    and prepare it once if absent (--build); write its
-//!                    input key and digest for CI's preview deploy
+//!   image preview --output <file> [--build | --queue | --dry-run] [--summary <file>]
+//!                    resolve master's input-keyed Hermes image, or copy the
+//!                    merge queue's build to it, or build it, and prepare it
+//!                    (--build); write its input key and digest for CI's
+//!                    preview deploy. --queue builds and prepares the merge
+//!                    queue's ahead (queue-<key>, never master's tag)
 //!                    --dry-run prints its plan without credentials or calls
 //!   cli-release plan | record <tag>
 //!                    CI's CLI input lookup/version plan, or record and
@@ -312,8 +314,6 @@ fn dev(args: &[String]) -> Result<()> {
         project: devstack::cell_dir(),
         port: DEV_PORT,
         log_dir: devstack::repo_root().join("target/devstack"),
-        // wrangler's own debug logs, when asked for
-        node_logs: std::env::var_os("FRAGMENT_NODE_LOGS").is_some(),
         // in the terminal's group: Ctrl-C stops it with xtask
         own_group: false,
     };
