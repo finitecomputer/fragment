@@ -123,6 +123,18 @@ FROM ${HERMES} AS hermes
 # them, and checks it does. Builder trace context changes per step and is
 # not upstream runtime configuration; never capture it into the image.
 RUN mkdir -p /opt/fragment && env | grep -Ev '^(TRACEPARENT|TRACESTATE)=' | sort > /opt/fragment/upstream.env
+# Upstream's turn-end fix for the Relay, its two commits after v0.22.5
+# unmodified (patches/relay-turn-end.patch names them; without them a
+# relayed message's turn never sends the bracket the bridge reads as its
+# end: docs/technical-debt-ledger.md says when this goes). The build fails
+# unless it applies cleanly, and its files are compiled here, loudly: the
+# image-wide compile below passes over files that do not compile.
+COPY images/hermes/patches/relay-turn-end.patch /tmp/relay-turn-end.patch
+RUN cd /opt/hermes \
+ && git apply --check /tmp/relay-turn-end.patch \
+ && git apply /tmp/relay-turn-end.patch \
+ && rm /tmp/relay-turn-end.patch \
+ && /opt/hermes/.venv/bin/python -c 'import py_compile, sys; [py_compile.compile(f, doraise=True, invalidation_mode=py_compile.PycInvalidationMode.UNCHECKED_HASH) for f in sys.argv[1:]]' gateway/platforms/webhook_ingress.py gateway/session_authority.py gateway/session_ingress.py gateway/session_producer_lifecycle.py
 COPY --from=docker.io/cloudflare/sandbox:1.0.0 /usr/local/bin/sandbox-shim /usr/local/bin/sandbox-shim
 # cua-driver, the backend of Hermes' computer_use (screenshots of the agent's
 # desktop, XTest input): without it Hermes offers the agent no computer_use.

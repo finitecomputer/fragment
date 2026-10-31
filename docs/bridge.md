@@ -837,8 +837,9 @@ the `computers` lane's door checks, through the stub's `door` commands.
 
 ## Hermes' Relay, as the bridge speaks it
 
-Hermes v0.21.7 (tag `v0.21.7`, 2026-10-12; read first from v0.21.5,
-whose wire it keeps; `gateway/relay/`), contract version 1. The bridge serves
+Hermes v0.22.5 (tag `v0.22.5`, 2026-10-23, with upstream's Relay
+turn-end fix from after it; read first from v0.21.5, whose wire it
+keeps; `gateway/relay/`), contract version 1. The bridge serves
 `ws://127.0.0.1:8650/relay` and `/relay/media` and checks Hermes'
 token; the descriptor names platform `relay` with draft streaming and
 the ops `send, edit, delete, typing, react, draft, prompt, send_media,

@@ -60,6 +60,31 @@ without a delete condition is unfinished design, not debt.
   text, and one per-call image-count/encoded-byte budget for attachments
   and screenshots passes those same checks under the route's 6 MiB cap.
 
+## The Hermes image carries upstream's Relay turn-end fix
+
+- **Observed:** 2026-10-31. Hermes v0.22.5 admits a relayed message
+  through its session authority, and that path never sends the
+  `👀`/`✅` bracket the bridge reads as a turn's end ("A Hermes turn's end
+  is read from its reactions", below). Its turns ran and replied but never
+  ended, and nearly the whole real-Hermes Docker lane failed on it.
+- **Shortcut:** upstream's fix, `02438db8` ("give producer-admitted relay
+  turns their typing and reactions back") and `c49ecd58` ("a cancel
+  during the producer start hook releases its typing and bracket"), both
+  on upstream's main after v0.22.5. Their `gateway/` changes are applied
+  unmodified at image build (`images/hermes/patches/relay-turn-end.patch`:
+  a new `gateway/session_producer_lifecycle.py`, and small changes to
+  `session_ingress.py`, `session_authority.py` and
+  `platforms/webhook_ingress.py`). The build fails unless they apply
+  cleanly, and their files are compiled there.
+- **Risk:** we run code no Hermes release has shipped with v0.22.5 around
+  it. The patch touches no file our other patches touch.
+- **First proof:** the whole real-Hermes Docker lane on v0.22.5 with the
+  patch: turns end. That includes a cut turn's three kinds (an owner's
+  sleep, a crash, a stop and start) and an upgrade in place from
+  production's image.
+- **Delete when:** the next Hermes release we adopt includes both commits.
+  Drop the patch and its Dockerfile step.
+
 ## The Hermes image adapts model preflight deployment waits
 
 - **Observed:** #625, 2026-10-29: release guard refusals lasted about five
