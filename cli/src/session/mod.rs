@@ -936,7 +936,7 @@ mod tests {
         let held = |source: &str| mock.search_index(NAME, |ix| ix.sources.get(source).cloned()).flatten();
         let a = held("sessions/hermes-a.json").expect("a is searched");
         assert_eq!(a.revision, sha(&file_of(session("a", Kind::Chat, "2026-10-01T09:00:00Z", &["hello", "hi"]))));
-        assert_eq!(a.sections[0]["text"], "Person: hello\nAgent: hi");
+        assert_eq!(a.sections[0].text, "Person: hello\nAgent: hi");
         assert_eq!(a.fields["kind"], "chat");
         assert_eq!(upserts(), 2);
 

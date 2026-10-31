@@ -105,7 +105,9 @@ fragment's is.
 Each import also writes the archive's search, through the platform's
 search write API (`/api/f/{name}/search/…`), as the writer holding the
 conversations' bytes: one source a conversation's file, its revision
-the file's sha256, and one section a turn (fragment_core::session_search).
+the file's sha256, and one section a turn (fragment_core::session_search),
+each checked as the platform checks it (`searchable::check`) before it is
+sent.
 
 - **A turn** is a person's message and what the agent said until their
   next one, as "Person: … / Agent: …": a tool's output left out and its

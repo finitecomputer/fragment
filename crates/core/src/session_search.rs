@@ -8,72 +8,28 @@
 //! one, as "Person: … / Agent: …": a tool's output left out and its call only
 //! named, reasoning left out, the files a message held named, and the summary
 //! a compression wrote a section of its own. A turn past
-//! `SECTION_TEXT_MAX_CHARS` splits at its messages (a message past it,
+//! `TEXT_MAX_CHARS` splits at its messages (a message past it,
 //! within the message, at a space where it can). Turns are numbered from the
 //! start (`t<n>`, a split's later parts `t<n>.<k>`), so a conversation that
 //! grew keeps its earlier sections' ids, and only its new turns are embedded
 //! again.
 //!
-//! The search capability's limits (its contract) are held here: at most
-//! `SECTIONS_MAX` sections of `SECTION_TEXT_MAX_CHARS`, ids of
-//! `SECTION_ID_MAX_BYTES`, at most 4 short fields, and an upsert of at most
-//! `UPSERT_MAX_BYTES` as sent. A conversation past them keeps its first
-//! sections, and says how many it left out.
+//! It is within what the platform takes of an upsert (`searchable::check`,
+//! the cell's own check, which the importer runs before it sends): at most
+//! `SECTIONS_MAX` sections of `TEXT_MAX_CHARS`, as sent at most
+//! `UPSERT_MAX_BYTES`, its title, fields and context bounded in bytes, and
+//! no control character but a line's end and a tab. A conversation past
+//! them keeps its first sections, and says how many it left out.
 
 use std::collections::BTreeMap;
 
-use serde::{Deserialize, Serialize};
+use fragment_proto::search::{Location, Section, Upsert, SECTIONS_MAX, TEXT_MAX_CHARS, UPSERT_MAX_BYTES};
 
+use crate::searchable::{CONTEXT_ITEM_MAX_BYTES, FIELD_VALUE_MAX_BYTES, TITLE_MAX_BYTES};
 use crate::session::{Message, Session};
 
-/// The capability's limits, as its contract sets them.
-pub const SECTIONS_MAX: usize = 2000;
-pub const SECTION_TEXT_MAX_CHARS: usize = 8000;
-pub const SECTION_ID_MAX_BYTES: usize = 64;
-pub const UPSERT_MAX_BYTES: usize = 4 * 1024 * 1024;
-pub const SOURCE_MAX_BYTES: usize = 512;
-pub const REVISION_MAX_BYTES: usize = 128;
-pub const FIELDS_MAX: usize = 4;
-/// A field, a context item, a tool's or a file's name: short.
-pub const FIELD_MAX_CHARS: usize = 64;
-pub const TITLE_MAX_CHARS: usize = 200;
-
-/// One source, replacing every section it had (`POST
-/// /api/f/{name}/search/upsert`).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Upsert {
-    pub source: String,
-    pub revision: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub title: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub at: Option<String>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub fields: BTreeMap<String, String>,
-    pub sections: Vec<Section>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Section {
-    pub id: String,
-    pub text: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub heading: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub context: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub at: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub location: Option<Location>,
-}
-
-/// Where a section is in its conversation: its first and last message's
-/// places (both in it).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Location {
-    pub from: usize,
-    pub to: usize,
-}
+/// A tool's or a file's name, as a turn names it.
+const NAME_MAX_BYTES: usize = 64;
 
 /// A conversation's upsert, and how many of its sections the limits left out.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -90,24 +46,43 @@ fn cut(text: &str, max: usize) -> &str {
     }
 }
 
-/// A name or a filter: its whitespace one space, at most `max` characters.
+/// `text`'s first `max` bytes, ending on a character's boundary.
+fn cut_bytes(text: &str, max: usize) -> &str {
+    let mut end = text.len().min(max);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
+/// A name, a title or a filter: its whitespace (and any control
+/// character) one space, at most `max` bytes, no `=` (a filter's
+/// separator).
 fn short(text: &str, max: usize) -> String {
-    cut(&text.split_whitespace().collect::<Vec<_>>().join(" "), max).to_string()
+    let words = text.split(|c: char| c.is_whitespace() || c.is_control()).filter(|w| !w.is_empty()).collect::<Vec<_>>().join(" ").replace('=', " ");
+    cut_bytes(&words, max).trim_end().to_string()
+}
+
+/// A message's text as a section holds it: no control character but a
+/// line's end and a tab.
+fn plain(text: &str) -> String {
+    text.chars().filter(|c| !c.is_control() || *c == '\n' || *c == '\t').collect()
 }
 
 /// A message as its turn reads it, or `None` when search keeps nothing of it.
 fn line_of(m: &Message) -> Option<String> {
-    let text = m.text.as_deref().unwrap_or_default().trim();
+    let text = plain(m.text.as_deref().unwrap_or_default());
+    let text = text.trim();
     if m.summary {
         return (!text.is_empty()).then(|| format!("Summary: {text}"));
     }
     let names = |names: Vec<String>| names.into_iter().filter(|n| !n.is_empty()).collect::<Vec<_>>().join(", ");
-    let files = names(m.attachments.iter().map(|a| short(&a.name, FIELD_MAX_CHARS)).collect());
+    let files = names(m.attachments.iter().map(|a| short(&a.name, NAME_MAX_BYTES)).collect());
     let files = (!files.is_empty()).then(|| format!("[{files}]"));
     let (who, used) = match m.role.as_str() {
         "user" => ("Person", None),
         "assistant" => {
-            let used = names(m.tool_calls.iter().map(|c| short(&c.name, FIELD_MAX_CHARS)).collect());
+            let used = names(m.tool_calls.iter().map(|c| short(&c.name, NAME_MAX_BYTES)).collect());
             ("Agent", (!used.is_empty()).then(|| format!("(used {used})")))
         }
         // a tool's output, the system's prompt: left out
@@ -146,7 +121,7 @@ fn turns_of(messages: &[Message]) -> Vec<Turn> {
 /// A turn's parts: its lines joined up to the limit, one longer than it cut
 /// at its last space in reach (or where it must be).
 fn parts_of(turn: &Turn) -> Vec<(Location, String)> {
-    let max = SECTION_TEXT_MAX_CHARS;
+    let max = TEXT_MAX_CHARS;
     let mut parts: Vec<(Location, String)> = Vec::new();
     let mut cur: Option<(Location, String, usize)> = None;
     for (i, line) in &turn.lines {
@@ -158,7 +133,7 @@ fn parts_of(turn: &Turn) -> Vec<(Location, String)> {
                 Some(at) if reach[..at].chars().count() > max / 2 => &reach[..at],
                 _ => reach,
             };
-            parts.push((Location { from: *i, to: *i }, piece.to_string()));
+            parts.push((Location { from: *i as u64, to: *i as u64 }, piece.to_string()));
             rest = rest[piece.len()..].trim_start();
         }
         if rest.is_empty() {
@@ -169,11 +144,11 @@ fn parts_of(turn: &Turn) -> Vec<(Location, String)> {
             Some((l, mut t, c)) if c + 1 + n <= max => {
                 t.push('\n');
                 t.push_str(rest);
-                Some((Location { from: l.from, to: *i }, t, c + 1 + n))
+                Some((Location { from: l.from, to: *i as u64 }, t, c + 1 + n))
             }
             other => {
                 parts.extend(other.map(|(l, t, _)| (l, t)));
-                Some((Location { from: *i, to: *i }, rest.to_string(), n))
+                Some((Location { from: *i as u64, to: *i as u64 }, rest.to_string(), n))
             }
         };
     }
@@ -184,14 +159,14 @@ fn parts_of(turn: &Turn) -> Vec<(Location, String)> {
 /// The upsert of `session`, filed at `source` with `revision` (its file's
 /// sha256), within the capability's limits.
 pub fn upsert_of(source: &str, revision: &str, session: &Session) -> Indexed {
-    let context: Vec<String> = [session.source.as_deref(), session.agent.as_deref()].into_iter().flatten().map(|v| short(v, FIELD_MAX_CHARS)).filter(|v| !v.is_empty()).collect();
-    let mut fields = BTreeMap::from([("kind".to_string(), session.kind.as_str().to_string()), ("origin".to_string(), short(&session.origin, FIELD_MAX_CHARS))]);
-    if let Some(s) = session.source.as_deref().map(|s| short(s, FIELD_MAX_CHARS)).filter(|s| !s.is_empty()) {
-        fields.insert("source".into(), s);
+    let context: Vec<String> = [session.source.as_deref(), session.agent.as_deref()].into_iter().flatten().map(|v| short(v, CONTEXT_ITEM_MAX_BYTES)).filter(|v| !v.is_empty()).collect();
+    let mut fields = BTreeMap::from([("kind".to_string(), session.kind.as_str().to_string()), ("origin".to_string(), short(&session.origin, FIELD_VALUE_MAX_BYTES))]);
+    if let Some(s) = session.source.as_deref() {
+        fields.insert("source".into(), short(s, FIELD_VALUE_MAX_BYTES));
     }
     fields.retain(|_, v| !v.is_empty());
-    let title = Some(short(&session.title, TITLE_MAX_CHARS)).filter(|t| !t.is_empty());
-    let mut upsert = Upsert { source: source.to_string(), revision: revision.to_string(), title, at: session.started_at.clone(), fields, sections: Vec::new() };
+    let title = Some(short(&session.title, TITLE_MAX_BYTES)).filter(|t| !t.is_empty());
+    let mut upsert = Upsert { source: source.to_string(), revision: revision.to_string(), replaces: None, title, at: session.started_at.clone(), fields, sections: Vec::new() };
     // as sent: the envelope, and each section with its comma
     let mut bytes = serde_json::to_vec(&upsert).map_or(0, |v| v.len());
     let mut left = 0;
@@ -267,7 +242,7 @@ mod tests {
         ];
         let Indexed { upsert, left } = upsert_of("sessions/hermes-c1.json", &sha(9), &session(messages));
         assert_eq!(left, 0);
-        assert_eq!((upsert.source.as_str(), upsert.revision, upsert.title.as_deref(), upsert.at.as_deref()), ("sessions/hermes-c1.json", sha(9), Some("Beans"), Some("2026-10-01T09:00:00.000Z")));
+        assert_eq!((upsert.source.as_str(), upsert.revision.clone(), upsert.title.as_deref(), upsert.at.as_deref()), ("sessions/hermes-c1.json", sha(9), Some("Beans"), Some("2026-10-01T09:00:00.000Z")));
         assert_eq!(upsert.fields, BTreeMap::from([("kind".into(), "chat".into()), ("origin".into(), "hermes".into()), ("source".into(), "telegram".into())]));
         let got: Vec<(&str, &str, Option<&str>, Location)> = upsert.sections.iter().map(|s| (s.id.as_str(), s.text.as_str(), s.heading.as_deref(), s.location.unwrap())).collect();
         assert_eq!(
@@ -282,6 +257,25 @@ mod tests {
         );
         assert_eq!(upsert.sections[0].at.as_deref(), Some("2026-10-01T09:00:01.000Z"), "a turn is when it began");
         assert_eq!(upsert.sections[0].context, ["telegram", "Juniper"]);
+        assert_eq!(crate::searchable::check(&upsert), Ok(()));
+    }
+
+    /// Goal: whatever a conversation holds, its upsert is one the platform
+    /// takes (`searchable::check`, the cell's own). Invalid: control
+    /// characters in its text, title and source, `=` in a filter, a title
+    /// and an agent's name far past their bytes in a script of three bytes
+    /// a character.
+    #[test]
+    fn an_upsert_is_one_the_platform_takes_whatever_the_conversation_holds() {
+        let mut s = session(vec![said("user", "2026-10-01T09:00:00.000Z", "bell\u{7} and\u{1b}[31m color\ttab\nline"), said("assistant", "2026-10-01T09:00:01.000Z", "\u{0}")]);
+        s.title = format!("{}\u{1}", "標題".repeat(200));
+        s.source = Some("tele=gram\u{2}".into());
+        s.agent = Some("名".repeat(200));
+        let Indexed { upsert, .. } = upsert_of("sessions/hermes-c1.json", &sha(1), &s);
+        assert_eq!(crate::searchable::check(&upsert), Ok(()), "{upsert:#?}");
+        assert_eq!(upsert.sections.len(), 1, "a message of control characters alone says nothing");
+        assert_eq!(upsert.sections[0].text, "Person: bell and[31m color\ttab\nline");
+        assert_eq!(upsert.fields["source"], "tele gram");
     }
 
     /// Goal: a conversation that grew keeps its earlier sections as they
@@ -304,9 +298,9 @@ mod tests {
     /// space, and a conversation of more turns than an upsert takes.
     #[test]
     fn every_upsert_is_within_the_capabilitys_limits() {
-        let words = "bean ".repeat(SECTION_TEXT_MAX_CHARS / 5 * 3);
-        let solid = "x".repeat(SECTION_TEXT_MAX_CHARS + 10);
-        let half = "pea ".repeat(SECTION_TEXT_MAX_CHARS / 4 / 2 + 10);
+        let words = "bean ".repeat(TEXT_MAX_CHARS / 5 * 3);
+        let solid = "x".repeat(TEXT_MAX_CHARS + 10);
+        let half = "pea ".repeat(TEXT_MAX_CHARS / 4 / 2 + 10);
         let messages = vec![said("user", "2026-10-01T09:00:00.000Z", &half), said("assistant", "2026-10-01T09:00:01.000Z", &half), said("assistant", "2026-10-01T09:00:02.000Z", &words), said("user", "2026-10-01T09:01:00.000Z", &solid)];
         let Indexed { upsert, left } = upsert_of("sessions/k.json", &sha(1), &session(messages));
         assert_eq!(left, 0);
@@ -314,19 +308,19 @@ mod tests {
         assert_eq!(ids, ["t0", "t0.1", "t0.2", "t0.3", "t0.4", "t0.5", "t1", "t1.1"]);
         assert_eq!(upsert.sections[1].location, Some(Location { from: 1, to: 1 }), "a turn splits at its messages");
         for s in &upsert.sections {
-            assert!(s.text.chars().count() <= SECTION_TEXT_MAX_CHARS && s.id.len() <= SECTION_ID_MAX_BYTES, "{}", s.id);
+            assert!(s.text.chars().count() <= TEXT_MAX_CHARS && s.id.len() <= fragment_proto::search::SECTION_ID_MAX_BYTES, "{}", s.id);
         }
         assert!(upsert.sections[2].text.ends_with("bean") && upsert.sections[3].text.starts_with("bean"), "a message splits at a space");
-        assert_eq!(upsert.sections[6].text.chars().count(), SECTION_TEXT_MAX_CHARS, "one with none where it must");
+        assert_eq!(upsert.sections[6].text.chars().count(), TEXT_MAX_CHARS, "one with none where it must");
 
         let many: Vec<Message> = (0..SECTIONS_MAX + 5).map(|i| said("user", "2026-10-01T09:00:00.000Z", &format!("turn {i}"))).collect();
         let Indexed { upsert, left } = upsert_of("sessions/k.json", &sha(1), &session(many));
         assert_eq!((upsert.sections.len(), left), (SECTIONS_MAX, 5), "its first sections, the rest counted");
 
-        let big = "y".repeat(SECTION_TEXT_MAX_CHARS);
+        let big = "y".repeat(TEXT_MAX_CHARS);
         let large: Vec<Message> = (0..1000).map(|_| said("user", "2026-10-01T09:00:00.000Z", &big)).collect();
         let Indexed { upsert, left } = upsert_of("sessions/k.json", &sha(1), &session(large));
         assert!(left > 0 && serde_json::to_vec(&upsert).unwrap().len() <= UPSERT_MAX_BYTES, "an upsert as sent is at most 4 MiB");
-        assert!(upsert.fields.len() <= FIELDS_MAX);
+        assert_eq!(crate::searchable::check(&upsert), Ok(()));
     }
 }

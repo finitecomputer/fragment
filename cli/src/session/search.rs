@@ -17,9 +17,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::Result;
 use fragment_core::session::{self, Entry, Session};
-use fragment_core::session_search;
+use fragment_core::{searchable, session_search};
+use fragment_proto::search::{Delete, SOURCES_PAGE_MAX};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 
 use super::{said_id, Spool};
 use crate::api::{encode_q, Client};
@@ -27,7 +27,7 @@ use crate::blobs::Blobs;
 use crate::codestorage::{CodeStorage, MAIN};
 
 /// Sources one listing asks for (the API's most).
-const PAGE: usize = 1000;
+const PAGE: usize = SOURCES_PAGE_MAX;
 /// Pages read, at most: an archive's conversations, and a little more.
 const PAGES_MAX: usize = session::SESSIONS_MAX / PAGE + 4;
 /// Conversations written at once.
@@ -145,7 +145,7 @@ pub fn sync(c: &Client, name: &str, spool: &Spool, entries: &BTreeMap<String, En
     }
     let mut deleted = 0;
     for source in gone {
-        match c.post_json_by_id(&format!("/api/f/{name}/search/delete"), &json!({ "source": source })) {
+        match c.post_json_by_id(&format!("/api/f/{name}/search/delete"), &Delete { source: source.clone() }) {
             Ok(r) if r.ok() => deleted += 1,
             Ok(r) => {
                 refused_count += 1;
@@ -175,6 +175,8 @@ fn write_one(c: &Client, name: &str, spool: &Spool, storage: &CodeStorage, blobs
     };
     let s: Session = serde_json::from_slice(&bytes).map_err(|err| (None, format!("it is no conversation: {err}")))?;
     let indexed = session_search::upsert_of(&path, &e.sha256, &s);
+    // what the platform would refuse is refused here, unsent
+    searchable::check(&indexed.upsert).map_err(|why| (None, why))?;
     match c.post_json_by_id(&format!("/api/f/{name}/search/upsert"), &indexed.upsert) {
         Ok(r) if r.ok() => Ok(indexed.left),
         Ok(r) => Err((Some(r.status), r.refusal().msg)),

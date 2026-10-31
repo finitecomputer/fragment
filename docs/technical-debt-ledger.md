@@ -24,24 +24,6 @@ without a delete condition is unfinished design, not debt.
   indexes' is (read the entries of the conversations it writes, keep the
   newer), or the archive moves to an app whose mutation writes both.
 
-## The session archive's search writes carry their own copy of the API's shapes
-
-- **Observed:** PR 4 of the session archive, 2026-10-30: the importer
-  writes the archive's search (templates/sessions/README.md, "Search")
-  through a write API the search capability's PR has not landed yet.
-- **Shortcut:** its request shapes (`Upsert`, `Section`, `Location`) and
-  the capability's limits are `fragment_core::session_search`'s, and the
-  CLI reads `sources` into a type of its own (cli/src/session/search.rs);
-  `fragment_fakes::search` stands in for the routes in tests.
-- **Risk:** the capability lands with another shape or other limits, and
-  the import's writes are refused (said, the import standing) until they
-  agree.
-- **First proof:** `search.refused` on an import against a host that has
-  search.
-- **Delete when:** the capability's PR adds its wire types to
-  fragment_proto: the importer sends those, its limits are those, and the
-  e2e's sessions section checks a real host's search in place of the fake.
-
 ## A paid org pack is still credited, though none is sold
 
 - **Observed:** #736 review, 2026-10-30: orgs now pay out of band and an
