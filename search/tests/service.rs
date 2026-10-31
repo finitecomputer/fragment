@@ -12,11 +12,27 @@ use std::sync::Arc;
 
 const SCOPE: &str = "f0123-1-members";
 
-fn dir(name: &str) -> PathBuf {
+/// A test's own directory, removed when the test ends, however it ends.
+struct Dir(PathBuf);
+
+impl std::ops::Deref for Dir {
+    type Target = Path;
+    fn deref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for Dir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn dir(name: &str) -> Dir {
     let d = std::env::temp_dir().join(format!("fragment-search-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
-    d
+    Dir(d)
 }
 
 async fn store(d: &Path) -> Arc<Store> {
