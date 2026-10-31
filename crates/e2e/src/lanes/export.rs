@@ -470,7 +470,7 @@ pub fn export(s: &mut Suite, api: &Api) -> Result<()> {
             let held = chrome.until(&page, building, Duration::from_secs(30));
             let new_id = view(api, &paul)["id"].as_str().unwrap_or("").to_string();
             let polled = chrome.until(&page, "window.__export.reads >= 1", Duration::from_secs(30));
-            chrome.eval(&page, &format!("(document.querySelector({:?}).click(), true)", format!("#chats [data-key=\"chat:{chat_name}\"]")))?;
+            chrome.eval(&page, &format!("(document.querySelector({:?}).click(), true)", format!("#chats [data-key=\"chat:{chat_name}\"] .chat-open")))?;
             let left = chrome.until(&page, "location.pathname === '/' && document.getElementById('settings-page').hidden", Duration::from_secs(30));
             let before = chrome.eval(&page, "window.__export.reads")?;
             std::thread::sleep(Duration::from_secs(5));
