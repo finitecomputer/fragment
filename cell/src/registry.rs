@@ -87,9 +87,6 @@ pub struct RegistryCell {
     /// one of another release (`calls::SKEWED`), refusing them as a deploy
     /// going out does, and how many more; for this cell's life, as `down` is.
     skew_for: RefCell<Option<(String, u32)>>,
-    /// When that stand-in release was deployed (`calls::SkewFor`'s
-    /// `deployed`, its seconds): none by default, as a release from before deploy times.
-    skew_deployed: Cell<Option<u64>>,
     /// The calls answered (or refused) since this cell started, the hooks'
     /// aside: what a test counts a request's Registry round trips by.
     calls: Cell<u64>,
@@ -141,7 +138,6 @@ impl DurableObject for RegistryCell {
             down: Cell::new(false),
             down_for: RefCell::new(None),
             skew_for: RefCell::new(None),
-            skew_deployed: Cell::new(None),
             calls: Cell::new(0),
             skewed: Cell::new(0),
             hold_ms: Cell::new(0),
@@ -154,7 +150,7 @@ impl DurableObject for RegistryCell {
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {
-        if let Some(refused) = crate::routed::refused(&req, self.release_for(&req.path()), &self.raw)? {
+        if let Some(refused) = crate::routed::refused(&req, self.release_for(&req.path()))? {
             self.skewed.set(self.skewed.get() + 1);
             return Ok(refused);
         }
@@ -735,14 +731,13 @@ impl RegistryCell {
 
     /// The release this cell answers a call to `path` as (`routed::refused`):
     /// its own, but while `TestHook::SkewFor` names the path, the hook's
-    /// stand-in for another (counting the call), deployed when the hook
-    /// said, so the call is refused as one from another release is, by the
-    /// same check, and restarts this cell when that one would.
-    fn release_for(&self, path: &str) -> crate::routed::Own<'_> {
+    /// stand-in for another (counting the call), so the call is refused as
+    /// one from another release is, by the same check.
+    fn release_for(&self, path: &str) -> &str {
         if one_more(&self.skew_for, path) {
-            crate::routed::Own { id: calls::SKEWED, deployed: self.skew_deployed.get() }
+            calls::SKEWED
         } else {
-            crate::routed::Own::of(self.cfg)
+            &self.cfg.deploy_id
         }
     }
 
@@ -774,13 +769,12 @@ impl RegistryCell {
                 *self.down_for.borrow_mut() = (times > 0).then(|| (path.clone(), times));
                 Ok(json!({ "downFor": { "path": path, "times": times } }))
             }
-            TestHook::SkewFor(calls::SkewFor { path, times, deployed }) => {
+            TestHook::SkewFor(calls::SkewFor { path, times }) => {
                 if times > TEST_DOWN_FOR_MAX || !path.starts_with('/') || path == TestHook::PATH {
                     return Err(CellError::invalid(format!("skew for a call's path (not /test's), at most {TEST_DOWN_FOR_MAX} times")));
                 }
                 *self.skew_for.borrow_mut() = (times > 0).then(|| (path.clone(), times));
-                self.skew_deployed.set(deployed);
-                Ok(json!({ "skewFor": { "path": path, "times": times, "deployed": deployed } }))
+                Ok(json!({ "skewFor": { "path": path, "times": times } }))
             }
             TestHook::Signins(hook) => Ok(json!(self.signins_hook(hook).await?)),
             TestHook::E2eSignIn(asked) => Ok(json!(self.e2e_sign_in(&asked.email, asked.paid_calls).await?)),

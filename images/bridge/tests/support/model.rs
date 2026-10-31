@@ -48,8 +48,6 @@
 //! - of a message with channel context before it (`[Recent channel
 //!   messages]\n…\n\n[New message]\n…`, the platform's note after a cut
 //!   turn), only the message after `[New message]` is acted on;
-//! - a last user message saying `take your time` is answered after
-//!   `UNHURRIED_MS`, each of its calls;
 //! - a last user message saying `stall` is held `STALL_S` before any of
 //!   its answer is sent (a model that streams nothing, as Workers AI's
 //!   DeepSeek did on 2026-10-09), on any model but the route's `fallback`,
@@ -245,16 +243,6 @@ fn stalls(body: &Value) -> bool {
     last_user.contains("stall") && !last_user.starts_with("Review the conversation above") && body["model"] != FALLBACK_ID && body["model"] != ROUTE_FALLBACK_ID && body["model"] != "fallback"
 }
 
-/// How long a call waits whose last user message says `take your time`: past
-/// Hermes' 0.3 s progress poll, so a quick tool's step is sent before the
-/// turn's next call ends it.
-pub const UNHURRIED_MS: u64 = 1_000;
-
-fn unhurried(body: &Value) -> bool {
-    let last_user = body["messages"].as_array().and_then(|m| m.iter().rev().find(|m| m["role"] == "user")).map(|m| text_of(&m["content"])).unwrap_or_default();
-    last_user.contains("take your time")
-}
-
 /// What `narrate: <command>` says before its call: a mid-turn answer, well
 /// past the 300 characters a step's words were once cut to.
 pub fn narrated() -> String {
@@ -339,9 +327,7 @@ pub fn answer(body: &Value) -> (String, Option<Value>) {
     }
     // P6, as a real turn runs before its card: `prepare the approvals
     // proof` checks the draft in `PREPARE_STEPS` terminal calls, each with
-    // its words first (each a second long: Hermes sends a quick tool's
-    // step late or not at all), then says
-    // its plan at length and asks its card (a
+    // its words first, then says its plan at length and asks its card (a
     // clarify, Publish or Keep private). Its effect (`approval-effects`)
     // only for Publish: answered live (the clarify's result), or late (a
     // fresh turn whose message is the answer: cards.rs).
@@ -349,7 +335,7 @@ pub fn answer(body: &Value) -> (String, Option<Value>) {
     let effect = || json!({ "index": 0, "id": APPROVAL_EFFECT, "type": "function", "function": { "name": "terminal", "arguments": json!({ "command": "echo published >> /data/work/juniper--k3x9/approval-effects" }).to_string() } });
     if last_user.contains("prepare the approvals proof") && has_terminal {
         if results < PREPARE_STEPS {
-            let call = json!({ "index": 0, "id": format!("call_prepare_{results}"), "type": "function", "function": { "name": "terminal", "arguments": json!({ "command": format!("sleep 1 && echo checked part {results} of the draft >> /data/work/juniper--k3x9/prepared") }).to_string() } });
+            let call = json!({ "index": 0, "id": format!("call_prepare_{results}"), "type": "function", "function": { "name": "terminal", "arguments": json!({ "command": format!("echo checked part {results} of the draft >> /data/work/juniper--k3x9/prepared") }).to_string() } });
             return (format!("Checking part {results} of the draft before I publish anything."), Some(call));
         }
         if results == PREPARE_STEPS {
@@ -626,9 +612,6 @@ async fn handle(req: Request<Incoming>, calls: Arc<Mutex<Vec<Call>>>, refused: A
     if stalls(&v) {
         // nothing at all, not even the answer's head, until the stall is over
         tokio::time::sleep(std::time::Duration::from_secs(STALL_S)).await;
-    }
-    if unhurried(&v) {
-        tokio::time::sleep(std::time::Duration::from_millis(UNHURRIED_MS)).await;
     }
     let (text, tool) = answer(&v);
     let model = v["model"].as_str().unwrap_or(CHEAP_ID).to_string();

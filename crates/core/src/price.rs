@@ -404,7 +404,7 @@ pub const DEFAULT_DYNAMIC_WORKERS: i64 = 2_000;
 /// Session (CDP over the binding: crate::card), which also bills
 /// concurrent browsers, $2.00 each a month past 10 (the month's average of
 /// each day's peak): a deployment-wide charge that no one shot causes, so
-/// it is not metered per person (docs/ledger.md, Assumptions).
+/// it is not metered per person.
 pub const DEFAULT_BROWSER: i64 = 90_000;
 /// Cloudflare Images: $0.50 per thousand unique transformations.
 pub const DEFAULT_IMAGES: i64 = 500_000;

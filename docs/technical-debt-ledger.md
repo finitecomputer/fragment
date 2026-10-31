@@ -5,6 +5,18 @@ Each entry says what the shortcut is, where and why, its risk, and the
 condition that deletes it. An entry without a delete condition is
 unfinished design, not debt.
 
+## Every call still carries its release's deploy time
+
+- **Shortcut:** an object of a release before #826 read
+  `x-fragment-release-deployed` to restart onto a newer caller's
+  release, so `routed::stamp` still sets it on every call into an object
+  (`fragment_core::release::DEPLOYED`, never renamed), though no release
+  reads it now.
+- **Risk:** none beyond a header's bytes on each internal call.
+- **Delete when:** no release from before #826 can be live (it has
+  reached production, and a rollback past it is no longer allowed); then
+  drop it from `stamp`, the constant, and MODEL.md's truth-map row.
+
 ## Hermes' explicit auxiliary vision overrides native image routing
 
 - **Shortcut:** Hermes' explicit auxiliary backend turns images into text
@@ -240,7 +252,7 @@ unfinished design, not debt.
   within `fragment_core::computer::ALIVE_MS`, else it wakes from its
   save.
 - **Risk:** a dead restore costs the wait and a restore.
-- **Delete when:** Cloudflare fixes #362 and a canary round shows no
+- **Delete when:** Cloudflare fixes #362 and a preview round shows no
   `snapshot: "dead"`, or snapshots go (`FRAGMENT_COMPUTER_SNAPSHOTS=off`).
 
 ## A computer's saves are not metered
