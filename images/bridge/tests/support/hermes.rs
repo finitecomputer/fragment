@@ -181,6 +181,13 @@ impl Hermes {
                 }
                 match dial(addr, &id, &secret).await {
                     Ok(ws) => {
+                        // A dial can land after its death: a test holds its
+                        // bridge's port between lives, so a dial waits for
+                        // the next life rather than being refused. Its
+                        // container's sockets are gone with it: it says nothing.
+                        if s.lock().unwrap().dead {
+                            return;
+                        }
                         backoff = 50;
                         s.lock().unwrap().dials += 1;
                         serve(s.clone(), ws, addr, id.clone(), secret.clone()).await;

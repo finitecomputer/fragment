@@ -427,6 +427,10 @@ impl FragmentCell {
             // an ended life's cleanup, which outlives it (ended.rs)
             return self.ended_view();
         }
+        if body["op"] == "search-index" {
+            // a life's search index, an ended life's too (searchable.rs)
+            return self.search_index_lever(body).await;
+        }
         self.name()?;
         let ms = || body["ms"].as_i64().filter(|ms| *ms >= 0).ok_or_else(|| CellError::invalid("ms is a duration"));
         Ok(match body["op"].as_str() {
@@ -461,9 +465,10 @@ impl FragmentCell {
                 self.schedule().await?;
                 json!({ "aged": ms, "invites": aged })
             }
-            Some(lever @ ("fail-deliveries" | "fail-outbox" | "fail-triggers" | "drop-effects" | "fail-meter-acks" | "fail-after-paid" | "fail-cards")) => {
+            Some(lever @ ("fail-deliveries" | "fail-outbox" | "fail-triggers" | "drop-effects" | "fail-meter-acks" | "fail-after-paid" | "fail-cards" | "fail-search-index")) => {
                 let key = match lever {
                     "fail-cards" => MetaKey::TestFailCards,
+                    "fail-search-index" => MetaKey::TestFailSearchIndex,
                     "fail-deliveries" => MetaKey::TestFailDeliveries,
                     "fail-outbox" => MetaKey::TestFailOutbox,
                     "fail-triggers" => MetaKey::TestFailTriggers,

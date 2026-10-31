@@ -12,6 +12,7 @@
 mod support;
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use serde_json::{json, Value};
@@ -57,7 +58,9 @@ fn write_ready(dir: &Path, agents: &[&str]) {
 /// A bridge whose screen listens on a loopback port, reading `dir`'s
 /// screens and ready files; its start command notes each agent it starts.
 async fn bridge(fake: &Fake, dir: &Path) -> (support::Running, Base) {
-    let port = Display::free_port().await;
+    // bound for the bridge's life, so no other socket takes it first
+    let listener = Arc::new(std::net::TcpListener::bind("127.0.0.1:0").unwrap());
+    let port = listener.local_addr().unwrap().port();
     let page = dir.join("page");
     std::fs::create_dir_all(&page).unwrap();
     std::fs::write(page.join("index.html"), "<p>the screen</p>").unwrap();
@@ -65,7 +68,7 @@ async fn bridge(fake: &Fake, dir: &Path) -> (support::Running, Base) {
     cfg.agents_file = Some(dir.join("agents.json"));
     let started = dir.join("started");
     cfg.screen = Some(ScreenConfig {
-        listen: format!("127.0.0.1:{port}").parse().unwrap(),
+        listener,
         dir: page,
         screens_file: Some(dir.join("screens.json")),
         // the agent's fragment comes last: `$0` to sh
@@ -112,9 +115,9 @@ async fn until(what: &str, done: impl Fn() -> bool) {
 async fn each_agent_has_its_own_screen() {
     let fake = Fake::start("127.0.0.1:0", &["juniper", "fred", "oak"]).await;
     let dir = support::dir("screens-own");
-    let juniper = Display::start(0, "hermes:juniper--k3x9").await;
-    let fred_port = Display::free_port().await;
-    write_screens(&dir, &[("juniper--k3x9", "juniper--k3x9", juniper.target()), ("fred--k3x9", "fred--k3x9", format!("tcp:127.0.0.1:{fred_port}"))]);
+    let juniper = Display::start("hermes:juniper--k3x9").await;
+    let fred = Display::down();
+    write_screens(&dir, &[("juniper--k3x9", "juniper--k3x9", juniper.target()), ("fred--k3x9", "fred--k3x9", fred.target())]);
     write_ready(&dir, &["juniper--k3x9", "fred--k3x9", "oak--k3x9"]);
     // juniper's desktop last used an hour ago
     let activity = desktop(&dir, "juniper--k3x9").join("activity");
@@ -154,7 +157,7 @@ async fn each_agent_has_its_own_screen() {
     };
     let started = dir.join("started");
     until("fred's desktop started", || std::fs::read_to_string(&started).is_ok_and(|s| s.contains("fred--k3x9"))).await;
-    let fred = Display::start(fred_port, "hermes:fred--k3x9").await;
+    let fred = fred.start("hermes:fred--k3x9");
     let f = opening.await.unwrap().unwrap_or_else(|e| panic!("fred's screen: {e}"));
     assert_eq!(f.name, "hermes:fred--k3x9", "fred's socket shows fred's desktop");
     assert_eq!(std::fs::read_to_string(&started).unwrap().trim(), "fred--k3x9", "the start named fred alone: juniper's was up");
@@ -175,8 +178,8 @@ async fn each_agent_has_its_own_screen() {
 async fn take_over_is_the_agents_lease() {
     let fake = Fake::start("127.0.0.1:0", &["juniper", "fred"]).await;
     let dir = support::dir("screens-lease");
-    let juniper = Display::start(0, "hermes:juniper--k3x9").await;
-    let fred = Display::start(0, "hermes:fred--k3x9").await;
+    let juniper = Display::start("hermes:juniper--k3x9").await;
+    let fred = Display::start("hermes:fred--k3x9").await;
     write_screens(&dir, &[("juniper--k3x9", "juniper--k3x9", juniper.target()), ("fred--k3x9", "fred--k3x9", fred.target())]);
     write_ready(&dir, &["juniper--k3x9", "fred--k3x9"]);
     let (running, base) = bridge(&fake, &dir).await;
@@ -251,8 +254,8 @@ async fn take_over_is_the_agents_lease() {
 async fn an_earlier_lives_lease_is_given_back_and_a_gone_agents_screen_closes() {
     let fake = Fake::start("127.0.0.1:0", &["juniper", "fred"]).await;
     let dir = support::dir("screens-life");
-    let juniper = Display::start(0, "hermes:juniper--k3x9").await;
-    let fred = Display::start(0, "hermes:fred--k3x9").await;
+    let juniper = Display::start("hermes:juniper--k3x9").await;
+    let fred = Display::start("hermes:fred--k3x9").await;
     let screens = [("juniper--k3x9", "juniper--k3x9", juniper.target()), ("fred--k3x9", "fred--k3x9", fred.target())];
     write_screens(&dir, &screens);
     write_ready(&dir, &["juniper--k3x9", "fred--k3x9"]);

@@ -8,11 +8,12 @@
 //! fragment-bridge version
 //! ```
 //!
-//! Its settings are environment variables (docs/bridge.md lists them);
+//! Its settings are environment variables (docs/bridge.md, "Settings");
 //! secrets are files named by path, never values.
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use fragment_bridge::driver::{self, Config};
@@ -89,7 +90,9 @@ fn runtime() -> Box<dyn Runtime> {
                     Some(_) => fail("BRIDGE_MEDIA_LOCAL is `allow`, or unset"),
                 },
             };
-            Box::new(Relay { config })
+            // bound here, at the start: a port in use says so at once
+            let listener = std::net::TcpListener::bind(listen).unwrap_or_else(|e| fail(&format!("listen {listen}: {e}")));
+            Box::new(Relay { config, listener })
         }
         "script" => Box::new(Script { config: ScriptConfig { pace: Duration::from_millis(parse_ms("BRIDGE_SCRIPT_PACE_MS", 40)), scratch: PathBuf::from(env_or("BRIDGE_SCRIPT_SCRATCH", "/tmp/bridge-script")), data: PathBuf::from(env_or("BRIDGE_SCRIPT_DATA", "/data")) } }),
         other => fail(&format!("BRIDGE_RUNTIME {other:?} is neither relay nor script")),
@@ -114,7 +117,16 @@ fn screen_config() -> Option<screen::ScreenConfig> {
     }
     let screens_file = env("BRIDGE_SCREENS_FILE").map(PathBuf::from);
     let start = env("BRIDGE_SCREEN_START").map(|s| s.split_whitespace().map(str::to_string).collect());
-    Some(screen::ScreenConfig { listen, dir: PathBuf::from(env_or("BRIDGE_SCREEN_DIR", "/opt/fragment/screen")), screens_file, start })
+    // bound here, at the start; a port in use leaves the bridge without a
+    // screen, as a screen that fails does (driver.rs), not without agents
+    let listener = match std::net::TcpListener::bind(listen) {
+        Ok(l) => Arc::new(l),
+        Err(e) => {
+            ev!("screen.failed", { "error": format!("screen listen {listen}: {e}") });
+            return None;
+        }
+    };
+    Some(screen::ScreenConfig { listener, dir: PathBuf::from(env_or("BRIDGE_SCREEN_DIR", "/opt/fragment/screen")), screens_file, start })
 }
 
 /// `BRIDGE_SIMPLEX_BIN` and the rest: SimpleX, when the image names its

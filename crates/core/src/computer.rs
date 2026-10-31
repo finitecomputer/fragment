@@ -16,7 +16,7 @@
 //!   port tab is open; with nothing open, until the latest hold runs out
 //!   (twenty minutes after a record or the last socket closed, a minute
 //!   after a pre-wake). An always-on computer never sleeps.
-//! - **Saving** (docs/durable-computers.md, step 1). `/data` is saved when
+//! - **Saving** (docs/computers.md, Durability, step 1). `/data` is saved when
 //!   work ends (the guest's last keepalive closes, and `SAVE_SETTLE_MS`
 //!   pass with none opened again, so turns back to back save once), every
 //!   `SAVE_EVERY_MS` while a keepalive stays open, and at every sleep. A
@@ -26,7 +26,7 @@
 //! - **Sleeping.** Its hold and its save, then its stop (snapshot, signal,
 //!   wait, destroy), reported back by `Asleep`. A keepalive that opens
 //!   during an idle sleep's hold cancels the sleep: the guest took work as
-//!   it was held, so it stays awake (docs/durable-computers.md).
+//!   it was held, so it stays awake (docs/computers.md, Lifecycle).
 //!   A sleep whose save fails keeps its container and is tried again, for
 //!   at most `Rules::unsaved_max_ms`; then it sleeps unsaved, and says so.
 //! - **Failing.** A start that fails, or never reports ready, is tried
@@ -111,7 +111,7 @@ pub const SAVE_EVERY_MS: i64 = 15 * 60_000;
 pub const SAVE_RETRY_MS: i64 = 60_000;
 /// How long a computer stays awake for a sleep whose save keeps failing,
 /// by default (`Rules`, the deployment's `computer_unsaved_max_ms`): thirty
-/// minutes, Paul's (2026-10-08; docs/durable-computers.md).
+/// minutes, Paul's (2026-10-08; docs/computers.md, Lifecycle).
 pub const UNSAVED_MAX_MS_DEFAULT: i64 = 30 * 60_000;
 /// Awake saves that fail in a row before its owner is told (`notices`): one
 /// that fails is tried again a minute later, and a blip need not alarm
@@ -131,7 +131,8 @@ pub const HOLD_DEADLINE_MS: i64 = 90_000;
 /// this catches a report its isolate lost.
 pub const SAVE_DEADLINE_MS: i64 = 10 * 60_000;
 /// Saves of `/data` kept: a wake restores the newest that restores, and
-/// falls back to the one before it (docs/durable-computers.md).
+/// falls back to the one before it (docs/computers.md, "Saves and what a
+/// wake restores").
 pub const SAVES_KEPT: usize = 3;
 /// A start from a snapshot is up only once its guest has read its own view
 /// (`GET /api/computer`, which an image reads as its entrypoint starts:
@@ -160,7 +161,7 @@ const _: () = assert!(ALIVE_MS < START_DEADLINE_MS, "a start's wait for its gues
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rules {
     /// A sleep whose save keeps failing keeps its container this long at
-    /// most, then sleeps unsaved (docs/durable-computers.md).
+    /// most, then sleeps unsaved (docs/computers.md, Lifecycle).
     pub unsaved_max_ms: i64,
 }
 
@@ -1078,7 +1079,7 @@ impl Lifecycle {
                 }
                 // a guest that died busy had turns open: its next life ends
                 // them, so it is held as a record holds it, and starts again
-                // however long the turn ran (docs/durable-computers.md).
+                // however long the turn ran (docs/computers.md, Lifecycle).
                 if self.keepalives > 0 {
                     self.hold(now_ms + IDLE_MS);
                 }
@@ -1434,8 +1435,8 @@ impl Save {
     }
 }
 
-/// A container snapshot: a cache of one save, for one image (P3 of
-/// docs/durable-computers.md). A wake uses it only while `save` is
+/// A container snapshot: a cache of one save, for one image (docs/computers.md,
+/// "Saves and what a wake restores"). A wake uses it only while `save` is
 /// the current save and `image` the pinned image's reference, so it only
 /// ever makes a wake faster, never different.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1933,7 +1934,7 @@ pub fn version_now(life: &Lifecycle, saves: &Saves, images: &Images) -> Option<S
     version_running(life, saves).or_else(|| images.latest())
 }
 
-/// Whether a computer's image does SimpleX (docs/computers.md, "SimpleX"),
+/// Whether a computer's image does SimpleX (docs/bridge.md, "SimpleX"),
 /// so its owner's Settings offer it: `said` is the version whose bridge
 /// last said it does (`GET /api/computer?simplex=1`, taken only of the image
 /// a running start came up on: `version_running`), and it must be the
@@ -2300,7 +2301,7 @@ mod tests {
         assert_eq!(s.ended, None, "{s:?}");
     }
 
-    /// Goal (docs/durable-computers.md): a guest that dies
+    /// Goal (docs/computers.md, Lifecycle): a guest that dies
     /// while it holds its keepalive (a turn open, however long it has run)
     /// is started again, so its next life ends that turn. Method: a turn
     /// that runs past every hold, then a crash; on master `gone()` zeroed
@@ -2544,7 +2545,7 @@ mod tests {
         assert_eq!(s.image_of(2), None, "a start that has not come up runs nothing yet");
     }
 
-    /// Goal (docs/durable-computers.md): the second ask of a
+    /// Goal (docs/computers.md, Lifecycle): the second ask of a
     /// slow sleep (`SLEEP_DEADLINE_MS`) never forgets the snapshot the first
     /// stored, nor notes a failed save the first one made. On master a
     /// snapshot that failed forgot the stored one (cell/src/computer.rs,

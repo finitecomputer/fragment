@@ -42,7 +42,7 @@ function say(text) {
   return p;
 }
 
-export function createSettings({ api, $, seg, account, navigation, notices, sections, agents, releaseInfo, beginWrite, heard, allFragments, own, freeLabel, load, named, openApp }) {
+export function createSettings({ api, $, seg, account, navigation, notices, sections, agents, releaseInfo, allFragments, own, freeLabel, load, named, openApp }) {
   const { person, setPerson, isGuest, setGuest, setSeat, support, seatIs, switchForm, noSeatSaid } = account;
   const { at, path: SETTINGS, isOpen, enter, entered } = navigation;
   const { hideNotice, noticeCurrent, notice } = notices;
@@ -271,18 +271,14 @@ export function createSettings({ api, $, seg, account, navigation, notices, sect
     file.onchange = async () => {
       const f = file.files?.[0];
       if (!f) return;
-      const endWrite = beginWrite();
-      let r;
       try {
-        r = await fetch("/api/identities/me/picture", { method: "PUT", headers: { "x-fragment-shell": "1", "content-type": f.type }, body: f, credentials: "same-origin" });
-        heard(r);
-      } finally {
-        endWrite();
+        await api("PUT", "/api/identities/me/picture", f, f.type);
+      } catch (e) {
+        picture.querySelector("span").textContent = e.message || "That picture was not taken";
+        return;
       }
-      if (r.ok) {
-        setPerson(await api("GET", "/api/identities/me"));
-        reopenSettings();
-      } else picture.querySelector("span").textContent = (await r.json().catch(() => ({}))).message || "That picture was not taken";
+      setPerson(await api("GET", "/api/identities/me"));
+      reopenSettings();
     };
     account.append(actionLine("Picture", picture));
     // their sign-ins, when they linked several before linking went (off

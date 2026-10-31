@@ -191,12 +191,6 @@ impl WorkOs<'_> {
     }
 }
 
-/// The search service's bearer token (bound as `SEARCH_TOKEN`), sent only
-/// to the service this deployment names (`FRAGMENT_SEARCH_URL`).
-pub async fn search_token(env: &Env) -> CellResult<String> {
-    required(env, store::SEARCH_TOKEN).await
-}
-
 /// The account's restricted Stripe key (bound as `STRIPE_KEY`).
 pub async fn stripe_key(env: &Env) -> CellResult<String> {
     required(env, store::STRIPE_KEY).await
