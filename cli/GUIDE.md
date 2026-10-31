@@ -65,10 +65,11 @@ does what that needs when the computer sets:
   own; the computer's egress signs it as that agent, which then holds
   exactly its grants.
 - `FRAGMENT_FOR=<npub>`, optional: the person the agent acts for (its
-  owner), named as `for` on a fragment's routes and the fragment list,
-  the routes that honor it. The agent then holds that person's role,
-  never above it (and never above an editor): `fragment list` lists their
-  fragments, and what `fragment create` makes is theirs, the agent its
+  owner), named as `for` on a fragment's routes, the fragment list and
+  `fragment search`, the routes that honor it. The agent then holds that
+  person's role, never above it (and never above an editor): `fragment
+  list` lists their fragments, `fragment search` searches only what they
+  may read, and what `fragment create` makes is theirs, the agent its
   editor.
 - The host is `--host`, else `FRAGMENT_HOST`, else the computer's
   `FRAGMENT_API` (`http://api.fragment.internal`), never the config's or

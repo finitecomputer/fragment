@@ -719,6 +719,24 @@ mod tests {
         let asked: Vec<Value> = seen.lock().unwrap().iter().filter(|r| r.1 == "/api/search").map(|r| r.2.clone()).collect();
         assert_eq!(asked.len(), 3, "the refused argument sent nothing");
         assert_eq!((asked[0]["in"].clone(), asked[1]["in"].clone()), (json!([NAME]), json!(["notes--m4p7", NAME])), "this fragment unless named");
+        // an agent acting for someone asks as them: `for`, as `fragment search` does
+        let pairs: Arc<Mutex<Vec<Option<String>>>> = Arc::default();
+        let log = Arc::clone(&pairs);
+        let egress = FakeHost::start(
+            0,
+            Arc::new(move |r: &Request| match (r.method.as_str(), r.path.as_str()) {
+                ("GET", _) => Response::json(200, &status("viewer")),
+                _ => {
+                    log.lock().unwrap().push(r.pairs.iter().find(|(k, _)| k == "for").map(|(_, v)| v.clone()));
+                    Response::json(200, &json!({ "semantic": "on", "fragments": [{ "name": NAME, "state": "denied" }], "results": [] }))
+                }
+            }),
+        )
+        .expect("start the fake host");
+        let agent = Client::new(&egress.url, crate::api::Signer::Agent(crate::api::AgentMode { agent: "juniper--k3x9".into(), acting_for: Some("id:paul".into()) }));
+        let answered = session(&agent, NAME, false, &[call(1, crate::search::TOOL, json!({ "q": "lantern" }))]);
+        assert_eq!(answered[0]["result"]["structuredContent"]["fragments"][0]["state"], "denied", "{}", answered[0]);
+        assert_eq!(*pairs.lock().unwrap(), [Some("id:paul".to_string())]);
         let (stranger, _) = host("public");
         let client = Client::new(&stranger.url, crate::auth::fixed(7));
         assert!(!names(&session(&client, NAME, false, &[request(1, "tools/list", json!({}))])[0]).contains(&crate::search::TOOL), "no reader, no search");

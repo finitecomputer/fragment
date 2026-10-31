@@ -5,7 +5,8 @@
 //! once, and says the third has none; a viewer of one finds that one's
 //! alone, the other denied; a member removed finds nothing more; a source
 //! a push deleted never shows; words alone embed nothing; a question past
-//! its limits is refused before anything is embedded; and `fragment
+//! its limits is refused before anything is embedded; an agent acting for
+//! someone (`for`) searches as them; and `fragment
 //! search --in` and `fragment mcp`'s `fragment-search` tool ask it as the
 //! signed-in person.
 
@@ -173,6 +174,30 @@ pub fn search_across(s: &mut Suite, api: &Api) -> Result<()> {
         "fragment mcp serves fragment-search to a reader, asking its own fragment's index unless told others",
         listed.iter().any(|t| t["name"] == "fragment-search") && from(&tool).first() == Some(&beta) && states(&tool) == [(beta.clone(), "searched".into())],
         json!({ "mcp": answers }),
+    );
+
+    // ---- an agent acting for someone searches as them: one only the agent reads is denied
+    // (its own person reads what it reads, so the one it acts for is another)
+    let hand = fragment_nip98::Keys::generate();
+    let reg = "/api/identities";
+    let registered = api.signed(&reader, "POST", reg, Some(&json!({ "kind": "agent", "proof": api.proof(&hand, "POST", reg, &reader) })))?;
+    let hand_id = registered.body["id"].as_str().context("the agent's id")?.to_string();
+    let asker = api.person()?;
+    let asker_id = api.identity(&asker)?;
+    let r = api.share(&alpha, &asker_id, "viewer")?;
+    anyhow::ensure!(r.status == 200, "the asker in {alpha}: {r}");
+    // a membership of the agent's own where the asker has none (a lever makes it)
+    let own = api.share(&beta, &hand_id, "viewer")?;
+    anyhow::ensure!(own.status == 200, "the agent on its own in {beta}: {own}");
+    let body = json!({ "q": "harbour lantern launch", "in": [&alpha, &beta] });
+    let for_asker = api.signed(&hand, "POST", &format!("/api/search?for={asker_id}"), Some(&body))?;
+    let as_itself = api.signed(&hand, "POST", "/api/search", Some(&body))?;
+    s.ok(
+        "an agent acting for someone (`for`) searches as them: a fragment only the agent reads is denied, and none of its hits shows; as itself, it reads it",
+        for_asker.status == 200 && from(&for_asker.body).iter().all(|f| *f == alpha) && !from(&for_asker.body).is_empty()
+            && states(&for_asker.body) == [(alpha.clone(), "searched".into()), (beta.clone(), "denied".into())]
+            && as_itself.status == 200 && states(&as_itself.body).get(1) == Some(&(beta.clone(), "searched".into())) && from(&as_itself.body).contains(&beta),
+        json!({ "for": for_asker.body, "itself": as_itself.body }),
     );
 
     // ---- a member removed finds nothing more

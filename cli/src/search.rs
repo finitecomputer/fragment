@@ -125,6 +125,35 @@ mod tests {
         assert!(serde_json::from_value::<Across>(args).is_ok());
     }
 
+    /// Goal (Alex's review of #848): an agent acting for someone searches
+    /// as them, so each fragment caps it by their role: the question names
+    /// `for`; one acting for no one, or a key, names none.
+    #[test]
+    fn an_agent_acting_for_someone_searches_as_them() {
+        use crate::api::{AgentMode, Signer};
+        use fragment_fakes::http::{Request, Response, Server};
+        use std::sync::{Arc, Mutex};
+        let seen: Arc<Mutex<Vec<Option<String>>>> = Arc::default();
+        let log = Arc::clone(&seen);
+        let host = Server::start(
+            0,
+            Arc::new(move |r: &Request| {
+                log.lock().unwrap().push(r.pairs.iter().find(|(k, _)| k == "for").map(|(_, v)| v.clone()));
+                Response::json(200, &json!({ "results": [], "fragments": [{ "name": "notes--k3x9", "state": "denied" }], "semantic": "on" }))
+            }),
+        )
+        .expect("start the fake host");
+        let asked = || across("ferry".into(), vec!["notes--k3x9".into()], None, None, &[], None, None).unwrap();
+        let for_paul = Client::new(&host.url, Signer::Agent(AgentMode { agent: "juniper--k3x9".into(), acting_for: Some("id:paul".into()) }));
+        let alone = Client::new(&host.url, Signer::Agent(AgentMode { agent: "juniper--k3x9".into(), acting_for: None }));
+        let key = Client::new(&host.url, crate::auth::fixed(7));
+        let answer = search(&for_paul, asked()).unwrap();
+        assert_eq!(answer.fragments[0].state, Reached::Denied);
+        search(&alone, asked()).unwrap();
+        search(&key, asked()).unwrap();
+        assert_eq!(*seen.lock().unwrap(), [Some("id:paul".to_string()), None, None]);
+    }
+
     #[test]
     fn all_is_your_brains_and_archive_by_name() {
         let row = |name: &str, kind: FragmentKind, archived: bool| {

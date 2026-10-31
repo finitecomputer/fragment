@@ -244,13 +244,14 @@ pub struct AgentMode {
 /// The header that names the agent a request acts as.
 pub const AGENT_HEADER: &str = "x-fragment-agent";
 
-/// Whether the platform honors `for` on `path`: a fragment's routes
-/// (`/api/f/…`, and its own at `/f/…`), the fragment list, and the invites
-/// waiting (`/api/invites…`, an agent's for its owner); it refuses it on
-/// every other route (cell/src/lib.rs `signer`).
-pub fn honors_for(path: &str) -> bool {
+/// Whether the platform honors `for` on `method path`: a fragment's routes
+/// (`/api/f/…`, and its own at `/f/…`), the fragment list, the invites
+/// waiting (`/api/invites…`, an agent's for its owner), and a search
+/// across fragments (`POST /api/search`; never the launcher's `GET`); it
+/// refuses it on every other route (cell/src/lib.rs `signer`).
+pub fn honors_for(method: &str, path: &str) -> bool {
     let p = path.split('?').next().unwrap_or(path);
-    p.starts_with("/api/f/") || p.starts_with("/f/") || p == "/api/fragments" || p == "/api/invites" || p.starts_with("/api/invites/")
+    p.starts_with("/api/f/") || p.starts_with("/f/") || p == "/api/fragments" || p == "/api/invites" || p.starts_with("/api/invites/") || (method == "POST" && p == "/api/search")
 }
 
 impl From<Identity> for Signer {
@@ -260,11 +261,11 @@ impl From<Identity> for Signer {
 }
 
 impl Signer {
-    /// The path as sent: an agent acting for someone names them in `for`
-    /// on the routes that honor it.
-    pub fn path(&self, path: &str) -> String {
+    /// The path as sent with `method`: an agent acting for someone names
+    /// them in `for` on the routes that honor it.
+    pub fn path(&self, method: &str, path: &str) -> String {
         match self {
-            Signer::Agent(AgentMode { acting_for: Some(who), .. }) if honors_for(path) => {
+            Signer::Agent(AgentMode { acting_for: Some(who), .. }) if honors_for(method, path) => {
                 let sep = if path.contains('?') { '&' } else { '?' };
                 format!("{path}{sep}for={}", encode_q(who))
             }
@@ -395,10 +396,10 @@ impl Client {
         }
     }
 
-    /// The URL a request to `path` goes to (with `for`, as an agent acting
-    /// for someone on a route that honors it).
-    pub fn url(&self, path: &str) -> String {
-        format!("{}{}", self.host, self.signer.path(path))
+    /// The URL a `method` request to `path` goes to (with `for`, as an
+    /// agent acting for someone on a route that honors it).
+    pub fn url(&self, method: &str, path: &str) -> String {
+        format!("{}{}", self.host, self.signer.path(method, path))
     }
 
     fn request(&self, method: &str, path: &str, body: Option<Vec<u8>>) -> Result<Resp> {
@@ -413,7 +414,7 @@ impl Client {
     #[allow(clippy::too_many_arguments)]
     fn send(&self, method: &str, path: &str, body: Vec<u8>, replay: Replay, signed: Signed, timeout: Duration, content_type: Option<&str>) -> Result<Resp> {
         let path = &self.resolved(path)?;
-        let url = self.url(path);
+        let url = self.url(method, path);
         let verb: reqwest::Method = method.parse()?;
         let what = format!("{method} {path}");
         let build = || {
@@ -480,7 +481,7 @@ impl Client {
     /// archive, which may be gigabytes), never held whole: its bytes. A
     /// refusal is read whole, as any other's is.
     pub fn download(&self, path: &str, to: &std::path::Path) -> Result<u64> {
-        let url = self.url(path);
+        let url = self.url("GET", path);
         let (header, value) = self.signer.header("GET", &url, &[]);
         if self.verbose {
             eprintln!("GET {path}");
@@ -795,22 +796,27 @@ mod tests {
         agent.post_json_by_id("/api/f/garden.paul/ops/add", &serde_json::json!({ "id": "x", "input": {} })).unwrap();
         agent.get("/api/f/garden.paul/channels/chat?after=3").unwrap();
         agent.get("/api/ledger").unwrap();
+        // a search across fragments names `for`; the launcher's search never
+        agent.post_json("/api/search", &serde_json::json!({ "q": "x", "in": ["garden--k3x9"] })).unwrap();
+        agent.get("/api/search?q=x").unwrap();
         let key = Client::new(&server.url, crate::auth::fixed(7));
         key.get("/api/fragments").unwrap();
+        key.post_json("/api/search", &serde_json::json!({ "q": "x", "in": ["garden--k3x9"] })).unwrap();
         let seen = seen.lock().unwrap();
         let for_of = |pairs: &Vec<(String, String)>| pairs.iter().find(|(k, _)| k == "for").map(|(_, v)| v.clone());
-        for (i, (method, path, pairs, auth, named)) in seen.iter().take(5).enumerate() {
+        for (i, (method, path, pairs, auth, named)) in seen.iter().take(7).enumerate() {
             assert_eq!(named.as_deref(), Some("juniper.paul"), "request {i} ({method} {path}) names its agent");
             assert!(auth.is_none(), "request {i} carries no signature of its own: {auth:?}");
-            let expected = matches!(path.as_str(), "/api/fragments" | "/api/f/garden.paul/ops/add" | "/api/f/garden.paul/channels/chat").then(|| "id:paul".to_string());
-            assert_eq!(for_of(pairs), expected, "{method} {path}");
+            let honored = matches!(path.as_str(), "/api/fragments" | "/api/f/garden.paul/ops/add" | "/api/f/garden.paul/channels/chat") || (method == "POST" && path == "/api/search");
+            assert_eq!(for_of(pairs), honored.then(|| "id:paul".to_string()), "{method} {path}");
         }
         assert_eq!(seen[3].2.iter().find(|(k, _)| k == "after").map(|(_, v)| v.as_str()), Some("3"), "a query of its own is kept beside `for`");
-        let (_, _, pairs, auth, named) = &seen[5];
-        assert!(auth.as_deref().is_some_and(|a| a.starts_with("Nostr ")) && named.is_none() && for_of(pairs).is_none(), "a key signs, and names no agent");
+        for (method, path, pairs, auth, named) in &seen[7..] {
+            assert!(auth.as_deref().is_some_and(|a| a.starts_with("Nostr ")) && named.is_none() && for_of(pairs).is_none(), "a key signs, and names no agent: {method} {path}");
+        }
         // an agent acting for no one names no one
         let alone = Signer::Agent(AgentMode { agent: "juniper.paul".into(), acting_for: None });
-        assert_eq!(alone.path("/api/fragments"), "/api/fragments");
+        assert_eq!(alone.path("GET", "/api/fragments"), "/api/fragments");
         assert!(agent.key().is_err() && key.key().is_ok(), "an agent holds no key");
         assert_eq!(agent.writer_id(), agent.writer_id());
         assert_eq!(agent.writer_id().len(), 8);
@@ -820,11 +826,14 @@ mod tests {
     #[test]
     fn for_is_named_on_a_fragments_routes_the_list_and_the_invites_only() {
         for yes in ["/api/f/x--k3x9.paul/status", "/api/f/x--k3x9.paul/ops/add", "/f/x.paul/__live", "/api/fragments", "/api/fragments?x=1", "/api/invites", "/api/invites/x--k3x9/accept"] {
-            assert!(honors_for(yes), "{yes}");
+            assert!(honors_for("GET", yes), "{yes}");
         }
         for no in ["/api/identities/me", "/api/ledger", "/api/search?q=a", "/api/fragments/x.paul/archived", "/api/computers", "/api/fx", "/api/invitesx"] {
-            assert!(!honors_for(no), "{no}");
+            assert!(!honors_for("GET", no), "{no}");
         }
+        // a search across fragments takes it; the launcher's search never
+        assert!(honors_for("POST", "/api/search"));
+        assert!(!honors_for("GET", "/api/search?q=a") && !honors_for("POST", "/api/searchx"));
     }
 
     /// Every code has its own name, and GUIDE.md lists each one.
