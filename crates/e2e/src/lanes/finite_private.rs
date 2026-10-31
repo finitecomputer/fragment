@@ -403,6 +403,16 @@ fn tier_checks(s: &mut Suite, api: &Api) -> Result<()> {
         json!({ "run": run, "tried": format!("{:?}", tried(s, calls)) }),
     );
 
+    // ---- videos: Private's tier is private, and no catalog video model is
+    let calls = s.ai.calls().len();
+    let r = api.op(&owner, &name, "film", "video-private", json!({ "prompt": "waves", "path": "video/waves.mp4" }))?;
+    let run = settle(api, &owner, &name, started(&r), &["succeeded", "held"], wait);
+    s.ok(
+        "a deployment whose tiers are private makes no videos: the step is refused, saying why, before any call, and charged nothing",
+        run["status"] == "held" && run["error"].as_str().is_some_and(|e| e.contains("not private")) && run["costMicros"].as_i64().unwrap_or(0) == 0 && s.ai.calls().len() == calls,
+        &run,
+    );
+
     // ---- embeddings: Private's tier is private and its embeddings slot is not (none is named)
     let (calls, before) = (s.ai.calls().len(), quiet(api, &owner_id, "aig:"));
     let r = api.signed(&hand, "POST", "/api/models/v1/embeddings", Some(&json!({ "input": "the standard notes" })))?;

@@ -344,8 +344,9 @@ class Job {
   }
 
   // Text through the platform's model route (a tier: cheap unless named),
-  // and images on Workers AI (FLUX.1 [schnell]); the owner's ledger pays
-  // for each (docs/ledger.md):
+  // images on Workers AI (FLUX.1 [schnell]) and videos from Cloudflare's
+  // model catalog (HappyHorse 1.0); the owner's ledger pays for each
+  // (docs/ledger.md):
   //   ai.text({ model?, prompt | messages, max_tokens?, reasoning_effort?, tools?, tool_choice?, draft?: { channel, turn } })
   //     → { text, message: { role, content, tool_calls? }, finish_reason, model, tier, usage, timing }
   //     (its arguments at most AI_TEXT_MAX_BYTES of JSON; with a draft, its
@@ -354,7 +355,8 @@ class Job {
   //     predicates and scores on the Clef family (clef-flash unless named), about text, JSON and
   //     media: the fragment's blobs ({ sha256, type }, as fragment.blob(file) answers) or small inline ({ data })
   //   ai.image({ prompt, path, steps? })  → { path, size, sha256, mediaType }: a JPEG on main
-  //   ai.video(…) is refused, saying why: videos are off until they run on Cloudflare
+  //   ai.video({ prompt, path, duration?, resolution?, aspect_ratio? })
+  //     → { path, size, sha256, mediaType, lengthMs }: an MP4 on main (refused where the tiers are private)
   get ai() {
     const step = (kind, args) => this.#step(kind, args);
     const clean = (o) => JSON.parse(JSON.stringify(o ?? {}));
@@ -366,7 +368,7 @@ class Job {
       },
       decide: (opts) => step("ai.decide", clean(opts)),
       image: (opts = {}) => (checkPath(opts.path), step("ai.image", clean(opts))),
-      video: (opts = {}) => step("ai.video", clean(opts)),
+      video: (opts = {}) => (checkPath(opts.path), step("ai.video", clean(opts))),
     };
   }
 

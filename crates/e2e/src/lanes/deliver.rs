@@ -2,15 +2,15 @@
 //! the delivery queue to a push service that checks VAPID and decrypts as
 //! a browser would; subscriptions that are gone, retries, the dead-letter
 //! report; and AI as a job's steps: text through the model
-//! route and images on its transport (both the Workers AI fake, a lower
-//! rung at the vendor boundary), generated images stored as files, video
-//! steps refused, and the calories template's text step. What each paid
-//! step costs is the ledger section's.
+//! route, and images and videos on its transport (all the Workers AI
+//! fake, a lower rung at the vendor boundary), generated images and videos
+//! stored as files, and the calories template's text step. What each paid
+//! step costs is the ledger section's; a video's charge is checked here.
 
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use fragment_fakes::workers_ai::{image_bytes, IMAGE_MODEL};
+use fragment_fakes::workers_ai::{image_bytes, video_bytes, IMAGE_MODEL, VIDEO_MODEL};
 use fragment_nip98::Keys;
 use serde_json::{json, Value};
 
@@ -265,17 +265,7 @@ pub fn ai(s: &mut Suite, api: &Api) -> Result<()> {
         json!([png, model, steps]),
     );
 
-    let calls = s.ai.calls().len();
-    let r = run("v1", "film", json!({ "prompt": "waves", "path": "video/waves.mp4" }))?;
-    s.ok(
-        "a video step is refused, saying why, and calls and reserves nothing",
-        r["status"] == "held"
-            && r["error"].as_str().is_some_and(|e| e.contains("video steps are off until they run on Cloudflare"))
-            && cost(&r) == 0
-            && s.ai.calls().len() == calls
-            && s.fake.file_at(&repo, "main", "video/waves.mp4").is_none(),
-        &r,
-    );
+    videos(s, api, &owner, &name, &repo, wait)?;
 
     s.ai.fail_next(&[503]);
     let calls = s.ai.calls().len();
@@ -302,6 +292,123 @@ pub fn ai(s: &mut Suite, api: &Api) -> Result<()> {
     );
     decisions(s, api, &owner, &name, wait)?;
     calories(s, api, wait)
+}
+
+/// Videos (docs/api.md, AI): HappyHorse 1.0 from Cloudflare's model
+/// catalog, on the model route's transport (the Workers AI fake, which
+/// answers its URL and serves its MP4), in meatproxy's shape, written to
+/// `main` as an image is, and charged its seconds at its resolution's price
+/// once its call answers, by one receipt whatever retries.
+fn videos(s: &mut Suite, api: &Api, owner: &fragment_nip98::Keys, name: &str, repo: &str, wait: Duration) -> Result<()> {
+    use super::ledger::{charged, entries, logged};
+    use fragment_core::price::{PriceBook, Usage};
+    let owner_id = api.identity(owner)?;
+    let run = |id: &str, input: Value| -> Result<Value> {
+        let r = api.op(owner, name, "film", id, input)?;
+        Ok(settle(api, owner, name, started(&r), &["succeeded", "held"], wait))
+    };
+    let made = |s: &Suite| s.ai.calls().into_iter().filter(|c| c.model == VIDEO_MODEL).collect::<Vec<_>>();
+    let cost = |r: &Value| r["costMicros"].as_i64().unwrap_or(0);
+    let price = |resolution: &str, ms: u64| PriceBook::defaults().price(&Usage::Tokens { model: format!("alibaba/hh1-t2v@{resolution}"), input: 0, cached_input: 0, cache_write: 0, output: ms }).map_or(-1, |p| p.charge);
+    // the ledger's charges of one run's steps (one a step, whatever attempt made it)
+    let paid = |r: &Value| -> Vec<Value> {
+        let marker = format!("/run/{}/step/", r["id"]);
+        entries(api, &owner_id, &format!("step:{name}@")).into_iter().filter(|e| e["ref"].as_str().is_some_and(|r| r.contains(&marker))).collect()
+    };
+
+    let waves = video_bytes("waves", 6);
+    let r = run("v1", json!({ "prompt": "waves", "path": "video/waves.mp4" }))?;
+    let pointer = fragment_core::blob::parse(&s.fake.file_at(repo, "main", "video/waves.mp4").unwrap_or_default());
+    s.ok(
+        "a video step in meatproxy's shape (a prompt, a path, six seconds) writes the model's MP4 to main as a blob, its pointer in git, and answers its path, size, hash, type and length",
+        r["status"] == "succeeded"
+            && r["output"] == json!({ "path": "video/waves.mp4", "size": waves.len(), "sha256": fragment_core::blob::sha256_hex(&waves), "mediaType": "video/mp4", "lengthMs": 6_000 })
+            && pointer.as_ref().is_some_and(|p| p.sha256 == fragment_core::blob::sha256_hex(&waves) && p.size == waves.len() as u64),
+        &r,
+    );
+    let served = api.signed(owner, "GET", &format!("/api/f/{name}/file?path=video/waves.mp4"), None)?;
+    s.ok("and its bytes are served", served.status == 200 && served.bytes == waves, format!("{} {} bytes", served.status, served.bytes.len()));
+    let call = made(s).last().cloned();
+    s.ok(
+        "made by HappyHorse 1.0 on the model route's transport: the catalog's input (720P and 16:9 unless named, no watermark), the payer by an opaque id",
+        call.as_ref().is_some_and(|c| c.body == json!({ "prompt": "waves", "duration": 6, "resolution": "720P", "ratio": "16:9", "watermark": false }) && c.metadata["user_id"].as_str().is_some_and(|u| u.len() == 16)),
+        format!("{call:?}"),
+    );
+    s.eventually(wait, || !paid(&r).is_empty());
+    let receipts = paid(&r);
+    s.ok(
+        "charged its six seconds at 720P's price a second ($0.14), once, by its step's receipt",
+        cost(&r) == price("720P", 6_000) && receipts.len() == 1 && charged(&receipts[0]) == Some(cost(&r)),
+        json!({ "run": r, "receipts": receipts, "price": price("720P", 6_000) }),
+    );
+
+    let boat = video_bytes("a small boat", 6);
+    let r = run("v-1080", json!({ "prompt": "a small boat", "path": "video/boat.mp4", "resolution": "1080p", "aspect_ratio": "9:16" }))?;
+    s.ok(
+        "a small video at 1080p and 9:16 is kept in git, made at what the job named, and charged at 1080P's price ($0.28 a second)",
+        r["status"] == "succeeded"
+            && s.fake.file_at(repo, "main", "video/boat.mp4") == Some(boat)
+            && made(s).last().is_some_and(|c| c.body["resolution"] == "1080P" && c.body["ratio"] == "9:16")
+            && cost(&r) == price("1080P", 6_000),
+        &r,
+    );
+
+    api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "fail-after-paid", "times": 1 })))?;
+    let before = made(s).len();
+    let r = run("v-retry", json!({ "prompt": "a tide", "path": "video/tide.mp4" }))?;
+    s.eventually(wait, || !paid(&r).is_empty());
+    let receipts = paid(&r);
+    s.ok(
+        "a step that fails after its paid call is tried again, reads the video at the URL it kept, and never makes it again nor charges it again",
+        r["status"] == "succeeded"
+            && made(s).len() == before + 1
+            && s.fake.file_at(repo, "main", "video/tide.mp4").is_some()
+            && receipts.len() == 1
+            && cost(&r) == price("720P", 6_000),
+        json!({ "run": r, "made": made(s).len() - before, "receipts": receipts }),
+    );
+
+    s.ai.fail_next(&[503]);
+    let before = made(s).len();
+    let r = run("v-503", json!({ "prompt": "a storm", "path": "video/storm.mp4" }))?;
+    s.ok("the video model's 503 is retried", r["status"] == "succeeded" && made(s).len() == before + 2 && cost(&r) == price("720P", 6_000), &r);
+
+    // refused before any call: nothing is charged, nothing reaches the model
+    let before = made(s).len();
+    let old = run("v-768", json!({ "prompt": "waves", "path": "video/w.mp4", "resolution": "768p" }))?;
+    let short = run("v-short", json!({ "prompt": "waves", "path": "video/w.mp4", "duration": 2 }))?;
+    let mov = run("v-mov", json!({ "prompt": "waves", "path": "video/w.mov" }))?;
+    let model = run("v-model", json!({ "prompt": "waves", "path": "video/w.mp4", "model": "minimax/hailuo-3-max" }))?;
+    s.ok(
+        "a video at the old model's 768p, under 3 seconds, to a path no MP4's, or naming a model is refused, saying why, before any call",
+        old["error"].as_str().is_some_and(|e| e.contains("720p or 1080p"))
+            && short["error"].as_str().is_some_and(|e| e.contains("3 to 15 seconds"))
+            && mov["error"].as_str().is_some_and(|e| e.contains("ends in .mp4"))
+            && model["error"].as_str().is_some_and(|e| e.contains("unknown field `model`"))
+            && [&old, &short, &mov, &model].iter().all(|r| r["status"] == "held" && cost(r) == 0)
+            && made(s).len() == before,
+        json!([old, short, mov, model]),
+    );
+
+    let said = logged(s, "ledger.unknown-usage");
+    let r = run("v-failed", json!({ "prompt": "it fails", "path": "video/failed.mp4" }))?;
+    let loud = s.eventually(wait, || logged(s, "ledger.unknown-usage") > said);
+    s.ok(
+        "a video that did not complete is refused, saying why, nothing written, and charged nothing, said aloud",
+        r["status"] == "held" && r["error"].as_str().is_some_and(|e| e.contains("no completed video")) && cost(&r) == 0 && loud && s.fake.file_at(repo, "main", "video/failed.mp4").is_none(),
+        &r,
+    );
+    let gone = run("v-gone", json!({ "prompt": "gone", "path": "video/gone.mp4" }))?;
+    let png = run("v-png", json!({ "prompt": "a png", "path": "video/png.mp4" }))?;
+    s.ok(
+        "a completed video gone from its URL, or that is no MP4, is refused, saying why, nothing written; the catalog billed it, so it is charged",
+        gone["status"] == "held" && gone["error"].as_str().is_some_and(|e| e.contains("gone from its URL"))
+            && png["status"] == "held" && png["error"].as_str().is_some_and(|e| e.contains("not an MP4"))
+            && [&gone, &png].iter().all(|r| cost(r) == price("720P", 6_000))
+            && s.fake.file_at(repo, "main", "video/gone.mp4").is_none() && s.fake.file_at(repo, "main", "video/png.mp4").is_none(),
+        json!([gone, png]),
+    );
+    Ok(())
 }
 
 /// Typed decisions (docs/api.md, AI): the Clef family by name, its media
