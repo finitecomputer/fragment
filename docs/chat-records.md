@@ -72,8 +72,9 @@ at most 16. A turn's records, in order:
 3. `turn.end` on `work`.
 
 A turn a restart cut may be followed by its **continuation** (since
-2026-10-31): a turn of its own, whose id is the cut turn's continuation's,
-not its cause's, with the cut turn's `cause` and asker, and a
+2026-10-31): a turn of its own, whose id is not its cause's but the first
+24 hex characters of the SHA-256 of `continue`, a NUL and the cut turn's
+id, with the cut turn's `cause` and asker, and a
 `turn.notice` (part `continued`) as it starts (docs/bridge.md, "A cut turn
 is continued once").
 
