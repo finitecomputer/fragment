@@ -8,9 +8,11 @@
 //! - `SEARCH_STORAGE_<OPTION>`: each of the store's options, its name
 //!   lowercased (`SEARCH_STORAGE_AWS_ENDPOINT` is `aws_endpoint`);
 //! - `SEARCH_TOKEN`: the bearer token every call carries, at least 32 bytes;
+//! - any of these with `_FILE` after its name: read from that file instead
+//!   (a secret mounted in), never from a command line;
 //! - `SEARCH_LISTEN`: the address to listen on, `0.0.0.0:8080` unnamed.
 
-use fragment_search::{http, store};
+use fragment_search::{env, http, store};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
@@ -19,10 +21,16 @@ use std::sync::Arc;
 const TOKEN_MIN_BYTES: usize = 32;
 
 fn need(name: &str) -> String {
-    std::env::var(name).unwrap_or_else(|_| {
-        eprintln!("fragment-search: {name} is required (README.md)");
-        std::process::exit(2);
-    })
+    match env::value(name) {
+        Ok(Some(v)) => v,
+        Ok(None) => fail(&format!("{name} (or {name}_FILE) is required (README.md)")),
+        Err(e) => fail(&e),
+    }
+}
+
+fn fail(why: &str) -> ! {
+    eprintln!("fragment-search: {why}");
+    std::process::exit(2);
 }
 
 #[tokio::main]
@@ -34,8 +42,7 @@ async fn main() {
         std::process::exit(2);
     }
     let listen = std::env::var("SEARCH_LISTEN").unwrap_or_else(|_| "0.0.0.0:8080".into());
-    let options: Vec<(String, String)> =
-        std::env::vars().filter_map(|(k, v)| k.strip_prefix("SEARCH_STORAGE_").map(|o| (o.to_lowercase(), v))).collect();
+    let options = env::options("SEARCH_STORAGE_").unwrap_or_else(|e| fail(&e));
     let store = match store::Store::open(&storage, options).await {
         Ok(s) => Arc::new(s),
         Err(e) => {
