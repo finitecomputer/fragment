@@ -284,7 +284,7 @@ pub fn export(s: &mut Suite, api: &Api) -> Result<()> {
     let files = entries_of(&archive).context("the archive is a tar")?;
     let root = fragment_core::export::ROOT;
     let frag = |name: &str, path: &str| format!("{root}/fragments/{name}/{path}");
-    s.ok("every entry is in its one folder, and its README is the platform's", files.keys().all(|k| k.starts_with(&format!("{root}/"))) && text_at(&files, &format!("{root}/README.md")) == fragment_core::export::README, files.keys().cloned().collect::<Vec<_>>().join(" "));
+    s.ok("every entry is in its one folder, and its README is the platform's", files.keys().all(|k| k.starts_with(&format!("{root}/"))) && text_at(&files, &format!("{root}/README.md")).as_bytes() == fragment_templates::EXPORT_README.bytes, files.keys().cloned().collect::<Vec<_>>().join(" "));
     let manifest = json_at(&files, &format!("{root}/manifest.json"));
     let names: Vec<&str> = manifest["fragments"].as_array().into_iter().flatten().filter_map(|f| f["name"].as_str()).collect();
     let shared_row = manifest["sharedWithMe"].as_array().into_iter().flatten().find(|f| f["name"] == bobs.as_str()).cloned().unwrap_or(Value::Null);
@@ -566,7 +566,7 @@ pub fn export(s: &mut Suite, api: &Api) -> Result<()> {
     let saved = std::fs::read(&out).ok().and_then(|b| entries_of(&b).ok()).unwrap_or_default();
     s.ok(
         "fragment export starts one, waits for it, and downloads it: one tar, its README first",
-        r.as_ref().is_ok_and(|v| v["export"]["state"] == "ready" && v["out"] == path.as_str()) && saved.get(&format!("{root}/README.md")).is_some_and(|b| b == fragment_core::export::README.as_bytes()),
+        r.as_ref().is_ok_and(|v| v["export"]["state"] == "ready" && v["out"] == path.as_str()) && saved.get(&format!("{root}/README.md")).is_some_and(|b| b == fragment_templates::EXPORT_README.bytes),
         format!("{r:?}"),
     );
     Ok(())
