@@ -35,7 +35,12 @@ fn export_with(root: &Path, later: bool) -> Result<()> {
             "with": "Ann", "started_at": at, "ended_at": at, "messages": words, "sessions": [id] })
     };
     let said = |role: &str, at: &str, text: &str| json!({ "role": role, "at": at, "text": text });
-    let mut said_in_beans = vec![said("user", "2026-10-01T09:00:00Z", "plant beans?"), said("assistant", "2026-10-01T09:00:05Z", "in spring")];
+    let mut said_in_beans = vec![
+        said("user", "2026-10-01T09:00:00Z", "plant beans?"),
+        json!({ "role": "assistant", "at": "2026-10-01T09:00:02Z", "reasoning": "weigh the soil", "tool_calls": [{ "name": "web_search", "arguments": "{\"q\":\"beans\"}" }] }),
+        json!({ "role": "tool", "at": "2026-10-01T09:00:03Z", "tool": "web_search", "text": "beans like warm soil" }),
+        said("assistant", "2026-10-01T09:00:05Z", "in spring"),
+    ];
     if later {
         said_in_beans.push(said("user", "2026-10-04T09:00:00Z", "and peas?"));
     }
@@ -53,6 +58,69 @@ fn export_with(root: &Path, later: bool) -> Result<()> {
     std::fs::write(chats.join("runs/cron-2026-10.json"), json!({ "format": format, "conversations": { "e2e_digest": run } }).to_string())?;
     listed.push(json!({ "id": "e2e_digest", "file": "chats/runs/cron-2026-10.json", "kind": "cron" }));
     std::fs::write(chats.join("index.json"), json!({ "format": format, "agent": "Juniper", "conversations": listed }).to_string())?;
+    Ok(())
+}
+
+/// Goal: the person's Session Archive shows in their shell, below their
+/// chats, its chats newest first, and one opens read-only in the middle
+/// column in a chat's look, the agent's steps folded away; the archive's
+/// own list folds its scheduled runs away. Method: an export imported
+/// with the real CLI, then the shell in Chrome as its person, at Settings
+/// (the sidebar, with no first agent to make).
+pub fn sessions_ui(s: &mut Suite, api: &Api) -> Result<()> {
+    if !s.section("sessions-ui", &[crate::Need::Fakes, crate::Need::Levers, crate::Need::Chrome]) {
+        return Ok(());
+    }
+    let Some(mut b) = s.browser()? else {
+        s.ok("Chrome is installed for the session archive's lane (set CHROME_BIN)", false, "no Chrome found");
+        return Ok(());
+    };
+    let wait = std::time::Duration::from_secs(30);
+    // evidence for a person: the reader and the archive's list, as Chrome drew them
+    let shots = s.dir("sessions-ui");
+    let home = s.dir("sessions-ui-home");
+    s.login(api, &home);
+    let keys = s.cli_keys(&home).context("the CLI logged in")?;
+    let root = s.dir("sessions-ui-export");
+    export(&root)?;
+    let imported = s.cli_json(api, &home, &["session", "import", root.to_str().expect("utf-8 path"), "--json"])?;
+    let name = imported["archive"].as_str().unwrap_or("").to_string();
+    let session = api.sign_in(&crate::cli_email(&fragment_core::npub::encode(keys.pubkey_hex()))?)?;
+    b.set_cookie(&format!("{}/", api.base), "fragment_session", &session)?;
+    let page = b.open(&format!("{}/settings", api.base))?;
+    b.viewport(&page, 1400, 900, false)?;
+    let listed = b.until(&page, "document.querySelectorAll('#archive:not([hidden]) #archive-rows .row').length === 2", wait);
+    let rows = b.eval(&page, "[...document.querySelectorAll('#archive-rows .row')].map((r) => r.textContent)")?;
+    s.ok("the shell lists the archive's chats under Session Archive, newest first", listed && rows == json!(["A long letter", "Beans"]), &rows);
+
+    b.click(&page, "#archive-rows [data-key=\"archived:hermes-e2e_beans\"]")?;
+    let opened = b.until(&page, "document.getElementById('chat-title').textContent === 'Beans' && document.getElementById('chat-options').hidden", wait);
+    let frame = "?s=hermes-e2e_beans";
+    let drawn = s.eventually(wait, || b.eval_in_frame(&page, frame, "document.querySelectorAll('.msg').length === 2").is_ok_and(|v| v == true));
+    let read = b.eval_in_frame(
+        &page,
+        frame,
+        "({ title: document.querySelector('.archive-head h1')?.textContent, user: [...document.querySelectorAll('.msg.user .bubble')].map((e) => e.textContent), agent: [...document.querySelectorAll('.msg.agent .md')].map((e) => e.textContent.trim()), \
+           folded: [...document.querySelectorAll('details.tools')].map((d) => ({ open: d.open, steps: [...d.querySelectorAll('.step-verb')].map((v) => v.textContent) })), composer: !!document.querySelector('textarea, form') })",
+    )?;
+    s.ok(
+        "one opens read-only in the middle column, in a chat's look: what was said, the agent's steps folded away",
+        opened && drawn && read == json!({ "title": "Beans", "user": ["plant beans?"], "agent": ["in spring"], "folded": [{ "open": false, "steps": ["Thought", "web_search"] }], "composer": false }),
+        &read,
+    );
+    b.screenshot(&page, &shots.join("reader.png"))?;
+
+    b.eval_in_frame(&page, frame, "(location.href = './', true)")?;
+    let folded = s.eventually(wait, || {
+        b.eval_in_frame(&page, &name, "[...document.querySelectorAll('details.kind')].map((d) => [d.open, d.querySelector('summary').textContent]).join('|') === 'false,Scheduled runs (1)'").is_ok_and(|v| v == true)
+    });
+    let headed = b.until(&page, "document.getElementById('chat-title').textContent === 'Session Archive' && !document.querySelector('#archive-rows .row.active')", wait);
+    s.ok(
+        "the archive's own list shows its chats and folds its scheduled runs away, and the shell's heading follows it there",
+        folded && headed,
+        b.eval_in_frame(&page, &name, "document.body.innerText.slice(0, 300)").unwrap_or_default(),
+    );
+    b.screenshot(&page, &shots.join("list.png"))?;
     Ok(())
 }
 
@@ -122,7 +190,7 @@ pub fn sessions(s: &mut Suite, api: &Api) -> Result<()> {
     let older = s.cli_json(api, &home, &["session", "import", &path(&root), "--json"])?;
     s.ok(
         "a later export updates the chat it holds a newer copy of, and the earlier one never takes it back",
-        newer["updated"] == 1 && newer["added"] == 0 && beans.is_some_and(|b| b.messages.len() == 3) && older["updated"] == 0 && older["unchanged"] == 3,
+        newer["updated"] == 1 && newer["added"] == 0 && beans.is_some_and(|b| b.messages.len() == 5) && older["updated"] == 0 && older["unchanged"] == 3,
         json!({ "newer": newer, "older": older }),
     );
 

@@ -13,11 +13,13 @@ export function createChatList({ api, ui, data, selection, menus, navigation, li
   // ---- chats: one flat list, newest first, the open one in the middle column ----
   function renderHeading() {
     const open = current() && byName(current()) && !page();
+    // the session archive is read here, never a chat to add to or share
+    const archive = byName(current())?.kind === "sessions";
     $("chat-heading").hidden = !open;
     $("page-title").hidden = !page();
     $("page-title").textContent = page() ?? "";
-    $("new-chat").hidden = !open || isGuest() || !primaryAgent()?.identity;
-    $("chat-options").hidden = !open;
+    $("new-chat").hidden = !open || archive || isGuest() || !primaryAgent()?.identity;
+    $("chat-options").hidden = !open || archive;
     if (!open) return;
     const title = chatTitle(current());
     $("chat-title").textContent = title;

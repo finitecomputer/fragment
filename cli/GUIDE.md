@@ -857,7 +857,9 @@ fragment export --out ~/me.tar           # somewhere else
 The conversations you had with an agent somewhere else, kept in a
 private fragment of yours (kind `sessions`, titled Session Archive, made
 the first time you import): one file a conversation, under `sessions/`,
-and one index a kind, under `index/`, newest first. Bring them in from
+and one index a kind, under `index/`, newest first. The shell lists its
+chats under Session Archive, below your chats, each read there as a
+chat. Bring them in from
 the old Finite's export (its `chats/`, or the folder holding it), or
 from Hermes' own `state.db` (or the Hermes home holding it), read-only:
 

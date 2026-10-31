@@ -113,6 +113,7 @@ const LANES: &[Lane] = &[
     appfiles::appfiles,
     blobs::blobs,
     sessions::sessions,
+    sessions::sessions_ui,
     notes::notes,
     brain::brain,
     doc::doc,
@@ -166,7 +167,7 @@ const LANES: &[Lane] = &[
 pub const SHARDS: [&[&str]; 4] = [
     &["signin", "shell", "computers", "export", "hermes", "agent-smoke", "agent-ask", "agent-app", "agent-restart", "bot-mode", "checkout", "restart"],
     &["connections", "shell-ui", "wipe", "sync", "migrations"],
-    &["deploy", "templates", "facet-cap", "app-lockdown", "site", "watch", "icons", "schemas", "channels", "live", "routes", "cli", "browser", "jobs", "triggers", "sessions", "finite-private", "chat"],
+    &["deploy", "templates", "facet-cap", "app-lockdown", "site", "watch", "icons", "schemas", "channels", "live", "routes", "cli", "browser", "jobs", "triggers", "sessions", "sessions-ui", "finite-private", "chat"],
     &[
         "auth", "create", "lockdown", "keys", "members", "identities", "levers", "secrets", "delegation", "files", "share", "faces", "isolation", "frames", "ops", "public", "effects",
         "appfiles", "blobs", "notes", "brain", "doc", "push", "ai", "ledger", "transcribe", "orgs", "billing", "governance", "billing-page", "trials", "admin", "admin-page",
