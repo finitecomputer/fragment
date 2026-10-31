@@ -101,8 +101,9 @@ row. A pass:
    threshold, a tenth of a file, would keep a few rows' bytes for good);
 2. rebuilds the text indexes from the rows left, after a removal (an
    index keeps a removed row's words otherwise), else folds new rows in;
-3. prunes the versions older than a minute, with every file only they
-   held.
+3. prunes every version older than the newest made more than a minute
+   ago, with every file only they held: a version a read began on stays a
+   minute after the next is made, however old it is.
 
 So deleted text leaves the store's files within about three minutes. A
 pass that fails is retried, waiting twice as long each time (at most 15

@@ -671,8 +671,7 @@ impl Store {
 /// row's words, whatever was rewritten), else the newest rows folded into
 /// them; the vectors indexed once there are `VECTOR_INDEX_MIN_ROWS` (that
 /// index rebuilt too when rows were removed); and the versions older than
-/// `keep` pruned, with every file only they held. Whether it left the
-/// table clean (`clean`).
+/// `keep` pruned (`prune`). Whether it left the table clean (`clean`).
 async fn pass(entry: &Entry, removed: bool, keep: Duration) -> Result<bool> {
     let t = &entry.table;
     let every_deletion = CompactionOptions { materialize_deletions: true, materialize_deletions_threshold: 0.0, ..CompactionOptions::default() };
@@ -686,9 +685,21 @@ async fn pass(entry: &Entry, removed: bool, keep: Duration) -> Result<bool> {
     if entry.space.is_some() && ((removed && vector_index) || (!vector_index && t.count_rows(Some(CHUNKS.into())).await? >= VECTOR_INDEX_MIN_ROWS)) {
         t.create_index(&["vector"], Index::IvfFlat(IvfFlatIndexBuilder::default().distance_type(DistanceType::Cosine))).replace(true).execute().await?;
     }
-    let older_than = Some(chrono::TimeDelta::from_std(keep).map_err(|e| Error::Engine(e.to_string()))?);
-    t.optimize(OptimizeAction::Prune { older_than, delete_unverified: Some(true), error_if_tagged_old_versions: Some(false) }).await?;
+    prune(t, keep).await?;
     clean(t).await
+}
+
+/// Every version older than the newest made more than `keep` ago pruned,
+/// with the files only they held. A version is read until the next one is
+/// made, but Lance prunes by when a version was made, so pruning those
+/// made `keep` ago would take one current a moment ago (made long before)
+/// from under its reads; this keeps it `keep` more. (`optimize_prune_before`
+/// is lancedb's absolute cutoff, hidden for its bindings; pinned at 0.40.0.)
+async fn prune(t: &Table, keep: Duration) -> Result<()> {
+    let cutoff = chrono::Utc::now() - chrono::TimeDelta::from_std(keep).map_err(|e| Error::Engine(e.to_string()))?;
+    let Some(before) = t.list_versions().await?.into_iter().map(|v| v.timestamp).filter(|made| *made <= cutoff).max() else { return Ok(()) };
+    t.optimize_prune_before(before, Some(true), Some(false)).await?;
+    Ok(())
 }
 
 /// A table with nothing left to maintain: one version, deleting no row.
