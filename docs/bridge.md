@@ -161,6 +161,13 @@ on a computer.
 | `BRIDGE_PROMPT_TTL_MS` | 3 600 000 | a card's life unless the runtime says |
 | `BRIDGE_TURN_IDLE_MS` | 900 000 | a running turn this quiet ends as an error |
 | `BRIDGE_KEEPALIVE_PING_MS` | 15 000 | how often the keepalive pings; silent twice that, it is opened again (#557) |
+| `BRIDGE_CLAUDE_BIN` | | the person's own unmodified `claude`: set, agents whose `agent.json` names `claude` run on it (below, "Claude Code, as the bridge speaks it"); unset (every image today), there is no such runtime and their turns are refused saying so |
+| `BRIDGE_CLAUDE_USER` | | `uid:gid` it runs as: the agents' user, never root, which Claude Code refuses to bypass permissions as |
+| `BRIDGE_CLAUDE_CONFIG_DIR` | `/data/claude` | its `CLAUDE_CONFIG_DIR`: the person's sign-in and the sessions' transcripts, saved with `/data` |
+| `BRIDGE_CLAUDE_WORK_DIR` | `/data/work` | each agent's working directory is `<dir>/<agent fragment>` |
+| `BRIDGE_CLAUDE_STATE_DIR` | `/data/bridge/claude` | each chat's `/new` count (`sessions.json`) |
+| `BRIDGE_CLAUDE_MODEL` | | `--model`; unset, the account's own default |
+| `BRIDGE_CLAUDE_IDLE_MS` | 300 000 | a session's `claude` stops this long after its last turn |
 | `BRIDGE_RELAY_LISTEN` | `127.0.0.1:8650` | where Hermes dials |
 | `BRIDGE_RELAY_SECRET_FILE` | required for `relay` | the per-boot secret (32+ characters) |
 | `GATEWAY_RELAY_ID` | `fragment-computer` | the gateway id both sides name |
@@ -828,6 +835,45 @@ page's code, which another page cannot fetch. The platform's half (the
 ticket's signature, its one redeeming, refusing a relayed record the
 agent's own key or any other signs, and the unlink closing the door) is
 the `computers` lane's door checks, through the stub's `door` commands.
+
+## Claude Code, as the bridge speaks it
+
+`runtime/claude.rs`, behind `BRIDGE_CLAUDE_BIN`: the person's own
+unmodified `claude`, signed in with their own plan, driven over its
+stream-json wire as Anthropic's Agent SDK drives it. The bridge never sits
+between it and Anthropic: no proxy, base URL or key, and no `ANTHROPIC_*` or
+`CLAUDE_CODE_*` variable of anyone's reaches it (`withheld`). Read from
+Claude Code 2.1.312 and spiked on 2026-10-30 (crash, resume, copy under the
+hold, interrupt, questions).
+
+- **A session per agent and chat**, its id derived from the two and the
+  chat's `/new` count, so every life names the same one. Its process starts
+  at the session's first turn, resuming it when its transcript is on disk
+  (else naming it new; a start refused either way is tried once the other
+  way), and stops once idle. Transcripts are whole lines, so a save under
+  the hold never tears one; a torn last line, restored, is skipped.
+- **A turn** is one user message: its note, quote, asker and files as
+  Relay's are, in words. Text deltas are the draft; each text block a reply
+  part; each tool's result a step with its call's id and status; its
+  `result` its end (`success` idle, else the error it says, a sign-in or a
+  plan's limit in its own words).
+- **No technical approvals:** tools run with permissions bypassed.
+  `AskUserQuestion` alone still asks the host (`can_use_tool`): each
+  question a card (`<tool_use_id>-q<n>`), its options and "Other" in
+  words; an unanswered card refuses the call, saying no one answered.
+- **Stop** is Claude Code's interrupt, which stops the running tool. Its
+  tools run in process groups of their own, so a lone kill of `claude`
+  would leave them running: a session stops by closing its input, and is
+  killed only past a grace.
+- **A crash** (the computer's death) leaves the cut call open in the
+  transcript. The next turn resumes the session, and Claude Code itself
+  tells its model the call's outcome is unknown, with no cut-turn patch
+  of ours; the bridge's note says what the chat saw.
+- **Its menu:** `new` (the chat's next session) and `stop`.
+- Proven against `fake-claude` replaying Claude Code's wire as it spoke,
+  recorded with Haiku 5.5 (tests/claude.rs, tests/claude/: a reply, a tool
+  step, a card, Stop, a session resumed by a new bridge and `/new`, and a
+  crash mid-tool), and in its own unit tests.
 
 ## Hermes' Relay, as the bridge speaks it
 
