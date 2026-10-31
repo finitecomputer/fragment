@@ -487,9 +487,12 @@ export class App extends DurableObject {
   path, steps})`. Text runs on a tier, `model: "cheap"` (the default) or
   `"medium"`; an image is a JPEG (FLUX.1 [schnell], 1 to 8 `steps`, 4 by
   default) written to `path` on `main`, which ends in `.jpg` or `.jpeg`.
-  You pay for them, from your ledger (below). `job.ai.video` is off until
-  videos run on Cloudflare. GLM can spend a small `max_tokens` thinking:
-  `reasoning_effort` is `low` unless you ask for `high`. A text step
+  `job.ai.video({prompt, path, duration, resolution, aspect_ratio})` makes
+  an MP4 (HappyHorse 1.0: 3 to 15 seconds, 5 by default; `720p` or
+  `1080p`) written to `path`, which ends in `.mp4`; none where your
+  models are private. You pay for them, from your ledger (below). GLM
+  can spend a small `max_tokens` thinking: `reasoning_effort` is `low`
+  unless you ask for `high`. A text step
   answers `{text, message, finish_reason, model, tier, usage, timing}`
   (`timing`: `{first_ms, ms, model, calls, tries}`). It takes OpenAI's
   `tools` (at most 64, each `{type: "function", function: {name,
@@ -1088,6 +1091,7 @@ fragment operator comp <email> [--kind seat|always-on] [--org O] [--key-file F]
 fragment operator uncomp <seat> [--key-file F]
 fragment operator trials [--name N [--days D] [--capacity C] | --send <id> --to <email>] [--key-file F]
 fragment operator health [--key-file F]
+fragment operator wake <class> <ids-file> [--key-file F]   # start objects by Cloudflare's ids, schemas made current
 fragment operator log [--before N] [--key-file F]
 fragment operator credit <org> <usd> --why W --id REF [--key-file F]
 fragment operator budget <org> <usd> [--id I] [--key-file F]

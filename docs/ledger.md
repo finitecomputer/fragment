@@ -113,6 +113,15 @@ it, and each book a ledger priced with is kept once as a command,
 informational. The fee is AI Gateway's on credits, so it applies to
 `tokens` and `neurons` only.
 
+- **A video's seconds** (crate::media's video model, a third party's in
+  Cloudflare's catalog, paid by Unified Billing): `tokens` of a row per
+  resolution (`alibaba/hh1-t2v@720P`, `@1080P`), its output one
+  millisecond of video, priced per million at the catalog's price a
+  second ($0.14, $0.28), with the fee. Charged when the model answers
+  with its video, at the seconds asked, as the catalog bills them. No
+  usage kind of its own: every release's ledger prices tokens, and one
+  without the row charges the video nothing (decision 62).
+
 - **OpenRouter's price** (decision 61; a decision for Paul): a slot on
   OpenRouter is priced at the ceiling it routes under
   (`body.provider.max_price`), every input token at its prompt price,

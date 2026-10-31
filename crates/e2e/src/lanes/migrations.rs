@@ -6,7 +6,9 @@
 //! step that fails rolls back; a step that adds a column keeps the rows;
 //! code that does not know an object's version refuses it. Locally, after
 //! a crash, each object's start says the same: the adopted answers with
-//! nothing run again, the refused answer `schema_refused`.
+//! nothing run again, the refused answer `schema_refused`; and an
+//! operator's wake starts one from before versions no call has started,
+//! adopting it.
 
 use anyhow::Result;
 use fragment_core::migrate::{self, Class};
@@ -131,6 +133,21 @@ pub fn migrations(s: &mut Suite, _: &Api) -> Result<()> {
         &view,
     );
 
+    // ---- one from before versions that no call starts until an
+    // operator's wake (`fragment operator wake`), after the crash: planted
+    // locally alone, as no crash on a preview wakes it
+    let (woken, woken_id, reset_id) = if s.hosted() {
+        Default::default()
+    } else {
+        let woken = s.named(&api, &owner, "schema-woken")?;
+        s.create(&api, &owner, &woken)?;
+        api.share(&woken, member.pubkey_hex(), "viewer")?;
+        let id = |name: &str| -> Result<String> { Ok(lever(&api, name, "schema", None)?.body["id"].as_str().unwrap_or_default().to_string()) };
+        let (woken_id, reset_id) = (id(&woken)?, id(&reset)?);
+        lever(&api, &woken, "schema-unversion", None)?;
+        (woken, woken_id, reset_id)
+    };
+
     // ---- steps after the newest: one that fails, one that adds a column
     let stepped = s.named(&api, &owner, "schema-stepped")?;
     s.create(&api, &owner, &stepped)?;
@@ -162,7 +179,15 @@ pub fn migrations(s: &mut Suite, _: &Api) -> Result<()> {
     // ---- each object's start says the same (locally: a preview's node
     // never crashes, and its objects stay as this start left them)
     let api = if s.hosted() {
-        for check in ["after a crash the adopted fragment answers, nothing run again", "and the one at a version its code does not know refuses every call, naming itself and why", "and the one that requires a reset too"] {
+        for check in [
+            "after a crash the adopted fragment answers, nothing run again",
+            "and the one at a version its code does not know refuses every call, naming itself and why",
+            "and the one that requires a reset too",
+            "an operator's wake starts one from before versions that no call has started: adopted, ready, its rows kept",
+            "asked again, it answers the same and runs nothing",
+            "a wake of one that requires a reset answers its refusal, naming it",
+            "a wake by an id of another class, a malformed id or no class is refused (400); anyone but an operator 403",
+        ] {
             s.skip(check, "the hosted lane crashes no node");
         }
         api
@@ -187,6 +212,35 @@ pub fn migrations(s: &mut Suite, _: &Api) -> Result<()> {
             "and the one that requires a reset too",
             r.status == 500 && r.body["error"] == "schema_refused" && r.body["message"].as_str().is_some_and(|m| m.starts_with("Fragment ") && m.contains("reset required")),
             &r,
+        );
+
+        let operator = s.operator.clone();
+        let wake = |keys: &fragment_nip98::Keys, class: &str, id: &str| api.signed(keys, "POST", &format!("/api/admin/objects/{class}/wake"), Some(&json!({ "id": id })));
+        let r = wake(&operator, "Fragment", &woken_id)?;
+        let view = lever(&api, &woken, "schema", None)?;
+        s.ok(
+            "an operator's wake starts one from before versions that no call has started: adopted, ready, its rows kept",
+            r.status == 200
+                && r.body == json!({ "class": "Fragment", "id": woken_id, "ready": true })
+                && holds_all(&view.body, &migrate::FRAGMENT, "adopted")
+                && members(&api, &owner, &woken) == [owner_id.clone(), member_id.clone()],
+            format!("{r} / {view}"),
+        );
+        let again = wake(&operator, "Fragment", &woken_id)?;
+        let after = lever(&api, &woken, "schema", None)?;
+        s.ok("asked again, it answers the same and runs nothing", again.status == 200 && again.body == r.body && after.body == view.body, format!("{again} / {after}"));
+        let r = wake(&operator, "Fragment", &reset_id)?;
+        s.ok(
+            "a wake of one that requires a reset answers its refusal, naming it",
+            r.status == 500 && r.body["error"] == "schema_refused" && r.body["message"].as_str().is_some_and(|m| m.starts_with(&format!("Fragment {reset_id}")) && m.contains("reset required")),
+            &r,
+        );
+        let stranger = api.person()?;
+        let refused = [wake(&operator, "Principal", &woken_id)?, wake(&operator, "Fragment", "nope")?, wake(&operator, "Nope", &woken_id)?, wake(&stranger, "Fragment", &woken_id)?];
+        s.ok(
+            "a wake by an id of another class, a malformed id or no class is refused (400); anyone but an operator 403",
+            refused.iter().map(|r| r.status).collect::<Vec<_>>() == [400, 400, 400, 403],
+            json!(refused.iter().map(|r| format!("{} {}", r.status, r.body)).collect::<Vec<_>>()),
         );
         api
     };

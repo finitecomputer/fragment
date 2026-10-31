@@ -296,6 +296,7 @@ calls the same.
 | `GET /api/admin/orgs?after=` | the same | → `AdminOrgs {orgs: [AdminOrg {id, name, createdAt, status, customer, subscription, periodEnd, cancelAtEnd, admins, paidSeats, compedSeats, pending}], next}` |
 | `GET /api/admin/health` | the same | → `AdminHealth {orgsPaying, orgsLapsed, seatsPaid, seatsComped, planPushesQueued, quantityPushesQueued, failing: [{queue, target, tries, due}], lastEventAt, oldestCopyAt}` |
 | `GET /api/admin/log?before=` | the same | → `AdminLog {entries: [{n, at, operator, action, target, detail}], next}`, newest first: every comp, trial code, pin and ledger command; the newest 10,000 kept |
+| `POST /api/admin/objects/{class}/wake` | the same | `{id}` → `{class, id, ready: true}`: starts the platform object `id` (as Cloudflare lists it) of `class` (Registry, Principal, Ledger, Fragment, Computer) as a call would, its schema made current, and answers as a deploy's probe; refused, its `schema_refused`. An id of another class 400. Not logged: it changes nothing a call would not |
 | `POST /api/admin/trials/{id}/send` | the same | `{email}` → `{sent, to}`: mails the code and `/welcome?trial=<code>`; an ended code 400 |
 
 Comps, orgs and trial codes are under Seats and orgs.
@@ -1090,8 +1091,19 @@ reason (402 `budget_used_up`). A run answers `costMicros`.
   `.jpeg`), a blob from 1 MiB. `prompt` 1 to 2048 characters, `steps` 1 to
   8 (default 4); any other key refused. An answer that is no JPEG is
   refused and charged nothing (`ai.image-refused`).
-- `job.ai.video(…)` is refused: "video steps are off until they run on
-  Cloudflare" (debt ledger).
+- `job.ai.video({prompt, path, duration?, resolution?, aspect_ratio?})`
+  → `{path, size, sha256, mediaType, lengthMs}`: an MP4 written to `main`
+  at `path` (ending `.mp4`), a blob from 1 MiB, made by HappyHorse 1.0
+  (`alibaba/hh1-t2v`, Cloudflare's model catalog, zero data retention)
+  through the deployment's AI Gateway. `prompt` 1 to 2500 characters,
+  `duration` 3 to 15 seconds (default 5), `resolution` `720p` (the
+  default) or `1080p`, `aspect_ratio` `16:9` (the default), `9:16`,
+  `1:1`, `4:3` or `3:4`; any other key refused. Charged its seconds at
+  its resolution's price as soon as the model answers with its video
+  (a step tried again reads that video, and is never made or charged
+  again); an answer with no completed video is refused and charged
+  nothing (`ai.video-refused`). Refused before any call on a deployment
+  whose tiers are private: no catalog video model is (`Models::video_refused`).
 
 A text model's 429 or 5xx is answered by the fallback model (Models), sent
 the same request; when that fails too, the step is retried. Other refusals

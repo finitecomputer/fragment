@@ -291,8 +291,12 @@ and only a `turn.step` of the same `response` says it ended, the one with
 its `tool_call_id`, else (its runtime renamed the call) the one with its
 `tool` and `args`. The provider's `tool_call_id` is no call's identity:
 some name every response's first call `call_0`. A call no step ended is
-named in the cut turn's note as one that may or may not have run. Pages
-show none yet; older bridges post none.
+named in the cut turn's note as one that may or may not have run. A page
+shows a call no step ended (#725): while its turn runs and waits on no
+one, one of the turn's latest response is running, its card's last line,
+with how long since its record; any other, and every one once the turn
+ended, "May have run", where it was asked for. Its step takes its place.
+Older bridges post none.
 
 **`turn.prompt`**, part `p:<prompt>`: a card, a question in plain words.
 

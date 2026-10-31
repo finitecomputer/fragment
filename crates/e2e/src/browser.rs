@@ -28,9 +28,7 @@ use serde_json::{json, Value};
 use tungstenite::stream::MaybeTlsStream;
 use tungstenite::{Message, WebSocket};
 
-/// Chrome starts tried before a lane gives up on it, and how long each may
-/// take to answer on its DevTools port.
-const CHROME_STARTS_MAX: u32 = 2;
+/// How long Chrome may take to answer on its DevTools port.
 const CHROME_START_WAIT: Duration = Duration::from_secs(30);
 /// How long a reloaded page has to load its new document, resources and
 /// all (`reload`), and how many reloads it is given.
@@ -228,6 +226,18 @@ fn without_surrogates(t: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+/// The DevTools port a Chrome started with `--remote-debugging-port=0`
+/// bound, as it writes it in its profile (`DevToolsActivePort`: the port,
+/// then its browser's path); none until it has.
+fn devtools_port(profile: &Path) -> Option<u16> {
+    let text = std::fs::read_to_string(profile.join("DevToolsActivePort")).ok()?;
+    let mut lines = text.lines();
+    let port = lines.next()?.trim().parse().ok().filter(|p| *p != 0)?;
+    // both lines, so a file read as it was written is not taken
+    lines.next().filter(|path| path.starts_with("/devtools/browser/"))?;
+    Some(port)
+}
+
 pub(crate) fn chrome() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("CHROME_BIN") {
         return Some(PathBuf::from(p));
@@ -248,17 +258,7 @@ impl Browser {
     /// `preferences` (Chrome's own settings file) in its profile first.
     pub fn launch_with(scratch: &Path, args: &[&str], preferences: Option<&Value>) -> Result<Option<Browser>> {
         let Some(bin) = chrome() else { return Ok(None) };
-        // a start that never comes up (a slow runner, a port taken between
-        // free_port and Chrome's bind) is tried once more, on a fresh port
-        let mut tries = 0;
-        let (child, url, profile) = loop {
-            tries += 1;
-            match Browser::start(&bin, scratch, args, preferences) {
-                Ok(started) => break started,
-                Err(e) if tries < CHROME_STARTS_MAX => eprintln!("      (Chrome did not come up, trying again: {e:#})"),
-                Err(e) => return Err(e),
-            }
-        };
+        let (child, url, profile) = Browser::start(&bin, scratch, args, preferences)?;
         let (ws, _) = tungstenite::connect(url.as_str())?;
         if let MaybeTlsStream::Plain(s) = ws.get_ref() {
             s.set_read_timeout(Some(Duration::from_secs(30)))?;
@@ -270,8 +270,7 @@ impl Browser {
     /// profile, whose `chrome.log` keeps what it said (a start that fails
     /// says why).
     fn start(bin: &Path, scratch: &Path, args: &[&str], preferences: Option<&Value>) -> Result<(Child, String, PathBuf)> {
-        let port = fragment_devstack::free_port()?;
-        let profile = scratch.join(format!("chrome-{port}"));
+        let profile = scratch.join(format!("chrome-{}", fragment_devstack::random_hex(4)));
         std::fs::create_dir_all(profile.join("Default"))?;
         if let Some(p) = preferences {
             std::fs::write(profile.join("Default/Preferences"), p.to_string())?;
@@ -281,7 +280,10 @@ impl Browser {
             .args(args)
             .args([
                 "--headless=new",
-                &format!("--remote-debugging-port={port}"),
+                // a port of its own picking, which it writes in its profile
+                // (`DevToolsActivePort`): one picked for it and let go
+                // before it bound could be another socket's by then
+                "--remote-debugging-port=0",
                 &format!("--user-data-dir={}", profile.display()),
                 "--no-first-run",
                 "--no-default-browser-check",
@@ -307,20 +309,22 @@ impl Browser {
         let t0 = Instant::now();
         let said = || std::fs::read_to_string(profile.join("chrome.log")).unwrap_or_default().lines().rev().take(5).collect::<Vec<_>>().join(" | ");
         loop {
-            let found = reqwest::blocking::get(format!("http://127.0.0.1:{port}/json/version"))
-                .ok()
-                .and_then(|r| r.json::<Value>().ok())
-                .and_then(|v| v["webSocketDebuggerUrl"].as_str().map(str::to_string));
+            let found = devtools_port(&profile).and_then(|port| {
+                reqwest::blocking::get(format!("http://127.0.0.1:{port}/json/version"))
+                    .ok()
+                    .and_then(|r| r.json::<Value>().ok())
+                    .and_then(|v| v["webSocketDebuggerUrl"].as_str().map(str::to_string))
+            });
             if let Some(u) = found {
                 return Ok((child, u, profile));
             }
             if let Ok(Some(status)) = child.try_wait() {
-                bail!("Chrome exited ({status}) before its DevTools endpoint came up on :{port}: {}", said());
+                bail!("Chrome exited ({status}) before its DevTools endpoint came up: {}", said());
             }
             if t0.elapsed() > CHROME_START_WAIT {
                 let _ = child.kill();
                 let _ = child.wait();
-                bail!("Chrome's DevTools endpoint did not come up on :{port} in {CHROME_START_WAIT:?}: {}", said());
+                bail!("Chrome's DevTools endpoint did not come up in {CHROME_START_WAIT:?} (its port: {:?}): {}", devtools_port(&profile), said());
             }
             std::thread::sleep(Duration::from_millis(100));
         }
@@ -914,6 +918,44 @@ mod tests {
         assert_eq!((c["name"].as_str(), c.get("secure")), (Some("fragment_session"), None));
         let c = cookie("https://e2e.finite.place/", "theme", "dark");
         assert_eq!((c["name"].as_str(), c.get("secure")), (Some("theme"), None));
+    }
+
+    /// Chrome's own port is read from its profile once it has written it
+    /// whole: the port, then its browser's path. A file not there yet, one
+    /// line of it, a port 0 or no number, and another path are none.
+    #[test]
+    fn chromes_port_is_read_from_its_profile() {
+        let dir = std::env::temp_dir().join(format!("e2e-devtools-port-{}", fragment_devstack::random_hex(4)));
+        std::fs::create_dir_all(&dir).unwrap();
+        let with = |text: &str| {
+            std::fs::write(dir.join("DevToolsActivePort"), text).unwrap();
+            devtools_port(&dir)
+        };
+        assert_eq!(devtools_port(&dir), None, "not written yet");
+        assert_eq!(with("40123\n/devtools/browser/0e1f-a2b3"), Some(40123));
+        assert_eq!(with("40123\n/devtools/browser/0e1f-a2b3\n"), Some(40123));
+        for half in ["40123", "40123\n", "0\n/devtools/browser/0e1f", "port\n/devtools/browser/0e1f", "40123\n/devtools/page/0e1f"] {
+            assert_eq!(with(half), None, "{half:?}");
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Chromes started together each answer on the port each picked and
+    /// wrote, never another's. By hand, with a Chrome:
+    /// `cargo test -p fragment-e2e chromes_started_together -- --ignored`.
+    #[test]
+    #[ignore = "needs Chrome"]
+    fn chromes_started_together_each_answer_on_their_own_port() {
+        let scratch = std::env::temp_dir().join(format!("e2e-chromes-{}", fragment_devstack::random_hex(4)));
+        std::fs::create_dir_all(&scratch).unwrap();
+        let started: Vec<Browser> = std::thread::scope(|s| {
+            let starts: Vec<_> = (0..4).map(|_| s.spawn(|| Browser::launch(&scratch).expect("Chrome starts").expect("a Chrome"))).collect();
+            starts.into_iter().map(|t| t.join().expect("a start")).collect()
+        });
+        let ports: std::collections::BTreeSet<u16> = started.iter().map(|b| devtools_port(&b.profile).expect("its port")).collect();
+        assert_eq!(ports.len(), started.len(), "each its own port: {ports:?}");
+        drop(started);
+        let _ = std::fs::remove_dir_all(&scratch);
     }
 
     /// A message serde_json reads is read as it is; one holding a body's
