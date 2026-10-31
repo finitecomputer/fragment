@@ -1194,7 +1194,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     // hello shown once it is open: no frame of it before)
     let first_title = row.as_str().unwrap_or("").to_string();
     let me = Person { session: &session, first: &first_label, first_title: &first_title };
-    b.click(&page, &format!("#chats [data-key={}]", js(&format!("chat:{reader_chat}"))))?;
+    click_chat(&mut b, &page, &reader_chat)?;
     b.until(&page, "document.getElementById('chat-title').textContent === 'Reader'", wait);
     let _ = s.eventually(wait, || b.eval_in_frame(&page, &reader_chat, "!!document.querySelector('.msg.agent:not(.streaming)')").ok() == Some(Value::Bool(true)));
     unread_ui(s, api, &mut b, &page, &me, &reader_chat, &shots)?;
@@ -2654,11 +2654,26 @@ const OLD_NAME_SWEEP: &str = r#"(old) => {
 
 /// Opens `chat` from its row in the sidebar, as a person picks it (a
 /// reload, or /, opens the newest chat: maybe another).
+/// Every section's More pressed (Paul, 2026-10-31: a section shows its
+/// first five chats): its chats past them shown, as the person would.
+const UNFOLD: &str = "[...document.querySelectorAll('#chats .more-row[aria-expanded=\"false\"]')].forEach((m) => m.click())";
+
+/// A chat's row clicked, its section unfolded first when it is past the
+/// five it shows.
+fn click_chat(b: &mut Browser, page: &Page, chat: &str) -> Result<()> {
+    let row = format!("#chats [data-key={}]", js(&format!("chat:{chat}")));
+    if b.eval(page, &format!("!document.querySelector({})", js(&row)))? == true {
+        b.eval(page, &format!("({UNFOLD}, true)"))?;
+        b.until(page, &format!("!!document.querySelector({})", js(&row)), std::time::Duration::from_secs(5));
+    }
+    b.click(page, &row)
+}
+
 fn open_row(b: &mut Browser, page: &Page, chat: &str, wait: std::time::Duration) -> Result<()> {
     let row = format!("document.querySelector({})", js(&format!("#chats [data-key={}]", js(&format!("chat:{chat}")))));
     let open = format!("location.pathname === '/' && [...document.querySelectorAll('#frames iframe')].find((f) => !f.hidden)?.dataset.fragment === {}", js(chat));
     if b.eval(page, &format!("!!({open})"))? != true {
-        b.eval(page, &format!("({row}?.querySelector('.chat-open')?.click(), true)"))?;
+        b.eval(page, &format!("(!{row} && {UNFOLD}, {row}?.querySelector('.chat-open')?.click(), true)"))?;
     }
     anyhow::ensure!(b.until(page, &open, wait), "{chat} opened from its row");
     Ok(())
@@ -5180,7 +5195,7 @@ fn groups_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person
     s.ok("Unarchive, from its ⋯, brings it back", unarchived && back, "");
 
     // the phone's picture below is of the Reader's chat
-    b.click(page, &format!("#chats [data-key={}]", js(&format!("chat:{}", own_named(api, me.session, "reader-chat")?))))?;
+    click_chat(b, page, &own_named(api, me.session, "reader-chat")?)?;
     Ok(())
 }
 
@@ -5231,7 +5246,7 @@ fn unread_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person
         json!({ "before": before, "now": unread_of(api, me.session, &first), "badge": b.eval(page, &format!("{row}?.querySelector('.unread')?.textContent ?? null"))? }),
     );
     // opened: seen, here and in their list
-    b.click(page, &format!("#chats [data-key={}]", js(&format!("chat:{first}"))))?;
+    click_chat(b, page, &first)?;
     let gone = b.until(page, &format!("{row} && !{row}.querySelector('.unread')"), wait);
     let cleared = s.eventually(wait, || unread_of(api, me.session, &first) == 0);
     s.ok("opening it marks it seen: its badge goes, and their list counts nothing on it", gone && cleared, json!({ "unread": unread_of(api, me.session, &first) }));
@@ -5242,7 +5257,7 @@ fn unread_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person
     let shown = s.eventually(wait, || b.eval_in_frame(page, &first, "document.body.innerText").ok().and_then(|v| v.as_str().map(|t| t.matches(more).count() >= 2)).unwrap_or(false));
     let none = s.eventually(wait, || unread_of(api, me.session, &first) == 0) && b.eval(page, &format!("!{row}.querySelector('.unread')"))? == true;
     s.ok("the chat open, on screen, counts nothing as its messages come (marked seen again)", sent && answered && shown && none, json!({ "unread": unread_of(api, me.session, &first) }));
-    b.click(page, &format!("#chats [data-key={}]", js(&format!("chat:{reader_chat}"))))?;
+    click_chat(b, page, &reader_chat)?;
     b.until(page, &format!("document.getElementById('chat-title').textContent === 'Reader' && {}", js(reader_chat) + " === [...document.querySelectorAll('#frames iframe')].find((f) => !f.hidden)?.dataset.fragment"), wait);
     Ok(())
 }
@@ -5345,7 +5360,7 @@ fn new_chat_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Pers
     );
     // from the Reader's chat, their main agent's New chat opens that empty
     // chat again, not another
-    b.click(page, &format!("#chats [data-key={}]", js(&format!("chat:{reader_chat}"))))?;
+    click_chat(b, page, &reader_chat)?;
     b.until(page, "document.getElementById('chat-title').textContent === 'Reader'", wait);
     for scheme in ["light", "dark"] {
         b.color_scheme(page, scheme)?;
@@ -5377,7 +5392,7 @@ fn new_chat_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Pers
     anyhow::ensure!(r.status == 200, "the Reader's new chat archived: {r}");
     let own = own_named(api, me.session, &own_chat)?;
     s.ok("the agent's own chat keeps its label, apart from the new ones", label_of(&own) == own_chat && label_of(&fresh) == format!("{own_chat}-2"), json!([own, fresh]));
-    b.click(page, &format!("#chats [data-key={}]", js(&format!("chat:{reader_chat}"))))?;
+    click_chat(b, page, &reader_chat)?;
     b.until(page, "document.getElementById('chat-title').textContent === 'Reader'", wait);
     Ok(())
 }
@@ -7174,7 +7189,7 @@ fn roster_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person
     let (reader, first) = (ids[0].clone(), ids[1].clone());
     let chat = own_named(api, me.session, "reader-chat")?;
     let host = chat.clone();
-    b.click(page, &format!("#chats [data-key={}]", js(&format!("chat:{chat}"))))?;
+    click_chat(b, page, &chat)?;
     let want = json!([{ "agent": reader, "outside": false }, { "agent": first, "outside": true }]);
     let listed = mentions_until(s, b, page, &host, "@", &want, wait);
     let placeholder = b.eval_in_frame(page, &host, "document.getElementById('text')?.placeholder ?? null").unwrap_or(Value::Null);
@@ -7327,7 +7342,7 @@ fn roster_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person
     if composed {
         b.eval_in_frame(page, &chosen, "(() => { const t = document.getElementById('text'); t.value = ''; t.dispatchEvent(new Event('input', { bubbles: true })); return true; })()")?;
     }
-    b.click(page, &format!("#chats [data-key={}]", js(&format!("chat:{chat}"))))?;
+    click_chat(b, page, &chat)?;
     Ok(())
 }
 
