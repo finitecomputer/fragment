@@ -839,7 +839,7 @@ struct Doors<'a> {
 /// named. Only its owner's words are its owner's: the agent, acting for its
 /// owner, sets none of its secrets, writes it no page, gets no token to
 /// push its code, and shares it no way (visibility, invite, share link),
-/// as it still shares its owner's own chat; a delivery without the webhook's secret, a stranger's
+/// as it still shares its owner's other fragments; a delivery without the webhook's secret, a stranger's
 /// message, an update again, a message while the deployment has it off, and
 /// one once its owner unlinked it (from its page) reach no one; and a fork
 /// lets its binding go for good. Answers the replies its agent's pokes made
@@ -978,20 +978,22 @@ fn telegram_checks(s: &mut Suite, api: &Api, c: &Doors, fetched: &dyn Fn(&Suite,
     let said = fetched(s, 439, &format!("door poke {name} status"))?;
     pokes += 1;
     s.ok("the agent, acting for its owner, is shown no share link of its owner's connector", said == "door poked status", &said);
-    // on its owner's own chat, no connector, it still shares for them
+    // on another fragment of its owner's, no connector, it still shares
+    // for them
+    let plain = s.named(api, c.owner, "plain")?;
+    s.create(api, c.owner, &plain)?;
+    let r = api.signed(c.owner, "PUT", &format!("/api/f/{plain}/members/{}", c.identity), Some(&json!({ "role": "viewer" })))?;
+    anyhow::ensure!(r.status == 200, "the agent a viewer of its owner's fragment: {r}");
     let mut shared = vec![];
     for (n, what) in [(440, "visibility"), (441, "invite"), (442, "rotate"), (443, "status")] {
-        shared.push(fetched(s, n, &format!("door poke {} {what}", c.chat))?);
+        shared.push(fetched(s, n, &format!("door poke {plain} {what}"))?);
         pokes += 1;
     }
-    let restored = api.signed(c.owner, "PUT", &format!("/api/f/{}/visibility", c.chat), Some(&json!({ "visibility": "members" })))?;
-    let revoked = api.signed(c.owner, "DELETE", &format!("/api/f/{}/invites/poked@e2e.test", c.chat), None)?;
     s.ok(
-        "on its owner's chat, no connector, the agent acting for them sets its visibility, invites, renews its share link and is shown it",
+        "on its owner's other fragment, no connector, the agent acting for them sets its visibility, invites, renews its share link and is shown it",
         shared[..2] == ["door poked visibility", "door poked invite"] && shared[2..] == ["door poked rotate, its share link shown", "door poked status, its share link shown"],
-        json!({ "shared": shared, "restored": restored.status, "revoked": revoked.status }),
+        json!(shared),
     );
-    anyhow::ensure!(restored.status == 200 && revoked.status == 200, "the chat shared back as it was: {restored} {revoked}");
     // nor, as itself, a viewer of it; and no one is made more than a viewer
     // of a connector, so its members list says the role that counts
     let made_editor = api.signed(c.owner, "PUT", &format!("/api/f/{name}/members/{}", c.identity), Some(&json!({ "role": "editor" })))?;
