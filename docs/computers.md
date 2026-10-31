@@ -620,8 +620,14 @@ agent; their account pays.
 
 What our Hermes image guarantees beyond the contract:
 
-- **One profile per agent**, named as its agent fragment, holding its
-  `SOUL.md`, `memories/` and `skills/`, synced both ways with it.
+- **One profile per agent of Hermes'**, named as its agent fragment,
+  holding its `SOUL.md`, `memories/` and `skills/`, synced both ways with
+  it. An agent whose `agent.json` names another runtime (Claude) has no
+  profile, desktop, route or sync: the boot reads `runtime` as the bridge
+  does (`with_runtimes`), and the ready file names it at once, for the
+  bridge to run on its runtime. One switched to another runtime while
+  the computer runs loses its desktop within 10 s, its profile retired at
+  the next start; switched back, its profile is written again.
 - **Its `agent.json`**, read at boot and every 10 s while awake (a change
   is the next turn's, nothing restarted): `tier` (`cheap` unless it says
   `medium`; `high` only with `FRAGMENT_HIGH_TIER=on`, decision 23),

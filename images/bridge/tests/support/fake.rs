@@ -362,6 +362,18 @@ impl Fake {
         });
     }
 
+    /// `add_agent`, its `agent.json` already `agent_json` when the computer
+    /// lists it: its runtime is read with it, never before it.
+    pub fn add_agent_with(&self, label: &str, agent_json: &str) {
+        self.with(|w| {
+            let (fragment, identity) = (format!("{label}--k3x9"), format!("npub1{label}"));
+            let mut f = agent_fragment(&identity);
+            f.files.insert("agent.json".into(), bytes::Bytes::from(agent_json.to_string()));
+            w.fragments.insert(fragment, f);
+            w.computer["agents"].as_array_mut().expect("the computer's agents").push(agent_view(label));
+        });
+    }
+
     /// Unassigns the agent `label` from the computer.
     pub fn remove_agent(&self, label: &str) {
         let fragment = format!("{label}--k3x9");
