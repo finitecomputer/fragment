@@ -1363,10 +1363,10 @@ impl Engine {
     /// The lane is done with one of a turn's owed records; a turn that owes
     /// none is let go. Done means answered (appended, a replay, or refused:
     /// a 409 is another life's end of the turn, a 403/404 a chat it may no
-    /// longer post in) or given up after the lane's tries (docs/bridge.md:
-    /// `POST_TRIES_MAX`, with jitter, on a transport error, 429 or 5xx), so
-    /// a record that keeps failing holds its turn for one life's tries at
-    /// most, then goes.
+    /// longer post in) or given up after the lane's tries
+    /// (`limits::POST_TRIES_MAX`, with jitter, on a transport error, 429 or
+    /// 5xx), so a record that keeps failing holds its turn for one life's
+    /// tries at most, then goes.
     fn posted(&mut self, id: &str, post: &str, kept: bool) {
         let Some(t) = self.state.turns.get_mut(id) else {
             crate::ev!("owed.stale", { "turn": id, "id": post, "why": "no turn held by that id" });

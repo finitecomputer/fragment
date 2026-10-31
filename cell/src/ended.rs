@@ -169,6 +169,8 @@ struct Stored {
     npub: String,
     facet: String,
     attempts: i64,
+    /// It may have written its search index (searchable.rs).
+    search: i64,
 }
 
 impl FragmentCell {
@@ -185,8 +187,8 @@ impl FragmentCell {
     /// `end_life`, its agent recorded to leave its computer and the
     /// registry's names (`agent`), or not (a wipe's, which empties both).
     fn end(&self, agent: bool) -> CellResult<Ended> {
-        let [name, created_at, owner, npub, version, identity, computer] =
-            self.metas([MetaKey::Name, MetaKey::CreatedAt, MetaKey::Owner, MetaKey::Npub, MetaKey::IndexVersion, MetaKey::AgentIdentity, MetaKey::Computer])?;
+        let [name, created_at, owner, npub, version, identity, computer, search] =
+            self.metas([MetaKey::Name, MetaKey::CreatedAt, MetaKey::Owner, MetaKey::Npub, MetaKey::IndexVersion, MetaKey::AgentIdentity, MetaKey::Computer, MetaKey::Search])?;
         let name = name.ok_or_else(|| missing(MetaKey::Name))?;
         let incarnation: i64 = created_at.and_then(|c| c.parse().ok()).ok_or_else(|| missing(MetaKey::CreatedAt))?;
         let owner = owner.ok_or_else(|| missing(MetaKey::Owner))?;
@@ -200,6 +202,12 @@ impl FragmentCell {
              ON CONFLICT (incarnation) DO NOTHING",
             vec![SqlStorageValue::Integer(incarnation), name.as_str().into(), npub.into(), facet.as_str().into(), now.clone(), now.clone()],
         )?;
+        // its search index, if it may have written one, ends with it
+        // (searchable.rs); recorded where step 5 made the column (an object
+        // that refuses its schema still ends, its tables as they are)
+        if search.is_some() && self.ended_records_search()? {
+            self.exec("UPDATE ended SET search = 1 WHERE incarnation = ?", vec![SqlStorageValue::Integer(incarnation)])?;
+        }
         // every member's list, and any a change still waits for (a member
         // removed whose list was not told yet)
         self.exec(
@@ -344,12 +352,24 @@ impl FragmentCell {
         }
     }
 
+    /// Whether its ended lives record their search indexes (`ended.search`,
+    /// Fragment step 5): an object that refuses its schema may hold step
+    /// 1's `ended`, and ends all the same.
+    fn ended_records_search(&self) -> CellResult<bool> {
+        Ok(!self.rows("SELECT 1 FROM pragma_table_info('ended') WHERE name = 'search'", vec![])?.is_empty())
+    }
+
     /// Deletes the app facet's database and the blobs of each ended life
     /// due, at most `BLOB_PAGES_PER_PASS` pages of blobs each: one with
     /// more is due again at once.
     async fn clear_ended(&self) {
+        let search = match self.ended_records_search() {
+            Ok(true) => "search",
+            Ok(false) => "0 AS search",
+            Err(e) => return console_error!("the ended lives did not read ({:?}): {}", e.code, e.message),
+        };
         let due: Vec<Stored> = match self.typed(
-            "SELECT incarnation, name, npub, facet, attempts FROM ended WHERE stored = 1 AND next_at <= ? ORDER BY next_at LIMIT ?",
+            &format!("SELECT incarnation, name, npub, facet, attempts, {search} FROM ended WHERE stored = 1 AND next_at <= ? ORDER BY next_at LIMIT ?"),
             vec![SqlStorageValue::Integer(js::now_ms()), SqlStorageValue::Integer(CLEARED_PER_PASS)],
         ) {
             Ok(due) => due,
@@ -358,8 +378,11 @@ impl FragmentCell {
         for s in due {
             let cleared = async {
                 js::delete_app_facet(&self.raw, &s.facet).await?;
-                // its search index, with its database (searchable.rs)
-                self.search_drop(s.incarnation).await?;
+                // its search index, with its database, if it wrote one
+                // (searchable.rs): a life that never did wakes none
+                if s.search == 1 {
+                    self.search_drop(s.incarnation).await?;
+                }
                 self.delete_blobs_under(&format!("{}/", s.npub), BLOB_PAGES_PER_PASS).await
             }
             .await;

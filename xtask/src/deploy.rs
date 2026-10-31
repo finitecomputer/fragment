@@ -45,13 +45,6 @@ use fragment_devstack as devstack;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SearchDeploy {
-    url: String,
-    token: String,
-}
-
 /// A deployment's settings (its config file). Unknown keys are refused, so
 /// a misspelt one never silently does nothing.
 #[derive(Deserialize)]
@@ -107,11 +100,6 @@ struct Deployment {
     /// model or body the cell would refuse is refused before a deploy, as
     /// is an OpenAI-compatible API without a key, and slots past a Workers
     /// variable's 5 KB.
-    /// Its search service (search/README.md), when it has one: where the
-    /// service listens, `url`, and its token's name in the store, `token`
-    /// (`FRAGMENT_SEARCH_URL`, `SEARCH_TOKEN`). None: no search.
-    #[serde(default)]
-    search: Option<SearchDeploy>,
     models: Option<Value>,
     /// A new person's plan: `guest` (the default), `seat`, or `seat_always_on`.
     default_plan: Option<String>,
@@ -393,7 +381,6 @@ fn bound_for(d: &Deployment, branch: Option<&str>) -> Result<devstack::store::Bo
         operator_keys,
         connection_secrets,
         model_keys,
-        search_token: d.search.as_ref().map(|s| s.token.clone()),
     })
 }
 
@@ -421,9 +408,6 @@ fn named_secrets(b: &devstack::store::Bound) -> Vec<(String, &str)> {
             Some((field, _)) => field.push_str(&format!(", models.{slot}.key")),
             None => named.push((format!("models.{slot}.key"), name.as_str())),
         }
-    }
-    if let Some(name) = &b.search_token {
-        named.push(("search.token".into(), name.as_str()));
     }
     for (provider, name) in &b.operator_keys {
         named.push((format!("providers: {provider}'s key"), name.as_str()));
@@ -929,13 +913,18 @@ impl crate::rollout::Platform for Cloudflare<'_> {
 /// (`FRAGMENT_SCHEMA`): the first 16 hex digits of the SHA-256 of the
 /// lock the compiled steps make (`fragment_core::migrate::host::
 /// platform_lock`: every class's steps, applied to a new object), never of
-/// the lock file, which a hand deploy's tree may hold stale. The cell this
-/// deploy ships is built from the same crates. A release is rolled back
-/// only to one of the same (rollout.rs): an object that ran a newer step
-/// refuses older code (docs/MODEL.md, Schemas).
-fn schema_id() -> Result<String> {
+/// the lock file, which a hand deploy's tree may hold stale, and of the
+/// tag of the Worker's last Durable Object migration (`cell`'s
+/// `migrations`): a class made, renamed or deleted changes what the
+/// objects are with no step. The cell this deploy ships is built from the
+/// same crates and config. A release is rolled back only to one of the
+/// same (rollout.rs): an object that ran a newer step refuses older code
+/// (docs/MODEL.md, Schemas), and older code has no class a newer migration
+/// made.
+fn schema_id(cell: &Value) -> Result<String> {
     let lock = fragment_core::migrate::host::platform_lock().map_err(|e| anyhow::anyhow!("the Durable Objects' steps do not apply to a new object: {e}"))?;
-    Ok(fragment_core::blob::sha256_hex(lock.as_bytes())[..16].to_string())
+    let tag = cell["migrations"].as_array().and_then(|m| m.last()).and_then(|m| m["tag"].as_str()).context("cell/wrangler.jsonc's migrations end with a tag")?;
+    Ok(fragment_core::blob::sha256_hex(format!("{lock}migration {tag}\n").as_bytes())[..16].to_string())
 }
 
 /// Runs `cmd` (no stdin) to its end, its output passed through to this
@@ -1199,7 +1188,7 @@ pub fn deploy(rest: &[String]) -> Result<()> {
         Some(_) => Err(format!("this deploy made {}'s Stripe webhook endpoint anew and deleted the one before, whose signing secret the release before holds: rolled back, every webhook would fail its signature", crate::stripe::endpoint_url(&platform_url))),
         None => Ok(()),
     };
-    let outcome = crate::rollout::run(&mut platform, &mut crate::prepare::Wall::new(), deploy_id, &schema_id()?, rollback)?;
+    let outcome = crate::rollout::run(&mut platform, &mut crate::prepare::Wall::new(), deploy_id, &schema_id(&cell)?, rollback)?;
     drop(reading);
     drop(test_secrets);
     outcome.result()?;
@@ -1221,6 +1210,7 @@ fn worker_config(d: &Deployment, n: &Names, store_id: &str, release: &Release, r
     let (catalog, _) = catalog_of(d)?;
     let platform_url = format!("https://{}", n.platform_host);
     let mut cell = devstack::read_config(&root.join("cell"))?;
+    let schema = schema_id(&cell)?;
     let c = cell.as_object_mut().context("cell/wrangler.jsonc is an object")?;
     c.remove("build");
     c.insert("name".into(), json!(n.cell));
@@ -1284,7 +1274,7 @@ fn worker_config(d: &Deployment, n: &Names, store_id: &str, release: &Release, r
         "FRAGMENT_DEPLOY_ID": release.id,
         "FRAGMENT_DEPLOYED_AT": release.deployed_at.to_string(),
         // read back by the next deploy, which goes back to this release only at its schema (rollout.rs)
-        "FRAGMENT_SCHEMA": schema_id()?,
+        "FRAGMENT_SCHEMA": schema,
         "FRAGMENT_HOST_SUFFIX": n.suffix,
         "FRAGMENT_PLATFORM_URL": platform_url,
         "CODESTORAGE_ORG": d.codestorage.org,
@@ -1327,11 +1317,6 @@ fn worker_config(d: &Deployment, n: &Names, store_id: &str, release: &Release, r
     }
     if let (Some(models), _) = models_of(d)? {
         v.insert("FRAGMENT_MODELS".into(), Value::String(models.to_string()));
-    }
-    if let Some(s) = &d.search {
-        let host = s.url.strip_prefix("https://").unwrap_or("");
-        anyhow::ensure!(!host.is_empty() && !s.url.contains('?') && !s.url.ends_with('/'), "search.url is the service's https URL, no query or trailing /: {}", s.url);
-        v.insert("FRAGMENT_SEARCH_URL".into(), json!(s.url));
     }
     if let Some(computers) = &d.computers {
         v.insert("FRAGMENT_COMPUTER_IMAGE".into(), json!(computers.default_image));
@@ -1507,7 +1492,7 @@ mod tests {
         assert_eq!(variable(&version, "FRAGMENT_SCHEMA").as_deref(), Some("5c1e3b0f2a9d4e61"));
         assert_eq!(variable(&version, "HOST_SECRET"), None, "a secret is no variable");
         assert_eq!(variable(&json!({}), "FRAGMENT_DEPLOY_ID"), None);
-        let schema = schema_id().unwrap();
+        let schema = schema_id(&devstack::read_config(&devstack::repo_root().join("cell")).unwrap()).unwrap();
         assert!(schema.len() == 16 && schema.bytes().all(|b| b.is_ascii_hexdigit()), "{schema}");
     }
 
@@ -1521,14 +1506,36 @@ mod tests {
     fn a_release_names_the_schema_its_code_runs_not_its_lock_file() {
         use fragment_core::migrate::{host, CLASSES};
         let made = host::platform_lock().unwrap();
-        assert_eq!(schema_id().unwrap(), fragment_core::blob::sha256_hex(made.as_bytes())[..16]);
+        let cell = devstack::read_config(&devstack::repo_root().join("cell")).unwrap();
+        let tag = cell["migrations"].as_array().and_then(|m| m.last()).and_then(|m| m["tag"].as_str()).unwrap().to_string();
+        let fingerprint = fragment_core::blob::sha256_hex(format!("{made}migration {tag}\n").as_bytes())[..16].to_string();
+        assert_eq!(schema_id(&cell).unwrap(), fingerprint);
         let file = fs::read_to_string(devstack::repo_root().join(host::LOCK_PATH)).unwrap();
         assert_eq!(file, made, "the tree's lock is current (cargo xtask check holds it)");
         // the lock as a tree whose newest step was never locked holds it
         let newest = file.lines().rfind(|l| l.starts_with("step ")).expect("a locked step").to_string();
         let stale: String = file.lines().filter(|l| *l != newest).map(|l| format!("{l}\n")).collect();
         assert!(!host::drift(&stale, &CLASSES).is_empty(), "a lock missing a step is drift: {newest}");
-        assert_eq!(schema_id().unwrap(), fragment_core::blob::sha256_hex(made.as_bytes())[..16], "and the fingerprint is the code's still");
+        assert_eq!(schema_id(&cell).unwrap(), fingerprint, "and the fingerprint is the code's still");
+    }
+
+    /// Goal: a class made, renamed or deleted (a Durable Object migration,
+    /// with no schema step) is forward only, as a step is: the release
+    /// before has no class the migration made, so a failed deploy does not
+    /// go back to it. Method: the tree's config with one migration more
+    /// names another schema (one rollout.rs never goes back across:
+    /// `a_release_whose_schema_moved_is_never_rolled_back`); the same
+    /// config names the same; one with no migration none.
+    #[test]
+    fn a_durable_object_migration_is_a_new_schema() {
+        let cell = devstack::read_config(&devstack::repo_root().join("cell")).unwrap();
+        let mut moved = cell.clone();
+        moved["migrations"].as_array_mut().unwrap().push(json!({ "tag": "e2e-next", "new_sqlite_classes": ["Probe"] }));
+        assert_eq!(schema_id(&cell).unwrap(), schema_id(&cell.clone()).unwrap(), "a deploy of the same tree is the same schema");
+        assert_ne!(schema_id(&moved).unwrap(), schema_id(&cell).unwrap(), "a new migration is a new schema, with no step");
+        let mut none = cell.clone();
+        none.as_object_mut().unwrap().remove("migrations");
+        assert!(schema_id(&none).is_err(), "a Worker config with no migration names no schema");
     }
 
     /// A try's output is passed through whole, and only its end is kept
@@ -1580,7 +1587,7 @@ mod tests {
         assert_eq!(vars["FRAGMENT_DEPLOY_ID"], "abc123");
         assert_eq!(vars["FRAGMENT_DEPLOYED_AT"], "1792615843", "a Worker variable is a string");
         assert_eq!(vars["FRAGMENT_DEPLOYED_AT"].as_str().and_then(fragment_core::release::deployed), Some(1_792_615_843));
-        assert_eq!(vars["FRAGMENT_SCHEMA"], schema_id().unwrap(), "the schema a rollback to it is checked against");
+        assert_eq!(vars["FRAGMENT_SCHEMA"], schema_id(&devstack::read_config(&devstack::repo_root().join("cell")).unwrap()).unwrap(), "the schema a rollback to it is checked against");
         assert!(vars.get("FRAGMENT_CLI_VERSION").is_none(), "a failed or absent CLI release promises no update");
         let mut with_cli = test_release();
         with_cli.cli_version = Some("0.15.10".into());
@@ -1607,7 +1614,6 @@ mod tests {
             operators: vec![],
             ai_gateway: None,
             models: None,
-            search: None,
             default_plan: None,
             support_url: None,
             mail_from: None,
@@ -2215,29 +2221,6 @@ mod tests {
             let why = format!("{:#}", load(&config_file("mail-invalid", &v)).err().unwrap());
             assert!(why.contains("mail_from:"), "{why}");
         }
-    }
-
-    /// A deployment's search service (search/README.md): its URL in the
-    /// cell's variables, its token bound by name and nowhere else; a URL
-    /// that is not https, or ends in /, refused before anything is built.
-    #[test]
-    fn a_deployments_search_is_its_url_and_its_token() {
-        let mut d = load(&devstack::repo_root().join("deploy/example.jsonc")).unwrap();
-        d.search = Some(SearchDeploy { url: "https://search.example.internal".into(), token: "fragment-search-token".into() });
-        let n = names(&d, Some("p5")).unwrap();
-        let cell = worker_config(&d, &n, "0f0e0d0c", &test_release(), &devstack::repo_root()).unwrap();
-        assert_eq!(cell["vars"]["FRAGMENT_SEARCH_URL"], "https://search.example.internal");
-        let bindings: Vec<(&str, &str)> = cell["secrets_store_secrets"].as_array().unwrap().iter().map(|b| (b["binding"].as_str().unwrap(), b["secret_name"].as_str().unwrap())).collect();
-        assert!(bindings.contains(&("SEARCH_TOKEN", "fragment-search-token")), "{bindings:?}");
-        assert!(!cell.to_string().contains("FRAGMENT_SEARCH_TOKEN"), "the token is a binding, never a variable");
-        assert!(named_secrets(&bound(&d).unwrap()).iter().any(|(field, name)| field == "search.token" && *name == "fragment-search-token"));
-        for bad in ["http://search.example.internal", "https://search.example.internal/", "https://"] {
-            d.search = Some(SearchDeploy { url: bad.into(), token: "fragment-search-token".into() });
-            assert!(worker_config(&d, &n, "0f0e0d0c", &test_release(), &devstack::repo_root()).is_err(), "{bad}");
-        }
-        d.search = None;
-        let cell = worker_config(&d, &n, "0f0e0d0c", &test_release(), &devstack::repo_root()).unwrap();
-        assert!(cell["vars"].get("FRAGMENT_SEARCH_URL").is_none(), "unnamed: no search");
     }
 
     /// Finite's own deployment's `models` (deploy/example.jsonc; decision
