@@ -1,18 +1,30 @@
 // The brain's index upkeep (templates/brain/app.mjs) against an in-memory
 // SQLite (as a Durable Object's) and fakes of its two capabilities: the
-// files at main and the fragment's search index, the index's
-// compare-and-set (`replaces`) and its `cleared` answer included. Each test
-// sets up an interleaving the platform allows (Alex's review of #869):
-// batches side by side, a claim that lapses, a page deleted while read, an
-// index emptied by an embeddings change, a batch that fails.
+// files at main and the fragment's search index, the index's fences and
+// tombstones (cell/src/search_index.rs) and its `cleared` answer included,
+// the index answering as the `Search` capability does across Workers RPC
+// (`{answer}` or a plain `{error}`, thrown on the app's side as
+// cell/platform.mjs throws it). Each test sets up an interleaving the
+// platform allows (Alex's reviews of #869): batches side by side, a claim
+// that lapses, a page deleted or made while read, an index emptied by an
+// embeddings change, a batch that fails.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { register } from "node:module";
 import { DatabaseSync } from "node:sqlite";
 
 // the brain's base class as the platform's wrapper gives it: its env's
-// capabilities behind `files` and `searchIndex`
-const BASE = "export class DurableObject { constructor(ctx, env) { this.ctx = ctx; this.env = env; } get files() { return this.env.FILES; } get searchIndex() { return this.env.SEARCH; } }";
+// capabilities behind `files` and `searchIndex`, a refusal thrown on the
+// app's side with its fields (cell/platform.mjs, `searchIndex`)
+const BASE = `export class DurableObject {
+  constructor(ctx, env) { this.ctx = ctx; this.env = env; }
+  get files() { return this.env.FILES; }
+  get searchIndex() {
+    const cap = this.env.SEARCH;
+    const answered = async (pending) => { const { answer, error } = await pending; if (error) throw Object.assign(new Error(error.message), error); return answer; };
+    return { upsert: (s) => answered(cap.upsert(s)), delete: (d) => answered(cap.delete(d)), query: (q) => answered(cap.query(q)), status: () => answered(cap.status()) };
+  }
+}`;
 const HOOKS = `export async function resolve(specifier, context, next) {
   if (specifier === "cloudflare:workers") return { url: ${JSON.stringify("data:text/javascript," + encodeURIComponent(BASE))}, shortCircuit: true };
   return next(specifier, context);
@@ -49,69 +61,94 @@ function storage() {
   return { sql, transactionSync };
 }
 
-// The files at main: a read takes the bytes as they are when it starts, and
-// waits on the path's gate, if one is set, before it answers.
+// The files at main: a read or a listing takes them as they are when it
+// starts, and waits on the path's gate (`read:<path>`, `list:<path>`), if
+// one is set, before it answers.
 function files(initial) {
   const at = new Map(Object.entries(initial));
   const gates = new Map();
+  const wait = async (key) => {
+    const gate = gates.get(key);
+    if (gate) await gate;
+  };
   return {
     at,
-    gate(path) {
+    gate(key) {
       let open;
-      gates.set(path, new Promise((resolve) => (open = resolve)));
+      gates.set(key, new Promise((resolve) => (open = resolve)));
       return () => {
-        gates.delete(path);
+        gates.delete(key);
         open();
       };
     },
     async list(prefix) {
-      return [...at].filter(([p]) => p.startsWith(prefix)).map(([path, text]) => ({ path, size: Buffer.byteLength(text) }));
+      const listed = [...at].filter(([p]) => p.startsWith(prefix)).map(([path, text]) => ({ path, size: Buffer.byteLength(text) }));
+      await wait(`list:${prefix}`);
+      return listed;
     },
     async readBytes(path) {
       const text = at.get(path);
-      const gate = gates.get(path);
-      if (gate) await gate;
+      await wait(`read:${path}`);
       return text === undefined ? null : new TextEncoder().encode(text);
     },
   };
 }
 
-// The fragment's index: each source's revision and text, written by a
-// compare-and-set; `clearNext` makes the next write empty it first, as a
-// write in a new embeddings space does (cell/src/search_index.rs: the clear
-// comes before the comparison, and a refusal says it cleared too).
+// The fragment's index as the Search capability answers it: each source's
+// revision and text, each source's fence (kept past a delete: a
+// tombstone), a fence below the stored one refused (409 naming it);
+// `clearNext` makes the next write empty it first, as a write in a new
+// embeddings space does, its fences kept, the clear said on whatever comes
+// of the write. `forget` is the platform's own delete, which sends no fence;
+// `holdDelete` holds the next delete until it is let go.
 function index() {
   const sources = new Map();
+  const fences = new Map();
+  const refused = (code, status, extra) => ({ error: { message: code, code, status, cleared: false, fence: null, ...extra } });
   const ix = {
     sources,
+    fences,
     writes: 0,
     fail: null,
     clearNext: false,
     text: (source) => sources.get(source)?.text ?? null,
+    forget: (source) => sources.delete(source),
+    held: null,
+    holdDelete() {
+      let go;
+      ix.held = new Promise((resolve) => (go = resolve));
+      return go;
+    },
     async upsert(src) {
-      if (ix.fail?.(src)) throw Object.assign(new Error("the index did not answer"), { code: "upstream_failed", status: 502 });
+      if (ix.fail?.(src)) return refused("upstream_failed", 502);
+      const stored = fences.get(src.source);
+      if (src.fence !== undefined && stored !== undefined && src.fence < stored) return refused("conflict", 409, { fence: stored });
       let cleared = false;
       if (ix.clearNext) {
         sources.clear();
         ix.clearNext = false;
         cleared = true;
       }
-      const current = sources.get(src.source)?.revision ?? "";
-      if (src.replaces !== undefined && src.replaces !== current) {
-        throw Object.assign(new Error("the source's revision is not the one this replaces"), { code: "conflict", status: 409, current, cleared });
-      }
+      const written = sources.get(src.source)?.revision !== src.revision;
+      if (src.fence !== undefined) fences.set(src.source, Math.max(stored ?? 0, src.fence));
       ix.writes++;
       sources.set(src.source, { revision: src.revision, text: src.sections.map((s) => s.text).join("\n") });
-      return { source: src.source, revision: src.revision, written: current !== src.revision, chunks: src.sections.length, cleared };
+      return { answer: { source: src.source, revision: src.revision, written, chunks: src.sections.length, cleared } };
     },
-    async delete(source) {
-      return { source, deleted: sources.delete(source) };
+    async delete({ source, fence }) {
+      const held = ix.held;
+      ix.held = null;
+      if (held) await held;
+      const stored = fences.get(source);
+      if (fence !== undefined && stored !== undefined && fence < stored) return refused("conflict", 409, { fence: stored });
+      if (fence !== undefined) fences.set(source, Math.max(stored ?? 0, fence));
+      return { answer: { source, deleted: sources.delete(source) } };
     },
     async query() {
-      return { results: [], semantic: "off" };
+      return { answer: { results: [], semantic: "off" } };
     },
     async status() {
-      return { chunks: sources.size, chunks_split: 25000, chunks_max: 50000, semantic: "off" };
+      return { answer: { chunks: sources.size, chunks_split: 25000, chunks_max: 50000, semantic: "off" } };
     },
   };
   return ix;
@@ -152,7 +189,7 @@ it("a batch that read a page before a newer change never writes the older over i
   const { app, fs, ix } = await brain({ "w/a.md": "# A\n\nfirst" });
   fs.at.set("w/a.md", "# A\n\nsecond");
   mark(app, "w/a.md");
-  const open = fs.gate("w/a.md");
+  const open = fs.gate("read:w/a.md");
   const a = app.reindex({}, EDITOR); // reads "second", and waits
   await new Promise((r) => setImmediate(r));
   fs.at.set("w/a.md", "# A\n\nthird");
@@ -171,13 +208,13 @@ it("a batch whose claim lapsed loses to the one that took the page, whichever wr
     const { app, fs, ix } = await brain({ "w/a.md": "# A\n\nfirst" });
     fs.at.set("w/a.md", "# A\n\nsecond");
     mark(app, "w/a.md");
-    const openA = fs.gate("w/a.md");
+    const openA = fs.gate("read:w/a.md");
     const a = app.reindex({}, EDITOR); // reads "second", and waits past its claim
     await new Promise((r) => setImmediate(r));
     fs.at.set("w/a.md", "# A\n\nthird");
     mark(app, "w/a.md");
     tick(CLAIM_MS + 1);
-    const openB = fs.gate("w/a.md");
+    const openB = fs.gate("read:w/a.md");
     const b = app.reindex({}, EDITOR); // takes the lapsed claim, reads "third", and waits
     await new Promise((r) => setImmediate(r));
     if (firstWriter === "late") {
@@ -202,12 +239,12 @@ it("a page deleted while it is read is not left in the index", async () => {
     const { app, fs, ix } = await brain(fresh ? {} : { "w/a.md": "# A\n\nfirst" });
     fs.at.set("w/a.md", "# A\n\nsecond");
     mark(app, "w/a.md");
-    const open = fs.gate("w/a.md");
+    const open = fs.gate("read:w/a.md");
     const a = app.reindex({}, EDITOR);
     await new Promise((r) => setImmediate(r));
     // main deletes it: the platform forgets its source, and the trigger marks it
     fs.at.delete("w/a.md");
-    await ix.delete("w/a.md");
+    ix.forget("w/a.md");
     mark(app, "w/a.md");
     open();
     await a;
@@ -256,7 +293,7 @@ it("a batch that fails lets go of its claims, and a retry at once does the work"
   fs.at.set("w/b.md", "# B\n\ntwo");
   fs.at.set("w/c.md", "# C\n\nthree");
   mark(app, "w/b.md");
-  const open = fs.gate("w/b.md");
+  const open = fs.gate("read:w/b.md");
   const holder = app.reindex({}, EDITOR); // holds b
   await new Promise((r) => setImmediate(r));
   mark(app, "w/c.md");
@@ -293,4 +330,47 @@ it("a run that finds the rest held waits out one claim, then takes what a batch 
   // with nothing to do: two steps, no wait
   const idle = await app.changed({}, job);
   assert.deepEqual([slept, idle.steps], [1, 1]);
+});
+
+it("a write whose claim lapsed never brings back a page a newer batch deleted", async (t) => {
+  const tick = clock(t);
+  const { app, fs, ix } = await brain({});
+  fs.at.set("w/a.md", "# A\n\nnew");
+  mark(app, "w/a.md");
+  const open = fs.gate("read:w/a.md");
+  const a = app.reindex({}, EDITOR); // reads the new page, and waits past its claim
+  await new Promise((r) => setImmediate(r));
+  fs.at.delete("w/a.md");
+  ix.forget("w/a.md");
+  mark(app, "w/a.md");
+  tick(CLAIM_MS + 1);
+  await settle(app); // a newer batch takes the deletion to its end
+  open();
+  await a; // the stale write lands now, at its older fence
+  const after = await settle(app);
+  assert.equal(ix.text("w/a.md"), null, "the deleted page stays out");
+  assert.equal(after.pending, 0);
+});
+
+it("a delete whose claim lapsed never takes out the page a newer batch wrote", async (t) => {
+  const tick = clock(t);
+  const { app, fs, ix } = await brain({ "w/a.md": "# A\n\nfirst" });
+  fs.at.delete("w/a.md");
+  ix.forget("w/a.md");
+  mark(app, "w/a.md");
+  const open = fs.gate("list:w/a.md");
+  const a = app.reindex({}, EDITOR); // finds it gone, and waits past its claim
+  await new Promise((r) => setImmediate(r));
+  fs.at.set("w/a.md", "# A\n\nagain");
+  mark(app, "w/a.md");
+  tick(CLAIM_MS + 1);
+  const letGo = ix.holdDelete();
+  open();
+  await new Promise((r) => setImmediate(r)); // its delete is on its way
+  await settle(app); // a newer batch writes the page made again
+  letGo();
+  await a; // the stale delete lands now, at its older fence
+  const after = await settle(app);
+  assert.equal(ix.text("w/a.md"), "again", "the page made again stays");
+  assert.equal(after.pending, 0);
 });

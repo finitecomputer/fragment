@@ -69,6 +69,7 @@ pub fn check(up: &Upsert) -> Result<(), String> {
         named("at", a, AT_MAX_BYTES)?;
     }
     check_fields(&up.fields)?;
+    check_fence(up.fence)?;
     if up.sections.len() > wire::SECTIONS_MAX {
         return Err(format!("a source is at most {} sections, not {}", wire::SECTIONS_MAX, up.sections.len()));
     }
@@ -121,6 +122,14 @@ pub fn check_fields(fields: &std::collections::BTreeMap<String, String>) -> Resu
         }
     }
     Ok(())
+}
+
+/// A fence, if any: at most `search_index::FENCE_MAX` (JavaScript sends it).
+pub fn check_fence(fence: Option<u64>) -> Result<(), String> {
+    match fence {
+        Some(f) if f > crate::search_index::FENCE_MAX => Err(format!("a fence is 0 to {}", crate::search_index::FENCE_MAX)),
+        _ => Ok(()),
+    }
 }
 
 /// A query, checked.
@@ -251,7 +260,7 @@ mod tests {
     use serde_json::json;
 
     fn up(sections: Vec<Section>) -> Upsert {
-        Upsert { source: "sessions/a.json".into(), revision: "r1".into(), replaces: None, title: Some("Trip".into()), at: None, fields: Default::default(), sections }
+        Upsert { source: "sessions/a.json".into(), revision: "r1".into(), replaces: None, title: Some("Trip".into()), at: None, fields: Default::default(), sections, fence: None }
     }
 
     fn section(id: &str, text: &str) -> Section {

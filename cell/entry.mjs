@@ -92,24 +92,27 @@ export class Files extends WorkerEntrypoint {
 
 // The app's own search index (searchable.rs, "A fragment's search"), handed
 // to its facet as `env.SEARCH` bound to one fragment by `props`, as FILES
-// is: the app writes and asks its own fragment's index, never another's. A
-// refusal throws an Error with the platform's `code` and `status`.
+// is: the app writes and asks its own fragment's index, never another's. It
+// answers `{answer}`, or a refusal as a plain `{error}`: Workers RPC keeps
+// none of a thrown Error's own fields, so platform.mjs's `searchIndex`
+// throws it on the app's side, its fields whole.
 export class Search extends WorkerEntrypoint {
   async #answer(op, body) {
     const { fragment } = this.ctx.props;
     const resp = await this.env.FRAGMENT.getByName(fragment).fetch(rs.InternalRoute.request(this.env, `cap/search/${op}`, JSON.stringify(body)));
     const answer = await resp.json().catch(() => ({}));
-    if (!resp.ok) {
-      const e = new Error(answer.message || `search.${op} answered ${resp.status}`);
-      e.code = answer.error ?? null;
-      e.status = resp.status;
-      // a compare-and-set's: the revision the index holds, and whether the
-      // write emptied an index of another embeddings space first
-      e.current = answer.current ?? null;
-      e.cleared = answer.cleared === true;
-      throw e;
-    }
-    return answer;
+    if (resp.ok) return { answer };
+    return {
+      error: {
+        message: answer.message || `search.${op} answered ${resp.status}`,
+        code: answer.error ?? null,
+        status: resp.status,
+        // a write's: whether it emptied an index of another embeddings space
+        // first, and the newer fence that refused it
+        cleared: answer.cleared === true,
+        fence: answer.fence ?? null,
+      },
+    };
   }
 
   upsert(source) { return this.#answer("upsert", source); }

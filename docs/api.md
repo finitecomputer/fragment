@@ -749,8 +749,8 @@ so are the limits named here.
 
 | method & path | who | body → answer |
 | --- | --- | --- |
-| `POST /api/f/{name}/search/upsert` | an editor | `Upsert {source, revision, replaces?, title?, at?, fields?, sections: [{id, text, heading?, context?, at?, location?: {from, to}}]}` → `{source, revision, written, chunks, cleared}` (`cleared`: this write emptied an index of another embeddings space first, so its other sources are to be written again; a refusal that may follow such a clear, 409 `conflict` or 507 `storage_full`, says `cleared` too) |
-| `POST /api/f/{name}/search/delete` | an editor | `{source}` → `{source, deleted}` |
+| `POST /api/f/{name}/search/upsert` | an editor | `Upsert {source, revision, replaces?, title?, at?, fields?, sections: [{id, text, heading?, context?, at?, location?: {from, to}}], fence?}` → `{source, revision, written, chunks, cleared}` (`cleared`: this write emptied an index of another embeddings space first, so its other sources are to be written again; a refusal that may follow such a clear, 409 `conflict` or 507 `storage_full`, says `cleared` too) |
+| `POST /api/f/{name}/search/delete` | an editor | `{source, fence?}` → `{source, deleted}` |
 | `GET /api/f/{name}/search/sources?after=&limit=` | an editor | → `{sources: [{source, revision, at?, chunks}], next}`, by source, at most `SOURCES_PAGE_MAX` |
 | `GET /api/f/{name}/search/status` | a viewer | → `{exists, sources, chunks, bytes, space, chunks_split, chunks_max, semantic, forgetting}` |
 | `POST /api/f/{name}/search` | a viewer | `Query {q, limit?, mode?, fields?, after?, before?}` → `Found {results: [{rank, source, section, revision, title, heading?, context?, at?, location?, snippet, score, signals, lexical?: {rank, bm25}, semantic?: {rank, cosine}}], semantic, indexed, space?, scheme?}` |
@@ -769,6 +769,16 @@ so are the limits named here.
   what it held. The same `(source, revision)` again writes nothing;
   `replaces` is a compare-and-set on its revision (`""`: none yet), else
   409 `conflict` naming `current`.
+- **A fence**, a writer's own generation for the source (0 to 2^53 − 1,
+  `search_index::FENCE_MAX`): a write or delete sent with one is refused
+  (409 `conflict` naming `fence`, the stored one) if it is below the
+  highest the index took for that source, and taken otherwise, its fence
+  then stored. A delete stores its fence even when the source is absent
+  (a tombstone), so a stale write cannot bring it back. So a writer's
+  stale work (a batch that lost its claim) never lands over its newer. A
+  write or delete with no fence is never refused for one and moves none;
+  the platform's own forget sends none; a clear of another space keeps
+  the fences, the life's end drops them.
 - **Bounds**, refused 400 (413 past `UPSERT_MAX_BYTES`) before anything is
   sent: `SECTIONS_MAX`, `TEXT_MAX_CHARS`, `SECTION_ID_MAX_BYTES`,
   `SOURCE_MAX_BYTES`, `REVISION_MAX_BYTES`; at most 4 `fields`. An index

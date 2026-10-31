@@ -481,14 +481,21 @@ export class App extends AuthorApp {
   }
 
   // The fragment's own search index through the SEARCH capability: a
-  // refusal throws, with the platform's `code` and `status`.
+  // refusal throws here, in the app's isolate, with the platform's `code`,
+  // `status`, `cleared` and `fence` (the capability answers it as a plain
+  // `{error}`: an Error crossing Workers RPC keeps no field of its own).
   get searchIndex() {
     const cap = this.env.SEARCH;
+    const answered = async (pending) => {
+      const { answer, error } = await pending;
+      if (error) throw Object.assign(new Error(error.message), error);
+      return answer;
+    };
     return {
-      upsert: (source) => cap.upsert(source),
-      delete: (source) => cap.delete(source),
-      query: (question) => cap.query(question),
-      status: () => cap.status(),
+      upsert: (source) => answered(cap.upsert(source)),
+      delete: (source) => answered(cap.delete(source)),
+      query: (question) => answered(cap.query(question)),
+      status: () => answered(cap.status()),
     };
   }
 

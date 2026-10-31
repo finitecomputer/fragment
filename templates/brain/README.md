@@ -68,9 +68,10 @@ indexing, hint?}`.
   of its claims; a run that finds the rest held waits out one claim, then
   takes what a batch that died left. Each path is marked at a generation,
   and a new mark keeps a batch's claim: one batch at a time reads a page,
-  and a read overtaken by a newer mark is read again. Each write is a
-  compare-and-set on the revision the index holds (`pages.revision`), so a
-  batch whose claim lapsed never writes over a newer one. A page whose
+  and a read overtaken by a newer mark is read again. Each write and
+  delete carries its batch's generation as a fence (docs/api.md, "A
+  fragment's search"), so a batch whose claim lapsed never lands a write
+  or a delete over a newer batch's. A page whose
   bytes hash the same is not written again; one `main` deletes is taken
   out. More than 200 paths in one move, or an index of an older shape
   (`FORMAT`, which drops the app's old tables), read every file again;

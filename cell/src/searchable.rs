@@ -112,10 +112,13 @@ struct KnownHashes {
     known: Vec<String>,
 }
 
-/// The index's answer to `delete`.
+/// The index's answer to `delete`: `fenced`, the source's higher fence
+/// that refused it.
 #[derive(Deserialize)]
 struct Deleted {
     deleted: bool,
+    #[serde(default)]
+    fenced: Option<u64>,
 }
 
 /// A question's vector: embedded here, or given by the platform's route
@@ -310,6 +313,10 @@ impl FragmentCell {
                     let body = json!({ "error": ErrorCode::StorageFull, "message": message, "cleared": cleared || cleared_before });
                     return Ok(Response::from_json(&body)?.with_status(507));
                 }
+                Wrote::Fenced { fence } => {
+                    let body = json!({ "error": ErrorCode::Conflict, "message": "a newer write or delete of this source was taken (its fence is higher)", "fence": fence, "cleared": cleared_before });
+                    return Ok(Response::from_json(&body)?.with_status(409));
+                }
                 Wrote::Ended => return Err(CellError::new(ErrorCode::NotFound, "this fragment was deleted while the source was written")),
             }
         }
@@ -327,15 +334,25 @@ impl FragmentCell {
         if d.source.is_empty() || d.source.len() > wire::SOURCE_MAX_BYTES {
             return Err(CellError::invalid(format!("source is 1 to {} bytes", wire::SOURCE_MAX_BYTES)));
         }
+        rules::check_fence(d.fence).map_err(CellError::invalid)?;
         if !self.search_indexed()? {
-            return json_response(&json!({ "source": d.source, "deleted": false }));
+            if d.fence.is_none() {
+                return json_response(&json!({ "source": d.source, "deleted": false }));
+            }
+            // a fenced delete leaves its tombstone in an index never written
+            // too: from here the index may hold one, so the life's end ends it
+            self.set_meta(MetaKey::Search, "1")?;
         }
         let life = self.search_life()?;
         let scope = rules::scope(&self.state.id().to_string(), life);
         let _held = self.search_hold(&d.source).await;
         self.search_same_life(life)?;
-        let gone: Deleted = self.search_index(&scope, "delete", &json!({ "source": d.source })).await?;
+        let gone: Deleted = self.search_index(&scope, "delete", &json!({ "source": d.source, "fence": d.fence })).await?;
         self.search_same_life(life)?;
+        if let Some(fence) = gone.fenced {
+            let body = json!({ "error": ErrorCode::Conflict, "message": "a newer write or delete of this source was taken (its fence is higher)", "fence": fence });
+            return Ok(Response::from_json(&body)?.with_status(409));
+        }
         self.exec("DELETE FROM search_forget WHERE source = ?", vec![d.source.as_str().into()])?;
         json_response(&json!({ "source": d.source, "deleted": gone.deleted }))
     }
@@ -610,6 +627,7 @@ fn index_write(up: &wire::Upsert, chunks: &[rules::Chunk], vectors: &HashMap<Str
         title: up.title.clone().unwrap_or_default(),
         at: up.at.clone(),
         fields: up.fields.clone(),
+        fence: up.fence,
         space,
         sections,
     }

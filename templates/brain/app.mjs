@@ -18,9 +18,10 @@
 // `CLAIM_MS`), so runs side by side take different pages and nothing is
 // read or embedded twice: any member may start `changed` (the page does,
 // when the index is behind), and a start with nothing left to do takes two
-// steps. Each write is a compare-and-set on the revision the index holds,
-// so a batch that read a page before a newer one wrote it never writes
-// over it. A page whose bytes did not change is not written again, unless
+// steps. Each write and delete carries its batch's generation as a fence,
+// and the index refuses one below the last it took for the page, so a
+// batch that read a page before a newer one wrote or deleted it never
+// lands over that. A page whose bytes did not change is not written again, unless
 // a rebuild (an editor's full pass, or an index its embedding model
 // emptied) writes every page; one main deletes leaves the index.
 //
@@ -133,9 +134,9 @@ export class App extends DurableObject {
     // (when, and which batch), and whether it is written whatever its hash
     sql.exec(`CREATE TABLE IF NOT EXISTS dirty (
       path TEXT PRIMARY KEY, gen INTEGER NOT NULL, claimed INTEGER, by TEXT, force INTEGER NOT NULL DEFAULT 0)`);
-    // a page as last read (its hash), and the revision the index holds of it
+    // a page as last written (its hash) or left out (`skipped`, why)
     sql.exec(`CREATE TABLE IF NOT EXISTS pages (
-      path TEXT PRIMARY KEY, wiki TEXT NOT NULL, title TEXT NOT NULL, hash TEXT NOT NULL, revision TEXT,
+      path TEXT PRIMARY KEY, wiki TEXT NOT NULL, title TEXT NOT NULL, hash TEXT NOT NULL,
       bytes INTEGER NOT NULL, sections INTEGER NOT NULL, skipped TEXT, at INTEGER NOT NULL)`);
   }
 
@@ -270,55 +271,51 @@ export class App extends DurableObject {
     });
   }
 
-  // Whether batch `by` still holds `path` at its newest mark `gen`.
-  #holds(path, gen, by) {
-    const row = this.ctx.storage.sql.exec("SELECT gen, claimed, by FROM dirty WHERE path = ?", path).toArray()[0];
-    return row !== undefined && row.by === by && row.gen === gen && row.claimed >= Date.now() - CLAIM_MS;
-  }
-
-  // `src` written over the revision the index holds as far as the brain
-  // knows (`expected`, "" for none): a compare-and-set. Another revision
-  // there (a batch whose claim lapsed wrote it, or the platform forgot the
-  // page) is written over only by a batch that holds the page at its newest
-  // mark; any other leaves it ("stale"). "held": the index held that
-  // revision already, and wrote nothing. "full": refused for room.
-  async #write(src, expected, path, gen, by) {
-    for (let tries = 0; tries < 2; tries++) {
-      try {
-        const wrote = await this.searchIndex.upsert({ ...src, replaces: expected });
-        if (wrote.cleared) this.#cleared();
-        return wrote.written === false ? "held" : "indexed";
-      } catch (e) {
-        // whatever came of the write, an index it emptied is written whole again
-        if (e.cleared) this.#cleared();
-        if (e.code === "storage_full") return "full";
-        if (e.code !== "conflict") throw e;
-        if (!this.#holds(path, gen, by)) return "stale";
-        expected = e.current ?? "";
-      }
+  // `src` written at fence `gen`. "indexed", "held" (the index held that
+  // revision already), "full" (refused for room), or "stale": a newer
+  // batch's write or delete of the page was taken, and this one is not.
+  async #write(src, gen) {
+    try {
+      const wrote = await this.searchIndex.upsert({ ...src, fence: gen });
+      if (wrote.cleared) this.#cleared();
+      return wrote.written === false ? "held" : "indexed";
+    } catch (e) {
+      // whatever came of the write, an index it emptied is written whole again
+      if (e.cleared) this.#cleared();
+      if (e.code === "storage_full") return "full";
+      if (e.code === "conflict" && e.fence != null) return "stale";
+      throw e;
     }
-    return "stale";
   }
 
-  // The index was emptied (its embedding model changed): it holds nothing
-  // the brain wrote, and every page is written again.
+  // `path` out of the index at fence `gen` (its tombstone stays): false if
+  // a newer batch's write or delete of it was taken.
+  async #remove(path, gen) {
+    try {
+      await this.searchIndex.delete({ source: path, fence: gen });
+      return true;
+    } catch (e) {
+      if (e.code === "conflict" && e.fence != null) return false;
+      throw e;
+    }
+  }
+
+  // The index was emptied (its embedding model changed): every page is
+  // written again.
   #cleared() {
-    this.ctx.storage.transactionSync(() => {
-      this.ctx.storage.sql.exec("UPDATE pages SET revision = NULL");
-      this.#set("full", "force");
-    });
+    this.#set("full", "force");
   }
 
   // One page, as main holds it now, by the batch `by` that claimed it at
   // `gen`: written to the index when its bytes changed (or `force`), taken
-  // out when it is gone. Answers what happened to it. Marked again while it
-  // was read, it stays marked, its claim let go, and a batch reads it again;
-  // taken by another batch (this one's claim lapsed), that batch decides.
+  // out when it is gone, each at fence `gen`. Answers what happened to it.
+  // Marked again while it was read, it stays marked, its claim let go, and
+  // a batch reads it again; taken by another batch (this one's claim
+  // lapsed), that batch decides, and the fences keep this one's effects
+  // from landing over its.
   async #index({ path, gen, force }, by) {
     const sql = this.ctx.storage.sql;
-    // what the index holds as far as the brain knows, before the page is
-    // read: a batch that wrote meanwhile makes this one's write a conflict
-    const prior = sql.exec("SELECT hash, revision FROM pages WHERE path = ?", path).toArray()[0] ?? null;
+    const prior = sql.exec("SELECT hash FROM pages WHERE path = ?", path).toArray()[0] ?? null;
     const listed = indexable(path) ? ((await this.files.list(path)).find((f) => f.path === path) ?? null) : null;
     const large = listed !== null && (listed.blob === true || listed.size > PAGE_MAX_BYTES);
     const bytes = listed && !large ? await this.files.readBytes(path) : null;
@@ -327,24 +324,20 @@ export class App extends DurableObject {
     let outcome;
     let page = { title: stem(path), sections: [], truncated: false };
     let why = null;
-    let revision = null;
     // a page left out for room is tried again at its next pass
     let retry = false;
     if (!force && prior?.hash === hash) outcome = "unchanged";
     else if (listed === null) {
-      // gone, or no longer searched: out of the index (the platform forgets
-      // a file main deletes too; this also takes out a write that landed after)
-      if (prior !== null || indexable(path)) await this.searchIndex.delete(path);
-      outcome = prior === null ? "unchanged" : "removed";
+      // gone, or no longer searched: out of the index, its tombstone kept
+      // (the platform forgets a file main deletes too)
+      outcome = !(await this.#remove(path, gen)) ? "stale" : prior === null ? "unchanged" : "removed";
     } else if (large || utf8.encode(path).length > SOURCE_MAX_BYTES) {
-      if (prior?.revision) await this.searchIndex.delete(path);
-      outcome = "skipped";
+      outcome = (await this.#remove(path, gen)) ? "skipped" : "stale";
       why = large ? "1 MiB or more: a blob, not read" : `its path is over ${SOURCE_MAX_BYTES} bytes`;
     } else {
       page = sections(path, new TextDecoder().decode(bytes));
-      outcome = await this.#write(source(path, hash, page), prior?.revision ?? "", path, gen, by);
+      outcome = await this.#write(source(path, hash, page), gen);
       if (outcome === "indexed" || outcome === "held") {
-        revision = hash;
         if (page.truncated) why = `only its first ${SECTIONS_MAX} sections`;
       } else if (outcome === "full") {
         outcome = "skipped";
@@ -363,12 +356,13 @@ export class App extends DurableObject {
         this.#bump("writes");
         return outcome;
       }
+      const written = outcome === "indexed" || outcome === "held";
       sql.exec(
-        `INSERT INTO pages (path, wiki, title, hash, revision, bytes, sections, skipped, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO pages (path, wiki, title, hash, bytes, sections, skipped, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (path) DO UPDATE SET wiki = excluded.wiki, title = excluded.title, hash = excluded.hash,
-           revision = excluded.revision, bytes = excluded.bytes, sections = excluded.sections, skipped = excluded.skipped, at = excluded.at`,
-        path, wikiOf(path), page.title, retry ? `full:${hash}` : hash, revision, listed.size,
-        revision !== null ? page.sections.length : 0, why, Date.now(),
+           bytes = excluded.bytes, sections = excluded.sections, skipped = excluded.skipped, at = excluded.at`,
+        path, wikiOf(path), page.title, retry ? `full:${hash}` : hash, listed.size,
+        written ? page.sections.length : 0, why, Date.now(),
       );
       // a revision the index held already is no write
       if (outcome === "held") return "unchanged";

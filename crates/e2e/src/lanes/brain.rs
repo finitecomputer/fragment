@@ -26,6 +26,7 @@ use fragment_nip98::Keys;
 use serde_json::{json, Value};
 
 use super::jobs;
+use super::ledger::lever;
 use super::shell::shell;
 use super::signin::site_cookie;
 use super::templates::person;
@@ -341,6 +342,50 @@ pub fn brain(s: &mut Suite, api: &Api) -> Result<()> {
         out.status.success() && followed && st["writes"].as_i64() == before["writes"].as_i64().map(|w| w + 2) && found(&r).iter().all(|f| f.0 != CAFE),
         json!({ "index": st, "cafe": r.body }),
     );
+
+    // a page the index has no room for is left out, saying why, and taken once there is room
+    // (the index's 507 crosses the capability whole)
+    let held_chunks = index(api, &keys, &name)["index"]["chunks"].as_u64().unwrap_or(0);
+    let capped = lever(api, &name, "search-index", json!({ "chunks_max": held_chunks }))?;
+    write(&dir, "garden/wiki/wind.md", b"# Wind\n\nA small turbine on the ridge.\n")?;
+    let out = s.cli(api, &home, &["sync", &name, "--dir", &dir_s]);
+    let left_out = s.eventually(WAIT, || {
+        let st = index(api, &keys, &name);
+        st["pending"] == 0 && st["skipped"].as_array().is_some_and(|l| l.iter().any(|x| x["path"] == "garden/wiki/wind.md" && x["why"].as_str().is_some_and(|w| w.contains("full"))))
+    });
+    let roomy = lever(api, &name, "search-index", json!({ "chunks_max": 50_000 }))?;
+    let r = api.op(&keys, &name, "changed", "after-room", json!({ "paths": ["garden/wiki/wind.md"] }))?;
+    jobs::settle(api, &keys, &name, jobs::started(&r), &["succeeded", "held"], WAIT);
+    let taken = search(api, &keys, &name, json!({ "q": "turbine ridge" }))?;
+    s.ok(
+        "a page past the index's room is left out (\"the index is full\", in index_status), and taken at its next pass once there is room",
+        capped.status == 200 && out.status.success() && left_out && roomy.status == 200 && found(&taken).first().is_some_and(|f| f.0 == "garden/wiki/wind.md"),
+        json!({ "index": index(api, &keys, &name), "taken": taken.body }),
+    );
+
+    // embeddings moved to another space: the first page written empties the index (`cleared`,
+    // across the capability), and the brain writes every page again
+    s.stop()?;
+    let api = &s.start_repinned()?;
+    let before = index(api, &keys, &name);
+    let mut page = PAGE.to_string();
+    page.push_str(BATTERIES);
+    page.push_str("\n## Tilt\n\nThe panels lean thirty degrees.\n");
+    write(&dir, SOLAR, page.as_bytes())?;
+    let out = s.cli(api, &home, &["sync", &name, "--dir", &dir_s]);
+    let rebuilt = s.eventually(WAIT, || {
+        let st = index(api, &keys, &name);
+        st["indexing"] == false && st["index"]["semantic"] == "on"
+            && search(api, &keys, &name, json!({ "q": "roof survey" })).is_ok_and(|r| results(&r).first().is_some_and(|h| h["path"] == NOTE && h["signals"].as_array().is_some_and(|s| s.iter().any(|x| x == "semantic"))))
+    });
+    let after = index(api, &keys, &name);
+    s.ok(
+        "embeddings moved to another space: one page written empties the index, and the brain writes every page again (an unchanged page found by meaning again)",
+        out.status.success() && rebuilt && after["writes"].as_u64().unwrap_or(0) >= before["writes"].as_u64().unwrap_or(0) + after["pages"].as_u64().unwrap_or(0),
+        json!({ "before": before, "after": after }),
+    );
+    s.stop()?;
+    let api = &s.start(false)?;
 
     // behind its files (a page marked, no run on it), a search says so, and how to finish it
     let r = api.op(&keys, &name, "mark", "behind", json!({ "paths": [SOLAR], "full": false }))?;
