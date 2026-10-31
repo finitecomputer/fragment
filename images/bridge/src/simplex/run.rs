@@ -2171,7 +2171,7 @@ mod tests {
     use sha2::Digest;
 
     fn agent() -> Agent {
-        Agent { fragment: "juniper--k3x9".into(), identity: "npub1juniper".into(), name: "juniper".into(), owner: "npub1paul".into(), credentials: vec![], key: None }
+        Agent { fragment: "juniper--k3x9".into(), identity: "npub1juniper".into(), name: "juniper".into(), owner: "npub1paul".into(), credentials: vec![], key: None, runtime: None }
     }
 
     fn computer(always_on: bool, generation: u64, restored: Option<(u64, bool)>) -> api::Computer {

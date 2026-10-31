@@ -1023,7 +1023,7 @@ pub struct FragmentStatus {
     pub counts: Counts,
     pub code: CodeStatus,
     /// The share link's token: its owner's alone (and their agent's,
-    /// sharing for them), as the share sheet shows it. A member does not
+    /// sharing for them, but on a connector), as the share sheet shows it. A member does not
     /// share by link: they ask its owner.
     pub view_token: Option<String>,
     /// Editors and up see the inbox token.

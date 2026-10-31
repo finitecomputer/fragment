@@ -105,7 +105,7 @@ mod tests {
     const ME: &str = "npub1agent";
 
     fn agent() -> Agent {
-        Agent { fragment: "agent".into(), identity: ME.into(), name: "agent".into(), owner: OWNER.into(), credentials: vec![], key: None }
+        Agent { fragment: "agent".into(), identity: ME.into(), name: "agent".into(), owner: OWNER.into(), credentials: vec![], key: None, runtime: None }
     }
 
     fn rec(channel: &str, seq: u64, at: i64, by: &str, body: Value) -> Record {
