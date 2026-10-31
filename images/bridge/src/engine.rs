@@ -2,7 +2,7 @@
 //! in, posts and runtime commands out. Nothing here does I/O or reads the
 //! clock; the driver (driver.rs) feeds it, persists its state whenever a
 //! step says so, and only then carries out the step's effects ("validate,
-//! persist, then interpret", docs/engineering-style.md).
+//! persist, then interpret", the engineering style).
 //!
 //! What it keeps (lesson 1, authority): a cursor per followed channel and
 //! the turns it admitted that have not ended. The chat channel owns what was
