@@ -1135,6 +1135,27 @@ impl FragmentCell {
         Ok(())
     }
 
+    /// Starts the runs an install of new code triggers, in the step that
+    /// installs it (plane.rs `install_code`): one install, one run each,
+    /// however often what installs it is asked again. Blocked when
+    /// `read_only` (the owner's standing, read before the install).
+    pub(crate) fn fire_installed(&self, triggers: &[TriggerDecl], sha: &str, code: &str, read_only: Option<Why>) -> CellResult<()> {
+        for t in triggers.iter().filter(|t| matches!(t.on, TriggerOn::Installed(_))) {
+            self.start_run(NewRun {
+                op: &t.run,
+                via: Via::Installed,
+                trigger: Some(code.to_string()),
+                principal: &self.own_key()?,
+                role: Role::Editor,
+                depth: self.commit_depth(Some(sha))?,
+                call: None,
+                input: json!({ "ref": "live", "commit": sha, "code": code }),
+                owner_read_only: read_only,
+            })?;
+        }
+        Ok(())
+    }
+
     /// After code is installed: an operation it does not have loses its
     /// pause and its breaker (one of that name later starts clean). Only
     /// installed code says an operation is gone; a live commit with no app

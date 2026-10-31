@@ -210,7 +210,7 @@ enum Cmd {
         #[arg(long, default_value = "30")]
         limit: u64,
     },
-    /// List a fragment's triggers (cron, channel, files) and what is paused
+    /// List a fragment's triggers (cron, channel, files, installed) and what is paused
     Triggers { name: String },
     /// The deployment's operators: an operator key, wiping a person, and
     /// the admin (people, orgs, comped seats, trial codes, billing's
@@ -2030,6 +2030,7 @@ fn run(cli: Cli) -> Result<()> {
                 let on = ["cron", "channel", "files"]
                     .iter()
                     .find_map(|k| t[*k].as_str().map(|v| format!("{k} {v}")))
+                    .or_else(|| (t["installed"] == true).then(|| "installed".to_string()))
                     .unwrap_or_default();
                 let next = t["nextAt"].as_u64().map(|n| format!("\tnext {} UTC", chrono_like(n / 1000))).unwrap_or_default();
                 let paused = if t["paused"].as_bool().unwrap_or(false) { "\tPAUSED" } else { "" };

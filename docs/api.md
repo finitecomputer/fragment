@@ -674,7 +674,7 @@ inbox's, which takes its token. `{name}` is a fragment's name in full.
 | `GET /api/f/{name}/runs/{id}` | viewer | → one run with `input` and `output`. A channel's run whose channel the asker may not read (or no longer declared) withholds `input` and `error` (`withheld: true`). `output` is the app's own answer, shown to viewers whatever it copied |
 | `POST /api/f/{name}/replay` | editor | `{run}` → `{ok, run, attempt}`: a `held` or `blocked` run again |
 | `POST /api/f/{name}/pause` | editor | `{op, paused}` → `{ok, op, paused}`: its triggers stop or start; calls are never paused |
-| `GET /api/f/{name}/triggers` | viewer | → `{triggers: [{cron \| channel \| files, run, paused, nextAt?}], paused}` |
+| `GET /api/f/{name}/triggers` | viewer | → `{triggers: [{cron \| channel \| files \| installed, run, paused, nextAt?}], paused}` |
 | `GET /api/f/{name}/schedules` | viewer | → `{schedules: [Schedule]}`, oldest first (Scheduled records) |
 | `POST /api/f/{name}/schedules` | editor holding the channel's post role | `{cron, channel, record}` → `{schedule, replayed}`; past the overdraft 402 |
 | `PUT /api/f/{name}/schedules/{id}` | editor | `{paused}` → `{schedule}`; a resume past the overdraft 402 |
@@ -860,7 +860,10 @@ agent, or carrying code, keeps the last good code and says to fork it.
   1 = Sunday); `{"channel": "inbox" | <app channel>, "run": op, "from"?:
   "person" | "agent"}` (each new record, of that kind's members only with
   `from`); `{"files": "notes/**", "run": op}` (a move of `main` changing a
-  matching path: `*`, `**`, `?`, a trailing `/`).
+  matching path: `*`, `**`, `?`, a trailing `/`); `{"installed": true,
+  "run": op}` (once per install of new code: a deploy moving `live`, or a
+  blessed template's changed release, at the fragment's next request; its
+  input `{ref: "live", commit, code}`).
 - `inbox` (optional): `{"header": "x-telegram-bot-api-secret-token",
   "secret": "TELEGRAM_WEBHOOK_SECRET"}`: the inbox takes a delivery only
   with that header (lower case; never `x-fragment-*`, `cookie`, `host`,
@@ -1426,7 +1429,7 @@ steps:
   page reads `__members`, `__people` and its presence.
 
 `job.principal`, `job.role`, `job.run`, `job.attempt`, `job.via` (`call`,
-`job`, `cron`, `channel`, `files`) and `job.fragment` say who and which;
+`job`, `cron`, `channel`, `files`, `installed`) and `job.fragment` say who and which;
 `job.door` is a connector's `{relayed, to}` while it is an open door (An
 agent's doors), else null.
 

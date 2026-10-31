@@ -1899,16 +1899,22 @@ pub enum TriggerOn {
     Channel(String),
     /// A move of `main` that changes a path matching this pattern.
     Files(String),
+    /// Each install of new code: a deploy that moves `live`, or a blessed
+    /// template's changed release re-installed. Always `true` (the
+    /// manifest refuses any other value).
+    Installed(bool),
 }
 
 impl TriggerOn {
     /// What starts it, and on what: `("cron", schedule)`, `("channel",
-    /// channel)`, or `("files", pattern)`; the names are its wire keys.
+    /// channel)`, `("files", pattern)`, or `("installed", "")`; the names
+    /// are its wire keys.
     pub fn parts(&self) -> (&'static str, &str) {
         match self {
             TriggerOn::Cron(c) => ("cron", c),
             TriggerOn::Channel(c) => ("channel", c),
             TriggerOn::Files(f) => ("files", f),
+            TriggerOn::Installed(_) => ("installed", ""),
         }
     }
 
@@ -1917,6 +1923,7 @@ impl TriggerOn {
             "cron" => Some(TriggerOn::Cron(target)),
             "channel" => Some(TriggerOn::Channel(target)),
             "files" => Some(TriggerOn::Files(target)),
+            "installed" => Some(TriggerOn::Installed(true)),
             _ => None,
         }
     }
@@ -1974,6 +1981,7 @@ pub enum Via {
     Cron,
     Channel,
     Files,
+    Installed,
 }
 
 impl Via {
@@ -1984,11 +1992,12 @@ impl Via {
             Via::Cron => "cron",
             Via::Channel => "channel",
             Via::Files => "files",
+            Via::Installed => "installed",
         }
     }
 
     pub fn parse(s: &str) -> Option<Via> {
-        [Via::Call, Via::Job, Via::Cron, Via::Channel, Via::Files].into_iter().find(|v| v.as_str() == s)
+        [Via::Call, Via::Job, Via::Cron, Via::Channel, Via::Files, Via::Installed].into_iter().find(|v| v.as_str() == s)
     }
 
     /// Started by a trigger: these runs act as the fragment, pause with
@@ -1996,7 +2005,7 @@ impl Via {
     pub fn triggered(self) -> bool {
         match self {
             Via::Call | Via::Job => false,
-            Via::Cron | Via::Channel | Via::Files => true,
+            Via::Cron | Via::Channel | Via::Files | Via::Installed => true,
         }
     }
 }
@@ -2309,6 +2318,9 @@ mod tests {
             assert_eq!(TriggerOn::from_parts(kind, target.to_string()), Some(on.clone()));
             assert_eq!(serde_json::to_value(&on).unwrap(), serde_json::json!({ kind: target }));
         }
+        let installed = TriggerOn::Installed(true);
+        assert_eq!(TriggerOn::from_parts("installed", String::new()), Some(installed.clone()));
+        assert_eq!(serde_json::to_value(&installed).unwrap(), serde_json::json!({ "installed": true }));
         assert_eq!(TriggerOn::from_parts("webhook", "x".into()), None);
     }
 
@@ -2550,13 +2562,13 @@ mod tests {
 
     #[test]
     fn stored_states_read_back_as_they_serialize() {
-        for v in [Via::Call, Via::Job, Via::Cron, Via::Channel, Via::Files] {
+        for v in [Via::Call, Via::Job, Via::Cron, Via::Channel, Via::Files, Via::Installed] {
             assert_eq!(Via::parse(v.as_str()), Some(v));
             assert_eq!(serde_json::to_value(v).unwrap(), v.as_str());
         }
         assert_eq!(Via::parse("inbox"), None);
         assert!(!Via::Call.triggered() && !Via::Job.triggered());
-        assert!(Via::Cron.triggered() && Via::Channel.triggered() && Via::Files.triggered());
+        assert!(Via::Cron.triggered() && Via::Channel.triggered() && Via::Files.triggered() && Via::Installed.triggered());
         for t in [Tier::Cheap, Tier::Medium, Tier::High] {
             assert_eq!(Tier::parse(t.as_str()), Some(t));
             assert_eq!(serde_json::to_value(t).unwrap(), t.as_str());

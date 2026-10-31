@@ -459,6 +459,17 @@ impl FragmentCell {
             },
             _ => None,
         };
+        // Installed triggers start their runs in the step that installs, so
+        // the owner's standing (which blocks them past the overdraft) is
+        // read before it, and only when there are any.
+        let read_only = match manifest.triggers.iter().any(|t| matches!(t.on, TriggerOn::Installed(_))) {
+            true => self.read_only().await?,
+            false => None,
+        };
+        // From here to the end nothing awaits, so what this install writes,
+        // the runs it starts, and the pin it follows (`follow`; a blessed
+        // one's release) commit as one: an install cut short leaves none of
+        // them and is done again whole, its runs started once.
         match &manifest.meta {
             Some(meta) => self.set_meta(MetaKey::MetaLive, &serde_json::to_string(meta).expect("meta serializes"))?,
             None => self.del_meta(MetaKey::MetaLive)?,
@@ -540,7 +551,7 @@ impl FragmentCell {
             ),
             json!({ "sha": sha, "code": loader_id, "operations": manifest.operations.keys().collect::<Vec<_>>() }),
         );
-        Ok(())
+        self.fire_installed(&manifest.triggers, sha, &loader_id, read_only)
     }
 
     /// The live commit's `app.mjs` and `applib/` modules, and their
