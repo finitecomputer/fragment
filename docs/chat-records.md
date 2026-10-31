@@ -71,6 +71,13 @@ at most 16. A turn's records, in order:
    (and a notice may follow the end: `turn.notice`, below);
 3. `turn.end` on `work`.
 
+A turn a restart cut may be followed by its **continuation** (since
+2026-10-31): a turn of its own, whose id is not its cause's but the first
+24 hex characters of the SHA-256 of `continue`, a NUL and the cut turn's
+id, with the cut turn's `cause` and asker, and a
+`turn.notice` (part `continued`) as it starts (docs/bridge.md, "A cut turn
+is continued once").
+
 Every turn has both its start and its end, one of each: a turn refused
 (too many waiting) or stopped while it waited posts its `turn.start` and
 then its `turn.end`, and runs nothing. The bridge keeps a turn until its
@@ -566,7 +573,7 @@ The page takes an agent's latest, and only one whose `agent` is its poster.
 A runtime with no commands posts none.
 
 **After a lost turn.** The agent's next turn in that chat is told what
-was cut, once (docs/computers.md, Durability, P5; docs/bridge.md, "The turn
+was cut, once (docs/durable-computers.md, P5; docs/bridge.md, "The turn
 after a cut one is told"). The note is built from these records alone,
 so it is the same in every life: on `work`, the agent's latest
 `turn.start` before the new turn's own (a refusal's passed over), whose

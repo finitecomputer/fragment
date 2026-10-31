@@ -14,13 +14,15 @@
 //! left to tell its owner. Two replies, a few paid calls. It sleeps at the
 //! end (`--sweep` deletes the run's `e2e-<run>-` fragments).
 //!
-//! Given a round's candidate (`--candidate`: docs/computers.md, "Stable and
-//! canary"), the restart is an upgrade: the computer, awake on the
-//! deployment's default after its first reply (which was given a word to
-//! keep), is pinned to the candidate and told an update is ready; the
-//! Restart takes it, and the agent names the word in the same chat. Then it
-//! is pinned back (a rollback), told again, restarted onto the default, and
-//! names the word once more. Three replies.
+//! Given an image to upgrade from (`--upgrade-from`: docs/computers.md,
+//! "Preview and production"; production's current digest, which the
+//! deployment's config names), the restart is an upgrade: the computer,
+//! pinned to that image before its first start and awake on it after its
+//! first reply (which was given a word to keep), is pinned to the
+//! deployment's default and told an update is ready; the Restart takes it,
+//! and the agent names the word in the same chat. Then it is pinned back (a
+//! rollback), told again, restarted onto the image it started on, and names
+//! the word once more. Three replies.
 
 use std::time::{Duration, Instant};
 
@@ -39,7 +41,7 @@ pub const SECTION: &str = "agent-restart";
 /// The paid calls the run lends the section's person: two replies, each a
 /// model call or two, and Hermes' title.
 const PAID_CALLS: u64 = 10;
-/// With a candidate: a third reply, its rollback's.
+/// With an upgrade: a third reply, its rollback's.
 const PAID_CALLS_ROUND: u64 = 16;
 /// A new computer's first start on a preview (the image pulled to the
 /// host, Hermes booted), to its agent following its chat.
@@ -80,8 +82,8 @@ fn paid(api: &Api, identity: &str) -> usize {
 }
 
 pub fn agent_restart(s: &mut Suite, api: &Api) -> Result<()> {
-    let candidate = s.candidate.clone();
-    let lent = if candidate.is_some() { PAID_CALLS_ROUND } else { PAID_CALLS };
+    let from = s.upgrade_from.clone();
+    let lent = if from.is_some() { PAID_CALLS_ROUND } else { PAID_CALLS };
     let why = format!("it restarts a real agent's Hermes computer on a preview, and spends up to {lent} of the run's paid calls");
     if !s.section_by_name(SECTION, &[Need::Levers, Need::Computers, Need::Models, Need::RealAgent], &why) {
         return Ok(());
@@ -98,6 +100,13 @@ pub fn agent_restart(s: &mut Suite, api: &Api) -> Result<()> {
     // its computer, one agent, and their chat
     let made = api.signed(&keys, "POST", "/api/computers", Some(&json!({})))?;
     let id = made.body["computer"].as_str().unwrap_or("").to_string();
+    // with an upgrade, its computer is pinned to the image it starts from
+    // before its first start, so its first life runs that image
+    let default_image = made.body["image"].as_str().unwrap_or("").to_string();
+    if let Some(image) = &from {
+        let r = api.signed(&keys, "PUT", &format!("/api/computers/{id}/image"), Some(&json!({ "image": image })))?;
+        s.ok(&format!("its computer is pinned to {image}, the image an upgrade starts from, before its first start"), r.status == 200 && r.body["image"] == image.as_str() && r.body["phase"] == "asleep", &r);
+    }
     let label = s.name("rowan");
     let agent = api.create_with(&keys, json!({ "label": label, "template": "agent", "title": "Rowan" }))?;
     let agent_name = agent.body["name"].as_str().unwrap_or("").to_string();
@@ -134,10 +143,10 @@ pub fn agent_restart(s: &mut Suite, api: &Api) -> Result<()> {
     let say = |n: u32, text: &str| api.signed(&keys, "POST", &format!("/api/f/{chat_name}/channels/chat"), Some(&json!({ "id": format!("restart-{n}"), "body": { "text": text } })));
     let ended = |turn: &str| work_of(&records(api, &keys, &chat_name, "work"), turn).into_iter().any(|r| r["body"]["kind"] == "turn.end");
     let reply_to = |turn: &str| agent_replies(&records(api, &keys, &chat_name, "chat"), &identity).into_iter().find(|r| r["body"]["turn"] == turn).and_then(|r| r["body"]["text"].as_str().map(str::to_string));
-    // with a candidate, a word to keep: the same chat names it after the
+    // with an upgrade, a word to keep: the same chat names it after the
     // upgrade, and after the rollback
     let word = format!("lantern{}", now_s() % 1000);
-    let first = match &candidate {
+    let first = match &from {
         Some(_) => say(1, &format!("Hello! Please remember this word for me: {word}. And what's one word for a calm morning?"))?,
         None => say(1, "Hello! What's one word for a calm morning?")?,
     };
@@ -153,21 +162,20 @@ pub fn agent_restart(s: &mut Suite, api: &Api) -> Result<()> {
         return Ok(());
     }
 
-    // a round's candidate, pinned while it is awake (as an operator puts a
-    // person on the canary): its owner is told an update is ready, and the
-    // Restart below is the notice's, the upgrade
-    let first_image = made.body["image"].as_str().unwrap_or("").to_string();
+    // with an upgrade, pinned to the default while awake (as a new image
+    // reaches a computer a deploy finds awake): its owner is told an update
+    // is ready, and the Restart below is the notice's, the upgrade
     let mut upgraded = None;
-    if let Some(image) = &candidate {
-        let r = api.signed(&keys, "PUT", &format!("/api/computers/{id}/image"), Some(&json!({ "image": image })))?;
+    if let Some(image) = &from {
+        let r = api.signed(&keys, "PUT", &format!("/api/computers/{id}/image"), Some(&json!({ "image": default_image })))?;
         let latest = r.body["latest"].as_str().unwrap_or("").to_string();
-        let label = format!("pinned to the candidate, {image}, while awake on {first_image}: its owner is told an update is ready, to the candidate's version");
+        let label = format!("pinned to {default_image}, the default, while awake on {image}: its owner is told an update is ready, to the default's version");
         if r.status == 200 && r.body["version"] == latest.as_str() {
-            // between rounds the canary is stable's digest: nothing to try
-            s.skip(&label, &format!("{image} is the version {first_image} runs ({latest}): no upgrade to make, so the restart is a restart"));
+            // the two names at one digest: nothing to upgrade
+            s.skip(&label, &format!("{image} is the version {default_image} runs ({latest}): no upgrade to make, so the restart is a restart"));
         } else {
             let told = within(LET_GO, || (notice(&view(), "update")["version"] == latest.as_str()).then_some(())).is_some();
-            s.ok(&label, r.status == 200 && r.body["image"] == image.as_str() && !latest.is_empty() && told, json!({ "pinned": r.body, "view": view() }));
+            s.ok(&label, r.status == 200 && r.body["image"] == default_image.as_str() && !latest.is_empty() && told, json!({ "pinned": r.body, "view": view() }));
             upgraded = Some(latest);
         }
     }
@@ -221,18 +229,18 @@ pub fn agent_restart(s: &mut Suite, api: &Api) -> Result<()> {
         again.status == 200 && again.body["generation"].as_u64() == Some(g + 1) && again.body["restored"] == restored,
         &again,
     );
-    if let (Some(image), Some(latest)) = (&candidate, &upgraded) {
+    if let (Some(_), Some(latest)) = (&from, &upgraded) {
         s.ok(
-            &format!("the restart took the update: it runs {image}'s version, its next start the same"),
-            after["image"] == image.as_str() && after["version"] == latest.as_str() && after["latest"] == latest.as_str(),
+            &format!("the restart took the update: it runs {default_image}'s version, its next start the same"),
+            after["image"] == default_image.as_str() && after["version"] == latest.as_str() && after["latest"] == latest.as_str(),
             &after,
         );
     }
 
     // and the agent answers after it, with nothing left to tell its owner;
-    // with a candidate, in the same chat, the word it was given before
+    // with an upgrade, in the same chat, the word it was given before
     let names_word = |text: Option<String>| text.is_some_and(|t| t.to_lowercase().contains(&word));
-    let second = match &candidate {
+    let second = match &from {
         Some(_) => say(2, "What was the word I asked you to remember? Answer with just the word.")?,
         None => say(2, "And one word for a quiet evening?")?,
     };
@@ -246,22 +254,22 @@ pub fn agent_restart(s: &mut Suite, api: &Api) -> Result<()> {
         answered && v["generation"].as_u64() == Some(g + 1) && v["notices"].as_array().is_none_or(|l| l.is_empty()),
         json!({ "reply": reply_to(&second_turn), "view": v }),
     );
-    if candidate.is_some() {
+    if from.is_some() {
         s.ok("after the upgrade its chat goes on: it names the word it was given before (model-dependent)", names_word(reply_to(&second_turn)), json!({ "word": word, "reply": reply_to(&second_turn) }));
     }
 
-    // with a candidate, the way back: pinned to the default again (a
-    // rollback), told, restarted onto it, and the chat goes on
+    // with an upgrade, the way back: pinned to the image it started on
+    // again (a rollback), told, restarted onto it, and the chat goes on
     let mut rolled_back = Value::Null;
-    if let (Some(image), Some(latest)) = (&candidate, &upgraded) {
+    if let (Some(image), Some(latest)) = (&from, &upgraded) {
         let ended_second = within(REPLY, || ended(&second_turn).then_some(())).is_some();
         let let_go = ended_second && within(LET_GO, || lever(api, &id, "saves").ok().filter(|r| r.body["keepalives"] == 0).map(|_| ())).is_some();
-        let r = api.signed(&keys, "PUT", &format!("/api/computers/{id}/image"), Some(&json!({ "image": first_image })))?;
+        let r = api.signed(&keys, "PUT", &format!("/api/computers/{id}/image"), Some(&json!({ "image": image })))?;
         let stable = r.body["latest"].as_str().unwrap_or("").to_string();
         let told = within(LET_GO, || (notice(&view(), "update")["version"] == stable.as_str()).then_some(())).is_some();
         s.ok(
-            &format!("pinned back to {first_image} from {image} (a rollback): its owner is told again, the version it ran before"),
-            let_go && r.status == 200 && r.body["image"] == first_image.as_str() && !stable.is_empty() && stable != *latest && r.body["version"] == latest.as_str() && told,
+            &format!("pinned back to {image} from {default_image} (a rollback): its owner is told again, the version it ran before"),
+            let_go && r.status == 200 && r.body["image"] == image.as_str() && !stable.is_empty() && stable != *latest && r.body["version"] == latest.as_str() && told,
             json!({ "pinned": r.body, "view": view() }),
         );
         std::thread::sleep(QUEUE_DRAIN);
@@ -275,7 +283,7 @@ pub fn agent_restart(s: &mut Suite, api: &Api) -> Result<()> {
         let newest = newest_save(api, &id);
         let restored = &back["restored"];
         s.ok(
-            &format!("restarted, it runs {first_image}'s version again, from its newest save (the restart's own, held), and no rollback"),
+            &format!("restarted, it runs {image}'s version again, from its newest save (the restart's own, held), and no rollback"),
             pressed.as_ref().is_ok_and(|r| r.status == 200)
                 && back["generation"].as_u64() == Some(g2 + 1)
                 && back["version"] == stable.as_str()
@@ -295,7 +303,7 @@ pub fn agent_restart(s: &mut Suite, api: &Api) -> Result<()> {
             answered && names_word(reply_to(&third_turn)) && v["notices"].as_array().is_none_or(|l| l.is_empty()),
             json!({ "word": word, "reply": reply_to(&third_turn), "view": v }),
         );
-        rolled_back = json!({ "candidate": image, "upgradedTo": latest, "backTo": stable, "view": back });
+        rolled_back = json!({ "from": image, "upgradedTo": latest, "backTo": stable, "view": back });
     }
     let spent = paid(api, &owner_id);
     s.ok(&format!("its paid calls stay within the {lent} lent"), spent as u64 <= lent, spent);

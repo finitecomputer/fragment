@@ -183,7 +183,7 @@ each chat's budget of agent turns ("Agents asking each other", below). It
 is a cache. The authority on which turns have started is the chat's `work`
 channel, which never goes back in time, so `/data` restored from any
 earlier save, or lost, costs reads and runs nothing twice
-(docs/computers.md, Durability, P1).
+(docs/durable-computers.md, P1).
 
 - **One life per turn.** Each bridge process is a life, with 128 random
   bits of its own, never written to `/data`. A turn is run only by the
@@ -549,7 +549,7 @@ request: Hermes keeps a turn's message as its session's last until the
 turn answers, and joins the next message to it (two user messages in a
 row are one), so its model was handed `[paul] do the risky thing\n\n[paul]
 good morning` and did the risky thing again (P5 of
-docs/computers.md, Durability). Two
+docs/durable-computers.md). Two
 parts close it:
 
 - **The note (every runtime).** The first turn an agent runs in a chat
@@ -584,6 +584,57 @@ Proven with the real Hermes in `a_turn_cut_by_a_restart_is_closed_and_told`
 second call of the cut command, no card again, an answer, and the model's
 request ends with the note and the message after the boundary. Whether a
 real model, so told, checks before it redoes is a hosted run's to see.
+
+## A cut turn is continued once
+
+Durability phase 4 (Paul, 2026-10-31): a turn a restart cut is picked up
+again by itself, so nobody types "continue", and never run twice.
+
+- **Which.** A turn this life ended as lost: at its start, one an earlier
+  life was running (`recover`), or at its claim, one another life claimed
+  (409). It is continued once its lost end lands on `work` as this life's
+  own (appended, or a replay of this body: `Input::Posted`'s `kept`). A
+  life that ran the turn to its end posted that end first, so this one's
+  is refused (409) and nothing is continued: a rolled-back disk never
+  continues a turn that finished.
+- **Not continued.** An ask's turn (its asker is answered `lost`), a
+  command, a turn its asker stopped, a turn this life knows was waiting
+  on its person (asking in words, or on a card: their answer is its next
+  turn, above, "A card outlives its turn (P6)"), and a continuation
+  itself: one continuation,
+  and a continuation a restart cuts is told to the turn after it, as any
+  cut turn is (Pi's restart limit, ending visibly). A state older than
+  the turn cannot know it waited on its person; its continuation may ask
+  again.
+- **A Stop is never undone.** A Stop this life accepted (`stop_requested`)
+  holds through a restart before the runtime's end, its question or card
+  included (a Stop answers them). One said after the restart, before the
+  lost end lands (the page still shows the turn running; a rolled-back
+  life reads it again), cancels the continuation; one naming a cut turn
+  whose continuation is queued or running stops that.
+- **What it is.** A turn queued in the cut turn's place (its order),
+  with its cause, asker and depth, whose id is the cut turn's
+  continuation's (`records::continuation_id`), so its claim makes it one
+  run in any life. It is said by the computer, never as its asker's words
+  (`[your computer] I restarted while you were working …`,
+  `engine::CONTINUE_TEXT`), and carries the cut turn's note by its id
+  (`TurnStart::continues`; driver.rs, `cut_note`), whatever ran between:
+  what it was asked, its steps and replies, and to check before redoing
+  anything. Its runtime is never asked to rerun a call: Claude Code tells
+  its model a cut call's outcome is unknown, and Hermes' cut session is
+  closed at boot (above). The chat is shown it as it starts
+  (`turn.notice`, `CONTINUE_NOTICE`).
+- **Bounds.** Past its chat's queue or the computer's turns it is not
+  admitted, and said so in the log (`turn.uncontinued`).
+- A state holding a continuation, or a turn to be continued, is format 4,
+  which a bridge before continuations sets aside.
+- Proven in `a_cut_turn_is_continued_once`,
+  `a_stopped_turn_is_never_continued`,
+  `a_claim_another_life_holds_ends_the_turn` and the simulation's
+  continuation invariants (engine_tests.rs: continued once, never a
+  continuation's continuation, only a turn the journal ended as lost),
+  tests/bridge.rs's restart cases, and with the real Hermes in
+  `a_turn_cut_while_its_tool_runs_is_continued_once` (tests/docker.rs).
 
 ## What a rollback forgot
 

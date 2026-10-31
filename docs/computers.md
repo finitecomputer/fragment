@@ -96,6 +96,13 @@ has none of it.
   turn after a cut one is told"): first each tool call it asked for that
   no step ended, which may or may not have run, since each call the model
   asks for is recorded on `work` (`turn.call`: docs/chat-records.md).
+- **A cut turn is continued once** (durability phase 4, Paul,
+  2026-10-31: nobody should type "continue"). A turn this life ended as
+  lost is queued once more in its place, said by the computer and
+  carrying the cut turn's note; its runtime is never asked to rerun a
+  call. Never twice, never a continuation's, and never one its asker
+  stopped or one that waited on its person (docs/bridge.md, "A cut turn
+  is continued once").
 - **P6, a card outlives its turn.** A sleep or a restart may cut a turn
   under its card. The card stays answerable until it expires; a late
   answer starts one fresh turn, claimed by the answer, with the card's
@@ -183,23 +190,27 @@ every chat and Settings.
 - **Getting help**: a deployment may name `support_url`, which the shell
   links once a restart has failed too.
 
-## Stable and canary
+## Preview and production
 
-**Preview is the canary; production is stable** (Paul, 2026-10-29).
+**There's preview and there's prod** (Paul, 2026-10-31). One image name,
+`hermes`: preview runs master's image, and production runs the digest
+preview proved, promoted by Paul.
 
 - **Pins are digests.** Every image a CI config names is pinned at
   `…@sha256:<64 hex>` (deploy.rs's `pinned_ok`); tags only find them. A
   computer is pinned to an image by its name in the config (`hermes` by
-  default), and a name stays while any computer is pinned to it.
-- **Preview follows master.** Each green master push deploys the Hermes
-  image its checkout's inputs make, as both `hermes` and `hermes-canary`,
-  reused by its input key when it was built before
-  (`xtask/src/image/preview.rs`). The merge queue builds it first
-  (`preview-image.yml`, under queue tags, never deploying and never a
-  required check); master's job alone writes an input tag. Only the
-  image's inputs change its version (Paul, 2026-10-14: a change to the
-  cell or the shell needs no image rollout); a host test holds that list
-  to the Dockerfile.
+  default). A computer pinned to a name the deployment no longer has has
+  no image to start: move its pins (`fragment operator pin`) before a
+  name goes.
+- **Preview follows master.** Each green master push deploys, as
+  `hermes`, the image its checkout's inputs make, reused by its input key
+  when it was built before (`xtask/src/image/preview.rs`). The merge
+  queue builds it first (`preview-image.yml`, under queue tags, never
+  deploying and never a required check); master's job alone writes an
+  input tag.
+- **What changes a version.** Only the image's inputs (Paul, 2026-10-14:
+  a change to the cell or the shell needs no image rollout); a host test
+  holds that list to the Dockerfile.
 - **Production stays pinned** (`production.jsonc` in
   finitecomputer/fragment-deploy) to a digest a round proved, copied byte
   for byte into production's registry (`cargo xtask image copy`), never
@@ -227,11 +238,12 @@ every chat and Settings.
    --hosted --config <preview config> --branch preview --only
    computers,agent-restart,agent-smoke,agent-ask,bot-mode
    --max-paid-calls 190`.
-4. Prove the upgrade on a production-shaped test branch (its deploy
-   Paul's to approve), `hermes` pinned to production's digest and
-   `hermes-canary` to the recorded one: the same run with `--candidate
-   hermes-canary`, then `--only computers,agent-restart --max-paid-calls
-   50` without it, each followed by `--sweep`.
+4. Prove the upgrade from production's image: name production's digest
+   in the preview config as an image of its own (`production`, in the
+   preview's registry, which a promotion copied it from), let the next
+   deploy take it, and run `--upgrade-from production --only
+   agent-restart --max-paid-calls 16`, then `--sweep`. Remove that line
+   once no computer is pinned to it.
 5. Soak the recorded digest for 24 hours, the watched computers having
    answered on it and the hosted runs green. A later image is another
    round.
