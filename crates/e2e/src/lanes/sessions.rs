@@ -185,8 +185,10 @@ pub fn sessions_ui(s: &mut Suite, api: &Api) -> Result<()> {
         !reply.is_empty()
     });
     s.ok(
-        "the agent is told what was said there at its first turn in the chat, as a note",
-        said.status == 200 && answered && reply.contains("(told: This chat goes on from a conversation your owner had with you before they moved here, “Beans”") && reply.contains("Your owner: plant beans?\nYou: in spring"),
+        "the agent is told what was said there at its first turn in the chat, as a note, whose words they were",
+        // this agent is not named as the conversation's was (Juniper): the
+        // note says whose words they were, never "you"
+        said.status == 200 && answered && reply.contains("(told: This chat goes on from a conversation your owner had with Juniper before they moved here, “Beans”") && reply.contains("Your owner: plant beans?\nJuniper: in spring"),
         &reply,
     );
 
