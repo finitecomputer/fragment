@@ -48,6 +48,8 @@ pub struct PinMove {
     pub changed: bool,
     pub to: Option<String>,
     pub paths: Vec<String>,
+    /// The paths it deleted (of `paths`).
+    pub removed: Vec<String>,
 }
 
 /// A file in a pin's tree index (metadata only; the bytes stay in git).
@@ -258,16 +260,16 @@ impl FragmentCell {
         let cs = self.cs()?;
         let Some(to) = cs.branch_head(&repo, which).await? else {
             if from.is_none() {
-                return Ok(PinMove { changed: false, to: None, paths: vec![] });
+                return Ok(PinMove { changed: false, to: None, paths: vec![], removed: vec![] });
             }
             self.exec("DELETE FROM tree WHERE ref = ?", vec![which.into()])?;
             self.exec("DELETE FROM pointers WHERE ref = ?", vec![which.into()])?;
             self.del_meta(MetaKey::pin(which))?;
             self.event("git.refresh", &format!("{which}: the branch is gone; pin cleared"), json!({ "ref": which, "from": from }));
-            return Ok(PinMove { changed: true, to: None, paths: vec![] });
+            return Ok(PinMove { changed: true, to: None, paths: vec![], removed: vec![] });
         };
         if from.as_deref() == Some(to.as_str()) {
-            return Ok(PinMove { changed: false, to: Some(to), paths: vec![] });
+            return Ok(PinMove { changed: false, to: Some(to), paths: vec![], removed: vec![] });
         }
         let entries = cs.tree(&repo, &to).await?;
         let prior: BTreeMap<String, Indexed> =
@@ -283,7 +285,8 @@ impl FragmentCell {
             &format!("{which}: {} → {} ({} files, {} changed)", short(from.as_deref()), short(Some(&to)), entries.len(), paths.len()),
             json!({ "ref": which, "from": from, "to": to, "changed": paths.iter().take(50).collect::<Vec<_>>() }),
         );
-        Ok(PinMove { changed: true, to: Some(to), paths })
+        let removed = diff.removed.iter().map(|p| p.to_string()).collect();
+        Ok(PinMove { changed: true, to: Some(to), paths, removed })
     }
 
     /// Writes a pin move's changes to its index (`tree::diff`): deletes
@@ -671,6 +674,7 @@ impl FragmentCell {
                 self.broadcast_change(moved.to.as_deref(), &moved.paths);
                 let depth = self.commit_depth(moved.to.as_deref())?;
                 self.fire_files(moved.to.as_deref(), &moved.paths, depth, read_only)?;
+                self.search_forget(&moved.removed)?;
             }
             self.follow(which).await?;
             out.push((which.to_string(), moved));
