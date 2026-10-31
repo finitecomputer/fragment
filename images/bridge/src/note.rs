@@ -19,9 +19,9 @@
 //! note is said once. A turn before it with no end in the journal (its end
 //! never landed) is told nothing: only a recorded loss is a cut.
 //!
-//! A call the cut turn asked for (`turn.call`, recorded before it ran) with
-//! no step of the same `tool_call_id` never reported back: it may or may
-//! not have run, and the note names it first among what to check.
+//! A call the cut turn asked for (`turn.call`, recorded before it ran) that
+//! no step of its response ended never reported back: it may or may not
+//! have run, and the note names it first among what to check.
 
 use serde_json::Value;
 
@@ -145,24 +145,25 @@ fn cut(from: &[Record], agent: &str, turn: &str, start: &Value, started_at: i64)
         .map(|r| CutStep { tool: field(&r.body, "tool").to_string(), args: field(&r.body, "args").to_string(), ok: r.body["ok"] != false })
         .collect();
     let steps_total = steps.len();
-    // Each step ends the call it pairs with: by its id, else (its runtime
-    // renamed the call before it ran: Hermes de-duplicates a session's ids,
-    // `_d<n>`, and splits composite ones, after saying them) by its tool and
-    // arguments, one step to one call. A call no step pairs with is unended.
+    // Each step ends a call it pairs with, among the calls of the response
+    // it ran in (Hermes runs a response's calls before it asks the model
+    // again; a step naming no response, an older image's, among all the
+    // turn's): by its id, else, for one its runtime renamed after saying it
+    // (Hermes de-duplicates a session's ids, `_d<n>`, splits composite ones
+    // and rewrites some providers'), by its tool and arguments. One step to
+    // one call, the first still open; a call no step pairs with is unended.
     let calls: Vec<&Value> = from.iter().filter(mine).map(|r| &r.body).filter(|b| b["kind"] == "turn.call").collect();
     let ends: Vec<&Value> = from.iter().filter(mine).map(|r| &r.body).filter(|b| b["kind"] == "turn.step").collect();
     let mut open: Vec<bool> = vec![true; calls.len()];
-    let mut by_shape: Vec<&Value> = Vec::new();
-    for end in ends {
-        match calls.iter().position(|c| c["tool_call_id"] == end["tool_call_id"] && end["tool_call_id"].is_string()) {
-            Some(i) if open[i] => open[i] = false,
-            Some(_) => {}
-            None => by_shape.push(end),
-        }
-    }
-    for end in by_shape {
-        if let Some(i) = (0..calls.len()).find(|&i| open[i] && calls[i]["tool"] == end["tool"] && calls[i]["args"] == end["args"]) {
-            open[i] = false;
+    let mut paired: Vec<bool> = vec![false; ends.len()];
+    let rules: [fn(&Value, &Value) -> bool; 2] = [|c, end| end["tool_call_id"].is_string() && c["tool_call_id"] == end["tool_call_id"], |c, end| c["tool"] == end["tool"] && c["args"] == end["args"]];
+    for pairs in rules {
+        for (e, end) in ends.iter().enumerate() {
+            let of_its_response = |c: &Value| end.get("response").is_none_or(|r| c["response"] == *r);
+            if let Some(i) = (0..calls.len()).find(|&i| !paired[e] && open[i] && of_its_response(calls[i]) && pairs(calls[i], end)) {
+                open[i] = false;
+                paired[e] = true;
+            }
         }
     }
     let unended: Vec<CutCall> = calls
@@ -551,64 +552,85 @@ mod tests {
         Step { tool: tool.into(), args: args.into(), ok, excerpt: String::new(), category: crate::records::Category::Shell, evidence: None }
     }
 
-    /// A step that ended the call `id`.
-    fn ended(id: &str, tool: &str, args: &str) -> Step {
-        let evidence = crate::records::ToolEvidence { tool_call_id: id.into(), status: crate::records::ToolStatus::Completed, duration_ms: 5 };
+    /// A step that ended the call `id` of `response` (`None`: an older
+    /// image's, naming none).
+    fn ended(response: Option<&str>, id: &str, tool: &str, args: &str) -> Step {
+        let evidence = crate::records::ToolEvidence { tool_call_id: id.into(), status: crate::records::ToolStatus::Completed, duration_ms: 5, response: response.map(Into::into) };
         Step { evidence: Some(evidence), ..step(tool, args, true) }
     }
 
-    fn call(id: &str, tool: &str, args: &str) -> crate::records::Call {
-        crate::records::Call { tool_call_id: id.into(), tool: tool.into(), args: args.into(), category: crate::records::Category::Shell }
+    fn call(response: &str, position: u32, id: &str, tool: &str, args: &str) -> crate::records::Call {
+        crate::records::Call { response: response.into(), position, tool_call_id: id.into(), tool: tool.into(), args: args.into(), category: crate::records::Category::Shell }
     }
 
     /// Goal (phase 4): a cut turn's note names, first, each call it asked
     /// for (`turn.call`, recorded before it ran) with no step ending it:
-    /// each may or may not have run. One a step ended is told as a step
-    /// alone, whether its step names its id or (its runtime renamed it
-    /// before it ran) its tool and arguments; another agent's call, or
-    /// another turn's, is not this one's.
-    /// Past `NOTE_STEPS_MAX` they are counted. Replay: a call recorded
-    /// twice (its record said again) is named once.
+    /// each may or may not have run. A step ends a call of its own response
+    /// alone, by its id or (its runtime renamed it before it ran) its tool
+    /// and arguments: a provider's id reused by a later response
+    /// (`call_0`, every response), with another preview or the same, is
+    /// another call, which the earlier one's step never ends. Another
+    /// agent's call, or another turn's, is not this one's. Past
+    /// `NOTE_STEPS_MAX` they are counted. Replay: a call said again is one
+    /// record (`call_id`), and its reused id in a later response another.
     #[test]
     fn a_cut_turns_unended_calls_are_named_first() {
-        use crate::records::turn_call;
+        use crate::records::{call_id, turn_call};
         let mut w = Work::default();
         w.start(ME, "cut", 3);
-        w.post(ME, turn_call("cut", &call("c1", "terminal", "ls")));
-        w.post(ME, turn_step("cut", 1, &ended("c1", "terminal", "ls")));
-        w.post(ME, turn_call("cut", &call("c2", "terminal", "make deploy")));
-        // renamed before it ran (Hermes' `call_1_d2`): its step pairs by shape
-        w.post(ME, turn_call("cut", &call("call_1", "write_file", "/tmp/a")));
-        w.post(ME, turn_step("cut", 2, &ended("call_1_d2", "write_file", "/tmp/a")));
-        w.post("npub1rowan", turn_call("cut", &call("c9", "terminal", "not mine")));
-        w.post(ME, turn_call("other", &call("c8", "terminal", "another turn's")));
+        // the first response: two calls, both ended (one renamed first)
+        w.post(ME, turn_call("cut", &call("r1", 0, "call_0", "terminal", "ls")));
+        w.post(ME, turn_call("cut", &call("r1", 1, "call_1", "write_file", "/tmp/a")));
+        w.post(ME, turn_step("cut", 1, &ended(Some("r1"), "call_0", "terminal", "ls")));
+        w.post(ME, turn_step("cut", 2, &ended(Some("r1"), "call_1_d2", "write_file", "/tmp/a")));
+        // the second reuses its ids, one with another preview, one the
+        // same, and a restart cuts it before either ends
+        w.post(ME, turn_call("cut", &call("r2", 0, "call_0", "terminal", "make deploy")));
+        w.post(ME, turn_call("cut", &call("r2", 1, "call_1", "terminal", "ls")));
+        w.post("npub1rowan", turn_call("cut", &call("r2", 2, "c9", "terminal", "not mine")));
+        w.post(ME, turn_call("other", &call("r2", 3, "c8", "terminal", "another turn's")));
         w.end(ME, "cut", Outcome::Error(LOST.into()));
         let next = w.start(ME, "next", 9);
         let Before::Cut(c) = previous(w.before(next), ME, true) else { panic!("a cut turn") };
-        assert_eq!(c.unended, vec![CutCall { tool: "terminal".into(), args: "make deploy".into() }], "{c:?}");
+        let named = |c: &Cut| c.unended.iter().map(|c| format!("{} {}", c.tool, c.args)).collect::<Vec<_>>();
+        assert_eq!(named(&c), ["terminal make deploy", "terminal ls"], "{c:?}");
         let note = text(&c, Some("ship it"), &[]);
         assert_eq!(
             note,
             "Your previous turn in this chat was cut short: your computer restarted before it finished. Check what it already did before you do any of it again; the message below is new.\n\
              It was answering: “ship it”\n\
-             It had started these and never heard back, so each may or may not have run, perhaps partly; check before running any again: terminal make deploy\n\
+             It had started these and never heard back, so each may or may not have run, perhaps partly; check before running any again: terminal make deploy; terminal ls\n\
              Its steps, as recorded: terminal ls (ok); write_file /tmp/a (ok)"
         );
+        assert_eq!(call_id("cut", "r2", 0), call_id("cut", "r2", 0), "said again, one record");
+        assert_ne!(call_id("cut", "r2", 0), call_id("cut", "r1", 0), "its id reused by a later response, another call");
+        assert_ne!(call_id("cut", "r2", 0), call_id("cut", "r2", 1));
+        assert_ne!(call_id("cut", "r2", 0), call_id("other", "r2", 0));
 
-        // replay: the same call's record again names it once (the platform
-        // keeps one record a call: `call_id`), and the bound counts the rest
+        // a step of a response whose calls never landed ends none of
+        // another response's; an older image's step, naming none, pairs
+        // among all the turn's
+        let mut w = Work::default();
+        w.start(ME, "cut", 3);
+        w.post(ME, turn_call("cut", &call("r2", 0, "call_0", "terminal", "make deploy")));
+        w.post(ME, turn_step("cut", 1, &ended(Some("r1"), "call_0", "terminal", "make deploy")));
+        w.post(ME, turn_call("cut", &call("r3", 0, "call_7", "terminal", "make test")));
+        w.post(ME, turn_step("cut", 2, &ended(None, "call_7", "terminal", "make test")));
+        w.end(ME, "cut", Outcome::Error(LOST.into()));
+        let next = w.start(ME, "next", 9);
+        let Before::Cut(c) = previous(w.before(next), ME, true) else { panic!("a cut turn") };
+        assert_eq!(named(&c), ["terminal make deploy"], "{c:?}");
+
         let mut w = Work::default();
         w.start(ME, "many", 3);
         for i in 0..limits::NOTE_STEPS_MAX + 3 {
-            w.post(ME, turn_call("many", &call(&format!("c{i}"), "terminal", &format!("step {i}"))));
+            w.post(ME, turn_call("many", &call("r1", i as u32, &format!("c{i}"), "terminal", &format!("step {i}"))));
         }
         w.end(ME, "many", Outcome::Error(LOST.into()));
         let next = w.start(ME, "next", 9);
         let Before::Cut(c) = previous(w.before(next), ME, true) else { panic!("a cut turn") };
         assert_eq!((c.unended.len(), c.unended_total), (limits::NOTE_STEPS_MAX, limits::NOTE_STEPS_MAX + 3));
         assert!(text(&c, None, &[]).contains("; and 3 more"));
-        assert_eq!(crate::records::call_id("many", "c1"), crate::records::call_id("many", "c1"), "one record a call");
-        assert_ne!(crate::records::call_id("many", "c1"), crate::records::call_id("many", "c2"));
     }
 
     /// Goal (P5): the turn after a cut one is told of it, with its steps and

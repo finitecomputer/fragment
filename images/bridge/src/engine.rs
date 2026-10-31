@@ -1775,9 +1775,9 @@ impl Engine {
                 let t = self.state.turns.get_mut(&turn).expect("checked");
                 t.calls = t.calls.saturating_add(1);
                 self.dirty = true;
-                if t.calls <= limits::STEPS_PER_TURN_MAX && records::valid_post_id(&call.tool_call_id) {
+                if t.calls <= limits::STEPS_PER_TURN_MAX && records::valid_post_id(&call.response) && records::valid_post_id(&call.tool_call_id) {
                     let (agent, fragment) = (t.agent.clone(), t.fragment.clone());
-                    self.post(&agent, &fragment, records::WORK, records::call_id(&turn, &call.tool_call_id), records::turn_call(&turn, &call), Vec::new());
+                    self.post(&agent, &fragment, records::WORK, records::call_id(&turn, &call.response, call.position), records::turn_call(&turn, &call), Vec::new());
                 }
             }
             Event::Step { turn, step } => {

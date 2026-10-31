@@ -647,31 +647,39 @@ struct Observed {
     tool_call_id: String,
     status: ToolStatus,
     duration_ms: u64,
+    /// The response whose calls were running (`Asked::response`); an older
+    /// image's plugin says none.
+    #[serde(default)]
+    response: Option<String>,
 }
 
 /// The step an observed end is, and its turn: the one source of steps
 /// (nothing is read from Hermes' progress text, nor inferred from silence).
 pub fn observed_tool(v: &Value) -> Option<(String, Step)> {
     let o = Observed::deserialize(v).ok()?;
-    if !valid_post_id(&o.turn) || o.tool.is_empty() || !valid_post_id(&o.tool_call_id) {
+    if !valid_post_id(&o.turn) || o.tool.is_empty() || !valid_post_id(&o.tool_call_id) || o.response.as_deref().is_some_and(|r| !valid_post_id(r)) {
         return None;
     }
-    let evidence = ToolEvidence { tool_call_id: o.tool_call_id, status: o.status, duration_ms: o.duration_ms };
+    let evidence = ToolEvidence { tool_call_id: o.tool_call_id, status: o.status, duration_ms: o.duration_ms, response: o.response };
     Some((o.turn, Step { category: category_of(&o.tool), ok: o.status == ToolStatus::Completed, tool: o.tool, args: o.args, excerpt: o.excerpt, evidence: Some(evidence) }))
 }
 
 /// A tool call the model asked for, as our image's `fragment-activity`
 /// plugin hears it (Hermes' `post_api_request`, before Hermes runs any call
 /// of its response) on the activity socket: its turn (Hermes' message id,
-/// ours), the call's id, tool and preview (Hermes' own display helper's).
+/// ours); the response that asked for it (an id the plugin gives each
+/// response once: its gateway's life and count) and its place there; the
+/// call's id, tool and preview (Hermes' own display helper's).
 #[derive(Deserialize)]
 struct Asked {
     turn: String,
+    response: String,
     call: AskedCall,
 }
 
 #[derive(Deserialize)]
 struct AskedCall {
+    position: u32,
     tool_call_id: String,
     tool: String,
     #[serde(default)]
@@ -682,25 +690,44 @@ struct AskedCall {
 /// before it runs (`turn.call`).
 pub fn asked_call(v: &Value) -> Option<(String, Call)> {
     let a = Asked::deserialize(v).ok()?;
-    if !valid_post_id(&a.turn) || a.call.tool.is_empty() || !valid_post_id(&a.call.tool_call_id) {
+    if !valid_post_id(&a.turn) || !valid_post_id(&a.response) || a.call.tool.is_empty() || !valid_post_id(&a.call.tool_call_id) {
         return None;
     }
-    Some((a.turn, Call { category: category_of(&a.call.tool), tool: a.call.tool, args: a.call.args, tool_call_id: a.call.tool_call_id }))
+    Some((a.turn, Call { category: category_of(&a.call.tool), response: a.response, position: a.call.position, tool: a.call.tool, args: a.call.args, tool_call_id: a.call.tool_call_id }))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// A call the model asked for is its turn, id, tool and preview; one
-    /// with no turn, no tool or an id that is no post id is none.
+    /// A call the model asked for is its turn, response, place, id, tool
+    /// and preview; one with no turn, no response, no place, no tool, or an
+    /// id that is no post id is none. An end names its response, or (an
+    /// older image's) none; one naming no post id is none.
     #[test]
     fn an_asked_call() {
-        let (turn, call) = asked_call(&json!({ "turn": "abc123", "call": { "tool_call_id": "call_9", "tool": "terminal", "args": "make deploy" } })).expect("a call");
-        assert_eq!((turn.as_str(), call.tool_call_id.as_str(), call.tool.as_str(), call.args.as_str(), call.category), ("abc123", "call_9", "terminal", "make deploy", Category::Shell));
-        for bad in [json!({ "call": { "tool_call_id": "c", "tool": "t" } }), json!({ "turn": "t", "call": { "tool_call_id": "c", "tool": "" } }), json!({ "turn": "t", "call": { "tool_call_id": "has space", "tool": "t" } }), json!({ "turn": "t", "tool_call_id": "c", "tool": "t", "status": "ok" })] {
+        let (turn, call) = asked_call(&json!({ "turn": "abc123", "response": "f00d-2", "call": { "position": 1, "tool_call_id": "call_0", "tool": "terminal", "args": "make deploy" } })).expect("a call");
+        assert_eq!((turn.as_str(), call.response.as_str(), call.position, call.tool_call_id.as_str(), call.tool.as_str(), call.args.as_str(), call.category), ("abc123", "f00d-2", 1, "call_0", "terminal", "make deploy", Category::Shell));
+        for bad in [
+            json!({ "response": "r", "call": { "position": 0, "tool_call_id": "c", "tool": "t" } }),
+            json!({ "turn": "t", "call": { "position": 0, "tool_call_id": "c", "tool": "t" } }),
+            json!({ "turn": "t", "response": "has space", "call": { "position": 0, "tool_call_id": "c", "tool": "t" } }),
+            json!({ "turn": "t", "response": "r", "call": { "tool_call_id": "c", "tool": "t" } }),
+            json!({ "turn": "t", "response": "r", "call": { "position": -1, "tool_call_id": "c", "tool": "t" } }),
+            json!({ "turn": "t", "response": "r", "call": { "position": 0, "tool_call_id": "c", "tool": "" } }),
+            json!({ "turn": "t", "response": "r", "call": { "position": 0, "tool_call_id": "has space", "tool": "t" } }),
+            json!({ "turn": "t", "tool_call_id": "c", "tool": "t", "status": "ok" }),
+        ] {
             assert!(asked_call(&bad).is_none(), "{bad}");
         }
+        let end = json!({ "turn": "t", "tool": "terminal", "args": "ls", "tool_call_id": "call_0_d2", "status": "completed", "duration_ms": 3 });
+        let response = |v: &Value| observed_tool(v).and_then(|(_, s)| s.evidence).map(|e| e.response);
+        assert_eq!(response(&end), Some(None), "an older image's end names none");
+        let mut of = end.clone();
+        of["response"] = json!("f00d-2");
+        assert_eq!(response(&of), Some(Some("f00d-2".to_string())));
+        of["response"] = json!("has space");
+        assert_eq!(response(&of), None);
     }
 
     /// A question in words is an open clarify (`❓`, as Hermes' base

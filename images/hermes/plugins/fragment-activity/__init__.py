@@ -20,10 +20,18 @@ _children = set()
 _socket = None
 _worker = None
 # The person's turns this gateway runs, by Hermes' turn id: each our turn's
-# id (its Relay message's). Bounded: the least recently busy go (a turn's
-# tool call makes it the newest, however long it runs).
+# id (its Relay message's) and its latest model response that asked for
+# calls, whose calls run until the next. Bounded: the least recently busy
+# go (a turn's tool call makes it the newest, however long it runs).
 _turns = {}
 _TURNS_MAX = 64
+# Each model response that asks for calls is named once: this gateway's life
+# and its count (`<life>-<n>`). A call's intent is its response's and place
+# there, so a provider's id a later response says again (some name every
+# response's first call `call_0`) is another call; a call's end names its
+# response, so it ends only that response's call.
+_LIFE = os.urandom(6).hex()
+_responses = 0
 # Hermes' tool outcomes, as a step's (docs/chat-records.md).
 _STATUS = {"ok": "completed", "error": "failed", "timeout": "timed_out", "cancelled": "cancelled", "blocked": "blocked"}
 
@@ -146,7 +154,7 @@ def turn_started(*, turn_id=None, **kwargs):
     if not turn_id or not turn or is_delegated_child_context() or get_session_env("HERMES_SESSION_PLATFORM", "") != "relay":
         return
     with _condition:
-        _turns[turn_id] = turn
+        _turns[turn_id] = [turn, None]
         while len(_turns) > _TURNS_MAX:
             del _turns[next(iter(_turns))]
 
@@ -163,17 +171,22 @@ _CALLS_MAX = 32
 def tools_asked(*, turn_id=None, assistant_message=None, **kwargs):
     # Each tool call of a model's response, said before Hermes runs any of
     # them: Hermes fires post_api_request in normalize_model_response, before
-    # run_tool_round (agent/conversation_loop.py, v0.21.7 and v0.22.5). Its
-    # intent: asked, which a refusal may still stop; only its end says it
-    # ran. A turn not the person's (the memory review's, a delegated child's)
-    # is none of ours, as for its end.
-    with _condition:
-        turn = _turns.get(turn_id)
+    # run_tool_round (agent/conversation_loop.py, v0.21.7 and v0.22.5), and
+    # runs them all before it asks the model again. Its intent: asked, which
+    # a refusal may still stop; only its end says it ran. A turn not the
+    # person's (the memory review's, a delegated child's) is none of ours, as
+    # for its end.
+    global _responses
     calls = (_field(assistant_message, "tool_calls") if assistant_message is not None else None) or []
-    if turn is None or not calls:
-        return
+    with _condition:
+        mine = _turns.get(turn_id)
+        if mine is None or not calls:
+            return
+        _responses += 1
+        mine[1] = response = f"{_LIFE}-{_responses}"
+        turn = mine[0]
     from agent.display import build_tool_preview
-    for call in list(calls)[:_CALLS_MAX]:
+    for position, call in enumerate(list(calls)[:_CALLS_MAX]):
         call_id, function = _field(call, "id"), _field(call, "function")
         name = _field(function, "name") if function is not None else None
         if not isinstance(call_id, str) or not call_id or not isinstance(name, str) or not name:
@@ -187,7 +200,8 @@ def tools_asked(*, turn_id=None, assistant_message=None, **kwargs):
             preview = build_tool_preview(name, args if isinstance(args, dict) else {}, max_len=140) or ""
         except Exception:
             preview = ""
-        frame = {"turn": turn, "call": {"tool_call_id": call_id[:128], "tool": name[:140], "args": preview}}
+        frame = {"turn": turn, "response": response,
+                 "call": {"position": position, "tool_call_id": call_id[:128], "tool": name[:140], "args": preview}}
         with _condition:
             # Answered before Hermes runs the call; unanswered, it runs anyway
             # (an observer never holds the agent back).
@@ -198,9 +212,10 @@ def tools_asked(*, turn_id=None, assistant_message=None, **kwargs):
 def tool_finished(*, tool_name=None, args=None, tool_call_id=None, turn_id=None,
                   duration_ms=0, status=None, result=None, **kwargs):
     with _condition:
-        turn = _turns.pop(turn_id, None)
-        if turn is not None:
-            _turns[turn_id] = turn
+        mine = _turns.pop(turn_id, None)
+        if mine is not None:
+            _turns[turn_id] = mine
+        turn, response = mine if mine is not None else (None, None)
     outcome = _STATUS.get(status)
     if turn is None or not tool_call_id or outcome is None:
         return  # another run's call, or no outcome: never a guessed step
@@ -222,6 +237,8 @@ def tool_finished(*, tool_name=None, args=None, tool_call_id=None, turn_id=None,
     frame = {"turn": turn, "tool": str(tool_name)[:140], "args": preview,
              "excerpt": "Exit code: " + str(exit_code) if type(exit_code) is int else "",
              "tool_call_id": str(tool_call_id)[:128], "status": outcome, "duration_ms": max(0, int(duration_ms or 0))}
+    if response is not None:
+        frame["response"] = response
     with _condition:
         # Answered before Hermes can finish its turn.
         if _send(frame) != "observed":

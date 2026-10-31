@@ -439,21 +439,27 @@ nothing is guessed.
 
 A call's intent comes before it runs: each call of a model's response, as
 Hermes' `post_api_request` hands its `assistant_message` (fired in
-`normalize_model_response`, before `run_tool_round` runs any of them; read
-from v0.21.7 and v0.22.5). Hermes has no supported "call started" hook:
-`pre_tool_call` is a policy gate that runs before Hermes' own refusals and
-blocks a call whose hook is slow (`plugins.hook_callback_timeout`), so no
-observer of ours sits there. The plugin says each call (`{"turn", "call":
-{tool_call_id, tool, args}}`, answered `called`) and the engine records it
-on `work` as a `turn.call` (docs/chat-records.md), once per call
-(`records::call_id`). Asked is all it says: a refusal may still stop the
-call, and only its step says it ended. Its id is the provider's as the
-model said it: Hermes may rename the call before it runs (`run_tool_round`
-de-duplicates the ids a session used before, `call_1_d2`, and splits
-composite ones), so a step pairs with its call by id, else by its tool and
-arguments, one step to one call. A turn a restart cut is told, first,
-each call it asked for with no step of the same `tool_call_id`: each may or
-may not have run (note.rs). The record is posted as soon as the lane can,
+`normalize_model_response`, before `run_tool_round` runs any of them;
+Hermes runs them all before it asks the model again; read from v0.21.7
+and v0.22.5). Hermes has no supported "call started" hook: `pre_tool_call`
+is a policy gate that runs before Hermes' own refusals and blocks a call
+whose hook is slow (`plugins.hook_callback_timeout`), so no observer of
+ours sits there. The plugin names each response that asks for calls once
+(its gateway's life, random, and a count: `<life>-<n>`) and says each call
+(`{"turn", "response", "call": {position, tool_call_id, tool, args}}`,
+answered `called`); the engine records it on `work` as a `turn.call`
+(docs/chat-records.md), one record per turn, response and place
+(`records::call_id`), so a frame said again is one record. The provider's
+id is no call's identity: some providers name every response's first call
+`call_0`, and Hermes renames a call after saying it (`run_tool_round`
+de-duplicates the ids a session used before, `call_0_d2`, splits
+composite ones and rewrites some providers'). A call's end names the
+turn's latest response (`"response"` on its frame), and a step pairs with
+a call of that response alone: by id, else by its tool and arguments, one
+step to one call. Asked is all a call's record says: a refusal may still
+stop the call, and only its step says it ended. A turn a restart cut is
+told, first, each call it asked for that no step ended: each may or may
+not have run (note.rs). The record is posted as soon as the lane can,
 after the hook is answered, so it trails the call's start by the lane's
 milliseconds; a call whose intent never landed is told as before, by its
 steps alone.

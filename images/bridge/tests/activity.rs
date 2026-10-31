@@ -15,13 +15,19 @@ use support::hermes::Hermes;
 
 const SECRET: &str = "0123456789abcdef0123456789abcdef";
 
+fn free_port() -> std::net::SocketAddr {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.local_addr().unwrap()
+}
+
+fn relay(listen: std::net::SocketAddr, dir: &std::path::Path) -> Box<Relay> {
+    Box::new(Relay { config: RelayConfig { listen, gateway_id: "activity-test".into(), secret: SECRET.into(), media_dir: dir.join("media"), media_local: true } })
+}
+
 fn start(fake: &Fake, name: &str) -> (std::net::SocketAddr, support::Running) {
     let dir = support::dir(name);
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let listen = listener.local_addr().unwrap();
-    drop(listener);
-    let runtime = Box::new(Relay { config: RelayConfig { listen, gateway_id: "activity-test".into(), secret: SECRET.into(), media_dir: dir.join("media"), media_local: true } });
-    (listen, support::start(support::config(&fake.url(), &dir, support::settings()), runtime))
+    let listen = free_port();
+    (listen, support::start(support::config(&fake.url(), &dir, support::settings()), relay(listen, &dir)))
 }
 
 async fn dial(listen: std::net::SocketAddr, secret: &str) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>> {
@@ -115,21 +121,78 @@ async fn a_call_asked_for_is_recorded_before_its_end() {
     let asked = fake.say(&chat, &person("paul"), json!({ "text": "use a tool slow without observations" }));
     let turn = fragment_bridge::records::turn_id("juniper--k3x9", &chat, "chat", asked["seq"].as_u64().unwrap());
     support::until(10_000, "the turn reached Hermes", || hermes.with(|s| !s.heard.is_empty())).await;
-    let call = json!({ "turn": turn, "call": { "tool_call_id": "call-deploy", "tool": "terminal", "args": "make deploy" } });
+    let call = json!({ "turn": turn, "response": "f00d-1", "call": { "position": 0, "tool_call_id": "call-deploy", "tool": "terminal", "args": "make deploy" } });
     assert_eq!(said(&mut observer, &call.to_string()).await, "called");
     assert_eq!(said(&mut observer, &call.to_string()).await, "called", "said again");
-    for bad in [json!({ "turn": turn, "call": { "tool_call_id": "call-x", "tool": "" } }), json!({ "turn": turn, "call": { "tool_call_id": "has space", "tool": "terminal" } })] {
+    for bad in [
+        json!({ "turn": turn, "response": "f00d-1", "call": { "position": 1, "tool_call_id": "call-x", "tool": "" } }),
+        json!({ "turn": turn, "response": "f00d-1", "call": { "position": 1, "tool_call_id": "has space", "tool": "terminal" } }),
+        json!({ "turn": turn, "call": { "position": 1, "tool_call_id": "call-x", "tool": "terminal" } }),
+    ] {
         assert_eq!(said(&mut observer, &bad.to_string()).await, "refused", "{bad}");
     }
-    let end = json!({ "turn": turn, "tool": "terminal", "args": "make deploy", "excerpt": "Exit code: 0", "tool_call_id": "call-deploy", "status": "completed", "duration_ms": 9 });
+    let end = json!({ "turn": turn, "tool": "terminal", "args": "make deploy", "excerpt": "Exit code: 0", "tool_call_id": "call-deploy", "status": "completed", "duration_ms": 9, "response": "f00d-1" });
     assert_eq!(said(&mut observer, &end.to_string()).await, "observed");
     fake.until(10_000, "turn ended", |w| !w.bodies(&chat, "work", "turn.end").is_empty()).await;
     let work = fake.with(|w| w.records(&chat, "work"));
     let kinds: Vec<&str> = work.iter().filter_map(|r| r["body"]["kind"].as_str()).filter(|k| *k == "turn.call" || *k == "turn.step").collect();
     assert_eq!(kinds, vec!["turn.call", "turn.step"], "one intent, then its end");
     let calls = fake.with(|w| w.bodies(&chat, "work", "turn.call"));
-    assert_eq!(calls, vec![json!({ "kind": "turn.call", "turn": turn, "tool_call_id": "call-deploy", "tool": "terminal", "category": "shell", "args": "make deploy" })]);
+    assert_eq!(calls, vec![json!({ "kind": "turn.call", "turn": turn, "response": "f00d-1", "tool_call_id": "call-deploy", "tool": "terminal", "category": "shell", "args": "make deploy" })]);
+    assert_eq!(fake.with(|w| w.bodies(&chat, "work", "turn.step"))[0]["response"], "f00d-1", "its end names its response");
     drop(observer);
     drop(hermes);
+    bridge.stop().await;
+}
+
+/// Goal (phase 4; Alex on #823): a provider's call id reused by a later
+/// response of the same turn (`call_0`, every response) is another call.
+/// The first response's call ends; the second's two reuse its ids, one
+/// with another preview and one with the same, and a crash cuts them
+/// before either ends. Replay: a frame said again is one record. The next
+/// life's next turn is told the second's two calls may or may not have
+/// run, and the first's as its step alone.
+#[tokio::test]
+async fn a_reused_call_id_is_another_call_across_a_crash() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    let chat = fake.chat("talk", &["juniper"]);
+    let dir = support::dir("asked-reused");
+    let listen = free_port();
+    let cfg = support::config(&fake.url(), &dir, support::settings());
+    let bridge = support::start_killable(cfg.clone(), relay(listen, &dir));
+    let hermes = Hermes::spawn(listen, "activity-test", SECRET);
+    fake.until(10_000, "chat followed", |w| w.live_sockets() >= 2).await;
+    let mut observer = dial(listen, SECRET).await;
+    observer.next().await.unwrap().unwrap();
+    // a turn that runs until its card is answered, so a crash cuts it
+    let asked = fake.say(&chat, &person("paul"), json!({ "text": "ship it, something risky" }));
+    let turn = fragment_bridge::records::turn_id("juniper--k3x9", &chat, "chat", asked["seq"].as_u64().unwrap());
+    support::until(10_000, "the turn reached Hermes", || hermes.with(|s| !s.heard.is_empty())).await;
+    let call = |response: &str, position: u32, id: &str, args: &str| json!({ "turn": turn, "response": response, "call": { "position": position, "tool_call_id": id, "tool": "terminal", "args": args } });
+    assert_eq!(said(&mut observer, &call("f00d-1", 0, "call_0", "ls").to_string()).await, "called");
+    let end = json!({ "turn": turn, "tool": "terminal", "args": "ls", "excerpt": "Exit code: 0", "tool_call_id": "call_0", "status": "completed", "duration_ms": 3, "response": "f00d-1" });
+    assert_eq!(said(&mut observer, &end.to_string()).await, "observed");
+    for frame in [call("f00d-2", 0, "call_0", "make deploy"), call("f00d-2", 1, "call_1", "ls"), call("f00d-2", 0, "call_0", "make deploy")] {
+        assert_eq!(said(&mut observer, &frame.to_string()).await, "called");
+    }
+    fake.until(10_000, "the three intents recorded", |w| w.bodies(&chat, "work", "turn.call").len() >= 3).await;
+    bridge.kill().await;
+    drop(observer);
+    fake.until(10_000, "its sockets closed", |w| w.live_sockets() == 0).await;
+    let bridge = support::start_killable(cfg, relay(listen, &dir));
+    let woken = hermes.after_boot(listen, "activity-test", SECRET);
+    let next = fake.say(&chat, &person("paul"), json!({ "text": "good morning" }));
+    let next = fragment_bridge::records::turn_id("juniper--k3x9", &chat, "chat", next["seq"].as_u64().unwrap());
+    fake.until(10_000, "the next message's turn to end", |w| w.bodies(&chat, "work", "turn.end").iter().any(|e| e["turn"] == next)).await;
+    let calls: Vec<(String, String, String)> = fake.with(|w| w.bodies(&chat, "work", "turn.call")).iter().map(|c| (c["response"].as_str().unwrap().into(), c["tool_call_id"].as_str().unwrap().into(), c["args"].as_str().unwrap().into())).collect();
+    let want = [("f00d-1", "call_0", "ls"), ("f00d-2", "call_0", "make deploy"), ("f00d-2", "call_1", "ls")].map(|(r, i, a)| (r.to_string(), i.to_string(), a.to_string()));
+    assert_eq!(calls, want, "one record a call, the replay none");
+    woken.with(|s| {
+        let heard = s.heard.iter().find(|e| e["message_id"] == next).unwrap_or_else(|| panic!("Hermes heard the next message: {:?}", s.heard));
+        let note = heard["context"][0]["text"].as_str().unwrap_or_else(|| panic!("the note: {heard}"));
+        for said in ["It had started these and never heard back, so each may or may not have run, perhaps partly; check before running any again: terminal make deploy; terminal ls\n", "Its steps, as recorded: terminal ls (ok)"] {
+            assert!(note.contains(said), "{said:?} in {note}");
+        }
+    });
     bridge.stop().await;
 }

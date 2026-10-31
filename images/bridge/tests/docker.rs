@@ -2573,26 +2573,40 @@ async fn steps_say_what_they_do() {
     let command = "echo a-command-that-runs-well-past-forty-characters-0123456789";
     let path = "/data/work/juniper--k3x9/a-file-whose-path-runs-past-forty-characters.txt";
     let code = "print('a script whose one line runs well past forty characters')";
+    // phase 4: each step's call was recorded as asked for before it, by
+    // Hermes' post_api_request, under the response its step names (its own
+    // id, or Hermes' rename of it: `call_0_d2`), with its tool and preview
+    let recorded_before = |turn: &str, said: &str| {
+        fake.with(|w| {
+            let work: Vec<serde_json::Value> = w.records(&chat, "work").into_iter().filter(|r| r["body"]["turn"] == turn).collect();
+            for (i, step) in work.iter().enumerate().filter(|(_, r)| r["body"]["kind"] == "turn.step") {
+                let response = &step["body"]["response"];
+                assert!(response.is_string(), "{said:?}: the image's step names its response: {step}");
+                let call = work[..i].iter().find(|r| r["body"]["kind"] == "turn.call" && r["body"]["response"] == *response && r["body"]["tool"] == step["body"]["tool"] && r["body"]["args"] == step["body"]["args"]);
+                assert!(call.is_some(), "{said:?}: the call of step {step} recorded before it, under its response; work: {work:#?}");
+            }
+        })
+    };
     for (said, want) in [(format!("run: {command}"), ("terminal", "shell", command)), (format!("write: {path}"), ("write_file", "write", path)), (format!("code: {code}"), ("execute_code", "shell", code))] {
         let turn = asked(&fake, &chat, &c, &said, ended).await;
         let got = fake.with(|w| steps(w, &turn));
         eprintln!("steps: {said:?} is {got:?}");
         assert!(got.iter().any(|(tool, category, args)| (tool.as_str(), category.as_str(), args.as_str()) == want), "{said:?}: a step {want:?}, its preview whole; got {got:?}");
-        // phase 4: each step's call was recorded as asked for before it,
-        // by Hermes' post_api_request, with its tool and preview
-        fake.with(|w| {
-            let work: Vec<serde_json::Value> = w.records(&chat, "work").into_iter().filter(|r| r["body"]["turn"] == turn).collect();
-            for (i, step) in work.iter().enumerate().filter(|(_, r)| r["body"]["kind"] == "turn.step") {
-                // by its id, or by what it does: Hermes renames a call whose
-                // id its session used before (`call_1_d2`) after saying it
-                let id = &step["body"]["tool_call_id"];
-                let same = |r: &&serde_json::Value| r["body"]["kind"] == "turn.call" && (r["body"]["tool_call_id"] == *id || (r["body"]["tool"] == step["body"]["tool"] && r["body"]["args"] == step["body"]["args"]));
-                let call = work[..i].iter().find(same);
-                let call = call.unwrap_or_else(|| panic!("{said:?}: the call of step {step} recorded before it; work: {work:#?}"));
-                assert_eq!((&call["body"]["tool"], &call["body"]["args"]), (&step["body"]["tool"], &step["body"]["args"]), "its intent says what its step does");
-            }
-        });
+        recorded_before(&turn, &said);
     }
+    // phase 4 (Alex on #823): three responses of one turn each name their
+    // call `call_0`, the last two the same command: each is a call of its
+    // own, recorded under its response, which its step names
+    let said = "reuse: echo first-of-three | echo again-of-three | echo again-of-three";
+    let turn = asked(&fake, &chat, &c, said, ended).await;
+    recorded_before(&turn, said);
+    fake.with(|w| {
+        let calls: Vec<serde_json::Value> = w.bodies(&chat, "work", "turn.call").into_iter().filter(|b| b["turn"] == turn).collect();
+        let shown: Vec<(&str, &str)> = calls.iter().map(|c| (c["tool_call_id"].as_str().unwrap_or(""), c["args"].as_str().unwrap_or(""))).collect();
+        assert_eq!(shown, [("call_0", "echo first-of-three"), ("call_0", "echo again-of-three"), ("call_0", "echo again-of-three")], "each call its own record: {calls:#?}");
+        let responses: std::collections::HashSet<&str> = calls.iter().filter_map(|c| c["response"].as_str()).collect();
+        assert_eq!(responses.len(), 3, "each its own response's: {calls:#?}");
+    });
 }
 
 /// Goal (Paul on production, 2026-10-24: an agent's words mid-turn were
