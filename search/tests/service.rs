@@ -273,29 +273,54 @@ async fn the_api_needs_the_token() {
 
 /// The same on an S3-compatible store (R2, or MinIO on a machine of one's
 /// own): `SEARCH_TEST_STORAGE=s3://<bucket>/<prefix>` and its options as
-/// `SEARCH_TEST_STORAGE_<OPTION>`. A write is visible, a restart reads it,
-/// and a delete and a purge take it from the next search.
+/// `SEARCH_TEST_STORAGE_<OPTION>`, or a secret's as `<…>_FILE`, its file.
+/// A write is visible, a restart reads it, and a delete and a purge take it
+/// from the next search; it says how long each took.
 #[tokio::test]
 #[ignore = "needs an S3-compatible store: SEARCH_TEST_STORAGE"]
 async fn on_an_object_store() {
     let uri = std::env::var("SEARCH_TEST_STORAGE").expect("SEARCH_TEST_STORAGE");
-    let options: Vec<(String, String)> = std::env::vars().filter_map(|(k, v)| k.strip_prefix("SEARCH_TEST_STORAGE_").map(|o| (o.to_lowercase(), v))).collect();
+    let options = fragment_search::env::options("SEARCH_TEST_STORAGE_").unwrap();
     let open = || async { Arc::new(Store::open(&uri, options.clone()).await.unwrap()) };
     let scope = format!("f-s3-{}", std::process::id());
+    let mut took: Vec<(&str, u128)> = Vec::new();
+    let mut lap = std::time::Instant::now();
+    let mut mark = |what: &'static str, took: &mut Vec<(&str, u128)>| {
+        took.push((what, lap.elapsed().as_millis()));
+        lap = std::time::Instant::now();
+    };
     {
         let s = open().await;
+        mark("open", &mut took);
         let w = s.upsert(&scope, up("sessions/a.json", "r1", harbour())).await.unwrap();
         assert!(w.written);
+        mark("first write (table made, indexed)", &mut took);
         let hits = s.search(&scope, search(json!({ "q": "lantern", "vector": b64(&[1.0, 0.0, 0.0, 0.0]), "space": space() }))).await.unwrap();
         assert_eq!(hits[0].section, "t0");
+        mark("hybrid search", &mut took);
     }
     let s = open().await;
     assert_eq!(s.status(&scope).await.unwrap()["chunks"], 3, "a restart reads what was written");
+    mark("reopened, status", &mut took);
+    let hits = s.search(&scope, search(json!({ "q": "lantern", "vector": b64(&[1.0, 0.0, 0.0, 0.0]), "space": space() }))).await.unwrap();
+    assert_eq!(hits[0].section, "t0");
+    mark("first hybrid search after reopen (cold)", &mut took);
+    let hits = s.search(&scope, search(json!({ "q": "taxes" }))).await.unwrap();
+    assert_eq!(hits[0].section, "t1");
+    mark("warm search", &mut took);
     let mut next = up("sessions/a.json", "r2", json!([{ "id": "t0", "chunks": [chunk("only this now", Some([0.5, 0.5, 0.0, 0.0]))] }]));
     next.replaces = Some("r1".into());
     assert!(s.upsert(&scope, next).await.unwrap().written);
+    mark("replace (merge_insert)", &mut took);
+    let mut stale = up("sessions/a.json", "r3", harbour());
+    stale.replaces = Some("r1".into());
+    assert!(matches!(s.upsert(&scope, stale).await, Err(Error::Conflict { .. })), "a stale write, refused by the conditional commit's caller");
     assert!(s.delete(&scope, "sessions/a.json").await.unwrap());
+    mark("stale refused, delete", &mut took);
     s.purge(&scope).await.unwrap();
+    mark("purge (compact, prune)", &mut took);
     assert!(s.search(&scope, search(json!({ "q": "only" }))).await.unwrap().is_empty());
     assert!(s.drop_table(&scope).await.unwrap());
+    mark("drop", &mut took);
+    eprintln!("{}", json!({ "store": uri.split('/').take(3).collect::<Vec<_>>().join("/"), "ms": took.iter().map(|(k, v)| json!({ k.to_string(): v })).collect::<Vec<_>>() }));
 }
