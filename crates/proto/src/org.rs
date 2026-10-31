@@ -393,8 +393,9 @@ pub struct AdminLog {
 }
 
 /// A person in an org's content (decisions 69 to 71), apart from its
-/// seats: in by their own yes to an admin's place; one who stepped down is
-/// in it still, an admin no more.
+/// seats: in by their own yes, to an admin's place, an invite to one of
+/// its fragments or a seat in it; one who stepped down is in it still, an
+/// admin no more. An offboarding takes them out of it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ContentPerson {
@@ -462,6 +463,15 @@ pub struct OrgContent {
     pub log: Vec<GovernanceEntry>,
     /// Ask `before` this for the next page (`None`: the last).
     pub next: Option<u64>,
+}
+
+/// `POST /api/orgs/{org}/offboard`: `person` out of the org's content at
+/// once, once by `id`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Offboard {
+    pub id: String,
+    pub person: String,
 }
 
 /// `POST /api/admin/orgs/{org}/payer`: an operator names the person an

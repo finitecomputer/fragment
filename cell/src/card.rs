@@ -190,7 +190,7 @@ impl FragmentCell {
             Err(skip) => return Ok(Err(skip)),
         };
         let origin = self.cfg.outside_origin(&self.name()?);
-        let owner = self.must(MetaKey::Owner)?;
+        let owner = self.owner()?.name();
         match crate::ledger::ask(&self.env, &owner, &MaySpend { spend: Spend::Create, fragment: None, by_owner: true }).await {
             Ok(_) => {}
             Err(e) if matches!(e.refused, Some(Refused::GuestCreates | Refused::GuestPayer | Refused::ReadOnly { .. })) => return Ok(Err(Skip::OwnerPays)),

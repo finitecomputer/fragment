@@ -781,6 +781,12 @@ impl FragmentCell {
 
     pub(crate) async fn storage_token(&self, caller: &Caller) -> CellResult<Response> {
         self.require(caller, false, Role::Editor)?;
+        // a token writes the repo for its 15 minutes whatever happens to its
+        // holder: an org's fragment, whose people an offboarding removes at
+        // once, hands out none
+        if self.owner()?.org().is_some() {
+            return Err(CellError::new(ErrorCode::Forbidden, "an org's fragment hands out no storage token: an offboarding could not take one back"));
+        }
         // its token writes the repo: a deploy's first step
         self.writable().await?;
 

@@ -31,9 +31,11 @@
 //! at its next frame after that, the registry is asked again with the
 //! credential it connected with, which this activation holds in memory
 //! only. A socket whose credential no longer names its principal (a
-//! sign-out, an ended session, a revoked key), or whose credential this
-//! activation does not hold (it woke from hibernation), is closed with
-//! 4001, and its page reconnects as whoever it is now.
+//! sign-out, an ended session, a revoked key), whose membership in an
+//! org's fragment no longer counts (an offboarding: fragment.rs `fence`),
+//! or whose credential this activation does not hold (it woke from
+//! hibernation), is closed with 4001, and its page reconnects as whoever
+//! it is now.
 //!
 //! A fragment holds at most `LIVE_SOCKETS_MAX` sockets, and a principal at
 //! most `LIVE_SOCKETS_PER_PRINCIPAL`. Presence comes whole in `hello`,
@@ -435,6 +437,13 @@ impl FragmentCell {
         Ok(())
     }
 
+    /// Whether `signed` is a member here whose membership counts no more:
+    /// an org's fragment's row of someone out of its org, or from before
+    /// they came in again (`fence`).
+    fn fenced_out(&self, signed: &crate::routed::Signed) -> CellResult<bool> {
+        Ok(self.member_role(&signed.id)?.is_some() && self.fenced_role(signed)?.is_none())
+    }
+
     /// Whether a socket still acts as who it connected as (the module doc);
     /// a registry that cannot answer closes it too: fail closed.
     async fn still_who(&self, ws: &WebSocket, st: &mut LiveState) -> bool {
@@ -445,7 +454,9 @@ impl FragmentCell {
         let credential = self.live.borrow().credentials.get(&st.id).cloned();
         let same = match (credential, self.meta(MetaKey::Name)) {
             (Some(credential), Ok(Some(name))) => match credential.resolve(&self.env, &name).await {
-                Ok(Some(signed)) => npub::display(&signed.identity.id) == st.principal,
+                // and, in an org's fragment, a membership that still counts at
+                // their place there now (an offboarding closes it here)
+                Ok(Some(signed)) => npub::display(&signed.identity.id) == st.principal && !self.fenced_out(&signed).unwrap_or(true),
                 Ok(None) | Err(_) => false,
             },
             _ => false,

@@ -74,7 +74,7 @@ impl FragmentCell {
     pub(crate) async fn seed(&self) -> CellResult<()> {
         let _seeding = self.seeding.lock().await;
         let Some(which) = self.meta(MetaKey::TemplatePending)? else { return Ok(()) };
-        let (name, owner) = (self.name()?, self.must(MetaKey::Owner)?);
+        let (name, owner) = (self.name()?, self.owner()?.name());
         let key = format!("template:{}", self.must(MetaKey::CreatedAt)?);
         let title = self.meta(MetaKey::TemplateTitle)?;
         let files = match (template(&which), blessed::template(&which)) {

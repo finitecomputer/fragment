@@ -1351,8 +1351,13 @@ by email. A client's `id` makes a call idempotent (another body 409).
   it has no admin. An offer expires after `OFFER_TTL_MS`; one whose grounds
   no longer hold lapses, named in the log. At most `ADMINS_MAX` admins,
   offers waiting counted.
-- **The last admin stays**: stepping down never leaves the org without
-  one (409).
+- **Who is in it**: whoever said yes to an admin's place, to an invite to
+  one of its fragments, or to a seat in it (its billing admins add people
+  too; Paul, 2026-10-31). An offboarding takes them out at once; a rehire
+  starts fresh, and an offer or invite from before they left admits them
+  no more.
+- **The last admin stays**: stepping down or offboarding never leaves
+  the org without one (409).
 - **It outlives its billing**: an org with anyone in its content, or that
   an operator credited or named a payer for, is never dropped when its
   seats go.
@@ -1367,9 +1372,43 @@ by email. A client's `id` makes a call idempotent (another body 409).
 | `POST /api/orgs/{org}/content-admin-offers/{offer}/decline` | the same | `{}` or none → `ContentOffer`; accepted 409 |
 | `DELETE /api/orgs/{org}/content-admin-offers/{offer}` | its content admins | → `ContentOffer`, `answer: withdrawn`; answered 409, expired 404 |
 | `DELETE /api/orgs/{org}/content-admins/{person}` | the same | → `ContentPerson`: an admin no more, still in its content, their offers withdrawn. The last admin 409 |
+| `POST /api/orgs/{org}/offboard` | the same | `Offboard {id, person}` → `ContentPerson`: out of its content at once, their offers withdrawn, logged; once by `id`. Someone not in it 404; the last admin 409 |
 | `GET /api/orgs/{org}/content?before=` | the same | → `OrgContent {org, people, offers, log: [GovernanceEntry {seq, at, actor, action, subject?, request, detail}], next?}`, the log newest first, `LOG_PAGE` a page |
 | `POST /api/admin/orgs/{org}/content-admin-offers` | operators, while it has no content admin (else 403) | `NewContentAdmin` → `ContentOffer`, logged there and in the operators' log |
 | `GET /api/admin/orgs/{org}/content?before=` | the same | → `OrgContent` |
+
+### An org's fragments (decisions 66 to 71)
+
+A fragment is owned by a person or by an org: its `owner` meta row, a
+person's npub or `org:<id>` (status's `owner`; `ownerRef: {kind: person |
+org, id}` says which). An org's fragment is the org's to pay for: its
+hosting, storage, cards, icons and its own AI steps bill the org's ledger,
+every AI step meets its $5 cap and the org's budget, whoever starts it,
+and no one changes its cap (403). A person's agent working in it bills
+that person (decision 67). It is never an agent, a chat or skills.
+
+- **Its content admins administer it**, each as themselves (an agent:
+  403): members, invites, visibility, share link and delete (decision
+  70). A capability apart from any role: one who is no member reads none
+  of it until they give themselves access, which its events show.
+- **Its members count while they are in its org.** A member row counts
+  only while its person (an agent: its owner) is in the org's content,
+  and only a row added since they came in (`governance::counts`), as the
+  registry answers each request. An offboarding fences them at their next
+  request, before anything is cleaned up; a rehire's old rows never count.
+  What reaches someone unasked is fenced the same way (`PlacesNow`): no
+  delivery to a subscription of someone who may read it no more (the
+  queue's consumer asks again before each send: `deliver/authorize`), and
+  their list's row is taken away. Whatever admits them again takes their
+  old rows away first, an ordinary member still by their own yes.
+- **No storage token.** A token writes the repo for its 15 minutes
+  whatever happens to its holder, so an org's fragment hands out none
+  (403).
+
+| method & path | who | body → answer |
+| --- | --- | --- |
+| `POST /api/orgs/{org}/fragments` | its content admins, each as themselves | a create's body (Fragments, above; `members` unless named) → `Created`, `owner: org:<id>`: the org's, made only while its ledger takes writes (funded: 402 otherwise), its maker an editor |
+| `GET /api/orgs/{org}/fragments` | its content admins | → `FragmentList`: its inventory, the org's own list (a person's is theirs), each row its owner's, with its sharing |
 
 ### Billing (docs/billing.md, "Stripe" and "Trials")
 

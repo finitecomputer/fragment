@@ -6,6 +6,7 @@
 //! the subscriber's capability; a computer's wake goes from the outbox to
 //! the computer itself. A member's subscriptions end with its membership.
 
+use fragment_core::owner::Owner;
 use fragment_core::{egress, npub};
 use fragment_proto::{valid_channel_name, ChannelRecord, DeliveryType, ErrorCode};
 use serde_json::{json, Value};
@@ -22,8 +23,10 @@ const SUB_URL_MAX_BYTES: usize = 1024;
 impl FragmentCell {
     /// The subscriber: a member whose role may read `channel`.
     fn subscriber(&self, caller: &Caller, channel: &str) -> CellResult<String> {
-        let principal = caller.principal().map(str::to_string).ok_or_else(|| CellError::new(ErrorCode::Unauthenticated, "subscribing needs a signed request"))?;
-        let Some(role) = self.member_role(&principal)? else {
+        let signed = caller.signed.as_ref().ok_or_else(|| CellError::new(ErrorCode::Unauthenticated, "subscribing needs a signed request"))?;
+        let principal = signed.id.clone();
+        // a membership as it counts now: an org's offboarded member's sends nothing out
+        let Some(role) = self.fenced_role(signed)? else {
             return Err(CellError::new(ErrorCode::Forbidden, "only a member subscribes to a channel"));
         };
         if !valid_channel_name(channel) {
@@ -68,10 +71,20 @@ impl FragmentCell {
         Ok(id)
     }
 
+    /// Whether `principal` sees and ends every subscription here: its
+    /// owner, or for an org's, one of its content admins as themselves
+    /// (each sends its channel's records somewhere: who reads out is access).
+    fn oversees(&self, caller: &Caller, principal: &str) -> CellResult<bool> {
+        Ok(match self.owner()? {
+            Owner::Person(p) => p == principal,
+            Owner::Org(org) => self.content_admin(caller, &org).is_ok(),
+        })
+    }
+
     /// `GET /api/subscriptions`: the caller's (the owner sees every one).
     pub(crate) fn subscriptions(&self, caller: &Caller) -> CellResult<Response> {
         let principal = caller.principal().map(str::to_string).ok_or_else(|| CellError::new(ErrorCode::Unauthenticated, "listing subscriptions needs a signed request"))?;
-        let owner = self.must(MetaKey::Owner)? == principal;
+        let owner = self.oversees(caller, &principal)?;
         let rows = self.rows(
             "SELECT id, principal, channel, url, created_at FROM subs WHERE principal = ? OR ? ORDER BY id",
             vec![principal.as_str().into(), SqlStorageValue::Integer(owner as i64)],
@@ -92,7 +105,7 @@ impl FragmentCell {
     pub(crate) fn unsubscribe(&self, caller: &Caller, id: &str) -> CellResult<Response> {
         let principal = caller.principal().map(str::to_string).ok_or_else(|| CellError::new(ErrorCode::Unauthenticated, "unsubscribing needs a signed request"))?;
         let id: i64 = id.parse().map_err(|_| CellError::invalid("a subscription id is a number"))?;
-        let owner = self.must(MetaKey::Owner)? == principal;
+        let owner = self.oversees(caller, &principal)?;
         let gone = self.rows("DELETE FROM subs WHERE id = ? AND (principal = ? OR ?) RETURNING id", vec![SqlStorageValue::Integer(id), principal.as_str().into(), SqlStorageValue::Integer(owner as i64)])?;
         json_response(&json!({ "ok": true, "removed": gone.len() }))
     }

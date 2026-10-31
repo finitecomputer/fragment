@@ -7,14 +7,14 @@
 
 use fragment_core::mail::PRODUCT;
 use fragment_core::governance::Answer;
-use fragment_proto::org::{CompSeat, Comped, NamePayer, NewContentAdmin, OrgMember, SeatKind, SeatStatus, SetSeatKind, SetSleeps};
+use fragment_proto::org::{CompSeat, Comped, NamePayer, NewContentAdmin, Offboard, OrgMember, SeatKind, SeatStatus, SetSeatKind, SetSleeps};
 use fragment_proto::{limits, ErrorCode};
 use worker::*;
 
 use crate::config::Config;
 use crate::error::{CellError, CellResult};
 use crate::registry::calls::By;
-use crate::registry::content::{AnswerOffer, ContentOf, NominatePayer, OfferAdmin, OffersToMe, StepDown, WithdrawOffer};
+use crate::registry::content::{AnswerOffer, ContentOf, NominatePayer, OfferAdmin, OffboardCall, OffersToMe, StepDown, WithdrawOffer};
 use crate::registry::orgs::{CompKind, CompSeatCall, EndComp, Mine, Mined, OrgOf, Sleeps, SyncSeat};
 use crate::registry::offers::{AcceptOffer, DeclineOffer, LeaveOrg};
 use crate::registry::seats::{AddAdmin, AddSeat, Added, RemoveAdmin, RemoveSeat};
@@ -150,10 +150,13 @@ pub(crate) async fn org(mut req: Request, env: &Env, cfg: &Config, url: &Url, re
 /// its first), answered by whoever signs in with the email (`POST
 /// content-admin-offers/<offer>/accept|decline`; theirs are `GET
 /// /api/orgs/offers`); `DELETE content-admin-offers/<offer>`, `DELETE
-/// content-admins/<person>` and `GET content?before=` (its content
-/// admins). Each is a person's own, never an agent's, and a billing
-/// admin's place gives no content power.
-pub(crate) async fn named(mut req: Request, env: &Env, url: &Url, org: &str, rest: &[&str]) -> CellResult<Response> {
+/// content-admins/<person>`, `POST offboard {id, person}`
+/// and `GET content?before=` (its content admins). Its fragments: `POST
+/// fragments` (a create's body; its content admins make one, `members`
+/// unless named) and `GET fragments`, its inventory (its content admins).
+/// Each is a person's own, never an agent's, and a billing admin's place
+/// gives no content power.
+pub(crate) async fn named(mut req: Request, env: &Env, cfg: &Config, url: &Url, org: &str, rest: &[&str]) -> CellResult<Response> {
     let bytes = read_body(&mut req, limits::BODY_MAX_BYTES).await?;
     let by = by(env, &req, url, &bytes)?;
     if let (Method::Get, "offers", []) = (req.method(), org, rest) {
@@ -186,6 +189,27 @@ pub(crate) async fn named(mut req: Request, env: &Env, url: &Url, org: &str, res
         (Method::Delete, ["content-admin-offers", offer]) => json_answer(&ask_registry(env, &WithdrawOffer { by, org: org.to_string(), offer: offer.to_string() }).await?),
         (Method::Delete, ["content-admins", person]) => json_answer(&ask_registry(env, &StepDown { by, org: org.to_string(), person: person.to_string() }).await?),
         (Method::Get, ["content"]) => json_answer(&ask_registry(env, &ContentOf { by: Some(by), org: org.to_string(), before: before(url)? }).await?),
+        (Method::Post, ["offboard"]) => {
+            let b: Offboard = body(&bytes)?;
+            json_answer(&ask_registry(env, &OffboardCall { by, org: org.to_string(), person: b.person, request: b.id }).await?)
+        }
+        // its fragments (decisions 66 to 71): made by its content admins,
+        // each as themselves, its editor; owned and paid for by the org
+        (Method::Post, ["fragments"]) => {
+            let mut create: fragment_proto::CreateFragment = body(&bytes)?;
+            let maker = crate::signer(env, &req, url, &bytes).await?;
+            create.visibility.get_or_insert(fragment_proto::Visibility::Members);
+            crate::create_fragment(env, cfg, url, create, maker, Some(org.to_string())).await
+        }
+        // its inventory: the list its fragments keep, as a person's keeps
+        // theirs (principal.rs), to its content admins
+        (Method::Get, ["fragments"]) => {
+            let who = crate::signer(env, &req, url, &bytes).await?;
+            if !who.org_place(org).is_some_and(|p| p.admin) {
+                return Err(CellError::new(ErrorCode::Forbidden, "only an org's content admins list its fragments"));
+            }
+            json_answer(&crate::listed(env, &fragment_core::ledger::org::Payer::Org(org.to_string()).name()).await?)
+        }
         (m, _) => Err(CellError::new(ErrorCode::NotFound, format!("no route {} /api/orgs/{org}/{}", m.as_ref(), rest.join("/")))),
     }
 }

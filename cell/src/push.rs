@@ -160,6 +160,8 @@ impl FragmentCell {
                 ],
                 body: B64.encode(body),
                 sub: s["id"].as_i64(),
+                // the drain marks an org's fragment's (deliveries.rs)
+                fenced: false,
             });
         }
         deliveries

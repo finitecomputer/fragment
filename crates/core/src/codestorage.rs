@@ -206,11 +206,11 @@ pub const REPO_OWNER_HEX: usize = 12;
 /// identity makes later (one a deleted fragment had) never finds the repo
 /// its earlier maker made: a repo a wipe deleted is never made again, nor
 /// another person's files read. The same owner making a deleted name again
-/// finds its repo, as before. `None`: not a fragment's name, or not an
-/// identity.
+/// finds its repo, as before. An org owns as `org:<id>` (`Owner::name`).
+/// `None`: not a fragment's name, or no owner's name.
 pub fn repo_name(prefix: &str, fragment: &str, owner: &str) -> Option<String> {
     assert!(prefix.is_empty() || prefix.ends_with("--"), "a deployment's repo prefix is empty or ends in --: {prefix:?}");
-    if !fragment_proto::valid_fragment_name(fragment) || !crate::npub::is_identity(owner) {
+    if !fragment_proto::valid_fragment_name(fragment) || crate::owner::Owner::parse(owner).is_none() {
         return None;
     }
     let digest = <sha2::Sha256 as sha2::Digest>::digest(format!("fragment repo owner\0{owner}").as_bytes());
@@ -521,11 +521,14 @@ mod tests {
         let theirs = repo_name("e2e--", "todo--k3x9", &fresh).unwrap();
         assert_ne!(theirs, first);
         assert!(theirs.starts_with("e2e--todo--k3x9--"), "{theirs}");
+        // an org's (decision 66): its own, never a person's
+        let org = repo_name("e2e--", "todo--k3x9", "org:org-0123456789abcdef").unwrap();
+        assert!(org.starts_with("e2e--todo--k3x9--") && org != first && org != theirs, "{org}");
         // production's has no prefix; another name is another repo
         assert!(repo_name("", "todo--k3x9", &paul).unwrap().starts_with("todo--k3x9--"));
         assert_ne!(repo_name("", "notes--k3x9", &paul), repo_name("", "todo--k3x9", &paul));
-        // not a fragment's name, or not an identity: no name
-        for (fragment, owner) in [("todo", paul.as_str()), ("Todo--k3x9", &paul), ("todo.paul", &paul), ("todo--k3x9", "id:short"), ("todo--k3x9", "npub1x"), ("todo--k3x9", &"a".repeat(64))] {
+        // not a fragment's name, or no owner's name: no name
+        for (fragment, owner) in [("todo", paul.as_str()), ("Todo--k3x9", &paul), ("todo.paul", &paul), ("todo--k3x9", "id:short"), ("todo--k3x9", "npub1x"), ("todo--k3x9", &"a".repeat(64)), ("todo--k3x9", "org:org-x")] {
             assert_eq!(repo_name("", fragment, owner), None, "{fragment} {owner}");
         }
     }

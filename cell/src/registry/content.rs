@@ -16,7 +16,7 @@
 //! while the grounds it was made on hold, and a person stepping down (or
 //! wiped) takes their waiting offers with them, made or received.
 
-use fragment_core::governance::{self, Answer, Grounds, Now, Refusal, Standing, LOG_PAGE, OFFER_TTL_MS};
+use fragment_core::governance::{self, Answer, Grounds, Now, Place, Refusal, Standing, LOG_PAGE, OFFER_TTL_MS};
 use fragment_proto::org::{ContentOffer, ContentOffers, ContentPerson, GovernanceEntry, OrgContent, PayerNamed};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -95,6 +95,58 @@ impl Call for StepDown {
     type Answer = ContentPerson;
 }
 
+/// `POST /content/offboard`: `person` out of the org's content at once.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct OffboardCall {
+    pub by: By,
+    pub org: String,
+    pub person: String,
+    pub request: String,
+}
+
+impl Call for OffboardCall {
+    const PATH: &'static str = "/content/offboard";
+    type Answer = ContentPerson;
+}
+
+/// `POST /content/enroll`: `person` comes into `org`'s content as they
+/// come into one of its fragments (their yes to an invite of `invited_at`,
+/// or a content admin's own add), if not in it already. Platform code's
+/// alone (a fragment's). An invite made before they last left admits them
+/// no more.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct Enroll {
+    pub org: String,
+    pub person: String,
+    pub invited_at: Option<i64>,
+}
+
+impl Call for Enroll {
+    const PATH: &'static str = "/content/enroll";
+    type Answer = ();
+}
+
+/// `POST /content/places`: which of `people` are in `org`'s content now,
+/// each since when: what an org's fragment checks its retained member
+/// rows against where no request carries the person's place (its
+/// deliveries, its members' lists, an admission; Alex's review).
+/// Platform code's alone (a fragment's).
+#[derive(Serialize, Deserialize)]
+pub(crate) struct PlacesNow {
+    pub org: String,
+    pub people: Vec<String>,
+}
+
+impl Call for PlacesNow {
+    const PATH: &'static str = "/content/places";
+    /// Each one in it, and since when (a list: a map's code costs the Wasm more).
+    type Answer = Vec<(String, i64)>;
+}
+
+/// The people a fragment asks about at once, at most: a batch of its
+/// members (`limits::MEMBERS_MAX`).
+pub(crate) const PLACES_ASKED_MAX: usize = fragment_proto::limits::MEMBERS_MAX;
+
 /// `POST /content/payer`: an operator (the router checked them) names the
 /// person an org's credit is invoiced to: its governance log's record of
 /// who pays, an org paying out of band (Paul, 2026-10-30). It gives them no
@@ -162,12 +214,58 @@ impl Tx {
         Ok(self.row::<Row>("SELECT admin FROM org_content WHERE org = ? AND person = ?", vec![org.into(), person.into()])?.map(|r| r.admin != 0))
     }
 
+    /// `person`'s place in `org`'s content, if they are in it.
+    fn place_of(&self, org: &str, person: &str) -> CellResult<Option<Place>> {
+        #[derive(Deserialize)]
+        struct Row {
+            admin: i64,
+            since: i64,
+        }
+        let row = self.row::<Row>("SELECT admin, since FROM org_content WHERE org = ? AND person = ?", vec![org.into(), person.into()])?;
+        Ok(row.map(|r| Place { admin: r.admin != 0, since: r.since }))
+    }
+
+    /// When `person` was last offboarded from `org`'s content, if ever: its
+    /// governance log's entry (an offer or an invite made before it admits
+    /// them no more).
+    fn left_at(&self, org: &str, person: &str) -> CellResult<Option<i64>> {
+        #[derive(Deserialize)]
+        struct Row {
+            at: Option<i64>,
+        }
+        let row = self.row::<Row>("SELECT MAX(at) AS at FROM org_governance WHERE org = ? AND action = 'offboarded' AND subject = ?", vec![org.into(), person.into()])?;
+        Ok(row.and_then(|r| r.at))
+    }
+
+    /// `person` in `org`'s content from `now` (an admin, if `admin`), or,
+    /// in it already, made an admin when `admin`; a newcomer within the
+    /// bound on the orgs' content a person is in at once.
+    fn join(&self, org: &str, person: &str, admin: bool, now: i64) -> CellResult<()> {
+        if self.place_of(org, person)?.is_none() {
+            let places = self.count("SELECT COUNT(*) AS n FROM org_content WHERE person = ?", vec![person.into()])?;
+            if places >= governance::ORGS_PER_PERSON_MAX {
+                return Err(CellError::invalid(format!("a person is in at most {} orgs' content", governance::ORGS_PER_PERSON_MAX)));
+            }
+        }
+        self.exec(
+            "INSERT INTO org_content (org, person, admin, since) VALUES (?, ?, ?, ?)
+             ON CONFLICT (org, person) DO UPDATE SET admin = MAX(org_content.admin, excluded.admin)",
+            vec![org.into(), person.into(), SqlStorageValue::Integer(i64::from(admin)), SqlStorageValue::Integer(now)],
+        )
+    }
+
     fn admins(&self, org: &str) -> CellResult<u64> {
         self.count("SELECT COUNT(*) AS n FROM org_content WHERE org = ? AND admin = 1", vec![org.into()])
     }
 
+    /// Whether `org` has had content admins (none: 0): one now, or a place
+    /// accepted ever (its log). Who pays offers its first while none. Its
+    /// seat holders, in its content too (`seat_taken`), are no admins.
     fn people(&self, org: &str) -> CellResult<u64> {
-        self.count("SELECT COUNT(*) AS n FROM org_content WHERE org = ?", vec![org.into()])
+        self.count(
+            "SELECT (SELECT COUNT(*) FROM org_content WHERE org = ?1 AND admin = 1) + (SELECT COUNT(*) FROM org_governance WHERE org = ?1 AND action = 'admin-accepted') AS n",
+            vec![org.into()],
+        )
     }
 
     /// `org`'s offers past their time, marked expired.
@@ -456,10 +554,9 @@ impl RegistryCell {
                     };
                     let now_is = Now { people: tx.people(&org)?, admins: tx.admins(&org)?, offerer_stands };
                     governance::grounds_hold(grounds, now_is).map_err(refused)?;
-                    tx.exec(
-                        "INSERT INTO org_content (org, person, admin, since) VALUES (?, ?, 1, ?) ON CONFLICT (org, person) DO UPDATE SET admin = 1",
-                        vec![org.as_str().into(), person.as_str().into(), SqlStorageValue::Integer(now)],
-                    )?;
+                    // made before they last left: it admits them no more
+                    governance::accepted(tx.left_at(&org, &person)?, o.offered_at).map_err(refused)?;
+                    tx.join(&org, &person, true, now)?;
                 }
                 tx.exec(
                     "UPDATE org_content_offers SET answer = ?, answered_by = ?, answered_at = ? WHERE id = ? AND answer IS NULL",
@@ -560,6 +657,89 @@ impl RegistryCell {
         Ok(ContentPerson { person: person.to_string(), email: self.email_now(person)?, admin: r.admin != 0, since: r.since })
     }
 
+    fn offboard(&self, b: OffboardCall) -> CellResult<ContentPerson> {
+        let request = client_request("offboard", &b.request)?;
+        let who = self.governor(&b.by)?;
+        let org = self.content_org(&b.org)?;
+        self.atomically({
+            let (org, actor, person) = (org.id.clone(), who.id.clone(), b.person.clone());
+            move |tx| {
+                let now = js::now_ms();
+                // a replay first: it answers as it did, whatever came since
+                if let Some(e) = tx.governed(&org, &request)? {
+                    return match e.action == "offboarded" && e.subject.as_deref() == Some(person.as_str()) && e.actor == actor {
+                        true => Ok(()),
+                        false => Err(CellError::new(ErrorCode::ConflictingBody, "this id was used for another change")),
+                    };
+                }
+                if tx.place(&org, &actor)? != Some(true) {
+                    return Err(refused(Refusal::NotAdmin));
+                }
+                governance::offboarded(tx.place_of(&org, &person)?, tx.admins(&org)?).map_err(refused)?;
+                // out of it at once: what its fragments granted them counts no more
+                tx.exec("DELETE FROM org_content WHERE org = ? AND person = ?", vec![org.as_str().into(), person.as_str().into()])?;
+                let withdrawn = tx.retire_offers(&org, &person, &actor, now)?;
+                tx.govern(&org, Logged { request: &request, actor: &actor, action: "offboarded", subject: Some(&person), detail: json!({ "withdrawn": withdrawn }) }, now)
+            }
+        })?;
+        console_log!("{}", json!({ "event": "org.offboarded", "org": org.id, "person": b.person }));
+        Ok(ContentPerson { email: self.email_now(&b.person)?, person: b.person, admin: false, since: js::now_ms() })
+    }
+
+    fn places_now(&self, b: PlacesNow) -> CellResult<Vec<(String, i64)>> {
+        if b.people.len() > PLACES_ASKED_MAX {
+            return Err(CellError::invalid(format!("at most {PLACES_ASKED_MAX} people's places at once")));
+        }
+        #[derive(Deserialize)]
+        struct Row {
+            person: String,
+            since: i64,
+        }
+        let mut now = Vec::with_capacity(b.people.len());
+        // bounded: PLACES_ASKED_MAX keyed reads
+        for person in &b.people {
+            if let Some(r) = self.row::<Row>("SELECT person, since FROM org_content WHERE org = ? AND person = ?", vec![b.org.as_str().into(), person.as_str().into()])? {
+                now.push((r.person, r.since));
+            }
+        }
+        Ok(now)
+    }
+
+    /// A person who said yes to a seat in `org` is in its content too
+    /// (Paul, 2026-10-31: its billing admins add people, as its content
+    /// admins do); one in it already, as they are. Logged as theirs.
+    pub(super) fn seat_taken(&self, org: &str, person: &str) -> CellResult<()> {
+        let (org, person) = (org.to_string(), person.to_string());
+        self.atomically(move |tx| {
+            if tx.place_of(&org, &person)?.is_some() {
+                return Ok(());
+            }
+            let now = js::now_ms();
+            tx.join(&org, &person, false, now)?;
+            tx.govern(&org, Logged { request: &format!("join:{person}:{now}"), actor: &person, action: "joined", subject: Some(&person), detail: json!({ "by": "seat" }) }, now)
+        })
+    }
+
+    fn enroll_content(&self, b: Enroll) -> CellResult<()> {
+        let org = self.content_org(&b.org)?;
+        if !npub::is_identity(&b.person) {
+            return Err(CellError::invalid("enroll names a person by identity"));
+        }
+        self.atomically({
+            let org = org.id.clone();
+            move |tx| {
+                let now = js::now_ms();
+                let (place, joins) = governance::enrolled(tx.place_of(&org, &b.person)?, tx.left_at(&org, &b.person)?, b.invited_at, now).map_err(refused)?;
+                if joins {
+                    tx.join(&org, &b.person, false, now)?;
+                    let request = format!("join:{}:{}", b.person, place.since);
+                    tx.govern(&org, Logged { request: &request, actor: &b.person, action: "joined", subject: Some(&b.person), detail: json!({}) }, now)?;
+                }
+                Ok(())
+            }
+        })
+    }
+
     fn content_of(&self, b: ContentOf) -> CellResult<OrgContent> {
         let org = self.content_org(&b.org)?;
         if let Some(by) = &b.by {
@@ -575,7 +755,7 @@ impl RegistryCell {
             since: i64,
             email: Option<String>,
         }
-        // bounded: the people who said yes to it (at most its admins, ever)
+        // bounded: a page of the people who said yes to it
         let people = self.rows::<Person>(
             "SELECT c.person, c.admin, c.since, (SELECT email FROM subjects s WHERE s.identity = c.person ORDER BY signed_in_at DESC LIMIT 1) AS email
              FROM org_content c WHERE c.org = ? ORDER BY c.since, c.person LIMIT 1000",
@@ -656,20 +836,22 @@ impl RegistryCell {
         })
     }
 
-    /// Whether `org` holds what outlives its billing: anyone in its content
-    /// (decision 69), or credit an operator gave it or a payer they named
-    /// (orgs pay out of band: Paul, 2026-10-30), so it is never dropped
-    /// with it, nor its credit stranded.
+    /// Whether `org` holds what outlives its billing: a content admin it
+    /// has had (decision 69: the only way it owns fragments, which outlive
+    /// it), or credit an operator gave it or a payer they named (orgs pay
+    /// out of band: Paul, 2026-10-30), so it is never dropped with it, nor
+    /// its credit stranded. Its seat holders alone, in its content too
+    /// (`seat_taken`), keep nothing.
     pub(super) fn has_content(&self, org: &str) -> CellResult<bool> {
-        let people = self.count("SELECT COUNT(*) AS n FROM org_content WHERE org = ?", vec![org.into()])?;
-        let funded = self.count("SELECT COUNT(*) AS n FROM org_governance WHERE org = ? AND action IN ('ledger-grant', 'payer-named')", vec![org.into()])?;
-        Ok(people + funded > 0)
+        Ok(self.count("SELECT COUNT(*) AS n FROM org_governance WHERE org = ? AND action IN ('admin-accepted', 'ledger-grant', 'payer-named')", vec![org.into()])? > 0)
     }
 
-    /// An org dropped with no one in its content: its offers go with it,
-    /// in the drop's turn, so none names an org that is not there.
+    /// An org dropped with nothing that outlives it: its offers, and its
+    /// content's rows (its seat holders'), go with it, in the drop's turn,
+    /// so none names an org that is not there.
     pub(super) fn content_dropped(&self, org: &str) -> CellResult<()> {
-        self.exec("DELETE FROM org_content_offers WHERE org = ?", vec![org.into()])
+        self.exec("DELETE FROM org_content_offers WHERE org = ?", vec![org.into()])?;
+        self.exec("DELETE FROM org_content WHERE org = ?", vec![org.into()])
     }
 
     /// A wiped person, in every org's content: an admin no more, and their
@@ -708,7 +890,10 @@ impl RegistryCell {
             WithdrawOffer::PATH => reply::<WithdrawOffer>(body(bytes).and_then(|b| self.withdraw_offer(b))),
             OffersToMe::PATH => reply::<OffersToMe>(body(bytes).and_then(|b| self.offers_to_me(b))),
             StepDown::PATH => reply::<StepDown>(body(bytes).and_then(|b| self.step_down(b))),
+            OffboardCall::PATH => reply::<OffboardCall>(body(bytes).and_then(|b| self.offboard(b))),
             ContentOf::PATH => reply::<ContentOf>(body(bytes).and_then(|b| self.content_of(b))),
+            Enroll::PATH => reply::<Enroll>(body(bytes).and_then(|b| self.enroll_content(b))),
+            PlacesNow::PATH => reply::<PlacesNow>(body(bytes).and_then(|b| self.places_now(b))),
             NominatePayer::PATH => reply::<NominatePayer>(body(bytes).and_then(|b| self.nominate_payer(b))),
             _ => return None,
         })
