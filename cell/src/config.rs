@@ -100,10 +100,12 @@ pub struct Config {
     /// AI binding's input to `<url>/run/<model>` instead (a fake at the
     /// vendor boundary, labeled so: models.rs) and needs no gateway.
     pub ai_url: Option<String>,
-    /// `FRAGMENT_SEARCH_URL`: the search service (search/README.md;
-    /// searchable.rs), beside the deployment, called with `SEARCH_TOKEN`;
-    /// none: this deployment has no search, and its routes answer 404.
-    pub search_url: Option<String>,
+    /// Where the search service runs (search/README.md; searchable.rs),
+    /// called with `SEARCH_TOKEN`: `FRAGMENT_SEARCH_URL`, a service of the
+    /// deployment's own, or `FRAGMENT_SEARCH_CONTAINER`, the deployment's
+    /// own container's store (search_container.rs); neither: this
+    /// deployment has no search, and its routes answer 404.
+    pub search: Option<fragment_core::searchable::At>,
     /// `FRAGMENT_MAIL_FROM`: a bare address or unquoted `Name <address>`
     /// (the deploy config's `mail_from`), on a domain onboarded to Email
     /// Sending; none: the deployment sends no mail (mail.rs).
@@ -358,7 +360,12 @@ impl Config {
                 assert!(id != "default", "AI_GATEWAY_ID names the deployment's own gateway: `default` makes one that logs (spike S4)");
             }),
             ai_url: var(env, "FRAGMENT_AI_URL").map(|u| u.trim_end_matches('/').to_string()),
-            search_url: var(env, "FRAGMENT_SEARCH_URL").map(|u| u.trim_end_matches('/').to_string()),
+            search: match (var(env, "FRAGMENT_SEARCH_URL"), var(env, "FRAGMENT_SEARCH_CONTAINER")) {
+                (None, None) => None,
+                (Some(url), None) => Some(fragment_core::searchable::At::Url(url.trim_end_matches('/').to_string())),
+                (None, Some(c)) => Some(fragment_core::searchable::At::Container(fragment_core::searchable::Container::parse(&c).unwrap_or_else(|e| panic!("FRAGMENT_SEARCH_CONTAINER: {e}")))),
+                (Some(_), Some(_)) => panic!("FRAGMENT_SEARCH_URL or FRAGMENT_SEARCH_CONTAINER: one search service, not two"),
+            },
             mail_from: env.var("FRAGMENT_MAIL_FROM").ok().map(|f| {
                 fragment_core::mail::Sender::parse(&f.to_string()).unwrap_or_else(|e| panic!("FRAGMENT_MAIL_FROM: {e}"))
             }),

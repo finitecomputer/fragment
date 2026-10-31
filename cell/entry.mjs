@@ -478,6 +478,92 @@ class ContainerHost {
   }
 }
 
+// The deployment's search service in its container (search_container.rs,
+// which decides; this only calls): Cloudflare's pattern for a container
+// behind its object (developers.cloudflare.com/containers, "Stateless"):
+// one start however many calls find it stopped, its port asked until it
+// answers, then each call passed on. It stops once its object has been
+// idle `SEARCH_IDLE_MS`; the object's alarm keeps it awake while `busy`.
+const SEARCH_PORT = 8080;
+const SEARCH_IDLE_MS = 10 * 60 * 1000;
+const SEARCH_READY_MS = 60 * 1000;
+
+class SearchHost {
+  #ctx;
+  #starting;
+  #ready = false;
+
+  constructor(ctx) {
+    this.#ctx = ctx;
+    const c = ctx.container;
+    // a restarted object (a deploy) finds its container running, and no timeout
+    if (c?.running) void ctx.blockConcurrencyWhile(() => c.setInactivityTimeout(SEARCH_IDLE_MS));
+  }
+
+  get #c() {
+    const c = this.#ctx.container;
+    if (!c) throw new Error("this deployment runs no search container");
+    return c;
+  }
+
+  // `request` passed to the service, its container started with `env`
+  // first if it is not running.
+  async forward(request, env) {
+    if (!(this.#ready && this.#c.running)) {
+      this.#starting ??= this.#start(env).finally(() => {
+        this.#starting = undefined;
+      });
+      await this.#starting;
+    }
+    const url = new URL(request.url);
+    const forwarded = new Request(`http://search${url.pathname}${url.search}`, request);
+    forwarded.headers.delete("host");
+    return this.#c.getTcpPort(SEARCH_PORT).fetch(forwarded);
+  }
+
+  async #start(env) {
+    const c = this.#c;
+    this.#ready = false;
+    if (!c.running) c.start({ image: c.images.search, instance: "standard-1", enableInternet: true, env });
+    await c.setInactivityTimeout(SEARCH_IDLE_MS);
+    const deadline = Date.now() + SEARCH_READY_MS;
+    let last;
+    while (Date.now() < deadline) {
+      try {
+        const r = await c.getTcpPort(SEARCH_PORT).fetch("http://search/healthz", { signal: AbortSignal.timeout(1000) });
+        await r.body?.cancel();
+        if (r.ok) {
+          this.#ready = true;
+          return;
+        }
+        last = new Error(`its health check answered ${r.status}`);
+      } catch (e) {
+        last = e;
+      }
+      await scheduler.wait(200);
+    }
+    throw new Error(`the search service did not answer within ${SEARCH_READY_MS} ms`, { cause: last });
+  }
+
+  // Whether it runs and has work of its own left (its health check's `busy`).
+  async busy() {
+    const c = this.#ctx.container;
+    if (!c?.running) return false;
+    const r = await c.getTcpPort(SEARCH_PORT).fetch("http://search/healthz", { signal: AbortSignal.timeout(5000) });
+    return r.ok && (await r.json()).busy === true;
+  }
+}
+
+export class Search extends DurableObject {
+  constructor(ctx, env) {
+    super(ctx, env);
+    Object.defineProperty(ctx, "searchHost", { value: new SearchHost(ctx) });
+    this.rs = new rs.SearchCell(ctx, env);
+  }
+  fetch(request) { return this.rs.fetch(request); }
+  alarm(info) { return this.rs.alarm(info); }
+}
+
 export class Computer extends DurableObject {
   constructor(ctx, env) {
     super(ctx, env);

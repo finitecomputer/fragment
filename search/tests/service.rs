@@ -285,7 +285,7 @@ async fn the_api_needs_the_token() {
             (status, serde_json::from_slice::<Value>(&bytes).unwrap_or(Value::Null))
         }
     };
-    assert_eq!(call("GET", "/healthz", None, None).await.0, 200);
+    assert_eq!(call("GET", "/healthz", None, None).await, (200, json!({ "ok": true, "busy": false })), "no token, and nothing but whether it works");
     assert_eq!(call("GET", "/v1/f-a/status", None, None).await.0, 401);
     assert_eq!(call("GET", "/v1/f-a/status", Some("t".repeat(31) + "u"), None).await.0, 401);
     let auth = Some(token);
@@ -625,4 +625,16 @@ async fn a_failed_drop_of_an_ended_scope_is_tried_again() {
     assert!(!d.join(format!("{SCOPE}.lance")).exists(), "its table is gone, with no end asked again");
     assert!(!holds(&d, b"lantern"));
     assert!(matches!(s.upsert(SCOPE, up("sessions/a.json", "r3", harbour())).await, Err(Error::Ended)));
+}
+
+#[tokio::test]
+async fn it_is_busy_while_maintenance_is_left() {
+    let d = dir("busy");
+    let s = store(&d).await;
+    assert!(!s.busy().await, "swept, nothing written");
+    s.upsert(SCOPE, up("sessions/a.json", "r1", harbour())).await.unwrap();
+    assert!(s.delete(SCOPE, "sessions/a.json").await.unwrap());
+    assert!(s.busy().await, "a delete's maintenance is left");
+    settled(&s).await;
+    assert!(!s.busy().await);
 }

@@ -10,9 +10,11 @@
 //! never lands after the source's next write; a write held at its
 //! embedding, or at the service's door, while its fragment is deleted and
 //! made again writes nothing to either life; the service restarted still
-//! holds what was written; a deleted fragment's index goes with it; and a
+//! holds what was written; a deleted fragment's index goes with it; a
 //! deployment whose tiers are private, with no private embeddings slot,
-//! indexes by words alone.
+//! indexes by words alone; and a node that runs the service in a container
+//! of its own (as a deployment on Cloudflare does: search_container.rs)
+//! starts it at the first call and passes every call on.
 
 use std::collections::BTreeSet;
 use std::process::Command;
@@ -178,7 +180,7 @@ pub fn search(s: &mut Suite, _: &Api) -> Result<()> {
     let service = start(&token)?;
     let door = Door::open(&service.url)?;
     s.stop()?;
-    s.search = Some(fragment_devstack::SearchVars { url: door.server.url.clone(), token: token.clone() });
+    s.search = Some(fragment_devstack::SearchVars { at: fragment_devstack::SearchAt::Url(door.server.url.clone()), token: token.clone() });
     let checked = match s.start(false) {
         Ok(api) => checks(s, &api, &service, &door),
         Err(e) => Err(e),
@@ -189,10 +191,56 @@ pub fn search(s: &mut Suite, _: &Api) -> Result<()> {
         Err(e) => Err(e),
     };
     s.stop()?;
-    s.search = None;
     drop(service);
+    s.search = Some(fragment_devstack::SearchVars { at: fragment_devstack::SearchAt::Container, token });
+    let contained = match s.start(false) {
+        Ok(api) => container_checks(s, &api),
+        Err(e) => Err(e),
+    };
+    s.stop()?;
+    s.search = None;
     s.start(false)?;
-    checked.and(private)
+    checked.and(private).and(contained)
+}
+
+/// On a node whose search service runs in its own container (its store on
+/// the container's disk here, on R2 in a deployment): the object starts it
+/// at the first call, with the token it reads from the store, and passes
+/// every call on, the release checked first.
+fn container_checks(s: &mut Suite, api: &Api) -> Result<()> {
+    let owner = api.person()?;
+    let created = s.create(api, &owner, "contained")?;
+    let name = created["name"].as_str().context("its name")?.to_string();
+    let path = |route: &str| format!("/api/f/{name}/search{route}");
+    let calls = s.ai.calls().len();
+    let w = api.signed(&owner, "POST", &path("/upsert"), Some(&upsert("sessions/a.json", "r1", turns())))?;
+    let wrote = embedded(s, calls);
+    let found = api.signed(&owner, "POST", &path(""), Some(&json!({ "q": "harbour lantern audit" })))?;
+    let status = api.signed(&owner, "GET", &path("/status"), None)?;
+    let hit = &found.body["results"][0];
+    s.ok(
+        "the search service in the node's own container: started at the first call, written, and searched by words and meaning through its object",
+        w.status == 200 && w.body["written"] == true && wrote == 2
+            && found.status == 200 && hit["section"] == "t0" && hit["signals"] == json!(["lexical", "semantic"])
+            && status.status == 200 && status.body["exists"] == true && status.body["sources"] == 1,
+        json!({ "write": w.body, "embedded": wrote, "found": found.body, "status": status.body }),
+    );
+    // its storage's cleanup (ended.rs) ends its index through the container
+    let deleted = api.signed(&owner, "DELETE", &format!("/api/f/{name}"), None)?;
+    let mut left = Value::Null;
+    let cleared = s.eventually(Duration::from_secs(60), || {
+        let Ok(r) = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "ended" }))) else { return false };
+        left = r.body.clone();
+        r.status == 200 && r.body["ended"].as_array().is_some_and(|lives| lives.iter().all(|l| l["stored"] == 0))
+    });
+    let remade = s.create(api, &owner, &name)?;
+    let now = api.signed(&owner, "GET", &path("/status"), None)?;
+    s.ok(
+        "a deleted fragment's index in the container is ended with its other storage, through the container's object; its name made again starts with none",
+        deleted.status == 200 && cleared && remade["name"] == name.as_str() && now.body["exists"] == false,
+        json!({ "left": left, "now": now.body }),
+    );
+    Ok(())
 }
 
 /// A fragment labelled `label`, made by `owner`, its index made by a

@@ -140,9 +140,19 @@
   // so trying another model is a change to this file alone. A slot there
   // without one is refused.
   // A search service (search/README.md; docs/api.md, "A fragment's
-  // search"): where it listens and its bearer token's name in the store.
-  // Unnamed, the deployment has no search.
+  // search"), and its bearer token's name in the store. Unnamed, the
+  // deployment has no search. Either a service of the deployment's own,
+  // where it listens:
   // "search": { "url": "https://search.example.internal", "token": "fragment-search-token" },
+  // or its own container on R2 (search/README.md, "On Cloudflare"): the
+  // bucket (made if it is not there), the names in the store of a key
+  // scoped to that bucket alone (Object Read & Write), and its image, built
+  // from the tree at every deploy, or pinned by digest as a computer's:
+  // "search": { "token": "fragment-search-token", "r2": {
+  //   "bucket": "fragment-search",
+  //   "access_key_id": "fragment-search-r2-access-key-id",
+  //   "secret_access_key": "fragment-search-r2-secret-access-key",
+  //   "image": { "dockerfile": "search/Dockerfile", "build_context": "search" } } },
   "models": {
     "cheap": { "provider": "openai", "base_url": "https://openrouter.ai/api/v1",
                "key": "fragment-openrouter-key", "model": "z-ai/glm-5.3-flash",

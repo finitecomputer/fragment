@@ -421,6 +421,9 @@ pub struct Bound {
     /// The search service's token's name (search/README.md), when the
     /// deployment names a search service.
     pub search_token: Option<String>,
+    /// The search container's R2 key's names, its id's and its secret's
+    /// (search_container.rs), when the deployment runs one on R2.
+    pub search_r2: Option<(String, String)>,
 }
 
 /// The model key's name in the store that deploy/example.jsonc's tiers
@@ -443,6 +446,7 @@ impl Bound {
             connection_secrets: vec![],
             model_keys: model_slots.iter().map(|s| (s.to_string(), MODEL_KEY.to_string())).collect(),
             search_token: None,
+            search_r2: None,
         }
     }
 
@@ -468,6 +472,10 @@ impl Bound {
         }
         if let Some(name) = &self.search_token {
             bound.push((bindings::SEARCH_TOKEN.to_string(), name.as_str()));
+        }
+        if let Some((id, key)) = &self.search_r2 {
+            bound.push((bindings::SEARCH_R2_ACCESS_KEY_ID.to_string(), id.as_str()));
+            bound.push((bindings::SEARCH_R2_SECRET_ACCESS_KEY.to_string(), key.as_str()));
         }
         for (provider, name) in &self.operator_keys {
             bound.push((bindings::operator_key(provider), name.as_str()));

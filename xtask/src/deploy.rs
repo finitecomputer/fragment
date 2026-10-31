@@ -45,11 +45,42 @@ use fragment_devstack as devstack;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+/// A deployment's search service (search/README.md): a service of its own
+/// at its https `url` (a self-hosted deployment's), or its own container
+/// (`r2`: Cloudflare Containers, its store on R2; search_container.rs), and
+/// its bearer token's name in the store, `token`.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SearchDeploy {
-    url: String,
     token: String,
+    url: Option<String>,
+    r2: Option<SearchR2>,
+}
+
+/// The search container's store and image: its R2 `bucket` (which a deploy
+/// makes if it is not there, as the blob bucket), the names in the store of
+/// a key scoped to that bucket alone (Object Read & Write), and the image
+/// (search/Dockerfile built at every deploy, or one pinned by digest, as a
+/// computer's: `Image`). Each deployment keeps its tables under its own
+/// prefix (its Worker's name), so branches share a bucket safely.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SearchR2 {
+    bucket: String,
+    access_key_id: String,
+    secret_access_key: String,
+    image: Image,
+}
+
+/// The search container's class, and its image's name (entry.mjs, `SearchHost`).
+const SEARCH_CLASS: &str = "Search";
+const SEARCH_IMAGE: &str = "search";
+
+/// Whether `name` is an R2 bucket's: 3 to 63 of a-z, 0-9 and `-`, a letter
+/// or digit at each end.
+fn bucket_ok(name: &str) -> bool {
+    let alnum = |b: Option<u8>| b.is_some_and(|b| b.is_ascii_lowercase() || b.is_ascii_digit());
+    (3..=63).contains(&name.len()) && name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-') && alnum(name.bytes().next()) && alnum(name.bytes().last())
 }
 
 /// A deployment's settings (its config file). Unknown keys are refused, so
@@ -107,9 +138,10 @@ struct Deployment {
     /// model or body the cell would refuse is refused before a deploy, as
     /// is an OpenAI-compatible API without a key, and slots past a Workers
     /// variable's 5 KB.
-    /// Its search service (search/README.md), when it has one: where the
-    /// service listens, `url`, and its token's name in the store, `token`
-    /// (`FRAGMENT_SEARCH_URL`, `SEARCH_TOKEN`). None: no search.
+    /// Its search service (search/README.md), when it has one: a service
+    /// at its `url` (`FRAGMENT_SEARCH_URL`), or its own container on R2
+    /// (`r2`: `FRAGMENT_SEARCH_CONTAINER`), and its token's name in the
+    /// store, `token` (`SEARCH_TOKEN`). None: no search.
     #[serde(default)]
     search: Option<SearchDeploy>,
     models: Option<Value>,
@@ -209,7 +241,8 @@ struct Pinned {
 /// anything (prepare.rs). One built from the tree wrangler pushes and
 /// prepares itself, before it uploads the Worker.
 fn pinned_images(d: &Deployment) -> Vec<&str> {
-    let images = d.computers.iter().flat_map(|c| c.images.values());
+    let search = d.search.iter().filter_map(|s| s.r2.as_ref()).map(|r| &r.image);
+    let images = d.computers.iter().flat_map(|c| c.images.values()).chain(search);
     images
         .filter_map(|i| match i {
             Image::Pinned(p) => Some(p.image.as_str()),
@@ -394,6 +427,7 @@ fn bound_for(d: &Deployment, branch: Option<&str>) -> Result<devstack::store::Bo
         connection_secrets,
         model_keys,
         search_token: d.search.as_ref().map(|s| s.token.clone()),
+        search_r2: d.search.as_ref().and_then(|s| s.r2.as_ref()).map(|r| (r.access_key_id.clone(), r.secret_access_key.clone())),
     })
 }
 
@@ -424,6 +458,10 @@ fn named_secrets(b: &devstack::store::Bound) -> Vec<(String, &str)> {
     }
     if let Some(name) = &b.search_token {
         named.push(("search.token".into(), name.as_str()));
+    }
+    if let Some((id, key)) = &b.search_r2 {
+        named.push(("search.r2.access_key_id".into(), id.as_str()));
+        named.push(("search.r2.secret_access_key".into(), key.as_str()));
     }
     for (provider, name) in &b.operator_keys {
         named.push((format!("providers: {provider}'s key"), name.as_str()));
@@ -657,6 +695,18 @@ fn checked(d: Deployment) -> Result<Deployment> {
             if let Image::Pinned(p) = image {
                 if !pinned_ok(&p.image, &d.account_id) {
                     bail!("computers: the image {name:?} is {:?}, not one pinned by digest in this account's registry ({REGISTRY}/{}/<repository>@sha256:<64 hex>)", p.image, d.account_id);
+                }
+            }
+        }
+    }
+    if let Some(s) = &d.search {
+        match (&s.url, &s.r2) {
+            (Some(_), Some(_)) | (None, None) => bail!("search: a service at its url, or its own container (r2): one"),
+            (Some(_), None) => {}
+            (None, Some(r)) => {
+                anyhow::ensure!(bucket_ok(&r.bucket), "search.r2.bucket is an R2 bucket's name (3 to 63 of a-z, 0-9 and -), not {:?}", r.bucket);
+                if let Image::Pinned(p) = &r.image {
+                    anyhow::ensure!(pinned_ok(&p.image, &d.account_id), "search.r2.image is {:?}, not one pinned by digest in this account's registry ({REGISTRY}/{}/<repository>@sha256:<64 hex>)", p.image, d.account_id);
                 }
             }
         }
@@ -1143,6 +1193,9 @@ pub fn deploy(rest: &[String]) -> Result<()> {
         None => println!("dns: no dns_token_file, so these must be proxied by hand: {}", n.dns.iter().map(|w| w.name.as_str()).collect::<Vec<_>>().join(", ")),
     }
     ensure(wrangler(&tools, &d.account_id)?.args(["r2", "bucket", "create", &n.bucket]), "the bucket")?;
+    if let Some(r2) = d.search.as_ref().and_then(|s| s.r2.as_ref()) {
+        ensure(wrangler(&tools, &d.account_id)?.args(["r2", "bucket", "create", &r2.bucket]), "the search bucket")?;
+    }
     for q in [&n.dead, &n.deliveries, &n.ledger] {
         ensure(wrangler(&tools, &d.account_id)?.args(["queues", "create", q]), "a queue")?;
     }
@@ -1260,28 +1313,36 @@ fn worker_config(d: &Deployment, n: &Names, store_id: &str, release: &Release, r
     }
     // the deployment's own images in place of the e2e's stubs, or none: one
     // built from the tree, or kept at its digest
-    match &d.computers {
-        Some(computers) => {
-            let container = &mut c["containers"][0];
-            let mut images = serde_json::Map::new();
-            for (name, image) in &computers.images {
-                let mut i = json!(image);
-                if let Image::Built(b) = image {
-                    i["dockerfile"] = json!(root.join(&b.dockerfile));
-                    i["build_context"] = json!(root.join(&b.build_context));
-                }
-                images.insert(name.clone(), i);
-            }
-            container["images"] = Value::Object(images);
-            // no setting wrangler applies to its container application after
-            // the Worker's upload (observability, ssh, flags): a deploy
-            // whose Worker is live finishes without them (rollout.rs)
-            let keys: Vec<&String> = container.as_object().context("the container is an object")?.keys().collect();
-            anyhow::ensure!(keys.iter().all(|k| ["class_name", "scheduling_policy", "images"].contains(&k.as_str())), "cell/wrangler.jsonc's container names {keys:?}: one with settings wrangler applies after the upload is no deploy rollout.rs finishes");
+    let image_of = |image: &Image| {
+        let mut i = json!(image);
+        if let Image::Built(b) = image {
+            i["dockerfile"] = json!(root.join(&b.dockerfile));
+            i["build_context"] = json!(root.join(&b.build_context));
         }
-        None => {
-            c.remove("containers");
-        }
+        i
+    };
+    let mut containers = Vec::new();
+    if let Some(computers) = &d.computers {
+        let mut container = c["containers"][0].take();
+        container["images"] = Value::Object(computers.images.iter().map(|(name, image)| (name.clone(), image_of(image))).collect());
+        containers.push(container);
+    }
+    // the search service's container (search_container.rs): placed beside
+    // its one object, its image by name for the object's start
+    if let Some(r2) = d.search.as_ref().and_then(|s| s.r2.as_ref()) {
+        containers.push(json!({ "class_name": SEARCH_CLASS, "scheduling_policy": "durable_object", "images": { SEARCH_IMAGE: image_of(&r2.image) } }));
+    }
+    for container in &containers {
+        // no setting wrangler applies to its container application after
+        // the Worker's upload (observability, ssh, flags): a deploy whose
+        // Worker is live finishes without them (rollout.rs)
+        let keys: Vec<&String> = container.as_object().context("a container is an object")?.keys().collect();
+        anyhow::ensure!(keys.iter().all(|k| ["class_name", "scheduling_policy", "images"].contains(&k.as_str())), "a container names {keys:?}: one with settings wrangler applies after the upload is no deploy rollout.rs finishes");
+    }
+    if containers.is_empty() {
+        c.remove("containers");
+    } else {
+        c.insert("containers".into(), Value::Array(containers));
     }
     let mut vars = json!({
         "FRAGMENT_DEPLOY_ID": release.id,
@@ -1332,9 +1393,24 @@ fn worker_config(d: &Deployment, n: &Names, store_id: &str, release: &Release, r
         v.insert("FRAGMENT_MODELS".into(), Value::String(models.to_string()));
     }
     if let Some(s) = &d.search {
-        let host = s.url.strip_prefix("https://").unwrap_or("");
-        anyhow::ensure!(!host.is_empty() && !s.url.contains('?') && !s.url.ends_with('/'), "search.url is the service's https URL, no query or trailing /: {}", s.url);
-        v.insert("FRAGMENT_SEARCH_URL".into(), json!(s.url));
+        match (&s.url, &s.r2) {
+            (Some(url), None) => {
+                let host = url.strip_prefix("https://").unwrap_or("");
+                anyhow::ensure!(!host.is_empty() && !url.contains('?') && !url.ends_with('/'), "search.url is the service's https URL, no query or trailing /: {url}");
+                v.insert("FRAGMENT_SEARCH_URL".into(), json!(url));
+            }
+            (None, Some(r2)) => {
+                // its tables under this deployment's own prefix; its keys bound apart
+                let store = fragment_core::searchable::Container {
+                    storage: format!("s3://{}/{}/", r2.bucket, n.cell),
+                    options: [("aws_endpoint".to_string(), format!("https://{}.r2.cloudflarestorage.com", d.account_id)), ("aws_region".to_string(), "auto".to_string())].into(),
+                };
+                let text = serde_json::to_string(&store)?;
+                fragment_core::searchable::Container::parse(&text).map_err(|e| anyhow::anyhow!("search.r2: {e}"))?;
+                v.insert("FRAGMENT_SEARCH_CONTAINER".into(), json!(text));
+            }
+            _ => bail!("search: a service at its url, or its own container (r2): one"),
+        }
     }
     if let Some(computers) = &d.computers {
         v.insert("FRAGMENT_COMPUTER_IMAGE".into(), json!(computers.default_image));
@@ -2223,21 +2299,79 @@ mod tests {
     #[test]
     fn a_deployments_search_is_its_url_and_its_token() {
         let mut d = load(&devstack::repo_root().join("deploy/example.jsonc")).unwrap();
-        d.search = Some(SearchDeploy { url: "https://search.example.internal".into(), token: "fragment-search-token".into() });
+        let at = |url: &str| Some(SearchDeploy { url: Some(url.into()), r2: None, token: "fragment-search-token".into() });
+        d.search = at("https://search.example.internal");
         let n = names(&d, Some("p5")).unwrap();
         let cell = worker_config(&d, &n, "0f0e0d0c", &test_release(), &devstack::repo_root()).unwrap();
         assert_eq!(cell["vars"]["FRAGMENT_SEARCH_URL"], "https://search.example.internal");
+        assert!(cell["vars"].get("FRAGMENT_SEARCH_CONTAINER").is_none());
         let bindings: Vec<(&str, &str)> = cell["secrets_store_secrets"].as_array().unwrap().iter().map(|b| (b["binding"].as_str().unwrap(), b["secret_name"].as_str().unwrap())).collect();
         assert!(bindings.contains(&("SEARCH_TOKEN", "fragment-search-token")), "{bindings:?}");
         assert!(!cell.to_string().contains("FRAGMENT_SEARCH_TOKEN"), "the token is a binding, never a variable");
         assert!(named_secrets(&bound(&d).unwrap()).iter().any(|(field, name)| field == "search.token" && *name == "fragment-search-token"));
+        assert!(!cell["containers"].as_array().unwrap().iter().any(|c| c["class_name"] == SEARCH_CLASS), "no container of its own");
         for bad in ["http://search.example.internal", "https://search.example.internal/", "https://"] {
-            d.search = Some(SearchDeploy { url: bad.into(), token: "fragment-search-token".into() });
+            d.search = at(bad);
             assert!(worker_config(&d, &n, "0f0e0d0c", &test_release(), &devstack::repo_root()).is_err(), "{bad}");
         }
         d.search = None;
         let cell = worker_config(&d, &n, "0f0e0d0c", &test_release(), &devstack::repo_root()).unwrap();
         assert!(cell["vars"].get("FRAGMENT_SEARCH_URL").is_none(), "unnamed: no search");
+    }
+
+    /// The search service in the deployment's own container (3c): its
+    /// container placed beside its object, its image built from the tree or
+    /// pinned (and so prepared before the deploy changes anything), its
+    /// store under the deployment's own prefix of its bucket on its
+    /// account's R2, and its key bound by name, never a variable.
+    #[test]
+    fn a_deployments_search_container_is_on_r2() {
+        let mut d = load(&devstack::repo_root().join("deploy/example.jsonc")).unwrap();
+        let r2 = |image: Image| SearchR2 { bucket: "fragment-search".into(), access_key_id: "fragment-search-r2-access-key-id".into(), secret_access_key: "fragment-search-r2-secret-access-key".into(), image };
+        let built = || Image::Built(Built { dockerfile: "search/Dockerfile".into(), build_context: "search".into(), build_vars: BTreeMap::new() });
+        d.search = Some(SearchDeploy { url: None, r2: Some(r2(built())), token: "fragment-search-token".into() });
+        let d = checked(d).unwrap();
+        let n = names(&d, Some("p5")).unwrap();
+        let cell = worker_config(&d, &n, "0f0e0d0c", &test_release(), &devstack::repo_root()).unwrap();
+        let store = fragment_core::searchable::Container::parse(cell["vars"]["FRAGMENT_SEARCH_CONTAINER"].as_str().unwrap()).unwrap();
+        assert_eq!(store.storage, format!("s3://fragment-search/{}/", n.cell), "the deployment's own prefix");
+        assert_eq!(store.options["aws_endpoint"], format!("https://{}.r2.cloudflarestorage.com", d.account_id));
+        assert_eq!(store.options["aws_region"], "auto");
+        assert!(cell["vars"].get("FRAGMENT_SEARCH_URL").is_none());
+        let search = cell["containers"].as_array().unwrap().iter().find(|c| c["class_name"] == SEARCH_CLASS).expect("its container").clone();
+        assert_eq!(search["scheduling_policy"], "durable_object");
+        assert_eq!(search["images"][SEARCH_IMAGE]["dockerfile"], json!(devstack::repo_root().join("search/Dockerfile")));
+        assert!(cell["containers"].as_array().unwrap().iter().any(|c| c["class_name"] == "Computer"), "beside the computers'");
+        let bindings: Vec<(&str, &str)> = cell["secrets_store_secrets"].as_array().unwrap().iter().map(|b| (b["binding"].as_str().unwrap(), b["secret_name"].as_str().unwrap())).collect();
+        for (binding, name) in [("SEARCH_TOKEN", "fragment-search-token"), ("SEARCH_R2_ACCESS_KEY_ID", "fragment-search-r2-access-key-id"), ("SEARCH_R2_SECRET_ACCESS_KEY", "fragment-search-r2-secret-access-key")] {
+            assert!(bindings.contains(&(binding, name)), "{binding}: {bindings:?}");
+        }
+        let fields: Vec<String> = named_secrets(&bound(&d).unwrap()).into_iter().map(|(f, _)| f).collect();
+        assert!(fields.contains(&"search.r2.access_key_id".to_string()) && fields.contains(&"search.r2.secret_access_key".to_string()), "checked present before a deploy: {fields:?}");
+        assert!(pinned_images(&d).is_empty(), "built at the deploy: nothing to prepare before");
+
+        let digest = format!("{REGISTRY}/{}/fragment-search@sha256:{}", d.account_id, "a".repeat(64));
+        let mut pinned = load(&devstack::repo_root().join("deploy/example.jsonc")).unwrap();
+        pinned.search = Some(SearchDeploy { url: None, r2: Some(r2(Image::Pinned(Pinned { image: digest.clone() }))), token: "fragment-search-token".into() });
+        let pinned = checked(pinned).unwrap();
+        assert!(pinned_images(&pinned).contains(&digest.as_str()), "a pinned image is prepared before the deploy changes anything");
+        let cell = worker_config(&pinned, &n, "0f0e0d0c", &test_release(), &devstack::repo_root()).unwrap();
+        let search = cell["containers"].as_array().unwrap().iter().find(|c| c["class_name"] == SEARCH_CLASS).unwrap().clone();
+        assert_eq!(search["images"][SEARCH_IMAGE], json!({ "image": digest }));
+
+        let refused = |search: SearchDeploy| {
+            let mut d = load(&devstack::repo_root().join("deploy/example.jsonc")).unwrap();
+            d.search = Some(search);
+            format!("{:#}", checked(d).err().expect("refused"))
+        };
+        let token = || "fragment-search-token".to_string();
+        assert!(refused(SearchDeploy { url: Some("https://s.example".into()), r2: Some(r2(built())), token: token() }).contains("one"));
+        assert!(refused(SearchDeploy { url: None, r2: None, token: token() }).contains("one"));
+        let mut bad = r2(built());
+        bad.bucket = "Fragment_Search".into();
+        assert!(refused(SearchDeploy { url: None, r2: Some(bad), token: token() }).contains("bucket"));
+        let elsewhere = format!("{REGISTRY}/0000/fragment-search@sha256:{}", "a".repeat(64));
+        assert!(refused(SearchDeploy { url: None, r2: Some(r2(Image::Pinned(Pinned { image: elsewhere }))), token: token() }).contains("search.r2.image"));
     }
 
     /// Finite's own deployment's `models` (deploy/example.jsonc; decision

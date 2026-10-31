@@ -182,13 +182,22 @@ pub fn local_config(project: &Path) -> PathBuf {
 /// and every one built from a Dockerfile of its own
 /// (`containers::scope_images`), so that no other stack's teardown removes
 /// its computers.
-fn write_local_config(project: &Path, secrets: &[(String, &str)], images: &[(String, serde_json::Value)]) -> Result<PathBuf> {
+fn write_local_config(project: &Path, secrets: &[(String, &str)], images: &[(String, serde_json::Value)], search_container: bool) -> Result<PathBuf> {
     let mut config = read_config(project)?;
     if !images.is_empty() {
         let named = config["containers"][0]["images"].as_object_mut().context("the config's computer container names its images")?;
         for (name, image) in images {
             anyhow::ensure!(named.insert(name.clone(), image.clone()).is_none(), "the image {name} is the config's own already");
         }
+    }
+    // the search service's container, as a deploy's `search.r2` adds it
+    // (xtask/src/deploy.rs), built from the tree
+    if search_container {
+        let search = std::path::absolute(repo_root().join("search"))?;
+        let container = serde_json::json!({ "class_name": "Search", "scheduling_policy": "durable_object", "images": { "search": {
+            "dockerfile": search.join("Dockerfile"), "build_context": search,
+        } } });
+        config["containers"].as_array_mut().context("the config names its containers")?.push(container);
     }
     absolute_images(&mut config, project)?;
     containers::scope_images(&mut config, project)?;
@@ -311,12 +320,33 @@ pub fn write_dev_vars(project: &Path, vars: &[(&str, &str)]) -> Result<()> {
     Ok(())
 }
 
-/// A fleet's search service (search/README.md): where it listens and the
+/// A fleet's search service (search/README.md): where it runs and the
 /// token it takes, which the fleet seeds as `SEARCH_TOKEN_NAME`.
 #[derive(Clone)]
 pub struct SearchVars {
-    pub url: String,
+    pub at: SearchAt,
     pub token: String,
+}
+
+#[derive(Clone)]
+pub enum SearchAt {
+    /// A service of its own at its URL (`FRAGMENT_SEARCH_URL`): the search
+    /// section's, in Docker, which it stops and pauses at will.
+    Url(String),
+    /// The node's own container (`FRAGMENT_SEARCH_CONTAINER`;
+    /// search_container.rs), built from search/Dockerfile as wrangler builds
+    /// a computer's image, its store on its own disk.
+    Container,
+}
+
+/// The search container's store, in dev and the e2e: its own disk, at a
+/// path of the project's own, which names its object (`Container::object`)
+/// and so its container: two projects' nodes on one Docker share none.
+fn search_container_store(project: &Path) -> Result<String> {
+    use sha2::Digest;
+    let path = std::path::absolute(project)?;
+    let tag: String = sha2::Sha256::digest(path.to_string_lossy().as_bytes())[..6].iter().map(|b| format!("{b:02x}")).collect();
+    Ok(serde_json::json!({ "storage": format!("/tmp/search-{tag}") }).to_string())
 }
 
 /// The search token's name in the store, as deploy/example.jsonc names it.
@@ -495,7 +525,8 @@ impl Fleet {
         }
         assert_eq!(values.len(), bound.secrets().len(), "every secret bound has its value, once");
         store::seed_local(tools, &state_dir(project), &values).map_err(|e| anyhow::anyhow!("seed the local Secrets Store: {e}"))?;
-        write_local_config(project, &bound.cell(), &self.images)?;
+        let search_container = self.search.as_ref().is_some_and(|s| matches!(s.at, SearchAt::Container));
+        write_local_config(project, &bound.cell(), &self.images, search_container)?;
         let poll = self.poll_interval_s.to_string();
         let retry = self.job_retry_delay_s.to_string();
         // the node's one release (`dev`) deployed as it is configured, as a
@@ -526,8 +557,11 @@ impl Fleet {
         if let Some(u) = &self.ai_url {
             vars.push(("FRAGMENT_AI_URL", u.as_str()));
         }
-        if let Some(s) = &self.search {
-            vars.push(("FRAGMENT_SEARCH_URL", s.url.as_str()));
+        let search_store = search_container.then(|| search_container_store(project)).transpose()?;
+        match self.search.as_ref().map(|s| &s.at) {
+            Some(SearchAt::Url(url)) => vars.push(("FRAGMENT_SEARCH_URL", url.as_str())),
+            Some(SearchAt::Container) => vars.push(("FRAGMENT_SEARCH_CONTAINER", search_store.as_deref().expect("its store"))),
+            None => {}
         }
         if let Some(g) = &self.ai_gateway {
             vars.push(("AI_GATEWAY_ID", g.as_str()));

@@ -125,17 +125,23 @@ fn object_id(file: &str) -> Option<&str> {
 }
 
 /// The names workerd gives the containers of the project's Durable
-/// Objects: for each container class its config names, each object of
-/// that class its state holds (`v3/do/<worker>-<class>/<id>.sqlite`), the
-/// container `workerd-<worker>-<class>-<id>` and its sidecar `…-proxy`.
+/// Objects: for each class its state holds objects of, whatever config its
+/// nodes ran (the search container is the search section's node's alone),
+/// each object (`v3/do/<worker>-<class>/<id>.sqlite`), the container
+/// `workerd-<worker>-<class>-<id>` and its sidecar `…-proxy`. A class with
+/// no container names none Docker has.
 fn owned_names(project: &Path) -> Result<BTreeSet<String>> {
     let config = crate::read_config(project)?;
     let worker = config["name"].as_str().context("a wrangler config names its Worker")?;
     let mut names = BTreeSet::new();
-    for container in config["containers"].as_array().into_iter().flatten() {
-        let class = container["class_name"].as_str().context("a container names its class")?;
-        let namespace = format!("{worker}-{class}");
-        let dir = crate::state_dir(project).join("v3/do").join(&namespace);
+    let root = crate::state_dir(project).join("v3/do");
+    let namespaces = match fs::read_dir(&root) {
+        Ok(entries) => entries.filter_map(|e| e.ok()?.file_name().into_string().ok()).filter(|n| n.starts_with(&format!("{worker}-"))).collect::<Vec<_>>(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => vec![],
+        Err(e) => return Err(e).with_context(|| format!("read {}", root.display())),
+    };
+    for namespace in namespaces {
+        let dir = root.join(&namespace);
         let entries = match fs::read_dir(&dir) {
             Ok(entries) => entries,
             // no object of the class ever stored anything: no container

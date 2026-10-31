@@ -686,6 +686,13 @@ impl Store {
         let _ = self.ending.subscribe().wait_for(|e| e.is_empty()).await;
     }
 
+    /// Whether it has work of its own left (a sweep, a table's maintenance,
+    /// an end's drop): what keeps a container that runs it awake while
+    /// no call comes (search/README.md, "On Cloudflare").
+    pub async fn busy(&self) -> bool {
+        !self.sweep.borrow().done || !self.ending.borrow().is_empty() || self.tables.lock().await.values().any(|e| e.maintenance.borrow().pending)
+    }
+
     async fn dropped(&self, tables: &mut HashMap<String, Arc<Entry>>, scope: &str) -> Result<bool> {
         if let Some(e) = tables.remove(scope) {
             // a write waiting for it finds it dropped (`upsert`)

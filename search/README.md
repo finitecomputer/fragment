@@ -22,6 +22,7 @@ Every path but `GET /healthz` takes the deployment's token as
 
 | call | body → answer |
 | --- | --- |
+| `GET /healthz` | → `{ok, busy}`, no token: `busy` while it has work of its own left (a sweep, a table's maintenance, an end's drop) |
 | `POST /v1/{scope}/upsert` | `{source, revision, replaces?, title?, at?, fields?, space, sections}` → `{source, revision, written, chunks, version}` |
 | `POST /v1/{scope}/delete` | `{source}` → `{source, deleted}` |
 | `POST /v1/{scope}/known` | `{hashes}` → `{known}`: the hashes it holds a vector of |
@@ -186,15 +187,47 @@ Moving a deployment's search:
 
 ### On Cloudflare
 
-The platform runs this image in Containers, its store an R2 bucket
-through R2's S3 API:
-- `SEARCH_STORAGE=s3://<bucket>/search`
-- `SEARCH_STORAGE_AWS_ENDPOINT=https://<account>.r2.cloudflarestorage.com`
-- `SEARCH_STORAGE_AWS_REGION=auto`
-- an R2 API token's key pair
+A deployment whose config names `search.r2` runs this image in a
+container of its own (Cloudflare Containers; cell/src/search_container.rs),
+its store an R2 bucket through R2's S3 API:
+- `SEARCH_STORAGE=s3://<bucket>/<the deployment's Worker>/`: each
+  deployment (a branch's too) under its own prefix, so no sweep of one
+  touches another's tables;
+- `SEARCH_STORAGE_AWS_ENDPOINT=https://<account>.r2.cloudflarestorage.com`;
+- `SEARCH_STORAGE_AWS_REGION=auto`;
+- a key scoped to the bucket alone (Object Read & Write), from Secrets
+  Store.
+
+How it runs:
+- **One object, one container.** The platform's `Search` object, by one
+  name, owns the container: a pool of one. Every call reaches it as every
+  call into a platform object does (refused, having done nothing, by an
+  object of another release), and it passes the call on untouched.
+- **Started by the first call.** It starts with its store, key and token
+  as its environment, and the call waits until `/healthz` answers (at most
+  a minute).
+- **Stopped when idle.** It stops ten minutes after the last call, so a
+  deployment that searches nothing runs none. While `/healthz` says
+  `busy` (a deletion's maintenance, the sweep after a start), the object
+  wakes every minute, keeping it awake: what a write removed leaves R2
+  within minutes, call or no call.
+- **Started again by the next call**, which opens tables lazily. The
+  sweep after each start opens every table, and so costs a few requests
+  for each (docs/technical-debt-ledger.md).
+
+Measured on R2 from outside Cloudflare (2026-10-31, three runs; inside it,
+each request is closer):
+
+| step | ms |
+| --- | --- |
+| a table's first write (the table and its 4 text indexes) | about 6,000 |
+| a search, first on a table just opened | 1,400 to 3,000 |
+| a warm search | 50 to 70 |
+| a replacement | 770 to 1,050 |
+| a purge (compact, rebuild, prune) | about 5,000 |
 
 The cell's capability makes the scopes, checks who may search, embeds,
-meters, and routes each scope to one instance.
+meters, and is the only caller.
 
 ## Tests
 

@@ -3612,8 +3612,10 @@ keyboard, not an inset's height above it.
 
 A fragment's own full-text and semantic index (cell/src/searchable.rs;
 fragment_proto::search). It is the search service's (search/README.md),
-beside the deployment, `FRAGMENT_SEARCH_URL` with `SEARCH_TOKEN`. A
-deployment that names none answers these routes 404. It is opt-in: nothing
+where the deployment runs it: at a URL of its own (`FRAGMENT_SEARCH_URL`)
+or in its own container on R2 (`FRAGMENT_SEARCH_CONTAINER`;
+search/README.md, "On Cloudflare"), called with `SEARCH_TOKEN`. A
+deployment that names neither answers these routes 404. It is opt-in: nothing
 is held for a fragment until an editor writes a source.
 
 | method & path | who | body → answer |

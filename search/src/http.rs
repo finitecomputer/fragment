@@ -93,7 +93,8 @@ impl Service {
     async fn route(&self, req: Request<Incoming>) -> Result<Reply, Refusal> {
         let path = req.uri().path().to_string();
         if req.method() == Method::GET && path == "/healthz" {
-            return Ok(reply(StatusCode::OK, &json!({ "ok": true })));
+            // `busy`: work of its own left, nothing more (no scope, no count)
+            return Ok(reply(StatusCode::OK, &json!({ "ok": true, "busy": self.store.busy().await })));
         }
         let presented = req.headers().get("authorization").and_then(|a| a.to_str().ok()).and_then(|a| a.strip_prefix("Bearer ")).unwrap_or("");
         if !same(presented.as_bytes(), self.token.as_bytes()) {

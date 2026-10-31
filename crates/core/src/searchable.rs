@@ -9,6 +9,12 @@
 //! model reads whole (`chunks`, at most the slot's window: nothing is cut
 //! away), and names each chunk's embedding input by its sha256 (`Chunk`),
 //! so a vector the table already holds is reused, not bought again.
+//!
+//! The service runs where the deployment says (`At`): at a URL of its own
+//! (a self-hosted deployment's), or in the deployment's own container
+//! (`Container`: Cloudflare Containers, its store on R2).
+
+use std::collections::BTreeMap;
 
 use crate::embed;
 use fragment_proto::search::{self as wire, Upsert};
@@ -28,6 +34,82 @@ pub const AT_MAX_BYTES: usize = 40;
 /// A chunk's embedding input's header (title, context, heading), at most
 /// this share of the window: the chunk's text keeps the rest.
 const HEADER_MAX_SHARE: u64 = 4;
+
+/// Where the search service runs (`FRAGMENT_SEARCH_URL`, or
+/// `FRAGMENT_SEARCH_CONTAINER`): a service at a URL, or the deployment's
+/// own container.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum At {
+    Url(String),
+    Container(Container),
+}
+
+/// The container's port, as the service listens (search/README.md).
+pub const CONTAINER_PORT: u16 = 8080;
+/// A container's store setting, at most: a path or an `s3://` URI.
+pub const STORAGE_MAX_BYTES: usize = 512;
+/// Its store's options, at most, and their names' and values' lengths.
+pub const STORAGE_OPTIONS_MAX: usize = 8;
+pub const STORAGE_OPTION_NAME_MAX_BYTES: usize = 64;
+pub const STORAGE_OPTION_VALUE_MAX_BYTES: usize = 512;
+
+/// The deployment's search container's store (`FRAGMENT_SEARCH_CONTAINER`):
+/// `storage` (the service's `SEARCH_STORAGE`: `s3://<bucket>/` on R2, a
+/// directory in dev) and its `options` (`SEARCH_STORAGE_<OPTION>`: R2's
+/// endpoint and region). Its keys are secrets, bound apart
+/// (`SEARCH_R2_ACCESS_KEY_ID`, `SEARCH_R2_SECRET_ACCESS_KEY`), never here.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Container {
+    pub storage: String,
+    #[serde(default)]
+    pub options: BTreeMap<String, String>,
+}
+
+impl Container {
+    pub fn parse(text: &str) -> Result<Container, String> {
+        let c: Container = serde_json::from_str(text).map_err(|e| format!("the search container is {{storage, options?}}: {e}"))?;
+        if c.storage.is_empty() || c.storage.len() > STORAGE_MAX_BYTES || c.storage.chars().any(char::is_control) {
+            return Err(format!("the search container's storage is 1 to {STORAGE_MAX_BYTES} bytes, a path or an s3:// URI"));
+        }
+        if c.options.len() > STORAGE_OPTIONS_MAX {
+            return Err(format!("the search container's store takes at most {STORAGE_OPTIONS_MAX} options"));
+        }
+        for (name, value) in &c.options {
+            if name.is_empty() || name.len() > STORAGE_OPTION_NAME_MAX_BYTES || !name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_') {
+                return Err(format!("a store option's name is 1 to {STORAGE_OPTION_NAME_MAX_BYTES} of a-z, 0-9 and _, not {name:?}"));
+            }
+            if name.contains("key") || name.contains("secret") || name.contains("token") {
+                return Err(format!("{name} is a secret: the store's keys are bound apart, never named here"));
+            }
+            if value.len() > STORAGE_OPTION_VALUE_MAX_BYTES || value.chars().any(char::is_control) {
+                return Err(format!("the store option {name} is at most {STORAGE_OPTION_VALUE_MAX_BYTES} printable bytes"));
+            }
+        }
+        Ok(c)
+    }
+
+    /// The Durable Object that owns its container, by name: one for its
+    /// store, so a pool of one, and two stores (two worktrees' nodes on one
+    /// machine) never share one.
+    pub fn object(&self) -> String {
+        format!("search {}", self.storage)
+    }
+
+    /// The service's environment (search/README.md, Running it): its store,
+    /// each option, the store's keys when the deployment binds them, and
+    /// its token.
+    pub fn env(&self, token: &str, keys: Option<(&str, &str)>) -> Vec<(String, String)> {
+        let mut env = vec![("SEARCH_STORAGE".to_string(), self.storage.clone())];
+        env.extend(self.options.iter().map(|(name, value)| (format!("SEARCH_STORAGE_{}", name.to_ascii_uppercase()), value.clone())));
+        if let Some((id, secret)) = keys {
+            env.push(("SEARCH_STORAGE_AWS_ACCESS_KEY_ID".into(), id.to_string()));
+            env.push(("SEARCH_STORAGE_AWS_SECRET_ACCESS_KEY".into(), secret.to_string()));
+        }
+        env.push(("SEARCH_TOKEN".into(), token.to_string()));
+        env
+    }
+}
 
 /// The service's table for a fragment: `f<id>-<incarnation>-members`.
 pub fn scope(fragment_id: &str, incarnation: i64) -> String {
@@ -303,6 +385,34 @@ mod tests {
 
     fn section(id: &str, text: &str) -> Section {
         Section { id: id.into(), text: text.into(), heading: None, context: vec![], at: None, location: None }
+    }
+
+    #[test]
+    fn a_container_is_started_with_its_store_and_its_token() {
+        let c = Container::parse(r#"{"storage": "s3://fragment-search/", "options": {"aws_endpoint": "https://a.r2.cloudflarestorage.com", "aws_region": "auto"}}"#).unwrap();
+        let env = c.env("t0k", Some(("id", "secret")));
+        assert_eq!(
+            env,
+            [
+                ("SEARCH_STORAGE", "s3://fragment-search/"),
+                ("SEARCH_STORAGE_AWS_ENDPOINT", "https://a.r2.cloudflarestorage.com"),
+                ("SEARCH_STORAGE_AWS_REGION", "auto"),
+                ("SEARCH_STORAGE_AWS_ACCESS_KEY_ID", "id"),
+                ("SEARCH_STORAGE_AWS_SECRET_ACCESS_KEY", "secret"),
+                ("SEARCH_TOKEN", "t0k"),
+            ]
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+        );
+        assert_eq!(Container::parse(r#"{"storage": "/tmp/search"}"#).unwrap().env("t", None).len(), 2, "a directory needs no keys");
+        assert_ne!(c.object(), Container::parse(r#"{"storage": "s3://fragment-search/other/"}"#).unwrap().object(), "an object a store");
+        for (bad, why) in [
+            (r#"{"storage": ""}"#, "1 to"),
+            (r#"{"storage": "s3://b/", "options": {"aws_secret_access_key": "x"}}"#, "is a secret"),
+            (r#"{"storage": "s3://b/", "options": {"AWS_REGION": "auto"}}"#, "a-z"),
+            (r#"{"storage": "s3://b/", "bucket": "b"}"#, "unknown field"),
+        ] {
+            assert!(Container::parse(bad).unwrap_err().contains(why), "{bad}");
+        }
     }
 
     #[test]

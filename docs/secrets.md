@@ -55,7 +55,8 @@ name fixed in code (`fragment_core::secrets_store`) and reads no value:
 | `codestorage.private_key` | `CODESTORAGE_KEY` | the platform Worker |
 | `workos.client_id`, `workos.api_key` | `WORKOS_CLIENT`, `WORKOS_KEY` | the platform Worker |
 | `stripe.key`, `stripe.webhook_secret` (seats sold: docs/billing.md) | `STRIPE_KEY` (the account's restricted key), `STRIPE_WEBHOOK` (this deployment's endpoint's signing secret; a branch whose deploy makes its own endpoint binds none, and its deploy uploads the endpoint's as the Worker secret `FRAGMENT_STRIPE_WEBHOOK`: decision 58) | the platform Worker |
-| `search.token` (the search service's bearer token: search/README.md) | `SEARCH_TOKEN`, sent only to `search.url` | the platform Worker |
+| `search.token` (the search service's bearer token: search/README.md) | `SEARCH_TOKEN`, sent only to the search service (`search.url`, or its own container) | the platform Worker |
+| `search.r2.access_key_id`, `search.r2.secret_access_key` (a key scoped to the search bucket alone: search/README.md, "On Cloudflare") | `SEARCH_R2_ACCESS_KEY_ID`, `SEARCH_R2_SECRET_ACCESS_KEY`, given only to the search container, as its environment when it starts | the platform Worker |
 | a model's `key` (`models.<name>.key`: a slot of the model route on an OpenAI-compatible API) | `MODEL_KEY_<NAME>` (`cheap` → `MODEL_KEY_CHEAP`), one binding a slot, though two slots may name one secret (Finite's tiers name `fragment-openrouter-key`) | the platform Worker |
 | a provider's `key` (an operator key) | `OPERATOR_KEY_<NAME>` (`perplexity` → `OPERATOR_KEY_PERPLEXITY`) | the platform Worker |
 

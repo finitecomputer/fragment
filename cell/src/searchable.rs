@@ -1,6 +1,7 @@
 //! A fragment's search (docs/api.md, "A fragment's search"): its sources'
-//! sections, indexed by the search service (search/README.md) beside the
-//! deployment, `FRAGMENT_SEARCH_URL` with `SEARCH_TOKEN`; none named, these
+//! sections, indexed by the search service (search/README.md) where the
+//! deployment runs it (`Config::search`: a URL of its own, or its own
+//! container, search_container.rs), called with `SEARCH_TOKEN`; none, these
 //! routes answer 404. Opt-in: nothing is held for a fragment until an
 //! editor writes a source, and a fragment that never searches costs
 //! nothing.
@@ -56,30 +57,43 @@ const FORGETS_PER_PASS: i64 = 100;
 /// How long after a failed try a forgotten source is tried again.
 const FORGET_RETRY_MS: i64 = 5 * 60 * 1000;
 
-/// The service this deployment names, and its token.
-struct Service {
-    url: String,
+/// The service this deployment runs (`Config::search`), and its token.
+struct Service<'a> {
+    env: &'a Env,
+    at: &'a rules::At,
     token: String,
 }
 
-impl Service {
-    async fn of(env: &Env, url: Option<&str>) -> CellResult<Service> {
-        let url = url.ok_or_else(|| CellError::new(ErrorCode::NotFound, "this deployment has no search"))?.to_string();
-        Ok(Service { url, token: crate::keys::search_token(env).await? })
+impl<'a> Service<'a> {
+    async fn of(env: &'a Env, at: Option<&'a rules::At>) -> CellResult<Service<'a>> {
+        let at = at.ok_or_else(|| CellError::new(ErrorCode::NotFound, "this deployment has no search"))?;
+        Ok(Service { env, at, token: crate::keys::search_token(env).await? })
     }
 
-    /// `method path` on the service, with `body`: its status and JSON.
+    /// `method path` on the service, with `body`: its status and JSON. The
+    /// deployment's own container is called through its object, as every
+    /// platform object is (routed.rs: refused, having done nothing, by an
+    /// object of another release, and so asked again).
     async fn call(&self, method: Method, path: &str, body: Option<&Value>) -> CellResult<(u16, Value)> {
-        let h = Headers::new();
-        h.set("authorization", &format!("Bearer {}", self.token))?;
-        let mut init = RequestInit::new();
-        init.with_method(method).with_headers(h);
-        if let Some(b) = body {
-            init.headers.set("content-type", "application/json")?;
-            init.with_body(Some(b.to_string().into()));
-        }
-        let req = Request::new_with_init(&format!("{}{path}", self.url), &init)?;
-        let mut resp = Fetch::Request(req).send().await.map_err(|e| CellError::new(ErrorCode::UpstreamFailed, format!("the search service did not answer: {e}")))?;
+        let make = || -> CellResult<Request> {
+            let h = Headers::new();
+            h.set("authorization", &format!("Bearer {}", self.token))?;
+            let mut init = RequestInit::new();
+            init.with_method(method.clone()).with_headers(h);
+            if let Some(b) = body {
+                init.headers.set("content-type", "application/json")?;
+                init.with_body(Some(b.to_string().into()));
+            }
+            let base = match self.at {
+                rules::At::Url(url) => url.as_str(),
+                rules::At::Container(_) => "https://search",
+            };
+            Ok(Request::new_with_init(&format!("{base}{path}"), &init)?)
+        };
+        let mut resp = match self.at {
+            rules::At::Url(_) => Fetch::Request(make()?).send().await.map_err(|e| CellError::new(ErrorCode::UpstreamFailed, format!("the search service did not answer: {e}")))?,
+            rules::At::Container(c) => crate::routed::send_again(self.env, "SEARCH", &c.object(), make).await?,
+        };
         let status = resp.status_code();
         let (bytes, cut) = crate::cs::read_answer(&mut resp, ANSWER_MAX_BYTES).await?;
         if cut {
@@ -179,7 +193,7 @@ impl FragmentCell {
 
     /// `source`'s forget, if one waits (due or not): sent now, held, before
     /// a write of it. The write is refused if it cannot be.
-    async fn search_forget_first(&self, svc: &Service, scope: &str, source: &str) -> CellResult<()> {
+    async fn search_forget_first(&self, svc: &Service<'_>, scope: &str, source: &str) -> CellResult<()> {
         if self.rows("SELECT 1 FROM search_forget WHERE source = ?", vec![source.into()])?.is_empty() {
             return Ok(());
         }
@@ -225,7 +239,7 @@ impl FragmentCell {
         let facts = self.facts()?;
         self.admit(&facts, caller, false, Role::Editor)?;
         rules::check(&up).map_err(CellError::invalid)?;
-        let svc = Service::of(&self.env, self.cfg.search_url.as_deref()).await?;
+        let svc = Service::of(&self.env, self.cfg.search.as_ref()).await?;
         let life = self.search_life()?;
         let scope = rules::scope(&self.state.id().to_string(), life);
         // the source, held to its end: a forget of it in flight lands
@@ -295,7 +309,7 @@ impl FragmentCell {
         if d.source.is_empty() || d.source.len() > wire::SOURCE_MAX_BYTES {
             return Err(CellError::invalid(format!("source is 1 to {} bytes", wire::SOURCE_MAX_BYTES)));
         }
-        let svc = Service::of(&self.env, self.cfg.search_url.as_deref()).await?;
+        let svc = Service::of(&self.env, self.cfg.search.as_ref()).await?;
         let life = self.search_life()?;
         let scope = rules::scope(&self.state.id().to_string(), life);
         let _held = self.search_hold(&d.source).await;
@@ -317,7 +331,7 @@ impl FragmentCell {
             None => wire::SOURCES_PAGE_MAX,
             Some(l) => l.parse().ok().filter(|l| (1..=wire::SOURCES_PAGE_MAX).contains(l)).ok_or_else(|| CellError::invalid(format!("limit is 1 to {}", wire::SOURCES_PAGE_MAX)))?,
         };
-        let svc = Service::of(&self.env, self.cfg.search_url.as_deref()).await?;
+        let svc = Service::of(&self.env, self.cfg.search.as_ref()).await?;
         let scope = self.search_scope()?;
         self.search_drain(&svc, &scope).await;
         let after: String = url::form_urlencoded::byte_serialize(after.unwrap_or_default().as_bytes()).collect();
@@ -333,7 +347,7 @@ impl FragmentCell {
     /// `GET /api/search/status` (a reader): what the index holds.
     pub(crate) async fn search_status(&self, caller: &Caller) -> CellResult<Response> {
         self.require(caller, false, Role::Viewer)?;
-        let svc = Service::of(&self.env, self.cfg.search_url.as_deref()).await?;
+        let svc = Service::of(&self.env, self.cfg.search.as_ref()).await?;
         let scope = self.search_scope()?;
         let (status, answer) = svc.call(Method::Get, &format!("/v1/{scope}/status"), None).await?;
         if status != 200 {
@@ -356,7 +370,7 @@ impl FragmentCell {
         let facts = self.facts()?;
         self.admit(&facts, caller, false, Role::Viewer)?;
         rules::check_query(&q).map_err(CellError::invalid)?;
-        let svc = Service::of(&self.env, self.cfg.search_url.as_deref()).await?;
+        let svc = Service::of(&self.env, self.cfg.search.as_ref()).await?;
         let scope = self.search_scope()?;
         self.search_drain(&svc, &scope).await;
         let who = asker(caller);
@@ -408,7 +422,7 @@ impl FragmentCell {
     /// in the move's turn, due at once: the alarm the move arms sends
     /// them (`search_forget_due`).
     pub(crate) fn search_forget(&self, removed: &[String]) -> CellResult<()> {
-        if removed.is_empty() || self.cfg.search_url.is_none() || self.metas([MetaKey::Search])?[0].is_none() {
+        if removed.is_empty() || self.cfg.search.is_none() || self.metas([MetaKey::Search])?[0].is_none() {
             return Ok(());
         }
         let now = SqlStorageValue::Integer(crate::js::now_ms());
@@ -428,7 +442,7 @@ impl FragmentCell {
         if self.search_forget_due_at().ok().flatten().is_none_or(|at| at > crate::js::now_ms()) {
             return;
         }
-        match (Service::of(&self.env, self.cfg.search_url.as_deref()).await, self.search_scope()) {
+        match (Service::of(&self.env, self.cfg.search.as_ref()).await, self.search_scope()) {
             (Ok(svc), Ok(scope)) => self.search_drain(&svc, &scope).await,
             (Err(e), _) | (_, Err(e)) => {
                 console_error!("{}", json!({ "event": "search.forget-unsent", "error": e.message }));
@@ -453,7 +467,7 @@ impl FragmentCell {
     /// Deletes from the service the sources due to be forgotten, a pass of
     /// at most `FORGETS_PER_PASS`; each gone there goes here. On a failure
     /// the rest wait `FORGET_RETRY_MS`.
-    async fn search_drain(&self, svc: &Service, scope: &str) {
+    async fn search_drain(&self, svc: &Service<'_>, scope: &str) {
         let now = SqlStorageValue::Integer(crate::js::now_ms());
         let due: Vec<Forget> = match self.typed("SELECT source FROM search_forget WHERE next_at <= ? ORDER BY next_at LIMIT ?", vec![now, SqlStorageValue::Integer(FORGETS_PER_PASS)]) {
             Ok(d) => d,
@@ -489,8 +503,8 @@ impl FragmentCell {
     /// An ended life's index ended (ended.rs), if the deployment searches:
     /// dropped, and never written again, by a write landing late too.
     pub(crate) async fn search_drop(&self, incarnation: i64) -> CellResult<()> {
-        let Some(url) = self.cfg.search_url.as_deref() else { return Ok(()) };
-        let svc = Service::of(&self.env, Some(url)).await?;
+        let Some(at) = self.cfg.search.as_ref() else { return Ok(()) };
+        let svc = Service::of(&self.env, Some(at)).await?;
         let scope = rules::scope(&self.state.id().to_string(), incarnation);
         let (status, answer) = svc.call(Method::Post, &format!("/v1/{scope}/end"), None).await?;
         if status != 200 {

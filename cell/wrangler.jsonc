@@ -89,10 +89,16 @@
       // The identity registry: one object for the deployment (registry.rs).
       { "name": "REGISTRY", "class_name": "Registry" },
       // A person's usage ledger: one object per person (ledger.rs).
-      { "name": "LEDGER", "class_name": "Ledger" }
+      { "name": "LEDGER", "class_name": "Ledger" },
+      // The search service's container, when the deployment runs one: one
+      // object (search_container.rs; its container is the deploy's).
+      { "name": "SEARCH", "class_name": "Search" }
     ]
   },
   // Restarted at the move to Cloudflare: nothing on celld migrates
   // (docs/cloudflare-v1.md, decision 33).
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Fragment", "Principal", "Registry", "Ledger", "Computer"] }]
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["Fragment", "Principal", "Registry", "Ledger", "Computer"] },
+    { "tag": "v2", "new_sqlite_classes": ["Search"] }
+  ]
 }

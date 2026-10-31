@@ -70,6 +70,7 @@ mod routed;
 mod schedules;
 mod schema;
 mod search;
+mod search_container;
 mod searchable;
 mod runs_on;
 mod serve;

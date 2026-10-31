@@ -5,6 +5,23 @@ Each entry names where it was observed, the risk, the first proof that
 would show it biting, and the condition that deletes it. An entry
 without a delete condition is unfinished design, not debt.
 
+## The search container's sweep opens every table at each start
+
+- **Observed:** search/src/store.rs `sweep`, run in a container that
+  stops when idle (cell/src/search_container.rs; search/README.md, "On
+  Cloudflare"), 2026-10-31.
+- **Shortcut:** the service learns what maintenance a restart left by
+  opening every table after each start (a few R2 requests each), not from
+  a record of the tables left unclean.
+- **Risk:** a deployment of many fragments' indexes that wakes often pays
+  for those requests at every wake, and its first calls wait behind the
+  sweep's opens.
+- **First proof:** R2 Class A/B requests from the search prefix that rise
+  with wakes rather than writes, or a wake's sweep taking minutes.
+- **Delete when:** the service records which tables a restart may have
+  left unclean (a small table of its own, written before a removal
+  commits), and sweeps only those.
+
 ## Two imports into one session archive at once agree last-writer-wins
 
 - **Observed:** `fragment session import` (templates/sessions/README.md),

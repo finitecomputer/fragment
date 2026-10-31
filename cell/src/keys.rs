@@ -192,9 +192,20 @@ impl WorkOs<'_> {
 }
 
 /// The search service's bearer token (bound as `SEARCH_TOKEN`), sent only
-/// to the service this deployment names (`FRAGMENT_SEARCH_URL`).
+/// to the service this deployment names (`Config::search`).
 pub async fn search_token(env: &Env) -> CellResult<String> {
     required(env, store::SEARCH_TOKEN).await
+}
+
+/// The R2 key the search container keeps its store with (bound as
+/// `SEARCH_R2_ACCESS_KEY_ID` and `SEARCH_R2_SECRET_ACCESS_KEY`), when the
+/// deployment binds it: both, or neither (a store on its disk, in dev).
+pub async fn search_r2_key(env: &Env) -> CellResult<Option<(String, String)>> {
+    match (secret(env, store::SEARCH_R2_ACCESS_KEY_ID).await?, secret(env, store::SEARCH_R2_SECRET_ACCESS_KEY).await?) {
+        (Some(id), Some(key)) => Ok(Some((id, key))),
+        (None, None) => Ok(None),
+        _ => Err(CellError::new(ErrorCode::HostFailed, "the search container's R2 key is half bound: both its id and its secret, or neither")),
+    }
 }
 
 /// The account's restricted Stripe key (bound as `STRIPE_KEY`).

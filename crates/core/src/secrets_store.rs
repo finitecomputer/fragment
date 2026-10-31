@@ -29,6 +29,10 @@ pub const STRIPE_WEBHOOK: &str = "STRIPE_WEBHOOK";
 /// The search service's bearer token (search/README.md): the platform's
 /// alone, shared with the service it is deployed beside.
 pub const SEARCH_TOKEN: &str = "SEARCH_TOKEN";
+/// The R2 key the deployment's search container keeps its store with
+/// (cell/src/search_container.rs): bucket-scoped, Object Read & Write.
+pub const SEARCH_R2_ACCESS_KEY_ID: &str = "SEARCH_R2_ACCESS_KEY_ID";
+pub const SEARCH_R2_SECRET_ACCESS_KEY: &str = "SEARCH_R2_SECRET_ACCESS_KEY";
 /// What an operator key's binding starts with (`operator_key`).
 pub const OPERATOR_KEY_PREFIX: &str = "OPERATOR_KEY_";
 /// What the binding of a model's key starts with (`model_key`).
@@ -44,11 +48,11 @@ pub fn connection_secret(provider: &str) -> String {
 /// a value changed in the store (`cargo xtask secret set`) reaches every
 /// warm isolate within this, with no deploy.
 pub const CACHE_MS_MAX: i64 = 60_000;
-/// The bindings one Worker has: the eight above, a model's key per slot a
+/// The bindings one Worker has: the ten above, a model's key per slot a
 /// deployment's `models` may name (`models::SLOTS_MAX`, and its
 /// embeddings slot's), and an operator key per provider of the catalog, at
 /// most.
-pub const CACHE_ENTRIES_MAX: usize = 8 + crate::models::SLOTS_MAX + 1 + catalog::PROVIDERS_MAX;
+pub const CACHE_ENTRIES_MAX: usize = 10 + crate::models::SLOTS_MAX + 1 + catalog::PROVIDERS_MAX;
 
 /// The binding that holds operator key `provider` (`perplexity` →
 /// `OPERATOR_KEY_PERPLEXITY`, `google-places` → `OPERATOR_KEY_GOOGLE_PLACES`).

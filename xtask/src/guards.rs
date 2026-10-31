@@ -127,23 +127,32 @@ mod tests {
         assert_eq!(uses(&files, "durable_object("), only("routed.rs", 1), "an object is reached through routed::send alone");
         assert_eq!(uses(&files, "fetch_with_request("), only("routed.rs", 1), "and called there alone, stamped");
         let objects = [("fragment.rs", "FragmentCell"), ("registry.rs", "RegistryCell"), ("principal.rs", "PrincipalCell"), ("ledger.rs", "LedgerCell"), ("computer.rs", "ComputerCell")];
-        for (file, class) in objects {
-            let text = &files[file];
+        // objects with no schema and no data of their own, which a deploy's
+        // probe has nothing to ask (the search container's: one passes a
+        // call on, and an old one's refusal is asked again, as any is)
+        let unprobed = [("search_container.rs", "SearchCell")];
+        for (file, class) in objects.iter().chain(&unprobed) {
+            let text = &files[*file];
             let at = text.find(&format!("impl DurableObject for {class} {{")).unwrap_or_else(|| panic!("{class} is a Durable Object"));
             let fetch = text[at..].find("    async fn fetch(&self, req: Request) -> Result<Response> {\n").unwrap_or_else(|| panic!("{class} answers fetch")) + at;
             let first = text[fetch..].lines().nth(1).unwrap_or_default();
             assert!(first.trim_start().starts_with("if let Some(refused) = crate::routed::refused(&req, "), "{class}'s fetch checks its caller's release before anything else, not: {first}");
+        }
+        for (file, class) in objects {
             // then a deploy's probe (`/healthz/objects`), before its own routes
+            let text = &files[file];
+            let fetch = text.find(&format!("impl DurableObject for {class} {{")).expect("found above");
             let body = &text[fetch..];
             let (probe, route) = (body.find("crate::routed::probed(&req, &self.schema)?"), body.find("self.route(req)"));
             assert!(matches!((probe, route), (Some(p), Some(r)) if p < r), "{class}'s fetch answers a deploy's probe after its release check and before its routes");
         }
-        let checked: BTreeMap<String, usize> = objects.iter().map(|(file, _)| (file.to_string(), 1)).collect();
+        let probed: BTreeMap<String, usize> = objects.iter().map(|(file, _)| (file.to_string(), 1)).collect();
+        let checked: BTreeMap<String, usize> = objects.iter().chain(&unprobed).map(|(file, _)| (file.to_string(), 1)).collect();
         assert_eq!(uses(&files, "routed::refused(&req, "), checked, "each object checks once, in its fetch");
-        assert_eq!(uses(&files, "routed::probed(&req, "), checked, "and answers a probe once, there");
+        assert_eq!(uses(&files, "routed::probed(&req, "), probed, "and answers a probe once, there");
         let entry = std::fs::read_to_string(crate::devstack::repo_root().join("cell/entry.mjs")).expect("entry.mjs reads");
         let code: Vec<&str> = entry.lines().filter(|l| !l.trim_start().starts_with("//")).collect();
-        assert_eq!(code.iter().filter(|l| l.contains(" extends DurableObject {")).count(), objects.len(), "the platform's objects are the five checked above");
+        assert_eq!(code.iter().filter(|l| l.contains(" extends DurableObject {")).count(), objects.len() + unprobed.len(), "the platform's objects are the six checked above");
         let made: Vec<&&str> = code.iter().filter(|l| l.contains("InternalRoute.request(")).collect();
         assert!(made.len() >= 3 && made.iter().all(|l| l.contains("InternalRoute.request(this.env, ") || l.contains("InternalRoute.request(env, ")), "the JavaScript's internal calls are stamped from its env: {made:?}");
         let called: Vec<&&str> = code.iter().filter(|l| l.contains("getByName(")).collect();
