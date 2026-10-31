@@ -289,6 +289,11 @@ impl<T> Fake<T> {
         Fake { what, fake: None, lanes: false }
     }
 
+    /// The fake, where the lanes may use it (a local run's).
+    fn lanes(&self) -> Option<&T> {
+        self.fake.as_ref().filter(|_| self.lanes)
+    }
+
     /// The fake as the node is configured with it.
     fn node(&self) -> &T {
         self.fake.as_ref().unwrap_or_else(|| panic!("a hosted run starts no node on the {} fake", self.what))
@@ -498,6 +503,12 @@ impl Suite {
         }
         println!("\n# {name}");
         self.ran.push(name.to_string());
+        // a section that stopped early leaves Stripe's events as it held
+        // them: each starts with them going out (billing-page's early stop
+        // once held trials' webhooks back, failing its checks besides)
+        if let Some(stripe) = self.stripe.lanes() {
+            stripe.release_events(false);
+        }
         if let Some(why) = self.lost.clone() {
             self.fail(&format!("{name} did not run: no node"), why);
             return false;
