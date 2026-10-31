@@ -226,6 +226,7 @@ pub fn shell_platform(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("a template that is none is refused, naming the blessed ones", r.status == 400 && r.text.contains("agent"), &r);
     search_and_archive(s, api, &session)?;
     dock_choice(s, api, &session)?;
+    pin_choice(s, api, &session)?;
     search_follows_reading(s, api)?;
     unread_and_seen(s, api, &session)?;
     list_watch(s, api, &session, &id)
@@ -769,6 +770,81 @@ fn dock_choice(s: &mut Suite, api: &Api, session: &str) -> Result<()> {
     let back = s.eventually(SEARCH_WAIT, || theirs().is_ok_and(|r| row(&r).is_some()));
     let t = theirs()?;
     s.ok("back in, it is on their dock again", r.status == 200 && back && on(&t), json!(row(&t)));
+    Ok(())
+}
+
+/// A pin, the person's own choice (Paul, 2026-10-31; docs/api.md, `PUT
+/// /api/fragments/{name}/pinned`): nothing is pinned until they pin it, for
+/// themselves alone (a member's list keeps its own), twice the same as once,
+/// and only one of theirs; archiving and the dock are choices of their own;
+/// it goes when they leave (back in, it is not pinned). Valid, invalid and
+/// replay here; a restart keeps it (the restart section).
+fn pin_choice(s: &mut Suite, api: &Api, session: &str) -> Result<()> {
+    let r = shell(api, session, "POST", "/api/fragments", Some(&json!({ "label": "pinned-talk", "template": "chat" })), &[])?;
+    let chat = r.body["name"].as_str().unwrap_or("").to_string();
+    anyhow::ensure!(r.status == 200 && label_of(&chat) == "pinned-talk", "making the chat: {r}");
+    let member = api.person()?;
+    let member_id = api.identity(&member)?;
+    let r = api.share(&chat, &member_id, "viewer")?;
+    anyhow::ensure!(r.status == 200, "adding the member: {r}");
+    let row = |r: &Reply| r.body["fragments"].as_array().and_then(|l| l.iter().find(|f| f["name"] == chat.as_str()).cloned());
+    // not pinned, a row leaves `pinned` out; pinned, it says `true`
+    let loose = |r: &Reply| row(r).is_some_and(|f| f.get("pinned").is_none());
+    let held = |r: &Reply| row(r).is_some_and(|f| f["pinned"] == true);
+    let mine = || shell(api, session, "GET", "/api/fragments", None, &[]);
+    let theirs = || api.signed(&member, "GET", "/api/fragments", None);
+    let pin = |name: &str, body: Value| shell(api, session, "PUT", &format!("/api/fragments/{name}/pinned"), Some(&body), &[]);
+    let listed = s.eventually(SEARCH_WAIT, || theirs().is_ok_and(|r| row(&r).is_some()));
+    let (m, t) = (mine()?, theirs()?);
+    s.ok("a new chat is pinned in no one's list: its owner's and a member's rows leave `pinned` out", listed && loose(&m) && loose(&t), json!([row(&m), row(&t)]));
+
+    let r = pin(&chat, json!({ "pinned": true }))?;
+    s.ok("the person pins a chat of theirs", r.status == 200 && r.body == json!({ "name": chat, "pinned": true }), &r);
+    let again = pin(&chat, json!({ "pinned": true }))?;
+    s.ok("pinning it again is the same", again.status == 200 && again.body == r.body, &again);
+    let (m, t) = (mine()?, theirs()?);
+    s.ok("their list says it is pinned, not archived and on their dock; a member's has it not pinned", held(&m) && row(&m).is_some_and(|f| f.get("archived").is_none() && f.get("dock").is_none()) && loose(&t), json!([row(&m), row(&t)]));
+    let r = api.signed(&member, "PUT", &format!("/api/fragments/{chat}/pinned"), Some(&json!({ "pinned": true })))?;
+    let back = pin(&chat, json!({ "pinned": false }))?;
+    let (m, t) = (mine()?, theirs()?);
+    s.ok(
+        "the member, a viewer, pins it for themselves (with their key); the person unpins it, and each list keeps its own",
+        r.status == 200 && back.status == 200 && back.body == json!({ "name": chat, "pinned": false }) && loose(&m) && held(&t),
+        json!([row(&m), row(&t)]),
+    );
+    // archiving is a choice of its own: neither changes the other
+    let archive = |on: bool| shell(api, session, "PUT", &format!("/api/fragments/{chat}/archived"), Some(&json!({ "archived": on })), &[]);
+    let (p, a, u) = (pin(&chat, json!({ "pinned": true }))?, archive(true)?, archive(false)?);
+    let m = mine()?;
+    s.ok("pinned, archived, then unarchived, it is pinned still", p.status == 200 && a.status == 200 && u.status == 200 && held(&m), json!(row(&m)));
+
+    let other = api.person()?;
+    let theirs_only = s.named(api, &other, "not-pinned")?;
+    let r = api.create(&other, &theirs_only)?;
+    anyhow::ensure!(r.status == 200, "someone else's app: {r}");
+    let r = pin(&theirs_only, json!({ "pinned": true }))?;
+    s.ok("a fragment they are not in is none of theirs to pin (404)", r.status == 404, &r);
+    let r = pin("nothing-here--k3x9", json!({ "pinned": true }))?;
+    s.ok("nor one that does not exist (404)", r.status == 404, &r);
+    let r = pin("pinned-talk", json!({ "pinned": true }))?;
+    s.ok("a bare label names nothing here (404): a fragment is named in full", r.status == 404 && r.message().contains("in full"), &r);
+    let r = pin("Not A Name", json!({ "pinned": true }))?;
+    s.ok("a name that is none is refused (400)", r.status == 400, &r);
+    let (r, r2) = (pin(&chat, json!({}))?, pin(&chat, json!({ "pinned": "yes" }))?);
+    s.ok("a body without `pinned`, or not a boolean, is refused (400)", r.status == 400 && r2.status == 400, format!("{r} {r2}"));
+    let r = api.unsigned("PUT", &format!("/api/fragments/{chat}/pinned"), Some(&json!({ "pinned": false })))?;
+    let m = mine()?;
+    s.ok("no one pins anyone's chats (401), and theirs is as it was", r.status == 401 && held(&m), &r);
+
+    // removed, their pin goes with their row; back in, it is not pinned
+    let r = shell(api, session, "DELETE", &format!("/api/f/{chat}/members/{member_id}"), None, &[])?;
+    let gone = s.eventually(SEARCH_WAIT, || theirs().is_ok_and(|r| r.status == 200 && row(&r).is_none()));
+    let r2 = api.signed(&member, "PUT", &format!("/api/fragments/{chat}/pinned"), Some(&json!({ "pinned": true })))?;
+    s.ok("a removed member's list has it no more, nor may they pin it (404)", r.status == 200 && gone && r2.status == 404, &r2);
+    let r = api.share(&chat, &member_id, "viewer")?;
+    let back = s.eventually(SEARCH_WAIT, || theirs().is_ok_and(|r| row(&r).is_some()));
+    let t = theirs()?;
+    s.ok("back in, it is not pinned for them", r.status == 200 && back && loose(&t), json!(row(&t)));
     Ok(())
 }
 
