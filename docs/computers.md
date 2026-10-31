@@ -476,8 +476,10 @@ computers keep three saves, each turn replacing the oldest, so soon no
 save from before the update remains. Pinning an older release onto those
 databases is unsafe. Fix such a release forward until a computer keeps
 the save an image change started from (docs/technical-debt-ledger.md).
-v0.21.7 happens to change neither state.db's schema 31 nor config version
-50, but the rule does not depend on inspecting each release's schema.
+v0.22.5 moves state.db's schema from 31 to 32 (additive: new tables,
+columns and triggers, one of which stops an older Hermes deleting a
+session with runtime history), but the rule does not depend on
+inspecting each release's schema.
 
 ### One round before production
 
@@ -1804,13 +1806,15 @@ settings and state):
   own, unoptimized), and a screen page. 9.6 MB and a 17 MB CLI; a local
   start follows its chats in 0.3 s. The platform's own lanes run against
   it.
-- `images/hermes`: Hermes v0.21.7's desktop image, `hermes-boot`, the
+- `images/hermes`: Hermes v0.22.5's desktop image, `hermes-boot`, the
   bridge as Hermes' Relay connector, the screen. The base is pinned by
-  digest to v0.21.7's release build (its versioned tag
-  `rc.15-v0.21.7-desktop`, 2026-10-12; its install stamp says 0.21.7,
-  commit `71d34bad`); upstream tags no `v0.21.7-desktop`, and a bare
-  version tag is not always the release (`v0.21.6-desktop` was an
-  earlier attempt's build). Hermes there is Python
+  digest to v0.22.5's release build (its versioned tag
+  `rc.3-v0.22.5-desktop`, 2026-10-23; its install stamp says 0.22.5,
+  commit `bf0203a7`), with upstream's two-commit Relay turn-end fix
+  from after it applied unmodified at build
+  (`images/hermes/patches/relay-turn-end.patch`;
+  docs/technical-debt-ledger.md); a bare version tag is not always the
+  release (`v0.21.6-desktop` was an earlier attempt's build). Hermes there is Python
   3.14.7 in a venv its own package manager (PM) builds, its tools (its
   Python, Node 26.7, npm 12, uv, ffmpeg, ripgrep, Chromium 145) in PM's
   store at `/opt/hermes/tools`. Its layers go by how often each changes:
@@ -1836,12 +1840,17 @@ settings and state):
   signalled, so a restored one always reads as an unclean exit, and a
   resumed turn would carry the old turn's message id and fold the
   person's next message into it, while the bridge has already ended it
-  (docs/chat-records.md). Then it closes each turn a restart cut in its
-  Hermes session (`hermes::CLOSE_CUT_TURNS`): a gateway session whose last
-  message has no answer gets the row Hermes itself writes when a turn ends
-  without one, its failed-turn boundary, through Hermes' own session code;
-  left open, Hermes would join the next message to the cut request and its
-  model would do it again (docs/durable-computers.md, P5; the bridge tells
+  (docs/chat-records.md). Then it settles each turn a restart cut in its
+  Hermes session (`hermes::SETTLE_CUT_TURNS`) as Hermes' own `/discard`
+  does: its relayed turns a previous gateway started are resolved
+  `interrupted`, never run again, with the row Hermes itself writes when a
+  turn ends without an answer (its failed-turn boundary) in the same
+  transaction, and the ones it took and had not started are cancelled.
+  Left alone, Hermes would pause the chat until its sender sent `/discard`
+  (which a person's chat never sends: the bridge keeps a leading `/` from
+  reading as a command). A session's tail a release before admissions left
+  open is closed with the same boundary, so an upgrade's first boot closes
+  what the old image cut (docs/durable-computers.md, P5; the bridge tells
   the next turn what was cut, docs/bridge.md). The managed skills and
   the fragment CLI: below,
   "Skills and the CLI in our Hermes image". An agent fragment's optional

@@ -1,0 +1,387 @@
+Upstream Hermes' turn-end fix for the Relay, backported unmodified onto
+the pinned v0.22.5 (images/hermes/Dockerfile applies it at build; the
+build fails unless it applies cleanly).
+
+  02438db863e199431b85021806a3467b0c9324a4
+    fix(gateway): give producer-admitted relay turns their typing and
+    reactions back
+  c49ecd58922bdce210f68e96dfbd07d11d1c6bd5
+    fix(gateway): a cancel during the producer start hook releases its
+    typing and bracket
+
+Both from NousResearch/hermes-agent main (2026-10-28), after v0.22.5. Their
+gateway/ changes only: the image carries no tests/. Without them a relayed
+message's turn never sends the 👀/✅ bracket the bridge reads as its end
+(docs/technical-debt-ledger.md, "The Hermes image carries upstream's
+Relay turn-end fix"). Delete when the next Hermes release we adopt
+includes both commits.
+
+From 02438db863e199431b85021806a3467b0c9324a4 Mon Sep 17 00:00:00 2001
+From: Victor Kyriazakos <victor@rocketfueldev.com>
+Date: Wed, 28 Oct 2026 22:43:39 +0000
+Subject: [PATCH 1/2] fix(gateway): give producer-admitted relay turns their
+ typing and reactions back
+
+A relay chat message has been admitted natively since the session authority shipped (e75bc52f50,
+first released in 0.22.3; e3fdebbf87 moved it into gateway/relay/inbound_admission.py):
+RelayAdapter._on_inbound commits it through admit_producer and the authority's drain runs it.
+The typing refresh and on_processing_start/on_processing_complete only ever ran in
+BasePlatformAdapter._process_message_background, which that path never enters. So a relay
+message got no in-progress reaction, no typing / Slack "is working" status, and no outcome
+reaction; only tool progress re-sent typing, so a turn without tools showed nothing. Slash
+commands still go through handle_message and kept theirs.
+
+The turn executor now brackets producer-admitted turns (relay and webhook deliveries; a messaging
+admission's own adapter task already brackets it):
+
+- admit_producer marks the event it commits; SessionAuthority._admitted records a freshly queued
+  row in the commit's own tracked task. A re-send of a row already running or settled is not
+  marked again, and a cancelled queued row drops its mark (_settle_cancelled).
+- execute_admission opens the bracket when the row starts executing, not when it commits: a
+  message queued behind a running turn is acknowledged when it runs, as the in-band queue does
+  (run_turn_followup_ack) and as 0.22.2's drain task did. It starts the adapter typing refresh
+  with the event's thread metadata and runs on_processing_start.
+- Typing lives as long as execution and stops before the reply is sent (#117300 pauses it there).
+- The outcome is reported once: an interrupted turn as CANCELLED and a failed one (exception, or a
+  failed result) as FAILURE when execution ends; a completed one after settlement, from the
+  reply's send in deliver_settled (deliver_response now reports whether it delivered), or as
+  FAILURE when settlement dropped the reply.
+- Adapters that render neither typing nor processing hooks (webhook) get no bracket; scheduled
+  wakes and heartbeats are not producer admissions, so they stay silent.
+
+pre_gateway_dispatch still fires once at admission, admission stays off the transport reader and
+the ACK semantics are unchanged: the bracket lives entirely on the execution side.
+---
+ gateway/platforms/webhook_ingress.py  |  11 ++-
+ gateway/session_authority.py          |   4 +
+ gateway/session_ingress.py            |  28 +++++-
+ gateway/session_producer_lifecycle.py | 127 ++++++++++++++++++++++++++
+ 4 files changed, 163 insertions(+), 7 deletions(-)
+ create mode 100644 gateway/session_producer_lifecycle.py
+
+diff --git a/gateway/platforms/webhook_ingress.py b/gateway/platforms/webhook_ingress.py
+index db9bfa788b..0c6c8a9c8e 100644
+--- a/gateway/platforms/webhook_ingress.py
++++ b/gateway/platforms/webhook_ingress.py
+@@ -134,7 +134,7 @@ async def admit_producer(adapter, event):
+         webhook = adapter.platform == Platform.WEBHOOK
+         hooks = [name for name in ('pre_gateway_dispatch', POST_ADMISSION_HOOK) if has_hook(name)]
+         if not (webhook or hooks):
+-            return await authority.admit_native(event)
++            return await _admit_native(authority, event)
+         from gateway.session_authority import native_write_started
+         payload, principal = await _prepared(authority, event)
+         writing = native_write_started.set(False)
+@@ -181,7 +181,14 @@ async def _admit_once(authority, event, webhook, hooks, committed):
+             if consumed:
+                 await _release_preparation(authority, committed[0])
+                 return None
+-    return await authority.admit_native(admitted)
++    return await _admit_native(authority, admitted)
++
++
++async def _admit_native(authority, event):
++    # No adapter task brackets a producer's turn: the executor runs its adapter lifecycle (typing,
++    # processing hooks) once the row starts executing (``session_producer_lifecycle``).
++    event._producer_delivery = True
++    return await authority.admit_native(event)
+ 
+ 
+ # Producer deliveries in flight by (profile, principal, provider id) -> [lock, holder + waiters]. This
+diff --git a/gateway/session_authority.py b/gateway/session_authority.py
+index b9e544c071..1629fa5b5a 100644
+--- a/gateway/session_authority.py
++++ b/gateway/session_authority.py
+@@ -20,6 +20,7 @@ from gateway.session_contract import (
+ )
+ from gateway.session_events import SessionEvents
+ from gateway.session_pending_controls import PendingControls
++from gateway.session_producer_lifecycle import drop_producer_turn, mark_producer_admission
+ from hermes_state_runtime import (
+     STEERING, RuntimeStoreError, admit_session_input, begin_runtime_epoch,
+     cancel_session_input, claim_session_input, get_session_admission,
+@@ -616,6 +617,7 @@ class SessionAuthority:
+             event._gateway_accepted = True
+             if row['status'] == 'queued' and (committed := getattr(event, '_on_commit', None)) is not None:
+                 committed()  # a queued slash command's ack follows its commit (``_queue_command_turn``)
++            mark_producer_admission(self, event, row)
+         self._publish_pending(ref)
+         return self._receipt(row)
+ 
+@@ -830,6 +832,7 @@ class SessionAuthority:
+         # Published once: a later exact retry re-collects media but never repeats the completion.
+         self.cancel_obligations.discard(admission_id)
+         self.native_waiters.discard(admission_id)
++        drop_producer_turn(self, admission_id)
+         waiter = self.waiters.pop(admission_id, None)
+         if waiter is not None and not waiter.done():
+             waiter.set_result(None)
+@@ -1386,6 +1389,7 @@ class SessionAuthority:
+                 if settled is None:
+                     # Uncommitted (unknown or discarded): the user is not told an answer the FIFO lost.
+                     self.pending_deliveries.pop(admission_id, None)
++                    drop_producer_turn(self, admission_id)
+                 from gateway.session_ingress import waiter_replies
+                 waiter_replies(self).pop(admission_id, None)
+                 # Taken on every exit, so a turn that never settled leaves no reset for a later one.
+diff --git a/gateway/session_ingress.py b/gateway/session_ingress.py
+index 38d11d7edd..a386bc3344 100644
+--- a/gateway/session_ingress.py
++++ b/gateway/session_ingress.py
+@@ -2,11 +2,12 @@
+ import asyncio
+ import logging
+ from contextvars import ContextVar
+-from contextlib import nullcontext
++from contextlib import asynccontextmanager, nullcontext
+ from dataclasses import replace
+ 
+-from gateway.platforms.event import MessageEvent
++from gateway.platforms.event import MessageEvent, ProcessingOutcome
+ from gateway.session_envelope import restore_native
++from gateway.session_producer_lifecycle import close_producer_turn, producer_turn
+ from hermes_state_runtime import RuntimeStoreError
+ 
+ logger = logging.getLogger(__name__)
+@@ -285,7 +286,7 @@ async def execute_admission(authority, ref, row):
+     event._turn_marker_handoff = True
+     handed = False
+     try:
+-        with await _execution_scope(authority, home):
++        async with _admission_scope(authority, home, row, event, captured):
+             if is_api:
+                 # Committed media resolves under the owning profile's home, like admission did.
+                 prepared = prepare_api_execution(authority, ref, row['payload'])
+@@ -353,6 +354,15 @@ def _launch_body_if_launch_owner(authority):
+     return launch_body()
+ 
+ 
++@asynccontextmanager
++async def _admission_scope(authority, home, row, event, captured):
++    """The execution scope, inside the adapter lifecycle the executor owns for a producer-admitted
++    turn (``session_producer_lifecycle``; a no-op for every other admission)."""
++    async with producer_turn(authority, row, event, captured):
++        with await _execution_scope(authority, home):
++            yield
++
++
+ async def _execution_scope(authority, home):
+     """Under multiplex, owner-side execution runs under the OWNING profile's home (agent build,
+     config, secrets, state.db), never the launch profile's ambient scope; native provenance
+@@ -394,11 +404,14 @@ async def deliver_settled(authority, admission_id):
+         if held is not None:
+             # Fenced unknown: no answer is owed, so no later boot may deliver one either.
+             await _release_turn_marker(authority, held)
++        # Settled with nothing (left) to send: its reply streamed, or it had none.
++        await close_producer_turn(authority, admission_id, ProcessingOutcome.SUCCESS)
+         return
+     adapter, event, session_key, response, home = delivery
++    delivered = False
+     try:
+         with await _execution_scope(authority, home):
+-            await deliver_response(adapter, event, session_key, response)
++            delivered = await deliver_response(adapter, event, session_key, response)
+     except Exception:
+         logger.exception('Delivery of settled admission %s failed', admission_id)
+     finally:
+@@ -406,13 +419,17 @@ async def deliver_settled(authority, admission_id):
+         authority.pending_deliveries.pop(admission_id, None)
+         # The ledgered send already released the marker; an empty or failed send owes no more.
+         await _release_turn_marker(authority, event)
++        await close_producer_turn(
++            authority, admission_id, ProcessingOutcome.SUCCESS if delivered else ProcessingOutcome.FAILURE)
+ 
+ 
+ async def deliver_response(adapter, event, session_key, response):
++    """Send a turn's reply; whether it was delivered (``_process_message_background``'s verdict:
++    nothing to send, or at least one send that succeeded)."""
+     from gateway.platforms.base import _thread_metadata_for_event, _mark_notify_metadata
+     text, ttl = adapter._unwrap_ephemeral(response)
+     if not text:
+-        return
++        return True
+     extracted = await adapter._extract_response_content(text, event, session_key, is_ephemeral_response=ttl > 0)
+     metadata = _mark_notify_metadata(_thread_metadata_for_event(event))
+     results = []
+@@ -421,6 +438,7 @@ async def deliver_response(adapter, event, session_key, response):
+                                        metadata, ttl > 0, ttl, results.append)
+     await adapter._deliver_attachments(event, extracted, metadata, anything_sent=bool(results),
+                                        record_delivery=results.append)
++    return any(getattr(result, 'success', False) for result in results if result is not None)
+ 
+ 
+ async def dispatch_shared_busy(adapter, event, session_key, *, durable=False):
+diff --git a/gateway/session_producer_lifecycle.py b/gateway/session_producer_lifecycle.py
+new file mode 100644
+index 0000000000..62e0404865
+--- /dev/null
++++ b/gateway/session_producer_lifecycle.py
+@@ -0,0 +1,127 @@
++"""The adapter processing lifecycle of a producer-admitted turn (relay, webhook: ``admit_producer``).
++
++A chat message an adapter hands to ``handle_message`` is bracketed by
++``BasePlatformAdapter._process_message_background``: the typing refresh, ``on_processing_start``,
++and ``on_processing_complete`` once its reply was sent. A producer delivery is only committed at
++ingress (off the transport reader, acknowledged on the commit) and the authority's drain runs it, so
++no adapter task brackets it. The executor does, for those admissions only (a messaging admission's
++own adapter task already brackets it):
++
++- opened when the admission starts executing, not when it commits: a delivery queued behind a
++  running turn is acknowledged when it runs, as the in-band queue's are (``run_turn_followup_ack``);
++- typing lives as long as execution, so it stops before the reply is sent (#117300 pauses it there);
++- the outcome is reported once: an interrupted turn as CANCELLED and a failed one as FAILURE when
++  execution ends; a completed one after its settlement, by the reply's send (``deliver_settled``),
++  or as FAILURE when settlement dropped the reply (``drop_producer_turn``).
++"""
++import asyncio
++from contextlib import asynccontextmanager
++
++from gateway.platforms.event import ProcessingOutcome
++
++
++def _turns(authority):
++    """admission id -> None (committed by a producer, not started) or its open ``_Bracket``."""
++    turns = getattr(authority, 'producer_turns', None)
++    if turns is None:
++        turns = authority.producer_turns = {}
++    return turns
++
++
++def mark_producer_admission(authority, event, row):
++    """``SessionAuthority._admitted``, in the commit's own tracked task: a producer's freshly queued
++    row is the executor's to bracket. A re-send of a row already running or settled is not marked."""
++    if getattr(event, '_producer_delivery', False) and row['status'] == 'queued':
++        _turns(authority).setdefault(row['admission_id'], None)
++
++
++class _Bracket:
++    def __init__(self, adapter, event, hooks):
++        from gateway.platforms.base import _thread_metadata_for_event
++        self.adapter, self.event, self.hooks = adapter, event, hooks
++        self.metadata = _thread_metadata_for_event(event)
++        self.stop = asyncio.Event()
++        self.typing = None
++        self.closed = False
++
++    async def stop_typing(self):
++        task, self.typing = self.typing, None
++        if task is not None:
++            self.stop.set()
++            await self.adapter._stop_typing_refresh(self.event.source.chat_id, task, metadata=self.metadata)
++
++    async def close(self, outcome):
++        if self.closed:
++            return
++        self.closed = True
++        await self.stop_typing()
++        if self.hooks:
++            await self.adapter._run_processing_hook('on_processing_complete', self.event, outcome)
++
++
++async def _open(authority, row, event):
++    """The bracket of a producer-admitted row starting to execute, else None: an adapter that
++    renders neither typing nor the processing hooks (a webhook) is left alone."""
++    turns = _turns(authority)
++    if row['admission_id'] not in turns:
++        return None
++    from gateway.platforms.base import BasePlatformAdapter
++    from gateway.run_turn_followup_ack import _followup_processing_hooks_apply
++    adapter = authority.runner._adapter_for_source(event.source)
++    typing = adapter is not None and type(adapter).send_typing is not BasePlatformAdapter.send_typing
++    hooks = _followup_processing_hooks_apply(adapter, event)
++    if not (typing or hooks):
++        turns.pop(row['admission_id'], None)
++        return None
++    bracket = turns[row['admission_id']] = _Bracket(adapter, event, hooks)
++    if typing:
++        # None for a heartbeat or ``typing_indicator: false``, as on the adapter path.
++        bracket.typing = adapter._start_typing_refresh(event, bracket.stop, bracket.metadata)
++    if hooks:
++        await adapter._run_processing_hook('on_processing_start', event)
++    return bracket
++
++
++def _executed_outcome(captured):
++    """The outcome settlement will commit (``session_results.prepare_result``), as a hook outcome."""
++    result = captured.get('terminal_result', captured.get('result')) or {}
++    if result.get('interrupted'):
++        return ProcessingOutcome.CANCELLED
++    if result.get('failed') or result.get('error'):
++        return ProcessingOutcome.FAILURE
++    return ProcessingOutcome.SUCCESS
++
++
++@asynccontextmanager
++async def producer_turn(authority, row, event, captured):
++    """Around ``execute_admission``'s run of *row*: ``captured`` is its ``execution_result``."""
++    bracket = await _open(authority, row, event)
++    if bracket is None:
++        yield
++        return
++    outcome = ProcessingOutcome.FAILURE
++    try:
++        yield
++        outcome = _executed_outcome(captured)
++    finally:
++        await bracket.stop_typing()
++        if outcome is not ProcessingOutcome.SUCCESS:
++            await close_producer_turn(authority, row['admission_id'], outcome)
++
++
++async def close_producer_turn(authority, admission_id, outcome):
++    """Report a settled producer turn's outcome (once; a no-op for any other admission)."""
++    bracket = _turns(authority).pop(admission_id, None)
++    if bracket is not None:
++        await bracket.close(outcome)
++
++
++def drop_producer_turn(authority, admission_id):
++    """The admission settled without its reply (unknown, discarded) or was cancelled before it ran:
++    a started turn reports FAILURE, off the caller's path."""
++    bracket = _turns(authority).pop(admission_id, None)
++    if bracket is None or bracket.closed:
++        return
++    task = asyncio.get_running_loop().create_task(bracket.close(ProcessingOutcome.FAILURE))
++    bracket.adapter._background_tasks.add(task)
++    task.add_done_callback(bracket.adapter._background_tasks.discard)
+-- 
+2.56.0
+
+
+From c49ecd58922bdce210f68e96dfbd07d11d1c6bd5 Mon Sep 17 00:00:00 2001
+From: Victor Kyriazakos <victor@rocketfueldev.com>
+Date: Wed, 28 Oct 2026 23:49:04 +0000
+Subject: [PATCH 2/2] fix(gateway): a cancel during the producer start hook
+ releases its typing and bracket
+
+A drain cancelled while on_processing_start is awaited left the typing refresh running and the
+row's bracket in producer_turns, because producer_turn's finally was not entered yet. Release both
+before re-raising.
+---
+ gateway/session_producer_lifecycle.py | 10 +++++++++-
+ 1 file changed, 9 insertions(+), 1 deletion(-)
+
+diff --git a/gateway/session_producer_lifecycle.py b/gateway/session_producer_lifecycle.py
+index 62e0404865..308ae321e5 100644
+--- a/gateway/session_producer_lifecycle.py
++++ b/gateway/session_producer_lifecycle.py
+@@ -78,7 +78,15 @@ async def _open(authority, row, event):
+         # None for a heartbeat or ``typing_indicator: false``, as on the adapter path.
+         bracket.typing = adapter._start_typing_refresh(event, bracket.stop, bracket.metadata)
+     if hooks:
+-        await adapter._run_processing_hook('on_processing_start', event)
++        try:
++            await adapter._run_processing_hook('on_processing_start', event)
++        except BaseException:
++            # Cancelled before ``producer_turn``'s finally exists: release what was opened here.
++            bracket.stop.set()
++            if bracket.typing is not None:
++                bracket.typing.cancel()
++            turns.pop(row['admission_id'], None)
++            raise
+     return bracket
+ 
+ 
+-- 
+2.56.0
+

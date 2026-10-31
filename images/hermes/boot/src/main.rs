@@ -1106,10 +1106,11 @@ fn start_gateway(home: &Path) -> Option<u32> {
 ///   turn, a compression) are cleared: their holder's PID names a live
 ///   process of this start (PIDs repeat in a fresh namespace: the gateway
 ///   is PID 7 each time), so Hermes would wait out its five-minute TTL.
-/// - Each turn a restart cut is closed in its session, with Hermes' own
-///   failed-turn boundary (`hermes::CLOSE_CUT_TURNS`, docs/durable-
-///   computers.md P5): left open, Hermes would join the next message to the
-///   cut request, and its model would do it again.
+/// - Each turn a restart cut is settled in its session as Hermes' own
+///   `/discard` settles it, with its failed-turn boundary
+///   (`hermes::SETTLE_CUT_TURNS`, docs/durable-computers.md P5): left
+///   alone, Hermes would pause the chat until its sender sent `/discard`,
+///   or, before its admissions, join the next message to the cut request.
 ///
 /// As the `hermes` user, so the files keep their owner.
 fn end_previous_life(agents: &[Agent], home: &Path) {
@@ -1143,14 +1144,14 @@ for p in sys.argv[1:]:
     }
     // after the leases: a write Hermes guards with them
     let t = Instant::now();
-    let out = Command::new("/command/s6-setuidgid").args(["hermes", "/opt/hermes/.venv/bin/python", "-c", hermes::CLOSE_CUT_TURNS]).args(&dbs).env("HOME", home).env("HERMES_HOME", home).current_dir("/").output();
+    let out = Command::new("/command/s6-setuidgid").args(["hermes", "/opt/hermes/.venv/bin/python", "-c", hermes::SETTLE_CUT_TURNS]).args(&dbs).env("HOME", home).env("HERMES_HOME", home).current_dir("/").output();
     let ms = t.elapsed().as_millis() as u64;
     match out {
-        Ok(o) if o.status.success() => match hermes::cut_turns_closed(&String::from_utf8_lossy(&o.stdout)) {
-            Ok((sessions, closed)) => ev!("boot.cut_turns_closed", { "dbs": dbs.len(), "sessions": sessions, "closed": closed, "ms": ms }),
+        Ok(o) if o.status.success() => match hermes::cut_turns_settled(&String::from_utf8_lossy(&o.stdout)) {
+            Ok((lost, dropped, closed)) => ev!("boot.cut_turns_settled", { "dbs": dbs.len(), "lost": lost, "dropped": dropped, "closed": closed, "ms": ms }),
             Err(why) => ev!("boot.cut_turns_failed", { "error": why, "ms": ms }),
         },
-        // the next message would be joined to a cut request: said loudly
+        // a chat would stay paused behind its cut turn: said loudly
         Ok(o) => ev!("boot.cut_turns_failed", { "status": o.status.code(), "error": String::from_utf8_lossy(&o.stderr).lines().rev().take(4).collect::<Vec<_>>().join(" | ").chars().take(600).collect::<String>(), "ms": ms }),
         Err(e) => ev!("boot.cut_turns_failed", { "error": e.to_string(), "ms": ms }),
     }

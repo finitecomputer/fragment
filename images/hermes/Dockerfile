@@ -33,16 +33,16 @@
 # what changes a version). That holds while the deploying machine's build
 # cache keeps the layers: a cold cache rebuilds them, stamped anew.
 
-# Hermes v0.21.7 (git tag v0.21.7, commit 71d34bad1045, 2026-10-12; its
-# install stamp says 0.21.7 at that commit), pinned by digest. Upstream
+# Hermes v0.22.5 (git tag v0.22.5, commit bf0203a794a0, 2026-10-23; its
+# install stamp says 0.22.5 at that commit), pinned by digest. Upstream
 # publishes a release as its last attempt's versioned tag
 # (`rc.<N>-vX.Y.Z-desktop`) and moves `stable-desktop` and `latest-desktop`
-# to it; v0.21.7's is rc.15, and no tag `v0.21.7-desktop` exists. A bare
+# to it; v0.22.5's is rc.3 (`v0.22.5-desktop` is the same digest). A bare
 # version tag is not always the release: `v0.21.6-desktop` was an earlier
 # attempt's build, not v0.21.6. A next release is pinned the same way: its
 # attempt's tag and digest, checked against its install stamp's commit and
 # version (`/opt/hermes/install-stamp.json`).
-ARG HERMES=nousresearch/hermes-agent:rc.15-v0.21.7-desktop@sha256:04c1a71a37da7d143202454234cf6952000e827e8ae47b36f7c26f1372a9c138
+ARG HERMES=nousresearch/hermes-agent:rc.3-v0.22.5-desktop@sha256:04f7a36d125bc3ebdef090cd5cf0cccaa74699e5a1a77c2965a4db437f24bf13
 
 # The bridge and hermes-boot, static (Alpine's Rust targets musl): the
 # images' own workspace.
@@ -123,6 +123,18 @@ FROM ${HERMES} AS hermes
 # them, and checks it does. Builder trace context changes per step and is
 # not upstream runtime configuration; never capture it into the image.
 RUN mkdir -p /opt/fragment && env | grep -Ev '^(TRACEPARENT|TRACESTATE)=' | sort > /opt/fragment/upstream.env
+# Upstream's turn-end fix for the Relay, its two commits after v0.22.5
+# unmodified (patches/relay-turn-end.patch names them; without them a
+# relayed message's turn never sends the bracket the bridge reads as its
+# end: docs/technical-debt-ledger.md says when this goes). The build fails
+# unless it applies cleanly, and its files are compiled here, loudly: the
+# image-wide compile below passes over files that do not compile.
+COPY images/hermes/patches/relay-turn-end.patch /tmp/relay-turn-end.patch
+RUN cd /opt/hermes \
+ && git apply --check /tmp/relay-turn-end.patch \
+ && git apply /tmp/relay-turn-end.patch \
+ && rm /tmp/relay-turn-end.patch \
+ && /opt/hermes/.venv/bin/python -c 'import py_compile, sys; [py_compile.compile(f, doraise=True, invalidation_mode=py_compile.PycInvalidationMode.UNCHECKED_HASH) for f in sys.argv[1:]]' gateway/platforms/webhook_ingress.py gateway/session_authority.py gateway/session_ingress.py gateway/session_producer_lifecycle.py
 COPY --from=docker.io/cloudflare/sandbox:1.0.0 /usr/local/bin/sandbox-shim /usr/local/bin/sandbox-shim
 # cua-driver, the backend of Hermes' computer_use (screenshots of the agent's
 # desktop, XTest input): without it Hermes offers the agent no computer_use.

@@ -6,10 +6,15 @@ The platform carries no Hermes code (docs/cloudflare-v1.md, "The rule");
 the connector the cell had until the cut is at tag `celld-final`
 (`cell/src/relay.rs`).
 
-Pinned to Hermes v0.21.7 (tag `v0.21.7`, commit `71d34bad1045`,
-2026-10-12; images/hermes/Dockerfile names its image), contract version
-1, read from `gateway/relay/` (its code wins over its contract
-document). Read first from v0.21.5 (tag `v2026.9.24`); v0.21.6 only drops
+Pinned to Hermes v0.22.5 (tag `v0.22.5`, commit `bf0203a794a0`,
+2026-10-23; images/hermes/Dockerfile names its image, with upstream's
+Relay turn-end fix from after it), contract version 1, read from
+`gateway/relay/` (its code wins over its contract document). v0.22's
+gateway admits a relayed message durably (its session authority) and
+ACKs its frame once that admission commits; its wire frames are
+unchanged. v0.22.5 itself sent no turn bracket for such a message,
+which upstream's two commits after it restore (docs/technical-debt-
+ledger.md). Read first from v0.21.5 (tag `v2026.9.24`); v0.21.6 only drops
 its plugin-compat names and takes its prompts' labels from translations
 (English as before), and v0.21.7 only restates its annotations (a lint
 sweep: `Dict` as `dict`, `asyncio.TimeoutError` as `TimeoutError`): the

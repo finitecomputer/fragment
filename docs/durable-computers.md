@@ -149,11 +149,13 @@ file is the newer word, and decision 18 points here.
   again, what was asked, the steps and cards it recorded, what it had
   replied; said once, at most 4 KiB, handed to every runtime
   (`TurnStart::note`; Relay's read-only `context`, the scripted agent
-  echoes it). And our image's boot closes the cut turn in Hermes' session
-  before the gateway starts, with the row Hermes writes itself when a turn
-  ends without an answer (its failed-turn boundary), through Hermes' own
-  session code, so the next message is a turn of its own. Hermes' own
-  recovery notes stay off. docs/bridge.md, "The turn after a cut one is
+  echoes it). And our image's boot settles the cut turn in Hermes' session
+  before the gateway starts, as Hermes' own `/discard` does: never run
+  again, with the row Hermes writes itself when a turn ends without an
+  answer (its failed-turn boundary), through Hermes' own runtime code, so
+  the next message is a turn of its own and the chat is never paused
+  behind it (Hermes v0.22 pauses a chat behind a turn a restart cut until
+  its sender discards it). Hermes' own recovery notes stay off. docs/bridge.md, "The turn after a cut one is
   told"; docs/chat-records.md; docs/computers.md.
 - **What Hermes writes under the hold is chosen (2026-10-07).** Its
   model-catalog refresh is off and Node's compile cache is out of
