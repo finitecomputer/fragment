@@ -207,7 +207,9 @@ pub fn run(c: &Client, sub: SessionCmd) -> Result<Imported> {
             // on a platform computer (as its agent), its own Hermes home's
             // databases are its chats here already; a person's own Hermes is theirs
             let own = c.agent().and(std::env::var_os("HERMES_HOME")).filter(|h| !h.is_empty()).map(PathBuf::from);
-            hermes::read(&db, &mut spool, own.as_deref())?
+            // a conversation it cannot read whole is refused, in the spool
+            hermes::read(&db, &mut spool, own.as_deref())?;
+            Vec::new()
         }
     };
     let (archive, made) = archive(c)?;

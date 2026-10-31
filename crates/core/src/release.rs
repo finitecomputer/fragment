@@ -127,6 +127,32 @@ pub fn restarts(caller_deployed: Option<u64>, own_deployed: Option<u64>) -> bool
     matches!((caller_deployed, own_deployed), (Some(caller), Some(own)) if caller > own)
 }
 
+/// What an object restarting onto a newer release (`restarts`) ends every
+/// request it is still answering with (cell/src/routed.rs
+/// `restart_soon`), naming its own release: `restart_reason`. A call it
+/// ends that was another release's was refused before it did anything
+/// (`admit`), so its caller asks again as at a refusal (`restarted_by`); a
+/// call of its own release may have acted, and is the error it was. The
+/// restart's timer runs late under load, past the caller's next ask
+/// (`AGAIN_AFTER_MS`), so the ask it ends is often that one.
+pub const RESTARTING: &str = "a call from a release deployed after this one's: restarting onto it";
+
+/// The reason an object running `own` restarts with.
+pub fn restart_reason(own: &str) -> String {
+    assert!(valid(own), "an object's own release is a valid id, not {own:?}");
+    format!("{RESTARTING} (from {own})")
+}
+
+/// The release that ended a call by restarting (`restart_reason`), read
+/// from the call's error as the runtime gave it (a JS error's text, any
+/// prefix): `None` for any other error, and for a restart's that named no
+/// valid release (one from before restarts named theirs).
+pub fn restarted_by(error: &str) -> Option<&str> {
+    let after = &error[error.find(RESTARTING)? + RESTARTING.len()..];
+    let own = after.strip_prefix(" (from ")?.split(')').next()?;
+    valid(own).then_some(own)
+}
+
 /// The object's check of a call, the first thing it does: admitted only
 /// from its own release (`callee`). Another release, newer or older, is
 /// refused, and so is a call that names none or one malformed (when each
@@ -289,6 +315,24 @@ mod tests {
         assert!(!restarts(None, Some(old)), "a caller from before deploy times were named");
         assert!(!restarts(Some(new), None), "an object of a fleet that sets none (dev)");
         assert!(!restarts(None, None));
+    }
+
+    /// Valid: a restart's reason names the release that restarted, read
+    /// back from the error a caller sees, the runtime's prefix and all.
+    /// Invalid: any other error, a restart's from before reasons named a
+    /// release (the deploy that brings this in meets those once), or one
+    /// naming no valid release, is no restart's: the caller's error stands.
+    #[test]
+    fn a_restart_names_the_release_that_restarted() {
+        let reason = restart_reason("069479198b79");
+        assert_eq!(restarted_by(&reason), Some("069479198b79"));
+        assert_eq!(restarted_by(&format!("Error: {reason}")), Some("069479198b79"));
+        assert_eq!(restarted_by(RESTARTING), None, "the reason before it named a release");
+        assert_eq!(restarted_by(&format!("Error: {RESTARTING}")), None);
+        assert_eq!(restarted_by(&format!("{RESTARTING} (from )")), None);
+        assert_eq!(restarted_by(&format!("{RESTARTING} (from a b)")), None);
+        assert_eq!(restarted_by("Error: Network connection lost."), None);
+        assert_eq!(restarted_by(""), None);
     }
 
     /// Replay: a newer caller's refusal restarts the old object once; the

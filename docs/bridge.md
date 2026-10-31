@@ -846,7 +846,16 @@ get_chat_info`.
   (above, "Commands"), read before any notice.
 - A file Hermes sends is uploaded to `/relay/media`, then `send_media`;
   a message's attachments are served at `/relay/media/<id>`, behind the
-  token.
+  token. Before the inbound is sent, the driver has downloaded the originals
+  to `<BRIDGE_MEDIA_DIR>/<sha256>` (default `/tmp/bridge-media`). Their
+  original names, MIME types and absolute local paths follow the new message's
+  words as file notes; an unread file is counted explicitly. They stay with
+  the message so Hermes' prepended voice transcript is not separated from
+  it by a channel-context block. Restart notes keep their read-only `context`.
+  The same file-note formatter names files sent as answers to
+  a question. No filename from the record becomes a disk path, and there
+  is no extra download or cache. Hermes' own localisation and native-image
+  routing continue normally. The scratch is not saved across a sleep.
 - A file Hermes sends by a URL of its provider's (`send_media` naming
   one: a reply's image link, as FAL's image generation hands back) is
   fetched by the bridge (`relay/fetch.rs`), apart from the loop, and is

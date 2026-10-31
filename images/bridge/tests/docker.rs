@@ -810,6 +810,68 @@ print(json.dumps({'images':len(images),'largest':max(len(p['image_url']['url']) 
     assert_eq!(c.logs().matches("\"boot.init\"").count(),1);
 }
 
+/// A person's PNG and PDF reach real Hermes together. The model must be
+/// told usable paths even with native vision, copy the original bytes into
+/// its app through its terminal, and send both back as chat attachments.
+#[tokio::test]
+#[ignore = "needs Docker"]
+async fn chat_attachments_have_tool_usable_paths_with_native_images() {
+    build(&repo_dir(), "images/hermes/Dockerfile", &hermes_tag());
+    let fake = Fake::start("0.0.0.0:0", &["juniper"]).await;
+    fake.with(|w| w.computer["models"]["images"] = json!([CHEAP_ID, FALLBACK_ID]));
+    let model = Model::start("0.0.0.0:0").await;
+    let chat = fake.chat("talk", &["juniper"]);
+    let c = Container::run(&hermes_tag(), fake.addr.port(), model.addr.port(), &[]);
+    within(&fake, &chat, &c, 120_000, "the bridge follows the attachment chat", |w| w.live_sockets() >= 2).await;
+    let fixtures = [("logo.png", "image/png", support::model::IMAGE), ("guide.pdf", "application/pdf", include_bytes!("../../../crates/e2e/fixtures/chat-preview.pdf").as_slice())];
+    let refs: Vec<_> = fixtures.iter().map(|(name, mime, bytes)| {
+        let sha = fragment_bridge::records::hex(&<sha2::Sha256 as sha2::Digest>::digest(bytes));
+        fake.with(|w| w.fragments.get_mut(&chat).unwrap().blobs.insert(sha.clone(), ((*mime).into(), bytes::Bytes::copy_from_slice(bytes))));
+        json!({ "name": name, "type": mime, "size": bytes.len(), "sha256": sha })
+    }).collect();
+    let said = fake.say(&chat, &person("paul"), json!({ "text": "put this image into my app, with the PDF beside it", "attachments": refs }));
+    let turn = fragment_bridge::records::turn_id("juniper--k3x9", &chat, "chat", said["seq"].as_u64().unwrap());
+    within(&fake, &chat, &c, 90_000, "the attachment copy turn ends", |w| w.bodies(&chat, "work", "turn.end").iter().any(|r| r["turn"] == turn)).await;
+    let calls = model.calls.lock().unwrap().clone();
+    let inbound = calls.iter().find_map(|call| call.body["messages"].as_array()?.iter().find(|m| m["role"] == "user" && content_text(m).contains("put this image into my app")).cloned()).expect("the person's turn reached the model");
+    let text = content_text(&inbound);
+    eprintln!("attachment turn text: {text}");
+    assert!(text.contains("put this image into my app, with the PDF beside it\n[paul sent a file: 'logo.png'"), "the caption precedes the file notes in the new message: {text}");
+    assert!(!text.contains("[New message]"), "attachments create no channel-context wrapper: {text}");
+    assert!(inbound["content"].as_array().is_some_and(|parts| parts.iter().any(|p| p["type"] == "image_url")), "the image reaches the native model");
+    for a in &refs {
+        let path = format!("/tmp/bridge-media/{}", a["sha256"].as_str().unwrap());
+        let hash = c.exec_out(&["sha256sum", &path]);
+        assert!(hash.starts_with(a["sha256"].as_str().unwrap()), "the bridge already downloaded the original: {hash}");
+    }
+    let copied = c.exec_out(&["sha256sum", "/data/work/juniper--k3x9/app/public/logo.png", "/data/work/juniper--k3x9/app/public/guide.pdf"]);
+    eprintln!("copied originals: {copied}");
+    for a in &refs {
+        assert!(copied.contains(a["sha256"].as_str().unwrap()), "the terminal copied the original bytes: {copied}");
+    }
+    fake.with(|w| {
+        let sent: Vec<_> = w.bodies(&chat, "chat", "reply").into_iter().filter(|r| r["turn"] == turn).flat_map(|r| r["attachments"].as_array().cloned().unwrap_or_default()).collect();
+        assert_eq!(sent.len(), 2, "both files arrive in chat once: {sent:?}");
+        for a in &refs { assert!(sent.contains(a), "the round trip preserves the attachment: {sent:?}"); }
+    });
+    assert!(!calls.iter().any(|call| call.model == "vision"), "file paths do not turn off native vision");
+    for a in &refs {
+        let path = format!("/tmp/bridge-media/{}", a["sha256"].as_str().unwrap());
+        assert!(text.lines().any(|line| line.contains(&path) && line.contains(a["name"].as_str().unwrap()) && line.contains(a["type"].as_str().unwrap())), "a consistent note must map the original name and MIME to its local path: {text}");
+    }
+    // A file without words is a new message containing its file note.
+    let before = model.calls.lock().unwrap().len();
+    let said = fake.say(&chat, &person("paul"), json!({ "text": "", "attachments": [refs[1]] }));
+    let turn = fragment_bridge::records::turn_id("juniper--k3x9", &chat, "chat", said["seq"].as_u64().unwrap());
+    within(&fake, &chat, &c, 90_000, "the file-only turn ends", |w| w.bodies(&chat, "work", "turn.end").iter().any(|r| r["turn"] == turn)).await;
+    let calls = model.calls.lock().unwrap().clone();
+    let (text, _) = asked_with(&calls[before..], "[paul sent a file: 'guide.pdf'").expect("the file-only message reached the model");
+    let path = format!("/tmp/bridge-media/{}", refs[1]["sha256"].as_str().unwrap());
+    assert!(text.contains(&format!("[paul sent a file: 'guide.pdf' (application/pdf). It is on your computer at: {path}]")), "the file note is the new message: {text}");
+    assert!(!text.contains("put this image into my app"), "the file-only message is its own request: {text}");
+    assert!(!text.contains("[New message]"), "the file note creates no empty new-message section: {text}");
+}
+
 async fn hermes_running_with_modes(tier: Option<&str>) -> (Fake, Model, String, Container) {
     build(&repo_dir(), "images/hermes/Dockerfile", &hermes_tag());
     let fake = Fake::start("0.0.0.0:0", &["juniper"]).await;
@@ -1020,6 +1082,19 @@ async fn hermes_deployment_adapter_contract() {
     build(&repo_dir(), "images/hermes/Dockerfile", &hermes_tag());
     let c = Container::idle(&hermes_tag());
     let (code, report) = c.exec_code(&["/opt/hermes/.venv/bin/python", "-c", include_str!("deploy_wait.py")]);
+    assert_eq!(code, 0, "{report}");
+}
+
+/// A command never stops for an interrupt meant for an ended thread (#776):
+/// pinned Hermes' tool worker, on a recycled thread id, takes the ended
+/// thread's interrupt as its own; with the image's `tool_threads.py` it
+/// starts clean, and its own agent's interrupt still stops it.
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn hermes_tool_workers_start_clean() {
+    build(&repo_dir(), "images/hermes/Dockerfile", &hermes_tag());
+    let c = Container::idle(&hermes_tag());
+    let (code, report) = c.exec_code(&["/opt/hermes/.venv/bin/python", "-c", include_str!("tool_threads.py")]);
     assert_eq!(code, 0, "{report}");
 }
 
@@ -3340,9 +3415,19 @@ async fn bots_message_each_other() {
     assert_eq!(bot_chat_of(&c, "maple--k3x9")["key"], "agent:maple--k3x9:relay:group:maple-chat--z8w6/maple--k3x9", "maple's Bot Chat is her own chat's session");
     let hooked = c.exec_out(&["readlink", "/data/hermes/profiles/maple--k3x9/hooks/fragment-bot-chat"]);
     assert_eq!(hooked.trim(), "/opt/fragment/hooks/fragment-bot-chat");
+    // the keeper holds maple's Bot Chat as its live owner once her first
+    // turn has made it (botmode.py `owned`). A message sent before then is
+    // handed to a background delivery, not that owner (#639).
+    let owned = |logs: &str, agent: &str| logs.lines().filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok()).any(|e| e["event"] == "botmode.owned" && e["agent"] == agent);
+    let t = Instant::now();
+    // bounded: three minutes
+    while !owned(&c.logs(), "maple--k3x9") {
+        assert!(t.elapsed() < Duration::from_secs(180), "the keeper to hold maple's Bot Chat: {}", told(&fake, &jchat, &c));
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
 
     // juniper, asked in her Bot Chat, messages maple
-    let reply = |w: &support::fake::World, chat: &str, turn: &str| w.bodies(chat, "chat", "reply").into_iter().find(|r| r["turn"] == turn).and_then(|r| r["text"].as_str().map(str::to_string));
+    let reply =|w: &support::fake::World, chat: &str, turn: &str| w.bodies(chat, "chat", "reply").into_iter().find(|r| r["turn"] == turn).and_then(|r| r["text"].as_str().map(str::to_string));
     let jturn = asked(&fake, &jchat, &c, "dm: maple: ping from juniper", |w, turn| reply(w, &jchat, turn).is_some()).await;
     let ack = fake.with(|w| reply(w, &jchat, &jturn)).unwrap_or_default();
     eprintln!("bots: juniper's message_agent said: {}", ack.chars().take(400).collect::<String>());
