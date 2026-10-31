@@ -273,7 +273,7 @@ Every change is checked against this table.
 | Members, roles, invites | the fragment's supervisor | grants and revokes are transactional; `events` records each. The registry keeps each invite waiting on an email against that email, with its role, the title it was sent with and its sharer, for the person who signs in as it to accept or decline (decision 63; `GET /api/invites` reads it): a pointer the fragment overrules (an accept or a decline the fragment finds none waiting for is forgotten; a revoke tells the registry to forget it). An invite from before decision 63 (no role) is met at a sign-in still, and a claim the fragment could not take is tried again by the registry's alarm, bounded, then waits on the next sign-in |
 | Cell state (supervisor tables, the operation ledger, channels, the app's SQL) | the Durable Objects' own storage | none |
 | A platform object's schema: its tables, and the steps that made them | its class's steps, `crates/core/migrations/<class>/` (Schemas, below) | each object's `_schema` holds the steps it took (number, name, SHA, ran or adopted) and refuses code whose steps differ (`schema_refused`); `crates/core/migrations/schema.lock` locks each step and what the steps make, and `cargo xtask check` holds the tree to it. An app facet's SQLite is its author's |
-| The release a call between the Worker and an object (or two objects) was made by | the caller's `FRAGMENT_DEPLOY_ID`, its deploy's commit, and `FRAGMENT_DEPLOYED_AT`, its deploy's second (Calls between releases, below) | stamped on each call (`x-fragment-release`, `x-fragment-release-deployed`) and checked first by the object, which refuses another's (503 `deploying`) before it acts, and restarts onto it when it was deployed later; never stored |
+| The release a call between the Worker and an object (or two objects) was made by | the caller's `FRAGMENT_DEPLOY_ID`, its deploy's commit, and `FRAGMENT_DEPLOYED_AT`, its deploy's second (Calls between releases, below) | stamped on each call (`x-fragment-release`, and `x-fragment-release-deployed`, which no release reads now: the debt ledger) and checked first by the object, which refuses another's (503 `deploying`) before it acts; never stored |
 | The release a browser's page of the platform runs, and the one under it now | the shell's page as it was answered (its `<meta name="fragment-release">`, filled with the answering `FRAGMENT_DEPLOY_ID`), and every answer of the platform's host (`x-fragment-deploy`) | the page compares the two on each answer it reads and reloads once they differ, at a safe moment (docs/api.md, The shell, "A new release"); its tab keeps its last such reload (`sessionStorage`: from, to, when, how often), so a deploy's old side answering again, or a reload that met it, is no loop; it reloads only while hidden or at the person's next move, and while no chat's page says it is busy |
 | A chat's unsent words (its composer's draft) | the chat's page, as its person types | that page's origin's storage (`localStorage`, `fragment.chat.draft.v1`), as the principal it is signed in as: put back for that principal alone as the page loads (anyone else's let go), emptied as it is sent, and let go when the shell asks as its person signs out or uses another account (docs/chat-records.md, "Its draft, kept") |
 | Large file bytes (1 MiB or more) | R2 (`BLOBS`), keyed by SHA-256 | git holds a pointer; a sync resolves it; a blob no branch tip references is deleted |
@@ -443,30 +443,18 @@ alone (`<sha>-dirty-<second>`). Dev and the e2e run one build in one
   sockets close (their pages reconnect; a hibernated object's stay open
   and wake on the new code), an alarm running is run again, and a
   computer's container runs on (the next instance adopts it).
-- **An object behind restarts.** An object that refuses a call from a
-  release deployed after its own restarts (`release::restarts`;
-  `ctx.abort()` from a timer 50 ms on: `routed::restart_soon`), and the
-  caller's next ask meets its next instance, the new release's (during
-  a deferral too, on 2026-10-30). It costs what a reset does. The
-  restart's reason names the release that restarted
-  (`release::restart_reason`): a call of another release it ends, which
-  it refused before acting (the timer runs late under load, as the
-  caller's next ask arrives), is asked again as a refusal is
-  (`routed::sent`); one of its own release may have acted, and fails. An
-  object restarts so at most once in an isolate (which runs one
-  release): one Cloudflare starts again on the code before refuses, as
-  it would have, until Cloudflare's own restart. A call from a release
-  deployed before the object's, at the same second, or naming no time
-  restarts nothing.
+- **No object is restarted for a release.** Until 2026-10-31 an object
+  that refused a newer release's call aborted itself so its next
+  instance ran the newer code (`restart_soon`). Under Cloudflare's
+  deferral the next instance often came back on the old code anyway (on
+  the preview, deploys still held busy objects 300 to 337 s after 4 to
+  15 restarts each), and under `immediate` no object is behind long
+  enough to refuse: ten preview deploys refused no call. It went.
 
 Both directions refuse alike: an old caller at a new object will not be
 admitted from that isolate, and its asks run out; a new caller at an old
-object is admitted once the object restarts on the new release, which
-its first refusal of that caller makes it do. Only that restart orders
-two releases, by when each was deployed (a release deployed again by
-`cargo xtask deploy` is the newer, as it should be; `wrangler rollback`
-brings back an older version's time, so its objects are left to
-Cloudflare's own restart). A
+object is admitted once Cloudflare has moved the object onto the new
+code, at once under `immediate`. A
 deploy is all at once (`wrangler deploy`): a gradual deployment, two
 versions serving for a while, would refuse between them for that while.
 
