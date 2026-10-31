@@ -3103,11 +3103,11 @@ means authorization is disabled. Existing own-key behavior below is unchanged.
 
 ## The shell (phase 5)
 
-The platform's one page is `/`, `/settings`, `/apps` and `/welcome`
-(cell/shell/, its files at `/__shell/<file>`, the release's: Serving,
-The release's files): its script reads the path, opening its
-settings at `/settings`, its Apps page at `/apps`, the welcome at
-`/welcome`, and the person's
+The platform's one page is `/`, `/settings`, `/apps`, `/history` and
+`/welcome` (cell/shell/, its files at `/__shell/<file>`, the release's:
+Serving, The release's files): its script reads the path, opening its
+settings at `/settings`, its Apps page at `/apps`, its History at
+`/history`, the welcome at `/welcome`, and the person's
 chats at `/`, and puts the view it shows in the address, so a reload
 stays put. Finite's about page, privacy policy and terms are `/about`,
 `/privacy` and `/terms` (cell/shell/about.html, privacy.html,
@@ -3207,6 +3207,28 @@ Icons, and preview controls), and **Sharing** (theirs) or **People**
 refusal is said under its row. Settings have no sharing section: who
 may open what is the Apps page's.
 
+**Its History** (`/history`, the sidebar's History, above Apps; in the
+work area as the Apps page is; cell/shell/history-page.js; Paul,
+2026-10-31: every chat goes to a good place, so archiving is cheap and
+the sidebar stays short) lists every chat the person has had, the newest
+first (a chat with nothing said yet first, as in the sidebar): their
+chats, archived ones too, those shared with them (a delegation thread's
+chat is its thread's line, not listed), and their Session Archive's
+conversations (its `index/chat.json`: templates/sessions/README.md).
+Each row is the chat's face, its title, whom it was with (its lead
+agent, when it is one of theirs; "Shared" on one someone else owns;
+"Imported" on the archive's), its first words, when it was last said
+(the time today, else the day, with its year past this one), and
+"Archived" on the ones they archived. All, Archived and Imported filter
+it. Its search box filters by title as it is typed (an import's first
+words too), and once typing rests asks `GET /api/search` (its first 8
+words and 256 bytes) for the messages that hold its words: each chat
+found there is listed once, its newest snippet in place of its first
+words; a search that fails says so above the rows and filters by title
+alone. A hundred rows show, then Show more. A row opens its chat in the
+middle column, or an import read-only as its archive's page shows it
+(`/?s=<key>`).
+
 The row's title, icon and preview open the app; its address is visible
 beside an open-in-new-tab link. The pencil edits the display name inline,
 through the manifest's `meta.title`, leaving the address alone. Dock is a
@@ -3254,7 +3276,7 @@ else their main agent): the ones they pinned (`PUT
 first (by the row's `previewAt`; one with nothing said yet above them
 all), five of them (the open one too, wherever it is), then More, which
 shows the rest, and Less. Chats someone else shared with them are the last
-section, Shared. Its apps (kind `app` or `brain`)
+section, Shared. At its foot History (above), Apps and Settings. Its apps (kind `app` or `brain`)
 are the desktop's: a dock of their icons and titles under the viewer's
 windows, less the archived and those they took off it (`PUT
 /api/fragments/{name}/dock`, above; search still finds them), then Add, open beside the chat on a

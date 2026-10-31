@@ -15,6 +15,7 @@ import { colorOf } from "./agent-color.js";
 import { icon } from "./icons.js";
 import { appArt, openIconSheet } from "./app-icon.js";
 import { createAppsPage } from "./apps-page.js";
+import { createHistoryPage } from "./history-page.js";
 import { createTitles } from "./fragment-title.js";
 import { createLayout, store, reducedMotion, springFrames } from "./layout.js";
 import { createViewer } from "./viewer.js";
@@ -865,10 +866,10 @@ const { renderHeading, renderChats, loadInvites, primaryAgent, newChatAgent, own
   listLive, load, invites: () => state.invites, setInvites: (v) => { state.invites = v; },
 });
 const sessionArchive = createSessionArchive({
-  api, ui: { $, el, patch, renderHeading: () => renderHeading(), notice },
+  api, ui: { renderHeading: () => renderHeading(), notice },
   data: { allFragments: () => state.fragments, own, seg, primaryAgent: () => primaryAgent(), agents: () => state.agents, chatLabel: (agent) => chatLabel(agent) },
-  selection: { current: () => state.current, page: () => state.page, getFrame: (name) => state.frames.get(name) },
-  navigation: { openChat, leaveSidebar }, load: () => load(), store,
+  selection: { getFrame: (name) => state.frames.get(name) },
+  navigation: { openChat, leaveSidebar }, load: () => load(), store, changed: () => historyPage.render(),
 });
 
 // Delegation threads: a line each over the chat an agent asked from, its
@@ -920,6 +921,7 @@ function openChat(name, push = true, path = null) {
   $("layout").classList.remove("settings-view");
   $("settings-page").hidden = true;
   leaveApps();
+  leaveHistory();
   $("frames").hidden = false;
   state.current = name;
   store.set(CURRENT, name);
@@ -930,7 +932,6 @@ function openChat(name, push = true, path = null) {
   for (const [n, frame] of state.frames) frame.hidden = n !== name;
   renderHeading();
   renderChats();
-  sessionArchive.render();
   markSeen();
   prewake();
   navigated();
@@ -1442,10 +1443,12 @@ function computerIs(v) {
 }
 
 // ---- where the page is: `/` its chats, `/settings` its settings, `/apps`
-// its apps, `/welcome` a new person's welcome; each view says so in the
-// address, so a reload or a link stays put ----
+// its apps, `/history` every chat they have had, `/welcome` a new person's
+// welcome; each view says so in the address, so a reload or a link stays
+// put ----
 const SETTINGS = "/settings";
 const APPS = "/apps";
+const HISTORY = "/history";
 const WELCOME = "/welcome";
 function at(path) {
   if (location.pathname !== path) history.pushState(null, "", path);
@@ -1454,6 +1457,7 @@ addEventListener("popstate", () => {
   const shown = !$("layout").hidden;
   if (shown && location.pathname === SETTINGS) openSettings(false).catch((e) => notice("Settings did not open", e.message));
   else if (shown && location.pathname === APPS) openApps(false);
+  else if (shown && location.pathname === HISTORY) openHistory(false);
   else if (shown && location.pathname === "/" && byName(state.current)) openChat(state.current, false);
   else startOrWait();
 });
@@ -1483,6 +1487,7 @@ function openApps(push = true) {
   $("layout").classList.add("settings-view");
   $("frames").hidden = true;
   $("settings-page").hidden = true;
+  leaveHistory();
   $("apps-page").hidden = false;
   renderHeading();
   renderChats();
@@ -1496,6 +1501,37 @@ function leaveApps() {
 }
 $("apps-link").onclick = () => openApps();
 
+// ---- the History page (history-page.js): every chat the person has had,
+// archived and imported ones too, and its search, in the work area as the
+// Apps page is ----
+const historyPage = createHistoryPage($("history-page"), {
+  api, el, icon, mark: (name, size) => mark(name, size), chats, isThread: (f) => threads.isPair(f), own, chatTitle: (name) => chatTitle(name),
+  agentsOf, agents: () => state.agents, titleOf,
+  archive: { name: () => sessionArchive.archive(), entries: () => sessionArchive.entries(), openSession: (key) => sessionArchive.openSession(key) },
+  openChat, leaveSidebar,
+});
+function openHistory(push = true) {
+  if (push) at(HISTORY);
+  if (state.page !== "History") views++;
+  hideNotice();
+  state.page = "History";
+  $("layout").classList.add("settings-view");
+  $("frames").hidden = true;
+  $("settings-page").hidden = true;
+  leaveApps();
+  $("history-page").hidden = false;
+  renderHeading();
+  renderChats();
+  leaveSidebar();
+  historyPage.open();
+}
+// a chat, settings or apps in its place
+function leaveHistory() {
+  $("history-page").hidden = true;
+  historyPage.close();
+}
+$("history-link").onclick = () => openHistory();
+
 const settings = createSettings({
   api, $, seg,
   account: { person: () => state.me, setPerson: (p) => { state.me = p; }, isGuest: () => state.guest, setGuest,
@@ -1508,6 +1544,7 @@ const settings = createSettings({
       $("layout").classList.add("settings-view");
       $("frames").hidden = true;
       leaveApps();
+      leaveHistory();
     },
     entered: () => { renderHeading(); renderChats(); leaveSidebar(); } },
   notices: { hideNotice, noticeCurrent: (gen) => gen === noticeGen, notice },
@@ -1593,6 +1630,7 @@ async function load(changed = false) {
   sessionArchive.load().catch(() => {});
   renderApps();
   appsPage.listed().catch(() => {});
+  historyPage.render();
   renderHeading();
   renderComputer();
   rosterChanged();
@@ -1709,12 +1747,13 @@ async function start(open) {
   // of theirs (not the deployment's plan) may reach their ledger a moment
   // after it is given: its first run waits for it (`seatFirst`)
   // settings or the Apps page, as the address asks
-  const settings = !open && (location.pathname === SETTINGS || location.pathname === APPS);
+  const settings = !open && [SETTINGS, APPS, HISTORY].includes(location.pathname);
   if (!open && !settings && await owesFirstAgent()) return creatingAgent(mine?.seat ? {} : null);
   if (!state.fragments.length && !state.invites.length && !open && !settings && state.guest) return welcome();
   showLayout();
   const pick = open ?? (byName(state.current) ? state.current : (shown(chats())[0] ?? chats()[0])?.name);
   if (settings && location.pathname === APPS) openApps(false);
+  else if (settings && location.pathname === HISTORY) openHistory(false);
   else if (settings) await openSettings(false);
   else if (pick) openChat(pick);
   else if (state.guest) guestHome(mine.offer);
