@@ -757,6 +757,12 @@ so are the limits named here.
   the fragment searches it. Nothing is held until an editor writes: until
   then a search answers `indexed: false` and no results, embedding
   nothing.
+- **Its own app** writes and asks it too, with `this.searchIndex.upsert(source)`,
+  `delete(source)`, `query(question)` and `status()` from anything async
+  (cell/platform.mjs; the `Search` capability, bound to its own fragment).
+  The app acts as the fragment: no role is checked, and everything it
+  embeds, its questions included, is paid by the fragment's owner. A
+  refusal throws, with the platform's `code` and `status`.
 - **A source is written whole**, in one transaction: its sections replace
   what it held. The same `(source, revision)` again writes nothing;
   `replaces` is a compare-and-set on its revision (`""`: none yet), else
@@ -912,7 +918,8 @@ at its pin; writes land on `main` as commits the cell makes.
 - `this.files.read(path)` (text), `readBytes(path)`, `list(prefix)`
   (`[{path, size, blob?}]`), `stat(path)` (`{path, size, sha, commit}`)
   from anything async. A file over `FILE_READ_MAX_BYTES` (a blob) is 413;
-  the site serves it. An absent file is `null`.
+  the site serves it. An absent file is `null`. (`this.searchIndex`, the
+  fragment's own search index, beside it: A fragment's search.)
 - In a mutation, `call.files.write(path, content)` and `remove(path)`
   (a string, `Uint8Array` or `ArrayBuffer`; at most `FILE_WRITES_MAX` files
   and `FILE_WRITE_MAX_BYTES`, each an effect; a path of at most

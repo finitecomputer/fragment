@@ -15,7 +15,10 @@
 // mutation commits, and `call.files.write(path, content)` /
 // `call.files.remove(path)` change files on `main` then (one commit).
 // `this.files.read / readBytes / list / stat` read files at `main` from
-// anything async (queries, fetch, jobs).
+// anything async (queries, fetch, jobs). `this.searchIndex.upsert / delete
+// / query / status` write and ask the fragment's own search index
+// (docs/api.md, "A fragment's search") as the fragment itself, its owner
+// paying; camel case, so no operation (`a-z`, `0-9`, `_`) can shadow it.
 //
 // A job's method gets (input, job) and runs as a Workflow: each `await
 // job.call / job.fetch / job.publish / job.sleep` is a durable step. The
@@ -474,6 +477,18 @@ export class App extends AuthorApp {
       },
       list: (prefix = "") => cap.list(prefix),
       stat: (path) => cap.stat(path),
+    };
+  }
+
+  // The fragment's own search index through the SEARCH capability: a
+  // refusal throws, with the platform's `code` and `status`.
+  get searchIndex() {
+    const cap = this.env.SEARCH;
+    return {
+      upsert: (source) => cap.upsert(source),
+      delete: (source) => cap.delete(source),
+      query: (question) => cap.query(question),
+      status: () => cap.status(),
     };
   }
 

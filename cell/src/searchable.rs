@@ -21,6 +21,10 @@
 //! meta-brain's fan-out across fragments) is searched by the vector it
 //! carries, never embedded again, so its asker pays once.
 //!
+//! The fragment's own app writes and asks its index through its `Search`
+//! capability (`cap_search`; entry.mjs, platform.mjs's `this.search`), as
+//! the fragment itself: no role, and its owner pays for its questions too.
+//!
 //! A source named by one of the fragment's paths is forgotten when a move
 //! of main deletes that file (`search_forget`, plane.rs): written to
 //! `search_forget` in the move's turn, deleted from the index by the alarm
@@ -62,6 +66,15 @@ const FORGETS_PER_PASS: i64 = 100;
 /// How long after a failed try a forgotten source is tried again.
 const FORGET_RETRY_MS: i64 = 5 * 60 * 1000;
 
+/// Who writes or asks: a caller, whose role is checked and who pays for a
+/// question, or the fragment's own app (its `Search` capability), which
+/// acts as the fragment itself: no role, its owner paying for all of it.
+#[derive(Clone, Copy)]
+enum By<'a> {
+    Caller(&'a Caller),
+    App,
+}
+
 /// Who a caller is, as search pays and counts it.
 struct Asker {
     /// The person whose ledger pays (an agent's owner), if any.
@@ -75,6 +88,16 @@ fn asker(caller: &Caller) -> Asker {
         None => Asker { payer: None, agent: None },
         Some(s) if s.identity.kind == IdentityKind::Agent => Asker { payer: s.identity.owner.clone(), agent: Some(s.identity.id.clone()) },
         Some(s) => Asker { payer: Some(s.identity.id.clone()), agent: None },
+    }
+}
+
+impl By<'_> {
+    /// Who pays, given the fragment's `owner`.
+    fn asker(self, owner: &str) -> Asker {
+        match self {
+            By::Caller(c) => asker(c),
+            By::App => Asker { payer: Some(owner.to_string()), agent: None },
+        }
     }
 }
 
@@ -216,8 +239,14 @@ impl FragmentCell {
 
     /// `POST /api/search/upsert` (an editor): a source, whole.
     pub(crate) async fn search_upsert(&self, caller: &Caller, up: wire::Upsert) -> CellResult<Response> {
+        self.search_write(By::Caller(caller), up).await
+    }
+
+    async fn search_write(&self, by: By<'_>, up: wire::Upsert) -> CellResult<Response> {
         let facts = self.facts()?;
-        self.admit(&facts, caller, false, Role::Editor)?;
+        if let By::Caller(caller) = by {
+            self.admit(&facts, caller, false, Role::Editor)?;
+        }
         rules::check(&up).map_err(CellError::invalid)?;
         let life = self.search_life()?;
         let scope = rules::scope(&self.state.id().to_string(), life);
@@ -230,8 +259,9 @@ impl FragmentCell {
         self.search_forget_first(&scope, &up.source).await?;
         let [owner] = self.metas([MetaKey::Owner])?;
         let owner = owner.ok_or_else(|| crate::fragment::missing(MetaKey::Owner))?;
-        let who = asker(caller);
-        let by_owner = who.payer.as_deref() == Some(owner.as_str()) && caller.signed.as_ref().is_none_or(|s| s.acting_for.as_deref().is_none_or(|f| f == owner));
+        let who = by.asker(&owner);
+        let acts_for_another = matches!(by, By::Caller(c) if c.signed.as_ref().is_some_and(|s| s.acting_for.as_deref().is_some_and(|f| f != owner)));
+        let by_owner = who.payer.as_deref() == Some(owner.as_str()) && !acts_for_another;
         let fragment = InFragment { name: &facts.name, owner: &owner, by_owner };
         let space = self.search_space();
         let chunks = rules::chunked(&up, self.cfg.models.embeddings.max_input_tokens);
@@ -281,6 +311,10 @@ impl FragmentCell {
     /// `POST /api/search/delete` (an editor): a source, gone.
     pub(crate) async fn search_delete(&self, caller: &Caller, d: wire::Delete) -> CellResult<Response> {
         self.require(caller, false, Role::Editor)?;
+        self.search_remove(d).await
+    }
+
+    async fn search_remove(&self, d: wire::Delete) -> CellResult<Response> {
         if d.source.is_empty() || d.source.len() > wire::SOURCE_MAX_BYTES {
             return Err(CellError::invalid(format!("source is 1 to {} bytes", wire::SOURCE_MAX_BYTES)));
         }
@@ -321,6 +355,10 @@ impl FragmentCell {
     /// `GET /api/search/status` (a reader): what the index holds.
     pub(crate) async fn search_status(&self, caller: &Caller) -> CellResult<Response> {
         self.require(caller, false, Role::Viewer)?;
+        self.search_state().await
+    }
+
+    async fn search_state(&self) -> CellResult<Response> {
         let semantic = if self.search_space().is_some() { "on" } else { "off" };
         let mut status: serde_json::Value = if self.search_indexed()? {
             let mut s: serde_json::Value = self.search_index(&self.search_scope()?, "status", &json!({})).await?;
@@ -337,18 +375,20 @@ impl FragmentCell {
 
     /// `POST /api/search` (a reader): the sections that answer a question.
     pub(crate) async fn search_query(&self, caller: &Caller, q: wire::Query) -> CellResult<Response> {
-        self.search_found(caller, q, Question::Embed).await
+        self.search_found(By::Caller(caller), q, Question::Embed).await
     }
 
     /// `POST /search/asked` (a reader, by the platform's own route, which
     /// the router maps no outside path to): a question embedded already.
     pub(crate) async fn search_asked(&self, caller: &Caller, asked: wire::Forwarded) -> CellResult<Response> {
-        self.search_found(caller, asked.query, Question::Given(asked.vector)).await
+        self.search_found(By::Caller(caller), asked.query, Question::Given(asked.vector)).await
     }
 
-    async fn search_found(&self, caller: &Caller, q: wire::Query, question: Question) -> CellResult<Response> {
+    async fn search_found(&self, by: By<'_>, q: wire::Query, question: Question) -> CellResult<Response> {
         let facts = self.facts()?;
-        self.admit(&facts, caller, false, Role::Viewer)?;
+        if let By::Caller(caller) = by {
+            self.admit(&facts, caller, false, Role::Viewer)?;
+        }
         rules::check_query(&q).map_err(CellError::invalid)?;
         let space = self.search_space();
         // `wire::Found`, its hits passed through as the index wrote them
@@ -374,7 +414,7 @@ impl FragmentCell {
         let vector = match question {
             _ if space.is_none() || q.mode == wire::Mode::Lexical => None,
             Question::Given(v) => v,
-            Question::Embed => self.search_embed_question(caller, &facts.name, &q.q).await?,
+            Question::Embed => self.search_embed_question(by, &facts.name, &q.q).await?,
         };
         let mode = match (q.mode, vector.is_some()) {
             (wire::Mode::Semantic, true) => wire::Mode::Semantic,
@@ -394,13 +434,13 @@ impl FragmentCell {
     }
 
     /// The question's vector, embedded and paid by its asker (an agent's
-    /// owner); none for an anonymous reader, or a refusal (it is searched
-    /// by its words).
-    async fn search_embed_question(&self, caller: &Caller, name: &str, q: &str) -> CellResult<Option<String>> {
-        let who = asker(caller);
-        let Some(payer) = &who.payer else { return Ok(None) };
+    /// owner; the fragment's owner for its app's); none for an anonymous
+    /// reader, or a refusal (it is searched by its words).
+    async fn search_embed_question(&self, by: By<'_>, name: &str, q: &str) -> CellResult<Option<String>> {
         let [owner] = self.metas([MetaKey::Owner])?;
         let owner = owner.ok_or_else(|| crate::fragment::missing(MetaKey::Owner))?;
+        let who = by.asker(&owner);
+        let Some(payer) = &who.payer else { return Ok(None) };
         let fragment = InFragment { name, owner: &owner, by_owner: payer == &owner };
         match embedded(&self.env, &[q.to_string()], payer, who.agent.as_deref(), Some(&fragment), &self.state).await? {
             Embedding::Vectors { vectors, .. } => Ok(vectors.into_iter().next().map(|v| rules::vector_b64(&v))),
@@ -408,6 +448,23 @@ impl FragmentCell {
                 console_warn!("{}", json!({ "event": "search.query-unembedded", "status": status, "why": text }));
                 Ok(None)
             }
+        }
+    }
+
+    /// `POST /cap/search/<op>`: the app facet's `Search` capability. The
+    /// app is the fragment itself, so its own index is its to write and
+    /// ask, with no role checked, and everything it embeds is paid by the
+    /// fragment's owner (its code cannot vouch for whoever called it).
+    pub(crate) async fn cap_search(&self, op: &str, body: serde_json::Value) -> CellResult<Response> {
+        fn read<T: DeserializeOwned>(op: &str, body: serde_json::Value) -> CellResult<T> {
+            serde_json::from_value(body).map_err(|e| CellError::invalid(format!("search.{op}: {e}")))
+        }
+        match op {
+            "upsert" => self.search_write(By::App, read(op, body)?).await,
+            "delete" => self.search_remove(read(op, body)?).await,
+            "query" => self.search_found(By::App, read(op, body)?, Question::Embed).await,
+            "status" => self.search_state().await,
+            _ => Err(CellError::new(ErrorCode::NotFound, format!("no capability search.{op}"))),
         }
     }
 

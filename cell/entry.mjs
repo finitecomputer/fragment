@@ -90,6 +90,30 @@ export class Files extends WorkerEntrypoint {
   stat(path) { return this.#answer("stat", { path: String(path) }); }
 }
 
+// The app's own search index (searchable.rs, "A fragment's search"), handed
+// to its facet as `env.SEARCH` bound to one fragment by `props`, as FILES
+// is: the app writes and asks its own fragment's index, never another's. A
+// refusal throws an Error with the platform's `code` and `status`.
+export class Search extends WorkerEntrypoint {
+  async #answer(op, body) {
+    const { fragment } = this.ctx.props;
+    const resp = await this.env.FRAGMENT.getByName(fragment).fetch(rs.InternalRoute.request(this.env, `cap/search/${op}`, JSON.stringify(body)));
+    const answer = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      const e = new Error(answer.message || `search.${op} answered ${resp.status}`);
+      e.code = answer.error ?? null;
+      e.status = resp.status;
+      throw e;
+    }
+    return answer;
+  }
+
+  upsert(source) { return this.#answer("upsert", source); }
+  delete(source) { return this.#answer("delete", { source: String(source) }); }
+  query(question) { return this.#answer("query", question); }
+  status() { return this.#answer("status", {}); }
+}
+
 // One run of an operation (docs/api.md, Jobs and triggers). Each round asks
 // the supervisor to advance the job to its next step, then performs that
 // step through the supervisor, which keeps the step's answer before it

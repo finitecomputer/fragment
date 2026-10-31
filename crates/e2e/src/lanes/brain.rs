@@ -1,14 +1,17 @@
 //! The brain template (docs/cloudflare-v1.md, decision 30): a fragment app
 //! on the blessed `brain` template, made as the CLI makes it, whose repo
 //! holds only its face and its files. Its files are wikis (raw/ wiki/ …,
-//! index.md, log.md); its search is FTS5 sections ranked by BM25 in the
-//! app's own SQLite, kept by a file trigger. An agent's path through it:
-//! the CLI syncs a folder, writes a source into raw/ and a page into wiki/,
-//! and searches. Then: FTS5's syntax is plain words, an over-long query is
-//! refused, a viewer searches and a stranger may not; the same files again
-//! change nothing; the index survives a restart and follows the next
-//! change; an asset's blob, named by its source note, is served; and the
-//! page (the notes viewer and the brain's search) loads for a member.
+//! index.md, log.md); its search is the fragment's own index, by words and
+//! by meaning, written through the app's `this.searchIndex` and kept by a
+//! file trigger. An agent's path through it: the CLI syncs a folder, writes
+//! a source into raw/ and a page into wiki/, and searches. Then: search
+//! syntax is plain words, an over-long query is refused, a viewer searches
+//! and a stranger may not, and a viewer's start of the index's job is safe;
+//! the same files again change nothing; the index survives a restart and
+//! follows the next change; an asset's blob, named by its source note, is
+//! served; an index behind its files says so, and a member's page starts
+//! its job; and the page (the notes viewer and the brain's search) loads
+//! for a member.
 
 #[path = "brain_parent.rs"]
 mod parent;
@@ -150,7 +153,7 @@ pub fn brain(s: &mut Suite, api: &Api) -> Result<()> {
             && st.body["code"]["id"].as_str() == release.as_deref()
             && ops["search"]["kind"] == "query"
             && ops["changed"]["kind"] == "job"
-            && ops["reindex"]["role"] == "editor",
+            && ops["changed"]["role"] == "viewer",
         &st.body["code"],
     );
     let t = api.signed(&keys, "GET", &format!("/api/f/{name}/triggers"), None)?;
@@ -197,50 +200,40 @@ pub fn brain(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok(
         "a search from the CLI finds the page's section: path, heading, the headings above it, a snippet",
         first["rank"] == 1 && first["path"] == SOLAR && first["heading"] == "Inverters" && first["ancestry"] == json!(["Solar panels"]) && first["title"] == "Solar panels"
-            && first["wiki"] == "garden" && first["snippet"].as_str().is_some_and(|t| t.to_lowercase().contains("inverter")) && r["pending"] == 0,
+            && first["wiki"] == "garden" && first["snippet"].as_str().is_some_and(|t| t.to_lowercase().contains("inverter")) && r["pending"] == 0 && r["indexing"] == false,
         &r,
     );
     let r = search(api, &keys, &name, json!({ "q": "photovoltaic" }))?;
     s.ok(
-        "ranked: the page whose section is about it first, the source that mentions it after",
-        found(&r) == vec![at(SOLAR, "Photovoltaic cells"), at(CAFE, "Café solaire")],
+        "ranked: the page whose section is about it first, the source that mentions it after, before what only means something like it",
+        found(&r).get(..2) == Some(&[at(SOLAR, "Photovoltaic cells"), at(CAFE, "Café solaire")][..]),
         &r,
     );
-    let r = search(api, &keys, &name, json!({ "q": "PHOTOVOLT" }))?;
-    s.ok("a word's start finds it, whatever its case", found(&r).first().is_some_and(|f| f.0 == SOLAR), &r);
+    let r = search(api, &keys, &name, json!({ "q": "PHOTOVOLTAIC" }))?;
+    s.ok("a word finds it, whatever its case", found(&r).first().is_some_and(|f| f.0 == SOLAR), &r);
     let r = search(api, &keys, &name, json!({ "q": "cafe" }))?;
-    s.ok("accents are ignored: cafe finds the café source first", found(&r).first().is_some_and(|f| f.0 == CAFE), &r);
+    s.ok("accents are ignored: cafe finds the café source, and the page that cites it, first", found(&r).iter().take(2).any(|f| f.0 == CAFE) && found(&r).iter().take(2).any(|f| f.0 == SOLAR), &r);
     let r = search(api, &keys, &name, json!({ "q": "photovoltaic", "wiki": "kitchen" }))?;
     let mine = search(api, &keys, &name, json!({ "q": "photovoltaic", "wiki": "garden", "limit": 1 }))?;
     s.ok("a search narrows to one wiki, and to a limit", r.status == 200 && results(&r).is_empty() && found(&mine) == vec![at(SOLAR, "Photovoltaic cells")], format!("{r} | {mine}"));
     let r = search(api, &keys, &name, json!({ "q": "zeppelin" }))?;
-    s.ok("a wiki's AGENTS.md is read by agents, not searched", r.status == 200 && results(&r).is_empty(), &r);
+    s.ok("a wiki's AGENTS.md is read by agents, not searched", r.status == 200 && found(&r).iter().all(|f| f.0 != "garden/AGENTS.md"), &r);
 
-    // invalid: FTS5's syntax is words; a query too long is refused
-    let r = search(api, &keys, &name, json!({ "q": "inverter OR zebra" }))?;
-    s.ok("OR is a word, not an operator: every word must be there", r.status == 200 && results(&r).is_empty(), &r);
-    let r = search(api, &keys, &name, json!({ "q": "NOT roof" }))?;
-    s.ok("NOT is a word too: it finds the section that says it", r.status == 200 && found(&r).first() == Some(&at(SOLAR, "Caveats")), &r);
-    let r = search(api, &keys, &name, json!({ "q": "heading:inverter" }))?;
-    s.ok("a column filter is two words (no section has \"heading\")", r.status == 200 && results(&r).is_empty(), &r);
-    // each as words: the Inverters section, or nothing when a word is in no section
+    // invalid: search syntax is words; a query too long is refused
     let mut tried = vec![];
-    for (q, want) in [("\"inverter", 1), ("inverter*", 1), ("^inverter", 1), ("inverter)", 1), ("NEAR(inverter", 0), ("inverter AND", 0)] {
+    for q in ["inverter OR zebra", "heading:inverter", "\"inverter", "inverter*", "^inverter", "inverter)", "NEAR(inverter", "inverter AND"] {
         let r = search(api, &keys, &name, json!({ "q": q }))?;
-        tried.push((q, r.status, found(&r).len(), want));
+        tried.push((q, r.status, found(&r).iter().take(3).any(|f| *f == at(SOLAR, "Inverters"))));
     }
     s.ok(
-        "quotes, stars, carets, brackets and a dangling AND are text, never a syntax error",
-        tried.iter().all(|(_, status, n, want)| *status == 200 && n == want),
+        "OR, a column filter, quotes, stars, carets, brackets, NEAR and a dangling AND are words, never a syntax error: each finds the Inverters section",
+        tried.iter().all(|(_, status, found)| *status == 200 && *found),
         format!("{tried:?}"),
     );
     let r = search(api, &keys, &name, json!({ "q": "?! …" }))?;
-    s.ok("a query with no word answers nothing, and is no error", r.status == 200 && r.body["result"]["words"] == json!([]) && results(&r).is_empty(), &r);
+    s.ok("a query with no word is no error", r.status == 200, &r);
     let r = search(api, &keys, &name, json!({ "q": "x".repeat(257) }))?;
     s.ok("a query over 256 characters is refused (400), naming it", r.status == 400 && r.message().contains("/q"), &r);
-    let many = (0..17).map(|i| format!("w{i}")).collect::<Vec<_>>().join(" ");
-    let r = search(api, &keys, &name, json!({ "q": many }))?;
-    s.ok("so is one of more than 16 words", r.status >= 400 && r.message().contains("at most 16 words"), &r);
     let r = search(api, &keys, &name, json!({ "q": "" }))?;
     let r2 = search(api, &keys, &name, json!({ "q": "inverter", "limit": 51 }))?;
     let r3 = search(api, &keys, &name, json!({ "q": "inverter", "sql": "1" }))?;
@@ -256,9 +249,18 @@ pub fn brain(s: &mut Suite, api: &Api) -> Result<()> {
     let r = search(api, &stranger, &name, json!({ "q": "inverter" }))?;
     let anon = api.browser_op(&name, "search", "q", json!({ "q": "inverter" }), None)?;
     s.ok("a stranger may not (403), nor anyone without the link (401)", r.status == 403 && anon.status == 401, format!("{r} | {anon}"));
-    let r = api.op(&viewer, &name, "reindex", "r", json!({}))?;
-    let r2 = api.op(&viewer, &name, "mark", "m", json!({ "paths": [SOLAR], "full": true }))?;
-    s.ok("nor may a viewer write the index (reindex and mark are an editor's)", r.status == 403 && r2.status == 403, format!("{r} | {r2}"));
+    // a viewer may start the index's job, which costs nothing with nothing to do: no full pass is theirs
+    let writes = index(api, &keys, &name)["writes"].clone();
+    let r = api.op(&viewer, &name, "reindex", "r", json!({ "full": true }))?;
+    let r2 = api.op(&viewer, &name, "mark", "m", json!({ "paths": [], "full": true }))?;
+    let started = api.op(&viewer, &name, "changed", "v-changed", json!({ "full": true }))?;
+    let run = jobs::settle(api, &keys, &name, jobs::started(&started), &["succeeded", "held"], WAIT);
+    s.ok(
+        "a viewer may start the index's job: with nothing to do it takes two steps and writes nothing, and a full pass is an editor's alone",
+        r.status == 200 && r.body["result"]["claimed"] == 0 && r2.status == 200 && r2.body["result"]["full"] == false
+            && run["status"] == "succeeded" && run["output"]["steps"] == 1 && run["output"]["full"] == false && index(api, &keys, &name)["writes"] == writes,
+        json!({ "reindex": r.body, "mark": r2.body, "run": run }),
+    );
 
     // an asset: its bytes a blob, named by its source note, served
     let pointer = s.fake.file_at(&repo, "main", ASSET).unwrap_or_default();
@@ -330,7 +332,7 @@ pub fn brain(s: &mut Suite, api: &Api) -> Result<()> {
     std::fs::remove_file(dir.join(CAFE))?;
     let out = s.cli(api, &home, &["sync", &name, "--dir", &dir_s]);
     let followed = s.eventually(WAIT, || {
-        settled(api, &keys, &name, 4) && search(api, &keys, &name, json!({ "q": "lithium" })).is_ok_and(|r| found(&r) == vec![at(SOLAR, "Batteries")])
+        settled(api, &keys, &name, 4) && search(api, &keys, &name, json!({ "q": "lithium" })).is_ok_and(|r| found(&r).first() == Some(&at(SOLAR, "Batteries")))
     });
     let st = index(api, &keys, &name);
     let r = search(api, &keys, &name, json!({ "q": "cafe" }))?;
@@ -340,7 +342,16 @@ pub fn brain(s: &mut Suite, api: &Api) -> Result<()> {
         json!({ "index": st, "cafe": r.body }),
     );
 
-    // the page: the notes viewer and the brain's search, for a member
+    // behind its files (a page marked, no run on it), a search says so, and how to finish it
+    let r = api.op(&keys, &name, "mark", "behind", json!({ "paths": [SOLAR], "full": false }))?;
+    let behind = search(api, &keys, &name, json!({ "q": "inverter" }))?;
+    s.ok(
+        "an index behind its files says so: indexing, results may be incomplete, and the job that finishes it",
+        r.status == 200 && behind.body["result"]["indexing"] == true && behind.body["result"]["hint"].as_str().is_some_and(|h| h.contains("changed")) && found(&behind).first() == Some(&at(SOLAR, "Inverters")),
+        &behind,
+    );
+
+    // the page: the notes viewer and the brain's search, for a member, who starts the index's job
     let Some(mut chrome) = s.browser()? else {
         s.ok("Chrome is installed for the brain's page (set CHROME_BIN)", false, "no Chrome found");
         return Ok(());
@@ -348,6 +359,8 @@ pub fn brain(s: &mut Suite, api: &Api) -> Result<()> {
     chrome.set_cookie(&format!("{}/", api.base), "fragment_session", &viewer_session)?;
     let tab = chrome.open(&api.site_url(&name, "__signin?return=/"))?;
     let wait = Duration::from_secs(20);
+    let caught_up = s.eventually(WAIT, || index(api, &keys, &name)["indexing"] == false);
+    s.ok("a member's page starts the index's job when it is behind, and the index catches up", caught_up, index(api, &keys, &name));
     let shown = chrome.until(&tab, "document.getElementById('tree')?.textContent.includes('solar-panels') && document.getElementById('content')?.textContent.includes('Wikis')", wait);
     let brand = chrome.eval(&tab, "document.getElementById('brand')?.textContent ?? ''")?;
     s.ok("the viewer shows a member the brain's tree and its landing, titled by the brain", shown && brand == "Garden", chrome.eval(&tab, "document.body.innerText.slice(0, 300)")?);
@@ -355,6 +368,8 @@ pub fn brain(s: &mut Suite, api: &Api) -> Result<()> {
     let listed = chrome.until(&tab, "document.querySelector('.brain-result .brain-title')?.textContent === 'Solar panels'", wait);
     let said = chrome.eval(&tab, "document.querySelector('.brain-result')?.innerText ?? ''")?;
     s.ok("its search box lists the ranked sections", listed && said.as_str().is_some_and(|t| t.contains("Inverters")), &said);
+    // the page as a person sees it (kept with the run's scratch: FRAGMENT_E2E_KEEP)
+    let _ = chrome.screenshot(&tab, &s.dir("brain-page").join("search.png"));
     chrome.click(&tab, ".brain-result .brain-title")?;
     let opened = chrome.until(&tab, "document.querySelector('#content .md')?.textContent.includes('Photovoltaic cells')", wait);
     s.ok("and a result opens its page in the viewer", opened, chrome.eval(&tab, "document.getElementById('content')?.innerText.slice(0, 200) ?? ''")?);
