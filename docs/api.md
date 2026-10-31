@@ -3837,7 +3837,10 @@ through one (`fragment_core::door`):
   - **no one but its owner edits it**, from its making: every other caller,
     an agent acting for its owner included, is at most a viewer there (no
     one else sets its secrets, writes its files or pages, deploys its code
-    or calls an editor's operation; its own triggered runs keep theirs);
+    or calls an editor's operation; its own triggered runs keep theirs),
+    and no member is given more than viewer there (an editor's role, set
+    or invited, is 400; an agent making it for its owner joins as a
+    viewer), so its members list shows the role that counts;
   - **its code is the platform's**: an install of any other code (a fork,
     another template, none) makes it no door again, for good, and lets its
     binding go (`door.unmade`);
