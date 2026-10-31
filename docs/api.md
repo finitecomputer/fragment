@@ -3249,8 +3249,10 @@ in that order, which no activity reshuffles. Each section is its agent's
 chats), whose menu, hanging from it, lists where it is doing something,
 then New chat (with it alone), Rename, its profile and its screen; then
 its chats, a chat under its lead agent (else the first of theirs in it,
-else their main agent), newest first (by the row's `previewAt`; one with
-nothing said yet above them all), five of them (the open one too, wherever it is), then More, which
+else their main agent): the ones they pinned (`PUT
+/api/fragments/{name}/pinned`, above) first, then the rest, each newest
+first (by the row's `previewAt`; one with nothing said yet above them
+all), five of them (the open one too, wherever it is), then More, which
 shows the rest, and Less. Chats someone else shared with them are the last
 section, Shared. Its apps (kind `app` or `brain`)
 are the desktop's: a dock of their icons and titles under the viewer's
@@ -3259,12 +3261,12 @@ windows, less the archived and those they took off it (`PUT
 desktop's width, a sheet from the bottom on a phone. A chat with any of
 their agents is a chat, listed and found as any other. Its row is two
 lines (Paul, 2026-10-31; its section names its agent): its title, its
-home's bell, and how long ago its newest message was
+home's bell, a pin when pinned, and how long ago its newest message was
 said (`previewAt`: now, minutes, hours, days within the week, else its
 date); then what its agent is doing there, or whom it waits on (a thread
 asked from it), else that message's first line (`preview`), and its unread
 count. Its ⋯, in the time's place on hover and always on a touch screen,
-renames it or archives it. **Add teaches
+pins or unpins it, renames it, or archives it. **Add teaches
 how to ask for an app** (Paul, 2026-10-14: "rather than spawning generic
 apps we teach the user how to prompt for new apps"): a window of ways to
 ask, each saying who the app is for and what it does, `…` the part to
