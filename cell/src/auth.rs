@@ -83,6 +83,7 @@ use crate::error::{CellError, CellResult};
 use crate::registry::calls::{self, Consent};
 use crate::routed::{Credential, Signed};
 use crate::{share, Fetched};
+use fragment_core::gather::Gathered;
 
 pub const SESSION_COOKIE: &str = "fragment_session";
 pub const SITE_COOKIE: &str = "fragment_site";
@@ -553,7 +554,7 @@ async fn cli_posted(req: &mut Request, url: &Url, platform: &str, purpose: fn(&B
     same_origin(req, platform)?;
     // read before anyone is known to be signed in: bounded as it arrives
     let bytes = crate::read_body(req, CLI_FORM_MAX_BYTES).await?;
-    let fields: BTreeMap<String, String> = url::form_urlencoded::parse(&bytes).map(|(k, v)| (k.into_owned(), v.into_owned())).collect();
+    let fields: BTreeMap<String, String> = url::form_urlencoded::parse(&bytes).map(|(k, v)| (k.into_owned(), v.into_owned())).gathered();
     let Some(token) = cookie_of(req, SESSION_COOKIE, secure(url), "/")? else {
         return Ok(Err(page(401, "Sign in first", "<p>This page's session ended.</p><p><a href=\"/auth/login?return=/cli\">Sign in</a>, then type the code again.</p>")?));
     };

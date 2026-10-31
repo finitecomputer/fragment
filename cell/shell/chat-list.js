@@ -15,6 +15,16 @@ export function sectionShown(list, { unfolded = false, current = null, max = 5 }
   return { shown, more: sorted.length > max };
 }
 
+// Whom the ways to ask for an app ask (the desktop's, the dock's Add's),
+// as their words name it (Paul, 2026-10-31: an agent's chosen name, every
+// surface): a prompt goes into the open chat when it is the person's own
+// (shell.js `promptChat`), so that chat's agent of theirs, the lead first;
+// else their main agent's chat, so their main agent.
+export function askedAgentOf({ open, own, agentsOf, mine, main }) {
+  if (open?.kind !== "chat" || !own(open)) return main;
+  return agentsOf(open.name).map((id) => mine.find((a) => a.identity === id)).find(Boolean) ?? main;
+}
+
 export function createChatList({ api, ui, data, selection, menus, navigation, listLive, load, invites, setInvites }) {
   const { $, el, patch, agentFace, notice } = ui;
   const { byName, own, chats, shown, titleOf, chatTitle, homeMark, isGroup, agentOfChat, agentsOf, agents, allFragments, computer, isGuest, personId, isThread, waitingOn, renderThreads } = data;
@@ -498,5 +508,6 @@ export function createChatList({ api, ui, data, selection, menus, navigation, li
       archiveItem(name),
     ]);
   }
-  return { renderHeading, renderChats, loadInvites, primaryAgent, newChatAgent, ownAgents, markSeen, edgeAgain: updateSidebarEdge };
+  const askedAgent = () => askedAgentOf({ open: current() && !page() ? byName(current()) : null, own, agentsOf, mine: ownAgents(), main: primaryAgent() });
+  return { renderHeading, renderChats, loadInvites, primaryAgent, newChatAgent, askedAgent, ownAgents, markSeen, edgeAgain: updateSidebarEdge };
 }

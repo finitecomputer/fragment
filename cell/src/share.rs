@@ -65,6 +65,7 @@ use crate::js;
 use crate::registry::calls::{self, Profile};
 use crate::registry::invites::{AnswerInvite, InvitesFor};
 use crate::routed::{Routed, Signed};
+use fragment_core::gather::Gathered;
 
 /// A form of a few short fields (the longest: an email).
 const FORM_MAX_BYTES: usize = 4 * 1024;
@@ -307,7 +308,7 @@ fn decoded<T: serde::de::DeserializeOwned>(v: Value, what: &str) -> CellResult<T
 /// are not named (decision 63: "I invite Skyler and his agents, not Skyler
 /// and his agent Agent123"): they reach what the person does, unnamed.
 pub(crate) async fn profiles(env: &Env, mut ids: Vec<String>) -> BTreeMap<String, Profile> {
-    ids.sort();
+    ids.sort_unstable();
     ids.dedup();
     let asked = ids.chunks(crate::registry::PROFILES_MAX).map(|chunk| {
         let call = calls::Profiles { ids: chunk.to_vec(), emails_of: chunk.to_vec() };
@@ -338,7 +339,7 @@ pub(crate) async fn name_agents(env: &Env, profiles: &mut BTreeMap<String, Profi
     }
     let none = json!({});
     let faces = join_all(asked.iter().map(|f| crate::fragment::ask(env, f, "computer/face", &none))).await;
-    let faces: BTreeMap<&String, Value> = asked.iter().zip(faces).filter_map(|(f, face)| Some((f, face.ok()?))).collect();
+    let faces: BTreeMap<&String, Value> = asked.iter().zip(faces).filter_map(|(f, face)| Some((f, face.ok()?))).gathered();
     let face = |f: &Option<String>, key: &str| f.as_ref().and_then(|f| faces.get(f)).and_then(|v| v[key].as_str()).map(str::to_string);
     for p in profiles.values_mut() {
         if p.kind == IdentityKind::Agent && p.fragment.is_some() {
@@ -738,7 +739,7 @@ fn refused(e: CellError, name: &str) -> CellResult<Response> {
 }
 
 fn form_fields(bytes: &[u8]) -> BTreeMap<String, String> {
-    url::form_urlencoded::parse(bytes).map(|(k, v)| (k.into_owned(), v.into_owned())).collect()
+    url::form_urlencoded::parse(bytes).map(|(k, v)| (k.into_owned(), v.into_owned())).gathered()
 }
 
 /// A POST's person, once its Origin and form token hold: the token is
