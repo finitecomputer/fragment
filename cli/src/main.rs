@@ -7,6 +7,7 @@ mod codestorage;
 mod mcp;
 mod notice;
 mod operator;
+mod search;
 mod session;
 mod sync;
 mod watch;
@@ -297,6 +298,37 @@ enum Cmd {
     Blob {
         #[command(subcommand)]
         sub: BlobCmd,
+    },
+    /// Search fragments' own indexes by their words and their meaning, as
+    /// one (a reader's, in each): each result a section of one of their
+    /// sources, best first, named by its fragment, with a snippet. `--json`
+    /// also says how each fragment answered
+    Search {
+        /// What to find, in words
+        query: String,
+        /// The fragments to search (`--in parent,research,delivery`; one is
+        /// `--in notes`)
+        #[arg(long = "in", value_delimiter = ',', required_unless_present = "all", conflicts_with = "all")]
+        fragments: Vec<String>,
+        /// Your brains and your Session Archive (not the ones you
+        /// archived), 32 at most, by name
+        #[arg(long)]
+        all: bool,
+        /// How many results, at most (1 to 50; 10 unnamed)
+        #[arg(long)]
+        limit: Option<usize>,
+        /// By words and meaning (the default), words alone, or meaning alone
+        #[arg(long, value_parser = ["hybrid", "lexical", "semantic"])]
+        mode: Option<String>,
+        /// Only sources with this field (`--field kind=chat`); each named is required
+        #[arg(long = "field", value_name = "NAME=VALUE")]
+        fields: Vec<String>,
+        /// Only sections at or after this time (RFC 3339)
+        #[arg(long)]
+        after: Option<String>,
+        /// Only sections before this time
+        #[arg(long)]
+        before: Option<String>,
     },
     /// Serve a fragment's described operations as tools to an MCP client
     /// (Claude Code, Codex) over stdio: its queries, and with --write its
@@ -2247,6 +2279,26 @@ fn run(cli: Cli) -> Result<()> {
             if v.replayed {
                 eprintln!("(replayed: operation {id} had already run)");
             }
+        }
+        Cmd::Search { query, fragments, all, limit, mode, fields, after, before } => {
+            let fragments = match all {
+                true => {
+                    let (names, left) = search::all(&c.call_as(c.get("/api/fragments")?)?);
+                    if names.is_empty() {
+                        return Err(usage("--all found no brain or Session Archive of yours to search: name some with --in"));
+                    }
+                    if left > 0 {
+                        eprintln!("(searching the first {} by name; {left} more left out: name them with --in)", names.len());
+                    }
+                    names
+                }
+                false => fragments,
+            };
+            let mode = mode.map(|m| serde_json::from_value(json!(m)).expect("clap took one of the modes"));
+            let asked = search::across(query, fragments, limit, mode, &fields, after, before).map_err(usage)?;
+            let answer = search::search(&c, asked)?;
+            json_exit(j, &answer);
+            search::print(&answer);
         }
         Cmd::Blob { sub: BlobCmd::Put { name, file } } => {
             let bytes = std::fs::read(&file).with_context(|| format!("reading {}", file.display()))?;

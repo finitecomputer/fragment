@@ -722,6 +722,34 @@ fragment channel my-thing                                      # list channels
 fragment channel my-thing activity --follow                     # the backlog a page at a time, then new records, as JSON lines
 ```
 
+## Searching fragments
+
+Fragments with a search index (docs/api.md, "A fragment's search": an
+app's sources, such as your Session Archive's conversations) are searched
+by their words and their meaning, several as one, by anyone who may read
+each:
+
+```
+fragment search "what did we decide about the ferry" --in my-sessions         # one fragment
+fragment search "launch readiness" --in executive,research,delivery         # a parent brain and its sources, as one
+fragment search "launch" --all                                               # your brains and Session Archive (32 at most, by name)
+fragment search ferry --in my-sessions --mode lexical --limit 5              # words alone; hybrid (default), semantic
+fragment search ferry --in my-sessions --field kind=chat --after 2026-10-01
+fragment search ferry --in my-sessions --json    # {results: [{fragment, rank, source, section, …, snippet}], fragments: [{name, state}], semantic}
+```
+
+- Each result is a section of one of their sources (a conversation's
+  turn, a page's part), best first across all the fragments, named by
+  its fragment, with its source, section, title and heading, and a
+  snippet of its best part.
+- Each fragment is asked as you, exactly as if you asked it alone: one
+  you may not read is `denied`, one with no index `no_index`, and is
+  said after the results (`fragments` in `--json`). Nothing is copied
+  between them.
+- Your question is embedded once on the platform's model, paid by you;
+  with `--mode lexical`, or on a deployment that embeds nothing, it is
+  searched by its words alone (`semantic: off`).
+
 ## Your operations as tools (MCP)
 
 `fragment mcp <name>` is an MCP server over stdio: another agent (Claude
@@ -758,6 +786,11 @@ codex mcp add my-thing -- fragment mcp my-thing              # Codex (or in ~/.c
   call that got no answer says `unavailable`, or `outcome_unknown` when
   it may have run: `fragment call <name> <op> --id <id>` finds out, and
   never runs it twice.
+- A reader has one tool more, `fragment-search` (a name no operation can
+  have): fragments' indexes searched as one, this fragment's unless its
+  `in` names others. Its arguments are `fragment search`'s question,
+  `{q, in?, limit?, mode?, fields?, after?, before?}`, and its result is
+  `fragment search --json`'s.
 - One server serves one fragment: add one for each. Claude desktop
   takes one in its config's `mcpServers`: `{"my-thing": {"command":
   "/Users/<you>/.local/bin/fragment", "args": ["mcp", "my-thing"]}}` (a
@@ -1039,6 +1072,7 @@ fragment drafts <name>                   fragment rollback <name> [--to <sha>]
 fragment rm <name>                       fragment guide|skill
 fragment ask <agent> <text> [--chat C] [--wait [S] | --return-to CHAT] [--id ID]
 fragment mcp <name> [--write]            # its described operations as an MCP server's tools, over stdio
+fragment search "<query>" --in <name>[,<name>…] | --all  [--limit N] [--mode hybrid|lexical|semantic] [--field K=V]… [--after T] [--before T]
 fragment agent [<agent>] [--name N] [--picture FILE | --no-picture]
 fragment schedule add [<name>] --cron "<m h dom mon dow>" --channel C --record JSON
 fragment schedule add [<name>] --cron "<m h dom mon dow>" --routine TEXT [--chat C]   # an agent's routine, on its tasks; no --chat: its owner's home

@@ -271,8 +271,10 @@ but an operation it calls `for` someone tells the app so: `call.principal`
 is them and `call.agent` the agent, so what it does for them is theirs.
 `for` is honored on a fragment's routes (`/api/f/{name}/…`), on `GET`
 and `POST /api/fragments` (a `POST` for anyone but the agent's owner is
-403: what an agent makes is its owner's), and on the model routes
-(`/api/models/v1/…`: Models, below); on any other route it is 400.
+403: what an agent makes is its owner's), on a search across fragments
+(`POST /api/search`: each fragment asked decides as on its own route),
+and on the model routes (`/api/models/v1/…`: Models, below); on any
+other route it is 400.
 A person's request naming `for` is 403, as is more than one `for` (400)
 or one that is not an identity (400). A call without `for` acts as the
 agent's own membership. A site request's query is its app's: `for`
@@ -1303,6 +1305,7 @@ shell's Apps page shows it, one row a fragment, each with its Share…
 | `PUT /api/fragments/{name}/dock` | any signer, for a fragment they hold a role on | `{dock: bool}` → `{name, dock}` (`Docked`): whether the signer's dock shows it (the shell's dock shows their apps, kind `app` or `brain`, less the archived and those taken off it; The shell, below), their own view as archiving is: kept in their list's row and nowhere else, so no one else's list or the fragment changes, and told to their list's sockets (`changed`). Every fragment is on it until they take it off (#587), so a list from before the choice keeps every app where it was; archiving still leaves an app off the dock, whatever this says. The same again answers the same. A bare label names nothing (404, as for archiving); a fragment they hold no role on, or none of that name, is 404; a name that is none, or a body without a boolean `dock`, 400. It goes when they leave the fragment (back in, it is on the dock), or the fragment is made again. Not honored for `for` |
 | `PUT /api/fragments/{name}/seen` | any signer, for a fragment they hold a role on | no body → `{name, unread: 0}` (`Seen`): the signer has seen its messages, up to the newest their search holds (Search, below), so their row counts none `unread` until another comes; kept beside their list's row and nowhere else, so no one else's list or the fragment changes. The place never goes back: the same again answers the same and tells no page; a mark that moved it tells the signer's list sockets (`changed`). A bare label names nothing (404, as for archiving); a fragment they hold no role on, or none of that name, is 404; a name that is none, or any body, 400. It goes when they leave the fragment (back in, every message it still logs for them is unread), or the fragment is made again. Not honored for `for` |
 | `GET /api/search?q=` | any signer | → `{fragments: [ListedFragment], messages: [{fragment, channel, seq, at, snippet}]}` (`SearchAnswer`): the signer's fragments whose title or label hold every word of `q`, then the messages that do, newest first, from fragments they hold a role on now, archived ones included (The shell, Search, below). `q` once, at most 256 bytes and 8 words (400 past either, or without it). Not honored for `for` |
+| `POST /api/search` | any signer | `{q, in: [name], …}` → one question asked of several fragments' indexes as the signer, merged (Search across fragments, below). Honored for `for` |
 | `GET /api/fragments` | any signer | → `{fragments: [{name, role, kind, title?, picture?, agents?, preview?, previewAt?, unread?, sharing?, archived?, dock?, listed?}]}` (`archived: true` on the ones the signer archived; `dock: false` on the ones they took off their dock, `PUT …/dock` above, left out on the rest, which a client reads as on it); `kind`, what its live `fragment.json` says it is (`app`, `chat`, `agent`, `brain`, `skills` or `sessions`; an app until it says), which a client reads, here as in `status` and `GET /api/access`, as `other` when it does not know it (a newer platform's: proto's `FragmentKind::Other`, the rest of the row kept), so a new kind breaks no shipped CLI or image; no kind is ever named `other`, and a `fragment.json` naming a kind the platform does not know is an invalid one (`status.code.error`, Apps, below); `picture`, an agent fragment's only: where its picture is served (Identities, "An agent's name and picture"), as its last install said; `agentRole`, an agent fragment's only: its role, its `fragment.json`'s `meta.role` trimmed (none when it says nothing), as its last install said (the same section); `agents`: its agent members, the first added (a chat's lead) first, at most 16 (`LISTED_AGENTS_MAX`), as the fragment last sent them (an agent's joining or leaving sends every row; a row sent before rows named them has none until it is sent again); `preview`, a chat's only: the first line with words of its newest message the signer's search holds (Search, below), at most 160 bytes, none when it holds none; `previewAt`, with `preview`: when that message was said (ms since the epoch, as a record's `at`); `unread`, a chat's only: its messages the signer's search holds after the last they marked seen (`PUT …/seen`, above; all of them before any mark), at most 100 (`LISTED_UNREAD_MAX`), left out at 0; a search entry names no author, so a message of the signer's own counts until they mark it; `sharing` on the signer's own fragments only: `{visibility, members, guests, invites}` (guests: members who are neither the owner nor an agent of theirs; invites: those waiting on an email, as of that change, absent in a row sent before they were counted; an invite met, revoked, or run out is such a change, the last sent by the fragment's alarm at its expiry), as the fragment last sent it with a change to its members, invites or visibility (who they are: `GET /api/access`, below); an agent's `?for=<id>`: the fragments that identity holds a role on where the agent or its owner is a member too, each with the role the agent acts with there for it (`fragment_core::access::listed_role`; a call decides again) and `owned: true` on those that identity owns, with none of that identity's `listed`; `listed`: what its members are doing, each member's newest record of a kind one of its channels lists that the signer's role there may read, the newest first, at most 16 (Listed records, below), left out when there are none |
 | `GET /api/access` | a person (not an agent) | → who may open each fragment they own, by email (Sharing, "Who has access to what") |
 | `GET /api/fragments/watch` | any signer; the shell with its session (below) | a WebSocket, upgraded; anything else is 400. It answers `{type: "hello"}`, then `{type: "changed"}` each time the signer's list changes: a fragment made, shared with them, changed (its title, kind, agents, sharing, their role), left or deleted, their archiving or their dock, and a chat's message new to their search (its preview) (principal.rs, Watching); and `{type: "invited"}` each time the invites waiting on their emails change (one made, renewed or revoked: `GET /api/invites`, Invites by email). A frame names nothing: the page reads `GET /api/fragments` again with its own credential, so a socket that outlives its session learns only that something changed. The platform session counts only on the platform's host with the platform's exact `Origin` (a browser names its page on every upgrade; a fragment's page, one site with the platform, is refused like no one: 401). A list holds `LIST_WATCHERS_MAX` (16) at once; one more is 429. It reads nothing from the client. Not honored for `for` |
@@ -3714,6 +3717,42 @@ is held for a fragment until an editor writes a source.
   `POST /search/asked {query, vector?}`, a route the router maps no
   outside path to (`fragment_proto::search::Forwarded`). It is searched
   by that vector, never embedded again, and answers as `POST …/search`.
+
+### Search across fragments
+
+One question asked of several fragments' indexes as one (cell/src/across.rs;
+fragment_core::across): a parent brain and its sources, or a person's
+brains and Session Archive. `fragment search --in` asks it, as does
+`fragment mcp`'s `fragment-search` tool (cli/GUIDE.md, "Searching
+fragments").
+
+| method & path | who | body → answer |
+| --- | --- | --- |
+| `POST /api/search` | any signer (`for` honored) | `{q, in: [name], limit?, mode?, fields?, after?, before?}` → `{results: [{fragment, …hit}], fragments: [{name, state, message?}], semantic}` |
+
+- **Each fragment decides alone.** Each named (1 to 32, in full, once) is
+  asked as the signer, all at once, as if asked alone (A fragment's
+  search): its role check, its life, what it is forgetting. So the route
+  answers nothing the signer could not have from each, holds nothing, and
+  makes no index. `fragments` says how each answered, in the order asked:
+  `searched` (its hits may be none), `no_index`, `denied`, `missing` or
+  `failed` (with its `message`).
+- **The question is embedded once**, here, on the deployment's slot, paid
+  by its asker (an agent's owner), and each fragment searches with that
+  vector (`POST /search/asked`, a supervisor's route the router never
+  maps). `mode: lexical`, a deployment that embeds nothing, or a refused
+  embedding: by its words alone (`semantic: off`).
+- **The merge.** Each fragment is asked for twice the answer's length (at
+  least 20, at most 50). Cosines compare across fragments whose answers
+  name the question's space and the one scheme, so the semantic hits sort
+  together by cosine; BM25 does not (each index's statistics are its
+  own), so the lexical hits interleave by each fragment's rank, the nearer
+  meaning first among equals. The two lists fuse by reciprocal rank (k =
+  60). A hit's `rank` and `score` are the merged answer's; its `lexical`
+  and `semantic` legs are its fragment's.
+- Its body is at most 16 KiB; `q`, `limit`, `fields`, `after` and `before`
+  are checked as a fragment's search checks them, before anything is
+  embedded or asked.
 
 ### Search (decision 9; docs/cloudflare-v1.md, lesson 12)
 
