@@ -288,7 +288,8 @@ changes or removes the owner). Every other agent's sharing request is
 403, saying why: one acting as itself or for anyone else, one its owner
 holds (at any hold), and one on a fragment its owner does not own (an
 editor's agent shares nothing there). Deleting a fragment and setting
-its cap are 403 for every agent, whomever it acts for. What an agent
+its cap are 403 for every agent, whomever it acts for, as is sharing a
+connector (An agent's doors, below). What an agent
 shares names it: the member's `addedBy` and the invite's `createdBy` are
 the agent, and each change's event (`member.set`, `member.removed`,
 `invite.created`, `invite.revoked`, `visibility`, `tokens.rotated`)
@@ -3841,6 +3842,9 @@ through one (`fragment_core::door`):
     and no member is given more than viewer there (an editor's role, set
     or invited, is 400; an agent making it for its owner joins as a
     viewer), so its members list shows the role that counts;
+  - **no one but its owner shares it**, in person: an agent's sharing
+    request there (members, invites, visibility, rotation) is 403
+    whomever it acts for, and its status shows an agent no share link;
   - **its code is the platform's**: an install of any other code (a fork,
     another template, none) makes it no door again, for good, and lets its
     binding go (`door.unmade`);

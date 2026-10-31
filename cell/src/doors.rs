@@ -14,7 +14,9 @@
 //!   for its owner included, is at most a viewer there, from its making
 //!   (`only_owner_edits`, in `standing`): no one else sets its secrets,
 //!   writes its files or pages, deploys its code or calls an editor's
-//!   operation. Its own triggered runs keep their role.
+//!   operation. Its own triggered runs keep their role. Nor does anyone
+//!   else share it (`agents_share`): no agent sets its visibility, members
+//!   or invites, or holds its share link, whomever it acts for.
 //! - **Only its owner binds it, in person** (a signed request of theirs, or
 //!   their session on its page: `__door`), never an agent, whomever it acts
 //!   for. Its agent joins it as a viewer, if it was no member.
@@ -95,6 +97,17 @@ impl FragmentCell {
             standing.held = Some(standing.held.map_or(Role::Viewer, |h| h.min(Role::Viewer)));
         }
         Ok(standing)
+    }
+
+    /// Whether an agent may share here at all: never on a connector, which
+    /// its owner shares in person alone, as they alone edit it (its
+    /// visibility, members, invites and share link). Elsewhere an agent
+    /// shares for its owner (`access::agent_shares`).
+    pub(crate) fn agents_share(&self) -> CellResult<()> {
+        if self.meta(MetaKey::DoorTemplate)?.is_some() {
+            return Err(CellError::new(ErrorCode::Forbidden, "only its owner, in person, shares a connector: never an agent, whomever it acts for"));
+        }
+        Ok(())
     }
 
     /// A role a member may be given here: on a connector, viewer at most, so
