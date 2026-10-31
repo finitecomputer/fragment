@@ -1193,7 +1193,7 @@ fn secret_hosts(given: &[String]) -> CellResult<Vec<String>> {
             hosts.push(host);
         }
     }
-    hosts.sort();
+    hosts.sort_unstable();
     assert!(!hosts.is_empty() && hosts.len() <= limits::SECRET_HOSTS_MAX, "a secret's hosts are within their bounds");
     Ok(hosts)
 }

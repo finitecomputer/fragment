@@ -106,7 +106,7 @@ pub fn listed(answer: &Value, provider: &str) -> Result<Vec<PipesAccount>, Strin
             out.push(account);
         }
     }
-    out.sort_by(|a, b| (&a.created_at, &a.id).cmp(&(&b.created_at, &b.id)));
+    out.sort_unstable_by(|a, b| (&a.created_at, &a.id).cmp(&(&b.created_at, &b.id)));
     Ok(out)
 }
 

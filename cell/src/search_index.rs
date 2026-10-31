@@ -127,9 +127,11 @@ pub(crate) enum Wrote {
         #[serde(default)]
         cleared: bool,
     },
-    /// Past `CHUNKS_MAX`, with `chunks` held.
+    /// Past `max` (`CHUNKS_MAX`, or a test fleet's lower), with `chunks`
+    /// held.
     Full {
         chunks: u64,
+        max: u64,
         #[serde(default)]
         cleared: bool,
     },
@@ -312,8 +314,9 @@ impl SearchIndexCell {
                         waited += 20;
                     }
                 }
+                let max = self.chunks_max()?;
                 let me = self.parts();
-                let wrote = js::transaction_sync(&self.raw, move || me.upsert(w))?;
+                let wrote = js::transaction_sync(&self.raw, move || me.upsert(w, max))?;
                 // a refusal may follow a clear (another space's), which wrote
                 if !matches!(wrote, Wrote::Ended | Wrote::Written { written: false, cleared: false, .. }) {
                     self.after_write().await?;
@@ -337,7 +340,7 @@ impl SearchIndexCell {
                 let p: Page = serde_json::from_value(body).map_err(|e| parse("sources", e))?;
                 self.parts().sources(&p)
             }
-            "status" => self.parts().status(),
+            "status" => self.parts().status(self.chunks_max()?),
             "search" => {
                 let a: Ask = serde_json::from_value(body).map_err(|e| parse("search", e))?;
                 Ok(serde_json::to_value(self.parts().search(&a)?).expect("an answer serializes"))
@@ -347,12 +350,26 @@ impl SearchIndexCell {
                 if let Some(hold) = body["hold"].as_bool() {
                     self.holding.set(hold);
                 }
-                let mut status = self.parts().status()?;
+                match &body["chunks_max"] {
+                    Value::Null => {}
+                    Value::Number(n) if n.as_u64().is_some_and(|n| (1..=CHUNKS_MAX).contains(&n)) => self.parts().set_meta("test_chunks_max", &n.to_string())?,
+                    _ => return Err(CellError::invalid(format!("chunks_max is 1 to {CHUNKS_MAX}"))),
+                }
+                let mut status = self.parts().status(self.chunks_max()?)?;
                 status["held"] = json!(self.held.get());
                 Ok(status)
             }
             _ => Err(CellError::new(ErrorCode::NotFound, format!("no route {path}"))),
         }
+    }
+
+    /// The chunks it holds at most: `CHUNKS_MAX`, or on a test fleet one
+    /// its lever lowered (`index/test`), so a run reaches the cap.
+    fn chunks_max(&self) -> CellResult<u64> {
+        if !self.cfg.test_hooks {
+            return Ok(CHUNKS_MAX);
+        }
+        Ok(self.parts().meta("test_chunks_max")?.and_then(|m| m.parse().ok()).unwrap_or(CHUNKS_MAX))
     }
 
     /// Its rows, as a transaction's closure holds them (`'static`).
@@ -498,7 +515,7 @@ impl Parts {
         Ok(out)
     }
 
-    fn upsert(&self, w: Write) -> CellResult<Wrote> {
+    fn upsert(&self, w: Write, max: u64) -> CellResult<Wrote> {
         if self.meta("ended")?.is_some() {
             return Ok(Wrote::Ended);
         }
@@ -524,10 +541,11 @@ impl Parts {
         }
         let new: usize = w.sections.iter().map(|s| s.chunks.len()).sum();
         let old = current.first().and_then(|r| r["chunks"].as_u64()).unwrap_or(0);
-        let total = self.chunks()?.saturating_sub(old) + new as u64;
-        if total > CHUNKS_MAX {
-            return Ok(Wrote::Full { chunks: self.chunks()?, cleared });
+        let held = self.chunks()?;
+        if !engine::fits(held, old, new as u64, max) {
+            return Ok(Wrote::Full { chunks: held, max, cleared });
         }
+        let total = held.saturating_sub(old) + new as u64;
         // each vector, held: its own, or this index's of its hash (read
         // before the source's old chunks go, which may hold it)
         let dims = w.space.as_ref().map(|s| s.dimensions as usize);
@@ -616,7 +634,7 @@ impl Parts {
         Ok(json!({ "sources": page, "next": next }))
     }
 
-    fn status(&self) -> CellResult<Value> {
+    fn status(&self, max: u64) -> CellResult<Value> {
         let sources = self.count("SELECT COUNT(*) AS n FROM sources")?;
         let chunks = self.chunks()?;
         Ok(json!({
@@ -627,7 +645,7 @@ impl Parts {
             "bytes": self.sql.database_size(),
             "space": self.space()?,
             "chunks_split": CHUNKS_SPLIT,
-            "chunks_max": CHUNKS_MAX,
+            "chunks_max": max,
         }))
     }
 

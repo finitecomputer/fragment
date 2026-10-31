@@ -561,7 +561,7 @@ impl Store for Memory {
 
     fn spends(&self, month: Month, limit: usize) -> Vec<(String, i64)> {
         let mut all: Vec<(String, i64)> = self.spent.get(&month).map(|m| m.iter().map(|(f, s)| (f.clone(), *s)).collect()).unwrap_or_default();
-        all.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        all.sort_unstable_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
         all.truncate(limit);
         all
     }
