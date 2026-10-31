@@ -9,11 +9,11 @@
 // Nothing is kept of it but what the platform has. A pair chat's state is
 // its row's listed records (live on the list's socket); what was asked, when,
 // where its answer goes and how each turn ended are its newest records, read
-// again only when its row says a message came, or a turn of it started or
-// ended. A line stays until its answer has come: the answer on its asker's
-// `tasks` (`an:<asked turn>`), and the asker's turn of it in the asking chat,
-// ended (read when that chat's row says a turn started or ended). So a
-// thread lost or stopped is said, never dropped.
+// again whenever its row changes. A line stays until its answer has come:
+// the answer on its asker's `tasks` (`an:<asked turn>`), and the asker's turn
+// of it in the asking chat, ended (looked for again whenever that chat's row
+// changes, or another of its threads is seen to end). So a thread lost or
+// stopped is said, never dropped.
 
 // The newest records a pair chat's read takes: its last questions, and their
 // turns' starts and ends among the steps between.
@@ -57,9 +57,11 @@ export function createThreads({ $, el, patch, api, seg, avatar, data, navigation
     const [a, b] = f.agents.map((id) => mine.get(id));
     return !!a && !!b && labelOf(f.name) === pairLabel(labelOf(a.fragment), labelOf(b.fragment));
   }
-  // What of a pair chat's row says its threads changed: a message (a
-  // question, a reply), or a turn's start or end.
-  const signature = (f) => JSON.stringify([f.previewAt ?? null, (f.listed ?? []).filter((r) => r.channel === "work" && (r.kind === "turn.start" || r.kind === "turn.end")).map((r) => [r.principal, r.kind, r.at])]);
+  // A row as it was sent: its newest message's time, and every member's
+  // newest listed record. Each is a member's newest only, sent at most once
+  // in 3 s (docs/api.md, Listed records), so a turn's start or end may be
+  // past before a row says it: any change is read again for (#779 review).
+  const signature = (f) => JSON.stringify([f.previewAt ?? null, (f.listed ?? []).map((r) => [r.channel, r.principal, r.kind, r.at])]);
 
   // A pair chat's threads, from its newest records: each question one of
   // their agents asked another (its `to`, and its `return_to`), its turn's
@@ -100,14 +102,17 @@ export function createThreads({ $, el, patch, api, seg, avatar, data, navigation
     if (mine === reading) rendered();
   }
   // Each ended thread's answer, looked for in the chat it was asked from
-  // once that chat's row says a turn started or ended there: its answer on
-  // its asker's `tasks` (`an:<asked turn>`, docs/chat-records.md), then the
-  // asker's turn of that record in the asking chat, ended.
+  // once that chat's row changes, or a thread of it is newly seen to end
+  // (its answer may have come before the pair's row said so: #779 review):
+  // its answer on its asker's `tasks` (`an:<asked turn>`,
+  // docs/chat-records.md), then the asker's turn of that record in the
+  // asking chat, ended.
   async function answersCame() {
     const waiting = [...reads.values()].flatMap((r) => r.threads).filter((t) => t.end && !answeredTurns.has(t.turn));
-    const chatsOf = [...new Set(waiting.map((t) => t.returnTo))].filter((name) => byName(name) && answerChecks.get(name) !== signature(byName(name)));
+    const checkOf = (name) => JSON.stringify([signature(byName(name)), waiting.filter((t) => t.returnTo === name).map((t) => t.turn).sort()]);
+    const chatsOf = [...new Set(waiting.map((t) => t.returnTo))].filter((name) => byName(name) && answerChecks.get(name) !== checkOf(name));
     await Promise.all(chatsOf.map(async (name) => {
-      const sig = signature(byName(name));
+      const check = checkOf(name);
       const ours = waiting.filter((t) => t.returnTo === name);
       const work = await api("GET", `/api/f/${seg(name)}/channels/work?before=${NEWEST}&limit=${WORK_RECORDS}`);
       for (const asker of new Set(ours.map((t) => t.asker))) {
@@ -120,7 +125,7 @@ export function createThreads({ $, el, patch, api, seg, avatar, data, navigation
           if (start && (work.records ?? []).some((r) => r.principal === asker && r.body?.kind === "turn.end" && r.body?.turn === start.body.turn)) answeredTurns.add(t.turn);
         }
       }
-      answerChecks.set(name, sig);
+      answerChecks.set(name, check);
     }));
   }
 
