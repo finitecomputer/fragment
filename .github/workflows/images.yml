@@ -214,7 +214,9 @@ jobs:
           RUST_BACKTRACE: "1"
       - if: always()
         name: disk, after
-        run: docker system df; df -h /; echo "peak: $(sort -n "$RUNNER_TEMP/disk-used" | tail -1) MiB used"
+        run: |
+          docker system df; df -h /
+          echo "peak: $(sort -n "$RUNNER_TEMP/disk-used" | tail -1) MiB used"
       # each container's log (Container's drop) and the tests' own
       - if: failure()
         uses: actions/upload-artifact@v4
