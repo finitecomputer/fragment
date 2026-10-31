@@ -40,15 +40,29 @@ pub fn clock() -> String {
 /// `HttpServerSettings::pipelineTimeout` at its default, and closes a
 /// connection 5 s after its last answer (measured under `wrangler dev`).
 const SERVER_KEEP_ALIVE: Duration = Duration::from_secs(5);
-/// How long the run's client keeps an idle connection to use again: under
-/// the server's. A request written onto a connection as the server closes
-/// it gets no answer ("connection closed before message completed", or a
-/// reset), and the client does not send a POST again: the hermes lane's
-/// skills polls, 5 s apart, lost one now and then (2026-10-05). Under the
-/// server's, the pool never hands out a connection the server may be
-/// closing.
+/// How long a hosted run's client keeps an idle connection to use again:
+/// under the server's. A request written onto a connection as the server
+/// closes it gets no answer ("connection closed before message completed",
+/// or a reset), and the client does not send a POST again: the hermes
+/// lane's skills polls, 5 s apart, lost one now and then (2026-10-05).
+/// Under the server's, the pool never hands out a connection the server
+/// may be closing.
 const POOL_IDLE: Duration = Duration::from_secs(4);
 const _: () = assert!(POOL_IDLE.as_millis() < SERVER_KEEP_ALIVE.as_millis(), "the client drops an idle connection before the server does");
+
+/// How the run's client keeps its connections. A local node's requests
+/// each take a new one (`Fresh`): workerd times an idle connection from
+/// its last answer, and with its loop slow (a busy machine, a computer's
+/// image pinned) it closes one whose next request had come in time but
+/// was not yet read, so a request sent at 3.8 s idle was lost (#817; a
+/// stalled loop lost 4 to 6 of 8 such, and none on a new connection, which
+/// workerd waits 15 s for: kj's `headerTimeout`). A hosted one's keep
+/// theirs under `POOL_IDLE`: a TLS handshake each would slow the lane.
+#[derive(Clone, Copy)]
+enum Pool {
+    Fresh,
+    Idle(Duration),
+}
 
 /// A request's body, as `wrangler dev` can send it again: a GET or HEAD
 /// with none goes with none, not `Content-Length: 0`. Its ProxyWorker
@@ -68,25 +82,22 @@ fn with_body(req: reqwest::blocking::RequestBuilder, method: &str, body: &[u8]) 
     }
 }
 
-fn client() -> reqwest::blocking::Client {
-    client_with(POOL_IDLE)
+fn client(pool: Pool) -> reqwest::blocking::Client {
+    client_waiting(pool, REQUEST_WAIT)
 }
 
 /// How long a request waits for its answer, unless a lane asks for more
 /// (`Api::patient`).
 const REQUEST_WAIT: Duration = Duration::from_secs(60);
 
-fn client_with(pool_idle: Duration) -> reqwest::blocking::Client {
-    client_waiting(pool_idle, REQUEST_WAIT)
-}
-
-fn client_waiting(pool_idle: Duration, wait: Duration) -> reqwest::blocking::Client {
-    reqwest::blocking::Client::builder()
-        .timeout(wait)
-        .pool_idle_timeout(pool_idle)
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .expect("http client")
+fn client_waiting(pool: Pool, wait: Duration) -> reqwest::blocking::Client {
+    let builder = reqwest::blocking::Client::builder().timeout(wait).redirect(reqwest::redirect::Policy::none());
+    match pool {
+        Pool::Fresh => builder.pool_max_idle_per_host(0),
+        Pool::Idle(idle) => builder.pool_idle_timeout(idle),
+    }
+    .build()
+    .expect("http client")
 }
 
 /// The current second, waited for until it has just begun: a request sent
@@ -326,7 +337,7 @@ impl Api {
     /// The local node's API (`suffix`: where fragments have their hosts).
     pub fn new(port: u16, suffix: &str, run: &Arc<Run>) -> Api {
         let base = format!("http://127.0.0.1:{port}");
-        Api { http: client(), base, port, suffix: suffix.to_string(), label_suffix: String::new(), target: Target::Local, run: Arc::clone(run) }
+        Api { http: client(Pool::Fresh), base, port, suffix: suffix.to_string(), label_suffix: String::new(), target: Target::Local, run: Arc::clone(run) }
     }
 
     /// The local node's API, the node shaped as the branch `branch`.
@@ -338,7 +349,7 @@ impl Api {
     /// A preview's API, at its own hosts over https.
     pub fn hosted(preview: &Preview, run: &Arc<Run>) -> Api {
         let (base, label_suffix) = (preview.platform(), String::new());
-        Api { http: client(), base, port: preview.port.unwrap_or(443), suffix: preview.zone.clone(), label_suffix, target: Target::Hosted(preview.clone()), run: Arc::clone(run) }
+        Api { http: client(Pool::Idle(POOL_IDLE)), base, port: preview.port.unwrap_or(443), suffix: preview.zone.clone(), label_suffix, target: Target::Hosted(preview.clone()), run: Arc::clone(run) }
     }
 
     /// `hosted`, each of `hosts` resolved to `at`: the client's own tests,
@@ -371,9 +382,17 @@ impl Api {
         self.waiting(wait)
     }
 
+    /// How this API's client keeps its connections (`Pool`).
+    fn pool(&self) -> Pool {
+        match self.target {
+            Target::Local => Pool::Fresh,
+            Target::Hosted(_) => Pool::Idle(POOL_IDLE),
+        }
+    }
+
     fn waiting(&self, wait: Duration) -> Api {
         Api {
-            http: client_waiting(POOL_IDLE, wait),
+            http: client_waiting(self.pool(), wait),
             base: self.base.clone(),
             port: self.port,
             suffix: self.suffix.clone(),
@@ -1020,7 +1039,7 @@ mod tests {
     fn a_connection_idle_past_the_limit_is_never_used_again() {
         let (url, accepted) = keep_alive_server();
         let limit = Duration::from_millis(200);
-        let http = super::client_with(limit);
+        let http = super::client(super::Pool::Idle(limit));
         let get = || http.get(&url).send().and_then(|r| r.bytes()).expect("the server answers");
         get();
         std::thread::sleep(Duration::from_millis(20));
@@ -1029,6 +1048,20 @@ mod tests {
         std::thread::sleep(limit + Duration::from_millis(150));
         get();
         assert_eq!(accepted.load(Ordering::SeqCst), 2, "a new connection past the limit");
+    }
+
+    /// The property (#817): a local node's client takes a new connection
+    /// for each request, however soon after another, though the server
+    /// keeps the old one open, so workerd never closes one under a request.
+    #[test]
+    fn a_local_nodes_client_takes_a_new_connection_each_time() {
+        let (url, accepted) = keep_alive_server();
+        let http = super::client(super::Pool::Fresh);
+        let get = || http.get(&url).send().and_then(|r| r.bytes()).expect("the server answers");
+        for _ in 0..3 {
+            get();
+        }
+        assert_eq!(accepted.load(Ordering::SeqCst), 3, "a connection each");
     }
 
     /// A server that answers one request and hands its head back, lowercased.
@@ -1057,7 +1090,7 @@ mod tests {
     /// none still says `Content-Length: 0`, and a body is still sent.
     #[test]
     fn a_get_with_no_body_says_no_content_length() {
-        let http = super::client_with(Duration::from_secs(4));
+        let http = super::client(super::Pool::Idle(super::POOL_IDLE));
         let sent = |method: &str, body: &[u8]| {
             let body = body.to_vec();
             let method = method.to_string();
