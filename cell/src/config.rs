@@ -70,7 +70,7 @@ pub struct Config {
     /// `FRAGMENT_COMPUTER_UNSAVED_MAX_MS` (the deploy config's
     /// `computers.unsaved_max_ms`): how long a computer whose sleep's save
     /// keeps failing stays awake before it sleeps unsaved. See
-    /// docs/durable-computers.md and `fragment_core::computer`.
+    /// docs/computers.md, Lifecycle, and `fragment_core::computer`.
     pub computer_unsaved_max_ms: i64,
     /// `FRAGMENT_SUPPORT_URL` (the deploy config's `support_url`): where a
     /// person whose computer will not start gets help, an `https:` page or

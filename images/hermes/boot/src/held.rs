@@ -1,5 +1,5 @@
 //! The Hermes image's answer to the platform's hold (docs/computers.md,
-//! "The hold"; step 1 of docs/durable-computers.md). Before a save the
+//! "The hold"). Before a save the
 //! platform touches `/run/computer/hold` and waits for `held`. This image
 //! answers once its bridge claims nothing (the bridge's own answer,
 //! `BRIDGE_HELD`) and once it has copied every SQLite database under
@@ -7,7 +7,7 @@
 //! into a staging directory the save keeps. Its answer names exactly what
 //! it copied (each database and its `-wal`, `-shm`, `-journal`) as what the
 //! save leaves out, so a hot copy of a database Hermes is writing, which
-//! could tear (docs/durable-computers.md), is never what a wake
+//! could tear, is never what a wake
 //! restores; a database made after the copy is named by none, and is kept
 //! hot rather than lost. A restore puts the copies back before Hermes
 //! starts, and `PRAGMA quick_check` proves each before the guest takes a

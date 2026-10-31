@@ -95,7 +95,7 @@ impl Credential {
     /// Who the credential names on `fragment`, asked of the registry: a key
     /// no one holds, or a revoked one, is 401; a session that is not live
     /// is nobody (a stale cookie leaves the request anonymous); a registry
-    /// that cannot answer is 503, never anonymous (rule 7).
+    /// that cannot answer is 503, never anonymous (R15, rule 7).
     pub async fn resolve(self, env: &Env, fragment: &str) -> CellResult<Option<Signed>> {
         match self {
             Credential::Key(key) => {
