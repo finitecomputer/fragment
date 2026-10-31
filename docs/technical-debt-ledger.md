@@ -367,14 +367,18 @@ unfinished design, not debt.
   it writes (refused for good, so it replays after a top-up), with an
   e2e check; the platform's own records stay.
 
-## Video steps are off
+## A video step's call waits on its model, unpolled
 
-- **Shortcut:** `job.ai.video` is refused
-  (`fragment_core::media::Refusal::VideoOff`): Workers AI has no video.
-- **Risk:** a fragment that made videos (meatproxy) cannot.
-- **Delete when:** a video model runs on Cloudflare, metered from its
-  usage, with an e2e check that a video is drawn, stored and charged; or
-  Paul drops videos, and `job.ai.video` goes with this entry.
+- **Shortcut:** `job.ai.video` is one call of the AI binding
+  (cell/src/ai.rs `step_video`), which answers when the video is made;
+  the model catalog names no request to poll.
+- **Risk:** a video whose making outlasts a Workflow step's try (5
+  minutes, cell/entry.mjs) is tried again before its answer is kept, and
+  may be made, and billed by the catalog, twice. A step tried again
+  after its answer was kept never calls again.
+- **Delete when:** the catalog answers a request id a step can poll (one
+  step starts it, the next ones poll, as the celld era's did), or a
+  step's try outlasts the model's longest making, with an e2e check.
 
 ## An icon's drawings skip the AI Gateway
 
