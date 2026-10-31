@@ -372,7 +372,10 @@ pub enum Event {
     Attachment { turn: String, part: u32, file: LocalFile },
     /// Reply `part` taken back before it was posted.
     Retract { turn: String, part: u32 },
-    /// A tool call.
+    /// A tool call the model asked for, before it runs (`records::Call`):
+    /// its intent, recorded so a turn cut while it ran is told of it.
+    Called { turn: String, call: crate::records::Call },
+    /// A tool call, ended.
     Step { turn: String, step: Step },
     /// A question with buttons; the turn waits for its answer.
     Prompt { turn: String, prompt: String, text: String, options: Vec<PromptOption>, ttl_ms: Option<u64> },

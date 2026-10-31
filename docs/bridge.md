@@ -396,11 +396,12 @@ Waiting on a person alone never holds it.
 
 The image's `fragment-activity` plugin uses Hermes v0.21.7's supported
 hooks: `subagent_start` and `subagent_stop` for its children,
-`pre_llm_call` and `post_tool_call` for the person's turns' steps (below).
+`pre_llm_call`, `post_api_request` and `post_tool_call` for the person's
+turns' calls and steps (below).
 Its one `ws://<bridge listen>/relay/activity` socket, authenticated by the
 gateway's normal Relay bearer token (`gateway.relay.auth.make_token`),
-carries both. The bridge answers each frame (`working`, `observed`, or
-`refused`) once its loop has it, and the hook returns only then, so the
+carries both. The bridge answers each frame (`working`, `called`,
+`observed`, or `refused`) once its loop has it, and the hook returns only then, so the
 parent's end cannot release a hold first, nor a step come after its
 turn's end.
 
@@ -435,6 +436,33 @@ progress showed), its `excerpt` a command's exit code, never its output or
 error text. A call whose end is not observed (no hook, a lost socket) is
 no step: delivery is best effort, each frame sent at most once, and
 nothing is guessed.
+
+A call's intent comes before it runs: each call of a model's response, as
+Hermes' `post_api_request` hands its `assistant_message` (fired in
+`normalize_model_response`, before `run_tool_round` runs any of them;
+Hermes runs them all before it asks the model again; read from v0.21.7
+and v0.22.5). Hermes has no supported "call started" hook: `pre_tool_call`
+is a policy gate that runs before Hermes' own refusals and blocks a call
+whose hook is slow (`plugins.hook_callback_timeout`), so no observer of
+ours sits there. The plugin names each response that asks for calls once
+(its gateway's life, random, and a count: `<life>-<n>`) and says each call
+(`{"turn", "response", "call": {position, tool_call_id, tool, args}}`,
+answered `called`); the engine records it on `work` as a `turn.call`
+(docs/chat-records.md), one record per turn, response and place
+(`records::call_id`), so a frame said again is one record. The provider's
+id is no call's identity: some providers name every response's first call
+`call_0`, and Hermes renames a call after saying it (`run_tool_round`
+de-duplicates the ids a session used before, `call_0_d2`, splits
+composite ones and rewrites some providers'). A call's end names the
+turn's latest response (`"response"` on its frame), and a step pairs with
+a call of that response alone: by id, else by its tool and arguments, one
+step to one call. Asked is all a call's record says: a refusal may still
+stop the call, and only its step says it ended. A turn a restart cut is
+told, first, each call it asked for that no step ended: each may or may
+not have run (note.rs). The record is posted as soon as the lane can,
+after the hook is answered, so it trails the call's start by the lane's
+milliseconds; a call whose intent never landed is told as before, by its
+steps alone.
 
 Files from delegated completion use the same path: `send_media` accepts an
 upload or a fetched provider URL after the parent ends and posts a reply
