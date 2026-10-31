@@ -1410,8 +1410,11 @@ steps:
   egress toward its hosts only (Control API); a fetch elsewhere fails the
   step, naming both. A URL's is percent-encoded as it goes in, a value
   that would change where the request goes (host, port, path segments,
-  query parameters) fails the step unsent, and the answer names each as
-  its placeholder again; `{{name}}` naming no secret goes as written
+  query parameters) fails the step unsent, and the answer and a
+  failure's message name every value filled, a header's or the URL's,
+  as its placeholder again, however the vendor spells it back
+  (percent-encoded, JSON- or HTML-escaped, in base64: docs/secrets.md);
+  `{{name}}` naming no secret goes as written
   (`fragment_core::secrets`). A connector bound as a door that is shut
   fetches nothing (An agent's doors). http(s) only;
   loopback, private and `.internal` addresses refused; redirects answered,
