@@ -66,8 +66,9 @@ use std::path::Path;
 use anyhow::{ensure, Context, Result};
 
 /// Where runtime code is: what ships or runs for people.
-pub const RUNTIME: [(&str, &str); 8] = [
+pub const RUNTIME: [(&str, &str); 9] = [
     ("cell/", "the Worker: its Rust, entry.mjs and the platform's JavaScript, and the shell"),
+    ("search/", "the search service, an image the platform runs"),
     ("templates/", "the templates' apps, sites and skills, which fragments and computers run"),
     ("images/", "the computer images: the bridge, Hermes' boot, plugins and hooks, the screen pages"),
     ("cli/", "the CLI"),
