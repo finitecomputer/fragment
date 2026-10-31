@@ -1,6 +1,7 @@
 //! Hermes' Relay wire, as Hermes v0.21.5 (tag `v2026.9.24`, contract
-//! version 1) speaks it, read from its `gateway/relay/` (docs/hermes-relay.md;
-//! its code wins over its contract document). Pure: frames in, frames out.
+//! version 1) speaks it, read from its `gateway/relay/` (docs/bridge.md,
+//! "Hermes' Relay"; its code wins over its contract document). Pure:
+//! frames in, frames out.
 //!
 //! Frames are JSON objects, one per line, each ending with `\n`, each under
 //! `limits::FRAME_MAX_BYTES`. Hermes dials; the bridge is its connector.
@@ -804,8 +805,8 @@ mod tests {
         assert_eq!(image_links(&many).len(), crate::limits::ATTACHMENTS_MAX);
     }
 
-    /// The gateway's own test vector (docs/hermes-relay.md): its token is
-    /// ours, and ours is checked as the gateway mints it.
+    /// The gateway's own test vector (docs/bridge.md, "Hermes' Relay"): its
+    /// token is ours, and ours is checked as the gateway mints it.
     #[test]
     fn a_token_is_the_gateways() {
         let t = token("gw-test", "s3cr3t", 1_790_000_000);

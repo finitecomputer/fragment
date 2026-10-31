@@ -129,7 +129,7 @@ const EXIT_WAIT_MS: i64 = 5_000;
 /// The markers the DO leaves in the container (docs/computers.md, "What
 /// every image carries"): the restore gate's, and a save's hold, which the
 /// guest reads as "claim no turn, and say `held` once nothing is claimed
-/// and what you keep is copied" (docs/durable-computers.md).
+/// and what you keep is copied" (docs/computers.md, "The hold").
 /// A hold clears the last answer before it asks, so only an answer to it
 /// counts. Each needs only `sh` (and its `test`), `mkdir`, `touch`, `rm`
 /// and `cat`, which every image carries.
@@ -150,8 +150,8 @@ const UNHELD_EXEC_MS: i64 = 5_000;
 const CHECK: &str = "test ! -x /usr/local/bin/computer-check || exec /usr/local/bin/computer-check";
 const CHECK_EXEC_MS: i64 = 120_000;
 const CHECK_UNUSABLE: i64 = 3;
-/// What a save saves (docs/computers.md, "Data and the restore gate"; step 2
-/// of docs/durable-computers.md): `/data/work`, what the guest's tools
+/// What a save saves (docs/computers.md, "Data and the restore gate"):
+/// `/data/work`, what the guest's tools
 /// write, and the rest of `/data`, the guest's own state, each a record of
 /// its own and restored together, the first first (a restore replaces its
 /// directory whole, so `/data`'s record goes in before the work's).
@@ -3151,7 +3151,7 @@ async fn egress_api(mut req: Request, env: &Env, ctx: &Context, computer: &str, 
     let path = url.path().to_string();
     match path.as_str() {
         "/api/computer" => {
-            // its bridge says whether its image does SimpleX (docs/computers.md, "SimpleX")
+            // its bridge says whether its image does SimpleX (docs/bridge.md, "SimpleX")
             let simplex = url.query_pairs().any(|(k, v)| k == "simplex" && v == "1");
             return json_response(&ask(env, computer, "computer/guest", &json!({ "simplex": simplex })).await?);
         }

@@ -2,7 +2,7 @@
 //! scripted Hermes, and a bridge run in process (stopped and started again
 //! over the same state, as a restart does; or killed, as a crash does).
 //!
-//! The tools of the failure cases (docs/durable-computers.md):
+//! The tools of the failure cases (docs/computers.md, Durability):
 //!
 //! - `Running::kill`: an abrupt stop. A bridge from `start_killable` runs on
 //!   a tokio runtime of its own, and a kill shuts that runtime down: every
@@ -113,7 +113,7 @@ impl Running {
     }
 
     /// Kills it, as a crash does: every task ends where it is (its sockets
-    /// close, its listener's port is free), nothing is flushed, and the
+    /// close; a port the test holds stays the test's), nothing is flushed, and the
     /// state file is as its last step wrote it (written whole and renamed,
     /// so a crash leaves the old state or the new). Only a bridge started
     /// with `start_killable`: one on the test's runtime leaves its tasks

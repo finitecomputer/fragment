@@ -95,7 +95,7 @@ impl Credential {
     /// Who the credential names on `fragment`, asked of the registry: a key
     /// no one holds, or a revoked one, is 401; a session that is not live
     /// is nobody (a stale cookie leaves the request anonymous); a registry
-    /// that cannot answer is 503, never anonymous (rule 7).
+    /// that cannot answer is 503, never anonymous (R15, rule 7).
     pub async fn resolve(self, env: &Env, fragment: &str) -> CellResult<Option<Signed>> {
         match self {
             Credential::Key(key) => {
@@ -204,7 +204,9 @@ fn marker(path: &str) -> CellResult<Option<(&'static str, &'static str)>> {
         Ok(Some((crate::members::CLAIM_HEADER, "1")))
     } else if path.starts_with("wipe/") {
         Ok(Some((crate::wipe::WIPE_HEADER, "1")))
-    } else if path.starts_with("test/") {
+    } else if path.starts_with("test/") || path.starts_with("index/") {
+        // a search index is called by its fragment's supervisor alone:
+        // the router never names one
         Ok(None)
     } else {
         Err(CellError::host(format!("{path} is not an internal route")))
@@ -212,8 +214,9 @@ fn marker(path: &str) -> CellResult<Option<(&'static str, &'static str)>> {
 }
 
 /// A call into a fragment's supervisor from inside the platform: `path`
-/// (`job/advance`, `cap/files/read`, `deliver/report`, `test/keys`) with a
-/// JSON body, marked as that route expects.
+/// (`job/advance`, `cap/files/read`, `deliver/report`, `test/keys`), or
+/// into its search index (`index/search`), with a JSON body, marked as
+/// that route expects.
 pub(crate) fn internal_request(path: &str, body: &str) -> CellResult<Request> {
     let headers = Headers::new();
     headers.set("content-type", "application/json")?;
@@ -345,12 +348,13 @@ const PROBE_HEADER: &str = "x-fragment-probe";
 /// at a deploy), and an object of each other class named for the probe, a
 /// name no fragment, person or computer has (`__`). One that never existed
 /// is made by the probe, its schema's steps run and nothing more.
-const PROBED: [(&str, &str, &str); 5] = [
+const PROBED: [(&str, &str, &str); 6] = [
     ("Registry", "REGISTRY", crate::registry::NAME),
     ("Principal", "PRINCIPAL", "__probe"),
     ("Ledger", "LEDGER", "__probe"),
     ("Fragment", "FRAGMENT", "__probe"),
     ("Computer", "COMPUTER", "__probe"),
+    ("SearchIndex", "SEARCH_INDEX", "__probe"),
 ];
 
 /// An object's answer to a deploy's probe, the second thing its `fetch`

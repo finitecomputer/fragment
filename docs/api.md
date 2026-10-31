@@ -739,39 +739,58 @@ what a kind means.
 
 ### A fragment's search
 
-A fragment's own full-text and semantic index, kept by the search service
-beside the deployment (search/README.md; cell/src/searchable.rs). A
-deployment that names none (`FRAGMENT_SEARCH_URL`) answers these 404.
-Shapes are `fragment_proto::search`'s, and so are the limits named here.
+A fragment's own full-text and semantic index: a `SearchIndex` object of
+each life's own (cell/src/search_index.rs), which its supervisor alone
+calls (cell/src/searchable.rs). Shapes are `fragment_proto::search`'s, and
+so are the limits named here.
 
 | method & path | who | body → answer |
 | --- | --- | --- |
 | `POST /api/f/{name}/search/upsert` | an editor | `Upsert {source, revision, replaces?, title?, at?, fields?, sections: [{id, text, heading?, context?, at?, location?: {from, to}}]}` → `{source, revision, written, chunks}` |
 | `POST /api/f/{name}/search/delete` | an editor | `{source}` → `{source, deleted}` |
-| `GET /api/f/{name}/search/sources?after=&limit=` | an editor | → `{sources: [{source, revision, at, chunks}], next}`, by source, at most `SOURCES_PAGE_MAX` |
-| `GET /api/f/{name}/search/status` | a viewer | → `{exists, sources, chunks, bytes, semantic, space, forgetting}` |
-| `POST /api/f/{name}/search` | a viewer | `Query {q, limit?, mode?, fields?, after?, before?}` → `Found {results: [{rank, source, section, revision, title, heading?, context?, at?, location?, snippet, score, signals}], semantic}` |
+| `GET /api/f/{name}/search/sources?after=&limit=` | an editor | → `{sources: [{source, revision, at?, chunks}], next}`, by source, at most `SOURCES_PAGE_MAX` |
+| `GET /api/f/{name}/search/status` | a viewer | → `{exists, sources, chunks, bytes, space, chunks_split, chunks_max, semantic, forgetting}` |
+| `POST /api/f/{name}/search` | a viewer | `Query {q, limit?, mode?, fields?, after?, before?}` → `Found {results: [{rank, source, section, revision, title, heading?, context?, at?, location?, snippet, score, signals, lexical?: {rank, bm25}, semantic?: {rank, cosine}}], semantic, indexed, space?, scheme?}` |
 
 - **One index a fragment's life**, which no caller names; whoever reads
-  the fragment searches it. Nothing is held until an editor writes.
-- **A source is written whole**: its sections replace what it held. The
-  same `(source, revision)` again writes nothing; `replaces` is a
-  compare-and-set on its revision (`""`: none yet), else 409 `conflict`
-  naming `current`.
+  the fragment searches it. Nothing is held until an editor writes: until
+  then a search answers `indexed: false` and no results, embedding
+  nothing.
+- **A source is written whole**, in one transaction: its sections replace
+  what it held. The same `(source, revision)` again writes nothing;
+  `replaces` is a compare-and-set on its revision (`""`: none yet), else
+  409 `conflict` naming `current`.
 - **Bounds**, refused 400 (413 past `UPSERT_MAX_BYTES`) before anything is
   sent: `SECTIONS_MAX`, `TEXT_MAX_CHARS`, `SECTION_ID_MAX_BYTES`,
-  `SOURCE_MAX_BYTES`, `REVISION_MAX_BYTES`; at most 4 `fields`.
+  `SOURCE_MAX_BYTES`, `REVISION_MAX_BYTES`; at most 4 `fields`. An index
+  holds at most `chunks_max` chunks (507 `storage_full` past it); past
+  `chunks_split` a search slows: split the sources across child fragments.
 - **Embedding** is the deployment's embeddings slot's (Models), each
-  section cut into chunks the slot reads whole. A write is paid for by the
-  fragment's owner, a question by its asker (an agent's owner). An
-  anonymous question, and every one on a deployment that embeds nothing
-  (`semantic: "off"`), is searched by its words alone.
-- **Search** is by words and by meaning, fused by rank: `mode` `hybrid`
-  (the default), `lexical` or `semantic`; `fields` filters by each field
-  named, `after` and `before` by a section's `at`.
+  section cut into chunks the slot reads whole, a chunk the index holds
+  never embedded again. A write is paid for by the fragment's owner, a
+  question by its asker (an agent's owner). An anonymous question, and
+  every one on a deployment that embeds nothing (`semantic: "off"`), is
+  searched by its words alone. An index holds one `space`'s vectors: a
+  write in another (the deployment's model changed) empties it first,
+  and its apps write their sources again.
+- **Search** is by words (BM25 by field: title, heading, context, text)
+  and by meaning (vectors held as `scheme` names, `i8x508+sign`), each
+  section ranked by its best chunk and the legs fused by rank: `mode`
+  `hybrid` (the default), `lexical` or `semantic`; `fields` filters by
+  each field named, `after` and `before` by a section's `at`. A hit's
+  `lexical` and `semantic` are its rank and score in each leg; cosines of
+  answers naming one `space` and `scheme` compare across fragments.
+- **Many fragments at once**: the platform's own route embeds a question
+  once and asks each fragment's supervisor at `POST /search/asked`
+  (`Forwarded {query, vector?}`), which the router maps no outside path
+  to. It is never embedded again, and answers as `POST …/search`.
 - **Deletes follow the files**: a source named by one of the fragment's
   paths is forgotten when a move of main deletes that file, gone from every
-  answer at once. A deleted or wiped fragment's index ends with it.
+  answer at once. A deleted chunk's words leave the index's segments at
+  its next fold (an hour after); SQLite's freed pages and Cloudflare's 30
+  days of point-in-time recovery may keep its bytes that long. A deleted
+  or wiped fragment's index ends with it: released whole, and never
+  written again, by a write landing late too.
 
 ## Apps
 

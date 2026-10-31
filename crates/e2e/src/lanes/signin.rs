@@ -236,7 +236,7 @@ fn deploying_cases(s: &mut Suite, api: &Api) -> Result<()> {
 /// `cargo xtask deploy` asks until every object class answers its release:
 /// the Registry's skew hook stands in for an object of another release.
 fn probe_cases(s: &mut Suite, api: &Api) -> Result<()> {
-    let classes = ["Registry", "Principal", "Ledger", "Fragment", "Computer"];
+    let classes = ["Registry", "Principal", "Ledger", "Fragment", "Computer", "SearchIndex"];
     let probe = || api.unsigned("GET", "/healthz/objects", None);
     // valid: every class's probe object admits the Worker's release, its schema ready
     let r = probe()?;
@@ -886,8 +886,8 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
     }
     s.ok("nor does a fragment origin's sign-in", escaped.is_empty(), format!("{escaped:?}"));
 
-    // the browser and the CLI decide alike, and as the model says (docs/MODEL.md,
-    // Visibility): public, link, members; a page, a file, the file list, an app
+    // the browser and the CLI decide alike, and as the model says (docs/api.md,
+    // Principals and access): public, link, members; a page, a file, the file list, an app
     // route (which sees who is asking), operations
     let member_f2 = site_cookie(api, &member_session, &f)?;
     let outsider_f = site_cookie(api, &outsider_session, &f)?;

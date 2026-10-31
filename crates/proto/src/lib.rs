@@ -579,7 +579,7 @@ pub enum ErrorCode {
     /// 502: code.storage (or another service the platform calls) failed.
     UpstreamFailed,
     /// 503: the identity registry did not answer; nothing signed is
-    /// decided without it (docs/finite-integration.md, rule 7).
+    /// decided without it (docs/cloudflare-v1.md, R15, rule 7).
     RegistryUnavailable,
     /// 402: the paying person's ledger refused the spend (no credit, a
     /// fragment's cap, a read-only overdraft; the message says which:
@@ -1405,7 +1405,7 @@ impl Tier {
 /// The tier agents and AI steps run on unless they name another.
 pub const DEFAULT_TIER: Tier = Tier::Cheap;
 
-/// What an identity is (docs/finite-integration.md). A fragment's own key
+/// What an identity is (docs/cloudflare-v1.md, R15). A fragment's own key
 /// stays the fragment's and is not registered. An agent has a designated
 /// owner, a person.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1713,7 +1713,7 @@ pub struct OpDecl {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input: Option<Value>,
     /// A mutation whose calls leave no ledger row (`"ephemeral": true`):
-    /// no replay (the same id runs again) and no effects (docs/MODEL.md).
+    /// no replay (the same id runs again) and no effects (docs/api.md, Apps).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub ephemeral: bool,
     /// What it does, in plain text, for a person or an agent choosing it

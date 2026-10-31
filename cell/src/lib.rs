@@ -71,6 +71,7 @@ mod schedules;
 mod schema;
 mod search;
 mod searchable;
+mod search_index;
 mod runs_on;
 mod serve;
 mod share;
@@ -224,7 +225,7 @@ pub(crate) fn authenticate(req: &Request, url: &Url, payload: Payload<'_>) -> Ce
 /// the body, and the answer are one definition both ends compile against).
 /// Its refusals pass through; not reaching it, a failure inside it, or an
 /// answer that does not decode is `registry_unavailable`: nothing signed
-/// is decided without it (docs/finite-integration.md, rule 7). A registry
+/// is decided without it (docs/cloudflare-v1.md, R15, rule 7). A registry
 /// of another release refuses the call before it reads it, and is asked
 /// again a few times, then is `deploying` (routed.rs, `send_again`): a
 /// deploy going out never has one release act and the other read its

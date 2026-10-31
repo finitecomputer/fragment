@@ -94,13 +94,17 @@ class ApiError extends Error {
 const UPDATING = "Updating — back in a moment";
 // this page's writes still going: a reload for a new release waits for them
 let writing = 0;
-async function api(method, path, body) {
+// `body`: JSON, or bytes as they are (a File or Blob, an ArrayBuffer or a
+// typed array: an upload), sent as `type`, else as a Blob's own type
+async function api(method, path, body, type) {
   const headers = { "x-fragment-shell": "1" };
-  if (body !== undefined) headers["content-type"] = "application/json";
+  const bytes = body instanceof Blob || body instanceof ArrayBuffer || ArrayBuffer.isView(body);
+  const kind = bytes ? type || body.type : body !== undefined && "application/json";
+  if (kind) headers["content-type"] = kind;
   const writes = method !== "GET";
   if (writes) writing++;
   try {
-    const r = await fetch(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body), credentials: "same-origin" });
+    const r = await fetch(path, { method, headers, body: body === undefined || bytes ? body : JSON.stringify(body), credentials: "same-origin" });
     heard(r);
     const out = await r.json().catch(() => ({}));
     if (r.status === 503 && out.error === "deploying") {
@@ -1434,7 +1438,7 @@ const { retitle, rename } = createTitles({ $, api, seg, byName, titleOf, reload:
 
 // ---- the launcher (launcher.js): one input for starting a chat or finding one again ----
 const launcher = createLauncher({
-  $, el, api, ApiError, seg, state, byName, isChat, titleOf, chatTitle, mark, iconOf, primaryAgent, newChatAgent, agentsOwnChat, UNTITLED,
+  $, el, api, seg, state, byName, isChat, titleOf, chatTitle, mark, iconOf, primaryAgent, newChatAgent, agentsOwnChat, UNTITLED,
   openChat, openApp, chatFrame, composeIn, newChat, leaveSidebar, closeMenu, notice, prewake: () => prewake(), originOf,
   views: () => views,
   busy: (name) => refresh.isBusy(state.frames.get(name)),
@@ -1572,8 +1576,8 @@ const settings = createSettings({
   notices: { hideNotice, noticeCurrent: (gen) => gen === noticeGen, notice },
   sections: { computerSection, connectionsSection: (...args) => connectionsSection(...args), simplexSection },
   agents: { getComputer: () => state.computer, getAgents: () => state.agents, faceControls, agentSettings, addAgentForm, renderAgentFaces, paintHomes },
-  releaseInfo: () => ({ mine: release.mine, deployed: DEPLOYED }), beginWrite: () => { writing++; return () => { writing--; }; },
-  heard: (r) => heard(r), allFragments: () => state.fragments, own, freeLabel, load, named, openApp,
+  releaseInfo: () => ({ mine: release.mine, deployed: DEPLOYED }),
+  allFragments: () => state.fragments, own, freeLabel, load, named, openApp,
 });
 function openSettings(push = true, failed = null) { return settings.openSettings(push, failed); }
 function reopenSettings(failed = null) { return settings.reopenSettings(failed); }

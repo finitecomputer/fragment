@@ -116,13 +116,80 @@ pub struct Hit {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub location: Option<Value>,
     pub snippet: String,
+    /// Its fused score: reciprocal rank fusion (k = 60) of the legs below.
     pub score: f64,
     pub signals: Vec<String>,
+    /// Where the words leg found it, if it did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lexical: Option<Lexical>,
+    /// Where the meaning leg found it, if it did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic: Option<Semantic>,
+}
+
+/// A section's place in the words leg: its rank there (from 1) and its
+/// best chunk's BM25, higher better, by this fragment's own statistics
+/// (so not comparable across fragments).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Lexical {
+    pub rank: usize,
+    pub bm25: f64,
+}
+
+/// A section's place in the meaning leg: its rank there (from 1) and its
+/// best chunk's cosine with the question, as `SCHEME` estimates it:
+/// comparable across fragments whose answers name the same space.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Semantic {
+    pub rank: usize,
+    pub cosine: f64,
+}
+
+/// How every index holds a vector: each component as int8 at the one
+/// scale 127/0.25 (so a dot product over 508² is a cosine), and its sign
+/// bit, which the first pass reads.
+pub const SCHEME: &str = "i8x508+sign";
+
+/// What a deployment's vectors mean: its embeddings model, their
+/// dimensions, and the version it names, if any.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Space {
+    pub model: String,
+    pub dimensions: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Found {
     pub results: Vec<Hit>,
-    /// `on`, or `off`: this deployment embeds nothing, so words alone.
+    /// `on`, or `off`: words alone answered (this deployment embeds
+    /// nothing, the question was not embedded, or the index holds vectors
+    /// of another space until its sources are written again).
     pub semantic: String,
+    /// Whether this life ever wrote its index: `false`, nothing was asked
+    /// of it, and `results` is empty.
+    pub indexed: bool,
+    /// The space of the cosines, and `SCHEME`: both, whenever this
+    /// deployment embeds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub space: Option<Space>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheme: Option<String>,
+}
+
+/// A question the platform embedded already, for one fragment of many
+/// (`POST /search/asked`, a supervisor's route the router never maps):
+/// searched by `vector` (the deployment's space, little-endian float32,
+/// base64), never embedded again, so its asker pays once; with none, by
+/// its words alone.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Forwarded {
+    pub query: Query,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vector: Option<String>,
 }

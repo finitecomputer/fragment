@@ -185,16 +185,10 @@ pub struct WorkOs<'a> {
 impl WorkOs<'_> {
     /// Who vouches for a person's subject: this environment. A person is
     /// keyed by `(issuer, subject)`, so finite.computer's login (another
-    /// environment) is another issuer (docs/finite-integration.md).
+    /// environment) is another issuer (docs/cloudflare-v1.md, R15).
     pub fn issuer(&self) -> String {
         format!("workos:{}", self.client_id)
     }
-}
-
-/// The search service's bearer token (bound as `SEARCH_TOKEN`), sent only
-/// to the service this deployment names (`FRAGMENT_SEARCH_URL`).
-pub async fn search_token(env: &Env) -> CellResult<String> {
-    required(env, store::SEARCH_TOKEN).await
 }
 
 /// The account's restricted Stripe key (bound as `STRIPE_KEY`).
