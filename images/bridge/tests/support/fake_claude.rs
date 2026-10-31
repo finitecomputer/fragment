@@ -68,7 +68,10 @@ fn record(args: &[String], real: &Path, out: &Path) {
     let mut cmd = Command::new(real);
     // the real claude dies with its recorder, as a computer's processes do
     // all at once (the crash scenario kills the recorder)
+    // (Linux's: elsewhere a recording's crash leaves the real one to exit
+    // on its closed input.)
     // SAFETY: prctl is async-signal-safe, and touches only this child.
+    #[cfg(target_os = "linux")]
     unsafe {
         std::os::unix::process::CommandExt::pre_exec(&mut cmd, || {
             if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) == 0 {
