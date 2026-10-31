@@ -78,12 +78,11 @@ const STOP_MS_MAX: u64 = 2_500;
 /// cut turns closed) is waited for at most this long before the gateway
 /// starts; it takes about half a second.
 const END_PREVIOUS_LIFE_MS_MAX: u64 = 30_000;
+/// Bot Mode's hook in a profile, as images before route A linked it (to
+/// `/opt/fragment/hooks/fragment-bot-chat`, which this image does not hold).
+const OLD_HOOK: &str = "hooks/fragment-bot-chat";
 /// The bridge is restarted at most this many times before the boot fails.
 const BRIDGE_RESTARTS_MAX: u32 = 10;
-/// The Bot Mode keeper (bots.rs) is restarted at most this many times; past
-/// it a bot's teammates reach it by Hermes' own path alone, and the computer
-/// runs on.
-const KEEPER_RESTARTS_MAX: u32 = 10;
 /// Readahead reads at most this many files.
 const READAHEAD_FILES_MAX: usize = 5_000;
 /// The computer's agents are read again this often while awake: one
@@ -696,12 +695,11 @@ async fn write_profile(api: &Api, a: &Agent, home: &Path, ids: Option<(u32, u32)
     // after the config
     write_credentials(a, home, ids);
     let synced = sync::round(api, a, &dir, &own).await;
-    // its Bot Mode identity (its title, its job's first line), and the hook
-    // that titles its own chat's session Bot Chat (bots.rs)
+    // its identity (its title, its role else its job's first line: bots.rs)
     write_identity(a, &dir, ids, &face);
-    match bots::link_hook(&dir, Path::new(&format!("{OPT}/{}", bots::HOOK))) {
-        Ok(()) => chown(&dir.join("hooks"), ids),
-        Err(e) => ev!("profile.hook_failed", { "agent": a.fragment, "error": e.to_string() }),
+    // Bot Mode's hook, linked by images before route A, links to nothing now
+    if std::fs::symlink_metadata(dir.join(OLD_HOOK)).is_ok_and(|m| m.file_type().is_symlink()) {
+        let _ = std::fs::remove_file(dir.join(OLD_HOOK));
     }
     match synced {
         Ok(d) => ev!("profile.written", { "agent": a.fragment, "profile": wire::profile(&a.fragment), "fresh": fresh, "model": main.map(|m| m.name()), "pulled": d.pulled, "pushed": d.pushed, "conflicts": d.conflicts, "ms": t.elapsed().as_millis() as u64 }),
@@ -712,9 +710,9 @@ async fn write_profile(api: &Api, a: &Agent, home: &Path, ids: Option<(u32, u32)
 /// An agent's agent fragment's title and role, its name and what it does
 /// (docs/api.md, "An agent's name and picture"), as its status says them
 /// now (none: it has none): read once for both files written from them,
-/// its config (`write_config`) and its Bot Mode identity
-/// (`write_identity`). Unread, it is said, and each file stays as it was,
-/// or, with none yet, names the agent by its name on the computer.
+/// its config (`write_config`) and its identity (`write_identity`).
+/// Unread, it is said, and each file stays as it was, or, with none yet,
+/// names the agent by its name on the computer.
 async fn read_face(api: &Api, a: &Agent) -> Result<fragment_bridge::api::Face, ()> {
     api.face(&a.fragment, &a.fragment).await.map_err(|e| ev!("profile.title_unread", { "agent": a.fragment, "error": e.to_string() }))
 }
@@ -761,7 +759,7 @@ async fn write_config(api: &Api, a: &Agent, dir: &Path, ids: Option<(u32, u32)>,
     Some(main)
 }
 
-/// An agent's Bot Mode identity (bots.rs, `profile_yaml`): its agent
+/// An agent's identity (bots.rs, `profile_yaml`): its agent
 /// fragment's title, its name everywhere (docs/api.md, "An agent's name and
 /// picture"), as `read_face` read it, and its role there, else its job's
 /// first line from its SOUL.md as the sync left it. Written when it changed: at its boot, as
@@ -769,8 +767,7 @@ async fn write_config(api: &Api, a: &Agent, dir: &Path, ids: Option<(u32, u32)>,
 /// again with its model, every `HERMES_BOOT_MODEL_MS`), nothing restarted:
 /// Hermes reads `profile.yaml` again as it uses it. A title unread leaves
 /// the file as it was, or, with none yet, names it by its name on the
-/// computer. Bot Mode has no picture (Hermes v0.21.6 reads a profile's
-/// title, display name and description alone).
+/// computer.
 fn write_identity(a: &Agent, dir: &Path, ids: Option<(u32, u32)>, face: &Result<fragment_bridge::api::Face, ()>) {
     let path = dir.join("profile.yaml");
     let (title, role) = match face {
@@ -872,74 +869,20 @@ fn spawn_bridge(card_timeout_s: u64) -> Option<Child> {
     }
 }
 
-/// The Bot Mode keeper (`images/hermes/botmode.py`, bots.rs), in Hermes'
-/// own Python as the hermes user: it reads the bots file, and writes
-/// nothing while the platform holds the computer.
-fn spawn_keeper(home: &Path) -> Option<Child> {
-    let keeper = Command::new("/command/s6-setuidgid")
-        .args(["hermes", "/opt/hermes/.venv/bin/python", &format!("{OPT}/botmode.py")])
-        .env("HOME", home)
-        .env("HERMES_HOME", home)
-        .env("FRAGMENT_RUN", RUN)
-        .env("FRAGMENT_HOLD", held::HOLD)
-        .current_dir("/")
-        .spawn();
-    match keeper {
-        Ok(child) => Some(child),
-        Err(e) => {
-            ev!("boot.keeper_failed", { "error": e.to_string() });
-            None
-        }
-    }
-}
-
 /// The bridge's screens file (each agent's own desktop), then its ready
 /// file (every agent whose profile is written): a screen is named before
 /// its agent runs, and goes with it.
-fn write_ready(agents: &[Agent], home: &Path, chats: &BotChats) {
+fn write_ready(agents: &[Agent], home: &Path) {
     write_whole(Path::new(&format!("{RUN}/{SCREENS_FILE}")), &desktop::screens_file(agents, home), None);
-    write_bots(agents, home, chats);
     write_whole(Path::new(&format!("{RUN}/{READY_FILE}")), &agents::ready_file(agents), None);
 }
 
-/// The bots file (bots.rs), for the agents whose Bot Chat is found.
-fn write_bots(agents: &[Agent], home: &Path, chats: &BotChats) {
-    write_whole(Path::new(&format!("{RUN}/{}", bots::BOTS_FILE)), &bots::bots_file(agents, home, chats), None);
-}
-
-/// Each agent's Bot Chat as found (bots.rs, `bot_chat`), by its fragment.
-type BotChats = BTreeMap<String, String>;
-
-/// Looks for the Bot Chat of each agent that has none found yet, in its
-/// list for its owner: at a boot, as agents come, and on the agents'
-/// cadence while one is missing (the shell makes an agent's chat after it
-/// assigns the agent). Whether one was found. Bounded: one list a missing
-/// agent, and a computer runs at most `AGENTS_MAX` of them.
-async fn find_bot_chats(api: &Api, agents: &[Agent], chats: &mut BotChats) -> bool {
-    let mut found = false;
-    let missing: Vec<&Agent> = agents.iter().filter(|a| !chats.contains_key(&a.fragment)).collect();
-    for a in missing {
-        match api.fragments_for(&a.fragment, &a.owner).await {
-            Ok(list) => {
-                if let Some(chat) = bots::bot_chat(&a.fragment, &list) {
-                    ev!("botmode.chat_found", { "agent": a.fragment, "chat": chat });
-                    chats.insert(a.fragment.clone(), chat);
-                    found = true;
-                }
-            }
-            Err(e) => ev!("botmode.chat_unread", { "agent": a.fragment, "error": e.to_string() }),
-        }
-    }
-    found
-}
-
-/// The chat each agent's route names (bots.rs, `profile_routes`): its Bot
-/// Chat, else, for one with none found, a chat it is in (`route_chat`,
-/// from its own list, as the bridge lists what it follows). Bounded: one
-/// list an agent with no Bot Chat, at most `AGENTS_MAX` of them.
-async fn route_chats(api: &Api, agents: &[Agent], chats: &BotChats) -> BotChats {
-    let mut routed = chats.clone();
-    for a in agents.iter().filter(|a| !chats.contains_key(&a.fragment)) {
+/// The chat each agent's route names (bots.rs, `profile_routes`): a chat
+/// it is in (`route_chat`, from its own list, as the bridge lists what it
+/// follows). Bounded: one list an agent, at most `AGENTS_MAX` of them.
+async fn route_chats(api: &Api, agents: &[Agent]) -> BTreeMap<String, String> {
+    let mut routed = BTreeMap::new();
+    for a in agents {
         match api.fragments(&a.fragment).await {
             Ok(list) => {
                 if let Some(chat) = bots::route_chat(&a.fragment, &list) {
@@ -1034,7 +977,7 @@ async fn ask_gateway(home: &Path, verb: &str) -> Result<serde_json::Value, Strin
 /// no turn before its profile is whole. A removed agent leaves the ready
 /// file, so the bridge stops at once; its profile waits for the next boot.
 #[allow(clippy::too_many_arguments)]
-async fn follow_agents(api: &Api, change: &agents::Change, now: &[Agent], home: &Path, ids: Option<(u32, u32)>, route: &hermes::Route, credential_env: &[String], chats: &mut BotChats, team: &[hermes::Teammate]) {
+async fn follow_agents(api: &Api, change: &agents::Change, now: &[Agent], home: &Path, ids: Option<(u32, u32)>, route: &hermes::Route, credential_env: &[String], team: &[hermes::Teammate]) {
     let t = Instant::now();
     let names = |l: &[Agent]| l.iter().map(|a| a.fragment.clone()).collect::<Vec<_>>();
     ev!("agents.changed", { "added": names(&change.added), "removed": names(&change.removed), "credentials": names(&change.credentials), "agents": now.len() });
@@ -1060,8 +1003,7 @@ async fn follow_agents(api: &Api, change: &agents::Change, now: &[Agent], home: 
             Err(e) => ev!("agents.serve_unasked", { "error": e, "ms": asked.elapsed().as_millis() as u64 }),
         }
     }
-    find_bot_chats(api, &change.added, chats).await;
-    write_ready(now, home, chats);
+    write_ready(now, home);
     ev!("agents.ready", { "agents": now.len(), "ms": t.elapsed().as_millis() as u64 });
 }
 
@@ -1257,11 +1199,8 @@ async fn boot_main() {
     let card_timeout_s = hermes::card_timeout_s(env("HERMES_BOOT_CARD_TIMEOUT_S").as_deref());
     // HERMES_BOOT_SCREEN_IDLE_MS: a test's shorter idle bound for desktops
     let (screen_idle_ms, screen_idle_every_ms) = desktop::idle_bounds(env("HERMES_BOOT_SCREEN_IDLE_MS").as_deref());
-    // each agent's Bot Chat, found before the gateway's config: the
-    // agent's route is there (bots.rs, `profile_routes`)
-    let mut chats = BotChats::new();
-    find_bot_chats(&api, &agents, &mut chats).await;
-    let routes = bots::profile_routes(&agents, &route_chats(&api, &agents, &chats).await);
+    // each agent's route, in the gateway's config (bots.rs, `profile_routes`)
+    let routes = bots::profile_routes(&agents, &route_chats(&api, &agents).await);
     let managed = hermes::managed_config(&lean, card_timeout_s, screen_idle_ms) + &routes;
     std::fs::write("/etc/hermes/config.yaml", managed).unwrap_or_else(|e| fail(&format!("/etc/hermes/config.yaml: {e}")));
     let default_cfg = home.join("config.yaml");
@@ -1272,12 +1211,6 @@ async fn boot_main() {
         // nothing to do.
         let _ = std::fs::write(&default_cfg, hermes::default_config(&route.base));
         chown(&default_cfg, ids);
-    }
-    // Bot Mode's roster lists the gateway's own profile as @hermes, always:
-    // its role says it is no agent (bots.rs)
-    let gateway_profile = home.join("profile.yaml");
-    if std::fs::read_to_string(&gateway_profile).ok().as_deref() != Some(bots::GATEWAY_PROFILE_YAML) {
-        write_whole(&gateway_profile, bots::GATEWAY_PROFILE_YAML, ids);
     }
     // The managed skills' directory exists before any profile names it:
     // Hermes skips an external dir it does not find, until the profile's
@@ -1294,11 +1227,9 @@ async fn boot_main() {
         // anyway, as it would find it
         Err(_) => ev!("boot.end_previous_life_failed", { "error": "still running", "ms": END_PREVIOUS_LIFE_MS_MAX }),
     }
-    write_ready(&agents, &home, &chats);
+    write_ready(&agents, &home);
     let mut bridge = spawn_bridge(card_timeout_s);
     let Some(gateway) = start_gateway(&home) else { fail("no gateway") };
-    let mut keeper = spawn_keeper(&home);
-    let mut keeper_restarts = 0u32;
     // its answer to the platform's holds, for its whole life
     let quiet = std::sync::Arc::new(Quiet::default());
     tokio::spawn(answer_holds(quiet.clone(), ids));
@@ -1340,22 +1271,15 @@ async fn boot_main() {
         }
         if !alive(gateway) {
             ev!("boot.gateway_exited");
-            stop(gateway, bridge.as_mut(), keeper.as_mut()).await;
+            stop(gateway, bridge.as_mut()).await;
             std::process::exit(1);
-        }
-        if let Some(k) = keeper.as_mut() {
-            if let Ok(Some(status)) = k.try_wait() {
-                keeper_restarts += 1;
-                ev!("boot.keeper_exited", { "status": status.code(), "restarts": keeper_restarts });
-                keeper = (keeper_restarts <= KEEPER_RESTARTS_MAX).then(|| spawn_keeper(&home)).flatten();
-            }
         }
         if let Some(b) = bridge.as_mut() {
             if let Ok(Some(status)) = b.try_wait() {
                 restarts += 1;
                 ev!("boot.bridge_exited", { "status": status.code(), "restarts": restarts });
                 if restarts > BRIDGE_RESTARTS_MAX {
-                    stop(gateway, None, keeper.as_mut()).await;
+                    stop(gateway, None).await;
                     fail("the bridge keeps exiting");
                 }
                 bridge = spawn_bridge(card_timeout_s);
@@ -1418,13 +1342,9 @@ async fn boot_main() {
                         }
                         let change = agents::diff(&agents, &c.agents);
                         if !change.is_empty() {
-                            follow_agents(&api, &change, &c.agents, &home, ids, &route, &credential_env, &mut chats, &team).await;
+                            follow_agents(&api, &change, &c.agents, &home, ids, &route, &credential_env, &team).await;
                         }
                         agents = c.agents;
-                        // an agent's chat made after the agent: its Bot Chat now
-                        if agents.iter().any(|a| !chats.contains_key(&a.fragment)) && find_bot_chats(&api, &agents, &mut chats).await {
-                            write_bots(&agents, &home, &chats);
-                        }
                     }
                     // once per outage: the next read that answers ends it
                     Err(e) if !agents_unread => {
@@ -1453,7 +1373,7 @@ async fn boot_main() {
                     let dir = hermes::profile_dir(&home, &a.fragment);
                     match sync::round(&api, a, &dir, &own).await {
                         Ok(d) if d != sync::Done::default() => {
-                            // its job may have changed: its Bot Mode description with it
+                            // its job may have changed: its role with it
                             if d.pulled > 0 {
                                 write_identity(a, &dir, ids, &read_face(&api, a).await);
                             }
@@ -1475,21 +1395,21 @@ async fn boot_main() {
         }
     }
     ev!("boot.signal");
-    stop(gateway, bridge.as_mut(), keeper.as_mut()).await;
+    stop(gateway, bridge.as_mut()).await;
     std::process::exit(0);
 }
 
-/// SIGTERM to the gateway, the bridge and the Bot Mode keeper, then wait
-/// for them, at most `STOP_MS_MAX`.
-async fn stop(gateway: u32, mut bridge: Option<&mut Child>, mut keeper: Option<&mut Child>) {
+/// SIGTERM to the gateway and the bridge, then wait for them, at most
+/// `STOP_MS_MAX`.
+async fn stop(gateway: u32, mut bridge: Option<&mut Child>) {
     let t = Instant::now();
     signal(gateway, libc::SIGTERM);
-    for c in [bridge.as_deref_mut(), keeper.as_deref_mut()].into_iter().flatten() {
+    if let Some(c) = bridge.as_deref_mut() {
         signal(c.id(), libc::SIGTERM);
     }
     // bounded by STOP_MS_MAX
     while t.elapsed() < Duration::from_millis(STOP_MS_MAX) {
-        let waiting = alive(gateway) || [bridge.as_deref_mut(), keeper.as_deref_mut()].into_iter().flatten().any(|c| matches!(c.try_wait(), Ok(None)));
+        let waiting = alive(gateway) || bridge.as_deref_mut().is_some_and(|c| matches!(c.try_wait(), Ok(None)));
         if !waiting {
             break;
         }
