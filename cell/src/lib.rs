@@ -71,6 +71,7 @@ mod schedules;
 mod schema;
 mod search;
 mod searchable;
+mod search_index;
 mod runs_on;
 mod serve;
 mod share;

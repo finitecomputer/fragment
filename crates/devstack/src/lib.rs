@@ -311,17 +311,6 @@ pub fn write_dev_vars(project: &Path, vars: &[(&str, &str)]) -> Result<()> {
     Ok(())
 }
 
-/// A fleet's search service (search/README.md): where it listens and the
-/// token it takes, which the fleet seeds as `SEARCH_TOKEN_NAME`.
-#[derive(Clone)]
-pub struct SearchVars {
-    pub url: String,
-    pub token: String,
-}
-
-/// The search token's name in the store, as deploy/example.jsonc names it.
-pub const SEARCH_TOKEN_NAME: &str = "fragment-search-token";
-
 /// What a local deployment is configured with. The cell reads its
 /// settings as Worker variables, from `.dev.vars` (mode 600) under
 /// `wrangler dev`, and its keys from Secrets Store bindings
@@ -373,9 +362,6 @@ pub struct Fleet {
     pub workos: Option<WorkOsVars>,
     /// Seats sold: Stripe (the fake in `crates/fakes`; docs/billing.md).
     pub stripe: Option<StripeVars>,
-    /// The search service (search/README.md; `FRAGMENT_SEARCH_URL`), and
-    /// its token, when the fleet searches.
-    pub search: Option<SearchVars>,
     /// The platform's origin (sign-in, the platform session;
     /// `FRAGMENT_PLATFORM_URL`, which every fleet names).
     pub platform_url: String,
@@ -454,7 +440,6 @@ impl Fleet {
         let providers: Vec<&str> = self.operator_key_values.iter().map(|(p, _)| p.as_str()).collect();
         let mut bound = store::Bound::conventional(self.workos.is_some(), self.stripe.is_some(), &providers, &[]);
         bound.model_keys = self.model_keys.iter().map(|k| (k.slot.clone(), k.name.clone())).collect();
-        bound.search_token = self.search.as_ref().map(|_| SEARCH_TOKEN_NAME.to_string());
         bound.connection_secrets = self.connection_secret_values.iter().map(|(p, _)| (p.clone(), format!("fragment-{p}-oauth-secret"))).collect();
         bound
     }
@@ -483,9 +468,6 @@ impl Fleet {
                 Some((_, value)) => anyhow::ensure!(*value == key.value, "the model key {} is one secret, at one value", key.name),
                 None => values.push((key.name.as_str(), key.value.as_str())),
             }
-        }
-        if let (Some(name), Some(s)) = (&bound.search_token, &self.search) {
-            values.push((name.as_str(), s.token.as_str()));
         }
         for ((_, name), (_, value)) in bound.operator_keys.iter().zip(&self.operator_key_values) {
             values.push((name.as_str(), value.as_str()));
@@ -525,9 +507,6 @@ impl Fleet {
         }
         if let Some(u) = &self.ai_url {
             vars.push(("FRAGMENT_AI_URL", u.as_str()));
-        }
-        if let Some(s) = &self.search {
-            vars.push(("FRAGMENT_SEARCH_URL", s.url.as_str()));
         }
         if let Some(g) = &self.ai_gateway {
             vars.push(("AI_GATEWAY_ID", g.as_str()));
