@@ -1,4 +1,4 @@
-//! Test levers (docs/api.md, `FRAGMENT_TEST_SECRET`; docs/secrets.md): the
+//! Test levers (docs/api.md, Test levers; docs/secrets.md): the
 //! `/api/test/*` routes the e2e pulls, and the sign-in of its people,
 //! exist only on a fleet given a test secret, and answer only a request
 //! that carries it. A local fleet (dev's and the e2e's, under `wrangler
