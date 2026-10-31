@@ -3665,7 +3665,10 @@ async fn teammates_ask_each_other() {
     assert_eq!((&q["body"]["to"], &q["body"]["return_to"]), (&json!(["npub1maple"]), &json!(jchat)), "for maple, to come back to juniper's chat: {q}");
     let mturn = fragment_bridge::records::turn_id("maple--k3x9", &pair, "chat", q["seq"].as_u64().unwrap());
     within(&fake, &jchat, &c, 180_000, "maple's answer said on in juniper's chat", |w| answers_of(w, "juniper", "ping from juniper").first().is_some_and(|a| ended(w, &jchat, &woke("juniper", a)))).await;
-    let (manswer, a) = fake.with(|w| (reply(w, &pair, &mturn), answers_of(w, "juniper", "ping from juniper")[0].clone()));
+    // maple's reply goes to their chat in its own lane, her answer to
+    // juniper's tasks in juniper's: neither waits for the other
+    within(&fake, &pair, &c, 30_000, "maple's reply in their chat", |w| !reply(w, &pair, &mturn).is_empty()).await;
+    let (manswer, a) =fake.with(|w| (reply(w, &pair, &mturn), answers_of(w, "juniper", "ping from juniper")[0].clone()));
     assert!(manswer.contains("ping from juniper"), "maple answered in their chat: {manswer}");
     assert_eq!((&a["principal"], &a["body"]["name"], &a["body"]["outcome"], &a["body"]["turn"]), (&json!("npub1juniper"), &json!("Maple"), &json!("idle"), &json!(mturn)));
     let woken = fake.with(|w| w.bodies(&jchat, "work", "turn.start").into_iter().find(|b| b["turn"] == woke("juniper", &a).as_str())).expect("its start");

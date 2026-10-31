@@ -1117,6 +1117,16 @@ enum Job {
     Draft { agent: String, turn: String, text: Option<String> },
 }
 
+impl Job {
+    /// The turn a job is of (a post's, by its body: a reply's, a step's).
+    fn turn(&self) -> Option<&str> {
+        match self {
+            Job::Post { body, .. } => body["turn"].as_str(),
+            Job::Claim { turn, .. } | Job::Fence { turn, .. } | Job::Owed { turn, .. } | Job::Draft { turn, .. } => Some(turn),
+        }
+    }
+}
+
 struct Lane {
     queue: Mutex<VecDeque<Job>>,
     ready: Notify,
@@ -1219,14 +1229,28 @@ async fn work(api: Api, fragment: String, lane: Arc<Lane>, claims: Claims, mut s
         match job {
             Job::Draft { agent, turn, text } => {
                 if text.is_some() {
-                    let wait = drafted.get(&turn).map(|t| Duration::from_millis(limits::DRAFT_INTERVAL_MS).saturating_sub(t.elapsed())).unwrap_or_default();
-                    if !wait.is_zero() {
-                        tokio::time::sleep(wait).await;
-                        // A newer draft may have come meanwhile.
-                        let newer = lane.queue.lock().expect("lane").iter().any(|j| matches!(j, Job::Draft { turn: t, .. } if *t == turn));
-                        if newer {
-                            continue;
+                    // Within its interval it waits, unless its turn has more
+                    // behind it (a newer draft, or its reply or its end):
+                    // then it is moot, and waiting would hold that behind it
+                    // (a reply waited up to the interval so, and an ask's
+                    // answer, in its asker's lane, overtook it).
+                    let until = drafted.get(&turn).map(|t| *t + Duration::from_millis(limits::DRAFT_INTERVAL_MS));
+                    let mut moot = false;
+                    // bounded: each pass ends at the interval's end, or as a
+                    // job comes (a lane holds at most LANE_MAX)
+                    while let Some(left) = until.map(|u| u.saturating_duration_since(Instant::now())).filter(|l| !l.is_zero()) {
+                        if lane.queue.lock().expect("lane").iter().any(|j| j.turn() == Some(turn.as_str())) {
+                            moot = true;
+                            break;
                         }
+                        tokio::select! {
+                            _ = tokio::time::sleep(left) => {}
+                            _ = lane.ready.notified() => {}
+                        }
+                    }
+                    // the interval out, a newer draft of its turn still goes first
+                    if moot || (until.is_some() && lane.queue.lock().expect("lane").iter().any(|j| matches!(j, Job::Draft { turn: t, .. } if *t == turn))) {
+                        continue;
                     }
                     drafted.insert(turn.clone(), Instant::now());
                 } else {

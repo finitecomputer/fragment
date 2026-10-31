@@ -228,6 +228,31 @@ async fn streaming_drafts_then_the_final() {
     bridge.stop().await;
 }
 
+/// Goal: a reply is never held behind its turn's drafts. Drafts go at most
+/// one a `DRAFT_INTERVAL_MS`; a draft that would wait out its interval
+/// while its turn's reply is already behind it is moot, so the reply goes
+/// at once (it waited up to the interval, and a teammate's answer, in its
+/// asker's lane, overtook it: the Docker lane's `teammates_ask_each_other`).
+/// The reply streams in drafts 1 ms apart, so it all comes within one
+/// interval of its first draft.
+#[tokio::test]
+async fn a_reply_is_not_held_behind_its_drafts_interval() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    let chat = fake.chat("talk", &["juniper"]);
+    let dir = support::dir("drafts-moot");
+    let bridge = support::start(support::config(&fake.url(), &dir, support::settings()), support::script_paced(Duration::from_millis(1)));
+    following(&fake, 2).await;
+    let said = fake.say(&chat, &person("paul"), json!({ "text": "tell me a long story please" }));
+    let turn = turn_of("juniper", &chat, seq(&said));
+    fake.until(WAIT, "its first draft", |w| w.drafts.iter().any(|d| d.2 == turn && d.3.is_some())).await;
+    let drafted = Instant::now();
+    fake.until(WAIT, "its reply", |w| replies(w, &chat).iter().any(|r| r["turn"] == turn)).await;
+    let held = drafted.elapsed();
+    // held, it came the whole interval after; seen within half of it, it was not
+    assert!(held < Duration::from_millis(fragment_bridge::limits::DRAFT_INTERVAL_MS / 2), "its reply came {held:?} after its first draft, not held for the interval");
+    bridge.stop().await;
+}
+
 /// Goal (Paul, 2026-10-24: everything the agent says is a reply in the
 /// chat): a tool call is a step on `work`; the words the agent said before
 /// it are a reply of their own, posted before the step and marked
