@@ -260,6 +260,24 @@ pub struct Return {
     pub said: String,
     #[serde(default, skip_serializing_if = "u32_is_zero")]
     pub files: u32,
+    /// Its interim words (narration), the answer's when it said nothing
+    /// else. A state from before holds none.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub narrated: String,
+}
+
+/// `text` added to what an answer carries (`into`), a paragraph of its
+/// own, with no control characters (an answer's body stays within the
+/// platform's bound once its text is escaped), within its bound.
+fn said_more(into: &mut String, text: &str) {
+    if text.trim().is_empty() || into.len() >= limits::ANSWER_TEXT_MAX_BYTES {
+        return;
+    }
+    if !into.is_empty() {
+        into.push_str("\n\n");
+    }
+    into.extend(text.trim().chars().filter(|c| !c.is_control() || matches!(c, '\n' | '\t')));
+    *into = records::cut_bytes(into, limits::ANSWER_TEXT_MAX_BYTES);
 }
 
 /// The platform's answer to a claim (`Effect::Claim`).
@@ -314,6 +332,11 @@ pub struct OpenReply {
     pub part: u32,
     pub text: String,
     pub files: Vec<LocalFile>,
+    /// Said before a call that only updates memory (housekeeping): the
+    /// turn's answer if the turn ends next (Hermes sends nothing after
+    /// one), else interim, whatever seals it (more words, a step, a card),
+    /// so a turn never answers twice (#729).
+    pub held: bool,
 }
 
 /// A turn the bridge admitted.
@@ -1218,7 +1241,7 @@ impl Engine {
             let asking = self.agents.iter().find(|a| a.identity == asker && a.fragment != agent.fragment)?;
             // as its chat shows it, else its label while that is unread
             let name = self.views.get(fragment).and_then(|v| v.names.get(&agent.identity)).cloned().unwrap_or_else(|| agent.name.clone());
-            Some(Return { agent: asking.fragment.clone(), chat: chat.clone(), name, said: String::new(), files: 0 })
+            Some(Return { agent: asking.fragment.clone(), chat: chat.clone(), name, said: String::new(), files: 0, narrated: String::new() })
         });
         self.state.admitted += 1;
         let turn = Turn {
@@ -1321,7 +1344,8 @@ impl Engine {
         let by = self.agent(&t.agent).expect("a held turn's agent is on this computer");
         let text = match outcome {
             Outcome::Error(why) if refused => records::refused_text(&r.name, &t.fragment, &t.text, why),
-            _ => records::answer_text(&r.name, &t.fragment, &t.text, &r.said, r.files, outcome),
+            // what it said, else its narration (it answered, then worked)
+            _ => records::answer_text(&r.name, &t.fragment, &t.text, if r.said.trim().is_empty() { &r.narrated } else { &r.said }, r.files, outcome),
         };
         let hop = t.hop.saturating_add(1).min(limits::HOPS_MAX);
         let body = records::answer(&r.chat, &text, &by.identity, &r.name, &t.cause, id, outcome, hop, refused);
@@ -1934,10 +1958,16 @@ impl Engine {
             Event::Step { turn, step } => {
                 // the words before a tool call are a reply, posted before
                 // its step; the turn works on after them, so they are
-                // interim (its push leaves them out), unless the call only
-                // updates its memory: an answer said beside housekeeping is
-                // the turn's answer (Hermes sends nothing after it)
-                self.seal(&turn, step.category != records::Category::Memory);
+                // interim (its push leaves them out). Before a call that
+                // only updates its memory they are held open: the turn's
+                // answer if it ends next, interim if it goes on (`seal`)
+                if step.category == records::Category::Memory {
+                    if let Some(open) = self.state.turns.get_mut(&turn).expect("checked").open.as_mut() {
+                        open.held = true;
+                    }
+                } else {
+                    self.seal(&turn, true);
+                }
                 let t = self.state.turns.get_mut(&turn).expect("checked");
                 t.steps = t.steps.saturating_add(1);
                 self.dirty = true;
@@ -2059,6 +2089,9 @@ impl Engine {
         let view = self.views.get(&self.state.turns[id].fragment).cloned().unwrap_or_default();
         let t = self.state.turns.get_mut(id).expect("sealing a held turn");
         let Some(open) = t.open.take() else { return };
+        // words held at a memory call: the turn went on after them (`end`
+        // lets them go as its answer)
+        let interim = interim || open.held;
         t.last_part = t.last_part.max(open.part);
         let empty = open.text.trim().is_empty() && open.files.is_empty();
         // interim replies have a bound of their own, so narration never
@@ -2074,18 +2107,15 @@ impl Engine {
         if interim {
             t.interim += 1;
         }
-        // what an asked turn says, its answer carries back (its interim
-        // words are narration, not the answer)
-        if let Some(r) = t.ret.as_mut().filter(|_| !interim) {
-            r.files = r.files.saturating_add(u32::try_from(open.files.len()).expect("a reply's files are bounded"));
-            if !open.text.trim().is_empty() && r.said.len() < limits::ANSWER_TEXT_MAX_BYTES {
-                if !r.said.is_empty() {
-                    r.said.push_str("\n\n");
-                }
-                // no control characters: an answer's body stays within the
-                // platform's bound once its text is escaped
-                r.said.extend(open.text.trim().chars().filter(|c| !c.is_control() || matches!(c, '\n' | '\t')));
-                r.said = records::cut_bytes(&r.said, limits::ANSWER_TEXT_MAX_BYTES);
+        // what an asked turn says, its answer carries back; its interim
+        // words are narration, kept apart: the answer only when it said
+        // nothing else (it answered, then worked: #720)
+        if let Some(r) = t.ret.as_mut() {
+            if interim {
+                said_more(&mut r.narrated, &open.text);
+            } else {
+                r.files = r.files.saturating_add(u32::try_from(open.files.len()).expect("a reply's files are bounded"));
+                said_more(&mut r.said, &open.text);
             }
         }
         self.dirty = true;
@@ -2139,6 +2169,10 @@ impl Engine {
     /// Unexpired cards outlive the run, except an explicit Stop. Their
     /// later answers are reconstructed from the journal as fresh turns.
     fn end(&mut self, id: &str, outcome: Outcome, unanswered: Closed) {
+        // words held at a memory call, with nothing after them: the answer
+        if let Some(open) = self.state.turns.get_mut(id).and_then(|t| t.open.as_mut()) {
+            open.held = false;
+        }
         self.seal(id, false);
         let t = self.state.turns.get_mut(id).expect("ending a held turn");
         assert!(t.active(), "a turn's run ends once: {id} is {:?}", t.phase);

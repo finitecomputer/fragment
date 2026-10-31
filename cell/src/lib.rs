@@ -27,6 +27,7 @@
 //! The suffix's own name, when the platform is elsewhere, sends a browser
 //! to the platform.
 
+mod across;
 mod ai;
 mod address;
 mod assets;
@@ -291,7 +292,7 @@ pub(crate) fn acting_for(url: &Url) -> CellResult<Option<String>> {
 
 /// Where `for` is honored (`signer_for`: docs/api.md, Principals and
 /// access), as a refusal elsewhere says it.
-pub(crate) const FOR_HONORED: &str = "`for` is honored on a fragment's routes (/api/f/…), /api/fragments and the model routes (/api/models/…) only";
+pub(crate) const FOR_HONORED: &str = "`for` is honored on a fragment's routes (/api/f/…), a search across fragments (POST /api/search), /api/fragments and the model routes (/api/models/…) only";
 
 /// The signer of a request that must be signed, resolved, with the body
 /// the router read. It acts as itself: a `for` is refused here
@@ -1203,8 +1204,9 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
             None => Err(CellError::new(ErrorCode::NotFound, format!("no shell file {}", file.join("/")))),
         },
         // the shell, for everyone: signed out it asks them to sign in;
-        // `/settings` opens its settings, `/apps` the person's apps, `/welcome` a new person's welcome
-        (Method::Get, [""] | ["settings"] | ["apps"] | ["welcome"]) => shell::page(&req, env, cfg, &url).await,
+        // `/settings` opens its settings, `/apps` the person's apps, `/history`
+        // every chat they have had, `/welcome` a new person's welcome
+        (Method::Get, [""] | ["settings"] | ["apps"] | ["history"] | ["welcome"]) => shell::page(&req, env, cfg, &url).await,
         // the operators' admin page: to anyone else, the 404 below
         (Method::Get, ["admin"]) => shell::admin_page(&req, env, cfg, &url).await,
         // Finite's about page, privacy policy and terms, for anyone (signed out too)
@@ -1321,6 +1323,9 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
             let search = Request::new(inner.as_str(), Method::Get)?;
             crate::routed::send(env, "PRINCIPAL", &who.identity.id, search).await
         }
+        // one question asked of several fragments' indexes, as the signer
+        // (across.rs): the meta-brain's search
+        (Method::Post, ["api", "search"]) => across::route(req, env, cfg, &url, ctx).await,
         // a person's export of everything that is theirs (export.rs)
         (_, ["api", "export", rest @ ..]) => {
             let rest = rest.to_vec();

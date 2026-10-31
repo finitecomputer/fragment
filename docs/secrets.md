@@ -42,14 +42,24 @@ only from that computer's egress, toward that provider.
   leaves, over https and only toward a host the secret names
   (`fragment_core::secrets::may_fill`). A value filled into a URL that
   would change its scheme, host, port, path segments or query parameters
-  is not sent, and a failure's message and the answer name it as its
-  placeholder again (`fill_url`, `redact`). Its hosts are set only with
+  is not sent (`fill_url`). A failure's message and the answer name every
+  value the fetch filled, a header's or the URL's, as its placeholder
+  again, in each form a vendor writes one back in, character by
+  character: as it is, its UTF-8 percent-encoded (either hex case, once or
+  twice), JSON-escaped (`\u` past ASCII and surrogate pairs, a control
+  character's short escape such as `\n`, also within JSON), as HTML character references; and in base64 for a value of 12
+  bytes or more, itself in any of those forms (`redact`; #814). A value that comes back compressed, hashed or
+  cut in pieces by the vendor is past what matching text can name. Its hosts are set only with
   its value, so an editor who cannot read a value cannot send it anywhere
   its setter did not mean. An editor sets one through the API (`fragment
   secret set`) or from the fragment's own page (`PUT __secrets/{KEY}`,
   the same contract over its session), so a connector's page takes a
   pasted token, and makes a webhook's secret in the browser, without
   either passing through app code or a model.
+- **No deployment traces its fetches**: a Workers trace records each
+  fetch's URL and query, which may carry a secret filled at the egress,
+  so `cargo xtask deploy` pins `observability.traces` off beside its logs
+  (#814).
 - **Agents hold no key.** Model calls go through the platform's model
   route, which adds a deployment key toward that API alone; operator keys
   and connections are swapped in at the computer's egress.

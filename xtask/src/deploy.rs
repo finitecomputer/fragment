@@ -118,7 +118,7 @@ struct Deployment {
     /// The connectors its people may link, and the exact endpoints a
     /// computer's relay carries for them (`FRAGMENT_CONNECTORS`;
     /// docs/computers.md, "Connector policy"). Without it, the cell's
-    /// default (SimpleX); `[]` turns every connector off.
+    /// default (SimpleX and Telegram); `[]` turns every connector off.
     connectors: Option<Vec<fragment_core::connectors::Connector>>,
     /// The provider catalog a computer's swap offers (decisions 22 and 37;
     /// `fragment_core::catalog`): each row a connection, an operator key or
@@ -1223,7 +1223,12 @@ fn worker_config(d: &Deployment, n: &Names, store_id: &str, release: &Release, r
     assets.insert("directory".into(), json!(dir));
     c.insert("workers_dev".into(), json!(false));
     c.insert("preview_urls".into(), json!(false));
-    c.insert("observability".into(), json!({ "enabled": true }));
+    // logs, never traces: a trace records each fetch's URL and query
+    // (Cloudflare's spans and attributes), and a job's fetch carries a
+    // secret filled into its URL (docs/secrets.md). Pinned off, so a
+    // compatibility date that turns tracing on with `enabled` (Cloudflare's
+    // stated plan) cannot start keeping them (#814).
+    c.insert("observability".into(), json!({ "enabled": true, "traces": { "enabled": false } }));
     c.insert("routes".into(), json!(n.routes.iter().map(|r| json!({ "pattern": r.pattern, "zone_name": r.zone })).collect::<Vec<_>>()));
     c.insert("workflows".into(), json!([{ "name": n.jobs, "binding": "JOBS", "class_name": "Job" }]));
     c.insert("r2_buckets".into(), json!([{ "binding": "BLOBS", "bucket_name": n.bucket }]));
@@ -1951,6 +1956,19 @@ mod tests {
     /// The Worker's config a deploy writes: every secret a binding to its
     /// store secret by name, no secret's value and no old name anywhere in
     /// it, and the WorkOS client id no longer a variable.
+    /// Goal (#814): no deployment traces its fetches, whose URLs may carry
+    /// a filled secret; its logs stay on.
+    #[test]
+    fn a_deploy_never_traces_its_fetches() {
+        for file in ["deploy/e2e.jsonc", "deploy/example.jsonc"] {
+            let text = fs::read_to_string(devstack::repo_root().join(file)).unwrap();
+            let v: Value = serde_json::from_str(&devstack::strip_comments(&text)).unwrap();
+            let d = load(&config_file("traces", &v)).unwrap();
+            let cell = worker_config(&d, &names(&d, Some("p5")).unwrap(), "0f0e0d0c", &test_release(), &devstack::repo_root()).unwrap();
+            assert_eq!(cell["observability"], json!({ "enabled": true, "traces": { "enabled": false } }), "{file}");
+        }
+    }
+
     #[test]
     fn the_deploy_binds_its_secrets_by_name() {
         let text = fs::read_to_string(devstack::repo_root().join("deploy/e2e.jsonc")).unwrap();
