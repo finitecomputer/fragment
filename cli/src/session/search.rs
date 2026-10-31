@@ -19,6 +19,8 @@
 //! search right, and an archive made before its host had search is
 //! searched from its next import. A host without search (its routes 404),
 //! or one that cannot be reached, is said and skipped: the import stands.
+//! A search that is full (507: an index's chunks are capped) takes no more,
+//! so nothing more is sent: what was not is counted refused with it.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -136,17 +138,22 @@ pub fn sync(c: &Client, name: &str, spool: &Spool) -> Searched {
     let todo: Vec<(&String, &Entry)> = entries.iter().filter(|(k, e)| held.get(&session::session_path(k)) != Some(&e.sha256)).collect();
     // a refusal that would be every one's (not allowed, no route): stop
     let stop = AtomicBool::new(false);
+    // search full (507): each write not yet sent would be refused too
+    let full = AtomicBool::new(false);
     let write = |todo: &[(&String, &Entry)]| -> Vec<std::result::Result<Wrote, (String, String)>> {
         let blobs = Blobs::new(c, name);
         let mut out = Vec::new();
         for (key, e) in todo {
-            if stop.load(Ordering::Relaxed) {
+            if stop.load(Ordering::Relaxed) || full.load(Ordering::Relaxed) {
                 break;
             }
             let replaces = held.get(&session::session_path(key)).map_or("", String::as_str);
             out.push(write_one(c, name, spool, &storage, &blobs, &head, key, e, replaces).map_err(|(status, why)| {
                 if matches!(status, Some(401 | 403 | 404)) {
                     stop.store(true, Ordering::Relaxed);
+                }
+                if status == Some(507) {
+                    full.store(true, Ordering::Relaxed);
                 }
                 (said_id(key), why)
             }));
@@ -158,7 +165,9 @@ pub fn sync(c: &Client, name: &str, spool: &Spool) -> Searched {
         let writers: Vec<_> = todo.chunks(per).map(|part| scope.spawn(move || write(part))).collect();
         writers.into_iter().flat_map(|w| w.join().unwrap_or_else(|_| vec![Err(("a writer".into(), "panicked".into()))])).collect()
     });
-    let (mut written, mut overtaken, mut left_out, mut refused, mut refused_count) = (0, 0, 0, Vec::new(), 0);
+    // those not sent once search was full
+    let unsent = if full.load(Ordering::Relaxed) { todo.len().saturating_sub(results.len()) } else { 0 };
+    let (mut written, mut overtaken, mut left_out, mut refused, mut refused_count) = (0, 0, 0, Vec::new(), unsent);
     for r in results {
         match r {
             Ok(Wrote::Written(left)) => {

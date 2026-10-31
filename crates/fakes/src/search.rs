@@ -40,6 +40,9 @@ pub struct Index {
     /// Upserts that wrote (a new revision), and that changed nothing.
     pub written: u32,
     pub unchanged: u32,
+    /// Chunks it holds at most (each section one here), as the cell's
+    /// index caps them: a write past it is refused, 507 `storage_full`.
+    pub chunks_max: Option<usize>,
 }
 
 fn refused(status: u16, message: &str) -> Response {
@@ -80,6 +83,11 @@ impl Index {
                 }
                 let changed = current.as_deref() != Some(held.revision.as_str());
                 let sections = held.sections.len();
+                let holds = self.sources.iter().filter(|(s, _)| **s != source).map(|(_, h)| h.sections.len()).sum::<usize>() + sections;
+                if let Some(max) = self.chunks_max.filter(|max| changed && holds > *max) {
+                    let message = format!("this fragment's index holds {holds} chunks, at most {max}: split its sources across fragments");
+                    return Response::json(507, &json!({ "error": "storage_full", "message": message }));
+                }
                 if changed {
                     self.written += 1;
                     self.sources.insert(source.clone(), held);

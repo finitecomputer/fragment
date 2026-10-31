@@ -134,7 +134,9 @@ sent.
   file. So an import that writes nothing puts search right too, and an
   archive made before its host had search is searched from its next
   import. A host without search, or one that cannot be reached, is said
-  and skipped: the import stands.
+  and skipped: the import stands. A search that is full (its index's
+  chunks are capped: 507) is sent no more; each conversation not written
+  is counted refused, and the next import writes it once there is room.
 
 ## Where they come from
 

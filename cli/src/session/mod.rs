@@ -967,6 +967,22 @@ mod tests {
         assert!(held("sessions/hermes-gone.json").is_some() && held("notes/x.md").is_some(), "nothing deleted: the platform forgets a source when its file goes");
     }
 
+    /// A search that is full (507) is sent no more: the import's writes
+    /// stop there, and each conversation not written is counted refused.
+    #[test]
+    fn an_import_stops_writing_once_search_is_full() {
+        let (mock, c) = archive();
+        mock.enable_search(NAME);
+        let spool = spooled((0..40).map(|i| session(&format!("c{i:02}"), Kind::Chat, "2026-10-01T09:00:00Z", &["hello", "hi"])).collect());
+        write(&c, NAME, &spool).unwrap();
+        mock.search_index(NAME, |ix| ix.chunks_max = Some(1));
+        mock.take_requests("");
+        let s = search::sync(&c, NAME, &spool);
+        let sent = mock.take_requests("").get("POST upsert").copied().unwrap_or(0);
+        assert!(matches!(&s, search::Searched::Written { written: 1, refused_count: 39, refused, .. } if refused[0].why.contains("at most 1")), "{s:?}");
+        assert!(sent < 40, "writes stop once search is full: {sent} of 40 sent");
+    }
+
     /// Goal: an import that pauses between its writes and its search, while
     /// another writes after it and puts search right, undoes nothing of the
     /// other's search: no older copy written back over a newer one, no
