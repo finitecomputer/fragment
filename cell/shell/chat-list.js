@@ -7,7 +7,7 @@ export function createChatList({ api, ui, data, selection, menus, navigation, li
   const { $, el, patch, agentFace, notice } = ui;
   const { byName, own, chats, shown, titleOf, chatTitle, homeMark, isGroup, agentOfChat, agentsOf, agents, allFragments, computer, isGuest, personId, isThread, waitingOn, renderThreads } = data;
   const { current, page, getFrame } = selection;
-  const { menuOwner, openMenu, shareItem, archiveItem } = menus;
+  const { menu, menuEdge, menuOwner, openMenu, shareItem, archiveItem } = menus;
   const { newChat, rename, openChat, openApp, openScreen, leaveSidebar, seg } = navigation;
   // ---- chats: one flat list, newest first, the open one in the middle column ----
   function renderHeading() {
@@ -185,26 +185,41 @@ export function createChatList({ api, ui, data, selection, menus, navigation, li
   }
   // The launcher's key, as the person's keyboard names it.
   const LAUNCHER_KEY = /Mac|iPhone|iPad|iPod/.test(navigator.userAgentData?.platform ?? navigator.platform ?? "") ? "⌘K" : "Ctrl K";
-  // An agent's hero (Paul, 2026-10-31: the sidebar is a section per agent):
-  // its face, its name, and under it what it is doing in any of its chats
-  // (the most pressing), real state only. It starts a new chat with it.
+  // An agent's hero (Paul, 2026-10-31: the sidebar is a section per agent,
+  // each headed by the original pill): its face, its name, and under it
+  // what it is doing in any of its chats (the most pressing), real state
+  // only. It opens its agent's menu, attached below it. Drawn again, it
+  // keeps the edge its pointer lit and whether its menu is open, so it stays
+  // the same node unless what it shows changed.
   function hero(agent, doing) {
     const says = DOING_SAYS[doing?.doing];
     const name = titleOf(agent.fragment);
     const row = el("button", "row agent-hero");
     row.type = "button";
     row.dataset.key = `agent:${agent.fragment}`;
-    row.title = `New chat with ${name}`;
-    row.setAttribute("aria-label", `New chat with ${name}${says ? `, ${says.toLowerCase()}` : ""}`);
-    row.disabled = !agent.identity || isGuest();
+    const was = $("chats").querySelector(`[data-key="${CSS.escape(row.dataset.key)}"]`);
+    if (was?.hasAttribute("style")) row.setAttribute("style", was.getAttribute("style"));
+    row.setAttribute("aria-label", `${name}${says ? `, ${says.toLowerCase()}` : ""}: its menu`);
+    row.setAttribute("aria-haspopup", "menu");
+    row.setAttribute("aria-controls", "menu");
+    row.setAttribute("aria-expanded", String(!!was && menuOwner()?.button === was));
     const face = el("span", "agent-hero-face");
     face.append(avatar(agentFace(agent.fragment, agent.identity), "small"));
     const named = el("span", "agent-hero-named");
     named.append(el("strong", "title", name));
     if (says) named.append(el("span", `agent-doing ${doing.doing}`, says));
     row.append(face, named);
-    row.onclick = () => { newChat(agent.identity); leaveSidebar(); };
+    row.onclick = () => openAgentMenu(agent, row);
     return row;
+  }
+  // An agent's menu: a new chat with it, its name, its profile, its screen.
+  function openAgentMenu(agent, trigger) {
+    openMenu(trigger, [
+      ...(agent.identity && !isGuest() ? [{ icon: "newChat", text: "New chat", onClick: () => { newChat(agent.identity); leaveSidebar(); } }] : []),
+      { icon: "rename", text: "Rename…", onClick: () => rename(agent.fragment) },
+      { icon: "agent", text: "Its profile", onClick: () => openApp(agent.fragment) },
+      ...(computer() ? [{ icon: "screen", text: "Its screen", onClick: () => openScreen(agent.fragment) }] : []),
+    ]);
   }
   // A section's chats: its five newest (and the open one, wherever it is),
   // then More, which shows the rest, and Less, which folds them again.
@@ -343,28 +358,45 @@ export function createChatList({ api, ui, data, selection, menus, navigation, li
     return b;
   }
   // Match the chat composer's edge reflection, including its 64px falloff.
+  // The pointer's reflection on the launcher's button and each agent's hero,
+  // as the chat composer's (its 64px falloff): each frame the pointer moved,
+  // every box read, then only their custom properties written (no list
+  // drawn, no read after a write). A hero whose menu is open lights the
+  // menu's edge in its place, over the hero and its menu.
   const sidebarHoverPointer = matchMedia("(hover: hover) and (pointer: fine)");
   let sidebarEdgeFrame = 0;
   let sidebarEdgePointer = null;
-  const sidebarEdgeControls = () => $("sidebar").querySelectorAll(".sidebar-new-chat");
+  const sidebarEdgeControls = () => $("sidebar").querySelectorAll(".agent-hero, .sidebar-new-chat");
+  const expandedEdge = (control) => control.getAttribute("aria-expanded") === "true" && !menu.hidden && menu.classList.contains("agent-menu");
+  const edgeLit = new WeakMap();
+  function lightEdge(surface, x, y, light) {
+    if (!light && !edgeLit.get(surface)) return;
+    edgeLit.set(surface, light);
+    surface.style.setProperty("--edge-x", `${x}px`);
+    surface.style.setProperty("--edge-y", `${y}px`);
+    surface.style.setProperty("--edge-light", String(light));
+  }
   function clearSidebarEdge() {
     cancelAnimationFrame(sidebarEdgeFrame);
     sidebarEdgeFrame = 0;
-    for (const control of sidebarEdgeControls()) control.style.setProperty("--edge-light", "0");
+    for (const surface of [...sidebarEdgeControls(), menuEdge]) lightEdge(surface, 0, 0, 0);
   }
   function updateSidebarEdge() {
     if (!sidebarEdgePointer || !sidebarHoverPointer.matches) return;
-    for (const control of sidebarEdgeControls()) {
-      const rect = control.getBoundingClientRect();
-      const x = sidebarEdgePointer.x - rect.left, y = sidebarEdgePointer.y - rect.top;
-      const radius = Math.min(rect.width / 2, rect.height / 2, parseFloat(getComputedStyle(control).borderTopLeftRadius));
-      const qx = Math.abs(x - rect.width / 2) - rect.width / 2 + radius;
-      const qy = Math.abs(y - rect.height / 2) - rect.height / 2 + radius;
+    const controls = [...sidebarEdgeControls()];
+    const menuBottom = controls.some(expandedEdge) ? menu.getBoundingClientRect().bottom : 0;
+    const boxes = controls.map((control) => {
+      const r = control.getBoundingClientRect();
+      const open = expandedEdge(control);
+      return { surface: open ? menuEdge : control, left: r.left, top: r.top, width: r.width, height: open ? menuBottom - r.top : r.height, radius: open ? 24 : Math.min(r.width, r.height) / 2 };
+    });
+    for (const { surface, left, top, width, height, radius } of boxes) {
+      const x = sidebarEdgePointer.x - left, y = sidebarEdgePointer.y - top;
+      const qx = Math.abs(x - width / 2) - width / 2 + radius;
+      const qy = Math.abs(y - height / 2) - height / 2 + radius;
       const distance = Math.max(0, Math.hypot(Math.max(qx, 0), Math.max(qy, 0)) + Math.min(Math.max(qx, qy), 0) - radius);
       const proximity = Math.max(0, 1 - distance / 64);
-      control.style.setProperty("--edge-x", `${x}px`);
-      control.style.setProperty("--edge-y", `${y}px`);
-      control.style.setProperty("--edge-light", String(proximity * proximity));
+      lightEdge(surface, x, y, proximity * proximity);
     }
   }
   document.addEventListener("pointermove", event => {
@@ -422,5 +454,5 @@ export function createChatList({ api, ui, data, selection, menus, navigation, li
       archiveItem(name),
     ]);
   }
-  return { renderHeading, renderChats, loadInvites, primaryAgent, newChatAgent, ownAgents, markSeen };
+  return { renderHeading, renderChats, loadInvites, primaryAgent, newChatAgent, ownAgents, markSeen, edgeAgain: updateSidebarEdge };
 }

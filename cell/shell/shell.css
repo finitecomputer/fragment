@@ -756,10 +756,9 @@ iframe[data-blocked] { display: none; }
 /* a section per agent (chat-list.js): its hero, the original pill (face,
    name, what it is doing), then its chats; More unfolds the rest; Shared last */
 #chats { flex: 0 1 auto; min-height: 0; max-height: none; }
-#chats .agent-hero { flex: none; gap: 10px; height: 48px; margin: 10px 0 2px; padding: 8px 13px; border-radius: 999px; }
+#chats .agent-hero { --edge-light: 0; flex: none; gap: 10px; height: 48px; margin: 10px 0 2px; padding: 8px 13px; border: 1px solid transparent; border-radius: 999px; background: var(--bg-sidebar); }
 #chats .agent-hero:first-child { margin-top: 2px; }
 #chats .agent-hero:hover { background: var(--bg-active); }
-#chats .agent-hero:disabled { opacity: 1; cursor: default; }
 .agent-hero-face { display: flex; flex: none; }
 .agent-hero-face .agent-avatar { width: 26px; height: 26px; }
 .agent-hero-named { display: flex; flex: 1; flex-direction: column; justify-content: center; min-width: 0; }
@@ -794,10 +793,10 @@ iframe[data-blocked] { display: none; }
 .sidebar-new-chat:disabled { opacity: .45; cursor: default; }
 .launcher-key { color: var(--text-tertiary); font: 500 12px/1 var(--font-sans); white-space: nowrap; }
 @media (pointer: coarse) and (not (any-pointer: fine)) { .launcher-key { display: none; } .sidebar-new-chat { padding: 0; } }
-.sidebar-new-chat { position: relative; border-color: transparent; }
-.sidebar-new-chat:focus-visible, #new-chat:focus-visible, .search-dialog button:focus-visible { outline: 1px solid var(--border-strong); outline-offset: 2px; }
+.sidebar-new-chat, #chats .agent-hero { position: relative; border-color: transparent; }
+#chats .agent-hero:focus-visible, .sidebar-new-chat:focus-visible, #new-chat:focus-visible, .search-dialog button:focus-visible { outline: 1px solid var(--border-strong); outline-offset: 2px; }
 /* The composer's pointer-following reflection, with no resting outline. */
-.sidebar-new-chat::before, .sidebar-new-chat::after {
+.sidebar-new-chat::before, .sidebar-new-chat::after, .agent-hero::before, .agent-hero::after, .agent-menu-edge::before, .agent-menu-edge::after {
   content: ""; position: absolute; inset: -1px; z-index: 1; border-radius: inherit; padding: 1px; pointer-events: none;
   background: radial-gradient(180px circle at var(--edge-x, 50%) var(--edge-y, 50%), rgba(255,255,255,.65), rgba(255,255,255,.16) 45%, transparent 100%);
   -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
@@ -805,9 +804,17 @@ iframe[data-blocked] { display: none; }
   -webkit-mask-composite: xor; mask-composite: exclude;
   opacity: var(--edge-light); transition: opacity 160ms ease-out;
 }
-.sidebar-new-chat::after { filter: blur(2px); opacity: calc(var(--edge-light) * .35); }
+.sidebar-new-chat::after, .agent-hero::after, .agent-menu-edge::after { filter: blur(2px); opacity: calc(var(--edge-light) * .35); }
+/* an agent's hero, open: its menu hangs from it, one surface with it, and
+   the menu's edge (shell.js `menuEdge`) is lit in the hero's place */
+#chats .agent-hero[aria-expanded="true"] { border-radius: 24px 24px 0 0; background: var(--bg-sidebar); }
+.agent-hero[aria-expanded="true"]::before, .agent-hero[aria-expanded="true"]::after { opacity: 0; }
+.menu.agent-menu { --edge-light: 0; min-width: 0; padding: 4px 8px 10px; border: 0; border-radius: 0 0 24px 24px; background: var(--bg-sidebar); box-shadow: none; overflow-y: auto; }
+.menu.agent-menu button { min-height: 34px; border-radius: 8px; font-size: 13px; }
+.agent-menu-edge { --edge-light: 0; position: fixed; z-index: 21; border-radius: 24px; pointer-events: none; }
+.agent-menu-edge::before, .agent-menu-edge::after { inset: 0; box-sizing: border-box; border-radius: inherit; }
 @media (prefers-reduced-motion: reduce) {
-  .sidebar-new-chat::before, .sidebar-new-chat::after { transition: none; }
+  .sidebar-new-chat::before, .sidebar-new-chat::after, .agent-hero::before, .agent-hero::after, .agent-menu-edge::before, .agent-menu-edge::after { transition: none; }
 }
 /* an invite waiting on the person's email, above their chats: what it
    shares, who invited them and as what, Accept and Decline (shell.js renderInvites) */
