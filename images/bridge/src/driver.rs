@@ -1347,8 +1347,20 @@ impl Sent {
 pub(crate) async fn post(api: &Api, fragment: &str, agent: &str, channel: &str, id: &str, mut body: Value, files: &[LocalFile], door: Option<&crate::simplex::door::Key>, tries: u32, stop: watch::Receiver<bool>) -> Sent {
     assert!(tries >= 1, "a post is tried");
     let mut backoff = Backoff::default();
+    // its files refused here (an agent that is a viewer of a connector's
+    // chat may post there, not upload): its words go alone, saying so
+    let mut files_refused = false;
     for attempt in 1..=tries {
-        let uploaded = upload(api, fragment, agent, files).await;
+        let uploaded = match if files_refused { Ok(Vec::new()) } else { upload(api, fragment, agent, files).await } {
+            Err(e) if e.status() == Some(403) && !files.is_empty() => {
+                crate::ev!("upload.refused", { "fragment": fragment, "channel": channel, "id": id, "files": files.len() });
+                files_refused = true;
+                let said = body["text"].as_str().unwrap_or("").trim_end().to_string();
+                body["text"] = json!(format!("{said}{}({} could not be attached here.)", if said.is_empty() { "" } else { "\n\n" }, if files.len() == 1 { "Its file" } else { "Its files" }));
+                Ok(Vec::new())
+            }
+            other => other,
+        };
         let result = match uploaded {
             Ok(refs) => {
                 if !refs.is_empty() {

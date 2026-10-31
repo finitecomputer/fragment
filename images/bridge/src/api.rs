@@ -805,6 +805,32 @@ impl Api {
         self.json(Method::POST, &format!("/api/f/{}/door?for={}", name(fragment)?, encode(owner)), Some(agent), Some(body)).await
     }
 
+    /// What an editor does to a fragment, asked by the agent for its owner,
+    /// or as itself (`itself`): `secret` sets its `TELEGRAM_WEBHOOK_SECRET`,
+    /// `files` writes it a page, `token` asks for a token to push its code,
+    /// `seen` and `propose` call a Telegram connector's operations of an
+    /// editor's. On a connector, refused whomever an agent acts for, and
+    /// whatever its membership (docs/api.md, "An agent's doors"). The
+    /// script's `door poke` asks it, for the platform's lanes.
+    pub async fn poke(&self, agent: &str, owner: &str, fragment: &str, what: &str, itself: bool) -> Result<Value, ApiError> {
+        let op = |op: &str, input: Value| (Method::POST, format!("ops/{op}"), Some(json!({ "id": format!("poke-{op}"), "input": input })));
+        let (method, route, body) = match what {
+            "secret" => (Method::PUT, "secrets/TELEGRAM_WEBHOOK_SECRET".to_string(), Some(json!({ "value": "the-agent-knows-this", "hosts": ["api.telegram.org"] }))),
+            "files" => (Method::POST, "files".to_string(), Some(json!({ "key": "poke", "message": "a page of the agent's", "files": [{ "path": "site/setup.html", "text": "<script>/* the agent's */</script>" }] }))),
+            "token" => (Method::GET, "storage-token".to_string(), None),
+            "seen" => op("seen", json!({ "update": 999_999 })),
+            "propose" => op("propose", json!({ "nonce": "0".repeat(32), "user": 1, "chat": 1, "name": "Paul" })),
+            "visibility" => (Method::PUT, "visibility".to_string(), Some(json!({ "visibility": "link" }))),
+            "invite" => (Method::POST, "invites".to_string(), Some(json!({ "email": "poked@e2e.test", "role": "viewer" }))),
+            "rotate" => (Method::POST, "rotate".to_string(), Some(json!({ "scopes": ["view"] }))),
+            "status" => (Method::GET, "status".to_string(), None),
+            _ => return Err(ApiError::Refused { status: 400, error: "invalid_request".into(), message: format!("poke {what:?}: secret, files, token, seen, propose, visibility, invite, rotate or status") }),
+        };
+        let path = format!("/api/f/{}/{route}", name(fragment)?);
+        let path = if itself { path } else { format!("{path}?for={}", encode(owner)) };
+        self.json(method, &path, Some(agent), body).await
+    }
+
     /// `GET /f/{name}/__live`, as the agent.
     pub async fn live(&self, agent: &str, fragment: &str) -> Result<ClientWs, String> {
         let fragment = name(fragment).map_err(|e| e.to_string())?;
