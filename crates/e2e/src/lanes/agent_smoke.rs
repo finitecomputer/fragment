@@ -3,9 +3,11 @@
 //! flows a person uses, against a branch preview, on a Hermes computer on
 //! Cloudflare Containers, its real model, and Chrome. The hosted lane runs
 //! it by name (`cargo xtask e2e --hosted … --only agent-smoke`): it runs an
-//! agent for about half an hour and spends up to `PAID_CALLS` of the run's
-//! paid calls. A local run never has a real agent (needs.rs `RealAgent`):
-//! the hermes section runs the same image on the scripted model.
+//! agent for 3 to 7 minutes on a preview, and lends its person `PAID_CALLS`
+//! of the run's paid calls as it signs in (a run with fewer left refuses
+//! it, so its `--max-paid-calls` is 56 at least). A local run never has a
+//! real agent (needs.rs `RealAgent`): the hermes section runs the same
+//! image on the scripted model.
 //!
 //! An e2e person gets their default agent as the shell makes it
 //! (cell/shell/shell.js, `defaultAgent`), through the API, then:
@@ -440,7 +442,7 @@ fn status(chrome: &mut Browser, page: &Page) -> String {
 }
 
 pub fn agent_smoke(s: &mut Suite, api: &Api) -> Result<()> {
-    let why = format!("it runs a real agent on a Hermes computer for about half an hour, and spends up to {PAID_CALLS} of the run's paid calls");
+    let why = format!("it runs a real agent on a Hermes computer for 3 to 7 minutes, and lends its person {PAID_CALLS} of the run's paid calls");
     if !s.section_by_name(SECTION, &[Need::Levers, Need::Computers, Need::Models, Need::RealAgent], &why) {
         return Ok(());
     }
