@@ -87,10 +87,11 @@
 //!   (only the agent's own key's, as every request of its is); one signed
 //!   by a key that is no door's; `door bind <fragment>`: the agent asking,
 //!   for its owner, to bind that connector as its own door; `door poke
-//!   <fragment> <secret|files|token|seen|propose> [itself]`: the agent
-//!   asking, for its owner (or as itself), to do an editor's thing there
-//!   (`Api::poke`). The reply is `door linked`,
-//!   `door said <seq>`, `door bound`, `door poked <what>`, or `door
+//!   <fragment> <secret|files|token|seen|propose|visibility|invite|rotate|status>
+//!   [itself]`: the agent asking, for its owner (or as itself), to do an
+//!   editor's or a sharer's thing there (`Api::poke`). The reply is `door
+//!   linked`, `door said <seq>`, `door bound`, `door poked <what>` (and
+//!   `, its share link shown` when the answer holds it), or `door
 //!   refused: <why>`;
 //! - `ask <agent> <words>`: another agent of its computer asked `<words>`
 //!   with the fragment CLI, `fragment ask --return-to <this chat>`, as the
@@ -520,9 +521,10 @@ async fn door(agent: &crate::runtime::Agent, chat: &str, rest: &str) -> Result<S
     }
     if verb == "poke" {
         let words: Vec<&str> = said.split_whitespace().collect();
-        let [fragment, what, rest @ ..] = &words[..] else { return Err("say `door poke <fragment> <secret|files|token|seen|propose> [itself]`".into()) };
-        api.poke(&agent.fragment, &agent.owner, fragment, what, rest == ["itself"]).await.map_err(|e| e.to_string())?;
-        return Ok(format!("door poked {what}"));
+        let [fragment, what, rest @ ..] = &words[..] else { return Err("say `door poke <fragment> <secret|files|token|seen|propose|visibility|invite|rotate|status> [itself]`".into()) };
+        let answer = api.poke(&agent.fragment, &agent.owner, fragment, what, rest == ["itself"]).await.map_err(|e| e.to_string())?;
+        let link = if answer["viewToken"].is_string() { ", its share link shown" } else { "" };
+        return Ok(format!("door poked {what}{link}"));
     }
     if verb == "link" {
         let ticket: Ticket = serde_json::from_str(said.trim()).map_err(|e| format!("not a ticket: {e}"))?;

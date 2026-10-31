@@ -816,7 +816,11 @@ impl Api {
             "token" => (Method::GET, "storage-token".to_string(), None),
             "seen" => op("seen", json!({ "update": 999_999 })),
             "propose" => op("propose", json!({ "nonce": "0".repeat(32), "user": 1, "chat": 1, "name": "Paul" })),
-            _ => return Err(ApiError::Refused { status: 400, error: "invalid_request".into(), message: format!("poke {what:?}: secret, files, token, seen or propose") }),
+            "visibility" => (Method::PUT, "visibility".to_string(), Some(json!({ "visibility": "link" }))),
+            "invite" => (Method::POST, "invites".to_string(), Some(json!({ "email": "poked@e2e.test", "role": "viewer" }))),
+            "rotate" => (Method::POST, "rotate".to_string(), Some(json!({ "scopes": ["view"] }))),
+            "status" => (Method::GET, "status".to_string(), None),
+            _ => return Err(ApiError::Refused { status: 400, error: "invalid_request".into(), message: format!("poke {what:?}: secret, files, token, seen, propose, visibility, invite, rotate or status") }),
         };
         let path = format!("/api/f/{}/{route}", name(fragment)?);
         let path = if itself { path } else { format!("{path}?for={}", encode(owner)) };
