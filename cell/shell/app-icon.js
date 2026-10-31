@@ -178,9 +178,7 @@ export function createIconEditor(h, name, title, f, inline = false) {
   }
   // `body` (an image's bytes) kept as the icon
   async function put(body) {
-    const r = await fetch(path, { method: "PUT", headers: SHELL, body, credentials: "same-origin" });
-    const out = await r.json().catch(() => ({}));
-    if (!r.ok) throw new Error(out.message || r.statusText);
+    const out = await h.api("PUT", path, body);
     return { ...row, picture: out.icon };
   }
 
