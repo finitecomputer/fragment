@@ -96,7 +96,8 @@ fragment's is.
   `chats/`, or the folder holding it; cli/src/session/chats.rs), whose
   records are Hermes' sessions as its `export.py` joined them, keyed by
   the same ids. It reads only regular files inside `chats/`, no link out
-  of it and no device, each at most 64 MiB.
+  of it and no device, each at most 512 MiB, read through a message at a
+  time (a picture's base64, which `export.py` copied, is not held).
 
 Another store (Hermes' own database, another agent runtime's sessions) is
 another read into the same format.
