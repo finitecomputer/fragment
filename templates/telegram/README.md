@@ -45,6 +45,9 @@ the owner's setup above it (`site/telegram.js`).
   relayed or sent (the inbox still keeps what Telegram delivers, as any
   inbox does); unlinked, Telegram is told so, and the agent stays a
   viewer of the chat, its words there going nowhere else.
+- **Marked so:** its page tags it "Experimental" and "Less secure" (Paul,
+  2026-10-31), the latter literally: Telegram's servers read its messages,
+  where SimpleX's (tagged "Secure" in Settings) are end to end.
 - **What it is not:** end-to-end encrypted (Telegram's servers, and the
   platform, carry the text), a group bot, or a carrier of files and voice:
   the agent, a viewer here, attaches no file (its reply says it could

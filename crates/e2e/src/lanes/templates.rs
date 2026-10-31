@@ -70,6 +70,7 @@ pub fn templates(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.create_with(&owner, json!({ "name": blank, "template": "blank" }))?;
     let blank_cookie = format!("fragview={}", r.body["viewToken"].as_str().unwrap_or(""));
     template_pages(s, api, &todo, &todo_cookie, &blank, &blank_cookie)?;
+    telegram_page(s, api, &owner, &owner_session)?;
     for (k, role) in [(&editor, "editor"), (&viewer, "viewer")] {
         let r = api.share(&blank, &npub_of(k), role)?;
         anyhow::ensure!(r.status == 200, "adding a {role}: {r}");
@@ -184,6 +185,30 @@ fn template_pages(s: &mut Suite, api: &Api, todo: &str, todo_cookie: &str, blank
         b.close(page)?;
     }
     println!("      (starter screenshots: {})", shots.display());
+    Ok(())
+}
+
+/// The Telegram connector's page marks it what it is for its owner, a word
+/// each (Paul, 2026-10-31): experimental, and less secure, as Telegram's
+/// servers read its messages (SimpleX's, in Settings, are end to end).
+fn telegram_page(s: &mut Suite, api: &Api, owner: &Keys, session: &str) -> Result<()> {
+    let Some(mut b) = s.browser()? else {
+        s.ok("Chrome is installed for the Telegram connector's page (set CHROME_BIN)", false, "no Chrome found");
+        return Ok(());
+    };
+    let name = s.named(api, owner, "ttelegram")?;
+    let r = api.create_with(owner, json!({ "name": name, "template": "telegram" }))?;
+    anyhow::ensure!(r.status == 200, "a Telegram connector: {r}");
+    b.set_cookie(&format!("{}/", api.base), "fragment_session", session)?;
+    let page = b.open(&api.site_url(&name, "__signin?return=/"))?;
+    let drawn = b.until(&page, "document.querySelectorAll('.telegram .connector-tag').length === 2", std::time::Duration::from_secs(15));
+    let tags = b.eval(&page, "[document.querySelector('.telegram-head strong')?.textContent, ...[...document.querySelectorAll('.telegram .connector-tag')].map((t) => [t.textContent, t.title])]")?;
+    s.ok(
+        "the Telegram connector's page marks it experimental and less secure (Telegram's servers read it), a word each",
+        drawn && tags == json!(["Connect Telegram", ["Experimental", ""], ["Less secure", "Telegram's servers can read these messages"]]),
+        &tags,
+    );
+    b.close(page)?;
     Ok(())
 }
 

@@ -509,6 +509,7 @@ iframe[data-blocked] { display: none; }
 .settings-section h2:focus-visible { outline: 2px solid var(--accent-blue); outline-offset: 4px; border-radius: 2px; }
 .settings-section > p { margin: 0; padding: 12px 2px; }
 .settings-section > p.muted { color: var(--text-secondary); font-size: 14px; line-height: 1.55; }
+.settings-section > .connector-tags { display: flex; gap: 6px; padding: 12px 2px 0; }
 .settings-section .settings-line { display: flex; align-items: center; gap: 18px; width: 100%; padding: 15px 2px; margin: 0; border-bottom: 1px solid var(--border-strong); font-size: 14px; }
 .settings-line:last-child { border-bottom: 0; }
 .settings-key { flex: 0 0 156px; color: var(--text-secondary); }

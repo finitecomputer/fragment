@@ -33,6 +33,24 @@ async function platformJson(path, init) {
 const secret = (name, value) => platformJson(`./__secrets/${name}`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ value, hosts: [TELEGRAM_HOST] }) });
 const randomHex = (n) => [...crypto.getRandomValues(new Uint8Array(n))].map((b) => b.toString(16).padStart(2, "0")).join("");
 
+// what it is, a word each (Paul, 2026-10-31): experimental, and less
+// secure than SimpleX, its words end to end, as Telegram's servers read
+// these
+function tags() {
+  const t = el("span", "telegram-tags");
+  const less = el("span", "connector-tag", "Less secure");
+  less.title = "Telegram's servers can read these messages";
+  t.append(el("span", "connector-tag", "Experimental"), less);
+  return t;
+}
+
+// a step's heading, with the tags
+function head(text) {
+  const h = el("div", "telegram-head");
+  h.append(el("strong", "", text), tags());
+  return h;
+}
+
 export async function setup(root) {
   const me = await fragment.me();
   if (me.role !== "owner") return;
@@ -86,7 +104,7 @@ export async function setup(root) {
       }));
       const row = el("div", "telegram-row");
       row.append(input, go);
-      return say(el("strong", "", "Connect Telegram"), el("p", "", "Make a bot with @BotFather, then paste its token. Telegram messages aren't end-to-end encrypted."), row);
+      return say(head("Connect Telegram"), el("p", "", "Make a bot with @BotFather, then paste its token."), row);
     }
     // 2: the account, paired and confirmed here
     if (!state.paired) {
@@ -94,7 +112,7 @@ export async function setup(root) {
       if (p?.candidate) {
         const row = el("div", "telegram-row");
         row.append(button(`Yes, ${p.candidate.name} is me`, true, act(() => fragment.call("confirm", { user: p.candidate.user }))), button("No", false, act(() => fragment.call("unpair"))));
-        return say(el("strong", "", "Is this your Telegram?"), row);
+        return say(head("Is this your Telegram?"), row);
       }
       if (p) {
         const open = el("a", "telegram-open", "Open in Telegram");
@@ -104,11 +122,11 @@ export async function setup(root) {
         pollUntil(async () => !!(await fragment.call("state")).pairing?.candidate);
         const row = el("div", "telegram-row");
         row.append(open);
-        return say(el("strong", "", `Tap Start in @${state.bot.username}`), row);
+        return say(head(`Tap Start in @${state.bot.username}`), row);
       }
       const row = el("div", "telegram-row");
       row.append(button("Pair your Telegram", true, act(() => fragment.call("pair"))));
-      return say(el("strong", "", `@${state.bot.username} is connected`), row);
+      return say(head(`@${state.bot.username} is connected`), row);
     }
     // 3: the agent it is a door of
     if (!door.bound) {
@@ -117,16 +135,16 @@ export async function setup(root) {
       const choices = agents.map((a) => people.profiles?.[a]).filter((p) => p?.fragment);
       const row = el("div", "telegram-row");
       for (const p of choices) row.append(button(`Link to ${p.title || p.name || p.fragment}`, true, act(() => platformJson("./__door", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ act: "link", agent: p.fragment }) }))));
-      return say(el("strong", "", "Link your agent"), el("p", "", choices.length ? "Your Telegram messages will reach it as yours." : "Add your agent to this chat first."), row);
+      return say(head("Link your agent"), el("p", "", choices.length ? "Your Telegram messages will reach it as yours." : "Add your agent to this chat first."), row);
     }
     // done: a quiet line, and how to undo it
     const row = el("div", "telegram-row");
-    row.append(el("span", "telegram-done", `@${state.bot.username} · ${state.paired.name}`), button("Unpair", false, act(() => fragment.call("unpair"))), button("Unlink", false, act(() => platformJson("./__door", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ act: "unlink" }) }))));
+    row.append(el("span", "telegram-done", `@${state.bot.username} · ${state.paired.name}`), tags(), button("Unpair", false, act(() => fragment.call("unpair"))), button("Unlink", false, act(() => platformJson("./__door", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ act: "unlink" }) }))));
     say(row);
   }
 
   draw().catch((e) => {
     error = e?.message || String(e);
-    say(el("strong", "", "Telegram"));
+    say(head("Telegram"));
   });
 }
