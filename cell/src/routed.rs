@@ -263,8 +263,13 @@ enum Sent {
 }
 
 async fn sent(env: &Env, binding: &str, name: &str, req: Request) -> CellResult<Sent> {
-    let stub = env.durable_object(binding)?.get_by_name(name)?;
+    let stub = namespace(env, binding)?.get_by_name(name)?;
     sent_to(env, binding, name, stub, req).await
+}
+
+/// The objects of `binding`, reached here alone (xtask guards.rs).
+fn namespace(env: &Env, binding: &str) -> CellResult<worker::ObjectNamespace> {
+    Ok(env.durable_object(binding)?)
 }
 
 /// `sent`, to the object `stub` is (`name` says which, in a refusal's words).
@@ -408,7 +413,7 @@ pub(crate) async fn wake(env: &Env, class: &str, Wake { id }: Wake) -> CellResul
     }
     // Cloudflare refuses an id of another namespace (another class, another
     // account's) here, before any object is made
-    let ns = env.durable_object(binding)?;
+    let ns = namespace(env, binding)?;
     let id = ns.id_from_string(&id).map_err(|_| CellError::invalid(format!("{id} is no {class} object's id")))?;
     let named = id.to_string();
     match sent_to(env, binding, &named, id.get_stub()?, probe_request()?).await? {
