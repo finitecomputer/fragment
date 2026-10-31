@@ -22,7 +22,7 @@ import reads are cli/src/session/.
   | `format` | `session-archive/1` |
   | `id` | its id where it came from (Hermes': the session it began as) |
   | `origin` | where it came from: `hermes` |
-  | `reader` | which read made it: 10 the old Finite's export (a later, better or fixed read takes a higher number: An import) |
+  | `reader` | which read made it: 10 the old Finite's export, 20 Hermes' own database (a later, better or fixed read takes a higher number: An import) |
   | `agent` | the agent it was with, as its origin named it (optional) |
   | `kind` | `chat` (a person's conversation with the agent), `cron` (a scheduled job's run), `subagent` (a side task the agent ran) |
   | `title` | its own, else the first line its person said (80 characters), else `Untitled` |
@@ -98,6 +98,24 @@ fragment's is.
   the same ids. It reads only regular files inside `chats/`, no link out
   of it and no device, each at most 512 MiB, read through a message at a
   time (a picture's base64, which `export.py` copied, is not held).
+- **Hermes' `state.db`** (or a Hermes home holding it), read-only, in one
+  read transaction (cli/src/session/hermes.rs, which says how it follows
+  Hermes v0.21.7, checked against what that Hermes writes:
+  `hermes-v0.21.7.sql`): a conversation is a session and the ones Hermes
+  continued it in each time it compressed, as Hermes' own session list
+  joins them; its messages are what Hermes shows a person, each once. A
+  better read than the export's (20 to 10), which kept a compression's
+  copied tail twice. Bounded by what is kept: SQLite hands over only a
+  message's text parts and a mark for each medium (never a picture's
+  data), each call's id, name and the start of its arguments, and a
+  tool's output and reasoning their cut's worth (a list that is no list
+  of typed parts, as a person's `["red", "blue"]`, kept as the text it
+  is); a conversation whose kept rows (each row counted, empty or not)
+  pass twice its limit is refused alone, and so is one SQLite cannot read
+  whole, never kept as the part read; a database of more than 200,000
+  sessions is refused whole. On a platform computer (the CLI as its
+  agent) its own databases (its Hermes root's, any profile's) are
+  refused: their conversations are chats here already.
 
-Another store (Hermes' own database, another agent runtime's sessions) is
-another read into the same format.
+Another agent runtime's sessions (Claude Code's, Codex's) are another
+read into the same format.

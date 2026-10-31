@@ -858,16 +858,23 @@ The conversations you had with an agent somewhere else, kept in a
 private fragment of yours (kind `sessions`, titled Session Archive, made
 the first time you import): one file a conversation, under `sessions/`,
 and one index a kind, under `index/`, newest first. Bring them in from
-the old Finite's export (its `chats/`, or the folder holding it):
+the old Finite's export (its `chats/`, or the folder holding it), or
+from Hermes' own `state.db` (or the Hermes home holding it), read-only:
 
 ```
 fragment session import ~/finite-import/export              # the old Finite's export, unpacked
-fragment session import ~/finite-import/export --kind chat  # only chats (also: cron, subagent)
+fragment session import ~/.hermes                           # a Hermes home, or its state.db
+fragment session import ~/.hermes --kind chat               # only chats (also: cron, subagent)
 ```
 
+A `state.db` copied from elsewhere needs its `state.db-wal` beside it, or
+its newest messages are not in it. On an agent's computer here, its own
+Hermes databases are refused: their conversations are your chats here
+already.
+
 Each conversation is kept by its own id, so importing again adds
-nothing twice, and a newer copy of one (a later export) replaces the
-older; an older copy never does. It says what it added, updated and
+nothing twice, and a newer copy of one (a later export, the same chats
+from Hermes' database) replaces the older; an older copy never does. It says what it added, updated and
 already had, and what it left out and why: at most 18,000 conversations
 and 1 GiB an archive (an import past either adds nothing), 8 MiB a
 conversation. A tool's output and an agent's reasoning are cut to 2,000

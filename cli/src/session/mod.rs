@@ -2,7 +2,8 @@
 //! person's session archive (templates/sessions/README.md), a fragment of
 //! theirs of kind `sessions`, made at their first import. Its format, its
 //! limits and its merge are `fragment_core::session`'s; the stores it
-//! reads are this module's (`chats`: the old Finite's export). It writes as
+//! reads are this module's (`chats`: the old Finite's export; `hermes`:
+//! Hermes' own `state.db`). It writes as
 //! the archive's owner or as their agent acting for them (`FRAGMENT_FOR`),
 //! which is an editor of what its owner owns: one commit a batch of
 //! conversations, then one for the indexes, each on the head it read (a
@@ -15,6 +16,7 @@
 //! made or anything written.
 
 mod chats;
+mod hermes;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -34,7 +36,8 @@ use crate::codestorage::{Author, Change, CodeStorage, CsError, MAIN};
 pub enum SessionCmd {
     /// Bring an agent's past conversations into your Session Archive, a
     /// private fragment of yours (made the first time): from the old
-    /// Finite's export (its chats/ folder, or the folder holding it). Each
+    /// Finite's export (its chats/ folder, or the folder holding it), or
+    /// Hermes' own state.db (or a Hermes home holding one). Each
     /// conversation is kept by its own id, so importing again adds nothing
     /// twice and only a newer copy of one replaces it
     Import {
@@ -197,9 +200,18 @@ pub fn run(c: &Client, sub: SessionCmd) -> Result<Imported> {
     if !path.exists() {
         bail!(usage(format!("{} is no file or folder", path.display())));
     }
-    let root = chats::root_of(&path).ok_or_else(|| usage(format!("{} holds no export's chats/ (its index.json): name the old Finite's export, or its chats/", path.display())))?;
     let mut spool = Spool::new(kinds)?;
-    let problems = chats::read(&root, &mut spool)?;
+    let problems = match source(&path)? {
+        Source::Export(root) => chats::read(&root, &mut spool)?,
+        Source::Hermes(db) => {
+            // on a platform computer (as its agent), its own Hermes home's
+            // databases are its chats here already; a person's own Hermes is theirs
+            let own = c.agent().and(std::env::var_os("HERMES_HOME")).filter(|h| !h.is_empty()).map(PathBuf::from);
+            // a conversation it cannot read whole is refused, in the spool
+            hermes::read(&db, &mut spool, own.as_deref())?;
+            Vec::new()
+        }
+    };
     let (archive, made) = archive(c)?;
     let written = write(c, &archive, &spool)?;
     let mut holds: BTreeMap<&'static str, usize> = Kind::ALL.iter().map(|k| (k.as_str(), 0)).collect();
@@ -208,6 +220,27 @@ pub fn run(c: &Client, sub: SessionCmd) -> Result<Imported> {
     }
     let refused = std::mem::take(&mut spool.refused);
     Ok(Imported { archive, made, added: written.added, updated: written.updated, unchanged: written.unchanged, refused, problems, holds })
+}
+
+/// Where a path a person names reads from.
+enum Source {
+    Export(PathBuf),
+    Hermes(PathBuf),
+}
+
+/// The old Finite's export (its `chats/`, or the folder holding it), else
+/// Hermes' database (a file, or a Hermes home holding `state.db`).
+fn source(path: &std::path::Path) -> Result<Source> {
+    if let Some(root) = chats::root_of(path) {
+        return Ok(Source::Export(root));
+    }
+    if path.is_file() {
+        return Ok(Source::Hermes(path.to_path_buf()));
+    }
+    if path.join("state.db").is_file() {
+        return Ok(Source::Hermes(path.join("state.db")));
+    }
+    Err(usage(format!("{} holds no export's chats/ (its index.json) and no state.db: name the old Finite's export, Hermes' state.db, or a Hermes home", path.display())))
 }
 
 /// The person's archive: theirs already (the first by name, should two
@@ -712,6 +745,20 @@ mod tests {
         let back = write(&c, NAME, &spooled(vec![first()])).unwrap();
         assert_eq!((back.updated, back.unchanged), (0, 1));
         assert_eq!(mock.file_at(NAME, "main", &session::session_path("hermes-a")), Some(file_of(later)));
+    }
+
+    /// Goal: a path names a store, or says what it should be. Invalid: a
+    /// folder with neither.
+    #[test]
+    fn a_path_names_a_store_or_says_what_to_name() {
+        let dir = tempdir();
+        let e = source(&dir).err().map(|e| format!("{e:#}")).unwrap_or_default();
+        assert!(e.contains("name the old Finite's export, Hermes' state.db, or a Hermes home"), "{e}");
+        hermes::tests::database(&dir.join("state.db"), "");
+        assert!(matches!(source(&dir), Ok(Source::Hermes(p)) if p == dir.join("state.db")));
+        assert!(matches!(source(&dir.join("state.db")), Ok(Source::Hermes(_))));
+        chats::tests::export(&dir);
+        assert!(matches!(source(&dir), Ok(Source::Export(p)) if p == dir), "an export's chats/ wins over a state.db beside it");
     }
 
     /// Goal: a spool holds what an import read within an archive's limits,

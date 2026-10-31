@@ -126,6 +126,20 @@ pub fn sessions(s: &mut Suite, api: &Api) -> Result<()> {
         json!({ "newer": newer, "older": older }),
     );
 
+    // Hermes' own database (what Hermes v0.21.7 writes: the CLI's fixture),
+    // its conversations as Hermes joins them, from a better read
+    let hermes = s.dir("sessions-hermes");
+    let db = rusqlite::Connection::open(hermes.join("state.db"))?;
+    db.execute_batch(&format!("PRAGMA foreign_keys = OFF;\n{}", include_str!("../../../../cli/src/session/hermes-v0.21.7.sql")))?;
+    drop(db);
+    let from_hermes = s.cli_json(api, &home, &["session", "import", &path(&hermes), "--json"])?;
+    let reset = serde_json::from_slice::<Session>(&file(&keys, "sessions/hermes-20261002_090000_reset1.json")?.bytes).ok();
+    s.ok(
+        "Hermes' own database is imported as Hermes joins its conversations, by its better read",
+        from_hermes["added"] == 6 && reset.is_some_and(|r| r.parts.len() == 2 && r.reader == 20),
+        &from_hermes,
+    );
+
     // restart: an import that stopped after its conversations, before its
     // indexes, is put right by the next
     let orphan = Session {
@@ -151,7 +165,7 @@ pub fn sessions(s: &mut Suite, api: &Api) -> Result<()> {
     s.commit(&made, &[(orphan_path.as_str(), Some(&orphan.file()))]);
     let repaired = s.cli_json(api, &home, &["session", "import", &path(&root), "--json"])?;
     let side = file(&keys, "index/subagent.json")?;
-    s.ok("an import after one that stopped before its indexes lists what that one wrote", repaired["added"] == 0 && keys_of(&side) == ["hermes-e2e_orphan"], json!({ "import": repaired, "index": side.body }));
+    s.ok("an import after one that stopped before its indexes lists what that one wrote", repaired["added"] == 0 && keys_of(&side).contains(&"hermes-e2e_orphan".to_string()), json!({ "import": repaired, "index": side.body }));
 
     // invalid: a path that holds nothing an import reads
     let empty = s.dir("sessions-empty");
