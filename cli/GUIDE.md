@@ -226,7 +226,7 @@ lists their templates:
 folder, from the platform's own templates: one of `blank`, `todo`,
 `inbox`, `calories`, `doc` is copied in as its first commit (`notes` is
 `new`'s and `init`'s alone); a blessed one, `agent`, `chat`, `brain`,
-`skills`, `sessions`, runs the platform's current release and is named in its
+`skills`, `sessions`, `telegram`, runs the platform's current release and is named in its
 `fragment.json`. Either way `--title` gives it its own title, its
 `fragment.json`'s `meta.title`, over the template's. Any other is
 refused, naming them.

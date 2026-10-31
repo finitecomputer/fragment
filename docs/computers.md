@@ -439,7 +439,8 @@ The deployment's `connectors` (`FRAGMENT_CONNECTORS`;
 and the exact endpoints a computer's relay carries for each: `[{id,
 relayTargets: [{host, port}]}]`, each an exact public DNS name on a
 nonzero port. Absent, the cell's default: `simplex`, with `relay::HOSTS`
-on 443. `[]` is the kill switch: no door is linked, redeemed or checked,
+on 443, and `telegram` (a hosted connector, templates/telegram: no
+relay). `[]` is the kill switch: no door is linked, redeemed or checked,
 and no relay opens; an owner may still unlink. A computer's relay offer
 and admission read the same policy, for the connectors its agents are
 allowed; the relay's bounds stay the computer's.
