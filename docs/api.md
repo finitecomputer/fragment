@@ -3165,10 +3165,16 @@ Anything else needs a signature as before. Adding a key still needs a
 key.
 
 Its sidebar is the person's list, one read (Skyler, 2026-10-12; Paul,
-2026-10-13): their **one agent** above (their first, the one the first
-run makes: the first their computer took, as its view lists its agents in
-the order it took them; a menu of New chat, Rename, its profile and its
-screen), saying what it is doing (below), then the **invites** waiting on
+2026-10-13; Paul, 2026-10-30: several agents, one of them main): beside
+its brand the launcher (below), a search and its key ("⌘K", "Ctrl K" off
+a Mac, the search alone on a touch screen with no finer pointer); then
+**New chat with** the agent its chip names: the open chat's (a group's
+lead) when it is one of theirs, else their **main agent** (their first,
+the one the first run makes: the first their computer took, as its view
+lists its agents in the order it took them). With more than one agent the
+chip lists them all (each one's face, name and role, the one it names
+marked), and the one picked gets that new chat alone; with one, it names
+it and opens nothing. Then the **invites** waiting on
 their emails, each its title, who invited them and to edit or view it,
 with Accept and Decline (decision 63; `GET /api/invites`, read as the
 page starts, as its list's socket opens and on its `invited`; Invites by
@@ -3182,9 +3188,14 @@ said yet above them all), less the ones they archived (`PUT
 are the desktop's: a dock of their icons and titles under the viewer's
 windows, less the archived and those they took off it (`PUT
 /api/fragments/{name}/dock`, above; search still finds them), then Add, open beside the chat on a
-desktop's width, a sheet from the bottom on a phone. Any other agents of
-theirs are in no list (a setting may offer more than one later); a chat
-with one of them is a chat, listed and found as any other. **Add teaches
+desktop's width, a sheet from the bottom on a phone. A chat with any of
+their agents is a chat, listed and found as any other. Its row is two
+lines, its agent first (Paul, 2026-10-30: it reads as talking to agents,
+not as threads piling up): its agents' faces (a group's stacked, as the
+launcher shows them), their names, and when its newest message was said
+(`previewAt`: today's time, "Yesterday", a weekday within the week, else
+its date), then the chat's own title, its unread count and its home's
+bell; a chat with none of their agents is its title alone. **Add teaches
 how to ask for an app** (Paul, 2026-10-14: "rather than spawning generic
 apps we teach the user how to prompt for new apps"): a window of ways to
 ask, each saying who the app is for and what it does, `…` the part to
@@ -3198,7 +3209,7 @@ shuffled again when it runs out; a reload deals the first three again).
 They are suggestions: nothing is made, sent or shown as if it were.
 Pressed, one goes into the composer of the person's chat, selected at its
 `…`, for them to change and send: the chat open, if it is their own; else
-their agent's newest chat, or a new one with it (New chat, below). On a
+their main agent's newest chat, or a new one with it (New chat, below). On a
 phone the desktop's sheet closes on it. The shell puts it there with
 `postMessage({fragment: "compose", text})` to that chat's frame, at the
 fragment's own origin, once the page in it has asked `agents?` (below;
@@ -3225,9 +3236,8 @@ reads a turn as the chat's page does: `turn.start`, `turn.step` or
 open card (`turn.prompt`) is Waiting for you (its owner answers its
 cards), a question (`turn.asked`) is Waiting for you when it `asks` them
 and Waiting when it asks someone else, and `turn.end`, or a card closed
-any other way, is nothing. The agent's row says the most pressing (for
-you, then waiting, then working), and its menu names up to five chats
-where it is so ("Waiting for you in Garden talk"), each opening it. It
+any other way, is nothing. Each chat's row says it in place of its time:
+its agents' most pressing (for you, then waiting, then working). It
 says nothing but an open card while their computer is not awake (its
 turns stop with it; a card outlives them: docs/bridge.md), nor anything
 while the page's socket is shut (it would not hear the change), nor of a
@@ -3253,19 +3263,17 @@ its member list, as its row names them (`agents`), never its name; the
 launcher's results stack their avatars, each in its identity's colour
 (the chat page's FNV-1a choice), and its ⋯ offers each one's profile and
 screen. The open chat's ⋯ renames it, invites people, and archives it.
-**New chat** (the agent's menu in the sidebar, the row below the agent
-there, for a seat once its agent is made, and the launcher) starts
-another chat with the person's agent: a chat fragment on
+**New chat** (the sidebar's, for a seat once its agent is made, and the
+launcher, each with the agent it names) starts another chat with the agent: a chat fragment on
 the `chat` template labelled `<agent's label>-chat-<n>`, titled "New
 chat", the agent added as an editor (which wakes its computer). Its
 context is its own (an agent's runtime keys its session by its chat). An
 untitled one with that agent where nothing has been said yet opens again
 instead of another. The agent's own chat, `<label>-chat` (the first
 run's, titled "Your first chat": below), is titled on its own as any
-chat is, never by its agent: the sidebar names the agent above it, and
-Rename in a chat's ⋯ renames that chat alone, as Rename in the agent's
-menu and Settings' Agents rename the agent alone (Identities, "An
-agent's name and picture"). It is the one `fragment ask` and Hermes'
+chat is, never by its agent: its row names the agent above it, and
+Rename in a chat's ⋯ renames that chat alone, as Settings' Agents
+renames the agent alone (Identities, "An agent's name and picture"). It is the one `fragment ask` and Hermes'
 Bot Mode find, by its label.
 An agent shows its picture, where it has one, in place of its tinted
 image wherever the shell draws it (the sidebar, a chat's mark, the
@@ -3359,7 +3367,7 @@ by the worker (never by a page), else one opens at `/?chat=<chat>`. A
 frame of anything else, or a message from another origin, is answered
 nothing.
 
-**The launcher** (the sidebar's +, a phone's top bar +, and ⌘K or
+**The launcher** (the sidebar's search, a phone's top bar +, and ⌘K or
 Ctrl K, from the chat's frame too: `{fragment: "open-launcher"}`, taken
 only from the focused frame of a listed fragment at its own origin;
 cell/shell/launcher.js) is one input over the desktop's landscape.
@@ -3368,7 +3376,9 @@ first 8 words and 256 bytes): the
 chats and apps whose title or label hold them, then the messages, newest
 first, archived ones marked. A chat found opens in the middle column, an
 app in the desktop, a message its chat. For a seat whose agent is made,
-Enter (or the first row, "Start a new chat with <agent>") makes a new
+Enter (or the first row, "Start a new chat with <agent>": the agent
+**New chat** names, and with more than one agent a pick of another
+beside it, for this launch alone) makes a new
 chat with it as **New chat** does and posts the words whole as its first
 message (`POST /api/f/{chat}/channels/chat`, the person's), with an id
 kept until it is sent, so trying again after an answer that was lost is

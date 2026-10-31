@@ -725,10 +725,6 @@ sheet.onclose = () => {
 
 // ---- one menu, for whichever button asked ----
 const menu = $("menu");
-const menuEdge = el("div", "agent-menu-edge");
-menuEdge.hidden = true;
-menuEdge.setAttribute("aria-hidden", "true");
-document.body.append(menuEdge);
 let menuFor = null;
 let menuClosing = false;
 let menuAnimations = [];
@@ -745,13 +741,10 @@ function finishMenuClose() {
   menuFor.button.setAttribute("aria-expanded", "false");
   menuFor = null;
   menu.hidden = true;
-  menuEdge.hidden = true;
+  // a closed menu keeps nothing it said (a name renamed since, among them)
+  menu.replaceChildren();
   menu.inert = false;
   menuClosing = false;
-  menu.classList.remove("agent-menu");
-  menu.style.removeProperty("width");
-  menu.style.removeProperty("max-height");
-  updateSidebarEdge();
 }
 function animateMenu(opening) {
   const current = menuParts.map(({ node }) => ({ opacity: getComputedStyle(node).opacity, transform: getComputedStyle(node).transform }));
@@ -778,6 +771,9 @@ function closeMenu(immediate = false) {
 reducedMotion.addEventListener("change", () => {
   if (reducedMotion.matches) { if (menuClosing) finishMenuClose(); else cancelMenuMotion(); }
 });
+// `items`: each `{icon, text, onClick}`, or an agent's `{face, text, tag?,
+// current?}`: its face in the icon's place, its role a tag, and whether it
+// is the one picked now.
 function openMenu(button, items) {
   const again = menuFor?.button === button && !menuClosing;
   if (again) return closeMenu();
@@ -787,37 +783,20 @@ function openMenu(button, items) {
     const b = el("button");
     b.type = "button";
     b.setAttribute("role", "menuitem");
-    b.replaceChildren(icon(it.icon));
-    b.append(it.text);
+    b.replaceChildren(it.face ?? icon(it.icon));
+    b.append(it.face ? el("span", "name", it.text) : it.text);
+    if (it.tag) b.append(el("span", "role-tag", it.tag));
+    if (it.current) b.setAttribute("aria-current", "true");
     b.onclick = () => { closeMenu(); it.onClick(); };
     return b;
   }));
   button.setAttribute("aria-expanded", "true");
-  const attached = button.id === "sidebar-agent";
-  menu.classList.toggle("agent-menu", attached);
   menu.hidden = false;
   const r = button.getBoundingClientRect();
-  if (attached) {
-    menu.style.width = `${r.width}px`;
-    menu.style.maxHeight = `${Math.max(0, innerHeight - r.bottom - 8)}px`;
-    menu.style.top = `${r.bottom - 1}px`;
-    menu.style.left = `${r.left}px`;
-    menuEdge.style.left = `${r.left}px`;
-    menuEdge.style.top = `${r.top}px`;
-    menuEdge.style.width = `${r.width}px`;
-    menuEdge.style.height = `${menu.getBoundingClientRect().bottom - r.top}px`;
-    menuEdge.hidden = false;
-  } else {
-    menu.style.top = `${Math.min(r.bottom + 4, innerHeight - menu.offsetHeight - 8)}px`;
-    menu.style.left = `${Math.max(8, Math.min(r.left, innerWidth - menu.offsetWidth - 8))}px`;
-  }
+  menu.style.top = `${Math.min(r.bottom + 4, innerHeight - menu.offsetHeight - 8)}px`;
+  menu.style.left = `${Math.max(8, Math.min(r.left, innerWidth - menu.offsetWidth - 8))}px`;
   menu.querySelector("button")?.focus();
-  updateSidebarEdge();
-  const bounds = attached ? menuEdge.getBoundingClientRect() : menu.getBoundingClientRect();
-  menuParts = (attached ? [menu, button, menuEdge] : [menu]).map(node => {
-    const rect = node.getBoundingClientRect();
-    return { node, origin: `${bounds.left + bounds.width / 2 - rect.left}px ${bounds.top + bounds.height / 2 - rect.top}px` };
-  });
+  menuParts = [{ node: menu, origin: "50% 50%" }];
   animateMenu(true);
 }
 addEventListener("pointerdown", (e) => { if (menuFor && !menu.contains(e.target) && !menuFor.button.contains(e.target)) closeMenu(); });
@@ -840,12 +819,12 @@ addEventListener("resize", () => closeMenu(true));
 
 const watching = { on: false, socket: null, wait: 1000, timer: null, settle: null };
 const listLive = () => watching.socket?.readyState === WebSocket.OPEN;
-const { renderHeading, renderChats, loadInvites, primaryAgent, markSeen, updateSidebarEdge } = createChatList({
-  api, ui: { $, el, patch, agentFace, notice },
+const { renderHeading, renderChats, loadInvites, primaryAgent, newChatAgent, markSeen } = createChatList({
+  api, ui: { $, el, patch, agentFace, mark, notice },
   data: { byName, own, chats, shown, titleOf, chatTitle: (name) => chatTitle(name), homeMark: (f) => homeMark(f), isGroup, agentOfChat: (name) => agentOfChat(name), agentsOf,
     agents: () => state.agents, allFragments: () => state.fragments, computer: () => state.computer, isGuest: () => state.guest, personId: () => state.me?.id },
   selection: { current: () => state.current, page: () => state.page, getFrame: (name) => state.frames.get(name) },
-  menus: { menu, menuEdge, menuOwner: () => menuFor, openMenu, shareItem, archiveItem },
+  menus: { menuOwner: () => menuFor, openMenu, shareItem, archiveItem },
   navigation: { newChat, rename: (name) => rename(name), openChat, openApp, openScreen, leaveSidebar, seg },
   listLive, load, invites: () => state.invites, setInvites: (v) => { state.invites = v; },
 });
@@ -1368,7 +1347,7 @@ const { retitle, rename } = createTitles({ $, api, seg, byName, titleOf, reload:
 
 // ---- the launcher (launcher.js): one input for starting a chat or finding one again ----
 const launcher = createLauncher({
-  $, el, api, ApiError, seg, state, byName, isChat, titleOf, chatTitle, mark, iconOf, primaryAgent, agentsOwnChat, UNTITLED,
+  $, el, api, ApiError, seg, state, byName, isChat, titleOf, chatTitle, mark, iconOf, primaryAgent, newChatAgent, agentsOwnChat, UNTITLED,
   openChat, openApp, chatFrame, composeIn, newChat, leaveSidebar, closeMenu, notice, prewake: () => prewake(), originOf,
   views: () => views,
   busy: (name) => refresh.isBusy(state.frames.get(name)),
