@@ -671,8 +671,12 @@ by the `computers` lane's recovery checks, where the stub echoes it.
 An agent's owner may link the agent to their SimpleX app (decision 32;
 `src/simplex/`). The bridge runs SimpleX's own
 core, `simplex-chat`, one per linked agent, as a child process, driven
-over its bot API (`-p`, loopback only) by one task, so nothing else ever
-drives it.
+over its bot API (loopback only) by one task, so nothing else ever
+drives it. The core binds a port the kernel picks (`-p 0`) and reports
+none, so the bridge reads it back from the core's own sockets in `/proc`.
+A port picked for the core and let go before it bound could be another
+socket's by then, or two cores' at once, and one agent's task then
+drove another agent's core.
 
 - **SimpleX is a chat of its own** (Paul, 2026-10-26): the agent's
   SimpleX chat, its owner's chat labelled `<label>-simplex` and titled

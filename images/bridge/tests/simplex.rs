@@ -491,9 +491,14 @@ impl Computer {
     /// Its owner links juniper from their Settings: with the ticket the
     /// platform (the fake) signed as the agent's key.
     fn link(&self, fake: &support::fake::Fake) -> (u16, Value) {
-        let t = fake.ticket("juniper", "link");
+        self.link_as(fake, "juniper")
+    }
+
+    /// `link`, of the agent labeled `label`.
+    fn link_as(&self, fake: &support::fake::Fake, label: &str) -> (u16, Value) {
+        let t = fake.ticket(label, "link");
         *self.session.lock().expect("its session") = t["nonce"].as_str().expect("a nonce").to_string();
-        self.http_with("POST", "/simplex/link?agent=juniper--k3x9", Some(&t))
+        self.http_with("POST", &format!("/simplex/link?agent={label}--k3x9"), Some(&t))
     }
 
     /// Its owner unlinks juniper from their Settings.
@@ -503,10 +508,15 @@ impl Computer {
 
     /// Its SimpleX state, once `done` holds (within `within`).
     async fn state_until(&self, within: Duration, what: &str, done: impl Fn(&Value) -> bool) -> Value {
+        self.state_of_until("juniper--k3x9", within, what, done).await
+    }
+
+    /// `state_until`, of `agent`'s.
+    async fn state_of_until(&self, agent: &str, within: Duration, what: &str, done: impl Fn(&Value) -> bool) -> Value {
         let t0 = Instant::now();
         // bounded by `within`
         loop {
-            let (code, v) = self.http("GET", "/simplex/state?agent=juniper--k3x9");
+            let (code, v) = self.http("GET", &format!("/simplex/state?agent={agent}"));
             if code == 200 && done(&v) {
                 return v;
             }
@@ -713,6 +723,57 @@ async fn the_bridge_runs_a_linked_core() {
     // an agent this bridge does not run has no link here
     let (code, _) = c.http("GET", "/simplex/state?agent=nobody--k3x9");
     assert_eq!(code, 404);
+}
+
+/// Goal: two cores started together each get their own bridge. A core
+/// listens on a port the kernel picks for it, which the bridge reads back
+/// from the core's own sockets; a port picked for it and let go could be
+/// handed to two cores started together, and one agent's commands then
+/// reached the other's core. Two agents linked, then the computer started
+/// again, so their cores start together: each agent's words from its
+/// owner's phone are posted by that agent, in its SimpleX chat, alone.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Docker; run by hand"]
+async fn two_cores_started_together_are_each_their_agents() {
+    build_bridge_image();
+    let mut lab = Lab::up_with("two-cores", true);
+    let mut person = lab.start("person", false).await;
+    let fake = support::fake::Fake::start("0.0.0.0:0", &["juniper", "fred"]).await;
+    fake.with(|w| {
+        w.computer["alwaysOn"] = json!(true);
+        w.computer["generation"] = json!(1);
+    });
+    let data = lab.dir.join("computer-data");
+    let c = Computer::start(&lab, &fake, &data);
+    let mut contacts = vec![];
+    for label in ["juniper", "fred"] {
+        let agent = format!("{label}--k3x9");
+        c.state_of_until(&agent, Duration::from_secs(60), "its state", |v| v["phase"] == "off").await;
+        assert_eq!(c.link_as(&fake, label).0, 200);
+        let v = c.state_of_until(&agent, Duration::from_secs(60), "an invitation", |v| v["phase"] == "inviting").await;
+        person.cmd(&format!("/connect {}", v["link"].as_str().expect("its link"))).await;
+        c.state_of_until(&agent, Duration::from_secs(90), "linked", |v| v["phase"] == "linked").await;
+        contacts.push(person.wait(Duration::from_secs(60), |e| tag(e) == "contactConnected").await["contact"]["contactId"].as_i64().expect("the agent, at the person's"));
+    }
+    fake.until(30_000, "a SimpleX chat for each", |w| w.made.len() == 2).await;
+    let chat_of = |label: &str| fake.with(|w| w.made.iter().find(|c| c.starts_with(&format!("{label}-simplex--"))).cloned()).expect("its SimpleX chat");
+    let chats = [chat_of("juniper"), chat_of("fred")];
+
+    // started again with both linked: both cores at once
+    c.stop();
+    let c = Computer::start(&lab, &fake, &data);
+    for agent in ["juniper--k3x9", "fred--k3x9"] {
+        c.state_of_until(agent, Duration::from_secs(60), "linked and running again", |v| v["phase"] == "linked" && v["running"] == true).await;
+    }
+    assert_eq!(c.cores(), 2);
+    for (label, contact) in ["juniper", "fred"].iter().zip(&contacts) {
+        say(&mut person, *contact, &format!("for {label}")).await;
+    }
+    fake.until(60_000, "each one's words relayed", |w| chats.iter().all(|c| w.records(c, "chat").iter().any(|r| r["body"]["relayed"]["via"] == "simplex"))).await;
+    for (label, chat) in ["juniper", "fred"].iter().zip(&chats) {
+        let said: Vec<(Value, Value)> = relayed_on(&fake, chat).iter().map(|r| (r["principal"].clone(), r["body"]["text"].clone())).collect();
+        assert_eq!(said, [(json!(format!("npub1{label}")), json!(format!("for {label}")))], "{label}'s words, posted by {label} alone");
+    }
 }
 
 /// The relayed records on `chat` (an agent's, carrying its owner's words).
