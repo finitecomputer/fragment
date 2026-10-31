@@ -325,6 +325,11 @@ pub struct OpenReply {
     pub part: u32,
     pub text: String,
     pub files: Vec<LocalFile>,
+    /// Said before a call that only updates memory (housekeeping): the
+    /// turn's answer if the turn ends next (Hermes sends nothing after
+    /// one), else interim, whatever seals it (more words, a step, a card),
+    /// so a turn never answers twice (#729).
+    pub held: bool,
 }
 
 /// A turn the bridge admitted.
@@ -1980,10 +1985,16 @@ impl Engine {
             Event::Step { turn, step } => {
                 // the words before a tool call are a reply, posted before
                 // its step; the turn works on after them, so they are
-                // interim (its push leaves them out), unless the call only
-                // updates its memory: an answer said beside housekeeping is
-                // the turn's answer (Hermes sends nothing after it)
-                self.seal(&turn, step.category != records::Category::Memory);
+                // interim (its push leaves them out). Before a call that
+                // only updates its memory they are held open: the turn's
+                // answer if it ends next, interim if it goes on (`seal`)
+                if step.category == records::Category::Memory {
+                    if let Some(open) = self.state.turns.get_mut(&turn).expect("checked").open.as_mut() {
+                        open.held = true;
+                    }
+                } else {
+                    self.seal(&turn, true);
+                }
                 let t = self.state.turns.get_mut(&turn).expect("checked");
                 t.steps = t.steps.saturating_add(1);
                 self.dirty = true;
@@ -2105,6 +2116,9 @@ impl Engine {
         let view = self.views.get(&self.state.turns[id].fragment).cloned().unwrap_or_default();
         let t = self.state.turns.get_mut(id).expect("sealing a held turn");
         let Some(open) = t.open.take() else { return };
+        // words held at a memory call: the turn went on after them (`end`
+        // lets them go as its answer)
+        let interim = interim || open.held;
         t.last_part = t.last_part.max(open.part);
         let empty = open.text.trim().is_empty() && open.files.is_empty();
         // interim replies have a bound of their own, so narration never
@@ -2185,6 +2199,10 @@ impl Engine {
     /// Unexpired cards outlive the run, except an explicit Stop. Their
     /// later answers are reconstructed from the journal as fresh turns.
     fn end(&mut self, id: &str, outcome: Outcome, unanswered: Closed) {
+        // words held at a memory call, with nothing after them: the answer
+        if let Some(open) = self.state.turns.get_mut(id).and_then(|t| t.open.as_mut()) {
+            open.held = false;
+        }
         self.seal(id, false);
         let t = self.state.turns.get_mut(id).expect("ending a held turn");
         assert!(t.active(), "a turn's run ends once: {id} is {:?}", t.phase);

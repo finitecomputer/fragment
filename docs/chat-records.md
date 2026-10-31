@@ -102,7 +102,9 @@ until a reply of that turn replaces it.
   including its words before a tool call, which are posted before that
   call's step.
 - `interim: true` marks words its turn went on working after: words
-  before a tool call that does more than update memory. The push leaves
+  before a tool call that does more than update memory. Words before a
+  call that only updates memory wait: they are the turn's answer if it
+  ends next, else interim, so a turn never answers twice (#729). The push leaves
   an interim reply out; a page shows it as any reply. A turn posts at
   most 64 replies that are not interim and, counted apart, 200 interim
   ones, so narration never costs the answer.
@@ -209,25 +211,31 @@ page's id is `pr:<first 32 hex digits of SHA-256 of "<agent>
   turn is a message of its own. A command the menu refuses for a word of
   its `args` still gets both its records, its end an `error` saying why.
 
-**History**, a chat continued from its person's Session Archive
-(templates/sessions/README.md):
+**History**, a chat continued from a conversation its person had (one of
+their Session Archive, templates/sessions/README.md, or an archived chat
+of theirs), with an agent of their choosing:
 
 ```json
 { "kind": "history", "title": "Beans", "archive": "sessions--k3x9", "key": "hermes-20261001_090000_ab12cd",
-  "started_at": "2026-10-01T09:00:00.000Z", "ended_at": "2026-10-04T09:00:00.000Z",
+  "agent": "Juniper", "started_at": "2026-10-01T09:00:00.000Z", "ended_at": "2026-10-04T09:00:00.000Z",
   "summary": "…", "messages": [{ "role": "user", "at": "…", "text": "…" }], "earlier": 12 }
 ```
 
-- Posted by the chat's owner (the shell's Continue) with the id
-  `history`, before the agent joins: the chat's first record. It holds
-  the conversation's last summary and the newest messages said after it
-  (the summary covers what came before), oldest first, with how many
-  others the conversation holds (`earlier`), bounded to fit one record
-  (cell/shell/session-archive.js, `historyOf`). `archive` and `key` name
-  the whole conversation's file.
-- Only its owner's counts. The page shows it above the chat. The bridge
-  hands it to the agent once, as its first turn's note there
-  (`note::history`); it starts no turn.
+- Posted by the chat's owner (the shell's Continue, cell/shell/continue.js)
+  with the id `history`, before the agent joins: the chat's first record.
+  It holds the conversation's last summary and the newest messages said
+  after it (the summary covers what came before), oldest first, with how
+  many others the conversation holds (`earlier`), bounded to fit one
+  record (`historyOf`, `historyOfChat`). `archive` and `key` name an
+  import's file, or `chat` the archived chat it was made of. `agent`:
+  whose the agent's words were, when not the agent continuing it.
+- One chat a (source, agent): its name is made from both, so Continue
+  asked again, in any tab, opens it, and a Continue cut short is finished
+  in the same chat.
+- Only its owner's counts. The page shows it above the chat, with whom it
+  was (`agent`). The bridge hands it to the agent once, as its first
+  turn's note there (`note::history`, another agent's words by its name);
+  it starts no turn.
 
 Any other `kind` on `chat` is a page's own, never a message. Search finds
 messages and replies alone, by their `text` (docs/api.md, Search).
