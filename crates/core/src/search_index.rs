@@ -241,7 +241,7 @@ pub fn fuse(lexical: &[Found], semantic: &[Found], limit: usize) -> Vec<Fused> {
         }
     }
     let mut all: Vec<Fused> = by.into_values().collect();
-    all.sort_by(|a, b| b.score.total_cmp(&a.score).then_with(|| a.section.cmp(&b.section)));
+    all.sort_unstable_by(|a, b| b.score.total_cmp(&a.score).then_with(|| a.section.cmp(&b.section)));
     all.truncate(limit);
     all
 }

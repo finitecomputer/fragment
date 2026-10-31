@@ -361,7 +361,7 @@ async fn theirs(env: &Env, facts: &WipeFacts, live: bool) -> CellResult<Vec<Stri
         }
     }
     names.retain(|n| fragment_proto::valid_fragment_name(n));
-    names.sort();
+    names.sort_unstable();
     names.dedup();
     Ok(names)
 }

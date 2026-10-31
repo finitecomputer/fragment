@@ -197,7 +197,7 @@ impl FragmentCell {
         if rows.is_empty() {
             return drained;
         }
-        rows.sort_by_key(|r| r["id"].as_i64());
+        rows.sort_unstable_by_key(|r| r["id"].as_i64());
         let (Ok(fragment), Ok(incarnation)) = (self.must(MetaKey::Name), self.must(MetaKey::CreatedAt)) else { return drained };
         let mut failed = false;
         // records go a queue batch at a time; each push goes on its own;
