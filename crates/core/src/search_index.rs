@@ -117,6 +117,13 @@ impl Table {
     }
 }
 
+/// Whether an index holding `held` chunks takes a source's write of `new`
+/// chunks that replaces `replaced` of them, holding at most `max`: a
+/// source written again counts once, so one at capacity is replaced.
+pub fn fits(held: u64, replaced: u64, new: u64, max: u64) -> bool {
+    held.saturating_sub(replaced).checked_add(new).is_some_and(|n| n <= max)
+}
+
 /// How many of `n` chunks the sign pass hands to int8.
 pub fn candidates(n: usize) -> usize {
     (n * CANDIDATES_PERCENT / 100).max(DEPTH).min(n)
@@ -330,6 +337,17 @@ mod tests {
         let reranked = best(first.iter().map(|(i, _)| (*i, dot(&hq.q, &held[*i].q) as f32)).collect(), 10);
         let kept = reranked.iter().filter(|(i, _)| truth.contains(i)).count();
         assert!(kept >= 9, "kept {kept} of the exact top 10");
+    }
+
+    #[test]
+    fn an_index_holds_up_to_its_cap_counting_a_replaced_source_once() {
+        assert!(fits(2, 0, 1, 3), "up to the cap");
+        assert!(!fits(3, 0, 1, 3), "past it");
+        assert!(fits(3, 2, 2, 3), "a source replaced at capacity, as large");
+        assert!(!fits(3, 2, 3, 3), "or larger, past it");
+        assert!(fits(3, 3, 0, 3), "emptied");
+        assert!(fits(0, 5, 3, 3), "a count that drifted below what it replaces is no room");
+        assert!(!fits(u64::MAX, 0, 1, u64::MAX));
     }
 
     #[test]
