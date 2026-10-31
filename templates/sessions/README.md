@@ -74,9 +74,11 @@ fragment's is.
   newer conversations a batch a commit (at most 256 files and 16 MiB of
   them), then every index they change in one last commit, made from main
   as it is then. That commit also lists by its file any conversation the
-  indexes lack or describe as another copy (its size in git, or a blob's
-  pointer, is not their entry's: an import stopped before its last
-  commit), and drops an entry whose file is gone, so the next import of
+  indexes lack, or whose file changed in a commit after theirs (an import
+  stopped before its last commit, whatever the copy's size: a file's last
+  commit, with its path, names its bytes), or that they describe as
+  another copy (its size in git, or a blob's pointer, is not their
+  entry's), and drops an entry whose file is gone, so the next import of
   anything puts a crash right. Each commit names the head it read; one
   another writer beat, or whose answer was lost, is made again on main as
   it is then, the indexes listing what this import wrote as it wrote it.
