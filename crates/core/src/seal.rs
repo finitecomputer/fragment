@@ -1,6 +1,6 @@
 //! Secrets at rest (docs/secrets.md). A value is sealed with AES-256-GCM
 //! under a key derived per Durable Object: HKDF-SHA256 of the deployment's
-//! host secret (a Worker secret), salted with the object's scope (its class
+//! host secret (a Secrets Store secret), salted with the object's scope (its class
 //! and id), so a value opens only in the object that sealed it. A sealed
 //! value names which host secret sealed it (`w2.<kid>.<base64
 //! nonce‖ciphertext>`), so a deployment can rotate: configure the new

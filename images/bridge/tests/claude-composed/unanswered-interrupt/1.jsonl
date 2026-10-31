@@ -1,0 +1,5 @@
+{"args":["--resume","00000000-0000-4000-8000-000000000002"]}
+{"in":{"type":"user"}}
+{"out":{"type":"system","subtype":"init","session_id":"00000000-0000-4000-8000-000000000002"}}
+{"out":{"type":"assistant","message":{"content":[{"type":"text","text":"The next turn's own answer"}]},"parent_tool_use_id":null}}
+{"out":{"type":"result","subtype":"success","is_error":false,"result":"The next turn's own answer"}}

@@ -1,6 +1,6 @@
 # Manual image preparation and production promotion. Preview normally
 # follows master through ci.yml's preview-image job: this workflow resolves
-# and prepares that same input-keyed image, never a separate canary state.
+# and prepares that same input-keyed image.
 # Production remains manual: copy the exact preview digest a full round
 # proved (from), or explicitly build a new image not proved by that round.
 #
@@ -114,7 +114,7 @@ jobs:
               ;;
             production)
               repository="fragment-computer-$IMAGE"
-              echo "::warning::a production build is a new image, not the one a round proved: with no layer cache, its digest is not the canary's. A promotion copies the proven digest (from)."
+              echo "::warning::a production build is a new image, not the one a round proved: with no layer cache, its digest is not the one preview ran. A promotion copies the proven digest (from)."
               ;;
           esac
           cargo xtask image push "$IMAGE" --repository "$repository" --tag "${TAG:-${GITHUB_SHA::12}}" --summary "$GITHUB_STEP_SUMMARY"

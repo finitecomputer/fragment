@@ -3534,6 +3534,54 @@ fn first_run_put_off_ui(s: &mut Suite, api: &Api, b: &mut Browser, shots: &std::
     Ok(())
 }
 
+/// The page's reads of the computer list (`GET /api/computers`), each
+/// answered by the platform at once and held at the page until let go,
+/// oldest first (`window.__computers.release()`).
+const COMPUTERS_HELD: &str = "(() => { const real = window.fetch.bind(window); \
+    const held = window.__computers = { waiting: [], given: 0, release: () => { held.waiting.shift()?.(); return true; }, \
+      restore: () => { window.fetch = real; held.waiting.splice(0).forEach((go) => go()); return true; } }; \
+    window.fetch = async (url, o) => { const r = await real(url, o); \
+      if (new URL(String(url), location.href).pathname === '/api/computers' && (o?.method ?? 'GET') === 'GET') { \
+        await new Promise((go) => held.waiting.push(go)); held.given++; } \
+      return r; }; return true; })()";
+
+/// A list read asked before a press and answered after it never shows the
+/// computer as it was (CI, 2026-10-31: a read asked as the second press
+/// went out came back after its answer, so settings drew the provider
+/// still taken away, for good). A change to their list (the chat archived)
+/// has the page read the list and the computer; that read is answered and
+/// held; the agent's chip pressed (taken away), its answer shown; the
+/// held read let go; settings opened again draw what the press made.
+#[allow(clippy::too_many_arguments)]
+fn stale_read_after_a_press_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &str, chat: &str, lead: &str, row: &str) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    let chip = format!("document.querySelector('{row} [data-agent={lead:?}]')");
+    b.eval(page, COMPUTERS_HELD)?;
+    shell(api, session, "PUT", &format!("/api/fragments/{chat}/archived"), Some(&json!({ "archived": true })), &[])?;
+    let asked = b.until(page, "window.__computers.waiting.length >= 1", wait);
+    b.eval(page, &format!("({chip}.click(), true)"))?;
+    let narrowed = b.until(page, &format!("{chip}?.getAttribute('aria-pressed') === 'false'"), wait);
+    b.eval(page, "window.__computers.release()")?;
+    let given = b.until(page, "window.__computers.given >= 1", wait);
+    // settings drawn again from what the page holds now
+    b.eval(page, "(document.getElementById('apps-link').click(), true)")?;
+    let left = b.until(page, "location.pathname === '/apps'", wait);
+    b.eval(page, "(document.getElementById('settings').click(), true)")?;
+    let drawn = b.until(page, &format!("location.pathname === '/settings' && !!{chip}"), wait);
+    let shown = b.eval(page, &format!("{chip}?.getAttribute('aria-pressed') ?? null"))?;
+    b.eval(page, "window.__computers.restore()")?;
+    s.ok(
+        "a list read asked before a press and answered after it never shows the computer as it was: settings drawn again show the press",
+        asked && narrowed && given && left && drawn && shown == "false",
+        json!({ "asked": asked, "narrowed": narrowed, "given": given, "drawn": drawn, "shown": shown }),
+    );
+    // as it was: the chat back, the agent let use it again
+    shell(api, session, "PUT", &format!("/api/fragments/{chat}/archived"), Some(&json!({ "archived": false })), &[])?;
+    b.eval(page, &format!("({chip}.click(), true)"))?;
+    b.until(page, &format!("{chip}?.getAttribute('aria-pressed') === 'true'"), wait);
+    Ok(())
+}
+
 /// The Connections page in settings (decisions 22, 37 and 44): every
 /// provider the deployment offers, one row each, with its kind, the
 /// person's state there, which agents may use it (and a press that narrows
@@ -3629,6 +3677,7 @@ fn connections_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sessio
     let view = shell(api, session, "GET", &format!("/api/computers/{id}"), None, &[])?;
     let back = view.body["agents"].as_array().and_then(|l| l.iter().find(|a| a["fragment"] == lead.as_str())).is_some_and(|a| a["connections"].is_null());
     s.ok("pressed again, it may use every provider again (null)", again && back, &view);
+    stale_read_after_a_press_ui(s, api, b, page, session, chat, &lead, &row("perplexity"))?;
     // Disconnect: this row names no revocation endpoint, so settings says
     // where the person removes the access at the provider
     let google = row(crate::SWAP_CONNECTION);
@@ -5298,7 +5347,7 @@ fn say_in(s: &Suite, b: &mut Browser, page: &Page, host: &str, text: &str) -> bo
     s.eventually(std::time::Duration::from_secs(30), || b.eval_in_frame(page, host, &typed).ok() == Some(Value::Bool(true)))
 }
 
-/// Unread (docs/api.md, The shell): a chat not open counts on its row what
+/// Unread (docs/api.md, Control API): a chat not open counts on its row what
 /// came since its person saw it, as their list does; opening it marks it
 /// seen, here and in their list; and the open chat counts nothing as its
 /// messages come. The first agent's chat, while the Reader's is open.
@@ -5340,7 +5389,7 @@ fn unread_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person
     Ok(())
 }
 
-/// A new chat (docs/api.md, The shell, the launcher): from the Reader's
+/// A new chat: from the Reader's
 /// chat, the launcher's Enter makes a chat with the person's one agent
 /// (not the open chat's), labelled beside its own (`<first>-chat-2`), the
 /// words posted whole as its first message: one record though the first
@@ -5892,7 +5941,7 @@ fn fresh_shown(b: &mut Browser, page: &Page, before: &[String]) -> Option<String
     (!shown.is_empty() && !before.contains(&shown)).then_some(shown)
 }
 
-/// The launcher as a person uses it (docs/api.md, The launcher). Its input
+/// The launcher as a person uses it. Its input
 /// is one line at rest and as words are typed; Shift+Enter is a new line,
 /// which it grows to, and a long prompt grows it to 200 px, then it
 /// scrolls. Files dropped on it or pasted into it are chips under its words
@@ -6732,7 +6781,7 @@ fn apps_sharing_refresh_ui(s: &mut Suite, b: &mut Browser, page: &Page, app: &st
     Ok(())
 }
 
-/// The Apps page (docs/api.md, The shell; #587), from the sidebar's Apps:
+/// The Apps page (#587), from the sidebar's Apps:
 /// the owner's app listed (no chat or skills), with its card and who has
 /// access; a kind this build does not know is listed as Other; its Dock
 /// switch takes it off the dock and back, moving only as the list does;

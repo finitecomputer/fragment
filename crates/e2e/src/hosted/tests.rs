@@ -77,34 +77,34 @@ fn a_hosted_run_names_its_preview_and_secret() {
     assert_eq!((dry.action, dry.secret_file, dry.computers), (Action::DryRun, None, false), "a dry run reads no secret, so needs none");
 }
 
-/// A round's candidate image (docs/computers.md, "Stable and canary"): a
-/// hosted run's, on a deployment that offers computers, once; a local run,
-/// a rehearsal or a sweep takes none, and a name no pin takes is refused.
-/// Its plan says what it does.
+/// An upgrade's starting image (docs/computers.md, "Preview and
+/// production"): a hosted run's, on a deployment that offers computers,
+/// once; a local run, a rehearsal or a sweep takes none, and a name no pin
+/// takes is refused. Its plan says what it does.
 #[test]
-fn a_hosted_run_takes_a_candidate() {
+fn a_hosted_run_takes_an_upgrade_from() {
     let base = ["--hosted", "--zone", "finite.build", "--branch", "preview", "--secret-file", "/s/test", "--offers", "computers,models"];
     let with = |extra: &[&str]| parse(&strings(&[&base[..], extra].concat()));
-    let h = with(&["--candidate", "hermes-canary", "--only", "agent-restart"]).unwrap().hosted.unwrap();
-    assert_eq!(h.candidate.as_deref(), Some("hermes-canary"));
-    assert_eq!(with(&[]).unwrap().hosted.unwrap().candidate, None, "none: the deployment's default");
+    let h = with(&["--upgrade-from", "production", "--only", "agent-restart"]).unwrap().hosted.unwrap();
+    assert_eq!(h.upgrade_from.as_deref(), Some("production"));
+    assert_eq!(with(&[]).unwrap().hosted.unwrap().upgrade_from, None, "none: a restart on the deployment's default");
     for bad in [
-        &["--candidate"][..],
-        &["--candidate", ""],
-        &["--candidate", "a b"],
-        &["--candidate", "--only"],
-        &["--candidate", "hermes-canary", "--candidate", "other"],
-        &["--candidate", "hermes-canary", "--sweep"],
+        &["--upgrade-from"][..],
+        &["--upgrade-from", ""],
+        &["--upgrade-from", "a b"],
+        &["--upgrade-from", "--only"],
+        &["--upgrade-from", "production", "--upgrade-from", "other"],
+        &["--upgrade-from", "production", "--sweep"],
     ] {
         assert!(with(bad).is_err(), "{bad:?}");
     }
     let long = "x".repeat(65);
-    assert!(with(&["--candidate", &long]).is_err());
-    assert!(parse(&strings(&["--hosted", "--zone", "finite.build", "--branch", "preview", "--secret-file", "/s/test", "--candidate", "hermes-canary"])).is_err(), "no computers offered");
-    assert!(parse(&strings(&["--candidate", "stub-next"])).is_err(), "a local run's computers are the stub's");
-    assert!(parse(&strings(&["--rehearse", "--candidate", "stub-next"])).is_err());
+    assert!(with(&["--upgrade-from", &long]).is_err());
+    assert!(parse(&strings(&["--hosted", "--zone", "finite.build", "--branch", "preview", "--secret-file", "/s/test", "--upgrade-from", "production"])).is_err(), "no computers offered");
+    assert!(parse(&strings(&["--upgrade-from", "stub-next"])).is_err(), "a local run's computers are the stub's");
+    assert!(parse(&strings(&["--rehearse", "--upgrade-from", "stub-next"])).is_err());
     let (planned, unknown) = plan(Some(strings(&["agent-restart"])), vec![], &h);
-    assert!(render(&h, &planned, &unknown).contains("candidate    hermes-canary: the real-agent sections' computers start on it"));
+    assert!(render(&h, &planned, &unknown).contains("upgrade      agent-restart's computer starts on production, upgrades into the default"));
 }
 
 /// A sweep is one run's: the last that finished here (`--sweep`), or one

@@ -1,9 +1,12 @@
 """The activity plugin's socket holds while children run however it is
 opened again after the bridge drops it: by a tool's end (tool first) or by
 its hold worker (worker first). With no child running it holds nothing, and
-a tool's end is never sent twice. Method: the plugin, its connection a stub
-of the bridge's, answering as the bridge does (alexlwn123's review of #664
-found a socket a tool's end opened again never held)."""
+a tool's end is never sent twice. Each model response that asks for calls
+is named once, so a provider's id a later response says again is another
+call, and a call's end names its response. Method: the plugin, its
+connection a stub of the bridge's, answering as the bridge does
+(alexlwn123's review of #664 found a socket a tool's end opened again never
+held; his review of #823, a reused `call_0` recorded once)."""
 import importlib.util
 import json
 import os
@@ -30,7 +33,7 @@ class Socket:
             raise ConnectionError("closed by the bridge")
         frame = json.loads(text)
         self.said.append(frame)
-        self.answers.append("working" if "working" in frame else "observed")
+        self.answers.append("working" if "working" in frame else "called" if "call" in frame else "observed")
 
     def recv(self, timeout=None):
         if self.closed:
@@ -57,7 +60,7 @@ class Socket:
 
 
 activity.connect = Socket
-activity._turns["turn-1"] = "m-1"
+activity._turns["turn-1"] = ["m-1", None]
 
 
 def end(n):
@@ -102,3 +105,31 @@ end(3)
 last = opened(4)
 assert (last.ends(), last.holds()) == (["call_3"], False), last.said
 assert len(sockets) == 4, [s.said for s in sockets]
+# a response's calls: one frame each, before any runs, with its response
+# (named once: this gateway's life and a count) and its place there
+def asked(turn_id, *calls):
+    tool_calls = [{"id": i, "function": {"name": "terminal", "arguments": json.dumps({"command": c})}} for i, c in calls]
+    activity.tools_asked(turn_id=turn_id, assistant_message={"tool_calls": tool_calls})
+
+
+def intents():
+    return [(f["turn"], f["response"], f["call"]["position"], f["call"]["tool_call_id"], f["call"]["args"]) for f in last.said if "call" in f]
+
+
+def ends_of():
+    return [(f["tool_call_id"], f.get("response")) for f in last.said if "tool_call_id" in f]
+
+
+asked("turn-1", ("call_0", "ls"))
+end(4)
+# the next response reuses `call_0`, with another command and the same
+# (one id across its batch, as some providers say it)
+asked("turn-1", ("call_0", "make deploy"), ("call_0", "ls"))
+end(5)
+asked("turn-x", ("call_0", "not the person's"))
+said = intents()
+assert [i[0] for i in said] == ["m-1"] * 3, said
+r1, r2 = said[0][1], said[1][1]
+assert r1 != r2 and said[2][1] == r2 and all(r.startswith(activity._LIFE + "-") for r in (r1, r2)), said
+assert [i[2:] for i in said] == [(0, "call_0", "ls"), (0, "call_0", "make deploy"), (1, "call_0", "ls")], said
+assert ends_of() == [("call_3", None), ("call_4", r1), ("call_5", r2)], last.said

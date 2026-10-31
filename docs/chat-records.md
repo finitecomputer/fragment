@@ -71,6 +71,13 @@ at most 16. A turn's records, in order:
    (and a notice may follow the end: `turn.notice`, below);
 3. `turn.end` on `work`.
 
+A turn a restart cut may be followed by its **continuation** (since
+2026-10-31): a turn of its own, whose id is not its cause's but the first
+24 hex characters of the SHA-256 of `continue`, a NUL and the cut turn's
+id, with the cut turn's `cause` and asker, and a
+`turn.notice` (part `continued`) as it starts (docs/bridge.md, "A cut turn
+is continued once").
+
 Every turn has both its start and its end, one of each: a turn refused
 (too many waiting) or stopped while it waited posts its `turn.start` and
 then its `turn.end`, and runs nothing. The bridge keeps a turn until its
@@ -353,9 +360,10 @@ templates/sessions/README.md):
 - Posted by the chat's owner, the shell's Continue, with the id
   `history`, before the agent joins: the chat's first record. It holds
   the conversation's last summary (`summary`, at most 8,000 characters)
-  and the newest of what the person and the agent said, oldest first
-  (`messages`, at most 40, each at most 4,000 characters), with how many
-  came before them (`earlier`), bounded as a whole by its body's bytes
+  and the newest of what the person and the agent said after it (the
+  summary covers what came before), oldest first (`messages`, at most 40,
+  each at most 4,000 characters), with how many others the conversation
+  holds (`earlier`), bounded as a whole by its body's bytes
   (63 KiB of JSON, under a record's 64 KiB, whatever the text: the newest
   that fit; a summary too large for it alone is cut) before the chat is
   made (cell/shell/session-archive.js, `historyOf`). `archive` and `key`
@@ -412,7 +420,8 @@ computer (docs/computers.md, the hold).
 ```json
 { "kind": "turn.step", "turn": "…", "step": 1, "tool": "terminal",
   "category": "shell", "args": "ls -la", "ok": true, "excerpt": "…", "text": "…",
-  "tool_call_id": "call_…", "status": "completed", "duration_ms": 120 }
+  "tool_call_id": "call_…", "status": "completed", "duration_ms": 120,
+  "response": "…" }
 ```
 
 Part `<step>`, from 1: one tool call. `tool` (the runtime's own name for
@@ -442,7 +451,30 @@ call that ended, so a page never shows it running, and names how it
 ended when it did not complete ("Timed out running"). `excerpt` is then a
 command's exit code (`Exit code: 7`) or empty: never its output. A step
 without them (an older bridge's, read from its runtime's progress) says
-only `ok`, which was true even for a call that failed.
+only `ok`, which was true even for a call that failed. `response` (since
+2026-10-31): the model response whose calls were running, as its
+`turn.call`s name it; an older image's step has none.
+
+```json
+{ "kind": "turn.call", "turn": "…", "response": "…", "tool_call_id": "call_…",
+  "tool": "terminal", "category": "shell", "args": "make deploy" }
+```
+
+Part `call:<24 hex of SHA-256 of its response, a NUL, and its place in
+it>` (since 2026-10-31): a tool call the model asked for, recorded before
+it runs, as its runtime says so (our Hermes image's: its
+`post_api_request`, before Hermes runs any call of the response;
+docs/bridge.md). `response` names the model response that asked for it,
+once (at most 128 of a post id's characters); its place there makes it
+one call. `tool_call_id` is the provider's, which is no call's identity:
+some providers name every response's first call `call_0`. Its intent, no
+more: a refusal may still stop it, and only a `turn.step` of the same
+`response` says it ended: the one with the same `tool_call_id`, else (its
+runtime renamed the call before running it) the one with the same `tool`
+and `args`. `tool`, `args` and `category` as a step's. At most 200 a turn.
+The note a turn cut by a restart carries names each call it asked for
+with no step, as one that may or may not have run. Pages show none of
+them yet; an older bridge posts none.
 
 ```json
 { "kind": "turn.prompt", "turn": "…", "prompt": "<prompt>",
