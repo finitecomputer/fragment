@@ -122,6 +122,17 @@ pub fn sessions_ui(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("History lists the archive's chats as imported, newest first", listed && rows == json!(["A long letter", "Beans"]), &rows);
     let beans = ".history-row[data-key=\"imported:hermes-e2e_beans\"]";
 
+    // History's search finds one by words its title and first words lack,
+    // in the archive's own search (the import wrote it)
+    b.click(&page, ".history-search input")?;
+    b.type_text(&page, "spring")?;
+    let found = b.until(&page, &format!("{imported}.length === 1 && !!document.querySelector('{beans} .history-preview.found')?.textContent.includes('spring')"), wait);
+    let seen = b.eval(&page, &format!("({{ rows: [...{imported}].map((r) => r.querySelector('.history-preview')?.textContent ?? ''), status: document.querySelector('.history-status')?.textContent ?? '' }})"))?;
+    s.ok("History's search finds an imported chat by the words in it, with its snippet", found, &seen);
+    b.screenshot(&page, &shots.join("history-search.png"))?;
+    b.eval(&page, "(() => { const i = document.querySelector('.history-search input'); i.value = ''; i.dispatchEvent(new Event('input')); return true; })()")?;
+    b.until(&page, &format!("{imported}.length === 2"), wait);
+
     b.click(&page, &format!("{beans} .history-open"))?;
     let opened = b.until(&page, "document.getElementById('chat-title').textContent === 'Beans' && document.getElementById('chat-options').hidden", wait);
     let frame = "?s=hermes-e2e_beans";

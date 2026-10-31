@@ -19,10 +19,11 @@
 // row shows without its time, nor sorts as the newest for want of one.
 // The search box filters by title as it is typed, and asks the person's
 // search (`GET /api/search`) for the messages that hold its words: each
-// chat found there once, with its newest snippet under it. The archive's
-// conversations are matched by their titles and first words alone until
-// the archive is searched too (#774), through `h.archive.search` (q →
-// [{key, snippet}]) once it has one.
+// chat found there once, with its newest snippet under it; and the
+// archive's own search (`h.archive.search`: q → [{key, snippet}], best
+// first) for its conversations whose words hold them, each with its best
+// snippet. Either failing, what the other found stands, and the page says
+// which was not searched (`answersOf`).
 // Opening a row opens it in the middle column; a message the person sends
 // in a chat they archived brings it back to the sidebar (shell.js, `said`).
 // Archived and imported rows end with `h.continueControl(source)` once it
@@ -99,6 +100,25 @@ export function historyRows({ chats, entries, filter = "all", q = "", found = ne
   }
   // one that says no time last, never the newest
   return rows.sort((a, b) => (b.at || 0) - (a.at || 0) || (a.key < b.key ? -1 : 1));
+}
+
+// The two answers to a search, as `Promise.allSettled` gives them: the
+// person's (`GET /api/search`: the newest first) and their archive's
+// (`h.archive.search`: the best first). Each chat or conversation found
+// once, with its first snippet; `failed` says which was not searched, and
+// why, or is empty.
+export function answersOf(chats, imported) {
+  const found = new Map();
+  if (chats.status === "fulfilled") for (const m of chats.value?.messages ?? []) if (!found.has(m.fragment)) found.set(m.fragment, m.snippet);
+  const foundImported = new Map();
+  if (imported.status === "fulfilled") for (const m of imported.value ?? []) if (!foundImported.has(m.key)) foundImported.set(m.key, m.snippet);
+  const why = (r) => r.reason?.message ?? String(r.reason);
+  const [lost, failure] =
+    chats.status === "rejected" && imported.status === "rejected" ? ["Messages and imported chats", chats]
+    : chats.status === "rejected" ? ["Messages", chats]
+    : imported.status === "rejected" ? ["Imported chats", imported]
+    : [null, null];
+  return { found, foundImported, failed: lost ? `${lost} were not searched: ${why(failure)}` : "" };
 }
 
 export function createHistoryPage(page, h) {
@@ -181,22 +201,12 @@ export function createHistoryPage(page, h) {
     if (hint === search.q) return;
     search.timer = setTimeout(async () => {
       const mine = ++search.asked;
-      try {
-        const [answer, imported] = await Promise.all([
-          h.api("GET", `/api/search?q=${encodeURIComponent(hint)}`),
-          h.archive.search ? h.archive.search(hint) : [],
-        ]);
-        if (mine !== search.asked) return;
-        // each chat's newest snippet (the answer is the newest first)
-        const found = new Map();
-        for (const m of answer.messages ?? []) if (!found.has(m.fragment)) found.set(m.fragment, m.snippet);
-        const foundImported = new Map();
-        for (const m of imported) if (!foundImported.has(m.key)) foundImported.set(m.key, m.snippet);
-        Object.assign(search, { q: hint, found, foundImported, failed: "" });
-      } catch (e) {
-        if (mine !== search.asked) return;
-        Object.assign(search, { q: hint, found: new Map(), foundImported: new Map(), failed: e.message });
-      }
+      const [chats, imported] = await Promise.allSettled([
+        h.api("GET", `/api/search?q=${encodeURIComponent(hint)}`),
+        h.archive.search ? h.archive.search(hint) : [],
+      ]);
+      if (mine !== search.asked) return;
+      Object.assign(search, { q: hint, ...answersOf(chats, imported) });
       render();
     }, SEARCH_WAIT_MS);
   }
@@ -311,7 +321,7 @@ export function createHistoryPage(page, h) {
     for (const chip of parts.chips.children) chip.setAttribute("aria-pressed", String(chip.dataset.filter === filter));
     const words = wordsOf(q).length > 0;
     const waiting = words && !searched;
-    parts.status.textContent = search.failed && searched ? `Messages were not searched: ${search.failed}` : waiting ? "Searching messages…" : "";
+    parts.status.textContent = search.failed && searched ? search.failed : waiting ? "Searching messages…" : "";
     parts.status.hidden = !parts.status.textContent;
     if (!rows.length) {
       const empty = words ? (waiting ? "" : `Nothing found for “${q.trim()}”`) : filter === "archived" ? "No archived chats" : filter === "imported" ? "No imported chats" : "No chats yet";

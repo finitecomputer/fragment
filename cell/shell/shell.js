@@ -1545,7 +1545,7 @@ $("apps-link").onclick = () => openApps();
 const historyPage = createHistoryPage($("history-page"), {
   api, el, icon, seg, mark: (name, size) => mark(name, size), chats, isThread: (f) => threads.isPair(f), own, chatTitle: (name) => chatTitle(name),
   agentsOf, agents: () => state.agents, titleOf,
-  archive: { name: () => sessionArchive.archive(), entries: () => sessionArchive.entries(), openSession: (key) => sessionArchive.openSession(key) },
+  archive: { name: () => sessionArchive.archive(), entries: () => sessionArchive.entries(), openSession: (key) => sessionArchive.openSession(key), search: (q) => sessionArchive.search(q) },
   continueControl: (source) => continuing.continueControl(source),
   openChat, leaveSidebar,
 });
