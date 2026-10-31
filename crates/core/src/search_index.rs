@@ -117,10 +117,11 @@ mod simd {
     }
 }
 
-/// Whether `dot` agrees with `dot_scalar` on `n` pseudo-random pairs of
-/// every length to 1040 (a slot's 1024 and its tails): what the index's
-/// test lever answers, run in the very Wasm a deploy ships.
-pub fn dot_agrees(n: u32) -> bool {
+/// Whether `dot` agrees with `dot_scalar` on a pseudo-random pair of each
+/// length from 0 to 1040, every one (a slot's 1024, its tails, and a
+/// step past): what the index's test lever answers, run in the very Wasm
+/// a deploy ships.
+pub fn dot_agrees() -> bool {
     let mut s: u64 = 0x2545_f491_4f6c_dd1d;
     let mut next = || {
         s ^= s << 13;
@@ -128,8 +129,7 @@ pub fn dot_agrees(n: u32) -> bool {
         s ^= s << 17;
         (s >> 32) as i8
     };
-    (0..n).all(|i| {
-        let len = (i as usize * 37) % 1041;
+    (0..=1040usize).all(|len| {
         let (a, b): (Vec<i8>, Vec<i8>) = (0..len).map(|_| (next(), next())).unzip();
         dot(&a, &b) == dot_scalar(&a, &b)
     })
@@ -171,6 +171,13 @@ impl Table {
         assert_eq!(code.len(), self.0.len(), "a code of the question's space");
         self.0.iter().zip(code).map(|(t, b)| t[usize::from(*b)]).sum()
     }
+}
+
+/// Whether an index holding `held` chunks takes a source's write of `new`
+/// chunks that replaces `replaced` of them, holding at most `max`: a
+/// source written again counts once, so one at capacity is replaced.
+pub fn fits(held: u64, replaced: u64, new: u64, max: u64) -> bool {
+    held.saturating_sub(replaced).checked_add(new).is_some_and(|n| n <= max)
 }
 
 /// How many of `n` chunks the sign pass hands to int8.
@@ -390,11 +397,22 @@ mod tests {
 
     #[test]
     fn dot_agrees_with_its_reference_at_every_length() {
-        assert!(dot_agrees(200));
+        assert!(dot_agrees());
         // the extremes: every product at its most
         let (a, b) = (vec![-128i8; 1040], vec![-128i8; 1040]);
         assert_eq!(dot(&a, &b), 1040 * 128 * 128);
         assert_eq!(dot(&a, &vec![127i8; 1040]), -(1040 * 128 * 127));
+    }
+
+    #[test]
+    fn an_index_holds_up_to_its_cap_counting_a_replaced_source_once() {
+        assert!(fits(2, 0, 1, 3), "up to the cap");
+        assert!(!fits(3, 0, 1, 3), "past it");
+        assert!(fits(3, 2, 2, 3), "a source replaced at capacity, as large");
+        assert!(!fits(3, 2, 3, 3), "or larger, past it");
+        assert!(fits(3, 3, 0, 3), "emptied");
+        assert!(fits(0, 5, 3, 3), "a count that drifted below what it replaces is no room");
+        assert!(!fits(u64::MAX, 0, 1, u64::MAX));
     }
 
     #[test]

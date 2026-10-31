@@ -11,10 +11,12 @@
 //! outage held back, or one past a pass's hundred, never lands after the
 //! source's next write; a write held at its embedding, or at the index
 //! itself, while its fragment is deleted and made again writes nothing to
-//! either life; a deleted fragment's index is ended, its rows gone; the
-//! node restarted still holds what was written; and a deployment whose
-//! tiers are private, with no private embeddings slot, indexes by words
-//! alone.
+//! either life; an index takes writes up to its cap, a source replaced at
+//! capacity counted once; a deleted fragment's index is ended, its rows
+//! gone; the node restarted still holds what was written; restarted with
+//! its embeddings in another space, an index answers by words alone until
+//! a write empties it; and a deployment whose tiers are private, with no
+//! private embeddings slot, indexes by words alone.
 
 use std::time::Duration;
 
@@ -75,13 +77,48 @@ pub fn search(s: &mut Suite, api: &Api) -> Result<()> {
     let found = api.signed(&owner, "POST", &format!("/api/f/{name}/search"), Some(&json!({ "q": "ferry friday" })))?;
     s.ok("the node restarted, what was written is searched still", found.status == 200 && found.body["results"][0]["section"] == "t2", &found);
     s.stop()?;
+    let moved = match s.start_repinned() {
+        Ok(api) => moved_checks(s, &api, &owner, &name),
+        Err(e) => Err(e),
+    };
+    s.stop()?;
     let private = match s.start_as_private_tier() {
         Ok(api) => private_checks(s, &api),
         Err(e) => Err(e),
     };
     s.stop()?;
     s.start(false)?;
-    private
+    moved.and(private)
+}
+
+/// On the node restarted with its embeddings in another space: `name`'s
+/// index, written in the space before, is searched by its words alone
+/// until a write empties it (a refused one too), and is written again.
+fn moved_checks(s: &mut Suite, api: &Api, owner: &Keys, name: &str) -> Result<()> {
+    let path = |route: &str| format!("/api/f/{name}/search{route}");
+    let before = api.signed(owner, "POST", &path(""), Some(&json!({ "q": "ferry friday" })))?;
+    let held = api.signed(owner, "GET", &path("/status"), None)?;
+    let mut stale = upsert("sessions/a.json", "r9", turns());
+    stale["replaces"] = json!("r2");
+    let refused = api.signed(owner, "POST", &path("/upsert"), Some(&stale))?;
+    let emptied = api.signed(owner, "GET", &path("/status"), None)?;
+    let nothing = api.signed(owner, "POST", &path(""), Some(&json!({ "q": "ferry friday" })))?;
+    let mut fresh = upsert("sessions/a.json", "r3", turns());
+    fresh["replaces"] = json!("");
+    let again = api.signed(owner, "POST", &path("/upsert"), Some(&fresh))?;
+    let found = api.signed(owner, "POST", &path(""), Some(&json!({ "q": "harbour lantern audit" })))?;
+    s.ok(
+        "embeddings moved to another space: the index of the space before answers by its words alone (semantic off); the first write in the new one empties it first, a compare-and-set it then refuses (409, naming none) included; questions find nothing until its sources are written again, then by words and meaning",
+        before.status == 200 && before.body["semantic"] == "off" && before.body["results"][0]["section"] == "t2" && before.body["results"][0].get("semantic").is_none()
+            && held.body["sources"].as_u64().is_some_and(|n| n > 0) && held.body["space"].get("version").is_none()
+            && refused.status == 409 && refused.body["error"] == "conflict" && refused.body["current"].is_null()
+            && emptied.body["sources"] == 0 && emptied.body["chunks"] == 0 && emptied.body["space"]["version"] == "e2e-2"
+            && nothing.status == 200 && nothing.body["results"] == json!([])
+            && again.status == 200 && again.body["written"] == true
+            && found.body["semantic"] == "on" && found.body["results"][0]["section"] == "t0" && found.body["results"][0]["signals"] == json!(["lexical", "semantic"]),
+        json!({ "before": before.body, "held": held.body, "refused": refused.body, "emptied": emptied.body, "nothing": nothing.body, "found": found.body }),
+    );
+    Ok(())
 }
 
 /// A fragment labelled `label`, made by `owner`, its index made by a
@@ -298,6 +335,30 @@ fn checks(s: &mut Suite, api: &Api) -> Result<(Keys, String)> {
         held && deleted.status == 200 && ended && remade["name"] == b.as_str() && released["index"]["held"] == 1 && wrote.status == 404
             && ended_empty(&old) && now.body["exists"] == false && found.body["results"] == json!([]) && found.body["indexed"] == false,
         json!({ "wrote": wrote.body, "old": old, "now": now.body, "found": found.body }),
+    );
+
+    // ---- an index holds up to its cap; a source written again at capacity counts once
+    let created_full = s.create(api, &owner, "search-full")?;
+    let full = created_full["name"].as_str().context("its name")?.to_string();
+    let write = |source: &str, revision: &str, n: usize| {
+        let sections: Vec<Value> = (0..n).map(|i| json!({ "id": format!("t{i}"), "text": format!("Person: note {i} of {revision}") })).collect();
+        api.signed(&owner, "POST", &format!("/api/f/{full}/search/upsert"), Some(&upsert(source, revision, json!(sections))))
+    };
+    let first = write("notes/a.md", "r1", 1)?;
+    let capped = lever(api, &full, "search-index", json!({ "chunks_max": 3 }))?;
+    let at_cap = write("notes/b.md", "r1", 2)?;
+    let past = write("notes/c.md", "r1", 1)?;
+    let same_size = write("notes/b.md", "r2", 2)?;
+    let larger = write("notes/b.md", "r3", 3)?;
+    let status = api.signed(&owner, "GET", &format!("/api/f/{full}/search/status"), None)?;
+    let listed = api.signed(&owner, "GET", &format!("/api/f/{full}/search/sources"), None)?;
+    let revisions: Vec<(String, String)> = listed.body["sources"].as_array().into_iter().flatten().map(|x| (x["source"].as_str().unwrap_or("").to_string(), x["revision"].as_str().unwrap_or("").to_string())).collect();
+    s.ok(
+        "an index takes writes up to its cap (lowered to 3 chunks here) and refuses one past it, 507 storage_full, holding what it held; a source written again at capacity counts once: as large it is taken, larger refused, its revision before kept",
+        first.status == 200 && capped.status == 200 && at_cap.status == 200 && past.status == 507 && past.body["error"] == "storage_full"
+            && same_size.status == 200 && larger.status == 507 && status.body["chunks"] == 3 && status.body["chunks_max"] == 3
+            && revisions == [("notes/a.md".to_string(), "r1".to_string()), ("notes/b.md".to_string(), "r2".to_string())],
+        json!({ "past": past.body, "larger": larger.body, "status": status.body, "sources": revisions }),
     );
 
     // ---- a deleted fragment's index is ended with it, its rows gone

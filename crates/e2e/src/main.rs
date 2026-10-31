@@ -77,6 +77,10 @@ enum Shape {
     /// price of its own) and nothing else changed: a row an operator adds,
     /// with no version to raise (#451).
     OneKeyMore,
+    /// As `Plain`, its embeddings slot pinned at another version
+    /// (`repinned_models`): another space, as a deployment that moved its
+    /// embeddings model is.
+    EmbeddingsRepinned,
 }
 
 /// Finite Private's key on a node shaped as Finite's (`Shape::FinitePrivate`):
@@ -96,6 +100,20 @@ pub fn plain_models() -> Value {
         "cheap": { "provider": "workers_ai", "model": fragment_core::models::CHEAP_MODEL, "label": RECOMMENDED_LABEL },
         "medium": { "provider": "workers_ai", "model": fragment_core::models::MEDIUM_MODEL, "label": STANDARD_LABEL }
     })
+}
+
+/// `plain_models`, its embeddings slot the default model pinned at a
+/// version (`Shape::EmbeddingsRepinned`): the same vectors in name, another
+/// space, which no index of the plain node's holds.
+pub fn repinned_models() -> Value {
+    let mut models = plain_models();
+    models["embeddings"] = json!({
+        "provider": "workers_ai",
+        "model": fragment_core::embed::MODEL_DEFAULT,
+        "dimensions": fragment_core::embed::DIMENSIONS_DEFAULT,
+        "version": "e2e-2",
+    });
+    models
 }
 
 /// Tinfoil's key on a node shaped as the private tier (`Shape::PrivateTier`):
@@ -640,6 +658,15 @@ impl Suite {
         started
     }
 
+    /// Starts the node with its embeddings in another space
+    /// (`Shape::EmbeddingsRepinned`).
+    pub fn start_repinned(&mut self) -> Result<Api> {
+        self.shape = Shape::EmbeddingsRepinned;
+        let started = self.start(false);
+        self.shape = Shape::Plain;
+        started
+    }
+
     /// Starts the node with one operator key more in its catalog
     /// (`Shape::OneKeyMore`).
     pub fn start_with_a_key_more(&mut self) -> Result<Api> {
@@ -689,6 +716,7 @@ impl Suite {
                 Shape::FinitePrivate => Some(finite_private_models(&self.ai.node().url).to_string()),
                 Shape::PrivateTier => Some(private_tier_models(&self.ai.node().url).to_string()),
                 Shape::Plain | Shape::TwoSites | Shape::SellsNothing | Shape::OneKeyMore => Some(plain_models().to_string()),
+                Shape::EmbeddingsRepinned => Some(repinned_models().to_string()),
             },
             model_keys: {
                 let key = |slot: &str, name: &str, value: &str| devstack::ModelKey { slot: slot.into(), name: name.into(), value: value.into() };
@@ -725,7 +753,7 @@ impl Suite {
             }),
             platform_url: match self.shape {
                 Shape::TwoSites => format!("http://{SUFFIX}:{}", self.port),
-                Shape::Plain | Shape::FinitePrivate | Shape::PrivateTier | Shape::SellsNothing | Shape::OneKeyMore => format!("http://127.0.0.1:{}", self.port),
+                Shape::Plain | Shape::FinitePrivate | Shape::PrivateTier | Shape::SellsNothing | Shape::OneKeyMore | Shape::EmbeddingsRepinned => format!("http://127.0.0.1:{}", self.port),
             },
             operators: Some(
                 std::iter::once(&self.operator).chain(self.wiper.as_ref()).map(|k| fragment_core::npub::encode(k.pubkey_hex())).collect::<Vec<_>>().join(","),
@@ -774,7 +802,7 @@ impl Suite {
     fn suffix(&self) -> &'static str {
         match self.shape {
             Shape::TwoSites => BOATS,
-            Shape::Plain | Shape::FinitePrivate | Shape::PrivateTier | Shape::SellsNothing | Shape::OneKeyMore => SUFFIX,
+            Shape::Plain | Shape::FinitePrivate | Shape::PrivateTier | Shape::SellsNothing | Shape::OneKeyMore | Shape::EmbeddingsRepinned => SUFFIX,
         }
     }
 
