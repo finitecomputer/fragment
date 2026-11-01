@@ -782,7 +782,8 @@ so are the limits named here.
   capability, bound to its own fragment). The app acts as the fragment: no
   role is checked, and everything it embeds, its questions included, is
   paid by the fragment's owner. A refusal throws, with the platform's
-  `code` and `status`, and `cleared` and `fence` where the answer has them.
+  `code` and `status`, and `cleared`, `fence` and `retry_after_ms` where
+  the answer has them.
 - **A source is written whole**, in one transaction: its sections replace
   what it held. The same `(source, revision)` again writes nothing;
   `replaces` is a compare-and-set on its revision (`""`: none yet), else

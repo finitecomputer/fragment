@@ -628,6 +628,19 @@ pub fn reach(s: &mut Suite, api: &Api) -> Result<()> {
         serves.status == 200 && yes.status == 403 && further.iter().all(|r| refused(r, "private_while_reaching")) && refused(&key_again, "unshare_first"),
         json!({ "serves": serves.status, "yes": yes.body, "further": further.iter().map(|r| r.body.clone()).collect::<Vec<_>>(), "key": key_again.body }),
     );
+    // its owner's sheet, locked: the line, New link (it ends the old one),
+    // and a Copy link that gives its address, never the share link
+    let session = api.sign_in(&Api::email_of(&owner))?;
+    let sheet = super::signin::with_session(api, "GET", &format!("/share/{old}"), &session)?;
+    s.ok(
+        "its owner's sheet is locked: the line, New link, and Copy link its address alone, never the share link",
+        sheet.status == 200
+            && sheet.text.contains("stay private to you and your agents for now")
+            && sheet.text.contains("New link")
+            && sheet.text.contains(&format!("data-copy=\"{}\"", api.site_url(&old, "")))
+            && !sheet.text.contains("?view="),
+        sheet.status,
+    );
     let removed = api.signed(&owner, "DELETE", &at(&old, &format!("members/{}", npub::encode(bea.pubkey_hex()))), None)?;
     let uninvited = api.signed(&owner, "DELETE", &at(&old, &format!("invites/{}", Api::email_of(&ivy))), None)?;
     let private = visibility(&old, "members")?;
