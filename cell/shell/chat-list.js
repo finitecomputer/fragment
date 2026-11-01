@@ -158,7 +158,8 @@ export function createChatList({ api, ui, data, selection, menus, navigation, li
   // A chat's row (Paul, 2026-10-31): its name, and how long ago its newest
   // message was said; under it what its agent is doing there, while it is,
   // else whom it waits on (a thread asked from here: threads.js), else that
-  // message's first line. Its section names its agent. Its ⋯ (in the
+  // message's first line; none of these, its name alone. Its section names
+  // its agent. Its ⋯ (in the
   // time's place on hover, always on touch) renames or archives it.
   function chatRow(f, doing, now) {
     const active = f.name === current() && !page();
@@ -188,9 +189,10 @@ export function createChatList({ api, ui, data, selection, menus, navigation, li
     const waits = doing ? null : waitingOn(f.name);
     if (doing) sub.append(el("span", `agent-doing ${doing.doing}`, DOING_SAYS[doing.doing]));
     else if (waits) sub.append(el("span", "agent-doing waiting", `Waiting on ${titleOf(waits.fragment)}`));
-    else sub.append(el("span", "chat-preview", f.preview ?? ""));
+    else if (f.preview) sub.append(el("span", "chat-preview", f.preview));
     sub.append(...unreadMark(f));
-    open.append(line, sub);
+    // nothing said in it yet (a chat continued, its history alone): one line
+    open.append(line, ...(sub.childElementCount ? [sub] : []));
     const more = el("button", "row-more", "⋯");
     more.type = "button";
     more.title = "Pin, rename or archive";

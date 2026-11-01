@@ -5442,7 +5442,8 @@ fn say_in(s: &Suite, b: &mut Browser, page: &Page, host: &str, text: &str) -> bo
 /// words; archived, it is under Archived with its chip, and gone from the
 /// sidebar; its title filters it at once, and a word only its messages
 /// hold finds it through the person's search, its snippet shown; it opens
-/// in the middle column and one Back is History again; on a phone its
+/// in the middle column and one Back is History again; in the sidebar,
+/// nothing said in it yet, it is one line; on a phone its
 /// Continue sits under its words, which stay shown. Invalid: a chat
 /// nothing was said in is not listed, and words nothing holds say so.
 /// Replay: a message the person sends in the archived chat brings it back
@@ -5471,6 +5472,10 @@ fn history_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Perso
         posted.status == 200 && listed && unlisted == true,
         json!({ "row": b.eval(page, &format!("{}?.innerText ?? null", row(&bread)))?, "unused": unlisted }),
     );
+    // in the sidebar, nothing said in it yet (its history alone): its name, one line
+    let side = format!("document.querySelector({})", js(&format!("#chats [data-key={}]", js(&format!("chat:{bread}")))));
+    let one_line = b.until(page, &format!("!!{side} && {side}.querySelector('.label')?.textContent === 'Bread notes' && !{side}.querySelector('.chat-sub')"), wait);
+    s.ok("in the sidebar a continued chat nothing was said in yet is its name alone, one line", one_line, b.eval(page, &format!("{side}?.innerHTML ?? null"))?);
     // archived: under Archived, with its chip, and gone from the sidebar
     shell(api, me.session, "PUT", &format!("/api/fragments/{bread}/archived"), Some(&json!({ "archived": true })), &[])?;
     b.click(page, ".history-filter[data-filter=\"archived\"]")?;
