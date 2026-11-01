@@ -5,7 +5,11 @@
 //! first time, authenticated now: the access token's `auth_time`); without
 //! one, a browser gets a one-field form (dev), and a test sets who comes
 //! next. Levers: change a user's email, fail the next authorize, the codes
-//! and sessions it handed out.
+//! and sessions it handed out. Its users can be kept in a file
+//! (`keep_users_in`), as a dev stack keeps its registry: a fake made new
+//! each start would hand the first email to sign in the subject (`user_…1`)
+//! of whoever held it before, and the registry, which signs a person in by
+//! subject, would sign them in as that person.
 //!
 //! And the session AuthKit keeps in a browser (its own cookie, on its own
 //! domain), which answers an authorize without asking anyone: the fake
@@ -54,14 +58,16 @@
 //! Each token remembers the account it was for (`token_account`).
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use base64::Engine;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::http::{Handler, Request, Response, Server};
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct User {
     pub id: String,
     pub email: String,
@@ -69,9 +75,19 @@ pub struct User {
     pub verified: bool,
 }
 
+/// What a file keeps of the fake (`keep_users_in`): its users, and the
+/// counter their ids come from, so none is handed out twice.
+#[derive(Default, Serialize, Deserialize)]
+struct Kept {
+    counter: u64,
+    users: Vec<User>,
+}
+
 #[derive(Default)]
 struct State {
     users: Vec<User>,
+    /// Where the users are kept, written as each is made or changed.
+    users_file: Option<PathBuf>,
     /// code → (user id, session id, `auth_time`), each used once.
     codes: HashMap<String, (String, String, i64)>,
     ended: Vec<String>,
@@ -285,7 +301,20 @@ impl State {
         }
         let user = User { id: self.next("user"), email: email.to_string(), verified: true };
         self.users.push(user.clone());
+        self.keep();
         user
+    }
+
+    /// The users and the counter, written to `users_file` (whole, then
+    /// moved into place, so a file is never half written).
+    fn keep(&self) {
+        if let Some(path) = &self.users_file {
+            let kept = serde_json::to_vec(&Kept { counter: self.counter, users: self.users.clone() }).expect("users serialize");
+            let tmp = path.with_extension("tmp");
+            if std::fs::write(&tmp, kept).is_ok() {
+                let _ = std::fs::rename(&tmp, path);
+            }
+        }
     }
 }
 
@@ -826,6 +855,26 @@ impl WorkOs {
         if let Some(u) = s.users.iter_mut().find(|u| u.id == id) {
             u.email = email.to_string();
         }
+        s.keep();
+    }
+
+    /// Its users kept in `path` from now on: those the file holds come back
+    /// (with the counter, so no id is handed out again), and each made or
+    /// changed after is written there. Answers how many came back.
+    pub fn keep_users_in(&self, path: &Path) -> std::io::Result<usize> {
+        let mut s = self.state.lock().expect("workos state");
+        if path.exists() {
+            let kept: Kept = serde_json::from_slice(&std::fs::read(path)?).map_err(std::io::Error::other)?;
+            s.counter = s.counter.max(kept.counter);
+            for u in kept.users {
+                if !s.users.iter().any(|x| x.id == u.id) {
+                    s.users.push(u);
+                }
+            }
+        }
+        s.users_file = Some(path.to_path_buf());
+        s.keep();
+        Ok(s.users.len())
     }
 
     /// Whether WorkOS has verified a user's email.
@@ -834,6 +883,7 @@ impl WorkOs {
         if let Some(u) = s.users.iter_mut().find(|u| u.id == id) {
             u.verified = verified;
         }
+        s.keep();
     }
 
     /// The next authorize redirects back with this error.

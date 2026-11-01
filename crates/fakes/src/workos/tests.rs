@@ -110,3 +110,34 @@ fn a_persons_accounts_at_a_provider_are_each_named_by_id() {
     assert_eq!(p.call("DELETE", &path, None).0, 204, "the compatibility connection, naming none");
     assert!(!p.fake.holds("a@e2e.test", "mail"));
 }
+
+/// Goal: a fake started again over the file its users were kept in hands no
+/// email another's subject, as a dev stack's registry (which signs a person
+/// in by subject) needs across its restarts. Method: one fake makes a user
+/// and stops; another, over the same file, is asked for a new email and the
+/// first one again. A fake with no file starts its ids over, the first
+/// email to come taking the first id.
+#[test]
+fn users_kept_in_a_file_keep_their_subjects_across_a_restart() {
+    let dir = std::env::temp_dir().join(format!("workos-kept-{}-{}", std::process::id(), now_s()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("workos.json");
+    let first = {
+        let fake = WorkOs::start("client_kept", KEY).unwrap();
+        assert_eq!(fake.keep_users_in(&file).unwrap(), 0, "a new file holds no one");
+        fake.user("dev@fragment.localhost").id
+    };
+    let fake = WorkOs::start("client_kept", KEY).unwrap();
+    assert_eq!(fake.keep_users_in(&file).unwrap(), 1, "the user kept comes back");
+    let other = fake.user("rehearsal@fragment.localhost");
+    assert_ne!(other.id, first, "a new email gets a new subject, never the one kept");
+    assert_eq!(fake.user("dev@fragment.localhost").id, first, "the kept email signs in as itself");
+    fake.set_email(&other.id, "renamed@fragment.localhost");
+    let again = WorkOs::start("client_kept", KEY).unwrap();
+    assert_eq!(again.keep_users_in(&file).unwrap(), 2);
+    assert_eq!(again.user("renamed@fragment.localhost").id, other.id, "a change of email is kept too");
+    // what a fake with no file does: its ids start over
+    let fresh = WorkOs::start("client_kept", KEY).unwrap();
+    assert_eq!(fresh.user("rehearsal@fragment.localhost").id, first, "without a file, the first email to come takes the first id");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
