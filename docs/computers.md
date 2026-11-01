@@ -657,7 +657,9 @@ What our Hermes image guarantees beyond the contract:
   own timers while held, each file replaced whole or appended, so a save
   holds a whole version of it; nothing else under `/data` changes (the
   Docker lane's `held_nothing_under_data_changes`). Its model-catalog
-  refresh is off, and Node's compile cache is outside `/data`.
+  refresh is off, and Node's compile cache is outside `/data`. A Claude
+  agent's idle `claude` is stopped before the hold is answered
+  (docs/bridge.md, "The Claude runtime").
 - **A turn a restart cut** is closed in its Hermes session before the
   gateway starts, so the next message is a turn of its own (P5).
 - **Its agents change while it runs**, nothing restarted: one assigned

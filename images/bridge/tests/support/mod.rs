@@ -261,10 +261,10 @@ impl Runtime for Counting {
     }
 
     fn run(self: Box<Self>, io: RuntimeIo) -> RuntimeFuture {
-        let RuntimeIo { mut commands, events, shutdown } = io;
+        let RuntimeIo { mut commands, events, shutdown, held, unquiet } = io;
         let (to_inner, inner_commands) = mpsc::channel::<Command>(256);
         let runs = self.runs;
-        let inner = self.inner.run(RuntimeIo { commands: inner_commands, events, shutdown });
+        let inner = self.inner.run(RuntimeIo { commands: inner_commands, events, shutdown, held, unquiet });
         Box::pin(async move {
             // On the bridge's runtime, so a kill ends it with the bridge.
             tokio::spawn(async move {
