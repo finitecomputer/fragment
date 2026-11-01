@@ -83,7 +83,7 @@ async fn question_vector(env: &Env, cfg: &Config, who: &Signed, asked: &Across, 
     // document prefix (searchable.rs)
     Ok(match embedded(env, &[cfg.models.embeddings.question(&asked.q)], &payer, agent, None, ctx).await? {
         Embedding::Vectors { vectors, .. } => vectors.into_iter().next().map(|v| rules::vector_b64(&v)),
-        Embedding::Refused { status, text } => {
+        Embedding::Refused { status, text, .. } => {
             console_warn!("{}", json!({ "event": "search.across-unembedded", "status": status, "why": text }));
             None
         }
