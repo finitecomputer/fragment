@@ -8,7 +8,7 @@ export const DEFAULT_AGENT_TIER = "cheap";
 const ROLE_MAX_CHARS = 48;
 const AGENTS_MAX = 16;
 
-export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, agents, named, rename, load, nameScreen, renderNames, computer, homePicker, addAgent }) {
+export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, agents, named, rename, load, nameScreen, renderNames, computer, homePicker, addAgent, primaryAgent, chats, own }) {
   // ---- an agent's name and picture (docs/api.md, "An agent's name and
   // picture"): its agent fragment's title and its avatar.png, written and
   // put live as any of its files are (POST …/files, then …/deploy). Every
@@ -50,8 +50,25 @@ export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, 
     await api("POST", `/api/f/${seg(agent)}/files`, { message: file ? "its picture" : "no picture", files: [write] });
     await api("POST", `/api/f/${seg(agent)}/deploy`, {});
   }
-  // An agent's row's Rename, its picture (Add, Change, Remove), and a line
-  // that says what they did or why not.
+  // An agent removed (FIN-250): the chats it is the only agent of are
+  // archived first, so they are in History, read and continued with another
+  // agent (its membership kept, so its words stay its), and then its
+  // fragment is deleted: it leaves its computer, and its routines (its own
+  // schedules) stop with it (docs/api.md, DELETE /api/f/{name}). Archived
+  // first: a delete that fails leaves it as it was but for those chats,
+  // which Remove again finds archived, and the person can unarchive.
+  async function removeAgent(a) {
+    const alone = chats().filter((f) => own(f) && !f.archived && (f.agents ?? []).length === 1 && f.agents[0] === a.identity);
+    for (const f of alone) await api("PUT", `/api/fragments/${seg(f.name)}/archived`, { archived: true });
+    await api("DELETE", `/api/f/${seg(a.fragment)}`);
+    await load();
+  }
+  // Whether an agent may be removed here: one of several, never the main
+  // agent (the first of theirs, whom new chats go to).
+  const removable = (a) => agents().size > 1 && primaryAgent()?.fragment !== a.fragment;
+  // An agent's row's Rename, its picture (Add, Change, Remove), Remove agent
+  // (asked once more, saying what it does), and a line that says what they
+  // did or why not.
   function faceControls(a) {
     const said = el("p", "muted agent-face-said");
     said.hidden = true;
@@ -93,6 +110,36 @@ export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, 
     remove.onclick = () => change(null);
     const actions = el("span", "agent-face-actions");
     actions.append(renameIt, picture, remove);
+    if (removable(a)) {
+      const ask = el("button", "quiet", "Remove agent");
+      ask.type = "button";
+      ask.dataset.removeAgent = a.fragment;
+      ask.onclick = () => {
+        const what = el("span", "muted agent-remove-what", "Its chats go to History. Its routines stop.");
+        const sure = el("button", "quiet", `Remove ${titleOf(a.fragment)}`);
+        sure.type = "button";
+        sure.dataset.removeAgentSure = a.fragment;
+        const cancel = el("button", "quiet", "Cancel");
+        cancel.type = "button";
+        cancel.onclick = () => actions.replaceChildren(renameIt, picture, remove, ask);
+        sure.onclick = async () => {
+          for (const b of [sure, cancel]) b.disabled = true;
+          tell(`Removing ${titleOf(a.fragment)}…`);
+          try {
+            await removeAgent(a);
+            // its row goes with it
+            const row = document.querySelector(`.agent-setting[data-agent="${CSS.escape(a.fragment)}"]`);
+            row?.nextElementSibling === said && said.remove();
+            row?.remove();
+          } catch (e) {
+            tell(e.message);
+            actions.replaceChildren(renameIt, picture, remove, ask);
+          }
+        };
+        actions.replaceChildren(what, sure, cancel);
+      };
+      actions.append(ask);
+    }
     return [actions, said];
   }
   // Settings' agent rows as the list says now: each one's face and name, and
@@ -406,5 +453,5 @@ export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, 
     read.then(show);
     return [fastRow, deepRow];
   }
-  return { faceControls, renderAgentFaces, agentSettings, addAgentForm, agentJson, writeAgentJson, savePick, settingLabel, modelOption };
+  return { faceControls, renderAgentFaces, agentSettings, addAgentForm, agentJson, writeAgentJson, savePick, settingLabel, modelOption, removeAgent, removable };
 }

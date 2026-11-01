@@ -1598,6 +1598,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     faces_ui(s, api, &mut b, &page, &me, &chat, &shots)?;
     // and a third agent, which none of the checks above counts
     add_agent_ui(s, api, &mut b, &page, &session, &shots)?;
+    remove_agent_ui(s, api, &mut b, &page, &session, &shots)?;
     b.close(page)?;
     first_chat_release_ui(s, api, &mut b)?;
     b.set_cookie(&format!("{}/", api.base), "fragment_session", &session)?;
@@ -7554,6 +7555,48 @@ fn add_agent_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session:
         edited && gone,
         json!({ "role": role() }),
     );
+    Ok(())
+}
+
+/// Remove agent, in Settings' Agents (FIN-250): offered for each agent but
+/// the main one (and never the only one), asked once more saying what it
+/// does. Valid: Wren, added above, removed: off its computer and the list,
+/// its chat (Wren its only agent) archived, in History with Continue, its
+/// words still Wren's. Invalid: the main agent has no Remove. Replay: its
+/// row is gone, and nothing else is.
+fn remove_agent_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &str, shots: &std::path::Path) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    let agent = own_named(api, session, "wren")?;
+    let chat = own_named(api, session, "wren-chat")?;
+    let before = shell(api, session, "GET", "/api/computers", None, &[])?.body["computers"][0]["agents"].as_array().map(Vec::len).unwrap_or(0);
+    b.click(page, "#settings")?;
+    let ask = format!("document.querySelector({})", js(&format!("[data-remove-agent={}]", js(&agent))));
+    let offered = b.until(page, &format!("!!{ask}"), wait);
+    // every agent's row but the main one's offers it
+    let rows = b.eval(page, "[document.querySelectorAll('#settings-page .agent-setting').length, document.querySelectorAll('#settings-page [data-remove-agent]').length]")?;
+    b.eval(page, &format!("({ask}.scrollIntoView({{ block: 'center' }}), {ask}.click(), true)"))?;
+    let sure = format!("document.querySelector({})", js(&format!("[data-remove-agent-sure={}]", js(&agent))));
+    let asked = b.until(page, &format!("{sure}?.textContent === 'Remove Wren' && {sure}.parentElement.innerText.includes('Its chats go to History. Its routines stop.')"), wait);
+    let _ = b.screenshot(page, &shots.join("desktop-remove-agent-ask.png"));
+    b.eval(page, &format!("({sure}.click(), true)"))?;
+    let gone_row = b.until(page, &format!("!document.querySelector({})", js(&format!(".agent-setting[data-agent={}]", js(&agent)))), wait);
+    let gone = s.eventually(wait, || own_row_of(api, session, &agent).is_null());
+    let after = shell(api, session, "GET", "/api/computers", None, &[])?.body["computers"][0]["agents"].as_array().map(Vec::len).unwrap_or(0);
+    let archived = own_row_of(api, session, &chat)["archived"] == true;
+    s.ok(
+        "Remove agent: offered for every agent but the main one, asked once more saying its chats go to History and its routines stop; then off its computer and the list, its own chat archived",
+        offered && rows[0].as_u64().zip(rows[1].as_u64()).is_some_and(|(all, offered)| all >= 2 && offered == all - 1) && asked && gone_row && gone && after + 1 == before && archived,
+        json!({ "rows": rows, "computer": [before, after], "chat": own_row_of(api, session, &chat) }),
+    );
+    // in History, under Archived: its words still read, and Continue offered
+    b.click(page, "#history-link")?;
+    b.click(page, ".history-filter[data-filter=\"archived\"]")?;
+    let row = format!("document.querySelector({})", js(&format!(".history-row[data-key={}]", js(&format!("chat:{chat}")))));
+    // its Continue never offers the agent removed (gone from the list at once, its computer a moment later)
+    let kept = b.until(page, &format!("!!{row} && !!{row}.querySelector('.continue-control') && !{row}.querySelector('.continue-control').innerText.includes('Wren')"), wait);
+    let _ = b.screenshot(page, &shots.join("desktop-removed-agent-history.png"));
+    s.ok("its chat is in History, under Archived, with Continue to another of their agents, never the one removed", kept, b.eval(page, &format!("{row}?.innerText ?? null"))?);
+    b.click(page, ".history-filter[data-filter=\"all\"]")?;
     Ok(())
 }
 

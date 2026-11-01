@@ -102,9 +102,12 @@ export function createContinue({
   const fileOf = (archive, path) => api("GET", `/api/f/${seg(archive)}/file?path=${encodeURIComponent(path)}`);
   const slotOf = (source, agent) => `${source.chat ? `chat ${source.chat}` : `${source.archive} ${source.key}`} ${agent}`;
 
-  // the person's own agents, as their computer runs them
+  // the person's own agents, as their computer runs them, and still theirs:
+  // one removed leaves their list at once, its computer a moment later
+  // (Settings' Remove agent, FIN-250), and is never offered
   function agents() {
-    return [...computerAgents().values()].filter((a) => a.fragment).map((a) => ({ identity: a.identity, fragment: a.fragment, title: titleOf(a.fragment) }));
+    const listed = new Set(allFragments().filter((f) => f.kind === "agent").map((f) => f.name));
+    return [...computerAgents().values()].filter((a) => a.fragment && listed.has(a.fragment)).map((a) => ({ identity: a.identity, fragment: a.fragment, title: titleOf(a.fragment) }));
   }
   const titled = (identity) => agents().find((a) => a.identity === identity)?.title ?? "";
   const same = (a, b) => typeof a === "string" && typeof b === "string" && a.trim().toLocaleLowerCase() === b.trim().toLocaleLowerCase();

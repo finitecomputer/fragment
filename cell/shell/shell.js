@@ -922,6 +922,7 @@ const agentsOwnChat = (agent) => chats().find((f) => own(f) && labelOf(f.name) =
 const { faceControls, renderAgentFaces, agentSettings, addAgentForm, agentJson, writeAgentJson, savePick, settingLabel, modelOption } = createAgentSettings({
   api, el, seg, byName, agentFace, titleOf, agents: () => state.agents, named, rename: (name) => rename(name), load, nameScreen, renderNames,
   computer: () => state.computer, homePicker: (a, said) => homePicker(a, said), addAgent: (spec) => onboarding.addAgent(spec),
+  primaryAgent: () => primaryAgent(), chats, own,
 });
 const { chatTitle, homeMark, loadHomes, homePicker, paintHomes, setHome } = createAgentHomes({
   el, icon, named, actionLine, settingLabel, modelOption, savePick,
