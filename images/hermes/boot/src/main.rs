@@ -859,8 +859,18 @@ fn spawn_bridge(card_timeout_s: u64) -> Option<Child> {
         // simplex/run.rs): the core the image carries. It runs only while
         // the computer is always on, and only for a linked agent.
         .env("BRIDGE_SIMPLEX_BIN", SIMPLEX_CHAT)
+        // Claude Code, for the agents that name it, is the person's own
+        // (docs/computers.md, "Claude Code"): installed in a terminal of an
+        // agent's desktop, whose home is Hermes' (its gateway's), so it lands
+        // in /data, on the image's PATH; run as Hermes' user, signed in as
+        // the person signed in there. Until they install it, a turn says how.
+        .env("BRIDGE_CLAUDE_BIN", home().join(".local/bin/claude"))
+        .env("BRIDGE_CLAUDE_HOME", home())
         // The restore already happened: the bridge reads /data at once.
         .env_remove("RESTORE_PENDING");
+    if let Some((uid, gid)) = hermes_ids() {
+        c.env("BRIDGE_CLAUDE_USER", format!("{uid}:{gid}"));
+    }
     match c.spawn() {
         Ok(child) => Some(child),
         Err(e) => {

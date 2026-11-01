@@ -37,10 +37,7 @@ pub(crate) async fn route(mut req: Request, env: &Env, cfg: &Config, url: &Url, 
     let limit = asked.limit.unwrap_or(wire::RESULTS_DEFAULT);
     let vector = question_vector(env, cfg, &who, &asked, ctx).await?;
     // the space the question is in, which an answer's cosines must name
-    let space = vector.as_ref().map(|_| {
-        let s = cfg.models.embeddings.space();
-        wire::Space { model: s.model.to_string(), dimensions: s.dimensions, version: s.version.map(str::to_string) }
-    });
+    let space = vector.as_ref().map(|_| cfg.models.embeddings.search_space());
     let semantic = vector.is_some();
     let inner = json!(Forwarded { query: across::query(&asked, Some(across::asked_limit(limit))), vector }).to_string();
     let answers = join_all(asked.fragments.iter().map(|name| ask(env, url, &who, name, &inner))).await;
@@ -82,7 +79,9 @@ async fn question_vector(env: &Env, cfg: &Config, who: &Signed, asked: &Across, 
         _ => (Some(who.identity.id.clone()), None),
     };
     let Some(payer) = payer else { return Ok(None) };
-    Ok(match embedded(env, std::slice::from_ref(&asked.q), &payer, agent, None, ctx).await? {
+    // after the slot's query prefix, as each child's chunks after its
+    // document prefix (searchable.rs)
+    Ok(match embedded(env, &[cfg.models.embeddings.question(&asked.q)], &payer, agent, None, ctx).await? {
         Embedding::Vectors { vectors, .. } => vectors.into_iter().next().map(|v| rules::vector_b64(&v)),
         Embedding::Refused { status, text } => {
             console_warn!("{}", json!({ "event": "search.across-unembedded", "status": status, "why": text }));

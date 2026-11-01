@@ -51,8 +51,8 @@ fn a_node_starts_and_reloads_from_vs_codes_debug_terminal() {
     std::fs::create_dir_all(&project).unwrap();
     std::fs::write(project.join("worker.js"), worker("first code")).unwrap();
     std::fs::write(devstack::local_config(&project), r#"{ "name": "debug-terminal", "main": "worker.js", "compatibility_date": "2026-01-01" }"#).unwrap();
-    let port = devstack::free_port().unwrap();
-    let opts = devstack::NodeOptions { project: project.clone(), port, log_dir: project.clone(), own_group: true };
+    let opts = devstack::NodeOptions { project: project.clone(), listener: devstack::hold_port(0).unwrap(), log_dir: project.clone(), own_group: true };
+    let port = opts.port();
     let (node, _) = devstack::Node::start(&tools, &opts).expect("a node starts with VSCODE_INSPECTOR_OPTIONS set");
     let first = get(port);
     assert!(says(&first, "first code"), "the first code answers through the front door: {first:?}");

@@ -130,8 +130,9 @@ jobs:
   # parallel (one per CPU). Measured on ubuntu-latest (4 CPUs, 16 GB, a
   # 145 GB disk with about 85 GB free): the Hermes image builds in about
   # 7 minutes (its two Rust stages, the CLI's and the bridge's, about
-  # 5.5 of them), the tests take about 3, and the job uses at most about
-  # 11 GB of the disk (71 GB used of 145 at its peak, 75 GB free).
+  # 5.5 of them), the tests take about 3. Its disk, measured on ubuntu-24.04
+  # (PR #890): from the 31 GB used once the disk is freed, a peak of 44.7
+  # GiB used, about 14 GiB of the lane's own.
   #
   # No layer cache, by measurement (PR #252): with BuildKit's layers in the
   # Actions cache (mode=max), an image whose every input was unchanged built
@@ -166,6 +167,25 @@ jobs:
         working-directory: images
     steps:
       - uses: actions/checkout@v4
+      # Some ubuntu-24.04 runners (image 20261018.96.1) have a 72 GB root,
+      # 12 GB free once the lane's test binary is built, which its two
+      # images (6.4 GB) and their build cache (2.7 GB) all but fill: runs
+      # 41249649091 and 41253027860 ran out of disk. Most have 145 GB, 86 GB
+      # free. The lane uses none of the image's Android (12 GB), .NET (5.8),
+      # Haskell (3.7), Swift (3.5) or CodeQL (1.4), nor its cached Docker
+      # images (2.5): they go first, 28 GB in about 90 seconds (PR #890).
+      # Its disk's layout is said, as it differs between runners.
+      - name: free the disk
+        working-directory: .
+        run: |
+          df -h /
+          lsblk -o NAME,SIZE,TYPE,MOUNTPOINT
+          sudo dmsetup status 2>/dev/null || true
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift /opt/hostedtoolcache/CodeQL
+          docker image prune -af > /dev/null
+          df -h /
+          # the root's use every 5 seconds, whose peak `disk, after` says
+          nohup sh -c 'while :; do df -B1M --output=used / | tail -1; sleep 5; done' > "$RUNNER_TEMP/disk-used" 2>&1 &
       - uses: dtolnay/rust-toolchain@stable
       # the check job's cache, read only
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -185,8 +205,10 @@ jobs:
       - name: build the Hermes image
         working-directory: .
         run: docker build --platform linux/amd64 -f images/hermes/Dockerfile -t fragment-hermes:test .
+      # the tests build only the SimpleX lab's image, from its own
+      # Dockerfile: the two builds' cache goes before them
       - name: disk, built
-        run: docker system df; df -h /
+        run: docker system df; docker builder prune -af > /dev/null; df -h /
       - name: the Docker lane
         run: cargo test -p fragment-bridge --test docker --locked -- --ignored --show-output
         env:
@@ -194,7 +216,9 @@ jobs:
           RUST_BACKTRACE: "1"
       - if: always()
         name: disk, after
-        run: df -h /
+        run: |
+          docker system df; df -h /
+          echo "peak: $(sort -n "$RUNNER_TEMP/disk-used" | tail -1) MiB used"
       # each container's log (Container's drop) and the tests' own
       - if: failure()
         uses: actions/upload-artifact@v4
