@@ -261,43 +261,11 @@ impl Tools {
     }
 }
 
-/// The lowest port `free_port` picks.
-const PICKED_PORTS_FROM: u16 = 20_000;
-/// Ports `free_port` tries before it gives up.
-const PICK_TRIES_MAX: u32 = 64;
-
-/// A free local port, for a process to bind a moment later (wrangler's
-/// node, its inspector), picked at random below the
-/// kernel's ephemeral range. The kernel numbers its own ports from that
-/// range alone: a connection's local end, any bind to port 0 (workerd's
-/// sockets inside wrangler), Docker's published ports. A port the kernel
-/// handed out for the asking (`bind(":0")`) was free only until then, and
-/// one of those took it before wrangler's bind (`bind(): Address already in
-/// use` at a node's boot, in CI runs 40148072254 and 40937119767); a node
-/// started again keeps its port, free while it is down. Below the range,
-/// only a process that names the port can take it.
-pub fn free_port() -> Result<u16> {
-    let ephemeral = ephemeral_ports_from()?;
-    anyhow::ensure!(ephemeral > PICKED_PORTS_FROM + 1024, "the kernel's ephemeral ports start at {ephemeral}, leaving none to pick below them from {PICKED_PORTS_FROM}");
-    for _ in 0..PICK_TRIES_MAX {
-        let r = u16::from_str_radix(&random_hex(2), 16).expect("four hex digits");
-        let port = PICKED_PORTS_FROM + r % (ephemeral - PICKED_PORTS_FROM);
-        if TcpListener::bind(("127.0.0.1", port)).is_ok() {
-            return Ok(port);
-        }
-    }
-    bail!("no free port in {PICK_TRIES_MAX} tries between {PICKED_PORTS_FROM} and {ephemeral}")
-}
-
-/// The first port of the kernel's ephemeral range: Linux's
-/// `ip_local_port_range` (32768 by default), macOS's 49152.
-fn ephemeral_ports_from() -> Result<u16> {
-    if cfg!(target_os = "macos") {
-        return Ok(49_152);
-    }
-    let range = fs::read_to_string("/proc/sys/net/ipv4/ip_local_port_range").context("read the kernel's ephemeral port range")?;
-    let first = range.split_whitespace().next().context("an empty ip_local_port_range")?;
-    first.parse().with_context(|| format!("ip_local_port_range starts at {first:?}"))
+/// The port a boot's log says wrangler is ready on (`Ready on
+/// http://127.0.0.1:<port>`): its own pick, a boot's log saying it once.
+fn ready_port(text: &str) -> Option<u16> {
+    let after = text.split("Ready on http://127.0.0.1:").nth(1)?;
+    after[..after.find(|c: char| !c.is_ascii_digit())?].parse().ok().filter(|p| *p != 0)
 }
 
 /// Writes a project's `.dev.vars` (dotenv, one line per value, mode 600).
@@ -754,11 +722,14 @@ impl Node {
         // the node's port, held before wrangler starts (front.rs)
         let heard = Arc::new(front::Heard::default());
         let front = front::Front::serve(opts.listener.try_clone()?, heard.clone(), out.clone())?;
-        let proxied = free_port()?;
         let mut cmd = tools.wrangler()?;
         cmd.arg("dev").arg("-c").arg(&config);
-        cmd.args(["--ip", "127.0.0.1", "--port", &proxied.to_string()]);
-        cmd.args(["--inspector-port", &free_port()?.to_string()]);
+        // its own port (its proxy's, which nothing here dials: the front
+        // door goes to the runtime) and its inspector's, each of its own
+        // picking (`0`): one picked for it and let go before it bound could
+        // be another's by then (`bind(): Address already in use` at a node's
+        // boot, CI runs 40148072254 and 40937119767)
+        cmd.args(["--ip", "127.0.0.1", "--port", "0", "--inspector-port", "0"]);
         cmd.arg("--persist-to").arg(state_dir(&opts.project));
         // debug: the runtime's address is named there alone (front.rs)
         cmd.args(["--show-interactive-dev-session=false", "--log-level", "debug"]);
@@ -788,10 +759,10 @@ impl Node {
             child
         };
         let mut node = Node { child, own_group: opts.own_group, base: format!("http://127.0.0.1:{port}"), port, log: log.clone(), reaped: false, _front: front };
-        loop {
+        let proxied = loop {
             let text = fs::read(&log).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
-            if text.contains(&format!("Ready on http://127.0.0.1:{proxied}")) {
-                break;
+            if let Some(proxied) = ready_port(&text) {
+                break proxied;
             }
             if exited_unreaped(node.child.id(), false)? {
                 let status = node.reap()?;
@@ -801,7 +772,7 @@ impl Node {
                 bail!("wrangler dev on :{port} was not ready after {READY_TIMEOUT:?}:\n{text}");
             }
             std::thread::sleep(Duration::from_millis(50));
-        }
+        };
         // fails loudly: never the proxy's path instead
         let Some(runtime) = heard.named(RUNTIME_NAMED_WAIT) else {
             let text = fs::read(&log).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
@@ -1032,16 +1003,13 @@ mod tests {
         assert_eq!(env("WRANGLER_SEND_METRICS"), Some(PathBuf::from("false")));
     }
 
-    /// A picked port is below the kernel's ephemeral range. It was free as
-    /// it was picked (`free_port` binds it to see); binding it again here
-    /// would test only that no other process took it since, which nothing
-    /// can promise on a shared machine (this test once failed so).
+    /// The port wrangler says it is ready on, once its line is whole; none
+    /// before it, from a line cut short, or for a port 0.
     #[test]
-    fn a_picked_port_is_below_the_ephemeral_range() {
-        let ephemeral = ephemeral_ports_from().expect("the ephemeral range");
-        for _ in 0..32 {
-            let port = free_port().expect("a free port");
-            assert!((PICKED_PORTS_FROM..ephemeral).contains(&port), "{port} is below {ephemeral}");
+    fn wrangler_is_ready_on_the_port_it_says() {
+        assert_eq!(ready_port("x\n[wrangler:info] Ready on http://127.0.0.1:35523\n[wrangler:info] GET / 200"), Some(35523));
+        for unready in ["", "Starting local server...", "Ready on http://127.0.0.1:355", "Ready on http://127.0.0.1:0\n", "Ready on http://localhost:35523\n"] {
+            assert_eq!(ready_port(unready), None, "{unready:?}");
         }
     }
 

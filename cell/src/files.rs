@@ -23,7 +23,7 @@ use crate::error::{CellError, CellResult};
 use crate::fragment::{FragmentCell, MetaKey};
 use crate::js;
 
-/// Set by the `Files` capability (entry.mjs); the router never sets or passes it.
+/// Set by the `Files` and `Search` capabilities (entry.mjs); the router never sets or passes it.
 pub const CAP_HEADER: &str = "x-fragment-cap";
 /// Commits tried against a `main` that keeps moving.
 const WRITE_ATTEMPTS: usize = 5;

@@ -35,6 +35,8 @@
 // `archive` ({name, entries, openSession}), `openChat`, `leaveSidebar` and
 // `continueControl`.
 
+import { speakers } from "./session-text.js";
+
 // The search API's hint: eight words, 256 bytes at most (launcher.js's).
 const HINT_WORDS = 8;
 const HINT_MAX_BYTES = 256;
@@ -262,7 +264,10 @@ export function createHistoryPage(page, h) {
     const sub = el("span", "history-sub");
     const who = r.kind === "chat" ? r.with : "Imported";
     if (who) sub.append(el("span", "history-with", who));
-    const words = r.snippet ?? (r.kind === "chat" ? r.preview : r.entry.preview) ?? "";
+    // an imported conversation's found words said for a person: You, and its
+    // agent by its index's name (session-text.js); its first words are its
+    // person's own already
+    const words = (r.kind === "imported" && r.snippet !== undefined ? speakers(r.snippet, r.entry.agent) : r.snippet) ?? (r.kind === "chat" ? r.preview : r.entry.preview) ?? "";
     if (words) sub.append(el("span", r.snippet === undefined ? "history-preview" : "history-preview found", words));
     main.append(line, sub);
     open.append(face, main);

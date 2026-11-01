@@ -118,8 +118,9 @@ Synthesis publishes to the parent's audience. Create with
 owners and agents. If a child becomes unreadable, mark dependent pages
 stale or withdrawn; never regenerate from cached copies. Withdraw content
 that should no longer be disclosed. Old git history cannot be recalled.
-Search children through their existing `search` operation as the reader,
-reporting incomplete coverage. The parent's browser searches its own pages.
+Search the parent and its children as one, as the reader (`fragment search
+"<q>" --in <parent>,<children>`), reporting any brain it could not search.
+The parent's browser searches its own pages.
 
 ## Rules
 
