@@ -8,9 +8,12 @@
 //
 // Search is the fragment's own index (docs/api.md, "A fragment's search"),
 // by words and by meaning, written and asked through `this.searchIndex`:
-// each markdown page a source (its path; its bytes' sha256 the revision),
-// cut into sections by applib/sections.mjs. Each move of main runs
-// `changed` (fragment.json's file trigger), and so does each install of a
+// each markdown page a source (its path; its bytes' sha256 under `FORMAT`
+// the revision, so a new format writes every page again), cut into sections
+// by applib/sections.mjs, a section's wiki links as their words (`linkWords`:
+// so every reader of the index, ⌘K's Knowledge, `fragment search` and the
+// brain's own page, shows "frost dates", not "[[frost-dates]]"). Each move
+// of main runs `changed` (fragment.json's file trigger), and so does each install of a
 // new release (its installed trigger: an index of an older `FORMAT` is
 // rebuilt with no one acting), a job: it marks the paths that
 // moved (`mark`, a mutation, which open pages follow), then takes them in
@@ -34,10 +37,11 @@
 // api/file here, with a search box of the brain's own beside it.
 import { DurableObject } from "cloudflare:workers";
 import { GUIDE } from "./applib/guide.mjs";
-import { SECTIONS_MAX, sections, stem } from "./applib/sections.mjs";
+import { SECTIONS_MAX, linkWords, sections, stem } from "./applib/sections.mjs";
 
 // The index's shape: a brain whose index is another rebuilds it from its files.
-const FORMAT = "brain-index-1";
+// 2: a section's wiki links as their words (FIN-367)
+const FORMAT = "brain-index-2";
 // Capability calls (`this.files`, `this.searchIndex`) one call into the
 // app may make: one subrequest each (measured on a preview, 2026-11-01).
 // The platform once held a call to 50 subrequests, which Cloudflare counts
@@ -126,7 +130,7 @@ function source(path, revision, page) {
   const out = { source: path, revision, title: clip(clean(page.title), TITLE_MAX_BYTES), sections: [] };
   if (wiki) out.fields = { wiki };
   page.sections.forEach((s, i) => {
-    const text = clean(s.body);
+    const text = clean(linkWords(s.body));
     if (!text.trim()) return;
     const section = { id: `s${i}`, text, context: s.ancestry.slice(-CONTEXT_MAX).map((a) => clip(clean(a), CONTEXT_ITEM_MAX_BYTES)) };
     if (s.heading) section.heading = clip(clean(s.heading), HEADING_MAX_BYTES);
@@ -375,7 +379,7 @@ export class App extends DurableObject {
       why = large ? "1 MiB or more: a blob, not read" : `its path is over ${SOURCE_MAX_BYTES} bytes`;
     } else {
       page = sections(path, new TextDecoder().decode(bytes));
-      outcome = await this.#write(source(path, hash, page), gen);
+      outcome = await this.#write(source(path, `${FORMAT}:${hash}`, page), gen);
       if (outcome === "indexed" || outcome === "held") {
         if (page.truncated) why = `only its first ${SECTIONS_MAX} sections`;
       } else if (outcome === "full") {
