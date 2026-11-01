@@ -602,7 +602,12 @@ pub struct NodeOptions {
     /// local Secrets Store's among it. Its fleet is configured first
     /// (`Fleet::configure`; `clear_state` before that discards the state).
     pub project: PathBuf,
-    pub port: u16,
+    /// The node's port, bound by its maker (`hold_port`) and held as long as
+    /// it likes, the e2e's across the node's lives: each life's front door
+    /// listens on a clone, so the port is never let go between a pick and a
+    /// bind, nor while the node is down (a client dialing then waits for
+    /// the next life, as one dialing during a boot does).
+    pub listener: Arc<TcpListener>,
     /// Where each boot's log goes (`node-<port>-<boot>.log`): wrangler's
     /// own debug logs beside the Worker's output, always, as the front
     /// door reads the runtime's address there (front.rs).
@@ -612,6 +617,18 @@ pub struct NodeOptions {
     /// as it reaches xtask: in a group of its own, it outlived a Ctrl-C,
     /// holding its port.
     pub own_group: bool,
+}
+
+impl NodeOptions {
+    pub fn port(&self) -> u16 {
+        self.listener.local_addr().expect("a bound listener's address").port()
+    }
+}
+
+/// 127.0.0.1:`port` (0: one the kernel picks), bound for a node's
+/// `NodeOptions::listener`.
+pub fn hold_port(port: u16) -> Result<Arc<TcpListener>> {
+    Ok(Arc::new(TcpListener::bind(("127.0.0.1", port)).with_context(|| format!("the node's port :{port} is taken"))?))
 }
 
 /// Boots of one port whose logs one directory keeps; a start past this
@@ -730,12 +747,13 @@ impl Node {
         if !config.is_file() {
             bail!("{} is not there: configure the fleet first (Fleet::configure)", config.display());
         }
-        let (log, out) = boot_log(&opts.log_dir, opts.port)?;
+        let port = opts.port();
+        let (log, out) = boot_log(&opts.log_dir, port)?;
         // wrangler's lines and the front door's requests, one file
         let out = Arc::new(Mutex::new(out));
         // the node's port, held before wrangler starts (front.rs)
         let heard = Arc::new(front::Heard::default());
-        let front = front::Front::bind(opts.port, heard.clone(), out.clone())?;
+        let front = front::Front::serve(opts.listener.try_clone()?, heard.clone(), out.clone())?;
         let proxied = free_port()?;
         let mut cmd = tools.wrangler()?;
         cmd.arg("dev").arg("-c").arg(&config);
@@ -769,7 +787,7 @@ impl Node {
             }
             child
         };
-        let mut node = Node { child, own_group: opts.own_group, base: format!("http://127.0.0.1:{}", opts.port), port: opts.port, log: log.clone(), reaped: false, _front: front };
+        let mut node = Node { child, own_group: opts.own_group, base: format!("http://127.0.0.1:{port}"), port, log: log.clone(), reaped: false, _front: front };
         loop {
             let text = fs::read(&log).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
             if text.contains(&format!("Ready on http://127.0.0.1:{proxied}")) {
@@ -780,7 +798,7 @@ impl Node {
                 bail!("wrangler dev exited ({status}) before it was ready:\n{text}");
             }
             if t0.elapsed() > READY_TIMEOUT {
-                bail!("wrangler dev on :{} was not ready after {READY_TIMEOUT:?}:\n{text}", opts.port);
+                bail!("wrangler dev on :{port} was not ready after {READY_TIMEOUT:?}:\n{text}");
             }
             std::thread::sleep(Duration::from_millis(50));
         }
