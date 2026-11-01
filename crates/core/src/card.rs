@@ -22,6 +22,10 @@
 //!   tried again after a wait that doubles, at most `ATTEMPTS_MAX` tries
 //!   in all, and then given up quietly: the card before stays, and
 //!   nothing else changes;
+//! - its content's first change after a live's shot (`Cards::content_moved`,
+//!   FIN-368): the app's files moved (main) while live stayed, as a brain's
+//!   pages arrive after its first, empty shot; the same live is shot once
+//!   more, once a live, so a busy app is never shot over and over;
 //! - an editor's two asks (docs/api.md, Cards): a shot of the live again
 //!   (`Cards::again`), at most one ask each `AGAIN_EVERY_MS`, joining a
 //!   shot already wanted; and an image of their own as the card
@@ -440,6 +444,10 @@ pub struct Cards {
     /// When a shot was last asked for again (`again`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub asked_at: Option<i64>,
+    /// The live whose content's change was shot already (`content_moved`):
+    /// one such shot a live.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_shot: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -564,6 +572,29 @@ impl Cards {
             return Ok(false);
         }
         self.wanted = Some(Wanted { live: live.to_string(), since: now, failures: 0, next_at: now });
+        Ok(true)
+    }
+
+    /// The app's files moved (main) while live stayed at `live`: the card,
+    /// a shot of `live` taken before, no longer shows what the app shows
+    /// (a brain's pages arriving after its first, empty shot: FIN-368). The
+    /// same live is wanted again, at once, its first change after the shot
+    /// alone: once a live (`content_shot`), so a busy app's later writes
+    /// shoot nothing until its next deploy, and an editor's ask (`again`)
+    /// stays for those. Nothing is wanted when a shot is wanted already (it
+    /// shows the change), when there is no card or it shows another live
+    /// (that live's own shot decides), or when an editor's upload is kept.
+    /// Answers whether a shot is now wanted that was not.
+    pub fn content_moved(&mut self, live: &str, now: i64) -> Result<bool, Fault> {
+        if !valid_live(live) {
+            return Err(Fault::Live);
+        }
+        let shows = self.card.as_ref().is_some_and(|c| c.live == live && !c.uploaded());
+        if !shows || self.keep_upload || self.wanted.is_some() || self.content_shot.as_deref() == Some(live) {
+            return Ok(false);
+        }
+        self.wanted = Some(Wanted { live: live.to_string(), since: now, failures: 0, next_at: now });
+        self.content_shot = Some(live.to_string());
         Ok(true)
     }
 
@@ -1124,6 +1155,72 @@ mod tests {
         let old: Cards = serde_json::from_value(serde_json::json!({ "card": { "blob": blob(1), "size": 40_000, "live": A, "attempt": 1, "at_ms": T0 }, "wanted": null, "page": null })).unwrap();
         assert_eq!((old.keep_upload, old.asked_at), (false, None));
         assert_eq!(serde_json::to_value(&old).unwrap().as_object().map(|o| o.len()), Some(3));
+    }
+
+    /// Goal: an app's content changing after its live's shot (main moved,
+    /// live stayed: a brain's pages after its empty first shot) is shot
+    /// once more, of the same live, and then not again until the next
+    /// deploy: a busy app is never shot over and over (FIN-368). Valid: the
+    /// first change after a deploy's card; a new live's own first change.
+    /// Invalid: a live that is no commit. Nothing is wanted for a second
+    /// change, a change while a shot is wanted (it shows the change), a
+    /// card of another live, no card, or an editor's upload kept. Replay:
+    /// the same change again wants nothing. Restart: kept, and read by the
+    /// release before as it was.
+    #[test]
+    fn content_after_a_shot_is_shot_once_a_live() {
+        let mut c = Cards::default();
+        assert_eq!(c.content_moved(A, T0), Ok(false), "no card: nothing to bring up to date");
+        shot_card(&mut c, A, 1, T0);
+        let t = T0 + 60_000;
+        assert_eq!(c.content_moved(A, t), Ok(true));
+        assert_eq!((c.due_at(), c.content_shot.as_deref()), (Some(t), Some(A)));
+        assert_eq!(c.content_moved(A, t + 1), Ok(false), "a replay while it is wanted");
+        let s = shoot(&mut c, t);
+        assert_eq!(s, Shot { live: A.into(), since: t, attempt: 1 });
+        assert_eq!(c.landed(&s, image(2), t + 2_000, PACE), Ok(Verdict::Kept));
+        assert_eq!(c.card.as_ref().map(|k| (k.blob.clone(), k.live.as_str())), Some((blob(2), A)));
+        // a busy app: its later changes shoot nothing until its next deploy
+        for later in [t + 3_000, t + 3_600_000, t + 86_400_000] {
+            assert_eq!(c.content_moved(A, later), Ok(false));
+        }
+        assert_eq!(c.wanted, None);
+        // an editor's ask still shoots it (its own minute)
+        assert_eq!(c.again(A, t + 86_400_000).map(|a| a.joined), Ok(false));
+        let s = shoot(&mut c, t + 86_400_000);
+        assert_eq!(c.landed(&s, image(3), t + 86_402_000, PACE), Ok(Verdict::Kept));
+        // a deploy: its shot, then its own first change once more
+        let u = t + 90_000_000;
+        assert_eq!(c.want(B, u), Ok(true));
+        assert_eq!(c.content_moved(B, u + 1), Ok(false), "a deploy's shot wanted already shows the change");
+        let s = shoot(&mut c, u);
+        assert_eq!(c.landed(&s, image(4), u + 2_000, PACE), Ok(Verdict::Kept));
+        assert_eq!(c.content_moved(A, u + 3_000), Ok(false), "the card shows another live");
+        assert_eq!(c.content_moved(B, u + 3_000), Ok(true));
+        // an editor's upload kept: changes leave it
+        let mut d = Cards::default();
+        shot_card(&mut d, A, 1, T0);
+        d.upload(&blob(9), 30_000, T0 + 1).unwrap();
+        assert_eq!((d.content_moved(A, T0 + 2), d.wanted.clone()), (Ok(false), None));
+        // invalid
+        assert_eq!(Cards::default().content_moved("main", T0), Err(Fault::Live));
+        // restart: kept; the release before reads the rest as it was
+        let text = serde_json::to_string(&c).unwrap();
+        let back: Cards = serde_json::from_str(&text).unwrap();
+        assert_eq!(back, c);
+        let before: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(before["content_shot"], B);
+        #[derive(Deserialize)]
+        struct Before {
+            #[allow(dead_code)]
+            card: Option<Card>,
+            wanted: Option<Wanted>,
+        }
+        let read: Before = serde_json::from_str(&text).unwrap();
+        assert_eq!(read.wanted.map(|w| w.live), Some(B.to_string()));
+        // a state from before writes as it did
+        let old: Cards = serde_json::from_value(serde_json::json!({ "card": null, "wanted": null, "page": null })).unwrap();
+        assert_eq!((old.content_shot, serde_json::to_value(Cards::default()).unwrap().as_object().map(|o| o.len())), (None, Some(3)));
     }
 
     /// Goal: chats and agents are not shot, nor a kind this build does not

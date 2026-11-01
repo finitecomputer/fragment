@@ -662,7 +662,8 @@ impl FragmentCell {
 
     /// Refreshes pins; a move of main notifies the change feed and starts
     /// the runs its file triggers name. A move of live wants its preview
-    /// card, shot later from the alarm (card.rs).
+    /// card, shot later from the alarm (card.rs), and so does main's first
+    /// move after live's shot (its content changed under the card).
     pub(crate) async fn interpret(&self, refs: &[&str]) -> CellResult<Vec<(String, PinMove)>> {
         let out = self.interpret_locked(refs).await?;
         // the file triggers' runs, and the alarm for newly installed schedules
@@ -671,6 +672,12 @@ impl FragmentCell {
             // a move of live wants its preview card, which the alarm shoots (card.rs)
             if let (true, "live", Some(live)) = (moved.changed, which.as_str(), moved.to.as_deref()) {
                 if let Err(e) = self.card_wanted(live) {
+                    self.event("card.want-failed", &e.message, json!({ "code": e.code }));
+                }
+            }
+            // main moved under live's card: its first change since the shot is shot (card.rs)
+            if moved.changed && which == "main" {
+                if let Err(e) = self.card_content_moved() {
                     self.event("card.want-failed", &e.message, json!({ "code": e.code }));
                 }
             }

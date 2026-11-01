@@ -579,7 +579,44 @@ fn preview_cards(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
     let site = api.page(&name, &format!("?view={view}"), None)?;
     s.ok("and the fragment serves its page all the same", site.status == 200 && site.text.contains("a card"), &site);
     card_asks(s, api, owner, &members)?;
+    content_after_shot(s, api, owner, page)?;
     page_errors(s, api, owner, page)
+}
+
+/// Goal: an app whose files change after its live's shot (main moves, live
+/// stays: a brain's pages arriving after its empty first shot) is shot
+/// once more, of the same live, and a busy app's next change shoots
+/// nothing until its next deploy (FIN-368). Replay: the same change twice.
+fn content_after_shot(s: &mut Suite, api: &Api, owner: &Keys, page: &[u8]) -> Result<()> {
+    let name = s.named(api, owner, "site-content")?;
+    let c = s.create(api, owner, &name)?;
+    s.commit(&c, &[("site/index.html", Some(page))]);
+    let live = s.deploy(&c);
+    let first = card_showing(s, api, owner, &name, &live);
+    let first_at = cards(api, &name)["cards"]["card"]["at_ms"].clone();
+    s.commit(&c, &[("notes/first.md", Some(b"# its first note"))]);
+    let wanted = cards(api, &name)["cards"]["content_shot"] == live.as_str();
+    let mut kept = Value::Null;
+    let again = s.eventually(CARD_WAIT, || {
+        kept = cards(api, &name);
+        kept["cards"]["card"]["at_ms"] != first_at && kept["cards"]["card"]["live"] == live.as_str() && kept["cards"]["wanted"].is_null()
+    });
+    s.ok(
+        "its files changed after its live's shot: its first change wants the same live shot once more, and that shot is its card",
+        first.as_ref().is_some_and(is_card) && wanted && again,
+        json!({ "first": card_detail(&first), "cards": kept }),
+    );
+    // a busy app: its next changes shoot nothing until its next deploy
+    let shot_at = kept["cards"]["card"]["at_ms"].clone();
+    s.commit(&c, &[("notes/second.md", Some(b"# its second note"))]);
+    s.commit(&c, &[("notes/third.md", Some(b"# its third note"))]);
+    let after = cards(api, &name);
+    s.ok(
+        "its later changes shoot nothing until its next deploy",
+        after["cards"]["wanted"].is_null() && after["cards"]["card"]["at_ms"] == shot_at && after["cards"]["content_shot"] == live.as_str(),
+        &after,
+    );
+    Ok(())
 }
 
 /// A JPEG header of `w` × `h` (SOI, SOF0, EOI): what `card::check_image`
