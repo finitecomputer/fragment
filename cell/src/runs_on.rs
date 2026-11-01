@@ -170,6 +170,9 @@ impl FragmentCell {
             // its face (kind, title, picture), for whatever names it: an
             // agent shows by its fragment's (share.rs, `name_agents`)
             "face" => Ok(self.meta(MetaKey::Face)?.and_then(|f| serde_json::from_str::<Value>(&f).ok()).unwrap_or(Value::Null)),
+            // its reach and whether it is shared beyond its owner and their
+            // agents, for an operator's census (reach.rs): no names
+            "reach" => Ok(json!({ "kind": self.kind()?, "reach": self.reaches()?, "beyond": self.sharing_counts()?.beyond() })),
             "identity" => {
                 let computer = body["computer"].as_str().unwrap_or("");
                 self.assigned_to(computer)?;
@@ -197,6 +200,11 @@ impl FragmentCell {
                     _ => return Err(CellError::invalid("act: link or unlink")),
                 };
                 self.door_allowed(text("door"), if act == door::Act::Link { Action::Link } else { Action::Unlink })?;
+                // a door is reach: none while the agent is shared beyond its
+                // owner and their agents (reach.rs); an unlink always closes
+                if act == door::Act::Link {
+                    self.reach_while_private()?;
+                }
                 let nonce = hex::encode(js::random_bytes::<16>());
                 let ticket = door::Ticket { door: text("door").into(), act, agent: self.name()?, computer: text("computer").into(), nonce, exp: js::now_ms() + door::TICKET_MS, sig: String::new() };
                 assert!(ticket.well_formed(), "a ticket the platform makes is well formed");
@@ -208,6 +216,7 @@ impl FragmentCell {
                         if self.meta(MetaKey::Door)?.is_some() {
                             self.del_meta(MetaKey::Door)?;
                             self.event("door.closed", "its door closed by its owner", json!({ "door": ticket.door }));
+                            self.sharing_changed()?;
                         }
                     }
                 }
@@ -229,8 +238,11 @@ impl FragmentCell {
                 if was != door || nonce.is_empty() || nonce != text("nonce") || exp < js::now_ms() {
                     return Err(CellError::new(ErrorCode::Forbidden, "that ticket is not the link its owner started last, or it is past its time: they start one from Settings"));
                 }
+                // shared since its ticket was made: no door (reach.rs)
+                self.reach_while_private()?;
                 self.del_meta(MetaKey::DoorTicket)?;
                 self.set_meta(MetaKey::Door, &format!("{door} {key}"))?;
+                self.sharing_changed()?;
                 self.event("door.opened", "its door opened by its owner", json!({ "door": door, "key": key }));
                 Ok(json!({ "door": door, "key": key }))
             }

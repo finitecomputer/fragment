@@ -141,7 +141,9 @@ pub fn export(s: &mut Suite, api: &Api) -> Result<()> {
     let member = api.share(&app_name, &bob_id, "viewer")?;
     let invitee = format!("export-invitee-{}@example.com", &Keys::generate().pubkey_hex()[..8]);
     let invited = api.signed(&paul, "POST", &format!("/api/f/{app_name}/invites"), Some(&json!({ "email": invitee, "role": "editor" })))?;
-    let secret = api.signed(&paul, "PUT", &format!("/api/f/{app_name}/secrets/API_KEY"), Some(&json!({ "value": SECRET, "hosts": ["api.example.com"] })))?;
+    // a member, an invite and a key together: an app from before FIN-352
+    // (its key's lever; a key now waits until its app is private)
+    let secret = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": app_name, "op": "legacy-reach", "name": "API_KEY", "value": SECRET, "hosts": ["api.example.com"] })))?;
     let status = api.status(&paul, &app_name)?;
     let tokens = [status.body["viewToken"].as_str().unwrap_or("").to_string(), status.body["inboxToken"].as_str().unwrap_or("").to_string()];
     s.ok(

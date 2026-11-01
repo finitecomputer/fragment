@@ -291,7 +291,13 @@ pub(crate) async fn ask(env: &Env, url: &Url, name: &str, who: &Signed, method: 
         return Ok(v);
     }
     match serde_json::from_value::<ErrorBody>(v) {
-        Ok(e) => Err(CellError::new(e.error, e.message)),
+        Ok(e) => {
+            let refused = CellError::new(e.error, e.message);
+            Err(match e.reason {
+                Some(reason) => refused.because(reason),
+                None => refused,
+            })
+        }
         Err(_) => Err(CellError::host(format!("{inner} answered {status}"))),
     }
 }
@@ -431,6 +437,9 @@ struct Sheet {
     link: Option<String>,
     /// Its address, which opens it for the people in it.
     canonical: String,
+    /// It holds a key or a door, so it stays its owner's and their agents'
+    /// (reach.rs): the sheet adds no one and offers no link.
+    reach: bool,
     profiles: BTreeMap<String, Profile>,
     /// The page's form token.
     form: String,
@@ -504,6 +513,7 @@ async fn load(env: &Env, cfg: &Config, url: &Url, name: &str, who: &Signed, sess
         chat_agent,
         link,
         canonical,
+        reach: status["reach"].as_bool() == Some(true),
         profiles,
         form: form::issue(session, &purpose("share", name), js::now_ms()),
     })
@@ -568,6 +578,10 @@ fn role_buttons(sheet: &Sheet, m: &Member, who: &str) -> String {
     action_form(sheet, "role", &format!("{}{seg}", hidden("member", &m.principal)), "")
 }
 
+/// Why a fragment with reach is shared with no one else (reach.rs), in
+/// the same words as the shell's Apps page.
+const REACH_LINE: &str = "Apps that can reach your accounts stay private to you and your agents for now.";
+
 fn render(sheet: &Sheet, flash: Option<Flash>) -> String {
     let mut out = String::new();
     match flash {
@@ -591,7 +605,9 @@ fn render(sheet: &Sheet, flash: Option<Flash>) -> String {
         Some(Flash::Refused(why)) => out += &format!("<div class=\"flash error\"><p>{}</p></div>", esc(&why)),
         None => {}
     }
-    if sheet.owner() {
+    if sheet.owner() && sheet.reach {
+        out += &format!("<p class=\"hint\">{REACH_LINE}</p>");
+    } else if sheet.owner() {
         let radio = |value: &str, name: &str, checked: bool| {
             format!("<label><input type=\"radio\" name=\"role\" value=\"{value}\"{}><span>{name}</span></label>", if checked { " checked" } else { "" })
         };
@@ -660,7 +676,9 @@ fn render(sheet: &Sheet, flash: Option<Flash>) -> String {
                 false => format!("<button class=\"option\" name=\"visibility\" value=\"{}\" aria-pressed=\"false\" data-arm disabled>{face}</button>", v.as_str()),
             }
         };
-        let options = [option(Visibility::Members), option(Visibility::Link), option(Visibility::Public)].concat();
+        // with reach, only what it is now and members only (reach.rs)
+        let offered = [Visibility::Members, Visibility::Link, Visibility::Public].into_iter().filter(|v| !sheet.reach || *v == Visibility::Members || *v == sheet.visibility);
+        let options = offered.map(option).collect::<String>();
         out += &action_form(sheet, "visibility", &format!("<div class=\"options\" role=\"group\" aria-label=\"general access\">{options}</div>"), "");
     } else {
         let (_, named, means) = general(sheet.visibility);
@@ -820,7 +838,12 @@ async fn share_post(mut req: Request, env: &Env, cfg: &Config, url: &Url, name: 
         Ok(_) => Ok(auth::redirect(&format!("/share/{name}"), &[])?.with_status(303)),
         Err(e) if matches!(e.code, ErrorCode::InvalidRequest | ErrorCode::NotFound | ErrorCode::AlreadyExists | ErrorCode::Forbidden | ErrorCode::RateLimited) => {
             let status = e.code.status();
-            shown(env, cfg, url, name, &who, &session, Some(Flash::Refused(e.message)), status).await
+            // sharing refused while it has reach says so in the sheet's words
+            let why = match e.reason {
+                Some(fragment_proto::Reason::PrivateWhileReaching) => REACH_LINE.to_string(),
+                _ => e.message,
+            };
+            shown(env, cfg, url, name, &who, &session, Some(Flash::Refused(why)), status).await
         }
         Err(e) => Err(e),
     }

@@ -732,6 +732,17 @@ impl Api {
 
     /// The email `person` signs in with: a lane connects that WorkOS
     /// user's accounts (Pipes) by it.
+    /// A new agent of `owner`'s, and its identity: the one kind of member a
+    /// fragment with reach takes besides its owner (FIN-352).
+    pub fn own_agent(&self, owner: &Keys) -> Result<(Keys, String)> {
+        let keys = Keys::generate();
+        let reg = "/api/identities";
+        let r = self.signed(owner, "POST", reg, Some(&json!({ "kind": "agent", "proof": self.proof(&keys, "POST", reg, owner) })))?;
+        anyhow::ensure!(r.status == 200, "registering an agent: {r}");
+        let id = r.body["id"].as_str().unwrap_or("").to_string();
+        Ok((keys, id))
+    }
+
     pub fn email_of(keys: &Keys) -> String {
         format!("p-{}@e2e.test", &keys.pubkey_hex()[..12])
     }
