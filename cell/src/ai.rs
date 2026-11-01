@@ -14,11 +14,11 @@
 //! else. A video is HappyHorse 1.0 from Cloudflare's model catalog, on the
 //! same transport (a third party's, which the gateway pays for by Unified
 //! Billing): its answer names the video's URL, which the step reads and
-//! writes to `main` as an image is; a deployment whose tiers are private
-//! makes none (`Models::video_refused`). Its call waits while the model
-//! makes it (there is no request to poll), and is asked at most once an
-//! attempt (`making`): a try that never heard its answer fails for good,
-//! and only a replay asks again.
+//! writes to `main` as an image is, on any deployment, Private's too (the
+//! catalog keeps no data; Paul, 2026-10-31: as its images are). Its call
+//! waits while the model makes it (there is no request to poll), and is
+//! asked at most once an attempt (`making`): a try that never heard its
+//! answer fails for good, and only a replay asks again.
 //!
 //! Who pays (docs/cloudflare-v1.md, decision 26): every paid step bills the
 //! fragment's owner, on their ledger, capped when the run's principal is
@@ -312,9 +312,6 @@ impl FragmentCell {
     async fn step_video(&self, run: &RunRow, index: u32, video: &AiVideo) -> Result<Value, StepFail> {
         let call = media::video_call(video).map_err(|why| permanent(why.message()))?;
         let cfg = crate::config::Config::from_env(&self.env);
-        if let Some(why) = cfg.models.video_refused() {
-            return Err(permanent(why));
-        }
         let p = self.paying(run, index)?;
         let url = match self.kept(&p.key)? {
             Some(kept) => {

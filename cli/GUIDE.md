@@ -489,8 +489,7 @@ export class App extends DurableObject {
   default) written to `path` on `main`, which ends in `.jpg` or `.jpeg`.
   `job.ai.video({prompt, path, duration, resolution, aspect_ratio})` makes
   an MP4 (HappyHorse 1.0: 3 to 15 seconds, 5 by default; `720p` or
-  `1080p`) written to `path`, which ends in `.mp4`; none where your
-  models are private. You pay for them, from your ledger (below): an
+  `1080p`) written to `path`, which ends in `.mp4`. You pay for them, from your ledger (below): an
   image about a tenth of a cent, a video $0.14 a second at 720p and
   $0.28 at 1080p, plus the platform's fee and margin. Before you build a
   fragment that makes images or videos, tell the person what each costs
