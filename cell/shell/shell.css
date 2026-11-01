@@ -705,6 +705,18 @@ iframe[data-blocked] { display: none; }
 .app-dock[aria-checked="true"] .app-dock-track { background: var(--accent-blue); }
 .app-dock[aria-checked="true"] .app-dock-track::after { transform: translateX(12px); }
 .app-dock:disabled { opacity: .6; cursor: default; }
+/* what an app can reach (apps-page.js, FIN-291's prototype): its keys by
+   name, each with the hosts it may go to, and its door, each with its
+   revoke, a quiet note under them */
+.app-reach { display: flex; flex-direction: column; gap: 8px; }
+.app-reach h2 { margin: 6px 0 0; font-size: 13px; font-weight: 600; color: var(--text-secondary); }
+.app-reach-item { display: flex; align-items: center; gap: 12px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 10px; }
+.app-reach-what { display: flex; flex: 1; flex-direction: column; gap: 2px; min-width: 0; font-size: 13.5px; }
+.app-reach-what code { font: 500 12.5px/1.4 "JetBrains Mono", monospace; }
+.app-reach-note { margin: 6px 0 0; font-size: 12.5px; }
+.app-reach-line { color: var(--text-secondary); }
+.app-reach-agents { margin: 4px 0 0; font-size: 13.5px; }
+/* an app that reaches their accounts: why its Sharing is theirs alone */
 .apps-archived { margin-top: 24px; }
 .apps-archived summary { padding: 6px 2px; color: var(--text-secondary); font-size: 14px; cursor: pointer; }
 /* the History page (history-page.js): in the work area as the Apps page
