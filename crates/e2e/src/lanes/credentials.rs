@@ -26,6 +26,8 @@ pub(super) struct Swapping<'a> {
     pub id: &'a str,
     pub agent: &'a str,
     pub identity: &'a str,
+    /// The month the computer's uses are counted in (`computers::pin_month`).
+    pub month: &'a str,
 }
 
 /// The checks `swap_checks` makes, as a run without the stub or the fakes
@@ -288,8 +290,8 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
     let counted = |u: &Value| expect.iter().all(|(p, calls, micros)| u["uses"].as_array().is_some_and(|l| l.iter().any(|x| x["provider"] == *p && x["agent"] == w.agent && x["calls"] == *calls && x["micros"] == *micros)));
     let all = s.eventually(Duration::from_secs(20), || counted(&uses()));
     let u = uses();
-    let month = fragment_core::ledger::Month::of(crate::api::now_s() * 1000).label();
-    s.ok(SWAP_CHECKS[18], all && u["month"] == month.as_str() && u["computer"] == w.id, &u);
+    let month = w.month;
+    s.ok(SWAP_CHECKS[18], all && u["month"] == month && u["computer"] == w.id, &u);
     let theirs = api.signed(w.stranger, "GET", &format!("/api/computers/{}/uses", w.id), None)?;
     let bad_month = api.signed(w.owner, "GET", &format!("/api/computers/{}/uses/2026-13", w.id), None)?;
     let this = api.signed(w.owner, "GET", &format!("/api/computers/{}/uses/{month}", w.id), None)?;
