@@ -6865,8 +6865,8 @@ fn apps_arrival_ui(s: &mut Suite, b: &mut Browser, page: &Page) -> Result<()> {
 /// (Paul on FIN-352; the cell's rule, reach.rs). Invalid: an app with no key
 /// and no door has no Reaches tab. Valid: one given a key while the page is
 /// open gets the tab, its key by name and host, never its value, and its
-/// Sharing says why it is not shared. Replay: its key removed from its
-/// Reaches (asked twice), the tab and that line go with its reach.
+/// Sharing (its share sheet, share.rs) says why it is not shared. Replay:
+/// its key removed from its Reaches (asked twice), the tab goes with its reach.
 fn apps_reach_ui(s: &mut Suite, b: &mut Browser, page: &Page, app: &str) -> Result<()> {
     let wait = std::time::Duration::from_secs(60);
     let in_page = |method: &str, path: &str, body: Value| {
@@ -6897,8 +6897,9 @@ fn apps_reach_ui(s: &mut Suite, b: &mut Browser, page: &Page, app: &str) -> Resu
         b.eval(page, &format!("{row}?.innerText ?? null"))?,
     );
     b.eval(page, &format!("({}?.click(), true)", tab_of(&name, "sharing")))?;
-    let locked = b.until(page, &format!("{row}?.querySelector('.app-share-locked')?.textContent === 'Apps that can reach your accounts stay private to you and your agents for now.'"), wait);
-    s.ok("its Sharing says an app that reaches their accounts stays theirs and their agents'", locked, b.eval(page, &format!("{row}?.innerText ?? null"))?);
+    let sheet = format!("({row}?.querySelector('.app-row-panel iframe')?.contentDocument?.body?.innerText ?? '')");
+    let locked = b.until(page, &format!("{sheet}.includes('Apps that can reach your accounts stay private to you and your agents for now.') && !{row}.querySelector('.app-row-panel iframe').contentDocument.querySelector('input[type=email]')"), wait);
+    s.ok("its Sharing says an app that reaches their accounts stays theirs and their agents', and invites no one", locked, b.eval(page, &sheet)?);
 
     b.eval(page, &format!("({}?.click(), true)", tab_of(&name, "reach")))?;
     let remove = format!("[...{row}?.querySelectorAll('.app-reach [data-action=reach]') ?? []]");
@@ -6906,8 +6907,8 @@ fn apps_reach_ui(s: &mut Suite, b: &mut Browser, page: &Page, app: &str) -> Resu
     b.eval(page, &format!("({remove}.find((b) => b.textContent === 'Remove')?.click(), true)"))?;
     let asked = b.until(page, &format!("{remove}.some((b) => b.textContent === 'Remove? Yes')"), wait);
     b.eval(page, &format!("({remove}.find((b) => b.textContent === 'Remove? Yes')?.click(), true)"))?;
-    let gone = b.until(page, &format!("!!{row} && !{} && !{row}.querySelector('.app-reach, .app-share-locked')", tab_of(&name, "reach")), wait);
-    s.ok("its key removed from its Reaches, asked twice: the tab and its private line go with its reach", asked && gone, b.eval(page, &format!("{row}?.innerText ?? null"))?);
+    let gone = b.until(page, &format!("!!{row} && !{} && !{row}.querySelector('.app-reach')", tab_of(&name, "reach")), wait);
+    s.ok("its key removed from its Reaches, asked twice: the tab goes with its reach", asked && gone, b.eval(page, &format!("{row}?.innerText ?? null"))?);
     b.eval(page, &format!("fetch('/api/f/{name}', {{ method: 'DELETE', headers: {{ 'x-fragment-shell': '1' }}, credentials: 'same-origin' }}).then((r) => r.status)"))?;
     b.until(page, &format!("!{row}"), wait);
     Ok(())

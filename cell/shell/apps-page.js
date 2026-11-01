@@ -16,7 +16,8 @@
 //   accounts: the keys it holds, by name and the hosts each may go to
 //   (never a value), with Remove; the agent it speaks to when it is a door,
 //   with Unlink; their own agents in it. Such an app is theirs and their
-//   agents' alone for now: its Sharing says so, and the cell refuses sharing it.
+//   agents' alone for now: the cell refuses sharing it, and its share sheet
+//   (its Sharing here) says so (reach.rs, share.rs).
 // Archived ones are folded at the end, each with Unarchive.
 //
 // The shell owns the page's place and its helpers (`h`): `api`, `el`,
@@ -45,8 +46,6 @@ const SHOT_WAIT_MS = 180_000;
 const CARD_READS_MAX = 6;
 // how many names a row says of who has access
 const NAMES_SHOWN = 2;
-// why an app that reaches the person's accounts is not shared (Paul, 2026-11-01)
-const PRIVATE_FOR_REACH = "Apps that can reach your accounts stay private to you and your agents for now.";
 
 export function createAppsPage(page, h) {
   // per app: an action in flight ("dock", "card", "archive"), what the
@@ -487,11 +486,6 @@ export function createAppsPage(page, h) {
         panel.dataset.addressEditor = name;
         panel.append(h.el("p", "muted", "Loading address…"));
       }
-      // an app that reaches their accounts is theirs and their agents'
-      // alone, for now (Paul, 2026-11-01): the cell refuses sharing it, and
-      // its Sharing says why above the people in it (beside the panel, whose
-      // frame is all it holds)
-      if (section === "sharing" && owns(f) && reaches(f)) item.append(h.el("p", "app-share-locked", PRIVATE_FOR_REACH));
       item.append(panel);
     }
     const shot = shots.get(name);
