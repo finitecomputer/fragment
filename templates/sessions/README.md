@@ -109,7 +109,9 @@ search write API (`/api/f/{name}/search/…`), as the writer holding the
 conversations' bytes: one source a conversation's file, its revision
 the file's sha256, and one section a turn (fragment_core::session_search),
 each checked as the platform checks it (`searchable::check`) before it is
-sent.
+sent. The person's History searches it with their own messages
+(cell/shell/session-archive.js, `search`): its chats whose words hold
+the question, best first, each with its best snippet.
 
 - **A turn** is a person's message and what the agent said until their
   next one, as "Person: … / Agent: …": a tool's output left out and its
