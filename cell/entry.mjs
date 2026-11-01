@@ -127,7 +127,11 @@ export class Job extends WorkflowEntrypoint {
         }
         try {
           // `try`: this step's try, from 1 (a text step's timing says it)
-          const done = await step.do(`${kind} ${i}`, retrying, (ctx) => post("effect", { index: i, kind, args, try: ctx?.attempt }));
+          // a video's call waits while its model makes it (ai.rs `step_video`):
+          // its try outlasts a making (Workflows advise 30 minutes at most), so
+          // it is not tried again meanwhile
+          const tries = kind === "ai.video" ? { ...retrying, timeout: "15 minutes" } : retrying;
+          const done = await step.do(`${kind} ${i}`, tries, (ctx) => post("effect", { index: i, kind, args, try: ctx?.attempt }));
           if (done.stop) return done;
         } catch (e) {
           failed = { index: i, kind, error: String((e && e.message) || e) };

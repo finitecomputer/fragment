@@ -374,18 +374,20 @@ unfinished design, not debt.
   it writes (refused for good, so it replays after a top-up), with an
   e2e check; the platform's own records stay.
 
-## A video step's call waits on its model, unpolled
+## A video's lost answer is made again only by a replay
 
 - **Shortcut:** `job.ai.video` is one call of the AI binding
   (cell/src/ai.rs `step_video`), which answers when the video is made;
-  the model catalog names no request to poll.
-- **Risk:** a video whose making outlasts a Workflow step's try (5
-  minutes, cell/entry.mjs) is tried again before its answer is kept, and
-  may be made, and billed by the catalog, twice. A step tried again
-  after its answer was kept never calls again.
+  the model catalog names no request to poll. Its try outlasts a making
+  (15 minutes, cell/entry.mjs), and it is asked at most once an attempt
+  (`making`): a try that never heard its answer (the object restarted
+  mid-call, the try broke, the making took longer) fails for good, saying
+  to replay.
+- **Risk:** a video whose answer was lost may still be made, and billed
+  by the catalog, charged to no one; a replay makes it again. The person
+  pays for one.
 - **Delete when:** the catalog answers a request id a step can poll (one
-  step starts it, the next ones poll, as the celld era's did), or a
-  step's try outlasts the model's longest making, with an e2e check.
+  step starts it, the next ones poll, as the celld era's did).
 
 ## An icon's drawings skip the AI Gateway
 

@@ -15,7 +15,10 @@
 //! same transport (a third party's, which the gateway pays for by Unified
 //! Billing): its answer names the video's URL, which the step reads and
 //! writes to `main` as an image is; a deployment whose tiers are private
-//! makes none (`Models::video_refused`).
+//! makes none (`Models::video_refused`). Its call waits while the model
+//! makes it (there is no request to poll), and is asked at most once an
+//! attempt (`making`): a try that never heard its answer fails for good,
+//! and only a replay asks again.
 //!
 //! Who pays (docs/cloudflare-v1.md, decision 26): every paid step bills the
 //! fragment's owner, on their ledger, capped when the run's principal is
@@ -50,7 +53,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use worker::*;
 
-use crate::error::CellError;
+use crate::error::{CellError, CellResult};
 use crate::files::FileWrite;
 use crate::fragment::{FragmentCell, MetaKey};
 use crate::jobs::{permanent, RunRow, StepFail};
@@ -319,8 +322,23 @@ impl FragmentCell {
                 kept.result["url"].as_str().ok_or_else(|| retry(CellError::host("a kept video names its URL")))?.to_string()
             }
             None => {
+                // asked at most once an attempt: a try that finds its own
+                // attempt's call unanswered never heard the answer (a
+                // restart, a broken try), which may still be made and billed
+                if media::lost(self.making(&p.key)?, run.attempt) {
+                    self.event("ai.video-lost", &format!("{}: its answer never came back; charged nothing", p.reference), json!({ "ref": p.reference }));
+                    console_error!("{}", json!({ "event": "ledger.unknown-usage", "ref": p.reference, "why": "the video's answer never came back, and the catalog may have billed it: charged nothing" }));
+                    return Err(permanent("this step's video was asked for and its answer never came back: replay the run to make it again"));
+                }
                 self.gate(&p).await?;
-                let (status, bytes, log_id) = crate::models::run(&self.env, media::VIDEO_MODEL, &call.input, &p.owner, p.agent.as_deref()).await.map_err(retry)?;
+                self.asking(&p, run).map_err(retry)?;
+                let answered = crate::models::run(&self.env, media::VIDEO_MODEL, &call.input, &p.owner, p.agent.as_deref()).await;
+                // test fleets: the answer lost before this try hears it, as a restart's is
+                self.test_countdown(MetaKey::TestLoseVideoAnswers, "the video's answer was lost").map_err(retry)?;
+                // no answer: it may still be making the video, so the row stays
+                let (status, bytes, log_id) = answered.map_err(retry)?;
+                // answered (a refusal, a 503 too): a try may ask again
+                self.answered(&p.key, run.attempt).map_err(retry)?;
                 if status != 200 {
                     return Err(model_failure(status, &bytes));
                 }
@@ -346,6 +364,32 @@ impl FragmentCell {
         out["mediaType"] = json!(media::VIDEO_MEDIA_TYPE);
         out["lengthMs"] = json!(length_ms);
         Ok(out)
+    }
+
+    /// The attempt whose call for this step's video waits on its model,
+    /// if one does (`making`).
+    fn making(&self, key: &str) -> Result<Option<u32>, StepFail> {
+        #[derive(Deserialize)]
+        struct Making {
+            attempt: u32,
+        }
+        let rows: Vec<Making> = self.typed(media::MAKING, vec![key.into()]).map_err(retry)?;
+        Ok(rows.into_iter().next().map(|m| m.attempt))
+    }
+
+    /// This attempt asks the model for the step's video: a replay's takes
+    /// the row from the attempt before.
+    fn asking(&self, p: &Paying, run: &RunRow) -> CellResult<()> {
+        self.exec(
+            media::ASKING,
+            vec![p.key.as_str().into(), SqlStorageValue::Integer(run.id), SqlStorageValue::Integer(run.attempt.into()), SqlStorageValue::Integer(crate::js::now_ms())],
+        )
+    }
+
+    /// The model answered `attempt`'s call for the step's video: its row
+    /// goes, and a newer attempt's stays (`media::ANSWERED`).
+    fn answered(&self, key: &str, attempt: u32) -> CellResult<()> {
+        self.exec(media::ANSWERED, vec![key.into(), SqlStorageValue::Integer(attempt.into())])
     }
 
     /// The video at the URL the model answered, at most
