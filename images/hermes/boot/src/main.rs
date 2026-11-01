@@ -1185,14 +1185,26 @@ async fn boot_main() {
     };
     // What the boot runs: the agents read at its start, then as they change,
     // each with its runtime as its agent.json names it (read as the bridge
-    // reads it): a Hermes profile only for an agent of Hermes' (agents.rs,
-    // `hermes`); one whose runtime is not read yet waits for the next read.
-    // And the route's models' ids, as the deployment names them.
+    // reads it): a Hermes profile only for an agent of Hermes'
+    // (agents.rs, `hermes`). At start every agent's is read before anything
+    // is done with the profiles, asked again as the computer is: one not
+    // read is no agent of another runtime, and its profile, its session in
+    // it, is never retired for it (Alex on #887). And the route's models'
+    // ids, as the deployment names them.
     let runtime_names = RuntimeNames::default();
-    let (mut agents, unread) = with_runtimes(&api, computer.agents.clone(), &runtime_names, true).await;
-    if unread > 0 {
+    let started = Instant::now();
+    let mut backoff = fragment_bridge::net::Backoff::default();
+    let mut agents = loop {
+        let (agents, unread) = with_runtimes(&api, computer.agents.clone(), &runtime_names, false).await;
+        if unread == 0 {
+            break agents;
+        }
+        if started.elapsed() >= Duration::from_secs(120) {
+            fail(&format!("{unread} agents' agent.json unread"));
+        }
         ev!("boot.runtimes_unread", { "agents": unread });
-    }
+        tokio::time::sleep(Duration::from_millis(backoff.next_ms())).await;
+    };
     let hermes_agents = agents::hermes(&agents);
     let mut credential_env = computer.credential_env.clone();
     let mut route = hermes::Route::new(&model, computer.models.as_ref());

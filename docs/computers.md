@@ -625,7 +625,9 @@ What our Hermes image guarantees beyond the contract:
   it. An agent whose `agent.json` names another runtime (Claude) has no
   profile, desktop, route or sync: the boot reads `runtime` as the bridge
   does (`with_runtimes`), and the ready file names it at once, for the
-  bridge to run on its runtime. One switched to another runtime while
+  bridge to run on its runtime. A start reads every agent's before it
+  writes or retires a profile, asking again until each answers, so a
+  failed read never retires a Hermes agent's profile. One switched to another runtime while
   the computer runs loses its desktop within 10 s, its profile retired at
   the next start; switched back, its profile is written again.
 - **Its `agent.json`**, read at boot and every 10 s while awake (a change

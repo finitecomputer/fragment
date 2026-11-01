@@ -101,6 +101,8 @@ pub struct World {
     /// answer 503, as a platform that failed one read does.
     pub fail_computer_reads: u32,
     pub fail_lists: u32,
+    /// The next this many reads of any agent's `agent.json` answer 503.
+    pub fail_agent_json: u32,
     /// The next this many reads of a page of 100 records (a note's, or a
     /// late card answer's) answer 503, as a deploying platform does.
     pub fail_history_reads: u32,
@@ -856,6 +858,11 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
         }
         (Method::GET, ["file"]) => {
             let path = query(&q, "path").into_iter().next().unwrap_or_default();
+            if path == "agent.json" && w.fail_agent_json > 0 {
+                w.fail_agent_json -= 1;
+                return refuse(StatusCode::SERVICE_UNAVAILABLE, "deploying");
+            }
+            let f = &w.fragments[&fragment];
             match f.files.get(&path) {
                 Some(b) => net::respond(StatusCode::OK, "application/octet-stream", b.clone()),
                 None => refuse(StatusCode::NOT_FOUND, "no such file"),
