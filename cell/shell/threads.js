@@ -28,7 +28,7 @@ const NEWEST = Number.MAX_SAFE_INTEGER;
 // agents' labels in order, joined by `-`, each cut to fit when both do not:
 // proto's `LABEL_ROOM_MIN_BYTES` (shell.js's `LABEL_ROOM`).
 const LABEL_ROOM = 39;
-const STATE_SAYS = { asked: "Asked", working: "Working", you: "Needs you", done: "Done", stopped: "Stopped", lost: "Lost" };
+const STATE_SAYS = { asked: "Asked", working: "Working", you: "Waiting for you", done: "Done", stopped: "Stopped", lost: "Lost" };
 
 export function pairLabel(a, b) {
   const [x, y] = [a, b].sort();

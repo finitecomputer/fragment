@@ -62,6 +62,11 @@ fn shows(chrome: &mut Browser, page: &Page, cond: &str) -> bool {
     chrome.until(page, cond, TURN)
 }
 
+/// The message box while a card waits on its owner that no message answers
+/// (buttons, or a code for the computer alone): its agent waits for them,
+/// not works (FIN-353).
+const WAITING_FOR_YOU: &str = "document.getElementById('text').placeholder.endsWith(' is waiting for you')";
+
 /// A chat page whose first live socket is never answered (its upgrade held,
 /// as a dropped connection or a phone's changing network leaves one: the
 /// library dialled again only on a close, so the page waited for its hello
@@ -645,6 +650,8 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     say(&mut chrome, "approve this")?;
     let card = "document.querySelector('.prompt:not(.closed) button[data-option=\"once\"]')";
     s.ok("an approval shows as a card with its buttons, enabled for the owner", shows(&mut chrome, &page, &format!("{card} && !{card}.disabled")), chrome.eval(&page, "document.getElementById('messages').innerText")?);
+    let waiting_here = format!("document.getElementById('text').placeholder === {}", js(&format!("{} is waiting for you", capital(&label))));
+    s.ok("while its card waits, the message box says the agent waits for its owner", shows(&mut chrome, &page, &waiting_here), chrome.eval(&page, "document.getElementById('text').placeholder")?);
     let elsewhere = chrome.another_context()?;
     chrome.set_cookie_in(&elsewhere, &format!("{}/", api.base), "fragment_session", &member_session)?;
     let theirs = chrome.open_in(&elsewhere, &api.site_url(&chat_name, "__signin?return=/"))?;
@@ -658,7 +665,11 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     chrome.click(&page, ".prompt:not(.closed) button[data-option=\"once\"]")?;
     let closed = shows(&mut chrome, &page, "document.querySelector('.prompt.closed .outcome.answered')?.textContent.startsWith('Allow once')");
     s.ok("its owner answers by clicking, and the card says how it closed", closed, chrome.eval(&page, "document.querySelector('.prompt')?.innerText")?);
-    s.ok("the turn goes on approved", shows(&mut chrome, &page, &replied("(approved)")), "");
+    s.ok(
+        "the turn goes on approved, and the message box waits no more",
+        shows(&mut chrome, &page, &format!("{} && !({waiting_here})", replied("(approved)"))),
+        chrome.eval(&page, "document.getElementById('text').placeholder")?,
+    );
     let r = records(api, &owner, &chat_name, "chat");
     let answer = r.iter().find(|x| x["body"]["kind"] == "prompt_response").cloned().unwrap_or_default();
     let asked = records(api, &owner, &chat_name, "work").into_iter().find(|x| x["body"]["kind"] == "turn.prompt" && x["body"]["prompt"] == answer["body"]["prompt"]).unwrap_or_default();
@@ -1047,12 +1058,12 @@ fn card_to_computer(s: &mut Suite, api: &Api, chrome: &mut Browser, owner: &Keys
     let asked = chrome.until(&frame, &format!("document.querySelector({0})?.type === 'password' && !document.querySelector({0}).disabled", js(field)), TURN);
     let _ = chrome.screenshot(&shell, &shots.join("card-to-computer.png"));
     s.ok(
-        "a card whose option is the computer's shows a masked field, saying it goes straight to the computer, and the message box does not answer it",
+        "a card whose option is the computer's shows a masked field, saying it goes straight to the computer, and the message box does not answer it: it says the agent waits for them",
         asked
             && chrome.eval(&frame, "document.querySelector('.prompt:not(.closed) .prompt-note')?.textContent ?? ''")?.as_str().is_some_and(|n| n.contains("straight to your computer"))
-            // and the message box is no answer to it: a message is a record
-            && chrome.eval(&frame, "document.getElementById('text').placeholder")?.as_str().is_some_and(|p| !p.starts_with("Your answer")),
-        chrome.eval(&frame, "document.querySelector('.prompt:not(.closed)')?.innerText ?? null")?,
+            // and the message box is no answer to it (a message is a record)
+            && shows(chrome, &frame, WAITING_FOR_YOU),
+        json!({ "card": chrome.eval(&frame, "document.querySelector('.prompt:not(.closed)')?.innerText ?? null")?, "placeholder": chrome.eval(&frame, "document.getElementById('text').placeholder")? }),
     );
     if asked {
         chrome.click(&frame, field)?;
@@ -1121,11 +1132,12 @@ fn claude_install(s: &mut Suite, api: &Api, chrome: &mut Browser, owner: &Keys, 
     // its first turn waits for the bridge to see a new agent's runtime (its
     // read of the computer, each minute: images/bridge `COMPUTER_EVERY_MS`)
     let asked = chrome.until(&page, &format!("!!document.querySelector({}) && document.querySelector('.prompt:not(.closed) .prompt-text')?.textContent === {}", js(install), js(CLAUDE_INSTALL_ASK)), Duration::from_secs(150));
+    let install_waits = asked && shows(chrome, &page, WAITING_FOR_YOU);
     let _ = chrome.screenshot(&shell, &shots.join("claude-install-card.png"));
     s.ok(
-        "a Claude agent's first message, Claude Code not installed: its turn asks on a card to install it, Install or Not now",
-        asked && chrome.eval(&page, "[...document.querySelectorAll('.prompt:not(.closed) .options button')].map((b) => b.textContent).join('|')")? == "Install|Not now",
-        chrome.eval(&page, "document.querySelector('.prompt')?.innerText ?? null")?,
+        "a Claude agent's first message, Claude Code not installed: its turn asks on a card to install it, Install or Not now, and the message box says it waits for them",
+        asked && install_waits && chrome.eval(&page, "[...document.querySelectorAll('.prompt:not(.closed) .options button')].map((b) => b.textContent).join('|')")? == "Install|Not now",
+        json!({ "card": chrome.eval(&page, "document.querySelector('.prompt')?.innerText ?? null")?, "placeholder": chrome.eval(&page, "document.getElementById('text').placeholder")? }),
     );
     if asked {
         chrome.click(&page, install)?;
@@ -1134,12 +1146,12 @@ fn claude_install(s: &mut Suite, api: &Api, chrome: &mut Browser, owner: &Keys, 
     // signed out: the sign-in card, its link and its masked field
     let field = ".prompt:not(.closed) input[data-option=\"code\"]";
     let card = |chrome: &mut Browser, says: &str| chrome.until(&page, &format!("document.querySelector({0})?.type === 'password' && !document.querySelector({0}).disabled && (document.querySelector('.prompt:not(.closed) .prompt-text')?.textContent ?? '').startsWith({1})", js(field), js(says)), TURN);
-    let signing = card(chrome, CLAUDE_SIGN_IN_ASK);
+    let signing = card(chrome, CLAUDE_SIGN_IN_ASK) && shows(chrome, &page, WAITING_FOR_YOU);
     let ran = records(api, owner, &chat, "work").iter().any(|r| r["body"]["kind"] == "turn.step" && r["body"]["args"] == "Anthropic's installer (Claude Code 2.1.316)");
     let link = chrome.eval(&page, "document.querySelector('.prompt:not(.closed) .prompt-text a')?.href ?? ''")?;
     let _ = chrome.screenshot(&shell, &shots.join("claude-sign-in-card.png"));
     s.ok(
-        "Install installs it (the turn says the installer ran); signed out, the turn asks on a card to sign in: a link to Anthropic's sign-in, and a masked field for its code that goes straight to the computer",
+        "Install installs it (the turn says the installer ran); signed out, the turn asks on a card to sign in: a link to Anthropic's sign-in, and a masked field for its code that goes straight to the computer, the message box saying it waits for them",
         ran && signing
             && link.as_str().is_some_and(|l| l.starts_with("https://claude.com/cai/oauth/authorize?"))
             && chrome.eval(&page, "document.querySelector('.prompt:not(.closed) .prompt-note')?.textContent ?? ''")?.as_str().is_some_and(|n| n.contains("straight to your computer")),
@@ -1158,13 +1170,13 @@ fn claude_install(s: &mut Suite, api: &Api, chrome: &mut Browser, owner: &Keys, 
     if again {
         code(chrome, CLAUDE_SIGN_IN_CODE)?;
     }
-    let answered = shows(chrome, &page, &format!("[...document.querySelectorAll('.msg.agent:not(.streaming) .md')].some((m) => m.textContent.includes({}))", js("Tidy up my README")));
+    let answered = shows(chrome, &page, &format!("[...document.querySelectorAll('.msg.agent:not(.streaming) .md')].some((m) => m.textContent.includes({})) && !({WAITING_FOR_YOU})", js("Tidy up my README")));
     let _ = chrome.screenshot(&shell, &shots.join("claude-signed-in.png"));
     let work = records(api, owner, &chat, "work");
     let signed = work.iter().any(|r| r["body"]["kind"] == "turn.step" && r["body"]["args"] == "Signed in to Claude");
     let kept = ["chat", "work"].iter().flat_map(|c| records(api, owner, &chat, c)).any(|r| r.to_string().contains("a-wrong-code") || r.to_string().contains(CLAUDE_SIGN_IN_CODE));
     s.ok(
-        "a wrong code is asked again; the right one signs Claude Code in: the turn says so, then answers what was asked, and no record holds either code",
+        "a wrong code is asked again; the right one signs Claude Code in: the turn says so, then answers what was asked (the message box waiting no more), and no record holds either code",
         again && signed && answered && !kept,
         json!({ "again": again, "signed": signed, "answered": answered, "kept": kept, "messages": chrome.eval(&page, "document.getElementById('messages').innerText")? }),
     );

@@ -705,6 +705,10 @@ export function mount(root) {
   // are the computer's alone (a sign-in's code), which no message carries
   const takesWords = (p) => p.options.some((o) => o.words === true && o.computer !== true);
   const cardFor = (t, principal) => running(t) && [...t.prompts.values()].some((p) => takesWords(p) && p.asks === principal && !t.closed.has(p.prompt) && !expired(p));
+  // a card this page's person may answer now: theirs, neither closed nor
+  // gone (expired, or its turn stopped); open past its turn's end, as a
+  // card outlives its turn (docs/bridge.md)
+  const mayAnswer = (t, p) => !!state.me && p.asks === state.me.principal && !t.closed.has(p.prompt) && !expired(p) && t.end?.outcome !== "stopped";
   // whether message `m` answered one of turn `t`'s cards: by its asker, said
   // after the card and before its close
   const answeredCard = (t, m) => [...t.prompts.values()].some((p) => takesWords(p) && p.asks === speaker(m) && p.at <= m.at && t.closed.get(p.prompt)?.outcome === "answered" && t.closed.get(p.prompt).at >= m.at);
@@ -1195,15 +1199,20 @@ export function mount(root) {
       // an agent waiting on this person's words, or on their card that takes
       // words: what they type is the answer
       const askedMe = [...state.turns.values()].find((t) => (waitsOnWords(t) && t.asked.asks === state.me?.principal) || cardFor(t, state.me?.principal));
+      // one waiting on a card of theirs no message answers (its buttons, or
+      // a code only their computer reads): it waits for them, not works
+      const waitsOnMe = [...state.turns.values()].find((t) => [...t.prompts.values()].some((p) => mayAnswer(t, p)));
       input.placeholder = askedMe
         ? `Your answer for ${who(askedMe.agent).name}`
-        : mine
-          ? `${who(mine.agent).name} is working: a message waits its turn${steers ? ", or Steer it now" : ""}`
-          : !firstName
-            ? "Message"
-            : others
-              ? `Message ${firstName}, or @ someone else`
-              : `Message ${firstName}`;
+        : waitsOnMe
+          ? `${who(waitsOnMe.agent).name} is waiting for you`
+          : mine
+            ? `${who(mine.agent).name} is working: a message waits its turn${steers ? ", or Steer it now" : ""}`
+            : !firstName
+              ? "Message"
+              : others
+                ? `Message ${firstName}, or @ someone else`
+                : `Message ${firstName}`;
     }
     refreshSend();
     if (setupHolds()) {
@@ -1622,10 +1631,10 @@ export function mount(root) {
     const sent = state.answering.get(card) ?? state.answers.get(card)?.get(p.asks) ?? state.answers.get(p.prompt)?.get(p.asks) ?? null;
     const handed = state.handed.get(card) ?? null;
     const gone = !closed && (expired(p) || t.end?.outcome === "stopped");
-    const mayAnswer = !!state.me && p.asks === state.me.principal && !closed && !gone;
+    const theirs = mayAnswer(t, p);
     const asks = who(p.asks);
     const by = closed?.by ? who(closed.by).name : "";
-    const sig = JSON.stringify([closed?.outcome, closed?.option, by, sent, handed, !!rosterOrigin, gone, mayAnswer, asks.name, who(t.agent).name]);
+    const sig = JSON.stringify([closed?.outcome, closed?.option, by, sent, handed, !!rosterOrigin, gone, theirs, asks.name, who(t.agent).name]);
     return [
       key,
       cached(key, sig, () => {
@@ -1648,25 +1657,25 @@ export function mount(root) {
           for (const o of p.options) {
             if (o.computer) {
               // answered on its agent's computer alone, never a record
-              options.append(computerField(t, p.prompt, o, !mayAnswer || sent !== null || !rosterOrigin));
+              options.append(computerField(t, p.prompt, o, !theirs || sent !== null || !rosterOrigin));
               continue;
             }
             if (o.words) {
               // answered in words: typed on the card, Enter sends them with it
-              options.append(wordsField(t, p.prompt, o, !mayAnswer || sent !== null));
+              options.append(wordsField(t, p.prompt, o, !theirs || sent !== null));
               continue;
             }
             const b = el("button", o.style === "primary" || o.style === "danger" ? o.style : "", o.label || o.id);
             b.type = "button";
             b.dataset.option = o.id;
-            b.disabled = !mayAnswer || sent !== null;
+            b.disabled = !theirs || sent !== null;
             if (sent === o.id) b.classList.add("chosen");
             b.onclick = () => answer(t, p.prompt, o.id);
             options.append(b);
           }
           card.append(options);
           const onComputer = p.options.some((o) => o.computer);
-          const note = !mayAnswer ? `Only ${asks.name} can answer this.` : sent !== null ? "Sent…" : onComputer && !rosterOrigin ? "Open this chat in Finite to answer it." : onComputer ? handed ?? "This goes straight to your computer. It isn't kept in this chat." : "";
+          const note = !theirs ? `Only ${asks.name} can answer this.` : sent !== null ? "Sent…" : onComputer && !rosterOrigin ? "Open this chat in Finite to answer it." : onComputer ? handed ?? "This goes straight to your computer. It isn't kept in this chat." : "";
           if (note) card.append(el("div", "prompt-note", note));
         }
         return card;
