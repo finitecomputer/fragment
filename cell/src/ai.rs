@@ -54,7 +54,7 @@ use serde_json::{json, Value};
 use worker::*;
 
 use crate::error::{CellError, CellResult};
-use crate::files::FileWrite;
+use crate::files::{FileWrite, Wrote};
 use crate::fragment::{FragmentCell, MetaKey};
 use crate::jobs::{permanent, RunRow, StepFail};
 use crate::ledger::{self, LedgerError, MaySpend};
@@ -243,8 +243,15 @@ impl FragmentCell {
         let key = format!("{JOB_ID_PREFIX}{}:{index}", run.id);
         let message = format!("{} run {}: generated {path}", run.op, run.id);
         let writes = [FileWrite { path: target, bytes: Some(content) }];
-        self.commit(&key, &writes, &Default::default(), &message, &run.principal, run.depth).await.map_err(retry)?;
-        Ok(json!({ "path": path, "size": size, "sha256": sha }))
+        let tip = match self.commit(&key, &writes, &Default::default(), &message, &run.principal, run.depth).await.map_err(retry)? {
+            Wrote::Commit(tip) => tip,
+            Wrote::Conflict(why) => return Err(permanent(why)),
+        };
+        // its version, for `__file?path=&v=` (FIN-340): the commit that last
+        // changed it, which is `tip` unless its bytes were already there
+        let repo = self.must(MetaKey::Repo).map_err(retry)?;
+        let commit = self.cs().map_err(retry)?.head(&repo, &tip, path).await.map_err(retry)?.map_or(tip, |h| h.last_commit_sha);
+        Ok(json!({ "path": path, "size": size, "sha256": sha, "commit": commit }))
     }
 
     /// A kept image's bytes, from the blob store where it was put before

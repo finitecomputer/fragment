@@ -21,7 +21,7 @@ use super::app::ship;
 use super::jobs;
 use super::posts;
 use super::signin::{site_cookie, who};
-use crate::api::Api;
+use crate::api::{Api, Call};
 use crate::{Suite, ADDED_KEY};
 
 const TODO_APP: &[u8] = include_bytes!("../../fixtures/todo.mjs");
@@ -404,6 +404,12 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     let r = api.op(&owner, &decider, "decide", "bad-before-crash", decision)?;
     let bad_decision = jobs::settle(&api, &owner, &decider, jobs::started(&r), &["held"], Duration::from_secs(40));
     let calls_before_crash = s.ai.calls().iter().filter(|c| c.model == fragment_core::decide::Model::ClefFlash.id()).count();
+    // a file's version (FIN-340), named before the crash
+    s.commit(&c, &[("kept.md", Some(b"the same bytes"))]);
+    let site = format!("fragment_site={member_site}");
+    let files = api.call(Call { method: "GET", url: api.site_url(&name, "__files"), cookie: Some(site.clone()), extra: vec![("accept", "application/json".into())], ..Call::default() })?;
+    let kept = files.body["files"].as_array().and_then(|a| a.iter().find(|f| f["path"] == "kept.md")).and_then(|f| f["commit"].as_str()).unwrap_or_default().to_string();
+    anyhow::ensure!(fragment_core::site::valid_version(&kept), "a version before the crash: {files}");
     s.crash()?;
     let api = s.start(false)?;
     let (book, shown) = book_of(&api, &owner)?;
@@ -420,6 +426,8 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     s.ok("after a crash no acknowledged write is lost", count(&api, &owner, &name) == 2, "count");
     let r = api.status(&owner, &name)?;
     s.ok("after a crash pins and code survive", r.body["pins"]["live"] == live.as_str() && r.body["code"]["sha"] == live.as_str(), &r);
+    let r = api.page(&name, &format!("__file?path=kept.md&v={kept}"), Some(&site))?;
+    s.ok("after a crash a file's version still answers its bytes, kept for good", r.status == 200 && r.text == "the same bytes" && r.header("cache-control") == "private, max-age=31536000, immutable", &r);
     let r = api.signed(&member, "GET", "/api/fragments", None)?;
     s.ok("after a crash the member's list survives", r.text.contains(&name), &r);
     s.ok("and a person's search, both messages in it", found(&api, "kale") == 2, "");
