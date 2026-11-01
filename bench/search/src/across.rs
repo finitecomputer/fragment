@@ -140,6 +140,8 @@ pub struct Hit {
     /// when scored with pooled statistics (`Pooled`).
     pub score: Option<f64>,
     pub cosine: Option<f64>,
+    /// The chunk its words matched best, when they matched.
+    pub chunk: Option<i64>,
 }
 
 /// Word statistics pooled across the fragments a question asks (what each
@@ -240,6 +242,21 @@ impl Index {
         Ok(out)
     }
 
+    /// Each of the question's words in `chunk`, as B′'s answer carries it:
+    /// the word, how many of this index's chunks hold it, and its BM25 in
+    /// that chunk here (FTS5's, with this index's IDF and lengths; 0 when
+    /// the chunk lacks it).
+    fn word_scores(&self, chunk: i64, q: &str) -> Result<Vec<(String, f64, f64)>, String> {
+        let mut out = Vec::new();
+        for w in words(q) {
+            let here: i64 = self.conn.query_row("SELECT count(*) FROM chunk_words WHERE chunk_words MATCH ?", [&w], |r| r.get(0)).map_err(|e| e.to_string())?;
+            let mut stmt = self.conn.prepare_cached("SELECT -bm25(chunk_words, 4.0, 3.0, 2.0, 1.0) FROM chunk_words WHERE chunk_words MATCH ? AND rowid = ?").map_err(|e| e.to_string())?;
+            let s: Option<f64> = stmt.query_row(params![w, chunk], |r| r.get(0)).ok();
+            out.push((w, here as f64, s.unwrap_or(0.0)));
+        }
+        Ok(out)
+    }
+
     /// The question, answered as cell/src/search_index.rs's `search` does,
     /// its best `limit` sections.
     pub fn search(&self, q: &str, question: &[f32], limit: usize) -> Result<Vec<Hit>, String> {
@@ -302,7 +319,7 @@ impl Index {
         }
         Ok(engine::fuse(&lexical, &semantic, limit)
             .into_iter()
-            .map(|f| Hit { section: names[f.section as usize].clone(), lexical: f.lexical.map(|p| p.rank), score: f.lexical.map(|p| p.score), cosine: f.semantic.map(|p| p.score) })
+            .map(|f| Hit { section: names[f.section as usize].clone(), lexical: f.lexical.map(|p| p.rank), score: f.lexical.map(|p| p.score), cosine: f.semantic.map(|p| p.score), chunk: f.lexical.map(|_| f.chunk) })
             .collect())
     }
 }
@@ -329,6 +346,38 @@ pub fn federated_pooled(fragments: &[Index], q: &str, question: &[f32], k: usize
     let pooled = Pooled::of(fragments, q)?;
     let asked = across::asked_limit(k);
     let answers: Vec<Vec<Hit>> = fragments.iter().map(|f| f.search_with(q, question, asked, Some(&pooled))).collect::<Result<_, _>>()?;
+    Ok(merge_by_score(&answers, k))
+}
+
+/// A prototype of B in one round (FIN-238, the bench's B′): each fragment
+/// answers its usual best `asked_limit(k)` by its own statistics, and with
+/// them its chunk count, how many of its chunks hold each of the
+/// question's words, and each hit's words as its best chunk holds them
+/// (its per-word BM25 here, what its term frequencies and length give);
+/// the route scores each returned hit's words again with the pooled IDF,
+/// and sorts by that. No second round, so no hit a fragment did not return.
+pub fn federated_rescored(fragments: &[Index], q: &str, question: &[f32], k: usize) -> Result<Vec<String>, String> {
+    let pooled = Pooled::of(fragments, q)?;
+    let asked = across::asked_limit(k);
+    let mut answers: Vec<Vec<Hit>> = fragments.iter().map(|f| f.search(q, question, asked)).collect::<Result<_, _>>()?;
+    for (f, hits) in fragments.iter().zip(answers.iter_mut()) {
+        let n_all = f.chunks() as f64;
+        for h in hits.iter_mut() {
+            if let Some(chunk) = h.chunk {
+                let mut score = 0.0;
+                for (w, here, s) in f.word_scores(chunk, q)? {
+                    score += s * idf(pooled.chunks, pooled.with.get(&w).copied().unwrap_or(0.0)) / idf(n_all, here);
+                }
+                h.score = Some(score);
+            }
+        }
+    }
+    Ok(merge_by_score(&answers, k))
+}
+
+/// The answers merged with their words scores comparable: the words list
+/// by score, the meaning list by cosine, then reciprocal rank fusion.
+fn merge_by_score(answers: &[Vec<Hit>], k: usize) -> Vec<String> {
     let all: Vec<(usize, usize, &Hit)> = answers.iter().enumerate().flat_map(|(f, hits)| hits.iter().enumerate().map(move |(i, h)| (f, i, h))).collect();
     let cosine = |h: &Hit| h.cosine.unwrap_or(f64::NEG_INFINITY);
     let place = |i: usize| (all[i].0, all[i].1);
@@ -344,5 +393,5 @@ pub fn federated_pooled(fragments: &[Index], q: &str, question: &[f32], k: usize
     }
     let mut order: Vec<usize> = (0..all.len()).collect();
     order.sort_by(|&a, &b| score[b].total_cmp(&score[a]).then(place(a).cmp(&place(b))));
-    Ok(order.into_iter().take(k).map(|i| all[i].2.section.clone()).collect())
+    order.into_iter().take(k).map(|i| all[i].2.section.clone()).collect()
 }
