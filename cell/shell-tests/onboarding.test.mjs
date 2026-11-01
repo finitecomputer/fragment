@@ -112,9 +112,11 @@ function platform() {
 }
 
 // A page of the shell over it: its own reads of the platform, and the
-// onboarding made as shell.js makes it.
-function page(world) {
+// onboarding made as shell.js makes it; `at` the page open (Settings'
+// "settings"), or none (home), and the notices it drew.
+function page(world, { at = null } = {}) {
   const state = { fragments: [], computer: null, agents: new Map(), frames: new Set() };
+  const notices = [];
   const load = async () => {
     state.fragments = world.rows();
     state.computer = world.computer();
@@ -126,7 +128,7 @@ function page(world) {
   const titleOf = (name) => state.fragments.find((f) => f.name === name)?.title || labelOf(name);
   const onboarding = createOnboarding({
     api: world.api,
-    ui: { $: node, el: node, notice() {} },
+    ui: { $: node, el: node, notice: (title) => notices.push(title) },
     account: { person: () => ({ email: "kim@e2e.test" }), isGuest: () => false, setGuest() {}, hasInvites: () => 0 },
     fragments: {
       allFragments: () => state.fragments,
@@ -150,7 +152,7 @@ function page(world) {
       seg: (s) => encodeURIComponent(s),
     },
     computer: { computerView: () => state.computer, computerFailed: () => false, agents: () => state.agents, computerOf: async () => state.computer, computerIs() {} },
-    navigation: { start() {}, openChat: (name) => state.frames.add(name), atHome: () => true, hasFrame: (name) => state.frames.has(name), welcomePath: "/welcome" },
+    navigation: { start() {}, openChat: (name) => state.frames.add(name), atHome: () => !at, hasFrame: (name) => state.frames.has(name), page: () => at, welcomePath: "/welcome" },
     reads: () => ({ listFailed: false, updating: false }),
     load,
     skillsFragment: async () => ({}),
@@ -164,7 +166,7 @@ function page(world) {
     else await onboarding.resumeFirstRun();
     await load();
   };
-  return { onboarding, opened, load };
+  return { onboarding, opened, load, notices };
 }
 
 // Wren made whole: one agent of that name with its role and job, on the
@@ -235,6 +237,38 @@ test("Add's Runs on: Claude Code is agent.json's runtime; Hermes names none", as
     const wren = world.rows().find((f) => f.kind === "agent" && f.title === "Wren");
     assert.deepEqual(JSON.parse(world.files(wren.name).get("agent.json")), json, String(runtime));
   }
+});
+
+// Paul, 11-01: "Making your agent…" floated over Settings. Asked from a
+// page, the making draws nothing over it (its chat opens when made); at
+// home, the middle column says it until its chat is.
+test("Add from Settings draws nothing over it; at home the making is said", async () => {
+  const world = platform();
+  const settings = page(world, { at: "settings" });
+  await settings.load();
+  await adding(settings);
+  madeWhole(world);
+  assert.deepEqual(settings.notices, []);
+  const home = page(platform());
+  await home.load();
+  await home.onboarding.addAgent({ name: "Wren", role: "Researcher" });
+  assert.deepEqual(home.notices, ["Making your agent…"]);
+});
+
+// A making that fails before its chat exists, asked from Settings: Add says
+// why (it rejects), nothing is drawn over the page, and Add again goes on
+// with what was made, the agent made once.
+test("Add failing before its chat, from Settings, says so in Add; Add again finishes it", async () => {
+  const world = platform();
+  const p = page(world, { at: "settings" });
+  await p.load();
+  world.cut(create("wren-chat"));
+  await assert.rejects(adding(p), /Failed to fetch/);
+  assert.deepEqual(p.notices, []);
+  await p.load();
+  await adding(p);
+  madeWhole(world);
+  assert.deepEqual(p.notices, []);
 });
 
 test("Try again on the same page finishes what failed", async () => {
