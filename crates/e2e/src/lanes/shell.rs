@@ -2794,7 +2794,8 @@ const WIDE_MESSAGE: &str = "A word that never breaks: supercalifragilisticexpial
 /// input, should feel like a native app)"), at 320, 375, 390 and 430 px in
 /// Chrome's phone emulation: the page never wider than the screen nor
 /// scrolling, with its sidebar open and closed, a chat holding a long
-/// word, code and a wide table (the table scrolls in its own box), the
+/// word, code and a wide table (the table scrolls in its own box), its
+/// stand-in's composer the chat's own box (nothing jumps as it loads), the
 /// launcher, settings (its Your data with an export ready, its widest
 /// rows), the share sheet, an app's window and the ways to ask for one
 /// (three, then three more from its die, a target of 44 px or more that a
@@ -2851,6 +2852,17 @@ fn phone_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &st
               return {{ ...p, ok: p.ok && !!t && t.getBoundingClientRect().right <= innerWidth + 1 && (!c || c.getBoundingClientRect().right <= innerWidth + 1), table: t ? [t.scrollWidth, t.clientWidth] : null }}; }})()"),
         )?;
         places.push(("its chat's page, a long word, code and a wide table", framed));
+        // a chat's stand-in (frame-standin.js) holds its composer's box, so
+        // nothing jumps when its page comes: one put over this chat, measured
+        let real = b.eval_in_frame(page, &chat, "(() => { const r = document.querySelector('.composer').getBoundingClientRect(); return { left: r.left, right: innerWidth - r.right, bottom: innerHeight - r.bottom, height: r.height }; })()")?;
+        let stand = b.eval(
+            page,
+            "(() => { const f = [...document.querySelectorAll('#frames iframe')].find((x) => !x.hidden).getBoundingClientRect(); const s = document.createElement('div'); s.className = 'frame-standin'; \
+             const k = document.createElement('div'); k.className = 'standin-composer'; s.append(k); document.getElementById('frames').append(s); const r = k.getBoundingClientRect(); s.remove(); \
+             return { left: r.left - f.left, right: f.right - r.right, bottom: f.bottom - r.bottom, height: r.height }; })()",
+        )?;
+        let same = ["left", "right", "bottom", "height"].iter().all(|k| real[*k].as_f64().zip(stand[*k].as_f64()).is_some_and(|(a, b)| (a - b).abs() <= 1.0));
+        places.push(("a chat's stand-in, its composer's box", json!({ "ok": same, "composer": real, "standin": stand })));
         if let Ok(Value::Array(l)) = b.eval_in_frame(page, &chat, SMALL_FIELDS) { small.extend(l.into_iter().map(|f| json!({ "width": w, "in": "chat", "field": f }))); }
         if w == 320 || w == 430 {
             let _ = b.screenshot(page, &shots.join(format!("phone-{w}-chat.png")));

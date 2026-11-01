@@ -173,6 +173,8 @@ body.resizing-row, body.resizing-row * { cursor: row-resize !important; }
    a quiet spinner */
 .frame-standin { position: absolute; inset: 0; z-index: 1; display: flex; flex-direction: column; justify-content: flex-end; align-items: center; background: var(--bg-sidebar); pointer-events: none; }
 .standin-composer { width: min(760px, calc(100% - 16px)); height: 99px; margin-bottom: 8px; border-radius: 12px; background: var(--chat-composer); box-shadow: inset 0 1px 2px rgba(0,0,0,.08); }
+/* a phone's chat (the shell's `mobileChat`, chat.css's own): one line, rounded */
+@media (max-width: 760px) { .standin-composer { width: calc(100% - 24px); height: 46px; border-radius: 23px; } }
 .standin-wait { position: absolute; top: calc(50% - 60px); left: calc(50% - 9px); width: 18px; height: 18px; border: 2px solid var(--border-strong); border-top-color: var(--text-tertiary); border-radius: 50%; opacity: 0; animation: standin-spin .9s linear infinite, standin-show .3s ease 1.5s forwards; }
 @keyframes standin-spin { to { transform: rotate(360deg); } }
 @keyframes standin-show { to { opacity: .8; } }
