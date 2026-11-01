@@ -282,3 +282,23 @@ impl Runtime for Counting {
         })
     }
 }
+
+/// One HTTP/1.1 request to the screen port, read to its end: its status
+/// and body.
+pub async fn http(base: &fragment_bridge::net::Base, method: &str, path: &str, headers: &[(&str, &str)], body: &[u8]) -> (u16, String) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut s = tokio::net::TcpStream::connect(base.authority()).await.expect("the screen answers");
+    let mut req = format!("{method} {path} HTTP/1.1\r\nhost: {}\r\nconnection: close\r\ncontent-length: {}\r\n", base.authority(), body.len());
+    for (k, v) in headers {
+        req.push_str(&format!("{k}: {v}\r\n"));
+    }
+    req.push_str("\r\n");
+    s.write_all(req.as_bytes()).await.unwrap();
+    s.write_all(body).await.unwrap();
+    let mut got = Vec::new();
+    s.read_to_end(&mut got).await.unwrap();
+    let got = String::from_utf8_lossy(&got).into_owned();
+    let status = got.split_whitespace().nth(1).and_then(|c| c.parse().ok()).unwrap_or(0);
+    let body = got.split_once("\r\n\r\n").map(|(_, b)| b.to_string()).unwrap_or_default();
+    (status, body)
+}

@@ -49,13 +49,15 @@ indexing, waiting_ms, hint?}`.
 
 - **The index** is the fragment's own (docs/api.md, "A fragment's
   search"), written and asked through the app's `this.searchIndex`: each
-  markdown page a source (its path, its bytes' sha256 the revision), cut
+  markdown page a source (its path; its bytes' sha256, under the index's
+  format, the revision, so a new format writes every page again), cut
   into sections (the text under a heading, with the headings above it as
-  context and the page's title: `applib/sections.mjs`), its wiki a field
-  that `wiki` narrows by. It indexes markdown, not a wiki's `AGENTS.md`
-  or a made `_index.md`. A question asked through the brain (its page, or
-  this operation) is paid by its owner; `fragment search --in` by its
-  asker.
+  context and the page's title: `applib/sections.mjs`; a wiki link its
+  words, `[[page|words]]` "words" and `[[frost-dates]]` "frost dates"),
+  its wiki a field that `wiki` narrows by. It indexes markdown, not a
+  wiki's `AGENTS.md` or a made `_index.md`. A question asked through the
+  brain (its page, or this operation) is paid by its owner; `fragment
+  search --in` by its asker.
 - **Kept by a file trigger.** `{"files": "**", "run": "changed"}`: each move
   of `main` runs the job `changed`, which marks the paths that moved
   (`mark`, a mutation, which open pages follow), then indexes them 8 files a
