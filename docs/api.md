@@ -1019,7 +1019,9 @@ GIF, MP4 and WebM video, MP3, WAV, WebM, Ogg and MP4 audio, PDF), else
 
 Every move of `live` wants a **preview card**: a 1280×800 JPEG shot of the
 fragment's page, which the shell's Apps page shows (`fragment_core::card`,
-cell/src/card.rs).
+cell/src/card.rs). So does the first move of `main` after live's shot (its
+files changed under the card, as a brain's pages arriving), once a live:
+later moves shoot nothing until the next deploy.
 
 - **Off the deploy's path.** The fragment's alarm takes the shot with the
   `BROWSER` binding, one at a time, the newest live winning; a failed try
