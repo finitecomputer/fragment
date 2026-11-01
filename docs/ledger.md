@@ -149,17 +149,34 @@ Before a spend starts, its payer's ledger is asked `may_spend` (an
 agent's turn, an AI step, a wake, a write, a create), and when someone
 else spends in a fragment, its owner's ledger is asked `fragment_open`
 (its cap), at the same time; if both refuse, the payer's refusal is
-the one said. Both go through one cached question, `ledger::may`: each
-isolate keeps each answer, a refusal too, for `STANDING_CACHE_MS`, and
-asks a ledger with no fresh answer once, for at most `GATE_WAIT_MS`.
-Only the ledger's own refusal stops a spend. A ledger that does not
-answer, or answers otherwise, lets the spend start
-(`ledger.gate-unknown`) and is asked again next time. So a payer out of
-credit may overspend by what starts within the minute, and one who
+the one said. Both go through one cached question: each isolate keeps
+each answer, a refusal too, for `STANDING_CACHE_MS`. Only the ledger's
+own refusal stops a spend. A ledger that does not answer, or answers
+otherwise, lets the spend start (`ledger.gate-unknown`) and is asked
+again next time.
+
+**A model call waits on no ledger** (Paul, 2026-11-01: "prioritize user
+experience over nickel-and-diming"; `ledger::may_beside`). A fresh
+answer answers it at once, a refusal refusing it before its vendor call.
+With none, it starts at once and the ledger is asked beside it, the
+answer kept for the next call. Only a question last heard refused,
+longer ago than the window, is asked first, for at most `GATE_WAIT_MS`
+(the payer may have topped up). An ask beside a call holds nothing of
+the call's: a call started runs to its end, a stream to its `[DONE]`,
+and is charged as any call is. So a payer out of credit, or past a
+fragment's cap, may make one call more in each isolate that has not
+heard them (paid by the platform, charged to their ledger), and the
+next is refused. A refusal said from the cache says the refusal's
+standard words.
+
+**Every other spend asks first** (`ledger::may`): a ledger with no
+fresh answer is asked once, for at most `GATE_WAIT_MS`. So a payer out
+of credit may overspend by what starts within the minute, and one who
 topped up waits up to a minute.
 
-- A model call, and an operator key's call through the swap, asks
-  `agent_turn` of the agent's owner.
+- A model call (an agent's chat, vision, decision, transcription and
+  embeddings, and a search's embeddings) asks `agent_turn` of its payer,
+  beside it; an operator key's call through the swap asks it first.
 - A job's AI step asks `ai_step` of the fragment's owner, capped when
   the run's principal is neither the owner nor an agent of theirs.
 - A fragment's write asks `write` of its owner (402 past the overdraft).

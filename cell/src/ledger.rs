@@ -40,7 +40,7 @@
 
 use std::cell::{Cell, RefCell};
 
-use fragment_core::ledger::gate::Gate;
+use fragment_core::ledger::gate::{Gate, Step};
 use fragment_core::ledger::org::Payer;
 use fragment_core::ledger::{self as core, BatchRecord, CommandRecord, Entry, Ledger, Month, Refused, Spend, Store};
 use fragment_proto::ledger::{GrantCredit, LedgerStatus, OrgBudget, OrgLedgerStatus, Plan, SeatState, SetFragmentCap, SetOverdraft, SetPlan, SetSeat, Why};
@@ -76,6 +76,11 @@ const PAID_CALLS_MAX: &str = "test_paid_calls_max";
 /// or far ledger costs a call at most this, once a minute, and one that
 /// does not answer lets the call through (decision 62).
 const GATE_WAIT_MS: u64 = 1_500;
+/// How long an ask beside a model call waits on a ledger (`may_beside`):
+/// no call waits on it, so longer than `GATE_WAIT_MS`, a slow ledger's
+/// answer still kept for the next call; within the 30 s a Worker keeps a
+/// request's `waitUntil` work alive after its answer.
+const BESIDE_WAIT_MS: u64 = 20_000;
 
 thread_local! {
     /// What each person's ledger last answered this isolate's gate (`may`).
@@ -231,7 +236,10 @@ pub struct OrgStatus {}
 /// (`slow {ms}`, at most `TEST_SLOW_MAX_MS`, 0 to end it: a slow or far
 /// ledger, which no paid call waits on past the gate's wait), or make the
 /// gate of its isolate (and, through the router's lever, the router's)
-/// forget what it heard (`forget-gate`), or fail its next `times` grants
+/// forget what it heard (`forget-gate`), or say what the router's gate
+/// heard for this person within the window (`gate-heard`: answered by the
+/// router, the ledger not asked; locally one isolate runs them all), or
+/// fail its next `times` grants
 /// before it takes them (`fail-grants {times}`, at most
 /// `TEST_FAIL_GRANTS_MAX`, 0 to end it: a ledger not reached once the
 /// router recorded an org's grant, which its retry completes).
@@ -252,6 +260,7 @@ pub enum TestHook {
         ms: u64,
     },
     ForgetGate,
+    GateHeard,
     FailGrants {
         times: u32,
     },
@@ -828,6 +837,8 @@ impl LedgerCell {
                 forget_gate();
                 Ok(json!({ "forgot": true }))
             }
+            // the router answers it, never forwarding it here (levers.rs)
+            TestHook::GateHeard => Err(CellError::new(ErrorCode::NotFound, "gate-heard is the router's lever").into()),
             TestHook::FailGrants { times } => {
                 self.fail_grants.set(times.min(TEST_FAIL_GRANTS_MAX));
                 Ok(json!({ "failGrants": self.fail_grants.get() }))
@@ -962,18 +973,55 @@ async fn asked(env: &Env, payer: &str, path: &str, body: String) -> Result<Vec<u
 /// out), lets it start, says so in the log, and is asked again next time
 /// (decision 62: billing never stops an agent).
 pub async fn may<R: Route<Answer = Done>>(env: &Env, person: &str, question: &R) -> Result<(), LedgerError> {
-    gated(env, person, R::PATH, serde_json::to_string(question).expect("a gate's question serializes")).await
+    gated(env, person, R::PATH, serde_json::to_string(question).expect("a gate's question serializes"), GATE_WAIT_MS).await
 }
 
-/// `may`, one copy for both questions: route `path` with `body`.
-async fn gated(env: &Env, person: &str, path: &'static str, body: String) -> Result<(), LedgerError> {
-    let key = format!("{person} {path} {body}");
+/// A model call's gate, off its path (`fragment_core::ledger::gate::Step`):
+/// what this isolate heard of `question` within the window answers at
+/// once; a question last heard refused, longer ago, is asked first, as
+/// `may` asks; anything else lets the call start at once, and `question`
+/// is asked beside it (`after`), its answer kept for the next call. The
+/// ask beside holds nothing of the call's: a refusal it hears never stops
+/// or undoes a call already started.
+pub async fn may_beside<R: Route<Answer = Done>>(env: &Env, person: &str, question: &R, after: &dyn crate::models::Background) -> Result<(), LedgerError> {
+    let body = serde_json::to_string(question).expect("a gate's question serializes");
+    match GATE.with(|g| g.borrow().step(&gate_key(person, R::PATH, &body), js::now_ms())) {
+        Step::Go => Ok(()),
+        Step::Refuse(why) => Err(why.into()),
+        Step::AskFirst => gated(env, person, R::PATH, body, GATE_WAIT_MS).await,
+        Step::GoAndAsk => {
+            let (env, person) = (env.clone(), person.to_string());
+            // its answer is kept by `gated`; a refusal is the next call's
+            after.later(Box::pin(async move {
+                let _ = gated(&env, &person, R::PATH, body, BESIDE_WAIT_MS).await;
+            }));
+            Ok(())
+        }
+    }
+}
+
+/// A gate question's key in the isolate's cache.
+fn gate_key(person: &str, path: &str, body: &str) -> String {
+    format!("{person} {path} {body}")
+}
+
+/// What this isolate's gate heard for `person` within the window
+/// (`gate-heard`): whether it holds a refusal, and an allowance.
+pub fn gate_heard(person: &str) -> Value {
+    let heard = GATE.with(|g| g.borrow().heard_for(person, js::now_ms()));
+    json!({ "refused": heard.iter().any(Result::is_err), "allowed": heard.iter().any(Result::is_ok) })
+}
+
+/// `may`, one copy for both questions: route `path` with `body`, the
+/// ledger waited on for at most `wait_ms`.
+async fn gated(env: &Env, person: &str, path: &'static str, body: String, wait_ms: u64) -> Result<(), LedgerError> {
+    let key = gate_key(person, path, &body);
     let now = js::now_ms();
     if let Some(answer) = GATE.with(|g| g.borrow().fresh(&key, now)) {
         return answer.map_err(LedgerError::from);
     }
     let asked = std::pin::pin!(asked(env, person, path, body));
-    let waited = std::pin::pin!(Delay::from(std::time::Duration::from_millis(GATE_WAIT_MS)));
+    let waited = std::pin::pin!(Delay::from(std::time::Duration::from_millis(wait_ms)));
     // what the ledger said, and its refusal as it said it (its message)
     let (heard, said) = match futures_util::future::select(asked, waited).await {
         // the routes answer `{}` when they allow it
@@ -984,7 +1032,7 @@ async fn gated(env: &Env, person: &str, path: &'static str, body: String) -> Res
             (None, None)
         }
         futures_util::future::Either::Right(_) => {
-            console_error!("{}", json!({ "event": "ledger.gate-unknown", "path": path, "message": format!("no answer in {GATE_WAIT_MS} ms") }));
+            console_error!("{}", json!({ "event": "ledger.gate-unknown", "path": path, "message": format!("no answer in {wait_ms} ms") }));
             (None, None)
         }
     };

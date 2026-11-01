@@ -5,8 +5,9 @@
 //! reader finds it by its words and its meaning, each hit placed in each
 //! leg, its answer's waits named in `Server-Timing`, the index's int8 dot
 //! product Wasm SIMD's; a reader's question in another person's fragment
-//! asks the reader's ledger and the owner's, either refusal stopping it,
-//! the reader's said first; a replay and a grown
+//! asks the reader's ledger and the owner's beside it, waiting on neither,
+//! a refusal heard so stopping the next, the reader's said first, a
+//! restart forgetting it until a question teaches it again; a replay and a grown
 //! source embed nothing again; a stale write is refused; limits are
 //! checked before anything is sent; a viewer only
 //! reads, a stranger neither, and a member removed reads nothing more; a
@@ -27,7 +28,7 @@ use anyhow::{Context, Result};
 use fragment_nip98::Keys;
 use serde_json::{json, Value};
 
-use super::ledger::{forget_gate, lever};
+use super::ledger::{forget_gate, gate_hears, lever, quiet};
 use crate::api::{Api, Reply};
 use crate::Suite;
 
@@ -67,10 +68,13 @@ fn turns() -> Value {
 
 /// A reader's question in a fragment another person owns asks two ledgers
 /// (models.rs `gate`): the reader's, who pays, and the owner's, whose cap
-/// applies. Either refusing stops it before anything is embedded; both
-/// refusing, the reader's refusal is said. (That the two are asked side by
-/// side is `ledger::gate::asked_together`'s host test: no clock here.)
-fn gate_checks(s: &mut Suite, api: &Api) -> Result<()> {
+/// applies, side by side (`ledger::gate::asked_together`'s host test) and
+/// off its path (`ledger::may_beside`): a gate that heard nothing lets the
+/// question start at once and asks beside it, and what it hears answers
+/// the next one. A refusal heard so stops the next question before
+/// anything is embedded; both refusing, the reader's is said. Its reader,
+/// left refused, and the fragment's name: the restart's check.
+fn gate_checks(s: &mut Suite, api: &Api) -> Result<(Keys, String, String)> {
     let owner = api.person()?;
     let reader = api.person()?;
     let (owner_id, reader_id) = (api.identity(&owner)?, api.identity(&reader)?);
@@ -94,47 +98,81 @@ fn gate_checks(s: &mut Suite, api: &Api) -> Result<()> {
         anyhow::ensure!(r.status == 200, "the fragment's cap: {r}");
         Ok(())
     };
-    // asked afresh: each isolate's gate keeps an answer, a refusal too, a minute
-    let ask = || -> Result<(Reply, usize)> {
-        forget_gate(api, &reader_id)?;
-        forget_gate(api, &owner_id)?;
+    // a question's answer, and the texts it embedded
+    type Asked = (Reply, usize);
+    let question = || -> Result<Asked> {
         let calls = s.ai.calls().len();
         let r = api.signed(&reader, "POST", &format!("/api/f/{name}/search"), Some(&json!({ "q": "harbour lantern audit" })))?;
         Ok((r, embedded(s, calls)))
     };
-    let (allowed, allowed_embeds) = ask()?;
+    // the reader's charged calls, once the rows of calls before have landed
+    let rows = || quiet(api, &reader_id, "aig:");
+    // From a gate that heard nothing (as an isolate made anew holds): the
+    // first question, what the gate then heard of each person whose answer
+    // `hears` names, and the next question, answered from it.
+    let taught = |hears: &[(&str, &str)]| -> Result<(Asked, bool, Asked)> {
+        forget_gate(api, &reader_id)?;
+        let first = question()?;
+        let heard = hears.iter().all(|(identity, answer)| gate_hears(s, api, identity, answer));
+        Ok((first, heard, question()?))
+    };
+    let both_allowed = [(reader_id.as_str(), "allowed"), (owner_id.as_str(), "allowed")];
+    let ((allowed, allowed_embeds), allowed_heard, (again, again_embeds)) = taught(&both_allowed)?;
     lend(0)?;
-    let (payer, payer_embeds) = ask()?;
+    let before = rows();
+    let ((paid, paid_embeds), payer_heard, (payer, payer_embeds)) = taught(&[(reader_id.as_str(), "refused")])?;
+    let (replayed, replayed_embeds) = question()?;
+    let charged_once = rows() == before + 1;
     lend(1_000)?;
     cap("g0", Some(0))?;
-    let (open, open_embeds) = ask()?;
+    let ((_, open_first_embeds), owner_heard, (open, open_embeds)) = taught(&[(owner_id.as_str(), "refused")])?;
     lend(0)?;
-    let (both, both_embeds) = ask()?;
+    let ((_, both_first_embeds), both_heard, (both, both_embeds)) = taught(&[(reader_id.as_str(), "refused"), (owner_id.as_str(), "refused")])?;
     lend(1_000)?;
     cap("g1", None)?;
-    let lent = |r: &Reply| r.status == 402 && r.message().contains("paid calls are used up");
+    // both ledgers slowed past the gate's old wait: a cold gate waits on neither
+    ledger_lever(&reader_id, json!({ "op": "slow", "ms": 10_000 }))?;
+    ledger_lever(&owner_id, json!({ "op": "slow", "ms": 10_000 }))?;
+    forget_gate(api, &reader_id)?;
+    let (slowed, slowed_embeds) = question()?;
+    ledger_lever(&reader_id, json!({ "op": "slow", "ms": 0 }))?;
+    ledger_lever(&owner_id, json!({ "op": "slow", "ms": 0 }))?;
+    lend(0)?;
+    let lent = |r: &Reply| r.status == 402 && r.message().contains("agents are stopped");
     let capped = |r: &Reply| r.status == 402 && r.message().contains("cap this month");
     s.ok(
-        "a reader's question in another person's fragment, both ledgers allowing it, is embedded as the reader's and answered by meaning",
-        allowed.status == 200 && allowed.body["semantic"] == "on" && allowed_embeds == 1,
-        json!({ "found": allowed.body, "embedded": allowed_embeds }),
+        "a reader's question in another person's fragment, both ledgers allowing it, is embedded as the reader's and answered by meaning, and so is the next",
+        allowed.status == 200 && allowed.body["semantic"] == "on" && allowed_embeds == 1 && allowed_heard && again.status == 200 && again_embeds == 1,
+        json!({ "found": allowed.body, "embedded": [allowed_embeds, again_embeds], "heard": allowed_heard }),
     );
     s.ok(
-        "the reader's ledger refusing (its lending used up) refuses it, 402, saying so, with nothing embedded",
-        lent(&payer) && payer_embeds == 0,
-        json!({ "refused": payer.body, "embedded": payer_embeds }),
+        "the reader's ledger refusing (its lending used up): the first question, its gate cold, is answered and charged once; the refusal heard beside it refuses the next, 402, saying so, and a replay too, nothing embedded or charged",
+        paid.status == 200 && paid_embeds == 1 && payer_heard && lent(&payer) && payer_embeds == 0 && lent(&replayed) && replayed_embeds == 0 && charged_once,
+        json!({ "first": paid.status, "heard": payer_heard, "next": payer.body, "replayed": replayed.status, "charged_once": charged_once }),
     );
     s.ok(
-        "the owner's ledger refusing (the fragment at its cap, $0 here) refuses it, 402, saying so, with nothing embedded",
-        capped(&open) && open_embeds == 0,
-        json!({ "refused": open.body, "embedded": open_embeds }),
+        "the owner's ledger refusing (the fragment at its cap, $0 here): the first goes on, the next is refused, 402, saying so, with nothing embedded",
+        open_first_embeds == 1 && owner_heard && capped(&open) && open_embeds == 0,
+        json!({ "heard": owner_heard, "next": open.body, "embedded": open_embeds }),
     );
     s.ok(
-        "both refusing, the reader's refusal is the one said, with nothing embedded",
-        lent(&both) && !capped(&both) && both_embeds == 0,
-        json!({ "refused": both.body, "embedded": both_embeds }),
+        "both refusing: the first goes on, and the next is refused with the reader's refusal, nothing embedded",
+        both_first_embeds == 1 && both_heard && lent(&both) && !capped(&both) && both_embeds == 0,
+        json!({ "heard": both_heard, "next": both.body, "embedded": both_embeds }),
     );
-    Ok(())
+    let gate = part_ms(&slowed, "gate");
+    s.ok(
+        "both ledgers slowed to 10 s an answer, a question with its gate cold waits on neither: answered and embedded, its gate under the 1.5 s the gate once waited (it awaits no ledger)",
+        slowed.status == 200 && slowed_embeds == 1 && gate.is_some_and(|ms| ms < 1_500),
+        json!({ "status": slowed.status, "gate_ms": gate }),
+    );
+    Ok((reader, reader_id, name))
+}
+
+/// How long a reply's `Server-Timing` says `part` took, in ms.
+fn part_ms(r: &Reply, part: &str) -> Option<u64> {
+    let value = r.headers.get("server-timing")?.to_str().ok()?;
+    value.split(", ").find_map(|entry| entry.strip_prefix(part)?.strip_prefix(";dur=")?.parse().ok())
 }
 
 /// The index of `name`'s life `incarnation` (its live one's, none named),
@@ -162,12 +200,23 @@ pub fn search(s: &mut Suite, api: &Api) -> Result<()> {
         return Ok(());
     }
     let (owner, name) = checks(s, api)?;
-    gate_checks(s, api)?;
+    let (refused, refused_id, gated) = gate_checks(s, api)?;
     // ---- the node restarted holds what was written
     s.stop()?;
     let api = s.start(false)?;
     let found = api.signed(&owner, "POST", &format!("/api/f/{name}/search"), Some(&json!({ "q": "ferry friday" })))?;
     s.ok("the node restarted, what was written is searched still", found.status == 200 && found.body["results"][0]["section"] == "t2", &found);
+    // its gates restarted empty: a refused reader's first question goes on
+    // and teaches the gate again, the next is refused
+    let ask = || api.signed(&refused, "POST", &format!("/api/f/{gated}/search"), Some(&json!({ "q": "harbour lantern audit" })));
+    let first = ask()?;
+    let taught = gate_hears(s, &api, &refused_id, "refused");
+    let next = ask()?;
+    s.ok(
+        "the node restarted, its gates empty: a refused reader's first question goes on, the refusal heard beside it refuses the next, 402",
+        first.status == 200 && taught && next.status == 402,
+        json!({ "first": first.status, "taught": taught, "next": next.body }),
+    );
     s.stop()?;
     let moved = match s.start_repinned() {
         Ok(api) => moved_checks(s, &api, &owner, &name),
