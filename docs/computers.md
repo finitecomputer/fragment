@@ -760,7 +760,10 @@ runs on Claude Code, which the person installs on their computer
 themselves, as on a VPS of theirs. The image ships none, and no flag
 gates it.
 
-- **Installed in a terminal of an agent's desktop** with Anthropic's own
+- **Installed from the chat**: a Claude agent's turn on a computer with
+  none asks its person to install it, and Install runs Anthropic's own
+  installer as below (docs/bridge.md, "The Claude runtime").
+- **Or installed in a terminal of an agent's desktop** with Anthropic's own
   installer, then signed in there with `claude auth login` (its URL
   opened in their browser, its code pasted back). The desktop's home is
   Hermes' (`/data/hermes`), so the install lands in `/data`

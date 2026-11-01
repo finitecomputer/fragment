@@ -67,6 +67,8 @@ fn runtimes() -> Runtimes {
         idle: Duration::from_millis(parse_ms("BRIDGE_CLAUDE_IDLE_MS", 300_000)),
         drain: Duration::from_millis(fragment_bridge::runtime::claude::DRAIN_MS_DEFAULT),
         run_as,
+        // its person installs it from a turn's card (Paul, FIN-233)
+        installer: Some(fragment_bridge::runtime::claude::INSTALLER.to_string()),
     };
     r.with("claude", Box::new(Claude { config }))
 }

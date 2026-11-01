@@ -124,9 +124,49 @@ impl Scenario {
                 idle: Duration::from_secs(60),
                 drain: self.drain,
                 run_as: None,
+                installer: None,
             },
         };
         Runtimes::new().with(DEFAULT, support::script()).with("claude", Box::new(claude))
+    }
+
+    /// Its bridge with Claude Code not installed: `installer` puts it in
+    /// its person's home (`<dir>/home`), as Anthropic's does.
+    fn start_uninstalled(&self, installer: &str) -> support::Running {
+        let home = self.dir.join("home");
+        let claude = Claude {
+            config: ClaudeConfig {
+                bin: home.join(".local/bin/claude"),
+                home,
+                config_dir: self.config_dir.clone(),
+                work_dir: self.dir.join("work"),
+                state_dir: self.dir.join("claude-state"),
+                model: Some("claude-haiku-5-5".into()),
+                idle: Duration::from_secs(60),
+                drain: self.drain,
+                run_as: None,
+                installer: Some(installer.to_string()),
+            },
+        };
+        support::start_runtimes(support::config(&self.fake.url(), &self.dir, self.settings), Runtimes::new().with(DEFAULT, support::script()).with("claude", Box::new(claude)))
+    }
+
+    /// What Anthropic's installer does, a test's: this scenario's
+    /// fake-claude as a version in `$XDG_DATA_HOME/claude/versions`, its
+    /// launcher a link in `~/.local/bin`, and a mark that it ran.
+    fn installer(&self) -> String {
+        format!(
+            "v=\"$XDG_DATA_HOME/claude/versions/2.1.316\" && mkdir -p \"$(dirname \"$v\")\" \"$HOME/.local/bin\" && cp '{bin}' \"$v\" && cp '{mode}' \"$(dirname \"$v\")/fake-claude.json\" && ln -sf \"$v\" \"$HOME/.local/bin/claude\" && touch '{mark}'",
+            bin = self.bin.display(),
+            mode = self.bin.with_file_name("fake-claude.json").display(),
+            mark = self.dir.join("installer-ran").display()
+        )
+    }
+
+    /// The install card the turn asked with, once it did.
+    async fn install_card(&self) -> Value {
+        self.fake.until(wait(), "the install card", |w| w.bodies(&self.chat, "work", "turn.prompt").iter().any(|p| p["prompt"] == "install")).await;
+        self.with(|w| w.bodies(&self.chat, "work", "turn.prompt").into_iter().find(|p| p["prompt"] == "install").expect("found"))
     }
 
     fn start(&self) -> support::Running {
@@ -302,6 +342,93 @@ async fn a_session_outlives_its_process_and_new_starts_another() {
     s.say(json!({ "text": "Did I ask you to remember a word in this conversation? If you don't know of one, reply with exactly: unknown" }));
     s.ended(4, "the new session's turn's end").await;
     assert!(s.replies().last().is_some_and(|r| r.to_lowercase().contains("unknown")), "{:?}", s.replies());
+    bridge.stop().await;
+    s.done();
+}
+
+/// Goal (FIN-258, Paul on FIN-233: a user-initiated install): an agent on
+/// Claude Code whose computer has none asks its person, on a card, to
+/// install it; on Install, Anthropic's installer runs into its person's home
+/// (here a test's, as the real one lays it out: a launcher linking into
+/// `$XDG_DATA_HOME/claude/versions`), the turn says it ran, and goes on to
+/// what was asked. Replay: the next turn asks nothing.
+#[tokio::test]
+async fn a_turn_asks_to_install_claude_code_and_runs_once_it_is() {
+    let s = Scenario::composed("install", support::settings().turn_idle_ms, Duration::from_millis(fragment_bridge::runtime::claude::DRAIN_MS_DEFAULT)).await;
+    let bridge = s.start_uninstalled(&s.installer());
+    s.following().await;
+    s.say(json!({ "text": "Hello" }));
+    let card = s.install_card().await;
+    assert_eq!(card["text"], fragment_bridge::runtime::claude::INSTALL_ASK);
+    assert_eq!(card["options"], json!([{ "id": "install", "label": "Install", "style": "primary" }, { "id": "not-now", "label": "Not now" }]));
+    let launcher = s.dir.join("home/.local/bin/claude");
+    assert!(!launcher.exists() && s.ends().is_empty(), "nothing installed, the turn waiting");
+    s.say(json!({ "kind": "prompt_response", "prompt": "install", "option": "install" }));
+    s.ended(1, "the turn's end").await;
+    assert_eq!(s.ends()[0]["outcome"], "idle", "{:?}", s.ends());
+    let steps = s.with(|w| w.bodies(&s.chat, "work", "turn.step"));
+    assert!(steps.iter().any(|st| st["args"] == "Anthropic's installer (Claude Code 2.1.316)"), "said: {steps:?}");
+    assert_eq!(s.replies(), vec!["Hello from Claude".to_string()], "and then what was asked");
+    let real = std::fs::canonicalize(&launcher).expect("its launcher");
+    assert!(real.starts_with(s.dir.join("home/.local/share/claude/versions")), "Anthropic's layout, in its person's home: {}", real.display());
+
+    // replay: installed, the next turn asks nothing
+    s.say(json!({ "text": "Again" }));
+    s.ended(2, "the next turn's end").await;
+    assert_eq!(s.with(|w| w.bodies(&s.chat, "work", "turn.prompt").len()), 1, "one card");
+    assert_eq!(s.replies().last().map(String::as_str), Some("Still here"));
+    bridge.stop().await;
+    s.done();
+}
+
+/// Goal (FIN-258): Not now installs nothing: the turn says so, and ends.
+/// Invalid: an installer that fails says why, in its own last words, and
+/// the turn ends there; a Stop while it runs stops the turn and kills the
+/// installer's whole process group.
+#[tokio::test]
+async fn not_now_installs_nothing_and_a_failed_or_stopped_install_says_so() {
+    let install = Path::new(COMPOSED).join("install");
+    let settings = support::settings();
+    let drain = Duration::from_millis(fragment_bridge::runtime::claude::DRAIN_MS_DEFAULT);
+
+    // not now
+    let s = Scenario::open("install-not-now", install.clone(), None, settings, drain).await;
+    let bridge = s.start_uninstalled(&s.installer());
+    s.following().await;
+    s.say(json!({ "text": "Hello" }));
+    s.install_card().await;
+    s.say(json!({ "kind": "prompt_response", "prompt": "install", "option": "not-now" }));
+    s.ended(1, "the turn's end").await;
+    assert_eq!((s.ends()[0]["outcome"].as_str(), s.replies()), (Some("idle"), vec![fragment_bridge::runtime::claude::NOT_NOW.to_string()]));
+    assert!(!s.dir.join("installer-ran").exists() && !s.dir.join("home/.local/bin/claude").exists(), "nothing ran, nothing installed");
+    bridge.stop().await;
+
+    // an installer that fails
+    let s = Scenario::open("install-fails", install.clone(), None, settings, drain).await;
+    let bridge = s.start_uninstalled("echo 'Downloading…'; echo 'curl: (6) Could not resolve host: claude.ai' >&2; exit 6");
+    s.following().await;
+    s.say(json!({ "text": "Hello" }));
+    s.install_card().await;
+    s.say(json!({ "kind": "prompt_response", "prompt": "install", "option": "install" }));
+    s.ended(1, "the turn's end").await;
+    let end = s.ends()[0].clone();
+    assert_eq!((end["outcome"].as_str(), end["error"].as_str()), (Some("error"), Some("Claude Code didn't install: Downloading… curl: (6) Could not resolve host: claude.ai")), "{end}");
+    bridge.stop().await;
+
+    // stopped while it runs: its whole group goes
+    let s = Scenario::open("install-stopped", install, None, settings, drain).await;
+    let bridge = s.start_uninstalled("sh -c 'sleep 31.25' & wait");
+    s.following().await;
+    s.say(json!({ "text": "Hello" }));
+    s.install_card().await;
+    s.say(json!({ "kind": "prompt_response", "prompt": "install", "option": "install" }));
+    let sleeping = || std::fs::read_dir("/proc").map(|d| d.filter_map(Result::ok).filter_map(|e| std::fs::read(e.path().join("cmdline")).ok()).any(|c| c == b"sleep\x0031.25\x00")).unwrap_or(false);
+    support::until(wait(), "the installer running", sleeping).await;
+    let turn = s.with(|w| w.bodies(&s.chat, "work", "turn.start")[0]["turn"].clone());
+    s.say(json!({ "kind": "stop", "turn": turn }));
+    s.ended(1, "the turn's end").await;
+    assert_eq!(s.ends()[0]["outcome"], "stopped");
+    support::until(wait(), "the installer's group gone", || !sleeping()).await;
     bridge.stop().await;
     s.done();
 }

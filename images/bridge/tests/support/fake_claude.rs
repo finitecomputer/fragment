@@ -33,10 +33,15 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 
 fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    // as the real one says it, which an install reads (FIN-258)
+    if args == ["--version"] {
+        println!("2.1.316 (Claude Code)");
+        return;
+    }
     let exe = std::env::current_exe().expect("its own path");
     let dir = exe.parent().expect("a directory").to_path_buf();
     let cfg: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.join("fake-claude.json")).expect("fake-claude.json beside it")).expect("JSON");
-    let args: Vec<String> = std::env::args().skip(1).collect();
     match cfg["mode"].as_str() {
         Some("record") => record(&args, Path::new(cfg["real"].as_str().expect("real")), Path::new(cfg["out"].as_str().expect("out"))),
         Some("replay") => replay(&args, Path::new(cfg["script"].as_str().expect("script"))),

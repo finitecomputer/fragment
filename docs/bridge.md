@@ -369,6 +369,14 @@ drives it. The bridge never sits between it and Anthropic: no proxy, base
 URL or key, and no `ANTHROPIC_*` or `CLAUDE_CODE_*` variable of anyone's
 reaches it (`withheld`).
 
+- **Not installed**, a turn asks its person on a card (`INSTALL_ASK`):
+  Install runs Anthropic's installer (`INSTALLER`, Paul's FIN-233: the
+  person's own install) as the agents' user into its person's home, its
+  data in that home's `.local/share`, for at most `INSTALL_MS_MAX`; the
+  turn says it ran ("Ran Anthropic's installer (Claude Code <version>)")
+  and goes on to what was asked. Not now (or the card expiring) ends the
+  turn saying so; a failed install ends it in the installer's last
+  words; a Stop kills the installer's whole process group.
 - **Its folder** is its work directory, its own: an `AGENTS.md` the
   bridge writes (who it is, and the `fragment` CLI, which acts as it:
   `FRAGMENT_AS_AGENT`, `FRAGMENT_FOR`), and a `CLAUDE.md` that reads it,
