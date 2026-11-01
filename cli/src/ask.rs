@@ -508,11 +508,11 @@ mod tests {
         me.owner = "npub1paul".into();
         for acting_for in [Some("npub1paul".to_string()), None] {
             let signer = Signer::Agent(AgentMode { agent: me.fragment.clone(), acting_for: acting_for.clone() });
-            let sent = signer.path(&names_path(&signer, Some(&me)));
+            let sent = signer.path("GET", &names_path(&signer, Some(&me)));
             assert_eq!(sent, "/api/fragments?for=npub1paul", "acting for {acting_for:?}");
         }
         let alone = Signer::Agent(AgentMode { agent: me.fragment.clone(), acting_for: None });
-        assert_eq!(alone.path(&names_path(&alone, None)), "/api/fragments", "a person's ask (no asker) names no one");
+        assert_eq!(alone.path("GET", &names_path(&alone, None)), "/api/fragments", "a person's ask (no asker) names no one");
     }
 
     /// Goal: what the CLI prints calls an agent by its name, else its label;
