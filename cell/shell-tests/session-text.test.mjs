@@ -27,6 +27,13 @@ test("a snippet cut at either end: its first words no one's, its marks cut short
   assert.equal(speakers("Person: see the photo [garden.jp…", "Juniper"), "You: see the photo");
 });
 
+// FIN-365: a snippet cut inside a speaker's line keeps that line's label
+// (fragment_core::search_index `snippet`), so its words still say whose.
+test("a snippet cut inside a speaker's line, its label kept: that speaker's", () => {
+  assert.equal(speakers("Agent: …tomatoes and peppers in the two beds. Pole beans fix nitrogen…", "Juniper"), "Juniper: …tomatoes and peppers in the two beds. Pole beans fix nitrogen…");
+  assert.equal(speakers("Person: …and the fence?\nAgent: Beans can climb it.", "Juniper"), "You: …and the fence? · Juniper: Beans can climb it.");
+});
+
 test("a message's own lines continue its speaker; one speaker's lines in a row are one", () => {
   assert.equal(speakers("Person: first line\nsecond line\nAgent: ok\nAgent: and more", "Juniper"), "You: first line second line · Juniper: ok and more");
 });
