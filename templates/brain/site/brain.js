@@ -5,7 +5,8 @@
 // brain becomes DOM through textContent only. While the brain's index is
 // behind its files, a member's page starts its `changed` job (one run at a
 // time holds the work, so a start while one runs costs it nothing), and an
-// answer says it may be incomplete.
+// answer says it may be incomplete, or that the search service asked for a
+// pause (which a run waits out by itself).
 import { call } from "./__fragment.js";
 
 const RESULTS = 20;
@@ -40,7 +41,8 @@ function show(answer, error) {
       ? `${results.length} section${results.length === 1 ? "" : "s"}, best first.`
       : "Nothing in this brain matches that.";
   note.append(el("p", error ? "hint brain-error" : "hint", said));
-  if (answer?.indexing) note.append(el("p", "hint", "Indexing: results may be incomplete."));
+  if (answer?.waiting_ms > 0) note.append(el("p", "hint", "Indexing: waiting for the search service."));
+  else if (answer?.indexing) note.append(el("p", "hint", "Indexing: results may be incomplete."));
   const list = el("ol", "brain-list");
   for (const r of results) {
     const item = el("li", "brain-result");
@@ -62,11 +64,11 @@ function show(answer, error) {
   $("main").scrollTop = 0;
 }
 
-// The index behind its files, and no run on it: start one (a member may),
-// once a page.
+// The index behind its files, and no run on it or waiting out a pause the
+// search service asked for: start one (a member may), once a page.
 let started = false;
 function catchUp(state) {
-  if (started || !state?.indexing || state.running) return;
+  if (started || !state?.indexing || state.running || state.waiting_ms > 0) return;
   started = true;
   call("changed", {}).catch(() => {});
 }

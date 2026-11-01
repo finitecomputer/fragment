@@ -52,16 +52,22 @@ const PERSON_PAID_CALLS: u64 = 200;
 /// embeddings fit what a person may spend: a larger fragment cycles them
 /// (the same text again is its vector reused, by its hash), the same work
 /// for each search.
-const POOL_MAX: usize = 19_000;
-/// Sections a source holds: 200 a write, about 80 KB, each of 60 words
+const POOL_MAX: usize = 5_760;
+/// Inputs an embedding call takes, the fewest a deployment names
+/// (Tinfoil's nomic-embed-text, `inputs_max` 32): what an owner's writes
+/// are budgeted at.
+const EMBED_BATCH: usize = 32;
+/// A 429's waits, at most, before a write is given up (`write`).
+const THROTTLED_TRIES: u32 = 20;
+/// Sections a source holds: 192 a write (6 embedding calls of 32), each of 60 words
 /// (one chunk: the chunker bounds a chunk by its bytes).
-const SECTIONS_PER_SOURCE: usize = 200;
+const SECTIONS_PER_SOURCE: usize = 192;
 /// Warm searches of each mode, a size.
 const WARM: usize = 30;
 /// How long a fragment sits idle before its first search is timed.
 const IDLE: Duration = Duration::from_secs(4 * 60);
 /// Chunks in each fragment a fan-out asks (`SEARCH_BENCH_FANOUT`).
-const FANOUT_CHUNKS: usize = 500;
+const FANOUT_CHUNKS: usize = 300;
 
 /// The words its text is drawn from, by a Zipf-like weight (the first
 /// most often): ordinary English, so an embeddings model reads it as
@@ -99,6 +105,12 @@ impl Text {
     fn sentence(&mut self, words: usize) -> String {
         (0..words).map(|_| self.word()).collect::<Vec<_>>().join(" ")
     }
+
+    /// A sentence of the stream from here, the stream left where it was
+    /// (for a closure that cannot move it): each call, the same.
+    fn clone_sentence(&self, words: usize) -> String {
+        Text(self.0).sentence(words)
+    }
 }
 
 /// p50 and p95 of `ms`, in milliseconds.
@@ -115,10 +127,142 @@ fn timed(f: impl FnOnce() -> Result<crate::api::Reply>) -> Result<(f64, u16, Val
     Ok((t0.elapsed().as_secs_f64() * 1000.0, r.status, r.body))
 }
 
+/// A reply's `Server-Timing`, `{part: ms}` (`{}` for none): what the
+/// cell says it waited on.
+fn server_timing(r: &crate::api::Reply) -> Value {
+    let value = r.headers.get("server-timing").and_then(|v| v.to_str().ok()).unwrap_or_default();
+    let parts = value.split(", ").filter_map(|entry| entry.split_once(";dur=")).filter_map(|(part, ms)| Some((part.to_string(), json!(ms.parse::<f64>().ok()?))));
+    Value::Object(parts.collect())
+}
+
+/// Distinct sections the cold split's fragments repeat: what is loaded
+/// cold (every chunk's code, every page) is the fragment's size, not its
+/// text's variety, so few embedding calls make a large one.
+const COLD_POOL: usize = 1_000;
+/// The cold split's large fragment, and its small one.
+const COLD_LARGE: usize = 25_000;
+const COLD_SMALL: usize = 1_000;
+
+/// The first search after idle, split into its parts by a sequence that
+/// adds one cold part at each step, `samples` times after `idle` each:
+/// the Worker (`/healthz`, which no object answers), the fragment's
+/// objects waking (its status, then again), its words' pages (a words
+/// search, then again), then a small fragment's first search by meaning
+/// (the embedding's first call from its supervisor, codes too few to
+/// count), then the large one's (its 25k codes read into memory), each
+/// then again warm. Each part is a step's time less the same step warm;
+/// each answer's `Server-Timing` says what the cell waited on inside it.
+fn cold(s: &mut Suite, api: &Api, samples: usize, idle: Duration) -> Result<()> {
+    let owns = |n: usize| n.min(COLD_POOL).div_ceil(EMBED_BATCH) as u64 + 4;
+    let asks = samples as u64 * 4 + 2;
+    let reader = api.person_paying(asks)?;
+    let (large, _, _) = write_pooled(s, api, &reader, owns(COLD_LARGE), "bench-cold-large", COLD_LARGE, COLD_POOL)?;
+    let (small, _, _) = write_pooled(s, api, &reader, owns(COLD_SMALL), "bench-cold-small", COLD_SMALL, COLD_POOL)?;
+    let mut question = Text(0xc01d);
+    let search = |name: &str, q: &str, mode: &str| api.signed(&reader, "POST", &format!("/api/f/{name}/search"), Some(&json!({ "q": q, "mode": mode, "limit": 10 })));
+    let status = |name: &str| api.signed(&reader, "GET", &format!("/api/f/{name}/search/status"), None);
+    let health = || api.unsigned("GET", "/healthz", None);
+    let mut rows: Vec<Value> = Vec::new();
+    for sample in 0..samples {
+        if !idle.is_zero() {
+            println!("      cold sample {}: idle for {} s", sample + 1, idle.as_secs());
+            std::thread::sleep(idle);
+        }
+        // a step's wall time, and the parts its answer says it waited on
+        let t = |f: &dyn Fn() -> Result<crate::api::Reply>| -> Result<(f64, Value)> {
+            let t0 = Instant::now();
+            let r = f()?;
+            let ms = t0.elapsed().as_secs_f64() * 1000.0;
+            anyhow::ensure!(r.status == 200, "a cold step: {r}");
+            Ok((ms, server_timing(&r)))
+        };
+        let worker = (t(&health)?, t(&health)?);
+        let objects = (t(&|| status(&large))?, t(&|| status(&large))?);
+        let pages = (t(&|| search(&large, &question.clone_sentence(3), "lexical"))?, t(&|| search(&large, &question.clone_sentence(3), "lexical"))?);
+        let small_meaning = (t(&|| search(&small, &question.clone_sentence(3), "semantic"))?, t(&|| search(&small, &question.clone_sentence(3), "semantic"))?);
+        let large_meaning = (t(&|| search(&large, &question.clone_sentence(3), "semantic"))?, t(&|| search(&large, &question.clone_sentence(3), "semantic"))?);
+        question.word();
+        let part = |((first, first_parts), (warm, warm_parts)): ((f64, Value), (f64, Value))| {
+            json!({ "first_ms": first, "warm_ms": warm, "cold_ms": first - warm, "first_parts": first_parts, "warm_parts": warm_parts })
+        };
+        let row = json!({ "worker": part(worker), "objects": part(objects), "words_pages": part(pages), "small_meaning": part(small_meaning), "large_meaning": part(large_meaning) });
+        println!("      cold sample {}: {}", sample + 1, row);
+        rows.push(row);
+    }
+    let median = |k: &str, f: &str| {
+        let mut v: Vec<f64> = rows.iter().filter_map(|r| r[k].pointer(f).and_then(Value::as_f64)).collect();
+        v.sort_by(f64::total_cmp);
+        v.get(v.len() / 2).copied().unwrap_or(f64::NAN)
+    };
+    println!("      part (median of {samples})          first    warm    cold part   (ms, client wall)");
+    for (k, what) in [("worker", "the Worker (/healthz)"), ("objects", "objects wake (status)"), ("words_pages", "words' pages (lexical)"), ("small_meaning", "embed's first (1k)"), ("large_meaning", "25k codes read")] {
+        println!("      {what:<30} {:>7.0} {:>7.0} {:>10.0}", median(k, "/first_ms"), median(k, "/warm_ms"), median(k, "/cold_ms"));
+    }
+    println!("      by meaning, what the answer waited on (median of {samples}, first / warm, ms: Server-Timing)");
+    for (k, what) in [("small_meaning", "1k"), ("large_meaning", "25k")] {
+        let parts: Vec<String> = ["gate", "key", "embed", "index"]
+            .iter()
+            .map(|p| format!("{p} {:.0} / {:.0}", median(k, &format!("/first_parts/{p}")), median(k, &format!("/warm_parts/{p}"))))
+            .collect();
+        println!("      {what:<6} {}", parts.join(", "));
+    }
+    s.ok("the first search after idle is split into its parts", rows.len() == samples, json!(rows));
+    let out = s.dir(SECTION);
+    std::fs::write(out.join("cold.json"), serde_json::to_vec_pretty(&json!({ "base": api.base, "idle_s": idle.as_secs(), "samples": rows }))?)?;
+    Ok(())
+}
+
+/// Sentences and questions that share no word (the question's words are
+/// none of its sentence's): words alone cannot find them, meaning can.
+const MEANING: [(&str, &str); 2] = [
+    ("The kitten curled up asleep beside the warm fireplace.", "cat napping near hearth"),
+    ("The ferry to the island leaves the harbour at dawn.", "vessel sailing sunrise port"),
+];
+/// Sentences beside them, about other things.
+const OTHERS: [&str; 2] = ["Quarterly tax returns are due to the revenue office in April.", "Our team meeting moved to Thursday afternoon in the library."];
+
+/// Whether the deployment searches by meaning (its `semantic`), shown by
+/// a match words alone cannot make: each question of `MEANING` finds its
+/// sentence first by meaning, and by its words finds it not at all.
+fn meaning(s: &mut Suite, api: &Api, reader: &fragment_nip98::Keys, lent: u64) -> Result<()> {
+    let keys = api.person_paying(lent)?;
+    let created = s.create(api, &keys, &s.name("bench-meaning"))?;
+    let name = created["name"].as_str().context("its name")?.to_string();
+    let shared = api.share(&name, &api.identity(reader)?, "viewer")?;
+    anyhow::ensure!(shared.status == 200, "{name}: the reader's share: {shared}");
+    let sentences: Vec<&str> = MEANING.iter().map(|(t, _)| *t).chain(OTHERS).collect();
+    let sections: Vec<Value> = sentences.iter().enumerate().map(|(i, t)| json!({ "id": format!("m{i}"), "text": t })).collect();
+    let w = api.signed(&keys, "POST", &format!("/api/f/{name}/search/upsert"), Some(&json!({ "source": "bench/meaning", "revision": "r1", "title": "Notes", "sections": sections })))?;
+    anyhow::ensure!(w.status == 200, "{name}: the meaning probe's write: {w}");
+    let mut found = Vec::new();
+    for (i, (_, q)) in MEANING.iter().enumerate() {
+        let ask = |mode: &str| api.signed(reader, "POST", &format!("/api/f/{name}/search"), Some(&json!({ "q": q, "mode": mode, "limit": 4 })));
+        let (by_meaning, by_words) = (ask("semantic")?, ask("lexical")?);
+        let first = by_meaning.body["results"][0]["section"].as_str().unwrap_or("").to_string();
+        let words_find: Vec<String> = by_words.body["results"].as_array().into_iter().flatten().filter_map(|h| h["section"].as_str().map(str::to_string)).collect();
+        println!("      meaning: {q:?}: by meaning first {first} (cosine {}), by words {words_find:?}; semantic {}", by_meaning.body["results"][0]["semantic"]["cosine"], by_meaning.body["semantic"]);
+        found.push(json!({ "q": q, "semantic": by_meaning.body["semantic"], "first": first, "want": format!("m{i}"), "by_words": words_find }));
+    }
+    let on = found.iter().all(|f| f["semantic"] == "on");
+    let matched = found.iter().all(|f| f["first"] == f["want"] && !f["by_words"].as_array().is_some_and(|w| w.contains(&f["want"])));
+    if s.on_fakes() {
+        // the fake's vectors are its words hashed: meaning is a model's
+        println!("      (on fakes, whose vectors carry words, not meaning: the match is reported, not checked)");
+        return Ok(());
+    }
+    s.ok("the deployment searches by meaning: a question that shares no word with its sentence finds it first by meaning, and by its words not at all", on && matched, json!(found));
+    Ok(())
+}
+
 /// A fragment of `chunks` synthetic chunks, labelled `label`, written by a
 /// person of its own lent `lent` paid calls, its reader a viewer: its
 /// name, its owner, and its row.
 fn write(s: &mut Suite, api: &Api, reader: &fragment_nip98::Keys, lent: u64, label: &str, chunks: usize) -> Result<(String, fragment_nip98::Keys, Value)> {
+    write_pooled(s, api, reader, lent, label, chunks, chunks.min(POOL_MAX))
+}
+
+/// `write`, its distinct sections at most `pool`.
+fn write_pooled(s: &mut Suite, api: &Api, reader: &fragment_nip98::Keys, lent: u64, label: &str, chunks: usize, pool: usize) -> Result<(String, fragment_nip98::Keys, Value)> {
     let keys = api.person_paying(lent)?;
     let created = s.create(api, &keys, &s.name(label))?;
     let name = created["name"].as_str().context("its name")?.to_string();
@@ -126,24 +270,35 @@ fn write(s: &mut Suite, api: &Api, reader: &fragment_nip98::Keys, lent: u64, lab
     anyhow::ensure!(shared.status == 200, "{name}: the reader's share: {shared}");
     let t0 = Instant::now();
     let seed = 0x9e37_79b9_7f4a_7c15 ^ chunks as u64 ^ label.len() as u64;
-    let pool = chunks.min(POOL_MAX);
     let mut written = 0;
     let mut source = 0;
+    let mut throttled = 0u64;
     while written < chunks {
         let n = SECTIONS_PER_SOURCE.min(chunks - written);
         let sections: Vec<Value> = (0..n).map(|i| json!({ "id": format!("s{i}"), "text": section_text(seed, written + i, pool) })).collect();
         // one title for all: a chunk's embedding input begins with it
         let body = json!({ "source": format!("bench/{source:04}"), "revision": "r1", "title": "Bench notes", "sections": sections });
-        let r = api.signed(&keys, "POST", &format!("/api/f/{name}/search/upsert"), Some(&body))?;
+        // a model's rate limit (429, "Retry after N seconds"): waited out
+        let mut tries = 0;
+        let r = loop {
+            let r = api.signed(&keys, "POST", &format!("/api/f/{name}/search/upsert"), Some(&body))?;
+            if r.status != 429 || tries == THROTTLED_TRIES {
+                break r;
+            }
+            tries += 1;
+            let wait = r.text.split("Retry after ").nth(1).and_then(|t| t.split(' ').next()).and_then(|n| n.parse::<u64>().ok()).unwrap_or(30).min(120);
+            throttled += wait;
+            std::thread::sleep(Duration::from_secs(wait));
+        };
         anyhow::ensure!(r.status == 200, "{name}: writing bench/{source:04}: {r}");
         written += r.body["chunks"].as_u64().unwrap_or(0) as usize;
         source += 1;
     }
     let status = api.signed(&keys, "GET", &format!("/api/f/{name}/search/status"), None)?;
     let wrote_s = t0.elapsed().as_secs_f64();
-    println!("      {name}: {written} chunks in {source} sources, written in {wrote_s:.0} s");
+    println!("      {name}: {written} chunks in {source} sources, written in {wrote_s:.0} s ({throttled} s of it waiting out the model's rate limit)");
     s.ok(&format!("{chunks} synthetic chunks are written to one fragment's index"), status.body["chunks"].as_u64().is_some_and(|c| c as usize >= chunks), &status);
-    Ok((name, keys, json!({ "chunks": written, "distinct": pool, "sources": source, "written_s": wrote_s })))
+    Ok((name, keys, json!({ "chunks": written, "distinct": pool, "sources": source, "written_s": wrote_s, "throttled_s": throttled })))
 }
 
 pub fn search_bench(s: &mut Suite, api: &Api) -> Result<()> {
@@ -157,6 +312,17 @@ pub fn search_bench(s: &mut Suite, api: &Api) -> Result<()> {
         Err(_) if s.on_fakes() => (vec![200, 1_000], Duration::ZERO),
         Err(_) => (vec![1_000, 10_000], IDLE),
     };
+    // `SEARCH_BENCH_COLD=<samples>`: the first search after idle, split
+    // into its parts (`cold`), and nothing else
+    if let Ok(samples) = std::env::var("SEARCH_BENCH_COLD") {
+        let samples: usize = samples.trim().parse().context("SEARCH_BENCH_COLD is a count of samples")?;
+        return cold(s, api, samples, if s.on_fakes() { Duration::ZERO } else { idle });
+    }
+    // `SEARCH_BENCH_IDLE_S`: another idle wait (0: none, a probe's)
+    let idle = match std::env::var("SEARCH_BENCH_IDLE_S") {
+        Ok(secs) => Duration::from_secs(secs.trim().parse().context("SEARCH_BENCH_IDLE_S is seconds")?),
+        Err(_) => idle,
+    };
     let fanouts: Vec<usize> = match std::env::var("SEARCH_BENCH_FANOUT") {
         Ok(list) if !list.trim().is_empty() => list.split(',').map(|n| n.trim().parse().context("SEARCH_BENCH_FANOUT lists fragment counts")).collect::<Result<_>>()?,
         _ if s.on_fakes() => vec![2, 3],
@@ -166,11 +332,14 @@ pub fn search_bench(s: &mut Suite, api: &Api) -> Result<()> {
     // what each person spends, at most, before anyone spends any: an owner
     // its distinct chunks' embeddings and the one write after, the reader
     // every hybrid question
-    let owns = |n: usize| n.min(POOL_MAX).div_ceil(100) as u64 + 2;
-    let asks = sizes.len() as u64 * (WARM as u64 + 2) + fanouts.len() as u64 * (WARM as u64 + 1);
-    let calls: u64 = sizes.iter().map(|n| owns(*n)).sum::<u64>() + widest as u64 * owns(FANOUT_CHUNKS) + asks;
+    // (and 4 more: the ledger's gate takes a spend's answer for a minute,
+    // so a burst may pass its cap by a few)
+    let owns = |n: usize| n.min(POOL_MAX).div_ceil(EMBED_BATCH) as u64 + 4;
+    let asks = sizes.len() as u64 * (WARM as u64 + 2) + fanouts.len() as u64 * (WARM as u64 + 1) + MEANING.len() as u64;
+    let calls: u64 = sizes.iter().map(|n| owns(*n)).sum::<u64>() + widest as u64 * owns(FANOUT_CHUNKS) + owns(MEANING.len()) + asks;
     anyhow::ensure!(calls <= RUN_PAID_CALLS && asks <= PERSON_PAID_CALLS, "{sizes:?} chunks take about {calls} paid calls ({asks} of them a reader's), past the {RUN_PAID_CALLS} a run lends or the {PERSON_PAID_CALLS} a person may: split them across runs (SEARCH_BENCH_CHUNKS)");
     let reader = api.person_paying(asks)?;
+    meaning(s, api, &reader, owns(MEANING.len()))?;
     let out = s.dir(SECTION);
     let mut rows: Vec<Value> = Vec::new();
     let mut fragments: Vec<(usize, String)> = Vec::new();

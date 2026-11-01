@@ -50,6 +50,12 @@ const PATHS_MAX = 200;
 const PAGE_MAX_BYTES = 1024 * 1024;
 // A batch's claim on its pages: past this, another batch may take them.
 const CLAIM_MS = 2 * 60 * 1000;
+// A wait the search service asks for (429 `rate_limited`, its
+// `retry_after_ms`), within these bounds; one that names none, a minute (a
+// rate window's).
+const WAIT_DEFAULT_MS = 60 * 1000;
+const WAIT_MIN_MS = 1000;
+const WAIT_MAX_MS = 10 * 60 * 1000;
 const RESULTS_DEFAULT = 10;
 const RESULTS_MAX = 50;
 const SKIPPED_LISTED = 20;
@@ -69,6 +75,9 @@ const hidden = (p) =>
 const indexable = (p) => /\.(md|markdown)$/i.test(p) && !hidden(p) && !/(^|\/)(AGENTS|_index)\.md$/i.test(p);
 const wikiOf = (p) => (p.includes("/") ? p.slice(0, p.indexOf("/")) : "");
 const editor = (role) => role === "editor" || role === "owner";
+const NOTHING_DONE = Object.freeze({ indexed: 0, unchanged: 0, removed: 0, skipped: 0, stale: 0 });
+// The wait a 429 asks for, within bounds.
+const waitFor = (ms) => (Number.isFinite(ms) && ms > 0 ? Math.min(Math.max(Math.ceil(ms), WAIT_MIN_MS), WAIT_MAX_MS) : WAIT_DEFAULT_MS);
 
 const MIME = {
   md: "text/plain; charset=utf-8", markdown: "text/plain; charset=utf-8", txt: "text/plain; charset=utf-8",
@@ -165,6 +174,11 @@ export class App extends DurableObject {
     return this.ctx.storage.sql.exec("SELECT COUNT(*) AS n FROM dirty").one().n + (this.#get("full") !== null ? 1 : 0);
   }
 
+  // What is left of a wait the search service asked for, in milliseconds.
+  #waiting() {
+    return Math.max(0, Number(this.#get("waiting") ?? 0) - Date.now());
+  }
+
   // Whether a batch is on the index now (a claim is fresh).
   #running() {
     return this.ctx.storage.sql.exec("SELECT COUNT(*) AS n FROM dirty WHERE claimed >= ?", Date.now() - CLAIM_MS).one().n > 0;
@@ -191,9 +205,19 @@ export class App extends DurableObject {
     let last = { claimed: 0, pending: 0 };
     let steps = 0;
     let waited = false;
+    let rated = 0;
     while (steps < STEPS_MAX) {
       last = await job.call("reindex", {});
       steps++;
+      // the search service asked for a wait (its claims let go): slept out,
+      // a durable step, and the run goes on. In the run, not a run of its
+      // own: a rebuild may meet more rate windows than a chain has hops.
+      if (last.wait > 0) {
+        await job.sleep(last.wait);
+        steps++;
+        rated++;
+        continue;
+      }
       if (last.claimed > 0) continue;
       if (last.pending === 0 || waited) break;
       await job.sleep(CLAIM_MS + 5000);
@@ -201,9 +225,9 @@ export class App extends DurableObject {
       waited = true;
     }
     // its steps ran out with pages left: the work goes on in a run of its own
-    const next = last.claimed > 0 && hop < HOPS_MAX;
+    const next = (last.claimed > 0 || last.wait > 0) && hop < HOPS_MAX;
     if (next) await job.call("changed", { hop: hop + 1 });
-    return { marked: marked.marked, full: marked.full, steps, pending: last.pending, next };
+    return { marked: marked.marked, full: marked.full, steps, pending: last.pending, rated, next };
   }
 
   // The paths that moved, each at a new generation; `full`, an editor's (or
@@ -229,10 +253,17 @@ export class App extends DurableObject {
   // One batch: up to `BATCH` marked files no other batch holds, claimed,
   // read at main and written to the index. `full` (an editor's) reads every
   // file again. `claimed` 0: nothing was left for it. A batch that fails
-  // lets go of what it holds, for the next to take at once.
+  // lets go of what it holds, for the next to take at once. One the search
+  // service turns away for now (429) lets go too, and answers `wait`, its
+  // milliseconds: until then a batch claims nothing, and answers what is
+  // left of it.
   async reindex({ full = false } = {}, call) {
     const sql = this.ctx.storage.sql;
+    // an editor's full pass is kept first: a pause defers it, never drops it
     if (full === true && editor(call?.role)) this.#set("full", "1");
+    const until = Number(this.#get("waiting") ?? 0);
+    if (until > Date.now()) return { ...NOTHING_DONE, claimed: 0, pending: this.#pending(), wait: until - Date.now() };
+    if (until) this.#unset("waiting");
     if (this.#get("full") !== null) await this.#markAll();
     const now = Date.now();
     const by = crypto.randomUUID();
@@ -242,14 +273,17 @@ export class App extends DurableObject {
        RETURNING path, gen`,
       now, by, now - CLAIM_MS, BATCH,
     ).toArray();
-    const done = { indexed: 0, unchanged: 0, removed: 0, skipped: 0, stale: 0 };
+    const done = { ...NOTHING_DONE };
     try {
       for (const row of rows) done[await this.#index(row, by)]++;
     } catch (e) {
       sql.exec("UPDATE dirty SET claimed = NULL, by = NULL WHERE by = ?", by);
-      throw e;
+      if (e.code !== "rate_limited") throw e;
+      const wait = waitFor(e.retry_after_ms);
+      this.#set("waiting", String(Date.now() + wait));
+      return { ...done, claimed: rows.length, pending: this.#pending(), wait };
     }
-    return { ...done, claimed: rows.length, pending: this.#pending() };
+    return { ...done, claimed: rows.length, pending: this.#pending(), wait: 0 };
   }
 
   // A full pass: every markdown file at main, and every page that left it.
@@ -366,8 +400,9 @@ export class App extends DurableObject {
 
   // Ranked sections, by words and by meaning: `{q, results: [{rank, path,
   // wiki, title, heading, ancestry, snippet, signals}], semantic, pending,
-  // indexing, hint?}`. While the index is behind (`indexing`), its answer
-  // may be incomplete, and `hint` says how to finish it.
+  // indexing, waiting_ms, hint?}`. While the index is behind (`indexing`),
+  // its answer may be incomplete, and `hint` says how to finish it, or that
+  // the search service asked for a pause (`waiting_ms` left of it).
   async search({ q, limit = RESULTS_DEFAULT, wiki = null }) {
     const question = { q, limit: Math.min(Math.max(1, Math.trunc(limit)), RESULTS_MAX) };
     if (wiki !== null) question.fields = { wiki: clip(clean(wiki), FIELD_MAX_BYTES) };
@@ -383,14 +418,17 @@ export class App extends DurableObject {
       signals: h.signals,
     }));
     const pending = this.#pending();
-    const answer = { q, results, semantic: found.semantic, pending, indexing: pending > 0 };
-    if (pending > 0) answer.hint = "Indexing: results may be incomplete. Its changed job finishes it: fragment call <this brain> changed";
+    const waiting_ms = pending > 0 ? this.#waiting() : 0;
+    const answer = { q, results, semantic: found.semantic, pending, indexing: pending > 0, waiting_ms };
+    if (waiting_ms > 0) answer.hint = "Indexing: waiting for the search service, which asked for a pause. Its changed job goes on by itself.";
+    else if (pending > 0) answer.hint = "Indexing: results may be incomplete. Its changed job finishes it: fragment call <this brain> changed";
     return answer;
   }
 
   // What the index holds: the brain's pages and their sections, what is
-  // pending and whether a run is on it, how many pages it has written, the
-  // pages it skipped, and the fragment's index's own counts and limits.
+  // pending, whether a run is on it and what is left of a pause the search
+  // service asked for, how many pages it has written, the pages it skipped,
+  // and the fragment's index's own counts and limits.
   async index_status() {
     const sql = this.ctx.storage.sql;
     const one = (q) => sql.exec(q).one().n;
@@ -404,6 +442,7 @@ export class App extends DurableObject {
       pending,
       indexing: pending > 0,
       running: this.#running(),
+      waiting_ms: pending > 0 ? this.#waiting() : 0,
       writes: Number(this.#get("writes") ?? 0),
       skipped: skipped.map((r) => ({ path: r.path, why: r.skipped })),
       index: { chunks: index.chunks, chunks_split: index.chunks_split, chunks_max: index.chunks_max, semantic: index.semantic },

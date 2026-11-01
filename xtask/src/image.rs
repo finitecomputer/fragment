@@ -192,21 +192,51 @@ pub fn image(rest: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// Builds and pushes the image; the reference the registry holds it at.
+/// Builds the image and pushes it from BuildKit's builder, never loading
+/// it into Docker's own store (build.rs `image_push` says why), Docker
+/// logged in to the registry with credentials minted to push. The
+/// reference the registry holds it at, by the digest BuildKit pushed.
 fn push(req: &Request, tools: &devstack::Tools) -> Result<String> {
     let root = devstack::repo_root();
     let tagged = req.tagged();
-    println!("building {} as {tagged}", req.image);
-    crate::build::image_build(&json!({ "dockerfile": root.join(req.dockerfile), "build_context": root.join(req.context) }), Some(&tagged))?;
+    let dir = root.join("target/image-push");
+    fs::create_dir_all(&dir)?;
+    let metadata = dir.join("metadata.json");
     tried(TRIES, PAUSE, |n| {
-        println!("pushing {tagged} (try {n} of {TRIES})");
-        let mut cmd = crate::deploy::wrangler(tools, &req.account)?;
-        cmd.args(["containers", "push", &tagged]).stdin(Stdio::null());
-        crate::run(&mut cmd)
+        println!("building {} and pushing it as {tagged} (try {n} of {TRIES})", req.image);
+        let _ = fs::remove_file(&metadata);
+        docker_login(tools, &req.account)?;
+        crate::build::image_push(&json!({ "dockerfile": root.join(req.dockerfile), "build_context": root.join(req.context) }), &tagged, &metadata)
     })?;
-    let out = Command::new("docker").args(["image", "inspect", "--format", "{{json .RepoDigests}}", &tagged]).stdin(Stdio::null()).output().context("could not start docker image inspect")?;
-    anyhow::ensure!(out.status.success(), "docker image inspect {tagged}: {}", String::from_utf8_lossy(&out.stderr).trim());
-    pinned_of(&String::from_utf8_lossy(&out.stdout), &req.account, &req.repository)
+    let text = fs::read_to_string(&metadata).with_context(|| format!("BuildKit's metadata of the push, {}", metadata.display()))?;
+    pushed(&text, &req.account, &req.repository)
+}
+
+/// Logs Docker in to `account`'s registry, as BuildKit's push reads it,
+/// with credentials minted to push (the password on its standard input).
+fn docker_login(tools: &devstack::Tools, account: &str) -> Result<()> {
+    let (username, password) = credentials(tools, account, None, &["--push", "--pull"])?;
+    let mut child = Command::new("docker")
+        .args(["login", "--username", &username, "--password-stdin", REGISTRY])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("could not start docker login")?;
+    child.stdin.take().context("docker login's stdin")?.write_all(password.as_bytes())?;
+    let out = child.wait_with_output()?;
+    anyhow::ensure!(out.status.success(), "docker login to {REGISTRY}: {}", said(&out));
+    Ok(())
+}
+
+/// The reference a push made, from BuildKit's metadata of it
+/// (`containerimage.digest`): one a deploy pins.
+fn pushed(metadata: &str, account: &str, repository: &str) -> Result<String> {
+    let v: Value = serde_json::from_str(metadata).with_context(|| format!("BuildKit's metadata is no JSON: {}", metadata.trim()))?;
+    let digest = v["containerimage.digest"].as_str().with_context(|| format!("BuildKit's metadata names no digest: {}", metadata.trim()))?;
+    let reference = format!("{REGISTRY}/{account}/{repository}@{digest}");
+    anyhow::ensure!(pinned_ok(&reference, account), "{reference} is not a reference a deploy pins ({REGISTRY}/<account>/<repository>@sha256:<64 hex>)");
+    Ok(reference)
 }
 
 /// Copies the source to the request's name with skopeo, which copies a
@@ -324,24 +354,6 @@ fn tried(tries: u32, pause: Duration, mut attempt: impl FnMut(u32) -> Result<()>
     unreachable!("the last try returns")
 }
 
-/// The reference the registry holds the pushed image at, from its
-/// `RepoDigests` (`docker image inspect`, after the push: what wrangler
-/// itself reads, and Cloudflare's docs say to): the one in `account`'s
-/// registry and `repository`, and only one, a reference a deploy pins.
-fn pinned_of(repo_digests: &str, account: &str, repository: &str) -> Result<String> {
-    let listed: Option<Vec<String>> = serde_json::from_str(repo_digests.trim()).with_context(|| format!("RepoDigests is no list of references: {}", repo_digests.trim()))?;
-    let at = format!("{REGISTRY}/{account}/{repository}@");
-    let mut found: Vec<String> = listed.unwrap_or_default().into_iter().filter(|r| r.starts_with(&at)).collect();
-    found.sort();
-    found.dedup();
-    match found.as_slice() {
-        [one] if pinned_ok(one, account) => Ok(one.clone()),
-        [one] => bail!("{one} is not a reference a deploy pins ({REGISTRY}/<account>/<repository>@sha256:<64 hex>)"),
-        [] => bail!("the pushed image has no digest in {REGISTRY}/<account>/{repository} (its RepoDigests: {})", repo_digests.trim()),
-        many => bail!("the pushed image has {} digests in {REGISTRY}/<account>/{repository}, not one: {}", many.len(), many.join(", ")),
-    }
-}
-
 /// What a run says it made (and, with `--summary`, writes as Markdown):
 /// the reference, readable with the account as `<account>`, and whole in
 /// its line of a deploy config's `computers.images`, under the image's own
@@ -440,29 +452,21 @@ mod tests {
         assert!(refused(copy(&whole), &env(&[("CLOUDFLARE_ACCOUNT_ID", ACCOUNT), ("FROM_CLOUDFLARE_ACCOUNT_ID", PREVIEW), ("FROM_CLOUDFLARE_API_TOKEN", "")])).contains("FROM_CLOUDFLARE_API_TOKEN is not set"));
     }
 
-    /// Goal: the reference named is the registry's, and one a deploy pins.
-    /// Valid: the pushed repository's digest among others' (another
-    /// repository's, another registry's), listed twice. Invalid: none
-    /// there, two different ones, one in another account, a digest cut
-    /// short, output that is no list.
+    /// Goal: the reference named is the one BuildKit pushed, and one a
+    /// deploy pins. Valid: its metadata's digest, in the request's account
+    /// and repository. Invalid: no digest, a digest cut short or of another
+    /// kind, metadata that is no JSON.
     #[test]
-    fn the_reference_is_the_one_the_registry_holds() {
-        let digest = "9f".repeat(32);
-        let ours = format!("registry.cloudflare.com/{ACCOUNT}/fragment-computer-hermes@sha256:{digest}");
-        let others = [format!("registry.cloudflare.com/{ACCOUNT}/fragment-computer-hermes-canary@sha256:{}", "ab".repeat(32)), format!("fragment-computer-hermes@sha256:{digest}")];
-        let list = |refs: &[&str]| serde_json::to_string(refs).unwrap();
-        let found = pinned_of(&list(&[&others[0], &ours, &others[1], &ours]), ACCOUNT, "fragment-computer-hermes").unwrap();
-        assert_eq!(found, ours);
+    fn the_reference_is_the_one_buildkit_pushed() {
+        let digest = format!("sha256:{}", "9f".repeat(32));
+        let metadata = |d: &str| serde_json::json!({ "containerimage.digest": d, "image.name": "x" }).to_string();
+        let found = pushed(&metadata(&digest), ACCOUNT, "fragment-computer-hermes").unwrap();
+        assert_eq!(found, format!("registry.cloudflare.com/{ACCOUNT}/fragment-computer-hermes@{digest}"));
         assert!(pinned_ok(&found, ACCOUNT));
-        assert!(pinned_of(&list(&[&others[0], &others[1]]), ACCOUNT, "fragment-computer-hermes").unwrap_err().to_string().contains("no digest"));
-        assert!(pinned_of("null\n", ACCOUNT, "fragment-computer-hermes").unwrap_err().to_string().contains("no digest"));
-        let second = format!("registry.cloudflare.com/{ACCOUNT}/fragment-computer-hermes@sha256:{}", "cd".repeat(32));
-        assert!(pinned_of(&list(&[&ours, &second]), ACCOUNT, "fragment-computer-hermes").unwrap_err().to_string().contains("2 digests"));
-        let other_account = ours.replace(ACCOUNT, &"f".repeat(32));
-        assert!(pinned_of(&list(&[&other_account]), ACCOUNT, "fragment-computer-hermes").is_err());
-        let short = ours.replace(&digest, &digest[..12]);
-        assert!(pinned_of(&list(&[&short]), ACCOUNT, "fragment-computer-hermes").unwrap_err().to_string().contains("not a reference a deploy pins"));
-        assert!(pinned_of("registry.cloudflare.com/x", ACCOUNT, "fragment-computer-hermes").unwrap_err().to_string().contains("no list"));
+        assert!(pushed("{}", ACCOUNT, "fragment-computer-hermes").unwrap_err().to_string().contains("names no digest"));
+        assert!(pushed(&metadata(&digest[..19]), ACCOUNT, "fragment-computer-hermes").unwrap_err().to_string().contains("not a reference a deploy pins"));
+        assert!(pushed(&metadata(&digest.replace("sha256", "sha512")), ACCOUNT, "fragment-computer-hermes").is_err());
+        assert!(pushed("registry.cloudflare.com/x", ACCOUNT, "fragment-computer-hermes").unwrap_err().to_string().contains("no JSON"));
     }
 
     /// Goal: the credentials wrangler mints are read from its answer, and

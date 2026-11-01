@@ -6270,9 +6270,14 @@ fn knowledge_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Per
     let wrote = shell(api, me.session, "POST", &format!("/api/f/{notes}/files"), Some(&json!({ "files": [{ "path": "wiki/ferry.md", "text": text }] })), &[])?;
     let page_at = json!({ "source": "wiki/ferry.md", "revision": "r1", "title": "Ferry timetable", "sections": [{ "id": "s1", "heading": "Winter", "text": "The ferry timetable changes in November: two crossings a day." }] });
     let upserts = [&notes, &old].iter().map(|n| shell(api, me.session, "POST", &format!("/api/f/{n}/search/upsert"), Some(&page_at), &[]).map(|r| r.status)).collect::<Result<Vec<_>>>()?;
+    // both on the dock (the shell's list has them), then the old one archived
+    // and off it: the shell knows it archived before anything is typed, so
+    // the question never asks it for a list a step behind
+    let docked = |name: &str| format!("!!document.querySelector('#apps [data-key=\"app:{name}\"]')");
+    let listed = b.until(page, &format!("{} && {}", docked(&notes), docked(&old)), wait);
     shell(api, me.session, "PUT", &format!("/api/fragments/{old}/archived"), Some(&json!({ "archived": true })), &[])?;
-    let known = b.until(page, &format!("!!document.querySelector('#apps [data-key=\"app:{notes}\"]')"), wait);
-    anyhow::ensure!(wrote.status == 200 && upserts == vec![200, 200] && known, "the brains' pages were not written: {} {upserts:?}", wrote.text);
+    let known = b.until(page, &format!("{} && !{}", docked(&notes), docked(&old)), wait);
+    anyhow::ensure!(wrote.status == 200 && upserts == vec![200, 200] && listed && known, "the brains' pages were not written, or the shell's list missed them: {} {upserts:?} {listed} {known}", wrote.text);
     b.eval(page, "(window.__knowledge = [], true)")?;
     let open = launch(b, "ferry timetable")?;
     let row = format!(".search-known [data-fragment={}][data-source=\"wiki/ferry.md\"]", js(&notes));
@@ -6704,10 +6709,12 @@ const APPS_RACE_PROBE: &str = "(() => {
   const revoke = URL.revokeObjectURL;
   URL.revokeObjectURL = () => {};
   const pending = { access: [], card: [] };
+  const made = { access: [], card: [] };
   const hold = (kind, url, o) => {
     const options = kind === 'card' ? { ...o, headers: { ...o?.headers } } : o;
     if (kind === 'card') delete options.headers['if-none-match'];
     const answer = real(url, options);
+    made[kind].push(String(url));
     return new Promise((resolve) => pending[kind].push({
       answer,
       release: async () => { const r = await answer; resolve(r); await new Promise((done) => setTimeout(done, 0)); },
@@ -6716,18 +6723,27 @@ const APPS_RACE_PROBE: &str = "(() => {
   window.fetch = (url, o) => {
     const u = String(url);
     if (u === '/api/access') return hold('access', url, o);
-    if (/^\\/api\\/f\\/[^/]+\\/card$/.test(u) && (o?.method ?? 'GET') === 'GET') return hold('card', url, o);
+    // the Apps page's own card reads: the dock's are the dock's
+    if (/^\\/api\\/f\\/[^/]+\\/card$/.test(u) && (o?.method ?? 'GET') === 'GET' && new Error().stack.includes('apps-page.js')) return hold('card', url, o);
     return real(url, o);
   };
   window.__appsRace = {
     count: (kind) => pending[kind].length,
+    made: (kind, url) => made[kind].filter((u) => u === url).length,
     release: async (kind, newest) => {
       const all = pending[kind].splice(0);
       if (newest) all.reverse();
       for (const p of all) await p.release();
       return true;
     },
-    restore: () => { window.fetch = real; URL.revokeObjectURL = revoke; return true; },
+    // nothing held for good: what is still held is answered, and what comes
+    // after goes straight to the server, as a request is answered in life
+    restore: async () => {
+      window.fetch = real;
+      URL.revokeObjectURL = revoke;
+      for (const kind of ['access', 'card']) for (const p of pending[kind].splice(0)) await p.release();
+      return true;
+    },
   };
   return true;
 })()";
@@ -6804,17 +6820,23 @@ fn apps_response_races_ui(s: &mut Suite, b: &mut Browser, page: &Page, app: &str
         b.until(page, "location.pathname === '/settings'", wait);
         let changed = set_visibility(b, visibility)?;
         let put = put_card(b, source)?;
+        // the new visit's own read of this card, not just as many reads as
+        // the old visit made (its two: this app's and another's)
+        let card_url = format!("/api/f/{app}/card");
+        let read_before = b.eval(page, &format!("window.__appsRace.made('card', {})", js(&card_url)))?.as_u64().unwrap_or(0);
         b.eval(page, "(document.getElementById('apps-link').click(), true)")?;
-        let new_visit = b.until(page, &format!("location.pathname === '/apps' && !!{row} && window.__appsRace.count('access') >= 2 && window.__appsRace.count('card') >= 2"), wait);
+        let new_visit = b.until(page, &format!("location.pathname === '/apps' && !!{row} && window.__appsRace.count('access') >= 2 && window.__appsRace.made('card', {}) > {read_before}", js(&card_url)), wait);
         release(b, "access", newest_first)?;
         release(b, "card", newest_first)?;
+        // a read made after those (a later list change's batch) is answered
+        // as it comes, never held for good
+        b.eval(page, "window.__appsRace.restore()")?;
         let final_access = b.until(page, &format!("{access}.includes({})", js(expected_access)), wait);
         let mut final_card = Value::Null;
         let card_settled = s.eventually(wait, || {
             final_card = b.eval(page, &format!("window.__appsHash({card}?.src).catch((e) => `hash failed: ${{e.message}}`)")).unwrap_or(Value::Null);
             final_card == expected_card
         });
-        b.eval(page, "window.__appsRace.restore()")?;
         s.ok(
             "closing and reopening Apps with access and card reads held: either completion order leaves the new visit's access text and card bytes",
             old_visit && new_visit && changed["status"] == 200 && put["status"] == 200 && final_access && card_settled,

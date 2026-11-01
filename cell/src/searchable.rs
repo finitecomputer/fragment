@@ -221,7 +221,7 @@ impl FragmentCell {
         // as many a call as the slot's model takes
         for batch in todo.chunks(self.cfg.models.embeddings.inputs_max) {
             let inputs: Vec<String> = batch.iter().map(|c| c.input.clone()).collect();
-            match embedded(&self.env, &inputs, payer, agent, Some(fragment), &self.state).await? {
+            match embedded(&self.env, &inputs, payer, agent, Some(fragment), &self.state, None).await? {
                 Embedding::Vectors { vectors, .. } => {
                     for (c, v) in batch.iter().zip(vectors) {
                         let held = engine::hold(&v).ok_or_else(|| CellError::new(ErrorCode::UpstreamFailed, "the embeddings model answered a vector with no direction"))?;
@@ -440,10 +440,12 @@ impl FragmentCell {
         }
         let scope = self.search_scope()?;
         self.search_drain(&scope).await;
+        // what it waited on, for its client (`Server-Timing`)
+        let mut laps = crate::js::Laps::start();
         let vector = match question {
             _ if space.is_none() || q.mode == wire::Mode::Lexical => None,
             Question::Given(v) => v,
-            Question::Embed => self.search_embed_question(by, &facts.name, &q.q).await?,
+            Question::Embed => self.search_embed_question(by, &facts.name, &q.q, &mut laps).await?,
         };
         let mode = match (q.mode, vector.is_some()) {
             (wire::Mode::Semantic, true) => wire::Mode::Semantic,
@@ -452,20 +454,26 @@ impl FragmentCell {
         };
         let limit = q.limit.unwrap_or(wire::RESULTS_DEFAULT);
         let ask = index::Ask { q: q.q, limit, mode, fields: q.fields, after: q.after, before: q.before, vector, space: space.clone() };
+        let t0 = crate::js::now_ms();
         let answer: serde_json::Value = self.search_index(&scope, "search", &ask).await?;
+        laps.took("index", crate::js::now_ms() - t0);
         let pending = self.search_pending()?;
         let hits = answer["results"].as_array().cloned().unwrap_or_default();
         let mut results: Vec<serde_json::Value> = hits.into_iter().filter(|h| !h["source"].as_str().is_some_and(|s| pending.contains(s))).collect();
         for (i, h) in results.iter_mut().enumerate() {
             h["rank"] = json!(i + 1);
         }
-        json_response(&found(results, answer["semantic"] == true, true))
+        let mut resp = json_response(&found(results, answer["semantic"] == true, true))?;
+        if let Some(timing) = laps.server_timing() {
+            resp.headers_mut().set("server-timing", &timing)?;
+        }
+        Ok(resp)
     }
 
     /// The question's vector, embedded and paid by its asker (an agent's
     /// owner; the fragment's owner for its app's); none for an anonymous
     /// reader, or a refusal (it is searched by its words).
-    async fn search_embed_question(&self, by: By<'_>, name: &str, q: &str) -> CellResult<Option<String>> {
+    async fn search_embed_question(&self, by: By<'_>, name: &str, q: &str, laps: &mut crate::js::Laps) -> CellResult<Option<String>> {
         let [owner] = self.metas([MetaKey::Owner])?;
         let owner = owner.ok_or_else(|| crate::fragment::missing(MetaKey::Owner))?;
         let who = by.asker(&owner);
@@ -473,7 +481,7 @@ impl FragmentCell {
         let fragment = InFragment { name, owner: &owner, by_owner: payer == &owner };
         // after the slot's query prefix, as its chunks after its document prefix
         let question = self.cfg.models.embeddings.question(q);
-        match embedded(&self.env, &[question], payer, who.agent.as_deref(), Some(&fragment), &self.state).await? {
+        match embedded(&self.env, &[question], payer, who.agent.as_deref(), Some(&fragment), &self.state, Some(laps)).await? {
             Embedding::Vectors { vectors, .. } => Ok(vectors.into_iter().next().map(|v| rules::vector_b64(&v))),
             Embedding::Refused { status, text, .. } => {
                 console_warn!("{}", json!({ "event": "search.query-unembedded", "status": status, "why": text }));
