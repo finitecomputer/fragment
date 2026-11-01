@@ -489,12 +489,12 @@ export class App extends DurableObject {
   default) written to `path` on `main`, which ends in `.jpg` or `.jpeg`.
   `job.ai.video({prompt, path, duration, resolution, aspect_ratio})` makes
   an MP4 (HappyHorse 1.0: 3 to 15 seconds, 5 by default; `720p` or
-  `1080p`) written to `path`, which ends in `.mp4`; none where your
-  models are private. You pay for them, from your ledger (below): an
-  image about a tenth of a cent, a video $0.14 a second at 720p and
-  $0.28 at 1080p, plus the platform's fee and margin. Before you build a
-  fragment that makes images or videos, tell the person what each costs
-  and that its owner pays for every one anyone makes in it. GLM
+  `1080p`) written to `path`, which ends in `.mp4`. You pay for them,
+  from your ledger (below): an image about a tenth of a cent, a video
+  $0.14 a second at 720p and $0.28 at 1080p, plus the platform's fee and
+  margin. Before you build a fragment that makes images or videos, tell
+  the person what each costs and that its owner pays for every one
+  anyone makes in it. GLM
   can spend a small `max_tokens` thinking: `reasoning_effort` is `low`
   unless you ask for `high`. A text step
   answers `{text, message, finish_reason, model, tier, usage, timing}`
@@ -1031,6 +1031,13 @@ variable of its name, else stdin, never the command line. A secret set
 before secrets named hosts fills nowhere until it is set again with
 `--to`. Never write secret values into files.
 
+A fragment holding a secret (or a door) stays its owner's and their own
+agents' for now: make it private first (`fragment visibility my-thing
+members`, no one else in it, no invite waiting), and while it holds one
+it gets no share link, no one else, and no invite (403
+`private_while_reaching`; a secret on a shared one is 403
+`unshare_first`).
+
 ## Rules of the road
 
 1. **The event log is truth.** Read `fragment events` before and after
@@ -1091,6 +1098,7 @@ fragment schedule list [<name>]          fragment schedule pause|resume|rm [<nam
 fragment operator key <file>
 fragment operator wipe <email|npub> [--dry-run | --yes] [--key-file F]
 fragment operator people [--q Q] [--after A] [--key-file F]
+fragment operator reach [--key-file F]      # FIN-352: fragments with a key or a door, by kind, and how many shared beyond (counts only)
 fragment operator person <npub> [--key-file F]
 fragment operator pin <npub> <image> [--key-file F]
 fragment operator orgs [--after A] [--key-file F]

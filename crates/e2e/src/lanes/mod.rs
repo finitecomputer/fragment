@@ -79,6 +79,7 @@ const LANES: &[Lane] = &[
     connections::connections,
     levers::levers,
     members::secrets,
+    members::reach,
     delegation::delegation,
     plane::files,
     plane::deploy,
@@ -175,7 +176,7 @@ pub const SHARDS: [&[&str]; 4] = [
     &["connections", "shell-ui", "wipe", "sync", "migrations"],
     &["deploy", "templates", "facet-cap", "app-lockdown", "site", "watch", "icons", "schemas", "channels", "live", "routes", "cli", "browser", "jobs", "triggers", "sessions", "sessions-ui", "finite-private", "chat"],
     &[
-        "auth", "create", "lockdown", "keys", "members", "identities", "levers", "secrets", "delegation", "files", "share", "faces", "isolation", "frames", "ops", "public", "effects",
+        "auth", "create", "lockdown", "keys", "members", "identities", "levers", "secrets", "reach", "delegation", "files", "share", "faces", "isolation", "frames", "ops", "public", "effects",
         "appfiles", "blobs", "notes", "brain", "doc", "push", "ai", "ledger", "transcribe", "orgs", "billing", "governance", "billing-page", "trials", "admin", "admin-page",
     ],
 ];

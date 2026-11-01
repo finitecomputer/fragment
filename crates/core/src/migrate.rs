@@ -155,7 +155,7 @@ pub const COMPUTER: Class = Class { name: "Computer", steps: &[step!("baseline",
 
 /// A fragment life's search index: its end releases its storage whole
 /// (`deleteAll`), so it keeps nothing.
-pub const SEARCH_INDEX: Class = Class { name: "SearchIndex", steps: &[step!("baseline", "searchindex/0001_baseline.sql")], variants: &[], kept: &[] };
+pub const SEARCH_INDEX: Class = Class { name: "SearchIndex", steps: &[step!("baseline", "searchindex/0001_baseline.sql"), step!("fences", "searchindex/0002_fences.sql")], variants: &[], kept: &[] };
 
 /// Every platform class, as the lock lists them.
 pub const CLASSES: [&Class; 6] = [&FRAGMENT, &REGISTRY, &PRINCIPAL, &LEDGER, &COMPUTER, &SEARCH_INDEX];

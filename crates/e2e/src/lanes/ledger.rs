@@ -236,13 +236,19 @@ pub(super) fn forget_gate(api: &Api, identity: &str) -> Result<()> {
 /// the 31st checked October's spend against November's: CI run
 /// 41254067181). Before anything the lane spends.
 fn pin_month(api: &Api, identity: &str) -> Result<()> {
+    let r = api.unsigned("POST", "/api/test/ledger", Some(&json!({ "identity": identity, "op": "clock", "offsetMs": mid_month_offset_ms() })))?;
+    anyhow::ensure!(r.status == 200, "the ledger's clock moves: {r}");
+    Ok(())
+}
+
+/// How far a test clock moves to run on from the 15th of this month (UTC):
+/// a lane pinned so has two weeks before its month ends, however late in a
+/// month it starts.
+pub(super) fn mid_month_offset_ms() -> i64 {
     const DAY_MS: i64 = 24 * 3600 * 1000;
     let now = crate::api::now_ms();
     let (_, _, day) = fragment_core::cron::civil(now.div_euclid(DAY_MS));
-    let offset = (15 - i64::from(day)) * DAY_MS - now.rem_euclid(DAY_MS);
-    let r = api.unsigned("POST", "/api/test/ledger", Some(&json!({ "identity": identity, "op": "clock", "offsetMs": offset })))?;
-    anyhow::ensure!(r.status == 200, "the ledger's clock moves: {r}");
-    Ok(())
+    (15 - i64::from(day)) * DAY_MS - now.rem_euclid(DAY_MS)
 }
 
 /// How many of the node's log lines name `event`: what the cell said aloud.

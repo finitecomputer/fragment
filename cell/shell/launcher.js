@@ -33,6 +33,7 @@
 
 import { icon } from "./icons.js";
 import { KIND } from "./frame-messages.js";
+import { speakers } from "./session-text.js";
 
 // At most 8 files, 25 MiB each, as the chat's page takes them.
 const FILES_MAX = 8;
@@ -162,7 +163,10 @@ export function createLauncher(shell) {
     row.dataset.source = hit.source;
     const text = el("span", "agent-copy");
     text.append(el("span", "label", hit.heading && hit.heading !== hit.title ? `${hit.title} › ${hit.heading}` : hit.title || hit.source));
-    if (hit.snippet) text.append(el("span", "agent-preview", hit.snippet));
+    // an imported conversation's words said for a person: You, and its agent by name
+    const key = byName(hit.fragment)?.kind === "sessions" ? hit.source.match(/^sessions\/(.+)\.json$/)?.[1] : null;
+    const snippet = key ? speakers(hit.snippet, shell.sessionAgent?.(key)) : hit.snippet;
+    if (snippet) text.append(el("span", "agent-preview", snippet));
     row.append(iconOf(hit.fragment), text, el("span", "meta", titleOf(hit.fragment)));
     row.onclick = () => openKnown(hit);
     return row;
