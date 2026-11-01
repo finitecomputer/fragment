@@ -56,34 +56,33 @@ indexing, waiting_ms, hint?}`.
   or a made `_index.md`. A question asked through the brain (its page, or
   this operation) is paid by its owner; `fragment search --in` by its
   asker.
-- **Kept by a file trigger.** `{"files": "**", "run": "changed"}`: each
-  move of `main` runs the job `changed`, which marks the paths that moved
-  (`mark`, a mutation, which open pages follow), then indexes them 8 files
-  a step (`reindex`, a query that reads the files at `main` and writes the
-  index) until none are left for it, going on in a run of its own past one
-  run's steps. An installed trigger (`{"installed": true, "run":
-  "changed"}`) runs it once per install of a new release too, at the
-  brain's next request, so a release that changes the index's shape
-  (`FORMAT`) is taken in with no member acting. A batch claims its pages
-  (for two minutes), so runs side by
-  side take different pages and nothing is read or embedded twice: any
-  member may start `changed` (the page does when the index is behind), and
-  one with nothing left to do takes two steps. A batch that fails lets go
-  of its claims; a run that finds the rest held waits out one claim, then
-  takes what a batch that died left. Each path is marked at a generation,
-  and a new mark keeps a batch's claim: one batch at a time reads a page,
-  and a read overtaken by a newer mark is read again. Each write and
-  delete carries its batch's generation as a fence (docs/api.md, "A
-  fragment's search"), so a batch whose claim lapsed never lands a write
-  or a delete over a newer batch's. Every page a batch takes is written
-  through its fence, its bytes unchanged too: the index writes (and
-  embeds) nothing for a revision it holds, but takes the newer fence, so
-  an older batch's write still on its way is refused. A page `main` deletes
-  is taken out, its tombstone kept. More than 200 paths in one move, an
-  index of an older shape (`FORMAT`, which drops the app's old tables),
-  `reindex {full: true}` (an editor's), or a write the index answers
-  `cleared` (its embedding model changed and it emptied) take every page
-  again.
+- **Kept by a file trigger.** `{"files": "**", "run": "changed"}`: each move
+  of `main` runs the job `changed`, which marks the paths that moved
+  (`mark`, a mutation, which open pages follow), then indexes them 8 files a
+  step (`reindex`, a query that reads the files at `main` and writes the
+  index, within its 50 capability calls: `CALLS_MAX`) until none are left
+  for it, going on in a run of its own past one run's steps. An installed
+  trigger (`{"installed": true, "run": "changed"}`) runs it once per install
+  of a new release too, at the brain's next request, so a release that
+  changes the index's shape (`FORMAT`) is taken in with no member acting. A
+  batch claims its pages (for two minutes), so runs side by side take
+  different pages and nothing is read or embedded twice: any member may
+  start `changed` (the page does when the index is behind), and one with
+  nothing left to do takes two steps. A batch that fails lets go of its
+  claims; a run that finds the rest held waits out one claim, then takes
+  what a batch that died left. Each path is marked at a generation, and a
+  new mark keeps a batch's claim: one batch at a time reads a page, and a
+  read overtaken by a newer mark is read again. Each write and delete
+  carries its batch's generation as a fence (docs/api.md, "A fragment's
+  search"), so a batch whose claim lapsed never lands a write or a delete
+  over a newer batch's. Every page a batch takes is written through its
+  fence, its bytes unchanged too: the index writes (and embeds) nothing for
+  a revision it holds, but takes the newer fence, so an older batch's write
+  still on its way is refused. A page `main` deletes is taken out, its
+  tombstone kept. More than 200 paths in one move, an index of an older
+  shape (`FORMAT`, which drops the app's old tables), `reindex {full: true}`
+  (an editor's), or a write the index answers `cleared` (its embedding model
+  changed and it emptied) take every page again.
 - **Behind its files**, a search answers `indexing: true` and a `hint`
   naming the job that finishes it, and the page says so.
 - **A pause the search service asks for** (429 `rate_limited`, as a rate

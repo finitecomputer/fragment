@@ -31,7 +31,7 @@ const HOOKS = `export async function resolve(specifier, context, next) {
   return next(specifier, context);
 }`;
 register("data:text/javascript," + encodeURIComponent(HOOKS));
-const { App } = await import(new URL("../../../templates/brain/app.mjs", import.meta.url).href);
+const { App, CALLS_MAX } = await import(new URL("../../../templates/brain/app.mjs", import.meta.url).href);
 
 const CLAIM_MS = 2 * 60 * 1000;
 // each test's own bound: a batch waiting on a gate that never opens (a
@@ -520,4 +520,45 @@ it("an editor's full pass asked during a pause is kept, and done after it; a vie
     assert.equal(ix.text("w/a.md"), "uno");
     assert.equal(ix.text("w/b.md"), role === "editor" ? "two" : null, `a full pass a ${role} asked during the pause`);
   }
+});
+
+// Each capability call the app makes, counted (one subrequest each).
+function counted(fs, ix) {
+  const calls = { n: 0 };
+  for (const [o, names] of [[fs, ["list", "readBytes"]], [ix, ["upsert", "delete", "query", "status"]]]) {
+    for (const k of names) {
+      const real = o[k];
+      o[k] = (...args) => {
+        calls.n++;
+        return real(...args);
+      };
+    }
+  }
+  return calls;
+}
+
+it("a batch keeps to its calls: at most CALLS_MAX capability calls in one call into the app, a full pass's first included", async () => {
+  const pages = {};
+  for (let i = 0; i < 30; i++) pages[`w${i % 3}/p${String(i).padStart(2, "0")}.md`] = `# P${i}\n\npage ${i}`;
+  const { app, fs, ix } = await brain(pages);
+  // a page past the read limit, one gone, one changed, and a full pass asked
+  fs.at.set("w0/huge.md", "x".repeat(1024 * 1024 + 1));
+  fs.at.delete("w1/p01.md");
+  fs.at.set("w2/p02.md", "# P2\n\nchanged");
+  const calls = counted(fs, ix);
+  let most = 0;
+  let r = await (async () => {
+    calls.n = 0;
+    const first = await app.reindex({ full: true }, EDITOR);
+    most = calls.n;
+    return first;
+  })();
+  for (let i = 0; r.pending > 0 && i < 50; i++) {
+    calls.n = 0;
+    r = await app.reindex({}, EDITOR);
+    most = Math.max(most, calls.n);
+  }
+  assert.equal(r.pending, 0);
+  assert.ok(most <= CALLS_MAX, `a batch made ${most} capability calls, past ${CALLS_MAX}`);
+  assert.deepEqual([ix.text("w2/p02.md"), ix.text("w1/p01.md"), ix.text("w0/huge.md")], ["changed", null, null]);
 });
