@@ -512,6 +512,11 @@ async fn transport(env: &Env, cfg: &Config, model: Model<'_>, input: &Value, met
 /// without it.
 async fn openai(env: &Env, slot: &str, base_url: &str, path: &str, body: &Value) -> CellResult<Response> {
     let key = crate::keys::model_key(env, slot).await?;
+    keyed(&key, base_url, path, body).await
+}
+
+/// `openai`, its key read already.
+async fn keyed(key: &str, base_url: &str, path: &str, body: &Value) -> CellResult<Response> {
     let h = Headers::new();
     h.set("content-type", "application/json")?;
     h.set("authorization", &format!("Bearer {key}"))?;
@@ -715,7 +720,7 @@ pub(crate) async fn embeddings_route(mut req: Request, env: &Env, url: &Url, aft
     let slot = &Config::from_env(env).models.embeddings;
     let bounded = embed::bound(&asked, slot).map_err(|why| CellError::invalid(why.message()))?;
     drop(asked);
-    match embedded(env, &bounded.inputs, &caller.owner, Some(&caller.agent), caller.in_fragment().as_ref(), after).await? {
+    match embedded(env, &bounded.inputs, &caller.owner, Some(&caller.agent), caller.in_fragment().as_ref(), after, None).await? {
         Embedding::Vectors { vectors, usage } => Ok(Response::from_json(&embed::reply(slot, bounded.format, &vectors, usage.as_ref()))?),
         Embedding::Refused { status, text, .. } => passed(status, text),
     }
@@ -738,18 +743,32 @@ pub(crate) enum Embedding {
 /// are private and its slot is not). An answer that is not
 /// the slot's (another count, another length) is charged, as it was paid
 /// for, and refused 502: a vector of another space is never passed on.
-pub(crate) async fn embedded(env: &Env, inputs: &[String], payer: &str, agent: Option<&str>, fragment: Option<&InFragment<'_>>, after: &dyn Background) -> CellResult<Embedding> {
+/// `laps`, if given, takes its waits: `gate`, `key` and `embed`.
+pub(crate) async fn embedded(env: &Env, inputs: &[String], payer: &str, agent: Option<&str>, fragment: Option<&InFragment<'_>>, after: &dyn Background, mut laps: Option<&mut js::Laps>) -> CellResult<Embedding> {
     let cfg = Config::from_env(env);
     if let Some(why) = cfg.models.embeddings_refused() {
         return Err(CellError::new(ErrorCode::Forbidden, why));
     }
+    let mut took = |step: &'static str, t0: i64| {
+        if let Some(laps) = laps.as_deref_mut() {
+            laps.took(step, js::now_ms() - t0);
+        }
+    };
     let slot = &cfg.models.embeddings;
+    let t0 = js::now_ms();
     let mut charge = gate(env, payer, agent, fragment, slot.upstream.model(), embed::EMBEDDINGS).await?;
+    took("gate", t0);
     let request = embed::request(slot, inputs);
     let meta = Metadata { user_id: opaque(payer), agent_id: agent.map(opaque) };
+    let mut t0 = js::now_ms();
     let answered = match &slot.upstream {
         Upstream::WorkersAi { model } => workers_ai(env, cfg, model, &request, &meta).await,
-        Upstream::Openai { base_url, .. } => openai(env, embed::EMBEDDINGS, base_url, "/embeddings", &request).await,
+        Upstream::Openai { base_url, .. } => {
+            let key = crate::keys::model_key(env, embed::EMBEDDINGS).await?;
+            took("key", t0);
+            t0 = js::now_ms();
+            keyed(&key, base_url, "/embeddings", &request).await
+        }
     };
     drop(request);
     // not reached: it used nothing, and nothing is charged
@@ -760,6 +779,7 @@ pub(crate) async fn embedded(env: &Env, inputs: &[String], payer: &str, agent: O
     if status != 200 {
         let header = upstream.headers().get("retry-after")?;
         let text = bounded_text(&mut upstream).await;
+        took("embed", t0);
         let retry_after_ms = (status == 429).then(|| embed::retry_after_ms(header.as_deref(), &text));
         return Ok(Embedding::Refused { status, text, retry_after_ms });
     }
@@ -771,6 +791,7 @@ pub(crate) async fn embedded(env: &Env, inputs: &[String], payer: &str, agent: O
             return Err(e);
         }
     };
+    took("embed", t0);
     let response: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
     drop(bytes);
     let usage = embed::usage_of(slot, inputs, &response);

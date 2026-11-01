@@ -3,7 +3,8 @@
 //! A fragment that wrote nothing answers `indexed: false`, embedding
 //! nothing; an editor writes a source whole, chunked and embedded once; a
 //! reader finds it by its words and its meaning, each hit placed in each
-//! leg, the index's int8 dot product Wasm SIMD's; a replay and a grown
+//! leg, its answer's waits named in `Server-Timing`, the index's int8 dot
+//! product Wasm SIMD's; a replay and a grown
 //! source embed nothing again; a stale write is refused; limits are
 //! checked before anything is sent; a viewer only
 //! reads, a stranger neither, and a member removed reads nothing more; a
@@ -33,6 +34,22 @@ const MODEL: &str = fragment_core::embed::MODEL_DEFAULT;
 /// How many texts the embeddings model was asked for since `from`.
 fn embedded(s: &Suite, from: usize) -> usize {
     s.ai.calls()[from..].iter().filter(|c| c.model == MODEL).map(|c| c.body["text"].as_array().map_or(0, Vec::len)).sum()
+}
+
+/// The parts a reply's `Server-Timing` names, sorted: none unless each
+/// entry is `<part>;dur=<ms>` and nothing more.
+fn timed_parts(r: &crate::api::Reply) -> Option<Vec<&'static str>> {
+    let value = r.headers.get("server-timing")?.to_str().ok()?;
+    let mut parts = value
+        .split(", ")
+        .map(|entry| {
+            let (part, ms) = entry.split_once(";dur=")?;
+            ms.parse::<u64>().ok()?;
+            ["embed", "gate", "index", "key"].into_iter().find(|p| *p == part)
+        })
+        .collect::<Option<Vec<_>>>()?;
+    parts.sort_unstable();
+    Some(parts)
 }
 
 fn upsert(source: &str, revision: &str, sections: Value) -> Value {
@@ -190,6 +207,14 @@ fn checks(s: &mut Suite, api: &Api) -> Result<(Keys, String)> {
             && hit["lexical"]["rank"] == 1 && hit["lexical"]["bm25"].as_f64().is_some_and(|b| b > 0.0) && hit["semantic"]["rank"].as_u64().is_some_and(|r| r >= 1) && (-1.01..=1.01).contains(&cosine)
             && asked && status.body["sources"] == 1 && status.body["chunks"] == 2 && status.body["semantic"] == "on" && status.body.get("ended").is_none(),
         json!({ "write": w.body, "embedded": wrote, "found": found.body, "status": status.body }),
+    );
+
+    // ---- its answer says what it waited on, by part: names and durations only
+    let lexical = api.signed(&reader, "POST", &path(""), Some(&json!({ "q": "harbour lantern audit", "mode": "lexical" })))?;
+    s.ok(
+        "a search's answer says what it waited on in `Server-Timing`, names and durations only: by meaning, the gate, the embedding and the index; by words, the index alone",
+        timed_parts(&found) == Some(vec!["embed", "gate", "index"]) && timed_parts(&lexical) == Some(vec!["index"]),
+        json!({ "meaning": found.headers.get("server-timing").and_then(|v| v.to_str().ok()), "words": lexical.headers.get("server-timing").and_then(|v| v.to_str().ok()) }),
     );
 
     // ---- the index's int8 dot product is Wasm SIMD's, and agrees with the scalar one

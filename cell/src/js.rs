@@ -717,6 +717,13 @@ impl Laps {
         self.waits.insert(step.to_string(), waited.into());
     }
 
+    /// Its steps' waits as a `Server-Timing` value, `step;dur=<ms>` each:
+    /// names and durations only. None for no steps.
+    pub fn server_timing(&self) -> Option<String> {
+        let steps: Vec<String> = self.waits.iter().map(|(step, ms)| format!("{step};dur={ms}")).collect();
+        (!steps.is_empty()).then(|| steps.join(", "))
+    }
+
     /// One line (lesson 14): `fields`, then `event`, `at` (when the work
     /// began, ms), its steps' `waits`, and `ms`, its whole.
     pub fn log(self, event: &str, mut fields: serde_json::Value) {
