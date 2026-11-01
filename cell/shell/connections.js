@@ -1,4 +1,6 @@
 // a provider's name for people: google-places is Google Places, xai xAI
+import { KIND } from "./frame-messages.js";
+
 const PROVIDER_NAMES = { xai: "xAI", elevenlabs: "ElevenLabs", openrouter: "OpenRouter" };
 export const providerName = (p) => PROVIDER_NAMES[p] ?? p.replace(/(^|-)([a-z])/g, (_, d, l) => `${d ? " " : ""}${l.toUpperCase()}`);
 
@@ -544,7 +546,7 @@ export function createSimplex({ api, el, section, actionLine, named, seg, comput
   function nameSimplex(frame) {
     const agent = frame.dataset.simplex;
     try {
-      frame.contentWindow?.postMessage({ fragment: "simplex", agent, name: titleOf(agent) }, new URL(frame.dataset.src).origin);
+      frame.contentWindow?.postMessage({ fragment: KIND.simplex, agent, name: titleOf(agent) }, new URL(frame.dataset.src).origin);
     } catch {}
   }
   // The link page asks for a ticket to link or unlink its agent (`{fragment:
@@ -558,10 +560,10 @@ export function createSimplex({ api, el, section, actionLine, named, seg, comput
   // unlink's takes its home back to its own chat.
   const onMessage = async (e) => {
     const m = e.data;
-    if (m?.fragment !== "simplex" || !["link", "unlink"].includes(m.want) || !computer()?.simplex) return;
+    if (m?.fragment !== KIND.simplex || !["link", "unlink"].includes(m.want) || !computer()?.simplex) return;
     const frame = [...document.querySelectorAll("iframe[data-simplex]")].find((f) => f.contentWindow === e.source);
     if (!frame || frame.dataset.simplex !== m.agent || e.origin !== new URL(frame.dataset.src).origin) return;
-    const reply = { fragment: "simplex", agent: m.agent, for: m.want };
+    const reply = { fragment: KIND.simplex, agent: m.agent, for: m.want };
     try {
       reply.ticket = await api("POST", `/api/computers/${seg(computer().computer)}/agents/${seg(m.agent)}/door`, { door: "simplex", act: m.want });
     } catch (err) {

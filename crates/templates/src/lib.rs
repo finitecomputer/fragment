@@ -112,7 +112,7 @@ pub fn shell_page(text: &str, release: &str, deployed: Option<u64>) -> String {
 /// each with its content type: of the rest of cell/shell/, its pages are
 /// served at their own paths, and its credits and licenses not at all.
 #[cfg(feature = "platform")]
-const SHELL_PUBLISHED: [(&str, &str); 49] = [
+const SHELL_PUBLISHED: [(&str, &str); 50] = [
     // the cell's server-rendered pages' base look (share.rs `sheet_html`),
     // on the platform's origin and, as /__sheet.css, on a fragment's
     ("sheet.css", "text/css; charset=utf-8"),
@@ -137,6 +137,8 @@ const SHELL_PUBLISHED: [(&str, &str); 49] = [
     ("agent-identity.js", "text/javascript; charset=utf-8"),
     // an agent's colour: the agent template's, linked (templates/agent/site)
     ("agent-color.js", "text/javascript; charset=utf-8"),
+    // the messages between the shell and the pages it frames: the chat template's, linked (templates/chat/site)
+    ("frame-messages.js", "text/javascript; charset=utf-8"),
     // its icons (Lucide's among them: vendor/lucide-LICENSE) and an app's
     ("icons.js", "text/javascript; charset=utf-8"),
     // an app's own icon in the dock, and the sheet that makes one (docs/api.md, Icons)
