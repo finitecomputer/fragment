@@ -501,3 +501,23 @@ it("a wait the search service asks for is kept within a second and ten minutes",
   assert.deepEqual(waits, [1000, 600_000, 60_000, 60_000]);
   assert.equal((await settle(app)).pending, 0);
 });
+
+it("an editor's full pass asked during a pause is kept, and done after it; a viewer's is not", async (t) => {
+  const tick = clock(t);
+  for (const role of ["editor", "viewer"]) {
+    const { app, fs, ix } = await brain({ "w/a.md": "# A\n\none", "w/b.md": "# B\n\ntwo" });
+    // the index lost b (the full pass's own repair), and a's change meets a 429
+    ix.sources.delete("w/b.md");
+    fs.at.set("w/a.md", "# A\n\nuno");
+    mark(app, "w/a.md");
+    ix.limited.push({ retry_after_ms: 5000 });
+    assert.equal((await app.reindex({}, EDITOR)).wait, 5000);
+    const asked = await app.reindex({ full: true }, { role });
+    assert.deepEqual([asked.claimed, asked.wait], [0, 5000], "a pause defers the full pass's listing and writes");
+    tick(5000);
+    const after = await settle(app);
+    assert.equal(after.pending, 0);
+    assert.equal(ix.text("w/a.md"), "uno");
+    assert.equal(ix.text("w/b.md"), role === "editor" ? "two" : null, `a full pass a ${role} asked during the pause`);
+  }
+});

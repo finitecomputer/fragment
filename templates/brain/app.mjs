@@ -259,10 +259,11 @@ export class App extends DurableObject {
   // left of it.
   async reindex({ full = false } = {}, call) {
     const sql = this.ctx.storage.sql;
+    // an editor's full pass is kept first: a pause defers it, never drops it
+    if (full === true && editor(call?.role)) this.#set("full", "1");
     const until = Number(this.#get("waiting") ?? 0);
     if (until > Date.now()) return { ...NOTHING_DONE, claimed: 0, pending: this.#pending(), wait: until - Date.now() };
     if (until) this.#unset("waiting");
-    if (full === true && editor(call?.role)) this.#set("full", "1");
     if (this.#get("full") !== null) await this.#markAll();
     const now = Date.now();
     const by = crypto.randomUUID();
