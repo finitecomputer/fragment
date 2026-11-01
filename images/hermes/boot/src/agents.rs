@@ -52,8 +52,22 @@ pub fn diff(running: &[Agent], read: &[Agent]) -> Change {
     }
 }
 
-/// The bridge's ready file (its `ready.rs`): every agent whose profile is
-/// written, in the platform's order.
+/// The agents Hermes runs: each whose `agent.json` names no runtime or
+/// Hermes' (`runtime::DEFAULT`). Only these have a profile, a desktop, a
+/// route and a sync; another's turns go to the runtime it names, and a
+/// runtime this bridge does not run refuses them (docs/computers.md).
+pub fn hermes(agents: &[Agent]) -> Vec<Agent> {
+    agents.iter().filter(|a| of_hermes(a)).cloned().collect()
+}
+
+/// One of the agents Hermes runs (`hermes`).
+pub fn of_hermes(a: &Agent) -> bool {
+    a.runtime.as_deref().is_none_or(|r| r == fragment_bridge::runtime::DEFAULT)
+}
+
+/// The bridge's ready file (its `ready.rs`): every agent it may run, in the
+/// platform's order: one of Hermes' once its profile is written, any other
+/// as soon as its runtime is read.
 pub fn ready_file(agents: &[Agent]) -> String {
     json!({ "agents": agents.iter().map(|a| a.fragment.as_str()).collect::<Vec<_>>() }).to_string()
 }
@@ -97,6 +111,28 @@ mod tests {
         assert_eq!(names(&c.added), vec!["juniper--k3x9"]);
         let c = diff(&[agent("juniper")], &[]);
         assert_eq!(names(&c.removed), vec!["juniper--k3x9"]);
+    }
+
+    /// Goal (FIN-258): Hermes runs an agent naming no runtime or its own,
+    /// and only those have a profile; every agent is in the ready file, so
+    /// the bridge runs a Claude agent at once. Valid: one switched to Claude
+    /// leaves Hermes as a removed agent does, still in the ready file, and
+    /// one switched back is added. Invalid: a runtime no one runs is not
+    /// Hermes'. Replay: the same runtimes again are no change.
+    #[test]
+    fn hermes_runs_only_the_agents_that_name_it() {
+        let named = |label: &str, runtime: Option<&str>| Agent { runtime: runtime.map(str::to_string), ..agent(label) };
+        let set = [named("juniper", None), named("maple", Some("hermes")), named("rowan", Some("claude")), named("oak", Some("nobody-runs-this"))];
+        assert_eq!(names(&hermes(&set)), vec!["juniper--k3x9", "maple--k3x9"]);
+        assert_eq!(ready_file(&set), r#"{"agents":["juniper--k3x9","maple--k3x9","rowan--k3x9","oak--k3x9"]}"#, "every agent the bridge may run");
+
+        let switched = [named("juniper", Some("claude")), named("maple", Some("hermes"))];
+        let c = diff(&hermes(&set[..2]), &hermes(&switched));
+        assert_eq!((names(&c.added), names(&c.removed)), (vec![], vec!["juniper--k3x9"]), "to Claude: its profile goes");
+        assert_eq!(ready_file(&set[..2]), ready_file(&switched), "still run, by the bridge");
+        let c = diff(&hermes(&switched), &hermes(&set[..2]));
+        assert_eq!((names(&c.added), names(&c.removed)), (vec!["juniper--k3x9"], vec![]), "back to Hermes: its profile again");
+        assert!(diff(&hermes(&set), &hermes(&set)).is_empty(), "replay");
     }
 
     /// Replay: the same set read again is no change, nor is an agent the
