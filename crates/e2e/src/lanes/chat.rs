@@ -1132,12 +1132,15 @@ fn claude_install(s: &mut Suite, api: &Api, chrome: &mut Browser, owner: &Keys, 
     // its first turn waits for the bridge to see a new agent's runtime (its
     // read of the computer, each minute: images/bridge `COMPUTER_EVERY_MS`)
     let asked = chrome.until(&page, &format!("!!document.querySelector({}) && document.querySelector('.prompt:not(.closed) .prompt-text')?.textContent === {}", js(install), js(CLAUDE_INSTALL_ASK)), Duration::from_secs(150));
-    let install_waits = asked && shows(chrome, &page, WAITING_FOR_YOU);
+    // its chat's row in the shell's list, as its listed records say (each
+    // after the list's gap, `LISTED_MIN_GAP_MS`)
+    let row_waits = format!("document.querySelector({})?.textContent === 'Waiting for you'", js(&format!("#chats [data-key={}] .agent-doing", js(&format!("chat:{chat}")))));
+    let install_waits = asked && shows(chrome, &page, WAITING_FOR_YOU) && shows(chrome, &shell, &row_waits);
     let _ = chrome.screenshot(&shell, &shots.join("claude-install-card.png"));
     s.ok(
-        "a Claude agent's first message, Claude Code not installed: its turn asks on a card to install it, Install or Not now, and the message box says it waits for them",
+        "a Claude agent's first message, Claude Code not installed: its turn asks on a card to install it, Install or Not now, and the message box and its row say it waits for them",
         asked && install_waits && chrome.eval(&page, "[...document.querySelectorAll('.prompt:not(.closed) .options button')].map((b) => b.textContent).join('|')")? == "Install|Not now",
-        json!({ "card": chrome.eval(&page, "document.querySelector('.prompt')?.innerText ?? null")?, "placeholder": chrome.eval(&page, "document.getElementById('text').placeholder")? }),
+        json!({ "card": chrome.eval(&page, "document.querySelector('.prompt')?.innerText ?? null")?, "placeholder": chrome.eval(&page, "document.getElementById('text').placeholder")?, "row": chrome.eval(&shell, &format!("document.querySelector({})?.textContent ?? null", js(&format!("#chats [data-key={}]", js(&format!("chat:{chat}"))))))? }),
     );
     if asked {
         chrome.click(&page, install)?;
@@ -1146,12 +1149,12 @@ fn claude_install(s: &mut Suite, api: &Api, chrome: &mut Browser, owner: &Keys, 
     // signed out: the sign-in card, its link and its masked field
     let field = ".prompt:not(.closed) input[data-option=\"code\"]";
     let card = |chrome: &mut Browser, says: &str| chrome.until(&page, &format!("document.querySelector({0})?.type === 'password' && !document.querySelector({0}).disabled && (document.querySelector('.prompt:not(.closed) .prompt-text')?.textContent ?? '').startsWith({1})", js(field), js(says)), TURN);
-    let signing = card(chrome, CLAUDE_SIGN_IN_ASK) && shows(chrome, &page, WAITING_FOR_YOU);
+    let signing = card(chrome, CLAUDE_SIGN_IN_ASK) && shows(chrome, &page, WAITING_FOR_YOU) && shows(chrome, &shell, &row_waits);
     let ran = records(api, owner, &chat, "work").iter().any(|r| r["body"]["kind"] == "turn.step" && r["body"]["args"] == "Anthropic's installer (Claude Code 2.1.316)");
     let link = chrome.eval(&page, "document.querySelector('.prompt:not(.closed) .prompt-text a')?.href ?? ''")?;
     let _ = chrome.screenshot(&shell, &shots.join("claude-sign-in-card.png"));
     s.ok(
-        "Install installs it (the turn says the installer ran); signed out, the turn asks on a card to sign in: a link to Anthropic's sign-in, and a masked field for its code that goes straight to the computer, the message box saying it waits for them",
+        "Install installs it (the turn says the installer ran); signed out, the turn asks on a card to sign in: a link to Anthropic's sign-in, and a masked field for its code that goes straight to the computer, the message box and its row saying it waits for them",
         ran && signing
             && link.as_str().is_some_and(|l| l.starts_with("https://claude.com/cai/oauth/authorize?"))
             && chrome.eval(&page, "document.querySelector('.prompt:not(.closed) .prompt-note')?.textContent ?? ''")?.as_str().is_some_and(|n| n.contains("straight to your computer")),

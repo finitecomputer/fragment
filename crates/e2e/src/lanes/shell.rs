@@ -1543,12 +1543,14 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     let fits = b.eval(&page, "document.documentElement.scrollWidth <= innerWidth + 1")?;
     s.ok("on a phone it fits its width, a chat open", phone && fits == true, &fits);
     // the open chat names its agent once `__people` answers, in its
-    // composer's placeholder ("Message Reader", which no innerText holds),
-    // and the picture waits for it; the frame the shell shows names its
+    // composer's placeholder ("Message Reader", which no innerText holds;
+    // "Reader is waiting for you" while a card of theirs waits there), and
+    // the picture waits for it; the frame the shell shows names its
     // fragment (`data-fragment`), whose flat host its page is on
     let open = b.eval(&page, "[...document.querySelectorAll('#frames iframe')].find((f) => !f.hidden)?.dataset.fragment ?? null")?;
     let host = open.as_str().unwrap_or_default().to_string();
-    let names = |p: &Value| p.as_str().is_some_and(|p| p.len() > "Message ".len() && p.starts_with("Message "));
+    const WAITING: &str = " is waiting for you";
+    let names = |p: &Value| p.as_str().is_some_and(|p| (p.len() > "Message ".len() && p.starts_with("Message ")) || (p.len() > WAITING.len() && p.ends_with(WAITING)));
     let t0 = std::time::Instant::now();
     let mut placeholder = Value::Null;
     // bounded: the wait, a look every 250 ms
