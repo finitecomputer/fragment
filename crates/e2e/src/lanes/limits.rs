@@ -105,3 +105,74 @@ pub fn lockdown(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("and the app itself answers again", r.status == 200 && r.body["result"]["hello"] == "still here", &r);
     Ok(())
 }
+
+/// An app that makes `n` calls of one capability in one call into it,
+/// until the runtime refuses one: how many it made, and the refusal.
+const BURN_APP: &[u8] = br#"import { DurableObject } from "cloudflare:workers";
+export class App extends DurableObject {
+  async burn({ op, n }) {
+    const call = {
+      "files.list": () => this.files.list("none/"),
+      "files.read": () => this.files.readBytes("note.md"),
+      "files.stat": () => this.files.stat("note.md"),
+      "search.status": () => this.searchIndex.status(),
+    }[op];
+    let made = 0;
+    try {
+      while (made < n) { await call(); made++; }
+      return { made, error: null };
+    } catch (e) {
+      return { made, error: String(e?.message ?? e) };
+    }
+  }
+}
+"#;
+const BURN_JSON: &[u8] = br#"{ "name": "burn", "operations": { "burn": { "kind": "query", "role": "viewer" } } }"#;
+
+/// What one capability call costs an app's facet, in subrequests
+/// (`limits::APP_SUBREQUESTS`): each kind on a fragment of its own, made
+/// in one call until the runtime refuses one; and whether the budget is
+/// each call's or the running facet's (two calls of 30 in a row on a fresh
+/// one: the second makes 20 when the 50 are shared). Run by name; it
+/// measures and gates nothing. Only Cloudflare enforces the limit (a local
+/// node makes every call asked), so it is a hosted lane's measure.
+pub fn capability_cost(s: &mut Suite, api: &Api) -> Result<()> {
+    if !s.section_by_name("capability-cost", &[], "it measures what a capability call costs an app's facet in subrequests, which only Cloudflare enforces") {
+        return Ok(());
+    }
+    let owner = api.person()?;
+    let budget = fragment_proto::limits::APP_SUBREQUESTS as u64;
+    let fresh = |label: &str| -> Result<String> {
+        let name = s.named(api, &owner, label)?;
+        let c = s.create(api, &owner, &name)?;
+        s.commit(&c, &[("app.mjs", Some(BURN_APP)), ("fragment.json", Some(BURN_JSON)), ("note.md", Some(b"# Note\n\na line\n"))]);
+        s.deploy(&c);
+        Ok(name)
+    };
+    let burn = |name: &str, op: &str, n: u64, id: &str| -> Result<Value> {
+        let r = api.op(&owner, name, "burn", id, json!({ "op": op, "n": n }))?;
+        Ok(json!({ "op": op, "status": r.status, "asked": n, "made": r.body["result"]["made"], "error": r.body["result"]["error"] }))
+    };
+    let mut rows = vec![];
+    for op in ["files.list", "files.stat", "files.read", "search.status"] {
+        let name = fresh(&format!("burn-{}", op.replace('.', "-")))?;
+        let mut row = burn(&name, op, budget * 2, "burn")?;
+        // refused after `made`: each call costs between budget / (made + 1) and budget / made
+        let cost = row["made"].as_u64().filter(|m| *m > 0 && *m < budget * 2).map(|m| format!("{:.2}..{:.2}", budget as f64 / (m + 1) as f64, budget as f64 / m as f64));
+        println!("      {op}: {} of {} made in one call on a fresh facet, {}", row["made"], budget * 2, cost.as_ref().map_or("none refused".into(), |c| format!("so each costs {c} of its {budget} subrequests")));
+        row["cost"] = json!(cost);
+        rows.push(row);
+    }
+    // the budget: each call's, or the running facet's
+    let name = fresh("burn-shared")?;
+    let first = burn(&name, "files.list", 30, "first")?;
+    let second = burn(&name, "files.list", 30, "second")?;
+    let third = burn(&name, "files.list", 1, "third")?;
+    println!("      two calls of 30 on one facet: the first made {}, the second {}, a third of 1 then {}", first["made"], second["made"], third["made"]);
+    let out = s.dir("capability-cost");
+    let report = json!({ "deployment": api.base, "budget": budget, "fresh": rows, "shared": [first, second, third] });
+    std::fs::write(out.join("cost.json"), serde_json::to_vec_pretty(&report)?)?;
+    println!("      (cost: {})", out.join("cost.json").display());
+    s.ok("each capability kind was measured on a facet of its own, and the budget's scope probed", rows.iter().all(|r| r["status"] == 200) && first["status"] == 200, &report);
+    Ok(())
+}
