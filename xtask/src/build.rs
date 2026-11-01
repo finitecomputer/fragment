@@ -299,11 +299,26 @@ pub fn images() -> Result<()> {
 /// its output shown only when it fails; a push's (`tag`: image.rs) is
 /// tagged, and its output shown as it runs.
 pub fn image_build(image: &serde_json::Value, tag: Option<&str>) -> Result<()> {
+    docker_build(image, tag, &["--load".as_ref()])
+}
+
+/// One image built and pushed as `tag` straight from BuildKit's builder:
+/// never loaded into Docker's own store, which would hold it a second time
+/// and send it there as a tarball first (the Hermes image: 5.9 GB more of
+/// a runner's disk, a 72 GB runner's filled so, and 44 s; FIN-360).
+/// BuildKit writes what it pushed to `metadata` (its digest,
+/// `containerimage.digest`).
+pub fn image_push(image: &serde_json::Value, tag: &str, metadata: &Path) -> Result<()> {
+    docker_build(image, Some(tag), &["--push".as_ref(), "--metadata-file".as_ref(), metadata.as_os_str()])
+}
+
+/// `docker build` of `image`, `how` its output (`--load`, or `--push`).
+fn docker_build(image: &serde_json::Value, tag: Option<&str>, how: &[&std::ffi::OsStr]) -> Result<()> {
     let dockerfile = image["dockerfile"].as_str().context("an image names its dockerfile")?;
     let context = image["build_context"].as_str().context("an image names its build context")?;
     let text = std::fs::read(dockerfile).with_context(|| format!("read {dockerfile}"))?;
     let mut cmd = Command::new("docker");
-    cmd.args(["build", "--load", "--platform", "linux/amd64", "--provenance=false"]);
+    cmd.arg("build").args(how).args(["--platform", "linux/amd64", "--provenance=false"]);
     if let Some(tag) = tag {
         cmd.args(["-t", tag]);
     }

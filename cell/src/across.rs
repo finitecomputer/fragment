@@ -81,7 +81,7 @@ async fn question_vector(env: &Env, cfg: &Config, who: &Signed, asked: &Across, 
     let Some(payer) = payer else { return Ok(None) };
     // after the slot's query prefix, as each child's chunks after its
     // document prefix (searchable.rs)
-    Ok(match embedded(env, &[cfg.models.embeddings.question(&asked.q)], &payer, agent, None, ctx).await? {
+    Ok(match embedded(env, &[cfg.models.embeddings.question(&asked.q)], &payer, agent, None, ctx, None).await? {
         Embedding::Vectors { vectors, .. } => vectors.into_iter().next().map(|v| rules::vector_b64(&v)),
         Embedding::Refused { status, text, .. } => {
             console_warn!("{}", json!({ "event": "search.across-unembedded", "status": status, "why": text }));

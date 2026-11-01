@@ -818,6 +818,10 @@ so are the limits named here.
   each field named, `after` and `before` by a section's `at`. A hit's
   `lexical` and `semantic` are its rank and score in each leg; cosines of
   answers naming one `space` and `scheme` compare across fragments.
+- **Its waits**: an answer from the index says in `Server-Timing` what
+  it waited on, `<part>;dur=<ms>` each, and nothing else: `gate` (the
+  payer's ledger), `key` (the model's key), `embed` (the question's
+  embedding) and `index`, each part only if it ran.
 - **Many fragments at once**: the platform's own route embeds a question
   once and asks each fragment's supervisor at `POST /search/asked`
   (`Forwarded {query, vector?}`), which the router maps no outside path

@@ -105,6 +105,12 @@ impl Text {
     fn sentence(&mut self, words: usize) -> String {
         (0..words).map(|_| self.word()).collect::<Vec<_>>().join(" ")
     }
+
+    /// A sentence of the stream from here, the stream left where it was
+    /// (for a closure that cannot move it): each call, the same.
+    fn clone_sentence(&self, words: usize) -> String {
+        Text(self.0).sentence(words)
+    }
 }
 
 /// p50 and p95 of `ms`, in milliseconds.
@@ -119,6 +125,91 @@ fn timed(f: impl FnOnce() -> Result<crate::api::Reply>) -> Result<(f64, u16, Val
     let t0 = Instant::now();
     let r = f()?;
     Ok((t0.elapsed().as_secs_f64() * 1000.0, r.status, r.body))
+}
+
+/// A reply's `Server-Timing`, `{part: ms}` (`{}` for none): what the
+/// cell says it waited on.
+fn server_timing(r: &crate::api::Reply) -> Value {
+    let value = r.headers.get("server-timing").and_then(|v| v.to_str().ok()).unwrap_or_default();
+    let parts = value.split(", ").filter_map(|entry| entry.split_once(";dur=")).filter_map(|(part, ms)| Some((part.to_string(), json!(ms.parse::<f64>().ok()?))));
+    Value::Object(parts.collect())
+}
+
+/// Distinct sections the cold split's fragments repeat: what is loaded
+/// cold (every chunk's code, every page) is the fragment's size, not its
+/// text's variety, so few embedding calls make a large one.
+const COLD_POOL: usize = 1_000;
+/// The cold split's large fragment, and its small one.
+const COLD_LARGE: usize = 25_000;
+const COLD_SMALL: usize = 1_000;
+
+/// The first search after idle, split into its parts by a sequence that
+/// adds one cold part at each step, `samples` times after `idle` each:
+/// the Worker (`/healthz`, which no object answers), the fragment's
+/// objects waking (its status, then again), its words' pages (a words
+/// search, then again), then a small fragment's first search by meaning
+/// (the embedding's first call from its supervisor, codes too few to
+/// count), then the large one's (its 25k codes read into memory), each
+/// then again warm. Each part is a step's time less the same step warm;
+/// each answer's `Server-Timing` says what the cell waited on inside it.
+fn cold(s: &mut Suite, api: &Api, samples: usize, idle: Duration) -> Result<()> {
+    let owns = |n: usize| n.min(COLD_POOL).div_ceil(EMBED_BATCH) as u64 + 4;
+    let asks = samples as u64 * 4 + 2;
+    let reader = api.person_paying(asks)?;
+    let (large, _, _) = write_pooled(s, api, &reader, owns(COLD_LARGE), "bench-cold-large", COLD_LARGE, COLD_POOL)?;
+    let (small, _, _) = write_pooled(s, api, &reader, owns(COLD_SMALL), "bench-cold-small", COLD_SMALL, COLD_POOL)?;
+    let mut question = Text(0xc01d);
+    let search = |name: &str, q: &str, mode: &str| api.signed(&reader, "POST", &format!("/api/f/{name}/search"), Some(&json!({ "q": q, "mode": mode, "limit": 10 })));
+    let status = |name: &str| api.signed(&reader, "GET", &format!("/api/f/{name}/search/status"), None);
+    let health = || api.unsigned("GET", "/healthz", None);
+    let mut rows: Vec<Value> = Vec::new();
+    for sample in 0..samples {
+        if !idle.is_zero() {
+            println!("      cold sample {}: idle for {} s", sample + 1, idle.as_secs());
+            std::thread::sleep(idle);
+        }
+        // a step's wall time, and the parts its answer says it waited on
+        let t = |f: &dyn Fn() -> Result<crate::api::Reply>| -> Result<(f64, Value)> {
+            let t0 = Instant::now();
+            let r = f()?;
+            let ms = t0.elapsed().as_secs_f64() * 1000.0;
+            anyhow::ensure!(r.status == 200, "a cold step: {r}");
+            Ok((ms, server_timing(&r)))
+        };
+        let worker = (t(&health)?, t(&health)?);
+        let objects = (t(&|| status(&large))?, t(&|| status(&large))?);
+        let pages = (t(&|| search(&large, &question.clone_sentence(3), "lexical"))?, t(&|| search(&large, &question.clone_sentence(3), "lexical"))?);
+        let small_meaning = (t(&|| search(&small, &question.clone_sentence(3), "semantic"))?, t(&|| search(&small, &question.clone_sentence(3), "semantic"))?);
+        let large_meaning = (t(&|| search(&large, &question.clone_sentence(3), "semantic"))?, t(&|| search(&large, &question.clone_sentence(3), "semantic"))?);
+        question.word();
+        let part = |((first, first_parts), (warm, warm_parts)): ((f64, Value), (f64, Value))| {
+            json!({ "first_ms": first, "warm_ms": warm, "cold_ms": first - warm, "first_parts": first_parts, "warm_parts": warm_parts })
+        };
+        let row = json!({ "worker": part(worker), "objects": part(objects), "words_pages": part(pages), "small_meaning": part(small_meaning), "large_meaning": part(large_meaning) });
+        println!("      cold sample {}: {}", sample + 1, row);
+        rows.push(row);
+    }
+    let median = |k: &str, f: &str| {
+        let mut v: Vec<f64> = rows.iter().filter_map(|r| r[k].pointer(f).and_then(Value::as_f64)).collect();
+        v.sort_by(f64::total_cmp);
+        v.get(v.len() / 2).copied().unwrap_or(f64::NAN)
+    };
+    println!("      part (median of {samples})          first    warm    cold part   (ms, client wall)");
+    for (k, what) in [("worker", "the Worker (/healthz)"), ("objects", "objects wake (status)"), ("words_pages", "words' pages (lexical)"), ("small_meaning", "embed's first (1k)"), ("large_meaning", "25k codes read")] {
+        println!("      {what:<30} {:>7.0} {:>7.0} {:>10.0}", median(k, "/first_ms"), median(k, "/warm_ms"), median(k, "/cold_ms"));
+    }
+    println!("      by meaning, what the answer waited on (median of {samples}, first / warm, ms: Server-Timing)");
+    for (k, what) in [("small_meaning", "1k"), ("large_meaning", "25k")] {
+        let parts: Vec<String> = ["gate", "key", "embed", "index"]
+            .iter()
+            .map(|p| format!("{p} {:.0} / {:.0}", median(k, &format!("/first_parts/{p}")), median(k, &format!("/warm_parts/{p}"))))
+            .collect();
+        println!("      {what:<6} {}", parts.join(", "));
+    }
+    s.ok("the first search after idle is split into its parts", rows.len() == samples, json!(rows));
+    let out = s.dir(SECTION);
+    std::fs::write(out.join("cold.json"), serde_json::to_vec_pretty(&json!({ "base": api.base, "idle_s": idle.as_secs(), "samples": rows }))?)?;
+    Ok(())
 }
 
 /// Sentences and questions that share no word (the question's words are
@@ -167,6 +258,11 @@ fn meaning(s: &mut Suite, api: &Api, reader: &fragment_nip98::Keys, lent: u64) -
 /// person of its own lent `lent` paid calls, its reader a viewer: its
 /// name, its owner, and its row.
 fn write(s: &mut Suite, api: &Api, reader: &fragment_nip98::Keys, lent: u64, label: &str, chunks: usize) -> Result<(String, fragment_nip98::Keys, Value)> {
+    write_pooled(s, api, reader, lent, label, chunks, chunks.min(POOL_MAX))
+}
+
+/// `write`, its distinct sections at most `pool`.
+fn write_pooled(s: &mut Suite, api: &Api, reader: &fragment_nip98::Keys, lent: u64, label: &str, chunks: usize, pool: usize) -> Result<(String, fragment_nip98::Keys, Value)> {
     let keys = api.person_paying(lent)?;
     let created = s.create(api, &keys, &s.name(label))?;
     let name = created["name"].as_str().context("its name")?.to_string();
@@ -174,7 +270,6 @@ fn write(s: &mut Suite, api: &Api, reader: &fragment_nip98::Keys, lent: u64, lab
     anyhow::ensure!(shared.status == 200, "{name}: the reader's share: {shared}");
     let t0 = Instant::now();
     let seed = 0x9e37_79b9_7f4a_7c15 ^ chunks as u64 ^ label.len() as u64;
-    let pool = chunks.min(POOL_MAX);
     let mut written = 0;
     let mut source = 0;
     let mut throttled = 0u64;
@@ -217,6 +312,12 @@ pub fn search_bench(s: &mut Suite, api: &Api) -> Result<()> {
         Err(_) if s.on_fakes() => (vec![200, 1_000], Duration::ZERO),
         Err(_) => (vec![1_000, 10_000], IDLE),
     };
+    // `SEARCH_BENCH_COLD=<samples>`: the first search after idle, split
+    // into its parts (`cold`), and nothing else
+    if let Ok(samples) = std::env::var("SEARCH_BENCH_COLD") {
+        let samples: usize = samples.trim().parse().context("SEARCH_BENCH_COLD is a count of samples")?;
+        return cold(s, api, samples, if s.on_fakes() { Duration::ZERO } else { idle });
+    }
     // `SEARCH_BENCH_IDLE_S`: another idle wait (0: none, a probe's)
     let idle = match std::env::var("SEARCH_BENCH_IDLE_S") {
         Ok(secs) => Duration::from_secs(secs.trim().parse().context("SEARCH_BENCH_IDLE_S is seconds")?),
