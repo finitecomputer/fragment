@@ -377,6 +377,25 @@ fn checks(s: &mut Suite, api: &Api) -> Result<(Keys, String)> {
     let deleted = api.signed(&owner, "DELETE", &format!("/api/f/{doomed}"), None)?;
     let dropped = s.eventually(wait, || index_of(api, &doomed, Some(life_d), None).is_ok_and(|i| ended_empty(&i)));
     s.ok("a deleted fragment's index is ended with its other data, its sources and chunks gone", w.status == 200 && deleted.status == 200 && dropped, json!({ "write": w.body }));
+
+    // ---- a Session Archive's import writes its search (cli/src/session/search.rs)
+    let home = s.dir("search-archive-home");
+    s.login(api, &home);
+    let person = s.cli_keys(&home).context("the CLI logged in")?;
+    let root = s.dir("search-archive-export");
+    super::sessions::export(&root)?;
+    let import = |s: &Suite| s.cli_json(api, &home, &["session", "import", root.to_str().expect("utf-8 path"), "--json"]);
+    let first = import(s)?;
+    let archive = first["archive"].as_str().unwrap_or_default().to_string();
+    let found = api.signed(&person, "POST", &format!("/api/f/{archive}/search"), Some(&json!({ "q": "plant beans" })))?;
+    let again = import(s)?;
+    s.ok(
+        "an import writes its archive's search, each conversation it keeps a source of its turns, which its person finds by their words; the same import again writes nothing",
+        first["search"]["state"] == "written" && first["search"]["written"] == 3 && first["search"]["refused_count"] == 0
+            && found.status == 200 && found.body["results"][0]["source"] == "sessions/hermes-e2e_beans.json"
+            && again["search"]["state"] == "written" && again["search"]["written"] == 0 && again["search"]["unchanged"] == 3,
+        json!({ "first": first["search"], "found": found.body["results"][0], "again": again["search"] }),
+    );
     Ok((owner, name))
 }
 
