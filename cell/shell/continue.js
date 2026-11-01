@@ -106,7 +106,7 @@ export function createContinue({
   // one removed leaves their list at once, its computer a moment later
   // (Settings' Remove agent, FIN-250), and is never offered
   function agents() {
-    const listed = new Set(allFragments().filter((f) => f.kind === "agent").map((f) => f.name));
+    const listed = new Set(allFragments().map((f) => f.name));
     return [...computerAgents().values()].filter((a) => a.fragment && listed.has(a.fragment)).map((a) => ({ identity: a.identity, fragment: a.fragment, title: titleOf(a.fragment) }));
   }
   const titled = (identity) => agents().find((a) => a.identity === identity)?.title ?? "";
