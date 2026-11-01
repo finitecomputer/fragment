@@ -144,6 +144,11 @@ the question, best first, each with its best snippet.
   and skipped: the import stands. A search that is full (its index's
   chunks are capped: 507) is sent no more; each conversation not written
   is counted refused, and the next import writes it once there is room.
+  One whose embeddings are rate limited (429 with `retry_after_ms`, a
+  limit the whole deployment shares) is waited out exactly, all of the
+  import's writers holding to one time ("Waiting 37 s for the search
+  service…"), and the refused write sent again; one refused so 20 times
+  in a row is counted refused, and the import stands.
 
 ### Section text
 

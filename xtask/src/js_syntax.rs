@@ -60,12 +60,15 @@ pub const PROCESSES_MAX: usize = 8;
 const SHELL: &str = "cell/shell/shell.js";
 /// A test file's name ends so (`node --test`'s own default).
 const TEST_SUFFIX: &str = ".test.mjs";
-/// The shell's tests, which a walk must find: the chat page's control.js's,
+/// The shell's tests, which a walk must find: the Apps page's cards
+/// (apps-page.js), the chat page's control.js's,
 /// chat-list.js's (its sections, and whom the ways to ask for an app ask),
 /// the messages between the shell and its frames, history-page.js's,
-/// launcher.js's Knowledge, onboarding.js's, session-archive.js's and
-/// threads.js's.
-const SHELL_TESTS: [&str; 9] = [
+/// the messages between the shell and its frames, history-page.js's,
+/// launcher.js's Knowledge, onboarding.js's, session-archive.js's, an
+/// import's words (session-text.js) and threads.js's.
+const SHELL_TESTS: [&str; 11] = [
+    "cell/shell-tests/apps-cards.test.mjs",
     "cell/shell-tests/asked-agent.test.mjs",
     "cell/shell-tests/chat-control.test.mjs",
     "cell/shell-tests/chat-list.test.mjs",
@@ -74,6 +77,7 @@ const SHELL_TESTS: [&str; 9] = [
     "cell/shell-tests/launcher-knowledge.test.mjs",
     "cell/shell-tests/onboarding.test.mjs",
     "cell/shell-tests/session-archive.test.mjs",
+    "cell/shell-tests/session-text.test.mjs",
     "cell/shell-tests/threads.test.mjs",
 ];
 

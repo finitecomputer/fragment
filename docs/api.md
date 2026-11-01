@@ -7,9 +7,11 @@ the CLI, the browser library and computers' images are its clients, and
 there.
 
 Errors are `{"error": "<code>", "message": "..."}` (`proto::ErrorCode`).
-Billing's, seats' and orgs' refusals add `"reason"` (`proto::Reason`)
+Billing's, seats', orgs' and reach's refusals add `"reason"` (`proto::Reason`)
 where one status has several causes a person acts on differently. It is
-add-only: a reason a client does not know reads as none.
+add-only: a reason a client does not know reads as none. A refusal that
+knows how long to wait before asking again adds `"retry_after_ms"` and a
+`Retry-After` header (a search write its embeddings model rate-limits).
 
 Any route may answer:
 
@@ -292,6 +294,7 @@ calls the same.
 | --- | --- | --- |
 | `GET /api/admin/people?q=&after=` | operators | → `AdminPeople {people: [AdminPerson {npub, email, joinedAt, lastSignInAt, org, admin, seat: {id, kind, comped, good, sleeps}}], next}`: 100 a page by npub; `q`, the start of their email (any case; wildcards match only themselves) |
 | `GET /api/admin/people/{npub}` | the same | → `{person, ledger: LedgerStatus, computer: ComputerView \| null, references: {running, next} \| null}`: the full image references its computer runs and its next start runs |
+| `GET /api/admin/people/{npub}/reach` | the same | → `{owned, reaching: {<kind>: n}, beyond: {<kind>: n}, unanswered}`: of the fragments they own, how many of each kind have reach, and how many of those are shared beyond them and their agents (Sharing; counts only, no names). `fragment operator reach` sums them over everyone |
 | `PUT /api/admin/people/{npub}/computer/image` | the same | `{image}` → `ComputerView`, pinned as its owner's `PUT /api/computers/{id}/image` pins it; logged (`pin`). An image the deployment lacks 400; no computer 404 |
 | `GET /api/admin/orgs?after=` | the same | → `AdminOrgs {orgs: [AdminOrg {id, name, createdAt, status, customer, subscription, periodEnd, cancelAtEnd, admins, paidSeats, compedSeats, pending}], next}` |
 | `GET /api/admin/health` | the same | → `AdminHealth {orgsPaying, orgsLapsed, seatsPaid, seatsComped, planPushesQueued, quantityPushesQueued, failing: [{queue, target, tries, due}], lastEventAt, oldestCopyAt}` |
@@ -554,6 +557,20 @@ only by the platform's own pages, severs its opener, loads scripts,
 styles and images only from the platform (`Content-Security-Policy`), and
 sends `Referrer-Policy: same-origin`.
 
+**Reach stays private** (Paul, 2026-11-01, FIN-352; temporary:
+docs/technical-debt-ledger.md). A fragment holding a secret or a door
+(a connector bound, an agent's SimpleX door) has reach (`status.reach`,
+`Sharing.reach` in its owner's row), and is shared with no one but its
+owner and their own agents. While it has reach, anyone else added or
+given a role, an invite or its yes, and `link` or `public` visibility are
+403 `reason: private_while_reaching`; while it is shared beyond them
+(`Sharing::beyond`: not `members`, someone else in it, or an invite
+waiting), `PUT secrets`, `__secrets`, a connector's link and an agent's
+door ticket are 403 `reason: unshare_first`. Narrowing it is never
+refused, and one shared before the rule keeps serving. The sheet then adds
+no one and offers `members` only. A public address is the same members
+and visibility, so no sharing.
+
 On a chat one of the owner's agents is in, the sheet, and `fragment
 members add`, say "People in this chat can talk to your agent."
 (`fragment_core::access::TRUST_WARNING`): whoever is in a chat may talk to
@@ -765,7 +782,8 @@ so are the limits named here.
   capability, bound to its own fragment). The app acts as the fragment: no
   role is checked, and everything it embeds, its questions included, is
   paid by the fragment's owner. A refusal throws, with the platform's
-  `code` and `status`, and `cleared` and `fence` where the answer has them.
+  `code` and `status`, and `cleared`, `fence` and `retry_after_ms` where
+  the answer has them.
 - **A source is written whole**, in one transaction: its sections replace
   what it held. The same `(source, revision)` again writes nothing;
   `replaces` is a compare-and-set on its revision (`""`: none yet), else
@@ -800,6 +818,10 @@ so are the limits named here.
   each field named, `after` and `before` by a section's `at`. A hit's
   `lexical` and `semantic` are its rank and score in each leg; cosines of
   answers naming one `space` and `scheme` compare across fragments.
+- **Its waits**: an answer from the index says in `Server-Timing` what
+  it waited on, `<part>;dur=<ms>` each, and nothing else: `gate` (the
+  payer's ledger), `key` (the model's key), `embed` (the question's
+  embedding) and `index`, each part only if it ran.
 - **Many fragments at once**: the platform's own route embeds a question
   once and asks each fragment's supervisor at `POST /search/asked`
   (`Forwarded {query, vector?}`), which the router maps no outside path
@@ -1283,7 +1305,11 @@ it embeds (nomic-embed-text's `search_document: ` and `search_query: `),
 which its index's `space` names, so a change of either is a new space
 there too. `inputs_max` (1 to `embed::INPUTS_MAX`, that unnamed) is the
 inputs its model takes in one call (Tinfoil's 32): a search embeds in
-batches of it, and this route refuses a call of more, 400. This route
+batches of it, and this route refuses a call of more, 400. A search write
+the model rate-limits is 429 `rate_limited` with `retry_after_ms` (and
+`Retry-After`, in seconds): the model's own wait, else 60 s, held between
+1 s and 10 minutes; its writer waits that long, then writes again. A
+question it rate-limits is answered by its words alone. This route
 embeds an agent's input as given. A deployment whose
 tiers are private embeds only on a slot marked `private` (else 403). Refused 400 before anything is sent:
 `input` not a string or 1 to `embed::INPUTS_MAX` strings, an empty one, or

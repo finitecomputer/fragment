@@ -744,7 +744,7 @@ mod tests {
             (ErrorCode::Deploying, "unavailable"),
         ];
         for (error, cli) in table {
-            let body = serde_json::to_vec(&ErrorBody { error, message: "name taken, already exists".into(), reason: None }).unwrap();
+            let body = serde_json::to_vec(&ErrorBody { error, message: "name taken, already exists".into(), reason: None, retry_after_ms: None }).unwrap();
             let refusal = Resp { status: error.status(), body }.refusal();
             assert_eq!(refusal.code.as_str(), cli, "{error:?}");
             assert_eq!(refusal.msg, format!("http {}: name taken, already exists", error.status()));

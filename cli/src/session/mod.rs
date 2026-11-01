@@ -967,6 +967,45 @@ mod tests {
         assert!(held("sessions/hermes-gone.json").is_some() && held("notes/x.md").is_some(), "nothing deleted: the platform forgets a source when its file goes");
     }
 
+    /// Goal (preview's embeddings rate limit): search's 429 with
+    /// `retry_after_ms` is waited out, every writer holding to one time,
+    /// and the import carries on: each conversation written, none refused,
+    /// a refused write sent again. Method: the fake refuses the first two
+    /// writes, 80 ms each.
+    #[test]
+    fn an_import_waits_out_searchs_rate_limit_and_carries_on() {
+        let (mock, c) = archive();
+        mock.enable_search(NAME);
+        let spool = spooled((0..3).map(|i| session(&format!("r{i}"), Kind::Chat, "2026-10-01T09:00:00Z", &["hello", "hi"])).collect());
+        write(&c, NAME, &spool).unwrap();
+        mock.search_index(NAME, |ix| ix.rate_limited.extend([80, 80]));
+        mock.take_requests("");
+        let began = std::time::Instant::now();
+        let s = search::sync(&c, NAME, &spool);
+        let sent = mock.take_requests("").get("POST upsert").copied().unwrap_or(0);
+        assert!(matches!(s, search::Searched::Written { written: 3, refused_count: 0, unresolved: 0, .. }), "{s:?}");
+        assert_eq!(sent, 5, "each write refused for the limit is sent again, once");
+        assert!(began.elapsed() >= std::time::Duration::from_millis(80), "the wait is waited: {:?}", began.elapsed());
+        assert_eq!(mock.search_index(NAME, |ix| ix.sources.len()), Some(3));
+    }
+
+    /// Goal: a write refused for the rate limit `RATE_WAITS_MAX` times in a
+    /// row is counted refused, saying why, and the import stands. Method:
+    /// one conversation, the fake refusing every write, 1 ms each.
+    #[test]
+    fn a_write_rate_limited_past_its_waits_is_counted_refused() {
+        let (mock, c) = archive();
+        mock.enable_search(NAME);
+        let spool = spooled(vec![session("r", Kind::Chat, "2026-10-01T09:00:00Z", &["hello"])]);
+        write(&c, NAME, &spool).unwrap();
+        mock.search_index(NAME, |ix| ix.rate_limited.extend(std::iter::repeat_n(1, search::RATE_WAITS_MAX + 1)));
+        mock.take_requests("");
+        let s = search::sync(&c, NAME, &spool);
+        let sent = mock.take_requests("").get("POST upsert").copied().unwrap_or(0);
+        assert!(matches!(&s, search::Searched::Written { written: 0, refused_count: 1, refused, .. } if refused[0].why.contains("rate limited")), "{s:?}");
+        assert_eq!(sent as usize, search::RATE_WAITS_MAX + 1, "waited out RATE_WAITS_MAX times, then refused");
+    }
+
     /// A search that is full (507) is sent no more: the import's writes
     /// stop there, and each conversation not written is counted refused.
     #[test]

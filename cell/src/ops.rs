@@ -591,6 +591,27 @@ impl FragmentCell {
                 let n = self.rows("UPDATE members SET kind = NULL WHERE principal = ? RETURNING principal", vec![principal.into()])?.len();
                 json!({ "members": n })
             }
+            Some("legacy-reach") => {
+                // a key set before FIN-352 (2026-11-01), while it was shared
+                // beyond its owner and their agents, as such fragments were
+                // left (reach.rs): sealed and stored as `PUT secrets` did
+                // then, past the rule as an older release wrote it
+                let name = body["name"].as_str().unwrap_or("LEGACY_KEY");
+                if !fragment_proto::valid_secret_name(name) {
+                    return Err(CellError::invalid("legacy-reach names a secret"));
+                }
+                let sealed = crate::keys::seal(&self.env, &self.scope(), body["value"].as_str().unwrap_or("legacy").as_bytes()).await?;
+                self.exec(
+                    "INSERT INTO secrets (name, sealed, set_by, set_at) VALUES (?, ?, 'legacy', ?) ON CONFLICT (name) DO UPDATE SET sealed = excluded.sealed",
+                    vec![name.into(), sealed.into(), SqlStorageValue::Integer(js::now_ms())],
+                )?;
+                for host in body["hosts"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+                    self.exec("INSERT OR IGNORE INTO secret_hosts (name, host) VALUES (?, ?)", vec![name.into(), host.into()])?;
+                }
+                // its owner's row never told (that release sent no `reach`)
+                self.del_meta(MetaKey::ReachTold)?;
+                json!({ "reach": self.reaches()? })
+            }
             Some("members") => {
                 let fill = body["fill"].as_u64().ok_or_else(|| CellError::invalid("fill is a count"))?;
                 json!({ "members": self.fill_members(fill)? })

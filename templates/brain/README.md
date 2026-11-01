@@ -45,7 +45,7 @@ CLI in the brain's AGENTS.md, `applib/guide.mjs`):
 `search {q, limit?, wiki?}` (a query, viewers and up) answers ranked
 sections, best first, by words and by meaning: `{q, results: [{rank, path,
 wiki, title, heading, ancestry, snippet, signals}], semantic, pending,
-indexing, hint?}`.
+indexing, waiting_ms, hint?}`.
 
 - **The index** is the fragment's own (docs/api.md, "A fragment's
   search"), written and asked through the app's `this.searchIndex`: each
@@ -86,6 +86,14 @@ indexing, hint?}`.
   again.
 - **Behind its files**, a search answers `indexing: true` and a `hint`
   naming the job that finishes it, and the page says so.
+- **A pause the search service asks for** (429 `rate_limited`, as a rate
+  limit answers, with its `retry_after_ms`: kept within a second and ten
+  minutes, a minute if it names none) fails nothing: the batch lets go of
+  its claims, no batch claims until the pause is over, and a run sleeps it
+  out (a durable step, in the run: a rebuild may meet more rate windows
+  than a chain has hops) and goes on. Meanwhile a search answers
+  `waiting_ms`, what is left of it, its `hint` says so, and the page says
+  "Indexing: waiting for the search service." and starts no run.
 - **Limits.** `q` is 1 to 256 characters; `limit` 1 to 50 (10 by default).
   A page of 1 MiB or more is a blob, not read, and is listed as skipped;
   a page keeps at most 500 sections of 8000 characters. The index holds
@@ -93,8 +101,8 @@ indexing, hint?}`.
   (a page refused for room is skipped "the index is full", and tried
   again at its next pass).
 - `index_status {}` answers `{format, pages, sections, pending, indexing,
-  running, writes, skipped, index: {chunks, chunks_split, chunks_max,
-  semantic}}`; `reindex {full: true}` (editors) reads every file again.
+  running, waiting_ms, writes, skipped, index: {chunks, chunks_split,
+  chunks_max, semantic}}`; `reindex {full: true}` (editors) reads every file again.
 
 ## The page
 

@@ -8,7 +8,7 @@
 // platform allows (Alex's reviews of #869): batches side by side, a claim
 // that lapses, a page deleted or made while read, a newer batch that finds
 // the same bytes as the last it wrote, an index emptied by an embeddings
-// change, a batch that fails.
+// change, a batch that fails, a search service that asks for a pause.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { register } from "node:module";
@@ -101,7 +101,9 @@ function files(initial) {
 // `clearNext` makes the next write empty it first, as a write in a new
 // embeddings space does, its fences kept, the clear said on whatever comes
 // of the write. `forget` is the platform's own delete, which sends no fence;
-// `holdDelete` holds the next delete until it is let go.
+// `holdDelete` holds the next delete until it is let go; each of `limited`
+// turns one write away as a rate limit does (429 `rate_limited`, with the
+// `retry_after_ms` it names, if it names one).
 function index() {
   const sources = new Map();
   const fences = new Map();
@@ -111,6 +113,7 @@ function index() {
     fences,
     writes: 0,
     fail: null,
+    limited: [],
     clearNext: false,
     text: (source) => sources.get(source)?.text ?? null,
     forget: (source) => sources.delete(source),
@@ -122,6 +125,8 @@ function index() {
     },
     async upsert(src) {
       if (ix.fail?.(src)) return refused("upstream_failed", 502);
+      const limited = ix.limited.shift();
+      if (limited) return refused("rate_limited", 429, limited);
       const stored = fences.get(src.source);
       if (src.fence !== undefined && stored !== undefined && src.fence < stored) return refused("conflict", 409, { fence: stored });
       let cleared = false;
@@ -430,5 +435,89 @@ it("a delete whose claim lapsed never takes out a page made again the same, whic
     const after = await settle(app);
     assert.equal(ix.text("w/a.md"), "first", `the stale delete landed ${stale} the newer batch`);
     assert.equal(after.pending, 0);
+  }
+});
+
+// The search service turns writes away for a while (Tinfoil's rate limit:
+// 429 `rate_limited`, `retry_after_ms`): a batch lets go and says how long,
+// and a run sleeps that out and finishes, failing nothing.
+it("a 429 lets go of the batch's claims and answers its wait; until it is over a batch claims nothing", async (t) => {
+  const tick = clock(t);
+  const { app, fs, ix, ctx } = await brain({});
+  fs.at.set("w/a.md", "# A\n\none");
+  fs.at.set("w/b.md", "# B\n\ntwo");
+  mark(app, "w/a.md", "w/b.md");
+  ix.limited.push({ retry_after_ms: 5000 });
+  const r = await app.reindex({}, EDITOR);
+  assert.deepEqual([r.wait, r.indexed, r.pending], [5000, 0, 2]);
+  assert.ok(claims(ctx).every((c) => c.by === null), "its claims let go");
+  const st = await app.index_status();
+  const found = await app.search({ q: "one" });
+  assert.deepEqual([st.waiting_ms, st.running, found.waiting_ms], [5000, false, 5000]);
+  assert.match(found.hint, /waiting for the search service/);
+  tick(4000);
+  const early = await app.reindex({}, EDITOR);
+  assert.deepEqual([early.claimed, early.wait], [0, 1000]);
+  tick(1000);
+  const after = await app.reindex({}, EDITOR);
+  assert.deepEqual([after.indexed, after.pending, after.wait], [2, 0, 0]);
+  assert.deepEqual([ix.text("w/a.md"), ix.text("w/b.md"), (await app.index_status()).waiting_ms], ["one", "two", 0]);
+});
+
+it("a run sleeps out each wait the search service asks for, a durable step, and finishes", async (t) => {
+  const tick = clock(t);
+  const { app, fs, ix } = await brain({});
+  fs.at.set("w/a.md", "# A\n\none");
+  mark(app, "w/a.md");
+  // one names its wait, the next names none (a minute)
+  ix.limited.push({ retry_after_ms: 5000 }, {});
+  const slept = [];
+  const job = {
+    run: 1,
+    call: (op, input) => app[op](input, EDITOR),
+    sleep: async (ms) => {
+      slept.push(ms);
+      tick(ms);
+    },
+  };
+  const out = await app.changed({}, job);
+  assert.deepEqual(slept, [5000, 60_000]);
+  assert.deepEqual([out.rated, out.pending, out.next], [2, 0, false]);
+  assert.equal(ix.text("w/a.md"), "one");
+});
+
+it("a wait the search service asks for is kept within a second and ten minutes", async (t) => {
+  const tick = clock(t);
+  const { app, fs, ix } = await brain({});
+  fs.at.set("w/a.md", "# A\n\none");
+  mark(app, "w/a.md");
+  const waits = [];
+  for (const retry_after_ms of [50, 3_600_000, -1, "soon"]) {
+    ix.limited.push({ retry_after_ms });
+    const r = await app.reindex({}, EDITOR);
+    waits.push(r.wait);
+    tick(r.wait);
+  }
+  assert.deepEqual(waits, [1000, 600_000, 60_000, 60_000]);
+  assert.equal((await settle(app)).pending, 0);
+});
+
+it("an editor's full pass asked during a pause is kept, and done after it; a viewer's is not", async (t) => {
+  const tick = clock(t);
+  for (const role of ["editor", "viewer"]) {
+    const { app, fs, ix } = await brain({ "w/a.md": "# A\n\none", "w/b.md": "# B\n\ntwo" });
+    // the index lost b (the full pass's own repair), and a's change meets a 429
+    ix.sources.delete("w/b.md");
+    fs.at.set("w/a.md", "# A\n\nuno");
+    mark(app, "w/a.md");
+    ix.limited.push({ retry_after_ms: 5000 });
+    assert.equal((await app.reindex({}, EDITOR)).wait, 5000);
+    const asked = await app.reindex({ full: true }, { role });
+    assert.deepEqual([asked.claimed, asked.wait], [0, 5000], "a pause defers the full pass's listing and writes");
+    tick(5000);
+    const after = await settle(app);
+    assert.equal(after.pending, 0);
+    assert.equal(ix.text("w/a.md"), "uno");
+    assert.equal(ix.text("w/b.md"), role === "editor" ? "two" : null, `a full pass a ${role} asked during the pause`);
   }
 });
