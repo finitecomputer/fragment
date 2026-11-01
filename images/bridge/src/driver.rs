@@ -392,11 +392,18 @@ pub async fn run(cfg: Config, runtimes: Runtimes, stop: watch::Receiver<bool>) -
                     // their phone too, once posted, whatever started its turn
                     let mirrored = simplex.is_some() && engine.mirror(&agent) == Some(fragment.as_str());
                     let relay = mirrored.then(|| for_simplex(channel, &body, files.len())).flatten();
-                    lanes.push(&fragment, Job::Post { agent, channel, id, body, files, relay })
+                    // an asked turn's files go with its answer too (#721)
+                    let answers = !files.is_empty() && body["turn"].as_str().and_then(|t| engine.state().turns.get(t)).is_some_and(|t| t.ret.is_some());
+                    lanes.push(&fragment, Job::Post { agent, channel, id, body, files, relay, answers })
                 }
                 Effect::Claim { agent, fragment, turn, id, body } => lanes.push(&fragment, Job::Claim { agent, turn, id, body }),
                 Effect::Fence { agent, fragment, turn, prompt, id, body } => lanes.push(&fragment, Job::Fence { agent, turn, prompt, id, body }),
-                Effect::Owed { agent, fragment, channel, turn, id, body } => lanes.push(&fragment, Job::Owed { agent, channel, turn, id, body }),
+                Effect::Owed { agent, fragment, channel, turn, id, body } => match engine.state().turns.get(&turn).map(|t| t.fragment.clone()) {
+                    // an answer goes from its question's chat's lane, after
+                    // the turn's replies, with their files (#721)
+                    Some(asked) if channel == records::TASKS && asked != fragment => lanes.push(&asked, Job::Answer { agent, to: fragment, turn, id, body }),
+                    _ => lanes.push(&fragment, Job::Owed { agent, channel, turn, id, body }),
+                },
                 Effect::Draft { agent, fragment, turn, text } => lanes.push(&fragment, Job::Draft { agent, turn, text }),
                 Effect::Runtime { runtime, command } => runtime_lanes.get(&runtime).expect("the engine names only the runtimes it was given").push(command),
                 Effect::Keepalive(on) => {
@@ -1110,7 +1117,9 @@ fn for_simplex(channel: &str, body: &Value, files: usize) -> Option<String> {
 enum Job {
     /// `relay`: what of it goes to the owner's SimpleX app once posted, for
     /// a post in its owner's SimpleX chat (`for_simplex`), with its files.
-    Post { agent: String, channel: &'static str, id: String, body: Value, files: Vec<LocalFile>, relay: Option<String> },
+    /// `answers`: its turn answers an ask, and its files go with that
+    /// answer (`Answer`).
+    Post { agent: String, channel: &'static str, id: String, body: Value, files: Vec<LocalFile>, relay: Option<String>, answers: bool },
     /// A turn's `turn.start` on `work`, whose answer the engine waits for.
     Claim { agent: String, turn: String, id: String, body: Value },
     /// A live card answer's closure on `work`, whose answer the engine
@@ -1119,6 +1128,11 @@ enum Job {
     /// One of a turn's last records (on `work`, or an answer on `tasks`):
     /// the engine hears when the lane is done with it.
     Owed { agent: String, channel: &'static str, turn: String, id: String, body: Value },
+    /// An asked turn's answer, in its question's chat's lane, so it goes
+    /// after the turn's replies there: it takes their files (the blobs this
+    /// lane uploaded for them, which its asker reads from this chat), then
+    /// goes to its asker's lane (`to`) as the turn's last record, `Owed`.
+    Answer { agent: String, to: String, turn: String, id: String, body: Value },
     Draft { agent: String, turn: String, text: Option<String> },
 }
 
@@ -1127,7 +1141,7 @@ impl Job {
     fn turn(&self) -> Option<&str> {
         match self {
             Job::Post { body, .. } => body["turn"].as_str(),
-            Job::Claim { turn, .. } | Job::Fence { turn, .. } | Job::Owed { turn, .. } | Job::Draft { turn, .. } => Some(turn),
+            Job::Claim { turn, .. } | Job::Fence { turn, .. } | Job::Owed { turn, .. } | Job::Answer { turn, .. } | Job::Draft { turn, .. } => Some(turn),
         }
     }
 }
@@ -1189,7 +1203,7 @@ impl Lanes {
                 None => {
                     let l = Arc::new(Lane { queue: Mutex::new(VecDeque::new()), ready: Notify::new() });
                     lanes.insert(fragment.to_string(), l.clone());
-                    tokio::spawn(work(self.api.clone(), fragment.to_string(), l.clone(), self.claims.clone(), self.stop.clone()));
+                    tokio::spawn(work(self.clone(), fragment.to_string(), l.clone()));
                     l
                 }
             }
@@ -1212,8 +1226,13 @@ impl Lanes {
 
 /// A fragment's lane: its jobs in order, each post retried until the
 /// platform takes it (its id makes a retry the same record).
-async fn work(api: Api, fragment: String, lane: Arc<Lane>, claims: Claims, mut stop: watch::Receiver<bool>) {
+async fn work(lanes: Lanes, fragment: String, lane: Arc<Lane>) {
+    let (api, claims, mut stop) = (lanes.api.clone(), lanes.claims.clone(), lanes.stop.clone());
     let mut drafted: HashMap<String, Instant> = HashMap::new();
+    // the files this lane attached to asked turns' replies, by turn, until
+    // their answer takes them (`Job::Answer`); at most as many turns as are
+    // open, the oldest let go
+    let mut answer_files: VecDeque<(String, Vec<AttachmentRef>)> = VecDeque::new();
     // bounded by the bridge's life: one job per pass
     loop {
         let job = {
@@ -1267,12 +1286,35 @@ async fn work(api: Api, fragment: String, lane: Arc<Lane>, claims: Claims, mut s
                     Err(e) => crate::ev!("draft.failed", { "fragment": fragment, "turn": turn, "error": e.to_string() }),
                 }
             }
-            Job::Post { agent, channel, id, body, files, relay } => {
+            Job::Post { agent, channel, id, body, files, relay, answers } => {
+                let turn = body["turn"].as_str().map(str::to_string);
                 // what goes back over SimpleX goes only once it is on the chat
-                let sent = post(&api, &fragment, &agent, channel, &id, body, &files, None, limits::POST_TRIES_MAX, stop.clone()).await;
+                let (sent, refs) = post_attached(&api, &fragment, &agent, channel, &id, body, &files, None, limits::POST_TRIES_MAX, stop.clone()).await;
                 if let (Some(text), true, Some(sx)) = (relay, sent.on_chat(), claims.simplex.as_ref()) {
                     sx.reply(&agent, &text, &files).await;
                 }
+                if let (true, true, Some(turn)) = (answers, sent == Sent::Posted && !refs.is_empty(), turn) {
+                    match answer_files.iter_mut().find(|(t, _)| *t == turn) {
+                        Some((_, kept)) => kept.extend(refs),
+                        None => {
+                            if answer_files.len() >= limits::TURNS_OPEN_MAX {
+                                answer_files.pop_front();
+                            }
+                            answer_files.push_back((turn, refs));
+                        }
+                    }
+                }
+            }
+            Job::Answer { agent, to, turn, id, mut body } => {
+                // the files of its turn's replies, all posted before it in
+                // this lane: its asker reads them from this chat, as itself
+                if let Some(i) = answer_files.iter().position(|(t, _)| *t == turn) {
+                    let (_, mut refs) = answer_files.remove(i).expect("found");
+                    refs.truncate(limits::ATTACHMENTS_MAX);
+                    crate::ev!("answer.files", { "turn": turn, "files": refs.len() });
+                    body["files"] = json!(refs);
+                }
+                lanes.push(&to, Job::Owed { agent, channel: records::TASKS, turn, id, body });
             }
             Job::Owed { agent, channel, turn, id, body } => {
                 // Done (answered, or given up after its tries) unless the
@@ -1382,7 +1424,14 @@ impl Sent {
 /// refused at once. A relayed record is signed by its `door` at each try,
 /// its files' refs in it (simplex/door.rs).
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn post(api: &Api, fragment: &str, agent: &str, channel: &str, id: &str, mut body: Value, files: &[LocalFile], door: Option<&crate::simplex::door::Key>, tries: u32, stop: watch::Receiver<bool>) -> Sent {
+pub(crate) async fn post(api: &Api, fragment: &str, agent: &str, channel: &str, id: &str, body: Value, files: &[LocalFile], door: Option<&crate::simplex::door::Key>, tries: u32, stop: watch::Receiver<bool>) -> Sent {
+    post_attached(api, fragment, agent, channel, id, body, files, door, tries, stop).await.0
+}
+
+/// `post`, and the refs its files went as on the record posted (none when
+/// it was not posted, or they were refused).
+#[allow(clippy::too_many_arguments)]
+async fn post_attached(api: &Api, fragment: &str, agent: &str, channel: &str, id: &str, mut body: Value, files: &[LocalFile], door: Option<&crate::simplex::door::Key>, tries: u32, stop: watch::Receiver<bool>) -> (Sent, Vec<AttachmentRef>) {
     assert!(tries >= 1, "a post is tried");
     let mut backoff = Backoff::default();
     // its files refused here (an agent that is a viewer of a connector's
@@ -1399,11 +1448,13 @@ pub(crate) async fn post(api: &Api, fragment: &str, agent: &str, channel: &str, 
             }
             other => other,
         };
+        let mut attached = Vec::new();
         let result = match uploaded {
             Ok(refs) => {
                 if !refs.is_empty() {
                     body["attachments"] = json!(refs);
                 }
+                attached = refs;
                 if let Some(door) = door {
                     door.seal(&mut body, fragment, channel, id, crate::log::now_ms() as i64);
                 }
@@ -1414,12 +1465,12 @@ pub(crate) async fn post(api: &Api, fragment: &str, agent: &str, channel: &str, 
         match result {
             Ok(posted) => {
                 crate::ev!("posted", { "fragment": fragment, "channel": channel, "id": id, "replayed": posted.replayed, "attempt": attempt });
-                return Sent::Posted;
+                return (Sent::Posted, attached);
             }
             Err(e) if e.retryable() && attempt < tries => {
                 crate::ev!("post.retry", { "fragment": fragment, "id": id, "attempt": attempt, "error": e.to_string() });
                 if !backoff.wait(stop.clone()).await {
-                    return Sent::Stopped;
+                    return (Sent::Stopped, Vec::new());
                 }
             }
             Err(e) if e.status() == Some(409) => {
@@ -1427,13 +1478,13 @@ pub(crate) async fn post(api: &Api, fragment: &str, agent: &str, channel: &str, 
                 // turn that life ended, or the records of one it claimed
                 // (one life per turn). Never retried.
                 crate::ev!("post.taken", { "fragment": fragment, "channel": channel, "id": id });
-                return Sent::Taken;
+                return (Sent::Taken, Vec::new());
             }
             Err(e) => {
                 // Out of tries, or a 403/404: it is no longer the agent's to
                 // post in.
                 crate::ev!("post.failed", { "fragment": fragment, "channel": channel, "id": id, "error": e.to_string() });
-                return Sent::Refused;
+                return (Sent::Refused, Vec::new());
             }
         }
     }
@@ -1514,7 +1565,7 @@ impl RuntimeLane {
                             None
                         })
                     };
-                    let (files, note, quote) = tokio::join!(download(&api, &ts.agent.fragment, &ts.fragment, &ts.attachments, &media_dir), note, quote);
+                    let (files, note, quote) = tokio::join!(download(&api, &ts.agent.fragment, ts.attachments_in.as_deref().unwrap_or(&ts.fragment), &ts.attachments, &media_dir), note, quote);
                     ts.files = files;
                     // its age first (a late message's), then a late card
                     // answer's turn's own note (engine.rs `hand`)

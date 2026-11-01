@@ -90,6 +90,35 @@ async fn an_answer_wakes_its_asker_after_it_has_gone() {
     bridge.stop().await;
 }
 
+/// Goal (#721): the files the asked agent sends with its answer go with
+/// it: blobs of the chat it was asked in, named on the answer, which its
+/// asker's turn at home reads as the asker (the platform's rule on who
+/// reads that chat) and has on its computer. A question answered with no
+/// files names none (the test above).
+#[tokio::test]
+async fn an_answer_carries_the_files_the_asked_agent_sent() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper", "rowan"]).await;
+    let pair = fake.chat("pair", &["juniper", "rowan"]);
+    let home = fake.chat("home", &["juniper"]);
+    let dir = support::dir("ask-files");
+    let bridge = support::start(support::config(&fake.url(), &dir, support::settings()), support::script());
+    following(&fake, 5).await;
+    let said = fake.say(&pair, &person("juniper"), question(&home, "draw"));
+    let asked = asked_turn(&pair, &said);
+    fake.until(WAIT, "juniper woken at home", |w| !w.bodies(&home, "work", "turn.end").is_empty()).await;
+    fake.with(|w| {
+        let reply = w.bodies(&pair, "chat", "reply").into_iter().find(|r| r["turn"] == asked.as_str()).expect("rowan's reply");
+        let sent = reply["attachments"].clone();
+        assert_eq!(sent.as_array().map(|a| a.iter().map(|f| f["name"].clone()).collect::<Vec<_>>()), Some(vec![json!("drawing.txt")]), "rowan drew: {reply}");
+        let a = &answers(w)[0]["body"];
+        assert_eq!((&a["files"], &a["asked"]["fragment"]), (&sent, &json!(pair)), "the answer names them, in the chat it was asked in: {a}");
+        let told = w.bodies(&home, "chat", "reply");
+        assert!(told.iter().any(|r| r["text"].as_str().is_some_and(|t| t.contains("[got 1: drawing.txt]"))), "juniper had the file at home: {told:?}");
+        assert!(w.calls.iter().any(|c| c.starts_with("GET ") && c.contains(&format!("/f/{pair}/blobs/"))), "read from the asked chat");
+    });
+    bridge.stop().await;
+}
+
 /// Goal: a crash before the answer is posted, and one after it was posted
 /// but before its answer came back: the next life posts it again under the
 /// same id and body (a replay when it had landed), so there is one answer,

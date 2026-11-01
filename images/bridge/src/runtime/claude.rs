@@ -856,6 +856,7 @@ mod tests {
             asker_name: "paul".into(),
             text: "hi".into(),
             attachments: vec![],
+            attachments_in: None,
             files: vec![super::super::LocalFile { path: "/tmp/m/a.png".into(), media_type: "image/png".into(), name: "a.png".into(), size: 1 }],
             routine: false,
             claim_seq: None,

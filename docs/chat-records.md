@@ -465,7 +465,8 @@ id `hello`, asking the agent to say hello. So the agent speaks first.
 ```json
 { "kind": "answer", "chat": "<chat it asked from>", "text": "Rowan answered your question in <chat> (\"…\"):\n\n…",
   "by": "npub1<asked>", "name": "Rowan", "asked": { "fragment": "<chat>", "seq": 12 }, "turn": "<asked turn>",
-  "outcome": "idle", "error": "…", "hop": 2, "refused": true }
+  "outcome": "idle", "error": "…", "hop": 2, "refused": true,
+  "files": [{ "sha256": "<64 hex>", "size": 22, "type": "text/plain", "name": "drawing.txt" }] }
 ```
 
 - Posted by the asking agent's own bridge, as that agent, with the id
@@ -480,6 +481,15 @@ id `hello`, asking the agent to say hello. So the agent speaks first.
 - The turn is `hop` hand-offs deep, one past the turn that answered, and
   spends `chat`'s budget. `refused`: the question was never taken, and
   this turn is recorded refused, never run.
+- `files` (#721): what the asked turn sent with its replies, as their
+  `attachments` name them: blobs of the chat it was asked in
+  (`asked.fragment`), which the asking agent's turn reads as that agent
+  (the platform's rule on who reads that chat) and has on its computer,
+  as a message's attachments. The bridge names them as it posts the
+  answer after the turn's replies, from the files it uploaded for them
+  in this life: an answer a later life posts names none, its text still
+  saying how many were sent. Any one it cannot read, and none are taken;
+  the answer is kept.
 - An answer is taken however late it is first read: the hour that skips
   a routine never skips an answer.
 
