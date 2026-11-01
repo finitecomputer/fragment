@@ -13,6 +13,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { register } from "node:module";
 import { DatabaseSync } from "node:sqlite";
+import { createHash } from "node:crypto";
 
 // the brain's base class as the platform's wrapper gives it: its env's
 // capabilities behind `files` and `searchIndex`, a refusal thrown on the
@@ -190,6 +191,37 @@ function clock(t) {
   t.after(() => (Date.now = real));
   return (ms) => (now += ms);
 }
+
+// FIN-367: what every reader of the index shows (⌘K, `fragment search`, the
+// brain's page) is its section text, so a link is its words there.
+it("a page's wiki links are their words in its index", async () => {
+  const { ix } = await brain({ "w/a.md": "# A\n\nTransplant after the last frost (see [[frost-dates]]), and [[home/lease.md|the lease]] says when." });
+  assert.equal(ix.text("w/a.md"), "Transplant after the last frost (see frost dates), and the lease says when.");
+});
+
+// An index the last format wrote holds every page under its bytes' bare
+// hash, its links bracketed: the release that changed the text writes every
+// page again, with no one acting (its installed trigger runs the full pass
+// an older `FORMAT` sets), and the index holds the words.
+it("a brain indexed in the last format writes every page again, its links as words", async () => {
+  const text = "# A\n\nsee [[frost-dates]]";
+  const fs = files({ "w/a.md": text });
+  const ix = index();
+  const old = createHash("sha256").update(text).digest("hex");
+  ix.sources.set("w/a.md", { revision: old, text: "see [[frost-dates]]" });
+  const ctx = { storage: storage() };
+  ctx.storage.sql.exec("CREATE TABLE brain_state (k TEXT PRIMARY KEY, v TEXT NOT NULL)");
+  ctx.storage.sql.exec("INSERT INTO brain_state (k, v) VALUES ('format', 'brain-index-1')");
+  const app = new App(ctx, { FILES: fs, SEARCH: ix });
+  await settle(app);
+  assert.equal(ix.text("w/a.md"), "see frost dates");
+  assert.notEqual(ix.sources.get("w/a.md").revision, old);
+  assert.equal(ix.writes, 1);
+  // replayed: the same bytes under the same format write nothing
+  mark(app, "w/a.md");
+  await settle(app);
+  assert.equal(ix.writes, 1);
+});
 
 it("a batch that read a page before a newer change never writes the older over it", async () => {
   const { app, fs, ix } = await brain({ "w/a.md": "# A\n\nfirst" });

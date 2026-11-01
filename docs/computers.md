@@ -762,9 +762,11 @@ runs on Claude Code, which the person installs on their computer
 themselves, as on a VPS of theirs. The image ships none, and no flag
 gates it.
 
-- **Installed from the chat**: a Claude agent's turn on a computer with
-  none asks its person to install it, and Install runs Anthropic's own
-  installer as below (docs/bridge.md, "The Claude runtime").
+- **Installed and signed in from the chat**: a Claude agent's turn on a
+  computer with none asks its person to install it, and Install runs
+  Anthropic's own installer as below; signed out, its turn's card links
+  Anthropic's sign-in for their own browser and takes the code it shows,
+  on the computer alone (docs/bridge.md, "The Claude runtime").
 - **Or installed in a terminal of an agent's desktop** with Anthropic's own
   installer, then signed in there with `claude auth login` (its URL
   opened in their browser, its code pasted back). The desktop's home is
@@ -775,13 +777,13 @@ gates it.
 - **The agent runs that same Claude Code** (`BRIDGE_CLAUDE_BIN`,
   `BRIDGE_CLAUDE_HOME`: docs/bridge.md), as Hermes' user, with the
   person's sign-in, settings and auto memory, each agent in its own work
-  directory. Until it is installed, the agent's turns end saying how.
+  directory.
 - **Its updates are Anthropic's**: Claude Code updates itself in the
   background, keeping the two newest versions, so a save carries one or
   two (about 270 MB each).
 - **A Claude agent has no Hermes profile or desktop** (above, "One
   profile per agent of Hermes'"): its person installs and signs in from
-  another agent's desktop.
+  its chat.
 
 ## Billing
 

@@ -4188,6 +4188,33 @@ async fn an_old_bot_chat_is_rebuilt_without_bot_mode() {
     assert!(!c.exec(&["test", "-L", "/data/hermes/profiles/juniper--k3x9/hooks/fragment-bot-chat"]), "the older image's Bot Mode hook link is gone");
 }
 
+/// `turn`'s `n`th sign-in card in `chat` (claude.rs, `SIGN_IN_CARD`), once
+/// it asks it.
+async fn signing_in(fake: &Fake, chat: &str, c: &Container, turn: &str, n: usize) -> serde_json::Value {
+    let id = format!("{}-{n}", fragment_bridge::runtime::claude::SIGN_IN_CARD);
+    let card = |w: &support::fake::World| w.bodies(chat, "work", "turn.prompt").into_iter().find(|p| p["turn"] == turn && p["prompt"] == id.as_str());
+    within(fake, chat, c, 180_000, "the sign-in card", |w| card(w).is_some()).await;
+    fake.with(|w| card(w).expect("found"))
+}
+
+/// `code` on rowan's sign-in `card`, posted to its computer's `/answer` as
+/// the shell's unseen frame posts it: what it said, then its status.
+fn sign_in_code(c: &Container, card: &serde_json::Value, code: &str) -> String {
+    let body = json!({ "turn": card["turn"], "prompt": card["prompt"], "option": "code", "value": code }).to_string();
+    c.exec_out(&["curl", "-s", "-w", " %{http_code}", "-H", "content-type: application/json", "-d", &body, "http://127.0.0.1:6080/answer?agent=rowan--k3x9"])
+}
+
+/// A Stop of `turn`, waiting on its sign-in card, and its end, stopped.
+async fn stop_signing_in(fake: &Fake, chat: &str, c: &Container, turn: &str) {
+    fake.say(chat, &person("paul"), json!({ "kind": "stop", "turn": turn }));
+    let end = |w: &support::fake::World| w.bodies(chat, "work", "turn.end").into_iter().find(|e| e["turn"] == turn);
+    within(fake, chat, c, 60_000, "the stopped sign-in's end", |w| end(w).is_some()).await;
+    assert_eq!(fake.with(|w| end(w).expect("ended")["outcome"].clone()), "stopped");
+    // `[a]` so the pattern never matches this shell's own command line
+    let left = c.exec_out(&["sh", "-c", "pgrep -fa '[a]uth login' || true"]);
+    assert_eq!(left.trim(), "", "its login ends with it");
+}
+
 /// The error `turn`'s end in `chat` says, once it ends.
 async fn ended_saying(fake: &Fake, chat: &str, c: &Container, turn: &str, what: &str) -> String {
     let end = |w: &support::fake::World| w.bodies(chat, "work", "turn.end").into_iter().find(|e| e["turn"] == turn);
@@ -4199,15 +4226,17 @@ async fn ended_saying(fake: &Fake, chat: &str, c: &Container, turn: &str, what: 
 /// right?"): Claude Code, installed by its person with Anthropic's own
 /// installer in a terminal of an agent's desktop, lands in /data and
 /// outlasts a restart and an image update, the same on disk each time, and
-/// an agent naming `claude` runs it: before the install its turn says how
-/// to install it, after it (no one signed in) Claude Code's own words.
+/// an agent naming `claude` runs it: before the install its turn asks to
+/// install it, after it (no one signed in) its turn asks its person to sign
+/// in (FIN-353), on a card linking Anthropic's sign-in as the real `claude
+/// auth login` says it, which calls a code that is not one invalid.
 /// Method: the real installer (the network; skipped without
 /// `FRAGMENT_DOCKER_REAL_CLAUDE=1`, so CI never downloads it), run as
 /// hermes in the environment of juniper's desktop's panel, which opens its
 /// terminals, in the shell a terminal there starts (its user's, not a
 /// login shell, so the desktop's PATH holds); the update is this image's /data saved and restored into
 /// another image (this one and a layer), as a deploy's wake from a save is.
-/// No model is called: nothing signs in.
+/// No model is called: nothing signs in (no real code is ever used).
 #[tokio::test]
 #[ignore = "needs Docker and the network: FRAGMENT_DOCKER_REAL_CLAUDE=1 cargo test -p fragment-bridge --test docker -- --ignored --exact a_persons_claude_code_outlasts_restarts_and_updates"]
 async fn a_persons_claude_code_outlasts_restarts_and_updates() {
@@ -4285,18 +4314,25 @@ sys.exit(subprocess.run([env.get("SHELL", "/bin/sh"), "-c", sys.argv[2]], env=en
     eprintln!("claude install: {version}; on disk:\n{installed}");
     assert!(installed.contains("/data/hermes/.local/share/claude/versions/") && installed.trim_end().ends_with("hermes"), "Anthropic's layout, the person's (hermes'): {installed}");
 
-    // the agent runs it: no one signed in, its turn says Claude Code's words
-    let not_signed_in = |said: &str| said.to_lowercase().contains("login");
-    let said = ended_saying(&fake, &workshop, &c, &ask_rowan("hello after the install"), "rowan's turn after the install").await;
-    eprintln!("claude install: rowan's turn, signed out: {said}");
-    assert!(not_signed_in(&said), "Claude Code ran, and asked for a sign-in: {said}");
+    // the agent runs it: no one signed in, its turn asks its person to sign
+    // in; a code that is not one is called invalid and asked again
+    let after = ask_rowan("hello after the install");
+    let card = signing_in(&fake, &workshop, &c, &after, 1).await;
+    eprintln!("claude install: rowan's sign-in card: {}", card["text"]);
+    assert!(card["text"].as_str().is_some_and(|t| t.contains("[Open the sign-in](https://")), "a link to Anthropic's sign-in: {card}");
+    let said = sign_in_code(&c, &card, "not-a-real-code");
+    assert!(said.ends_with(" 200"), "taken: {said}");
+    let again = signing_in(&fake, &workshop, &c, &after, 2).await;
+    assert!(again["text"].as_str().is_some_and(|t| t.starts_with("That code didn't work.")), "Claude Code's login called it invalid: {again}");
+    stop_signing_in(&fake, &workshop, &c, &after).await;
 
     // a restart
     c.restart();
     fake.until(180_000, "the bridge back after the restart", |w| w.live_sockets() >= 3).await;
     assert_eq!(on_disk(&c), installed, "the same install after the restart");
-    let said = ended_saying(&fake, &workshop, &c, &ask_rowan("hello after the restart"), "rowan's turn after the restart").await;
-    assert!(not_signed_in(&said), "after the restart: {said}");
+    let restarted = ask_rowan("hello after the restart");
+    signing_in(&fake, &workshop, &c, &restarted, 1).await;
+    stop_signing_in(&fake, &workshop, &c, &restarted).await;
 
     // an image update: /data saved, and restored into another image
     let next = format!("{}-next", hermes_tag());
@@ -4327,8 +4363,9 @@ sys.exit(subprocess.run([env.get("SHELL", "/bin/sh"), "-c", sys.argv[2]], env=en
     assert!(c.exec(&["test", "-e", "/opt/fragment/next-image"]), "the next image");
     fake.until(180_000, "the next image's bridge", |w| w.live_sockets() >= 3).await;
     assert_eq!(on_disk(&c), installed, "the same install after the update");
-    let said = ended_saying(&fake, &workshop, &c, &ask_rowan("hello after the update"), "rowan's turn after the update").await;
-    assert!(not_signed_in(&said), "after the update: {said}");
+    let updated = ask_rowan("hello after the update");
+    signing_in(&fake, &workshop, &c, &updated, 1).await;
+    stop_signing_in(&fake, &workshop, &c, &updated).await;
 }
 
 /// Goal (docs/computers.md, "An agent's own model"; Paul, 2026-10-08): an

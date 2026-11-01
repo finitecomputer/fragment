@@ -235,7 +235,13 @@ pub fn brain(s: &mut Suite, api: &Api) -> Result<()> {
     let r = search(api, &keys, &name, json!({ "q": "PHOTOVOLTAIC" }))?;
     s.ok("a word finds it, whatever its case", found(&r).first().is_some_and(|f| f.0 == SOLAR), &r);
     let r = search(api, &keys, &name, json!({ "q": "cafe" }))?;
-    s.ok("accents are ignored: cafe finds the café source, and the page that cites it, first", found(&r).iter().take(2).any(|f| f.0 == CAFE) && found(&r).iter().take(2).any(|f| f.0 == SOLAR), &r);
+    // the page cites it as "the café article" (a link's words: FIN-367), as
+    // the log does: both after the source, in either order
+    s.ok(
+        "accents are ignored: cafe finds the café source first, and the page that cites it among the next",
+        found(&r).first().is_some_and(|f| f.0 == CAFE) && found(&r).iter().take(3).any(|f| f.0 == SOLAR),
+        &r,
+    );
     let r = search(api, &keys, &name, json!({ "q": "photovoltaic", "wiki": "kitchen" }))?;
     let mine = search(api, &keys, &name, json!({ "q": "photovoltaic", "wiki": "garden", "limit": 1 }))?;
     s.ok("a search narrows to one wiki, and to a limit", r.status == 200 && results(&r).is_empty() && found(&mine) == vec![at(SOLAR, "Photovoltaic cells")], format!("{r} | {mine}"));
