@@ -61,7 +61,7 @@ otherwise); the registry's and the mail lever are no route.
 | `POST /api/test/keys` | `{fragment, op, plaintext \| sealed}` |
 | `POST /api/test/list` | `{identity, op}` |
 | `POST /api/test/fragment` | `{fragment, op, …}` |
-| `POST /api/test/computer` | `{computer, op, times?, on?, ms?, freeze?}` |
+| `POST /api/test/computer` | `{computer, op, times?, on?, ms?, freeze?, offsetMs?}` |
 | `POST /api/test/export` | `{identity, op, steps?}` |
 | `POST /api/test/mail` | `{to, subject, text}` → `{messageId}` |
 | `POST /api/test/registry` | `{…}` |
@@ -1107,8 +1107,7 @@ reason (402 `budget_used_up`). A run answers `costMicros`.
   again); an answer with no completed video is refused and charged
   nothing (`ai.video-refused`). Asked at most once an attempt: a try
   that never heard its answer fails, charged nothing, saying to replay
-  (`ai.video-lost`). Refused before any call on a deployment
-  whose tiers are private: no catalog video model is (`Models::video_refused`).
+  (`ai.video-lost`).
 
 A text model's 429 or 5xx is answered by the fallback model (Models), sent
 the same request; when that fails too, the step is retried. Other refusals

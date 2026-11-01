@@ -225,7 +225,11 @@ resolves it from the chat's journal, read back to the card (`cards.rs`):
 - **The first valid answer starts one fresh turn**, caused by the
   answer's record, so a retry after any restart is the same claim. Its
   message is the owner's answer; its note is the card's turn as `note.rs`
-  renders a cut one. The old turn never resumes.
+  renders a cut one. The old turn never resumes. It also carries the
+  answer as a runtime reads it (`TurnStart::late`, `LateCard`): which card,
+  which option, and what the card's turn was asked, so a runtime that acts
+  on its own cards (Claude's install card) honours it from that, never
+  from the message's words.
 - **Only a late closure rebuilds.** A late answer's closure names it
   (`answerSeq`). A live one names none, and the runtime gets a live
   answer only once its closure is on `work`, so a rollback to before the
@@ -398,6 +402,18 @@ drives it. The bridge never sits between it and Anthropic: no proxy, base
 URL or key, and no `ANTHROPIC_*` or `CLAUDE_CODE_*` variable of anyone's
 reaches it (`withheld`).
 
+- **Not installed**, a turn asks its person on a card (`INSTALL_ASK`):
+  Install runs Anthropic's installer (`INSTALLER`, Paul's FIN-233: the
+  person's own install) as the agents' user into its person's home, its
+  data in that home's `.local/share`, for at most `INSTALL_MS_MAX`; the
+  turn says it ran ("Ran Anthropic's installer (Claude Code <version>)")
+  and goes on to what was asked. Not now (or the card expiring) ends the
+  turn saying so; a failed install ends it in the installer's last
+  words; a Stop kills the installer's whole process group. Answered after
+  a sleep or a restart, its fresh turn (above, "A card outlives its
+  turn") does the same from its `LateCard`: Install, then what the card's
+  turn was asked; Not now, declined, asking nothing again. Installed by
+  then, it installs nothing more.
 - **Its folder** is its work directory, its own: an `AGENTS.md` the
   bridge writes (who it is, and the `fragment` CLI, which acts as it:
   `FRAGMENT_AS_AGENT`, `FRAGMENT_FOR`), and a `CLAUDE.md` that reads it,

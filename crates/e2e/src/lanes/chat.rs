@@ -1015,6 +1015,7 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     polish::finished_card_times(s, api, &owner, &mut chrome)?;
     alerts_in_frame(s, api, &mut chrome, &owner, &owner_session, &member_session, &owner_site, &chat_name, &identity)?;
     card_to_computer(s, api, &mut chrome, &owner, &chat_name, &shots)?;
+    claude_install(s, api, &mut chrome, &owner, &computer, &shots)?;
 
     std::thread::sleep(super::computers::QUEUE_DRAIN);
     api.signed(&owner, "POST", &format!("/api/computers/{computer}/sleep"), Some(&json!({})))?;
@@ -1061,6 +1062,62 @@ fn card_to_computer(s: &mut Suite, api: &Api, chrome: &mut Browser, owner: &Keys
         json!({ "took": took, "closed": closed, "kept": kept }),
     );
     chrome.close(shell)?;
+    Ok(())
+}
+
+/// What a Claude agent's turn asks with when Claude Code is not installed
+/// (images/bridge/src/runtime/claude.rs, `INSTALL_ASK`).
+const CLAUDE_INSTALL_ASK: &str = "Claude Code isn't installed on your computer yet. Install it? It's Anthropic's own installer, and takes about a minute.";
+
+/// FIN-353 (Paul: "(a) first message"): a Claude agent's chat, its computer
+/// with no Claude Code. Its first message's turn asks on a card to install
+/// it; Install runs the installer (the stub image's stand-in, which lays out
+/// its scripted Claude Code as Anthropic's lays out the real one), the turn
+/// says it ran, and answers what was asked. Its own agent and chat, after
+/// the rest, so it changes nothing they count. Screenshots for FIN-353.
+fn claude_install(s: &mut Suite, api: &Api, chrome: &mut Browser, owner: &Keys, computer: &str, shots: &Path) -> Result<()> {
+    let name = s.named(api, owner, "rowan")?;
+    let agent = s.create(api, owner, &name)?;
+    s.commit(&agent, &[("fragment.json", Some(AGENT_JSON)), ("agent.json", Some(b"{ \"runtime\": \"claude\" }\n"))]);
+    s.deploy(&agent);
+    let r = api.signed(owner, "PUT", &format!("/api/computers/{computer}/agents/{name}"), Some(&json!({})))?;
+    let identity = r.body["agents"].as_array().into_iter().flatten().find(|a| a["fragment"] == name.as_str()).and_then(|a| a["identity"].as_str()).unwrap_or("").to_string();
+    anyhow::ensure!(r.status == 200 && fragment_core::npub::is_identity(&identity), "assigning the Claude agent: {r}");
+    let chat = s.named(api, owner, "claude")?;
+    let r = api.create_with(owner, json!({ "name": chat, "template": "chat" }))?;
+    anyhow::ensure!(r.status == 200, "making its chat: {r}");
+    s.owned(&r.body, owner);
+    let r = api.signed(owner, "PUT", &format!("/api/f/{chat}/members/{identity}"), Some(&json!({ "role": "editor" })))?;
+    anyhow::ensure!(r.status == 200, "the Claude agent joining its chat: {r}");
+
+    let page = chrome.open(&api.site_url(&chat, "__signin?return=/"))?;
+    fit(chrome, &page, 1280, 860, false)?;
+    let ready = chrome.until(&page, "document.getElementById('say')?.dataset.ready === '1'", TURN);
+    chrome.click(&page, "#text")?;
+    chrome.type_text(&page, "Tidy up my README")?;
+    chrome.press(&page, "Enter", false)?;
+    let install = ".prompt:not(.closed) button[data-option=\"install\"]";
+    // its first turn waits for the bridge to see a new agent's runtime (its
+    // read of the computer, each minute: images/bridge `COMPUTER_EVERY_MS`)
+    let asked = chrome.until(&page, &format!("!!document.querySelector({}) && document.querySelector('.prompt:not(.closed) .prompt-text')?.textContent === {}", js(install), js(CLAUDE_INSTALL_ASK)), Duration::from_secs(150));
+    let _ = chrome.screenshot(&page, &shots.join("claude-install-card.png"));
+    s.ok(
+        "a Claude agent's first message, Claude Code not installed: its turn asks on a card to install it, Install or Not now",
+        ready && asked && chrome.eval(&page, "[...document.querySelectorAll('.prompt:not(.closed) .options button')].map((b) => b.textContent).join('|')")? == "Install|Not now",
+        chrome.eval(&page, "document.querySelector('.prompt')?.innerText ?? null")?,
+    );
+    if asked {
+        chrome.click(&page, install)?;
+    }
+    let answered = shows(chrome, &page, &format!("[...document.querySelectorAll('.msg.agent:not(.streaming) .md')].some((m) => m.textContent.includes({}))", js("Tidy up my README")));
+    let _ = chrome.screenshot(&page, &shots.join("claude-installed.png"));
+    let ran = records(api, owner, &chat, "work").iter().any(|r| r["body"]["kind"] == "turn.step" && r["body"]["args"] == "Anthropic's installer (Claude Code 2.1.316)");
+    s.ok(
+        "Install installs it: the turn says the installer ran, then answers what was asked, on Claude Code",
+        ran && answered,
+        chrome.eval(&page, "document.getElementById('messages').innerText")?,
+    );
+    chrome.close(page)?;
     Ok(())
 }
 

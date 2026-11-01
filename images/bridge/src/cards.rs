@@ -27,6 +27,8 @@ pub struct Resolved {
 pub struct Fresh {
     pub text: String,
     pub note: String,
+    /// The answer as its runtime reads it (`runtime::LateCard`).
+    pub late: crate::runtime::LateCard,
 }
 
 /// `answer`, an owner's `prompt_response` on `chat`, against the agent's
@@ -98,7 +100,8 @@ pub fn resolve(agent: &Agent, answer: &Record, work: &[Record], chat: &[Record],
     let note = note::late(&cut, &name(asker), cause.and_then(note::asked).as_deref(), &note::replies(chat, &agent.identity, turn));
     let mut closed = records::turn_prompt_closed(turn, &prompt, Closed::Answered, Some((&option, &answer.principal, words.as_deref())));
     closed["answerSeq"] = json!(answer.seq);
-    Ok(Some(Resolved { closed, fresh: Some(Fresh { text, note }) }))
+    let late = crate::runtime::LateCard { prompt: prompt.clone(), option: option.clone(), request: cause.and_then(note::asked) };
+    Ok(Some(Resolved { closed, fresh: Some(Fresh { text, note, late }) }))
 }
 
 #[cfg(test)]
@@ -158,6 +161,10 @@ mod tests {
             assert!(fresh.note.contains(said), "{said:?} in {}", fresh.note);
         }
         assert!(!fresh.note.contains(&"x".repeat(100)), "no excerpt is said");
+        // and the answer as its runtime reads it (Alex on #901): which card,
+        // which option, what its turn was asked, never parsed from words
+        assert_eq!((fresh.late.prompt.as_str(), fresh.late.option.as_str()), ("p", "yes"));
+        assert!(fresh.late.request.as_deref().is_some_and(|r| r.starts_with("Publish my draft after asking Paul.")), "{:?}", fresh.late.request);
         assert_eq!((r.closed["outcome"].as_str(), r.closed["option"].as_str(), r.closed["answerSeq"].as_u64()), (Some("answered"), Some("yes"), Some(3)));
         let mut closed = work.clone();
         closed.push(rec("work", 15, 21, ME, r.closed.clone()));
@@ -166,7 +173,9 @@ mod tests {
         let r = late(&work, &[chat[0].clone(), chat[1].clone(), words.clone()], &words, 20).unwrap().unwrap();
         assert_eq!(r.fresh.unwrap().text, "Answer to your earlier question “Publish?”: only the summary");
         let no_cause = resolve(&agent(), &chat[2], &work, &chat, None, name, 20).unwrap().unwrap();
-        assert!(no_cause.fresh.unwrap().note.contains("It was answering Robin; what they asked is not in this chat's record."));
+        let no_cause = no_cause.fresh.unwrap();
+        assert!(no_cause.note.contains("It was answering Robin; what they asked is not in this chat's record."));
+        assert_eq!(no_cause.late.request, None, "no request it was not told");
     }
 
     /// Goal (the rollback's double run): only a closure the late path wrote

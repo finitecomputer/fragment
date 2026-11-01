@@ -1,13 +1,13 @@
 // cell/shell/history-page.js's rows (Paul, 2026-10-31): every chat and
 // imported conversation, the newest first; All, Archived and Imported;
 // words held by a title (an import's first words too) or found by the
-// person's search; the search's hint bounded as the API bounds it; and a
+// person's search or their archive's, either standing when the other fails; the search's hint bounded as the API bounds it; and a
 // row's time.
 // Run by `cargo xtask check` on the pinned Node (xtask/src/js_syntax.rs).
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { firstOf, historyRows, hintOf, when } from "../shell/history-page.js";
+import { answersOf, firstOf, historyRows, hintOf, when } from "../shell/history-page.js";
 
 const chat = (name, at, extra = {}) => ({ name, title: name, at, archived: false, ...extra });
 const entry = (key, ended_at, extra = {}) => ({ key, title: key, ended_at, preview: "", ...extra });
@@ -59,4 +59,24 @@ test("a row's time: the time today, the day this year, with its year before it",
   assert.match(when(new Date(2026, 9, 31, 9, 5).getTime(), now), /9:05/);
   assert.doesNotMatch(when(new Date(2026, 9, 12).getTime(), now), /2026/);
   assert.match(when(new Date(2025, 9, 12).getTime(), now), /2025/);
+});
+
+test("a search's two answers: each found once with its first snippet; one failing, the other's stand and the page says which", () => {
+  const chats = { status: "fulfilled", value: { messages: [{ fragment: "trip", snippet: "newest" }, { fragment: "trip", snippet: "older" }, { fragment: "taxes", snippet: "receipts" }] } };
+  const imported = { status: "fulfilled", value: [{ key: "old-talk", snippet: "the garden" }, { key: "old-talk", snippet: "worse" }] };
+  const down = (message) => ({ status: "rejected", reason: Object.assign(new Error(message), { status: 503 }) });
+  const both = answersOf(chats, imported);
+  assert.deepEqual([...both.found], [["trip", "newest"], ["taxes", "receipts"]]);
+  assert.deepEqual([...both.foundImported], [["old-talk", "the garden"]]);
+  assert.equal(both.failed, "");
+  const noArchive = answersOf(chats, down("the archive is asleep"));
+  assert.deepEqual([...noArchive.found], [...both.found]);
+  assert.equal(noArchive.foundImported.size, 0);
+  assert.equal(noArchive.failed, "Imported chats were not searched: the archive is asleep");
+  const noChats = answersOf(down("search is down"), imported);
+  assert.equal(noChats.found.size, 0);
+  assert.deepEqual([...noChats.foundImported], [...both.foundImported]);
+  assert.equal(noChats.failed, "Messages were not searched: search is down");
+  assert.equal(answersOf(down("search is down"), down("asleep")).failed, "Messages and imported chats were not searched: search is down");
+  assert.equal(answersOf(chats, { status: "fulfilled", value: [] }).foundImported.size, 0);
 });
