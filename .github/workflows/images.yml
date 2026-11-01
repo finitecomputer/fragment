@@ -146,6 +146,33 @@ jobs:
   # caches ci.yml reads on every run.
   #
   # The tests' container logs are kept on failure.
+  # TEMPORARY (PR #890, dropped before merge): which disk each
+  # ubuntu-24.04 runner has, and whether a copy-on-write root writes into
+  # what the lane frees
+  disk-probe:
+    if: github.event_name == 'pull_request'
+    strategy:
+      fail-fast: false
+      matrix:
+        n: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - run: |
+          echo "image $ImageVersion"
+          df -h /
+          lsblk -o NAME,SIZE,TYPE,MOUNTPOINT
+          sudo dmsetup table 2>/dev/null || true
+          sudo dmsetup status 2>/dev/null || true
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift /opt/hostedtoolcache/CodeQL
+          docker image prune -af > /dev/null
+          df -h /
+          dd if=/dev/zero of="$RUNNER_TEMP/fill" bs=1M count=20480 status=none
+          sync
+          df -h /
+          sudo dmsetup status 2>/dev/null || true
+          echo "wrote 20 GiB into the freed disk"
+
   docker:
     name: docker (real Hermes)
     needs: changes
