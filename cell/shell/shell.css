@@ -164,7 +164,21 @@ body.resizing-row, body.resizing-row * { cursor: row-resize !important; }
 .icon-button.small svg { width: var(--icon-size); height: var(--icon-size); }
 /* the open chat is a chat fragment's own page; each chat keeps its frame */
 .frames { flex: 1; min-height: 0; position: relative; border-top: 1px solid var(--border); }
-.frames > iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: transparent; }
+/* a middle-column page's own scheme is its own (a chat's and the archive's
+   paint their background): a frame of the shell's dark scheme would paint
+   the empty page it holds before one comes white */
+.frames > iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: transparent; color-scheme: normal; }
+/* a chat's stand-in while its page comes (frame-standin.js): the room's
+   colour, its composer's outline where the page's will be, and past 1.5 s
+   a quiet spinner */
+.frame-standin { position: absolute; inset: 0; z-index: 1; display: flex; flex-direction: column; justify-content: flex-end; align-items: center; background: var(--bg-sidebar); pointer-events: none; }
+.standin-composer { width: min(760px, calc(100% - 16px)); height: 99px; margin-bottom: 8px; border-radius: 12px; background: var(--chat-composer); box-shadow: inset 0 1px 2px rgba(0,0,0,.08); }
+/* a phone's chat (the shell's `mobileChat`, chat.css's own): one line, rounded */
+@media (max-width: 760px) { .standin-composer { width: calc(100% - 24px); height: 46px; border-radius: 23px; } }
+.standin-wait { position: absolute; top: calc(50% - 60px); left: calc(50% - 9px); width: 18px; height: 18px; border: 2px solid var(--border-strong); border-top-color: var(--text-tertiary); border-radius: 50%; opacity: 0; animation: standin-spin .9s linear infinite, standin-show .3s ease 1.5s forwards; }
+@keyframes standin-spin { to { transform: rotate(360deg); } }
+@keyframes standin-show { to { opacity: .8; } }
+@media (prefers-reduced-motion: reduce) { .standin-wait { animation: standin-show .3s ease 1.5s forwards; } }
 .notice { margin: 12vh auto 0; max-width: 28rem; padding: 24px; text-align: center; color: var(--text-secondary); }
 .notice > strong { display: block; color: var(--text-primary); font-size: 17px; margin-bottom: 6px; }
 .notice a, .notice button { color: var(--accent-blue); background: none; border: 0; padding: 0; text-decoration: underline; }
@@ -371,6 +385,7 @@ button:focus-visible, .rename-agent input:focus-visible { outline: 2px solid var
 .search-known .agent-preview { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
 .search-known .meta { max-width: 30%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .search-known-failed { margin: 4px 10px 8px; font-size: 13px; color: var(--text-secondary); }
+.search-known-more { font-size: 12px; color: var(--text-tertiary); }
 /* the launcher's files (launcher.js, launchFiles): rows of chips under its words, scrolling when the viewport leaves less room */
 .search-files { display: flex; flex: 0 1 auto; flex-wrap: wrap; min-height: 0; overflow-y: auto; gap: 8px; padding: 0 18px 14px 18px; }
 .search-files[hidden] { display: none; }
@@ -704,6 +719,18 @@ iframe[data-blocked] { display: none; }
 .app-dock[aria-checked="true"] .app-dock-track { background: var(--accent-blue); }
 .app-dock[aria-checked="true"] .app-dock-track::after { transform: translateX(12px); }
 .app-dock:disabled { opacity: .6; cursor: default; }
+/* what an app can reach (apps-page.js, FIN-291's prototype): its keys by
+   name, each with the hosts it may go to, and its door, each with its
+   revoke, a quiet note under them */
+.app-reach { display: flex; flex-direction: column; gap: 8px; }
+.app-reach h2 { margin: 6px 0 0; font-size: 13px; font-weight: 600; color: var(--text-secondary); }
+.app-reach-item { display: flex; align-items: center; gap: 12px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 10px; }
+.app-reach-what { display: flex; flex: 1; flex-direction: column; gap: 2px; min-width: 0; font-size: 13.5px; }
+.app-reach-what code { font: 500 12.5px/1.4 "JetBrains Mono", monospace; }
+.app-reach-note { margin: 6px 0 0; font-size: 12.5px; }
+.app-reach-line { color: var(--text-secondary); }
+.app-reach-agents { margin: 4px 0 0; font-size: 13.5px; }
+/* an app that reaches their accounts: why its Sharing is theirs alone */
 .apps-archived { margin-top: 24px; }
 .apps-archived summary { padding: 6px 2px; color: var(--text-secondary); font-size: 14px; cursor: pointer; }
 /* the History page (history-page.js): in the work area as the Apps page
@@ -746,6 +773,13 @@ iframe[data-blocked] { display: none; }
 @container settings (max-width: 620px) {
   .apps-layout { padding: 18px 16px 60px; }
   .history-layout { padding: 18px 16px 60px; }
+  /* a row's Continue under its words, so its title and what a search found
+     have the width (two agents' "Continue with [agent]" left them "M…") */
+  .history-row { flex-wrap: wrap; }
+  .history-open { flex-basis: 100%; }
+  .history-row > .continue-control { margin: -4px 0 10px 52px; }
+  .history-sub { align-items: flex-start; }
+  .history-preview.found { display: -webkit-box; white-space: normal; -webkit-box-orient: vertical; -webkit-line-clamp: 4; }
   .app-row-card { width: 72px; height: 45px; }
   .app-row-controls, .app-row-said, .app-row-progress { padding-left: 0; }
   .app-row-panel { margin-left: 0; padding: 16px; gap: 20px; }

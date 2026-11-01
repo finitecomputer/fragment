@@ -229,6 +229,28 @@ pub(super) fn forget_gate(api: &Api, identity: &str) -> Result<()> {
     Ok(())
 }
 
+/// Pins `identity`'s ledger to this month for the lane: its test clock
+/// (`clock {offsetMs}`) runs on from the 15th, its now and the rows it
+/// hears alike, so the lane's spends and the checks against its caps are
+/// in one month however late in a month it runs (one run over midnight on
+/// the 31st checked October's spend against November's: CI run
+/// 41254067181). Before anything the lane spends.
+fn pin_month(api: &Api, identity: &str) -> Result<()> {
+    let r = api.unsigned("POST", "/api/test/ledger", Some(&json!({ "identity": identity, "op": "clock", "offsetMs": mid_month_offset_ms() })))?;
+    anyhow::ensure!(r.status == 200, "the ledger's clock moves: {r}");
+    Ok(())
+}
+
+/// How far a test clock moves to run on from the 15th of this month (UTC):
+/// a lane pinned so has two weeks before its month ends, however late in a
+/// month it starts.
+pub(super) fn mid_month_offset_ms() -> i64 {
+    const DAY_MS: i64 = 24 * 3600 * 1000;
+    let now = crate::api::now_ms();
+    let (_, _, day) = fragment_core::cron::civil(now.div_euclid(DAY_MS));
+    (15 - i64::from(day)) * DAY_MS - now.rem_euclid(DAY_MS)
+}
+
 /// How many of the node's log lines name `event`: what the cell said aloud.
 pub(super) fn logged(s: &Suite, event: &str) -> usize {
     let log = s.node.as_ref().map(|n| std::fs::read_to_string(&n.log).unwrap_or_default()).unwrap_or_default();
@@ -249,6 +271,7 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
     // ---- plans: a new person is the deployment's default (a seat here)
     let owner = api.person()?;
     let owner_id = api.identity(&owner)?;
+    pin_month(api, &owner_id)?;
     let v = ledger(api, &owner);
     s.ok(
         "a new person is a seat here (FRAGMENT_DEFAULT_PLAN), with the month's included credit",

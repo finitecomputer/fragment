@@ -319,6 +319,11 @@ pub struct Prompt {
     /// Its options answered in words.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub words: Vec<String>,
+    /// Its options answered on the agent's computer alone, never in a
+    /// record (`PromptOption::computer`: `computer_answer`): none of
+    /// `words`, so no message, which a record is, answers one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub computer: Vec<String>,
     pub expires_at: u64,
     pub closed: bool,
     /// Its owner's answer, held from the runtime until its closure is on
@@ -416,6 +421,10 @@ pub struct Turn {
     /// the card's turn (cards.rs, `Fresh::note`; `TurnStart::note`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// The card answer it is the fresh turn of (`runtime::LateCard`), for a
+    /// runtime that acts on its own cards. A state from before holds none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub late: Option<crate::runtime::LateCard>,
     /// It answers an ask: its end owes the answer too (`Return`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ret: Option<Return>,
@@ -505,6 +514,10 @@ pub enum Input {
     /// its owner's phone (`mirror`). Their relayed records are honored with
     /// or without it.
     Relaying(BTreeMap<String, Option<String>>),
+    /// An open card's option answered on the agent's computer (its `/answer`
+    /// page: screen.rs), never in a record: `reply` names the request the
+    /// answer goes back to (`Effect::ComputerAnswered`).
+    ComputerAnswer { agent: String, turn: String, prompt: String, option: String, words: String, reply: u64 },
 }
 
 /// What the engine asks the driver to do, in order.
@@ -535,6 +548,9 @@ pub enum Effect {
     Runtime { runtime: String, command: Command },
     /// Hold the keepalive socket (true) or drop it.
     Keepalive(bool),
+    /// Whether a computer's answer (`Input::ComputerAnswer`, by `reply`) was
+    /// taken, or why not, in words its person reads.
+    ComputerAnswered { reply: u64, taken: Result<(), String> },
     /// List the agent's fragments again (it joined one: `joined`, whose
     /// members changed, so every view of it read before is stale).
     Discover { agent: String, joined: Option<String> },
@@ -788,6 +804,7 @@ impl Engine {
             Input::Posted { turn, id, kept } => self.posted(&turn, &id, kept),
             Input::Tick => self.tick(),
             Input::Gone { agent, fragment } => self.gone(&agent, &fragment),
+            Input::ComputerAnswer { agent, turn, prompt, option, words, reply } => self.computer_answer(&agent, &turn, &prompt, &option, words, reply),
             Input::Relaying(agents) => {
                 assert!(agents.len() <= limits::AGENTS_MAX, "the bridge runs at most so many agents");
                 self.relaying = agents;
@@ -1019,6 +1036,7 @@ impl Engine {
                 self.admit(&a, fragment, cause, at, &asker, name(&asker), &m, 0, Ask::Message);
                 if let Some(t) = self.state.turns.get_mut(&id).filter(|t| t.phase == Phase::Queued) {
                     t.note = Some(fresh.note);
+                    t.late = Some(fresh.late);
                 }
             }
             Err(why) => {
@@ -1322,6 +1340,7 @@ impl Engine {
             command: matches!(ask, Ask::Command | Ask::Refused(_)),
             reply_to: m.reply_to,
             note: None,
+            late: None,
             ret,
             continues: None,
             continue_after: false,
@@ -1540,6 +1559,7 @@ impl Engine {
             command: false,
             reply_to: None,
             note: None,
+            late: None,
             ret: None,
             continues: Some(cut.id),
             continue_after: false,
@@ -1706,6 +1726,7 @@ impl Engine {
             text: t.text.clone(),
             attachments: t.attachments.clone(),
             attachments_in: t.attachments_in.clone(),
+            late: t.late.clone(),
             files: Vec::new(),
             routine: t.routine,
             claim_seq,
@@ -1890,8 +1911,47 @@ impl Engine {
             crate::ev!("prompt.ignored", { "turn": id, "prompt": prompt, "why": "not one of its options" });
             return;
         }
+        if p.computer.iter().any(|c| c == option) {
+            crate::ev!("prompt.ignored", { "turn": id, "prompt": prompt, "why": "answered on its computer alone, never in a record" });
+            return;
+        }
         let words = text.filter(|_| p.words.iter().any(|w| w == option));
         self.answered(&agent.fragment, fragment, &id, prompt, option, principal, words.clone(), words, None, seq);
+    }
+
+    /// An open card's option answered on the agent's computer (its `/answer`
+    /// page), never in a record (`PromptOption::computer`): its words go to
+    /// the runtime alone, and the card closes answered by its owner, saying
+    /// nothing of them. Its page is its owner's, through the platform (or
+    /// something on the computer itself, which holds what it would give:
+    /// docs/bridge.md, "An answer for the computer"). A card no running
+    /// turn holds any longer (a restart ended it) is answered no more: its
+    /// person asks again with a message.
+    fn computer_answer(&mut self, agent: &str, turn: &str, prompt: &str, option: &str, words: String, reply: u64) {
+        let refused = |why: &str| Effect::ComputerAnswered { reply, taken: Err(why.to_string()) };
+        let Some(owner) = self.agent(agent).map(|a| a.owner.clone()) else {
+            return self.out.push(refused("no such agent on this computer"));
+        };
+        let now = self.now;
+        let Some(t) = self.state.turns.get(turn).filter(|t| t.agent == agent && t.active()) else {
+            crate::ev!("prompt.ignored", { "turn": turn, "prompt": prompt, "why": "answered on its computer, but no running turn asked it" });
+            return self.out.push(refused("This ended before your answer came: send a message to start again."));
+        };
+        let Some((place, p)) = t.prompts.iter().enumerate().find(|(_, p)| p.id == prompt) else {
+            return self.out.push(refused("This ended before your answer came: send a message to start again."));
+        };
+        if p.closed || p.expires_at <= now {
+            return self.out.push(refused("This was already answered, or it expired."));
+        }
+        if !p.computer.iter().any(|c| c == option) || words.trim().is_empty() || words.len() > limits::MESSAGE_TEXT_MAX_BYTES {
+            return self.out.push(refused("That is not an answer this card takes."));
+        }
+        let fragment = t.fragment.clone();
+        // no record answered it: a seq no record has (the high bit), one
+        // for each of the turn's cards, which a runtime may name it by
+        let seq = (1 << 63) | (place as u64 + 1);
+        self.answered(agent, &fragment, turn, prompt, option, &owner, None, Some(words), None, seq);
+        self.out.push(Effect::ComputerAnswered { reply, taken: Ok(()) });
     }
 
     /// An open prompt of turn `id` answered with `option` by `principal`:
@@ -2229,7 +2289,7 @@ impl Engine {
         let expires_at = self.now + ttl;
         let t = self.state.turns.get_mut(id).expect("checked");
         let Some(owner) = self.agents.iter().find(|a| a.fragment == t.agent).map(|a| a.owner.clone()) else { return };
-        t.prompts.push(Prompt { id: prompt.clone(), options: options.iter().map(|o| o.id.clone()).collect(), words: options.iter().filter(|o| o.words).map(|o| o.id.clone()).collect(), expires_at, closed: false, held: None });
+        t.prompts.push(Prompt { id: prompt.clone(), options: options.iter().map(|o| o.id.clone()).collect(), words: options.iter().filter(|o| o.words && !o.computer).map(|o| o.id.clone()).collect(), computer: options.iter().filter(|o| o.computer).map(|o| o.id.clone()).collect(), expires_at, closed: false, held: None });
         t.phase = Phase::Waiting;
         self.dirty = true;
         let (agent, fragment) = (t.agent.clone(), t.fragment.clone());

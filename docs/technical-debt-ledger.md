@@ -5,6 +5,43 @@ Each entry says what the shortcut is, where and why, its risk, and the
 condition that deletes it. An entry without a delete condition is
 unfinished design, not debt.
 
+## A fragment with reach is shared with no one else
+
+- **Shortcut:** Paul, 2026-11-01 (FIN-352): "as an extra safety right now
+  we should disallow sharing for apps that have reach". A fragment holding
+  a secret or a door is its owner's and their own agents' alone
+  (`cell/src/reach.rs`), both ways: sharing it further is refused
+  (`Reason::PrivateWhileReaching`), and reach on one shared beyond them
+  (`Reason::UnshareFirst`). Fragments shared before the rule keep serving,
+  counted by `fragment operator reach`.
+- **Risk:** a person cannot share an app that holds a key, even with
+  someone they trust; an agent building an app with a key makes it
+  private first.
+- **Delete when:** temporary: lift after the FIN-354 audit. Then drop
+  reach.rs's two refusals and their call sites, the share sheet's lock,
+  the two reasons (kept on the wire as add-only names), the census route
+  and command, and the `legacy-reach` lever.
+
+## An app facet's subrequests are the account's, for the facet's life
+
+- **Shortcut:** Cloudflare counts a Durable Object facet's subrequests
+  across its calls for as long as it runs, not per call (measured on a
+  preview, 2026-11-01, e2e `capability-cost`: two calls of 30 on one
+  facet made 30, then 20, under a limit of 50). So the platform sets no
+  `subRequests` on the app facet (`cell/src/js.rs`, `worker_code`), and
+  leaves the account's. A call that fails at a runtime limit on the facet
+  stops it (`Facet::failed`, `fragment_core::facet::at_limit`), so the next
+  call starts it fresh. CPU stays each call's guard (`APP_CPU_MS`, measured
+  per call the same day).
+- **Risk:** no per-call bound on an app's capability calls. The facet has
+  no network, so they are the platform's own calls, each bounded by its
+  route. A facet that makes the account's limit in one life fails one call,
+  and then starts again.
+- **Delete when:** Cloudflare scopes a facet's subrequests to each call,
+  or gives a facet call limits of its own (as `getEntrypoint` does for a
+  Dynamic Worker). Then set a per-call budget again, beside `APP_CPU_MS`,
+  and turn `capability-cost`'s across-calls check into its refusal.
+
 ## Every call still carries its release's deploy time
 
 - **Shortcut:** an object of a release before #826 read
@@ -357,18 +394,20 @@ unfinished design, not debt.
   it writes (refused for good, so it replays after a top-up), with an
   e2e check; the platform's own records stay.
 
-## A video step's call waits on its model, unpolled
+## A video's lost answer is made again only by a replay
 
 - **Shortcut:** `job.ai.video` is one call of the AI binding
   (cell/src/ai.rs `step_video`), which answers when the video is made;
-  the model catalog names no request to poll.
-- **Risk:** a video whose making outlasts a Workflow step's try (5
-  minutes, cell/entry.mjs) is tried again before its answer is kept, and
-  may be made, and billed by the catalog, twice. A step tried again
-  after its answer was kept never calls again.
+  the model catalog names no request to poll. Its try outlasts a making
+  (15 minutes, cell/entry.mjs), and it is asked at most once an attempt
+  (`making`): a try that never heard its answer (the object restarted
+  mid-call, the try broke, the making took longer) fails for good, saying
+  to replay.
+- **Risk:** a video whose answer was lost may still be made, and billed
+  by the catalog, charged to no one; a replay makes it again. The person
+  pays for one.
 - **Delete when:** the catalog answers a request id a step can poll (one
-  step starts it, the next ones poll, as the celld era's did), or a
-  step's try outlasts the model's longest making, with an e2e check.
+  step starts it, the next ones poll, as the celld era's did).
 
 ## An icon's drawings skip the AI Gateway
 

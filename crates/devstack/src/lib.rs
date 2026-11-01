@@ -261,43 +261,11 @@ impl Tools {
     }
 }
 
-/// The lowest port `free_port` picks.
-const PICKED_PORTS_FROM: u16 = 20_000;
-/// Ports `free_port` tries before it gives up.
-const PICK_TRIES_MAX: u32 = 64;
-
-/// A free local port, for a process to bind a moment later (wrangler's
-/// node, its inspector), picked at random below the
-/// kernel's ephemeral range. The kernel numbers its own ports from that
-/// range alone: a connection's local end, any bind to port 0 (workerd's
-/// sockets inside wrangler), Docker's published ports. A port the kernel
-/// handed out for the asking (`bind(":0")`) was free only until then, and
-/// one of those took it before wrangler's bind (`bind(): Address already in
-/// use` at a node's boot, in CI runs 40148072254 and 40937119767); a node
-/// started again keeps its port, free while it is down. Below the range,
-/// only a process that names the port can take it.
-pub fn free_port() -> Result<u16> {
-    let ephemeral = ephemeral_ports_from()?;
-    anyhow::ensure!(ephemeral > PICKED_PORTS_FROM + 1024, "the kernel's ephemeral ports start at {ephemeral}, leaving none to pick below them from {PICKED_PORTS_FROM}");
-    for _ in 0..PICK_TRIES_MAX {
-        let r = u16::from_str_radix(&random_hex(2), 16).expect("four hex digits");
-        let port = PICKED_PORTS_FROM + r % (ephemeral - PICKED_PORTS_FROM);
-        if TcpListener::bind(("127.0.0.1", port)).is_ok() {
-            return Ok(port);
-        }
-    }
-    bail!("no free port in {PICK_TRIES_MAX} tries between {PICKED_PORTS_FROM} and {ephemeral}")
-}
-
-/// The first port of the kernel's ephemeral range: Linux's
-/// `ip_local_port_range` (32768 by default), macOS's 49152.
-fn ephemeral_ports_from() -> Result<u16> {
-    if cfg!(target_os = "macos") {
-        return Ok(49_152);
-    }
-    let range = fs::read_to_string("/proc/sys/net/ipv4/ip_local_port_range").context("read the kernel's ephemeral port range")?;
-    let first = range.split_whitespace().next().context("an empty ip_local_port_range")?;
-    first.parse().with_context(|| format!("ip_local_port_range starts at {first:?}"))
+/// The port a boot's log says wrangler is ready on (`Ready on
+/// http://127.0.0.1:<port>`): its own pick, a boot's log saying it once.
+fn ready_port(text: &str) -> Option<u16> {
+    let after = text.split("Ready on http://127.0.0.1:").nth(1)?;
+    after[..after.find(|c: char| !c.is_ascii_digit())?].parse().ok().filter(|p| *p != 0)
 }
 
 /// Writes a project's `.dev.vars` (dotenv, one line per value, mode 600).
@@ -602,7 +570,12 @@ pub struct NodeOptions {
     /// local Secrets Store's among it. Its fleet is configured first
     /// (`Fleet::configure`; `clear_state` before that discards the state).
     pub project: PathBuf,
-    pub port: u16,
+    /// The node's port, bound by its maker (`hold_port`) and held as long as
+    /// it likes, the e2e's across the node's lives: each life's front door
+    /// listens on a clone, so the port is never let go between a pick and a
+    /// bind, nor while the node is down (a client dialing then waits for
+    /// the next life, as one dialing during a boot does).
+    pub listener: Arc<TcpListener>,
     /// Where each boot's log goes (`node-<port>-<boot>.log`): wrangler's
     /// own debug logs beside the Worker's output, always, as the front
     /// door reads the runtime's address there (front.rs).
@@ -612,6 +585,18 @@ pub struct NodeOptions {
     /// as it reaches xtask: in a group of its own, it outlived a Ctrl-C,
     /// holding its port.
     pub own_group: bool,
+}
+
+impl NodeOptions {
+    pub fn port(&self) -> u16 {
+        self.listener.local_addr().expect("a bound listener's address").port()
+    }
+}
+
+/// 127.0.0.1:`port` (0: one the kernel picks), bound for a node's
+/// `NodeOptions::listener`.
+pub fn hold_port(port: u16) -> Result<Arc<TcpListener>> {
+    Ok(Arc::new(TcpListener::bind(("127.0.0.1", port)).with_context(|| format!("the node's port :{port} is taken"))?))
 }
 
 /// Boots of one port whose logs one directory keeps; a start past this
@@ -664,6 +649,32 @@ fn hear(child: &mut Child, out: Arc<Mutex<fs::File>>, heard: Arc<front::Heard>) 
 /// Workflows and queues, as workerd persists them.
 pub fn state_dir(project: &Path) -> PathBuf {
     project.join(".wrangler/state")
+}
+
+/// Each subject of `issuer` a project's node signs a person in by, and its
+/// email, as its Registry keeps them (`subjects`), read-only while no node
+/// runs: what a WorkOS fake made new must hand out exactly as they are
+/// (crates/fakes/src/workos.rs `adopt`). None for a node with no state.
+pub fn signed_in_subjects(project: &Path, issuer: &str) -> Result<Vec<(String, String)>> {
+    let dir = state_dir(project).join("v3/do/fragment-Registry");
+    let mut found = Vec::new();
+    let Ok(entries) = fs::read_dir(&dir) else { return Ok(found) };
+    for entry in entries {
+        let path = entry?.path();
+        if path.extension().is_none_or(|e| e != "sqlite") || path.file_stem().is_some_and(|s| s == "metadata") {
+            continue;
+        }
+        let db = rusqlite::Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX)
+            .with_context(|| format!("open {} read-only", path.display()))?;
+        let tables: i64 = db.query_row("SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'subjects'", [], |r| r.get(0))?;
+        if tables == 0 {
+            continue;
+        }
+        let mut q = db.prepare("SELECT subject, email FROM subjects WHERE issuer = ?1 ORDER BY subject")?;
+        let rows = q.query_map([issuer], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        found.extend(rows.collect::<rusqlite::Result<Vec<_>>>().with_context(|| format!("read {}'s subjects", path.display()))?);
+    }
+    Ok(found)
 }
 
 /// The nodes this process started in process groups of their own and has
@@ -730,17 +741,21 @@ impl Node {
         if !config.is_file() {
             bail!("{} is not there: configure the fleet first (Fleet::configure)", config.display());
         }
-        let (log, out) = boot_log(&opts.log_dir, opts.port)?;
+        let port = opts.port();
+        let (log, out) = boot_log(&opts.log_dir, port)?;
         // wrangler's lines and the front door's requests, one file
         let out = Arc::new(Mutex::new(out));
         // the node's port, held before wrangler starts (front.rs)
         let heard = Arc::new(front::Heard::default());
-        let front = front::Front::bind(opts.port, heard.clone(), out.clone())?;
-        let proxied = free_port()?;
+        let front = front::Front::serve(opts.listener.try_clone()?, heard.clone(), out.clone())?;
         let mut cmd = tools.wrangler()?;
         cmd.arg("dev").arg("-c").arg(&config);
-        cmd.args(["--ip", "127.0.0.1", "--port", &proxied.to_string()]);
-        cmd.args(["--inspector-port", &free_port()?.to_string()]);
+        // its own port (its proxy's, which nothing here dials: the front
+        // door goes to the runtime) and its inspector's, each of its own
+        // picking (`0`): one picked for it and let go before it bound could
+        // be another's by then (`bind(): Address already in use` at a node's
+        // boot, CI runs 40148072254 and 40937119767)
+        cmd.args(["--ip", "127.0.0.1", "--port", "0", "--inspector-port", "0"]);
         cmd.arg("--persist-to").arg(state_dir(&opts.project));
         // debug: the runtime's address is named there alone (front.rs)
         cmd.args(["--show-interactive-dev-session=false", "--log-level", "debug"]);
@@ -769,21 +784,21 @@ impl Node {
             }
             child
         };
-        let mut node = Node { child, own_group: opts.own_group, base: format!("http://127.0.0.1:{}", opts.port), port: opts.port, log: log.clone(), reaped: false, _front: front };
-        loop {
+        let mut node = Node { child, own_group: opts.own_group, base: format!("http://127.0.0.1:{port}"), port, log: log.clone(), reaped: false, _front: front };
+        let proxied = loop {
             let text = fs::read(&log).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
-            if text.contains(&format!("Ready on http://127.0.0.1:{proxied}")) {
-                break;
+            if let Some(proxied) = ready_port(&text) {
+                break proxied;
             }
             if exited_unreaped(node.child.id(), false)? {
                 let status = node.reap()?;
                 bail!("wrangler dev exited ({status}) before it was ready:\n{text}");
             }
             if t0.elapsed() > READY_TIMEOUT {
-                bail!("wrangler dev on :{} was not ready after {READY_TIMEOUT:?}:\n{text}", opts.port);
+                bail!("wrangler dev on :{port} was not ready after {READY_TIMEOUT:?}:\n{text}");
             }
             std::thread::sleep(Duration::from_millis(50));
-        }
+        };
         // fails loudly: never the proxy's path instead
         let Some(runtime) = heard.named(RUNTIME_NAMED_WAIT) else {
             let text = fs::read(&log).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
@@ -907,6 +922,30 @@ impl Drop for Node {
 
 #[cfg(test)]
 mod tests {
+
+    /// A node's subjects, as its Registry keeps them: one issuer's alone,
+    /// its other SQLite (metadata) passed over; a node with no state has none.
+    #[test]
+    fn a_nodes_subjects_are_read_from_its_registry() {
+        let project = std::env::temp_dir().join(format!("devstack-subjects-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&project);
+        assert!(signed_in_subjects(&project, "workos:client").unwrap().is_empty(), "no state: no one");
+        let dir = state_dir(&project).join("v3/do/fragment-Registry");
+        fs::create_dir_all(&dir).unwrap();
+        let db = rusqlite::Connection::open(dir.join("0123abcd.sqlite")).unwrap();
+        db.execute_batch(
+            "CREATE TABLE subjects (issuer TEXT NOT NULL, subject TEXT NOT NULL, identity TEXT NOT NULL, linked_at INTEGER NOT NULL, email TEXT NOT NULL, signed_in_at INTEGER NOT NULL, PRIMARY KEY (issuer, subject));
+             INSERT INTO subjects VALUES ('workos:client', 'user_00000000000000000000000004', 'npub1b', 0, 'second@example.test', 0);
+             INSERT INTO subjects VALUES ('workos:client', 'user_00000000000000000000000002', 'npub1a', 0, 'first@example.test', 0);
+             INSERT INTO subjects VALUES ('e2e', 'e2e:x', 'npub1c', 0, 'x@e2e.test', 0);",
+        )
+        .unwrap();
+        drop(db);
+        rusqlite::Connection::open(dir.join("metadata.sqlite")).unwrap().execute_batch("CREATE TABLE other (x);").unwrap();
+        let found = signed_in_subjects(&project, "workos:client").unwrap();
+        assert_eq!(found, [("user_00000000000000000000000002".to_string(), "first@example.test".to_string()), ("user_00000000000000000000000004".to_string(), "second@example.test".to_string())]);
+        fs::remove_dir_all(&project).unwrap();
+    }
     use super::*;
 
     /// A node of `script` (`sh -c`) in a process group of its own, as
@@ -1014,16 +1053,13 @@ mod tests {
         assert_eq!(env("WRANGLER_SEND_METRICS"), Some(PathBuf::from("false")));
     }
 
-    /// A picked port is below the kernel's ephemeral range. It was free as
-    /// it was picked (`free_port` binds it to see); binding it again here
-    /// would test only that no other process took it since, which nothing
-    /// can promise on a shared machine (this test once failed so).
+    /// The port wrangler says it is ready on, once its line is whole; none
+    /// before it, from a line cut short, or for a port 0.
     #[test]
-    fn a_picked_port_is_below_the_ephemeral_range() {
-        let ephemeral = ephemeral_ports_from().expect("the ephemeral range");
-        for _ in 0..32 {
-            let port = free_port().expect("a free port");
-            assert!((PICKED_PORTS_FROM..ephemeral).contains(&port), "{port} is below {ephemeral}");
+    fn wrangler_is_ready_on_the_port_it_says() {
+        assert_eq!(ready_port("x\n[wrangler:info] Ready on http://127.0.0.1:35523\n[wrangler:info] GET / 200"), Some(35523));
+        for unready in ["", "Starting local server...", "Ready on http://127.0.0.1:355", "Ready on http://127.0.0.1:0\n", "Ready on http://localhost:35523\n"] {
+            assert_eq!(ready_port(unready), None, "{unready:?}");
         }
     }
 

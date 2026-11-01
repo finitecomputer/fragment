@@ -137,6 +137,25 @@ export const MESSAGES = Object.freeze({
     fields: "to the page: {agent, name}; asked: {agent, want: link | unlink, home?}; answered: {agent, for, ticket?, error?, home?, homeError?}",
     says: "The agent's name as the page loads and on a rename; a door ticket for a link (docs/api.md, An agent's doors), a link's `home` setting its home and an unlink's taking it back.",
   },
+  // ---- an answer for the computer (docs/bridge.md, "An answer for the computer") ----
+  cardToComputer: {
+    kind: "card-to-computer",
+    from: "a chat → the shell; the shell → its agent's computer's `/answer/` page",
+    fields: "{agent, turn, prompt, option, value, nonce} (`agent`: to the shell its identity, to the page its fragment)",
+    says: "A card's option answered on its agent's computer, never in a record (`computer` on the option: a sign-in's code). The shell takes it only from a frame of the person's own fragment and for an agent of their own computer, frames that computer's `/answer/` page unseen through a port ticket, and hands it on once the page says it is ready. Never kept, never logged.",
+  },
+  computerReady: {
+    kind: "computer-ready",
+    from: "a computer's `/answer/` page → the shell",
+    fields: "{agent}",
+    says: "Loaded, and ready for its `card-to-computer`.",
+  },
+  computerAnswered: {
+    kind: "computer-answered",
+    from: "a computer's `/answer/` page → the shell; the shell → that chat",
+    fields: "{nonce, ok, error?}",
+    says: "What came of a `card-to-computer`: taken, or why not, in words its person reads.",
+  },
   // ---- the alerts worker ----
   openChat: {
     kind: "open-chat",

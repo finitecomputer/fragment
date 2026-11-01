@@ -36,7 +36,7 @@
 //!
 //! Test levers are methods on [`CodeStorage`]; none is an HTTP route.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -111,6 +111,16 @@ struct Repo {
 pub type Change<'a> = (&'a str, Option<&'a [u8]>);
 type OwnedChange = (String, Option<Vec<u8>>);
 
+/// What another writer does just ahead of a search upsert to a fragment
+/// (`land_before_upserts`): its commit to main (no CAS), then its write
+/// of a source to search: the moves that land between a writer's reads
+/// and its write.
+#[derive(Debug, Clone, Default)]
+pub struct Ahead {
+    pub commit: Vec<(String, Option<Vec<u8>>)>,
+    pub source: Option<(String, crate::search::Held)>,
+}
+
 /// A commit's files, by path.
 type Tree = BTreeMap<String, Entry>;
 
@@ -166,6 +176,14 @@ struct State {
     tokens_minted: u64,
     #[serde(skip)]
     tokens_revoked_below: u64,
+    /// The search index of each fragment whose search a test turned on
+    /// (`enable_search`; crate::search), by its name.
+    #[serde(skip)]
+    search: BTreeMap<String, crate::search::Index>,
+    /// Another writer's moves still to land, each just ahead of the next
+    /// search upsert to that fragment (`land_before_upserts`), by its name.
+    #[serde(skip)]
+    ahead: BTreeMap<String, VecDeque<Ahead>>,
 }
 
 struct Inner {
@@ -364,6 +382,17 @@ impl State {
         self.repos.get(name_or_url).or_else(|| self.repos.values().find(|r| r.name == name_or_url))
     }
 
+    /// Another writer's moves (`Ahead`) on fragment `name`, landed now.
+    fn land(&mut self, name: &str, a: Ahead) {
+        if !a.commit.is_empty() {
+            let url = self.url_of(name).expect("a landing on a known repo");
+            self.commit(&url, Write { branch: "main", message: "another writer", author: "external", changes: &a.commit, from: None });
+        }
+        if let (Some((source, held)), Some(index)) = (a.source, self.search.get_mut(name)) {
+            index.sources.insert(source, held);
+        }
+    }
+
     fn url_of(&self, name_or_url: &str) -> Option<String> {
         self.repo_by(name_or_url).map(|r| r.url.clone())
     }
@@ -470,6 +499,19 @@ impl Inner {
                 let token = self.mint(st, &url, &["git:read", "git:write"], self.token_ttl_s);
                 // the host's whole answer (fragment_proto::StorageToken)
                 return Response::json(200, &json!({ "token": token, "repo": url, "api": self.url, "expiresAt": now_ms() + self.token_ttl_s * 1000 }));
+            }
+            // the search write API (crate::search), for a fragment whose
+            // search is on; another's is a host without it (404)
+            if let Some((name, op)) = path.strip_prefix("/api/f/").and_then(|p| p.split_once("/search/")) {
+                if (m, op) == ("POST", "upsert") {
+                    if let Some(a) = st.ahead.get_mut(name).and_then(VecDeque::pop_front) {
+                        st.land(name, a);
+                    }
+                }
+                return match st.search.get_mut(name) {
+                    Some(index) => index.handle(op, req),
+                    None => problem(404, &format!("no route {m} {path}")),
+                };
             }
             if path.starts_with("/api/f/") && path.ends_with("/refresh") && m == "POST" {
                 st.refreshes += 1;
@@ -1163,6 +1205,27 @@ impl CodeStorage {
     /// Host `refresh` nudges received (with `host_routes`).
     pub fn refresh_count(&self) -> u32 {
         self.with(|st| st.refreshes)
+    }
+
+    /// Turns on the search write API for fragment `name` (with
+    /// `host_routes`), its index empty; it is off until then.
+    pub fn enable_search(&self, name: &str) {
+        self.with(|st| {
+            st.search.entry(name.into()).or_default();
+        });
+    }
+
+    /// Each of `ahead` lands just ahead of one of the next search upserts
+    /// to fragment `name`, in order: another writer's moves between a
+    /// writer's reads and its write.
+    pub fn land_before_upserts(&self, name: &str, ahead: Vec<Ahead>) {
+        self.with(|st| st.ahead.entry(name.into()).or_default().extend(ahead));
+    }
+
+    /// `f` of fragment `name`'s search index, when its search is on: to
+    /// read it, or change it as a test needs (an index lost).
+    pub fn search_index<T>(&self, name: &str, f: impl FnOnce(&mut crate::search::Index) -> T) -> Option<T> {
+        self.with(|st| st.search.get_mut(name).map(f))
     }
 
     /// The requests answered since the last take, by route (`GET branch`,

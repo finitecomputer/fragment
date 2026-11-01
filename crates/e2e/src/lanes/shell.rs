@@ -2794,7 +2794,8 @@ const WIDE_MESSAGE: &str = "A word that never breaks: supercalifragilisticexpial
 /// input, should feel like a native app)"), at 320, 375, 390 and 430 px in
 /// Chrome's phone emulation: the page never wider than the screen nor
 /// scrolling, with its sidebar open and closed, a chat holding a long
-/// word, code and a wide table (the table scrolls in its own box), the
+/// word, code and a wide table (the table scrolls in its own box), its
+/// stand-in's composer the chat's own box (nothing jumps as it loads), the
 /// launcher, settings (its Your data with an export ready, its widest
 /// rows), the share sheet, an app's window and the ways to ask for one
 /// (three, then three more from its die, a target of 44 px or more that a
@@ -2851,6 +2852,17 @@ fn phone_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &st
               return {{ ...p, ok: p.ok && !!t && t.getBoundingClientRect().right <= innerWidth + 1 && (!c || c.getBoundingClientRect().right <= innerWidth + 1), table: t ? [t.scrollWidth, t.clientWidth] : null }}; }})()"),
         )?;
         places.push(("its chat's page, a long word, code and a wide table", framed));
+        // a chat's stand-in (frame-standin.js) holds its composer's box, so
+        // nothing jumps when its page comes: one put over this chat, measured
+        let real = b.eval_in_frame(page, &chat, "(() => { const r = document.querySelector('.composer').getBoundingClientRect(); return { left: r.left, right: innerWidth - r.right, bottom: innerHeight - r.bottom, height: r.height }; })()")?;
+        let stand = b.eval(
+            page,
+            "(() => { const f = [...document.querySelectorAll('#frames iframe')].find((x) => !x.hidden).getBoundingClientRect(); const s = document.createElement('div'); s.className = 'frame-standin'; \
+             const k = document.createElement('div'); k.className = 'standin-composer'; s.append(k); document.getElementById('frames').append(s); const r = k.getBoundingClientRect(); s.remove(); \
+             return { left: r.left - f.left, right: f.right - r.right, bottom: f.bottom - r.bottom, height: r.height }; })()",
+        )?;
+        let same = ["left", "right", "bottom", "height"].iter().all(|k| real[*k].as_f64().zip(stand[*k].as_f64()).is_some_and(|(a, b)| (a - b).abs() <= 1.0));
+        places.push(("a chat's stand-in, its composer's box", json!({ "ok": same, "composer": real, "standin": stand })));
         if let Ok(Value::Array(l)) = b.eval_in_frame(page, &chat, SMALL_FIELDS) { small.extend(l.into_iter().map(|f| json!({ "width": w, "in": "chat", "field": f }))); }
         if w == 320 || w == 430 {
             let _ = b.screenshot(page, &shots.join(format!("phone-{w}-chat.png")));
@@ -3663,6 +3675,9 @@ fn connections_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sessio
         s.ok("the Connections page has agents to show", false, &computers);
         return Ok(());
     };
+    let id = computer["computer"].as_str().unwrap_or("").to_string();
+    // the uses below, and the page's month of them, in one month
+    super::computers::pin_month(api, &id)?;
     // the person connects Google (as another account than their sign-in here),
     // and reading their connections tells their computer
     s.workos.connect(email, crate::SWAP_CONNECTION, true);
@@ -3682,7 +3697,6 @@ fn connections_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sessio
         shell(api, session, "POST", &format!("/api/f/{chat}/channels/chat"), Some(&json!({ "id": format!("conn-{n}"), "body": { "text": text } })), &[])?;
         s.eventually(std::time::Duration::from_secs(60), || replies() > n);
     }
-    let id = computer["computer"].as_str().unwrap_or("").to_string();
     let counted = s.eventually(wait, || {
         shell(api, session, "GET", &format!("/api/computers/{id}/uses"), None, &[]).is_ok_and(|r| r.body["uses"].as_array().is_some_and(|l| l.len() >= 2))
     });
@@ -5428,7 +5442,8 @@ fn say_in(s: &Suite, b: &mut Browser, page: &Page, host: &str, text: &str) -> bo
 /// words; archived, it is under Archived with its chip, and gone from the
 /// sidebar; its title filters it at once, and a word only its messages
 /// hold finds it through the person's search, its snippet shown; it opens
-/// in the middle column and one Back is History again. Invalid: a chat
+/// in the middle column and one Back is History again; on a phone its
+/// Continue sits under its words, which stay shown. Invalid: a chat
 /// nothing was said in is not listed, and words nothing holds say so.
 /// Replay: a message the person sends in the archived chat brings it back
 /// to their sidebar. Restart: a reload at `/history` stays there.
@@ -5462,7 +5477,29 @@ fn history_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Perso
     let archived = b.until(page, &format!("{}?.querySelector('.history-chip')?.textContent === 'Archived' && [...document.querySelectorAll('.history-row')].every((r) => r.querySelector('.history-chip')) && !document.querySelector({})", row(&bread), js(&format!("#chats [data-key={}]", js(&format!("chat:{bread}"))))), wait);
     let _ = b.screenshot(page, &shots.join("desktop-history-archived.png"));
     s.ok("archived, it is under Archived with its chip, and gone from the sidebar", archived, json!({ "rows": b.eval(page, "[...document.querySelectorAll('.history-row')].map((r) => r.innerText)")? }));
+    // at a phone's width its Continue (theirs is "Continue with [agent]",
+    // several agents) goes under its words: its title whole, its words shown
+    let wide = b.eval(page, "[innerWidth, innerHeight]")?;
+    b.viewport(page, 390, 844, true)?;
+    let phone = b.until(
+        page,
+        &format!(
+            "(() => {{ const r = {}; const c = r?.querySelector('.continue-control'), l = r?.querySelector('.label'), p = r?.querySelector('.history-preview'); if (!c || !l || !p) return false; \
+             const t = p.firstChild, g = document.createRange(); g.setStart(t, 0); g.setEnd(t, Math.min(4, t.length)); const w = g.getBoundingClientRect(), b = p.getBoundingClientRect(); \
+             return l.scrollWidth <= l.clientWidth && w.width > 0 && w.right <= b.right + 1 && c.getBoundingClientRect().top >= b.bottom - 1; }})()",
+            row(&bread)
+        ),
+        wait,
+    );
+    let _ = b.screenshot(page, &shots.join("phone-390-history-archived.png"));
+    let seen = b.eval(page, &format!("{}?.innerText ?? null", row(&bread)))?;
+    let (w, h) = (wide[0].as_u64().unwrap_or(1280) as u32, wide[1].as_u64().unwrap_or(900) as u32);
+    b.viewport(page, w, h, false)?;
+    // wide again and still before the next press, which goes by where things are
+    let back = b.until(page, &format!("innerWidth === {w} && !document.getElementById('layout').classList.contains('narrow') && document.getAnimations().every((a) => a.playState !== 'running' || a.effect?.getComputedTiming().iterations === Infinity)"), wait);
+    s.ok("at a phone's width a row's Continue sits under its words: its title whole, its words shown", phone && back, seen);
     b.click(page, ".history-filter[data-filter=\"all\"]")?;
+    anyhow::ensure!(b.until(page, "document.querySelector('.history-filter[data-filter=\"all\"]')?.getAttribute('aria-pressed') === 'true'", wait), "History's All was not pressed");
     // its title filters it at once; words nothing holds say so
     b.eval(page, &fill(".history-search input", "bread no"))?;
     let titled = b.until(page, &format!("document.querySelectorAll('.history-row').length === 1 && !!{}", row(&bread)), wait);
@@ -6229,7 +6266,9 @@ const LAUNCHER_STATUS_GEOMETRY: &str = "(() => { const status = document.getElem
 /// start row stays; and an answer that came though a fragment of it failed
 /// (Alex on #885) names that fragment, beside the hits of the rest, or
 /// alone, never as nothing found; one searched and holding nothing shows
-/// no Knowledge.
+/// no Knowledge. Replay: a page matched in two sections is one row, its
+/// other section counted, and a brain with no index yet is named quietly
+/// (the Session Archive's rehearsal).
 fn knowledge_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person, shots: &std::path::Path) -> Result<()> {
     let wait = std::time::Duration::from_secs(30);
     // what the page asks of `POST /api/search`, each body kept
@@ -6268,9 +6307,14 @@ fn knowledge_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Per
     let wrote = shell(api, me.session, "POST", &format!("/api/f/{notes}/files"), Some(&json!({ "files": [{ "path": "wiki/ferry.md", "text": text }] })), &[])?;
     let page_at = json!({ "source": "wiki/ferry.md", "revision": "r1", "title": "Ferry timetable", "sections": [{ "id": "s1", "heading": "Winter", "text": "The ferry timetable changes in November: two crossings a day." }] });
     let upserts = [&notes, &old].iter().map(|n| shell(api, me.session, "POST", &format!("/api/f/{n}/search/upsert"), Some(&page_at), &[]).map(|r| r.status)).collect::<Result<Vec<_>>>()?;
+    // both on the dock (the shell's list has them), then the old one archived
+    // and off it: the shell knows it archived before anything is typed, so
+    // the question never asks it for a list a step behind
+    let docked = |name: &str| format!("!!document.querySelector('#apps [data-key=\"app:{name}\"]')");
+    let listed = b.until(page, &format!("{} && {}", docked(&notes), docked(&old)), wait);
     shell(api, me.session, "PUT", &format!("/api/fragments/{old}/archived"), Some(&json!({ "archived": true })), &[])?;
-    let known = b.until(page, &format!("!!document.querySelector('#apps [data-key=\"app:{notes}\"]')"), wait);
-    anyhow::ensure!(wrote.status == 200 && upserts == vec![200, 200] && known, "the brains' pages were not written: {} {upserts:?}", wrote.text);
+    let known = b.until(page, &format!("{} && !{}", docked(&notes), docked(&old)), wait);
+    anyhow::ensure!(wrote.status == 200 && upserts == vec![200, 200] && listed && known, "the brains' pages were not written, or the shell's list missed them: {} {upserts:?} {listed} {known}", wrote.text);
     b.eval(page, "(window.__knowledge = [], true)")?;
     let open = launch(b, "ferry timetable")?;
     let row = format!(".search-known [data-fragment={}][data-source=\"wiki/ferry.md\"]", js(&notes));
@@ -6301,6 +6345,11 @@ fn knowledge_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Per
     launch(b, "ferry timetable")?;
     let mixed = b.until(page, &format!("!!document.querySelector({}) && document.querySelector('.search-known-failed')?.textContent === 'Not searched: Old notes'", js(&row)), wait);
     s.ok("an answer that came though one fragment failed shows the others' hits and names the one not searched", mixed, b.eval(page, "document.getElementById('search-results').innerText")?);
+    // a page matched in two sections, and a brain with no index yet: one row, the other section counted, that brain named
+    b.eval(page, &doctor_once(&format!("(a) => {{ const h = a.results.find((r) => r.fragment === {} && r.source === 'wiki/ferry.md'); a.results.push({{ ...h, snippet: 'its other section' }}); a.fragments.push({{ name: {}, state: 'no_index' }}); }}", js(&notes), js(&old))))?;
+    launch(b, "ferry timetable")?;
+    let grouped = b.until(page, &format!("document.querySelectorAll({0}).length === 1 && document.querySelector({0} + ' .search-known-more')?.textContent === '+1 more on this page' && [...document.querySelectorAll('.search-known-failed')].some((p) => p.textContent === 'Not indexed yet: Old notes')", js(&row)), wait);
+    s.ok("a page matched in two sections shows once, the other counted, and a brain with no index yet is named as not indexed yet", grouped, b.eval(page, "document.getElementById('search-results').innerText")?);
     // every fragment of it failed: no hits, each named, never nothing found
     b.eval(page, &doctor_once("(a) => { a.results = []; a.fragments = a.fragments.map((f) => ({ ...f, state: 'failed', message: 'the index did not answer' })); }"))?;
     launch(b, "ferry timetable")?;
@@ -6702,10 +6751,12 @@ const APPS_RACE_PROBE: &str = "(() => {
   const revoke = URL.revokeObjectURL;
   URL.revokeObjectURL = () => {};
   const pending = { access: [], card: [] };
+  const made = { access: [], card: [] };
   const hold = (kind, url, o) => {
     const options = kind === 'card' ? { ...o, headers: { ...o?.headers } } : o;
     if (kind === 'card') delete options.headers['if-none-match'];
     const answer = real(url, options);
+    made[kind].push(String(url));
     return new Promise((resolve) => pending[kind].push({
       answer,
       release: async () => { const r = await answer; resolve(r); await new Promise((done) => setTimeout(done, 0)); },
@@ -6714,18 +6765,27 @@ const APPS_RACE_PROBE: &str = "(() => {
   window.fetch = (url, o) => {
     const u = String(url);
     if (u === '/api/access') return hold('access', url, o);
-    if (/^\\/api\\/f\\/[^/]+\\/card$/.test(u) && (o?.method ?? 'GET') === 'GET') return hold('card', url, o);
+    // the Apps page's own card reads: the dock's are the dock's
+    if (/^\\/api\\/f\\/[^/]+\\/card$/.test(u) && (o?.method ?? 'GET') === 'GET' && new Error().stack.includes('apps-page.js')) return hold('card', url, o);
     return real(url, o);
   };
   window.__appsRace = {
     count: (kind) => pending[kind].length,
+    made: (kind, url) => made[kind].filter((u) => u === url).length,
     release: async (kind, newest) => {
       const all = pending[kind].splice(0);
       if (newest) all.reverse();
       for (const p of all) await p.release();
       return true;
     },
-    restore: () => { window.fetch = real; URL.revokeObjectURL = revoke; return true; },
+    // nothing held for good: what is still held is answered, and what comes
+    // after goes straight to the server, as a request is answered in life
+    restore: async () => {
+      window.fetch = real;
+      URL.revokeObjectURL = revoke;
+      for (const kind of ['access', 'card']) for (const p of pending[kind].splice(0)) await p.release();
+      return true;
+    },
   };
   return true;
 })()";
@@ -6802,17 +6862,23 @@ fn apps_response_races_ui(s: &mut Suite, b: &mut Browser, page: &Page, app: &str
         b.until(page, "location.pathname === '/settings'", wait);
         let changed = set_visibility(b, visibility)?;
         let put = put_card(b, source)?;
+        // the new visit's own read of this card, not just as many reads as
+        // the old visit made (its two: this app's and another's)
+        let card_url = format!("/api/f/{app}/card");
+        let read_before = b.eval(page, &format!("window.__appsRace.made('card', {})", js(&card_url)))?.as_u64().unwrap_or(0);
         b.eval(page, "(document.getElementById('apps-link').click(), true)")?;
-        let new_visit = b.until(page, &format!("location.pathname === '/apps' && !!{row} && window.__appsRace.count('access') >= 2 && window.__appsRace.count('card') >= 2"), wait);
+        let new_visit = b.until(page, &format!("location.pathname === '/apps' && !!{row} && window.__appsRace.count('access') >= 2 && window.__appsRace.made('card', {}) > {read_before}", js(&card_url)), wait);
         release(b, "access", newest_first)?;
         release(b, "card", newest_first)?;
+        // a read made after those (a later list change's batch) is answered
+        // as it comes, never held for good
+        b.eval(page, "window.__appsRace.restore()")?;
         let final_access = b.until(page, &format!("{access}.includes({})", js(expected_access)), wait);
         let mut final_card = Value::Null;
         let card_settled = s.eventually(wait, || {
             final_card = b.eval(page, &format!("window.__appsHash({card}?.src).catch((e) => `hash failed: ${{e.message}}`)")).unwrap_or(Value::Null);
             final_card == expected_card
         });
-        b.eval(page, "window.__appsRace.restore()")?;
         s.ok(
             "closing and reopening Apps with access and card reads held: either completion order leaves the new visit's access text and card bytes",
             old_visit && new_visit && changed["status"] == 200 && put["status"] == 200 && final_access && card_settled,
@@ -6855,6 +6921,89 @@ fn apps_arrival_ui(s: &mut Suite, b: &mut Browser, page: &Page) -> Result<()> {
     b.eval(page, "window.__arrivingRestore()")?;
     b.eval(page, &format!("fetch('/api/f/{name}', {{ method: 'DELETE', headers: {{ 'x-fragment-shell': '1' }}, credentials: 'same-origin' }}).then((r) => r.status)"))?;
     b.until(page, &format!("!{row}"), wait);
+    Ok(())
+}
+
+/// Goal: an app's Reaches shows only on one that reaches the person's
+/// accounts, and such an app says it stays theirs and their agents' alone
+/// (Paul on FIN-352; the cell's rule, reach.rs). Invalid: an app with no key
+/// and no door has no Reaches tab. Valid: one given a key while the page is
+/// open gets the tab, its key by name and host, never its value, and its
+/// Sharing (its share sheet, share.rs) says why it is not shared; a
+/// connector bound as their agent's door is listed, its Reaches the door
+/// with Unlink, and their agents never are (an agent's own door is
+/// Settings': Alex on #918). Replay: its key removed from its Reaches
+/// (asked twice), the tab goes with its reach; the connector unlinked, it
+/// holds no door and leaves the page.
+fn apps_reach_ui(s: &mut Suite, b: &mut Browser, page: &Page, app: &str) -> Result<()> {
+    let wait = std::time::Duration::from_secs(60);
+    let in_page = |method: &str, path: &str, body: Value| {
+        format!(
+            "fetch({}, {{ method: {}, headers: {{ 'x-fragment-shell': '1', 'content-type': 'application/json' }}, body: {}, credentials: 'same-origin' }}).then(async (r) => ({{ status: r.status, body: await r.json().catch(() => null) }}))",
+            js(path),
+            js(method),
+            js(&body.to_string())
+        )
+    };
+    let tab_of = |name: &str, action: &str| format!("document.querySelector({})", js(&format!("#apps-page .app-row[data-fragment=\"{name}\"] [data-action={action}]")));
+    let none = b.until(page, &format!("!!{} && !{}", tab_of(app, "sharing"), tab_of(app, "reach")), wait);
+    s.ok("an app with no key and no door has no Reaches tab", none, b.eval(page, &format!("{}?.closest('.app-row')?.innerText ?? null", tab_of(app, "sharing")))?);
+
+    let made = b.eval(page, &in_page("POST", "/api/fragments", json!({ "label": "reaching-apps", "template": "todo", "title": "Reaching app" })))?;
+    let name = made["body"]["name"].as_str().unwrap_or("").to_string();
+    let private = b.eval(page, &in_page("PUT", &format!("/api/f/{name}/visibility"), json!({ "visibility": "members" })))?;
+    let key = b.eval(page, &in_page("PUT", &format!("/api/f/{name}/secrets/API_KEY"), json!({ "value": "sk-e2e-apps-reach-never-shown", "hosts": ["api.example.com"] })))?;
+    anyhow::ensure!(made["status"] == 200 && private["status"] == 200 && key["status"] == 200, "the reaching app was not made: {made} {private} {key}");
+    let row = format!("document.querySelector({})", js(&format!("#apps-page .app-row[data-fragment=\"{name}\"]")));
+    let tab = b.until(page, &format!("!!{}", tab_of(&name, "reach")), wait);
+    b.eval(page, &format!("({}?.click(), true)", tab_of(&name, "reach")))?;
+    let keys = b.until(page, &format!("!!{row}?.querySelector('.app-reach code') && {row}.querySelector('.app-reach code').textContent === 'API_KEY' && {row}.querySelector('.app-reach').innerText.includes('sent only to api.example.com')"), wait);
+    let quiet = b.eval(page, &format!("!{row}?.innerText.includes('sk-e2e')"))?;
+    s.ok(
+        "an app given a key while the page is open gets its Reaches tab: the key by name and host, never its value",
+        tab && keys && quiet == true,
+        b.eval(page, &format!("{row}?.innerText ?? null"))?,
+    );
+    b.eval(page, &format!("({}?.click(), true)", tab_of(&name, "sharing")))?;
+    let sheet = format!("({row}?.querySelector('.app-row-panel iframe')?.contentDocument?.body?.innerText ?? '')");
+    let locked = b.until(page, &format!("{sheet}.includes('Apps that can reach your accounts stay private to you and your agents for now.') && !{row}.querySelector('.app-row-panel iframe').contentDocument.querySelector('input[type=email]')"), wait);
+    s.ok("its Sharing says an app that reaches their accounts stays theirs and their agents', and invites no one", locked, b.eval(page, &sheet)?);
+
+    b.eval(page, &format!("({}?.click(), true)", tab_of(&name, "reach")))?;
+    let remove = format!("[...{row}?.querySelectorAll('.app-reach [data-action=reach]') ?? []]");
+    b.until(page, &format!("{remove}.some((b) => b.textContent === 'Remove')"), wait);
+    b.eval(page, &format!("({remove}.find((b) => b.textContent === 'Remove')?.click(), true)"))?;
+    let asked = b.until(page, &format!("{remove}.some((b) => b.textContent === 'Remove? Yes')"), wait);
+    b.eval(page, &format!("({remove}.find((b) => b.textContent === 'Remove? Yes')?.click(), true)"))?;
+    let gone = b.until(page, &format!("!!{row} && !{} && !{row}.querySelector('.app-reach')", tab_of(&name, "reach")), wait);
+    s.ok("its key removed from its Reaches, asked twice: the tab goes with its reach", asked && gone, b.eval(page, &format!("{row}?.innerText ?? null"))?);
+    b.eval(page, &format!("fetch('/api/f/{name}', {{ method: 'DELETE', headers: {{ 'x-fragment-shell': '1' }}, credentials: 'same-origin' }}).then((r) => r.status)"))?;
+    b.until(page, &format!("!{row}"), wait);
+
+    // a connector (Telegram's chat, members only as made) bound as their agent's door
+    let agent = b.eval(page, "fetch('/api/fragments', { headers: { 'x-fragment-shell': '1' }, credentials: 'same-origin' }).then((r) => r.json()).then((l) => l.fragments.find((f) => f.kind === 'agent' && f.role === 'owner')?.name ?? '')")?.as_str().unwrap_or("").to_string();
+    let made = b.eval(page, &in_page("POST", "/api/fragments", json!({ "label": "reaching-connector", "template": "telegram", "title": "Telegram" })))?;
+    let connector = made["body"]["name"].as_str().unwrap_or("").to_string();
+    let linked = b.eval(page, &in_page("POST", &format!("/api/f/{connector}/door"), json!({ "act": "link", "agent": agent })))?;
+    anyhow::ensure!(!agent.is_empty() && made["status"] == 200 && linked["status"] == 200, "the connector was not bound as {agent:?}'s door: {made} {linked}");
+    let crow = format!("document.querySelector({})", js(&format!("#apps-page .app-row[data-fragment=\"{connector}\"]")));
+    let listed = b.until(page, &format!("!!{}", tab_of(&connector, "reach")), wait);
+    b.eval(page, &format!("({}?.click(), true)", tab_of(&connector, "reach")))?;
+    let unlink = format!("[...{crow}?.querySelectorAll('.app-reach [data-action=reach]') ?? []]");
+    let door = b.until(page, &format!("({crow}?.querySelector('.app-reach')?.innerText ?? '').includes('Speaks for you to') && {unlink}.some((b) => b.textContent === 'Unlink')"), wait);
+    let no_agent = b.eval(page, &format!("!document.querySelector({})", js(&format!("#apps-page .app-row[data-fragment=\"{agent}\"]"))))?;
+    s.ok(
+        "a connector bound as their agent's door is listed, its Reaches the door with Unlink; their agent is not listed (its own door is Settings')",
+        listed && door && no_agent == true,
+        b.eval(page, &format!("{crow}?.innerText ?? null"))?,
+    );
+    b.eval(page, &format!("({unlink}.find((b) => b.textContent === 'Unlink')?.click(), true)"))?;
+    let asked = b.until(page, &format!("{unlink}.some((b) => b.textContent === 'Unlink? Yes')"), wait);
+    b.eval(page, &format!("({unlink}.find((b) => b.textContent === 'Unlink? Yes')?.click(), true)"))?;
+    let left = b.until(page, &format!("!{crow}"), wait);
+    let bound = b.eval(page, &format!("fetch('/api/f/{connector}/door', {{ headers: {{ 'x-fragment-shell': '1' }}, credentials: 'same-origin' }}).then((r) => r.json()).then((d) => d.bound)"))?;
+    s.ok("the connector unlinked from its Reaches, asked twice, holds no door and leaves the Apps page", asked && left && bound.is_null(), json!({ "bound": bound }));
+    b.eval(page, &format!("fetch('/api/f/{connector}', {{ method: 'DELETE', headers: {{ 'x-fragment-shell': '1' }}, credentials: 'same-origin' }}).then((r) => r.status)"))?;
     Ok(())
 }
 
@@ -7111,6 +7260,7 @@ fn apps_ui(s: &mut Suite, b: &mut Browser, page: &Page, skills: &str, app: &str,
     apps_sharing_refresh_ui(s, b, page, app)?;
     apps_response_races_ui(s, b, page, app)?;
     apps_arrival_ui(s, b, page)?;
+    apps_reach_ui(s, b, page, app)?;
     b.eval(page, &format!("(() => {{ if (!{row}?.querySelector('.icon-editor')) {}?.click(); return true; }})()", control("appearance")))?;
     apps_preview_visit_ui(s, b, page, app)?;
 

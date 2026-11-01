@@ -16,6 +16,8 @@
 //! answer is. A ledger that does not answer is no answer: the spend goes
 //! on, and nothing is kept, so the next one asks again.
 
+use std::future::Future;
+
 use super::Refused;
 
 /// How long an isolate trusts what a ledger answered its gate.
@@ -94,8 +96,31 @@ impl Gate {
     }
 }
 
+/// A spend's two questions, asked side by side (cell models.rs `gate`):
+/// its payer's `may_spend`, and, when another person owns its fragment,
+/// that owner's `fragment_open`. Neither answer depends on the other, so
+/// neither waits for the other (cold, each wakes a Ledger: FIN-320). Both
+/// must allow; both refusing, the payer's refusal is the one said.
+pub async fn asked_together<E>(payer: impl Future<Output = Result<(), E>>, owner: Option<impl Future<Output = Result<(), E>>>) -> Result<(), E> {
+    let owner = async {
+        match owner {
+            Some(asked) => asked.await,
+            None => Ok(()),
+        }
+    };
+    let (payer, owner) = futures_util::future::join(payer, owner).await;
+    payer.and(owner)
+}
+
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+    use std::future::{poll_fn, ready};
+    use std::pin::pin;
+    use std::task::{Context, Poll, Waker};
+
+    use futures_util::FutureExt;
+
     use super::*;
     use fragment_proto::ledger::Why;
 
@@ -143,6 +168,55 @@ mod tests {
         assert_eq!(gate.heard("p may", Some(Ok(())), 50_000), Ok(()));
         assert_eq!(gate.fresh("p may", 49_999), None);
         assert_eq!(gate.fresh("p may", 50_000), Some(Ok(())));
+    }
+
+    /// Side by side, with no clock: each ask in turn stays pending until
+    /// the other has been asked (polled), so asked one after the other in
+    /// either order they never finish; asked together they finish by the
+    /// second poll. Method: the joined future polled by hand, with a waker
+    /// that does nothing.
+    #[test]
+    fn the_two_asks_never_wait_on_each_other() {
+        // an ask that, if it `waits`, answers only once the other was asked
+        fn ask<'a>(mine: &'a Cell<bool>, theirs: &'a Cell<bool>, waits: bool) -> impl Future<Output = Result<(), Refused>> + 'a {
+            poll_fn(move |_| {
+                mine.set(true);
+                if waits && !theirs.get() {
+                    Poll::Pending
+                } else {
+                    Poll::Ready(Ok(()))
+                }
+            })
+        }
+        for payer_waits in [true, false] {
+            let (payer_asked, owner_asked) = (Cell::new(false), Cell::new(false));
+            let payer = ask(&payer_asked, &owner_asked, payer_waits);
+            let owner = ask(&owner_asked, &payer_asked, !payer_waits);
+            let mut both = pin!(asked_together(payer, Some(owner)));
+            let mut cx = Context::from_waker(Waker::noop());
+            // at most two polls, none after it answers
+            let answered = (0..2).find_map(|_| match both.as_mut().poll(&mut cx) {
+                Poll::Ready(answer) => Some(answer),
+                Poll::Pending => None,
+            });
+            let waiting = if payer_waits { "payer's" } else { "owner's" };
+            assert_eq!(answered, Some(Ok(())), "the {waiting} ask answers once the other is asked: asked alone first, it never would");
+        }
+    }
+
+    /// The decision, and whose refusal is said: both must allow; either
+    /// refusing refuses; both refusing, the payer's is said; with no owner
+    /// to ask, the payer's answer is the whole answer.
+    #[test]
+    fn both_must_allow_and_the_payers_refusal_comes_first() {
+        const CAPPED: Refused = Refused::CapReached { cap: 0, spent: 0 };
+        let answer = |payer: Result<(), Refused>, owner: Option<Result<(), Refused>>| asked_together(ready(payer), owner.map(ready)).now_or_never().expect("ready asks answer at once");
+        assert_eq!(answer(Ok(()), Some(Ok(()))), Ok(()));
+        assert_eq!(answer(Err(STOPPED), Some(Ok(()))), Err(STOPPED));
+        assert_eq!(answer(Ok(()), Some(Err(CAPPED))), Err(CAPPED));
+        assert_eq!(answer(Err(STOPPED), Some(Err(CAPPED))), Err(STOPPED), "the payer's refusal is said");
+        assert_eq!(answer(Ok(()), None), Ok(()));
+        assert_eq!(answer(Err(STOPPED), None), Err(STOPPED));
     }
 
     /// Bounded: at the bound the stale answers go first, then the oldest;

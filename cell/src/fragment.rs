@@ -42,6 +42,7 @@
 //!   POST   /job/advance|effect|finish     a run's Workflow (jobs.rs); never routed from outside
 //!   PUT    /api/cap                       owner: the fragment's monthly cap on the owner's ledger (meter.rs)
 //!   POST   /cap/files/read|list|stat      the app facet's `Files` capability (files.rs); never routed from outside
+//!   POST   /cap/search/upsert|delete|query|status  the app facet's `Search` capability (searchable.rs); never routed from outside
 //!   POST   /deliver/report                the delivery consumer (deliveries.rs); never routed from outside
 //!   GET    /api/card                      viewer: the preview card's JPEG (card.rs)
 //!   POST   /api/card  PUT /api/card       editor: a shot again; an upload as the card (card.rs)
@@ -102,6 +103,9 @@ pub struct FragmentCell {
     pub(crate) search_sending: RefCell<BTreeMap<String, Arc<futures_util::lock::Mutex<()>>>>,
     /// How the app facet starts (ops.rs `app_loader`).
     pub(crate) app: js::AppLoader,
+    /// Test fleets only: the facet start the `facet-calls` lever counts
+    /// capability calls for, and how many it has made.
+    pub(crate) facet_calls: Cell<(u32, u64)>,
     /// What this activation knows of its live sockets (live.rs).
     pub(crate) live: RefCell<crate::live::LiveMemory>,
     /// The minute it last set the alarm to close a request count for.
@@ -143,6 +147,7 @@ impl DurableObject for FragmentCell {
             seeding: futures_util::lock::Mutex::new(()),
             rate: RefCell::new(rate),
             swept: Cell::new(false),
+            facet_calls: Cell::new((0, 0)),
             settling: RefCell::default(),
             search_sending: RefCell::default(),
             app,
@@ -370,6 +375,9 @@ pub(crate) enum MetaKey {
     /// Test fleets only: while set, an advance after a run's first step
     /// waits (`hold-advances`), naming its run in `TestAdvanceHeld`.
     TestHoldAdvances,
+    /// Test fleets only: the capability calls each start of the app facet
+    /// may make (`facet-calls`), as Cloudflare spends a facet's subrequests.
+    TestFacetCalls,
     TestAdvanceHeld,
     /// The computer this agent fragment runs on (runs_on.rs).
     Computer,
@@ -393,11 +401,17 @@ pub(crate) enum MetaKey {
     /// CONNECTORS`), while it runs no other code: no one but its owner edits
     /// it, and only then may it be a door (doors.rs).
     DoorTemplate,
+    /// Its owner's row was told its reach (`Sharing.reach`, reach.rs).
+    ReachTold,
     /// The next time a page may pre-wake the computers its channels wake.
     PrewakeAt,
     /// Test fleets only: how many more paid AI steps fail just after their
     /// call was paid and kept (`fail-after-paid`), so the step is retried.
     TestFailAfterPaid,
+    /// Test fleets only: how many more video steps lose their model's
+    /// answer before it is kept (`lose-video-answers`), as a restart or a
+    /// broken try would, so the step is tried again without it.
+    TestLoseVideoAnswers,
     /// Test fleets only: how many more meter acknowledgements are lost
     /// (`fail-meter-acks`), so the queue delivers their batch again.
     TestFailMeterAcks,
@@ -410,6 +424,10 @@ pub(crate) enum MetaKey {
     /// Test fleets only: how many more card shots open a page nothing
     /// serves, so they fail (`fail-cards`).
     TestFailCards,
+    /// Test fleets only: how many more card shots find the fragment gone
+    /// members only between their look at it and their page's load, as an
+    /// owner restricting it then makes it (`members-while-shot`).
+    TestMembersWhileShot,
     /// Test fleets only: how many more calls into its search index fail
     /// before they are sent (`fail-search-index`): the index out of reach.
     TestFailSearchIndex,
@@ -466,6 +484,7 @@ impl MetaKey {
             MetaKey::TestFailTriggers => "test_fail_triggers",
             MetaKey::TestDropEffects => "test_drop_effects",
             MetaKey::TestHoldAdvances => "test_hold_advances",
+            MetaKey::TestFacetCalls => "test_facet_calls",
             MetaKey::TestAdvanceHeld => "test_advance_held",
             MetaKey::Computer => "computer",
             MetaKey::AgentIdentity => "agent_identity",
@@ -474,14 +493,17 @@ impl MetaKey {
             MetaKey::DoorActor => "door_actor",
             MetaKey::InboxSecret => "inbox_secret",
             MetaKey::DoorTemplate => "door_template",
+            MetaKey::ReachTold => "reach_told",
             MetaKey::PrewakeAt => "prewake_at",
             MetaKey::TestFailAfterPaid => "test_fail_after_paid",
+            MetaKey::TestLoseVideoAnswers => "test_lose_video_answers",
             MetaKey::TestFailMeterAcks => "test_fail_meter_acks",
 
             MetaKey::MeterClosed => "meter_closed",
             MetaKey::StorageSampledAt => "storage_sampled_at",
             MetaKey::Cards => "cards",
             MetaKey::TestFailCards => "test_fail_cards",
+            MetaKey::TestMembersWhileShot => "test_members_while_shot",
             MetaKey::TestFailSearchIndex => "test_fail_search_index",
             MetaKey::TestConnectors => "test_connectors",
             MetaKey::Icon => "icon",
@@ -857,6 +879,11 @@ impl FragmentCell {
         let ends = path.starts_with("/wipe/") || (req.method() == Method::Delete && path == "/delete");
         if !ends {
             self.schema.ready()?;
+            // one from before `Sharing.reach` tells its owner's row once
+            // (reach.rs); a failure here fails no request
+            if let Err(e) = self.reach_told() {
+                worker::console_error!("its owner's row was not told its reach: {}", e.message);
+            }
         }
         if path == "/test/keys" && self.cfg.test_hooks {
             // this cell's own sealing: the e2e checks that what one
@@ -918,9 +945,20 @@ impl FragmentCell {
             if req.headers().get(crate::files::CAP_HEADER)?.as_deref() != Some("files") {
                 return Err(CellError::new(ErrorCode::NotFound, format!("no route {path}")));
             }
+            self.facet_calls_lever()?;
             let op = op.to_string();
             let body: Value = body_json(&mut req).await?;
             return self.cap_files(&op, &body).await;
+        }
+        if let Some(op) = path.strip_prefix("/cap/search/") {
+            // Only the `Search` capability sets the header (searchable.rs)
+            if req.headers().get(crate::files::CAP_HEADER)?.as_deref() != Some("search") {
+                return Err(CellError::new(ErrorCode::NotFound, format!("no route {path}")));
+            }
+            self.facet_calls_lever()?;
+            let op = op.to_string();
+            let body: Value = body_json(&mut req).await?;
+            return self.cap_search(&op, body).await;
         }
         if path == "/invites/claim" || path == "/invites/decline" || path == "/members/agent" {
             // Only the platform sets the header (a person's yes or no; an
@@ -1319,6 +1357,8 @@ impl FragmentCell {
             code: self.code_status()?,
             // the share link is its owner's to give (and their agent's, sharing for them): a member asks them
             view_token: self.shares(caller).then_some(facts.view_token),
+            // it stays its owner's and their agents' while it has reach (reach.rs)
+            reach: self.reaches()?,
             inbox_token: if role >= Role::Editor { Some(inbox_token.ok_or_else(|| missing(MetaKey::InboxToken))?) } else { None },
             urls: Urls { canonical: self.cfg.canonical(&caller.url, &facts.name), platform: self.cfg.platform() },
             blob_min_bytes: Some(fragment_core::blob::BLOB_MIN_BYTES as u64),

@@ -130,8 +130,9 @@ jobs:
   # parallel (one per CPU). Measured on ubuntu-latest (4 CPUs, 16 GB, a
   # 145 GB disk with about 85 GB free): the Hermes image builds in about
   # 7 minutes (its two Rust stages, the CLI's and the bridge's, about
-  # 5.5 of them), the tests take about 3, and the job uses at most about
-  # 11 GB of the disk (71 GB used of 145 at its peak, 75 GB free).
+  # 5.5 of them), the tests take about 3. Its disk, measured on ubuntu-24.04
+  # (PR #890): from the 31 GB used once the disk is freed, a peak of 44.7
+  # GiB used, about 14 GiB of the lane's own.
   #
   # No layer cache, by measurement (PR #252): with BuildKit's layers in the
   # Actions cache (mode=max), an image whose every input was unchanged built
@@ -166,6 +167,8 @@ jobs:
         working-directory: images
     steps:
       - uses: actions/checkout@v4
+      # its disk freed first (the action says why: PR #890), and sampled
+      - uses: ./.github/actions/free-disk
       - uses: dtolnay/rust-toolchain@stable
       # the check job's cache, read only
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -185,8 +188,10 @@ jobs:
       - name: build the Hermes image
         working-directory: .
         run: docker build --platform linux/amd64 -f images/hermes/Dockerfile -t fragment-hermes:test .
+      # the tests build only the SimpleX lab's image, from its own
+      # Dockerfile: the two builds' cache goes before them
       - name: disk, built
-        run: docker system df; df -h /
+        run: docker system df; docker builder prune -af > /dev/null; df -h /
       - name: the Docker lane
         run: cargo test -p fragment-bridge --test docker --locked -- --ignored --show-output
         env:
@@ -194,7 +199,9 @@ jobs:
           RUST_BACKTRACE: "1"
       - if: always()
         name: disk, after
-        run: df -h /
+        run: |
+          docker system df; df -h /; free -h
+          echo "peak: $(awk '$1 > d { d = $1 } END { print d }' "$RUNNER_TEMP/disk-used") MiB of the disk used, $(awk '$2 > m { m = $2 } END { print m }' "$RUNNER_TEMP/disk-used") MiB of the memory"
       # each container's log (Container's drop) and the tests' own
       - if: failure()
         uses: actions/upload-artifact@v4

@@ -173,6 +173,17 @@ impl Table {
     }
 }
 
+/// A fence, at most: what JavaScript holds exactly, and SQLite's integer.
+pub const FENCE_MAX: u64 = (1 << 53) - 1;
+
+/// Whether a write or delete sent at fence `asked` is taken, the source's
+/// stored fence `stored` (none: none taken yet). Only a lower one is
+/// refused: the same batch's retry, at its own fence, is taken again.
+pub fn admits(stored: Option<u64>, asked: u64) -> bool {
+    assert!(asked <= FENCE_MAX, "a fence is checked against FENCE_MAX before it is compared");
+    stored.is_none_or(|s| asked >= s)
+}
+
 /// Whether an index holding `held` chunks takes a source's write of `new`
 /// chunks that replaces `replaced` of them, holding at most `max`: a
 /// source written again counts once, so one at capacity is replaced.
@@ -473,5 +484,14 @@ mod tests {
         assert_eq!((hits[1].chunk, hits[1].semantic), (10, None), "its best chunk, its second unranked");
         assert_eq!((hits[2].chunk, hits[2].lexical, hits[2].semantic.map(|p| p.rank)), (30, None, Some(2)));
         assert_eq!(fuse(&lexical, &semantic, 1).len(), 1);
+    }
+
+    #[test]
+    fn a_fence_refuses_only_a_lower_one() {
+        assert!(admits(None, 0) && admits(None, FENCE_MAX), "none stored: any");
+        assert!(admits(Some(7), 7), "the same batch's retry");
+        assert!(admits(Some(7), 8));
+        assert!(!admits(Some(7), 6), "a stale batch's");
+        assert_eq!(FENCE_MAX, 9_007_199_254_740_991);
     }
 }

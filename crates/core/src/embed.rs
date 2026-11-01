@@ -96,6 +96,11 @@ pub struct Slot {
     /// embeddings route embeds an agent's input as given.
     pub document_prefix: Option<String>,
     pub query_prefix: Option<String>,
+    /// The inputs its model takes in one call, at most (`inputs_max`;
+    /// `INPUTS_MAX` unnamed): Tinfoil's nomic-embed-text takes 32 and
+    /// refuses 33 (413, 2026-11-01), so a search embeds a write's chunks in
+    /// batches of this many, and the embeddings route refuses more.
+    pub inputs_max: usize,
 }
 
 /// The vector space a slot's answers are in: compare only vectors of one.
@@ -116,6 +121,7 @@ impl Default for Slot {
             private: false,
             document_prefix: None,
             query_prefix: None,
+            inputs_max: INPUTS_MAX,
         }
     }
 }
@@ -142,6 +148,28 @@ impl Slot {
     pub fn question(&self, q: &str) -> String {
         format!("{}{q}", self.query_prefix.as_deref().unwrap_or(""))
     }
+}
+
+/// How long a writer waits after its embeddings model's rate limit (429)
+/// before it writes again, when the model says nothing (`retry_after_ms`).
+pub const RETRY_AFTER_DEFAULT_MS: u64 = 60_000;
+/// The longest and shortest wait a refusal names: a model's own outside
+/// them is held to them.
+pub const RETRY_AFTER_MAX_MS: u64 = 10 * 60_000;
+pub const RETRY_AFTER_MIN_MS: u64 = 1_000;
+
+/// The wait a model's 429 asks for, in ms: its `Retry-After` header (in
+/// seconds), else the "Retry after N seconds" its body says (Tinfoil's),
+/// else `RETRY_AFTER_DEFAULT_MS`; held between `RETRY_AFTER_MIN_MS` and
+/// `RETRY_AFTER_MAX_MS`. One rule, so every writer waits alike.
+pub fn retry_after_ms(header: Option<&str>, body: &str) -> u64 {
+    let seconds = |s: &str| s.trim().parse::<f64>().ok().filter(|n| n.is_finite() && *n >= 0.0);
+    let said = header.and_then(seconds).or_else(|| {
+        let lower = body.to_ascii_lowercase();
+        let after = lower.split("retry after ").nth(1)?;
+        seconds(after.split(|c: char| !(c.is_ascii_digit() || c == '.')).next()?)
+    });
+    said.map_or(RETRY_AFTER_DEFAULT_MS, |s| (s * 1000.0).ceil() as u64).clamp(RETRY_AFTER_MIN_MS, RETRY_AFTER_MAX_MS)
 }
 
 /// The most tokens `c` is read as, by any tokenizer an embeddings model
@@ -207,6 +235,14 @@ pub fn slot_of(models: &mut Value) -> Result<Slot, String> {
     };
     let document_prefix = prefix("document_prefix")?;
     let query_prefix = prefix("query_prefix")?;
+    let inputs_max = match o.remove("inputs_max") {
+        None => INPUTS_MAX,
+        Some(v) => v
+            .as_u64()
+            .filter(|n| (1..=INPUTS_MAX as u64).contains(n))
+            .map(|n| n as usize)
+            .ok_or_else(|| format!("models.embeddings: inputs_max is the inputs its model takes in one call, 1 to {INPUTS_MAX}, not {v}"))?,
+    };
     let private = match o.remove("private") {
         None => false,
         Some(Value::Bool(b)) => b,
@@ -221,7 +257,7 @@ pub fn slot_of(models: &mut Value) -> Result<Slot, String> {
     if let Upstream::Openai { body: Some(_), .. } = &upstream {
         return Err("models.embeddings: body is a chat slot's (an API's own fields for its chat completions)".into());
     }
-    Ok(Slot { upstream, dimensions, version, max_input_tokens, private, document_prefix, query_prefix })
+    Ok(Slot { upstream, dimensions, version, max_input_tokens, private, document_prefix, query_prefix, inputs_max })
 }
 
 /// How the client reads its vectors: OpenAI's `encoding_format`.
@@ -246,7 +282,7 @@ pub struct Bounded {
 pub enum Refusal {
     Input,
     Empty,
-    TooMany(usize),
+    TooMany { inputs: usize, max: usize },
     TooLong { index: usize, window: u32, tokens: u64 },
     Model(String),
     Dimensions(u64),
@@ -258,7 +294,7 @@ impl Refusal {
         match self {
             Refusal::Input => "input is a string or an array of strings (token arrays are not taken)".into(),
             Refusal::Empty => "an input is some text: an empty one has no embedding".into(),
-            Refusal::TooMany(n) => format!("a call embeds 1 to {INPUTS_MAX} inputs, not {n}"),
+            Refusal::TooMany { inputs, max } => format!("a call embeds 1 to {max} inputs on this deployment's embeddings slot, not {inputs}"),
             Refusal::TooLong { index, window, tokens } => format!("input {index} may be {tokens} tokens, past the embeddings slot's {window}: split it, as nothing is cut"),
             Refusal::Model(m) => format!("model is {EMBEDDINGS} or the embeddings slot's own model, not {m:?}"),
             Refusal::Dimensions(d) => format!("dimensions is the slot's own when named: this deployment's vectors are not cut to {d}"),
@@ -279,8 +315,8 @@ pub fn bound(body: &Value, slot: &Slot) -> Result<Bounded, Refusal> {
         Value::Array(a) => a.iter().map(|v| v.as_str().map(str::to_string).ok_or(Refusal::Input)).collect::<Result<_, _>>()?,
         _ => return Err(Refusal::Input),
     };
-    if inputs.is_empty() || inputs.len() > INPUTS_MAX {
-        return Err(Refusal::TooMany(inputs.len()));
+    if inputs.is_empty() || inputs.len() > slot.inputs_max {
+        return Err(Refusal::TooMany { inputs: inputs.len(), max: slot.inputs_max });
     }
     let window = slot.max_input_tokens;
     if let Some((index, tokens)) = inputs.iter().map(|t| tokens_max(t)).enumerate().find(|&(_, n)| n > u64::from(window)) {
@@ -432,6 +468,38 @@ mod tests {
     }
 
     #[test]
+    fn a_rate_limit_names_how_long_to_wait() {
+        assert_eq!(retry_after_ms(Some("37"), ""), 37_000, "the header, in seconds");
+        assert_eq!(retry_after_ms(None, r#"{"error":{"message":"Rate limit reached for tokens. Retry after 37 seconds."}}"#), 37_000, "Tinfoil's words");
+        assert_eq!(retry_after_ms(Some("2"), "Retry after 37 seconds"), 2_000, "the header first");
+        assert_eq!(retry_after_ms(Some("1.5"), ""), 1_500);
+        assert_eq!(retry_after_ms(None, "slow down"), RETRY_AFTER_DEFAULT_MS, "nothing said: the default");
+        assert_eq!(retry_after_ms(Some("Wed, 21 Oct 2026 07:28:00 GMT"), ""), RETRY_AFTER_DEFAULT_MS, "a date is not read: the default");
+        assert_eq!(retry_after_ms(Some("0"), ""), RETRY_AFTER_MIN_MS, "held to the shortest");
+        assert_eq!(retry_after_ms(Some("86400"), ""), RETRY_AFTER_MAX_MS, "held to the longest");
+        assert_eq!(retry_after_ms(Some("-5"), "retry after 9 seconds"), 9_000, "a header that says nothing sensible: the body");
+    }
+
+    #[test]
+    fn a_slot_names_the_inputs_its_model_takes_in_one_call() {
+        let slot = |extra: Value| {
+            let mut row = json!({ "provider": "openai", "base_url": "https://inference.tinfoil.sh/v1", "model": "nomic-embed-text", "dimensions": 768, "private": true, "price": { "input": 0.05, "output": 0 } });
+            row.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            slot_of(&mut json!({ "embeddings": row }))
+        };
+        assert_eq!(slot(json!({})).unwrap().inputs_max, INPUTS_MAX, "unnamed, the route's own most");
+        let tinfoil = slot(json!({ "inputs_max": 32 })).unwrap();
+        assert_eq!(tinfoil.inputs_max, 32);
+        // the embeddings route refuses a call past it, before anything is sent
+        assert!(bound(&json!({ "input": vec!["x"; 32] }), &tinfoil).is_ok());
+        assert_eq!(bound(&json!({ "input": vec!["x"; 33] }), &tinfoil).err(), Some(Refusal::TooMany { inputs: 33, max: 32 }));
+        assert!(Refusal::TooMany { inputs: 33, max: 32 }.message().contains("1 to 32"));
+        for bad in [json!(0), json!(INPUTS_MAX + 1), json!("32"), json!(-1)] {
+            assert!(slot(json!({ "inputs_max": bad.clone() })).unwrap_err().contains("inputs_max"), "{bad}");
+        }
+    }
+
+    #[test]
     fn a_slot_names_the_prefixes_its_search_embeds_after() {
         let nomic = |extra: Value| {
             let mut row = json!({ "provider": "openai", "base_url": "https://inference.tinfoil.sh/v1", "model": "nomic-embed-text", "dimensions": 768, "version": "nomic-v1.5", "private": true, "price": { "input": 0.05, "output": 0 } });
@@ -484,15 +552,15 @@ mod tests {
         assert_eq!(bound(&json!({ "input": ["a", "b"], "encoding_format": "base64", "dimensions": 1024, "model": MODEL_DEFAULT }), &s).unwrap().format, Format::Base64);
         let refused = |body: Value| bound(&body, &s).unwrap_err();
         assert_eq!(refused(json!({ "input": [1, 2] })), Refusal::Input);
-        assert_eq!(refused(json!({ "input": [] })), Refusal::TooMany(0));
-        assert_eq!(refused(json!({ "input": vec!["x"; INPUTS_MAX + 1] })), Refusal::TooMany(INPUTS_MAX + 1));
+        assert_eq!(refused(json!({ "input": [] })), Refusal::TooMany { inputs: 0, max: INPUTS_MAX });
+        assert_eq!(refused(json!({ "input": vec!["x"; INPUTS_MAX + 1] })), Refusal::TooMany { inputs: INPUTS_MAX + 1, max: INPUTS_MAX });
         assert_eq!(refused(json!({ "input": ["ok", "x".repeat(510)] })), Refusal::TooLong { index: 1, window: 512, tokens: 513 });
         assert!(bound(&json!({ "input": "x".repeat(509) }), &s).is_ok(), "a window's tokens exactly");
         assert_eq!(refused(json!({ "input": " " })), Refusal::Empty);
         assert_eq!(refused(json!({ "input": "x", "model": "cheap" })), Refusal::Model("cheap".into()));
         assert_eq!(refused(json!({ "input": "x", "dimensions": 256 })), Refusal::Dimensions(256));
         assert_eq!(refused(json!({ "input": "x", "encoding_format": "int8" })), Refusal::Format("int8".into()));
-        assert!(Refusal::TooMany(0).message().contains("1 to 100"));
+        assert!(Refusal::TooMany { inputs: 0, max: INPUTS_MAX }.message().contains("1 to 100"));
     }
 
     /// Each text's tokens as BGE-M3 reads them, `<s>` and `</s>` included:

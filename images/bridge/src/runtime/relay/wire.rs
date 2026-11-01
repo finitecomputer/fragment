@@ -186,7 +186,7 @@ fn options(v: &Value, clarify: bool) -> Vec<PromptOption> {
             let label = o["label"].as_str().unwrap_or(&id).to_string();
             let style = o["style"].as_str().filter(|s| !s.is_empty()).map(str::to_string);
             let words = clarify && id == "other";
-            Some(PromptOption { id, label, style, words })
+            Some(PromptOption { id, label, style, words, computer: false })
         })
         .collect()
 }
@@ -846,7 +846,7 @@ mod tests {
         let p = out(json!({ "op": "prompt", "chat_id": "c", "content": "Run?", "prompt_kind": "approval", "prompt_id": "ab.12", "options": [{ "id": "once", "label": "Allow Once", "style": "primary" }, { "id": "deny", "label": "Deny" }] }));
         let FromGateway::Outbound { action: Action::Prompt { prompt_id, options, clarify, .. }, .. } = p else { panic!("a prompt") };
         assert_eq!((prompt_id.as_str(), clarify), ("ab.12", false), "an approval");
-        assert_eq!(options[0], PromptOption { id: "once".into(), label: "Allow Once".into(), style: Some("primary".into()), words: false });
+        assert_eq!(options[0], PromptOption { id: "once".into(), label: "Allow Once".into(), style: Some("primary".into()), words: false, computer: false });
         assert_eq!(options[1].style, None);
         // a clarify's choices (Hermes' send_clarify): the question without its glyph, and "Other" answered in words
         let c = out(json!({ "op": "prompt", "chat_id": "c", "content": "❓ Which color?", "prompt_kind": "clarify", "prompt_id": "q.1", "options": [{ "id": "c0", "label": "red" }, { "id": "other", "label": "✏️ Other (type answer)" }] }));

@@ -491,6 +491,13 @@ enum OperatorCmd {
         #[arg(long)]
         key_file: Option<PathBuf>,
     },
+    /// FIN-352's census: of everyone's fragments, how many of each kind
+    /// hold a key or a door, and how many of those are shared beyond their
+    /// owner and their agents. Counts only, no names
+    Reach {
+        #[arg(long)]
+        key_file: Option<PathBuf>,
+    },
     /// List people, a page at a time; --q finds them by the start of their email
     People {
         #[arg(long)]
@@ -1356,6 +1363,37 @@ fn run(cli: Cli) -> Result<()> {
             json_exit(j, &json!({ "report": r, "calls": calls }));
             operator::print(&r);
             println!("wiped in {calls} call(s): nothing of theirs is left; their next sign-in is a new person");
+            return Ok(());
+        }
+        Cmd::Operator { sub: OperatorCmd::Reach { key_file } } => {
+            let c = operator_client(&cli.host, cli.verbose, key_file.as_deref())?;
+            let (mut people, mut owned, mut unanswered) = (0u64, 0u64, 0u64);
+            let (mut reaching, mut beyond) = (std::collections::BTreeMap::<String, u64>::new(), std::collections::BTreeMap::<String, u64>::new());
+            let mut after: Option<String> = None;
+            loop {
+                let page = admin_answer(&c, c.get(&format!("/api/admin/people?after={}", api::encode_q(after.as_deref().unwrap_or(""))))?)?;
+                for p in page["people"].as_array().into_iter().flatten() {
+                    let npub = p["npub"].as_str().context("a person without an npub")?;
+                    let r = admin_answer(&c, c.get(&format!("/api/admin/people/{npub}/reach"))?)?;
+                    people += 1;
+                    owned += r["owned"].as_u64().unwrap_or(0);
+                    unanswered += r["unanswered"].as_u64().unwrap_or(0);
+                    for (into, field) in [(&mut reaching, "reaching"), (&mut beyond, "beyond")] {
+                        for (kind, n) in r[field].as_object().into_iter().flatten() {
+                            *into.entry(kind.clone()).or_default() += n.as_u64().unwrap_or(0);
+                        }
+                    }
+                }
+                match page["next"].as_str() {
+                    Some(next) => after = Some(next.to_string()),
+                    None => break,
+                }
+            }
+            json_exit(j, &json!({ "people": people, "owned": owned, "reaching": reaching, "beyond": beyond, "unanswered": unanswered }));
+            let say = |m: &std::collections::BTreeMap<String, u64>| if m.is_empty() { "none".to_string() } else { m.iter().map(|(k, n)| format!("{n} {k}")).collect::<Vec<_>>().join(", ") };
+            println!("{people} people, {owned} fragments owned ({unanswered} did not answer)");
+            println!("with a key or a door: {}", say(&reaching));
+            println!("of those, shared beyond their owner and their agents: {}", say(&beyond));
             return Ok(());
         }
         Cmd::Operator { sub: OperatorCmd::People { q, after, key_file } } => {

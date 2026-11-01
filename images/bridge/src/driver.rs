@@ -275,10 +275,15 @@ pub async fn run(cfg: Config, runtimes: Runtimes, stop: watch::Receiver<bool>) -
     // touched before the restore.
     let (screen_agents, screen_rx) = watch::channel::<Option<Vec<Named>>>(None);
     let simplex_page = crate::simplex::http::Simplex { configured: cfg.simplex.is_some(), ..Default::default() };
+    // answers for the computer (answer.rs), each stepped as it comes, its
+    // post told whether it was taken (`Effect::ComputerAnswered`)
+    let (answers_tx, mut answers_rx) = mpsc::channel::<crate::answer::Ask>(16);
+    let taken: Mutex<HashMap<u64, tokio::sync::oneshot::Sender<Result<(), String>>>> = Mutex::new(HashMap::new());
+    let mut next_answer = 0u64;
     if let Some(sc) = cfg.screen.clone() {
         let (stop, simplex_page) = (stop.clone(), simplex_page.clone());
         tokio::spawn(async move {
-            if let Err(e) = screen::serve(sc, screen_rx, simplex_page, stop).await {
+            if let Err(e) = screen::serve(sc, screen_rx, simplex_page, Some(answers_tx), stop).await {
                 crate::ev!("screen.failed", { "error": e });
             }
         });
@@ -298,12 +303,15 @@ pub async fn run(cfg: Config, runtimes: Runtimes, stop: watch::Receiver<bool>) -
     // yet, and no SimpleX core runs: `quiet` is false only while one does)
     let claims_in_flight = Arc::new(AtomicUsize::new(0));
     let quiet = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    // the hold as the runtimes see it, and what of theirs it waits on
+    let (held_tx, held_rx) = watch::channel(false);
+    let runtimes_unquiet = Arc::new(AtomicUsize::new(0));
     let answer: String = cfg.left_out.iter().map(|p| format!("{p}\n")).collect();
     // a core a bridge before this one left running is gone before any hold is answered
     if let Some(sc) = &cfg.simplex {
         crate::simplex::run::kill_strays(sc).await;
     }
-    tokio::spawn(answer_holds(cfg.hold.clone(), cfg.held.clone(), answer, claims_in_flight.clone(), quiet.clone(), stop.clone()));
+    tokio::spawn(answer_holds(cfg.hold.clone(), cfg.held.clone(), answer, claims_in_flight.clone(), quiet.clone(), held_tx, runtimes_unquiet.clone(), stop.clone()));
     // SimpleX, when the image names its core: told of the computer at each
     // read; it says which agents' links are bound (`relaying`), whose
     // relayed records alone the engine honors, each with its SimpleX chat
@@ -334,7 +342,7 @@ pub async fn run(cfg: Config, runtimes: Runtimes, stop: watch::Receiver<bool>) -
         let (event_tx, mut event_rx) = mpsc::channel::<Event>(1024);
         let name = runtime.name();
         runs.push(json!({ "serves": serves, "runtime": name }));
-        let task = tokio::spawn(runtime.run(RuntimeIo { commands: cmd_rx, events: event_tx, shutdown: stop.clone() }));
+        let task = tokio::spawn(runtime.run(RuntimeIo { commands: cmd_rx, events: event_tx, shutdown: stop.clone(), held: held_rx.clone(), unquiet: runtimes_unquiet.clone() }));
         runtime_tasks.push(Box::pin(async move { (name, task.await) }));
         to_runtime.insert(serves.clone(), cmd_tx);
         let inbox_tx = inbox_tx.clone();
@@ -405,6 +413,11 @@ pub async fn run(cfg: Config, runtimes: Runtimes, stop: watch::Receiver<bool>) -
                     _ => lanes.push(&fragment, Job::Owed { agent, channel, turn, id, body }),
                 },
                 Effect::Draft { agent, fragment, turn, text } => lanes.push(&fragment, Job::Draft { agent, turn, text }),
+                Effect::ComputerAnswered { reply, taken: t } => {
+                    if let Some(post) = taken.lock().expect("answers").remove(&reply) {
+                        let _ = post.send(t);
+                    }
+                }
                 Effect::Runtime { runtime, command } => runtime_lanes.get(&runtime).expect("the engine names only the runtimes it was given").push(command),
                 Effect::Keepalive(on) => {
                     crate::ev!("keepalive", { "hold": on });
@@ -459,6 +472,16 @@ pub async fn run(cfg: Config, runtimes: Runtimes, stop: watch::Receiver<bool>) -
         tokio::select! {
             biased;
             _ = crate::net::stopped(&mut stop_rx) => break Ok(()),
+            Some(ask) = answers_rx.recv() => {
+                // an answer for the computer: its value the runtime's alone
+                next_answer += 1;
+                taken.lock().expect("answers").insert(next_answer, ask.taken);
+                let input = Input::ComputerAnswer { agent: ask.agent, turn: ask.turn, prompt: ask.prompt, option: ask.option, words: ask.words, reply: next_answer };
+                let s = engine.step(input, crate::log::now_ms());
+                if let Err(e) = act(&engine, s) {
+                    break Err(e);
+                }
+            }
             m = inbox.recv() => {
                 let Some(m) = m else { break Ok(()) };
                 let step = match m {
@@ -1863,16 +1886,21 @@ async fn cut_note(api: &Api, ts: &TurnStart) -> Option<String> {
 /// looks at the hold before each try, so none starts once it holds), and no
 /// SimpleX core runs (`cores_quiet`: SimpleX stops them all as it sees the
 /// hold, and starts none while it lasts; always true with no SimpleX), and
+/// nothing of a runtime's own runs outside its turns (`runtimes_unquiet`:
+/// each runtime is told the hold, `runtimes_held`, and quiets its own), and
 /// not otherwise. The platform clears `held` before each hold, so an
 /// answer is always to the hold it finds. The answer is `answer`: what the
 /// save may leave out, one per line (none, empty). Looked at every
 /// `HOLD_POLL_MS`, for the bridge's life.
-async fn answer_holds(hold: PathBuf, held: PathBuf, answer: String, in_flight: Arc<AtomicUsize>, cores_quiet: Arc<std::sync::atomic::AtomicBool>, mut stop: watch::Receiver<bool>) {
+#[allow(clippy::too_many_arguments)]
+async fn answer_holds(hold: PathBuf, held: PathBuf, answer: String, in_flight: Arc<AtomicUsize>, cores_quiet: Arc<std::sync::atomic::AtomicBool>, runtimes_held: watch::Sender<bool>, runtimes_unquiet: Arc<AtomicUsize>, mut stop: watch::Receiver<bool>) {
     assert!(hold != held, "a hold and its answer are two files");
     assert!(answer.len() <= limits::HELD_ANSWER_MAX_BYTES, "an answer the platform reads whole");
     // bounded by the bridge's life: one look per `HOLD_POLL_MS`, ended by `stop`
     loop {
-        let quiet = hold.exists() && in_flight.load(Ordering::SeqCst) == 0 && cores_quiet.load(Ordering::SeqCst);
+        let holding = hold.exists();
+        runtimes_held.send_if_modified(|was| std::mem::replace(was, holding) != holding);
+        let quiet = holding && in_flight.load(Ordering::SeqCst) == 0 && cores_quiet.load(Ordering::SeqCst) && runtimes_unquiet.load(Ordering::SeqCst) == 0;
         match (quiet, held.exists()) {
             // written whole, then renamed: the platform never reads half
             (true, false) => match write_whole(&held, answer.as_bytes()) {
@@ -1991,7 +2019,7 @@ mod tests {
         assert_eq!(for_simplex(records::CHAT, &records::reply(" ", "t1", &[], 0, false), 0), None, "nothing said");
         let agent = crate::runtime::Agent { fragment: "juniper--k3x9".into(), identity: "npub1juniper".into(), name: "juniper".into(), owner: "npub1paul".into(), credentials: vec![], key: None, runtime: None };
         assert_eq!(for_simplex(records::CHAT, &records::relayed_message("hi from my phone", &agent, records::VIA_SIMPLEX, &[]), 0), None, "its owner's own, from the phone");
-        let option = |id: &str, label: &str, words: bool| records::PromptOption { id: id.into(), label: label.into(), style: None, words };
+        let option = |id: &str, label: &str, words: bool| records::PromptOption { id: id.into(), label: label.into(), style: None, words, computer: false };
         let card = records::turn_prompt("t1", "c-1", "What should I plant?", &[option("c0", "Basil", false), option("c1", "Mint", false), option("other", "Something else", true)], "npub1paul", 1);
         assert_eq!(for_simplex(records::WORK, &card, 0).as_deref(), Some("What should I plant?\n\n(Answer with one of: Basil, Mint, or in your own words.)"));
         let buttons = records::turn_prompt("t1", "p-1", "Run it?", &[option("once", "Allow once", false)], "npub1paul", 1);

@@ -82,10 +82,14 @@ with its default. What an image sets:
 - `BRIDGE_SIMPLEX_BIN`: SimpleX's core (below). Unset, nothing of SimpleX
   runs.
 - `BRIDGE_CLAUDE_BIN`: the person's own unmodified `claude` (below, "The
-  Claude runtime"), run as `BRIDGE_CLAUDE_USER` (`uid:gid`, never root),
-  its config, work and state under `/data`. Unset, as in every image
-  today, an agent whose `agent.json` names `claude` has its turns refused,
-  saying so.
+  Claude runtime"), run as `BRIDGE_CLAUDE_USER` (`uid:gid`, never root)
+  with `HOME` `BRIDGE_CLAUDE_HOME`, the person's, and its config that
+  home's `.claude`, so the agent runs the Claude Code the person
+  installed and signed in to there; its work and state under `/data`.
+  Our Hermes image sets them to the person's install in `/data`
+  (docs/computers.md, "Claude Code"). Unset, an agent whose `agent.json`
+  names `claude` has its turns refused, saying so; set but not installed
+  yet, each turn ends saying how to install it (`NOT_INSTALLED`).
 
 ## State, and what it never does twice
 
@@ -181,6 +185,35 @@ runtime forgot. The agent's next turn in that chat is told what each
 forgotten turn was asked and replied, from the journal
 (`note::forgotten`), once a life.
 
+## An answer for the computer
+
+A card's option may be answered on the agent's computer alone, never in
+a record (`PromptOption::computer`: a sign-in's code, which no chat
+should keep). The runtime asks it as a words option; the card shows a
+masked field, and:
+
+- **The chat's page** hands what is typed to the shell
+  (templates/chat/site/frame-messages.js, `cardToComputer`), only from the
+  person's own shell (the one that answered its `agents?`).
+- **The shell** takes it only from a frame of the person's own fragment,
+  for an agent of their own computer, and hands it to that computer's
+  `/answer/` page on its screen port (answer.rs), framed unseen through a
+  port ticket, its owner's alone. The page posts it to `POST /answer`
+  (JSON from its own origin alone), and what came of it goes back to the
+  chat, in words its person reads.
+- **The engine** (`Input::ComputerAnswer`) takes it only for an open card
+  of a running turn, an option that is the computer's, once: the runtime
+  gets its words once the card's closure is on `work`; the closure says it
+  was answered by the agent's owner, nothing of what. A record answering
+  it is ignored, live or late. A card whose turn is gone (a restart) takes
+  it no more, saying so: its person sends a message to start again.
+
+The value is never logged or kept, here or on the platform, which only
+carries the port's bytes. Something on the computer itself (the agent's
+own tools) may also post to the port, but it already holds what such an
+answer opens (the agent's own sign-in), so an answer of its own can
+only fail.
+
 ## A card outlives its turn
 
 Waiting on a person (a card, or a question in words) never holds the
@@ -192,7 +225,11 @@ resolves it from the chat's journal, read back to the card (`cards.rs`):
 - **The first valid answer starts one fresh turn**, caused by the
   answer's record, so a retry after any restart is the same claim. Its
   message is the owner's answer; its note is the card's turn as `note.rs`
-  renders a cut one. The old turn never resumes.
+  renders a cut one. The old turn never resumes. It also carries the
+  answer as a runtime reads it (`TurnStart::late`, `LateCard`): which card,
+  which option, and what the card's turn was asked, so a runtime that acts
+  on its own cards (Claude's install card) honours it from that, never
+  from the message's words.
 - **Only a late closure rebuilds.** A late answer's closure names it
   (`answerSeq`). A live one names none, and the runtime gets a live
   answer only once its closure is on `work`, so a rollback to before the
@@ -365,6 +402,40 @@ drives it. The bridge never sits between it and Anthropic: no proxy, base
 URL or key, and no `ANTHROPIC_*` or `CLAUDE_CODE_*` variable of anyone's
 reaches it (`withheld`).
 
+- **Not installed**, a turn asks its person on a card (`INSTALL_ASK`):
+  Install runs Anthropic's installer (`INSTALLER`, Paul's FIN-233: the
+  person's own install) as the agents' user into its person's home, its
+  data in that home's `.local/share`, for at most `INSTALL_MS_MAX`; the
+  turn says it ran ("Ran Anthropic's installer (Claude Code <version>)")
+  and goes on to what was asked. Not now (or the card expiring) ends the
+  turn saying so; a failed install ends it in the installer's last
+  words; a Stop kills the installer's whole process group. Answered after
+  a sleep or a restart, its fresh turn (above, "A card outlives its
+  turn") does the same from its `LateCard`: Install, then what the card's
+  turn was asked; Not now, declined, asking nothing again. Installed by
+  then, it installs nothing more.
+- **Signed out** (`claude auth status`, before a session's process
+  starts), a turn asks its person to sign in on a card (FIN-353):
+  `claude auth login`, started with no display so it opens no browser on
+  the computer, says Anthropic's sign-in URL, which the card links for
+  its person's own browser on any device; the code that page shows them
+  goes back on the card as an answer for the computer (`SIGN_IN_OPTION`;
+  above, "An answer for the computer"), never a record or a log line,
+  and into the login's input. Signed in, the turn says so and goes on to
+  what was asked. A code the login calls invalid is asked again on a new
+  card, at most `SIGN_IN_TRIES_MAX` times. A Stop or a let-go wherever it
+  waits (its status checks, the URL, the code's exchange), or the card
+  expiring, ends the turn, its login with it, and no session begins; the
+  URL is taken only once said whole (a pipe's reads are not its lines).
+  The login's verifier lives only in
+  its process (PKCE), so a sign-in never outlives its turn: after a sleep
+  or a restart its card's code is refused, saying so, and the next
+  message asks anew.
+- **Its folder** is its work directory, its own: an `AGENTS.md` the
+  bridge writes (who it is, and the `fragment` CLI, which acts as it:
+  `FRAGMENT_AS_AGENT`, `FRAGMENT_FOR`), and a `CLAUDE.md` that reads it,
+  written only when the agent has none. Claude's auto memory is on, kept
+  per agent under the person's `.claude`.
 - **A session per agent and chat**, its id derived from the two and the
   chat's `/new` count, so every life names the same one. It resumes when
   its transcript is on disk, and its process stops once idle.
@@ -389,6 +460,13 @@ reaches it (`withheld`).
   may or may not have run (recorded with Haiku 5.5: it found the call
   still running and waited, never running it again).
 - **Its menu:** `new` (the chat's next session) and `stop`.
+- **Under a hold** (a save's), a session's idle `claude` stops before the
+  bridge answers it, so nothing of Claude Code's own (its background
+  update, among others) writes under `/data` while the save copies it. A
+  turn running at the hold runs on, as a Hermes turn does, its process
+  stopped as it ends; the next turn resumes the session. Each runtime is
+  told the hold (`RuntimeIo::held`) and counts what of its own the answer
+  waits on (`RuntimeIo::unquiet`).
 
 ## Hermes' Relay
 

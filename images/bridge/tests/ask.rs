@@ -322,10 +322,10 @@ impl Runtime for AskingAgain {
     }
 
     fn run(self: Box<Self>, io: RuntimeIo) -> RuntimeFuture {
-        let RuntimeIo { mut commands, events, shutdown } = io;
+        let RuntimeIo { mut commands, events, shutdown, held, unquiet } = io;
         let (to_inner, inner_commands) = mpsc::channel::<Command>(256);
         let AskingAgain { inner, world, api, pair } = *self;
-        let inner = inner.run(RuntimeIo { commands: inner_commands, events, shutdown });
+        let inner = inner.run(RuntimeIo { commands: inner_commands, events, shutdown, held, unquiet });
         Box::pin(async move {
             tokio::spawn(async move {
                 let api = Api::new(&api).expect("the fake's address");

@@ -112,84 +112,91 @@ pub fn shell_page(text: &str, release: &str, deployed: Option<u64>) -> String {
 /// each with its content type: of the rest of cell/shell/, its pages are
 /// served at their own paths, and its credits and licenses not at all.
 #[cfg(feature = "platform")]
-const SHELL_PUBLISHED: [(&str, &str); 50] = [
-    // the cell's server-rendered pages' base look (share.rs `sheet_html`),
-    // on the platform's origin and, as /__sheet.css, on a fragment's
-    ("sheet.css", "text/css; charset=utf-8"),
-    // the platform's pages' look and Funnel Sans (vendor/funnel-sans-OFL.txt),
-    // which the shell loads too: its type, and its first run's card; their
-    // card's pointer-following rim
-    ("platform-pages.css", "text/css; charset=utf-8"),
-    ("platform-pages.js", "text/javascript; charset=utf-8"),
-    ("platform-landscape.jpg", "image/jpeg"),
-    ("platform-landscape-dark.jpg", "image/jpeg"),
-    ("funnel-sans-400.ttf", "font/ttf"),
-    ("funnel-sans-500.ttf", "font/ttf"),
-    ("funnel-sans-600.ttf", "font/ttf"),
-    ("funnel-sans-700.ttf", "font/ttf"),
-    ("shell.js", "text/javascript; charset=utf-8"),
+const SHELL_PUBLISHED: &[(&str, &str)] = &[
+    ("activity.js", "text/javascript; charset=utf-8"),
+    // the operators' admin page (`/admin`)
+    ("admin.css", "text/css; charset=utf-8"),
+    ("admin.js", "text/javascript; charset=utf-8"),
+    // an agent's colour: the agent template's, linked (templates/agent/site)
+    ("agent-color.js", "text/javascript; charset=utf-8"),
+    ("agent-identity.js", "text/javascript; charset=utf-8"),
+    ("agent-settings.js", "text/javascript; charset=utf-8"),
+    // every agent's image, tinted to its colour (shell.css; CREDITS.md)
+    ("agent.png", "image/png"),
     // a chat's alerts: the service worker the shell registers for each
     // chat whose alerts are on (shell.js, "a chat's alerts")
     ("alerts-sw.js", "text/javascript; charset=utf-8"),
-    ("shell.css", "text/css; charset=utf-8"),
-    ("layout.js", "text/javascript; charset=utf-8"),
-    ("viewer.js", "text/javascript; charset=utf-8"),
-    ("agent-identity.js", "text/javascript; charset=utf-8"),
-    // an agent's colour: the agent template's, linked (templates/agent/site)
-    ("agent-color.js", "text/javascript; charset=utf-8"),
-    // the messages between the shell and the pages it frames: the chat template's, linked (templates/chat/site)
-    ("frame-messages.js", "text/javascript; charset=utf-8"),
-    // its icons (Lucide's among them: vendor/lucide-LICENSE) and an app's
-    ("icons.js", "text/javascript; charset=utf-8"),
     // an app's own icon in the dock, and the sheet that makes one (docs/api.md, Icons)
     ("app-icon.js", "text/javascript; charset=utf-8"),
-    // the Apps page: each app's dock, card, icon and who has access
-    ("apps-page.js", "text/javascript; charset=utf-8"),
-    // the History page: every chat they have had, and its search
-    ("history-page.js", "text/javascript; charset=utf-8"),
-    ("activity.js", "text/javascript; charset=utf-8"),
-    ("fragment-title.js", "text/javascript; charset=utf-8"),
-    ("tooltips.js", "text/javascript; charset=utf-8"),
-    // Settings' Billing: a seat, credit, an org (docs/billing.md)
-    ("billing.js", "text/javascript; charset=utf-8"),
-    // the launcher: ⌘K, to start a chat or find one again
-    ("settings.js", "text/javascript; charset=utf-8"),
-    ("chat-list.js", "text/javascript; charset=utf-8"),
-    // the Session Archive under the chats (templates/sessions/README.md)
-    ("session-archive.js", "text/javascript; charset=utf-8"),
-    ("continue.js", "text/javascript; charset=utf-8"),
-    // delegation threads: a line each over the chat an agent asked from
-    ("threads.js", "text/javascript; charset=utf-8"),
-    ("session-refresh.js", "text/javascript; charset=utf-8"),
-    ("onboarding.js", "text/javascript; charset=utf-8"),
-    ("computer.js", "text/javascript; charset=utf-8"),
-    ("agent-settings.js", "text/javascript; charset=utf-8"),
-    ("connections.js", "text/javascript; charset=utf-8"),
-    ("exports.js", "text/javascript; charset=utf-8"),
-    ("launcher.js", "text/javascript; charset=utf-8"),
-    ("vendor/split-grid.js", "text/javascript; charset=utf-8"),
-    ("manifest.webmanifest", "application/manifest+json"),
-    // the shell's favicon (a tab's, and the sign-in page's logo, which WorkOS takes from
-    // it): Finite's mark full-bleed, black, or white in a dark scheme
-    ("icon.svg", "image/svg+xml"),
     // the app's icon (the manifest's; iOS's home screen takes only a PNG of it): the mark,
     // white, on a dark square, inside a maskable icon's safe zone
     ("app-icon.svg", "image/svg+xml"),
     ("apple-touch-icon.png", "image/png"),
+    // the Apps page: each app's dock, card, icon and who has access
+    ("apps-page.js", "text/javascript; charset=utf-8"),
+    // Settings' Billing: a seat, credit, an org (docs/billing.md)
+    ("billing.js", "text/javascript; charset=utf-8"),
+    ("chat-list.js", "text/javascript; charset=utf-8"),
+    // who may hand a card's answer to its agent's computer
+    ("computer-answer.js", "text/javascript; charset=utf-8"),
+    ("computer.js", "text/javascript; charset=utf-8"),
+    ("connections.js", "text/javascript; charset=utf-8"),
+    ("continue.js", "text/javascript; charset=utf-8"),
+    ("exports.js", "text/javascript; charset=utf-8"),
     // Finite's logo, above the splash's and the welcome's card (CREDITS.md)
     ("finite-logo.svg", "image/svg+xml"),
-    // the desktop's and the launcher's light and dark landscapes (cell/shell/CREDITS.md)
-    ("wallpaper.jpg", "image/jpeg"),
-    ("wallpaper-dark.jpg", "image/jpeg"),
-    // every agent's image, tinted to its colour (shell.css; CREDITS.md)
-    ("agent.png", "image/png"),
-    // the operators' admin page (`/admin`)
-    ("admin.js", "text/javascript; charset=utf-8"),
-    ("admin.css", "text/css; charset=utf-8"),
+    ("fragment-title.js", "text/javascript; charset=utf-8"),
+    // the messages between the shell and the pages it frames: the chat template's, linked (templates/chat/site)
+    ("frame-messages.js", "text/javascript; charset=utf-8"),
+    // a chat's stand-in while its page comes: its room and composer, never a blank frame
+    ("frame-standin.js", "text/javascript; charset=utf-8"),
+    // Funnel Sans (vendor/funnel-sans-OFL.txt): the platform's pages' type,
+    // which the shell loads too
+    ("funnel-sans-400.ttf", "font/ttf"),
+    ("funnel-sans-500.ttf", "font/ttf"),
+    ("funnel-sans-600.ttf", "font/ttf"),
+    ("funnel-sans-700.ttf", "font/ttf"),
+    // the History page: every chat they have had, and its search
+    ("history-page.js", "text/javascript; charset=utf-8"),
+    // the shell's favicon (a tab's, and the sign-in page's logo, which WorkOS takes from
+    // it): Finite's mark full-bleed, black, or white in a dark scheme
+    ("icon.svg", "image/svg+xml"),
+    // its icons (Lucide's among them: vendor/lucide-LICENSE) and an app's
+    ("icons.js", "text/javascript; charset=utf-8"),
+    // the launcher: ⌘K, to start a chat or find one again
+    ("launcher.js", "text/javascript; charset=utf-8"),
+    ("layout.js", "text/javascript; charset=utf-8"),
     // the look of Finite's about page, privacy policy and terms (`/about`,
-    // `/privacy`, `/terms`): a sheet of paper, its edges bowed by this mask
+    // `/privacy`, `/terms`): a sheet of paper, its edges bowed by paper-edge.svg
     ("legal.css", "text/css; charset=utf-8"),
+    ("manifest.webmanifest", "application/manifest+json"),
+    ("onboarding.js", "text/javascript; charset=utf-8"),
     ("paper-edge.svg", "image/svg+xml"),
+    // the platform's pages' look: their first run's card, and its
+    // pointer-following rim
+    ("platform-landscape-dark.jpg", "image/jpeg"),
+    ("platform-landscape.jpg", "image/jpeg"),
+    ("platform-pages.css", "text/css; charset=utf-8"),
+    ("platform-pages.js", "text/javascript; charset=utf-8"),
+    // the Session Archive under the chats (templates/sessions/README.md)
+    ("session-archive.js", "text/javascript; charset=utf-8"),
+    ("session-refresh.js", "text/javascript; charset=utf-8"),
+    // an imported conversation's words said for a person (History, the launcher's Knowledge)
+    ("session-text.js", "text/javascript; charset=utf-8"),
+    ("settings.js", "text/javascript; charset=utf-8"),
+    // the cell's server-rendered pages' base look (share.rs `sheet_html`),
+    // on the platform's origin and, as /__sheet.css, on a fragment's
+    ("sheet.css", "text/css; charset=utf-8"),
+    ("shell.css", "text/css; charset=utf-8"),
+    ("shell.js", "text/javascript; charset=utf-8"),
+    // delegation threads: a line each over the chat an agent asked from
+    ("threads.js", "text/javascript; charset=utf-8"),
+    ("tooltips.js", "text/javascript; charset=utf-8"),
+    ("vendor/split-grid.js", "text/javascript; charset=utf-8"),
+    ("viewer.js", "text/javascript; charset=utf-8"),
+    // the desktop's and the launcher's light and dark landscapes (cell/shell/CREDITS.md)
+    ("wallpaper-dark.jpg", "image/jpeg"),
+    ("wallpaper.jpg", "image/jpeg"),
 ];
 
 /// A file the shell publishes, by its name, and its content type.
@@ -349,9 +356,12 @@ pub(crate) mod tests {
     /// its pages, credits and licenses are indexed but not published.
     #[test]
     fn the_shell_publishes_its_files_alone() {
-        for (name, content_type) in SHELL_PUBLISHED {
+        for &(name, content_type) in SHELL_PUBLISHED {
             assert_eq!(shell_published(name), Some((shell(name).unwrap(), content_type)), "{name}");
         }
+        // sorted by name, each once, so two changes conflict only where they
+        // add beside each other (no count to bump)
+        assert!(SHELL_PUBLISHED.windows(2).all(|w| w[0].0 < w[1].0), "SHELL_PUBLISHED is sorted by name, each once");
         for name in ["index.html", "admin.html", "about.html", "privacy.html", "terms.html", "CREDITS.md", "vendor/lucide-LICENSE", "vendor/split-grid.LICENSE.txt", "vendor/funnel-sans-OFL.txt"] {
             assert!(shell(name).is_some() && shell_published(name).is_none(), "{name}");
         }

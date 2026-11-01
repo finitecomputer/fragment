@@ -182,7 +182,8 @@ impl FragmentCell {
         let b = Binding::read(&stored)?;
         self.del_meta(MetaKey::DoorActor)?;
         self.event("door.unbound", why, json!({ "door": b.door, "agent": b.agent }));
-        Ok(())
+        // its owner's row says whether it still has reach (reach.rs)
+        self.sharing_changed()
     }
 
     /// `POST /api/f/{name}/door` and `POST __door`: `{act: "link", agent}`
@@ -213,6 +214,9 @@ impl FragmentCell {
             return Err(CellError::new(ErrorCode::Forbidden, "this fragment is no connector: only one made from a connector's template, that never ran other code, is a door"));
         };
         self.connector_policy()?.authorize(&owner, agent, &door, Action::Link).map_err(|why| CellError::new(ErrorCode::Forbidden, format!("door {door} {why}")))?;
+        // refused before the agent is asked (it records the binding), and
+        // again in the binding's own turn, below
+        self.reach_while_private()?;
         // the agent's fragment says it is theirs, and an agent, and records it
         let asked = json!({ "owner": owner, "door": door, "actor": self.name()? });
         let identity = crate::fragment::ask(&self.env, agent, "computer/door-actor", &asked).await?["identity"].as_str().map(str::to_string).ok_or_else(|| CellError::host("the agent fragment named no identity"))?;
@@ -224,8 +228,12 @@ impl FragmentCell {
             let as_owner = self.as_owner()?;
             self.set_member(&as_owner, &identity, SetRole { role: Role::Viewer }).await?;
         }
+        // a door is reach: none while it is shared beyond its owner and
+        // their agents (reach.rs), decided again in the binding's own turn
+        self.reach_while_private()?;
         let b = Binding { door, agent: agent.into(), identity };
         self.set_meta(MetaKey::DoorActor, &b.stored())?;
+        self.sharing_changed()?;
         self.event("door.bound", &format!("its owner's agent {agent}'s {} door", b.door), json!({ "door": b.door, "agent": agent, "identity": b.identity }));
         Ok(json!({ "door": b.door, "agent": agent, "relayed": Hosted { door: b.door.clone(), agent: agent.into(), owner: npub::display(&owner) }.relayed() }))
     }

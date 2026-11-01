@@ -216,8 +216,10 @@ fn dev(args: &[String]) -> Result<()> {
     build::cell_as(build::Profile::Dev)?;
     let clean = args.clean;
     let state = devstack::repo_root().join("target/devstack/codestorage.json");
+    let workos_users = devstack::repo_root().join("target/devstack/workos.json");
     if clean {
         let _ = std::fs::remove_file(&state);
+        let _ = std::fs::remove_file(&workos_users);
         // the node's state too, before the fleet seeds its local store again
         devstack::clear_state(&devstack::cell_dir())?;
     }
@@ -241,6 +243,13 @@ fn dev(args: &[String]) -> Result<()> {
         (Some(client_id), Some(api_key)) => (devstack::WorkOsVars { client_id, api_key, api_url: None }, None),
         _ => {
             let fake = fragment_fakes::workos::WorkOs::start_on(DEV_WORKOS_PORT, DEV_WORKOS_CLIENT, DEV_WORKOS_KEY)?;
+            // its users kept as the node keeps its people (who sign in by
+            // subject), and every subject the node signs someone in by taken
+            // as it is (a node from before the file, or one whose file
+            // went): a fake made new each start would give the first email
+            // to sign in the subject of whoever had it before
+            fake.keep_users_in(&workos_users)?;
+            fake.adopt(&devstack::signed_in_subjects(&devstack::cell_dir(), &format!("workos:{DEV_WORKOS_CLIENT}"))?)?;
             (devstack::WorkOsVars { client_id: DEV_WORKOS_CLIENT.into(), api_key: DEV_WORKOS_KEY.into(), api_url: Some(fake.url.clone()) }, Some(fake))
         }
     };
@@ -316,7 +325,7 @@ fn dev(args: &[String]) -> Result<()> {
     fleet.configure(&tools, &devstack::cell_dir())?;
     let opts = devstack::NodeOptions {
         project: devstack::cell_dir(),
-        port: DEV_PORT,
+        listener: devstack::hold_port(DEV_PORT)?,
         log_dir: devstack::repo_root().join("target/devstack"),
         // in the terminal's group: Ctrl-C stops it with xtask
         own_group: false,

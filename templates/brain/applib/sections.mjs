@@ -1,5 +1,4 @@
-// A brain's markdown as its search sees it (app.mjs), and a query as plain
-// words. Pure functions, no I/O.
+// A brain's markdown as its search sees it (app.mjs). Pure functions, no I/O.
 //
 // A page is cut into sections, as Finite Brain's search cuts it: the text
 // under each heading (ATX, `#` to `######`, outside fenced code), with the
@@ -12,17 +11,24 @@
 
 export const SECTION_MAX_CHARS = 8000;
 export const SECTIONS_MAX = 500;
-export const QUERY_WORDS_MAX = 16;
 export const TITLE_MAX_CHARS = 300;
 
 const FENCE = /^ {0,3}(`{3,}|~{3,})/;
 const ATX = /^ {0,3}(#{1,6})(?:[ \t]+(.*?))?[ \t]*$/;
 
-/// Markdown's inline marks, gone: what a heading or a title reads as.
-export function plain(text) {
+/// A wiki's links as their words: `[[page|its words]]` its words,
+/// `[[page]]` the page's name as `stem` says it ("frost dates"). What a
+/// heading, a title and a section's text read as, wherever they are shown
+/// (FIN-367).
+export function linkWords(text) {
   return String(text)
     .replace(/\[\[([^\]|]+)\|([^\]]+)\]\]/g, "$2")
-    .replace(/\[\[([^\]]+)\]\]/g, "$1")
+    .replace(/\[\[([^\]]+)\]\]/g, (_, page) => stem(page));
+}
+
+/// Markdown's inline marks, gone: what a heading or a title reads as.
+export function plain(text) {
+  return linkWords(text)
     .replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1")
     .replace(/[*_`~]+/g, "")
     .replace(/\s+/g, " ")
@@ -128,17 +134,4 @@ export function sections(path, text) {
   });
   const truncated = out.length > SECTIONS_MAX;
   return { title, sections: out.slice(0, SECTIONS_MAX), truncated };
-}
-
-/// A query as words: runs of letters, digits and marks, lowercased. Nothing
-/// else in it means anything: FTS5's syntax (OR, NOT, NEAR, quotes, column:,
-/// *, ^) is text like any other, split away or kept as a word.
-export function words(q) {
-  return String(q).normalize("NFKC").toLowerCase().split(/[^\p{L}\p{N}\p{M}]+/u).filter(Boolean);
-}
-
-/// The FTS5 expression for `ws`: each word a quoted phrase matching a word
-/// or a word's start, all of them required.
-export function match(ws) {
-  return ws.map((w) => `"${w.replaceAll('"', '""')}"*`).join(" ");
 }

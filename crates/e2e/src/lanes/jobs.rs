@@ -122,8 +122,12 @@ pub(super) fn jobs_fragment(s: &Suite, api: &Api, owner: &Keys, base: &str, edit
     Ok((name, c))
 }
 
-/// Sets the fixture's `API_KEY` to `value`, for `hosts`.
+/// Sets the fixture's `API_KEY` to `value`, for `hosts`, on the fragment
+/// made private first: a key is held only where its owner and their own
+/// agents alone are (FIN-352, cell reach.rs).
 pub(super) fn set_secret(api: &Api, keys: &Keys, name: &str, value: &str, hosts: &[&str]) -> Result<Reply> {
+    let private = api.signed(keys, "PUT", &format!("/api/f/{name}/visibility"), Some(&json!({ "visibility": "members" })))?;
+    anyhow::ensure!(private.status == 200, "{name} made private for its key: {private}");
     api.signed(keys, "PUT", &format!("/api/f/{name}/secrets/API_KEY"), Some(&json!({ "value": value, "hosts": hosts })))
 }
 
@@ -143,7 +147,7 @@ pub(super) fn settle(api: &Api, keys: &Keys, name: &str, id: i64, want: &[&str],
     }
 }
 
-fn runs(api: &Api, keys: &Keys, name: &str, query: &str) -> Vec<Value> {
+pub(super) fn runs(api: &Api, keys: &Keys, name: &str, query: &str) -> Vec<Value> {
     api.signed(keys, "GET", &format!("/api/f/{name}/runs?limit=200{query}"), None)
         .ok()
         .and_then(|r| r.body["runs"].as_array().cloned())
@@ -221,9 +225,11 @@ pub fn jobs(s: &mut Suite, api: &Api) -> Result<()> {
     }
     let upstream = Upstream::start()?;
     let owner = api.person()?;
-    let viewer = api.person()?;
     let (name, _) = jobs_fragment(s, api, &owner, "jobs", |_| {})?;
-    api.share(&name, viewer.pubkey_hex(), "viewer")?;
+    // its viewer its owner's own agent: it holds a key (FIN-352)
+    let (viewer, viewer_id) = api.own_agent(&owner)?;
+    let r = api.signed(&owner, "PUT", &format!("/api/f/{name}/members/{viewer_id}"), Some(&json!({ "role": "viewer" })))?;
+    anyhow::ensure!(r.status == 200, "the jobs fragment's viewer: {r}");
     let r = set_secret(api, &owner, &name, SECRET, &["127.0.0.1"])?;
     anyhow::ensure!(r.status == 200, "secret setup: {r}");
     let long = Duration::from_secs(40);
@@ -451,10 +457,13 @@ pub fn jobs(s: &mut Suite, api: &Api) -> Result<()> {
     );
 
     // the CLI
+    // the CLI as its owner: a fragment holding a key takes no one else in
+    // (FIN-352), so no other person's CLI
     let home = s.dir("jobs-cli");
-    s.login(api, &home);
-    let cli = s.cli_keys(&home).expect("the CLI logged in");
-    api.share(&name, cli.pubkey_hex(), "editor")?;
+    let config = home.join(if cfg!(target_os = "macos") { "Library/Application Support" } else { ".config" }).join("fragment");
+    std::fs::create_dir_all(&config)?;
+    std::fs::write(config.join("config.json"), json!({ "secret_key": owner.secret_hex() }).to_string())?;
+    let cli = s.cli_keys(&home).expect("the CLI's key");
     let wrong_id = wrong["id"].as_i64().unwrap_or(0).to_string();
     let r = s.cli_json(api, &home, &["runs", &name, "--status", "held", "--json"])?;
     s.ok("fragment runs --status held lists the held runs", r["runs"].as_array().is_some_and(|a| a.len() == 1 && a[0]["op"] == "wrong"), &r);
@@ -513,6 +522,8 @@ fn inbox_secret(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
     };
     let r = post(vec![("x-hook-secret", HOOK.into())])?;
     s.ok("an inbox whose secret is not set takes nothing", r.status == 403 && r.text.contains("x-hook-secret"), &r);
+    // its key held only while it is private (FIN-352)
+    anyhow::ensure!(api.signed(owner, "PUT", &format!("/api/f/{name}/visibility"), Some(&json!({ "visibility": "members" })))?.status == 200, "made private");
     let r = api.signed(owner, "PUT", &format!("/api/f/{name}/secrets/HOOK"), Some(&json!({ "value": HOOK, "hosts": ["api.telegram.org"] })))?;
     anyhow::ensure!(r.status == 200, "the inbox's secret: {r}");
     let r = post(vec![("x-fragment-inbox-token", token.clone())])?;

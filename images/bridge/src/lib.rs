@@ -7,6 +7,7 @@
 //! map of their displays, `lease` who drives one; `simplex` an agent's link
 //! to its owner's SimpleX app (groundwork: nothing runs it yet).
 
+pub mod answer;
 pub mod api;
 pub mod cards;
 pub mod driver;

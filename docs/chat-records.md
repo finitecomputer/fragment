@@ -320,7 +320,12 @@ Older bridges post none.
 `prompt` matches `^[A-Za-z0-9._-]{1,64}$`, and option ids the same with
 at most 32 characters. A card has 1 to 8 options; `style` is optional
 (`primary`, `danger`). An option with `"words": true` is answered in
-words on the card (the answer's `text`, above). Only `asks` answers, and
+words on the card (the answer's `text`, above). One with `"computer":
+true` too is answered on the agent's computer, never in a record (a
+sign-in's code): the chat's page hands what is typed to the shell, which
+hands it to that computer (docs/bridge.md, "An answer for the
+computer"); a `prompt_response` naming it is ignored, and its card closes
+answered with no `text`. Only `asks` answers, and
 only until `expiresAt` (ms). A card outlives a restart of its turn: an
 answer whose turn is gone starts a fresh turn (docs/bridge.md, "A card
 outlives its turn").

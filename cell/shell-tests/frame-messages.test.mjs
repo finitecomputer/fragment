@@ -25,7 +25,7 @@ const IMPORTERS = ["cell/shell/shell.js", "cell/shell/session-refresh.js", "cell
 const LITERALS = [
   "templates/agent/site/agent.js", "templates/skills/site/skills.js", "templates/sessions/site/sessions.js",
   "cell/files.mjs", "cell/src/auth.rs", "cell/shell/alerts-sw.js",
-  "images/bridge/src/simplex/page.html", "images/hermes/screen/index.html", "images/stub/screen/index.html",
+  "images/bridge/src/simplex/page.html", "images/bridge/src/answer.html", "images/hermes/screen/index.html", "images/stub/screen/index.html",
 ];
 
 // a kind written out: compared (`fragment === "busy"`), sent (`fragment:

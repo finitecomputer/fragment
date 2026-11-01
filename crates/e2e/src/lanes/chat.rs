@@ -347,6 +347,15 @@ fn mic_card_shots(chrome: &mut Browser, page: &Page, shots: &Path, kind: &str) -
     chrome.color_scheme(page, "light")
 }
 
+/// Whether the drafts a page saw streamed the reply: each the whole text
+/// so far, a beginning of the reply (the last may be all of it: its final
+/// frame can show before the reply replaces it), and at least one only a
+/// part of it, as it was written.
+fn streamed(drafts: &Value, reply: &str) -> bool {
+    let drafts: Vec<&str> = drafts.as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+    drafts.iter().all(|t| reply.starts_with(t)) && drafts.iter().any(|t| t.len() < reply.len())
+}
+
 /// A JSON array's strings.
 fn strings_of(v: &Value) -> Vec<String> {
     v.as_array().into_iter().flatten().filter_map(|x| x.as_str().map(str::to_string)).collect()
@@ -558,9 +567,7 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     let reply = chrome.eval(&page, &format!("[...document.querySelectorAll('.msg.agent .md')].map((m) => m.textContent).find((t) => t.includes({})) ?? ''", js(first)))?;
     let reply = reply.as_str().unwrap_or("").to_string();
     let drafts = chrome.eval(&page, "window.__drafts")?;
-    // each draft the whole text so far: a beginning of the reply
-    let drafted = drafts.as_array().is_some_and(|d| !d.is_empty() && d.iter().all(|t| t.as_str().is_some_and(|t| reply.starts_with(t) && t.len() < reply.len())));
-    s.ok("the agent's draft shows live, as it writes", drafted, json!({ "drafts": drafts, "reply": reply }));
+    s.ok("the agent's draft shows live, as it writes", streamed(&drafts, &reply), json!({ "drafts": drafts, "reply": reply }));
     s.ok("then its reply replaces the draft", answered && reply.starts_with("echo:"), chrome.eval(&page, "document.getElementById('messages').innerText")?);
     s.ok("the agent's reply is under its name", chrome.eval(&page, &format!("[...document.querySelectorAll('.msg.agent .who')].every((w) => w.textContent === {})", js(&capital(&label))))? == true, "");
 
@@ -1014,9 +1021,154 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     polish::record_shapes(s, api, &owner, &owner_session, &mut chrome)?;
     polish::finished_card_times(s, api, &owner, &mut chrome)?;
     alerts_in_frame(s, api, &mut chrome, &owner, &owner_session, &member_session, &owner_site, &chat_name, &identity)?;
+    card_to_computer(s, api, &mut chrome, &owner, &chat_name, &shots)?;
+    claude_install(s, api, &mut chrome, &owner, &computer, &shots)?;
 
     std::thread::sleep(super::computers::QUEUE_DRAIN);
     api.signed(&owner, "POST", &format!("/api/computers/{computer}/sleep"), Some(&json!({})))?;
+    Ok(())
+}
+
+/// FIN-353 PR 2: an answer for the computer. In the chat the shell frames,
+/// the agent's card asks for a code its option takes on the computer alone
+/// (the script's `code-card`); typed on the card and sent, the shell hands it
+/// to the computer's `/answer/` page, unseen, and the turn has it: it says
+/// how many characters it took, the card closes answered, and no record of
+/// the chat holds what was typed. Screenshots for FIN-353.
+fn card_to_computer(s: &mut Suite, api: &Api, chrome: &mut Browser, owner: &Keys, chat: &str, shots: &Path) -> Result<()> {
+    let Some((shell, frame)) = framing_shell(s, api, chrome, chat, "")? else {
+        s.ok("the shell frames the chat for its card that asks for a code", false, "");
+        return Ok(());
+    };
+    chrome.click(&frame, "#text")?;
+    chrome.type_text(&frame, "code-card")?;
+    chrome.press(&frame, "Enter", false)?;
+    let field = ".prompt:not(.closed) input[data-option=\"code\"]";
+    let asked = chrome.until(&frame, &format!("document.querySelector({0})?.type === 'password' && !document.querySelector({0}).disabled", js(field)), TURN);
+    let _ = chrome.screenshot(&shell, &shots.join("card-to-computer.png"));
+    s.ok(
+        "a card whose option is the computer's shows a masked field, saying it goes straight to the computer, and the message box does not answer it",
+        asked
+            && chrome.eval(&frame, "document.querySelector('.prompt:not(.closed) .prompt-note')?.textContent ?? ''")?.as_str().is_some_and(|n| n.contains("straight to your computer"))
+            // and the message box is no answer to it: a message is a record
+            && chrome.eval(&frame, "document.getElementById('text').placeholder")?.as_str().is_some_and(|p| !p.starts_with("Your answer")),
+        chrome.eval(&frame, "document.querySelector('.prompt:not(.closed)')?.innerText ?? null")?,
+    );
+    if asked {
+        chrome.click(&frame, field)?;
+        chrome.type_text(&frame, "the-code-123")?;
+        chrome.press(&frame, "Enter", false)?;
+    }
+    let took = chrome.until(&frame, "[...document.querySelectorAll('.msg.agent:not(.streaming) .md')].some((m) => m.textContent.includes('(took 12 characters)'))", TURN);
+    let closed = chrome.until(&frame, "[...document.querySelectorAll('.prompt.closed .outcome.answered')].length > 0", TURN);
+    let _ = chrome.screenshot(&shell, &shots.join("card-to-computer-answered.png"));
+    let kept = ["chat", "work"].iter().flat_map(|c| records(api, owner, chat, c)).any(|r| r.to_string().contains("the-code-123"));
+    s.ok(
+        "sent from the card, the computer has it: the turn took its 12 characters, the card closed answered, and no record of the chat holds it",
+        took && closed && !kept,
+        json!({ "took": took, "closed": closed, "kept": kept }),
+    );
+    chrome.close(shell)?;
+    Ok(())
+}
+
+/// What a Claude agent's turn asks with when Claude Code is not installed
+/// (images/bridge/src/runtime/claude.rs, `INSTALL_ASK`).
+const CLAUDE_INSTALL_ASK: &str = "Claude Code isn't installed on your computer yet. Install it? It's Anthropic's own installer, and takes about a minute.";
+
+/// What a Claude agent's turn asks with when Claude Code is signed out, and
+/// again after a code that did not work (claude.rs, `sign_in_ask`).
+const CLAUDE_SIGN_IN_ASK: &str = "Claude Code needs you to sign in to your Claude account.";
+const CLAUDE_SIGN_IN_AGAIN: &str = "That code didn't work. Copy the whole code and try again.";
+/// The code the stub image's Claude Code signs in with (images/bridge/tests/support/fake_claude.rs).
+const CLAUDE_SIGN_IN_CODE: &str = "the-right-code";
+
+/// FIN-353 (Paul: "(a) first message, (b) inside the card"): a Claude
+/// agent's chat, in the shell, its computer with no Claude Code. Its first
+/// message's turn asks on a card to install it; Install runs the installer
+/// (the stub image's stand-in, which lays out its scripted Claude Code as
+/// Anthropic's lays out the real one), and the turn says it ran. Signed
+/// out, the turn then asks on a card to sign in: a link to Anthropic's
+/// sign-in, and a masked field for the code it shows, which goes to the
+/// computer alone. A wrong code is asked again; the right one signs in, the
+/// turn says so and answers what was asked, and no record holds either
+/// code. Its own agent and chat, after the rest, so it changes nothing they
+/// count. Screenshots for FIN-353.
+fn claude_install(s: &mut Suite, api: &Api, chrome: &mut Browser, owner: &Keys, computer: &str, shots: &Path) -> Result<()> {
+    let name = s.named(api, owner, "rowan")?;
+    let agent = s.create(api, owner, &name)?;
+    s.commit(&agent, &[("fragment.json", Some(AGENT_JSON)), ("agent.json", Some(b"{ \"runtime\": \"claude\" }\n"))]);
+    s.deploy(&agent);
+    let r = api.signed(owner, "PUT", &format!("/api/computers/{computer}/agents/{name}"), Some(&json!({})))?;
+    let identity = r.body["agents"].as_array().into_iter().flatten().find(|a| a["fragment"] == name.as_str()).and_then(|a| a["identity"].as_str()).unwrap_or("").to_string();
+    anyhow::ensure!(r.status == 200 && fragment_core::npub::is_identity(&identity), "assigning the Claude agent: {r}");
+    let chat = s.named(api, owner, "claude")?;
+    let r = api.create_with(owner, json!({ "name": chat, "template": "chat" }))?;
+    anyhow::ensure!(r.status == 200, "making its chat: {r}");
+    s.owned(&r.body, owner);
+    let r = api.signed(owner, "PUT", &format!("/api/f/{chat}/members/{identity}"), Some(&json!({ "role": "editor" })))?;
+    anyhow::ensure!(r.status == 200, "the Claude agent joining its chat: {r}");
+
+    // in the shell: a code from the card reaches the computer through it
+    let Some((shell, page)) = framing_shell(s, api, chrome, &chat, "")? else {
+        s.ok("the shell frames the Claude agent's chat", false, "");
+        return Ok(());
+    };
+    chrome.click(&page, "#text")?;
+    chrome.type_text(&page, "Tidy up my README")?;
+    chrome.press(&page, "Enter", false)?;
+    let install = ".prompt:not(.closed) button[data-option=\"install\"]";
+    // its first turn waits for the bridge to see a new agent's runtime (its
+    // read of the computer, each minute: images/bridge `COMPUTER_EVERY_MS`)
+    let asked = chrome.until(&page, &format!("!!document.querySelector({}) && document.querySelector('.prompt:not(.closed) .prompt-text')?.textContent === {}", js(install), js(CLAUDE_INSTALL_ASK)), Duration::from_secs(150));
+    let _ = chrome.screenshot(&shell, &shots.join("claude-install-card.png"));
+    s.ok(
+        "a Claude agent's first message, Claude Code not installed: its turn asks on a card to install it, Install or Not now",
+        asked && chrome.eval(&page, "[...document.querySelectorAll('.prompt:not(.closed) .options button')].map((b) => b.textContent).join('|')")? == "Install|Not now",
+        chrome.eval(&page, "document.querySelector('.prompt')?.innerText ?? null")?,
+    );
+    if asked {
+        chrome.click(&page, install)?;
+    }
+
+    // signed out: the sign-in card, its link and its masked field
+    let field = ".prompt:not(.closed) input[data-option=\"code\"]";
+    let card = |chrome: &mut Browser, says: &str| chrome.until(&page, &format!("document.querySelector({0})?.type === 'password' && !document.querySelector({0}).disabled && (document.querySelector('.prompt:not(.closed) .prompt-text')?.textContent ?? '').startsWith({1})", js(field), js(says)), TURN);
+    let signing = card(chrome, CLAUDE_SIGN_IN_ASK);
+    let ran = records(api, owner, &chat, "work").iter().any(|r| r["body"]["kind"] == "turn.step" && r["body"]["args"] == "Anthropic's installer (Claude Code 2.1.316)");
+    let link = chrome.eval(&page, "document.querySelector('.prompt:not(.closed) .prompt-text a')?.href ?? ''")?;
+    let _ = chrome.screenshot(&shell, &shots.join("claude-sign-in-card.png"));
+    s.ok(
+        "Install installs it (the turn says the installer ran); signed out, the turn asks on a card to sign in: a link to Anthropic's sign-in, and a masked field for its code that goes straight to the computer",
+        ran && signing
+            && link.as_str().is_some_and(|l| l.starts_with("https://claude.com/cai/oauth/authorize?"))
+            && chrome.eval(&page, "document.querySelector('.prompt:not(.closed) .prompt-note')?.textContent ?? ''")?.as_str().is_some_and(|n| n.contains("straight to your computer")),
+        chrome.eval(&page, "document.querySelector('.prompt:not(.closed)')?.innerText ?? null")?,
+    );
+    let code = |chrome: &mut Browser, code: &str| -> Result<()> {
+        chrome.click(&page, field)?;
+        chrome.type_text(&page, code)?;
+        chrome.press(&page, "Enter", false)
+    };
+    if signing {
+        code(chrome, "a-wrong-code")?;
+    }
+    let again = card(chrome, CLAUDE_SIGN_IN_AGAIN);
+    let _ = chrome.screenshot(&shell, &shots.join("claude-sign-in-again.png"));
+    if again {
+        code(chrome, CLAUDE_SIGN_IN_CODE)?;
+    }
+    let answered = shows(chrome, &page, &format!("[...document.querySelectorAll('.msg.agent:not(.streaming) .md')].some((m) => m.textContent.includes({}))", js("Tidy up my README")));
+    let _ = chrome.screenshot(&shell, &shots.join("claude-signed-in.png"));
+    let work = records(api, owner, &chat, "work");
+    let signed = work.iter().any(|r| r["body"]["kind"] == "turn.step" && r["body"]["args"] == "Signed in to Claude");
+    let kept = ["chat", "work"].iter().flat_map(|c| records(api, owner, &chat, c)).any(|r| r.to_string().contains("a-wrong-code") || r.to_string().contains(CLAUDE_SIGN_IN_CODE));
+    s.ok(
+        "a wrong code is asked again; the right one signs Claude Code in: the turn says so, then answers what was asked, and no record holds either code",
+        again && signed && answered && !kept,
+        json!({ "again": again, "signed": signed, "answered": answered, "kept": kept, "messages": chrome.eval(&page, "document.getElementById('messages').innerText")? }),
+    );
+    chrome.close(shell)?;
     Ok(())
 }
 
@@ -1477,4 +1629,25 @@ fn capital(s: &str) -> String {
 /// Whether the element `id` is hidden on the page.
 fn document_hidden(chrome: &mut Browser, page: &Page, id: &str) -> Result<bool> {
     Ok(chrome.eval(page, &format!("document.getElementById({}).hidden", js(id)))? == Value::Bool(true))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Goal: drafts that streamed pass, the last whole or not; drafts that
+    /// never streamed fail. Valid: parts then the whole reply (as CI run
+    /// 41269711917 saw), parts alone. Invalid: only the whole reply seen,
+    /// none at all, a draft that is not a beginning of the reply, no list.
+    #[test]
+    fn drafts_streamed_are_parts_of_the_reply() {
+        let reply = "echo: [p@e2e.test] hello there, slowly";
+        let parts = ["echo", "echo: [p", "echo: [p@e2e.test] he"];
+        assert!(streamed(&json!([parts[0], parts[1], parts[2], reply]), reply), "the last draft all of it");
+        assert!(streamed(&json!(parts), reply), "parts alone");
+        assert!(!streamed(&json!([reply]), reply), "only the whole reply: it never streamed");
+        assert!(!streamed(&json!([]), reply), "no draft");
+        assert!(!streamed(&json!(["echo", "something else"]), reply), "a draft that is not a beginning of it");
+        assert!(!streamed(&json!(null), reply), "no list");
+    }
 }

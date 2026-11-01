@@ -272,6 +272,8 @@ pub(crate) async fn admin(mut req: Request, env: &Env, cfg: &Config, url: &Url, 
         (Method::Get, ["orgs", org]) => json_answer(&ask_registry(env, &OrgOf { by: None, org: Some(org.to_string()) }).await?),
         (Method::Get, ["people"]) => json_answer(&ask_registry(env, &admin::People { q: param(url, "q"), after: param(url, "after") }).await?),
         (Method::Get, ["people", person]) => json_answer(&person_page(env, person).await?),
+        // FIN-352's census: reach shared beyond, counted (reach.rs)
+        (Method::Get, ["people", person, "reach"]) => json_answer(&crate::reach::census(env, person).await?),
         (Method::Put, ["people", person, "computer", "image"]) => json_answer(&pin(env, &by, person, &bytes).await?),
         (Method::Get, ["health"]) => json_answer(&ask_registry(env, &admin::Health {}).await?),
         (Method::Post, ["objects", class, "wake"]) => json_answer(&crate::routed::wake(env, class, body(&bytes)?).await?),

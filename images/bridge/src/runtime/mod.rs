@@ -269,6 +269,9 @@ pub struct TurnStart {
     /// The fragment whose blobs they are, when not the turn's chat: an
     /// answer's are the chat its question was asked in.
     pub attachments_in: Option<String>,
+    /// A card's answer read after its turn was gone, this turn its own
+    /// (`LateCard`): none for any other turn.
+    pub late: Option<LateCard>,
     /// The same attachments on disk (the driver downloads them before the
     /// runtime hears of the turn).
     pub files: Vec<LocalFile>,
@@ -423,11 +426,33 @@ impl std::fmt::Display for RuntimeError {
     }
 }
 
-/// A runtime's two queues, and the bridge's shutdown signal.
+/// A card answered after the turn that asked it was gone (a sleep, a
+/// restart: cards.rs), as the fresh turn of that answer carries it: which
+/// card (`prompt`, its id as its runtime asked it), which of its options,
+/// and what the asking turn was asked (its cause's words, if any). A
+/// runtime that acts on its own cards' answers reads this, never the
+/// fresh turn's words (Alex on #901).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct LateCard {
+    pub prompt: String,
+    pub option: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request: Option<String>,
+}
+
+/// A runtime's two queues, the bridge's shutdown signal, and the hold.
 pub struct RuntimeIo {
     pub commands: mpsc::Receiver<Command>,
     pub events: mpsc::Sender<Event>,
     pub shutdown: watch::Receiver<bool>,
+    /// Whether the platform holds the computer now, for a save
+    /// (docs/computers.md, "The hold"): a runtime quiets what of its own
+    /// runs outside its turns (a turn already running may run on).
+    pub held: watch::Receiver<bool>,
+    /// How many things of the runtimes' own the hold's answer waits on, each
+    /// counted while it runs outside a turn under a hold or not: the bridge
+    /// answers only at none. One with nothing outside its turns counts none.
+    pub unquiet: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
 pub type RuntimeFuture = Pin<Box<dyn Future<Output = Result<(), RuntimeError>> + Send>>;

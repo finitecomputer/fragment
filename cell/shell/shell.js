@@ -32,6 +32,8 @@ import { el, section, line, actionLine, createSettings } from "./settings.js";
 import { createLauncher } from "./launcher.js";
 import { createThreads } from "./threads.js";
 import { KIND } from "./frame-messages.js";
+import { answerTo } from "./computer-answer.js";
+import { standIns } from "./frame-standin.js";
 
 const $ = (id) => document.getElementById(id);
 const CURRENT = "shell.chat.v1";
@@ -306,6 +308,8 @@ function frameOf(src, title, name = null) {
 // a fragment's frame whose policy does not name its origin yet -> the
 // navigation it makes once it does (frameOf)
 const unready = new WeakMap();
+// the middle column's frames' stand-ins while their pages come (frame-standin.js)
+const standins = standIns(el);
 // A frame sent to `src`: at once, or, its origin not known yet, once it is.
 // `replace`: in place of the page it shows, adding nothing to the tab's
 // history (a cross-origin frame's `location.replace` is one it may call).
@@ -313,6 +317,8 @@ function go(frame, src, replace = false) {
   if (unready.has(frame)) unready.set(frame, src);
   else if (replace && frame.contentWindow) frame.contentWindow.location.replace(new URL(src, location.href).href);
   else frame.src = src;
+  // a page of the middle column sent elsewhere: its stand-in again until it comes
+  standins.again(frame);
 }
 
 // A frame that could not sign in says so, and how on (the mint's note,
@@ -947,7 +953,10 @@ function openChat(name, push = true, path = null) {
   // a frame shown before goes to the page asked in place of the one it
   // showed, so Back goes to the view before (History), not to that page
   if (path && !made) go(state.frames.get(name), framed(name, path), true);
-  for (const [n, frame] of state.frames) frame.hidden = n !== name;
+  for (const [n, frame] of state.frames) {
+    frame.hidden = n !== name;
+    standins.sync(frame);
+  }
   renderHeading();
   renderChats();
   // the ways to ask for an app ask the open chat's agent
@@ -960,12 +969,21 @@ function openChat(name, push = true, path = null) {
   if (onboarding.putOff()) resumeFirstRun();
 }
 
+// A chat's frame let go (the launcher's, to load it again), its stand-in
+// with it.
+function dropFrame(name) {
+  const frame = state.frames.get(name);
+  if (!frame) return;
+  standins.drop(frame);
+  state.frames.delete(name);
+}
 // A chat's frame, made once and kept.
 function chatFrame(name, path = setupFor(name) ? "/?setup=1" : "/") {
   if (state.frames.has(name)) return;
   const frame = frameOf(framed(name, path), titleOf(name), name);
   $("frames").append(frame);
   state.frames.set(name, frame);
+  standins.add(frame);
 }
 
 // ---- apps: every other fragment, each a window in the viewer ----
@@ -1210,6 +1228,67 @@ function fragmentAt(url, sender, origin) {
   const name = url.hostname.slice(0, url.hostname.length - tail.length);
   return FRAGMENT_NAME.test(name) ? name : null;
 }
+
+// ---- an answer for the computer (docs/bridge.md, "An answer for the
+// computer"): a card's option its agent's runtime takes on its computer
+// alone, never in a record (a sign-in's code), handed by the chat's page.
+// Taken only from a frame of the person's own fragment, for an agent of
+// their own computer (computer-answer.js); handed to that computer's `/answer/` page, framed
+// unseen through a port ticket (its owner's alone) and dropped once it
+// answered; what came of it told to the chat. Never kept. ----
+const COMPUTER_ANSWER_WAIT_MS = 90_000;
+addEventListener("message", async (event) => {
+  const d = event.data;
+  if (d?.fragment !== KIND.cardToComputer || typeof d.nonce !== "string" || typeof d.value !== "string") return;
+  const frame = [...document.querySelectorAll("iframe[data-fragment]")].find((f) => f.contentWindow === event.source);
+  const name = frame?.dataset.fragment;
+  let origin = null;
+  if (name && byName(name)?.role === "owner") {
+    try {
+      origin = await originOf(name);
+    } catch {
+      return;
+    }
+  }
+  const to = answerTo({ frame: name, role: name && byName(name)?.role, origin, sentFrom: event.origin, agent: d.agent, agents: state.agents, computer: state.computer });
+  if (!to || frame.contentWindow !== event.source) return;
+  const reply = (ok, error) => event.source.postMessage({ fragment: KIND.computerAnswered, nonce: d.nonce, ok, ...(error ? { error } : {}) }, origin);
+  if (to.refused) return reply(false, to.refused);
+  const agent = to.agent;
+  let ticket;
+  try {
+    ticket = await api("POST", `/api/computers/${seg(state.computer.computer)}/ports/6080/ticket`, { path: `/answer/?agent=${encodeURIComponent(agent)}` });
+  } catch {
+    return reply(false, "Your computer could not be reached: try again.");
+  }
+  const port = document.createElement("iframe");
+  port.hidden = true;
+  port.setAttribute("aria-hidden", "true");
+  port.title = "An answer for your computer";
+  const portOrigin = new URL(ticket.url).origin;
+  let timer = 0;
+  const heard = (e) => {
+    const m = e.data;
+    if (e.source !== port.contentWindow || e.origin !== portOrigin || m?.agent !== agent) return;
+    if (m.fragment === KIND.computerReady) {
+      port.contentWindow.postMessage({ fragment: KIND.cardToComputer, agent, turn: d.turn, prompt: d.prompt, option: d.option, value: d.value, nonce: d.nonce }, portOrigin);
+    } else if (m.fragment === KIND.computerAnswered && m.nonce === d.nonce) {
+      finish(m.ok === true, typeof m.error === "string" ? m.error : undefined);
+    }
+  };
+  const finish = (ok, error) => {
+    removeEventListener("message", heard);
+    clearTimeout(timer);
+    port.remove();
+    reply(ok, error);
+  };
+  addEventListener("message", heard);
+  // a computer asleep wakes for its port, which takes a while; one that
+  // never answers is said so
+  timer = setTimeout(() => finish(false, "Your computer didn't answer: try again."), COMPUTER_ANSWER_WAIT_MS);
+  port.src = ticket.url;
+  document.body.append(port);
+});
 
 // ---- an agent's screen: its own desktop, a port of its computer's own
 // origin, through a ticket that lands on the agent's page (docs/computers.md, Ports) ----
@@ -1457,6 +1536,9 @@ const launcher = createLauncher({
   views: () => views,
   busy: (name) => refresh.isBusy(state.frames.get(name)),
   setupChat: () => onboarding.setupChat(),
+  dropFrame,
+  // the agent an imported conversation was with, as its archive's index names it
+  sessionAgent: (key) => sessionArchive.entries().find((e) => e.key === key)?.agent ?? null,
 });
 
 // Each view of the computer taken in from an action's answer (`computerIs`,
@@ -1546,7 +1628,7 @@ $("apps-link").onclick = () => openApps();
 const historyPage = createHistoryPage($("history-page"), {
   api, el, icon, seg, mark: (name, size) => mark(name, size), chats, isThread: (f) => threads.isPair(f), own, chatTitle: (name) => chatTitle(name),
   agentsOf, agents: () => state.agents, titleOf,
-  archive: { name: () => sessionArchive.archive(), entries: () => sessionArchive.entries(), openSession: (key) => sessionArchive.openSession(key) },
+  archive: { name: () => sessionArchive.archive(), entries: () => sessionArchive.entries(), openSession: (key) => sessionArchive.openSession(key), search: (q) => sessionArchive.search(q) },
   continueControl: (source) => continuing.continueControl(source),
   openChat, leaveSidebar,
 });
@@ -1754,6 +1836,11 @@ const refresh = createSessionRefresh({
 });
 const { heard, navigated, reopenWindows, release, DEPLOYED } = refresh;
 const frameOfWindow = (win) => [...state.frames.values()].find((f) => f.contentWindow === win);
+// a frame's page that speaks to the shell is drawn: its stand-in goes (frame-standin.js)
+addEventListener("message", (event) => {
+  const frame = frameOfWindow(event.source);
+  if (frame) standins.spoke(frame);
+});
 // A chat's page says the person sent a message there (`said`): a chat they
 // archived comes back to their sidebar, as an email thread does once it is
 // written in again (the History page; Paul, 2026-10-31). Their own flag,

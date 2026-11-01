@@ -27,6 +27,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -34,7 +35,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 use super::{Agent, Command, Event, How, MenuItem, Runtime, RuntimeError, RuntimeFuture, RuntimeIo, TurnStart};
 use crate::records::{self, Call, Category, Outcome, PromptOption, Step, ToolEvidence, ToolStatus};
@@ -65,10 +66,17 @@ pub const DRAIN_MS_DEFAULT: u64 = 10_000;
 
 #[derive(Debug, Clone)]
 pub struct ClaudeConfig {
-    /// The unmodified `claude`, as Anthropic publishes it.
+    /// The unmodified `claude`, as Anthropic publishes it: the person's own
+    /// install, which this image does not ship (docs/computers.md).
     pub bin: PathBuf,
-    /// Its `CLAUDE_CONFIG_DIR`: the person's login and the sessions'
-    /// transcripts, under `/data`.
+    /// Its `HOME`: the person's, where Anthropic's installer put it and
+    /// what Claude Code writes beside it (its versions as it updates), so
+    /// the agent runs the same Claude Code its person installed.
+    pub home: PathBuf,
+    /// Its `CLAUDE_CONFIG_DIR`: the person's login and settings, and the
+    /// sessions' transcripts and memory, under `/data` (the person's own,
+    /// `<home>/.claude`, so `claude auth login` in their terminal signs the
+    /// agent in).
     pub config_dir: PathBuf,
     /// Each agent's working directory is `<work_dir>/<agent fragment>`.
     pub work_dir: PathBuf,
@@ -85,6 +93,11 @@ pub struct ClaudeConfig {
     /// root, which Claude Code refuses to bypass permissions as. None: the
     /// bridge's.
     pub run_as: Option<(u32, u32)>,
+    /// What installs it, run by `sh -c` when its person presses Install on
+    /// a turn's card (`INSTALL_ASK`), as `run_as` with `home` its home:
+    /// Anthropic's own installer (`INSTALLER`). None: a turn says it is not
+    /// installed (`NOT_INSTALLED`), and offers nothing.
+    pub installer: Option<String>,
 }
 
 pub struct Claude {
@@ -212,7 +225,7 @@ async fn run(cfg: ClaudeConfig, mut io: RuntimeIo) -> Result<(), RuntimeError> {
         };
         let tx = sessions.entry(key.clone()).or_insert_with(|| {
             let (tx, rx) = mpsc::channel(16);
-            tokio::spawn(session(cfg.clone(), key.clone(), generations.clone(), rx, io.events.clone()));
+            tokio::spawn(session(cfg.clone(), key.clone(), generations.clone(), rx, io.events.clone(), io.held.clone(), io.unquiet.clone()));
             tx
         });
         let _ = tx.send(msg).await;
@@ -262,7 +275,35 @@ struct Turn {
     stopping: bool,
 }
 
-async fn session(cfg: ClaudeConfig, key: (String, String), generations: Arc<Mutex<Generations>>, mut rx: mpsc::Receiver<ToSession>, events: mpsc::Sender<Event>) {
+/// A session counted while its process runs with no turn on it: what a
+/// hold waits on (`RuntimeIo::unquiet`), uncounted as it stops or the
+/// session ends.
+struct Idle {
+    counted: bool,
+    unquiet: Arc<AtomicUsize>,
+}
+
+impl Idle {
+    fn set(&mut self, idle: bool) {
+        if idle != self.counted {
+            if idle {
+                self.unquiet.fetch_add(1, Ordering::SeqCst);
+            } else {
+                self.unquiet.fetch_sub(1, Ordering::SeqCst);
+            }
+            self.counted = idle;
+        }
+    }
+}
+
+impl Drop for Idle {
+    fn drop(&mut self) {
+        self.set(false);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn session(cfg: ClaudeConfig, key: (String, String), generations: Arc<Mutex<Generations>>, mut rx: mpsc::Receiver<ToSession>, events: mpsc::Sender<Event>, mut held: watch::Receiver<bool>, unquiet: Arc<AtomicUsize>) {
     let (agent, chat) = key;
     let gen_key = format!("{agent}|{chat}");
     let cwd = cfg.work_dir.join(&agent);
@@ -270,8 +311,12 @@ async fn session(cfg: ClaudeConfig, key: (String, String), generations: Arc<Mute
     let mut turn: Option<Turn> = None;
     let mut idle_since = Instant::now();
     let mut requests = 0u64;
+    let mut idle = Idle { counted: false, unquiet };
+    // a turn asking its person to install Claude Code (`INSTALL_CARD`)
+    let mut asking: Option<Box<TurnStart>> = None;
     // bounded by its idle stop, or the bridge dropping its sender
     loop {
+        idle.set(proc.is_some() && turn.is_none());
         let idle_left = cfg.idle.saturating_sub(idle_since.elapsed());
         tokio::select! {
             m = rx.recv() => {
@@ -291,24 +336,86 @@ async fn session(cfg: ClaudeConfig, key: (String, String), generations: Arc<Mute
                             idle_since = Instant::now();
                             continue;
                         }
-                        let message = message(&ts);
-                        if proc.is_none() {
-                            let id = session_id(&agent, &chat, generations.lock().expect("generations").of(&gen_key));
-                            let resume = transcript(&cfg.config_dir, &cwd, &id).is_file();
-                            match spawn(&cfg, &ts.agent, &cwd, &id, resume) {
-                                Ok(p) => proc = Some(p),
-                                Err(why) => {
-                                    let _ = events.send(Event::End { turn: ts.turn.clone(), outcome: Outcome::Error(why) }).await;
-                                    continue;
-                                }
+                        asking = None;
+                        // its install card answered after its turn was gone
+                        // (a sleep, a restart: cards.rs): the answer, as the
+                        // fresh turn carries it, never read from its words
+                        if let Some(late) = ts.late.clone().filter(|l| l.prompt == INSTALL_CARD) {
+                            idle_since = Instant::now();
+                            crate::ev!("claude.install_late", { "turn": ts.turn, "option": late.option });
+                            if late.option != INSTALL_YES {
+                                let _ = events.send(Event::Reply { turn: ts.turn.clone(), part: 1, text: NOT_NOW.into() }).await;
+                                let _ = events.send(Event::End { turn: ts.turn.clone(), outcome: Outcome::Idle }).await;
+                                continue;
                             }
+                            idle.set(true);
+                            let installed = ensure_installed(&cfg, &ts.turn, &mut rx, &events).await;
+                            // a sign-in waits on its person: no hold waits on it
+                            idle.set(false);
+                            if !installed {
+                                continue;
+                            }
+                            // then what its card's turn was asked
+                            let Some(request) = late.request else {
+                                let _ = events.send(Event::Reply { turn: ts.turn.clone(), part: 1, text: INSTALLED_READY.into() }).await;
+                                let _ = events.send(Event::End { turn: ts.turn.clone(), outcome: Outcome::Idle }).await;
+                                continue;
+                            };
+                            let asked = TurnStart { text: request, note: None, late: None, ..(*ts).clone() };
+                            if proc.is_none() && !ensure_signed_in(&cfg, &asked, &mut rx, &events).await {
+                                continue;
+                            }
+                            let id = session_id(&agent, &chat, generations.lock().expect("generations").of(&gen_key));
+                            begin(&cfg, &asked, &cwd, &id, &mut proc, &mut turn, &events).await;
+                            continue;
                         }
-                        let p = proc.as_mut().expect("started");
-                        let started = p.started;
-                        if let Err(e) = write(&mut p.stdin, &user_message(&message)).await {
-                            crate::ev!("claude.write", { "turn": ts.turn, "error": e.to_string() });
+                        // not installed: its person may install it from here,
+                        // the turn waiting on their answer (Paul, FIN-233)
+                        if proc.is_none() && cfg.installer.is_some() && !cfg.bin.is_file() {
+                            crate::ev!("claude.not_installed", { "turn": ts.turn, "bin": cfg.bin.display().to_string() });
+                            let options = vec![
+                                PromptOption { id: INSTALL_YES.into(), label: "Install".into(), style: Some("primary".into()), words: false, computer: false },
+                                PromptOption { id: INSTALL_NO.into(), label: "Not now".into(), style: None, words: false, computer: false },
+                            ];
+                            let _ = events.send(Event::Prompt { turn: ts.turn.clone(), prompt: INSTALL_CARD.into(), text: INSTALL_ASK.into(), options, ttl_ms: None }).await;
+                            asking = Some(ts);
+                            continue;
                         }
-                        turn = Some(Turn { id: ts.turn.clone(), agent: ts.agent.clone(), message: (!started).then_some(message), retried: false, part: 1, draft: String::new(), calls: HashMap::new(), said: None, asked: Vec::new(), stopping: false });
+                        // signed out: its person signs in from the turn's card
+                        if proc.is_none() && !ensure_signed_in(&cfg, &ts, &mut rx, &events).await {
+                            continue;
+                        }
+                        let id = session_id(&agent, &chat, generations.lock().expect("generations").of(&gen_key));
+                        begin(&cfg, &ts, &cwd, &id, &mut proc, &mut turn, &events).await;
+                    }
+                    ToSession::Answer { turn: id, prompt, option, .. } if prompt == INSTALL_CARD && asking.as_ref().is_some_and(|a| a.turn == id) => {
+                        let ts = asking.take().expect("checked");
+                        idle_since = Instant::now();
+                        // not now, or the card expired: it says so, and ends
+                        if option.as_deref() != Some(INSTALL_YES) {
+                            let _ = events.send(Event::Reply { turn: ts.turn.clone(), part: 1, text: NOT_NOW.into() }).await;
+                            let _ = events.send(Event::End { turn: ts.turn.clone(), outcome: Outcome::Idle }).await;
+                            continue;
+                        }
+                        // an install writes under /data: a hold waits on it
+                        // as on an idle process (FIN-348)
+                        idle.set(true);
+                        let installed = ensure_installed(&cfg, &ts.turn, &mut rx, &events).await;
+                        // a sign-in waits on its person: no hold waits on it
+                        idle.set(false);
+                        if installed && ensure_signed_in(&cfg, &ts, &mut rx, &events).await {
+                            let id = session_id(&agent, &chat, generations.lock().expect("generations").of(&gen_key));
+                            begin(&cfg, &ts, &cwd, &id, &mut proc, &mut turn, &events).await;
+                        }
+                    }
+                    ToSession::Stop(id) if asking.as_ref().is_some_and(|a| a.turn == id) => {
+                        asking = None;
+                        let _ = events.send(Event::End { turn: id, outcome: Outcome::Stopped }).await;
+                        idle_since = Instant::now();
+                    }
+                    ToSession::Forget(id) if asking.as_ref().is_some_and(|a| a.turn == id) => {
+                        asking = None;
+                        idle_since = Instant::now();
                     }
                     ToSession::Stop(id) if turn.as_ref().is_some_and(|t| t.id == id) => {
                         // interrupted, it ends stopped at its own `result`
@@ -386,7 +493,19 @@ async fn session(cfg: ClaudeConfig, key: (String, String), generations: Arc<Mute
                     }
                 }
             }
-            _ = tokio::time::sleep(idle_left), if turn.is_none() => {
+            _ = async { let _ = held.wait_for(|h| *h).await; }, if turn.is_none() && proc.is_some() => {
+                // held for a save: its process stops now, as at its idle
+                // bound, so nothing of it (an update Claude Code makes on its
+                // own, among others) writes under /data while it is copied; a
+                // turn running at the hold runs on, its process stopped as it
+                // ends. The session stays, for a turn handed as the hold came,
+                // and its next turn resumes it.
+                crate::ev!("claude.held", { "agent": agent, "chat": chat });
+                if let Some(p) = proc.take() {
+                    stop(p).await;
+                }
+            }
+            _ = tokio::time::sleep(idle_left), if turn.is_none() && asking.is_none() => {
                 // idle: its process stops, and so does this task
                 break;
             }
@@ -456,10 +575,515 @@ fn withheld(name: &str) -> bool {
     name.starts_with("ANTHROPIC_") || name.starts_with("CLAUDE_CODE_") || name.starts_with("BRIDGE_") || matches!(name, "CLAUDECODE" | "CLAUDE_CONFIG_DIR" | "MCP_TOOL_TIMEOUT")
 }
 
+/// What a turn of an agent says when its computer has no Claude Code: what
+/// its person does about it, in a terminal of the computer.
+pub const NOT_INSTALLED: &str = "Claude Code isn't installed on this computer yet. Install it in a terminal on one of your agents' desktops, then sign in there with `claude auth login`";
+
+/// Anthropic's own installer, as its setup page gives it (Paul, FIN-233:
+/// the person installs it; this runs only when they press Install).
+pub const INSTALLER: &str = "curl -fsSL https://claude.ai/install.sh | bash";
+
+/// The card a turn asks with when Claude Code is not installed: its id on
+/// the turn, its words, and its two options.
+pub const INSTALL_CARD: &str = "install";
+pub const INSTALL_ASK: &str = "Claude Code isn't installed on your computer yet. Install it? It's Anthropic's own installer, and takes about a minute.";
+pub const INSTALL_YES: &str = "install";
+pub const INSTALL_NO: &str = "not-now";
+
+/// A late Install's reply when its card's turn was asked nothing in words
+/// (a file alone, a routine): installed, it asks what to do.
+pub const INSTALLED_READY: &str = "Claude Code is installed. What would you like me to do?";
+
+/// The turn's reply when its person says not now (or lets the card expire).
+pub const NOT_NOW: &str = "Okay, not now. Ask me anything when you'd like to install Claude Code.";
+
+/// The sign-in's cards (FIN-353, Paul: "inside the card"): each try's id on
+/// the turn (`sign-in-<n>`), and its one option, its code, answered on the
+/// computer alone (`PromptOption::computer`: docs/bridge.md, "An answer for
+/// the computer"), never in a record.
+pub const SIGN_IN_CARD: &str = "sign-in";
+pub const SIGN_IN_OPTION: &str = "code";
+/// A sign-in takes at most this many codes before it gives up.
+pub const SIGN_IN_TRIES_MAX: u32 = 3;
+/// `claude auth login` says its URL, and answers a code, within this long.
+pub const SIGN_IN_SAYS_MS: u64 = 30_000;
+/// A sign-in's card left unanswered (it expired) ends its turn so.
+pub const SIGN_IN_ENDED: &str = "The sign-in wasn't finished. Send a message when you're ready to sign in.";
+/// A sign-in whose codes all failed ends its turn so.
+pub const SIGN_IN_GAVE_UP: &str = "That code didn't work three times. Send a message to sign in again.";
+
+/// What a sign-in's card says: Anthropic's sign-in (`url`, as its `claude
+/// auth login` said it) to open in its person's own browser, and the code
+/// to paste back; again, after a code that did not work.
+pub fn sign_in_ask(url: &str, again: bool) -> String {
+    let first = if again { "That code didn't work. Copy the whole code and try again." } else { "Claude Code needs you to sign in to your Claude account." };
+    format!("{first} [Open the sign-in]({url}) in your own browser, then paste the code it shows you here.")
+}
+
+/// An install runs at most this long; past it, it is stopped and the turn
+/// says so. Anthropic's takes about a minute.
+pub const INSTALL_MS_MAX: u64 = 600_000;
+
+/// How an install ended.
+#[derive(Debug, PartialEq)]
+pub enum Installed {
+    /// Claude Code, its version as it says it.
+    Done(String),
+    /// Why not, in words.
+    Failed(String),
+    /// Its turn was stopped while it ran.
+    Stopped,
+    /// Its turn was let go of while it ran (the bridge ended it).
+    LetGo,
+}
+
+/// `program` as its person runs it: as `run_as`, with their home and its
+/// `.claude` (their sign-in), none of the bridge's or anyone's Claude Code
+/// settings (`withheld`).
+fn as_person(cfg: &ClaudeConfig, program: &Path) -> tokio::process::Command {
+    let mut c = tokio::process::Command::new(program);
+    for (name, _) in std::env::vars_os() {
+        if name.to_str().is_none_or(withheld) {
+            c.env_remove(&name);
+        }
+    }
+    c.env("HOME", &cfg.home).env("CLAUDE_CONFIG_DIR", &cfg.config_dir);
+    if let Some((uid, gid)) = cfg.run_as {
+        c.uid(uid).gid(gid);
+    }
+    c
+}
+
+/// Whether Claude Code is signed in: `claude auth status`, as its person.
+async fn signed_in(cfg: &ClaudeConfig) -> bool {
+    let mut c = as_person(cfg, &cfg.bin);
+    c.args(["auth", "status"]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).kill_on_drop(true);
+    matches!(tokio::time::timeout(Duration::from_millis(SIGN_IN_SAYS_MS), c.status()).await, Ok(Ok(s)) if s.success())
+}
+
+/// How a sign-in ended, or was cut.
+enum SignIn {
+    Done,
+    /// The turn ends so.
+    Ended(Outcome),
+    /// The turn was let go of: it says nothing more.
+    LetGo,
+}
+
+/// `work`, unless its turn is cut first: a Stop ends it stopped, a let-go
+/// (or the session's end) lets it go; one already waiting wins over `work`
+/// done (`biased`). Only the turn's own messages come meanwhile (the bridge
+/// runs one turn of a chat at a time, and tells a let-go first); any other
+/// is dropped. `work` is dropped with it, and what it held (a login's
+/// process group) with that.
+async fn uncut<T>(turn: &str, rx: &mut mpsc::Receiver<ToSession>, work: impl std::future::Future<Output = T>) -> Result<T, SignIn> {
+    tokio::pin!(work);
+    // bounded by `work`: each pass takes one message
+    loop {
+        tokio::select! {
+            biased;
+            m = rx.recv() => match m {
+                Some(ToSession::Stop(t)) if t == turn => return Err(SignIn::Ended(Outcome::Stopped)),
+                Some(ToSession::Forget(t)) if t == turn => return Err(SignIn::LetGo),
+                None => return Err(SignIn::LetGo),
+                Some(_) => {}
+            },
+            v = &mut work => return Ok(v),
+        }
+    }
+}
+
+/// Before a session's `claude` starts: signed in already, or its person
+/// signs in from the turn's card (`sign_in`). True once signed in; else
+/// the turn ended saying why, or, let go of, saying nothing. A Stop or a
+/// let-go while it looks is honoured: no session begins.
+async fn ensure_signed_in(cfg: &ClaudeConfig, ts: &TurnStart, rx: &mut mpsc::Receiver<ToSession>, events: &mpsc::Sender<Event>) -> bool {
+    let signed = match uncut(&ts.turn, rx, signed_in(cfg)).await {
+        Ok(true) => return true,
+        Ok(false) => {
+            crate::ev!("claude.signed_out", { "turn": ts.turn });
+            sign_in(cfg, &ts.turn, rx, events).await
+        }
+        Err(cut) => cut,
+    };
+    match signed {
+        SignIn::Done => {
+            let step = Step { tool: "sign-in".into(), args: "Signed in to Claude".into(), ok: true, excerpt: String::new(), category: Category::Shell, evidence: None };
+            let _ = events.send(Event::Step { turn: ts.turn.clone(), step }).await;
+            true
+        }
+        SignIn::Ended(outcome) => {
+            let _ = events.send(Event::End { turn: ts.turn.clone(), outcome }).await;
+            false
+        }
+        SignIn::LetGo => false,
+    }
+}
+
+/// What a sign-in's `claude auth login` said on one of its streams (its
+/// first `SAID_MAX_BYTES`), and whether that stream ended.
+#[derive(Default)]
+struct Said {
+    bytes: Vec<u8>,
+    ended: bool,
+}
+
+const SAID_MAX_BYTES: usize = 64 * 1024;
+
+/// A piece of what the login said (`(stream, bytes)`; none once that
+/// stream ended), kept in `said`. False once both streams ended.
+fn heard(said: &mut [Said; 2], piece: Option<(usize, Option<Vec<u8>>)>) -> bool {
+    match piece {
+        Some((i, Some(bytes))) => {
+            let room = SAID_MAX_BYTES.saturating_sub(said[i].bytes.len());
+            said[i].bytes.extend_from_slice(&bytes[..bytes.len().min(room)]);
+            true
+        }
+        Some((i, None)) => {
+            said[i].ended = true;
+            true
+        }
+        None => false,
+    }
+}
+
+/// The sign-in URL one stream said (`said`), once it said all of it: from
+/// `https://` to the whitespace after it, or to the stream's end (`ended`).
+/// A pipe's reads are not its lines (Alex on #920): a URL its bytes so far
+/// end inside is not whole yet.
+fn sign_in_url(said: &[u8], ended: bool) -> Option<String> {
+    let text = String::from_utf8_lossy(said);
+    let rest = &text[text.find("https://")?..];
+    match rest.find(char::is_whitespace) {
+        Some(end) => Some(rest[..end].to_string()),
+        None => ended.then(|| rest.to_string()),
+    }
+}
+
+/// What came of a code.
+enum Came {
+    SignedIn,
+    Invalid,
+    Failed(String),
+}
+
+/// Its person signs Claude Code in from the turn's card (Paul, FIN-353):
+/// `claude auth login`, with no display (so it opens no browser here), says
+/// Anthropic's sign-in URL, which the card links for its person's own
+/// browser on any device; the code that page shows them goes back on the
+/// card, to this computer alone (`SIGN_IN_OPTION`), and to the login's
+/// input. Signed in once it exits and `claude auth status` says so; a code
+/// it calls invalid is asked again, at most `SIGN_IN_TRIES_MAX` times. Its
+/// verifier never leaves the login (PKCE); the code is never logged or
+/// kept. A Stop, a let-go or the card's expiry, at any point (`uncut`),
+/// ends it, its process group killed; a restart ends it too (its next
+/// message signs in anew).
+async fn sign_in(cfg: &ClaudeConfig, turn: &str, rx: &mut mpsc::Receiver<ToSession>, events: &mpsc::Sender<Event>) -> SignIn {
+    let didnt = |why: String| SignIn::Ended(Outcome::Error(format!("Claude Code didn't sign in: {why}")));
+    let mut c = as_person(cfg, &cfg.bin);
+    c.args(["auth", "login"]).env_remove("DISPLAY").env_remove("WAYLAND_DISPLAY").env_remove("BROWSER");
+    c.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).process_group(0).kill_on_drop(true);
+    let mut child = match c.spawn() {
+        Ok(c) => c,
+        Err(e) => return didnt(e.to_string()),
+    };
+    let mut group = Group(child.id());
+    let mut stdin = child.stdin.take().expect("piped");
+    // what it says on each stream, as it reads (its prompt ends no line)
+    let (tx, mut said_rx) = mpsc::unbounded_channel::<(usize, Option<Vec<u8>>)>();
+    let streams: [Option<Box<dyn tokio::io::AsyncRead + Send + Unpin>>; 2] = [child.stdout.take().map(|s| Box::new(s) as _), child.stderr.take().map(|s| Box::new(s) as _)];
+    for (i, stream) in streams.into_iter().enumerate() {
+        let Some(mut stream) = stream else { continue };
+        let tx = tx.clone();
+        tokio::spawn(async move {
+            let mut buf = [0u8; 1024];
+            // bounded by the process: ends with its output
+            loop {
+                match stream.read(&mut buf).await {
+                    Ok(n) if n > 0 => {
+                        if tx.send((i, Some(buf[..n].to_vec()))).is_err() {
+                            return;
+                        }
+                    }
+                    _ => {
+                        let _ = tx.send((i, None));
+                        return;
+                    }
+                }
+            }
+        });
+    }
+    drop(tx);
+    let mut said = [Said::default(), Said::default()];
+    // its URL, once it said all of it
+    let url = uncut(turn, rx, async {
+        let deadline = tokio::time::sleep(Duration::from_millis(SIGN_IN_SAYS_MS));
+        tokio::pin!(deadline);
+        // bounded by `SIGN_IN_SAYS_MS`: one piece of its output per pass
+        loop {
+            if let Some(url) = said.iter().find_map(|s| sign_in_url(&s.bytes, s.ended)) {
+                return Some(url);
+            }
+            tokio::select! {
+                piece = said_rx.recv() => if !heard(&mut said, piece) {
+                    return None;
+                },
+                _ = &mut deadline => return None,
+            }
+        }
+    })
+    .await;
+    let url = match url {
+        Ok(Some(url)) => url,
+        Ok(None) => return didnt("it said no sign-in to open".into()),
+        Err(cut) => return cut,
+    };
+    crate::ev!("claude.sign_in", { "turn": turn });
+    for attempt in 1..=SIGN_IN_TRIES_MAX {
+        let prompt = format!("{SIGN_IN_CARD}-{attempt}");
+        let options = vec![PromptOption { id: SIGN_IN_OPTION.into(), label: "Paste the code".into(), style: None, words: true, computer: true }];
+        let _ = events.send(Event::Prompt { turn: turn.to_string(), prompt: prompt.clone(), text: sign_in_ask(&url, attempt > 1), options, ttl_ms: None }).await;
+        // its person's code, from their computer (or a Stop, a let-go, the
+        // card's expiry)
+        let code = loop {
+            match rx.recv().await {
+                Some(ToSession::Answer { turn: t, prompt: p, option, words, .. }) if t == turn && p == prompt => match (option.as_deref(), words) {
+                    (Some(SIGN_IN_OPTION), Some(code)) => break code,
+                    _ => return SignIn::Ended(Outcome::Error(SIGN_IN_ENDED.into())),
+                },
+                Some(ToSession::Stop(t)) if t == turn => return SignIn::Ended(Outcome::Stopped),
+                Some(ToSession::Forget(t)) if t == turn => return SignIn::LetGo,
+                None => return SignIn::LetGo,
+                Some(_) => {}
+            }
+        };
+        for s in &mut said {
+            s.bytes.clear();
+        }
+        let line = format!("{}\n", code.trim());
+        if stdin.write_all(line.as_bytes()).await.is_err() || stdin.flush().await.is_err() {
+            return didnt("it stopped before the code".into());
+        }
+        // what came of it: it exits (signed in once `claude auth status`
+        // says so), or calls the code invalid
+        let came = uncut(turn, rx, async {
+            let deadline = tokio::time::sleep(Duration::from_millis(SIGN_IN_SAYS_MS));
+            tokio::pin!(deadline);
+            let mut saying = true;
+            // bounded by `SIGN_IN_SAYS_MS`: one piece of its output per pass
+            loop {
+                tokio::select! {
+                    status = child.wait() => {
+                        group.0 = None;
+                        if status.is_ok_and(|s| s.success()) && signed_in(cfg).await {
+                            return Came::SignedIn;
+                        }
+                        let text = said.iter().map(|s| String::from_utf8_lossy(&s.bytes).into_owned()).collect::<Vec<_>>().join("\n");
+                        return Came::Failed(records::cut(text.lines().map(str::trim).rfind(|l| !l.is_empty()).unwrap_or("it ended"), 300));
+                    }
+                    piece = said_rx.recv(), if saying => {
+                        saying = heard(&mut said, piece);
+                        if said.iter().any(|s| String::from_utf8_lossy(&s.bytes).contains("Invalid code")) {
+                            return Came::Invalid;
+                        }
+                    }
+                    _ = &mut deadline => return Came::Failed("it didn't answer the code".into()),
+                }
+            }
+        })
+        .await;
+        match came {
+            Ok(Came::SignedIn) => {
+                crate::ev!("claude.signed_in", { "turn": turn });
+                return SignIn::Done;
+            }
+            Ok(Came::Invalid) => crate::ev!("claude.sign_in_invalid", { "turn": turn, "attempt": attempt }),
+            Ok(Came::Failed(why)) => return didnt(why),
+            Err(cut) => return cut,
+        }
+    }
+    SignIn::Ended(Outcome::Error(SIGN_IN_GAVE_UP.into()))
+}
+
+/// Its person said Install (on its card, or late: `LateCard`): Anthropic's
+/// installer, unless Claude Code is there by now (an answer delivered twice
+/// installs once), the turn told it ran. True once it is installed; else
+/// the turn (`turn`) ended saying why, or, let go of, saying nothing.
+async fn ensure_installed(cfg: &ClaudeConfig, turn: &str, rx: &mut mpsc::Receiver<ToSession>, events: &mpsc::Sender<Event>) -> bool {
+    if cfg.bin.is_file() {
+        return true;
+    }
+    let Some(command) = cfg.installer.clone() else {
+        let _ = events.send(Event::End { turn: turn.to_string(), outcome: Outcome::Error(NOT_INSTALLED.into()) }).await;
+        return false;
+    };
+    let outcome = match install(cfg, &command, rx, turn).await {
+        Installed::Done(version) => {
+            let step = Step { tool: "installer".into(), args: format!("Anthropic's installer (Claude Code {version})"), ok: true, excerpt: String::new(), category: Category::Shell, evidence: None };
+            let _ = events.send(Event::Step { turn: turn.to_string(), step }).await;
+            return true;
+        }
+        Installed::Failed(why) => Outcome::Error(why),
+        Installed::Stopped => Outcome::Stopped,
+        // the bridge ended it: it says nothing more
+        Installed::LetGo => return false,
+    };
+    let _ = events.send(Event::End { turn: turn.to_string(), outcome }).await;
+    false
+}
+
+/// The installer's process group, killed whole unless it ended.
+struct Group(Option<u32>);
+
+impl Drop for Group {
+    fn drop(&mut self) {
+        if let Some(pid) = self.0.and_then(|p| i32::try_from(p).ok()) {
+            // SAFETY: a signal to a process group this runtime started
+            unsafe { libc::kill(-pid, libc::SIGKILL) };
+        }
+    }
+}
+
+/// Anthropic's installer (`command`, by `sh -c`), run as the agents' user
+/// (`run_as`) with its person's home (`home`, its data in that home's
+/// `.local/share`, as its desktop's), for at most `INSTALL_MS_MAX`; then
+/// `claude --version`. A Stop or a let-go of its turn (`turn`) cuts it, its
+/// whole process group killed.
+async fn install(cfg: &ClaudeConfig, command: &str, rx: &mut mpsc::Receiver<ToSession>, turn: &str) -> Installed {
+    let failed = |why: String| Installed::Failed(format!("Claude Code didn't install: {why}"));
+    if let Err(e) = std::fs::create_dir_all(&cfg.home) {
+        return failed(format!("{}: {e}", cfg.home.display()));
+    }
+    let mut c = tokio::process::Command::new("sh");
+    c.arg("-c").arg(command).current_dir(&cfg.home);
+    for (name, _) in std::env::vars_os() {
+        if name.to_str().is_none_or(withheld) {
+            c.env_remove(&name);
+        }
+    }
+    c.env("HOME", &cfg.home).env("XDG_DATA_HOME", cfg.home.join(".local/share"));
+    if let Some((uid, gid)) = cfg.run_as {
+        c.uid(uid).gid(gid);
+    }
+    c.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).process_group(0);
+    let child = match c.spawn() {
+        Ok(c) => c,
+        Err(e) => return failed(e.to_string()),
+    };
+    let mut group = Group(child.id());
+    crate::ev!("claude.install", { "turn": turn });
+    let out = child.wait_with_output();
+    tokio::pin!(out);
+    let deadline = tokio::time::sleep(Duration::from_millis(INSTALL_MS_MAX));
+    tokio::pin!(deadline);
+    // bounded by `INSTALL_MS_MAX`: one message of its session per pass
+    let out = loop {
+        tokio::select! {
+            o = &mut out => break o,
+            _ = &mut deadline => return failed("the installer took too long".into()),
+            m = rx.recv() => match m {
+                Some(ToSession::Stop(t)) if t == turn => return Installed::Stopped,
+                Some(ToSession::Forget(t)) if t == turn => return Installed::LetGo,
+                None => return Installed::LetGo,
+                Some(_) => {}
+            }
+        }
+    };
+    group.0 = None;
+    let out = match out {
+        Ok(o) => o,
+        Err(e) => return failed(e.to_string()),
+    };
+    if !out.status.success() {
+        let said = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        let tail: Vec<&str> = said.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+        return failed(records::cut(&tail[tail.len().saturating_sub(3)..].join(" "), 300));
+    }
+    // as its person would find it: the launcher it put where this computer looks
+    let mut v = tokio::process::Command::new(&cfg.bin);
+    v.arg("--version").env("HOME", &cfg.home).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).kill_on_drop(true);
+    if let Some((uid, gid)) = cfg.run_as {
+        v.uid(uid).gid(gid);
+    }
+    match tokio::time::timeout(Duration::from_secs(30), v.output()).await {
+        Ok(Ok(o)) if o.status.success() => {
+            let said = String::from_utf8_lossy(&o.stdout);
+            let version = said.split_whitespace().next().unwrap_or("").chars().take(32).collect::<String>();
+            crate::ev!("claude.installed", { "turn": turn, "version": version });
+            Installed::Done(version)
+        }
+        _ => failed("the installer finished, but Claude Code isn't where this computer looks for it".into()),
+    }
+}
+
+/// The agent's `AGENTS.md`: who it is, and the `fragment` CLI that acts as
+/// it (Paul, FIN-233: one in the Claude agent's folder). The CLI's own
+/// guide is the one source of what it does (`fragment skill`).
+pub fn agents_md(agent: &Agent) -> String {
+    format!(
+        "# This computer\n\n\
+         You are {name}, an agent fragment (`{fragment}`) on its owner's computer, working for `{owner}`. Each chat you are in is a fragment; what you write in your turn is your reply there.\n\n\
+         The `fragment` CLI acts as you here: the computer signs each request as you, so it needs no login or keys, and it acts for your owner where they may. Run `fragment skill` for its guide: making, deploying and sharing apps, reading and writing fragments, routines, and search.\n\n\
+         Your computer writes this file again when it changes. Keep your own notes in `CLAUDE.md` or your memory.\n",
+        name = agent.name,
+        fragment = agent.fragment,
+        owner = agent.owner,
+    )
+}
+
+/// What `CLAUDE.md` holds when the agent has none: `AGENTS.md`, read by any
+/// Claude Code (one alone reads `AGENTS.md` only without a `CLAUDE.md`, and
+/// only from v2.1.277). An agent's own `CLAUDE.md` is never written over.
+pub const CLAUDE_MD: &str = "@AGENTS.md\n";
+
+/// The agent's working directory, made ready for its `claude`: its own
+/// (`run_as`'s), with its `AGENTS.md` as it is now and a `CLAUDE.md` that
+/// reads it if it has none.
+pub fn prepare(cwd: &Path, agent: &Agent, run_as: Option<(u32, u32)>) -> std::io::Result<()> {
+    std::fs::create_dir_all(cwd)?;
+    let own = |p: &Path| run_as.map_or(Ok(()), |(uid, gid)| std::os::unix::fs::chown(p, Some(uid), Some(gid)));
+    own(cwd)?;
+    let agents = cwd.join("AGENTS.md");
+    let text = agents_md(agent);
+    if std::fs::read_to_string(&agents).ok().as_deref() != Some(text.as_str()) {
+        std::fs::write(&agents, &text)?;
+        own(&agents)?;
+    }
+    let claude = cwd.join("CLAUDE.md");
+    if !claude.exists() {
+        std::fs::write(&claude, CLAUDE_MD)?;
+        own(&claude)?;
+    }
+    Ok(())
+}
+
+/// A turn's message to its session's `claude` (session `id`), started for
+/// it, resuming the session if its transcript is on disk, when none runs;
+/// one that will not start ends saying why.
+async fn begin(cfg: &ClaudeConfig, ts: &TurnStart, cwd: &Path, id: &str, proc: &mut Option<Proc>, turn: &mut Option<Turn>, events: &mpsc::Sender<Event>) {
+    let message = message(ts);
+    if proc.is_none() {
+        let resume = transcript(&cfg.config_dir, cwd, id).is_file();
+        match spawn(cfg, &ts.agent, cwd, id, resume) {
+            Ok(p) => *proc = Some(p),
+            Err(why) => {
+                let _ = events.send(Event::End { turn: ts.turn.clone(), outcome: Outcome::Error(why) }).await;
+                return;
+            }
+        }
+    }
+    let p = proc.as_mut().expect("started");
+    let started = p.started;
+    if let Err(e) = write(&mut p.stdin, &user_message(&message)).await {
+        crate::ev!("claude.write", { "turn": ts.turn, "error": e.to_string() });
+    }
+    *turn = Some(Turn { id: ts.turn.clone(), agent: ts.agent.clone(), message: (!started).then_some(message), retried: false, part: 1, draft: String::new(), calls: HashMap::new(), said: None, asked: Vec::new(), stopping: false });
+}
+
 /// Starts the session's `claude`: resuming it, or naming it new.
 fn spawn(cfg: &ClaudeConfig, agent: &Agent, cwd: &Path, id: &str, resume: bool) -> Result<Proc, String> {
-    std::fs::create_dir_all(cwd).map_err(|e| format!("{}: {e}", cwd.display()))?;
-    let mut c = tokio::process::Command::new(&cfg.bin);
+    prepare(cwd, agent, cfg.run_as).map_err(|e| format!("{}: {e}", cwd.display()))?;
+    let mut c = as_person(cfg, &cfg.bin);
     c.args(["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--include-partial-messages"]);
     c.args(["--permission-mode", "bypassPermissions", "--allow-dangerously-skip-permissions", "--permission-prompt-tool", "stdio"]);
     if let Some(m) = &cfg.model {
@@ -467,12 +1091,9 @@ fn spawn(cfg: &ClaudeConfig, agent: &Agent, cwd: &Path, id: &str, resume: bool) 
     }
     c.arg(if resume { "--resume" } else { "--session-id" }).arg(id);
     c.current_dir(cwd);
-    for (name, _) in std::env::vars_os() {
-        if name.to_str().is_none_or(withheld) {
-            c.env_remove(&name);
-        }
-    }
-    c.env("CLAUDE_CONFIG_DIR", &cfg.config_dir);
+    // its terminal's `fragment` acts as the agent, for its owner, as a
+    // Hermes agent's does (its profile's environment)
+    c.env("FRAGMENT_AS_AGENT", &agent.fragment).env("FRAGMENT_FOR", &agent.owner);
     // the agent's connections, as every runtime's tools get them: a
     // placeholder its computer's egress swaps (never a model's key)
     for cred in &agent.credentials {
@@ -480,12 +1101,9 @@ fn spawn(cfg: &ClaudeConfig, agent: &Agent, cwd: &Path, id: &str, resume: bool) 
             c.env(e, &cred.placeholder);
         }
     }
-    if let Some((uid, gid)) = cfg.run_as {
-        c.uid(uid).gid(gid);
-    }
     c.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
     let mut child = c.spawn().map_err(|e| match e.kind() {
-        std::io::ErrorKind::NotFound => "Claude Code isn't installed on this computer".to_string(),
+        std::io::ErrorKind::NotFound => NOT_INSTALLED.to_string(),
         _ => format!("Claude Code did not start: {e}"),
     })?;
     let stdin = child.stdin.take().expect("piped");
@@ -736,8 +1354,8 @@ async fn ask(t: &mut Turn, request: &str, r: &Value, events: &mpsc::Sender<Event
         let card = format!("{}-q{i}", records::cut(&tool_use_id, 56));
         let text = q["question"].as_str().unwrap_or("").to_string();
         let labels: Vec<String> = q["options"].as_array().into_iter().flatten().filter_map(|o| o["label"].as_str().map(str::to_string)).collect();
-        let mut options: Vec<PromptOption> = labels.iter().enumerate().map(|(j, l)| PromptOption { id: format!("o{j}"), label: l.clone(), style: None, words: false }).collect();
-        options.push(PromptOption { id: "other".into(), label: "Other".into(), style: None, words: true });
+        let mut options: Vec<PromptOption> = labels.iter().enumerate().map(|(j, l)| PromptOption { id: format!("o{j}"), label: l.clone(), style: None, words: false, computer: false }).collect();
+        options.push(PromptOption { id: "other".into(), label: "Other".into(), style: None, words: true, computer: false });
         let _ = events.send(Event::Prompt { turn: t.id.clone(), prompt: card.clone(), text: text.clone(), options, ttl_ms: None }).await;
         cards.push((card, text, labels, None));
     }
@@ -774,6 +1392,69 @@ async fn answer(t: &mut Turn, p: &mut Proc, prompt: &str, option: Option<String>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Goal (Alex on #920): the sign-in URL is taken only once it was said
+    /// whole. The real login's words (a prompt with no newline after them),
+    /// split into two reads at every byte (inside the scheme, the path, the
+    /// query, the newline after it): the first read alone yields nothing
+    /// that is not the whole URL, and both yield it. Invalid: a stream that
+    /// ended inside it yields what it said; one that said none, nothing.
+    #[test]
+    fn a_sign_in_url_is_taken_only_once_said_whole() {
+        let url = "https://claude.com/cai/oauth/authorize?code=true&client_id=9d1c250a&response_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&state=4hsN";
+        let said = format!("Opening browser to sign in\u{2026}\nIf the browser didn't open, visit: {url}\nPaste code here if prompted > ");
+        let bytes = said.as_bytes();
+        for at in 0..=bytes.len() {
+            let mut kept = [Said::default(), Said::default()];
+            heard(&mut kept, Some((0, Some(bytes[..at].to_vec()))));
+            let first = sign_in_url(&kept[0].bytes, kept[0].ended);
+            assert!(first.is_none() || first.as_deref() == Some(url), "split at {at}: {first:?}");
+            heard(&mut kept, Some((0, Some(bytes[at..].to_vec()))));
+            assert_eq!(sign_in_url(&kept[0].bytes, kept[0].ended).as_deref(), Some(url), "split at {at}");
+        }
+        // a stream that ended: what it said is all it will
+        let cut = &url[..40];
+        assert_eq!(sign_in_url(cut.as_bytes(), false), None);
+        assert_eq!(sign_in_url(cut.as_bytes(), true).as_deref(), Some(cut));
+        assert_eq!(sign_in_url(b"no sign-in here\n", true), None);
+        // each stream's bytes are its own, at most `SAID_MAX_BYTES`
+        let mut kept = [Said::default(), Said::default()];
+        assert!(heard(&mut kept, Some((1, Some(vec![b'x'; SAID_MAX_BYTES + 10])))));
+        assert!(heard(&mut kept, Some((1, None))));
+        assert_eq!((kept[0].bytes.len(), kept[1].bytes.len(), kept[1].ended), (0, SAID_MAX_BYTES, true));
+        assert!(!heard(&mut kept, None), "both streams ended");
+    }
+
+    /// Goal (FIN-258): the agent's folder is ready for its `claude`: an
+    /// `AGENTS.md` naming it and the `fragment` CLI, and a `CLAUDE.md` that
+    /// reads it. Replay: the same agent again writes nothing. Valid: a
+    /// renamed agent's `AGENTS.md` is written again. Invalid: an agent's own
+    /// `CLAUDE.md` is never written over.
+    #[test]
+    fn an_agents_folder_names_it_and_the_cli() {
+        let dir = std::env::temp_dir().join(format!("claude-prepare-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut a = Agent { fragment: "rowan--k3x9".into(), identity: "npub1rowan".into(), name: "Rowan".into(), owner: "npub1paul".into(), credentials: vec![], key: None, runtime: Some("claude".into()) };
+        let cwd = dir.join("work").join(&a.fragment);
+        prepare(&cwd, &a, None).expect("prepared");
+        let agents = std::fs::read_to_string(cwd.join("AGENTS.md")).expect("its AGENTS.md");
+        for said in ["You are Rowan", "`rowan--k3x9`", "`npub1paul`", "The `fragment` CLI acts as you", "`fragment skill`"] {
+            assert!(agents.contains(said), "{said}: {agents}");
+        }
+        assert_eq!(std::fs::read_to_string(cwd.join("CLAUDE.md")).expect("its CLAUDE.md"), "@AGENTS.md\n");
+        // its time set far back: a write would move it
+        let long_ago = std::time::UNIX_EPOCH + Duration::from_secs(1);
+        std::fs::File::options().write(true).open(cwd.join("AGENTS.md")).and_then(|f| f.set_modified(long_ago)).expect("its time set");
+        prepare(&cwd, &a, None).expect("again");
+        assert_eq!(std::fs::metadata(cwd.join("AGENTS.md")).and_then(|m| m.modified()).expect("a time"), long_ago, "replay writes nothing");
+        a.name = "Rowan the Builder".into();
+        std::fs::write(cwd.join("CLAUDE.md"), "My own notes.\n").expect("its own");
+        prepare(&cwd, &a, None).expect("renamed");
+        assert!(std::fs::read_to_string(cwd.join("AGENTS.md")).expect("again").contains("You are Rowan the Builder"));
+        assert_eq!(std::fs::read_to_string(cwd.join("CLAUDE.md")).expect("its own"), "My own notes.\n", "never written over");
+        assert!(NOT_INSTALLED.contains("claude auth login") && NOT_INSTALLED.contains("Install it"), "says what to do");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// Goal: a session's id is a UUID of its agent, chat and `/new` count:
     /// the same in every life, another for another chat or count.
@@ -857,6 +1538,7 @@ mod tests {
             text: "hi".into(),
             attachments: vec![],
             attachments_in: None,
+            late: None,
             files: vec![super::super::LocalFile { path: "/tmp/m/a.png".into(), media_type: "image/png".into(), name: "a.png".into(), size: 1 }],
             routine: false,
             claim_seq: None,

@@ -609,7 +609,7 @@ fn words_held_at_a_memory_call_are_the_answer_only_if_the_turn_ends() {
     let t = turn(&mut e, T0 + 20);
     ev(&mut e, Event::Reply { turn: t.clone(), part: 1, text: "Noted.".into() }, T0 + 21);
     ev(&mut e, Event::Step { turn: t.clone(), step: memory() }, T0 + 22);
-    let options = vec![PromptOption { id: "once".into(), label: "Allow".into(), style: None, words: false }];
+    let options = vec![PromptOption { id: "once".into(), label: "Allow".into(), style: None, words: false, computer: false }];
     let card = ev(&mut e, Event::Prompt { turn: t.clone(), prompt: "p1".into(), text: "Run it?".into(), options, ttl_ms: None }, T0 + 23);
     assert_eq!(replies(&card), vec![json!({ "text": "Noted.", "turn": t, "interim": true })]);
     ev(&mut e, Event::End { turn: t.clone(), outcome: Outcome::Idle }, T0 + 24);
@@ -737,7 +737,7 @@ fn an_approval_answered() {
     let v = view(&[&a]);
     let mut e = engine(std::slice::from_ref(&a));
     let turn = started(&said(&mut e, &a, &v, 1, "npub1paul", json!({ "text": "risky" }), T0)).expect("started").turn;
-    let options = vec![PromptOption { id: "once".into(), label: "Allow once".into(), style: None, words: false }, PromptOption { id: "deny".into(), label: "Deny".into(), style: Some("danger".into()), words: false }];
+    let options = vec![PromptOption { id: "once".into(), label: "Allow once".into(), style: None, words: false, computer: false }, PromptOption { id: "deny".into(), label: "Deny".into(), style: Some("danger".into()), words: false, computer: false }];
     let p = ev(&mut e, Event::Prompt { turn: turn.clone(), prompt: "ab12.0011".into(), text: "Run rm?".into(), options: options.clone(), ttl_ms: None }, T0 + 10);
     let (id, body) = posts(&p)[0].clone();
     assert_eq!(id, records::work_id(&turn, "p:ab12.0011"));
@@ -773,7 +773,7 @@ fn an_answer_to_another_agents_card_of_the_same_prompt_id_answers_nothing() {
     let v = view(&[&a]);
     let mut e = engine(std::slice::from_ref(&a));
     let turn = started(&said(&mut e, &a, &v, 1, "npub1paul", json!({ "text": "risky" }), T0)).expect("started").turn;
-    let options = vec![PromptOption { id: "once".into(), label: "Allow once".into(), style: None, words: false }];
+    let options = vec![PromptOption { id: "once".into(), label: "Allow once".into(), style: None, words: false, computer: false }];
     ev(&mut e, Event::Prompt { turn: turn.clone(), prompt: "p1".into(), text: "Run rm?".into(), options, ttl_ms: None }, T0 + 10);
     let answer = |agent: &str, turn: &str| json!({ "kind": "prompt_response", "prompt": "p1", "option": "once", "agent": agent, "turn": turn });
     let other_agent = said(&mut e, &a, &v, 2, "npub1paul", answer("npub1forger", &turn), T0 + 20);
@@ -796,7 +796,7 @@ fn other_answered_in_words_on_its_card() {
     let v = view(&[&a]);
     let mut e = engine(std::slice::from_ref(&a));
     let turn = started(&said(&mut e, &a, &v, 1, "npub1paul", json!({ "text": "pick for me" }), T0)).expect("started").turn;
-    let options = vec![PromptOption { id: "c0".into(), label: "red".into(), style: None, words: false }, PromptOption { id: "other".into(), label: "Other".into(), style: None, words: true }];
+    let options = vec![PromptOption { id: "c0".into(), label: "red".into(), style: None, words: false, computer: false }, PromptOption { id: "other".into(), label: "Other".into(), style: None, words: true, computer: false }];
     let p = ev(&mut e, Event::Prompt { turn: turn.clone(), prompt: "q.1".into(), text: "Which color?".into(), options: options.clone(), ttl_ms: None }, T0 + 10);
     assert_eq!(posts(&p)[0].1["options"][1], json!({ "id": "other", "label": "Other", "words": true }), "the card says which option takes words");
     let other = said(&mut e, &a, &v, 2, "npub1paul", json!({ "kind": "prompt_response", "prompt": "q.1", "option": "other", "text": "purple" }), T0 + 20);
@@ -814,6 +814,52 @@ fn other_answered_in_words_on_its_card() {
     assert!(posts(&red)[0].1.get("text").is_none(), "{:?}", posts(&red));
 }
 
+/// Goal (FIN-353): a card's option answered on the agent's computer (its
+/// `/answer` page, never a record: a sign-in's code) gives the runtime its
+/// words once the card's closure is on `work`, closes the card answered by
+/// its owner saying nothing of them, and tells the post it was taken.
+/// Invalid: a record answering that option is ignored (it would put the
+/// code in the chat); another option, empty words, and a turn no longer
+/// running (a restart ended it) are refused in words its person reads, the
+/// runtime given nothing. Replay: a second answer to it is refused.
+#[test]
+fn a_card_answered_on_its_computer_never_in_a_record() {
+    let a = agent("juniper");
+    let v = view(&[&a]);
+    let mut e = engine(std::slice::from_ref(&a));
+    let turn = started(&said(&mut e, &a, &v, 1, "npub1paul", json!({ "text": "sign me in" }), T0)).expect("started").turn;
+    let options = vec![
+        PromptOption { id: "code".into(), label: "Paste the code".into(), style: None, words: true, computer: true },
+        PromptOption { id: "cancel".into(), label: "Cancel".into(), style: None, words: false, computer: false },
+    ];
+    let p = ev(&mut e, Event::Prompt { turn: turn.clone(), prompt: "signin".into(), text: "Paste the code".into(), options, ttl_ms: None }, T0 + 10);
+    assert_eq!(posts(&p)[0].1["options"][0], json!({ "id": "code", "label": "Paste the code", "words": true, "computer": true }), "the card says it is the computer's");
+
+    // a record answering it goes nowhere: a card's answer, or a message
+    // (a card that takes words would take its owner's next one)
+    let record = said(&mut e, &a, &v, 2, "npub1paul", json!({ "kind": "prompt_response", "prompt": "signin", "option": "code", "text": "leaked-code" }), T0 + 20);
+    assert!(commands(&record).is_empty() && posts(&record).is_empty(), "{:?}", record.effects);
+    let message = said(&mut e, &a, &v, 3, "npub1paul", json!({ "text": "pasted-in-the-message-box" }), T0 + 21);
+    assert!(!message.effects.iter().any(|x| matches!(x, Effect::Fence { .. } | Effect::Runtime { command: Command::Answer { .. } | Command::Tell { .. }, .. })), "a message answers it not: {:?}", message.effects);
+
+    let answer = |e: &mut Engine, turn: &str, option: &str, words: &str, reply: u64, at: u64| e.step(Input::ComputerAnswer { agent: a.fragment.clone(), turn: turn.into(), prompt: "signin".into(), option: option.into(), words: words.into(), reply }, at);
+    let refused = |s: &Step, reply: u64, why: &str| s.effects == vec![Effect::ComputerAnswered { reply, taken: Err(why.into()) }];
+    let not_taken = "That is not an answer this card takes.";
+    assert!(refused(&answer(&mut e, &turn, "cancel", "x", 1, T0 + 21), 1, not_taken), "another option");
+    assert!(refused(&answer(&mut e, &turn, "code", "  ", 2, T0 + 22), 2, not_taken), "no words");
+    assert!(refused(&answer(&mut e, "a-turn-gone", "code", "x", 3, T0 + 23), 3, "This ended before your answer came: send a message to start again."), "a turn no longer running");
+
+    let taken = answer(&mut e, &turn, "code", "the-code-123", 4, T0 + 30);
+    assert!(taken.effects.contains(&Effect::ComputerAnswered { reply: 4, taken: Ok(()) }), "{:?}", taken.effects);
+    let fence = taken.effects.iter().find_map(|x| match x { Effect::Fence { body, .. } => Some(body.clone()), _ => None }).expect("its closure");
+    assert_eq!(fence, json!({ "kind": "turn.prompt.closed", "turn": turn, "prompt": "signin", "outcome": "answered", "option": "code", "by": "npub1paul" }), "answered by its owner, nothing of the code");
+    let fenced = e.step(Input::Fenced { turn: turn.clone(), prompt: "signin".into(), answer: ClaimAnswer::Ours { seq: Some(5) } }, T0 + 31);
+    assert_eq!(commands(&fenced), vec![Command::Answer { turn: turn.clone(), prompt: "signin".into(), option: Some("code".into()), seq: (1 << 63) | 1, by: "npub1paul".into(), words: Some("the-code-123".into()), attached: None }]);
+
+    // replay: answered once
+    assert!(refused(&answer(&mut e, &turn, "code", "the-code-123", 6, T0 + 40), 6, "This was already answered, or it expired."));
+}
+
 /// Goal: an unanswered prompt expires: its card says so, and the runtime is
 /// told it got no answer. An answer after that is ignored.
 #[test]
@@ -822,7 +868,7 @@ fn an_approval_expires() {
     let v = view(&[&a]);
     let mut e = engine(std::slice::from_ref(&a));
     let turn = started(&said(&mut e, &a, &v, 1, "npub1paul", json!({ "text": "risky" }), T0)).expect("started").turn;
-    let options = vec![PromptOption { id: "once".into(), label: "Allow".into(), style: None, words: false }];
+    let options = vec![PromptOption { id: "once".into(), label: "Allow".into(), style: None, words: false, computer: false }];
     ev(&mut e, Event::Prompt { turn: turn.clone(), prompt: "p1".into(), text: "ok?".into(), options, ttl_ms: Some(30_000) }, T0);
     assert!(e.step(Input::Tick, T0 + 29_999).effects.is_empty(), "not yet");
     let t = e.step(Input::Tick, T0 + 30_000);
@@ -845,7 +891,7 @@ fn an_open_card_releases_its_computer_until_it_expires() {
     let v = view(&[&a]);
     let mut e = engine(std::slice::from_ref(&a));
     let turn = started(&said(&mut e, &a, &v, 1, "npub1paul", json!({ "text": "risky" }), T0)).expect("started").turn;
-    let options = vec![PromptOption { id: "once".into(), label: "Allow".into(), style: None, words: false }];
+    let options = vec![PromptOption { id: "once".into(), label: "Allow".into(), style: None, words: false, computer: false }];
     let p = ev(&mut e, Event::Prompt { turn: turn.clone(), prompt: "p1".into(), text: "ok?".into(), options, ttl_ms: None }, T0 + 10);
     assert_eq!(posts(&p)[0].1["expiresAt"], T0 + 10 + 60_000);
     assert_eq!(keepalive(&p), Some(false));
@@ -1262,7 +1308,7 @@ fn a_message_answers_a_card_that_takes_words() {
     let v = view(&[&a]);
     let mut e = engine(std::slice::from_ref(&a));
     let turn = started(&said(&mut e, &a, &v, 1, "npub1paul", json!({ "text": "what should I plant?" }), T0)).expect("started").turn;
-    let options = || vec![PromptOption { id: "c0".into(), label: "Basil".into(), style: None, words: false }, PromptOption { id: "other".into(), label: "Other".into(), style: None, words: true }];
+    let options = || vec![PromptOption { id: "c0".into(), label: "Basil".into(), style: None, words: false, computer: false }, PromptOption { id: "other".into(), label: "Other".into(), style: None, words: true, computer: false }];
     let card = |e: &mut Engine, prompt: &str, now: u64| ev(e, Event::Prompt { turn: turn.clone(), prompt: prompt.into(), text: "What should I plant?".into(), options: options(), ttl_ms: None }, now);
     card(&mut e, "q.1", T0 + 1);
     let open = |e: &Engine, prompt: &str| e.state().turns[&turn].prompts.iter().any(|p| p.id == prompt && !p.closed);
@@ -1292,7 +1338,7 @@ fn a_message_answers_a_card_that_takes_words() {
     assert_eq!(commands(&only), vec![Command::Answer { turn: turn.clone(), prompt: "q.3".into(), option: Some("other".into()), seq: 6, by: "npub1paul".into(), words: Some(String::new()), attached: attached(&a, &["a.png", "b.png"]) }]);
 
     // a card that takes no words takes a press alone
-    let approval = vec![PromptOption { id: "once".into(), label: "Allow".into(), style: None, words: false }, PromptOption { id: "deny".into(), label: "Deny".into(), style: None, words: false }];
+    let approval = vec![PromptOption { id: "once".into(), label: "Allow".into(), style: None, words: false, computer: false }, PromptOption { id: "deny".into(), label: "Deny".into(), style: None, words: false, computer: false }];
     ev(&mut e, Event::Prompt { turn: turn.clone(), prompt: "p.4".into(), text: "Fill your card?".into(), options: approval, ttl_ms: None }, T0 + 10);
     let yes = said(&mut e, &a, &v, 7, "npub1paul", json!({ "text": "yes go ahead" }), T0 + 11);
     assert!(commands(&yes).is_empty() && posts(&yes).is_empty() && open(&e, "p.4"), "queued, the card open for its press");
@@ -2623,7 +2669,7 @@ impl World {
                     };
                     self.tells.push(Told { life: self.lives, turn, seq, claim, held });
                 }
-                Effect::Draft { .. } | Effect::Keepalive(_) | Effect::Discover { .. } | Effect::Runtime { command: Command::Aside { .. }, .. } => {}
+                Effect::Draft { .. } | Effect::Keepalive(_) | Effect::Discover { .. } | Effect::ComputerAnswered { .. } | Effect::Runtime { command: Command::Aside { .. }, .. } => {}
             }
         }
     }
@@ -2812,7 +2858,7 @@ impl World {
     fn ask(&mut self, turn: &str) {
         let prompt = format!("p-{}", &turn[..12]);
         self.held.get_mut(turn).expect("held").prompted = Some(prompt.clone());
-        let options = vec![PromptOption { id: "once".into(), label: "Allow once".into(), style: None, words: false }, PromptOption { id: "deny".into(), label: "Deny".into(), style: None, words: false }];
+        let options = vec![PromptOption { id: "once".into(), label: "Allow once".into(), style: None, words: false, computer: false }, PromptOption { id: "deny".into(), label: "Deny".into(), style: None, words: false, computer: false }];
         self.step(heard(Event::Prompt { turn: turn.into(), prompt, text: "ok?".into(), options, ttl_ms: None }));
     }
 
@@ -4052,7 +4098,7 @@ fn a_late_answer_is_a_fresh_claim_even_without_the_cache() {
     let mut e = engine(std::slice::from_ref(&a));
     let initial = said(&mut e, &a, &v, 1, &a.owner, json!({"text":"publish after asking"}), T0);
     let old = started(&initial).unwrap().turn;
-    let card = ev(&mut e, Event::Prompt { turn: old.clone(), prompt: "p".into(), text: "Publish?".into(), options: vec![PromptOption { id:"yes".into(), label:"Publish".into(), style:None, words:false }], ttl_ms:None }, T0);
+    let card = ev(&mut e, Event::Prompt { turn: old.clone(), prompt: "p".into(), text: "Publish?".into(), options: vec![PromptOption { id:"yes".into(), label:"Publish".into(), style:None, words:false, computer: false }], ttl_ms:None }, T0);
     assert!(!e.keepalive());
     let saved = e.state().clone();
     let ended = ev(&mut e, Event::End {turn:old.clone(),outcome:Outcome::Idle}, T0);
@@ -4111,7 +4157,7 @@ fn a_card_answered_live_starts_nothing_after_a_rollback() {
     let mut e = engine(std::slice::from_ref(&a));
     let initial = said(&mut e, &a, &v, 1, &a.owner, json!({"text":"publish after asking"}), T0);
     let old = started(&initial).unwrap().turn;
-    let options = vec![PromptOption { id:"yes".into(), label:"Publish".into(), style:None, words:false }];
+    let options = vec![PromptOption { id:"yes".into(), label:"Publish".into(), style:None, words:false, computer: false }];
     let card = ev(&mut e, Event::Prompt { turn: old.clone(), prompt: "p".into(), text: "Publish?".into(), options, ttl_ms:None }, T0);
     let saved = e.state().clone();
     assert!(e.held().contains(&(a.fragment.clone(), "talk--k3x9".into(), "p".into())), "its answer is the running turn's");
@@ -4151,7 +4197,7 @@ fn a_live_answer_reaches_the_runtime_only_once_its_closure_is_on_work() {
     let v = view(&[&a]);
     let mut e = engine(std::slice::from_ref(&a));
     let turn = started(&said(&mut e, &a, &v, 1, &a.owner, json!({"text":"ask me"}), T0)).unwrap().turn;
-    let options = || vec![PromptOption { id:"yes".into(), label:"Publish".into(), style:None, words:false }];
+    let options = || vec![PromptOption { id:"yes".into(), label:"Publish".into(), style:None, words:false, computer: false }];
     ev(&mut e, Event::Prompt { turn: turn.clone(), prompt: "p".into(), text: "Publish?".into(), options: options(), ttl_ms: None }, T0);
     let record = |seq: u64, prompt: &str| Input::Record { agent: a.fragment.clone(), fragment: "talk--k3x9".into(), record: rec(seq, &a.owner, json!({"kind":"prompt_response","prompt":prompt,"option":"yes"})), view: Some(v.clone()), since: 0 };
     let live = e.step(record(2, "p"), T0 + 1);
@@ -4206,7 +4252,7 @@ fn a_child_holds_even_when_its_parent_waits_on_a_person() {
     let v = view(&[&a]);
     let mut e = engine(std::slice::from_ref(&a));
     let turn = started(&said(&mut e, &a, &v, 1, &a.owner, json!({"text":"ask me"}), T0)).unwrap().turn;
-    ev(&mut e, Event::Prompt { turn, prompt:"p".into(), text:"Publish?".into(), options:vec![PromptOption {id:"yes".into(),label:"Publish".into(),style:None,words:false}], ttl_ms:None }, T0);
+    ev(&mut e, Event::Prompt { turn, prompt:"p".into(), text:"Publish?".into(), options:vec![PromptOption {id:"yes".into(),label:"Publish".into(),style:None,words:false, computer: false }], ttl_ms:None }, T0);
     assert!(!e.keepalive());
     assert_eq!(keepalive(&ev(&mut e, Event::Working(true), T0)), Some(true));
     assert_eq!(keepalive(&ev(&mut e, Event::Working(false), T0)), Some(false));

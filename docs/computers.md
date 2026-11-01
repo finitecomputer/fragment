@@ -657,7 +657,9 @@ What our Hermes image guarantees beyond the contract:
   own timers while held, each file replaced whole or appended, so a save
   holds a whole version of it; nothing else under `/data` changes (the
   Docker lane's `held_nothing_under_data_changes`). Its model-catalog
-  refresh is off, and Node's compile cache is outside `/data`.
+  refresh is off, and Node's compile cache is outside `/data`. A Claude
+  agent's idle `claude` is stopped before the hold is answered
+  (docs/bridge.md, "The Claude runtime").
 - **A turn a restart cut** is closed in its Hermes session before the
   gateway starts, so the next message is a turn of its own (P5).
 - **Its agents change while it runs**, nothing restarted: one assigned
@@ -749,8 +751,39 @@ passwordless `sudo`: the computer is one person's, with no secret in it,
 and their agents are not fenced from each other (decisions 13, 43, 44).
 An install outside `/data` lasts until the next start from the image (a
 crash, an update, a restart; a snapshot's wake keeps it). Nothing is
-installed under `/data` at run time. The bridge runs as root and keeps
-SimpleX's state from the agent's user, though not from its sudo.
+installed under `/data` at run time but the person's own Claude Code
+(below). The bridge runs as root and keeps SimpleX's state from the
+agent's user, though not from its sudo.
+
+### Claude Code in our Hermes image
+
+Paul, FIN-233 (2026-10-31): an agent whose `agent.json` names `claude`
+runs on Claude Code, which the person installs on their computer
+themselves, as on a VPS of theirs. The image ships none, and no flag
+gates it.
+
+- **Installed and signed in from the chat**: a Claude agent's turn on a
+  computer with none asks its person to install it, and Install runs
+  Anthropic's own installer as below; signed out, its turn's card links
+  Anthropic's sign-in for their own browser and takes the code it shows,
+  on the computer alone (docs/bridge.md, "The Claude runtime").
+- **Or installed in a terminal of an agent's desktop** with Anthropic's own
+  installer, then signed in there with `claude auth login` (its URL
+  opened in their browser, its code pasted back). The desktop's home is
+  Hermes' (`/data/hermes`), so the install lands in `/data`
+  (`.local/bin/claude`, its versions in `.local/share/claude`), already on
+  the image's `PATH`, and the sign-in in `/data/hermes/.claude`. Both
+  outlast a restart, a sleep and an image update, as all of `/data` does.
+- **The agent runs that same Claude Code** (`BRIDGE_CLAUDE_BIN`,
+  `BRIDGE_CLAUDE_HOME`: docs/bridge.md), as Hermes' user, with the
+  person's sign-in, settings and auto memory, each agent in its own work
+  directory.
+- **Its updates are Anthropic's**: Claude Code updates itself in the
+  background, keeping the two newest versions, so a save carries one or
+  two (about 270 MB each).
+- **A Claude agent has no Hermes profile or desktop** (above, "One
+  profile per agent of Hermes'"): its person installs and signs in from
+  its chat.
 
 ## Billing
 

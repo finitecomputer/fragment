@@ -525,6 +525,27 @@ fn preview_cards(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
         json!({ "card": r.status, "cards": cards(api, &name), "events": event_kinds(api, owner, &name) }),
     );
 
+    // gone members only while its shot loads (FIN-359): the shot lands on
+    // the platform's sign-in, which is no card of it; its next look skips it
+    let name = s.named(api, owner, "site-private-shot")?;
+    let c = s.create(api, owner, &name)?;
+    api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "members-while-shot", "times": 1 })))?;
+    s.commit(&c, &[("site/index.html", Some(page))]);
+    s.deploy(&c);
+    let skipped = s.eventually(CARD_WAIT, || event_kinds(api, owner, &name).iter().any(|k| k == "card.skipped"));
+    let r = api.signed(owner, "GET", &format!("/api/f/{name}/card"), None)?;
+    if r.status == 200 {
+        // what it kept instead, for the record
+        let _ = std::fs::write(s.dir("cards").join("members-while-shot.jpg"), &r.bytes);
+    }
+    let made = event_kinds(api, owner, &name).iter().any(|k| k == "card.made");
+    let visibility = api.signed(owner, "GET", &format!("/api/f/{name}/status"), None)?.body["visibility"].clone();
+    s.ok(
+        "a fragment gone members only while its shot loads keeps no card of the sign-in its shot landed on: none made, 404, and its next look skips it",
+        skipped && !made && r.status == 404 && visibility == "members",
+        json!({ "card": r.status, "made": made, "visibility": visibility, "cards": cards(api, &name), "events": event_kinds(api, owner, &name) }),
+    );
+
     // a shot that fails is tried again, with a wait between, and the card comes
     let name = s.named(api, owner, "site-retry")?;
     let c = s.create(api, owner, &name)?;

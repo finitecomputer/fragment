@@ -699,6 +699,9 @@ impl FragmentCell {
                     return Ok(json!({ "done": true }));
                 }
                 if let Some(why) = answer["failed"].as_str() {
+                    // the platform code catches the job's throw: a runtime
+                    // limit on the facet stops it here, as a thrown one does
+                    facet.stop_at_limit(why);
                     return fail(why.to_string());
                 }
                 if answer["error"] == "unknown_operation" {
@@ -1303,9 +1306,10 @@ impl FragmentCell {
             "DELETE FROM runs WHERE status NOT IN ('queued', 'running') AND (finished_at < ? OR id <= (SELECT MAX(id) FROM runs) - ?)",
             vec![SqlStorageValue::Integer(js::now_ms() - limits::RUN_RETENTION_MS), SqlStorageValue::Integer(limits::RUNS_KEPT)],
         )?;
-        // a run's charges and what its steps bought go with it (the ledger keeps the month's usage)
+        // a run's charges, what its steps bought and asked for go with it (the ledger keeps the month's usage)
         self.exec("DELETE FROM charges WHERE run NOT IN (SELECT id FROM runs)", vec![])?;
-        self.exec("DELETE FROM paid WHERE run NOT IN (SELECT id FROM runs)", vec![])
+        self.exec("DELETE FROM paid WHERE run NOT IN (SELECT id FROM runs)", vec![])?;
+        self.exec("DELETE FROM making WHERE run NOT IN (SELECT id FROM runs)", vec![])
 
     }
 

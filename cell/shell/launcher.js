@@ -33,6 +33,7 @@
 
 import { icon } from "./icons.js";
 import { KIND } from "./frame-messages.js";
+import { speakers } from "./session-text.js";
 
 // At most 8 files, 25 MiB each, as the chat's page takes them.
 const FILES_MAX = 8;
@@ -52,6 +53,11 @@ const HINT_MAX_BYTES = 256;
 const KNOWLEDGE_IN_MAX = 32;
 const KNOWLEDGE_Q_MAX_BYTES = 1024;
 const KNOWLEDGE_SHOWN = 5;
+// the hits asked for, so five pages fill once a page's other matches are
+// folded into its best (`knownOf`)
+const KNOWLEDGE_ASKED = 20;
+// the fragments not indexed yet named at most, the rest counted
+const UNINDEXED_NAMED = 3;
 const KNOWLEDGE_WAIT_MS = 400;
 
 // What the knowledge question asks: the person's brains and Session Archive
@@ -59,15 +65,26 @@ const KNOWLEDGE_WAIT_MS = 400;
 // list's order, KNOWLEDGE_IN_MAX at most.
 export const knowledgeIn = (fragments) => fragments.filter((f) => (f.kind === "brain" || f.kind === "sessions") && !f.archived).map((f) => f.name).slice(0, KNOWLEDGE_IN_MAX);
 // What a knowledge answer says (`POST /api/search`'s `FoundAcross`): its
-// hits, and the fragments it could not search, which Knowledge names
-// (Alex on #885): one whose `state` is `failed` (its index did not answer,
-// or refused), though the answer itself came. One with no index yet
-// (`no_index`), or searched and holding nothing, is no failure; one denied
-// or missing has left the person's list since it was read.
-export function knownOf(answer) {
+// hits, a page's (a fragment's source: a brain's page, an imported
+// conversation) best alone, the first the merge ranked, with how many more
+// of its sections matched (`more`), `shown` of them; the fragments it could
+// not search, which Knowledge names (Alex on #885): one whose `state` is
+// `failed` (its index did not answer, or refused), though the answer itself
+// came; and those with no index yet (`no_index`: a brain before its pages
+// are indexed), named too, quietly. One searched and holding nothing says
+// nothing; one denied or missing has left the person's list since it was read.
+export function knownOf(answer, shown = KNOWLEDGE_SHOWN) {
+  const pages = new Map();
+  for (const hit of answer?.results ?? []) {
+    const page = JSON.stringify([hit.fragment, hit.source]);
+    if (pages.has(page)) pages.get(page).more++;
+    else pages.set(page, { ...hit, more: 0 });
+  }
+  const states = answer?.fragments ?? [];
   return {
-    hits: answer?.results ?? [],
-    unsearched: (answer?.fragments ?? []).filter((f) => f.state === "failed").map((f) => ({ name: f.name, message: f.message ?? "" })),
+    hits: [...pages.values()].slice(0, shown),
+    unsearched: states.filter((f) => f.state === "failed").map((f) => ({ name: f.name, message: f.message ?? "" })),
+    unindexed: states.filter((f) => f.state === "no_index").map((f) => f.name),
   };
 }
 // Where a knowledge hit opens: a Session Archive's conversation in the
@@ -89,7 +106,8 @@ export function knownAt(hit, kind) {
  * `state`, `byName`, `isChat`, `titleOf`, `chatTitle`, `mark`,
  * `iconOf`, `primaryAgent`, `newChatAgent`, `agentsOwnChat`, `UNTITLED`, `openChat`,
  * `openApp`, `chatFrame`, `composeIn`, `newChat`, `leaveSidebar`,
- * `closeMenu`, `notice`, `prewake`, `originOf`), and three it reads late:
+ * `closeMenu`, `notice`, `prewake`, `originOf`, `dropFrame`: a chat's frame
+ * let go with its stand-in), and three it reads late:
  * `views()` (how many views the middle column has been given: `openChat`
  * and `openSettings` count them), `busy(name)` (whether a chat's page holds
  * what no storage keeps: files chosen, a voice memo) and `setupChat()` (the
@@ -161,7 +179,13 @@ export function createLauncher(shell) {
     row.dataset.source = hit.source;
     const text = el("span", "agent-copy");
     text.append(el("span", "label", hit.heading && hit.heading !== hit.title ? `${hit.title} › ${hit.heading}` : hit.title || hit.source));
-    if (hit.snippet) text.append(el("span", "agent-preview", hit.snippet));
+    // an imported conversation's words said for a person: You, and its agent by name
+    const sessions = byName(hit.fragment)?.kind === "sessions";
+    const key = sessions ? hit.source.match(/^sessions\/(.+)\.json$/)?.[1] : null;
+    const snippet = key ? speakers(hit.snippet, shell.sessionAgent?.(key)) : hit.snippet;
+    if (snippet) text.append(el("span", "agent-preview", snippet));
+    // its other sections that matched, folded into this one (`knownOf`)
+    if (hit.more) text.append(el("span", "search-known-more", `+${hit.more} more ${sessions ? "in this chat" : "on this page"}`));
     row.append(iconOf(hit.fragment), text, el("span", "meta", titleOf(hit.fragment)));
     row.onclick = () => openKnown(hit);
     return row;
@@ -237,7 +261,11 @@ export function createLauncher(shell) {
     const failed = known?.failed ? `Not searched: ${known.failed}` : unsearched.length ? `Not searched: ${unsearched.map((u) => titleOf(u.name)).join(", ")}` : "";
     const note = failed && el("p", "search-known-failed", failed);
     if (note && unsearched.length) note.title = unsearched.map((u) => `${titleOf(u.name)}: ${u.message}`).join("\n");
-    const rows = hits.length || note ? [el("h3", null, "Knowledge"), ...hits.map(knownRow), ...(note ? [note] : [])] : [];
+    // what holds no index yet (a brain before its pages are), named quietly
+    const unindexed = (known?.unindexed ?? []).map(titleOf);
+    const waits = unindexed.length > 0 && el("p", "search-known-failed", `Not indexed yet: ${unindexed.slice(0, UNINDEXED_NAMED).join(", ")}${unindexed.length > UNINDEXED_NAMED ? ` and ${unindexed.length - UNINDEXED_NAMED} more` : ""}`);
+    const notes = [note, waits].filter(Boolean);
+    const rows = hits.length || notes.length ? [el("h3", null, "Knowledge"), ...hits.map(knownRow), ...notes] : [];
     knownBox.replaceChildren(...rows);
     if (rows.length && input.value.trim()) results.append(knownBox);
     else knownBox.remove();
@@ -404,7 +432,7 @@ export function createLauncher(shell) {
     }
     let answer;
     try {
-      answer = knownOf(await api("POST", "/api/search", { q: words.join("").trim(), in: names, limit: KNOWLEDGE_SHOWN }));
+      answer = knownOf(await api("POST", "/api/search", { q: words.join("").trim(), in: names, limit: KNOWLEDGE_ASKED }));
     } catch (e) {
       answer = { failed: e.message };
     }
@@ -487,8 +515,8 @@ export function createLauncher(shell) {
     // no storage keeps (`busy`).
     const unload = (name) => {
       if (shell.busy(name)) return;
-      state.frames.get(name)?.remove();
-      state.frames.delete(name);
+      // the frame and its stand-in (frame-standin.js), with no chat of it left
+      shell.dropFrame(name);
     };
     let name = null;
     try {

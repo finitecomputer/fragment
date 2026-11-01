@@ -21,6 +21,10 @@
 //! meta-brain's fan-out across fragments) is searched by the vector it
 //! carries, never embedded again, so its asker pays once.
 //!
+//! The fragment's own app writes and asks its index through its `Search`
+//! capability (`cap_search`; entry.mjs, platform.mjs's `this.search`), as
+//! the fragment itself: no role, and its owner pays for its questions too.
+//!
 //! A source named by one of the fragment's paths is forgotten when a move
 //! of main deletes that file (`search_forget`, plane.rs): written to
 //! `search_forget` in the move's turn, deleted from the index by the alarm
@@ -42,7 +46,6 @@
 
 use std::collections::{HashMap, HashSet};
 
-use fragment_core::embed;
 use fragment_core::search_index as engine;
 use fragment_core::searchable as rules;
 use fragment_proto::search as wire;
@@ -62,6 +65,15 @@ const FORGETS_PER_PASS: i64 = 100;
 /// How long after a failed try a forgotten source is tried again.
 const FORGET_RETRY_MS: i64 = 5 * 60 * 1000;
 
+/// Who writes or asks: a caller, whose role is checked and who pays for a
+/// question, or the fragment's own app (its `Search` capability), which
+/// acts as the fragment itself: no role, its owner paying for all of it.
+#[derive(Clone, Copy)]
+enum By<'a> {
+    Caller(&'a Caller),
+    App,
+}
+
 /// Who a caller is, as search pays and counts it.
 struct Asker {
     /// The person whose ledger pays (an agent's owner), if any.
@@ -78,6 +90,16 @@ fn asker(caller: &Caller) -> Asker {
     }
 }
 
+impl By<'_> {
+    /// Who pays, given the fragment's `owner`.
+    fn asker(self, owner: &str) -> Asker {
+        match self {
+            By::Caller(c) => asker(c),
+            By::App => Asker { payer: Some(owner.to_string()), agent: None },
+        }
+    }
+}
+
 #[derive(Deserialize)]
 struct Forget {
     source: String,
@@ -89,10 +111,13 @@ struct KnownHashes {
     known: Vec<String>,
 }
 
-/// The index's answer to `delete`.
+/// The index's answer to `delete`: `fenced`, the source's higher fence
+/// that refused it.
 #[derive(Deserialize)]
 struct Deleted {
     deleted: bool,
+    #[serde(default)]
+    fenced: Option<u64>,
 }
 
 /// A question's vector: embedded here, or given by the platform's route
@@ -193,18 +218,24 @@ impl FragmentCell {
     /// embedded on the deployment's slot, paid by `payer`.
     async fn search_embed(&self, todo: &[&rules::Chunk], payer: &str, agent: Option<&str>, fragment: &InFragment<'_>) -> CellResult<HashMap<String, String>> {
         let mut out = HashMap::new();
-        for batch in todo.chunks(embed::INPUTS_MAX) {
+        // as many a call as the slot's model takes
+        for batch in todo.chunks(self.cfg.models.embeddings.inputs_max) {
             let inputs: Vec<String> = batch.iter().map(|c| c.input.clone()).collect();
-            match embedded(&self.env, &inputs, payer, agent, Some(fragment), &self.state).await? {
+            match embedded(&self.env, &inputs, payer, agent, Some(fragment), &self.state, None).await? {
                 Embedding::Vectors { vectors, .. } => {
                     for (c, v) in batch.iter().zip(vectors) {
                         let held = engine::hold(&v).ok_or_else(|| CellError::new(ErrorCode::UpstreamFailed, "the embeddings model answered a vector with no direction"))?;
                         out.insert(c.hash.clone(), index::held_b64(&held));
                     }
                 }
-                Embedding::Refused { status, text } => {
+                Embedding::Refused { status, text, retry_after_ms } => {
                     let code = if status == 429 { ErrorCode::RateLimited } else { ErrorCode::UpstreamFailed };
-                    return Err(CellError::new(code, format!("the embeddings model refused ({status}): {text}")));
+                    let refused = CellError::new(code, format!("the embeddings model refused ({status}): {text}"));
+                    // its rate limit: the writer waits this long, then writes again
+                    return Err(match retry_after_ms {
+                        Some(ms) => refused.retry_after(ms),
+                        None => refused,
+                    });
                 }
             }
         }
@@ -213,8 +244,14 @@ impl FragmentCell {
 
     /// `POST /api/search/upsert` (an editor): a source, whole.
     pub(crate) async fn search_upsert(&self, caller: &Caller, up: wire::Upsert) -> CellResult<Response> {
+        self.search_write(By::Caller(caller), up).await
+    }
+
+    async fn search_write(&self, by: By<'_>, up: wire::Upsert) -> CellResult<Response> {
         let facts = self.facts()?;
-        self.admit(&facts, caller, false, Role::Editor)?;
+        if let By::Caller(caller) = by {
+            self.admit(&facts, caller, false, Role::Editor)?;
+        }
         rules::check(&up).map_err(CellError::invalid)?;
         let life = self.search_life()?;
         let scope = rules::scope(&self.state.id().to_string(), life);
@@ -227,15 +264,18 @@ impl FragmentCell {
         self.search_forget_first(&scope, &up.source).await?;
         let [owner] = self.metas([MetaKey::Owner])?;
         let owner = owner.ok_or_else(|| crate::fragment::missing(MetaKey::Owner))?;
-        let who = asker(caller);
-        let by_owner = who.payer.as_deref() == Some(owner.as_str()) && caller.signed.as_ref().is_none_or(|s| s.acting_for.as_deref().is_none_or(|f| f == owner));
+        let who = by.asker(&owner);
+        let acts_for_another = matches!(by, By::Caller(c) if c.signed.as_ref().is_some_and(|s| s.acting_for.as_deref().is_some_and(|f| f != owner)));
+        let by_owner = who.payer.as_deref() == Some(owner.as_str()) && !acts_for_another;
         let fragment = InFragment { name: &facts.name, owner: &owner, by_owner };
         let space = self.search_space();
         let slot = &self.cfg.models.embeddings;
         let chunks = rules::chunked(&up, slot.max_input_tokens, slot.document_prefix.as_deref());
         let mut vectors: HashMap<String, String> = HashMap::new();
         // at most twice: once more, embedding all, when the index lost a
-        // vector it said it held (a write in between took it)
+        // vector it said it held (a write in between took it); `cleared`,
+        // whether either emptied an index of another space first
+        let mut cleared_before = false;
         for attempt in 0..2 {
             if let Some(space) = &space {
                 let hashes: Vec<&str> = chunks.iter().map(|c| c.hash.as_str()).collect::<HashSet<_>>().into_iter().collect();
@@ -253,44 +293,69 @@ impl FragmentCell {
             self.search_same_life(life)?;
             match wrote {
                 Wrote::Written { written, chunks, cleared } => {
+                    let cleared = cleared || cleared_before;
                     if cleared {
                         // the deployment's embeddings moved: the index is
                         // written again from its sources, starting with this one
                         console_log!("{}", json!({ "event": "search.space-changed", "fragment": facts.name, "now": space }));
                     }
-                    return json_response(&json!({ "source": up.source, "revision": up.revision, "written": written, "chunks": chunks }));
+                    return json_response(&json!({ "source": up.source, "revision": up.revision, "written": written, "chunks": chunks, "cleared": cleared }));
                 }
-                Wrote::Conflict { current } => {
-                    let body = json!({ "error": ErrorCode::Conflict, "message": "the source's revision is not the one this replaces", "current": current });
+                Wrote::Conflict { current, cleared } => {
+                    let body = json!({ "error": ErrorCode::Conflict, "message": "the source's revision is not the one this replaces", "current": current, "cleared": cleared || cleared_before });
                     return Ok(Response::from_json(&body)?.with_status(409));
                 }
-                Wrote::MissingVectors if attempt == 0 => {}
-                Wrote::MissingVectors => break,
-                Wrote::Full { chunks, max } => {
+                Wrote::MissingVectors { cleared } => {
+                    cleared_before |= cleared;
+                    if attempt > 0 {
+                        break;
+                    }
+                }
+                Wrote::Full { chunks, max, cleared } => {
                     let message = format!("this fragment's index holds {chunks} chunks, at most {max}: split its sources across fragments");
-                    return Err(CellError::new(ErrorCode::StorageFull, message));
+                    let body = json!({ "error": ErrorCode::StorageFull, "message": message, "cleared": cleared || cleared_before });
+                    return Ok(Response::from_json(&body)?.with_status(507));
+                }
+                Wrote::Fenced { fence } => {
+                    let body = json!({ "error": ErrorCode::Conflict, "message": "a newer write or delete of this source was taken (its fence is higher)", "fence": fence, "cleared": cleared_before });
+                    return Ok(Response::from_json(&body)?.with_status(409));
                 }
                 Wrote::Ended => return Err(CellError::new(ErrorCode::NotFound, "this fragment was deleted while the source was written")),
             }
         }
-        Err(CellError::new(ErrorCode::UpstreamFailed, "the index lost vectors it held twice: try again"))
+        let body = json!({ "error": ErrorCode::UpstreamFailed, "message": "the index lost vectors it held twice: try again", "cleared": cleared_before });
+        Ok(Response::from_json(&body)?.with_status(502))
     }
 
     /// `POST /api/search/delete` (an editor): a source, gone.
     pub(crate) async fn search_delete(&self, caller: &Caller, d: wire::Delete) -> CellResult<Response> {
         self.require(caller, false, Role::Editor)?;
+        self.search_remove(d).await
+    }
+
+    async fn search_remove(&self, d: wire::Delete) -> CellResult<Response> {
         if d.source.is_empty() || d.source.len() > wire::SOURCE_MAX_BYTES {
             return Err(CellError::invalid(format!("source is 1 to {} bytes", wire::SOURCE_MAX_BYTES)));
         }
+        rules::check_fence(d.fence).map_err(CellError::invalid)?;
         if !self.search_indexed()? {
-            return json_response(&json!({ "source": d.source, "deleted": false }));
+            if d.fence.is_none() {
+                return json_response(&json!({ "source": d.source, "deleted": false }));
+            }
+            // a fenced delete leaves its tombstone in an index never written
+            // too: from here the index may hold one, so the life's end ends it
+            self.set_meta(MetaKey::Search, "1")?;
         }
         let life = self.search_life()?;
         let scope = rules::scope(&self.state.id().to_string(), life);
         let _held = self.search_hold(&d.source).await;
         self.search_same_life(life)?;
-        let gone: Deleted = self.search_index(&scope, "delete", &json!({ "source": d.source })).await?;
+        let gone: Deleted = self.search_index(&scope, "delete", &json!({ "source": d.source, "fence": d.fence })).await?;
         self.search_same_life(life)?;
+        if let Some(fence) = gone.fenced {
+            let body = json!({ "error": ErrorCode::Conflict, "message": "a newer write or delete of this source was taken (its fence is higher)", "fence": fence });
+            return Ok(Response::from_json(&body)?.with_status(409));
+        }
         self.exec("DELETE FROM search_forget WHERE source = ?", vec![d.source.as_str().into()])?;
         json_response(&json!({ "source": d.source, "deleted": gone.deleted }))
     }
@@ -319,6 +384,10 @@ impl FragmentCell {
     /// `GET /api/search/status` (a reader): what the index holds.
     pub(crate) async fn search_status(&self, caller: &Caller) -> CellResult<Response> {
         self.require(caller, false, Role::Viewer)?;
+        self.search_state().await
+    }
+
+    async fn search_state(&self) -> CellResult<Response> {
         let semantic = if self.search_space().is_some() { "on" } else { "off" };
         let mut status: serde_json::Value = if self.search_indexed()? {
             let mut s: serde_json::Value = self.search_index(&self.search_scope()?, "status", &json!({})).await?;
@@ -335,18 +404,20 @@ impl FragmentCell {
 
     /// `POST /api/search` (a reader): the sections that answer a question.
     pub(crate) async fn search_query(&self, caller: &Caller, q: wire::Query) -> CellResult<Response> {
-        self.search_found(caller, q, Question::Embed).await
+        self.search_found(By::Caller(caller), q, Question::Embed).await
     }
 
     /// `POST /search/asked` (a reader, by the platform's own route, which
     /// the router maps no outside path to): a question embedded already.
     pub(crate) async fn search_asked(&self, caller: &Caller, asked: wire::Forwarded) -> CellResult<Response> {
-        self.search_found(caller, asked.query, Question::Given(asked.vector)).await
+        self.search_found(By::Caller(caller), asked.query, Question::Given(asked.vector)).await
     }
 
-    async fn search_found(&self, caller: &Caller, q: wire::Query, question: Question) -> CellResult<Response> {
+    async fn search_found(&self, by: By<'_>, q: wire::Query, question: Question) -> CellResult<Response> {
         let facts = self.facts()?;
-        self.admit(&facts, caller, false, Role::Viewer)?;
+        if let By::Caller(caller) = by {
+            self.admit(&facts, caller, false, Role::Viewer)?;
+        }
         rules::check_query(&q).map_err(CellError::invalid)?;
         let space = self.search_space();
         // `wire::Found`, its hits passed through as the index wrote them
@@ -369,10 +440,12 @@ impl FragmentCell {
         }
         let scope = self.search_scope()?;
         self.search_drain(&scope).await;
+        // what it waited on, for its client (`Server-Timing`)
+        let mut laps = crate::js::Laps::start();
         let vector = match question {
             _ if space.is_none() || q.mode == wire::Mode::Lexical => None,
             Question::Given(v) => v,
-            Question::Embed => self.search_embed_question(caller, &facts.name, &q.q).await?,
+            Question::Embed => self.search_embed_question(by, &facts.name, &q.q, &mut laps).await?,
         };
         let mode = match (q.mode, vector.is_some()) {
             (wire::Mode::Semantic, true) => wire::Mode::Semantic,
@@ -381,33 +454,56 @@ impl FragmentCell {
         };
         let limit = q.limit.unwrap_or(wire::RESULTS_DEFAULT);
         let ask = index::Ask { q: q.q, limit, mode, fields: q.fields, after: q.after, before: q.before, vector, space: space.clone() };
+        let t0 = crate::js::now_ms();
         let answer: serde_json::Value = self.search_index(&scope, "search", &ask).await?;
+        laps.took("index", crate::js::now_ms() - t0);
         let pending = self.search_pending()?;
         let hits = answer["results"].as_array().cloned().unwrap_or_default();
         let mut results: Vec<serde_json::Value> = hits.into_iter().filter(|h| !h["source"].as_str().is_some_and(|s| pending.contains(s))).collect();
         for (i, h) in results.iter_mut().enumerate() {
             h["rank"] = json!(i + 1);
         }
-        json_response(&found(results, answer["semantic"] == true, true))
+        let mut resp = json_response(&found(results, answer["semantic"] == true, true))?;
+        if let Some(timing) = laps.server_timing() {
+            resp.headers_mut().set("server-timing", &timing)?;
+        }
+        Ok(resp)
     }
 
     /// The question's vector, embedded and paid by its asker (an agent's
-    /// owner); none for an anonymous reader, or a refusal (it is searched
-    /// by its words).
-    async fn search_embed_question(&self, caller: &Caller, name: &str, q: &str) -> CellResult<Option<String>> {
-        let who = asker(caller);
-        let Some(payer) = &who.payer else { return Ok(None) };
+    /// owner; the fragment's owner for its app's); none for an anonymous
+    /// reader, or a refusal (it is searched by its words).
+    async fn search_embed_question(&self, by: By<'_>, name: &str, q: &str, laps: &mut crate::js::Laps) -> CellResult<Option<String>> {
         let [owner] = self.metas([MetaKey::Owner])?;
         let owner = owner.ok_or_else(|| crate::fragment::missing(MetaKey::Owner))?;
+        let who = by.asker(&owner);
+        let Some(payer) = &who.payer else { return Ok(None) };
         let fragment = InFragment { name, owner: &owner, by_owner: payer == &owner };
         // after the slot's query prefix, as its chunks after its document prefix
         let question = self.cfg.models.embeddings.question(q);
-        match embedded(&self.env, &[question], payer, who.agent.as_deref(), Some(&fragment), &self.state).await? {
+        match embedded(&self.env, &[question], payer, who.agent.as_deref(), Some(&fragment), &self.state, Some(laps)).await? {
             Embedding::Vectors { vectors, .. } => Ok(vectors.into_iter().next().map(|v| rules::vector_b64(&v))),
-            Embedding::Refused { status, text } => {
+            Embedding::Refused { status, text, .. } => {
                 console_warn!("{}", json!({ "event": "search.query-unembedded", "status": status, "why": text }));
                 Ok(None)
             }
+        }
+    }
+
+    /// `POST /cap/search/<op>`: the app facet's `Search` capability. The
+    /// app is the fragment itself, so its own index is its to write and
+    /// ask, with no role checked, and everything it embeds is paid by the
+    /// fragment's owner (its code cannot vouch for whoever called it).
+    pub(crate) async fn cap_search(&self, op: &str, body: serde_json::Value) -> CellResult<Response> {
+        fn read<T: DeserializeOwned>(op: &str, body: serde_json::Value) -> CellResult<T> {
+            serde_json::from_value(body).map_err(|e| CellError::invalid(format!("search.{op}: {e}")))
+        }
+        match op {
+            "upsert" => self.search_write(By::App, read(op, body)?).await,
+            "delete" => self.search_remove(read(op, body)?).await,
+            "query" => self.search_found(By::App, read(op, body)?, Question::Embed).await,
+            "status" => self.search_state().await,
+            _ => Err(CellError::new(ErrorCode::NotFound, format!("no capability search.{op}"))),
         }
     }
 
@@ -544,6 +640,7 @@ fn index_write(up: &wire::Upsert, chunks: &[rules::Chunk], vectors: &HashMap<Str
         title: up.title.clone().unwrap_or_default(),
         at: up.at.clone(),
         fields: up.fields.clone(),
+        fence: up.fence,
         space,
         sections,
     }

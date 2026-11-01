@@ -19,17 +19,20 @@
     "last_change": { "kind": "query" },
     "changed": {
       "kind": "job",
+      "role": "viewer",
       "input": {
         "type": "object",
         "properties": {
           "paths": { "type": "array", "maxItems": 200, "items": { "type": "string", "minLength": 1, "maxLength": 300 } },
           "more": { "type": "integer", "minimum": 0 },
-          "full": { "type": "boolean" }
+          "full": { "type": "boolean" },
+          "hop": { "type": "integer", "minimum": 0, "maximum": 16 }
         }
       }
     },
     "mark": {
       "kind": "mutation",
+      "role": "viewer",
       "input": {
         "type": "object",
         "required": ["paths", "full"],
@@ -42,13 +45,13 @@
     },
     "reindex": {
       "kind": "query",
-      "role": "editor",
+      "role": "viewer",
       "input": { "type": "object", "additionalProperties": false, "properties": { "full": { "type": "boolean" } } }
     }
   },
-  "triggers": [{ "files": "**", "run": "changed" }],
+  "triggers": [{ "files": "**", "run": "changed" }, { "installed": true, "run": "changed" }],
   "meta": {
     "title": "Brain",
-    "description": "A knowledge base your agents keep: wikis of sources and pages, searched by section, shared with whoever you add."
+    "description": "A knowledge base your agents keep: wikis of sources and pages, searched by words and meaning, shared with whoever you add."
   }
 }

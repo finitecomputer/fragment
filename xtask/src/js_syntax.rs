@@ -60,11 +60,23 @@ pub const PROCESSES_MAX: usize = 8;
 const SHELL: &str = "cell/shell/shell.js";
 /// A test file's name ends so (`node --test`'s own default).
 const TEST_SUFFIX: &str = ".test.mjs";
-/// The shell's tests, which a walk must find: the chat page's control.js's,
-/// chat-list.js's (its sections, and whom the ways to ask for an app ask),
-/// the messages between the shell and its frames, history-page.js's,
-/// launcher.js's Knowledge, onboarding.js's and threads.js's.
-const SHELL_TESTS: [&str; 8] = ["cell/shell-tests/asked-agent.test.mjs", "cell/shell-tests/chat-control.test.mjs", "cell/shell-tests/chat-list.test.mjs", "cell/shell-tests/frame-messages.test.mjs", "cell/shell-tests/history-page.test.mjs", "cell/shell-tests/launcher-knowledge.test.mjs", "cell/shell-tests/onboarding.test.mjs", "cell/shell-tests/threads.test.mjs"];
+/// The shell's tests, which a walk must find (each named in its file).
+const SHELL_TESTS: &[&str] = &[
+    "cell/shell-tests/apps-cards.test.mjs",
+    "cell/shell-tests/apps-page.test.mjs",
+    "cell/shell-tests/asked-agent.test.mjs",
+    "cell/shell-tests/chat-control.test.mjs",
+    "cell/shell-tests/chat-list.test.mjs",
+    "cell/shell-tests/computer-answer.test.mjs",
+    "cell/shell-tests/frame-messages.test.mjs",
+    "cell/shell-tests/frame-standin.test.mjs",
+    "cell/shell-tests/history-page.test.mjs",
+    "cell/shell-tests/launcher-knowledge.test.mjs",
+    "cell/shell-tests/onboarding.test.mjs",
+    "cell/shell-tests/session-archive.test.mjs",
+    "cell/shell-tests/session-text.test.mjs",
+    "cell/shell-tests/threads.test.mjs",
+];
 
 /// How Node is told to parse a file (`--input-type`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -277,14 +289,19 @@ mod tests {
     }
 
     /// The walk over the repo itself finds the shell, the templates' site
-    /// and app code (the notes viewer's among them), and the classic
-    /// service worker, and leaves out vendored code.
+    /// and app code (the notes viewer's among them), the classic service
+    /// worker and every test, and leaves out vendored code.
     #[test]
     fn the_walk_covers_the_shell_and_templates_and_skips_vendored_code() {
         let found = files(&devstack::repo_root()).expect("the repo's walk");
         let kind = |path: &str| found.iter().find(|(p, _)| p == path).map(|(_, k)| *k);
         assert_eq!(kind("cell/shell/shell.js"), Some(InputType::Module));
-        assert_eq!(tests(&found), SHELL_TESTS);
+        // the shell's tests, and the brain app's (beside the templates crate: a
+        // file under templates/brain would ship with the template)
+        assert_eq!(tests(&found), [SHELL_TESTS, &["crates/templates/tests/brain_app.test.mjs"]].concat());
+        // sorted, each once, so two changes conflict only where they add
+        // beside each other (no count to bump)
+        assert!(SHELL_TESTS.windows(2).all(|w| w[0] < w[1]), "SHELL_TESTS is sorted, each once");
         // the launcher, a module shell.js imports
         assert_eq!(kind("cell/shell/launcher.js"), Some(InputType::Module));
         assert_eq!(kind("templates/todo/app.mjs"), Some(InputType::Module));

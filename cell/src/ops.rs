@@ -170,7 +170,6 @@ fn read_installed_code(sql: &SqlStorage, id: &str) -> Result<AppCode, String> {
         source: row.source,
         modules,
         cpu_ms: row.cpu_ms,
-        subrequests: limits::APP_SUBREQUESTS,
     })
 }
 
@@ -193,6 +192,27 @@ impl FragmentCell {
         // key, which is the same for every version of it): one dynamic worker a day
         self.note_dynamic_worker(&format!("{loader_id}:{}", platform().id));
         self.app.facet(&self.raw, &self.app_facet()?)
+    }
+
+    /// Test fleets only: one capability call, counted against the
+    /// `facet-calls` lever's budget for the facet's current start and
+    /// refused past it in the runtime's words (`facet::at_limit`), as
+    /// Cloudflare refuses a facet's subrequests past its life's limit.
+    pub(crate) fn facet_calls_lever(&self) -> CellResult<()> {
+        if !self.cfg.test_hooks {
+            return Ok(());
+        }
+        let Some(limit) = self.meta(MetaKey::TestFacetCalls)?.and_then(|n| n.parse::<u64>().ok()) else {
+            return Ok(());
+        };
+        let start = self.app.starts();
+        let (at, made) = self.facet_calls.get();
+        let made = if at == start { made + 1 } else { 1 };
+        self.facet_calls.set((start, made));
+        if made > limit {
+            return Err(CellError::host(format!("Too many subrequests by single Worker invocation (a test lever: {limit} capability calls a facet start)")));
+        }
+        Ok(())
     }
 
     /// The installed app code's identity (its stored loader id), when live has an app.
@@ -465,15 +485,17 @@ impl FragmentCell {
                 self.schedule().await?;
                 json!({ "aged": ms, "invites": aged })
             }
-            Some(lever @ ("fail-deliveries" | "fail-outbox" | "fail-triggers" | "drop-effects" | "fail-meter-acks" | "fail-after-paid" | "fail-cards" | "fail-search-index")) => {
+            Some(lever @ ("fail-deliveries" | "fail-outbox" | "fail-triggers" | "drop-effects" | "fail-meter-acks" | "fail-after-paid" | "lose-video-answers" | "fail-cards" | "members-while-shot" | "fail-search-index")) => {
                 let key = match lever {
                     "fail-cards" => MetaKey::TestFailCards,
+                    "members-while-shot" => MetaKey::TestMembersWhileShot,
                     "fail-search-index" => MetaKey::TestFailSearchIndex,
                     "fail-deliveries" => MetaKey::TestFailDeliveries,
                     "fail-outbox" => MetaKey::TestFailOutbox,
                     "fail-triggers" => MetaKey::TestFailTriggers,
                     "fail-meter-acks" => MetaKey::TestFailMeterAcks,
                     "fail-after-paid" => MetaKey::TestFailAfterPaid,
+                    "lose-video-answers" => MetaKey::TestLoseVideoAnswers,
                     _ => MetaKey::TestDropEffects,
                 };
                 let times = body["times"].as_u64().ok_or_else(|| CellError::invalid(format!("{lever} names how many times")))?;
@@ -572,12 +594,55 @@ impl FragmentCell {
                 )?;
                 json!({ "triggers": triggers, "run": run.first().and_then(|r| r["id"].as_i64()) })
             }
+            Some("facet-calls") => {
+                // each start of the app facet may make this many capability
+                // calls, refused past it in the runtime's words, as
+                // Cloudflare spends a facet's subrequests for its life
+                // (`facet_calls_lever`); no number, no limit
+                match body["calls"].as_u64() {
+                    Some(n) => self.set_meta(MetaKey::TestFacetCalls, &n.to_string())?,
+                    None => self.del_meta(MetaKey::TestFacetCalls)?,
+                }
+                json!({ "calls": body["calls"] })
+            }
+            Some("blessed-stale") => {
+                // as if the platform had deployed a newer release of its
+                // blessed template since: its next request installs that
+                // release again (plane.rs `blessed_current`)
+                let installed = self.meta(MetaKey::Blessed)?;
+                if let Some(installed) = &installed {
+                    let t = installed.split_once('@').map_or(installed.as_str(), |(t, _)| t);
+                    self.set_meta(MetaKey::Blessed, &format!("{t}@older"))?;
+                }
+                json!({ "stale": installed.is_some() })
+            }
             Some("legacy-member-kind") => {
                 // a member row from before `members.kind` (2026-09-24): its
                 // kind NULL, as such rows were left
                 let principal = body["principal"].as_str().ok_or_else(|| CellError::invalid("legacy-member-kind names a member's principal"))?;
                 let n = self.rows("UPDATE members SET kind = NULL WHERE principal = ? RETURNING principal", vec![principal.into()])?.len();
                 json!({ "members": n })
+            }
+            Some("legacy-reach") => {
+                // a key set before FIN-352 (2026-11-01), while it was shared
+                // beyond its owner and their agents, as such fragments were
+                // left (reach.rs): sealed and stored as `PUT secrets` did
+                // then, past the rule as an older release wrote it
+                let name = body["name"].as_str().unwrap_or("LEGACY_KEY");
+                if !fragment_proto::valid_secret_name(name) {
+                    return Err(CellError::invalid("legacy-reach names a secret"));
+                }
+                let sealed = crate::keys::seal(&self.env, &self.scope(), body["value"].as_str().unwrap_or("legacy").as_bytes()).await?;
+                self.exec(
+                    "INSERT INTO secrets (name, sealed, set_by, set_at) VALUES (?, ?, 'legacy', ?) ON CONFLICT (name) DO UPDATE SET sealed = excluded.sealed",
+                    vec![name.into(), sealed.into(), SqlStorageValue::Integer(js::now_ms())],
+                )?;
+                for host in body["hosts"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+                    self.exec("INSERT OR IGNORE INTO secret_hosts (name, host) VALUES (?, ?)", vec![name.into(), host.into()])?;
+                }
+                // its owner's row never told (that release sent no `reach`)
+                self.del_meta(MetaKey::ReachTold)?;
+                json!({ "reach": self.reaches()? })
             }
             Some("members") => {
                 let fill = body["fill"].as_u64().ok_or_else(|| CellError::invalid("fill is a count"))?;
