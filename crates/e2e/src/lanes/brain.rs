@@ -2,9 +2,10 @@
 //! on the blessed `brain` template, made as the CLI makes it, whose repo
 //! holds only its face and its files. Its files are wikis (raw/ wiki/ …,
 //! index.md, log.md); its search is the fragment's own index, by words and
-//! by meaning, written through the app's `this.searchIndex` and kept by a
-//! file trigger. An agent's path through it: the CLI syncs a folder, writes
-//! a source into raw/ and a page into wiki/, and searches. Then: search
+//! by meaning, written through the app's `this.searchIndex` and kept by
+//! its triggers (each move of main, each install of a new release). An
+//! agent's path through it: the CLI syncs a folder, writes a source into
+//! raw/ and a page into wiki/, and searches. Then: search
 //! syntax is plain words, an over-long query is refused, a viewer searches
 //! and a stranger may not, and a viewer's start of the index's job is safe;
 //! the same files again change nothing; the index survives a restart and
@@ -161,7 +162,25 @@ pub fn brain(s: &mut Suite, api: &Api) -> Result<()> {
         &st.body["code"],
     );
     let t = api.signed(&keys, "GET", &format!("/api/f/{name}/triggers"), None)?;
-    s.ok("a file trigger keeps the index", t.body["triggers"].as_array().is_some_and(|l| l.iter().any(|x| x["files"] == "**" && x["run"] == "changed")), &t);
+    let listed = |want: Value| t.body["triggers"].as_array().is_some_and(|l| l.iter().any(|x| x["run"] == "changed" && want.as_object().is_some_and(|w| w.iter().all(|(k, v)| x[k] == *v))));
+    s.ok("a file trigger keeps the index, and an installed trigger takes each new release", listed(json!({ "files": "**" })) && listed(json!({ "installed": true })), &t);
+    // each install of the release runs `changed` once, as the brain: a new
+    // release (an index of an older shape among them) is taken in with no
+    // one acting, at the brain's next request
+    let own = st.body["npub"].clone();
+    let installs = || jobs::runs(api, &keys, &name, "&op=changed").into_iter().filter(|r| r["via"] == "installed").collect::<Vec<Value>>();
+    let first = s.eventually(WAIT, || installs().first().is_some_and(|r| r["status"] == "succeeded"));
+    let stale = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "blessed-stale" })))?;
+    let asked = index(api, &keys, &name);
+    let again = s.eventually(WAIT, || {
+        let l = installs();
+        l.len() == 2 && l.iter().all(|r| r["status"] == "succeeded" && r["principal"] == own)
+    });
+    s.ok(
+        "its install ran changed once, as the brain; a newer release of the template runs it once more at the brain's next request, no one starting it",
+        first && stale.status == 200 && stale.body["stale"] == true && asked["format"].is_string() && again,
+        json!({ "stale": stale.body, "installs": installs() }),
+    );
 
     // ingest, as an agent does: sync a folder, write a source and a page, sync
     let dir = s.dir("brain");

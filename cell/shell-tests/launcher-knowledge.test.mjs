@@ -38,7 +38,7 @@ const hit = (fragment) => ({ fragment, source: "wiki/a.md", title: "A", snippet:
 
 test("every fragment failed: no hits, each named as not searched", () => {
   const k = knownOf({ results: [], fragments: [asked("product--c3d4", "failed", "the index did not answer"), asked("sales--p6q7", "failed", "refused")], semantic: "on" });
-  assert.deepEqual(k, { hits: [], unsearched: [{ name: "product--c3d4", message: "the index did not answer" }, { name: "sales--p6q7", message: "refused" }] });
+  assert.deepEqual(k, { hits: [], unsearched: [{ name: "product--c3d4", message: "the index did not answer" }, { name: "sales--p6q7", message: "refused" }], unindexed: [] });
 });
 
 test("some failed, some answered: the hits, and the failed ones named beside them", () => {
@@ -47,7 +47,32 @@ test("some failed, some answered: the hits, and the failed ones named beside the
   assert.deepEqual(k.unsearched, [{ name: "sales--p6q7", message: "" }]);
 });
 
-test("all searched, nothing found, or no index yet: no failure to say (and a fragment gone since is none either)", () => {
-  assert.deepEqual(knownOf({ results: [], fragments: [asked("product--c3d4", "searched"), asked("archive--j2k3", "no_index"), asked("gone--x2y3", "missing"), asked("theirs--z4a5", "denied")], semantic: "on" }), { hits: [], unsearched: [] });
-  assert.deepEqual(knownOf({}), { hits: [], unsearched: [] });
+test("all searched, nothing found, or no index yet: no failure to say, the not indexed named apart (and a fragment gone since is none either)", () => {
+  assert.deepEqual(knownOf({ results: [], fragments: [asked("product--c3d4", "searched"), asked("archive--j2k3", "no_index"), asked("gone--x2y3", "missing"), asked("theirs--z4a5", "denied")], semantic: "on" }), { hits: [], unsearched: [], unindexed: ["archive--j2k3"] });
+  assert.deepEqual(knownOf({}), { hits: [], unsearched: [], unindexed: [] });
+});
+
+// The Session Archive's rehearsal: one conversation showed three times, once a turn.
+test("a page's matches are one row: its best (the first the merge ranked) with how many more, five pages shown", () => {
+  const at = (fragment, source, snippet) => ({ fragment, source, title: source, snippet });
+  const results = [
+    at("archive--j2k3", "sessions/garden.json", "best turn"),
+    at("product--c3d4", "wiki/a.md", "a"),
+    at("archive--j2k3", "sessions/garden.json", "second turn"),
+    at("product--c3d4", "wiki/b.md", "b"),
+    at("archive--j2k3", "sessions/garden.json", "third turn"),
+    // the same path in another fragment is another page
+    at("sales--p6q7", "wiki/a.md", "sales a"),
+    at("product--c3d4", "wiki/c.md", "c"),
+    at("product--c3d4", "wiki/d.md", "d"),
+  ];
+  const k = knownOf({ results, fragments: [] });
+  assert.deepEqual(k.hits.map((h) => [h.fragment, h.source, h.snippet, h.more]), [
+    ["archive--j2k3", "sessions/garden.json", "best turn", 2],
+    ["product--c3d4", "wiki/a.md", "a", 0],
+    ["product--c3d4", "wiki/b.md", "b", 0],
+    ["sales--p6q7", "wiki/a.md", "sales a", 0],
+    ["product--c3d4", "wiki/c.md", "c", 0],
+  ]);
+  assert.equal(knownOf({ results }, 2).hits.length, 2);
 });

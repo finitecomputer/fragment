@@ -61,7 +61,11 @@ indexing, waiting_ms, hint?}`.
   (`mark`, a mutation, which open pages follow), then indexes them 8 files
   a step (`reindex`, a query that reads the files at `main` and writes the
   index) until none are left for it, going on in a run of its own past one
-  run's steps. A batch claims its pages (for two minutes), so runs side by
+  run's steps. An installed trigger (`{"installed": true, "run":
+  "changed"}`) runs it once per install of a new release too, at the
+  brain's next request, so a release that changes the index's shape
+  (`FORMAT`) is taken in with no member acting. A batch claims its pages
+  (for two minutes), so runs side by
   side take different pages and nothing is read or embedded twice: any
   member may start `changed` (the page does when the index is behind), and
   one with nothing left to do takes two steps. A batch that fails lets go
