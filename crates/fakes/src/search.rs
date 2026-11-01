@@ -43,6 +43,10 @@ pub struct Index {
     /// Chunks it holds at most (each section one here), as the cell's
     /// index caps them: a write past it is refused, 507 `storage_full`.
     pub chunks_max: Option<usize>,
+    /// Upserts still to refuse for the embeddings' rate limit, each the
+    /// wait it names (429 `rate_limited`, `retry_after_ms`, and its
+    /// `Retry-After`), in order: a refused write writes nothing.
+    pub rate_limited: std::collections::VecDeque<u64>,
 }
 
 fn refused(status: u16, message: &str) -> Response {
@@ -64,6 +68,10 @@ impl Index {
     pub fn handle(&mut self, op: &str, req: &Request) -> Response {
         match (req.method.as_str(), op) {
             ("POST", "upsert") => {
+                if let Some(ms) = self.rate_limited.pop_front() {
+                    let body = json!({ "error": "rate_limited", "message": "the embeddings model refused (429): rate limited", "retry_after_ms": ms });
+                    return Response::json(429, &body).with_header("retry-after", &ms.div_ceil(1000).to_string());
+                }
                 if req.body.len() > UPSERT_MAX_BYTES {
                     return refused(413, &format!("an upsert is at most {UPSERT_MAX_BYTES} bytes"));
                 }

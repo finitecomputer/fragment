@@ -26,16 +26,23 @@
 //! searched from its next import. A host without search (its routes 404),
 //! or one that cannot be reached, is said and skipped: the import stands.
 //! A search that is full (507: an index's chunks are capped) takes no more,
-//! so nothing more is sent: what was not is counted refused with it.
+//! so nothing more is sent: what was not is counted refused with it. One
+//! whose embeddings are rate limited (429 with `retry_after_ms`: the
+//! deployment's own limit, which every writer shares) is waited out
+//! exactly, every writer holding to one time (`Hold`), said as it begins,
+//! and the write sent again (a refused write wrote nothing).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use fragment_core::blob;
 use fragment_core::session::{self, Entry, Session};
 use fragment_core::{searchable, session_search};
 use fragment_proto::search::SOURCES_PAGE_MAX;
+use fragment_proto::ErrorBody;
 use serde::{Deserialize, Serialize};
 
 use super::{said_id, Spool};
@@ -54,6 +61,10 @@ const REFUSED_SAID: usize = 20;
 /// Passes an import's search makes at most: the first, and one more while
 /// a write was overtaken (409), search and the archive read anew each time.
 pub(super) const PASSES_MAX: usize = 4;
+/// A conversation's write waited out at most this many times in a row for
+/// search's rate limit (each wait 1 s to 10 min, as search says), then
+/// counted refused: the import stands, and the next one writes it.
+pub(super) const RATE_WAITS_MAX: usize = 20;
 
 /// What an import did to its archive's search.
 #[derive(Debug, Serialize)]
@@ -133,6 +144,51 @@ fn archive_now(c: &Client, name: &str, storage: &CodeStorage, blobs: &Blobs) -> 
 /// said, and why).
 type Outcome = std::result::Result<Wrote, (String, String)>;
 
+/// Why a write was refused: search's status (when it answered), why, and
+/// how long it asked to be left (`retry_after_ms`, a 429 of its
+/// embeddings' rate limit), when it said.
+#[derive(Debug)]
+pub(super) struct Refusal {
+    pub status: Option<u16>,
+    pub why: String,
+    pub wait_ms: Option<u64>,
+}
+
+impl Refusal {
+    fn unsent(why: String) -> Refusal {
+        Refusal { status: None, why, wait_ms: None }
+    }
+}
+
+/// The time before which no writer sends: search's embeddings rate limited
+/// (a limit of the deployment's, every writer's), so all hold to one time
+/// rather than each retrying on its own clock.
+#[derive(Default)]
+struct Hold(Mutex<Option<Instant>>);
+
+impl Hold {
+    /// Held at least `ms` from now; said when that holds later than before.
+    fn until(&self, ms: u64) {
+        let at = Instant::now() + Duration::from_millis(ms);
+        let mut held = self.0.lock().expect("the hold");
+        if held.is_none_or(|t| at > t + Duration::from_secs(1)) {
+            eprintln!("Waiting {} s for the search service…", ms.div_ceil(1000));
+        }
+        *held = Some(held.map_or(at, |t| t.max(at)));
+    }
+
+    /// Back once the hold has passed (at once when there is none).
+    fn wait(&self) {
+        loop {
+            let held = *self.0.lock().expect("the hold");
+            match held.and_then(|t| t.checked_duration_since(Instant::now())) {
+                Some(left) if !left.is_zero() => std::thread::sleep(left),
+                _ => return,
+            }
+        }
+    }
+}
+
 /// One pass's writes: each conversation's key and how its write went, or
 /// why it was refused (its id said); whether a refusal was every one's
 /// (`stopped`: not allowed, no route); whether search was full (`full`:
@@ -151,24 +207,37 @@ fn write_pass<'a>(c: &Client, name: &str, spool: &Spool, storage: &CodeStorage, 
     let stop = AtomicBool::new(false);
     // search full (507): each write not yet sent would be refused too
     let full = AtomicBool::new(false);
+    // search's rate limit, waited out by every writer at once
+    let hold = Hold::default();
     let write = |todo: &[(&'a String, &'a Entry)]| {
         let blobs = Blobs::new(c, name);
         let mut out = Vec::new();
-        for &(key, e) in todo {
-            if stop.load(Ordering::Relaxed) || full.load(Ordering::Relaxed) {
-                break;
-            }
+        'each: for &(key, e) in todo {
             let replaces = held.get(&session::session_path(key)).map_or("", String::as_str);
+            let mut waits = 0;
+            let wrote = loop {
+                hold.wait();
+                if stop.load(Ordering::Relaxed) || full.load(Ordering::Relaxed) {
+                    break 'each;
+                }
+                match write_one(c, name, spool, storage, &blobs, head, key, e, replaces) {
+                    Err(Refusal { wait_ms: Some(ms), .. }) if waits < RATE_WAITS_MAX => {
+                        waits += 1;
+                        hold.until(ms);
+                    }
+                    wrote => break wrote,
+                }
+            };
             out.push((
                 key,
-                write_one(c, name, spool, storage, &blobs, head, key, e, replaces).map_err(|(status, why)| {
-                    if matches!(status, Some(401 | 403 | 404)) {
+                wrote.map_err(|r| {
+                    if matches!(r.status, Some(401 | 403 | 404)) {
                         stop.store(true, Ordering::Relaxed);
                     }
-                    if status == Some(507) {
+                    if r.status == Some(507) {
                         full.store(true, Ordering::Relaxed);
                     }
-                    (said_id(key), why)
+                    (said_id(key), r.why)
                 }),
             ));
         }
@@ -265,25 +334,29 @@ pub fn sync(c: &Client, name: &str, spool: &Spool) -> Searched {
 /// they are the archive's at `head`, else read at `head`; its revision their
 /// own sha256, written only over `replaces` (the revision search was read
 /// holding, `""` for none). A refusal says its status (when search
-/// answered) and why.
+/// answered), why, and how long search asked to be left.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn write_one(c: &Client, name: &str, spool: &Spool, storage: &CodeStorage, blobs: &Blobs, head: &str, key: &str, e: &Entry, replaces: &str) -> std::result::Result<Wrote, (Option<u16>, String)> {
+pub(super) fn write_one(c: &Client, name: &str, spool: &Spool, storage: &CodeStorage, blobs: &Blobs, head: &str, key: &str, e: &Entry, replaces: &str) -> std::result::Result<Wrote, Refusal> {
     let path = session::session_path(key);
     let bytes = if spool.entries.get(key).is_some_and(|s| s.sha256 == e.sha256) {
-        std::fs::read(spool.path(key)).map_err(|err| (None, format!("reading it back: {err}")))?
+        std::fs::read(spool.path(key)).map_err(|err| Refusal::unsent(format!("reading it back: {err}")))?
     } else {
-        storage.read_file(&path, head).map_err(anyhow::Error::new).and_then(|b| blobs.resolve(b)).map_err(|err| (None, format!("reading it: {err:#}")))?
+        storage.read_file(&path, head).map_err(anyhow::Error::new).and_then(|b| blobs.resolve(b)).map_err(|err| Refusal::unsent(format!("reading it: {err:#}")))?
     };
-    let s: Session = serde_json::from_slice(&bytes).map_err(|err| (None, format!("it is no conversation: {err}")))?;
+    let s: Session = serde_json::from_slice(&bytes).map_err(|err| Refusal::unsent(format!("it is no conversation: {err}")))?;
     let mut indexed = session_search::upsert_of(&path, &blob::sha256_hex(&bytes), &s);
     indexed.upsert.replaces = Some(replaces.to_string());
     // what the platform would refuse is refused here, unsent
-    searchable::check(&indexed.upsert).map_err(|why| (None, why))?;
+    searchable::check(&indexed.upsert).map_err(Refusal::unsent)?;
     match c.post_json_by_id(&format!("/api/f/{name}/search/upsert"), &indexed.upsert) {
         Ok(r) if r.ok() => Ok(Wrote::Written(indexed.left)),
         // another import's write since this one read search: theirs stands
         Ok(r) if r.status == 409 => Ok(Wrote::Overtaken),
-        Ok(r) => Err((Some(r.status), r.refusal().msg)),
-        Err(err) => Err((None, format!("{err:#}"))),
+        Ok(r) => {
+            // a rate limit's 429 says how long (fragment_proto::ErrorBody)
+            let wait_ms = (r.status == 429).then(|| serde_json::from_slice::<ErrorBody>(&r.body).ok().and_then(|b| b.retry_after_ms)).flatten();
+            Err(Refusal { status: Some(r.status), why: r.refusal().msg, wait_ms })
+        }
+        Err(err) => Err(Refusal::unsent(format!("{err:#}"))),
     }
 }
