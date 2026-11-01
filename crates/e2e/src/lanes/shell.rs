@@ -6270,9 +6270,14 @@ fn knowledge_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Per
     let wrote = shell(api, me.session, "POST", &format!("/api/f/{notes}/files"), Some(&json!({ "files": [{ "path": "wiki/ferry.md", "text": text }] })), &[])?;
     let page_at = json!({ "source": "wiki/ferry.md", "revision": "r1", "title": "Ferry timetable", "sections": [{ "id": "s1", "heading": "Winter", "text": "The ferry timetable changes in November: two crossings a day." }] });
     let upserts = [&notes, &old].iter().map(|n| shell(api, me.session, "POST", &format!("/api/f/{n}/search/upsert"), Some(&page_at), &[]).map(|r| r.status)).collect::<Result<Vec<_>>>()?;
+    // both on the dock (the shell's list has them), then the old one archived
+    // and off it: the shell knows it archived before anything is typed, so
+    // the question never asks it for a list a step behind
+    let docked = |name: &str| format!("!!document.querySelector('#apps [data-key=\"app:{name}\"]')");
+    let listed = b.until(page, &format!("{} && {}", docked(&notes), docked(&old)), wait);
     shell(api, me.session, "PUT", &format!("/api/fragments/{old}/archived"), Some(&json!({ "archived": true })), &[])?;
-    let known = b.until(page, &format!("!!document.querySelector('#apps [data-key=\"app:{notes}\"]')"), wait);
-    anyhow::ensure!(wrote.status == 200 && upserts == vec![200, 200] && known, "the brains' pages were not written: {} {upserts:?}", wrote.text);
+    let known = b.until(page, &format!("{} && !{}", docked(&notes), docked(&old)), wait);
+    anyhow::ensure!(wrote.status == 200 && upserts == vec![200, 200] && listed && known, "the brains' pages were not written, or the shell's list missed them: {} {upserts:?} {listed} {known}", wrote.text);
     b.eval(page, "(window.__knowledge = [], true)")?;
     let open = launch(b, "ferry timetable")?;
     let row = format!(".search-known [data-fragment={}][data-source=\"wiki/ferry.md\"]", js(&notes));
