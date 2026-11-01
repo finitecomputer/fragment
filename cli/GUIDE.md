@@ -1028,6 +1028,13 @@ variable of its name, else stdin, never the command line. A secret set
 before secrets named hosts fills nowhere until it is set again with
 `--to`. Never write secret values into files.
 
+A fragment holding a secret (or a door) stays its owner's and their own
+agents' for now: make it private first (`fragment visibility my-thing
+members`, no one else in it, no invite waiting), and while it holds one
+it gets no share link, no one else, and no invite (403
+`private_while_reaching`; a secret on a shared one is 403
+`unshare_first`).
+
 ## Rules of the road
 
 1. **The event log is truth.** Read `fragment events` before and after

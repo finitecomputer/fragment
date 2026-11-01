@@ -5,6 +5,23 @@ Each entry says what the shortcut is, where and why, its risk, and the
 condition that deletes it. An entry without a delete condition is
 unfinished design, not debt.
 
+## A fragment with reach is shared with no one else
+
+- **Shortcut:** Paul, 2026-11-01 (FIN-352): "as an extra safety right now
+  we should disallow sharing for apps that have reach". A fragment holding
+  a secret or a door is its owner's and their own agents' alone
+  (`cell/src/reach.rs`), both ways: sharing it further is refused
+  (`Reason::PrivateWhileReaching`), and reach on one shared beyond them
+  (`Reason::UnshareFirst`). Fragments shared before the rule keep serving,
+  counted by `fragment operator reach`.
+- **Risk:** a person cannot share an app that holds a key, even with
+  someone they trust; an agent building an app with a key makes it
+  private first.
+- **Delete when:** temporary: lift after the FIN-354 audit. Then drop
+  reach.rs's two refusals and their call sites, the share sheet's lock,
+  the two reasons (kept on the wire as add-only names), the census route
+  and command, and the `legacy-reach` lever.
+
 ## Every call still carries its release's deploy time
 
 - **Shortcut:** an object of a release before #826 read

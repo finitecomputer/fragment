@@ -338,7 +338,13 @@ pub(crate) async fn ask_object(env: &Env, binding: &str, name: &str, path: &str,
     }
     let code = v["error"].as_str().and_then(|c| serde_json::from_value::<ErrorCode>(serde_json::json!(c)).ok()).unwrap_or(ErrorCode::HostFailed);
     let message = v["message"].as_str().map(str::to_string).unwrap_or_else(|| format!("{binding} {name} answered {status}"));
-    Err(CellError::new(code, message))
+    // its reason too, for whoever reads the refusal (FIN-352's, through a
+    // computer's door ticket)
+    let refused = CellError::new(code, message);
+    Err(match v["reason"].as_str().and_then(fragment_proto::Reason::parse) {
+        Some(reason) => refused.because(reason),
+        None => refused,
+    })
 }
 
 /// The internal call `path` on the Durable Object `name` of `binding`, its
