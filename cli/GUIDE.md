@@ -1098,6 +1098,7 @@ fragment schedule list [<name>]          fragment schedule pause|resume|rm [<nam
 fragment operator key <file>
 fragment operator wipe <email|npub> [--dry-run | --yes] [--key-file F]
 fragment operator people [--q Q] [--after A] [--key-file F]
+fragment operator reach [--key-file F]      # FIN-352: fragments with a key or a door, by kind, and how many shared beyond (counts only)
 fragment operator person <npub> [--key-file F]
 fragment operator pin <npub> <image> [--key-file F]
 fragment operator orgs [--after A] [--key-file F]
