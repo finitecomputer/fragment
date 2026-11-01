@@ -17,8 +17,34 @@ use rusqlite::{params, Connection};
 
 use crate::corpus::{Page, Section};
 
-/// The headings above a section a brain sends (templates/brain/app.mjs).
+/// What a brain sends of a page (templates/brain/app.mjs `source`): the
+/// headings above a section, and the bytes of each field.
 const CONTEXT_MAX: usize = 8;
+const TITLE_MAX_BYTES: usize = 512;
+const HEADING_MAX_BYTES: usize = 512;
+const CONTEXT_ITEM_MAX_BYTES: usize = 256;
+const FIELD_MAX_BYTES: usize = 64;
+
+/// At most `max` bytes of `text`, cut at a whole character (app.mjs `clip`).
+fn clip(text: &str, max: usize) -> String {
+    let mut end = text.len().min(max);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text[..end].to_string()
+}
+
+/// Text as the index takes it: no control characters but newlines and
+/// tabs (app.mjs `clean`).
+fn clean(text: &str) -> String {
+    text.replace("\r\n", "\n").replace('\r', "\n").chars().filter(|c| !matches!(*c as u32, 0..=8 | 0x0b..=0x1f | 0x7f)).collect()
+}
+
+/// The wiki a page is in, as the brain names it (app.mjs `wikiOf`): its
+/// top-level folder, or none at the root.
+fn wiki_field(path: &str) -> String {
+    path.split_once('/').map_or(String::new(), |(w, _)| clip(&clean(w), FIELD_MAX_BYTES))
+}
 
 /// The fragment a page is in when the corpus is cut by wiki: its top-level
 /// folder, or `.` for a page at the root.
@@ -26,21 +52,28 @@ pub fn wiki_of(path: &str) -> &str {
     path.split_once('/').map_or(".", |(w, _)| w)
 }
 
-/// A page as the brain writes it to its index: its path the source, its
-/// sections (those with text) with the headings above them as context.
-fn upsert(page: &Page, sections: &[Section]) -> (wire::Upsert, Vec<String>) {
+/// A page as the brain writes it to its index (app.mjs `source`, held to
+/// it by the parity fixtures): its path the source, its title clipped, its
+/// wiki a field, and each section whose text is something once its wiki
+/// links read as their words and it is cleaned, with the headings above it
+/// as context, each clipped.
+pub fn upsert(page: &Page, sections: &[Section]) -> (wire::Upsert, Vec<String>) {
     let title = sections.first().map(|s| s.title.clone()).unwrap_or_else(|| crate::corpus::stem(&page.path));
     let mut out = Vec::new();
     let mut ids = Vec::new();
     for (i, s) in sections.iter().enumerate() {
-        if s.body.trim().is_empty() {
+        let text = clean(&crate::corpus::link_words(&s.body));
+        if text.trim().is_empty() {
             continue;
         }
-        let context = s.ancestry.iter().rev().take(CONTEXT_MAX).rev().cloned().collect();
-        out.push(wire::Section { id: format!("s{i}"), text: s.body.clone(), heading: s.heading.clone(), context, at: None, location: None });
+        let context = s.ancestry.iter().rev().take(CONTEXT_MAX).rev().map(|a| clip(&clean(a), CONTEXT_ITEM_MAX_BYTES)).collect();
+        let heading = s.heading.as_deref().filter(|h| !h.is_empty()).map(|h| clip(&clean(h), HEADING_MAX_BYTES));
+        out.push(wire::Section { id: format!("s{i}"), text, heading, context, at: None, location: None });
         ids.push(s.id.clone());
     }
-    let up = wire::Upsert { source: page.path.clone(), revision: "r".into(), replaces: None, title: Some(title), at: None, fields: Default::default(), sections: out, fence: None };
+    let wiki = wiki_field(&page.path);
+    let fields = if wiki.is_empty() { Default::default() } else { [("wiki".to_string(), wiki)].into_iter().collect() };
+    let up = wire::Upsert { source: page.path.clone(), revision: "r".into(), replaces: None, title: Some(clip(&clean(&title), TITLE_MAX_BYTES)), at: None, fields, sections: out, fence: None };
     (up, ids)
 }
 
