@@ -130,8 +130,9 @@ jobs:
   # parallel (one per CPU). Measured on ubuntu-latest (4 CPUs, 16 GB, a
   # 145 GB disk with about 85 GB free): the Hermes image builds in about
   # 7 minutes (its two Rust stages, the CLI's and the bridge's, about
-  # 5.5 of them), the tests take about 3, and the job uses at most about
-  # 11 GB of the disk (71 GB used of 145 at its peak, 75 GB free).
+  # 5.5 of them), the tests take about 3. Its disk, measured on ubuntu-24.04
+  # (PR #890): from the 31 GB used once the disk is freed, a peak of 44.7
+  # GiB used, about 14 GiB of the lane's own.
   #
   # No layer cache, by measurement (PR #252): with BuildKit's layers in the
   # Actions cache (mode=max), an image whose every input was unchanged built
@@ -146,33 +147,6 @@ jobs:
   # caches ci.yml reads on every run.
   #
   # The tests' container logs are kept on failure.
-  # TEMPORARY (PR #890, dropped before merge): which disk each
-  # ubuntu-24.04 runner has, and whether a copy-on-write root writes into
-  # what the lane frees
-  disk-probe:
-    if: github.event_name == 'pull_request'
-    strategy:
-      fail-fast: false
-      matrix:
-        n: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    steps:
-      - run: |
-          echo "image $ImageVersion"
-          df -h /
-          lsblk -o NAME,SIZE,TYPE,MOUNTPOINT
-          sudo dmsetup table 2>/dev/null || true
-          sudo dmsetup status 2>/dev/null || true
-          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift /opt/hostedtoolcache/CodeQL
-          docker image prune -af > /dev/null
-          df -h /
-          dd if=/dev/zero of="$RUNNER_TEMP/fill" bs=1M count=20480 status=none
-          sync
-          df -h /
-          sudo dmsetup status 2>/dev/null || true
-          echo "wrote 20 GiB into the freed disk"
-
   docker:
     name: docker (real Hermes)
     needs: changes
@@ -193,19 +167,20 @@ jobs:
         working-directory: images
     steps:
       - uses: actions/checkout@v4
-      # ubuntu-24.04's image from 20261018 is a 72 GB root with 12 GB free
-      # once the lane's test binary is built, which its two images (6.4 GB)
-      # and their build cache (2.7 GB) all but fill: run 41249649091's tests
-      # ran out of disk. The lane uses none of the image's Android, .NET,
-      # Haskell, Swift or CodeQL, nor its cached Docker images: they go first.
+      # Some ubuntu-24.04 runners (image 20261018.96.1) have a 72 GB root,
+      # 12 GB free once the lane's test binary is built, which its two
+      # images (6.4 GB) and their build cache (2.7 GB) all but fill: runs
+      # 41249649091 and 41253027860 ran out of disk. Most have 145 GB, 86 GB
+      # free. The lane uses none of the image's Android (12 GB), .NET (5.8),
+      # Haskell (3.7), Swift (3.5) or CodeQL (1.4), nor its cached Docker
+      # images (2.5): they go first, 28 GB in about 90 seconds (PR #890).
+      # Its disk's layout is said, as it differs between runners.
       - name: free the disk
         working-directory: .
         run: |
           df -h /
           lsblk -o NAME,SIZE,TYPE,MOUNTPOINT
           sudo dmsetup status 2>/dev/null || true
-          sudo du -sh /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift /opt/hostedtoolcache/CodeQL 2>/dev/null || true
-          docker system df
           sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift /opt/hostedtoolcache/CodeQL
           docker image prune -af > /dev/null
           df -h /
@@ -230,8 +205,8 @@ jobs:
       - name: build the Hermes image
         working-directory: .
         run: docker build --platform linux/amd64 -f images/hermes/Dockerfile -t fragment-hermes:test .
-      # the tests build only the lab image, from the Hermes image: the
-      # builds' cache goes before them
+      # the tests build only the SimpleX lab's image, from its own
+      # Dockerfile: the two builds' cache goes before them
       - name: disk, built
         run: docker system df; docker builder prune -af > /dev/null; df -h /
       - name: the Docker lane
