@@ -347,6 +347,15 @@ fn mic_card_shots(chrome: &mut Browser, page: &Page, shots: &Path, kind: &str) -
     chrome.color_scheme(page, "light")
 }
 
+/// Whether the drafts a page saw streamed the reply: each the whole text
+/// so far, a beginning of the reply (the last may be all of it: its final
+/// frame can show before the reply replaces it), and at least one only a
+/// part of it, as it was written.
+fn streamed(drafts: &Value, reply: &str) -> bool {
+    let drafts: Vec<&str> = drafts.as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+    drafts.iter().all(|t| reply.starts_with(t)) && drafts.iter().any(|t| t.len() < reply.len())
+}
+
 /// A JSON array's strings.
 fn strings_of(v: &Value) -> Vec<String> {
     v.as_array().into_iter().flatten().filter_map(|x| x.as_str().map(str::to_string)).collect()
@@ -558,9 +567,7 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     let reply = chrome.eval(&page, &format!("[...document.querySelectorAll('.msg.agent .md')].map((m) => m.textContent).find((t) => t.includes({})) ?? ''", js(first)))?;
     let reply = reply.as_str().unwrap_or("").to_string();
     let drafts = chrome.eval(&page, "window.__drafts")?;
-    // each draft the whole text so far: a beginning of the reply
-    let drafted = drafts.as_array().is_some_and(|d| !d.is_empty() && d.iter().all(|t| t.as_str().is_some_and(|t| reply.starts_with(t) && t.len() < reply.len())));
-    s.ok("the agent's draft shows live, as it writes", drafted, json!({ "drafts": drafts, "reply": reply }));
+    s.ok("the agent's draft shows live, as it writes", streamed(&drafts, &reply), json!({ "drafts": drafts, "reply": reply }));
     s.ok("then its reply replaces the draft", answered && reply.starts_with("echo:"), chrome.eval(&page, "document.getElementById('messages').innerText")?);
     s.ok("the agent's reply is under its name", chrome.eval(&page, &format!("[...document.querySelectorAll('.msg.agent .who')].every((w) => w.textContent === {})", js(&capital(&label))))? == true, "");
 
@@ -1622,4 +1629,25 @@ fn capital(s: &str) -> String {
 /// Whether the element `id` is hidden on the page.
 fn document_hidden(chrome: &mut Browser, page: &Page, id: &str) -> Result<bool> {
     Ok(chrome.eval(page, &format!("document.getElementById({}).hidden", js(id)))? == Value::Bool(true))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Goal: drafts that streamed pass, the last whole or not; drafts that
+    /// never streamed fail. Valid: parts then the whole reply (as CI run
+    /// 41269711917 saw), parts alone. Invalid: only the whole reply seen,
+    /// none at all, a draft that is not a beginning of the reply, no list.
+    #[test]
+    fn drafts_streamed_are_parts_of_the_reply() {
+        let reply = "echo: [p@e2e.test] hello there, slowly";
+        let parts = ["echo", "echo: [p", "echo: [p@e2e.test] he"];
+        assert!(streamed(&json!([parts[0], parts[1], parts[2], reply]), reply), "the last draft all of it");
+        assert!(streamed(&json!(parts), reply), "parts alone");
+        assert!(!streamed(&json!([reply]), reply), "only the whole reply: it never streamed");
+        assert!(!streamed(&json!([]), reply), "no draft");
+        assert!(!streamed(&json!(["echo", "something else"]), reply), "a draft that is not a beginning of it");
+        assert!(!streamed(&json!(null), reply), "no list");
+    }
 }
