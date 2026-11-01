@@ -60,14 +60,8 @@ pub const PROCESSES_MAX: usize = 8;
 const SHELL: &str = "cell/shell/shell.js";
 /// A test file's name ends so (`node --test`'s own default).
 const TEST_SUFFIX: &str = ".test.mjs";
-/// The shell's tests, which a walk must find: the Apps page's cards
-/// (apps-page.js), the chat page's control.js's,
-/// chat-list.js's (its sections, and whom the ways to ask for an app ask),
-/// the messages between the shell and its frames, history-page.js's,
-/// the messages between the shell and its frames, history-page.js's,
-/// launcher.js's Knowledge, onboarding.js's, session-archive.js's, an
-/// import's words (session-text.js) and threads.js's.
-const SHELL_TESTS: [&str; 11] = [
+/// The shell's tests, which a walk must find (each named in its file).
+const SHELL_TESTS: &[&str] = &[
     "cell/shell-tests/apps-cards.test.mjs",
     "cell/shell-tests/asked-agent.test.mjs",
     "cell/shell-tests/chat-control.test.mjs",
@@ -301,7 +295,10 @@ mod tests {
         assert_eq!(kind("cell/shell/shell.js"), Some(InputType::Module));
         // the shell's tests, and the brain app's (beside the templates crate: a
         // file under templates/brain would ship with the template)
-        assert_eq!(tests(&found), [&SHELL_TESTS[..], &["crates/templates/tests/brain_app.test.mjs"]].concat());
+        assert_eq!(tests(&found), [SHELL_TESTS, &["crates/templates/tests/brain_app.test.mjs"]].concat());
+        // sorted, each once, so two changes conflict only where they add
+        // beside each other (no count to bump)
+        assert!(SHELL_TESTS.windows(2).all(|w| w[0] < w[1]), "SHELL_TESTS is sorted, each once");
         // the launcher, a module shell.js imports
         assert_eq!(kind("cell/shell/launcher.js"), Some(InputType::Module));
         assert_eq!(kind("templates/todo/app.mjs"), Some(InputType::Module));
