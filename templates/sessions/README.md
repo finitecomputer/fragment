@@ -24,7 +24,7 @@ import reads are cli/src/session/.
   | `origin` | where it came from: `hermes` |
   | `reader` | which read made it: 11 the old Finite's export (10 before it read the files messages held), 20 Hermes' own database (a later, better or fixed read takes a higher number: An import) |
   | `agent` | the agent it was with, as its origin named it (optional) |
-  | `kind` | `chat` (a person's conversation with the agent), `cron` (a scheduled job's run), `subagent` (a side task the agent ran) |
+  | `kind` | `chat` (a person's conversation with the agent), `cron` (a scheduled job's run), `subagent` (a side task the agent ran); a later version may file another (a name of a lower-case letter, then letters, digits, `_` and `-`, at most 32 bytes): an earlier one keeps that conversation and its kind's index as written, and lists the kinds it knows |
   | `title` | its own, else the first line its person said (80 characters), else `Untitled` |
   | `source`, `with`, `model` | where it was said (`telegram`, `cli`), whom with, on which model, as its origin named them (optional) |
   | `started_at`, `ended_at` | when it began, and when it was last said (its last message's time, else its end) |

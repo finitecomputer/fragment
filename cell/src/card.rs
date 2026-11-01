@@ -5,6 +5,9 @@
 //! - **After live moves** (plane.rs `interpret`) the fragment wants a card
 //!   of the new live, in the same turn, and nothing more: the deploy's
 //!   request shoots nothing.
+//! - **After main moves** while live stays (the app's files: a brain's
+//!   pages), its live is wanted again, the first time since its shot only
+//!   (`card::Cards::content_moved`, FIN-368).
 //! - **Its alarm** takes the shot, after the rest of its work: it asks
 //!   whether the live is shot at all (an app or a brain, not members-only,
 //!   an owner who pays), then takes it with the `BROWSER` binding: a
@@ -91,6 +94,18 @@ impl FragmentCell {
         let before = cards.clone();
         cards.want(live, js::now_ms()).map_err(|_| CellError::host(format!("live moved to {live}, which is no commit id")))?;
         if cards != before {
+            self.keep_cards(&cards)?;
+        }
+        Ok(())
+    }
+
+    /// Main moved (plane.rs `interpret`): the card of live as it is is
+    /// wanted again when this is its first change since live's shot
+    /// (`card::Cards::content_moved`). The alarm takes the shot.
+    pub(crate) fn card_content_moved(&self) -> CellResult<()> {
+        let Some(live) = self.meta(MetaKey::PinLive)? else { return Ok(()) };
+        let mut cards = self.cards()?;
+        if cards.content_moved(&live, js::now_ms()).map_err(|_| CellError::host(format!("live is at {live}, which is no commit id")))? {
             self.keep_cards(&cards)?;
         }
         Ok(())

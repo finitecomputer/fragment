@@ -364,6 +364,8 @@ async fn an_asks_turn_that_asks_back_in_words_goes_on() {
     let p = fake.with(|w| work_of(w, &pair, &turn, "turn.prompt")[0].clone());
     fake.say(&pair, &person("paul"), json!({ "kind": "prompt_response", "prompt": p["prompt"], "option": "other" }));
     fake.until(WAIT, "the turn's end", |w| !work_of(w, &pair, &turn, "turn.end").is_empty()).await;
+    // its answer goes after the turn's records in its chat (#721)
+    fake.until(WAIT, "its answer", |w| w.records("juniper--k3x9", "tasks").iter().any(|r| r["body"]["turn"] == turn.as_str())).await;
     fake.with(|w| {
         assert_eq!(work_of(w, &pair, &turn, "turn.end")[0]["outcome"], "idle", "it went on and answered");
         assert!(work_of(w, &pair, &turn, "turn.asked").is_empty(), "waiting for no one");

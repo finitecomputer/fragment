@@ -950,7 +950,7 @@ and peas?',210,1,'hidden');
             "the tail copied into s2 is shown once, where it was first said"
         );
         assert_eq!(c.ended_at.as_deref(), session::iso(400.0).as_deref(), "it ends when it was last said");
-        assert_eq!(by_id(&all, "stale").map(|s| s.kind), Some(Kind::Subagent), "a continuation Hermes passed over is kept, as a side task");
+        assert_eq!(by_id(&all, "stale").map(|s| s.kind.clone()), Some(Kind::Subagent), "a continuation Hermes passed over is kept, as a side task");
     }
 
     /// Goal: what a session is follows Hermes' markers. Valid: a branch and
@@ -977,7 +977,7 @@ and peas?',210,1,'hidden');
             INSERT INTO sessions VALUES ('orphan_tool','tool',NULL,NULL,NULL,NULL,NULL,213,223,NULL,NULL,NULL,NULL);
             "#,
         );
-        let kind_of = |id: &str| by_id(&all, id).map(|s| (s.kind, s.parts.clone()));
+        let kind_of = |id: &str| by_id(&all, id).map(|s| (s.kind.clone(), s.parts.clone()));
         assert_eq!(kind_of("root"), Some((Kind::Chat, vec!["root".into(), "cont".into()])));
         assert_eq!(kind_of("branch").map(|k| k.0), Some(Kind::Chat));
         assert_eq!(kind_of("reset"), Some((Kind::Chat, vec!["reset".into(), "reset2".into()])), "a reset that compressed goes on in its continuation, though it carries the marker");
@@ -1221,7 +1221,7 @@ for table in ("sessions", "messages"):
         Connection::open(&path).unwrap().execute_batch(&format!("PRAGMA foreign_keys = OFF;\n{FIXTURE}")).unwrap();
         let (spool, all) = read_path(&path);
         assert!(spool.refused.is_empty(), "{:?}", spool.refused.iter().map(|r| &r.why).collect::<Vec<_>>());
-        let kinds: Vec<(&str, Kind, usize)> = all.iter().map(|s| (s.id.as_str(), s.kind, s.parts.len())).collect();
+        let kinds: Vec<(&str, Kind, usize)> = all.iter().map(|s| (s.id.as_str(), s.kind.clone(), s.parts.len())).collect();
         assert_eq!(
             kinds,
             [

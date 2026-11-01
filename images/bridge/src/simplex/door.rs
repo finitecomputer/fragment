@@ -18,9 +18,11 @@
 //!   platform takes no relayed record without that signature, so the
 //!   agent's own key, which its tools use, cannot speak as its owner.
 //!
-//! What it does not hold off: a process as the bridge's user (today, root,
-//! which the agent's tools run as too) can read the key's file. The ledger
-//! records this risk in docs/technical-debt-ledger.md.
+//! What it does not hold off: a process as the bridge's user (root) can
+//! read the key's file, and the agent's tools, which run as `hermes`, can
+//! become root through its passwordless sudo. The ledger records this risk
+//! in docs/technical-debt-ledger.md ("SimpleX retains the computer's root
+//! trust and rewindable state").
 
 use std::io::{Read, Write};
 use std::path::Path;

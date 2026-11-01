@@ -369,6 +369,11 @@ pub struct Turn {
     pub asker_name: String,
     pub text: String,
     pub attachments: Vec<AttachmentRef>,
+    /// Where its attachments' blobs are, when not its chat's: an answer's
+    /// are the asked chat's (`Message::attachments_in`). A state from
+    /// before holds none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attachments_in: Option<String>,
     pub routine: bool,
     /// Agent hand-offs that led to it.
     pub hop: u32,
@@ -1027,7 +1032,7 @@ impl Engine {
                 // a question another turn asks meanwhile
                 let cause = Cause { fragment: fragment.to_string(), channel: records::CHAT.to_string(), seq };
                 let id = records::turn_id(agent, fragment, records::CHAT, seq);
-                let m = Message { text: fresh.text, to: vec![a.identity.clone()], attachments: Vec::new(), turn: None, hop: 0, reply_to: None, return_to: None };
+                let m = Message { text: fresh.text, to: vec![a.identity.clone()], attachments: Vec::new(), turn: None, hop: 0, reply_to: None, return_to: None, attachments_in: None };
                 self.admit(&a, fragment, cause, at, &asker, name(&asker), &m, 0, Ask::Message);
                 if let Some(t) = self.state.turns.get_mut(&id).filter(|t| t.phase == Phase::Queued) {
                     t.note = Some(fresh.note);
@@ -1162,9 +1167,11 @@ impl Engine {
             // Stop, their words to a question it asks), and no fewer hops
             // deep than the turn that answered, so a callback resets no
             // depth and spends that chat's budget.
-            Task::Answer { chat, text, by, name, hop, refused } if record.principal == agent.identity => {
+            Task::Answer { chat, text, by, name, hop, refused, files, asked } if record.principal == agent.identity => {
                 let cause = Cause { fragment: agent.fragment.clone(), channel: record.channel.clone(), seq: record.seq };
-                let m = Message { text: text.clone(), ..Message::default() };
+                // what the asked agent sent: blobs of the chat it was asked
+                // in, which this agent, its asker, reads as itself (#721)
+                let m = Message { text: text.clone(), attachments: files, attachments_in: asked, ..Message::default() };
                 // a refused question's answer is a turn that never runs, its
                 // end saying why: no runtime hears it, so nothing asks again
                 let ask = if refused { Ask::Refused(&text) } else { Ask::Message };
@@ -1314,6 +1321,7 @@ impl Engine {
             asker_name,
             text: records::cut_bytes(&m.text, limits::MESSAGE_TEXT_MAX_BYTES),
             attachments: m.attachments.clone(),
+            attachments_in: m.attachments_in.clone(),
             routine,
             hop,
             order: self.state.admitted,
@@ -1528,6 +1536,7 @@ impl Engine {
             asker_name: CONTINUE_ASKER.into(),
             text: CONTINUE_TEXT.into(),
             attachments: Vec::new(),
+            attachments_in: None,
             routine: cut.routine,
             hop: cut.hop,
             // its place: before what was said after the cut turn
@@ -1716,6 +1725,7 @@ impl Engine {
             asker_name: t.asker_name.clone(),
             text: t.text.clone(),
             attachments: t.attachments.clone(),
+            attachments_in: t.attachments_in.clone(),
             late: t.late.clone(),
             files: Vec::new(),
             routine: t.routine,

@@ -83,8 +83,9 @@ pub struct Imported {
     pub refused: Vec<RefusedOne>,
     /// What could not be read at all, each in a sentence.
     pub problems: Vec<String>,
-    /// What the archive holds now, by kind.
-    pub holds: BTreeMap<&'static str, usize>,
+    /// What the archive holds now, by kind (the known kinds always; any
+    /// other a newer CLI filed, by its name).
+    pub holds: BTreeMap<String, usize>,
     /// What it did to the archive's search (search.rs).
     pub search: search::Searched,
 }
@@ -148,8 +149,8 @@ impl Spool {
     }
 
     /// Whether an import keeps conversations of `kind` (`--kind`).
-    pub fn wants(&self, kind: Kind) -> bool {
-        self.kinds.is_empty() || self.kinds.contains(&kind)
+    pub fn wants(&self, kind: &Kind) -> bool {
+        self.kinds.is_empty() || self.kinds.contains(kind)
     }
 
     /// A file a message held, its bytes checked against `a` (its hash and
@@ -183,7 +184,7 @@ impl Spool {
     /// the format refuses is said, and the rest go on), the newer of two
     /// copies of one kept. An import past an archive's limits stops here.
     pub fn add(&mut self, s: Session) -> Result<()> {
-        if !self.wants(s.kind) {
+        if !self.wants(&s.kind) {
             return Ok(());
         }
         let id = s.id.clone();
@@ -240,7 +241,7 @@ fn clear_stale_spools(tmp: &Path) {
 /// `fragment session import`.
 pub fn run(c: &Client, sub: SessionCmd) -> Result<Imported> {
     let SessionCmd::Import { path, kinds } = sub;
-    let kinds: BTreeSet<Kind> = kinds.iter().map(|k| Kind::parse(k).ok_or_else(|| usage(format!("--kind is chat, cron or subagent, not {k:?}")))).collect::<Result<_>>()?;
+    let kinds: BTreeSet<Kind> = kinds.iter().map(|k| Kind::known(k).ok_or_else(|| usage(format!("--kind is chat, cron or subagent, not {k:?}")))).collect::<Result<_>>()?;
     if let Some(mode) = c.agent() {
         if mode.acting_for.is_none() {
             return Err(usage(format!("a session archive is a person's: {} imports into its owner's, acting for them (FRAGMENT_FOR)", mode.agent)));
@@ -263,9 +264,9 @@ pub fn run(c: &Client, sub: SessionCmd) -> Result<Imported> {
     };
     let (archive, made) = archive(c)?;
     let written = write(c, &archive, &spool)?;
-    let mut holds: BTreeMap<&'static str, usize> = Kind::ALL.iter().map(|k| (k.as_str(), 0)).collect();
+    let mut holds: BTreeMap<String, usize> = Kind::KNOWN.iter().map(|k| (k.as_str().to_string(), 0)).collect();
     for e in written.entries.values() {
-        *holds.entry(e.kind.as_str()).or_default() += 1;
+        *holds.entry(e.kind.as_str().to_string()).or_default() += 1;
     }
     let search = search::sync(c, &archive, &spool);
     let refused = std::mem::take(&mut spool.refused);
@@ -349,8 +350,10 @@ fn held(storage: &CodeStorage, blobs: &Blobs) -> Result<Held> {
     // describe, and one changed in a commit after it may be any copy (its
     // size the same or not), so it is read. A file's last commit, with its
     // path, names its bytes (code.storage lists it).
-    let index_paths: BTreeSet<String> = Kind::ALL.iter().map(|k| session::index_path(*k)).collect();
-    let index_commits: BTreeSet<&str> = listed.entries.iter().filter(|e| index_paths.contains(e.path.as_str())).map(|e| e.last_commit_sha.as_str()).collect();
+    // every kind's index main holds, a kind this CLI does not know too (a
+    // newer one's: FIN-296), so its conversations stay listed as they were
+    let indexes: Vec<(&str, Kind)> = listed.entries.iter().filter_map(|e| Some((e.path.as_str(), session::kind_of_index_path(e.path.as_str())?))).collect();
+    let index_commits: BTreeSet<&str> = listed.entries.iter().filter(|e| session::kind_of_index_path(e.path.as_str()).is_some()).map(|e| e.last_commit_sha.as_str()).collect();
     let since: Option<BTreeSet<String>> = if index_commits.is_empty() {
         Some(BTreeSet::new())
     } else {
@@ -367,12 +370,8 @@ fn held(storage: &CodeStorage, blobs: &Blobs) -> Result<Held> {
         .collect();
     let media = paths.iter().filter(|p| p.starts_with("media/")).map(|p| p.to_string()).collect();
     let mut indexed = BTreeMap::new();
-    for kind in Kind::ALL {
-        let path = session::index_path(kind);
-        if !paths.contains(path.as_str()) {
-            continue;
-        }
-        let bytes = blobs.resolve(storage.read_file(&path, &rev)?)?;
+    for (path, kind) in indexes {
+        let bytes = blobs.resolve(storage.read_file(path, &rev)?)?;
         // an index that is not one (an agent edited it): made again from
         // the conversations, as an index that is missing is
         let Ok(index) = serde_json::from_slice::<Index>(&bytes) else {
@@ -514,8 +513,8 @@ impl Indexes<'_> {
             }
             let mut changes = Vec::new();
             for kind in &kinds {
-                let bytes = blobs.store(Index::of(*kind, &entries).file())?;
-                changes.push(Change::Upsert { path: RepoPath::parse(&session::index_path(*kind)).map_err(|e| anyhow!("{e}"))?, bytes });
+                let bytes = blobs.store(Index::of(kind.clone(), &entries).file())?;
+                changes.push(Change::Upsert { path: RepoPath::parse(&session::index_path(kind)).map_err(|e| anyhow!("{e}"))?, bytes });
             }
             match self.storage.commit(head.as_deref(), "session import: the indexes", self.author, &changes) {
                 Ok(_) => return Ok((entries, true)),
@@ -562,8 +561,11 @@ pub fn print(r: &Imported) {
     }
     let holds: usize = r.holds.values().sum();
     let noun = |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
+    // kinds a newer CLI filed, kept as they are: named, not counted as these
+    let others: Vec<String> = r.holds.iter().filter(|(k, n)| Kind::known(k).is_none() && **n > 0).map(|(k, n)| format!("{n} {k}")).collect();
+    let others = if others.is_empty() { String::new() } else { format!(", and {} (kept as a newer CLI filed them)", others.join(", ")) };
     println!(
-        "It holds {}: {}, {}, {}.",
+        "It holds {}: {}, {}, {}{others}.",
         noun(holds, "conversation", "conversations"),
         noun(r.holds["chat"], "chat", "chats"),
         noun(r.holds["cron"], "scheduled run", "scheduled runs"),
@@ -629,7 +631,7 @@ mod tests {
     }
 
     fn index(mock: &crate::mockcs::MockServer, kind: Kind) -> Vec<(String, String)> {
-        let bytes = mock.file_at(NAME, "main", &session::index_path(kind)).unwrap_or_default();
+        let bytes = mock.file_at(NAME, "main", &session::index_path(&kind)).unwrap_or_default();
         serde_json::from_slice::<Index>(&bytes).map(|i| i.sessions.into_iter().map(|e| (e.key, e.sha256)).collect()).unwrap_or_default()
     }
 
@@ -659,7 +661,7 @@ mod tests {
         }
         assert_eq!(keys(&mock, Kind::Chat), ["hermes-b", "hermes-a"], "newest first");
         assert_eq!(keys(&mock, Kind::Cron), ["hermes-r"]);
-        assert!(mock.file_at(NAME, "main", &session::index_path(Kind::Subagent)).is_none(), "no index for a kind it holds none of");
+        assert!(mock.file_at(NAME, "main", &session::index_path(&Kind::Subagent)).is_none(), "no index for a kind it holds none of");
         assert!(mock.refresh_count() >= 1, "the cell is told main moved");
 
         let packs = mock.requests(NAME, "POST commit-pack");
@@ -1020,6 +1022,56 @@ mod tests {
         let sent = mock.take_requests("").get("POST upsert").copied().unwrap_or(0);
         assert!(matches!(&s, search::Searched::Written { written: 1, refused_count: 39, refused, .. } if refused[0].why.contains("at most 1")), "{s:?}");
         assert!(sent < 40, "writes stop once search is full: {sent} of 40 sent");
+    }
+
+    /// Goal (FIN-296): an older CLI importing into an archive a newer one
+    /// wrote keeps the newer kind's conversation and its index as written,
+    /// trusting that index as it does its own (its file not read again,
+    /// and not again on a replay); a newer kind's file its index lacks is
+    /// listed in that kind's own index; a file whose kind is no kind's name
+    /// is left out, said, the import standing. Method: the archive seeded
+    /// as a newer CLI leaves it (a `heartbeat` conversation, its index's
+    /// entry titled apart from its file's so a read of the file shows),
+    /// then imports of chats.
+    #[test]
+    fn an_older_cli_keeps_a_newer_kinds_conversations() {
+        let (mock, c) = archive();
+        let hb = Kind::Other("heartbeat".into());
+        let beat = Session { kind: hb.clone(), ..session("beat", Kind::Chat, "2026-10-01T09:00:00Z", &["ping"]) };
+        let (mut listed, bytes) = beat.normalized().filed().unwrap();
+        listed.title = "as the newer CLI's index lists it".into();
+        let hb_index = session::index_path(&hb);
+        let seeded = Index::of(hb.clone(), &BTreeMap::from([(listed.key.clone(), listed.clone())])).file();
+        mock.external_commit(NAME, "main", &[(session::session_path(&listed.key).as_str(), Some(&bytes)), (hb_index.as_str(), Some(&seeded))], "a newer CLI's import");
+        // the index's commit came last: it describes the file
+        let spool = spooled(vec![session("a", Kind::Chat, "2026-10-02T09:00:00Z", &["hello"])]);
+        let w = write(&c, NAME, &spool).unwrap();
+        assert_eq!(w.added, 1);
+        assert_eq!(w.entries.get(&listed.key), Some(&listed), "kept as its index lists it: its file not read again");
+        assert_eq!(mock.file_at(NAME, "main", &hb_index), Some(seeded.clone()), "its index left as the newer CLI wrote it");
+        assert_eq!(keys(&mock, Kind::Chat), ["hermes-a"]);
+        let replay = write(&c, NAME, &spool).unwrap();
+        assert_eq!((replay.added, replay.updated, replay.unchanged), (0, 0, 1), "the same again writes nothing");
+        assert_eq!(replay.entries.get(&listed.key), Some(&listed));
+
+        // a newer kind's file its index lacks (a newer import cut off before
+        // its indexes): read, and listed in its own kind's index
+        let fresh = Session { kind: hb.clone(), ..session("beat2", Kind::Chat, "2026-10-03T09:00:00Z", &["pong"]) };
+        let (fresh_entry, fresh_bytes) = fresh.normalized().filed().unwrap();
+        mock.external_commit(NAME, "main", &[(session::session_path(&fresh_entry.key).as_str(), Some(&fresh_bytes))], "a newer import cut off before its indexes");
+        let w = write(&c, NAME, &spooled(vec![])).unwrap();
+        assert_eq!(w.entries.get(&fresh_entry.key), Some(&fresh_entry));
+        let listed_now: Index = serde_json::from_slice(&mock.file_at(NAME, "main", &hb_index).unwrap()).unwrap();
+        assert_eq!(listed_now.sessions.iter().map(|e| e.key.as_str()).collect::<Vec<_>>(), [fresh_entry.key.as_str(), listed.key.as_str()], "both, newest first, in their kind's index");
+
+        // a file whose kind is no kind's name: left out, the import standing
+        let mut bad: serde_json::Value = serde_json::from_slice(&file_of(session("odd", Kind::Chat, "2026-10-04T09:00:00Z", &["?"]))).unwrap();
+        bad["kind"] = serde_json::json!("Heart Beat");
+        let bad = bad.to_string();
+        mock.external_commit(NAME, "main", &[(session::session_path("hermes-odd").as_str(), Some(bad.as_bytes()))], "a file no CLI wrote");
+        let w = write(&c, NAME, &spooled(vec![])).unwrap();
+        assert!(!w.entries.contains_key("hermes-odd"), "no kind's name: not listed");
+        assert!(mock.file_at(NAME, "main", "index/Heart Beat.json").is_none());
     }
 
     /// Goal: an import that pauses between its writes and its search, while

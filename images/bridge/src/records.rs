@@ -63,6 +63,10 @@ pub struct Message {
     /// An ask's: the chat its asker's answer runs in (docs/chat-records.md,
     /// "An ask"). Honored only from another agent of this computer.
     pub return_to: Option<String>,
+    /// Where its attachments' blobs are: none, the chat it was said in; an
+    /// answer's, the chat its question was asked in. Never read from a
+    /// message: only an agent's own answer names another chat.
+    pub attachments_in: Option<String>,
 }
 
 /// A command for an agent's runtime (`{kind: "command"}`), from a person:
@@ -118,8 +122,11 @@ pub enum Task {
     /// The answer to a question the agent asked another (`answer`): a turn
     /// in `chat`, told `text` by that agent (`by`, its `name`), `hop`
     /// hand-offs deep; `refused`: the question was never taken, and the
-    /// turn never runs.
-    Answer { chat: String, text: String, by: String, name: String, hop: u32, refused: bool },
+    /// turn never runs. `files`: what the asked agent sent with its answer,
+    /// blobs of the chat it was asked in (`asked`), which the asker reads
+    /// as itself; none from an answer that names no chat, or any it cannot
+    /// read whole.
+    Answer { chat: String, text: String, by: String, name: String, hop: u32, refused: bool, files: Vec<AttachmentRef>, asked: Option<String> },
     Other,
 }
 
@@ -274,7 +281,7 @@ fn message(o: &Map<String, Value>) -> Said {
         Some(Value::String(c)) if fragment_name_ok(c) => Some(c.clone()),
         Some(_) => return Said::Other,
     };
-    Said::Message(Message { text, to, attachments, turn, hop, reply_to, return_to })
+    Said::Message(Message { text, to, attachments, turn, hop, reply_to, return_to, attachments_in: None })
 }
 
 /// Whether `s` is a fragment's name in full, in shape: lowercase letters,
@@ -388,8 +395,18 @@ pub fn task(body: &Value) -> Task {
                 Some(_) => None,
             };
             let by = text_field(o, "by").filter(|b| is_identity(b) && b.len() <= 128);
+            // its files, all of them read or none: an answer is kept whatever
+            // they say, as its question's only delivery
+            let asked = o.get("asked").and_then(|a| a.get("fragment")).and_then(Value::as_str).filter(|f| fragment_name_ok(f)).map(str::to_string);
+            let files = match (o.get("files"), &asked) {
+                (Some(Value::Array(items)), Some(_)) if items.len() <= limits::ATTACHMENTS_MAX => {
+                    let parsed: Vec<AttachmentRef> = items.iter().filter_map(attachment).collect();
+                    if parsed.len() == items.len() { parsed } else { Vec::new() }
+                }
+                _ => Vec::new(),
+            };
             match (text_field(o, "chat"), text_field(o, "text"), by, text_field(o, "name"), hop, refused) {
-                (Some(chat), Some(text), Some(by), Some(name), Some(hop), Some(refused)) if fragment_name_ok(&chat) && !name.trim().is_empty() && name.len() <= limits::ANSWER_NAME_MAX_BYTES => Task::Answer { chat, text, by, name, hop, refused },
+                (Some(chat), Some(text), Some(by), Some(name), Some(hop), Some(refused)) if fragment_name_ok(&chat) && !name.trim().is_empty() && name.len() <= limits::ANSWER_NAME_MAX_BYTES => Task::Answer { chat, text, by, name, hop, refused, files, asked },
                 _ => Task::Other,
             }
         }
@@ -1055,10 +1072,31 @@ mod tests {
         assert_eq!(task(&json!({ "kind": "routine", "text": "water", "chat": "c--k3x9" })), Task::Routine { text: "water".into(), chat: "c--k3x9".into() });
         assert_eq!(task(&json!({ "kind": "joined", "fragment": "c--k3x9" })), Task::Joined { fragment: Some("c--k3x9".into()) });
         let answer = json!({ "kind": "answer", "chat": "home--k3x9", "text": "t", "by": "npub1rowan", "name": "Rowan", "hop": 2 });
-        assert_eq!(task(&answer), Task::Answer { chat: "home--k3x9".into(), text: "t".into(), by: "npub1rowan".into(), name: "Rowan".into(), hop: 2, refused: false });
+        assert_eq!(task(&answer), Task::Answer { chat: "home--k3x9".into(), text: "t".into(), by: "npub1rowan".into(), name: "Rowan".into(), hop: 2, refused: false, files: vec![], asked: None });
         let mut refused = answer.clone();
         refused["refused"] = json!(true);
         assert!(matches!(task(&refused), Task::Answer { refused: true, .. }));
+
+        // #721: the files the asked agent sent, blobs of the chat it was
+        // asked in; any one unread, or more than a message carries, and
+        // none are (the answer is kept: its question's only delivery)
+        let file = |name: &str| json!({ "sha256": "a".repeat(64), "size": 3, "type": "text/plain", "name": name });
+        let mut with = answer.clone();
+        with["asked"] = json!({ "fragment": "talk--k3x9", "seq": 4 });
+        with["files"] = json!([file("drawing.txt")]);
+        let read = AttachmentRef { sha256: "a".repeat(64), size: 3, media_type: "text/plain".into(), name: "drawing.txt".into() };
+        assert!(matches!(task(&with), Task::Answer { ref files, ref asked, .. } if *files == vec![read.clone()] && asked.as_deref() == Some("talk--k3x9")), "{:?}", task(&with));
+        let mut bad = with.clone();
+        bad["files"] = json!([file("drawing.txt"), { "sha256": "zz", "size": 1, "type": "a", "name": "b" }]);
+        let mut many = with.clone();
+        many["files"] = json!((0..=limits::ATTACHMENTS_MAX).map(|i| file(&format!("f{i}"))).collect::<Vec<_>>());
+        let mut nowhere = with.clone();
+        nowhere["asked"] = json!({ "fragment": "Not A Chat" });
+        let mut unasked = with.clone();
+        unasked.as_object_mut().unwrap().remove("asked");
+        for (why, b) in [("an unread file", bad), ("past the bound", many), ("no chat to read them from", nowhere), ("no asked chat", unasked)] {
+            assert!(matches!(task(&b), Task::Answer { ref files, .. } if files.is_empty()), "{why}: {:?}", task(&b));
+        }
         // a name at its bound, written as the writer cuts one (51 emoji, 67
         // CJK characters: a title of 120 characters is more), is read
         for long in ["🌱".repeat(120), "森".repeat(120)] {

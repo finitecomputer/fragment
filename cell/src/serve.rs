@@ -359,6 +359,54 @@ impl FragmentCell {
         with_cookies(resp, &set)
     }
 
+    /// `__file?path=<p>&v=<commit>` (FIN-340): the file at `main` or `live`
+    /// whose last change is that commit, kept for good (`pinned_cache`, its
+    /// `ETag` the commit, 304 to a browser that has it); a file whose
+    /// version is another, a 302 to that one's URL (`no-store`): a URL
+    /// answers its bytes or sends the browser on, never other bytes. None
+    /// when neither pin has the file (its blessed template's data, or
+    /// nothing, as without a version).
+    async fn versioned_file(&self, req: &Request, facts: &Facts, p: &str, v: &str, public: bool, head: bool) -> CellResult<Option<Response>> {
+        // the one an unversioned `__file` reads first
+        let first = if self.main_first()? { ["main", "live"] } else { ["live", "main"] };
+        let mut current = None;
+        for which in first {
+            match self.tree_row(which, p)? {
+                Some(row) if row.last_commit == v => {
+                    let cache = site::pinned_cache(public);
+                    let etag = site::file_etag(v);
+                    if let Some(resp) = not_modified(req, &etag, cache)? {
+                        return Ok(Some(resp));
+                    }
+                    let mut resp = if head {
+                        let size = match crate::blobs::maybe_pointer(row.size) {
+                            true => self.pointer(which, p)?.map_or(row.size, |(_, size)| size),
+                            false => row.size,
+                        };
+                        let h = Headers::new();
+                        h.set("content-type", site::mime_for_path(p))?;
+                        h.set("content-length", &size.to_string())?;
+                        Response::empty()?.with_headers(h)
+                    } else {
+                        self.stream_file(facts, which, &row, req.headers().get("range")?.as_deref()).await?
+                    };
+                    resp.headers_mut().set("cache-control", cache)?;
+                    resp.headers_mut().set("etag", &etag)?;
+                    return Ok(Some(resp));
+                }
+                Some(row) => current = current.or(Some(row.last_commit)),
+                None => {}
+            }
+        }
+        let Some(now) = current else { return Ok(None) };
+        let mut to = url::form_urlencoded::Serializer::new(String::new());
+        to.append_pair("path", p).append_pair("v", &now);
+        let h = Headers::new();
+        h.set("location", &format!("__file?{}", to.finish()))?;
+        h.set("cache-control", "no-store")?;
+        Ok(Some(Response::empty()?.with_status(302).with_headers(h)))
+    }
+
     /// The author's `fetch` for a path that is not a site file: it sees the
     /// fragment's public URL and who is asking (`x-fragment-principal`,
     /// `x-fragment-role`), so they are resolved first.
@@ -460,29 +508,48 @@ impl FragmentCell {
                     return Ok(Response::ok(files_page(name))?.with_headers(headers("text/html; charset=utf-8", "no-store")?));
                 }
                 // a path on both is the one `__file` reads (live's; an agent's
-                // or a session archive's, main's)
+                // or a session archive's, main's), with its version (`commit`:
+                // `__file?path=&v=`, FIN-340)
                 let mut sizes = std::collections::BTreeMap::new();
                 let last_wins = if self.main_first()? { ["live", "main"] } else { ["main", "live"] };
                 for which in last_wins {
                     let blobs = self.pointer_sizes(which)?;
                     for r in self.tree_rows(which)?.into_iter().filter(|r| !site::is_machinery(&r.path)) {
                         let size = blobs.get(&r.path).copied().unwrap_or(r.size);
-                        sizes.insert(r.path, size);
+                        sizes.insert(r.path, (size, Some(r.last_commit)));
                     }
                 }
-                // beneath them, its blessed template's data (decision 40)
-                let release: Vec<(String, u64)> = {
+                // beneath them, its blessed template's data (decision 40), no version of its own
+                let release: Vec<(String, (u64, Option<String>))> = {
                     let own: std::collections::BTreeSet<&str> = sizes.keys().map(String::as_str).gathered();
-                    self.release_data(&own)?.into_iter().map(|d| (d.path.to_string(), d.size)).collect()
+                    self.release_data(&own)?.into_iter().map(|d| (d.path.to_string(), (d.size, None))).collect()
                 };
                 sizes.extend(release);
-                let files: Vec<Value> = sizes.into_iter().map(|(path, size)| json!({ "path": path, "size": size })).collect();
+                let files: Vec<Value> = sizes
+                    .into_iter()
+                    .map(|(path, (size, commit))| match commit {
+                        Some(commit) => json!({ "path": path, "size": size, "commit": commit }),
+                        None => json!({ "path": path, "size": size }),
+                    })
+                    .collect();
                 return json_response(&json!({ "type": "files", "count": files.len(), "files": files }));
             }
             "__file" => {
                 let p = url.query_pairs().find(|(k, _)| k == "path").map(|(_, v)| v.into_owned()).unwrap_or_default();
                 if !valid_repo_path(&p) || site::is_machinery(&p) {
                     return Err(CellError::invalid("path must be a content path (not the fragment's own machinery)"));
+                }
+                // a version (FIN-340): the commit that last changed the file
+                // names its bytes, so its URL is kept for good; an older one
+                // goes on to the current (never other bytes at one URL)
+                let v = url.query_pairs().find(|(k, _)| k == "v").map(|(_, v)| v.into_owned());
+                if let Some(v) = &v {
+                    if !site::valid_version(v) {
+                        return Err(CellError::invalid("v is a file's version: the commit that last changed it (files.stat's `commit`), 40 or 64 lowercase hex characters"));
+                    }
+                    if let Some(resp) = self.versioned_file(req, facts, &p, v, public, head).await? {
+                        return Ok(resp);
+                    }
                 }
                 // Data an app writes lands on main; a path not yet on live
                 // reads from there. An agent's files (its job, its settings,

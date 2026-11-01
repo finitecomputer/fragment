@@ -70,9 +70,18 @@ pub const FIELD_MAX_CHARS: usize = 200;
 /// Where an untitled conversation's title comes from: its first words.
 const TITLE_FROM_TEXT_CHARS: usize = 80;
 
-/// What a conversation was, as its origin ran it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+/// A kind's name, in bytes, at most: it names its index's file
+/// (`index_path`).
+pub const KIND_MAX_BYTES: usize = 32;
+
+/// What a conversation was, as its origin ran it: one of the kinds this
+/// reader files, or one a later reader files that this one does not know
+/// (`Other`, FIN-296). A kind is read as any kind's name (`Kind::parse`)
+/// and kept as it was named, so an older CLI importing into an archive a
+/// newer one wrote keeps that conversation and its index as the newer
+/// wrote them (add-only, as the wire is); readers list the kinds they
+/// know. On the wire and in files it is its name, a string.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Kind {
     /// A conversation a person had with the agent.
     Chat,
@@ -80,21 +89,59 @@ pub enum Kind {
     Cron,
     /// A side task the agent ran on its own (a delegate, a tool's run).
     Subagent,
+    /// A kind this reader does not know, by its name: never one of the
+    /// known kinds' (`parse` makes those the known kind).
+    Other(String),
 }
 
 impl Kind {
-    pub const ALL: [Kind; 3] = [Kind::Chat, Kind::Cron, Kind::Subagent];
+    /// The kinds this reader files.
+    pub const KNOWN: [Kind; 3] = [Kind::Chat, Kind::Cron, Kind::Subagent];
 
-    pub fn as_str(self) -> &'static str {
+    pub fn as_str(&self) -> &str {
         match self {
             Kind::Chat => "chat",
             Kind::Cron => "cron",
             Kind::Subagent => "subagent",
+            Kind::Other(name) => name,
         }
     }
 
+    /// One of the kinds this reader files (what its readers make and
+    /// `--kind` names).
+    pub fn known(s: &str) -> Option<Kind> {
+        Kind::KNOWN.into_iter().find(|k| k.as_str() == s)
+    }
+
+    /// A kind as an archive names it: a known one, else any name a kind
+    /// may have (a lower-case letter, then letters, digits, `_` and `-`,
+    /// at most `KIND_MAX_BYTES`), which names a file (`index_path`).
     pub fn parse(s: &str) -> Option<Kind> {
-        Kind::ALL.into_iter().find(|k| k.as_str() == s)
+        if let Some(k) = Kind::known(s) {
+            return Some(k);
+        }
+        let mut chars = s.chars();
+        let named = s.len() <= KIND_MAX_BYTES
+            && chars.next().is_some_and(|c| c.is_ascii_lowercase())
+            && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-');
+        named.then(|| Kind::Other(s.to_string()))
+    }
+
+    pub fn is_known(&self) -> bool {
+        !matches!(self, Kind::Other(_))
+    }
+}
+
+impl Serialize for Kind {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for Kind {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Kind, D::Error> {
+        let name = String::deserialize(d)?;
+        Kind::parse(&name).ok_or_else(|| serde::de::Error::custom(format!("{name:?} is no kind's name (a lower-case letter, then letters, digits, _ and -, at most {KIND_MAX_BYTES} bytes)")))
     }
 }
 
@@ -291,8 +338,13 @@ pub fn key_of_path(path: &str) -> Option<&str> {
 }
 
 /// Where a kind's index is.
-pub fn index_path(kind: Kind) -> String {
+pub fn index_path(kind: &Kind) -> String {
     format!("index/{}.json", kind.as_str())
+}
+
+/// The kind whose index a path is (`index/<kind>.json`), when it is one.
+pub fn kind_of_index_path(path: &str) -> Option<Kind> {
+    Kind::parse(path.strip_prefix("index/")?.strip_suffix(".json")?)
 }
 
 impl Session {
@@ -349,7 +401,7 @@ impl Session {
             id: self.id.clone(),
             origin: self.origin.clone(),
             reader: self.reader,
-            kind: self.kind,
+            kind: self.kind.clone(),
             title: self.title.clone(),
             agent: self.agent.clone(),
             source: self.source.clone(),
@@ -517,14 +569,14 @@ pub fn merge<P>(indexed: &BTreeMap<String, Entry>, stored: &std::collections::BT
         if stored.contains(key) {
             m.entries.insert(key.clone(), entry.clone());
         } else {
-            changed.insert(entry.kind);
+            changed.insert(entry.kind.clone());
         }
     }
     for entry in found {
         if stored.contains(&entry.key) && m.entries.get(&entry.key) != Some(&entry) {
-            changed.insert(entry.kind);
+            changed.insert(entry.kind.clone());
             if let Some(stale) = m.entries.insert(entry.key.clone(), entry) {
-                changed.insert(stale.kind);
+                changed.insert(stale.kind.clone());
             }
         }
     }
@@ -538,9 +590,9 @@ pub fn merge<P>(indexed: &BTreeMap<String, Entry>, stored: &std::collections::BT
                     m.added += 1;
                 }
                 if let Some(h) = held {
-                    changed.insert(h.kind);
+                    changed.insert(h.kind.clone());
                 }
-                changed.insert(entry.kind);
+                changed.insert(entry.kind.clone());
                 m.writes.insert(entry.key.clone(), file);
                 m.entries.insert(entry.key.clone(), entry);
             }
@@ -805,7 +857,7 @@ mod tests {
         assert_eq!(key_of_path(&session_path(&k)), Some(k.as_str()));
         assert!(fragment_proto::valid_repo_path(&session_path(&hashed)));
         assert_eq!(key_of_path("sessions/a/b.json"), None);
-        assert_eq!(index_path(Kind::Cron), "index/cron.json");
+        assert_eq!(index_path(&Kind::Cron), "index/cron.json");
     }
 
     /// Goal: a file a message held is kept by its hash, at a path its kind
@@ -899,6 +951,63 @@ mod tests {
         let m = merge::<Vec<u8>>(&indexed, &stored, vec![orphan, newer_a.clone()], vec![]).unwrap();
         assert_eq!(m.entries.get(&a.key), Some(&newer_a));
         assert_eq!(m.indexes, vec![Kind::Chat, Kind::Cron]);
+    }
+
+    /// Goal (FIN-296): a kind is any kind's name, kept as it was named, so
+    /// an older reader reads a newer reader's kind; a name no kind may have
+    /// (it names a file) is refused. Method: the known kinds, a newer one,
+    /// and names no kind has, through serde and the index paths.
+    #[test]
+    fn a_kind_is_any_kinds_name_kept_as_named() {
+        for k in Kind::KNOWN {
+            let json = serde_json::to_string(&k).unwrap();
+            assert_eq!(json, format!("\"{}\"", k.as_str()));
+            assert_eq!(serde_json::from_str::<Kind>(&json).unwrap(), k);
+            assert!(k.is_known() && Kind::known(k.as_str()) == Some(k.clone()));
+        }
+        let newer: Kind = serde_json::from_str("\"heartbeat\"").unwrap();
+        assert_eq!(newer, Kind::Other("heartbeat".into()));
+        assert!(!newer.is_known() && Kind::known("heartbeat").is_none(), "a reader makes the kinds it knows alone");
+        assert_eq!(serde_json::to_string(&newer).unwrap(), "\"heartbeat\"", "written back as it was named");
+        assert_eq!(index_path(&newer), "index/heartbeat.json");
+        assert_eq!(kind_of_index_path("index/heartbeat.json"), Some(newer));
+        assert_eq!(Kind::parse("chat"), Some(Kind::Chat), "a known name is the known kind, never another");
+        let long = "a".repeat(KIND_MAX_BYTES + 1);
+        for bad in ["", "Heartbeat", "heart beat", "../x", "x/y", "1st", "-x", "é", long.as_str()] {
+            assert_eq!(Kind::parse(bad), None, "{bad:?}");
+            assert!(serde_json::from_str::<Kind>(&serde_json::to_string(bad).unwrap()).is_err(), "{bad:?}");
+        }
+        assert!(Kind::parse(&"a".repeat(KIND_MAX_BYTES)).is_some());
+        for path in ["index/a/b.json", "index/.json", "sessions/hermes-a.json", "index/Chat.json"] {
+            assert_eq!(kind_of_index_path(path), None, "{path}");
+        }
+    }
+
+    /// Goal (FIN-296): an archive holding a conversation of a kind this
+    /// reader does not know takes an import as before, keeping that
+    /// conversation and leaving its index as it is; one its index lacks (a
+    /// newer import stopped before its indexes) is listed in its own
+    /// kind's index, as the newer reader lists it; the same import again
+    /// writes nothing. Method: merge, over a `heartbeat` conversation.
+    #[test]
+    fn an_archive_with_a_newer_kind_takes_an_import_and_keeps_it() {
+        let hb = Kind::Other("heartbeat".into());
+        let (beat, _) = filed(Session { kind: hb.clone(), ..chat("beat", vec![said("user", "2026-10-01T09:00:00Z", "ping")]) });
+        let (indexed, stored) = held(&[&beat]);
+        let import = || vec![filed(chat("a", vec![said("user", "2026-10-02T09:00:00Z", "hello")]))];
+        let m = merge(&indexed, &stored, vec![], import()).unwrap();
+        assert_eq!((m.added, m.indexes.clone()), (1, vec![Kind::Chat]), "its index left as it is");
+        assert_eq!(m.entries.get(&beat.key), Some(&beat), "kept as the newer reader filed it");
+        assert_eq!(Index::of(hb.clone(), &m.entries).sessions, vec![beat.clone()]);
+
+        let (again_indexed, again_stored) = held(&m.entries.values().collect::<Vec<_>>());
+        let replay = merge(&again_indexed, &again_stored, vec![], import()).unwrap();
+        assert_eq!((replay.writes.len(), replay.unchanged, replay.indexes.len()), (0, 1, 0), "the same again writes nothing");
+
+        let stored: BTreeSet<String> = [beat.key.clone()].into();
+        let repaired = merge::<Vec<u8>>(&BTreeMap::new(), &stored, vec![beat.clone()], vec![]).unwrap();
+        assert_eq!(repaired.indexes, vec![hb], "listed in its own kind's index");
+        assert_eq!(repaired.entries.get(&beat.key), Some(&beat));
     }
 
     /// Goal: an archive past its limits (its conversations, or their

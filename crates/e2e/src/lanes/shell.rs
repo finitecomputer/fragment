@@ -7610,6 +7610,14 @@ fn threads_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &
     let said: Vec<Value> = shell(api, session, "GET", &format!("/api/f/{chat}/channels/chat?before={}&limit=6", i64::MAX), None, &[])?.body["records"].as_array().cloned().unwrap_or_default().into_iter().map(|r| r["body"]["text"].clone()).collect();
     s.ok("asked plainly, the answer comes back as its asker's own turn, and no line stays once it is in", replied && then_gone, json!({ "said": said }));
 
+    // asked for a drawing: the file the Reader sent comes back with its
+    // answer, on its asker's computer, as its asker read it (#721)
+    say("thread-0-file", json!({ "text": "ask reader draw" }))?;
+    let filed = s.eventually(agent_wait, || replies(api, session, chat, &first_id, "[got 1: drawing.txt]") >= 1);
+    let _ = b.screenshot(page, &shots.join("desktop-answer-with-a-file.png"));
+    let filed_gone = gone(b);
+    s.ok("asked for a file, its answer brings the file the asked agent sent: its asker's turn has it", filed && filed_gone, json!({ "filed": filed, "gone": filed_gone }));
+
     // asked for a card: it needs them; one line, its row waiting on the Reader
     say("thread-1", json!({ "text": "ask reader approve the plan" }))?;
     let needs = state_is(b, "you");
