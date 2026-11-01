@@ -381,6 +381,61 @@ async fn a_turn_asks_to_install_claude_code_and_runs_once_it_is() {
     s.done();
 }
 
+/// How many of this scenario's `claude` processes run now (Linux's /proc).
+fn running(bin: &Path) -> usize {
+    let bin = bin.as_os_str().as_encoded_bytes();
+    std::fs::read_dir("/proc")
+        .map(|d| d.filter_map(Result::ok).filter_map(|e| std::fs::read(e.path().join("cmdline")).ok()).filter(|c| c.split(|&b| b == 0).next() == Some(bin)).count())
+        .unwrap_or(0)
+}
+
+/// Goal (FIN-348): a hold (the platform's, before a save) stops a session's
+/// idle `claude`, and the bridge answers it only once that has stopped:
+/// nothing of it (an update Claude Code makes on its own, among others)
+/// writes under /data while the save copies it. After the hold, the chat's
+/// next turn resumes its session (the model remembers). Restart: a bridge
+/// started while held answers at once, starting no `claude`. Replay: held
+/// again, its next idle process stops the same way.
+#[tokio::test]
+async fn a_hold_stops_an_idle_session_which_resumes_after_it() {
+    // composed: a first process that idles on after its turn (a recorded
+    // one exits as its recording did), then one resuming its session
+    let s = Scenario::composed("hold", support::settings().turn_idle_ms, Duration::from_millis(fragment_bridge::runtime::claude::DRAIN_MS_DEFAULT)).await;
+    let bridge = s.start();
+    s.following().await;
+    s.say(json!({ "text": "Remember the word maple. Reply with exactly: noted" }));
+    s.ended(1, "the first turn's end").await;
+    assert_eq!(running(&s.bin), 1, "its process idles on, for its next turn");
+
+    support::hold(&s.dir);
+    support::until(10_000, "the hold's answer", || support::held(&s.dir)).await;
+    assert_eq!(running(&s.bin), 0, "its idle process stopped before the answer");
+
+    // restart, still held: answered at once, no `claude` started
+    bridge.stop().await;
+    support::hold(&s.dir);
+    let bridge = s.start();
+    support::until(10_000, "the hold's answer after the restart", || support::held(&s.dir)).await;
+    assert_eq!(running(&s.bin), 0);
+
+    // the hold lets go: once the bridge takes its answer back, the runtime
+    // has heard it too (the same look, every `HOLD_POLL_MS`)
+    std::fs::remove_file(support::hold_path(&s.dir)).expect("the hold");
+    support::until(10_000, "the answer taken back", || !support::held(&s.dir)).await;
+    s.following().await;
+    s.say(json!({ "text": "What word did I ask you to remember? Reply with just that word." }));
+    s.ended(2, "the resumed turn's end").await;
+    assert!(s.replies().last().is_some_and(|r| r.to_lowercase().contains("maple")), "its session resumed: {:?}", s.replies());
+
+    // replay: held again, its new idle process stops the same way
+    assert_eq!(running(&s.bin), 1);
+    support::hold(&s.dir);
+    support::until(10_000, "the second hold's answer", || support::held(&s.dir)).await;
+    assert_eq!(running(&s.bin), 0, "stopped before the answer");
+    bridge.stop().await;
+    s.done();
+}
+
 /// Goal (FIN-258): Not now installs nothing: the turn says so, and ends.
 /// Invalid: an installer that fails says why, in its own last words, and
 /// the turn ends there; a Stop while it runs stops the turn and kills the
@@ -429,6 +484,26 @@ async fn not_now_installs_nothing_and_a_failed_or_stopped_install_says_so() {
     s.ended(1, "the turn's end").await;
     assert_eq!(s.ends()[0]["outcome"], "stopped");
     support::until(wait(), "the installer's group gone", || !sleeping()).await;
+    bridge.stop().await;
+    s.done();
+}
+
+/// Goal (FIN-348): a turn running when the hold comes runs on, as a Hermes
+/// turn does: the hold is answered without waiting for it, and its process
+/// stops as it ends, while the hold lasts.
+#[tokio::test]
+async fn a_turn_running_at_a_hold_runs_on_and_its_process_stops_as_it_ends() {
+    let s = Scenario::composed("hold-running", support::settings().turn_idle_ms, Duration::from_millis(fragment_bridge::runtime::claude::DRAIN_MS_DEFAULT)).await;
+    let bridge = s.start();
+    s.following().await;
+    s.say(json!({ "text": "Take your time." }));
+    support::until(10_000, "its process", || running(&s.bin) == 1).await;
+    support::hold(&s.dir);
+    support::until(10_000, "the hold's answer", || support::held(&s.dir)).await;
+    assert!(s.ends().is_empty() && running(&s.bin) == 1, "answered while the turn runs on");
+    s.ended(1, "the turn's end").await;
+    support::until(10_000, "its process stopped as it ended", || running(&s.bin) == 0).await;
+    assert_eq!(s.replies(), vec!["done".to_string()]);
     bridge.stop().await;
     s.done();
 }

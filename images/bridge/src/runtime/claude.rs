@@ -27,6 +27,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -34,7 +35,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 use super::{Agent, Command, Event, How, MenuItem, Runtime, RuntimeError, RuntimeFuture, RuntimeIo, TurnStart};
 use crate::records::{self, Call, Category, Outcome, PromptOption, Step, ToolEvidence, ToolStatus};
@@ -224,7 +225,7 @@ async fn run(cfg: ClaudeConfig, mut io: RuntimeIo) -> Result<(), RuntimeError> {
         };
         let tx = sessions.entry(key.clone()).or_insert_with(|| {
             let (tx, rx) = mpsc::channel(16);
-            tokio::spawn(session(cfg.clone(), key.clone(), generations.clone(), rx, io.events.clone()));
+            tokio::spawn(session(cfg.clone(), key.clone(), generations.clone(), rx, io.events.clone(), io.held.clone(), io.unquiet.clone()));
             tx
         });
         let _ = tx.send(msg).await;
@@ -274,7 +275,35 @@ struct Turn {
     stopping: bool,
 }
 
-async fn session(cfg: ClaudeConfig, key: (String, String), generations: Arc<Mutex<Generations>>, mut rx: mpsc::Receiver<ToSession>, events: mpsc::Sender<Event>) {
+/// A session counted while its process runs with no turn on it: what a
+/// hold waits on (`RuntimeIo::unquiet`), uncounted as it stops or the
+/// session ends.
+struct Idle {
+    counted: bool,
+    unquiet: Arc<AtomicUsize>,
+}
+
+impl Idle {
+    fn set(&mut self, idle: bool) {
+        if idle != self.counted {
+            if idle {
+                self.unquiet.fetch_add(1, Ordering::SeqCst);
+            } else {
+                self.unquiet.fetch_sub(1, Ordering::SeqCst);
+            }
+            self.counted = idle;
+        }
+    }
+}
+
+impl Drop for Idle {
+    fn drop(&mut self) {
+        self.set(false);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn session(cfg: ClaudeConfig, key: (String, String), generations: Arc<Mutex<Generations>>, mut rx: mpsc::Receiver<ToSession>, events: mpsc::Sender<Event>, mut held: watch::Receiver<bool>, unquiet: Arc<AtomicUsize>) {
     let (agent, chat) = key;
     let gen_key = format!("{agent}|{chat}");
     let cwd = cfg.work_dir.join(&agent);
@@ -282,10 +311,12 @@ async fn session(cfg: ClaudeConfig, key: (String, String), generations: Arc<Mute
     let mut turn: Option<Turn> = None;
     let mut idle_since = Instant::now();
     let mut requests = 0u64;
+    let mut idle = Idle { counted: false, unquiet };
     // a turn asking its person to install Claude Code (`INSTALL_CARD`)
     let mut asking: Option<Box<TurnStart>> = None;
     // bounded by its idle stop, or the bridge dropping its sender
     loop {
+        idle.set(proc.is_some() && turn.is_none());
         let idle_left = cfg.idle.saturating_sub(idle_since.elapsed());
         tokio::select! {
             m = rx.recv() => {
@@ -331,6 +362,9 @@ async fn session(cfg: ClaudeConfig, key: (String, String), generations: Arc<Mute
                             continue;
                         }
                         let command = cfg.installer.clone().expect("a turn asks only with an installer");
+                        // an install writes under /data: a hold waits on it
+                        // as on an idle process (FIN-348)
+                        idle.set(true);
                         match install(&cfg, &command, &mut rx, &ts.turn).await {
                             Installed::Done(version) => {
                                 let step = Step { tool: "installer".into(), args: format!("Anthropic's installer (Claude Code {version})"), ok: true, excerpt: String::new(), category: Category::Shell, evidence: None };
@@ -431,6 +465,18 @@ async fn session(cfg: ClaudeConfig, key: (String, String), generations: Arc<Mute
                         }
                         idle_since = Instant::now();
                     }
+                }
+            }
+            _ = async { let _ = held.wait_for(|h| *h).await; }, if turn.is_none() && proc.is_some() => {
+                // held for a save: its process stops now, as at its idle
+                // bound, so nothing of it (an update Claude Code makes on its
+                // own, among others) writes under /data while it is copied; a
+                // turn running at the hold runs on, its process stopped as it
+                // ends. The session stays, for a turn handed as the hold came,
+                // and its next turn resumes it.
+                crate::ev!("claude.held", { "agent": agent, "chat": chat });
+                if let Some(p) = proc.take() {
+                    stop(p).await;
                 }
             }
             _ = tokio::time::sleep(idle_left), if turn.is_none() && asking.is_none() => {

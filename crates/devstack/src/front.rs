@@ -38,7 +38,7 @@ use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 
 use crate::framing::{self, Framer, Head, Side};
 
@@ -132,8 +132,8 @@ fn runtime_port(line: &str) -> Option<u16> {
     port[..port.find('"')?].parse().ok().filter(|p| *p != 0)
 }
 
-/// The node's port, held from before wrangler starts until the node is
-/// dropped: connections accepted on it are passed to the runtime.
+/// The node's port, listened on from before wrangler starts until the node
+/// is dropped: connections accepted on it are passed to the runtime.
 pub(crate) struct Front {
     port: u16,
     stop: Arc<AtomicBool>,
@@ -141,15 +141,9 @@ pub(crate) struct Front {
 }
 
 impl Front {
-    /// Holds 127.0.0.1:`port`, passing what it accepts to the runtime
-    /// `heard` names, each request a line of `log` (the boot's).
-    pub(crate) fn bind(port: u16, heard: Arc<Heard>, log: Arc<Mutex<File>>) -> Result<Front> {
-        let listener = TcpListener::bind(("127.0.0.1", port)).with_context(|| format!("the node's port :{port} is taken"))?;
-        Front::serve(listener, heard, log)
-    }
-
-    /// `bind`, on a listener already bound (a port picked and let go before
-    /// a bind may be another's by then).
+    /// Passes what `listener` accepts (the node's port, bound by its maker:
+    /// `NodeOptions::listener`) to the runtime `heard` names, each request a
+    /// line of `log` (the boot's).
     pub(crate) fn serve(listener: TcpListener, heard: Arc<Heard>, log: Arc<Mutex<File>>) -> Result<Front> {
         let port = listener.local_addr()?.port();
         let stop = Arc::new(AtomicBool::new(false));
@@ -170,8 +164,8 @@ impl Front {
 }
 
 impl Drop for Front {
-    /// The port let go: the next node may hold it. Connections still open
-    /// end with the runtime's.
+    /// Its listener let go (the port stays its maker's, for the node's next
+    /// life). Connections still open end with the runtime's.
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
         // the accept loop wakes at a connection, sees the stop, and returns
@@ -413,6 +407,40 @@ mod tests {
             r.read_exact(&mut vec![0; length]).unwrap();
         }
         status
+    }
+
+    /// Goal: the node's port is its maker's across the node's lives. With a
+    /// life's front door gone, no other socket can bind the port, and a
+    /// client that dials then is answered once the next life's door is
+    /// open, as one dialing during a boot is.
+    #[test]
+    fn a_held_port_outlives_each_front_door() {
+        let runtime = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let heard = Arc::new(Heard::default());
+        heard.line(NAMED.replace("43765", &runtime.local_addr().unwrap().port().to_string()).as_bytes());
+        // bounded by the test's process: it ends with it
+        thread::spawn(move || {
+            for s in runtime.incoming().flatten() {
+                thread::spawn(move || serve(s));
+            }
+        });
+        let held = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = held.local_addr().unwrap().port();
+        let path = std::env::temp_dir().join(format!("front-log-{}", crate::random_hex(4)));
+        let log = Arc::new(Mutex::new(File::create(&path).unwrap()));
+        let asked = || {
+            let mut client = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            client.write_all(b"GET /a/200 HTTP/1.1\r\nhost: x\r\n\r\n").unwrap();
+            io::BufReader::new(client)
+        };
+        let first = Front::serve(held.try_clone().unwrap(), heard.clone(), log.clone()).unwrap();
+        assert_eq!(answer(&mut asked(), "GET"), 200, "through the first life's door");
+        drop(first);
+        assert!(TcpListener::bind(("127.0.0.1", port)).is_err(), "no other socket binds the port between lives");
+        let mut waiting = asked();
+        let _second = Front::serve(held.try_clone().unwrap(), heard, log).unwrap();
+        assert_eq!(answer(&mut waiting, "GET"), 200, "a client that dialed between lives, answered through the next");
+        std::fs::remove_file(&path).ok();
     }
 
     /// Through `pass`, to a runtime that answers each request at once: 1,000
