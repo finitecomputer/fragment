@@ -119,6 +119,7 @@ const LANES: &[Lane] = &[
     sessions::sessions_ui,
     notes::notes,
     brain::brain,
+    brain::brain_release,
     doc::doc,
     deliver::push,
     deliver::ai,
@@ -176,7 +177,7 @@ pub const SHARDS: [&[&str]; 4] = [
     &["deploy", "templates", "facet-cap", "app-lockdown", "site", "watch", "icons", "schemas", "channels", "live", "routes", "cli", "browser", "jobs", "triggers", "sessions", "sessions-ui", "finite-private", "chat"],
     &[
         "auth", "create", "lockdown", "keys", "members", "identities", "levers", "secrets", "delegation", "files", "share", "faces", "isolation", "frames", "ops", "public", "effects",
-        "appfiles", "blobs", "notes", "brain", "doc", "push", "ai", "ledger", "transcribe", "orgs", "billing", "governance", "billing-page", "trials", "admin", "admin-page",
+        "appfiles", "blobs", "notes", "brain", "brain-release", "doc", "push", "ai", "ledger", "transcribe", "orgs", "billing", "governance", "billing-page", "trials", "admin", "admin-page",
     ],
 ];
 
