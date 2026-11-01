@@ -82,10 +82,14 @@ with its default. What an image sets:
 - `BRIDGE_SIMPLEX_BIN`: SimpleX's core (below). Unset, nothing of SimpleX
   runs.
 - `BRIDGE_CLAUDE_BIN`: the person's own unmodified `claude` (below, "The
-  Claude runtime"), run as `BRIDGE_CLAUDE_USER` (`uid:gid`, never root),
-  its config, work and state under `/data`. Unset, as in every image
-  today, an agent whose `agent.json` names `claude` has its turns refused,
-  saying so.
+  Claude runtime"), run as `BRIDGE_CLAUDE_USER` (`uid:gid`, never root)
+  with `HOME` `BRIDGE_CLAUDE_HOME`, the person's, and its config that
+  home's `.claude`, so the agent runs the Claude Code the person
+  installed and signed in to there; its work and state under `/data`.
+  Our Hermes image sets them to the person's install in `/data`
+  (docs/computers.md, "Claude Code"). Unset, an agent whose `agent.json`
+  names `claude` has its turns refused, saying so; set but not installed
+  yet, each turn ends saying how to install it (`NOT_INSTALLED`).
 
 ## State, and what it never does twice
 
@@ -304,7 +308,9 @@ turn in a chat in a life posts the menu on `work` (`commands`).
 An agent's owner may link the agent to their SimpleX app (decision 32;
 `simplex/mod.rs` and `run.rs` say how). The bridge runs SimpleX's own
 core, `simplex-chat`, one per linked agent, as its child process, over
-the core's bot API on loopback.
+the core's bot API on loopback: on a port the core picks, which the
+bridge reads back from that core's own sockets, so one agent's task
+never reaches another agent's core.
 
 - **Only where the image names the core** (`BRIDGE_SIMPLEX_BIN`). The
   bridge's reads of its computer say so (`?simplex=1`), so its owner's
@@ -363,6 +369,11 @@ drives it. The bridge never sits between it and Anthropic: no proxy, base
 URL or key, and no `ANTHROPIC_*` or `CLAUDE_CODE_*` variable of anyone's
 reaches it (`withheld`).
 
+- **Its folder** is its work directory, its own: an `AGENTS.md` the
+  bridge writes (who it is, and the `fragment` CLI, which acts as it:
+  `FRAGMENT_AS_AGENT`, `FRAGMENT_FOR`), and a `CLAUDE.md` that reads it,
+  written only when the agent has none. Claude's auto memory is on, kept
+  per agent under the person's `.claude`.
 - **A session per agent and chat**, its id derived from the two and the
   chat's `/new` count, so every life names the same one. It resumes when
   its transcript is on disk, and its process stops once idle.
@@ -387,6 +398,13 @@ reaches it (`withheld`).
   may or may not have run (recorded with Haiku 5.5: it found the call
   still running and waited, never running it again).
 - **Its menu:** `new` (the chat's next session) and `stop`.
+- **Under a hold** (a save's), a session's idle `claude` stops before the
+  bridge answers it, so nothing of Claude Code's own (its background
+  update, among others) writes under `/data` while the save copies it. A
+  turn running at the hold runs on, as a Hermes turn does, its process
+  stopped as it ends; the next turn resumes the session. Each runtime is
+  told the hold (`RuntimeIo::held`) and counts what of its own the answer
+  waits on (`RuntimeIo::unquiet`).
 
 ## Hermes' Relay
 

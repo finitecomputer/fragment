@@ -54,9 +54,13 @@ fn runtimes() -> Runtimes {
         let (uid, gid) = u.split_once(':').unwrap_or_else(|| fail("BRIDGE_CLAUDE_USER is uid:gid"));
         (uid.parse().unwrap_or_else(|_| fail("BRIDGE_CLAUDE_USER's uid is a number")), gid.parse().unwrap_or_else(|_| fail("BRIDGE_CLAUDE_USER's gid is a number")))
     });
+    // the person's home, where they installed it and signed in (its
+    // `.claude`): the agent runs that same Claude Code
+    let home = PathBuf::from(env_or("BRIDGE_CLAUDE_HOME", "/data/claude"));
     let config = ClaudeConfig {
         bin: PathBuf::from(bin),
-        config_dir: PathBuf::from(env_or("BRIDGE_CLAUDE_CONFIG_DIR", "/data/claude")),
+        config_dir: home.join(".claude"),
+        home,
         work_dir: PathBuf::from(env_or("BRIDGE_CLAUDE_WORK_DIR", "/data/work")),
         state_dir: PathBuf::from(env_or("BRIDGE_CLAUDE_STATE_DIR", "/data/bridge/claude")),
         model: env("BRIDGE_CLAUDE_MODEL"),

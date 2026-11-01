@@ -102,6 +102,47 @@ fragment's is.
   one larger is left out, saying so, and the rest imported. Its id is at
   most 200 bytes, and one refused is said escaped and cut.
 
+## Search
+
+Each import also writes the archive's search, through the platform's
+search write API (`/api/f/{name}/search/…`), as the writer holding the
+conversations' bytes: one source a conversation's file, its revision
+the file's sha256, and one section a turn (fragment_core::session_search),
+each checked as the platform checks it (`searchable::check`) before it is
+sent.
+
+- **A turn** is a person's message and what the agent said until their
+  next one, as "Person: … / Agent: …": a tool's output left out and its
+  call only named, reasoning left out, the files a message held named,
+  and the summary a compression wrote a section of its own. Turns are
+  numbered from the start (`t<n>`), so a conversation that grew keeps its
+  earlier sections, and only its new turns are embedded again. A turn
+  past 8,000 characters splits at its messages (a message past that,
+  within it); a conversation past 2,000 sections or 4 MiB keeps its first,
+  saying how many it left out. Its fields are `kind`, `origin` and
+  `source`; a section's context its source and agent, its location the
+  places of its first and last message.
+- **Reconciled, each import, with the archive as it stands then.** After
+  its writes, an import reads search's sources and the archive at main's
+  head (its indexes, and the files changed since them: another import may
+  have written meanwhile), and writes each conversation whose sha256 is
+  not the revision search holds, its bytes read at that head and its
+  revision theirs. Search is read first, so what it holds is never of a
+  newer copy than the archive read after. Each write names the revision
+  it replaces, as search was read holding it, so another import's write
+  since is never written over; refused, that conversation is read anew
+  from search and the archive and written again if they still differ (a
+  few passes at most, those left counted `unresolved` for the next
+  import). Whichever import's write lands first, search ends holding the
+  archive's copy. Nothing is deleted: the
+  platform forgets a conversation's source when a move of main deletes its
+  file. So an import that writes nothing puts search right too, and an
+  archive made before its host had search is searched from its next
+  import. A host without search, or one that cannot be reached, is said
+  and skipped: the import stands. A search that is full (its index's
+  chunks are capped: 507) is sent no more; each conversation not written
+  is counted refused, and the next import writes it once there is room.
+
 ## Where they come from
 
 - **The old Finite's export** (format `finite-chat-archive/1`: its

@@ -103,8 +103,9 @@ pub fn plain_models() -> Value {
 }
 
 /// `plain_models`, its embeddings slot the default model pinned at a
-/// version (`Shape::EmbeddingsRepinned`): the same vectors in name, another
-/// space, which no index of the plain node's holds.
+/// version, with the task prefixes nomic-embed-text asks for
+/// (`Shape::EmbeddingsRepinned`): the same vectors in name, another space,
+/// which no index of the plain node's holds.
 pub fn repinned_models() -> Value {
     let mut models = plain_models();
     models["embeddings"] = json!({
@@ -112,6 +113,8 @@ pub fn repinned_models() -> Value {
         "model": fragment_core::embed::MODEL_DEFAULT,
         "dimensions": fragment_core::embed::DIMENSIONS_DEFAULT,
         "version": "e2e-2",
+        "document_prefix": "search_document: ",
+        "query_prefix": "search_query: ",
     });
     models
 }

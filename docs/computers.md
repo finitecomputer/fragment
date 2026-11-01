@@ -620,8 +620,16 @@ agent; their account pays.
 
 What our Hermes image guarantees beyond the contract:
 
-- **One profile per agent**, named as its agent fragment, holding its
-  `SOUL.md`, `memories/` and `skills/`, synced both ways with it.
+- **One profile per agent of Hermes'**, named as its agent fragment,
+  holding its `SOUL.md`, `memories/` and `skills/`, synced both ways with
+  it. An agent whose `agent.json` names another runtime (Claude) has no
+  profile, desktop, route or sync: the boot reads `runtime` as the bridge
+  does (`with_runtimes`), and the ready file names it at once, for the
+  bridge to run on its runtime. A start reads every agent's before it
+  writes or retires a profile, asking again until each answers, so a
+  failed read never retires a Hermes agent's profile. One switched to another runtime while
+  the computer runs loses its desktop within 10 s, its profile retired at
+  the next start; switched back, its profile is written again.
 - **Its `agent.json`**, read at boot and every 10 s while awake (a change
   is the next turn's, nothing restarted): `tier` (`cheap` unless it says
   `medium`; `high` only with `FRAGMENT_HIGH_TIER=on`, decision 23),
@@ -649,7 +657,9 @@ What our Hermes image guarantees beyond the contract:
   own timers while held, each file replaced whole or appended, so a save
   holds a whole version of it; nothing else under `/data` changes (the
   Docker lane's `held_nothing_under_data_changes`). Its model-catalog
-  refresh is off, and Node's compile cache is outside `/data`.
+  refresh is off, and Node's compile cache is outside `/data`. A Claude
+  agent's idle `claude` is stopped before the hold is answered
+  (docs/bridge.md, "The Claude runtime").
 - **A turn a restart cut** is closed in its Hermes session before the
   gateway starts, so the next message is a turn of its own (P5).
 - **Its agents change while it runs**, nothing restarted: one assigned
@@ -661,7 +671,9 @@ What our Hermes image guarantees beyond the contract:
   which Hermes' tools obey until Give back. Its agents run as one user
   (decision 44), so only the lease and the platform skill keep an agent
   off another's desktop. The desktop and the browser tools share one
-  regular Chromium and one saved profile per agent.
+  regular Chromium and one saved profile per agent. A link opened on the
+  desktop (a terminal's sign-in, `xdg-open`) opens there too: it is the
+  desktop's default web browser, so no dialog asks which (FIN-351).
 
 ### Approvals in our Hermes image
 
@@ -739,8 +751,34 @@ passwordless `sudo`: the computer is one person's, with no secret in it,
 and their agents are not fenced from each other (decisions 13, 43, 44).
 An install outside `/data` lasts until the next start from the image (a
 crash, an update, a restart; a snapshot's wake keeps it). Nothing is
-installed under `/data` at run time. The bridge runs as root and keeps
-SimpleX's state from the agent's user, though not from its sudo.
+installed under `/data` at run time but the person's own Claude Code
+(below). The bridge runs as root and keeps SimpleX's state from the
+agent's user, though not from its sudo.
+
+### Claude Code in our Hermes image
+
+Paul, FIN-233 (2026-10-31): an agent whose `agent.json` names `claude`
+runs on Claude Code, which the person installs on their computer
+themselves, as on a VPS of theirs. The image ships none, and no flag
+gates it.
+
+- **Installed in a terminal of an agent's desktop** with Anthropic's own
+  installer, then signed in there with `claude auth login` (its URL
+  opened in their browser, its code pasted back). The desktop's home is
+  Hermes' (`/data/hermes`), so the install lands in `/data`
+  (`.local/bin/claude`, its versions in `.local/share/claude`), already on
+  the image's `PATH`, and the sign-in in `/data/hermes/.claude`. Both
+  outlast a restart, a sleep and an image update, as all of `/data` does.
+- **The agent runs that same Claude Code** (`BRIDGE_CLAUDE_BIN`,
+  `BRIDGE_CLAUDE_HOME`: docs/bridge.md), as Hermes' user, with the
+  person's sign-in, settings and auto memory, each agent in its own work
+  directory. Until it is installed, the agent's turns end saying how.
+- **Its updates are Anthropic's**: Claude Code updates itself in the
+  background, keeping the two newest versions, so a save carries one or
+  two (about 270 MB each).
+- **A Claude agent has no Hermes profile or desktop** (above, "One
+  profile per agent of Hermes'"): its person installs and signs in from
+  another agent's desktop.
 
 ## Billing
 

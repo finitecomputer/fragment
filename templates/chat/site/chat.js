@@ -28,13 +28,13 @@
 // recorded here (MediaRecorder) and shown as a player wherever audio is.
 // "Notify me" subscribes this browser for its person, from a click
 // (`fragment.push.register`; framed by the shell, the shell holds the
-// subscription, `{fragment: "alerts"}`), and the page's presence says
+// subscription, `{fragment: KIND.alerts}`), and the page's presence says
 // whether the chat is on screen (`looking`), so its person is not pushed
 // while it is.
 // `@` lists the chat's agents, then (when the shell framing it is its
 // owner's) the owner's other agents, which the shell hands over on asking
-// (`{fragment: "agents?"}`); a message to one of those asks the shell to
-// add it first (`{fragment: "add-agent"}`; the shell asks its person, in
+// (`{fragment: KIND.agentsAsk}`); a message to one of those asks the shell to
+// add it first (`{fragment: KIND.addAgent}`; the shell asks its person, in
 // its own dialog), then names it in `to`.
 // `/` lists the commands an agent's runtime takes from its owner (its menu,
 // `{kind: "commands"}` on `work`), for the agent's owner alone; one typed
@@ -56,6 +56,7 @@ import { inline, renderMarkdown } from "./markdown.js";
 import { renderAttachments as renderMessageAttachments } from "./media.js";
 import { share, feedback } from "./response-actions.js";
 import "./tooltips.js";
+import { KIND } from "./frame-messages.js";
 
 // A message's text and files (docs/chat-records.md).
 const TEXT_MAX_BYTES = 32 * 1024;
@@ -1153,7 +1154,7 @@ export function mount(root) {
         retry.onclick = () => {
           if (!rosterOrigin) return;
           retry.disabled = true;
-          window.parent.postMessage({ fragment: "retry-setup" }, rosterOrigin);
+          window.parent.postMessage({ fragment: KIND.retrySetup }, rosterOrigin);
         };
         error.append(retry);
         card.append(error);
@@ -1429,7 +1430,7 @@ export function mount(root) {
 
   // A link to another fragment's page (an app an agent made) gets "Open":
   // the shell that frames the chat opens it beside the chat, in its viewer
-  // (`{fragment: "open", url}`; docs/api.md, The shell). The link itself
+  // (`{fragment: KIND.open, url}`; docs/api.md, The shell). The link itself
   // still opens a tab.
   function openBeside(md) {
     if (!framed) return;
@@ -1440,7 +1441,7 @@ export function mount(root) {
       open.title = "Open beside the chat";
       open.replaceChildren(icon("panel"));
       open.append("Open");
-      open.onclick = () => window.parent.postMessage({ fragment: "open", url: a.href }, "*");
+      open.onclick = () => window.parent.postMessage({ fragment: KIND.open, url: a.href }, "*");
       a.after(open);
     }
   }
@@ -2125,13 +2126,13 @@ export function mount(root) {
     try {
       localStorage.removeItem(DRAFT_KEY);
     } catch {}
-    window.parent.postMessage({ fragment: "draft-forgotten" }, event.origin);
+    window.parent.postMessage({ fragment: KIND.draftForgotten }, event.origin);
   }
   // ---- what this page holds that no storage keeps: files chosen, a voice
   // memo, a message on its way, one that failed (its Retry, and a retry
   // under way: newer words may be in the composer), a quote chosen, a
   // card's answer typed and not sent, or on its way. The shell that frames
-  // it is told as it changes (`{fragment: "busy", busy}`), and reloads it
+  // it is told as it changes (`{fragment: KIND.busy, busy}`), and reloads it
   // for a new release only while it is not, and stops a reload under way
   // if it becomes so. ----
   function tellBusy() {
@@ -2139,7 +2140,7 @@ export function mount(root) {
     const busy = attachments.length > 0 || !!recording || sending || state.sending.size > 0 || state.failed.size > 0 || !!state.replyTo || answersOnTheirWay > 0 || answerTyped;
     if (!framed || !state.me || busy === busyTold) return;
     busyTold = busy;
-    window.parent.postMessage({ fragment: "busy", busy }, state.me.platform);
+    window.parent.postMessage({ fragment: KIND.busy, busy }, state.me.platform);
   }
   function renderAttachments() {
     const list = $("attachments");
@@ -2466,12 +2467,12 @@ export function mount(root) {
         reject(new Error("the shell did not answer"));
       }, ADD_WAIT_MS);
       adding.set(nonce, { resolve, reject, timer });
-      window.parent.postMessage({ fragment: "add-agent", identity, nonce }, rosterOrigin);
+      window.parent.postMessage({ fragment: KIND.addAgent, identity, nonce }, rosterOrigin);
     });
   }
   function fromShell(event) {
     const d = event.data;
-    if (d?.fragment === "agents" && Array.isArray(d.agents)) {
+    if (d?.fragment === KIND.agents && Array.isArray(d.agents)) {
       rosterOrigin = event.origin;
       state.roster = d.agents
         .filter((a) => a && typeof a.identity === "string" && a.identity.startsWith("npub1") && typeof a.name === "string" && HANDLE.test(a.name))
@@ -2490,12 +2491,12 @@ export function mount(root) {
       } else setup = null;
       schedule();
       if (picking) updateMentions();
-    } else if (d?.fragment === "alerts" && typeof d.nonce === "string" && event.origin === state.me?.platform) {
+    } else if (d?.fragment === KIND.alerts && typeof d.nonce === "string" && event.origin === state.me?.platform) {
       const waiting = askingShell.get(d.nonce);
       if (!waiting) return;
       askingShell.delete(d.nonce);
       waiting(d);
-    } else if (d?.fragment === "agent-added" && typeof d.nonce === "string" && event.origin === rosterOrigin) {
+    } else if (d?.fragment === KIND.agentAdded && typeof d.nonce === "string" && event.origin === rosterOrigin) {
       const waiting = adding.get(d.nonce);
       if (!waiting) return;
       adding.delete(d.nonce);
@@ -2683,10 +2684,10 @@ export function mount(root) {
   }
 
   // The shell that frames this page is told the person sent a message here
-  // (`{fragment: "said"}`): a chat they archived comes back to their
-  // sidebar (docs/api.md, The shell's messages).
+  // (`{fragment: KIND.said}`): a chat they archived comes back to their
+  // sidebar (frame-messages.js, `said`).
   function tellSaid() {
-    if (framed && state.me) window.parent.postMessage({ fragment: "said" }, state.me.platform);
+    if (framed && state.me) window.parent.postMessage({ fragment: KIND.said }, state.me.platform);
   }
 
   // Someone signed in, in a chat with an agent: a turn starts on it soon
@@ -2815,15 +2816,15 @@ export function mount(root) {
   async function alertsOn() {
     const { key } = await fetch("./__push-key", { credentials: "same-origin" }).then((r) => r.json()).catch(() => ({}));
     if (typeof key !== "string" || !key) return { ok: false, reason: "error", error: "this chat has no key to push with" };
-    const a = await askShell({ fragment: "alerts", on: true, key }, ALERTS_ASK_MS);
+    const a = await askShell({ fragment: KIND.alerts, on: true, key }, ALERTS_ASK_MS);
     if (a?.state !== "on" || !a.subscription) return unsubscribed(a);
     const stored = await pushPost("./__push-sub", { who: state.me.principal, ...a.subscription });
     // not stored here: the shell lets it go
-    if (stored.ok === false) await askShell({ fragment: "alerts", on: false }, ALERTS_ASK_MS);
+    if (stored.ok === false) await askShell({ fragment: KIND.alerts, on: false }, ALERTS_ASK_MS);
     return stored;
   }
   async function alertsOff() {
-    const a = await askShell({ fragment: "alerts", on: false }, ALERTS_ASK_MS);
+    const a = await askShell({ fragment: KIND.alerts, on: false }, ALERTS_ASK_MS);
     if (a?.state !== "off") return unsubscribed(a);
     return a.endpoint ? pushPost("./__push-unsub", { endpoint: a.endpoint }) : { ok: true, removed: 0 };
   }
@@ -2845,7 +2846,7 @@ export function mount(root) {
     if (framed) {
       // shown once it is known whose it is (a press before would ask the frame)
       $("notify").hidden = true;
-      const a = await askShell({ fragment: "alerts?" }, ALERTS_READ_MS);
+      const a = await askShell({ fragment: KIND.alertsAsk }, ALERTS_READ_MS);
       shellAlerts = !!a;
       if (a?.state === "unsupported") return;
       $("notify").hidden = false;
@@ -2881,20 +2882,20 @@ export function mount(root) {
   addEventListener("message", (event) => {
     if (!framed || event.source !== window.parent) return;
     const d = event.data;
-    if (d && d.fragment === "theme" && (d.mode === "light" || d.mode === "dark")) {
+    if (d && d.fragment === KIND.theme && (d.mode === "light" || d.mode === "dark")) {
       document.documentElement.dataset.theme = d.mode;
       if (typeof d.mobile === "boolean") document.documentElement.dataset.mobile = String(d.mobile);
     }
-    else if (d && d.fragment === "compose" && typeof d.text === "string") compose(event, d.text);
-    else if (d && d.fragment === "forget-draft") forgetDraft(event);
+    else if (d && d.fragment === KIND.compose && typeof d.text === "string") compose(event, d.text);
+    else if (d && d.fragment === KIND.forgetDraft) forgetDraft(event);
     else fromShell(event);
   });
   // asks once: a shell that is its owner's answers (and again on a change)
-  if (framed) window.parent.postMessage({ fragment: "agents?" }, "*");
+  if (framed) window.parent.postMessage({ fragment: KIND.agentsAsk }, "*");
   addEventListener("keydown", event => {
     if (!framed || event.isComposing || event.repeat || !(event.metaKey || event.ctrlKey) || event.altKey || event.shiftKey || event.code !== "KeyK") return;
     event.preventDefault();
-    window.parent.postMessage({ fragment: "open-launcher" }, rosterOrigin || "*");
+    window.parent.postMessage({ fragment: KIND.openLauncher }, rosterOrigin || "*");
   });
 
   // ---- who this page is, then the channels it may read, and who is here ----

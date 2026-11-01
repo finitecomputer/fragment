@@ -398,6 +398,10 @@ pub(crate) enum MetaKey {
     /// Test fleets only: how many more paid AI steps fail just after their
     /// call was paid and kept (`fail-after-paid`), so the step is retried.
     TestFailAfterPaid,
+    /// Test fleets only: how many more video steps lose their model's
+    /// answer before it is kept (`lose-video-answers`), as a restart or a
+    /// broken try would, so the step is tried again without it.
+    TestLoseVideoAnswers,
     /// Test fleets only: how many more meter acknowledgements are lost
     /// (`fail-meter-acks`), so the queue delivers their batch again.
     TestFailMeterAcks,
@@ -476,6 +480,7 @@ impl MetaKey {
             MetaKey::DoorTemplate => "door_template",
             MetaKey::PrewakeAt => "prewake_at",
             MetaKey::TestFailAfterPaid => "test_fail_after_paid",
+            MetaKey::TestLoseVideoAnswers => "test_lose_video_answers",
             MetaKey::TestFailMeterAcks => "test_fail_meter_acks",
 
             MetaKey::MeterClosed => "meter_closed",

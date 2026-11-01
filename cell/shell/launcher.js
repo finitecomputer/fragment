@@ -32,6 +32,7 @@
 // launcher's next opening.
 
 import { icon } from "./icons.js";
+import { KIND } from "./frame-messages.js";
 
 // At most 8 files, 25 MiB each, as the chat's page takes them.
 const FILES_MAX = 8;
@@ -582,7 +583,7 @@ export function createLauncher(shell) {
   });
   // Keyboard events inside the chat iframe cannot bubble to the desktop.
   addEventListener("message", async event => {
-    if (event.data?.fragment !== "open-launcher" || $("layout").hidden) return;
+    if (event.data?.fragment !== KIND.openLauncher || $("layout").hidden) return;
     const frame = [...document.querySelectorAll("iframe[data-fragment]")].find(f => f.contentWindow === event.source);
     const name = frame?.dataset.fragment;
     if (!name || !byName(name) || document.activeElement !== frame) return;
