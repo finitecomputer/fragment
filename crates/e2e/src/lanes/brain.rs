@@ -570,7 +570,13 @@ pub fn brain_release(s: &mut Suite, api: &Api) -> Result<()> {
         st["indexing"] == false && st["pending"] == 0
     });
     let visit_ms = t0.elapsed().as_millis() as u64;
-    let since: Vec<Value> = jobs::runs(api, &keys, &name, "&op=changed").into_iter().filter(|r| !before.contains(&r["id"])).collect();
+    // the run that caught it up ends a step after: its last batch finds nothing left
+    let since = || jobs::runs(api, &keys, &name, "&op=changed").into_iter().filter(|r| !before.contains(&r["id"])).collect::<Vec<Value>>();
+    s.eventually(WAIT, || {
+        let l = since();
+        !l.is_empty() && l.iter().all(|r| r["status"] != "running" && r["status"] != "queued")
+    });
+    let since = since();
     let run_ms = since.first().and_then(|r| Some(r["finishedAt"].as_i64()? - r["createdAt"].as_i64()?));
     println!("      a release, then one read: indexed {visit_ms} ms after the read (its installed run took {} ms)", run_ms.map_or("?".into(), |ms| ms.to_string()));
     s.ok(
