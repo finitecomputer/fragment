@@ -5442,7 +5442,8 @@ fn say_in(s: &Suite, b: &mut Browser, page: &Page, host: &str, text: &str) -> bo
 /// words; archived, it is under Archived with its chip, and gone from the
 /// sidebar; its title filters it at once, and a word only its messages
 /// hold finds it through the person's search, its snippet shown; it opens
-/// in the middle column and one Back is History again. Invalid: a chat
+/// in the middle column and one Back is History again; on a phone its
+/// Continue sits under its words, which stay shown. Invalid: a chat
 /// nothing was said in is not listed, and words nothing holds say so.
 /// Replay: a message the person sends in the archived chat brings it back
 /// to their sidebar. Restart: a reload at `/history` stays there.
@@ -5476,7 +5477,29 @@ fn history_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Perso
     let archived = b.until(page, &format!("{}?.querySelector('.history-chip')?.textContent === 'Archived' && [...document.querySelectorAll('.history-row')].every((r) => r.querySelector('.history-chip')) && !document.querySelector({})", row(&bread), js(&format!("#chats [data-key={}]", js(&format!("chat:{bread}"))))), wait);
     let _ = b.screenshot(page, &shots.join("desktop-history-archived.png"));
     s.ok("archived, it is under Archived with its chip, and gone from the sidebar", archived, json!({ "rows": b.eval(page, "[...document.querySelectorAll('.history-row')].map((r) => r.innerText)")? }));
+    // at a phone's width its Continue (theirs is "Continue with [agent]",
+    // several agents) goes under its words: its title whole, its words shown
+    let wide = b.eval(page, "[innerWidth, innerHeight]")?;
+    b.viewport(page, 390, 844, true)?;
+    let phone = b.until(
+        page,
+        &format!(
+            "(() => {{ const r = {}; const c = r?.querySelector('.continue-control'), l = r?.querySelector('.label'), p = r?.querySelector('.history-preview'); if (!c || !l || !p) return false; \
+             const t = p.firstChild, g = document.createRange(); g.setStart(t, 0); g.setEnd(t, Math.min(4, t.length)); const w = g.getBoundingClientRect(), b = p.getBoundingClientRect(); \
+             return l.scrollWidth <= l.clientWidth && w.width > 0 && w.right <= b.right + 1 && c.getBoundingClientRect().top >= b.bottom - 1; }})()",
+            row(&bread)
+        ),
+        wait,
+    );
+    let _ = b.screenshot(page, &shots.join("phone-390-history-archived.png"));
+    let seen = b.eval(page, &format!("{}?.innerText ?? null", row(&bread)))?;
+    let (w, h) = (wide[0].as_u64().unwrap_or(1280) as u32, wide[1].as_u64().unwrap_or(900) as u32);
+    b.viewport(page, w, h, false)?;
+    // wide again and still before the next press, which goes by where things are
+    let back = b.until(page, &format!("innerWidth === {w} && !document.getElementById('layout').classList.contains('narrow') && document.getAnimations().every((a) => a.playState !== 'running' || a.effect?.getComputedTiming().iterations === Infinity)"), wait);
+    s.ok("at a phone's width a row's Continue sits under its words: its title whole, its words shown", phone && back, seen);
     b.click(page, ".history-filter[data-filter=\"all\"]")?;
+    anyhow::ensure!(b.until(page, "document.querySelector('.history-filter[data-filter=\"all\"]')?.getAttribute('aria-pressed') === 'true'", wait), "History's All was not pressed");
     // its title filters it at once; words nothing holds say so
     b.eval(page, &fill(".history-search input", "bread no"))?;
     let titled = b.until(page, &format!("document.querySelectorAll('.history-row').length === 1 && !!{}", row(&bread)), wait);

@@ -773,6 +773,13 @@ iframe[data-blocked] { display: none; }
 @container settings (max-width: 620px) {
   .apps-layout { padding: 18px 16px 60px; }
   .history-layout { padding: 18px 16px 60px; }
+  /* a row's Continue under its words, so its title and what a search found
+     have the width (two agents' "Continue with [agent]" left them "M…") */
+  .history-row { flex-wrap: wrap; }
+  .history-open { flex-basis: 100%; }
+  .history-row > .continue-control { margin: -4px 0 10px 52px; }
+  .history-sub { align-items: flex-start; }
+  .history-preview.found { display: -webkit-box; white-space: normal; -webkit-box-orient: vertical; -webkit-line-clamp: 4; }
   .app-row-card { width: 72px; height: 45px; }
   .app-row-controls, .app-row-said, .app-row-progress { padding-left: 0; }
   .app-row-panel { margin-left: 0; padding: 16px; gap: 20px; }
