@@ -13,6 +13,8 @@
 // new to this page, and as the page comes back into view: an import moves
 // the archive's files and not their list.
 // `changed`: the index read again, or the conversation open in it moved.
+import { KIND } from "./frame-messages.js";
+
 export function createSessionArchive({
   api, ui: { renderHeading }, data: { allFragments, own, seg },
   selection: { getFrame }, navigation: { openChat, leaveSidebar }, continuing, store, changed,
@@ -51,7 +53,7 @@ export function createSessionArchive({
   // (continue.js), as the person.
   addEventListener("message", (e) => {
     const d = e.data;
-    if (d?.fragment !== "session-archive" || !read.name || e.source !== getFrame(read.name)?.contentWindow) return;
+    if (d?.fragment !== KIND.sessionArchive || !read.name || e.source !== getFrame(read.name)?.contentWindow) return;
     if (typeof d.continue === "string") return void continuing.ask({ archive: read.name, key: d.continue }, read.entries.find((x) => x.key === d.continue)?.title);
     open = typeof d.key === "string" ? d.key : null;
     renderHeading();

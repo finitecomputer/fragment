@@ -105,8 +105,12 @@ fn moved_checks(s: &mut Suite, api: &Api, owner: &Keys, name: &str) -> Result<()
     let nothing = api.signed(owner, "POST", &path(""), Some(&json!({ "q": "ferry friday" })))?;
     let mut fresh = upsert("sessions/a.json", "r3", turns());
     fresh["replaces"] = json!("");
+    let calls = s.ai.calls().len();
     let again = api.signed(owner, "POST", &path("/upsert"), Some(&fresh))?;
+    let written: Vec<String> = s.ai.calls()[calls..].iter().filter(|c| c.model == MODEL).flat_map(|c| c.body["text"].as_array().cloned().unwrap_or_default()).filter_map(|t| t.as_str().map(str::to_string)).collect();
+    let calls = s.ai.calls().len();
     let found = api.signed(owner, "POST", &path(""), Some(&json!({ "q": "harbour lantern audit" })))?;
+    let asked: Vec<Value> = s.ai.calls()[calls..].iter().filter(|c| c.model == MODEL).map(|c| c.body["text"].clone()).collect();
     s.ok(
         "embeddings moved to another space: the index of the space before answers by its words alone (semantic off); the first write in the new one empties it first, a compare-and-set it then refuses (409, naming none) included; questions find nothing until its sources are written again, then by words and meaning",
         before.status == 200 && before.body["semantic"] == "off" && before.body["results"][0]["section"] == "t2" && before.body["results"][0].get("semantic").is_none()
@@ -117,6 +121,12 @@ fn moved_checks(s: &mut Suite, api: &Api, owner: &Keys, name: &str) -> Result<()
             && again.status == 200 && again.body["written"] == true
             && found.body["semantic"] == "on" && found.body["results"][0]["section"] == "t0" && found.body["results"][0]["signals"] == json!(["lexical", "semantic"]),
         json!({ "before": before.body, "held": held.body, "refused": refused.body, "emptied": emptied.body, "nothing": nothing.body, "found": found.body }),
+    );
+    s.ok(
+        "a slot's task prefixes: each chunk is embedded after its document prefix, each question after its query prefix, and the index's space names both",
+        written.len() == 2 && written.iter().all(|t| t.starts_with("search_document: ")) && asked == [json!(["search_query: harbour lantern audit"])]
+            && emptied.body["space"]["document_prefix"] == "search_document: " && emptied.body["space"]["query_prefix"] == "search_query: ",
+        json!({ "written": written, "asked": asked, "space": emptied.body["space"] }),
     );
     Ok(())
 }
@@ -367,6 +377,25 @@ fn checks(s: &mut Suite, api: &Api) -> Result<(Keys, String)> {
     let deleted = api.signed(&owner, "DELETE", &format!("/api/f/{doomed}"), None)?;
     let dropped = s.eventually(wait, || index_of(api, &doomed, Some(life_d), None).is_ok_and(|i| ended_empty(&i)));
     s.ok("a deleted fragment's index is ended with its other data, its sources and chunks gone", w.status == 200 && deleted.status == 200 && dropped, json!({ "write": w.body }));
+
+    // ---- a Session Archive's import writes its search (cli/src/session/search.rs)
+    let home = s.dir("search-archive-home");
+    s.login(api, &home);
+    let person = s.cli_keys(&home).context("the CLI logged in")?;
+    let root = s.dir("search-archive-export");
+    super::sessions::export(&root)?;
+    let import = |s: &Suite| s.cli_json(api, &home, &["session", "import", root.to_str().expect("utf-8 path"), "--json"]);
+    let first = import(s)?;
+    let archive = first["archive"].as_str().unwrap_or_default().to_string();
+    let found = api.signed(&person, "POST", &format!("/api/f/{archive}/search"), Some(&json!({ "q": "plant beans" })))?;
+    let again = import(s)?;
+    s.ok(
+        "an import writes its archive's search, each conversation it keeps a source of its turns, which its person finds by their words; the same import again writes nothing",
+        first["search"]["state"] == "written" && first["search"]["written"] == 3 && first["search"]["refused_count"] == 0
+            && found.status == 200 && found.body["results"][0]["source"] == "sessions/hermes-e2e_beans.json"
+            && again["search"]["state"] == "written" && again["search"]["written"] == 0 && again["search"]["unchanged"] == 3,
+        json!({ "first": first["search"], "found": found.body["results"][0], "again": again["search"] }),
+    );
     Ok((owner, name))
 }
 
