@@ -572,8 +572,10 @@ pub fn dir_name_ok(fragment: &str) -> bool {
     !fragment.is_empty() && fragment.len() <= 96 && fragment.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 
-/// A core's command line: its state under `dir`, its bot API on `port`
-/// (loopback), and the servers a test names (else the core's presets).
+/// A core's command line: its state under `dir`, its bot API on loopback,
+/// on a port the kernel picks as the core binds it (`-p 0`; the bridge
+/// reads it back, `listening_port`), and the servers a test names (else
+/// the core's presets).
 /// Every connection through the bridge's own proxy (`socks`, on loopback, at
 /// `socks`), which sends SimpleX's file servers through the platform's XFTP
 /// relay, and the rest straight out: the hosts it names, never their onion
@@ -585,8 +587,8 @@ pub fn dir_name_ok(fragment: &str) -> bool {
 /// preview computer, 2026-10-25: each SMP preset reset there, and the same
 /// servers answering on 5223). XFTP's servers are on 443 alone, so a file
 /// arrives only through the relay (docs/bridge.md, "SimpleX").
-fn core_args(cfg: &Config, dir: &Path, port: u16, name: &str, socks: Option<u16>) -> Vec<std::ffi::OsString> {
-    let mut args: Vec<std::ffi::OsString> = vec!["-d".into(), dir.join("sx").into(), "-p".into(), port.to_string().into()];
+fn core_args(cfg: &Config, dir: &Path, name: &str, socks: Option<u16>) -> Vec<std::ffi::OsString> {
+    let mut args: Vec<std::ffi::OsString> = vec!["-d".into(), dir.join("sx").into(), "-p".into(), "0".into()];
     args.extend(["--files-folder".into(), dir.join("files").into(), "--temp-folder".into(), dir.join("tmp").into()]);
     for a in ["-y", "--mute", "--create-bot-display-name", name, "--create-bot-allow-files", "--smp-web-port-servers", "off"] {
         args.push(a.into());
@@ -1416,13 +1418,6 @@ impl Manager {
                 return;
             }
         }
-        let port = match std::net::TcpListener::bind("127.0.0.1:0").and_then(|l| l.local_addr()) {
-            Ok(a) => a.port(),
-            Err(e) => {
-                s.note = Some(format!("SimpleX could not start: no port: {e}"));
-                return;
-            }
-        };
         // a profile its database lacks (its first start) is made with its
         // label, which the core always takes (it makes none of a name it
         // refuses, and would not start), and named once it is up (`profile`)
@@ -1449,7 +1444,7 @@ impl Manager {
                 Ok(())
             });
         }
-        cmd.args(core_args(&cfg, &s.dir, port, &name, socks));
+        cmd.args(core_args(&cfg, &s.dir, &name, socks));
         cmd.current_dir(&s.dir).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped()).kill_on_drop(true);
         let mut child = match cmd.spawn() {
             Ok(c) => c,
@@ -1471,6 +1466,7 @@ impl Manager {
         let (writer, writes) = mpsc::channel::<String>(WRITER_MAX);
         let (ended, exited) = watch::channel(false);
         CORES.lock().expect("not poisoned").insert(pid);
+        let gone = exited.clone();
         s.core = Some(Core { pid, writer, exited, planned: false });
         crate::ev!("simplex.core_started", { "agent": f, "epoch": epoch, "pid": pid });
         // its end, with its last words
@@ -1502,15 +1498,22 @@ impl Manager {
         // its bot API, then its frames
         let agent = f.to_string();
         tokio::spawn(async move {
-            let url = format!("ws://127.0.0.1:{port}");
             let t0 = Instant::now();
             // bounded by CONNECT_MS_MAX
             let ws = loop {
-                match tokio_tungstenite::connect_async(url.as_str()).await {
-                    Ok((ws, _)) => break ws,
+                // ended: nothing of its to dial, and its pid may be another's
+                if *gone.borrow() {
+                    return;
+                }
+                let dialed = match listening_port(pid) {
+                    Some(port) => tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}")).await.map(|(ws, _)| ws).map_err(|e| e.to_string()),
+                    None => Err("its bot API is not listening".to_string()),
+                };
+                match dialed {
+                    Ok(ws) => break ws,
                     Err(_) if t0.elapsed() < Duration::from_millis(CONNECT_MS_MAX) => tokio::time::sleep(Duration::from_millis(200)).await,
                     Err(e) => {
-                        crate::ev!("simplex.api_unreached", { "agent": agent, "error": e.to_string() });
+                        crate::ev!("simplex.api_unreached", { "agent": agent, "error": e });
                         // SAFETY: a signal to the core's own process, by its pid
                         unsafe { libc::kill(pid as i32, libc::SIGKILL) };
                         return;
@@ -2030,6 +2033,36 @@ pub async fn kill_strays(cfg: &Config) {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     crate::ev!("simplex.strays_killed", { "pids": strays, "left": strays.iter().filter(|p| alive(**p)).count() });
+}
+
+/// The port a core's bot API listens on, read from `/proc`: the core binds
+/// one the kernel picks (`-p 0`) and reports no bound port (simplex-chat
+/// v7.0.3 has no flag, port file or log line for it), so its own sockets'
+/// inodes (`/proc/<pid>/fd`) are found among the loopback listeners
+/// (`/proc/<pid>/net/tcp`). A port picked for it and let go before it bound
+/// was not its own: another socket bound to port 0 could be handed it, and
+/// two cores started together the same one, so one agent's bridge dialed
+/// another agent's core. None until it listens; Linux's alone, as the core
+/// is (elsewhere there is no `/proc`, and no core).
+fn listening_port(pid: u32) -> Option<u16> {
+    let inodes: BTreeSet<u64> = std::fs::read_dir(format!("/proc/{pid}/fd")).ok()?.flatten().filter_map(|e| std::fs::read_link(e.path()).ok()?.to_str()?.strip_prefix("socket:[")?.strip_suffix(']')?.parse().ok()).collect();
+    loopback_listener(&std::fs::read_to_string(format!("/proc/{pid}/net/tcp")).ok()?, &inodes)
+}
+
+/// The port of the one loopback listener among `inodes` in a
+/// `/proc/net/tcp` table: a second is not told from the bot API, so none.
+fn loopback_listener(table: &str, inodes: &BTreeSet<u64>) -> Option<u16> {
+    let mut ports = table.lines().skip(1).filter_map(|row| {
+        // sl local_address rem_address st tx_queue:rx_queue tr:tm->when retrnsmt uid timeout inode
+        let cols: Vec<&str> = row.split_whitespace().collect();
+        let (local, state, inode) = (cols.get(1)?, cols.get(3)?, cols.get(9)?.parse::<u64>().ok()?);
+        let (addr, port) = local.split_once(':')?;
+        // the address as the kernel's u32 in host order: its bytes are the address's
+        let loopback = u32::from_str_radix(addr, 16).is_ok_and(|a| std::net::Ipv4Addr::from(a.to_ne_bytes()).is_loopback());
+        (*state == "0A" && loopback && inodes.contains(&inode)).then(|| u16::from_str_radix(port, 16).ok()).flatten()
+    });
+    let port = ports.next()?;
+    ports.next().is_none().then_some(port)
 }
 
 /// SIGKILL to every core still running (the bridge's forced exit).
@@ -2936,23 +2969,77 @@ mod tests {
         }
     }
 
+    /// Goal: a core is dialed on its own listener, read from `/proc`.
+    /// Valid: the one loopback listener among its sockets. Invalid: another
+    /// process's listener, one of its own not on loopback, a connection
+    /// (no listener), and two loopback listeners of its own (not told
+    /// apart): none of them dialed.
+    #[test]
+    fn a_core_is_dialed_on_its_own_listener() {
+        // as the kernel writes it: the address's u32 in host order
+        let at = |a: [u8; 4], port: u16| format!("{:08X}:{port:04X}", u32::from_ne_bytes(a));
+        let row = |sl: u32, local: String, remote: String, state: &str, inode: u64| format!("{sl:4}: {local} {remote} {state} 00000000:00000000 00:00000000 00000000  1000        0 {inode} 1 0000000000000000 100 0 0 10 0");
+        let (lo, any, none) = ([127, 0, 0, 1], [0, 0, 0, 0], at([0, 0, 0, 0], 0));
+        let table = ["  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode".to_string(), row(0, at(lo, 46531), none.clone(), "0A", 41), row(1, at(lo, 8080), none.clone(), "0A", 42), row(2, at(any, 8081), none.clone(), "0A", 43), row(3, at(lo, 8082), at(lo, 46531), "01", 44)].join("\n");
+        let of = |inodes: &[u64]| loopback_listener(&table, &inodes.iter().copied().collect());
+        assert_eq!(of(&[41]), Some(46531));
+        assert_eq!(of(&[41, 43, 44]), Some(46531), "its own loopback listener, among its other sockets");
+        assert_eq!(of(&[43, 44]), None, "not on loopback, or no listener");
+        assert_eq!(of(&[]), None, "another's listener is never its");
+        assert_eq!(of(&[41, 42]), None, "two of its own: neither");
+        assert_eq!(loopback_listener(&table[..table.find('\n').expect("a header")], &[41].into_iter().collect()), None, "an empty table");
+    }
+
+    /// Goal: two cores started together each get their own bridge: each
+    /// is dialed on the port its own process listens on, never the
+    /// other's, as `/proc` says, and one not listening yet on none.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn two_cores_started_together_are_each_dialed_on_their_own() {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::process::CommandExt;
+        // a core's stand-in: a process whose listener is its own (handed
+        // to it, the parent's copy closed after), or that has none yet
+        let core = |listener: Option<&std::net::TcpListener>| {
+            let mut cmd = std::process::Command::new("sleep");
+            cmd.arg("30");
+            if let Some(fd) = listener.map(AsRawFd::as_raw_fd) {
+                // SAFETY: only an async-signal-safe call, in the child before its exec
+                unsafe {
+                    cmd.pre_exec(move || if libc::fcntl(fd, libc::F_SETFD, 0) == -1 { Err(std::io::Error::last_os_error()) } else { Ok(()) });
+                }
+            }
+            cmd.spawn().expect("a stand-in core")
+        };
+        let (a, b) = (std::net::TcpListener::bind("127.0.0.1:0").expect("a port"), std::net::TcpListener::bind("127.0.0.1:0").expect("a port"));
+        let ports = (a.local_addr().expect("its port").port(), b.local_addr().expect("its port").port());
+        let mut cores = [core(Some(&a)), core(Some(&b)), core(None)];
+        drop((a, b));
+        let dialed: Vec<Option<u16>> = cores.iter().map(|c| listening_port(c.id())).collect();
+        for c in &mut cores {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+        assert_eq!(dialed, [Some(ports.0), Some(ports.1), None]);
+    }
+
     /// Goal: a core reaches SMP servers on their own port, never on 443
     /// (Cloudflare Containers reset a TLS hello there that names no
     /// server), with the presets or a test's servers alike.
     #[test]
     fn a_core_reaches_smp_servers_off_443() {
-        let words = |cfg: &Config| core_args(cfg, Path::new("/data/simplex/a"), 5225, "Juniper", Some(40123)).into_iter().map(|a| a.into_string().expect("text")).collect::<Vec<_>>();
+        let words = |cfg: &Config| core_args(cfg, Path::new("/data/simplex/a"), "Juniper", Some(40123)).into_iter().map(|a| a.into_string().expect("text")).collect::<Vec<_>>();
         let presets = Config { bin: PathBuf::from("/nowhere"), dir: PathBuf::from("/data/simplex"), smp: None, xftp: None };
         let lab = Config { smp: Some("smp://fp@smp.lab".into()), xftp: Some("xftp://fp@xftp.lab".into()), ..presets.clone() };
         for args in [words(&presets), words(&lab)] {
             assert!(args.windows(2).any(|w| w == ["--smp-web-port-servers", "off"]), "{args:?}");
-            assert!(args.windows(2).any(|w| w == ["-p", "5225"]) && args.windows(2).any(|w| w == ["-d", "/data/simplex/a/sx"]), "{args:?}");
+            assert!(args.windows(2).any(|w| w == ["-p", "0"]) && args.windows(2).any(|w| w == ["-d", "/data/simplex/a/sx"]), "its port its own pick: {args:?}");
         }
         assert!(!words(&presets).contains(&"-s".to_string()), "the presets: no server named");
         for args in [words(&presets), words(&lab)] {
             assert!(args.windows(2).any(|w| w == ["--socks-proxy", "127.0.0.1:40123"]) && args.windows(2).any(|w| w == ["--host-mode", "public"]), "through the bridge's proxy, by name: {args:?}");
         }
-        let unproxied = core_args(&presets, Path::new("/d"), 1, "J", None).into_iter().map(|a| a.into_string().expect("text")).collect::<Vec<_>>();
+        let unproxied = core_args(&presets, Path::new("/d"), "J", None).into_iter().map(|a| a.into_string().expect("text")).collect::<Vec<_>>();
         assert!(!unproxied.iter().any(|a| a.starts_with("--socks") || a == "--host-mode"), "no proxy bound: straight out");
         assert!(words(&lab).windows(2).any(|w| w == ["-s", "smp://fp@smp.lab"]));
     }

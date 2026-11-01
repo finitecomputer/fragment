@@ -439,7 +439,8 @@ The deployment's `connectors` (`FRAGMENT_CONNECTORS`;
 and the exact endpoints a computer's relay carries for each: `[{id,
 relayTargets: [{host, port}]}]`, each an exact public DNS name on a
 nonzero port. Absent, the cell's default: `simplex`, with `relay::HOSTS`
-on 443. `[]` is the kill switch: no door is linked, redeemed or checked,
+on 443, and `telegram` (a hosted connector, templates/telegram: no
+relay). `[]` is the kill switch: no door is linked, redeemed or checked,
 and no relay opens; an owner may still unlink. A computer's relay offer
 and admission read the same policy, for the connectors its agents are
 allowed; the relay's bounds stay the computer's.
@@ -619,8 +620,16 @@ agent; their account pays.
 
 What our Hermes image guarantees beyond the contract:
 
-- **One profile per agent**, named as its agent fragment, holding its
-  `SOUL.md`, `memories/` and `skills/`, synced both ways with it.
+- **One profile per agent of Hermes'**, named as its agent fragment,
+  holding its `SOUL.md`, `memories/` and `skills/`, synced both ways with
+  it. An agent whose `agent.json` names another runtime (Claude) has no
+  profile, desktop, route or sync: the boot reads `runtime` as the bridge
+  does (`with_runtimes`), and the ready file names it at once, for the
+  bridge to run on its runtime. A start reads every agent's before it
+  writes or retires a profile, asking again until each answers, so a
+  failed read never retires a Hermes agent's profile. One switched to another runtime while
+  the computer runs loses its desktop within 10 s, its profile retired at
+  the next start; switched back, its profile is written again.
 - **Its `agent.json`**, read at boot and every 10 s while awake (a change
   is the next turn's, nothing restarted): `tier` (`cheap` unless it says
   `medium`; `high` only with `FRAGMENT_HIGH_TIER=on`, decision 23),

@@ -34,6 +34,7 @@ use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
 use fragment_bridge::api::Api;
+use fragment_bridge::driver::{with_runtimes, RuntimeNames};
 use fragment_bridge::ev;
 use fragment_bridge::runtime::relay::wire;
 use fragment_bridge::runtime::Agent;
@@ -869,11 +870,11 @@ fn spawn_bridge(card_timeout_s: u64) -> Option<Child> {
     }
 }
 
-/// The bridge's screens file (each agent's own desktop), then its ready
-/// file (every agent whose profile is written): a screen is named before
-/// its agent runs, and goes with it.
+/// The bridge's screens file (each of Hermes' agents' own desktop), then its
+/// ready file (every agent it may run: agents.rs, `ready_file`): a screen is
+/// named before its agent runs, and goes with it.
 fn write_ready(agents: &[Agent], home: &Path) {
-    write_whole(Path::new(&format!("{RUN}/{SCREENS_FILE}")), &desktop::screens_file(agents, home), None);
+    write_whole(Path::new(&format!("{RUN}/{SCREENS_FILE}")), &desktop::screens_file(&agents::hermes(agents), home), None);
     write_whole(Path::new(&format!("{RUN}/{READY_FILE}")), &agents::ready_file(agents), None);
 }
 
@@ -971,11 +972,14 @@ async fn ask_gateway(home: &Path, verb: &str) -> Result<serde_json::Value, Strin
 }
 
 /// A change of the computer's agents while it is awake (agents.rs), carried
-/// out with nothing restarted: each new agent's profile is written, the
-/// gateway is asked to serve it (`rescan-profiles`, as Hermes' own `profile
-/// create` asks), and then the ready file names it, so the bridge hands it
-/// no turn before its profile is whole. A removed agent leaves the ready
-/// file, so the bridge stops at once; its profile waits for the next boot.
+/// out with nothing restarted. `change` is of the agents Hermes runs: each
+/// new one's profile is written, the gateway is asked to serve it
+/// (`rescan-profiles`, as Hermes' own `profile create` asks), and then the
+/// ready file names it, so the bridge hands it no turn before its profile is
+/// whole. One Hermes no longer runs (it left, or names another runtime)
+/// loses its screen; its profile waits for the next boot. The ready file
+/// names `now`, every agent the bridge may run: one that left leaves it, so
+/// the bridge stops at once.
 #[allow(clippy::too_many_arguments)]
 async fn follow_agents(api: &Api, change: &agents::Change, now: &[Agent], home: &Path, ids: Option<(u32, u32)>, route: &hermes::Route, credential_env: &[String], team: &[hermes::Teammate]) {
     let t = Instant::now();
@@ -1179,9 +1183,29 @@ async fn boot_main() {
             Err(e) => fail(&format!("GET /api/computer: {e}")),
         }
     };
-    // What the boot runs: the agents read at its start, then as they change;
-    // and the route's models' ids, as the deployment names them
-    let mut agents = computer.agents.clone();
+    // What the boot runs: the agents read at its start, then as they change,
+    // each with its runtime as its agent.json names it (read as the bridge
+    // reads it): a Hermes profile only for an agent of Hermes'
+    // (agents.rs, `hermes`). At start every agent's is read before anything
+    // is done with the profiles, asked again as the computer is: one not
+    // read is no agent of another runtime, and its profile, its session in
+    // it, is never retired for it (Alex on #887). And the route's models'
+    // ids, as the deployment names them.
+    let runtime_names = RuntimeNames::default();
+    let started = Instant::now();
+    let mut backoff = fragment_bridge::net::Backoff::default();
+    let mut agents = loop {
+        let (agents, unread) = with_runtimes(&api, computer.agents.clone(), &runtime_names, false).await;
+        if unread == 0 {
+            break agents;
+        }
+        if started.elapsed() >= Duration::from_secs(120) {
+            fail(&format!("{unread} agents' agent.json unread"));
+        }
+        ev!("boot.runtimes_unread", { "agents": unread });
+        tokio::time::sleep(Duration::from_millis(backoff.next_ms())).await;
+    };
+    let hermes_agents = agents::hermes(&agents);
     let mut credential_env = computer.credential_env.clone();
     let mut route = hermes::Route::new(&model, computer.models.as_ref());
     ev!("boot.model_ids", { "given": computer.models.is_some(), "ids": route.ids });
@@ -1189,7 +1213,7 @@ async fn boot_main() {
     // Python takes about half a second), beside the profiles' writes, which
     // touch no database; waited for before the gateway starts.
     let ending = {
-        let (agents, home) = (agents.clone(), home.clone());
+        let (agents, home) = (hermes_agents.clone(), home.clone());
         tokio::task::spawn_blocking(move || end_previous_life(&agents, &home))
     };
 
@@ -1200,7 +1224,7 @@ async fn boot_main() {
     // HERMES_BOOT_SCREEN_IDLE_MS: a test's shorter idle bound for desktops
     let (screen_idle_ms, screen_idle_every_ms) = desktop::idle_bounds(env("HERMES_BOOT_SCREEN_IDLE_MS").as_deref());
     // each agent's route, in the gateway's config (bots.rs, `profile_routes`)
-    let routes = bots::profile_routes(&agents, &route_chats(&api, &agents).await);
+    let routes = bots::profile_routes(&hermes_agents, &route_chats(&api, &hermes_agents).await);
     let managed = hermes::managed_config(&lean, card_timeout_s, screen_idle_ms) + &routes;
     std::fs::write("/etc/hermes/config.yaml", managed).unwrap_or_else(|e| fail(&format!("/etc/hermes/config.yaml: {e}")));
     let default_cfg = home.join("config.yaml");
@@ -1216,8 +1240,9 @@ async fn boot_main() {
     // Hermes skips an external dir it does not find, until the profile's
     // config changes. What it holds is installed off the boot's path.
     managed_dir();
+    // every agent is its teammates', whatever runs it
     let (_, mut team) = team_of(&api, &agents, &home).await;
-    profiles(&api, &agents, &home, ids, &route, &credential_env, &team).await;
+    profiles(&api, &hermes_agents, &home, ids, &route, &credential_env, &team).await;
     ev!("boot.configured", { "agents": agents.len(), "ms": t0.elapsed().as_millis() as u64 });
 
     match tokio::time::timeout(Duration::from_millis(END_PREVIOUS_LIFE_MS_MAX), ending).await {
@@ -1242,6 +1267,8 @@ async fn boot_main() {
     let mut last_sync = Instant::now();
     let mut last_agents = Instant::now();
     let mut last_models = Instant::now();
+    // every agent's runtime is read again on its model's cadence
+    let mut last_runtimes = Instant::now();
     // HERMES_BOOT_MODEL_MS: a test's cadence for reading agent.json again, at least 1 s.
     let models_every = env("HERMES_BOOT_MODEL_MS").and_then(|v| v.parse::<u64>().ok()).map_or(MODEL_EVERY_MS, |v| v.max(1_000));
     let high_on = env("FRAGMENT_HIGH_TIER").as_deref() == Some("on");
@@ -1255,7 +1282,7 @@ async fn boot_main() {
     let skills_every = env("HERMES_BOOT_SKILLS_MS").and_then(|v| v.parse::<u64>().ok()).map_or(SKILLS_EVERY_MS, |v| v.max(1_000));
     let owner = computer.owner.clone();
     let skills_found = SkillsFound::default();
-    let mut skills_task = spawn_skills(&api, &agents, &owner, &skills_found, &quiet);
+    let mut skills_task = spawn_skills(&api, &hermes_agents, &owner, &skills_found, &quiet);
     let mut last_skills = Instant::now();
     // idle desktops: looked at on their cadence, never while held
     let mut last_idle_look = Instant::now();
@@ -1289,21 +1316,21 @@ async fn boot_main() {
         // read them as, then on their cadence (sooner while the owner has no
         // skills fragment: the shell makes one), never two at once
         let skills_due = match &skills_task {
-            None => !agents.is_empty(),
+            None => !agents::hermes(&agents).is_empty(),
             Some(t) => {
                 let found = *skills_found.lock().expect("the skills' state is never poisoned");
                 t.is_finished() && last_skills.elapsed() >= Duration::from_millis(skills::next_install_ms(found, skills_every))
             }
         };
         if skills_due {
-            skills_task = spawn_skills(&api, &agents, &owner, &skills_found, &quiet);
+            skills_task = spawn_skills(&api, &agents::hermes(&agents), &owner, &skills_found, &quiet);
             last_skills = Instant::now();
         }
         // a desktop no one uses is stopped (desktop.rs); not while held, so
         // nothing under /data moves under a hold for it
         if !quiet.paused() && last_idle_look.elapsed() >= Duration::from_millis(screen_idle_every_ms) {
             last_idle_look = Instant::now();
-            stop_idle_desktops(&agents, &home, screen_idle_ms, &stopping);
+            stop_idle_desktops(&agents::hermes(&agents), &home, screen_idle_ms, &stopping);
         }
         // What waits on the platform (each call up to its 15 s), cut short by
         // SIGTERM: a slow platform never holds the stop. Cut, it is done
@@ -1326,7 +1353,7 @@ async fn boot_main() {
                         // at its next start
                         if c.credential_env != credential_env {
                             credential_env = c.credential_env.clone();
-                            for a in agents.iter().filter(|a| c.agents.iter().any(|n| n.fragment == a.fragment)) {
+                            for a in agents::hermes(&agents).iter().filter(|a| c.agents.iter().any(|n| n.fragment == a.fragment)) {
                                 write_profile(&api, a, &home, ids, &route, &credential_env, &team).await;
                             }
                         }
@@ -1335,16 +1362,25 @@ async fn boot_main() {
                         if c.models.is_some() && c.models != Some(route.ids.clone()) {
                             route = hermes::Route::new(&model, c.models.as_ref());
                             ev!("profile.model_ids", { "ids": route.ids });
-                            for a in agents.iter().filter(|a| c.agents.iter().any(|n| n.fragment == a.fragment)) {
+                            for a in agents::hermes(&agents).iter().filter(|a| c.agents.iter().any(|n| n.fragment == a.fragment)) {
                                 let face = read_face(&api, a).await;
                                 write_config(&api, a, &hermes::profile_dir(&home, &a.fragment), ids, &route, &credential_env, high_on, &face, &team).await;
                             }
                         }
-                        let change = agents::diff(&agents, &c.agents);
-                        if !change.is_empty() {
-                            follow_agents(&api, &change, &c.agents, &home, ids, &route, &credential_env, &team).await;
+                        // each new agent's runtime, and every agent's again on
+                        // its model's cadence: one that names another runtime
+                        // now leaves Hermes as a removed agent does, and one
+                        // that names Hermes again is added
+                        let again = last_runtimes.elapsed() >= Duration::from_millis(models_every);
+                        if again {
+                            last_runtimes = Instant::now();
                         }
-                        agents = c.agents;
+                        let (read, _) = with_runtimes(&api, c.agents, &runtime_names, again).await;
+                        let change = agents::diff(&agents::hermes(&agents), &agents::hermes(&read));
+                        if !change.is_empty() || agents::ready_file(&agents) != agents::ready_file(&read) {
+                            follow_agents(&api, &change, &read, &home, ids, &route, &credential_env, &team).await;
+                        }
+                        agents = read;
                     }
                     // once per outage: the next read that answers ends it
                     Err(e) if !agents_unread => {
@@ -1361,7 +1397,7 @@ async fn boot_main() {
                 // and its teammates, as they are named and doing now
                 let faces;
                 (faces, team) = team_of(&api, &agents, &home).await;
-                for (a, face) in agents.iter().zip(&faces) {
+                for (a, face) in agents.iter().zip(&faces).filter(|(a, _)| agents::of_hermes(a)) {
                     let dir = hermes::profile_dir(&home, &a.fragment);
                     write_config(&api, a, &dir, ids, &route, &credential_env, high_on, face, &team).await;
                     write_identity(a, &dir, ids, face);
@@ -1369,7 +1405,7 @@ async fn boot_main() {
             }
             if last_sync.elapsed() > Duration::from_millis(sync_every) {
                 last_sync = Instant::now();
-                for a in &agents {
+                for a in &agents::hermes(&agents) {
                     let dir = hermes::profile_dir(&home, &a.fragment);
                     match sync::round(&api, a, &dir, &own).await {
                         Ok(d) if d != sync::Done::default() => {

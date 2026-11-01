@@ -1,0 +1,1 @@
+../../chat/site/tooltips.js

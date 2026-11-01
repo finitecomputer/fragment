@@ -520,8 +520,8 @@ fn runtime_result(r: Result<Result<(), crate::runtime::RuntimeError>, tokio::tas
 fn reread(api: &Api, simplex: bool, names: &RuntimeNames, inbox: &mpsc::Sender<Msg>) {
     let (api, names, inbox) = (api.clone(), names.clone(), inbox.clone());
     tokio::spawn(async move {
-        if let Some(c) = ask_once(&api, simplex).await {
-            let (c, _) = with_runtimes(&api, c, &names).await;
+        if let Some(mut c) = ask_once(&api, simplex).await {
+            (c.agents, _) = with_runtimes(&api, c.agents, &names, true).await;
             let _ = inbox.send(Msg::Computer(c)).await;
         }
     });
@@ -529,16 +529,20 @@ fn reread(api: &Api, simplex: bool, names: &RuntimeNames, inbox: &mpsc::Sender<M
 
 /// Each agent's runtime as its `agent.json` named it last (`None`: it names
 /// none), by agent fragment: at most the agents the computer lists.
-type RuntimeNames = Arc<Mutex<HashMap<String, Option<String>>>>;
+pub type RuntimeNames = Arc<Mutex<HashMap<String, Option<String>>>>;
 
 /// The computer's agents, each with the runtime its `agent.json` names
-/// (`runtime::named`; no file names none), read as the computer is: at
-/// start, every minute, and as the ready file changes. One whose file does
-/// not read keeps what it named last; one never read is left out (counted
-/// in the second value), as an agent not ready is, so no turn of it goes to
-/// a runtime it does not name. An agent's runtime changes within a minute.
-async fn with_runtimes(api: &Api, mut c: api::Computer, names: &RuntimeNames) -> (api::Computer, usize) {
-    let reads = c.agents.iter().map(|a| async move { (a.fragment.clone(), api.file(&a.fragment, &a.fragment, "agent.json", api::AGENT_JSON_MAX_BYTES).await) });
+/// (`runtime::named`; no file names none): every agent's file read again
+/// when `again`, else only one never read. The bridge reads them as it
+/// reads the computer (at start, every minute, and as the ready file
+/// changes), and a Hermes image's boot as it reads its agents, which runs
+/// a Hermes profile only for an agent of Hermes'. One whose file does not
+/// read keeps what it named last; one never read is left out (counted in
+/// the second value), as an agent not ready is, so no turn of it goes to a
+/// runtime it does not name. An agent's runtime changes within a minute.
+pub async fn with_runtimes(api: &Api, mut agents: Vec<Agent>, names: &RuntimeNames, again: bool) -> (Vec<Agent>, usize) {
+    let known: Vec<String> = if again { Vec::new() } else { names.lock().expect("runtime names").keys().cloned().collect() };
+    let reads = agents.iter().filter(|a| !known.contains(&a.fragment)).map(|a| async move { (a.fragment.clone(), api.file(&a.fragment, &a.fragment, "agent.json", api::AGENT_JSON_MAX_BYTES).await) });
     let read = futures_util::future::join_all(reads).await;
     let mut named = names.lock().expect("runtime names");
     for (agent, r) in read {
@@ -555,14 +559,14 @@ async fn with_runtimes(api: &Api, mut c: api::Computer, names: &RuntimeNames) ->
         }
         named.insert(agent, now);
     }
-    named.retain(|agent, _| c.agents.iter().any(|a| &a.fragment == agent));
-    let listed = c.agents.len();
-    c.agents.retain(|a| named.contains_key(&a.fragment));
-    for a in &mut c.agents {
+    named.retain(|agent, _| agents.iter().any(|a| &a.fragment == agent));
+    let listed = agents.len();
+    agents.retain(|a| named.contains_key(&a.fragment));
+    for a in &mut agents {
         a.runtime = named[&a.fragment].clone();
     }
-    let unread = listed - c.agents.len();
-    (c, unread)
+    let unread = listed - agents.len();
+    (agents, unread)
 }
 
 async fn ask_once(api: &Api, simplex: bool) -> Option<api::Computer> {
@@ -582,8 +586,9 @@ async fn ask_until(api: &Api, simplex: bool, names: &RuntimeNames, stop: watch::
     let mut backoff = Backoff::default();
     // bounded by the platform's answer, or `stop`
     loop {
-        if let Some(c) = ask_once(api, simplex).await {
-            let (c, unread) = with_runtimes(api, c, names).await;
+        if let Some(mut c) = ask_once(api, simplex).await {
+            let unread;
+            (c.agents, unread) = with_runtimes(api, c.agents, names, true).await;
             if unread == 0 {
                 return Some(c);
             }
@@ -1380,8 +1385,20 @@ impl Sent {
 pub(crate) async fn post(api: &Api, fragment: &str, agent: &str, channel: &str, id: &str, mut body: Value, files: &[LocalFile], door: Option<&crate::simplex::door::Key>, tries: u32, stop: watch::Receiver<bool>) -> Sent {
     assert!(tries >= 1, "a post is tried");
     let mut backoff = Backoff::default();
+    // its files refused here (an agent that is a viewer of a connector's
+    // chat may post there, not upload): its words go alone, saying so
+    let mut files_refused = false;
     for attempt in 1..=tries {
-        let uploaded = upload(api, fragment, agent, files).await;
+        let uploaded = match if files_refused { Ok(Vec::new()) } else { upload(api, fragment, agent, files).await } {
+            Err(e) if e.status() == Some(403) && !files.is_empty() => {
+                crate::ev!("upload.refused", { "fragment": fragment, "channel": channel, "id": id, "files": files.len() });
+                files_refused = true;
+                let said = body["text"].as_str().unwrap_or("").trim_end().to_string();
+                body["text"] = json!(format!("{said}{}({} could not be attached here.)", if said.is_empty() { "" } else { "\n\n" }, if files.len() == 1 { "Its file" } else { "Its files" }));
+                Ok(Vec::new())
+            }
+            other => other,
+        };
         let result = match uploaded {
             Ok(refs) => {
                 if !refs.is_empty() {

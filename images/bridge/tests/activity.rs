@@ -91,9 +91,9 @@ async fn an_observed_end_is_a_step_and_a_disconnect_invents_none() {
     observer.next().await.unwrap().unwrap();
     let asked = fake.say(&chat, &person("paul"), json!({ "text": "use a tool slow without observations" }));
     let turn = fragment_bridge::records::turn_id("juniper--k3x9", &chat, "chat", asked["seq"].as_u64().unwrap());
-    // a call ends in a turn Hermes holds, so only once the turn reached it
-    // (its `turn.start` is posted before the relay hands it on)
-    support::until(10_000, "the turn reached Hermes", || hermes.with(|s| !s.heard.is_empty())).await;
+    // a call ends in a turn Hermes runs, so only once its turn is under way
+    // (past its startup bracket, whose `✅` a step before it would make the end)
+    support::until(10_000, "the turn under way in Hermes", || hermes.with(|s| !s.begun.is_empty())).await;
     let end = json!({ "turn": turn, "tool": "terminal", "args": "make", "excerpt": "Exit code: 7", "tool_call_id": "call-failed", "status": "failed", "duration_ms": 2 });
     assert_eq!(said(&mut observer, &end.to_string()).await, "observed");
     drop(observer);
@@ -123,7 +123,7 @@ async fn a_call_asked_for_is_recorded_before_its_end() {
     observer.next().await.unwrap().unwrap();
     let asked = fake.say(&chat, &person("paul"), json!({ "text": "use a tool slow without observations" }));
     let turn = fragment_bridge::records::turn_id("juniper--k3x9", &chat, "chat", asked["seq"].as_u64().unwrap());
-    support::until(10_000, "the turn reached Hermes", || hermes.with(|s| !s.heard.is_empty())).await;
+    support::until(10_000, "the turn under way in Hermes", || hermes.with(|s| !s.begun.is_empty())).await;
     let call = json!({ "turn": turn, "response": "f00d-1", "call": { "position": 0, "tool_call_id": "call-deploy", "tool": "terminal", "args": "make deploy" } });
     assert_eq!(said(&mut observer, &call.to_string()).await, "called");
     assert_eq!(said(&mut observer, &call.to_string()).await, "called", "said again");
@@ -171,7 +171,7 @@ async fn a_reused_call_id_is_another_call_across_a_crash() {
     // a turn that runs until its card is answered, so a crash cuts it
     let asked = fake.say(&chat, &person("paul"), json!({ "text": "ship it, something risky" }));
     let turn = fragment_bridge::records::turn_id("juniper--k3x9", &chat, "chat", asked["seq"].as_u64().unwrap());
-    support::until(10_000, "the turn reached Hermes", || hermes.with(|s| !s.heard.is_empty())).await;
+    support::until(10_000, "the turn under way in Hermes", || hermes.with(|s| !s.begun.is_empty())).await;
     let call = |response: &str, position: u32, id: &str, args: &str| json!({ "turn": turn, "response": response, "call": { "position": position, "tool_call_id": id, "tool": "terminal", "args": args } });
     assert_eq!(said(&mut observer, &call("f00d-1", 0, "call_0", "ls").to_string()).await, "called");
     let end = json!({ "turn": turn, "tool": "terminal", "args": "ls", "excerpt": "Exit code: 0", "tool_call_id": "call_0", "status": "completed", "duration_ms": 3, "response": "f00d-1" });

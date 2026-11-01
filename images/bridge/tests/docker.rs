@@ -902,6 +902,98 @@ async fn hermes_running_with_modes(tier: Option<&str>) -> (Fake, Model, String, 
     (fake, model, chat, c)
 }
 
+/// Goal (FIN-258): an agent whose `agent.json` names another runtime
+/// (Claude) gets no Hermes profile and no desktop, and the bridge's ready
+/// file names it at once: its turns go to the runtime it names, which this
+/// image does not run yet, so they end saying so. Valid: an agent switched
+/// to Claude while the computer runs loses its screen at once, its profile
+/// retired at the next start, as an unassigned agent's is; switched back,
+/// its profile is written again and it answers as Hermes. Restart: the
+/// Claude agent is still profile-less after it, and a Hermes agent whose
+/// runtime the start fails to read at first keeps its profile, its session
+/// in it (Alex on #887): the start reads it again before it retires any.
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn an_agent_of_another_runtime_gets_no_hermes_profile() {
+    let (fake, _model, chat, c) = hermes_running().await;
+    let ready = |c: &Container| c.exec_out(&["cat", "/var/lib/fragment-run/agents.json"]);
+    let screens = |c: &Container| c.exec_out(&["cat", "/var/lib/fragment-run/screens.json"]);
+    let profile = |c: &Container, label: &str| c.exec(&["test", "-d", &format!("/data/hermes/profiles/{label}--k3x9")]);
+    // how often juniper's runtime was read as `runtime`: the boot and the
+    // bridge each say so when it changes (driver.rs, `with_runtimes`)
+    let read_as = |c: &Container, runtime: &str| c.logs().lines().filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok()).filter(|e| e["event"] == "agent.runtime" && e["agent"] == "juniper--k3x9" && e["runtime"] == runtime).count();
+
+    // rowan, a Claude agent, assigned while it runs, in its chat already
+    // (ready as soon as its runtime is read, no profile to wait for, so its
+    // chats are found before a chat made after it would be)
+    let workshop = fake.chat("workshop", &["rowan"]);
+    fake.add_agent_with("rowan", r#"{"tier":"cheap","runtime":"claude"}"#);
+    let t = Instant::now();
+    while !ready(&c).contains("rowan--k3x9") {
+        assert!(t.elapsed() < Duration::from_secs(30), "the ready file never named rowan: {}", ready(&c));
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    assert!(!profile(&c, "rowan") && !screens(&c).contains("rowan--k3x9"), "no profile, no desktop: {}", screens(&c));
+    let asked = fake.say(&workshop, &person("paul"), json!({ "text": "hello rowan" }));
+    let tr = fragment_bridge::records::turn_id("rowan--k3x9", &workshop, "chat", asked["seq"].as_u64().unwrap());
+    fake.until(90_000, "rowan's turn to end", |w| w.bodies(&workshop, "work", "turn.end").iter().any(|e| e["turn"] == tr)).await;
+    fake.with(|w| {
+        let end = w.bodies(&workshop, "work", "turn.end").into_iter().find(|e| e["turn"] == tr).unwrap();
+        assert_eq!(end["error"], json!(fragment_bridge::engine::refused_runtime("claude")), "its runtime's turn, refused in words: {end}");
+    });
+
+    // maple, of Hermes', and oak, unassigned before the restart
+    fake.add_agent("maple");
+    fake.add_agent("oak");
+    let t = Instant::now();
+    while !(profile(&c, "maple") && profile(&c, "oak") && ready(&c).contains("maple--k3x9")) {
+        assert!(t.elapsed() < Duration::from_secs(60), "maple's and oak's profiles: {}", ready(&c));
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    assert!(c.exec(&["/command/s6-setuidgid", "hermes", "sh", "-c", "echo kept > /data/hermes/profiles/maple--k3x9/fragment-test-marker"]));
+
+    // juniper switched to Claude: its screen goes at once, its profile at the next start
+    fake.with(|w| w.fragments.get_mut("juniper--k3x9").unwrap().files.insert("agent.json".into(), bytes::Bytes::from_static(br#"{"tier":"cheap","runtime":"claude"}"#)));
+    let t = Instant::now();
+    while screens(&c).contains("juniper--k3x9") {
+        assert!(t.elapsed() < Duration::from_secs(40), "juniper's screen stayed: {}", screens(&c));
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    assert!(ready(&c).contains("juniper--k3x9") && profile(&c, "juniper"), "still run, its profile kept until the next start");
+    fake.remove_agent("oak");
+    // the restart, its start's first read of every agent.json failed
+    let unread_before = c.logs().matches("\"boot.runtimes_unread\"").count();
+    c.sigterm();
+    fake.with(|w| w.fail_agent_json = 3);
+    c.start();
+    let t = Instant::now();
+    while !(ready(&c).contains("juniper--k3x9") && ready(&c).contains("rowan--k3x9") && ready(&c).contains("maple--k3x9")) {
+        assert!(t.elapsed() < Duration::from_secs(120), "the ready file after the restart: {}", ready(&c));
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    assert!(c.exec(&["grep", "-q", "kept", "/data/hermes/profiles/maple--k3x9/fragment-test-marker"]), "maple's profile kept whole, its runtime read again");
+    assert!(!c.exec(&["sh", "-c", "ls -d /data/hermes-retired/maple--k3x9-*"]), "maple's never retired");
+    assert!(!profile(&c, "juniper") && !profile(&c, "rowan"), "juniper's profile retired, rowan still has none");
+    assert!(c.exec(&["sh", "-c", "ls -d /data/hermes-retired/juniper--k3x9-*"]), "moved aside, never deleted");
+    assert!(!profile(&c, "oak") && c.exec(&["sh", "-c", "ls -d /data/hermes-retired/oak--k3x9-*"]), "oak, unassigned, retired");
+    assert!(c.logs().matches("\"boot.runtimes_unread\"").count() > unread_before, "the start's first reads failed, and were read again");
+
+    // back to Hermes: its profile again, and once the bridge has read it so
+    // too (within its minute), it answers as Hermes
+    let before = read_as(&c, "hermes");
+    assert_eq!(before, 2, "the boot and the bridge read it as Hermes' once, in the first life");
+    fake.with(|w| w.fragments.get_mut("juniper--k3x9").unwrap().files.insert("agent.json".into(), bytes::Bytes::from_static(br#"{"tier":"cheap"}"#)));
+    let t = Instant::now();
+    while !(profile(&c, "juniper") && screens(&c).contains("juniper--k3x9") && read_as(&c, "hermes") == before + 2) {
+        assert!(t.elapsed() < Duration::from_secs(90), "juniper never came back to Hermes: {} {}", screens(&c), read_as(&c, "hermes"));
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    let back = fake.say(&chat, &person("paul"), json!({ "text": "hello again" }));
+    let tb = fragment_bridge::records::turn_id("juniper--k3x9", &chat, "chat", back["seq"].as_u64().unwrap());
+    fake.until(180_000, "juniper's reply as Hermes", |w| w.bodies(&chat, "chat", "reply").iter().any(|r| r["turn"] == tb)).await;
+    assert!(!profile(&c, "rowan"), "rowan never had one");
+}
+
 /// Decision 65's image gate: a real Hermes background delegate finishes
 /// after its parent's reply, its result comes back through the bridge
 /// once, and the computer remains held while the child is still working.

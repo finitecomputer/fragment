@@ -49,7 +49,8 @@ computer's own:
   `/f/{f}/__live` socket;
 - what it writes: `POST …/channels/chat`, `…/channels/work` and its own
   `…/channels/tasks` (an ask's answer), `PUT …/channels/chat/draft`,
-  `PUT` and `GET …/blobs/{sha256}`;
+  `PUT` and `GET …/blobs/{sha256}` (an upload refused, as a viewer's in
+  a connector's chat, sends the reply's words alone, saying so);
 - for its owner: `GET` and `POST /api/fragments?for=` (its home, its
   SimpleX chat), and on its own fragment `GET …/status` (its name) and
   `GET …/file?path=agent.json` (its home and runtime).
@@ -269,7 +270,13 @@ a turn:
   answer, on the asking agent's own `tasks`, which that agent reads as a
   turn in the chat it asked from. The owed record is the delivery: it is
   retried under one id until the platform answers it, and nothing waits
-  or is held awake for it.
+  or is held awake for it. An asked agent taken off the computer still
+  answers an asker that stays, also when the bridge first sees it gone at
+  a start: a turn not over ends, its answer saying so (`LEFT`), and an
+  answer not yet landed is kept. The asked agent's identity is kept with
+  the turn (`Return::by`), so the answer is by it once it is gone (#722).
+  A turn saved before `by` was kept, whose agent is first seen gone at a
+  start, has no one to be by and goes unanswered, as before.
 - **`tasks` is the agent's own.** A routine or `joined` starts anything
   only from the agent fragment's own key or its owner. Another of the
   owner's agents, which may post there, is passed over.
@@ -297,7 +304,9 @@ turn in a chat in a life posts the menu on `work` (`commands`).
 An agent's owner may link the agent to their SimpleX app (decision 32;
 `simplex/mod.rs` and `run.rs` say how). The bridge runs SimpleX's own
 core, `simplex-chat`, one per linked agent, as its child process, over
-the core's bot API on loopback.
+the core's bot API on loopback: on a port the core picks, which the
+bridge reads back from that core's own sockets, so one agent's task
+never reaches another agent's core.
 
 - **Only where the image names the core** (`BRIDGE_SIMPLEX_BIN`). The
   bridge's reads of its computer say so (`?simplex=1`), so its owner's

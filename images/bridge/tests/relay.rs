@@ -211,8 +211,9 @@ async fn hermes_notices_are_notices() {
 /// and lingers not. A step whose words do not come within `STEP_HOLD_MS`
 /// posts, and the words after it. Words before a work call are `interim`
 /// (the chat's push leaves them out); an answer said only beside a
-/// housekeeping call (Hermes sends nothing after it) is the turn's one
-/// reply, not interim. Method: the scripted gateway's orders.
+/// housekeeping call (Hermes sends nothing after it) is held until the turn
+/// ends, then its one reply, not interim (#729). Method: the scripted
+/// gateway's orders.
 #[tokio::test]
 async fn text_beside_a_tool_call_is_a_reply_of_its_own() {
     let (fake, bridge, _hermes, _dir) = setup("relay-narrate", &["juniper"]).await;
@@ -236,7 +237,7 @@ async fn text_beside_a_tool_call_is_a_reply_of_its_own() {
             assert!(steps[0]["body"].get("text").is_none(), "{text}: the words are no part of the step: {steps:?}");
             if text.contains("only") {
                 assert_eq!(bodies, vec![json!({ "text": words, "turn": turn })], "{text}: its one reply, its answer, not interim");
-                assert!(at(&replies[0]) < at(&steps[0]), "{text}: the answer, then the step");
+                assert!(at(&steps[0]) < at(&replies[0]), "{text}: the step, then the answer, held until the turn ended with nothing after it (#729)");
             } else if text.contains("stalled") {
                 assert_eq!(bodies, vec![json!({ "text": words, "turn": turn }), json!({ "text": answer(text), "turn": turn })], "{text}: the words, whole, then the answer");
                 assert!(at(&steps[0]) < at(&replies[0]), "{text}: the step waited its bound, then posted, its words after it");
