@@ -238,8 +238,24 @@ pub fn match_of(q: &str) -> Option<String> {
     (!words.is_empty()).then(|| words.iter().map(|w| format!("\"{w}\"")).collect::<Vec<_>>().join(" OR "))
 }
 
+/// A line's label, its first word or two and a colon ("Agent: "), at most
+/// this long: kept when a snippet starts inside its line, so a cut line still
+/// says whose words it holds (FIN-365: a Session Archive's "Agent: …").
+pub const LABEL_MAX_BYTES: usize = 24;
+
+/// `line`'s label, when it begins with one: letters (and spaces between
+/// them) then ": ", within `LABEL_MAX_BYTES`.
+fn label_of(line: &str) -> Option<&str> {
+    let head = line.char_indices().take_while(|&(i, _)| i < LABEL_MAX_BYTES).last().map_or(0, |(i, c)| i + c.len_utf8());
+    let colon = line[..head].find(": ")?;
+    let name = &line[..colon];
+    let worded = name.starts_with(|c: char| c.is_alphabetic()) && name.chars().all(|c| c.is_alphabetic() || c == ' ');
+    (worded && colon + 2 <= LABEL_MAX_BYTES).then(|| &line[..colon + 2])
+}
+
 /// At most `SNIPPET_MAX_BYTES` of `body`, around the first of the
-/// question's words it holds (else its start), cut at characters.
+/// question's words it holds (else its start), cut at characters; begun
+/// inside a line with a label, that label first (`label_of`).
 pub fn snippet(body: &str, q: &str) -> String {
     let lower = body.to_lowercase();
     let at = q
@@ -254,11 +270,23 @@ pub fn snippet(body: &str, q: &str) -> String {
     while !body.is_char_boundary(start) {
         start -= 1;
     }
-    let mut end = (start + SNIPPET_MAX_BYTES).min(body.len());
+    // the line it starts in, and that line's label: begun inside the label,
+    // it starts at the line; past it, the label leads
+    let line = body[..start].rfind('\n').map_or(0, |i| i + 1);
+    let mut label = (start > line).then(|| label_of(&body[line..])).flatten();
+    if label.is_some_and(|l| start < line + l.len()) {
+        start = line;
+        label = None;
+    }
+    let budget = SNIPPET_MAX_BYTES - label.map_or(0, str::len);
+    let mut end = (start + budget).min(body.len());
     while !body.is_char_boundary(end) {
         end -= 1;
     }
     let mut s = String::new();
+    if let Some(l) = label {
+        s.push_str(l);
+    }
     if start > 0 {
         s.push('…');
     }
@@ -467,6 +495,42 @@ mod tests {
         assert!(s.contains("lantern") && s.starts_with('…') && s.ends_with('…'));
         assert!(s.len() <= SNIPPET_MAX_BYTES + 2 * '…'.len_utf8());
         assert_eq!(snippet("short body", "nothing"), "short body");
+    }
+
+    /// Goal: a snippet begun inside a line keeps that line's label, so a
+    /// cut line still says whose words it holds (FIN-365). Valid: a long
+    /// "Agent: " line found deep in leads with its label. Invalid: a line
+    /// with no label (a page's paragraph), or a "label" too long or not
+    /// words, is cut as before. Edge: begun inside the label itself, the
+    /// snippet starts at the line; begun at a line's start, nothing doubles.
+    #[test]
+    fn a_snippet_begun_inside_a_labelled_line_keeps_its_label() {
+        let reply = format!("Nice sketch. {} Pole beans fix nitrogen, which helps the tomatoes. {}", "The south fence gets the most sun. ".repeat(4), "x ".repeat(200));
+        let body = format!("Person: Here's the plot plan.\nAgent: {reply}\nPerson: thanks");
+        let s = snippet(&body, "nitrogen");
+        assert!(s.starts_with("Agent: …") && s.contains("nitrogen"), "{s}");
+        assert!(s.len() <= SNIPPET_MAX_BYTES + 2 * '…'.len_utf8(), "{}", s.len());
+        // no label: a page's paragraph, cut as before
+        let page = format!("Tomatoes need sun. {} Pole beans fix nitrogen. {}", "Water them well. ".repeat(8), "y ".repeat(200));
+        let p = snippet(&page, "nitrogen");
+        assert!(p.starts_with('…') && p.contains("nitrogen"), "{p}");
+        // not a label: too long, or not words
+        for line in [format!("A label far too long to be one: {reply}"), format!("https://x.test: {reply}"), format!("2026-10-01: {reply}")] {
+            let t = snippet(&line, "nitrogen");
+            assert!(t.starts_with('…') && t.contains("nitrogen"), "{t}");
+        }
+        // begun inside the label: the line's start, the label whole and once
+        // (the word 3 bytes past the window's lead, the window starts in "Agent: ")
+        let near = format!("q\nAgent: {} nitrogen", "b".repeat(SNIPPET_MAX_BYTES / 3 - 7 + 3 - 1));
+        let lead = near.find("nitrogen").unwrap() - SNIPPET_MAX_BYTES / 3;
+        assert!((2..2 + "Agent: ".len()).contains(&lead), "the window starts inside the label: {lead}");
+        let n = snippet(&near, "nitrogen");
+        assert!(n.starts_with("…Agent: b") && n.matches("Agent:").count() == 1, "{n}");
+        // begun at a line's start: as before
+        assert_eq!(snippet("Agent: beans fix nitrogen", "nitrogen"), "Agent: beans fix nitrogen");
+        // a label of more than one byte a character
+        let s2 = snippet(&format!("Élève: {reply}"), "nitrogen");
+        assert!(s2.starts_with("Élève: …") && s2.contains("nitrogen"), "{s2}");
     }
 
     #[test]

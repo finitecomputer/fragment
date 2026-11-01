@@ -1021,6 +1021,7 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     polish::record_shapes(s, api, &owner, &owner_session, &mut chrome)?;
     polish::finished_card_times(s, api, &owner, &mut chrome)?;
     alerts_in_frame(s, api, &mut chrome, &owner, &owner_session, &member_session, &owner_site, &chat_name, &identity)?;
+    card_to_computer(s, api, &mut chrome, &owner, &chat_name, &shots)?;
     claude_install(s, api, &mut chrome, &owner, &computer, &shots)?;
 
     std::thread::sleep(super::computers::QUEUE_DRAIN);
@@ -1028,16 +1029,71 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     Ok(())
 }
 
+/// FIN-353 PR 2: an answer for the computer. In the chat the shell frames,
+/// the agent's card asks for a code its option takes on the computer alone
+/// (the script's `code-card`); typed on the card and sent, the shell hands it
+/// to the computer's `/answer/` page, unseen, and the turn has it: it says
+/// how many characters it took, the card closes answered, and no record of
+/// the chat holds what was typed. Screenshots for FIN-353.
+fn card_to_computer(s: &mut Suite, api: &Api, chrome: &mut Browser, owner: &Keys, chat: &str, shots: &Path) -> Result<()> {
+    let Some((shell, frame)) = framing_shell(s, api, chrome, chat, "")? else {
+        s.ok("the shell frames the chat for its card that asks for a code", false, "");
+        return Ok(());
+    };
+    chrome.click(&frame, "#text")?;
+    chrome.type_text(&frame, "code-card")?;
+    chrome.press(&frame, "Enter", false)?;
+    let field = ".prompt:not(.closed) input[data-option=\"code\"]";
+    let asked = chrome.until(&frame, &format!("document.querySelector({0})?.type === 'password' && !document.querySelector({0}).disabled", js(field)), TURN);
+    let _ = chrome.screenshot(&shell, &shots.join("card-to-computer.png"));
+    s.ok(
+        "a card whose option is the computer's shows a masked field, saying it goes straight to the computer, and the message box does not answer it",
+        asked
+            && chrome.eval(&frame, "document.querySelector('.prompt:not(.closed) .prompt-note')?.textContent ?? ''")?.as_str().is_some_and(|n| n.contains("straight to your computer"))
+            // and the message box is no answer to it: a message is a record
+            && chrome.eval(&frame, "document.getElementById('text').placeholder")?.as_str().is_some_and(|p| !p.starts_with("Your answer")),
+        chrome.eval(&frame, "document.querySelector('.prompt:not(.closed)')?.innerText ?? null")?,
+    );
+    if asked {
+        chrome.click(&frame, field)?;
+        chrome.type_text(&frame, "the-code-123")?;
+        chrome.press(&frame, "Enter", false)?;
+    }
+    let took = chrome.until(&frame, "[...document.querySelectorAll('.msg.agent:not(.streaming) .md')].some((m) => m.textContent.includes('(took 12 characters)'))", TURN);
+    let closed = chrome.until(&frame, "[...document.querySelectorAll('.prompt.closed .outcome.answered')].length > 0", TURN);
+    let _ = chrome.screenshot(&shell, &shots.join("card-to-computer-answered.png"));
+    let kept = ["chat", "work"].iter().flat_map(|c| records(api, owner, chat, c)).any(|r| r.to_string().contains("the-code-123"));
+    s.ok(
+        "sent from the card, the computer has it: the turn took its 12 characters, the card closed answered, and no record of the chat holds it",
+        took && closed && !kept,
+        json!({ "took": took, "closed": closed, "kept": kept }),
+    );
+    chrome.close(shell)?;
+    Ok(())
+}
+
 /// What a Claude agent's turn asks with when Claude Code is not installed
 /// (images/bridge/src/runtime/claude.rs, `INSTALL_ASK`).
 const CLAUDE_INSTALL_ASK: &str = "Claude Code isn't installed on your computer yet. Install it? It's Anthropic's own installer, and takes about a minute.";
 
-/// FIN-353 (Paul: "(a) first message"): a Claude agent's chat, its computer
-/// with no Claude Code. Its first message's turn asks on a card to install
-/// it; Install runs the installer (the stub image's stand-in, which lays out
-/// its scripted Claude Code as Anthropic's lays out the real one), the turn
-/// says it ran, and answers what was asked. Its own agent and chat, after
-/// the rest, so it changes nothing they count. Screenshots for FIN-353.
+/// What a Claude agent's turn asks with when Claude Code is signed out, and
+/// again after a code that did not work (claude.rs, `sign_in_ask`).
+const CLAUDE_SIGN_IN_ASK: &str = "Claude Code needs you to sign in to your Claude account.";
+const CLAUDE_SIGN_IN_AGAIN: &str = "That code didn't work. Copy the whole code and try again.";
+/// The code the stub image's Claude Code signs in with (images/bridge/tests/support/fake_claude.rs).
+const CLAUDE_SIGN_IN_CODE: &str = "the-right-code";
+
+/// FIN-353 (Paul: "(a) first message, (b) inside the card"): a Claude
+/// agent's chat, in the shell, its computer with no Claude Code. Its first
+/// message's turn asks on a card to install it; Install runs the installer
+/// (the stub image's stand-in, which lays out its scripted Claude Code as
+/// Anthropic's lays out the real one), and the turn says it ran. Signed
+/// out, the turn then asks on a card to sign in: a link to Anthropic's
+/// sign-in, and a masked field for the code it shows, which goes to the
+/// computer alone. A wrong code is asked again; the right one signs in, the
+/// turn says so and answers what was asked, and no record holds either
+/// code. Its own agent and chat, after the rest, so it changes nothing they
+/// count. Screenshots for FIN-353.
 fn claude_install(s: &mut Suite, api: &Api, chrome: &mut Browser, owner: &Keys, computer: &str, shots: &Path) -> Result<()> {
     let name = s.named(api, owner, "rowan")?;
     let agent = s.create(api, owner, &name)?;
@@ -1053,9 +1109,11 @@ fn claude_install(s: &mut Suite, api: &Api, chrome: &mut Browser, owner: &Keys, 
     let r = api.signed(owner, "PUT", &format!("/api/f/{chat}/members/{identity}"), Some(&json!({ "role": "editor" })))?;
     anyhow::ensure!(r.status == 200, "the Claude agent joining its chat: {r}");
 
-    let page = chrome.open(&api.site_url(&chat, "__signin?return=/"))?;
-    fit(chrome, &page, 1280, 860, false)?;
-    let ready = chrome.until(&page, "document.getElementById('say')?.dataset.ready === '1'", TURN);
+    // in the shell: a code from the card reaches the computer through it
+    let Some((shell, page)) = framing_shell(s, api, chrome, &chat, "")? else {
+        s.ok("the shell frames the Claude agent's chat", false, "");
+        return Ok(());
+    };
     chrome.click(&page, "#text")?;
     chrome.type_text(&page, "Tidy up my README")?;
     chrome.press(&page, "Enter", false)?;
@@ -1063,24 +1121,54 @@ fn claude_install(s: &mut Suite, api: &Api, chrome: &mut Browser, owner: &Keys, 
     // its first turn waits for the bridge to see a new agent's runtime (its
     // read of the computer, each minute: images/bridge `COMPUTER_EVERY_MS`)
     let asked = chrome.until(&page, &format!("!!document.querySelector({}) && document.querySelector('.prompt:not(.closed) .prompt-text')?.textContent === {}", js(install), js(CLAUDE_INSTALL_ASK)), Duration::from_secs(150));
-    let _ = chrome.screenshot(&page, &shots.join("claude-install-card.png"));
+    let _ = chrome.screenshot(&shell, &shots.join("claude-install-card.png"));
     s.ok(
         "a Claude agent's first message, Claude Code not installed: its turn asks on a card to install it, Install or Not now",
-        ready && asked && chrome.eval(&page, "[...document.querySelectorAll('.prompt:not(.closed) .options button')].map((b) => b.textContent).join('|')")? == "Install|Not now",
+        asked && chrome.eval(&page, "[...document.querySelectorAll('.prompt:not(.closed) .options button')].map((b) => b.textContent).join('|')")? == "Install|Not now",
         chrome.eval(&page, "document.querySelector('.prompt')?.innerText ?? null")?,
     );
     if asked {
         chrome.click(&page, install)?;
     }
-    let answered = shows(chrome, &page, &format!("[...document.querySelectorAll('.msg.agent:not(.streaming) .md')].some((m) => m.textContent.includes({}))", js("Tidy up my README")));
-    let _ = chrome.screenshot(&page, &shots.join("claude-installed.png"));
+
+    // signed out: the sign-in card, its link and its masked field
+    let field = ".prompt:not(.closed) input[data-option=\"code\"]";
+    let card = |chrome: &mut Browser, says: &str| chrome.until(&page, &format!("document.querySelector({0})?.type === 'password' && !document.querySelector({0}).disabled && (document.querySelector('.prompt:not(.closed) .prompt-text')?.textContent ?? '').startsWith({1})", js(field), js(says)), TURN);
+    let signing = card(chrome, CLAUDE_SIGN_IN_ASK);
     let ran = records(api, owner, &chat, "work").iter().any(|r| r["body"]["kind"] == "turn.step" && r["body"]["args"] == "Anthropic's installer (Claude Code 2.1.316)");
+    let link = chrome.eval(&page, "document.querySelector('.prompt:not(.closed) .prompt-text a')?.href ?? ''")?;
+    let _ = chrome.screenshot(&shell, &shots.join("claude-sign-in-card.png"));
     s.ok(
-        "Install installs it: the turn says the installer ran, then answers what was asked, on Claude Code",
-        ran && answered,
-        chrome.eval(&page, "document.getElementById('messages').innerText")?,
+        "Install installs it (the turn says the installer ran); signed out, the turn asks on a card to sign in: a link to Anthropic's sign-in, and a masked field for its code that goes straight to the computer",
+        ran && signing
+            && link.as_str().is_some_and(|l| l.starts_with("https://claude.com/cai/oauth/authorize?"))
+            && chrome.eval(&page, "document.querySelector('.prompt:not(.closed) .prompt-note')?.textContent ?? ''")?.as_str().is_some_and(|n| n.contains("straight to your computer")),
+        chrome.eval(&page, "document.querySelector('.prompt:not(.closed)')?.innerText ?? null")?,
     );
-    chrome.close(page)?;
+    let code = |chrome: &mut Browser, code: &str| -> Result<()> {
+        chrome.click(&page, field)?;
+        chrome.type_text(&page, code)?;
+        chrome.press(&page, "Enter", false)
+    };
+    if signing {
+        code(chrome, "a-wrong-code")?;
+    }
+    let again = card(chrome, CLAUDE_SIGN_IN_AGAIN);
+    let _ = chrome.screenshot(&shell, &shots.join("claude-sign-in-again.png"));
+    if again {
+        code(chrome, CLAUDE_SIGN_IN_CODE)?;
+    }
+    let answered = shows(chrome, &page, &format!("[...document.querySelectorAll('.msg.agent:not(.streaming) .md')].some((m) => m.textContent.includes({}))", js("Tidy up my README")));
+    let _ = chrome.screenshot(&shell, &shots.join("claude-signed-in.png"));
+    let work = records(api, owner, &chat, "work");
+    let signed = work.iter().any(|r| r["body"]["kind"] == "turn.step" && r["body"]["args"] == "Signed in to Claude");
+    let kept = ["chat", "work"].iter().flat_map(|c| records(api, owner, &chat, c)).any(|r| r.to_string().contains("a-wrong-code") || r.to_string().contains(CLAUDE_SIGN_IN_CODE));
+    s.ok(
+        "a wrong code is asked again; the right one signs Claude Code in: the turn says so, then answers what was asked, and no record holds either code",
+        again && signed && answered && !kept,
+        json!({ "again": again, "signed": signed, "answered": answered, "kept": kept, "messages": chrome.eval(&page, "document.getElementById('messages').innerText")? }),
+    );
+    chrome.close(shell)?;
     Ok(())
 }
 

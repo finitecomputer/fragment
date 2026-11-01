@@ -81,10 +81,11 @@ COPY images/stub/screen /opt/fragment/screen
 # this stand-in for Anthropic's installer (BRIDGE_CLAUDE_INSTALLER). It
 # lays out the bridge's test double of Claude Code (fake-claude, here
 # answering `echo: <its words>`) as Anthropic's installer lays out the
-# real one: a version in the data dir, a launcher linking to it.
+# real one: a version in the data dir, a launcher linking to it. It starts
+# signed out, and signs in from its turn's card with fake-claude's code.
 COPY --from=build /fake-claude /opt/fragment/claude/claude
 COPY <<'EOF' /opt/fragment/claude/fake-claude.json
-{"mode":"echo"}
+{"mode":"echo","signed_out":true}
 EOF
 COPY --chmod=755 <<'EOF' /opt/fragment/bin/install-claude
 #!/bin/sh

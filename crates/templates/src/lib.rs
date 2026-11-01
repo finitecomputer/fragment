@@ -137,6 +137,8 @@ const SHELL_PUBLISHED: &[(&str, &str)] = &[
     // Settings' Billing: a seat, credit, an org (docs/billing.md)
     ("billing.js", "text/javascript; charset=utf-8"),
     ("chat-list.js", "text/javascript; charset=utf-8"),
+    // who may hand a card's answer to its agent's computer
+    ("computer-answer.js", "text/javascript; charset=utf-8"),
     ("computer.js", "text/javascript; charset=utf-8"),
     ("connections.js", "text/javascript; charset=utf-8"),
     ("continue.js", "text/javascript; charset=utf-8"),

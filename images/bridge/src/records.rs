@@ -723,6 +723,12 @@ pub struct PromptOption {
     /// Answered in words (a clarify's "Other"): its answer carries them.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub words: bool,
+    /// Answered on the agent's computer, never in a record (`words` too):
+    /// what its person gives that computer alone, a sign-in's code (the
+    /// chat's page hands it to the shell, which hands it to the computer's
+    /// `/answer` page: docs/bridge.md, "An answer for the computer").
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub computer: bool,
 }
 
 pub fn turn_prompt(turn: &str, prompt: &str, text: &str, options: &[PromptOption], asks: &str, expires_at: u64) -> Value {
@@ -1141,8 +1147,8 @@ mod tests {
         assert_eq!(turn_end("t", &Outcome::Error("x".repeat(400))).get("error").and_then(Value::as_str).map(|e| e.chars().count()), Some(limits::ERROR_MAX_CHARS));
         assert_eq!(turn_prompt_closed("t", "p", Closed::Answered, Some(("once", "npub1p", None))), json!({ "kind": "turn.prompt.closed", "turn": "t", "prompt": "p", "outcome": "answered", "option": "once", "by": "npub1p" }));
         assert_eq!(turn_prompt_closed("t", "p", Closed::Answered, Some(("other", "npub1p", Some("purple"))))["text"], "purple");
-        let other = PromptOption { id: "other".into(), label: "Other".into(), style: None, words: true };
-        let once = PromptOption { id: "once".into(), label: "Allow once".into(), style: None, words: false };
+        let other = PromptOption { id: "other".into(), label: "Other".into(), style: None, words: true, computer: false };
+        let once = PromptOption { id: "once".into(), label: "Allow once".into(), style: None, words: false, computer: false };
         assert_eq!(turn_prompt("t", "p", "Which?", &[once, other], "npub1p", 9)["options"], json!([{ "id": "once", "label": "Allow once" }, { "id": "other", "label": "Other", "words": true }]));
         assert_eq!(turn_prompt_closed("t", "p", Closed::Expired, None)["outcome"], "expired");
         assert_eq!(reply("hi", "t", &[], 0, false), json!({ "text": "hi", "turn": "t" }));
