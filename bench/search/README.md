@@ -72,4 +72,40 @@ holds the indexes, the embedding cache and `details.jsonl` (each
 question's top results and the pages no judgment covers: the pool to judge
 next), which name the corpus's pages: keep it where the corpus is kept.
 
+## The quality gate for a question across fragments (FIN-238)
+
+`across` asks whether searching a brain split into child brains, one per
+wiki, finds what one index over the whole brain finds (decision 5: the
+federated answer's nDCG@10 within 5% of the union's, and no worse than
+Finite Brain's hybrid):
+
+```sh
+target/release/search-bench across --corpus <dir> --questions <file.jsonl> --work <dir> \
+  --embeddings-url http://127.0.0.1:18091/v1/embeddings --embeddings-model nomic-ai/nomic-embed-text-v1.5 \
+  --query-prefix "search_query: " --document-prefix "search_document: " --window 8192 [--report <file.json>]
+```
+
+It runs what ships (`src/across.rs`), not the prototypes above:
+- **Chunks:** each page is written as the brain writes it (`wire::Upsert`:
+  wiki links as their words, text cleaned, title, heading and context
+  clipped) and cut by `fragment_core::searchable::chunked`, at the slot's
+  window and document prefix, so each chunk embeds what production embeds.
+  `fixtures/parity/` holds it to the brain: `upserts.json` is what the
+  brain itself writes for those pages (its Node test, which writes the
+  file again with `BENCH_PARITY_WRITE=1`), and a test here compares.
+- **Each fragment's index:** the cell's SearchIndex, step by step. That's
+  the same FTS5 table, tokenizer and field weights; BM25's best 100
+  chunks; the sign codes against the question over all chunks, the best
+  `candidates` reranked by int8, the best 100; and `fuse`.
+- **Federated:** the corpus cut by top-level folder, one index each, each
+  asked for `asked_limit(10)`, merged by `fragment_core::across::merge`
+  (the route's code).
+- **Union:** one index over the whole corpus, built for the test.
+- **fbrain hybrid:** its lexical search over sections, fused with an exact
+  float32 scan (a section by its best chunk).
+
+It prints and writes aggregates, and the verdict. Each question's top
+pages by system go to `<work>/across-details.jsonl`: the pool to judge,
+which names the corpus's pages.
+
 `cargo test --release` runs the whole pipeline on the synthetic fixtures.

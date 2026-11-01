@@ -14,6 +14,8 @@ import assert from "node:assert/strict";
 import { register } from "node:module";
 import { DatabaseSync } from "node:sqlite";
 import { createHash } from "node:crypto";
+import { readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
 // the brain's base class as the platform's wrapper gives it: its env's
 // capabilities behind `files` and `searchIndex`, a refusal thrown on the
@@ -593,4 +595,33 @@ it("a batch keeps to its calls: at most CALLS_MAX capability calls in one call i
   assert.equal(r.pending, 0);
   assert.ok(most <= CALLS_MAX, `a batch made ${most} capability calls, past ${CALLS_MAX}`);
   assert.deepEqual([ix.text("w2/p02.md"), ix.text("w1/p01.md"), ix.text("w0/huge.md")], ["changed", null, null]);
+});
+
+// The search bench's parity fixtures (bench/search/fixtures/parity): what
+// this brain writes to its index for those pages, recorded in upserts.json,
+// which the bench's own conversion is held to (bench/search, `across`).
+// BENCH_PARITY_WRITE=1 writes the file again after a change to the brain.
+it("the search bench's parity fixtures are what the brain writes for them", async () => {
+  const root = fileURLToPath(new URL("../../../bench/search/fixtures/parity/", import.meta.url));
+  const pages = {};
+  for (const entry of readdirSync(root + "corpus", { recursive: true, withFileTypes: true })) {
+    if (!entry.isFile()) continue;
+    const full = `${entry.parentPath}/${entry.name}`;
+    pages[full.slice((root + "corpus/").length)] = readFileSync(full, "utf8");
+  }
+  const fs = files(pages);
+  const ix = index();
+  const written = [];
+  const upsert = ix.upsert;
+  ix.upsert = (src) => {
+    written.push(src);
+    return upsert(src);
+  };
+  await settle(new App({ storage: storage() }, { FILES: fs, SEARCH: ix }));
+  const got = written
+    .map(({ source, title, fields, sections }) => ({ source, title, fields: fields ?? {}, sections }))
+    .sort((a, b) => (a.source < b.source ? -1 : 1));
+  const golden = root + "upserts.json";
+  if (process.env.BENCH_PARITY_WRITE) writeFileSync(golden, JSON.stringify(got, null, 1) + "\n");
+  assert.deepEqual(got, JSON.parse(readFileSync(golden, "utf8")));
 });
