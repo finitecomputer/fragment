@@ -6231,7 +6231,9 @@ const LAUNCHER_STATUS_GEOMETRY: &str = "(() => { const status = document.getElem
 /// start row stays; and an answer that came though a fragment of it failed
 /// (Alex on #885) names that fragment, beside the hits of the rest, or
 /// alone, never as nothing found; one searched and holding nothing shows
-/// no Knowledge.
+/// no Knowledge. Replay: a page matched in two sections is one row, its
+/// other section counted, and a brain with no index yet is named quietly
+/// (the Session Archive's rehearsal).
 fn knowledge_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person, shots: &std::path::Path) -> Result<()> {
     let wait = std::time::Duration::from_secs(30);
     // what the page asks of `POST /api/search`, each body kept
@@ -6308,6 +6310,11 @@ fn knowledge_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Per
     launch(b, "ferry timetable")?;
     let mixed = b.until(page, &format!("!!document.querySelector({}) && document.querySelector('.search-known-failed')?.textContent === 'Not searched: Old notes'", js(&row)), wait);
     s.ok("an answer that came though one fragment failed shows the others' hits and names the one not searched", mixed, b.eval(page, "document.getElementById('search-results').innerText")?);
+    // a page matched in two sections, and a brain with no index yet: one row, the other section counted, that brain named
+    b.eval(page, &doctor_once(&format!("(a) => {{ const h = a.results.find((r) => r.fragment === {} && r.source === 'wiki/ferry.md'); a.results.push({{ ...h, snippet: 'its other section' }}); a.fragments.push({{ name: {}, state: 'no_index' }}); }}", js(&notes), js(&old))))?;
+    launch(b, "ferry timetable")?;
+    let grouped = b.until(page, &format!("document.querySelectorAll({0}).length === 1 && document.querySelector({0} + ' .search-known-more')?.textContent === '+1 more on this page' && [...document.querySelectorAll('.search-known-failed')].some((p) => p.textContent === 'Not indexed yet: Old notes')", js(&row)), wait);
+    s.ok("a page matched in two sections shows once, the other counted, and a brain with no index yet is named as not indexed yet", grouped, b.eval(page, "document.getElementById('search-results').innerText")?);
     // every fragment of it failed: no hits, each named, never nothing found
     b.eval(page, &doctor_once("(a) => { a.results = []; a.fragments = a.fragments.map((f) => ({ ...f, state: 'failed', message: 'the index did not answer' })); }"))?;
     launch(b, "ferry timetable")?;
