@@ -127,6 +127,14 @@ fn timed(f: impl FnOnce() -> Result<crate::api::Reply>) -> Result<(f64, u16, Val
     Ok((t0.elapsed().as_secs_f64() * 1000.0, r.status, r.body))
 }
 
+/// A reply's `Server-Timing`, `{part: ms}` (`{}` for none): what the
+/// cell says it waited on.
+fn server_timing(r: &crate::api::Reply) -> Value {
+    let value = r.headers.get("server-timing").and_then(|v| v.to_str().ok()).unwrap_or_default();
+    let parts = value.split(", ").filter_map(|entry| entry.split_once(";dur=")).filter_map(|(part, ms)| Some((part.to_string(), json!(ms.parse::<f64>().ok()?))));
+    Value::Object(parts.collect())
+}
+
 /// Distinct sections the cold split's fragments repeat: what is loaded
 /// cold (every chunk's code, every page) is the fragment's size, not its
 /// text's variety, so few embedding calls make a large one.
@@ -142,7 +150,8 @@ const COLD_SMALL: usize = 1_000;
 /// search, then again), then a small fragment's first search by meaning
 /// (the embedding's first call from its supervisor, codes too few to
 /// count), then the large one's (its 25k codes read into memory), each
-/// then again warm. Each part is a step's time less the same step warm.
+/// then again warm. Each part is a step's time less the same step warm;
+/// each answer's `Server-Timing` says what the cell waited on inside it.
 fn cold(s: &mut Suite, api: &Api, samples: usize, idle: Duration) -> Result<()> {
     let owns = |n: usize| n.min(COLD_POOL).div_ceil(EMBED_BATCH) as u64 + 4;
     let asks = samples as u64 * 4 + 2;
@@ -159,10 +168,13 @@ fn cold(s: &mut Suite, api: &Api, samples: usize, idle: Duration) -> Result<()> 
             println!("      cold sample {}: idle for {} s", sample + 1, idle.as_secs());
             std::thread::sleep(idle);
         }
-        let t = |f: &dyn Fn() -> Result<crate::api::Reply>| -> Result<f64> {
-            let (ms, status, body) = timed(f)?;
-            anyhow::ensure!(status == 200, "a cold step: {status} {body}");
-            Ok(ms)
+        // a step's wall time, and the parts its answer says it waited on
+        let t = |f: &dyn Fn() -> Result<crate::api::Reply>| -> Result<(f64, Value)> {
+            let t0 = Instant::now();
+            let r = f()?;
+            let ms = t0.elapsed().as_secs_f64() * 1000.0;
+            anyhow::ensure!(r.status == 200, "a cold step: {r}");
+            Ok((ms, server_timing(&r)))
         };
         let worker = (t(&health)?, t(&health)?);
         let objects = (t(&|| status(&large))?, t(&|| status(&large))?);
@@ -170,19 +182,29 @@ fn cold(s: &mut Suite, api: &Api, samples: usize, idle: Duration) -> Result<()> 
         let small_meaning = (t(&|| search(&small, &question.clone_sentence(3), "semantic"))?, t(&|| search(&small, &question.clone_sentence(3), "semantic"))?);
         let large_meaning = (t(&|| search(&large, &question.clone_sentence(3), "semantic"))?, t(&|| search(&large, &question.clone_sentence(3), "semantic"))?);
         question.word();
-        let part = |(first, warm): (f64, f64)| json!({ "first_ms": first, "warm_ms": warm, "cold_ms": first - warm });
+        let part = |((first, first_parts), (warm, warm_parts)): ((f64, Value), (f64, Value))| {
+            json!({ "first_ms": first, "warm_ms": warm, "cold_ms": first - warm, "first_parts": first_parts, "warm_parts": warm_parts })
+        };
         let row = json!({ "worker": part(worker), "objects": part(objects), "words_pages": part(pages), "small_meaning": part(small_meaning), "large_meaning": part(large_meaning) });
         println!("      cold sample {}: {}", sample + 1, row);
         rows.push(row);
     }
     let median = |k: &str, f: &str| {
-        let mut v: Vec<f64> = rows.iter().filter_map(|r| r[k][f].as_f64()).collect();
+        let mut v: Vec<f64> = rows.iter().filter_map(|r| r[k].pointer(f).and_then(Value::as_f64)).collect();
         v.sort_by(f64::total_cmp);
         v.get(v.len() / 2).copied().unwrap_or(f64::NAN)
     };
     println!("      part (median of {samples})          first    warm    cold part   (ms, client wall)");
     for (k, what) in [("worker", "the Worker (/healthz)"), ("objects", "objects wake (status)"), ("words_pages", "words' pages (lexical)"), ("small_meaning", "embed's first (1k)"), ("large_meaning", "25k codes read")] {
-        println!("      {what:<30} {:>7.0} {:>7.0} {:>10.0}", median(k, "first_ms"), median(k, "warm_ms"), median(k, "cold_ms"));
+        println!("      {what:<30} {:>7.0} {:>7.0} {:>10.0}", median(k, "/first_ms"), median(k, "/warm_ms"), median(k, "/cold_ms"));
+    }
+    println!("      by meaning, what the answer waited on (median of {samples}, first / warm, ms: Server-Timing)");
+    for (k, what) in [("small_meaning", "1k"), ("large_meaning", "25k")] {
+        let parts: Vec<String> = ["gate", "key", "embed", "index"]
+            .iter()
+            .map(|p| format!("{p} {:.0} / {:.0}", median(k, &format!("/first_parts/{p}")), median(k, &format!("/warm_parts/{p}"))))
+            .collect();
+        println!("      {what:<6} {}", parts.join(", "));
     }
     s.ok("the first search after idle is split into its parts", rows.len() == samples, json!(rows));
     let out = s.dir(SECTION);
