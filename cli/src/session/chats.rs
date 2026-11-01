@@ -175,7 +175,7 @@ pub fn read(root: &Path, spool: &mut Spool) -> Result<Vec<String>> {
             };
             match session(h, &listed, index.agent.as_deref()) {
                 // a kind not asked for: none of its files are read
-                Ok((s, _)) if !spool.wants(s.kind) => {}
+                Ok((s, _)) if !spool.wants(&s.kind) => {}
                 Ok((mut s, files)) => {
                     media(root, &mut s, files, spool, &mut problems)?;
                     spool.add(s)?;
@@ -191,7 +191,8 @@ pub fn read(root: &Path, spool: &mut Spool) -> Result<Vec<String>> {
 /// filling in what the file left out.
 fn session(held: Record<Kept>, listed: &Listed, agent: Option<&str>) -> Result<(Session, Vec<(usize, Attachment)>), String> {
     let kind_name = held.kind.as_deref().or(listed.kind.as_deref()).unwrap_or("chat");
-    let kind = Kind::parse(kind_name).ok_or_else(|| format!("its kind {:?} is none of chat, cron, subagent", said_id(kind_name)))?;
+    // the export's kinds are this reader's to map: those it knows alone
+    let kind = Kind::known(kind_name).ok_or_else(|| format!("its kind {:?} is none of chat, cron, subagent", said_id(kind_name)))?;
     let Some(Kept(messages, files)) = held.messages else {
         return Err("its file holds no messages".into());
     };
