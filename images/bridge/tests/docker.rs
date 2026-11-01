@@ -936,11 +936,15 @@ async fn an_agent_of_another_runtime_gets_no_hermes_profile() {
     assert!(!profile(&c, "rowan") && !screens(&c).contains("rowan--k3x9"), "no profile, no desktop: {}", screens(&c));
     let asked = fake.say(&workshop, &person("paul"), json!({ "text": "hello rowan" }));
     let tr = fragment_bridge::records::turn_id("rowan--k3x9", &workshop, "chat", asked["seq"].as_u64().unwrap());
-    fake.until(90_000, "rowan's turn to end", |w| w.bodies(&workshop, "work", "turn.end").iter().any(|e| e["turn"] == tr)).await;
+    // its runtime's turn asks its person to install Claude Code (#901);
+    // declined, it ends, so nothing waits on it below
+    fake.until(90_000, "rowan's install card", |w| w.bodies(&workshop, "work", "turn.prompt").iter().any(|p| p["turn"] == tr && p["prompt"] == "install")).await;
     fake.with(|w| {
-        let end = w.bodies(&workshop, "work", "turn.end").into_iter().find(|e| e["turn"] == tr).unwrap();
-        assert_eq!(end["error"], json!(fragment_bridge::runtime::claude::NOT_INSTALLED), "its runtime's turn, saying how to install it: {end}");
+        let card = w.bodies(&workshop, "work", "turn.prompt").into_iter().find(|p| p["turn"] == tr).unwrap();
+        assert_eq!(card["text"], json!(fragment_bridge::runtime::claude::INSTALL_ASK), "its runtime's turn, asking to install it: {card}");
     });
+    fake.say(&workshop, &person("paul"), json!({ "kind": "prompt_response", "prompt": "install", "option": "not-now", "agent": "npub1rowan", "turn": tr }));
+    fake.until(90_000, "rowan's turn to end", |w| w.bodies(&workshop, "work", "turn.end").iter().any(|e| e["turn"] == tr && e["outcome"] == "idle")).await;
 
     // maple, of Hermes', and oak, unassigned before the restart
     fake.add_agent("maple");
@@ -4234,9 +4238,14 @@ sys.exit(subprocess.run([env.get("SHELL", "/bin/sh"), "-c", sys.argv[2]], env=en
         fragment_bridge::records::turn_id("rowan--k3x9", &workshop, "chat", said["seq"].as_u64().unwrap())
     };
 
-    // before the install: rowan's turn says how
-    let said = ended_saying(&fake, &workshop, &c, &ask_rowan("hello before"), "rowan's turn before the install").await;
-    assert_eq!(said, fragment_bridge::runtime::claude::NOT_INSTALLED);
+    // before the install: rowan's turn asks to install it (#901); its
+    // person installs it from the desktop instead, so declines here
+    let before = ask_rowan("hello before");
+    let asked = |w: &support::fake::World| w.bodies(&workshop, "work", "turn.prompt").into_iter().find(|p| p["turn"] == before.as_str() && p["prompt"] == "install");
+    within(&fake, &workshop, &c, 180_000, "rowan's install card", |w| asked(w).is_some()).await;
+    assert_eq!(fake.with(|w| asked(w).expect("found")["text"].clone()), json!(fragment_bridge::runtime::claude::INSTALL_ASK));
+    fake.say(&workshop, &person("paul"), json!({ "kind": "prompt_response", "prompt": "install", "option": "not-now", "agent": "npub1rowan", "turn": before }));
+    assert_eq!(ended_saying(&fake, &workshop, &c, &before, "rowan's declined turn").await, "", "declined, it ends idle");
 
     // juniper's desktop, and its terminals' environment: home is Hermes'
     let (code, started) = c.exec_code(&["/opt/fragment/bin/hermes-boot", "screen-start", "juniper--k3x9"]);
@@ -4277,7 +4286,7 @@ sys.exit(subprocess.run([env.get("SHELL", "/bin/sh"), "-c", sys.argv[2]], env=en
     assert!(installed.contains("/data/hermes/.local/share/claude/versions/") && installed.trim_end().ends_with("hermes"), "Anthropic's layout, the person's (hermes'): {installed}");
 
     // the agent runs it: no one signed in, its turn says Claude Code's words
-    let not_signed_in = |said: &str| said != fragment_bridge::runtime::claude::NOT_INSTALLED && said.to_lowercase().contains("login");
+    let not_signed_in = |said: &str| said.to_lowercase().contains("login");
     let said = ended_saying(&fake, &workshop, &c, &ask_rowan("hello after the install"), "rowan's turn after the install").await;
     eprintln!("claude install: rowan's turn, signed out: {said}");
     assert!(not_signed_in(&said), "Claude Code ran, and asked for a sign-in: {said}");
