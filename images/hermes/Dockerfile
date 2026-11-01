@@ -378,6 +378,30 @@ COPY --from=ours / /
 # The adapter extends the pinned Bot Desktop's start, attach and stop paths;
 # the boot refuses upstream source changes before it installs those hooks.
 COPY images/hermes/desktop_browser.py /opt/hermes/tools/bot_desktop/fragment_browser.py
+# A link opened on an agent's desktop (a terminal's `claude auth login`
+# sign-in, xdg-open) opens in that agent's own Chromium: the desktop's
+# default web browser, as Xfce's helper (exo-open reads it), in place of
+# Debian's sensible-browser, which names none here, so Xfce asked its person
+# which browser to use (FIN-351).
+COPY --chmod=755 <<'EOF' /opt/fragment/bin/desktop-browser
+#!/bin/sh
+# The desktop's web browser (images/hermes/Dockerfile): the agent's own.
+exec /opt/hermes/.venv/bin/python /opt/hermes/tools/bot_desktop/fragment_browser.py --open "${1:-about:blank}"
+EOF
+COPY <<'EOF' /usr/share/xfce4/helpers/fragment-browser.desktop
+[Desktop Entry]
+Version=1.0
+Icon=chromium
+Type=X-XFCE-Helper
+Name=Chromium
+StartupNotify=true
+X-XFCE-Binaries=/opt/fragment/bin/desktop-browser;
+X-XFCE-Category=WebBrowser
+X-XFCE-Commands=%B;
+X-XFCE-CommandsWithParameter=%B "%s";
+EOF
+RUN sed -i 's/^WebBrowser=.*/WebBrowser=fragment-browser/' /etc/xdg/xfce4/helpers.rc \
+ && grep -qx 'WebBrowser=fragment-browser' /etc/xdg/xfce4/helpers.rc
 RUN /opt/fragment/bin/hermes-boot build-info \
  && /opt/hermes/.venv/bin/python -m compileall -q --invalidation-mode unchecked-hash \
     /opt/hermes/tools/browser_tool_session.py /opt/hermes/tools/bot_desktop/browser.py \

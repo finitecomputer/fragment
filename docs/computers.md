@@ -661,7 +661,9 @@ What our Hermes image guarantees beyond the contract:
   which Hermes' tools obey until Give back. Its agents run as one user
   (decision 44), so only the lease and the platform skill keep an agent
   off another's desktop. The desktop and the browser tools share one
-  regular Chromium and one saved profile per agent.
+  regular Chromium and one saved profile per agent. A link opened on the
+  desktop (a terminal's sign-in, `xdg-open`) opens there too: it is the
+  desktop's default web browser, so no dialog asks which (FIN-351).
 
 ### Approvals in our Hermes image
 
