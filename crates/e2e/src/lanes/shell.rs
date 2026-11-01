@@ -3663,6 +3663,9 @@ fn connections_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sessio
         s.ok("the Connections page has agents to show", false, &computers);
         return Ok(());
     };
+    let id = computer["computer"].as_str().unwrap_or("").to_string();
+    // the uses below, and the page's month of them, in one month
+    super::computers::pin_month(api, &id)?;
     // the person connects Google (as another account than their sign-in here),
     // and reading their connections tells their computer
     s.workos.connect(email, crate::SWAP_CONNECTION, true);
@@ -3682,7 +3685,6 @@ fn connections_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sessio
         shell(api, session, "POST", &format!("/api/f/{chat}/channels/chat"), Some(&json!({ "id": format!("conn-{n}"), "body": { "text": text } })), &[])?;
         s.eventually(std::time::Duration::from_secs(60), || replies() > n);
     }
-    let id = computer["computer"].as_str().unwrap_or("").to_string();
     let counted = s.eventually(wait, || {
         shell(api, session, "GET", &format!("/api/computers/{id}/uses"), None, &[]).is_ok_and(|r| r.body["uses"].as_array().is_some_and(|l| l.len() >= 2))
     });

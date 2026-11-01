@@ -1,5 +1,4 @@
-// A brain's markdown as its search sees it (app.mjs), and a query as plain
-// words. Pure functions, no I/O.
+// A brain's markdown as its search sees it (app.mjs). Pure functions, no I/O.
 //
 // A page is cut into sections, as Finite Brain's search cuts it: the text
 // under each heading (ATX, `#` to `######`, outside fenced code), with the
@@ -12,7 +11,6 @@
 
 export const SECTION_MAX_CHARS = 8000;
 export const SECTIONS_MAX = 500;
-export const QUERY_WORDS_MAX = 16;
 export const TITLE_MAX_CHARS = 300;
 
 const FENCE = /^ {0,3}(`{3,}|~{3,})/;
@@ -128,17 +126,4 @@ export function sections(path, text) {
   });
   const truncated = out.length > SECTIONS_MAX;
   return { title, sections: out.slice(0, SECTIONS_MAX), truncated };
-}
-
-/// A query as words: runs of letters, digits and marks, lowercased. Nothing
-/// else in it means anything: FTS5's syntax (OR, NOT, NEAR, quotes, column:,
-/// *, ^) is text like any other, split away or kept as a word.
-export function words(q) {
-  return String(q).normalize("NFKC").toLowerCase().split(/[^\p{L}\p{N}\p{M}]+/u).filter(Boolean);
-}
-
-/// The FTS5 expression for `ws`: each word a quoted phrase matching a word
-/// or a word's start, all of them required.
-export function match(ws) {
-  return ws.map((w) => `"${w.replaceAll('"', '""')}"*`).join(" ");
 }

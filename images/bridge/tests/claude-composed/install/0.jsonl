@@ -1,0 +1,8 @@
+{"args":["--session-id","00000000-0000-4000-8000-000000000004"]}
+{"in":{"type":"user"}}
+{"out":{"type":"system","subtype":"init","session_id":"00000000-0000-4000-8000-000000000004"}}
+{"out":{"type":"assistant","message":{"content":[{"type":"text","text":"Hello from Claude"}]},"parent_tool_use_id":null}}
+{"out":{"type":"result","subtype":"success","is_error":false,"result":"Hello from Claude"}}
+{"in":{"type":"user"}}
+{"out":{"type":"assistant","message":{"content":[{"type":"text","text":"Still here"}]},"parent_tool_use_id":null}}
+{"out":{"type":"result","subtype":"success","is_error":false,"result":"Still here"}}

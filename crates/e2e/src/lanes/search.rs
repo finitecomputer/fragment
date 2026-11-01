@@ -108,6 +108,7 @@ fn moved_checks(s: &mut Suite, api: &Api, owner: &Keys, name: &str) -> Result<()
     let calls = s.ai.calls().len();
     let again = api.signed(owner, "POST", &path("/upsert"), Some(&fresh))?;
     let written: Vec<String> = s.ai.calls()[calls..].iter().filter(|c| c.model == MODEL).flat_map(|c| c.body["text"].as_array().cloned().unwrap_or_default()).filter_map(|t| t.as_str().map(str::to_string)).collect();
+    let batches: Vec<usize> = s.ai.calls()[calls..].iter().filter(|c| c.model == MODEL).map(|c| c.body["text"].as_array().map_or(0, Vec::len)).collect();
     let calls = s.ai.calls().len();
     let found = api.signed(owner, "POST", &path(""), Some(&json!({ "q": "harbour lantern audit" })))?;
     let asked: Vec<Value> = s.ai.calls()[calls..].iter().filter(|c| c.model == MODEL).map(|c| c.body["text"].clone()).collect();
@@ -127,6 +128,11 @@ fn moved_checks(s: &mut Suite, api: &Api, owner: &Keys, name: &str) -> Result<()
         written.len() == 2 && written.iter().all(|t| t.starts_with("search_document: ")) && asked == [json!(["search_query: harbour lantern audit"])]
             && emptied.body["space"]["document_prefix"] == "search_document: " && emptied.body["space"]["query_prefix"] == "search_query: ",
         json!({ "written": written, "asked": asked, "space": emptied.body["space"] }),
+    );
+    s.ok(
+        "a slot's model that takes one input a call is sent a write's chunks one a call",
+        again.status == 200 && batches == [1, 1],
+        json!({ "batches": batches }),
     );
     Ok(())
 }
@@ -369,6 +375,48 @@ fn checks(s: &mut Suite, api: &Api) -> Result<(Keys, String)> {
             && same_size.status == 200 && larger.status == 507 && status.body["chunks"] == 3 && status.body["chunks_max"] == 3
             && revisions == [("notes/a.md".to_string(), "r1".to_string()), ("notes/b.md".to_string(), "r2".to_string())],
         json!({ "past": past.body, "larger": larger.body, "status": status.body, "sources": revisions }),
+    );
+
+    // ---- a fence: a writer's stale work never lands over its newer
+    let (fenced, _) = life(s, api, &owner, "fenced")?;
+    let at = |route: &str| format!("/api/f/{fenced}/search{route}");
+    let note = |revision: &str, fence: Option<u64>| {
+        let mut u = upsert("notes/f.md", revision, json!([{ "id": "t0", "text": format!("Person: the quartz ledger, {revision}") }]));
+        if let Some(f) = fence {
+            u["fence"] = json!(f);
+        }
+        u
+    };
+    let holds = |revision: &str| -> Result<bool> {
+        let r = api.signed(&owner, "POST", &at(""), Some(&json!({ "q": "quartz ledger", "mode": "lexical" })))?;
+        Ok(r.body["results"].as_array().is_some_and(|h| h.iter().any(|h| h["source"] == "notes/f.md" && h["revision"] == revision)))
+    };
+    let written = api.signed(&owner, "POST", &at("/upsert"), Some(&note("r5", Some(5))))?;
+    let deleted = api.signed(&owner, "POST", &at("/delete"), Some(&json!({ "source": "notes/f.md", "fence": 6 })))?;
+    let stale_write = api.signed(&owner, "POST", &at("/upsert"), Some(&note("r4", Some(4))))?;
+    let still_gone = !holds("r4")? && !holds("r5")?;
+    s.ok(
+        "a fenced write below the fence of a newer delete is refused (409 naming the fence): the deleted source stays gone",
+        written.status == 200 && deleted.status == 200 && deleted.body["deleted"] == true
+            && stale_write.status == 409 && stale_write.body["error"] == "conflict" && stale_write.body["fence"] == 6 && still_gone,
+        json!({ "deleted": deleted.body, "stale": stale_write.body }),
+    );
+    let newer = api.signed(&owner, "POST", &at("/upsert"), Some(&note("r7", Some(7))))?;
+    let stale_delete = api.signed(&owner, "POST", &at("/delete"), Some(&json!({ "source": "notes/f.md", "fence": 6 })))?;
+    let replayed = api.signed(&owner, "POST", &at("/upsert"), Some(&note("r7", Some(7))))?;
+    s.ok(
+        "a fenced delete below the fence of a newer write is refused, the source kept; the same fence again is taken (a replay writes nothing)",
+        newer.status == 200 && stale_delete.status == 409 && stale_delete.body["fence"] == 7 && holds("r7")?
+            && replayed.status == 200 && replayed.body["written"] == false,
+        json!({ "stale": stale_delete.body, "replayed": replayed.body }),
+    );
+    let unfenced = api.signed(&owner, "POST", &at("/upsert"), Some(&note("r8", None)))?;
+    let then_fenced = api.signed(&owner, "POST", &at("/upsert"), Some(&note("r9", Some(7))))?;
+    let too_high = api.signed(&owner, "POST", &at("/upsert"), Some(&note("r10", Some(1 << 53))))?;
+    s.ok(
+        "a writer that sends no fence is never refused for one and moves none (a fence of 7 is taken after it); a fence past 2^53 - 1 is refused (400)",
+        unfenced.status == 200 && unfenced.body["written"] == true && then_fenced.status == 200 && holds("r9")? && too_high.status == 400,
+        json!({ "unfenced": unfenced.body, "then": then_fenced.body, "too_high": too_high.body }),
     );
 
     // ---- a deleted fragment's index is ended with it, its rows gone

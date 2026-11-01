@@ -27,6 +27,7 @@ step Ledger 1 baseline 6d5c6ebad64a53b2
 step Computer 1 baseline 0f429c07654198e6
 step Computer 2 agent_accounts 55b329a8b0da4bbd
 step SearchIndex 1 baseline 500e1cc281039770
+step SearchIndex 2 fences 203375fb20518981
 
 Fragment table blobs: CREATE TABLE blobs ( sha TEXT PRIMARY KEY, size INTEGER NOT NULL, uploaded_at INTEGER NOT NULL, seen_at INTEGER NOT NULL, mime TEXT)
 Fragment table charges: CREATE TABLE charges ( ref TEXT PRIMARY KEY, run INTEGER NOT NULL, micros INTEGER NOT NULL, held INTEGER NOT NULL, at INTEGER NOT NULL)
@@ -200,6 +201,7 @@ SearchIndex table chunk_words: CREATE VIRTUAL TABLE chunk_words USING fts5( titl
 SearchIndex table chunks: CREATE TABLE chunks (id INTEGER PRIMARY KEY, section INTEGER NOT NULL, hash TEXT NOT NULL, body TEXT NOT NULL)
 SearchIndex index chunks_hash: CREATE INDEX chunks_hash ON chunks (hash)
 SearchIndex index chunks_section: CREATE INDEX chunks_section ON chunks (section)
+SearchIndex table fences: CREATE TABLE fences (source TEXT PRIMARY KEY, fence INTEGER NOT NULL)
 SearchIndex table meta: CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)
 SearchIndex table sections: CREATE TABLE sections ( id INTEGER PRIMARY KEY, source TEXT NOT NULL, section TEXT NOT NULL, heading TEXT, context TEXT NOT NULL, at TEXT, location TEXT)
 SearchIndex index sections_source: CREATE INDEX sections_source ON sections (source)

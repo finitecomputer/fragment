@@ -1457,6 +1457,8 @@ const launcher = createLauncher({
   views: () => views,
   busy: (name) => refresh.isBusy(state.frames.get(name)),
   setupChat: () => onboarding.setupChat(),
+  // the agent an imported conversation was with, as its archive's index names it
+  sessionAgent: (key) => sessionArchive.entries().find((e) => e.key === key)?.agent ?? null,
 });
 
 // Each view of the computer taken in from an action's answer (`computerIs`,
@@ -1546,7 +1548,7 @@ $("apps-link").onclick = () => openApps();
 const historyPage = createHistoryPage($("history-page"), {
   api, el, icon, seg, mark: (name, size) => mark(name, size), chats, isThread: (f) => threads.isPair(f), own, chatTitle: (name) => chatTitle(name),
   agentsOf, agents: () => state.agents, titleOf,
-  archive: { name: () => sessionArchive.archive(), entries: () => sessionArchive.entries(), openSession: (key) => sessionArchive.openSession(key) },
+  archive: { name: () => sessionArchive.archive(), entries: () => sessionArchive.entries(), openSession: (key) => sessionArchive.openSession(key), search: (q) => sessionArchive.search(q) },
   continueControl: (source) => continuing.continueControl(source),
   openChat, leaveSidebar,
 });
