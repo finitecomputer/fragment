@@ -163,6 +163,8 @@ const SHELL_PUBLISHED: [(&str, &str); 50] = [
     ("session-refresh.js", "text/javascript; charset=utf-8"),
     ("onboarding.js", "text/javascript; charset=utf-8"),
     ("computer.js", "text/javascript; charset=utf-8"),
+    // who may hand a card's answer to its agent's computer
+    ("computer-answer.js", "text/javascript; charset=utf-8"),
     ("agent-settings.js", "text/javascript; charset=utf-8"),
     ("connections.js", "text/javascript; charset=utf-8"),
     ("exports.js", "text/javascript; charset=utf-8"),

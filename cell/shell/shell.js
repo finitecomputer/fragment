@@ -32,6 +32,7 @@ import { el, section, line, actionLine, createSettings } from "./settings.js";
 import { createLauncher } from "./launcher.js";
 import { createThreads } from "./threads.js";
 import { KIND } from "./frame-messages.js";
+import { answerTo } from "./computer-answer.js";
 
 const $ = (id) => document.getElementById(id);
 const CURRENT = "shell.chat.v1";
@@ -1215,7 +1216,7 @@ function fragmentAt(url, sender, origin) {
 // computer"): a card's option its agent's runtime takes on its computer
 // alone, never in a record (a sign-in's code), handed by the chat's page.
 // Taken only from a frame of the person's own fragment, for an agent of
-// their own computer; handed to that computer's `/answer/` page, framed
+// their own computer (computer-answer.js); handed to that computer's `/answer/` page, framed
 // unseen through a port ticket (its owner's alone) and dropped once it
 // answered; what came of it told to the chat. Never kept. ----
 const COMPUTER_ANSWER_WAIT_MS = 90_000;
@@ -1224,17 +1225,19 @@ addEventListener("message", async (event) => {
   if (d?.fragment !== KIND.cardToComputer || typeof d.nonce !== "string" || typeof d.value !== "string") return;
   const frame = [...document.querySelectorAll("iframe[data-fragment]")].find((f) => f.contentWindow === event.source);
   const name = frame?.dataset.fragment;
-  if (!name || !byName(name)) return;
-  let origin;
-  try {
-    origin = await originOf(name);
-  } catch {
-    return;
+  let origin = null;
+  if (name && byName(name)?.role === "owner") {
+    try {
+      origin = await originOf(name);
+    } catch {
+      return;
+    }
   }
-  if (event.origin !== origin || frame.contentWindow !== event.source) return;
+  const to = answerTo({ frame: name, role: name && byName(name)?.role, origin, sentFrom: event.origin, agent: d.agent, agents: state.agents, computer: state.computer });
+  if (!to || frame.contentWindow !== event.source) return;
   const reply = (ok, error) => event.source.postMessage({ fragment: KIND.computerAnswered, nonce: d.nonce, ok, ...(error ? { error } : {}) }, origin);
-  const agent = state.agents.get(d.agent)?.fragment;
-  if (!state.computer || !agent) return reply(false, "Only its owner answers this, from their own Finite.");
+  if (to.refused) return reply(false, to.refused);
+  const agent = to.agent;
   let ticket;
   try {
     ticket = await api("POST", `/api/computers/${seg(state.computer.computer)}/ports/6080/ticket`, { path: `/answer/?agent=${encodeURIComponent(agent)}` });

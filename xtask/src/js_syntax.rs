@@ -62,13 +62,15 @@ const SHELL: &str = "cell/shell/shell.js";
 const TEST_SUFFIX: &str = ".test.mjs";
 /// The shell's tests, which a walk must find: the chat page's control.js's,
 /// chat-list.js's (its sections, and whom the ways to ask for an app ask),
-/// the messages between the shell and its frames, history-page.js's,
+/// who may hand a card's answer to its agent's computer, the messages
+/// between the shell and its frames, history-page.js's,
 /// launcher.js's Knowledge, onboarding.js's, session-archive.js's and
 /// threads.js's.
-const SHELL_TESTS: [&str; 9] = [
+const SHELL_TESTS: [&str; 10] = [
     "cell/shell-tests/asked-agent.test.mjs",
     "cell/shell-tests/chat-control.test.mjs",
     "cell/shell-tests/chat-list.test.mjs",
+    "cell/shell-tests/computer-answer.test.mjs",
     "cell/shell-tests/frame-messages.test.mjs",
     "cell/shell-tests/history-page.test.mjs",
     "cell/shell-tests/launcher-knowledge.test.mjs",
