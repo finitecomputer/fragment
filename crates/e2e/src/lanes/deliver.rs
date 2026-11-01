@@ -368,6 +368,38 @@ fn videos(s: &mut Suite, api: &Api, owner: &fragment_nip98::Keys, name: &str, re
         json!({ "run": r, "made": made(s).len() - before, "receipts": receipts }),
     );
 
+    // an answer lost before its try heard it (a restart, a broken try) is
+    // never asked for again in its attempt; a replay asks once more
+    api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "lose-video-answers", "times": 1 })))?;
+    let (before, said) = (made(s).len(), logged(s, "ledger.unknown-usage"));
+    let lost = run("v-lost", json!({ "prompt": "a lost reel", "path": "video/lost.mp4" }))?;
+    let loud = s.eventually(wait, || logged(s, "ledger.unknown-usage") > said);
+    s.ok(
+        "a step whose video's answer was lost is tried again without asking the model again: it is held, saying to replay, nothing written, charged nothing, said aloud",
+        lost["status"] == "held"
+            && lost["error"].as_str().is_some_and(|e| e.contains("never came back") && e.contains("replay"))
+            && made(s).len() == before + 1
+            && cost(&lost) == 0
+            && paid(&lost).is_empty()
+            && loud
+            && s.fake.file_at(repo, "main", "video/lost.mp4").is_none(),
+        json!({ "run": lost, "made": made(s).len() - before }),
+    );
+    let id = lost["id"].as_i64().unwrap_or(0);
+    api.signed(owner, "POST", &format!("/api/f/{name}/replay"), Some(&json!({ "run": id })))?;
+    let again = settle(api, owner, name, id, &["succeeded"], wait);
+    s.eventually(wait, || !paid(&again).is_empty());
+    let receipts = paid(&again);
+    s.ok(
+        "its replay asks the model once more, writes the video, and is charged for it once",
+        again["status"] == "succeeded"
+            && made(s).len() == before + 2
+            && s.fake.file_at(repo, "main", "video/lost.mp4").is_some()
+            && receipts.len() == 1
+            && cost(&again) == price("720P", 6_000),
+        json!({ "run": again, "made": made(s).len() - before, "receipts": receipts }),
+    );
+
     s.ai.fail_next(&[503]);
     let before = made(s).len();
     let r = run("v-503", json!({ "prompt": "a storm", "path": "video/storm.mp4" }))?;

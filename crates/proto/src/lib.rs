@@ -712,10 +712,18 @@ pub enum Reason {
     OffersPerDay,
     /// The org's last paid seat: its subscription is canceled instead.
     LastPaidSeat,
+    /// It holds a secret or a door (it has reach), so for now it stays its
+    /// owner's and their own agents': no one else is added, invited or
+    /// given its link (Paul, 2026-11-01, FIN-352; `Sharing::reach`).
+    PrivateWhileReaching,
+    /// It is shared beyond its owner and their own agents (its link, someone
+    /// else in it, an invite waiting), so for now it takes no secret and no
+    /// door: it is made private first (FIN-352; `Sharing::beyond`).
+    UnshareFirst,
 }
 
 impl Reason {
-    pub const ALL: [Reason; 25] = [
+    pub const ALL: [Reason; 27] = [
         Reason::TrialUnknown,
         Reason::TrialEnded,
         Reason::TrialUsed,
@@ -741,6 +749,8 @@ impl Reason {
         Reason::TooManyOffers,
         Reason::OffersPerDay,
         Reason::LastPaidSeat,
+        Reason::PrivateWhileReaching,
+        Reason::UnshareFirst,
     ];
 
     /// Its name on the wire.
@@ -771,6 +781,8 @@ impl Reason {
             Reason::TooManyOffers => "too_many_offers",
             Reason::OffersPerDay => "offers_per_day",
             Reason::LastPaidSeat => "last_paid_seat",
+            Reason::PrivateWhileReaching => "private_while_reaching",
+            Reason::UnshareFirst => "unshare_first",
         }
     }
 
@@ -1029,6 +1041,11 @@ pub struct FragmentStatus {
     /// sharing for them, but on a connector), as the share sheet shows it. A member does not
     /// share by link: they ask its owner.
     pub view_token: Option<String>,
+    /// It holds a secret or a door, so it is shared with no one but its
+    /// owner and their own agents (FIN-352, `Sharing::reach`): the share
+    /// sheet says so. Add-only: left out when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reach: bool,
     /// Editors and up see the inbox token.
     pub inbox_token: Option<String>,
     pub urls: Urls,
@@ -1250,6 +1267,12 @@ pub struct Sharing {
     pub guests: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub invites: Option<u64>,
+    /// It holds a secret or a door, so it is shared with no one but its
+    /// owner and their own agents (FIN-352: `Reason::PrivateWhileReaching`,
+    /// `Reason::UnshareFirst`). Add-only: left out when false, and a row
+    /// from before it reads none.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reach: bool,
 }
 
 impl Sharing {
@@ -1257,6 +1280,12 @@ impl Sharing {
     /// invited (a row sent before invites were counted may have some).
     pub fn with_others(&self) -> bool {
         self.guests > 0 || self.invites.is_none_or(|n| n > 0)
+    }
+
+    /// Whether it is shared beyond its owner and their own agents: anyone
+    /// with its link, or anyone else in it or invited (FIN-352).
+    pub fn beyond(&self) -> bool {
+        self.visibility != Visibility::Members || self.with_others()
     }
 }
 
@@ -2463,7 +2492,7 @@ mod tests {
         }
         let listed = FragmentList { fragments: vec![ListedFragment { name: "notes-k3x9".into(), role: Role::Owner, kind: FragmentKind::App, title: None, picture: None, agent_role: None, agents: vec![], preview: None, preview_at: None, unread: 0, sharing: None, archived: false, dock: true, pinned: false, owned: false, listed: vec![] }] };
         assert_eq!(value(&listed), serde_json::json!({ "fragments": [{ "name": "notes-k3x9", "role": "owner", "kind": "app" }] }));
-        let sharing = Sharing { visibility: Visibility::Link, members: 3, guests: 1, invites: Some(2) };
+        let sharing = Sharing { visibility: Visibility::Link, members: 3, guests: 1, invites: Some(2), reach: false };
         let listed = FragmentList {
             fragments: vec![ListedFragment { name: "todo-k3x9".into(), role: Role::Owner, kind: FragmentKind::Chat, title: Some("Todo".into()), picture: None, agent_role: None, agents: vec!["npub1juniper".into()], preview: Some("hi".into()), preview_at: Some(1_760_000_000_000), unread: 3, sharing: Some(sharing), archived: true, dock: true, pinned: false, owned: false, listed: vec![ListedRecord { channel: "work".into(), principal: "npub1juniper".into(), kind: "turn.asked".into(), fields: [("asks".to_string(), "npub1me".to_string())].into(), at: 1_760_000_000_001 }] }],
         };
@@ -2505,6 +2534,16 @@ mod tests {
         assert!(!Sharing { invites: Some(0), ..old }.with_others());
         assert!(Sharing { invites: Some(1), ..old }.with_others());
         assert!(Sharing { guests: 1, invites: Some(0), ..old }.with_others());
+        // FIN-352: beyond its owner and their agents is a link, someone
+        // else, or an invite; reach is sent only when true, and a row from
+        // before it reads none
+        let private = Sharing { visibility: Visibility::Members, members: 2, guests: 0, invites: Some(0), reach: true };
+        assert!(!private.beyond());
+        assert_eq!(value(&private), serde_json::json!({ "visibility": "members", "members": 2, "guests": 0, "invites": 0, "reach": true }));
+        for shared in [Sharing { visibility: Visibility::Link, ..private }, Sharing { visibility: Visibility::Public, ..private }, Sharing { guests: 1, members: 3, ..private }, Sharing { invites: Some(1), ..private }, Sharing { invites: None, ..private }] {
+            assert!(shared.beyond(), "{shared:?}");
+        }
+        assert!(!old.reach && value(&Sharing { reach: false, ..private }).get("reach").is_none());
         // a chat and an agent are made members only; the rest by link
         assert_eq!([Some("chat"), Some("agent"), Some("sessions")].map(Visibility::made_from), [Visibility::Members; 3]);
         assert_eq!([None, Some("todo"), Some("brain"), Some("blank"), Some("skills")].map(Visibility::made_from), [Visibility::Link; 5]);
@@ -2638,6 +2677,8 @@ mod tests {
             (TooManyOffers, "too_many_offers"),
             (OffersPerDay, "offers_per_day"),
             (LastPaidSeat, "last_paid_seat"),
+            (PrivateWhileReaching, "private_while_reaching"),
+            (UnshareFirst, "unshare_first"),
         ];
         assert_eq!(all.len(), Reason::ALL.len(), "every reason is named here");
         for (reason, wire) in all {

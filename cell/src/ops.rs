@@ -465,7 +465,7 @@ impl FragmentCell {
                 self.schedule().await?;
                 json!({ "aged": ms, "invites": aged })
             }
-            Some(lever @ ("fail-deliveries" | "fail-outbox" | "fail-triggers" | "drop-effects" | "fail-meter-acks" | "fail-after-paid" | "fail-cards" | "fail-search-index")) => {
+            Some(lever @ ("fail-deliveries" | "fail-outbox" | "fail-triggers" | "drop-effects" | "fail-meter-acks" | "fail-after-paid" | "lose-video-answers" | "fail-cards" | "fail-search-index")) => {
                 let key = match lever {
                     "fail-cards" => MetaKey::TestFailCards,
                     "fail-search-index" => MetaKey::TestFailSearchIndex,
@@ -474,6 +474,7 @@ impl FragmentCell {
                     "fail-triggers" => MetaKey::TestFailTriggers,
                     "fail-meter-acks" => MetaKey::TestFailMeterAcks,
                     "fail-after-paid" => MetaKey::TestFailAfterPaid,
+                    "lose-video-answers" => MetaKey::TestLoseVideoAnswers,
                     _ => MetaKey::TestDropEffects,
                 };
                 let times = body["times"].as_u64().ok_or_else(|| CellError::invalid(format!("{lever} names how many times")))?;
@@ -578,6 +579,26 @@ impl FragmentCell {
                 let principal = body["principal"].as_str().ok_or_else(|| CellError::invalid("legacy-member-kind names a member's principal"))?;
                 let n = self.rows("UPDATE members SET kind = NULL WHERE principal = ? RETURNING principal", vec![principal.into()])?.len();
                 json!({ "members": n })
+            }
+            Some("legacy-reach") => {
+                // a key set before FIN-352 (2026-11-01), while it was shared
+                // beyond its owner and their agents, as such fragments were
+                // left (reach.rs): sealed and stored as `PUT secrets` did
+                // then, past the rule as an older release wrote it
+                let name = body["name"].as_str().unwrap_or("LEGACY_KEY");
+                if !fragment_proto::valid_secret_name(name) {
+                    return Err(CellError::invalid("legacy-reach names a secret"));
+                }
+                let sealed = crate::keys::seal(&self.env, &self.scope(), body["value"].as_str().unwrap_or("legacy").as_bytes()).await?;
+                self.exec(
+                    "INSERT INTO secrets (name, sealed, set_by, set_at) VALUES (?, ?, 'legacy', ?) ON CONFLICT (name) DO UPDATE SET sealed = excluded.sealed",
+                    vec![name.into(), sealed.into(), SqlStorageValue::Integer(js::now_ms())],
+                )?;
+                for host in body["hosts"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+                    self.exec("INSERT OR IGNORE INTO secret_hosts (name, host) VALUES (?, ?)", vec![name.into(), host.into()])?;
+                }
+                self.sharing_changed()?;
+                json!({ "reach": self.reaches()? })
             }
             Some("members") => {
                 let fill = body["fill"].as_u64().ok_or_else(|| CellError::invalid("fill is a count"))?;

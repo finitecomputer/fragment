@@ -316,7 +316,7 @@ fn dev(args: &[String]) -> Result<()> {
     fleet.configure(&tools, &devstack::cell_dir())?;
     let opts = devstack::NodeOptions {
         project: devstack::cell_dir(),
-        port: DEV_PORT,
+        listener: devstack::hold_port(DEV_PORT)?,
         log_dir: devstack::repo_root().join("target/devstack"),
         // in the terminal's group: Ctrl-C stops it with xtask
         own_group: false,

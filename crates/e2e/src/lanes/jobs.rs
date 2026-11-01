@@ -122,8 +122,12 @@ pub(super) fn jobs_fragment(s: &Suite, api: &Api, owner: &Keys, base: &str, edit
     Ok((name, c))
 }
 
-/// Sets the fixture's `API_KEY` to `value`, for `hosts`.
+/// Sets the fixture's `API_KEY` to `value`, for `hosts`, on the fragment
+/// made private first: a key is held only where its owner and their own
+/// agents alone are (FIN-352, cell reach.rs).
 pub(super) fn set_secret(api: &Api, keys: &Keys, name: &str, value: &str, hosts: &[&str]) -> Result<Reply> {
+    let private = api.signed(keys, "PUT", &format!("/api/f/{name}/visibility"), Some(&json!({ "visibility": "members" })))?;
+    anyhow::ensure!(private.status == 200, "{name} made private for its key: {private}");
     api.signed(keys, "PUT", &format!("/api/f/{name}/secrets/API_KEY"), Some(&json!({ "value": value, "hosts": hosts })))
 }
 
@@ -221,9 +225,11 @@ pub fn jobs(s: &mut Suite, api: &Api) -> Result<()> {
     }
     let upstream = Upstream::start()?;
     let owner = api.person()?;
-    let viewer = api.person()?;
     let (name, _) = jobs_fragment(s, api, &owner, "jobs", |_| {})?;
-    api.share(&name, viewer.pubkey_hex(), "viewer")?;
+    // its viewer its owner's own agent: it holds a key (FIN-352)
+    let (viewer, viewer_id) = api.own_agent(&owner)?;
+    let r = api.signed(&owner, "PUT", &format!("/api/f/{name}/members/{viewer_id}"), Some(&json!({ "role": "viewer" })))?;
+    anyhow::ensure!(r.status == 200, "the jobs fragment's viewer: {r}");
     let r = set_secret(api, &owner, &name, SECRET, &["127.0.0.1"])?;
     anyhow::ensure!(r.status == 200, "secret setup: {r}");
     let long = Duration::from_secs(40);
@@ -513,6 +519,8 @@ fn inbox_secret(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
     };
     let r = post(vec![("x-hook-secret", HOOK.into())])?;
     s.ok("an inbox whose secret is not set takes nothing", r.status == 403 && r.text.contains("x-hook-secret"), &r);
+    // its key held only while it is private (FIN-352)
+    anyhow::ensure!(api.signed(owner, "PUT", &format!("/api/f/{name}/visibility"), Some(&json!({ "visibility": "members" })))?.status == 200, "made private");
     let r = api.signed(owner, "PUT", &format!("/api/f/{name}/secrets/HOOK"), Some(&json!({ "value": HOOK, "hosts": ["api.telegram.org"] })))?;
     anyhow::ensure!(r.status == 200, "the inbox's secret: {r}");
     let r = post(vec![("x-fragment-inbox-token", token.clone())])?;

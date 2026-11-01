@@ -398,6 +398,10 @@ pub(crate) enum MetaKey {
     /// Test fleets only: how many more paid AI steps fail just after their
     /// call was paid and kept (`fail-after-paid`), so the step is retried.
     TestFailAfterPaid,
+    /// Test fleets only: how many more video steps lose their model's
+    /// answer before it is kept (`lose-video-answers`), as a restart or a
+    /// broken try would, so the step is tried again without it.
+    TestLoseVideoAnswers,
     /// Test fleets only: how many more meter acknowledgements are lost
     /// (`fail-meter-acks`), so the queue delivers their batch again.
     TestFailMeterAcks,
@@ -476,6 +480,7 @@ impl MetaKey {
             MetaKey::DoorTemplate => "door_template",
             MetaKey::PrewakeAt => "prewake_at",
             MetaKey::TestFailAfterPaid => "test_fail_after_paid",
+            MetaKey::TestLoseVideoAnswers => "test_lose_video_answers",
             MetaKey::TestFailMeterAcks => "test_fail_meter_acks",
 
             MetaKey::MeterClosed => "meter_closed",
@@ -1319,6 +1324,8 @@ impl FragmentCell {
             code: self.code_status()?,
             // the share link is its owner's to give (and their agent's, sharing for them): a member asks them
             view_token: self.shares(caller).then_some(facts.view_token),
+            // it stays its owner's and their agents' while it has reach (reach.rs)
+            reach: self.reaches()?,
             inbox_token: if role >= Role::Editor { Some(inbox_token.ok_or_else(|| missing(MetaKey::InboxToken))?) } else { None },
             urls: Urls { canonical: self.cfg.canonical(&caller.url, &facts.name), platform: self.cfg.platform() },
             blob_min_bytes: Some(fragment_core::blob::BLOB_MIN_BYTES as u64),

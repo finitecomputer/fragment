@@ -921,7 +921,10 @@ from Hermes' database) replaces the older; an older copy never does. It says wha
 already had, and what it left out and why: at most 18,000 conversations
 and 1 GiB an archive (an import past either adds nothing), 8 MiB a
 conversation. A tool's output and an agent's reasoning are cut to 2,000
-characters; what was said, never. An agent runs it for its owner (into
+characters; what was said, never. Each import also writes the archive's
+search, a section a turn of each conversation, and puts it right when it
+has fallen behind (on a host without search yet, it says so and skips
+it). An agent runs it for its owner (into
 their archive, never one of its own), and so reads it: `fragment sync
 <archive> --dir ~/archive --mode pull`, then your own tools over
 `~/archive/sessions/`. A conversation's file (format
@@ -1028,6 +1031,13 @@ variable of its name, else stdin, never the command line. A secret set
 before secrets named hosts fills nowhere until it is set again with
 `--to`. Never write secret values into files.
 
+A fragment holding a secret (or a door) stays its owner's and their own
+agents' for now: make it private first (`fragment visibility my-thing
+members`, no one else in it, no invite waiting), and while it holds one
+it gets no share link, no one else, and no invite (403
+`private_while_reaching`; a secret on a shared one is 403
+`unshare_first`).
+
 ## Rules of the road
 
 1. **The event log is truth.** Read `fragment events` before and after
@@ -1088,6 +1098,7 @@ fragment schedule list [<name>]          fragment schedule pause|resume|rm [<nam
 fragment operator key <file>
 fragment operator wipe <email|npub> [--dry-run | --yes] [--key-file F]
 fragment operator people [--q Q] [--after A] [--key-file F]
+fragment operator reach [--key-file F]      # FIN-352: fragments with a key or a door, by kind, and how many shared beyond (counts only)
 fragment operator person <npub> [--key-file F]
 fragment operator pin <npub> <image> [--key-file F]
 fragment operator orgs [--after A] [--key-file F]

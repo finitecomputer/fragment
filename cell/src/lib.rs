@@ -41,6 +41,7 @@ mod channels;
 mod computer;
 mod deliveries;
 mod doors;
+mod reach;
 mod ended;
 mod cs;
 mod error;
