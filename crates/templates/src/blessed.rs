@@ -285,10 +285,12 @@ mod tests {
         }
     }
 
-    /// Every hosted door's template is a blessed one, named.
+    /// Every hosted door's template is a blessed one, named, and made
+    /// members-only (it holds its owner's keys: FIN-352).
     #[test]
     fn every_connector_is_blessed() {
         assert!(CONNECTORS.iter().all(|c| BLESSED.contains(c) && template(c).is_some()), "{CONNECTORS:?}");
+        assert!(CONNECTORS.iter().all(|c| fragment_proto::Visibility::made_from(Some(c)) == fragment_proto::Visibility::Members), "{CONNECTORS:?}");
     }
 
     /// The named statics are the templates under templates/ of those names,

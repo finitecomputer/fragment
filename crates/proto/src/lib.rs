@@ -921,11 +921,12 @@ impl Visibility {
 
     /// Who may open a fragment made from `template` with no visibility
     /// asked: a chat or an agent (its SOUL and memories) only its members
-    /// (Paul, 2026-10-13), as a session archive (a person's old chats);
-    /// anything else anyone with its share link (decision 48).
+    /// (Paul, 2026-10-13), as a session archive (a person's old chats) and
+    /// a connector (a chat of its owner's direct messages, holding its
+    /// keys: FIN-352); anything else anyone with its share link (decision 48).
     pub fn made_from(template: Option<&str>) -> Visibility {
         match template {
-            Some("chat" | "agent" | "sessions") => Visibility::Members,
+            Some("chat" | "agent" | "sessions" | "telegram") => Visibility::Members,
             _ => Visibility::Link,
         }
     }
@@ -2545,7 +2546,7 @@ mod tests {
         }
         assert!(!old.reach && value(&Sharing { reach: false, ..private }).get("reach").is_none());
         // a chat and an agent are made members only; the rest by link
-        assert_eq!([Some("chat"), Some("agent"), Some("sessions")].map(Visibility::made_from), [Visibility::Members; 3]);
+        assert_eq!([Some("chat"), Some("agent"), Some("sessions"), Some("telegram")].map(Visibility::made_from), [Visibility::Members; 4]);
         assert_eq!([None, Some("todo"), Some("brain"), Some("blank"), Some("skills")].map(Visibility::made_from), [Visibility::Link; 5]);
         // a share is the person's and their agents' (Paul, 2026-10-13): no
         // field says otherwise, and one that tries is refused
