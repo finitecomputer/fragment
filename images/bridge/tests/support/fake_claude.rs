@@ -45,7 +45,52 @@ fn main() {
     match cfg["mode"].as_str() {
         Some("record") => record(&args, Path::new(cfg["real"].as_str().expect("real")), Path::new(cfg["out"].as_str().expect("out"))),
         Some("replay") => replay(&args, Path::new(cfg["script"].as_str().expect("script"))),
+        Some("echo") => echo(&args),
         other => panic!("fake-claude: no mode {other:?}"),
+    }
+}
+
+/// A scripted Claude Code (the stub image's: images/stub/Dockerfile): each
+/// message answered `echo: <its words>` on Claude Code's own stream-json
+/// wire, its session's transcript kept as the real one keeps it (so a
+/// later process resumes it), an interrupt answered.
+fn echo(args: &[String]) {
+    let id = flag(args, "--session-id").or_else(|| flag(args, "--resume")).unwrap_or("echo").to_string();
+    let config = PathBuf::from(std::env::var("CLAUDE_CONFIG_DIR").unwrap_or_else(|_| ".claude".into()));
+    let cwd = std::env::current_dir().expect("a working directory");
+    let project: String = cwd.to_string_lossy().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
+    let transcript = config.join("projects").join(project).join(format!("{id}.jsonl"));
+    let mut stdout = std::io::stdout();
+    let mut inited = false;
+    // bounded by its input: one line per pass
+    for line in std::io::stdin().lock().lines() {
+        let Ok(line) = line else { return };
+        let got: serde_json::Value = serde_json::from_str(&line).unwrap_or(serde_json::Value::Null);
+        let out = match got["type"].as_str() {
+            Some("user") => {
+                if !transcript.is_file() {
+                    let _ = std::fs::create_dir_all(transcript.parent().expect("a project"));
+                    let _ = std::fs::write(&transcript, b"");
+                }
+                let content = &got["message"]["content"];
+                let said = content.as_str().map(str::to_string).unwrap_or_else(|| content.as_array().into_iter().flatten().filter_map(|c| c["text"].as_str()).collect::<Vec<_>>().join(" "));
+                let text = format!("echo: {said}");
+                let mut out = Vec::new();
+                if !inited {
+                    inited = true;
+                    out.push(serde_json::json!({ "type": "system", "subtype": "init", "session_id": id }));
+                }
+                out.push(serde_json::json!({ "type": "assistant", "message": { "content": [{ "type": "text", "text": text }] }, "parent_tool_use_id": null }));
+                out.push(serde_json::json!({ "type": "result", "subtype": "success", "is_error": false, "result": text }));
+                out
+            }
+            Some("control_request") => vec![serde_json::json!({ "type": "control_response", "response": { "subtype": "success", "request_id": got["request_id"], "response": {} } })],
+            _ => Vec::new(),
+        };
+        for v in out {
+            writeln!(stdout, "{v}").expect("written");
+        }
+        stdout.flush().expect("flushed");
     }
 }
 

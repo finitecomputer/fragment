@@ -67,8 +67,9 @@ fn runtimes() -> Runtimes {
         idle: Duration::from_millis(parse_ms("BRIDGE_CLAUDE_IDLE_MS", 300_000)),
         drain: Duration::from_millis(fragment_bridge::runtime::claude::DRAIN_MS_DEFAULT),
         run_as,
-        // its person installs it from a turn's card (Paul, FIN-233)
-        installer: Some(fragment_bridge::runtime::claude::INSTALLER.to_string()),
+        // its person installs it from a turn's card (Paul, FIN-233), with
+        // Anthropic's installer, or the stand-in a test image names
+        installer: Some(env_or("BRIDGE_CLAUDE_INSTALLER", fragment_bridge::runtime::claude::INSTALLER)),
     };
     r.with("claude", Box::new(Claude { config }))
 }
