@@ -205,7 +205,25 @@ def stop():
             _stop(process)
 
 
+def open_link(url):
+    """A link opened on the desktop (its default web browser: the image's
+    desktop-browser, as Xfce's helper), in this agent's own browser, started
+    if it is not. Xfce otherwise asks which browser to use: a question put
+    to its person (FIN-351)."""
+    from tools.bot_desktop import browser
+    profile = browser.profile_dir()
+    _start(profile, dict(os.environ))
+    # Chromium's own profile singleton hands the link to the running browser.
+    subprocess.run([BROWSER, f'--user-data-dir={profile}', '--no-first-run',
+                    '--no-default-browser-check', url], check=True, timeout=10)
+
+
 if __name__ == '__main__':
+    if sys.argv[1:2] == ['--open']:
+        if len(sys.argv) != 3:
+            raise SystemExit('desktop browser: --open expects one link')
+        open_link(sys.argv[2])
+        raise SystemExit(0)
     if len(sys.argv) != 2:
         raise SystemExit('desktop browser: expected the profile directory')
     profile = Path(sys.argv[1])

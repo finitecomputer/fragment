@@ -329,6 +329,21 @@ pub const VIDEO_MAX_BYTES: usize = 64 * 1024 * 1024;
 /// seconds with room for a frame's rounding, a length that is no video's.
 pub const VIDEO_LENGTH_MAX_MS: u64 = (DURATION_MAX_S as u64 + 1) * 1000;
 
+/// A video step's call while it waits on its model (the fragment's
+/// `making`, schema step 7), by the step's key: written as an attempt asks
+/// (a replay's replaces the attempt before it), gone when that attempt's
+/// call answers. A late answer of an attempt before leaves a newer one's
+/// row, which still keeps that attempt from asking twice.
+pub const ASKING: &str = "INSERT INTO making (key, run, attempt, at) VALUES (?, ?, ?, ?) ON CONFLICT (key) DO UPDATE SET attempt = excluded.attempt, at = excluded.at";
+pub const ANSWERED: &str = "DELETE FROM making WHERE key = ? AND attempt = ?";
+pub const MAKING: &str = "SELECT attempt FROM making WHERE key = ?";
+
+/// Whether this attempt's call for its video was asked and never heard
+/// (`making` names it, and no receipt is kept): it asks no second time.
+pub fn lost(making: Option<u32>, attempt: u32) -> bool {
+    making == Some(attempt)
+}
+
 /// A video's resolution, as its model names it, and the row its price is
 /// kept under in the book.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -800,5 +815,33 @@ mod tests {
         assert!(Refusal::AspectRatio.message().contains("16:9, 9:16, 1:1, 4:3, 3:4"));
         assert!(AnswerFault::VideoTooLarge.message().contains(&VIDEO_MAX_BYTES.to_string()));
         assert!(AnswerFault::TooLarge.message().contains(&IMAGE_MAX_BYTES.to_string()));
+    }
+
+    /// Goal: a video is asked for at most once an attempt, whatever answers
+    /// late. Method: the fragment's schema in SQLite; attempt 1 asks and
+    /// is never heard, its run is held, and its replay (attempt 2) asks;
+    /// attempt 1's late refusal arrives; attempt 2's answer is lost too, and
+    /// its retry finds its own row: it does not ask again. Its own answer
+    /// clears it; a replay's next attempt may ask.
+    #[test]
+    fn a_late_answer_leaves_a_newer_attempts_call_guarded() {
+        use rusqlite::{params, Connection};
+        let db = Connection::open_in_memory().unwrap();
+        for step in crate::migrate::FRAGMENT.steps {
+            db.execute_batch(step.sql).unwrap();
+        }
+        let key = "f@1/run/7/step/0";
+        let ask = |attempt: u32| db.execute(ASKING, params![key, 7, attempt, 0]).unwrap();
+        let answered = |attempt: u32| db.execute(ANSWERED, params![key, attempt]).unwrap();
+        let making = || db.query_row(MAKING, params![key], |r| r.get::<_, u32>(0)).ok();
+        assert!(!lost(making(), 1), "nothing asked: attempt 1 asks");
+        ask(1);
+        assert!(lost(making(), 1), "attempt 1 retried unheard asks no second time");
+        assert!(!lost(making(), 2), "its replay may ask");
+        ask(2);
+        assert_eq!(answered(1), 0, "attempt 1's late answer removes nothing of attempt 2's");
+        assert!(lost(making(), 2), "attempt 2 retried unheard asks no second time");
+        assert_eq!(answered(2), 1, "attempt 2's own answer clears its row");
+        assert!(!lost(making(), 2), "answered: a retry may ask again");
     }
 }

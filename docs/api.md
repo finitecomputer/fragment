@@ -1105,7 +1105,9 @@ reason (402 `budget_used_up`). A run answers `costMicros`.
   its resolution's price as soon as the model answers with its video
   (a step tried again reads that video, and is never made or charged
   again); an answer with no completed video is refused and charged
-  nothing (`ai.video-refused`). Refused before any call on a deployment
+  nothing (`ai.video-refused`). Asked at most once an attempt: a try
+  that never heard its answer fails, charged nothing, saying to replay
+  (`ai.video-lost`). Refused before any call on a deployment
   whose tiers are private: no catalog video model is (`Models::video_refused`).
 
 A text model's 429 or 5xx is answered by the fallback model (Models), sent
@@ -1262,7 +1264,10 @@ compared with the old. A slot may name a `document_prefix` and a
 instructions a fragment's search puts before each chunk and each question
 it embeds (nomic-embed-text's `search_document: ` and `search_query: `),
 which its index's `space` names, so a change of either is a new space
-there too. This route embeds an agent's input as given. A deployment whose
+there too. `inputs_max` (1 to `embed::INPUTS_MAX`, that unnamed) is the
+inputs its model takes in one call (Tinfoil's 32): a search embeds in
+batches of it, and this route refuses a call of more, 400. This route
+embeds an agent's input as given. A deployment whose
 tiers are private embeds only on a slot marked `private` (else 403). Refused 400 before anything is sent:
 `input` not a string or 1 to `embed::INPUTS_MAX` strings, an empty one, or
 one that may pass the slot's window (`embed::tokens_max`; nothing is cut);

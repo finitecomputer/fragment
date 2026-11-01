@@ -98,12 +98,12 @@ Every change is checked against this table.
 | A computer's XFTP relays | the Computer DO: leases in memory, the day's bytes in `relay_day` | none |
 | A fragment's scheduled records | its supervisor's `record_schedules` (docs/api.md, "Scheduled records") | each fire appended once, keyed by schedule and minute; a computer keeps none |
 | Money | each payer's ledger (docs/ledger.md) | meters batch rows to it, idempotently; each isolate's gate keeps an answer a minute at most |
-| A job's paid AI answer | the supervisor's `paid` receipts, by incarnation, run and step | its charge in the meter outbox (`step:<key>`), charged once; no provider call once a receipt exists |
+| A job's paid AI answer | the supervisor's `paid` receipts, by incarnation, run and step | its charge in the meter outbox (`step:<key>`), charged once; no provider call once a receipt exists, nor a video's while its attempt's call is in `making` |
 | Audit trail | the `events` channel | pin moves recorded as events |
 | The agent docs | `cli/SKILL.md` and `cli/GUIDE.md`, naming no host | compiled into the CLI and the release's files (`/llms.txt`), each filled with its host |
 | The release's files: templates, the shell's, the agent docs | the repo | the cell's index and its Static Assets, by hash, from one build; the CLI embeds the templates |
 | A fragment's icon | its meta, naming one of its blobs (cell/src/icon.rs) | members' list rows carry its address |
-| A person's session archive | its conversations' files, `sessions/<key>.json`, in a fragment of theirs of kind `sessions` (templates/sessions/README.md) | its indexes (`index/<kind>.json`), a projection rewritten by each import; the store an import read is never written |
+| A person's session archive | its conversations' files, `sessions/<key>.json`, in a fragment of theirs of kind `sessions` (templates/sessions/README.md) | its indexes (`index/<kind>.json`), a projection rewritten by each import; its search, a projection of `sessions/` each import writes (a source a file, its revision the file's sha256) and reconciles against the indexes; the store an import read is never written |
 | A fragment's preview card | its own storage (`fragment_core::card::Cards`) | status's `page`; errors also an `events` row |
 | What members are doing: each one's newest listed record | the channel's records | the fragment's `listed`, and each member's list row (docs/api.md, Listed records) |
 | A person's own view of their fragments (archived, docked, read up to) | their list, the `Principal` cell | none |

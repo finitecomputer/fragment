@@ -42,7 +42,6 @@
 
 use std::collections::{HashMap, HashSet};
 
-use fragment_core::embed;
 use fragment_core::search_index as engine;
 use fragment_core::searchable as rules;
 use fragment_proto::search as wire;
@@ -193,7 +192,8 @@ impl FragmentCell {
     /// embedded on the deployment's slot, paid by `payer`.
     async fn search_embed(&self, todo: &[&rules::Chunk], payer: &str, agent: Option<&str>, fragment: &InFragment<'_>) -> CellResult<HashMap<String, String>> {
         let mut out = HashMap::new();
-        for batch in todo.chunks(embed::INPUTS_MAX) {
+        // as many a call as the slot's model takes
+        for batch in todo.chunks(self.cfg.models.embeddings.inputs_max) {
             let inputs: Vec<String> = batch.iter().map(|c| c.input.clone()).collect();
             match embedded(&self.env, &inputs, payer, agent, Some(fragment), &self.state).await? {
                 Embedding::Vectors { vectors, .. } => {
