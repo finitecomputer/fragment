@@ -169,7 +169,12 @@ struct Hold(Mutex<Option<Instant>>);
 impl Hold {
     /// Held at least `ms` from now; said when that holds later than before.
     fn until(&self, ms: u64) {
-        let at = Instant::now() + Duration::from_millis(ms);
+        self.until_at(Instant::now(), ms);
+    }
+
+    /// `until`, `now` being this (a test's clock).
+    fn until_at(&self, now: Instant, ms: u64) {
+        let at = now + Duration::from_millis(ms);
         let mut held = self.0.lock().expect("the hold");
         if held.is_none_or(|t| at > t + Duration::from_secs(1)) {
             eprintln!("Waiting {} s for the search service…", ms.div_ceil(1000));
@@ -179,10 +184,16 @@ impl Hold {
 
     /// Back once the hold has passed (at once when there is none).
     fn wait(&self) {
+        self.wait_with(Instant::now, std::thread::sleep);
+    }
+
+    /// `wait`, on a clock (`now`) and its sleep: the hold read again after
+    /// each sleep, so one a later 429 moved holds a writer already waiting.
+    fn wait_with(&self, now: impl Fn() -> Instant, mut sleep: impl FnMut(Duration)) {
         loop {
             let held = *self.0.lock().expect("the hold");
-            match held.and_then(|t| t.checked_duration_since(Instant::now())) {
-                Some(left) if !left.is_zero() => std::thread::sleep(left),
+            match held.and_then(|t| t.checked_duration_since(now())) {
+                Some(left) if !left.is_zero() => sleep(left),
                 _ => return,
             }
         }
@@ -358,5 +369,42 @@ pub(super) fn write_one(c: &Client, name: &str, spool: &Spool, storage: &CodeSto
             Err(Refusal { status: Some(r.status), why: r.refusal().msg, wait_ms })
         }
         Err(err) => Err(Refusal::unsent(format!("{err:#}"))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::{Cell, RefCell};
+
+    use super::*;
+
+    /// Goal (#919's review): a later 429 moves the one time every writer
+    /// holds to, so a writer already waiting resumes no sooner than the
+    /// later time; and a shorter one never moves it earlier. Method: a test
+    /// clock; a writer waits on a hold of 60 ms, and 20 ms into its wait
+    /// another writer's 429 holds 150 ms from then. Nothing sleeps.
+    #[test]
+    fn a_later_rate_limit_moves_the_time_a_waiting_writer_holds_to() {
+        let hold = Hold::default();
+        let start = Instant::now();
+        let now = Cell::new(start);
+        let slept = RefCell::new(Vec::new());
+        hold.until_at(start, 60);
+        hold.wait_with(
+            || now.get(),
+            |d| {
+                if slept.borrow().is_empty() {
+                    // another writer, 20 ms into this one's wait
+                    hold.until_at(start + Duration::from_millis(20), 150);
+                }
+                slept.borrow_mut().push(d);
+                now.set(now.get() + d);
+            },
+        );
+        assert_eq!(*slept.borrow(), [Duration::from_millis(60), Duration::from_millis(110)], "it waited to the first time, read the hold again, and waited the rest");
+        assert_eq!(now.get(), start + Duration::from_millis(170), "resumed at the later time, not before");
+        hold.until_at(start + Duration::from_millis(30), 10);
+        assert_eq!(*hold.0.lock().unwrap(), Some(start + Duration::from_millis(170)), "a shorter hold never moves it earlier");
+        hold.wait_with(|| now.get(), |_| panic!("the time passed: no wait"));
     }
 }
