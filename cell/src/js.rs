@@ -88,12 +88,15 @@ pub struct AppCode {
     /// `applib/…` path → source.
     pub modules: std::collections::BTreeMap<String, String>,
     pub cpu_ms: u32,
-    pub subrequests: u32,
 }
 
 /// The `app` facet of a Durable Object: author code in its own SQLite.
 pub struct Facet {
     stub: JsValue,
+    /// The facet table and this facet's name: a call that meets one of
+    /// the runtime's limits on the facet stops it (`Facet::failed`).
+    facets: JsValue,
+    name: String,
 }
 
 /// The app facet's name, before its life's `@<incarnation>`: each life of
@@ -128,9 +131,12 @@ fn worker_code(ctx: &JsValue, code: &AppCode) -> CellResult<Object> {
         set(&module, "js", source.as_str());
         set(&modules, path, module);
     }
+    // CPU is each call's (the runaway guard); subrequests are left the
+    // account's: Cloudflare counts a facet's across its calls for its life
+    // (docs/technical-debt-ledger.md), and a facet without network makes
+    // none but its capability calls
     let limits = Object::new();
     set(&limits, "cpuMs", code.cpu_ms);
-    set(&limits, "subRequests", code.subrequests);
     let worker_code = Object::new();
     set(&worker_code, "compatibilityDate", "2026-01-01");
     set(&worker_code, "mainModule", "platform.js");
@@ -164,6 +170,9 @@ pub struct AppLoader {
     /// How many times this activation built worker code for the loader (a
     /// test hook reads it: `/test/fragment code-builds`).
     builds: std::rc::Rc<std::cell::Cell<u32>>,
+    /// How many times this activation started the facet (a test lever
+    /// counts its capability calls by start: `facet-calls`).
+    starts: std::rc::Rc<std::cell::Cell<u32>>,
 }
 
 impl AppLoader {
@@ -185,7 +194,10 @@ impl AppLoader {
             Ok(worker_code(&ctx_for_code, &app).map_err(|e| thrown(&e.message))?.into())
         });
         let env = env.clone();
+        let starts = std::rc::Rc::new(std::cell::Cell::new(0u32));
+        let started = starts.clone();
         let start: Callback = Closure::new(move || -> Result<JsValue, JsValue> {
+            started.set(started.get() + 1);
             let id = id().map_err(|why| thrown(&why))?;
             // the loader calls its callback with no arguments: bound, it
             // is told which id it builds (a fresh bound function a call,
@@ -198,11 +210,15 @@ impl AppLoader {
             set(&options, "class", class);
             Ok(options.into())
         });
-        AppLoader { start, builds }
+        AppLoader { start, builds, starts }
     }
 
     pub fn builds(&self) -> u32 {
         self.builds.get()
+    }
+
+    pub fn starts(&self) -> u32 {
+        self.starts.get()
     }
 
     /// The running app facet `name`, or a new one started from the
@@ -210,7 +226,7 @@ impl AppLoader {
     pub fn facet(&self, ctx: &JsValue, name: &str) -> CellResult<Facet> {
         let facets = get(ctx, "facets")?;
         let stub = call(&facets, "get", &[name.into(), self.start.as_ref().clone()]).map_err(|e| CellError::host(format!("facets.get: {}", js_message(&e))))?;
-        Ok(Facet { stub })
+        Ok(Facet { stub, facets, name: name.to_string() })
     }
 }
 
@@ -237,11 +253,29 @@ fn facet_error(message: String) -> CellError {
 }
 
 impl Facet {
+    /// Stops the facet when `message` is a runtime limit on it (its
+    /// subrequests, which last its life, or a call's CPU), so the next call
+    /// starts it fresh, its whole budget again: a call's failure thrown
+    /// (`failed`), or one the platform code caught and answered (a job's).
+    pub fn stop_at_limit(&self, message: &str) {
+        if facet::at_limit(message) {
+            if let Err(e) = call(&self.facets, "abort", &[self.name.as_str().into(), js_sys::Error::new(message).into()]) {
+                worker::console_error!("{}", serde_json::json!({ "event": "app.facet-unstopped", "error": js_message(&e) }));
+            }
+        }
+    }
+
+    /// A call's failure, its facet stopped at a runtime limit.
+    fn failed(&self, message: String) -> CellError {
+        self.stop_at_limit(&message);
+        facet_error(message)
+    }
+
     /// Forwards a request to the facet's `fetch` (the author's custom routes).
     pub async fn fetch(&self, req: worker::Request) -> CellResult<worker::Response> {
         let raw = JsValue::from(req.inner());
-        let pending = call(&self.stub, "fetch", &[raw]).map_err(|e| facet_error(js_message(&e)))?;
-        let out = settle(pending).await.map_err(|e| facet_error(js_message(&e)))?;
+        let pending = call(&self.stub, "fetch", &[raw]).map_err(|e| self.failed(js_message(&e)))?;
+        let out = settle(pending).await.map_err(|e| self.failed(js_message(&e)))?;
         let resp: worker_sys::web_sys::Response =
             out.dyn_into().map_err(|_| CellError::new(ErrorCode::AppFailed, "the app's fetch did not return a Response"))?;
         // The app's response has immutable headers; the platform adds its
@@ -263,8 +297,8 @@ impl Facet {
     }
 
     async fn invoke(&self, method: &str, args: &[JsValue]) -> CellResult<JsValue> {
-        let pending = call(&self.stub, method, args).map_err(|e| facet_error(js_message(&e)))?;
-        settle(pending).await.map_err(|e| facet_error(js_message(&e)))
+        let pending = call(&self.stub, method, args).map_err(|e| self.failed(js_message(&e)))?;
+        settle(pending).await.map_err(|e| self.failed(js_message(&e)))
     }
 
     /// A platform method's answer, the JSON text it made (platform.mjs):

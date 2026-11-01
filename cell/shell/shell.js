@@ -33,6 +33,7 @@ import { createLauncher } from "./launcher.js";
 import { createThreads } from "./threads.js";
 import { KIND } from "./frame-messages.js";
 import { answerTo } from "./computer-answer.js";
+import { standIns } from "./frame-standin.js";
 
 const $ = (id) => document.getElementById(id);
 const CURRENT = "shell.chat.v1";
@@ -307,6 +308,8 @@ function frameOf(src, title, name = null) {
 // a fragment's frame whose policy does not name its origin yet -> the
 // navigation it makes once it does (frameOf)
 const unready = new WeakMap();
+// the middle column's frames' stand-ins while their pages come (frame-standin.js)
+const standins = standIns(el);
 // A frame sent to `src`: at once, or, its origin not known yet, once it is.
 // `replace`: in place of the page it shows, adding nothing to the tab's
 // history (a cross-origin frame's `location.replace` is one it may call).
@@ -314,6 +317,8 @@ function go(frame, src, replace = false) {
   if (unready.has(frame)) unready.set(frame, src);
   else if (replace && frame.contentWindow) frame.contentWindow.location.replace(new URL(src, location.href).href);
   else frame.src = src;
+  // a page of the middle column sent elsewhere: its stand-in again until it comes
+  standins.again(frame);
 }
 
 // A frame that could not sign in says so, and how on (the mint's note,
@@ -948,7 +953,10 @@ function openChat(name, push = true, path = null) {
   // a frame shown before goes to the page asked in place of the one it
   // showed, so Back goes to the view before (History), not to that page
   if (path && !made) go(state.frames.get(name), framed(name, path), true);
-  for (const [n, frame] of state.frames) frame.hidden = n !== name;
+  for (const [n, frame] of state.frames) {
+    frame.hidden = n !== name;
+    standins.sync(frame);
+  }
   renderHeading();
   renderChats();
   // the ways to ask for an app ask the open chat's agent
@@ -961,12 +969,21 @@ function openChat(name, push = true, path = null) {
   if (onboarding.putOff()) resumeFirstRun();
 }
 
+// A chat's frame let go (the launcher's, to load it again), its stand-in
+// with it.
+function dropFrame(name) {
+  const frame = state.frames.get(name);
+  if (!frame) return;
+  standins.drop(frame);
+  state.frames.delete(name);
+}
 // A chat's frame, made once and kept.
 function chatFrame(name, path = setupFor(name) ? "/?setup=1" : "/") {
   if (state.frames.has(name)) return;
   const frame = frameOf(framed(name, path), titleOf(name), name);
   $("frames").append(frame);
   state.frames.set(name, frame);
+  standins.add(frame);
 }
 
 // ---- apps: every other fragment, each a window in the viewer ----
@@ -1519,6 +1536,7 @@ const launcher = createLauncher({
   views: () => views,
   busy: (name) => refresh.isBusy(state.frames.get(name)),
   setupChat: () => onboarding.setupChat(),
+  dropFrame,
   // the agent an imported conversation was with, as its archive's index names it
   sessionAgent: (key) => sessionArchive.entries().find((e) => e.key === key)?.agent ?? null,
 });
@@ -1818,6 +1836,11 @@ const refresh = createSessionRefresh({
 });
 const { heard, navigated, reopenWindows, release, DEPLOYED } = refresh;
 const frameOfWindow = (win) => [...state.frames.values()].find((f) => f.contentWindow === win);
+// a frame's page that speaks to the shell is drawn: its stand-in goes (frame-standin.js)
+addEventListener("message", (event) => {
+  const frame = frameOfWindow(event.source);
+  if (frame) standins.spoke(frame);
+});
 // A chat's page says the person sent a message there (`said`): a chat they
 // archived comes back to their sidebar, as an email thread does once it is
 // written in again (the History page; Paul, 2026-10-31). Their own flag,

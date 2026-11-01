@@ -148,6 +148,8 @@ const SHELL_PUBLISHED: &[(&str, &str)] = &[
     ("fragment-title.js", "text/javascript; charset=utf-8"),
     // the messages between the shell and the pages it frames: the chat template's, linked (templates/chat/site)
     ("frame-messages.js", "text/javascript; charset=utf-8"),
+    // a chat's stand-in while its page comes: its room and composer, never a blank frame
+    ("frame-standin.js", "text/javascript; charset=utf-8"),
     // Funnel Sans (vendor/funnel-sans-OFL.txt): the platform's pages' type,
     // which the shell loads too
     ("funnel-sans-400.ttf", "font/ttf"),

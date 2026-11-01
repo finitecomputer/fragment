@@ -6889,6 +6889,89 @@ fn apps_arrival_ui(s: &mut Suite, b: &mut Browser, page: &Page) -> Result<()> {
     Ok(())
 }
 
+/// Goal: an app's Reaches shows only on one that reaches the person's
+/// accounts, and such an app says it stays theirs and their agents' alone
+/// (Paul on FIN-352; the cell's rule, reach.rs). Invalid: an app with no key
+/// and no door has no Reaches tab. Valid: one given a key while the page is
+/// open gets the tab, its key by name and host, never its value, and its
+/// Sharing (its share sheet, share.rs) says why it is not shared; a
+/// connector bound as their agent's door is listed, its Reaches the door
+/// with Unlink, and their agents never are (an agent's own door is
+/// Settings': Alex on #918). Replay: its key removed from its Reaches
+/// (asked twice), the tab goes with its reach; the connector unlinked, it
+/// holds no door and leaves the page.
+fn apps_reach_ui(s: &mut Suite, b: &mut Browser, page: &Page, app: &str) -> Result<()> {
+    let wait = std::time::Duration::from_secs(60);
+    let in_page = |method: &str, path: &str, body: Value| {
+        format!(
+            "fetch({}, {{ method: {}, headers: {{ 'x-fragment-shell': '1', 'content-type': 'application/json' }}, body: {}, credentials: 'same-origin' }}).then(async (r) => ({{ status: r.status, body: await r.json().catch(() => null) }}))",
+            js(path),
+            js(method),
+            js(&body.to_string())
+        )
+    };
+    let tab_of = |name: &str, action: &str| format!("document.querySelector({})", js(&format!("#apps-page .app-row[data-fragment=\"{name}\"] [data-action={action}]")));
+    let none = b.until(page, &format!("!!{} && !{}", tab_of(app, "sharing"), tab_of(app, "reach")), wait);
+    s.ok("an app with no key and no door has no Reaches tab", none, b.eval(page, &format!("{}?.closest('.app-row')?.innerText ?? null", tab_of(app, "sharing")))?);
+
+    let made = b.eval(page, &in_page("POST", "/api/fragments", json!({ "label": "reaching-apps", "template": "todo", "title": "Reaching app" })))?;
+    let name = made["body"]["name"].as_str().unwrap_or("").to_string();
+    let private = b.eval(page, &in_page("PUT", &format!("/api/f/{name}/visibility"), json!({ "visibility": "members" })))?;
+    let key = b.eval(page, &in_page("PUT", &format!("/api/f/{name}/secrets/API_KEY"), json!({ "value": "sk-e2e-apps-reach-never-shown", "hosts": ["api.example.com"] })))?;
+    anyhow::ensure!(made["status"] == 200 && private["status"] == 200 && key["status"] == 200, "the reaching app was not made: {made} {private} {key}");
+    let row = format!("document.querySelector({})", js(&format!("#apps-page .app-row[data-fragment=\"{name}\"]")));
+    let tab = b.until(page, &format!("!!{}", tab_of(&name, "reach")), wait);
+    b.eval(page, &format!("({}?.click(), true)", tab_of(&name, "reach")))?;
+    let keys = b.until(page, &format!("!!{row}?.querySelector('.app-reach code') && {row}.querySelector('.app-reach code').textContent === 'API_KEY' && {row}.querySelector('.app-reach').innerText.includes('sent only to api.example.com')"), wait);
+    let quiet = b.eval(page, &format!("!{row}?.innerText.includes('sk-e2e')"))?;
+    s.ok(
+        "an app given a key while the page is open gets its Reaches tab: the key by name and host, never its value",
+        tab && keys && quiet == true,
+        b.eval(page, &format!("{row}?.innerText ?? null"))?,
+    );
+    b.eval(page, &format!("({}?.click(), true)", tab_of(&name, "sharing")))?;
+    let sheet = format!("({row}?.querySelector('.app-row-panel iframe')?.contentDocument?.body?.innerText ?? '')");
+    let locked = b.until(page, &format!("{sheet}.includes('Apps that can reach your accounts stay private to you and your agents for now.') && !{row}.querySelector('.app-row-panel iframe').contentDocument.querySelector('input[type=email]')"), wait);
+    s.ok("its Sharing says an app that reaches their accounts stays theirs and their agents', and invites no one", locked, b.eval(page, &sheet)?);
+
+    b.eval(page, &format!("({}?.click(), true)", tab_of(&name, "reach")))?;
+    let remove = format!("[...{row}?.querySelectorAll('.app-reach [data-action=reach]') ?? []]");
+    b.until(page, &format!("{remove}.some((b) => b.textContent === 'Remove')"), wait);
+    b.eval(page, &format!("({remove}.find((b) => b.textContent === 'Remove')?.click(), true)"))?;
+    let asked = b.until(page, &format!("{remove}.some((b) => b.textContent === 'Remove? Yes')"), wait);
+    b.eval(page, &format!("({remove}.find((b) => b.textContent === 'Remove? Yes')?.click(), true)"))?;
+    let gone = b.until(page, &format!("!!{row} && !{} && !{row}.querySelector('.app-reach')", tab_of(&name, "reach")), wait);
+    s.ok("its key removed from its Reaches, asked twice: the tab goes with its reach", asked && gone, b.eval(page, &format!("{row}?.innerText ?? null"))?);
+    b.eval(page, &format!("fetch('/api/f/{name}', {{ method: 'DELETE', headers: {{ 'x-fragment-shell': '1' }}, credentials: 'same-origin' }}).then((r) => r.status)"))?;
+    b.until(page, &format!("!{row}"), wait);
+
+    // a connector (Telegram's chat, members only as made) bound as their agent's door
+    let agent = b.eval(page, "fetch('/api/fragments', { headers: { 'x-fragment-shell': '1' }, credentials: 'same-origin' }).then((r) => r.json()).then((l) => l.fragments.find((f) => f.kind === 'agent' && f.role === 'owner')?.name ?? '')")?.as_str().unwrap_or("").to_string();
+    let made = b.eval(page, &in_page("POST", "/api/fragments", json!({ "label": "reaching-connector", "template": "telegram", "title": "Telegram" })))?;
+    let connector = made["body"]["name"].as_str().unwrap_or("").to_string();
+    let linked = b.eval(page, &in_page("POST", &format!("/api/f/{connector}/door"), json!({ "act": "link", "agent": agent })))?;
+    anyhow::ensure!(!agent.is_empty() && made["status"] == 200 && linked["status"] == 200, "the connector was not bound as {agent:?}'s door: {made} {linked}");
+    let crow = format!("document.querySelector({})", js(&format!("#apps-page .app-row[data-fragment=\"{connector}\"]")));
+    let listed = b.until(page, &format!("!!{}", tab_of(&connector, "reach")), wait);
+    b.eval(page, &format!("({}?.click(), true)", tab_of(&connector, "reach")))?;
+    let unlink = format!("[...{crow}?.querySelectorAll('.app-reach [data-action=reach]') ?? []]");
+    let door = b.until(page, &format!("({crow}?.querySelector('.app-reach')?.innerText ?? '').includes('Speaks for you to') && {unlink}.some((b) => b.textContent === 'Unlink')"), wait);
+    let no_agent = b.eval(page, &format!("!document.querySelector({})", js(&format!("#apps-page .app-row[data-fragment=\"{agent}\"]"))))?;
+    s.ok(
+        "a connector bound as their agent's door is listed, its Reaches the door with Unlink; their agent is not listed (its own door is Settings')",
+        listed && door && no_agent == true,
+        b.eval(page, &format!("{crow}?.innerText ?? null"))?,
+    );
+    b.eval(page, &format!("({unlink}.find((b) => b.textContent === 'Unlink')?.click(), true)"))?;
+    let asked = b.until(page, &format!("{unlink}.some((b) => b.textContent === 'Unlink? Yes')"), wait);
+    b.eval(page, &format!("({unlink}.find((b) => b.textContent === 'Unlink? Yes')?.click(), true)"))?;
+    let left = b.until(page, &format!("!{crow}"), wait);
+    let bound = b.eval(page, &format!("fetch('/api/f/{connector}/door', {{ headers: {{ 'x-fragment-shell': '1' }}, credentials: 'same-origin' }}).then((r) => r.json()).then((d) => d.bound)"))?;
+    s.ok("the connector unlinked from its Reaches, asked twice, holds no door and leaves the Apps page", asked && left && bound.is_null(), json!({ "bound": bound }));
+    b.eval(page, &format!("fetch('/api/f/{connector}', {{ method: 'DELETE', headers: {{ 'x-fragment-shell': '1' }}, credentials: 'same-origin' }}).then((r) => r.status)"))?;
+    Ok(())
+}
+
 /// Preview actions answered after a navigation or another open: visible
 /// operation state is cleaned up at each visit, an old result never renders,
 /// and an old POST's cleanup never unlocks a newer POST. Responses are gated
@@ -7142,6 +7225,7 @@ fn apps_ui(s: &mut Suite, b: &mut Browser, page: &Page, skills: &str, app: &str,
     apps_sharing_refresh_ui(s, b, page, app)?;
     apps_response_races_ui(s, b, page, app)?;
     apps_arrival_ui(s, b, page)?;
+    apps_reach_ui(s, b, page, app)?;
     b.eval(page, &format!("(() => {{ if (!{row}?.querySelector('.icon-editor')) {}?.click(); return true; }})()", control("appearance")))?;
     apps_preview_visit_ui(s, b, page, app)?;
 

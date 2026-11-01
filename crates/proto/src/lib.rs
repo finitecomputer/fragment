@@ -58,10 +58,13 @@ pub mod limits {
     /// An agent's role (its `fragment.json`'s `meta.role`: "chief of
     /// staff"), in characters: a tag beside its name, so a few words.
     pub const ROLE_MAX_CHARS: usize = 48;
-    /// CPU per call into author code.
+    /// CPU per call into author code: the runtime's guard against a
+    /// runaway call, each call's own (measured on a preview, 2026-11-01:
+    /// e2e `capability-cost`). An app's subrequests have no limit of the
+    /// platform's: the facet has no network, so they are its capability
+    /// calls alone (docs/technical-debt-ledger.md, "An app facet's
+    /// subrequests are the account's, for the facet's life").
     pub const APP_CPU_MS: u32 = 30_000;
-    /// Subrequests per call into author code.
-    pub const APP_SUBREQUESTS: u32 = 50;
     /// A NIP-98 event's `created_at` may differ from the cell's clock by this much.
     pub const AUTH_WINDOW_S: i64 = 60;
     /// Request bodies the router reads (to hash for NIP-98).
