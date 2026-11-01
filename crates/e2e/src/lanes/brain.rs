@@ -19,7 +19,7 @@
 mod parent;
 
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use fragment_core::blob::{self, sha256_hex};
@@ -494,5 +494,119 @@ pub fn brain(s: &mut Suite, api: &Api) -> Result<()> {
         json!({ "index": index(api, &keys, &name), "gale": stands.body }),
     );
     parent::run(s, api, &keys)?;
+    Ok(())
+}
+
+/// A brain's pages, made up for `brain-release`: two wikis, five pages.
+const RELEASE_PAGES: [(&str, &str); 5] = [
+    ("garden/index.md", "# garden\n\n- [[garden/wiki/tomatoes.md|Tomatoes]]\n"),
+    ("garden/log.md", "# Log\n\n## 2026-11-01\n\nWrote [[garden/wiki/tomatoes.md|Tomatoes]].\n"),
+    (TOMATOES, "# Tomatoes\n\n## Spacing\n\nPlant tomatoes about 60 cm apart, in rows a metre apart, so air moves between them and blight has less to hold on to.\n\n## Watering\n\nWater at the base in the morning: leaves left wet overnight invite blight.\n"),
+    ("home/index.md", "# home\n\n- [[home/wiki/boiler.md|Boiler]]\n"),
+    ("home/wiki/boiler.md", "# Boiler\n\n## Annual service\n\nThe boiler is serviced every October: the engineer checks its pressure and bleeds the radiators.\n"),
+];
+const TOMATOES: &str = "garden/wiki/tomatoes.md";
+const TOMATO_QUESTION: &str = "how far apart should tomatoes be";
+/// What its person may spend: each page's embeddings (one call a page) and
+/// a few questions, well inside a hosted run's budget.
+const RELEASE_PAID_CALLS: u64 = 30;
+
+/// A brain as a person meets one on a deployment's own vendors (the hosted
+/// lane's: preview's embeddings; locally its fakes): made and synced with
+/// the CLI, it indexes itself. Left behind its files (a full pass marked,
+/// as a release that changes the index's shape marks one), a release of the
+/// template and one plain read catch it up, no one starting a job: its
+/// installed trigger's run, timed from the read to the index caught up.
+/// Then a page of it is found across fragments, as the launcher's Knowledge
+/// asks (`fragment search --all`), and on its page (a screenshot). The
+/// launcher itself is the shell lane's: a new person's shell makes their
+/// first agent, a real computer on a deployment.
+pub fn brain_release(s: &mut Suite, api: &Api) -> Result<()> {
+    if !s.section("brain-release", &[crate::Need::Levers, crate::Need::Models, crate::Need::Chrome]) {
+        return Ok(());
+    }
+    let keys = api.person_paying(RELEASE_PAID_CALLS)?;
+    let session = api.sign_in(&Api::email_of(&keys))?;
+    // the CLI as that person's: their key in a home of its own
+    let home = s.dir("brain-release-home");
+    let config = home.join(if cfg!(target_os = "macos") { "Library/Application Support" } else { ".config" }).join("fragment");
+    std::fs::create_dir_all(&config)?;
+    std::fs::write(config.join("config.json"), json!({ "secret_key": keys.secret_hex() }).to_string())?;
+    let label = s.name("garden-home");
+    let made = s.cli_json(api, &home, &["create", &label, "--template", "brain", "--title", "Garden & home", "--json"]).unwrap_or_else(|e| json!({ "error": format!("{e:#}") }));
+    let name = made["name"].as_str().unwrap_or("").to_string();
+    anyhow::ensure!(!name.is_empty(), "no brain to test: {made}");
+    let dir = s.dir("brain-release");
+    let dir_s = dir.to_str().context("a utf-8 path")?.to_string();
+    let out = s.cli(api, &home, &["sync", &name, "--dir", &dir_s]);
+    anyhow::ensure!(out.status.success(), "the first sync: {}", String::from_utf8_lossy(&out.stderr));
+    for (path, text) in RELEASE_PAGES {
+        write(&dir, path, text.as_bytes())?;
+    }
+    let t0 = Instant::now();
+    let out = s.cli(api, &home, &["sync", &name, "--dir", &dir_s]);
+    let took = s.eventually(WAIT, || settled(api, &keys, &name, RELEASE_PAGES.len() as u64));
+    let synced_ms = t0.elapsed().as_millis() as u64;
+    let st = index(api, &keys, &name);
+    s.ok(
+        &format!("made and synced with the CLI, a brain indexes its {} pages itself (its file trigger)", RELEASE_PAGES.len()),
+        out.status.success() && took,
+        json!({ "index": st, "sync_to_indexed_ms": synced_ms }),
+    );
+
+    // behind its files as a release that changes the index's shape leaves
+    // it (every page marked again), and a release of the template since
+    let own = api.status(&keys, &name)?.body["npub"].clone();
+    let before: Vec<Value> = jobs::runs(api, &keys, &name, "&op=changed").iter().map(|r| r["id"].clone()).collect();
+    let marked = api.op(&keys, &name, "mark", "behind", json!({ "paths": [], "full": true }))?;
+    let behind = index(api, &keys, &name)["indexing"] == true;
+    let stale = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "blessed-stale" })))?;
+    anyhow::ensure!(marked.status == 200 && behind && stale.status == 200 && stale.body["stale"] == true, "behind, at an older release: {marked} {stale}");
+    // one plain read (a query: it starts nothing), then the index caught up
+    let t0 = Instant::now();
+    let visit = index(api, &keys, &name);
+    let caught = s.eventually(WAIT, || {
+        let st = index(api, &keys, &name);
+        st["indexing"] == false && st["pending"] == 0
+    });
+    let visit_ms = t0.elapsed().as_millis() as u64;
+    let since: Vec<Value> = jobs::runs(api, &keys, &name, "&op=changed").into_iter().filter(|r| !before.contains(&r["id"])).collect();
+    let run_ms = since.first().and_then(|r| Some(r["finishedAt"].as_i64()? - r["createdAt"].as_i64()?));
+    println!("      a release, then one read: indexed {visit_ms} ms after the read (its installed run took {} ms)", run_ms.map_or("?".into(), |ms| ms.to_string()));
+    s.ok(
+        "behind its files at an older release, one plain read installs the new release and its installed trigger catches the brain up, as the brain, no one starting a job",
+        visit["format"].is_string() && caught && since.len() == 1 && since[0]["via"] == "installed" && since[0]["status"] == "succeeded" && since[0]["principal"] == own,
+        json!({ "read_to_indexed_ms": visit_ms, "run_ms": run_ms, "runs": since }),
+    );
+
+    // found across fragments, as Knowledge asks: the CLI's --all is the same question
+    let t0 = Instant::now();
+    let found = s.cli_json(api, &home, &["search", TOMATO_QUESTION, "--all", "--json"]).unwrap_or_else(|e| json!({ "error": format!("{e:#}") }));
+    let across_ms = t0.elapsed().as_millis() as u64;
+    let hits: Vec<(String, String)> = found["results"].as_array().into_iter().flatten().map(|h| (h["fragment"].as_str().unwrap_or("").to_string(), h["source"].as_str().unwrap_or("").to_string())).collect();
+    s.ok(
+        "fragment search --all (the question the launcher's Knowledge asks) finds the brain's page among the first three",
+        hits.iter().take(3).any(|(f, p)| *f == name && p == TOMATOES) && found["fragments"].as_array().is_some_and(|l| l.iter().any(|f| f["name"] == name.as_str())),
+        json!({ "answer": found, "ms": across_ms }),
+    );
+
+    // its page, as its person sees it: the brain's search box finds the page
+    let shots = s.dir("brain-release-page");
+    let Some(mut chrome) = s.browser()? else {
+        s.ok("Chrome is installed for the brain's page (set CHROME_BIN)", false, "no Chrome found");
+        return Ok(());
+    };
+    chrome.set_cookie(&format!("{}/", api.base), "fragment_session", &session)?;
+    let tab = chrome.open(&api.site_url(&name, "__signin?return=/"))?;
+    let wait = Duration::from_secs(30);
+    // its tree drawn: the page's scripts, the search box's among them, have run
+    let shown = chrome.until(&tab, "document.getElementById('tree')?.textContent.includes('tomatoes') && document.getElementById('content')?.textContent.includes('Wikis')", wait);
+    chrome.eval(&tab, &format!("(() => {{ const q = document.getElementById('q'); q.value = {}; q.dispatchEvent(new Event('input', {{ bubbles: true }})); return true; }})()", serde_json::to_string(TOMATO_QUESTION)?))?;
+    let listed = chrome.until(&tab, "document.querySelector('.brain-result .brain-title')?.textContent === 'Tomatoes'", wait);
+    let _ = chrome.screenshot(&tab, &shots.join("search.png"));
+    s.ok("its page's search finds the page for its person", shown && listed, chrome.eval(&tab, "document.querySelector('.brain-results')?.innerText ?? ''")?);
+    let timings = json!({ "deployment": api.base, "brain": name, "pages": RELEASE_PAGES.len(), "semantic": found["semantic"], "sync_to_indexed_ms": synced_ms, "read_to_indexed_ms": visit_ms, "installed_run_ms": run_ms, "search_all_ms": across_ms });
+    std::fs::write(shots.join("timings.json"), serde_json::to_vec_pretty(&timings)?)?;
+    println!("      (timings: {}; screenshot: {})", shots.join("timings.json").display(), shots.join("search.png").display());
     Ok(())
 }

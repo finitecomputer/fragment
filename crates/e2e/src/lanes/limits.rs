@@ -4,6 +4,8 @@
 //! away. Its CPU and memory limits are the runtime's, which local workerd
 //! does not enforce (spike S1): the hosted lane checks those.
 
+use std::time::Instant;
+
 use anyhow::Result;
 use serde_json::{json, Value};
 
@@ -103,5 +105,112 @@ pub fn lockdown(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("its neighbors carry on", r.status == 200, &r);
     let r = api.op(&owner, &name, "hello", "h", json!({}))?;
     s.ok("and the app itself answers again", r.status == 200 && r.body["result"]["hello"] == "still here", &r);
+    Ok(())
+}
+
+/// An app that makes `n` calls of one capability in one call into it,
+/// until the runtime refuses one: how many it made, and the refusal.
+const BURN_APP: &[u8] = br#"import { DurableObject } from "cloudflare:workers";
+export class App extends DurableObject {
+  async burn({ op, n }) {
+    const call = {
+      "files.list": () => this.files.list("none/"),
+      "files.read": () => this.files.readBytes("note.md"),
+      "files.stat": () => this.files.stat("note.md"),
+      "search.status": () => this.searchIndex.status(),
+    }[op];
+    let made = 0;
+    try {
+      while (made < n) { await call(); made++; }
+      return { made, error: null };
+    } catch (e) {
+      return { made, error: String(e?.message ?? e) };
+    }
+  }
+  // `iters` turns of arithmetic in one call: CPU time and no I/O
+  spin({ iters }) {
+    let x = 0x9e3779b9 | 0;
+    for (let i = 0; i < iters; i++) x = (Math.imul(x ^ (x >>> 15), 0x2c1b3c6d) + i) | 0;
+    return { x };
+  }
+}
+"#;
+const BURN_JSON: &[u8] = br#"{ "name": "burn", "operations": { "burn": { "kind": "query", "role": "viewer" }, "spin": { "kind": "query", "role": "viewer" } } }"#;
+
+/// What an app's facet may spend, and for how long: what one capability
+/// call costs in subrequests (`limits::APP_SUBREQUESTS`), each kind on a
+/// fragment of its own, made in one call until the runtime refuses one;
+/// whether that budget is each call's or the running facet's (two calls of
+/// 30 in a row on a fresh one: the second makes 20 when the 50 are
+/// shared); and the same for CPU (`limits::APP_CPU_MS`). Run by name; it
+/// measures and gates nothing. Only Cloudflare enforces these limits (a
+/// local node makes every call asked), so it is a hosted lane's measure.
+/// On preview (2026-11-01): a call costs 1 subrequest, the 50 are the
+/// facet's for its life (30, 20, then 0), and CPU is each call's (five
+/// calls of 13 s on one facet answered; one past 30 s was stopped).
+pub fn capability_cost(s: &mut Suite, api: &Api) -> Result<()> {
+    if !s.section_by_name("capability-cost", &[], "it measures what a capability call costs an app's facet in subrequests, which only Cloudflare enforces") {
+        return Ok(());
+    }
+    let owner = api.person()?;
+    let budget = fragment_proto::limits::APP_SUBREQUESTS as u64;
+    let fresh = |label: &str| -> Result<String> {
+        let name = s.named(api, &owner, label)?;
+        let c = s.create(api, &owner, &name)?;
+        s.commit(&c, &[("app.mjs", Some(BURN_APP)), ("fragment.json", Some(BURN_JSON)), ("note.md", Some(b"# Note\n\na line\n"))]);
+        s.deploy(&c);
+        Ok(name)
+    };
+    let burn = |name: &str, op: &str, n: u64, id: &str| -> Result<Value> {
+        let r = api.op(&owner, name, "burn", id, json!({ "op": op, "n": n }))?;
+        Ok(json!({ "op": op, "status": r.status, "asked": n, "made": r.body["result"]["made"], "error": r.body["result"]["error"] }))
+    };
+    let mut rows = vec![];
+    for op in ["files.list", "files.stat", "files.read", "search.status"] {
+        let name = fresh(&format!("burn-{}", op.replace('.', "-")))?;
+        let mut row = burn(&name, op, budget * 2, "burn")?;
+        // refused after `made`: each call costs between budget / (made + 1) and budget / made
+        let cost = row["made"].as_u64().filter(|m| *m > 0 && *m < budget * 2).map(|m| format!("{:.2}..{:.2}", budget as f64 / (m + 1) as f64, budget as f64 / m as f64));
+        println!("      {op}: {} of {} made in one call on a fresh facet, {}", row["made"], budget * 2, cost.as_ref().map_or("none refused".into(), |c| format!("so each costs {c} of its {budget} subrequests")));
+        row["cost"] = json!(cost);
+        rows.push(row);
+    }
+    // the budget: each call's, or the running facet's
+    let name = fresh("burn-shared")?;
+    let first = burn(&name, "files.list", 30, "first")?;
+    let second = burn(&name, "files.list", 30, "second")?;
+    let third = burn(&name, "files.list", 1, "third")?;
+    println!("      two calls of 30 on one facet: the first made {}, the second {}, a third of 1 then {}", first["made"], second["made"], third["made"]);
+    // CPU: each call's (`limits::APP_CPU_MS`), or the running facet's. A
+    // Worker's clock stands still through computation, so the client times
+    // it: turns a second of CPU takes (its wall time, less a call's floor),
+    // then five calls of two fifths of the limit each on a fresh facet
+    // (the third refused when the limit is the facet's), and one call past
+    // it on another (refused either way: the guard)
+    let cpu_budget = fragment_proto::limits::APP_CPU_MS as f64;
+    let spin = |name: &str, iters: u64, id: &str| -> Result<Value> {
+        let t0 = Instant::now();
+        let r = api.op(&owner, name, "spin", id, json!({ "iters": iters }))?;
+        Ok(json!({ "iters": iters, "status": r.status, "ms": t0.elapsed().as_millis() as u64, "error": if r.status == 200 { Value::Null } else { json!(r.message()) } }))
+    };
+    let calibrate = fresh("spin-calibrate")?;
+    spin(&calibrate, 1_000_000, "warm")?;
+    let floor = spin(&calibrate, 1, "floor")?["ms"].as_f64().unwrap_or(0.0);
+    let probe = 200_000_000u64;
+    let took = spin(&calibrate, probe, "calibrate")?;
+    let per_ms = probe as f64 / (took["ms"].as_f64().unwrap_or(1.0) - floor).max(1.0);
+    let at = |ms: f64| ((per_ms * ms) as u64).clamp(1, 1 << 52);
+    println!("      CPU: {per_ms:.0} turns a millisecond (a call's floor {floor:.0} ms)");
+    let life = fresh("spin-life")?;
+    let thirds: Vec<Value> = (0..5).map(|i| spin(&life, at(cpu_budget * 0.4), &format!("part{i}"))).collect::<Result<_>>()?;
+    println!("      five calls of ~{:.0} s CPU on one facet: {}", cpu_budget * 0.4 / 1000.0, thirds.iter().map(|t| format!("{} in {} ms", t["status"], t["ms"])).collect::<Vec<_>>().join(", "));
+    let guard = fresh("spin-guard")?;
+    let past = spin(&guard, at(cpu_budget * 1.5), "past")?;
+    println!("      one call of ~{:.0} s CPU: {} in {} ms ({})", cpu_budget * 1.5 / 1000.0, past["status"], past["ms"], past["error"]);
+    let out = s.dir("capability-cost");
+    let report = json!({ "deployment": api.base, "budget": budget, "fresh": rows, "shared": [first, second, third], "cpu": { "budget_ms": cpu_budget, "turns_per_ms": per_ms, "floor_ms": floor, "thirds": thirds, "past": past } });
+    std::fs::write(out.join("cost.json"), serde_json::to_vec_pretty(&report)?)?;
+    println!("      (cost: {})", out.join("cost.json").display());
+    s.ok("each capability kind was measured on a facet of its own, and the budget's scope probed", rows.iter().all(|r| r["status"] == 200) && first["status"] == 200, &report);
     Ok(())
 }
