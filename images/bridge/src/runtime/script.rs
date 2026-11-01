@@ -14,7 +14,7 @@
 //! - `approve` or `risky`: a step, then a prompt (`once`, `deny`) the
 //!   owner answers; the reply says `(approved)`, `(denied)`, or
 //!   `(not approved)` once it expired;
-//! - `secret`: a card whose one option, `code`, is answered on the agent's
+//! - `code-card`: a card whose one option, `code`, is answered on the agent's
 //!   computer, never in a record (`PromptOption::computer`, as a sign-in's
 //!   code is); the reply says `(took N characters)`, never what they were,
 //!   or `(took nothing)` once it expired;
@@ -876,7 +876,9 @@ async fn turn(cfg: ScriptConfig, ts: TurnStart, mut rx: mpsc::Receiver<Heard>, e
         };
         reply = format!("{reply} ({said})");
     }
-    if text.split_whitespace().any(|w| w == "secret") {
+    // a word no other command says (`door poke <fragment> secret` does say
+    // `secret`)
+    if text.split_whitespace().any(|w| w == "code-card") {
         let options = vec![PromptOption { id: "code".into(), label: "Paste the code".into(), style: None, words: true, computer: true }];
         let prompt = format!("s-{}", &id[..12]);
         emit(Event::Prompt { turn: id.clone(), prompt, text: "Paste the code your browser shows you.".into(), options, ttl_ms: None }).await;

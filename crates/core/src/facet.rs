@@ -234,8 +234,29 @@ pub fn decode_ledger(text: &str) -> Result<Option<LedgerRow>, String> {
     serde_json::from_str::<Ledger>(text).map(|l| l.result).map_err(|e| e.to_string())
 }
 
+/// Whether a call into the facet failed at one of the runtime's limits on
+/// the facet: its subrequests (the account's, which Cloudflare counts
+/// across the facet's calls for its life) or one call's CPU, in the words
+/// the runtime throws (both seen on a preview, 2026-11-01). The supervisor
+/// stops such a facet, so the next call starts it fresh.
+pub fn at_limit(message: &str) -> bool {
+    message.contains("Too many subrequests") || message.contains("exceeded CPU time limit")
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_runtime_limit_on_the_facet_is_told_from_the_apps_own_failure() {
+        use super::at_limit;
+        // as the runtime threw them on a preview
+        assert!(at_limit("Too many subrequests by single Worker invocation. To configure this limit, refer to https://developers.cloudflare.com/workers/wrangler/configuration/#limits"));
+        assert!(at_limit("Worker exceeded CPU time limit."));
+        // the app's own, and the platform's refusal for now
+        assert!(!at_limit("TypeError: x is not a function"));
+        assert!(!at_limit("Dynamic worker concurrency limit exceeded"));
+        assert!(!at_limit(""));
+    }
+
     use super::*;
 
     const PLATFORM_JS: &str = include_str!("../../../cell/platform.mjs");

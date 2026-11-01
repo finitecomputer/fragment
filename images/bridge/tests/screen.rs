@@ -288,7 +288,7 @@ async fn an_earlier_lives_lease_is_given_back_and_a_gone_agents_screen_closes() 
     running.stop().await;
 }
 
-/// Goal (FIN-353): an answer for the computer. The script's `secret` card
+/// Goal (FIN-353): an answer for the computer. The script's `code-card` card
 /// asks for a code its option `code` takes on the computer alone
 /// (`PromptOption::computer`); posted to the screen port's `/answer`, as
 /// the shell's unseen frame of `GET /answer/` posts it, it reaches the
@@ -310,7 +310,7 @@ async fn a_cards_answer_for_the_computer_reaches_its_runtime_alone() {
     let (status, page) = support::http(&base, "GET", "/answer/", &[], b"").await;
     assert!(status == 200 && page.contains("card-to-computer") && page.contains("computer-answered"), "its page: {status}");
 
-    fake.say(&chat, &support::fake::person("paul"), json!({ "text": "secret" }));
+    fake.say(&chat, &support::fake::person("paul"), json!({ "text": "code-card" }));
     fake.until(10_000, "its card", |w| w.bodies(&chat, "work", "turn.prompt").iter().any(|p| p["options"][0]["computer"] == true)).await;
     let card = fake.with(|w| w.bodies(&chat, "work", "turn.prompt")[0].clone());
     let answer = json!({ "turn": card["turn"], "prompt": card["prompt"], "option": "code", "value": "the-code-123" }).to_string();

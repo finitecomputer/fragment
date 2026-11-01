@@ -22,6 +22,26 @@ unfinished design, not debt.
   the two reasons (kept on the wire as add-only names), the census route
   and command, and the `legacy-reach` lever.
 
+## An app facet's subrequests are the account's, for the facet's life
+
+- **Shortcut:** Cloudflare counts a Durable Object facet's subrequests
+  across its calls for as long as it runs, not per call (measured on a
+  preview, 2026-11-01, e2e `capability-cost`: two calls of 30 on one
+  facet made 30, then 20, under a limit of 50). So the platform sets no
+  `subRequests` on the app facet (`cell/src/js.rs`, `worker_code`), and
+  leaves the account's. A call that fails at a runtime limit on the facet
+  stops it (`Facet::failed`, `fragment_core::facet::at_limit`), so the next
+  call starts it fresh. CPU stays each call's guard (`APP_CPU_MS`, measured
+  per call the same day).
+- **Risk:** no per-call bound on an app's capability calls. The facet has
+  no network, so they are the platform's own calls, each bounded by its
+  route. A facet that makes the account's limit in one life fails one call,
+  and then starts again.
+- **Delete when:** Cloudflare scopes a facet's subrequests to each call,
+  or gives a facet call limits of its own (as `getEntrypoint` does for a
+  Dynamic Worker). Then set a per-call budget again, beside `APP_CPU_MS`,
+  and turn `capability-cost`'s across-calls check into its refusal.
+
 ## Every call still carries its release's deploy time
 
 - **Shortcut:** an object of a release before #826 read

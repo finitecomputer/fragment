@@ -170,7 +170,6 @@ fn read_installed_code(sql: &SqlStorage, id: &str) -> Result<AppCode, String> {
         source: row.source,
         modules,
         cpu_ms: row.cpu_ms,
-        subrequests: limits::APP_SUBREQUESTS,
     })
 }
 
@@ -193,6 +192,27 @@ impl FragmentCell {
         // key, which is the same for every version of it): one dynamic worker a day
         self.note_dynamic_worker(&format!("{loader_id}:{}", platform().id));
         self.app.facet(&self.raw, &self.app_facet()?)
+    }
+
+    /// Test fleets only: one capability call, counted against the
+    /// `facet-calls` lever's budget for the facet's current start and
+    /// refused past it in the runtime's words (`facet::at_limit`), as
+    /// Cloudflare refuses a facet's subrequests past its life's limit.
+    pub(crate) fn facet_calls_lever(&self) -> CellResult<()> {
+        if !self.cfg.test_hooks {
+            return Ok(());
+        }
+        let Some(limit) = self.meta(MetaKey::TestFacetCalls)?.and_then(|n| n.parse::<u64>().ok()) else {
+            return Ok(());
+        };
+        let start = self.app.starts();
+        let (at, made) = self.facet_calls.get();
+        let made = if at == start { made + 1 } else { 1 };
+        self.facet_calls.set((start, made));
+        if made > limit {
+            return Err(CellError::host(format!("Too many subrequests by single Worker invocation (a test lever: {limit} capability calls a facet start)")));
+        }
+        Ok(())
     }
 
     /// The installed app code's identity (its stored loader id), when live has an app.
@@ -573,6 +593,17 @@ impl FragmentCell {
                     vec![self.own_key()?.into(), now.clone(), now],
                 )?;
                 json!({ "triggers": triggers, "run": run.first().and_then(|r| r["id"].as_i64()) })
+            }
+            Some("facet-calls") => {
+                // each start of the app facet may make this many capability
+                // calls, refused past it in the runtime's words, as
+                // Cloudflare spends a facet's subrequests for its life
+                // (`facet_calls_lever`); no number, no limit
+                match body["calls"].as_u64() {
+                    Some(n) => self.set_meta(MetaKey::TestFacetCalls, &n.to_string())?,
+                    None => self.del_meta(MetaKey::TestFacetCalls)?,
+                }
+                json!({ "calls": body["calls"] })
             }
             Some("blessed-stale") => {
                 // as if the platform had deployed a newer release of its

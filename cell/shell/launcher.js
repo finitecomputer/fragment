@@ -106,7 +106,8 @@ export function knownAt(hit, kind) {
  * `state`, `byName`, `isChat`, `titleOf`, `chatTitle`, `mark`,
  * `iconOf`, `primaryAgent`, `newChatAgent`, `agentsOwnChat`, `UNTITLED`, `openChat`,
  * `openApp`, `chatFrame`, `composeIn`, `newChat`, `leaveSidebar`,
- * `closeMenu`, `notice`, `prewake`, `originOf`), and three it reads late:
+ * `closeMenu`, `notice`, `prewake`, `originOf`, `dropFrame`: a chat's frame
+ * let go with its stand-in), and three it reads late:
  * `views()` (how many views the middle column has been given: `openChat`
  * and `openSettings` count them), `busy(name)` (whether a chat's page holds
  * what no storage keeps: files chosen, a voice memo) and `setupChat()` (the
@@ -514,8 +515,8 @@ export function createLauncher(shell) {
     // no storage keeps (`busy`).
     const unload = (name) => {
       if (shell.busy(name)) return;
-      state.frames.get(name)?.remove();
-      state.frames.delete(name);
+      // the frame and its stand-in (frame-standin.js), with no chat of it left
+      shell.dropFrame(name);
     };
     let name = null;
     try {

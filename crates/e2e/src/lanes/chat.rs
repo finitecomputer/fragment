@@ -1031,7 +1031,7 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
 
 /// FIN-353 PR 2: an answer for the computer. In the chat the shell frames,
 /// the agent's card asks for a code its option takes on the computer alone
-/// (the script's `secret`); typed on the card and sent, the shell hands it
+/// (the script's `code-card`); typed on the card and sent, the shell hands it
 /// to the computer's `/answer/` page, unseen, and the turn has it: it says
 /// how many characters it took, the card closes answered, and no record of
 /// the chat holds what was typed. Screenshots for FIN-353.
@@ -1041,7 +1041,7 @@ fn card_to_computer(s: &mut Suite, api: &Api, chrome: &mut Browser, owner: &Keys
         return Ok(());
     };
     chrome.click(&frame, "#text")?;
-    chrome.type_text(&frame, "secret")?;
+    chrome.type_text(&frame, "code-card")?;
     chrome.press(&frame, "Enter", false)?;
     let field = ".prompt:not(.closed) input[data-option=\"code\"]";
     let asked = chrome.until(&frame, &format!("document.querySelector({0})?.type === 'password' && !document.querySelector({0}).disabled", js(field)), TURN);

@@ -148,7 +148,8 @@ logged `ledger.unpriced` (#509).
 Before a spend starts, its payer's ledger is asked `may_spend` (an
 agent's turn, an AI step, a wake, a write, a create), and when someone
 else spends in a fragment, its owner's ledger is asked `fragment_open`
-(its cap). Both go through one cached question, `ledger::may`: each
+(its cap), at the same time; if both refuse, the payer's refusal is
+the one said. Both go through one cached question, `ledger::may`: each
 isolate keeps each answer, a refusal too, for `STANDING_CACHE_MS`, and
 asks a ledger with no fresh answer once, for at most `GATE_WAIT_MS`.
 Only the ledger's own refusal stops a spend. A ledger that does not
