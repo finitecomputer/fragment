@@ -699,6 +699,9 @@ impl FragmentCell {
                     return Ok(json!({ "done": true }));
                 }
                 if let Some(why) = answer["failed"].as_str() {
+                    // the platform code catches the job's throw: a runtime
+                    // limit on the facet stops it here, as a thrown one does
+                    facet.stop_at_limit(why);
                     return fail(why.to_string());
                 }
                 if answer["error"] == "unknown_operation" {

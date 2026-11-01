@@ -4,6 +4,10 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content">
   <title>Telegram</title>
+  <!-- its first paint is the room's own colour, light or dark, before any
+       stylesheet comes (the fonts' is another site's): never white while
+       it loads in the shell's middle column (chat.css's --bg-chat) -->
+  <style>html{background:#181818;color-scheme:dark}@media (prefers-color-scheme:light){html{background:#ebe9e5;color-scheme:light}}</style>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Funnel+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap">

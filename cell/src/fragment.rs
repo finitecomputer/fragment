@@ -103,6 +103,9 @@ pub struct FragmentCell {
     pub(crate) search_sending: RefCell<BTreeMap<String, Arc<futures_util::lock::Mutex<()>>>>,
     /// How the app facet starts (ops.rs `app_loader`).
     pub(crate) app: js::AppLoader,
+    /// Test fleets only: the facet start the `facet-calls` lever counts
+    /// capability calls for, and how many it has made.
+    pub(crate) facet_calls: Cell<(u32, u64)>,
     /// What this activation knows of its live sockets (live.rs).
     pub(crate) live: RefCell<crate::live::LiveMemory>,
     /// The minute it last set the alarm to close a request count for.
@@ -144,6 +147,7 @@ impl DurableObject for FragmentCell {
             seeding: futures_util::lock::Mutex::new(()),
             rate: RefCell::new(rate),
             swept: Cell::new(false),
+            facet_calls: Cell::new((0, 0)),
             settling: RefCell::default(),
             search_sending: RefCell::default(),
             app,
@@ -371,6 +375,9 @@ pub(crate) enum MetaKey {
     /// Test fleets only: while set, an advance after a run's first step
     /// waits (`hold-advances`), naming its run in `TestAdvanceHeld`.
     TestHoldAdvances,
+    /// Test fleets only: the capability calls each start of the app facet
+    /// may make (`facet-calls`), as Cloudflare spends a facet's subrequests.
+    TestFacetCalls,
     TestAdvanceHeld,
     /// The computer this agent fragment runs on (runs_on.rs).
     Computer,
@@ -477,6 +484,7 @@ impl MetaKey {
             MetaKey::TestFailTriggers => "test_fail_triggers",
             MetaKey::TestDropEffects => "test_drop_effects",
             MetaKey::TestHoldAdvances => "test_hold_advances",
+            MetaKey::TestFacetCalls => "test_facet_calls",
             MetaKey::TestAdvanceHeld => "test_advance_held",
             MetaKey::Computer => "computer",
             MetaKey::AgentIdentity => "agent_identity",
@@ -937,6 +945,7 @@ impl FragmentCell {
             if req.headers().get(crate::files::CAP_HEADER)?.as_deref() != Some("files") {
                 return Err(CellError::new(ErrorCode::NotFound, format!("no route {path}")));
             }
+            self.facet_calls_lever()?;
             let op = op.to_string();
             let body: Value = body_json(&mut req).await?;
             return self.cap_files(&op, &body).await;
@@ -946,6 +955,7 @@ impl FragmentCell {
             if req.headers().get(crate::files::CAP_HEADER)?.as_deref() != Some("search") {
                 return Err(CellError::new(ErrorCode::NotFound, format!("no route {path}")));
             }
+            self.facet_calls_lever()?;
             let op = op.to_string();
             let body: Value = body_json(&mut req).await?;
             return self.cap_search(&op, body).await;

@@ -100,6 +100,8 @@ const LANES: &[Lane] = &[
         Ok(())
     },
     limits::facet_cap,
+    limits::capability_cost,
+    limits::facet_restart,
     limits::lockdown,
     site::site,
     site::watch,
@@ -121,6 +123,7 @@ const LANES: &[Lane] = &[
     sessions::sessions_ui,
     notes::notes,
     brain::brain,
+    brain::brain_release,
     doc::doc,
     deliver::push,
     deliver::ai,
@@ -176,10 +179,10 @@ const LANES: &[Lane] = &[
 pub const SHARDS: [&[&str]; 4] = [
     &["signin", "shell", "computers", "export", "search", "search-across", "search-bench", "import-release", "hermes", "agent-smoke", "agent-ask", "agent-app", "agent-restart", "bot-mode", "checkout", "restart"],
     &["connections", "shell-ui", "wipe", "sync", "migrations"],
-    &["deploy", "templates", "facet-cap", "app-lockdown", "site", "watch", "icons", "schemas", "channels", "live", "routes", "cli", "browser", "jobs", "triggers", "sessions", "sessions-ui", "finite-private", "chat"],
+    &["deploy", "templates", "facet-cap", "capability-cost", "facet-restart", "app-lockdown", "site", "watch", "icons", "schemas", "channels", "live", "routes", "cli", "browser", "jobs", "triggers", "sessions", "sessions-ui", "finite-private", "chat"],
     &[
         "auth", "create", "lockdown", "keys", "members", "identities", "levers", "secrets", "reach", "delegation", "files", "share", "faces", "isolation", "frames", "ops", "public", "effects",
-        "appfiles", "blobs", "notes", "brain", "doc", "push", "ai", "ledger", "transcribe", "orgs", "billing", "governance", "billing-page", "trials", "admin", "admin-page",
+        "appfiles", "blobs", "notes", "brain", "brain-release", "doc", "push", "ai", "ledger", "transcribe", "orgs", "billing", "governance", "billing-page", "trials", "admin", "admin-page",
     ],
 ];
 

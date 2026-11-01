@@ -588,6 +588,7 @@ dependencies = [
  "bech32",
  "fragment-nip98",
  "fragment-proto",
+ "futures-util",
  "hex",
  "hkdf",
  "hmac",

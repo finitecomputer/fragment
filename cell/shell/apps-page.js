@@ -1,7 +1,8 @@
 // The Apps page (`/apps`): every fragment in the
 // person's list but their chats, agents and skills (apps, brains, a kind
-// this page does not know), each with what they may change of it here, as
-// the server says it is:
+// this page does not know), and any that reaches their accounts (a
+// connector's chat), each with what they may change of it here, as the
+// server says it is:
 // - Dock: whether their own dock shows it (`PUT /api/fragments/{name}/dock`),
 //   an app's or a brain's; the switch moves only once the list says so.
 // - New preview: its card shot again (`POST /api/f/{name}/card`), an
@@ -11,6 +12,13 @@
 // - Who has access (`GET /api/access`, the owner's), and inline Sharing
 //   (the owner's) or People (a member's), the platform's sharing view.
 // - A display name edited inline, and the owner's optional public address.
+// - Reaches (FIN-291; Paul, 2026-11-01), only on one that reaches their
+//   accounts: the keys it holds, by name and the hosts each may go to
+//   (never a value), with Remove; the agent it speaks to when it is a
+//   connector's door (`/api/f/{name}/door`), with Unlink; their own agents
+//   in it. Such an app is theirs and their agents' alone for now: the cell
+//   refuses sharing it, and its share sheet (its Sharing here) says so
+//   (reach.rs, share.rs).
 // Archived ones are folded at the end, each with Unarchive.
 //
 // The shell owns the page's place and its helpers (`h`): `api`, `el`,
@@ -25,7 +33,13 @@ const ROLE = { viewer: "Viewer", editor: "Editor", owner: "Owner" };
 const GENERAL = { members: ["lock", "Restricted"], link: ["link", "Anyone with the link"], public: ["globe", "Public"] };
 // the list's kinds the dock shows, and a card is shot of (card::is_app)
 const dockable = (f) => f.kind === "app" || f.kind === "brain";
-const listed = (f) => f.kind !== "chat" && f.kind !== "agent" && f.kind !== "skills" && f.kind !== "sessions";
+// What the page lists: every fragment but their chats, agents, skills and
+// Session Archives, and a chat that reaches their accounts (its row's
+// `sharing.reach`: a connector, such as Telegram's chat, with its keys and
+// its door), so what reaches them is in one place (Paul, 2026-11-01). An
+// agent with a door (its SimpleX link) is not: that door is opened and
+// closed in Settings, from its own page (Alex on #918).
+export const listed = (f) => (f.kind !== "chat" && f.kind !== "agent" && f.kind !== "skills" && f.kind !== "sessions") || (f.kind === "chat" && f.sharing?.reach === true);
 const owns = (f) => f.role === "owner";
 const edits = (f) => f.role === "owner" || f.role === "editor";
 const seg = (s) => encodeURIComponent(s).replace(/%3A/gi, ":");
@@ -135,6 +149,12 @@ export function createAppsPage(page, h) {
   const addresses = new Map();
   const addressInfo = new Map();
   const addressEditors = new Map();
+  // What each app can reach (FIN-291, a design's prototype): its secrets by
+  // name with the hosts each may go to (an editor's read, values never),
+  // and the agent it speaks to for its owner when it is a door (the
+  // owner's), as the server says now; and a removal asked (a second press)
+  const reach = new Map();
+  const confirming = new Map();
   const expanded = new Map();
   const editing = new Map();
   const iconEditors = new Map();
@@ -179,6 +199,119 @@ export function createAppsPage(page, h) {
       if (mine !== visit) return;
       render();
     }
+  }
+
+  // An app's reach, read now: its secrets (an editor's) and its door (its
+  // owner's); what cannot be read is left unsaid.
+  async function readReach(f) {
+    const [secrets, door] = await Promise.all([
+      h.api("GET", `/api/f/${seg(f.name)}/secrets`).then((r) => r.secrets ?? [], () => null),
+      owns(f) ? h.api("GET", `/api/f/${seg(f.name)}/door`).then((r) => r.bound ?? null, () => null) : null,
+    ]);
+    return { secrets, door };
+  }
+  // Each app's reach, eight at a time.
+  async function loadReach() {
+    const mine = visit;
+    const rows = h.state.fragments.filter((f) => listed(f) && edits(f));
+    for (let offset = 0; offset < rows.length; offset += 8) {
+      await Promise.all(rows.slice(offset, offset + 8).map(async (f) => {
+        const read = await readReach(f);
+        if (mine !== visit) return;
+        reach.set(f.name, read);
+      }));
+      if (mine !== visit) return;
+      render();
+    }
+  }
+  // Whether an app reaches the person's accounts (Paul, 2026-11-01: only
+  // then its Reaches tab and line show, and it stays theirs and their
+  // agents' alone): a key it holds or a door it is, as their own row says
+  // it (`sharing.reach`, the cell's own rule), else, on one shared with
+  // them they edit, as read here.
+  const reaches = (f) => {
+    if (owns(f)) return f.sharing?.reach === true;
+    const r = reach.get(f.name);
+    return !!r && ((r.secrets?.length ?? 0) > 0 || !!r.door);
+  };
+  // Their own agents in it, by name and what they may do (Paul: a line of
+  // its Reaches); none, nothing.
+  function agentsLine(f) {
+    const row = access?.fragments?.find((x) => x.name === f.name);
+    const mine = (row?.members ?? []).filter((m) => m.kind === "agent" && m.owner === h.state.me?.id);
+    const named = mine.map((m) => {
+      const fragment = h.state.agents.get(m.principal)?.fragment;
+      return `${fragment ? h.titleOf(fragment) : "An agent of yours"} (${m.role === "editor" ? "can edit" : "can view"})`;
+    });
+    return named.length ? h.el("p", "app-reach-agents", `Your agents in it: ${named.join(", ")}`) : null;
+  }
+  // what it reaches, in a line: the hosts its secrets go to, and whom it speaks to
+  function reachLine(f) {
+    const r = reach.get(f.name);
+    const hosts = [...new Set((r?.secrets ?? []).flatMap((s) => s.hosts))];
+    const parts = [hosts.length ? `Reaches ${hosts.join(", ")}` : "", r?.door ? `Speaks for you to ${h.titleOf(r.door.agent)}` : ""].filter(Boolean);
+    return parts.length ? h.el("span", "app-row-meta app-reach-line", parts.join(" · ")) : null;
+  }
+  // the panel: each secret with its hosts and Remove; the door with Unlink;
+  // a press asks once more before it acts
+  function reachPanel(f) {
+    const r = reach.get(f.name);
+    const box = h.el("section", "app-reach");
+    if (!r) {
+      box.append(h.el("p", "muted", "Reading what it can reach…"));
+      return box;
+    }
+    const ask = (key, label, act) => {
+      const b = button(confirming.get(f.name) === key ? `${label}? Yes` : label, "reach", () => {
+        if (confirming.get(f.name) !== key) {
+          confirming.set(f.name, key);
+          return render();
+        }
+        confirming.delete(f.name);
+        act();
+      }, busy.get(f.name)?.kind === "reach");
+      b.classList.add("quiet");
+      return b;
+    };
+    const keys = r.secrets ?? [];
+    box.append(h.el("h2", null, "Keys it holds"));
+    if (r.secrets === null) box.append(h.el("p", "muted", "Its keys could not be read."));
+    else if (!keys.length) box.append(h.el("p", "muted", "None. It reaches none of your accounts by a key."));
+    for (const k of keys) {
+      const line = h.el("div", "app-reach-item");
+      const what = h.el("div", "app-reach-what");
+      what.append(h.el("code", null, k.name), h.el("span", "muted", `sent only to ${k.hosts.join(", ")}`));
+      line.append(what, ask(`secret:${k.name}`, "Remove", () => revoke(f.name, "DELETE", `/api/f/${seg(f.name)}/secrets/${encodeURIComponent(k.name)}`)));
+      box.append(line);
+    }
+    if (owns(f) && r.door) {
+      box.append(h.el("h2", null, "Door"));
+      const line = h.el("div", "app-reach-item");
+      const what = h.el("div", "app-reach-what");
+      what.append(h.el("span", null, `Speaks for you to ${h.titleOf(r.door.agent)}`), h.el("span", "muted", `through ${r.door.door}`));
+      line.append(what, ask("door", "Unlink", () => revoke(f.name, "POST", `/api/f/${seg(f.name)}/door`, { act: "unlink" })));
+      box.append(line);
+    }
+    const through = owns(f) && r.door ? "the keys and door above" : "the keys above";
+    const agents = agentsLine(f);
+    if (agents) box.append(agents);
+    box.append(h.el("p", "muted app-reach-note", `Any app can read public web pages. It reaches your accounts only through ${keys.length || r.door ? through : "a key or a door"}.`));
+    return box;
+  }
+  async function revoke(name, method, path, body) {
+    const operation = beginBusy(name, "reach");
+    say(name, "");
+    render();
+    try {
+      await h.api(method, path, body);
+    } catch (e) {
+      say(name, e.message);
+    } finally {
+      endBusy(name, operation);
+    }
+    const f = h.state.fragments.find((x) => x.name === name);
+    if (f) reach.set(name, await readReach(f));
+    render();
   }
 
   async function loadAccess() {
@@ -230,6 +363,17 @@ export function createAppsPage(page, h) {
     if (expanded.get(name) === section) expanded.delete(name);
     else expanded.set(name, section);
     render();
+    // its Reaches opened: what it reaches read again, so a key or a door
+    // given it since the page was read shows
+    const f = h.state.fragments.find((x) => x.name === name);
+    if (expanded.get(name) === "reach" && f) {
+      const mine = visit;
+      readReach(f).then((read) => {
+        if (mine !== visit) return;
+        reach.set(name, read);
+        render();
+      });
+    }
   }
 
   function titleEditor(f) {
@@ -291,7 +435,8 @@ export function createAppsPage(page, h) {
   function row(f) {
     const name = f.name;
     const doing = busy.get(name)?.kind;
-    const section = expanded.get(name);
+    // its Reaches closes with its reach (its last key removed, its door unlinked)
+    const section = expanded.get(name) === "reach" && !reaches(f) ? null : expanded.get(name);
     const item = h.el("article", "app-row");
     item.dataset.key = name;
     item.dataset.fragment = name;
@@ -313,6 +458,8 @@ export function createAppsPage(page, h) {
     const about = [KIND[f.kind] ?? (f.kind === "app" ? "" : KIND.other), owns(f) ? "" : `Shared with you · ${ROLE[f.role] ?? f.role}`].filter(Boolean).join(" · ");
     if (about) text.append(h.el("span", "app-row-meta", about));
     if (owns(f)) text.append(whoLine(f));
+    const reachSaid = reaches(f) && reachLine(f);
+    if (reachSaid) text.append(reachSaid);
     const head = h.el("div", "app-row-head");
     head.append(art, text);
     const card = cards.get(name);
@@ -348,6 +495,7 @@ export function createAppsPage(page, h) {
       return b;
     };
     if (!f.archived && edits(f)) tools.append(tab("Appearance", "appearance"));
+    if (edits(f) && reaches(f)) tools.append(tab("Reaches", "reach"));
     tools.append(tab(owns(f) ? "Sharing" : "People", "sharing"));
     if (owns(f) && !f.archived) tools.append(tab("Address", "address"));
     item.append(tools);
@@ -366,6 +514,8 @@ export function createAppsPage(page, h) {
         }
       } else if (section === "sharing") {
         panel.dataset.shareEditor = name;
+      } else if (section === "reach") {
+        panel.append(reachPanel(f));
       } else if (section === "address") {
         panel.dataset.addressEditor = name;
         panel.append(h.el("p", "muted", "Loading address…"));
@@ -382,7 +532,7 @@ export function createAppsPage(page, h) {
     const words = said.get(name);
     if (words) { const p = h.el("p", "app-row-said", words); p.setAttribute("role", "status"); item.append(p); }
     const edit = editing.get(name);
-    item.dataset.shows = JSON.stringify([f, doing ?? null, words ?? null, card?.url ?? null, address ?? null, shots.has(name), section ?? null, edit ? [true, edit.saving] : null, item.querySelector(".app-row-access")?.textContent ?? null]);
+    item.dataset.shows = JSON.stringify([f, doing ?? null, words ?? null, card?.url ?? null, address ?? null, shots.has(name), section ?? null, edit ? [true, edit.saving] : null, item.querySelector(".app-row-access")?.textContent ?? null, reach.get(name) ?? null, confirming.get(name) ?? null]);
     item.dataset.art = artReadiness(item);
     return item;
   }
@@ -631,6 +781,7 @@ export function createAppsPage(page, h) {
       render();
       const reading = cards.load(true).catch(() => {});
       const urls = loadAddresses(true);
+      loadReach().catch(() => {});
       if (await loadAccess()) render();
       await reading;
       await urls;
