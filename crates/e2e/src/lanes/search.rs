@@ -5,8 +5,8 @@
 //! reader finds it by its words and its meaning, each hit placed in each
 //! leg, its answer's waits named in `Server-Timing`, the index's int8 dot
 //! product Wasm SIMD's; a reader's question in another person's fragment
-//! asks the reader's ledger and the owner's side by side, either refusal
-//! stopping it, the reader's said first; a replay and a grown
+//! asks the reader's ledger and the owner's, either refusal stopping it,
+//! the reader's said first; a replay and a grown
 //! source embed nothing again; a stale write is refused; limits are
 //! checked before anything is sent; a viewer only
 //! reads, a stranger neither, and a member removed reads nothing more; a
@@ -54,16 +54,6 @@ fn timed_parts(r: &crate::api::Reply) -> Option<Vec<&'static str>> {
     Some(parts)
 }
 
-/// How long a reply's `Server-Timing` says `part` took, in ms.
-fn part_ms(r: &Reply, part: &str) -> Option<u64> {
-    let value = r.headers.get("server-timing")?.to_str().ok()?;
-    value.split(", ").find_map(|entry| entry.strip_prefix(part)?.strip_prefix(";dur=")?.parse().ok())
-}
-
-/// How long each ledger is slowed for the gate's side-by-side check: under
-/// the gate's 1.5 s wait, so each answers.
-const SLOW_LEDGER_MS: u64 = 1_000;
-
 fn upsert(source: &str, revision: &str, sections: Value) -> Value {
     json!({ "source": source, "revision": revision, "title": "Trip planning", "fields": { "kind": "chat" }, "sections": sections })
 }
@@ -78,8 +68,8 @@ fn turns() -> Value {
 /// A reader's question in a fragment another person owns asks two ledgers
 /// (models.rs `gate`): the reader's, who pays, and the owner's, whose cap
 /// applies. Either refusing stops it before anything is embedded; both
-/// refusing, the reader's refusal is said. The two are asked side by side:
-/// both slowed alike, the gate waits as long as one.
+/// refusing, the reader's refusal is said. (That the two are asked side by
+/// side is `ledger::gate::asked_together`'s host test: no clock here.)
 fn gate_checks(s: &mut Suite, api: &Api) -> Result<()> {
     let owner = api.person()?;
     let reader = api.person()?;
@@ -122,11 +112,6 @@ fn gate_checks(s: &mut Suite, api: &Api) -> Result<()> {
     let (both, both_embeds) = ask()?;
     lend(1_000)?;
     cap("g1", None)?;
-    ledger_lever(&reader_id, json!({ "op": "slow", "ms": SLOW_LEDGER_MS }))?;
-    ledger_lever(&owner_id, json!({ "op": "slow", "ms": SLOW_LEDGER_MS }))?;
-    let (slowed, _) = ask()?;
-    ledger_lever(&reader_id, json!({ "op": "slow", "ms": 0 }))?;
-    ledger_lever(&owner_id, json!({ "op": "slow", "ms": 0 }))?;
     let lent = |r: &Reply| r.status == 402 && r.message().contains("paid calls are used up");
     let capped = |r: &Reply| r.status == 402 && r.message().contains("cap this month");
     s.ok(
@@ -148,12 +133,6 @@ fn gate_checks(s: &mut Suite, api: &Api) -> Result<()> {
         "both refusing, the reader's refusal is the one said, with nothing embedded",
         lent(&both) && !capped(&both) && both_embeds == 0,
         json!({ "refused": both.body, "embedded": both_embeds }),
-    );
-    let gate = part_ms(&slowed, "gate");
-    s.ok(
-        "the two ledgers are asked side by side: each slowed by 1 s, the gate waits about 1 s, not 2",
-        slowed.status == 200 && gate.is_some_and(|ms| (SLOW_LEDGER_MS..2 * SLOW_LEDGER_MS).contains(&ms)),
-        json!({ "gate_ms": gate, "status": slowed.status }),
     );
     Ok(())
 }
