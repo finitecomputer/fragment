@@ -5481,9 +5481,13 @@ fn history_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Perso
     );
     let _ = b.screenshot(page, &shots.join("phone-390-history-archived.png"));
     let seen = b.eval(page, &format!("{}?.innerText ?? null", row(&bread)))?;
-    b.viewport(page, wide[0].as_u64().unwrap_or(1280) as u32, wide[1].as_u64().unwrap_or(900) as u32, false)?;
-    s.ok("at a phone's width a row's Continue sits under its words: its title whole, its words shown", phone, seen);
+    let (w, h) = (wide[0].as_u64().unwrap_or(1280) as u32, wide[1].as_u64().unwrap_or(900) as u32);
+    b.viewport(page, w, h, false)?;
+    // wide again and still before the next press, which goes by where things are
+    let back = b.until(page, &format!("innerWidth === {w} && !document.getElementById('layout').classList.contains('narrow') && document.getAnimations().every((a) => a.playState !== 'running' || a.effect?.getComputedTiming().iterations === Infinity)"), wait);
+    s.ok("at a phone's width a row's Continue sits under its words: its title whole, its words shown", phone && back, seen);
     b.click(page, ".history-filter[data-filter=\"all\"]")?;
+    anyhow::ensure!(b.until(page, "document.querySelector('.history-filter[data-filter=\"all\"]')?.getAttribute('aria-pressed') === 'true'", wait), "History's All was not pressed");
     // its title filters it at once; words nothing holds say so
     b.eval(page, &fill(".history-search input", "bread no"))?;
     let titled = b.until(page, &format!("document.querySelectorAll('.history-row').length === 1 && !!{}", row(&bread)), wait);
