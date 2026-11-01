@@ -252,6 +252,9 @@ pub struct Run {
     levers_sign_in: bool,
     /// Lanes call from threads of their own (site.rs): shared under locks.
     people: Mutex<Vec<String>>,
+    /// The emails they signed in by (the levers'), oldest first: all a
+    /// sweep of this run signs in again (hosted/sweep.rs `Who::These`).
+    emails: Mutex<Vec<String>>,
     /// The people a lane wiped (docs/api.md, Operators): their ledgers went
     /// with them, so the run's spend counts them apart.
     wiped: Mutex<Vec<String>>,
@@ -279,12 +282,17 @@ impl Run {
 
     fn make(secret: String, levers_sign_in: bool, paid_calls: u64) -> Arc<Run> {
         assert!(secret.len() >= fragment_core::levers::SECRET_BYTES_MIN, "a test secret is long");
-        Arc::new(Run { secret, levers_sign_in, people: Mutex::new(vec![]), wiped: Mutex::new(vec![]), budget: Mutex::new(Budget { left: paid_calls, lent: 0 }) })
+        Arc::new(Run { secret, levers_sign_in, people: Mutex::new(vec![]), emails: Mutex::new(vec![]), wiped: Mutex::new(vec![]), budget: Mutex::new(Budget { left: paid_calls, lent: 0 }) })
     }
 
     /// The people this run signed in (hosted), oldest first.
     pub fn people(&self) -> Vec<String> {
         self.people.lock().expect("the people's lock").clone()
+    }
+
+    /// The emails the run's people signed in by (the levers'), oldest first.
+    pub fn emails(&self) -> Vec<String> {
+        self.emails.lock().expect("the emails' lock").clone()
     }
 
     /// The people a lane wiped, oldest first.
@@ -313,10 +321,14 @@ impl Run {
     }
 
     /// Notes a person this run signed in, once.
-    fn signed_in(&self, identity: &str) {
+    fn signed_in(&self, identity: &str, email: &str) {
         let mut people = self.people.lock().expect("the people's lock");
         if !people.iter().any(|p| p == identity) {
             people.push(identity.to_string());
+        }
+        let mut emails = self.emails.lock().expect("the emails' lock");
+        if !emails.iter().any(|e| e == email) {
+            emails.push(email.to_string());
         }
     }
 }
@@ -414,6 +426,11 @@ impl Api {
     /// Whether people sign in through the levers (the hosted lane's rules).
     pub fn signs_in_by_levers(&self) -> bool {
         self.run.levers_sign_in
+    }
+
+    /// The emails this run's people signed in by (`Run::emails`).
+    pub fn run_emails(&self) -> Vec<String> {
+        self.run.emails()
     }
 
     /// The mark a branch deployment's fragments' hosts carry
@@ -573,7 +590,7 @@ impl Api {
         if let Some(n) = paid_calls {
             anyhow::ensure!(r.body["paidCalls"] == n, "the e2e sign-in capped {email} at {}, not {n}", r.body["paidCalls"]);
         }
-        self.run.signed_in(&identity);
+        self.run.signed_in(&identity, email);
         Ok((session, identity))
     }
 

@@ -113,8 +113,10 @@ narrows it to one wiki; "limit" is 1 to 50 (10 unless you ask). "signals"
 says what found a section: its words, its meaning, or both. "indexing"
 true means the index is still taking in a sync, and the answer may be
 incomplete: its changed job finishes it (fragment call <brain> changed
---input '{}'); ask again once it has run. A question asked here is paid
-by the brain's owner.
+--input '{}'); ask again once it has run. With "waiting_ms" above 0 the
+search service asked for a pause, and the job already running goes on by
+itself after it: start nothing, ask again later. A question asked here is
+paid by the brain's owner.
 
 A result points at a section: open its page and read it whole before you
 answer from it, and cite the pages and sources you used. When the brain

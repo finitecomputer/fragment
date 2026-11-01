@@ -448,7 +448,7 @@ fn sections(only: Option<Vec<String>>, except: Vec<String>, hosted: Hosted) -> R
     let shared = api::Run::signing_in_by_levers(secret, hosted.max_paid_calls);
     let deploy = preflight(&Api::hosted(&hosted.preview, &shared))?;
     let cli = crate::cli_binary()?;
-    let mut s = suite(only, except, &hosted, shared, cli, PathBuf::new());
+    let mut s = suite(only, except, &hosted, std::sync::Arc::clone(&shared), cli, PathBuf::new());
     s.wiper = hosted.operator_key_file.as_deref().map(|file| read_operator(file, &hosted.operators)).transpose()?;
     let run = s.run.clone();
     println!("hosted: {} (deploy {deploy}), run {run} (its fragments e2e-{run}-…); at most {} paid calls", hosted.preview.platform(), hosted.max_paid_calls);
@@ -456,8 +456,9 @@ fn sections(only: Option<Vec<String>>, except: Vec<String>, hosted: Hosted) -> R
     crate::make_scratch(&s.scratch)?;
     s.chrome = browser::Shared::new(&s.scratch);
     crate::lanes::run(&mut s);
-    // noted as it finishes, so `--sweep` never takes a run still going here
-    let noted = sweep::note_last_run(&hosted.preview, &run);
+    // noted as it finishes, so `--sweep` never takes a run still going here;
+    // its people first, so its sweep signs in those alone
+    let noted = sweep::note_run_people(&hosted.preview, &run, &shared.emails()).and_then(|()| sweep::note_last_run(&hosted.preview, &run));
     let finished = crate::finish(&mut s);
     match noted {
         Ok(()) => println!("run {run}'s fragments stay for a look: `--sweep` deletes them (this run's alone; `--sweep {run}` names it)"),
@@ -518,14 +519,27 @@ fn sweep(hosted: &Hosted, of: &SweepOf) -> Result<()> {
     let api = Api::hosted(&hosted.preview, &shared);
     preflight(&api)?;
     let platform = hosted.preview.platform();
-    match &scope {
-        sweep::Scope::Run(run) => println!("sweeping run {run}'s fragments (e2e-{run}-…) on {platform}, and no other"),
-        sweep::Scope::All { spared_for_ms } => println!("sweeping every e2e fragment on {platform} but those younger than {} min", spared_for_ms / 60_000),
+    // a run that ran here noted its people: its sweep signs in those alone
+    let noted = match &scope {
+        sweep::Scope::Run(run) => sweep::run_people(&hosted.preview, run),
+        sweep::Scope::All { .. } => None,
+    };
+    let who = noted.as_deref().map_or(sweep::Who::Everyone, sweep::Who::These);
+    match (&scope, &noted) {
+        (sweep::Scope::Run(run), Some(people)) => println!("sweeping run {run}'s fragments (e2e-{run}-…) on {platform}, and no other, as its {} (noted as it ran here)", count(people.len(), "person", "people")),
+        (sweep::Scope::Run(run), None) => println!("sweeping run {run}'s fragments (e2e-{run}-…) on {platform}, and no other, as every e2e person (it did not run here)"),
+        (sweep::Scope::All { spared_for_ms }, _) => println!("sweeping every e2e fragment on {platform} but those younger than {} min", spared_for_ms / 60_000),
     }
-    let swept = sweep::sweep_on(&api, &scope, api::now_ms())?;
+    let swept = sweep::sweep_on(&api, &scope, who, api::now_ms());
     println!("swept {platform}: {} e2e people, {} fragments deleted, {} computers put to sleep", swept.people, swept.deleted, swept.slept);
     println!("{}", swept.report());
+    anyhow::ensure!(swept.left.is_empty(), "the sweep left {} undone (sweep again)", count(swept.left.len(), "thing", "things"));
     Ok(())
+}
+
+/// `n` of a noun, as a person says it.
+fn count(n: usize, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
 }
 
 /// A rehearsal's last section, `sweep`, on its node: the run's sweep
@@ -544,7 +558,7 @@ pub fn rehearse_sweep(s: &mut Suite) {
 }
 
 fn rehearse_sweeps(s: &mut Suite) -> Result<()> {
-    use sweep::{Kept, Scope};
+    use sweep::{Kept, Scope, Who};
     let api = s.api();
     // another run's fragment, and one of an older layout, whose label names
     // no run: a person of their own makes them now
@@ -568,32 +582,42 @@ fn rehearse_sweeps(s: &mut Suite) -> Result<()> {
     other_runs.sort();
 
     let ours = Scope::Run(s.run.clone());
-    let first = sweep::sweep_on(&api, &ours, api::now_ms())?;
+    // the run's own people, as it notes them: its sweep signs in those alone
+    let people = api.run_emails();
+    let first = sweep::sweep_on(&api, &ours, Who::These(&people), api::now_ms());
     s.ok(
-        "the run's sweep signs each e2e person in again and deletes the run's fragments, and keeps another run's, by their labels",
-        first.people > 0 && first.deleted > 0 && decoys(&first) == other_runs,
+        "the run's sweep signs in the run's own people alone, deletes the run's fragments, and keeps another run's, by their labels",
+        first.left.is_empty() && first.people == people.len() && first.deleted > 0 && decoys(&first) == other_runs,
         format!("{first:?}"),
     );
-    let again = sweep::sweep_on(&api, &ours, api::now_ms())?;
+    let again = sweep::sweep_on(&api, &ours, Who::Everyone, api::now_ms());
     s.ok(
-        "a second finds none of the run's left, nor an awake computer of its people",
-        again.deleted == 0 && again.slept == 0 && again.people >= first.people && decoys(&again) == other_runs && there(&theirs)? == 200,
+        "a second, walking every e2e person, finds none of the run's left, nor an awake computer of its people",
+        again.left.is_empty() && again.deleted == 0 && again.slept == 0 && again.people >= first.people && decoys(&again) == other_runs && there(&theirs)? == 200,
         format!("{again:?}"),
     );
-    let all = sweep::sweep_on(&api, &Scope::All { spared_for_ms: sweep::SPARED_FOR_MS }, api::now_ms())?;
+    // one that does not answer is passed and said, the rest done
+    let missing = [format!("{}@e2e.test", "no".repeat(40)), people[0].clone()];
+    let past = sweep::sweep_on(&api, &ours, Who::These(&missing), api::now_ms());
+    s.ok(
+        "a person whose sign-in fails is passed and said, and the sweep goes on to the next",
+        past.people == 2 && past.left.len() == 1 && past.left[0].contains("signing") && past.report().contains("left 1 thing undone"),
+        format!("{past:?}\n{}", past.report()),
+    );
+    let all = sweep::sweep_on(&api, &Scope::All { spared_for_ms: sweep::SPARED_FOR_MS }, Who::Everyone, api::now_ms());
     let young = all.spared_for(|k| matches!(k, Kept::Young(age) if (0..sweep::SPARED_FOR_MS).contains(age)));
     s.ok(
         "the whole sweep spares another run's fragments made within the hour, and says so",
         all.deleted == 0 && young.len() == 2 && all.spared.len() == 2 && all.report().contains("2 younger than 60 min") && there(&older)? == 200,
         format!("{all:?}\n{}", all.report()),
     );
-    let named = sweep::sweep_on(&api, &Scope::Run(other.to_string()), api::now_ms())?;
+    let named = sweep::sweep_on(&api, &Scope::Run(other.to_string()), Who::Everyone, api::now_ms());
     s.ok(
         "a sweep naming the other run deletes its fragment alone",
         named.deleted == 1 && decoys(&named) == [kept_older] && there(&theirs)? == 404 && there(&older)? == 200,
         format!("{named:?}"),
     );
-    let rest = sweep::sweep_on(&api, &Scope::All { spared_for_ms: 0 }, api::now_ms())?;
+    let rest = sweep::sweep_on(&api, &Scope::All { spared_for_ms: 0 }, Who::Everyone, api::now_ms());
     s.ok("and a whole sweep sparing nothing deletes the rest", rest.deleted == 1 && rest.spared.is_empty() && there(&older)? == 404, format!("{rest:?}"));
     Ok(())
 }
