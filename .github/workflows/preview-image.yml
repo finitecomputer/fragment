@@ -62,6 +62,11 @@ jobs:
         run: |
           cargo xtask image preview --output "$RUNNER_TEMP/preview-image.json"
           echo "build=$(jq -r .build "$RUNNER_TEMP/preview-image.json")" >> "$GITHUB_OUTPUT"
+      # its disk freed before it builds: the image, held by BuildKit's
+      # builder and copied to Docker by `--queue`, filled a 72 GB runner (the
+      # action says)
+      - if: steps.probe.outputs.build == 'true'
+        uses: ./.github/actions/free-disk
       - id: buildx
         if: steps.probe.outputs.build == 'true'
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
@@ -80,3 +85,8 @@ jobs:
         env:
           BUILDX_BUILDER: ${{ steps.buildx.outputs.name }}
         run: cargo xtask image preview --queue --output "$RUNNER_TEMP/preview-image.json"
+      - if: always() && steps.probe.outputs.build == 'true'
+        name: disk, after
+        run: |
+          docker system df; df -h /; free -h
+          echo "peak: $(awk '$1 > d { d = $1 } END { print d }' "$RUNNER_TEMP/disk-used") MiB of the disk used, $(awk '$2 > m { m = $2 } END { print m }' "$RUNNER_TEMP/disk-used") MiB of the memory"

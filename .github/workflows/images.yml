@@ -167,25 +167,8 @@ jobs:
         working-directory: images
     steps:
       - uses: actions/checkout@v4
-      # Some ubuntu-24.04 runners (image 20261018.96.1) have a 72 GB root,
-      # 12 GB free once the lane's test binary is built, which its two
-      # images (6.4 GB) and their build cache (2.7 GB) all but fill: runs
-      # 41249649091 and 41253027860 ran out of disk. Most have 145 GB, 86 GB
-      # free. The lane uses none of the image's Android (12 GB), .NET (5.8),
-      # Haskell (3.7), Swift (3.5) or CodeQL (1.4), nor its cached Docker
-      # images (2.5): they go first, 28 GB in about 90 seconds (PR #890).
-      # Its disk's layout is said, as it differs between runners.
-      - name: free the disk
-        working-directory: .
-        run: |
-          df -h /
-          lsblk -o NAME,SIZE,TYPE,MOUNTPOINT
-          sudo dmsetup status 2>/dev/null || true
-          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift /opt/hostedtoolcache/CodeQL
-          docker image prune -af > /dev/null
-          df -h /
-          # the root's use every 5 seconds, whose peak `disk, after` says
-          nohup sh -c 'while :; do df -B1M --output=used / | tail -1; sleep 5; done' > "$RUNNER_TEMP/disk-used" 2>&1 &
+      # its disk freed first (the action says why: PR #890), and sampled
+      - uses: ./.github/actions/free-disk
       - uses: dtolnay/rust-toolchain@stable
       # the check job's cache, read only
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -217,8 +200,8 @@ jobs:
       - if: always()
         name: disk, after
         run: |
-          docker system df; df -h /
-          echo "peak: $(sort -n "$RUNNER_TEMP/disk-used" | tail -1) MiB used"
+          docker system df; df -h /; free -h
+          echo "peak: $(awk '$1 > d { d = $1 } END { print d }' "$RUNNER_TEMP/disk-used") MiB of the disk used, $(awk '$2 > m { m = $2 } END { print m }' "$RUNNER_TEMP/disk-used") MiB of the memory"
       # each container's log (Container's drop) and the tests' own
       - if: failure()
         uses: actions/upload-artifact@v4
