@@ -714,6 +714,9 @@ iframe[data-blocked] { display: none; }
 .app-reach-what code { font: 500 12.5px/1.4 "JetBrains Mono", monospace; }
 .app-reach-note { margin: 6px 0 0; font-size: 12.5px; }
 .app-reach-line { color: var(--text-secondary); }
+.app-reach-agents { margin: 4px 0 0; font-size: 13.5px; }
+/* an app that reaches their accounts: why its Sharing is theirs alone */
+.app-share-locked { margin: 0 0 12px; font-size: 13.5px; color: var(--text-secondary); }
 .apps-archived { margin-top: 24px; }
 .apps-archived summary { padding: 6px 2px; color: var(--text-secondary); font-size: 14px; cursor: pointer; }
 /* the History page (history-page.js): in the work area as the Apps page

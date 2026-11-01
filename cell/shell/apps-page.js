@@ -1,7 +1,8 @@
 // The Apps page (`/apps`): every fragment in the
 // person's list but their chats, agents and skills (apps, brains, a kind
-// this page does not know), each with what they may change of it here, as
-// the server says it is:
+// this page does not know), and any that reaches their accounts (a
+// connector's chat), each with what they may change of it here, as the
+// server says it is:
 // - Dock: whether their own dock shows it (`PUT /api/fragments/{name}/dock`),
 //   an app's or a brain's; the switch moves only once the list says so.
 // - New preview: its card shot again (`POST /api/f/{name}/card`), an
@@ -11,6 +12,11 @@
 // - Who has access (`GET /api/access`, the owner's), and inline Sharing
 //   (the owner's) or People (a member's), the platform's sharing view.
 // - A display name edited inline, and the owner's optional public address.
+// - Reaches (FIN-291; Paul, 2026-11-01), only on one that reaches their
+//   accounts: the keys it holds, by name and the hosts each may go to
+//   (never a value), with Remove; the agent it speaks to when it is a door,
+//   with Unlink; their own agents in it. Such an app is theirs and their
+//   agents' alone for now: its Sharing says so, and the cell refuses sharing it.
 // Archived ones are folded at the end, each with Unarchive.
 //
 // The shell owns the page's place and its helpers (`h`): `api`, `el`,
@@ -25,7 +31,10 @@ const ROLE = { viewer: "Viewer", editor: "Editor", owner: "Owner" };
 const GENERAL = { members: ["lock", "Restricted"], link: ["link", "Anyone with the link"], public: ["globe", "Public"] };
 // the list's kinds the dock shows, and a card is shot of (card::is_app)
 const dockable = (f) => f.kind === "app" || f.kind === "brain";
-const listed = (f) => f.kind !== "chat" && f.kind !== "agent" && f.kind !== "skills" && f.kind !== "sessions";
+// and, whatever its kind, one of theirs that reaches their accounts (its
+// row's `sharing.reach`: a connector such as Telegram's chat), so what
+// reaches them is all in one place (Paul, 2026-11-01)
+const listed = (f) => (f.kind !== "chat" && f.kind !== "agent" && f.kind !== "skills" && f.kind !== "sessions") || f.sharing?.reach === true;
 const owns = (f) => f.role === "owner";
 const edits = (f) => f.role === "owner" || f.role === "editor";
 const seg = (s) => encodeURIComponent(s).replace(/%3A/gi, ":");
@@ -36,6 +45,8 @@ const SHOT_WAIT_MS = 180_000;
 const CARD_READS_MAX = 6;
 // how many names a row says of who has access
 const NAMES_SHOWN = 2;
+// why an app that reaches the person's accounts is not shared (Paul, 2026-11-01)
+const PRIVATE_FOR_REACH = "Apps that can reach your accounts stay private to you and your agents for now.";
 
 export function createAppsPage(page, h) {
   // per app: an action in flight ("dock", "card", "archive"), what the
@@ -121,6 +132,27 @@ export function createAppsPage(page, h) {
       render();
     }
   }
+  // Whether an app reaches the person's accounts (Paul, 2026-11-01: only
+  // then its Reaches tab and line show, and it stays theirs and their
+  // agents' alone): a key it holds or a door it is, as their own row says
+  // it (`sharing.reach`, the cell's own rule), else, on one shared with
+  // them they edit, as read here.
+  const reaches = (f) => {
+    if (owns(f)) return f.sharing?.reach === true;
+    const r = reach.get(f.name);
+    return !!r && ((r.secrets?.length ?? 0) > 0 || !!r.door);
+  };
+  // Their own agents in it, by name and what they may do (Paul: a line of
+  // its Reaches); none, nothing.
+  function agentsLine(f) {
+    const row = access?.fragments?.find((x) => x.name === f.name);
+    const mine = (row?.members ?? []).filter((m) => m.kind === "agent" && m.owner === h.state.me?.id);
+    const named = mine.map((m) => {
+      const fragment = h.state.agents.get(m.principal)?.fragment;
+      return `${fragment ? h.titleOf(fragment) : "An agent of yours"} (${m.role === "editor" ? "can edit" : "can view"})`;
+    });
+    return named.length ? h.el("p", "app-reach-agents", `Your agents in it: ${named.join(", ")}`) : null;
+  }
   // what it reaches, in a line: the hosts its secrets go to, and whom it speaks to
   function reachLine(f) {
     const r = reach.get(f.name);
@@ -169,6 +201,8 @@ export function createAppsPage(page, h) {
       box.append(line);
     }
     const through = owns(f) && r.door ? "the keys and door above" : "the keys above";
+    const agents = agentsLine(f);
+    if (agents) box.append(agents);
     box.append(h.el("p", "muted app-reach-note", `Any app can read public web pages. It reaches your accounts only through ${keys.length || r.door ? through : "a key or a door"}.`));
     return box;
   }
@@ -356,7 +390,8 @@ export function createAppsPage(page, h) {
   function row(f) {
     const name = f.name;
     const doing = busy.get(name)?.kind;
-    const section = expanded.get(name);
+    // its Reaches closes with its reach (its last key removed, its door unlinked)
+    const section = expanded.get(name) === "reach" && !reaches(f) ? null : expanded.get(name);
     const item = h.el("article", "app-row");
     item.dataset.key = name;
     item.dataset.fragment = name;
@@ -378,8 +413,8 @@ export function createAppsPage(page, h) {
     const about = [KIND[f.kind] ?? (f.kind === "app" ? "" : KIND.other), owns(f) ? "" : `Shared with you · ${ROLE[f.role] ?? f.role}`].filter(Boolean).join(" · ");
     if (about) text.append(h.el("span", "app-row-meta", about));
     if (owns(f)) text.append(whoLine(f));
-    const reaches = reachLine(f);
-    if (reaches) text.append(reaches);
+    const reachSaid = reaches(f) && reachLine(f);
+    if (reachSaid) text.append(reachSaid);
     const head = h.el("div", "app-row-head");
     head.append(art, text);
     const card = cards.get(name);
@@ -415,7 +450,7 @@ export function createAppsPage(page, h) {
       return b;
     };
     if (!f.archived && edits(f)) tools.append(tab("Appearance", "appearance"));
-    if (edits(f)) tools.append(tab("Reaches", "reach"));
+    if (edits(f) && reaches(f)) tools.append(tab("Reaches", "reach"));
     tools.append(tab(owns(f) ? "Sharing" : "People", "sharing"));
     if (owns(f) && !f.archived) tools.append(tab("Address", "address"));
     item.append(tools);
@@ -440,6 +475,11 @@ export function createAppsPage(page, h) {
         panel.dataset.addressEditor = name;
         panel.append(h.el("p", "muted", "Loading address…"));
       }
+      // an app that reaches their accounts is theirs and their agents'
+      // alone, for now (Paul, 2026-11-01): the cell refuses sharing it, and
+      // its Sharing says why above the people in it (beside the panel, whose
+      // frame is all it holds)
+      if (section === "sharing" && owns(f) && reaches(f)) item.append(h.el("p", "app-share-locked", PRIVATE_FOR_REACH));
       item.append(panel);
     }
     const shot = shots.get(name);
