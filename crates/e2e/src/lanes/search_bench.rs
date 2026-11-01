@@ -199,6 +199,11 @@ pub fn search_bench(s: &mut Suite, api: &Api) -> Result<()> {
         Err(_) if s.on_fakes() => (vec![200, 1_000], Duration::ZERO),
         Err(_) => (vec![1_000, 10_000], IDLE),
     };
+    // `SEARCH_BENCH_IDLE_S`: another idle wait (0: none, a probe's)
+    let idle = match std::env::var("SEARCH_BENCH_IDLE_S") {
+        Ok(secs) => Duration::from_secs(secs.trim().parse().context("SEARCH_BENCH_IDLE_S is seconds")?),
+        Err(_) => idle,
+    };
     let fanouts: Vec<usize> = match std::env::var("SEARCH_BENCH_FANOUT") {
         Ok(list) if !list.trim().is_empty() => list.split(',').map(|n| n.trim().parse().context("SEARCH_BENCH_FANOUT lists fragment counts")).collect::<Result<_>>()?,
         _ if s.on_fakes() => vec![2, 3],
