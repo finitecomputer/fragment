@@ -8,6 +8,9 @@
 # Build from the repo root (it carries the fragment CLI, of the root
 # workspace; .dockerignore keeps the context to what the build reads):
 #   docker build --platform linux/amd64 -f images/hermes/Dockerfile .
+# A deploy's push (`cargo xtask image`) builds it and pushes it straight
+# from BuildKit's builder (`docker build --push`), never loaded into
+# Docker's own store first, which would hold its 4.3 GB a second time.
 #
 # Its layers, by how often each changes: a deploy pushes, and a computer's
 # first start after it pulls, only the layers that changed (a layer is
