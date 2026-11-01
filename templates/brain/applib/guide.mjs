@@ -103,17 +103,18 @@ update a page rather than duplicate it.
     fragment call <brain> search --input '{"q": "battery storage"}'
     fragment call <brain> search --input '{"q": "tariff", "wiki": "garden", "limit": 20}'
 
-The answer is ranked sections, best first (BM25 over each section's text,
-its headings, its page's title and its path):
+The answer is ranked sections, best first, found by their words and by
+their meaning (a section about solar panels answers "photovoltaic"):
 
-    {"results": [{"rank", "path", "wiki", "title", "heading", "ancestry", "snippet"}], "pending"}
+    {"results": [{"rank", "path", "wiki", "title", "heading", "ancestry", "snippet", "signals"}], "indexing"}
 
-A query is plain words, at most 16 of them and 256 characters. Each word
-must be in the section, as a word or the start of one, ignoring case and
-accents. Search syntax means nothing: OR, NOT, NEAR, quotes, a colon or a
-star are words or nothing. "wiki" narrows it to one wiki; "limit" is 1 to
-50 (10 unless you ask). "pending" above 0 means the index is still taking
-in a sync: ask again in a moment.
+A query is plain words or a question, at most 256 characters. "wiki"
+narrows it to one wiki; "limit" is 1 to 50 (10 unless you ask). "signals"
+says what found a section: its words, its meaning, or both. "indexing"
+true means the index is still taking in a sync, and the answer may be
+incomplete: its changed job finishes it (fragment call <brain> changed
+--input '{}'); ask again once it has run. A question asked here is paid
+by the brain's owner.
 
 A result points at a section: open its page and read it whole before you
 answer from it, and cite the pages and sources you used. When the brain
@@ -121,10 +122,11 @@ has no answer, say so, and say what to ingest.
 
     fragment call <brain> index_status --input '{}'
 
-says how many pages and sections are indexed, what is pending, and which
-pages were skipped and why (a page of 1 MiB or more is not indexed: split
-it). The index is the brain's own, rebuilt from its files; a sync is all
-it needs.
+says how many pages and sections are indexed, what is pending, whether a
+run is on it, and which pages were skipped and why (a page of 1 MiB or
+more is not indexed: split it). The index is the brain's own, rebuilt from
+its files; a sync is all it needs. A brain past about 25,000 chunks
+should be split into child brains under a parent (below).
 
 ## A parent brain (the meta-brain convention)
 
@@ -178,11 +180,13 @@ editor access to the parent:
    copies. Withdraw the text when it should no longer be disclosed. Access
    revocation cannot recall old git versions, chats, exports or downloads.
 
-For questions spanning children, call each child's existing search as the
-reader (fragment call <child> search --input '{"q":"launch","limit":10}').
-Bound the source count and results; group by source, report denied or
-unavailable sources and pending indexes, and don't compare BM25 ranks
-across brains. Reopen pages with the pin check before citing them. Search
+For questions spanning children, search them as one, as the reader:
+
+    fragment search "launch readiness" --in <parent>,<child>,<child>
+
+Its results are merged across the brains, each named by its fragment, and
+it says which brains it could not search (denied, no index). Name at most
+32. Reopen pages with the pin check before citing them. Search
 snippets, answers and the chat receiving them need the same audience
 check. The parent's browser search covers only its own synthesis. Child
 references and a parent's job confer no reader credentials.
