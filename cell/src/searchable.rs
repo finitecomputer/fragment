@@ -186,10 +186,7 @@ impl FragmentCell {
     /// nothing.
     fn search_space(&self) -> Option<wire::Space> {
         let models = &self.cfg.models;
-        models.embeddings_refused().is_none().then(|| {
-            let s = models.embeddings.space();
-            wire::Space { model: s.model.to_string(), dimensions: s.dimensions, version: s.version.map(str::to_string) }
-        })
+        models.embeddings_refused().is_none().then(|| models.embeddings.search_space())
     }
 
     /// `todo`'s vectors, held as an index holds them (by their hashes),
@@ -234,7 +231,8 @@ impl FragmentCell {
         let by_owner = who.payer.as_deref() == Some(owner.as_str()) && caller.signed.as_ref().is_none_or(|s| s.acting_for.as_deref().is_none_or(|f| f == owner));
         let fragment = InFragment { name: &facts.name, owner: &owner, by_owner };
         let space = self.search_space();
-        let chunks = rules::chunked(&up, self.cfg.models.embeddings.max_input_tokens);
+        let slot = &self.cfg.models.embeddings;
+        let chunks = rules::chunked(&up, slot.max_input_tokens, slot.document_prefix.as_deref());
         let mut vectors: HashMap<String, String> = HashMap::new();
         // at most twice: once more, embedding all, when the index lost a
         // vector it said it held (a write in between took it)
@@ -402,7 +400,9 @@ impl FragmentCell {
         let [owner] = self.metas([MetaKey::Owner])?;
         let owner = owner.ok_or_else(|| crate::fragment::missing(MetaKey::Owner))?;
         let fragment = InFragment { name, owner: &owner, by_owner: payer == &owner };
-        match embedded(&self.env, &[q.to_string()], payer, who.agent.as_deref(), Some(&fragment), &self.state).await? {
+        // after the slot's query prefix, as its chunks after its document prefix
+        let question = self.cfg.models.embeddings.question(q);
+        match embedded(&self.env, &[question], payer, who.agent.as_deref(), Some(&fragment), &self.state).await? {
             Embedding::Vectors { vectors, .. } => Ok(vectors.into_iter().next().map(|v| rules::vector_b64(&v))),
             Embedding::Refused { status, text } => {
                 console_warn!("{}", json!({ "event": "search.query-unembedded", "status": status, "why": text }));

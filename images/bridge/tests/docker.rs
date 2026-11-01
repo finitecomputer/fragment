@@ -1970,6 +1970,118 @@ fn desktop_up(c: &Container, profile: &str) -> bool {
     c.exec(&["test", "-e", &format!("/data/hermes/profiles/{profile}/bot-desktop/env")])
 }
 
+/// The environment of `profile`'s desktop session (its panel's, which opens
+/// its terminals and links), read as hermes: a process's environment is its
+/// own user's to read.
+async fn desktop_session(c: &Container, profile: &str) -> serde_json::Value {
+    const SESSION_ENV: &str = r#"import json, os, sys
+for pid in filter(str.isdigit, os.listdir("/proc")):
+    try:
+        cmd = open(f"/proc/{pid}/cmdline", "rb").read().split(b"\0")[0].decode(errors="replace")
+        env = dict(e.split("=", 1) for e in open(f"/proc/{pid}/environ", "rb").read().decode(errors="replace").split("\0") if "=" in e)
+    except Exception:
+        continue
+    if cmd.endswith("xfce4-panel") and env.get("HERMES_BD_PROFILE") == sys.argv[1]:
+        print(json.dumps(env))
+        break
+"#;
+    let t = Instant::now();
+    // bounded: 90 s for the desktop to start
+    loop {
+        let out = c.exec_out(&["/command/s6-setuidgid", "hermes", "/opt/hermes/.venv/bin/python", "-c", SESSION_ENV, profile]);
+        if let Ok(env) = serde_json::from_str::<serde_json::Value>(out.trim()) {
+            return env;
+        }
+        assert!(t.elapsed() < Duration::from_secs(90), "no panel on {profile}'s desktop: {out}");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
+/// `cmd` run by `sh` as hermes in a desktop session's environment, as a
+/// terminal there runs it: its exit code and what it printed.
+fn in_session(c: &Container, session: &serde_json::Value, cmd: &str) -> (i32, String) {
+    const RUN: &str = r#"import json, subprocess, sys
+env = json.loads(sys.argv[1])
+sys.exit(subprocess.run([env.get("SHELL", "/bin/sh"), "-c", sys.argv[2]], env=env, cwd=env["HOME"]).returncode)
+"#;
+    c.exec_code(&["/command/s6-setuidgid", "hermes", "/opt/hermes/.venv/bin/python", "-c", RUN, &session.to_string(), cmd])
+}
+
+/// The pages open in the browser holding `user_data_dir` (by its real path:
+/// a profile names its jar through a link), its tabs' URLs read over its
+/// DevTools port, and its process: none if none holds it.
+fn browser_pages(c: &Container, user_data_dir: &str) -> Option<(u32, Vec<String>)> {
+    const PAGES: &str = r#"import json, os, sys, urllib.request
+import psutil
+jar = os.path.realpath(sys.argv[1])
+for p in psutil.process_iter(["pid", "cmdline"]):
+    argv = p.info["cmdline"] or []
+    held = next((a.split("=", 1)[1] for a in argv if a.startswith("--user-data-dir=")), None)
+    if held and os.path.realpath(held) == jar and not any(a.startswith("--type=") for a in argv):
+        port = next((a.split("=", 1)[1] for a in argv if a.startswith("--remote-debugging-port=")), None)
+        if port:
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            pages = json.load(opener.open(f"http://127.0.0.1:{port}/json/list", timeout=5))
+            print(json.dumps({"pid": p.info["pid"], "urls": [t["url"] for t in pages if t.get("type") == "page"]}))
+            break
+"#;
+    let out = c.exec_out(&["/command/s6-setuidgid", "hermes", "/opt/hermes/.venv/bin/python", "-c", PAGES, user_data_dir]);
+    let v: serde_json::Value = serde_json::from_str(out.trim()).ok()?;
+    Some((v["pid"].as_u64()? as u32, v["urls"].as_array()?.iter().filter_map(|u| u.as_str().map(str::to_string)).collect()))
+}
+
+/// The process of the browser holding `jar` once it shows `url`.
+async fn showing(c: &Container, profile: &str, jar: &str, url: &str) -> u32 {
+    let t = Instant::now();
+    // bounded: 60 s for the browser to start and show it
+    loop {
+        if let Some((pid, urls)) = browser_pages(c, jar) {
+            if urls.iter().any(|u| u == url) {
+                return pid;
+            }
+        }
+        assert!(t.elapsed() < Duration::from_secs(60), "{url} never showed in its browser: {:?}; windows {}; browsers' jars:\n{}", browser_pages(c, jar), desk(c, profile)["windows"], c.exec_out(&["sh", "-c", "ps -eo args | grep -o -- '--user-data-dir=[^ ]*' | sort | uniq -c"]));
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
+/// Goal (FIN-351): a link opened on an agent's desktop (a terminal's
+/// `claude auth login` sign-in, xdg-open) opens in that agent's own
+/// Chromium, started for it, and no window asks its person which browser
+/// to use. Replay: a second link goes to the same browser. Invalid: opened
+/// outside a desktop, it fails saying so, starting nothing.
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn a_link_opened_on_the_desktop_opens_in_its_own_browser() {
+    let (_fake, _model, _chat, c) = hermes_running().await;
+    let profile = "juniper--k3x9";
+    let jar = "/data/work/juniper--k3x9/browser-profile";
+    let (code, said) = c.exec_code(&["/opt/fragment/bin/hermes-boot", "screen-start", profile]);
+    assert_eq!(code, 0, "the desktop starts: {said}");
+    let session = desktop_session(&c, profile).await;
+    assert!(browser_pages(&c, jar).is_none(), "no browser before a link");
+
+    let opened = |c: &Container, url: &str| {
+        let (code, said) = in_session(c, &session, &format!("xdg-open '{url}'"));
+        assert_eq!(code, 0, "xdg-open {url}: {said}");
+    };
+    let first = "http://127.0.0.1:9/fragment-link-one";
+    opened(&c, first);
+    let pid = showing(&c, profile, jar, first).await;
+    let windows = desk(&c, profile)["windows"].to_string();
+    assert!(!windows.contains("Choose Preferred Application") && !windows.contains("Preferred"), "no one asked which browser: {windows}");
+
+    // replay: a second link, the same browser
+    let second = "http://127.0.0.1:9/fragment-link-two";
+    opened(&c, second);
+    assert_eq!(showing(&c, profile, jar, second).await, pid, "the same browser");
+    eprintln!("desktop link: both links in juniper's own browser (pid {pid}): {:?}; windows {windows}", browser_pages(&c, jar).map(|(_, u)| u));
+
+    // invalid: outside the desktop, no browser to open it in
+    let (code, said) = c.exec_code(&["/command/s6-setuidgid", "hermes", "/opt/fragment/bin/desktop-browser", "http://127.0.0.1:9/nowhere"]);
+    assert!(code != 0 && said.contains("desktop is not running"), "{code}: {said}");
+}
+
 /// Goal: two agents on one computer, two desktops (Hermes gives each
 /// profile its own), each its own screen: a socket naming juniper is
 /// juniper's desktop and one naming fred is fred's, each started for its
