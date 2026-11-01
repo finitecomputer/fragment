@@ -643,6 +643,12 @@ pub struct ErrorBody {
     /// one reads none (`reason_or_none`).
     #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "reason_or_none")]
     pub reason: Option<Reason>,
+    /// How long to wait before asking again, in ms, where a refusal knows
+    /// (a 429 `rate_limited` of an embeddings model's rate limit: its
+    /// writer waits exactly this, then writes again). Add-only: absent
+    /// from every other refusal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_after_ms: Option<u64>,
 }
 
 /// A reason this reader does not know is none: reasons are add-only, so a
@@ -2686,12 +2692,12 @@ mod tests {
             assert!(Reason::ALL.contains(&reason));
             assert_eq!(serde_json::to_value(reason).unwrap(), wire);
             assert_eq!(Reason::parse(wire), Some(reason));
-            let body = ErrorBody { error: ErrorCode::AlreadyExists, message: "m".into(), reason: Some(reason) };
+            let body = ErrorBody { error: ErrorCode::AlreadyExists, message: "m".into(), reason: Some(reason), retry_after_ms: None };
             let text = serde_json::to_string(&body).unwrap();
             assert_eq!(text, format!(r#"{{"error":"already_exists","message":"m","reason":"{wire}"}}"#));
             assert_eq!(serde_json::from_str::<ErrorBody>(&text).unwrap(), body);
         }
-        let none = ErrorBody { error: ErrorCode::AlreadyExists, message: "m".into(), reason: None };
+        let none = ErrorBody { error: ErrorCode::AlreadyExists, message: "m".into(), reason: None, retry_after_ms: None };
         assert_eq!(serde_json::to_string(&none).unwrap(), r#"{"error":"already_exists","message":"m"}"#, "no reason, no field");
         let newer: ErrorBody = serde_json::from_str(r#"{"error":"already_exists","message":"m","reason":"one_from_later"}"#).unwrap();
         assert_eq!(newer, none, "a reason this reader does not know reads as none");
@@ -2699,7 +2705,7 @@ mod tests {
 
     #[test]
     fn error_codes_serialize_snake_case() {
-        let body = ErrorBody { error: ErrorCode::ConflictingBody, message: "x".into(), reason: None };
+        let body = ErrorBody { error: ErrorCode::ConflictingBody, message: "x".into(), reason: None, retry_after_ms: None };
         assert_eq!(serde_json::to_string(&body).unwrap(), r#"{"error":"conflicting_body","message":"x"}"#);
         assert_eq!(ErrorCode::ConflictingBody.status(), 409);
         assert_eq!(serde_json::to_value(ErrorCode::Deploying).unwrap(), "deploying");
