@@ -167,6 +167,35 @@ pub fn visit(origin: &str, visitor: Visitor, view_token: &str) -> Visit {
     }
 }
 
+/// Why a shot's page is not the app's (`landed`): it went to another
+/// origin. A fragment that went members only while it was shot sends the
+/// shot's visitor, who has no account, to sign in on the platform's origin
+/// (as any signed-out visit to a page it refuses); that page is no card of
+/// it (FIN-359).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Elsewhere {
+    pub origin: String,
+}
+
+impl Elsewhere {
+    pub fn message(&self) -> String {
+        format!("the page went to {}, not the app's own origin: a sign-in, as for a fragment gone members only", self.origin)
+    }
+}
+
+/// Whether the page a shot of `url` (a `visit`'s) opened is on the app's
+/// own origin, once it loaded at `at` (the page's own URL, as the browser
+/// says). Whatever the app answers there is its page, a 404 included.
+pub fn landed(url: &str, at: &str) -> Result<(), Elsewhere> {
+    let opened = url::Url::parse(url).expect("a visit's URL parses").origin();
+    let origin = url::Url::parse(at).map(|u| u.origin());
+    match origin {
+        Ok(origin) if origin == opened => Ok(()),
+        Ok(origin) => Err(Elsewhere { origin: origin.ascii_serialization() }),
+        Err(_) => Err(Elsewhere { origin: "a page with no URL".to_string() }),
+    }
+}
+
 /// Why an image (a shot's, or an upload's) is no card.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -694,6 +723,28 @@ mod tests {
             Next::Shoot(s) => s,
             other => panic!("expected a shot, got {other:?}"),
         }
+    }
+
+    /// Goal: a shot is the app's only where it landed on the app's own
+    /// origin. Valid: its front page, another of its paths (the app's own
+    /// redirect), a port's origin. Invalid: a sign-in on another origin (the
+    /// platform's, WorkOS'), an origin that only starts like its own, and
+    /// a page with no origin (Chrome's error page).
+    #[test]
+    fn a_shot_is_the_apps_only_where_it_landed_on_it() {
+        let url = visit("https://notes.finite.place", Visitor::Anyone, "").url;
+        for at in ["https://notes.finite.place/", "https://notes.finite.place/today?x=1"] {
+            assert_eq!(landed(&url, at), Ok(()), "{at}");
+        }
+        let local = visit("http://notes.fragment.localhost:8790", Visitor::Anyone, "").url;
+        assert_eq!(landed(&local, "http://notes.fragment.localhost:8790/"), Ok(()));
+        let elsewhere = |origin: &str| Err(Elsewhere { origin: origin.into() });
+        assert_eq!(landed(&url, "https://finite.chat/auth/fragment?name=notes&return=%2F"), elsewhere("https://finite.chat"));
+        assert_eq!(landed(&url, "https://auth.workos.com/sign-in"), elsewhere("https://auth.workos.com"));
+        assert_eq!(landed(&url, "https://notes.finite.place.evil.test/"), elsewhere("https://notes.finite.place.evil.test"));
+        assert_eq!(landed(&local, "http://notes.fragment.localhost:8791/"), elsewhere("http://notes.fragment.localhost:8791"));
+        assert_eq!(landed(&url, "chrome-error://chromewebdata/"), elsewhere("null"));
+        assert!(Elsewhere { origin: "https://finite.chat".into() }.message().contains("https://finite.chat"));
     }
 
     /// Goal: a deploy is shot once, and its shot is the card. Method: want
