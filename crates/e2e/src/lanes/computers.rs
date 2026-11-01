@@ -134,6 +134,15 @@ pub(super) fn lever_with(api: &Api, id: &str, mut body: Value) -> Result<crate::
     api.unsigned("POST", "/api/test/computer", Some(&body))
 }
 
+/// Pins computer `id`'s uses to this month for the lane (its `clock` lever,
+/// run on from the 15th), so the uses the lane makes and its reads of the
+/// month's are in one month however late in a month it runs: its month.
+pub(super) fn pin_month(api: &Api, id: &str) -> Result<String> {
+    let r = lever_with(api, id, json!({ "op": "clock", "offsetMs": super::ledger::mid_month_offset_ms() }))?;
+    anyhow::ensure!(r.status == 200, "the computer's clock moves: {r}");
+    Ok(r.body["month"].as_str().unwrap_or_default().to_string())
+}
+
 /// The newest save computer `id` keeps (the lever's `saves`), if any.
 pub(super) fn newest_save(api: &Api, id: &str) -> Value {
     lever(api, id, "saves").map(|r| r.body["saves"][0].clone()).unwrap_or(Value::Null)
@@ -1640,6 +1649,7 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.signed(&owner, "POST", "/api/computers", Some(&json!({})))?;
     let id = r.body["computer"].as_str().unwrap_or("").to_string();
     s.ok("a person makes their computer, asleep", r.status == 200 && id.starts_with("computer:") && r.body["phase"] == "asleep", &r);
+    let month = pin_month(api, &id)?;
     // The stub's scripted runtime (images/stub) answers its commands ("tool
     // please", "slow…", "fetch …", "think …") and echoes the rest; the
     // deployment's own image (our Hermes) answers as its real model does.
@@ -1855,7 +1865,7 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
             s.skip(label, "it needs the stub's fetch, and the fakes' accounts and providers behind the swap");
         }
     } else {
-        let swapping = Swapping { owner: &owner, stranger: &stranger, id: &id, agent: &agent_name, identity: &identity };
+        let swapping = Swapping { owner: &owner, stranger: &stranger, id: &id, agent: &agent_name, identity: &identity, month: &month };
         replies_so_far += swap_checks(s, api, &swapping, &fetched)?;
         replies_so_far += model_checks(s, api, &swapping, &fetched)?;
         let r = allow(&stranger, json!([]))?;
