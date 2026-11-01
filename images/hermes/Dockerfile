@@ -317,6 +317,13 @@ COPY --from=novnc /novnc/vendor /opt/fragment/screen/novnc/vendor
 #   PATH names, so `sudo npm install -g` would put a program nowhere an
 #   agent runs it from, and write into Hermes' sealed store. Hermes' PM
 #   leaves npm_config_* out of its own npm runs.
+# Each agent's desktop keeps its data (XDG_DATA_HOME) in Hermes' home's
+# ~/.local/share, as its terminal's ~ is Hermes' home, not under its
+# profile (upstream's HERMES_BD_DATA_HOME default): the agents are one user
+# (decision 44), and what its person installs from a terminal there (their
+# Claude Code: docs/computers.md, "Claude Code in our Hermes image") lands
+# whole in /data/hermes, never in a profile a removed agent's retirement
+# moves aside.
 # Lazy installs, which upstream now turns on (into /data/hermes/installs),
 # are off: Hermes' managed overlay (security.allow_lazy_installs,
 # boot/src/hermes.rs).
@@ -340,6 +347,7 @@ ENV PATH="/opt/hermes/bin:/opt/hermes/.venv/bin:/data/hermes/.local/bin:/usr/loc
     HERMES_WEB_DIST=/opt/hermes/hermes_cli/web_dist \
     HERMES_TUI_DIR=/opt/hermes/ui-tui \
     HERMES_HOME=/data/hermes \
+    HERMES_BD_DATA_HOME=/data/hermes/.local/share \
     HERMES_WRITE_SAFE_ROOT=/data/hermes:/data/work:/tmp \
     XDG_RUNTIME_DIR=/tmp/hermes-runtime \
     NODE_COMPILE_CACHE=/tmp/node-compile-cache \

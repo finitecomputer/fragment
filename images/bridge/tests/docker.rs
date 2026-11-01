@@ -904,8 +904,8 @@ async fn hermes_running_with_modes(tier: Option<&str>) -> (Fake, Model, String, 
 
 /// Goal (FIN-258): an agent whose `agent.json` names another runtime
 /// (Claude) gets no Hermes profile and no desktop, and the bridge's ready
-/// file names it at once: its turns go to the runtime it names, which this
-/// image does not run yet, so they end saying so. Valid: an agent switched
+/// file names it at once: its turns go to the runtime it names, Claude
+/// Code, which its person has not installed here, so they end saying how. Valid: an agent switched
 /// to Claude while the computer runs loses its screen at once, its profile
 /// retired at the next start, as an unassigned agent's is; switched back,
 /// its profile is written again and it answers as Hermes. Restart: the
@@ -939,7 +939,7 @@ async fn an_agent_of_another_runtime_gets_no_hermes_profile() {
     fake.until(90_000, "rowan's turn to end", |w| w.bodies(&workshop, "work", "turn.end").iter().any(|e| e["turn"] == tr)).await;
     fake.with(|w| {
         let end = w.bodies(&workshop, "work", "turn.end").into_iter().find(|e| e["turn"] == tr).unwrap();
-        assert_eq!(end["error"], json!(fragment_bridge::engine::refused_runtime("claude")), "its runtime's turn, refused in words: {end}");
+        assert_eq!(end["error"], json!(fragment_bridge::runtime::claude::NOT_INSTALLED), "its runtime's turn, saying how to install it: {end}");
     });
 
     // maple, of Hermes', and oak, unassigned before the restart
@@ -4182,6 +4182,144 @@ async fn an_old_bot_chat_is_rebuilt_without_bot_mode() {
     assert!(tools.contains("fragment_ask") && !tools.contains("message_agent"), "fragment_ask, not message_agent: {tools}");
     assert!(call.body["messages"].to_string().contains("hello from before"), "its history kept");
     assert!(!c.exec(&["test", "-L", "/data/hermes/profiles/juniper--k3x9/hooks/fragment-bot-chat"]), "the older image's Bot Mode hook link is gone");
+}
+
+/// The error `turn`'s end in `chat` says, once it ends.
+async fn ended_saying(fake: &Fake, chat: &str, c: &Container, turn: &str, what: &str) -> String {
+    let end = |w: &support::fake::World| w.bodies(chat, "work", "turn.end").into_iter().find(|e| e["turn"] == turn);
+    within(fake, chat, c, 180_000, what, |w| end(w).is_some()).await;
+    fake.with(|w| end(w).expect("ended")["error"].as_str().unwrap_or_default().to_string())
+}
+
+/// Goal (FIN-258; Paul on FIN-233: "The install will survive restarts
+/// right?"): Claude Code, installed by its person with Anthropic's own
+/// installer in a terminal of an agent's desktop, lands in /data and
+/// outlasts a restart and an image update, the same on disk each time, and
+/// an agent naming `claude` runs it: before the install its turn says how
+/// to install it, after it (no one signed in) Claude Code's own words.
+/// Method: the real installer (the network; skipped without
+/// `FRAGMENT_DOCKER_REAL_CLAUDE=1`, so CI never downloads it), run as
+/// hermes in the environment of juniper's desktop's panel, which opens its
+/// terminals, in the shell a terminal there starts (its user's, not a
+/// login shell, so the desktop's PATH holds); the update is this image's /data saved and restored into
+/// another image (this one and a layer), as a deploy's wake from a save is.
+/// No model is called: nothing signs in.
+#[tokio::test]
+#[ignore = "needs Docker and the network: FRAGMENT_DOCKER_REAL_CLAUDE=1 cargo test -p fragment-bridge --test docker -- --ignored --exact a_persons_claude_code_outlasts_restarts_and_updates"]
+async fn a_persons_claude_code_outlasts_restarts_and_updates() {
+    if std::env::var("FRAGMENT_DOCKER_REAL_CLAUDE").is_err() {
+        eprintln!("skip: FRAGMENT_DOCKER_REAL_CLAUDE=1 runs Anthropic's installer, from the network");
+        return;
+    }
+    const SESSION_ENV: &str = r#"import json, os, sys
+for pid in filter(str.isdigit, os.listdir("/proc")):
+    try:
+        cmd = open(f"/proc/{pid}/cmdline", "rb").read().split(b"\0")[0].decode(errors="replace")
+        env = dict(e.split("=", 1) for e in open(f"/proc/{pid}/environ", "rb").read().decode(errors="replace").split("\0") if "=" in e)
+    except Exception:
+        continue
+    if cmd.endswith("xfce4-panel") and env.get("HERMES_BD_PROFILE") == sys.argv[1]:
+        print(json.dumps(env))
+        break
+"#;
+    const IN_SESSION: &str = r#"import json, os, subprocess, sys
+env = json.loads(sys.argv[1])
+sys.exit(subprocess.run([env.get("SHELL", "/bin/sh"), "-c", sys.argv[2]], env=env, cwd=env["HOME"]).returncode)
+"#;
+    let (fake, model, _chat, c) = hermes_running().await;
+    let workshop = fake.chat("workshop", &["rowan"]);
+    fake.add_agent_with("rowan", r#"{"tier":"cheap","runtime":"claude"}"#);
+    let ask_rowan = |text: &str| -> String {
+        let said = fake.say(&workshop, &person("paul"), json!({ "text": text }));
+        fragment_bridge::records::turn_id("rowan--k3x9", &workshop, "chat", said["seq"].as_u64().unwrap())
+    };
+
+    // before the install: rowan's turn says how
+    let said = ended_saying(&fake, &workshop, &c, &ask_rowan("hello before"), "rowan's turn before the install").await;
+    assert_eq!(said, fragment_bridge::runtime::claude::NOT_INSTALLED);
+
+    // juniper's desktop, and its terminals' environment: home is Hermes'
+    let (code, started) = c.exec_code(&["/opt/fragment/bin/hermes-boot", "screen-start", "juniper--k3x9"]);
+    assert_eq!(code, 0, "the desktop starts: {started}");
+    let t = Instant::now();
+    let session = loop {
+        // as hermes: a process's environment is its own user's to read
+        let out = c.exec_out(&["/command/s6-setuidgid", "hermes", "/opt/hermes/.venv/bin/python", "-c", SESSION_ENV, "juniper--k3x9"]);
+        if let Ok(env) = serde_json::from_str::<serde_json::Value>(out.trim()) {
+            break env;
+        }
+        assert!(
+            t.elapsed() < Duration::from_secs(180),
+            "no panel on juniper's desktop: {out}\nscreen-start said: {started}\nthe panel's environment:\n{}\nprocesses:\n{}\nits launcher:\n{}",
+            c.exec_out(&["/command/s6-setuidgid", "hermes", "sh", "-c", "for p in $(pgrep -x xfce4-panel); do tr '\\0' '\\n' < /proc/$p/environ | grep -E '^(HOME|HERMES_BD_PROFILE|PATH)='; done"]),
+            c.exec_out(&["ps", "-eo", "pid,user,args"]),
+            c.exec_out(&["sh", "-c", "tail -40 /data/hermes/profiles/juniper--k3x9/bot-desktop/launcher.log"])
+        );
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    };
+    eprintln!("claude install: the desktop's HOME {} and PATH {}", session["HOME"], session["PATH"]);
+    assert_eq!(session["HOME"], "/data/hermes", "the desktop's home is Hermes', in /data");
+    assert_eq!(session["XDG_DATA_HOME"], "/data/hermes/.local/share", "its data in that home, not its profile");
+    let in_session = |cmd: &str| c.exec_code(&["/command/s6-setuidgid", "hermes", "/opt/hermes/.venv/bin/python", "-c", IN_SESSION, &session.to_string(), cmd]);
+
+    // the install, as its person types it there
+    let t = Instant::now();
+    let (code, out) = in_session("curl -fsSL https://claude.ai/install.sh | bash");
+    eprintln!("claude install: {} s\n{out}", t.elapsed().as_secs());
+    assert_eq!(code, 0, "the installer: {out}");
+    let (code, found) = in_session("command -v claude && claude --version");
+    assert_eq!(code, 0, "{found}");
+    assert!(found.starts_with("/data/hermes/.local/bin/claude\n"), "on the desktop's PATH, in /data: {found}");
+    let version = found.lines().nth(1).unwrap_or_default().to_string();
+    let on_disk = |c: &Container| c.exec_out(&["sh", "-c", "readlink -f /data/hermes/.local/bin/claude && ls /data/hermes/.local/share/claude/versions && stat -c '%U' /data/hermes/.local/bin/claude"]);
+    let installed = on_disk(&c);
+    eprintln!("claude install: {version}; on disk:\n{installed}");
+    assert!(installed.contains("/data/hermes/.local/share/claude/versions/") && installed.trim_end().ends_with("hermes"), "Anthropic's layout, the person's (hermes'): {installed}");
+
+    // the agent runs it: no one signed in, its turn says Claude Code's words
+    let not_signed_in = |said: &str| said != fragment_bridge::runtime::claude::NOT_INSTALLED && said.to_lowercase().contains("login");
+    let said = ended_saying(&fake, &workshop, &c, &ask_rowan("hello after the install"), "rowan's turn after the install").await;
+    eprintln!("claude install: rowan's turn, signed out: {said}");
+    assert!(not_signed_in(&said), "Claude Code ran, and asked for a sign-in: {said}");
+
+    // a restart
+    c.restart();
+    fake.until(180_000, "the bridge back after the restart", |w| w.live_sockets() >= 3).await;
+    assert_eq!(on_disk(&c), installed, "the same install after the restart");
+    let said = ended_saying(&fake, &workshop, &c, &ask_rowan("hello after the restart"), "rowan's turn after the restart").await;
+    assert!(not_signed_in(&said), "after the restart: {said}");
+
+    // an image update: /data saved, and restored into another image
+    let next = format!("{}-next", hermes_tag());
+    let mut build = Command::new(docker()).args(["build", "-t", &next, "-"]).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped()).spawn().expect("docker runs");
+    {
+        use std::io::Write;
+        build.stdin.take().expect("its stdin").write_all(format!("FROM {}\nRUN echo next > /opt/fragment/next-image\n", hermes_tag()).as_bytes()).expect("its Dockerfile");
+    }
+    let built = build.wait_with_output().expect("docker build");
+    assert!(built.status.success(), "the next image: {}", String::from_utf8_lossy(&built.stderr));
+    let left_out = hold(&c).unwrap_or_else(|| panic!("no answer to the hold"));
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("claude-install-update");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let save = dir.join("data.tar");
+    let bytes = save_data(&c, &left_out, &save);
+    eprintln!("claude install: the save is {} MB", bytes / 1_000_000);
+    c.sigterm();
+    drop(c);
+    fake.until(30_000, "its sockets closed", |w| w.live_sockets() == 0).await;
+    let c = Container::run(&next, fake.addr.port(), model.addr.port(), &[("RESTORE_PENDING", "1")]);
+    let tar = std::fs::File::open(&save).expect("the save");
+    let cp = Command::new(docker()).args(["cp", "-a", "-", &format!("{}:/data", c.id)]).stdin(tar).output().expect("docker runs");
+    assert!(cp.status.success(), "the restore: {}", String::from_utf8_lossy(&cp.stderr));
+    let (code, checked) = c.exec_code(&["/usr/local/bin/computer-check"]);
+    assert_eq!(code, 0, "the save checks: {checked}");
+    assert!(c.exec(&["touch", "/run/computer/restored"]));
+    assert!(c.exec(&["test", "-e", "/opt/fragment/next-image"]), "the next image");
+    fake.until(180_000, "the next image's bridge", |w| w.live_sockets() >= 3).await;
+    assert_eq!(on_disk(&c), installed, "the same install after the update");
+    let said = ended_saying(&fake, &workshop, &c, &ask_rowan("hello after the update"), "rowan's turn after the update").await;
+    assert!(not_signed_in(&said), "after the update: {said}");
 }
 
 /// Goal (docs/computers.md, "An agent's own model"; Paul, 2026-10-08): an

@@ -749,8 +749,34 @@ passwordless `sudo`: the computer is one person's, with no secret in it,
 and their agents are not fenced from each other (decisions 13, 43, 44).
 An install outside `/data` lasts until the next start from the image (a
 crash, an update, a restart; a snapshot's wake keeps it). Nothing is
-installed under `/data` at run time. The bridge runs as root and keeps
-SimpleX's state from the agent's user, though not from its sudo.
+installed under `/data` at run time but the person's own Claude Code
+(below). The bridge runs as root and keeps SimpleX's state from the
+agent's user, though not from its sudo.
+
+### Claude Code in our Hermes image
+
+Paul, FIN-233 (2026-10-31): an agent whose `agent.json` names `claude`
+runs on Claude Code, which the person installs on their computer
+themselves, as on a VPS of theirs. The image ships none, and no flag
+gates it.
+
+- **Installed in a terminal of an agent's desktop** with Anthropic's own
+  installer, then signed in there with `claude auth login` (its URL
+  opened in their browser, its code pasted back). The desktop's home is
+  Hermes' (`/data/hermes`), so the install lands in `/data`
+  (`.local/bin/claude`, its versions in `.local/share/claude`), already on
+  the image's `PATH`, and the sign-in in `/data/hermes/.claude`. Both
+  outlast a restart, a sleep and an image update, as all of `/data` does.
+- **The agent runs that same Claude Code** (`BRIDGE_CLAUDE_BIN`,
+  `BRIDGE_CLAUDE_HOME`: docs/bridge.md), as Hermes' user, with the
+  person's sign-in, settings and auto memory, each agent in its own work
+  directory. Until it is installed, the agent's turns end saying how.
+- **Its updates are Anthropic's**: Claude Code updates itself in the
+  background, keeping the two newest versions, so a save carries one or
+  two (about 270 MB each).
+- **A Claude agent has no Hermes profile or desktop** (above, "One
+  profile per agent of Hermes'"): its person installs and signs in from
+  another agent's desktop.
 
 ## Billing
 

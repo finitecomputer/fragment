@@ -116,6 +116,7 @@ impl Scenario {
         let claude = Claude {
             config: ClaudeConfig {
                 bin: self.bin.clone(),
+                home: self.dir.clone(),
                 config_dir: self.config_dir.clone(),
                 work_dir: self.dir.join("work"),
                 state_dir: self.dir.join("claude-state"),
