@@ -1,0 +1,79 @@
+# TEMPORARY (FIN-360's follow-up; a draft PR, never merged): the Hermes
+# image's push measured two ways, on the runner the preview image's
+# prebuild gets, against a registry on the runner itself.
+# A, as `--queue` does now: `docker build --load` into Docker's store, then
+#   `docker push` from there.
+# B, the cut: `docker buildx build --push` straight from BuildKit's builder.
+name: measure-image-push
+
+on:
+  pull_request:
+    paths: [".github/workflows/measure-image-push.yml"]
+
+jobs:
+  measure:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/free-disk
+      - run: docker run -d --name registry --restart always -p 5000:5000 registry:2
+      - id: buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          driver-opts: network=host
+      - name: warm the builder, as the prebuild's build-push step does
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        env:
+          DOCKER_BUILD_SUMMARY: false
+          DOCKER_BUILD_RECORD_UPLOAD: false
+        with:
+          context: .
+          file: images/hermes/Dockerfile
+          platforms: linux/amd64
+          provenance: false
+          cache-from: type=gha,scope=preview-hermes
+      - name: before
+        run: |
+          df -B1M --output=used / | tail -1 | tr -d ' ' > "$RUNNER_TEMP/before"
+          docker system df
+          echo "builder: $(docker buildx du --builder ${{ steps.buildx.outputs.name }} 2>/dev/null | tail -1)"
+      - name: "A: build --load, then push from Docker"
+        env:
+          BUILDX_BUILDER: ${{ steps.buildx.outputs.name }}
+        run: |
+          t0=$(date +%s)
+          docker build --load --platform linux/amd64 --provenance=false -t localhost:5000/hermes:a -f images/hermes/Dockerfile .
+          t1=$(date +%s)
+          docker push localhost:5000/hermes:a > /dev/null
+          t2=$(date +%s)
+          used=$(df -B1M --output=used / | tail -1 | tr -d ' ')
+          echo "A: build --load $((t1 - t0)) s, push $((t2 - t1)) s, total $((t2 - t0)) s; disk +$((used - $(cat "$RUNNER_TEMP/before"))) MiB (Docker's store and the registry)"
+          docker system df
+          docker image inspect localhost:5000/hermes:a --format 'image: {{.Size}} bytes'
+          echo "$used" > "$RUNNER_TEMP/after-a"
+      - name: "Docker's copy and the registry's, gone"
+        run: |
+          docker image rm localhost:5000/hermes:a > /dev/null
+          docker rm -f registry > /dev/null && docker volume prune -af > /dev/null
+          docker run -d --name registry --restart always -p 5000:5000 registry:2
+          df -B1M --output=used / | tail -1 | tr -d ' ' > "$RUNNER_TEMP/before-b"
+          echo "back to $(cat "$RUNNER_TEMP/before-b") MiB used (before A: $(cat "$RUNNER_TEMP/before"))"
+      - name: "B: push straight from BuildKit"
+        env:
+          BUILDX_BUILDER: ${{ steps.buildx.outputs.name }}
+        run: |
+          t0=$(date +%s)
+          docker buildx build --push --platform linux/amd64 --provenance=false -t localhost:5000/hermes:b --metadata-file "$RUNNER_TEMP/meta.json" -f images/hermes/Dockerfile .
+          t1=$(date +%s)
+          used=$(df -B1M --output=used / | tail -1 | tr -d ' ')
+          echo "B: build --push $((t1 - t0)) s; disk +$((used - $(cat "$RUNNER_TEMP/before-b"))) MiB (the registry alone)"
+          echo "digest: $(jq -r '."containerimage.digest"' "$RUNNER_TEMP/meta.json")"
+          docker system df
+      - if: always()
+        name: disk, after
+        run: |
+          df -h /; free -h
+          echo "peak: $(awk '$1 > d { d = $1 } END { print d }' "$RUNNER_TEMP/disk-used") MiB of the disk used, $(awk '$2 > m { m = $2 } END { print m }' "$RUNNER_TEMP/disk-used") MiB of the memory"
