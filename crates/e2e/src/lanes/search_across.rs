@@ -4,8 +4,11 @@
 //! the owner's question finds both indexes' sections merged, embedded
 //! once, and says the third has none; a viewer of one finds that one's
 //! alone, the other denied; a member removed finds nothing more; a source
-//! a push deleted never shows; words alone embed nothing; a question past
-//! its limits is refused before anything is embedded; an agent acting for
+//! a push deleted never shows; words alone embed nothing; by words, the
+//! fragments' word statistics pool, so a word rare across them all ranks
+//! as one index would rank it, and one fragment's answer is its own; a
+//! question past its limits is refused before anything is embedded; an
+//! agent acting for
 //! someone (`for`) searches as them; and `fragment
 //! search --in` and `fragment mcp`'s `fragment-search` tool ask it as the
 //! signed-in person.
@@ -29,6 +32,17 @@ fn embedded(s: &Suite, from: usize) -> usize {
 
 fn upsert(source: &str, title: &str, text: &str) -> Value {
     json!({ "source": source, "revision": "r1", "title": title, "sections": [{ "id": "s0", "text": text }] })
+}
+
+/// One source of several sections, each its text.
+fn sections(source: &str, texts: &[String]) -> Value {
+    let sections: Vec<Value> = texts.iter().enumerate().map(|(i, t)| json!({ "id": format!("s{i}"), "text": t })).collect();
+    json!({ "source": source, "revision": "r1", "title": "Log", "sections": sections })
+}
+
+/// Each hit of an answer: its fragment and its section, best first.
+fn placed(answer: &Value) -> Vec<(String, String)> {
+    answer["results"].as_array().into_iter().flatten().map(|h| (h["fragment"].as_str().unwrap_or("").to_string(), h["section"].as_str().unwrap_or("").to_string())).collect()
 }
 
 /// Each fragment's state in an answer, by name.
@@ -122,6 +136,34 @@ pub fn search_across(s: &mut Suite, api: &Api) -> Result<()> {
         words.status == 200 && words.body["semantic"] == "off" && from(&words.body).len() >= 2
             && [&too_many, &bare, &twice, &unknown].iter().all(|r| r.status == 400) && embedded(s, calls) == 0,
         json!({ "words": words.body, "refused": [too_many.status, bare.status, twice.status, unknown.status] }),
+    );
+
+    // ---- by words, statistics pool: "kelp" is rare in the first fragment and
+    // common in the second, small one, but rare across both; "tide" the other way
+    let mut big: Vec<String> = (0..11).map(|i| format!("Tide table for morning {i}")).collect();
+    big.push("Kelp survey for the reef".into());
+    let small: Vec<String> = vec!["Tide table for the bay".into(), "Kelp survey for the cove".into(), "Kelp survey for the point".into()];
+    for (name, body) in [(&alpha, sections("log/big.md", &big)), (&beta, sections("log/small.md", &small))] {
+        let w = api.signed(&owner, "POST", &format!("/api/f/{name}/search/upsert"), Some(&body))?;
+        anyhow::ensure!(w.status == 200, "{name}'s log: {w}");
+    }
+    let kelp = json!({ "q": "kelp tide", "mode": "lexical" });
+    let pooled = ask(&owner, &[&alpha, &beta], kelp.clone())?;
+    let mut first: Vec<(String, String)> = placed(&pooled.body).into_iter().take(3).collect();
+    first.sort();
+    let mut rare = vec![(alpha.clone(), "s11".to_string()), (beta.clone(), "s1".to_string()), (beta.clone(), "s2".to_string())];
+    rare.sort();
+    let one = ask(&owner, &[&beta], kelp.clone())?;
+    let own = api.signed(&owner, "POST", &format!("/api/f/{beta}/search"), Some(&kelp))?;
+    let sections_of = |answer: &Value| -> Vec<String> { answer["results"].as_array().into_iter().flatten().map(|h| h["section"].as_str().unwrap_or("").to_string()).collect() };
+    let no_scores = |answer: &Value| answer.get("words").is_none() && answer["results"].as_array().is_some_and(|h| h.iter().all(|h| h.get("words").is_none()));
+    s.ok(
+        "by words across fragments, their word statistics pool: the sections holding the word rare across both come first, though the small fragment holds it often; asked of one fragment, its own order; neither answer carries the statistics",
+        pooled.status == 200 && first == rare
+            && one.status == 200 && own.status == 200 && !sections_of(&own.body).is_empty() && sections_of(&one.body) == sections_of(&own.body)
+            && sections_of(&own.body).first().map(String::as_str) == Some("s0")
+            && no_scores(&pooled.body) && no_scores(&one.body) && no_scores(&own.body),
+        json!({ "pooled": pooled.body, "one": one.body, "own": own.body }),
     );
 
     // ---- a source a push deleted never shows

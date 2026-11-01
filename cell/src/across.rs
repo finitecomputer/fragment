@@ -42,22 +42,27 @@ pub(crate) async fn route(mut req: Request, env: &Env, cfg: &Config, url: &Url, 
     let inner = json!(Forwarded { query: across::query(&asked, Some(across::asked_limit(limit))), vector }).to_string();
     let answers = join_all(asked.fragments.iter().map(|name| ask(env, url, &who, name, &inner))).await;
     let mut fragments = Vec::with_capacity(answers.len());
-    let mut hits: Vec<Vec<Value>> = Vec::with_capacity(answers.len());
+    let mut replies: Vec<across::Reply> = Vec::with_capacity(answers.len());
     let mut legs: Vec<Vec<across::Legs>> = Vec::with_capacity(answers.len());
     for (name, answer) in asked.fragments.iter().zip(answers) {
         let reply = match answer {
             Ok((status, v)) => across::reached(status, v, space.as_ref()),
-            Err(e) => across::Reply { state: Reached::Failed, message: Some(e.message), hits: vec![], cosines: false },
+            Err(e) => across::Reply { state: Reached::Failed, message: Some(e.message), hits: vec![], cosines: false, words: None },
         };
         legs.push(reply.hits.iter().enumerate().map(|(i, h)| across::legs(h, i, reply.cosines)).collect());
-        fragments.push(Asked { name: name.clone(), state: reply.state, message: reply.message });
-        hits.push(reply.hits);
+        fragments.push(Asked { name: name.clone(), state: reply.state, message: reply.message.clone() });
+        replies.push(reply);
     }
+    across::pool_words(&fragment_core::search_index::words_of(&asked.q), &replies, &mut legs);
     let results: Vec<Value> = across::merge(&legs, limit)
         .into_iter()
         .enumerate()
         .map(|(i, p)| {
-            let mut hit = hits[p.fragment][p.hit].clone();
+            let mut hit = replies[p.fragment].hits[p.hit].clone();
+            // each word's score by its own fragment's statistics: pooled here
+            if let Some(h) = hit.as_object_mut() {
+                h.remove("words");
+            }
             hit["fragment"] = json!(asked.fragments[p.fragment]);
             hit["rank"] = json!(i + 1);
             hit["score"] = json!(p.score);
