@@ -1123,7 +1123,9 @@ reason (402 `budget_used_up`). A run answers `costMicros`.
   its resolution's price as soon as the model answers with its video
   (a step tried again reads that video, and is never made or charged
   again); an answer with no completed video is refused and charged
-  nothing (`ai.video-refused`). Refused before any call on a deployment
+  nothing (`ai.video-refused`). Asked at most once an attempt: a try
+  that never heard its answer fails, charged nothing, saying to replay
+  (`ai.video-lost`). Refused before any call on a deployment
   whose tiers are private: no catalog video model is (`Models::video_refused`).
 
 A text model's 429 or 5xx is answered by the fallback model (Models), sent
@@ -1275,8 +1277,16 @@ back to it); unnamed, `embed::MODEL_DEFAULT` on Workers AI. Every answer
 names its `space`, and every vector has the slot's `dimensions` and unit
 length;
 a change of the slot's model, dimensions or version is a new space, never
-compared with the old. A deployment whose tiers are private embeds only on
-a slot marked `private` (else 403). Refused 400 before anything is sent:
+compared with the old. A slot may name a `document_prefix` and a
+`query_prefix` (each at most `embed::PREFIX_TOKENS_MAX` tokens): the task
+instructions a fragment's search puts before each chunk and each question
+it embeds (nomic-embed-text's `search_document: ` and `search_query: `),
+which its index's `space` names, so a change of either is a new space
+there too. `inputs_max` (1 to `embed::INPUTS_MAX`, that unnamed) is the
+inputs its model takes in one call (Tinfoil's 32): a search embeds in
+batches of it, and this route refuses a call of more, 400. This route
+embeds an agent's input as given. A deployment whose
+tiers are private embeds only on a slot marked `private` (else 403). Refused 400 before anything is sent:
 `input` not a string or 1 to `embed::INPUTS_MAX` strings, an empty one, or
 one that may pass the slot's window (`embed::tokens_max`; nothing is cut);
 `model` other than `embeddings` or the slot's; `dimensions` other than the
@@ -1773,29 +1783,13 @@ a key.
 
 **Messages with framed pages.** The shell frames a person's fragments
 (chats, app windows) and their computer's ports (an agent's screen, its
-SimpleX link page). It takes a message only from a frame it made, at that
-frame's own origin, and answers that frame alone; a page's messages ask,
-never grant. Framed pages take messages only from their parent at the
-platform's origin (the `__live` hello's `platform`).
-
-| message | from → to | rule and answer |
-| --- | --- | --- |
-| `{fragment: "agents?"}` | a frame of a fragment the person owns → the shell | → `{fragment: "agents", agents: [{identity, fragment, name, title, picture?, phase?, modelProviders?}], models?, setup}`: the agents their computer runs (`name` the label `@` uses, `title` and `picture` the face, `phase` the computer's), and `models` and `modelProviders` from its view (`GET /api/computers/{id}`). Sent again when any of it changes. `setup` is `{steps: [{text, state: done \| doing \| todo \| failed}], error}` for the first run's chat while its agent is made, else `null`. A frame of a fragment shared with them gets no answer |
-| `{fragment: "add-agent", identity, nonce}` | the same | the shell asks the person in its own dialog ("Add Fred to …?", Add armed after 800 ms), and only on Add makes the agent an editor of the frame's fragment → `{fragment: "agent-added", nonce, identity, ok, error?}`, `error` `"declined"`, `"not answered"` (90 s), `"busy"`, or the API's refusal. Nothing is remembered |
-| `{fragment: "retry-setup"}` | the first run's chat, as `agents?` | tries a failed setup step again |
-| `{fragment: "compose", text}` | the shell → a chat it framed, once the chat asked `agents?` | the chat replaces what was typed and focuses its composer; sends nothing; taken only by a person who may post |
-| `{fragment: "open", url, title?}` | any frame it made → the shell | a URL of the frame's own origin opens a file's window; a page of another fragment of the deployment (the frame's origin with another name in its place) opens as that fragment's window. Anything else opens nothing |
-| `{fragment: "open-launcher"}` | the focused frame of a listed fragment → the shell | opens the launcher |
-| `{fragment: "alerts?", nonce}`, `{fragment: "alerts", nonce, on, key?}` | a frame of one of the person's chats → the shell | A chat's alerts are the shell's, below |
-| `{fragment: "busy", busy}` | a chat → the shell | whether it holds what no storage keeps (files chosen, a memo, a message on its way or failed, …): the shell does not reload under it |
-| `{fragment: "said"}` | a chat → the shell | the person's message was sent there: a chat they archived is unarchived (`PUT /api/fragments/{name}/archived`), back in their sidebar |
-| `{fragment: "forget-draft"}` | the shell → each chat, before signing out | the chat drops its stored draft → `{fragment: "draft-forgotten"}` |
-| `{fragment: "theme", mode, mobile}` | the shell → a frame | its light or dark mode, and whether it is laid out for a phone |
-| `{fragment: "screen", agent, name}`, `{fragment: "simplex", agent, name}` | the shell → a port's page | the agent's name, as it loads and on a rename |
-| `{fragment: "simplex", agent, want: "link" \| "unlink", home?}` | a SimpleX link page Settings framed, for its own agent → the shell | → `{fragment: "simplex", agent, for, ticket?, error?, home?, homeError?}`: a door ticket (An agent's doors); a link's `home` sets its home (An agent's home), an unlink's takes it back |
-| `{fragment: "session-archive", key \| continue}` | the person's session archive's frame → the shell | `key` the conversation it shows (`null` its list); `continue` a conversation to pick up as a new chat: the shell asks with which of their agents (its picker), or opens the chat one made of it |
-| `{fragment: "signin-blocked", name, why?}` | a fragment's `__signin`, or `/auth/frame`'s note → the parent | Frame sessions |
-| `{fragment: "open-chat", name}` | the alerts worker → an open shell | opens the chat |
+SimpleX link page). Their messages, each `{fragment: <kind>, ...}`, are
+defined in one module, templates/chat/site/frame-messages.js (the shell's
+cell/shell/frame-messages.js links to it): every kind, who sends it to
+whom, its fields and what it does. The shell takes a message only from a
+frame it made, at that frame's own origin, and answers that frame alone;
+a page's messages ask, never grant. Framed pages take messages only from
+their parent at the platform's origin (the `__live` hello's `platform`).
 
 ### A new release
 

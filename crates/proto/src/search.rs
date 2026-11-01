@@ -161,8 +161,9 @@ pub struct Semantic {
 /// bit, which the first pass reads.
 pub const SCHEME: &str = "i8x508+sign";
 
-/// What a deployment's vectors mean: its embeddings model, their
-/// dimensions, and the version it names, if any.
+/// What a fragment's search vectors mean: the deployment's embeddings
+/// model, their dimensions, the version it names, if any, and the
+/// prefixes its search embeds after.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Space {
@@ -170,6 +171,12 @@ pub struct Space {
     pub dimensions: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
+    /// The task instructions its chunks and questions were embedded after
+    /// (the slot's `document_prefix` and `query_prefix`), if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub document_prefix: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query_prefix: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

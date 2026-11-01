@@ -20,7 +20,7 @@ use crate::Suite;
 /// The old Finite's export's chats, as its export.py writes them: a chat,
 /// a chat large enough to be a blob, a month's scheduled runs, and a chat
 /// past what a conversation may hold.
-fn export(root: &Path) -> Result<()> {
+pub(super) fn export(root: &Path) -> Result<()> {
     export_with(root, false)
 }
 
@@ -121,6 +121,17 @@ pub fn sessions_ui(s: &mut Suite, api: &Api) -> Result<()> {
     let rows = b.eval(&page, &format!("[...{imported}].map((r) => r.querySelector('.history-line .label').textContent)"))?;
     s.ok("History lists the archive's chats as imported, newest first", listed && rows == json!(["A long letter", "Beans"]), &rows);
     let beans = ".history-row[data-key=\"imported:hermes-e2e_beans\"]";
+
+    // History's search finds one by words its title and first words lack,
+    // in the archive's own search (the import wrote it)
+    b.click(&page, ".history-search input")?;
+    b.type_text(&page, "spring")?;
+    let found = b.until(&page, &format!("{imported}.length === 1 && !!document.querySelector('{beans} .history-preview.found')?.textContent.includes('spring')"), wait);
+    let seen = b.eval(&page, &format!("({{ rows: [...{imported}].map((r) => r.querySelector('.history-preview')?.textContent ?? ''), status: document.querySelector('.history-status')?.textContent ?? '' }})"))?;
+    s.ok("History's search finds an imported chat by the words in it, with its snippet", found, &seen);
+    b.screenshot(&page, &shots.join("history-search.png"))?;
+    b.eval(&page, "(() => { const i = document.querySelector('.history-search input'); i.value = ''; i.dispatchEvent(new Event('input')); return true; })()")?;
+    b.until(&page, &format!("{imported}.length === 2"), wait);
 
     b.click(&page, &format!("{beans} .history-open"))?;
     let opened = b.until(&page, "document.getElementById('chat-title').textContent === 'Beans' && document.getElementById('chat-options').hidden", wait);
@@ -247,6 +258,12 @@ pub fn sessions(s: &mut Suite, api: &Api) -> Result<()> {
         "an export's chats are imported into an archive made for its person, the one past the limit refused alone",
         first["made"] == true && first["added"] == 3 && refused == ["e2e_huge"] && first["holds"] == json!({ "chat": 2, "cron": 1, "subagent": 0 }),
         &first,
+    );
+    // every fragment has its search (the search section checks what it holds)
+    s.ok(
+        "the import writes its archive's search, one source each conversation it keeps",
+        first["search"]["state"] == "written" && first["search"]["written"] == 3 && first["search"]["refused_count"] == 0,
+        &first["search"],
     );
     let status = api.status(&keys, &name)?;
     let listed = api.signed(&keys, "GET", "/api/fragments", None)?;

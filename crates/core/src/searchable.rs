@@ -227,17 +227,20 @@ fn header(title: &str, context: &[String], heading: Option<&str>, max: u64) -> S
 
 /// `up`'s sections in chunks, each input at most `window` tokens as the
 /// embeddings route bounds them (`embed::tokens_max`), its model's own
-/// tokens included: a slot's `max_input_tokens`.
-pub fn chunked(up: &Upsert, window: u32) -> Vec<Chunk> {
+/// tokens included: a slot's `max_input_tokens`. Each input begins with
+/// `prefix` (the slot's `document_prefix`), which its hash covers.
+pub fn chunked(up: &Upsert, window: u32, prefix: Option<&str>) -> Vec<Chunk> {
     assert!(window >= embed::MAX_INPUT_TOKENS_MIN, "a slot's window is at least MAX_INPUT_TOKENS_MIN");
-    let room = u64::from(window - embed::OVERHEAD_TOKENS);
+    let prefix = prefix.unwrap_or("");
+    assert!(tokens(prefix) <= embed::PREFIX_TOKENS_MAX, "a slot's prefix is checked as it is parsed");
+    let room = u64::from(window - embed::OVERHEAD_TOKENS) - tokens(prefix);
     let title = up.title.as_deref().unwrap_or("");
     let mut out = Vec::new();
     for (i, s) in up.sections.iter().enumerate() {
         let head = header(title, &s.context, s.heading.as_deref(), room / HEADER_MAX_SHARE);
         let budget = room - if head.is_empty() { 0 } else { tokens(&head) + 2 };
         for text in chunks(&s.text, budget) {
-            let input = if head.is_empty() { text.clone() } else { format!("{head}\n\n{text}") };
+            let input = if head.is_empty() { format!("{prefix}{text}") } else { format!("{prefix}{head}\n\n{text}") };
             assert!(embed::tokens_max(&input) <= u64::from(window), "a chunk's input fits its window");
             let hash = hex::encode(Sha256::digest(input.as_bytes()));
             out.push(Chunk { section: i, text, input, hash });
@@ -312,12 +315,32 @@ mod tests {
         let mut s = section("t0", &"word ".repeat(400));
         s.heading = Some("Monday".into());
         s.context = vec!["telegram".into()];
-        let cs = chunked(&up(vec![s, section("t1", "short")]), 512);
+        let cs = chunked(&up(vec![s, section("t1", "short")]), 512, None);
         assert!(cs.len() >= 2 && cs.iter().all(|c| embed::tokens_max(&c.input) <= 512));
         assert!(cs[0].input.starts_with("Trip\ntelegram > Monday\n\nword"));
         assert_eq!(cs.last().unwrap().section, 1);
-        let again = chunked(&up(vec![section("t1", "short")]), 512);
+        let again = chunked(&up(vec![section("t1", "short")]), 512, None);
         assert_eq!(again[0].hash, cs.last().unwrap().hash, "the same input is the same hash, wherever it was");
+    }
+
+    /// Goal: a slot's document prefix (nomic-embed-text's
+    /// `search_document: `) begins every chunk's input, so its vector is
+    /// the model's for a document and its hash names it; the prefix's
+    /// tokens come out of the window, so every input still fits.
+    #[test]
+    fn a_document_prefix_begins_every_chunk_and_fits_its_window() {
+        let slot = embed::Slot { max_input_tokens: embed::MAX_INPUT_TOKENS_MIN, ..embed::Slot::default() };
+        let texts = [section("t0", &"word ".repeat(400)), section("t1", "short")];
+        let plain = chunked(&up(texts.to_vec()), slot.max_input_tokens, None);
+        let prefixed = chunked(&up(texts.to_vec()), slot.max_input_tokens, Some("search_document: "));
+        for c in &prefixed {
+            assert!(c.input.starts_with("search_document: "), "{:?}", c.input);
+            assert_eq!(embed::bound(&json!({ "input": c.input }), &slot).map(|_| ()), Ok(()), "{:?}", c.input);
+        }
+        assert!(prefixed.len() > plain.len(), "the prefix's tokens leave less room a chunk");
+        let (a, b) = (&plain.last().unwrap(), &prefixed.last().unwrap());
+        assert_eq!(a.text, b.text);
+        assert_ne!(a.hash, b.hash, "the hash names the prefix too: a vector of one is not reused for the other");
     }
 
     /// The route refused BGE-M3's 773 tokens of 1,400 bytes of numbers, and
@@ -329,7 +352,7 @@ mod tests {
         let mut numbers = section("t0", &"1,2,3,4,5,6,7,8,9,0\n".repeat(400));
         numbers.heading = Some("Таблица".into());
         let texts = [numbers, section("t1", &"ﷺ ".repeat(500)), section("t2", &"검색 색인은 쓰기마다 갱신됩니다. ".repeat(150)), section("t3", &"word ".repeat(1500))];
-        let cs = chunked(&up(texts.to_vec()), slot.max_input_tokens);
+        let cs = chunked(&up(texts.to_vec()), slot.max_input_tokens, None);
         for c in &cs {
             assert_eq!(embed::bound(&json!({ "input": c.input }), &slot).map(|_| ()), Ok(()), "{:?}", &c.input[..40.min(c.input.len())]);
         }

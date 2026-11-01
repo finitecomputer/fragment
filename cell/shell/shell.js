@@ -31,6 +31,7 @@ import { createConnections, createAgentHomes, createSimplex } from "./connection
 import { el, section, line, actionLine, createSettings } from "./settings.js";
 import { createLauncher } from "./launcher.js";
 import { createThreads } from "./threads.js";
+import { KIND } from "./frame-messages.js";
 
 const $ = (id) => document.getElementById(id);
 const CURRENT = "shell.chat.v1";
@@ -327,7 +328,7 @@ const BLOCKED = {
 const blockedNote = (frame) => (frame.previousElementSibling?.classList.contains("frame-note") ? frame.previousElementSibling : null);
 addEventListener("message", (event) => {
   const d = event.data;
-  if (d?.fragment !== "signin-blocked" || !Object.hasOwn(BLOCKED, d.why)) return;
+  if (d?.fragment !== KIND.signinBlocked || !Object.hasOwn(BLOCKED, d.why)) return;
   const frame = [...document.querySelectorAll("iframe[data-fragment]")].find((f) => f.contentWindow === event.source);
   if (!frame || frame.dataset.fragment !== d.name) return;
   const [title, text, go, target] = BLOCKED[d.why](titleOf(d.name));
@@ -377,7 +378,7 @@ async function updateWallpaper() {
 }
 function theme(frame) {
   try {
-    frame.contentWindow?.postMessage({ fragment: "theme", mode: dark.matches ? "dark" : "light", mobile: mobileChat.matches }, "*");
+    frame.contentWindow?.postMessage({ fragment: KIND.theme, mode: dark.matches ? "dark" : "light", mobile: mobileChat.matches }, "*");
   } catch {}
 }
 dark.addEventListener("change", () => {
@@ -410,8 +411,8 @@ fitViewport();
 
 // ---- the person's agents, for a page of theirs that asks (a chat's @) ----
 // A frame of a fragment the person owns may ask for their agents
-// (`{fragment: "agents?"}`); the shell answers it, at that fragment's own
-// origin only (its status's canonical URL), `{fragment: "agents", agents:
+// (`{fragment: KIND.agentsAsk}`); the shell answers it, at that fragment's own
+// origin only (its status's canonical URL), `{fragment: KIND.agents, agents:
 // [{identity, fragment, name, title, picture?, phase?, modelProviders?}],
 // models?}` (`picture` its picture's address, whole, on this platform;
 // `phase` their computer's, as the platform last said: `asleep`,
@@ -421,7 +422,7 @@ fitViewport();
 // with an agent's `agent.json` say the model it runs), and again whenever
 // any of it changes: a rename or a new picture reaches the page as it
 // reaches this one.
-// It may then ask for one of them in its fragment (`{fragment: "add-agent",
+// It may then ask for one of them in its fragment (`{fragment: KIND.addAgent,
 // identity, nonce}`): the shell asks its person, in its own dialog (never
 // in the frame: a page is code its author or an agent wrote, so it asks
 // and never grants), "Add Fred to <title>?", and only on their Add adds that
@@ -455,7 +456,7 @@ const roster = () => {
   });
 };
 // the answer to `name`'s frame
-const rosterFor = (name) => ({ fragment: "agents", agents: roster(), ...(state.computer?.models ? { models: state.computer.models } : {}), setup: setupFor(name) });
+const rosterFor = (name) => ({ fragment: KIND.agents, agents: roster(), ...(state.computer?.models ? { models: state.computer.models } : {}), setup: setupFor(name) });
 let rosterSent = "";
 function rosterChanged() {
   // the first run's chat named too: its steps are the same before it is
@@ -474,7 +475,7 @@ function rosterChanged() {
 }
 addEventListener("message", async (event) => {
   const d = event.data;
-  if (!["agents?", "add-agent", "retry-setup"].includes(d?.fragment)) return;
+  if (![KIND.agentsAsk, KIND.addAgent, KIND.retrySetup].includes(d?.fragment)) return;
   // the frame that sent it shows one of the person's own fragments, and
   // the page in it is that fragment's
   const frame = [...document.querySelectorAll("iframe[data-fragment]")].find((f) => f.contentWindow === event.source);
@@ -487,21 +488,21 @@ addEventListener("message", async (event) => {
     return;
   }
   if (event.origin !== origin || frame.contentWindow !== event.source) return;
-  if (d.fragment === "retry-setup") {
+  if (d.fragment === KIND.retrySetup) {
     onboarding.retrySetup(name);
     return;
   }
-  if (d.fragment === "agents?") {
+  if (d.fragment === KIND.agentsAsk) {
     rosterTo.set(event.source, origin);
     event.source.postMessage(rosterFor(name), origin);
     // a prompt pressed before its chat's page was there (`composeApp`)
     const text = composing.get(name);
     composing.delete(name);
-    if (text !== undefined) event.source.postMessage({ fragment: "compose", text }, origin);
+    if (text !== undefined) event.source.postMessage({ fragment: KIND.compose, text }, origin);
     return;
   }
   const asker = event.source;
-  const answer = (ok, error) => asker.postMessage({ fragment: "agent-added", nonce: d.nonce, identity: d.identity, ok, ...(error ? { error } : {}) }, origin);
+  const answer = (ok, error) => asker.postMessage({ fragment: KIND.agentAdded, nonce: d.nonce, identity: d.identity, ok, ...(error ? { error } : {}) }, origin);
   if (typeof d.nonce !== "string" || d.nonce.length > 64) return;
   const agent = state.agents.get(d.identity);
   if (!agent) return answer(false, "that is not one of your agents");
@@ -626,7 +627,7 @@ async function alertsOff(name) {
 }
 addEventListener("message", async (event) => {
   const d = event.data;
-  if (!["alerts?", "alerts"].includes(d?.fragment) || typeof d.nonce !== "string" || d.nonce.length > 64 || alertsEnded) return;
+  if (![KIND.alertsAsk, KIND.alerts].includes(d?.fragment) || typeof d.nonce !== "string" || d.nonce.length > 64 || alertsEnded) return;
   const frame = [...document.querySelectorAll("iframe[data-fragment]")].find((f) => f.contentWindow === event.source);
   const name = frame?.dataset.fragment;
   if (!name || byName(name)?.kind !== "chat") return;
@@ -644,10 +645,10 @@ addEventListener("message", async (event) => {
   // nothing of a chat that left it). Read and turned off, any chat's: one
   // that left the release may let go of what it had
   const blessed = String(status.code?.id ?? "").startsWith("blessed:chat@");
-  const answer = (a) => event.source.postMessage({ fragment: "alerts", nonce: d.nonce, ...a }, origin);
+  const answer = (a) => event.source.postMessage({ fragment: KIND.alerts, nonce: d.nonce, ...a }, origin);
   if (!alertable()) return answer({ state: "unsupported" });
   try {
-    if (d.fragment === "alerts?") {
+    if (d.fragment === KIND.alertsAsk) {
       if (Notification.permission === "denied") return answer({ state: "denied" });
       const on = Notification.permission === "granted" && !!(await (await alertsOf(name))?.pushManager.getSubscription());
       return answer({ state: on ? "on" : "off" });
@@ -678,7 +679,7 @@ async function dropAlerts() {
 // with `?chat=`, at the page's start)
 navigator.serviceWorker?.addEventListener("message", (event) => {
   const d = event.data;
-  if (d?.fragment === "open-chat" && typeof d.name === "string" && byName(d.name)?.kind === "chat") {
+  if (d?.fragment === KIND.openChat && typeof d.name === "string" && byName(d.name)?.kind === "chat") {
     openChat(d.name);
     leaveSidebar();
   }
@@ -1156,7 +1157,7 @@ async function setArchived(name, archived) {
     notice(archived ? "It was not archived" : "It was not unarchived", e.message);
   }
 }
-// A frame asks for a page as a window (`{fragment: "open", url}`): a file of
+// A frame asks for a page as a window (`{fragment: KIND.open, url}`): a file of
 // its own origin (a fragment's file viewer) opens as a file's window; a page
 // of another fragment of this deployment (a link in a chat: "Open"), as that
 // fragment's window beside the chat, signed in by the mint as its row's is.
@@ -1164,7 +1165,7 @@ async function setArchived(name, archived) {
 // whether it is a fragment's (`fragmentAt`).
 addEventListener("message", async (e) => {
   const ask = e.data;
-  if (ask?.fragment !== "open" || typeof ask.url !== "string") return;
+  if (ask?.fragment !== KIND.open || typeof ask.url !== "string") return;
   const from = [...document.querySelectorAll("iframe")].find((f) => f.contentWindow === e.source);
   if (!from) return;
   let url;
@@ -1226,7 +1227,7 @@ async function openScreen(agent) {
 }
 // Whose screen it is, by the agent's name as the person's list says it now
 // (its fragment's title): its window's, and its page's, told at the port's
-// own origin as it loads and again on a rename (`{fragment: "screen",
+// own origin as it loads and again on a rename (`{fragment: KIND.screen,
 // agent, name}`; docs/computers.md, Ports). Its computer knows the agent by
 // its label alone, which is no name.
 function nameScreen(frame) {
@@ -1235,7 +1236,7 @@ function nameScreen(frame) {
   const title = frame.closest(".pane")?.querySelector(".pane-title");
   if (title) title.textContent = titleOf(agent);
   try {
-    frame.contentWindow?.postMessage({ fragment: "screen", agent, name: titleOf(agent) }, new URL(frame.dataset.src).origin);
+    frame.contentWindow?.postMessage({ fragment: KIND.screen, agent, name: titleOf(agent) }, new URL(frame.dataset.src).origin);
   } catch {}
 }
 
@@ -1419,7 +1420,7 @@ async function promptChat() {
 // made): chat -> text.
 const composing = new Map();
 // Puts `text` in the composer of the person's chat and focuses it, sending
-// nothing: `{fragment: "compose", text}` to its frame, at its fragment's
+// nothing: `{fragment: KIND.compose, text}` to its frame, at its fragment's
 // origin (docs/api.md, The shell). On a phone the desktop's sheet goes, so
 // the composer is what shows.
 async function composeApp(text) {
@@ -1442,7 +1443,7 @@ function composeIn(name, text) {
   const frame = state.frames.get(name);
   frame?.focus();
   const origin = frame && rosterTo.get(frame.contentWindow);
-  if (origin) frame.contentWindow.postMessage({ fragment: "compose", text }, origin);
+  if (origin) frame.contentWindow.postMessage({ fragment: KIND.compose, text }, origin);
   else composing.set(name, text);
 }
 
@@ -1545,7 +1546,7 @@ $("apps-link").onclick = () => openApps();
 const historyPage = createHistoryPage($("history-page"), {
   api, el, icon, seg, mark: (name, size) => mark(name, size), chats, isThread: (f) => threads.isPair(f), own, chatTitle: (name) => chatTitle(name),
   agentsOf, agents: () => state.agents, titleOf,
-  archive: { name: () => sessionArchive.archive(), entries: () => sessionArchive.entries(), openSession: (key) => sessionArchive.openSession(key) },
+  archive: { name: () => sessionArchive.archive(), entries: () => sessionArchive.entries(), openSession: (key) => sessionArchive.openSession(key), search: (q) => sessionArchive.search(q) },
   continueControl: (source) => continuing.continueControl(source),
   openChat, leaveSidebar,
 });
@@ -1758,16 +1759,16 @@ const frameOfWindow = (win) => [...state.frames.values()].find((f) => f.contentW
 // written in again (the History page; Paul, 2026-10-31). Their own flag,
 // of the frame's own chat.
 addEventListener("message", (event) => {
-  if (event.data?.fragment !== "said") return;
+  if (event.data?.fragment !== KIND.said) return;
   const name = frameOfWindow(event.source)?.dataset.fragment;
   if (name && byName(name)?.kind === "chat" && byName(name).archived) setArchived(name, false);
 });
 addEventListener("message", (event) => {
   const d = event.data;
-  if (d?.fragment !== "agents?" && d?.fragment !== "busy") return;
+  if (d?.fragment !== KIND.agentsAsk && d?.fragment !== KIND.busy) return;
   const frame = frameOfWindow(event.source);
   if (!frame) return;
-  if (d.fragment === "agents?") {
+  if (d.fragment === KIND.agentsAsk) {
     refresh.greet(frame);
   } else if (d.busy === true) {
     refresh.busy(frame, true);

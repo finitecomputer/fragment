@@ -298,12 +298,15 @@ pub async fn run(cfg: Config, runtimes: Runtimes, stop: watch::Receiver<bool>) -
     // yet, and no SimpleX core runs: `quiet` is false only while one does)
     let claims_in_flight = Arc::new(AtomicUsize::new(0));
     let quiet = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    // the hold as the runtimes see it, and what of theirs it waits on
+    let (held_tx, held_rx) = watch::channel(false);
+    let runtimes_unquiet = Arc::new(AtomicUsize::new(0));
     let answer: String = cfg.left_out.iter().map(|p| format!("{p}\n")).collect();
     // a core a bridge before this one left running is gone before any hold is answered
     if let Some(sc) = &cfg.simplex {
         crate::simplex::run::kill_strays(sc).await;
     }
-    tokio::spawn(answer_holds(cfg.hold.clone(), cfg.held.clone(), answer, claims_in_flight.clone(), quiet.clone(), stop.clone()));
+    tokio::spawn(answer_holds(cfg.hold.clone(), cfg.held.clone(), answer, claims_in_flight.clone(), quiet.clone(), held_tx, runtimes_unquiet.clone(), stop.clone()));
     // SimpleX, when the image names its core: told of the computer at each
     // read; it says which agents' links are bound (`relaying`), whose
     // relayed records alone the engine honors, each with its SimpleX chat
@@ -334,7 +337,7 @@ pub async fn run(cfg: Config, runtimes: Runtimes, stop: watch::Receiver<bool>) -
         let (event_tx, mut event_rx) = mpsc::channel::<Event>(1024);
         let name = runtime.name();
         runs.push(json!({ "serves": serves, "runtime": name }));
-        let task = tokio::spawn(runtime.run(RuntimeIo { commands: cmd_rx, events: event_tx, shutdown: stop.clone() }));
+        let task = tokio::spawn(runtime.run(RuntimeIo { commands: cmd_rx, events: event_tx, shutdown: stop.clone(), held: held_rx.clone(), unquiet: runtimes_unquiet.clone() }));
         runtime_tasks.push(Box::pin(async move { (name, task.await) }));
         to_runtime.insert(serves.clone(), cmd_tx);
         let inbox_tx = inbox_tx.clone();
@@ -520,8 +523,8 @@ fn runtime_result(r: Result<Result<(), crate::runtime::RuntimeError>, tokio::tas
 fn reread(api: &Api, simplex: bool, names: &RuntimeNames, inbox: &mpsc::Sender<Msg>) {
     let (api, names, inbox) = (api.clone(), names.clone(), inbox.clone());
     tokio::spawn(async move {
-        if let Some(c) = ask_once(&api, simplex).await {
-            let (c, _) = with_runtimes(&api, c, &names).await;
+        if let Some(mut c) = ask_once(&api, simplex).await {
+            (c.agents, _) = with_runtimes(&api, c.agents, &names, true).await;
             let _ = inbox.send(Msg::Computer(c)).await;
         }
     });
@@ -529,16 +532,20 @@ fn reread(api: &Api, simplex: bool, names: &RuntimeNames, inbox: &mpsc::Sender<M
 
 /// Each agent's runtime as its `agent.json` named it last (`None`: it names
 /// none), by agent fragment: at most the agents the computer lists.
-type RuntimeNames = Arc<Mutex<HashMap<String, Option<String>>>>;
+pub type RuntimeNames = Arc<Mutex<HashMap<String, Option<String>>>>;
 
 /// The computer's agents, each with the runtime its `agent.json` names
-/// (`runtime::named`; no file names none), read as the computer is: at
-/// start, every minute, and as the ready file changes. One whose file does
-/// not read keeps what it named last; one never read is left out (counted
-/// in the second value), as an agent not ready is, so no turn of it goes to
-/// a runtime it does not name. An agent's runtime changes within a minute.
-async fn with_runtimes(api: &Api, mut c: api::Computer, names: &RuntimeNames) -> (api::Computer, usize) {
-    let reads = c.agents.iter().map(|a| async move { (a.fragment.clone(), api.file(&a.fragment, &a.fragment, "agent.json", api::AGENT_JSON_MAX_BYTES).await) });
+/// (`runtime::named`; no file names none): every agent's file read again
+/// when `again`, else only one never read. The bridge reads them as it
+/// reads the computer (at start, every minute, and as the ready file
+/// changes), and a Hermes image's boot as it reads its agents, which runs
+/// a Hermes profile only for an agent of Hermes'. One whose file does not
+/// read keeps what it named last; one never read is left out (counted in
+/// the second value), as an agent not ready is, so no turn of it goes to a
+/// runtime it does not name. An agent's runtime changes within a minute.
+pub async fn with_runtimes(api: &Api, mut agents: Vec<Agent>, names: &RuntimeNames, again: bool) -> (Vec<Agent>, usize) {
+    let known: Vec<String> = if again { Vec::new() } else { names.lock().expect("runtime names").keys().cloned().collect() };
+    let reads = agents.iter().filter(|a| !known.contains(&a.fragment)).map(|a| async move { (a.fragment.clone(), api.file(&a.fragment, &a.fragment, "agent.json", api::AGENT_JSON_MAX_BYTES).await) });
     let read = futures_util::future::join_all(reads).await;
     let mut named = names.lock().expect("runtime names");
     for (agent, r) in read {
@@ -555,14 +562,14 @@ async fn with_runtimes(api: &Api, mut c: api::Computer, names: &RuntimeNames) ->
         }
         named.insert(agent, now);
     }
-    named.retain(|agent, _| c.agents.iter().any(|a| &a.fragment == agent));
-    let listed = c.agents.len();
-    c.agents.retain(|a| named.contains_key(&a.fragment));
-    for a in &mut c.agents {
+    named.retain(|agent, _| agents.iter().any(|a| &a.fragment == agent));
+    let listed = agents.len();
+    agents.retain(|a| named.contains_key(&a.fragment));
+    for a in &mut agents {
         a.runtime = named[&a.fragment].clone();
     }
-    let unread = listed - c.agents.len();
-    (c, unread)
+    let unread = listed - agents.len();
+    (agents, unread)
 }
 
 async fn ask_once(api: &Api, simplex: bool) -> Option<api::Computer> {
@@ -582,8 +589,9 @@ async fn ask_until(api: &Api, simplex: bool, names: &RuntimeNames, stop: watch::
     let mut backoff = Backoff::default();
     // bounded by the platform's answer, or `stop`
     loop {
-        if let Some(c) = ask_once(api, simplex).await {
-            let (c, unread) = with_runtimes(api, c, names).await;
+        if let Some(mut c) = ask_once(api, simplex).await {
+            let unread;
+            (c.agents, unread) = with_runtimes(api, c.agents, names, true).await;
             if unread == 0 {
                 return Some(c);
             }
@@ -1807,16 +1815,21 @@ async fn cut_note(api: &Api, ts: &TurnStart) -> Option<String> {
 /// looks at the hold before each try, so none starts once it holds), and no
 /// SimpleX core runs (`cores_quiet`: SimpleX stops them all as it sees the
 /// hold, and starts none while it lasts; always true with no SimpleX), and
+/// nothing of a runtime's own runs outside its turns (`runtimes_unquiet`:
+/// each runtime is told the hold, `runtimes_held`, and quiets its own), and
 /// not otherwise. The platform clears `held` before each hold, so an
 /// answer is always to the hold it finds. The answer is `answer`: what the
 /// save may leave out, one per line (none, empty). Looked at every
 /// `HOLD_POLL_MS`, for the bridge's life.
-async fn answer_holds(hold: PathBuf, held: PathBuf, answer: String, in_flight: Arc<AtomicUsize>, cores_quiet: Arc<std::sync::atomic::AtomicBool>, mut stop: watch::Receiver<bool>) {
+#[allow(clippy::too_many_arguments)]
+async fn answer_holds(hold: PathBuf, held: PathBuf, answer: String, in_flight: Arc<AtomicUsize>, cores_quiet: Arc<std::sync::atomic::AtomicBool>, runtimes_held: watch::Sender<bool>, runtimes_unquiet: Arc<AtomicUsize>, mut stop: watch::Receiver<bool>) {
     assert!(hold != held, "a hold and its answer are two files");
     assert!(answer.len() <= limits::HELD_ANSWER_MAX_BYTES, "an answer the platform reads whole");
     // bounded by the bridge's life: one look per `HOLD_POLL_MS`, ended by `stop`
     loop {
-        let quiet = hold.exists() && in_flight.load(Ordering::SeqCst) == 0 && cores_quiet.load(Ordering::SeqCst);
+        let holding = hold.exists();
+        runtimes_held.send_if_modified(|was| std::mem::replace(was, holding) != holding);
+        let quiet = holding && in_flight.load(Ordering::SeqCst) == 0 && cores_quiet.load(Ordering::SeqCst) && runtimes_unquiet.load(Ordering::SeqCst) == 0;
         match (quiet, held.exists()) {
             // written whole, then renamed: the platform never reads half
             (true, false) => match write_whole(&held, answer.as_bytes()) {

@@ -46,7 +46,6 @@
 
 use std::collections::{HashMap, HashSet};
 
-use fragment_core::embed;
 use fragment_core::search_index as engine;
 use fragment_core::searchable as rules;
 use fragment_proto::search as wire;
@@ -212,17 +211,15 @@ impl FragmentCell {
     /// nothing.
     fn search_space(&self) -> Option<wire::Space> {
         let models = &self.cfg.models;
-        models.embeddings_refused().is_none().then(|| {
-            let s = models.embeddings.space();
-            wire::Space { model: s.model.to_string(), dimensions: s.dimensions, version: s.version.map(str::to_string) }
-        })
+        models.embeddings_refused().is_none().then(|| models.embeddings.search_space())
     }
 
     /// `todo`'s vectors, held as an index holds them (by their hashes),
     /// embedded on the deployment's slot, paid by `payer`.
     async fn search_embed(&self, todo: &[&rules::Chunk], payer: &str, agent: Option<&str>, fragment: &InFragment<'_>) -> CellResult<HashMap<String, String>> {
         let mut out = HashMap::new();
-        for batch in todo.chunks(embed::INPUTS_MAX) {
+        // as many a call as the slot's model takes
+        for batch in todo.chunks(self.cfg.models.embeddings.inputs_max) {
             let inputs: Vec<String> = batch.iter().map(|c| c.input.clone()).collect();
             match embedded(&self.env, &inputs, payer, agent, Some(fragment), &self.state).await? {
                 Embedding::Vectors { vectors, .. } => {
@@ -267,7 +264,8 @@ impl FragmentCell {
         let by_owner = who.payer.as_deref() == Some(owner.as_str()) && !acts_for_another;
         let fragment = InFragment { name: &facts.name, owner: &owner, by_owner };
         let space = self.search_space();
-        let chunks = rules::chunked(&up, self.cfg.models.embeddings.max_input_tokens);
+        let slot = &self.cfg.models.embeddings;
+        let chunks = rules::chunked(&up, slot.max_input_tokens, slot.document_prefix.as_deref());
         let mut vectors: HashMap<String, String> = HashMap::new();
         // at most twice: once more, embedding all, when the index lost a
         // vector it said it held (a write in between took it); `cleared`,
@@ -468,7 +466,9 @@ impl FragmentCell {
         let who = by.asker(&owner);
         let Some(payer) = &who.payer else { return Ok(None) };
         let fragment = InFragment { name, owner: &owner, by_owner: payer == &owner };
-        match embedded(&self.env, &[q.to_string()], payer, who.agent.as_deref(), Some(&fragment), &self.state).await? {
+        // after the slot's query prefix, as its chunks after its document prefix
+        let question = self.cfg.models.embeddings.question(q);
+        match embedded(&self.env, &[question], payer, who.agent.as_deref(), Some(&fragment), &self.state).await? {
             Embedding::Vectors { vectors, .. } => Ok(vectors.into_iter().next().map(|v| rules::vector_b64(&v))),
             Embedding::Refused { status, text } => {
                 console_warn!("{}", json!({ "event": "search.query-unembedded", "status": status, "why": text }));
