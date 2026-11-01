@@ -661,7 +661,7 @@ async fn signed_in(cfg: &ClaudeConfig) -> bool {
     matches!(tokio::time::timeout(Duration::from_millis(SIGN_IN_SAYS_MS), c.status()).await, Ok(Ok(s)) if s.success())
 }
 
-/// How a sign-in ended.
+/// How a sign-in ended, or was cut.
 enum SignIn {
     Done,
     /// The turn ends so.
@@ -670,15 +670,43 @@ enum SignIn {
     LetGo,
 }
 
+/// `work`, unless its turn is cut first: a Stop ends it stopped, a let-go
+/// (or the session's end) lets it go; one already waiting wins over `work`
+/// done (`biased`). Only the turn's own messages come meanwhile (the bridge
+/// runs one turn of a chat at a time, and tells a let-go first); any other
+/// is dropped. `work` is dropped with it, and what it held (a login's
+/// process group) with that.
+async fn uncut<T>(turn: &str, rx: &mut mpsc::Receiver<ToSession>, work: impl std::future::Future<Output = T>) -> Result<T, SignIn> {
+    tokio::pin!(work);
+    // bounded by `work`: each pass takes one message
+    loop {
+        tokio::select! {
+            biased;
+            m = rx.recv() => match m {
+                Some(ToSession::Stop(t)) if t == turn => return Err(SignIn::Ended(Outcome::Stopped)),
+                Some(ToSession::Forget(t)) if t == turn => return Err(SignIn::LetGo),
+                None => return Err(SignIn::LetGo),
+                Some(_) => {}
+            },
+            v = &mut work => return Ok(v),
+        }
+    }
+}
+
 /// Before a session's `claude` starts: signed in already, or its person
 /// signs in from the turn's card (`sign_in`). True once signed in; else
-/// the turn ended saying why, or, let go of, saying nothing.
+/// the turn ended saying why, or, let go of, saying nothing. A Stop or a
+/// let-go while it looks is honoured: no session begins.
 async fn ensure_signed_in(cfg: &ClaudeConfig, ts: &TurnStart, rx: &mut mpsc::Receiver<ToSession>, events: &mpsc::Sender<Event>) -> bool {
-    if signed_in(cfg).await {
-        return true;
-    }
-    crate::ev!("claude.signed_out", { "turn": ts.turn });
-    match sign_in(cfg, &ts.turn, rx, events).await {
+    let signed = match uncut(&ts.turn, rx, signed_in(cfg)).await {
+        Ok(true) => return true,
+        Ok(false) => {
+            crate::ev!("claude.signed_out", { "turn": ts.turn });
+            sign_in(cfg, &ts.turn, rx, events).await
+        }
+        Err(cut) => cut,
+    };
+    match signed {
         SignIn::Done => {
             let step = Step { tool: "sign-in".into(), args: "Signed in to Claude".into(), ok: true, excerpt: String::new(), category: Category::Shell, evidence: None };
             let _ = events.send(Event::Step { turn: ts.turn.clone(), step }).await;
@@ -692,6 +720,53 @@ async fn ensure_signed_in(cfg: &ClaudeConfig, ts: &TurnStart, rx: &mut mpsc::Rec
     }
 }
 
+/// What a sign-in's `claude auth login` said on one of its streams (its
+/// first `SAID_MAX_BYTES`), and whether that stream ended.
+#[derive(Default)]
+struct Said {
+    bytes: Vec<u8>,
+    ended: bool,
+}
+
+const SAID_MAX_BYTES: usize = 64 * 1024;
+
+/// A piece of what the login said (`(stream, bytes)`; none once that
+/// stream ended), kept in `said`. False once both streams ended.
+fn heard(said: &mut [Said; 2], piece: Option<(usize, Option<Vec<u8>>)>) -> bool {
+    match piece {
+        Some((i, Some(bytes))) => {
+            let room = SAID_MAX_BYTES.saturating_sub(said[i].bytes.len());
+            said[i].bytes.extend_from_slice(&bytes[..bytes.len().min(room)]);
+            true
+        }
+        Some((i, None)) => {
+            said[i].ended = true;
+            true
+        }
+        None => false,
+    }
+}
+
+/// The sign-in URL one stream said (`said`), once it said all of it: from
+/// `https://` to the whitespace after it, or to the stream's end (`ended`).
+/// A pipe's reads are not its lines (Alex on #920): a URL its bytes so far
+/// end inside is not whole yet.
+fn sign_in_url(said: &[u8], ended: bool) -> Option<String> {
+    let text = String::from_utf8_lossy(said);
+    let rest = &text[text.find("https://")?..];
+    match rest.find(char::is_whitespace) {
+        Some(end) => Some(rest[..end].to_string()),
+        None => ended.then(|| rest.to_string()),
+    }
+}
+
+/// What came of a code.
+enum Came {
+    SignedIn,
+    Invalid,
+    Failed(String),
+}
+
 /// Its person signs Claude Code in from the turn's card (Paul, FIN-353):
 /// `claude auth login`, with no display (so it opens no browser here), says
 /// Anthropic's sign-in URL, which the card links for its person's own
@@ -700,8 +775,9 @@ async fn ensure_signed_in(cfg: &ClaudeConfig, ts: &TurnStart, rx: &mut mpsc::Rec
 /// input. Signed in once it exits and `claude auth status` says so; a code
 /// it calls invalid is asked again, at most `SIGN_IN_TRIES_MAX` times. Its
 /// verifier never leaves the login (PKCE); the code is never logged or
-/// kept. A Stop, a let-go or the card's expiry ends it, its process with
-/// it; a restart ends it too (its next message signs in anew).
+/// kept. A Stop, a let-go or the card's expiry, at any point (`uncut`),
+/// ends it, its process group killed; a restart ends it too (its next
+/// message signs in anew).
 async fn sign_in(cfg: &ClaudeConfig, turn: &str, rx: &mut mpsc::Receiver<ToSession>, events: &mpsc::Sender<Event>) -> SignIn {
     let didnt = |why: String| SignIn::Ended(Outcome::Error(format!("Claude Code didn't sign in: {why}")));
     let mut c = as_person(cfg, &cfg.bin);
@@ -713,32 +789,54 @@ async fn sign_in(cfg: &ClaudeConfig, turn: &str, rx: &mut mpsc::Receiver<ToSessi
     };
     let mut group = Group(child.id());
     let mut stdin = child.stdin.take().expect("piped");
-    // what it says, both streams, as it says it (its prompt ends no line)
-    let (tx, mut said_rx) = mpsc::unbounded_channel::<String>();
-    for stream in [child.stdout.take().map(|s| Box::new(s) as Box<dyn tokio::io::AsyncRead + Send + Unpin>), child.stderr.take().map(|s| Box::new(s) as Box<dyn tokio::io::AsyncRead + Send + Unpin>)].into_iter().flatten() {
+    // what it says on each stream, as it reads (its prompt ends no line)
+    let (tx, mut said_rx) = mpsc::unbounded_channel::<(usize, Option<Vec<u8>>)>();
+    let streams: [Option<Box<dyn tokio::io::AsyncRead + Send + Unpin>>; 2] = [child.stdout.take().map(|s| Box::new(s) as _), child.stderr.take().map(|s| Box::new(s) as _)];
+    for (i, stream) in streams.into_iter().enumerate() {
+        let Some(mut stream) = stream else { continue };
         let tx = tx.clone();
         tokio::spawn(async move {
-            let mut stream = stream;
             let mut buf = [0u8; 1024];
             // bounded by the process: ends with its output
-            while let Ok(n) = stream.read(&mut buf).await {
-                if n == 0 || tx.send(String::from_utf8_lossy(&buf[..n]).into_owned()).is_err() {
-                    return;
+            loop {
+                match stream.read(&mut buf).await {
+                    Ok(n) if n > 0 => {
+                        if tx.send((i, Some(buf[..n].to_vec()))).is_err() {
+                            return;
+                        }
+                    }
+                    _ => {
+                        let _ = tx.send((i, None));
+                        return;
+                    }
                 }
             }
         });
     }
     drop(tx);
-    let mut said = String::new();
-    // its URL, as it says it
-    let url = loop {
-        if let Some(u) = said.split_whitespace().find(|w| w.starts_with("https://")) {
-            break u.to_string();
+    let mut said = [Said::default(), Said::default()];
+    // its URL, once it said all of it
+    let url = uncut(turn, rx, async {
+        let deadline = tokio::time::sleep(Duration::from_millis(SIGN_IN_SAYS_MS));
+        tokio::pin!(deadline);
+        // bounded by `SIGN_IN_SAYS_MS`: one piece of its output per pass
+        loop {
+            if let Some(url) = said.iter().find_map(|s| sign_in_url(&s.bytes, s.ended)) {
+                return Some(url);
+            }
+            tokio::select! {
+                piece = said_rx.recv() => if !heard(&mut said, piece) {
+                    return None;
+                },
+                _ = &mut deadline => return None,
+            }
         }
-        match tokio::time::timeout(Duration::from_millis(SIGN_IN_SAYS_MS), said_rx.recv()).await {
-            Ok(Some(more)) if said.len() < 64 * 1024 => said.push_str(&more),
-            _ => return didnt("it said no sign-in to open".into()),
-        }
+    })
+    .await;
+    let url = match url {
+        Ok(Some(url)) => url,
+        Ok(None) => return didnt("it said no sign-in to open".into()),
+        Err(cut) => return cut,
     };
     crate::ev!("claude.sign_in", { "turn": turn });
     for attempt in 1..=SIGN_IN_TRIES_MAX {
@@ -759,43 +857,49 @@ async fn sign_in(cfg: &ClaudeConfig, turn: &str, rx: &mut mpsc::Receiver<ToSessi
                 Some(_) => {}
             }
         };
-        said.clear();
+        for s in &mut said {
+            s.bytes.clear();
+        }
         let line = format!("{}\n", code.trim());
         if stdin.write_all(line.as_bytes()).await.is_err() || stdin.flush().await.is_err() {
             return didnt("it stopped before the code".into());
         }
-        // what came of it: it exits signed in, or calls the code invalid
-        let deadline = tokio::time::sleep(Duration::from_millis(SIGN_IN_SAYS_MS));
-        tokio::pin!(deadline);
-        // bounded by `SIGN_IN_SAYS_MS`: one piece of its output per pass
-        let mut saying = true;
-        loop {
-            tokio::select! {
-                status = child.wait() => {
-                    group.0 = None;
-                    let ok = status.is_ok_and(|s| s.success());
-                    if ok && signed_in(cfg).await {
-                        crate::ev!("claude.signed_in", { "turn": turn });
-                        return SignIn::Done;
+        // what came of it: it exits (signed in once `claude auth status`
+        // says so), or calls the code invalid
+        let came = uncut(turn, rx, async {
+            let deadline = tokio::time::sleep(Duration::from_millis(SIGN_IN_SAYS_MS));
+            tokio::pin!(deadline);
+            let mut saying = true;
+            // bounded by `SIGN_IN_SAYS_MS`: one piece of its output per pass
+            loop {
+                tokio::select! {
+                    status = child.wait() => {
+                        group.0 = None;
+                        if status.is_ok_and(|s| s.success()) && signed_in(cfg).await {
+                            return Came::SignedIn;
+                        }
+                        let text = said.iter().map(|s| String::from_utf8_lossy(&s.bytes).into_owned()).collect::<Vec<_>>().join("\n");
+                        return Came::Failed(records::cut(text.lines().map(str::trim).rfind(|l| !l.is_empty()).unwrap_or("it ended"), 300));
                     }
-                    let last = said.lines().map(str::trim).rfind(|l| !l.is_empty()).unwrap_or("it ended").to_string();
-                    return didnt(records::cut(&last, 300));
+                    piece = said_rx.recv(), if saying => {
+                        saying = heard(&mut said, piece);
+                        if said.iter().any(|s| String::from_utf8_lossy(&s.bytes).contains("Invalid code")) {
+                            return Came::Invalid;
+                        }
+                    }
+                    _ = &mut deadline => return Came::Failed("it didn't answer the code".into()),
                 }
-                more = said_rx.recv(), if saying => match more {
-                    Some(more) => {
-                        // what it said of this code, its first 64 KiB
-                        if said.len() < 64 * 1024 {
-                            said.push_str(&more);
-                        }
-                        if said.contains("Invalid code") {
-                            crate::ev!("claude.sign_in_invalid", { "turn": turn, "attempt": attempt });
-                            break;
-                        }
-                    }
-                    None => saying = false,
-                },
-                _ = &mut deadline => return didnt("it didn't answer the code".into()),
             }
+        })
+        .await;
+        match came {
+            Ok(Came::SignedIn) => {
+                crate::ev!("claude.signed_in", { "turn": turn });
+                return SignIn::Done;
+            }
+            Ok(Came::Invalid) => crate::ev!("claude.sign_in_invalid", { "turn": turn, "attempt": attempt }),
+            Ok(Came::Failed(why)) => return didnt(why),
+            Err(cut) => return cut,
         }
     }
     SignIn::Ended(Outcome::Error(SIGN_IN_GAVE_UP.into()))
@@ -1288,6 +1392,38 @@ async fn answer(t: &mut Turn, p: &mut Proc, prompt: &str, option: Option<String>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Goal (Alex on #920): the sign-in URL is taken only once it was said
+    /// whole. The real login's words (a prompt with no newline after them),
+    /// split into two reads at every byte (inside the scheme, the path, the
+    /// query, the newline after it): the first read alone yields nothing
+    /// that is not the whole URL, and both yield it. Invalid: a stream that
+    /// ended inside it yields what it said; one that said none, nothing.
+    #[test]
+    fn a_sign_in_url_is_taken_only_once_said_whole() {
+        let url = "https://claude.com/cai/oauth/authorize?code=true&client_id=9d1c250a&response_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&state=4hsN";
+        let said = format!("Opening browser to sign in\u{2026}\nIf the browser didn't open, visit: {url}\nPaste code here if prompted > ");
+        let bytes = said.as_bytes();
+        for at in 0..=bytes.len() {
+            let mut kept = [Said::default(), Said::default()];
+            heard(&mut kept, Some((0, Some(bytes[..at].to_vec()))));
+            let first = sign_in_url(&kept[0].bytes, kept[0].ended);
+            assert!(first.is_none() || first.as_deref() == Some(url), "split at {at}: {first:?}");
+            heard(&mut kept, Some((0, Some(bytes[at..].to_vec()))));
+            assert_eq!(sign_in_url(&kept[0].bytes, kept[0].ended).as_deref(), Some(url), "split at {at}");
+        }
+        // a stream that ended: what it said is all it will
+        let cut = &url[..40];
+        assert_eq!(sign_in_url(cut.as_bytes(), false), None);
+        assert_eq!(sign_in_url(cut.as_bytes(), true).as_deref(), Some(cut));
+        assert_eq!(sign_in_url(b"no sign-in here\n", true), None);
+        // each stream's bytes are its own, at most `SAID_MAX_BYTES`
+        let mut kept = [Said::default(), Said::default()];
+        assert!(heard(&mut kept, Some((1, Some(vec![b'x'; SAID_MAX_BYTES + 10])))));
+        assert!(heard(&mut kept, Some((1, None))));
+        assert_eq!((kept[0].bytes.len(), kept[1].bytes.len(), kept[1].ended), (0, SAID_MAX_BYTES, true));
+        assert!(!heard(&mut kept, None), "both streams ended");
+    }
 
     /// Goal (FIN-258): the agent's folder is ready for its `claude`: an
     /// `AGENTS.md` naming it and the `fragment` CLI, and a `CLAUDE.md` that

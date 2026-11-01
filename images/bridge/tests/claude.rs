@@ -344,7 +344,9 @@ async fn stop_interrupts_the_running_tool() {
     if recording().is_some() {
         support::until(wait(), "the tool to run", || s.work().join("progress.txt").is_file()).await;
     } else {
-        s.fake.until(wait(), "the turn's start", |w| !w.bodies(&s.chat, "work", "turn.start").is_empty()).await;
+        // its tool's call, as Claude Code made it: a Stop before that (in
+        // its sign-in check) ends the turn before Claude Code starts
+        s.fake.until(wait(), "the tool's call", |w| !w.bodies(&s.chat, "work", "turn.call").is_empty()).await;
     }
     s.say(json!({ "kind": "stop", "turn": turn }));
     s.ended(1, "the stopped turn's end").await;
@@ -557,6 +559,66 @@ async fn a_sign_in_ends_with_its_turn_and_the_next_message_asks_anew() {
     assert!(s.replies().is_empty() && !s.config_dir.join(".credentials.json").exists(), "never signed in");
     bridge.stop().await;
     s.done();
+}
+
+/// Goal (Alex on #920): a sign-in honours a Stop wherever it waits: before
+/// its login says the URL, during a code's exchange, and during the check
+/// that it signed in (fake-claude slowed there). Each time the turn ends
+/// stopped, no login is left running, and Claude Code is never given what
+/// the stopped turn asked: the next message is the first it hears, once
+/// signed in (again, unless the stopped exchange had finished).
+#[tokio::test]
+async fn a_stop_anywhere_in_a_sign_in_ends_it_and_no_session_begins() {
+    let drain = Duration::from_millis(fragment_bridge::runtime::claude::DRAIN_MS_DEFAULT);
+    for (name, slow) in [("sign-in-stop-url", "login_url_after_ms"), ("sign-in-stop-exchange", "login_exchange_ms"), ("sign-in-stop-status", "status_signed_in_ms")] {
+        let s = Scenario::open(name, Path::new(COMPOSED).join("install"), None, support::settings(), drain).await;
+        let config = s.bin.with_file_name("fake-claude.json");
+        let mut mode: Value = serde_json::from_slice(&std::fs::read(&config).expect("its mode")).expect("JSON");
+        mode[slow] = json!(2_000);
+        std::fs::write(&config, mode.to_string()).expect("its mode");
+        let (bridge, base) = s.start_signed_out(None);
+        s.following().await;
+        let said = s.say(json!({ "text": "Hello" }));
+        let turn = fragment_bridge::records::turn_id("juniper--k3x9", &s.chat, "chat", said["seq"].as_u64().expect("a seq"));
+        let mut cards = 0;
+        match slow {
+            "login_url_after_ms" => support::until(wait(), "its login, before its URL", || logging_in(&s.bin) == 1).await,
+            _ => {
+                let card = s.sign_in_card(1).await;
+                cards = 1;
+                assert_eq!(s.code(&base, &card, SIGN_IN_CODE).await.0, 200);
+                // the code in its login (given it once its card's closure
+                // posted), then signed in there for the status check's
+                let took = || if slow == "login_exchange_ms" { s.bin.with_file_name("login-took-a-code").is_file() } else { s.config_dir.join(".credentials.json").is_file() };
+                support::until(wait(), "its login to take the code", took).await;
+            }
+        }
+        s.say(json!({ "kind": "stop", "turn": turn }));
+        s.ended(1, "the stopped turn's end").await;
+        assert_eq!(s.ends()[0]["outcome"], "stopped", "{slow}: {:?}", s.ends());
+        support::until(10_000, "no login left", || logging_in(&s.bin) == 0).await;
+
+        // the next message is the first Claude Code hears
+        s.say(json!({ "text": "Again" }));
+        if slow != "status_signed_in_ms" {
+            let card = s.sign_in_card(cards + 1).await;
+            assert_ne!(card["turn"], json!(turn));
+            assert_eq!(s.code(&base, &card, SIGN_IN_CODE).await.0, 200);
+        }
+        s.ended(2, "the next turn's end").await;
+        let heard = s.heard();
+        assert!(heard.len() == 1 && heard[0].contains("Again") && !heard[0].contains("Hello"), "{slow}: Claude Code heard {heard:?}");
+        assert_eq!(s.replies().len(), 1, "{slow}: one answer, the next message's");
+        bridge.stop().await;
+        s.done();
+    }
+}
+
+/// How many of this scenario's `claude auth login`s run now.
+fn logging_in(bin: &Path) -> usize {
+    let mut login = bin.as_os_str().as_encoded_bytes().to_vec();
+    login.extend_from_slice(b"\0auth\0login\0");
+    std::fs::read_dir("/proc").map(|d| d.filter_map(Result::ok).filter_map(|e| std::fs::read(e.path().join("cmdline")).ok()).filter(|c| *c == login).count()).unwrap_or(0)
 }
 
 /// How many of this scenario's `claude` processes run now (Linux's /proc).

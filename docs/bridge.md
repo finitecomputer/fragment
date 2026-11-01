@@ -423,8 +423,11 @@ reaches it (`withheld`).
   above, "An answer for the computer"), never a record or a log line,
   and into the login's input. Signed in, the turn says so and goes on to
   what was asked. A code the login calls invalid is asked again on a new
-  card, at most `SIGN_IN_TRIES_MAX` times; a Stop, or the card expiring,
-  ends the turn, its login with it. The login's verifier lives only in
+  card, at most `SIGN_IN_TRIES_MAX` times. A Stop or a let-go wherever it
+  waits (its status checks, the URL, the code's exchange), or the card
+  expiring, ends the turn, its login with it, and no session begins; the
+  URL is taken only once said whole (a pipe's reads are not its lines).
+  The login's verifier lives only in
   its process (PKCE), so a sign-in never outlives its turn: after a sleep
   or a restart its card's code is refused, saying so, and the next
   message asks anew.

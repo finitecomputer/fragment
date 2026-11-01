@@ -33,7 +33,8 @@
 //!
 //! `claude auth status` and `claude auth login` are as the real ones with
 //! no display: signed in, unless its config says `"signed_out": true` and
-//! no sign-in took `SIGN_IN_CODE` yet.
+//! no sign-in took `SIGN_IN_CODE` yet. Its config may slow them
+//! (`login_url_after_ms`, `login_exchange_ms`, `status_signed_in_ms`).
 
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
@@ -59,10 +60,13 @@ fn main() {
         let signed_in = cfg["signed_out"] != true || creds.is_file();
         match args.get(1).map(String::as_str) {
             Some("status") => {
+                if signed_in {
+                    pause(&cfg, "status_signed_in_ms");
+                }
                 println!("{}", serde_json::json!({ "loggedIn": signed_in, "authMethod": if signed_in { "claude.ai" } else { "none" } }));
                 std::process::exit(if signed_in { 0 } else { 1 });
             }
-            Some("login") => auth_login(&creds),
+            Some("login") => auth_login(&cfg, &creds),
             other => panic!("fake-claude: no auth {other:?}"),
         }
     }
@@ -74,6 +78,14 @@ fn main() {
     }
 }
 
+/// A pause its config asks for (`key`, in milliseconds): a slow step of the
+/// real one's, for the bridge's tests to cut it in.
+fn pause(cfg: &serde_json::Value, key: &str) {
+    if let Some(ms) = cfg[key].as_u64() {
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+    }
+}
+
 /// The code its sign-in takes (the stub image's, and the tests'): any other
 /// is invalid, as a mistyped one is.
 pub const SIGN_IN_CODE: &str = "the-right-code";
@@ -81,21 +93,31 @@ pub const SIGN_IN_CODE: &str = "the-right-code";
 /// `claude auth login` as the real one runs with no display: it says its
 /// URL and waits for a pasted code (no newline after its prompt), takes
 /// `SIGN_IN_CODE` (its credentials written, then it exits), and says any
-/// other is invalid and asks again. Its input closed, it waits on (only a
-/// kill ends it: the bridge's tests see that it was killed).
-fn auth_login(creds: &Path) -> ! {
+/// other is invalid and asks again. Its URL comes in two writes, apart, as
+/// a pipe may deliver it. Its input closed, it waits on (only a kill ends
+/// it: the bridge's tests see that it was killed). Slow where its config
+/// says (`pause`): before its URL, and in a code's exchange. Each code it
+/// reads, it marks (`login-took-a-code` beside it; never the code).
+fn auth_login(cfg: &serde_json::Value, creds: &Path) -> ! {
     let mut stdout = std::io::stdout();
     let prompt = |out: &mut std::io::Stdout| {
         write!(out, "Paste code here if prompted > ").expect("written");
         out.flush().expect("flushed");
     };
+    pause(cfg, "login_url_after_ms");
     writeln!(stdout, "Opening browser to sign in…").expect("written");
-    writeln!(stdout, "If the browser didn't open, visit: https://claude.com/cai/oauth/authorize?code=true&client_id=fake&response_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&state=fake").expect("written");
+    write!(stdout, "If the browser didn't open, visit: https://claude.com/cai/oauth/authorize?code=true&client_id=fa").expect("written");
+    stdout.flush().expect("flushed");
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    writeln!(stdout, "ke&response_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&state=fake").expect("written");
     prompt(&mut stdout);
     // bounded by its input: one code per pass
     for line in std::io::stdin().lock().lines() {
         let Ok(code) = line else { break };
+        let exe = std::env::current_exe().and_then(std::fs::canonicalize).expect("its own path");
+        std::fs::write(exe.with_file_name("login-took-a-code"), b"").expect("its mark");
         if code.trim() == SIGN_IN_CODE {
+            pause(cfg, "login_exchange_ms");
             std::fs::create_dir_all(creds.parent().expect("a config dir")).expect("its config dir");
             std::fs::write(creds, b"{}").expect("its credentials");
             writeln!(stdout, "\nLogin successful.").expect("written");
