@@ -4,6 +4,7 @@
 //! report it writes hold aggregates only; per-question detail, which names
 //! the corpus's pages, stays in the work directory beside the indexes.
 
+mod across;
 mod corpus;
 mod decoy;
 mod embed;
@@ -34,7 +35,10 @@ const USAGE: &str = "usage:
   search-bench embed --corpus <dir> --work <dir> --embeddings-url <url> --embeddings-model <name>
   search-bench run --corpus <dir> --questions <file.jsonl> --work <dir>
       (--embeddings-url <url> --embeddings-model <name> [--query-prefix <text>] | --hashed-embeddings <dims>)
-      [--runs <n>] [--decoys <n>] [--report <file.json>]";
+      [--runs <n>] [--decoys <n>] [--report <file.json>]
+  search-bench across --corpus <dir> --questions <file.jsonl> --work <dir>
+      (--embeddings-url <url> --embeddings-model <name> [--query-prefix <text>] | --hashed-embeddings <dims>)
+      [--window <tokens>] [--document-prefix <text>] [--report <file.json>]";
 
 struct Args(HashMap<String, String>);
 
@@ -84,6 +88,7 @@ fn main() {
     let result = match argv.first().map(String::as_str) {
         Some("embed") => Args::parse(&argv[1..]).and_then(|a| embed_corpus(&a)),
         Some("run") => Args::parse(&argv[1..]).and_then(|a| run(&a).map(|report| print!("{}", report.render()))),
+        Some("across") => Args::parse(&argv[1..]).and_then(|a| gate(&a).map(|report| print!("{report}"))),
         _ => Err(USAGE.to_owned()),
     };
     if let Err(e) = result {
@@ -603,6 +608,120 @@ impl Report {
     }
 }
 
+/// The quality gate's bar (FIN-238, decision 5): the federated answer's
+/// nDCG@10 within this share of the union index's.
+const GATE_SHARE: f64 = 0.95;
+
+/// FIN-238's quality gate (src/across.rs): the corpus cut by wiki, each
+/// searched as a fragment's index, merged as the route merges, against one
+/// index over the whole corpus and Finite Brain's hybrid. Prints and
+/// writes aggregates; each question's top pages go to the work directory
+/// (`across-details.jsonl`), the pool to judge.
+fn gate(args: &Args) -> Result<String, String> {
+    let work = args.work()?;
+    let window: u32 = args.get("window").unwrap_or("8192").parse().map_err(|_| "--window: a token count")?;
+    let prefix = args.get("document-prefix");
+    let (pages, _) = load(&args.path("corpus")?)?;
+    let questions = questions(&args.path("questions")?, &pages)?;
+    let mut embeddings = Embeddings::open(args.embedder()?, &work)?;
+    let cuts = across::cut(&pages, window, prefix);
+    let chunks: Vec<&fragment_core::searchable::Chunk> = cuts.iter().flat_map(|c| c.chunks.iter().map(|(_, ch, _, _)| ch)).collect();
+    eprintln!("{} pages, {} chunks, {} questions", pages.len(), chunks.len(), questions.len());
+    let inputs: Vec<String> = chunks.iter().map(|c| c.input.clone()).collect();
+    let vectors = embeddings.documents(&inputs, true)?;
+    let vector_of: HashMap<String, Vec<f32>> = chunks.iter().map(|c| c.hash.clone()).zip(vectors).collect();
+    let dims = embeddings.dims;
+    let dir = work.join("across");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    eprintln!("building the indexes");
+    let union = across::Index::build(&dir.join("union.sqlite3"), &cuts.iter().collect::<Vec<_>>(), &vector_of, dims)?;
+    let mut by_wiki: BTreeMap<&str, Vec<&across::Cut>> = BTreeMap::new();
+    for ((page, _), cut) in pages.iter().zip(&cuts) {
+        by_wiki.entry(across::wiki_of(&page.path)).or_default().push(cut);
+    }
+    let fragments: Vec<across::Index> = by_wiki
+        .values()
+        .enumerate()
+        .map(|(i, cuts)| across::Index::build(&dir.join(format!("wiki-{i}.sqlite3")), cuts, &vector_of, dims))
+        .collect::<Result<_, _>>()?;
+    // Finite Brain's hybrid: its lexical search over sections, fused with an
+    // exact float32 scan (a section by its best chunk)
+    let _ = std::fs::remove_file(dir.join("fbrain.sqlite3"));
+    let mut fts = Fts::create(&dir.join("fbrain.sqlite3"), None)?;
+    for (p, s) in &pages {
+        fts.put_page(&p.path, &s.iter().collect::<Vec<_>>())?;
+    }
+    let units: Vec<(&str, Vec<f32>)> = cuts
+        .iter()
+        .flat_map(|c| c.chunks.iter().map(|(section, ch, _, _)| (section.as_str(), fragment_core::search_index::unit(&vector_of[&ch.hash]).unwrap_or_default())))
+        .collect();
+    let nearest = |v: &[f32]| -> Vec<String> {
+        let u = fragment_core::search_index::unit(v).unwrap_or_default();
+        let mut best: HashMap<&str, f32> = HashMap::new();
+        for (section, c) in &units {
+            let d: f32 = c.iter().zip(&u).map(|(a, b)| a * b).sum();
+            let e = best.entry(section).or_insert(f32::NEG_INFINITY);
+            *e = e.max(d);
+        }
+        let mut all: Vec<(&str, f32)> = best.into_iter().collect();
+        all.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+        all.into_iter().take(DEPTH).map(|(s, _)| s.to_string()).collect()
+    };
+    const SYSTEMS: [&str; 3] = ["federated (by wiki, the route's merge)", "union (one index, the shipped engine)", "fbrain hybrid"];
+    eprintln!("searching: {} questions over {} wikis", questions.len(), fragments.len());
+    let mut rankings: Vec<[Vec<String>; 3]> = Vec::new();
+    for q in &questions {
+        let (v, _) = embeddings.query(&q.q)?;
+        let fed = across::federated(&fragments, &q.q, &v, K)?;
+        let uni: Vec<String> = union.search(&q.q, &v, K)?.into_iter().map(|h| h.section).collect();
+        let fb: Vec<String> = sqlite::rrf(&[&fts.fbrain(&q.q, DEPTH)?, &nearest(&v)], RRF_K).into_iter().take(K).collect();
+        rankings.push([fed, uni, fb]);
+    }
+    let answerable: Vec<usize> = (0..questions.len()).filter(|&i| questions[i].relevant.values().any(|&g| g > 0)).collect();
+    let score = |s: usize, f: fn(&[String], &Judgments, usize) -> f64, which: &dyn Fn(usize) -> bool| {
+        metrics::mean(&answerable.iter().filter(|&&i| which(i)).map(|&i| f(&rankings[i][s], &questions[i].relevant, K)).collect::<Vec<_>>())
+    };
+    let mut kinds: BTreeMap<String, usize> = BTreeMap::new();
+    for &i in &answerable {
+        *kinds.entry(questions[i].kind.clone()).or_default() += 1;
+    }
+    let systems: Vec<serde_json::Value> = (0..3)
+        .map(|s| {
+            let by_kind: BTreeMap<&String, f64> = kinds.keys().map(|k| (k, score(s, metrics::ndcg, &|i| &questions[i].kind == k))).collect();
+            serde_json::json!({
+                "system": SYSTEMS[s],
+                "ndcg_at_10": score(s, metrics::ndcg, &|_| true),
+                "recall_at_10": score(s, metrics::recall, &|_| true),
+                "success_at_10": score(s, metrics::success, &|_| true),
+                "ndcg_by_kind": by_kind,
+            })
+        })
+        .collect();
+    let ndcg = |s: usize| systems[s]["ndcg_at_10"].as_f64().unwrap_or(0.0);
+    let passed = ndcg(0) >= GATE_SHARE * ndcg(1) && ndcg(0) >= ndcg(2);
+    let mut sizes: Vec<usize> = fragments.iter().map(across::Index::chunks).collect();
+    sizes.sort_unstable();
+    let report = serde_json::json!({
+        "model": embeddings.embedder.id(), "dimensions": dims, "window": window, "document_prefix": prefix,
+        "pages": pages.len(), "chunks": union.chunks(), "wikis": fragments.len(), "wiki_chunks_sorted": sizes,
+        "questions": questions.len(), "answerable": answerable.len(), "answerable_by_kind": kinds,
+        "systems": systems,
+        "gate": { "federated_over_union": ndcg(0) / ndcg(1).max(f64::MIN_POSITIVE), "bar": GATE_SHARE, "federated_minus_fbrain": ndcg(0) - ndcg(2), "passed": passed },
+    });
+    // each question's top pages by system: names the corpus's pages, so it stays in the work directory
+    let mut details = String::new();
+    for (q, r) in questions.iter().zip(&rankings) {
+        let pages = |ids: &[String]| ids.iter().map(|id| id.rsplit_once('#').map_or(id.as_str(), |(p, _)| p).to_string()).collect::<Vec<_>>();
+        details.push_str(&serde_json::json!({ "id": q.id, "federated": pages(&r[0]), "union": pages(&r[1]), "fbrain": pages(&r[2]) }).to_string());
+        details.push('\n');
+    }
+    std::fs::write(work.join("across-details.jsonl"), details).map_err(|e| e.to_string())?;
+    if let Some(path) = args.get("report") {
+        std::fs::write(path, serde_json::to_string_pretty(&report).unwrap()).map_err(|e| format!("{path}: {e}"))?;
+    }
+    Ok(format!("{}\n", serde_json::to_string_pretty(&report).unwrap()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -636,6 +755,50 @@ mod tests {
             assert!(f.lexical_visible && f.semantic_visible && f.lexical_gone && f.semantic_gone, "{}", f.engine);
         }
         assert!(report.render().contains("| LanceDB hybrid"));
+        std::fs::remove_dir_all(&work).unwrap();
+    }
+
+    /// The quality gate on the synthetic fixtures, on hashed vectors: the
+    /// corpus cut by its folders, every system scored, the verdict written;
+    /// and one fragment holding the whole corpus answers, merged, nearly as
+    /// the union index does: the same first hit, and eight of its ten. (The
+    /// merge places a hit among the asked hits, `asked_limit`, not among
+    /// every hit its legs found, so the order below the first may move.)
+    #[test]
+    fn across_gate_end_to_end() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/synthetic");
+        let work = std::env::temp_dir().join(format!("search-bench-across-{}", std::process::id()));
+        let report_path = work.join("report.json");
+        std::fs::create_dir_all(&work).unwrap();
+        let args = Args(
+            [("corpus", root.join("corpus")), ("questions", root.join("questions.jsonl")), ("work", work.clone()), ("report", report_path.clone())]
+                .into_iter()
+                .map(|(k, v)| (k.to_owned(), v.to_string_lossy().into_owned()))
+                .chain([("hashed-embeddings".to_owned(), "64".to_owned()), ("document-prefix".to_owned(), "search_document: ".to_owned())])
+                .collect(),
+        );
+        gate(&args).unwrap();
+        let report: serde_json::Value = serde_json::from_slice(&std::fs::read(&report_path).unwrap()).unwrap();
+        assert_eq!((report["pages"].as_u64(), report["wikis"].as_u64(), report["answerable"].as_u64()), (Some(18), Some(8), Some(11)));
+        assert_eq!(report["systems"].as_array().map(Vec::len), Some(3));
+        assert!(report["gate"]["passed"].is_boolean());
+
+        let (pages, _) = load(&root.join("corpus")).unwrap();
+        let mut embeddings = Embeddings::open(Embedder::Hashed { dims: 64 }, &work).unwrap();
+        let cuts = across::cut(&pages, 8192, None);
+        let chunks: Vec<&fragment_core::searchable::Chunk> = cuts.iter().flat_map(|c| c.chunks.iter().map(|(_, ch, _, _)| ch)).collect();
+        let vectors = embeddings.documents(&chunks.iter().map(|c| c.input.clone()).collect::<Vec<_>>(), false).unwrap();
+        let vector_of: HashMap<String, Vec<f32>> = chunks.iter().map(|c| c.hash.clone()).zip(vectors).collect();
+        let all: Vec<&across::Cut> = cuts.iter().collect();
+        let union = across::Index::build(&work.join("one-union.sqlite3"), &all, &vector_of, 64).unwrap();
+        let one = [across::Index::build(&work.join("one-fragment.sqlite3"), &all, &vector_of, 64).unwrap()];
+        for q in questions(&root.join("questions.jsonl"), &pages).unwrap() {
+            let (v, _) = embeddings.query(&q.q).unwrap();
+            let alone: Vec<String> = union.search(&q.q, &v, K).unwrap().into_iter().map(|h| h.section).collect();
+            let merged = across::federated(&one, &q.q, &v, K).unwrap();
+            assert_eq!(merged.first(), alone.first(), "{}", q.id);
+            assert!(merged.iter().filter(|s| alone.contains(s)).count() >= 8, "{}: {merged:?} vs {alone:?}", q.id);
+        }
         std::fs::remove_dir_all(&work).unwrap();
     }
 
