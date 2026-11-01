@@ -389,6 +389,13 @@ reaches it (`withheld`).
   may or may not have run (recorded with Haiku 5.5: it found the call
   still running and waited, never running it again).
 - **Its menu:** `new` (the chat's next session) and `stop`.
+- **Under a hold** (a save's), a session's idle `claude` stops before the
+  bridge answers it, so nothing of Claude Code's own (its background
+  update, among others) writes under `/data` while the save copies it. A
+  turn running at the hold runs on, as a Hermes turn does, its process
+  stopped as it ends; the next turn resumes the session. Each runtime is
+  told the hold (`RuntimeIo::held`) and counts what of its own the answer
+  waits on (`RuntimeIo::unquiet`).
 
 ## Hermes' Relay
 
