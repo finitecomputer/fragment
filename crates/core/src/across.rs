@@ -93,14 +93,22 @@ pub fn reached(status: u16, mut answer: Value, space: Option<&wire::Space>) -> R
             let named = serde_json::from_value::<wire::Space>(answer["space"].clone()).ok();
             let cosines = space.is_some_and(|s| named.as_ref() == Some(s)) && answer["scheme"] == wire::SCHEME;
             let hits = answer.get_mut("results").and_then(Value::as_array_mut).map(std::mem::take).unwrap_or_default();
-            // another release's, or none: its hits interleave by their own ranks
-            let words = answer.get_mut("words").map(Value::take).and_then(|w| serde_json::from_value(w).ok());
-            Reply { state: Reached::Searched, message: None, hits, cosines, words }
+            Reply { state: Reached::Searched, message: None, hits, cosines, words: word_stats(&answer["words"]) }
         }
         401 | 403 => none(Reached::Denied, message),
         404 => none(Reached::Missing, message),
         _ => none(Reached::Failed, Some(message.unwrap_or_else(|| format!("it answered {status}")))),
     }
+}
+
+/// What an answer says its index knows of the question's words: none if
+/// it says nothing (another release's) or not in that shape, so its hits
+/// interleave by their own ranks. Read by hand, not by serde: the cell's
+/// Wasm is budgeted.
+fn word_stats(w: &Value) -> Option<wire::WordStats> {
+    let words = w["words"].as_array()?.iter().map(|w| w.as_str().map(str::to_string)).collect::<Option<_>>()?;
+    let with = w["with"].as_array()?.iter().map(Value::as_u64).collect::<Option<_>>()?;
+    Some(wire::WordStats { words, chunks: w["chunks"].as_u64()?, with })
 }
 
 /// What the merge reads of a hit (fragment_proto::search::Hit): its rank

@@ -849,7 +849,7 @@ impl Parts {
         let stats = if a.words && !words.is_empty() { Some(self.word_stats(words)?) } else { None };
         let scores = match &stats {
             Some(s) => self.word_scores(&fused, &s.words)?,
-            None => HashMap::new(),
+            None => vec![],
         };
         Ok(Answer { results: self.shown(&fused, &a.q, &scores)?, semantic: semantic.is_some(), words: stats })
     }
@@ -868,9 +868,10 @@ impl Parts {
     /// The chunk of each section the words leg found (`Fused::chunk`, its
     /// best), its score for each of `words`: FTS5's BM25 of the word alone
     /// (0: not in it), which the question's sums.
-    fn word_scores(&self, fused: &[Fused], words: &[String]) -> CellResult<HashMap<i64, Vec<f64>>> {
+    fn word_scores(&self, fused: &[Fused], words: &[String]) -> CellResult<Vec<(i64, Vec<f64>)>> {
         let by_words: Vec<i64> = fused.iter().filter(|f| f.lexical.is_some()).map(|f| f.chunk).collect();
-        let mut scores: HashMap<i64, Vec<f64>> = by_words.iter().map(|&c| (c, vec![0.0; words.len()])).collect();
+        // at most `RESULTS_MAX`: a look along is cheaper than a map's code
+        let mut scores: Vec<(i64, Vec<f64>)> = by_words.iter().map(|&c| (c, vec![0.0; words.len()])).collect();
         for (i, w) in words.iter().enumerate() {
             for part in by_words.chunks(BINDS_MAX - 1) {
                 let marks = vec!["?"; part.len()].join(", ");
@@ -878,7 +879,7 @@ impl Parts {
                 let binds: Vec<SqlStorageValue> = std::iter::once(text(&engine::phrase(w))).chain(part.iter().map(|&c| SqlStorageValue::Integer(c))).collect();
                 for row in self.sql.exec(&q, binds)?.raw() {
                     if let [SqlStorageValue::Integer(chunk), score] = row?.as_slice() {
-                        if let Some(s) = scores.get_mut(chunk) {
+                        if let Some((_, s)) = scores.iter_mut().find(|(c, _)| c == chunk) {
                             s[i] = bm25(score)?;
                         }
                     }
@@ -890,7 +891,7 @@ impl Parts {
 
     /// Each fused section as a hit, shown by its chunk, with its `words`
     /// scores if the words leg found it.
-    fn shown(&self, fused: &[Fused], q: &str, words: &HashMap<i64, Vec<f64>>) -> CellResult<Vec<wire::Hit>> {
+    fn shown(&self, fused: &[Fused], q: &str, words: &[(i64, Vec<f64>)]) -> CellResult<Vec<wire::Hit>> {
         if fused.is_empty() {
             return Ok(vec![]);
         }
@@ -924,7 +925,7 @@ impl Parts {
                 signals: [f.lexical.map(|_| "lexical"), f.semantic.map(|_| "semantic")].into_iter().flatten().map(str::to_string).collect(),
                 lexical: f.lexical.map(|p| wire::Lexical { rank: p.rank, bm25: p.score }),
                 semantic: f.semantic.map(|p| wire::Semantic { rank: p.rank, cosine: p.score }),
-                words: f.lexical.and_then(|_| words.get(&f.chunk).cloned()),
+                words: f.lexical.and_then(|_| words.iter().find(|(c, _)| *c == f.chunk)).map(|(_, s)| s.clone()),
             })
             .collect())
     }
