@@ -39,6 +39,20 @@ impl FragmentCell {
         Ok(self.count("SELECT COUNT(*) AS n FROM secrets")? > 0 || self.meta(MetaKey::DoorActor)?.is_some() || self.meta(MetaKey::Door)?.is_some())
     }
 
+    /// Its owner's row told its reach, once: a fragment from before
+    /// `Sharing.reach` (its rows sent without it) sends its row again on
+    /// its first request after the release, so a key or a door set then
+    /// shows (the census, touching each, brings every row current).
+    pub(crate) fn reach_told(&self) -> CellResult<()> {
+        if self.meta(MetaKey::ReachTold)?.is_some() || self.meta(MetaKey::Owner)?.is_none() {
+            return Ok(());
+        }
+        if self.reaches()? {
+            self.sharing_changed()?;
+        }
+        self.set_meta(MetaKey::ReachTold, "1")
+    }
+
     /// Sharing it further, refused while it has reach.
     pub(crate) fn share_while_private(&self) -> CellResult<()> {
         match self.reaches()? {

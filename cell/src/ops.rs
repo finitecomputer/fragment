@@ -597,7 +597,8 @@ impl FragmentCell {
                 for host in body["hosts"].as_array().into_iter().flatten().filter_map(Value::as_str) {
                     self.exec("INSERT OR IGNORE INTO secret_hosts (name, host) VALUES (?, ?)", vec![name.into(), host.into()])?;
                 }
-                self.sharing_changed()?;
+                // its owner's row never told (that release sent no `reach`)
+                self.del_meta(MetaKey::ReachTold)?;
                 json!({ "reach": self.reaches()? })
             }
             Some("members") => {

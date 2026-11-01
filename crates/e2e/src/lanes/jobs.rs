@@ -457,10 +457,13 @@ pub fn jobs(s: &mut Suite, api: &Api) -> Result<()> {
     );
 
     // the CLI
+    // the CLI as its owner: a fragment holding a key takes no one else in
+    // (FIN-352), so no other person's CLI
     let home = s.dir("jobs-cli");
-    s.login(api, &home);
-    let cli = s.cli_keys(&home).expect("the CLI logged in");
-    api.share(&name, cli.pubkey_hex(), "editor")?;
+    let config = home.join(if cfg!(target_os = "macos") { "Library/Application Support" } else { ".config" }).join("fragment");
+    std::fs::create_dir_all(&config)?;
+    std::fs::write(config.join("config.json"), json!({ "secret_key": owner.secret_hex() }).to_string())?;
+    let cli = s.cli_keys(&home).expect("the CLI's key");
     let wrong_id = wrong["id"].as_i64().unwrap_or(0).to_string();
     let r = s.cli_json(api, &home, &["runs", &name, "--status", "held", "--json"])?;
     s.ok("fragment runs --status held lists the held runs", r["runs"].as_array().is_some_and(|a| a.len() == 1 && a[0]["op"] == "wrong"), &r);

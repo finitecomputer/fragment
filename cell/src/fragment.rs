@@ -393,6 +393,8 @@ pub(crate) enum MetaKey {
     /// CONNECTORS`), while it runs no other code: no one but its owner edits
     /// it, and only then may it be a door (doors.rs).
     DoorTemplate,
+    /// Its owner's row was told its reach (`Sharing.reach`, reach.rs).
+    ReachTold,
     /// The next time a page may pre-wake the computers its channels wake.
     PrewakeAt,
     /// Test fleets only: how many more paid AI steps fail just after their
@@ -478,6 +480,7 @@ impl MetaKey {
             MetaKey::DoorActor => "door_actor",
             MetaKey::InboxSecret => "inbox_secret",
             MetaKey::DoorTemplate => "door_template",
+            MetaKey::ReachTold => "reach_told",
             MetaKey::PrewakeAt => "prewake_at",
             MetaKey::TestFailAfterPaid => "test_fail_after_paid",
             MetaKey::TestLoseVideoAnswers => "test_lose_video_answers",
@@ -862,6 +865,11 @@ impl FragmentCell {
         let ends = path.starts_with("/wipe/") || (req.method() == Method::Delete && path == "/delete");
         if !ends {
             self.schema.ready()?;
+            // one from before `Sharing.reach` tells its owner's row once
+            // (reach.rs); a failure here fails no request
+            if let Err(e) = self.reach_told() {
+                worker::console_error!("its owner's row was not told its reach: {}", e.message);
+            }
         }
         if path == "/test/keys" && self.cfg.test_hooks {
             // this cell's own sealing: the e2e checks that what one

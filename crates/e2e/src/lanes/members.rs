@@ -614,7 +614,12 @@ pub fn reach(s: &mut Suite, api: &Api) -> Result<()> {
     anyhow::ensure!(invite(&old, &ivy)?.status == 200, "ivy invited to the old one");
     let lever = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": old, "op": "legacy-reach" })))?;
     anyhow::ensure!(lever.body["reach"] == true, "the legacy-reach lever: {lever}");
+    // its owner's row, sent before the release, says no reach until its
+    // first request after it tells it once
+    let unaware = row(&old)["sharing"].get("reach").is_none();
     let serves = api.status(&bea, &old)?;
+    let told = s.eventually(Duration::from_secs(10), || row(&old)["sharing"]["reach"] == true);
+    s.ok("one from before the release tells its owner's row its reach on its first request after it", unaware && told, json!({ "unaware": unaware, "row": row(&old)["sharing"] }));
     let yes = api.signed(&ivy, "POST", &format!("/api/invites/{old}/accept"), None)?;
     let further = [visibility(&old, "public")?, invite(&old, &api.person()?)?];
     let key_again = put_key(&old)?;
