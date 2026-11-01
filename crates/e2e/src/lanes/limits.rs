@@ -10,6 +10,7 @@ use anyhow::Result;
 use serde_json::{json, Value};
 
 use super::app::ship;
+use super::jobs;
 use crate::api::Api;
 use crate::Suite;
 
@@ -130,6 +131,10 @@ export class App extends DurableObject {
     }
     return { made };
   }
+  // the same calls in a job: a throw the platform code answers as the run's failure
+  async burn_job(input) {
+    return this.burn(input);
+  }
   // `iters` turns of arithmetic in one call: CPU time and no I/O
   spin({ iters }) {
     let x = 0x9e3779b9 | 0;
@@ -138,7 +143,7 @@ export class App extends DurableObject {
   }
 }
 "#;
-const BURN_JSON: &[u8] = br#"{ "name": "burn", "operations": { "burn": { "kind": "query", "role": "viewer" }, "spin": { "kind": "query", "role": "viewer" } } }"#;
+const BURN_JSON: &[u8] = br#"{ "name": "burn", "operations": { "burn": { "kind": "query", "role": "viewer" }, "burn_job": { "kind": "job", "role": "editor" }, "spin": { "kind": "query", "role": "viewer" } } }"#;
 
 /// Calls past the 50 subrequests an app facet was once held to, in one call.
 const ASKED: u64 = 100;
@@ -251,5 +256,46 @@ pub fn capability_cost(s: &mut Suite, api: &Api) -> Result<()> {
     }
     let out = s.dir("capability-cost");
     std::fs::write(out.join("cost.json"), serde_json::to_vec_pretty(&report)?)?;
+    Ok(())
+}
+
+/// A facet that meets a runtime limit is started again
+/// (docs/technical-debt-ledger.md, "An app facet's subrequests are the
+/// account's"). The `facet-calls` lever gives each start of the facet 5
+/// capability calls, refused past them in the runtime's words, as
+/// Cloudflare refuses a facet's subrequests past its life's limit. A query
+/// that runs out fails, and the next call makes all it asks; so does a job
+/// that runs out, whose throw the platform code answers as its run's failure.
+pub fn facet_restart(s: &mut Suite, api: &Api) -> Result<()> {
+    if !s.section("facet-restart", &[crate::Need::Levers]) {
+        return Ok(());
+    }
+    let wait = std::time::Duration::from_secs(40);
+    let owner = api.person()?;
+    let name = s.named(api, &owner, "restart")?;
+    let c = s.create(api, &owner, &name)?;
+    s.commit(&c, &[("app.mjs", Some(BURN_APP)), ("fragment.json", Some(BURN_JSON)), ("note.md", Some(b"# Note\n\na line\n"))]);
+    s.deploy(&c);
+    let lever = |calls: Value| api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "facet-calls", "calls": calls })));
+    let burn = |n: u64, id: &str| api.op(&owner, &name, "burn", id, json!({ "op": "files.list", "n": n }));
+    let made = |r: &crate::api::Reply, n: u64| r.status == 200 && r.body["result"]["made"] == n;
+    let set = lever(json!(5))?;
+    anyhow::ensure!(set.status == 200, "the facet-calls lever: {set}");
+    let out = burn(10, "query-out")?;
+    let next = burn(5, "query-next")?;
+    s.ok(
+        "a query that runs out of its facet's calls fails in the runtime's words, and the next call makes all it asks: the facet started again",
+        out.status != 200 && out.message().contains("Too many subrequests") && made(&next, 5),
+        format!("{out} | {next}"),
+    );
+    let started = api.op(&owner, &name, "burn_job", "job-out", json!({ "op": "files.list", "n": 10 }))?;
+    let run = jobs::settle(api, &owner, &name, jobs::started(&started), &["succeeded", "held", "failed"], wait);
+    let next = burn(5, "job-next")?;
+    s.ok(
+        "a job that runs out fails its run in the runtime's words (the platform code answers its throw), and the next call makes all it asks: the facet started again",
+        run["status"] != "succeeded" && run["error"].as_str().is_some_and(|e| e.contains("Too many subrequests")) && made(&next, 5),
+        json!({ "run": run, "next": next.body }),
+    );
+    lever(Value::Null)?;
     Ok(())
 }

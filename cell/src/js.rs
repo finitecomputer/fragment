@@ -170,6 +170,9 @@ pub struct AppLoader {
     /// How many times this activation built worker code for the loader (a
     /// test hook reads it: `/test/fragment code-builds`).
     builds: std::rc::Rc<std::cell::Cell<u32>>,
+    /// How many times this activation started the facet (a test lever
+    /// counts its capability calls by start: `facet-calls`).
+    starts: std::rc::Rc<std::cell::Cell<u32>>,
 }
 
 impl AppLoader {
@@ -191,7 +194,10 @@ impl AppLoader {
             Ok(worker_code(&ctx_for_code, &app).map_err(|e| thrown(&e.message))?.into())
         });
         let env = env.clone();
+        let starts = std::rc::Rc::new(std::cell::Cell::new(0u32));
+        let started = starts.clone();
         let start: Callback = Closure::new(move || -> Result<JsValue, JsValue> {
+            started.set(started.get() + 1);
             let id = id().map_err(|why| thrown(&why))?;
             // the loader calls its callback with no arguments: bound, it
             // is told which id it builds (a fresh bound function a call,
@@ -204,11 +210,15 @@ impl AppLoader {
             set(&options, "class", class);
             Ok(options.into())
         });
-        AppLoader { start, builds }
+        AppLoader { start, builds, starts }
     }
 
     pub fn builds(&self) -> u32 {
         self.builds.get()
+    }
+
+    pub fn starts(&self) -> u32 {
+        self.starts.get()
     }
 
     /// The running app facet `name`, or a new one started from the
@@ -243,15 +253,21 @@ fn facet_error(message: String) -> CellError {
 }
 
 impl Facet {
-    /// A call's failure. One at a runtime limit on the facet (its
-    /// subrequests, which last its life, or a call's CPU) stops it, so the
-    /// next call starts it fresh, its whole budget again.
-    fn failed(&self, message: String) -> CellError {
-        if facet::at_limit(&message) {
-            if let Err(e) = call(&self.facets, "abort", &[self.name.as_str().into(), js_sys::Error::new(&message).into()]) {
+    /// Stops the facet when `message` is a runtime limit on it (its
+    /// subrequests, which last its life, or a call's CPU), so the next call
+    /// starts it fresh, its whole budget again: a call's failure thrown
+    /// (`failed`), or one the platform code caught and answered (a job's).
+    pub fn stop_at_limit(&self, message: &str) {
+        if facet::at_limit(message) {
+            if let Err(e) = call(&self.facets, "abort", &[self.name.as_str().into(), js_sys::Error::new(message).into()]) {
                 worker::console_error!("{}", serde_json::json!({ "event": "app.facet-unstopped", "error": js_message(&e) }));
             }
         }
+    }
+
+    /// A call's failure, its facet stopped at a runtime limit.
+    fn failed(&self, message: String) -> CellError {
+        self.stop_at_limit(&message);
         facet_error(message)
     }
 
