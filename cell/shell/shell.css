@@ -164,7 +164,19 @@ body.resizing-row, body.resizing-row * { cursor: row-resize !important; }
 .icon-button.small svg { width: var(--icon-size); height: var(--icon-size); }
 /* the open chat is a chat fragment's own page; each chat keeps its frame */
 .frames { flex: 1; min-height: 0; position: relative; border-top: 1px solid var(--border); }
-.frames > iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: transparent; }
+/* a middle-column page's own scheme is its own (a chat's and the archive's
+   paint their background): a frame of the shell's dark scheme would paint
+   the empty page it holds before one comes white */
+.frames > iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: transparent; color-scheme: normal; }
+/* a chat's stand-in while its page comes (frame-standin.js): the room's
+   colour, its composer's outline where the page's will be, and past 1.5 s
+   a quiet spinner */
+.frame-standin { position: absolute; inset: 0; z-index: 1; display: flex; flex-direction: column; justify-content: flex-end; align-items: center; background: var(--bg-sidebar); pointer-events: none; }
+.standin-composer { width: min(760px, calc(100% - 16px)); height: 99px; margin-bottom: 8px; border-radius: 12px; background: var(--chat-composer); box-shadow: inset 0 1px 2px rgba(0,0,0,.08); }
+.standin-wait { position: absolute; top: calc(50% - 60px); left: calc(50% - 9px); width: 18px; height: 18px; border: 2px solid var(--border-strong); border-top-color: var(--text-tertiary); border-radius: 50%; opacity: 0; animation: standin-spin .9s linear infinite, standin-show .3s ease 1.5s forwards; }
+@keyframes standin-spin { to { transform: rotate(360deg); } }
+@keyframes standin-show { to { opacity: .8; } }
+@media (prefers-reduced-motion: reduce) { .standin-wait { animation: standin-show .3s ease 1.5s forwards; } }
 .notice { margin: 12vh auto 0; max-width: 28rem; padding: 24px; text-align: center; color: var(--text-secondary); }
 .notice > strong { display: block; color: var(--text-primary); font-size: 17px; margin-bottom: 6px; }
 .notice a, .notice button { color: var(--accent-blue); background: none; border: 0; padding: 0; text-decoration: underline; }

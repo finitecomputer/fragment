@@ -112,7 +112,7 @@ pub fn shell_page(text: &str, release: &str, deployed: Option<u64>) -> String {
 /// each with its content type: of the rest of cell/shell/, its pages are
 /// served at their own paths, and its credits and licenses not at all.
 #[cfg(feature = "platform")]
-const SHELL_PUBLISHED: [(&str, &str); 50] = [
+const SHELL_PUBLISHED: [(&str, &str); 51] = [
     // the cell's server-rendered pages' base look (share.rs `sheet_html`),
     // on the platform's origin and, as /__sheet.css, on a fragment's
     ("sheet.css", "text/css; charset=utf-8"),
@@ -147,6 +147,8 @@ const SHELL_PUBLISHED: [(&str, &str); 50] = [
     ("apps-page.js", "text/javascript; charset=utf-8"),
     // the History page: every chat they have had, and its search
     ("history-page.js", "text/javascript; charset=utf-8"),
+    // a chat's stand-in while its page comes: its room and composer, never a blank frame
+    ("frame-standin.js", "text/javascript; charset=utf-8"),
     ("activity.js", "text/javascript; charset=utf-8"),
     ("fragment-title.js", "text/javascript; charset=utf-8"),
     ("tooltips.js", "text/javascript; charset=utf-8"),
