@@ -1519,6 +1519,8 @@ const launcher = createLauncher({
   views: () => views,
   busy: (name) => refresh.isBusy(state.frames.get(name)),
   setupChat: () => onboarding.setupChat(),
+  // the agent an imported conversation was with, as its archive's index names it
+  sessionAgent: (key) => sessionArchive.entries().find((e) => e.key === key)?.agent ?? null,
 });
 
 // Each view of the computer taken in from an action's answer (`computerIs`,

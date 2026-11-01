@@ -80,7 +80,7 @@ pub(crate) fn property(obj: &JsValue, key: &str) -> CellResult<JsValue> {
 /// ambient network and bounded CPU. Read from the code row only when the
 /// loader asks for it (`AppLoader`).
 pub struct AppCode {
-    /// The fragment its `FILES` capability is bound to.
+    /// The fragment its `FILES` and `SEARCH` capabilities are bound to.
     pub fragment: String,
     pub platform: &'static str,
     pub limits: &'static str,
@@ -100,17 +100,19 @@ pub struct Facet {
 /// a fragment's name has its own (`Fragment::app_facet`).
 pub const APP_FACET: &str = "app";
 
-/// The capabilities an app's env holds: `FILES`, bound to `fragment`
-/// (`ctx.exports.Files({ props })`, the class in entry.mjs).
+/// The capabilities an app's env holds: `FILES` and `SEARCH`, each bound
+/// to `fragment` (`ctx.exports.Files({ props })`, the classes in entry.mjs).
 fn app_env(ctx: &JsValue, fragment: &str) -> CellResult<Object> {
     let props = Object::new();
     set(&props, "fragment", fragment);
     let options = Object::new();
     set(&options, "props", props);
     let exports = get(ctx, "exports")?;
-    let files = call(&exports, "Files", &[options.into()]).map_err(|e| CellError::host(format!("ctx.exports.Files: {}", js_message(&e))))?;
     let env = Object::new();
-    set(&env, "FILES", files);
+    for (name, class) in [("FILES", "Files"), ("SEARCH", "Search")] {
+        let cap = call(&exports, class, &[options.clone().into()]).map_err(|e| CellError::host(format!("ctx.exports.{class}: {}", js_message(&e))))?;
+        set(&env, name, cap);
+    }
     Ok(env)
 }
 

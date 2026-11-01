@@ -356,6 +356,15 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     let ran = jobs::settle(&api, &owner, &stored, jobs::started(&r), &["succeeded", "held"], Duration::from_secs(40));
     let got = seen.lock().expect("upstream log").clone();
     s.ok("after a restart a sealed secret opens: the job's fetch carries it", ran["status"] == "succeeded" && got == [format!("Bearer {SECRET}")], format!("{ran} {got:?}"));
+    // and, holding it, it is still its owner's and their agents' alone
+    // (FIN-352): its link refused as before the restart
+    let shared = api.signed(&owner, "PUT", &format!("/api/f/{stored}/visibility"), Some(&json!({ "visibility": "link" })))?;
+    let status = api.status(&owner, &stored)?;
+    s.ok(
+        "after a restart a fragment holding a key still has reach, and its link is refused (403 private_while_reaching)",
+        shared.status == 403 && shared.body["reason"] == "private_while_reaching" && status.body["reach"] == true && status.body["visibility"] == "members",
+        format!("{shared} {status}"),
+    );
     // a browser's sessions, and the key its push subscriptions were made with
     let r = who(&api, &member_session)?;
     s.ok("after a restart a browser's platform session still signs it in", r.to_string().contains(MEMBER_EMAIL), &r);

@@ -2,7 +2,10 @@
 // template's, which this file leaves as it is). The box asks the
 // brain's search operation and lists its ranked sections in the reader; a
 // result opens its page through the viewer's own hash route. Text from the
-// brain becomes DOM through textContent only.
+// brain becomes DOM through textContent only. While the brain's index is
+// behind its files, a member's page starts its `changed` job (one run at a
+// time holds the work, so a start while one runs costs it nothing), and an
+// answer says it may be incomplete.
 import { call } from "./__fragment.js";
 
 const RESULTS = 20;
@@ -33,13 +36,11 @@ function show(answer, error) {
   const results = answer?.results ?? [];
   const said = error
     ? error
-    : !answer.words.length
-      ? "Type a word or two."
-      : results.length
-        ? `${results.length} section${results.length === 1 ? "" : "s"} with ${answer.words.join(", ")}, best first.`
-        : `Nothing in this brain has ${answer.words.join(", ")}.`;
+    : results.length
+      ? `${results.length} section${results.length === 1 ? "" : "s"}, best first.`
+      : "Nothing in this brain matches that.";
   note.append(el("p", error ? "hint brain-error" : "hint", said));
-  if (answer?.pending > 0) note.append(el("p", "hint", "The brain is still taking in a sync: search again in a moment for the rest."));
+  if (answer?.indexing) note.append(el("p", "hint", "Indexing: results may be incomplete."));
   const list = el("ol", "brain-list");
   for (const r of results) {
     const item = el("li", "brain-result");
@@ -61,12 +62,23 @@ function show(answer, error) {
   $("main").scrollTop = 0;
 }
 
+// The index behind its files, and no run on it: start one (a member may),
+// once a page.
+let started = false;
+function catchUp(state) {
+  if (started || !state?.indexing || state.running) return;
+  started = true;
+  call("changed", {}).catch(() => {});
+}
+call("index_status", {}).then(catchUp, () => {});
+
 let asked = 0;
 async function search(q) {
   const mine = ++asked;
   try {
     const answer = await call("search", { q, limit: RESULTS });
     if (mine === asked) show(answer);
+    catchUp(answer);
   } catch (e) {
     if (mine === asked) show(null, e.message || String(e));
   }

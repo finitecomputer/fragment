@@ -42,6 +42,7 @@
 //!   POST   /job/advance|effect|finish     a run's Workflow (jobs.rs); never routed from outside
 //!   PUT    /api/cap                       owner: the fragment's monthly cap on the owner's ledger (meter.rs)
 //!   POST   /cap/files/read|list|stat      the app facet's `Files` capability (files.rs); never routed from outside
+//!   POST   /cap/search/upsert|delete|query|status  the app facet's `Search` capability (searchable.rs); never routed from outside
 //!   POST   /deliver/report                the delivery consumer (deliveries.rs); never routed from outside
 //!   GET    /api/card                      viewer: the preview card's JPEG (card.rs)
 //!   POST   /api/card  PUT /api/card       editor: a shot again; an upload as the card (card.rs)
@@ -393,6 +394,8 @@ pub(crate) enum MetaKey {
     /// CONNECTORS`), while it runs no other code: no one but its owner edits
     /// it, and only then may it be a door (doors.rs).
     DoorTemplate,
+    /// Its owner's row was told its reach (`Sharing.reach`, reach.rs).
+    ReachTold,
     /// The next time a page may pre-wake the computers its channels wake.
     PrewakeAt,
     /// Test fleets only: how many more paid AI steps fail just after their
@@ -478,6 +481,7 @@ impl MetaKey {
             MetaKey::DoorActor => "door_actor",
             MetaKey::InboxSecret => "inbox_secret",
             MetaKey::DoorTemplate => "door_template",
+            MetaKey::ReachTold => "reach_told",
             MetaKey::PrewakeAt => "prewake_at",
             MetaKey::TestFailAfterPaid => "test_fail_after_paid",
             MetaKey::TestLoseVideoAnswers => "test_lose_video_answers",
@@ -862,6 +866,11 @@ impl FragmentCell {
         let ends = path.starts_with("/wipe/") || (req.method() == Method::Delete && path == "/delete");
         if !ends {
             self.schema.ready()?;
+            // one from before `Sharing.reach` tells its owner's row once
+            // (reach.rs); a failure here fails no request
+            if let Err(e) = self.reach_told() {
+                worker::console_error!("its owner's row was not told its reach: {}", e.message);
+            }
         }
         if path == "/test/keys" && self.cfg.test_hooks {
             // this cell's own sealing: the e2e checks that what one
@@ -926,6 +935,15 @@ impl FragmentCell {
             let op = op.to_string();
             let body: Value = body_json(&mut req).await?;
             return self.cap_files(&op, &body).await;
+        }
+        if let Some(op) = path.strip_prefix("/cap/search/") {
+            // Only the `Search` capability sets the header (searchable.rs)
+            if req.headers().get(crate::files::CAP_HEADER)?.as_deref() != Some("search") {
+                return Err(CellError::new(ErrorCode::NotFound, format!("no route {path}")));
+            }
+            let op = op.to_string();
+            let body: Value = body_json(&mut req).await?;
+            return self.cap_search(&op, body).await;
         }
         if path == "/invites/claim" || path == "/invites/decline" || path == "/members/agent" {
             // Only the platform sets the header (a person's yes or no; an
@@ -1324,6 +1342,8 @@ impl FragmentCell {
             code: self.code_status()?,
             // the share link is its owner's to give (and their agent's, sharing for them): a member asks them
             view_token: self.shares(caller).then_some(facts.view_token),
+            // it stays its owner's and their agents' while it has reach (reach.rs)
+            reach: self.reaches()?,
             inbox_token: if role >= Role::Editor { Some(inbox_token.ok_or_else(|| missing(MetaKey::InboxToken))?) } else { None },
             urls: Urls { canonical: self.cfg.canonical(&caller.url, &facts.name), platform: self.cfg.platform() },
             blob_min_bytes: Some(fragment_core::blob::BLOB_MIN_BYTES as u64),
