@@ -17,12 +17,13 @@ const FENCE = /^ {0,3}(`{3,}|~{3,})/;
 const ATX = /^ {0,3}(#{1,6})(?:[ \t]+(.*?))?[ \t]*$/;
 
 /// A wiki's links as their words: `[[page|its words]]` its words,
-/// `[[page]]` the page as written. What a heading, a title and a section's
-/// text read as, wherever they are shown (FIN-367).
+/// `[[page]]` the page's name as `stem` says it ("frost dates"). What a
+/// heading, a title and a section's text read as, wherever they are shown
+/// (FIN-367).
 export function linkWords(text) {
   return String(text)
     .replace(/\[\[([^\]|]+)\|([^\]]+)\]\]/g, "$2")
-    .replace(/\[\[([^\]]+)\]\]/g, "$1");
+    .replace(/\[\[([^\]]+)\]\]/g, (_, page) => stem(page));
 }
 
 /// Markdown's inline marks, gone: what a heading or a title reads as.

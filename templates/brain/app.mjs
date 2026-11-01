@@ -12,7 +12,7 @@
 // the revision, so a new format writes every page again), cut into sections
 // by applib/sections.mjs, a section's wiki links as their words (`linkWords`:
 // so every reader of the index, ⌘K's Knowledge, `fragment search` and the
-// brain's own page, shows "frost-dates", not "[[frost-dates]]"). Each move
+// brain's own page, shows "frost dates", not "[[frost-dates]]"). Each move
 // of main runs `changed` (fragment.json's file trigger), and so does each install of a
 // new release (its installed trigger: an index of an older `FORMAT` is
 // rebuilt with no one acting), a job: it marks the paths that

@@ -196,7 +196,7 @@ function clock(t) {
 // brain's page) is its section text, so a link is its words there.
 it("a page's wiki links are their words in its index", async () => {
   const { ix } = await brain({ "w/a.md": "# A\n\nTransplant after the last frost (see [[frost-dates]]), and [[home/lease.md|the lease]] says when." });
-  assert.equal(ix.text("w/a.md"), "Transplant after the last frost (see frost-dates), and the lease says when.");
+  assert.equal(ix.text("w/a.md"), "Transplant after the last frost (see frost dates), and the lease says when.");
 });
 
 // An index the last format wrote holds every page under its bytes' bare
@@ -214,7 +214,7 @@ it("a brain indexed in the last format writes every page again, its links as wor
   ctx.storage.sql.exec("INSERT INTO brain_state (k, v) VALUES ('format', 'brain-index-1')");
   const app = new App(ctx, { FILES: fs, SEARCH: ix });
   await settle(app);
-  assert.equal(ix.text("w/a.md"), "see frost-dates");
+  assert.equal(ix.text("w/a.md"), "see frost dates");
   assert.notEqual(ix.sources.get("w/a.md").revision, old);
   assert.equal(ix.writes, 1);
   // replayed: the same bytes under the same format write nothing
