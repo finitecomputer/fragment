@@ -202,9 +202,14 @@ impl FragmentCell {
                         out.insert(c.hash.clone(), index::held_b64(&held));
                     }
                 }
-                Embedding::Refused { status, text } => {
+                Embedding::Refused { status, text, retry_after_ms } => {
                     let code = if status == 429 { ErrorCode::RateLimited } else { ErrorCode::UpstreamFailed };
-                    return Err(CellError::new(code, format!("the embeddings model refused ({status}): {text}")));
+                    let refused = CellError::new(code, format!("the embeddings model refused ({status}): {text}"));
+                    // its rate limit: the writer waits this long, then writes again
+                    return Err(match retry_after_ms {
+                        Some(ms) => refused.retry_after(ms),
+                        None => refused,
+                    });
                 }
             }
         }
@@ -404,7 +409,7 @@ impl FragmentCell {
         let question = self.cfg.models.embeddings.question(q);
         match embedded(&self.env, &[question], payer, who.agent.as_deref(), Some(&fragment), &self.state).await? {
             Embedding::Vectors { vectors, .. } => Ok(vectors.into_iter().next().map(|v| rules::vector_b64(&v))),
-            Embedding::Refused { status, text } => {
+            Embedding::Refused { status, text, .. } => {
                 console_warn!("{}", json!({ "event": "search.query-unembedded", "status": status, "why": text }));
                 Ok(None)
             }

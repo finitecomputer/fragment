@@ -205,7 +205,7 @@ impl TryFrom<AnswerFrame> for Answer {
     fn try_from(f: AnswerFrame) -> Result<Answer, String> {
         let outcome = match (f.result, f.error, f.message, f.status) {
             (Some(result), None, None, None) => Ok(result),
-            (None, Some(error), Some(message), Some(status)) if status == error.status() => Err(ErrorBody { error, message, reason: None }),
+            (None, Some(error), Some(message), Some(status)) if status == error.status() => Err(ErrorBody { error, message, reason: None, retry_after_ms: None }),
             (None, Some(error), Some(_), Some(status)) => return Err(format!("status {status} is not {}'s", error.status())),
             _ => return Err("a result carries a result, or an error with its message and status".into()),
         };
@@ -344,7 +344,7 @@ mod tests {
             (LiveOut::Result(Answer { id: "live-1".into(), outcome: Ok(raw(r#"{ "n": 2 }"#)) }), json!({ "type": "result", "id": "live-1", "result": { "n": 2 } })),
             (LiveOut::Result(Answer { id: "live-2".into(), outcome: Ok(raw("null")) }), json!({ "type": "result", "id": "live-2", "result": null })),
             (
-                LiveOut::Result(Answer { id: "live-3".into(), outcome: Err(ErrorBody { error: ErrorCode::Forbidden, message: "this needs the editor role".into(), reason: None }) }),
+                LiveOut::Result(Answer { id: "live-3".into(), outcome: Err(ErrorBody { error: ErrorCode::Forbidden, message: "this needs the editor role".into(), reason: None, retry_after_ms: None }) }),
                 json!({ "type": "result", "id": "live-3", "error": "forbidden", "message": "this needs the editor role", "status": 403 }),
             ),
             (LiveOut::Error { message: "no".into() }, json!({ "type": "error", "message": "no" })),

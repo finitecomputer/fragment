@@ -9,7 +9,9 @@ there.
 Errors are `{"error": "<code>", "message": "..."}` (`proto::ErrorCode`).
 Billing's, seats' and orgs' refusals add `"reason"` (`proto::Reason`)
 where one status has several causes a person acts on differently. It is
-add-only: a reason a client does not know reads as none.
+add-only: a reason a client does not know reads as none. A refusal that
+knows how long to wait before asking again adds `"retry_after_ms"` and a
+`Retry-After` header (a search write its embeddings model rate-limits).
 
 Any route may answer:
 
@@ -1265,7 +1267,11 @@ it embeds (nomic-embed-text's `search_document: ` and `search_query: `),
 which its index's `space` names, so a change of either is a new space
 there too. `inputs_max` (1 to `embed::INPUTS_MAX`, that unnamed) is the
 inputs its model takes in one call (Tinfoil's 32): a search embeds in
-batches of it, and this route refuses a call of more, 400. This route
+batches of it, and this route refuses a call of more, 400. A search write
+the model rate-limits is 429 `rate_limited` with `retry_after_ms` (and
+`Retry-After`, in seconds): the model's own wait, else 60 s, held between
+1 s and 10 minutes; its writer waits that long, then writes again. A
+question it rate-limits is answered by its words alone. This route
 embeds an agent's input as given. A deployment whose
 tiers are private embeds only on a slot marked `private` (else 403). Refused 400 before anything is sent:
 `input` not a string or 1 to `embed::INPUTS_MAX` strings, an empty one, or

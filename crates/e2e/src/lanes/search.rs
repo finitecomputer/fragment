@@ -218,6 +218,23 @@ fn checks(s: &mut Suite, api: &Api) -> Result<(Keys, String)> {
     let r = api.signed(&owner, "POST", &path("/upsert"), Some(&stale))?;
     s.ok("a write that replaces a revision the source has not is 409 conflict, naming the one it has", r.status == 409 && r.body["error"] == "conflict" && r.body["current"] == "r2", &r);
 
+    // ---- the embeddings model's rate limit: the write says how long to wait; a question goes on by words
+    s.ai.fail_next(&[429]);
+    let limited = api.signed(&owner, "POST", &path("/upsert"), Some(&upsert("sessions/r.json", "r1", json!([{ "id": "t0", "text": "Person: the rate-limited note" }]))))?;
+    let again = api.signed(&owner, "POST", &path("/upsert"), Some(&upsert("sessions/r.json", "r1", json!([{ "id": "t0", "text": "Person: the rate-limited note" }]))))?;
+    s.ai.fail_next(&[429]);
+    let asked = api.signed(&owner, "POST", &path(""), Some(&json!({ "q": "harbour lantern audit" })))?;
+    s.ok(
+        "a write its embeddings model rate-limits is refused 429 rate_limited, saying how long to wait (retry_after_ms, the model's own or 60 s, and Retry-After), and written when sent again; a question it rate-limits is answered by its words",
+        limited.status == 429 && limited.body["error"] == "rate_limited" && limited.body["retry_after_ms"] == fragment_core::embed::RETRY_AFTER_DEFAULT_MS
+            && limited.header("retry-after") == "60" && again.status == 200 && again.body["written"] == true
+            && asked.status == 200 && asked.body["semantic"] == "off" && asked.body["results"][0]["section"] == "t0",
+        json!({ "limited": limited.body, "again": again.body, "asked": asked.body["semantic"] }),
+    );
+    // gone again: the checks after count this fragment's sources
+    let gone = api.signed(&owner, "POST", &path("/delete"), Some(&json!({ "source": "sessions/r.json" })))?;
+    anyhow::ensure!(gone.status == 200 && gone.body["deleted"] == true, "the rate-limited source's delete: {gone}");
+
     // ---- limits, before anything is embedded or sent
     let calls = s.ai.calls().len();
     let mut refused = Vec::new();

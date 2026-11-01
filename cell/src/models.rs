@@ -717,7 +717,7 @@ pub(crate) async fn embeddings_route(mut req: Request, env: &Env, url: &Url, aft
     drop(asked);
     match embedded(env, &bounded.inputs, &caller.owner, Some(&caller.agent), caller.in_fragment().as_ref(), after).await? {
         Embedding::Vectors { vectors, usage } => Ok(Response::from_json(&embed::reply(slot, bounded.format, &vectors, usage.as_ref()))?),
-        Embedding::Refused { status, text } => passed(status, text),
+        Embedding::Refused { status, text, .. } => passed(status, text),
     }
 }
 
@@ -726,7 +726,9 @@ pub(crate) async fn embeddings_route(mut req: Request, env: &Env, url: &Url, aft
 /// refusal as it came (it used nothing, and nothing is charged).
 pub(crate) enum Embedding {
     Vectors { vectors: Vec<Vec<f32>>, usage: Option<Usage> },
-    Refused { status: u16, text: String },
+    /// The model's refusal; a 429 names how long to wait
+    /// (`embed::retry_after_ms`).
+    Refused { status: u16, text: String, retry_after_ms: Option<u64> },
 }
 
 /// `inputs` (bounded: `embed::bound`) embedded on the deployment's
@@ -756,7 +758,10 @@ pub(crate) async fn embedded(env: &Env, inputs: &[String], payer: &str, agent: O
     let status = upstream.status_code();
     let log_id = upstream.headers().get("cf-aig-log-id")?;
     if status != 200 {
-        return Ok(Embedding::Refused { status, text: bounded_text(&mut upstream).await });
+        let header = upstream.headers().get("retry-after")?;
+        let text = bounded_text(&mut upstream).await;
+        let retry_after_ms = (status == 429).then(|| embed::retry_after_ms(header.as_deref(), &text));
+        return Ok(Embedding::Refused { status, text, retry_after_ms });
     }
     let bytes = match read_whole(&mut upstream).await {
         Ok(b) => b,
