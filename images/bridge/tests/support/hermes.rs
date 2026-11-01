@@ -97,6 +97,11 @@ use fragment_bridge::runtime::relay::wire;
 pub struct Seen {
     /// Each inbound event, in order (prompt answers too).
     pub heard: Vec<Value>,
+    /// Each message whose turn is under way: past its startup bracket, its
+    /// own `👀` answered. A test that speaks for a turn from outside (its
+    /// calls on the activity socket) waits for this, not `heard`: a step
+    /// before the bracket's `✅` makes that `✅` the turn's end.
+    pub begun: Vec<String>,
     /// Successful dials, and close codes heard.
     pub dials: u64,
     pub closes: Vec<u16>,
@@ -431,6 +436,7 @@ async fn turn(gw: &Gateway, event: Value, mut rx: mpsc::UnboundedReceiver<Heard>
     gw.act(react("✅", false)).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
     gw.act(react("👀", false)).await;
+    gw.seen.lock().unwrap().begun.push(mid.clone());
     let message = event["text"].as_str().unwrap_or("").trim_start_matches('\u{200b}').to_string();
     if message.contains("observed boundary") {
         // A tool call's end on the activity socket, and the words said
