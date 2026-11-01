@@ -14,8 +14,8 @@
 // - A display name edited inline, and the owner's optional public address.
 // - Reaches (FIN-291; Paul, 2026-11-01), only on one that reaches their
 //   accounts: the keys it holds, by name and the hosts each may go to
-//   (never a value), with Remove; the agent it speaks to when it is a door,
-//   with Unlink; their own agents in it. Such an app is theirs and their
+//   (never a value), with Remove; the agent it speaks to when it is a
+//   connector's door (`/api/f/{name}/door`), with Unlink; their own agents in it. Such an app is theirs and their
 //   agents' alone for now: the cell refuses sharing it, and its share sheet
 //   (its Sharing here) says so (reach.rs, share.rs).
 // Archived ones are folded at the end, each with Unarchive.
@@ -32,10 +32,13 @@ const ROLE = { viewer: "Viewer", editor: "Editor", owner: "Owner" };
 const GENERAL = { members: ["lock", "Restricted"], link: ["link", "Anyone with the link"], public: ["globe", "Public"] };
 // the list's kinds the dock shows, and a card is shot of (card::is_app)
 const dockable = (f) => f.kind === "app" || f.kind === "brain";
-// and, whatever its kind, one of theirs that reaches their accounts (its
-// row's `sharing.reach`: a connector such as Telegram's chat), so what
-// reaches them is all in one place (Paul, 2026-11-01)
-const listed = (f) => (f.kind !== "chat" && f.kind !== "agent" && f.kind !== "skills" && f.kind !== "sessions") || f.sharing?.reach === true;
+// What the page lists: every fragment but their chats, agents, skills and
+// Session Archives, and a chat that reaches their accounts (its row's
+// `sharing.reach`: a connector, such as Telegram's chat, with its keys and
+// its door), so what reaches them is in one place (Paul, 2026-11-01). An
+// agent with a door (its SimpleX link) is not: that door is opened and
+// closed in Settings, from its own page (Alex on #918).
+export const listed = (f) => (f.kind !== "chat" && f.kind !== "agent" && f.kind !== "skills" && f.kind !== "sessions") || (f.kind === "chat" && f.sharing?.reach === true);
 const owns = (f) => f.role === "owner";
 const edits = (f) => f.role === "owner" || f.role === "editor";
 const seg = (s) => encodeURIComponent(s).replace(/%3A/gi, ":");

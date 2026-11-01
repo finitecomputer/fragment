@@ -6865,8 +6865,12 @@ fn apps_arrival_ui(s: &mut Suite, b: &mut Browser, page: &Page) -> Result<()> {
 /// (Paul on FIN-352; the cell's rule, reach.rs). Invalid: an app with no key
 /// and no door has no Reaches tab. Valid: one given a key while the page is
 /// open gets the tab, its key by name and host, never its value, and its
-/// Sharing (its share sheet, share.rs) says why it is not shared. Replay:
-/// its key removed from its Reaches (asked twice), the tab goes with its reach.
+/// Sharing (its share sheet, share.rs) says why it is not shared; a
+/// connector bound as their agent's door is listed, its Reaches the door
+/// with Unlink, and their agents never are (an agent's own door is
+/// Settings': Alex on #918). Replay: its key removed from its Reaches
+/// (asked twice), the tab goes with its reach; the connector unlinked, it
+/// holds no door and leaves the page.
 fn apps_reach_ui(s: &mut Suite, b: &mut Browser, page: &Page, app: &str) -> Result<()> {
     let wait = std::time::Duration::from_secs(60);
     let in_page = |method: &str, path: &str, body: Value| {
@@ -6911,6 +6915,31 @@ fn apps_reach_ui(s: &mut Suite, b: &mut Browser, page: &Page, app: &str) -> Resu
     s.ok("its key removed from its Reaches, asked twice: the tab goes with its reach", asked && gone, b.eval(page, &format!("{row}?.innerText ?? null"))?);
     b.eval(page, &format!("fetch('/api/f/{name}', {{ method: 'DELETE', headers: {{ 'x-fragment-shell': '1' }}, credentials: 'same-origin' }}).then((r) => r.status)"))?;
     b.until(page, &format!("!{row}"), wait);
+
+    // a connector (Telegram's chat, members only as made) bound as their agent's door
+    let agent = b.eval(page, "fetch('/api/fragments', { headers: { 'x-fragment-shell': '1' }, credentials: 'same-origin' }).then((r) => r.json()).then((l) => l.fragments.find((f) => f.kind === 'agent' && f.role === 'owner')?.name ?? '')")?.as_str().unwrap_or("").to_string();
+    let made = b.eval(page, &in_page("POST", "/api/fragments", json!({ "label": "reaching-connector", "template": "telegram", "title": "Telegram" })))?;
+    let connector = made["body"]["name"].as_str().unwrap_or("").to_string();
+    let linked = b.eval(page, &in_page("POST", &format!("/api/f/{connector}/door"), json!({ "act": "link", "agent": agent })))?;
+    anyhow::ensure!(!agent.is_empty() && made["status"] == 200 && linked["status"] == 200, "the connector was not bound as {agent:?}'s door: {made} {linked}");
+    let crow = format!("document.querySelector({})", js(&format!("#apps-page .app-row[data-fragment=\"{connector}\"]")));
+    let listed = b.until(page, &format!("!!{}", tab_of(&connector, "reach")), wait);
+    b.eval(page, &format!("({}?.click(), true)", tab_of(&connector, "reach")))?;
+    let unlink = format!("[...{crow}?.querySelectorAll('.app-reach [data-action=reach]') ?? []]");
+    let door = b.until(page, &format!("({crow}?.querySelector('.app-reach')?.innerText ?? '').includes('Speaks for you to') && {unlink}.some((b) => b.textContent === 'Unlink')"), wait);
+    let no_agent = b.eval(page, &format!("!document.querySelector({})", js(&format!("#apps-page .app-row[data-fragment=\"{agent}\"]"))))?;
+    s.ok(
+        "a connector bound as their agent's door is listed, its Reaches the door with Unlink; their agent is not listed (its own door is Settings')",
+        listed && door && no_agent == true,
+        b.eval(page, &format!("{crow}?.innerText ?? null"))?,
+    );
+    b.eval(page, &format!("({unlink}.find((b) => b.textContent === 'Unlink')?.click(), true)"))?;
+    let asked = b.until(page, &format!("{unlink}.some((b) => b.textContent === 'Unlink? Yes')"), wait);
+    b.eval(page, &format!("({unlink}.find((b) => b.textContent === 'Unlink? Yes')?.click(), true)"))?;
+    let left = b.until(page, &format!("!{crow}"), wait);
+    let bound = b.eval(page, &format!("fetch('/api/f/{connector}/door', {{ headers: {{ 'x-fragment-shell': '1' }}, credentials: 'same-origin' }}).then((r) => r.json()).then((d) => d.bound)"))?;
+    s.ok("the connector unlinked from its Reaches, asked twice, holds no door and leaves the Apps page", asked && left && bound.is_null(), json!({ "bound": bound }));
+    b.eval(page, &format!("fetch('/api/f/{connector}', {{ method: 'DELETE', headers: {{ 'x-fragment-shell': '1' }}, credentials: 'same-origin' }}).then((r) => r.status)"))?;
     Ok(())
 }
 

@@ -66,7 +66,8 @@ const TEST_SUFFIX: &str = ".test.mjs";
 /// the messages between the shell and its frames, history-page.js's,
 /// launcher.js's Knowledge, onboarding.js's, session-archive.js's, an
 /// import's words (session-text.js) and threads.js's.
-const SHELL_TESTS: [&str; 10] = [
+const SHELL_TESTS: [&str; 11] = [
+    "cell/shell-tests/apps-page.test.mjs",
     "cell/shell-tests/asked-agent.test.mjs",
     "cell/shell-tests/chat-control.test.mjs",
     "cell/shell-tests/chat-list.test.mjs",
