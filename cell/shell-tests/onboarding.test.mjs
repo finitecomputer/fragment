@@ -225,6 +225,20 @@ for (const [where, when, done] of [
   });
 }
 
+// FIN-250: what an added agent runs on, chosen in Add alone, written as the
+// bridge reads it (agent.json `runtime`; none named, Hermes with its tier).
+test("Add's Runs on: Claude Code is agent.json's runtime; Hermes names none", async () => {
+  for (const [runtime, json] of [["claude", { runtime: "claude" }], ["hermes", { tier: "cheap" }], [undefined, { tier: "cheap" }]]) {
+    const world = platform();
+    const p = page(world);
+    await p.load();
+    await p.onboarding.addAgent({ name: "Wren", role: "Researcher", ...(runtime ? { runtime } : {}) });
+    madeWhole(world);
+    const wren = world.rows().find((f) => f.kind === "agent" && f.title === "Wren");
+    assert.deepEqual(JSON.parse(world.files(wren.name).get("agent.json")), json, String(runtime));
+  }
+});
+
 // Paul, 11-01: "Making your agent…" floated over Settings. Asked from a
 // page, the making draws nothing over it (its chat opens when made); at
 // home, the middle column says it until its chat is.

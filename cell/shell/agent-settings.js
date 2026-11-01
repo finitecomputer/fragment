@@ -256,7 +256,8 @@ export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, 
     label.classList.add("agent-role-label");
     return label;
   }
-  // ---- another agent (Paul, 2026-10-30): its name and role, then it is
+  // ---- another agent (Paul, 2026-10-30): its name and role, and what it
+  // runs on (FIN-250: Hermes, or Claude Code, chosen here only), then it is
   // made as the first was, in its own chat (onboarding.js `addAgent`),
   // which opens. None past what one computer runs. ----
   function addAgentForm() {
@@ -272,6 +273,14 @@ export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, 
     role.maxLength = ROLE_MAX_CHARS;
     role.placeholder = "Role, e.g. dev";
     role.setAttribute("aria-label", "New agent's role");
+    // its runtime, as the bridge reads it (agent.json `runtime`; none, Hermes)
+    const runs = el("select", "agent-add-runtime");
+    runs.setAttribute("aria-label", "New agent runs on");
+    for (const [value, text] of [["hermes", "Runs on Hermes"], ["claude", "Runs on Claude Code"]]) {
+      const o = el("option", null, text);
+      o.value = value;
+      runs.append(o);
+    }
     const add = el("button", "quiet", "Add agent");
     add.type = "submit";
     const said = el("p", "muted agent-face-said");
@@ -284,7 +293,7 @@ export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, 
       add.textContent = "Adding…";
       said.hidden = true;
       try {
-        await addAgent({ name: name.value.trim(), role: role.value.trim() });
+        await addAgent({ name: name.value.trim(), role: role.value.trim(), runtime: runs.value });
       } catch (e) {
         said.textContent = e.message;
         said.hidden = false;
@@ -293,7 +302,7 @@ export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, 
         add.textContent = "Add agent";
       }
     };
-    form.append(name, role, add);
+    form.append(name, role, runs, add);
     return [form, said];
   }
   function agentSettings(a, row, modeled) {

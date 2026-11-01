@@ -393,11 +393,11 @@ export function createOnboarding({ api, ui, account, fragments, computer, naviga
   // A making that failed before its chat, asked from a page, is Add's to say
   // (it rejects): nothing is drawn over the page, and Add again goes on with
   // what was made.
-  async function addAgent({ name, role }) {
+  async function addAgent({ name, role, runtime = "hermes" }) {
     if (setup) throw new Error("Another agent is being made: finish it in its chat first.");
     const placed = new Set([...agents().values()].map((a) => a.fragment));
     const left = allFragments().find((f) => f.kind === "agent" && own(f) && titleOf(f.name) === name && !placed.has(f.name) && !agentsOwnChat(f.name));
-    setup = { label: left ? labelOf(left.name) : freeLabel(slug(name)), title: name, role: role || null, job: addedJob, added: true, agent: left?.name ?? null, written: false, chat: null, made: false, joined: false, ready: false, error: null };
+    setup = { label: left ? labelOf(left.name) : freeLabel(slug(name)), title: name, role: role || null, runtime, job: addedJob, added: true, agent: left?.name ?? null, written: false, chat: null, made: false, joined: false, ready: false, error: null };
     const unsaid = await creatingAgent();
     if (unsaid) throw new Error(unsaid);
   }
@@ -461,7 +461,10 @@ export function createOnboarding({ api, ui, account, fragments, computer, naviga
     const written = await api("GET", `/api/f/${seg(agent)}/file?path=agent.json`).then(() => true, (e) => { if (e.status === 404) return false; throw e; });
     if (!written) {
       const owner = person().email || "your person";
-      const files = [{ path: "SOUL.md", text: job(owner) }, { path: "agent.json", text: JSON.stringify({ tier: DEFAULT_AGENT_TIER }, null, 2) + "\n" }];
+      // what it runs on, as the bridge reads it (docs/bridge.md): Claude
+      // Code named, Hermes (none named) with its tier
+      const runs = setup.runtime === "claude" ? { runtime: "claude" } : { tier: DEFAULT_AGENT_TIER };
+      const files = [{ path: "SOUL.md", text: job(owner) }, { path: "agent.json", text: JSON.stringify(runs, null, 2) + "\n" }];
       // its role, beside its name in its fragment.json (`meta.role`)
       if (setup.role) {
         const manifest = await api("GET", `/api/f/${seg(agent)}/manifest`);
