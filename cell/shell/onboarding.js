@@ -496,9 +496,9 @@ export function createOnboarding({ api, ui, account, fragments, computer, naviga
   function creatingAgent(seat = null) {
     if (seat) return seatFirst(seat);
     if (setupRun) return setupRun;
+    showLayout();
     if (!page()) {
       history.replaceState(null, "", "/");
-      showLayout();
       if (!setup?.chat || !hasFrame(setup.chat)) notice("Making your agent…");
     }
     setupRun = (async () => {
