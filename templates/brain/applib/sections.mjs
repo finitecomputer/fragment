@@ -16,11 +16,18 @@ export const TITLE_MAX_CHARS = 300;
 const FENCE = /^ {0,3}(`{3,}|~{3,})/;
 const ATX = /^ {0,3}(#{1,6})(?:[ \t]+(.*?))?[ \t]*$/;
 
-/// Markdown's inline marks, gone: what a heading or a title reads as.
-export function plain(text) {
+/// A wiki's links as their words: `[[page|its words]]` its words,
+/// `[[page]]` the page as written. What a heading, a title and a section's
+/// text read as, wherever they are shown (FIN-367).
+export function linkWords(text) {
   return String(text)
     .replace(/\[\[([^\]|]+)\|([^\]]+)\]\]/g, "$2")
-    .replace(/\[\[([^\]]+)\]\]/g, "$1")
+    .replace(/\[\[([^\]]+)\]\]/g, "$1");
+}
+
+/// Markdown's inline marks, gone: what a heading or a title reads as.
+export function plain(text) {
+  return linkWords(text)
     .replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1")
     .replace(/[*_`~]+/g, "")
     .replace(/\s+/g, " ")
