@@ -14,8 +14,8 @@
 //! else. A video is HappyHorse 1.0 from Cloudflare's model catalog, on the
 //! same transport (a third party's, which the gateway pays for by Unified
 //! Billing): its answer names the video's URL, which the step reads and
-//! writes to `main` as an image is, on any deployment, Private's too (the
-//! catalog keeps no data; Paul, 2026-10-31: as its images are). Its call
+//! writes to `main` as an image is, on any deployment, Private's too (its
+//! zero data retention; Paul, 2026-10-31: as its images are). Its call
 //! waits while the model makes it (there is no request to poll), and is
 //! asked at most once an attempt (`making`): a try that never heard its
 //! answer fails for good, and only a replay asks again.
