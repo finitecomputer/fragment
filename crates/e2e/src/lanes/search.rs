@@ -4,7 +4,9 @@
 //! nothing; an editor writes a source whole, chunked and embedded once; a
 //! reader finds it by its words and its meaning, each hit placed in each
 //! leg, its answer's waits named in `Server-Timing`, the index's int8 dot
-//! product Wasm SIMD's; a replay and a grown
+//! product Wasm SIMD's; a reader's question in another person's fragment
+//! asks the reader's ledger and the owner's side by side, either refusal
+//! stopping it, the reader's said first; a replay and a grown
 //! source embed nothing again; a stale write is refused; limits are
 //! checked before anything is sent; a viewer only
 //! reads, a stranger neither, and a member removed reads nothing more; a
@@ -25,8 +27,8 @@ use anyhow::{Context, Result};
 use fragment_nip98::Keys;
 use serde_json::{json, Value};
 
-use super::ledger::lever;
-use crate::api::Api;
+use super::ledger::{forget_gate, lever};
+use crate::api::{Api, Reply};
 use crate::Suite;
 
 const MODEL: &str = fragment_core::embed::MODEL_DEFAULT;
@@ -52,6 +54,16 @@ fn timed_parts(r: &crate::api::Reply) -> Option<Vec<&'static str>> {
     Some(parts)
 }
 
+/// How long a reply's `Server-Timing` says `part` took, in ms.
+fn part_ms(r: &Reply, part: &str) -> Option<u64> {
+    let value = r.headers.get("server-timing")?.to_str().ok()?;
+    value.split(", ").find_map(|entry| entry.strip_prefix(part)?.strip_prefix(";dur=")?.parse().ok())
+}
+
+/// How long each ledger is slowed for the gate's side-by-side check: under
+/// the gate's 1.5 s wait, so each answers.
+const SLOW_LEDGER_MS: u64 = 1_000;
+
 fn upsert(source: &str, revision: &str, sections: Value) -> Value {
     json!({ "source": source, "revision": revision, "title": "Trip planning", "fields": { "kind": "chat" }, "sections": sections })
 }
@@ -61,6 +73,89 @@ fn turns() -> Value {
         { "id": "t0", "text": "Person: the harbour lantern audit moved to the north annex\nAgent: noted", "at": "2026-10-29T10:00:00.000Z", "location": { "from": 0, "to": 1 } },
         { "id": "t1", "text": "Person: taxes are due in april\nAgent: I will remind you", "location": { "from": 2, "to": 3 } },
     ])
+}
+
+/// A reader's question in a fragment another person owns asks two ledgers
+/// (models.rs `gate`): the reader's, who pays, and the owner's, whose cap
+/// applies. Either refusing stops it before anything is embedded; both
+/// refusing, the reader's refusal is said. The two are asked side by side:
+/// both slowed alike, the gate waits as long as one.
+fn gate_checks(s: &mut Suite, api: &Api) -> Result<()> {
+    let owner = api.person()?;
+    let reader = api.person()?;
+    let (owner_id, reader_id) = (api.identity(&owner)?, api.identity(&reader)?);
+    let created = s.create(api, &owner, "gated")?;
+    let name = created["name"].as_str().context("its name")?.to_string();
+    let r = api.share(&name, &reader_id, "viewer")?;
+    anyhow::ensure!(r.status == 200, "a viewer: {r}");
+    let w = api.signed(&owner, "POST", &format!("/api/f/{name}/search/upsert"), Some(&upsert("sessions/a.json", "r1", turns())))?;
+    anyhow::ensure!(w.status == 200, "a source: {w}");
+    let ledger_lever = |identity: &str, hook: Value| -> Result<()> {
+        let mut body = hook.clone();
+        body["identity"] = json!(identity);
+        let r = api.unsigned("POST", "/api/test/ledger", Some(&body))?;
+        anyhow::ensure!(r.status == 200, "the ledger lever {hook}: {r}");
+        Ok(())
+    };
+    // the reader's ledger refuses a paid call past its lending
+    let lend = |max: u64| ledger_lever(&reader_id, json!({ "op": "paid-calls", "max": max }));
+    let cap = |id: &str, micros: Option<u64>| -> Result<()> {
+        let r = api.signed(&owner, "PUT", &format!("/api/f/{name}/cap"), Some(&json!({ "id": id, "micros": micros })))?;
+        anyhow::ensure!(r.status == 200, "the fragment's cap: {r}");
+        Ok(())
+    };
+    // asked afresh: each isolate's gate keeps an answer, a refusal too, a minute
+    let ask = || -> Result<(Reply, usize)> {
+        forget_gate(api, &reader_id)?;
+        forget_gate(api, &owner_id)?;
+        let calls = s.ai.calls().len();
+        let r = api.signed(&reader, "POST", &format!("/api/f/{name}/search"), Some(&json!({ "q": "harbour lantern audit" })))?;
+        Ok((r, embedded(s, calls)))
+    };
+    let (allowed, allowed_embeds) = ask()?;
+    lend(0)?;
+    let (payer, payer_embeds) = ask()?;
+    lend(1_000)?;
+    cap("g0", Some(0))?;
+    let (open, open_embeds) = ask()?;
+    lend(0)?;
+    let (both, both_embeds) = ask()?;
+    lend(1_000)?;
+    cap("g1", None)?;
+    ledger_lever(&reader_id, json!({ "op": "slow", "ms": SLOW_LEDGER_MS }))?;
+    ledger_lever(&owner_id, json!({ "op": "slow", "ms": SLOW_LEDGER_MS }))?;
+    let (slowed, _) = ask()?;
+    ledger_lever(&reader_id, json!({ "op": "slow", "ms": 0 }))?;
+    ledger_lever(&owner_id, json!({ "op": "slow", "ms": 0 }))?;
+    let lent = |r: &Reply| r.status == 402 && r.message().contains("paid calls are used up");
+    let capped = |r: &Reply| r.status == 402 && r.message().contains("cap this month");
+    s.ok(
+        "a reader's question in another person's fragment, both ledgers allowing it, is embedded as the reader's and answered by meaning",
+        allowed.status == 200 && allowed.body["semantic"] == "on" && allowed_embeds == 1,
+        json!({ "found": allowed.body, "embedded": allowed_embeds }),
+    );
+    s.ok(
+        "the reader's ledger refusing (its lending used up) refuses it, 402, saying so, with nothing embedded",
+        lent(&payer) && payer_embeds == 0,
+        json!({ "refused": payer.body, "embedded": payer_embeds }),
+    );
+    s.ok(
+        "the owner's ledger refusing (the fragment at its cap, $0 here) refuses it, 402, saying so, with nothing embedded",
+        capped(&open) && open_embeds == 0,
+        json!({ "refused": open.body, "embedded": open_embeds }),
+    );
+    s.ok(
+        "both refusing, the reader's refusal is the one said, with nothing embedded",
+        lent(&both) && !capped(&both) && both_embeds == 0,
+        json!({ "refused": both.body, "embedded": both_embeds }),
+    );
+    let gate = part_ms(&slowed, "gate");
+    s.ok(
+        "the two ledgers are asked side by side: each slowed by 1 s, the gate waits about 1 s, not 2",
+        slowed.status == 200 && gate.is_some_and(|ms| (SLOW_LEDGER_MS..2 * SLOW_LEDGER_MS).contains(&ms)),
+        json!({ "gate_ms": gate, "status": slowed.status }),
+    );
+    Ok(())
 }
 
 /// The index of `name`'s life `incarnation` (its live one's, none named),
@@ -88,6 +183,7 @@ pub fn search(s: &mut Suite, api: &Api) -> Result<()> {
         return Ok(());
     }
     let (owner, name) = checks(s, api)?;
+    gate_checks(s, api)?;
     // ---- the node restarted holds what was written
     s.stop()?;
     let api = s.start(false)?;

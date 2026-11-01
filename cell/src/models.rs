@@ -222,14 +222,23 @@ impl Charge {
 /// what this isolate heard within the minute; a ledger that does not
 /// answer refuses nothing), and the call's charge. Whose cap applies: the
 /// payer's own fragment's, on its ledger; another owner's, asked of
-/// theirs, unless the spender is that owner's (decision 26).
+/// theirs, unless the spender is that owner's (decision 26). The two are
+/// asked side by side: neither answer depends on the other, and a cold
+/// one wakes its Ledger (FIN-320). Both refusing, the payer's is said.
 async fn gate(env: &Env, payer: &str, agent: Option<&str>, fragment: Option<&InFragment<'_>>, model: &'static str, name: &'static str) -> CellResult<Charge> {
     let own = fragment.filter(|f| f.owner == payer);
     let capped = own.filter(|f| !f.by_owner).map(|f| f.name.to_string());
-    ledger::may(env, payer, &MaySpend { spend: Spend::AgentTurn, by_owner: capped.is_none(), fragment: capped }).await?;
-    if let Some(f) = fragment.filter(|f| f.owner != payer && !f.by_owner) {
-        ledger::may(env, f.owner, &FragmentOpen { fragment: f.name.to_string() }).await?;
-    }
+    let may = MaySpend { spend: Spend::AgentTurn, by_owner: capped.is_none(), fragment: capped };
+    let spend = ledger::may(env, payer, &may);
+    let open = async {
+        match fragment.filter(|f| f.owner != payer && !f.by_owner) {
+            Some(f) => ledger::may(env, f.owner, &FragmentOpen { fragment: f.name.to_string() }).await,
+            None => Ok(()),
+        }
+    };
+    let (spend, open) = futures_util::future::join(spend, open).await;
+    spend?;
+    open?;
     Ok(Charge {
         env: env.clone(),
         payer: payer.to_string(),
