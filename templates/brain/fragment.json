@@ -49,7 +49,7 @@
       "input": { "type": "object", "additionalProperties": false, "properties": { "full": { "type": "boolean" } } }
     }
   },
-  "triggers": [{ "files": "**", "run": "changed" }],
+  "triggers": [{ "files": "**", "run": "changed" }, { "installed": true, "run": "changed" }],
   "meta": {
     "title": "Brain",
     "description": "A knowledge base your agents keep: wikis of sources and pages, searched by words and meaning, shared with whoever you add."

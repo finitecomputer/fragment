@@ -10,7 +10,9 @@
 // by words and by meaning, written and asked through `this.searchIndex`:
 // each markdown page a source (its path; its bytes' sha256 the revision),
 // cut into sections by applib/sections.mjs. Each move of main runs
-// `changed` (fragment.json's file trigger), a job: it marks the paths that
+// `changed` (fragment.json's file trigger), and so does each install of a
+// new release (its installed trigger: an index of an older `FORMAT` is
+// rebuilt with no one acting), a job: it marks the paths that
 // moved (`mark`, a mutation, which open pages follow), then takes them in
 // batches (`reindex`, a query that reads the files at main and writes the
 // index) until none are left for it, and goes on in a run of its own past

@@ -573,6 +573,17 @@ impl FragmentCell {
                 )?;
                 json!({ "triggers": triggers, "run": run.first().and_then(|r| r["id"].as_i64()) })
             }
+            Some("blessed-stale") => {
+                // as if the platform had deployed a newer release of its
+                // blessed template since: its next request installs that
+                // release again (plane.rs `blessed_current`)
+                let installed = self.meta(MetaKey::Blessed)?;
+                if let Some(installed) = &installed {
+                    let t = installed.split_once('@').map_or(installed.as_str(), |(t, _)| t);
+                    self.set_meta(MetaKey::Blessed, &format!("{t}@older"))?;
+                }
+                json!({ "stale": installed.is_some() })
+            }
             Some("legacy-member-kind") => {
                 // a member row from before `members.kind` (2026-09-24): its
                 // kind NULL, as such rows were left
