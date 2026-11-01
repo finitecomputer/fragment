@@ -114,19 +114,24 @@ export function createAppsPage(page, h) {
     }
   }
 
-  // Each app's reach, eight at a time: its secrets (an editor's) and its
-  // door (its owner's); what cannot be read is left unsaid.
+  // An app's reach, read now: its secrets (an editor's) and its door (its
+  // owner's); what cannot be read is left unsaid.
+  async function readReach(f) {
+    const [secrets, door] = await Promise.all([
+      h.api("GET", `/api/f/${seg(f.name)}/secrets`).then((r) => r.secrets ?? [], () => null),
+      owns(f) ? h.api("GET", `/api/f/${seg(f.name)}/door`).then((r) => r.bound ?? null, () => null) : null,
+    ]);
+    return { secrets, door };
+  }
+  // Each app's reach, eight at a time.
   async function loadReach() {
     const mine = visit;
     const rows = h.state.fragments.filter((f) => listed(f) && edits(f));
     for (let offset = 0; offset < rows.length; offset += 8) {
       await Promise.all(rows.slice(offset, offset + 8).map(async (f) => {
-        const [secrets, door] = await Promise.all([
-          h.api("GET", `/api/f/${seg(f.name)}/secrets`).then((r) => r.secrets ?? [], () => null),
-          owns(f) ? h.api("GET", `/api/f/${seg(f.name)}/door`).then((r) => r.bound ?? null, () => null) : null,
-        ]);
+        const read = await readReach(f);
         if (mine !== visit) return;
-        reach.set(f.name, { secrets, door });
+        reach.set(f.name, read);
       }));
       if (mine !== visit) return;
       render();
@@ -218,11 +223,7 @@ export function createAppsPage(page, h) {
       endBusy(name, operation);
     }
     const f = h.state.fragments.find((x) => x.name === name);
-    const [secrets, door] = await Promise.all([
-      h.api("GET", `/api/f/${seg(name)}/secrets`).then((r) => r.secrets ?? [], () => null),
-      f && owns(f) ? h.api("GET", `/api/f/${seg(name)}/door`).then((r) => r.bound ?? null, () => null) : null,
-    ]);
-    reach.set(name, { secrets, door });
+    if (f) reach.set(name, await readReach(f));
     render();
   }
 
@@ -329,6 +330,17 @@ export function createAppsPage(page, h) {
     if (expanded.get(name) === section) expanded.delete(name);
     else expanded.set(name, section);
     render();
+    // its Reaches opened: what it reaches read again, so a key or a door
+    // given it since the page was read shows
+    const f = h.state.fragments.find((x) => x.name === name);
+    if (expanded.get(name) === "reach" && f) {
+      const mine = visit;
+      readReach(f).then((read) => {
+        if (mine !== visit) return;
+        reach.set(name, read);
+        render();
+      });
+    }
   }
 
   function titleEditor(f) {
