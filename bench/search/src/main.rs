@@ -802,6 +802,40 @@ mod tests {
         std::fs::remove_dir_all(&work).unwrap();
     }
 
+    /// The gate measures what brains index: the bench's conversion of each
+    /// parity fixture page is the brain's own (`upserts.json`, which the
+    /// brain's Node test writes from templates/brain), and so is each chunk
+    /// it embeds.
+    #[test]
+    fn across_writes_what_the_brain_writes() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/parity");
+        let (pages, _) = load(&root.join("corpus")).unwrap();
+        let mut ours: Vec<fragment_proto::search::Upsert> = pages.iter().map(|(p, s)| across::upsert(p, s).0).collect();
+        ours.sort_by(|a, b| a.source.cmp(&b.source));
+        let shape = |up: &fragment_proto::search::Upsert| {
+            let sections: Vec<serde_json::Value> = up
+                .sections
+                .iter()
+                .map(|s| {
+                    let mut v = serde_json::json!({ "id": s.id, "text": s.text, "context": s.context });
+                    if let Some(h) = &s.heading {
+                        v["heading"] = serde_json::json!(h);
+                    }
+                    v
+                })
+                .collect();
+            serde_json::json!({ "source": up.source, "title": up.title, "fields": up.fields, "sections": sections })
+        };
+        let golden: Vec<serde_json::Value> = serde_json::from_slice(&std::fs::read(root.join("upserts.json")).unwrap()).unwrap();
+        assert_eq!(ours.iter().map(shape).collect::<Vec<_>>(), golden);
+        for (up, mut g) in ours.iter().zip(golden) {
+            g["revision"] = serde_json::json!("r");
+            let theirs: fragment_proto::search::Upsert = serde_json::from_value(g).unwrap();
+            let inputs = |u: &fragment_proto::search::Upsert| fragment_core::searchable::chunked(u, 8192, Some("search_document: ")).into_iter().map(|c| c.input).collect::<Vec<_>>();
+            assert_eq!(inputs(up), inputs(&theirs), "{}", up.source);
+        }
+    }
+
     #[test]
     fn questions_must_name_the_corpus_pages() {
         let dir = std::env::temp_dir().join(format!("search-bench-q-{}", std::process::id()));

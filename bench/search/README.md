@@ -86,9 +86,13 @@ target/release/search-bench across --corpus <dir> --questions <file.jsonl> --wor
 ```
 
 It runs what ships (`src/across.rs`), not the prototypes above:
-- **Chunks:** each page is written as the brain writes it (`wire::Upsert`)
-  and cut by `fragment_core::searchable::chunked`, at the slot's window
-  and document prefix, so each chunk embeds what production embeds.
+- **Chunks:** each page is written as the brain writes it (`wire::Upsert`:
+  wiki links as their words, text cleaned, title, heading and context
+  clipped) and cut by `fragment_core::searchable::chunked`, at the slot's
+  window and document prefix, so each chunk embeds what production embeds.
+  `fixtures/parity/` holds it to the brain: `upserts.json` is what the
+  brain itself writes for those pages (its Node test, which writes the
+  file again with `BENCH_PARITY_WRITE=1`), and a test here compares.
 - **Each fragment's index:** the cell's SearchIndex, step by step. That's
   the same FTS5 table, tokenizer and field weights; BM25's best 100
   chunks; the sign codes against the question over all chunks, the best
