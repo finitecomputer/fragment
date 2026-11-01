@@ -28,6 +28,7 @@ mod finite_private;
 mod search;
 mod search_across;
 mod search_bench;
+mod import_release;
 mod governance;
 mod frames;
 mod icons;
@@ -139,6 +140,7 @@ const LANES: &[Lane] = &[
     search::search,
     search_across::search_across,
     search_bench::search_bench,
+    import_release::import_release,
     chat::chat,
     shell::shell_ui,
     wipe::wipe,
@@ -172,7 +174,7 @@ const LANES: &[Lane] = &[
 /// fragment's deploy (after `effects`) up to it, so its first cron minute
 /// passes while they run, as in a whole run.
 pub const SHARDS: [&[&str]; 4] = [
-    &["signin", "shell", "computers", "export", "search", "search-across", "search-bench", "hermes", "agent-smoke", "agent-ask", "agent-app", "agent-restart", "bot-mode", "checkout", "restart"],
+    &["signin", "shell", "computers", "export", "search", "search-across", "search-bench", "import-release", "hermes", "agent-smoke", "agent-ask", "agent-app", "agent-restart", "bot-mode", "checkout", "restart"],
     &["connections", "shell-ui", "wipe", "sync", "migrations"],
     &["deploy", "templates", "facet-cap", "app-lockdown", "site", "watch", "icons", "schemas", "channels", "live", "routes", "cli", "browser", "jobs", "triggers", "sessions", "sessions-ui", "finite-private", "chat"],
     &[
