@@ -103,7 +103,7 @@ pub fn plain_models() -> Value {
 }
 
 /// `plain_models`, its embeddings slot the default model pinned at a
-/// version, with the task prefixes nomic-embed-text asks for
+/// version, taking one input a call, with the task prefixes nomic-embed-text asks for
 /// (`Shape::EmbeddingsRepinned`): the same vectors in name, another space,
 /// which no index of the plain node's holds.
 pub fn repinned_models() -> Value {
@@ -115,6 +115,8 @@ pub fn repinned_models() -> Value {
         "version": "e2e-2",
         "document_prefix": "search_document: ",
         "query_prefix": "search_query: ",
+        // a model that takes one input a call (Tinfoil's takes 32)
+        "inputs_max": 1,
     });
     models
 }
