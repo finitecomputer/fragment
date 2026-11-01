@@ -145,6 +145,13 @@ impl Front {
     /// `heard` names, each request a line of `log` (the boot's).
     pub(crate) fn bind(port: u16, heard: Arc<Heard>, log: Arc<Mutex<File>>) -> Result<Front> {
         let listener = TcpListener::bind(("127.0.0.1", port)).with_context(|| format!("the node's port :{port} is taken"))?;
+        Front::serve(listener, heard, log)
+    }
+
+    /// `bind`, on a listener already bound (a port picked and let go before
+    /// a bind may be another's by then).
+    pub(crate) fn serve(listener: TcpListener, heard: Arc<Heard>, log: Arc<Mutex<File>>) -> Result<Front> {
+        let port = listener.local_addr()?.port();
         let stop = Arc::new(AtomicBool::new(false));
         let stopping = stop.clone();
         let accepting = thread::Builder::new().name(format!("front-{port}")).spawn(move || {

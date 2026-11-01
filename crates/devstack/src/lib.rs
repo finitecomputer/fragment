@@ -918,10 +918,11 @@ mod tests {
         std::io::BufRead::read_line(&mut std::io::BufReader::new(child.stdout.take().unwrap()), &mut line).unwrap();
         let member: u32 = line.trim().parse().unwrap();
         LIVE.lock().unwrap().groups.push(child.id());
-        let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
         let log = std::env::temp_dir().join(format!("devstack-node-{}.log", child.id()));
         let file = Arc::new(Mutex::new(fs::File::create(&log).unwrap()));
-        let front = front::Front::bind(port, Arc::new(front::Heard::default()), file).unwrap();
+        let front = front::Front::serve(listener, Arc::new(front::Heard::default()), file).unwrap();
         (Node { child, own_group: true, base: format!("http://127.0.0.1:{port}"), port, log, reaped: false, _front: front }, member)
     }
 
