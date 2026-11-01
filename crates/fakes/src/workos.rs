@@ -6,10 +6,13 @@
 //! one, a browser gets a one-field form (dev), and a test sets who comes
 //! next. Levers: change a user's email, fail the next authorize, the codes
 //! and sessions it handed out. Its users can be kept in a file
-//! (`keep_users_in`), as a dev stack keeps its registry: a fake made new
-//! each start would hand the first email to sign in the subject (`user_…1`)
-//! of whoever held it before, and the registry, which signs a person in by
-//! subject, would sign them in as that person.
+//! (`keep_users_in`), as a dev stack keeps its registry, and the subjects a
+//! registry already signs people in by taken as they are (`adopt`): a fake
+//! made new each start would hand the first email to sign in the subject
+//! (`user_…1`) of whoever held it before, and the registry, which signs a
+//! person in by subject, would sign them in as that person. A user is
+//! handed out only once kept: a write that fails makes no one (the
+//! authorize answers 503).
 //!
 //! And the session AuthKit keeps in a browser (its own cookie, on its own
 //! domain), which answers an authorize without asking anyone: the fake
@@ -295,26 +298,32 @@ impl State {
         }
     }
 
-    fn user_for(&mut self, email: &str) -> User {
+    /// The user `email` signs in as, made the first time, and kept before
+    /// it is handed out: one not kept is made no one (its id handed out
+    /// again by the next, not after a restart to another email).
+    fn user_for(&mut self, email: &str) -> std::io::Result<User> {
         if let Some(u) = self.users.iter().find(|u| u.email.eq_ignore_ascii_case(email)) {
-            return u.clone();
+            return Ok(u.clone());
         }
+        let counter = self.counter;
         let user = User { id: self.next("user"), email: email.to_string(), verified: true };
         self.users.push(user.clone());
-        self.keep();
-        user
+        if let Err(e) = self.keep() {
+            self.users.pop();
+            self.counter = counter;
+            return Err(e);
+        }
+        Ok(user)
     }
 
     /// The users and the counter, written to `users_file` (whole, then
     /// moved into place, so a file is never half written).
-    fn keep(&self) {
-        if let Some(path) = &self.users_file {
-            let kept = serde_json::to_vec(&Kept { counter: self.counter, users: self.users.clone() }).expect("users serialize");
-            let tmp = path.with_extension("tmp");
-            if std::fs::write(&tmp, kept).is_ok() {
-                let _ = std::fs::rename(&tmp, path);
-            }
-        }
+    fn keep(&self) -> std::io::Result<()> {
+        let Some(path) = &self.users_file else { return Ok(()) };
+        let kept = serde_json::to_vec(&Kept { counter: self.counter, users: self.users.clone() }).expect("users serialize");
+        let tmp = path.with_extension("tmp");
+        std::fs::write(&tmp, kept)?;
+        std::fs::rename(&tmp, path)
     }
 }
 
@@ -463,7 +472,7 @@ impl WorkOs {
     /// `email`'s accounts at `provider`, oldest first.
     pub fn accounts(&self, email: &str, provider: &str) -> Vec<Connected> {
         let mut s = self.state.lock().expect("workos state");
-        let user = s.user_for(email);
+        let user = s.user_for(email).expect("the fake keeps its users");
         s.accounts.get(&(user.id, provider.to_string())).map(|l| l.iter().map(Account::read).collect()).unwrap_or_default()
     }
 
@@ -477,7 +486,7 @@ impl WorkOs {
     /// its id.
     pub fn add_account(&self, email: &str, provider: &str, identifier: &str, label: &str) -> String {
         let mut s = self.state.lock().expect("workos state");
-        let user = s.user_for(email);
+        let user = s.user_for(email).expect("the fake keeps its users");
         let a = s.made(&user.id, provider, false);
         a.identifier = Some(identifier.to_string());
         a.label = Some(label.to_string());
@@ -503,7 +512,7 @@ impl WorkOs {
     /// to need authorizing again (`false`).
     pub fn authorize_account(&self, email: &str, provider: &str, id: &str, authorized: bool) {
         let mut s = self.state.lock().expect("workos state");
-        let user = s.user_for(email);
+        let user = s.user_for(email).expect("the fake keeps its users");
         if let Some(a) = s.accounts.get_mut(&(user.id, provider.to_string())).and_then(|l| l.iter_mut().find(|a| a.id == id)) {
             a.authorized = authorized;
         }
@@ -668,7 +677,10 @@ impl WorkOs {
                         );
                         return Response::bytes(200, "text/html; charset=utf-8", page.into_bytes());
                     }
-                    let user = s.user_for(&email);
+                    let user = match s.user_for(&email) {
+                        Ok(u) => u,
+                        Err(e) => return problem(503, "server_error", &format!("the fake could not keep its users: {e}")),
+                    };
                     let (code, sid) = (s.next("code"), s.next("session"));
                     s.codes.insert(code.clone(), (user.id, sid, now_s()));
                     redirect(&with_query(&back, &[("code", &code), ("state", &q("state"))]))
@@ -846,7 +858,7 @@ impl WorkOs {
 
     /// The user an email signs in as (made the first time).
     pub fn user(&self, email: &str) -> User {
-        self.state.lock().expect("workos state").user_for(email)
+        self.state.lock().expect("workos state").user_for(email).expect("the fake keeps its users")
     }
 
     /// A user's email changes; their id does not.
@@ -855,7 +867,7 @@ impl WorkOs {
         if let Some(u) = s.users.iter_mut().find(|u| u.id == id) {
             u.email = email.to_string();
         }
-        s.keep();
+        s.keep().expect("the fake keeps its users");
     }
 
     /// Its users kept in `path` from now on: those the file holds come back
@@ -873,8 +885,29 @@ impl WorkOs {
             }
         }
         s.users_file = Some(path.to_path_buf());
-        s.keep();
+        s.keep()?;
         Ok(s.users.len())
+    }
+
+    /// Subjects a registry already signs people in by (`(subject, email)`),
+    /// each its user as it is: handed to that email alone, never made again
+    /// for another (the counter goes past every one of the fake's own
+    /// form). Kept, when users are (`keep_users_in`); answers how many were
+    /// new to it.
+    pub fn adopt(&self, subjects: &[(String, String)]) -> std::io::Result<usize> {
+        let mut s = self.state.lock().expect("workos state");
+        let mut new = 0;
+        for (subject, email) in subjects {
+            if let Some(n) = subject.strip_prefix("user_").and_then(|n| n.parse::<u64>().ok()) {
+                s.counter = s.counter.max(n);
+            }
+            if !s.users.iter().any(|u| u.id == *subject) {
+                s.users.push(User { id: subject.clone(), email: email.clone(), verified: true });
+                new += 1;
+            }
+        }
+        s.keep()?;
+        Ok(new)
     }
 
     /// Whether WorkOS has verified a user's email.
@@ -883,7 +916,7 @@ impl WorkOs {
         if let Some(u) = s.users.iter_mut().find(|u| u.id == id) {
             u.verified = verified;
         }
-        s.keep();
+        s.keep().expect("the fake keeps its users");
     }
 
     /// The next authorize redirects back with this error.
@@ -895,7 +928,7 @@ impl WorkOs {
     /// need authorizing again (`false`).
     pub fn connect(&self, email: &str, provider: &str, authorized: bool) {
         let mut s = self.state.lock().expect("workos state");
-        let user = s.user_for(email);
+        let user = s.user_for(email).expect("the fake keeps its users");
         s.compatibility(&user.id, provider).authorized = authorized;
     }
 
@@ -903,7 +936,7 @@ impl WorkOs {
     /// `account_display_name`), as a connect through the platform sets it.
     pub fn label(&self, email: &str, provider: &str, label: &str) {
         let mut s = self.state.lock().expect("workos state");
-        let user = s.user_for(email);
+        let user = s.user_for(email).expect("the fake keeps its users");
         s.compatibility(&user.id, provider).label = Some(label.to_string());
     }
 
@@ -911,7 +944,7 @@ impl WorkOs {
     /// connect through the platform imports what the person allowed.
     pub fn grant(&self, email: &str, provider: &str, scopes: &[&str]) {
         let mut s = self.state.lock().expect("workos state");
-        let user = s.user_for(email);
+        let user = s.user_for(email).expect("the fake keeps its users");
         s.compatibility(&user.id, provider).scopes = Some(scopes.iter().map(|s| s.to_string()).collect());
     }
 
@@ -942,7 +975,7 @@ impl WorkOs {
     /// answered from it until its logout. Answers its id.
     pub fn hold(&self, email: &str, age_s: i64) -> String {
         let mut s = self.state.lock().expect("workos state");
-        let (user, sid) = (s.user_for(email), s.next("session"));
+        let (user, sid) = (s.user_for(email).expect("the fake keeps its users"), s.next("session"));
         s.held = Some((user.id, sid.clone(), now_s() - age_s));
         sid
     }

@@ -148,9 +148,6 @@ const DEV_MAIL_FROM: &str = "fragment <mail@fragment.localhost>";
 /// The WorkOS fake's environment in dev.
 const DEV_WORKOS_CLIENT: &str = "client_fragment_dev";
 const DEV_WORKOS_KEY: &str = "sk_test_fragment_dev";
-/// The address the WorkOS fake's sign-in form offers (crates/fakes/src/workos.rs),
-/// the first user a dev node's fake makes.
-const DEV_WORKOS_FIRST_EMAIL: &str = "dev@fragment.localhost";
 const DEV_ORG: &str = "fragment-dev";
 
 /// A command as errors show it: the program and its arguments only
@@ -247,13 +244,12 @@ fn dev(args: &[String]) -> Result<()> {
         _ => {
             let fake = fragment_fakes::workos::WorkOs::start_on(DEV_WORKOS_PORT, DEV_WORKOS_CLIENT, DEV_WORKOS_KEY)?;
             // its users kept as the node keeps its people (who sign in by
-            // subject): a fake made new each start would give the first
-            // email to sign in the subject of whoever had it before
-            if fake.keep_users_in(&workos_users)? == 0 {
-                // the first start that keeps them, on a node from before:
-                // the dev form's address first, as it came first then
-                fake.user(DEV_WORKOS_FIRST_EMAIL);
-            }
+            // subject), and every subject the node signs someone in by taken
+            // as it is (a node from before the file, or one whose file
+            // went): a fake made new each start would give the first email
+            // to sign in the subject of whoever had it before
+            fake.keep_users_in(&workos_users)?;
+            fake.adopt(&devstack::signed_in_subjects(&devstack::cell_dir(), &format!("workos:{DEV_WORKOS_CLIENT}"))?)?;
             (devstack::WorkOsVars { client_id: DEV_WORKOS_CLIENT.into(), api_key: DEV_WORKOS_KEY.into(), api_url: Some(fake.url.clone()) }, Some(fake))
         }
     };
