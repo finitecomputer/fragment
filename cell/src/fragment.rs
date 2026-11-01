@@ -42,6 +42,7 @@
 //!   POST   /job/advance|effect|finish     a run's Workflow (jobs.rs); never routed from outside
 //!   PUT    /api/cap                       owner: the fragment's monthly cap on the owner's ledger (meter.rs)
 //!   POST   /cap/files/read|list|stat      the app facet's `Files` capability (files.rs); never routed from outside
+//!   POST   /cap/search/upsert|delete|query|status  the app facet's `Search` capability (searchable.rs); never routed from outside
 //!   POST   /deliver/report                the delivery consumer (deliveries.rs); never routed from outside
 //!   GET    /api/card                      viewer: the preview card's JPEG (card.rs)
 //!   POST   /api/card  PUT /api/card       editor: a shot again; an upload as the card (card.rs)
@@ -926,6 +927,15 @@ impl FragmentCell {
             let op = op.to_string();
             let body: Value = body_json(&mut req).await?;
             return self.cap_files(&op, &body).await;
+        }
+        if let Some(op) = path.strip_prefix("/cap/search/") {
+            // Only the `Search` capability sets the header (searchable.rs)
+            if req.headers().get(crate::files::CAP_HEADER)?.as_deref() != Some("search") {
+                return Err(CellError::new(ErrorCode::NotFound, format!("no route {path}")));
+            }
+            let op = op.to_string();
+            let body: Value = body_json(&mut req).await?;
+            return self.cap_search(&op, body).await;
         }
         if path == "/invites/claim" || path == "/invites/decline" || path == "/members/agent" {
             // Only the platform sets the header (a person's yes or no; an
