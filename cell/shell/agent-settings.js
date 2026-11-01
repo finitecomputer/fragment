@@ -209,6 +209,9 @@ export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, 
       event.preventDefault();
       if (!name.value.trim()) return name.focus();
       add.disabled = true;
+      // made here, its chat opens when it is (onboarding.js `creatingAgent`)
+      add.textContent = "Adding…";
+      said.hidden = true;
       try {
         await addAgent({ name: name.value.trim(), role: role.value.trim() });
       } catch (e) {
@@ -216,6 +219,7 @@ export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, 
         said.hidden = false;
       } finally {
         add.disabled = false;
+        add.textContent = "Add agent";
       }
     };
     form.append(name, role, add);
