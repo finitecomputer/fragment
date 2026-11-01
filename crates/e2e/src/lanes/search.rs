@@ -108,6 +108,7 @@ fn moved_checks(s: &mut Suite, api: &Api, owner: &Keys, name: &str) -> Result<()
     let calls = s.ai.calls().len();
     let again = api.signed(owner, "POST", &path("/upsert"), Some(&fresh))?;
     let written: Vec<String> = s.ai.calls()[calls..].iter().filter(|c| c.model == MODEL).flat_map(|c| c.body["text"].as_array().cloned().unwrap_or_default()).filter_map(|t| t.as_str().map(str::to_string)).collect();
+    let batches: Vec<usize> = s.ai.calls()[calls..].iter().filter(|c| c.model == MODEL).map(|c| c.body["text"].as_array().map_or(0, Vec::len)).collect();
     let calls = s.ai.calls().len();
     let found = api.signed(owner, "POST", &path(""), Some(&json!({ "q": "harbour lantern audit" })))?;
     let asked: Vec<Value> = s.ai.calls()[calls..].iter().filter(|c| c.model == MODEL).map(|c| c.body["text"].clone()).collect();
@@ -127,6 +128,11 @@ fn moved_checks(s: &mut Suite, api: &Api, owner: &Keys, name: &str) -> Result<()
         written.len() == 2 && written.iter().all(|t| t.starts_with("search_document: ")) && asked == [json!(["search_query: harbour lantern audit"])]
             && emptied.body["space"]["document_prefix"] == "search_document: " && emptied.body["space"]["query_prefix"] == "search_query: ",
         json!({ "written": written, "asked": asked, "space": emptied.body["space"] }),
+    );
+    s.ok(
+        "a slot's model that takes one input a call is sent a write's chunks one a call",
+        again.status == 200 && batches == [1, 1],
+        json!({ "batches": batches }),
     );
     Ok(())
 }
