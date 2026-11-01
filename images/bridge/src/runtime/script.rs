@@ -14,6 +14,10 @@
 //! - `approve` or `risky`: a step, then a prompt (`once`, `deny`) the
 //!   owner answers; the reply says `(approved)`, `(denied)`, or
 //!   `(not approved)` once it expired;
+//! - `secret`: a card whose one option, `code`, is answered on the agent's
+//!   computer, never in a record (`PromptOption::computer`, as a sign-in's
+//!   code is); the reply says `(took N characters)`, never what they were,
+//!   or `(took nothing)` once it expired;
 //! - `choose`: a prompt of choices (`c0` Basil, `c1` Mint) and `other`, answered
 //!   in words, as Hermes' clarify asks it; the reply says `(chose: <the
 //!   label, or the words>)`, or `(chose: nothing)` once it expired. `other`
@@ -856,8 +860,8 @@ async fn turn(cfg: ScriptConfig, ts: TurnStart, mut rx: mpsc::Receiver<Heard>, e
     if says(&text, "approve") || says(&text, "risky") {
         emit(Event::Step { turn: id.clone(), step: Step { tool: "terminal".into(), args: "rm -rf ./scratch".into(), ok: true, excerpt: String::new(), category: Category::Shell, evidence: None } }).await;
         let options = vec![
-            PromptOption { id: "once".into(), label: "Allow once".into(), style: Some("primary".into()), words: false },
-            PromptOption { id: "deny".into(), label: "Deny".into(), style: Some("danger".into()), words: false },
+            PromptOption { id: "once".into(), label: "Allow once".into(), style: Some("primary".into()), words: false, computer: false },
+            PromptOption { id: "deny".into(), label: "Deny".into(), style: Some("danger".into()), words: false, computer: false },
         ];
         let prompt = format!("p-{}", &id[..12]);
         emit(Event::Prompt { turn: id.clone(), prompt, text: "Run `rm -rf ./scratch`?".into(), options, ttl_ms: None }).await;
@@ -872,8 +876,22 @@ async fn turn(cfg: ScriptConfig, ts: TurnStart, mut rx: mpsc::Receiver<Heard>, e
         };
         reply = format!("{reply} ({said})");
     }
+    if text.split_whitespace().any(|w| w == "secret") {
+        let options = vec![PromptOption { id: "code".into(), label: "Paste the code".into(), style: None, words: true, computer: true }];
+        let prompt = format!("s-{}", &id[..12]);
+        emit(Event::Prompt { turn: id.clone(), prompt, text: "Paste the code your browser shows you.".into(), options, ttl_ms: None }).await;
+        let took = match rx.recv().await {
+            Some(Heard::Answer(Some(_), Some(words))) => format!("{} characters", words.chars().count()),
+            Some(Heard::Answer(..) | Heard::Told(_) | Heard::Steered(_)) => "nothing".into(),
+            Some(Heard::Stop) | None => {
+                emit(Event::End { turn: id, outcome: Outcome::Stopped }).await;
+                return;
+            }
+        };
+        reply = format!("{reply} (took {took})");
+    }
     if text.split_whitespace().any(|w| w == "choose") {
-        let options = [("c0", "Basil", false), ("c1", "Mint", false), ("other", "Something else", true)].map(|(id, label, words)| PromptOption { id: id.into(), label: label.into(), style: None, words });
+        let options = [("c0", "Basil", false), ("c1", "Mint", false), ("other", "Something else", true)].map(|(id, label, words)| PromptOption { id: id.into(), label: label.into(), style: None, words, computer: false });
         let prompt = format!("c-{}", &id[..12]);
         emit(Event::Prompt { turn: id.clone(), prompt, text: "What should I plant?".into(), options: options.to_vec(), ttl_ms: None }).await;
         let chose = match rx.recv().await {

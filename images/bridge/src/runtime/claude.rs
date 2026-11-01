@@ -834,8 +834,8 @@ async fn ask(t: &mut Turn, request: &str, r: &Value, events: &mpsc::Sender<Event
         let card = format!("{}-q{i}", records::cut(&tool_use_id, 56));
         let text = q["question"].as_str().unwrap_or("").to_string();
         let labels: Vec<String> = q["options"].as_array().into_iter().flatten().filter_map(|o| o["label"].as_str().map(str::to_string)).collect();
-        let mut options: Vec<PromptOption> = labels.iter().enumerate().map(|(j, l)| PromptOption { id: format!("o{j}"), label: l.clone(), style: None, words: false }).collect();
-        options.push(PromptOption { id: "other".into(), label: "Other".into(), style: None, words: true });
+        let mut options: Vec<PromptOption> = labels.iter().enumerate().map(|(j, l)| PromptOption { id: format!("o{j}"), label: l.clone(), style: None, words: false, computer: false }).collect();
+        options.push(PromptOption { id: "other".into(), label: "Other".into(), style: None, words: true, computer: false });
         let _ = events.send(Event::Prompt { turn: t.id.clone(), prompt: card.clone(), text: text.clone(), options, ttl_ms: None }).await;
         cards.push((card, text, labels, None));
     }

@@ -1211,6 +1211,65 @@ function fragmentAt(url, sender, origin) {
   return FRAGMENT_NAME.test(name) ? name : null;
 }
 
+// ---- an answer for the computer (docs/bridge.md, "An answer for the
+// computer"): a card's option its agent's runtime takes on its computer
+// alone, never in a record (a sign-in's code), handed by the chat's page.
+// Taken only from a frame of the person's own fragment, for an agent of
+// their own computer; handed to that computer's `/answer/` page, framed
+// unseen through a port ticket (its owner's alone) and dropped once it
+// answered; what came of it told to the chat. Never kept. ----
+const COMPUTER_ANSWER_WAIT_MS = 90_000;
+addEventListener("message", async (event) => {
+  const d = event.data;
+  if (d?.fragment !== KIND.cardToComputer || typeof d.nonce !== "string" || typeof d.value !== "string") return;
+  const frame = [...document.querySelectorAll("iframe[data-fragment]")].find((f) => f.contentWindow === event.source);
+  const name = frame?.dataset.fragment;
+  if (!name || !byName(name)) return;
+  let origin;
+  try {
+    origin = await originOf(name);
+  } catch {
+    return;
+  }
+  if (event.origin !== origin || frame.contentWindow !== event.source) return;
+  const reply = (ok, error) => event.source.postMessage({ fragment: KIND.computerAnswered, nonce: d.nonce, ok, ...(error ? { error } : {}) }, origin);
+  const agent = state.agents.get(d.agent)?.fragment;
+  if (!state.computer || !agent) return reply(false, "Only its owner answers this, from their own Finite.");
+  let ticket;
+  try {
+    ticket = await api("POST", `/api/computers/${seg(state.computer.computer)}/ports/6080/ticket`, { path: `/answer/?agent=${encodeURIComponent(agent)}` });
+  } catch {
+    return reply(false, "Your computer could not be reached: try again.");
+  }
+  const port = document.createElement("iframe");
+  port.hidden = true;
+  port.setAttribute("aria-hidden", "true");
+  port.title = "An answer for your computer";
+  const portOrigin = new URL(ticket.url).origin;
+  let timer = 0;
+  const heard = (e) => {
+    const m = e.data;
+    if (e.source !== port.contentWindow || e.origin !== portOrigin || m?.agent !== agent) return;
+    if (m.fragment === KIND.computerReady) {
+      port.contentWindow.postMessage({ fragment: KIND.cardToComputer, agent, turn: d.turn, prompt: d.prompt, option: d.option, value: d.value, nonce: d.nonce }, portOrigin);
+    } else if (m.fragment === KIND.computerAnswered && m.nonce === d.nonce) {
+      finish(m.ok === true, typeof m.error === "string" ? m.error : undefined);
+    }
+  };
+  const finish = (ok, error) => {
+    removeEventListener("message", heard);
+    clearTimeout(timer);
+    port.remove();
+    reply(ok, error);
+  };
+  addEventListener("message", heard);
+  // a computer asleep wakes for its port, which takes a while; one that
+  // never answers is said so
+  timer = setTimeout(() => finish(false, "Your computer didn't answer: try again."), COMPUTER_ANSWER_WAIT_MS);
+  port.src = ticket.url;
+  document.body.append(port);
+});
+
 // ---- an agent's screen: its own desktop, a port of its computer's own
 // origin, through a ticket that lands on the agent's page (docs/computers.md, Ports) ----
 async function openScreen(agent) {

@@ -383,6 +383,8 @@ export function mount(root) {
     answers: new Map(), // `cardKey` (or a bare prompt id) -> Map(poster -> option): each poster's first prompt_response on `chat`
     answering: new Map(), // `cardKey` -> the option this page posted, until its card closes
     typed: new Map(), // `cardKey` -> what is typed in its card's field (an option answered in words)
+    handed: new Map(), // `cardKey` -> what came of an answer this page handed its agent's computer, in words
+    toComputer: new Map(), // a nonce -> the `cardKey` whose answer it handed the shell, until the shell says
     stopping: new Set(), // turns this page asked to stop
     pending: null, // { seq, at, n, target }: this page's message no turn has started on yet
     here: [], // the fragment's presence: [{ id, principal, data }]
@@ -699,7 +701,9 @@ export function mount(root) {
   // a card that takes words (an option answered in words): its asker's
   // message in the chat while it is open answers it as that option, as if
   // typed on the card (docs/chat-records.md, "A person's message")
-  const takesWords = (p) => p.options.some((o) => o.words === true);
+  // a card answered in words in the message box too: never one whose words
+  // are the computer's alone (a sign-in's code), which no message carries
+  const takesWords = (p) => p.options.some((o) => o.words === true && o.computer !== true);
   const cardFor = (t, principal) => running(t) && [...t.prompts.values()].some((p) => takesWords(p) && p.asks === principal && !t.closed.has(p.prompt) && !expired(p));
   // whether message `m` answered one of turn `t`'s cards: by its asker, said
   // after the card and before its close
@@ -1616,11 +1620,12 @@ export function mount(root) {
     // only the card's asker's answer counts here, as only theirs counts to the agent
     const card = cardKey(t.key, p.prompt);
     const sent = state.answering.get(card) ?? state.answers.get(card)?.get(p.asks) ?? state.answers.get(p.prompt)?.get(p.asks) ?? null;
+    const handed = state.handed.get(card) ?? null;
     const gone = !closed && (expired(p) || t.end?.outcome === "stopped");
     const mayAnswer = !!state.me && p.asks === state.me.principal && !closed && !gone;
     const asks = who(p.asks);
     const by = closed?.by ? who(closed.by).name : "";
-    const sig = JSON.stringify([closed?.outcome, closed?.option, by, sent, gone, mayAnswer, asks.name, who(t.agent).name]);
+    const sig = JSON.stringify([closed?.outcome, closed?.option, by, sent, handed, !!rosterOrigin, gone, mayAnswer, asks.name, who(t.agent).name]);
     return [
       key,
       cached(key, sig, () => {
@@ -1641,6 +1646,11 @@ export function mount(root) {
         else {
           const options = el("div", "options");
           for (const o of p.options) {
+            if (o.computer) {
+              // answered on its agent's computer alone, never a record
+              options.append(computerField(t, p.prompt, o, !mayAnswer || sent !== null || !rosterOrigin));
+              continue;
+            }
             if (o.words) {
               // answered in words: typed on the card, Enter sends them with it
               options.append(wordsField(t, p.prompt, o, !mayAnswer || sent !== null));
@@ -1655,7 +1665,8 @@ export function mount(root) {
             options.append(b);
           }
           card.append(options);
-          const note = !mayAnswer ? `Only ${asks.name} can answer this.` : sent !== null ? "Sent…" : "";
+          const onComputer = p.options.some((o) => o.computer);
+          const note = !mayAnswer ? `Only ${asks.name} can answer this.` : sent !== null ? "Sent…" : onComputer && !rosterOrigin ? "Open this chat in Finite to answer it." : onComputer ? handed ?? "This goes straight to your computer. It isn't kept in this chat." : "";
           if (note) card.append(el("div", "prompt-note", note));
         }
         return card;
@@ -1692,6 +1703,45 @@ export function mount(root) {
       e.preventDefault();
       const words = cutBytes(field.value.trim(), TEXT_MAX_BYTES);
       if (words && !disabled) answer(t, prompt, o.id, words);
+    };
+    form.append(field, go);
+    return form;
+  }
+  // An option answered on the agent's computer, never in a record (a
+  // sign-in's code: docs/chat-records.md, `computer`): typed on the card,
+  // masked, and handed to the shell (`KIND.cardToComputer`), which hands it
+  // to that computer alone; what came of it is said on the card. Neither
+  // kept nor shown here.
+  function computerField(t, prompt, o, disabled) {
+    const card = cardKey(t.key, prompt);
+    const form = el("form", "words");
+    const field = el("input");
+    field.type = "password";
+    field.autocomplete = "off";
+    field.dataset.option = o.id;
+    field.placeholder = o.label || o.id;
+    field.setAttribute("aria-label", o.label || o.id);
+    field.maxLength = TEXT_MAX_BYTES;
+    field.enterKeyHint = "send";
+    field.disabled = disabled;
+    const go = el("button", "send");
+    go.type = "submit";
+    go.title = "Send to your computer (Enter)";
+    go.setAttribute("aria-label", "Send to your computer");
+    go.replaceChildren(icon("send"));
+    const ready = () => (go.disabled = disabled || !field.value.trim());
+    field.oninput = ready;
+    ready();
+    form.onsubmit = (e) => {
+      e.preventDefault();
+      const value = field.value.trim();
+      if (!value || disabled || !rosterOrigin) return;
+      const nonce = crypto.randomUUID();
+      state.toComputer.set(nonce, card);
+      state.handed.set(card, "Sending to your computer…");
+      field.value = "";
+      window.parent.postMessage({ fragment: KIND.cardToComputer, agent: t.agent, turn: t.id, prompt, option: o.id, value, nonce }, rosterOrigin);
+      schedule();
     };
     form.append(field, go);
     return form;
@@ -2472,6 +2522,14 @@ export function mount(root) {
   }
   function fromShell(event) {
     const d = event.data;
+    // what came of an answer this page handed its agent's computer
+    if (d?.fragment === KIND.computerAnswered && typeof d.nonce === "string" && event.origin === rosterOrigin) {
+      const card = state.toComputer.get(d.nonce);
+      state.toComputer.delete(d.nonce);
+      if (card) state.handed.set(card, d.ok === true ? "Sent to your computer." : typeof d.error === "string" && d.error ? d.error.slice(0, 300) : "Your computer did not take it: try again.");
+      schedule();
+      return;
+    }
     if (d?.fragment === KIND.agents && Array.isArray(d.agents)) {
       rosterOrigin = event.origin;
       state.roster = d.agents
