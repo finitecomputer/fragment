@@ -25,6 +25,11 @@
 //!   supervisor and index, which a search's time less this is the
 //!   search's own.
 //!
+//! `SEARCH_BENCH_FANOUT=5,20` also writes as many fragments of
+//! `FANOUT_CHUNKS` as its widest, and times one question across the first
+//! 5, then 20 (`POST /api/search {q, in}`, what `fragment search --in`
+//! asks): the meta-brain's fan-out, embedded once, merged.
+//!
 //! It writes `timings.json` in its scratch directory and prints a table.
 //! Its fragments are the run's (`e2e-<run>-…`): `--sweep <run>` deletes
 //! them. Its spend is its person's, which the run reports as it ends.
@@ -55,6 +60,8 @@ const SECTIONS_PER_SOURCE: usize = 200;
 const WARM: usize = 30;
 /// How long a fragment sits idle before its first search is timed.
 const IDLE: Duration = Duration::from_secs(4 * 60);
+/// Chunks in each fragment a fan-out asks (`SEARCH_BENCH_FANOUT`).
+const FANOUT_CHUNKS: usize = 500;
 
 /// The words its text is drawn from, by a Zipf-like weight (the first
 /// most often): ordinary English, so an embeddings model reads it as
@@ -108,6 +115,37 @@ fn timed(f: impl FnOnce() -> Result<crate::api::Reply>) -> Result<(f64, u16, Val
     Ok((t0.elapsed().as_secs_f64() * 1000.0, r.status, r.body))
 }
 
+/// A fragment of `chunks` synthetic chunks, labelled `label`, written by a
+/// person of its own lent `lent` paid calls, its reader a viewer: its
+/// name, its owner, and its row.
+fn write(s: &mut Suite, api: &Api, reader: &fragment_nip98::Keys, lent: u64, label: &str, chunks: usize) -> Result<(String, fragment_nip98::Keys, Value)> {
+    let keys = api.person_paying(lent)?;
+    let created = s.create(api, &keys, &s.name(label))?;
+    let name = created["name"].as_str().context("its name")?.to_string();
+    let shared = api.share(&name, &api.identity(reader)?, "viewer")?;
+    anyhow::ensure!(shared.status == 200, "{name}: the reader's share: {shared}");
+    let t0 = Instant::now();
+    let seed = 0x9e37_79b9_7f4a_7c15 ^ chunks as u64 ^ label.len() as u64;
+    let pool = chunks.min(POOL_MAX);
+    let mut written = 0;
+    let mut source = 0;
+    while written < chunks {
+        let n = SECTIONS_PER_SOURCE.min(chunks - written);
+        let sections: Vec<Value> = (0..n).map(|i| json!({ "id": format!("s{i}"), "text": section_text(seed, written + i, pool) })).collect();
+        // one title for all: a chunk's embedding input begins with it
+        let body = json!({ "source": format!("bench/{source:04}"), "revision": "r1", "title": "Bench notes", "sections": sections });
+        let r = api.signed(&keys, "POST", &format!("/api/f/{name}/search/upsert"), Some(&body))?;
+        anyhow::ensure!(r.status == 200, "{name}: writing bench/{source:04}: {r}");
+        written += r.body["chunks"].as_u64().unwrap_or(0) as usize;
+        source += 1;
+    }
+    let status = api.signed(&keys, "GET", &format!("/api/f/{name}/search/status"), None)?;
+    let wrote_s = t0.elapsed().as_secs_f64();
+    println!("      {name}: {written} chunks in {source} sources, written in {wrote_s:.0} s");
+    s.ok(&format!("{chunks} synthetic chunks are written to one fragment's index"), status.body["chunks"].as_u64().is_some_and(|c| c as usize >= chunks), &status);
+    Ok((name, keys, json!({ "chunks": written, "distinct": pool, "sources": source, "written_s": wrote_s })))
+}
+
 pub fn search_bench(s: &mut Suite, api: &Api) -> Result<()> {
     let why = format!("it writes up to 36k synthetic chunks, embeds them (up to {RUN_PAID_CALLS} paid calls a run), waits {} minutes idle, and times searches", IDLE.as_secs() / 60);
     if !s.section_by_name(SECTION, &[Need::Levers, Need::Models], &why) {
@@ -115,48 +153,40 @@ pub fn search_bench(s: &mut Suite, api: &Api) -> Result<()> {
     }
     // locally, on fakes: the harness proven at small sizes, nothing idle
     let (sizes, idle): (Vec<usize>, Duration) = match std::env::var("SEARCH_BENCH_CHUNKS") {
-        Ok(list) => (list.split(',').map(|n| n.trim().parse().context("SEARCH_BENCH_CHUNKS lists chunk counts")).collect::<Result<_>>()?, if s.on_fakes() { Duration::ZERO } else { IDLE }),
+        Ok(list) => (list.split(',').filter(|n| !n.trim().is_empty()).map(|n| n.trim().parse().context("SEARCH_BENCH_CHUNKS lists chunk counts")).collect::<Result<_>>()?, if s.on_fakes() { Duration::ZERO } else { IDLE }),
         Err(_) if s.on_fakes() => (vec![200, 1_000], Duration::ZERO),
         Err(_) => (vec![1_000, 10_000], IDLE),
     };
+    let fanouts: Vec<usize> = match std::env::var("SEARCH_BENCH_FANOUT") {
+        Ok(list) if !list.trim().is_empty() => list.split(',').map(|n| n.trim().parse().context("SEARCH_BENCH_FANOUT lists fragment counts")).collect::<Result<_>>()?,
+        _ if s.on_fakes() => vec![2, 3],
+        _ => vec![],
+    };
+    let widest = fanouts.iter().copied().max().unwrap_or(0);
     // what each person spends, at most, before anyone spends any: an owner
     // its distinct chunks' embeddings and the one write after, the reader
     // every hybrid question
     let owns = |n: usize| n.min(POOL_MAX).div_ceil(100) as u64 + 2;
-    let asks = sizes.len() as u64 * (WARM as u64 + 2);
-    let calls: u64 = sizes.iter().map(|n| owns(*n)).sum::<u64>() + asks;
+    let asks = sizes.len() as u64 * (WARM as u64 + 2) + fanouts.len() as u64 * (WARM as u64 + 1);
+    let calls: u64 = sizes.iter().map(|n| owns(*n)).sum::<u64>() + widest as u64 * owns(FANOUT_CHUNKS) + asks;
     anyhow::ensure!(calls <= RUN_PAID_CALLS && asks <= PERSON_PAID_CALLS, "{sizes:?} chunks take about {calls} paid calls ({asks} of them a reader's), past the {RUN_PAID_CALLS} a run lends or the {PERSON_PAID_CALLS} a person may: split them across runs (SEARCH_BENCH_CHUNKS)");
     let reader = api.person_paying(asks)?;
     let out = s.dir(SECTION);
     let mut rows: Vec<Value> = Vec::new();
     let mut fragments: Vec<(usize, String)> = Vec::new();
     let mut owners = Vec::new();
+    // the fan-out's fragments: written first, asked after the idle wait
+    let mut fanned: Vec<String> = Vec::with_capacity(widest);
+    for i in 0..widest {
+        let (name, _, _) = write(s, api, &reader, owns(FANOUT_CHUNKS), &format!("bench-fan{i:02}"), FANOUT_CHUNKS)?;
+        fanned.push(name);
+    }
+    if widest > 0 {
+        println!("      {widest} fragments of {FANOUT_CHUNKS} chunks for the fan-out");
+    }
     for &chunks in &sizes {
-        let keys = api.person_paying(owns(chunks))?;
-        let created = s.create(api, &keys, &s.name(&format!("bench-{}k", chunks / 1000)))?;
-        let name = created["name"].as_str().context("its name")?.to_string();
-        let shared = api.share(&name, &api.identity(&reader)?, "viewer")?;
-        anyhow::ensure!(shared.status == 200, "{name}: the reader's share: {shared}");
-        let t0 = Instant::now();
-        let seed = 0x9e37_79b9_7f4a_7c15 ^ chunks as u64;
-        let pool = chunks.min(POOL_MAX);
-        let mut written = 0;
-        let mut source = 0;
-        while written < chunks {
-            let n = SECTIONS_PER_SOURCE.min(chunks - written);
-            let sections: Vec<Value> = (0..n).map(|i| json!({ "id": format!("s{i}"), "text": section_text(seed, written + i, pool) })).collect();
-            // one title for all: a chunk's embedding input begins with it
-            let body = json!({ "source": format!("bench/{source:04}"), "revision": "r1", "title": "Bench notes", "sections": sections });
-            let r = api.signed(&keys, "POST", &format!("/api/f/{name}/search/upsert"), Some(&body))?;
-            anyhow::ensure!(r.status == 200, "{name}: writing bench/{source:04}: {r}");
-            written += r.body["chunks"].as_u64().unwrap_or(0) as usize;
-            source += 1;
-        }
-        let status = api.signed(&keys, "GET", &format!("/api/f/{name}/search/status"), None)?;
-        let wrote_s = t0.elapsed().as_secs_f64();
-        println!("      {name}: {written} chunks in {source} sources, written in {wrote_s:.0} s");
-        s.ok(&format!("{chunks} synthetic chunks are written to one fragment's index"), status.body["chunks"].as_u64().is_some_and(|c| c as usize >= chunks), &status);
-        rows.push(json!({ "chunks": written, "distinct": pool, "sources": source, "written_s": wrote_s }));
+        let (name, keys, row) = write(s, api, &reader, owns(chunks), &format!("bench-{}k", chunks / 1000), chunks)?;
+        rows.push(row);
         fragments.push((chunks, name));
         owners.push(keys);
     }
@@ -215,7 +245,35 @@ pub fn search_bench(s: &mut Suite, api: &Api) -> Result<()> {
             r["chunks"], r["semantic"].as_str().unwrap_or("?"), f("first_after_idle_ms"), f("first_after_write_ms"), f("hybrid_p50_ms"), f("hybrid_p95_ms"), f("lexical_p50_ms"), f("lexical_p95_ms"), f("status_p50_ms"), f("status_p95_ms")
         );
     }
-    let report = json!({ "base": api.base, "idle_s": idle.as_secs(), "warm": WARM, "rows": rows });
+    // the fan-out: one question across the first n fragments, embedded once
+    let across = |names: &[String], q: &str, mode: &str| api.signed(&reader, "POST", "/api/search", Some(&json!({ "q": q, "in": names, "mode": mode, "limit": 10 })));
+    let mut fans: Vec<Value> = Vec::new();
+    for &n in &fanouts {
+        let names = &fanned[..n];
+        let (cold_ms, cold_status, cold) = timed(|| across(names, &question.sentence(3), "hybrid"))?;
+        let searched = cold["fragments"].as_array().map_or(0, |f| f.iter().filter(|x| x["state"] == "searched").count());
+        let mut warm = |mode: &str| -> Result<(f64, f64)> {
+            let mut ms = Vec::with_capacity(WARM);
+            for _ in 0..WARM {
+                let (t, status, body) = timed(|| across(names, &question.sentence(3), mode))?;
+                anyhow::ensure!(status == 200, "a {mode} question across {n}: {status} {body}");
+                ms.push(t);
+            }
+            Ok(quantiles(&mut ms))
+        };
+        let (h50, h95) = warm("hybrid")?;
+        let (l50, l95) = warm("lexical")?;
+        s.ok(&format!("a question across {n} fragments answers, each searched"), cold_status == 200 && searched == n && cold["results"].as_array().is_some_and(|r| !r.is_empty()), json!({ "semantic": cold["semantic"], "searched": searched }));
+        fans.push(json!({ "fragments": n, "chunks_each": FANOUT_CHUNKS, "semantic": cold["semantic"], "first_ms": cold_ms, "hybrid_p50_ms": h50, "hybrid_p95_ms": h95, "lexical_p50_ms": l50, "lexical_p95_ms": l95 }));
+    }
+    if !fans.is_empty() {
+        println!("      across  semantic  first   hybrid p50/p95   lexical p50/p95   (ms, client wall; {FANOUT_CHUNKS} chunks a fragment)");
+        for r in &fans {
+            let f = |k: &str| r[k].as_f64().unwrap_or(f64::NAN);
+            println!("      {:>6}  {:>8}  {:>5.0}   {:>6.0} / {:<6.0}  {:>6.0} / {:<6.0}", r["fragments"], r["semantic"].as_str().unwrap_or("?"), f("first_ms"), f("hybrid_p50_ms"), f("hybrid_p95_ms"), f("lexical_p50_ms"), f("lexical_p95_ms"));
+        }
+    }
+    let report = json!({ "base": api.base, "idle_s": idle.as_secs(), "warm": WARM, "rows": rows, "across": fans });
     std::fs::write(out.join("timings.json"), serde_json::to_vec_pretty(&report)?)?;
     println!("      (timings: {})", out.join("timings.json").display());
     Ok(())
