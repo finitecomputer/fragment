@@ -222,21 +222,21 @@ mod tests {
     fn only_a_question_last_refused_waits_on_the_ledger() {
         let mut gate = Gate::new();
         assert_eq!(gate.step("p may", 1_000), Step::GoAndAsk, "nothing heard: it goes, and asks beside");
-        gate.heard("p may", Some(Ok(())), 1_000);
+        assert_eq!(gate.heard("p may", Some(Ok(())), 1_000), Ok(()));
         assert_eq!(gate.step("p may", 1_000 + STANDING_CACHE_MS - 1), Step::Go);
         assert_eq!(gate.step("p may", 1_000 + STANDING_CACHE_MS), Step::GoAndAsk, "an allowance gone stale asks beside again");
         assert_eq!(gate.step("p may", 999), Step::GoAndAsk, "a clock run backwards: stale");
-        gate.heard("p may", Some(Err(STOPPED)), 2_000);
+        assert_eq!(gate.heard("p may", Some(Err(STOPPED)), 2_000), Err(STOPPED));
         assert_eq!(gate.step("p may", 2_000), Step::Refuse(STOPPED));
         assert_eq!(gate.step("p may", 2_000 + STANDING_CACHE_MS - 1), Step::Refuse(STOPPED));
         assert_eq!(gate.step("p may", 2_000 + STANDING_CACHE_MS), Step::AskFirst, "a refusal gone stale asks first: it may have topped up");
         assert_eq!(gate.step("p may", 1_999), Step::AskFirst, "and a clock run backwards asks first too");
         assert_eq!(gate.step("q may", 2_000), Step::GoAndAsk, "each question is its own");
         // the ledger did not answer the ask first: the refusal is left as it was
-        gate.heard("p may", None, 2_000 + STANDING_CACHE_MS);
+        assert_eq!(gate.heard("p may", None, 2_000 + STANDING_CACHE_MS), Ok(()));
         assert_eq!(gate.step("p may", 2_000 + STANDING_CACHE_MS), Step::AskFirst);
         // it answered: topped up
-        gate.heard("p may", Some(Ok(())), 2_000 + STANDING_CACHE_MS);
+        assert_eq!(gate.heard("p may", Some(Ok(())), 2_000 + STANDING_CACHE_MS), Ok(()));
         assert_eq!(gate.step("p may", 2_000 + STANDING_CACHE_MS), Step::Go);
         gate.forget();
         assert_eq!(gate.step("p may", 2_000 + STANDING_CACHE_MS), Step::GoAndAsk, "forgotten (an isolate made anew): nothing heard");
@@ -247,9 +247,9 @@ mod tests {
     #[test]
     fn heard_for_reads_one_persons_fresh_answers() {
         let mut gate = Gate::new();
-        gate.heard("p /may-spend {}", Some(Err(STOPPED)), 1_000);
-        gate.heard("p /fragment-open {}", Some(Ok(())), 1_000);
-        gate.heard("pq /may-spend {}", Some(Ok(())), 1_000);
+        assert_eq!(gate.heard("p /may-spend {}", Some(Err(STOPPED)), 1_000), Err(STOPPED));
+        assert_eq!(gate.heard("p /fragment-open {}", Some(Ok(())), 1_000), Ok(()));
+        assert_eq!(gate.heard("pq /may-spend {}", Some(Ok(())), 1_000), Ok(()));
         assert_eq!(gate.heard_for("p", 1_000), vec![Err(STOPPED), Ok(())]);
         assert_eq!(gate.heard_for("p", 1_000 + STANDING_CACHE_MS), vec![], "stale answers are not heard");
         assert_eq!(gate.heard_for("q", 1_000), vec![]);

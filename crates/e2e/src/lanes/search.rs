@@ -98,7 +98,9 @@ fn gate_checks(s: &mut Suite, api: &Api) -> Result<(Keys, String, String)> {
         anyhow::ensure!(r.status == 200, "the fragment's cap: {r}");
         Ok(())
     };
-    let question = || -> Result<(Reply, usize)> {
+    // a question's answer, and the texts it embedded
+    type Asked = (Reply, usize);
+    let question = || -> Result<Asked> {
         let calls = s.ai.calls().len();
         let r = api.signed(&reader, "POST", &format!("/api/f/{name}/search"), Some(&json!({ "q": "harbour lantern audit" })))?;
         Ok((r, embedded(s, calls)))
@@ -108,7 +110,7 @@ fn gate_checks(s: &mut Suite, api: &Api) -> Result<(Keys, String, String)> {
     // From a gate that heard nothing (as an isolate made anew holds): the
     // first question, what the gate then heard of each person whose answer
     // `hears` names, and the next question, answered from it.
-    let taught = |hears: &[(&str, &str)]| -> Result<((Reply, usize), bool, (Reply, usize))> {
+    let taught = |hears: &[(&str, &str)]| -> Result<(Asked, bool, Asked)> {
         forget_gate(api, &reader_id)?;
         let first = question()?;
         let heard = hears.iter().all(|(identity, answer)| gate_hears(s, api, identity, answer));
