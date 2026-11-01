@@ -325,7 +325,7 @@ impl FragmentCell {
                 // asked at most once an attempt: a try that finds its own
                 // attempt's call unanswered never heard the answer (a
                 // restart, a broken try), which may still be made and billed
-                if self.making(&p.key)? == Some(run.attempt) {
+                if media::lost(self.making(&p.key)?, run.attempt) {
                     self.event("ai.video-lost", &format!("{}: its answer never came back; charged nothing", p.reference), json!({ "ref": p.reference }));
                     console_error!("{}", json!({ "event": "ledger.unknown-usage", "ref": p.reference, "why": "the video's answer never came back, and the catalog may have billed it: charged nothing" }));
                     return Err(permanent("this step's video was asked for and its answer never came back: replay the run to make it again"));
@@ -338,7 +338,7 @@ impl FragmentCell {
                 // no answer: it may still be making the video, so the row stays
                 let (status, bytes, log_id) = answered.map_err(retry)?;
                 // answered (a refusal, a 503 too): a try may ask again
-                self.answered(&p.key).map_err(retry)?;
+                self.answered(&p.key, run.attempt).map_err(retry)?;
                 if status != 200 {
                     return Err(model_failure(status, &bytes));
                 }
@@ -373,7 +373,7 @@ impl FragmentCell {
         struct Making {
             attempt: u32,
         }
-        let rows: Vec<Making> = self.typed("SELECT attempt FROM making WHERE key = ?", vec![key.into()]).map_err(retry)?;
+        let rows: Vec<Making> = self.typed(media::MAKING, vec![key.into()]).map_err(retry)?;
         Ok(rows.into_iter().next().map(|m| m.attempt))
     }
 
@@ -381,14 +381,15 @@ impl FragmentCell {
     /// the row from the attempt before.
     fn asking(&self, p: &Paying, run: &RunRow) -> CellResult<()> {
         self.exec(
-            "INSERT INTO making (key, run, attempt, at) VALUES (?, ?, ?, ?) ON CONFLICT (key) DO UPDATE SET attempt = excluded.attempt, at = excluded.at",
+            media::ASKING,
             vec![p.key.as_str().into(), SqlStorageValue::Integer(run.id), SqlStorageValue::Integer(run.attempt.into()), SqlStorageValue::Integer(crate::js::now_ms())],
         )
     }
 
-    /// The model answered the step's video call.
-    fn answered(&self, key: &str) -> CellResult<()> {
-        self.exec("DELETE FROM making WHERE key = ?", vec![key.into()])
+    /// The model answered `attempt`'s call for the step's video: its row
+    /// goes, and a newer attempt's stays (`media::ANSWERED`).
+    fn answered(&self, key: &str, attempt: u32) -> CellResult<()> {
+        self.exec(media::ANSWERED, vec![key.into(), SqlStorageValue::Integer(attempt.into())])
     }
 
     /// The video at the URL the model answered, at most
