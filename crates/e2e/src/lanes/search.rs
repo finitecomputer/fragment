@@ -3,7 +3,8 @@
 //! A fragment that wrote nothing answers `indexed: false`, embedding
 //! nothing; an editor writes a source whole, chunked and embedded once; a
 //! reader finds it by its words and its meaning, each hit placed in each
-//! leg, the index's int8 dot product Wasm SIMD's; a replay and a grown
+//! leg, its answer's waits named in `Server-Timing`, the index's int8 dot
+//! product Wasm SIMD's; a replay and a grown
 //! source embed nothing again; a stale write is refused; limits are
 //! checked before anything is sent; a viewer only
 //! reads, a stranger neither, and a member removed reads nothing more; a
@@ -33,6 +34,22 @@ const MODEL: &str = fragment_core::embed::MODEL_DEFAULT;
 /// How many texts the embeddings model was asked for since `from`.
 fn embedded(s: &Suite, from: usize) -> usize {
     s.ai.calls()[from..].iter().filter(|c| c.model == MODEL).map(|c| c.body["text"].as_array().map_or(0, Vec::len)).sum()
+}
+
+/// The parts a reply's `Server-Timing` names, sorted: none unless each
+/// entry is `<part>;dur=<ms>` and nothing more.
+fn timed_parts(r: &crate::api::Reply) -> Option<Vec<&'static str>> {
+    let value = r.headers.get("server-timing")?.to_str().ok()?;
+    let mut parts = value
+        .split(", ")
+        .map(|entry| {
+            let (part, ms) = entry.split_once(";dur=")?;
+            ms.parse::<u64>().ok()?;
+            ["embed", "gate", "index", "key"].into_iter().find(|p| *p == part)
+        })
+        .collect::<Option<Vec<_>>>()?;
+    parts.sort_unstable();
+    Some(parts)
 }
 
 fn upsert(source: &str, revision: &str, sections: Value) -> Value {
@@ -192,6 +209,14 @@ fn checks(s: &mut Suite, api: &Api) -> Result<(Keys, String)> {
         json!({ "write": w.body, "embedded": wrote, "found": found.body, "status": status.body }),
     );
 
+    // ---- its answer says what it waited on, by part: names and durations only
+    let lexical = api.signed(&reader, "POST", &path(""), Some(&json!({ "q": "harbour lantern audit", "mode": "lexical" })))?;
+    s.ok(
+        "a search's answer says what it waited on in `Server-Timing`, names and durations only: by meaning, the gate, the embedding and the index; by words, the index alone",
+        timed_parts(&found) == Some(vec!["embed", "gate", "index"]) && timed_parts(&lexical) == Some(vec!["index"]),
+        json!({ "meaning": found.headers.get("server-timing").and_then(|v| v.to_str().ok()), "words": lexical.headers.get("server-timing").and_then(|v| v.to_str().ok()) }),
+    );
+
     // ---- the index's int8 dot product is Wasm SIMD's, and agrees with the scalar one
     let index = index_of(api, &name, None, None)?;
     s.ok(
@@ -217,6 +242,23 @@ fn checks(s: &mut Suite, api: &Api) -> Result<(Keys, String)> {
     stale["replaces"] = json!("r0");
     let r = api.signed(&owner, "POST", &path("/upsert"), Some(&stale))?;
     s.ok("a write that replaces a revision the source has not is 409 conflict, naming the one it has", r.status == 409 && r.body["error"] == "conflict" && r.body["current"] == "r2", &r);
+
+    // ---- the embeddings model's rate limit: the write says how long to wait; a question goes on by words
+    s.ai.fail_next(&[429]);
+    let limited = api.signed(&owner, "POST", &path("/upsert"), Some(&upsert("sessions/r.json", "r1", json!([{ "id": "t0", "text": "Person: the rate-limited note" }]))))?;
+    let again = api.signed(&owner, "POST", &path("/upsert"), Some(&upsert("sessions/r.json", "r1", json!([{ "id": "t0", "text": "Person: the rate-limited note" }]))))?;
+    s.ai.fail_next(&[429]);
+    let asked = api.signed(&owner, "POST", &path(""), Some(&json!({ "q": "harbour lantern audit" })))?;
+    s.ok(
+        "a write its embeddings model rate-limits is refused 429 rate_limited, saying how long to wait (retry_after_ms, the model's own or 60 s, and Retry-After), and written when sent again; a question it rate-limits is answered by its words",
+        limited.status == 429 && limited.body["error"] == "rate_limited" && limited.body["retry_after_ms"] == fragment_core::embed::RETRY_AFTER_DEFAULT_MS
+            && limited.header("retry-after") == "60" && again.status == 200 && again.body["written"] == true
+            && asked.status == 200 && asked.body["semantic"] == "off" && asked.body["results"][0]["section"] == "t0",
+        json!({ "limited": limited.body, "again": again.body, "asked": asked.body["semantic"] }),
+    );
+    // gone again: the checks after count this fragment's sources
+    let gone = api.signed(&owner, "POST", &path("/delete"), Some(&json!({ "source": "sessions/r.json" })))?;
+    anyhow::ensure!(gone.status == 200 && gone.body["deleted"] == true, "the rate-limited source's delete: {gone}");
 
     // ---- limits, before anything is embedded or sent
     let calls = s.ai.calls().len();

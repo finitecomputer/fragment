@@ -474,7 +474,7 @@ impl FragmentCell {
             }
             Err(e) => Err(e),
         };
-        Answer { id, outcome: outcome.map_err(|e| ErrorBody { error: e.code, message: e.message, reason: e.reason }) }
+        Answer { id, outcome: outcome.map_err(|e| ErrorBody { error: e.code, message: e.message, reason: e.reason, retry_after_ms: e.retry_after_ms }) }
     }
 
     fn admit_query(&self, principal: &str, socket: &str, id: &str) -> CellResult<Running<'_>> {

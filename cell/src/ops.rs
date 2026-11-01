@@ -465,9 +465,10 @@ impl FragmentCell {
                 self.schedule().await?;
                 json!({ "aged": ms, "invites": aged })
             }
-            Some(lever @ ("fail-deliveries" | "fail-outbox" | "fail-triggers" | "drop-effects" | "fail-meter-acks" | "fail-after-paid" | "lose-video-answers" | "fail-cards" | "fail-search-index")) => {
+            Some(lever @ ("fail-deliveries" | "fail-outbox" | "fail-triggers" | "drop-effects" | "fail-meter-acks" | "fail-after-paid" | "lose-video-answers" | "fail-cards" | "members-while-shot" | "fail-search-index")) => {
                 let key = match lever {
                     "fail-cards" => MetaKey::TestFailCards,
+                    "members-while-shot" => MetaKey::TestMembersWhileShot,
                     "fail-search-index" => MetaKey::TestFailSearchIndex,
                     "fail-deliveries" => MetaKey::TestFailDeliveries,
                     "fail-outbox" => MetaKey::TestFailOutbox,
@@ -572,6 +573,17 @@ impl FragmentCell {
                     vec![self.own_key()?.into(), now.clone(), now],
                 )?;
                 json!({ "triggers": triggers, "run": run.first().and_then(|r| r["id"].as_i64()) })
+            }
+            Some("blessed-stale") => {
+                // as if the platform had deployed a newer release of its
+                // blessed template since: its next request installs that
+                // release again (plane.rs `blessed_current`)
+                let installed = self.meta(MetaKey::Blessed)?;
+                if let Some(installed) = &installed {
+                    let t = installed.split_once('@').map_or(installed.as_str(), |(t, _)| t);
+                    self.set_meta(MetaKey::Blessed, &format!("{t}@older"))?;
+                }
+                json!({ "stale": installed.is_some() })
             }
             Some("legacy-member-kind") => {
                 // a member row from before `members.kind` (2026-09-24): its

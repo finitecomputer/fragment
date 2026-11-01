@@ -42,7 +42,7 @@ use fragment_core::card::{self, Cards, Fault, Heard, Next, Outcome, Pace, Skip, 
 use fragment_core::site::VIEW_COOKIE;
 use fragment_core::ledger::{Refused, Spend};
 use fragment_core::price::Usage;
-use fragment_proto::{ErrorCode, PageErrorKind, Role};
+use fragment_proto::{ErrorCode, PageErrorKind, Role, Visibility};
 use futures_util::future::{select, Either};
 use futures_util::StreamExt;
 use serde_json::{json, Value};
@@ -123,6 +123,12 @@ impl FragmentCell {
                 return Ok(());
             }
         };
+        // test fleets: gone members only between this look and the shot's
+        // page, as an owner restricting it while it is shot makes it
+        if self.test_countdown(MetaKey::TestMembersWhileShot, "members only while shot").is_err() {
+            self.set_meta(MetaKey::Visibility, Visibility::Members.as_str())?;
+            self.sharing_changed()?;
+        }
         let shot = match cards.next(now, self.card_pace()) {
             Next::Shoot(shot) => shot,
             Next::GaveUp { failures } => {
@@ -436,6 +442,11 @@ async fn shoot(cdp: &mut Cdp<'_>, page: &card::Visit, deadline: i64) -> Result<V
     let load_by = deadline.min(js::now_ms() + card::LOAD_TIMEOUT_MS as i64);
     cdp.loaded(load_by).await?;
     Delay::from(Duration::from_millis(card::SETTLE_MS)).await;
+    // where it landed: the app's own origin, or a sign-in (gone members
+    // only meanwhile), whose shot is no card of it; tried again, the next
+    // look finds it members only and lets it go (FIN-359)
+    let tree = cdp.call("Page.getFrameTree", json!({}), deadline).await?;
+    card::landed(&page.url, tree["frameTree"]["frame"]["url"].as_str().unwrap_or("")).map_err(|e| Failure::retry(e.message()))?;
     let mut size = 0;
     for quality in card::QUALITIES {
         let shot = cdp.call("Page.captureScreenshot", json!({ "format": "jpeg", "quality": quality, "fromSurface": true }), deadline).await?;

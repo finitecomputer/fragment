@@ -15,9 +15,10 @@
 // - Reaches (FIN-291; Paul, 2026-11-01), only on one that reaches their
 //   accounts: the keys it holds, by name and the hosts each may go to
 //   (never a value), with Remove; the agent it speaks to when it is a
-//   connector's door (`/api/f/{name}/door`), with Unlink; their own agents in it. Such an app is theirs and their
-//   agents' alone for now: the cell refuses sharing it, and its share sheet
-//   (its Sharing here) says so (reach.rs, share.rs).
+//   connector's door (`/api/f/{name}/door`), with Unlink; their own agents
+//   in it. Such an app is theirs and their agents' alone for now: the cell
+//   refuses sharing it, and its share sheet (its Sharing here) says so
+//   (reach.rs, share.rs).
 // Archived ones are folded at the end, each with Unarchive.
 //
 // The shell owns the page's place and its helpers (`h`): `api`, `el`,
@@ -50,16 +51,100 @@ const CARD_READS_MAX = 6;
 // how many names a row says of who has access
 const NAMES_SHOWN = 2;
 
+// The Apps page's cards (`GET /api/f/<name>/card`), read with the page's
+// session as the dock's are: every one on a visit's open; afterwards a new
+// or changed row's, and one whose card is not there yet, asked again with
+// bounded backoff and retries. `visit()` is the page's visit now (a read
+// made in an earlier one, or one a newer read of its row superseded,
+// changes nothing), `shown()` whether the page is open, `rows()` the apps
+// it may show a card for, `draw()` draws the page again. Its own function
+// so its tests (cell/shell-tests/apps-cards.test.mjs) drive it as the page
+// does; `fetch`, `urls` and `timers` are the page's own, looked up as each
+// is used.
+export function createCards({ rows, visit, shown, draw, fetch = (url, options) => globalThis.fetch(url, options), urls = URL, timers = globalThis }) {
+  const cards = new Map();
+  const reads = new Map();
+  const attempts = new Map();
+  const drawn = new Map();
+  const load = { wait: 0, timer: null, batch: 0 };
+
+  // its card: "new", "same", "none" or "stale" (a newer read or visit owns the row)
+  async function read(name, mine) {
+    const request = (reads.get(name) ?? 0) + 1;
+    reads.set(name, request);
+    const current = () => mine === visit() && reads.get(name) === request;
+    const known = cards.get(name);
+    const headers = { ...SHELL, ...(known ? { "if-none-match": known.etag } : {}) };
+    const r = await fetch(`/api/f/${seg(name)}/card`, { headers, credentials: "same-origin" });
+    if (!current()) return "stale";
+    if (r.status === 304) return "same";
+    if (!r.ok) return "none";
+    const body = await r.blob();
+    if (!current()) return "stale";
+    const url = urls.createObjectURL(body);
+    if (known) urls.revokeObjectURL(known.url);
+    cards.set(name, { etag: r.headers.get("etag"), url });
+    return "new";
+  }
+
+  async function loadAll(all = false) {
+    if (!shown()) return;
+    timers.clearTimeout(load.timer);
+    const mine = visit();
+    const batch = ++load.batch;
+    let fresh = false;
+    const asked = [];
+    for (const f of rows()) {
+      const fingerprint = JSON.stringify(f);
+      if (!all && cards.has(f.name) && drawn.get(f.name) === fingerprint) continue;
+      if (all || attempts.get(f.name)?.fingerprint !== fingerprint) {
+        attempts.set(f.name, { fingerprint, count: 0 });
+        fresh = true;
+      }
+      const attempt = attempts.get(f.name);
+      if (attempt.count < CARD_READS_MAX) {
+        ++attempt.count;
+        asked.push(f);
+      }
+    }
+    if (fresh) load.wait = 0;
+    const got = await Promise.all(asked.map(async (f) => [f, await read(f.name, mine).catch(() => "none")]));
+    if (mine !== visit()) return;
+    // a card its read set is drawn, though a newer batch began: that one's
+    // read asks with this card's etag and, told it is the same, draws nothing
+    if (got.some(([, result]) => result === "new")) draw();
+    if (batch !== load.batch) return;
+    for (const [f, result] of got) if (result === "new" || result === "same") drawn.set(f.name, JSON.stringify(f));
+    if (got.some(([, result]) => result === "none") && load.wait < 60_000) {
+      load.wait = Math.min(60_000, load.wait ? load.wait * 2 : 2_000);
+      load.timer = timers.setTimeout(() => { if (mine === visit()) loadAll().catch(() => {}); }, load.wait);
+    }
+  }
+
+  return {
+    get: (name) => cards.get(name),
+    read,
+    load: loadAll,
+    // a visit's open asks every card at once; its close lets every batch go
+    opened() { load.wait = 0; },
+    closed() {
+      ++load.batch;
+      timers.clearTimeout(load.timer);
+    },
+  };
+}
+
 export function createAppsPage(page, h) {
   // per app: an action in flight ("dock", "card", "archive"), what the
   // last one said (a refusal, or a preview still being taken), and its card
   const busy = new Map();
   const said = new Map();
-  const cards = new Map();
-  const cardReads = new Map();
-  const cardAttempts = new Map();
-  const cardRows = new Map();
-  const cardsLoad = { wait: 0, timer: null, batch: 0 };
+  const cards = createCards({
+    rows: () => h.state.fragments.filter((f) => listed(f) && dockable(f)),
+    visit: () => visit,
+    shown: () => shown,
+    draw: () => render(),
+  });
   const shots = new Map();
   const addresses = new Map();
   const addressInfo = new Map();
@@ -227,60 +312,6 @@ export function createAppsPage(page, h) {
     const f = h.state.fragments.find((x) => x.name === name);
     if (f) reach.set(name, await readReach(f));
     render();
-  }
-
-  // its card, read with this page's session as the dock's are; "new",
-  // "same", "none" or "stale" (a newer read or visit owns the row)
-  async function loadCard(name, mine) {
-    const request = (cardReads.get(name) ?? 0) + 1;
-    cardReads.set(name, request);
-    const current = () => mine === visit && cardReads.get(name) === request;
-    const known = cards.get(name);
-    const headers = { ...SHELL, ...(known ? { "if-none-match": known.etag } : {}) };
-    const r = await fetch(`/api/f/${seg(name)}/card`, { headers, credentials: "same-origin" });
-    if (!current()) return "stale";
-    if (r.status === 304) return "same";
-    if (!r.ok) return "none";
-    const body = await r.blob();
-    if (!current()) return "stale";
-    const url = URL.createObjectURL(body);
-    if (known) URL.revokeObjectURL(known.url);
-    cards.set(name, { etag: r.headers.get("etag"), url });
-    return "new";
-  }
-
-  // Every card on open; afterwards, a new or changed row's, and one whose
-  // card is not there yet, asked again with bounded backoff and retries.
-  async function loadCards(all = false) {
-    if (!shown) return;
-    clearTimeout(cardsLoad.timer);
-    const mine = visit;
-    const batch = ++cardsLoad.batch;
-    const rows = h.state.fragments.filter((f) => listed(f) && dockable(f));
-    let fresh = false;
-    const asked = [];
-    for (const f of rows) {
-      const fingerprint = JSON.stringify(f);
-      if (!all && cards.has(f.name) && cardRows.get(f.name) === fingerprint) continue;
-      if (all || cardAttempts.get(f.name)?.fingerprint !== fingerprint) {
-        cardAttempts.set(f.name, { fingerprint, count: 0 });
-        fresh = true;
-      }
-      const attempt = cardAttempts.get(f.name);
-      if (attempt.count < CARD_READS_MAX) {
-        ++attempt.count;
-        asked.push(f);
-      }
-    }
-    if (fresh) cardsLoad.wait = 0;
-    const got = await Promise.all(asked.map(async (f) => [f, await loadCard(f.name, mine).catch(() => "none")]));
-    if (mine !== visit || batch !== cardsLoad.batch) return;
-    for (const [f, result] of got) if (result === "new" || result === "same") cardRows.set(f.name, JSON.stringify(f));
-    if (got.some(([, result]) => result === "new")) render();
-    if (got.some(([, result]) => result === "none") && cardsLoad.wait < 60_000) {
-      cardsLoad.wait = Math.min(60_000, cardsLoad.wait ? cardsLoad.wait * 2 : 2_000);
-      cardsLoad.timer = setTimeout(() => { if (mine === visit) loadCards().catch(() => {}); }, cardsLoad.wait);
-    }
   }
 
   async function loadAccess() {
@@ -730,7 +761,7 @@ export function createAppsPage(page, h) {
     }
     if (mine !== visit) return;
     shots.delete(name);
-    await loadCard(name, mine).catch(() => "same");
+    await cards.read(name, mine).catch(() => "same");
     if (mine !== visit) return;
     say(name, done ? "" : "The preview is still being taken.");
     render();
@@ -746,9 +777,9 @@ export function createAppsPage(page, h) {
       for (const [name, operation] of busy) if (operation.kind === "card") busy.delete(name);
       shots.clear();
       page.replaceChildren();
-      cardsLoad.wait = 0;
+      cards.opened();
       render();
-      const reading = loadCards(true).catch(() => {});
+      const reading = cards.load(true).catch(() => {});
       const urls = loadAddresses(true);
       loadReach().catch(() => {});
       if (await loadAccess()) render();
@@ -758,8 +789,7 @@ export function createAppsPage(page, h) {
     close() {
       shown = false;
       ++visit;
-      ++cardsLoad.batch;
-      clearTimeout(cardsLoad.timer);
+      cards.closed();
       shots.clear();
       for (const editor of iconEditors.values()) editor.dispose();
       iconEditors.clear();
@@ -772,7 +802,7 @@ export function createAppsPage(page, h) {
     async listed() {
       if (!shown) return;
       render();
-      loadCards().catch(() => {});
+      cards.load().catch(() => {});
       loadAddresses().catch(() => {});
       if (sharingOf() !== accessed && await loadAccess()) render();
     },
@@ -780,7 +810,7 @@ export function createAppsPage(page, h) {
     async shared() {
       if (!shown) return;
       render();
-      loadCards().catch(() => {});
+      cards.load().catch(() => {});
       if (await loadAccess()) render();
     },
   };

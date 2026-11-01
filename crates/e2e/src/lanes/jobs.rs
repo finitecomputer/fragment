@@ -147,7 +147,7 @@ pub(super) fn settle(api: &Api, keys: &Keys, name: &str, id: i64, want: &[&str],
     }
 }
 
-fn runs(api: &Api, keys: &Keys, name: &str, query: &str) -> Vec<Value> {
+pub(super) fn runs(api: &Api, keys: &Keys, name: &str, query: &str) -> Vec<Value> {
     api.signed(keys, "GET", &format!("/api/f/{name}/runs?limit=200{query}"), None)
         .ok()
         .and_then(|r| r.body["runs"].as_array().cloned())

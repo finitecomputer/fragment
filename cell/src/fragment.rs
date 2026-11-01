@@ -417,6 +417,10 @@ pub(crate) enum MetaKey {
     /// Test fleets only: how many more card shots open a page nothing
     /// serves, so they fail (`fail-cards`).
     TestFailCards,
+    /// Test fleets only: how many more card shots find the fragment gone
+    /// members only between their look at it and their page's load, as an
+    /// owner restricting it then makes it (`members-while-shot`).
+    TestMembersWhileShot,
     /// Test fleets only: how many more calls into its search index fail
     /// before they are sent (`fail-search-index`): the index out of reach.
     TestFailSearchIndex,
@@ -491,6 +495,7 @@ impl MetaKey {
             MetaKey::StorageSampledAt => "storage_sampled_at",
             MetaKey::Cards => "cards",
             MetaKey::TestFailCards => "test_fail_cards",
+            MetaKey::TestMembersWhileShot => "test_members_while_shot",
             MetaKey::TestFailSearchIndex => "test_fail_search_index",
             MetaKey::TestConnectors => "test_connectors",
             MetaKey::Icon => "icon",
