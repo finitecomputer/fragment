@@ -1257,8 +1257,13 @@ back to it); unnamed, `embed::MODEL_DEFAULT` on Workers AI. Every answer
 names its `space`, and every vector has the slot's `dimensions` and unit
 length;
 a change of the slot's model, dimensions or version is a new space, never
-compared with the old. A deployment whose tiers are private embeds only on
-a slot marked `private` (else 403). Refused 400 before anything is sent:
+compared with the old. A slot may name a `document_prefix` and a
+`query_prefix` (each at most `embed::PREFIX_TOKENS_MAX` tokens): the task
+instructions a fragment's search puts before each chunk and each question
+it embeds (nomic-embed-text's `search_document: ` and `search_query: `),
+which its index's `space` names, so a change of either is a new space
+there too. This route embeds an agent's input as given. A deployment whose
+tiers are private embeds only on a slot marked `private` (else 403). Refused 400 before anything is sent:
 `input` not a string or 1 to `embed::INPUTS_MAX` strings, an empty one, or
 one that may pass the slot's window (`embed::tokens_max`; nothing is cut);
 `model` other than `embeddings` or the slot's; `dimensions` other than the

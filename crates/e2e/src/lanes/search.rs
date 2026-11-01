@@ -105,8 +105,12 @@ fn moved_checks(s: &mut Suite, api: &Api, owner: &Keys, name: &str) -> Result<()
     let nothing = api.signed(owner, "POST", &path(""), Some(&json!({ "q": "ferry friday" })))?;
     let mut fresh = upsert("sessions/a.json", "r3", turns());
     fresh["replaces"] = json!("");
+    let calls = s.ai.calls().len();
     let again = api.signed(owner, "POST", &path("/upsert"), Some(&fresh))?;
+    let written: Vec<String> = s.ai.calls()[calls..].iter().filter(|c| c.model == MODEL).flat_map(|c| c.body["text"].as_array().cloned().unwrap_or_default()).filter_map(|t| t.as_str().map(str::to_string)).collect();
+    let calls = s.ai.calls().len();
     let found = api.signed(owner, "POST", &path(""), Some(&json!({ "q": "harbour lantern audit" })))?;
+    let asked: Vec<Value> = s.ai.calls()[calls..].iter().filter(|c| c.model == MODEL).map(|c| c.body["text"].clone()).collect();
     s.ok(
         "embeddings moved to another space: the index of the space before answers by its words alone (semantic off); the first write in the new one empties it first, a compare-and-set it then refuses (409, naming none) included; questions find nothing until its sources are written again, then by words and meaning",
         before.status == 200 && before.body["semantic"] == "off" && before.body["results"][0]["section"] == "t2" && before.body["results"][0].get("semantic").is_none()
@@ -117,6 +121,12 @@ fn moved_checks(s: &mut Suite, api: &Api, owner: &Keys, name: &str) -> Result<()
             && again.status == 200 && again.body["written"] == true
             && found.body["semantic"] == "on" && found.body["results"][0]["section"] == "t0" && found.body["results"][0]["signals"] == json!(["lexical", "semantic"]),
         json!({ "before": before.body, "held": held.body, "refused": refused.body, "emptied": emptied.body, "nothing": nothing.body, "found": found.body }),
+    );
+    s.ok(
+        "a slot's task prefixes: each chunk is embedded after its document prefix, each question after its query prefix, and the index's space names both",
+        written.len() == 2 && written.iter().all(|t| t.starts_with("search_document: ")) && asked == [json!(["search_query: harbour lantern audit"])]
+            && emptied.body["space"]["document_prefix"] == "search_document: " && emptied.body["space"]["query_prefix"] == "search_query: ",
+        json!({ "written": written, "asked": asked, "space": emptied.body["space"] }),
     );
     Ok(())
 }

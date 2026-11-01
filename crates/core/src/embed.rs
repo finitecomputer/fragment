@@ -55,6 +55,11 @@ pub const MAX_INPUT_TOKENS_MAX: u32 = 32_768;
 pub const MAX_INPUT_TOKENS_MIN: u32 = 128;
 /// A slot's `version`, at most: a tag the deployment pins, not prose.
 pub const VERSION_MAX_BYTES: usize = 32;
+/// A slot's document or query prefix, at most, in tokens (`tokens_max`,
+/// its model's own not counted): a task instruction its model reads before
+/// the text (nomic-embed-text's `search_document: `), out of a window of
+/// at least `MAX_INPUT_TOKENS_MIN`.
+pub const PREFIX_TOKENS_MAX: u64 = 32;
 /// Inputs one call embeds, at most (Workers AI's text embedding models take
 /// a batch of 100).
 pub const INPUTS_MAX: usize = 100;
@@ -85,6 +90,12 @@ pub struct Slot {
     /// Its model is private: confidential inference that keeps nothing
     /// (a slot's `"private": true`, as a chat slot's; never Workers AI's).
     pub private: bool,
+    /// What a fragment's search puts before each chunk it embeds, and
+    /// before each question (a model that asks for task instructions:
+    /// nomic-embed-text's `search_document: ` and `search_query: `). The
+    /// embeddings route embeds an agent's input as given.
+    pub document_prefix: Option<String>,
+    pub query_prefix: Option<String>,
 }
 
 /// The vector space a slot's answers are in: compare only vectors of one.
@@ -97,13 +108,39 @@ pub struct Space<'a> {
 
 impl Default for Slot {
     fn default() -> Slot {
-        Slot { upstream: Upstream::WorkersAi { model: MODEL_DEFAULT.into() }, dimensions: DIMENSIONS_DEFAULT, version: None, max_input_tokens: MAX_INPUT_TOKENS_DEFAULT, private: false }
+        Slot {
+            upstream: Upstream::WorkersAi { model: MODEL_DEFAULT.into() },
+            dimensions: DIMENSIONS_DEFAULT,
+            version: None,
+            max_input_tokens: MAX_INPUT_TOKENS_DEFAULT,
+            private: false,
+            document_prefix: None,
+            query_prefix: None,
+        }
     }
 }
 
 impl Slot {
     pub fn space(&self) -> Space<'_> {
         Space { model: self.upstream.model(), dimensions: self.dimensions, version: self.version.as_deref() }
+    }
+
+    /// The space a fragment's search index holds vectors of: the slot's,
+    /// and the prefixes its chunks and questions were embedded with, so a
+    /// change of either is a new space (the index written again).
+    pub fn search_space(&self) -> fragment_proto::search::Space {
+        fragment_proto::search::Space {
+            model: self.upstream.model().to_string(),
+            dimensions: self.dimensions,
+            version: self.version.clone(),
+            document_prefix: self.document_prefix.clone(),
+            query_prefix: self.query_prefix.clone(),
+        }
+    }
+
+    /// A question as its search embeds it: after `query_prefix`.
+    pub fn question(&self, q: &str) -> String {
+        format!("{}{q}", self.query_prefix.as_deref().unwrap_or(""))
     }
 }
 
@@ -163,6 +200,13 @@ pub fn slot_of(models: &mut Value) -> Result<Slot, String> {
             .map(|n| n as u32)
             .ok_or_else(|| format!("models.embeddings: max_input_tokens is the tokens of an input its model reads, {MAX_INPUT_TOKENS_MIN} to {MAX_INPUT_TOKENS_MAX}, not {v}"))?,
     };
+    let mut prefix = |key: &str| match o.remove(key) {
+        None => Ok(None),
+        Some(Value::String(p)) if !p.is_empty() && !p.chars().any(char::is_control) && tokens_max(&p) - u64::from(OVERHEAD_TOKENS) <= PREFIX_TOKENS_MAX => Ok(Some(p)),
+        Some(other) => Err(format!("models.embeddings: {key} is the text its model reads before each input (1 to {PREFIX_TOKENS_MAX} tokens, no control characters), not {other}")),
+    };
+    let document_prefix = prefix("document_prefix")?;
+    let query_prefix = prefix("query_prefix")?;
     let private = match o.remove("private") {
         None => false,
         Some(Value::Bool(b)) => b,
@@ -177,7 +221,7 @@ pub fn slot_of(models: &mut Value) -> Result<Slot, String> {
     if let Upstream::Openai { body: Some(_), .. } = &upstream {
         return Err("models.embeddings: body is a chat slot's (an API's own fields for its chat completions)".into());
     }
-    Ok(Slot { upstream, dimensions, version, max_input_tokens, private })
+    Ok(Slot { upstream, dimensions, version, max_input_tokens, private, document_prefix, query_prefix })
 }
 
 /// How the client reads its vectors: OpenAI's `encoding_format`.
@@ -385,6 +429,29 @@ mod tests {
     fn openai_slot() -> Slot {
         let mut models = json!({ "embeddings": { "provider": "openai", "base_url": "http://127.0.0.1:8080/v1", "model": "BAAI/bge-m3", "dimensions": 3, "version": "2024-01", "max_input_tokens": 8192, "private": true, "price": { "input": 0, "output": 0 } } });
         slot_of(&mut models).unwrap()
+    }
+
+    #[test]
+    fn a_slot_names_the_prefixes_its_search_embeds_after() {
+        let nomic = |extra: Value| {
+            let mut row = json!({ "provider": "openai", "base_url": "https://inference.tinfoil.sh/v1", "model": "nomic-embed-text", "dimensions": 768, "version": "nomic-v1.5", "private": true, "price": { "input": 0.05, "output": 0 } });
+            row.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            slot_of(&mut json!({ "embeddings": row }))
+        };
+        let s = nomic(json!({ "document_prefix": "search_document: ", "query_prefix": "search_query: " })).unwrap();
+        assert_eq!(s.question("ferry friday"), "search_query: ferry friday");
+        let space = s.search_space();
+        assert_eq!((space.document_prefix.as_deref(), space.query_prefix.as_deref()), (Some("search_document: "), Some("search_query: ")));
+        assert_eq!(s.space(), Space { model: "nomic-embed-text", dimensions: 768, version: Some("nomic-v1.5") }, "the embeddings route's space is its model's: it embeds an agent's input as given");
+        // none named: the question as asked, and a space of no prefixes
+        let plain = nomic(json!({})).unwrap();
+        assert_eq!((plain.question("ferry"), plain.search_space().document_prefix), ("ferry".to_string(), None));
+        assert_ne!(plain.search_space(), space, "another prefix is another space");
+        for bad in [json!(""), json!("a\u{7}b"), json!("x".repeat(PREFIX_TOKENS_MAX as usize + 1)), json!(7)] {
+            assert!(nomic(json!({ "document_prefix": bad.clone() })).unwrap_err().contains("document_prefix"), "{bad}");
+            assert!(nomic(json!({ "query_prefix": bad.clone() })).unwrap_err().contains("query_prefix"), "{bad}");
+        }
+        assert!(nomic(json!({ "document_prefix": "x".repeat(PREFIX_TOKENS_MAX as usize) })).is_ok(), "at most PREFIX_TOKENS_MAX");
     }
 
     #[test]

@@ -231,7 +231,7 @@ mod tests {
     #[test]
     fn each_answer_says_how_its_fragment_was_reached() {
         use serde_json::json;
-        let space = wire::Space { model: "@cf/baai/bge-m3".into(), dimensions: 1024, version: None };
+        let space = wire::Space { model: "@cf/baai/bge-m3".into(), dimensions: 1024, version: None, document_prefix: None, query_prefix: None };
         let named = json!({ "model": "@cf/baai/bge-m3", "dimensions": 1024 });
         let hit = json!({ "rank": 1, "source": "s", "section": "t0" });
         let answer = |space: &Value, scheme: &str| json!({ "results": [hit.clone()], "semantic": "on", "indexed": true, "space": space, "scheme": scheme });
