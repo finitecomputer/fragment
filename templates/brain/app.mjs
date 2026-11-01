@@ -38,8 +38,19 @@ import { SECTIONS_MAX, sections, stem } from "./applib/sections.mjs";
 
 // The index's shape: a brain whose index is another rebuilds it from its files.
 const FORMAT = "brain-index-1";
-// Files one reindex reads and writes (each embedded): well inside a call's time.
-const BATCH = 8;
+// Capability calls (`this.files`, `this.searchIndex`) one call into the
+// app may make: one subrequest each (measured on a preview, 2026-11-01).
+// The platform once held a call to 50 subrequests, which Cloudflare counts
+// for a facet's whole life instead (docs/technical-debt-ledger.md, "An app
+// facet's subrequests are the account's"); a batch keeps to them still.
+export const CALLS_MAX = 50;
+// A page's calls in a batch: its listing, its read, and its write or delete.
+const PAGE_CALLS = 3;
+// A full pass's own call, before its first batch: the listing of every file.
+const PASS_CALLS = 1;
+// Files one reindex reads and writes: as many as its calls allow, and no
+// more than 8 (each embedded: well inside a call's time).
+const BATCH = Math.min(8, Math.floor((CALLS_MAX - PASS_CALLS) / PAGE_CALLS));
 // A run's reindex steps (a job takes 256 steps; mark is one, and the next
 // run's start another).
 const STEPS_MAX = 240;
