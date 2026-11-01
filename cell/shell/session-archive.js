@@ -13,7 +13,27 @@
 // new to this page, and as the page comes back into view: an import moves
 // the archive's files and not their list.
 // `changed`: the index read again, or the conversation open in it moved.
+//
+// History's search asks the archive's own search too (`search`), which
+// each import writes (templates/sessions/README.md, Search): its chats
+// whose words hold the question, best first.
 import { KIND } from "./frame-messages.js";
+
+// Results a search asks the archive for (the API's most: RESULTS_MAX)
+const SEARCH_LIMIT = 50;
+const SESSION_SOURCE = /^sessions\/([^/]+)\.json$/;
+
+// A search's results as the archive's conversations, best first: each
+// once, its key from its source (`sessions/<key>.json`) and its best
+// snippet; a result of any other source left out.
+export function foundSessions(results) {
+  const found = new Map();
+  for (const r of results ?? []) {
+    const key = typeof r?.source === "string" ? SESSION_SOURCE.exec(r.source)?.[1] : undefined;
+    if (key && !found.has(key)) found.set(key, typeof r.snippet === "string" ? r.snippet : "");
+  }
+  return [...found].map(([key, snippet]) => ({ key, snippet }));
+}
 
 export function createSessionArchive({
   api, ui: { renderHeading }, data: { allFragments, own, seg },
@@ -59,7 +79,17 @@ export function createSessionArchive({
     renderHeading();
   });
 
-
+  // its chats whose words hold `q`, as `foundSessions` says them; none
+  // without an archive, or on a host without search (404). Any other
+  // failure is the caller's to say. By their words alone (`lexical`), as
+  // History filters the person's own chats: a search by meaning answers
+  // its nearest whatever they hold, so it would filter out none.
+  async function search(q) {
+    const name = read.name;
+    if (!name) return [];
+    const found = await api("POST", `/api/f/${seg(name)}/search`, { q, limit: SEARCH_LIMIT, mode: "lexical", fields: { kind: "chat" } }).catch((e) => (e.status === 404 ? null : Promise.reject(e)));
+    return foundSessions(found?.results);
+  }
 
   // one conversation (its key), or with none the archive's list
   function openSession(key) {
@@ -71,5 +101,5 @@ export function createSessionArchive({
   // what the middle column's heading says while the archive is open there
   const title = () => read.entries.find((e) => e.key === open)?.title || "Session Archive";
 
-  return { load, title, archive: () => read.name, entries: () => read.entries, openSession };
+  return { load, title, archive: () => read.name, entries: () => read.entries, openSession, search };
 }
