@@ -922,6 +922,7 @@ const agentsOwnChat = (agent) => chats().find((f) => own(f) && labelOf(f.name) =
 const { faceControls, renderAgentFaces, agentSettings, addAgentForm, agentJson, writeAgentJson, savePick, settingLabel, modelOption } = createAgentSettings({
   api, el, seg, byName, agentFace, titleOf, agents: () => state.agents, named, rename: (name) => rename(name), load, nameScreen, renderNames,
   computer: () => state.computer, homePicker: (a, said) => homePicker(a, said), addAgent: (spec) => onboarding.addAgent(spec),
+  primaryAgent: () => primaryAgent(), chats, own, me: () => state.me,
 });
 const { chatTitle, homeMark, loadHomes, homePicker, paintHomes, setHome } = createAgentHomes({
   el, icon, named, actionLine, settingLabel, modelOption, savePick,
@@ -1694,7 +1695,7 @@ const onboarding = createOnboarding({
   account: { person: () => state.me, isGuest: () => state.guest, setGuest, hasInvites: () => state.invites.length },
   fragments: { allFragments: () => state.fragments, chats, own, labelOf, titleOf, primaryAgent, agentsOwnChat, freeLabel, slug, seg },
   computer: { computerView: () => state.computer, computerFailed: () => state.computerFailed, agents: () => state.agents, computerOf, computerIs },
-  navigation: { start, openChat, atHome: () => location.pathname === "/" && !state.page, hasFrame: (name) => state.frames.has(name), welcomePath: WELCOME },
+  navigation: { start, openChat, atHome: () => location.pathname === "/" && !state.page, hasFrame: (name) => state.frames.has(name), page: () => state.page, welcomePath: WELCOME },
   reads: () => reads, load, skillsFragment, rosterChanged,
 });
 const { signIn, showLayout, welcome, switchForm, noSeatSaid, setupFor, owesFirstAgent, resumeFirstRun, creatingAgent } = onboarding;
