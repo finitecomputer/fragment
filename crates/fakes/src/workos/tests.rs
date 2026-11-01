@@ -110,3 +110,98 @@ fn a_persons_accounts_at_a_provider_are_each_named_by_id() {
     assert_eq!(p.call("DELETE", &path, None).0, 204, "the compatibility connection, naming none");
     assert!(!p.fake.holds("a@e2e.test", "mail"));
 }
+
+/// Goal: a fake started again over the file its users were kept in hands no
+/// email another's subject, as a dev stack's registry (which signs a person
+/// in by subject) needs across its restarts. Method: one fake makes a user
+/// and stops; another, over the same file, is asked for a new email and the
+/// first one again. A fake with no file starts its ids over, the first
+/// email to come taking the first id.
+#[test]
+fn users_kept_in_a_file_keep_their_subjects_across_a_restart() {
+    let dir = std::env::temp_dir().join(format!("workos-kept-{}-{}", std::process::id(), now_s()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("workos.json");
+    let first = {
+        let fake = WorkOs::start("client_kept", KEY).unwrap();
+        assert_eq!(fake.keep_users_in(&file).unwrap(), 0, "a new file holds no one");
+        fake.user("dev@fragment.localhost").id
+    };
+    let fake = WorkOs::start("client_kept", KEY).unwrap();
+    assert_eq!(fake.keep_users_in(&file).unwrap(), 1, "the user kept comes back");
+    let other = fake.user("rehearsal@fragment.localhost");
+    assert_ne!(other.id, first, "a new email gets a new subject, never the one kept");
+    assert_eq!(fake.user("dev@fragment.localhost").id, first, "the kept email signs in as itself");
+    fake.set_email(&other.id, "renamed@fragment.localhost");
+    let again = WorkOs::start("client_kept", KEY).unwrap();
+    assert_eq!(again.keep_users_in(&file).unwrap(), 2);
+    assert_eq!(again.user("renamed@fragment.localhost").id, other.id, "a change of email is kept too");
+    // what a fake with no file does: its ids start over
+    let fresh = WorkOs::start("client_kept", KEY).unwrap();
+    assert_eq!(fresh.user("rehearsal@fragment.localhost").id, first, "without a file, the first email to come takes the first id");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A browser's authorize as `email` (login_hint): its status, and the code
+/// the redirect carries, when it carries one.
+fn authorize(fake: &WorkOs, client: &str, email: &str) -> (u16, Option<String>) {
+    let http = reqwest::blocking::Client::builder().redirect(reqwest::redirect::Policy::none()).build().unwrap();
+    let q = [("client_id", client), ("response_type", "code"), ("redirect_uri", "http://127.0.0.1:9/cb"), ("state", "s"), ("login_hint", email)];
+    let r = http.get(format!("{}/user_management/authorize", fake.url)).query(&q).send().unwrap();
+    let code = r.headers().get("location").and_then(|l| url::Url::parse(l.to_str().ok()?).ok()).and_then(|u| u.query_pairs().find(|(k, _)| k == "code").map(|(_, v)| v.into_owned()));
+    (r.status().as_u16(), code)
+}
+
+/// Goal (#910's review): the subjects a registry signs people in by are
+/// handed to their emails alone, whatever came first, however many: a new
+/// email never gets one. Method: a node whose first person was not the dev
+/// form's address and which holds several, adopted by a fake made new; a
+/// new email, each adopted one, and a restart over the file.
+#[test]
+fn adopted_subjects_go_to_their_own_emails_alone() {
+    let dir = std::env::temp_dir().join(format!("workos-adopt-{}-{}", std::process::id(), now_s()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("workos.json");
+    let registry = [("user_00000000000000000000000003".to_string(), "first@example.test".to_string()), ("user_00000000000000000000000007".to_string(), "second@example.test".to_string())];
+    let fake = WorkOs::start("client_adopt", KEY).unwrap();
+    fake.keep_users_in(&file).unwrap();
+    assert_eq!(fake.adopt(&registry).unwrap(), 2);
+    let different = fake.user("different@example.test").id;
+    assert!(registry.iter().all(|(s, _)| *s != different) && different.as_str() > "user_00000000000000000000000007", "a new email gets a new subject past them: {different}");
+    assert_eq!(fake.user("first@example.test").id, registry[0].0);
+    assert_eq!(fake.user("second@example.test").id, registry[1].0);
+    assert!(fake.user("dev@fragment.localhost").id.as_str() > different.as_str(), "the dev address is no one's until it signs in");
+    let again = WorkOs::start("client_adopt", KEY).unwrap();
+    assert_eq!(again.keep_users_in(&file).unwrap(), 4, "kept across a restart");
+    assert_eq!(again.adopt(&registry).unwrap(), 0, "adopting the same again adds no one");
+    assert_eq!(again.user("second@example.test").id, registry[1].0);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// Goal (#910's review): a user whose keeping fails is handed out to no
+/// one: the authorize answers 503 with no code, a try again once the file
+/// can be written makes them and keeps them, and a restart hands their
+/// subject to no other email. Method: the users' folder taken away under
+/// a fake, an authorize, the folder back, the authorize again, a restart.
+#[test]
+fn a_user_not_kept_is_handed_out_to_no_one() {
+    let dir = std::env::temp_dir().join(format!("workos-unkept-{}-{}", std::process::id(), now_s()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("workos.json");
+    let fake = WorkOs::start("client_unkept", KEY).unwrap();
+    fake.keep_users_in(&file).unwrap();
+    let dev = fake.user("dev@fragment.localhost").id;
+    std::fs::remove_dir_all(&dir).unwrap();
+    assert_eq!(authorize(&fake, "client_unkept", "new@example.test"), (503, None), "not kept: no code");
+    std::fs::create_dir_all(&dir).unwrap();
+    let (status, code) = authorize(&fake, "client_unkept", "new@example.test");
+    assert_eq!((status, code.is_some()), (302, true), "kept on the try again");
+    let new = fake.user("new@example.test").id;
+    assert_ne!(new, dev);
+    let again = WorkOs::start("client_unkept", KEY).unwrap();
+    assert_eq!(again.keep_users_in(&file).unwrap(), 2, "both kept");
+    assert_eq!(again.user("new@example.test").id, new);
+    let other = again.user("other@example.test").id;
+    assert!(other != new && other != dev, "a restart hands neither subject to another email");
+    std::fs::remove_dir_all(&dir).unwrap();
+}

@@ -25,3 +25,7 @@ tar = { version = "0.4", default-features = false }
 # in the lock beneath reqwest
 signal-hook = "0.4"
 libc = "0.2"
+# a node's people by subject, read from its Registry's SQLite (read-only,
+# while no node runs) before dev's WorkOS fake starts (src/lib.rs
+# `signed_in_subjects`): the crate e2e and the CLI pin
+rusqlite = { version = "0.40", default-features = false, features = ["bundled"] }
