@@ -667,15 +667,29 @@ fn gate(args: &Args) -> Result<String, String> {
         all.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(b.0)));
         all.into_iter().take(DEPTH).map(|(s, _)| s.to_string()).collect()
     };
-    const SYSTEMS: [&str; 3] = ["federated (by wiki, the route's merge)", "union (one index, the shipped engine)", "fbrain hybrid"];
+    const SYSTEMS: [&str; 7] = [
+        "federated (by wiki, the route's merge)",
+        "union (one index, the shipped engine)",
+        "fbrain hybrid",
+        "federated + pooled word statistics (bench prototype, B)",
+        "union, exact float32 meaning leg (diagnosis C1)",
+        "union, fbrain's words leg (diagnosis C2)",
+        "union, legs 50 deep (diagnosis C3)",
+    ];
     eprintln!("searching: {} questions over {} wikis", questions.len(), fragments.len());
-    let mut rankings: Vec<[Vec<String>; 3]> = Vec::new();
+    let mut rankings: Vec<[Vec<String>; 7]> = Vec::new();
     for q in &questions {
         let (v, _) = embeddings.query(&q.q)?;
         let fed = across::federated(&fragments, &q.q, &v, K)?;
         let uni: Vec<String> = union.search(&q.q, &v, K)?.into_iter().map(|h| h.section).collect();
         let fb: Vec<String> = sqlite::rrf(&[&fts.fbrain(&q.q, DEPTH)?, &nearest(&v)], RRF_K).into_iter().take(K).collect();
-        rankings.push([fed, uni, fb]);
+        let pooled = across::federated_pooled(&fragments, &q.q, &v, K)?;
+        let sections = |hits: Vec<across::Hit>| -> Vec<String> { hits.into_iter().map(|h| h.section).collect() };
+        let exact = sections(union.search_variant(&q.q, &v, K, None, across::Variant { exact: true, ..Default::default() }, None)?);
+        let fb_words = fts.fbrain(&q.q, 100)?;
+        let words = sections(union.search_variant(&q.q, &v, K, None, across::Variant::default(), Some(&fb_words))?);
+        let shallow = sections(union.search_variant(&q.q, &v, K, None, across::Variant { depth: 50, ..Default::default() }, None)?);
+        rankings.push([fed, uni, fb, pooled, exact, words, shallow]);
     }
     let answerable: Vec<usize> = (0..questions.len()).filter(|&i| questions[i].relevant.values().any(|&g| g > 0)).collect();
     let score = |s: usize, f: fn(&[String], &Judgments, usize) -> f64, which: &dyn Fn(usize) -> bool| {
@@ -685,7 +699,7 @@ fn gate(args: &Args) -> Result<String, String> {
     for &i in &answerable {
         *kinds.entry(questions[i].kind.clone()).or_default() += 1;
     }
-    let systems: Vec<serde_json::Value> = (0..3)
+    let systems: Vec<serde_json::Value> = (0..SYSTEMS.len())
         .map(|s| {
             let by_kind: BTreeMap<&String, f64> = kinds.keys().map(|k| (k, score(s, metrics::ndcg, &|i| &questions[i].kind == k))).collect();
             serde_json::json!({
@@ -707,12 +721,13 @@ fn gate(args: &Args) -> Result<String, String> {
         "questions": questions.len(), "answerable": answerable.len(), "answerable_by_kind": kinds,
         "systems": systems,
         "gate": { "federated_over_union": ndcg(0) / ndcg(1).max(f64::MIN_POSITIVE), "bar": GATE_SHARE, "federated_minus_fbrain": ndcg(0) - ndcg(2), "passed": passed },
+        "pooled_prototype": { "over_union": ndcg(3) / ndcg(1).max(f64::MIN_POSITIVE), "minus_fbrain": ndcg(3) - ndcg(2) },
     });
     // each question's top pages by system: names the corpus's pages, so it stays in the work directory
     let mut details = String::new();
     for (q, r) in questions.iter().zip(&rankings) {
         let pages = |ids: &[String]| ids.iter().map(|id| id.rsplit_once('#').map_or(id.as_str(), |(p, _)| p).to_string()).collect::<Vec<_>>();
-        details.push_str(&serde_json::json!({ "id": q.id, "federated": pages(&r[0]), "union": pages(&r[1]), "fbrain": pages(&r[2]) }).to_string());
+        details.push_str(&serde_json::json!({ "id": q.id, "federated": pages(&r[0]), "union": pages(&r[1]), "fbrain": pages(&r[2]), "pooled": pages(&r[3]), "exact": pages(&r[4]), "fbrain_words": pages(&r[5]), "depth50": pages(&r[6]) }).to_string());
         details.push('\n');
     }
     std::fs::write(work.join("across-details.jsonl"), details).map_err(|e| e.to_string())?;
@@ -780,7 +795,7 @@ mod tests {
         gate(&args).unwrap();
         let report: serde_json::Value = serde_json::from_slice(&std::fs::read(&report_path).unwrap()).unwrap();
         assert_eq!((report["pages"].as_u64(), report["wikis"].as_u64(), report["answerable"].as_u64()), (Some(18), Some(8), Some(11)));
-        assert_eq!(report["systems"].as_array().map(Vec::len), Some(3));
+        assert_eq!(report["systems"].as_array().map(Vec::len), Some(7));
         assert!(report["gate"]["passed"].is_boolean());
 
         let (pages, _) = load(&root.join("corpus")).unwrap();
@@ -798,6 +813,11 @@ mod tests {
             let merged = across::federated(&one, &q.q, &v, K).unwrap();
             assert_eq!(merged.first(), alone.first(), "{}", q.id);
             assert!(merged.iter().filter(|s| alone.contains(s)).count() >= 8, "{}: {merged:?} vs {alone:?}", q.id);
+            // a fragment's words leg scored with its own statistics as pooled ones is its own: the OR query's BM25
+            let own = across::Pooled::of(&one, &q.q).unwrap();
+            let plain: Vec<String> = one[0].search(&q.q, &v, K).unwrap().into_iter().map(|h| h.section).collect();
+            let pooled: Vec<String> = one[0].search_with(&q.q, &v, K, Some(&own)).unwrap().into_iter().map(|h| h.section).collect();
+            assert_eq!(pooled, plain, "{}: pooled statistics of one fragment are its own", q.id);
         }
         std::fs::remove_dir_all(&work).unwrap();
     }
