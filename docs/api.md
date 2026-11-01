@@ -1129,13 +1129,13 @@ reason (402 `budget_used_up`). A run answers `costMicros`.
   usage}` (Decisions). An answer that does not answer what was asked is
   kept as a rejection (`ai.decide-refused`), charged, and thrown; a retry
   reuses it. No fallback.
-- `job.ai.image({prompt, path, steps?})` → `{path, size, sha256,
+- `job.ai.image({prompt, path, steps?})` → `{path, size, sha256, commit,
   mediaType}`: a JPEG written to `main` at `path` (ending `.jpg` or
   `.jpeg`), a blob from 1 MiB. `prompt` 1 to 2048 characters, `steps` 1 to
   8 (default 4); any other key refused. An answer that is no JPEG is
   refused and charged nothing (`ai.image-refused`).
 - `job.ai.video({prompt, path, duration?, resolution?, aspect_ratio?})`
-  → `{path, size, sha256, mediaType, lengthMs}`: an MP4 written to `main`
+  → `{path, size, sha256, commit, mediaType, lengthMs}`: an MP4 written to `main`
   at `path` (ending `.mp4`), a blob from 1 MiB, made by HappyHorse 1.0
   (`alibaba/hh1-t2v`, Cloudflare's model catalog, zero data retention)
   through the deployment's AI Gateway. `prompt` 1 to 2500 characters,
@@ -1596,7 +1596,8 @@ fragment's, `/api/…` included.
 | path | |
 | --- | --- |
 | `/`, `/<page>` | `site/` in the live commit (`index.html` for a directory); Open Graph tags from `meta` |
-| `__file?path=` | a content file from live, else main; an agent fragment's or a session archive's from main, else live (its computer, or its imports, write main and never deploy) |
+| `__file?path=` | a content file from live, else main; an agent fragment's or a session archive's from main, else live (its computer, or its imports, write main and never deploy); `no-store`, the file as it is now |
+| `__file?path=&v=<commit>` | that file at the version `v` names: the commit that last changed it (`files.stat`'s and `__files`' `commit`, a generated file's `commit`), 40 or 64 lowercase hex (else 400). At main or live, `immutable` (`private` unless the fragment is public), `ETag` the commit; another version, a 302 to the current one's URL (`no-store`): a URL never answers other bytes. Neither pin has the file: as without `v` |
 | `__preview.svg` | the placeholder preview image |
 | `__blob/{sha256}` | `GET`, `HEAD`: one of this fragment's blobs, to viewers and up (not `public` alone), as its declared type (Blobs; ranges 206), `private, max-age=31536000, immutable`, `nosniff`, `ETag` the hash; another fragment's hash 404. `PUT` (editors, from the fragment's own page) uploads as `PUT /api/f/{name}/blobs/{sha256}` → `{ok, sha, size, stored}`; another fragment's page uploads as no one (401) |
 | `__members` | viewers and up (the share link too): as `GET /api/f/{name}/members` |
@@ -1611,7 +1612,7 @@ fragment's, `/api/…` included.
 | `__fragment.css` | the platform's stylesheet (below) |
 | `__markdown.js` | a module: `markdown(text, options)` → a DocumentFragment, `inline(parent, text, options)`; markdown to DOM only (HTML in the text is text; nesting stops at 32). Options: `resolve(target, kind)` → `{href, path?}` or null, `image(src, kind)` → `{src, href?}` or null, `code(text, lang)`, `breaks`; links stay http(s), mailto or relative, pictures http(s) or relative |
 | `__people?id=…&id=…` | anyone who may see the fragment: `{profiles: {<id>: {kind, email?, picture, name?, fragment?, title?}}}` for at most 64 identities: `email` only between members (decision 48); `picture` an absolute platform URL; an agent's `fragment`, its label as `name`, its `title` and `picture` (An agent's name and picture); an unknown id left out |
-| `__files` | the files viewer (`__files.js`, `__files.css`); asked for `application/json`, `{type: "files", count, files: [{path, size}]}`. Framed, it asks its parent to open a file as a window (`{fragment: "open", url, title}`) |
+| `__files` | the files viewer (`__files.js`, `__files.css`); asked for `application/json`, `{type: "files", count, files: [{path, size, commit?}]}` (`commit` its version, for `__file?path=&v=`; none for its blessed template's data). Framed, it asks its parent to open a file as a window (`{fragment: "open", url, title}`) |
 | `__live` | WebSocket, anyone who may see the fragment (below) |
 | `__watch` | WebSocket, viewers and up (the share link, or a signed upgrade): `{type: "hello", ref, sha}`, then `{type: "changed", ref: "main", sha, paths}` per external move of main |
 | anything else | the app's `fetch`, when it has one |

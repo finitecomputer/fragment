@@ -130,11 +130,28 @@ fn hashed(path: &str) -> bool {
 /// membership is `private`: a shared cache must never hand it to someone else.
 pub fn cache_control(path: &str, public_fragment: bool) -> &'static str {
     match (hashed(path), public_fragment) {
-        (true, true) => "public, max-age=31536000, immutable",
-        (true, false) => "private, max-age=31536000, immutable",
+        (true, _) => pinned_cache(public_fragment),
         (false, true) => "public, max-age=60",
         (false, false) => "private, no-cache",
     }
+}
+
+/// Cache policy for bytes whose URL never names other bytes (a hashed
+/// file name, a versioned `__file`): kept for good, `private` unless the
+/// fragment is public.
+pub fn pinned_cache(public_fragment: bool) -> &'static str {
+    if public_fragment {
+        "public, max-age=31536000, immutable"
+    } else {
+        "private, max-age=31536000, immutable"
+    }
+}
+
+/// Whether `v` can be a file's version in `__file?path=&v=` (FIN-340): the
+/// commit that last changed it, as its tree row and `files.stat` name it,
+/// 40 (SHA-1) or 64 (SHA-256) lowercase hex characters.
+pub fn valid_version(v: &str) -> bool {
+    matches!(v.len(), 40 | 64) && v.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 /// A site file's entity tag: its tree row's last commit, which with its
@@ -480,6 +497,22 @@ mod tests {
             let expected = if hashed { "public, max-age=31536000, immutable" } else { "public, max-age=60" };
             assert_eq!(cache_control(path, true), expected, "{path}");
         }
+    }
+
+    /// Goal (FIN-340): a versioned `__file` names a commit as its tree row
+    /// and `files.stat` do, and is kept for good, `private` unless the
+    /// fragment is public. Invalid: a version cut short, too long, in
+    /// capitals, or not hex.
+    #[test]
+    fn a_files_version_is_a_commit_and_pins_its_bytes() {
+        let sha1 = "3f9a1c2e0123456789abcdef0123456789abcdef";
+        let sha256 = "3f9a1c2e0123456789abcdef0123456789abcdef0123456789abcdef01234567";
+        assert!(valid_version(sha1) && valid_version(sha256));
+        for bad in ["", &sha1[..39], &format!("{sha1}0"), &sha1.to_uppercase(), &sha1.replace('3', "g"), "../../etc/passwd"] {
+            assert!(!valid_version(bad), "{bad}");
+        }
+        assert_eq!((pinned_cache(true), pinned_cache(false)), ("public, max-age=31536000, immutable", "private, max-age=31536000, immutable"));
+        assert_eq!(cache_control("app.3f9a1c2e.js", false), pinned_cache(false), "a hashed name is pinned the same way");
     }
 
     /// Goal: a conditional GET is answered 304 exactly when it names the

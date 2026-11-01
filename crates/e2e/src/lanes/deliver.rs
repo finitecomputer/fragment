@@ -319,10 +319,14 @@ fn videos(s: &mut Suite, api: &Api, owner: &fragment_nip98::Keys, name: &str, re
     let waves = video_bytes("waves", 6);
     let r = run("v1", json!({ "prompt": "waves", "path": "video/waves.mp4" }))?;
     let pointer = fragment_core::blob::parse(&s.fake.file_at(repo, "main", "video/waves.mp4").unwrap_or_default());
+    // its version (FIN-340): the commit that wrote it, main's tip
+    let mut output = r["output"].clone();
+    let commit = output.as_object_mut().and_then(|o| o.remove("commit")).and_then(|c| c.as_str().map(str::to_string)).unwrap_or_default();
     s.ok(
-        "a video step in meatproxy's shape (a prompt, a path, six seconds) writes the model's MP4 to main as a blob, its pointer in git, and answers its path, size, hash, type and length",
+        "a video step in meatproxy's shape (a prompt, a path, six seconds) writes the model's MP4 to main as a blob, its pointer in git, and answers its path, size, hash, version, type and length",
         r["status"] == "succeeded"
-            && r["output"] == json!({ "path": "video/waves.mp4", "size": waves.len(), "sha256": fragment_core::blob::sha256_hex(&waves), "mediaType": "video/mp4", "lengthMs": 6_000 })
+            && output == json!({ "path": "video/waves.mp4", "size": waves.len(), "sha256": fragment_core::blob::sha256_hex(&waves), "mediaType": "video/mp4", "lengthMs": 6_000 })
+            && s.fake.branch(repo, "main").as_deref() == Some(commit.as_str())
             && pointer.as_ref().is_some_and(|p| p.sha256 == fragment_core::blob::sha256_hex(&waves) && p.size == waves.len() as u64),
         &r,
     );
