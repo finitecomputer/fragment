@@ -52,16 +52,16 @@ const PERSON_PAID_CALLS: u64 = 200;
 /// embeddings fit what a person may spend: a larger fragment cycles them
 /// (the same text again is its vector reused, by its hash), the same work
 /// for each search.
-const POOL_MAX: usize = 6_000;
+const POOL_MAX: usize = 5_760;
 /// Inputs an embedding call takes, the fewest a deployment names
 /// (Tinfoil's nomic-embed-text, `inputs_max` 32): what an owner's writes
 /// are budgeted at.
 const EMBED_BATCH: usize = 32;
 /// A 429's waits, at most, before a write is given up (`write`).
 const THROTTLED_TRIES: u32 = 20;
-/// Sections a source holds: 200 a write, about 80 KB, each of 60 words
+/// Sections a source holds: 192 a write (6 embedding calls of 32), each of 60 words
 /// (one chunk: the chunker bounds a chunk by its bytes).
-const SECTIONS_PER_SOURCE: usize = 200;
+const SECTIONS_PER_SOURCE: usize = 192;
 /// Warm searches of each mode, a size.
 const WARM: usize = 30;
 /// How long a fragment sits idle before its first search is timed.
