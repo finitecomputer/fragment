@@ -78,6 +78,9 @@ pub(crate) struct Write {
     /// The space its vectors are in; none, the deployment embeds nothing.
     pub space: Option<wire::Space>,
     pub sections: Vec<WriteSection>,
+    /// Its writer's fence (`engine::admits`), if it sends one.
+    #[serde(default)]
+    pub fence: Option<u64>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -113,14 +116,31 @@ pub(crate) enum Wrote {
     /// `chunks`; `cleared`, the index held another space's and was
     /// emptied first.
     Written { written: bool, chunks: usize, cleared: bool },
-    /// `replaces` is not the source's revision now.
-    Conflict { current: Option<String> },
+    /// `replaces` is not the source's revision now. Here and below,
+    /// `cleared` as above: a clear comes first, so a refused write may
+    /// follow one, and its writer is told so it writes every source again.
+    Conflict {
+        current: Option<String>,
+        #[serde(default)]
+        cleared: bool,
+    },
     /// A chunk sent without its vector is one the index no longer holds
     /// (a write in between took it): sent again, embedded.
-    MissingVectors,
+    MissingVectors {
+        #[serde(default)]
+        cleared: bool,
+    },
     /// Past `max` (`CHUNKS_MAX`, or a test fleet's lower), with `chunks`
     /// held.
-    Full { chunks: u64, max: u64 },
+    Full {
+        chunks: u64,
+        max: u64,
+        #[serde(default)]
+        cleared: bool,
+    },
+    /// Its writer's fence is below `fence`, the source's: nothing is
+    /// written (a newer write or delete of it was taken).
+    Fenced { fence: u64 },
     /// Its life ended: nothing is written.
     Ended,
 }
@@ -304,19 +324,26 @@ impl SearchIndexCell {
                 let me = self.parts();
                 let wrote = js::transaction_sync(&self.raw, move || me.upsert(w, max))?;
                 // a refusal may follow a clear (another space's), which wrote
-                if !matches!(wrote, Wrote::Ended | Wrote::Written { written: false, cleared: false, .. }) {
+                if !matches!(wrote, Wrote::Ended | Wrote::Fenced { .. } | Wrote::Written { written: false, cleared: false, .. }) {
                     self.after_write().await?;
                 }
                 Ok(serde_json::to_value(wrote).expect("an outcome serializes"))
             }
             "delete" => {
                 let source = body["source"].as_str().ok_or_else(|| CellError::invalid("index/delete names its source"))?.to_string();
+                let fence = body["fence"].as_u64();
                 let me = self.parts();
-                let deleted = js::transaction_sync(&self.raw, move || me.remove(&source))? > 0;
-                if deleted {
-                    self.after_write().await?;
+                // the fence's check, the removal and its tombstone, one transaction
+                let removed = js::transaction_sync(&self.raw, move || me.remove_fenced(&source, fence))?;
+                match removed {
+                    Err(stored) => Ok(json!({ "deleted": false, "fenced": stored })),
+                    Ok(n) => {
+                        if n > 0 {
+                            self.after_write().await?;
+                        }
+                        Ok(json!({ "deleted": n > 0 }))
+                    }
                 }
-                Ok(json!({ "deleted": deleted }))
             }
             "known" => {
                 let k: Known = serde_json::from_value(body).map_err(|e| parse("known", e))?;
@@ -465,6 +492,39 @@ impl Parts {
         self.set_meta("removed", &js::now_ms().to_string())
     }
 
+    /// `source`'s fence, if a writer sent one.
+    fn fence(&self, source: &str) -> CellResult<Option<u64>> {
+        Ok(self.rows("SELECT fence FROM fences WHERE source = ?", vec![text(source)])?.first().and_then(|r| r["fence"].as_u64()))
+    }
+
+    /// `fence`, taken for `source`: its stored fence moves up to it.
+    fn keep_fence(&self, source: &str, fence: Option<u64>) -> CellResult<()> {
+        let Some(f) = fence else { return Ok(()) };
+        let f = i64::try_from(f).expect("a fence is at most FENCE_MAX");
+        self.exec(
+            "INSERT INTO fences (source, fence) VALUES (?, ?) ON CONFLICT (source) DO UPDATE SET fence = MAX(fence, excluded.fence)",
+            vec![text(source), SqlStorageValue::Integer(f)],
+        )
+    }
+
+    /// `remove`, if `fence` is the source's or above (else `Err` its
+    /// stored fence), keeping the fence even when there was nothing to
+    /// remove: a tombstone, so a stale write cannot bring it back.
+    fn remove_fenced(&self, source: &str, fence: Option<u64>) -> CellResult<Result<u64, u64>> {
+        if let Some(f) = fence {
+            if f > engine::FENCE_MAX {
+                return Err(CellError::invalid(format!("a fence is 0 to {}", engine::FENCE_MAX)));
+            }
+            let stored = self.fence(source)?;
+            if !engine::admits(stored, f) {
+                return Ok(Err(stored.expect("only a stored fence refuses")));
+            }
+        }
+        let n = self.remove(source)?;
+        self.keep_fence(source, fence)?;
+        Ok(Ok(n))
+    }
+
     /// `source`'s sections, chunks, words and vectors gone, its own row
     /// with them: the chunks it held.
     fn remove(&self, source: &str) -> CellResult<u64> {
@@ -508,6 +568,13 @@ impl Parts {
         if self.meta("ended")?.is_some() {
             return Ok(Wrote::Ended);
         }
+        // a fence below the source's is refused before anything, a clear included
+        if let Some(f) = w.fence {
+            let stored = self.fence(&w.source)?;
+            if !engine::admits(stored, f) {
+                return Ok(Wrote::Fenced { fence: stored.expect("only a stored fence refuses") });
+            }
+        }
         let mut cleared = false;
         if self.space()? != w.space {
             if self.count("SELECT COUNT(*) AS n FROM sources")? > 0 {
@@ -520,19 +587,21 @@ impl Parts {
         let current: Vec<Value> = self.rows("SELECT revision, chunks FROM sources WHERE source = ?", vec![text(&w.source)])?;
         let current_revision = current.first().and_then(|r| r["revision"].as_str()).map(str::to_string);
         if current_revision.as_deref() == Some(w.revision.as_str()) {
+            // taken, so its fence moves: a newer writer's same revision fences out an older's
+            self.keep_fence(&w.source, w.fence)?;
             return Ok(Wrote::Written { written: false, chunks: 0, cleared });
         }
         if let Some(r) = &w.replaces {
             let matches = if r.is_empty() { current_revision.is_none() } else { current_revision.as_deref() == Some(r.as_str()) };
             if !matches {
-                return Ok(Wrote::Conflict { current: current_revision });
+                return Ok(Wrote::Conflict { current: current_revision, cleared });
             }
         }
         let new: usize = w.sections.iter().map(|s| s.chunks.len()).sum();
         let old = current.first().and_then(|r| r["chunks"].as_u64()).unwrap_or(0);
         let held = self.chunks()?;
         if !engine::fits(held, old, new as u64, max) {
-            return Ok(Wrote::Full { chunks: held, max });
+            return Ok(Wrote::Full { chunks: held, max, cleared });
         }
         let total = held.saturating_sub(old) + new as u64;
         // each vector, held: its own, or this index's of its hash (read
@@ -560,7 +629,7 @@ impl Parts {
             missing.dedup();
             let found = if cleared { HashMap::new() } else { self.held(&missing)? };
             if missing.iter().any(|h| !found.contains_key(*h) && !vectors.contains_key(*h)) {
-                return Ok(Wrote::MissingVectors);
+                return Ok(Wrote::MissingVectors { cleared });
             }
             vectors.extend(found);
         }
@@ -593,6 +662,7 @@ impl Parts {
             }
         }
         self.set_meta("chunks", &total.to_string())?;
+        self.keep_fence(&w.source, w.fence)?;
         Ok(Wrote::Written { written: true, chunks: new, cleared })
     }
 

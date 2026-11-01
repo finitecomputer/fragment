@@ -174,7 +174,7 @@ pub fn upsert_of(source: &str, revision: &str, session: &Session) -> Indexed {
     }
     fields.retain(|_, v| !v.is_empty());
     let title = Some(short(&session.title, TITLE_MAX_BYTES)).filter(|t| !t.is_empty());
-    let mut upsert = Upsert { source: source.to_string(), revision: revision.to_string(), replaces: None, title, at: session.started_at.clone(), fields, sections: Vec::new() };
+    let mut upsert = Upsert { source: source.to_string(), revision: revision.to_string(), replaces: None, title, at: session.started_at.clone(), fields, sections: Vec::new(), fence: None };
     // as sent: the envelope, and each section with its comma
     let mut bytes = serde_json::to_vec(&upsert).map_or(0, |v| v.len());
     let mut left = 0;

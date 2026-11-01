@@ -288,14 +288,16 @@ mod tests {
     }
 
     /// The walk over the repo itself finds the shell, the templates' site
-    /// and app code (the notes viewer's among them), and the classic
-    /// service worker, and leaves out vendored code.
+    /// and app code (the notes viewer's among them), the classic service
+    /// worker and every test, and leaves out vendored code.
     #[test]
     fn the_walk_covers_the_shell_and_templates_and_skips_vendored_code() {
         let found = files(&devstack::repo_root()).expect("the repo's walk");
         let kind = |path: &str| found.iter().find(|(p, _)| p == path).map(|(_, k)| *k);
         assert_eq!(kind("cell/shell/shell.js"), Some(InputType::Module));
-        assert_eq!(tests(&found), SHELL_TESTS);
+        // the shell's tests, and the brain app's (beside the templates crate: a
+        // file under templates/brain would ship with the template)
+        assert_eq!(tests(&found), [&SHELL_TESTS[..], &["crates/templates/tests/brain_app.test.mjs"]].concat());
         // the launcher, a module shell.js imports
         assert_eq!(kind("cell/shell/launcher.js"), Some(InputType::Module));
         assert_eq!(kind("templates/todo/app.mjs"), Some(InputType::Module));
