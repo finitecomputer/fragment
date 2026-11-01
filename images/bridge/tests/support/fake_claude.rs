@@ -39,7 +39,9 @@ fn main() {
         println!("2.1.316 (Claude Code)");
         return;
     }
-    let exe = std::env::current_exe().expect("its own path");
+    // through its launcher's link, as an install lays it out (macOS's
+    // current_exe names the link itself)
+    let exe = std::env::current_exe().and_then(std::fs::canonicalize).expect("its own path");
     let dir = exe.parent().expect("a directory").to_path_buf();
     let cfg: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.join("fake-claude.json")).expect("fake-claude.json beside it")).expect("JSON");
     match cfg["mode"].as_str() {

@@ -411,6 +411,10 @@ pub struct Turn {
     /// the card's turn (cards.rs, `Fresh::note`; `TurnStart::note`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// The card answer it is the fresh turn of (`runtime::LateCard`), for a
+    /// runtime that acts on its own cards. A state from before holds none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub late: Option<crate::runtime::LateCard>,
     /// It answers an ask: its end owes the answer too (`Return`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ret: Option<Return>,
@@ -1014,6 +1018,7 @@ impl Engine {
                 self.admit(&a, fragment, cause, at, &asker, name(&asker), &m, 0, Ask::Message);
                 if let Some(t) = self.state.turns.get_mut(&id).filter(|t| t.phase == Phase::Queued) {
                     t.note = Some(fresh.note);
+                    t.late = Some(fresh.late);
                 }
             }
             Err(why) => {
@@ -1314,6 +1319,7 @@ impl Engine {
             command: matches!(ask, Ask::Command | Ask::Refused(_)),
             reply_to: m.reply_to,
             note: None,
+            late: None,
             ret,
             continues: None,
             continue_after: false,
@@ -1531,6 +1537,7 @@ impl Engine {
             command: false,
             reply_to: None,
             note: None,
+            late: None,
             ret: None,
             continues: Some(cut.id),
             continue_after: false,
@@ -1696,6 +1703,7 @@ impl Engine {
             asker_name: t.asker_name.clone(),
             text: t.text.clone(),
             attachments: t.attachments.clone(),
+            late: t.late.clone(),
             files: Vec::new(),
             routine: t.routine,
             claim_seq,

@@ -156,11 +156,16 @@ impl Scenario {
     /// launcher a link in `~/.local/bin`, and a mark that it ran.
     fn installer(&self) -> String {
         format!(
-            "v=\"$XDG_DATA_HOME/claude/versions/2.1.316\" && mkdir -p \"$(dirname \"$v\")\" \"$HOME/.local/bin\" && cp '{bin}' \"$v\" && cp '{mode}' \"$(dirname \"$v\")/fake-claude.json\" && ln -sf \"$v\" \"$HOME/.local/bin/claude\" && touch '{mark}'",
+            "v=\"$XDG_DATA_HOME/claude/versions/2.1.316\" && mkdir -p \"$(dirname \"$v\")\" \"$HOME/.local/bin\" && cp '{bin}' \"$v\" && cp '{mode}' \"$(dirname \"$v\")/fake-claude.json\" && ln -sf \"$v\" \"$HOME/.local/bin/claude\" && echo ran >> '{mark}'",
             bin = self.bin.display(),
             mode = self.bin.with_file_name("fake-claude.json").display(),
             mark = self.dir.join("installer-ran").display()
         )
+    }
+
+    /// How many times its installer ran.
+    fn installs(&self) -> usize {
+        std::fs::read_to_string(self.dir.join("installer-ran")).map(|t| t.lines().count()).unwrap_or(0)
     }
 
     /// The install card the turn asked with, once it did.
@@ -436,6 +441,58 @@ async fn a_hold_stops_an_idle_session_which_resumes_after_it() {
     s.done();
 }
 
+/// Goal (Alex on #901): its install card answered after its turn is gone
+/// (waiting on a card lets the computer sleep: decision 42; a restart ends
+/// the turn, and the answer is a fresh turn of its own, cards.rs) is
+/// honoured from the answer as that fresh turn carries it (`LateCard`),
+/// never its words: Install installs, then does what the card's turn was
+/// asked; Not now declines, asking nothing again. Replay: a second answer
+/// to the same card (the first wins) installs nothing more and starts no
+/// turn.
+#[tokio::test]
+async fn an_install_card_answered_after_a_restart_is_honoured() {
+    let install = Path::new(COMPOSED).join("install");
+    let drain = Duration::from_millis(fragment_bridge::runtime::claude::DRAIN_MS_DEFAULT);
+    for option in ["install", "not-now"] {
+        let name = if option == "install" { "install-late-yes" } else { "install-late-no" };
+        let s = Scenario::open(name, install.clone(), None, support::settings(), drain).await;
+        let bridge = s.start_uninstalled(&s.installer());
+        s.following().await;
+        s.say(json!({ "text": "Hello" }));
+        let card = s.install_card().await;
+        bridge.stop().await;
+
+        // a restart, then its owner's answer to the card they saw
+        let bridge = s.start_uninstalled(&s.installer());
+        s.following().await;
+        s.say(json!({ "kind": "prompt_response", "prompt": "install", "option": option, "agent": "npub1juniper", "turn": card["turn"] }));
+        let chat = s.chat.clone();
+        let replied = |want: &'static str| {
+            let chat = chat.clone();
+            move |w: &World| w.bodies(&chat, "chat", "reply").iter().any(|r| r["text"] == want)
+        };
+        if option == "install" {
+            s.fake.until(wait(), "what was asked, done", replied("Hello from Claude")).await;
+            assert_eq!(s.installs(), 1, "installed once");
+            let steps = s.with(|w| w.bodies(&s.chat, "work", "turn.step"));
+            assert!(steps.iter().any(|st| st["args"] == "Anthropic's installer (Claude Code 2.1.316)"), "{steps:?}");
+            // replay: a second answer to it, then a message, which runs
+            // on Claude Code: the answer started nothing
+            s.say(json!({ "kind": "prompt_response", "prompt": "install", "option": "install", "agent": "npub1juniper", "turn": card["turn"] }));
+            s.say(json!({ "text": "Again" }));
+            s.fake.until(wait(), "the next message's answer", replied("Still here")).await;
+            assert_eq!(s.installs(), 1, "never twice");
+            assert_eq!(s.replies(), vec!["Hello from Claude".to_string(), "Still here".to_string()], "one turn of the answer, one of the message");
+        } else {
+            s.fake.until(wait(), "its decline", replied(fragment_bridge::runtime::claude::NOT_NOW)).await;
+            assert_eq!(s.installs(), 0, "nothing installed");
+        }
+        assert_eq!(s.with(|w| w.bodies(&s.chat, "work", "turn.prompt").len()), 1, "{option}: asked once, never again");
+        bridge.stop().await;
+        s.done();
+    }
+}
+
 /// Goal (FIN-258): Not now installs nothing: the turn says so, and ends.
 /// Invalid: an installer that fails says why, in its own last words, and
 /// the turn ends there; a Stop while it runs stops the turn and kills the
@@ -455,7 +512,7 @@ async fn not_now_installs_nothing_and_a_failed_or_stopped_install_says_so() {
     s.say(json!({ "kind": "prompt_response", "prompt": "install", "option": "not-now" }));
     s.ended(1, "the turn's end").await;
     assert_eq!((s.ends()[0]["outcome"].as_str(), s.replies()), (Some("idle"), vec![fragment_bridge::runtime::claude::NOT_NOW.to_string()]));
-    assert!(!s.dir.join("installer-ran").exists() && !s.dir.join("home/.local/bin/claude").exists(), "nothing ran, nothing installed");
+    assert!(s.installs() == 0 && !s.dir.join("home/.local/bin/claude").exists(), "nothing ran, nothing installed");
     bridge.stop().await;
 
     // an installer that fails
@@ -472,13 +529,18 @@ async fn not_now_installs_nothing_and_a_failed_or_stopped_install_says_so() {
 
     // stopped while it runs: its whole group goes
     let s = Scenario::open("install-stopped", install, None, settings, drain).await;
-    let bridge = s.start_uninstalled("sh -c 'sleep 31.25' & wait");
+    let pid_file = s.dir.join("installer.pid");
+    let bridge = s.start_uninstalled(&format!("sleep 30 & echo $! > '{}'; wait", pid_file.display()));
     s.following().await;
     s.say(json!({ "text": "Hello" }));
     s.install_card().await;
     s.say(json!({ "kind": "prompt_response", "prompt": "install", "option": "install" }));
-    let sleeping = || std::fs::read_dir("/proc").map(|d| d.filter_map(Result::ok).filter_map(|e| std::fs::read(e.path().join("cmdline")).ok()).any(|c| c == b"sleep\x0031.25\x00")).unwrap_or(false);
-    support::until(wait(), "the installer running", sleeping).await;
+    support::until(wait(), "the installer running", || pid_file.exists()).await;
+    // its child, alive while signal 0 reaches it (any Unix's)
+    let pid: i32 = std::fs::read_to_string(&pid_file).expect("its pid").trim().parse().expect("a pid");
+    // SAFETY: signal 0 sends nothing; it asks whether the process is there
+    let sleeping = || unsafe { libc::kill(pid, 0) } == 0;
+    assert!(sleeping(), "the installer's child runs");
     let turn = s.with(|w| w.bodies(&s.chat, "work", "turn.start")[0]["turn"].clone());
     s.say(json!({ "kind": "stop", "turn": turn }));
     s.ended(1, "the turn's end").await;

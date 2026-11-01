@@ -337,6 +337,32 @@ async fn session(cfg: ClaudeConfig, key: (String, String), generations: Arc<Mute
                             continue;
                         }
                         asking = None;
+                        // its install card answered after its turn was gone
+                        // (a sleep, a restart: cards.rs): the answer, as the
+                        // fresh turn carries it, never read from its words
+                        if let Some(late) = ts.late.clone().filter(|l| l.prompt == INSTALL_CARD) {
+                            idle_since = Instant::now();
+                            crate::ev!("claude.install_late", { "turn": ts.turn, "option": late.option });
+                            if late.option != INSTALL_YES {
+                                let _ = events.send(Event::Reply { turn: ts.turn.clone(), part: 1, text: NOT_NOW.into() }).await;
+                                let _ = events.send(Event::End { turn: ts.turn.clone(), outcome: Outcome::Idle }).await;
+                                continue;
+                            }
+                            idle.set(true);
+                            if !ensure_installed(&cfg, &ts.turn, &mut rx, &events).await {
+                                continue;
+                            }
+                            // then what its card's turn was asked
+                            let Some(request) = late.request else {
+                                let _ = events.send(Event::Reply { turn: ts.turn.clone(), part: 1, text: INSTALLED_READY.into() }).await;
+                                let _ = events.send(Event::End { turn: ts.turn.clone(), outcome: Outcome::Idle }).await;
+                                continue;
+                            };
+                            let asked = TurnStart { text: request, note: None, late: None, ..(*ts).clone() };
+                            let id = session_id(&agent, &chat, generations.lock().expect("generations").of(&gen_key));
+                            begin(&cfg, &asked, &cwd, &id, &mut proc, &mut turn, &events).await;
+                            continue;
+                        }
                         // not installed: its person may install it from here,
                         // the turn waiting on their answer (Paul, FIN-233)
                         if proc.is_none() && cfg.installer.is_some() && !cfg.bin.is_file() {
@@ -361,25 +387,12 @@ async fn session(cfg: ClaudeConfig, key: (String, String), generations: Arc<Mute
                             let _ = events.send(Event::End { turn: ts.turn.clone(), outcome: Outcome::Idle }).await;
                             continue;
                         }
-                        let command = cfg.installer.clone().expect("a turn asks only with an installer");
                         // an install writes under /data: a hold waits on it
                         // as on an idle process (FIN-348)
                         idle.set(true);
-                        match install(&cfg, &command, &mut rx, &ts.turn).await {
-                            Installed::Done(version) => {
-                                let step = Step { tool: "installer".into(), args: format!("Anthropic's installer (Claude Code {version})"), ok: true, excerpt: String::new(), category: Category::Shell, evidence: None };
-                                let _ = events.send(Event::Step { turn: ts.turn.clone(), step }).await;
-                                let id = session_id(&agent, &chat, generations.lock().expect("generations").of(&gen_key));
-                                begin(&cfg, &ts, &cwd, &id, &mut proc, &mut turn, &events).await;
-                            }
-                            Installed::Failed(why) => {
-                                let _ = events.send(Event::End { turn: ts.turn.clone(), outcome: Outcome::Error(why) }).await;
-                            }
-                            Installed::Stopped => {
-                                let _ = events.send(Event::End { turn: ts.turn.clone(), outcome: Outcome::Stopped }).await;
-                            }
-                            // the bridge ended it: it says nothing more
-                            Installed::LetGo => {}
+                        if ensure_installed(&cfg, &ts.turn, &mut rx, &events).await {
+                            let id = session_id(&agent, &chat, generations.lock().expect("generations").of(&gen_key));
+                            begin(&cfg, &ts, &cwd, &id, &mut proc, &mut turn, &events).await;
                         }
                     }
                     ToSession::Stop(id) if asking.as_ref().is_some_and(|a| a.turn == id) => {
@@ -564,6 +577,10 @@ pub const INSTALL_ASK: &str = "Claude Code isn't installed on your computer yet.
 pub const INSTALL_YES: &str = "install";
 pub const INSTALL_NO: &str = "not-now";
 
+/// A late Install's reply when its card's turn was asked nothing in words
+/// (a file alone, a routine): installed, it asks what to do.
+pub const INSTALLED_READY: &str = "Claude Code is installed. What would you like me to do?";
+
 /// The turn's reply when its person says not now (or lets the card expire).
 pub const NOT_NOW: &str = "Okay, not now. Ask me anything when you'd like to install Claude Code.";
 
@@ -582,6 +599,33 @@ pub enum Installed {
     Stopped,
     /// Its turn was let go of while it ran (the bridge ended it).
     LetGo,
+}
+
+/// Its person said Install (on its card, or late: `LateCard`): Anthropic's
+/// installer, unless Claude Code is there by now (an answer delivered twice
+/// installs once), the turn told it ran. True once it is installed; else
+/// the turn (`turn`) ended saying why, or, let go of, saying nothing.
+async fn ensure_installed(cfg: &ClaudeConfig, turn: &str, rx: &mut mpsc::Receiver<ToSession>, events: &mpsc::Sender<Event>) -> bool {
+    if cfg.bin.is_file() {
+        return true;
+    }
+    let Some(command) = cfg.installer.clone() else {
+        let _ = events.send(Event::End { turn: turn.to_string(), outcome: Outcome::Error(NOT_INSTALLED.into()) }).await;
+        return false;
+    };
+    let outcome = match install(cfg, &command, rx, turn).await {
+        Installed::Done(version) => {
+            let step = Step { tool: "installer".into(), args: format!("Anthropic's installer (Claude Code {version})"), ok: true, excerpt: String::new(), category: Category::Shell, evidence: None };
+            let _ = events.send(Event::Step { turn: turn.to_string(), step }).await;
+            return true;
+        }
+        Installed::Failed(why) => Outcome::Error(why),
+        Installed::Stopped => Outcome::Stopped,
+        // the bridge ended it: it says nothing more
+        Installed::LetGo => return false,
+    };
+    let _ = events.send(Event::End { turn: turn.to_string(), outcome }).await;
+    false
 }
 
 /// The installer's process group, killed whole unless it ended.
@@ -1166,6 +1210,7 @@ mod tests {
             asker_name: "paul".into(),
             text: "hi".into(),
             attachments: vec![],
+            late: None,
             files: vec![super::super::LocalFile { path: "/tmp/m/a.png".into(), media_type: "image/png".into(), name: "a.png".into(), size: 1 }],
             routine: false,
             claim_seq: None,

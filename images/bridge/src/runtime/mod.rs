@@ -266,6 +266,9 @@ pub struct TurnStart {
     pub text: String,
     /// The message's attachments, as the record names them.
     pub attachments: Vec<crate::records::AttachmentRef>,
+    /// A card's answer read after its turn was gone, this turn its own
+    /// (`LateCard`): none for any other turn.
+    pub late: Option<LateCard>,
     /// The same attachments on disk (the driver downloads them before the
     /// runtime hears of the turn).
     pub files: Vec<LocalFile>,
@@ -418,6 +421,20 @@ impl std::fmt::Display for RuntimeError {
             RuntimeError::Failed(m) => write!(f, "runtime failed: {m}"),
         }
     }
+}
+
+/// A card answered after the turn that asked it was gone (a sleep, a
+/// restart: cards.rs), as the fresh turn of that answer carries it: which
+/// card (`prompt`, its id as its runtime asked it), which of its options,
+/// and what the asking turn was asked (its cause's words, if any). A
+/// runtime that acts on its own cards' answers reads this, never the
+/// fresh turn's words (Alex on #901).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct LateCard {
+    pub prompt: String,
+    pub option: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request: Option<String>,
 }
 
 /// A runtime's two queues, the bridge's shutdown signal, and the hold.
