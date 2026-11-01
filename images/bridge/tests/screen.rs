@@ -288,26 +288,6 @@ async fn an_earlier_lives_lease_is_given_back_and_a_gone_agents_screen_closes() 
     running.stop().await;
 }
 
-/// One HTTP/1.1 request to the screen port, read to its end: its status
-/// and body.
-async fn http(base: &Base, method: &str, path: &str, headers: &[(&str, &str)], body: &[u8]) -> (u16, String) {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let mut s = tokio::net::TcpStream::connect(base.authority()).await.expect("the screen answers");
-    let mut req = format!("{method} {path} HTTP/1.1\r\nhost: {}\r\nconnection: close\r\ncontent-length: {}\r\n", base.authority(), body.len());
-    for (k, v) in headers {
-        req.push_str(&format!("{k}: {v}\r\n"));
-    }
-    req.push_str("\r\n");
-    s.write_all(req.as_bytes()).await.unwrap();
-    s.write_all(body).await.unwrap();
-    let mut got = Vec::new();
-    s.read_to_end(&mut got).await.unwrap();
-    let got = String::from_utf8_lossy(&got).into_owned();
-    let status = got.split_whitespace().nth(1).and_then(|c| c.parse().ok()).unwrap_or(0);
-    let body = got.split_once("\r\n\r\n").map(|(_, b)| b.to_string()).unwrap_or_default();
-    (status, body)
-}
-
 /// Goal (FIN-353): an answer for the computer. The script's `secret` card
 /// asks for a code its option `code` takes on the computer alone
 /// (`PromptOption::computer`); posted to the screen port's `/answer`, as
@@ -327,7 +307,7 @@ async fn a_cards_answer_for_the_computer_reaches_its_runtime_alone() {
     let (running, base) = bridge(&fake, &dir).await;
     fake.until(10_000, "the bridge to follow", |w| w.live_sockets() >= 2).await;
 
-    let (status, page) = http(&base, "GET", "/answer/", &[], b"").await;
+    let (status, page) = support::http(&base, "GET", "/answer/", &[], b"").await;
     assert!(status == 200 && page.contains("card-to-computer") && page.contains("computer-answered"), "its page: {status}");
 
     fake.say(&chat, &support::fake::person("paul"), json!({ "text": "secret" }));
@@ -336,7 +316,7 @@ async fn a_cards_answer_for_the_computer_reaches_its_runtime_alone() {
     let answer = json!({ "turn": card["turn"], "prompt": card["prompt"], "option": "code", "value": "the-code-123" }).to_string();
     let post = |agent: &'static str, headers: Vec<(&'static str, &'static str)>, body: String| {
         let base = base.clone();
-        async move { http(&base, "POST", &format!("/answer?agent={agent}"), &headers, body.as_bytes()).await }
+        async move { support::http(&base, "POST", &format!("/answer?agent={agent}"), &headers, body.as_bytes()).await }
     };
     let json_type = ("content-type", "application/json");
     assert_eq!(post("juniper--k3x9", vec![("content-type", "application/x-www-form-urlencoded")], answer.clone()).await.0, 415, "a form's");

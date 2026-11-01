@@ -24,12 +24,15 @@
 mod support;
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::{json, Value};
 
+use fragment_bridge::net::Base;
 use fragment_bridge::runtime::claude::{Claude, ClaudeConfig};
 use fragment_bridge::runtime::{Runtimes, DEFAULT};
+use fragment_bridge::screen::ScreenConfig;
 use support::fake::{person, Fake, World};
 
 /// The recordings, one directory a scenario.
@@ -37,6 +40,9 @@ const RECORDINGS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/claude");
 
 /// The composed scripts, one directory a scenario.
 const COMPOSED: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/claude-composed");
+
+/// The code fake-claude's sign-in takes (tests/support/fake_claude.rs).
+const SIGN_IN_CODE: &str = "the-right-code";
 
 /// The real `claude` to record with, when recording.
 fn recording() -> Option<PathBuf> {
@@ -113,30 +119,19 @@ impl Scenario {
     }
 
     fn runtimes(&self) -> Runtimes {
-        let claude = Claude {
-            config: ClaudeConfig {
-                bin: self.bin.clone(),
-                home: self.dir.clone(),
-                config_dir: self.config_dir.clone(),
-                work_dir: self.dir.join("work"),
-                state_dir: self.dir.join("claude-state"),
-                model: Some("claude-haiku-5-5".into()),
-                idle: Duration::from_secs(60),
-                drain: self.drain,
-                run_as: None,
-                installer: None,
-            },
-        };
-        Runtimes::new().with(DEFAULT, support::script()).with("claude", Box::new(claude))
+        self.runtimes_installing(None)
     }
 
-    /// Its bridge with Claude Code not installed: `installer` puts it in
-    /// its person's home (`<dir>/home`), as Anthropic's does.
-    fn start_uninstalled(&self, installer: &str) -> support::Running {
-        let home = self.dir.join("home");
+    /// Its runtimes; with an `installer`, Claude Code not installed: it
+    /// puts it in its person's home (`<dir>/home`), as Anthropic's does.
+    fn runtimes_installing(&self, installer: Option<&str>) -> Runtimes {
+        let (bin, home) = match installer {
+            Some(_) => (self.dir.join("home/.local/bin/claude"), self.dir.join("home")),
+            None => (self.bin.clone(), self.dir.clone()),
+        };
         let claude = Claude {
             config: ClaudeConfig {
-                bin: home.join(".local/bin/claude"),
+                bin,
                 home,
                 config_dir: self.config_dir.clone(),
                 work_dir: self.dir.join("work"),
@@ -145,10 +140,15 @@ impl Scenario {
                 idle: Duration::from_secs(60),
                 drain: self.drain,
                 run_as: None,
-                installer: Some(installer.to_string()),
+                installer: installer.map(str::to_string),
             },
         };
-        support::start_runtimes(support::config(&self.fake.url(), &self.dir, self.settings), Runtimes::new().with(DEFAULT, support::script()).with("claude", Box::new(claude)))
+        Runtimes::new().with(DEFAULT, support::script()).with("claude", Box::new(claude))
+    }
+
+    /// Its bridge with Claude Code not installed (`runtimes_installing`).
+    fn start_uninstalled(&self, installer: &str) -> support::Running {
+        support::start_runtimes(support::config(&self.fake.url(), &self.dir, self.settings), self.runtimes_installing(Some(installer)))
     }
 
     /// What Anthropic's installer does, a test's: this scenario's
@@ -176,6 +176,44 @@ impl Scenario {
 
     fn start(&self) -> support::Running {
         support::start_runtimes(support::config(&self.fake.url(), &self.dir, self.settings), self.runtimes())
+    }
+
+    /// Its bridge with Claude Code signed out (fake-claude's `signed_out`,
+    /// until a sign-in takes `SIGN_IN_CODE`), its screen port listening for
+    /// a card's answer for the computer (`code`); with an `installer`, not
+    /// installed either (`runtimes_installing`).
+    fn start_signed_out(&self, installer: Option<&str>) -> (support::Running, Base) {
+        let config = self.bin.with_file_name("fake-claude.json");
+        let mut mode: Value = serde_json::from_slice(&std::fs::read(&config).expect("its mode")).expect("JSON");
+        mode["signed_out"] = json!(true);
+        std::fs::write(&config, mode.to_string()).expect("its mode");
+        // bound for the bridge's life, so no other socket takes it first
+        let listener = Arc::new(std::net::TcpListener::bind("127.0.0.1:0").expect("a port"));
+        let port = listener.local_addr().expect("its port").port();
+        let page = self.dir.join("page");
+        std::fs::create_dir_all(&page).expect("its page");
+        let mut cfg = support::config(&self.fake.url(), &self.dir, self.settings);
+        cfg.screen = Some(ScreenConfig { listener, dir: page, screens_file: None, start: None });
+        (support::start_runtimes(cfg, self.runtimes_installing(installer)), Base::parse(&format!("http://127.0.0.1:{port}")).expect("its base"))
+    }
+
+    /// The chat's `n`th sign-in card (from 1), once a turn asked it.
+    async fn sign_in_card(&self, n: usize) -> Value {
+        let cards = |w: &World| w.bodies(&self.chat, "work", "turn.prompt").into_iter().filter(|p| p["prompt"].as_str().is_some_and(|id| id.starts_with("sign-in-"))).collect::<Vec<_>>();
+        self.fake.until(wait(), &format!("sign-in card {n}"), |w| cards(w).len() >= n).await;
+        self.with(|w| cards(w)[n - 1].clone())
+    }
+
+    /// `code` on a sign-in card, as the shell's unseen frame of its
+    /// computer's `/answer/` posts it: its status and what it said.
+    async fn code(&self, base: &Base, card: &Value, code: &str) -> (u16, String) {
+        let body = json!({ "turn": card["turn"], "prompt": card["prompt"], "option": "code", "value": code }).to_string();
+        support::http(base, "POST", "/answer?agent=juniper--k3x9", &[("content-type", "application/json"), ("sec-fetch-site", "same-origin")], body.as_bytes()).await
+    }
+
+    /// No record, request or line of the platform's log holds `code`.
+    fn kept_nowhere(&self, code: &str) {
+        self.with(|w| assert!(!format!("{:?}{:?}", w.log, w.requests).contains(code), "{code} kept"));
     }
 
     /// The agent's working directory, where its tools run.
@@ -382,6 +420,141 @@ async fn a_turn_asks_to_install_claude_code_and_runs_once_it_is() {
     s.ended(2, "the next turn's end").await;
     assert_eq!(s.with(|w| w.bodies(&s.chat, "work", "turn.prompt").len()), 1, "one card");
     assert_eq!(s.replies().last().map(String::as_str), Some("Still here"));
+    bridge.stop().await;
+    s.done();
+}
+
+/// Goal (FIN-353): Claude Code signed out asks its person, on the turn's
+/// card, to sign in: the card links Anthropic's sign-in as `claude auth
+/// login` said it, and takes the code that page shows on the computer alone
+/// (`computer`); the login takes it, and the turn says it signed in and
+/// goes on to what was asked. Invalid: a code the login calls invalid is
+/// asked again, on a new card. No record holds a code. Replay: signed in,
+/// the next turn asks nothing.
+#[tokio::test]
+async fn a_turn_asks_its_person_to_sign_in_and_runs_once_signed_in() {
+    let drain = Duration::from_millis(fragment_bridge::runtime::claude::DRAIN_MS_DEFAULT);
+    let s = Scenario::open("sign-in", Path::new(COMPOSED).join("install"), None, support::settings(), drain).await;
+    let (bridge, base) = s.start_signed_out(None);
+    s.following().await;
+    s.say(json!({ "text": "Hello" }));
+    let card = s.sign_in_card(1).await;
+    let text = card["text"].as_str().expect("its words");
+    assert!(text.starts_with("Claude Code needs you to sign in") && text.contains("[Open the sign-in](https://claude.com/cai/oauth/authorize?"), "{text}");
+    assert_eq!(card["options"], json!([{ "id": "code", "label": "Paste the code", "words": true, "computer": true }]));
+    assert!(s.ends().is_empty() && s.replies().is_empty(), "the turn waits");
+    assert_eq!(running(&s.bin), 1, "its login waits for the code");
+
+    // invalid: the login says so, and a new card of the same turn asks again
+    assert_eq!(s.code(&base, &card, "a-wrong-code").await.0, 200);
+    let again = s.sign_in_card(2).await;
+    assert!(again["text"].as_str().is_some_and(|t| t.starts_with("That code didn't work.")), "{again}");
+    assert_eq!(again["turn"], card["turn"]);
+
+    assert_eq!(s.code(&base, &again, SIGN_IN_CODE).await.0, 200);
+    s.ended(1, "the turn's end").await;
+    assert_eq!(s.ends()[0]["outcome"], "idle", "{:?}", s.ends());
+    let steps = s.with(|w| w.bodies(&s.chat, "work", "turn.step"));
+    assert!(steps.iter().any(|st| st["args"] == "Signed in to Claude"), "said: {steps:?}");
+    assert_eq!(s.replies(), vec!["Hello from Claude".to_string()], "and then what was asked");
+    assert!(s.config_dir.join(".credentials.json").is_file(), "signed in where its sessions read it");
+    s.kept_nowhere("a-wrong-code");
+    s.kept_nowhere(SIGN_IN_CODE);
+
+    // replay: signed in, the next turn asks nothing
+    s.say(json!({ "text": "Again" }));
+    s.ended(2, "the next turn's end").await;
+    assert_eq!(s.with(|w| w.bodies(&s.chat, "work", "turn.prompt").len()), 2, "two cards, both the first turn's");
+    assert_eq!(s.replies().last().map(String::as_str), Some("Still here"));
+    bridge.stop().await;
+    s.done();
+}
+
+/// Goal (FIN-353, FIN-348): installed from the turn's card, then signed
+/// out, the turn's sign-in card waits on its person, never on a hold: a
+/// hold then is answered at once (an install, which writes under /data, is
+/// waited on; a sign-in's wait is not), and the code afterwards still signs
+/// in. Replay: the next turn asks for neither.
+#[tokio::test]
+async fn an_install_then_a_sign_in_which_no_hold_waits_on() {
+    let drain = Duration::from_millis(fragment_bridge::runtime::claude::DRAIN_MS_DEFAULT);
+    let s = Scenario::open("install-sign-in", Path::new(COMPOSED).join("install"), None, support::settings(), drain).await;
+    let (bridge, base) = s.start_signed_out(Some(&s.installer()));
+    s.following().await;
+    s.say(json!({ "text": "Hello" }));
+    s.install_card().await;
+    s.say(json!({ "kind": "prompt_response", "prompt": "install", "option": "install" }));
+    let card = s.sign_in_card(1).await;
+    assert_eq!(s.installs(), 1);
+
+    support::hold(&s.dir);
+    support::until(10_000, "the hold's answer while the sign-in waits", || support::held(&s.dir)).await;
+    std::fs::remove_file(support::hold_path(&s.dir)).expect("the hold");
+    support::until(10_000, "the answer taken back", || !support::held(&s.dir)).await;
+
+    assert_eq!(s.code(&base, &card, SIGN_IN_CODE).await.0, 200);
+    s.ended(1, "the turn's end").await;
+    assert_eq!(s.replies(), vec!["Hello from Claude".to_string()], "installed, signed in, then what was asked");
+
+    // replay: neither asked again
+    s.say(json!({ "text": "Again" }));
+    s.ended(2, "the next turn's end").await;
+    assert_eq!(s.with(|w| w.bodies(&s.chat, "work", "turn.prompt").len()), 2, "one install card, one sign-in card");
+    assert_eq!(s.installs(), 1);
+    bridge.stop().await;
+    s.done();
+}
+
+/// Goal (FIN-353): a sign-in lives and dies with its turn. Restart: a
+/// bridge stopped while its card waits ends its `claude auth login` (and
+/// the verifier only that process held: no later process could take that
+/// card's code), so a code posted after is refused, in words its person
+/// reads, and their next message asks anew, on a card that signs in.
+/// Invalid: three codes the login calls invalid end the turn saying so; a
+/// Stop while a card waits stops the turn. Either way its login ends.
+#[tokio::test]
+async fn a_sign_in_ends_with_its_turn_and_the_next_message_asks_anew() {
+    let drain = Duration::from_millis(fragment_bridge::runtime::claude::DRAIN_MS_DEFAULT);
+    let s = Scenario::open("sign-in-restart", Path::new(COMPOSED).join("install"), None, support::settings(), drain).await;
+    let (bridge, _) = s.start_signed_out(None);
+    s.following().await;
+    s.say(json!({ "text": "Hello" }));
+    let lost = s.sign_in_card(1).await;
+    bridge.stop().await;
+    support::until(10_000, "its login to end with its bridge", || running(&s.bin) == 0).await;
+
+    let (bridge, base) = s.start_signed_out(None);
+    s.following().await;
+    let (status, said) = s.code(&base, &lost, SIGN_IN_CODE).await;
+    assert!(status == 409 && said.contains("This ended before your answer came"), "{status} {said}");
+    assert!(!s.config_dir.join(".credentials.json").exists(), "no sign-in took it");
+    s.say(json!({ "text": "Hello" }));
+    let card = s.sign_in_card(2).await;
+    assert_ne!(card["turn"], lost["turn"], "the message's own turn");
+    assert_eq!(s.code(&base, &card, SIGN_IN_CODE).await.0, 200);
+    let chat = s.chat.clone();
+    s.fake.until(wait(), "what was asked, done", move |w| w.bodies(&chat, "chat", "reply").iter().any(|r| r["text"] == "Hello from Claude")).await;
+    bridge.stop().await;
+
+    // invalid: three wrong codes; then a Stop
+    let s = Scenario::open("sign-in-invalid", Path::new(COMPOSED).join("install"), None, support::settings(), drain).await;
+    let (bridge, base) = s.start_signed_out(None);
+    s.following().await;
+    s.say(json!({ "text": "Hello" }));
+    for n in 1..=3 {
+        let card = s.sign_in_card(n).await;
+        assert_eq!(s.code(&base, &card, &format!("wrong-{n}")).await.0, 200);
+    }
+    s.ended(1, "the turn's end").await;
+    assert_eq!((s.ends()[0]["outcome"].as_str(), s.ends()[0]["error"].as_str()), (Some("error"), Some(fragment_bridge::runtime::claude::SIGN_IN_GAVE_UP)));
+    support::until(10_000, "its login to end", || running(&s.bin) == 0).await;
+    s.say(json!({ "text": "Hello" }));
+    let card = s.sign_in_card(4).await;
+    s.say(json!({ "kind": "stop", "turn": card["turn"] }));
+    s.ended(2, "the stopped turn's end").await;
+    assert_eq!(s.ends()[1]["outcome"], "stopped");
+    support::until(10_000, "its login to end", || running(&s.bin) == 0).await;
+    assert!(s.replies().is_empty() && !s.config_dir.join(".credentials.json").exists(), "never signed in");
     bridge.stop().await;
     s.done();
 }

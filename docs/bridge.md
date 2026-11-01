@@ -414,6 +414,20 @@ reaches it (`withheld`).
   turn") does the same from its `LateCard`: Install, then what the card's
   turn was asked; Not now, declined, asking nothing again. Installed by
   then, it installs nothing more.
+- **Signed out** (`claude auth status`, before a session's process
+  starts), a turn asks its person to sign in on a card (FIN-353):
+  `claude auth login`, started with no display so it opens no browser on
+  the computer, says Anthropic's sign-in URL, which the card links for
+  its person's own browser on any device; the code that page shows them
+  goes back on the card as an answer for the computer (`SIGN_IN_OPTION`;
+  above, "An answer for the computer"), never a record or a log line,
+  and into the login's input. Signed in, the turn says so and goes on to
+  what was asked. A code the login calls invalid is asked again on a new
+  card, at most `SIGN_IN_TRIES_MAX` times; a Stop, or the card expiring,
+  ends the turn, its login with it. The login's verifier lives only in
+  its process (PKCE), so a sign-in never outlives its turn: after a sleep
+  or a restart its card's code is refused, saying so, and the next
+  message asks anew.
 - **Its folder** is its work directory, its own: an `AGENTS.md` the
   bridge writes (who it is, and the `fragment` CLI, which acts as it:
   `FRAGMENT_AS_AGENT`, `FRAGMENT_FOR`), and a `CLAUDE.md` that reads it,

@@ -1,6 +1,6 @@
 //! `fake-claude`: Claude Code's stream-json wire, recorded from the real
 //! `claude` and replayed, for the bridge's tests of its `claude` runtime
-//! (tests/claude.rs). Test-only: no image carries it.
+//! (tests/claude.rs), and the stub image's Claude Code.
 //!
 //! It reads what to do from `fake-claude.json` beside its own executable
 //! (each test copies it into a directory of its own, so tests in parallel
@@ -24,8 +24,16 @@
 //!   transcript is there, and `--resume` of one that is not, fail as the
 //!   real one does, and its first message makes its transcript.
 //!
-//! In either mode each line it is given is appended to `heard.jsonl` beside
-//! it, as it came: what a test reads of what Claude Code was told.
+//! - `{"mode": "echo"}`: answers each message `echo: <its words>` (the stub
+//!   image's Claude Code, images/stub/Dockerfile).
+//!
+//! In record or replay mode each line it is given is appended to
+//! `heard.jsonl` beside it, as it came: what a test reads of what Claude
+//! Code was told.
+//!
+//! `claude auth status` and `claude auth login` are as the real ones with
+//! no display: signed in, unless its config says `"signed_out": true` and
+//! no sign-in took `SIGN_IN_CODE` yet.
 
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
@@ -44,11 +52,60 @@ fn main() {
     let exe = std::env::current_exe().and_then(std::fs::canonicalize).expect("its own path");
     let dir = exe.parent().expect("a directory").to_path_buf();
     let cfg: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.join("fake-claude.json")).expect("fake-claude.json beside it")).expect("JSON");
+    // signing in, as the real one does with no display (FIN-353): signed
+    // out only when its config says so (`signed_out`), until a sign-in
+    if args.first().map(String::as_str) == Some("auth") {
+        let creds = PathBuf::from(std::env::var("CLAUDE_CONFIG_DIR").unwrap_or_else(|_| ".claude".into())).join(".credentials.json");
+        let signed_in = cfg["signed_out"] != true || creds.is_file();
+        match args.get(1).map(String::as_str) {
+            Some("status") => {
+                println!("{}", serde_json::json!({ "loggedIn": signed_in, "authMethod": if signed_in { "claude.ai" } else { "none" } }));
+                std::process::exit(if signed_in { 0 } else { 1 });
+            }
+            Some("login") => auth_login(&creds),
+            other => panic!("fake-claude: no auth {other:?}"),
+        }
+    }
     match cfg["mode"].as_str() {
         Some("record") => record(&args, Path::new(cfg["real"].as_str().expect("real")), Path::new(cfg["out"].as_str().expect("out"))),
         Some("replay") => replay(&args, Path::new(cfg["script"].as_str().expect("script"))),
         Some("echo") => echo(&args),
         other => panic!("fake-claude: no mode {other:?}"),
+    }
+}
+
+/// The code its sign-in takes (the stub image's, and the tests'): any other
+/// is invalid, as a mistyped one is.
+pub const SIGN_IN_CODE: &str = "the-right-code";
+
+/// `claude auth login` as the real one runs with no display: it says its
+/// URL and waits for a pasted code (no newline after its prompt), takes
+/// `SIGN_IN_CODE` (its credentials written, then it exits), and says any
+/// other is invalid and asks again. Its input closed, it waits on (only a
+/// kill ends it: the bridge's tests see that it was killed).
+fn auth_login(creds: &Path) -> ! {
+    let mut stdout = std::io::stdout();
+    let prompt = |out: &mut std::io::Stdout| {
+        write!(out, "Paste code here if prompted > ").expect("written");
+        out.flush().expect("flushed");
+    };
+    writeln!(stdout, "Opening browser to sign in…").expect("written");
+    writeln!(stdout, "If the browser didn't open, visit: https://claude.com/cai/oauth/authorize?code=true&client_id=fake&response_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&state=fake").expect("written");
+    prompt(&mut stdout);
+    // bounded by its input: one code per pass
+    for line in std::io::stdin().lock().lines() {
+        let Ok(code) = line else { break };
+        if code.trim() == SIGN_IN_CODE {
+            std::fs::create_dir_all(creds.parent().expect("a config dir")).expect("its config dir");
+            std::fs::write(creds, b"{}").expect("its credentials");
+            writeln!(stdout, "\nLogin successful.").expect("written");
+            std::process::exit(0);
+        }
+        writeln!(stdout, "Invalid code. Please make sure the full code was copied.").expect("written");
+        prompt(&mut stdout);
+    }
+    loop {
+        std::thread::park();
     }
 }
 
