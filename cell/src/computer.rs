@@ -162,6 +162,9 @@ const SAVED_DIRS: [&str; 2] = ["/data", "/data/work"];
 const WORK_LEFT_OUT: &str = "/work/";
 /// The lever's failed saves at most at once (`fail-saves`).
 const FAIL_SAVES_MAX: u32 = 100;
+/// How far the `clock` lever moves a computer's uses' months, either way:
+/// a month's worth.
+const CLOCK_OFFSET_MAX_MS: u64 = 31 * 24 * 3600 * 1000;
 /// The lever's `hang-backups`: the guest's `sandbox-shim`, which its saves'
 /// backups run, swapped for one that never answers, as a sick container's
 /// (r4, r6), the real one kept beside it; and put back.
@@ -275,6 +278,9 @@ enum MetaKey {
     /// What its XFTP relays carried on their UTC day (`fragment_core::relay`):
     /// `<day> <bytes>`.
     RelayDay,
+    /// The clock a test fleet moved (the `clock` lever): the milliseconds its
+    /// uses' months are counted and read ahead by. None elsewhere.
+    ClockOffset,
 }
 
 impl MetaKey {
@@ -295,6 +301,7 @@ impl MetaKey {
             MetaKey::Images => "images",
             MetaKey::Simplex => "simplex",
             MetaKey::RelayDay => "relay_day",
+            MetaKey::ClockOffset => "clock_offset",
         }
     }
 }
@@ -667,6 +674,9 @@ struct TestLever {
     /// `alive-check`'s: its start's guest stopped as it starts.
     #[serde(default)]
     freeze: Option<bool>,
+    /// `clock`'s: how far its uses' months are moved.
+    #[serde(default, rename = "offsetMs")]
+    offset_ms: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -1848,6 +1858,14 @@ impl ComputerCell {
         Ok(ComputerUses { computer: self.must(MetaKey::Id)?, month: month.label(), uses })
     }
 
+    /// The clock's offset a test fleet set (the `clock` lever); none elsewhere.
+    fn offset_ms(&self) -> CellResult<i64> {
+        if !self.cfg.test_hooks {
+            return Ok(0);
+        }
+        Ok(self.meta(MetaKey::ClockOffset)?.and_then(|v| v.parse().ok()).unwrap_or(0))
+    }
+
     /// Counts an agent's calls a provider answered, in `at`'s month, and
     /// forgets months past `USES_MONTHS_KEPT`. A month already holding
     /// `USES_ROWS_MAX` rows takes no new one (its calls are logged).
@@ -1855,7 +1873,7 @@ impl ComputerCell {
         if b.at <= 0 || b.uses.len() > swap::PLACEHOLDERS_MAX || !fragment_proto::valid_fragment_name(&b.agent) {
             return Err(CellError::invalid("a use names an agent, when, and at most a request's providers"));
         }
-        let month = Month::of(b.at);
+        let month = Month::of(b.at.saturating_add(self.offset_ms()?));
         for u in &b.uses {
             if self.cfg.providers.get(&u.provider).is_none() || u.micros < 0 {
                 return Err(CellError::invalid(format!("no provider {:?} to count, or a charge below zero", u.provider)));
@@ -2097,6 +2115,13 @@ impl ComputerCell {
                 }
                 let view = self.view()?;
                 Ok(json!({ "computer": id, "simplex": view.simplex }))
+            }
+            "clock" => {
+                // a lane's uses and its reads of them in one month, however
+                // late in a month it runs
+                let offset = b.offset_ms.filter(|o| o.unsigned_abs() <= CLOCK_OFFSET_MAX_MS).ok_or_else(|| CellError::invalid(format!("clock names its offsetMs, at most {CLOCK_OFFSET_MAX_MS} either way")))?;
+                self.set_meta(MetaKey::ClockOffset, &offset.to_string())?;
+                Ok(json!({ "computer": id, "offsetMs": offset, "month": Month::of(js::now_ms() + offset).label() }))
             }
             "always-on" => {
                 let on = b.on.ok_or_else(|| CellError::invalid("always-on names on: true or false"))?;
@@ -2369,7 +2394,7 @@ impl ComputerCell {
                 let b: UsesAsk = body_json(&mut req).await?;
                 let month = match b.month.as_deref() {
                     Some(label) => Month::parse(label).ok_or_else(|| CellError::invalid("a month is YYYY-MM"))?,
-                    None => Month::of(js::now_ms()),
+                    None => Month::of(js::now_ms() + self.offset_ms()?),
                 };
                 json_response(&self.uses(month)?)
             }
