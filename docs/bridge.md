@@ -308,7 +308,9 @@ turn in a chat in a life posts the menu on `work` (`commands`).
 An agent's owner may link the agent to their SimpleX app (decision 32;
 `simplex/mod.rs` and `run.rs` say how). The bridge runs SimpleX's own
 core, `simplex-chat`, one per linked agent, as its child process, over
-the core's bot API on loopback.
+the core's bot API on loopback: on a port the core picks, which the
+bridge reads back from that core's own sockets, so one agent's task
+never reaches another agent's core.
 
 - **Only where the image names the core** (`BRIDGE_SIMPLEX_BIN`). The
   bridge's reads of its computer say so (`?simplex=1`), so its owner's
