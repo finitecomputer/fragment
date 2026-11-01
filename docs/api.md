@@ -1105,7 +1105,9 @@ reason (402 `budget_used_up`). A run answers `costMicros`.
   its resolution's price as soon as the model answers with its video
   (a step tried again reads that video, and is never made or charged
   again); an answer with no completed video is refused and charged
-  nothing (`ai.video-refused`). Refused before any call on a deployment
+  nothing (`ai.video-refused`). Asked at most once an attempt: a try
+  that never heard its answer fails, charged nothing, saying to replay
+  (`ai.video-lost`). Refused before any call on a deployment
   whose tiers are private: no catalog video model is (`Models::video_refused`).
 
 A text model's 429 or 5xx is answered by the fallback model (Models), sent
