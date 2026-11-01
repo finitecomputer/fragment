@@ -8,7 +8,7 @@ export const DEFAULT_AGENT_TIER = "cheap";
 const ROLE_MAX_CHARS = 48;
 const AGENTS_MAX = 16;
 
-export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, agents, named, rename, load, nameScreen, renderNames, computer, homePicker, addAgent, primaryAgent, chats, own }) {
+export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, agents, named, rename, load, nameScreen, renderNames, computer, homePicker, addAgent, primaryAgent, chats, own, me }) {
   // ---- an agent's name and picture (docs/api.md, "An agent's name and
   // picture"): its agent fragment's title and its avatar.png, written and
   // put live as any of its files are (POST …/files, then …/deploy). Every
@@ -50,7 +50,7 @@ export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, 
     await api("POST", `/api/f/${seg(agent)}/files`, { message: file ? "its picture" : "no picture", files: [write] });
     await api("POST", `/api/f/${seg(agent)}/deploy`, {});
   }
-  // An agent removed (FIN-250): the chats it is the only agent of are
+  // An agent removed (FIN-250): the chats it is the last live agent of are
   // archived first, so they are in History, read and continued with another
   // agent (its membership kept, so its words stay its), and then its
   // fragment is deleted: it leaves its computer, and its routines (its own
@@ -58,14 +58,38 @@ export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, 
   // first: a delete that fails leaves it as it was but for those chats,
   // which Remove again finds archived, and the person can unarchive.
   async function removeAgent(a) {
-    const alone = chats().filter((f) => own(f) && !f.archived && (f.agents ?? []).length === 1 && f.agents[0] === a.identity);
-    for (const f of alone) await api("PUT", `/api/fragments/${seg(f.name)}/archived`, { archived: true });
+    const live = liveOwn();
+    const last = [];
+    for (const f of chats().filter((f) => own(f) && !f.archived && (f.agents ?? []).includes(a.identity))) {
+      if (!(await keepsAnAgent(f, a, live))) last.push(f);
+    }
+    for (const f of last) await api("PUT", `/api/fragments/${seg(f.name)}/archived`, { archived: true });
     await api("DELETE", `/api/f/${seg(a.fragment)}`);
     await load();
   }
+  // The person's own agents still theirs: run by their computer and in
+  // their list (one removed leaves the list at once, its computer a moment
+  // after: Continue's boundary too).
+  const liveOwn = () => new Set([...agents().values()].filter((x) => x.fragment && byName(x.fragment)).map((x) => x.identity));
+  // Whether `chat` keeps a live agent once `a` is gone: one of theirs still
+  // theirs, or another person's. A chat's agents are its agent members,
+  // and a removed agent keeps its membership (for whose words were its), so
+  // one not live of theirs is told from another person's by the chat's
+  // members' owners, asked only then.
+  async function keepsAnAgent(chat, a, live) {
+    const others = (chat.agents ?? []).filter((id) => id !== a.identity);
+    if (others.some((id) => live.has(id))) return true;
+    if (!others.length) return false;
+    const { members = [] } = await api("GET", `/api/f/${seg(chat.name)}/members`);
+    const mine = me()?.id;
+    return members.some((m) => m.kind === "agent" && others.includes(m.principal) && !!m.owner && m.owner !== mine);
+  }
   // Whether an agent may be removed here: one of several, never the main
   // agent (the first of theirs, whom new chats go to).
-  const removable = (a) => agents().size > 1 && primaryAgent()?.fragment !== a.fragment;
+  const removable = (a) => {
+    const live = liveOwn();
+    return live.has(a.identity) && live.size > 1 && primaryAgent()?.fragment !== a.fragment;
+  };
   // An agent's row's Rename, its picture (Add, Change, Remove), Remove agent
   // (asked once more, saying what it does), and a line that says what they
   // did or why not.
