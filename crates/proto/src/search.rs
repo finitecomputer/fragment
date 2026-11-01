@@ -66,12 +66,21 @@ pub struct Upsert {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub fields: BTreeMap<String, String>,
     pub sections: Vec<Section>,
+    /// A writer's own generation for the source (0 to 2^53 − 1): taken only
+    /// at or above the highest the index took for it, so a writer's stale
+    /// work never lands over its newer (409 `conflict` naming `fence`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fence: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Delete {
     pub source: String,
+    /// As an upsert's: a delete keeps it, so a stale write cannot bring the
+    /// source back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fence: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]

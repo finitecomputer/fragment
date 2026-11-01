@@ -100,8 +100,7 @@ async sort({ sha256, type }, job) {
 - A video (`job.ai.video({prompt, path, duration, resolution,
   aspect_ratio})`) is an MP4 written to a path ending in `.mp4`: text to
   video only, 3 to 15 seconds (5 by default), `720p` or `1080p`. It is
-  charged by the second, and refused where the deployment's models are
-  private.
+  charged by the second.
 - `job.ai.text` takes OpenAI's `messages`, `tools` and `tool_choice`, and
   answers `{text, message, finish_reason, timing, …}`: a job runs its own
   tool loop (on `finish_reason: "tool_calls"`, push `message`, run each of

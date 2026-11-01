@@ -134,6 +134,15 @@ pub(super) fn lever_with(api: &Api, id: &str, mut body: Value) -> Result<crate::
     api.unsigned("POST", "/api/test/computer", Some(&body))
 }
 
+/// Pins computer `id`'s uses to this month for the lane (its `clock` lever,
+/// run on from the 15th), so the uses the lane makes and its reads of the
+/// month's are in one month however late in a month it runs: its month.
+pub(super) fn pin_month(api: &Api, id: &str) -> Result<String> {
+    let r = lever_with(api, id, json!({ "op": "clock", "offsetMs": super::ledger::mid_month_offset_ms() }))?;
+    anyhow::ensure!(r.status == 200, "the computer's clock moves: {r}");
+    Ok(r.body["month"].as_str().unwrap_or_default().to_string())
+}
+
 /// The newest save computer `id` keeps (the lever's `saves`), if any.
 pub(super) fn newest_save(api: &Api, id: &str) -> Value {
     lever(api, id, "saves").map(|r| r.body["saves"][0].clone()).unwrap_or(Value::Null)
@@ -1135,6 +1144,17 @@ fn door_checks(s: &mut Suite, api: &Api, c: &Doors, fetched: &dyn Fn(&Suite, u32
     let ticket = |who: &crate::Keys, act: &str| api.signed(who, "POST", &path, Some(&json!({ "door": "simplex", "act": act })));
     let r = ticket(c.stranger, "link")?;
     s.ok("no one but its owner is given a ticket to the agent's door", r.status == 404, &r);
+    // an agent shared beyond its owner and their agents is given no door
+    // (FIN-352): an invite waiting, its link refused; revoked, it is given
+    let outsider = format!("door-outsider-{}@e2e.test", &crate::Keys::generate().pubkey_hex()[..8]);
+    let invited = api.signed(c.owner, "POST", &format!("/api/f/{}/invites", c.agent), Some(&json!({ "email": outsider, "role": "viewer" })))?;
+    let shared = ticket(c.owner, "link")?;
+    let revoked = api.signed(c.owner, "DELETE", &format!("/api/f/{}/invites/{outsider}", c.agent), None)?;
+    s.ok(
+        "an agent with an invite waiting is given no link ticket to a door (403 unshare_first), and once it is revoked, it is",
+        invited.status == 200 && shared.status == 403 && shared.body["reason"] == "unshare_first" && revoked.status == 200,
+        json!({ "invited": invited.body, "ticket": shared.body, "revoked": revoked.status }),
+    );
     let t = ticket(c.owner, "link")?;
     let key = fragment_core::npub::parse(c.identity).unwrap_or_default();
     let read = serde_json::from_value::<fragment_core::door::Ticket>(t.body.clone()).ok().filter(fragment_core::door::Ticket::well_formed);
@@ -1640,6 +1660,7 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.signed(&owner, "POST", "/api/computers", Some(&json!({})))?;
     let id = r.body["computer"].as_str().unwrap_or("").to_string();
     s.ok("a person makes their computer, asleep", r.status == 200 && id.starts_with("computer:") && r.body["phase"] == "asleep", &r);
+    let month = pin_month(api, &id)?;
     // The stub's scripted runtime (images/stub) answers its commands ("tool
     // please", "slow…", "fetch …", "think …") and echoes the rest; the
     // deployment's own image (our Hermes) answers as its real model does.
@@ -1662,6 +1683,10 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     let agent = s.create(api, &owner, &agent_name)?;
     s.commit(&agent, &[("fragment.json", Some(AGENT_JSON))]);
     s.deploy(&agent);
+    // members only, as one made from the agent template is: a door is
+    // linked only on an agent no one else is in (FIN-352)
+    let r = api.signed(&owner, "PUT", &format!("/api/f/{agent_name}/visibility"), Some(&json!({ "visibility": "members" })))?;
+    anyhow::ensure!(r.status == 200, "the agent made members-only: {r}");
     let r = api.signed(&owner, "PUT", &format!("/api/computers/{id}/agents/{agent_name}"), Some(&json!({})))?;
     let identity = r.body["agents"][0]["identity"].as_str().unwrap_or("").to_string();
     s.ok("its owner assigns the agent fragment to it", r.status == 200 && fragment_core::npub::is_identity(&identity) && r.body["agents"][0]["fragment"] == agent_name.as_str(), &r);
@@ -1855,7 +1880,7 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
             s.skip(label, "it needs the stub's fetch, and the fakes' accounts and providers behind the swap");
         }
     } else {
-        let swapping = Swapping { owner: &owner, stranger: &stranger, id: &id, agent: &agent_name, identity: &identity };
+        let swapping = Swapping { owner: &owner, stranger: &stranger, id: &id, agent: &agent_name, identity: &identity, month: &month };
         replies_so_far += swap_checks(s, api, &swapping, &fetched)?;
         replies_so_far += model_checks(s, api, &swapping, &fetched)?;
         let r = allow(&stranger, json!([]))?;

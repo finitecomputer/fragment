@@ -181,10 +181,11 @@ pub async fn route(mut req: Request, env: &Env, cfg: &Config, rest: &[&str]) -> 
             crate::routed::send(env, "FRAGMENT", &target.fragment, inner).await
         }
         (Method::Post, ["computer"]) => {
-            /// `{computer, op, times?, on?, ms?, freeze?}`: a lever on that
-            /// computer (computer.rs, `lever`): `times` is `fail-saves`',
-            /// `on` is `always-on`'s, `ms` is `hang-backups`' and
-            /// `alive-check`'s, `freeze` is `alive-check`'s.
+            /// `{computer, op, times?, on?, ms?, freeze?, offsetMs?}`: a lever
+            /// on that computer (computer.rs, `lever`): `times` is
+            /// `fail-saves`', `on` is `always-on`'s, `ms` is `hang-backups`'
+            /// and `alive-check`'s, `freeze` is `alive-check`'s, `offsetMs`
+            /// is `clock`'s.
             #[derive(Deserialize)]
             #[serde(deny_unknown_fields)]
             struct TestComputer {
@@ -198,6 +199,8 @@ pub async fn route(mut req: Request, env: &Env, cfg: &Config, rest: &[&str]) -> 
                 ms: Option<u32>,
                 #[serde(default)]
                 freeze: Option<bool>,
+                #[serde(default, rename = "offsetMs")]
+                offset_ms: Option<i64>,
             }
             let t: TestComputer = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
             if !valid_computer_id(&t.computer) {
@@ -210,7 +213,7 @@ pub async fn route(mut req: Request, env: &Env, cfg: &Config, rest: &[&str]) -> 
                     return Err(CellError::new(ErrorCode::Forbidden, "on a preview, the computer levers reach e2e people's computers alone"));
                 }
             }
-            json_answer(&crate::computer::ask(env, &t.computer, "computer/test", &serde_json::json!({ "op": t.op, "times": t.times, "on": t.on, "ms": t.ms, "freeze": t.freeze })).await?)
+            json_answer(&crate::computer::ask(env, &t.computer, "computer/test", &serde_json::json!({ "op": t.op, "times": t.times, "on": t.on, "ms": t.ms, "freeze": t.freeze, "offsetMs": t.offset_ms })).await?)
         }
         // the registry is the whole deployment's: a preview's is everyone's
         (Method::Post, ["registry"]) if cfg.levers_scoped => Err(no_route("/api/test/registry")),

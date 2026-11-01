@@ -109,7 +109,9 @@ search write API (`/api/f/{name}/search/…`), as the writer holding the
 conversations' bytes: one source a conversation's file, its revision
 the file's sha256, and one section a turn (fragment_core::session_search),
 each checked as the platform checks it (`searchable::check`) before it is
-sent.
+sent. The person's History searches it with their own messages
+(cell/shell/session-archive.js, `search`): its chats whose words hold
+the question, best first, each with its best snippet.
 
 - **A turn** is a person's message and what the agent said until their
   next one, as "Person: … / Agent: …": a tool's output left out and its
@@ -142,6 +144,37 @@ sent.
   and skipped: the import stands. A search that is full (its index's
   chunks are capped: 507) is sent no more; each conversation not written
   is counted refused, and the next import writes it once there is room.
+
+### Section text
+
+As written (fragment_core::session_search: `PERSON`, `AGENT`,
+`SUMMARY`): one line a message kept, in order, joined by line ends. A
+person's is `Person: <text>`, then ` [<file>, …]` when it held files.
+The agent's is `Agent: <text>`, then ` [<file>, …]`, then
+` (used <tool>, …)` when it called tools, each part left out when empty
+(a call alone reads `Agent: (used web_search)`). A compression's
+summary, a section of its own (heading `Summary`), is `Summary: <text>`.
+`<text>` is the message trimmed, with no control character but a line's
+end and a tab, so a message's own line breaks are lines with no prefix
+after its first; a name is at most 64 bytes, its spaces collapsed and
+`=` a space. A turn split past 8,000 characters, and a search's snippet
+(at most 300 bytes of one chunk, around the words asked, `…` where cut),
+may begin within a line. For example (a test holds these to what is
+written):
+
+```
+Person: when do I plant beans? [plot.png]
+Agent: (used web_search)
+Agent: In spring, after the frost.
+```
+
+```
+Summary: Ann plants beans in spring.
+```
+
+It is for whoever reads search: an agent reads it as it is; a shell
+renders it for people (History: `You`, the agent's name from the
+archive's index, the markers dropped).
 
 ## Where they come from
 

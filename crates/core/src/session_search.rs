@@ -31,6 +31,14 @@ use crate::session::{Message, Session};
 /// A tool's or a file's name, as a turn names it.
 const NAME_MAX_BYTES: usize = 64;
 
+/// What a line of a section's text starts with (templates/sessions/README.md,
+/// "Section text"): a person's message, the agent's, a compression's
+/// summary. A shell renders them for people (`You`, the agent's name); an
+/// agent reading search reads them as they are.
+pub const PERSON: &str = "Person: ";
+pub const AGENT: &str = "Agent: ";
+pub const SUMMARY: &str = "Summary: ";
+
 /// A conversation's upsert, and how many of its sections the limits left out.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Indexed {
@@ -74,22 +82,22 @@ fn line_of(m: &Message) -> Option<String> {
     let text = plain(m.text.as_deref().unwrap_or_default());
     let text = text.trim();
     if m.summary {
-        return (!text.is_empty()).then(|| format!("Summary: {text}"));
+        return (!text.is_empty()).then(|| format!("{SUMMARY}{text}"));
     }
     let names = |names: Vec<String>| names.into_iter().filter(|n| !n.is_empty()).collect::<Vec<_>>().join(", ");
     let files = names(m.attachments.iter().map(|a| short(&a.name, NAME_MAX_BYTES)).collect());
     let files = (!files.is_empty()).then(|| format!("[{files}]"));
     let (who, used) = match m.role.as_str() {
-        "user" => ("Person", None),
+        "user" => (PERSON, None),
         "assistant" => {
             let used = names(m.tool_calls.iter().map(|c| short(&c.name, NAME_MAX_BYTES)).collect());
-            ("Agent", (!used.is_empty()).then(|| format!("(used {used})")))
+            (AGENT, (!used.is_empty()).then(|| format!("(used {used})")))
         }
         // a tool's output, the system's prompt: left out
         _ => return None,
     };
     let said: Vec<&str> = [Some(text).filter(|t| !t.is_empty()), files.as_deref(), used.as_deref()].into_iter().flatten().collect();
-    (!said.is_empty()).then(|| format!("{who}: {}", said.join(" ")))
+    (!said.is_empty()).then(|| format!("{who}{}", said.join(" ")))
 }
 
 struct Turn {
@@ -166,7 +174,7 @@ pub fn upsert_of(source: &str, revision: &str, session: &Session) -> Indexed {
     }
     fields.retain(|_, v| !v.is_empty());
     let title = Some(short(&session.title, TITLE_MAX_BYTES)).filter(|t| !t.is_empty());
-    let mut upsert = Upsert { source: source.to_string(), revision: revision.to_string(), replaces: None, title, at: session.started_at.clone(), fields, sections: Vec::new() };
+    let mut upsert = Upsert { source: source.to_string(), revision: revision.to_string(), replaces: None, title, at: session.started_at.clone(), fields, sections: Vec::new(), fence: None };
     // as sent: the envelope, and each section with its comma
     let mut bytes = serde_json::to_vec(&upsert).map_or(0, |v| v.len());
     let mut left = 0;
@@ -258,6 +266,11 @@ mod tests {
         assert_eq!(upsert.sections[0].at.as_deref(), Some("2026-10-01T09:00:01.000Z"), "a turn is when it began");
         assert_eq!(upsert.sections[0].context, ["telegram", "Juniper"]);
         assert_eq!(crate::searchable::check(&upsert), Ok(()));
+        // the README's example is what is written (templates/sessions/README.md, "Section text")
+        let readme = include_str!("../../../templates/sessions/README.md");
+        for section in [&upsert.sections[0].text, &upsert.sections[1].text] {
+            assert!(readme.contains(section.as_str()), "the README's \"Section text\" shows {section:?}");
+        }
     }
 
     /// Goal: whatever a conversation holds, its upsert is one the platform
