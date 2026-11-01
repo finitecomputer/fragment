@@ -1021,10 +1021,54 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     polish::record_shapes(s, api, &owner, &owner_session, &mut chrome)?;
     polish::finished_card_times(s, api, &owner, &mut chrome)?;
     alerts_in_frame(s, api, &mut chrome, &owner, &owner_session, &member_session, &owner_site, &chat_name, &identity)?;
+    card_to_computer(s, api, &mut chrome, &owner, &chat_name, &shots)?;
     claude_install(s, api, &mut chrome, &owner, &computer, &shots)?;
 
     std::thread::sleep(super::computers::QUEUE_DRAIN);
     api.signed(&owner, "POST", &format!("/api/computers/{computer}/sleep"), Some(&json!({})))?;
+    Ok(())
+}
+
+/// FIN-353 PR 2: an answer for the computer. In the chat the shell frames,
+/// the agent's card asks for a code its option takes on the computer alone
+/// (the script's `code-card`); typed on the card and sent, the shell hands it
+/// to the computer's `/answer/` page, unseen, and the turn has it: it says
+/// how many characters it took, the card closes answered, and no record of
+/// the chat holds what was typed. Screenshots for FIN-353.
+fn card_to_computer(s: &mut Suite, api: &Api, chrome: &mut Browser, owner: &Keys, chat: &str, shots: &Path) -> Result<()> {
+    let Some((shell, frame)) = framing_shell(s, api, chrome, chat, "")? else {
+        s.ok("the shell frames the chat for its card that asks for a code", false, "");
+        return Ok(());
+    };
+    chrome.click(&frame, "#text")?;
+    chrome.type_text(&frame, "code-card")?;
+    chrome.press(&frame, "Enter", false)?;
+    let field = ".prompt:not(.closed) input[data-option=\"code\"]";
+    let asked = chrome.until(&frame, &format!("document.querySelector({0})?.type === 'password' && !document.querySelector({0}).disabled", js(field)), TURN);
+    let _ = chrome.screenshot(&shell, &shots.join("card-to-computer.png"));
+    s.ok(
+        "a card whose option is the computer's shows a masked field, saying it goes straight to the computer, and the message box does not answer it",
+        asked
+            && chrome.eval(&frame, "document.querySelector('.prompt:not(.closed) .prompt-note')?.textContent ?? ''")?.as_str().is_some_and(|n| n.contains("straight to your computer"))
+            // and the message box is no answer to it: a message is a record
+            && chrome.eval(&frame, "document.getElementById('text').placeholder")?.as_str().is_some_and(|p| !p.starts_with("Your answer")),
+        chrome.eval(&frame, "document.querySelector('.prompt:not(.closed)')?.innerText ?? null")?,
+    );
+    if asked {
+        chrome.click(&frame, field)?;
+        chrome.type_text(&frame, "the-code-123")?;
+        chrome.press(&frame, "Enter", false)?;
+    }
+    let took = chrome.until(&frame, "[...document.querySelectorAll('.msg.agent:not(.streaming) .md')].some((m) => m.textContent.includes('(took 12 characters)'))", TURN);
+    let closed = chrome.until(&frame, "[...document.querySelectorAll('.prompt.closed .outcome.answered')].length > 0", TURN);
+    let _ = chrome.screenshot(&shell, &shots.join("card-to-computer-answered.png"));
+    let kept = ["chat", "work"].iter().flat_map(|c| records(api, owner, chat, c)).any(|r| r.to_string().contains("the-code-123"));
+    s.ok(
+        "sent from the card, the computer has it: the turn took its 12 characters, the card closed answered, and no record of the chat holds it",
+        took && closed && !kept,
+        json!({ "took": took, "closed": closed, "kept": kept }),
+    );
+    chrome.close(shell)?;
     Ok(())
 }
 

@@ -66,6 +66,10 @@ pub fn resolve(agent: &Agent, answer: &Record, work: &[Record], chat: &[Record],
     }
     let options = asked.body["options"].as_array().ok_or(Unavailable::Corrupt)?;
     let Some(choice) = options.iter().find(|o| o["id"] == option.as_str()) else { return Ok(None) };
+    // answered on the computer alone, never by a record (`PromptOption::computer`)
+    if choice["computer"] == true {
+        return Ok(None);
+    }
     let label = choice["label"].as_str().ok_or(Unavailable::Corrupt)?;
     let expires = asked.body["expiresAt"].as_i64().ok_or(Unavailable::Corrupt)?;
     let closed = |how: Closed| records::turn_prompt_closed(turn, &prompt, how, None);

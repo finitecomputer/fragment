@@ -275,10 +275,15 @@ pub async fn run(cfg: Config, runtimes: Runtimes, stop: watch::Receiver<bool>) -
     // touched before the restore.
     let (screen_agents, screen_rx) = watch::channel::<Option<Vec<Named>>>(None);
     let simplex_page = crate::simplex::http::Simplex { configured: cfg.simplex.is_some(), ..Default::default() };
+    // answers for the computer (answer.rs), each stepped as it comes, its
+    // post told whether it was taken (`Effect::ComputerAnswered`)
+    let (answers_tx, mut answers_rx) = mpsc::channel::<crate::answer::Ask>(16);
+    let taken: Mutex<HashMap<u64, tokio::sync::oneshot::Sender<Result<(), String>>>> = Mutex::new(HashMap::new());
+    let mut next_answer = 0u64;
     if let Some(sc) = cfg.screen.clone() {
         let (stop, simplex_page) = (stop.clone(), simplex_page.clone());
         tokio::spawn(async move {
-            if let Err(e) = screen::serve(sc, screen_rx, simplex_page, stop).await {
+            if let Err(e) = screen::serve(sc, screen_rx, simplex_page, Some(answers_tx), stop).await {
                 crate::ev!("screen.failed", { "error": e });
             }
         });
@@ -401,6 +406,11 @@ pub async fn run(cfg: Config, runtimes: Runtimes, stop: watch::Receiver<bool>) -
                 Effect::Fence { agent, fragment, turn, prompt, id, body } => lanes.push(&fragment, Job::Fence { agent, turn, prompt, id, body }),
                 Effect::Owed { agent, fragment, channel, turn, id, body } => lanes.push(&fragment, Job::Owed { agent, channel, turn, id, body }),
                 Effect::Draft { agent, fragment, turn, text } => lanes.push(&fragment, Job::Draft { agent, turn, text }),
+                Effect::ComputerAnswered { reply, taken: t } => {
+                    if let Some(post) = taken.lock().expect("answers").remove(&reply) {
+                        let _ = post.send(t);
+                    }
+                }
                 Effect::Runtime { runtime, command } => runtime_lanes.get(&runtime).expect("the engine names only the runtimes it was given").push(command),
                 Effect::Keepalive(on) => {
                     crate::ev!("keepalive", { "hold": on });
@@ -455,6 +465,16 @@ pub async fn run(cfg: Config, runtimes: Runtimes, stop: watch::Receiver<bool>) -
         tokio::select! {
             biased;
             _ = crate::net::stopped(&mut stop_rx) => break Ok(()),
+            Some(ask) = answers_rx.recv() => {
+                // an answer for the computer: its value the runtime's alone
+                next_answer += 1;
+                taken.lock().expect("answers").insert(next_answer, ask.taken);
+                let input = Input::ComputerAnswer { agent: ask.agent, turn: ask.turn, prompt: ask.prompt, option: ask.option, words: ask.words, reply: next_answer };
+                let s = engine.step(input, crate::log::now_ms());
+                if let Err(e) = act(&engine, s) {
+                    break Err(e);
+                }
+            }
             m = inbox.recv() => {
                 let Some(m) = m else { break Ok(()) };
                 let step = match m {
@@ -1948,7 +1968,7 @@ mod tests {
         assert_eq!(for_simplex(records::CHAT, &records::reply(" ", "t1", &[], 0, false), 0), None, "nothing said");
         let agent = crate::runtime::Agent { fragment: "juniper--k3x9".into(), identity: "npub1juniper".into(), name: "juniper".into(), owner: "npub1paul".into(), credentials: vec![], key: None, runtime: None };
         assert_eq!(for_simplex(records::CHAT, &records::relayed_message("hi from my phone", &agent, records::VIA_SIMPLEX, &[]), 0), None, "its owner's own, from the phone");
-        let option = |id: &str, label: &str, words: bool| records::PromptOption { id: id.into(), label: label.into(), style: None, words };
+        let option = |id: &str, label: &str, words: bool| records::PromptOption { id: id.into(), label: label.into(), style: None, words, computer: false };
         let card = records::turn_prompt("t1", "c-1", "What should I plant?", &[option("c0", "Basil", false), option("c1", "Mint", false), option("other", "Something else", true)], "npub1paul", 1);
         assert_eq!(for_simplex(records::WORK, &card, 0).as_deref(), Some("What should I plant?\n\n(Answer with one of: Basil, Mint, or in your own words.)"));
         let buttons = records::turn_prompt("t1", "p-1", "Run it?", &[option("once", "Allow once", false)], "npub1paul", 1);

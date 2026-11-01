@@ -55,7 +55,7 @@ fn session_of(query: Option<&str>) -> Option<String> {
 }
 
 /// `?agent=` alone, an agent fragment's name.
-fn agent_of(query: Option<&str>) -> Result<String, String> {
+pub(crate) fn agent_of(query: Option<&str>) -> Result<String, String> {
     let mut found = query.unwrap_or("").split('&').filter_map(|kv| kv.split_once('=')).filter(|(k, _)| *k == "agent").map(|(_, v)| v);
     match (found.next(), found.next()) {
         (Some(a), None) if crate::screen::agent_name_ok(a) => Ok(a.to_string()),
