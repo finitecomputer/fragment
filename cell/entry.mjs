@@ -108,9 +108,10 @@ export class Search extends WorkerEntrypoint {
         code: answer.error ?? null,
         status: resp.status,
         // a write's: whether it emptied an index of another embeddings space
-        // first, and the newer fence that refused it
+        // first, the newer fence that refused it, and the wait a 429 asks for
         cleared: answer.cleared === true,
         fence: answer.fence ?? null,
+        retry_after_ms: answer.retry_after_ms ?? null,
       },
     };
   }
