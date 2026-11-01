@@ -129,12 +129,16 @@ fn archive_now(c: &Client, name: &str, storage: &CodeStorage, blobs: &Blobs) -> 
     Ok((h.head, entries))
 }
 
+/// How one conversation's write went, or why it was refused (its id
+/// said, and why).
+type Outcome = std::result::Result<Wrote, (String, String)>;
+
 /// One pass's writes: each conversation's key and how its write went, or
 /// why it was refused (its id said); whether a refusal was every one's
 /// (`stopped`: not allowed, no route); whether search was full (`full`:
 /// those not sent are not among the results).
 struct Pass<'a> {
-    results: Vec<(&'a String, std::result::Result<Wrote, (String, String)>)>,
+    results: Vec<(&'a String, Outcome)>,
     stopped: bool,
     full: bool,
 }
