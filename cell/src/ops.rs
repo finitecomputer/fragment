@@ -170,7 +170,6 @@ fn read_installed_code(sql: &SqlStorage, id: &str) -> Result<AppCode, String> {
         source: row.source,
         modules,
         cpu_ms: row.cpu_ms,
-        subrequests: limits::APP_SUBREQUESTS,
     })
 }
 
