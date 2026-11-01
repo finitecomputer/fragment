@@ -368,8 +368,8 @@ async fn session(cfg: ClaudeConfig, key: (String, String), generations: Arc<Mute
                         if proc.is_none() && cfg.installer.is_some() && !cfg.bin.is_file() {
                             crate::ev!("claude.not_installed", { "turn": ts.turn, "bin": cfg.bin.display().to_string() });
                             let options = vec![
-                                PromptOption { id: INSTALL_YES.into(), label: "Install".into(), style: Some("primary".into()), words: false },
-                                PromptOption { id: INSTALL_NO.into(), label: "Not now".into(), style: None, words: false },
+                                PromptOption { id: INSTALL_YES.into(), label: "Install".into(), style: Some("primary".into()), words: false, computer: false },
+                                PromptOption { id: INSTALL_NO.into(), label: "Not now".into(), style: None, words: false, computer: false },
                             ];
                             let _ = events.send(Event::Prompt { turn: ts.turn.clone(), prompt: INSTALL_CARD.into(), text: INSTALL_ASK.into(), options, ttl_ms: None }).await;
                             asking = Some(ts);
