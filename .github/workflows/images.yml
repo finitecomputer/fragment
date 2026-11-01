@@ -1,7 +1,9 @@
 # The computer images' Rust (images/: the bridge and hermes-boot,
 # docs/bridge.md): its own workspace, so its own jobs.
 #
-# - `check`: host tests and clippy, warnings denied, on every change here.
+# - `check`: host tests and clippy, warnings denied, on every change to
+#   images/, what it compiles in from outside it, or this workflow
+#   (`changes`, below).
 # - `docker`: the Docker lane (images/bridge/tests/docker.rs): both images
 #   built for linux/amd64 and run in Docker against the fake API and a
 #   scripted model, real Hermes included (`cargo test -p fragment-bridge
@@ -12,6 +14,14 @@
 #   master's pushes, on every run by hand, and whenever `changes` itself
 #   did not succeed.
 #
+# The workflow runs on every pull request, merge group and master push,
+# with no path filter of its own: master's ruleset requires `images check`
+# and `docker (real Hermes)`, and a check a workflow-level `paths` filter
+# keeps from starting never reports, which blocks a pull request that
+# touches none of them for good. Each job decides instead (`changes`): one
+# its inputs did not change skips, which a required check counts as a
+# pass, and one `changes` could not decide for runs.
+#
 # Their Rust cache (the registry and images/target's dependencies) is
 # Swatinem/rust-cache's, one key for both jobs, saved only from master's
 # pushes by `check` (a PR reads master's), as ci.yml's.
@@ -20,11 +30,9 @@ name: images
 on:
   push:
     branches: [master]
-    paths: ["images/**", ".github/workflows/images.yml", ".dockerignore", "Cargo.toml", "Cargo.lock", "cli/**", "crates/core/**", "crates/nip98/**", "crates/proto/**", "crates/templates/**", "templates/blank/**", "templates/calories/**", "templates/doc/**", "templates/inbox/**", "templates/notes/**", "templates/todo/**", "crates/devstack/Cargo.toml", "crates/e2e/Cargo.toml", "crates/fakes/Cargo.toml", "xtask/Cargo.toml"]
   pull_request:
-    paths: ["images/**", ".github/workflows/images.yml", ".dockerignore", "Cargo.toml", "Cargo.lock", "cli/**", "crates/core/**", "crates/nip98/**", "crates/proto/**", "crates/templates/**", "templates/blank/**", "templates/calories/**", "templates/doc/**", "templates/inbox/**", "templates/notes/**", "templates/todo/**", "crates/devstack/Cargo.toml", "crates/e2e/Cargo.toml", "crates/fakes/Cargo.toml", "xtask/Cargo.toml"]
-  # No event-level path filter exists for merge_group. `changes` compares
-  # the group's exact base and head, so the Docker lane stays conditional.
+  # `changes` compares a merge group's exact base and head, as it does a
+  # pull request's files and a push's since its `before`.
   merge_group:
     types: [checks_requested]
   workflow_dispatch:
@@ -37,6 +45,10 @@ jobs:
   check:
     # ci.yml also has `check`; required checks need unambiguous names.
     name: images check
+    needs: changes
+    # as the Docker lane's: skips when images/ and this workflow did not
+    # change, and runs whenever `changes` did not succeed
+    if: ${{ !cancelled() && (github.event_name == 'workflow_dispatch' || needs.changes.result != 'success' || needs.changes.outputs.check == 'true') }}
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -55,8 +67,9 @@ jobs:
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
 
-  # Whether the Docker lane runs: a change to what it builds or runs. Its own
-  # job, since a job's `if` reads only another job's outputs. The changed
+  # Whether `check` and the Docker lane run: a change to what each checks,
+  # builds or runs. Its own job, since a job's `if` reads only another
+  # job's outputs. The changed
   # files are the pull request's (from the API, every page), or the push's
   # since its `before`, or the merge group's since its exact base (by git,
   # hence the checkout); a run by hand runs the lane whatever it says.
@@ -64,6 +77,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
+      check: ${{ steps.paths.outputs.check }}
       docker: ${{ steps.paths.outputs.docker }}
     steps:
       - uses: actions/checkout@v4
@@ -73,6 +87,14 @@ jobs:
           base: ${{ github.event.merge_group.base_sha || github.ref }}
           ref: ${{ github.event.merge_group.head_sha || github.ref }}
           filters: |
+            check:
+              - images/**
+              - .github/workflows/images.yml
+              # what images/ compiles in from outside it, which a host test
+              # (xtask/src/image/preview.rs) holds this list to
+              - cli/SKILL.md
+              - templates/skills/**
+              - crates/e2e/fixtures/chat-preview.pdf
             docker:
               - images/hermes/**
               - images/bridge/**
@@ -108,8 +130,9 @@ jobs:
   # parallel (one per CPU). Measured on ubuntu-latest (4 CPUs, 16 GB, a
   # 145 GB disk with about 85 GB free): the Hermes image builds in about
   # 7 minutes (its two Rust stages, the CLI's and the bridge's, about
-  # 5.5 of them), the tests take about 3, and the job uses at most about
-  # 11 GB of the disk (71 GB used of 145 at its peak, 75 GB free).
+  # 5.5 of them), the tests take about 3. Its disk, measured on ubuntu-24.04
+  # (PR #890): from the 31 GB used once the disk is freed, a peak of 44.7
+  # GiB used, about 14 GiB of the lane's own.
   #
   # No layer cache, by measurement (PR #252): with BuildKit's layers in the
   # Actions cache (mode=max), an image whose every input was unchanged built
@@ -144,6 +167,25 @@ jobs:
         working-directory: images
     steps:
       - uses: actions/checkout@v4
+      # Some ubuntu-24.04 runners (image 20261018.96.1) have a 72 GB root,
+      # 12 GB free once the lane's test binary is built, which its two
+      # images (6.4 GB) and their build cache (2.7 GB) all but fill: runs
+      # 41249649091 and 41253027860 ran out of disk. Most have 145 GB, 86 GB
+      # free. The lane uses none of the image's Android (12 GB), .NET (5.8),
+      # Haskell (3.7), Swift (3.5) or CodeQL (1.4), nor its cached Docker
+      # images (2.5): they go first, 28 GB in about 90 seconds (PR #890).
+      # Its disk's layout is said, as it differs between runners.
+      - name: free the disk
+        working-directory: .
+        run: |
+          df -h /
+          lsblk -o NAME,SIZE,TYPE,MOUNTPOINT
+          sudo dmsetup status 2>/dev/null || true
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift /opt/hostedtoolcache/CodeQL
+          docker image prune -af > /dev/null
+          df -h /
+          # the root's use every 5 seconds, whose peak `disk, after` says
+          nohup sh -c 'while :; do df -B1M --output=used / | tail -1; sleep 5; done' > "$RUNNER_TEMP/disk-used" 2>&1 &
       - uses: dtolnay/rust-toolchain@stable
       # the check job's cache, read only
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -163,8 +205,10 @@ jobs:
       - name: build the Hermes image
         working-directory: .
         run: docker build --platform linux/amd64 -f images/hermes/Dockerfile -t fragment-hermes:test .
+      # the tests build only the SimpleX lab's image, from its own
+      # Dockerfile: the two builds' cache goes before them
       - name: disk, built
-        run: docker system df; df -h /
+        run: docker system df; docker builder prune -af > /dev/null; df -h /
       - name: the Docker lane
         run: cargo test -p fragment-bridge --test docker --locked -- --ignored --show-output
         env:
@@ -172,7 +216,9 @@ jobs:
           RUST_BACKTRACE: "1"
       - if: always()
         name: disk, after
-        run: df -h /
+        run: |
+          docker system df; df -h /
+          echo "peak: $(sort -n "$RUNNER_TEMP/disk-used" | tail -1) MiB used"
       # each container's log (Container's drop) and the tests' own
       - if: failure()
         uses: actions/upload-artifact@v4

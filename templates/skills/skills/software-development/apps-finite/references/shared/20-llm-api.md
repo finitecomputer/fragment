@@ -110,9 +110,9 @@ async sort({ sha256, type }, job) {
   turn}` the reply streams into that channel's draft, and the record you
   publish with the same `turn` replaces it. `fragment guide`, AI, has a
   worked example.
-- Every step bills the fragment's owner, reserved before it runs; one the
-  ledger cannot cover is held, saying why. Each fragment has a monthly cap
-  ($5 unless set: `fragment cap garden 10`).
+- Every step bills the fragment's owner, charged once it answers; one
+  started when the ledger is out of credit is held, saying why. Each
+  fragment has a monthly cap ($5 unless set: `fragment cap garden 10`).
 
 ## Outside APIs
 
@@ -144,6 +144,20 @@ provides.
 - The page collects input and renders results.
 - A job calls the model or the API and records what it got.
 - The page follows a channel, or re-runs a query, to show it.
+
+## Cost Guardrail
+
+Before you build a fragment that makes images or videos, tell the person
+what each one costs and that its owner pays for every one anyone makes
+in it:
+
+- an image: about a tenth of a cent;
+- a video: $0.14 a second at 720p, $0.28 at 1080p, plus the platform's
+  fee and margin. A 5-second clip is about a dollar, so the fragment's
+  $5 cap covers only a few.
+
+Make media when someone asks for it. A schedule or a trigger that makes
+it needs the person's yes to what that costs.
 
 ## Publish Guardrail
 

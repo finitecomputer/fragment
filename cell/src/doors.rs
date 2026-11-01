@@ -8,8 +8,9 @@
 //! - **Its code is the platform's.** It is made from a blessed connector
 //!   template (`blessed::CONNECTORS`), which marks it (`door_template`)
 //!   as it is made; an install of any other code (a fork, a template
-//!   changed) unmarks it and lets its binding go, for good: a fragment that
-//!   ever ran other code is no door.
+//!   changed) unmarks it, lets its binding go and removes its secrets, for
+//!   good: a fragment that ever ran other code is no door, and sends
+//!   nothing its owner set there (`drop_secrets`).
 //! - **No one but its owner edits it.** Every other caller, an agent acting
 //!   for its owner included, is at most a viewer there, from its making
 //!   (`only_owner_edits`, in `standing`): no one else sets its secrets,

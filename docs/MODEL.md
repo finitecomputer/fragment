@@ -98,7 +98,7 @@ Every change is checked against this table.
 | A computer's XFTP relays | the Computer DO: leases in memory, the day's bytes in `relay_day` | none |
 | A fragment's scheduled records | its supervisor's `record_schedules` (docs/api.md, "Scheduled records") | each fire appended once, keyed by schedule and minute; a computer keeps none |
 | Money | each payer's ledger (docs/ledger.md) | meters batch rows to it, idempotently; each isolate's gate keeps an answer a minute at most |
-| A job's paid AI answer | the supervisor's `paid` receipts, by incarnation, run and step | its charge in the meter outbox (`step:<key>`), charged once; no provider call once a receipt exists |
+| A job's paid AI answer | the supervisor's `paid` receipts, by incarnation, run and step | its charge in the meter outbox (`step:<key>`), charged once; no provider call once a receipt exists, nor a video's while its attempt's call is in `making` |
 | Audit trail | the `events` channel | pin moves recorded as events |
 | The agent docs | `cli/SKILL.md` and `cli/GUIDE.md`, naming no host | compiled into the CLI and the release's files (`/llms.txt`), each filled with its host |
 | The release's files: templates, the shell's, the agent docs | the repo | the cell's index and its Static Assets, by hash, from one build; the CLI embeds the templates |
@@ -165,6 +165,10 @@ release was deployed (`release::DEPLOYED`), which no release reads now
   until its asks run out.
 - **What outlives a deploy is not a call.** A queue message or a stored
   row one release writes, the next reads, so its shape stays readable.
+  A release tolerates what the next writes where it can: a run's `via`
+  it does not know reads as written, and a trigger kind it does not know
+  starts nothing. A value an older release cannot read makes its release
+  forward only, by a schema step (Fragment step 6, FIN-328).
 
 A deploy is all at once (a gradual deployment would refuse between its
 two versions), and done when every object class answers it within 90 s

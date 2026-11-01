@@ -1277,6 +1277,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     new_chat_ui(s, api, &mut b, &page, &me, &reader_chat, &shots)?;
     launch_late_ui(s, api, &mut b, &page, &me, &reader_chat, &shots)?;
     launch_straight_ui(s, api, &mut b, &page, &me, &reader_chat)?;
+    knowledge_ui(s, api, &mut b, &page, &me, &shots)?;
     launch_geometry_ui(s, &mut b, &page, &shots)?;
 
     // both agents in one chat, search, and archiving, as the person uses them
@@ -1372,6 +1373,14 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     b.eval(&page, "(document.getElementById('build-prompt').value += 'kept as typed', true)")?;
     let on = super::computers::lever_with(api, &simplex_id, json!({ "op": "simplex", "on": true }))?;
     let shown = b.until(&page, "(() => { const s = document.querySelector('#settings-simplex:not([hidden])'); return !!s && /always-on plan/.test(s.innerText) && !!document.querySelector('.settings-nav-link[data-section=settings-simplex]:not([hidden])'); })()", wait);
+    // marked what it is, a word each (Paul, 2026-10-31), its nav link still
+    // its name alone
+    let tags = b.eval(&page, "[[...document.querySelectorAll('#settings-simplex .connector-tag')].map((t) => [t.textContent, t.title]), document.querySelector('.settings-nav-link[data-section=settings-simplex]')?.textContent]")?;
+    s.ok(
+        "settings mark SimpleX experimental and secure (end to end), a word each, its nav link still \"SimpleX\"",
+        tags == json!([[["Experimental", ""], ["Secure", "End-to-end encrypted to your computer"]], "SimpleX"]),
+        &tags,
+    );
     let kept = b.eval(&page, "location.pathname === '/settings' && document.getElementById('build-prompt').value.endsWith('kept as typed')")?;
     let off = super::computers::lever_with(api, &simplex_id, json!({ "op": "simplex", "on": false }))?;
     let hidden = b.until(&page, "!!document.querySelector('#settings-simplex[hidden]') && !document.querySelector('.settings-nav-link[data-section=settings-simplex]:not([hidden])')", wait);
@@ -6210,6 +6219,115 @@ const LAUNCHER_STATUS_GEOMETRY: &str = "(() => { const status = document.getElem
 /// Send stays on screen and hit-testable. At 320×800, eight long filenames
 /// shrink their own region and scroll: every removal can be brought on
 /// screen and pressed with a real mouse click.
+/// The launcher's Knowledge (FIN-238, decision 6: the launcher searches
+/// across brains): words typed also ask the person's brains and Session
+/// Archive as one (`POST /api/search`). Invalid: with none, no question is
+/// asked and no Knowledge shows; an archived brain is never asked. Valid: a
+/// brain's page holding the words shows under Knowledge (its title and
+/// section, its snippet, the brain's name), and pressed opens the brain at
+/// that page. Failure: the fan-out refused, Knowledge says so alone and the
+/// start row stays; and an answer that came though a fragment of it failed
+/// (Alex on #885) names that fragment, beside the hits of the rest, or
+/// alone, never as nothing found; one searched and holding nothing shows
+/// no Knowledge.
+fn knowledge_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person, shots: &std::path::Path) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    // what the page asks of `POST /api/search`, each body kept
+    const ASKS: &str = "(() => { if (window.__knowledge) return true; window.__knowledge = []; window.__answers = []; const real = window.fetch; window.fetch = async (url, o) => { const r = await real(url, o); \
+        if (url === '/api/search' && o?.method === 'POST') { window.__knowledge.push(JSON.parse(o.body)); r.clone().json().then((a) => window.__answers.push(a), () => window.__answers.push(null)); } return r; }; return true; })()";
+    // the next knowledge answer as the platform gives it, `change` (a
+    // function of it) done to it first: a fragment of it failing
+    let doctor_once = |change: &str| format!("(() => {{ const real = window.fetch; window.fetch = async (url, o) => {{ if (url !== '/api/search' || o?.method !== 'POST') return real(url, o); window.fetch = real; \
+        const a = await (await real(url, o)).json(); ({change})(a); return new Response(JSON.stringify(a), {{ status: 200, headers: {{ 'content-type': 'application/json' }} }}); }}; return true; }})()");
+    let launch = |b: &mut Browser, words: &str| -> Result<bool> {
+        b.eval(page, "(document.getElementById('search-dialog').open && document.getElementById('search-dialog').close(), true)")?;
+        b.eval(page, "(document.getElementById('sidebar-new-chat').click(), true)")?;
+        let open = b.until(page, "document.getElementById('search-dialog').open", wait);
+        b.eval(page, &fill("#workspace-search", words))?;
+        Ok(open)
+    };
+    b.eval(page, ASKS)?;
+    // none of theirs: nothing asked, no Knowledge
+    let listed = shell(api, me.session, "GET", "/api/fragments", None, &[])?;
+    let theirs: Vec<String> = listed.body["fragments"].as_array().into_iter().flatten().filter(|f| (f["kind"] == "brain" || f["kind"] == "sessions") && f["archived"] != true).filter_map(|f| f["name"].as_str().map(str::to_string)).collect();
+    if theirs.is_empty() {
+        launch(b, "ferry timetable")?;
+        std::thread::sleep(std::time::Duration::from_millis(1200));
+        let none = b.eval(page, "window.__knowledge.length === 0 && !document.querySelector('.search-known')")?;
+        s.ok("with no brain or Session Archive of theirs, typing asks no knowledge question and shows no Knowledge", none == true, b.eval(page, "window.__knowledge")?);
+    }
+    // a brain, its page in its own index (as its sync writes one), and an archived one
+    let brain = |label: &str, title: &str| -> Result<String> {
+        let r = shell(api, me.session, "POST", "/api/fragments", Some(&json!({ "label": format!("{}-{label}", me.first), "template": "brain", "title": title })), &[])?;
+        anyhow::ensure!(r.status == 200, "the brain {title} was not made: {}", r.text);
+        Ok(r.body["name"].as_str().unwrap_or_default().to_string())
+    };
+    let notes = brain("notes", "Field notes")?;
+    let old = brain("old", "Old notes")?;
+    let text = "# Ferry timetable\n\n## Winter\n\nThe ferry timetable changes in November: two crossings a day.\n";
+    let wrote = shell(api, me.session, "POST", &format!("/api/f/{notes}/files"), Some(&json!({ "files": [{ "path": "wiki/ferry.md", "text": text }] })), &[])?;
+    let page_at = json!({ "source": "wiki/ferry.md", "revision": "r1", "title": "Ferry timetable", "sections": [{ "id": "s1", "heading": "Winter", "text": "The ferry timetable changes in November: two crossings a day." }] });
+    let upserts = [&notes, &old].iter().map(|n| shell(api, me.session, "POST", &format!("/api/f/{n}/search/upsert"), Some(&page_at), &[]).map(|r| r.status)).collect::<Result<Vec<_>>>()?;
+    shell(api, me.session, "PUT", &format!("/api/fragments/{old}/archived"), Some(&json!({ "archived": true })), &[])?;
+    let known = b.until(page, &format!("!!document.querySelector('#apps [data-key=\"app:{notes}\"]')"), wait);
+    anyhow::ensure!(wrote.status == 200 && upserts == vec![200, 200] && known, "the brains' pages were not written: {} {upserts:?}", wrote.text);
+    b.eval(page, "(window.__knowledge = [], true)")?;
+    let open = launch(b, "ferry timetable")?;
+    let row = format!(".search-known [data-fragment={}][data-source=\"wiki/ferry.md\"]", js(&notes));
+    let shown = b.until(page, &format!("!!document.querySelector({})", js(&row)), wait);
+    let seen = b.eval(page, &format!("(() => {{ const r = document.querySelector({}); return r && {{ label: r.querySelector('.label')?.textContent, snippet: r.querySelector('.agent-preview')?.textContent, from: r.querySelector('.meta')?.textContent, heading: document.querySelector('.search-known h3')?.textContent }}; }})()", js(&row)))?;
+    let asked = b.eval(page, "window.__knowledge.at(-1) ?? null")?;
+    let _ = b.screenshot(page, &shots.join("desktop-launcher-knowledge.png"));
+    let ins: Vec<&str> = asked["in"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+    s.ok(
+        "typing asks their brains (never an archived one) as one, and a page holding the words shows under Knowledge: its title and section, its snippet, its brain",
+        open && shown && seen["heading"] == "Knowledge" && seen["label"] == "Ferry timetable › Winter" && seen["snippet"].as_str().is_some_and(|t| t.contains("ferry")) && seen["from"] == "Field notes" && ins.contains(&notes.as_str()) && !ins.contains(&old.as_str()) && asked["q"] == "ferry timetable",
+        json!({ "seen": seen, "asked": asked }),
+    );
+    // pressed: the brain, in the desktop, at that page
+    b.eval(page, &format!("(document.querySelector({}).click(), true)", js(&row)))?;
+    let pane = format!("#stack .pane[data-key={}] iframe", js(&format!("app:{notes}")));
+    let framed = b.until(page, &format!("!document.getElementById('search-dialog').open && (document.querySelector({})?.src ?? '').includes(encodeURIComponent('/#/' + encodeURIComponent('wiki/ferry.md')))", js(&pane)), wait);
+    let at_page = s.eventually(wait, || b.eval_in_frame(page, &notes, "document.querySelector('#content h1')?.textContent ?? ''").ok().is_some_and(|t| t.as_str() == Some("Ferry timetable")));
+    s.ok("a Knowledge hit pressed opens its brain in the desktop, at that page", framed && at_page, b.eval(page, &format!("document.querySelector({})?.src ?? null", js(&pane)))?);
+    // the fan-out refused: Knowledge says so, alone
+    b.eval(page, &refuse_once("POST", "^/api/search$"))?;
+    launch(b, "ferry crossings")?;
+    let failed = b.until(page, "document.querySelector('.search-known-failed')?.textContent.startsWith('Not searched')", wait);
+    let rest = b.eval(page, "!!document.querySelector('#search-results .search-start') && document.getElementById('search-status').textContent === ''")?;
+    s.ok("the knowledge question refused, Knowledge says it was not searched and the rest stands", failed && rest == true, b.eval(page, "document.getElementById('search-results').innerText")?);
+    // the answer came, a fragment of it failed: the hits, and that one named
+    b.eval(page, &doctor_once(&format!("(a) => a.fragments.push({{ name: {}, state: 'failed', message: 'the index did not answer' }})", js(&old))))?;
+    launch(b, "ferry timetable")?;
+    let mixed = b.until(page, &format!("!!document.querySelector({}) && document.querySelector('.search-known-failed')?.textContent === 'Not searched: Old notes'", js(&row)), wait);
+    s.ok("an answer that came though one fragment failed shows the others' hits and names the one not searched", mixed, b.eval(page, "document.getElementById('search-results').innerText")?);
+    // every fragment of it failed: no hits, each named, never nothing found
+    b.eval(page, &doctor_once("(a) => { a.results = []; a.fragments = a.fragments.map((f) => ({ ...f, state: 'failed', message: 'the index did not answer' })); }"))?;
+    launch(b, "ferry timetable")?;
+    let all_failed = b.until(page, "document.querySelector('.search-known-failed')?.textContent === 'Not searched: Field notes' && !document.querySelector('.search-known .search-result')", wait);
+    let not_none = b.eval(page, "document.getElementById('search-status').textContent !== 'Nothing found.'")?;
+    s.ok("an answer whose every fragment failed names them as not searched, no hits, and never says nothing was found", all_failed && not_none == true, b.eval(page, "document.getElementById('search-results').innerText")?);
+    // every fragment searched, none holding the words (the meaning leg finds
+    // the nearest whatever is asked, so the answer is made so): no Knowledge
+    let answered = b.eval(page, "window.__answers.length")?.as_u64().unwrap_or(0);
+    b.eval(page, &doctor_once("(a) => { a.results = []; }"))?;
+    launch(b, "ferry timetable")?;
+    let came = b.until(page, &format!("window.__answers.length > {answered}"), wait);
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let quiet = b.eval(page, "(() => { const a = window.__answers.at(-1); return a?.fragments.every((f) => f.state === 'searched') && !document.querySelector('.search-known'); })()")?;
+    s.ok("an answer every fragment searched with no hits shows no Knowledge", came && quiet == true, b.eval(page, "window.__answers.at(-1)?.fragments ?? null")?);
+    b.eval(page, "(document.getElementById('search-dialog').close(), true)")?;
+    // the brains go, so the desktop is as the steps after it expect: empty
+    for name in [&notes, &old] {
+        let gone = shell(api, me.session, "DELETE", &format!("/api/f/{name}"), None, &[])?;
+        anyhow::ensure!(gone.status == 200, "{name} was not deleted: {}", gone.text);
+    }
+    let pane_gone = format!("#stack .pane[data-key={}] .pane-action[aria-label=\"Close\"]", js(&format!("app:{notes}")));
+    b.eval(page, &format!("(document.querySelector({})?.click(), true)", js(&pane_gone)))?;
+    anyhow::ensure!(b.until(page, &format!("!document.querySelector('#apps [data-key=\"app:{notes}\"]')"), wait), "the deleted brain stayed on the dock");
+    Ok(())
+}
+
 fn launch_geometry_ui(s: &mut Suite, b: &mut Browser, page: &Page, shots: &std::path::Path) -> Result<()> {
     let wait = std::time::Duration::from_secs(30);
     let opened = "document.getElementById('search-dialog').open";

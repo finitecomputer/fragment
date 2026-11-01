@@ -1,4 +1,6 @@
 // a provider's name for people: google-places is Google Places, xai xAI
+import { KIND } from "./frame-messages.js";
+
 const PROVIDER_NAMES = { xai: "xAI", elevenlabs: "ElevenLabs", openrouter: "OpenRouter" };
 export const providerName = (p) => PROVIDER_NAMES[p] ?? p.replace(/(^|-)([a-z])/g, (_, d, l) => `${d ? " " : ""}${l.toUpperCase()}`);
 
@@ -544,7 +546,7 @@ export function createSimplex({ api, el, section, actionLine, named, seg, comput
   function nameSimplex(frame) {
     const agent = frame.dataset.simplex;
     try {
-      frame.contentWindow?.postMessage({ fragment: "simplex", agent, name: titleOf(agent) }, new URL(frame.dataset.src).origin);
+      frame.contentWindow?.postMessage({ fragment: KIND.simplex, agent, name: titleOf(agent) }, new URL(frame.dataset.src).origin);
     } catch {}
   }
   // The link page asks for a ticket to link or unlink its agent (`{fragment:
@@ -558,10 +560,10 @@ export function createSimplex({ api, el, section, actionLine, named, seg, comput
   // unlink's takes its home back to its own chat.
   const onMessage = async (e) => {
     const m = e.data;
-    if (m?.fragment !== "simplex" || !["link", "unlink"].includes(m.want) || !computer()?.simplex) return;
+    if (m?.fragment !== KIND.simplex || !["link", "unlink"].includes(m.want) || !computer()?.simplex) return;
     const frame = [...document.querySelectorAll("iframe[data-simplex]")].find((f) => f.contentWindow === e.source);
     if (!frame || frame.dataset.simplex !== m.agent || e.origin !== new URL(frame.dataset.src).origin) return;
-    const reply = { fragment: "simplex", agent: m.agent, for: m.want };
+    const reply = { fragment: KIND.simplex, agent: m.agent, for: m.want };
     try {
       reply.ticket = await api("POST", `/api/computers/${seg(computer().computer)}/agents/${seg(m.agent)}/door`, { door: "simplex", act: m.want });
     } catch (err) {
@@ -601,7 +603,14 @@ export function createSimplex({ api, el, section, actionLine, named, seg, comput
     if (jump) jump.hidden = s.hidden;
     if (s.hidden) return;
     const agents = c.agents ?? [];
-    s.append(el("p", "muted", "Message your agents from SimpleX Chat, a private messenger for your phone. Your messages are encrypted between your SimpleX app and your computer."));
+    // what it is, a word each (Paul, 2026-10-31), beside Telegram's
+    // "Less secure" (templates/telegram): not in the heading, which names
+    // its nav link
+    const tags = el("div", "connector-tags");
+    const secure = el("span", "role-tag connector-tag", "Secure");
+    secure.title = "End-to-end encrypted to your computer";
+    tags.append(el("span", "role-tag connector-tag", "Experimental"), secure);
+    s.append(tags, el("p", "muted", "Message your agents from SimpleX Chat, a private messenger for your phone. Your messages are encrypted between your SimpleX app and your computer."));
     if (!agents.length) {
       s.append(el("p", "muted", "Make an agent first."));
       return;

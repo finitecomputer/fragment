@@ -129,9 +129,14 @@ the question, best first, each with its best snippet.
   head (its indexes, and the files changed since them: another import may
   have written meanwhile), and writes each conversation whose sha256 is
   not the revision search holds, its bytes read at that head and its
-  revision theirs. Each write names the revision it replaces, as search
-  was read holding it, so another import's write since is never written
-  over (it is left as it is, counted `overtaken`). Nothing is deleted: the
+  revision theirs. Search is read first, so what it holds is never of a
+  newer copy than the archive read after. Each write names the revision
+  it replaces, as search was read holding it, so another import's write
+  since is never written over; refused, that conversation is read anew
+  from search and the archive and written again if they still differ (a
+  few passes at most, those left counted `unresolved` for the next
+  import). Whichever import's write lands first, search ends holding the
+  archive's copy. Nothing is deleted: the
   platform forgets a conversation's source when a move of main deletes its
   file. So an import that writes nothing puts search right too, and an
   archive made before its host had search is searched from its next

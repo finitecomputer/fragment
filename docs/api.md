@@ -152,8 +152,9 @@ a member, or the visibility floor; never a share link) and the agent's cap
 `editor`). The principal stays the agent; an operation called `for`
 someone sees `call.principal` as them and `call.agent` as the agent. `for`
 is honoured on `/api/f/{name}/…`, on `GET` and `POST /api/fragments` (a
-`POST` for anyone but the agent's owner is 403) and on `/api/models/v1/…`;
-anywhere else 400. A person naming `for` is 403; two, or one that is no
+`POST` for anyone but the agent's owner is 403), on `POST /api/search`
+(each fragment asked decides as on its own route) and on
+`/api/models/v1/…`; anywhere else 400. A person naming `for` is 403; two, or one that is no
 identity, 400. A site request's query is its app's.
 
 **An agent shares for its owner** (`fragment_core::access::agent_shares`):
@@ -630,7 +631,7 @@ inbox's, which takes its token. `{name}` is a fragment's name in full.
 
 | method & path | who | body → answer |
 | --- | --- | --- |
-| `POST /api/fragments` | a person who is not a guest; an agent for its owner (the owner's, billed to them, its maker an editor) | `{label \| name, visibility?, template?, title?}` (Names) → `{name, npub, owner, visibility, viewToken, inboxToken, repo, canonical}`. A guest is 403 `forbidden` (`Spend::Create`), however asked, and past the overdraft 402 `budget_used_up`; a ledger that does not answer refuses none. `visibility` defaults to `link`, but `members` for a chat, an agent or a session archive (`Visibility::made_from`). The fragment's own key is made in its cell, sealed. With `template` (`blank`, `todo`, `inbox`, `calories`, `doc`; any other is 400 and nothing is made), the template's files are main's first commit (its `fragment.json` stamped with the name, and `title`) and live once the create answers; one that fails to land is retried by the alarm (`template.failed`). `agent`, `chat`, `brain`, `skills`, `sessions` are blessed (decision 40): main's first commit is `{"template", "meta": {title}}`, and the release serves the rest (Apps; a session archive, which `fragment session import` makes: templates/sessions/README.md). `notes` is the CLI's only. A `title` (1 to `TITLE_MAX_CHARS`) needs a `template` (400) |
+| `POST /api/fragments` | a person who is not a guest; an agent for its owner (the owner's, billed to them, its maker an editor) | `{label \| name, visibility?, template?, title?}` (Names) → `{name, npub, owner, visibility, viewToken, inboxToken, repo, canonical}`. A guest is 403 `forbidden` (`Spend::Create`), however asked, and past the overdraft 402 `budget_used_up`; a ledger that does not answer refuses none. `visibility` defaults to `link`, but `members` for a chat, an agent or a session archive (`Visibility::made_from`). The fragment's own key is made in its cell, sealed. With `template` (`blank`, `todo`, `inbox`, `calories`, `doc`; any other is 400 and nothing is made), the template's files are main's first commit (its `fragment.json` stamped with the name, and `title`) and live once the create answers; one that fails to land is retried by the alarm (`template.failed`). `agent`, `chat`, `brain`, `skills`, `sessions`, `telegram` are blessed (decision 40): main's first commit is `{"template", "meta": {title}}`, and the release serves the rest (Apps; a session archive, which `fragment session import` makes: templates/sessions/README.md). `notes` is the CLI's only. A `title` (1 to `TITLE_MAX_CHARS`) needs a `template` (400) |
 | `GET /api/fragments` | any signer | → `{fragments: [ListedFragment {name, role, kind, title?, picture?, agentRole?, agents?, preview?, previewAt?, unread?, sharing?, archived?, dock?, pinned?, listed?}]}`. `kind` is `app`, `chat`, `agent`, `brain`, `skills` or `sessions` (a client reads an unknown one as `other`: `FragmentKind::Other`); `picture` an agent's face or an app's icon; `agentRole` an agent's role (An agent's name and picture); `agents` its agent members, the first added first, at most `LISTED_AGENTS_MAX`; `preview` (at most `LISTED_PREVIEW_MAX_BYTES`) and `previewAt`, a chat's newest message their search holds (Search); `unread`, a chat's messages after their last `seen`, at most `LISTED_UNREAD_MAX`, absent at 0; `sharing`, their own fragments' `{visibility, members, guests, invites}`; `archived: true`, `dock: false` and `pinned: true` their own choices; `listed`, what its members are doing (Listed records). An agent's `?for=<id>`: the fragments that identity holds a role on where the agent or its owner is a member, each with the role the agent acts with there for it and `owned: true` on that identity's own, without `listed` |
 | `GET /api/fragments/watch` | any signer; the shell's session with the platform's exact `Origin` | a WebSocket: `{type: "hello"}`, then `{type: "changed"}` whenever their list changes, and `{type: "invited"}` whenever the invites waiting on them change. Frames name nothing: the page reads again with its own credential. A fragment's page is refused like no one (401). At most `LIST_WATCHERS_MAX` a list (429). Not for `for` |
 | `PUT /api/fragments/{name}/archived` | any signer with a role on it | `{archived: bool}` → `{name, archived}`: their own view, in their list's row only. It goes when they leave, or the fragment is made again. No role, none, or a bare label 404; a bad body 400. Not for `for` |
@@ -638,6 +639,7 @@ inbox's, which takes its token. `{name}` is a fragment's name in full.
 | `PUT /api/fragments/{name}/pinned` | the same | `{pinned: bool}` → `Pinned {name, pinned}`: whether they pinned it, as archiving is (nothing is pinned until pinned); their list's sockets are told. It goes when they leave, or the fragment is made again. Not for `for` |
 | `PUT /api/fragments/{name}/seen` | the same | no body → `Seen {name, unread: 0}`: they have seen its messages up to the newest their search holds; it never goes back. Any body 400. Not for `for` |
 | `GET /api/search?q=` | any signer | → `SearchAnswer {fragments: [ListedFragment], messages: [{fragment, channel, seq, at, snippet}]}` (Search). `q` once, at most `SEARCH_QUERY_MAX_BYTES` and `SEARCH_QUERY_WORDS_MAX` words (400). Not for `for` |
+| `POST /api/search` | any signer, `for` too | `Across {q, in, limit?, mode?, fields?, after?, before?}` → `FoundAcross {results, fragments, semantic}`: one question asked of several fragments' indexes (Search across fragments) |
 | `GET /api/access` | a person | Sharing, "Who has access to what" |
 | `DELETE /api/f/{name}` | the owner (never an agent) | → `{ok, deleted}` once it is gone: 404 to everyone, out of its owner's list, its name free. Its members' lists, app database and blobs go after, by its alarm (`fragment_core::ended`: retried, a part refused or failing ten tries held and tried daily). An agent fragment's agent leaves its computer and is named by it no more. A life made again under the name is untouched by the old one's cleanup. The repo stays |
 | `GET /api/f/{name}/status` | viewer | → `{name, kind, title?, agentRole?, npub, owner, role, visibility, repo, pins: {main, live}, counts: {files, events, members}, code: {sha, id, operations: {<op>: {kind, role, input?, ephemeral?, description?}}, error}, viewToken, inboxToken, urls: {canonical, platform}, blobMinBytes, page}`: `viewToken` the owner's (or their agent's for them, but on a connector), `inboxToken` an editor's; `code.id` `app:<hash>` of `app.mjs` and `applib/`, or `blessed:<template>@<release>`; `urls.platform` the platform's origin, for links a person opens; `page` the card's report (Cards), absent before the first |
@@ -674,7 +676,7 @@ inbox's, which takes its token. `{name}` is a fragment's name in full.
 | `GET /api/f/{name}/runs/{id}` | viewer | → one run with `input` and `output`. A channel's run whose channel the asker may not read (or no longer declared) withholds `input` and `error` (`withheld: true`). `output` is the app's own answer, shown to viewers whatever it copied |
 | `POST /api/f/{name}/replay` | editor | `{run}` → `{ok, run, attempt}`: a `held` or `blocked` run again |
 | `POST /api/f/{name}/pause` | editor | `{op, paused}` → `{ok, op, paused}`: its triggers stop or start; calls are never paused |
-| `GET /api/f/{name}/triggers` | viewer | → `{triggers: [{cron \| channel \| files, run, paused, nextAt?}], paused}` |
+| `GET /api/f/{name}/triggers` | viewer | → `{triggers: [{cron \| channel \| files \| installed, run, paused, nextAt?}], paused}` |
 | `GET /api/f/{name}/schedules` | viewer | → `{schedules: [Schedule]}`, oldest first (Scheduled records) |
 | `POST /api/f/{name}/schedules` | editor holding the channel's post role | `{cron, channel, record}` → `{schedule, replayed}`; past the overdraft 402 |
 | `PUT /api/f/{name}/schedules/{id}` | editor | `{paused}` → `{schedule}`; a resume past the overdraft 402 |
@@ -784,7 +786,8 @@ so are the limits named here.
 - **Many fragments at once**: the platform's own route embeds a question
   once and asks each fragment's supervisor at `POST /search/asked`
   (`Forwarded {query, vector?}`), which the router maps no outside path
-  to. It is never embedded again, and answers as `POST …/search`.
+  to. It is never embedded again, and answers as `POST …/search` (Search
+  across fragments, below).
 - **Deletes follow the files**: a source named by one of the fragment's
   paths is forgotten when a move of main deletes that file, gone from every
   answer at once. A deleted chunk's words leave the index's segments at
@@ -792,6 +795,36 @@ so are the limits named here.
   days of point-in-time recovery may keep its bytes that long. A deleted
   or wiped fragment's index ends with it: released whole, and never
   written again, by a write landing late too.
+
+
+### Search across fragments
+
+`POST /api/search` (cell/src/across.rs, merged by fragment_core::across):
+one question asked of several fragments' indexes as one, as the signer: a
+parent brain and its sources, or a person's brains and Session Archive.
+`fragment search --in` and `fragment mcp`'s `fragment-search` tool ask it
+(cli/GUIDE.md, "Searching fragments").
+
+- **Each fragment decides alone.** Each named (1 to `IN_MAX`, in full,
+  once) is asked at once, as the signer, exactly as on its own route:
+  its role, its life, what it forgets. So nothing is answered that the
+  signer could not have from each, and nothing is held or indexed.
+  `fragments` says how each answered, in the order asked: `searched`,
+  `no_index`, `denied`, `missing`, or `failed` with its `message`.
+- **The question is embedded once**, paid by its asker (an agent's owner),
+  and each fragment searches with that vector; `mode: lexical`, a
+  deployment that embeds nothing, or a refused embedding: words alone
+  (`semantic: "off"`).
+- **The merge.** Each fragment is asked for twice the answer's length (at
+  least `ASKED_MIN`, at most `RESULTS_MAX`). Cosines of answers naming the
+  question's `space` and `scheme` compare, so semantic hits sort together
+  by cosine; BM25 does not (each index's statistics are its own), so
+  lexical hits interleave by each fragment's rank, the nearer meaning
+  first among equals. The two fuse by reciprocal rank (k = 60). A hit's
+  `rank` and `score` are the merged answer's, its `lexical` and `semantic`
+  its fragment's, and `fragment` names it.
+- The body is at most 16 KiB; the question is checked as a fragment's
+  search checks it, before anything is embedded or asked.
 
 ## Apps
 
@@ -860,7 +893,10 @@ agent, or carrying code, keeps the last good code and says to fork it.
   1 = Sunday); `{"channel": "inbox" | <app channel>, "run": op, "from"?:
   "person" | "agent"}` (each new record, of that kind's members only with
   `from`); `{"files": "notes/**", "run": op}` (a move of `main` changing a
-  matching path: `*`, `**`, `?`, a trailing `/`).
+  matching path: `*`, `**`, `?`, a trailing `/`); `{"installed": true,
+  "run": op}` (once per install of new code: a deploy moving `live`, or a
+  blessed template's changed release, at the fragment's next request; its
+  input `{ref: "live", commit, code}`).
 - `inbox` (optional): `{"header": "x-telegram-bot-api-secret-token",
   "secret": "TELEGRAM_WEBHOOK_SECRET"}`: the inbox takes a delivery only
   with that header (lower case; never `x-fragment-*`, `cookie`, `host`,
@@ -1069,7 +1105,9 @@ reason (402 `budget_used_up`). A run answers `costMicros`.
   its resolution's price as soon as the model answers with its video
   (a step tried again reads that video, and is never made or charged
   again); an answer with no completed video is refused and charged
-  nothing (`ai.video-refused`). Refused before any call on a deployment
+  nothing (`ai.video-refused`). Asked at most once an attempt: a try
+  that never heard its answer fails, charged nothing, saying to replay
+  (`ai.video-lost`). Refused before any call on a deployment
   whose tiers are private: no catalog video model is (`Models::video_refused`).
 
 A text model's 429 or 5xx is answered by the fallback model (Models), sent
@@ -1221,8 +1259,13 @@ back to it); unnamed, `embed::MODEL_DEFAULT` on Workers AI. Every answer
 names its `space`, and every vector has the slot's `dimensions` and unit
 length;
 a change of the slot's model, dimensions or version is a new space, never
-compared with the old. A deployment whose tiers are private embeds only on
-a slot marked `private` (else 403). Refused 400 before anything is sent:
+compared with the old. A slot may name a `document_prefix` and a
+`query_prefix` (each at most `embed::PREFIX_TOKENS_MAX` tokens): the task
+instructions a fragment's search puts before each chunk and each question
+it embeds (nomic-embed-text's `search_document: ` and `search_query: `),
+which its index's `space` names, so a change of either is a new space
+there too. This route embeds an agent's input as given. A deployment whose
+tiers are private embeds only on a slot marked `private` (else 403). Refused 400 before anything is sent:
 `input` not a string or 1 to `embed::INPUTS_MAX` strings, an empty one, or
 one that may pass the slot's window (`embed::tokens_max`; nothing is cut);
 `model` other than `embeddings` or the slot's; `dimensions` other than the
@@ -1410,8 +1453,11 @@ steps:
   egress toward its hosts only (Control API); a fetch elsewhere fails the
   step, naming both. A URL's is percent-encoded as it goes in, a value
   that would change where the request goes (host, port, path segments,
-  query parameters) fails the step unsent, and the answer names each as
-  its placeholder again; `{{name}}` naming no secret goes as written
+  query parameters) fails the step unsent, and the answer and a
+  failure's message name every value filled, a header's or the URL's,
+  as its placeholder again, however the vendor spells it back
+  (percent-encoded, JSON- or HTML-escaped, in base64: docs/secrets.md);
+  `{{name}}` naming no secret goes as written
   (`fragment_core::secrets`). A connector bound as a door that is shut
   fetches nothing (An agent's doors). http(s) only;
   loopback, private and `.internal` addresses refused; redirects answered,
@@ -1426,7 +1472,7 @@ steps:
   page reads `__members`, `__people` and its presence.
 
 `job.principal`, `job.role`, `job.run`, `job.attempt`, `job.via` (`call`,
-`job`, `cron`, `channel`, `files`) and `job.fragment` say who and which;
+`job`, `cron`, `channel`, `files`, `installed`) and `job.fragment` say who and which;
 `job.door` is a connector's `{relayed, to}` while it is an open door (An
 agent's doors), else null.
 
@@ -1716,29 +1762,13 @@ a key.
 
 **Messages with framed pages.** The shell frames a person's fragments
 (chats, app windows) and their computer's ports (an agent's screen, its
-SimpleX link page). It takes a message only from a frame it made, at that
-frame's own origin, and answers that frame alone; a page's messages ask,
-never grant. Framed pages take messages only from their parent at the
-platform's origin (the `__live` hello's `platform`).
-
-| message | from → to | rule and answer |
-| --- | --- | --- |
-| `{fragment: "agents?"}` | a frame of a fragment the person owns → the shell | → `{fragment: "agents", agents: [{identity, fragment, name, title, picture?, phase?, modelProviders?}], models?, setup}`: the agents their computer runs (`name` the label `@` uses, `title` and `picture` the face, `phase` the computer's), and `models` and `modelProviders` from its view (`GET /api/computers/{id}`). Sent again when any of it changes. `setup` is `{steps: [{text, state: done \| doing \| todo \| failed}], error}` for the first run's chat while its agent is made, else `null`. A frame of a fragment shared with them gets no answer |
-| `{fragment: "add-agent", identity, nonce}` | the same | the shell asks the person in its own dialog ("Add Fred to …?", Add armed after 800 ms), and only on Add makes the agent an editor of the frame's fragment → `{fragment: "agent-added", nonce, identity, ok, error?}`, `error` `"declined"`, `"not answered"` (90 s), `"busy"`, or the API's refusal. Nothing is remembered |
-| `{fragment: "retry-setup"}` | the first run's chat, as `agents?` | tries a failed setup step again |
-| `{fragment: "compose", text}` | the shell → a chat it framed, once the chat asked `agents?` | the chat replaces what was typed and focuses its composer; sends nothing; taken only by a person who may post |
-| `{fragment: "open", url, title?}` | any frame it made → the shell | a URL of the frame's own origin opens a file's window; a page of another fragment of the deployment (the frame's origin with another name in its place) opens as that fragment's window. Anything else opens nothing |
-| `{fragment: "open-launcher"}` | the focused frame of a listed fragment → the shell | opens the launcher |
-| `{fragment: "alerts?", nonce}`, `{fragment: "alerts", nonce, on, key?}` | a frame of one of the person's chats → the shell | A chat's alerts are the shell's, below |
-| `{fragment: "busy", busy}` | a chat → the shell | whether it holds what no storage keeps (files chosen, a memo, a message on its way or failed, …): the shell does not reload under it |
-| `{fragment: "said"}` | a chat → the shell | the person's message was sent there: a chat they archived is unarchived (`PUT /api/fragments/{name}/archived`), back in their sidebar |
-| `{fragment: "forget-draft"}` | the shell → each chat, before signing out | the chat drops its stored draft → `{fragment: "draft-forgotten"}` |
-| `{fragment: "theme", mode, mobile}` | the shell → a frame | its light or dark mode, and whether it is laid out for a phone |
-| `{fragment: "screen", agent, name}`, `{fragment: "simplex", agent, name}` | the shell → a port's page | the agent's name, as it loads and on a rename |
-| `{fragment: "simplex", agent, want: "link" \| "unlink", home?}` | a SimpleX link page Settings framed, for its own agent → the shell | → `{fragment: "simplex", agent, for, ticket?, error?, home?, homeError?}`: a door ticket (An agent's doors); a link's `home` sets its home (An agent's home), an unlink's takes it back |
-| `{fragment: "session-archive", key \| continue}` | the person's session archive's frame → the shell | `key` the conversation it shows (`null` its list); `continue` a conversation to pick up as a new chat: the shell asks with which of their agents (its picker), or opens the chat one made of it |
-| `{fragment: "signin-blocked", name, why?}` | a fragment's `__signin`, or `/auth/frame`'s note → the parent | Frame sessions |
-| `{fragment: "open-chat", name}` | the alerts worker → an open shell | opens the chat |
+SimpleX link page). Their messages, each `{fragment: <kind>, ...}`, are
+defined in one module, templates/chat/site/frame-messages.js (the shell's
+cell/shell/frame-messages.js links to it): every kind, who sends it to
+whom, its fields and what it does. The shell takes a message only from a
+frame it made, at that frame's own origin, and answers that frame alone;
+a page's messages ask, never grant. Framed pages take messages only from
+their parent at the platform's origin (the `__live` hello's `platform`).
 
 ### A new release
 
@@ -1856,8 +1886,9 @@ nor speak through one (`fragment_core::door`):
   minutes of `at` (ms). Anything else saying `relayed` is 403; an app's
   operation or job publishes none (400), but a hosted door's.
 - **A hosted door** is a fragment made from a blessed connector template
-  (`blessed::CONNECTORS`; none ships yet) that has never run other code
-  (another install unbinds it for good, `door.unmade`). Only its owner
+  (`blessed::CONNECTORS`: `telegram`, templates/telegram) that has never
+  run other code (another install unbinds it for good and removes its
+  secrets, `door.unmade`). Only its owner
   edits or shares it: anyone else, an agent for its owner included, is at
   most a viewer there, an editor's role for anyone is 400, and its status
   shows an agent no share link. Only its owner, in person, binds it (`POST

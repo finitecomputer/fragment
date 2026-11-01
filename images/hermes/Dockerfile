@@ -317,6 +317,13 @@ COPY --from=novnc /novnc/vendor /opt/fragment/screen/novnc/vendor
 #   PATH names, so `sudo npm install -g` would put a program nowhere an
 #   agent runs it from, and write into Hermes' sealed store. Hermes' PM
 #   leaves npm_config_* out of its own npm runs.
+# Each agent's desktop keeps its data (XDG_DATA_HOME) in Hermes' home's
+# ~/.local/share, as its terminal's ~ is Hermes' home, not under its
+# profile (upstream's HERMES_BD_DATA_HOME default): the agents are one user
+# (decision 44), and what its person installs from a terminal there (their
+# Claude Code: docs/computers.md, "Claude Code in our Hermes image") lands
+# whole in /data/hermes, never in a profile a removed agent's retirement
+# moves aside.
 # Lazy installs, which upstream now turns on (into /data/hermes/installs),
 # are off: Hermes' managed overlay (security.allow_lazy_installs,
 # boot/src/hermes.rs).
@@ -340,6 +347,7 @@ ENV PATH="/opt/hermes/bin:/opt/hermes/.venv/bin:/data/hermes/.local/bin:/usr/loc
     HERMES_WEB_DIST=/opt/hermes/hermes_cli/web_dist \
     HERMES_TUI_DIR=/opt/hermes/ui-tui \
     HERMES_HOME=/data/hermes \
+    HERMES_BD_DATA_HOME=/data/hermes/.local/share \
     HERMES_WRITE_SAFE_ROOT=/data/hermes:/data/work:/tmp \
     XDG_RUNTIME_DIR=/tmp/hermes-runtime \
     NODE_COMPILE_CACHE=/tmp/node-compile-cache \
@@ -378,6 +386,30 @@ COPY --from=ours / /
 # The adapter extends the pinned Bot Desktop's start, attach and stop paths;
 # the boot refuses upstream source changes before it installs those hooks.
 COPY images/hermes/desktop_browser.py /opt/hermes/tools/bot_desktop/fragment_browser.py
+# A link opened on an agent's desktop (a terminal's `claude auth login`
+# sign-in, xdg-open) opens in that agent's own Chromium: the desktop's
+# default web browser, as Xfce's helper (exo-open reads it), in place of
+# Debian's sensible-browser, which names none here, so Xfce asked its person
+# which browser to use (FIN-351).
+COPY --chmod=755 <<'EOF' /opt/fragment/bin/desktop-browser
+#!/bin/sh
+# The desktop's web browser (images/hermes/Dockerfile): the agent's own.
+exec /opt/hermes/.venv/bin/python /opt/hermes/tools/bot_desktop/fragment_browser.py --open "${1:-about:blank}"
+EOF
+COPY <<'EOF' /usr/share/xfce4/helpers/fragment-browser.desktop
+[Desktop Entry]
+Version=1.0
+Icon=chromium
+Type=X-XFCE-Helper
+Name=Chromium
+StartupNotify=true
+X-XFCE-Binaries=/opt/fragment/bin/desktop-browser;
+X-XFCE-Category=WebBrowser
+X-XFCE-Commands=%B;
+X-XFCE-CommandsWithParameter=%B "%s";
+EOF
+RUN sed -i 's/^WebBrowser=.*/WebBrowser=fragment-browser/' /etc/xdg/xfce4/helpers.rc \
+ && grep -qx 'WebBrowser=fragment-browser' /etc/xdg/xfce4/helpers.rc
 RUN /opt/fragment/bin/hermes-boot build-info \
  && /opt/hermes/.venv/bin/python -m compileall -q --invalidation-mode unchecked-hash \
     /opt/hermes/tools/browser_tool_session.py /opt/hermes/tools/bot_desktop/browser.py \

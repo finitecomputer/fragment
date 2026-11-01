@@ -27,6 +27,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -34,7 +35,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 use super::{Agent, Command, Event, How, MenuItem, Runtime, RuntimeError, RuntimeFuture, RuntimeIo, TurnStart};
 use crate::records::{self, Call, Category, Outcome, PromptOption, Step, ToolEvidence, ToolStatus};
@@ -65,10 +66,17 @@ pub const DRAIN_MS_DEFAULT: u64 = 10_000;
 
 #[derive(Debug, Clone)]
 pub struct ClaudeConfig {
-    /// The unmodified `claude`, as Anthropic publishes it.
+    /// The unmodified `claude`, as Anthropic publishes it: the person's own
+    /// install, which this image does not ship (docs/computers.md).
     pub bin: PathBuf,
-    /// Its `CLAUDE_CONFIG_DIR`: the person's login and the sessions'
-    /// transcripts, under `/data`.
+    /// Its `HOME`: the person's, where Anthropic's installer put it and
+    /// what Claude Code writes beside it (its versions as it updates), so
+    /// the agent runs the same Claude Code its person installed.
+    pub home: PathBuf,
+    /// Its `CLAUDE_CONFIG_DIR`: the person's login and settings, and the
+    /// sessions' transcripts and memory, under `/data` (the person's own,
+    /// `<home>/.claude`, so `claude auth login` in their terminal signs the
+    /// agent in).
     pub config_dir: PathBuf,
     /// Each agent's working directory is `<work_dir>/<agent fragment>`.
     pub work_dir: PathBuf,
@@ -212,7 +220,7 @@ async fn run(cfg: ClaudeConfig, mut io: RuntimeIo) -> Result<(), RuntimeError> {
         };
         let tx = sessions.entry(key.clone()).or_insert_with(|| {
             let (tx, rx) = mpsc::channel(16);
-            tokio::spawn(session(cfg.clone(), key.clone(), generations.clone(), rx, io.events.clone()));
+            tokio::spawn(session(cfg.clone(), key.clone(), generations.clone(), rx, io.events.clone(), io.held.clone(), io.unquiet.clone()));
             tx
         });
         let _ = tx.send(msg).await;
@@ -262,7 +270,35 @@ struct Turn {
     stopping: bool,
 }
 
-async fn session(cfg: ClaudeConfig, key: (String, String), generations: Arc<Mutex<Generations>>, mut rx: mpsc::Receiver<ToSession>, events: mpsc::Sender<Event>) {
+/// A session counted while its process runs with no turn on it: what a
+/// hold waits on (`RuntimeIo::unquiet`), uncounted as it stops or the
+/// session ends.
+struct Idle {
+    counted: bool,
+    unquiet: Arc<AtomicUsize>,
+}
+
+impl Idle {
+    fn set(&mut self, idle: bool) {
+        if idle != self.counted {
+            if idle {
+                self.unquiet.fetch_add(1, Ordering::SeqCst);
+            } else {
+                self.unquiet.fetch_sub(1, Ordering::SeqCst);
+            }
+            self.counted = idle;
+        }
+    }
+}
+
+impl Drop for Idle {
+    fn drop(&mut self) {
+        self.set(false);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn session(cfg: ClaudeConfig, key: (String, String), generations: Arc<Mutex<Generations>>, mut rx: mpsc::Receiver<ToSession>, events: mpsc::Sender<Event>, mut held: watch::Receiver<bool>, unquiet: Arc<AtomicUsize>) {
     let (agent, chat) = key;
     let gen_key = format!("{agent}|{chat}");
     let cwd = cfg.work_dir.join(&agent);
@@ -270,8 +306,10 @@ async fn session(cfg: ClaudeConfig, key: (String, String), generations: Arc<Mute
     let mut turn: Option<Turn> = None;
     let mut idle_since = Instant::now();
     let mut requests = 0u64;
+    let mut idle = Idle { counted: false, unquiet };
     // bounded by its idle stop, or the bridge dropping its sender
     loop {
+        idle.set(proc.is_some() && turn.is_none());
         let idle_left = cfg.idle.saturating_sub(idle_since.elapsed());
         tokio::select! {
             m = rx.recv() => {
@@ -386,6 +424,18 @@ async fn session(cfg: ClaudeConfig, key: (String, String), generations: Arc<Mute
                     }
                 }
             }
+            _ = async { let _ = held.wait_for(|h| *h).await; }, if turn.is_none() && proc.is_some() => {
+                // held for a save: its process stops now, as at its idle
+                // bound, so nothing of it (an update Claude Code makes on its
+                // own, among others) writes under /data while it is copied; a
+                // turn running at the hold runs on, its process stopped as it
+                // ends. The session stays, for a turn handed as the hold came,
+                // and its next turn resumes it.
+                crate::ev!("claude.held", { "agent": agent, "chat": chat });
+                if let Some(p) = proc.take() {
+                    stop(p).await;
+                }
+            }
             _ = tokio::time::sleep(idle_left), if turn.is_none() => {
                 // idle: its process stops, and so does this task
                 break;
@@ -456,9 +506,54 @@ fn withheld(name: &str) -> bool {
     name.starts_with("ANTHROPIC_") || name.starts_with("CLAUDE_CODE_") || name.starts_with("BRIDGE_") || matches!(name, "CLAUDECODE" | "CLAUDE_CONFIG_DIR" | "MCP_TOOL_TIMEOUT")
 }
 
+/// What a turn of an agent says when its computer has no Claude Code: what
+/// its person does about it, in a terminal of the computer.
+pub const NOT_INSTALLED: &str = "Claude Code isn't installed on this computer yet. Install it in a terminal on one of your agents' desktops, then sign in there with `claude auth login`";
+
+/// The agent's `AGENTS.md`: who it is, and the `fragment` CLI that acts as
+/// it (Paul, FIN-233: one in the Claude agent's folder). The CLI's own
+/// guide is the one source of what it does (`fragment skill`).
+pub fn agents_md(agent: &Agent) -> String {
+    format!(
+        "# This computer\n\n\
+         You are {name}, an agent fragment (`{fragment}`) on its owner's computer, working for `{owner}`. Each chat you are in is a fragment; what you write in your turn is your reply there.\n\n\
+         The `fragment` CLI acts as you here: the computer signs each request as you, so it needs no login or keys, and it acts for your owner where they may. Run `fragment skill` for its guide: making, deploying and sharing apps, reading and writing fragments, routines, and search.\n\n\
+         Your computer writes this file again when it changes. Keep your own notes in `CLAUDE.md` or your memory.\n",
+        name = agent.name,
+        fragment = agent.fragment,
+        owner = agent.owner,
+    )
+}
+
+/// What `CLAUDE.md` holds when the agent has none: `AGENTS.md`, read by any
+/// Claude Code (one alone reads `AGENTS.md` only without a `CLAUDE.md`, and
+/// only from v2.1.277). An agent's own `CLAUDE.md` is never written over.
+pub const CLAUDE_MD: &str = "@AGENTS.md\n";
+
+/// The agent's working directory, made ready for its `claude`: its own
+/// (`run_as`'s), with its `AGENTS.md` as it is now and a `CLAUDE.md` that
+/// reads it if it has none.
+pub fn prepare(cwd: &Path, agent: &Agent, run_as: Option<(u32, u32)>) -> std::io::Result<()> {
+    std::fs::create_dir_all(cwd)?;
+    let own = |p: &Path| run_as.map_or(Ok(()), |(uid, gid)| std::os::unix::fs::chown(p, Some(uid), Some(gid)));
+    own(cwd)?;
+    let agents = cwd.join("AGENTS.md");
+    let text = agents_md(agent);
+    if std::fs::read_to_string(&agents).ok().as_deref() != Some(text.as_str()) {
+        std::fs::write(&agents, &text)?;
+        own(&agents)?;
+    }
+    let claude = cwd.join("CLAUDE.md");
+    if !claude.exists() {
+        std::fs::write(&claude, CLAUDE_MD)?;
+        own(&claude)?;
+    }
+    Ok(())
+}
+
 /// Starts the session's `claude`: resuming it, or naming it new.
 fn spawn(cfg: &ClaudeConfig, agent: &Agent, cwd: &Path, id: &str, resume: bool) -> Result<Proc, String> {
-    std::fs::create_dir_all(cwd).map_err(|e| format!("{}: {e}", cwd.display()))?;
+    prepare(cwd, agent, cfg.run_as).map_err(|e| format!("{}: {e}", cwd.display()))?;
     let mut c = tokio::process::Command::new(&cfg.bin);
     c.args(["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--include-partial-messages"]);
     c.args(["--permission-mode", "bypassPermissions", "--allow-dangerously-skip-permissions", "--permission-prompt-tool", "stdio"]);
@@ -472,7 +567,10 @@ fn spawn(cfg: &ClaudeConfig, agent: &Agent, cwd: &Path, id: &str, resume: bool) 
             c.env_remove(&name);
         }
     }
-    c.env("CLAUDE_CONFIG_DIR", &cfg.config_dir);
+    c.env("HOME", &cfg.home).env("CLAUDE_CONFIG_DIR", &cfg.config_dir);
+    // its terminal's `fragment` acts as the agent, for its owner, as a
+    // Hermes agent's does (its profile's environment)
+    c.env("FRAGMENT_AS_AGENT", &agent.fragment).env("FRAGMENT_FOR", &agent.owner);
     // the agent's connections, as every runtime's tools get them: a
     // placeholder its computer's egress swaps (never a model's key)
     for cred in &agent.credentials {
@@ -485,7 +583,7 @@ fn spawn(cfg: &ClaudeConfig, agent: &Agent, cwd: &Path, id: &str, resume: bool) 
     }
     c.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
     let mut child = c.spawn().map_err(|e| match e.kind() {
-        std::io::ErrorKind::NotFound => "Claude Code isn't installed on this computer".to_string(),
+        std::io::ErrorKind::NotFound => NOT_INSTALLED.to_string(),
         _ => format!("Claude Code did not start: {e}"),
     })?;
     let stdin = child.stdin.take().expect("piped");
@@ -774,6 +872,37 @@ async fn answer(t: &mut Turn, p: &mut Proc, prompt: &str, option: Option<String>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Goal (FIN-258): the agent's folder is ready for its `claude`: an
+    /// `AGENTS.md` naming it and the `fragment` CLI, and a `CLAUDE.md` that
+    /// reads it. Replay: the same agent again writes nothing. Valid: a
+    /// renamed agent's `AGENTS.md` is written again. Invalid: an agent's own
+    /// `CLAUDE.md` is never written over.
+    #[test]
+    fn an_agents_folder_names_it_and_the_cli() {
+        let dir = std::env::temp_dir().join(format!("claude-prepare-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut a = Agent { fragment: "rowan--k3x9".into(), identity: "npub1rowan".into(), name: "Rowan".into(), owner: "npub1paul".into(), credentials: vec![], key: None, runtime: Some("claude".into()) };
+        let cwd = dir.join("work").join(&a.fragment);
+        prepare(&cwd, &a, None).expect("prepared");
+        let agents = std::fs::read_to_string(cwd.join("AGENTS.md")).expect("its AGENTS.md");
+        for said in ["You are Rowan", "`rowan--k3x9`", "`npub1paul`", "The `fragment` CLI acts as you", "`fragment skill`"] {
+            assert!(agents.contains(said), "{said}: {agents}");
+        }
+        assert_eq!(std::fs::read_to_string(cwd.join("CLAUDE.md")).expect("its CLAUDE.md"), "@AGENTS.md\n");
+        // its time set far back: a write would move it
+        let long_ago = std::time::UNIX_EPOCH + Duration::from_secs(1);
+        std::fs::File::options().write(true).open(cwd.join("AGENTS.md")).and_then(|f| f.set_modified(long_ago)).expect("its time set");
+        prepare(&cwd, &a, None).expect("again");
+        assert_eq!(std::fs::metadata(cwd.join("AGENTS.md")).and_then(|m| m.modified()).expect("a time"), long_ago, "replay writes nothing");
+        a.name = "Rowan the Builder".into();
+        std::fs::write(cwd.join("CLAUDE.md"), "My own notes.\n").expect("its own");
+        prepare(&cwd, &a, None).expect("renamed");
+        assert!(std::fs::read_to_string(cwd.join("AGENTS.md")).expect("again").contains("You are Rowan the Builder"));
+        assert_eq!(std::fs::read_to_string(cwd.join("CLAUDE.md")).expect("its own"), "My own notes.\n", "never written over");
+        assert!(NOT_INSTALLED.contains("claude auth login") && NOT_INSTALLED.contains("Install it"), "says what to do");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// Goal: a session's id is a UUID of its agent, chat and `/new` count:
     /// the same in every life, another for another chat or count.

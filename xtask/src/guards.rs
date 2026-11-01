@@ -166,9 +166,11 @@ mod tests {
     /// drifts from them silently: proto's `LISTED_FRESH_MS` and
     /// `LISTED_UNREAD_MAX`, and the bridge's `TURN_IDLE_MS_MAX` and
     /// `PROMPT_TTL_MS_DEFAULT` (images/bridge/src/limits.rs: images/ is a
-    /// workspace of its own, so its file is read); and Settings' proto's
-    /// `ROLE_MAX_CHARS` and the cell's computer's `AGENTS_MAX`. Method: each copy and
-    /// each Rust source, read and evaluated.
+    /// workspace of its own, so its file is read); Settings' proto's
+    /// `ROLE_MAX_CHARS` and the cell's computer's `AGENTS_MAX`; and the
+    /// launcher's knowledge question's proto `search::IN_MAX` and
+    /// `QUERY_MAX_BYTES`. Method: each copy and each Rust source, read and
+    /// evaluated.
     #[test]
     fn the_shell_copies_its_limits() {
         let root = crate::devstack::repo_root();
@@ -183,5 +185,8 @@ mod tests {
         let computer = std::fs::read_to_string(root.join("cell/src/computer.rs")).expect("the cell's computer reads");
         assert_eq!(constant(&settings, "const", "ROLE_MAX_CHARS", " = "), fragment_proto::limits::ROLE_MAX_CHARS as i64);
         assert_eq!(constant(&settings, "const", "AGENTS_MAX", " = "), constant(&computer, "const", "AGENTS_MAX", ": u64 = "), "the shell's AGENTS_MAX is a computer's");
+        let launcher = std::fs::read_to_string(root.join("cell/shell/launcher.js")).expect("the shell's launcher reads");
+        assert_eq!(constant(&launcher, "const", "KNOWLEDGE_IN_MAX", " = "), fragment_proto::search::IN_MAX as i64);
+        assert_eq!(constant(&launcher, "const", "KNOWLEDGE_Q_MAX_BYTES", " = "), fragment_proto::search::QUERY_MAX_BYTES as i64);
     }
 }

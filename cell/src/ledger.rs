@@ -213,7 +213,9 @@ pub struct Status {}
 pub struct OrgStatus {}
 
 /// Fleets with levers only (`FRAGMENT_TEST_SECRET`; cell/src/levers.rs):
-/// move this ledger's clock (`clock {offsetMs}`), run its sweep now
+/// move this ledger's clock (`clock {offsetMs}`: its now, and the times of
+/// the rows it hears, so a lane's spends and its cap's checks share a
+/// month), run its sweep now
 /// (`sweep`), list the references under a prefix (`entries {prefix}`),
 /// read what moved its balance (`totals`), read the price book its head
 /// holds as of its last call (`book`, answering `{book}`), or cap its paid
@@ -684,7 +686,13 @@ impl LedgerCell {
         }
         match path.as_str() {
             <core::Meter as Route>::PATH => {
-                let m: core::Meter = decode(&body)?;
+                let mut m: core::Meter = decode(&body)?;
+                // a clock a test fleet moved (`TestHook::Clock`) reads the
+                // rows' times on it too, so a row's month is its clock's
+                let offset = self.offset_ms()?;
+                for row in &mut m.rows {
+                    row.at_ms = row.at_ms.saturating_add(offset);
+                }
                 let book = &self.cfg.book;
                 reply(self.mutate(move |l, s, now| l.meter(s, &m, now, book)).await?)
             }

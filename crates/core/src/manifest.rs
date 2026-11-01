@@ -301,34 +301,41 @@ fn listed(name: &str, v: &Value) -> Result<ListedDecl, String> {
     Ok(ListedDecl { kinds, fields })
 }
 
-/// One entry of `triggers`: `{"cron" | "channel" | "files": …, "run": op}`,
-/// a channel's with an optional `"from": "person" | "agent"` (only records
-/// a member of that kind posted start runs).
+/// One entry of `triggers`: `{"cron" | "channel" | "files": …, "run": op}`
+/// or `{"installed": true, "run": op}`, a channel's with an optional
+/// `"from": "person" | "agent"` (only records a member of that kind posted
+/// start runs).
 fn trigger(i: usize, v: &Value, m: &Manifest) -> Result<TriggerDecl, String> {
     let at = format!("triggers[{i}]");
     let obj = v.as_object().ok_or_else(|| format!("{at} must be an object"))?;
-    if let Some(k) = obj.keys().find(|k| !matches!(k.as_str(), "cron" | "channel" | "files" | "run" | "from")) {
-        return Err(format!("{at} has an unknown key {k:?} (cron, channel, files, run, from)"));
+    if let Some(k) = obj.keys().find(|k| !matches!(k.as_str(), "cron" | "channel" | "files" | "installed" | "run" | "from")) {
+        return Err(format!("{at} has an unknown key {k:?} (cron, channel, files, installed, run, from)"));
     }
     let text = |k: &str| obj.get(k).map(|v| v.as_str().map(str::to_string).ok_or_else(|| format!("{at}.{k} must be a string"))).transpose();
-    let on = match (text("cron")?, text("channel")?, text("files")?) {
-        (Some(c), None, None) => {
+    let installed = match obj.get("installed") {
+        None => false,
+        Some(Value::Bool(true)) => true,
+        Some(_) => return Err(format!("{at}.installed must be true")),
+    };
+    let on = match (text("cron")?, text("channel")?, text("files")?, installed) {
+        (None, None, None, true) => TriggerOn::Installed(true),
+        (Some(c), None, None, false) => {
             crate::cron::Cron::parse(&c).map_err(|e| format!("{at}.cron: {e}"))?;
             TriggerOn::Cron(c)
         }
-        (None, Some(c), None) => {
+        (None, Some(c), None, false) => {
             if c != "inbox" && !m.channels.contains_key(&c) {
                 return Err(format!("{at}.channel must be inbox or a channel this fragment.json declares, not {c:?}"));
             }
             TriggerOn::Channel(c)
         }
-        (None, None, Some(f)) => {
+        (None, None, Some(f), false) => {
             if !crate::glob::valid(&f) {
                 return Err(format!("{at}.files must be a relative path pattern (* ** ?), not {f:?}"));
             }
             TriggerOn::Files(f)
         }
-        _ => return Err(format!("{at} needs exactly one of cron, channel, files")),
+        _ => return Err(format!("{at} needs exactly one of cron, channel, files, installed")),
     };
     let run = text("run")?.ok_or_else(|| format!("{at} needs run: the operation it starts"))?;
     let decl = m.operations.get(&run).ok_or_else(|| format!("{at}.run names no declared operation: {run:?}"))?;
@@ -612,6 +619,31 @@ mod tests {
             (br#"{"operations":{"n":{"kind":"job"}},"channels":{"chat":{}},"triggers":[{"channel":"chat","from":7,"run":"n"}]}"#, "from must be a string"),
             (br#"{"operations":{"n":{"kind":"job"}},"triggers":[{"cron":"* * * * *","from":"agent","run":"n"}]}"#, "from is a channel trigger's"),
             (br#"{"operations":{"n":{"kind":"job"}},"triggers":[{"files":"a/**","from":"person","run":"n"}]}"#, "from is a channel trigger's"),
+        ] {
+            let e = parse(bad).expect_err(&String::from_utf8_lossy(bad));
+            assert!(e.contains(says), "{e}");
+        }
+    }
+
+    /// Goal: an operation may run once after each install of new code (a
+    /// brain re-reading what changed). Method: `"installed": true`, valid
+    /// and stored as it serializes; any other value, or beside another
+    /// kind, refused at deploy.
+    #[test]
+    fn an_installed_trigger_is_true_and_alone() {
+        let m = parse(br#"{"operations":{"n":{"kind":"mutation"}},"triggers":[{"installed":true,"run":"n"}]}"#).unwrap();
+        assert_eq!(m.triggers[0], TriggerDecl { on: TriggerOn::Installed(true), run: "n".into(), from: None });
+        let wire = serde_json::to_value(&m.triggers[0]).unwrap();
+        assert_eq!(wire, serde_json::json!({ "installed": true, "run": "n" }));
+        assert_eq!(serde_json::from_value::<TriggerDecl>(wire).unwrap(), m.triggers[0], "it reads back");
+        for (bad, says) in [
+            (&br#"{"operations":{"n":{"kind":"job"}},"triggers":[{"installed":false,"run":"n"}]}"#[..], "installed must be true"),
+            (br#"{"operations":{"n":{"kind":"job"}},"triggers":[{"installed":"yes","run":"n"}]}"#, "installed must be true"),
+            (br#"{"operations":{"n":{"kind":"job"}},"triggers":[{"installed":true,"cron":"* * * * *","run":"n"}]}"#, "exactly one of"),
+            (br#"{"operations":{"n":{"kind":"job"}},"triggers":[{"installed":true,"from":"agent","run":"n"}]}"#, "from is a channel trigger's"),
+            (br#"{"operations":{"n":{"kind":"query"}},"triggers":[{"installed":true,"run":"n"}]}"#, "is a query"),
+            (br#"{"operations":{"n":{"kind":"job","role":"owner"}},"triggers":[{"installed":true,"run":"n"}]}"#, "a trigger acts as an editor"),
+            (br#"{"operations":{"n":{"kind":"job"}},"triggers":[{"installed":true}]}"#, "needs run"),
         ] {
             let e = parse(bad).expect_err(&String::from_utf8_lossy(bad));
             assert!(e.contains(says), "{e}");

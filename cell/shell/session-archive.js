@@ -17,6 +17,7 @@
 // History's search asks the archive's own search too (`search`), which
 // each import writes (templates/sessions/README.md, Search): its chats
 // whose words hold the question, best first.
+import { KIND } from "./frame-messages.js";
 
 // Results a search asks the archive for (the API's most: RESULTS_MAX)
 const SEARCH_LIMIT = 50;
@@ -72,7 +73,7 @@ export function createSessionArchive({
   // (continue.js), as the person.
   addEventListener("message", (e) => {
     const d = e.data;
-    if (d?.fragment !== "session-archive" || !read.name || e.source !== getFrame(read.name)?.contentWindow) return;
+    if (d?.fragment !== KIND.sessionArchive || !read.name || e.source !== getFrame(read.name)?.contentWindow) return;
     if (typeof d.continue === "string") return void continuing.ask({ archive: read.name, key: d.continue }, read.entries.find((x) => x.key === d.continue)?.title);
     open = typeof d.key === "string" ? d.key : null;
     renderHeading();

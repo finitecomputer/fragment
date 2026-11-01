@@ -103,8 +103,9 @@ pub fn plain_models() -> Value {
 }
 
 /// `plain_models`, its embeddings slot the default model pinned at a
-/// version (`Shape::EmbeddingsRepinned`): the same vectors in name, another
-/// space, which no index of the plain node's holds.
+/// version, with the task prefixes nomic-embed-text asks for
+/// (`Shape::EmbeddingsRepinned`): the same vectors in name, another space,
+/// which no index of the plain node's holds.
 pub fn repinned_models() -> Value {
     let mut models = plain_models();
     models["embeddings"] = json!({
@@ -112,6 +113,8 @@ pub fn repinned_models() -> Value {
         "model": fragment_core::embed::MODEL_DEFAULT,
         "dimensions": fragment_core::embed::DIMENSIONS_DEFAULT,
         "version": "e2e-2",
+        "document_prefix": "search_document: ",
+        "query_prefix": "search_query: ",
     });
     models
 }
@@ -386,6 +389,10 @@ pub struct Suite {
     /// The local node's tools (`None`: a hosted run, which starts no node).
     tools: Option<devstack::Tools>,
     node: Option<devstack::Node>,
+    /// The node's port, held for the whole run: each of the node's lives
+    /// listens on it (`devstack::NodeOptions::listener`), so no other socket
+    /// takes it first or while the node is down. `None`: a hosted run.
+    listener: Option<Arc<std::net::TcpListener>>,
     port: u16,
     /// Distinguishes this run's fragment names from any earlier state.
     run: String,
@@ -784,7 +791,7 @@ impl Suite {
         fleet.configure(tools, &self.project)?;
         let opts = devstack::NodeOptions {
             project: self.project.clone(),
-            port: self.port,
+            listener: self.listener.clone().context("a local run holds the node's port")?,
             // each boot's log, in this run's scratch: a FAIL comes with the
             // node's side of it, the logs of a node a lane killed included
             log_dir: self.scratch.clone(),
@@ -1157,6 +1164,7 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
     };
     let hidden = rehearse.is_some();
     let openrouter = fragment_fakes::openrouter::OpenRouter::start()?;
+    let listener = devstack::hold_port(0)?;
     let mut s = Suite {
         only,
         except,
@@ -1179,7 +1187,8 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
         chrome: browser::Shared::new(&scratch),
         tools: Some(tools),
         node: None,
-        port: devstack::free_port()?,
+        port: listener.local_addr()?.port(),
+        listener: Some(listener),
         run,
         fake: Fake::of(hidden, "code.storage", fake),
         ai: Fake::of(hidden, "Workers AI", fragment_fakes::workers_ai::WorkersAi::start(0)?),
