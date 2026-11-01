@@ -8,9 +8,10 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { standIn } from "../shell/frame-standin.js";
+import { standIn, standIns } from "../shell/frame-standin.js";
 
-// a column of nodes (#frames) and the elements the stand-in makes and moves
+// a column of nodes (#frames) and the elements the stand-in makes and moves;
+// `frame()` adds another frame to it, as the shell does
 function column() {
   const nodes = [];
   const node = (cls) => {
@@ -30,9 +31,13 @@ function column() {
     return n;
   };
   const el = (tag, cls) => node(cls);
-  const frame = node("frame");
-  nodes.push(frame);
-  return { nodes, el, frame };
+  const add = () => {
+    const f = node("frame");
+    nodes.push(f);
+    return f;
+  };
+  const frame = add();
+  return { nodes, el, frame, add, boxes: () => nodes.filter((n) => n.className === "frame-standin") };
 }
 
 test("shown from the frame's making; the empty page before its src loading is not its page", () => {
@@ -79,4 +84,52 @@ test("the frame sent elsewhere: shown again, hidden as the frame is, until that 
   assert.equal(frame.listeners.get("load").size, 1, "armed once however often it is shown");
   frame.dispatch("load");
   assert.equal(s.shown(), false);
+});
+
+// Alex on #907: the launcher lets a frame go (a launch whose send failed) to
+// load it again; its stand-in must go with it, never to cover another.
+test("a frame let go before its page loaded: its stand-in goes with it, and nothing of it answers later", () => {
+  const { el, frame, boxes } = column();
+  const all = standIns(el);
+  all.add(frame);
+  frame.setAttribute("src", "/auth/frame?name=talk--k3x9&return=%2F");
+  all.drop(frame);
+  assert.equal(frame.isConnected, false);
+  assert.deepEqual(boxes(), []);
+  all.spoke(frame);
+  all.again(frame);
+  frame.dispatch("load");
+  assert.deepEqual(boxes(), [], "a dropped frame's stand-in never comes back");
+});
+
+test("its replacement, for the same chat: a stand-in of its own, settled by its own page", () => {
+  const { el, frame, add, boxes } = column();
+  const all = standIns(el);
+  all.add(frame);
+  all.drop(frame);
+  const again = add();
+  all.add(again);
+  assert.equal(boxes().length, 1);
+  again.setAttribute("src", "/auth/frame?name=talk--k3x9&return=%2F");
+  again.dispatch("load");
+  assert.deepEqual(boxes(), []);
+  assert.equal(all.shown(again), false);
+});
+
+test("after a failed launch, another chat opened: only its stand-in, shown and hidden with it", () => {
+  const { el, frame, add, boxes } = column();
+  const all = standIns(el);
+  all.add(frame);
+  all.drop(frame);
+  const other = add();
+  all.add(other);
+  other.hidden = true;
+  all.sync(other);
+  assert.equal(boxes().length, 1);
+  assert.equal(boxes()[0].hidden, true);
+  other.hidden = false;
+  all.sync(other);
+  assert.equal(boxes()[0].hidden, false);
+  all.spoke(other);
+  assert.deepEqual(boxes(), []);
 });

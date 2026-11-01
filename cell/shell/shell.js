@@ -32,7 +32,7 @@ import { el, section, line, actionLine, createSettings } from "./settings.js";
 import { createLauncher } from "./launcher.js";
 import { createThreads } from "./threads.js";
 import { KIND } from "./frame-messages.js";
-import { standIn } from "./frame-standin.js";
+import { standIns } from "./frame-standin.js";
 
 const $ = (id) => document.getElementById(id);
 const CURRENT = "shell.chat.v1";
@@ -307,8 +307,8 @@ function frameOf(src, title, name = null) {
 // a fragment's frame whose policy does not name its origin yet -> the
 // navigation it makes once it does (frameOf)
 const unready = new WeakMap();
-// a middle-column frame -> its stand-in while its page comes (frame-standin.js)
-const standins = new WeakMap();
+// the middle column's frames' stand-ins while their pages come (frame-standin.js)
+const standins = standIns(el);
 // A frame sent to `src`: at once, or, its origin not known yet, once it is.
 // `replace`: in place of the page it shows, adding nothing to the tab's
 // history (a cross-origin frame's `location.replace` is one it may call).
@@ -317,7 +317,7 @@ function go(frame, src, replace = false) {
   else if (replace && frame.contentWindow) frame.contentWindow.location.replace(new URL(src, location.href).href);
   else frame.src = src;
   // a page of the middle column sent elsewhere: its stand-in again until it comes
-  standins.get(frame)?.again();
+  standins.again(frame);
 }
 
 // A frame that could not sign in says so, and how on (the mint's note,
@@ -954,8 +954,7 @@ function openChat(name, push = true, path = null) {
   if (path && !made) go(state.frames.get(name), framed(name, path), true);
   for (const [n, frame] of state.frames) {
     frame.hidden = n !== name;
-    const standin = standins.get(frame);
-    if (standin) standin.box.hidden = frame.hidden;
+    standins.sync(frame);
   }
   renderHeading();
   renderChats();
@@ -969,15 +968,21 @@ function openChat(name, push = true, path = null) {
   if (onboarding.putOff()) resumeFirstRun();
 }
 
+// A chat's frame let go (the launcher's, to load it again), its stand-in
+// with it.
+function dropFrame(name) {
+  const frame = state.frames.get(name);
+  if (!frame) return;
+  standins.drop(frame);
+  state.frames.delete(name);
+}
 // A chat's frame, made once and kept.
 function chatFrame(name, path = setupFor(name) ? "/?setup=1" : "/") {
   if (state.frames.has(name)) return;
   const frame = frameOf(framed(name, path), titleOf(name), name);
   $("frames").append(frame);
   state.frames.set(name, frame);
-  const standin = standIn(frame, el);
-  frame.after(standin.box);
-  standins.set(frame, standin);
+  standins.add(frame);
 }
 
 // ---- apps: every other fragment, each a window in the viewer ----
@@ -1469,6 +1474,7 @@ const launcher = createLauncher({
   views: () => views,
   busy: (name) => refresh.isBusy(state.frames.get(name)),
   setupChat: () => onboarding.setupChat(),
+  dropFrame,
 });
 
 // Each view of the computer taken in from an action's answer (`computerIs`,
@@ -1769,7 +1775,7 @@ const frameOfWindow = (win) => [...state.frames.values()].find((f) => f.contentW
 // a frame's page that speaks to the shell is drawn: its stand-in goes (frame-standin.js)
 addEventListener("message", (event) => {
   const frame = frameOfWindow(event.source);
-  if (frame) standins.get(frame)?.settled();
+  if (frame) standins.spoke(frame);
 });
 // A chat's page says the person sent a message there (`said`): a chat they
 // archived comes back to their sidebar, as an email thread does once it is

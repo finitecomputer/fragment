@@ -32,3 +32,36 @@ export function standIn(frame, el) {
   frame.addEventListener("load", loaded);
   return { box, settled, again, shown: () => box.isConnected };
 }
+
+// The shell's stand-ins, by frame: one made with each middle-column frame
+// (`add`), shown or hidden with it (`sync`), settled when its page speaks
+// (`spoke`), shown again when it is sent elsewhere (`again`), and let go
+// with it (`drop`: the launcher lets a frame go to load it again), so none
+// outlives its frame to cover another (Alex on #907).
+export function standIns(el) {
+  const of = new Map();
+  return {
+    add(frame) {
+      const s = standIn(frame, el);
+      frame.after(s.box);
+      of.set(frame, s);
+      return s;
+    },
+    sync(frame) {
+      const s = of.get(frame);
+      if (s) s.box.hidden = frame.hidden;
+    },
+    spoke(frame) {
+      of.get(frame)?.settled();
+    },
+    again(frame) {
+      of.get(frame)?.again();
+    },
+    drop(frame) {
+      of.get(frame)?.settled();
+      of.delete(frame);
+      frame.remove();
+    },
+    shown: (frame) => !!of.get(frame)?.shown(),
+  };
+}
