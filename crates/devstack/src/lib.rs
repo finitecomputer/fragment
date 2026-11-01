@@ -651,6 +651,32 @@ pub fn state_dir(project: &Path) -> PathBuf {
     project.join(".wrangler/state")
 }
 
+/// Each subject of `issuer` a project's node signs a person in by, and its
+/// email, as its Registry keeps them (`subjects`), read-only while no node
+/// runs: what a WorkOS fake made new must hand out exactly as they are
+/// (crates/fakes/src/workos.rs `adopt`). None for a node with no state.
+pub fn signed_in_subjects(project: &Path, issuer: &str) -> Result<Vec<(String, String)>> {
+    let dir = state_dir(project).join("v3/do/fragment-Registry");
+    let mut found = Vec::new();
+    let Ok(entries) = fs::read_dir(&dir) else { return Ok(found) };
+    for entry in entries {
+        let path = entry?.path();
+        if path.extension().is_none_or(|e| e != "sqlite") || path.file_stem().is_some_and(|s| s == "metadata") {
+            continue;
+        }
+        let db = rusqlite::Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX)
+            .with_context(|| format!("open {} read-only", path.display()))?;
+        let tables: i64 = db.query_row("SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'subjects'", [], |r| r.get(0))?;
+        if tables == 0 {
+            continue;
+        }
+        let mut q = db.prepare("SELECT subject, email FROM subjects WHERE issuer = ?1 ORDER BY subject")?;
+        let rows = q.query_map([issuer], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        found.extend(rows.collect::<rusqlite::Result<Vec<_>>>().with_context(|| format!("read {}'s subjects", path.display()))?);
+    }
+    Ok(found)
+}
+
 /// The nodes this process started in process groups of their own and has
 /// not dropped, which a terminal's Ctrl-C does not reach (it signals the
 /// terminal's group), and whether the process is ending (`kill_nodes`).
@@ -896,6 +922,30 @@ impl Drop for Node {
 
 #[cfg(test)]
 mod tests {
+
+    /// A node's subjects, as its Registry keeps them: one issuer's alone,
+    /// its other SQLite (metadata) passed over; a node with no state has none.
+    #[test]
+    fn a_nodes_subjects_are_read_from_its_registry() {
+        let project = std::env::temp_dir().join(format!("devstack-subjects-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&project);
+        assert!(signed_in_subjects(&project, "workos:client").unwrap().is_empty(), "no state: no one");
+        let dir = state_dir(&project).join("v3/do/fragment-Registry");
+        fs::create_dir_all(&dir).unwrap();
+        let db = rusqlite::Connection::open(dir.join("0123abcd.sqlite")).unwrap();
+        db.execute_batch(
+            "CREATE TABLE subjects (issuer TEXT NOT NULL, subject TEXT NOT NULL, identity TEXT NOT NULL, linked_at INTEGER NOT NULL, email TEXT NOT NULL, signed_in_at INTEGER NOT NULL, PRIMARY KEY (issuer, subject));
+             INSERT INTO subjects VALUES ('workos:client', 'user_00000000000000000000000004', 'npub1b', 0, 'second@example.test', 0);
+             INSERT INTO subjects VALUES ('workos:client', 'user_00000000000000000000000002', 'npub1a', 0, 'first@example.test', 0);
+             INSERT INTO subjects VALUES ('e2e', 'e2e:x', 'npub1c', 0, 'x@e2e.test', 0);",
+        )
+        .unwrap();
+        drop(db);
+        rusqlite::Connection::open(dir.join("metadata.sqlite")).unwrap().execute_batch("CREATE TABLE other (x);").unwrap();
+        let found = signed_in_subjects(&project, "workos:client").unwrap();
+        assert_eq!(found, [("user_00000000000000000000000002".to_string(), "first@example.test".to_string()), ("user_00000000000000000000000004".to_string(), "second@example.test".to_string())]);
+        fs::remove_dir_all(&project).unwrap();
+    }
     use super::*;
 
     /// A node of `script` (`sh -c`) in a process group of its own, as

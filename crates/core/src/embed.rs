@@ -150,6 +150,28 @@ impl Slot {
     }
 }
 
+/// How long a writer waits after its embeddings model's rate limit (429)
+/// before it writes again, when the model says nothing (`retry_after_ms`).
+pub const RETRY_AFTER_DEFAULT_MS: u64 = 60_000;
+/// The longest and shortest wait a refusal names: a model's own outside
+/// them is held to them.
+pub const RETRY_AFTER_MAX_MS: u64 = 10 * 60_000;
+pub const RETRY_AFTER_MIN_MS: u64 = 1_000;
+
+/// The wait a model's 429 asks for, in ms: its `Retry-After` header (in
+/// seconds), else the "Retry after N seconds" its body says (Tinfoil's),
+/// else `RETRY_AFTER_DEFAULT_MS`; held between `RETRY_AFTER_MIN_MS` and
+/// `RETRY_AFTER_MAX_MS`. One rule, so every writer waits alike.
+pub fn retry_after_ms(header: Option<&str>, body: &str) -> u64 {
+    let seconds = |s: &str| s.trim().parse::<f64>().ok().filter(|n| n.is_finite() && *n >= 0.0);
+    let said = header.and_then(seconds).or_else(|| {
+        let lower = body.to_ascii_lowercase();
+        let after = lower.split("retry after ").nth(1)?;
+        seconds(after.split(|c: char| !(c.is_ascii_digit() || c == '.')).next()?)
+    });
+    said.map_or(RETRY_AFTER_DEFAULT_MS, |s| (s * 1000.0).ceil() as u64).clamp(RETRY_AFTER_MIN_MS, RETRY_AFTER_MAX_MS)
+}
+
 /// The most tokens `c` is read as, by any tokenizer an embeddings model
 /// runs: the UTF-8 bytes of the longest of `c`, its canonical decomposition
 /// (NFD) and its compatibility decomposition (NFKD).
@@ -443,6 +465,19 @@ mod tests {
     fn openai_slot() -> Slot {
         let mut models = json!({ "embeddings": { "provider": "openai", "base_url": "http://127.0.0.1:8080/v1", "model": "BAAI/bge-m3", "dimensions": 3, "version": "2024-01", "max_input_tokens": 8192, "private": true, "price": { "input": 0, "output": 0 } } });
         slot_of(&mut models).unwrap()
+    }
+
+    #[test]
+    fn a_rate_limit_names_how_long_to_wait() {
+        assert_eq!(retry_after_ms(Some("37"), ""), 37_000, "the header, in seconds");
+        assert_eq!(retry_after_ms(None, r#"{"error":{"message":"Rate limit reached for tokens. Retry after 37 seconds."}}"#), 37_000, "Tinfoil's words");
+        assert_eq!(retry_after_ms(Some("2"), "Retry after 37 seconds"), 2_000, "the header first");
+        assert_eq!(retry_after_ms(Some("1.5"), ""), 1_500);
+        assert_eq!(retry_after_ms(None, "slow down"), RETRY_AFTER_DEFAULT_MS, "nothing said: the default");
+        assert_eq!(retry_after_ms(Some("Wed, 21 Oct 2026 07:28:00 GMT"), ""), RETRY_AFTER_DEFAULT_MS, "a date is not read: the default");
+        assert_eq!(retry_after_ms(Some("0"), ""), RETRY_AFTER_MIN_MS, "held to the shortest");
+        assert_eq!(retry_after_ms(Some("86400"), ""), RETRY_AFTER_MAX_MS, "held to the longest");
+        assert_eq!(retry_after_ms(Some("-5"), "retry after 9 seconds"), 9_000, "a header that says nothing sensible: the body");
     }
 
     #[test]

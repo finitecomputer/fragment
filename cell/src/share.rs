@@ -438,7 +438,8 @@ struct Sheet {
     /// Its address, which opens it for the people in it.
     canonical: String,
     /// It holds a key or a door, so it stays its owner's and their agents'
-    /// (reach.rs): the sheet adds no one and offers no link.
+    /// (reach.rs): the sheet adds no one, and its Copy link is its address,
+    /// never the share link.
     reach: bool,
     profiles: BTreeMap<String, Profile>,
     /// The page's form token.
@@ -698,10 +699,13 @@ fn render(sheet: &Sheet, flash: Option<Flash>) -> String {
         _ => String::new(),
     };
     // Copy link: the share link while it opens it, else its address (the
-    // people in it open that; a public one, anyone)
+    // people in it open that; a public one, anyone). With reach, never the
+    // share link, though one from before the rule still opens it: the sheet
+    // gives it to no one more (reach.rs); New link, above, still ends it
+    let copied = shared.filter(|_| !sheet.reach);
     out += &format!(
         "<footer>{leave}<button type=\"button\" class=\"quiet\" data-copy=\"{}\">Copy link</button><button type=\"button\" data-done>Done</button></footer>",
-        esc(shared.unwrap_or(&sheet.canonical))
+        esc(copied.unwrap_or(&sheet.canonical))
     );
     out
 }
