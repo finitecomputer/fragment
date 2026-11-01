@@ -266,6 +266,9 @@ pub struct TurnStart {
     pub text: String,
     /// The message's attachments, as the record names them.
     pub attachments: Vec<crate::records::AttachmentRef>,
+    /// The fragment whose blobs they are, when not the turn's chat: an
+    /// answer's are the chat its question was asked in.
+    pub attachments_in: Option<String>,
     /// A card's answer read after its turn was gone, this turn its own
     /// (`LateCard`): none for any other turn.
     pub late: Option<LateCard>,
