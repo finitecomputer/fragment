@@ -115,6 +115,48 @@ fn timed(f: impl FnOnce() -> Result<crate::api::Reply>) -> Result<(f64, u16, Val
     Ok((t0.elapsed().as_secs_f64() * 1000.0, r.status, r.body))
 }
 
+/// Sentences and questions that share no word (the question's words are
+/// none of its sentence's): words alone cannot find them, meaning can.
+const MEANING: [(&str, &str); 2] = [
+    ("The kitten curled up asleep beside the warm fireplace.", "cat napping near hearth"),
+    ("The ferry to the island leaves the harbour at dawn.", "vessel sailing sunrise port"),
+];
+/// Sentences beside them, about other things.
+const OTHERS: [&str; 2] = ["Quarterly tax returns are due to the revenue office in April.", "Our team meeting moved to Thursday afternoon in the library."];
+
+/// Whether the deployment searches by meaning (its `semantic`), shown by
+/// a match words alone cannot make: each question of `MEANING` finds its
+/// sentence first by meaning, and by its words finds it not at all.
+fn meaning(s: &mut Suite, api: &Api, reader: &fragment_nip98::Keys, lent: u64) -> Result<()> {
+    let keys = api.person_paying(lent)?;
+    let created = s.create(api, &keys, &s.name("bench-meaning"))?;
+    let name = created["name"].as_str().context("its name")?.to_string();
+    let shared = api.share(&name, &api.identity(reader)?, "viewer")?;
+    anyhow::ensure!(shared.status == 200, "{name}: the reader's share: {shared}");
+    let sentences: Vec<&str> = MEANING.iter().map(|(t, _)| *t).chain(OTHERS).collect();
+    let sections: Vec<Value> = sentences.iter().enumerate().map(|(i, t)| json!({ "id": format!("m{i}"), "text": t })).collect();
+    let w = api.signed(&keys, "POST", &format!("/api/f/{name}/search/upsert"), Some(&json!({ "source": "bench/meaning", "revision": "r1", "title": "Notes", "sections": sections })))?;
+    anyhow::ensure!(w.status == 200, "{name}: the meaning probe's write: {w}");
+    let mut found = Vec::new();
+    for (i, (_, q)) in MEANING.iter().enumerate() {
+        let ask = |mode: &str| api.signed(reader, "POST", &format!("/api/f/{name}/search"), Some(&json!({ "q": q, "mode": mode, "limit": 4 })));
+        let (by_meaning, by_words) = (ask("semantic")?, ask("lexical")?);
+        let first = by_meaning.body["results"][0]["section"].as_str().unwrap_or("").to_string();
+        let words_find: Vec<String> = by_words.body["results"].as_array().into_iter().flatten().filter_map(|h| h["section"].as_str().map(str::to_string)).collect();
+        println!("      meaning: {q:?}: by meaning first {first} (cosine {}), by words {words_find:?}; semantic {}", by_meaning.body["results"][0]["semantic"]["cosine"], by_meaning.body["semantic"]);
+        found.push(json!({ "q": q, "semantic": by_meaning.body["semantic"], "first": first, "want": format!("m{i}"), "by_words": words_find }));
+    }
+    let on = found.iter().all(|f| f["semantic"] == "on");
+    let matched = found.iter().all(|f| f["first"] == f["want"] && !f["by_words"].as_array().is_some_and(|w| w.contains(&f["want"])));
+    if s.on_fakes() {
+        // the fake's vectors are its words hashed: meaning is a model's
+        println!("      (on fakes, whose vectors carry words, not meaning: the match is reported, not checked)");
+        return Ok(());
+    }
+    s.ok("the deployment searches by meaning: a question that shares no word with its sentence finds it first by meaning, and by its words not at all", on && matched, json!(found));
+    Ok(())
+}
+
 /// A fragment of `chunks` synthetic chunks, labelled `label`, written by a
 /// person of its own lent `lent` paid calls, its reader a viewer: its
 /// name, its owner, and its row.
@@ -167,10 +209,11 @@ pub fn search_bench(s: &mut Suite, api: &Api) -> Result<()> {
     // its distinct chunks' embeddings and the one write after, the reader
     // every hybrid question
     let owns = |n: usize| n.min(POOL_MAX).div_ceil(100) as u64 + 2;
-    let asks = sizes.len() as u64 * (WARM as u64 + 2) + fanouts.len() as u64 * (WARM as u64 + 1);
-    let calls: u64 = sizes.iter().map(|n| owns(*n)).sum::<u64>() + widest as u64 * owns(FANOUT_CHUNKS) + asks;
+    let asks = sizes.len() as u64 * (WARM as u64 + 2) + fanouts.len() as u64 * (WARM as u64 + 1) + MEANING.len() as u64;
+    let calls: u64 = sizes.iter().map(|n| owns(*n)).sum::<u64>() + widest as u64 * owns(FANOUT_CHUNKS) + owns(MEANING.len()) + asks;
     anyhow::ensure!(calls <= RUN_PAID_CALLS && asks <= PERSON_PAID_CALLS, "{sizes:?} chunks take about {calls} paid calls ({asks} of them a reader's), past the {RUN_PAID_CALLS} a run lends or the {PERSON_PAID_CALLS} a person may: split them across runs (SEARCH_BENCH_CHUNKS)");
     let reader = api.person_paying(asks)?;
+    meaning(s, api, &reader, owns(MEANING.len()))?;
     let out = s.dir(SECTION);
     let mut rows: Vec<Value> = Vec::new();
     let mut fragments: Vec<(usize, String)> = Vec::new();
