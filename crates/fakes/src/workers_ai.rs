@@ -343,6 +343,10 @@ struct State {
     /// Paced answers whose reader dropped the connection while it was held
     /// past their `[DONE]`.
     hung_up: Arc<AtomicU64>,
+    /// While true, a paced answer holds after its first event
+    /// (`hold_streams`): a stream the caller has begun reading, its end
+    /// not yet sent.
+    streams_held: Arc<(Mutex<bool>, std::sync::Condvar)>,
     /// The usage the next answers report, in order; then the default.
     usage: VecDeque<Used>,
     /// Raw System One answers queued by tests, including malformed ones.
@@ -1179,7 +1183,7 @@ fn chat_answer(s: &mut State, face: Face, model: &str, body: &Value) -> Response
         let thinking = pace.map_or(0, |p| p.thinking);
         let events = stream(face, model, &reply, &mut s.tool_calls, usage_of(used, body, written), budget, broken, pieces, thinking);
         return match pace {
-            Some(pace) => paced(events, pace, Arc::clone(&s.hung_up)),
+            Some(pace) => paced(events, pace, Arc::clone(&s.hung_up), Arc::clone(&s.streams_held)),
             None => Response::bytes(200, "text/event-stream", events.into_bytes()),
         };
     }
@@ -1213,12 +1217,21 @@ fn chat_answer(s: &mut State, face: Face, model: &str, body: &Value) -> Response
 /// A streamed answer written as `pace` says: chunked, an event at a time,
 /// `every_ms` apart, then its connection held `hold_ms` past its `[DONE]`
 /// with nothing more sent, as the gateway held one; a reader that drops it
-/// meanwhile is counted in `hung_up`.
-fn paced(events: String, pace: Pace, hung_up: Arc<AtomicU64>) -> Response {
+/// meanwhile is counted in `hung_up`. Held (`hold_streams`), it waits
+/// after its first event until released.
+fn paced(events: String, pace: Pace, hung_up: Arc<AtomicU64>, held: Arc<(Mutex<bool>, std::sync::Condvar)>) -> Response {
     let events: Vec<String> = events.split_inclusive("\n\n").map(str::to_string).collect();
     let write = move |mut s: std::net::TcpStream| {
         let chunk = |e: &str| format!("{:x}\r\n{e}\r\n", e.len());
         for (i, e) in events.iter().enumerate() {
+            if i == 1 {
+                let (lock, released) = &*held;
+                let mut holding = lock.lock().expect("streams hold");
+                // bounded by `release_streams`, which a test always calls
+                while *holding {
+                    holding = released.wait(holding).expect("streams hold");
+                }
+            }
             if i > 0 {
                 std::thread::sleep(Duration::from_millis(pace.every_ms));
             }
@@ -1336,6 +1349,18 @@ impl WorkersAi {
     /// How the next streamed answers are written, in order (`Pace`).
     pub fn pace_next(&self, paces: &[Pace]) {
         self.state().paces.extend(paces.iter().copied());
+    }
+
+    /// Paced answers hold after their first event, from now until
+    /// `release_streams`: a stream begun and not yet ended.
+    pub fn hold_streams(&self) {
+        *self.state().streams_held.0.lock().expect("streams hold") = true;
+    }
+
+    pub fn release_streams(&self) {
+        let held = Arc::clone(&self.state().streams_held);
+        *held.0.lock().expect("streams hold") = false;
+        held.1.notify_all();
     }
 
     /// Paced answers whose reader dropped the connection while it was held

@@ -224,14 +224,15 @@ impl Charge {
 /// payer's own fragment's, on its ledger; another owner's, asked of
 /// theirs, unless the spender is that owner's (decision 26). The two are
 /// asked side by side (`gate::asked_together`), the payer's refusal said
-/// first.
-async fn gate(env: &Env, payer: &str, agent: Option<&str>, fragment: Option<&InFragment<'_>>, model: &'static str, name: &'static str) -> CellResult<Charge> {
+/// first, and off the call's path (`ledger::may_beside`): the call waits
+/// on a ledger only when this isolate last heard that question refused.
+async fn gate(env: &Env, payer: &str, agent: Option<&str>, fragment: Option<&InFragment<'_>>, model: &'static str, name: &'static str, after: &dyn Background) -> CellResult<Charge> {
     let own = fragment.filter(|f| f.owner == payer);
     let capped = own.filter(|f| !f.by_owner).map(|f| f.name.to_string());
     let may = MaySpend { spend: Spend::AgentTurn, by_owner: capped.is_none(), fragment: capped };
     let open = fragment.filter(|f| f.owner != payer && !f.by_owner).map(|f| (f.owner, FragmentOpen { fragment: f.name.to_string() }));
-    let theirs = open.as_ref().map(|(owner, open)| ledger::may(env, owner, open));
-    fragment_core::ledger::gate::asked_together(ledger::may(env, payer, &may), theirs).await?;
+    let theirs = open.as_ref().map(|(owner, open)| ledger::may_beside(env, owner, open, after));
+    fragment_core::ledger::gate::asked_together(ledger::may_beside(env, payer, &may, after), theirs).await?;
     Ok(Charge {
         env: env.clone(),
         payer: payer.to_string(),
@@ -266,7 +267,7 @@ pub async fn complete(env: &Env, call: ModelCall<'_>, after: &dyn Background) ->
     }
     let model = cfg.models.capped_for(call.named, call.tier).map_err(refused)?;
     let bounded = bounds::bound(model, call.body, call.stream).map_err(refused)?;
-    let mut charge = gate(env, call.payer, call.agent, call.fragment.as_ref(), bounded.model.id(), call.named.as_str()).await?;
+    let mut charge = gate(env, call.payer, call.agent, call.fragment.as_ref(), bounded.model.id(), call.named.as_str(), after).await?;
     let meta = Metadata { user_id: opaque(call.payer), agent_id: call.agent.map(opaque) };
     // as its slot falls back, however the call named it (#589's review)
     let fallback = cfg.models.fallback_for_input(bounded.model.slot, &bounded.input);
@@ -687,7 +688,7 @@ pub(crate) async fn decide_route(mut req: Request, env: &Env, url: &Url, after: 
     let call = decide::bound(&asked, decide::Asker::Agent).map_err(|why| CellError::invalid(why.message()))?;
     drop(asked);
     let model = call.model;
-    let mut charge = gate(env, &caller.owner, Some(&caller.agent), caller.in_fragment().as_ref(), model.id(), DECIDE).await?;
+    let mut charge = gate(env, &caller.owner, Some(&caller.agent), caller.in_fragment().as_ref(), model.id(), DECIDE, after).await?;
     let input = call.input(vec![]);
     let answered = run(env, model.id(), &input, &caller.owner, Some(&caller.agent)).await;
     drop(input);
@@ -758,7 +759,7 @@ pub(crate) async fn embedded(env: &Env, inputs: &[String], payer: &str, agent: O
     };
     let slot = &cfg.models.embeddings;
     let t0 = js::now_ms();
-    let mut charge = gate(env, payer, agent, fragment, slot.upstream.model(), embed::EMBEDDINGS).await?;
+    let mut charge = gate(env, payer, agent, fragment, slot.upstream.model(), embed::EMBEDDINGS, after).await?;
     took("gate", t0);
     let request = embed::request(slot, inputs);
     let meta = Metadata { user_id: opaque(payer), agent_id: agent.map(opaque) };
@@ -826,7 +827,7 @@ pub(crate) async fn transcription_route(mut req: Request, env: &Env, url: &Url, 
     };
     drop(parts);
     drop(body);
-    let mut charge = gate(env, &owner, Some(&agent.id), None, transcribe::TRANSCRIBE_MODEL, transcribe::WHISPER).await?;
+    let mut charge = gate(env, &owner, Some(&agent.id), None, transcribe::TRANSCRIBE_MODEL, transcribe::WHISPER, after).await?;
     let meta = Metadata { user_id: opaque(&owner), agent_id: Some(opaque(&agent.id)) };
     let (answer, calls) = whispered(env, Config::from_env(env), &bounded.input, &meta).await;
     charge.calls = calls;
