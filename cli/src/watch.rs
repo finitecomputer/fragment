@@ -191,6 +191,8 @@ fn next_batch(rx: &Receiver<Wakeup>, gate: &Debounced, watcher: &Watcher<'_>) ->
 /// Syncs `dir` until the process ends, woken by the OS's events, the
 /// cell's change feed, and a sweep.
 pub fn run(client: &Client, name: &str, dir: &Path, opts: &SyncOptions) -> Result<()> {
+    // in full: the folder's journal and the live socket both name it so
+    let name = &sync::full_name(client, name)?;
     let _lock = SyncLock::acquire(dir)?; // one watcher per folder, ever
     let debounce = Duration::from_millis(DEBOUNCE_MS);
     let gate = Debounced { pending: Arc::new(AtomicBool::new(false)), debounce, max_latency: debounce * 3 };
