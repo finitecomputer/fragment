@@ -118,9 +118,14 @@ fn version_of(state: &State) -> u32 {
 /// A turn a restart cut may be continued (`Engine::continue_turn`): never
 /// a continuation (one continuation, ending visibly), one its asker stopped
 /// (a Stop this life accepted: the work is cancelled, never picked up
-/// again), an ask's turn (its asker is answered `lost`) or a command.
-fn continued(t: &Turn) -> bool {
-    t.continues.is_none() && !t.stop_requested && t.ret.is_none() && !t.command
+/// again), an ask's turn (its asker is answered `lost`), a command, or one
+/// that `waited` on its person (a card, a question in words): their answer
+/// is its next turn. One rule for both ways a life ends a cut turn: what
+/// its own state holds (`recover`), and what the journal holds of one
+/// another life ran after the `/data` it restored (`claimed`; read once
+/// its lost end is this life's: `Effect::ReadCut`).
+fn continued(t: &Turn, waited: bool) -> bool {
+    t.continues.is_none() && !t.stop_requested && t.ret.is_none() && !t.command && !waited
 }
 
 /// Why an asked turn of an agent that left this computer never answered:
@@ -500,6 +505,10 @@ pub enum Input {
     Fenced { turn: String, prompt: String, answer: ClaimAnswer },
     /// The platform's answer to a turn's claim.
     Claimed { turn: String, answer: ClaimAnswer },
+    /// What the journal says of a cut turn another life ran
+    /// (`Effect::ReadCut`): whether it waited on its person; `false` too
+    /// when the read failed or ran past its bound.
+    CutRead { turn: String, waited: bool },
     /// The lane is done with an owed record (`Effect::Owed`): answered
     /// (appended, a replay, or refused), or given up after its tries.
     /// `kept`: the platform holds its body as this life's (appended, or a
@@ -554,6 +563,11 @@ pub enum Effect {
     /// List the agent's fragments again (it joined one: `joined`, whose
     /// members changed, so every view of it read before is stale).
     Discover { agent: String, joined: Option<String> },
+    /// Read whether a cut turn another life ran waited on its person
+    /// (`note::waited`), from its chat's `work`, and answer
+    /// `Input::CutRead`: in a task of its own, never a lane's, bounded by
+    /// `NOTE_READ_MS_MAX`, so no claim waits on it.
+    ReadCut { agent: String, identity: String, fragment: String, turn: String },
 }
 
 /// One step's result.
@@ -615,6 +629,15 @@ pub struct Engine {
     /// and the entry goes. Never written to `/data`: a life that restores
     /// the same old `/data` reads them again, and is told again.
     forgotten: BTreeMap<(String, String), (VecDeque<String>, u32)>,
+    /// Cut turns another life ran (claims answered 409) that may be
+    /// continued once their lost end is this life's, which the journal
+    /// decides then (`Effect::ReadCut`). Never written to `/data`: a life
+    /// that never posted the end continues such a turn without the read,
+    /// as before the rule read the journal.
+    unread_cuts: BTreeSet<String>,
+    /// Those whose read is out, each with the turn to continue: at most the
+    /// turns a computer holds.
+    reading_cuts: BTreeMap<String, Turn>,
     /// Per agent and chat, its menu posted there in this life (at its first
     /// turn there: `records::menu_id`). Never written to `/data`; at most
     /// one entry per followed chat of each agent.
@@ -708,6 +731,8 @@ impl Engine {
             keepalive: false,
             ended: VecDeque::new(),
             forgotten: BTreeMap::new(),
+            unread_cuts: BTreeSet::new(),
+            reading_cuts: BTreeMap::new(),
             published: BTreeSet::new(),
             relaying: BTreeMap::new(),
             noticed: VecDeque::new(),
@@ -783,7 +808,7 @@ impl Engine {
             // continued once its lost end lands as this life's (`posted`),
             // unless it waited on its person: their answer is its next turn
             let t = self.state.turns.get_mut(id).expect("listed");
-            t.continue_after = continued(t) && !t.asking && t.phase != Phase::Waiting;
+            t.continue_after = continued(t, t.asking || t.phase == Phase::Waiting);
             self.end(id, Outcome::Error(LOST.into()), Closed::Expired);
         }
         assert!(self.state.turns.values().all(|t| matches!(t.phase, Phase::Queued | Phase::Ended)), "a recovered life holds only queued and ended turns");
@@ -800,6 +825,7 @@ impl Engine {
             Input::CardRecord { agent, fragment, record, view, since, history } => self.card_record(&agent, &fragment, record, view, since, history),
             Input::Runtime { runtime, event } => self.runtime(&runtime, event),
             Input::Claimed { turn, answer } => self.claimed(&turn, answer),
+            Input::CutRead { turn, waited } => self.cut_read(&turn, waited),
             Input::Fenced { turn, prompt, answer } => self.fenced(&turn, &prompt, answer),
             Input::Posted { turn, id, kept } => self.posted(&turn, &id, kept),
             Input::Tick => self.tick(),
@@ -1502,8 +1528,33 @@ impl Engine {
             crate::ev!("turn.closed", { "turn": id });
         }
         if let Some(cut) = cut {
-            self.continue_turn(cut);
+            if self.unread_cuts.remove(id) {
+                // another life's: whether it waited on its person is the
+                // journal's to say, read off the claims' way (`ReadCut`)
+                let identity = self.agent(&cut.agent).map(|a| a.identity.clone()).unwrap_or_default();
+                assert!(self.reading_cuts.len() < limits::TURNS_OPEN_MAX, "cuts being read are bounded by the turns a computer holds");
+                self.out.push(Effect::ReadCut { agent: cut.agent.clone(), identity, fragment: cut.fragment.clone(), turn: id.to_string() });
+                self.reading_cuts.insert(id.to_string(), cut);
+            } else {
+                self.continue_turn(cut);
+            }
         }
+    }
+
+    /// What the journal says of a cut turn another life ran
+    /// (`Effect::ReadCut`): continued once unless it waited on its person.
+    /// A read that failed, or ran past its bound, says `waited: false`:
+    /// continued, as before the rule read the journal.
+    fn cut_read(&mut self, turn: &str, waited: bool) {
+        let Some(cut) = self.reading_cuts.remove(turn) else {
+            crate::ev!("cut.stale", { "turn": turn, "why": "no cut turn being read by that id" });
+            return;
+        };
+        if waited {
+            crate::ev!("turn.uncontinued", { "turn": turn, "why": "it waited on its person: their answer is its next turn" });
+            return;
+        }
+        self.continue_turn(cut);
     }
 
     /// One automatic continuation of a turn a restart cut (durability phase
@@ -1639,8 +1690,13 @@ impl Engine {
                 t.owed = vec![end.clone()];
                 // that life left it with no end of its own when this one's
                 // lands as this life's (`posted`): it was cut, and is
-                // continued once; one that life ended refuses this end (409)
-                t.continue_after = continued(t);
+                // continued once unless the journal says it waited on its
+                // person (`Effect::ReadCut`, read then: this state cannot
+                // know); one that life ended refuses this end (409)
+                t.continue_after = continued(t, false);
+                if t.continue_after {
+                    self.unread_cuts.insert(id.to_string());
+                }
                 let (agent, fragment) = (t.agent.clone(), t.fragment.clone());
                 self.dirty = true;
                 crate::ev!("turn.lost", { "turn": id, "agent": agent, "why": "another life claimed it" });

@@ -2504,6 +2504,11 @@ struct World {
     /// The ids of the posts the lane gave up after its tries (never an
     /// answer: the driver's lane tries one until the platform answers it).
     given_up: Vec<String>,
+    /// Cut turns' journal reads out (`Effect::ReadCut`): the driver's run in
+    /// tasks of their own, beside the lane; answered once the lane is
+    /// empty, unless `reads_hang`.
+    reads: VecDeque<Effect>,
+    reads_hang: bool,
     now: u64,
 }
 
@@ -2528,6 +2533,8 @@ impl World {
             conflicts_on_chat: Vec::new(),
             dropped: Vec::new(),
             given_up: Vec::new(),
+            reads: VecDeque::new(),
+            reads_hang: false,
             now: T0,
         }
     }
@@ -2604,6 +2611,8 @@ impl World {
             }
         }
         self.held.clear();
+        // a read's task dies with its life, its answer unsent
+        self.reads.clear();
     }
 
     fn step(&mut self, input: Input) {
@@ -2621,6 +2630,7 @@ impl World {
         for e in s.effects {
             match e {
                 Effect::Post { .. } | Effect::Claim { .. } | Effect::Fence { .. } | Effect::Owed { .. } => self.lane.push_back(e),
+                Effect::ReadCut { .. } => self.reads.push_back(e),
                 Effect::Runtime { command: Command::Start(ts), .. } => {
                     let claim = self.journal.work(&ts.turn, "turn.start").into_iter().next();
                     self.runs.push((self.lives, ts.turn.clone()));
@@ -2742,13 +2752,25 @@ impl World {
 
     /// Every post answered, and every record read.
     fn answer_all(&mut self) {
-        // bounded: each pass answers one post, and a world makes few
+        // bounded: each pass answers one post or one read, and a world makes few
         for _ in 0..10_000 {
-            if !self.answer_one() {
+            if !self.answer_one() && !self.read_one() {
                 return;
             }
         }
         panic!("a lane that never empties");
+    }
+
+    /// A cut turn's journal read answered, as the driver's task reads it
+    /// (`note::waited`); false when none is out, or reads hang.
+    fn read_one(&mut self) -> bool {
+        if self.reads_hang {
+            return false;
+        }
+        let Some(Effect::ReadCut { identity, fragment, turn, .. }) = self.reads.pop_front() else { return false };
+        let waited = crate::note::waited(self.journal.channel(&fragment, records::WORK), &identity, &turn);
+        self.step(Input::CutRead { turn, waited });
+        true
     }
 
     /// The lane gives up on its next claim (or a live answer's closure): it
@@ -3357,17 +3379,11 @@ fn a_question_cut_by_a_restart_is_lost_and_its_answer_runs_once() {
         w.answer_all();
         assert_eq!(w.runs_of(&asked), 1, "{wake}: never run again");
         assert_eq!(w.ends(&asked), vec![json!({ "kind": "turn.end", "turn": asked, "outcome": "error", "error": LOST })], "{wake}: ended once, as lost");
-        // phase 4: a turn this life knows waited on its person is not
-        // continued (their answer is its next turn); a state older than the
-        // turn cannot know it asked, so it is continued once
-        let c = records::continuation_id(&asked);
-        if wake == "latest" {
-            assert_eq!(w.runs_of(&c), 0, "{wake}: not continued");
-        } else {
-            assert_eq!(w.runs_of(&c), 1, "{wake}: continued once");
-            w.end(&c, Outcome::Idle);
-            w.answer_all();
-        }
+        // phase 4: a turn that waited on its person is not continued (their
+        // answer is its next turn), whatever state the next life wakes
+        // with: its own says it asked, or the journal does of one another
+        // life ran (read once its lost end is this life's: `ReadCut`)
+        assert_eq!(w.runs_of(&records::continuation_id(&asked)), 0, "{wake}: not continued");
         let answer = w.say("npub1paul", "Fernando");
         w.answer_all();
         assert!(w.tells.is_empty(), "{wake}: never told to a turn of another life");
@@ -3569,6 +3585,95 @@ fn a_cut_turn_is_continued_once() {
     assert!(!posted.effects.iter().any(|x| matches!(x, Effect::Claim { .. })), "a command is not continued: {posted:?}");
     let again = next.step(Input::Posted { turn: ran.turn.clone(), id: end, kept: true }, T0 + 3);
     assert_eq!(again, Step::default(), "answered again: nothing");
+}
+
+/// Goal (one rule for a cut turn, FIN-220): a life rolled back to before
+/// a turn's claim (another life's, its claim answered 409) continues the
+/// cut turn as a life whose own state ran it does (`recover`): one that ran
+/// is continued once; one that waited on its card, or asked in words, is
+/// not, its answer being its next turn. Method: the turn said, claimed and
+/// cut after the state the next life wakes with; the journal read once its
+/// lost end is this life's.
+#[test]
+fn a_rolled_back_life_continues_a_cut_turn_as_its_own_state_would() {
+    for (how, continued) in [("running", 1), ("waiting on its card", 0), ("asking in words", 0)] {
+        let mut w = World::new(&["juniper"]);
+        w.start(None);
+        let before = w.latest();
+        let t = w.say("npub1paul", "deploy the site");
+        w.answer_all();
+        match how {
+            "waiting on its card" => w.ask(&t),
+            "asking in words" => w.ask_in_words(&t),
+            _ => {}
+        }
+        w.answer_all();
+        w.crash(false);
+        w.start(before);
+        w.answer_all();
+        assert_eq!((w.runs_of(&t), w.ends(&t).len()), (1, 1), "{how}: never run again, ended once");
+        let c = records::continuation_id(&t);
+        assert_eq!(w.runs_of(&c), continued, "{how}");
+        if continued == 1 {
+            w.end(&c, Outcome::Idle);
+        }
+        w.settle();
+        w.check().unwrap_or_else(|e| panic!("{how}: {e}"));
+    }
+}
+
+/// Goal (FIN-220, #966): a cut turn's journal read holds nothing up. Every
+/// claim answers at once, and while the read is out (it hangs) the chat's
+/// next message is claimed and runs. Its answer, when it comes, decides the
+/// continuation: one that says the turn did not wait (a read that failed
+/// or ran past its bound says so too) continues it once, after the turn
+/// already running; a read that never answers before a crash continues
+/// nothing.
+#[test]
+fn a_cut_turns_read_holds_no_claim() {
+    let mut w = World::new(&["juniper"]);
+    w.start(None);
+    let before = w.latest();
+    let t = w.say("npub1paul", "deploy the site");
+    w.answer_all();
+    w.crash(false);
+    w.start(before);
+    w.reads_hang = true;
+    w.answer_all();
+    assert_eq!((w.ends(&t).len(), w.reads.len()), (1, 1), "its lost end posted, its read out");
+    let c = records::continuation_id(&t);
+    assert_eq!(w.runs_of(&c), 0, "nothing continued while the read is out");
+    let next = w.say("npub1paul", "and the blog");
+    w.answer_all();
+    assert_eq!(w.runs_of(&next), 1, "the chat's next message is claimed and runs meanwhile");
+    w.end(&next, Outcome::Idle);
+    w.answer_all();
+    // the read answers: not waiting (or it failed, which says the same)
+    w.reads_hang = false;
+    w.answer_all();
+    assert_eq!(w.runs_of(&c), 1, "continued once its read says it did not wait");
+    w.end(&c, Outcome::Idle);
+    w.settle();
+    w.check().unwrap();
+
+    // a read that never answers before a crash: nothing continued, then or after
+    let mut w = World::new(&["juniper"]);
+    w.start(None);
+    let before = w.latest();
+    let t = w.say("npub1paul", "deploy the site");
+    w.answer_all();
+    w.crash(false);
+    w.start(before);
+    w.reads_hang = true;
+    w.answer_all();
+    let state = w.latest();
+    w.crash(false);
+    w.reads_hang = false;
+    w.start(state);
+    w.answer_all();
+    assert_eq!(w.runs_of(&records::continuation_id(&t)), 0, "its read died with its life");
+    w.settle();
+    w.check().unwrap();
 }
 
 /// Goal (durability phase 4; Alex on #830): a turn its asker stopped is
