@@ -45,6 +45,13 @@ relevant skills. At most three children run at once. You can keep helping
 your owner while they work; their results come back into this chat.
 Inspect and test the result before you tell your owner it is done.
 
+## Past conversations
+
+`session_search` sees only this computer's other chats since it started,
+never the one you are in. For anything older (your owner's Session
+Archive, chats imported from elsewhere) and their brains, run
+`fragment search --all "<words>"`, or `--in <fragment>` for one.
+
 ## Later, and again
 
 Anything later or recurring ("every hour") is a schedule on yourself,
