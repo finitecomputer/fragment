@@ -1257,8 +1257,72 @@ fn claude_install(s: &mut Suite, api: &Api, chrome: &mut Browser, owner: &Keys, 
         ended && quiet,
         json!({ "ended": ended, "row": chrome.eval(&shell, &format!("{row}?.textContent ?? null"))?, "listed": records(api, owner, &chat, "work").iter().rev().take(4).map(|r| r["body"]["kind"].clone()).collect::<Vec<_>>() }),
     );
+    claude_offers(s, chrome, &shell, &name, shots)?;
     claude_settings(s, api, chrome, owner, &shell, &name, shots)?;
     chrome.close(shell)?;
+    Ok(())
+}
+
+/// The shell's Settings, a fresh page of it: the page before marked, then
+/// navigated, and its Settings read once a page without the mark has them
+/// (the same address again is a new document, and a look before it lands
+/// would read the old one).
+fn to_settings(chrome: &mut Browser, shell: &Page) -> Result<()> {
+    chrome.eval(shell, "(window.__leaving = true, location.href = '/settings', true)")?;
+    anyhow::ensure!(
+        chrome.until(shell, "!window.__leaving && location.pathname === '/settings' && !!document.querySelector('#settings-page .agent-setting')", TURN),
+        "Settings opened again, a fresh page of it"
+    );
+    Ok(())
+}
+
+/// What a Claude agent offers beyond its chats (cell/shell/agent-runtimes.js;
+/// AGENTS.md: the UI shows only what an agent's runtime can do): no profile
+/// and no screen in its hero's menu, its chat's ⋯, or Settings (Agents'
+/// Open, Computer's Screens), while the person's Hermes agent keeps both.
+fn claude_offers(s: &mut Suite, chrome: &mut Browser, shell: &Page, agent: &str, shots: &Path) -> Result<()> {
+    let items = |chrome: &mut Browser, trigger: &str| -> Result<Value> {
+        chrome.click(shell, trigger)?;
+        chrome.until(shell, "!document.getElementById('menu').hidden && document.querySelectorAll('#menu button').length > 0", TURN);
+        let said = chrome.eval(shell, "[...document.querySelectorAll('#menu button')].map((b) => b.textContent)")?;
+        chrome.press(shell, "Escape", false)?;
+        chrome.until(shell, "document.getElementById('menu').hidden", TURN);
+        Ok(said)
+    };
+    let hero = |a: &str| format!("#chats [data-key={}]", js(&format!("agent:{a}")));
+    let hermes = chrome.eval(shell, &format!("[...document.querySelectorAll('#chats .agent-hero')].map((h) => h.dataset.key.slice('agent:'.length)).find((a) => a !== {}) ?? ''", js(agent)))?.as_str().unwrap_or("").to_string();
+    let lacks = |v: &Value| v.as_array().is_some_and(|l| !l.is_empty() && !l.iter().any(|i| i.as_str().is_some_and(|t| t.contains("profile") || t.contains("screen"))));
+    let has = |v: &Value| ["Its profile", "Its screen"].iter().all(|t| v.as_array().is_some_and(|l| l.iter().any(|i| i == t)));
+    let claude_menu = items(chrome, &hero(agent))?;
+    let chat_menu = items(chrome, "#chat-options")?;
+    let hermes_menu = if hermes.is_empty() { Value::Null } else { items(chrome, &hero(&hermes))? };
+    chrome.click(shell, &hero(agent))?;
+    chrome.until(shell, "!document.getElementById('menu').hidden", TURN);
+    let _ = chrome.screenshot(shell, &shots.join("claude-agent-menu.png"));
+    chrome.press(shell, "Escape", false)?;
+    s.ok(
+        "a Claude agent's menu and its chat's ⋯ offer no profile and no screen, which its runtime has not; the Hermes agent's offers both",
+        lacks(&claude_menu) && lacks(&chat_menu) && has(&hermes_menu),
+        json!({ "claude": claude_menu, "its chat": chat_menu, "hermes": hermes_menu }),
+    );
+    to_settings(chrome, shell)?;
+    // its Open (`data-offer="profile"`) in Agents, its button in Computer's Screens
+    let open = |a: &str| format!("(() => {{ const n = document.querySelector({}); return !!n && !n.hidden; }})()", js(&format!("[data-offer=\"profile\"][data-offer-for={}]", js(a))));
+    let screen = |a: &str| format!("(() => {{ const n = document.querySelector({}); return !!n && !n.hidden; }})()", js(&format!("[data-screen-for={}]", js(a))));
+    let read = chrome.until(shell, &format!("{} && {}", open(&hermes), screen(&hermes)), TURN);
+    let settings = json!({
+        "claude open": chrome.eval(shell, &open(agent))?,
+        "claude screen": chrome.eval(shell, &screen(agent))?,
+        "hermes open": chrome.eval(shell, &open(&hermes))?,
+        "hermes screen": chrome.eval(shell, &screen(&hermes))?,
+    });
+    let _ = chrome.eval(shell, &format!("(document.querySelector('.agent-setting[data-agent={}]')?.scrollIntoView({{ block: 'center' }}), true)", js(agent)));
+    let _ = chrome.screenshot(shell, &shots.join("claude-agent-settings.png"));
+    s.ok(
+        "in Settings a Claude agent has no Open (its profile) and no screen to open; the Hermes agent has both",
+        read && settings == json!({ "claude open": false, "claude screen": false, "hermes open": true, "hermes screen": true }),
+        settings,
+    );
     Ok(())
 }
 
@@ -1274,7 +1338,7 @@ const CLAUDE_SAVED: &str = "Saved: it applies from its next message, within a mi
 /// taking its field away, and no tier written; no other agent shows them.
 /// Haiku only (Paul's rule for Claude); the stub's Claude runs no model.
 fn claude_settings(s: &mut Suite, api: &Api, chrome: &mut Browser, owner: &Keys, shell: &Page, agent: &str, shots: &Path) -> Result<()> {
-    chrome.eval(shell, "(location.href = '/settings', true)")?;
+    to_settings(chrome, shell)?;
     let model = format!("document.querySelector('[data-claude-model-for={agent:?}]')");
     let effort = format!("document.querySelector('[data-claude-effort-for={agent:?}]')");
     let shown = chrome.until(shell, &format!("{model}?.dataset.read === '1' && {effort}?.dataset.read === '1' && !{model}.closest('label').hidden && !{effort}.closest('label').hidden"), TURN);

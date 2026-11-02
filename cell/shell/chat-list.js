@@ -40,7 +40,7 @@ export function askedAgentOf({ open, own, agentsOf, mine, main }) {
 
 export function createChatList({ api, ui, data, selection, menus, navigation, listLive, load, invites, setInvites }) {
   const { $, el, patch, agentFace, notice } = ui;
-  const { byName, own, chats, shown, titleOf, chatTitle, homeMark, isGroup, agentOfChat, agentsOf, agents, allFragments, computer, isGuest, personId, isThread, waitingOn, renderThreads } = data;
+  const { byName, own, chats, shown, titleOf, chatTitle, homeMark, isGroup, agentOfChat, agentsOf, agents, allFragments, computer, isGuest, personId, isThread, waitingOn, renderThreads, offers } = data;
   const { current, page, getFrame } = selection;
   const { menu, menuEdge, menuOwner, openMenu, closeMenu, shareItem, archiveItem, pinItem } = menus;
   const { newChat, rename, openChat, openApp, openScreen, leaveSidebar, seg } = navigation;
@@ -261,7 +261,8 @@ export function createChatList({ api, ui, data, selection, menus, navigation, li
   const agentNow = (fragment) => ownAgents().find((a) => a.fragment === fragment) ?? (primaryAgent()?.fragment === fragment ? primaryAgent() : { fragment, identity: null });
   // An agent's menu: where it is doing something (each chat opens; read as
   // it opens, not from when its hero was drawn), a new chat with it, its
-  // name, its profile and its screen. Its hero is first scrolled up enough
+  // name, and its profile and its screen where its runtime offers them
+  // (`offers`: agent-runtimes.js). Its hero is first scrolled up enough
   // for the menu to hang below it in the window, as far as the list scrolls.
   const DOING_LISTED = 5;
   function openAgentMenu(agent, trigger) {
@@ -270,8 +271,8 @@ export function createChatList({ api, ui, data, selection, menus, navigation, li
       ...doing.map((x) => ({ icon: "agent", text: `${DOING_SAYS[x.doing]} in ${titleOf(x.chat)}`, onClick: () => { openChat(x.chat); leaveSidebar(); } })),
       ...(agent.identity && !isGuest() ? [{ icon: "newChat", text: "New chat", onClick: () => { newChat(agent.identity); leaveSidebar(); } }] : []),
       { icon: "rename", text: "Rename…", onClick: () => rename(agent.fragment) },
-      { icon: "agent", text: "Its profile", onClick: () => openApp(agent.fragment) },
-      ...(computer() ? [{ icon: "screen", text: "Its screen", onClick: () => openScreen(agent.fragment) }] : []),
+      ...(offers(agent.fragment, "profile") ? [{ icon: "agent", text: "Its profile", onClick: () => openApp(agent.fragment) }] : []),
+      ...(computer() && offers(agent.fragment, "screen") ? [{ icon: "screen", text: "Its screen", onClick: () => openScreen(agent.fragment) }] : []),
     ];
     const nav = $("chats");
     const short = items.length * 34 + 16 - (innerHeight - trigger.getBoundingClientRect().bottom - 8);
@@ -506,13 +507,14 @@ export function createChatList({ api, ui, data, selection, menus, navigation, li
     const group = isGroup(name);
     const agent = agentOfChat(name);
     // a group's agents each have a profile; a direct chat's agent has one
+    // (each where its runtime offers one: `offers`)
     const profiles = group
-      ? agentsOf(name).map((id) => agents().get(id)?.fragment).filter(Boolean).map((a) => ({ icon: "agent", text: `${titleOf(a)}'s profile`, onClick: () => openApp(a) }))
-      : agent ? [{ icon: "agent", text: "Its profile", onClick: () => openApp(agent) }] : [];
+      ? agentsOf(name).map((id) => agents().get(id)?.fragment).filter((a) => a && offers(a, "profile")).map((a) => ({ icon: "agent", text: `${titleOf(a)}'s profile`, onClick: () => openApp(a) }))
+      : agent && offers(agent, "profile") ? [{ icon: "agent", text: "Its profile", onClick: () => openApp(agent) }] : [];
     // each agent's own desktop: a group's agents each have one to pick from
     const screens = !computer() ? [] : group
-      ? agentsOf(name).map((id) => agents().get(id)?.fragment).filter(Boolean).map((a) => ({ icon: "screen", text: `${titleOf(a)}'s screen`, onClick: () => openScreen(a) }))
-      : agent ? [{ icon: "screen", text: "Its screen", onClick: () => openScreen(agent) }] : [];
+      ? agentsOf(name).map((id) => agents().get(id)?.fragment).filter((a) => a && offers(a, "screen")).map((a) => ({ icon: "screen", text: `${titleOf(a)}'s screen`, onClick: () => openScreen(a) }))
+      : agent && offers(agent, "screen") ? [{ icon: "screen", text: "Its screen", onClick: () => openScreen(agent) }] : [];
     openMenu(trigger, [
       { icon: "rename", text: "Rename…", onClick: () => rename(name) },
       shareItem(name),

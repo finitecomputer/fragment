@@ -42,7 +42,7 @@ function say(text) {
   return p;
 }
 
-export function createSettings({ api, $, seg, account, navigation, notices, sections, agents, releaseInfo, allFragments, own, freeLabel, load, named, openApp }) {
+export function createSettings({ api, $, seg, account, navigation, notices, sections, agents, releaseInfo, allFragments, own, freeLabel, load, named, openApp, markOffer }) {
   const { person, setPerson, isGuest, setGuest, setSeat, support, seatIs, switchForm, noSeatSaid } = account;
   const { at, path: SETTINGS, isOpen, enter, entered } = navigation;
   const { hideNotice, noticeCurrent, notice } = notices;
@@ -311,7 +311,8 @@ export function createSettings({ api, $, seg, account, navigation, notices, sect
     const modeled = (linked?.providers ?? []).filter((p) => p.models?.length && p.state === "set");
     if (mine.length && modeled.length) agents.append(say("Each agent runs on the platform's own model, included in your credit, unless you pick one of a provider you connected, which your account there pays for."));
     agents.append(...(mine.length ? mine.flatMap((a) => {
-      const row = el("button", "row", "Open");
+      // its profile, where its runtime offers one (agent-runtimes.js)
+      const row = markOffer(el("button", "row", "Open"), a.fragment, "profile");
       row.type = "button";
       row.onclick = () => openApp(a.fragment);
       const name = el("span", "settings-agent-name");
