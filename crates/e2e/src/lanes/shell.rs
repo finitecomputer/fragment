@@ -6340,7 +6340,8 @@ fn knowledge_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Per
     b.eval(page, &format!("(document.querySelector({}).click(), true)", js(&row)))?;
     let pane = format!("#stack .pane[data-key={}] iframe", js(&format!("app:{notes}")));
     let framed = b.until(page, &format!("!document.getElementById('search-dialog').open && (document.querySelector({})?.src ?? '').includes(encodeURIComponent('/#/' + encodeURIComponent('wiki/ferry.md')))", js(&pane)), wait);
-    let at_page = s.eventually(wait, || b.eval_in_frame(page, &notes, "document.querySelector('#content h1')?.textContent ?? ''").ok().is_some_and(|t| t.as_str() == Some("Ferry timetable")));
+    // its page is the files view (FIN-372), which draws a page in its reader
+    let at_page = s.eventually(wait, || b.eval_in_frame(page, &notes, "document.querySelector('#reader .doc h1')?.textContent ?? ''").ok().is_some_and(|t| t.as_str() == Some("Ferry timetable")));
     s.ok("a Knowledge hit pressed opens its brain in the desktop, at that page", framed && at_page, b.eval(page, &format!("document.querySelector({})?.src ?? null", js(&pane)))?);
     // the fan-out refused: Knowledge says so, alone
     b.eval(page, &refuse_once("POST", "^/api/search$"))?;
