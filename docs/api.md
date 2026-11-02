@@ -826,7 +826,11 @@ so are the limits named here.
   once and asks each fragment's supervisor at `POST /search/asked`
   (`Forwarded {query, vector?}`), which the router maps no outside path
   to. It is never embedded again, and answers as `POST …/search` (Search
-  across fragments, below).
+  across fragments, below), and, when its words leg ran, says what its
+  index knows of the question's words: `words: WordStats {words, chunks,
+  with}` (the question's words as the leg asked them, its chunks, and how
+  many hold each), and on each hit the words leg found, `words`: each
+  word's BM25 in that hit's chunk, in that order (0: not in it).
 - **Deletes follow the files**: a source named by one of the fragment's
   paths is forgotten when a move of main deletes that file, gone from every
   answer at once. A deleted chunk's words leave the index's segments at
@@ -857,11 +861,17 @@ parent brain and its sources, or a person's brains and Session Archive.
 - **The merge.** Each fragment is asked for twice the answer's length (at
   least `ASKED_MIN`, at most `RESULTS_MAX`). Cosines of answers naming the
   question's `space` and `scheme` compare, so semantic hits sort together
-  by cosine; BM25 does not (each index's statistics are its own), so
-  lexical hits interleave by each fragment's rank, the nearer meaning
-  first among equals. The two fuse by reciprocal rank (k = 60). A hit's
-  `rank` and `score` are the merged answer's, its `lexical` and `semantic`
-  its fragment's, and `fragment` names it.
+  by cosine. BM25 compares once its statistics are pooled: the lexical
+  hits of the fragments whose answers say their `words` (two or more)
+  are scored again with the IDF of their chunks and counts summed, each
+  word's score rescaled from its fragment's IDF, and ranked by that as
+  one index's, the nearer meaning first among equals. A fragment that
+  does not say them (another release's, or statistics that do not hold
+  together) interleaves by its own rank. Asked of one fragment, its
+  lexical ranks are its own. The two lists fuse by reciprocal rank (k =
+  60). A hit's `rank` and `score` are the merged answer's, its `lexical`
+  and `semantic` its fragment's, and `fragment` names it; the word
+  statistics are not in the answer.
 - The body is at most 16 KiB; the question is checked as a fragment's
   search checks it, before anything is embedded or asked.
 

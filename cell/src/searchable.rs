@@ -431,6 +431,9 @@ impl FragmentCell {
             }
             found
         };
+        // a question across fragments pools every fragment's word
+        // statistics (fragment_core::across::pool_words)
+        let words = matches!(question, Question::Given(_));
         if let (Question::Given(Some(v)), Some(s)) = (&question, &space) {
             engine::vector_of(v, s.dimensions).map_err(CellError::invalid)?;
         }
@@ -453,7 +456,7 @@ impl FragmentCell {
             _ => wire::Mode::Lexical,
         };
         let limit = q.limit.unwrap_or(wire::RESULTS_DEFAULT);
-        let ask = index::Ask { q: q.q, limit, mode, fields: q.fields, after: q.after, before: q.before, vector, space: space.clone() };
+        let ask = index::Ask { q: q.q, limit, mode, fields: q.fields, after: q.after, before: q.before, vector, space: space.clone(), words };
         let t0 = crate::js::now_ms();
         let answer: serde_json::Value = self.search_index(&scope, "search", &ask).await?;
         laps.took("index", crate::js::now_ms() - t0);
@@ -463,7 +466,11 @@ impl FragmentCell {
         for (i, h) in results.iter_mut().enumerate() {
             h["rank"] = json!(i + 1);
         }
-        let mut resp = json_response(&found(results, answer["semantic"] == true, true))?;
+        let mut found = found(results, answer["semantic"] == true, true);
+        if let Some(w) = answer.get("words") {
+            found["words"] = w.clone();
+        }
+        let mut resp = json_response(&found)?;
         if let Some(timing) = laps.server_timing() {
             resp.headers_mut().set("server-timing", &timing)?;
         }

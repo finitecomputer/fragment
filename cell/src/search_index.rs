@@ -165,13 +165,20 @@ pub(crate) struct Ask {
     /// The question's float32 vector, base64, in `space`.
     pub vector: Option<String>,
     pub space: Option<wire::Space>,
+    /// Whether to say what it knows of the question's words, for a
+    /// question across fragments (`wire::WordStats`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub words: bool,
 }
 
-/// A search's answer: its hits, and whether the meaning leg ran.
+/// A search's answer: its hits, whether the meaning leg ran, and what it
+/// knows of the question's words, if asked and its words leg ran.
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct Answer {
     pub results: Vec<wire::Hit>,
     pub semantic: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub words: Option<wire::WordStats>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -431,6 +438,15 @@ fn text(s: &str) -> SqlStorageValue {
 
 fn opt(s: Option<&str>) -> SqlStorageValue {
     s.map_or(SqlStorageValue::Null, text)
+}
+
+/// A chunk's BM25, as SQLite answered it.
+fn bm25(v: &SqlStorageValue) -> CellResult<f64> {
+    match v {
+        SqlStorageValue::Float(f) => Ok(*f),
+        SqlStorageValue::Integer(i) => Ok(*i as f64),
+        _ => Err(CellError::host("a chunk's BM25 is a number")),
+    }
 }
 
 impl Parts {
@@ -743,12 +759,7 @@ impl Parts {
         let mut found = Vec::new();
         for row in self.sql.exec(&q, binds)?.raw() {
             if let [SqlStorageValue::Integer(chunk), SqlStorageValue::Integer(section), score] = row?.as_slice() {
-                let score = match score {
-                    SqlStorageValue::Float(f) => *f,
-                    SqlStorageValue::Integer(i) => *i as f64,
-                    _ => return Err(CellError::host("a chunk's BM25 is a number")),
-                };
-                found.push(Found { section: *section, chunk: *chunk, score });
+                found.push(Found { section: *section, chunk: *chunk, score: bm25(score)? });
             }
         }
         Ok(found)
@@ -821,10 +832,11 @@ impl Parts {
         if !(1..=wire::RESULTS_MAX).contains(&a.limit) {
             return Err(CellError::invalid(format!("limit is 1 to {}", wire::RESULTS_MAX)));
         }
-        let lexical = match (a.mode, engine::match_of(&a.q)) {
-            (wire::Mode::Semantic, _) | (_, None) => vec![],
-            (_, Some(words)) => self.lexical(a, &words)?,
+        let words = match a.mode {
+            wire::Mode::Semantic => vec![],
+            _ => engine::words_of(&a.q),
         };
+        let lexical = if words.is_empty() { vec![] } else { self.lexical(a, &engine::any_of(&words))? };
         // the meaning leg runs on a question of this index's space
         let mut semantic = None;
         if let (false, Some(b64), Some(space)) = (a.mode == wire::Mode::Lexical, &a.vector, &a.space) {
@@ -834,11 +846,52 @@ impl Parts {
             }
         }
         let fused = engine::fuse(&lexical, semantic.as_deref().unwrap_or_default(), a.limit);
-        Ok(Answer { results: self.shown(&fused, &a.q)?, semantic: semantic.is_some() })
+        let stats = if a.words && !words.is_empty() { Some(self.word_stats(words)?) } else { None };
+        let scores = match &stats {
+            Some(s) => self.word_scores(&fused, &s.words)?,
+            None => vec![],
+        };
+        Ok(Answer { results: self.shown(&fused, &a.q, &scores)?, semantic: semantic.is_some(), words: stats })
     }
 
-    /// Each fused section as a hit, shown by its chunk.
-    fn shown(&self, fused: &[Fused], q: &str) -> CellResult<Vec<wire::Hit>> {
+    /// What it knows of `words`: its chunks, and how many hold each
+    /// (FTS5's own counts, as its BM25 weighs them).
+    fn word_stats(&self, words: Vec<String>) -> CellResult<wire::WordStats> {
+        let mut with = Vec::with_capacity(words.len());
+        for w in &words {
+            let n = self.ids("SELECT count(*) FROM chunk_words WHERE chunk_words MATCH ?", vec![text(&engine::phrase(w))])?;
+            with.push(n.first().and_then(|&n| u64::try_from(n).ok()).ok_or_else(|| CellError::host("a count answered no number"))?);
+        }
+        Ok(wire::WordStats { words, chunks: self.chunks()?, with })
+    }
+
+    /// The chunk of each section the words leg found (`Fused::chunk`, its
+    /// best), its score for each of `words`: FTS5's BM25 of the word alone
+    /// (0: not in it), which the question's sums.
+    fn word_scores(&self, fused: &[Fused], words: &[String]) -> CellResult<Vec<(i64, Vec<f64>)>> {
+        let by_words: Vec<i64> = fused.iter().filter(|f| f.lexical.is_some()).map(|f| f.chunk).collect();
+        // at most `RESULTS_MAX`: a look along is cheaper than a map's code
+        let mut scores: Vec<(i64, Vec<f64>)> = by_words.iter().map(|&c| (c, vec![0.0; words.len()])).collect();
+        for (i, w) in words.iter().enumerate() {
+            for part in by_words.chunks(BINDS_MAX - 1) {
+                let marks = vec!["?"; part.len()].join(", ");
+                let q = format!("SELECT rowid, -bm25(chunk_words, 4.0, 3.0, 2.0, 1.0) FROM chunk_words WHERE chunk_words MATCH ? AND rowid IN ({marks})");
+                let binds: Vec<SqlStorageValue> = std::iter::once(text(&engine::phrase(w))).chain(part.iter().map(|&c| SqlStorageValue::Integer(c))).collect();
+                for row in self.sql.exec(&q, binds)?.raw() {
+                    if let [SqlStorageValue::Integer(chunk), score] = row?.as_slice() {
+                        if let Some((_, s)) = scores.iter_mut().find(|(c, _)| c == chunk) {
+                            s[i] = bm25(score)?;
+                        }
+                    }
+                }
+            }
+        }
+        Ok(scores)
+    }
+
+    /// Each fused section as a hit, shown by its chunk, with its `words`
+    /// scores if the words leg found it.
+    fn shown(&self, fused: &[Fused], q: &str, words: &[(i64, Vec<f64>)]) -> CellResult<Vec<wire::Hit>> {
         if fused.is_empty() {
             return Ok(vec![]);
         }
@@ -872,6 +925,7 @@ impl Parts {
                 signals: [f.lexical.map(|_| "lexical"), f.semantic.map(|_| "semantic")].into_iter().flatten().map(str::to_string).collect(),
                 lexical: f.lexical.map(|p| wire::Lexical { rank: p.rank, bm25: p.score }),
                 semantic: f.semantic.map(|p| wire::Semantic { rank: p.rank, cosine: p.score }),
+                words: f.lexical.and_then(|_| words.iter().find(|(c, _)| *c == f.chunk)).map(|(_, s)| s.clone()),
             })
             .collect())
     }
