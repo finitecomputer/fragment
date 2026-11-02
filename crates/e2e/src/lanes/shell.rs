@@ -1543,12 +1543,14 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     let fits = b.eval(&page, "document.documentElement.scrollWidth <= innerWidth + 1")?;
     s.ok("on a phone it fits its width, a chat open", phone && fits == true, &fits);
     // the open chat names its agent once `__people` answers, in its
-    // composer's placeholder ("Message Reader", which no innerText holds),
-    // and the picture waits for it; the frame the shell shows names its
+    // composer's placeholder ("Message Reader", which no innerText holds;
+    // "Reader is waiting for you" while a card of theirs waits there), and
+    // the picture waits for it; the frame the shell shows names its
     // fragment (`data-fragment`), whose flat host its page is on
     let open = b.eval(&page, "[...document.querySelectorAll('#frames iframe')].find((f) => !f.hidden)?.dataset.fragment ?? null")?;
     let host = open.as_str().unwrap_or_default().to_string();
-    let names = |p: &Value| p.as_str().is_some_and(|p| p.len() > "Message ".len() && p.starts_with("Message "));
+    const WAITING: &str = " is waiting for you";
+    let names = |p: &Value| p.as_str().is_some_and(|p| (p.len() > "Message ".len() && p.starts_with("Message ")) || (p.len() > WAITING.len() && p.ends_with(WAITING)));
     let t0 = std::time::Instant::now();
     let mut placeholder = Value::Null;
     // bounded: the wait, a look every 250 ms
@@ -7628,7 +7630,7 @@ fn threads_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &
     let first_id = members.body["members"].as_array().into_iter().flatten().find(|m| m["kind"] == "agent").and_then(|m| m["principal"].as_str()).unwrap_or("").to_string();
     open_row(b, page, chat, wait)?;
     let say = |id: &str, body: Value| shell(api, session, "POST", &format!("/api/f/{chat}/channels/chat"), Some(&json!({ "id": id, "body": body })), &[]);
-    let line = "(() => { const t = [...document.querySelectorAll('#threads .thread')].pop(); return t ? { who: t.querySelector('.thread-who')?.textContent, what: t.querySelector('.thread-what')?.textContent, state: t.dataset.state, took: t.querySelector('.thread-took')?.textContent, stop: !!t.querySelector('.thread-stop') } : null; })()";
+    let line = "(() => { const t = [...document.querySelectorAll('#threads .thread')].pop(); return t ? { who: t.querySelector('.thread-who')?.textContent, what: t.querySelector('.thread-what')?.textContent, state: t.dataset.state, says: t.querySelector('.thread-state')?.textContent, took: t.querySelector('.thread-took')?.textContent, stop: !!t.querySelector('.thread-stop') } : null; })()";
     let state_is = |b: &mut Browser, state: &str| b.until(page, &format!("({line})?.state === {}", js(state)), agent_wait);
     let gone = |b: &mut Browser| b.until(page, "document.getElementById('threads').hidden && !document.querySelector('#threads .thread')", agent_wait);
     // a card of its own in the first chat (its words quote "approve"), not
@@ -7684,8 +7686,8 @@ fn threads_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &
     let waits = asked_done && b.until(page, &format!("{row}?.querySelector('.agent-doing')?.textContent === 'Waiting on Reader'"), wait);
     let _ = b.screenshot(page, &shots.join("desktop-thread.png"));
     s.ok(
-        "asked for a card: one line over the asking chat, the Reader, what was asked, Needs you while its card waits, how long, and Stop; the chat's row waits on the Reader; its pair chat leaves the list",
-        needs && seen["who"] == "Reader" && seen["what"] == "approve the plan" && seen["took"].as_str().is_some_and(|t| t.ends_with('m')) && seen["stop"] == true && unlisted && waits,
+        "asked for a card: one line over the asking chat, the Reader, what was asked, Waiting for you while its card waits (as the sidebar says it), how long, and Stop; the chat's row waits on the Reader; its pair chat leaves the list",
+        needs && seen["who"] == "Reader" && seen["what"] == "approve the plan" && seen["says"] == "Waiting for you" && seen["took"].as_str().is_some_and(|t| t.ends_with('m')) && seen["stop"] == true && unlisted && waits,
         json!({ "line": seen, "pair": pair, "unlisted": unlisted, "row": b.eval(page, &format!("{row}?.textContent ?? null"))? }),
     );
     // its line opens the pair chat (its transcript), the card there
