@@ -696,8 +696,21 @@ impl FragmentCell {
                 self.schedule().await?;
                 json!({ "pollAt": now })
             }
+            Some("hold-rows") => {
+                // while on, the alarm sends no list row (`on_alarm`): a row
+                // a list shows was sent by a request's own flush or its
+                // answer's (`after_answer`); off, the alarm is armed for
+                // what waited
+                if body["on"] == true {
+                    self.set_meta(MetaKey::TestHoldRows, "1")?;
+                } else {
+                    self.del_meta(MetaKey::TestHoldRows)?;
+                    self.schedule().await?;
+                }
+                json!({ "ok": true })
+            }
             _ => return Err(CellError::invalid("op is fail-deliveries, fail-outbox, fail-triggers, drop-effects, fail-meter-acks, fail-after-paid, forget-steps,
- hold-advances, advance-held, forget-live, age-live, drop-live, ledger, age, members, code-builds, alarm, age-outside, age-invites, meter-now, meter, forget-standing, receipt-before, cron-now, poll-now, or ended")),
+ hold-advances, advance-held, forget-live, age-live, drop-live, ledger, age, members, code-builds, alarm, age-outside, age-invites, meter-now, meter, forget-standing, receipt-before, cron-now, poll-now, hold-rows, or ended")),
         })
     }
 }

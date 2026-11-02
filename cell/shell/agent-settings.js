@@ -2,6 +2,27 @@ import { avatar } from "./agent-identity.js";
 import { providerName } from "./connections.js";
 
 export const DEFAULT_AGENT_TIER = "cheap";
+// A Claude agent's model and thinking (agent.json `claude`), as the bridge
+// reads them (images/bridge, Claude's `--model` and `--effort`): Claude
+// Code's own aliases and levels; none is Claude Code's default.
+export const CLAUDE_MODELS = [["", "Claude's default"], ["fable", "Fable"], ["opus", "Opus"], ["sonnet", "Sonnet"], ["haiku", "Haiku"]];
+export const CLAUDE_EFFORTS = [["", "Claude's default"], ["low", "Low"], ["medium", "Medium"], ["high", "High"], ["xhigh", "Extra high"], ["max", "Max"]];
+const CLAUDE_SAVED = "Saved: it applies from its next message, within a minute.";
+// agent.json's `claude`, an object or none
+export const claudeSettings = (j) => (j?.claude && typeof j.claude === "object" && !Array.isArray(j.claude) ? j.claude : {});
+// Sets `field` of agent.json `next`'s `claude` to `value` (none: Claude
+// Code's default, the field gone, and `claude` gone with its last field),
+// the other kept; whether that changed anything.
+export function claudeSet(next, field, value) {
+  const was = claudeSettings(next);
+  if ((was[field] ?? null) === value) return false;
+  const claude = { ...was };
+  if (value) claude[field] = value;
+  else delete claude[field];
+  if (Object.keys(claude).length) next.claude = claude;
+  else delete next.claude;
+  return true;
+}
 // An agent's role, at most (proto's `ROLE_MAX_CHARS`), and the agents one
 // computer runs (the cell's `AGENTS_MAX`): copies, each held to its source
 // by a host test (xtask/src/guards.rs, `the_shell_copies_its_limits`).
@@ -198,7 +219,8 @@ export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, 
   const UNREAD_SETTINGS = "Couldn't read this agent's settings, so nothing was changed. Try again.";
   // One write of an agent's agent.json at a time, each on what the one before
   // wrote: `change` sets its pick on what agent.json holds now (its tier
-  // kept), and says what changed.
+  // kept; a Claude agent's has none, the platform's tiers being Hermes'), and
+  // says what changed.
   const agentJsonWrites = new Map();
   function writeAgentJson(agent, change) {
     const written = (agentJsonWrites.get(agent) ?? Promise.resolve()).catch(() => {}).then(async () => {
@@ -206,7 +228,7 @@ export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, 
         if (e.status === 404) return {};
         throw new Error(UNREAD_SETTINGS);
       });
-      const next = { ...now, tier: now.tier ?? DEFAULT_AGENT_TIER };
+      const next = now.runtime === "claude" ? { ...now } : { ...now, tier: now.tier ?? DEFAULT_AGENT_TIER };
       const message = change(next);
       // (none: as it is already, so nothing written)
       if (message === null) return;
@@ -317,7 +339,7 @@ export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, 
     // names (Private, Standard) or a model of a provider the person
     // connected; whether there is one, with a single route, is the agent's
     // own tier's to say (once agent.json is read)
-    const picks = [roleField(a, said), ...modelPickers(a, modeled, read, write, said), ...homePicker(a, said)];
+    const picks = [roleField(a, said), ...modelPickers(a, modeled, read, write, said), ...claudePickers(a, read, write, said), ...homePicker(a, said)];
     box.append(row, ...picks, said);
     return box;
   }
@@ -435,6 +457,11 @@ export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, 
       pick.value = pick.dataset.was = value;
     };
     const show = (j) => {
+      // a Claude agent's model is Claude Code's (`claudePickers`)
+      if (j?.runtime === "claude") {
+        fastRow.hidden = deepRow.hidden = true;
+        return;
+      }
       const modes = ownModes(j);
       fill(fast, modes?.fast, j?.tier, true);
       fill(deep, modes?.deep, j?.tier, false);
@@ -489,6 +516,40 @@ export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, 
     });
     read.then(show);
     return [fastRow, deepRow];
+  }
+  // ---- a Claude agent's model and thinking (agent.json `runtime: "claude"`):
+  // its `claude.model` and `claude.effort`, Claude Code's own aliases and
+  // levels, none for Claude Code's default, the other kept as it is. Its
+  // computer reads agent.json again within a minute, and a change applies
+  // from the agent's next turn, never one under way. ----
+  function claudePickers(a, read, write, said) {
+    return [["Model", "model", CLAUDE_MODELS], ["Thinking", "effort", CLAUDE_EFFORTS]].map(([key, field, choices]) => {
+      const pick = el("select", "agent-model");
+      pick.dataset[field === "model" ? "claudeModelFor" : "claudeEffortFor"] = a.fragment;
+      named(pick, a.fragment, (t) => `${t}'s ${key === "Model" ? "model" : "thinking"}`, "aria-label");
+      for (const [value, text] of choices) pick.append(modelOption(value, text));
+      pick.disabled = true;
+      const row = settingLabel(key, pick);
+      row.hidden = true;
+      // what agent.json holds, one it names that is none of these shown as it is
+      const show = (j) => {
+        const value = claudeSettings(j)[field] ?? "";
+        if (value && ![...pick.options].some((o) => o.value === value)) pick.append(modelOption(value, value));
+        pick.value = pick.dataset.was = value;
+      };
+      read.then((j) => {
+        row.hidden = j?.runtime !== "claude";
+        if (j) show(j);
+        pick.disabled = j === null;
+        pick.dataset.read = "1";
+      });
+      pick.onchange = () => {
+        const value = pick.value;
+        const written = write((next) => claudeSet(next, field, value || null) ? `its ${key === "Model" ? "model" : "thinking"}: ${choices.find(([v]) => v === value)?.[1] ?? value}` : null);
+        savePick(pick, value, said, written, CLAUDE_SAVED);
+      };
+      return row;
+    });
   }
   return { faceControls, renderAgentFaces, agentSettings, addAgentForm, agentJson, writeAgentJson, savePick, settingLabel, modelOption, removeAgent, removable };
 }

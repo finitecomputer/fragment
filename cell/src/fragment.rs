@@ -116,9 +116,10 @@ pub struct FragmentCell {
     /// A record woke an idle search cursor, and the alarm is not armed for
     /// it yet (search.rs `log_search`; `after_answer` arms it).
     pub(crate) search_woke: Cell<bool>,
-    /// A record moved what its members' lists show (listed.rs
-    /// `listed_send`): `after_answer` sends the rows it queued, and arms
-    /// the alarm for a send that waits.
+    /// A list's row was queued (members.rs `index_change`), or a record
+    /// moved what its members' lists show (listed.rs `listed_send`):
+    /// `after_answer` sends the rows queued, and arms the alarm for a send
+    /// that waits.
     pub(crate) listed_moved: Cell<bool>,
     /// What a write leaves for after its answer is asked for, and has not
     /// begun (`later`).
@@ -382,6 +383,9 @@ pub(crate) enum MetaKey {
     /// Test fleets only: while set, an advance after a run's first step
     /// waits (`hold-advances`), naming its run in `TestAdvanceHeld`.
     TestHoldAdvances,
+    /// Test fleets only: while set, the alarm sends no list row
+    /// (`hold-rows`): what a list shows was sent by a request.
+    TestHoldRows,
     /// Test fleets only: the capability calls each start of the app facet
     /// may make (`facet-calls`), as Cloudflare spends a facet's subrequests.
     TestFacetCalls,
@@ -492,6 +496,7 @@ impl MetaKey {
             MetaKey::TestFailTriggers => "test_fail_triggers",
             MetaKey::TestDropEffects => "test_drop_effects",
             MetaKey::TestHoldAdvances => "test_hold_advances",
+            MetaKey::TestHoldRows => "test_hold_rows",
             MetaKey::TestFacetCalls => "test_facet_calls",
             MetaKey::TestAdvanceHeld => "test_advance_held",
             MetaKey::Computer => "computer",
@@ -1432,7 +1437,10 @@ impl FragmentCell {
         if let Err(e) = self.listed_send_due() {
             self.event("listed.send-failed", &e.message, json!({ "code": e.code }));
         }
-        self.flush_index().await;
+        // test fleets: `hold-rows` keeps its rows for a request to send
+        if !(self.cfg.test_hooks && self.meta(MetaKey::TestHoldRows)?.is_some()) {
+            self.flush_index().await;
+        }
         self.flush_search().await;
         self.search_forget_due().await;
         self.flush_joined().await;
@@ -1518,9 +1526,9 @@ impl FragmentCell {
             }
         }
         laps.lap("search");
-        // a record that moved what lists show: the rows it queued go now,
-        // not at the alarm's next pass (what this round leaves, and a send
-        // that waits for its gap's end, the alarm sends)
+        // a row queued, or a record that moved what lists show: the rows
+        // go now, not at the alarm's next pass (what this round leaves, and
+        // a send that waits for its gap's end, the alarm sends)
         let listed = self.listed_moved.replace(false);
         if listed {
             self.flush_index().await;
