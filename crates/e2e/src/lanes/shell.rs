@@ -7730,12 +7730,28 @@ fn threads_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &
     say("thread-2", json!({ "text": "ask reader approve once more" }))?;
     let needs = state_is(b, "you");
     let computer = shell(api, session, "GET", "/api/computers", None, &[])?.body["computers"][0]["computer"].as_str().unwrap_or("").to_string();
+    // the first agent's turns here as it is killed: its own that asked,
+    // whose card waits too. The restarted computer ends each as lost once
+    // it reaches it, after a rollback only once it has claimed again every
+    // turn before it, which may be after the Reader's is (the line's Lost):
+    // until then its card looks open, and answering it answers no one
+    let ended = |w: &[Value], turn: &Value| w.iter().any(|r| r["body"]["kind"] == "turn.end" && r["body"]["turn"] == *turn);
+    let before = work();
+    let open: Vec<Value> = before.iter().filter(|r| r["principal"] == first_id.as_str() && r["body"]["kind"] == "turn.start" && !ended(&before, &r["body"]["turn"])).map(|r| r["body"]["turn"].clone()).collect();
     let killed = super::computers::lever(api, &computer, "kill")?;
     let lost = killed.status == 200 && state_is(b, "lost");
     let _ = b.screenshot(page, &shots.join("desktop-thread-lost.png"));
-    let answered = answer_own(s)?;
+    let cut = !open.is_empty() && s.eventually(agent_wait, || {
+        let w = work();
+        open.iter().all(|t| ended(&w, t))
+    });
+    let answered = cut && answer_own(s)?;
     let then_gone = gone(b);
-    s.ok("cut by a restart, its line says Lost (never dropped) until its asker has answered in the chat, then goes", needs && lost && answered && then_gone, json!({ "needs": needs, "killed": killed.status, "lost": lost, "answered": answered, "gone": then_gone, "line": b.eval(page, line)? }));
+    s.ok(
+        "cut by a restart, its line says Lost (never dropped) until its asker has answered in the chat, then goes",
+        needs && lost && cut && answered && then_gone,
+        json!({ "needs": needs, "killed": killed.status, "lost": lost, "cut": open, "ended": cut, "answered": answered, "gone": then_gone, "line": b.eval(page, line)? }),
+    );
     // the restart's own notice ("Your computer restarted…"), seen, so the checks after it start from none
     let told = "document.querySelector('#computer-notices .computer-notice[data-kind=went_back] [data-action=seen]')";
     let notices = shell(api, session, "GET", &format!("/api/computers/{computer}"), None, &[])?.body["notices"].clone();
