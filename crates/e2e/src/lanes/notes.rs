@@ -247,9 +247,11 @@ fn hostile(s: &mut Suite, api: &Api, vault: &Vault, chrome: &mut crate::browser:
     );
     // the page's browser holds the share link's cookie
     let svg = chrome.open(&api.site_url(name, "__file?path=notes/pic.svg"))?;
-    std::thread::sleep(Duration::from_millis(500));
+    // its document whole, its script's turn come and gone (an inline
+    // script runs as its document parses)
+    let loaded = chrome.until(&svg, "document.readyState === 'complete' && document.documentElement.localName === 'svg'", Duration::from_secs(10));
     let ran = chrome.eval(&svg, "document.documentElement.getAttribute('data-ran')")?;
-    s.ok("opened directly, the SVG's script does not run", ran.is_null(), &ran);
+    s.ok("opened directly, the SVG's script does not run", loaded && ran.is_null(), &ran);
     chrome.close(svg)?;
     Ok(())
 }

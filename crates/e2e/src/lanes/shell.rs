@@ -1597,6 +1597,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     );
     phone_ui(s, api, &mut b, &page, &session, &shots)?;
     phone_sheet_still(s, &mut b, &page, &shots)?;
+    desktop_settle_ui(s, &mut b, &page)?;
     // last: it renames the person's first agent, which the checks above name
     faces_ui(s, api, &mut b, &page, &me, &chat, &shots)?;
     // and a third agent, which none of the checks above counts
@@ -2829,6 +2830,53 @@ const PHONE_SAMPLE: &str = "(() => {
 })()";
 /// Stops `PHONE_SAMPLE`, answering its frames.
 const PHONE_SAMPLED: &str = "(() => { window.__sheet.on = false; return window.__sheet.frames; })()";
+
+/// A window's motion ends where the window is placed now (viewer.js
+/// `settleAll`, Codex on #976): at a desktop's width, two windows open, the
+/// lower one closed and the window resized at once (its close finished, the
+/// other laid out again), no window is still moving; nor after a FLIP that
+/// a resize across the phone's breakpoint (760 px) interrupts.
+fn desktop_settle_ui(s: &mut Suite, b: &mut Browser, page: &Page) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    let settled = "document.getAnimations().every((a) => a.playState !== 'running' || a.effect?.getComputedTiming().iterations === Infinity)";
+    let moving = "[...document.querySelectorAll('#stack .pane')].flatMap((p) => p.getAnimations()).filter((a) => a.playState === 'running').map((a) => a.effect?.target?.dataset?.key ?? null)";
+    b.viewport(page, 1280, 800, false)?;
+    b.reload(page)?;
+    b.until(page, "!document.getElementById('layout').hidden && !!document.querySelector('#frames iframe:not([hidden])')", wait);
+    b.eval(page, "(() => { for (const p of document.querySelectorAll('#stack .pane')) [...p.querySelectorAll('.pane-head button')].pop()?.click(); if (!document.getElementById('layout').classList.contains('right-open')) document.getElementById('toggle-right').click(); return true; })()")?;
+    b.until(page, &format!("!document.querySelector('#stack .pane') && document.getElementById('layout').classList.contains('right-open') && !!document.querySelector('#apps [data-key^=\"app:\"]') && {settled}"), wait);
+    // two windows: an app's, lower, and the ways to ask, opened after it, above
+    let two = |b: &mut Browser| -> Result<bool> {
+        b.eval(page, "(document.querySelector('#apps [data-key^=\"app:\"]')?.click(), true)")?;
+        b.until(page, &format!("document.querySelectorAll('#stack .pane').length === 1 && {settled}"), wait);
+        b.eval(page, "(document.getElementById('add-app')?.click(), true)")?;
+        Ok(b.until(page, &format!("document.querySelectorAll('#stack .pane').length === 2 && {settled}"), wait))
+    };
+    let opened = two(b)?;
+    // the lower closed, then a resize in the same task: what moves after it
+    let after_resize = b.eval(page, &format!("(() => {{ const low = [...document.querySelectorAll('#stack .pane')].find((p) => p.dataset.key !== 'prompts'); [...low.querySelectorAll('.pane-head button')].pop().click(); dispatchEvent(new Event('resize')); return {{ moving: {moving}, panes: document.querySelectorAll('#stack .pane').length }}; }})()"))?;
+    s.ok(
+        "at a desktop's width, the lower of two windows closed and the window resized at once: it is gone, and no window is still moving",
+        opened && after_resize["moving"] == json!([]) && after_resize["panes"] == 1,
+        &after_resize,
+    );
+    // a FLIP begun, then a resize across the phone's breakpoint
+    b.until(page, settled, wait);
+    b.eval(page, "(() => { for (const p of document.querySelectorAll('#stack .pane')) [...p.querySelectorAll('.pane-head button')].pop()?.click(); return true; })()")?;
+    b.until(page, &format!("!document.querySelector('#stack .pane') && {settled}"), wait);
+    let reopened = two(b)?;
+    b.eval(page, "(() => { const low = [...document.querySelectorAll('#stack .pane')].find((p) => p.dataset.key !== 'prompts'); [...low.querySelectorAll('.pane-head button')].pop().click(); return true; })()")?;
+    b.viewport(page, 600, 800, true)?;
+    let crossed = b.until(page, "innerWidth <= 760 && document.getElementById('layout').classList.contains('narrow')", wait);
+    let after_cross = b.eval(page, &format!("({{ moving: {moving}, panes: document.querySelectorAll('#stack .pane').length }})"))?;
+    b.viewport(page, 1280, 800, false)?;
+    s.ok(
+        "a window's close begun at a desktop's width and the window then narrowed past the phone's breakpoint: it is gone, and no window is still moving",
+        reopened && crossed && after_cross["moving"] == json!([]) && after_cross["panes"] == 1,
+        &after_cross,
+    );
+    Ok(())
+}
 
 /// The desktop's sheet on a phone holds its wallpaper and its windows still
 /// (Paul, 2026-11-02, an iPhone: a window left offset in the sheet until it
