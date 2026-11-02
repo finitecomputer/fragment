@@ -468,7 +468,8 @@ impl FragmentCell {
             Some("alarm") => {
                 let alarm_at = self.state.storage().get_alarm().await?;
                 let poll_at = self.meta(MetaKey::PollAt)?.and_then(|at| at.parse::<i64>().ok());
-                json!({ "alarmAt": alarm_at, "pollAt": poll_at, "now": js::now_ms() })
+                // `soonMs`: no alarm is armed sooner than this after now
+                json!({ "alarmAt": alarm_at, "pollAt": poll_at, "now": js::now_ms(), "soonMs": crate::fragment::ALARM_SOON_MS })
             }
             Some("age-outside") => {
                 let ms = ms()?;

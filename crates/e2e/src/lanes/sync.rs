@@ -182,12 +182,17 @@ fn quiet_poll(s: &mut Suite, api: &Api) -> Result<()> {
     // the alarm also wakes for the request just counted: at its minute's end
     // at the latest (cell/src/meter.rs `meter_soon`), when the minute closes
     // into a meter row on its own. The alarm is read first, then the meter:
-    // a minute still open at the second read was open at the first.
+    // a minute still open at the second read was open at the first. No
+    // alarm is armed sooner than `soonMs` after it is (fragment.rs `arm`),
+    // and every arming came before the read: one in the minute's last
+    // `soonMs`, or after its end, is that much later (run 41353476592: the
+    // minute's end + 18 ms, read 1 ms after it)
     let alarm = hook("alarm", None);
     let meter = hook("meter", None);
     let open = meter["counted"].as_array().and_then(|c| c.iter().filter_map(|m| m["minute"].as_i64()).min());
+    let latest = |minute: i64| alarm["now"].as_i64().zip(alarm["soonMs"].as_i64()).map(|(now, soon)| ((minute + 1) * 60_000).max(now) + soon);
     let armed = match open {
-        Some(minute) => alarm["alarmAt"].as_i64().is_some_and(|at| at <= (minute + 1) * 60_000),
+        Some(minute) => alarm["alarmAt"].as_i64().zip(latest(minute)).is_some_and(|(at, latest)| at <= latest),
         // closed already, on its own: its minute is over
         None => crate::api::now_s() >= (requested_minute + 1) * 60,
     };

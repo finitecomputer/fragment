@@ -76,7 +76,7 @@ use crate::routed::{Credential, Routed, Signed};
 /// How long a create in progress holds its name.
 pub(crate) const CLAIM_TTL_MS: i64 = 120_000;
 /// The alarm fires no sooner than this after it is armed …
-const ALARM_SOON_MS: i64 = 50;
+pub(crate) const ALARM_SOON_MS: i64 = 50;
 /// … or than this after it failed.
 const ALARM_RETRY_MS: i64 = 30_000;
 
