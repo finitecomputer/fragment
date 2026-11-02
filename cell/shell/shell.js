@@ -254,6 +254,8 @@ const layout = createLayout({
 });
 const viewer = createViewer({
   stack: $("stack"),
+  // a phone's sheet: its windows hold still (viewer.js `animatePane`)
+  still: () => layout.narrow,
   onChange: (keys) => {
     $("viewer").classList.toggle("is-empty", !keys.length);
     $("viewer-count").hidden = !keys.length;
