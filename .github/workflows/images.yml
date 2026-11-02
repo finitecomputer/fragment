@@ -260,16 +260,21 @@ jobs:
           retention-days: 7
 
   # The required check: green when both halves of the lane are, skipped when
-  # they are (a pull request's own run, or nothing they build changed), and
-  # red otherwise, a half cancelled included.
+  # the lane is not to run (a pull request's own run, or nothing it builds
+  # changed), and red otherwise. It runs through a cancelled run (`always()`,
+  # never `!cancelled()`): a required check that skips counts as passed, so
+  # one cancelled with a half still running would let the merge through
+  # (Codex review of #981). Its check runs whatever came before it, and a
+  # half cancelled, skipped or failed is red.
   docker:
     name: docker (real Hermes)
     needs: [changes, docker-stub, docker-hermes]
-    if: ${{ !cancelled() && github.event_name != 'pull_request' && (github.event_name == 'workflow_dispatch' || needs.changes.result != 'success' || needs.changes.outputs.docker == 'true') }}
+    if: ${{ always() && github.event_name != 'pull_request' && (github.event_name == 'workflow_dispatch' || needs.changes.result != 'success' || needs.changes.outputs.docker == 'true') }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - env:
+      - if: always()
+        env:
           STUB: ${{ needs.docker-stub.result }}
           HERMES: ${{ needs.docker-hermes.result }}
         run: |
