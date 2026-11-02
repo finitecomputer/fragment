@@ -423,6 +423,15 @@ pub async fn run(cfg: Config, runtimes: Runtimes, stop: watch::Receiver<bool>) -
                     crate::ev!("keepalive", { "hold": on });
                     let _ = keep_tx.send(on);
                 }
+                Effect::ReadCut { agent, identity, fragment, turn } => {
+                    // a task of its own, bounded: no claim waits on it, and
+                    // one that does not read in time continues the turn
+                    let (api, inbox) = (api.clone(), inbox_tx.clone());
+                    tokio::spawn(async move {
+                        let waited = cut_waited(&api, &fragment, &agent, &identity, &turn).await;
+                        let _ = inbox.send(Msg::Input(Input::CutRead { turn, waited })).await;
+                    });
+                }
                 Effect::Discover { agent, joined } => {
                     if let Some(fragment) = joined {
                         shared.joined(&fragment);
@@ -1415,6 +1424,36 @@ async fn claim(api: &Api, fragment: &str, agent: &str, id: &str, body: &Value, c
         }
     }
     unreachable!("the last try returns")
+}
+
+/// Whether another life's cut turn `turn` waited on its person as that
+/// life left it (`note::waited`), from `fragment`'s `work` back from its
+/// tail to the turn's start: at most one `Budget`, within
+/// `NOTE_READ_MS_MAX` (a note's bound). One that does not read, or not in
+/// time, is taken as not waiting, and its turn is continued as before.
+async fn cut_waited(api: &Api, fragment: &str, agent: &str, me: &str, turn: &str) -> bool {
+    let read = async {
+        let mut budget = Budget::default();
+        budget.request()?;
+        let tail = api.channels(agent, fragment).await?.into_iter().find(|c| c.name == records::WORK).map_or(0, |c| c.seq);
+        let started = |rs: &[Record]| rs.iter().any(|r| r.principal == me && r.body["kind"] == "turn.start" && r.body["turn"] == turn);
+        read_back(api, agent, fragment, records::WORK, tail.saturating_add(1), started, &mut budget).await
+    };
+    match tokio::time::timeout(Duration::from_millis(limits::NOTE_READ_MS_MAX), read).await {
+        Ok(Ok((work, _))) => {
+            let waited = note::waited(&work, me, turn);
+            crate::ev!("cut.read", { "fragment": fragment, "turn": turn, "waited": waited });
+            waited
+        }
+        Ok(Err(e)) => {
+            crate::ev!("cut.unread", { "fragment": fragment, "turn": turn, "error": e.why() });
+            false
+        }
+        Err(_) => {
+            crate::ev!("cut.unread", { "fragment": fragment, "turn": turn, "error": format!("no answer in {} ms", limits::NOTE_READ_MS_MAX) });
+            false
+        }
+    }
 }
 
 /// How a post ended: on the chat (this try's, or an earlier life's under
