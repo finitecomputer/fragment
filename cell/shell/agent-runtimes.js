@@ -16,21 +16,24 @@ export function createRuntimes({ agentJson, agents, own, byName }) {
   const runtimes = new Map();
   const reading = new Set();
   // Reads the runtime of each of the person's agents not read yet; each read
-  // that lands shows or hides what it offers (`renderOffers`).
+  // that lands shows or hides what it offers (`renderOffers`). Answers once
+  // the reads it began have landed (none begun: at once).
   function loadRuntimes() {
+    const reads = [];
     for (const a of agents().values()) {
       const agent = a.fragment;
       if (!agent || runtimes.has(agent) || reading.has(agent) || !own(byName(agent) ?? {})) continue;
       reading.add(agent);
-      agentJson(agent)
+      reads.push(agentJson(agent)
         .catch((e) => (e.status === 404 ? {} : null))
         .then((j) => {
           reading.delete(agent);
           if (!j) return;
           runtimes.set(agent, typeof j.runtime === "string" ? j.runtime : "hermes");
           renderOffers();
-        });
+        }));
     }
+    return Promise.all(reads);
   }
   // Whether `agent` offers `what` ("profile", "screen").
   function offers(agent, what) {
