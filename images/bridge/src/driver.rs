@@ -567,8 +567,9 @@ fn reread(api: &Api, simplex: bool, names: &RuntimeNames, inbox: &mpsc::Sender<M
 }
 
 /// Each agent's runtime as its `agent.json` named it last (`None`: it names
-/// none), by agent fragment: at most the agents the computer lists.
-pub type RuntimeNames = Arc<Mutex<HashMap<String, Option<String>>>>;
+/// none), and what it asked of Claude Code, by agent fragment: at most the
+/// agents the computer lists.
+pub type RuntimeNames = Arc<Mutex<HashMap<String, (Option<String>, crate::runtime::ClaudeSettings)>>>;
 
 /// The computer's agents, each with the runtime its `agent.json` names
 /// (`runtime::named`; no file names none): every agent's file read again
@@ -586,15 +587,19 @@ pub async fn with_runtimes(api: &Api, mut agents: Vec<Agent>, names: &RuntimeNam
     let mut named = names.lock().expect("runtime names");
     for (agent, r) in read {
         let now = match r {
-            Ok(b) => crate::runtime::named(Some(&b)),
-            Err(e) if e.status() == Some(404) => None,
+            Ok(b) => (crate::runtime::named(Some(&b)), crate::runtime::ClaudeSettings::of(Some(&b))),
+            Err(e) if e.status() == Some(404) => (None, Default::default()),
             Err(e) => {
                 crate::ev!("runtime.unread", { "agent": agent, "error": e.to_string() });
                 continue;
             }
         };
-        if named.get(&agent) != Some(&now) {
-            crate::ev!("agent.runtime", { "agent": agent, "runtime": now.as_deref().unwrap_or(crate::runtime::DEFAULT) });
+        let was = named.get(&agent);
+        if was.map(|w| &w.0) != Some(&now.0) {
+            crate::ev!("agent.runtime", { "agent": agent, "runtime": now.0.as_deref().unwrap_or(crate::runtime::DEFAULT) });
+        }
+        if was.map(|w| &w.1) != Some(&now.1) {
+            crate::ev!("agent.claude", { "agent": agent, "model": now.1.model, "effort": now.1.effort });
         }
         named.insert(agent, now);
     }
@@ -602,7 +607,7 @@ pub async fn with_runtimes(api: &Api, mut agents: Vec<Agent>, names: &RuntimeNam
     let listed = agents.len();
     agents.retain(|a| named.contains_key(&a.fragment));
     for a in &mut agents {
-        a.runtime = named[&a.fragment].clone();
+        (a.runtime, a.claude) = named[&a.fragment].clone();
     }
     let unread = listed - agents.len();
     (agents, unread)
@@ -2056,7 +2061,7 @@ mod tests {
         assert_eq!(for_simplex(records::CHAT, &reply(true), 0), None, "interim: the chat's alone");
         assert_eq!(for_simplex(records::CHAT, &records::reply("", "t1", &[], 0, false), 1).as_deref(), Some(""), "a file alone goes");
         assert_eq!(for_simplex(records::CHAT, &records::reply(" ", "t1", &[], 0, false), 0), None, "nothing said");
-        let agent = crate::runtime::Agent { fragment: "juniper--k3x9".into(), identity: "npub1juniper".into(), name: "juniper".into(), owner: "npub1paul".into(), credentials: vec![], key: None, runtime: None };
+        let agent = crate::runtime::Agent { fragment: "juniper--k3x9".into(), identity: "npub1juniper".into(), name: "juniper".into(), owner: "npub1paul".into(), credentials: vec![], key: None, runtime: None, claude: Default::default() };
         assert_eq!(for_simplex(records::CHAT, &records::relayed_message("hi from my phone", &agent, records::VIA_SIMPLEX, &[]), 0), None, "its owner's own, from the phone");
         let option = |id: &str, label: &str, words: bool| records::PromptOption { id: id.into(), label: label.into(), style: None, words, computer: false };
         let card = records::turn_prompt("t1", "c-1", "What should I plant?", &[option("c0", "Basil", false), option("c1", "Mint", false), option("other", "Something else", true)], "npub1paul", 1);
@@ -2095,7 +2100,7 @@ mod tests {
     /// own; anything else the agent posted is its own.
     #[test]
     fn a_relayed_message_quoted_is_its_owners() {
-        let agent = crate::runtime::Agent { fragment: "juniper--k3x9".into(), identity: "npub1juniper".into(), name: "juniper".into(), owner: "npub1paul".into(), credentials: vec![], key: None, runtime: None };
+        let agent = crate::runtime::Agent { fragment: "juniper--k3x9".into(), identity: "npub1juniper".into(), name: "juniper".into(), owner: "npub1paul".into(), credentials: vec![], key: None, runtime: None, claude: Default::default() };
         let relayed = records::relayed_message("hi from my phone", &agent, records::VIA_SIMPLEX, &[]);
         assert!(!own_words("npub1juniper", &relayed, &agent), "its owner's, relayed");
         assert!(own_words("npub1juniper", &json!({ "text": "a reply", "turn": "t1" }), &agent));
