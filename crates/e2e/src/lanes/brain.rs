@@ -498,31 +498,52 @@ pub fn brain(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("and a hit opens its page in the files view", opened, chrome.eval(&tab, "document.getElementById('reader')?.innerText.slice(0, 200) ?? ''")?);
 
     // a view asked later wins, whichever answer comes first (FIN-372's
-    // review): the page's fetch held where a test says, then let go
-    chrome.eval(&tab, "(() => { window.__held = []; const real = window.fetch; window.fetch = (u, o) => window.__hold?.test(String(u)) ? new Promise((done, fail) => window.__held.push(() => real(u, o).then(done, fail))) : real(u, o); return true; })()")?;
+    // review). The page's fetch is held where a test says (`__hold`), then
+    // let go. A held answer's body, once read, counts `__consumed`, and the
+    // view's continuation after that read runs in the same turn, so an
+    // evaluation after the count sees all it did: no clock to wait on.
+    chrome.eval(&tab, "(() => { window.__held = []; window.__consumed = 0; const real = window.fetch; const counted = (r) => { for (const m of ['json', 'arrayBuffer', 'text']) { const read = r[m].bind(r); r[m] = () => read().finally(() => window.__consumed++); } return r; }; window.fetch = (u, o) => window.__hold?.test(String(u)) ? new Promise((done, fail) => window.__held.push(() => real(u, o).then((r) => done(counted(r)), fail))) : real(u, o); return true; })()")?;
     let let_go = "(window.__held.splice(0).forEach((go) => go()), true)";
     let ask = |q: &str| format!("(() => {{ window.__hold = null; const q = document.getElementById('q'); q.value = {}; q.dispatchEvent(new Event('input', {{ bubbles: true }})); return true; }})()", serde_json::to_string(q).unwrap_or_default());
+    let solar_read = "(window.__hold = /__file\\?path=garden%2Fwiki%2Fsolar/, true)";
+    let hash = |h: &str| -> Result<String> { Ok(format!("(() => {{ location.hash = {}; return true; }})()", serde_json::to_string(h)?)) };
     // a search out, then a file opened: the search's late answer leaves the file
     chrome.eval(&tab, "(window.__hold = /__search/, true)")?;
     chrome.eval(&tab, &ask("lithium").replace("window.__hold = null; ", ""))?;
     let search_held = chrome.until(&tab, "window.__held.length === 1", wait);
-    chrome.eval(&tab, &format!("(() => {{ window.__hold = null; location.hash = {}; return true; }})()", serde_json::to_string(&format!("#/{NOTE}"))?))?;
+    chrome.eval(&tab, "(window.__hold = null, true)")?;
+    chrome.eval(&tab, &hash(&format!("#/{NOTE}"))?)?;
     let file_shown = chrome.until(&tab, "document.querySelector('#reader .doc h1')?.textContent === 'Roof survey'", wait);
     chrome.eval(&tab, let_go)?;
-    std::thread::sleep(Duration::from_millis(800));
+    let search_answered = chrome.until(&tab, "window.__consumed === 1", wait);
     let file_stays = chrome.eval(&tab, "document.querySelector('#reader .doc h1')?.textContent === 'Roof survey' && !document.querySelector('.hits')")? == true;
     // a file being read, then a search: the file's late answer leaves the results
-    chrome.eval(&tab, &format!("(() => {{ window.__hold = /__file\\?path=garden%2Fwiki%2Fsolar/; location.hash = {}; return true; }})()", serde_json::to_string(&format!("#/{SOLAR}"))?))?;
+    chrome.eval(&tab, solar_read)?;
+    chrome.eval(&tab, &hash(&format!("#/{SOLAR}"))?)?;
     let read_held = chrome.until(&tab, "window.__held.length === 1", wait);
     chrome.eval(&tab, &ask("turbine"))?;
     let hits_shown = chrome.until(&tab, "document.querySelectorAll('.hit').length > 0", wait);
     chrome.eval(&tab, let_go)?;
-    std::thread::sleep(Duration::from_millis(800));
+    let read_answered = chrome.until(&tab, "window.__consumed === 2", wait);
     let hits_stay = chrome.eval(&tab, "document.querySelectorAll('.hit').length > 0 && !document.querySelector('#reader .doc')")? == true;
+    // a section's file still being read, chosen again: it is read again for
+    // the newer view and drawn, whatever the first read's answer does later
+    chrome.eval(&tab, solar_read)?;
+    chrome.eval(&tab, &hash(&format!("#/{SOLAR}#Inverters"))?)?;
+    let first_held = chrome.until(&tab, "window.__held.length === 1", wait);
+    chrome.eval(&tab, "(window.__hold = null, window.dispatchEvent(new HashChangeEvent('hashchange')), true)")?;
+    let drawn = chrome.until(&tab, "document.querySelector('#reader .doc h1')?.textContent === 'Solar panels'", wait);
+    chrome.eval(&tab, let_go)?;
+    let first_answered = chrome.until(&tab, "window.__consumed === 3", wait);
+    let stays_drawn = chrome.eval(&tab, "document.querySelector('#reader .doc h1')?.textContent === 'Solar panels'")? == true;
     s.ok(
-        "a view asked later wins, whichever answer comes first: a search answered after a file was opened leaves the file; a file read answered after a search leaves its results",
-        search_held && file_shown && file_stays && read_held && hits_shown && hits_stay,
-        json!({ "search_held": search_held, "file_shown": file_shown, "file_stays": file_stays, "read_held": read_held, "hits_shown": hits_shown, "hits_stay": hits_stay }),
+        "a view asked later wins, whichever answer comes first: a search answered after a file was opened leaves the file; a file read answered after a search leaves its results; a section's file chosen again while still read is drawn",
+        search_held && file_shown && search_answered && file_stays && read_held && hits_shown && read_answered && hits_stay && first_held && drawn && first_answered && stays_drawn,
+        json!({
+            "search": [search_held, file_shown, search_answered, file_stays],
+            "read": [read_held, hits_shown, read_answered, hits_stay],
+            "again": [first_held, drawn, first_answered, stays_drawn],
+        }),
     );
 
     // a page an agent wrote is data, whatever a model put in it (audit H2:

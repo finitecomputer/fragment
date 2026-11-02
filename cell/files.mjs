@@ -131,6 +131,7 @@ let searching = false;         // a search's hits are in the reader
 let typing = null;             // a search waiting for the typing to stop
 let inflight = false;          // a search asked and not answered yet
 let drawn = null;              // the open note as drawn ({path, text}), to draw again
+let ready = null;              // the file whose view is in the reader, done (not still being read)
 
 // ---- the page ----
 
@@ -368,6 +369,7 @@ async function open(path, anchor, keep) {
   const top = keep ? reader.scrollTop : 0;
   current = path;
   drawn = null;
+  ready = null;
   const f = index.get(path);
   bar(path, f);
   mark();
@@ -407,6 +409,7 @@ async function open(path, anchor, keep) {
   }
   reader.replaceChildren(view);
   reader.scrollTop = top;
+  ready = path;
   if (anchor) reach(anchor);
 }
 
@@ -453,7 +456,9 @@ async function go() {
   const path = decode(p) || (await first());
   if (n !== nav) return;
   if (!path) return landing();
-  if (path === current && anchor) return reach(decode(anchor));
+  // the file in the reader already, drawn: only its heading to reach. One
+  // still being read is read again for this view (its read is dropped)
+  if (path === ready && path === current && anchor) return reach(decode(anchor));
   open(path, anchor && decode(anchor));
 }
 
