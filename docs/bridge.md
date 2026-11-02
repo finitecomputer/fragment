@@ -152,7 +152,11 @@ A turn a restart cut is picked up again by itself, once, so nobody types
 - **Not continued**: an ask's turn (its asker is answered `lost`), a
   command, a turn its asker stopped (a Stop is never undone), one waiting
   on its person (their answer is its next turn), and a continuation: a
-  cut continuation is told to the turn after it, as any cut turn is.
+  cut continuation is told to the turn after it, as any cut turn is. One
+  rule (`engine.rs`, `continued`): a turn this life ran is judged by its
+  state, and one another life ran after the `/data` this life restored
+  (its claim answered 409) by `work`: a card still open, or a
+  `turn.asked` (`note::waited`).
 - **What it is**: a turn queued in the cut turn's place, with its cause,
   asker and depth, its id the cut turn's `records::continuation_id`, so
   its claim makes it one run in any life. The computer says it

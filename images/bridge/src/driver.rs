@@ -1352,7 +1352,10 @@ async fn work(lanes: Lanes, fragment: String, lane: Arc<Lane>) {
                 }
             }
             Job::Claim { agent, turn, id, body } => {
-                let answer = claim(&api, &fragment, &agent, &id, &body, Some(&claims), stop.clone()).await;
+                let answer = match claim(&api, &fragment, &agent, &id, &body, Some(&claims), stop.clone()).await {
+                    ClaimAnswer::Theirs { .. } => ClaimAnswer::Theirs { waited: waited(&api, &fragment, &agent, body["agent"].as_str().unwrap_or(""), &turn).await },
+                    answer => answer,
+                };
                 // A closed inbox is an engine that has stopped.
                 let _ = claims.inbox.send(Msg::Input(Input::Claimed { turn, answer })).await;
             }
@@ -1391,7 +1394,7 @@ async fn claim(api: &Api, fragment: &str, agent: &str, id: &str, body: &Value, c
             }
             Err(e) if e.status() == Some(409) => {
                 crate::ev!("claim.taken", { "fragment": fragment, "id": id, "why": "another life's claim holds the id" });
-                return ClaimAnswer::Theirs;
+                return ClaimAnswer::Theirs { waited: false };
             }
             Err(e) if e.gone() => {
                 // Not the agent's to post in (it left, or is held below
@@ -1415,6 +1418,33 @@ async fn claim(api: &Api, fragment: &str, agent: &str, id: &str, body: &Value, c
         }
     }
     unreachable!("the last try returns")
+}
+
+/// Whether another life's turn `turn` waited on its person as that life
+/// left it (`note::waited`), from `fragment`'s `work` back from its tail to
+/// the turn's start, at most one `Budget`: whether this life continues it
+/// once its lost end is this life's (engine.rs, `continued`). Read only
+/// for a claim answered 409, after a rollback of `/data`; one that does not
+/// read is taken as not waiting, and continued as before.
+async fn waited(api: &Api, fragment: &str, agent: &str, me: &str, turn: &str) -> bool {
+    let read = async {
+        let mut budget = Budget::default();
+        budget.request()?;
+        let tail = api.channels(agent, fragment).await?.into_iter().find(|c| c.name == records::WORK).map_or(0, |c| c.seq);
+        let started = |rs: &[Record]| rs.iter().any(|r| r.principal == me && r.body["kind"] == "turn.start" && r.body["turn"] == turn);
+        read_back(api, agent, fragment, records::WORK, tail.saturating_add(1), started, &mut budget).await
+    };
+    match read.await {
+        Ok((work, _)) => {
+            let waited = note::waited(&work, me, turn);
+            crate::ev!("claim.waited", { "fragment": fragment, "turn": turn, "waited": waited });
+            waited
+        }
+        Err(e) => {
+            crate::ev!("claim.unread", { "fragment": fragment, "turn": turn, "error": e.why() });
+            false
+        }
+    }
 }
 
 /// How a post ended: on the chat (this try's, or an earlier life's under
