@@ -1234,7 +1234,63 @@ fn claude_install(s: &mut Suite, api: &Api, chrome: &mut Browser, owner: &Keys, 
         again && signed && answered && !kept,
         json!({ "again": again, "signed": signed, "answered": answered, "kept": kept, "messages": chrome.eval(&page, "document.getElementById('messages').innerText")? }),
     );
+    claude_settings(s, api, chrome, owner, &shell, &name, shots)?;
     chrome.close(shell)?;
+    Ok(())
+}
+
+/// What a Claude agent's Model or Thinking says once saved (agent-settings.js
+/// `CLAUDE_SAVED`): its computer reads agent.json again within a minute, and
+/// a change applies from its next turn.
+const CLAUDE_SAVED: &str = "Saved: it applies from its next message, within a minute.";
+
+/// Settings › Agents for a Claude agent (agent.json `runtime: "claude"`): a
+/// Model row (Claude's default, Fable, Opus, Sonnet, Haiku) and a Thinking
+/// row (Claude's default, Low … Max) in place of the platform's routes,
+/// written to agent.json `claude`, each keeping the other, Claude's default
+/// taking its field away, and no tier written; no other agent shows them.
+/// Haiku only (Paul's rule for Claude); the stub's Claude runs no model.
+fn claude_settings(s: &mut Suite, api: &Api, chrome: &mut Browser, owner: &Keys, shell: &Page, agent: &str, shots: &Path) -> Result<()> {
+    chrome.eval(shell, "(location.href = '/settings', true)")?;
+    let model = format!("document.querySelector('[data-claude-model-for={agent:?}]')");
+    let effort = format!("document.querySelector('[data-claude-effort-for={agent:?}]')");
+    let shown = chrome.until(shell, &format!("{model}?.dataset.read === '1' && {effort}?.dataset.read === '1' && !{model}.closest('label').hidden && !{effort}.closest('label').hidden"), TURN);
+    let platform = chrome.eval(shell, &format!("[...document.querySelectorAll('[data-model-for={agent:?}], [data-deep-model-for={agent:?}]')].every((p) => p.closest('.agent-model-label').hidden)"))?;
+    let others = chrome.eval(shell, &format!("[...document.querySelectorAll('[data-claude-model-for]')].filter((p) => p.dataset.claudeModelFor !== {agent:?}).every((p) => p.closest('label').hidden)"))?;
+    let options = chrome.eval(shell, &format!("[{model}, {effort}].map((p) => p && [...p.options].map((o) => [o.value, o.textContent]))"))?;
+    s.ok(
+        "a Claude agent's settings offer Claude Code's models and thinking in place of the platform's routes, and no other agent's do",
+        shown && platform == true && others == true
+            && options == json!([
+                [["", "Claude's default"], ["fable", "Fable"], ["opus", "Opus"], ["sonnet", "Sonnet"], ["haiku", "Haiku"]],
+                [["", "Claude's default"], ["low", "Low"], ["medium", "Medium"], ["high", "High"], ["xhigh", "Extra high"], ["max", "Max"]],
+            ]),
+        json!({ "shown": shown, "platform hidden": platform, "others hidden": others, "options": options }),
+    );
+    let pick = |chrome: &mut Browser, which: &str, value: &str| -> Result<bool> {
+        chrome.eval(shell, &format!("(() => {{ const p = {which}; p.value = {value:?}; p.dispatchEvent(new Event('change')); return true; }})()"))?;
+        Ok(chrome.until(shell, &format!("{which}?.dataset.saved === {value:?}"), TURN))
+    };
+    let agent_json = || api.signed(owner, "GET", &format!("/api/f/{agent}/file?path=agent.json"), None).map(|r| r.body).unwrap_or(Value::Null);
+    let said = format!("document.querySelector('.agent-setting[data-agent={agent:?}] .agent-model-said')?.textContent ?? null");
+    let set = pick(chrome, &model, "haiku")? && pick(chrome, &effort, "low")?;
+    let both = agent_json();
+    let _ = chrome.eval(shell, &format!("({model}.closest('.agent-setting').scrollIntoView({{ block: 'center' }}), true)"));
+    let _ = chrome.screenshot(shell, &shots.join("claude-settings.png"));
+    s.ok(
+        "picked, Haiku and Low are its agent.json's `claude`, each kept beside the other, no tier written, and it says when they apply",
+        set && both["runtime"] == "claude" && both["claude"] == json!({ "model": "haiku", "effort": "low" }) && both.get("tier").is_none() && chrome.eval(shell, &said)? == CLAUDE_SAVED,
+        json!({ "agent.json": both, "said": chrome.eval(shell, &said)? }),
+    );
+    let model_default = pick(chrome, &model, "")?;
+    let thinking_only = agent_json();
+    let effort_default = pick(chrome, &effort, "")?;
+    let neither = agent_json();
+    s.ok(
+        "Claude's default takes its field away, the other kept, and the last takes `claude` with it",
+        model_default && effort_default && thinking_only["claude"] == json!({ "effort": "low" }) && neither.get("claude").is_none() && neither["runtime"] == "claude",
+        json!({ "after the model's default": thinking_only, "after both": neither }),
+    );
     Ok(())
 }
 
