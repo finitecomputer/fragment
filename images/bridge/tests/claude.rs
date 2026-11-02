@@ -243,6 +243,12 @@ impl Scenario {
         self.with(|w| w.bodies(&self.chat, "work", "turn.end"))
     }
 
+    /// Each `claude` process's arguments, in the order they started.
+    fn started(&self) -> Vec<Vec<String>> {
+        let heard = std::fs::read_to_string(self.bin.with_file_name("heard.jsonl")).unwrap_or_default();
+        heard.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()).filter_map(|v| v["args"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())).collect()
+    }
+
     /// Each message Claude Code was given, in order, as fake-claude heard it.
     fn heard(&self) -> Vec<String> {
         let heard = std::fs::read_to_string(self.bin.with_file_name("heard.jsonl")).unwrap_or_default();
@@ -271,6 +277,31 @@ async fn a_reply() {
     s.ended(1, "the turn's end").await;
     assert!(s.replies().iter().any(|r| r.to_lowercase().contains("hello")), "{:?}", s.replies());
     assert_eq!(s.ends()[0]["outcome"], "idle");
+    bridge.stop().await;
+    s.done();
+}
+
+/// Goal (Paul, 2026-11-02): an agent whose `agent.json` asks Claude Code
+/// for a model and an effort (`"claude": {"model": "haiku", "effort":
+/// "low"}`) has its session started with them, as Claude Code's own flags,
+/// over the runtime's model, and the real `claude` answers on them
+/// (recorded with Haiku alone). Its `model` and `tier` for Hermes are not
+/// read.
+#[tokio::test]
+async fn an_agents_claude_settings_reach_claude_code() {
+    let s = Scenario::new("settings").await;
+    s.fake.with(|w| {
+        w.fragments.get_mut("juniper--k3x9").expect("its fragment").files.insert("agent.json".into(), bytes::Bytes::from(r#"{"runtime":"claude","tier":"cheap","model":"glm-5-3-flash","claude":{"model":"haiku","effort":"low"}}"#));
+    });
+    let bridge = s.start();
+    s.following().await;
+    s.say(json!({ "text": "Reply with exactly the word: hello" }));
+    s.ended(1, "the turn's end").await;
+    assert!(s.replies().iter().any(|r| r.to_lowercase().contains("hello")), "{:?}", s.replies());
+    assert_eq!(s.ends()[0]["outcome"], "idle");
+    let started = s.started();
+    let flag = |f: &str| started.first().and_then(|a| a.iter().position(|x| x == f).and_then(|i| a.get(i + 1))).cloned();
+    assert_eq!((flag("--model").as_deref(), flag("--effort").as_deref()), (Some("haiku"), Some("low")), "{started:?}");
     bridge.stop().await;
     s.done();
 }
@@ -619,6 +650,112 @@ fn logging_in(bin: &Path) -> usize {
     let mut login = bin.as_os_str().as_encoded_bytes().to_vec();
     login.extend_from_slice(b"\0auth\0login\0");
     std::fs::read_dir("/proc").map(|d| d.filter_map(Result::ok).filter_map(|e| std::fs::read(e.path().join("cmdline")).ok()).filter(|c| *c == login).count()).unwrap_or(0)
+}
+
+/// Goal (Paul, 2026-11-02): each Claude agent's sessions run on the model
+/// and effort its `agent.json` asks for (`claude.model`, `claude.effort`),
+/// passed as Claude Code's own `--model` and `--effort`; its model else the
+/// runtime's (`BRIDGE_CLAUDE_MODEL`), its effort else none. Method: the
+/// runtime driven directly, each turn's agent as the driver last read it,
+/// and the arguments each `claude` process started with. Replay: the same
+/// settings again, the same process answers. Changed: the next turn stops
+/// the process its session idles in and resumes the session with the new
+/// flags; back to none, neither flag of the agent's. (Invalid values never
+/// reach a flag: runtime::tests, `ClaudeSettings::of`.)
+#[tokio::test]
+async fn an_agents_model_and_effort_are_its_sessions_flags() {
+    use fragment_bridge::runtime::{Agent, ClaudeSettings, Command, Event, Runtime, RuntimeIo, TurnStart};
+    let dir = support::dir("claude-flags");
+    let bin = dir.join("bin/claude");
+    std::fs::create_dir_all(bin.parent().expect("its bin")).expect("its bin");
+    std::fs::copy(env!("CARGO_BIN_EXE_fake-claude"), &bin).expect("fake-claude copied");
+    std::fs::write(bin.with_file_name("fake-claude.json"), r#"{"mode":"echo"}"#).expect("its mode");
+    let claude = Claude {
+        config: ClaudeConfig {
+            bin: bin.clone(),
+            home: dir.clone(),
+            config_dir: dir.join("claude-config"),
+            work_dir: dir.join("work"),
+            state_dir: dir.join("claude-state"),
+            model: Some("claude-haiku-5-5".into()),
+            idle: Duration::from_secs(60),
+            drain: Duration::from_millis(fragment_bridge::runtime::claude::DRAIN_MS_DEFAULT),
+            run_as: None,
+            installer: None,
+        },
+    };
+    let (to_runtime, commands) = tokio::sync::mpsc::channel(8);
+    let (events, mut from_runtime) = tokio::sync::mpsc::channel(64);
+    let (stop, shutdown) = tokio::sync::watch::channel(false);
+    let (_hold, held) = tokio::sync::watch::channel(false);
+    let running = tokio::spawn(Box::new(claude).run(RuntimeIo { commands, events, shutdown, held, unquiet: Arc::new(std::sync::atomic::AtomicUsize::new(0)) }));
+    let settings = |model: Option<&str>, effort: Option<&str>| ClaudeSettings { model: model.map(str::to_string), effort: effort.map(str::to_string) };
+    let mut replies = Vec::new();
+    for (n, claude) in [settings(Some("haiku"), Some("low")), settings(Some("haiku"), Some("low")), settings(None, Some("high")), settings(None, None)].into_iter().enumerate() {
+        let agent = Agent { fragment: "juniper--k3x9".into(), identity: "npub1juniper".into(), name: "juniper".into(), owner: "npub1paul".into(), credentials: vec![], key: None, runtime: Some("claude".into()), claude };
+        let id = format!("t{n}");
+        let ts = TurnStart {
+            turn: id.clone(),
+            agent,
+            fragment: "talk--k3x9".into(),
+            chat_name: "talk".into(),
+            seq: n as u64 + 1,
+            asker: "npub1paul".into(),
+            asker_name: "paul".into(),
+            text: format!("message {n}"),
+            attachments: vec![],
+            attachments_in: None,
+            late: None,
+            files: vec![],
+            routine: false,
+            claim_seq: None,
+            note: None,
+            forgotten: vec![],
+            forgotten_more: 0,
+            command: false,
+            reply_to: None,
+            quote: None,
+            simplex: false,
+            continues: None,
+            age: None,
+        };
+        to_runtime.send(Command::Start(Box::new(ts))).await.expect("the runtime runs");
+        // bounded by `wait()`: its events until its end
+        let ended = tokio::time::timeout(Duration::from_millis(wait()), async {
+            while let Some(e) = from_runtime.recv().await {
+                match e {
+                    Event::Reply { turn, text, .. } if turn == id => replies.push(text),
+                    Event::End { turn, outcome } if turn == id => return Some(outcome),
+                    _ => {}
+                }
+            }
+            None
+        })
+        .await;
+        assert!(matches!(ended, Ok(Some(fragment_bridge::records::Outcome::Idle))), "turn {n}: {ended:?}");
+    }
+    let _ = stop.send(true);
+    drop(to_runtime);
+    let _ = running.await;
+
+    // each process's arguments, as it started
+    let heard = std::fs::read_to_string(bin.with_file_name("heard.jsonl")).unwrap_or_default();
+    let started: Vec<Vec<String>> = heard.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()).filter_map(|v| v["args"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())).collect();
+    let flag = |args: &[String], f: &str| args.iter().position(|a| a == f).and_then(|i| args.get(i + 1)).cloned();
+    let flags: Vec<(Option<String>, Option<String>, bool)> = started.iter().map(|a| (flag(a, "--model"), flag(a, "--effort"), a.iter().any(|x| x == "--resume"))).collect();
+    assert_eq!(
+        flags,
+        vec![
+            (Some("haiku".into()), Some("low".into()), false),
+            // the same settings: the same process answered the second turn
+            (Some("claude-haiku-5-5".into()), Some("high".into()), true),
+            (Some("claude-haiku-5-5".into()), None, true),
+        ],
+        "its own model and effort; then the runtime's model and its own effort; then neither of its own, each change a process resuming the session: {started:?}"
+    );
+    let session = |a: &[String]| flag(a, "--session-id").or_else(|| flag(a, "--resume"));
+    assert!(started.iter().all(|a| session(a) == session(&started[0])), "one session throughout: {started:?}");
+    assert_eq!(replies.len(), 4, "every turn answered: {replies:?}");
 }
 
 /// How many of this scenario's `claude` processes run now (Linux's /proc).

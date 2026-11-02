@@ -17,7 +17,7 @@ const T0: u64 = 1_000_000;
 const LIFE: &str = "0123456789abcdef0123456789abcdef";
 
 fn agent(label: &str) -> Agent {
-    Agent { fragment: format!("{label}--k3x9"), identity: format!("npub1{label}"), name: label.to_string(), owner: "npub1paul".into(), credentials: vec![], key: None, runtime: None }
+    Agent { fragment: format!("{label}--k3x9"), identity: format!("npub1{label}"), name: label.to_string(), owner: "npub1paul".into(), credentials: vec![], key: None, runtime: None, claude: Default::default() }
 }
 
 /// What the default runtime said (`runtime::DEFAULT`, the one agents that
