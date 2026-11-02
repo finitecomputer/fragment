@@ -168,7 +168,7 @@ impl FragmentCell {
     }
 
     /// Whether this life may have written its index.
-    fn search_indexed(&self) -> CellResult<bool> {
+    pub(crate) fn search_indexed(&self) -> CellResult<bool> {
         Ok(self.metas([MetaKey::Search])?[0].is_some())
     }
 
@@ -404,19 +404,26 @@ impl FragmentCell {
 
     /// `POST /api/search` (a reader): the sections that answer a question.
     pub(crate) async fn search_query(&self, caller: &Caller, q: wire::Query) -> CellResult<Response> {
-        self.search_found(By::Caller(caller), q, Question::Embed).await
+        self.search_found(By::Caller(caller), false, q, Question::Embed).await
+    }
+
+    /// `POST __search` (a reader, from the fragment's own page, a share
+    /// link's too): the sections that answer a question, as the API's
+    /// (FIN-372: the files view's search).
+    pub(crate) async fn search_page(&self, caller: &Caller, link: bool, q: wire::Query) -> CellResult<Response> {
+        self.search_found(By::Caller(caller), link, q, Question::Embed).await
     }
 
     /// `POST /search/asked` (a reader, by the platform's own route, which
     /// the router maps no outside path to): a question embedded already.
     pub(crate) async fn search_asked(&self, caller: &Caller, asked: wire::Forwarded) -> CellResult<Response> {
-        self.search_found(By::Caller(caller), asked.query, Question::Given(asked.vector)).await
+        self.search_found(By::Caller(caller), false, asked.query, Question::Given(asked.vector)).await
     }
 
-    async fn search_found(&self, by: By<'_>, q: wire::Query, question: Question) -> CellResult<Response> {
+    async fn search_found(&self, by: By<'_>, link: bool, q: wire::Query, question: Question) -> CellResult<Response> {
         let facts = self.facts()?;
         if let By::Caller(caller) = by {
-            self.admit(&facts, caller, false, Role::Viewer)?;
+            self.admit(&facts, caller, link, Role::Viewer)?;
         }
         rules::check_query(&q).map_err(CellError::invalid)?;
         let space = self.search_space();
@@ -508,7 +515,7 @@ impl FragmentCell {
         match op {
             "upsert" => self.search_write(By::App, read(op, body)?).await,
             "delete" => self.search_remove(read(op, body)?).await,
-            "query" => self.search_found(By::App, read(op, body)?, Question::Embed).await,
+            "query" => self.search_found(By::App, false, read(op, body)?, Question::Embed).await,
             "status" => self.search_state().await,
             _ => Err(CellError::new(ErrorCode::NotFound, format!("no capability search.{op}"))),
         }

@@ -20,6 +20,24 @@ pub struct Meta {
     pub image: Option<String>,
 }
 
+/// `files` (FIN-372): the platform's files view (`__files`) as the
+/// fragment's own page, and what it opens first and says of it. A
+/// template's layer over the one view, declared, so the view knows no
+/// template.
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub struct FilesDecl {
+    /// Its page (`/`) is the files view.
+    #[serde(default)]
+    pub page: bool,
+    /// The file it opens first, over the view's own choice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub home: Option<String>,
+    /// A query of its own the view asks for a status line: its answer's
+    /// `line` (text) and `busy` (whether work is under way).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Manifest {
     pub operations: BTreeMap<String, OpDecl>,
@@ -36,6 +54,8 @@ pub struct Manifest {
     /// How its inbox knows a delivery (`inbox`): by a header that holds one
     /// of its secrets, not by its inbox token.
     pub inbox: Option<InboxDecl>,
+    /// Its page as the platform's files view, and that view's layer (`files`).
+    pub files: Option<FilesDecl>,
     /// Top-level keys that no longer do anything here.
     pub ignored: Vec<&'static str>,
 }
@@ -112,6 +132,7 @@ pub fn on_template(own: &Manifest, blessed: &Manifest) -> Result<Manifest, Strin
         ("channels", !own.channels.is_empty()),
         ("triggers", !own.triggers.is_empty()),
         ("inbox", own.inbox.is_some()),
+        ("files", own.files.is_some()),
     ]
     .into_iter()
     .filter_map(|(k, set)| set.then_some(k))
@@ -302,40 +323,42 @@ fn listed(name: &str, v: &Value) -> Result<ListedDecl, String> {
 }
 
 /// One entry of `triggers`: `{"cron" | "channel" | "files": …, "run": op}`
-/// or `{"installed": true, "run": op}`, a channel's with an optional
+/// or `{"installed" | "woke": true, "run": op}`, a channel's with an optional
 /// `"from": "person" | "agent"` (only records a member of that kind posted
 /// start runs).
 fn trigger(i: usize, v: &Value, m: &Manifest) -> Result<TriggerDecl, String> {
     let at = format!("triggers[{i}]");
     let obj = v.as_object().ok_or_else(|| format!("{at} must be an object"))?;
-    if let Some(k) = obj.keys().find(|k| !matches!(k.as_str(), "cron" | "channel" | "files" | "installed" | "run" | "from")) {
-        return Err(format!("{at} has an unknown key {k:?} (cron, channel, files, installed, run, from)"));
+    if let Some(k) = obj.keys().find(|k| !matches!(k.as_str(), "cron" | "channel" | "files" | "installed" | "woke" | "run" | "from")) {
+        return Err(format!("{at} has an unknown key {k:?} (cron, channel, files, installed, woke, run, from)"));
     }
     let text = |k: &str| obj.get(k).map(|v| v.as_str().map(str::to_string).ok_or_else(|| format!("{at}.{k} must be a string"))).transpose();
-    let installed = match obj.get("installed") {
-        None => false,
-        Some(Value::Bool(true)) => true,
-        Some(_) => return Err(format!("{at}.installed must be true")),
+    let flag = |k: &str| match obj.get(k) {
+        None => Ok(false),
+        Some(Value::Bool(true)) => Ok(true),
+        Some(_) => Err(format!("{at}.{k} must be true")),
     };
-    let on = match (text("cron")?, text("channel")?, text("files")?, installed) {
-        (None, None, None, true) => TriggerOn::Installed(true),
-        (Some(c), None, None, false) => {
+    let (installed, woke) = (flag("installed")?, flag("woke")?);
+    let on = match (text("cron")?, text("channel")?, text("files")?, installed, woke) {
+        (None, None, None, true, false) => TriggerOn::Installed(true),
+        (None, None, None, false, true) => TriggerOn::Woke(true),
+        (Some(c), None, None, false, false) => {
             crate::cron::Cron::parse(&c).map_err(|e| format!("{at}.cron: {e}"))?;
             TriggerOn::Cron(c)
         }
-        (None, Some(c), None, false) => {
+        (None, Some(c), None, false, false) => {
             if c != "inbox" && !m.channels.contains_key(&c) {
                 return Err(format!("{at}.channel must be inbox or a channel this fragment.json declares, not {c:?}"));
             }
             TriggerOn::Channel(c)
         }
-        (None, None, Some(f), false) => {
+        (None, None, Some(f), false, false) => {
             if !crate::glob::valid(&f) {
                 return Err(format!("{at}.files must be a relative path pattern (* ** ?), not {f:?}"));
             }
             TriggerOn::Files(f)
         }
-        _ => return Err(format!("{at} needs exactly one of cron, channel, files, installed")),
+        _ => return Err(format!("{at} needs exactly one of cron, channel, files, installed, woke")),
     };
     let run = text("run")?.ok_or_else(|| format!("{at} needs run: the operation it starts"))?;
     let decl = m.operations.get(&run).ok_or_else(|| format!("{at}.run names no declared operation: {run:?}"))?;
@@ -352,6 +375,36 @@ fn trigger(i: usize, v: &Value, m: &Manifest) -> Result<TriggerDecl, String> {
         Some(k) => Some(IdentityKind::parse(&k).ok_or_else(|| format!("{at}.from is person or agent, not {k:?}"))?),
     };
     Ok(TriggerDecl { on, run, from })
+}
+
+/// `files: {page?, home?, status?}` (`FilesDecl`): `page` true or false;
+/// `home` a content path (not the fragment's machinery, nor its site);
+/// `status` a query it declares, since the view asks it on every visit.
+fn files(v: &Value, m: &Manifest) -> Result<FilesDecl, String> {
+    let obj = v.as_object().ok_or("files must be an object: {\"page\": true, \"home\": …, \"status\": …}")?;
+    if let Some(k) = obj.keys().find(|k| !matches!(k.as_str(), "page" | "home" | "status")) {
+        return Err(format!("files has an unknown key {k:?} (page, home, status)"));
+    }
+    let page = match obj.get("page") {
+        None => false,
+        Some(Value::Bool(b)) => *b,
+        Some(_) => return Err("files.page must be true or false".into()),
+    };
+    let home = match obj.get("home") {
+        None => None,
+        Some(Value::String(p)) if fragment_proto::valid_repo_path(p) && !crate::site::is_machinery(p) && !p.starts_with("site/") => Some(p.clone()),
+        Some(_) => return Err("files.home must be a content path: not fragment.json, app.mjs, applib/ or site/".into()),
+    };
+    let status = match obj.get("status") {
+        None => None,
+        Some(Value::String(op)) => match m.operations.get(op) {
+            Some(d) if d.kind == OpKind::Query => Some(op.clone()),
+            Some(_) => return Err(format!("files.status: {op} is not a query; the view asks it on every visit, so it must change nothing")),
+            None => return Err(format!("files.status names no declared operation: {op:?}")),
+        },
+        Some(_) => return Err("files.status must name a query".into()),
+    };
+    Ok(FilesDecl { page, home, status })
 }
 
 pub fn parse(bytes: &[u8]) -> Result<Manifest, String> {
@@ -432,6 +485,10 @@ pub fn parse(bytes: &[u8]) -> Result<Manifest, String> {
     match obj.get("inbox") {
         None | Some(Value::Null) => {}
         Some(v) => m.inbox = Some(inbox(v)?),
+    }
+    match obj.get("files") {
+        None | Some(Value::Null) => {}
+        Some(v) => m.files = Some(files(v, &m)?),
     }
     Ok(m)
 }
@@ -648,6 +705,58 @@ mod tests {
             let e = parse(bad).expect_err(&String::from_utf8_lossy(bad));
             assert!(e.contains(says), "{e}");
         }
+    }
+
+    /// Goal: a brain catches up when someone comes back to it (FIN-372),
+    /// declared as installed is: `"woke": true`, valid alone, running a
+    /// mutation or a job an editor may.
+    #[test]
+    fn a_woke_trigger_is_true_and_alone() {
+        let m = parse(br#"{"operations":{"n":{"kind":"job"}},"triggers":[{"woke":true,"run":"n"}]}"#).unwrap();
+        assert_eq!(m.triggers[0], TriggerDecl { on: TriggerOn::Woke(true), run: "n".into(), from: None });
+        let wire = serde_json::to_value(&m.triggers[0]).unwrap();
+        assert_eq!(wire, serde_json::json!({ "woke": true, "run": "n" }));
+        assert_eq!(serde_json::from_value::<TriggerDecl>(wire).unwrap(), m.triggers[0], "it reads back");
+        for (bad, says) in [
+            (&br#"{"operations":{"n":{"kind":"job"}},"triggers":[{"woke":false,"run":"n"}]}"#[..], "woke must be true"),
+            (br#"{"operations":{"n":{"kind":"job"}},"triggers":[{"woke":true,"installed":true,"run":"n"}]}"#, "exactly one of"),
+            (br#"{"operations":{"n":{"kind":"job"}},"triggers":[{"woke":true,"files":"a/**","run":"n"}]}"#, "exactly one of"),
+            (br#"{"operations":{"n":{"kind":"query"}},"triggers":[{"woke":true,"run":"n"}]}"#, "is a query"),
+            (br#"{"operations":{"n":{"kind":"job","role":"owner"}},"triggers":[{"woke":true,"run":"n"}]}"#, "a trigger acts as an editor"),
+        ] {
+            let e = parse(bad).expect_err(&String::from_utf8_lossy(bad));
+            assert!(e.contains(says), "{e}");
+        }
+    }
+
+    /// Goal: a template makes the files view its page, and says what it
+    /// opens first and its status line, without the view knowing it
+    /// (FIN-372); a fragment on a blessed template takes its template's.
+    #[test]
+    fn files_make_the_files_view_a_page() {
+        let m = parse(br#"{"operations":{"st":{"kind":"query"}},"files":{"page":true,"home":"wiki/index.md","status":"st"}}"#).unwrap();
+        assert_eq!(m.files, Some(FilesDecl { page: true, home: Some("wiki/index.md".into()), status: Some("st".into()) }));
+        assert_eq!(serde_json::to_value(m.files.as_ref().unwrap()).unwrap(), serde_json::json!({ "page": true, "home": "wiki/index.md", "status": "st" }));
+        assert_eq!(parse(br#"{"files":{}}"#).unwrap().files, Some(FilesDecl::default()), "page is false unless said");
+        assert_eq!(parse(b"{}").unwrap().files, None);
+        for (bad, says) in [
+            (&br#"{"files":true}"#[..], "files must be an object"),
+            (br#"{"files":{"page":"yes"}}"#, "files.page must be true or false"),
+            (br#"{"files":{"search":true}}"#, "unknown key \"search\""),
+            (br#"{"files":{"home":"app.mjs"}}"#, "files.home must be a content path"),
+            (br#"{"files":{"home":"site/index.html"}}"#, "files.home must be a content path"),
+            (br#"{"files":{"home":"../x.md"}}"#, "files.home must be a content path"),
+            (br#"{"files":{"status":"nope"}}"#, "names no declared operation"),
+            (br#"{"operations":{"j":{"kind":"job"}},"files":{"status":"j"}}"#, "is not a query"),
+        ] {
+            let e = parse(bad).expect_err(&String::from_utf8_lossy(bad));
+            assert!(e.contains(says), "{e}");
+        }
+        let blessed = parse(br#"{"kind":"brain","operations":{"st":{"kind":"query"}},"files":{"page":true,"status":"st"}}"#).unwrap();
+        let own = parse(br#"{"template":"brain","meta":{"title":"Garden"}}"#).unwrap();
+        assert_eq!(on_template(&own, &blessed).unwrap().files, blessed.files, "the template's");
+        let mine = parse(br#"{"template":"brain","files":{"page":false}}"#).unwrap();
+        assert!(on_template(&mine, &blessed).unwrap_err().contains("not files"), "its own is the template's to say");
     }
 
     #[test]

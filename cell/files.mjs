@@ -9,19 +9,30 @@
 // an agent's: a file can never add markup or script to this origin, and
 // HTML in one shows as text (xtask's check refuses an HTML sink here).
 //
-// A file opens by the hash (`#/notes/a.md`, or `#/notes/a.md#a-heading`),
-// README.md or index.md at the root when none is named. The list is
+// A file opens by the hash (`#/notes/a.md`, or `#/notes/a.md#a-heading`);
+// when none is named, the first page: the one the fragment's manifest names
+// (`files.home`), else README.md at the root if it says something, else
+// index.md at the root, else the first markdown file by path. The list is
 // `__files` asked for JSON and the bytes `__file?path=`, as anyone who may
 // see the fragment reads them; `__watch` (viewers and up) says when main
 // moves, and the tree and the open file follow. Framed (a pane of a page),
 // the reader's bar also offers to open a file as a pane of its own: it asks
 // the page around it, `{fragment: "open", url, title}`.
+//
+// It is also a fragment's own page when its manifest says so (`files.page`:
+// a brain's, a notes vault's), and its layer comes from there too (FIN-372):
+// a search box when the fragment has an index (`__search`, by words and
+// meaning, as the asker), and a status line its own query answers
+// (`files.status`: `{line, busy}`), asked again while busy and as main
+// moves. Narrow, the page comes first: the search sits in the bar, and the
+// tree waits behind its button.
 
 import { markdown as render, resolvePath, scheme, slug, withoutFrontMatter } from "./__markdown.js";
 
 // Each icon's shapes, on a 24-unit grid (files.css strokes them).
 const ICON = {
   menu: [["path", { d: "M4 7h16M4 12h16M4 17h16" }]],
+  filter: [["path", { d: "M4 5h16l-6 7v6l-4 2v-8z" }]],
   search: [["circle", { cx: 11, cy: 11, r: 6.5 }], ["path", { d: "m20 20-4.2-4.2" }]],
   chevron: [["path", { d: "m9 6 6 6-6 6" }]],
   folder: [["path", { d: "M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" }]],
@@ -66,6 +77,10 @@ const TEXT_MAX = 1024 * 1024;
 const PREFETCH_MAX = 256 * 1024;
 // Past this many files, folders start closed.
 const OPEN_FOLDERS_MAX = 100;
+// hits a search shows, and how soon a busy status line is asked again
+const HITS_MAX = 20;
+const TYPING_MS = 250;
+const STATUS_BUSY_MS = 5000;
 
 const $ = (id) => document.getElementById(id);
 function el(tag, cls, text) {
@@ -99,6 +114,7 @@ const base = (path) => path.slice(path.lastIndexOf("/") + 1);
 const bytes = (n) => (n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1048576).toFixed(1)} MB`);
 
 const fragmentName = document.body.dataset.fragment || "";
+let title = document.body.dataset.title || fragmentName;
 const framed = parent !== window;
 
 let files = [];                // [{path, size}], by path
@@ -109,22 +125,30 @@ const opened = new Set();      // the folders shown open
 let current = null;            // the file in the reader
 let reading = 0;               // the latest open: an earlier read's answer is dropped
 const texts = new Map();       // a hovered file's read, taken by its open
+let home = null;               // the manifest's first page (`files.home`)
+let statusOp = null;           // the manifest's status query (`files.status`)
+let searching = false;         // a search's hits are in the reader
+let drawn = null;              // the open note as drawn ({path, text}), to draw again
 
 // ---- the page ----
 
 document.body.replaceChildren(
   h("div", { class: "files", id: "files" },
     h("aside", { class: "side" },
-      h("div", { class: "side-top" },
+      h("div", { class: "side-top", id: "side-top" },
         h("div", { class: "brand", id: "brand" }),
-        h("label", { class: "filter" }, icon("search"), h("input", { id: "filter", type: "search", placeholder: "Filter files", autocomplete: "off", spellcheck: "false", "aria-label": "Filter files" })),
+        h("label", { class: "filter search", id: "search", hidden: true }, icon("search"), h("input", { id: "q", type: "search", placeholder: `Search ${title}`, autocomplete: "off", "aria-label": `Search ${title}` })),
+        h("label", { class: "filter", id: "filter-box" }, icon("filter"), h("input", { id: "filter", type: "search", placeholder: "Filter files", autocomplete: "off", spellcheck: "false", "aria-label": "Filter files" })),
       ),
       h("nav", { class: "tree", id: "tree", "aria-label": "Files" }),
-      h("div", { class: "side-foot", id: "count" }),
+      h("div", { class: "side-foot", id: "foot" },
+        h("div", { class: "status", id: "status", hidden: true, role: "status" }, h("span", { class: "dot" }), h("span", { id: "status-line" })),
+        h("div", { id: "count" }),
+      ),
     ),
     h("div", { class: "scrim", id: "scrim" }),
     h("main", { class: "main" },
-      h("header", { class: "bar" },
+      h("header", { class: "bar", id: "bar" },
         h("button", { class: "icon menu", id: "menu", type: "button", title: "Files", "aria-label": "Show the files" }, icon("menu")),
         h("div", { class: "crumbs", id: "crumbs" }),
         h("span", { class: "meta", id: "meta" }),
@@ -135,9 +159,26 @@ document.body.replaceChildren(
     ),
   ),
 );
-$("brand").textContent = fragmentName;
+$("brand").textContent = title;
 const drawer = (open) => $("files").classList.toggle("nav", open);
-const narrow = () => matchMedia("(max-width: 640px)").matches;
+const narrowing = matchMedia("(max-width: 640px)");
+const narrow = () => narrowing.matches;
+// Narrow, the search sits in the bar and a busy status under it; wide, both
+// in the sidebar (one element each, moved).
+function place() {
+  if (narrow()) {
+    $("bar").insertBefore($("search"), $("crumbs"));
+    $("bar").after($("status"));
+  } else {
+    $("side-top").insertBefore($("search"), $("filter-box"));
+    $("foot").prepend($("status"));
+  }
+  $("status").classList.toggle("strip", narrow());
+  // the count gives way to a status line in the sidebar, not to one in the bar
+  $("count").hidden = !$("status").hidden && !narrow();
+}
+narrowing.addEventListener("change", place);
+place();
 
 // ---- the list and the tree ----
 
@@ -146,6 +187,18 @@ async function load() {
   const body = await r.json().catch(() => null);
   if (!r.ok) throw new Error(body?.message || `http ${r.status}`);
   files = body.files;
+  // its title as it is now: a rename while it is open is followed
+  if (typeof body.title === "string" && body.title.trim() && body.title !== title) {
+    title = body.title;
+    $("brand").textContent = title;
+    $("q").placeholder = `Search ${title}`;
+    $("q").setAttribute("aria-label", `Search ${title}`);
+    document.title = current ? `${base(current)} · ${title}` : title;
+  }
+  home = typeof body.home === "string" ? body.home : null;
+  statusOp = typeof body.status === "string" ? body.status : null;
+  $("search").hidden = body.searchable !== true;
+  $("files").classList.toggle("searchable", body.searchable === true);
   index = new Map(files.map((f) => [f.path, f]));
   lower = new Map(files.map((f) => [f.path.toLowerCase(), f.path]));
   byName = new Map();
@@ -286,7 +339,7 @@ function bar(path, f) {
     $("raw").toggleAttribute("download", kind(path) === "binary");
   }
   $("pop").hidden = !(f && framed);
-  document.title = path ? `${base(path)} · ${fragmentName}` : `${fragmentName}: files`;
+  document.title = path ? `${base(path)} · ${title}` : title;
 }
 
 function say(title, text) {
@@ -312,6 +365,7 @@ async function open(path, anchor, keep) {
   const reader = $("reader");
   const top = keep ? reader.scrollTop : 0;
   current = path;
+  drawn = null;
   const f = index.get(path);
   bar(path, f);
   mark();
@@ -344,8 +398,10 @@ async function open(path, anchor, keep) {
     if (n !== reading) return;
     if (text instanceof Error) view = say("This file could not be read", text.message);
     else if (text === null) view = download(f);
-    else if (kind(path) === "markdown") view = markdown(text, folder(path));
-    else view = code(text);
+    else if (kind(path) === "markdown") {
+      view = markdown(text, folder(path));
+      drawn = { path, text };
+    } else view = code(text);
   }
   reader.replaceChildren(view);
   reader.scrollTop = top;
@@ -362,14 +418,31 @@ function landing() {
   mark();
   const n = files.length;
   $("reader").replaceChildren(
-    n ? say("Pick a file", `${n} ${n === 1 ? "file" : "files"} in ${fragmentName}.`) : say("No files yet", `Nothing is in ${fragmentName} yet.`),
+    n ? say("Pick a file", `${n} ${n === 1 ? "file" : "files"} in ${title}.`) : say("No files yet", `Nothing is in ${title} yet.`),
   );
-  if (n && narrow()) drawer(true);
 }
 
-function go() {
+// Whether a README says something: more than headings once its front
+// matter is gone (a new repo's is often its title alone).
+const says = (text) => typeof text === "string" && withoutFrontMatter(text).split("\n").some((line) => line.trim() && !/^\s*#/.test(line));
+
+// The page shown when the hash names none (the header's rule).
+async function first() {
+  if (home && index.has(home)) return home;
+  const readme = lower.get("readme.md");
+  if (readme && (index.get(readme)?.size ?? 0) <= PREFETCH_MAX) {
+    const pending = read(readme);
+    pending.catch(() => {});
+    texts.set(readme, pending);
+    if (says(await pending.catch(() => null))) return readme;
+  }
+  return lower.get("index.md") || files.find((f) => kind(f.path) === "markdown")?.path || null;
+}
+
+async function go() {
+  searching = false;
   const [p, anchor] = location.hash.replace(/^#\/?/, "").split("#");
-  const path = decode(p) || ["readme.md", "index.md"].map((name) => lower.get(name)).find(Boolean);
+  const path = decode(p) || (await first());
   if (!path) return landing();
   if (path === current && anchor) return reach(decode(anchor));
   open(path, anchor && decode(anchor));
@@ -433,9 +506,99 @@ async function refresh() {
   const again = current && (every || stale.has(current));
   stale = new Set();
   every = false;
+  const before = new Set(index.keys());
   await load().catch(() => {});
+  status();
+  // a file came or went: the open note, unchanged, is drawn again from what
+  // was read (a picture or a note it names may be here now, or gone)
+  const moved = files.length !== before.size || files.some((f) => !before.has(f.path));
   if (again) open(current, null, true);
-  else if (!current) go();
+  else if (moved && current && drawn?.path === current) redraw();
+  else if (!current && !searching) go();
+}
+
+function redraw() {
+  const reader = $("reader");
+  const top = reader.scrollTop;
+  reader.replaceChildren(markdown(drawn.text, folder(drawn.path)));
+  reader.scrollTop = top;
+}
+
+// ---- search: the fragment's own index, by words and meaning, as the
+// asker (`__search`); a hit opens its file at its heading ----
+
+let asked = 0;
+let typing = null;
+async function search(q) {
+  const n = ++asked;
+  const r = await fetch("__search", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ q, limit: HITS_MAX }) }).catch((e) => e);
+  const body = r instanceof Error ? null : await r.json().catch(() => null);
+  if (n !== asked) return;
+  searching = true;
+  current = null;
+  bar(null);
+  mark();
+  $("crumbs").replaceChildren(el("strong", null, "Search"));
+  if (r instanceof Error || !r.ok) {
+    $("reader").replaceChildren(say("Search did not answer", body?.message || (r instanceof Error ? r.message : `http ${r.status}`)));
+    return;
+  }
+  const hits = body.results || [];
+  const box = el("div", "hits");
+  box.append(el("p", "said", hits.length ? `${hits.length} ${hits.length === 1 ? "section" : "sections"}, best first.` : "Nothing here matches that."));
+  for (const hit of hits) {
+    // a hit whose source is a file opens it; another's (a conversation) is shown
+    const path = index.has(hit.source) ? hit.source : null;
+    const row = el(path ? "a" : "div", "hit");
+    if (path) row.href = route(path, hit.heading || undefined);
+    row.append(el("div", "hit-title", hit.title || base(hit.source)));
+    const where = [...(hit.context || []), hit.heading].filter((part) => part && part !== hit.title).join(" › ");
+    if (where) row.append(el("div", "hit-where", where));
+    if (hit.snippet) row.append(el("div", "hit-snippet", hit.snippet));
+    row.append(el("div", "hit-path", hit.source));
+    box.append(row);
+  }
+  $("reader").replaceChildren(box);
+  $("reader").scrollTop = 0;
+}
+
+$("q").addEventListener("input", () => {
+  clearTimeout(typing);
+  drawer(false);
+  const q = $("q").value.trim();
+  if (!q) {
+    asked++;
+    if (searching) go();
+    return;
+  }
+  typing = setTimeout(() => search(q), TYPING_MS);
+});
+$("q").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && $("q").value.trim()) {
+    clearTimeout(typing);
+    search($("q").value.trim());
+  } else if (e.key === "Escape") {
+    $("q").value = "";
+    $("q").dispatchEvent(new Event("input"));
+  }
+});
+
+// ---- its status line: its own query's `{line, busy}`, asked on load, as
+// main moves, and again while busy ----
+
+let statusTimer = null;
+async function status() {
+  if (!statusOp) return;
+  clearTimeout(statusTimer);
+  const r = await fetch(`__op/${encodeURIComponent(statusOp)}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: crypto.randomUUID(), input: {} }) }).catch(() => null);
+  const said = r?.ok ? (await r.json().catch(() => null))?.result : null;
+  const line = typeof said?.line === "string" ? said.line.slice(0, 120) : "";
+  const busy = said?.busy === true;
+  $("status-line").textContent = line;
+  $("status").hidden = !line;
+  $("status").classList.toggle("busy", busy);
+  $("count").hidden = !!line && !narrow();
+  if (busy) statusTimer = setTimeout(status, STATUS_BUSY_MS);
 }
 
 // ---- markdown, through the platform's renderer: its links and pictures
@@ -518,4 +681,5 @@ try {
 }
 addEventListener("hashchange", go);
 go();
+status();
 watch();

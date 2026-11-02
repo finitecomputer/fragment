@@ -945,7 +945,18 @@ agent, or carrying code, keeps the last good code and says to fork it.
   matching path: `*`, `**`, `?`, a trailing `/`); `{"installed": true,
   "run": op}` (once per install of new code: a deploy moving `live`, or a
   blessed template's changed release, at the fragment's next request; its
-  input `{ref: "live", commit, code}`).
+  input `{ref: "live", commit, code}`); `{"woke": true, "run": op}` (at
+  most once per activation of the fragment's object, at the first request
+  of it a person or an agent makes: signed, or a page's session; never an
+  alarm, the platform's own calls, or an anonymous visitor; its input
+  `{}`, its run's `via` `woke`).
+- `files` (optional, FIN-372): `{"page": true, "home": <path>, "status":
+  <query>}`, each optional. `page`: the fragment's page (`/`) is the files
+  view (`__files`), with its Open Graph tags. `home`: the content file it
+  opens first. `status`: a query it declares, whose answer's `line` (text)
+  and `busy` the view shows as a status line, asking again while busy.
+  Unknown keys are refused at deploy; a fragment on a blessed template
+  declares none (its template's applies).
 - `inbox` (optional): `{"header": "x-telegram-bot-api-secret-token",
   "secret": "TELEGRAM_WEBHOOK_SECRET"}`: the inbox takes a delivery only
   with that header (lower case; never `x-fragment-*`, `cookie`, `host`,
@@ -1530,7 +1541,7 @@ steps:
   page reads `__members`, `__people` and its presence.
 
 `job.principal`, `job.role`, `job.run`, `job.attempt`, `job.via` (`call`,
-`job`, `cron`, `channel`, `files`, `installed`) and `job.fragment` say who and which;
+`job`, `cron`, `channel`, `files`, `installed`, `woke`) and `job.fragment` say who and which;
 `job.door` is a connector's `{relayed, to}` while it is an open door (An
 agent's doors), else null.
 
@@ -1607,7 +1618,7 @@ fragment's, `/api/…` included.
 
 | path | |
 | --- | --- |
-| `/`, `/<page>` | `site/` in the live commit (`index.html` for a directory); Open Graph tags from `meta` |
+| `/`, `/<page>` | `site/` in the live commit (`index.html` for a directory); Open Graph tags from `meta`. With `files.page`, `/` is the files view |
 | `__file?path=` | a content file from live, else main; an agent fragment's or a session archive's from main, else live (its computer, or its imports, write main and never deploy); `no-store`, the file as it is now |
 | `__file?path=&v=<commit>` | that file at the version `v` names: the commit that last changed it (`files.stat`'s and `__files`' `commit`, a generated file's `commit`), 40 or 64 lowercase hex (else 400). At main or live, `immutable` (`private` unless the fragment is public), `ETag` the commit; another version, a 302 to the current one's URL (`no-store`): a URL never answers other bytes. Neither pin has the file: as without `v` |
 | `__preview.svg` | the placeholder preview image |
@@ -1624,7 +1635,8 @@ fragment's, `/api/…` included.
 | `__fragment.css` | the platform's stylesheet (below) |
 | `__markdown.js` | a module: `markdown(text, options)` → a DocumentFragment, `inline(parent, text, options)`; markdown to DOM only (HTML in the text is text; nesting stops at 32). Options: `resolve(target, kind)` → `{href, path?}` or null, `image(src, kind)` → `{src, href?}` or null, `code(text, lang)`, `breaks`; links stay http(s), mailto or relative, pictures http(s) or relative |
 | `__people?id=…&id=…` | anyone who may see the fragment: `{profiles: {<id>: {kind, email?, picture, name?, fragment?, title?}}}` for at most 64 identities: `email` only between members (decision 48); `picture` an absolute platform URL; an agent's `fragment`, its label as `name`, its `title` and `picture` (An agent's name and picture); an unknown id left out |
-| `__files` | the files viewer (`__files.js`, `__files.css`); asked for `application/json`, `{type: "files", count, files: [{path, size, commit?}]}` (`commit` its version, for `__file?path=&v=`; none for its blessed template's data). Framed, it asks its parent to open a file as a window (`{fragment: "open", url, title}`) |
+| `__files` | the files view (`__files.js`, `__files.css`), titled by `meta.title`; asked for `application/json`, `{type: "files", count, files: [{path, size, commit?}], searchable?, home?, status?}` (`commit` its version, for `__file?path=&v=`; none for its blessed template's data; `searchable: true` when the fragment has a search index; `home` and `status` its manifest's `files`). With no file named it opens `home`, else `README.md` at the root when it says more than headings, else `index.md` at the root, else the first markdown file by path. Framed, it asks its parent to open a file as a window (`{fragment: "open", url, title}`) |
+| `POST __search` | its own index, from its page: `application/json` `Query` → `Found`, as `POST /api/f/{name}/search` (viewers and up, the share link too; the asker pays for the question's embedding, an anonymous one is searched by its words) |
 | `__live` | WebSocket, anyone who may see the fragment (below) |
 | `__watch` | WebSocket, viewers and up (the share link, or a signed upgrade): `{type: "hello", ref, sha}`, then `{type: "changed", ref: "main", sha, paths}` per external move of main |
 | anything else | the app's `fetch`, when it has one |

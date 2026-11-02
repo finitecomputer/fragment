@@ -103,7 +103,7 @@ async fn browser_asset(req: &Request, env: &Env, file: &File, content_type: &str
 /// member's `__watch` closes when they leave), or a push subscription. Its
 /// caller is resolved first.
 fn answers_someone(path: &str) -> bool {
-    path.starts_with("__op/") || path.starts_with("__secrets/") || matches!(path, "__push-key" | "__push-sub" | "__push-unsub" | "__watch" | "__live" | "__door")
+    path.starts_with("__op/") || path.starts_with("__secrets/") || matches!(path, "__push-key" | "__push-sub" | "__push-unsub" | "__watch" | "__live" | "__door" | "__search")
 }
 
 /// A browser's navigation to a page: a GET or HEAD that its Fetch
@@ -225,6 +225,15 @@ impl FragmentCell {
             };
             let result = self.call_op(caller, &facts, &principal, link, op, body).await?;
             json_response(&result)?
+        } else if path == "__search" {
+            // its own index, asked from its page as the asker, who pays for
+            // the question's embedding (searchable.rs): viewers and up
+            if req.method() != Method::Post || !req.headers().get("content-type")?.is_some_and(|c| c.starts_with("application/json")) {
+                return Err(CellError::invalid("ask with POST, the question as application/json"));
+            }
+            let body = crate::read_body(&mut req, SEARCH_BODY_MAX_BYTES).await?;
+            let q = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+            self.search_page(caller, link, q).await?
         } else if let Some(op) = path.strip_prefix("__push-").filter(|op| matches!(*op, "key" | "sub" | "unsub")) {
             // web push: anyone who can see the fragment (push.rs)
             self.admit(&facts, caller, link, Role::Public)?;
@@ -505,7 +514,7 @@ impl FragmentCell {
             }
             "__files" => {
                 if !req.headers().get("accept")?.is_some_and(|a| a.contains("application/json")) {
-                    return Ok(Response::ok(files_page(name))?.with_headers(headers("text/html; charset=utf-8", "no-store")?));
+                    return Ok(Response::ok(files_page(name, &self.title_now(name)?))?.with_headers(headers("text/html; charset=utf-8", "no-store")?));
                 }
                 // a path on both is the one `__file` reads (live's; an agent's
                 // or a session archive's, main's), with its version (`commit`:
@@ -532,7 +541,20 @@ impl FragmentCell {
                         None => json!({ "path": path, "size": size }),
                     })
                     .collect();
-                return json_response(&json!({ "type": "files", "count": files.len(), "files": files }));
+                let mut answer = json!({ "type": "files", "count": files.len(), "files": files, "title": self.title_now(name)? });
+                // the files view's layer (FIN-372): its search, and what its manifest says
+                if self.search_indexed()? {
+                    answer["searchable"] = json!(true);
+                }
+                if let Some(f) = self.files_live()? {
+                    if let Some(home) = f.home {
+                        answer["home"] = json!(home);
+                    }
+                    if let Some(status) = f.status {
+                        answer["status"] = json!(status);
+                    }
+                }
+                return json_response(&answer);
             }
             "__file" => {
                 let p = url.query_pairs().find(|(k, _)| k == "path").map(|(_, v)| v.into_owned()).unwrap_or_default();
@@ -583,6 +605,17 @@ impl FragmentCell {
         }
         if !path.is_empty() && !valid_repo_path(path.trim_end_matches('/')) {
             return Err(CellError::new(ErrorCode::NotFound, "no such page"));
+        }
+        // a fragment whose page is the files view (its manifest's
+        // `files.page`, FIN-372), with its Open Graph tags as a page's
+        if path.is_empty() && self.files_live()?.is_some_and(|f| f.page) {
+            let mut page = files_page(name, &self.title_now(name)?);
+            if let Some(meta) = self.meta(MetaKey::MetaLive)? {
+                let meta: fragment_core::manifest::Meta = serde_json::from_str(&meta).map_err(|e| CellError::host(format!("the stored meta does not decode: {e}")))?;
+                page = site::inject_og(&page, name, &meta, &format!("{}__preview.svg", self.cfg.canonical(&caller.url, name)));
+            }
+            let h = headers("text/html; charset=utf-8", "no-store")?;
+            return Ok(if head { Response::empty()?.with_headers(h) } else { Response::from_html(page)?.with_headers(h) });
         }
         // a blessed template's fragment: its site is the platform release's (decision 40)
         if let Some(installed) = self.meta(MetaKey::Blessed)? {
@@ -707,22 +740,47 @@ impl FragmentCell {
     }
 }
 
-/// `__files`: the files viewer's page (`files.mjs`), which lists the
-/// fragment's content files by asking `__files` for JSON.
-fn files_page(name: &str) -> String {
+/// A question to `__search`, at most: its words and filters.
+const SEARCH_BODY_MAX_BYTES: usize = 16 * 1024;
+
+/// `__files`, and the page of a fragment whose page it is: the files
+/// view (`files.mjs`), which lists the fragment's content files by asking
+/// `__files` for JSON, titled `title`.
+fn files_page(name: &str, title: &str) -> String {
     format!(
         r#"<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{n}: files</title>
+<title>{t}</title>
 <link rel="stylesheet" href="./__files.css">
 </head>
-<body data-fragment="{n}">
+<body data-fragment="{n}" data-title="{t}">
 <script type="module" src="./__files.js"></script>
 </body>
 </html>"#,
-        n = site::html_escape(name)
+        n = site::html_escape(name),
+        t = site::html_escape(title)
     )
+}
+
+impl FragmentCell {
+    /// What live's manifest says of the files view (`files`), if anything.
+    fn files_live(&self) -> CellResult<Option<fragment_core::manifest::FilesDecl>> {
+        self.meta(MetaKey::FilesLive)?
+            .map(|text| serde_json::from_str(&text).map_err(|e| CellError::host(format!("the stored files do not decode: {e}"))))
+            .transpose()
+    }
+
+    /// Its title now: as its manifest at main names it (a rename lands
+    /// there first), else as live's does, else its name.
+    fn title_now(&self, name: &str) -> CellResult<String> {
+        let [main, live] = self.metas([MetaKey::ManifestMain, MetaKey::MetaLive])?;
+        let at = |text: Option<String>, meta: fn(&Value) -> &Value| -> Option<String> {
+            let v: Value = serde_json::from_str(&text?).ok()?;
+            meta(&v)["title"].as_str().map(str::trim).filter(|t| !t.is_empty()).map(str::to_string)
+        };
+        Ok(at(main, |v| &v["meta"]).or_else(|| at(live, |v| v)).unwrap_or_else(|| name.to_string()))
+    }
 }

@@ -617,6 +617,12 @@ impl FragmentCell {
                 }
                 json!({ "stale": installed.is_some() })
             }
+            Some("woke-reset") => {
+                // as if its object had just started again: the next request
+                // a person or an agent makes has its woke trigger's chance
+                // (jobs.rs `woke_chance`)
+                json!({ "had": self.woke.replace(false) })
+            }
             Some("legacy-member-kind") => {
                 // a member row from before `members.kind` (2026-09-24): its
                 // kind NULL, as such rows were left

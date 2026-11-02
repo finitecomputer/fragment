@@ -1167,6 +1167,71 @@ impl FragmentCell {
         Ok(())
     }
 
+    /// A woke trigger (`{"woke": true, "run": op}`, FIN-372) starts its run
+    /// at most once per activation of this object, for the first request
+    /// of it that a person or an agent made: one the router signed for
+    /// them, or a page's whose credential resolves to one. Never for an
+    /// alarm (it makes no request), the platform's own routes (answered
+    /// before the router's), or an anonymous visitor (a share link's
+    /// reader, or the card's browser, which opens the page as one), so a
+    /// wake no one caused starts nothing. Whether it is someone, and the
+    /// run, are found after the answer: the request waits on neither.
+    pub(crate) fn woke_chance(&self, caller: &Caller, name: &str) {
+        if self.woke.get() || (caller.signed.is_none() && caller.unresolved.is_none()) {
+            return;
+        }
+        let declared = self.triggers().is_ok_and(|t| t.iter().any(|t| matches!(t.on, TriggerOn::Woke(_))));
+        if !declared {
+            // the chance is spent: code installed later this activation waits for the next
+            self.woke.set(true);
+            return;
+        }
+        let (caller, name) = (caller.clone(), name.to_string());
+        // SAFETY: as `later`'s: `waitUntil` holds the object while this runs.
+        let cell: &'static FragmentCell = unsafe { &*(self as *const FragmentCell) };
+        self.state.wait_until(async move { cell.woke_run(&caller, &name).await });
+    }
+
+    async fn woke_run(&self, caller: &Caller, name: &str) {
+        let someone = self.identified(caller, name).await.is_ok_and(|c| c.signed.is_some());
+        // two first requests at once: the first to get here starts it
+        if !someone || self.woke.replace(true) {
+            return;
+        }
+        let started = async {
+            let read_only = self.read_only().await?;
+            self.fire_woke(read_only)
+        };
+        match started.await {
+            Ok(0) => {}
+            Ok(_) => {
+                self.launch_queued().await;
+            }
+            Err(e) => self.event("woke.failed", &e.message, json!({ "code": e.code })),
+        }
+    }
+
+    /// The runs a woke trigger starts (`woke_chance`), as the fragment, from the
+    /// code installed now: how many.
+    fn fire_woke(&self, read_only: Option<Why>) -> CellResult<usize> {
+        let mut started = 0;
+        for t in self.triggers()?.iter().filter(|t| matches!(t.on, TriggerOn::Woke(_))) {
+            self.start_run(NewRun {
+                op: &t.run,
+                via: Via::Woke,
+                trigger: None,
+                principal: &self.own_key()?,
+                role: Role::Editor,
+                depth: 0,
+                call: None,
+                input: json!({}),
+                owner_read_only: read_only,
+            })?;
+            started += 1;
+        }
+        Ok(started)
+    }
+
     /// After code is installed: an operation it does not have loses its
     /// pause and its breaker (one of that name later starts clean). Only
     /// installed code says an operation is gone; a live commit with no app
