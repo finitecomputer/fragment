@@ -120,6 +120,8 @@ const SHELL_PUBLISHED: &[(&str, &str)] = &[
     // an agent's colour: the agent template's, linked (templates/agent/site)
     ("agent-color.js", "text/javascript; charset=utf-8"),
     ("agent-identity.js", "text/javascript; charset=utf-8"),
+    // what each agent's runtime offers beyond its chats (shell.js)
+    ("agent-runtimes.js", "text/javascript; charset=utf-8"),
     ("agent-settings.js", "text/javascript; charset=utf-8"),
     // every agent's image, tinted to its colour (shell.css; CREDITS.md)
     ("agent.png", "image/png"),
