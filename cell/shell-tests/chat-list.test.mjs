@@ -7,7 +7,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { pinnedFirst, sectionShown } from "../shell/chat-list.js";
+import { pinnedFirst, rowStatus, sectionShown } from "../shell/chat-list.js";
 
 const chat = (name, previewAt, pinned = false) => ({ name, previewAt, pinned });
 const names = (list) => list.map((f) => f.name);
@@ -35,6 +35,20 @@ test("a chat its agent is waiting in or working in shows however far down it is,
   assert.deepEqual(names(sectionShown(list, { busy: new Set(["c1", "c3"]) }).shown), ["c8", "c7", "c6", "c5", "c4", "c3", "c1"]);
   assert.equal(sectionShown(list, { busy: new Set(["c1"]) }).more, true, "More still folds the rest");
   assert.deepEqual(names(sectionShown(list, { busy: new Set(["c7"]) }).shown), ["c8", "c7", "c6", "c5", "c4"], "one among the first five adds none");
+});
+
+test("a chat whose own turn is over while a thread it asked is still out waits on that agent: its row says so, and it is never folded (Codex on #977)", () => {
+  const list = [1, 2, 3, 4, 5, 6, 7, 8].map((n) => chat(`c${n}`, n * 10));
+  const reader = { fragment: "reader--a1b2" };
+  // c1, folded and not open: its agent's turn ended (nothing doing there), its thread to Reader not answered
+  const statuses = new Map(list.map((f) => [f.name, rowStatus([], f.name === "c1" ? reader : null)]));
+  assert.deepEqual(statuses.get("c1"), { waits: reader, seen: [] });
+  const busy = new Set([...statuses].filter(([, st]) => st).map(([name]) => name));
+  assert.deepEqual(names(sectionShown(list, { busy }).shown), ["c8", "c7", "c6", "c5", "c4", "c1"]);
+  // its own agent doing something there says that first, whatever it waits on
+  const working = { chat: "c1", doing: "working", at: 1, until: 2 };
+  assert.deepEqual(rowStatus([working], reader), { doing: working, seen: [working] });
+  assert.equal(rowStatus([], null), null);
 });
 
 test("five or fewer: all of them, and no More", () => {

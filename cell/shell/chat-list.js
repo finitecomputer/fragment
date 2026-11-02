@@ -17,6 +17,17 @@ export function sectionShown(list, { unfolded = false, current = null, max = 5, 
   return { shown, more: sorted.length > max };
 }
 
+// What a chat's row says its agent is doing there (Paul, 2026-10-31): what
+// its agents of theirs are doing in it (`doing`, the most pressing first),
+// else whom it waits on (`waits`: a thread asked from it, still out, its own
+// turn over: threads.js `waitingOn`), else nothing (null). Its row says it
+// and its section never folds it away (`sectionShown`'s `busy`), both from
+// this one answer, so they cannot disagree (Codex on #977).
+export function rowStatus(doing, waits) {
+  if (doing.length) return { doing: doing[0], seen: doing };
+  return waits ? { waits, seen: [] } : null;
+}
+
 // Whom the ways to ask for an app ask (the desktop's, the dock's Add's),
 // as their words name it (Paul, 2026-10-31: an agent's chosen name, every
 // surface): a prompt goes into the open chat when it is the person's own
@@ -163,7 +174,7 @@ export function createChatList({ api, ui, data, selection, menus, navigation, li
   // message's first line; none of these, its name alone. Its section names
   // its agent. Its ⋯ (in the
   // time's place on hover, always on touch) renames or archives it.
-  function chatRow(f, doing, now) {
+  function chatRow(f, status, now) {
     const active = f.name === current() && !page();
     const row = el("div", `row chat-row${active ? " active" : ""}`);
     row.dataset.key = `chat:${f.name}`;
@@ -188,7 +199,7 @@ export function createChatList({ api, ui, data, selection, menus, navigation, li
       next = until;
     }
     const sub = el("span", "chat-sub");
-    const waits = doing ? null : waitingOn(f.name);
+    const { doing, waits } = status ?? {};
     if (doing) sub.append(el("span", `agent-doing ${doing.doing}`, DOING_SAYS[doing.doing]));
     else if (waits) sub.append(el("span", "agent-doing waiting", `Waiting on ${titleOf(waits.fragment)}`));
     else if (f.preview) sub.append(el("span", "chat-preview", f.preview));
@@ -333,13 +344,13 @@ export function createChatList({ api, ui, data, selection, menus, navigation, li
     const seen = [];
     const now = Date.now();
     let next = Infinity;
-    // what each listed chat's agents of theirs are doing there, as its row says it
-    const doingOf = new Map([...sections.values()].flatMap((x) => x.chats).concat(loose, shared).map((f) => [f.name, doingIn(f, agentsOf(f.name).filter((id) => ids.has(id)))]));
-    const busy = new Set([...doingOf].filter(([, d]) => d.length).map(([name]) => name));
+    // what each listed chat's row says, its row and its section's fold both from it
+    const statuses = new Map([...sections.values()].flatMap((x) => x.chats).concat(loose, shared).map((f) => [f.name, rowStatus(doingIn(f, agentsOf(f.name).filter((id) => ids.has(id))), waitingOn(f.name))]));
+    const busy = new Set([...statuses].filter(([, st]) => st).map(([name]) => name));
     const rowOf = (f) => {
-      const doing = doingOf.get(f.name) ?? [];
-      seen.push(...doing);
-      const [row, until] = chatRow(f, doing[0], now);
+      const status = statuses.get(f.name) ?? null;
+      seen.push(...(status?.seen ?? []));
+      const [row, until] = chatRow(f, status, now);
       next = Math.min(next, until);
       return row;
     };
