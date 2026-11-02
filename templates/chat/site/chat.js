@@ -50,7 +50,7 @@
 
 import * as fragment from "./__fragment.js";
 import { colorOf } from "./agent-color.js";
-import { controlledBy, controllerOf, running } from "./control.js";
+import { controlledBy, controllerOf, running as ran } from "./control.js";
 import { icon } from "./icons.js";
 import { inline, renderMarkdown } from "./markdown.js";
 import { renderAttachments as renderMessageAttachments } from "./media.js";
@@ -568,9 +568,16 @@ export function mount(root) {
     return [...here, ...state.roster.map((r) => r.identity).filter((id) => !here.includes(id))];
   };
   const lead = () => chatAgents()[0] ?? [...state.turns.values()].find(started)?.agent ?? null;
+  // Both backlogs in (chat's, `caughtUp`; work's, `workReady`). They come
+  // a record at a time, so before then an ended turn's start may be here
+  // without its end, or a question without the answer said after it: no
+  // turn is shown running until then (each load said an idle agent was
+  // working for a moment).
+  const settled = () => caughtUp && history.workReady;
+  const running = (t) => settled() && ran(t);
   // this page's person's turn running now, the newest: theirs to stop and
   // command (an answer come back is its agent's owner's: control.js)
-  const myTurn = () => controlledBy(state.turns.values(), state.members, state.me?.principal);
+  const myTurn = () => (settled() ? controlledBy(state.turns.values(), state.members, state.me?.principal) : null);
   // an agent's turn running in the chat, whoever asked it
   const workingOn = (agent) => [...state.turns.values()].find((t) => running(t) && t.agent === agent) ?? null;
   // whom a command goes to: the agent working for this person, else the lead
@@ -2970,6 +2977,7 @@ export function mount(root) {
     nodes.clear();
     if (atLeast(hello.role, "viewer")) fragment.subscribe("work", onWork, { last: WORK_LAST, onReady: async () => {
       history.workReady = true;
+      schedule();
       try { await earlierWork(); }
       catch (err) { $("history-error").textContent = `Could not load earlier progress: ${err.message}.`; $("earlier").hidden = false; }
     } });
