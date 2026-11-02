@@ -10,9 +10,13 @@
 #   --test docker -- --ignored`). It runs only when a change touches what it
 #   builds or runs (`changes` below: images/hermes, images/bridge,
 #   images/stub, the images' manifest and lock, the Hermes image's CLI
-#   stage's inputs, or this workflow), on pull requests, merge groups and
-#   master's pushes, on every run by hand, and whenever `changes` itself
-#   did not succeed.
+#   stage's inputs, or this workflow), in merge groups and on master's
+#   pushes, on every run by hand, and whenever `changes` itself did not
+#   succeed. Never on a pull request's own runs: the merge queue runs it on
+#   the very tree that merges (as ci.yml's e2e), and a pull request's run
+#   of it only held the queue back by its 20 minutes (Paul, 2026-11-02).
+#   Skipped there, the required check passes; a run by hand runs it on a
+#   branch's head before it queues.
 #
 # The workflow runs on every pull request, merge group and master push,
 # with no path filter of its own: master's ruleset requires `images check`
@@ -152,8 +156,9 @@ jobs:
     needs: changes
     # fails closed: a `changes` that did not succeed (it failed, or ran out
     # its time, as in run 41100441445) runs the lane rather than skip it,
-    # which a required check would count as a pass
-    if: ${{ !cancelled() && (github.event_name == 'workflow_dispatch' || needs.changes.result != 'success' || needs.changes.outputs.docker == 'true') }}
+    # which a required check would count as a pass; a pull request's own
+    # run skips it, as its merge group runs it
+    if: ${{ !cancelled() && github.event_name != 'pull_request' && (github.event_name == 'workflow_dispatch' || needs.changes.result != 'success' || needs.changes.outputs.docker == 'true') }}
     # ubuntu-24.04 (Docker 28), not ubuntu-latest: since 2026-10-25,
     # ubuntu-latest is 26.04 with Docker 29, whose containerd image store
     # names `containerd` in every container's root mount, so Hermes takes
