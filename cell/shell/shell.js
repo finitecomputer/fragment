@@ -27,6 +27,7 @@ import { createSessionRefresh } from "./session-refresh.js";
 import { createOnboarding } from "./onboarding.js";
 import { createComputer } from "./computer.js";
 import { createAgentSettings } from "./agent-settings.js";
+import { createRuntimes } from "./agent-runtimes.js";
 import { createConnections, createAgentHomes, createSimplex } from "./connections.js";
 import { el, section, line, actionLine, createSettings } from "./settings.js";
 import { createLauncher } from "./launcher.js";
@@ -874,7 +875,8 @@ const { renderHeading, renderChats, loadInvites, primaryAgent, newChatAgent, ask
   api, ui: { $, el, patch, agentFace, mark, notice },
   data: { byName, own, chats, shown, titleOf, chatTitle: (name) => (byName(name)?.kind === "sessions" ? sessionArchive.title() : chatTitle(name)), homeMark: (f) => homeMark(f), isGroup, agentOfChat: (name) => agentOfChat(name), agentsOf,
     agents: () => state.agents, allFragments: () => state.fragments, computer: () => state.computer, isGuest: () => state.guest, personId: () => state.me?.id,
-    isThread: (f) => threads.isPair(f), waitingOn: (name) => threads.waitingOn(name), renderThreads: () => threads.render() },
+    isThread: (f) => threads.isPair(f), waitingOn: (name) => threads.waitingOn(name), renderThreads: () => threads.render(),
+    offers: (agent, what) => offers(agent, what) },
   selection: { current: () => state.current, page: () => state.page, getFrame: (name) => state.frames.get(name) },
   menus: { menu, menuEdge, menuOwner: () => menuFor, openMenu, closeMenu, shareItem, archiveItem, pinItem },
   navigation: { newChat, rename: (name) => rename(name), openChat, openApp, openScreen, leaveSidebar, seg },
@@ -924,6 +926,9 @@ const { faceControls, renderAgentFaces, agentSettings, addAgentForm, agentJson, 
   computer: () => state.computer, homePicker: (a, said) => homePicker(a, said), addAgent: (spec) => onboarding.addAgent(spec),
   primaryAgent: () => primaryAgent(), chats, own, me: () => state.me,
 });
+// what each agent's runtime offers beyond its chats (agent-runtimes.js),
+// from its agent.json as Settings reads it
+const { loadRuntimes, offers, markOffer } = createRuntimes({ agentJson: (agent) => agentJson(agent), agents: () => state.agents, own, byName });
 const { chatTitle, homeMark, loadHomes, homePicker, paintHomes, setHome } = createAgentHomes({
   el, icon, named, actionLine, settingLabel, modelOption, savePick,
   agents: () => state.agents, chats, own, labelOf, byName, titleOf, agentsOwnChat,
@@ -1550,7 +1555,7 @@ const { computerOf, prewake, renderComputer, restartComputer, computerSection } 
   api, el, seg, named, section, line, actionLine, computer: () => state.computer,
   agents: () => state.agents, computerFailed: () => state.computerFailed,
   support: () => state.support, setupPending: () => onboarding.setupPending(),
-  made: (c) => { computerTaken++; state.computer = c; }, computerIs, reopenSettings, openScreen,
+  made: (c) => { computerTaken++; state.computer = c; }, computerIs, reopenSettings, openScreen, markOffer,
   reads: () => reads, load,
 });
 // The computer as the platform last answered: shown at once.
@@ -1674,7 +1679,7 @@ const settings = createSettings({
   sections: { computerSection, connectionsSection: (...args) => connectionsSection(...args), simplexSection },
   agents: { getComputer: () => state.computer, getAgents: () => state.agents, faceControls, agentSettings, addAgentForm, renderAgentFaces, paintHomes },
   releaseInfo: () => ({ mine: release.mine, deployed: DEPLOYED }),
-  allFragments: () => state.fragments, own, freeLabel, load, named, openApp,
+  allFragments: () => state.fragments, own, freeLabel, load, named, openApp, markOffer,
 });
 function openSettings(push = true, failed = null) { return settings.openSettings(push, failed); }
 function reopenSettings(failed = null) { return settings.reopenSettings(failed); }
@@ -1767,6 +1772,7 @@ async function load(changed = false) {
   launcher.agentsRead();
   renderAgentFaces();
   loadHomes();
+  loadRuntimes();
   for (const f of chats()) if (own(f) && f.title === UNTITLED && f.preview) titleFromFirst(f.name);
   // answered, it goes on with what a failure put off, whoever asked
   if (computers && unknown) reopenSettings().catch(() => {});

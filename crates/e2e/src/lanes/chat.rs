@@ -1246,7 +1246,58 @@ fn claude_install(s: &mut Suite, api: &Api, chrome: &mut Browser, owner: &Keys, 
         again && signed && answered && !kept,
         json!({ "again": again, "signed": signed, "answered": answered, "kept": kept, "messages": chrome.eval(&page, "document.getElementById('messages').innerText")? }),
     );
+    claude_offers(s, chrome, &shell, &name, shots)?;
     chrome.close(shell)?;
+    Ok(())
+}
+
+/// What a Claude agent offers beyond its chats (cell/shell/agent-runtimes.js;
+/// AGENTS.md: the UI shows only what an agent's runtime can do): no profile
+/// and no screen in its hero's menu, its chat's ⋯, or Settings (Agents'
+/// Open, Computer's Screens), while the person's Hermes agent keeps both.
+fn claude_offers(s: &mut Suite, chrome: &mut Browser, shell: &Page, agent: &str, shots: &Path) -> Result<()> {
+    let items = |chrome: &mut Browser, trigger: &str| -> Result<Value> {
+        chrome.click(shell, trigger)?;
+        chrome.until(shell, "!document.getElementById('menu').hidden && document.querySelectorAll('#menu button').length > 0", TURN);
+        let said = chrome.eval(shell, "[...document.querySelectorAll('#menu button')].map((b) => b.textContent)")?;
+        chrome.press(shell, "Escape", false)?;
+        chrome.until(shell, "document.getElementById('menu').hidden", TURN);
+        Ok(said)
+    };
+    let hero = |a: &str| format!("#chats [data-key={}]", js(&format!("agent:{a}")));
+    let hermes = chrome.eval(shell, &format!("[...document.querySelectorAll('#chats .agent-hero')].map((h) => h.dataset.key.slice('agent:'.length)).find((a) => a !== {}) ?? ''", js(agent)))?.as_str().unwrap_or("").to_string();
+    let lacks = |v: &Value| v.as_array().is_some_and(|l| !l.is_empty() && !l.iter().any(|i| i.as_str().is_some_and(|t| t.contains("profile") || t.contains("screen"))));
+    let has = |v: &Value| ["Its profile", "Its screen"].iter().all(|t| v.as_array().is_some_and(|l| l.iter().any(|i| i == t)));
+    let claude_menu = items(chrome, &hero(agent))?;
+    let chat_menu = items(chrome, "#chat-options")?;
+    let hermes_menu = if hermes.is_empty() { Value::Null } else { items(chrome, &hero(&hermes))? };
+    chrome.click(shell, &hero(agent))?;
+    chrome.until(shell, "!document.getElementById('menu').hidden", TURN);
+    let _ = chrome.screenshot(shell, &shots.join("claude-agent-menu.png"));
+    chrome.press(shell, "Escape", false)?;
+    s.ok(
+        "a Claude agent's menu and its chat's ⋯ offer no profile and no screen, which its runtime has not; the Hermes agent's offers both",
+        lacks(&claude_menu) && lacks(&chat_menu) && has(&hermes_menu),
+        json!({ "claude": claude_menu, "its chat": chat_menu, "hermes": hermes_menu }),
+    );
+    chrome.eval(shell, "(location.href = '/settings', true)")?;
+    // its Open (`data-offer="profile"`) in Agents, its button in Computer's Screens
+    let open = |a: &str| format!("(() => {{ const n = document.querySelector({}); return !!n && !n.hidden; }})()", js(&format!("[data-offer=\"profile\"][data-offer-for={}]", js(a))));
+    let screen = |a: &str| format!("(() => {{ const n = document.querySelector({}); return !!n && !n.hidden; }})()", js(&format!("[data-screen-for={}]", js(a))));
+    let read = chrome.until(shell, &format!("{} && {}", open(&hermes), screen(&hermes)), TURN);
+    let settings = json!({
+        "claude open": chrome.eval(shell, &open(agent))?,
+        "claude screen": chrome.eval(shell, &screen(agent))?,
+        "hermes open": chrome.eval(shell, &open(&hermes))?,
+        "hermes screen": chrome.eval(shell, &screen(&hermes))?,
+    });
+    let _ = chrome.eval(shell, &format!("(document.querySelector('.agent-setting[data-agent={}]')?.scrollIntoView({{ block: 'center' }}), true)", js(agent)));
+    let _ = chrome.screenshot(shell, &shots.join("claude-agent-settings.png"));
+    s.ok(
+        "in Settings a Claude agent has no Open (its profile) and no screen to open; the Hermes agent has both",
+        read && settings == json!({ "claude open": false, "claude screen": false, "hermes open": true, "hermes screen": true }),
+        settings,
+    );
     Ok(())
 }
 
