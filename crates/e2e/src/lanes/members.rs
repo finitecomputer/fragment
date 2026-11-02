@@ -553,14 +553,24 @@ pub fn reach(s: &mut Suite, api: &Api) -> Result<()> {
         let r = api.signed(&owner, "GET", "/api/fragments", None).ok();
         r.and_then(|r| r.body["fragments"].as_array().and_then(|a| a.iter().find(|f| f["name"] == n).cloned())).unwrap_or(Value::Null)
     };
+    // while held, its alarm sends no list row (`hold-rows`): a row its
+    // owner's list shows was sent by the request that queued it, never by
+    // a pass of the alarm (a poll 2 s off here, a meter's minute anywhere)
+    let hold_rows = |n: &str, on: bool| -> Result<()> {
+        let r = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": n, "op": "hold-rows", "on": on })))?;
+        anyhow::ensure!(r.status == 200, "hold-rows {on} on {n}: {r}");
+        Ok(())
+    };
 
     // a key on an app its link opens (as it is made) waits for it to be private
     let r = put_key(&name)?;
     s.ok("a key on an app whose link opens it is refused (403 unshare_first): it is made private first", refused(&r, "unshare_first") && r.text.contains("make it private first"), &r);
     anyhow::ensure!(visibility(&name, "members")?.status == 200, "made private");
+    hold_rows(&name, true)?;
     let r = put_key(&name)?;
     let status = api.status(&owner, &name)?;
     let listed = s.eventually(Duration::from_secs(10), || row(&name)["sharing"]["reach"] == true);
+    hold_rows(&name, false)?;
     s.ok(
         "private, it takes the key, and its status and its owner's row say it has reach",
         r.status == 200 && status.body["reach"] == true && listed,
@@ -617,8 +627,10 @@ pub fn reach(s: &mut Suite, api: &Api) -> Result<()> {
     // its owner's row, sent before the release, says no reach until its
     // first request after it tells it once
     let unaware = row(&old)["sharing"].get("reach").is_none();
+    hold_rows(&old, true)?;
     let serves = api.status(&bea, &old)?;
     let told = s.eventually(Duration::from_secs(10), || row(&old)["sharing"]["reach"] == true);
+    hold_rows(&old, false)?;
     s.ok("one from before the release tells its owner's row its reach on its first request after it", unaware && told, json!({ "unaware": unaware, "row": row(&old)["sharing"] }));
     let yes = api.signed(&ivy, "POST", &format!("/api/invites/{old}/accept"), None)?;
     let further = [visibility(&old, "public")?, invite(&old, &api.person()?)?];
