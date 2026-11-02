@@ -351,6 +351,8 @@ details.tools.rolling.advanced > .step:nth-last-child(4) { display: block; overf
 .options form.words:focus-within { border-color: var(--chat-agent-color, var(--border-strong)); }
 .options form.words input { flex: 1; min-width: 0; border: 0; outline: 0; background: none; color: inherit; font: inherit; font-size: 16px; }
 .options form.words input:disabled { opacity: .42; }
+/* a code for the computer alone, masked without being a password (chat.js, `computerField`) */
+.options form.words input.masked { -webkit-text-security: disc; }
 .options form.words button { display: grid; place-items: center; width: 26px; min-height: 26px; height: 26px; padding: 0; border: 0; border-radius: 50%; background: var(--primary); color: var(--primary-foreground); }
 .options form.words button svg { width: 14px; height: 14px; }
 .prompt-note { margin-top: 10px; font-size: 12.5px; color: var(--text-tertiary); }

@@ -67,6 +67,13 @@ fn shows(chrome: &mut Browser, page: &Page, cond: &str) -> bool {
 /// not works (FIN-353).
 const WAITING_FOR_YOU: &str = "document.getElementById('text').placeholder.endsWith(' is waiting for you')";
 
+/// A card's code for the computer alone (chat.js `computerField`), applied
+/// to its field: masked by CSS, not a password field (which every password
+/// manager offers to save: Paul, 2026-11-02), with each manager's hint to
+/// leave it be, no name and no form history.
+const MASKED_CODE: &str = "((f) => !!f && f.type === 'text' && getComputedStyle(f).webkitTextSecurity === 'disc' && !f.name && f.autocomplete === 'off' \
+    && f.dataset.bwignore === 'true' && f.dataset['1pIgnore'] === 'true' && f.dataset.lpignore === 'true' && f.dataset.formType === 'other')";
+
 /// A chat page whose first live socket is never answered (its upgrade held,
 /// as a dropped connection or a phone's changing network leaves one: the
 /// library dialled again only on a close, so the page waited for its hello
@@ -1106,19 +1113,24 @@ fn card_to_computer(s: &mut Suite, api: &Api, chrome: &mut Browser, owner: &Keys
     chrome.type_text(&frame, "code-card")?;
     chrome.press(&frame, "Enter", false)?;
     let field = ".prompt:not(.closed) input[data-option=\"code\"]";
-    let asked = chrome.until(&frame, &format!("document.querySelector({0})?.type === 'password' && !document.querySelector({0}).disabled", js(field)), TURN);
+    let asked = chrome.until(&frame, &format!("{MASKED_CODE}(document.querySelector({0})) && !document.querySelector({0}).disabled", js(field)), TURN);
     let _ = chrome.screenshot(&shell, &shots.join("card-to-computer.png"));
     s.ok(
-        "a card whose option is the computer's shows a masked field, saying it goes straight to the computer, and the message box does not answer it: it says the agent waits for them",
+        "a card whose option is the computer's shows a masked field, not a password one (no password manager offers to keep it), saying it goes straight to the computer, and the message box does not answer it: it says the agent waits for them",
         asked
             && chrome.eval(&frame, "document.querySelector('.prompt:not(.closed) .prompt-note')?.textContent ?? ''")?.as_str().is_some_and(|n| n.contains("straight to your computer"))
             // and the message box is no answer to it (a message is a record)
             && shows(chrome, &frame, WAITING_FOR_YOU),
-        json!({ "card": chrome.eval(&frame, "document.querySelector('.prompt:not(.closed)')?.innerText ?? null")?, "placeholder": chrome.eval(&frame, "document.getElementById('text').placeholder")? }),
+        json!({
+            "card": chrome.eval(&frame, "document.querySelector('.prompt:not(.closed)')?.innerText ?? null")?,
+            "field": chrome.eval(&frame, &format!("(() => {{ const f = document.querySelector({}); return f && [f.type, getComputedStyle(f).webkitTextSecurity, f.outerHTML]; }})()", js(field)))?,
+            "placeholder": chrome.eval(&frame, "document.getElementById('text').placeholder")?,
+        }),
     );
     if asked {
         chrome.click(&frame, field)?;
         chrome.type_text(&frame, "the-code-123")?;
+        let _ = chrome.screenshot(&shell, &shots.join("card-to-computer-typed.png"));
         chrome.press(&frame, "Enter", false)?;
     }
     let took = chrome.until(&frame, "[...document.querySelectorAll('.msg.agent:not(.streaming) .md')].some((m) => m.textContent.includes('(took 12 characters)'))", TURN);
@@ -1199,7 +1211,7 @@ fn claude_install(s: &mut Suite, api: &Api, chrome: &mut Browser, owner: &Keys, 
 
     // signed out: the sign-in card, its link and its masked field
     let field = ".prompt:not(.closed) input[data-option=\"code\"]";
-    let card = |chrome: &mut Browser, says: &str| chrome.until(&page, &format!("document.querySelector({0})?.type === 'password' && !document.querySelector({0}).disabled && (document.querySelector('.prompt:not(.closed) .prompt-text')?.textContent ?? '').startsWith({1})", js(field), js(says)), TURN);
+    let card = |chrome: &mut Browser, says: &str| chrome.until(&page, &format!("{MASKED_CODE}(document.querySelector({0})) && !document.querySelector({0}).disabled && (document.querySelector('.prompt:not(.closed) .prompt-text')?.textContent ?? '').startsWith({1})", js(field), js(says)), TURN);
     let signing = card(chrome, CLAUDE_SIGN_IN_ASK) && shows(chrome, &page, WAITING_FOR_YOU) && shows(chrome, &shell, &row_waits);
     let ran = records(api, owner, &chat, "work").iter().any(|r| r["body"]["kind"] == "turn.step" && r["body"]["args"] == "Anthropic's installer (Claude Code 2.1.316)");
     let link = chrome.eval(&page, "document.querySelector('.prompt:not(.closed) .prompt-text a')?.href ?? ''")?;

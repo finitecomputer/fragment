@@ -86,7 +86,7 @@ Every change is checked against this table.
 | The image a computer's next start runs | each image name's reference in the Worker version; a computer's pin names one | the Computer DO's last look, recorded as the image each life runs |
 | An agent's name and picture | its fragment at live: `meta.title` and `avatar.png` (docs/api.md, "An agent's name and picture") | its cell's face, and everything read from it; its computer's profile and SimpleX profile follow a rename; no chat title or `SOUL.md` copies it; its label never changes |
 | An agent's role | its fragment at live: `meta.role` | its status's `agentRole`, which its runtime tells it at each turn |
-| An agent's runtime, tier, or its own models and efforts | its `agent.json` in git (`runtime`, `hermes` unless named; docs/computers.md) | its computer's bridge and profile config; Settings and the agent's page read it |
+| An agent's runtime, tier, or its own models and efforts | its `agent.json` in git (`runtime`, `hermes` unless named; `claude.model` and `claude.effort` for Claude Code; docs/computers.md, docs/bridge.md) | its computer's bridge and profile config; Settings and the agent's page read it |
 | An agent's home | its `agent.json` `home` in git (docs/api.md, "An agent's home") | read by the shell, its computer's profile and the bridge; none kept |
 | An agent's SimpleX chat | its owner's chat `<agent label>-simplex`, the agent in it | its name in the link's file, chosen once, before the chat is made |
 | An agent's SimpleX door | the agent fragment's `meta` `door`, written only by redeeming its owner's latest ticket (docs/api.md, "An agent's doors") | its private key on the computer; a relayed record is taken only signed by the key the fragment holds |

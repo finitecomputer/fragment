@@ -4313,6 +4313,11 @@ sys.exit(subprocess.run([env.get("SHELL", "/bin/sh"), "-c", sys.argv[2]], env=en
     let installed = on_disk(&c);
     eprintln!("claude install: {version}; on disk:\n{installed}");
     assert!(installed.contains("/data/hermes/.local/share/claude/versions/") && installed.trim_end().ends_with("hermes"), "Anthropic's layout, the person's (hermes'): {installed}");
+    // an agent's Claude settings become these flags (`claude.model`,
+    // `claude.effort`): the installed Claude Code takes both, unwarned
+    // (signed out, it calls no model)
+    let (_, took) = in_session("claude -p --model haiku --effort low hi </dev/null 2>&1");
+    assert!(took.contains("Not logged in") && !took.contains("Warning") && !took.contains("unknown option"), "the installed Claude Code takes --model and --effort: {took}");
 
     // the agent runs it: no one signed in, its turn asks its person to sign
     // in; a code that is not one is called invalid and asked again
