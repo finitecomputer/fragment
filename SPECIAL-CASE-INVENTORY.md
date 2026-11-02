@@ -50,11 +50,12 @@ These are fragments or computers, or components any fragment may use:
   ones run the platform's current template version.
 - A computer's screen is a page its image serves, reached through the
   generic port proxy.
-- Platform components any fragment may use: the vault UI (files and
-  notes, used by brains), the browser library (`__fragment.js`), the
-  markdown renderer (`__markdown.js`: markdown to DOM, never markup; the
-  vault UI, the chat and the notes viewer use it), and the stylesheet a
-  page may link (`__fragment.css`).
+- Platform components any fragment may use: the files view (`__files`:
+  its files, its own search, and a template's declared layer; a brain's
+  and a notes vault's page, by `files.page`), the browser library
+  (`__fragment.js`), the markdown renderer (`__markdown.js`: markdown to
+  DOM, never markup; the files view and the chat use it), and the
+  stylesheet a page may link (`__fragment.css`).
 
 Which connectors may be linked, and the exact TCP targets a computer's relay carries for them, are the deployment's policy (`connectors`; docs/computers.md, "Connector policy"), never an image's declaration. Relay leases and the computer's pooled quotas stay the platform's.
 

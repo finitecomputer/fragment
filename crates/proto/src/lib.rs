@@ -1942,18 +1942,23 @@ pub enum TriggerOn {
     /// template's changed release re-installed. Always `true` (the
     /// manifest refuses any other value).
     Installed(bool),
+    /// The fragment's object waking for someone: the first request of its
+    /// activation that a person or an agent made, never an alarm or the
+    /// platform's own. At most once per activation. Always `true`.
+    Woke(bool),
 }
 
 impl TriggerOn {
     /// What starts it, and on what: `("cron", schedule)`, `("channel",
-    /// channel)`, `("files", pattern)`, or `("installed", "")`; the names
-    /// are its wire keys.
+    /// channel)`, `("files", pattern)`, `("installed", "")` or `("woke",
+    /// "")`; the names are its wire keys.
     pub fn parts(&self) -> (&'static str, &str) {
         match self {
             TriggerOn::Cron(c) => ("cron", c),
             TriggerOn::Channel(c) => ("channel", c),
             TriggerOn::Files(f) => ("files", f),
             TriggerOn::Installed(_) => ("installed", ""),
+            TriggerOn::Woke(_) => ("woke", ""),
         }
     }
 
@@ -1963,6 +1968,7 @@ impl TriggerOn {
             "channel" => Some(TriggerOn::Channel(target)),
             "files" => Some(TriggerOn::Files(target)),
             "installed" => Some(TriggerOn::Installed(true)),
+            "woke" => Some(TriggerOn::Woke(true)),
             _ => None,
         }
     }
@@ -2026,11 +2032,12 @@ pub enum Via {
     Channel,
     Files,
     Installed,
+    Woke,
     Unknown(String),
 }
 
 impl Via {
-    const KNOWN: [Via; 6] = [Via::Call, Via::Job, Via::Cron, Via::Channel, Via::Files, Via::Installed];
+    const KNOWN: [Via; 7] = [Via::Call, Via::Job, Via::Cron, Via::Channel, Via::Files, Via::Installed, Via::Woke];
 
     pub fn as_str(&self) -> &str {
         match self {
@@ -2040,6 +2047,7 @@ impl Via {
             Via::Channel => "channel",
             Via::Files => "files",
             Via::Installed => "installed",
+            Via::Woke => "woke",
             Via::Unknown(s) => s,
         }
     }
@@ -2375,6 +2383,9 @@ mod tests {
         let installed = TriggerOn::Installed(true);
         assert_eq!(TriggerOn::from_parts("installed", String::new()), Some(installed.clone()));
         assert_eq!(serde_json::to_value(&installed).unwrap(), serde_json::json!({ "installed": true }));
+        let woke = TriggerOn::Woke(true);
+        assert_eq!(TriggerOn::from_parts("woke", String::new()), Some(woke.clone()));
+        assert_eq!(serde_json::to_value(&woke).unwrap(), serde_json::json!({ "woke": true }));
         assert_eq!(TriggerOn::from_parts("webhook", "x".into()), None);
     }
 
@@ -2646,7 +2657,7 @@ mod tests {
             assert_eq!(serde_json::to_value(&v).unwrap(), v.as_str());
         }
         assert!(!Via::Call.triggered() && !Via::Job.triggered());
-        assert!(Via::Cron.triggered() && Via::Channel.triggered() && Via::Files.triggered() && Via::Installed.triggered());
+        assert!(Via::Cron.triggered() && Via::Channel.triggered() && Via::Files.triggered() && Via::Installed.triggered() && Via::Woke.triggered());
         for t in [Tier::Cheap, Tier::Medium, Tier::High] {
             assert_eq!(Tier::parse(t.as_str()), Some(t));
             assert_eq!(serde_json::to_value(t).unwrap(), t.as_str());

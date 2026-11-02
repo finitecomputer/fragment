@@ -283,7 +283,7 @@ mod tests {
             ("tools/config.cjs", Some(InputType::CommonJs)),
             ("cell/src/lib.rs", None),
             ("templates/todo/site/index.html", None),
-            ("templates/notes/site/assets/viewer.js.map", None),
+            ("templates/sessions/site/sessions.js.map", None),
             ("package.json", None),
         ] {
             assert_eq!(input_type(path), kind, "{path}");
@@ -291,7 +291,7 @@ mod tests {
     }
 
     /// The walk over the repo itself finds the shell, the templates' site
-    /// and app code (the notes viewer's among them), the classic service
+    /// and app code (the session archive's page among them), the classic service
     /// worker and every test, and leaves out vendored code.
     #[test]
     fn the_walk_covers_the_shell_and_templates_and_skips_vendored_code() {
@@ -308,7 +308,7 @@ mod tests {
         assert_eq!(kind("cell/shell/launcher.js"), Some(InputType::Module));
         assert_eq!(kind("templates/todo/app.mjs"), Some(InputType::Module));
         assert_eq!(kind("templates/chat/site/chat.js"), Some(InputType::Module));
-        assert_eq!(kind("templates/notes/site/assets/viewer.js"), Some(InputType::Module));
+        assert_eq!(kind("templates/sessions/site/sessions.js"), Some(InputType::Module));
         assert_eq!(kind("cell/markdown.mjs"), Some(InputType::Module));
         assert_eq!(kind("cell/sw.js"), Some(InputType::CommonJs));
         assert_eq!(kind("cell/shell/alerts-sw.js"), Some(InputType::CommonJs));

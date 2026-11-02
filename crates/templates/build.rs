@@ -14,9 +14,8 @@
 // no shell: `ALL` is the templates a person or an agent scaffolds, and
 // `SHELL` is empty, so neither is an input of the CLI's build.
 //
-// A template may hold another's files through a symlink (the brain's
-// viewer is the notes template's, `templates/brain/site/assets`; the
-// chat's agent.png is the agent's, and so is the shell's): one asset, and
+// A template may hold another's files through a symlink (the chat's
+// agent.png is the agent's, and so is the shell's): one asset, and
 // embedded, its bytes are in a binary once. A symlink in a template that
 // leaves templates/ fails the build.
 use std::collections::BTreeMap;

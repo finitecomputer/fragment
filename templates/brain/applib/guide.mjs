@@ -1,6 +1,7 @@
-// The brain's AGENTS.md: how an agent keeps a brain, shown as AGENTS.md at
-// the top of its viewer (api/file?path=AGENTS.md) and answered by its
-// guide operation (app.mjs; fragment call <brain> guide --input '{}').
+// The brain's AGENTS.md: how an agent keeps a brain, listed as AGENTS.md
+// among its files (the template's AGENTS.md, which its tests hold to this
+// text) and answered by its guide operation (app.mjs; fragment call
+// <brain> guide --input '{}').
 // It is the release's (decision 40), so every brain reads the
 // same one and it updates with the platform; a wiki's own AGENTS.md, in the
 // brain's files, adds to it. Adapted from Finite Brain's wiki skill
@@ -33,9 +34,9 @@ own index and log.
       datasets/     manifests, schemas, samples, query recipes
       output/       reports, plans, summaries and other deliverables
 
-At the top level, fragment.json holds the brain's title, and _index.md is
-the brain's own list of its wikis (made for you: never write one).
-Everything else at the top level is a wiki.
+At the top level, fragment.json holds the brain's title, and index.md is
+its front page: the platform's, unless the brain holds one of its own.
+Each folder at the top level is a wiki.
 
 ## Working on a brain
 
@@ -199,7 +200,7 @@ references and a parent's job confer no reader credentials.
 - Each wiki's index.md and log.md speak of that wiki alone.
 - Prefer updating a page to making a near-duplicate. Delete a page only
   when someone asks you to.
-- Never write _index.md, app.mjs, applib/ or site/: the brain's code is
+- Never write app.mjs, applib/ or site/: the brain's code is
   the platform's, and a brain that carries code of its own is a fork.
 - Everyone the brain is shared with (fragment members) reads all of it.
   There are no folder permissions and no encryption: put what a narrower

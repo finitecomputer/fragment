@@ -188,11 +188,8 @@ mod tests {
     use super::*;
     use crate::tests::bytes_of;
 
-    fn text(t: &Template, path: &str) -> String {
-        String::from_utf8(bytes_of(t, t.file(path).unwrap_or_else(|| panic!("{} has {path}", t.name)))).expect("UTF-8")
-    }
-
-    /// Every blessed template parses, names its kind, has a page, and its
+    /// Every blessed template parses, names its kind, has a page (its own,
+    /// or the files view its manifest makes its page), and its
     /// code, when it carries some, is within an app's limits and runs the
     /// operations its manifest declares (a chat's push, from its trigger).
     #[test]
@@ -202,7 +199,7 @@ mod tests {
             let m = manifest(name, &bytes_of(t, manifest_file(name).unwrap())).unwrap();
             assert!(m.kind.is_some(), "{name} names its kind");
             assert!(m.template.is_none(), "{name} names no template itself");
-            assert!(site_file(name, "site/index.html").is_some(), "{name} has a page");
+            assert!(site_file(name, "site/index.html").is_some() || m.files.as_ref().is_some_and(|f| f.page), "{name} has a page");
             assert_eq!(release(name), Some(t.release), "its release is the build's hash of its files");
             match code_files(name).unwrap_or_else(|e| panic!("{name}: {}", e.message())) {
                 Some(files) => {
@@ -239,29 +236,23 @@ mod tests {
         assert_eq!(crate::shell("agent.png").map(|f| f.sha256), Some(agent.sha256), "the shell's too");
     }
 
-    /// Goal: a brain (decision 30) is the notes viewer and the brain's own
-    /// code, all of it the template's. Method: its page loads the viewer and
-    /// its search; the viewer's files are the notes template's very bytes
-    /// (one asset, through the symlink build.rs follows), plain source that
-    /// renders with the platform's renderer and carries no bundle; its code carries
-    /// its sections and its guide, which is one template literal; its file
-    /// trigger keeps the index.
+    /// Goal: a brain (decision 30) is the platform's files view with the
+    /// brain's own code, all of it the template's (FIN-372). Method: it
+    /// carries no page of its own; its manifest makes the files view its
+    /// page, with its status line, and its triggers keep the index as main
+    /// moves, as a release installs, and as someone comes back; its data
+    /// are its guide and front page; its code carries its sections and its
+    /// guide, which is one template literal.
     #[test]
-    fn a_brain_is_the_notes_viewer_and_its_own_search() {
+    fn a_brain_is_the_files_view_and_its_own_code() {
         let brain = template("brain").unwrap();
-        let page = text(brain, "site/index.html");
-        assert!(page.contains("assets/viewer.js") && page.contains("brain.js"), "its page is the viewer and its search");
-        let viewer = crate::NOTES.files.iter().filter(|f| f.path.starts_with("site/assets/")).map(|f| f.path).collect::<Vec<_>>();
-        assert_eq!(viewer, ["site/assets/viewer.css", "site/assets/viewer.js"], "the viewer is two files of source, no bundle");
-        let source = text(&crate::NOTES, "site/assets/viewer.js");
-        assert!(source.contains("from \"../__markdown.js\""), "it renders with the platform's renderer");
-        for f in crate::NOTES.files.iter().filter(|f| f.path.starts_with("site/assets/")) {
-            let mine = site_file("brain", f.path).unwrap_or_else(|| panic!("the brain serves the viewer's {}", f.path));
-            assert_eq!(mine.sha256, f.sha256, "{} is one asset", f.path);
-        }
+        assert!(brain.files.iter().all(|f| !f.path.starts_with("site/")), "no page of its own");
+        assert_eq!(data("brain").iter().map(|f| f.path).collect::<Vec<_>>(), ["AGENTS.md", "index.md"], "its guide and its front page");
         let m = manifest("brain", &bytes_of(brain, manifest_file("brain").unwrap())).unwrap();
         assert_eq!(m.kind(), fragment_proto::FragmentKind::Brain);
-        assert!(m.triggers.iter().any(|t| t.run == "changed"), "a file trigger keeps its index");
+        assert_eq!(m.files, Some(fragment_core::manifest::FilesDecl { page: true, home: None, status: Some("index_status".into()) }), "its page is the files view");
+        let on: Vec<&str> = m.triggers.iter().filter(|t| t.run == "changed").map(|t| t.on.parts().0).collect();
+        assert_eq!(on, ["files", "installed", "woke"], "its index kept as main moves, a release installs, and someone comes back");
         let files = code_files("brain").unwrap().expect("a brain carries code");
         let c = code("brain", files.into_iter().map(|f| (f, bytes_of(brain, f))).collect()).unwrap();
         assert!(c.modules.contains_key("applib/sections.mjs") && c.modules.contains_key("applib/guide.mjs"), "{:?}", c.modules.keys());

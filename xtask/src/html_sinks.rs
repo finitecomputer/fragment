@@ -290,7 +290,7 @@ mod tests {
     fn the_repo_holds_no_html_sink() {
         let root = devstack::repo_root();
         let found = sources(&root).expect("the repo's sources");
-        for path in ["cell/markdown.mjs", "cell/files.mjs", "cell/shell/shell.js", "templates/chat/site/chat.js", "templates/notes/site/assets/viewer.js", "templates/notes/site/index.html"] {
+        for path in ["cell/markdown.mjs", "cell/files.mjs", "cell/shell/shell.js", "templates/chat/site/chat.js", "templates/sessions/site/sessions.js", "templates/todo/site/index.html"] {
             assert!(found.iter().any(|s| s.path == path), "{path} is scanned");
         }
         check(&found, &ALLOWED).expect("no HTML sink in first-party JavaScript");
