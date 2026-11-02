@@ -76,7 +76,9 @@ function windowGlow(pane) {
   return () => { clear(); events.abort(); for (const controller of frameEvents.values()) controller.abort(); };
 }
 
-export function createViewer({ stack, onChange = () => {} }) {
+// `still()`: whether windows hold still, never moved by an animation of
+// their own (a phone's sheet: shell.js).
+export function createViewer({ stack, onChange = () => {}, still = () => false }) {
   const panes = []; // { key, el, gutter, size (fr), persist }
   let split = null;
   let solo = null; // key of the maximized pane
@@ -85,9 +87,14 @@ export function createViewer({ stack, onChange = () => {} }) {
   const dragStyle = frameWriter();
   const bounds = () => new Map(panes.filter(p => !p.el.hidden && !p.closing).map(p => [p.key, p.el.getBoundingClientRect()]));
   const cancelMotion = (p) => { p.motion?.cancel(); p.motion = null; };
+  // A window's motion: none where windows hold still (`still`). On a
+  // phone's sheet a window is placed by the grid alone: Safari 26 may never
+  // start an animation (WebKit bug 299823), and a FLIP that never starts
+  // holds the window at its first frame, its old place, until it closes
+  // (Paul, 2026-11-02: one left offset in the sheet).
   function animatePane(p, frames, options) {
     cancelMotion(p);
-    if (reducedMotion.matches || !p.el.getBoundingClientRect().height) return null;
+    if (reducedMotion.matches || still() || !p.el.getBoundingClientRect().height) return null;
     const motion = p.el.animate(frames, options);
     p.motion = motion;
     motion.onfinish = () => { if (p.motion === motion) { p.motion = null; motion.cancel(); } };
@@ -109,10 +116,16 @@ export function createViewer({ stack, onChange = () => {} }) {
       }
     }
   }
-  reducedMotion.addEventListener("change", () => {
-    if (!reducedMotion.matches) return;
+  // Every window where the layout puts it now: a motion begun from another
+  // layout is dropped, and one closing is gone.
+  function settleAll() {
     for (const p of [...panes]) { if (p.closing) finishClose(p); else cancelMotion(p); }
-  });
+  }
+  reducedMotion.addEventListener("change", () => { if (reducedMotion.matches) settleAll(); });
+  // a motion measured against the window as it was (its size, Safari's bars)
+  // is not this layout's: each window placed again from the settled layout
+  addEventListener("resize", settleAll);
+  window.visualViewport?.addEventListener("resize", settleAll);
 
   function relayout(previous = bounds()) {
     dragStyle.flush();
