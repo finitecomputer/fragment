@@ -255,7 +255,18 @@ pub(super) fn check(s: &mut Suite, api: &Api, owner: &Keys, session: &str, chrom
     chrome.eval(&page, &format!("(() => {{ window.__frame.contentWindow.postMessage({absent}, location.origin); return true; }})()"))?;
     s.ok("without a phase the page waits plainly, without claiming the agent is working", super::shows(chrome, &page, "window.__frame.contentDocument.querySelector('.working')?.textContent === 'Waiting for Bob…'"), "");
     chrome.eval(&page, "(() => { const w = window.__frame.contentWindow; window.__now = w.Date.now; w.Date.now = () => window.__now() + 91000; w.postMessage({fragment:'agents',agents:[]}, location.origin); return true; })()")?;
-    s.ok("after ninety seconds without a turn the page says a reply has not started", super::shows(chrome, &page, "window.__frame.contentDocument.querySelector('.working')?.textContent.includes('has not started a reply yet')"), "");
+    let late = super::shows(chrome, &page, "window.__frame.contentDocument.querySelector('.working')?.textContent.includes('has not started a reply yet')");
+    // what the frame shows when it does not say so (one CI run failed with
+    // nothing to read, 41271812848): its waiting lines, its composer, its
+    // clock against the page's, and the person's last messages there
+    let shown = if late {
+        Value::Null
+    } else {
+        chrome
+            .eval(&page, "(() => { const w = window.__frame.contentWindow; const d = w.document; return { working: [...d.querySelectorAll('.working')].map((l) => l.textContent), placeholder: d.getElementById('text')?.placeholder ?? null, ahead: w.Date.now() - window.__now(), mine: [...d.querySelectorAll('.msg.user.mine')].slice(-2).map((m) => [m.dataset.seq ?? null, m.querySelector('.bubble')?.textContent ?? null, m.className]), url: w.location.href }; })()")
+            .unwrap_or(Value::Null)
+    };
+    s.ok("after ninety seconds without a turn the page says a reply has not started", late, shown);
     chrome.eval(&page, "(() => { window.__frame.contentWindow.Date.now = window.__now; return true; })()")?;
     let cause = super::super::jobs::records(api, owner, &name, "chat").into_iter().find(|r| r["body"]["text"] == "A slow first reply").unwrap_or_default();
     let started = api.signed(&hand, "POST", &format!("/api/f/{name}/channels/work"), Some(&json!({ "id": "fixture-new", "body": { "kind": "turn.start", "turn": "fixture-new", "agent": agent, "asker": api.identity(owner)?, "cause": { "channel": "chat", "seq": cause["seq"] } } })))?;
