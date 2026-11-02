@@ -107,7 +107,8 @@ export function knownAt(hit, kind) {
  * `iconOf`, `primaryAgent`, `newChatAgent`, `agentsOwnChat`, `UNTITLED`, `openChat`,
  * `openApp`, `chatFrame`, `composeIn`, `newChat`, `leaveSidebar`,
  * `closeMenu`, `notice`, `prewake`, `originOf`, `dropFrame`: a chat's frame
- * let go with its stand-in), and three it reads late:
+ * let go with its stand-in), `offers` (what an agent's runtime offers:
+ * agent-runtimes.js), and three it reads late:
  * `views()` (how many views the middle column has been given: `openChat`
  * and `openSettings` count them), `busy(name)` (whether a chat's page holds
  * what no storage keeps: files chosen, a voice memo) and `setupChat()` (the
@@ -120,7 +121,7 @@ export function knownAt(hit, kind) {
  */
 export function createLauncher(shell) {
   const { $, el, api, seg, state, byName, isChat, titleOf, chatTitle, mark, iconOf, primaryAgent, newChatAgent, agentsOwnChat, UNTITLED } = shell;
-  const { openChat, openApp, chatFrame, composeIn, newChat, leaveSidebar, closeMenu, notice, prewake, originOf } = shell;
+  const { openChat, openApp, chatFrame, composeIn, newChat, leaveSidebar, closeMenu, notice, prewake, originOf, offers } = shell;
   const input = $("workspace-search");
   const dialog = $("search-dialog");
 
@@ -157,9 +158,20 @@ export function createLauncher(shell) {
   // Attachments), each uploaded to the chat once it is made.
   let launchFiles = []; // { file, url }: url, an image's preview
 
+  // Where a hit opens: a chat, or its page; an agent whose runtime offers no
+  // page (a Claude agent: agent-runtimes.js) its own chat, and none when it
+  // has none, so it is not listed.
+  function opensTo(name) {
+    if (isChat(name)) return { chat: name };
+    if (byName(name)?.kind !== "agent" || offers(name, "profile")) return { app: name };
+    const own = agentsOwnChat(name)?.name;
+    return own ? { chat: own } : null;
+  }
   function openFound(name) {
+    const to = opensTo(name);
     closeSearch();
-    if (isChat(name)) openChat(name); else openApp(name);
+    if (to?.chat) openChat(to.chat);
+    else if (to) openApp(to.app);
     leaveSidebar();
   }
   // A knowledge hit's page: a brain's in the desktop at that page (its
@@ -191,6 +203,7 @@ export function createLauncher(shell) {
     return row;
   }
   function foundRow(name, preview, extra) {
+    if (!opensTo(name)) return null;
     const f = byName(name);
     const row = el("button", "row search-result");
     row.type = "button";
@@ -236,10 +249,10 @@ export function createLauncher(shell) {
       // a message in a fragment the list has not shown yet is left out until it has
       ["Messages", messages.filter((m) => byName(m.fragment)).map((m) => {
         const row = foundRow(m.fragment, m.snippet, el("span", "meta", when(m.at)));
-        row.classList.add("search-message");
-        row.dataset.seq = String(m.seq);
+        row?.classList.add("search-message");
+        if (row) row.dataset.seq = String(m.seq);
         return row;
-      })],
+      }).filter(Boolean)],
     ];
     let count = 0;
     for (const [heading, rows] of groups) {

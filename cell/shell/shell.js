@@ -1538,7 +1538,7 @@ const { retitle, rename } = createTitles({ $, api, seg, byName, titleOf, reload:
 // ---- the launcher (launcher.js): one input for starting a chat or finding one again ----
 const launcher = createLauncher({
   $, el, api, seg, state, byName, isChat, titleOf, chatTitle, mark, iconOf, primaryAgent, newChatAgent, agentsOwnChat, UNTITLED,
-  openChat, openApp, chatFrame, composeIn, newChat, leaveSidebar, closeMenu, notice, prewake: () => prewake(), originOf,
+  openChat, openApp, chatFrame, composeIn, newChat, leaveSidebar, closeMenu, notice, prewake: () => prewake(), originOf, offers,
   views: () => views,
   busy: (name) => refresh.isBusy(state.frames.get(name)),
   setupChat: () => onboarding.setupChat(),
