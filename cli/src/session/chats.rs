@@ -316,8 +316,8 @@ pub(crate) mod tests {
     fn an_export_reads_as_its_conversations() {
         let root = super::super::tempdir();
         export(&root);
-        assert_eq!(root_of(&root).as_deref(), Some(root.as_path()));
-        assert_eq!(root_of(&root.join("chats")).as_deref(), Some(root.as_path()));
+        assert_eq!(root_of(&root).as_deref(), Some(&*root));
+        assert_eq!(root_of(&root.join("chats")).as_deref(), Some(&*root));
         assert_eq!(root_of(&root.join("chats/sessions")), None);
         let mut s = spool();
         let problems = read(&root, &mut s).unwrap();

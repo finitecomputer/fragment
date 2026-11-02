@@ -813,7 +813,8 @@ pub(crate) mod tests {
     }
 
     fn read_sql(sql: &str) -> (Spool, Vec<Session>) {
-        let path = super::super::tempdir().join("state.db");
+        let dir = super::super::tempdir();
+        let path = dir.join("state.db");
         database(&path, sql);
         read_path(&path)
     }
@@ -862,7 +863,8 @@ pub(crate) mod tests {
     /// continuation of one conversation; a second conversation beside it.
     #[test]
     fn a_conversation_that_cannot_be_read_whole_is_refused_whole() {
-        let path = super::super::tempdir().join("state.db");
+        let dir = super::super::tempdir();
+        let path = dir.join("state.db");
         let db = Connection::open(&path).unwrap();
         db.execute_batch(&SCHEMA.replace("CREATE TABLE messages ", "CREATE TABLE stored ")).unwrap();
         db.execute_batch(
@@ -1037,7 +1039,8 @@ and peas?',210,1,'hidden');
         assert_eq!(spool.refused.len(), 1);
         assert_eq!(spool.refused[0].id, "big");
 
-        let path = super::super::tempdir().join("state.db");
+        let dir = super::super::tempdir();
+        let path = dir.join("state.db");
         database(&path, &format!("WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i <= {SESSIONS_READ_MAX}) INSERT INTO sessions (id, source, started_at) SELECT 's' || i, 'cli', i FROM n;"));
         let e = read(&path, &mut Spool::new(BTreeSet::new()).unwrap(), None).unwrap_err();
         assert!(format!("{e:#}").contains("past the 200000 an import reads"), "{e:#}");
@@ -1075,7 +1078,8 @@ and peas?',210,1,'hidden');
     /// Goal: a read changes nothing: the database is opened read-only.
     #[test]
     fn a_read_writes_nothing() {
-        let path = super::super::tempdir().join("state.db");
+        let dir = super::super::tempdir();
+        let path = dir.join("state.db");
         database(&path, "INSERT INTO sessions VALUES ('a','cli',NULL,NULL,NULL,NULL,NULL,1,NULL,NULL,NULL,NULL,NULL);");
         let before = std::fs::read(&path).unwrap();
         read_path(&path);
@@ -1093,7 +1097,8 @@ and peas?',210,1,'hidden');
         let (mine, sibling) = (root.join("profiles/juniper"), root.join("profiles/maple"));
         std::fs::create_dir_all(&mine).unwrap();
         std::fs::create_dir_all(&sibling).unwrap();
-        let elsewhere = super::super::tempdir().join("state.db");
+        let away = super::super::tempdir();
+        let elsewhere = away.join("state.db");
         for db in [root.join("state.db"), sibling.join("state.db"), mine.join("state.db"), elsewhere.clone()] {
             database(&db, "");
         }
@@ -1216,7 +1221,8 @@ for table in ("sessions", "messages"):
     /// delegate, and one whose parent a prune let go.
     #[test]
     fn what_hermes_wrote_reads_as_hermes_shows_it() {
-        let path = super::super::tempdir().join("state.db");
+        let dir = super::super::tempdir();
+        let path = dir.join("state.db");
         // its other tables (a prompt's hash) left out: their keys are not this test's
         Connection::open(&path).unwrap().execute_batch(&format!("PRAGMA foreign_keys = OFF;\n{FIXTURE}")).unwrap();
         let (spool, all) = read_path(&path);
