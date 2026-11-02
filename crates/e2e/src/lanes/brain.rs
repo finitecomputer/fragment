@@ -576,18 +576,28 @@ pub fn brain_release(s: &mut Suite, api: &Api) -> Result<()> {
         st["indexing"] == false && st["pending"] == 0
     });
     let visit_ms = t0.elapsed().as_millis() as u64;
-    // the run that caught it up ends a step after: its last batch finds nothing left
+    // The installed trigger's run, as the brain, ends a step after: its last
+    // batch finds nothing left. A page that opens meanwhile may start a run
+    // of its own (templates/brain/site/brain.js: behind, and no batch holding
+    // a claim yet), which the brain lets a viewer do: the card's shot of the
+    // new live opens it as an anonymous visitor. Claims keep the two off each
+    // other's pages, so that run may still be waiting out one (`CLAIM_MS`).
+    // Never a person's.
     let since = || jobs::runs(api, &keys, &name, "&op=changed").into_iter().filter(|r| !before.contains(&r["id"])).collect::<Vec<Value>>();
+    let brains = |l: &[Value]| l.iter().filter(|r| r["principal"] == own).cloned().collect::<Vec<Value>>();
     s.eventually(WAIT, || {
-        let l = since();
+        let l = brains(&since());
         !l.is_empty() && l.iter().all(|r| r["status"] != "running" && r["status"] != "queued")
     });
     let since = since();
-    let run_ms = since.first().and_then(|r| Some(r["finishedAt"].as_i64()? - r["createdAt"].as_i64()?));
+    let installed: Vec<&Value> = since.iter().filter(|r| r["via"] == "installed").collect();
+    let anonymous = |r: &Value| r["principal"].as_str().is_some_and(|p| p.starts_with("anon:"));
+    let no_person = brains(&since).iter().all(|r| r["status"] == "succeeded") && since.iter().all(|r| r["principal"] == own || anonymous(r));
+    let run_ms = installed.first().and_then(|r| Some(r["finishedAt"].as_i64()? - r["createdAt"].as_i64()?));
     println!("      a release, then one read: indexed {visit_ms} ms after the read (its installed run took {} ms)", run_ms.map_or("?".into(), |ms| ms.to_string()));
     s.ok(
-        "behind its files at an older release, one plain read installs the new release and its installed trigger catches the brain up, as the brain, no one starting a job",
-        visit["format"].is_string() && caught && since.len() == 1 && since[0]["via"] == "installed" && since[0]["status"] == "succeeded" && since[0]["principal"] == own,
+        "behind its files at an older release, one plain read installs the new release and its installed trigger catches the brain up, as the brain, no person starting a job",
+        visit["format"].is_string() && caught && installed.len() == 1 && installed[0]["principal"] == own && no_person,
         json!({ "read_to_indexed_ms": visit_ms, "run_ms": run_ms, "runs": since }),
     );
 
