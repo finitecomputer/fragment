@@ -6,6 +6,7 @@
 use std::time::Duration;
 
 use anyhow::Result;
+use serde_json::json;
 
 use crate::api::{Api, Call};
 use crate::Suite;
@@ -29,6 +30,9 @@ pub fn notes(s: &mut Suite, api: &Api) -> Result<()> {
         out.status.success() && dir.join("notes/welcome.md").is_file() && manifest["files"]["page"] == true && !dir.join("site").exists() && !dir.join("app.mjs").exists(),
         String::from_utf8_lossy(&out.stderr),
     );
+    // two notes live as deployed, then changed on main alone (below)
+    std::fs::write(dir.join("notes/kept.md"), "# kept\n\nfirst words\n")?;
+    std::fs::write(dir.join("notes/gone.md"), "# gone\n")?;
     let out = s.cli(api, &home, &["deploy", &name, "--dir", &dir_s]);
     s.ok("it deploys", out.status.success(), String::from_utf8_lossy(&out.stderr));
 
@@ -36,12 +40,18 @@ pub fn notes(s: &mut Suite, api: &Api) -> Result<()> {
     let get = |path: &str| {
         api.call(Call { method: "GET", url: format!("{}{}view={view}", api.site_url(&name, path), if path.contains('?') { "&" } else { "?" }), ..Call::default() })
     };
-    let r = api.call(Call {
-        method: "GET",
-        url: format!("{}?view={view}", api.site_url(&name, "__files")),
-        extra: vec![("accept", "application/json".into())],
-        ..Call::default()
-    })?;
+    let listing = || {
+        api.call(Call {
+            method: "GET",
+            url: format!("{}?view={view}", api.site_url(&name, "__files")),
+            extra: vec![("accept", "application/json".into())],
+            ..Call::default()
+        })
+    };
+    let commit = |r: &crate::api::Reply, path: &str| -> Option<String> {
+        r.body["files"].as_array()?.iter().find(|f| f["path"] == path).and_then(|f| f["commit"].as_str()).map(str::to_string)
+    };
+    let r = listing()?;
     let paths: Vec<&str> = r.body["files"].as_array().map(|a| a.iter().filter_map(|f| f["path"].as_str()).collect()).unwrap_or_default();
     s.ok(
         "its files view lists the notes, not the machinery",
@@ -56,6 +66,31 @@ pub fn notes(s: &mut Suite, api: &Api) -> Result<()> {
     s.cli(api, &home, &["sync", &name, "--dir", &dir_s]);
     let r = get("__file?path=notes/second.md")?;
     s.ok("a synced note is served without a deploy", r.status == 200 && r.text == "# second\n", &r);
+
+    // main is its files' authority (FIN-372, as its search and sync read
+    // them): a deployed note edited or deleted on main alone is as main
+    // says, at a version too, and nothing main deleted is listed or read
+    // from live's older tree
+    let deployed = listing()?;
+    let (was_kept, was_gone) = (commit(&deployed, "notes/kept.md").unwrap_or_default(), commit(&deployed, "notes/gone.md").unwrap_or_default());
+    std::fs::write(dir.join("notes/kept.md"), "# kept\n\nnew words\n")?;
+    std::fs::remove_file(dir.join("notes/gone.md"))?;
+    let out = s.cli(api, &home, &["sync", &name, "--dir", &dir_s]);
+    let after = listing()?;
+    let now_kept = commit(&after, "notes/kept.md").unwrap_or_default();
+    let kept = get("__file?path=notes/kept.md")?;
+    let kept_then = get(&format!("__file?path=notes/kept.md&v={was_kept}"))?;
+    let gone = get("__file?path=notes/gone.md")?;
+    let gone_then = get(&format!("__file?path=notes/gone.md&v={was_gone}"))?;
+    s.ok(
+        "a deployed note edited on main alone reads as main has it, its old version sent on to the new; one deleted on main alone is listed nowhere and read nowhere, its old version neither",
+        out.status.success()
+            && !was_kept.is_empty() && !was_gone.is_empty() && !now_kept.is_empty() && now_kept != was_kept
+            && kept.status == 200 && kept.text.contains("new words")
+            && kept_then.status == 302 && kept_then.header("location").contains(&format!("v={now_kept}"))
+            && commit(&after, "notes/gone.md").is_none() && gone.status == 404 && gone_then.status == 404,
+        json!({ "kept": [kept.status, kept_then.status], "location": kept_then.header("location"), "gone": [gone.status, gone_then.status], "commits": [was_kept, now_kept] }),
+    );
 
     // its page, in a browser: the files view, which opens its README and follows new notes
     let Some(mut chrome) = s.browser()? else {

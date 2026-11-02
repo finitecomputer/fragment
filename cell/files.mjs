@@ -123,11 +123,13 @@ let lower = new Map();         // lowercased path -> path
 let byName = new Map();        // lowercased file name, and without .md -> [path]
 const opened = new Set();      // the folders shown open
 let current = null;            // the file in the reader
-let reading = 0;               // the latest open: an earlier read's answer is dropped
+let nav = 0;                   // the view asked for last (a file, a search, the landing): an earlier one's answer is dropped
 const texts = new Map();       // a hovered file's read, taken by its open
 let home = null;               // the manifest's first page (`files.home`)
 let statusOp = null;           // the manifest's status query (`files.status`)
 let searching = false;         // a search's hits are in the reader
+let typing = null;             // a search waiting for the typing to stop
+let inflight = false;          // a search asked and not answered yet
 let drawn = null;              // the open note as drawn ({path, text}), to draw again
 
 // ---- the page ----
@@ -361,7 +363,7 @@ function download(f, why) {
 
 // Opens `path` in the reader; `keep` holds its place (a live refresh).
 async function open(path, anchor, keep) {
-  const n = ++reading;
+  const n = ++nav;
   const reader = $("reader");
   const top = keep ? reader.scrollTop : 0;
   current = path;
@@ -395,7 +397,7 @@ async function open(path, anchor, keep) {
     view = download(f, "Too large to show here.");
   } else {
     const text = await take(path).catch((e) => e);
-    if (n !== reading) return;
+    if (n !== nav) return;
     if (text instanceof Error) view = say("This file could not be read", text.message);
     else if (text === null) view = download(f);
     else if (kind(path) === "markdown") {
@@ -439,10 +441,17 @@ async function first() {
   return lower.get("index.md") || files.find((f) => kind(f.path) === "markdown")?.path || null;
 }
 
+// The view the hash names. Any view asked for after this one wins: a
+// search still out, a search still waiting for the typing to stop, and a
+// file still being read are all dropped.
 async function go() {
-  searching = false;
+  const n = ++nav;
+  clearTimeout(typing);
+  typing = null;
+  searching = inflight = false;
   const [p, anchor] = location.hash.replace(/^#\/?/, "").split("#");
   const path = decode(p) || (await first());
+  if (n !== nav) return;
   if (!path) return landing();
   if (path === current && anchor) return reach(decode(anchor));
   open(path, anchor && decode(anchor));
@@ -509,12 +518,14 @@ async function refresh() {
   const before = new Set(index.keys());
   await load().catch(() => {});
   status();
+  // a search asked, out or shown keeps the reader: only the tree follows
+  if (searching || inflight || typing) return;
   // a file came or went: the open note, unchanged, is drawn again from what
   // was read (a picture or a note it names may be here now, or gone)
   const moved = files.length !== before.size || files.some((f) => !before.has(f.path));
   if (again) open(current, null, true);
   else if (moved && current && drawn?.path === current) redraw();
-  else if (!current && !searching) go();
+  else if (!current) go();
 }
 
 function redraw() {
@@ -527,15 +538,17 @@ function redraw() {
 // ---- search: the fragment's own index, by words and meaning, as the
 // asker (`__search`); a hit opens its file at its heading ----
 
-let asked = 0;
-let typing = null;
 async function search(q) {
-  const n = ++asked;
+  typing = null;
+  const n = ++nav;
+  inflight = true;
   const r = await fetch("__search", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ q, limit: HITS_MAX }) }).catch((e) => e);
   const body = r instanceof Error ? null : await r.json().catch(() => null);
-  if (n !== asked) return;
+  if (n !== nav) return;
+  inflight = false;
   searching = true;
   current = null;
+  drawn = null;
   bar(null);
   mark();
   $("crumbs").replaceChildren(el("strong", null, "Search"));
@@ -567,8 +580,9 @@ $("q").addEventListener("input", () => {
   drawer(false);
   const q = $("q").value.trim();
   if (!q) {
-    asked++;
-    if (searching) go();
+    typing = null;
+    // the page the hash names again; a search still out is dropped
+    if (searching || inflight) go();
     return;
   }
   typing = setTimeout(() => search(q), TYPING_MS);

@@ -376,10 +376,9 @@ impl FragmentCell {
     /// when neither pin has the file (its blessed template's data, or
     /// nothing, as without a version).
     async fn versioned_file(&self, req: &Request, facts: &Facts, p: &str, v: &str, public: bool, head: bool) -> CellResult<Option<Response>> {
-        // the one an unversioned `__file` reads first
-        let first = if self.main_first()? { ["main", "live"] } else { ["live", "main"] };
+        // the pins an unversioned `__file` reads, in its order
         let mut current = None;
-        for which in first {
+        for &which in self.content_pins()? {
             match self.tree_row(which, p)? {
                 Some(row) if row.last_commit == v => {
                     let cache = site::pinned_cache(public);
@@ -516,12 +515,10 @@ impl FragmentCell {
                 if !req.headers().get("accept")?.is_some_and(|a| a.contains("application/json")) {
                     return Ok(Response::ok(files_page(name, &self.title_now(name)?))?.with_headers(headers("text/html; charset=utf-8", "no-store")?));
                 }
-                // a path on both is the one `__file` reads (live's; an agent's
-                // or a session archive's, main's), with its version (`commit`:
-                // `__file?path=&v=`, FIN-340)
+                // a path on both is the one `__file` reads (`content_pins`),
+                // with its version (`commit`: `__file?path=&v=`, FIN-340)
                 let mut sizes = std::collections::BTreeMap::new();
-                let last_wins = if self.main_first()? { ["live", "main"] } else { ["main", "live"] };
-                for which in last_wins {
+                for &which in self.content_pins()?.iter().rev() {
                     let blobs = self.pointer_sizes(which)?;
                     for r in self.tree_rows(which)?.into_iter().filter(|r| !site::is_machinery(&r.path)) {
                         let size = blobs.get(&r.path).copied().unwrap_or(r.size);
@@ -573,18 +570,14 @@ impl FragmentCell {
                         return Ok(resp);
                     }
                 }
-                // Data an app writes lands on main; a path not yet on live
-                // reads from there. An agent's files (its job, its settings,
-                // its memories) are main's first: its computer's sync writes
-                // them there and never deploys (images/hermes/boot/src/
-                // sync.rs), so live keeps the job of its last deploy. So are a
-                // session archive's: its imports write main and never deploy
-                // (templates/sessions/README.md).
-                let first = if self.main_first()? { ["main", "live"] } else { ["live", "main"] };
-                let found = match self.tree_row(first[0], &p)? {
-                    Some(row) => Some((first[0], row)),
-                    None => self.tree_row(first[1], &p)?.map(|row| (first[1], row)),
-                };
+                // the first of its content pins that has it (`content_pins`)
+                let mut found = None;
+                for &which in self.content_pins()? {
+                    if let Some(row) = self.tree_row(which, &p)? {
+                        found = Some((which, row));
+                        break;
+                    }
+                }
                 let (which, row) = match found {
                     Some(f) => f,
                     // beneath both, its blessed template's data (decision 40)
@@ -766,6 +759,28 @@ fn files_page(name: &str, title: &str) -> String {
 }
 
 impl FragmentCell {
+    /// The pins its content files are read from (`__file`, `__files`, a
+    /// version's read too), the first that has a path winning. Data an
+    /// app writes lands on main, so a path not yet on live reads from
+    /// there: live, then main. An agent's files (its job, its settings, its
+    /// memories) are main's first: its computer's sync writes them there
+    /// and never deploys (images/hermes/boot/src/sync.rs), so live keeps
+    /// the job of its last deploy; so are a session archive's, whose
+    /// imports write main and never deploy (templates/sessions/README.md).
+    /// A fragment whose page is the files view (`files.page`: a brain, a
+    /// notes vault) reads main alone, as its search and its sync do: a page
+    /// edited or deleted there and not deployed is as main says, never
+    /// live's older bytes, and nothing main deleted is listed (FIN-372).
+    fn content_pins(&self) -> CellResult<&'static [&'static str]> {
+        if self.files_live()?.is_some_and(|f| f.page) {
+            return Ok(&["main"]);
+        }
+        Ok(match self.kind()? {
+            fragment_proto::FragmentKind::Agent | fragment_proto::FragmentKind::Sessions => &["main", "live"],
+            _ => &["live", "main"],
+        })
+    }
+
     /// What live's manifest says of the files view (`files`), if anything.
     fn files_live(&self) -> CellResult<Option<fragment_core::manifest::FilesDecl>> {
         self.meta(MetaKey::FilesLive)?

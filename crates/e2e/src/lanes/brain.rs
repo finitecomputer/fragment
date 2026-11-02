@@ -497,6 +497,34 @@ pub fn brain(s: &mut Suite, api: &Api) -> Result<()> {
     let opened = chrome.until(&tab, "document.querySelector('#reader .doc')?.textContent.includes('Photovoltaic cells')", wait);
     s.ok("and a hit opens its page in the files view", opened, chrome.eval(&tab, "document.getElementById('reader')?.innerText.slice(0, 200) ?? ''")?);
 
+    // a view asked later wins, whichever answer comes first (FIN-372's
+    // review): the page's fetch held where a test says, then let go
+    chrome.eval(&tab, "(() => { window.__held = []; const real = window.fetch; window.fetch = (u, o) => window.__hold?.test(String(u)) ? new Promise((done, fail) => window.__held.push(() => real(u, o).then(done, fail))) : real(u, o); return true; })()")?;
+    let let_go = "(window.__held.splice(0).forEach((go) => go()), true)";
+    let ask = |q: &str| format!("(() => {{ window.__hold = null; const q = document.getElementById('q'); q.value = {}; q.dispatchEvent(new Event('input', {{ bubbles: true }})); return true; }})()", serde_json::to_string(q).unwrap_or_default());
+    // a search out, then a file opened: the search's late answer leaves the file
+    chrome.eval(&tab, "(window.__hold = /__search/, true)")?;
+    chrome.eval(&tab, &ask("lithium").replace("window.__hold = null; ", ""))?;
+    let search_held = chrome.until(&tab, "window.__held.length === 1", wait);
+    chrome.eval(&tab, &format!("(() => {{ window.__hold = null; location.hash = {}; return true; }})()", serde_json::to_string(&format!("#/{NOTE}"))?))?;
+    let file_shown = chrome.until(&tab, "document.querySelector('#reader .doc h1')?.textContent === 'Roof survey'", wait);
+    chrome.eval(&tab, let_go)?;
+    std::thread::sleep(Duration::from_millis(800));
+    let file_stays = chrome.eval(&tab, "document.querySelector('#reader .doc h1')?.textContent === 'Roof survey' && !document.querySelector('.hits')")? == true;
+    // a file being read, then a search: the file's late answer leaves the results
+    chrome.eval(&tab, &format!("(() => {{ window.__hold = /__file\\?path=garden%2Fwiki%2Fsolar/; location.hash = {}; return true; }})()", serde_json::to_string(&format!("#/{SOLAR}"))?))?;
+    let read_held = chrome.until(&tab, "window.__held.length === 1", wait);
+    chrome.eval(&tab, &ask("turbine"))?;
+    let hits_shown = chrome.until(&tab, "document.querySelectorAll('.hit').length > 0", wait);
+    chrome.eval(&tab, let_go)?;
+    std::thread::sleep(Duration::from_millis(800));
+    let hits_stay = chrome.eval(&tab, "document.querySelectorAll('.hit').length > 0 && !document.querySelector('#reader .doc')")? == true;
+    s.ok(
+        "a view asked later wins, whichever answer comes first: a search answered after a file was opened leaves the file; a file read answered after a search leaves its results",
+        search_held && file_shown && file_stays && read_held && hits_shown && hits_stay,
+        json!({ "search_held": search_held, "file_shown": file_shown, "file_stays": file_stays, "read_held": read_held, "hits_shown": hits_shown, "hits_stay": hits_stay }),
+    );
+
     // a page an agent wrote is data, whatever a model put in it (audit H2:
     // the viewer's markdown once went into innerHTML): its markup is text
     write(&dir, "garden/raw/hostile.md", include_bytes!("../../fixtures/hostile-note.md"))?;
