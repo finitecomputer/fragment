@@ -187,6 +187,11 @@ impl FragmentCell {
              ON CONFLICT (principal) DO UPDATE SET role = excluded.role, version = excluded.version, attempts = 0, next_at = excluded.next_at",
             vec![principal.into(), stored, SqlStorageValue::Integer(version), SqlStorageValue::Integer(js::now_ms())],
         )?;
+        // it goes after the answer (`after_answer`), never left for the
+        // alarm's next pass, which may be a poll away; a request that must
+        // see it taken before it answers flushes in its own turn as well
+        self.listed_moved.set(true);
+        self.later();
         self.search_follows(principal, role)
     }
 
