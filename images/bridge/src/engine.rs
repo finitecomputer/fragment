@@ -636,8 +636,12 @@ pub struct Engine {
     /// as before the rule read the journal.
     unread_cuts: BTreeSet<String>,
     /// Those whose read is out, each with the turn to continue: at most the
-    /// turns a computer holds.
+    /// turns a computer holds. A Stop naming one ends it (`stop`).
     reading_cuts: BTreeMap<String, Turn>,
+    /// Those of them whose card this life closed for a late answer
+    /// (`card_record`): open as that life left it, so not continued,
+    /// whatever a read finds after the closure.
+    closed_late: BTreeSet<String>,
     /// Per agent and chat, its menu posted there in this life (at its first
     /// turn there: `records::menu_id`). Never written to `/data`; at most
     /// one entry per followed chat of each agent.
@@ -733,6 +737,7 @@ impl Engine {
             forgotten: BTreeMap::new(),
             unread_cuts: BTreeSet::new(),
             reading_cuts: BTreeMap::new(),
+            closed_late: BTreeSet::new(),
             published: BTreeSet::new(),
             relaying: BTreeMap::new(),
             noticed: VecDeque::new(),
@@ -1052,6 +1057,11 @@ impl Engine {
             Ok(Some(r)) => {
                 let turn = r.closed["turn"].as_str().expect("a closure names its turn").to_string();
                 crate::ev!("card.late", { "agent": agent, "fragment": fragment, "seq": seq, "turn": turn, "outcome": r.closed["outcome"], "fresh": r.fresh.is_some() });
+                // a cut turn another life ran, its continuation still to be
+                // judged: its card was open as that life left it
+                if self.unread_cuts.contains(&turn) || self.reading_cuts.contains_key(&turn) {
+                    self.closed_late.insert(turn.clone());
+                }
                 self.post(agent, fragment, records::WORK, records::work_id(&turn, &format!("pc:{prompt}")), r.closed, Vec::new());
                 let Some(fresh) = r.fresh else { return };
                 // admitted as the answer's own turn, never Tell or Other for
@@ -1527,10 +1537,16 @@ impl Engine {
             self.state.turns.remove(id);
             crate::ev!("turn.closed", { "turn": id });
         }
+        // another life's cut turn: its read is due now, or never (that life
+        // ended it, or its asker stopped it first)
+        let unread = post == records::work_id(id, "end") && self.unread_cuts.remove(id);
+        let late = unread && self.closed_late.remove(id);
         if let Some(cut) = cut {
-            if self.unread_cuts.remove(id) {
-                // another life's: whether it waited on its person is the
-                // journal's to say, read off the claims' way (`ReadCut`)
+            if late {
+                crate::ev!("turn.uncontinued", { "turn": id, "why": "it waited on its card, which this life closed for a late answer" });
+            } else if unread {
+                // whether it waited on its person is the journal's to say,
+                // read off the claims' way (`ReadCut`)
                 let identity = self.agent(&cut.agent).map(|a| a.identity.clone()).unwrap_or_default();
                 assert!(self.reading_cuts.len() < limits::TURNS_OPEN_MAX, "cuts being read are bounded by the turns a computer holds");
                 self.out.push(Effect::ReadCut { agent: cut.agent.clone(), identity, fragment: cut.fragment.clone(), turn: id.to_string() });
@@ -1547,9 +1563,13 @@ impl Engine {
     /// continued, as before the rule read the journal.
     fn cut_read(&mut self, turn: &str, waited: bool) {
         let Some(cut) = self.reading_cuts.remove(turn) else {
+            // its asker stopped it meanwhile (`stop`), or its life is another's
             crate::ev!("cut.stale", { "turn": turn, "why": "no cut turn being read by that id" });
             return;
         };
+        // a card of its this life closed for a late answer was open as that
+        // life left it, whatever the read found: the answer is its next turn
+        let waited = self.closed_late.remove(turn) || waited;
         if waited {
             crate::ev!("turn.uncontinued", { "turn": turn, "why": "it waited on its person: their answer is its next turn" });
             return;
@@ -1879,6 +1899,19 @@ impl Engine {
             .min_by_key(|t| t.phase == Phase::Ended)
             .map(|t| (t.id.clone(), self.who_answers(t), t.phase));
         let Some((id, answers, phase)) = target else {
+            // a cut turn another life ran whose journal is being read
+            // (`ReadCut`), its lost end this life's: stopped, it is never
+            // continued, whatever the read says
+            if let Some((id, cut)) = named.and_then(|id| self.reading_cuts.get(id).filter(|t| t.agent == agent.fragment && t.fragment == fragment).map(|t| (id.to_string(), t))) {
+                if self.who_answers(cut) != principal {
+                    crate::ev!("stop.ignored", { "turn": id, "why": "only the turn's asker (its owner, for a routine's or an answer's) stops it" });
+                    return;
+                }
+                self.reading_cuts.remove(&id);
+                self.closed_late.remove(&id);
+                crate::ev!("turn.uncontinued", { "turn": id, "why": "its asker stopped it" });
+                return;
+            }
             crate::ev!("stop.ignored", { "agent": agent.fragment, "fragment": fragment, "why": "no such turn" });
             return;
         };

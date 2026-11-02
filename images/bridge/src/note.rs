@@ -270,12 +270,14 @@ pub fn turn(work: &[Record], agent: &str, turn: &str) -> Option<Cut> {
 /// (`asking`, `Phase::Waiting`), read from the journal for one another
 /// life ran after the `/data` this life restored (its claim answered 409),
 /// read once its lost end is this life's (`Effect::ReadCut`), so a restart
-/// continues neither (engine.rs, `continued`). A question in words counts answered or not: an answer
-/// that life heard is a message this life reads again and no life
-/// claimed, so it runs as its own turn.
+/// continues neither (engine.rs, `continued`). A question in words counts
+/// answered or not: an answer that life heard is a message this life reads
+/// again and no life claimed, so it runs as its own turn. A card closed
+/// for a late answer (`answerSeq`, cards.rs) was open as that life left
+/// it: still waiting, the answer's fresh turn its next.
 pub fn waited(work: &[Record], agent: &str, turn: &str) -> bool {
     let mine = |r: &&Record| r.principal == agent && r.body["turn"] == turn;
-    let closed = |prompt: &Value| work.iter().filter(mine).any(|r| r.body["kind"] == "turn.prompt.closed" && r.body["prompt"] == *prompt);
+    let closed = |prompt: &Value| work.iter().filter(mine).any(|r| r.body["kind"] == "turn.prompt.closed" && r.body["prompt"] == *prompt && r.body.get("answerSeq").is_none());
     work.iter().filter(mine).any(|r| r.body["kind"] == "turn.asked" || (r.body["kind"] == "turn.prompt" && !closed(&r.body["prompt"])))
 }
 
@@ -765,6 +767,7 @@ mod tests {
     /// would: while a card of its stayed open, or once it asked in words.
     /// Valid: its card closed (answered or expired), steps alone. Invalid:
     /// another agent's card under the same turn, a turn not in the records.
+    /// A late answer's closure (`answerSeq`) leaves it waiting.
     #[test]
     fn a_turn_waited_while_its_card_stayed_open_or_once_it_asked_in_words() {
         let card = |turn: &str, prompt: &str| json!({ "kind": "turn.prompt", "turn": turn, "prompt": prompt, "text": "Run it?", "options": [], "asks": "npub1paul", "expiresAt": 1 });
@@ -781,9 +784,15 @@ mod tests {
         w.post(ME, turn_prompt_closed("expired", "p3", Closed::Expired, None));
         w.start(ME, "worded", 5);
         w.post(ME, records::turn_asked("worded", "npub1paul"));
+        w.start(ME, "late", 6);
+        w.post(ME, card("late", "p5"));
+        let mut late = turn_prompt_closed("late", "p5", Closed::Answered, Some(("once", "npub1paul", None)));
+        late["answerSeq"] = json!(9);
+        w.post(ME, late);
         w.post("npub1rowan", card("ran", "p4"));
         let waits = |turn: &str| waited(&w.0, ME, turn);
         assert!(waits("carded") && waits("worded"), "an open card, a question in words");
+        assert!(waits("late"), "a card closed for a late answer was open as its life left it");
         assert!(!waits("answered") && !waits("expired") && !waits("ran"), "a card closed, steps alone, another agent's card");
         assert!(!waits("nowhere"), "a turn not in the records");
     }

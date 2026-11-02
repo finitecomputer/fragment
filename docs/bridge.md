@@ -158,7 +158,9 @@ A turn a restart cut is picked up again by itself, once, so nobody types
   claim answered 409) by `work` (a card still open, or a `turn.asked`:
   `note::waited`), read once its lost end lands as this life's, in a task
   of its own within `NOTE_READ_MS_MAX`. No claim waits on that read, and
-  one that fails or runs out continues the turn.
+  one that fails or runs out continues the turn, unless its asker stopped
+  it meanwhile or this life closed its card for a late answer (that answer
+  is its next turn).
 - **What it is**: a turn queued in the cut turn's place, with its cause,
   asker and depth, its id the cut turn's `records::continuation_id`, so
   its claim makes it one run in any life. The computer says it
