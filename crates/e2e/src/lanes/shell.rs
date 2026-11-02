@@ -1596,6 +1596,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
         b.eval(&page, "(() => { const v = document.getElementById('viewer').getBoundingClientRect(); return { top: v.top, bottom: v.bottom, width: v.width, innerWidth, innerHeight }; })()")?,
     );
     phone_ui(s, api, &mut b, &page, &session, &shots)?;
+    phone_sheet_still(s, &mut b, &page, &shots)?;
     // last: it renames the person's first agent, which the checks above name
     faces_ui(s, api, &mut b, &page, &me, &chat, &shots)?;
     // and a third agent, which none of the checks above counts
@@ -2807,6 +2808,79 @@ const WIDE_MESSAGE: &str = "A word that never breaks: supercalifragilisticexpial
 /// a way to ask the die dealt, pressed, goes into the chat's composer, the
 /// desktop's sheet closed.
 /// Safari's keyboard, bounce and zoom are not Chrome's: a phone tests those.
+/// Starts sampling each frame of the shell: the wallpaper's box in the
+/// desktop's sheet's (`[x, y, w, h]` from the sheet's corner; none while the
+/// sheet shows nothing) and the windows moved by a transform of their own
+/// (`[key, transform]`), until `PHONE_SAMPLED` stops it.
+const PHONE_SAMPLE: &str = "(() => {
+  const r = (el) => { const b = el.getBoundingClientRect(); return [b.left, b.top, b.width, b.height].map(Math.round); };
+  window.__sheet = { on: true, frames: [] };
+  const tick = () => {
+    if (!window.__sheet.on) return;
+    const v = document.getElementById('viewer'), s = r(v), w = r(v.querySelector('.wallpaper'));
+    window.__sheet.frames.push({
+      wallpaper: s[2] && s[3] ? [w[0] - s[0], w[1] - s[1], w[2], w[3]] : null,
+      moved: [...document.querySelectorAll('#stack .pane')].map((p) => [p.dataset.key, getComputedStyle(p).transform]).filter(([, t]) => t !== 'none'),
+    });
+    requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
+  return true;
+})()";
+/// Stops `PHONE_SAMPLE`, answering its frames.
+const PHONE_SAMPLED: &str = "(() => { window.__sheet.on = false; return window.__sheet.frames; })()";
+
+/// The desktop's sheet on a phone holds its wallpaper and its windows still
+/// (Paul, 2026-11-02, an iPhone: a window left offset in the sheet until it
+/// closed, and the background re-placed as a fragment opened). Opening, the
+/// sheet is its wallpaper's box in every frame, so nothing moves once it
+/// stops sliding; a window opened, a second, and the second closed, no
+/// window is moved by an animation of its own in any frame: on a phone a
+/// window is placed by the sheet's grid alone (Safari may never start a
+/// window's animation, WebKit bug 299823, holding it at its old place).
+/// Each frame sampled until the page's animations are done: no time of the
+/// test's own.
+fn phone_sheet_still(s: &mut Suite, b: &mut Browser, page: &Page, shots: &std::path::Path) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    let settled = "document.getAnimations().every((a) => a.playState !== 'running' || a.effect?.getComputedTiming().iterations === Infinity)";
+    b.viewport(page, 393, 852, true)?;
+    b.reload(page)?;
+    b.until(page, "!document.getElementById('layout').hidden && !!document.querySelector('#frames iframe:not([hidden])')", wait);
+    // no window from before, the sheet closed
+    b.eval(page, "(() => { for (const p of document.querySelectorAll('#stack .pane')) [...p.querySelectorAll('.pane-head button')].pop()?.click(); if (document.getElementById('layout').classList.contains('right-open')) document.getElementById('toggle-right').click(); return true; })()")?;
+    b.until(page, &format!("!document.querySelector('#stack .pane') && !document.getElementById('layout').classList.contains('right-open') && {settled}"), wait);
+    // the sheet slides in
+    b.eval(page, PHONE_SAMPLE)?;
+    b.eval(page, "(document.getElementById('toggle-right').click(), true)")?;
+    let opened = b.until(page, &format!("document.getElementById('layout').classList.contains('right-open') && !!document.querySelector('#apps [data-key^=\"app:\"]') && {settled}"), wait);
+    let sliding = b.eval(page, PHONE_SAMPLED)?;
+    let boxes: Vec<Value> = sliding.as_array().into_iter().flatten().map(|f| f["wallpaper"].clone()).filter(|w| !w.is_null()).collect();
+    let placed = boxes.windows(2).all(|w| w[0] == w[1]);
+    s.ok(
+        "on a phone the desktop's sheet slides in with its wallpaper placed in it the same in every frame, so nothing moves once it stops",
+        opened && !boxes.is_empty() && placed,
+        json!({ "opened": opened, "frames": boxes.len(), "first": boxes.first(), "last": boxes.last() }),
+    );
+    // a window, a second (the ways to ask, the dock's Add), the second closed
+    b.eval(page, PHONE_SAMPLE)?;
+    b.eval(page, "(document.querySelector('#apps [data-key^=\"app:\"]')?.click(), true)")?;
+    let one = b.until(page, &format!("document.querySelectorAll('#stack .pane').length === 1 && {settled}"), wait);
+    b.eval(page, "(document.getElementById('add-app')?.click(), true)")?;
+    let two = b.until(page, &format!("document.querySelectorAll('#stack .pane').length === 2 && {settled}"), wait);
+    let _ = b.screenshot(page, &shots.join("phone-sheet-two-windows.png"));
+    b.eval(page, "([...document.querySelectorAll('#stack .pane[data-key=prompts] .pane-head button')].pop()?.click(), true)")?;
+    let back = b.until(page, &format!("document.querySelectorAll('#stack .pane').length === 1 && {settled}"), wait);
+    let windows = b.eval(page, PHONE_SAMPLED)?;
+    let moved: Vec<Value> = windows.as_array().into_iter().flatten().filter(|f| f["moved"].as_array().is_some_and(|m| !m.is_empty())).map(|f| f["moved"].clone()).collect();
+    let _ = b.screenshot(page, &shots.join("phone-sheet-window.png"));
+    s.ok(
+        "on a phone a window opened, a second, and the second closed: no window is moved by an animation of its own in any frame",
+        one && two && back && moved.is_empty(),
+        json!({ "one": one, "two": two, "back": back, "frames": windows.as_array().map_or(0, Vec::len), "moved": moved.iter().take(3).collect::<Vec<_>>() }),
+    );
+    Ok(())
+}
+
 fn phone_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &str, shots: &std::path::Path) -> Result<()> {
     let wait = std::time::Duration::from_secs(30);
     let agent_wait = std::time::Duration::from_secs(120);
@@ -5242,6 +5316,20 @@ fn doing_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &st
     let waiting = b.until(page, &format!("{doing} === 'Waiting for you'"), agent_wait);
     let _ = b.screenshot(page, &shots.join("desktop-agent-waiting.png"));
     let said = b.eval(page, &format!("{row}?.textContent ?? null"))?;
+    // said on its chat's row alone, never on its agent's card too (Paul, 2026-11-02)
+    let heroes = b.eval(page, "[...document.querySelectorAll('#chats .agent-hero')].map((h) => h.querySelector('.agent-doing')?.textContent ?? null)")?;
+    s.ok(
+        "what an agent is doing is said on its chat's row alone: no agent's card says it",
+        waiting && heroes.as_array().is_some_and(|l| !l.is_empty() && l.iter().all(Value::is_null)),
+        json!({ "heroes": heroes }),
+    );
+    // the same at a phone's width, the list over the chat
+    let (w, h) = (b.eval(page, "innerWidth")?.as_u64().unwrap_or(1280) as u32, b.eval(page, "innerHeight")?.as_u64().unwrap_or(800) as u32);
+    b.viewport(page, 393, 852, true)?;
+    b.eval(page, "(document.getElementById('layout').classList.contains('left-open') || document.getElementById('toggle-left').click(), true)")?;
+    b.until(page, &format!("{doing} === 'Waiting for you' && document.getAnimations().every((a) => a.playState !== 'running' || a.effect?.getComputedTiming().iterations === Infinity)"), agent_wait);
+    let _ = b.screenshot(page, &shots.join("phone-agent-waiting.png"));
+    b.viewport(page, w, h, false)?;
     let work = shell(api, session, "GET", &format!("/api/f/{chat}/channels/work?after=0&limit=1000"), None, &[])?;
     let card = work.body["records"].as_array().into_iter().flatten().rev().find(|r| r["body"]["kind"] == "turn.prompt").cloned().unwrap_or_default();
     let prompt = card["body"]["prompt"].as_str().unwrap_or("").to_string();

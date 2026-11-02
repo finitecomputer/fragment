@@ -1246,6 +1246,17 @@ fn claude_install(s: &mut Suite, api: &Api, chrome: &mut Browser, owner: &Keys, 
         again && signed && answered && !kept,
         json!({ "again": again, "signed": signed, "answered": answered, "kept": kept, "messages": chrome.eval(&page, "document.getElementById('messages').innerText")? }),
     );
+    // its turn answered and ended, its row says nothing more: no card waits
+    // on them, nothing works (its listed records, as the list has them once
+    // its gap ends: no time of the test's own)
+    let row = format!("document.querySelector({})", js(&format!("#chats [data-key={}]", js(&format!("chat:{chat}")))));
+    let quiet = answered && shows(chrome, &shell, &format!("!!{row} && !{row}.querySelector('.agent-doing')"));
+    let ended = records(api, owner, &chat, "work").iter().any(|r| r["body"]["kind"] == "turn.end");
+    s.ok(
+        "its turn answered and ended, its chat's row leaves Waiting for you and says nothing more",
+        ended && quiet,
+        json!({ "ended": ended, "row": chrome.eval(&shell, &format!("{row}?.textContent ?? null"))?, "listed": records(api, owner, &chat, "work").iter().rev().take(4).map(|r| r["body"]["kind"].clone()).collect::<Vec<_>>() }),
+    );
     claude_offers(s, chrome, &shell, &name, shots)?;
     claude_settings(s, api, chrome, owner, &shell, &name, shots)?;
     chrome.close(shell)?;
