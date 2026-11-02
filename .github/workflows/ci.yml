@@ -52,12 +52,22 @@ on:
     types: [checks_requested]
   workflow_dispatch:
 
-# a pull request's newer run cancels its older one; a push's run is never
-# cancelled, as it may be deploying: a newer push's waits for it (and
-# replaces one already waiting)
+# A pull request's run of a new head (`synchronize`) cancels its older
+# head's; a push's run is never cancelled, as it may be deploying: a newer
+# push's waits for it (and replaces one already waiting). Nothing cancels
+# a run of the same head: GitHub counts every run's required checks on a
+# commit, a cancelled one's as failed even beside its re-run's passing, so
+# its pull request stayed BLOCKED, green and approved, until a new head
+# (#942, #944, #956: each opened with `full-e2e`, its `opened` and
+# `labeled` runs together, the first cancelled). So a label added waits for
+# the head's run under way, and a run that would test nothing new is idle
+# (`check` and the shards skip, `e2e` says why), in a group of its own,
+# never cancelled: one opened with `full-e2e` on it already, which the
+# `labeled` run that comes with it tests, and one for another label. The
+# idle expression is the same in `check`, `e2e-shard` and `e2e`.
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: ci-${{ github.ref }}${{ ((github.event.action == 'opened' && contains(github.event.pull_request.labels.*.name, 'full-e2e')) || (github.event.action == 'labeled' && github.event.label.name != 'full-e2e')) && format('-idle-{0}', github.run_id) || '' }}
+  cancel-in-progress: ${{ github.event.action == 'synchronize' }}
 
 jobs:
   # A push to master or production, or a merge group into master: whether
@@ -170,8 +180,10 @@ jobs:
           echo "no run of this workflow proved $GITHUB_SHA's tree: testing it first"
           echo proven=false >> "$GITHUB_OUTPUT"
 
-  # on every run, a proven push's too (`proven`, above, says why)
+  # on every run, a proven push's too (`proven`, above, says why), but an
+  # idle pull request's (`concurrency`, above)
   check:
+    if: ${{ !((github.event.action == 'opened' && contains(github.event.pull_request.labels.*.name, 'full-e2e')) || (github.event.action == 'labeled' && github.event.label.name != 'full-e2e')) }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -212,13 +224,15 @@ jobs:
   e2e-shard:
     name: e2e shard ${{ matrix.shard }}/4
     # on every run but a pull request's without the `full-e2e` label (its
-    # e2e is the merge queue's) and a push or merge group whose tree a run
-    # proved (`proven`, which skips on every other run: `!cancelled()` keeps
-    # its skip from skipping this), and never after `proven` fails
+    # e2e is the merge queue's) or idle (`concurrency`, above), and a push
+    # or merge group whose tree a run proved (`proven`, which skips on every
+    # other run: `!cancelled()` keeps its skip from skipping this), and
+    # never after `proven` fails
     needs: proven
     if: >-
       ${{ !cancelled()
       && (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-e2e'))
+      && !((github.event.action == 'opened' && contains(github.event.pull_request.labels.*.name, 'full-e2e')) || (github.event.action == 'labeled' && github.event.label.name != 'full-e2e'))
       && (needs.proven.result == 'skipped' || (needs.proven.result == 'success' && needs.proven.outputs.proven == 'false')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -291,7 +305,9 @@ jobs:
           PROVEN_RESULT: ${{ needs.proven.result }}
           SHARDS: ${{ needs.e2e-shard.result }}
           QUEUED: ${{ github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'full-e2e') }}
+          IDLE: ${{ (github.event.action == 'opened' && contains(github.event.pull_request.labels.*.name, 'full-e2e')) || (github.event.action == 'labeled' && github.event.label.name != 'full-e2e') }}
         run: |
+          if [ "$IDLE" = true ]; then echo "this run tests nothing new (\`concurrency\` says why): another run of this head tests it"; exit 0; fi
           if [ "$PROVEN" = true ]; then echo "a run that proved this tree ran its e2e (\`proven\`'s log names it): none ran here"; exit 0; fi
           if [ "$QUEUED" = true ]; then echo "a pull request's e2e runs in the merge queue, on the tree that merges, before it lands; the label full-e2e runs it here too"; exit 0; fi
           test "$SHARDS" = success || { echo "the shards did not all pass (shards: $SHARDS; proven: $PROVEN_RESULT): their logs, or proven's, say why"; exit 1; }
