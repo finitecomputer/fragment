@@ -281,6 +281,18 @@ for word in "$@"; do
 done
 exec /opt/hermes/bin/hermes "$@"
 EOF
+# The computer's Python environment, active in every login shell, as each
+# command of Hermes' terminal runs in one (docs/computers.md, "Python in
+# our Hermes image"): `python`, `pip` and `uv pip` are its, and what they
+# install is kept. The boot makes it (boot/src/python.rs). Its `bin` goes
+# first: Debian's /etc/profile sets PATH before it sources this.
+COPY <<'EOF' /etc/profile.d/fragment-python.sh
+# The computer's Python environment (images/hermes/Dockerfile).
+VIRTUAL_ENV=/data/work/python
+export VIRTUAL_ENV
+PATH="$VIRTUAL_ENV/bin:$PATH"
+export PATH
+EOF
 COPY images/hermes/preload.py /opt/fragment/preload.py
 COPY images/hermes/tool_keys.py /opt/fragment/tool_keys.py
 COPY images/hermes/tool_threads.py /opt/fragment/tool_threads.py
@@ -378,6 +390,11 @@ RUN env | sort > /tmp/env.now \
 COPY --from=simplex --chmod=0700 /simplex-chat /opt/fragment/bin/simplex-chat
 RUN /opt/fragment/bin/simplex-chat --version | grep -q 'v7\.0\.0\.12'
 COPY --from=ours / /
+# uv by name on every PATH (/usr/local/bin): Hermes' own, the release its
+# PM's lock pins, which the boot makes the Python environment with too.
+RUN uv="$(/opt/hermes/.venv/bin/python -c 'from pm._uv import _toolchain; print(_toolchain(realize=False)[0])')" \
+ && ln -s "$uv" /usr/local/bin/uv && ln -s "$(dirname "$uv")/uvx" /usr/local/bin/uvx \
+ && /usr/local/bin/uv --version && /usr/local/bin/uvx --version
 # What the boot reads instead of finding it each time: the lean plugin list;
 # the image's Chromium, /opt/fragment/bin/chromium
 # (regular /usr/bin/chromium from the pinned desktop base, always with the

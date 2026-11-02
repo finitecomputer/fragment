@@ -751,9 +751,32 @@ passwordless `sudo`: the computer is one person's, with no secret in it,
 and their agents are not fenced from each other (decisions 13, 43, 44).
 An install outside `/data` lasts until the next start from the image (a
 crash, an update, a restart; a snapshot's wake keeps it). Nothing is
-installed under `/data` at run time but the person's own Claude Code
-(below). The bridge runs as root and keeps SimpleX's state from the
-agent's user, though not from its sudo.
+installed under `/data` at run time but what its agents install into its
+Python environment (next) and the person's own Claude Code (below). The
+bridge runs as root and keeps SimpleX's state from the agent's user,
+though not from its sudo.
+
+### Python in our Hermes image
+
+Paul, 2026-11-02 (his agent found no `pip`, `uv` only in Hermes' tool
+store, and the image's Python read-only): `pip install` and `uv pip
+install` work, and what they install is kept.
+
+- **One environment for the computer**, `/data/work/python`, its agents'
+  (they run as one user, decision 44), saved with their work. Every login
+  shell, as each command of Hermes' terminal runs in, has it active
+  (`/etc/profile.d/fragment-python.sh`: its `bin` first on `PATH`, and
+  `VIRTUAL_ENV`), so `python`, `pip` and `uv pip` are its. `uv` and `uvx`
+  are Hermes' own, on every `PATH`.
+- **Made by the boot**, off its path and offline: uv makes it on the
+  image's Python (`/usr/local/bin/python3`, the name upstream links it
+  at), seeing that Python's own packages, and its pip is the wheel that
+  Python bundles (`boot/src/python.rs`).
+- **Kept** across a restart and a sleep, and across an image update whose
+  Python is the same minor release: it runs whichever Python the image
+  links. One made for another Python (or unreadable) is set aside whole
+  (`/data/work/python.3.14`), with `requirements.txt` listing what it held
+  for `pip install -r`, and a new one is made.
 
 ### Claude Code in our Hermes image
 
