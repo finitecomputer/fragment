@@ -64,6 +64,7 @@ const TEST_SUFFIX: &str = ".test.mjs";
 const SHELL_TESTS: &[&str] = &[
     "cell/shell-tests/agent-claude.test.mjs",
     "cell/shell-tests/agent-remove.test.mjs",
+    "cell/shell-tests/agent-runtimes.test.mjs",
     "cell/shell-tests/apps-cards.test.mjs",
     "cell/shell-tests/apps-page.test.mjs",
     "cell/shell-tests/asked-agent.test.mjs",
@@ -273,6 +274,7 @@ mod tests {
             ("cell/shell/onboarding.js", Some(InputType::Module)),
             ("cell/shell/computer.js", Some(InputType::Module)),
             ("cell/shell/agent-settings.js", Some(InputType::Module)),
+            ("cell/shell/agent-runtimes.js", Some(InputType::Module)),
             ("cell/shell/connections.js", Some(InputType::Module)),
             ("cell/shell/exports.js", Some(InputType::Module)),
             ("cell/client.mjs", Some(InputType::Module)),

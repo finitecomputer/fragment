@@ -91,6 +91,9 @@ Dev and e2e use separate state; failed e2e logs remain in `target/e2e/`.
   library when it simplifies the stack. Bespoke code needs its reason
   beside it (comment, decision or debt entry). A build step is welcome
   when it buys significant simplification or safety.
+- Each runtime offers what it supports: the UI shows only what an agent's
+  runtime can do (`cell/shell/agent-runtimes.js`), and we don't build
+  parity across runtimes.
 - One concern per PR. Work goes to github.com/finitecomputer/fragment
   as a branch and PR against `master`; names under `ci/` are refused.
   The coordinating session reviews PRs once CI is green.

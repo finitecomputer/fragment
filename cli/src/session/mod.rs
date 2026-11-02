@@ -591,12 +591,36 @@ pub fn print(r: &Imported) {
     }
 }
 
-/// A fresh folder in the system's temporary place (a test's).
+/// A fresh folder in the system's temporary place, a test's own: removed,
+/// with all it holds, when its guard drops, so a test run leaves none
+/// behind (each `cargo xtask check` once left about twenty, and 22.7 GB of
+/// them had filled a shared box's /tmp by 2026-11-02).
 #[cfg(test)]
-pub(crate) fn tempdir() -> PathBuf {
+pub(crate) struct TempDir(PathBuf);
+
+#[cfg(test)]
+impl std::ops::Deref for TempDir {
+    type Target = Path;
+    fn deref(&self) -> &Path {
+        &self.0
+    }
+}
+
+#[cfg(test)]
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// A fresh folder for a test, gone when the guard it answers drops: keep
+/// the guard while the folder is used (`let dir = tempdir();`, never
+/// `tempdir().join(…)`).
+#[cfg(test)]
+pub(crate) fn tempdir() -> TempDir {
     let d = std::env::temp_dir().join(format!("fragment-session-{}-{}", std::process::id(), rand::random::<u64>()));
     std::fs::create_dir_all(&d).unwrap();
-    d
+    TempDir(d)
 }
 
 #[cfg(test)]
@@ -605,6 +629,19 @@ mod tests {
     use fragment_core::session::Message;
 
     const NAME: &str = "sessions--k3x9";
+
+    /// Goal: a test run leaves no folder behind. Method: one written into,
+    /// then its guard dropped, as each test's is at its end or its panic.
+    #[test]
+    fn a_tests_folder_goes_with_its_guard() {
+        let dir = tempdir();
+        std::fs::create_dir_all(dir.join("chats/a")).unwrap();
+        std::fs::write(dir.join("chats/a/state.db"), "x").unwrap();
+        let path = dir.to_path_buf();
+        assert!(path.is_dir());
+        drop(dir);
+        assert!(!path.exists(), "{} is left behind", path.display());
+    }
 
     fn session(id: &str, kind: Kind, at: &str, words: &[&str]) -> Session {
         let messages = words.iter().enumerate().map(|(i, w)| Message { role: if i % 2 == 0 { "user" } else { "assistant" }.into(), at: Some(at.into()), text: Some(w.to_string()), ..Default::default() }).collect();
@@ -1219,7 +1256,7 @@ mod tests {
         assert!(matches!(source(&dir), Ok(Source::Hermes(p)) if p == dir.join("state.db")));
         assert!(matches!(source(&dir.join("state.db")), Ok(Source::Hermes(_))));
         chats::tests::export(&dir);
-        assert!(matches!(source(&dir), Ok(Source::Export(p)) if p == dir), "an export's chats/ wins over a state.db beside it");
+        assert!(matches!(source(&dir), Ok(Source::Export(p)) if p == *dir), "an export's chats/ wins over a state.db beside it");
     }
 
     /// Goal: a spool holds what an import read within an archive's limits,

@@ -1,6 +1,6 @@
 export const PHASE = { asleep: "Asleep", starting: "Starting", awake: "Awake", sleeping: "Going to sleep", wont_wake: "Won't start" };
 
-export function createComputer({ api, el, seg, named, section, line, actionLine, computer, agents, computerFailed, support, setupPending, made, computerIs, reopenSettings, openScreen, reads, load }) {
+export function createComputer({ api, el, seg, named, section, line, actionLine, computer, agents, computerFailed, support, setupPending, made, computerIs, reopenSettings, openScreen, markOffer, reads, load }) {
   // ---- the computer: awake while the person is here, and its updates ----
   let woke = 0;
   // asking for a wake as the person arrives or focuses a chat hides the
@@ -206,16 +206,22 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
         : // never read: a failed read is not "none" (shown again once one answers: `load`)
           [el("p", "muted", computerFailed() ? "Couldn't load your computer." : "Your computer starts with your first agent.")]),
     );
-    // each agent's own desktop
+    // each agent's own desktop, where its runtime offers one (`markOffer`:
+    // agent-runtimes.js), and the line gone with the last
     const screens = [];
     for (const a of c ? agents().values() : []) {
       const screen = named(el("button", "quiet"), a.fragment, (t) => `Open ${t}'s screen`);
       screen.type = "button";
       screen.dataset.screenFor = a.fragment;
       screen.onclick = () => openScreen(a.fragment);
-      screens.push(screen);
+      screens.push(markOffer(screen, a.fragment, "screen"));
     }
-    if (screens.length) computer.append(actionLine("Screens", ...screens));
+    if (screens.length) {
+      const shown = actionLine("Screens", ...screens);
+      shown.dataset.offers = "";
+      shown.hidden = screens.every((s) => s.hidden);
+      computer.append(shown);
+    }
     // the way back to working when something is wrong with it: asked once
     // more before it cuts what its agents are doing
     if (c) {
