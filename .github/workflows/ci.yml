@@ -4,7 +4,7 @@
 # `wrangler dev` (workerd), with fakes only at the vendor boundaries.
 # The celld e2e on macOS is at tag celld-final.
 #
-# The e2e runs in four shards (crates/e2e/src/lanes/mod.rs, SHARDS: every
+# The e2e runs in five shards (crates/e2e/src/lanes/mod.rs, SHARDS: every
 # section in exactly one, a host test checks), each on a runner of its own
 # with its own build and node; the `e2e` job is green when every shard is.
 #
@@ -222,7 +222,7 @@ jobs:
       - run: cargo xtask image preview --dry-run --output "$RUNNER_TEMP/preview-image-plan.json"
 
   e2e-shard:
-    name: e2e shard ${{ matrix.shard }}/4
+    name: e2e shard ${{ matrix.shard }}/5
     # on every run but a pull request's without the `full-e2e` label (its
     # e2e is the merge queue's) or idle (`concurrency`, above), and a push
     # or merge group whose tree a run proved (`proven`, which skips on every
@@ -242,7 +242,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        shard: [1, 2, 3, 4, 5]
     steps:
       # first, before any container: no IPv6 address on a link made from
       # here on, nor on Docker's bridge. Chrome takes a link's IPv6 address
@@ -265,7 +265,7 @@ jobs:
       # one shard's sections on a fresh node; the run's scratch (each node
       # boot's log, the lanes' screenshots) is kept when a check fails, and
       # uploaded below
-      - run: cargo xtask e2e --no-build --shard ${{ matrix.shard }}/4
+      - run: cargo xtask e2e --no-build --shard ${{ matrix.shard }}/5
         env:
           BUILDX_BUILDER: ${{ steps.build.outputs.builder }}
           CHROME_BIN: /usr/bin/google-chrome

@@ -167,23 +167,32 @@ const LANES: &[Lane] = &[
 /// on a preview, so their shard reports each as the whole run does: one
 /// skip.
 ///
-/// Balanced by each section's 90th-percentile time over 16 green runs on
-/// CI's runners (2026-10-30, merge groups and pull requests, all four
-/// shards each): the slowest shard's sections took 575 s, the fastest's
-/// 389 s; each now takes about 500 s. `shell-ui` (423 s) is one section,
-/// so no split runs faster than it: four shards are within 80 s of that.
+/// Balanced by each section's 90th-percentile time over 13 green merge
+/// groups on CI's runners (2026-11-02): 38.9 minutes in all. `shell-ui`
+/// (513 s) is one section, so no split runs faster than it: it is a shard
+/// alone, and the other four each take about 455 s (they took 560 to 595
+/// in four shards, with `shell-ui` among them). A fifth shard is one more
+/// runner a run; the day's peak was 20 of the plan's 60.
 /// The slow ones vary: `channels` fills 10 000 records.
 /// Shard 3 holds `triggers` and the sections from the cron
 /// fragment's deploy (after `effects`) up to it, so its first cron minute
 /// passes while they run, as in a whole run.
-pub const SHARDS: [&[&str]; 4] = [
-    &["signin", "shell", "computers", "export", "search", "search-across", "search-bench", "import-release", "hermes", "agent-smoke", "agent-ask", "agent-app", "agent-restart", "bot-mode", "checkout", "restart"],
-    &["connections", "shell-ui", "wipe", "sync", "migrations"],
-    &["deploy", "templates", "facet-cap", "capability-cost", "facet-restart", "app-lockdown", "site", "watch", "icons", "schemas", "channels", "live", "routes", "cli", "browser", "jobs", "triggers", "sessions", "sessions-ui", "finite-private", "chat"],
+pub const SHARDS: [&[&str]; 5] = [
     &[
-        "auth", "create", "lockdown", "keys", "members", "identities", "levers", "secrets", "reach", "delegation", "files", "share", "faces", "isolation", "frames", "ops", "public", "effects",
-        "appfiles", "blobs", "notes", "brain", "brain-release", "doc", "push", "ai", "ledger", "transcribe", "orgs", "billing", "governance", "billing-page", "trials", "admin", "admin-page",
+        "keys", "members", "levers", "delegation", "isolation", "blobs", "push", "transcribe", "orgs", "trials", "admin-page", "computers",
+        "search-bench", "import-release", "hermes", "agent-smoke", "agent-ask", "agent-app", "agent-restart", "bot-mode", "checkout",
     ],
+    &["shell-ui"],
+    &[
+        "lockdown", "templates", "faces", "public", "facet-cap", "facet-restart", "app-lockdown", "site", "watch", "icons", "schemas", "channels",
+        "live", "routes", "cli", "browser", "jobs", "triggers", "sessions", "brain", "brain-release", "doc", "export", "search", "search-across",
+        "sync", "migrations", "capability-cost",
+    ],
+    &[
+        "auth", "create", "reach", "share", "effects", "appfiles", "sessions-ui", "ai", "billing", "governance", "billing-page", "admin", "shell",
+        "chat",
+    ],
+    &["identities", "signin", "connections", "secrets", "files", "deploy", "frames", "ops", "notes", "ledger", "finite-private", "wipe", "restart"],
 ];
 
 /// Whether shard `k` (from 1) of the table runs the section `name`.
