@@ -13,3 +13,32 @@
 .brain-snippet { margin-top: 6px; font-size: 14.5px; }
 .brain-path { color: var(--fg2); font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; margin-top: 6px; word-break: break-all; }
 .brain-error { color: var(--wl-missing); }
+
+/* Narrow (the viewer's own breakpoint): the page first. The title and a
+   Files button in one row, the search under them; the file tree and
+   Recent open over the page from the button. Wide, the two wrappers are
+   not boxes at all, so the viewer's sidebar is as it was. */
+#top, #files { display: contents; }
+#files-toggle { display: none; }
+@media (max-width: 760px) {
+  body { grid-template-rows: auto 1fr; height: 100vh; height: 100dvh; }
+  #side {
+    position: relative; z-index: 2; height: auto; max-height: none; overflow: visible;
+    padding: 10px 0 2px; border-right: none; border-bottom: 1px solid var(--line);
+  }
+  #top { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 12px 8px 16px; }
+  #top #brand { padding: 0; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #files-toggle {
+    display: block; flex: none; padding: 4px 12px; font: inherit; font-size: 13px; color: var(--fg);
+    background: var(--bg); border: 1px solid var(--line); border-radius: 7px; cursor: pointer;
+  }
+  #files-toggle[aria-expanded="true"] { color: var(--accent); border-color: var(--accent); }
+  #files { display: none; }
+  body.files-open #files {
+    display: flex; flex-direction: column; position: absolute; top: 100%; left: 0; right: 0;
+    max-height: 70vh; padding-top: 10px; background: var(--bg2);
+    border-bottom: 1px solid var(--line); box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+  }
+  #main { height: auto; min-height: 0; overflow-y: auto; }
+  .note { padding-top: 24px; }
+}

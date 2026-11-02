@@ -27,6 +27,22 @@ if (title) {
   document.title = title;
 }
 
+// Narrow, the files and Recent sit behind one button (brain.css): open
+// and closed by it, closed by a file picked, a search, Escape, or the page.
+const filesButton = $("files-toggle");
+function files(open) {
+  document.body.classList.toggle("files-open", open);
+  filesButton.setAttribute("aria-expanded", String(open));
+}
+filesButton.addEventListener("click", () => files(!document.body.classList.contains("files-open")));
+$("files").addEventListener("click", (e) => {
+  if (e.target.closest("a.file")) files(false);
+});
+$("main").addEventListener("click", () => files(false));
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") files(false);
+});
+
 // the viewer draws the page the hash names again (a result for the page
 // already open changes no hash)
 const reroute = () => window.dispatchEvent(new HashChangeEvent("hashchange"));
@@ -89,6 +105,7 @@ async function search(q) {
 let typing = null;
 const box = $("q");
 box.addEventListener("input", () => {
+  files(false);
   clearTimeout(typing);
   const q = box.value.trim();
   if (!q) {

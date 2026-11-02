@@ -29,14 +29,19 @@
 </head>
 <body>
 <div id="side">
-  <div id="brand">brain</div>
+  <div id="top">
+    <div id="brand">brain</div>
+    <button id="files-toggle" type="button" aria-expanded="false" aria-controls="files">Files</button>
+  </div>
   <form id="search" role="search" autocomplete="off">
     <input id="q" type="search" placeholder="search the brain…" maxlength="256" aria-label="search the brain">
   </form>
-  <input id="filter" type="search" placeholder="filter files…" autocomplete="off" aria-label="filter files">
-  <nav id="tree" aria-label="files"></nav>
-  <div id="recent-label">recent</div>
-  <nav id="recent" aria-label="recently changed"></nav>
+  <div id="files">
+    <input id="filter" type="search" placeholder="filter files…" autocomplete="off" aria-label="filter files">
+    <nav id="tree" aria-label="files"></nav>
+    <div id="recent-label">recent</div>
+    <nav id="recent" aria-label="recently changed"></nav>
+  </div>
 </div>
 <main id="main"><div id="content"></div></main>
 </body>
