@@ -439,6 +439,15 @@ reaches it (`withheld`).
   its process (PKCE), so a sign-in never outlives its turn: after a sleep
   or a restart its card's code is refused, saying so, and the next
   message asks anew.
+- **Its model and effort** are its agent's own: its `agent.json`'s
+  `"claude": {"model", "effort"}` (`ClaudeSettings`), read with its
+  runtime, in Claude Code's own names (`opus`, `sonnet`, `haiku`, `fable`
+  or a model's full name; `low`, `medium`, `high`, `xhigh`, `max`), and
+  passed as `--model` and `--effort`. Its model else `BRIDGE_CLAUDE_MODEL`,
+  else the account's default; its effort else Claude Code's. A value of no
+  such name is none. A change applies at its next turn: the process its
+  session idles in stops, and the turn resumes the session with the new
+  flags; a turn running keeps its own.
 - **Its folder** is its work directory, its own: an `AGENTS.md` the
   bridge writes (who it is, and the `fragment` CLI, which acts as it:
   `FRAGMENT_AS_AGENT`, `FRAGMENT_FOR`), and a `CLAUDE.md` that reads it,

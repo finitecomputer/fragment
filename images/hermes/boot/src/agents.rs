@@ -90,7 +90,7 @@ mod tests {
     use super::*;
 
     fn agent(label: &str) -> Agent {
-        Agent { fragment: format!("{label}--k3x9"), identity: format!("npub1{label}"), name: label.into(), owner: "npub1paul".into(), credentials: vec![], key: None, runtime: None }
+        Agent { fragment: format!("{label}--k3x9"), identity: format!("npub1{label}"), name: label.into(), owner: "npub1paul".into(), credentials: vec![], key: None, runtime: None, claude: Default::default() }
     }
 
     fn names(agents: &[Agent]) -> Vec<&str> {

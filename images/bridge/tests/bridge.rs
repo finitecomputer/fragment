@@ -1212,7 +1212,7 @@ async fn a_routine_waits_for_its_simplex_chat() {
     // its chat made by its name (its poster's `ensure_chat`; no core runs here to start one): the routine runs there
     let bridge = support::start(config(), support::script());
     let api = fragment_bridge::api::Api::new(&fake.url()).expect("an address");
-    let juniper = fragment_bridge::runtime::Agent { fragment: "juniper--k3x9".into(), identity: "npub1juniper".into(), name: "juniper".into(), owner: "npub1paul".into(), credentials: vec![], key: None, runtime: None };
+    let juniper = fragment_bridge::runtime::Agent { fragment: "juniper--k3x9".into(), identity: "npub1juniper".into(), name: "juniper".into(), owner: "npub1paul".into(), credentials: vec![], key: None, runtime: None, claude: Default::default() };
     run::ensure_chat(&api, &juniper, &simplex).await.expect("made");
     fake.until(WAIT, "the routine in its SimpleX chat", |w| said(w, &simplex).len() == 1).await;
     bridge.stop().await;
@@ -1244,7 +1244,7 @@ async fn its_simplex_chat_is_made_once_by_its_name() {
     fake.add_member(&theirs, "npub1skyler", "owner");
     let left = fake.chat_named("juniper-simplex--s5t6", &[]);
     let api = fragment_bridge::api::Api::new(&fake.url()).expect("an address");
-    let juniper = fragment_bridge::runtime::Agent { fragment: "juniper--k3x9".into(), identity: "npub1juniper".into(), name: "juniper".into(), owner: "npub1paul".into(), credentials: vec![], key: None, runtime: None };
+    let juniper = fragment_bridge::runtime::Agent { fragment: "juniper--k3x9".into(), identity: "npub1juniper".into(), name: "juniper".into(), owner: "npub1paul".into(), credentials: vec![], key: None, runtime: None, claude: Default::default() };
     let chat = "juniper-simplex--w9x2";
     ensure_chat(&api, &juniper, chat).await.expect("made");
     fake.with(|w| {

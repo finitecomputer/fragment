@@ -60,6 +60,43 @@ pub fn named(agent_json: Option<&[u8]>) -> Option<String> {
     }
 }
 
+/// What an agent's `agent.json` asks of Claude Code (`"claude": {"model",
+/// "effort"}`; Paul, 2026-11-02): each none, Claude Code's own, and each
+/// passed to its sessions as is (`--model`, `--effort`), so its own names
+/// (`opus`, `sonnet`, `haiku`, `fable`, or a model's full name; `low` to
+/// `max`) track Anthropic's latest with no release of ours.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ClaudeSettings {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+}
+
+/// Claude Code's effort levels (`claude --help`, 2.1.316: `--effort
+/// <level>`).
+pub const CLAUDE_EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+
+impl ClaudeSettings {
+    pub fn is_default(&self) -> bool {
+        *self == ClaudeSettings::default()
+    }
+
+    /// From an agent's `agent.json` bytes (none: there is no file): its
+    /// `claude` object's `model`, when it can be a model's name (an alias or
+    /// a full name: `^[A-Za-z0-9][A-Za-z0-9._\[\]-]{0,63}$`, never a flag),
+    /// and its `effort`, when it is one of `CLAUDE_EFFORTS`. Anything else
+    /// is none: Claude Code's own.
+    pub fn of(agent_json: Option<&[u8]>) -> ClaudeSettings {
+        let Some(v) = agent_json.and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok()) else { return ClaudeSettings::default() };
+        let model = v["claude"]["model"].as_str().filter(|m| {
+            (1..=64).contains(&m.len()) && m.as_bytes()[0].is_ascii_alphanumeric() && m.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-[]".contains(&b))
+        });
+        let effort = v["claude"]["effort"].as_str().filter(|e| CLAUDE_EFFORTS.contains(e));
+        ClaudeSettings { model: model.map(str::to_string), effort: effort.map(str::to_string) }
+    }
+}
+
 /// The runtimes a bridge runs, each with the name agents give it, in the
 /// order they start: at most `limits::RUNTIMES_MAX`, each name once.
 pub struct Runtimes(Vec<(String, Box<dyn Runtime>)>);
@@ -125,6 +162,10 @@ pub struct Agent {
     /// `DEFAULT`. Never the platform's: the driver reads it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<String>,
+    /// What its `agent.json` asks of Claude Code (`ClaudeSettings::of`),
+    /// read with its runtime. Never the platform's.
+    #[serde(default, skip_serializing_if = "ClaudeSettings::is_default")]
+    pub claude: ClaudeSettings,
 }
 
 /// One credential of an agent's (`GET /api/computer`'s `agents[].credentials`).
@@ -492,6 +533,20 @@ mod tests {
         assert_eq!(named(Some(b"{\"runtime\":7}")).as_deref(), Some("7"));
         let long = format!("{{\"runtime\":\"{}\"}}", "x".repeat(100));
         assert_eq!(named(Some(long.as_bytes())).map(|n| n.len()), Some(64));
+        // what it asks of Claude Code: its own names, else Claude Code's own
+        let of = |j: &str| ClaudeSettings::of(Some(j.as_bytes()));
+        assert_eq!(of(r#"{"runtime":"claude","claude":{"model":"sonnet","effort":"high"}}"#), ClaudeSettings { model: Some("sonnet".into()), effort: Some("high".into()) });
+        assert_eq!(of(r#"{"claude":{"model":"claude-haiku-5-5"}}"#).model.as_deref(), Some("claude-haiku-5-5"));
+        assert_eq!(of(r#"{"claude":{"model":"sonnet[1m]"}}"#).model.as_deref(), Some("sonnet[1m]"));
+        for e in CLAUDE_EFFORTS {
+            assert_eq!(of(&format!(r#"{{"claude":{{"effort":"{e}"}}}}"#)).effort.as_deref(), Some(e));
+        }
+        assert!(ClaudeSettings::of(None).is_default() && of("not json").is_default() && of(r#"{"tier":"cheap","model":"x"}"#).is_default(), "none: Claude Code's own");
+        // invalid: a flag, a space, too long, not a string, an effort of no level
+        for bad in [r#"{"claude":{"model":"--dangerously-skip-permissions"}}"#, r#"{"claude":{"model":"so net"}}"#, r#"{"claude":{"model":7}}"#, r#"{"claude":{"model":""}}"#, r#"{"claude":{"effort":"extreme"}}"#, r#"{"claude":{"effort":"HIGH"}}"#, r#"{"claude":"sonnet"}"#] {
+            assert!(of(bad).is_default(), "{bad}");
+        }
+        assert!(of(&format!(r#"{{"claude":{{"model":"{}"}}}}"#, "a".repeat(65))).is_default());
         assert!(valid_name(DEFAULT) && valid_name("codex") && !valid_name("Claude") && !valid_name("") && !valid_name(&"a".repeat(33)));
     }
 
