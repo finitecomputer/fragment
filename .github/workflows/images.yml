@@ -4,10 +4,11 @@
 # - `check`: host tests and clippy, warnings denied, on every change to
 #   images/, what it compiles in from outside it, or this workflow
 #   (`changes`, below).
-# - `docker`: the Docker lane (images/bridge/tests/docker.rs): both images
-#   built for linux/amd64 and run in Docker against the fake API and a
-#   scripted model, real Hermes included (`cargo test -p fragment-bridge
-#   --test docker -- --ignored`). It runs only when a change touches what it
+# - `docker (real Hermes)`: the Docker lane (images/bridge/tests/docker.rs),
+#   both images built for linux/amd64 and run in Docker against the fake
+#   API and a scripted model, real Hermes included (`cargo test -p
+#   fragment-bridge --test docker -- --ignored`): two jobs side by side,
+#   the stub image's and the Hermes image's, and the check that needs both. It runs only when a change touches what it
 #   builds or runs (`changes` below: images/hermes, images/bridge,
 #   images/stub, the images' manifest and lock, the Hermes image's CLI
 #   stage's inputs, or this workflow), in merge groups and on master's
@@ -151,8 +152,54 @@ jobs:
   # caches ci.yml reads on every run.
   #
   # The tests' container logs are kept on failure.
-  docker:
-    name: docker (real Hermes)
+  # The Docker lane is two jobs, side by side, each building only the image
+  # its tests run: the stub image's one test (`the_stub_image`), and the
+  # Hermes image's, every other. Built one after the other on one runner,
+  # the stub's 4.6 minutes were the Hermes image's to wait out (the two
+  # share no layer: their stages' cache mounts and copies differ), on the
+  # merge queue's longest job (25 to 26.5 minutes, 2026-11-02). `docker
+  # (real Hermes)`, the required check, is the job that needs both.
+  docker-stub:
+    name: docker lane (stub)
+    needs: changes
+    # as `docker-hermes`'s, which says why
+    if: ${{ !cancelled() && github.event_name != 'pull_request' && (github.event_name == 'workflow_dispatch' || needs.changes.result != 'success' || needs.changes.outputs.docker == 'true') }}
+    # the Docker `docker-hermes` runs on, which says why
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    defaults:
+      run:
+        working-directory: images
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/free-disk
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: images
+          workspaces: images -> target
+          cache-bin: false
+          save-if: false
+      - run: cargo test -p fragment-bridge --test docker --locked --no-run
+      - name: the runner
+        run: nproc; free -g; df -h /; docker version --format '{{.Server.Version}}'
+      - name: build the stub image
+        working-directory: .
+        run: docker build --platform linux/amd64 -f images/stub/Dockerfile -t fragment-stub:test .
+      - name: the Docker lane, the stub image's
+        run: cargo test -p fragment-bridge --test docker --locked -- --ignored --exact the_stub_image --show-output
+        env:
+          FRAGMENT_DOCKER_SKIP_BUILD: "1"
+          RUST_BACKTRACE: "1"
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-lane-stub-logs
+          path: images/target/tmp/**/*.log
+          retention-days: 7
+
+  docker-hermes:
+    name: docker lane (Hermes)
     needs: changes
     # fails closed: a `changes` that did not succeed (it failed, or ran out
     # its time, as in run 41100441445) runs the lane rather than skip it,
@@ -185,20 +232,17 @@ jobs:
       - run: cargo test -p fragment-bridge --test docker --locked --no-run
       - name: the runner
         run: nproc; free -g; df -h /; docker version --format '{{.Server.Version}}'
-      # as the tests' own `build` does (docker.rs), both from the repo's root
-      # (each carries the fragment CLI, of the root workspace)
-      - name: build the stub image
-        working-directory: .
-        run: docker build --platform linux/amd64 -f images/stub/Dockerfile -t fragment-stub:test .
+      # as the tests' own `build` does (docker.rs), from the repo's root (it
+      # carries the fragment CLI, of the root workspace)
       - name: build the Hermes image
         working-directory: .
         run: docker build --platform linux/amd64 -f images/hermes/Dockerfile -t fragment-hermes:test .
       # the tests build only the SimpleX lab's image, from its own
-      # Dockerfile: the two builds' cache goes before them
+      # Dockerfile: the build's cache goes before them
       - name: disk, built
         run: docker system df; docker builder prune -af > /dev/null; df -h /
-      - name: the Docker lane
-        run: cargo test -p fragment-bridge --test docker --locked -- --ignored --show-output
+      - name: the Docker lane, the Hermes image's
+        run: cargo test -p fragment-bridge --test docker --locked -- --ignored --skip the_stub_image --show-output
         env:
           FRAGMENT_DOCKER_SKIP_BUILD: "1"
           RUST_BACKTRACE: "1"
@@ -211,6 +255,28 @@ jobs:
       - if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: docker-lane-logs
+          name: docker-lane-hermes-logs
           path: images/target/tmp/**/*.log
           retention-days: 7
+
+  # The required check: green when both halves of the lane are, skipped when
+  # the lane is not to run (a pull request's own run, or nothing it builds
+  # changed), and red otherwise. It runs through a cancelled run (`always()`,
+  # never `!cancelled()`): a required check that skips counts as passed, so
+  # one cancelled with a half still running would let the merge through
+  # (Codex review of #981). Its check runs whatever came before it, and a
+  # half cancelled, skipped or failed is red.
+  docker:
+    name: docker (real Hermes)
+    needs: [changes, docker-stub, docker-hermes]
+    if: ${{ always() && github.event_name != 'pull_request' && (github.event_name == 'workflow_dispatch' || needs.changes.result != 'success' || needs.changes.outputs.docker == 'true') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - if: always()
+        env:
+          STUB: ${{ needs.docker-stub.result }}
+          HERMES: ${{ needs.docker-hermes.result }}
+        run: |
+          echo "the stub image's half: $STUB; the Hermes image's: $HERMES"
+          test "$STUB" = success && test "$HERMES" = success
