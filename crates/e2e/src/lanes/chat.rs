@@ -1263,6 +1263,19 @@ fn claude_install(s: &mut Suite, api: &Api, chrome: &mut Browser, owner: &Keys, 
     Ok(())
 }
 
+/// The shell's Settings, a fresh page of it: the page before marked, then
+/// navigated, and its Settings read once a page without the mark has them
+/// (the same address again is a new document, and a look before it lands
+/// would read the old one).
+fn to_settings(chrome: &mut Browser, shell: &Page) -> Result<()> {
+    chrome.eval(shell, "(window.__leaving = true, location.href = '/settings', true)")?;
+    anyhow::ensure!(
+        chrome.until(shell, "!window.__leaving && location.pathname === '/settings' && !!document.querySelector('#settings-page .agent-setting')", TURN),
+        "Settings opened again, a fresh page of it"
+    );
+    Ok(())
+}
+
 /// What a Claude agent offers beyond its chats (cell/shell/agent-runtimes.js;
 /// AGENTS.md: the UI shows only what an agent's runtime can do): no profile
 /// and no screen in its hero's menu, its chat's ⋯, or Settings (Agents'
@@ -1292,7 +1305,7 @@ fn claude_offers(s: &mut Suite, chrome: &mut Browser, shell: &Page, agent: &str,
         lacks(&claude_menu) && lacks(&chat_menu) && has(&hermes_menu),
         json!({ "claude": claude_menu, "its chat": chat_menu, "hermes": hermes_menu }),
     );
-    chrome.eval(shell, "(location.href = '/settings', true)")?;
+    to_settings(chrome, shell)?;
     // its Open (`data-offer="profile"`) in Agents, its button in Computer's Screens
     let open = |a: &str| format!("(() => {{ const n = document.querySelector({}); return !!n && !n.hidden; }})()", js(&format!("[data-offer=\"profile\"][data-offer-for={}]", js(a))));
     let screen = |a: &str| format!("(() => {{ const n = document.querySelector({}); return !!n && !n.hidden; }})()", js(&format!("[data-screen-for={}]", js(a))));
@@ -1325,7 +1338,7 @@ const CLAUDE_SAVED: &str = "Saved: it applies from its next message, within a mi
 /// taking its field away, and no tier written; no other agent shows them.
 /// Haiku only (Paul's rule for Claude); the stub's Claude runs no model.
 fn claude_settings(s: &mut Suite, api: &Api, chrome: &mut Browser, owner: &Keys, shell: &Page, agent: &str, shots: &Path) -> Result<()> {
-    chrome.eval(shell, "(location.href = '/settings', true)")?;
+    to_settings(chrome, shell)?;
     let model = format!("document.querySelector('[data-claude-model-for={agent:?}]')");
     let effort = format!("document.querySelector('[data-claude-effort-for={agent:?}]')");
     let shown = chrome.until(shell, &format!("{model}?.dataset.read === '1' && {effort}?.dataset.read === '1' && !{model}.closest('label').hidden && !{effort}.closest('label').hidden"), TURN);
