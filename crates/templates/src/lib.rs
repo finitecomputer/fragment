@@ -403,7 +403,7 @@ pub(crate) mod tests {
     /// each, and nothing else. Method: the blessed and catalog templates',
     /// the shell's and the docs' files are all there; a file two hold (the
     /// agent's image) is one; a template the cell does not serve adds only
-    /// what another it serves holds too (notes' viewer is the brain's).
+    /// none of it (notes, the CLI's: a manifest and its notes).
     #[test]
     fn the_release_files_are_what_the_cell_reads() {
         let files = release_files();
@@ -413,8 +413,7 @@ pub(crate) mod tests {
             assert!(t.files.iter().all(|f| hashes.contains(f.sha256)), "{}", t.name);
         }
         assert!(SHELL.iter().chain([&SKILL_MD, &GUIDE_MD]).all(|f| hashes.contains(f.sha256)));
-        assert!(NOTES.files.iter().any(|f| f.path == "app.mjs" && !hashes.contains(f.sha256)), "notes is the CLI's");
-        assert!(NOTES.files.iter().filter(|f| f.path.starts_with("site/assets/")).all(|f| hashes.contains(f.sha256)), "its viewer is the brain's");
+        assert!(NOTES.files.iter().all(|f| !hashes.contains(f.sha256)), "notes is the CLI's alone");
         assert_eq!(CATALOG.map(|t| t.name), ["blank", "todo", "inbox", "calories", "doc"]);
     }
 

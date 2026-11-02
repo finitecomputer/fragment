@@ -1121,28 +1121,41 @@ function openApp(name, path = "/") {
   const frame = named(frameOf(framed(name, path), titleOf(name), name), name, (t) => t, "aria-label");
   const status = el("span", "pane-sharing");
   if (f) status.append(...badges(f));
+  show({
+    key: `app:${name}`, title: titleOf(name), subtitle: !f || own(f) ? undefined : f.role, icon: iconOf(name), body: frame, status,
+    actions: windowActions(name, frame, path, () => show({ key: `tree:${name}`, title: titleOf(name), subtitle: "files", icon: paneIcon("folder"), body: filesFrame(name), actions: windowActions(name, null, "/__files") })),
+  });
+  navigated();
+}
+
+// A fragment's files (its `__files` view) as a pane's frame.
+const filesFrame = (name) => named(frameOf(framed(name, "/__files"), `${titleOf(name)} files`, name), name, (t) => `${t} files`, "aria-label");
+
+// A fragment window's actions, its app's or its files' (FIN-372: the files
+// view has the window's too): Share (its owner), its files (`files`, but on
+// the files pane itself), Reload, a tab of its own, and More. `frame`, the
+// pane's frame (its files', when none: found when asked).
+function windowActions(name, frame, path, files) {
+  const f = byName(name);
   // its own URL, for a tab of its own or the clipboard
   const at = originOf(name).then((o) => `${o}${path}`);
   at.catch(() => {});
-  show({
-    key: `app:${name}`, title: titleOf(name), subtitle: !f || own(f) ? undefined : f.role, icon: iconOf(name), body: frame, status,
-    actions: [
-      ...(f && own(f) ? [{ icon: "share", title: "Share…", onClick: () => share(name) }] : []),
-      { icon: "folder", title: "Files", onClick: () => show({ key: `tree:${name}`, title: titleOf(name), subtitle: "files", icon: paneIcon("folder"), body: named(frameOf(framed(name, "/__files"), `${titleOf(name)} files`, name), name, (t) => `${t} files`, "aria-label") }) },
-      { icon: "reload", title: "Reload", onClick: () => go(frame, framed(name, path)) },
-      { icon: "external", title: "Open in a new tab", onClick: () => window.open(`/auth/fragment?name=${encodeURIComponent(name)}&return=${encodeURIComponent(path)}`, "_blank", "noopener") },
-      {
-        icon: "more", title: "More", onClick: (e) => openMenu(e.currentTarget, [
-          { icon: "link", text: "Copy link", onClick: () => at.then((u) => navigator.clipboard.writeText(u)).catch((err) => notice("The link was not copied", err.message)) },
-          // someone else's: who else is in it, and leaving it
-          ...(f && !own(f) ? [shareItem(name)] : []),
-          ...(f && (own(f) || f.role === "editor") ? [{ icon: "image", text: "Icon…", onClick: () => openIconSheet(iconHelpers, name, titleOf(name), byName(name)) }] : []),
-          ...(f ? [archiveItem(name)] : []),
-        ]),
-      },
-    ],
-  });
-  navigated();
+  const shown = () => frame || document.querySelector(`#stack .pane[data-key="${CSS.escape(`tree:${name}`)}"] iframe`);
+  return [
+    ...(f && own(f) ? [{ icon: "share", title: "Share…", onClick: () => share(name) }] : []),
+    ...(files ? [{ icon: "folder", title: "Files", onClick: files }] : []),
+    { icon: "reload", title: "Reload", onClick: () => shown() && go(shown(), framed(name, path)) },
+    { icon: "external", title: "Open in a new tab", onClick: () => window.open(`/auth/fragment?name=${encodeURIComponent(name)}&return=${encodeURIComponent(path)}`, "_blank", "noopener") },
+    {
+      icon: "more", title: "More", onClick: (e) => openMenu(e.currentTarget, [
+        { icon: "link", text: "Copy link", onClick: () => at.then((u) => navigator.clipboard.writeText(u)).catch((err) => notice("The link was not copied", err.message)) },
+        // someone else's: who else is in it, and leaving it
+        ...(f && !own(f) ? [shareItem(name)] : []),
+        ...(f && (own(f) || f.role === "editor") ? [{ icon: "image", text: "Icon…", onClick: () => openIconSheet(iconHelpers, name, titleOf(name), byName(name)) }] : []),
+        ...(f ? [archiveItem(name)] : []),
+      ]),
+    },
+  ];
 }
 
 // the icon sheet's (app-icon.js): the list again, which takes a new icon to the dock

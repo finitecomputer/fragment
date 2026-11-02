@@ -96,6 +96,9 @@ pub struct FragmentCell {
     pub(crate) rate: RefCell<fragment_core::ratelimit::Rate>,
     /// Whether this activation has swept its pending mutations.
     pub(crate) swept: Cell<bool>,
+    /// Whether this activation has had its woke trigger's chance (jobs.rs
+    /// `woke_chance`): started, or found none declared.
+    pub(crate) woke: Cell<bool>,
     /// The ledger ids a call or a sweep is settling now (channels.rs).
     pub(crate) settling: RefCell<BTreeMap<String, Arc<futures_util::lock::Mutex<()>>>>,
     /// The search sources a write or a forget is sending now
@@ -148,6 +151,7 @@ impl DurableObject for FragmentCell {
             seeding: futures_util::lock::Mutex::new(()),
             rate: RefCell::new(rate),
             swept: Cell::new(false),
+            woke: Cell::new(false),
             facet_calls: Cell::new((0, 0)),
             settling: RefCell::default(),
             search_sending: RefCell::default(),
@@ -332,6 +336,9 @@ pub(crate) enum MetaKey {
     ManifestMain,
     /// The live manifest's `meta`, as JSON text: a page's Open Graph tags.
     MetaLive,
+    /// The live manifest's `files` (`FilesDecl`), as JSON text: its page as
+    /// the files view, and that view's layer (FIN-372).
+    FilesLive,
     /// The blessed template live runs and its release (`<name>@<release>`,
     /// blessed.rs in crates/templates), when it names one.
     Blessed,
@@ -471,6 +478,7 @@ impl MetaKey {
             MetaKey::LiveReadAt => "live_read_at",
             MetaKey::ManifestMain => "manifest_main",
             MetaKey::MetaLive => "meta_live",
+            MetaKey::FilesLive => "files_live",
             MetaKey::Blessed => "blessed",
             MetaKey::Face => "face",
             MetaKey::Picture => "picture",
@@ -1007,6 +1015,8 @@ impl FragmentCell {
         if let Err(e) = self.blessed_current().await {
             self.event("blessed.install-failed", &e.message, json!({ "code": e.code }));
         }
+        // its woke trigger, once this activation, for a person or an agent
+        self.woke_chance(&caller, &routed_name);
         if let Some(rest) = path.strip_prefix("/serve/") {
             let rest = rest.to_string();
             return self.serve(req, &caller, &routed_name, &rest).await;

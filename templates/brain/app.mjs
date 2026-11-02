@@ -1,10 +1,11 @@
 // The brain template's code (docs/cloudflare-v1.md, decision 30). A brain is
 // a fragment app whose files are the knowledge, laid out as Finite Brain
 // lays it out: each top-level folder a wiki (raw/ wiki/ inventory/
-// datasets/ output/, index.md, log.md), and the brain's AGENTS.md
-// (applib/guide.mjs) on how an agent keeps one. It runs from the platform's
-// release (decision 40): a brain's repo holds only its face (fragment.json)
-// and its files.
+// datasets/ output/, index.md, log.md), and the brain's AGENTS.md on how an
+// agent keeps one (the template's, held to applib/guide.mjs). It runs from
+// the platform's release (decision 40): a brain's repo holds only its face
+// (fragment.json) and its files; the release adds AGENTS.md and a front
+// page (index.md) beneath them.
 //
 // Search is the fragment's own index (docs/api.md, "A fragment's search"),
 // by words and by meaning, written and asked through `this.searchIndex`:
@@ -33,8 +34,13 @@
 // embedding model emptied) takes every page; one main deletes leaves the
 // index.
 //
-// The viewer (site/) is the notes template's, reading api/tree and
-// api/file here, with a search box of the brain's own beside it.
+// Its page is the platform's files view (fragment.json `files`, FIN-372):
+// the tree and reader every fragment has, with the fragment's search, and
+// this brain's status line (`index_status`'s `line` and `busy`). It catches
+// up on its own: each move of main (its file trigger), each new release
+// (installed), and when someone comes back to it (woke: once an activation
+// of its object, for a person or an agent), a run of `changed`, two steps
+// when nothing is left.
 import { DurableObject } from "cloudflare:workers";
 import { GUIDE } from "./applib/guide.mjs";
 import { SECTIONS_MAX, linkWords, sections, stem } from "./applib/sections.mjs";
@@ -88,21 +94,13 @@ const FIELD_MAX_BYTES = 64;
 const hidden = (p) =>
   p === "fragment.json" || p === "app.mjs" || p.startsWith("site/") || p.startsWith("applib/") ||
   p.startsWith(".") || p.includes("/.") || p.includes(".conflict-");
-// what search reads: markdown, but neither a wiki's instructions nor a made index
+// what search reads: markdown, but neither a wiki's instructions nor _index.md (which the platform hides)
 const indexable = (p) => /\.(md|markdown)$/i.test(p) && !hidden(p) && !/(^|\/)(AGENTS|_index)\.md$/i.test(p);
 const wikiOf = (p) => (p.includes("/") ? p.slice(0, p.indexOf("/")) : "");
 const editor = (role) => role === "editor" || role === "owner";
 const NOTHING_DONE = Object.freeze({ indexed: 0, unchanged: 0, removed: 0, skipped: 0, stale: 0 });
 // The wait a 429 asks for, within bounds.
 const waitFor = (ms) => (Number.isFinite(ms) && ms > 0 ? Math.min(Math.max(Math.ceil(ms), WAIT_MIN_MS), WAIT_MAX_MS) : WAIT_DEFAULT_MS);
-
-const MIME = {
-  md: "text/plain; charset=utf-8", markdown: "text/plain; charset=utf-8", txt: "text/plain; charset=utf-8",
-  json: "application/json", csv: "text/csv", svg: "image/svg+xml", png: "image/png", jpg: "image/jpeg",
-  jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp", pdf: "application/pdf", mp3: "audio/mpeg",
-  wav: "audio/wav", mp4: "video/mp4", webm: "video/webm",
-};
-const mimeOf = (p) => MIME[(p.match(/\.([a-z0-9]+)$/i) || [])[1]?.toLowerCase()] || "application/octet-stream";
 
 async function sha256(bytes) {
   return [...new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))].map((b) => b.toString(16).padStart(2, "0")).join("");
@@ -139,9 +137,6 @@ function source(path, revision, page) {
   return out;
 }
 
-// Markdown text that reads as itself: a name from the brain's files, written into a made page.
-const literal = (s) => String(s).replace(/[\\`*_[\]<>#|]/g, (c) => `\\${c}`);
-
 export class App extends DurableObject {
   constructor(ctx, env) {
     super(ctx, env);
@@ -158,7 +153,6 @@ export class App extends DurableObject {
         this.#set("full", "1");
       });
     }
-    sql.exec("CREATE TABLE IF NOT EXISTS changes (id INTEGER PRIMARY KEY CHECK (id = 1), at INTEGER NOT NULL, paths TEXT NOT NULL)");
     // a marked path: its newest mark's generation, and a batch's claim on
     // it (when, and which batch)
     sql.exec("CREATE TABLE IF NOT EXISTS dirty (path TEXT PRIMARY KEY, gen INTEGER NOT NULL, claimed INTEGER, by TEXT)");
@@ -248,22 +242,13 @@ export class App extends DurableObject {
   }
 
   // The paths that moved, each at a new generation; `full`, an editor's (or
-  // a trigger's), asks for every file to be read again. Open pages re-run
-  // last_change after a trigger's mark, and refresh their tree.
+  // a trigger's), asks for every file to be read again.
   mark({ paths = [], full = false }, call) {
-    const sql = this.ctx.storage.sql;
     const gen = this.#bump("gen");
     const mine = paths.filter(indexable);
     for (const p of mine) this.#dirty(p, gen);
     const may = editor(call.role);
     if (full && may) this.#set("full", "1");
-    if (may) {
-      sql.exec(
-        "INSERT INTO changes (id, at, paths) VALUES (1, ?, ?) ON CONFLICT (id) DO UPDATE SET at = excluded.at, paths = excluded.paths",
-        Date.now(),
-        JSON.stringify(paths),
-      );
-    }
     return { marked: mine.length, full: full && may, gen };
   }
 
@@ -445,21 +430,39 @@ export class App extends DurableObject {
   // What the index holds: the brain's pages and their sections, what is
   // pending, whether a run is on it and what is left of a pause the search
   // service asked for, how many pages it has written, the pages it skipped,
-  // and the fragment's index's own counts and limits.
+  // and the fragment's index's own counts and limits; and, for its page's
+  // status line (fragment.json `files.status`), all that said in a `line`,
+  // `busy` while there is work under way.
   async index_status() {
     const sql = this.ctx.storage.sql;
     const one = (q) => sql.exec(q).one().n;
     const skipped = sql.exec("SELECT path, skipped FROM pages WHERE skipped IS NOT NULL ORDER BY path LIMIT ?", SKIPPED_LISTED).toArray();
     const pending = this.#pending();
+    const waiting_ms = pending > 0 ? this.#waiting() : 0;
+    const pages = one("SELECT COUNT(*) AS n FROM pages WHERE skipped IS NULL");
+    const left_out = one("SELECT COUNT(*) AS n FROM pages WHERE skipped IS NOT NULL");
     const index = await this.searchIndex.status();
+    const plural = (n, one) => `${n} ${one}${n === 1 ? "" : "s"}`;
+    const line =
+      waiting_ms > 0
+        ? "Indexing: waiting for the search service"
+        : pending > 0
+          ? `Indexing: ${plural(pending, "page")} to go`
+          : pages === 0
+            ? "No pages yet"
+            : left_out > 0
+              ? `${plural(pages, "page")} searchable, ${left_out} left out`
+              : `${plural(pages, "page")}, all searchable`;
     return {
+      line,
+      busy: pending > 0,
       format: FORMAT,
       pages: one("SELECT COUNT(*) AS n FROM pages"),
       sections: one("SELECT COALESCE(SUM(sections), 0) AS n FROM pages"),
       pending,
       indexing: pending > 0,
       running: this.#running(),
-      waiting_ms: pending > 0 ? this.#waiting() : 0,
+      waiting_ms,
       writes: Number(this.#get("writes") ?? 0),
       skipped: skipped.map((r) => ({ path: r.path, why: r.skipped })),
       index: { chunks: index.chunks, chunks_split: index.chunks_split, chunks_max: index.chunks_max, semantic: index.semantic },
@@ -469,77 +472,5 @@ export class App extends DurableObject {
   // The brain's AGENTS.md, for an agent with the CLI.
   guide() {
     return { text: GUIDE };
-  }
-
-  last_change() {
-    const row = this.ctx.storage.sql.exec("SELECT at, paths FROM changes WHERE id = 1").toArray()[0];
-    return row ? { at: row.at, paths: JSON.parse(row.paths) } : null;
-  }
-
-  // ---- the viewer's routes ----
-
-  // The brain's title, from its face.
-  async #title() {
-    try {
-      const m = JSON.parse((await this.files.read("fragment.json")) ?? "{}");
-      return typeof m.meta?.title === "string" && m.meta.title ? m.meta.title : "Brain";
-    } catch {
-      return "Brain";
-    }
-  }
-
-  // _index.md, made: the brain's wikis, each with its pages, and the guide.
-  async #landing(files) {
-    const wikis = new Map();
-    for (const f of files) {
-      const w = wikiOf(f.path);
-      if (!w) continue;
-      const e = wikis.get(w) ?? { pages: 0, sources: 0, index: false };
-      if (/\.(md|markdown)$/i.test(f.path)) e.pages++;
-      if (f.path.startsWith(`${w}/raw/`)) e.sources++;
-      if (f.path === `${w}/index.md`) e.index = true;
-      wikis.set(w, e);
-    }
-    const lines = [`# ${literal(await this.#title())}`, "", "A brain: each folder is a wiki, kept as [[AGENTS.md]] says. Search it with the box above.", ""];
-    if (!wikis.size) lines.push("No wikis yet. An agent starts one by writing its index.md and log.md (see [[AGENTS.md]]).");
-    else lines.push("## Wikis", "");
-    for (const [w, e] of [...wikis].sort(([a], [b]) => a.localeCompare(b))) {
-      const name = e.index ? `[[${w}/index.md|${literal(w)}]]` : literal(w);
-      lines.push(`- ${name}: ${e.pages} page${e.pages === 1 ? "" : "s"}, ${e.sources} in raw/`);
-    }
-    return lines.join("\n") + "\n";
-  }
-
-  // api/tree: the brain's files at main, and the two it makes (its
-  // _index.md, and the guide as AGENTS.md, each unless the brain holds one
-  // of its own); api/file?path=: one of them (a blob's bytes come from the
-  // platform's __file, beside this route).
-  async fetch(request) {
-    const url = new URL(request.url);
-    const text = (body) => new Response(body, { headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" } });
-    if (url.pathname.endsWith("/api/tree")) {
-      const files = (await this.files.list("")).filter((f) => !hidden(f.path));
-      const made = [];
-      if (!files.some((f) => f.path === "_index.md")) made.push({ path: "_index.md", size: 0, made: true });
-      if (!files.some((f) => f.path === "AGENTS.md")) made.push({ path: "AGENTS.md", size: GUIDE.length, made: true });
-      return Response.json({ files: [...made, ...files] }, { headers: { "cache-control": "no-store" } });
-    }
-    if (!url.pathname.endsWith("/api/file")) return new Response(`no route ${url.pathname}`, { status: 404 });
-    const path = url.searchParams.get("path") || "";
-    if (hidden(path)) return new Response("not a file of the brain", { status: 404 });
-    const stat = (await this.files.list(path)).find((f) => f.path === path);
-    if (!stat && path === "AGENTS.md") return text(GUIDE);
-    if (!stat && path === "_index.md") return text(await this.#landing((await this.files.list("")).filter((f) => !hidden(f.path))));
-    if (!stat) return new Response("no such file", { status: 404 });
-    if (stat.blob) {
-      const to = new URL("../__file", url);
-      to.searchParams.set("path", path);
-      const view = url.searchParams.get("view");
-      if (view) to.searchParams.set("view", view);
-      return Response.redirect(to.href, 302);
-    }
-    return new Response(await this.files.readBytes(path), {
-      headers: { "content-type": mimeOf(path), "cache-control": "no-store", "x-content-type-options": "nosniff" },
-    });
   }
 }

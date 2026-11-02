@@ -16,7 +16,6 @@
     },
     "index_status": { "kind": "query", "input": { "type": "object", "additionalProperties": false, "properties": {} } },
     "guide": { "kind": "query", "input": { "type": "object", "additionalProperties": false, "properties": {} } },
-    "last_change": { "kind": "query" },
     "changed": {
       "kind": "job",
       "role": "viewer",
@@ -49,7 +48,8 @@
       "input": { "type": "object", "additionalProperties": false, "properties": { "full": { "type": "boolean" } } }
     }
   },
-  "triggers": [{ "files": "**", "run": "changed" }, { "installed": true, "run": "changed" }],
+  "triggers": [{ "files": "**", "run": "changed" }, { "installed": true, "run": "changed" }, { "woke": true, "run": "changed" }],
+  "files": { "page": true, "status": "index_status" },
   "meta": {
     "title": "Brain",
     "description": "A knowledge base your agents keep: wikis of sources and pages, searched by words and meaning, shared with whoever you add."

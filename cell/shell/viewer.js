@@ -118,8 +118,11 @@ export function createViewer({ stack, onChange = () => {}, still = () => false }
   }
   // Every window where the layout puts it now: a motion begun from another
   // layout is dropped, and one closing is gone.
+  // Those closing go first: each one's going lays the rest out again, which
+  // may start their motions (`relayout`), so every motion is dropped after.
   function settleAll() {
-    for (const p of [...panes]) { if (p.closing) finishClose(p); else cancelMotion(p); }
+    for (const p of panes.filter((x) => x.closing)) finishClose(p);
+    for (const p of panes) cancelMotion(p);
   }
   reducedMotion.addEventListener("change", () => { if (reducedMotion.matches) settleAll(); });
   // a motion measured against the window as it was (its size, Safari's bars)

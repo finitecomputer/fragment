@@ -194,6 +194,33 @@ function clock(t) {
   return (ms) => (now += ms);
 }
 
+// FIN-372: its page is the files view, whose status line is index_status's
+// `line`, busy while pages are left; and the AGENTS.md every brain lists
+// (the template's file, the release's data) is the guide its operation answers.
+it("its status line says what the index holds, busy while pages are left", async (t) => {
+  const tick = clock(t);
+  const { app, fs, ix } = await brain({ "w/a.md": "# A\n\none" });
+  assert.deepEqual(await app.index_status().then((s) => [s.line, s.busy]), ["1 page, all searchable", false]);
+  fs.at.set("w/b.md", "# B\n\ntwo");
+  fs.at.set("w/c.md", "# C\n\nthree");
+  mark(app, "w/b.md", "w/c.md");
+  assert.deepEqual(await app.index_status().then((s) => [s.line, s.busy]), ["Indexing: 2 pages to go", true]);
+  ix.limited.push({ retry_after_ms: 5000 });
+  await app.reindex({}, EDITOR);
+  assert.deepEqual(await app.index_status().then((s) => [s.line, s.busy]), ["Indexing: waiting for the search service", true]);
+  tick(5000);
+  await settle(app);
+  assert.deepEqual(await app.index_status().then((s) => [s.line, s.busy]), ["3 pages, all searchable", false]);
+  const empty = await brain({});
+  assert.equal((await empty.app.index_status()).line, "No pages yet");
+});
+
+it("the AGENTS.md every brain lists is the guide its operation answers", async () => {
+  const { app } = await brain({});
+  const listed = readFileSync(new URL("../../../templates/brain/AGENTS.md", import.meta.url), "utf8");
+  assert.equal(listed, app.guide().text, "templates/brain/AGENTS.md is applib/guide.mjs's GUIDE: write it again from there");
+});
+
 // FIN-367: what every reader of the index shows (⌘K, `fragment search`, the
 // brain's page) is its section text, so a link is its words there.
 it("a page's wiki links are their words in its index", async () => {
