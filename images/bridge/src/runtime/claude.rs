@@ -37,7 +37,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin};
 use tokio::sync::{mpsc, watch};
 
-use super::{Agent, Command, Event, How, MenuItem, Runtime, RuntimeError, RuntimeFuture, RuntimeIo, TurnStart};
+use super::{Agent, ClaudeSettings, Command, Event, How, MenuItem, Runtime, RuntimeError, RuntimeFuture, RuntimeIo, TurnStart};
 use crate::records::{self, Call, Category, Outcome, PromptOption, Step, ToolEvidence, ToolStatus};
 
 /// Its owners' commands: a new conversation, and Stop.
@@ -242,6 +242,8 @@ struct Proc {
     resumed: bool,
     /// Its `system` `init` came: it started.
     started: bool,
+    /// What it was started with (`--model`, `--effort`: `flags`).
+    flags: ClaudeSettings,
 }
 
 /// One question of an `AskUserQuestion` call, shown as a card.
@@ -1062,6 +1064,14 @@ pub fn prepare(cwd: &Path, agent: &Agent, run_as: Option<(u32, u32)>) -> std::io
 /// one that will not start ends saying why.
 async fn begin(cfg: &ClaudeConfig, ts: &TurnStart, cwd: &Path, id: &str, proc: &mut Option<Proc>, turn: &mut Option<Turn>, events: &mpsc::Sender<Event>) {
     let message = message(ts);
+    // its agent asks another model or effort now (`agent.json`'s `claude`):
+    // the process it idles in stops between turns, and this turn resumes
+    // the session on the new ones
+    let flags = flags(cfg, &ts.agent);
+    if let Some(p) = proc.take_if(|p| p.flags != flags) {
+        crate::ev!("claude.flags_changed", { "turn": ts.turn, "from": p.flags, "to": flags });
+        stop(p).await;
+    }
     if proc.is_none() {
         let resume = transcript(&cfg.config_dir, cwd, id).is_file();
         match spawn(cfg, &ts.agent, cwd, id, resume) {
@@ -1080,14 +1090,25 @@ async fn begin(cfg: &ClaudeConfig, ts: &TurnStart, cwd: &Path, id: &str, proc: &
     *turn = Some(Turn { id: ts.turn.clone(), agent: ts.agent.clone(), message: (!started).then_some(message), retried: false, part: 1, draft: String::new(), calls: HashMap::new(), said: None, asked: Vec::new(), stopping: false });
 }
 
+/// What an agent's sessions start with: its own model (`agent.json`'s
+/// `claude.model`), else the runtime's (`BRIDGE_CLAUDE_MODEL`), else
+/// none (the account's default); its own effort, else none (Claude Code's).
+fn flags(cfg: &ClaudeConfig, agent: &Agent) -> ClaudeSettings {
+    ClaudeSettings { model: agent.claude.model.clone().or_else(|| cfg.model.clone()), effort: agent.claude.effort.clone() }
+}
+
 /// Starts the session's `claude`: resuming it, or naming it new.
 fn spawn(cfg: &ClaudeConfig, agent: &Agent, cwd: &Path, id: &str, resume: bool) -> Result<Proc, String> {
     prepare(cwd, agent, cfg.run_as).map_err(|e| format!("{}: {e}", cwd.display()))?;
     let mut c = as_person(cfg, &cfg.bin);
     c.args(["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--include-partial-messages"]);
     c.args(["--permission-mode", "bypassPermissions", "--allow-dangerously-skip-permissions", "--permission-prompt-tool", "stdio"]);
-    if let Some(m) = &cfg.model {
+    let flags = flags(cfg, agent);
+    if let Some(m) = &flags.model {
         c.args(["--model", m]);
+    }
+    if let Some(e) = &flags.effort {
+        c.args(["--effort", e]);
     }
     c.arg(if resume { "--resume" } else { "--session-id" }).arg(id);
     c.current_dir(cwd);
@@ -1138,7 +1159,7 @@ fn spawn(cfg: &ClaudeConfig, agent: &Agent, cwd: &Path, id: &str, resume: bool) 
         }
     });
     crate::ev!("claude.start", { "agent": agent.fragment, "session": id, "resume": resume });
-    Ok(Proc { child, stdin, lines, stderr, resumed: resume, started: false })
+    Ok(Proc { child, stdin, lines, stderr, resumed: resume, started: false, flags })
 }
 
 async fn write(stdin: &mut ChildStdin, v: &Value) -> std::io::Result<()> {
@@ -1434,7 +1455,7 @@ mod tests {
     fn an_agents_folder_names_it_and_the_cli() {
         let dir = std::env::temp_dir().join(format!("claude-prepare-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let mut a = Agent { fragment: "rowan--k3x9".into(), identity: "npub1rowan".into(), name: "Rowan".into(), owner: "npub1paul".into(), credentials: vec![], key: None, runtime: Some("claude".into()) };
+        let mut a = Agent { fragment: "rowan--k3x9".into(), identity: "npub1rowan".into(), name: "Rowan".into(), owner: "npub1paul".into(), credentials: vec![], key: None, runtime: Some("claude".into()), claude: Default::default() };
         let cwd = dir.join("work").join(&a.fragment);
         prepare(&cwd, &a, None).expect("prepared");
         let agents = std::fs::read_to_string(cwd.join("AGENTS.md")).expect("its AGENTS.md");
@@ -1494,7 +1515,7 @@ mod tests {
     /// one, each piece of its text grows it, and nothing else touches it.
     #[test]
     fn its_words_stream_as_the_draft() {
-        let agent = Agent { fragment: "juniper--k3x9".into(), identity: "npub1j".into(), name: "juniper".into(), owner: "npub1paul".into(), credentials: vec![], key: None, runtime: Some("claude".into()) };
+        let agent = Agent { fragment: "juniper--k3x9".into(), identity: "npub1j".into(), name: "juniper".into(), owner: "npub1paul".into(), credentials: vec![], key: None, runtime: Some("claude".into()), claude: Default::default() };
         let mut t = Turn { id: "t".into(), agent, message: None, retried: false, part: 1, draft: "stale".into(), calls: HashMap::new(), said: None, asked: Vec::new(), stopping: false };
         assert_eq!(drafted(&mut t, &json!({ "type": "content_block_start", "content_block": { "type": "text" } })), None);
         assert_eq!(drafted(&mut t, &json!({ "type": "content_block_delta", "delta": { "type": "text_delta", "text": "hel" } })).as_deref(), Some("hel"));
@@ -1526,7 +1547,7 @@ mod tests {
     /// where each file sent with it is.
     #[test]
     fn a_turns_message() {
-        let agent = Agent { fragment: "juniper--k3x9".into(), identity: "npub1j".into(), name: "juniper".into(), owner: "npub1paul".into(), credentials: vec![], key: None, runtime: Some("claude".into()) };
+        let agent = Agent { fragment: "juniper--k3x9".into(), identity: "npub1j".into(), name: "juniper".into(), owner: "npub1paul".into(), credentials: vec![], key: None, runtime: Some("claude".into()), claude: Default::default() };
         let ts = TurnStart {
             turn: "t".into(),
             agent,

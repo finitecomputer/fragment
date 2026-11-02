@@ -29,7 +29,8 @@
 //!
 //! In record or replay mode each line it is given is appended to
 //! `heard.jsonl` beside it, as it came: what a test reads of what Claude
-//! Code was told.
+//! Code was told. Every process, in any mode, first appends its arguments
+//! there (`{"args": [...]}`).
 //!
 //! `claude auth status` and `claude auth login` are as the real ones with
 //! no display: signed in, unless its config says `"signed_out": true` and
@@ -70,6 +71,8 @@ fn main() {
             other => panic!("fake-claude: no auth {other:?}"),
         }
     }
+    // what each process was started with, for a test to read (`{"args"}`)
+    heard(&serde_json::json!({ "args": args }).to_string());
     match cfg["mode"].as_str() {
         Some("record") => record(&args, Path::new(cfg["real"].as_str().expect("real")), Path::new(cfg["out"].as_str().expect("out"))),
         Some("replay") => replay(&args, Path::new(cfg["script"].as_str().expect("script"))),
@@ -197,8 +200,9 @@ fn next_file(dir: &Path, taken: &str) -> (usize, PathBuf) {
 }
 
 fn record(args: &[String], real: &Path, out: &Path) {
-    // recording spends its user's own plan: Haiku 5.5 alone (Paul, 2026-10-30)
-    assert_eq!(flag(args, "--model"), Some("claude-haiku-5-5"), "fake-claude records only with --model claude-haiku-5-5");
+    // recording spends its user's own plan: Haiku 5.5 alone (Paul,
+    // 2026-10-30), by its name or Claude Code's alias for the latest Haiku
+    assert!(matches!(flag(args, "--model"), Some("claude-haiku-5-5" | "haiku")), "fake-claude records only with --model claude-haiku-5-5 or haiku: {args:?}");
     let (_, path) = next_file(out, "recorded");
     let log = Arc::new(Mutex::new(std::fs::File::create(&path).expect("its recording")));
     let put = |log: &Arc<Mutex<std::fs::File>>, v: serde_json::Value| {
