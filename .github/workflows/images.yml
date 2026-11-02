@@ -152,6 +152,45 @@ jobs:
   # caches ci.yml reads on every run.
   #
   # The tests' container logs are kept on failure.
+  # Whether master's merge queue already ran the Docker lane on this push's
+  # very tree, as ci.yml's `proven` asks for the e2e: its `docker (real
+  # Hermes)` recorded the tree (`docker-lane-tree-<tree>`, below) once both
+  # halves passed. Then master's push runs it no more: the queue ran it on
+  # the tree that landed (about 25 minutes of a runner a merge, 2026-11-02).
+  # Only a merge group of master's counts, its run this workflow's and
+  # green, its head's tree this push's; anything else, or a question the
+  # API does not answer, runs the lane.
+  docker-proven:
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read # this workflow's runs and their artifacts, through the API
+      contents: read # the commits' trees
+    outputs:
+      proven: ${{ steps.ask.outputs.proven }}
+    steps:
+      - id: ask
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          repo=repos/$GITHUB_REPOSITORY
+          workflow=$(gh api "$repo/actions/runs/$GITHUB_RUN_ID" --jq .workflow_id)
+          tree=$(gh api "$repo/git/commits/$GITHUB_SHA" --jq .tree.sha)
+          echo "$GITHUB_SHA's tree is $tree"
+          for id in $(gh api -X GET "$repo/actions/artifacts" -f name="docker-lane-tree-$tree" -f per_page=100 --jq '.artifacts[].workflow_run.id' | sort -u); do
+            run=$(gh api "$repo/actions/runs/$id")
+            jq -r '"\(.html_url), attempt \(.run_attempt): \(.event) of \(.head_sha) (\(.head_branch)), \(.status) \(.conclusion // "")"' <<< "$run"
+            jq -e --argjson w "$workflow" --arg r "$GITHUB_REPOSITORY" '.workflow_id == $w and .status == "completed" and .conclusion == "success" and .event == "merge_group" and .head_repository.full_name == $r and (.head_branch | startswith("gh-readonly-queue/master/"))' <<< "$run" > /dev/null || continue
+            [ "$(gh api "$repo/git/commits/$(jq -r .head_sha <<< "$run")" --jq .tree.sha)" = "$tree" ] || continue
+            echo "master's merge queue ran the Docker lane on this tree: it need not run again"
+            echo proven=true >> "$GITHUB_OUTPUT"
+            exit 0
+          done
+          echo "no merge group's run proved this tree: the Docker lane runs"
+          echo proven=false >> "$GITHUB_OUTPUT"
+
   # The Docker lane is two jobs, side by side, each building only the image
   # its tests run: the stub image's one test (`the_stub_image`), and the
   # Hermes image's, every other. Built one after the other on one runner,
@@ -161,9 +200,9 @@ jobs:
   # (real Hermes)`, the required check, is the job that needs both.
   docker-stub:
     name: docker lane (stub)
-    needs: changes
+    needs: [changes, docker-proven]
     # as `docker-hermes`'s, which says why
-    if: ${{ !cancelled() && github.event_name != 'pull_request' && (github.event_name == 'workflow_dispatch' || needs.changes.result != 'success' || needs.changes.outputs.docker == 'true') }}
+    if: ${{ !cancelled() && github.event_name != 'pull_request' && needs.docker-proven.outputs.proven != 'true' && (github.event_name == 'workflow_dispatch' || needs.changes.result != 'success' || needs.changes.outputs.docker == 'true') }}
     # the Docker `docker-hermes` runs on, which says why
     runs-on: ubuntu-24.04
     timeout-minutes: 40
@@ -200,12 +239,12 @@ jobs:
 
   docker-hermes:
     name: docker lane (Hermes)
-    needs: changes
+    needs: [changes, docker-proven]
     # fails closed: a `changes` that did not succeed (it failed, or ran out
     # its time, as in run 41100441445) runs the lane rather than skip it,
     # which a required check would count as a pass; a pull request's own
     # run skips it, as its merge group runs it
-    if: ${{ !cancelled() && github.event_name != 'pull_request' && (github.event_name == 'workflow_dispatch' || needs.changes.result != 'success' || needs.changes.outputs.docker == 'true') }}
+    if: ${{ !cancelled() && github.event_name != 'pull_request' && needs.docker-proven.outputs.proven != 'true' && (github.event_name == 'workflow_dispatch' || needs.changes.result != 'success' || needs.changes.outputs.docker == 'true') }}
     # ubuntu-24.04 (Docker 28), not ubuntu-latest: since 2026-10-25,
     # ubuntu-latest is 26.04 with Docker 29, whose containerd image store
     # names `containerd` in every container's root mount, so Hermes takes
@@ -268,8 +307,8 @@ jobs:
   # half cancelled, skipped or failed is red.
   docker:
     name: docker (real Hermes)
-    needs: [changes, docker-stub, docker-hermes]
-    if: ${{ always() && github.event_name != 'pull_request' && (github.event_name == 'workflow_dispatch' || needs.changes.result != 'success' || needs.changes.outputs.docker == 'true') }}
+    needs: [changes, docker-proven, docker-stub, docker-hermes]
+    if: ${{ always() && github.event_name != 'pull_request' && needs.docker-proven.outputs.proven != 'true' && (github.event_name == 'workflow_dispatch' || needs.changes.result != 'success' || needs.changes.outputs.docker == 'true') }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -280,3 +319,26 @@ jobs:
         run: |
           echo "the stub image's half: $STUB; the Hermes image's: $HERMES"
           test "$STUB" = success && test "$HERMES" = success
+      # The tree both halves tested, for `docker-proven`: recorded as an
+      # artifact named by it, which counts only for a merge group's green
+      # run. Recording is a saving, not a test: a step of it that fails
+      # warns, and master's push of the tree runs the lane again.
+      - id: tree
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tree=$(gh api "repos/$GITHUB_REPOSITORY/git/commits/$GITHUB_SHA" --jq .tree.sha)
+          [[ $tree =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]] || { echo "::warning::the API named no tree for $GITHUB_SHA: '$tree'"; exit 1; }
+          echo "$GITHUB_SHA $tree" > "$RUNNER_TEMP/docker-lane-tree"
+          echo "tree=$tree" >> "$GITHUB_OUTPUT"
+      - if: steps.tree.outcome == 'success'
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-lane-tree-${{ steps.tree.outputs.tree }}
+          path: ${{ runner.temp }}/docker-lane-tree
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 30
