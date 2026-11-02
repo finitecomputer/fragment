@@ -28,13 +28,11 @@ function world() {
   });
   return { runtimes, asked };
 }
-const settle = () => new Promise((r) => setTimeout(r, 0));
 const offered = (r, agent) => ["profile", "screen"].filter((what) => r.offers(agent, what));
 
 test("a Claude agent offers neither its profile nor its screen; a Hermes one both; none named is Hermes", async () => {
   const { runtimes } = world();
-  runtimes.loadRuntimes();
-  await settle();
+  await runtimes.loadRuntimes();
   assert.deepEqual(offered(runtimes, "clio--a1b2"), []);
   assert.deepEqual(offered(runtimes, "juniper--c3d4"), ["profile", "screen"]);
   assert.deepEqual(offered(runtimes, "rook--j9k2"), ["profile", "screen"], "no agent.json (404): Hermes");
@@ -43,19 +41,17 @@ test("a Claude agent offers neither its profile nor its screen; a Hermes one bot
 test("unread, or its read failed, an agent is offered what it was before; a runtime not known here, nothing", async () => {
   const { runtimes } = world();
   assert.deepEqual(offered(runtimes, "clio--a1b2"), ["profile", "screen"], "not read yet");
-  runtimes.loadRuntimes();
-  await settle();
+  await runtimes.loadRuntimes();
   assert.deepEqual(offered(runtimes, "wren--e5f6"), ["profile", "screen"], "its read failed");
   assert.deepEqual(offered(runtimes, "quill--g7h8"), [], "a runtime this shell does not know");
 });
 
 test("each of the person's agents is read once a page, another's never", async () => {
   const { runtimes, asked } = world();
-  runtimes.loadRuntimes();
-  runtimes.loadRuntimes();
-  await settle();
-  runtimes.loadRuntimes();
-  await settle();
+  const first = runtimes.loadRuntimes();
+  await runtimes.loadRuntimes(); // its reads begun already: none again
+  await first;
+  await runtimes.loadRuntimes();
   assert.deepEqual(asked.filter((a) => a !== "wren--e5f6").sort(), ["clio--a1b2", "juniper--c3d4", "quill--g7h8", "rook--j9k2"]);
   assert.ok(!asked.includes("sams--m3n4"), "not theirs");
 });
@@ -70,8 +66,7 @@ test("a control drawn before its agent's runtime is read is hidden once it is, a
   assert.equal(clioOpen.hidden, false, "drawn unread: as before");
   globalThis.document = { querySelectorAll: (sel) => (sel === "[data-offer]" ? [clioOpen, clioScreen, juniperScreen] : [screens]) };
   try {
-    runtimes.loadRuntimes();
-    await settle();
+    await runtimes.loadRuntimes();
   } finally {
     delete globalThis.document;
   }
