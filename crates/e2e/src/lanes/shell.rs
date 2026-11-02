@@ -7520,6 +7520,8 @@ fn add_agent_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session:
     b.viewport(page, 1280, 900, false)?;
     b.click(page, "#settings")?;
     let offered = b.until(page, "!!document.querySelector('#settings-page .agent-add')", wait);
+    // what it runs on: Hermes unless Claude Code is chosen (FIN-250)
+    let runs = b.eval(page, "[...document.querySelectorAll('#settings-page .agent-add-runtime option')].map((o) => [o.value, o.selected])")?;
     b.eval(page, &fill("#settings-page .agent-add-name", "Wren"))?;
     b.eval(page, &fill("#settings-page .agent-add-role", "editor"))?;
     b.eval(page, "(document.querySelector('#settings-page .agent-add').scrollIntoView({ block: 'center' }), true)")?;
@@ -7537,11 +7539,17 @@ fn add_agent_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session:
     let id = agent_ids(api, session, &["wren"])?.remove(0);
     let (hello, seen) = said_hello(s, api, session, &chat, &id, agent_wait);
     let job = shell(api, session, "GET", &format!("/api/f/{agent}/file?path=SOUL.md"), None, &[])?.text;
+    let runtime = serde_json::from_str::<Value>(&shell(api, session, "GET", &format!("/api/f/{agent}/file?path=agent.json"), None, &[])?.text).ok().map(|j| j["runtime"].clone());
     let _ = b.screenshot(page, &shots.join("desktop-agent-added.png"));
     s.ok(
         "Add agent, in Settings (a name and a role): its chat opens at once, for the making's steps; once made, its own section's hero names it over that chat, its role is its list row's, it says hello first, and its job names no role",
         offered && card && listed && role() == json!("editor") && hello && !job.is_empty() && !job.contains("editor"),
         json!({ "chat": chat, "hello": seen, "job": job }),
+    );
+    s.ok(
+        "Add offers what it runs on, Hermes chosen unless Claude Code is: Wren, added as it was, runs on Hermes (its agent.json names no runtime)",
+        runs == json!([["hermes", true], ["claude", false]]) && runtime == Some(Value::Null),
+        json!({ "offered": runs, "runtime": runtime }),
     );
     // its role, edited in Settings, then taken away
     b.click(page, "#settings")?;

@@ -134,6 +134,13 @@ pub struct Hit {
     /// Where the meaning leg found it, if it did.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub semantic: Option<Semantic>,
+    /// Each of the question's words' BM25 in the chunk the words leg found
+    /// best (0: not in it), in its answer's `words` order, by this
+    /// fragment's own statistics: only on a hit found by words, in an
+    /// answer to `/search/asked`, which a question across fragments scores
+    /// again with all of theirs (`WordStats`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub words: Option<Vec<f64>>,
 }
 
 /// A section's place in the words leg: its rank there (from 1) and its
@@ -195,6 +202,24 @@ pub struct Found {
     pub space: Option<Space>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scheme: Option<String>,
+    /// What its index knows of the question's words, when its words leg
+    /// ran: only in an answer to `/search/asked`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub words: Option<WordStats>,
+}
+
+/// What a fragment's index knows of a question's words (FIN-238): the
+/// words as its words leg asked them (fragment_core::search_index::
+/// words_of), its chunks, and how many of them hold each word (`with`, in
+/// `words`' order). BM25 weighs a word by these, so a question across
+/// fragments sums them over every fragment asked and scores each hit's
+/// words again with the sums, comparable across fragments
+/// (fragment_core::across::pool_words).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WordStats {
+    pub words: Vec<String>,
+    pub chunks: u64,
+    pub with: Vec<u64>,
 }
 
 /// A question the platform embedded already, for one fragment of many

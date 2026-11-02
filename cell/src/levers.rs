@@ -116,6 +116,10 @@ pub async fn route(mut req: Request, env: &Env, cfg: &Config, rest: &[&str]) -> 
             if cfg.levers_scoped && !is_e2e(env, &t.identity).await? {
                 return Err(CellError::new(ErrorCode::Forbidden, "on a preview, the ledger levers reach e2e people alone"));
             }
+            if matches!(t.hook, ledger::TestHook::GateHeard) {
+                // the router's gate, where model calls ask
+                return json_answer(&ledger::gate_heard(&t.identity));
+            }
             if matches!(t.hook, ledger::TestHook::ForgetGate) {
                 // the router's isolate's gate; the ledger forgets its own
                 ledger::forget_gate();

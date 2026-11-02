@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use fragment_core::price::{PriceBook, Usage};
-use fragment_fakes::workers_ai::{embedding as fake_embedding, heard as fake_heard, image_bytes, spoken_wav, Used, EMBEDDING_DIMENSIONS, IMAGE_MODEL, TRANSCRIBE_MODEL};
+use fragment_fakes::workers_ai::{embedding as fake_embedding, heard as fake_heard, image_bytes, spoken_wav, Pace, Used, EMBEDDING_DIMENSIONS, IMAGE_MODEL, TRANSCRIBE_MODEL};
 use fragment_nip98::Keys;
 use serde_json::{json, Value};
 
@@ -229,6 +229,21 @@ pub(super) fn forget_gate(api: &Api, identity: &str) -> Result<()> {
     Ok(())
 }
 
+/// What the router's gate holds for `identity` within the window
+/// (`gate-heard`): `{refused, allowed}`.
+pub(super) fn gate_heard(api: &Api, identity: &str) -> Result<Value> {
+    let r = api.unsigned("POST", "/api/test/ledger", Some(&json!({ "identity": identity, "op": "gate-heard" })))?;
+    anyhow::ensure!(r.status == 200, "what the gate heard: {r}");
+    Ok(r.body)
+}
+
+/// Waits until the router's gate holds `identity`'s `answer` (`"refused"`
+/// or `"allowed"`): what an ask beside a call heard, kept for the next
+/// call. A barrier on the gate's own state, not a timer.
+pub(super) fn gate_hears(s: &Suite, api: &Api, identity: &str, answer: &str) -> bool {
+    s.eventually(Duration::from_secs(30), || gate_heard(api, identity).is_ok_and(|h| h[answer] == true))
+}
+
 /// Pins `identity`'s ledger to this month for the lane: its test clock
 /// (`clock {offsetMs}`) runs on from the 15th, its now and the rows it
 /// hears alike, so the lane's spends and the checks against its caps are
@@ -355,11 +370,27 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
         run["status"] == "held" && run["error"].as_str().is_some_and(|e| e.contains("a guest pays for nothing")) && s.ai.calls().len() == calls,
         &run,
     );
+    // the gate forgets what it heard, as an isolate made anew holds nothing
+    forget_gate(api, &guest_id)?;
+    let first = api.signed(&hand, "POST", MODEL_ROUTE, Some(&hello()))?;
+    let taught = gate_hears(s, api, &guest_id, "refused");
+    let calls = s.ai.calls().len();
     let r = api.signed(&hand, "POST", MODEL_ROUTE, Some(&hello()))?;
     s.ok(
-        "a guest's agent's model call is refused, 403, saying why, and never reaches the model",
-        r.status == 403 && r.message().contains("a guest pays for nothing") && s.ai.calls().len() == calls,
-        &r,
+        "a guest's agent's model call: the first, its gate cold, goes on (the ledger asked beside it); the next is refused, 403, saying why, and never reaches the model",
+        first.status == 200 && taught && r.status == 403 && r.message().contains("a guest pays for nothing") && s.ai.calls().len() == calls,
+        json!({ "first": first.status, "taught": taught, "next": r.body }),
+    );
+    // its ledger slowed past the gate's wait: had a call asked it, the call
+    // would have gone on once the wait ran out
+    let slow = |ms: u64| api.unsigned("POST", "/api/test/ledger", Some(&json!({ "identity": guest_id, "op": "slow", "ms": ms })));
+    let slowed = slow(10_000)?;
+    let again = api.signed(&hand, "POST", MODEL_ROUTE, Some(&hello()))?;
+    let restored = slow(0)?;
+    s.ok(
+        "and the calls after, within the minute, are refused from what the gate heard, asking the ledger nothing (slowed to 10 s, it would have let one go on)",
+        slowed.status == 200 && again.status == 403 && again.message().contains("a guest pays for nothing") && s.ai.calls().len() == calls && restored.status == 200,
+        json!({ "again": again.body }),
     );
     let r = api.op(&guest, &guest_app, "note", "gn-1", json!({ "text": "a guest writes" }))?;
     s.ok("a guest's fragment still takes writes (it is billed nothing)", r.status == 200, &r);
@@ -542,13 +573,16 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
     let reg = "/api/identities";
     let r = api.signed(&owner, "POST", reg, Some(&json!({ "kind": "agent", "proof": api.proof(&hand, "POST", reg, &owner) })))?;
     anyhow::ensure!(r.status == 200, "an agent of the owner's: {r}");
-    // the gate may have heard the owner within the minute: it asks afresh
+    // the gate forgets what it heard, as an isolate made anew holds nothing
     forget_gate(api, &owner_id)?;
+    let first = api.signed(&hand, "POST", MODEL_ROUTE, Some(&hello()))?;
+    let taught = gate_hears(s, api, &owner_id, "refused");
+    let calls = s.ai.calls().len();
     let r = api.signed(&hand, "POST", MODEL_ROUTE, Some(&hello()))?;
     s.ok(
-        "and so is their agent's model call (402)",
-        r.status == 402 && r.message().contains("agents are stopped") && s.ai.calls().len() == calls,
-        &r,
+        "and so is their agent's model call: a gate that heard nothing lets the first start at once, asking the ledger beside it, and refuses the next (402) before its vendor call",
+        first.status == 200 && taught && r.status == 402 && r.message().contains("agents are stopped") && s.ai.calls().len() == calls,
+        json!({ "first": first.status, "taught": taught, "next": r.body }),
     );
     let w = api.op(&owner, &name, "note", "n-zero", json!({ "text": "at zero" }))?;
     let q = api.op(&owner, &name, "notes", "q", json!({}))?;
@@ -727,6 +761,7 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
         json!({ "loud": loud, "entries": aig().len() - before }),
     );
     gate_waits_on_no_ledger(s, api, &hand, &owner_id)?;
+    cap_mid_stream(s, api, wait)?;
     fallback(s, api, &hand, &owner_id, wait)?;
     let r = api.signed(&hand, "POST", route, Some(&json!({ "model": "high", "messages": [{ "role": "user", "content": "hi" }] })))?;
     s.ok("the high tier is refused, saying why (decision 23)", r.status == 400 && r.message().contains("high tier is off"), &r);
@@ -743,8 +778,16 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("a call names only a fragment its agent is in", r.status == 403, &r);
     api.signed(&owner, "PUT", &format!("/api/f/{name}/members/{}", fragment_core::npub::encode(hand.pubkey_hex())), Some(&json!({ "role": "editor" })))?;
     api.signed(&owner, "PUT", &format!("/api/f/{name}/cap"), Some(&json!({ "id": "c4", "micros": 1_000 })))?;
-    let r = api.signed(&hand, "POST", &format!("{route}?fragment={}&for={}", url_enc(&name), url_enc(&visitor_id)), Some(&chat(false)))?;
-    s.ok("an agent turn for someone else in a fragment past its cap is refused, 402", r.status == 402 && r.message().contains("cap this month"), &r);
+    let for_visitor = || api.signed(&hand, "POST", &format!("{route}?fragment={}&for={}", url_enc(&name), url_enc(&visitor_id)), Some(&chat(false)));
+    forget_gate(api, &owner_id)?;
+    let first = for_visitor()?;
+    let taught = gate_hears(s, api, &owner_id, "refused");
+    let r = for_visitor()?;
+    s.ok(
+        "an agent turn for someone else in a fragment past its cap: the first, its gate cold, goes on; the next is refused, 402",
+        first.status == 200 && taught && r.status == 402 && r.message().contains("cap this month"),
+        json!({ "first": first.status, "taught": taught, "next": r.body }),
+    );
     let r = api.signed(&hand, "POST", &format!("{route}?fragment={}&for={}", url_enc(&name), url_enc(&owner_id)), Some(&chat(false)))?;
     s.ok("and one for its owner goes on", r.status == 200, &r);
 
@@ -821,26 +864,62 @@ fn gate_waits_on_no_ledger(s: &mut Suite, api: &Api, hand: &Keys, owner_id: &str
     // the gate hears the owner now
     let warm = call()?;
     let slowed = slow(10_000)?;
-    let t0 = Instant::now();
-    let quick = call();
-    let quick_took = t0.elapsed();
+    let quick = call()?;
     forget_gate(api, owner_id)?;
-    let t0 = Instant::now();
-    let cold = call();
-    let cold_took = t0.elapsed();
+    let cold = call()?;
+    // the ask beside it waits longer than the gate once did: kept when the slowed ledger answers
+    let learned = gate_hears(s, api, owner_id, "allowed");
     // the queue's consumer waits on the slowed ledger, and its rows land after
     let all = s.eventually(Duration::from_secs(90), || aig().len() == before + 3);
     let restored = slow(0)?;
-    let (quick, cold) = (quick?, cold?);
     s.ok(
-        "with its payer's ledger slowed to 10 s an answer, a call whose gate heard the payer within the minute answers at once: it waits on no ledger",
-        warm.status == 200 && slowed.status == 200 && quick.status == 200 && quick.body["choices"][0]["message"]["content"] == "echo: quick" && quick_took < Duration::from_secs(5),
-        format!("{quick_took:?}: {quick}"),
+        "with its payer's ledger slowed to 10 s an answer, a call whose gate heard the payer within the minute answers, asking nothing",
+        warm.status == 200 && slowed.status == 200 && quick.status == 200 && quick.body["choices"][0]["message"]["content"] == "echo: quick",
+        &quick,
     );
     s.ok(
-        "one whose gate must ask waits at most the gate's 1.5 s, then goes on (the ledger refuses nothing it did not answer), and every call is charged once the ledger answers",
-        cold.status == 200 && cold_took < Duration::from_secs(8) && all && restored.status == 200,
-        format!("{cold_took:?}: {cold}; {} rows", aig().len() - before),
+        "one whose gate heard nothing answers, its ledger asked beside it, and that ledger's answer, 10 s late, is kept for the next call; every call is charged once the ledger answers",
+        cold.status == 200 && learned && all && restored.status == 200,
+        json!({ "cold": cold.status, "learned": learned, "rows": aig().len() - before }),
+    );
+    Ok(())
+}
+
+/// A cap reached mid-stream (FIN-320: the gate off the call path): a
+/// payer's ledger refuses (its lending used up) while their agent's
+/// streamed call is held after its first delta, the gate cold. The stream
+/// still ends whole and is charged once at its usage; the refusal, heard
+/// beside it, stops the next call before its vendor call.
+fn cap_mid_stream(s: &mut Suite, api: &Api, wait: Duration) -> Result<()> {
+    let payer = api.person()?;
+    let payer_id = api.identity(&payer)?;
+    let hand = Keys::generate();
+    let reg = "/api/identities";
+    let r = api.signed(&payer, "POST", reg, Some(&json!({ "kind": "agent", "proof": api.proof(&hand, "POST", reg, &payer) })))?;
+    anyhow::ensure!(r.status == 200, "an agent of the payer's: {r}");
+    let lent = api.unsigned("POST", "/api/test/ledger", Some(&json!({ "identity": payer_id, "op": "paid-calls", "max": 0 })))?;
+    anyhow::ensure!(lent.status == 200, "the payer's lending: {lent}");
+    let aig = || entries(api, &payer_id, "aig:");
+    let before = aig().len();
+    forget_gate(api, &payer_id)?;
+    s.ai.pace_next(&[Pace { every_ms: 0, thinking: 0, hold_ms: 0 }]);
+    s.ai.hold_streams();
+    let chat = json!({ "model": "cheap", "stream": true, "messages": [{ "role": "user", "content": "a long one" }] });
+    let (streamed, taught) = std::thread::scope(|t| {
+        let streaming = t.spawn(|| api.signed(&hand, "POST", MODEL_ROUTE, Some(&chat)));
+        // the stream is held mid-way while the gate hears the refusal
+        let taught = gate_hears(s, api, &payer_id, "refused");
+        s.ai.release_streams();
+        (streaming.join().expect("the streamed call's thread"), taught)
+    });
+    let streamed = streamed?;
+    let charged = s.eventually(wait, || aig().len() == before + 1);
+    let calls = s.ai.calls().len();
+    let next = api.signed(&hand, "POST", MODEL_ROUTE, Some(&hello()))?;
+    s.ok(
+        "a cap reached mid-stream: the stream, begun with its gate cold, ends whole ([DONE]) and is charged once; the refusal heard beside it stops the next call (402) before its vendor call",
+        streamed.status == 200 && streamed.text.contains("data: [DONE]") && taught && charged && next.status == 402 && s.ai.calls().len() == calls,
+        json!({ "taught": taught, "charged": aig().len() - before, "next": next.body }),
     );
     Ok(())
 }

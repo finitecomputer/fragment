@@ -207,9 +207,11 @@ fn not_a_workos_person(s: &mut Suite, api: &Api, email: &str) -> Result<()> {
 
 /// Locally, on the Workers AI fake: an e2e person lent one paid call makes
 /// one model call (their agent's, through the model route), charged after
-/// it, and their ledger's gate refuses the next before it is made, once it
-/// asks (it trusts what it heard for a minute: the cap is approximate by
-/// that).
+/// it. A gate that has heard nothing of them since (as an isolate made
+/// anew) lets one more start, asking their ledger beside it (ledger.rs
+/// `may_beside`), and refuses the one after before it is made: the cap
+/// overshoots by a call an isolate, and by what starts within the minute
+/// its gate trusts what it heard.
 fn paid_calls(s: &mut Suite, api: &Api) -> Result<()> {
     let keys = Keys::generate();
     let email = Api::email_of(&keys);
@@ -230,16 +232,19 @@ fn paid_calls(s: &mut Suite, api: &Api) -> Result<()> {
     let one = call("one")?;
     let charged = s.eventually(std::time::Duration::from_secs(20), || calls(api) == 1);
     s.ok("their first model call is made, and charged after it", one.status == 200 && one.body["choices"][0]["message"]["content"] == "echo: one" && charged, &one);
-    // the gate heard their ledger before that call: it asks afresh, as it would a minute on
+    // the gate heard their ledger before that call: it forgets, as an isolate made anew holds nothing
     super::ledger::forget_gate(api, &identity)?;
-    let asked = s.ai.chats().len();
     let two = call("two")?;
+    let taught = super::ledger::gate_hears(s, api, &identity, "refused");
+    let charged = s.eventually(std::time::Duration::from_secs(20), || calls(api) == 2);
+    let asked = s.ai.chats().len();
+    let three = call("three")?;
     s.ok(
-        "the next is refused by their ledger's gate before it is made (402), and the model is not asked",
-        two.status == 402 && two.message().contains("paid calls") && calls(api) == 1 && s.ai.chats().len() == asked,
-        &two,
+        "the next, its gate cold, starts (its ledger asked beside it) and is charged; the one after is refused by the gate before it is made (402), and the model is not asked",
+        two.status == 200 && taught && charged && three.status == 402 && three.message().contains("agents are stopped") && calls(api) == 2 && s.ai.chats().len() == asked,
+        json!({ "two": two.status, "taught": taught, "three": three.body }),
     );
     let cap = api.unsigned("POST", "/api/test/ledger", Some(&json!({ "identity": identity, "op": "paid-calls", "max": 1 })))?;
-    s.ok("(the ledger counts the call it allowed)", cap.status == 200 && cap.body == json!({ "max": 1, "used": 1 }), &cap);
+    s.ok("(the ledger counts both calls that started)", cap.status == 200 && cap.body == json!({ "max": 1, "used": 2 }), &cap);
     Ok(())
 }

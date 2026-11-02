@@ -221,9 +221,9 @@ pub fn vector_of(b64: &str, dims: u32) -> Result<Vec<f32>, String> {
     Ok(v)
 }
 
-/// The question's words as FTS5 asks for them: each quoted, any of them,
-/// at most `WORDS_MAX` distinct (lower-cased); none, no words leg.
-pub fn match_of(q: &str) -> Option<String> {
+/// The question's words, as the words leg asks for them: its runs of
+/// alphanumerics, lower-cased, each once, in order, at most `WORDS_MAX`.
+pub fn words_of(q: &str) -> Vec<String> {
     let mut words: Vec<String> = Vec::new();
     for w in q.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()) {
         let w = w.to_lowercase();
@@ -234,8 +234,25 @@ pub fn match_of(q: &str) -> Option<String> {
             break;
         }
     }
-    // alphanumerics alone: nothing to escape inside the quotes
-    (!words.is_empty()).then(|| words.iter().map(|w| format!("\"{w}\"")).collect::<Vec<_>>().join(" OR "))
+    words
+}
+
+/// One word as FTS5 asks for it alone: quoted. Alphanumerics alone
+/// (`words_of`), so nothing to escape inside the quotes.
+pub fn phrase(word: &str) -> String {
+    format!("\"{word}\"")
+}
+
+/// `words` as FTS5 asks for any of them.
+pub fn any_of(words: &[String]) -> String {
+    words.iter().map(|w| phrase(w)).collect::<Vec<_>>().join(" OR ")
+}
+
+/// The question's words as FTS5 asks for them: any of them (`words_of`);
+/// none, no words leg.
+pub fn match_of(q: &str) -> Option<String> {
+    let words = words_of(q);
+    (!words.is_empty()).then(|| any_of(&words))
 }
 
 /// A line's label, its first word or two and a colon ("Agent: "), at most
@@ -481,6 +498,7 @@ mod tests {
 
     #[test]
     fn the_words_leg_asks_for_any_word_quoted() {
+        assert_eq!(words_of("Harbour lantern, harbour"), ["harbour", "lantern"]);
         assert_eq!(match_of("Harbour lantern, harbour"), Some("\"harbour\" OR \"lantern\"".into()));
         assert_eq!(match_of("\"x\" OR y* NEAR(z)"), Some("\"x\" OR \"or\" OR \"y\" OR \"near\" OR \"z\"".into()), "FTS5's syntax is only words here");
         assert_eq!(match_of("?! —"), None);
