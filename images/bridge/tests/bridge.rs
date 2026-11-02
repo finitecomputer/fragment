@@ -542,6 +542,9 @@ async fn a_question_cut_by_a_crash_is_lost_and_its_answer_is_a_turn() {
         let asked = fake.say(&chat, &person("paul"), json!({ "text": "name my plant, ask-me" }));
         let turn = turn_of("juniper", &chat, seq(&asked));
         fake.until(WAIT, "the question", |w| replies(w, &chat).iter().any(|r| r["text"] == "What should I call it?")).await;
+        // asking on the journal too (`turn.asked`, posted after the
+        // question), where a life rolled back to before it reads it
+        fake.until(WAIT, "its question on work", |w| !w.bodies(&chat, "work", "turn.asked").is_empty()).await;
         bridge.kill().await;
         fake.until(WAIT, "its sockets closed", |w| w.live_sockets() == 0).await;
         match wakes {
@@ -552,32 +555,22 @@ async fn a_question_cut_by_a_crash_is_lost_and_its_answer_is_a_turn() {
 
         let bridge = support::start_killable(cfg, support::counting(support::script(), &runs));
         fake.until(WAIT, "the cut turn's end", |w| !ends_of(w, &chat, &turn).is_empty()).await;
-        // phase 4: the state the crash left knows the turn waited on its
-        // person (their answer is its next turn): not continued; an older
-        // state, or none, cannot know it asked: continued once, first
-        let cont = records::continuation_id(&turn);
-        let continued = wakes != "during";
-        if continued {
-            fake.until(WAIT, "its continuation's end", |w| !ends_of(w, &chat, &cont).is_empty()).await;
-        }
+        // phase 4: a turn that waited on its person is not continued (their
+        // answer is its next turn), whatever the next life wakes with: the
+        // state the crash left says it asked, and the journal says so of
+        // one another life ran (its claim answered 409: `note::waited`)
         let answer = said_and_ended(&fake, &chat, "Fernando").await;
-        let want = if continued { vec![turn.clone(), cont.clone(), answer.clone()] } else { vec![turn.clone(), answer.clone()] };
-        assert_eq!(runs.all(), want, "{wakes}: the asking turn ran once, and the answer is a turn of its own");
+        assert_eq!(runs.all(), vec![turn.clone(), answer.clone()], "{wakes}: the asking turn ran once, and the answer is a turn of its own");
         fake.with(|w| {
             assert_eq!(ends_of(w, &chat, &turn), vec![json!({ "kind": "turn.end", "turn": turn, "outcome": "error", "error": "lost when the computer restarted" })], "{wakes}: one end, as lost");
+            assert!(ends_of(w, &chat, &records::continuation_id(&turn)).is_empty(), "{wakes}: never continued");
             let r = replies(w, &chat);
-            assert_eq!(r.len(), if continued { 3 } else { 2 }, "{wakes}: the question, its continuation's, then the answer's own reply: {r:?}");
+            assert_eq!(r.len(), 2, "{wakes}: the question, then the answer's own reply: {r:?}");
             assert_eq!(r[0], json!({ "text": "What should I call it?", "turn": turn }), "{wakes}");
-            // the first turn after the cut one is told of it (P5): its
-            // continuation, else the answer's
-            let told = &r[1];
-            let text = told["text"].as_str().unwrap_or("");
-            let said = if continued { "echo: [your computer] I restarted" } else { "echo: [paul] Fernando" };
-            assert_eq!(told["turn"], json!(if continued { &cont } else { &answer }), "{wakes}");
-            assert!(text.starts_with(said) && text.contains("(told: Your previous turn in this chat was cut short") && text.contains("It was answering: “name my plant, ask-me”") && text.contains("It had replied: “What should I call it?”"), "{wakes}: {text}");
-            if continued {
-                assert_eq!(r[2], json!({ "text": "echo: [paul] Fernando", "turn": answer }), "{wakes}: told once");
-            }
+            // the first turn after the cut one is told of it (P5): the answer's
+            let text = r[1]["text"].as_str().unwrap_or("");
+            assert_eq!(r[1]["turn"], json!(&answer), "{wakes}");
+            assert!(text.starts_with("echo: [paul] Fernando") && text.contains("(told: Your previous turn in this chat was cut short") && text.contains("It was answering: “name my plant, ask-me”") && text.contains("It had replied: “What should I call it?”"), "{wakes}: {text}");
             assert_eq!(ends_of(w, &chat, &answer), vec![json!({ "kind": "turn.end", "turn": answer, "outcome": "idle" })], "{wakes}");
         });
         bridge.stop().await;

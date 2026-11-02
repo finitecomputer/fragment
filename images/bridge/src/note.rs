@@ -264,6 +264,21 @@ pub fn turn(work: &[Record], agent: &str, turn: &str) -> Option<Cut> {
     cut(&work[i..], agent, turn, &work[i].body, work[i].at)
 }
 
+/// Whether the agent's turn `turn`, as `work` holds it, waited on its
+/// person: a card it showed that never closed, or a question it asked in
+/// words (`turn.asked`). What a life's own state says of a turn it ran
+/// (`asking`, `Phase::Waiting`), read from the journal for one another
+/// life ran after the `/data` this life restored (its claim answered 409:
+/// `ClaimAnswer::Theirs`), so a restart continues neither (engine.rs,
+/// `continued`). A question in words counts answered or not: an answer
+/// that life heard is a message this life reads again and no life
+/// claimed, so it runs as its own turn.
+pub fn waited(work: &[Record], agent: &str, turn: &str) -> bool {
+    let mine = |r: &&Record| r.principal == agent && r.body["turn"] == turn;
+    let closed = |prompt: &Value| work.iter().filter(mine).any(|r| r.body["kind"] == "turn.prompt.closed" && r.body["prompt"] == *prompt);
+    work.iter().filter(mine).any(|r| r.body["kind"] == "turn.asked" || (r.body["kind"] == "turn.prompt" && !closed(&r.body["prompt"])))
+}
+
 /// What a fresh turn from a late answer to its card is told (cards.rs),
 /// bounded (`NOTE_MAX_BYTES`): that the card's turn ended before the
 /// answer and is not resumed, and to check what it did before doing any of
@@ -744,6 +759,33 @@ mod tests {
         assert_eq!(previous(w.before(after), ME, true), Before::Kept, "said once");
         // and the cut turn's own claim is told of the turn before it, not of itself
         assert_eq!(previous(w.before(3), ME, true), Before::Kept);
+    }
+
+    /// Goal: the journal says a turn waited on its person as its own state
+    /// would: while a card of its stayed open, or once it asked in words.
+    /// Valid: its card closed (answered or expired), steps alone. Invalid:
+    /// another agent's card under the same turn, a turn not in the records.
+    #[test]
+    fn a_turn_waited_while_its_card_stayed_open_or_once_it_asked_in_words() {
+        let card = |turn: &str, prompt: &str| json!({ "kind": "turn.prompt", "turn": turn, "prompt": prompt, "text": "Run it?", "options": [], "asks": "npub1paul", "expiresAt": 1 });
+        let mut w = Work::default();
+        w.start(ME, "ran", 1);
+        w.post(ME, turn_step("ran", 1, &step("terminal", "ls", true)));
+        w.start(ME, "carded", 2);
+        w.post(ME, card("carded", "p1"));
+        w.start(ME, "answered", 3);
+        w.post(ME, card("answered", "p2"));
+        w.post(ME, turn_prompt_closed("answered", "p2", Closed::Answered, Some(("once", "npub1paul", None))));
+        w.start(ME, "expired", 4);
+        w.post(ME, card("expired", "p3"));
+        w.post(ME, turn_prompt_closed("expired", "p3", Closed::Expired, None));
+        w.start(ME, "worded", 5);
+        w.post(ME, records::turn_asked("worded", "npub1paul"));
+        w.post("npub1rowan", card("ran", "p4"));
+        let waits = |turn: &str| waited(&w.0, ME, turn);
+        assert!(waits("carded") && waits("worded"), "an open card, a question in words");
+        assert!(!waits("answered") && !waits("expired") && !waits("ran"), "a card closed, steps alone, another agent's card");
+        assert!(!waits("nowhere"), "a turn not in the records");
     }
 
     /// Goal: only a recorded loss is a cut. A turn that ended any other way,

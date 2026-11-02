@@ -968,7 +968,7 @@ fn turns_another_life_ran_are_told_once_to_the_next_turn() {
     let theirs = |e: &mut Engine, s: Step| -> Vec<String> {
         let claims: Vec<String> = s.effects.iter().filter_map(|x| match x { Effect::Claim { turn, .. } => Some(turn.clone()), _ => None }).collect();
         for turn in &claims {
-            let r = e.step(Input::Claimed { turn: turn.clone(), answer: ClaimAnswer::Theirs }, T0 + 1);
+            let r = e.step(Input::Claimed { turn: turn.clone(), answer: ClaimAnswer::Theirs { waited: false } }, T0 + 1);
             assert!(started(&r).is_none(), "another life's turn never runs here");
             let owed: Vec<(String, String)> = r.effects.iter().filter_map(|x| match x { Effect::Owed { turn, id, .. } => Some((turn.clone(), id.clone())), _ => None }).collect();
             for (turn, id) in owed {
@@ -2163,7 +2163,7 @@ fn every_end_of_an_asked_turn_answers() {
     let mut e = engine(&[rowan.clone(), juniper.clone()]);
     let s = e.step(Input::Record { agent: rowan.fragment.clone(), fragment: "talk--k3x9".into(), record: question(1, "q"), view: Some(talk.clone()), since: 0 }, T0);
     let turn = s.effects.iter().find_map(|x| match x { Effect::Claim { turn, .. } => Some(turn.clone()), _ => None }).expect("a claim");
-    let s = e.step(Input::Claimed { turn: turn.clone(), answer: ClaimAnswer::Theirs }, T0);
+    let s = e.step(Input::Claimed { turn: turn.clone(), answer: ClaimAnswer::Theirs { waited: false } }, T0);
     assert_eq!(outcome(&s), Some((json!("error"), json!(LOST))));
 
     // a restart's cut
@@ -2733,11 +2733,22 @@ impl World {
         };
         let answer = match self.land(&e) {
             Answer::Appended | Answer::Replayed => ClaimAnswer::Ours { seq: seq.and_then(|(f, id)| self.journal.seq_of(&f, &id)) },
-            Answer::Conflict => ClaimAnswer::Theirs,
+            // a claim's 409 is read against the journal as the driver reads
+            // it (driver.rs, `waited`)
+            Answer::Conflict => ClaimAnswer::Theirs { waited: self.waited(&e) },
         };
         self.tell(&e, answer);
         self.deliver();
         true
+    }
+
+    /// Whether a claim's turn waited on its person in the journal
+    /// (`note::waited`), as the driver reads it for a claim answered 409; a
+    /// live answer's closure is never one.
+    fn waited(&self, e: &Effect) -> bool {
+        let Effect::Claim { agent, fragment, turn, .. } = e else { return false };
+        let me = self.agents.iter().find(|a| &a.fragment == agent).map(|a| a.identity.clone()).expect("a claim's agent");
+        crate::note::waited(self.journal.channel(fragment, records::WORK), &me, turn)
     }
 
     /// Every post answered, and every record read.
@@ -3357,17 +3368,11 @@ fn a_question_cut_by_a_restart_is_lost_and_its_answer_runs_once() {
         w.answer_all();
         assert_eq!(w.runs_of(&asked), 1, "{wake}: never run again");
         assert_eq!(w.ends(&asked), vec![json!({ "kind": "turn.end", "turn": asked, "outcome": "error", "error": LOST })], "{wake}: ended once, as lost");
-        // phase 4: a turn this life knows waited on its person is not
-        // continued (their answer is its next turn); a state older than the
-        // turn cannot know it asked, so it is continued once
-        let c = records::continuation_id(&asked);
-        if wake == "latest" {
-            assert_eq!(w.runs_of(&c), 0, "{wake}: not continued");
-        } else {
-            assert_eq!(w.runs_of(&c), 1, "{wake}: continued once");
-            w.end(&c, Outcome::Idle);
-            w.answer_all();
-        }
+        // phase 4: a turn that waited on its person is not continued (their
+        // answer is its next turn), whatever state the next life wakes
+        // with: its own says it asked, or the journal does of one another
+        // life ran (its claim answered 409: `note::waited`)
+        assert_eq!(w.runs_of(&records::continuation_id(&asked)), 0, "{wake}: not continued");
         let answer = w.say("npub1paul", "Fernando");
         w.answer_all();
         assert!(w.tells.is_empty(), "{wake}: never told to a turn of another life");
@@ -3569,6 +3574,40 @@ fn a_cut_turn_is_continued_once() {
     assert!(!posted.effects.iter().any(|x| matches!(x, Effect::Claim { .. })), "a command is not continued: {posted:?}");
     let again = next.step(Input::Posted { turn: ran.turn.clone(), id: end, kept: true }, T0 + 3);
     assert_eq!(again, Step::default(), "answered again: nothing");
+}
+
+/// Goal (one rule for a cut turn, FIN-220): a life rolled back to before
+/// a turn's claim (another life's, its claim answered 409) continues the
+/// cut turn as a life whose own state ran it does (`recover`): one that ran
+/// is continued once; one that waited on its card, or asked in words, is
+/// not, its answer being its next turn. Method: the turn said, claimed and
+/// cut after the state the next life wakes with.
+#[test]
+fn a_rolled_back_life_continues_a_cut_turn_as_its_own_state_would() {
+    for (how, continued) in [("running", 1), ("waiting on its card", 0), ("asking in words", 0)] {
+        let mut w = World::new(&["juniper"]);
+        w.start(None);
+        let before = w.latest();
+        let t = w.say("npub1paul", "deploy the site");
+        w.answer_all();
+        match how {
+            "waiting on its card" => w.ask(&t),
+            "asking in words" => w.ask_in_words(&t),
+            _ => {}
+        }
+        w.answer_all();
+        w.crash(false);
+        w.start(before);
+        w.answer_all();
+        assert_eq!((w.runs_of(&t), w.ends(&t).len()), (1, 1), "{how}: never run again, ended once");
+        let c = records::continuation_id(&t);
+        assert_eq!(w.runs_of(&c), continued, "{how}");
+        if continued == 1 {
+            w.end(&c, Outcome::Idle);
+        }
+        w.settle();
+        w.check().unwrap_or_else(|e| panic!("{how}: {e}"));
+    }
 }
 
 /// Goal (durability phase 4; Alex on #830): a turn its asker stopped is
@@ -4140,7 +4179,7 @@ fn a_late_answer_is_a_fresh_claim_even_without_the_cache() {
         other.step(Input::Agents(vec![a.clone()]), T0 + 1);
         other.recover(T0 + 1);
         other.step(input, T0 + 1);
-        let denied = other.step(Input::Claimed { turn:fresh, answer:ClaimAnswer::Theirs }, T0 + 1);
+        let denied = other.step(Input::Claimed { turn:fresh, answer:ClaimAnswer::Theirs { waited: false } }, T0 + 1);
         assert!(started(&denied).is_none(), "journal claim prevents another run after rollback");
     }
 }
@@ -4218,7 +4257,7 @@ fn a_live_answer_reaches_the_runtime_only_once_its_closure_is_on_work() {
     // another body under its id: the runtime's wait ends unanswered
     ev(&mut e, Event::Prompt { turn: turn.clone(), prompt: "q".into(), text: "Again?".into(), options: options(), ttl_ms: None }, T0 + 7);
     e.step(record(3, "q"), T0 + 8);
-    let theirs = e.step(Input::Fenced { turn: turn.clone(), prompt: "q".into(), answer: ClaimAnswer::Theirs }, T0 + 9);
+    let theirs = e.step(Input::Fenced { turn: turn.clone(), prompt: "q".into(), answer: ClaimAnswer::Theirs { waited: false } }, T0 + 9);
     assert_eq!(commands(&theirs), vec![Command::Answer { turn: turn.clone(), prompt: "q".into(), option: None, seq: 0, by: String::new(), words: None, attached: None }]);
 
     // a restart while held: the turn ends, its answer never given

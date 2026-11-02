@@ -118,9 +118,14 @@ fn version_of(state: &State) -> u32 {
 /// A turn a restart cut may be continued (`Engine::continue_turn`): never
 /// a continuation (one continuation, ending visibly), one its asker stopped
 /// (a Stop this life accepted: the work is cancelled, never picked up
-/// again), an ask's turn (its asker is answered `lost`) or a command.
-fn continued(t: &Turn) -> bool {
-    t.continues.is_none() && !t.stop_requested && t.ret.is_none() && !t.command
+/// again), an ask's turn (its asker is answered `lost`), a command, or one
+/// that `waited` on its person (a card, a question in words): their answer
+/// is its next turn. One rule for both ways a life ends a cut turn: what
+/// its own state holds (`recover`), and what the journal holds of one
+/// another life ran after the `/data` it restored (`claimed`, the claim's
+/// `ClaimAnswer::Theirs`).
+fn continued(t: &Turn, waited: bool) -> bool {
+    t.continues.is_none() && !t.stop_requested && t.ret.is_none() && !t.command && !waited
 }
 
 /// Why an asked turn of an agent that left this computer never answered:
@@ -299,8 +304,10 @@ pub enum ClaimAnswer {
     /// answer names it: the journal before it says what the turn is told of
     /// the agent's turn before it there (note.rs).
     Ours { seq: Option<u64> },
-    /// 409: another life's claim holds the id.
-    Theirs,
+    /// 409: another life's claim holds the id. `waited`: that life's turn
+    /// waited on its person as the journal holds it (`note::waited`, read
+    /// for a turn's claim; a live answer's closure is never one).
+    Theirs { waited: bool },
     /// 403 or 404: the agent may not post on the chat's `work` (it left
     /// the chat, or its owner holds it below editor). Nothing runs, nothing
     /// can be recorded there, and the turn is dropped, as a fragment the
@@ -783,7 +790,7 @@ impl Engine {
             // continued once its lost end lands as this life's (`posted`),
             // unless it waited on its person: their answer is its next turn
             let t = self.state.turns.get_mut(id).expect("listed");
-            t.continue_after = continued(t) && !t.asking && t.phase != Phase::Waiting;
+            t.continue_after = continued(t, t.asking || t.phase == Phase::Waiting);
             self.end(id, Outcome::Error(LOST.into()), Closed::Expired);
         }
         assert!(self.state.turns.values().all(|t| matches!(t.phase, Phase::Queued | Phase::Ended)), "a recovered life holds only queued and ended turns");
@@ -1630,7 +1637,7 @@ impl Engine {
         assert!(self.state.turns.get(id).is_some_and(|t| t.phase == Phase::Queued), "a turn being claimed is held, queued: {id}");
         match answer {
             ClaimAnswer::Ours { seq } => self.hand(id, seq),
-            ClaimAnswer::Theirs => {
+            ClaimAnswer::Theirs { waited } => {
                 // It owes its end as lost (a 409 itself when that life ended
                 // it, and let go then like any answered end).
                 let t = self.state.turns.get_mut(id).expect("checked");
@@ -1639,8 +1646,10 @@ impl Engine {
                 t.owed = vec![end.clone()];
                 // that life left it with no end of its own when this one's
                 // lands as this life's (`posted`): it was cut, and is
-                // continued once; one that life ended refuses this end (409)
-                t.continue_after = continued(t);
+                // continued once unless it waited on its person, as a turn
+                // this life ran is (`recover`); one that life ended refuses
+                // this end (409)
+                t.continue_after = continued(t, waited);
                 let (agent, fragment) = (t.agent.clone(), t.fragment.clone());
                 self.dirty = true;
                 crate::ev!("turn.lost", { "turn": id, "agent": agent, "why": "another life claimed it" });
@@ -2011,7 +2020,7 @@ impl Engine {
                 return;
             }
             ClaimAnswer::Ours { .. } => p.held.take().expect("held").answer,
-            ClaimAnswer::Theirs | ClaimAnswer::Refused => {
+            ClaimAnswer::Theirs { .. } | ClaimAnswer::Refused => {
                 p.held = None;
                 crate::ev!("fence.refused", { "turn": turn, "prompt": prompt, "why": "its closure is not this answer's to post" });
                 Command::Answer { turn: turn.to_string(), prompt: prompt.to_string(), option: None, seq: 0, by: String::new(), words: None, attached: None }
