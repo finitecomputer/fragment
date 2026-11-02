@@ -14,6 +14,7 @@ use fragment_core::search_index as engine;
 use fragment_core::{across, searchable};
 use fragment_proto::search as wire;
 use rusqlite::{params, Connection};
+use serde_json::{json, Value};
 
 use crate::corpus::{Page, Section};
 
@@ -152,23 +153,12 @@ pub struct Pooled {
     with: HashMap<String, f64>,
 }
 
-/// FTS5's IDF: ln((N - n + 0.5) / (n + 0.5)), at least 1e-6.
-fn idf(n_all: f64, n_with: f64) -> f64 {
-    ((n_all - n_with + 0.5) / (n_with + 0.5)).ln().max(1e-6)
-}
-
-/// The question's words as FTS5 phrases, each alone (`match_of`'s words).
-fn words(q: &str) -> Vec<String> {
-    engine::match_of(q).map(|m| m.split(" OR ").map(str::to_string).collect()).unwrap_or_default()
-}
-
 impl Pooled {
     pub fn of(fragments: &[Index], q: &str) -> Result<Pooled, String> {
         let mut with: HashMap<String, f64> = HashMap::new();
         for f in fragments {
-            for w in words(q) {
-                let n: i64 = f.conn.query_row("SELECT count(*) FROM chunk_words WHERE chunk_words MATCH ?", [&w], |r| r.get(0)).map_err(|e| e.to_string())?;
-                *with.entry(w).or_default() += n as f64;
+            for w in engine::words_of(q) {
+                *with.entry(w.clone()).or_default() += f.holding(&w)? as f64;
             }
         }
         Ok(Pooled { chunks: fragments.iter().map(|f| f.chunks() as f64).sum(), with })
@@ -227,11 +217,11 @@ impl Index {
     fn lexical_pooled(&self, q: &str, pooled: &Pooled) -> Result<Vec<(i64, f64)>, String> {
         let mut score: HashMap<i64, f64> = HashMap::new();
         let n_all = self.chunks() as f64;
-        for w in words(q) {
+        for w in engine::words_of(q) {
             let mut stmt = self.conn.prepare_cached("SELECT rowid, -bm25(chunk_words, 4.0, 3.0, 2.0, 1.0) FROM chunk_words WHERE chunk_words MATCH ?").map_err(|e| e.to_string())?;
-            let rows: Vec<(i64, f64)> = stmt.query_map([&w], |r| Ok((r.get(0)?, r.get(1)?))).map_err(|e| e.to_string())?.collect::<Result<_, _>>().map_err(|e| e.to_string())?;
-            let here = idf(n_all, rows.len() as f64);
-            let all = idf(pooled.chunks, pooled.with.get(&w).copied().unwrap_or(0.0));
+            let rows: Vec<(i64, f64)> = stmt.query_map([engine::phrase(&w)], |r| Ok((r.get(0)?, r.get(1)?))).map_err(|e| e.to_string())?.collect::<Result<_, _>>().map_err(|e| e.to_string())?;
+            let here = across::idf(n_all, rows.len() as f64);
+            let all = across::idf(pooled.chunks, pooled.with.get(&w).copied().unwrap_or(0.0));
             for (chunk, s) in rows {
                 *score.entry(chunk).or_default() += s * all / here;
             }
@@ -242,19 +232,41 @@ impl Index {
         Ok(out)
     }
 
-    /// Each of the question's words in `chunk`, as B′'s answer carries it:
-    /// the word, how many of this index's chunks hold it, and its BM25 in
-    /// that chunk here (FTS5's, with this index's IDF and lengths; 0 when
-    /// the chunk lacks it).
-    fn word_scores(&self, chunk: i64, q: &str) -> Result<Vec<(String, f64, f64)>, String> {
-        let mut out = Vec::new();
-        for w in words(q) {
-            let here: i64 = self.conn.query_row("SELECT count(*) FROM chunk_words WHERE chunk_words MATCH ?", [&w], |r| r.get(0)).map_err(|e| e.to_string())?;
-            let mut stmt = self.conn.prepare_cached("SELECT -bm25(chunk_words, 4.0, 3.0, 2.0, 1.0) FROM chunk_words WHERE chunk_words MATCH ? AND rowid = ?").map_err(|e| e.to_string())?;
-            let s: Option<f64> = stmt.query_row(params![w, chunk], |r| r.get(0)).ok();
-            out.push((w, here as f64, s.unwrap_or(0.0)));
+    /// How many of its chunks hold `word` (FTS5's count, as its BM25
+    /// weighs the word; cell/src/search_index.rs `word_stats`).
+    fn holding(&self, word: &str) -> Result<u64, String> {
+        let n: i64 = self.conn.query_row("SELECT count(*) FROM chunk_words WHERE chunk_words MATCH ?", [engine::phrase(word)], |r| r.get(0)).map_err(|e| e.to_string())?;
+        u64::try_from(n).map_err(|e| e.to_string())
+    }
+
+    /// Each of `words` in `chunk`: its BM25 there alone (FTS5's, with this
+    /// index's IDF and lengths; 0 when the chunk lacks it), as
+    /// cell/src/search_index.rs `word_scores` answers it.
+    fn word_scores(&self, chunk: i64, words: &[String]) -> Result<Vec<f64>, String> {
+        let mut stmt = self.conn.prepare_cached("SELECT -bm25(chunk_words, 4.0, 3.0, 2.0, 1.0) FROM chunk_words WHERE chunk_words MATCH ? AND rowid = ?").map_err(|e| e.to_string())?;
+        words.iter().map(|w| Ok(stmt.query_row(params![engine::phrase(w), chunk], |r| r.get(0)).ok().unwrap_or(0.0))).collect()
+    }
+
+    /// Its answer to `/search/asked` (cell/src/searchable.rs), as the route
+    /// reads it: its best `limit` hits by its own statistics, each found by
+    /// words with each word's BM25 in its best chunk, and what it knows of
+    /// the question's words.
+    pub fn asked(&self, q: &str, question: &[f32], limit: usize, space: &wire::Space) -> Result<Value, String> {
+        let words = engine::words_of(q);
+        let mut results = Vec::new();
+        for (i, h) in self.search(q, question, limit)?.into_iter().enumerate() {
+            let mut hit = json!({ "rank": i + 1, "section": h.section });
+            if let (Some(rank), Some(bm25), Some(chunk)) = (h.lexical, h.score, h.chunk) {
+                hit["lexical"] = json!({ "rank": rank, "bm25": bm25 });
+                hit["words"] = json!(self.word_scores(chunk, &words)?);
+            }
+            if let Some(cosine) = h.cosine {
+                hit["semantic"] = json!({ "cosine": cosine });
+            }
+            results.push(hit);
         }
-        Ok(out)
+        let with = words.iter().map(|w| self.holding(w)).collect::<Result<Vec<u64>, String>>()?;
+        Ok(json!({ "results": results, "semantic": "on", "indexed": true, "space": space, "scheme": wire::SCHEME, "words": { "words": words, "chunks": self.chunks(), "with": with } }))
     }
 
     /// The question, answered as cell/src/search_index.rs's `search` does,
@@ -349,30 +361,21 @@ pub fn federated_pooled(fragments: &[Index], q: &str, question: &[f32], k: usize
     Ok(merge_by_score(&answers, k))
 }
 
-/// A prototype of B in one round (FIN-238, the bench's B′): each fragment
-/// answers its usual best `asked_limit(k)` by its own statistics, and with
-/// them its chunk count, how many of its chunks hold each of the
-/// question's words, and each hit's words as its best chunk holds them
-/// (its per-word BM25 here, what its term frequencies and length give);
-/// the route scores each returned hit's words again with the pooled IDF,
-/// and sorts by that. No second round, so no hit a fragment did not return.
+/// B in one round (FIN-238, the bench's B′), as the route runs it since
+/// #954: each fragment answers its usual best `asked_limit(k)` by its own
+/// statistics, with its chunk count, how many of its chunks hold each of
+/// the question's words, and each hit's words as its best chunk holds them
+/// (`Index::asked`); the route reads each answer (`across::reached`),
+/// ranks the hits found by words with the pooled IDF
+/// (`across::pool_words`), and merges (`across::merge`). No second round,
+/// so no hit a fragment did not return.
 pub fn federated_rescored(fragments: &[Index], q: &str, question: &[f32], k: usize) -> Result<Vec<String>, String> {
-    let pooled = Pooled::of(fragments, q)?;
+    let space = wire::Space { model: "bench".into(), dimensions: question.len() as u32, version: None, document_prefix: None, query_prefix: None };
     let asked = across::asked_limit(k);
-    let mut answers: Vec<Vec<Hit>> = fragments.iter().map(|f| f.search(q, question, asked)).collect::<Result<_, _>>()?;
-    for (f, hits) in fragments.iter().zip(answers.iter_mut()) {
-        let n_all = f.chunks() as f64;
-        for h in hits.iter_mut() {
-            if let Some(chunk) = h.chunk {
-                let mut score = 0.0;
-                for (w, here, s) in f.word_scores(chunk, q)? {
-                    score += s * idf(pooled.chunks, pooled.with.get(&w).copied().unwrap_or(0.0)) / idf(n_all, here);
-                }
-                h.score = Some(score);
-            }
-        }
-    }
-    Ok(merge_by_score(&answers, k))
+    let replies: Vec<across::Reply> = fragments.iter().map(|f| Ok(across::reached(200, f.asked(q, question, asked, &space)?, Some(&space)))).collect::<Result<_, String>>()?;
+    let mut legs: Vec<Vec<across::Legs>> = replies.iter().map(|r| r.hits.iter().enumerate().map(|(i, h)| across::legs(h, i, r.cosines)).collect()).collect();
+    across::pool_words(&engine::words_of(q), &replies, &mut legs);
+    Ok(across::merge(&legs, k).into_iter().map(|p| replies[p.fragment].hits[p.hit]["section"].as_str().unwrap_or_default().to_string()).collect())
 }
 
 /// The answers merged with their words scores comparable: the words list
