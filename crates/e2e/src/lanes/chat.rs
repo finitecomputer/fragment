@@ -107,6 +107,56 @@ fn held_socket(s: &mut Suite, api: &Api, chrome: &mut Browser, owner: &Keys, cha
     Ok(())
 }
 
+/// Watches a page from before its script runs: each composer placeholder
+/// it sets and each working line it draws (`__said`), and `__drawn` once
+/// its chat and work backlogs are in (each channel's last `subscribed`)
+/// and two frames are drawn after.
+const LOAD_WATCH: &str = "(() => { if (window !== window.top) return; window.__said = []; window.__drawn = false; const done = new Set(); \
+    new MutationObserver((ms) => { for (const m of ms) { if (m.type === 'attributes' && m.target.id === 'text') window.__said.push(m.target.getAttribute('placeholder')); \
+      for (const n of m.addedNodes) if (n.classList?.contains('working')) window.__said.push(`line: ${n.textContent}`); } }).observe(document, { subtree: true, childList: true, attributes: true, attributeFilter: ['placeholder'] }); \
+    window.WebSocket = new Proxy(window.WebSocket, { construct(target, args) { const ws = new target(...args); ws.addEventListener('message', (e) => { \
+      let m; try { m = JSON.parse(e.data); } catch { return; } \
+      if (m.type !== 'subscribed' || m.more || done.has(m.channel)) return; done.add(m.channel); \
+      if (done.has('chat') && done.has('work')) requestAnimationFrame(() => requestAnimationFrame(() => { window.__drawn = true; })); }); return ws; } }); })();";
+
+/// An idle chat's page says nothing of a turn running as it loads. Its
+/// backlogs come a record at a time, and a page that drew what it had so
+/// far said, for a moment, that its agent was working or waited on an
+/// answer, for turns long ended (24 of 30 loads; the shell's roster check
+/// read it so, FIN-220). Method: the chat's turns all ended, then five
+/// loads, each watched from before its script runs until its backlogs are
+/// in and drawn.
+fn loads_idle(s: &mut Suite, api: &Api, chrome: &mut Browser, owner: &Keys, chat: &str) -> Result<()> {
+    let wait = Duration::from_secs(30);
+    let work = || {
+        api.signed(owner, "GET", &format!("/api/f/{chat}/channels/work?before={}&limit=1000", i64::MAX), None)
+            .ok()
+            .and_then(|r| r.body["records"].as_array().cloned())
+            .unwrap_or_default()
+    };
+    let idle = s.eventually(TURN, || {
+        let w = work();
+        let ended = |turn: &Value| w.iter().any(|r| r["body"]["kind"] == "turn.end" && r["body"]["turn"] == *turn);
+        w.iter().filter(|r| r["body"]["kind"] == "turn.start").all(|r| ended(&r["body"]["turn"]))
+    });
+    let mut said = Vec::new();
+    let mut drawn = true;
+    for _ in 0..5 {
+        let page = chrome.open_with_script(&api.site_url(chat, "__signin?return=/"), LOAD_WATCH)?;
+        drawn &= chrome.until(&page, "window.__drawn === true && document.getElementById('say')?.dataset.ready === '1'", wait);
+        said.push(chrome.eval(&page, "window.__said")?);
+        chrome.close(page)?;
+    }
+    let running = |p: &Value| p.as_str().is_some_and(|t| t.contains(" is working") || t.starts_with("Your answer for") || t.starts_with("line: "));
+    let told: Vec<&Value> = said.iter().filter_map(Value::as_array).flatten().filter(|p| running(p)).collect();
+    s.ok(
+        "an idle chat's page says nothing of a turn running as it loads (its agent working, or waiting on an answer): five loads, each watched until its backlogs are drawn",
+        idle && drawn && told.is_empty(),
+        json!({ "idle": idle, "drawn": drawn, "told": told, "said": said }),
+    );
+    Ok(())
+}
+
 /// The chat's page whose script does not come, in the shell's frame (the
 /// frame was blank, with nothing to press): after a while it says it is
 /// still loading, with a reload of its own page, in its frame. Valid: a
@@ -1021,6 +1071,7 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     // (a tab of its own, in front: after the push checks, which ask whether
     // the owner's page is on screen)
     held_socket(s, api, &mut chrome, &owner, &chat_name)?;
+    loads_idle(s, api, &mut chrome, &owner, &chat_name)?;
     still_loading_in_frame(s, api, &mut chrome, &chat_name)?;
     mic_in_frame(s, api, &mut chrome, &chat_name)?;
     mic_after_access_ends(s, api, &mut chrome, &owner, &member, &member_session)?;
