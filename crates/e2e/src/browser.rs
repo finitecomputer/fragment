@@ -34,6 +34,10 @@ const CHROME_START_WAIT: Duration = Duration::from_secs(30);
 /// all (`reload`), and how many reloads it is given.
 const RELOAD_LOAD: Duration = Duration::from_secs(30);
 const RELOADS_MAX: u32 = 2;
+/// A page `open` asks for has its document within this, or the open fails:
+/// the browser reports its commit and its default context
+/// (`Browser::navigate`); one that never comes is the stack's to explain.
+const NAVIGATED_MAX: Duration = Duration::from_secs(60);
 /// A watched page keeps at most this many of its events; past it, they are
 /// counted (`Watched::dropped`). A small app's page says a few hundred.
 pub const WATCHED_EVENTS_MAX: usize = 20_000;
@@ -452,10 +456,10 @@ impl Browser {
 
     /// A browser-only transport fault installed before the page starts.
     pub fn open_with_script(&mut self, url: &str, script: &str) -> Result<Page> {
-        let page = self.open("about:blank")?;
+        let page = self.blank_at(self.context.clone().as_deref())?;
         self.send("Page.enable", json!({}), Some(&page.session))?;
         self.send("Page.addScriptToEvaluateOnNewDocument", json!({ "source": script }), Some(&page.session))?;
-        self.send("Page.navigate", json!({ "url": url }), Some(&page.session))?;
+        self.navigate(&page, url)?;
         Ok(page)
     }
 
@@ -468,10 +472,10 @@ impl Browser {
     /// characters) are refused from its first document, as a resource that
     /// never comes; `unblock` lets them through again.
     pub fn open_blocking(&mut self, url: &str, patterns: &[&str]) -> Result<Page> {
-        let page = self.open("about:blank")?;
+        let page = self.blank_at(self.context.clone().as_deref())?;
         self.send("Network.enable", json!({}), Some(&page.session))?;
         self.send("Network.setBlockedURLs", json!({ "urls": patterns }), Some(&page.session))?;
-        self.send("Page.navigate", json!({ "url": url }), Some(&page.session))?;
+        self.navigate(&page, url)?;
         Ok(page)
     }
 
@@ -480,13 +484,75 @@ impl Browser {
         Ok(())
     }
 
+    /// A page at `url`, its document there by the time it is answered
+    /// (`navigate`): a first `eval` runs in it.
     fn open_at(&mut self, context: Option<&str>, url: &str) -> Result<Page> {
-        let mut params = json!({ "url": url });
+        let page = self.blank_at(context)?;
+        if url != "about:blank" {
+            self.navigate(&page, url)?;
+        }
+        Ok(page)
+    }
+
+    /// A new blank page in `context` (the lease's when `None`), attached.
+    fn blank_at(&mut self, context: Option<&str>) -> Result<Page> {
+        let mut params = json!({ "url": "about:blank" });
         if let Some(context) = context {
             params["browserContextId"] = json!(context);
         }
         let target = self.send("Target.createTarget", params, None)?["targetId"].as_str().unwrap_or("").to_string();
         self.attach(&target)
+    }
+
+    /// Navigates `page` to `url` and waits for its new document's default
+    /// execution context, as the browser reports them: the main frame
+    /// committed to this navigation (`Page.frameNavigated`, its loader),
+    /// then that frame's default context made after it
+    /// (`Runtime.executionContextCreated`). So a first `eval` runs in the
+    /// page asked for, never in the blank one before it, nor between the
+    /// two ("Cannot find default execution context"). A navigation that
+    /// failed (`errorText`) answers at once, the browser's error page shown.
+    /// Its frame's events may come before the navigation's answer, so the
+    /// command is sent and read here, every other message kept as `send`
+    /// keeps it.
+    fn navigate(&mut self, page: &Page, url: &str) -> Result<()> {
+        self.send("Page.enable", json!({}), Some(&page.session))?;
+        self.send("Runtime.enable", json!({}), Some(&page.session))?;
+        self.next += 1;
+        let id = self.next;
+        let msg = json!({ "id": id, "method": "Page.navigate", "params": { "url": url }, "sessionId": page.session });
+        self.ws.send(Message::Text(msg.to_string().into()))?;
+        // the main frame's id is its target's; its default context made
+        // since the command was sent, while no later event ended it
+        let (mut loader, mut committed, mut context) = (None::<String>, None::<String>, None::<Value>);
+        let t0 = Instant::now();
+        while t0.elapsed() < NAVIGATED_MAX {
+            let Message::Text(t) = self.ws.read()? else { continue };
+            let v = message(&t)?;
+            if v["id"].as_u64() == Some(id) {
+                if !v["error"].is_null() {
+                    bail!("Page.navigate {url}: {}", v["error"]);
+                }
+                if v["result"]["errorText"].as_str().is_some_and(|e| !e.is_empty()) {
+                    return Ok(());
+                }
+                loader = v["result"]["loaderId"].as_str().map(str::to_string);
+            } else if v["sessionId"] == page.session.as_str() {
+                let p = &v["params"];
+                match v["method"].as_str() {
+                    Some("Page.frameNavigated") if p["frame"]["id"] == page.target.as_str() => committed = p["frame"]["loaderId"].as_str().map(str::to_string),
+                    Some("Runtime.executionContextCreated") if p["context"]["auxData"]["isDefault"] == true && p["context"]["auxData"]["frameId"] == page.target.as_str() => context = Some(p["context"]["id"].clone()),
+                    Some("Runtime.executionContextDestroyed") if context.as_ref() == Some(&p["executionContextId"]) => context = None,
+                    Some("Runtime.executionContextsCleared") => context = None,
+                    _ => {}
+                }
+            }
+            if loader.is_some() && loader == committed && context.is_some() {
+                return Ok(());
+            }
+            self.keep(v);
+        }
+        bail!("{url}: its document did not come in {NAVIGATED_MAX:.0?} (committed: {committed:?}, navigation: {loader:?})")
     }
 
     /// A page `pages` listed (a popup a page opened), to drive as one `open` answered.
