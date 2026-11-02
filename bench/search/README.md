@@ -100,6 +100,10 @@ It runs what ships (`src/across.rs`), not the prototypes above:
 - **Federated:** the corpus cut by top-level folder, one index each, each
   asked for `asked_limit(10)`, merged by `fragment_core::across::merge`
   (the route's code).
+- **Federated with pooled words (B′):** each fragment's `/search/asked`
+  answer with its word statistics (`Index::asked`), read, ranked by
+  `fragment_core::across::pool_words` and merged, as the route does since
+  #954. B (pooled statistics in a second round) stays a prototype.
 - **Union:** one index over the whole corpus, built for the test.
 - **fbrain hybrid:** its lexical search over sections, fused with an exact
   float32 scan (a section by its best chunk).

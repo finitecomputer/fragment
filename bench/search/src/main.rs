@@ -675,7 +675,7 @@ fn gate(args: &Args) -> Result<String, String> {
         "union, exact float32 meaning leg (diagnosis C1)",
         "union, fbrain's words leg (diagnosis C2)",
         "union, legs 50 deep (diagnosis C3)",
-        "federated, one round re-scored with pooled IDF (bench prototype, B′)",
+        "federated, one round re-scored with pooled IDF (the route's since #954, B′)",
     ];
     eprintln!("searching: {} questions over {} wikis", questions.len(), fragments.len());
     let mut rankings: Vec<[Vec<String>; 8]> = Vec::new();
@@ -876,4 +876,44 @@ mod tests {
         assert!(check("").is_err());
         std::fs::remove_dir_all(&dir).unwrap();
     }
+    /// B′ is the route's own (#954): over the synthetic corpus cut by its
+    /// folders, every fragment's answer holds together as the route checks
+    /// it (each hit's word scores summing to its BM25, so none falls back
+    /// to its own ranks unseen), and pooling moves some answer.
+    #[test]
+    fn rescored_is_the_routes() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/synthetic");
+        let work = std::env::temp_dir().join(format!("search-bench-rescored-{}", std::process::id()));
+        std::fs::create_dir_all(&work).unwrap();
+        let (pages, _) = load(&root.join("corpus")).unwrap();
+        let mut embeddings = Embeddings::open(Embedder::Hashed { dims: 64 }, &work).unwrap();
+        let cuts = across::cut(&pages, 8192, None);
+        let chunks: Vec<&fragment_core::searchable::Chunk> = cuts.iter().flat_map(|c| c.chunks.iter().map(|(_, ch, _, _)| ch)).collect();
+        let vectors = embeddings.documents(&chunks.iter().map(|c| c.input.clone()).collect::<Vec<_>>(), false).unwrap();
+        let vector_of: HashMap<String, Vec<f32>> = chunks.iter().map(|c| c.hash.clone()).zip(vectors).collect();
+        let mut by_wiki: BTreeMap<&str, Vec<&across::Cut>> = BTreeMap::new();
+        for ((page, _), cut) in pages.iter().zip(&cuts) {
+            by_wiki.entry(across::wiki_of(&page.path)).or_default().push(cut);
+        }
+        let fragments: Vec<across::Index> = by_wiki.values().enumerate().map(|(i, c)| across::Index::build(&work.join(format!("wiki-{i}.sqlite3")), c, &vector_of, 64).unwrap()).collect();
+        let space = fragment_proto::search::Space { model: "bench".into(), dimensions: 64, version: None, document_prefix: None, query_prefix: None };
+        let mut moved = 0;
+        for q in questions(&root.join("questions.jsonl"), &pages).unwrap() {
+            let (v, _) = embeddings.query(&q.q).unwrap();
+            for f in &fragments {
+                let answer = f.asked(&q.q, &v, fragment_core::across::asked_limit(K), &space).unwrap();
+                for h in answer["results"].as_array().unwrap().iter().filter(|h| h.get("lexical").is_some()) {
+                    let sum: f64 = h["words"].as_array().unwrap().iter().map(|s| s.as_f64().unwrap()).sum();
+                    let bm25 = h["lexical"]["bm25"].as_f64().unwrap();
+                    assert!((sum - bm25).abs() <= 1e-9 * bm25.abs(), "{}: {sum} vs {bm25}", q.id);
+                }
+            }
+            if across::federated_rescored(&fragments, &q.q, &v, K).unwrap() != across::federated(&fragments, &q.q, &v, K).unwrap() {
+                moved += 1;
+            }
+        }
+        assert!(moved > 0, "pooled words move some answer");
+        std::fs::remove_dir_all(&work).unwrap();
+    }
+
 }
