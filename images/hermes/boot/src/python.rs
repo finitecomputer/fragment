@@ -109,7 +109,7 @@ mod tests {
     /// (`pip`) pip's script.
     fn env_of(dir: &Path, version: &str, pip: bool) {
         std::fs::create_dir_all(dir.join("bin")).unwrap();
-        std::fs::write(dir.join("pyvenv.cfg"), format!("home = /usr/local/bin\nimplementation = CPython\nuv = 0.12.3\nversion_info = {version}\ninclude-system-site-packages = true\n")).unwrap();
+        std::fs::write(dir.join("pyvenv.cfg"), format!("home = /usr/local/bin\nimplementation = CPython\nuv = 0.12.3\nversion_info = {version}\ninclude-system-site-packages = false\n")).unwrap();
         std::fs::write(dir.join("bin/python"), "").unwrap();
         if pip {
             std::fs::write(dir.join("bin/pip"), "").unwrap();

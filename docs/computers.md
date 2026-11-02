@@ -770,8 +770,8 @@ install` work, and what they install is kept.
   are Hermes' own, on every `PATH`.
 - **Made by the boot**, off its path and offline: uv makes it on the
   image's Python (`/usr/local/bin/python3`, the name upstream links it
-  at), seeing that Python's own packages, and its pip is the wheel that
-  Python bundles (`boot/src/python.rs`).
+  at), and its pip is the wheel that Python bundles
+  (`boot/src/python.rs`).
 - **Kept** across a restart and a sleep, and across an image update whose
   Python is the same minor release: it runs whichever Python the image
   links. One made for another Python (or unreadable) is set aside whole

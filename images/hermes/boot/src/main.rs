@@ -1173,11 +1173,9 @@ for p in sys.argv[1:]:
 
 /// The computer's Python environment (`python.rs`), made or mended off the
 /// boot's path, which never waits for it (a first start's takes about a
-/// tenth of a second). Offline: uv makes it on the image's Python, seeing
-/// that Python's own packages (`--system-site-packages`, which an image
-/// may add to: docs/computers.md), and its pip comes from the wheel that
-/// Python bundles (ensurepip's). As the hermes user, so what its agents
-/// install is theirs to change.
+/// tenth of a second). Offline: uv makes it on the image's Python, and its
+/// pip comes from the wheel that Python bundles (ensurepip's). As the
+/// hermes user, so what its agents install is theirs to change.
 fn python_env(ids: Option<(u32, u32)>) {
     let t = Instant::now();
     let dir = Path::new(python::DIR);
@@ -1220,7 +1218,7 @@ fn python_env(ids: Option<(u32, u32)>) {
             return failed("make", e.to_string());
         }
         chown(dir, ids);
-        if ran("make", as_hermes(&[python::UV, "venv", "--quiet", "--allow-existing", "--system-site-packages", "--python", python::PYTHON, python::DIR])).is_none() {
+        if ran("make", as_hermes(&[python::UV, "venv", "--quiet", "--allow-existing", "--python", python::PYTHON, python::DIR])).is_none() {
             return;
         }
     }
