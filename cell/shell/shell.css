@@ -839,9 +839,6 @@ iframe[data-blocked] { display: none; }
 .agent-hero-face .agent-avatar { width: 26px; height: 26px; }
 .agent-hero-named { display: flex; flex: 1; flex-direction: column; justify-content: center; min-width: 0; }
 .agent-hero-named .title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-primary); font-size: 14px; }
-.agent-hero .agent-doing { font-size: 11px; font-weight: 600; line-height: 14px; color: var(--text-tertiary); }
-.agent-hero .agent-doing.working { color: var(--success); }
-.agent-hero .agent-doing.you { color: var(--accent-blue); }
 #chats .more-row { min-height: 28px; padding-top: 4px; padding-bottom: 4px; color: var(--text-tertiary); font-size: 13px; }
 #chats .more-row:hover { color: var(--text-secondary); }
 .section-head { margin: 14px 8px 4px; color: var(--text-tertiary); font-size: 12px; font-weight: 600; }

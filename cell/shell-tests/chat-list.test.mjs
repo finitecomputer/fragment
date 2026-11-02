@@ -1,7 +1,8 @@
 // cell/shell/chat-list.js's sections (Paul, 2026-10-31): a section's
 // order, its pinned chats first, then the rest, each the newest first; and
 // what it shows, its first five (pinned ones among them), the open one
-// wherever it is, and all of them unfolded.
+// wherever it is, each whose row says what its agent is doing (never folded
+// under More), and all of them unfolded.
 // Run by `cargo xtask check` on the pinned Node (xtask/src/js_syntax.rs).
 
 import { test } from "node:test";
@@ -27,6 +28,13 @@ test("the open chat shows wherever it is; unfolded, every chat in order", () => 
   const list = [1, 2, 3, 4, 5, 6, 7].map((n) => chat(`c${n}`, n * 10));
   assert.deepEqual(names(sectionShown(list, { current: "c1" }).shown), ["c7", "c6", "c5", "c4", "c3", "c1"]);
   assert.deepEqual(names(sectionShown(list, { unfolded: true }).shown), ["c7", "c6", "c5", "c4", "c3", "c2", "c1"]);
+});
+
+test("a chat its agent is waiting in or working in shows however far down it is, in its place, never under More", () => {
+  const list = [1, 2, 3, 4, 5, 6, 7, 8].map((n) => chat(`c${n}`, n * 10));
+  assert.deepEqual(names(sectionShown(list, { busy: new Set(["c1", "c3"]) }).shown), ["c8", "c7", "c6", "c5", "c4", "c3", "c1"]);
+  assert.equal(sectionShown(list, { busy: new Set(["c1"]) }).more, true, "More still folds the rest");
+  assert.deepEqual(names(sectionShown(list, { busy: new Set(["c7"]) }).shown), ["c8", "c7", "c6", "c5", "c4"], "one among the first five adds none");
 });
 
 test("five or fewer: all of them, and no More", () => {

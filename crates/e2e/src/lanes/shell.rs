@@ -5242,6 +5242,20 @@ fn doing_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &st
     let waiting = b.until(page, &format!("{doing} === 'Waiting for you'"), agent_wait);
     let _ = b.screenshot(page, &shots.join("desktop-agent-waiting.png"));
     let said = b.eval(page, &format!("{row}?.textContent ?? null"))?;
+    // said on its chat's row alone, never on its agent's card too (Paul, 2026-11-02)
+    let heroes = b.eval(page, "[...document.querySelectorAll('#chats .agent-hero')].map((h) => h.querySelector('.agent-doing')?.textContent ?? null)")?;
+    s.ok(
+        "what an agent is doing is said on its chat's row alone: no agent's card says it",
+        waiting && heroes.as_array().is_some_and(|l| !l.is_empty() && l.iter().all(Value::is_null)),
+        json!({ "heroes": heroes }),
+    );
+    // the same at a phone's width, the list over the chat
+    let (w, h) = (b.eval(page, "innerWidth")?.as_u64().unwrap_or(1280) as u32, b.eval(page, "innerHeight")?.as_u64().unwrap_or(800) as u32);
+    b.viewport(page, 393, 852, true)?;
+    b.eval(page, "(document.getElementById('layout').classList.contains('left-open') || document.getElementById('toggle-left').click(), true)")?;
+    b.until(page, &format!("{doing} === 'Waiting for you' && document.getAnimations().every((a) => a.playState !== 'running' || a.effect?.getComputedTiming().iterations === Infinity)"), agent_wait);
+    let _ = b.screenshot(page, &shots.join("phone-agent-waiting.png"));
+    b.viewport(page, w, h, false)?;
     let work = shell(api, session, "GET", &format!("/api/f/{chat}/channels/work?after=0&limit=1000"), None, &[])?;
     let card = work.body["records"].as_array().into_iter().flatten().rev().find(|r| r["body"]["kind"] == "turn.prompt").cloned().unwrap_or_default();
     let prompt = card["body"]["prompt"].as_str().unwrap_or("").to_string();

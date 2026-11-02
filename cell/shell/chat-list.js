@@ -7,11 +7,13 @@ export const newestChat = (a, b) => (b.previewAt ?? Infinity) - (a.previewAt ?? 
 // the newest first (Paul, 2026-10-31).
 export const pinnedFirst = (a, b) => Number(!!b.pinned) - Number(!!a.pinned) || newestChat(a, b);
 // What a section shows of its chats (in `pinnedFirst`'s order): all of
-// them unfolded; else its first `max`, pinned ones among them, and the open
-// one wherever it is. `more`: whether it has more than `max` (More, Less).
-export function sectionShown(list, { unfolded = false, current = null, max = 5 } = {}) {
+// them unfolded; else its first `max`, pinned ones among them, the open one
+// wherever it is, and each whose row says what its agent is doing (`busy`,
+// names: waiting for them or working), so none is folded under More (Paul,
+// 2026-11-02). `more`: whether it has more than `max` (More, Less).
+export function sectionShown(list, { unfolded = false, current = null, max = 5, busy = new Set() } = {}) {
   const sorted = [...list].sort(pinnedFirst);
-  const shown = unfolded ? sorted : sorted.filter((f, i) => i < max || f.name === current);
+  const shown = unfolded ? sorted : sorted.filter((f, i) => i < max || f.name === current || busy.has(f.name));
   return { shown, more: sorted.length > max };
 }
 
@@ -216,20 +218,20 @@ export function createChatList({ api, ui, data, selection, menus, navigation, li
   // The launcher's key, as the person's keyboard names it.
   const LAUNCHER_KEY = /Mac|iPhone|iPad|iPod/.test(navigator.userAgentData?.platform ?? navigator.platform ?? "") ? "⌘K" : "Ctrl K";
   // An agent's hero (Paul, 2026-10-31: the sidebar is a section per agent,
-  // each headed by the original pill): its face, its name, and under it
-  // what it is doing in any of its chats (the most pressing), real state
-  // only. It opens its agent's menu, attached below it. Drawn again, it
-  // keeps the edge its pointer lit and whether its menu is open, so it stays
-  // the same node unless what it shows changed.
-  function hero(agent, doing) {
-    const says = DOING_SAYS[doing?.doing];
+  // each headed by the original pill): its face and its name. What it is
+  // doing is said on its chats' rows alone, never here too (Paul,
+  // 2026-11-02), each such row shown however many its section folds
+  // (`sectionShown`'s `busy`). It opens its agent's menu, attached below
+  // it. Drawn again, it keeps the edge its pointer lit and whether its menu
+  // is open, so it stays the same node unless what it shows changed.
+  function hero(agent) {
     const name = titleOf(agent.fragment);
     const row = el("button", "row agent-hero");
     row.type = "button";
     row.dataset.key = `agent:${agent.fragment}`;
     const was = $("chats").querySelector(`[data-key="${CSS.escape(row.dataset.key)}"]`);
     if (was?.hasAttribute("style")) row.setAttribute("style", was.getAttribute("style"));
-    row.setAttribute("aria-label", `${name}${says ? `, ${says.toLowerCase()}` : ""}: its menu`);
+    row.setAttribute("aria-label", `${name}: its menu`);
     row.setAttribute("aria-haspopup", "menu");
     row.setAttribute("aria-controls", "menu");
     row.setAttribute("aria-expanded", String(!!was && menuOwner()?.button === was));
@@ -237,7 +239,6 @@ export function createChatList({ api, ui, data, selection, menus, navigation, li
     face.append(avatar(agentFace(agent.fragment, agent.identity), "small"));
     const named = el("span", "agent-hero-named");
     named.append(el("strong", "title", name));
-    if (says) named.append(el("span", `agent-doing ${doing.doing}`, says));
     row.append(face, named);
     // its agent as it is when pressed: a hero kept from an earlier drawing
     // (the same node) may have been drawn before its computer was read
@@ -278,12 +279,13 @@ export function createChatList({ api, ui, data, selection, menus, navigation, li
     else if (menuOwner()?.button.classList.contains("agent-hero")) closeMenu(true);
   }, { passive: true });
   // A section's chats (`sectionShown`): its first five, pinned ones first,
-  // and the open one wherever it is; then More, which shows the rest, and
-  // Less, which folds them again.
+  // the open one wherever it is, and each whose row says what its agent is
+  // doing (`busy`); then More, which shows the rest, and Less, which folds
+  // them again.
   const unfolded = new Set();
-  function sectionRows(key, list, rowOf) {
+  function sectionRows(key, list, rowOf, busy) {
     const open = unfolded.has(key);
-    const { shown, more: many } = sectionShown(list, { unfolded: open, current: page() ? null : current() });
+    const { shown, more: many } = sectionShown(list, { unfolded: open, current: page() ? null : current(), busy });
     const rows = shown.map(rowOf);
     if (many) {
       const more = el("button", "row more-row", open ? "Less" : "More");
@@ -331,25 +333,23 @@ export function createChatList({ api, ui, data, selection, menus, navigation, li
     const seen = [];
     const now = Date.now();
     let next = Infinity;
+    // what each listed chat's agents of theirs are doing there, as its row says it
+    const doingOf = new Map([...sections.values()].flatMap((x) => x.chats).concat(loose, shared).map((f) => [f.name, doingIn(f, agentsOf(f.name).filter((id) => ids.has(id)))]));
+    const busy = new Set([...doingOf].filter(([, d]) => d.length).map(([name]) => name));
     const rowOf = (f) => {
-      const theirs = agentsOf(f.name).filter((id) => ids.has(id));
-      const doing = doingIn(f, theirs);
+      const doing = doingOf.get(f.name) ?? [];
       seen.push(...doing);
       const [row, until] = chatRow(f, doing[0], now);
       next = Math.min(next, until);
       return row;
     };
     const rows = [];
-    for (const [key, { agent, chats: list }] of sections) {
-      const doing = agent.identity ? chats().flatMap((f) => doingIn(f, [agent.identity])).sort(pressing) : [];
-      seen.push(...doing);
-      rows.push(hero(agent, doing[0]), ...sectionRows(key, list, rowOf));
-    }
-    rows.push(...sectionRows("own", loose, rowOf));
+    for (const [key, { agent, chats: list }] of sections) rows.push(hero(agent), ...sectionRows(key, list, rowOf, busy));
+    rows.push(...sectionRows("own", loose, rowOf, busy));
     if (shared.length) {
       const head = el("div", "section-head", "Shared");
       head.dataset.key = "head:shared";
-      rows.push(head, ...sectionRows("shared", shared, rowOf));
+      rows.push(head, ...sectionRows("shared", shared, rowOf, busy));
     }
     if (!rows.some((r) => r.dataset.key.startsWith("chat:"))) rows.push(el("div", "empty-row", chats().length ? "Every chat is archived" : isGuest() ? "Chats shared with you show here" : "Your chats will appear here"));
     doingAgain(seen);
