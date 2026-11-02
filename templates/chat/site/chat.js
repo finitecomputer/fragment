@@ -100,6 +100,10 @@ const SENDING_OPACITY = 0.55;
 // The first run's steps a shell may show here (its `setup`), and their states.
 const SETUP_STEPS_MAX = 6;
 const SETUP_STEP = ["done", "doing", "todo", "failed"];
+// A code for the computer alone (`computerField`): masked by CSS where it
+// can be, and each password manager's own hint to leave its field be.
+const MASKS = typeof CSS !== "undefined" && CSS.supports("-webkit-text-security", "disc");
+const IGNORED_BY_MANAGERS = [["data-bwignore", "true"], ["data-1p-ignore", "true"], ["data-lpignore", "true"], ["data-form-type", "other"]];
 const HANDLE = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/;
 // A command's name (docs/chat-records.md), and the commands one agent's
 // menu offers, at most.
@@ -1728,12 +1732,23 @@ export function mount(root) {
   // masked, and handed to the shell (`KIND.cardToComputer`), which hands it
   // to that computer alone; what came of it is said on the card. Neither
   // kept nor shown here.
+  //
+  // Masked by its look, not as a password: a password field is one every
+  // password manager offers to save, and a code used once is not one to
+  // keep (Paul, 2026-11-02, Bitwarden). So a text field, masked by CSS
+  // (`.masked`), with each manager's own hint to leave it be, no name, and
+  // no form history; a password field only where the CSS is unsupported.
   function computerField(t, prompt, o, disabled) {
     const card = cardKey(t.key, prompt);
     const form = el("form", "words");
-    const field = el("input");
-    field.type = "password";
+    form.autocomplete = "off";
+    const field = el("input", "masked");
+    field.type = MASKS ? "text" : "password";
     field.autocomplete = "off";
+    field.spellcheck = false;
+    field.setAttribute("autocapitalize", "off");
+    field.setAttribute("autocorrect", "off");
+    for (const [name, value] of IGNORED_BY_MANAGERS) field.setAttribute(name, value);
     field.dataset.option = o.id;
     field.placeholder = o.label || o.id;
     field.setAttribute("aria-label", o.label || o.id);
