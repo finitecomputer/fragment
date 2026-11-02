@@ -250,10 +250,14 @@ fn read_state(dir: &Path, name: &str) -> Result<(SyncState, Option<Vec<u8>>)> {
     }
     let bytes = fs::read(&p)?;
     match serde_json::from_slice::<SyncState>(&bytes) {
-        Ok(s) if s.schema_version == 3 => {
-            if s.name != name {
+        Ok(mut s) if s.schema_version == 3 => {
+            // a journal a sync named by its bare label wrote (`todo`, before
+            // a sync resolved it) is the same fragment's, named in full now
+            let bare = fragment_proto::split_fragment_name(name).is_some_and(|(label, _)| label == s.name);
+            if s.name != name && !bare {
                 anyhow::bail!("directory is synced to fragment '{}', not '{}'", s.name, name);
             }
+            s.name = name.to_string();
             Ok((s, Some(bytes)))
         }
         _ => {
@@ -514,9 +518,20 @@ fn mass_delete_trips(push_deletes: usize, local_deletes: usize, known: usize, ap
     }
 }
 
+/// The fragment `name` names, in full (`Client::fragment`): a folder's
+/// journal names it so, whether a command was given its label (`todo`)
+/// or its full name (`todo--k3x9`).
+pub fn full_name(client: &Client, name: &str) -> Result<String, SyncError> {
+    client.fragment(name).map_err(|e| match e.downcast::<CodedError>() {
+        Ok(refused) => SyncError::Host(refused),
+        Err(e) => SyncError::Io(format!("naming {name}: {e:#}")),
+    })
+}
+
 /// `fragment sync` (and a deploy's): connects, runs one pass, and nudges
 /// the cell's pins when a commit landed.
 pub fn sync_once(client: &Client, name: &str, dir: &Path, opts: &SyncOptions) -> Result<Report, SyncError> {
+    let name = &full_name(client, name)?;
     let storage = CodeStorage::connect(client, name)?;
     let report = pass_over(client, &storage, name, dir, opts, read_local(dir, name)?)?;
     if report.landed {
@@ -966,6 +981,7 @@ fn pull_file(storage: &CodeStorage, blobs: &crate::blobs::Blobs<'_>, dir: &Path,
 /// Full-content audit: local truth vs the repo listing + fetched bytes
 /// (no shortcuts — every remote file is fetched and hashed).
 pub fn verify(client: &Client, name: &str, dir: &Path) -> Result<Report, SyncError> {
+    let name = &full_name(client, name)?;
     let state = load_state(dir, name).map_err(|e| SyncError::Io(e.to_string()))?;
     let Scan { files: local, stats, refused } = scan_local(dir, Some(&state), true).map_err(|e| SyncError::Io(e.to_string()))?;
     let storage = CodeStorage::connect(client, name)?;
@@ -1640,6 +1656,56 @@ mod tests {
         assert!(report.conflicts.iter().any(|c| c.starts_with("b.txt")), "{:?}", report.conflicts);
         assert!(report.conflicts.iter().all(|c| !c.starts_with("a.txt")));
         assert_eq!(report.exit_code(), 3, "drift exits as a conflict does");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Goal: `fragment sync` (and `verify`) take a fragment's bare label,
+    /// as every other subcommand does (`Client::fragment`): a folder synced
+    /// as `t--k3x9` syncs as `t` (prod, 2026-11-02: `fragment sync
+    /// workarounds` refused a folder bound to `workarounds--f3xz`). Valid:
+    /// the label syncs the bound folder, and the journal still names it in
+    /// full. Restart: a later run's client, its names unresolved, verifies
+    /// it by the label. Invalid: another fragment's label, and a label of
+    /// none, refuse before anything moves. Replay: a journal an earlier
+    /// bare-label sync wrote (`"name": "t"`) syncs by either name, and is
+    /// named in full after.
+    #[test]
+    fn a_bare_label_syncs_the_folder_its_fragment_is_bound_to() {
+        let mock = crate::mockcs::start();
+        mock.seed_repo("t--k3x9", &[("a.md", b"a")]);
+        mock.seed_repo("u--m4pq", &[("u.md", b"u")]);
+        let dir = tmpdir("bare-label");
+        let journal = || -> serde_json::Value { serde_json::from_slice(&fs::read(state_path(&dir)).unwrap()).unwrap() };
+        sync_once(&client_for(&mock), "t--k3x9", &dir, &opts(Mode::Mirror)).unwrap();
+        fs::write(dir.join("b.md"), b"b").unwrap();
+        let report = sync_once(&client_for(&mock), "t", &dir, &opts(Mode::Mirror)).unwrap();
+        assert_eq!(report.pushed, ["b.md"]);
+        assert_eq!(journal()["name"], "t--k3x9", "the journal names it in full");
+        let checked = verify(&client_for(&mock), "t", &dir).unwrap();
+        assert_eq!((checked.exit_code(), checked.conflicts.len()), (0, 0), "{:?}", checked.conflicts);
+
+        let packs = mock.commit_pack_count();
+        fs::write(dir.join("c.md"), b"c").unwrap();
+        let other = sync_once(&client_for(&mock), "u", &dir, &opts(Mode::Mirror)).unwrap_err();
+        assert!(other.to_string().contains("synced to fragment 't--k3x9', not 'u--m4pq'"), "{other}");
+        let none = sync_once(&client_for(&mock), "garden", &dir, &opts(Mode::Mirror)).unwrap_err();
+        assert!(matches!(&none, SyncError::Host(e) if e.code == crate::api::Code::NotFound), "{none}");
+        assert!(verify(&client_for(&mock), "u", &dir).is_err(), "verify refuses another fragment's label too");
+        assert_eq!(mock.commit_pack_count(), packs, "a refused name sends nothing");
+        assert!(!dir.join("u.md").exists(), "nor pulls anything");
+
+        for name in ["t--k3x9", "t"] {
+            let mut bare = journal();
+            bare["name"] = "t".into();
+            fs::write(state_path(&dir), serde_json::to_vec(&bare).unwrap()).unwrap();
+            sync_once(&client_for(&mock), name, &dir, &opts(Mode::Mirror)).unwrap();
+            assert_eq!(journal()["name"], "t--k3x9", "a bare journal synced as {name} is named in full after");
+        }
+        let mut wrong = journal();
+        wrong["name"] = "u".into();
+        fs::write(state_path(&dir), serde_json::to_vec(&wrong).unwrap()).unwrap();
+        let err = sync_once(&client_for(&mock), "t", &dir, &opts(Mode::Mirror)).unwrap_err();
+        assert!(err.to_string().contains("synced to fragment 'u', not 't--k3x9'"), "another label's journal still refuses: {err}");
         fs::remove_dir_all(&dir).ok();
     }
 

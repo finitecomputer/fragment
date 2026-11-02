@@ -513,6 +513,12 @@ impl Inner {
                     None => problem(404, &format!("no route {m} {path}")),
                 };
             }
+            // the caller's list (`GET /api/fragments`): every repo, as its
+            // owner's, so a bare label resolves (`Client::fragment`)
+            if path == "/api/fragments" && m == "GET" {
+                let fragments: Vec<Value> = st.repos.values().map(|r| json!({ "name": r.name, "role": "owner" })).collect();
+                return Response::json(200, &json!({ "fragments": fragments }));
+            }
             if path.starts_with("/api/f/") && path.ends_with("/refresh") && m == "POST" {
                 st.refreshes += 1;
                 return Response::json(200, &json!({ "ok": true }));
