@@ -440,7 +440,32 @@ export async function billingSections(helpers, ledger, mine, back) {
         : null;
     // the balance: below zero, what is owed (a paid call is charged after it, so one can go past zero)
     const balance = ledger.balanceMicros;
-    billing.append(line("Credit this month", balance < 0 ? `${usd(-balance)} owed` : `${usd(balance)} left`, topUp));
+    const credit = line("Credit this month", balance < 0 ? `${usd(-balance)} owed` : `${usd(balance)} left`, topUp);
+    credit.dataset.credit = "";
+    // a bar of this month's included credit, filling as it is used: a
+    // charge draws included credit before bought credit (crates/core/src/
+    // ledger.rs), so the bar is full once only bought credit, or a debt, is
+    // left. None where no credit is included (a plan that grants none).
+    const granted = ledger.includedGrantedMicros ?? 0;
+    if (granted > 0) {
+      const owed = balance < 0;
+      const used = owed ? granted : Math.min(granted, Math.max(0, granted - (ledger.includedMicros ?? 0)));
+      const bought = ledger.purchasedMicros ?? 0;
+      const said = `${usd(used)} of ${usd(granted)} used` + (bought > 0 ? ` · ${usd(bought)} of bought credit left` : "");
+      // spans: the row is a <p> when it has no button
+      const bar = el("span", owed ? "credit-bar owed" : "credit-bar");
+      bar.setAttribute("role", "progressbar");
+      bar.setAttribute("aria-label", "Included credit used this month");
+      bar.setAttribute("aria-valuemin", "0");
+      bar.setAttribute("aria-valuemax", String(granted));
+      bar.setAttribute("aria-valuenow", String(used));
+      bar.setAttribute("aria-valuetext", said);
+      const fill = el("span", "credit-bar-fill");
+      fill.style.width = `${(used / granted) * 100}%`;
+      bar.append(fill);
+      (credit.querySelector(".settings-info") ?? credit).append(bar, el("span", "credit-said muted", said));
+    }
+    billing.append(credit);
   }
   if (!alone) return org ? [billing, orgSection(org, offer, mine.pays)] : [billing];
   // an admin alone buys seats for others, where something is sold
