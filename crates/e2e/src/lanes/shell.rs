@@ -3228,8 +3228,8 @@ fn update_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
     let said = b.eval(page, "document.getElementById('computer-notices').innerText")?;
     let _ = b.screenshot(page, &shots.join("computer-update.png"));
     s.ok(
-        "an update is shown at once, with no reload: an update is ready, Restart (about a minute, chats and work kept; or by itself at its next sleep), and Later",
-        r.status == 200 && told && !running.is_empty() && latest != running && said.as_str().is_some_and(|t| t.contains("about a minute; your chats and work are kept") && t.contains("the next time your computer sleeps")),
+        "an update is shown at once, with no reload: an update is ready, Restart (chats and work kept, no time promised; or by itself at its next sleep), and Later",
+        r.status == 200 && told && !running.is_empty() && latest != running && said.as_str().is_some_and(|t| t.contains("Restart to get it; your chats and work are kept") && !t.contains("minute") && t.contains("the next time your computer sleeps")),
         json!({ "said": said, "view": r.body }),
     );
     // a read of it failing meanwhile (#437): what the last one said stays
