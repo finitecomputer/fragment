@@ -417,16 +417,19 @@ pub const ANSWER_LINES_MAX: usize = 512;
 /// fetches or rebuilds again (a package manager's downloads, a browser's
 /// caches), so a save keeps the person's work and state, not gigabytes the
 /// computer fetches again: a computer's saves grew past its disk
-/// (2026-11-03). Each a pattern under a home (Hermes', the desktop's
-/// terminal's; and each agent's, its terminal's `~` in its work) or a
-/// browser profile (any of Hermes' home, each agent's own in its work, and
-/// one under an agent's `~/.config`), anchored to `/data` (the platform
-/// applies those under `/work/` to the work's own save), a trailing `/` a
-/// directory, `**` any depth (the SDK's exclude reads them as gitignore
-/// does), a space as `?` (the platform's patterns take no space). Named,
-/// not all of `.cache`: some of it is state (a Hugging Face token is
-/// `.cache/huggingface/token`). A person's own folders in their work are
-/// never matched: each pattern is under a home or a browser profile.
+/// (2026-11-03). Only exact, known places: a cache directory of a home
+/// (Hermes', the desktop's terminal's; each agent's, its terminal's `~` in
+/// its work), and the caches inside a browser's own profile directory
+/// (Chromium's or Chrome's under such a home, each agent's own browser
+/// profile), at its top or one profile down, never deeper and never `**`:
+/// a folder of a person's that happens to be called `Cache` is theirs, and
+/// when in doubt a save keeps it (a cache missed costs disk; a folder
+/// wrongly left out loses work). Anchored to `/data` (the platform applies
+/// those under `/work/` to the work's own save), a trailing `/` a
+/// directory, `*` one name, a space as `?` (the platform's patterns take
+/// no space). Named, never all of `.cache`: some of it is state (a Hugging
+/// Face token is `.cache/huggingface/token`).
+pub const HOMES: [&str; 2] = ["/hermes/", "/work/*/home/"];
 pub const HOME_CACHES: [&str; 13] = [
     ".cache/pip/",
     ".cache/uv/",
@@ -442,9 +445,13 @@ pub const HOME_CACHES: [&str; 13] = [
     ".npm/_cacache/",
     ".npm/_npx/",
 ];
-pub const BROWSER_CACHES: [&str; 9] = ["Cache/", "Code?Cache/", "GPUCache/", "GrShaderCache/", "ShaderCache/", "DawnGraphiteCache/", "DawnWebGPUCache/", "Service?Worker/CacheStorage/", "component_crx_cache/"];
-pub const HOMES: [&str; 2] = ["/hermes/", "/work/*/home/"];
-pub const BROWSERS: [&str; 3] = ["/hermes/**/", "/work/*/browser-profile/**/", "/work/*/home/.config/**/"];
+/// A browser's own profile directories (its user data directory): under
+/// each home, Chromium's and Chrome's; each agent's own (`browser-profile`
+/// in its work: boot/src/main.rs, `work_dirs`).
+pub const BROWSERS: [&str; 5] = ["/hermes/.config/chromium/", "/hermes/.config/google-chrome/", "/work/*/browser-profile/", "/work/*/home/.config/chromium/", "/work/*/home/.config/google-chrome/"];
+/// What in one is a cache: a profile's (`Default`, `Profile 1`: one name
+/// down), or the whole directory's.
+pub const BROWSER_CACHES: [&str; 10] = ["*/Cache/", "*/Code?Cache/", "*/GPUCache/", "*/DawnGraphiteCache/", "*/DawnWebGPUCache/", "*/Service?Worker/CacheStorage/", "GrShaderCache/", "ShaderCache/", "GraphiteDawnCache/", "component_crx_cache/"];
 
 /// Every cache pattern a save leaves out: each home's tools', then each
 /// browser profile's.
@@ -513,6 +520,67 @@ pub fn answer(data: &Path, copies: &[Copied]) -> String {
 mod tests {
     use super::*;
 
+    /// The patterns as the platform's save reads them (gitignore, relative to
+    /// `/data`, a `?` a space): whether `path` (under `/data`, a file) is
+    /// left out.
+    fn left_out_by(patterns: &[String], path: &str) -> bool {
+        let mut g = ignore::gitignore::GitignoreBuilder::new("/data");
+        for p in patterns {
+            g.add_line(None, p).expect("a gitignore line");
+        }
+        let g = g.build().expect("the matcher");
+        g.matched_path_or_any_parents(Path::new("/data").join(path.trim_start_matches('/')), false).is_ignore()
+    }
+
+    /// Goal (Codex on #1010: a pattern under a whole home left out a
+    /// person's project folder named `Cache`): the caches a save leaves out
+    /// are only known caches in exact places. When in doubt a save keeps it.
+    /// Valid (each kind of cache, in each home and browser profile, goes)
+    /// and invalid (a person's own `Cache` or `Code Cache` anywhere, an
+    /// app's state under `.config`, a token in `.cache`, a browser's cookies
+    /// and databases, the work's own folders stay), matched as gitignore does.
+    #[test]
+    fn a_save_leaves_out_known_caches_and_nothing_of_a_persons() {
+        let patterns = caches();
+        for gone in [
+            "hermes/.cache/pip/http/a",
+            "hermes/.cache/huggingface/hub/models--x/blob",
+            "hermes/.npm/_cacache/content-v2/x",
+            "hermes/.config/chromium/Default/Cache/Cache_Data/data_0",
+            "hermes/.config/chromium/Profile 1/Code Cache/js/x",
+            "hermes/.config/chromium/GrShaderCache/data_1",
+            "hermes/.config/google-chrome/Default/Service Worker/CacheStorage/x",
+            "work/juniper--k3x9/home/.cache/uv/archive/x",
+            "work/juniper--k3x9/browser-profile/Default/Cache/Cache_Data/x",
+            "work/juniper--k3x9/browser-profile/Default/GPUCache/x",
+            "work/juniper--k3x9/browser-profile/component_crx_cache/x",
+            "work/juniper--k3x9/home/.config/chromium/Default/Code Cache/wasm/x",
+        ] {
+            assert!(left_out_by(&patterns, gone), "a cache: {gone}");
+        }
+        for kept in [
+            "hermes/projects/demo/Cache/report.csv",
+            "hermes/projects/demo/Code Cache/notes.md",
+            "hermes/Cache/x",
+            "hermes/.config/someapp/Cache/state.json",
+            "hermes/.config/someapp/Default/Cache/state.json",
+            "hermes/.config/chromium/Default/Cookies",
+            "hermes/.config/chromium/Default/Service Worker/Database/x",
+            "hermes/.config/chromium/Default/Extensions/x/Cache/y",
+            "hermes/.cache/huggingface/token",
+            "hermes/state.db",
+            "work/juniper--k3x9/project/Cache/mine.txt",
+            "work/juniper--k3x9/project/Code Cache/mine.txt",
+            "work/juniper--k3x9/project/node_modules/pkg/index.js",
+            "work/juniper--k3x9/home/.config/someapp/Cache/state.json",
+            "work/juniper--k3x9/home/projects/Cache/x",
+            "work/juniper--k3x9/browser-profile/Default/Cookies",
+            "work/juniper--k3x9/tmp/scratch.bin",
+        ] {
+            assert!(!left_out_by(&patterns, kept), "a person's, or state, kept: {kept}");
+        }
+    }
+
     /// Goal (2026-11-03: saves grew past a computer's disk): a hold's answer
     /// names its copies, then the caches a save leaves out, then Claude
     /// Code's versions but the one it runs; never the one it runs, nor any
@@ -536,8 +604,7 @@ mod tests {
         assert_eq!(lines[..4], ["/hermes/state.db", "/hermes/state.db-wal", "/hermes/state.db-shm", "/hermes/state.db-journal"]);
         let caches = caches();
         assert_eq!(caches.len(), HOMES.len() * HOME_CACHES.len() + BROWSERS.len() * BROWSER_CACHES.len());
-        assert!(caches.contains(&"/hermes/.cache/pip/".to_string()) && caches.contains(&"/work/*/home/.npm/_cacache/".to_string()) && caches.contains(&"/work/*/browser-profile/**/Code?Cache/".to_string()));
-        assert!(caches.iter().all(|c| HOMES.iter().chain(BROWSERS.iter()).any(|root| c.starts_with(root))), "each under a home or a browser profile, never a person's own folder");
+        assert!(caches.iter().all(|c| !c.contains("**")), "no pattern reaches any depth");
         assert_eq!(lines[4..4 + caches.len()], caches);
         assert_eq!(lines[4 + caches.len()..], [format!("/{CLAUDE_VERSIONS}/2.0.29"), format!("/{CLAUDE_VERSIONS}/2.0.30")]);
         assert!(!said.contains("2.0.31"), "never the version it runs");
