@@ -291,17 +291,23 @@ export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, 
     return label;
   }
   // ---- another agent (Paul, 2026-10-30): its name and role, and what it
-  // runs on (FIN-250: Hermes, or Claude Code, chosen here only), then it is
-  // made as the first was, in its own chat (onboarding.js `addAgent`),
-  // which opens. None past what one computer runs. One button, Add agent,
-  // opens its fields; Cancel folds them again, emptied. ----
-  function addAgentForm() {
-    if (agents().size >= AGENTS_MAX) return [];
-    const open = el("button", "quiet agent-add-open");
-    open.type = "button";
-    open.append(icon("plus"), "Add agent");
+  // runs on (FIN-250: Hermes, or Claude Code, chosen here only), asked in a
+  // dialog New agent opens; then it is made as the first was, in its own
+  // chat (onboarding.js `addAgent`), which opens at once for the making's
+  // steps. Asked, the dialog says it is on its way and closes as that chat
+  // opens (Settings hidden), a moment after it said so at the least; a
+  // making that fails before its chat brings the form back, saying why.
+  // None past what one computer runs. ----
+  const CONFIRMED_MS = 1200;
+  let newAgent = null;
+  function newAgentDialog() {
+    if (newAgent?.isConnected) return newAgent;
+    const dialog = el("dialog", "rename-agent agent-dialog");
+    dialog.id = "new-agent";
+    dialog.setAttribute("aria-labelledby", "new-agent-title");
     const form = el("form", "agent-add");
-    form.hidden = true;
+    const title = el("h2", null, "New agent");
+    title.id = "new-agent-title";
     const name = el("input", "agent-add-name");
     name.type = "text";
     name.maxLength = 48;
@@ -312,51 +318,119 @@ export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, 
     role.placeholder = "e.g. dev";
     // its runtime, as the bridge reads it (agent.json `runtime`; none, Hermes)
     const runs = el("select", "agent-model agent-add-runtime");
-    for (const [value, text] of [["hermes", "Hermes"], ["claude", "Claude Code"]]) {
-      const o = el("option", null, text);
-      o.value = value;
-      runs.append(o);
-    }
-    const add = el("button", "quiet agent-add-submit", "Add agent");
-    add.type = "submit";
-    const cancel = el("button", "quiet", "Cancel");
-    cancel.type = "button";
-    const said = el("p", "muted agent-face-said");
-    said.hidden = true;
-    open.onclick = () => {
-      open.hidden = true;
-      form.hidden = false;
-      name.focus();
-    };
-    cancel.onclick = () => {
-      form.reset();
-      form.hidden = said.hidden = true;
-      open.hidden = false;
-      open.focus();
-    };
-    form.onsubmit = async (event) => {
-      event.preventDefault();
-      if (!name.value.trim()) return name.focus();
-      add.disabled = true;
-      // made here, its chat opens when it is (onboarding.js `creatingAgent`)
-      add.textContent = "Adding…";
-      said.hidden = true;
-      try {
-        await addAgent({ name: name.value.trim(), role: role.value.trim(), runtime: runs.value });
-      } catch (e) {
-        said.textContent = e.message;
-        said.hidden = false;
-      } finally {
-        add.disabled = false;
-        add.textContent = "Add agent";
-      }
-    };
+    for (const [value, text] of [["hermes", "Hermes"], ["claude", "Claude Code"]]) runs.append(modelOption(value, text));
     const fields = el("div", "agent-fields");
     fields.append(settingLabel("Name", name), settingLabel("Role", role), settingLabel("Runs on", runs));
-    const buttons = el("div", "settings-actions agent-add-buttons");
+    const error = el("p", "form-error");
+    error.setAttribute("role", "alert");
+    error.hidden = true;
+    const cancel = el("button", null, "Cancel");
+    cancel.type = "button";
+    cancel.onclick = () => dialog.close();
+    const add = el("button", "agent-add-submit", "Add agent");
+    add.type = "submit";
+    const buttons = el("div", "rename-actions");
     buttons.append(cancel, add);
-    form.append(fields, buttons);
-    return [open, form, said];
+    form.append(title, fields, error, buttons);
+    // its confirmation, in the form's place
+    const done = el("div", "agent-dialog-done");
+    done.setAttribute("role", "status");
+    done.hidden = true;
+    const mark = el("span", "agent-dialog-check");
+    mark.append(icon("check"));
+    const doneTitle = el("h2");
+    done.append(mark, doneTitle, el("p", null, "Its chat opens next, where it says hello."));
+    dialog.append(form, done);
+    const asking = () => {
+      form.hidden = false;
+      done.hidden = true;
+    };
+    dialog.addEventListener("close", () => {
+      form.reset();
+      error.hidden = true;
+      asking();
+    });
+    form.onsubmit = async (event) => {
+      event.preventDefault();
+      const called = name.value.trim();
+      if (!called) return name.focus();
+      const asked = { name: called, role: role.value.trim(), runtime: runs.value };
+      error.hidden = true;
+      form.hidden = true;
+      done.hidden = false;
+      doneTitle.textContent = `${called} is on its way`;
+      const shown = Date.now();
+      const page = document.getElementById("settings-page");
+      const opened = new Promise((resolve) => {
+        if (page.hidden) return resolve();
+        const watch = new MutationObserver(() => page.hidden && (watch.disconnect(), resolve()));
+        watch.observe(page, { attributes: true, attributeFilter: ["hidden"] });
+      });
+      opened.then(() => setTimeout(() => dialog.open && !done.hidden && dialog.close(), Math.max(0, CONFIRMED_MS - (Date.now() - shown))));
+      try {
+        await addAgent(asked);
+      } catch (e) {
+        // still in Settings, no chat opened: asked again, its words kept, saying why
+        if (!dialog.open) dialog.showModal();
+        asking();
+        name.value = asked.name;
+        role.value = asked.role;
+        runs.value = asked.runtime;
+        error.textContent = e.message;
+        error.hidden = false;
+      }
+    };
+    document.body.append(dialog);
+    newAgent = dialog;
+    return dialog;
+  }
+  function addAgentForm() {
+    if (agents().size >= AGENTS_MAX) return [];
+    const open = el("button", "quiet agent-add-open");
+    open.type = "button";
+    open.append(icon("plus"), "New agent");
+    open.onclick = () => {
+      const dialog = newAgentDialog();
+      dialog.showModal();
+      dialog.querySelector(".agent-add-name").focus();
+    };
+    return [open];
+  }
+  // ---- an agent's settings, edited in a dialog Edit opens: Settings shows
+  // what they are, each its label above it, as text; its fields (each
+  // written as it changes, said under them) are kept in its card, unseen,
+  // and lent to the dialog while it is open ----
+  let editing = null;
+  function editDialog() {
+    if (editing?.dialog.isConnected) return editing;
+    const dialog = el("dialog", "rename-agent agent-dialog");
+    dialog.id = "edit-agent";
+    dialog.setAttribute("aria-labelledby", "edit-agent-title");
+    const form = el("form");
+    form.method = "dialog";
+    const title = el("h2");
+    title.id = "edit-agent-title";
+    const slot = el("div", "agent-dialog-fields");
+    const done = el("button", null, "Done");
+    done.type = "submit";
+    const buttons = el("div", "rename-actions");
+    buttons.append(done);
+    form.append(title, slot, buttons);
+    dialog.append(form);
+    document.body.append(dialog);
+    editing = { dialog, title, slot };
+    return editing;
+  }
+  // what an agent's fields hold, as text: each shown field's label and its
+  // value (a pick's option, both of a mode's picks), none said so
+  function summaryOf(fields) {
+    return [...fields.querySelectorAll(":scope > .agent-model-label")].filter((l) => !l.hidden).map((l) => {
+      const shown = [...l.querySelectorAll("input, select")].filter((c) => !c.hidden);
+      const value = shown.map((c) => (c.tagName === "SELECT" ? c.selectedOptions[0]?.textContent ?? "" : c.value.trim())).filter(Boolean).join(" · ");
+      const item = el("div", "agent-summary-item");
+      item.append(el("dt", "settings-key", l.querySelector(".settings-key")?.textContent ?? ""), el("dd", value ? null : "muted", value || "None"));
+      return item;
+    });
   }
   function agentSettings(a, row, modeled) {
     const box = el("div", "agent-setting");
@@ -373,7 +447,33 @@ export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, 
     const picks = [roleField(a, said), ...modelPickers(a, modeled, read, write, said), ...claudePickers(a, read, write, said), ...homePicker(a, said)];
     const fields = el("div", "agent-fields");
     fields.append(...picks);
-    box.append(row, fields, said);
+    const home = el("div", "agent-edit-home");
+    home.hidden = true;
+    home.append(fields, said);
+    const summary = el("dl", "agent-summary");
+    summary.dataset.summaryFor = a.fragment;
+    const summarize = () => summary.replaceChildren(...summaryOf(fields));
+    // drawn again as its fields fill (their reads answer), change, or show
+    new MutationObserver(summarize).observe(fields, { subtree: true, childList: true, attributes: true, attributeFilter: ["hidden"] });
+    fields.addEventListener("change", summarize);
+    read.then(summarize);
+    summarize();
+    const edit = el("button", "quiet", "Edit");
+    edit.type = "button";
+    edit.dataset.editAgent = a.fragment;
+    named(edit, a.fragment, (t) => `Edit ${t}`, "aria-label");
+    edit.onclick = () => {
+      const d = editDialog();
+      named(d.title, a.fragment, (t) => `Edit ${t}`);
+      d.slot.replaceChildren(fields, said);
+      d.dialog.onclose = () => {
+        if (home.isConnected) home.append(fields, said);
+        summarize();
+      };
+      d.dialog.showModal();
+    };
+    row.querySelector(".settings-control")?.prepend(edit);
+    box.append(row, summary, home);
     return box;
   }
   // a pick (`value`) being written (`written`), said under its agent's

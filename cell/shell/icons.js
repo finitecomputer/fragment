@@ -41,6 +41,8 @@ const ICON = {
   // a clock turned back (Lucide's history), and a magnifier (Lucide's search)
   history: [["path", { d: "M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" }], ["path", { d: "M3 3v5h5" }], ["path", { d: "M12 7v5l4 2" }]],
   search: [["circle", { cx: 11, cy: 11, r: 8 }], ["path", { d: "m21 21-4.3-4.3" }]],
+  // Lucide's check
+  check: [["path", { d: "M20 6 9 17l-5-5" }]],
 };
 const SVG_NS = "http://www.w3.org/2000/svg";
 

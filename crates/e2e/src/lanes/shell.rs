@@ -7656,20 +7656,19 @@ fn add_agent_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session:
     let agent_wait = std::time::Duration::from_secs(120);
     b.viewport(page, 1280, 900, false)?;
     b.click(page, "#settings")?;
-    // one button, Add agent, opens its fields
-    let offered = b.until(page, "!!document.querySelector('#settings-page .agent-add-open') && document.querySelector('#settings-page .agent-add').hidden", wait);
+    // one button, New agent, opens its dialog
+    let offered = b.until(page, "!!document.querySelector('#settings-page .agent-add-open') && !document.getElementById('new-agent')?.open", wait);
     b.click(page, "#settings-page .agent-add-open")?;
-    let unfolded = b.until(page, "!document.querySelector('#settings-page .agent-add').hidden && document.querySelector('#settings-page .agent-add-open').hidden", wait);
+    let unfolded = b.until(page, "document.getElementById('new-agent')?.open === true && !document.querySelector('#new-agent .agent-add').hidden", wait);
     // what it runs on: Hermes unless Claude Code is chosen (FIN-250)
-    let runs = b.eval(page, "[...document.querySelectorAll('#settings-page .agent-add-runtime option')].map((o) => [o.value, o.selected])")?;
-    b.eval(page, &fill("#settings-page .agent-add-name", "Wren"))?;
-    b.eval(page, &fill("#settings-page .agent-add-role", "editor"))?;
-    b.eval(page, "(document.querySelector('#settings-page .agent-add').scrollIntoView({ block: 'center' }), true)")?;
+    let runs = b.eval(page, "[...document.querySelectorAll('#new-agent .agent-add-runtime option')].map((o) => [o.value, o.selected])")?;
+    b.eval(page, &fill("#new-agent .agent-add-name", "Wren"))?;
+    b.eval(page, &fill("#new-agent .agent-add-role", "editor"))?;
     let _ = b.screenshot(page, &shots.join("settings-add-agent.png"));
-    b.eval(page, "(document.querySelector('#settings-page .agent-add').requestSubmit(), true)")?;
+    b.eval(page, "(document.querySelector('#new-agent .agent-add').requestSubmit(), true)")?;
     let mut chat = String::new();
     let made = s.eventually(wait, || own_named(api, session, "wren-chat").map(|c| chat = c).is_ok());
-    let opened = made && b.until(page, &format!("location.pathname === '/' && document.getElementById('chat-title').textContent === {} && [...document.querySelectorAll('#frames iframe')].find((f) => !f.hidden)?.dataset.fragment === {}", js(FIRST_CHAT), js(&chat)), wait);
+    let opened = made && b.until(page, &format!("!document.getElementById('new-agent')?.open && location.pathname === '/' && document.getElementById('chat-title').textContent === {} && [...document.querySelectorAll('#frames iframe')].find((f) => !f.hidden)?.dataset.fragment === {}", js(FIRST_CHAT), js(&chat)), wait);
     // its frame opened for the making's steps (its card, gone once it is ready)
     let card = opened && b.eval(page, &format!("[...document.querySelectorAll('#frames iframe')].find((f) => f.dataset.fragment === {})?.dataset.src.includes('setup%3D1') ?? false", js(&chat)))? == true;
     let listed = b.until(page, &format!("({HEROES}).some((h) => h.name === 'Wren' && h.chats.includes({}))", js(&chat)), agent_wait);
