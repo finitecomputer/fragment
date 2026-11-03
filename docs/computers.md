@@ -354,7 +354,10 @@ from a snapshot.
 - **A wake restores the current save**, the newest not found unusable. A
   start whose save will never restore (its archive gone or altered)
   marks it unusable and starts again at once from the one before, with no
-  strike against the computer.
+  strike against the computer. A read of its archive that storage failed
+  (R2 answered an error) is asked again a few times within the restore
+  (`cell/backup-reads.mjs`), since the SDK's shim would fail the whole
+  start on one.
 - **The snapshot is only a cache** of one save on one image (`{id, image,
   save}`): a wake uses it only when `save` is the current save and
   `image` the pinned image's reference, and one that fails or comes up
