@@ -106,6 +106,11 @@ pub fn read_config(project: &Path) -> Result<serde_json::Value> {
     serde_json::from_str(&strip_comments(&text)).with_context(|| format!("parse {}", path.display()))
 }
 
+/// The cell's shim, as a staged copy needs it: `entry.mjs` and each module
+/// it imports from beside it (a deploy runs it from the source tree, so
+/// only a staged copy can miss one: `the_staged_shim_holds_what_it_imports`).
+pub const SHIM_FILES: [&str; 2] = ["entry.mjs", "backup-reads.mjs"];
+
 /// A copy of the built cell project at `dir`: its config (without its
 /// `build` step: a staged copy has no source to build), its shim, and its
 /// `build/`, so a node run from it keeps its state and variables apart from
@@ -131,7 +136,9 @@ pub fn stage_project(dir: &Path) -> Result<PathBuf> {
     config.as_object_mut().context("a wrangler config is an object")?.remove("build");
     absolute_images(&mut config, &from)?;
     fs::write(dir.join("wrangler.jsonc"), serde_json::to_string_pretty(&config)?)?;
-    fs::copy(from.join("entry.mjs"), dir.join("entry.mjs")).context("stage entry.mjs")?;
+    for shim in SHIM_FILES {
+        fs::copy(from.join(shim), dir.join(shim)).with_context(|| format!("stage {shim}"))?;
+    }
     let _ = fs::remove_dir_all(dir.join("build"));
     // no build writes among the files as they are copied
     let reading = built::reading(&from.join("build"))?;
@@ -922,6 +929,26 @@ impl Drop for Node {
 
 #[cfg(test)]
 mod tests {
+    /// Goal: a staged cell (dev's, the e2e's) holds every module its shim
+    /// imports from beside it, as the source tree a deploy runs from does
+    /// (a module left out failed the e2e's build: "Could not resolve
+    /// ./backup-reads.mjs"), and nothing it does not. Method: entry.mjs's
+    /// relative imports, read, against `SHIM_FILES`.
+    #[test]
+    fn the_staged_shim_holds_what_it_imports() {
+        let entry = std::fs::read_to_string(super::cell_dir().join("entry.mjs")).expect("entry.mjs reads");
+        let mut beside: Vec<String> = entry
+            .lines()
+            .filter(|l| l.trim_start().starts_with("import ") || l.trim_start().starts_with("export ") && l.contains(" from "))
+            .filter_map(|l| l.split(" from \"./").nth(1))
+            .filter_map(|rest| rest.split('"').next())
+            .filter(|path| !path.starts_with("build/"))
+            .map(str::to_string)
+            .collect();
+        beside.insert(0, "entry.mjs".into());
+        assert_eq!(beside, super::SHIM_FILES, "SHIM_FILES is entry.mjs and what it imports from beside it");
+    }
+
 
     /// A node's subjects, as its Registry keeps them: one issuer's alone,
     /// its other SQLite (metadata) passed over; a node with no state has none.
