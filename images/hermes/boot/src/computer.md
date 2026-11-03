@@ -194,7 +194,10 @@ or browser tool, and stops once no one has used it for ten minutes; it
 starts again when you next need it, your browser's sign-ins kept. Your
 native browser tools and the desktop's Browser icon share one regular
 Chromium and its saved sign-ins. Use those tools for signed-in browsing;
-you do not need to install or launch a second browser. If a site asks for
+you do not need to install or launch a second browser. In your own code,
+Playwright (Python's and Node's) is installed: a plain `chromium.launch()`
+runs this computer's Chromium, without your desktop's sign-ins; no
+`playwright install` is needed. If a site asks for
 human verification, ask your owner to take over this desktop.
 Your owner watches it live from "Its screen" in your chat's menu (in a group
 chat, "<your name>'s screen"), and can take over the mouse and keyboard

@@ -777,6 +777,32 @@ install` work, and what they install is kept.
   links. One made for another Python (or unreadable) is set aside whole
   (`/data/work/python.3.14`), with `requirements.txt` listing what it held
   for `pip install -r`, and a new one is made.
+- **The image's own packages**, in `/opt/fragment/python` (never Hermes'
+  store, whose Python its PM records a digest of), are named in it by a
+  `.pth` the boot writes at each start, after its own: an agent's install
+  of one wins.
+
+### Playwright and small tools in our Hermes image
+
+Paul, 2026-11-02: an agent's own code drives a browser with Playwright,
+on the system Chromium, which passes Cloudflare's bot check where Chrome
+for Testing fails.
+
+- **One release for Python and Node**, pinned in
+  `images/hermes/playwright-requirements.txt`: Python's in the image's own
+  packages (above), Node's global (`require('playwright')` through the
+  login shell's `NODE_PATH`), and the `playwright` CLI. A plain
+  `chromium.launch()` runs `/opt/fragment/bin/chromium`, the desktop's:
+  the image puts it in `PLAYWRIGHT_BROWSERS_PATH` under the names that
+  release looks for, marked installed, so `sudo playwright install
+  chromium` downloads no Chromium.
+  Another release an agent installs looks for its own names, and finds
+  none.
+- **`unzip`, `zip`, `jq` and `sqlite3`**, Debian's. `sqlite3` runs with
+  Debian's SQLite library, not the newer one upstream puts first.
+- The image still carries Hermes' Chrome for Testing
+  (docs/technical-debt-ledger.md, "The Hermes image carries two
+  Chromiums").
 
 ### Claude Code in our Hermes image
 

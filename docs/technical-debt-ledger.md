@@ -139,6 +139,21 @@ unfinished design, not debt.
   `a_regular_browser_is_shared_by_the_desktop_and_tools` and
   `two_agents_two_desktops` pass against it.
 
+## The Hermes image carries two Chromiums
+
+- **Shortcut:** Hermes v0.21.7's browser tools bring Chrome for Testing
+  r1208 (`/opt/hermes/tools/chromium-1208`, 364 MB) beside the system
+  Chromium (`/usr/bin/chromium`, 376 MB), which the desktop, Hermes'
+  browser (desktop_browser.py) and an agent's own Playwright run
+  (images/hermes/Dockerfile). r1208 fails Cloudflare's bot check where
+  the system Chromium passes (Paul's prod agent, 2026-10-28).
+- **Risk:** 364 MB of every image, and a browser an agent could still
+  reach by its path.
+- **Delete when:** the image moves to Hermes v0.22, which drops the
+  browser tools (FIN-305): then the image removes r1208, and the
+  build's Playwright check (both runtimes print a page with the system
+  Chromium) still passes.
+
 ## Each agent's Hermes profile config is rewritten at every boot
 
 - **Shortcut:** Hermes' managed scope cannot carry per-profile settings,

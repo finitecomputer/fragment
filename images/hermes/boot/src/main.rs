@@ -1174,7 +1174,8 @@ for p in sys.argv[1:]:
 /// The computer's Python environment (`python.rs`), made or mended off the
 /// boot's path, which never waits for it (a first start's takes about a
 /// tenth of a second). Offline: uv makes it on the image's Python, and its
-/// pip comes from the wheel that Python bundles (ensurepip's). As the
+/// pip comes from the wheel that Python bundles (ensurepip's); every start
+/// names the image's own packages in it (`python::IMAGE_PACKAGES`). As the
 /// hermes user, so what its agents install is theirs to change.
 fn python_env(ids: Option<(u32, u32)>) {
     let t = Instant::now();
@@ -1224,6 +1225,15 @@ fn python_env(ids: Option<(u32, u32)>) {
     }
     if plan != python::Plan::Keep && ran("pip", as_hermes(&[python::UV, "pip", "install", "--quiet", "--python", &format!("{}/bin/python", python::DIR), "--offline", "--no-index", "--find-links", &wheels, "pip"])).is_none() {
         return;
+    }
+    // the image's own packages, named in it at every start
+    let pth = python::image_pth(dir, &image);
+    let line = format!("{}\n", python::IMAGE_PACKAGES);
+    if std::fs::read_to_string(&pth).ok().as_deref() != Some(line.as_str()) {
+        if let Err(e) = std::fs::write(&pth, &line) {
+            return failed("image packages", e.to_string());
+        }
+        chown(&pth, ids);
     }
     ev!("python.env", { "plan": format!("{plan:?}"), "python": image, "set_aside": set_aside, "ms": t.elapsed().as_millis() as u64 });
 }
