@@ -774,6 +774,8 @@ impl Suite {
             computer_image: Some("stub".into()),
             images: vec![],
             computer_snapshots: false,
+            // a run must not depend on public DNS (devstack::Fleet)
+            computer_internet: false,
             computer_unsaved_max_ms: Some(UNSAVED_MAX_MS),
             providers: Some({
                 let mut rows = swap_providers(Some(self.openrouter.node().oauth()))?;
@@ -823,6 +825,19 @@ impl Suite {
     pub fn crash(&mut self) -> Result<()> {
         anyhow::ensure!(!self.hosted_rules, "the hosted lane crashes no node: a section that does declares Need::Node");
         self.node.take().expect("a running node").crash()
+    }
+
+    /// Has the run's computers that are up drop every query they would
+    /// send public DNS (devstack::containers::drop_public_dns): the sidecars
+    /// dropping, for `public_dns_asked`.
+    pub fn drop_public_dns(&self) -> Result<Vec<String>> {
+        anyhow::ensure!(!self.hosted_rules, "the hosted lane reaches no container: a section that does declares Need::Node");
+        devstack::containers::drop_public_dns(&self.project)
+    }
+
+    /// The queries to public DNS `sidecars` dropped since `drop_public_dns`.
+    pub fn public_dns_asked(&self, sidecars: &[String]) -> Result<u64> {
+        devstack::containers::public_dns_asked(sidecars)
     }
 
     /// Reloads the node's Worker as a deploy does: a new build of its shim
