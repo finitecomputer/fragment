@@ -68,9 +68,14 @@ an image may rely on this:
 - **A start's deadline is fixed** (`START_DEADLINE_MS`, its restore's
   share `RESTORE_MS`), never one that follows a restore's progress: a
   restore moves about 40 MB/s (5.7 GB to ready in 147 s on production,
-  2026-11-02), so its ten and a half minutes hold about 25 GB, more than
-  a computer's 20 GB disk. Any restore that fits the disk fits the
+  2026-11-02), so its nine and a half minutes hold about 22 GB, more
+  than a computer's 20 GB disk. Any restore that fits the disk fits the
   deadline; one that does not fit is set aside, not waited for.
+- **A start owed after its container goes** (a sleep's end with a wake
+  or a restart asked, a crash while wanted, a start that fell back past a
+  bad save) is due at once: the request that saw it go makes it, or, in
+  an alarm, the alarm it asks for, never the rest of the alarm that ran
+  the sleep (see Bounds).
 - **Won't wake**: after `STARTS_FAILED_MAX` failed starts in a row it
   starts no container until its owner asks.
 - **Trying again**: "won't wake" is never for good, since what failed may
@@ -399,8 +404,10 @@ backups get what the rest leaves (`BACKUPS_MS`, 11 minutes 10 seconds).
 That is the most any save can have, so it is fixed, not one that follows
 a save's progress. Saves over 1 GB moved 9 to 156 MB/s on production
 (2026-10-27 to 11-03), so a full disk's save (about 10.8 GB) fits all but
-the slowest 6% of tries, each tried again. So an owner's sleep answers
-within 14 minutes.
+the slowest 6% of tries, each tried again. A start takes an alarm of its
+own: the one start an alarm makes (a retry's, or one owed after a sleep),
+with the alarm's other events, fits 15 minutes (`RESTORE_MS` leaves them
+their minute). So an owner's sleep answers within 14 minutes.
 
 ### The fragment API
 

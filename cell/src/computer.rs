@@ -184,7 +184,10 @@ const MARK_EXEC_MS: i64 = 30_000;
 /// hold, save and unhold, all in one.
 const ALARM_WALL_MS: i64 = 15 * 60_000;
 /// What an alarm's other events take beside those steps (its adopt, a
-/// meter's flush, its owner told), each a call of about a second.
+/// meter's flush, its owner told), each a call of about a second. Kept
+/// free, not enforced: those calls take no bound of their own (the
+/// ledger's `ask`, `principal::tell_changed`), and one that hung would be
+/// ended by the alarm's wall, its step then tried again.
 const ALARM_OTHER_MS: i64 = 60_000;
 /// A save's backups, its records one after the other, answer within this
 /// together, or the save fails (entry.mjs's `Overdue`), as one that says so
@@ -201,9 +204,11 @@ const BACKUPS_MS: i64 = ALARM_WALL_MS - ALARM_OTHER_MS - HOLD_STEPS_MS - MARK_EX
 /// A start's restores, its save's records together, answer within this, or
 /// the start failed (tried again, on the same save): what the start's own
 /// deadline leaves after the waits around them (the container taking an
-/// exec, the image's check, the gate's mark), so a slow restore fails as
-/// itself, saying so, before the lifecycle fails the start unexplained.
-const RESTORE_MS: i64 = START_DEADLINE_MS - EXEC_READY_MS - CHECK_EXEC_MS - MARK_EXEC_MS;
+/// exec, the image's check, the gate's mark) and an alarm's other events,
+/// so a slow restore fails as itself, saying so, before the lifecycle
+/// fails the start unexplained, and a start fits an alarm of its own (a
+/// retry's, or one owed after a sleep: `Lifecycle::start_due`).
+const RESTORE_MS: i64 = START_DEADLINE_MS - EXEC_READY_MS - CHECK_EXEC_MS - MARK_EXEC_MS - ALARM_OTHER_MS;
 /// A pass of deletes of the records let go of (`forget`) ends within this:
 /// an R2 delete answers in well under a second, and what a pass leaves is
 /// the next save's, as a delete that failed is.
@@ -244,7 +249,8 @@ const _: () = assert!(HOLD_STEPS_MS < HOLD_DEADLINE_MS, "a hold reports before i
 const _: () = assert!(SAVE_STEPS_MS < SAVE_DEADLINE_MS, "a save reports before its deadline, which then only catches a report its isolate lost");
 const _: () = assert!(STOP_STEPS_MS < SLEEP_DEADLINE_MS, "a stop reports before its deadline");
 const _: () = assert!(EXEC_READY_MS + RESTORE_MS + CHECK_EXEC_MS + MARK_EXEC_MS <= START_DEADLINE_MS && ALIVE_MS < START_DEADLINE_MS, "a start's waits fit its deadline");
-const _: () = assert!(RESTORE_MS >= 10 * 60_000, "a restore of a full disk's save (5.9 GB took longer than 165 s) is given ten minutes at least");
+const _: () = assert!(RESTORE_MS >= 9 * 60_000 + 30_000, "a restore of a full disk's save (17 GB at 30 MB/s; 5.7 GB took 147 s) is given nine and a half minutes at least");
+const _: () = assert!(START_DEADLINE_MS <= ALARM_WALL_MS && EXEC_READY_MS + RESTORE_MS + CHECK_EXEC_MS + MARK_EXEC_MS + ALARM_OTHER_MS <= ALARM_WALL_MS, "a start, and an alarm's other events, fit an alarm of its own");
 // an awake save's unhold (`MARK_EXEC_MS`) is within a stop's bound
 const _: () = assert!(SLEEP_STEPS_MS + ALARM_OTHER_MS <= ALARM_WALL_MS, "a sleep's steps, and an alarm's other events, fit the one alarm they run in");
 const _: () = assert!(BACKUPS_MS >= 11 * 60_000, "a full disk's save (10.8 GB at 16.1 MB/s) is given eleven minutes at least");
@@ -442,7 +448,7 @@ impl DurableObject for ComputerCell {
             return Response::ok("");
         }
         if !self.wiped.get() && self.meta(MetaKey::Id).ok().flatten().is_some() {
-            if let Err(e) = self.drive(Event::Alarm).await {
+            if let Err(e) = self.drive_with(Some(Event::Alarm), false).await {
                 console_error!("{{\"computer\":\"alarm\",\"error\":{}}}", json!(e.message));
             }
         }
@@ -820,10 +826,23 @@ impl ComputerCell {
     /// runtime no longer holds open (`keepalives_lost`); with no `first`,
     /// those alone (a keepalive's close).
     async fn drive_after(&self, first: Option<Event>) -> CellResult<Option<String>> {
+        self.drive_with(first, true).await
+    }
+
+    /// `drive_after`, in a request (`asked`) or the DO's alarm. A start its
+    /// events leave due (a sleep's end, a crash, a fallback:
+    /// `Lifecycle::start_due`) a request makes at once, since nothing ends
+    /// a request that waits; an alarm leaves it to the alarm its events
+    /// asked for, an invocation of its own, since an alarm ends at
+    /// `ALARM_WALL_MS` and its sleep's steps took most of this one.
+    async fn drive_with(&self, first: Option<Event>, asked: bool) -> CellResult<Option<String>> {
         let told = self.notices()?;
         // a deploy since its last look is news, told as any change is
         self.look_logged().await;
-        let refused = self.drive_events(first).await;
+        let refused = match self.drive_events(first).await {
+            Ok(refused) if asked && self.lifecycle()?.start_due(js::now_ms()) => self.drive_events(Some(Event::Alarm)).await.map(|again| refused.or(again)),
+            driven => driven,
+        };
         // what its owner is told changed: their open pages read it again
         // (whatever the events did, a step that failed half way included)
         if self.notices().is_ok_and(|now| now != told) {

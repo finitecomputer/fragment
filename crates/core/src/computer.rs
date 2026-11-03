@@ -106,7 +106,8 @@ pub const WONT_WAKE_RETRY_MS: i64 = 30 * 60_000;
 /// save restores it whole first, 5.7 GB in 147 s on the production fleet
 /// (2026-11-02). Three minutes cut a restore of 5.9 GB at 165 s, every
 /// try, so that computer never started again (2026-11-03): a restore is
-/// given ten minutes and more (the cell's `RESTORE_MS`).
+/// given nine and a half minutes (the cell's `RESTORE_MS`, which also
+/// leaves an alarm's other events room: a start made by an alarm fits it).
 pub const START_DEADLINE_MS: i64 = 15 * 60_000;
 /// A sleep's stop (snapshot, signal, five seconds of exit, destroy)
 /// finishes within this, or it is asked again.
@@ -436,7 +437,9 @@ pub struct Lifecycle {
     tabs: u32,
     /// With nothing open, it is held awake until this.
     held_until_ms: i64,
-    /// A wake came while it was going to sleep.
+    /// A start is owed once its container is gone: a wake came while it
+    /// was going to sleep, or something wanted it as it went (`gone`).
+    /// The start it owes comes from an alarm (`start_due`).
     wake_after_sleep: bool,
     /// Starts that failed in a row, and when the next try is due.
     failures: u32,
@@ -658,6 +661,8 @@ impl Lifecycle {
     fn start(&mut self, now_ms: i64, step: &mut Step) {
         self.generation += 1;
         self.retry_at_ms = None;
+        // whatever started it, a start owed is made
+        self.wake_after_sleep = false;
         self.ready = false;
         self.phase = Phase::Starting { generation: self.generation, since_ms: now_ms };
         step.actions.push(Action::Start { generation: self.generation });
@@ -953,9 +958,21 @@ impl Lifecycle {
         self.restarting = false;
         self.failing = None;
         self.save_failures = 0;
-        if std::mem::take(&mut self.wake_after_sleep) || self.wanted(now_ms) {
-            self.start(now_ms, step);
+        // a start owed is due now, made by the alarm that asks for it (or
+        // at once by a request: `start_due`), never in what is left of the
+        // invocation that saw it go: a Durable Object's alarm runs for 15
+        // minutes at most, and a sleep's steps take most of one, as a
+        // failed restore's start does (the cell's `ALARM_WALL_MS`)
+        if self.wake_after_sleep || self.wanted(now_ms) {
+            self.wake_after_sleep = true;
+            self.retry_at_ms = Some(now_ms);
         }
+    }
+
+    /// Whether a start is due at `now_ms` (asleep, its retry's pause or a
+    /// start owed come): an alarm makes it, or a request may at once.
+    pub fn start_due(&self, now_ms: i64) -> bool {
+        matches!(self.phase, Phase::Asleep) && self.retry_at_ms.is_some_and(|at| now_ms >= at)
     }
 
     fn next_alarm(&self) -> Option<i64> {
@@ -1150,9 +1167,10 @@ impl Lifecycle {
                 }
             }
             // its stop signalled it: the stop's own end (`Asleep`) reports
-            // that, so the start after it (a restart's, a wake's) is made by
-            // whatever performs the stop and waits on it (the restart's own
-            // request), never by this report, a request of its own
+            // that, so the start after it (a restart's, a wake's) is owed by
+            // the stop's end, made by whatever performed the stop (the
+            // restart's own request) or the alarm it asks for, never by this
+            // report, a request of its own
             (Phase::Sleeping { generation, .. }, Event::Exited { generation: g }) if g == generation && matches!(self.saving, Some(Saving::Stop { .. })) => {}
             (Phase::Sleeping { generation, .. }, Event::Exited { generation: g }) if g == generation => {
                 // it died as it was held or saved, before the sleep stopped it
@@ -1266,8 +1284,8 @@ impl Lifecycle {
                 }
             }
             (Phase::Asleep, Event::Alarm) => {
-                if self.retry_at_ms.is_some_and(|at| now_ms >= at) {
-                    if self.wanted(now_ms) {
+                if self.start_due(now_ms) {
+                    if self.wake_after_sleep || self.wanted(now_ms) {
                         self.start(now_ms, &mut step);
                     } else {
                         self.retry_at_ms = None;
@@ -2134,6 +2152,15 @@ mod tests {
         generation
     }
 
+    /// The start `s` (applied `at`) owes: none in its own step, which asks
+    /// for an alarm at once; that alarm's step, which makes it.
+    fn owed(l: &mut Lifecycle, s: &Step, at: i64) -> Step {
+        assert!(!s.actions.iter().any(|a| matches!(a, Action::Start { .. })), "never in the invocation that saw it go: {s:?}");
+        assert_eq!(s.alarm_ms, Some(at), "an alarm at once");
+        assert!(l.start_due(at));
+        l.apply(Event::Alarm, at)
+    }
+
     /// Goal: a record wakes a sleeping computer, which then sleeps twenty
     /// minutes after nothing holds it, metering exactly its awake time.
     #[test]
@@ -2221,6 +2248,7 @@ mod tests {
         assert!(matches!(l.phase, Phase::Sleeping { .. }));
         assert!(l.apply(Event::Wake { why: Wake::Record }, T + IDLE_MS + 1_000).actions.is_empty());
         let s = l.apply(Event::Asleep { generation: g1 }, T + IDLE_MS + 5_000);
+        let s = owed(&mut l, &s, T + IDLE_MS + 5_000);
         assert!(s.actions.contains(&Action::Start { generation: g1 + 1 }), "{s:?}");
         // the old generation's late reports are ignored
         for e in [Event::Ready { generation: g1 }, Event::Asleep { generation: g1 }, Event::Exited { generation: g1 }, Event::StartFailed { generation: g1, why: "late".into() }] {
@@ -2228,6 +2256,48 @@ mod tests {
             assert!(l.apply(e, T + IDLE_MS + 6_000).actions.is_empty());
             assert_eq!(l, before);
         }
+    }
+
+    /// Goal (#1020's review): an idle sleep's hold, save and stop take most
+    /// of the alarm that asked for them (a Durable Object's runs 15 minutes
+    /// at most), so the start a wake during it owes is never made in what
+    /// is left: the sleep's end asks for an alarm at once, an invocation of
+    /// its own, and that alarm makes it, though the wake's own hold ran out
+    /// during the save. Valid (owed and made once), the bound (its save as
+    /// long as its backups' bound, 11 minutes and more), replay (a second
+    /// alarm makes no second start). Method: the lifecycle's steps, each
+    /// what one invocation of the DO performs.
+    #[test]
+    fn a_start_owed_after_a_long_sleep_comes_from_an_alarm_of_its_own() {
+        let mut l = Lifecycle::new();
+        let g = started(&mut l, T);
+        let slept = T + IDLE_MS;
+        assert!(l.apply(Event::Alarm, slept).actions.contains(&Action::Sleep { generation: g }), "the idle sleep, in an alarm");
+        // a presence wake as it holds: its hold runs out long before the save ends
+        assert!(l.apply(Event::Wake { why: Wake::Presence }, slept + 1_000).actions.is_empty());
+        let (_, _, seq) = save_asked(&l.apply(Event::Held { generation: g, held: true }, slept + 2_000));
+        let saved = slept + 2_000 + 11 * 60_000;
+        assert!(saved > slept + 1_000 + PREWAKE_MS, "the wake's hold ran out during the save");
+        assert_eq!(l.apply(Event::Saved { generation: g, seq }, saved).actions, vec![Action::Stop { generation: g, saved: true }]);
+        let asleep = saved + 10_000;
+        let s = l.apply(Event::Asleep { generation: g }, asleep);
+        assert!(s.ended.is_some_and(|e| e.by == LifeEnd::Sleep));
+        assert!(!s.actions.iter().any(|a| matches!(a, Action::Start { .. })), "no start in what is left of the sleep's alarm: {s:?}");
+        assert_eq!((s.alarm_ms, l.phase.clone()), (Some(asleep), Phase::Asleep), "an alarm at once");
+        // another event of the same invocation keeps it due, and its alarm
+        let s = l.apply(Event::Closed { socket: Socket::Tab }, asleep);
+        assert!(s.actions.is_empty() && s.alarm_ms == Some(asleep) && l.start_due(asleep), "{s:?}");
+        // the alarm, a fresh invocation, makes it once
+        let s = l.apply(Event::Alarm, asleep + 50);
+        assert_eq!(s.actions, vec![Action::Start { generation: g + 1 }]);
+        assert!(!l.start_due(asleep + 50) && l.apply(Event::Alarm, asleep + 100).actions.is_empty(), "made once");
+        // a request may make it first: a wake at once, and the alarm then nothing
+        let mut l = Lifecycle::new();
+        let g = started(&mut l, T);
+        l.apply(Event::Exited { generation: g }, T + 60_000);
+        assert!(l.start_due(T + 60_000));
+        assert_eq!(l.apply(Event::Wake { why: Wake::Owner }, T + 60_010).actions, vec![Action::Start { generation: g + 1 }]);
+        assert!(l.apply(Event::Alarm, T + 60_020).actions.is_empty(), "the start owed was made");
     }
 
     /// Goal: failed starts are retried with a growing pause, then the
@@ -2314,7 +2384,8 @@ mod tests {
         let mut l = Lifecycle::new();
         let g = started(&mut l, T);
         let s = l.apply(Event::Exited { generation: g }, T + 60_000);
-        assert_eq!(s.actions, vec![Action::Meter { from_ms: T + 3_000, to_ms: T + 60_000 }, Action::Start { generation: g + 1 }]);
+        assert_eq!(s.actions, vec![Action::Meter { from_ms: T + 3_000, to_ms: T + 60_000 }]);
+        assert_eq!(owed(&mut l, &s, T + 60_000).actions, vec![Action::Start { generation: g + 1 }]);
         // once nothing wants it, an exit leaves it asleep
         let mut l = Lifecycle::new();
         let g = started(&mut l, T);
@@ -2463,8 +2534,9 @@ mod tests {
         // SAVE_EVERY_MS) saved, never put to sleep
         assert_eq!(l.apply(Event::Alarm, late - 1).actions, vec![Action::Meter { from_ms: T + 3_000, to_ms: late - 1 }, Action::Hold { generation: g }], "busy, it stays awake");
         let s = l.apply(Event::Exited { generation: g }, late);
-        assert!(s.actions.contains(&Action::Start { generation: g + 1 }), "busy when it died, it starts again: {s:?}");
         assert_eq!(s.ended, Some(Ended { generation: g, by: LifeEnd::Exit, saved: false, at_ms: late, restart: false, quiet: false }));
+        let s = owed(&mut l, &s, late);
+        assert!(s.actions.contains(&Action::Start { generation: g + 1 }), "busy when it died, it starts again: {s:?}");
         // the next life comes up and, its turns ended, is idle: it sleeps
         // once the crash's hold runs out, as after a record
         l.apply(Event::Ready { generation: g + 1 }, late + 3_000);
@@ -2477,6 +2549,7 @@ mod tests {
         l.apply(Event::Opened { socket: Socket::Keepalive }, T + 4_000);
         l.apply(Event::Closed { socket: Socket::Keepalive }, late);
         let s = l.apply(Event::Exited { generation: g }, late);
+        let s = owed(&mut l, &s, late);
         assert!(s.actions.contains(&Action::Start { generation: g + 1 }), "{s:?}");
         // idle when it died, and nothing holding it: it stays asleep
         let mut l = Lifecycle::new();
@@ -2562,6 +2635,7 @@ mod tests {
         let s = l.apply(Event::Wake { why: Wake::Record }, T + 60_000);
         assert_eq!(s.actions, vec![Action::Start { generation: g + 1 }]);
         let s = l.apply(Event::SnapshotFailed { generation: g + 1, why: "no such snapshot".into() }, T + 61_000);
+        let s = owed(&mut l, &s, T + 61_000);
         assert_eq!(s.actions, vec![Action::Start { generation: g + 2 }], "the same wake, from the image, metering nothing");
         assert_eq!(l.failures, 0, "no strike");
         // a replay of it, or one from the start it superseded, changes nothing
@@ -2811,6 +2885,13 @@ mod tests {
             s
         }
 
+        /// The start `s` owes, made by the alarm it asks for (`owed`).
+        fn owed(&mut self, s: &Step) -> Step {
+            assert!(!s.actions.iter().any(|a| matches!(a, Action::Start { .. })), "never in the invocation that saw it go: {s:?}");
+            assert_eq!(s.alarm_ms, Some(self.now), "an alarm at once");
+            self.apply(Event::Alarm)
+        }
+
         /// A wake that comes up: what it restored.
         fn wake(&mut self) -> ComputerRestore {
             let s = self.apply(Event::Wake { why: Wake::Owner });
@@ -2901,6 +2982,7 @@ mod tests {
         // a crash: it comes back from the save before it, a rollback
         let g = c.life.generation();
         let s = c.apply(Event::Exited { generation: g });
+        let s = c.owed(&s);
         let Some(Action::Start { generation }) = s.actions.iter().find(|a| matches!(a, Action::Start { .. })).cloned() else { panic!("{s:?}") };
         let r = c.come_up(generation);
         assert_eq!((r.from, r.after, r.rollback, c.saves.rollbacks()), (RestoreSource::Backup, Some(LifeEnd::Exit), true, 1), "{r:?}");
@@ -2947,6 +3029,7 @@ mod tests {
         assert_eq!(c.saves.start_from(generation), Some(RestoreSource::Snapshot), "its exit now is the start's own failure");
         assert_eq!(c.saves.snapshot_failed().map(|s| s.id), Some("s1".into()));
         let s = c.apply(Event::SnapshotFailed { generation, why: "expired".into() });
+        let s = c.owed(&s);
         let Some(Action::Start { generation: next }) = s.actions.first().cloned() else { panic!("{s:?}") };
         assert_eq!(c.saves.plan(Some(IMAGE)), Plan::Backup);
         let r = c.come_up(next);
@@ -3578,6 +3661,7 @@ mod tests {
         let s = l.apply(Event::Wake { why: Wake::Record }, T);
         let Some(Action::Start { generation: g }) = s.actions.first().cloned() else { panic!("{s:?}") };
         let s = l.apply(Event::SnapshotFailed { generation: g, why: "its guest did not read its view within 45 s".into() }, T + ALIVE_MS + 1_000);
+        let s = owed(&mut l, &s, T + ALIVE_MS + 1_000);
         assert_eq!((s.actions, l.failures), (vec![Action::Start { generation: g + 1 }], 0), "the same wake, from the image and the save, no strike");
         let s = l.apply(Event::SnapshotFailed { generation: g + 1, why: "dead again".into() }, T + 2 * ALIVE_MS);
         assert_eq!((s.actions.len(), l.failures, l.phase.clone()), (0, 1, Phase::Asleep), "a second in the wake is a strike, tried again after a pause");
@@ -3616,6 +3700,7 @@ mod tests {
             let older = c.saves.unusable(bad);
             assert!(older);
             let s = c.apply(Event::RestoreFailed { generation: g, why: format!("{bad}'s archive is corrupt"), older });
+            let s = c.owed(&s);
             assert_eq!(s.actions, vec![Action::Start { generation: g + 1 }], "at once, from the save before it");
             assert_eq!(c.life.failures, 1, "no strike");
             assert_eq!(c.saves.current().map(|s| s.id.as_str()), Some(next));
@@ -3640,6 +3725,7 @@ mod tests {
         l.apply(Event::Wake { why: Wake::Owner }, T);
         for i in 0..SAVES_KEPT as u64 {
             let s = l.apply(Event::RestoreFailed { generation: i + 1, why: "x".into(), older: true }, T + i as i64);
+            let s = owed(&mut l, &s, T + i as i64);
             assert_eq!(s.actions, vec![Action::Start { generation: i + 2 }]);
         }
         let s = l.apply(Event::RestoreFailed { generation: SAVES_KEPT as u64 + 1, why: "x".into(), older: true }, T + 10);
@@ -3669,6 +3755,7 @@ mod tests {
         assert_eq!(l.apply(Event::Saved { generation: g, seq }, T + 12_000).actions, vec![Action::Stop { generation: g, saved: true }]);
         let s = l.apply(Event::Asleep { generation: g }, T + 15_000);
         assert_eq!(s.ended, Some(Ended { generation: g, by: LifeEnd::Sleep, saved: true, at_ms: T + 15_000, restart: true, quiet: false }), "saved: no rollback");
+        let s = owed(&mut l, &s, T + 15_000);
         assert!(s.actions.contains(&Action::Start { generation: g + 1 }), "then a start, at once: {s:?}");
         l.apply(Event::Ready { generation: g + 1 }, T + 18_000);
         assert!(!l.restarting && matches!(l.phase, Phase::Awake { .. }));
@@ -3738,7 +3825,8 @@ mod tests {
             }
             let s = l.apply(Event::Asleep { generation: g }, T + 12_300);
             assert_eq!(s.ended, Some(Ended { generation: g, by: LifeEnd::Sleep, saved, at_ms: T + 12_300, restart: true, quiet: true }));
-            assert!(s.actions.contains(&Action::Start { generation: g + 1 }), "the stop's end starts it, in the restart's request: {s:?}");
+            let s = owed(&mut l, &s, T + 12_300);
+            assert!(s.actions.contains(&Action::Start { generation: g + 1 }), "the stop's end owes it, made in the restart's request: {s:?}");
             // a report of the stopped one, late, changes nothing
             let before = l.clone();
             assert!(l.apply(Event::Exited { generation: g }, T + 12_400).actions.is_empty() && l == before);
@@ -3762,6 +3850,7 @@ mod tests {
         l.apply(Event::Restart { generation: g }, T + 10_000);
         let s = l.apply(Event::Exited { generation: g }, T + 10_200);
         assert_eq!(s.ended.map(|e| e.by), Some(LifeEnd::Exit));
+        let s = owed(&mut l, &s, T + 10_200);
         assert!(s.actions.contains(&Action::Start { generation: g + 1 }), "{s:?}");
         assert!(l.apply(Event::Held { generation: g, held: true }, T + 10_500).actions.is_empty(), "its hold's late answer is nothing");
     }
@@ -3797,6 +3886,7 @@ mod tests {
         assert!(matches!(&s.note, SaveNote::Says(why) if why.contains("restart could not save")), "{:?}", s.note);
         let s = c.apply(Event::Asleep { generation: g });
         assert!(s.ended.is_some_and(|e| e.restart && !e.saved && e.by == LifeEnd::Sleep), "{s:?}");
+        let s = c.owed(&s);
         let Some(Action::Start { generation }) = s.actions.iter().find(|a| matches!(a, Action::Start { .. })).cloned() else { panic!("it starts again: {s:?}") };
         let r = c.come_up(generation);
         assert_eq!((r.save.as_deref(), r.rollback), (Some("b1"), true), "back to its last save: {r:?}");
@@ -3895,6 +3985,7 @@ mod tests {
         let g = r.generation;
         let s = c.apply(Event::Exited { generation: g });
         let crashed_at = c.now;
+        let s = c.owed(&s);
         let Some(Action::Start { generation }) = s.actions.iter().find(|a| matches!(a, Action::Start { .. })).cloned() else { panic!("{s:?}") };
         let pending = ComputerNotice::WentBack { life: g, cause: LossCause::Crash, ended_at: Some(crashed_at), pending: true, save: Some(1), saved_at, at: None };
         assert_eq!(went_back(&c), Some(pending), "starting again: it goes back to b1");
@@ -3927,6 +4018,7 @@ mod tests {
         let Some(Action::Start { generation }) = s.actions.first().cloned() else { panic!("{s:?}") };
         assert!(c.saves.unusable("b3"));
         let s = c.apply(Event::RestoreFailed { generation, why: "corrupt".into(), older: true });
+        let s = c.owed(&s);
         let Some(Action::Start { generation }) = s.actions.first().cloned() else { panic!("{s:?}") };
         let r = c.come_up(generation);
         assert!(r.rollback);
@@ -4276,6 +4368,7 @@ mod tests {
         c.saves.saved(g, rec("b2"), c.now, held);
         c.apply(Event::Saved { generation: g, seq });
         let s = c.apply(Event::Asleep { generation: g });
+        let s = c.owed(&s);
         let Some(Action::Start { generation }) = s.actions.iter().find(|a| matches!(a, Action::Start { .. })).cloned() else { panic!("{s:?}") };
         assert_eq!(update(&c), None, "starting: the start under way runs the newest");
         c.come_up(generation);
@@ -4588,7 +4681,8 @@ mod tests {
                     last_work_ms = i64::MIN;
                 }
                 if busy_crash && !matches!(l.phase, Phase::Failed { .. }) {
-                    assert!(s.actions.iter().any(|a| matches!(a, Action::Start { .. })), "busy when it died, it starts again (seed {seed0}): {l:?}");
+                    // made by the alarm it asks for at once
+                    assert!(l.start_due(now) && s.alarm_ms == Some(now), "busy when it died, it starts again (seed {seed0}): {l:?}");
                 }
                 if start_failed {
                     assert_eq!(l.failures, failures_before + 1, "a failed start is one strike (seed {seed0}): {l:?}");
