@@ -326,7 +326,9 @@ from a snapshot.
 - **What the save leaves out.** `held` may name, one per line, what the
   save of `/data` leaves out: gitignore patterns relative to `/data`, the
   files the guest copied under the hold to names the save keeps, so a hot
-  copy of one is never what a wake restores. Bounds and the patterns'
+  copy of one is never what a wake restores, and caches a tool fetches
+  again. Those under `/work/` its work's own save leaves out, relative to
+  it (`fragment_core::computer::work_left_out`). Bounds and the patterns'
   alphabet are `fragment_core::computer::left_out`'s. An empty answer
   leaves nothing out; one the DO refuses saves the guest whole.
 - **A hold not answered.** Until it answers, a guest may say why in
@@ -344,7 +346,8 @@ from a snapshot.
   scratch), and the rest of `/data` is the guest's own state (ours:
   Hermes' home and the bridge's state). Each is a `DirectoryBackup`
   record of its own, restored together, `/data` first; the work's record
-  leaves nothing out. The DO makes `/data/work` with its hold, so it
+  leaves out only the caches the guest named in it. The DO makes
+  `/data/work` with its hold, so it
   always exists to save.
 - With `RESTORE_PENDING=1`, the image waits for `/run/computer/restored`
   before it reads `/data`. Without it, `/data` is ready at start (a
@@ -666,7 +669,11 @@ What our Hermes image guarantees beyond the contract:
   of its own, copies every SQLite database outside the work with SQLite's
   online backup, and names exactly those as left out; a database it
   cannot copy (made after the copy, or held locked) is saved hot. Its
-  `computer-check` puts the copies back and checks each.
+  `computer-check` puts the copies back and checks each. It also names
+  the caches a save leaves out (`held::caches`: package managers'
+  downloads under Hermes' home and each agent's, a browser profile's
+  caches, never a person's own folder) and Claude Code's versions but the
+  one it runs, as many as fit beside its copies.
 - **What changes under the hold.** Hermes' gateway still writes on its
   own timers while held, each file replaced whole or appended, so a save
   holds a whole version of it; nothing else under `/data` changes (the

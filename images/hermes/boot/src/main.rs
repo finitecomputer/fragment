@@ -393,7 +393,7 @@ async fn copy_databases(ids: Option<(u32, u32)>) -> Result<Copies, String> {
 /// `held`, whole: exactly what was copied, which the save leaves out.
 fn write_answer(manifest: &held::Manifest) -> std::io::Result<()> {
     let tmp = format!("{}.tmp", held::HELD);
-    std::fs::write(&tmp, held::answer(Path::new(held::DATA), &manifest.copies))?;
+    std::fs::write(&tmp, held::answer_with_caches(Path::new(held::DATA), &manifest.copies))?;
     std::fs::rename(&tmp, held::HELD)
 }
 

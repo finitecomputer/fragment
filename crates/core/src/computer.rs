@@ -1408,6 +1408,16 @@ pub fn left_out(answer: &str) -> Result<Vec<String>, String> {
 }
 
 /// What the DO keeps of a guest's word on a hold it has not answered.
+/// The patterns of a held guest's answer (`left_out`, anchored to `/data`)
+/// that its work's own save leaves out, relative to its work (`/data/work`):
+/// those under `/work/`, that prefix cut (a cache under an agent's home or
+/// its browser's profile). `/data`'s own save leaves its work out whole, so
+/// they change nothing there. A pattern of `**` at its top, which could
+/// reach anything, is never one: the work's save is the person's.
+pub fn work_left_out(left_out: &[String]) -> Vec<String> {
+    left_out.iter().filter_map(|p| p.strip_prefix("/work/")).filter(|p| !p.is_empty() && !p.starts_with("**")).map(|p| format!("/{p}")).collect()
+}
+
 pub const UNHELD_MAX_BYTES: usize = 1024;
 
 /// What a guest says of a hold it has not answered (`/run/computer/unheld`,
@@ -2657,6 +2667,17 @@ mod tests {
         // once b0's delete worked it is not named again
         s.forgot("b0");
         assert_eq!(ids(&s), ["b3", "b2", "b1"]);
+    }
+
+    /// Goal (2026-11-03: saves grew past a computer's disk, caches in its
+    /// agents' homes among them): the work's own save leaves out what the
+    /// held guest named under `/work/`, relative to the work; nothing else
+    /// it named, and never a pattern that could reach all of it.
+    #[test]
+    fn the_work_leaves_out_what_its_guest_named_in_it() {
+        let named: Vec<String> = ["/hermes/state.db", "/work/*/home/.cache/pip/", "/work/*/browser-profile/**/Code?Cache/", "/work/", "/work/**/x", "/workshop/a", "/hermes/.cache/uv/"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(work_left_out(&named), ["/*/home/.cache/pip/", "/*/browser-profile/**/Code?Cache/"]);
+        assert!(work_left_out(&[]).is_empty());
     }
 
     /// Goal (P3, decision 19): a snapshot is of the image its start ran, so

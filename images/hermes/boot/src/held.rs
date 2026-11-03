@@ -409,6 +409,89 @@ pub fn nameable(data: &Path, db: &Path) -> bool {
     !rel.is_empty() && rel.len() + 1 + "-journal".len() <= LINE_MAX_BYTES && rel.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-/".contains(&b))
 }
 
+/// The patterns an answer holds at most: the platform refuses one past
+/// this and saves the guest whole (fragment_core::computer::LEFT_OUT_MAX).
+pub const ANSWER_LINES_MAX: usize = 512;
+
+/// What a save leaves out beside the databases it copied: caches a tool
+/// fetches or rebuilds again (a package manager's downloads, a browser's
+/// caches), so a save keeps the person's work and state, not gigabytes the
+/// computer fetches again: a computer's saves grew past its disk
+/// (2026-11-03). Each a pattern under a home (Hermes', the desktop's
+/// terminal's; and each agent's, its terminal's `~` in its work) or a
+/// browser profile (any of Hermes' home, each agent's own in its work, and
+/// one under an agent's `~/.config`), anchored to `/data` (the platform
+/// applies those under `/work/` to the work's own save), a trailing `/` a
+/// directory, `**` any depth (the SDK's exclude reads them as gitignore
+/// does), a space as `?` (the platform's patterns take no space). Named,
+/// not all of `.cache`: some of it is state (a Hugging Face token is
+/// `.cache/huggingface/token`). A person's own folders in their work are
+/// never matched: each pattern is under a home or a browser profile.
+pub const HOME_CACHES: [&str; 13] = [
+    ".cache/pip/",
+    ".cache/uv/",
+    ".cache/ms-playwright/",
+    ".cache/puppeteer/",
+    ".cache/node-gyp/",
+    ".cache/huggingface/hub/",
+    ".cache/torch/",
+    ".cache/go-build/",
+    ".cache/yarn/",
+    ".cache/pnpm/",
+    ".cache/typescript/",
+    ".npm/_cacache/",
+    ".npm/_npx/",
+];
+pub const BROWSER_CACHES: [&str; 9] = ["Cache/", "Code?Cache/", "GPUCache/", "GrShaderCache/", "ShaderCache/", "DawnGraphiteCache/", "DawnWebGPUCache/", "Service?Worker/CacheStorage/", "component_crx_cache/"];
+pub const HOMES: [&str; 2] = ["/hermes/", "/work/*/home/"];
+pub const BROWSERS: [&str; 3] = ["/hermes/**/", "/work/*/browser-profile/**/", "/work/*/home/.config/**/"];
+
+/// Every cache pattern a save leaves out: each home's tools', then each
+/// browser profile's.
+pub fn caches() -> Vec<String> {
+    let homes = HOMES.iter().flat_map(|h| HOME_CACHES.iter().map(move |c| format!("{h}{c}")));
+    let browsers = BROWSERS.iter().flat_map(|b| BROWSER_CACHES.iter().map(move |c| format!("{b}{c}")));
+    homes.chain(browsers).collect()
+}
+
+/// Claude Code's installs under Hermes' home (docs/computers.md, "Claude
+/// Code in our Hermes image"): each version a directory of its own, and
+/// the one it runs named by its link.
+pub const CLAUDE_VERSIONS: &str = "hermes/.local/share/claude/versions";
+pub const CLAUDE_BIN: &str = "hermes/.local/bin/claude";
+
+/// Claude Code's versions but the one it runs, which its self-update keeps
+/// beside the new one (about 200 MB each): left out, as the next update
+/// would remove them. None unless the link names a version that is there,
+/// so the one it runs is never left out.
+pub fn old_claude_versions(data: &Path) -> Vec<String> {
+    let Ok(link) = std::fs::read_link(data.join(CLAUDE_BIN)) else { return vec![] };
+    let Some(current) = link.file_name().and_then(|n| n.to_str()) else { return vec![] };
+    let Ok(entries) = std::fs::read_dir(data.join(CLAUDE_VERSIONS)) else { return vec![] };
+    let names: Vec<String> = entries.filter_map(|e| e.ok()?.file_name().into_string().ok()).collect();
+    if !names.iter().any(|n| n == current) {
+        return vec![];
+    }
+    let mut out: Vec<String> = names.into_iter().filter(|n| n != current && !n.is_empty() && n.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))).map(|n| format!("/{CLAUDE_VERSIONS}/{n}")).collect();
+    out.sort();
+    out
+}
+
+/// The whole answer to a hold: what was copied (`answer`), then what a
+/// save leaves out beside it (`caches`, `old_claude_versions`), as many as
+/// fit in `ANSWER_LINES_MAX`: the copies' lines always, which the restore
+/// needs whole.
+pub fn answer_with_caches(data: &Path, copies: &[Copied]) -> String {
+    let mut out = answer(data, copies);
+    let lines = out.lines().count();
+    assert!(lines <= ANSWER_LINES_MAX, "the copies' lines fit: {lines}");
+    for p in caches().into_iter().chain(old_claude_versions(data)).take(ANSWER_LINES_MAX - lines) {
+        out.push_str(&p);
+        out.push('\n');
+    }
+    out
+}
+
 /// The answer to a hold: exactly what was copied, each database and its
 /// journal files, one anchored pattern a line, relative to `data`. A
 /// database Hermes makes after the copy is named by none, so the save
@@ -429,6 +512,50 @@ pub fn answer(data: &Path, copies: &[Copied]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Goal (2026-11-03: saves grew past a computer's disk): a hold's answer
+    /// names its copies, then the caches a save leaves out, then Claude
+    /// Code's versions but the one it runs; never the one it runs, nor any
+    /// when its link names none that is there; within the platform's
+    /// patterns (letters it takes, at most 256 bytes, at most
+    /// `ANSWER_LINES_MAX` lines, the copies' always whole).
+    #[test]
+    fn an_answer_leaves_out_caches_and_old_claude_versions() {
+        let root = dir("caches");
+        let versions = root.join(CLAUDE_VERSIONS);
+        for v in ["2.0.30", "2.0.31", "2.0.29"] {
+            std::fs::create_dir_all(versions.join(v)).unwrap();
+        }
+        std::fs::create_dir_all(root.join(CLAUDE_BIN).parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(versions.join("2.0.31"), root.join(CLAUDE_BIN)).unwrap();
+        assert_eq!(old_claude_versions(&root), [format!("/{CLAUDE_VERSIONS}/2.0.29"), format!("/{CLAUDE_VERSIONS}/2.0.30")]);
+        let copy = |p: String| Copied { file: "0.sqlite".into(), path: p, bytes: 1, uid: 0, gid: 0, mode: 0o600 };
+        let copies = [copy(root.join("hermes/state.db").display().to_string())];
+        let said = answer_with_caches(&root, &copies);
+        let lines: Vec<&str> = said.lines().collect();
+        assert_eq!(lines[..4], ["/hermes/state.db", "/hermes/state.db-wal", "/hermes/state.db-shm", "/hermes/state.db-journal"]);
+        let caches = caches();
+        assert_eq!(caches.len(), HOMES.len() * HOME_CACHES.len() + BROWSERS.len() * BROWSER_CACHES.len());
+        assert!(caches.contains(&"/hermes/.cache/pip/".to_string()) && caches.contains(&"/work/*/home/.npm/_cacache/".to_string()) && caches.contains(&"/work/*/browser-profile/**/Code?Cache/".to_string()));
+        assert!(caches.iter().all(|c| HOMES.iter().chain(BROWSERS.iter()).any(|root| c.starts_with(root))), "each under a home or a browser profile, never a person's own folder");
+        assert_eq!(lines[4..4 + caches.len()], caches);
+        assert_eq!(lines[4 + caches.len()..], [format!("/{CLAUDE_VERSIONS}/2.0.29"), format!("/{CLAUDE_VERSIONS}/2.0.30")]);
+        assert!(!said.contains("2.0.31"), "never the version it runs");
+        for l in &lines {
+            assert!(l.len() <= 256 && l.starts_with('/') && l.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-/*?[]".contains(&b)), "a pattern the platform takes: {l}");
+        }
+        // a link to a version that is not there: none left out
+        std::fs::remove_file(root.join(CLAUDE_BIN)).unwrap();
+        std::os::unix::fs::symlink(versions.join("9.9.9"), root.join(CLAUDE_BIN)).unwrap();
+        assert!(old_claude_versions(&root).is_empty());
+        // no install at all: none
+        assert!(old_claude_versions(&dir("no-claude")).is_empty());
+        // the copies' lines fill the answer: no cache line past the bound
+        let many: Vec<Copied> = (0..ANSWER_LINES_MAX / 4).map(|i| copy(root.join(format!("hermes/p{i}/state.db")).display().to_string())).collect();
+        let full = answer_with_caches(&root, &many);
+        assert_eq!(full.lines().count(), ANSWER_LINES_MAX);
+        assert!(!full.contains(".cache"), "the copies first, whole");
+    }
 
     fn dir(name: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("held-{name}-{}", std::process::id()));
