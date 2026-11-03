@@ -273,26 +273,35 @@ const ASIDE_CHECKS: [&str; 3] = [
 /// `full-restore`: its restore answers as the disk's floor stops one, the
 /// shim having written nothing): the start goes on without it, its other
 /// folder restored, and the folder is set aside, told, and kept across
-/// three newer saves. No fixed wait: a record's wake can reach the computer
-/// after its owner's sleep and start it again, so the lever is set before
-/// the sleep (whichever start restores that save takes it), and each sleep
-/// is judged by the save it took, not by the phase it answers. Starts and
-/// ends awake. Answers how many replies of its agent it added.
+/// three newer saves. No fixed wait: each sleep waits until the last turn
+/// ended and its guest let go of the computer (so it cuts no turn), the
+/// lever is set before the sleep (a record's wake that reaches the
+/// computer after it starts it again, and whichever start restores that
+/// save takes the lever), and each sleep is judged by the save it took,
+/// not by the phase it answers. Starts and ends awake. Answers how many
+/// replies of its agent it added.
 fn aside_checks(s: &mut Suite, api: &Api, c: &Crashing, say: &dyn Fn(u32, &str) -> Result<crate::api::Reply>) -> Result<usize> {
     let path = |rest: &str| format!("/api/computers/{}{rest}", c.id);
-    let reply_of = |seq: i64| {
-        let turn = turn_of(c.agent, c.chat, "chat", seq);
-        agent_replies(&records(api, c.owner, c.chat, "chat"), c.identity).into_iter().find(|r| r["body"]["turn"] == turn.as_str())
-    };
-    let said = |s: &Suite, n: u32, text: &str| -> Result<String> {
+    let reply_of = |turn: &str| agent_replies(&records(api, c.owner, c.chat, "chat"), c.identity).into_iter().find(|r| r["body"]["turn"] == turn);
+    // a message, its reply's words, and its turn's name
+    let said = |s: &Suite, n: u32, text: &str| -> Result<(String, String)> {
         let r = say(n, text)?;
-        let seq = r.body["record"]["seq"].as_i64().unwrap_or(0);
-        s.eventually(c.wake, || reply_of(seq).is_some());
-        Ok(reply_of(seq).and_then(|x| x["body"]["text"].as_str().map(str::to_string)).unwrap_or_default())
+        let turn = turn_of(c.agent, c.chat, "chat", r.body["record"]["seq"].as_i64().unwrap_or(0));
+        s.eventually(c.wake, || reply_of(&turn).is_some());
+        Ok((reply_of(&turn).and_then(|x| x["body"]["text"].as_str().map(str::to_string)).unwrap_or_default(), turn))
+    };
+    // its owner's sleep cuts no turn: the last one ended, and its guest let go
+    let settled = |s: &Suite, turn: &str| {
+        s.eventually(c.wake, || {
+            work_of(&records(api, c.owner, c.chat, "work"), turn).iter().any(|r| r["body"]["kind"] == "turn.end") && lever(api, c.id, "saves").is_ok_and(|r| r.body["keepalives"] == 0)
+        })
     };
     let records_of = |save: &Value| save["records"].as_array().map(|l| l.iter().map(|r| r["dir"].as_str().unwrap_or("").to_string()).collect::<Vec<_>>()).unwrap_or_default();
     let number = |save: &Value| save["number"].as_u64().unwrap_or(0);
-    let wrote = [said(s, 70, "write work/aside.txt set aside")?, said(s, 71, "write notes/aside-kept.txt kept")?];
+    let (first, _) = said(s, 500, "write work/aside.txt set aside")?;
+    let (second, turn) = said(s, 501, "write notes/aside-kept.txt kept")?;
+    let wrote = [first, second];
+    let quiet = settled(s, &turn);
     let elsewhere = lever_with(api, c.id, json!({ "op": "full-restore", "dir": "/elsewhere" }))?;
     let full = lever_with(api, c.id, json!({ "op": "full-restore", "dir": "/data/work" }))?;
     let before = number(&newest_save(api, c.id));
@@ -301,11 +310,12 @@ fn aside_checks(s: &mut Suite, api: &Api, c: &Crashing, say: &dyn Fn(u32, &str) 
     let work = save["records"].as_array().and_then(|l| l.iter().find(|r| r["dir"] == "/data/work")).cloned().unwrap_or(Value::Null);
     // its wake, or a record's that came first: the start after the sleep
     let woke = api.signed(c.owner, "POST", &path("/wake"), Some(&json!({})))?;
-    let read = [said(s, 72, "read work/aside.txt")?, said(s, 73, "read notes/aside-kept.txt")?];
+    let read = [said(s, 502, "read work/aside.txt")?.0, said(s, 503, "read notes/aside-kept.txt")?.0];
     let told = notice(&woke.body, "set_aside");
     s.ok(
         ASIDE_CHECKS[0],
         wrote.iter().all(|w| w.starts_with("wrote "))
+            && quiet
             && slept.status == 200
             && number(&save) > before
             && work["id"].is_string()
@@ -331,8 +341,9 @@ fn aside_checks(s: &mut Suite, api: &Api, c: &Crashing, say: &dyn Fn(u32, &str) 
     // three newer saves, each a sleep's (judged by the save it took) and a wake:
     // the save it was of is pushed out
     let mut cycled = true;
-    for n in 74..77 {
-        cycled &= said(s, n, &format!("write work/new-{n}.txt newer"))?.starts_with("wrote ");
+    for n in 504..507 {
+        let (wrote, turn) = said(s, n, &format!("write work/new-{n}.txt newer"))?;
+        cycled &= wrote.starts_with("wrote ") && settled(s, &turn);
         let before = number(&newest_save(api, c.id));
         cycled &= api.signed(c.owner, "POST", &path("/sleep"), Some(&json!({})))?.status == 200 && number(&newest_save(api, c.id)) > before;
         cycled &= api.signed(c.owner, "POST", &path("/wake"), Some(&json!({})))?.body["phase"] == "awake";
