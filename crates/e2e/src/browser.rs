@@ -154,6 +154,15 @@ pub struct Page {
     target: String,
 }
 
+/// A page's fetch held where a test says, then let go: a script for a
+/// page's `eval`. `window.__hold`, a RegExp, holds each fetch whose URL it
+/// matches (`window.__held` its releases: `window.__held.splice(0).forEach((go) => go())`);
+/// each held answer's body, once read (`json`, `arrayBuffer`, `text`),
+/// counts `window.__consumed`. The page's continuation after that read
+/// runs in the same turn, so an evaluation that sees the count sees all it
+/// did: a test waits on the count, never a clock (FIN-372's review).
+pub const HOLD_FETCH: &str = "(() => { window.__held = []; window.__consumed = 0; const real = window.fetch; const counted = (r) => { for (const m of ['json', 'arrayBuffer', 'text']) { const read = r[m].bind(r); r[m] = () => read().finally(() => window.__consumed++); } return r; }; window.fetch = (u, o) => window.__hold?.test(String(u)) ? new Promise((done, fail) => window.__held.push(() => real(u, o).then((r) => done(counted(r)), fail))) : real(u, o); return true; })()";
+
 /// For `open_with_script`: the page's first WebSocket whose URL holds
 /// `part`, held as an upgrade never answered is (a dropped connection, a
 /// phone's network changing under it): it stays connecting, never opening

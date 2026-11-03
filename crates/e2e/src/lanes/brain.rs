@@ -502,7 +502,7 @@ pub fn brain(s: &mut Suite, api: &Api) -> Result<()> {
     // let go. A held answer's body, once read, counts `__consumed`, and the
     // view's continuation after that read runs in the same turn, so an
     // evaluation after the count sees all it did: no clock to wait on.
-    chrome.eval(&tab, "(() => { window.__held = []; window.__consumed = 0; const real = window.fetch; const counted = (r) => { for (const m of ['json', 'arrayBuffer', 'text']) { const read = r[m].bind(r); r[m] = () => read().finally(() => window.__consumed++); } return r; }; window.fetch = (u, o) => window.__hold?.test(String(u)) ? new Promise((done, fail) => window.__held.push(() => real(u, o).then((r) => done(counted(r)), fail))) : real(u, o); return true; })()")?;
+    chrome.eval(&tab, crate::browser::HOLD_FETCH)?;
     let let_go = "(window.__held.splice(0).forEach((go) => go()), true)";
     let ask = |q: &str| format!("(() => {{ window.__hold = null; const q = document.getElementById('q'); q.value = {}; q.dispatchEvent(new Event('input', {{ bubbles: true }})); return true; }})()", serde_json::to_string(q).unwrap_or_default());
     let solar_read = "(window.__hold = /__file\\?path=garden%2Fwiki%2Fsolar/, true)";
