@@ -168,10 +168,13 @@ RUN HERMES_HOME=/tmp/pm-agent-browser /opt/hermes/.venv/bin/python -c 'from pm i
 # the computer's next start from this image (docs/computers.md, "Root in
 # our Hermes image"). apt's lists are kept, fresh as of this build. sudo
 # keeps npm's global prefix (npm_config_prefix, below), so `sudo npm
-# install -g` puts a program in /usr/local/bin.
+# install -g` puts a program in /usr/local/bin, and Playwright's browsers
+# directory (PLAYWRIGHT_BROWSERS_PATH), so `sudo playwright install` puts
+# a browser where an agent's own launch looks, never in root's cache, and
+# PLAYWRIGHT_SKIP_BROWSER_GC (the final stage), so it removes nothing there.
 RUN apt-get -o Acquire::Retries=3 update \
  && DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 install -y --no-install-recommends sudo \
- && printf 'Defaults env_keep += "npm_config_prefix"\nhermes ALL=(ALL:ALL) NOPASSWD: ALL\n' > /etc/sudoers.d/hermes \
+ && printf 'Defaults env_keep += "npm_config_prefix PLAYWRIGHT_BROWSERS_PATH PLAYWRIGHT_SKIP_BROWSER_GC"\nhermes ALL=(ALL:ALL) NOPASSWD: ALL\n' > /etc/sudoers.d/hermes \
  && chmod 0440 /etc/sudoers.d/hermes \
  && visudo -c -q
 
@@ -357,11 +360,16 @@ EOF
 # agents run it from habit and old skills. So, there only, `install` is
 # answered at once: for the image's own release, Chromium (or no browser
 # named) is installed already, the system Chromium; anything else is
-# root's to install. Every other command runs as it is.
+# root's to install. `uninstall` is refused in Hermes' store (below). Every
+# other command runs as it is.
 COPY --chmod=755 <<'EOF' /opt/fragment/bin/playwright-node
 #!/bin/sh
 # Playwright's Node, answering an `install` it cannot do (images/hermes/Dockerfile).
 browsers="${PLAYWRIGHT_BROWSERS_PATH:-$HOME/.cache/ms-playwright}"
+if [ "${2-}" = uninstall ] && [ "$browsers" = /opt/hermes/tools ]; then
+  echo "playwright uninstall would remove Hermes' own tools from $browsers; Playwright here has no browser of its own to uninstall." >&2
+  exit 1
+fi
 if [ "${2-}" = install ] && [ -d "$browsers" ] && [ ! -w "$browsers" ]; then
   others="" n=0
   for arg in "$@"; do
@@ -530,10 +538,17 @@ RUN /opt/fragment/bin/hermes-boot build-info \
 # own Chromium, and a plain `chromium.launch()` (the headless shell's name)
 # and `channel="chromium"` (the browser's) both run it. INSTALLATION_COMPLETE
 # is Playwright's own mark of an installed browser: `sudo playwright install
-# chromium` finds both and downloads no Chromium. The build fails unless
+# chromium` finds them, FFmpeg's too, and downloads nothing. The build fails unless
 # both runtimes print a page with it, Python's on the image's Node (through
 # playwright-node).
-ENV PLAYWRIGHT_NODEJS_PATH=/opt/fragment/bin/playwright-node
+# PLAYWRIGHT_BROWSERS_PATH is Hermes' tool store, and Playwright's install
+# collects every browser-named directory there that no Playwright on the
+# computer links: a `sudo playwright install` removed Hermes' own Chrome
+# for Testing and its FFmpeg (/usr/local/bin/ffmpeg's). It never collects
+# here, under sudo too (sudoers, above); `uninstall`, which collects
+# whatever is set, playwright-node refuses there.
+ENV PLAYWRIGHT_NODEJS_PATH=/opt/fragment/bin/playwright-node \
+    PLAYWRIGHT_SKIP_BROWSER_GC=1
 RUN <<'EOF'
 set -eu
 # the global CLI through Playwright's Node (playwright-node, above)
@@ -544,9 +559,14 @@ chmod 755 /usr/local/bin/playwright
 export NODE_DISABLE_COMPILE_CACHE=1
 browsers=/usr/local/lib/node_modules/playwright/node_modules/playwright-core/browsers.json
 rev() { /usr/local/bin/node -p "require('$browsers').browsers.find(b => b.name === '$1').revision"; }
-for at in "chromium-$(rev chromium)/chrome-linux64/chrome" "chromium_headless_shell-$(rev chromium-headless-shell)/chrome-headless-shell-linux64/chrome-headless-shell"; do
+# Chromium's two names, and FFmpeg's (which `install chromium` brings, for
+# a page's video: the image's own, libvpx's VP8 and MJPEG in it)
+for link in "chromium-$(rev chromium)/chrome-linux64/chrome /opt/fragment/bin/chromium" \
+  "chromium_headless_shell-$(rev chromium-headless-shell)/chrome-headless-shell-linux64/chrome-headless-shell /opt/fragment/bin/chromium" \
+  "ffmpeg-$(rev ffmpeg)/ffmpeg-linux /usr/local/bin/ffmpeg"; do
+  at="${link% *}"
   mkdir -p "$PLAYWRIGHT_BROWSERS_PATH/${at%/*}"
-  ln -s /opt/fragment/bin/chromium "$PLAYWRIGHT_BROWSERS_PATH/$at"
+  ln -s "${link#* }" "$PLAYWRIGHT_BROWSERS_PATH/$at"
   touch "$PLAYWRIGHT_BROWSERS_PATH/${at%%/*}/INSTALLATION_COMPLETE"
 done
 cd /tmp

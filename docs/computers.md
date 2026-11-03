@@ -800,12 +800,19 @@ for Testing fails.
   `playwright` CLI. A plain
   `chromium.launch()` runs `/opt/fragment/bin/chromium`, the desktop's:
   the image puts it in `PLAYWRIGHT_BROWSERS_PATH` under the names that
-  release looks for, marked installed, so `sudo playwright install
-  chromium` downloads no Chromium. As the agent's user, `playwright
-  install` (either runtime's) answers at once (`playwright-node`, the Node
-  both run Playwright's CLI on): Chromium, or no browser named, is
-  installed already; another browser is root's to install. Playwright's
-  own would wait ten minutes on its lock in that directory, root's.
+  release looks for, marked installed, beside the image's FFmpeg under
+  its name (a page's video), so `sudo playwright install chromium`
+  downloads nothing. sudo keeps `PLAYWRIGHT_BROWSERS_PATH`, so a browser
+  `sudo playwright install` adds is where an agent's own launch looks,
+  and `PLAYWRIGHT_SKIP_BROWSER_GC`: that directory is Hermes' tool store,
+  and Playwright's install would collect Hermes' own Chrome for Testing
+  and FFmpeg from it (`uninstall`, which always collects, is refused
+  there). As
+  the agent's user, `playwright install` (either runtime's) answers at
+  once (`playwright-node`, the Node both run Playwright's CLI on):
+  Chromium, or no browser named, is installed already; another browser is
+  root's to install. Playwright's own would wait ten minutes on its lock
+  in that directory, root's.
   Another release an agent installs looks for its own names, and finds
   none.
 - **`unzip`, `zip`, `jq` and `sqlite3`**, Debian's. `sqlite3` runs with
