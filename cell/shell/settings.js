@@ -317,11 +317,14 @@ export function createSettings({ api, $, seg, account, navigation, notices, sect
       row.onclick = () => openApp(a.fragment);
       const name = el("span", "settings-agent-name");
       name.dataset.agentFace = a.fragment;
-      const [actions, said, renameIt, pictures] = faceControls(a);
-      // its pencil and its picture's buttons beside the name, outside it:
-      // renderAgentFaces redraws the name
+      const [actions, said, renameIt, pictures, picture] = faceControls(a);
+      // its picture's pencil over its picture, and its pencil and Remove
+      // picture beside its name, all outside the name: renderAgentFaces
+      // redraws it (its picture and its title)
+      const face = el("span", "agent-face-edit");
+      face.append(name, picture);
       const title = el("span", "settings-agent-title");
-      title.append(name, renameIt, pictures);
+      title.append(face, renameIt, pictures);
       return [agentSettings(a, actionLine(title, actions, row), modeled), said];
     }) : [el("p", "muted", "None yet.")]), ...(mine.length ? addAgentForm() : []));
     const connections = connectionsSection(linked, uses);

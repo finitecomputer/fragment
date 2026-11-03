@@ -648,7 +648,22 @@ label.settings-line { cursor: pointer; }
 /* an agent's picture's buttons, small, by its picture and name */
 .agent-picture-actions { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-left: 10px; }
 .settings-section .agent-picture-actions .quiet { min-height: 28px; padding: 3px 11px; font-size: 12.5px; }
-.settings-section .agent-picture-actions .picture { margin: 0; }
+/* an agent's picture in Settings, larger, and over it the pencil that changes
+   it: shown on hover or as its file input takes focus; always, faintly,
+   where nothing hovers */
+.agent-face-edit { position: relative; display: inline-flex; align-items: center; }
+.settings-agent-name { gap: 10px; }
+.settings-agent-name .agent-avatar.small { width: 36px; height: 36px; }
+.agent-picture-edit { position: absolute; top: 50%; left: 0; display: grid; place-items: center; width: 36px; height: 36px; margin-top: -18px; border-radius: 10px; background: rgba(0,0,0,.5); color: #fff; opacity: 0; cursor: pointer; transition: opacity .15s; }
+.agent-picture-edit:hover, .agent-picture-edit:has(input:focus-visible) { opacity: 1; }
+/* round over a picture, as it is; square, its corners softened, over the cube, which fills its square */
+.agent-face-edit:has(.agent-avatar.picture) .agent-picture-edit { border-radius: 50%; }
+.agent-picture-edit:has(input:focus-visible) { outline: 2px solid var(--accent-blue); outline-offset: 2px; }
+.agent-picture-edit:has(input:disabled) { cursor: default; }
+.agent-picture-edit svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.agent-picture-edit input, .agent-picture-said { position: absolute; width: 1px; height: 1px; margin: 0; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; opacity: 0; }
+@media (hover: none) { .agent-picture-edit { opacity: 1; background: rgba(0,0,0,.28); } }
+@media (prefers-reduced-motion: reduce) { .agent-picture-edit { transition: none; } }
 /* an agent's fields (its role, where it reaches you, its model), and a new agent's: one compact grid, each its label above it */
 .agent-fields { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px; width: 100%; }
 .agent-fields input { width: 100%; height: 36px; }

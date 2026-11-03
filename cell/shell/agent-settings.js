@@ -115,8 +115,9 @@ export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, 
   // An agent's row's Remove agent (asked once more, saying what it does),
   // a line that says what they did or why not, and what the row puts beside
   // its name: its Rename, a pencil, as the Apps page puts one beside an
-  // app's (apps-page.js), and its picture's Add, Change and Remove, by the
-  // picture they change.
+  // app's (apps-page.js); its picture's Add and Change, a pencil over the
+  // picture itself, shown on hover or focus, its tooltip saying which; and
+  // its Remove, beside the name while it has one.
   function faceControls(a) {
     const said = el("p", "muted agent-face-said");
     said.hidden = true;
@@ -130,15 +131,17 @@ export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, 
     renameIt.append(icon("rename"));
     renameIt.dataset.renameAgent = a.fragment;
     renameIt.onclick = () => rename(a.fragment);
-    const picture = el("label", "quiet picture");
-    const label = el("span");
+    // the file input stays in reach of the keyboard, unseen: its focus shows
+    // the pencil and the tooltip; its words (Add a picture, Change picture)
+    // are the label's name, read aloud, and the tooltip's (renderAgentFaces)
+    const picture = el("label", "agent-picture-edit");
+    const label = el("span", "agent-picture-said");
     label.dataset.pictureLabel = a.fragment;
     const file = el("input");
     file.type = "file";
     file.accept = "image/png,image/jpeg,image/webp,image/gif";
     file.dataset.pictureFor = a.fragment;
-    file.hidden = true;
-    picture.append(label, file);
+    picture.append(icon("rename"), label, file);
     const remove = el("button", "quiet", "Remove picture");
     remove.type = "button";
     remove.dataset.pictureRemove = a.fragment;
@@ -191,7 +194,7 @@ export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, 
       };
       actions.append(ask);
     }
-    return [actions, said, renameIt, pictures];
+    return [actions, said, renameIt, pictures, picture];
   }
   // Settings' agent rows as the list says now: each one's face and name, and
   // whether it has a picture to change or remove; and its open screens. The
@@ -207,7 +210,10 @@ export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, 
       name.dataset.shown = shown;
       name.replaceChildren(avatar(face, "small"), titleOf(fragment));
     }
-    for (const label of document.querySelectorAll("[data-picture-label]")) label.textContent = byName(label.dataset.pictureLabel)?.picture ? "Change picture" : "Add a picture";
+    for (const label of document.querySelectorAll("[data-picture-label]")) {
+      label.textContent = byName(label.dataset.pictureLabel)?.picture ? "Change picture" : "Add a picture";
+      label.closest(".agent-picture-edit")?.setAttribute("data-tooltip", label.textContent);
+    }
     for (const remove of document.querySelectorAll("[data-picture-remove]")) remove.hidden = !byName(remove.dataset.pictureRemove)?.picture;
     renderNames();
   }
