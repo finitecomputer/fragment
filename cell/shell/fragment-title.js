@@ -85,6 +85,8 @@ export function createTitles({ $, api, seg, byName, titleOf, reload, heard, ApiE
     if (!title || !name || saving) return;
     saving = true;
     save.disabled = true;
+    // as wide as it was: its words change, its size does not
+    save.style.minWidth = `${save.offsetWidth}px`;
     save.textContent = "Saving…";
     error.hidden = true;
     try {
@@ -98,6 +100,7 @@ export function createTitles({ $, api, seg, byName, titleOf, reload, heard, ApiE
       saving = false;
       save.disabled = false;
       save.textContent = saveText;
+      save.style.removeProperty("min-width");
     }
   };
   return { retitle, rename };
