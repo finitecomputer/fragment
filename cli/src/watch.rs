@@ -121,7 +121,7 @@ impl<'a> Watcher<'a> {
         let passed = self.storage.get(client).map_err(SyncError::from).and_then(|storage| sync::pass_over(client, storage, name, dir, opts, local));
         let report = self.refused_on_auth(passed)?;
         if report.landed {
-            sync::refresh_pins(client, name);
+            sync::refresh_pins(client, name, MAIN);
         }
         self.head = report.head.clone();
         Ok(Served::Passed(Box::new(report)))

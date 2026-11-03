@@ -76,6 +76,16 @@ fn files_lane(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.signed(&owner, "POST", &format!("/api/f/{name}/refresh"), Some(&json!({})))?;
     s.ok("refresh moves main at once", r.status == 200 && r.body["refs"]["main"]["moved"] == true && r.body["refs"]["live"]["absent"] == true, &r);
     s.ok("refresh made the file visible", read(api, &owner, &name, "quiet.md").as_deref() == Some("unannounced"), "");
+    // a writer names the ref it moved, and only that one is read again
+    s.fake.external_commit(&repo, "main", &[("named.md", Some(b"main alone"))], "unannounced");
+    let r = api.signed(&owner, "POST", &format!("/api/f/{name}/refresh"), Some(&json!({ "ref": "main" })))?;
+    s.ok(
+        "a refresh naming main moves main and reads live not at all",
+        r.status == 200 && r.body["refs"]["main"]["moved"] == true && r.body["refs"].get("live").is_none() && read(api, &owner, &name, "named.md").as_deref() == Some("main alone"),
+        &r,
+    );
+    let r = api.signed(&owner, "POST", &format!("/api/f/{name}/refresh"), Some(&json!({ "ref": "dev" })))?;
+    s.ok("a ref the platform does not pin is 400", r.status == 400, &r);
     s.fake.external_commit(&repo, "main", &[("polled.md", Some(b"found by the poll"))], "unannounced");
     let polled = s.eventually(Duration::from_secs(u64::from(crate::POLL_S) * 5), || read(api, &owner, &name, "polled.md").is_some());
     s.ok("the poll backstop finds a commit no one refreshed, a storage token since", polled, "");

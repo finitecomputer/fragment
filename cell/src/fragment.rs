@@ -1088,7 +1088,11 @@ impl FragmentCell {
             }
             (Method::Delete, ["api", "secrets", key]) => self.delete_secret(&caller, key),
             (Method::Get, ["api", "storage-token"]) => self.storage_token(&caller).await,
-            (Method::Post, ["api", "refresh"]) => self.refresh(&caller).await,
+            (Method::Post, ["api", "refresh"]) => {
+                // the ref its writer moved, or both (fragment_proto::Refresh)
+                let refs = fragment_proto::Refresh::refs_of(&req.bytes().await?).map_err(CellError::invalid)?;
+                self.refresh(&caller, &refs).await
+            }
             (Method::Get, ["api", "files"]) => self.files(&caller).await,
             (Method::Post, ["api", "files"]) => {
                 let body = body_json(&mut req).await?;

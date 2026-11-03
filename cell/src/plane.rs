@@ -43,7 +43,7 @@ pub const QUIET_PASS_MS: i64 = 24 * 3600 * 1000;
 /// fails to follow: a token lives 15 minutes, so this is generous for
 /// whoever pushes with it, and outlasts a code.storage outage of hours.
 const MAY_LAG_MS: i64 = 24 * 3600 * 1000;
-pub const REFS: [&str; 2] = ["main", "live"];
+pub const REFS: [&str; 2] = fragment_proto::PINNED_REFS;
 
 pub struct PinMove {
     pub changed: bool,
@@ -791,9 +791,11 @@ impl FragmentCell {
         self.schedule().await
     }
 
-    pub(crate) async fn refresh(&self, caller: &Caller) -> CellResult<Response> {
+    /// `POST /api/refresh`: `refs` read again (the one its writer moved,
+    /// or both), their moves taken before it answers.
+    pub(crate) async fn refresh(&self, caller: &Caller, refs: &[&str]) -> CellResult<Response> {
         self.require(caller, false, Role::Editor)?;
-        let moved = self.interpret(&REFS).await?;
+        let moved = self.interpret(refs).await?;
         let refs: serde_json::Map<String, Value> = moved
             .into_iter()
             .map(|(which, m)| {
