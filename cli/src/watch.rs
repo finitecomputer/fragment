@@ -1,4 +1,4 @@
-// Continuous sync: OS events (debounced) + a live `__watch` websocket
+// Continuous sync: OS events (settled by notify's debouncer) + a live `__watch` websocket
 // from the cell + periodic sweeps as the correctness floor. Falls back to
 // polling when native watching is unavailable. A wakeup costs what it
 // needs: the folder's echo of a pull and the feed's echo of our own commit
@@ -13,9 +13,15 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-const DEBOUNCE_MS: u64 = 300;
+/// How long a path's OS events must be quiet before the watcher hears of
+/// them: notify's debouncer holds them that long, the one wait between a
+/// save and its pass. An editor's save and its droppings (a temp file, a
+/// rename, a mode change) land within it. A second quiet period of our own
+/// (300 ms more, polled every 50 ms) once followed it, for about 0.6 s from
+/// a save to its first request (bench, 2026-11-02).
+const QUIET_MS: u64 = 200;
 const POLL_INTERVAL_SECS: u64 = 5;
 const RESCAN_SECS: u64 = 60;
 /// Wakeups one batch takes from the queue at most: a burst (a checkout,
@@ -35,38 +41,6 @@ fn relevant(roots: &[PathBuf], paths: &[PathBuf]) -> bool {
         Some(rel) => sync::syncable(&rel.to_string_lossy().replace('\\', "/")),
         None => true,
     })
-}
-
-/// The debounce window: hold the latest wakeups until things go quiet, or
-/// until the max-latency cap forces a flush, then run ONE pass.
-struct Debounced {
-    pending: Arc<AtomicBool>,
-    debounce: Duration,
-    max_latency: Duration,
-}
-
-impl Debounced {
-    /// block until quiet (or the cap), then clear
-    fn wait(&self) {
-        let started = Instant::now();
-        let mut quiet_for = Duration::ZERO;
-        // bounded by max_latency: a folder that never goes quiet (a long
-        // copy) still gets a pass every max_latency
-        loop {
-            std::thread::sleep(Duration::from_millis(50));
-            if self.pending.swap(false, Ordering::Relaxed) {
-                quiet_for = Duration::ZERO; // still churning
-            } else {
-                quiet_for += Duration::from_millis(50);
-                if quiet_for >= self.debounce {
-                    return;
-                }
-            }
-            if started.elapsed() >= self.max_latency {
-                return;
-            }
-        }
-    }
 }
 
 /// What woke the watcher.
@@ -168,18 +142,15 @@ impl<'a> Watcher<'a> {
     }
 }
 
-/// Blocks for the next wakeup (or the sweep's deadline), lets a burst
-/// settle, then folds everything queued into one batch: a burst of saves
-/// spanning a pass is one more pass, not one per save.
-fn next_batch(rx: &Receiver<Wakeup>, gate: &Debounced, watcher: &Watcher<'_>) -> Due {
+/// Blocks for the next wakeup (or the sweep's deadline), then folds
+/// everything queued into one batch: a burst of saves spanning a pass is
+/// one more pass, not one per save. OS events arrive settled (`QUIET_MS`).
+fn next_batch(rx: &Receiver<Wakeup>, watcher: &Watcher<'_>) -> Due {
     let first = match rx.recv_timeout(Duration::from_secs(RESCAN_SECS)) {
         Ok(wakeup) => wakeup,
         Err(RecvTimeoutError::Timeout) => Wakeup::Sweep,
         Err(RecvTimeoutError::Disconnected) => unreachable!("run holds a sender for as long as it loops"),
     };
-    if first != Wakeup::Sweep {
-        gate.wait(); // let a burst settle into one pass
-    }
     let mut due = Due::default();
     watcher.note(&mut due, first);
     for wakeup in rx.try_iter().take(WAKEUPS_BATCH_MAX) {
@@ -195,15 +166,13 @@ pub fn run(client: &Client, name: &str, dir: &Path, opts: &SyncOptions) -> Resul
     // a refusal keeps its code (`Client::fragment`'s own error)
     let name = &client.fragment(name)?;
     let _lock = SyncLock::acquire(dir)?; // one watcher per folder, ever
-    let debounce = Duration::from_millis(DEBOUNCE_MS);
-    let gate = Debounced { pending: Arc::new(AtomicBool::new(false)), debounce, max_latency: debounce * 3 };
 
     // channel of wakeups; `tx` lives as long as the loop below
     let (tx, rx) = std::sync::mpsc::channel::<Wakeup>();
 
     // ---- backend 1: OS events (with poll fallback) ----
     let mut backend_in_use = "native";
-    let _watcher = match spawn_native(dir, tx.clone(), gate.pending.clone()) {
+    let _watcher = match spawn_native(dir, tx.clone()) {
         Ok(w) => Some(w),
         Err(e) => {
             eprintln!("warning: native watcher unavailable ({e}); falling back to polling every {}s", POLL_INTERVAL_SECS);
@@ -257,7 +226,7 @@ pub fn run(client: &Client, name: &str, dir: &Path, opts: &SyncOptions) -> Resul
                 err_backoff = (err_backoff * 2).min(60);
             }
         }
-        due = next_batch(&rx, &gate, &watcher);
+        due = next_batch(&rx, &watcher);
         // a failed pass is retried by the next batch: the folder still
         // differs from its journal, or main from the head we hold
     }
@@ -270,19 +239,18 @@ fn view_token(client: &Client, name: &str) -> Option<String> {
 
 /// native OS watcher; the boxed return keeps the watcher alive (dropping it
 /// stops events)
-fn spawn_native(dir: &Path, tx: Sender<Wakeup>, pending: Arc<AtomicBool>) -> Result<Box<dyn Send>> {
+fn spawn_native(dir: &Path, tx: Sender<Wakeup>) -> Result<Box<dyn Send>> {
     use notify_debouncer_full::{new_debouncer, DebounceEventResult};
     let dir_owned: PathBuf = dir.to_path_buf();
     // the folder as given, and as the OS may report it (macOS names
     // /var/… by its real path, /private/var/…)
     let roots = vec![dir.to_path_buf(), dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf())];
     let mut debouncer = new_debouncer(
-        Duration::from_millis(200),
+        Duration::from_millis(QUIET_MS),
         None,
         move |res: DebounceEventResult| {
             if let Ok(events) = res {
                 if events.iter().any(|e| relevant(&roots, &e.paths)) {
-                    pending.store(true, Ordering::Relaxed);
                     let _ = tx.send(Wakeup::Events);
                 }
             }
@@ -523,7 +491,6 @@ mod tests {
     #[test]
     fn a_burst_is_one_batch_and_an_echo_asks_nothing() {
         let (tx, rx) = std::sync::mpsc::channel();
-        let gate = Debounced { pending: Arc::new(AtomicBool::new(false)), debounce: Duration::ZERO, max_latency: Duration::ZERO };
         let c = Client::new("http://127.0.0.1:9", auth::fixed(7));
         let dir = tmpdir("burst");
         let o = opts();
@@ -533,12 +500,12 @@ mod tests {
             tx.send(Wakeup::Events).unwrap();
         }
         tx.send(Wakeup::Head(Some("b".repeat(40)))).unwrap();
-        assert_eq!(next_batch(&rx, &gate, &watcher), LOCAL);
+        assert_eq!(next_batch(&rx, &watcher), LOCAL);
         assert!(rx.try_recv().is_err(), "the batch took every queued wakeup");
         tx.send(Wakeup::Head(Some("b".repeat(40)))).unwrap();
-        assert_eq!(next_batch(&rx, &gate, &watcher), Due::default(), "an echo alone asks nothing");
+        assert_eq!(next_batch(&rx, &watcher), Due::default(), "an echo alone asks nothing");
         tx.send(Wakeup::Head(Some("c".repeat(40)))).unwrap();
-        assert_eq!(next_batch(&rx, &gate, &watcher), REMOTE);
+        assert_eq!(next_batch(&rx, &watcher), REMOTE);
         fs::remove_dir_all(&dir).ok();
     }
 
