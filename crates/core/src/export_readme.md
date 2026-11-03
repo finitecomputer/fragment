@@ -25,6 +25,7 @@ or `tar -xf <file>.tar`; everything is in the folder `fragment-export/`.
         meta.json                   its image, its agents, and the save exported
         data.tar.zst                the save of /data, but /data/work
         data-work.tar.zst           the same save's /data/work: its agents' workspace
+        aside/<record>.tar.zst      a folder set aside: it did not fit when your computer started
 
 A `<name>` is a fragment's name (`todo--k3x9`). A name in `database/` is its
 table's, with any byte but `A-Z a-z 0-9 . _ -` written `%XX`.
@@ -108,6 +109,12 @@ sessions, databases and profiles there). `data-work.tar.zst` is
 before the two were apart is one `data.tar.zst`. Each record's `sha256` in
 `meta.json` is that file's. What the computer did after that save is in no
 save yet.
+
+A folder set aside (`aside/<record>.tar.zst`, listed in `meta.json`'s
+`aside` with the save it was of) did not fit on your computer's disk when
+it started, so it started without it and kept it as it was saved. Each is
+a record as above. One that would pass what an export holds is listed in
+`skipped` instead: get it back on your computer, then export again.
 
 ## What is not here
 

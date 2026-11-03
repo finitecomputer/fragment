@@ -31,7 +31,7 @@ use fragment_nip98::Keys;
 use serde_json::{json, Value};
 
 use super::app::ship;
-use super::computers::{agent_replies, newest_save, AGENT_JSON, QUEUE_DRAIN};
+use super::computers::{agent_replies, lever, lever_with, newest_save, notice, AGENT_JSON, QUEUE_DRAIN};
 use super::jobs::records;
 use super::ledger::entries;
 use crate::api::{now_s, Api, Call, Reply};
@@ -558,6 +558,32 @@ pub fn export(s: &mut Suite, api: &Api) -> Result<()> {
     let again = press(api, &erin)?;
     let made = built(s, api, &erin);
     s.ok("within its limit, the next is made", again.body["id"] != r.body["id"] && made["state"] == "ready", &made);
+
+    // ---- a folder set aside goes in the export beside its save: a person's
+    // computer saved, its work then set aside (the lever's full disk)
+    let fern = api.person()?;
+    let made = api.signed(&fern, "POST", "/api/computers", Some(&json!({})))?;
+    let fc = made.body["computer"].as_str().unwrap_or("").to_string();
+    let path = |rest: &str| format!("/api/computers/{fc}{rest}");
+    let woke = api.signed(&fern, "POST", &path("/wake"), Some(&json!({})))?;
+    let slept = api.signed(&fern, "POST", &path("/sleep"), Some(&json!({})))?;
+    let full = lever_with(api, &fc, json!({ "op": "full-restore", "dir": "/data/work" }))?;
+    let again = api.signed(&fern, "POST", &path("/wake"), Some(&json!({})))?;
+    let aside = lever(api, &fc, "saves").map(|r| r.body["aside"][0]["record"].clone()).unwrap_or(Value::Null);
+    let rid = aside["id"].as_str().unwrap_or("").to_string();
+    let set_up = made.status == 200 && woke.body["phase"] == "awake" && slept.status == 200 && full.status == 200 && !notice(&again.body, "set_aside").is_null() && !rid.is_empty();
+    press(api, &fern)?;
+    let done = built(s, api, &fern);
+    let r = api.signed(&fern, "GET", done["download"].as_str().unwrap_or("/api/export/none/download"), None)?;
+    let files = entries_of(&r.bytes).unwrap_or_default();
+    let fhex = fc.strip_prefix("computer:").unwrap_or("");
+    let file = fragment_core::export::aside_path(&fc, &rid);
+    let meta = json_at(&files, &format!("{root}/computers/{fhex}/meta.json"));
+    s.ok(
+        "a folder set aside is in its person's export beside the save: its record as stored (its SHA-256 the record's), listed in its computer's meta",
+        set_up && done["state"] == "ready" && files.get(&file).is_some_and(|b| sha256_hex(b) == aside["sha256"].as_str().unwrap_or("-")) && meta["aside"][0]["record"]["id"] == rid.as_str() && meta["aside"][0]["record"]["file"].as_str().is_some_and(|f| file.ends_with(f)) && newest_save(api, &fc)["records"].as_array().is_some_and(|l| l.iter().all(|x| x["id"] != rid.as_str())),
+        json!({ "aside": aside, "meta": meta["aside"], "file": file, "export": done["state"] }),
+    );
 
     // ---- the CLI: `fragment export` starts one, waits, and downloads it
     let home = s.dir("export-cli");

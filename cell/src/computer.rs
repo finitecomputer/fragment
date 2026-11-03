@@ -2079,8 +2079,9 @@ impl ComputerCell {
     /// at a time. A record no such save names (pushed out by newer saves
     /// since the export looked) is 404, as is a range past its end.
     async fn export_read(&self, b: &ExportRead) -> CellResult<Response> {
-        let saves = self.saves()?;
-        let record = saves.all().iter().filter(|s| !s.unusable).flat_map(|s| s.records.iter()).find(|r| r["id"].as_str() == Some(b.record.as_str()));
+        let (saves, aside) = (self.saves()?, self.aside()?);
+        let kept = saves.all().iter().filter(|s| !s.unusable).flat_map(|s| s.records.iter());
+        let record = kept.chain(aside.folders().iter().map(|a| &a.record)).find(|r| r["id"].as_str() == Some(b.record.as_str()));
         let Some(record) = record else {
             return Err(CellError::new(ErrorCode::NotFound, format!("no save keeps the record {}: the computer saved again since", b.record)));
         };
@@ -2316,7 +2317,8 @@ impl ComputerCell {
                 self.owned_by(&b.owner)?;
                 let saves = self.saves()?;
                 let save = saves.all().iter().find(|s| !s.unusable);
-                json_response(&json!({ "save": save.map(|s| json!({ "number": s.number, "id": s.id, "at": s.at_ms, "generation": s.generation, "held": s.held, "records": s.records })) }))
+                // and its folders set aside, each a record of its own
+                json_response(&json!({ "save": save.map(|s| json!({ "number": s.number, "id": s.id, "at": s.at_ms, "generation": s.generation, "held": s.held, "records": s.records })), "aside": self.aside()?.folders() }))
             }
             "computer/export-read" => {
                 let b: ExportRead = body_json(&mut req).await?;
