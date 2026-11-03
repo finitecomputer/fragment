@@ -617,11 +617,21 @@ label.settings-line { cursor: pointer; }
 @container settings (max-width: 620px) {
   .settings-layout { padding: 16px 20px 60px; }
   .settings-nav { min-height: 57px; margin: -16px -20px 22px; padding: 10px 20px; }
-  .settings-control { flex: none; max-width: 58%; }
-  /* a line whose buttons go under it (who is signed in, and a guest's seat) */
-  .settings-section .settings-stack { flex-wrap: wrap; row-gap: 10px; }
-  .settings-stack .settings-control { flex: 1 1 100%; max-width: none; justify-content: flex-start; }
-  .settings-stack .settings-actions { justify-content: flex-start; }
+  /* on a phone, a row's buttons (and a field beside them) go under what it
+     says, each the row's width, one under another; a switch stays beside
+     its row, as it is not a button */
+  .settings-section :is(.settings-line-with-action:not(:has(.settings-switch)), .settings-action-line) { flex-direction: column; align-items: stretch; gap: 12px; }
+  .settings-section :is(.settings-line-with-action:not(:has(.settings-switch)), .settings-action-line) .settings-control { flex: none; flex-direction: column; align-items: stretch; gap: 8px; width: 100%; max-width: none; margin-left: 0; }
+  .settings-control :is(.settings-actions, .agent-face-actions, form) { display: flex; flex-direction: column; align-items: stretch; gap: 8px; width: 100%; margin: 0; }
+  .settings-control .agent-face-actions:empty { display: none; }
+  .settings-section :is(.settings-line-with-action:not(:has(.settings-switch)), .settings-action-line) .settings-control :is(button, input, label.quiet) { width: 100%; max-width: none; justify-content: center; }
+  .settings-section :is(.settings-line-with-action:not(:has(.settings-switch)), .settings-action-line) .settings-control .row { align-self: stretch; }
+  .settings-section > :is(.quiet, .agent-add-open) { align-self: stretch; justify-content: center; }
+  .settings-section > .settings-actions { flex-direction: column; align-items: stretch; }
+  .settings-section > .settings-actions > button { width: 100%; justify-content: center; }
+  .provider-head { flex-direction: column; align-items: stretch; }
+  .provider-head .settings-actions { flex-direction: column; align-items: stretch; max-width: none; }
+  .provider-head .settings-actions button { width: 100%; justify-content: center; }
   .settings-intro { padding-bottom: 4px; }
   .settings-section { margin-top: 60px; padding: 6px 16px 12px; border-radius: 16px; }
 }
