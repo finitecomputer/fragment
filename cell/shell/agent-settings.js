@@ -396,7 +396,7 @@ export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, 
     };
     return [open];
   }
-  // ---- an agent's settings, edited in a dialog Edit opens: Settings shows
+  // ---- an agent's settings, edited in a dialog its Edit (a pencil) opens: Settings shows
   // what they are, each its label above it, as text; its fields (each
   // written as it changes, said under them) are kept in its card, unseen,
   // and lent to the dialog while it is open ----
@@ -458,8 +458,11 @@ export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, 
     fields.addEventListener("change", summarize);
     read.then(summarize);
     summarize();
-    const edit = el("button", "quiet", "Edit");
+    // Edit: a pencil at the end of the line of what they are, its tooltip
+    // its name (tooltips.js: an icon button's label)
+    const edit = el("button", "icon-button agent-edit");
     edit.type = "button";
+    edit.append(icon("rename"));
     edit.dataset.editAgent = a.fragment;
     named(edit, a.fragment, (t) => `Edit ${t}`, "aria-label");
     edit.onclick = () => {
@@ -472,8 +475,9 @@ export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, 
       };
       d.dialog.showModal();
     };
-    row.querySelector(".settings-control")?.prepend(edit);
-    box.append(row, summary, home);
+    const details = el("div", "agent-details");
+    details.append(summary, edit);
+    box.append(row, details, home);
     return box;
   }
   // a pick (`value`) being written (`written`), said under its agent's
