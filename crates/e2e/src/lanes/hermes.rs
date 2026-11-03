@@ -662,14 +662,45 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("its sleep's save, its desktop used, is held: the image answered the hold", newest["held"] == true, &newest);
     let r = api.signed(&owner, "POST", &format!("/api/computers/{id}/wake"), Some(&json!({})))?;
     s.ok("woken again", r.body["phase"] == "awake", &r);
-    let closed = s.eventually(WAKE, || {
-        let w = work_of(&records(api, &owner, &chat_name, "work"), &lost);
-        w.iter().any(|r| r["body"]["kind"] == "turn.prompt.closed" && r["body"]["outcome"] == "expired") && w.iter().any(|r| r["body"]["kind"] == "turn.end" && r["body"]["outcome"] == "error")
-    });
+    // P6, a card outlives its turn (docs/computers.md): the restart cuts the
+    // turn, which ends in an error, and its card stays open, answerable
+    // until it expires (an hour, its runtime's own bound)
+    let cut = s.eventually(WAKE, || ended(&lost) == Some(json!("error")));
+    let work = work_of(&records(api, &owner, &chat_name, "work"), &lost);
+    let card = work.iter().find(|r| r["body"]["kind"] == "turn.prompt").cloned().unwrap_or_default();
     s.ok(
-        "a turn the restart cut short ends in an error, its card expired, its question never answered",
-        closed && reply_of(&lost).is_none_or(|t| !t.contains("the tool ran")),
-        json!(work_of(&records(api, &owner, &chat_name, "work"), &lost)),
+        "a turn the restart cut short ends in an error, and its card stays open: it outlives its turn",
+        cut && !card.is_null() && !work.iter().any(|r| r["body"]["kind"] == "turn.prompt.closed") && reply_of(&lost).is_none_or(|t| !t.contains("the tool ran")),
+        json!(work),
+    );
+    // its owner's late answer is one fresh turn, claimed by the answer and
+    // told of the card's turn; the card closes as answered by it, and the
+    // cut turn never resumes
+    let prompt = card["body"]["prompt"].as_str().unwrap_or("").to_string();
+    let answer = json!({ "id": format!("pr:{prompt}"), "body": { "kind": "prompt_response", "prompt": prompt, "option": "c0", "agent": card["principal"], "turn": lost } });
+    let r = api.signed(&owner, "POST", &format!("/api/f/{chat_name}/channels/chat"), Some(&answer))?;
+    let answered_at = r.body["record"]["seq"].as_i64().unwrap_or(0);
+    let fresh = turn_of(&agent_name, &chat_name, "chat", answered_at);
+    let done = s.eventually(TURN, || ended(&fresh).is_some());
+    let w = records(api, &owner, &chat_name, "work");
+    let started = work_of(&w, &fresh).into_iter().find(|r| r["body"]["kind"] == "turn.start").unwrap_or_default();
+    let closed = work_of(&w, &lost).into_iter().find(|r| r["body"]["kind"] == "turn.prompt.closed").unwrap_or_default();
+    // resumed: another turn started from the cut turn's message (its
+    // continuation's id is its own, its cause the same)
+    let cause = work_of(&w, &lost).into_iter().find(|r| r["body"]["kind"] == "turn.start").map(|r| r["body"]["cause"]["seq"].clone()).unwrap_or_default();
+    let resumed = w.iter().any(|r| r["body"]["kind"] == "turn.start" && r["body"]["turn"] != lost.as_str() && !cause.is_null() && r["body"]["cause"]["seq"] == cause);
+    s.ok(
+        "its owner's late answer to that card is one fresh turn, claimed by the answer; the card closes as answered by it, and the cut turn never resumes",
+        r.status == 200
+            && done
+            && ended(&fresh) == Some(json!("idle"))
+            && started["body"]["cause"]["seq"].as_i64() == Some(answered_at)
+            && closed["body"]["outcome"] == "answered"
+            && closed["body"]["answerSeq"].as_i64() == Some(answered_at)
+            && !resumed
+            && reply_of(&fresh).is_some()
+            && reply_of(&lost).is_none_or(|t| !t.contains("the tool ran")),
+        json!({ "answer": r.status, "fresh": work_of(&w, &fresh), "cut": work_of(&w, &lost), "reply": reply_of(&fresh) }),
     );
 
     // a wake with restore: Hermes' conversation came back with /data
