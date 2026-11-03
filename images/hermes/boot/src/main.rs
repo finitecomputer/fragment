@@ -1200,6 +1200,18 @@ fn python_env(ids: Option<(u32, u32)>) {
     let (Some(image), Some(wheels)) = (said.lines().next().and_then(python::minor), said.lines().nth(1).map(str::to_string)) else {
         return failed("the image's Python", format!("said {said:?}"));
     };
+    // on the stable name before it plans (a kept environment's Python is
+    // the one the image links, whatever made it)
+    match python::rebind(dir, &image) {
+        Ok(true) => {
+            for p in [dir.join("bin/python"), dir.join("pyvenv.cfg")] {
+                chown(&p, ids);
+            }
+            ev!("python.rebound", { "to": python::PYTHON });
+        }
+        Ok(false) => {}
+        Err(e) => return failed("rebind", e.to_string()),
+    }
     let plan = python::plan(dir, &image);
     let mut set_aside = None;
     if let python::Plan::SetAside(made) = &plan {

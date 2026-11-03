@@ -44,8 +44,51 @@ pub enum Plan {
     SetAside(Option<String>),
 }
 
+/// Binds an environment of the image's Python (`image`, `major.minor`) to
+/// it by the name every image links it at: `bin/python` a link to
+/// `PYTHON`, and `pyvenv.cfg`'s `home` that link's directory. Whatever made
+/// it (uv keeps the name it is given; another may write the store's own
+/// path, which an image update of the same minor release removes), a start
+/// keeps it on that name before it plans. One of another Python, or none,
+/// is left as it is. True when it changed.
+pub fn rebind(dir: &Path, image: &str) -> std::io::Result<bool> {
+    let cfg_path = dir.join("pyvenv.cfg");
+    let Ok(cfg) = std::fs::read_to_string(&cfg_path) else { return Ok(false) };
+    if made_for(&cfg).as_deref() != Some(image) {
+        return Ok(false);
+    }
+    let home = Path::new(PYTHON).parent().expect("PYTHON names a file in a directory").display().to_string();
+    let mut changed = false;
+    let mut lines: Vec<String> = Vec::new();
+    for line in cfg.lines() {
+        match line.split_once('=') {
+            Some((k, v)) if k.trim() == "home" && v.trim() != home => {
+                changed = true;
+                lines.push(format!("home = {home}"));
+            }
+            _ => lines.push(line.to_string()),
+        }
+    }
+    if changed {
+        let next = dir.join("pyvenv.cfg.rebind");
+        std::fs::write(&next, lines.join("\n") + "\n")?;
+        std::fs::rename(&next, &cfg_path)?;
+    }
+    let link = dir.join("bin/python");
+    if std::fs::read_link(&link).ok().as_deref() != Some(Path::new(PYTHON)) {
+        match std::fs::remove_file(&link) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
+            _ => {}
+        }
+        std::fs::create_dir_all(dir.join("bin"))?;
+        std::os::unix::fs::symlink(PYTHON, &link)?;
+        changed = true;
+    }
+    Ok(changed)
+}
+
 /// What a start does with `dir`, the image's Python being `image`
-/// (`major.minor`).
+/// (`major.minor`), after `rebind`.
 pub fn plan(dir: &Path, image: &str) -> Plan {
     match std::fs::symlink_metadata(dir) {
         Err(_) => return Plan::Make,
@@ -54,7 +97,7 @@ pub fn plan(dir: &Path, image: &str) -> Plan {
     }
     let made = std::fs::read_to_string(dir.join("pyvenv.cfg")).ok().and_then(|cfg| made_for(&cfg));
     match made {
-        Some(made) if made == image && dir.join("bin/python").exists() => {
+        Some(made) if made == image && std::fs::symlink_metadata(dir.join("bin/python")).is_ok() => {
             if dir.join("bin/pip").exists() {
                 Plan::Keep
             } else {
@@ -122,7 +165,8 @@ mod tests {
     fn env_of(dir: &Path, version: &str, pip: bool) {
         std::fs::create_dir_all(dir.join("bin")).unwrap();
         std::fs::write(dir.join("pyvenv.cfg"), format!("home = /usr/local/bin\nimplementation = CPython\nuv = 0.12.3\nversion_info = {version}\ninclude-system-site-packages = false\n")).unwrap();
-        std::fs::write(dir.join("bin/python"), "").unwrap();
+        let _ = std::fs::remove_file(dir.join("bin/python"));
+        std::os::unix::fs::symlink(PYTHON, dir.join("bin/python")).unwrap();
         if pip {
             std::fs::write(dir.join("bin/pip"), "").unwrap();
         }
@@ -153,6 +197,42 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
         std::fs::write(&dir, "a file").unwrap();
         assert_eq!(plan(&dir, "3.14"), Plan::SetAside(None), "not a directory");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Goal (Codex on #989): a kept environment runs the image's Python by
+    /// its stable name, whatever made it. Valid: one uv made (the name kept)
+    /// is left alone. Invalid: one bound to the store's own path (another
+    /// uv's way), or with no `bin/python`, is rebound, and the rest of its
+    /// `pyvenv.cfg` kept. Replay: a second rebind changes nothing. One of
+    /// another Python, or unreadable, is left for `plan` to set aside.
+    #[test]
+    fn a_kept_environment_is_bound_to_the_stable_name() {
+        let root = tmp("rebind");
+        let dir = root.join("python");
+        env_of(&dir, "3.14.7", true);
+        assert!(!rebind(&dir, "3.14").unwrap(), "uv's own: nothing to do");
+
+        let store = "/opt/hermes/tools/python-3.14.7+20260901-linux-x64/bin";
+        std::fs::write(dir.join("pyvenv.cfg"), format!("home = {store}\nimplementation = CPython\nversion_info = 3.14.7\ninclude-system-site-packages = false\n")).unwrap();
+        std::fs::remove_file(dir.join("bin/python")).unwrap();
+        std::os::unix::fs::symlink(format!("{store}/python3.14"), dir.join("bin/python")).unwrap();
+        assert!(rebind(&dir, "3.14").unwrap());
+        assert_eq!(std::fs::read_link(dir.join("bin/python")).unwrap(), PathBuf::from(PYTHON));
+        assert_eq!(std::fs::read_to_string(dir.join("pyvenv.cfg")).unwrap(), "home = /usr/local/bin\nimplementation = CPython\nversion_info = 3.14.7\ninclude-system-site-packages = false\n");
+        assert!(!rebind(&dir, "3.14").unwrap(), "replay: bound already");
+        assert_eq!(plan(&dir, "3.14"), Plan::Keep);
+
+        std::fs::remove_file(dir.join("bin/python")).unwrap();
+        assert!(rebind(&dir, "3.14").unwrap(), "no bin/python: linked");
+        assert_eq!(std::fs::read_link(dir.join("bin/python")).unwrap(), PathBuf::from(PYTHON));
+
+        let other = format!("home = {store}\nversion_info = 3.13.5\n");
+        std::fs::write(dir.join("pyvenv.cfg"), &other).unwrap();
+        assert!(!rebind(&dir, "3.14").unwrap());
+        assert_eq!(std::fs::read_to_string(dir.join("pyvenv.cfg")).unwrap(), other, "another Python's is left for plan");
+        std::fs::remove_file(dir.join("pyvenv.cfg")).unwrap();
+        assert!(!rebind(&dir, "3.14").unwrap(), "unreadable: left for plan");
         std::fs::remove_dir_all(&root).ok();
     }
 
