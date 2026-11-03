@@ -906,17 +906,19 @@ fn adopt_identical(
         .filter(|(_, rf, lf)| lf.size == rf.size || crate::blobs::could_point(rf.size, lf.size))
         .collect();
     // read as the pull reads, READS_AT_ONCE at a time: a folder a pull
-    // left part-way is all of these on its next pass
-    let read = at_once(&unknown, READS_AT_ONCE, |(p, _, _)| storage.read_file(p.as_str(), listing.rev()));
-    for ((p, rf, lf), got) in unknown.iter().zip(read) {
+    // left part-way is all of these on its next pass. Each is compared
+    // where it is read, so a body is let go before the next read: what
+    // these hold at once is READS_AT_ONCE files, not the folder's
+    let same = at_once(&unknown, READS_AT_ONCE, |(p, _, lf)| storage.read_file(p.as_str(), listing.rev()).map(|bytes| crate::blobs::content_sha(&bytes) == lf.sha256));
+    for ((p, rf, lf), got) in unknown.iter().zip(same) {
         match got {
-            Some(Ok(bytes)) if crate::blobs::content_sha(&bytes) == lf.sha256 => {
+            Some(Ok(true)) => {
                 state.files.insert(
                     (*p).clone(),
                     FileState { sha256: lf.sha256.clone(), size: lf.size, mtime_ns: lf.mtime_ns, commit: rf.last_commit_sha.clone() },
                 );
             }
-            Some(Ok(_)) | None => {}
+            Some(Ok(false)) | None => {}
             Some(Err(e)) => return Err(e.into()),
         }
     }
@@ -1046,15 +1048,36 @@ fn pull_file(storage: &CodeStorage, blobs: &crate::blobs::Blobs<'_>, blob_gate: 
     // anything is fetched for it
     let Some(target) = place(dir, path)? else { return Ok(None) };
     let git = storage.read_file(path.as_str(), rev)?;
-    let bytes = {
-        let _one = fragment_core::blob::parse(&git).is_some().then(|| blob_gate.lock().unwrap_or_else(|e| e.into_inner()));
-        blobs.resolve(git).map_err(|e| SyncError::blob(path.as_str(), e))?
-    };
-    let sha = sha256_hex(&bytes);
-    atomic_write(&target, &bytes).map_err(|e| SyncError::Io(e.to_string()))?;
-    let md = fs::metadata(&target).map_err(|e| SyncError::Io(e.to_string()))?;
+    let (sha, md) = land(
+        blob_gate,
+        git,
+        |git| blobs.resolve(git).map_err(|e| SyncError::blob(path.as_str(), e)),
+        |bytes| {
+            atomic_write(&target, bytes).map_err(|e| SyncError::Io(e.to_string()))?;
+            fs::metadata(&target).map_err(|e| SyncError::Io(e.to_string()))
+        },
+    )?;
     let mtime_ns = md.modified().map(|m| m.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as i128).unwrap_or(0)).unwrap_or(0);
     Ok(Some(FileState { sha256: sha, size: md.len(), mtime_ns, commit: commit.to_string() }))
+}
+
+/// A file's bytes from what git holds (`resolve`), their hash, and what
+/// `write` made of them. A pointer's bytes (a blob, up to
+/// `BLOB_MAX_BYTES`) are fetched and written under `gate`, held until they
+/// are written and dropped: however many files a pull fetches at once, one
+/// blob is in memory at a time. A plain file takes no gate.
+fn land<T>(
+    gate: &Mutex<()>,
+    git: Vec<u8>,
+    resolve: impl FnOnce(Vec<u8>) -> Result<Vec<u8>, SyncError>,
+    write: impl FnOnce(&[u8]) -> Result<T, SyncError>,
+) -> Result<(String, T), SyncError> {
+    let _one = fragment_core::blob::parse(&git).is_some().then(|| gate.lock().unwrap_or_else(|e| e.into_inner()));
+    let bytes = resolve(git)?;
+    let sha = sha256_hex(&bytes);
+    let wrote = write(&bytes)?;
+    drop(bytes);
+    Ok((sha, wrote))
 }
 
 /// Full-content audit: local truth vs the repo listing + fetched bytes
@@ -1531,6 +1554,23 @@ mod tests {
         let answers = at_once(&[1, 2, 3, 4, 5], 1, |&i| if i == 3 { Err(i) } else { Ok(i) });
         assert_eq!(answers, vec![Some(Ok(1)), Some(Ok(2)), Some(Err(3)), None, None]);
         assert!(at_once(&[] as &[u8], 4, |_| Ok::<_, ()>(())).is_empty());
+    }
+
+    /// Goal: a blob's bytes are one in memory at a time however many files
+    /// a pull fetches at once: its gate is held until they are written and
+    /// dropped. Method: land a pointer's bytes and a plain file's, trying
+    /// the gate from inside the write. Before, the gate was let go once the
+    /// bytes arrived, while they were hashed, written and fsync'd.
+    #[test]
+    fn a_blobs_gate_is_held_until_its_bytes_are_written() {
+        let gate = Mutex::new(());
+        let pointer = fragment_core::blob::pointer(&"a".repeat(64), 2 * 1024 * 1024).into_bytes();
+        let (sha, (len, held)) = land(&gate, pointer, |_| Ok(vec![7u8; 16]), |bytes| Ok((bytes.len(), gate.try_lock().is_err()))).unwrap();
+        assert_eq!((len, held), (16, true), "the gate is held through a blob's write");
+        assert_eq!(sha, sha256_hex(&[7u8; 16]), "the hash is the blob's bytes'");
+        assert!(gate.try_lock().is_ok(), "and let go after");
+        let (_, held) = land(&gate, b"plain".to_vec(), Ok, |_| Ok(gate.try_lock().is_err())).unwrap();
+        assert!(!held, "a plain file takes no gate");
     }
 
     /// Goal: files written at once never share a partial file. Before,
