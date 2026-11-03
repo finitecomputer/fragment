@@ -2,6 +2,13 @@ import { avatar } from "./agent-identity.js";
 import { providerName } from "./connections.js";
 
 export const DEFAULT_AGENT_TIER = "cheap";
+// The runtimes a new agent may be made on (Settings' Add agent), each as Add
+// names it; one alone, Add asks nothing. Claude Code is left out for now
+// (Paul, 2026-11-03): its install and self-update grew a computer's /data
+// past its disk, and Skyler's computer could not start. An agent already on
+// Claude Code runs, shows and chats as before. To offer it again, add back
+// ["claude", "Runs on Claude Code"].
+export const NEW_AGENT_RUNTIMES = [["hermes", "Runs on Hermes"]];
 // A Claude agent's model and thinking (agent.json `claude`), as the bridge
 // reads them (images/bridge, Claude's `--model` and `--effort`): Claude
 // Code's own aliases and levels; none is Claude Code's default.
@@ -295,10 +302,11 @@ export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, 
     role.maxLength = ROLE_MAX_CHARS;
     role.placeholder = "Role, e.g. dev";
     role.setAttribute("aria-label", "New agent's role");
-    // its runtime, as the bridge reads it (agent.json `runtime`; none, Hermes)
-    const runs = el("select", "agent-add-runtime");
-    runs.setAttribute("aria-label", "New agent runs on");
-    for (const [value, text] of [["hermes", "Runs on Hermes"], ["claude", "Runs on Claude Code"]]) {
+    // its runtime, as the bridge reads it (agent.json `runtime`; none,
+    // Hermes): a choice only when there is one (`NEW_AGENT_RUNTIMES`)
+    const runs = NEW_AGENT_RUNTIMES.length > 1 ? el("select", "agent-add-runtime") : null;
+    runs?.setAttribute("aria-label", "New agent runs on");
+    for (const [value, text] of runs ? NEW_AGENT_RUNTIMES : []) {
       const o = el("option", null, text);
       o.value = value;
       runs.append(o);
@@ -315,7 +323,7 @@ export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, 
       add.textContent = "Adding…";
       said.hidden = true;
       try {
-        await addAgent({ name: name.value.trim(), role: role.value.trim(), runtime: runs.value });
+        await addAgent({ name: name.value.trim(), role: role.value.trim(), runtime: runs?.value ?? NEW_AGENT_RUNTIMES[0][0] });
       } catch (e) {
         said.textContent = e.message;
         said.hidden = false;
@@ -324,7 +332,7 @@ export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, 
         add.textContent = "Add agent";
       }
     };
-    form.append(name, role, runs, add);
+    form.append(name, role, ...(runs ? [runs] : []), add);
     return [form, said];
   }
   function agentSettings(a, row, modeled) {

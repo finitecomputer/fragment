@@ -7657,7 +7657,8 @@ fn add_agent_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session:
     b.viewport(page, 1280, 900, false)?;
     b.click(page, "#settings")?;
     let offered = b.until(page, "!!document.querySelector('#settings-page .agent-add')", wait);
-    // what it runs on: Hermes unless Claude Code is chosen (FIN-250)
+    // what it runs on: Hermes alone, no choice, while Claude Code is left out
+    // of new agents (agent-settings.js `NEW_AGENT_RUNTIMES`, Paul, 2026-11-03)
     let runs = b.eval(page, "[...document.querySelectorAll('#settings-page .agent-add-runtime option')].map((o) => [o.value, o.selected])")?;
     b.eval(page, &fill("#settings-page .agent-add-name", "Wren"))?;
     b.eval(page, &fill("#settings-page .agent-add-role", "editor"))?;
@@ -7684,8 +7685,8 @@ fn add_agent_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session:
         json!({ "chat": chat, "hello": seen, "job": job }),
     );
     s.ok(
-        "Add offers what it runs on, Hermes chosen unless Claude Code is: Wren, added as it was, runs on Hermes (its agent.json names no runtime)",
-        runs == json!([["hermes", true], ["claude", false]]) && runtime == Some(Value::Null),
+        "Add offers no runtime to choose, Claude Code left out of new agents: Wren, added, runs on Hermes (its agent.json names no runtime)",
+        runs == json!([]) && runtime == Some(Value::Null),
         json!({ "offered": runs, "runtime": runtime }),
     );
     // its role, edited in Settings, then taken away
