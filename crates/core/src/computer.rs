@@ -53,7 +53,7 @@
 //! From them, what its owner is told (`notices`): a rollback only when
 //! something was done on the life it lost after the save it went back to.
 
-use fragment_proto::computer::{ComputerNotice, ComputerRestore, ComputerSave, LifeEnd, LossCause, RestoreSource};
+use fragment_proto::computer::{ComputerAside, ComputerNotice, ComputerRestore, ComputerSave, LifeEnd, LossCause, RestoreSource};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -1821,9 +1821,10 @@ impl Saves {
         &self.forgetting
     }
 
-    /// Every record a wipe deletes (docs/api.md, Operators): each kept
-    /// save's, newest first, then each let go of and not deleted yet. A
-    /// record is a save's or waits to be deleted, never both.
+    /// Every record a wipe deletes of its saves (docs/api.md, Operators):
+    /// each kept save's, newest first, then each let go of and not deleted
+    /// yet. A record is a save's or waits to be deleted, never both (and
+    /// one set aside is neither: `Aside`).
     pub fn every_record(&self) -> Vec<Value> {
         let kept = self.saves.iter().flat_map(|s| s.records.iter());
         let out: Vec<Value> = kept.chain(self.forgetting.iter()).cloned().collect();
@@ -1834,6 +1835,22 @@ impl Saves {
     /// Whether it keeps a snapshot's id (a cache of its current save).
     pub fn has_snapshot(&self) -> bool {
         self.snapshot.is_some()
+    }
+
+    /// The record `id` leaves the kept save that holds it (`Aside::set_aside`),
+    /// and a snapshot of that save (which would bring it back whole) is
+    /// forgotten: the record, that save's number, and when it was taken.
+    /// None when no kept save holds it.
+    fn take(&mut self, id: &str) -> Option<(Value, u64, i64)> {
+        let save = self.saves.iter_mut().find(|s| s.records.iter().any(|r| r["id"] == id))?;
+        let at = save.records.iter().position(|r| r["id"] == id).expect("found above");
+        let record = save.records.remove(at);
+        let (number, saved_at_ms, save_id) = (save.number, save.at_ms, save.id.clone());
+        if self.snapshot.as_ref().is_some_and(|s| s.save == save_id) {
+            self.snapshot = None;
+        }
+        assert!(!self.saves.iter().any(|s| s.records.iter().any(|r| r["id"] == id)), "a record taken is no save's");
+        Some((record, number, saved_at_ms))
     }
 
     /// The record `id` was deleted.
@@ -1879,6 +1896,83 @@ impl Saves {
     /// The saves, as the computer's view shows them.
     pub fn views(&self) -> Vec<ComputerSave> {
         self.saves.iter().map(Save::view).collect()
+    }
+}
+
+/// Folders set aside at most (`Aside::set_aside`): a start that cannot fit
+/// one more fails as any start does, so what is aside is never let go of
+/// for room. Each is a folder that filled a disk once: a few GB of R2.
+pub const ASIDE_MAX: usize = 4;
+
+/// The folders set aside: a restore of each stopped at the disk's floor
+/// (the Sandbox SDK's ENOSPC), so the start went on without it. Each left
+/// its save, so no newer save lets it go, and is kept as it was saved
+/// until its owner gets it back or drops it (docs/computers.md, "Saves and
+/// what a wake restores"). The DO keeps it beside its `Saves`, never in
+/// them: a release from before it reads its saves and writes them back
+/// whole, and knows nothing of this, so a rollback to one erases nothing
+/// set aside (its rotation never lets one go, as no save holds it, and its
+/// wipe deletes every archive under the computer's prefix).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct Aside {
+    /// Oldest first, at most `ASIDE_MAX`.
+    #[serde(default)]
+    folders: Vec<AsideFolder>,
+}
+
+impl Aside {
+    /// The record `id` of a kept save would not fit on the disk a start
+    /// restored it to: it leaves its save for here (`Saves::take`). Answers
+    /// whether it is aside: false when `ASIDE_MAX` are already (the start
+    /// then fails as any), or when no kept save holds it. Again, the same.
+    /// The DO writes both, this first, in one step.
+    pub fn set_aside(&mut self, saves: &mut Saves, id: &str, now_ms: i64) -> bool {
+        if self.folders.iter().any(|a| a.record["id"] == id) {
+            return true;
+        }
+        if self.folders.len() >= ASIDE_MAX {
+            return false;
+        }
+        let Some((record, save, saved_at_ms)) = saves.take(id) else { return false };
+        self.folders.push(AsideFolder { record, save, saved_at_ms, at_ms: now_ms });
+        assert!(self.folders.len() <= ASIDE_MAX, "at most ASIDE_MAX aside");
+        true
+    }
+
+    /// The folders set aside, oldest first.
+    pub fn folders(&self) -> &[AsideFolder] {
+        &self.folders
+    }
+
+    /// Their records, which a wipe deletes beside its saves'.
+    pub fn records(&self) -> Vec<Value> {
+        self.folders.iter().map(|a| a.record.clone()).collect()
+    }
+}
+
+/// One folder set aside (`Aside`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AsideFolder {
+    /// Its `DirectoryBackup` record, as its save held it.
+    pub record: Value,
+    /// The save it was of, and when that save was taken.
+    pub save: u64,
+    pub saved_at_ms: i64,
+    /// When it was set aside.
+    pub at_ms: i64,
+}
+
+impl AsideFolder {
+    pub fn view(&self) -> ComputerAside {
+        ComputerAside {
+            record: self.record["id"].as_str().unwrap_or_default().to_string(),
+            dir: self.record["dir"].as_str().unwrap_or_default().to_string(),
+            bytes: self.record["size"].as_u64().unwrap_or(0),
+            save: self.save,
+            saved_at: self.saved_at_ms,
+            at: self.at_ms,
+        }
     }
 }
 
@@ -2027,9 +2121,12 @@ pub fn support_url_ok(url: &str) -> bool {
 ///   (`Images`), with no turn running (no keepalive: never in the middle of
 ///   its agents' work), until its owner puts that version off
 ///   (`Images::later`). Never while it sleeps or starts: its next start
-///   takes the new version anyway.
-pub fn notices(life: &Lifecycle, saves: &Saves, images: &Images, rules: &Rules) -> Vec<ComputerNotice> {
-    let mut out = Vec::with_capacity(4);
+///   takes the new version anyway;
+/// - `set_aside`: folders a start could not fit on its disk, so it started
+///   without them (`Aside::set_aside`), each kept until its owner gets it
+///   back or drops it.
+pub fn notices(life: &Lifecycle, saves: &Saves, aside: &Aside, images: &Images, rules: &Rules) -> Vec<ComputerNotice> {
+    let mut out = Vec::with_capacity(5);
     if let Phase::Failed { why } = &life.phase {
         out.push(ComputerNotice::WontWake { why: why.clone() });
     }
@@ -2082,7 +2179,10 @@ pub fn notices(life: &Lifecycle, saves: &Saves, images: &Images, rules: &Rules) 
             out.push(ComputerNotice::Update { version: latest });
         }
     }
-    assert!(out.len() <= 4, "one notice of each kind at most");
+    if !aside.folders.is_empty() {
+        out.push(ComputerNotice::SetAside { aside: aside.folders.iter().map(AsideFolder::view).collect() });
+    }
+    assert!(out.len() <= 5, "one notice of each kind at most");
     out
 }
 
@@ -2657,6 +2757,64 @@ mod tests {
         // once b0's delete worked it is not named again
         s.forgot("b0");
         assert_eq!(ids(&s), ["b3", "b2", "b1"]);
+    }
+
+    /// Goal (2026-11-03: a computer's work folder filled its disk, and no
+    /// start could restore it again): a folder of a save that will not fit
+    /// on the disk is set aside, out of its save, so no newer save lets it
+    /// go; its save's snapshot (which would bring it back whole) is
+    /// forgotten; its owner is told of each, oldest first. It is kept apart
+    /// from the saves: a release from before it writes its saves back
+    /// whole, so what it writes back holds nothing set aside to lose. Valid,
+    /// replay (set aside again: the same), invalid (a record no kept save
+    /// holds), the bound (`ASIDE_MAX`: refused, so that start fails as any),
+    /// the boundary with an older release, and what was stored before (none
+    /// aside). Method: the saves and the folders aside as the DO keeps them.
+    #[test]
+    fn a_folder_that_will_not_fit_is_set_aside_and_kept() {
+        let two = |id: &str, bytes: u64| vec![json!({ "id": id, "dir": "/data", "size": 10 }), json!({ "id": format!("{id}w"), "dir": "/data/work", "size": bytes })];
+        let (mut s, mut a) = (Saves::default(), Aside::default());
+        s.saved(1, two("b1", 5_000), T, true);
+        assert!(s.snapshotted("b1", "s1", IMAGE));
+        assert!(a.set_aside(&mut s, "b1w", T + 10));
+        assert!(a.set_aside(&mut s, "b1w", T + 20), "again: the same");
+        assert_eq!(a.folders().len(), 1);
+        assert_eq!((a.folders()[0].save, a.folders()[0].saved_at_ms, a.folders()[0].at_ms), (1, T, T + 10), "the first time is kept");
+        assert_eq!(s.current().map(|c| c.records.len()), Some(1), "its save holds the rest");
+        assert!(!s.has_snapshot(), "its save's snapshot would bring it back whole");
+        assert_eq!(s.plan(Some(IMAGE)), Plan::Backup);
+        // the boundary with an older release: what it reads and writes back
+        // whole (its saves) holds nothing set aside, which is kept apart
+        let written = serde_json::to_string(&s).unwrap();
+        assert!(!written.contains("b1w"), "the saves an older release writes back name nothing set aside: {written}");
+        let old: Saves = serde_json::from_str(&written).unwrap();
+        assert_eq!(old, s, "read and written back, the same");
+        assert_eq!(serde_json::from_str::<Aside>(&serde_json::to_string(&a).unwrap()).unwrap(), a, "kept apart, read back whole");
+        // three newer saves push its save out: what it held is let go of, never the folder aside
+        let mut lost = vec![];
+        for (n, id) in ["b2", "b3", "b4"].iter().enumerate() {
+            lost.extend(s.saved(2, two(id, 1), T + 100 + n as i64, true));
+        }
+        assert!(lost.is_empty(), "nothing pushed past the deletes: {lost:?}");
+        assert_eq!(s.forgetting().iter().map(|r| r["id"].as_str().unwrap()).collect::<Vec<_>>(), ["b1"], "its save's other folder is let go of");
+        assert!(!s.every_record().iter().any(|r| r["id"] == "b1w") && a.records().iter().any(|r| r["id"] == "b1w"), "a wipe finds it among the folders aside");
+        let told = notices(&Lifecycle::new(), &s, &a, &Images::default(), &Rules::default());
+        assert_eq!(
+            told,
+            vec![ComputerNotice::SetAside { aside: vec![ComputerAside { record: "b1w".into(), dir: "/data/work".into(), bytes: 5_000, save: 1, saved_at: T, at: T + 10 }] }]
+        );
+        // invalid: a record no kept save holds (b1's other folder, let go of)
+        assert!(!a.set_aside(&mut s, "b1", T + 200) && !a.set_aside(&mut s, "nope", T + 200));
+        // the bound: past ASIDE_MAX, refused, and nothing moves
+        for id in ["b2w", "b3w", "b4w"] {
+            assert!(a.set_aside(&mut s, id, T + 300));
+        }
+        assert_eq!(a.folders().len(), ASIDE_MAX);
+        s.saved(3, two("b5", 1), T + 400, true);
+        assert!(!a.set_aside(&mut s, "b5w", T + 500), "a fifth is refused");
+        assert_eq!(s.current().map(|c| c.records.len()), Some(2), "and stays in its save");
+        // stored before any was set aside: none
+        assert!(serde_json::from_str::<Aside>("{}").unwrap().folders().is_empty());
     }
 
     /// Goal (P3, decision 19): a snapshot is of the image its start ran, so
@@ -3751,13 +3909,13 @@ mod tests {
     #[test]
     fn its_owner_is_told_while_saves_fail_and_when_it_stops() {
         let rules = Rules::default();
-        let unsaved = |c: &Computer| notices(&c.life, &c.saves, &c.images, &rules).into_iter().find(|n| matches!(n, ComputerNotice::Unsaved { .. }));
+        let unsaved = |c: &Computer| notices(&c.life, &c.saves, &Aside::default(), &c.images, &rules).into_iter().find(|n| matches!(n, ComputerNotice::Unsaved { .. }));
         let mut c = Computer::new();
         c.wake();
         c.sleep(Some("b1"));
         let r = c.wake();
         let g = r.generation;
-        assert!(notices(&c.life, &c.saves, &c.images, &rules).is_empty(), "nothing to tell");
+        assert!(notices(&c.life, &c.saves, &Aside::default(), &c.images, &rules).is_empty(), "nothing to tell");
         // a turn, and its end's save fails: once is a blip
         c.apply(Event::Opened { socket: Socket::Keepalive });
         c.apply(Event::Closed { socket: Socket::Keepalive });
@@ -3821,7 +3979,7 @@ mod tests {
     #[test]
     fn its_owner_is_told_once_what_a_start_went_back_to() {
         let rules = Rules::default();
-        let went_back = |c: &Computer| notices(&c.life, &c.saves, &c.images, &rules).into_iter().find(|n| matches!(n, ComputerNotice::WentBack { .. }));
+        let went_back = |c: &Computer| notices(&c.life, &c.saves, &Aside::default(), &c.images, &rules).into_iter().find(|n| matches!(n, ComputerNotice::WentBack { .. }));
         let mut c = Computer::new();
         c.wake();
         c.sleep(Some("b1"));
@@ -3873,7 +4031,7 @@ mod tests {
         // what it knows survives a restart of its Durable Object
         let back: Saves = serde_json::from_str(&serde_json::to_string(&c.saves).unwrap()).unwrap();
         assert_eq!(back, c.saves);
-        assert_eq!(notices(&c.life, &back, &c.images, &rules), notices(&c.life, &c.saves, &c.images, &rules));
+        assert_eq!(notices(&c.life, &back, &Aside::default(), &c.images, &rules), notices(&c.life, &c.saves, &Aside::default(), &c.images, &rules));
         // a record stored before notices reads as none told
         let mut v = serde_json::to_value(&c.saves).unwrap();
         for k in ["wentBack", "seen", "fresh"] {
@@ -3899,7 +4057,7 @@ mod tests {
     #[test]
     fn a_stop_that_lost_nothing_tells_nothing() {
         let rules = Rules::default();
-        let went_back = |c: &Computer| notices(&c.life, &c.saves, &c.images, &rules).into_iter().find(|n| matches!(n, ComputerNotice::WentBack { .. }));
+        let went_back = |c: &Computer| notices(&c.life, &c.saves, &Aside::default(), &c.images, &rules).into_iter().find(|n| matches!(n, ComputerNotice::WentBack { .. }));
         let mut c = Computer::new();
         c.wake();
         c.sleep(Some("b1"));
@@ -3984,9 +4142,9 @@ mod tests {
         let mut v = serde_json::to_value(&c.saves).unwrap();
         v["ended"].as_object_mut().unwrap().remove("quiet");
         let older: Saves = serde_json::from_value(v).unwrap();
-        assert!(notices(&c.life, &older, &c.images, &rules).iter().any(|n| matches!(n, ComputerNotice::WentBack { pending: true, .. })), "told as any loss");
+        assert!(notices(&c.life, &older, &Aside::default(), &c.images, &rules).iter().any(|n| matches!(n, ComputerNotice::WentBack { pending: true, .. })), "told as any loss");
         let back: Saves = serde_json::from_str(&serde_json::to_string(&c.saves).unwrap()).unwrap();
-        assert_eq!(notices(&c.life, &back, &c.images, &rules), notices(&c.life, &c.saves, &c.images, &rules), "the same after its Durable Object restarts");
+        assert_eq!(notices(&c.life, &back, &Aside::default(), &c.images, &rules), notices(&c.life, &c.saves, &Aside::default(), &c.images, &rules), "the same after its Durable Object restarts");
         // and a lifecycle stored before its work was kept counts none kept,
         // even after a save of its own
         assert!(c.come_up(next).rollback);
@@ -4030,10 +4188,10 @@ mod tests {
                 generation = next;
             }
         }
-        assert_eq!(notices(&c.life, &c.saves, &c.images, &rules), vec![ComputerNotice::WontWake { why: "the image would not pull".into() }]);
+        assert_eq!(notices(&c.life, &c.saves, &Aside::default(), &c.images, &rules), vec![ComputerNotice::WontWake { why: "the image would not pull".into() }]);
         let s = c.apply(Event::Restart { generation });
         assert!(matches!(s.actions.first(), Some(Action::Start { .. })), "{s:?}");
-        assert!(notices(&c.life, &c.saves, &c.images, &rules).is_empty(), "starting again");
+        assert!(notices(&c.life, &c.saves, &Aside::default(), &c.images, &rules).is_empty(), "starting again");
     }
 
     /// Goal: a restart's start is fresh from the image and the newest good
@@ -4172,7 +4330,7 @@ mod tests {
     #[test]
     fn its_owner_is_told_an_update_is_ready_while_idle() {
         let rules = Rules::default();
-        let told = |c: &Computer| notices(&c.life, &c.saves, &c.images, &rules);
+        let told = |c: &Computer| notices(&c.life, &c.saves, &Aside::default(), &c.images, &rules);
         let update = |c: &Computer| told(c).into_iter().find(|n| matches!(n, ComputerNotice::Update { .. }));
         let ready = |reference: &str| Some(ComputerNotice::Update { version: version_of(reference) });
         // deploys' references, each a digest
@@ -4246,10 +4404,10 @@ mod tests {
         // what it knows survives a restart of its Durable Object
         let back: Images = serde_json::from_str(&serde_json::to_string(&c.images).unwrap()).unwrap();
         assert_eq!(back, c.images);
-        assert_eq!(notices(&c.life, &c.saves, &back, &rules), told(&c));
+        assert_eq!(notices(&c.life, &c.saves, &Aside::default(), &back, &rules), told(&c));
         // a record stored before it looked reads as never looked: nothing told
         let never: Images = serde_json::from_str("{}").unwrap();
-        assert!(never.next().is_none() && notices(&c.life, &c.saves, &never, &rules).is_empty());
+        assert!(never.next().is_none() && notices(&c.life, &c.saves, &Aside::default(), &never, &rules).is_empty());
     }
 
     /// Goal: three saves are kept, newest first, each numbered; a fourth
@@ -4621,7 +4779,7 @@ mod tests {
                     reached[12] += u32::from(lost > 0);
                 }
                 // what its owner is told is its state's, whatever happened
-                let told = notices(&l, &saves, &images, &rules);
+                let told = notices(&l, &saves, &Aside::default(), &images, &rules);
                 for n in &told {
                     match n {
                         ComputerNotice::WontWake { .. } => assert!(matches!(l.phase, Phase::Failed { .. }), "won't wake is told only of one that won't (seed {seed0})"),
@@ -4645,20 +4803,21 @@ mod tests {
                             assert_ne!(images.later.as_ref(), Some(version), "never one put off (seed {seed0})");
                             reached[10] += 1;
                         }
+                        ComputerNotice::SetAside { aside } => assert!(!aside.is_empty() && aside.len() <= ASIDE_MAX, "set aside is told of what is (seed {seed0}): {n:?}"),
                     }
                 }
                 // its owner puts an update off, now and then
                 if let Some(ComputerNotice::Update { version }) = told.iter().find(|n| matches!(n, ComputerNotice::Update { .. })) {
                     if rng(&mut seed).is_multiple_of(4) {
                         assert!(images.later(version), "an update told can be put off (seed {seed0})");
-                        assert!(!notices(&l, &saves, &images, &rules).iter().any(|n| matches!(n, ComputerNotice::Update { .. })), "put off, it is told no more (seed {seed0})");
+                        assert!(!notices(&l, &saves, &Aside::default(), &images, &rules).iter().any(|n| matches!(n, ComputerNotice::Update { .. })), "put off, it is told no more (seed {seed0})");
                     }
                 }
                 // its owner says they saw one, now and then
                 if let Some(ComputerNotice::WentBack { life, .. }) = told.last() {
                     if rng(&mut seed).is_multiple_of(5) {
                         assert!(saves.saw(*life), "a loss told can be seen (seed {seed0})");
-                        assert!(!notices(&l, &saves, &images, &rules).iter().any(|n| matches!(n, ComputerNotice::WentBack { .. })), "seen, it is told no more (seed {seed0})");
+                        assert!(!notices(&l, &saves, &Aside::default(), &images, &rules).iter().any(|n| matches!(n, ComputerNotice::WentBack { .. })), "seen, it is told no more (seed {seed0})");
                     }
                 }
             }

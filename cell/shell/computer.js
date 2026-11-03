@@ -1,5 +1,22 @@
 export const PHASE = { asleep: "Asleep", starting: "Starting", awake: "Awake", sleeping: "Going to sleep", wont_wake: "Won't start" };
 
+// What the person is told of folders set aside (the `set_aside` notice: a
+// start found no room for one, so it started without it, and kept it), in
+// this one place: the words are Paul's to change. Each folder in a sentence,
+// oldest first, with the day it was saved and its saved size.
+export const ASIDE_TITLE = "A folder didn't fit on your computer";
+const ASIDE_FOLDER = { "/data/work": ["work folder", "it", "It's"], "/data": ["computer's own files", "them", "They're"] };
+export function setAsideSaid(aside) {
+  const size = (b) => (b >= 1e9 ? `${(b / 1e9).toFixed(1)} GB` : `${Math.max(1, Math.round(b / 1e6))} MB`);
+  const day = (ms) => new Date(ms).toLocaleDateString([], { month: "short", day: "numeric" });
+  return aside
+    .map((a) => {
+      const [folder, it, kept] = ASIDE_FOLDER[a.dir] ?? ["folder", "it", "It's"];
+      return `Your ${folder} from ${day(a.savedAt)} (${size(a.bytes)}) didn't fit, so your computer started without ${it}. ${kept} kept safe.`;
+    })
+    .join(" ");
+}
+
 export function createComputer({ api, el, seg, named, section, line, actionLine, computer, agents, computerFailed, support, setupPending, made, computerIs, reopenSettings, openScreen, markOffer, reads, load }) {
   // ---- the computer: awake while the person is here, and its updates ----
   let woke = 0;
@@ -114,6 +131,8 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
       later.dataset.action = "later";
       later.onclick = () => updateLater(n.version, later);
       actions.append(later);
+    } else if (n.kind === "set_aside") {
+      say(ASIDE_TITLE, setAsideSaid(n.aside));
     } else if (n.kind === "deploying") {
       copy.append(el("strong", null, "Updating — back in a moment"));
     } else if (n.kind === "refresh") {
