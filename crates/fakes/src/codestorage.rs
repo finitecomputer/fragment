@@ -158,6 +158,9 @@ struct State {
     /// File reads answer 503 while set (an outage).
     #[serde(skip)]
     reads_failing: bool,
+    /// Reads of this one path answer 503 while set (`fail_file_read`).
+    #[serde(skip)]
+    read_failing: Option<String>,
     /// Repo deletes still to answer 503 (`fail_repo_deletes`).
     #[serde(skip)]
     deletes_failing: u32,
@@ -658,6 +661,9 @@ impl Inner {
             }
             ("GET", "files/metadata") => self.tree_page(&st.repos[&url], req),
             ("GET" | "HEAD", "file") if st.reads_failing => problem(503, "file reads are unavailable (the fake's outage lever)"),
+            ("GET" | "HEAD", "file") if st.read_failing.is_some() && req.query.get("path") == st.read_failing.as_ref() => {
+                problem(503, "this file's read is unavailable (the fake's one-path lever)")
+            }
             ("GET" | "HEAD", "file") => file(&st.repos[&url], req),
             ("GET", "commits") => commits(&st.repos[&url], req),
             ("GET", "merge/preview") => merge_preview(&st.repos[&url], req),
@@ -1169,6 +1175,12 @@ impl CodeStorage {
     /// File reads answer 503 until this is cleared.
     pub fn fail_file_reads(&self, failing: bool) {
         self.with(|st| st.reads_failing = failing);
+    }
+
+    /// Reads of `path` answer 503 until this is cleared (`None`): one
+    /// file of many failing, wherever it falls in a pull.
+    pub fn fail_file_read(&self, path: Option<&str>) {
+        self.with(|st| st.read_failing = path.map(str::to_string));
     }
 
     /// The next `n` commit packs each lose to a competitor commit (409).
