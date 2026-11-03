@@ -758,8 +758,16 @@ label.settings-line { cursor: pointer; }
 .agent-summary-item { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
 .agent-summary dd { font: var(--type-body); margin: 0; overflow-wrap: anywhere; }
 .agent-summary dd.muted { color: var(--text-tertiary); }
-.agent-dialog { width: min(560px, calc(100vw - 32px)); }
-.agent-dialog .agent-fields { margin-top: 20px; }
+.agent-dialog { width: min(440px, calc(100vw - 32px)); }
+/* a dialog's fields: one column, each its label above it */
+.agent-dialog .agent-fields { grid-template-columns: 1fr; gap: 16px; margin-top: 20px; }
+.agent-dialog .quiet { font: var(--type-control); min-height: 36px; padding: 0 15px; background: var(--bg-active); }
+.agent-dialog .quiet:hover { background: var(--bg-hover); }
+.agent-dialog label.quiet { cursor: pointer; }
+.agent-picture-field::after { content: none; }
+.agent-picture-buttons { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.agent-picture-shown { display: inline-flex; margin-right: 4px; }
+.agent-picture-shown .agent-avatar { width: 36px; height: 36px; }
 .agent-dialog .agent-model-label { display: flex; margin: 0; }
 .agent-dialog .agent-model-said { font: var(--type-caption); display: block; margin-top: 12px; }
 .agent-dialog .agent-model-said:empty { display: none; }

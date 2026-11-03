@@ -30,7 +30,7 @@ export function claudeSet(next, field, value) {
 const ROLE_MAX_CHARS = 48;
 const AGENTS_MAX = 16;
 
-export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, agents, named, rename, load, nameScreen, renderNames, computer, homePicker, addAgent, primaryAgent, chats, own, me }) {
+export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, agents, named, rename, retitle, load, nameScreen, renderNames, computer, homePicker, addAgent, primaryAgent, chats, own, me }) {
   // ---- an agent's name and picture (docs/api.md, "An agent's name and
   // picture"): its agent fragment's title and its avatar.png, written and
   // put live as any of its files are (POST …/files, then …/deploy). Every
@@ -263,6 +263,85 @@ export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, 
     await api("POST", `/api/f/${seg(agent)}/files`, { message: role ? "its role" : "no role", files: [{ path: "fragment.json", text: JSON.stringify(manifest, null, 2) + "\n" }] });
     await api("POST", `/api/f/${seg(agent)}/deploy`, {});
   }
+  // ---- an agent's name and picture in its Edit dialog, written as they
+  // change, as its other fields are: its name its fragment's title (as
+  // Rename writes it: fragment-title.js `retitle`), none or as it was
+  // changing nothing; its picture chosen there, or taken away
+  // (`setPicture`). Neither is said in its summary, which its card's
+  // header shows ----
+  function nameField(a, said) {
+    const field = el("input", "agent-name-field");
+    field.type = "text";
+    field.maxLength = 48;
+    field.dataset.nameFor = a.fragment;
+    field.value = titleOf(a.fragment);
+    named(field, a.fragment, (t) => `${t}'s name`, "aria-label");
+    field.onchange = async () => {
+      const title = field.value.trim();
+      if (!title || title === titleOf(a.fragment)) {
+        field.value = titleOf(a.fragment);
+        return;
+      }
+      field.disabled = true;
+      said.textContent = "Saving…";
+      try {
+        await retitle(a.fragment, title);
+        said.textContent = "Saved.";
+        await load();
+      } catch (e) {
+        said.textContent = e.message;
+        field.value = titleOf(a.fragment);
+      } finally {
+        field.disabled = false;
+      }
+    };
+    const label = settingLabel("Name", field);
+    label.dataset.summary = "skip";
+    return label;
+  }
+  function pictureField(a, said) {
+    const row = el("div", "agent-model-label agent-picture-field");
+    row.dataset.summary = "skip";
+    const shown = el("span", "agent-picture-shown");
+    const choose = el("label", "quiet");
+    const words = el("span");
+    const file = el("input");
+    file.type = "file";
+    file.accept = "image/png,image/jpeg,image/webp,image/gif";
+    file.hidden = true;
+    choose.append(words, file);
+    const remove = el("button", "quiet", "Remove picture");
+    remove.type = "button";
+    const draw = () => {
+      shown.replaceChildren(avatar(agentFace(a.fragment, a.identity)));
+      const has = !!byName(a.fragment)?.picture;
+      words.textContent = has ? "Change picture" : "Add a picture";
+      remove.hidden = !has;
+    };
+    draw();
+    const change = async (chosen) => {
+      file.disabled = remove.disabled = true;
+      said.textContent = chosen ? "Saving its picture…" : "Taking its picture away…";
+      try {
+        await setPicture(a.fragment, chosen);
+        said.textContent = "Saved.";
+        await load();
+        draw();
+      } catch (e) {
+        said.textContent = e.message;
+      } finally {
+        file.disabled = remove.disabled = false;
+        file.value = "";
+      }
+    };
+    file.onchange = () => file.files?.[0] && change(file.files[0]);
+    remove.onclick = () => change(null);
+    const buttons = el("span", "agent-picture-buttons");
+    buttons.append(shown, choose, remove);
+    row.append(el("span", "settings-key", "Picture"), buttons);
+    row.redraw = draw;
+    return row;
+  }
   function roleField(a, said) {
     const field = el("input", "agent-role");
     field.type = "text";
@@ -424,7 +503,7 @@ export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, 
   // what an agent's fields hold, as text: each shown field's label and its
   // value (a pick's option, both of a mode's picks), none said so
   function summaryOf(fields) {
-    return [...fields.querySelectorAll(":scope > .agent-model-label")].filter((l) => !l.hidden).map((l) => {
+    return [...fields.querySelectorAll(":scope > .agent-model-label")].filter((l) => !l.hidden && l.dataset.summary !== "skip").map((l) => {
       const shown = [...l.querySelectorAll("input, select")].filter((c) => !c.hidden);
       const value = shown.map((c) => (c.tagName === "SELECT" ? c.selectedOptions[0]?.textContent ?? "" : c.value.trim())).filter(Boolean).join(" · ");
       const item = el("div", "agent-summary-item");
@@ -444,7 +523,8 @@ export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, 
     // names (Private, Standard) or a model of a provider the person
     // connected; whether there is one, with a single route, is the agent's
     // own tier's to say (once agent.json is read)
-    const picks = [roleField(a, said), ...modelPickers(a, modeled, read, write, said), ...claudePickers(a, read, write, said), ...homePicker(a, said)];
+    const name = nameField(a, said), picture = pictureField(a, said);
+    const picks = [name, picture, roleField(a, said), ...homePicker(a, said), ...modelPickers(a, modeled, read, write, said), ...claudePickers(a, read, write, said)];
     const fields = el("div", "agent-fields");
     fields.append(...picks);
     const home = el("div", "agent-edit-home");
@@ -468,6 +548,9 @@ export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, 
     edit.onclick = () => {
       const d = editDialog();
       named(d.title, a.fragment, (t) => `Edit ${t}`);
+      // its name and picture as they are now (renamed, or pictured, elsewhere)
+      name.querySelector("input").value = titleOf(a.fragment);
+      picture.redraw();
       d.slot.replaceChildren(fields, said);
       d.dialog.onclose = () => {
         if (home.isConnected) home.append(fields, said);
