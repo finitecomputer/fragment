@@ -517,7 +517,8 @@ function changed(paths) {
 }
 
 async function refresh() {
-  const again = current && (every || stale.has(current));
+  const named = stale;
+  const all = every;
   stale = new Set();
   every = false;
   const before = new Set(index.keys());
@@ -525,6 +526,10 @@ async function refresh() {
   status();
   // a search asked, out or shown keeps the reader: only the tree follows
   if (searching || inflight || typing) return;
+  // the file open now, a file opened while the list was read included: read
+  // again when main changed it, or when it was not listed and is now (opened
+  // against the list before, it said there was no such file)
+  const again = current && (all || named.has(current) || (!before.has(current) && index.has(current)));
   // a file came or went: the open note, unchanged, is drawn again from what
   // was read (a picture or a note it names may be here now, or gone)
   const moved = files.length !== before.size || files.some((f) => !before.has(f.path));

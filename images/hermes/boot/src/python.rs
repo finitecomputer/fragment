@@ -18,10 +18,10 @@ pub const PYTHON: &str = "/usr/local/bin/python3";
 /// Hermes' own uv, linked by the image (its Dockerfile).
 pub const UV: &str = "/usr/local/bin/uv";
 
-/// The image's own Python packages (Playwright), installed at its build
-/// apart from Hermes' store, whose Python it records a digest of. The
-/// environment reads them after its own (`image_pth`), so an agent's
-/// install of one wins.
+/// The image's own Python packages (the document skills' libraries,
+/// Playwright), installed at its build apart from Hermes' store, whose
+/// Python it records a digest of. The environment reads them after its own
+/// (`image_pth`), so an agent's install of one wins.
 pub const IMAGE_PACKAGES: &str = "/opt/fragment/python";
 
 /// The `.pth` that names `IMAGE_PACKAGES` in an environment of Python

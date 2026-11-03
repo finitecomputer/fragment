@@ -117,7 +117,36 @@ pub fn notes(s: &mut Suite, api: &Api) -> Result<()> {
     let vault = Vault { home: &home, name: &name, dir: &dir, view: &view };
     hostile(s, api, &vault, &mut chrome, &page)?;
     links(s, api, &vault, &mut chrome, &page)?;
-    late(s, api, &vault, &mut chrome, &page)
+    late(s, api, &vault, &mut chrome, &page)?;
+    listed_late(s, api, &vault, &mut chrome, &page)
+}
+
+/// A note opened while the page's list is read again, before the list has
+/// it (a link to a page an agent just wrote, followed at once). Goal: once
+/// the list has it, it is drawn, not left as "no such file". Method: the
+/// list's read held (`HOLD_FETCH`) as main's move reaches the page, the
+/// note named meanwhile, the read let go, and the page waited on its body
+/// read (hosted e2e e90d7c4619 found it: preview's latency left the note
+/// "not in" its vault for good).
+fn listed_late(s: &mut Suite, api: &Api, vault: &Vault, chrome: &mut crate::browser::Browser, page: &crate::browser::Page) -> Result<()> {
+    let (home, name, dir) = (vault.home, vault.name, vault.dir);
+    let wait = Duration::from_secs(20);
+    chrome.eval(page, crate::browser::HOLD_FETCH)?;
+    chrome.eval(page, "(window.__hold = /^__files$/, true)")?;
+    std::fs::write(dir.join("notes/fresh.md"), "# fresh\n\nJust written.\n")?;
+    s.cli(api, home, &["sync", name, "--dir", dir.to_str().expect("utf-8 path")]);
+    let held = chrome.until(page, "window.__held.length === 1", wait);
+    chrome.eval(page, "(window.__hold = null, location.hash = '#/notes/fresh.md', true)")?;
+    let missing = chrome.until(page, "document.getElementById('reader')?.textContent.includes('notes/fresh.md is not in')", wait);
+    chrome.eval(page, "(window.__held.splice(0).forEach((go) => go()), true)")?;
+    let listed = chrome.until(page, "window.__consumed === 1", wait);
+    let drawn = chrome.until(page, "document.querySelector('#reader .doc h1')?.textContent === 'fresh'", wait);
+    s.ok(
+        "a note opened before the page's list has it is drawn once the list has it, not left as no such file",
+        held && missing && listed && drawn,
+        json!({ "held": held, "missing": missing, "listed": listed, "drawn": drawn, "reader": chrome.eval(page, "document.getElementById('reader')?.innerText.slice(0, 120) ?? ''")? }),
+    );
+    Ok(())
 }
 
 /// The notes fragment the lane made: its CLI's home, its name, the synced
