@@ -7955,10 +7955,18 @@ fn roster_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person
     click_chat(b, page, &chat)?;
     let want = json!([{ "agent": reader, "outside": false }, { "agent": first, "outside": true }]);
     let listed = mentions_until(s, b, page, &host, "@", &want, wait);
-    let placeholder = b.eval_in_frame(page, &host, "document.getElementById('text')?.placeholder ?? null").unwrap_or(Value::Null);
+    // The list is read as `@` is typed, from the chat's members as they
+    // are; the placeholder is drawn from them on the frame after they come
+    // (`readMembers` schedules a render, whose `renderChrome` sets it), so
+    // it is waited for as the list is (it read "Message" a frame early).
+    let mut placeholder = Value::Null;
+    let named = s.eventually(wait, || {
+        placeholder = b.eval_in_frame(page, &host, "document.getElementById('text')?.placeholder ?? null").unwrap_or(Value::Null);
+        placeholder.as_str().is_some_and(|p| p.ends_with(", or @ someone else"))
+    });
     s.ok(
         "in a chat of their own, @ lists its agent, then their other agent, marked as one the message adds",
-        listed == want && placeholder.as_str().is_some_and(|p| p.ends_with(", or @ someone else")),
+        listed == want && named,
         json!({ "listed": listed, "placeholder": placeholder }),
     );
     let _ = b.screenshot(page, &shots.join("desktop-roster.png"));
