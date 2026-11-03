@@ -18,10 +18,9 @@ export function setAsideSaid(aside) {
 }
 
 // What the person is told of a disk filling (the `disk_filling` notice),
-// here too: how much room is left, and what to do before it runs out.
-export const DISK_TITLE = "Your computer is almost full";
+// here too, in one line (Paul's words): the room left, and what to do.
 export function diskSaid(n) {
-  return `It has ${size(n.free)} of space left. When it's full, your agents can't save their work. Delete files you don't need, or ask an agent to tidy up.`;
+  return `Your computer is almost full (${size(n.free)} left). Delete files you don't need, or ask an agent to tidy up.`;
 }
 
 export function createComputer({ api, el, seg, named, section, line, actionLine, computer, agents, computerFailed, support, setupPending, made, computerIs, reopenSettings, openScreen, markOffer, reads, load }) {
@@ -142,7 +141,7 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
       say(ASIDE_TITLE, setAsideSaid(n.aside));
     } else if (n.kind === "disk_filling") {
       row.classList.add("warn");
-      say(DISK_TITLE, diskSaid(n));
+      copy.append(el("strong", null, diskSaid(n)));
     } else if (n.kind === "deploying") {
       copy.append(el("strong", null, "Updating — back in a moment"));
     } else if (n.kind === "refresh") {
