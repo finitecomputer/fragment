@@ -111,8 +111,9 @@ has none of it.
   under its card. The card stays answerable until it expires; a late
   answer starts one fresh turn, claimed by the answer, with the card's
   turn as its note, and the old turn never resumes (docs/bridge.md, "A
-  card outlives its turn (P6)"). Not yet proved by a hosted run's real
-  sleep and wake: the Docker lane's sleep is a save and a restore.
+  card outlives its turn (P6)"). Proved on real Hermes by the `hermes`
+  lane: a turn cut under its card by a sleep and a wake, then its late
+  answer. Not yet by a hosted run's real sleep and wake.
 
 **A+ now, toward E** (Paul, 2026-10-05). A save asked of the guest covers
 only the writers it knows of, and some state must never go back in time

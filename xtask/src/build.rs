@@ -276,30 +276,62 @@ fn worker_build_installed() -> Result<()> {
 /// --provenance=false [--build-arg …] -f - <context>`, the Dockerfile on
 /// stdin), so the boot's build finds every layer cached. A cold build of
 /// the stub compiles its bridge in Docker: minutes that pass beside the
-/// Rust and Wasm builds instead of after them. CI builds the stub just
-/// before, from its layers in the Actions cache unless the bridge changed
-/// (ci.yml, e2e-shard), so there every step here is cached.
+/// Rust and Wasm builds instead of after them. In CI the build reads its
+/// layers from the Actions cache (`image_cache_args`); a build beside it
+/// that read them for itself warmed nothing here (BuildKit takes a remote
+/// cache's hits without fetching them, and a build that exports nothing
+/// keeps nothing), so the stub compiled its bridge on every shard.
 pub fn images() -> Result<()> {
     let cell = devstack::cell_dir();
     let mut config = devstack::read_config(&cell)?;
     devstack::absolute_images(&mut config, &cell)?;
     let containers = config["containers"].as_array().cloned().unwrap_or_default();
+    let env = |k: &str| std::env::var(k).ok();
     // bounded: the images one config names
-    for container in &containers {
-        for (name, image) in container["images"].as_object().into_iter().flatten() {
-            let t0 = Instant::now();
-            image_build(image, None).with_context(|| format!("building the {name} image ahead of the node"))?;
-            println!("image {name} built ahead of the node in {:.1?}", t0.elapsed());
-        }
+    for (n, (name, image)) in containers.iter().flat_map(|c| c["images"].as_object().into_iter().flatten()).enumerate() {
+        let t0 = Instant::now();
+        let built = docker_build(image, None, &["--load".as_ref()], &image_cache_args(env, n == 0)).with_context(|| format!("building the {name} image ahead of the node"))?;
+        let (cached, steps) = cached_steps(&built);
+        println!("image {name} built ahead of the node in {:.1?} ({cached} of {steps} steps cached)", t0.elapsed());
     }
     Ok(())
 }
 
-/// One image, as wrangler builds it. Ahead of the node it is untagged and
-/// its output shown only when it fails; a push's (`tag`: image.rs) is
-/// tagged, and its output shown as it runs.
-pub fn image_build(image: &serde_json::Value, tag: Option<&str>) -> Result<()> {
-    docker_build(image, tag, &["--load".as_ref()])
+/// The Actions cache an image built ahead of the node reads, and writes
+/// when asked (.github/actions/e2e-build, which hands the build the
+/// Actions runtime BuildKit's `type=gha` cache needs): `FRAGMENT_IMAGE_CACHE`
+/// names it (`type=gha,scope=…`), and `FRAGMENT_IMAGE_CACHE_SAVE=true`
+/// (master's pushes alone) writes it, every stage's layers. Only the
+/// config's `first` image writes: the others share its layers, and one
+/// writer keeps the scope one build's. Neither set (a local run, any run
+/// outside Actions), an image builds with no cache flags, from the
+/// builder's own layers.
+fn image_cache_args(env: impl Fn(&str) -> Option<String>, first: bool) -> Vec<String> {
+    let Some(cache) = env("FRAGMENT_IMAGE_CACHE").filter(|c| !c.is_empty()) else { return Vec::new() };
+    let mut args = vec!["--cache-from".to_string(), cache.clone()];
+    if first && env("FRAGMENT_IMAGE_CACHE_SAVE").as_deref() == Some("true") {
+        args.extend(["--cache-to".to_string(), format!("{cache},mode=max,ignore-error=true")]);
+    }
+    args
+}
+
+/// How many of a build's steps BuildKit took from its cache, of all it
+/// ran (its plain progress: `#N [stage k/n] …`, then `#N CACHED`).
+fn cached_steps(progress: &str) -> (usize, usize) {
+    let mut steps = std::collections::BTreeSet::new();
+    let mut cached = std::collections::BTreeSet::new();
+    for line in progress.lines() {
+        let Some((id, rest)) = line.strip_prefix('#').and_then(|l| l.split_once(' ')) else { continue };
+        if id.parse::<u32>().is_err() {
+            continue;
+        }
+        if rest.starts_with('[') && !rest.starts_with("[internal]") && !rest.starts_with("[auth]") {
+            steps.insert(id.to_string());
+        } else if rest == "CACHED" {
+            cached.insert(id.to_string());
+        }
+    }
+    (cached.intersection(&steps).count(), steps.len())
 }
 
 /// One image built and pushed as `tag` straight from BuildKit's builder:
@@ -309,16 +341,19 @@ pub fn image_build(image: &serde_json::Value, tag: Option<&str>) -> Result<()> {
 /// BuildKit writes what it pushed to `metadata` (its digest,
 /// `containerimage.digest`).
 pub fn image_push(image: &serde_json::Value, tag: &str, metadata: &Path) -> Result<()> {
-    docker_build(image, Some(tag), &["--push".as_ref(), "--metadata-file".as_ref(), metadata.as_os_str()])
+    docker_build(image, Some(tag), &["--push".as_ref(), "--metadata-file".as_ref(), metadata.as_os_str()], &[]).map(drop)
 }
 
-/// `docker build` of `image`, `how` its output (`--load`, or `--push`).
-fn docker_build(image: &serde_json::Value, tag: Option<&str>, how: &[&std::ffi::OsStr]) -> Result<()> {
+/// `docker build` of `image` as wrangler builds it, `how` its output
+/// (`--load`, or `--push`), `cache` its cache flags. Untagged (ahead of the
+/// node), its output is kept, shown only when it fails, and answered (its
+/// progress); a push's (`tag`: image.rs) is shown as it runs.
+fn docker_build(image: &serde_json::Value, tag: Option<&str>, how: &[&std::ffi::OsStr], cache: &[String]) -> Result<String> {
     let dockerfile = image["dockerfile"].as_str().context("an image names its dockerfile")?;
     let context = image["build_context"].as_str().context("an image names its build context")?;
     let text = std::fs::read(dockerfile).with_context(|| format!("read {dockerfile}"))?;
     let mut cmd = Command::new("docker");
-    cmd.arg("build").args(how).args(["--platform", "linux/amd64", "--provenance=false"]);
+    cmd.arg("build").args(how).args(["--platform", "linux/amd64", "--provenance=false"]).args(cache);
     if let Some(tag) = tag {
         cmd.args(["-t", tag]);
     }
@@ -337,11 +372,48 @@ fn docker_build(image: &serde_json::Value, tag: Option<&str>, how: &[&std::ffi::
     if !out.status.success() {
         bail!("{shown} failed: {}\n{}{}", out.status, String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     }
-    Ok(())
+    Ok(String::from_utf8_lossy(&out.stderr).into_owned())
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
+    /// Goal: an image built ahead of the node reads the Actions cache only
+    /// when CI names one, and writes it only when asked, from the config's
+    /// first image. Valid: outside Actions (nothing set, or an empty name),
+    /// no cache flags at all, as a local `cargo xtask e2e` builds; a cache
+    /// named, `--cache-from` it; asked to save, `--cache-to` it (every
+    /// stage's layers), from the first image alone. Invalid: a save asked
+    /// with no cache named writes nothing; a save other than `true`, none.
+    #[test]
+    fn an_image_reads_the_actions_cache_only_where_one_is_named() {
+        let env = |pairs: &[(&str, &str)]| {
+            let m: HashMap<String, String> = pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+            move |k: &str| m.get(k).cloned()
+        };
+        let gha = "type=gha,scope=e2e-stub";
+        assert!(super::image_cache_args(env(&[]), true).is_empty(), "outside Actions: no cache flags");
+        assert!(super::image_cache_args(env(&[("FRAGMENT_IMAGE_CACHE", "")]), true).is_empty());
+        assert!(super::image_cache_args(env(&[("FRAGMENT_IMAGE_CACHE_SAVE", "true")]), true).is_empty(), "nothing to write to");
+        assert_eq!(super::image_cache_args(env(&[("FRAGMENT_IMAGE_CACHE", gha)]), true), ["--cache-from", gha]);
+        assert_eq!(super::image_cache_args(env(&[("FRAGMENT_IMAGE_CACHE", gha), ("FRAGMENT_IMAGE_CACHE_SAVE", "false")]), true), ["--cache-from", gha]);
+        let saving = env(&[("FRAGMENT_IMAGE_CACHE", gha), ("FRAGMENT_IMAGE_CACHE_SAVE", "true")]);
+        assert_eq!(super::image_cache_args(&saving, true), ["--cache-from", gha, "--cache-to", "type=gha,scope=e2e-stub,mode=max,ignore-error=true"]);
+        assert_eq!(super::image_cache_args(&saving, false), ["--cache-from", gha], "only the first image writes");
+    }
+
+    /// Goal: a build's cached steps are counted from BuildKit's plain
+    /// progress: a stage's step, then its `CACHED`, once each however often
+    /// a step is printed; its internal and auth steps are no stage's.
+    #[test]
+    fn a_builds_cached_steps_are_counted_from_its_progress() {
+        let progress = "#1 [internal] load build definition from Dockerfile\n#1 DONE 0.0s\n#2 [auth] library/rust:pull token\n\
+            #8 [stage-2  1/10] FROM docker.io/library/busybox\n#8 CACHED\n#14 [cli  2/25] WORKDIR /src\n#14 CACHED\n\
+            #28 [build 6/6] RUN cargo build --release\n#28 0.512 Compiling fragment-bridge\n#28 [build 6/6] RUN cargo build --release\n#28 DONE 93.1s\n#3 CACHED\n";
+        assert_eq!(super::cached_steps(progress), (2, 3), "FROM and WORKDIR cached, the bridge compiled; #3 is no stage's step");
+        assert_eq!(super::cached_steps(""), (0, 0));
+    }
     /// The budget is inclusive, and a one-byte difference stays visible
     /// even when the rounded MB is identical. Extreme sizes never wrap.
     #[test]

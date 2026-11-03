@@ -4855,7 +4855,8 @@ async fn python_env_said(c: &Container, n: usize) -> serde_json::Value {
 /// document libraries, by `python` and `python3`. Restart and wake: they
 /// still import, the boot keeping the environment, and so after an image
 /// update whose Python is the same minor release at another path (Codex on
-/// #989). Invalid: one made for another Python is set aside, its packages
+/// #989), the old path kept or gone, and one bound to that old path
+/// rebound to the stable name. Invalid: one made for another Python is set aside, its packages
 /// listed for `pip install -r`, and a new one with pip made. Replay: the
 /// start after keeps that one.
 #[tokio::test]
@@ -4865,6 +4866,11 @@ async fn the_computers_python_keeps_what_its_agents_install() {
     let made = python_env_said(&c, 1).await;
     assert_eq!(made["event"], "python.env", "{made}");
     assert_eq!(made["plan"], "Make", "a first start makes it: {made}");
+    // its Python by the name every image links it at, which uv keeps
+    let (link, cfg) = (c.exec_out(&["readlink", "/data/work/python/bin/python"]), c.exec_out(&["cat", "/data/work/python/pyvenv.cfg"]));
+    eprintln!("python env: bin/python -> {}pyvenv.cfg:\n{cfg}", link);
+    assert_eq!(link.trim(), "/usr/local/bin/python3");
+    assert!(cfg.lines().any(|l| l == "home = /usr/local/bin"), "{cfg}");
     let wheels = c.exec_code(&["/command/s6-setuidgid", "hermes", "/usr/local/bin/python3", "-c", TEST_WHEELS, "by_pip", "by_uv"]);
     assert_eq!(wheels.0, 0, "the test's wheels: {}", wheels.1);
 
@@ -4915,17 +4921,32 @@ async fn the_computers_python_keeps_what_its_agents_install() {
     // the path's end: what the terminal says masks a run of digits in it
     assert!(said.contains("-next by_uv-ok") && said.contains("base /opt/hermes/tools/python-"), "it runs the newly linked Python ({next}), its packages kept: {said}");
 
+    // one bound to the store's own path (as another uv may bind it), and
+    // that path gone, as an update of the same minor release leaves it:
+    // the start rebinds it to the stable name, and keeps it
+    let real = c.exec_out(&["readlink", "-f", &format!("{old}/bin/python3")]);
+    assert!(c.exec(&["sh", "-c", &format!("ln -sfn '{}' /data/work/python/bin/python && sed -i 's|^home = .*|home = {old}/bin|' /data/work/python/pyvenv.cfg", real.trim())]));
+    assert!(c.exec(&["mv", &old, &format!("{old}.gone")]));
+    c.restart();
+    assert_eq!(python_env_said(&c, 3).await["plan"], "Keep", "rebound, then kept");
+    assert!(c.logs().contains("\"event\":\"python.rebound\""), "it said it rebound");
+    assert_eq!(c.exec_out(&["readlink", "/data/work/python/bin/python"]).trim(), "/usr/local/bin/python3");
+    assert!(c.exec_out(&["cat", "/data/work/python/pyvenv.cfg"]).lines().any(|l| l == "home = /usr/local/bin"));
+    let ran = c.exec_out(&["/command/s6-setuidgid", "hermes", "/data/work/python/bin/python", "-c", "import sys, by_uv; print(sys.base_prefix, by_uv.OK)"]);
+    assert_eq!(ran.trim(), format!("{next} by_uv-ok"), "the old path gone, it runs the linked Python, packages kept");
+    assert!(c.exec(&["mv", &format!("{old}.gone"), &old]));
+
     // one made for another Python: set aside, listed, and made again
     assert!(c.exec(&["sed", "-i", "s/^version_info = .*/version_info = 3.13.5/", "/data/work/python/pyvenv.cfg"]));
     assert!(c.exec(&["mv", "/data/work/python/lib/python3.14", "/data/work/python/lib/python3.13"]));
     c.restart();
-    let remade = python_env_said(&c, 3).await;
+    let remade = python_env_said(&c, 4).await;
     assert_eq!((remade["plan"].as_str(), remade["set_aside"].as_str()), (Some("SetAside(Some(\"3.13\"))"), Some("/data/work/python.3.13")), "{remade}");
     assert_eq!(c.exec_out(&["cat", "/data/work/python.3.13/requirements.txt"]), "by_pip==1.0\nby_uv==1.0\n");
     let said = tool_said(&fake, &chat, &c, "run: cd /tmp && pip --version && python -c 'import by_pip' || echo by_pip-gone").await;
     assert!(said.contains("/data/work/python/lib/python3.14/site-packages/pip") && said.contains("by_pip-gone"), "a new one, with pip and without the old packages: {said}");
     c.restart();
-    assert_eq!(python_env_said(&c, 4).await["plan"], "Keep", "the start after keeps the new one");
+    assert_eq!(python_env_said(&c, 5).await["plan"], "Keep", "the start after keeps the new one");
     assert_eq!(c.exec_out(&["ls", "/data/work"]).lines().filter(|l| l.starts_with("python")).collect::<Vec<_>>(), ["python", "python.3.13"], "set aside once");
 }
 

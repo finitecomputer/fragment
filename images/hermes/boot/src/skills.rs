@@ -82,7 +82,7 @@ pub const EXTERNAL_DIRS: [&str; 2] = [MANAGED_DIR, PLATFORM_VIEW];
 const COMPUTER_PAGE: &str = include_str!("computer.md");
 /// The platform skill's description, which Hermes lists in every turn's
 /// prompt (its skills index): what makes an agent load it.
-const PLATFORM_DESCRIPTION: &str = "You are an agent on a Fragment computer: what that is, and the `fragment` CLI in your terminal, which acts as you. Load it before you list, read, make, change, deploy or share your owner's fragments (apps, sites, brains, chats), when asked what you can do here, to ask another of your owner's agents (`fragment ask`), for anything later or recurring (`fragment schedule`), and for your owner's connections (Google: GOOGLE_OAUTH_ACCESS_TOKEN) or your desktop.";
+const PLATFORM_DESCRIPTION: &str = "You are an agent on a Fragment computer: what that is, and the `fragment` CLI in your terminal, which acts as you. Load it before you list, read, make, change, deploy or share your owner's fragments (apps, sites, brains, chats), when asked what you can do here, to ask another of your owner's agents (`fragment ask`), for anything later or recurring (`fragment schedule`), to search past conversations and brains (`fragment search`), and for your owner's connections (Google: GOOGLE_OAUTH_ACCESS_TOKEN) or your desktop.";
 /// The platform skill is a page or two, not a manual. 20 KiB since
 /// 2026-10-22: the computer's page's "Files your owner sends you" took it
 /// past 16 KiB, which it had all but reached.
@@ -711,6 +711,19 @@ mod tests {
     /// as a skill (one frontmatter, a one-line description it lists, nothing
     /// its guard flags or its preprocessing would run). Invalid: a CLI skill
     /// with no frontmatter, or another name, is refused.
+    /// Goal (Paul's prod agent, 2026-11-02: `session_search` found nothing of
+    /// a conversation from before its computer, which the Session Archive
+    /// held): every agent is told what Hermes' `session_search` sees, and
+    /// how to search the rest, in the page and in the description that gets
+    /// it loaded.
+    #[test]
+    fn an_agent_is_told_where_past_conversations_are() {
+        for said in ["`session_search` sees only this computer's other chats since it started", "never the one you are in", "chats imported from elsewhere", "fragment search --all \"<words>\"", "`--in <fragment>`"] {
+            assert!(COMPUTER_PAGE.contains(said), "computer.md says {said}");
+        }
+        assert!(PLATFORM_DESCRIPTION.contains("to search past conversations and brains (`fragment search`)"));
+    }
+
     #[test]
     fn the_platform_skill_is_the_clis_after_the_computers_page() {
         let cli = &cli_skill();
