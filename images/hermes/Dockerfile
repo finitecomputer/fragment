@@ -168,12 +168,30 @@ RUN HERMES_HOME=/tmp/pm-agent-browser /opt/hermes/.venv/bin/python -c 'from pm i
 # the computer's next start from this image (docs/computers.md, "Root in
 # our Hermes image"). apt's lists are kept, fresh as of this build. sudo
 # keeps npm's global prefix (npm_config_prefix, below), so `sudo npm
-# install -g` puts a program in /usr/local/bin.
+# install -g` puts a program in /usr/local/bin, and Playwright's browsers
+# directory (PLAYWRIGHT_BROWSERS_PATH), so `sudo playwright install` puts
+# a browser where an agent's own launch looks, never in root's cache, and
+# PLAYWRIGHT_SKIP_BROWSER_GC (the final stage), so it removes nothing there.
 RUN apt-get -o Acquire::Retries=3 update \
  && DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 install -y --no-install-recommends sudo \
- && printf 'Defaults env_keep += "npm_config_prefix"\nhermes ALL=(ALL:ALL) NOPASSWD: ALL\n' > /etc/sudoers.d/hermes \
+ && printf 'Defaults env_keep += "npm_config_prefix PLAYWRIGHT_BROWSERS_PATH PLAYWRIGHT_SKIP_BROWSER_GC"\nhermes ALL=(ALL:ALL) NOPASSWD: ALL\n' > /etc/sudoers.d/hermes \
  && chmod 0440 /etc/sudoers.d/hermes \
  && visudo -c -q
+
+# Four small tools an agent reaches for, from Debian's own packages (Paul,
+# 2026-11-02): archives (unzip, zip), JSON (jq) and SQLite's shell
+# (sqlite3). Upstream puts its newer SQLite library in /usr/local/lib,
+# which the loader finds first for every program, and Debian's shell
+# refuses a library not its own ("SQLite header and source version
+# mismatch"), so `sqlite3` by name runs it with Debian's library first.
+COPY --chmod=755 <<'EOF' /usr/local/bin/sqlite3
+#!/bin/sh
+# Debian's sqlite3 with Debian's SQLite library (images/hermes/Dockerfile).
+LD_LIBRARY_PATH="/usr/lib/x86_64-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" exec /usr/bin/sqlite3 "$@"
+EOF
+RUN DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 install -y --no-install-recommends unzip zip jq sqlite3 \
+ && unzip -v > /dev/null && zip -v > /dev/null && jq --version \
+ && test "$(/usr/local/bin/sqlite3 :memory: 'select sqlite_version()')" = "$(dpkg-query -W -f '${Version}' sqlite3 | cut -d- -f1)"
 
 # Every agent reads the pinned Hermes skills through the boot's read-only
 # view, beside the platform skill. Move them out of Hermes' sync source:
@@ -227,6 +245,30 @@ RUN uv="$(/opt/hermes/.venv/bin/python -c 'from pm._uv import _toolchain; print(
  && echo /opt/fragment/python > "$(/opt/hermes/.venv/bin/python -c 'import sysconfig; print(sysconfig.get_path("purelib"))')/fragment-image.pth" \
  && /opt/hermes/.venv/bin/python -c 'import reportlab, pypdf, pdfplumber, pypdfium2, pymupdf, docx, pptx, openpyxl' \
  && PYTHONPATH=/opt/fragment/python /usr/local/bin/python3 -c 'import reportlab, pypdf, pdfplumber, pypdfium2, pymupdf, docx, pptx, openpyxl'
+
+# Playwright for an agent's own code, Python's and Node's, at one release,
+# and no browser of its own: it launches the system Chromium (links in the
+# final stage). Python's is the image's own package directory,
+# /opt/fragment/python, which the boot names in the computer's Python
+# environment (boot/src/python.rs, a .pth); never Hermes' PM store, whose
+# Python it records a digest of. Its lock pins versions and SHA-256s,
+# resolved on Python 3.14 (`uv pip compile --generate-hashes
+# --python-version 3.14 --python-platform x86_64-manylinux_2_28` of
+# `playwright==<release>`, in /opt/hermes, so upstream's uv config holds
+# it to releases two weeks old, as npm's min-release-age does Node's).
+# Node's is global (/usr/local, as `sudo npm install -g` puts one),
+# required through NODE_PATH, and its CLI is `playwright`. The build fails unless both are the same release. Python's
+# wheel bundles a Node of its own for its driver (121 MB, as a second
+# Chromium would be): it goes, and the driver runs on the image's Node,
+# which PLAYWRIGHT_NODEJS_PATH names (the final stage), the override
+# Playwright's Python driver reads.
+COPY images/hermes/playwright-requirements.txt /tmp/playwright-requirements.txt
+RUN uv="$(/opt/hermes/.venv/bin/python -c 'from pm._uv import _toolchain; print(_toolchain(realize=False)[0])')" \
+ && UV_CACHE_DIR=/tmp/uv-cache "$uv" pip install --quiet --python /usr/local/bin/python3 --target /opt/fragment/python --require-hashes --no-build -r /tmp/playwright-requirements.txt \
+ && PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm install --global --prefix /usr/local --cache /tmp/npm-cache --no-fund --no-audit "playwright@$(sed -n 's/^playwright==\([0-9.]*\).*/\1/p' /tmp/playwright-requirements.txt)" \
+ && rm -rf /tmp/uv-cache /tmp/npm-cache /tmp/playwright-requirements.txt /opt/fragment/python/playwright/driver/node \
+ && /usr/local/bin/python3 -m compileall -q --invalidation-mode unchecked-hash /opt/fragment/python > /dev/null \
+ && test "$(PYTHONPATH=/opt/fragment/python /usr/local/bin/python3 -c 'from importlib.metadata import version; print(version("playwright"))')" = "$(/usr/local/bin/playwright --version | sed 's/^Version //')"
 
 # Bytecode in the image (S3b, cut a: -6.2 s). unchecked-hash: /opt/hermes is
 # sealed, so nothing can make a .pyc stale.
@@ -301,6 +343,51 @@ VIRTUAL_ENV=/data/work/python
 export VIRTUAL_ENV
 PATH="$VIRTUAL_ENV/bin:$PATH"
 export PATH
+EOF
+# The image's global Node packages (Playwright) for an agent's own
+# `require()`, which reads no global folder unless NODE_PATH names it
+# (Node's "loading from the global folders").
+COPY <<'EOF' /etc/profile.d/fragment-node.sh
+# The image's global Node packages (images/hermes/Dockerfile).
+NODE_PATH=/usr/local/lib/node_modules
+export NODE_PATH
+EOF
+# The Node that runs Playwright's CLI, `<this> <cli.js> <args>`: Python's
+# driver through PLAYWRIGHT_NODEJS_PATH, the global CLI through its
+# /usr/local/bin/playwright. Playwright's `install` takes a lock in its
+# browsers directory (PLAYWRIGHT_BROWSERS_PATH, root's here: Hermes' store)
+# and, as the agent's user, retries it for ten minutes before it fails;
+# agents run it from habit and old skills. So, there only, `install` is
+# answered at once: for the image's own release, Chromium (or no browser
+# named) is installed already, the system Chromium; anything else is
+# root's to install. `uninstall` is refused in Hermes' store (below). Every
+# other command runs as it is.
+COPY --chmod=755 <<'EOF' /opt/fragment/bin/playwright-node
+#!/bin/sh
+# Playwright's Node, answering an `install` it cannot do (images/hermes/Dockerfile).
+browsers="${PLAYWRIGHT_BROWSERS_PATH:-$HOME/.cache/ms-playwright}"
+if [ "${2-}" = uninstall ] && [ "$browsers" = /opt/hermes/tools ]; then
+  echo "playwright uninstall would remove Hermes' own tools from $browsers; Playwright here has no browser of its own to uninstall." >&2
+  exit 1
+fi
+if [ "${2-}" = install ] && [ -d "$browsers" ] && [ ! -w "$browsers" ]; then
+  others="" n=0
+  for arg in "$@"; do
+    n=$((n + 1))
+    [ "$n" -le 2 ] && continue
+    case "$arg" in -*|chromium|chromium-headless-shell) ;; *) others="$others $arg" ;; esac
+  done
+  case "$1" in
+  /opt/fragment/python/playwright/driver/package/cli.js|/usr/local/lib/node_modules/playwright/cli.js)
+    if [ -z "$others" ]; then
+      echo "Playwright's Chromium is installed already: it runs this computer's own Chromium."
+      exit 0
+    fi ;;
+  esac
+  echo "playwright install:${others:- this Playwright release's browsers} can only be installed as root here (sudo playwright install${others})." >&2
+  exit 1
+fi
+exec /usr/local/bin/node "$@"
 EOF
 COPY images/hermes/preload.py /opt/fragment/preload.py
 COPY images/hermes/tool_keys.py /opt/fragment/tool_keys.py
@@ -440,6 +527,65 @@ RUN /opt/fragment/bin/hermes-boot build-info \
  && /opt/hermes/.venv/bin/python -m compileall -q --invalidation-mode unchecked-hash \
     /opt/hermes/tools/browser_tool_session.py /opt/hermes/tools/bot_desktop/browser.py \
     /opt/hermes/tools/bot_desktop/runtime.py /opt/hermes/tools/bot_desktop/fragment_browser.py
+# Playwright launches the system Chromium, the one the desktop and Hermes'
+# browser run (/opt/fragment/bin/chromium: /usr/bin/chromium with a
+# container's flags), never a browser of its own: Chrome for Testing fails
+# Cloudflare's bot check where the system Chromium passes (Paul's prod
+# agent, 2026-10-28). Playwright reads no setting for its browser's path,
+# only a launch's `executable_path`; it finds a browser by its release's
+# revision under PLAYWRIGHT_BROWSERS_PATH. So the system Chromium is put
+# there under those names, as nixpkgs' playwright-driver.browsers puts its
+# own Chromium, and a plain `chromium.launch()` (the headless shell's name)
+# and `channel="chromium"` (the browser's) both run it. INSTALLATION_COMPLETE
+# is Playwright's own mark of an installed browser: `sudo playwright install
+# chromium` finds them, FFmpeg's too, and downloads nothing. The build fails unless
+# both runtimes print a page with it, Python's on the image's Node (through
+# playwright-node).
+# PLAYWRIGHT_BROWSERS_PATH is Hermes' tool store, and Playwright's install
+# collects every browser-named directory there that no Playwright on the
+# computer links: a `sudo playwright install` removed Hermes' own Chrome
+# for Testing and its FFmpeg (/usr/local/bin/ffmpeg's). It never collects
+# here, under sudo too (sudoers, above); `uninstall`, which collects
+# whatever is set, playwright-node refuses there.
+ENV PLAYWRIGHT_NODEJS_PATH=/opt/fragment/bin/playwright-node \
+    PLAYWRIGHT_SKIP_BROWSER_GC=1
+RUN <<'EOF'
+set -eu
+# the global CLI through Playwright's Node (playwright-node, above)
+rm /usr/local/bin/playwright
+printf '#!/bin/sh\n# Playwright'"'"'s CLI (images/hermes/Dockerfile).\nexec /opt/fragment/bin/playwright-node /usr/local/lib/node_modules/playwright/cli.js "$@"\n' > /usr/local/bin/playwright
+chmod 755 /usr/local/bin/playwright
+# the check leaves nothing behind: no compile cache, no headless profile
+export NODE_DISABLE_COMPILE_CACHE=1
+browsers=/usr/local/lib/node_modules/playwright/node_modules/playwright-core/browsers.json
+rev() { /usr/local/bin/node -p "require('$browsers').browsers.find(b => b.name === '$1').revision"; }
+# Chromium's two names, and FFmpeg's (which `install chromium` brings, for
+# a page's video: the image's own, libvpx's VP8 and MJPEG in it)
+for link in "chromium-$(rev chromium)/chrome-linux64/chrome /opt/fragment/bin/chromium" \
+  "chromium_headless_shell-$(rev chromium-headless-shell)/chrome-headless-shell-linux64/chrome-headless-shell /opt/fragment/bin/chromium" \
+  "ffmpeg-$(rev ffmpeg)/ffmpeg-linux /usr/local/bin/ffmpeg"; do
+  at="${link% *}"
+  mkdir -p "$PLAYWRIGHT_BROWSERS_PATH/${at%/*}"
+  ln -s "${link#* }" "$PLAYWRIGHT_BROWSERS_PATH/$at"
+  touch "$PLAYWRIGHT_BROWSERS_PATH/${at%%/*}/INSTALLATION_COMPLETE"
+done
+cd /tmp
+PYTHONPATH=/opt/fragment/python /usr/local/bin/python3 -c '
+from playwright.sync_api import sync_playwright
+with sync_playwright() as p:
+    for channel in (None, "chromium"):
+        b = p.chromium.launch(channel=channel)
+        pdf = b.new_page().pdf()
+        assert pdf.startswith(b"%PDF-") and b.version.startswith("'"$(/usr/bin/chromium --version | sed 's/^Chromium \([0-9.]*\).*/\1/')"'"), (channel, b.version)
+        b.close()'
+NODE_PATH=/usr/local/lib/node_modules /usr/local/bin/node -e '
+require("playwright").chromium.launch().then(async b => {
+  const pdf = await (await b.newPage()).pdf();
+  await b.close();
+  if (pdf.subarray(0, 5).toString() !== "%PDF-") throw new Error("no PDF");
+}).catch(e => { console.error(e); process.exit(1); })'
+rm -rf /tmp/fragment-chromium-0
+EOF
 # which build this is, served beside the screen (the platform's upgrade and
 # rollback lane reads it through the computer's port): a layer of its own,
 # so another build shares the ones above

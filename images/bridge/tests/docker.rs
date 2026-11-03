@@ -4949,3 +4949,93 @@ async fn the_computers_python_keeps_what_its_agents_install() {
     assert_eq!(python_env_said(&c, 5).await["plan"], "Keep", "the start after keeps the new one");
     assert_eq!(c.exec_out(&["ls", "/data/work"]).lines().filter(|l| l.starts_with("python")).collect::<Vec<_>>(), ["python", "python.3.13"], "set aside once");
 }
+
+/// An agent's own Playwright, Python's: a screenshot and a PDF of a page,
+/// with a plain `chromium.launch()`.
+const PLAYWRIGHT_PY: &str = r#"from playwright.sync_api import sync_playwright
+with sync_playwright() as p:
+    b = p.chromium.launch()
+    page = b.new_page()
+    page.set_content("<h1>hello from python</h1>")
+    page.screenshot(path="/tmp/pw/py.png")
+    page.pdf(path="/tmp/pw/py.pdf")
+    print("python-chromium", b.version)
+    # a page's video, through the FFmpeg Playwright finds
+    context = b.new_context(record_video_dir="/tmp/pw/video")
+    context.new_page().set_content("<h1>a video</h1>")
+    context.close()
+    import pathlib
+    print("videos", sum(1 for v in pathlib.Path("/tmp/pw/video").glob("*.webm") if v.stat().st_size > 0))
+    b.close()
+"#;
+
+/// The same, Node's.
+const PLAYWRIGHT_JS: &str = r#"const { chromium } = require('playwright');
+chromium.launch().then(async b => {
+  const page = await b.newPage();
+  await page.setContent('<h1>hello from node</h1>');
+  await page.screenshot({ path: '/tmp/pw/js.png' });
+  await page.pdf({ path: '/tmp/pw/js.pdf' });
+  console.log('node-chromium', b.version());
+  await b.close();
+}).catch(e => { console.error(e); process.exit(1); });
+"#;
+
+/// Goal (Paul, 2026-11-02): an agent's own Python and Node code run
+/// Playwright with a plain `chromium.launch()` on the system Chromium, the
+/// desktop's (Chrome for Testing fails Cloudflare's bot check where it
+/// passes), with no browser downloaded; and unzip, zip, jq and sqlite3
+/// run. Method: through the agent's terminal, a Python script (in the
+/// computer's Python environment) and a Node script each take a screenshot
+/// and print a PDF, saying their browser's version, which is the system
+/// Chromium's; each tool does its work; and no browser was downloaded.
+/// Invalid: `playwright install`, by either runtime as the agent's user,
+/// answers at once, never waiting on its lock in a directory of root's.
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn playwright_runs_the_system_chromium_and_the_small_tools_run() {
+    let (fake, _model, chat, c) = hermes_running().await;
+    python_env_said(&c, 1).await;
+    let system = c.exec_out(&["/usr/bin/chromium", "--version"]);
+    let version = system.split_whitespace().nth(1).unwrap_or_else(|| panic!("the system Chromium's version: {system:?}")).to_string();
+    for (path, text) in [("/tmp/pw/pw.py", PLAYWRIGHT_PY), ("/tmp/pw/pw.js", PLAYWRIGHT_JS)] {
+        let (code, said) = c.exec_code(&["/command/s6-setuidgid", "hermes", "sh", "-c", "mkdir -p /tmp/pw && printf '%s' \"$1\" > \"$2\"", "sh", text, path]);
+        assert_eq!(code, 0, "{path}: {said}");
+    }
+    let said = tool_said(&fake, &chat, &c, "run: cd /tmp/pw && python pw.py && node pw.js && python -c 'import sys; [print(f, open(f, \"rb\").read(5)) for f in sys.argv[1:]]' py.png py.pdf js.png js.pdf").await;
+    for seen in [format!("python-chromium {version}"), format!("node-chromium {version}"), "videos 1".into(), r"py.png b'\\x89PNG\\r'".into(), "py.pdf b'%PDF-'".into(), r"js.png b'\\x89PNG\\r'".into(), "js.pdf b'%PDF-'".into()] {
+        assert!(said.contains(&seen), "{seen:?} in what the terminal said: {said}");
+    }
+    let said = tool_said(&fake, &chat, &c, "run: cd /tmp/pw && zip -q t.zip pw.py && unzip -l t.zip | grep -c pw.py && echo '{\"n\": 42}' | jq .n && sqlite3 :memory: 'select 6 * 7' && playwright --version").await;
+    let lines: Vec<&str> = said.split("\\n").map(str::trim).collect();
+    let pinned = include_str!("../../hermes/playwright-requirements.txt").lines().find_map(|l| l.strip_prefix("playwright==")).and_then(|v| v.split_whitespace().next()).expect("the lock pins playwright");
+    let release = format!("Version {pinned}");
+    for seen in ["1", "42", release.as_str()] {
+        assert!(lines.iter().any(|l| l.contains(seen)), "{seen:?} in what the terminal said: {said}");
+    }
+    assert!(said.contains("\"exit_code\": 0"), "each ran: {said}");
+    // `playwright install`, as the agent's user, answers at once (Codex on
+    // #991: Playwright's own waits ten minutes on a lock in a directory of
+    // root's): Chromium, or no browser named, is installed already; another
+    // is root's
+    let said = tool_said(&fake, &chat, &c, "run: cd /tmp && s=$(date +%s) && timeout 60 playwright install && timeout 60 playwright install chromium && timeout 60 python -m playwright install --with-deps chromium && { timeout 60 playwright install firefox; echo \"firefox=$?\"; } && echo \"took=$(( $(date +%s) - s ))\"").await;
+    assert_eq!(said.matches("Playwright's Chromium is installed already").count(), 3, "each install of Chromium says so: {said}");
+    assert!(said.contains("firefox=1") && said.contains("firefox can only be installed as root here (sudo playwright install firefox)"), "another browser is root's: {said}");
+    let took: u64 = said.split("took=").nth(1).and_then(|r| r.split(|ch: char| !ch.is_ascii_digit()).next()).and_then(|n| n.parse().ok()).unwrap_or_else(|| panic!("how long: {said}"));
+    assert!(took < 10, "at once, not after Playwright's lock: {took} s");
+    // what it suggests (Codex on #991): `sudo playwright install chromium`
+    // fetches nothing, and a browser `sudo` installs goes where the agent's
+    // own launch looks (sudo keeps PLAYWRIGHT_BROWSERS_PATH): its dry run's
+    // place is the one the agent's Playwright resolves
+    let said = tool_said(&fake, &chat, &c, "run: cd /tmp/pw && sudo playwright install chromium && echo \"sudo-chromium=$?\" && at=$(sudo playwright install --dry-run firefox | sed -n 's|^ *Install location: *\\(.*/firefox-[0-9]*\\)$|\\1|p') && mine=$(python -c 'from playwright.sync_api import sync_playwright; p = sync_playwright().start(); print(p.firefox.executable_path); p.stop()') && case \"$mine\" in \"$at\"/*) echo \"firefox-where-$((6 * 7))\" ;; *) echo \"sudo $at, the agent $mine\" ;; esac").await;
+    assert!(said.contains("sudo-chromium=0") && !said.contains("MiB") && !said.contains("downloaded to"), "sudo installs no Chromium, nor its FFmpeg: {said}");
+    assert!(!said.contains("Removing unused browser"), "nor collects Hermes' tools: {said}");
+    assert!(said.contains("firefox-where-42"), "a browser sudo installs is where the agent looks: {said}");
+    // `uninstall`, which collects regardless, is refused in Hermes' store
+    let said = tool_said(&fake, &chat, &c, "run: cd /tmp/pw && { sudo playwright uninstall --all; echo \"uninstall=$?\"; } && { timeout 60 playwright uninstall; echo \"mine=$?\"; }").await;
+    assert!(said.contains("uninstall=1") && said.contains("mine=1") && said.contains("would remove Hermes' own tools"), "{said}");
+    let store = c.exec_out(&["ls", "/opt/hermes/tools"]);
+    assert!(store.lines().any(|l| l == "chromium-1208") && store.lines().any(|l| l.starts_with("ffmpeg-9")), "Hermes' Chrome for Testing and FFmpeg are kept: {store}");
+    let browsers = c.exec_out(&["sh", "-c", "ls /opt/hermes/tools | grep chromium"]);
+    assert_eq!(browsers.lines().count(), 3, "Chrome for Testing's, and Playwright's two names for the system Chromium; none downloaded: {browsers}");
+}
