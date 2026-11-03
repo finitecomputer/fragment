@@ -364,6 +364,9 @@ from a snapshot.
   saved, and told to its owner (`set_aside`) until they get it back or
   drop it. At most `ASIDE_MAX` (4) are aside; a start that would set aside
   one more fails as any start does. A wipe deletes them with the rest.
+  They are kept beside its saves, never in them (`Aside`): a release from
+  before them reads its saves and writes them back whole, so a rollback to
+  one erases none (no save of its holds one to let go of).
 - **The snapshot is only a cache** of one save on one image (`{id, image,
   save}`): a wake uses it only when `save` is the current save and
   `image` the pinned image's reference, and one that fails or comes up

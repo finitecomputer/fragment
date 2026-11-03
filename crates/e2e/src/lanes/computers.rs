@@ -273,8 +273,11 @@ const ASIDE_CHECKS: [&str; 3] = [
 /// `full-restore`: its restore answers as the disk's floor stops one, the
 /// shim having written nothing): the start goes on without it, its other
 /// folder restored, and the folder is set aside, told, and kept across
-/// three newer saves. Starts and ends awake. Answers how many replies of
-/// its agent it added.
+/// three newer saves. No fixed wait: a record's wake can reach the computer
+/// after its owner's sleep and start it again, so the lever is set before
+/// the sleep (whichever start restores that save takes it), and each sleep
+/// is judged by the save it took, not by the phase it answers. Starts and
+/// ends awake. Answers how many replies of its agent it added.
 fn aside_checks(s: &mut Suite, api: &Api, c: &Crashing, say: &dyn Fn(u32, &str) -> Result<crate::api::Reply>) -> Result<usize> {
     let path = |rest: &str| format!("/api/computers/{}{rest}", c.id);
     let reply_of = |seq: i64| {
@@ -288,20 +291,23 @@ fn aside_checks(s: &mut Suite, api: &Api, c: &Crashing, say: &dyn Fn(u32, &str) 
         Ok(reply_of(seq).and_then(|x| x["body"]["text"].as_str().map(str::to_string)).unwrap_or_default())
     };
     let records_of = |save: &Value| save["records"].as_array().map(|l| l.iter().map(|r| r["dir"].as_str().unwrap_or("").to_string()).collect::<Vec<_>>()).unwrap_or_default();
+    let number = |save: &Value| save["number"].as_u64().unwrap_or(0);
     let wrote = [said(s, 70, "write work/aside.txt set aside")?, said(s, 71, "write notes/aside-kept.txt kept")?];
-    std::thread::sleep(QUEUE_DRAIN);
+    let elsewhere = lever_with(api, c.id, json!({ "op": "full-restore", "dir": "/elsewhere" }))?;
+    let full = lever_with(api, c.id, json!({ "op": "full-restore", "dir": "/data/work" }))?;
+    let before = number(&newest_save(api, c.id));
     let slept = api.signed(c.owner, "POST", &path("/sleep"), Some(&json!({})))?;
     let save = newest_save(api, c.id);
     let work = save["records"].as_array().and_then(|l| l.iter().find(|r| r["dir"] == "/data/work")).cloned().unwrap_or(Value::Null);
-    let elsewhere = lever_with(api, c.id, json!({ "op": "full-restore", "dir": "/elsewhere" }))?;
-    let full = lever_with(api, c.id, json!({ "op": "full-restore", "dir": "/data/work" }))?;
+    // its wake, or a record's that came first: the start after the sleep
     let woke = api.signed(c.owner, "POST", &path("/wake"), Some(&json!({})))?;
     let read = [said(s, 72, "read work/aside.txt")?, said(s, 73, "read notes/aside-kept.txt")?];
     let told = notice(&woke.body, "set_aside");
     s.ok(
         ASIDE_CHECKS[0],
         wrote.iter().all(|w| w.starts_with("wrote "))
-            && slept.body["phase"] == "asleep"
+            && slept.status == 200
+            && number(&save) > before
             && work["id"].is_string()
             && elsewhere.status == 400
             && full.status == 200
@@ -322,12 +328,13 @@ fn aside_checks(s: &mut Suite, api: &Api, c: &Crashing, say: &dyn Fn(u32, &str) 
         kept["aside"][0]["record"] == work && kept["aside"][0]["save"] == save["number"] && !in_a_save(&kept) && records_of(&kept["saves"][0]) == ["/data"],
         &kept,
     );
-    // three newer saves, each a sleep and a wake: the save it was of is pushed out
+    // three newer saves, each a sleep's (judged by the save it took) and a wake:
+    // the save it was of is pushed out
     let mut cycled = true;
     for n in 74..77 {
         cycled &= said(s, n, &format!("write work/new-{n}.txt newer"))?.starts_with("wrote ");
-        std::thread::sleep(QUEUE_DRAIN);
-        cycled &= api.signed(c.owner, "POST", &path("/sleep"), Some(&json!({})))?.body["phase"] == "asleep";
+        let before = number(&newest_save(api, c.id));
+        cycled &= api.signed(c.owner, "POST", &path("/sleep"), Some(&json!({})))?.status == 200 && number(&newest_save(api, c.id)) > before;
         cycled &= api.signed(c.owner, "POST", &path("/wake"), Some(&json!({})))?.body["phase"] == "awake";
     }
     let kept = lever(api, c.id, "saves")?.body;

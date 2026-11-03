@@ -50,7 +50,7 @@ use std::collections::BTreeMap;
 
 use fragment_core::catalog::{self, Kind};
 use fragment_core::computer::{
-    alive, does_simplex, image_running, notices, valid_version, version_running, Action, Alive, Event, Images, Lifecycle, Phase, Plan as Restore, Rules, Save, SaveNote, Saves, Saving, Socket, Step, Wake, ALIVE_MS, ASIDE_MAX, HOLD_DEADLINE_MS, HOLD_WAIT_MS, SAVE_DEADLINE_MS,
+    alive, Aside, does_simplex, image_running, notices, valid_version, version_running, Action, Alive, Event, Images, Lifecycle, Phase, Plan as Restore, Rules, Save, SaveNote, Saves, Saving, Socket, Step, Wake, ALIVE_MS, ASIDE_MAX, HOLD_DEADLINE_MS, HOLD_WAIT_MS, SAVE_DEADLINE_MS,
     SLEEP_DEADLINE_MS, START_DEADLINE_MS,
 };
 use fragment_core::ledger::{Meter, MeterRow, Month, Spend};
@@ -268,6 +268,10 @@ enum MetaKey {
     /// The test lever's full disk (`full-restore`): the folder whose next
     /// restore answers as the disk's floor stopped it, taken by that restore.
     FullRestore,
+    /// The folders set aside (`fragment_core::computer::Aside`), kept beside
+    /// its saves and never in them: a release from before them writes its
+    /// saves back whole, and never this.
+    Aside,
     /// The owner's WorkOS user, once the registry named it
     /// (`workos_user`): `{owner, issuer, subject}`.
     WorkosUser,
@@ -301,6 +305,7 @@ impl MetaKey {
             MetaKey::HangBackups => "hang_backups",
             MetaKey::AliveCheck => "alive_check",
             MetaKey::FullRestore => "full_restore",
+            MetaKey::Aside => "aside",
             MetaKey::WorkosUser => "workos_user",
             MetaKey::Images => "images",
             MetaKey::Simplex => "simplex",
@@ -742,6 +747,14 @@ impl ComputerCell {
         }
     }
 
+    /// The folders set aside (none before any was).
+    fn aside(&self) -> CellResult<Aside> {
+        match self.meta(MetaKey::Aside)? {
+            Some(text) => serde_json::from_str(&text).map_err(|e| CellError::host(format!("its folders set aside: {e}"))),
+            None => Ok(Aside::default()),
+        }
+    }
+
     fn images(&self) -> CellResult<Images> {
         match self.meta(MetaKey::Images)? {
             Some(text) => serde_json::from_str(&text).map_err(|e| CellError::host(format!("the stored images: {e}"))),
@@ -820,7 +833,7 @@ impl ComputerCell {
 
     /// What its owner is told of it now (`fragment_core::computer::notices`).
     fn notices(&self) -> CellResult<Vec<ComputerNotice>> {
-        Ok(notices(&self.lifecycle()?, &self.saves()?, &self.images()?, &self.rules()))
+        Ok(notices(&self.lifecycle()?, &self.saves()?, &self.aside()?, &self.images()?, &self.rules()))
     }
 
     /// The image its next start runs, as the deployment has it now: the
@@ -1303,7 +1316,14 @@ impl ComputerCell {
     async fn set_aside(&self, g: &JsValue, save: &Save, record: &Value, why: &str) -> Result<(), Unstarted> {
         let id = record["id"].as_str().unwrap_or_default();
         let dir = SAVED_DIRS.into_iter().find(|d| record["dir"] == *d).ok_or_else(|| CellError::host(format!("save {}'s record {id} names no folder a save saves", save.number)))?;
-        let kept = self.update_saves(|s| s.set_aside(id, js::now_ms()))?;
+        // both in one step, no await between: the folder's record leaves its
+        // save as it is kept aside
+        let (mut saves, mut aside) = (self.saves()?, self.aside()?);
+        let kept = aside.set_aside(&mut saves, id, js::now_ms());
+        if kept {
+            self.set_meta(MetaKey::Aside, &serde_json::to_string(&aside).map_err(|e| CellError::host(e.to_string()))?)?;
+            self.set_meta(MetaKey::Saves, &serde_json::to_string(&saves).map_err(|e| CellError::host(e.to_string()))?)?;
+        }
         console_log!("{}", json!({ "computer": self.meta(MetaKey::Id)?, "aside": id, "dir": dir, "save": save.number, "bytes": record["size"], "why": why, "kept": kept }));
         if !kept {
             return Err(CellError::host(format!("save {}'s {dir} did not fit ({why}), and {ASIDE_MAX} folders are set aside already", save.number)).into());
@@ -1975,7 +1995,7 @@ impl ComputerCell {
             phase,
             generation: life.generation(),
             why,
-            notices: notices(&life, &saves, &images, &self.rules()),
+            notices: notices(&life, &saves, &self.aside()?, &images, &self.rules()),
             agents: self.agents()?,
             origin,
             credential_env: vec![],
@@ -2019,8 +2039,9 @@ impl ComputerCell {
         if !destroyed {
             return Err(CellError::host("its container is still running: the wipe goes on once it is gone"));
         }
-        let records = self.saves()?.every_record();
-        // bounded: a computer's records are (Saves::every_record), each
+        let mut records = self.saves()?.every_record();
+        records.extend(self.aside()?.records());
+        // bounded: a computer's records are (Saves::every_record, Aside), each
         // delete within a pass's bound; one that passes it fails this call,
         // and the next call deletes it
         for record in &records {
