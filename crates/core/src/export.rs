@@ -139,6 +139,12 @@ pub fn computer_meta_path(id: &str) -> String {
     format!("{}/meta.json", computer_dir(id))
 }
 
+/// A folder set aside as `record` (docs/computers.md: it did not fit when
+/// the computer started), as stored: `aside/<record>.tar.zst`.
+pub fn aside_path(id: &str, record: &str) -> String {
+    format!("{}/aside/{}.tar.zst", computer_dir(id), segment(record))
+}
+
 /// A save's record of `dir` (`/data` → `data.tar.zst`, `/data/work` →
 /// `data-work.tar.zst`), as stored: a tar compressed with zstd.
 pub fn save_path(id: &str, dir: &str) -> String {
@@ -512,6 +518,22 @@ pub struct ComputerMeta {
     pub view: Value,
     pub save: Option<SaveExported>,
     pub skipped: Vec<Skipped>,
+    /// Its folders set aside, each with its file (none: one past what an
+    /// export holds, told in `skipped`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aside: Vec<AsideExported>,
+}
+
+/// A folder set aside, exported: the save it was of, when that save was
+/// taken, when it was set aside, and its `DirectoryBackup` record with its
+/// file (`aside_path`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AsideExported {
+    pub save: u64,
+    pub saved_at: i64,
+    pub at: i64,
+    pub record: Value,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -880,6 +902,7 @@ mod tests {
         let id = format!("computer:{}", "ab".repeat(12));
         assert_eq!(save_path(&id, "/data"), format!("fragment-export/computers/{}/data.tar.zst", "ab".repeat(12)));
         assert_eq!(save_path(&id, "/data/work"), format!("fragment-export/computers/{}/data-work.tar.zst", "ab".repeat(12)));
+        assert_eq!(aside_path(&id, "0b6e7c3e-1d2a-4f7e-9b0c-3f5a2e1d9c8b"), format!("fragment-export/computers/{}/aside/0b6e7c3e-1d2a-4f7e-9b0c-3f5a2e1d9c8b.tar.zst", "ab".repeat(12)));
         assert!(std::panic::catch_unwind(|| computer_dir("computer:../x")).is_err());
         assert!(std::panic::catch_unwind(|| fragment_dir("../x")).is_err());
         assert!(std::panic::catch_unwind(|| file_path(NAME, "../x")).is_err());
@@ -963,7 +986,7 @@ mod tests {
         assert_eq!(back, m);
         let v: Value = serde_json::from_slice(&bytes).unwrap();
         assert!(v["sharedWithMe"][0]["role"] == "viewer" && v["madeAt"] == 1 && v["fragments"][0]["kind"] == "chat");
-        for file in ["manifest.json", "meta.json", "files/", "schema.sql", ".jsonl", "transcript.md", "blobs/", "data.tar.zst", "data-work.tar.zst", "sharedWithMe"] {
+        for file in ["manifest.json", "meta.json", "files/", "schema.sql", ".jsonl", "transcript.md", "blobs/", "data.tar.zst", "data-work.tar.zst", "aside/", "sharedWithMe"] {
             assert!(README.contains(file), "the README names {file}");
         }
     }

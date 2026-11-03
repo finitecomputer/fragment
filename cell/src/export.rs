@@ -394,6 +394,10 @@ struct Comp {
     view: Value,
     save: Option<core::SaveExported>,
     skipped: Vec<core::Skipped>,
+    /// Its folders set aside, copied after its save's records (a job
+    /// stored before them has none).
+    #[serde(default)]
+    aside: Vec<core::AsideExported>,
 }
 
 impl Job {
@@ -1776,8 +1780,9 @@ impl PrincipalCell {
             CompStep::Facts => {
                 let view = crate::computer::ask(&self.env, &id, "computer/view", &json!({})).await?;
                 let mut skipped = vec![];
-                let save = match crate::computer::ask(&self.env, &id, "computer/export", &json!({ "owner": person })).await {
-                    Ok(v) if v["save"].is_object() => {
+                let exported = crate::computer::ask(&self.env, &id, "computer/export", &json!({ "owner": person })).await?;
+                let save = match &exported {
+                    v if v["save"].is_object() => {
                         let s = &v["save"];
                         let records: Vec<Value> = s["records"].as_array().cloned().unwrap_or_default();
                         Some(core::SaveExported {
@@ -1796,28 +1801,56 @@ impl PrincipalCell {
                                 .collect(),
                         })
                     }
-                    Ok(_) => {
+                    _ => {
                         skipped.push(core::Skipped { part: "save".into(), why: "it was never saved".into() });
                         None
                     }
-                    Err(e) => return Err(e.into()),
                 };
-                run.job.comp = Some(Comp { id: id.clone(), view, save, skipped });
+                // its folders set aside, each a record of its own beside the save's
+                let aside = exported["aside"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|a| {
+                        let mut record = a["record"].clone();
+                        let rid = record["id"].as_str().unwrap_or("").to_string();
+                        record["file"] = json!(core::within(&core::aside_path(&id, &rid), &core::computer_dir(&id)));
+                        core::AsideExported { save: a["save"].as_u64().unwrap_or(0), saved_at: a["savedAtMs"].as_i64().unwrap_or(0), at: a["atMs"].as_i64().unwrap_or(0), record }
+                    })
+                    .collect();
+                run.job.comp = Some(Comp { id: id.clone(), view, save, skipped, aside });
                 run.job.at = At::Computer { i, step: CompStep::Records { record: 0 } };
             }
             CompStep::Records { record } => {
-                let rec = run.job.comp.as_ref().and_then(|c| c.save.as_ref()).and_then(|s| s.records.get(record)).cloned();
+                // its save's records, then each folder set aside
+                let comp = run.job.comp.as_ref().expect("a computer's facts before its records");
+                let saved = comp.save.as_ref().map_or(0, |s| s.records.len());
+                let (rec, aside) = match record.checked_sub(saved) {
+                    None => (comp.save.as_ref().and_then(|s| s.records.get(record)).cloned(), false),
+                    Some(a) => (comp.aside.get(a).map(|x| x.record.clone()), true),
+                };
                 let Some(rec) = rec else {
                     run.job.at = At::Computer { i, step: CompStep::Meta };
                     return Ok(());
                 };
                 let (dir, size, rid) = (rec["dir"].as_str().unwrap_or("/data").to_string(), rec["size"].as_u64().unwrap_or(0), rec["id"].as_str().unwrap_or("").to_string());
-                self.stored(run, &core::save_path(&id, &dir), Source::Save { computer: id.clone(), record: rid }, size, false).await?;
+                if aside && run.job.written + size + ASIDE_SLACK_BYTES > run.archive_max {
+                    // past what the archive holds: told, never the export's failure
+                    let comp = run.job.comp.as_mut().expect("its facts");
+                    if let Some(a) = comp.aside.get_mut(record - saved) {
+                        a.record["file"] = Value::Null;
+                    }
+                    comp.skipped.push(core::Skipped { part: format!("aside/{rid}"), why: format!("a folder set aside of {}, past what an export holds: get it back on the computer, then export again", bytes_text(size)) });
+                } else {
+                    let path = if aside { core::aside_path(&id, &rid) } else { core::save_path(&id, &dir) };
+                    self.stored(run, &path, Source::Save { computer: id.clone(), record: rid }, size, false).await?;
+                }
                 run.job.at = At::Computer { i, step: CompStep::Records { record: record + 1 } };
             }
             CompStep::Meta => {
                 let comp = run.job.comp.take().expect("a computer's facts before its meta");
-                let meta = core::ComputerMeta { view: comp.view, save: comp.save, skipped: comp.skipped };
+                let meta = core::ComputerMeta { view: comp.view, save: comp.save, skipped: comp.skipped, aside: comp.aside };
                 self.entry(run, &core::computer_meta_path(&id), &core::json_file(&meta), false).await?;
                 run.job.done += 1;
                 run.job.at = if i + 1 < run.job.plan().computers.len() { At::Computer { i: i + 1, step: CompStep::Facts } } else { At::End };
@@ -1893,6 +1926,10 @@ fn view(r: &Row) -> CellResult<ExportView> {
 }
 
 /// Bytes as a person reads them: `3.2 MB`.
+/// Room kept beside a folder set aside as it is weighed against what the
+/// archive holds: its entry's tar header and padding, and the meta after it.
+const ASIDE_SLACK_BYTES: u64 = 64 * 1024;
+
 fn bytes_text(n: u64) -> String {
     match n {
         n if n >= 1_000_000_000 => format!("{:.1} GB", n as f64 / 1e9),
