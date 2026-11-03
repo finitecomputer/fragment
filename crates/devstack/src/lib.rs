@@ -261,6 +261,21 @@ impl Tools {
     }
 }
 
+/// Whether a boot's log says wrangler's build of the Worker failed:
+/// wrangler 4.145.0 (`logBuildFailure`) says "Build failed with N
+/// error(s):" and each of esbuild's errors after it, in one write. A dev
+/// server whose build failed stays up waiting for a file to change: it
+/// neither gets ready nor exits, so without this a start waited out
+/// READY_TIMEOUT (runs 41655792118 and 41655789661: an import of a file the
+/// node's copy of cell/ did not have, 900 s on each shard).
+fn build_failed(text: &str) -> bool {
+    text.match_indices("Build failed with ").any(|(at, said)| {
+        let count = &text[at + said.len()..];
+        let digits = count.len() - count.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+        digits > 0 && count[digits..].starts_with(" error")
+    })
+}
+
 /// The port a boot's log says wrangler is ready on (`Ready on
 /// http://127.0.0.1:<port>`): its own pick, a boot's log saying it once.
 fn ready_port(text: &str) -> Option<u16> {
@@ -794,6 +809,11 @@ impl Node {
                 let status = node.reap()?;
                 bail!("wrangler dev exited ({status}) before it was ready:\n{text}");
             }
+            // neither ready nor gone: it waits for a file to change, and
+            // no file of a started node's changes under it (`build_failed`)
+            if build_failed(&text) {
+                bail!("wrangler dev's build failed, so it never gets ready:\n{text}");
+            }
             if t0.elapsed() > READY_TIMEOUT {
                 bail!("wrangler dev on :{port} was not ready after {READY_TIMEOUT:?}:\n{text}");
             }
@@ -1060,6 +1080,19 @@ mod tests {
         assert_eq!(ready_port("x\n[wrangler:info] Ready on http://127.0.0.1:35523\n[wrangler:info] GET / 200"), Some(35523));
         for unready in ["", "Starting local server...", "Ready on http://127.0.0.1:355", "Ready on http://127.0.0.1:0\n", "Ready on http://localhost:35523\n"] {
             assert_eq!(ready_port(unready), None, "{unready:?}");
+        }
+    }
+
+    /// A build that failed, as wrangler says it (run 41655792118's words,
+    /// its colors kept), for one error or several; not a start's lines, nor
+    /// the words without a count.
+    #[test]
+    fn a_failed_build_is_heard_from_wranglers_own_words() {
+        let ci = "\x1b[31m\u{2718} \x1b[41;31m[\x1b[41;97mERROR\x1b[41;31m]\x1b[0m \x1b[1mBuild failed with 1 error:\x1b[0m\n\n  \x1b[31m\u{2718} \x1b[41;31m[\x1b[41;97mERROR\x1b[41;31m]\x1b[0m \x1b[1mCould not resolve \"./backup-reads.mjs\"\x1b[0m\n";
+        assert!(build_failed(ci));
+        assert!(build_failed("x\nBuild failed with 2 errors:\n"));
+        for fine in ["", "[wrangler:info] Ready on http://127.0.0.1:35523\n", "Build failed with", "Build failed with errors", "Build failed with 1"] {
+            assert!(!build_failed(fine), "{fine:?}");
         }
     }
 
