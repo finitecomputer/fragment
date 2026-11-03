@@ -595,6 +595,12 @@ pub enum ComputerNotice {
     /// may put it off (`POST …/notices/later {version}`): told no more until
     /// a version other than that one is ready.
     Update { version: String },
+    /// Its disk is filling, as the platform last read it (`df` of its
+    /// container, after a start came up and after each save): `free` of its
+    /// `total` bytes are left, the image's own share counted used. A disk
+    /// that fills stops its agents from saving their work, so its owner is
+    /// told well before.
+    DiskFilling { total: u64, free: u64 },
 }
 
 /// `POST /api/computers/{id}/restart`: the start its owner restarts, as
