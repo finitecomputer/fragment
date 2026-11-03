@@ -1,5 +1,5 @@
-# The e2e's build on a runner (ci.yml): its caches restored, the stub image
-# built into BuildKit's builder, and `cargo xtask e2e --build-only` (the
+# The e2e's build on a runner (ci.yml): its caches restored, BuildKit's
+# builder set up, and `cargo xtask e2e --build-only` (the
 # cell, the CLI and the suite, and the computer images the node's boot
 # builds), with this commit's builds saved for the runs after it when
 # `save` says so.
@@ -17,7 +17,7 @@ inputs:
     required: true
 outputs:
   builder:
-    description: the BuildKit builder the stub image was built in, for BUILDX_BUILDER
+    description: the BuildKit builder the computer images were built in, for BUILDX_BUILDER
     value: ${{ steps.buildx.outputs.name }}
   js-cache-hit:
     description: whether the JavaScript caches' key was restored whole
@@ -97,44 +97,50 @@ runs:
       env:
         WORKER_BUILD_VERSION: ${{ inputs.worker-build-version }}
       run: worker-build --version | grep -qF "$WORKER_BUILD_VERSION" || cargo install worker-build --version "$WORKER_BUILD_VERSION" --locked
-    # The stub image's layers (images/stub/Dockerfile), BuildKit's, in the
-    # Actions cache (scope e2e-stub), built first and here, where a build
-    # can read and write that cache: into a builder of BuildKit's own
-    # (setup-buildx's), whose cache the builds after it find every step in,
-    # xtask's beside the Rust and the node's boot (wrangler's): their
-    # `docker build` goes to it by BUILDX_BUILDER (below), as it would
-    # otherwise to the Docker engine's own builder, which has none of
-    # these layers (`buildx use` does not move `docker build`). An
-    # unchanged bridge (images/bridge,
-    # images/hermes/boot, the images' manifest and lock: about one master
-    # commit in eight changes one) is its layers fetched in seconds, not
-    # its bridge compiled (about 100 s alone, 250 beside the Rust); a
-    # changed one compiles here, before the Rust rather than beside it.
-    # Its CLI stage (the fragment CLI its agents ask with) is the same:
-    # cached until the CLI or a crate it builds from changes, then built
-    # beside the bridge's stage. The context is the repo's root, cut to
-    # what the images build from (.dockerignore).
-    # Saved when asked, every stage's layers (mode=max: the build stage's
-    # base too, 345 MB in all, each layer kept once by its digest).
+    # The builder the computer images build in, BuildKit's own (setup-buildx's):
+    # xtask's builds ahead of the node and the node's boot (wrangler's) go
+    # to it by BUILDX_BUILDER (below), as they would otherwise to the Docker
+    # engine's builder, which can read no Actions cache (`buildx use` does
+    # not move `docker build`).
     - id: buildx
       uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-    - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-      env:
-        # no job summary, and no build record artifact
-        DOCKER_BUILD_SUMMARY: "false"
-        DOCKER_BUILD_RECORD_UPLOAD: "false"
+    # The Actions runtime BuildKit's `type=gha` cache needs, handed to the
+    # build step below alone (its env), never to the job: a shell step is
+    # given none of it, and only a JavaScript action's process holds it.
+    # The token reaches xtask's image builds, whose stub's layers it reads
+    # (and on master's pushes writes); the tests run in later steps without
+    # it. The e2e runs only on trees a review let through (merge groups and
+    # master's pushes, or a pull request its label opts in), with locked
+    # dependencies. It replaces a build of the stub here that read the
+    # cache for itself and warmed nothing: BuildKit takes a remote cache's
+    # hits without fetching them, and that build exported nothing, so
+    # xtask's build after it compiled the bridge on every shard (195 s of
+    # a 196 s `--build-only` on a cached commit, run 41548180413).
+    - id: runtime
+      uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
       with:
-        context: .
-        file: images/stub/Dockerfile
-        platforms: linux/amd64
-        provenance: false
-        cache-from: type=gha,scope=e2e-stub
-        cache-to: ${{ inputs.save == 'true' && 'type=gha,scope=e2e-stub,mode=max,ignore-error=true' || '' }}
-    # the cell, the CLI and the suite, and the computer images the
-    # node's boot builds (xtask/src/build.rs), all at once
+        script: |
+          if (process.env.ACTIONS_RUNTIME_TOKEN) core.setSecret(process.env.ACTIONS_RUNTIME_TOKEN);
+          for (const name of ['ACTIONS_RUNTIME_TOKEN', 'ACTIONS_RESULTS_URL', 'ACTIONS_CACHE_URL', 'ACTIONS_CACHE_SERVICE_V2']) {
+            core.setOutput(name, process.env[name] ?? '');
+          }
+    # the cell, the CLI and the suite, and the computer images the node's
+    # boot builds (xtask/src/build.rs `images`), all at once. The stub's
+    # layers come from the Actions cache (scope e2e-stub): an unchanged
+    # bridge (images/bridge, images/hermes/boot, the images' manifest and
+    # lock: about one master commit in eight changes one) is its layers
+    # fetched in seconds, not compiled (about 100 s alone, 250 beside the
+    # Rust); its CLI stage likewise until the CLI or a crate it builds from
+    # changes. Saved when asked, every stage's layers (mode=max).
     - shell: bash
       env:
         BUILDX_BUILDER: ${{ steps.buildx.outputs.name }}
+        FRAGMENT_IMAGE_CACHE: type=gha,scope=e2e-stub
+        FRAGMENT_IMAGE_CACHE_SAVE: ${{ inputs.save }}
+        ACTIONS_RUNTIME_TOKEN: ${{ steps.runtime.outputs.ACTIONS_RUNTIME_TOKEN }}
+        ACTIONS_RESULTS_URL: ${{ steps.runtime.outputs.ACTIONS_RESULTS_URL }}
+        ACTIONS_CACHE_URL: ${{ steps.runtime.outputs.ACTIONS_CACHE_URL }}
+        ACTIONS_CACHE_SERVICE_V2: ${{ steps.runtime.outputs.ACTIONS_CACHE_SERVICE_V2 }}
       run: cargo xtask e2e --build-only
     # this commit's builds, with the tree they were built from, for the
     # runs after it, when asked (a red e2e's too: its build was green),
