@@ -185,9 +185,11 @@ const MARK_EXEC_MS: i64 = 30_000;
 /// backup never returned, so its sleep never ended).
 const BACKUPS_MS: i64 = 8 * 60_000;
 /// A start's restores, its save's records together, answer within this, or
-/// the start failed (tried again, on the same save): past the start's own
-/// deadline the lifecycle has failed it already.
-const RESTORE_MS: i64 = START_DEADLINE_MS;
+/// the start failed (tried again, on the same save): what the start's own
+/// deadline leaves after the waits around them (the container taking an
+/// exec, the image's check, the gate's mark), so a slow restore fails as
+/// itself, saying so, before the lifecycle fails the start unexplained.
+const RESTORE_MS: i64 = START_DEADLINE_MS - EXEC_READY_MS - CHECK_EXEC_MS - MARK_EXEC_MS;
 /// A pass of deletes of the records let go of (`forget`) ends within this:
 /// an R2 delete answers in well under a second, and what a pass leaves is
 /// the next save's, as a delete that failed is.
@@ -227,7 +229,8 @@ const SLEEP_STEPS_MS: i64 = HOLD_STEPS_MS + SAVE_STEPS_MS + STOP_STEPS_MS;
 const _: () = assert!(HOLD_STEPS_MS < HOLD_DEADLINE_MS, "a hold reports before its deadline");
 const _: () = assert!(SAVE_STEPS_MS < SAVE_DEADLINE_MS, "a save reports before its deadline, which then only catches a report its isolate lost");
 const _: () = assert!(STOP_STEPS_MS < SLEEP_DEADLINE_MS, "a stop reports before its deadline");
-const _: () = assert!(RESTORE_MS <= START_DEADLINE_MS && ALIVE_MS < START_DEADLINE_MS, "a start's waits fit its deadline");
+const _: () = assert!(EXEC_READY_MS + RESTORE_MS + CHECK_EXEC_MS + MARK_EXEC_MS <= START_DEADLINE_MS && ALIVE_MS < START_DEADLINE_MS, "a start's waits fit its deadline");
+const _: () = assert!(RESTORE_MS >= 10 * 60_000, "a restore of a full disk's save (5.9 GB took longer than 165 s) is given ten minutes at least");
 const _: () = assert!(SLEEP_STEPS_MS <= 11 * 60_000, "docs/api.md: a sleep answers within 11 minutes");
 /// The largest request body the egress signs and hands on (it is hashed
 /// for NIP-98 first, so it is read whole).
@@ -377,9 +380,10 @@ pub struct ComputerCell {
     /// start that waits for its guest waits for (`alive`). In memory only:
     /// a start and its guest's reads are one isolate's.
     heard_ms: std::cell::Cell<Option<i64>>,
-    /// The start this isolate judged dead and destroys: its exit is that
-    /// start's own failure, which it reports (`exit_of`).
-    dead: std::cell::Cell<Option<u64>>,
+    /// The start this isolate found failed, and destroys: its container's
+    /// end is that start's own failure, which the start reports itself
+    /// (`exit_of`), never a crash as well.
+    failing: std::cell::Cell<Option<u64>>,
     /// Its XFTP relays open now (`fragment_core::relay::Leases`). In memory
     /// only: a restart forgets them, and they lapse on their own bounds.
     relays: RefCell<fragment_core::relay::Leases>,
@@ -406,7 +410,7 @@ impl DurableObject for ComputerCell {
             states_told: std::cell::Cell::new(0),
             wiped: std::cell::Cell::new(wiped),
             heard_ms: std::cell::Cell::new(None),
-            dead: std::cell::Cell::new(None),
+            failing: std::cell::Cell::new(None),
             relays: RefCell::default(),
             schema,
         }
@@ -1132,7 +1136,14 @@ impl ComputerCell {
         };
         let from = planned.plan.source();
         let save_id = planned.save.as_ref().map(|s| s.id.clone());
-        match self.try_start(generation, &planned).await {
+        let started = self.try_start(generation, &planned).await;
+        if started.is_err() {
+            // what it destroys below ends as this start's failure, reported
+            // by the event this answers, so the end is not a crash too: it
+            // would count a second strike, and start again with no pause
+            self.failing.set(Some(generation));
+        }
+        match started {
             Ok(()) => {
                 let came_up = |s: &mut Saves| s.came_up(generation, from, save_id.as_deref(), planned.reference.as_deref(), js::now_ms()).map(|r| (r, s.rollbacks()));
                 match self.update_saves(came_up) {
@@ -1155,9 +1166,8 @@ impl ComputerCell {
                 Event::RestoreFailed { generation, why, older }
             }
             Err(Unstarted::Failed(e)) if from == RestoreSource::Snapshot => {
-                // forgotten before the destroy: the exit that reports is the
-                // start's own failure (`exit_of`), and any start after it
-                // restores the save
+                // forgotten before the destroy: any start after it restores
+                // the save
                 let forgot = self.update_saves(|s| s.snapshot_failed());
                 console_log!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "snapshot": "failed", "generation": generation, "why": e.message, "forgot": forgot.ok().flatten() }));
                 let _ = self.destroy(generation, "the snapshot did not start").await;
@@ -1169,7 +1179,6 @@ impl ComputerCell {
                 // report's to make (`exit_of`), and the same wake starts the
                 // image and the save, no strike. Its own line, so the logs
                 // count how often a snapshot's restore comes up dead (#362).
-                self.dead.set(Some(generation));
                 let forgot = self.update_saves(|s| s.snapshot_failed());
                 console_log!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "snapshot": "dead", "generation": generation, "from": from, "why": why, "forgot": forgot.ok().flatten() }));
                 let _ = self.destroy(generation, "it came up dead").await;
@@ -1383,14 +1392,14 @@ impl ComputerCell {
     }
 
     /// An exit of start `generation`'s container, as the lifecycle should
-    /// hear it: one from the snapshot that stopped before it came up is the
-    /// start's own failure (the snapshot is forgotten), never a strike; one
-    /// its start judged dead and destroys is that start's to report (as a
-    /// snapshot that would not start), so its wake goes on in one place:
-    /// nothing here.
+    /// hear it: one its start found failed and destroys is that start's to
+    /// report (`StartFailed`, `RestoreFailed`, `SnapshotFailed`), so its wake
+    /// goes on in one place: nothing here. One from the snapshot that
+    /// stopped on its own before it came up is the start's own failure (the
+    /// snapshot is forgotten), never a strike.
     fn exit_of(&self, generation: u64) -> CellResult<Option<Event>> {
         let starting = matches!(self.lifecycle()?.phase, Phase::Starting { generation: g, .. } if g == generation);
-        if starting && self.dead.get() == Some(generation) {
+        if starting && self.failing.get() == Some(generation) {
             return Ok(None);
         }
         if starting && self.saves()?.start_from(generation) == Some(RestoreSource::Snapshot) {

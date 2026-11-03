@@ -55,9 +55,10 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
     return today ? time : `${d.toLocaleDateString([], { month: "short", day: "numeric" })}, ${time}`;
   };
   // why a computer won't start, in plain words (the platform's own words
-  // stay beside them, for whoever helps)
+  // stay beside them, for whoever helps); no time it may not keep: a big
+  // restore takes a start up to 15 minutes (#1001)
   function wontStart(why) {
-    if (/not ready within/.test(why)) return "It didn't finish starting within a few minutes.";
+    if (/not ready within/.test(why)) return "It didn't finish starting in time.";
     if (/kept stopping/.test(why)) return "It kept stopping as soon as it started.";
     if (/check/.test(why)) return "Its saved files didn't pass their check.";
     if (/restore|archive|backup/i.test(why)) return "Its save couldn't be restored.";
@@ -119,9 +120,11 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
       actions.append(ok);
     } else if (n.kind === "update") {
       // told only between turns, never restarted behind their back; an
-      // always-on computer never sleeps, so never updates by itself
+      // always-on computer never sleeps, so never updates by itself. No
+      // time promised: a restart restores its work, a big one up to 15
+      // minutes (#1001)
       const itself = computer()?.alwaysOn ? "" : " It also updates by itself the next time your computer sleeps.";
-      say("An update is ready for your computer", `Restart to get it — about a minute; your chats and work are kept.${itself}`);
+      say("An update is ready for your computer", `Restart to get it; your chats and work are kept.${itself}`);
       restart("Restart");
       const later = el("button", null, "Later");
       later.type = "button";

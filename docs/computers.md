@@ -61,8 +61,18 @@ an image may rely on this:
 - **A crash** (the container stopped on its own) starts it again while
   something wants it; a guest that died holding its keepalive is started
   again however long its turn ran, and its next life ends what was cut.
+- **A failed start** (it failed, never reported ready, or its container
+  stopped before it was ready) is tried again after a growing pause. It
+  is one strike however its failure is heard: a start that fails
+  destroys its container, and that container's end is not a crash too.
 - **Won't wake**: after `STARTS_FAILED_MAX` failed starts in a row it
   starts no container until its owner asks.
+- **Trying again**: "won't wake" is never for good, since what failed may
+  pass (a storage error, a disk a release made room on). A wake that is
+  not its owner's (a record, a page's presence, a join, a port tab)
+  `WONT_WAKE_RETRY_MS` (30 minutes) after it gave up tries one start, and
+  a failure gives up again at once: at most one paid start that often,
+  and only while something wants it.
 
 ## Durability
 
@@ -354,7 +364,10 @@ from a snapshot.
 - **A wake restores the current save**, the newest not found unusable. A
   start whose save will never restore (its archive gone or altered)
   marks it unusable and starts again at once from the one before, with no
-  strike against the computer.
+  strike against the computer. A read of its archive that storage failed
+  (R2 answered an error) is asked again a few times within the restore
+  (`cell/backup-reads.mjs`), since the SDK's shim would fail the whole
+  start on one.
 - **A folder that will not fit is set aside, never a computer that will
   not start.** A restore stops when its disk's free space falls under the
   Sandbox SDK's floor (ENOSPC, the lesser of 256 MiB and 5% of the disk),

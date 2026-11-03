@@ -354,7 +354,8 @@ pub const DEFAULT_BOOK_VERSION: u32 = 8;
 /// in neurons too (crate::media).
 pub const DEFAULT_NEURONS: i64 = 11_000;
 /// The default computer (decision 13: 2 vCPU, 6 GiB; a 12 GB disk
-/// assumed), from Containers' pricing (Workers Paid, 2026-08-28):
+/// assumed, where it runs on `DISK_MB`: the 8 GB more, $0.002016 an hour,
+/// is not charged yet), from Containers' pricing (Workers Paid, 2026-08-28):
 /// - memory, provisioned: 6 GiB × $0.0000025 a GiB-second = $0.054 an hour;
 /// - disk, provisioned: 12 GB × $0.00000007 a GB-second = $0.003024 an hour;
 /// - CPU, billed on active use only, which the Computer DO cannot see:
@@ -379,11 +380,20 @@ pub enum InstanceSize {
 /// Containers' named instance types (developers.cloudflare.com/containers/platform/limits).
 const NAMED_INSTANCES: [&str; 6] = ["lite", "basic", "standard-1", "standard-2", "standard-3", "standard-4"];
 
+/// The disk of every custom instance: Containers' most for one (its limits
+/// page, "Maximum Disk 20 GB"), whatever its memory ("Custom Container
+/// instance types no longer have a disk to memory ratio limit", changelog
+/// 2026-09-29). The image shares it (the Hermes image is 5.9 GB), and a
+/// start restores `/data` onto what is left with 256 MiB to spare (the
+/// Sandbox SDK's floor), so a computer whose `/data` filled a 12 GB disk
+/// could never start again (2026-11-03). The price still counts 12 GB
+/// (`DEFAULT_INSTANCES`; docs/technical-debt-ledger.md).
+pub const DISK_MB: u32 = 20_000;
+
 /// The size an instance of the price book names: a named type as it is,
 /// or `<n>vcpu-<m>gib` (the book's own names, decision 13's `2vcpu-6gib`)
-/// as a custom size with a disk of 2 GB a GiB, as the price assumes, within
-/// Containers' bounds for one: 1 to 4 vCPU, at most 12 GiB, at least 3 GiB
-/// a vCPU, at most 20 GB of disk.
+/// as a custom size with a disk of `DISK_MB`, within Containers' bounds for
+/// one: 1 to 4 vCPU, at most 12 GiB, at least 3 GiB a vCPU.
 pub fn instance_size(name: &str) -> Result<InstanceSize, String> {
     if NAMED_INSTANCES.contains(&name) {
         return Ok(InstanceSize::Named(name.to_string()));
@@ -395,7 +405,7 @@ pub fn instance_size(name: &str) -> Result<InstanceSize, String> {
     if !(1..=4).contains(&vcpu) || gib > 12 || gib < 3 * vcpu {
         return Err(format!("{name}: a custom instance has 1 to 4 vCPU and at least 3 GiB a vCPU, at most 12 GiB"));
     }
-    Ok(InstanceSize::Custom { vcpu, memory_mib: gib * 1024, disk_mb: (gib * 2_000).min(20_000) })
+    Ok(InstanceSize::Custom { vcpu, memory_mib: gib * 1024, disk_mb: DISK_MB })
 }
 /// R2 Standard $0.015, Durable Objects' SQL storage $0.20 per GB-month.
 /// code.storage publishes no price to us: git is at R2's until the
@@ -669,8 +679,9 @@ mod tests {
     /// they are; a size Containers refuses is refused here first.
     #[test]
     fn instance_sizes() {
-        assert_eq!(instance_size(INSTANCE), Ok(InstanceSize::Custom { vcpu: 2, memory_mib: 6144, disk_mb: 12_000 }));
-        assert_eq!(serde_json::to_value(instance_size("2vcpu-6gib").unwrap()).unwrap(), serde_json::json!({ "vcpu": 2, "memoryMib": 6144, "diskMb": 12000 }));
+        assert_eq!(instance_size(INSTANCE), Ok(InstanceSize::Custom { vcpu: 2, memory_mib: 6144, disk_mb: 20_000 }), "Containers' most disk, whatever the memory");
+        assert_eq!(serde_json::to_value(instance_size("2vcpu-6gib").unwrap()).unwrap(), serde_json::json!({ "vcpu": 2, "memoryMib": 6144, "diskMb": 20000 }));
+        assert_eq!(instance_size("1vcpu-3gib"), Ok(InstanceSize::Custom { vcpu: 1, memory_mib: 3072, disk_mb: 20_000 }));
         assert_eq!(instance_size("standard-3"), Ok(InstanceSize::Named("standard-3".into())));
         assert_eq!(serde_json::to_value(instance_size("standard-3").unwrap()).unwrap(), serde_json::json!("standard-3"));
         assert_eq!(instance_size("4vcpu-12gib"), Ok(InstanceSize::Custom { vcpu: 4, memory_mib: 12_288, disk_mb: 20_000 }));
