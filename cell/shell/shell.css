@@ -608,15 +608,26 @@ label.settings-line { cursor: pointer; }
 .settings-section p a { color: var(--text-primary); text-underline-offset: 3px; }
 .settings-section pre.command { font: var(--type-mono); width: 100%; margin: 0; padding: 14px 16px; border: 1px solid var(--border); border-radius: 10px; background: var(--chat-code); white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text-primary); }
 /* settings' Build with Claude Code or Codex: the prompt to copy, one line, its Copy an icon at its end, the install folded */
-.build-prompt-field { position: relative; width: 100%; margin: 4px 0 6px; }
-.settings-section .build-prompt-field input.build-prompt { width: 100%; padding-right: 44px; color: var(--text-secondary); text-overflow: ellipsis; }
-.settings-section .build-prompt-field input.build-prompt:focus { color: var(--text-primary); }
+.build-prompt-field { position: relative; align-self: stretch; margin: 4px 2px 6px; }
+/* the prompt as the commands are: code on code's ground; 16px on a phone, which then does not zoom */
+.settings-section .build-prompt-field input.build-prompt { width: 100%; min-height: 44px; padding: 10px 48px 10px 16px; border: 1px solid var(--border); border-radius: 10px; background: var(--chat-code); color: var(--text-primary); font: var(--type-mono); text-overflow: ellipsis; }
+@media (max-width: 47.99rem) { .settings-section .build-prompt-field input.build-prompt { font-size: 1rem; } }
+.build-copy { right: 7px; }
 .settings-section input.build-prompt:focus-visible { outline: 2px solid var(--accent-blue); outline-offset: 1px; }
 .build-copy { position: absolute; top: 50%; right: 3px; width: 30px; height: 30px; transform: translateY(-50%); }
 .build-copy svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 .build-copy-word { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .settings-install { width: 100%; padding: 4px 2px 8px; }
-.settings-install summary { font: var(--type-body-sm); width: max-content; padding: 6px 0; color: var(--text-secondary); cursor: pointer; }
+.settings-install summary { font: var(--type-body-sm); display: inline-flex; align-items: center; gap: 6px; width: max-content; padding: 6px 0; color: var(--text-secondary); cursor: pointer; list-style: none; }
+.settings-install summary::-webkit-details-marker { display: none; }
+.settings-install summary svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; transform: rotate(-90deg); transition: transform .15s; }
+.settings-install[open] summary svg { transform: none; }
+@media (prefers-reduced-motion: reduce) { .settings-install summary svg { transition: none; } }
+/* a command, its copy icon in its corner */
+.command-block { position: relative; width: 100%; }
+.settings-section .command-block pre.command { padding-right: 52px; }
+.command-copy { position: absolute; top: 7px; right: 7px; width: 30px; height: 30px; }
+.command-copy svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 .settings-install p { font: var(--type-body); margin: 8px 0; }
 /* Account's first row: the person's picture (their initial where there is
    none), a pencil over it on hover or focus, then who is signed in */

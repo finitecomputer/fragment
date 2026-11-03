@@ -430,13 +430,46 @@ export function createSettings({ api, $, seg, account, navigation, notices, sect
         if (mine === presses) shows(false);
       }, 1500);
     };
+    // a command to run, its Copy a copy icon in its corner (a check once
+    // copied); a clipboard that refuses selects it, to copy by hand
+    const command = (text) => {
+      const pre = el("pre", "command", text);
+      const button = el("button", "icon-button command-copy");
+      button.type = "button";
+      const showing = (copied) => {
+        button.setAttribute("aria-label", copied ? "Copied" : "Copy the command");
+        button.replaceChildren(icon(copied ? "check" : "copy"));
+      };
+      showing(false);
+      let pressed = 0;
+      button.onclick = async () => {
+        const mine = ++pressed;
+        try {
+          await navigator.clipboard.writeText(text);
+        } catch {
+          const range = document.createRange();
+          range.selectNodeContents(pre);
+          getSelection()?.removeAllRanges();
+          getSelection()?.addRange(range);
+          return;
+        }
+        showing(true);
+        setTimeout(() => mine === pressed && showing(false), 1500);
+      };
+      const block = el("div", "command-block");
+      block.append(pre, button);
+      return block;
+    };
+    // its fold: a chevron that turns as it opens
+    const fold = el("summary");
+    fold.append(icon("caret"), "Install it yourself");
     const yourself = el("details", "settings-install");
     yourself.append(
-      el("summary", null, "Install it yourself"),
+      fold,
       say("On macOS or Linux (on Windows, in WSL), then pair it with you:"),
-      el("pre", "command", `${INSTALL}\nfragment login --host ${location.origin}`),
+      command(`${INSTALL}\nfragment login --host ${location.origin}`),
       say("To give Claude Code its skill:"),
-      el("pre", "command", SKILL),
+      command(SKILL),
     );
     const about = say("Paste this into your coding agent and finish the sentence: it sets up the `fragment` command line itself, and you approve it here once.");
     about.classList.add("muted");
