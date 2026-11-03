@@ -157,7 +157,8 @@ const CHECK_UNUSABLE: i64 = 3;
 /// its own and restored together, the first first (a restore replaces its
 /// directory whole, so `/data`'s record goes in before the work's).
 /// `/data`'s record leaves the work out (`WORK_LEFT_OUT`), and what a held
-/// guest names; the work's record leaves nothing out.
+/// guest names; the work's record leaves out only what it named under
+/// `/work/` (`work_left_out`: its agents' caches).
 const SAVED_DIRS: [&str; 2] = ["/data", "/data/work"];
 const WORK_LEFT_OUT: &str = "/work/";
 /// The lever's failed saves at most at once (`fail-saves`).
@@ -1460,10 +1461,12 @@ impl ComputerCell {
         let until = js::now_ms() + budget;
         for dir in SAVED_DIRS {
             // the guest's own state leaves its work out (a record of its
-            // own) and what it copied; its work is saved as it is
+            // own) and what it copied or named; its work leaves out only the
+            // caches it named in it
             let exclude = match dir {
                 "/data" => std::iter::once(WORK_LEFT_OUT.to_string()).chain(left_out.iter().cloned()).collect::<Vec<_>>(),
-                _ => vec![],
+                // what it named in its work (its agents' caches), relative to it
+                _ => fragment_core::computer::work_left_out(&left_out),
             };
             let exclude = js::to_js(&json!(exclude));
             let left = JsValue::from_f64((until - js::now_ms()).max(1) as f64);
