@@ -4,7 +4,7 @@
 //! downloads a pointer's bytes when it pulls one, so a folder always holds
 //! real files, at the threshold the host names (`blobMinBytes` in status).
 
-use std::sync::OnceLock;
+use std::sync::Mutex;
 
 use anyhow::{anyhow, bail, Result};
 use fragment_core::blob::{self, sha256_hex};
@@ -15,23 +15,26 @@ use crate::api::Client;
 pub struct Blobs<'a> {
     client: &'a Client,
     name: &'a str,
-    /// shared by a pass's reads at once (`sync::READS_AT_ONCE`)
-    min: OnceLock<Option<u64>>,
+    /// the host's threshold once asked: a pass's transfers at once
+    /// (`sync::BLOB_TRANSFERS_AT_ONCE`) share it, and ask it once
+    min: Mutex<Option<Option<u64>>>,
 }
 
 impl<'a> Blobs<'a> {
     pub fn new(client: &'a Client, name: &'a str) -> Blobs<'a> {
-        Blobs { client, name, min: OnceLock::new() }
+        Blobs { client, name, min: Mutex::new(None) }
     }
 
     /// The host's blob threshold, asked once per pass (`None`: it keeps
     /// everything in git).
     fn min_bytes(&self) -> Result<Option<u64>> {
-        if let Some(m) = self.min.get() {
-            return Ok(*m);
+        let mut min = self.min.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(m) = *min {
+            return Ok(m);
         }
         let status: FragmentStatus = self.client.call_as(self.client.get(&format!("/api/f/{}/status", self.name))?)?;
-        Ok(*self.min.get_or_init(|| status.blob_min_bytes))
+        *min = Some(status.blob_min_bytes);
+        Ok(status.blob_min_bytes)
     }
 
     fn path(&self, sha: &str) -> String {
