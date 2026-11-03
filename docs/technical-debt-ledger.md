@@ -503,6 +503,24 @@ unfinished design, not debt.
   the debug level and `Node::start`'s readers go. The devstack's
   `front_door` and `debug_terminal` tests check a wrangler move.
 
+## The e2e's computers have no internet
+
+- **Shortcut:** with the internet on, local workerd's networking sidecar
+  (`cloudflare/proxy-everything`) resolves even the hosts the platform
+  intercepts through public DNS first, so a run's saves failed while
+  public DNS did not answer (#1017). The e2e's fleet starts computers
+  with it off (`FRAGMENT_COMPUTER_INTERNET=off`, crates/devstack's
+  `Fleet::computer_internet`), and the sidecar answers them at once.
+  The computers lane checks it by dropping a sidecar's queries to public
+  DNS (`containers::drop_public_dns`, which leans on the sidecar's mark
+  for them).
+- **Risk:** a run's computers do not run as a deployment's do, with the
+  internet on: something a computer needs from the internet fails only
+  on a preview.
+- **Delete when:** the sidecar answers an intercepted name without
+  asking public DNS (a draft upstream issue awaits Paul); then the fleet
+  var, `computer_internet` and the lane's drop go.
+
 ## The dev proxy may answer an early refusal with its own 500
 
 - **Shortcut:** the e2e accepts miniflare's 500 for an early 413
