@@ -801,7 +801,11 @@ for Testing fails.
   `chromium.launch()` runs `/opt/fragment/bin/chromium`, the desktop's:
   the image puts it in `PLAYWRIGHT_BROWSERS_PATH` under the names that
   release looks for, marked installed, so `sudo playwright install
-  chromium` downloads no Chromium.
+  chromium` downloads no Chromium. As the agent's user, `playwright
+  install` (either runtime's) answers at once (`playwright-node`, the Node
+  both run Playwright's CLI on): Chromium, or no browser named, is
+  installed already; another browser is root's to install. Playwright's
+  own would wait ten minutes on its lock in that directory, root's.
   Another release an agent installs looks for its own names, and finds
   none.
 - **`unzip`, `zip`, `jq` and `sqlite3`**, Debian's. `sqlite3` runs with

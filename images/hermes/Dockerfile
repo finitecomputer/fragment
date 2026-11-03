@@ -349,6 +349,38 @@ COPY <<'EOF' /etc/profile.d/fragment-node.sh
 NODE_PATH=/usr/local/lib/node_modules
 export NODE_PATH
 EOF
+# The Node that runs Playwright's CLI, `<this> <cli.js> <args>`: Python's
+# driver through PLAYWRIGHT_NODEJS_PATH, the global CLI through its
+# /usr/local/bin/playwright. Playwright's `install` takes a lock in its
+# browsers directory (PLAYWRIGHT_BROWSERS_PATH, root's here: Hermes' store)
+# and, as the agent's user, retries it for ten minutes before it fails;
+# agents run it from habit and old skills. So, there only, `install` is
+# answered at once: for the image's own release, Chromium (or no browser
+# named) is installed already, the system Chromium; anything else is
+# root's to install. Every other command runs as it is.
+COPY --chmod=755 <<'EOF' /opt/fragment/bin/playwright-node
+#!/bin/sh
+# Playwright's Node, answering an `install` it cannot do (images/hermes/Dockerfile).
+browsers="${PLAYWRIGHT_BROWSERS_PATH:-$HOME/.cache/ms-playwright}"
+if [ "${2-}" = install ] && [ -d "$browsers" ] && [ ! -w "$browsers" ]; then
+  others="" n=0
+  for arg in "$@"; do
+    n=$((n + 1))
+    [ "$n" -le 2 ] && continue
+    case "$arg" in -*|chromium|chromium-headless-shell) ;; *) others="$others $arg" ;; esac
+  done
+  case "$1" in
+  /opt/fragment/python/playwright/driver/package/cli.js|/usr/local/lib/node_modules/playwright/cli.js)
+    if [ -z "$others" ]; then
+      echo "Playwright's Chromium is installed already: it runs this computer's own Chromium."
+      exit 0
+    fi ;;
+  esac
+  echo "playwright install:${others:- this Playwright release's browsers} can only be installed as root here (sudo playwright install${others})." >&2
+  exit 1
+fi
+exec /usr/local/bin/node "$@"
+EOF
 COPY images/hermes/preload.py /opt/fragment/preload.py
 COPY images/hermes/tool_keys.py /opt/fragment/tool_keys.py
 COPY images/hermes/tool_threads.py /opt/fragment/tool_threads.py
@@ -499,10 +531,15 @@ RUN /opt/fragment/bin/hermes-boot build-info \
 # and `channel="chromium"` (the browser's) both run it. INSTALLATION_COMPLETE
 # is Playwright's own mark of an installed browser: `sudo playwright install
 # chromium` finds both and downloads no Chromium. The build fails unless
-# both runtimes print a page with it, Python's on the image's Node.
-ENV PLAYWRIGHT_NODEJS_PATH=/usr/local/bin/node
+# both runtimes print a page with it, Python's on the image's Node (through
+# playwright-node).
+ENV PLAYWRIGHT_NODEJS_PATH=/opt/fragment/bin/playwright-node
 RUN <<'EOF'
 set -eu
+# the global CLI through Playwright's Node (playwright-node, above)
+rm /usr/local/bin/playwright
+printf '#!/bin/sh\n# Playwright'"'"'s CLI (images/hermes/Dockerfile).\nexec /opt/fragment/bin/playwright-node /usr/local/lib/node_modules/playwright/cli.js "$@"\n' > /usr/local/bin/playwright
+chmod 755 /usr/local/bin/playwright
 # the check leaves nothing behind: no compile cache, no headless profile
 export NODE_DISABLE_COMPILE_CACHE=1
 browsers=/usr/local/lib/node_modules/playwright/node_modules/playwright-core/browsers.json

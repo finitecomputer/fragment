@@ -4983,6 +4983,8 @@ chromium.launch().then(async b => {
 /// computer's Python environment) and a Node script each take a screenshot
 /// and print a PDF, saying their browser's version, which is the system
 /// Chromium's; each tool does its work; and no browser was downloaded.
+/// Invalid: `playwright install`, by either runtime as the agent's user,
+/// answers at once, never waiting on its lock in a directory of root's.
 #[tokio::test]
 #[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
 async fn playwright_runs_the_system_chromium_and_the_small_tools_run() {
@@ -5006,6 +5008,15 @@ async fn playwright_runs_the_system_chromium_and_the_small_tools_run() {
         assert!(lines.iter().any(|l| l.contains(seen)), "{seen:?} in what the terminal said: {said}");
     }
     assert!(said.contains("\"exit_code\": 0"), "each ran: {said}");
+    // `playwright install`, as the agent's user, answers at once (Codex on
+    // #991: Playwright's own waits ten minutes on a lock in a directory of
+    // root's): Chromium, or no browser named, is installed already; another
+    // is root's
+    let said = tool_said(&fake, &chat, &c, "run: cd /tmp && s=$(date +%s) && timeout 60 playwright install && timeout 60 playwright install chromium && timeout 60 python -m playwright install --with-deps chromium && { timeout 60 playwright install firefox; echo \"firefox=$?\"; } && echo \"took=$(( $(date +%s) - s ))\"").await;
+    assert_eq!(said.matches("Playwright's Chromium is installed already").count(), 3, "each install of Chromium says so: {said}");
+    assert!(said.contains("firefox=1") && said.contains("firefox can only be installed as root here (sudo playwright install firefox)"), "another browser is root's: {said}");
+    let took: u64 = said.split("took=").nth(1).and_then(|r| r.split(|ch: char| !ch.is_ascii_digit()).next()).and_then(|n| n.parse().ok()).unwrap_or_else(|| panic!("how long: {said}"));
+    assert!(took < 10, "at once, not after Playwright's lock: {took} s");
     let browsers = c.exec_out(&["sh", "-c", "ls /opt/hermes/tools | grep chromium"]);
     assert_eq!(browsers.lines().count(), 3, "Chrome for Testing's, and Playwright's two names for the system Chromium; none downloaded: {browsers}");
 }
