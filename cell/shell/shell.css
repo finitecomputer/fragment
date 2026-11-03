@@ -531,9 +531,11 @@ iframe[data-blocked] { display: none; }
 .settings-section > .connector-tags { display: flex; gap: 6px; padding: 12px 2px 0; }
 .settings-section .settings-line { display: flex; align-items: center; gap: 18px; width: 100%; padding: 15px 2px; margin: 0; border-bottom: 1px solid var(--border-strong); font-size: 14px; }
 .settings-line:last-child { border-bottom: 0; }
-.settings-key { flex: 0 0 156px; color: var(--text-secondary); }
-.settings-value { min-width: 0; flex: 1; overflow-wrap: anywhere; }
-.settings-info { display: flex; align-items: baseline; flex: 1; min-width: 0; gap: 18px; }
+/* a row: its label above its content, its actions (when it has any) anchored on the right */
+.settings-key { flex: none; color: var(--text-secondary); font-size: 13px; line-height: 1.4; }
+.settings-value { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
+.settings-section .settings-line:has(> .settings-key + .settings-value) { flex-direction: column; align-items: flex-start; gap: 3px; }
+.settings-info { display: flex; flex-direction: column; align-items: flex-start; flex: 1; min-width: 0; gap: 3px; }
 .settings-action-line .settings-key { flex: 1; }
 .settings-control { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; min-width: 0; margin-left: auto; }
 .settings-control .settings-actions { margin: 0; }
@@ -577,11 +579,7 @@ iframe[data-blocked] { display: none; }
 @container settings (max-width: 620px) {
   .settings-layout { padding: 16px 20px 60px; }
   .settings-nav { min-height: 57px; margin: -16px -20px 22px; padding: 10px 20px; }
-  .settings-section .settings-line:not(.settings-action-line):not(.settings-line-with-action) { flex-direction: column; align-items: flex-start; gap: 2px; }
-  .settings-info { flex-direction: column; gap: 2px; }
-  .settings-info .settings-key { flex: none; }
   .settings-control { flex: none; max-width: 58%; }
-  .settings-key { flex: none; }
   /* a line whose buttons go under it (who is signed in, and a guest's seat) */
   .settings-section .settings-stack { flex-wrap: wrap; row-gap: 10px; }
   .settings-stack .settings-control { flex: 1 1 100%; max-width: none; justify-content: flex-start; }
@@ -619,28 +617,26 @@ iframe[data-blocked] { display: none; }
 .provider-key { display: flex; gap: 8px; flex-wrap: wrap; }
 .provider-key input { height: 30px; min-width: 0; width: 220px; max-width: 100%; padding: 0 10px; border: 1px solid var(--border-strong); border-radius: 8px; background: none; color: var(--text-primary); font: inherit; font-size: 13px; }
 /* settings' agents: a platform route, or independent BYO Fast/Deep picks */
-.agent-setting { width: 100%; display: flex; flex-direction: column; gap: 4px; padding: 14px 2px; border-bottom: 1px solid var(--border-strong); }
+.agent-setting { width: 100%; display: flex; flex-direction: column; gap: 14px; padding: 14px 2px; border-bottom: 1px solid var(--border-strong); }
 .agent-setting:last-child { border-bottom: 0; }
 .agent-setting .settings-line { padding: 0 0 4px; border: 0; }
 .settings-agent-name { display: inline-flex; align-items: center; gap: 8px; color: var(--text-primary); font-weight: 600; }
-.agent-model-label { position: relative; display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%; font-size: 13px; }
-.agent-model-label .settings-key { flex: 0 0 auto; min-width: 80px; }
-.agent-model-label::after { content: ""; position: absolute; top: 50%; right: 15px; width: 7px; height: 7px; border-right: 1.5px solid var(--text-secondary); border-bottom: 1.5px solid var(--text-secondary); transform: translateY(-70%) rotate(45deg); pointer-events: none; }
-.settings-section select.agent-model { width: min(320px, 62%); height: 36px; min-width: 0; padding: 0 34px 0 15px; appearance: none; -webkit-appearance: none; border: 1px solid var(--border-strong); border-radius: 999px; background: var(--bg-active); color: var(--text-primary); font-size: 13px; font-weight: 600; text-overflow: ellipsis; cursor: pointer; }
+.agent-model-label { position: relative; display: flex; flex-direction: column; align-items: stretch; gap: 6px; width: 100%; font-size: 13px; }
+/* the chevron sits in the pick under the label: its middle, 18px above the bottom */
+.agent-model-label::after { content: ""; position: absolute; top: calc(100% - 18px); right: 15px; width: 7px; height: 7px; border-right: 1.5px solid var(--text-secondary); border-bottom: 1.5px solid var(--text-secondary); transform: translateY(-70%) rotate(45deg); pointer-events: none; }
+.settings-section select.agent-model { width: 100%; height: 36px; min-width: 0; padding: 0 34px 0 15px; appearance: none; -webkit-appearance: none; border: 1px solid var(--border-strong); border-radius: 999px; background: var(--bg-active); color: var(--text-primary); font-size: 13px; font-weight: 600; text-overflow: ellipsis; cursor: pointer; }
 .settings-section select.agent-model:hover { background: var(--bg-hover); }
 .settings-section select.agent-model:disabled { opacity: .55; cursor: default; }
 /* Settings' Agents: an agent's role, and another agent to add (agent-settings.js) */
 .agent-role-label::after { content: none; }
-.settings-section input.agent-role { width: min(320px, 62%); height: 36px; }
+.settings-section input.agent-role { width: 100%; height: 36px; }
 .agent-add { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 14px 0 4px; }
 .agent-add input { flex: 1 1 140px; min-width: 0; }
-.agent-mode-picks { display: flex; gap: 8px; width: min(460px, 74%); min-width: 0; }
+.agent-mode-picks { display: flex; gap: 8px; width: 100%; min-width: 0; }
 .agent-mode-picks select.agent-model { width: 100%; flex: 1; }
 .agent-mode-picks select.agent-effort { flex: 0 0 86px; }
-.agent-model-label:not(.has-modes) .agent-mode-picks { width: min(320px, 62%); }
 .agent-model-label.has-modes::after { display: none; }
 .agent-model-label.has-modes .settings-key { min-width: 32px; }
-.agent-model-label.has-modes .agent-mode-picks { width: min(460px, calc(100% - 40px)); }
 .agent-model-label.has-modes select.agent-model { appearance: auto; padding: 0 10px; }
 .agent-model-said { font-size: 12.5px; }
 .chip { height: 26px; padding: 0 10px; border: 1px solid var(--border-strong); border-radius: 999px; background: none; color: var(--text-tertiary); font-size: 12.5px; }
