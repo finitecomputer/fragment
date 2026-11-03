@@ -51,7 +51,7 @@ use std::collections::BTreeMap;
 use fragment_core::catalog::{self, Kind};
 use fragment_core::computer::{
     alive, disk_of_df, reads_disk_after, does_simplex, image_running, notices, valid_version, version_running, Action, Alive, Event, Images, Lifecycle, Phase, Plan as Restore, Rules, Save, SaveNote, Saves, Saving, Socket, Step, Wake, ALIVE_MS, DISK_READ, HOLD_DEADLINE_MS, HOLD_WAIT_MS, SAVE_DEADLINE_MS,
-    SLEEP_DEADLINE_MS, START_DEADLINE_MS,
+    SLEEP_DEADLINE_MS, START_DEADLINE_MS, STARTS_OWED_MAX,
 };
 use fragment_core::ledger::{Meter, MeterRow, Month, Spend};
 use fragment_core::own_signin;
@@ -180,19 +180,39 @@ const SIGSTOP: f64 = 19.0;
 /// A marker's exec answers within this, or it failed: a sleep goes on
 /// without its hold, a start fails.
 const MARK_EXEC_MS: i64 = 30_000;
+/// A Durable Object's alarm runs at most this long (Cloudflare's limits:
+/// "Alarm handler invocations have a maximum wall time of 15 minutes"),
+/// and a save's steps run inside the alarm whose events asked for them
+/// (`drive_events`): an idle sleep's hold, save and stop, an awake save's
+/// hold, save and unhold, all in one.
+const ALARM_WALL_MS: i64 = 15 * 60_000;
+/// What an alarm's other events take beside those steps (its adopt, a
+/// meter's flush, its owner told), each a call of about a second. Kept
+/// free, not enforced: those calls take no bound of their own (the
+/// ledger's `ask`, `principal::tell_changed`), and one that hung would be
+/// ended by the alarm's wall, its step then tried again.
+const ALARM_OTHER_MS: i64 = 60_000;
 /// A save's backups, its records one after the other, answer within this
 /// together, or the save fails (entry.mjs's `Overdue`), as one that says so
-/// does: spike S3 moved 52 MB in 3.3 s, so a few GiB fit, and the rest of
-/// the save still reports before the lifecycle's `SAVE_DEADLINE_MS`. The
-/// Sandbox SDK "never times out anything" (r4, r6: a sick container's
-/// backup never returned, so its sleep never ended).
-const BACKUPS_MS: i64 = 8 * 60_000;
+/// does: the Sandbox SDK "never times out anything" (r4, r6: a sick
+/// container's backup never returned, so its sleep never ended). It is
+/// what an alarm leaves after a sleep's other steps, the most any save can
+/// have. A 20 GB disk holds about 17 GB of a person's (a fresh computer
+/// uses 2.4 GB), 10.8 GB saved at the 1.6 to 1 the largest save showed;
+/// 577 saves over 1 GB on production moved 9 to 156 MB a second
+/// (2026-10-27 to 11-03), so eight minutes would cut 18% of such a save's
+/// tries and this cuts 6%, each tried again a minute later. A save bigger
+/// or slower than an alarm allows needs saves that are not whole copies.
+const BACKUPS_MS: i64 = ALARM_WALL_MS - ALARM_OTHER_MS - HOLD_STEPS_MS - MARK_EXEC_MS - FORGET_PASS_MS - STOP_STEPS_MS;
 /// A start's restores, its save's records together, answer within this, or
 /// the start failed (tried again, on the same save): what the start's own
 /// deadline leaves after the waits around them (the container taking an
-/// exec, the image's check, the gate's mark), so a slow restore fails as
-/// itself, saying so, before the lifecycle fails the start unexplained.
-const RESTORE_MS: i64 = START_DEADLINE_MS - EXEC_READY_MS - CHECK_EXEC_MS - MARK_EXEC_MS;
+/// exec, the image's check, the gate's mark), the disk's read once it is
+/// ready and an alarm's other events, so a slow restore fails as itself,
+/// saying so, before the lifecycle fails the start unexplained, and a
+/// start fits an alarm of its own (a retry's, or one owed after a sleep:
+/// `Lifecycle::start_due`).
+const RESTORE_MS: i64 = START_DEADLINE_MS - EXEC_READY_MS - CHECK_EXEC_MS - MARK_EXEC_MS - DISK_READ_MS - ALARM_OTHER_MS;
 /// A pass of deletes of the records let go of (`forget`) ends within this:
 /// an R2 delete answers in well under a second, and what a pass leaves is
 /// the next save's, as a delete that failed is.
@@ -233,8 +253,12 @@ const _: () = assert!(HOLD_STEPS_MS < HOLD_DEADLINE_MS, "a hold reports before i
 const _: () = assert!(SAVE_STEPS_MS < SAVE_DEADLINE_MS, "a save reports before its deadline, which then only catches a report its isolate lost");
 const _: () = assert!(STOP_STEPS_MS < SLEEP_DEADLINE_MS, "a stop reports before its deadline");
 const _: () = assert!(EXEC_READY_MS + RESTORE_MS + CHECK_EXEC_MS + MARK_EXEC_MS <= START_DEADLINE_MS && ALIVE_MS < START_DEADLINE_MS, "a start's waits fit its deadline");
-const _: () = assert!(RESTORE_MS >= 10 * 60_000, "a restore of a full disk's save (5.9 GB took longer than 165 s) is given ten minutes at least");
-const _: () = assert!(SLEEP_STEPS_MS <= 11 * 60_000, "docs/api.md: a sleep answers within 11 minutes");
+const _: () = assert!(RESTORE_MS >= 9 * 60_000, "a restore of a full disk's save (17 GB at 31 MB/s; 5.7 GB took 147 s) is given nine minutes at least");
+const _: () = assert!(START_DEADLINE_MS <= ALARM_WALL_MS && EXEC_READY_MS + RESTORE_MS + CHECK_EXEC_MS + MARK_EXEC_MS + DISK_READ_MS + ALARM_OTHER_MS <= ALARM_WALL_MS, "a start, the disk's read once it is ready, and an alarm's other events fit an alarm of its own");
+const _: () = assert!(SLEEP_STEPS_MS + ALARM_OTHER_MS <= ALARM_WALL_MS, "a sleep's steps, and an alarm's other events, fit the one alarm they run in");
+const _: () = assert!(HOLD_STEPS_MS + SAVE_STEPS_MS + MARK_EXEC_MS + DISK_READ_MS + ALARM_OTHER_MS <= ALARM_WALL_MS, "an awake save, its unhold and the disk's read after it fit the one alarm they run in");
+const _: () = assert!(BACKUPS_MS >= 11 * 60_000, "a full disk's save (10.8 GB at 16.1 MB/s) is given eleven minutes at least");
+const _: () = assert!(SLEEP_STEPS_MS <= 14 * 60_000, "docs/api.md: a sleep answers within 14 minutes");
 /// The largest request body the egress signs and hands on (it is hashed
 /// for NIP-98 first, so it is read whole).
 const EGRESS_BODY_MAX_BYTES: usize = 32 * 1024 * 1024;
@@ -428,7 +452,7 @@ impl DurableObject for ComputerCell {
             return Response::ok("");
         }
         if !self.wiped.get() && self.meta(MetaKey::Id).ok().flatten().is_some() {
-            if let Err(e) = self.drive(Event::Alarm).await {
+            if let Err(e) = self.drive_with(Some(Event::Alarm), false).await {
                 console_error!("{{\"computer\":\"alarm\",\"error\":{}}}", json!(e.message));
             }
         }
@@ -806,10 +830,36 @@ impl ComputerCell {
     /// runtime no longer holds open (`keepalives_lost`); with no `first`,
     /// those alone (a keepalive's close).
     async fn drive_after(&self, first: Option<Event>) -> CellResult<Option<String>> {
+        self.drive_with(first, true).await
+    }
+
+    /// `drive_after`, in a request (`asked`) or the DO's alarm. Each start its
+    /// events leave due (a sleep's end, a crash, a fallback past a bad save:
+    /// `Lifecycle::start_due`) a request makes at once, one after another
+    /// as each fails over to the next, since nothing ends a request that
+    /// waits (`STARTS_OWED_MAX` of them at most); an alarm leaves it to the
+    /// alarm its events asked for, an invocation of its own, since an alarm
+    /// ends at `ALARM_WALL_MS` and its sleep's steps took most of this one.
+    async fn drive_with(&self, first: Option<Event>, asked: bool) -> CellResult<Option<String>> {
         let told = self.notices()?;
         // a deploy since its last look is news, told as any change is
         self.look_logged().await;
-        let refused = self.drive_events(first).await;
+        let mut refused = self.drive_events(first).await;
+        if asked {
+            // bounded: the lifecycle owes at most STARTS_OWED_MAX in a row
+            for _ in 0..STARTS_OWED_MAX {
+                let Ok(said) = &refused else { break };
+                if !self.lifecycle()?.start_due(js::now_ms()) {
+                    break;
+                }
+                let said = said.clone();
+                refused = self.drive_events(Some(Event::Alarm)).await.map(|again| said.or(again));
+            }
+            if refused.is_ok() && self.lifecycle()?.start_due(js::now_ms()) {
+                // past the lifecycle's own bound: its alarm makes the next
+                console_error!("{}", json!({ "computer": self.meta(MetaKey::Id)?, "starts": "owed past the bound", "max": STARTS_OWED_MAX }));
+            }
+        }
         // what its owner is told changed: their open pages read it again
         // (whatever the events did, a step that failed half way included)
         if self.notices().is_ok_and(|now| now != told) {
