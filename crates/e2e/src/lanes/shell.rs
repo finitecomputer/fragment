@@ -3539,7 +3539,7 @@ fn deploying_uploads_ui(s: &mut Suite, b: &mut Browser, page: &Page, app: &str, 
     b.choose_files(page, input, &[&photo])?;
     let held = b.until(page, "!!window.__held.release", wait);
     b.eval(page, "(window.__held.release('deploying'), true)")?;
-    let line = "document.querySelector('#settings-page label.picture span')";
+    let line = "document.querySelector('#settings-page .profile-said')";
     let told = b.until(page, &format!("{line}?.textContent === {} && {no_release}", js(UPDATING)), wait);
     b.eval(page, &format!("({line}?.scrollIntoView({{ block: 'center' }}), true)"))?;
     let _ = b.screenshot(page, &shots.join("picture-upload-deploying.png"));

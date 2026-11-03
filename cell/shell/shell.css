@@ -540,7 +540,6 @@ iframe[data-blocked] { display: none; }
 .settings-action-line .settings-key { flex: 1; }
 .settings-control { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; min-width: 0; margin-left: auto; }
 .settings-control .settings-actions { margin: 0; }
-.settings-section .settings-control .picture { margin: 0; }
 .settings-warning { color: var(--danger-text); font-size: 14px; }
 /* a row's short line under its label, where its value would be: what it does */
 .settings-value.settings-sub { color: var(--text-secondary); font-size: 13px; line-height: 1.45; }
@@ -589,8 +588,23 @@ label.settings-line { cursor: pointer; }
 .settings-install { width: 100%; padding: 4px 2px 8px; }
 .settings-install summary { width: max-content; padding: 6px 0; color: var(--text-secondary); font-size: 13.5px; cursor: pointer; }
 .settings-install p { margin: 8px 0; font-size: 14px; }
-.settings-section .picture { margin-top: 12px; margin-bottom: 2px; }
-.settings-section .picture img { width: 24px; height: 24px; }
+/* Account's first row: the person's picture (their initial where there is
+   none), a pencil over it on hover or focus, then who is signed in */
+.profile .settings-info.profile-info { flex-direction: row; align-items: center; gap: 14px; }
+.profile-text { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.profile-picture { position: relative; flex: none; width: 52px; height: 52px; border-radius: 50%; cursor: pointer; }
+.profile-picture:has(input:disabled) { cursor: default; }
+.profile-picture:has(input:focus-visible) { outline: 2px solid var(--accent-blue); outline-offset: 2px; }
+.profile-avatar { position: relative; display: grid; place-items: center; width: 100%; height: 100%; border-radius: 50%; overflow: hidden; background: var(--bg-active); box-shadow: inset 0 0 0 1px var(--border-strong); color: var(--text-secondary); font-size: 20px; font-weight: 600; }
+.profile-picture .profile-avatar img { position: absolute; inset: 0; width: 100%; height: 100%; border-radius: 0; object-fit: cover; }
+.profile-picture-over { position: absolute; inset: 0; display: grid; place-items: center; border-radius: 50%; background: rgba(0,0,0,.5); color: #fff; opacity: 0; transition: opacity .15s; }
+.profile-picture:hover .profile-picture-over, .profile-picture:has(input:focus-visible) .profile-picture-over { opacity: 1; }
+.profile-picture-over svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.profile-picture input, .profile-picture-words { position: absolute; width: 1px; height: 1px; margin: 0; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; opacity: 0; }
+.profile-said { margin: 2px 0 0; color: var(--text-secondary); font-size: 13px; }
+.profile-said.form-error { color: var(--danger-text); }
+@media (hover: none) { .profile-picture-over { opacity: 1; background: rgba(0,0,0,.28); } }
+@media (prefers-reduced-motion: reduce) { .profile-picture-over { transition: none; } }
 @container settings (max-width: 880px) {
   .settings-layout { display: block; max-width: 760px; padding: 22px 24px 72px; }
   /* as tall before its links come (settings loading) as with them: a link's 36px, padded */

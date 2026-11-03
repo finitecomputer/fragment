@@ -1,5 +1,6 @@
 import { billingSections, returnSaid, returning } from "./billing.js";
 import { dataSection } from "./exports.js";
+import { icon } from "./icons.js";
 
 export function el(tag, cls, text) {
   const e = document.createElement(tag);
@@ -241,8 +242,10 @@ export function createSettings({ api, $, seg, account, navigation, notices, sect
     if (mySeat) setGuest(mySeat.guest);
     setSeat(mySeat?.seat ?? null);
     const emails = (person().subjects ?? []).map((x) => x.email).filter(Boolean);
-    // who is signed in (their latest sign-in's email), signing out, and
-    // another account: a seat may wait under another email
+    // who is signed in: their picture, changed from the picture itself (a
+    // pencil over it on hover or focus, as an agent's: agent-settings.js),
+    // their latest sign-in's email beside it, and signing out, and another
+    // account: a seat may wait under another email
     const signout = el("form");
     signout.method = "post";
     signout.action = "/auth/logout";
@@ -251,36 +254,63 @@ export function createSettings({ api, $, seg, account, navigation, notices, sect
     signout.append(out);
     const ways = el("span", "settings-actions");
     ways.append(signout, switchForm(SETTINGS));
-    const who = line("Signed in as", "", ways);
-    who.classList.add("settings-who", "settings-stack");
-    who.querySelector(".settings-value").append(person().email ? el("strong", null, person().email) : "—");
-    const id = line("Identity", person().id);
-    id.lastChild.classList.add("mono");
-    const account = section("Account", who, id);
-    // a picture: PNG, JPEG, WebP or GIF, at most 256 KiB (PUT /api/identities/me/picture)
-    const picture = el("label", "quiet picture");
-    const shown = el("img");
-    shown.alt = "";
-    shown.hidden = !person().picture;
-    if (person().picture) shown.src = person().picture;
+    // a picture: PNG, JPEG, WebP or GIF, at most 256 KiB (PUT
+    // /api/identities/me/picture); none, their email's first letter. The
+    // file input stays in reach of the keyboard, unseen, its words the
+    // label's name and its tooltip's.
+    const words = person().picture ? "Change your picture" : "Add a picture";
+    const picture = el("label", "picture profile-picture");
+    picture.dataset.tooltip = words;
+    const face = el("span", "profile-avatar", (person().email ?? "").trim().charAt(0).toUpperCase() || "?");
+    if (person().picture) {
+      const img = el("img");
+      img.alt = "";
+      img.src = person().picture;
+      img.onerror = () => img.remove();
+      face.append(img);
+    }
     const file = el("input");
     file.type = "file";
     file.accept = "image/png,image/jpeg,image/webp,image/gif";
-    file.hidden = true;
-    picture.append(shown, el("span", null, person().picture ? "Change your picture" : "Add a picture"), file);
+    const over = el("span", "profile-picture-over");
+    over.append(icon("rename"));
+    picture.append(face, over, el("span", "profile-picture-words", words), file);
+    // what became of a picture chosen: saving it, or why it was not taken
+    const said = el("p", "profile-said");
+    said.setAttribute("role", "status");
+    said.hidden = true;
+    const email = el("span", "settings-value");
+    email.append(person().email ? el("strong", null, person().email) : "—");
+    const text = el("div", "profile-text");
+    text.append(el("span", "settings-key", "Signed in as"), email, said);
+    const info = el("div", "settings-info profile-info");
+    info.append(picture, text);
+    const control = el("div", "settings-control");
+    control.append(ways);
+    const who = el("div", "settings-line settings-line-with-action settings-who settings-stack profile");
+    who.append(info, control);
     file.onchange = async () => {
       const f = file.files?.[0];
       if (!f) return;
+      file.disabled = true;
+      said.classList.remove("form-error");
+      said.textContent = "Saving your picture…";
+      said.hidden = false;
       try {
         await api("PUT", "/api/identities/me/picture", f, f.type);
       } catch (e) {
-        picture.querySelector("span").textContent = e.message || "That picture was not taken";
+        said.classList.add("form-error");
+        said.textContent = e.message || "That picture was not taken";
+        file.disabled = false;
+        file.value = "";
         return;
       }
       setPerson(await api("GET", "/api/identities/me"));
       reopenSettings();
     };
-    account.append(actionLine("Picture", picture));
+    const id = line("Identity", person().id);
+    id.lastChild.classList.add("mono");
+    const account = section("Account", who, id);
     // their sign-ins, when they linked several before linking went (off
     // until WorkOS offers an account picker: docs/api.md, Sign-in)
     if (emails.length > 1) account.append(line("Sign-ins", emails.join(", ")));
