@@ -788,6 +788,74 @@ fn woke_trigger(s: &mut Suite, api: &Api, long: Duration) -> Result<()> {
     api.signed(&owner, "POST", &format!("/api/f/{name}/pause"), Some(&json!({ "op": "tick", "paused": false })))?;
     let caught = woke_to(s, 3) && woke()[0]["status"] == "succeeded";
     s.ok("unpaused, the run that did not succeed is caught up by a wake, once", caught && quiet(s, 3), json!(woke()));
+
+    // a wake decides again once the ledger answers, with no wait before
+    // the run it starts: held there (a test lever, a latch), a files
+    // trigger's run for the move, or a pause, that comes meanwhile is seen
+    let hold = |name: &str, on: bool| api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "hold-woke", "on": on })));
+    let held = |name: &str| api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "woke-held" }))).map(|r| r.body["held"] == true).unwrap_or(false);
+    let held_wake = |s: &Suite| -> bool {
+        let _ = hold(&name, true);
+        let _ = lever("woke-reset");
+        let _ = api.status(&owner, &name);
+        s.eventually(long, || held(&name))
+    };
+    let decided = |s: &Suite| -> bool {
+        let _ = hold(&name, false);
+        s.eventually(long, || !held(&name))
+    };
+    s.commit(&c, &[("other/held.md", Some(b"main moved where no files trigger looks"))]);
+    refresh()?;
+    let waiting = held_wake(s);
+    s.commit(&c, &[("notes/meanwhile.md", Some(b"its files trigger runs it while the wake waits"))]);
+    refresh()?;
+    let ran = s.eventually(long, || runs(api, &owner, &name, "&op=tick").first().is_some_and(|r| r["via"] == "files" && r["status"] == "succeeded"));
+    s.ok(
+        "a files trigger's run that comes while a wake waits for the ledger: the wake starts none",
+        waiting && ran && decided(s) && woke().len() == 3,
+        json!(runs(api, &owner, &name, "&op=tick")),
+    );
+    s.commit(&c, &[("other/held-again.md", Some(b"main moved again, no run on it"))]);
+    refresh()?;
+    let waiting = held_wake(s);
+    api.signed(&owner, "POST", &format!("/api/f/{name}/pause"), Some(&json!({ "op": "tick", "paused": true })))?;
+    s.ok("a pause that comes while a wake waits for the ledger: the wake starts none (no blocked run)", waiting && decided(s) && woke().len() == 3, json!(woke()));
+    api.signed(&owner, "POST", &format!("/api/f/{name}/pause"), Some(&json!({ "op": "tick", "paused": false })))?;
+    s.ok("and unpaused, the move is caught up by a wake, once", woke_to(s, 4) && quiet(s, 4), json!(woke()));
+
+    // a run still on it, however old: a newer one that ended (blocked, a
+    // files run while paused) does not make a wake due
+    let (active, ca) = jobs_fragment(s, api, &owner, "woke-active", |m| {
+        m["triggers"] = json!([{ "woke": true, "run": "nap" }, { "files": "notes/**", "run": "nap" }])
+    })?;
+    let lever2 = |op: &str, extra: Value| {
+        let mut body = json!({ "fragment": active, "op": op });
+        body.as_object_mut().expect("an object").extend(extra.as_object().cloned().unwrap_or_default());
+        api.unsigned("POST", "/api/test/fragment", Some(&body))
+    };
+    lever2("hold-advances", json!({ "on": true }))?;
+    let older = started(&api.op(&owner, &active, "nap", "older", json!({ "ms": 100 }))?);
+    let running = s.eventually(long, || lever2("advance-held", json!({})).is_ok_and(|r| r.body["run"] == older));
+    api.signed(&owner, "POST", &format!("/api/f/{active}/pause"), Some(&json!({ "op": "nap", "paused": true })))?;
+    s.commit(&ca, &[("notes/newer.md", Some(b"a files run, blocked while paused"))]);
+    api.signed(&owner, "POST", &format!("/api/f/{active}/refresh"), Some(&json!({})))?;
+    let newer = s.eventually(long, || runs(api, &owner, &active, "&op=nap").first().is_some_and(|r| r["via"] == "files" && r["status"] == "blocked"));
+    api.signed(&owner, "POST", &format!("/api/f/{active}/pause"), Some(&json!({ "op": "nap", "paused": false })))?;
+    // the wake, held were anything due: once it has had its chance, it never waited
+    let _ = hold(&active, true);
+    let _ = lever2("woke-reset", json!({}));
+    let _ = api.status(&owner, &active);
+    let had = s.eventually(long, || lever2("woke-reset", json!({})).is_ok_and(|r| r.body["had"] == true));
+    let never_held = !held(&active);
+    let _ = hold(&active, false);
+    let woke_active = runs(api, &owner, &active, "&op=nap").into_iter().filter(|r| r["via"] == "woke").count();
+    s.ok(
+        "an older run still running, a newer one ended blocked: a wake starts none",
+        running && newer && had && never_held && woke_active == 0,
+        json!(runs(api, &owner, &active, "&op=nap")),
+    );
+    lever2("hold-advances", json!({ "on": false }))?;
+    let _ = settle(api, &owner, &active, older, &["succeeded", "held"], long);
     Ok(())
 }
 

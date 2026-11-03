@@ -556,6 +556,18 @@ impl FragmentCell {
                 json!({ "ok": true })
             }
             Some("advance-held") => json!({ "run": self.meta(MetaKey::TestAdvanceHeld)?.and_then(|r| r.parse::<i64>().ok()) }),
+            Some("hold-woke") => {
+                // while on, a wake with something due waits before it reads
+                // the ledger (jobs.rs `held_woke`), at most 20 s
+                if body["on"] == true {
+                    self.del_meta(MetaKey::TestWokeHeld)?;
+                    self.set_meta(MetaKey::TestHoldWoke, "1")?;
+                } else {
+                    self.del_meta(MetaKey::TestHoldWoke)?;
+                }
+                json!({ "ok": true })
+            }
+            Some("woke-held") => json!({ "held": self.meta(MetaKey::TestWokeHeld)?.is_some() }),
             Some("age-live") => {
                 let ms = body["ms"].as_i64().filter(|ms| *ms > 0).ok_or_else(|| CellError::invalid("ms: a positive number"))?;
                 json!({ "aged": self.live_age(ms)? })
@@ -710,7 +722,7 @@ impl FragmentCell {
                 json!({ "ok": true })
             }
             _ => return Err(CellError::invalid("op is fail-deliveries, fail-outbox, fail-triggers, drop-effects, fail-meter-acks, fail-after-paid, forget-steps,
- hold-advances, advance-held, forget-live, age-live, drop-live, ledger, age, members, code-builds, alarm, age-outside, age-invites, meter-now, meter, forget-standing, receipt-before, cron-now, poll-now, hold-rows, or ended")),
+ hold-advances, advance-held, hold-woke, woke-held, forget-live, age-live, drop-live, ledger, age, members, code-builds, alarm, age-outside, age-invites, meter-now, meter, forget-standing, receipt-before, cron-now, poll-now, hold-rows, or ended")),
         })
     }
 }

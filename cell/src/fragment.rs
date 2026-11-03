@@ -394,6 +394,12 @@ pub(crate) enum MetaKey {
     /// may make (`facet-calls`), as Cloudflare spends a facet's subrequests.
     TestFacetCalls,
     TestAdvanceHeld,
+    /// Test fleets: while set, a wake with something due waits before it
+    /// reads the ledger (jobs.rs `held_woke`), at most `TEST_HOLD_MAX_MS`.
+    TestHoldWoke,
+    /// Test fleets: set while a wake waits there, until it has decided
+    /// (`woke-held`).
+    TestWokeHeld,
     /// The computer this agent fragment runs on (runs_on.rs).
     Computer,
     /// The agent identity its own key holds, once it ran on a computer.
@@ -504,6 +510,8 @@ impl MetaKey {
             MetaKey::TestHoldRows => "test_hold_rows",
             MetaKey::TestFacetCalls => "test_facet_calls",
             MetaKey::TestAdvanceHeld => "test_advance_held",
+            MetaKey::TestHoldWoke => "test_hold_woke",
+            MetaKey::TestWokeHeld => "test_woke_held",
             MetaKey::Computer => "computer",
             MetaKey::AgentIdentity => "agent_identity",
             MetaKey::Door => "door",

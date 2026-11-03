@@ -1203,12 +1203,22 @@ impl FragmentCell {
         let started = async {
             // nothing to catch up is decided here, before any await: no
             // ledger read, no run
-            let due = self.woke_due()?;
-            if due.is_empty() {
+            if self.woke_due()?.is_empty() {
                 return Ok(0);
             }
+            if self.cfg.test_hooks {
+                self.held_woke().await?;
+            }
             let read_only = self.read_only().await?;
-            self.fire_woke(&due, read_only)
+            // and decided again after the ledger's answer, with no await
+            // before the runs it starts: a files trigger's run, or a pause,
+            // may have come while it was asked
+            let fired = self.fire_woke(read_only);
+            if self.cfg.test_hooks {
+                // a held wake has decided (`woke-held` reads false again)
+                self.del_meta(MetaKey::TestWokeHeld)?;
+            }
+            fired
         };
         match started.await {
             Ok(0) => {}
@@ -1239,13 +1249,14 @@ impl FragmentCell {
             if self.is_paused(&op)? {
                 continue;
             }
+            // any run on it, however old: a newer one's end says nothing of it
+            let active = self.rows("SELECT 1 FROM runs WHERE status IN ('queued', 'running') AND op = ? LIMIT 1", vec![op.as_str().into()])?;
+            if !active.is_empty() {
+                continue;
+            }
             let latest = self.rows("SELECT status FROM runs WHERE op = ? ORDER BY id DESC LIMIT 1", vec![op.as_str().into()])?;
             let status = latest.first().and_then(|r| r["status"].as_str().and_then(RunStatus::parse));
-            let caught_up = match status {
-                Some(RunStatus::Queued | RunStatus::Running) => true,
-                Some(RunStatus::Succeeded) => covered.get(&op) == Some(&main),
-                _ => false,
-            };
+            let caught_up = status == Some(RunStatus::Succeeded) && covered.get(&op) == Some(&main);
             if !caught_up && !due.contains(&op) {
                 due.push(op);
             }
@@ -1276,10 +1287,26 @@ impl FragmentCell {
         self.set_meta(MetaKey::WokeCovered, &serde_json::to_string(&covered).expect("commits serialize"))
     }
 
+    /// Test fleets: while `hold-woke` is on, a wake with something due
+    /// waits here, before the ledger is read, at most `TEST_HOLD_MAX_MS`.
+    async fn held_woke(&self) -> CellResult<()> {
+        assert!(self.cfg.test_hooks, "only a test fleet holds a wake");
+        for _ in 0..TEST_HOLD_MAX_MS / TEST_HOLD_POLL_MS {
+            if self.meta(MetaKey::TestHoldWoke)?.is_none() {
+                return Ok(());
+            }
+            self.set_meta(MetaKey::TestWokeHeld, "1")?;
+            Delay::from(Duration::from_millis(TEST_HOLD_POLL_MS)).await;
+        }
+        Ok(())
+    }
+
     /// The runs a woke trigger starts (`woke_chance`) for the operations
-    /// with something to catch up (`woke_due`), as the fragment, from the
+    /// with something to catch up (`woke_due`, decided here again: no await
+    /// comes between it and the runs it starts), as the fragment, from the
     /// code installed now: how many.
-    fn fire_woke(&self, due: &[String], read_only: Option<Why>) -> CellResult<usize> {
+    fn fire_woke(&self, read_only: Option<Why>) -> CellResult<usize> {
+        let due = self.woke_due()?;
         let mut started = 0;
         let main = self.pin("main")?;
         for t in self.triggers()?.iter().filter(|t| matches!(t.on, TriggerOn::Woke(_)) && due.contains(&t.run)) {
