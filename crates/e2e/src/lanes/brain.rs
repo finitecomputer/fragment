@@ -436,30 +436,48 @@ pub fn brain(s: &mut Suite, api: &Api) -> Result<()> {
         json!({ "before": before, "after": after }),
     );
     let woke_runs = |api: &Api| jobs::runs(api, &keys, &name, "&op=changed").into_iter().filter(|r| r["via"] == "woke").collect::<Vec<Value>>();
+    let settled = |api: &Api| jobs::runs(api, &keys, &name, "&op=changed").iter().all(|r| r["status"] != "running" && r["status"] != "queued");
+    anyhow::ensure!(s.eventually(WAIT, || settled(api)), "changed's runs never ended before the restart");
     let woken = woke_runs(api).len();
     s.stop()?;
     let api = &s.start(false)?;
-    // a fresh start: the first request someone makes (this one) starts the
-    // woke trigger's run, which finds nothing left; let it come and end
-    // before marking
-    let quiet = s.eventually(WAIT, || {
-        let l = woke_runs(api);
-        l.len() > woken && l.iter().all(|r| r["status"] != "running" && r["status"] != "queued")
-    });
-    anyhow::ensure!(quiet, "the woke run after a restart never came, or never ended: {:?}", woke_runs(api));
+    // a fresh start with nothing changed since changed last ran: the first
+    // request someone makes (this one) has the woke trigger's chance, and
+    // starts nothing (its chance spent: the lever says it had it)
+    let _ = index(api, &keys, &name);
+    let decided = s.eventually(WAIT, || lever(api, &name, "woke-reset", json!({})).is_ok_and(|r| r.body["had"] == true));
+    s.ok(
+        "a restart with nothing changed since changed's last run starts no run when someone comes back",
+        decided && woke_runs(api).len() == woken,
+        json!({ "woke": woke_runs(api), "before": woken }),
+    );
 
     // behind its files (a page marked, no run on it), a search says so, and how to finish it
     let r = api.op(&keys, &name, "mark", "behind", json!({ "paths": [SOLAR], "full": false }))?;
     let behind = search(api, &keys, &name, json!({ "q": "inverter" }))?;
+    s.ok(
+        "a page marked alone is not indexed, and mark says to call changed after it",
+        r.status == 200 && r.body["result"]["marked"] == 1 && r.body["result"]["hint"].as_str().is_some_and(|h| h.contains("call changed after mark")),
+        &r,
+    );
     s.ok(
         "an index behind its files says so: indexing, results may be incomplete, and the job that finishes it",
         r.status == 200 && behind.body["result"]["indexing"] == true && behind.body["result"]["hint"].as_str().is_some_and(|h| h.contains("changed")) && found(&behind).first() == Some(&at(SOLAR, "Inverters")),
         &behind,
     );
 
-    // someone coming back (its woke trigger, FIN-372): as if its object had
-    // just started, an anonymous visit spends nothing, and the first request
-    // a person makes starts changed once, as the brain, which catches it up
+    // someone coming back (its woke trigger, FIN-372) after changed's last
+    // run did not succeed (paused while main moved: blocked): as if its
+    // object had just started, an anonymous visit spends nothing, and the
+    // first request a person makes starts changed once, as the brain, which
+    // catches the marked page up
+    let pause = |paused: bool| api.signed(&keys, "POST", &format!("/api/f/{name}/pause"), Some(&json!({ "op": "changed", "paused": paused })));
+    pause(true)?;
+    write(&dir, "garden/raw/assets/roof.txt", b"a source's bytes, while changed was paused")?;
+    let synced = s.cli(api, &home, &["sync", &name, "--dir", &dir_s]);
+    let blocked = s.eventually(WAIT, || jobs::runs(api, &keys, &name, "&op=changed").first().is_some_and(|r| r["status"] == "blocked"));
+    anyhow::ensure!(synced.status.success() && blocked, "a move of main while changed was paused left no blocked run");
+    pause(false)?;
     let woke = || woke_runs(api);
     let woke_before = woke().len();
     let armed = lever(api, &name, "woke-reset", json!({}))?;
@@ -483,6 +501,10 @@ pub fn brain(s: &mut Suite, api: &Api) -> Result<()> {
         armed.status == 200 && anonymous.status < 500 && kept.body["had"] == false && caught_up && woke().len() == woke_before + 1,
         json!({ "woke": woke(), "kept": kept.body, "index": index(api, &keys, &name) }),
     );
+    let _ = lever(api, &name, "woke-reset", json!({}))?;
+    let _ = index(api, &keys, &name);
+    let decided = s.eventually(WAIT, || lever(api, &name, "woke-reset", json!({})).is_ok_and(|r| r.body["had"] == true));
+    s.ok("and coming back again, with nothing changed since, starts none", decided && woke().len() == woke_before + 1, json!(woke()));
     let brand = chrome.eval(&tab, "document.getElementById('brand')?.textContent ?? ''")?;
     s.ok("its page is the files view: the brain's tree and its front page, titled by the brain", shown && brand == "Garden", chrome.eval(&tab, "document.body.innerText.slice(0, 300)")?);
     let status = chrome.until(&tab, "/searchable/.test(document.getElementById('status-line')?.textContent ?? '')", wait);
@@ -677,9 +699,8 @@ pub fn brain_release(s: &mut Suite, api: &Api) -> Result<()> {
     let visit_ms = t0.elapsed().as_millis() as u64;
     // The installed trigger's run, as the brain, ends a step after: its last
     // batch finds nothing left. Were the read its object's first request of
-    // an activation, its woke trigger's run (the brain's too) joins it, and
-    // claims keep the two off each other's pages: that one may still be
-    // waiting out a claim (`CLAIM_MS`). Every run the brain's: no person's.
+    // an activation, its woke trigger finds that run on it and starts none
+    // (jobs.rs `woke_due`). Every run the brain's: no person's.
     let since = || jobs::runs(api, &keys, &name, "&op=changed").into_iter().filter(|r| !before.contains(&r["id"])).collect::<Vec<Value>>();
     s.eventually(WAIT, || since().iter().any(|r| r["via"] == "installed" && r["status"] != "running" && r["status"] != "queued"));
     let since = since();

@@ -62,17 +62,19 @@ indexing, waiting_ms, hint?}`.
   search --in` by its asker.
 - **Kept by a file trigger.** `{"files": "**", "run": "changed"}`: each move
   of `main` runs the job `changed`, which marks the paths that moved
-  (`mark`, a mutation, which open pages follow), then indexes them 8 files a
+  (`mark`, a mutation, which open pages follow; marking alone indexes
+  nothing, so whoever calls `mark` calls `changed` after it), then indexes them 8 files a
   step (`reindex`, a query that reads the files at `main` and writes the
   index, within its 50 capability calls: `CALLS_MAX`) until none are left
   for it, going on in a run of its own past one run's steps. An installed
   trigger (`{"installed": true, "run": "changed"}`) runs it once per install
   of a new release too, at the brain's next request, so a release that
   changes the index's shape (`FORMAT`) is taken in with no member acting;
-  and a woke trigger (`{"woke": true, "run": "changed"}`) once each time
-  its object starts again for a person or an agent (never an alarm, the
-  platform's own calls, or an anonymous visitor), which catches up a run
-  that died. A
+  and a woke trigger (`{"woke": true, "run": "changed"}`) when its object
+  starts again for a person or an agent (never an alarm, the platform's
+  own calls, or an anonymous visitor) and there is something to catch up:
+  main moved since `changed`'s last run, or that run did not succeed (one
+  that died). A
   batch claims its pages (for two minutes), so runs side by side take
   different pages and nothing is read or embedded twice: any member may
   start `changed`, and one with

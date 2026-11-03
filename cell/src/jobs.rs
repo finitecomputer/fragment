@@ -1142,6 +1142,8 @@ impl FragmentCell {
                 }),
                 owner_read_only: read_only,
             })?;
+            // a woke trigger of the same operation has this move covered
+            self.cover_woke(&t.run, commit)?;
         }
         Ok(())
     }
@@ -1199,8 +1201,24 @@ impl FragmentCell {
             return;
         }
         let started = async {
+            // nothing to catch up is decided here, before any await: no
+            // ledger read, no run
+            if self.woke_due()?.is_empty() {
+                return Ok(0);
+            }
+            if self.cfg.test_hooks {
+                self.held_woke().await?;
+            }
             let read_only = self.read_only().await?;
-            self.fire_woke(read_only)
+            // and decided again after the ledger's answer, with no await
+            // before the runs it starts: a files trigger's run, or a pause,
+            // may have come while it was asked
+            let fired = self.fire_woke(read_only);
+            if self.cfg.test_hooks {
+                // a held wake has decided (`woke-held` reads false again)
+                self.del_meta(MetaKey::TestWokeHeld)?;
+            }
+            fired
         };
         match started.await {
             Ok(0) => {}
@@ -1211,11 +1229,88 @@ impl FragmentCell {
         }
     }
 
-    /// The runs a woke trigger starts (`woke_chance`), as the fragment, from the
+    /// The woke triggers' operations with something to catch up: main moved
+    /// since the operation's last triggered run started (`WokeCovered`),
+    /// or its latest run ended without succeeding (failed, held, blocked).
+    /// One queued or running is on it already; a paused one would only be
+    /// blocked, so it waits for its unpause. Each wake used to start one
+    /// whatever was left, a job of 1.3 to 1.8 s on a brain whose index was
+    /// current, and a brain's object sleeps after about 10 s idle (bench,
+    /// 2026-11-02): a person met one nearly every time they came back.
+    fn woke_due(&self) -> CellResult<Vec<String>> {
+        let ops: Vec<String> = self.triggers()?.iter().filter(|t| matches!(t.on, TriggerOn::Woke(_))).map(|t| t.run.clone()).collect();
+        if ops.is_empty() {
+            return Ok(vec![]);
+        }
+        let main = self.pin("main")?;
+        let covered = self.woke_covered()?;
+        let mut due = vec![];
+        for op in ops {
+            if self.is_paused(&op)? {
+                continue;
+            }
+            // any run on it, however old: a newer one's end says nothing of it
+            let active = self.rows("SELECT 1 FROM runs WHERE status IN ('queued', 'running') AND op = ? LIMIT 1", vec![op.as_str().into()])?;
+            if !active.is_empty() {
+                continue;
+            }
+            let latest = self.rows("SELECT status FROM runs WHERE op = ? ORDER BY id DESC LIMIT 1", vec![op.as_str().into()])?;
+            let status = latest.first().and_then(|r| r["status"].as_str().and_then(RunStatus::parse));
+            let caught_up = status == Some(RunStatus::Succeeded) && covered.get(&op) == Some(&main);
+            if !caught_up && !due.contains(&op) {
+                due.push(op);
+            }
+        }
+        Ok(due)
+    }
+
+    /// `WokeCovered`: per woke trigger's operation, the main commit its
+    /// last triggered run started at.
+    fn woke_covered(&self) -> CellResult<BTreeMap<String, Option<String>>> {
+        match self.meta(MetaKey::WokeCovered)? {
+            Some(text) => serde_json::from_str(&text).map_err(|e| CellError::host(format!("the stored woke commits do not decode: {e}"))),
+            None => Ok(Default::default()),
+        }
+    }
+
+    /// A triggered run of `op` started with main at `main`: a woke trigger
+    /// of `op` has that much covered. Kept for woke triggers' operations
+    /// alone (at most the triggers a manifest declares).
+    fn cover_woke(&self, op: &str, main: Option<&str>) -> CellResult<()> {
+        let woke: Vec<String> = self.triggers()?.iter().filter(|t| matches!(t.on, TriggerOn::Woke(_))).map(|t| t.run.clone()).collect();
+        if !woke.iter().any(|w| w == op) {
+            return Ok(());
+        }
+        let mut covered = self.woke_covered()?;
+        covered.retain(|o, _| woke.contains(o));
+        covered.insert(op.to_string(), main.map(str::to_string));
+        self.set_meta(MetaKey::WokeCovered, &serde_json::to_string(&covered).expect("commits serialize"))
+    }
+
+    /// Test fleets: while `hold-woke` is on, a wake with something due
+    /// waits here, before the ledger is read, at most `TEST_HOLD_MAX_MS`.
+    async fn held_woke(&self) -> CellResult<()> {
+        assert!(self.cfg.test_hooks, "only a test fleet holds a wake");
+        for _ in 0..TEST_HOLD_MAX_MS / TEST_HOLD_POLL_MS {
+            if self.meta(MetaKey::TestHoldWoke)?.is_none() {
+                return Ok(());
+            }
+            self.set_meta(MetaKey::TestWokeHeld, "1")?;
+            Delay::from(Duration::from_millis(TEST_HOLD_POLL_MS)).await;
+        }
+        Ok(())
+    }
+
+    /// The runs a woke trigger starts (`woke_chance`) for the operations
+    /// with something to catch up (`woke_due`, decided here again: no await
+    /// comes between it and the runs it starts), as the fragment, from the
     /// code installed now: how many.
     fn fire_woke(&self, read_only: Option<Why>) -> CellResult<usize> {
+        let due = self.woke_due()?;
         let mut started = 0;
-        for t in self.triggers()?.iter().filter(|t| matches!(t.on, TriggerOn::Woke(_))) {
+        let main = self.pin("main")?;
+        for t in self.triggers()?.iter().filter(|t| matches!(t.on, TriggerOn::Woke(_)) && due.contains(&t.run)) {
+            self.cover_woke(&t.run, main.as_deref())?;
             self.start_run(NewRun {
                 op: &t.run,
                 via: Via::Woke,
