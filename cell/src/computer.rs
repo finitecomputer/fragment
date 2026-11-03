@@ -2226,6 +2226,8 @@ impl ComputerCell {
                 let life = self.lifecycle()?;
                 let mut v = serde_json::to_value(self.saves()?).map_err(|e| CellError::host(e.to_string()))?;
                 v["computer"] = json!(id);
+                // the folders set aside, kept beside its saves
+                v["aside"] = json!(self.aside()?.folders());
                 v["generation"] = json!(life.generation());
                 v["saving"] = json!(life.saving());
                 v["unsavedSince"] = json!(life.unsaved_since_ms());
