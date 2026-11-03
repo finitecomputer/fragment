@@ -19,8 +19,10 @@ pub const WORKER_BUILD_VERSION: &str = "0.8.5";
 /// the release's Static Assets, not its data (cell/src/assets.rs); what
 /// grows it past this is a choice, made by moving this number: 6.5 MB
 /// since launch week (2026-10-14, the debt ledger's "The cell's Wasm
-/// budget was raised for launch").
-pub const CELL_WASM_MAX_BYTES: u64 = 6_500_000;
+/// budget was raised for launch"), 6.6 MB since 2026-11-03, Paul's, for
+/// the fixes that let every computer restart (the debt ledger's "The
+/// cell's Wasm budget raised to 6.6 MB").
+pub const CELL_WASM_MAX_BYTES: u64 = 6_600_000;
 
 /// The cell's code generation for wasm32, beside the paths it remaps: Wasm
 /// SIMD (`simd128`, which V8 and workerd run), for the search index's int8
@@ -418,19 +420,19 @@ mod tests {
     /// even when the rounded MB is identical. Extreme sizes never wrap.
     #[test]
     fn the_cell_is_held_to_its_budget() {
-        assert_eq!(super::CELL_WASM_MAX_BYTES, 6_500_000);
+        assert_eq!(super::CELL_WASM_MAX_BYTES, 6_600_000);
         for (size, expected) in [
-            (0, "0 bytes of Wasm (0.00 MB; budget 6500000 bytes; remaining bytes: 6500000)"),
-            (6_499_999, "6499999 bytes of Wasm (6.50 MB; budget 6500000 bytes; remaining bytes: 1)"),
-            (6_500_000, "6500000 bytes of Wasm (6.50 MB; budget 6500000 bytes; remaining bytes: 0)"),
+            (0, "0 bytes of Wasm (0.00 MB; budget 6600000 bytes; remaining bytes: 6600000)"),
+            (6_599_999, "6599999 bytes of Wasm (6.60 MB; budget 6600000 bytes; remaining bytes: 1)"),
+            (6_600_000, "6600000 bytes of Wasm (6.60 MB; budget 6600000 bytes; remaining bytes: 0)"),
         ] {
             assert_eq!(super::within_budget(size).unwrap(), expected);
         }
         let refused = super::within_budget(super::CELL_WASM_MAX_BYTES + 1).unwrap_err().to_string();
-        assert!(refused.starts_with("cell/build/index_bg.wasm is 6500001 bytes, over its budget of 6500000 bytes (excess bytes: 1;"), "{refused}");
+        assert!(refused.starts_with("cell/build/index_bg.wasm is 6600001 bytes, over its budget of 6600000 bytes (excess bytes: 1;"), "{refused}");
         assert!(refused.contains("CELL_WASM_MAX_BYTES") && refused.contains("Static Assets"), "{refused}");
         let refused = super::within_budget(u64::MAX).unwrap_err().to_string();
-        assert!(refused.starts_with("cell/build/index_bg.wasm is 18446744073709551615 bytes, over its budget of 6500000 bytes (excess bytes: 18446744073703051615;"), "{refused}");
+        assert!(refused.starts_with("cell/build/index_bg.wasm is 18446744073709551615 bytes, over its budget of 6600000 bytes (excess bytes: 18446744073702951615;"), "{refused}");
     }
 
     /// Goal: the cell's Wasm holds no path of the machine that built it.

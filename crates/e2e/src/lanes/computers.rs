@@ -163,7 +163,7 @@ const HELD_AWAKE: &str = "its turn's end is saved awake, and its guest answered 
 /// the stub and the fakes.
 const SAVE_CHECKS: [&str; 7] = [
     "awake and idle after a turn, it has a save newer than the turn, held",
-    "it keeps at most three saves, newest first, and its view lists them",
+    "it keeps its newest three saves (and the one it came up from), newest first, and its view lists them",
     "an always-on computer is saved without sleeping",
     "a save leaves out what its guest's answer to the hold names, and keeps the rest (DirectoryBackup's exclude)",
     "a save is two records, /data and its work (/data/work), and a wake restores both",
@@ -200,7 +200,7 @@ fn save_checks(s: &mut Suite, api: &Api, c: &Crashing, say: &dyn Fn(u32, &str) -
     let numbers: Vec<u64> = all.as_array().map(|l| l.iter().filter_map(|x| x["number"].as_u64()).collect()).unwrap_or_default();
     s.ok(
         SAVE_CHECKS[1],
-        (1..=3).contains(&numbers.len()) && numbers.windows(2).all(|w| w[0] > w[1]) && v["saves"].as_array().map(|l| l.len()) == Some(numbers.len()) && v["saves"][0]["id"] == newest["id"],
+        ((1..=3).contains(&numbers.len()) || (numbers.len() == 4 && all[3]["id"] == v["restored"]["save"])) && numbers.windows(2).all(|w| w[0] > w[1]) && v["saves"].as_array().map(|l| l.len()) == Some(numbers.len()) && v["saves"][0]["id"] == newest["id"],
         format!("{all} / {}", v["saves"]),
     );
     // always on: a turn's end saves it, and it never sleeps for it

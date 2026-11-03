@@ -148,7 +148,10 @@ pub const HOLD_DEADLINE_MS: i64 = 90_000;
 pub const SAVE_DEADLINE_MS: i64 = 10 * 60_000;
 /// Saves of `/data` kept: a wake restores the newest that restores, and
 /// falls back to the one before it (docs/computers.md, "Saves and what a
-/// wake restores").
+/// wake restores"). Beside these, the save its running life came up from
+/// is kept too, until a start comes up from a newer one: a long life saves
+/// every 15 minutes, and its three newest would otherwise all be its own,
+/// none a start ever came up from.
 pub const SAVES_KEPT: usize = 3;
 /// A start from a snapshot is up only once its guest has read its own view
 /// (`GET /api/computer`, which an image reads as its entrypoint starts:
@@ -1806,7 +1809,14 @@ impl Saves {
         }
         self.numbered += 1;
         self.saves.insert(0, Save { number: self.numbered, id, generation, at_ms, held, records, unusable: false });
-        let dropped = if self.saves.len() > SAVES_KEPT { self.saves.split_off(SAVES_KEPT) } else { vec![] };
+        let mut dropped = if self.saves.len() > SAVES_KEPT { self.saves.split_off(SAVES_KEPT) } else { vec![] };
+        // the save its running life came up from is kept past the newest: one
+        // a start restored and came up from, the last to fall back to
+        let booted = self.restored.as_ref().and_then(|r| r.save.as_deref());
+        if let Some(at) = dropped.iter().position(|s| Some(s.id.as_str()) == booted && !s.unusable) {
+            self.saves.push(dropped.remove(at));
+        }
+        assert!(self.saves.len() <= SAVES_KEPT + 1, "the newest, and the one it came up from");
         assert!(self.saves.windows(2).all(|w| w[0].number > w[1].number), "newest first");
         assert!(self.snapshot.as_ref().is_none_or(|s| self.saves[0].id == s.save), "a snapshot kept is of the current save");
         self.let_go(dropped.into_iter().flat_map(|s| s.records).collect())
@@ -1837,7 +1847,7 @@ impl Saves {
     pub fn every_record(&self) -> Vec<Value> {
         let kept = self.saves.iter().flat_map(|s| s.records.iter());
         let out: Vec<Value> = kept.chain(self.forgetting.iter()).cloned().collect();
-        assert!(out.len() <= SAVES_KEPT * SAVE_RECORDS_MAX + FORGETTING_MAX, "a computer's records are bounded");
+        assert!(out.len() <= (SAVES_KEPT + 1) * SAVE_RECORDS_MAX + FORGETTING_MAX, "a computer's records are bounded");
         out
     }
 
@@ -2678,6 +2688,57 @@ mod tests {
         let named: Vec<String> = ["/hermes/state.db", "/work/*/home/.cache/pip/", "/work/*/browser-profile/**/Code?Cache/", "/work/", "/work/**/x", "/workshop/a", "/hermes/.cache/uv/"].iter().map(|s| s.to_string()).collect();
         assert_eq!(work_left_out(&named), ["/*/home/.cache/pip/", "/*/browser-profile/**/Code?Cache/"]);
         assert!(work_left_out(&[]).is_empty());
+    }
+
+    /// Goal (2026-11-03: a computer's three saves were all of one long
+    /// life, none a start had come up from): beside its newest three, the
+    /// save its running life came up from is kept, as the oldest, the last
+    /// a start falls back to; once a start comes up from a newer one, it
+    /// goes with the next save. One found unusable is not kept so. Valid,
+    /// invalid (unusable), the bound (four at most). Method: a life's saves
+    /// as the DO keeps them.
+    #[test]
+    fn the_save_a_life_came_up_from_is_kept_past_the_newest() {
+        let mut c = Computer::new();
+        c.wake();
+        c.sleep(Some("b1"));
+        let r = c.wake();
+        assert_eq!(r.save.as_deref(), Some("b1"), "this life came up from b1");
+        // the life saves three times, and a fourth: b1 stays, the oldest
+        for id in ["b2", "b3", "b4", "b5"] {
+            c.turn_saved(id);
+        }
+        let ids = |c: &Computer| c.saves.all().iter().map(|s| s.id.clone()).collect::<Vec<_>>();
+        assert_eq!(ids(&c), ["b5", "b4", "b3", "b1"], "the newest three, and the one it came up from");
+        assert!(c.saves.forgetting().iter().any(|r| r["id"] == "b2"), "the others let go of");
+        // its newer saves found unusable, a start falls back to b1 last
+        for bad in ["b5", "b4", "b3"] {
+            assert!(c.saves.unusable(bad));
+        }
+        assert_eq!(c.saves.current().map(|s| s.id.as_str()), Some("b1"));
+        // a start comes up from a newer one: b1 goes with the next save
+        let mut c = Computer::new();
+        c.wake();
+        c.sleep(Some("b1"));
+        c.wake();
+        for id in ["b2", "b3", "b4"] {
+            c.turn_saved(id);
+        }
+        c.sleep(Some("b5"));
+        let r = c.wake();
+        assert_eq!(r.save.as_deref(), Some("b5"));
+        c.turn_saved("b6");
+        assert_eq!(ids(&c), ["b6", "b5", "b4"], "b5 is among the newest: nothing more kept");
+        // one found unusable is not kept past the newest
+        let mut c = Computer::new();
+        c.wake();
+        c.sleep(Some("b1"));
+        c.wake();
+        c.saves.unusable("b1");
+        for id in ["b2", "b3", "b4"] {
+            c.turn_saved(id);
+        }
+        assert_eq!(ids(&c), ["b4", "b3", "b2"]);
     }
 
     /// Goal (P3, decision 19): a snapshot is of the image its start ran, so
