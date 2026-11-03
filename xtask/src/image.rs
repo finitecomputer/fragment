@@ -9,7 +9,7 @@
 //!
 //! - `push <image> --repository <name> --tag <tag> [--summary <file>]`
 //!   builds the image from the tree as a deploy's wrangler builds it
-//!   (build.rs, `image_build`) and pushes it with wrangler's `containers
+//!   (build.rs, `image_push`) and pushes it with wrangler's `containers
 //!   push` on the pinned Node.
 //! - `copy <image> --from <reference> --repository <name> --tag <tag>
 //!   [--summary <file>]` builds nothing: it copies an image another
