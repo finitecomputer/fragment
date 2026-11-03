@@ -1,5 +1,13 @@
 export const PHASE = { asleep: "Asleep", starting: "Starting", awake: "Awake", sleeping: "Going to sleep", wont_wake: "Won't start" };
 
+const size = (b) => (b >= 1e9 ? `${(b / 1e9).toFixed(1)} GB` : `${Math.max(1, Math.round(b / 1e6))} MB`);
+
+// What the person is told of a disk filling (the `disk_filling` notice),
+// here too, in one line (Paul's words): the room left, and what to do.
+export function diskSaid(n) {
+  return `Your computer is almost full (${size(n.free)} left). Delete files you don't need, or ask an agent to tidy up.`;
+}
+
 export function createComputer({ api, el, seg, named, section, line, actionLine, computer, agents, computerFailed, support, setupPending, made, computerIs, reopenSettings, openScreen, markOffer, reads, load }) {
   // ---- the computer: awake while the person is here, and its updates ----
   let woke = 0;
@@ -114,6 +122,9 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
       later.dataset.action = "later";
       later.onclick = () => updateLater(n.version, later);
       actions.append(later);
+    } else if (n.kind === "disk_filling") {
+      row.classList.add("warn");
+      copy.append(el("strong", null, diskSaid(n)));
     } else if (n.kind === "deploying") {
       copy.append(el("strong", null, "Updating — back in a moment"));
     } else if (n.kind === "refresh") {
