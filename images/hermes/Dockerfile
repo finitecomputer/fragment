@@ -209,15 +209,24 @@ RUN cd /opt/hermes \
 
 # Hermes' document skills carry deterministic create/read/render helpers,
 # but its desktop image leaves their Python dependencies uninstalled. Bake
-# them in: no first-turn installation and no writes to the sealed venv at
-# runtime. The requirements lock pins versions and SHA-256s, resolved on
-# Hermes' Python 3.14; its PM's uv installs wheels only. Chromium already
-# handles HTML-to-PDF; no second browser or LaTeX distribution is needed.
+# them in: no first-turn installation and no writes at runtime. They are the
+# image's own packages, /opt/fragment/python, which the computer's Python
+# environment names (boot/src/python.rs, a .pth), where an agent's `python`
+# runs a skill's helper, and which Hermes' venv names by the same .pth;
+# never Hermes' PM store, whose Python it records a digest of. What the lock
+# shares with Hermes' venv (cffi, cryptography, pillow and the like) is at
+# the releases that venv already holds, which it reads first. The lock pins
+# versions and SHA-256s, resolved on Hermes' Python 3.14; its PM's uv
+# installs wheels only. Chromium already handles HTML-to-PDF; no second
+# browser or LaTeX distribution is needed.
 COPY images/hermes/document-requirements.txt /tmp/document-requirements.txt
 RUN uv="$(/opt/hermes/.venv/bin/python -c 'from pm._uv import _toolchain; print(_toolchain(realize=False)[0])')" \
- && UV_CACHE_DIR=/tmp/uv-cache "$uv" pip install --python /opt/hermes/.venv/bin/python --require-hashes --no-build -r /tmp/document-requirements.txt \
- && rm -rf /tmp/uv-cache /tmp/document-requirements.txt /opt/hermes/.venv/.lock \
- && /opt/hermes/.venv/bin/python -c 'import reportlab, pypdf, pdfplumber, pypdfium2, pymupdf, docx, pptx, openpyxl'
+ && UV_CACHE_DIR=/tmp/uv-cache "$uv" pip install --quiet --python /usr/local/bin/python3 --target /opt/fragment/python --require-hashes --no-build -r /tmp/document-requirements.txt \
+ && rm -rf /tmp/uv-cache /tmp/document-requirements.txt \
+ && /usr/local/bin/python3 -m compileall -q --invalidation-mode unchecked-hash /opt/fragment/python > /dev/null \
+ && echo /opt/fragment/python > "$(/opt/hermes/.venv/bin/python -c 'import sysconfig; print(sysconfig.get_path("purelib"))')/fragment-image.pth" \
+ && /opt/hermes/.venv/bin/python -c 'import reportlab, pypdf, pdfplumber, pypdfium2, pymupdf, docx, pptx, openpyxl' \
+ && PYTHONPATH=/opt/fragment/python /usr/local/bin/python3 -c 'import reportlab, pypdf, pdfplumber, pypdfium2, pymupdf, docx, pptx, openpyxl'
 
 # Bytecode in the image (S3b, cut a: -6.2 s). unchecked-hash: /opt/hermes is
 # sealed, so nothing can make a .pyc stale.

@@ -774,9 +774,16 @@ install` work, and what they install is kept.
   (`boot/src/python.rs`).
 - **Kept** across a restart and a sleep, and across an image update whose
   Python is the same minor release: it runs whichever Python the image
-  links. One made for another Python (or unreadable) is set aside whole
-  (`/data/work/python.3.14`), with `requirements.txt` listing what it held
-  for `pip install -r`, and a new one is made.
+  links (`bin/python` is a link to `/usr/local/bin/python3`, as is its
+  `home`), wherever the image's store keeps it. One made for another
+  Python (or unreadable) is set aside whole (`/data/work/python.3.14`),
+  with `requirements.txt` listing what it held for `pip install -r`, and a
+  new one is made; the agent's page says so.
+- **The image's own packages**, in `/opt/fragment/python` (the document
+  skills' libraries; never Hermes' store, whose Python its PM records a
+  digest of), are named in it by a `.pth` the boot writes at each start,
+  after its own, so an agent's install of one wins. Hermes' venv names
+  them by the same `.pth`.
 
 ### Claude Code in our Hermes image
 

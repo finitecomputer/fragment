@@ -18,6 +18,18 @@ pub const PYTHON: &str = "/usr/local/bin/python3";
 /// Hermes' own uv, linked by the image (its Dockerfile).
 pub const UV: &str = "/usr/local/bin/uv";
 
+/// The image's own Python packages (the document skills' libraries),
+/// installed at its build apart from Hermes' store, whose Python it
+/// records a digest of. The environment reads them after its own
+/// (`image_pth`), so an agent's install of one wins.
+pub const IMAGE_PACKAGES: &str = "/opt/fragment/python";
+
+/// The `.pth` that names `IMAGE_PACKAGES` in an environment of Python
+/// `minor`, written at each start.
+pub fn image_pth(dir: &Path, minor: &str) -> PathBuf {
+    dir.join(format!("lib/python{minor}/site-packages/fragment-image.pth"))
+}
+
 /// What a start does with the environment.
 #[derive(Debug, PartialEq)]
 pub enum Plan {
@@ -152,6 +164,7 @@ mod tests {
             assert_eq!(made_for(bad), None, "{bad:?}");
         }
         assert_eq!(minor("3.14.7\n").as_deref(), Some("3.14"));
+        assert_eq!(image_pth(Path::new(DIR), "3.14"), PathBuf::from("/data/work/python/lib/python3.14/site-packages/fragment-image.pth"));
     }
 
     /// Goal: one set aside is named for its Python, never over another set

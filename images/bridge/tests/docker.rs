@@ -4852,10 +4852,12 @@ async fn python_env_said(c: &Container, n: usize) -> serde_json::Value {
 /// sleep (a save restored into a fresh container, as every wake and image
 /// update starts) (docs/computers.md, "Python in our Hermes image").
 /// Valid: both installs import in the terminal, beside the image's own
-/// document libraries. Restart and wake: they still import, the boot
-/// keeping the environment. Invalid: one made for another Python is set
-/// aside, its packages listed for `pip install -r`, and a new one with pip
-/// made. Replay: the start after keeps that one.
+/// document libraries, by `python` and `python3`. Restart and wake: they
+/// still import, the boot keeping the environment, and so after an image
+/// update whose Python is the same minor release at another path (Codex on
+/// #989). Invalid: one made for another Python is set aside, its packages
+/// listed for `pip install -r`, and a new one with pip made. Replay: the
+/// start after keeps that one.
 #[tokio::test]
 #[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
 async fn the_computers_python_keeps_what_its_agents_install() {
@@ -4866,8 +4868,10 @@ async fn the_computers_python_keeps_what_its_agents_install() {
     let wheels = c.exec_code(&["/command/s6-setuidgid", "hermes", "/usr/local/bin/python3", "-c", TEST_WHEELS, "by_pip", "by_uv"]);
     assert_eq!(wheels.0, 0, "the test's wheels: {}", wheels.1);
 
-    let said = tool_said(&fake, &chat, &c, "run: cd /tmp && which python pip uv && echo \"venv=$VIRTUAL_ENV\" && pip install --no-index /tmp/wheels/by_pip-1.0-py3-none-any.whl && uv pip install --offline /tmp/wheels/by_uv-1.0-py3-none-any.whl && python -c 'import by_pip, by_uv; print(by_pip.OK, by_uv.OK)' && python3 -c 'import reportlab, pypdf, docx; print(\"documents-ok\")'").await;
-    for seen in ["/data/work/python/bin/python", "/data/work/python/bin/pip", "/usr/local/bin/uv", "venv=/data/work/python", "by_pip-ok by_uv-ok", "documents-ok"] {
+    // what each prints is computed, never in the command: a failing
+    // command's traceback quotes its source
+    let said = tool_said(&fake, &chat, &c, "run: cd /tmp && which python python3 pip uv && echo \"venv=$VIRTUAL_ENV\" && pip install --no-index /tmp/wheels/by_pip-1.0-py3-none-any.whl && uv pip install --offline /tmp/wheels/by_uv-1.0-py3-none-any.whl && python -c 'import by_pip, by_uv; print(by_pip.OK, by_uv.OK)' && python -c 'import reportlab, pypdf, pdfplumber, pypdfium2, pymupdf; print(\"pdf\", 6 * 7)' && python3 -c 'import docx, pptx, openpyxl; print(\"office\", 6 * 7)'").await;
+    for seen in ["/data/work/python/bin/python\\n", "/data/work/python/bin/python3\\n", "/data/work/python/bin/pip", "/usr/local/bin/uv", "venv=/data/work/python\\n", "by_pip-ok by_uv-ok", "pdf 42", "office 42"] {
         assert!(said.contains(seen), "{seen:?} in what the terminal said: {said}");
     }
     let imported = "run: cd /tmp && python -c 'import by_pip, by_uv; print(by_pip.__file__, by_uv.OK)'";
@@ -4898,16 +4902,29 @@ async fn the_computers_python_keeps_what_its_agents_install() {
     let said = tool_said(&fake, &chat, &c, imported).await;
     assert!(said.contains("by_uv-ok"), "after a sleep: {said}");
 
+    // an image update whose Python is the same minor release at another
+    // path (upstream's store names each release by its own): the
+    // environment runs the Python the image links, and keeps what it holds
+    let linked = c.exec_out(&["readlink", "/usr/local/bin/python3"]);
+    let old = linked.trim().strip_suffix("/bin/python3").unwrap_or_else(|| panic!("the image links its Python: {linked:?}")).to_string();
+    let next = format!("{old}-next");
+    assert!(c.exec(&["cp", "-a", &old, &next]) && c.exec(&["ln", "-sfn", &format!("{next}/bin/python3"), "/usr/local/bin/python3"]));
+    c.restart();
+    assert_eq!(python_env_said(&c, 2).await["plan"], "Keep", "a Python of the same minor release at another path keeps it");
+    let said = tool_said(&fake, &chat, &c, "run: cd /tmp && python -c 'import sys, by_uv; print(\"base\", sys.base_prefix, by_uv.OK)'").await;
+    // the path's end: what the terminal says masks a run of digits in it
+    assert!(said.contains("-next by_uv-ok") && said.contains("base /opt/hermes/tools/python-"), "it runs the newly linked Python ({next}), its packages kept: {said}");
+
     // one made for another Python: set aside, listed, and made again
     assert!(c.exec(&["sed", "-i", "s/^version_info = .*/version_info = 3.13.5/", "/data/work/python/pyvenv.cfg"]));
     assert!(c.exec(&["mv", "/data/work/python/lib/python3.14", "/data/work/python/lib/python3.13"]));
     c.restart();
-    let remade = python_env_said(&c, 2).await;
+    let remade = python_env_said(&c, 3).await;
     assert_eq!((remade["plan"].as_str(), remade["set_aside"].as_str()), (Some("SetAside(Some(\"3.13\"))"), Some("/data/work/python.3.13")), "{remade}");
     assert_eq!(c.exec_out(&["cat", "/data/work/python.3.13/requirements.txt"]), "by_pip==1.0\nby_uv==1.0\n");
     let said = tool_said(&fake, &chat, &c, "run: cd /tmp && pip --version && python -c 'import by_pip' || echo by_pip-gone").await;
     assert!(said.contains("/data/work/python/lib/python3.14/site-packages/pip") && said.contains("by_pip-gone"), "a new one, with pip and without the old packages: {said}");
     c.restart();
-    assert_eq!(python_env_said(&c, 3).await["plan"], "Keep", "the start after keeps the new one");
+    assert_eq!(python_env_said(&c, 4).await["plan"], "Keep", "the start after keeps the new one");
     assert_eq!(c.exec_out(&["ls", "/data/work"]).lines().filter(|l| l.starts_with("python")).collect::<Vec<_>>(), ["python", "python.3.13"], "set aside once");
 }
