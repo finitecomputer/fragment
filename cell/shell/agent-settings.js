@@ -524,7 +524,7 @@ export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, 
     // connected; whether there is one, with a single route, is the agent's
     // own tier's to say (once agent.json is read)
     const name = nameField(a, said), picture = pictureField(a, said);
-    const picks = [name, picture, roleField(a, said), ...homePicker(a, said), ...modelPickers(a, modeled, read, write, said), ...claudePickers(a, read, write, said)];
+    const picks = [picture, name, roleField(a, said), ...homePicker(a, said), ...modelPickers(a, modeled, read, write, said), ...claudePickers(a, read, write, said)];
     const fields = el("div", "agent-fields");
     fields.append(...picks);
     const home = el("div", "agent-edit-home");
