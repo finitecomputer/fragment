@@ -454,7 +454,8 @@ fn aside_out_checks(s: &mut Suite, api: &Api, c: &Crashing, stranger: &crate::Ke
     let (read, turn) = said(s, 525, &format!("read {at}/aside.txt"))?;
     s.ok(
         ASIDE_OUT_CHECKS[2],
-        killed.status == 200 && restarted && again_told && again.status == 200 && !at.is_empty() && read == format!("read {at}/aside.txt: set aside") && aside_of(&record)["back"]["doneMs"].is_i64(),
+        // its first reply after the crash also tells it what the crash cut
+        killed.status == 200 && restarted && again_told && again.status == 200 && !at.is_empty() && read.starts_with(&format!("read {at}/aside.txt: set aside")) && aside_of(&record)["back"]["doneMs"].is_i64(),
         json!({ "restarted": restarted, "told": again_told, "back": again.body["back"], "read": read }),
     );
     // a save of its life holds it: aside no more, its archive deleted
