@@ -1,4 +1,5 @@
 import { avatar } from "./agent-identity.js";
+import { icon } from "./icons.js";
 import { providerName } from "./connections.js";
 
 export const DEFAULT_AGENT_TIER = "cheap";
@@ -111,9 +112,10 @@ export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, 
     const live = liveOwn();
     return live.has(a.identity) && live.size > 1 && primaryAgent()?.fragment !== a.fragment;
   };
-  // An agent's row's Rename, its picture (Add, Change, Remove), Remove agent
-  // (asked once more, saying what it does), and a line that says what they
-  // did or why not.
+  // An agent's row's picture (Add, Change, Remove), Remove agent (asked
+  // once more, saying what it does), a line that says what they did or why
+  // not, and its Rename: a pencil the row puts beside the name, as the Apps
+  // page puts one beside an app's (apps-page.js).
   function faceControls(a) {
     const said = el("p", "muted agent-face-said");
     said.hidden = true;
@@ -121,8 +123,10 @@ export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, 
       said.textContent = text;
       said.hidden = !text;
     };
-    const renameIt = el("button", "quiet", "Rename");
+    const renameIt = el("button", "app-title-edit agent-rename");
     renameIt.type = "button";
+    renameIt.setAttribute("aria-label", `Rename ${titleOf(a.fragment)}`);
+    renameIt.append(icon("rename"));
     renameIt.dataset.renameAgent = a.fragment;
     renameIt.onclick = () => rename(a.fragment);
     const picture = el("label", "quiet picture");
@@ -154,7 +158,7 @@ export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, 
     file.onchange = () => file.files?.[0] && change(file.files[0]);
     remove.onclick = () => change(null);
     const actions = el("span", "agent-face-actions");
-    actions.append(renameIt, picture, remove);
+    actions.append(picture, remove);
     if (removable(a)) {
       const ask = el("button", "quiet", "Remove agent");
       ask.type = "button";
@@ -166,7 +170,7 @@ export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, 
         sure.dataset.removeAgentSure = a.fragment;
         const cancel = el("button", "quiet", "Cancel");
         cancel.type = "button";
-        cancel.onclick = () => actions.replaceChildren(renameIt, picture, remove, ask);
+        cancel.onclick = () => actions.replaceChildren(picture, remove, ask);
         sure.onclick = async () => {
           for (const b of [sure, cancel]) b.disabled = true;
           tell(`Removing ${titleOf(a.fragment)}…`);
@@ -178,14 +182,14 @@ export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, 
             row?.remove();
           } catch (e) {
             tell(e.message);
-            actions.replaceChildren(renameIt, picture, remove, ask);
+            actions.replaceChildren(picture, remove, ask);
           }
         };
         actions.replaceChildren(what, sure, cancel);
       };
       actions.append(ask);
     }
-    return [actions, said];
+    return [actions, said, renameIt];
   }
   // Settings' agent rows as the list says now: each one's face and name, and
   // whether it has a picture to change or remove; and its open screens. The

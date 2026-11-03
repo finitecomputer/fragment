@@ -317,8 +317,11 @@ export function createSettings({ api, $, seg, account, navigation, notices, sect
       row.onclick = () => openApp(a.fragment);
       const name = el("span", "settings-agent-name");
       name.dataset.agentFace = a.fragment;
-      const [actions, said] = faceControls(a);
-      return [agentSettings(a, actionLine(name, actions, row), modeled), said];
+      const [actions, said, renameIt] = faceControls(a);
+      // the pencil beside the name, outside it: renderAgentFaces redraws the name
+      const title = el("span", "settings-agent-title");
+      title.append(name, renameIt);
+      return [agentSettings(a, actionLine(title, actions, row), modeled), said];
     }) : [el("p", "muted", "None yet.")]), ...(mine.length ? addAgentForm() : []));
     const connections = connectionsSection(linked, uses);
     const skills = await skillsSection();

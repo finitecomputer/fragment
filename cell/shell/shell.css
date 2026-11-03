@@ -638,6 +638,7 @@ label.settings-line { cursor: pointer; }
 .agent-setting:last-child { border-bottom: 0; }
 .agent-setting .settings-line { padding: 0 0 4px; border: 0; }
 .settings-agent-name { display: inline-flex; align-items: center; gap: 8px; color: var(--text-primary); font-weight: 600; }
+.settings-agent-title { display: inline-flex; align-items: center; gap: 2px; }
 .agent-model-label { position: relative; display: flex; flex-direction: column; align-items: stretch; gap: 6px; width: 100%; font-size: 13px; }
 /* the chevron sits in the pick under the label: its middle, 18px above the bottom */
 .agent-model-label::after { content: ""; position: absolute; top: calc(100% - 18px); right: 15px; width: 7px; height: 7px; border-right: 1.5px solid var(--text-secondary); border-bottom: 1.5px solid var(--text-secondary); transform: translateY(-70%) rotate(45deg); pointer-events: none; }
