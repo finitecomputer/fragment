@@ -50,7 +50,7 @@ use std::collections::BTreeMap;
 
 use fragment_core::catalog::{self, Kind};
 use fragment_core::computer::{
-    alive, does_simplex, image_running, notices, valid_version, version_running, Action, Alive, Event, Images, Lifecycle, Phase, Plan as Restore, Rules, Save, SaveNote, Saves, Saving, Socket, Step, Wake, ALIVE_MS, HOLD_DEADLINE_MS, HOLD_WAIT_MS, SAVE_DEADLINE_MS,
+    alive, disk_of_df, reads_disk_after, does_simplex, image_running, notices, valid_version, version_running, Action, Alive, Event, Images, Lifecycle, Phase, Plan as Restore, Rules, Save, SaveNote, Saves, Saving, Socket, Step, Wake, ALIVE_MS, DISK_READ, HOLD_DEADLINE_MS, HOLD_WAIT_MS, SAVE_DEADLINE_MS,
     SLEEP_DEADLINE_MS, START_DEADLINE_MS, STARTS_OWED_MAX,
 };
 use fragment_core::ledger::{Meter, MeterRow, Month, Spend};
@@ -144,6 +144,8 @@ const HELD_READ: &str = "cat /run/computer/held";
 const UNHELD_READ: &str = "cat /run/computer/unheld 2>/dev/null || true";
 /// The read of it answers within this, or the hold's line says so.
 const UNHELD_EXEC_MS: i64 = 5_000;
+/// A read of its disk (`DISK_READ`) answers within this, or it is not read.
+const DISK_READ_MS: i64 = 5_000;
 /// The image's check of what a start restored (docs/computers.md, "Data and
 /// the restore gate"), when it carries one: run after the restore and
 /// before the gate opens. Its exit `CHECK_UNUSABLE` says the save is
@@ -205,11 +207,12 @@ const BACKUPS_MS: i64 = ALARM_WALL_MS - ALARM_OTHER_MS - HOLD_STEPS_MS - MARK_EX
 /// A start's restores, its save's records together, answer within this, or
 /// the start failed (tried again, on the same save): what the start's own
 /// deadline leaves after the waits around them (the container taking an
-/// exec, the image's check, the gate's mark) and an alarm's other events,
-/// so a slow restore fails as itself, saying so, before the lifecycle
-/// fails the start unexplained, and a start fits an alarm of its own (a
-/// retry's, or one owed after a sleep: `Lifecycle::start_due`).
-const RESTORE_MS: i64 = START_DEADLINE_MS - EXEC_READY_MS - CHECK_EXEC_MS - MARK_EXEC_MS - ALARM_OTHER_MS;
+/// exec, the image's check, the gate's mark), the disk's read once it is
+/// ready and an alarm's other events, so a slow restore fails as itself,
+/// saying so, before the lifecycle fails the start unexplained, and a
+/// start fits an alarm of its own (a retry's, or one owed after a sleep:
+/// `Lifecycle::start_due`).
+const RESTORE_MS: i64 = START_DEADLINE_MS - EXEC_READY_MS - CHECK_EXEC_MS - MARK_EXEC_MS - DISK_READ_MS - ALARM_OTHER_MS;
 /// A pass of deletes of the records let go of (`forget`) ends within this:
 /// an R2 delete answers in well under a second, and what a pass leaves is
 /// the next save's, as a delete that failed is.
@@ -250,10 +253,10 @@ const _: () = assert!(HOLD_STEPS_MS < HOLD_DEADLINE_MS, "a hold reports before i
 const _: () = assert!(SAVE_STEPS_MS < SAVE_DEADLINE_MS, "a save reports before its deadline, which then only catches a report its isolate lost");
 const _: () = assert!(STOP_STEPS_MS < SLEEP_DEADLINE_MS, "a stop reports before its deadline");
 const _: () = assert!(EXEC_READY_MS + RESTORE_MS + CHECK_EXEC_MS + MARK_EXEC_MS <= START_DEADLINE_MS && ALIVE_MS < START_DEADLINE_MS, "a start's waits fit its deadline");
-const _: () = assert!(RESTORE_MS >= 9 * 60_000 + 30_000, "a restore of a full disk's save (17 GB at 30 MB/s; 5.7 GB took 147 s) is given nine and a half minutes at least");
-const _: () = assert!(START_DEADLINE_MS <= ALARM_WALL_MS && EXEC_READY_MS + RESTORE_MS + CHECK_EXEC_MS + MARK_EXEC_MS + ALARM_OTHER_MS <= ALARM_WALL_MS, "a start, and an alarm's other events, fit an alarm of its own");
-// an awake save's unhold (`MARK_EXEC_MS`) is within a stop's bound
+const _: () = assert!(RESTORE_MS >= 9 * 60_000, "a restore of a full disk's save (17 GB at 31 MB/s; 5.7 GB took 147 s) is given nine minutes at least");
+const _: () = assert!(START_DEADLINE_MS <= ALARM_WALL_MS && EXEC_READY_MS + RESTORE_MS + CHECK_EXEC_MS + MARK_EXEC_MS + DISK_READ_MS + ALARM_OTHER_MS <= ALARM_WALL_MS, "a start, the disk's read once it is ready, and an alarm's other events fit an alarm of its own");
 const _: () = assert!(SLEEP_STEPS_MS + ALARM_OTHER_MS <= ALARM_WALL_MS, "a sleep's steps, and an alarm's other events, fit the one alarm they run in");
+const _: () = assert!(HOLD_STEPS_MS + SAVE_STEPS_MS + MARK_EXEC_MS + DISK_READ_MS + ALARM_OTHER_MS <= ALARM_WALL_MS, "an awake save, its unhold and the disk's read after it fit the one alarm they run in");
 const _: () = assert!(BACKUPS_MS >= 11 * 60_000, "a full disk's save (10.8 GB at 16.1 MB/s) is given eleven minutes at least");
 const _: () = assert!(SLEEP_STEPS_MS <= 14 * 60_000, "docs/api.md: a sleep answers within 14 minutes");
 /// The largest request body the egress signs and hands on (it is hashed
@@ -933,6 +936,7 @@ impl ComputerCell {
         while let Some(event) = queue.pop() {
             let mut life = self.lifecycle()?;
             let logged = json!(event);
+            let applied = event.clone();
             let step = life.apply_with(event, js::now_ms(), &rules);
             // one line per event (lesson 14): what happened, and what it led to
             let mut line = json!({ "computer": self.meta(MetaKey::Id)?, "event": logged, "phase": life.phase, "actions": step.actions });
@@ -958,6 +962,11 @@ impl ComputerCell {
             refused = refused.or(step.refused.clone());
             for next in self.perform(step).await? {
                 queue.push(next);
+            }
+            // its disk, once its start is ready or an awake save worked:
+            // after the event, so no read holds up a start's readiness
+            if let Some(generation) = reads_disk_after(&applied, &life) {
+                self.read_disk(generation).await;
             }
         }
         Ok(refused)
@@ -1331,6 +1340,30 @@ impl ComputerCell {
             console_log!("{}", json!({ "computer": id, "alive": generation, "heardInMs": waited }));
         }
         Ok(())
+    }
+
+    /// Reads the disk of start `generation`'s container (`DISK_READ`) and
+    /// keeps it (`Saves::measured`), which its owner's notices tell: once
+    /// its start is ready, and after each awake save (`reads_disk_after`),
+    /// a line of its own. Best effort: a read that fails is logged and
+    /// changes nothing.
+    async fn read_disk(&self, generation: u64) -> Option<fragment_core::computer::ComputerDisk> {
+        let at = js::now_ms();
+        let argv = js::to_js(&json!(["sh", "-c", DISK_READ]));
+        let read = self.call("exec", &[JsValue::from_f64(generation as f64), argv, JsValue::from_f64(DISK_READ_MS as f64)]).await.and_then(|o| js::from_js(&o).map_err(CellError::host));
+        let out = match read {
+            Ok(o) if o["exitCode"] == 0 => o["output"].as_str().unwrap_or_default().to_string(),
+            Ok(o) => format!("exit {}", o["exitCode"]),
+            Err(e) => e.message,
+        };
+        let disk = disk_of_df(&out, at);
+        let kept = disk.map(|d| self.update_saves(|s| s.measured(d)));
+        match (disk, kept) {
+            // one line per read (lesson 14): its size and what is free
+            (Some(d), Some(Ok(_))) => console_log!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "disk": { "total": d.total, "free": d.free }, "generation": generation })),
+            _ => console_error!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "disk": "unread", "generation": generation, "answer": out.chars().take(200).collect::<String>() })),
+        }
+        disk
     }
 
     /// Waits, at most `bound_ms`, for the guest of the start made at
