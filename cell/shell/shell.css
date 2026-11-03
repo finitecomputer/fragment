@@ -638,7 +638,15 @@ label.settings-line { cursor: pointer; }
 .agent-setting:last-child { border-bottom: 0; }
 .agent-setting .settings-line { padding: 0 0 4px; border: 0; }
 .settings-agent-name { display: inline-flex; align-items: center; gap: 8px; color: var(--text-primary); font-weight: 600; }
-.settings-agent-title { display: inline-flex; align-items: center; gap: 2px; }
+.settings-agent-title { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 2px; }
+/* an agent's picture's buttons, small, by its picture and name */
+.agent-picture-actions { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-left: 10px; }
+.settings-section .agent-picture-actions .quiet { min-height: 28px; padding: 3px 11px; font-size: 12.5px; }
+.settings-section .agent-picture-actions .picture { margin: 0; }
+/* an agent's fields (its role, where it reaches you, its model), and a new agent's: one compact grid, each its label above it */
+.agent-fields { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px; width: 100%; }
+.agent-fields input { width: 100%; height: 36px; }
+.agent-model-label:has(> input)::after { content: none; }
 .agent-model-label { position: relative; display: flex; flex-direction: column; align-items: stretch; gap: 6px; width: 100%; font-size: 13px; }
 /* the chevron sits in the pick under the label: its middle, 18px above the bottom */
 .agent-model-label::after { content: ""; position: absolute; top: calc(100% - 18px); right: 15px; width: 7px; height: 7px; border-right: 1.5px solid var(--text-secondary); border-bottom: 1.5px solid var(--text-secondary); transform: translateY(-70%) rotate(45deg); pointer-events: none; }
@@ -648,8 +656,11 @@ label.settings-line { cursor: pointer; }
 /* Settings' Agents: an agent's role, and another agent to add (agent-settings.js) */
 .agent-role-label::after { content: none; }
 .settings-section input.agent-role { width: 100%; height: 36px; }
-.agent-add { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 14px 0 4px; }
-.agent-add input { flex: 1 1 140px; min-width: 0; }
+/* Add agent: one button, then the new agent's fields and its own Add agent */
+.settings-section > .agent-add-open { display: inline-flex; align-items: center; gap: 6px; align-self: flex-start; margin: 14px 2px 4px; }
+.agent-add-open svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 2; }
+.agent-add { display: flex; flex-direction: column; gap: 12px; width: 100%; padding: 14px 2px 4px; }
+.agent-add-buttons { margin: 0; }
 .agent-mode-picks { display: flex; gap: 8px; width: 100%; min-width: 0; }
 .agent-mode-picks select.agent-model { width: 100%; flex: 1; }
 .agent-mode-picks select.agent-effort { flex: 0 0 86px; }

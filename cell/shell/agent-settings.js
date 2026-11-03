@@ -112,10 +112,11 @@ export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, 
     const live = liveOwn();
     return live.has(a.identity) && live.size > 1 && primaryAgent()?.fragment !== a.fragment;
   };
-  // An agent's row's picture (Add, Change, Remove), Remove agent (asked
-  // once more, saying what it does), a line that says what they did or why
-  // not, and its Rename: a pencil the row puts beside the name, as the Apps
-  // page puts one beside an app's (apps-page.js).
+  // An agent's row's Remove agent (asked once more, saying what it does),
+  // a line that says what they did or why not, and what the row puts beside
+  // its name: its Rename, a pencil, as the Apps page puts one beside an
+  // app's (apps-page.js), and its picture's Add, Change and Remove, by the
+  // picture they change.
   function faceControls(a) {
     const said = el("p", "muted agent-face-said");
     said.hidden = true;
@@ -157,8 +158,9 @@ export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, 
     };
     file.onchange = () => file.files?.[0] && change(file.files[0]);
     remove.onclick = () => change(null);
+    const pictures = el("span", "agent-picture-actions");
+    pictures.append(picture, remove);
     const actions = el("span", "agent-face-actions");
-    actions.append(picture, remove);
     if (removable(a)) {
       const ask = el("button", "quiet", "Remove agent");
       ask.type = "button";
@@ -170,7 +172,7 @@ export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, 
         sure.dataset.removeAgentSure = a.fragment;
         const cancel = el("button", "quiet", "Cancel");
         cancel.type = "button";
-        cancel.onclick = () => actions.replaceChildren(picture, remove, ask);
+        cancel.onclick = () => actions.replaceChildren(ask);
         sure.onclick = async () => {
           for (const b of [sure, cancel]) b.disabled = true;
           tell(`Removing ${titleOf(a.fragment)}…`);
@@ -182,14 +184,14 @@ export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, 
             row?.remove();
           } catch (e) {
             tell(e.message);
-            actions.replaceChildren(picture, remove, ask);
+            actions.replaceChildren(ask);
           }
         };
         actions.replaceChildren(what, sure, cancel);
       };
       actions.append(ask);
     }
-    return [actions, said, renameIt];
+    return [actions, said, renameIt, pictures];
   }
   // Settings' agent rows as the list says now: each one's face and name, and
   // whether it has a picture to change or remove; and its open screens. The
@@ -285,32 +287,47 @@ export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, 
   // ---- another agent (Paul, 2026-10-30): its name and role, and what it
   // runs on (FIN-250: Hermes, or Claude Code, chosen here only), then it is
   // made as the first was, in its own chat (onboarding.js `addAgent`),
-  // which opens. None past what one computer runs. ----
+  // which opens. None past what one computer runs. One button, Add agent,
+  // opens its fields; Cancel folds them again, emptied. ----
   function addAgentForm() {
     if (agents().size >= AGENTS_MAX) return [];
+    const open = el("button", "quiet agent-add-open");
+    open.type = "button";
+    open.append(icon("plus"), "Add agent");
     const form = el("form", "agent-add");
+    form.hidden = true;
     const name = el("input", "agent-add-name");
     name.type = "text";
     name.maxLength = 48;
-    name.placeholder = "Name";
-    name.setAttribute("aria-label", "New agent's name");
+    name.placeholder = "e.g. Wren";
     const role = el("input", "agent-add-role");
     role.type = "text";
     role.maxLength = ROLE_MAX_CHARS;
-    role.placeholder = "Role, e.g. dev";
-    role.setAttribute("aria-label", "New agent's role");
+    role.placeholder = "e.g. dev";
     // its runtime, as the bridge reads it (agent.json `runtime`; none, Hermes)
-    const runs = el("select", "agent-add-runtime");
-    runs.setAttribute("aria-label", "New agent runs on");
-    for (const [value, text] of [["hermes", "Runs on Hermes"], ["claude", "Runs on Claude Code"]]) {
+    const runs = el("select", "agent-model agent-add-runtime");
+    for (const [value, text] of [["hermes", "Hermes"], ["claude", "Claude Code"]]) {
       const o = el("option", null, text);
       o.value = value;
       runs.append(o);
     }
-    const add = el("button", "quiet", "Add agent");
+    const add = el("button", "quiet agent-add-submit", "Add agent");
     add.type = "submit";
+    const cancel = el("button", "quiet", "Cancel");
+    cancel.type = "button";
     const said = el("p", "muted agent-face-said");
     said.hidden = true;
+    open.onclick = () => {
+      open.hidden = true;
+      form.hidden = false;
+      name.focus();
+    };
+    cancel.onclick = () => {
+      form.reset();
+      form.hidden = said.hidden = true;
+      open.hidden = false;
+      open.focus();
+    };
     form.onsubmit = async (event) => {
       event.preventDefault();
       if (!name.value.trim()) return name.focus();
@@ -328,8 +345,12 @@ export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, 
         add.textContent = "Add agent";
       }
     };
-    form.append(name, role, runs, add);
-    return [form, said];
+    const fields = el("div", "agent-fields");
+    fields.append(settingLabel("Name", name), settingLabel("Role", role), settingLabel("Runs on", runs));
+    const buttons = el("div", "settings-actions agent-add-buttons");
+    buttons.append(cancel, add);
+    form.append(fields, buttons);
+    return [open, form, said];
   }
   function agentSettings(a, row, modeled) {
     const box = el("div", "agent-setting");
@@ -344,7 +365,9 @@ export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, 
     // connected; whether there is one, with a single route, is the agent's
     // own tier's to say (once agent.json is read)
     const picks = [roleField(a, said), ...modelPickers(a, modeled, read, write, said), ...claudePickers(a, read, write, said), ...homePicker(a, said)];
-    box.append(row, ...picks, said);
+    const fields = el("div", "agent-fields");
+    fields.append(...picks);
+    box.append(row, fields, said);
     return box;
   }
   // a pick (`value`) being written (`written`), said under its agent's

@@ -7656,7 +7656,10 @@ fn add_agent_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session:
     let agent_wait = std::time::Duration::from_secs(120);
     b.viewport(page, 1280, 900, false)?;
     b.click(page, "#settings")?;
-    let offered = b.until(page, "!!document.querySelector('#settings-page .agent-add')", wait);
+    // one button, Add agent, opens its fields
+    let offered = b.until(page, "!!document.querySelector('#settings-page .agent-add-open') && document.querySelector('#settings-page .agent-add').hidden", wait);
+    b.click(page, "#settings-page .agent-add-open")?;
+    let unfolded = b.until(page, "!document.querySelector('#settings-page .agent-add').hidden && document.querySelector('#settings-page .agent-add-open').hidden", wait);
     // what it runs on: Hermes unless Claude Code is chosen (FIN-250)
     let runs = b.eval(page, "[...document.querySelectorAll('#settings-page .agent-add-runtime option')].map((o) => [o.value, o.selected])")?;
     b.eval(page, &fill("#settings-page .agent-add-name", "Wren"))?;
@@ -7680,7 +7683,7 @@ fn add_agent_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session:
     let _ = b.screenshot(page, &shots.join("desktop-agent-added.png"));
     s.ok(
         "Add agent, in Settings (a name and a role): its chat opens at once, for the making's steps; once made, its own section's hero names it over that chat, its role is its list row's, it says hello first, and its job names no role",
-        offered && card && listed && role() == json!("editor") && hello && !job.is_empty() && !job.contains("editor"),
+        offered && unfolded && card && listed && role() == json!("editor") && hello && !job.is_empty() && !job.contains("editor"),
         json!({ "chat": chat, "hello": seen, "job": job }),
     );
     s.ok(
