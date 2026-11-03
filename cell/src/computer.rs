@@ -51,7 +51,7 @@ use std::collections::BTreeMap;
 use fragment_core::catalog::{self, Kind};
 use fragment_core::computer::{
     alive, does_simplex, image_running, notices, valid_version, version_running, Action, Alive, Event, Images, Lifecycle, Phase, Plan as Restore, Rules, Save, SaveNote, Saves, Saving, Socket, Step, Wake, ALIVE_MS, HOLD_DEADLINE_MS, HOLD_WAIT_MS, SAVE_DEADLINE_MS,
-    SLEEP_DEADLINE_MS, START_DEADLINE_MS,
+    SLEEP_DEADLINE_MS, START_DEADLINE_MS, STARTS_OWED_MAX,
 };
 use fragment_core::ledger::{Meter, MeterRow, Month, Spend};
 use fragment_core::own_signin;
@@ -830,20 +830,33 @@ impl ComputerCell {
         self.drive_with(first, true).await
     }
 
-    /// `drive_after`, in a request (`asked`) or the DO's alarm. A start its
-    /// events leave due (a sleep's end, a crash, a fallback:
-    /// `Lifecycle::start_due`) a request makes at once, since nothing ends
-    /// a request that waits; an alarm leaves it to the alarm its events
-    /// asked for, an invocation of its own, since an alarm ends at
-    /// `ALARM_WALL_MS` and its sleep's steps took most of this one.
+    /// `drive_after`, in a request (`asked`) or the DO's alarm. Each start its
+    /// events leave due (a sleep's end, a crash, a fallback past a bad save:
+    /// `Lifecycle::start_due`) a request makes at once, one after another
+    /// as each fails over to the next, since nothing ends a request that
+    /// waits (`STARTS_OWED_MAX` of them at most); an alarm leaves it to the
+    /// alarm its events asked for, an invocation of its own, since an alarm
+    /// ends at `ALARM_WALL_MS` and its sleep's steps took most of this one.
     async fn drive_with(&self, first: Option<Event>, asked: bool) -> CellResult<Option<String>> {
         let told = self.notices()?;
         // a deploy since its last look is news, told as any change is
         self.look_logged().await;
-        let refused = match self.drive_events(first).await {
-            Ok(refused) if asked && self.lifecycle()?.start_due(js::now_ms()) => self.drive_events(Some(Event::Alarm)).await.map(|again| refused.or(again)),
-            driven => driven,
-        };
+        let mut refused = self.drive_events(first).await;
+        if asked {
+            // bounded: the lifecycle owes at most STARTS_OWED_MAX in a row
+            for _ in 0..STARTS_OWED_MAX {
+                let Ok(said) = &refused else { break };
+                if !self.lifecycle()?.start_due(js::now_ms()) {
+                    break;
+                }
+                let said = said.clone();
+                refused = self.drive_events(Some(Event::Alarm)).await.map(|again| said.or(again));
+            }
+            if refused.is_ok() && self.lifecycle()?.start_due(js::now_ms()) {
+                // past the lifecycle's own bound: its alarm makes the next
+                console_error!("{}", json!({ "computer": self.meta(MetaKey::Id)?, "starts": "owed past the bound", "max": STARTS_OWED_MAX }));
+            }
+        }
         // what its owner is told changed: their open pages read it again
         // (whatever the events did, a step that failed half way included)
         if self.notices().is_ok_and(|now| now != told) {

@@ -155,6 +155,12 @@ pub const SAVE_DEADLINE_MS: i64 = 13 * 60_000;
 /// every 15 minutes, and its three newest would otherwise all be its own,
 /// none a start ever came up from.
 pub const SAVES_KEPT: usize = 3;
+/// Starts owed one after another at most (`Lifecycle::gone`, each due at
+/// once): the one after its container went, one past a snapshot that
+/// would not start, and one past each kept save that would not restore
+/// (`restore_fallbacks`); the next failure is a strike, retried after a
+/// pause. A request makes them all as it waits (the cell's `drive_with`).
+pub const STARTS_OWED_MAX: u32 = SAVES_KEPT as u32 + 2;
 /// A start from a snapshot is up only once its guest has read its own view
 /// (`GET /api/computer`, which an image reads as its entrypoint starts:
 /// `alive`) within this of the DO's last step of that start: a container
@@ -1276,7 +1282,18 @@ impl Lifecycle {
                 self.owner_sleep = true;
                 self.restarting = false;
             }
-            (Phase::Asleep | Phase::Failed { .. }, Event::Sleep) => {}
+            (Phase::Asleep, Event::Sleep) => {
+                // the newest ask wins, asleep as going to sleep: a start owed
+                // after its stop (a wake's, a restart's), a failed start's
+                // retry, and what held it, all let go; one always on is
+                // wanted still, and starts again, as after a sleep of it awake
+                self.held_until_ms = now_ms;
+                self.wake_after_sleep = false;
+                if !self.wanted(now_ms) {
+                    self.retry_at_ms = None;
+                }
+            }
+            (Phase::Failed { .. }, Event::Sleep) => {}
             (_, Event::AlwaysOn { on }) => {
                 self.always_on = on;
                 if on && matches!(self.phase, Phase::Asleep) {
@@ -2308,6 +2325,98 @@ mod tests {
         assert!(l.start_due(T + 60_000));
         assert_eq!(l.apply(Event::Wake { why: Wake::Owner }, T + 60_010).actions, vec![Action::Start { generation: g + 1 }]);
         assert!(l.apply(Event::Alarm, T + 60_020).actions.is_empty(), "the start owed was made");
+    }
+
+    /// Goal (#1020's review): its owner's sleep is the newest ask, asleep
+    /// too: a start owed after a sleep a wake came during, not made yet,
+    /// is let go, so neither the sleep's own request nor the alarm the
+    /// sleep's end asked for (replayed) starts it; a failed start's retry
+    /// goes the same way. (One always on keeps its start, as after a sleep
+    /// of it awake: the simulation below holds that.) Method: the
+    /// lifecycle's steps.
+    #[test]
+    fn its_owners_sleep_lets_go_of_a_start_owed() {
+        let mut l = Lifecycle::new();
+        let g = started(&mut l, T);
+        let slept = T + IDLE_MS;
+        l.apply(Event::Alarm, slept);
+        l.apply(Event::Wake { why: Wake::Record }, slept + 1_000);
+        let (_, _, seq) = save_asked(&l.apply(Event::Held { generation: g, held: true }, slept + 2_000));
+        l.apply(Event::Saved { generation: g, seq }, slept + 3_000);
+        l.apply(Event::Asleep { generation: g }, slept + 4_000);
+        assert!(l.start_due(slept + 4_000), "the wake owes a start");
+        let s = l.apply(Event::Sleep, slept + 4_100);
+        assert!(s.actions.is_empty() && s.alarm_ms.is_none() && !l.start_due(slept + 4_100), "its request makes nothing after it: {s:?}");
+        assert!(l.apply(Event::Alarm, slept + 4_200).actions.is_empty(), "nor the alarm, replayed");
+        assert!(!l.wanted(slept + 4_200), "the wake's hold let go");
+        // a failed start's retry, asleep: let go too
+        let mut l = Lifecycle::new();
+        let s = l.apply(Event::Wake { why: Wake::Record }, T);
+        let Some(Action::Start { generation }) = s.actions.first().cloned() else { panic!("{s:?}") };
+        l.apply(Event::StartFailed { generation, why: "pull".into() }, T + 1_000);
+        let due = l.next_alarm().expect("its retry");
+        assert!(l.apply(Event::Sleep, T + 2_000).actions.is_empty());
+        assert!(l.apply(Event::Alarm, due).actions.is_empty() && l.next_alarm().is_none(), "no retry after its owner's sleep");
+    }
+
+    /// Goal (#1020's review): a request makes every start owed after the
+    /// one before it failed, as it waits, within `STARTS_OWED_MAX`: its
+    /// owner's restart whose newest save will not restore goes on to the
+    /// one before it, and answers once that is up, never asleep between.
+    /// Valid (the older save's start is up), the bound (the longest chain
+    /// the fallbacks allow is `STARTS_OWED_MAX`, then a strike). Method:
+    /// the cell's `drive_with` as a loop over the lifecycle, each start
+    /// reported as the DO would.
+    #[test]
+    fn a_request_makes_each_start_owed_in_turn() {
+        let mut c = Computer::new();
+        c.wake();
+        c.sleep(Some("b1"));
+        c.wake();
+        c.turn_saved("b2");
+        let g = c.life.generation();
+        // its owner's restart: the request's sleep saves b3, which will not restore
+        c.saves.restart_fresh();
+        assert_eq!(c.apply(Event::Restart { generation: g }).actions, vec![Action::Sleep { generation: g }]);
+        c.saved_as("b3");
+        let s = c.apply(Event::Asleep { generation: g });
+        assert!(c.life.start_due(c.now), "{s:?}");
+        let mut bad = vec!["b3"];
+        let mut made = 0;
+        let mut restored = None;
+        while c.life.start_due(c.now) {
+            made += 1;
+            assert!(made <= STARTS_OWED_MAX, "a request's starts are bounded");
+            let s = c.apply(Event::Alarm);
+            let Some(Action::Start { generation }) = s.actions.first().cloned() else { panic!("each start due is made: {s:?}") };
+            match bad.pop() {
+                Some(id) => {
+                    let older = c.saves.unusable(id);
+                    assert!(older, "an older save to fall back to");
+                    c.apply(Event::RestoreFailed { generation, why: format!("{id}'s archive is corrupt"), older });
+                }
+                None => restored = c.come_up(generation).save,
+            }
+        }
+        assert_eq!((made, restored.as_deref()), (2, Some("b2")), "the restart's start, then the one past its bad save");
+        assert!(matches!(c.life.phase, Phase::Awake { .. }), "the request answers once it is up: {:?}", c.life.phase);
+        // the longest chain: owed after a crash, past a snapshot, past every kept save
+        let mut l = Lifecycle::new();
+        let g = started(&mut l, T);
+        let mut at = T + 60_000;
+        l.apply(Event::Exited { generation: g }, at);
+        let crashed = l.failures;
+        let mut made = 0;
+        while l.start_due(at) {
+            made += 1;
+            let s = l.apply(Event::Alarm, at);
+            let Some(Action::Start { generation }) = s.actions.first().cloned() else { panic!("{s:?}") };
+            at += 1_000;
+            let failed = if made == 1 { Event::SnapshotFailed { generation, why: "dead".into() } } else { Event::RestoreFailed { generation, why: "corrupt".into(), older: true } };
+            l.apply(failed, at);
+        }
+        assert_eq!(made, STARTS_OWED_MAX, "the most a chain owes");
+        assert!(l.failures == crashed + 1 && l.phase == Phase::Asleep && !l.start_due(at), "then a strike, its retry after a pause: {l:?}");
     }
 
     /// Goal: failed starts are retried with a growing pause, then the

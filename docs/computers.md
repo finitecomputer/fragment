@@ -73,9 +73,11 @@ an image may rely on this:
   deadline; one that does not fit is set aside, not waited for.
 - **A start owed after its container goes** (a sleep's end with a wake
   or a restart asked, a crash while wanted, a start that fell back past a
-  bad save) is due at once: the request that saw it go makes it, or, in
+  bad save) is due at once: the request that saw it go makes it, and each
+  one after it as a start falls back (`STARTS_OWED_MAX` at most), or, in
   an alarm, the alarm it asks for, never the rest of the alarm that ran
-  the sleep (see Bounds).
+  the sleep (see Bounds). Its owner's sleep before it is made lets it go,
+  unless the computer is always on.
 - **Won't wake**: after `STARTS_FAILED_MAX` failed starts in a row it
   starts no container until its owner asks.
 - **Trying again**: "won't wake" is never for good, since what failed may
