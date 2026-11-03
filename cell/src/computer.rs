@@ -50,7 +50,7 @@ use std::collections::BTreeMap;
 
 use fragment_core::catalog::{self, Kind};
 use fragment_core::computer::{
-    alive, Aside, disk_of_df, does_simplex, image_running, notices, valid_version, version_running, Action, Alive, Event, Images, Lifecycle, Phase, Plan as Restore, Rules, Save, SaveNote, Saves, Saving, Socket, Step, Wake, ALIVE_MS, ASIDE_MAX, DISK_READ, HOLD_DEADLINE_MS, HOLD_WAIT_MS, SAVE_DEADLINE_MS,
+    alive, Aside, disk_of_df, reads_disk_after, does_simplex, image_running, notices, valid_version, version_running, Action, Alive, Event, Images, Lifecycle, Phase, Plan as Restore, Rules, Save, SaveNote, Saves, Saving, Socket, Step, Wake, ALIVE_MS, ASIDE_MAX, DISK_READ, HOLD_DEADLINE_MS, HOLD_WAIT_MS, SAVE_DEADLINE_MS,
     SLEEP_DEADLINE_MS, START_DEADLINE_MS,
 };
 use fragment_core::ledger::{Meter, MeterRow, Month, Spend};
@@ -905,6 +905,7 @@ impl ComputerCell {
         while let Some(event) = queue.pop() {
             let mut life = self.lifecycle()?;
             let logged = json!(event);
+            let applied = event.clone();
             let step = life.apply_with(event, js::now_ms(), &rules);
             // one line per event (lesson 14): what happened, and what it led to
             let mut line = json!({ "computer": self.meta(MetaKey::Id)?, "event": logged, "phase": life.phase, "actions": step.actions });
@@ -930,6 +931,11 @@ impl ComputerCell {
             refused = refused.or(step.refused.clone());
             for next in self.perform(step).await? {
                 queue.push(next);
+            }
+            // its disk, once its start is ready or an awake save worked:
+            // after the event, so no read holds up a start's readiness
+            if let Some(generation) = reads_disk_after(&applied, &life) {
+                self.read_disk(generation).await;
             }
         }
         Ok(refused)
@@ -1148,11 +1154,9 @@ impl ComputerCell {
         match started {
             Ok(()) => {
                 let came_up = |s: &mut Saves| s.came_up(generation, from, save_id.as_deref(), planned.reference.as_deref(), js::now_ms()).map(|r| (r, s.rollbacks()));
-                let came = self.update_saves(came_up);
-                let disk = self.read_disk(generation).await;
-                match came {
-                    // one line per start that came up (lesson 14): what it restored, and its disk
-                    Ok(Some((restored, rollbacks))) => console_log!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "restored": restored, "rollbacks": rollbacks, "disk": disk })),
+                match self.update_saves(came_up) {
+                    // one line per start that came up (lesson 14): what it restored
+                    Ok(Some((restored, rollbacks))) => console_log!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "restored": restored, "rollbacks": rollbacks })),
                     Ok(None) => {}
                     Err(e) => console_error!("{}", json!({ "computer": "restored", "generation": generation, "error": e.message })),
                 }
@@ -1346,9 +1350,10 @@ impl ComputerCell {
     }
 
     /// Reads the disk of start `generation`'s container (`DISK_READ`) and
-    /// keeps it (`Saves::measured`), which its view and its owner's notices
-    /// show: after a start came up, and after each save. Best effort: a
-    /// read that fails is logged and changes nothing.
+    /// keeps it (`Saves::measured`), which its owner's notices tell: once
+    /// its start is ready, and after each awake save (`reads_disk_after`),
+    /// a line of its own. Best effort: a read that fails is logged and
+    /// changes nothing.
     async fn read_disk(&self, generation: u64) -> Option<fragment_core::computer::ComputerDisk> {
         let at = js::now_ms();
         let argv = js::to_js(&json!(["sh", "-c", DISK_READ]));
@@ -1360,8 +1365,10 @@ impl ComputerCell {
         };
         let disk = disk_of_df(&out, at);
         let kept = disk.map(|d| self.update_saves(|s| s.measured(d)));
-        if !matches!(kept, Some(Ok(_))) {
-            console_error!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "disk": "unread", "generation": generation, "answer": out.chars().take(200).collect::<String>() }));
+        match (disk, kept) {
+            // one line per read (lesson 14): its size and what is free
+            (Some(d), Some(Ok(_))) => console_log!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "disk": { "total": d.total, "free": d.free }, "generation": generation })),
+            _ => console_error!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "disk": "unread", "generation": generation, "answer": out.chars().take(200).collect::<String>() })),
         }
         disk
     }
@@ -1541,9 +1548,8 @@ impl ComputerCell {
         let bytes: u64 = records.iter().filter_map(|r| r["size"].as_u64()).sum();
         match self.keep_save(generation, records, held).await {
             Ok(save) => {
-                let disk = self.read_disk(generation).await;
-                // one line per save (lesson 14): which, how big, how long, and its disk
-                console_log!("{}", json!({ "computer": id, "saved": save.number, "id": save.id, "generation": generation, "held": held, "leftOut": left_out, "bytes": bytes, "ms": js::now_ms() - t0, "disk": disk }));
+                // one line per save (lesson 14): which, how big, how long
+                console_log!("{}", json!({ "computer": id, "saved": save.number, "id": save.id, "generation": generation, "held": held, "leftOut": left_out, "bytes": bytes, "ms": js::now_ms() - t0 }));
                 Event::Saved { generation, seq }
             }
             Err(e) => {

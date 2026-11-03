@@ -1572,11 +1572,14 @@ pub struct Saves {
     /// `/data`), and no snapshot is kept until a start comes up.
     #[serde(default)]
     fresh: bool,
-    /// Its disk as last read (`measured`): a cache, which a release from
-    /// before it drops as it writes its saves back (the next start or save
-    /// reads it again).
+    /// Its disk as last read (`measured`), and whether its owner is told it
+    /// is filling (a latch: `disk_filling` sets it, `disk_clear` clears it):
+    /// a cache, which a release from before it drops as it writes its saves
+    /// back (the next read sets both again).
     #[serde(default)]
     disk: Option<ComputerDisk>,
+    #[serde(default)]
+    disk_told: bool,
 }
 
 /// A start that went back in time, as its owner is told of it.
@@ -1866,6 +1869,7 @@ impl Saves {
         if self.disk.is_some_and(|d| d.at > disk.at) {
             return false;
         }
+        self.disk_told = if self.disk_told { !disk_clear(disk.total, disk.free) } else { disk_filling(disk.total, disk.free) };
         self.disk = Some(disk);
         true
     }
@@ -2011,12 +2015,39 @@ const _: () = assert!(DISK_TOLD_USED_PCT > 0 && DISK_TOLD_USED_PCT < 100, "told 
 /// room it has plenty of.
 pub const DISK_TOLD_FREE_MAX: u64 = 5_000_000_000;
 
+/// Told, it is told no more only once a read finds clearly more room:
+/// at most this much used, or at least `DISK_CLEAR_FREE_MIN` free. The gap
+/// below where it is told keeps a disk that hovers at the edge (a read a
+/// few KB either side) from showing and clearing its notice in turn.
+pub const DISK_CLEAR_USED_PCT: u64 = 70;
+pub const DISK_CLEAR_FREE_MIN: u64 = 6_000_000_000;
+const _: () = assert!(DISK_CLEAR_USED_PCT < DISK_TOLD_USED_PCT && DISK_CLEAR_FREE_MIN > DISK_TOLD_FREE_MAX, "it clears only past where it is told");
+
 /// Whether a disk of `total` bytes with `free` left is used past
 /// `DISK_TOLD_USED_PCT`, with at most `DISK_TOLD_FREE_MAX` free: its owner
 /// is told.
 pub fn disk_filling(total: u64, free: u64) -> bool {
     assert!(free <= total, "free fits in its disk");
     (total - free) as u128 * 100 >= total as u128 * DISK_TOLD_USED_PCT as u128 && free <= DISK_TOLD_FREE_MAX
+}
+
+/// Whether a disk told filling has clearly more room now: at most
+/// `DISK_CLEAR_USED_PCT` used, or at least `DISK_CLEAR_FREE_MIN` free.
+pub fn disk_clear(total: u64, free: u64) -> bool {
+    assert!(free <= total, "free fits in its disk");
+    (total - free) as u128 * 100 <= total as u128 * DISK_CLEAR_USED_PCT as u128 || free >= DISK_CLEAR_FREE_MIN
+}
+
+/// The start whose disk to read once `event` was applied to `life`: the
+/// one that just came up (its `Ready`), or an awake one whose save just
+/// worked. Never before: a start is ready, and its deadline met, without
+/// waiting on a read; and never a sleep's save, whose stop follows at once
+/// (its next start reads it).
+pub fn reads_disk_after(event: &Event, life: &Lifecycle) -> Option<u64> {
+    match (event, &life.phase) {
+        (Event::Ready { generation: g } | Event::Saved { generation: g, .. }, Phase::Awake { generation, .. }) if g == generation => Some(*g),
+        _ => None,
+    }
 }
 
 /// What reads a computer's disk, run in its container (`disk_of_df` reads
@@ -2192,8 +2223,9 @@ pub fn support_url_ok(url: &str) -> bool {
 /// - `set_aside`: folders a start could not fit on its disk, so it started
 ///   without them (`Aside::set_aside`), each kept until its owner gets it
 ///   back or drops it;
-/// - `disk_filling`: its disk, as last read, is used past
-///   `DISK_TOLD_USED_PCT`, until a read finds it below that again.
+/// - `disk_filling`: a read found its disk used past `DISK_TOLD_USED_PCT`
+///   with at most `DISK_TOLD_FREE_MAX` free, and none since found clearly
+///   more room (`disk_clear`).
 pub fn notices(life: &Lifecycle, saves: &Saves, aside: &Aside, images: &Images, rules: &Rules) -> Vec<ComputerNotice> {
     let mut out = Vec::with_capacity(6);
     if let Phase::Failed { why } = &life.phase {
@@ -2251,7 +2283,7 @@ pub fn notices(life: &Lifecycle, saves: &Saves, aside: &Aside, images: &Images, 
     if !aside.folders.is_empty() {
         out.push(ComputerNotice::SetAside { aside: aside.folders.iter().map(AsideFolder::view).collect() });
     }
-    if let Some(d) = saves.disk.filter(|d| disk_filling(d.total, d.free)) {
+    if let Some(d) = saves.disk.filter(|_| saves.disk_told) {
         out.push(ComputerNotice::DiskFilling { total: d.total, free: d.free });
     }
     assert!(out.len() <= 6, "one notice of each kind at most");
@@ -2891,35 +2923,80 @@ mod tests {
 
     /// Goal (2026-11-03: a disk that filled left a computer that could not
     /// start): its owner is told its disk is filling once a read finds it
-    /// used past `DISK_TOLD_USED_PCT`, and no more once a read finds it
-    /// below. Valid (the edge: exactly the share is told, a byte under is
-    /// not), replay and order (a read of an earlier moment changes
-    /// nothing), invalid (more free than its size is refused), saves
-    /// stored before (no disk, nothing told). Method: the reads as the DO
-    /// takes them, and what is told.
+    /// used past `DISK_TOLD_USED_PCT` with at most `DISK_TOLD_FREE_MAX`
+    /// free, and no more only once a read finds clearly more room
+    /// (`disk_clear`): a disk hovering at either edge, reads a few KB
+    /// apart, never shows and clears it in turn (Codex on #1015). Valid
+    /// (each edge, exactly), oscillation around both edges, replay and
+    /// order (a read of an earlier moment changes nothing), invalid (more
+    /// free than its size is refused), saves stored before (none told).
+    /// Method: the reads as the DO takes them, and what is told.
     #[test]
     fn a_disk_filling_is_told_until_a_read_finds_room() {
         const GB: u64 = 1_000_000_000;
+        const KB: u64 = 8_192;
         let told = |s: &Saves| notices(&Lifecycle::new(), s, &Aside::default(), &Images::default(), &Rules::default());
         assert!(disk_filling(20 * GB, 4 * GB) && !disk_filling(20 * GB, 4 * GB + 1), "80% used exactly is told, a byte under is not");
-        assert!(disk_filling(20 * GB, 0) && !disk_filling(20 * GB, 20 * GB));
         assert!(!disk_filling(2_000 * GB, 300 * GB), "a host's shared disk, 85% used with room to spare");
         assert!(disk_filling(2_000 * GB, 5 * GB) && !disk_filling(2_000 * GB, 5 * GB + 1), "told once at most DISK_TOLD_FREE_MAX is free");
+        assert!(disk_clear(20 * GB, 6 * GB) && !disk_clear(20 * GB, 6 * GB - 1), "clear at 70% used, or 6 GB free");
+        assert!(disk_clear(2_000 * GB, 6 * GB) && !disk_clear(2_000 * GB, 6 * GB - 1));
+        // a run of reads, each a moment later, and whether it is told after each
+        let run = |total: u64, frees: &[u64]| -> Vec<bool> {
+            let mut s = Saves::default();
+            frees.iter().enumerate().map(|(i, free)| {
+                assert!(s.measured(ComputerDisk { total, free: *free, at: T + i as i64 }));
+                matches!(told(&s).as_slice(), [ComputerNotice::DiskFilling { total: t, free: f }] if *t == total && *f == *free)
+            }).collect()
+        };
+        // around the told edge of a computer's own disk: shown, and it stays until 6 GB free
+        assert_eq!(run(20 * GB, &[4 * GB + KB, 4 * GB, 4 * GB + KB, 4 * GB, 5 * GB, 6 * GB - 1, 6 * GB, 6 * GB - KB, 4 * GB + KB, 4 * GB]), [false, true, true, true, true, true, false, false, false, true]);
+        // around the cleared edge: once clear, never told again until the told edge
+        assert_eq!(run(20 * GB, &[4 * GB, 6 * GB, 6 * GB - KB, 6 * GB, 6 * GB - KB, 4 * GB + KB]), [true, false, false, false, false, false]);
+        // a host's shared disk, around 5 GB free
+        assert_eq!(run(2_000 * GB, &[5 * GB + KB, 5 * GB, 5 * GB + KB, 6 * GB - KB, 6 * GB, 5 * GB + KB]), [false, true, true, true, false, false]);
+        // replay and order
         let mut s = Saves::default();
         assert!(told(&s).is_empty() && s.disk().is_none(), "never read: nothing told");
-        assert!(s.measured(ComputerDisk { total: 20 * GB, free: 10 * GB, at: T }));
-        assert!(told(&s).is_empty(), "half full");
         assert!(s.measured(ComputerDisk { total: 20 * GB, free: 3 * GB, at: T + 10 }));
-        assert_eq!(told(&s), vec![ComputerNotice::DiskFilling { total: 20 * GB, free: 3 * GB }]);
         assert!(!s.measured(ComputerDisk { total: 20 * GB, free: 15 * GB, at: T + 5 }), "a late read of an earlier moment");
-        assert_eq!(s.disk().map(|d| d.free), Some(3 * GB));
+        assert_eq!(told(&s), vec![ComputerNotice::DiskFilling { total: 20 * GB, free: 3 * GB }]);
         assert!(s.measured(ComputerDisk { total: 20 * GB, free: 3 * GB, at: T + 10 }), "the same read again: the same");
-        assert!(s.measured(ComputerDisk { total: 20 * GB, free: 6 * GB, at: T + 20 }));
-        assert!(told(&s).is_empty(), "tidied: told no more");
+        assert_eq!(told(&s).len(), 1);
         assert!(std::panic::catch_unwind(|| Saves::default().measured(ComputerDisk { total: GB, free: 2 * GB, at: T })).is_err(), "more free than its size");
+        // saves stored before the disk was read, or before the latch: none told
         let mut stored = serde_json::to_value(&s).unwrap();
         stored.as_object_mut().unwrap().remove("disk");
-        assert!(serde_json::from_value::<Saves>(stored).unwrap().disk().is_none());
+        stored.as_object_mut().unwrap().remove("diskTold");
+        let old: Saves = serde_json::from_value(stored).unwrap();
+        assert!(old.disk().is_none() && told(&old).is_empty());
+    }
+
+    /// Goal (Codex on #1015: a read before `Ready` could push a start past
+    /// its deadline): a start's disk is read only once its `Ready` was
+    /// applied (the start awake, its deadline met), an awake save's once its
+    /// `Saved` was; never a late `Ready` of a start no longer under way, a
+    /// sleep's save (its stop follows), nor any other event. Method: the
+    /// lifecycle's steps, and what each says to read after.
+    #[test]
+    fn a_disk_is_read_only_after_its_start_is_ready() {
+        let mut l = Lifecycle::new();
+        l.apply(Event::Wake { why: Wake::Owner }, T);
+        assert_eq!(reads_disk_after(&Event::Wake { why: Wake::Owner }, &l), None, "starting: nothing read");
+        // the deadline passes first: the late Ready is no start's, and nothing is read
+        let mut late = l.clone();
+        late.apply(Event::Alarm, T + START_DEADLINE_MS);
+        late.apply(Event::Ready { generation: 1 }, T + START_DEADLINE_MS + 1);
+        assert_eq!(reads_disk_after(&Event::Ready { generation: 1 }, &late), None);
+        // ready within it: read after, the start awake and its alarm the awake one
+        let s = l.apply(Event::Ready { generation: 1 }, T + START_DEADLINE_MS - 1);
+        assert!(matches!(l.phase, Phase::Awake { generation: 1, .. }) && s.alarm_ms.is_some_and(|a| a > T + START_DEADLINE_MS - 1));
+        assert_eq!(reads_disk_after(&Event::Ready { generation: 1 }, &l), Some(1));
+        // an awake save that worked: read after
+        assert_eq!(reads_disk_after(&Event::Saved { generation: 1, seq: 1 }, &l), Some(1));
+        // a sleep's save: its stop follows, nothing read
+        l.apply(Event::Sleep, T + START_DEADLINE_MS + 10);
+        assert_eq!(reads_disk_after(&Event::Saved { generation: 1, seq: 1 }, &l), None);
     }
 
     /// Goal: a disk read from `df -P -B1 /` as GNU's (the Hermes image) and
@@ -4923,7 +5000,7 @@ mod tests {
                             reached[10] += 1;
                         }
                         ComputerNotice::SetAside { aside } => assert!(!aside.is_empty() && aside.len() <= ASIDE_MAX, "set aside is told of what is (seed {seed0}): {n:?}"),
-                        ComputerNotice::DiskFilling { total, free } => assert!(disk_filling(*total, *free), "a disk is told filling only past its share (seed {seed0}): {n:?}"),
+                        ComputerNotice::DiskFilling { total, free } => assert!(!disk_clear(*total, *free), "a disk told filling has no clear room (seed {seed0}): {n:?}"),
                     }
                 }
                 // its owner puts an update off, now and then
