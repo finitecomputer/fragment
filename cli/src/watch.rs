@@ -191,8 +191,9 @@ fn next_batch(rx: &Receiver<Wakeup>, gate: &Debounced, watcher: &Watcher<'_>) ->
 /// Syncs `dir` until the process ends, woken by the OS's events, the
 /// cell's change feed, and a sweep.
 pub fn run(client: &Client, name: &str, dir: &Path, opts: &SyncOptions) -> Result<()> {
-    // in full: the folder's journal and the live socket both name it so
-    let name = &sync::full_name(client, name)?;
+    // in full: the folder's journal and the live socket both name it so;
+    // a refusal keeps its code (`Client::fragment`'s own error)
+    let name = &client.fragment(name)?;
     let _lock = SyncLock::acquire(dir)?; // one watcher per folder, ever
     let debounce = Duration::from_millis(DEBOUNCE_MS);
     let gate = Debounced { pending: Arc::new(AtomicBool::new(false)), debounce, max_latency: debounce * 3 };
@@ -453,6 +454,21 @@ mod tests {
     use crate::sync::Mode;
     use std::collections::BTreeMap;
     use std::fs;
+
+    /// Goal (Codex on #985): `fragment sync --watch` with a label that names
+    /// nothing fails as `sync` does, its refusal keeping its code (so its
+    /// exit status and hint are the code's), before it takes the folder.
+    #[test]
+    fn a_watch_of_no_fragment_keeps_its_refusals_code() {
+        let mock = crate::mockcs::start();
+        mock.seed_repo("t--k3x9", &[]);
+        let dir = tmpdir("unnamed");
+        let c = Client::new(&mock.url, auth::fixed(7));
+        let err = run(&c, "garden", &dir, &SyncOptions { mode: Mode::Mirror, ..Default::default() }).unwrap_err();
+        assert_eq!(err.downcast_ref::<crate::api::CodedError>().map(|e| e.code), Some(crate::api::Code::NotFound), "{err:#}");
+        assert!(!dir.join(".fragment").exists(), "the folder is not taken");
+        fs::remove_dir_all(&dir).ok();
+    }
 
     /// Goal: an editor's own state is not a change, however an event
     /// names it. Method: `relevant` over events' path lists; the old rule
