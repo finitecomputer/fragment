@@ -4,7 +4,7 @@
 //! downloads a pointer's bytes when it pulls one, so a folder always holds
 //! real files, at the threshold the host names (`blobMinBytes` in status).
 
-use std::cell::OnceCell;
+use std::sync::OnceLock;
 
 use anyhow::{anyhow, bail, Result};
 use fragment_core::blob::{self, sha256_hex};
@@ -15,12 +15,13 @@ use crate::api::Client;
 pub struct Blobs<'a> {
     client: &'a Client,
     name: &'a str,
-    min: OnceCell<Option<u64>>,
+    /// shared by a pass's reads at once (`sync::READS_AT_ONCE`)
+    min: OnceLock<Option<u64>>,
 }
 
 impl<'a> Blobs<'a> {
     pub fn new(client: &'a Client, name: &'a str) -> Blobs<'a> {
-        Blobs { client, name, min: OnceCell::new() }
+        Blobs { client, name, min: OnceLock::new() }
     }
 
     /// The host's blob threshold, asked once per pass (`None`: it keeps
