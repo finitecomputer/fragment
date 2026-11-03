@@ -377,18 +377,29 @@ export function createSettings({ api, $, seg, account, navigation, notices, sect
 
   // Building with a coding agent: one prompt that names this platform's
   // /llms.txt (its handoff: the install, `fragment login --host` here, the
-  // manual), copied into Claude Code or Codex with what to build. The
-  // install line stays, folded, for whoever runs it themselves.
+  // manual), copied into Claude Code or Codex with what to build: one line,
+  // quiet, its Copy a copy icon at its end (a check once copied; its words,
+  // Copy and Copied, its label and its tooltip's). The install line stays,
+  // folded, for whoever runs it themselves.
   function buildSection() {
-    const prompt = el("textarea", "build-prompt");
+    const prompt = el("input", "build-prompt");
     prompt.id = "build-prompt";
-    prompt.rows = 3;
+    prompt.type = "text";
     prompt.spellcheck = false;
     prompt.setAttribute("aria-label", "A prompt for your coding agent");
     prompt.value = `Read ${location.origin}/llms.txt and help me build: `;
-    const copy = el("button", "quiet", "Copy");
+    const copy = el("button", "icon-button build-copy");
     copy.type = "button";
     copy.dataset.action = "copy-prompt";
+    const word = el("span", "build-copy-word");
+    const shows = (copied) => {
+      word.textContent = copied ? "Copied" : "Copy";
+      copy.setAttribute("aria-label", copied ? "Copied" : "Copy the prompt");
+      copy.replaceChildren(icon(copied ? "check" : "copy"), word);
+    };
+    shows(false);
+    const field = el("div", "build-prompt-field");
+    field.append(prompt, copy);
     // a clipboard that refuses (no permission, a webview's, none at all) is
     // said under the prompt, which is selected to copy by hand; Copy stays
     // Copy, to try again (#438)
@@ -406,7 +417,7 @@ export function createSettings({ api, $, seg, account, navigation, notices, sect
         await navigator.clipboard.writeText(prompt.value);
       } catch {
         if (mine !== presses) return;
-        copy.textContent = "Copy";
+        shows(false);
         said.textContent = "Couldn't copy it. The prompt is selected: copy it yourself (Ctrl+C, or ⌘C on a Mac).";
         said.hidden = false;
         prompt.focus();
@@ -414,13 +425,11 @@ export function createSettings({ api, $, seg, account, navigation, notices, sect
         return;
       }
       if (mine !== presses) return;
-      copy.textContent = "Copied";
+      shows(true);
       setTimeout(() => {
-        if (mine === presses) copy.textContent = "Copy";
+        if (mine === presses) shows(false);
       }, 1500);
     };
-    const actions = el("div", "settings-actions");
-    actions.append(copy);
     const yourself = el("details", "settings-install");
     yourself.append(
       el("summary", null, "Install it yourself"),
@@ -429,14 +438,9 @@ export function createSettings({ api, $, seg, account, navigation, notices, sect
       say("To give Claude Code its skill:"),
       el("pre", "command", SKILL),
     );
-    return section(
-      "Build with Claude Code or Codex",
-      say("Paste this into your coding agent and finish the sentence: it sets up the `fragment` command line itself, and you approve it here once."),
-      prompt,
-      actions,
-      said,
-      yourself,
-    );
+    const about = say("Paste this into your coding agent and finish the sentence: it sets up the `fragment` command line itself, and you approve it here once.");
+    about.classList.add("muted");
+    return section("Build with Claude Code or Codex", about, field, said, yourself);
   }
 
   // ---- skills (decision 17): the managed set, the person's skills fragment's

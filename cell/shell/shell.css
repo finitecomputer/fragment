@@ -607,9 +607,14 @@ label.settings-line { cursor: pointer; }
 .settings-section p code { padding: 2px 5px; border-radius: 5px; background: var(--chat-code); }
 .settings-section p a { color: var(--text-primary); text-underline-offset: 3px; }
 .settings-section pre.command { font: var(--type-mono); width: 100%; margin: 0; padding: 14px 16px; border: 1px solid var(--border); border-radius: 10px; background: var(--chat-code); white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text-primary); }
-/* settings' Build with Claude Code or Codex: the prompt to copy (16px: no zoom as it takes focus), the install folded */
-.settings-section textarea.build-prompt { font: var(--type-field); width: 100%; min-height: 80px; padding: 12px 14px; border: 1px solid var(--border-strong); border-radius: 10px; background: var(--bg-card); color: var(--text-primary); resize: vertical; }
-.settings-section textarea.build-prompt:focus-visible { outline: 2px solid var(--accent-blue); outline-offset: 1px; }
+/* settings' Build with Claude Code or Codex: the prompt to copy, one line, its Copy an icon at its end, the install folded */
+.build-prompt-field { position: relative; width: 100%; margin: 4px 0 6px; }
+.settings-section .build-prompt-field input.build-prompt { width: 100%; padding-right: 44px; color: var(--text-secondary); text-overflow: ellipsis; }
+.settings-section .build-prompt-field input.build-prompt:focus { color: var(--text-primary); }
+.settings-section input.build-prompt:focus-visible { outline: 2px solid var(--accent-blue); outline-offset: 1px; }
+.build-copy { position: absolute; top: 50%; right: 3px; width: 30px; height: 30px; transform: translateY(-50%); }
+.build-copy svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.build-copy-word { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .settings-install { width: 100%; padding: 4px 2px 8px; }
 .settings-install summary { font: var(--type-body-sm); width: max-content; padding: 6px 0; color: var(--text-secondary); cursor: pointer; }
 .settings-install p { font: var(--type-body); margin: 8px 0; }

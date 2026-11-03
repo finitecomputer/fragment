@@ -1430,11 +1430,12 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     // a prompt for Claude Code or Codex naming this platform's own llms.txt,
     // copied whole; the CLI's install folded below it
     let prompt = format!("Read {}/llms.txt and help me build: ", api.base);
-    let shown = b.eval(&page, "(() => { const p = document.getElementById('build-prompt'); const d = document.querySelector('#settings-page details.settings-install'); return { prompt: p?.value, size: p && getComputedStyle(p).fontSize, folded: d && !d.open, install: d?.querySelector('pre.command')?.textContent }; })()")?;
+    let shown = b.eval(&page, "(() => { const p = document.getElementById('build-prompt'); const d = document.querySelector('#settings-page details.settings-install'); return { prompt: p?.value, size: p && getComputedStyle(p).fontSize, line: p?.tagName === 'INPUT', folded: d && !d.open, install: d?.querySelector('pre.command')?.textContent }; })()")?;
     s.ok(
-        "settings' Build with Claude Code or Codex: a prompt naming this platform's llms.txt, its text 16px, and the install folded behind Install it yourself",
+        "settings' Build with Claude Code or Codex: a prompt naming this platform's llms.txt, its text the field style (14px at this width, 16px on a phone, which then does not zoom), one line, and the install folded behind Install it yourself",
         shown["prompt"] == prompt.as_str()
-            && shown["size"] == "16px"
+            && shown["size"] == "14px"
+            && shown["line"] == true
             && shown["folded"] == true
             && shown["install"].as_str().is_some_and(|i| {
                 i.contains("releases/latest/download/fragment-$(uname -s)-$(uname -m).tar.gz") && i.contains(&format!("fragment login --host {}", api.base))
