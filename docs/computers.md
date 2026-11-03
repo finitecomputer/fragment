@@ -781,10 +781,45 @@ install` work, and what they install is kept.
   with `requirements.txt` listing what it held for `pip install -r`, and a
   new one is made; the agent's page says so.
 - **The image's own packages**, in `/opt/fragment/python` (the document
-  skills' libraries; never Hermes' store, whose Python its PM records a
-  digest of), are named in it by a `.pth` the boot writes at each start,
-  after its own, so an agent's install of one wins. Hermes' venv names
-  them by the same `.pth`.
+  skills' libraries and Playwright; never Hermes' store, whose Python its
+  PM records a digest of), are named in it by a `.pth` the boot writes at
+  each start, after its own, so an agent's install of one wins. Hermes'
+  venv names them by the same `.pth`.
+
+### Playwright and small tools in our Hermes image
+
+Paul, 2026-11-02: an agent's own code drives a browser with Playwright,
+on the system Chromium, which passes Cloudflare's bot check where Chrome
+for Testing fails.
+
+- **One release for Python and Node**, pinned in
+  `images/hermes/playwright-requirements.txt`: Python's in the image's own
+  packages (above), its driver on the image's Node
+  (`PLAYWRIGHT_NODEJS_PATH`; the wheel's own is dropped), Node's global
+  (`require('playwright')` through the login shell's `NODE_PATH`), and the
+  `playwright` CLI. A plain
+  `chromium.launch()` runs `/opt/fragment/bin/chromium`, the desktop's:
+  the image puts it in `PLAYWRIGHT_BROWSERS_PATH` under the names that
+  release looks for, marked installed, beside the image's FFmpeg under
+  its name (a page's video), so `sudo playwright install chromium`
+  downloads nothing. sudo keeps `PLAYWRIGHT_BROWSERS_PATH`, so a browser
+  `sudo playwright install` adds is where an agent's own launch looks,
+  and `PLAYWRIGHT_SKIP_BROWSER_GC`: that directory is Hermes' tool store,
+  and Playwright's install would collect Hermes' own Chrome for Testing
+  and FFmpeg from it (`uninstall`, which always collects, is refused
+  there). As
+  the agent's user, `playwright install` (either runtime's) answers at
+  once (`playwright-node`, the Node both run Playwright's CLI on):
+  Chromium, or no browser named, is installed already; another browser is
+  root's to install. Playwright's own would wait ten minutes on its lock
+  in that directory, root's.
+  Another release an agent installs looks for its own names, and finds
+  none.
+- **`unzip`, `zip`, `jq` and `sqlite3`**, Debian's. `sqlite3` runs with
+  Debian's SQLite library, not the newer one upstream puts first.
+- The image still carries Hermes' Chrome for Testing
+  (docs/technical-debt-ledger.md, "The Hermes image carries two
+  Chromiums").
 
 ### Claude Code in our Hermes image
 
