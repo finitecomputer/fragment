@@ -50,7 +50,7 @@ use std::collections::BTreeMap;
 
 use fragment_core::catalog::{self, Kind};
 use fragment_core::computer::{
-    alive, Aside, does_simplex, image_running, notices, valid_version, version_running, Action, Alive, Event, Images, Lifecycle, Phase, Plan as Restore, Rules, Save, SaveNote, Saves, Saving, Socket, Step, Wake, ALIVE_MS, ASIDE_MAX, HOLD_DEADLINE_MS, HOLD_WAIT_MS, SAVE_DEADLINE_MS,
+    alive, Aside, disk_of_df, does_simplex, image_running, notices, valid_version, version_running, Action, Alive, Event, Images, Lifecycle, Phase, Plan as Restore, Rules, Save, SaveNote, Saves, Saving, Socket, Step, Wake, ALIVE_MS, ASIDE_MAX, DISK_READ, HOLD_DEADLINE_MS, HOLD_WAIT_MS, SAVE_DEADLINE_MS,
     SLEEP_DEADLINE_MS, START_DEADLINE_MS,
 };
 use fragment_core::ledger::{Meter, MeterRow, Month, Spend};
@@ -144,6 +144,8 @@ const HELD_READ: &str = "cat /run/computer/held";
 const UNHELD_READ: &str = "cat /run/computer/unheld 2>/dev/null || true";
 /// The read of it answers within this, or the hold's line says so.
 const UNHELD_EXEC_MS: i64 = 5_000;
+/// A read of its disk (`DISK_READ`) answers within this, or it is not read.
+const DISK_READ_MS: i64 = 5_000;
 /// The image's check of what a start restored (docs/computers.md, "Data and
 /// the restore gate"), when it carries one: run after the restore and
 /// before the gate opens. Its exit `CHECK_UNUSABLE` says the save is
@@ -1146,9 +1148,11 @@ impl ComputerCell {
         match started {
             Ok(()) => {
                 let came_up = |s: &mut Saves| s.came_up(generation, from, save_id.as_deref(), planned.reference.as_deref(), js::now_ms()).map(|r| (r, s.rollbacks()));
-                match self.update_saves(came_up) {
-                    // one line per start that came up (lesson 14): what it restored
-                    Ok(Some((restored, rollbacks))) => console_log!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "restored": restored, "rollbacks": rollbacks })),
+                let came = self.update_saves(came_up);
+                let disk = self.read_disk(generation).await;
+                match came {
+                    // one line per start that came up (lesson 14): what it restored, and its disk
+                    Ok(Some((restored, rollbacks))) => console_log!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "restored": restored, "rollbacks": rollbacks, "disk": disk })),
                     Ok(None) => {}
                     Err(e) => console_error!("{}", json!({ "computer": "restored", "generation": generation, "error": e.message })),
                 }
@@ -1341,6 +1345,27 @@ impl ComputerCell {
         Ok(())
     }
 
+    /// Reads the disk of start `generation`'s container (`DISK_READ`) and
+    /// keeps it (`Saves::measured`), which its view and its owner's notices
+    /// show: after a start came up, and after each save. Best effort: a
+    /// read that fails is logged and changes nothing.
+    async fn read_disk(&self, generation: u64) -> Option<fragment_core::computer::ComputerDisk> {
+        let at = js::now_ms();
+        let argv = js::to_js(&json!(["sh", "-c", DISK_READ]));
+        let read = self.call("exec", &[JsValue::from_f64(generation as f64), argv, JsValue::from_f64(DISK_READ_MS as f64)]).await.and_then(|o| js::from_js(&o).map_err(CellError::host));
+        let out = match read {
+            Ok(o) if o["exitCode"] == 0 => o["output"].as_str().unwrap_or_default().to_string(),
+            Ok(o) => format!("exit {}", o["exitCode"]),
+            Err(e) => e.message,
+        };
+        let disk = disk_of_df(&out, at);
+        let kept = disk.map(|d| self.update_saves(|s| s.measured(d)));
+        if !matches!(kept, Some(Ok(_))) {
+            console_error!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "disk": "unread", "generation": generation, "answer": out.chars().take(200).collect::<String>() }));
+        }
+        disk
+    }
+
     /// The lever's full disk for `record`'s folder (`full-restore`), once:
     /// its restore answers as the floor would, and nothing is restored.
     fn take_full_restore(&self, record: &Value) -> CellResult<Option<String>> {
@@ -1516,8 +1541,9 @@ impl ComputerCell {
         let bytes: u64 = records.iter().filter_map(|r| r["size"].as_u64()).sum();
         match self.keep_save(generation, records, held).await {
             Ok(save) => {
-                // one line per save (lesson 14): which, how big, how long
-                console_log!("{}", json!({ "computer": id, "saved": save.number, "id": save.id, "generation": generation, "held": held, "leftOut": left_out, "bytes": bytes, "ms": js::now_ms() - t0 }));
+                let disk = self.read_disk(generation).await;
+                // one line per save (lesson 14): which, how big, how long, and its disk
+                console_log!("{}", json!({ "computer": id, "saved": save.number, "id": save.id, "generation": generation, "held": held, "leftOut": left_out, "bytes": bytes, "ms": js::now_ms() - t0, "disk": disk }));
                 Event::Saved { generation, seq }
             }
             Err(e) => {

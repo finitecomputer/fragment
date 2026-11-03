@@ -170,6 +170,10 @@ with no clock, so every reader is told the same, and when they change the
 DO tells its owner's open pages (`/api/fragments/watch`'s `changed`):
 
 - `wont_wake`: its starts kept failing.
+- `disk_filling`: its disk, read (`df`) after each start came up and
+  after each save, is used past `DISK_TOLD_USED_PCT` (80%) with at most
+  `DISK_TOLD_FREE_MAX` (5 GB) free: the room left, told until a read finds
+  more. Each read is in its `restored` or `saved` log line.
 - `unsaved`: this life's saves are failing (a sleep's at once, awake ones
   from the second in a row): since when its work is in no save, and when
   the bound stops it.

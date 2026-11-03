@@ -1572,6 +1572,11 @@ pub struct Saves {
     /// `/data`), and no snapshot is kept until a start comes up.
     #[serde(default)]
     fresh: bool,
+    /// Its disk as last read (`measured`): a cache, which a release from
+    /// before it drops as it writes its saves back (the next start or save
+    /// reads it again).
+    #[serde(default)]
+    disk: Option<ComputerDisk>,
 }
 
 /// A start that went back in time, as its owner is told of it.
@@ -1853,6 +1858,23 @@ impl Saves {
         Some((record, number, saved_at_ms))
     }
 
+    /// Its disk was read (`df`, after a start came up or a save): kept
+    /// when it is newer than the one kept (a late read of an earlier
+    /// moment changes nothing). Answers whether it was kept.
+    pub fn measured(&mut self, disk: ComputerDisk) -> bool {
+        assert!(disk.total > 0 && disk.free <= disk.total, "a disk read is its size and what fits in it: {disk:?}");
+        if self.disk.is_some_and(|d| d.at > disk.at) {
+            return false;
+        }
+        self.disk = Some(disk);
+        true
+    }
+
+    /// Its disk as last read.
+    pub fn disk(&self) -> Option<ComputerDisk> {
+        self.disk
+    }
+
     /// The record `id` was deleted.
     pub fn forgot(&mut self, id: &str) {
         self.forgetting.retain(|r| r["id"] != id);
@@ -1974,6 +1996,51 @@ impl AsideFolder {
             at: self.at_ms,
         }
     }
+}
+
+/// Its owner is told its disk is filling once this much of it is used
+/// (`notices`, `disk_filling`): on a 20 GB disk, about 4 GB before it is
+/// full, while a save still fits and there is room to tidy up. A disk that
+/// filled made a computer's every later start fail (2026-11-03).
+pub const DISK_TOLD_USED_PCT: u64 = 80;
+const _: () = assert!(DISK_TOLD_USED_PCT > 0 && DISK_TOLD_USED_PCT < 100, "told before it is full, never always");
+
+/// And only once at most this is free: a computer's own disk (20 GB) is
+/// told at 4 GB, past `DISK_TOLD_USED_PCT`, while one on a host's shared
+/// disk (a dev box's, CI's: terabytes, most of it others') is not told of
+/// room it has plenty of.
+pub const DISK_TOLD_FREE_MAX: u64 = 5_000_000_000;
+
+/// Whether a disk of `total` bytes with `free` left is used past
+/// `DISK_TOLD_USED_PCT`, with at most `DISK_TOLD_FREE_MAX` free: its owner
+/// is told.
+pub fn disk_filling(total: u64, free: u64) -> bool {
+    assert!(free <= total, "free fits in its disk");
+    (total - free) as u128 * 100 >= total as u128 * DISK_TOLD_USED_PCT as u128 && free <= DISK_TOLD_FREE_MAX
+}
+
+/// What reads a computer's disk, run in its container (`disk_of_df` reads
+/// its answer): POSIX `df` in bytes, which GNU's and BusyBox's both print.
+pub const DISK_READ: &str = "df -P -B1 /";
+
+/// A computer's disk from `DISK_READ`'s answer, read at `at_ms`: the line
+/// after its header, its size and what is available (to the guest's user,
+/// as a restore's floor counts it). None for an answer it cannot read.
+pub fn disk_of_df(out: &str, at_ms: i64) -> Option<ComputerDisk> {
+    let mut lines = out.lines().filter(|l| !l.trim().is_empty());
+    lines.next().filter(|h| h.starts_with("Filesystem"))?;
+    let cols: Vec<&str> = lines.next()?.split_whitespace().collect();
+    let (total, free) = (cols.get(1)?.parse::<u64>().ok()?, cols.get(3)?.parse::<u64>().ok()?);
+    (total > 0 && free <= total).then_some(ComputerDisk { total, free, at: at_ms })
+}
+
+/// A computer's disk, as a read found it (`disk_of_df`): its size and what
+/// is free, in bytes; when it was read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ComputerDisk {
+    pub total: u64,
+    pub free: u64,
+    pub at: i64,
 }
 
 /// Hex digits in an image's version (`version_of`).
@@ -2124,9 +2191,11 @@ pub fn support_url_ok(url: &str) -> bool {
 ///   takes the new version anyway;
 /// - `set_aside`: folders a start could not fit on its disk, so it started
 ///   without them (`Aside::set_aside`), each kept until its owner gets it
-///   back or drops it.
+///   back or drops it;
+/// - `disk_filling`: its disk, as last read, is used past
+///   `DISK_TOLD_USED_PCT`, until a read finds it below that again.
 pub fn notices(life: &Lifecycle, saves: &Saves, aside: &Aside, images: &Images, rules: &Rules) -> Vec<ComputerNotice> {
-    let mut out = Vec::with_capacity(5);
+    let mut out = Vec::with_capacity(6);
     if let Phase::Failed { why } = &life.phase {
         out.push(ComputerNotice::WontWake { why: why.clone() });
     }
@@ -2182,7 +2251,10 @@ pub fn notices(life: &Lifecycle, saves: &Saves, aside: &Aside, images: &Images, 
     if !aside.folders.is_empty() {
         out.push(ComputerNotice::SetAside { aside: aside.folders.iter().map(AsideFolder::view).collect() });
     }
-    assert!(out.len() <= 5, "one notice of each kind at most");
+    if let Some(d) = saves.disk.filter(|d| disk_filling(d.total, d.free)) {
+        out.push(ComputerNotice::DiskFilling { total: d.total, free: d.free });
+    }
+    assert!(out.len() <= 6, "one notice of each kind at most");
     out
 }
 
@@ -2815,6 +2887,53 @@ mod tests {
         assert_eq!(s.current().map(|c| c.records.len()), Some(2), "and stays in its save");
         // stored before any was set aside: none
         assert!(serde_json::from_str::<Aside>("{}").unwrap().folders().is_empty());
+    }
+
+    /// Goal (2026-11-03: a disk that filled left a computer that could not
+    /// start): its owner is told its disk is filling once a read finds it
+    /// used past `DISK_TOLD_USED_PCT`, and no more once a read finds it
+    /// below. Valid (the edge: exactly the share is told, a byte under is
+    /// not), replay and order (a read of an earlier moment changes
+    /// nothing), invalid (more free than its size is refused), saves
+    /// stored before (no disk, nothing told). Method: the reads as the DO
+    /// takes them, and what is told.
+    #[test]
+    fn a_disk_filling_is_told_until_a_read_finds_room() {
+        const GB: u64 = 1_000_000_000;
+        let told = |s: &Saves| notices(&Lifecycle::new(), s, &Aside::default(), &Images::default(), &Rules::default());
+        assert!(disk_filling(20 * GB, 4 * GB) && !disk_filling(20 * GB, 4 * GB + 1), "80% used exactly is told, a byte under is not");
+        assert!(disk_filling(20 * GB, 0) && !disk_filling(20 * GB, 20 * GB));
+        assert!(!disk_filling(2_000 * GB, 300 * GB), "a host's shared disk, 85% used with room to spare");
+        assert!(disk_filling(2_000 * GB, 5 * GB) && !disk_filling(2_000 * GB, 5 * GB + 1), "told once at most DISK_TOLD_FREE_MAX is free");
+        let mut s = Saves::default();
+        assert!(told(&s).is_empty() && s.disk().is_none(), "never read: nothing told");
+        assert!(s.measured(ComputerDisk { total: 20 * GB, free: 10 * GB, at: T }));
+        assert!(told(&s).is_empty(), "half full");
+        assert!(s.measured(ComputerDisk { total: 20 * GB, free: 3 * GB, at: T + 10 }));
+        assert_eq!(told(&s), vec![ComputerNotice::DiskFilling { total: 20 * GB, free: 3 * GB }]);
+        assert!(!s.measured(ComputerDisk { total: 20 * GB, free: 15 * GB, at: T + 5 }), "a late read of an earlier moment");
+        assert_eq!(s.disk().map(|d| d.free), Some(3 * GB));
+        assert!(s.measured(ComputerDisk { total: 20 * GB, free: 3 * GB, at: T + 10 }), "the same read again: the same");
+        assert!(s.measured(ComputerDisk { total: 20 * GB, free: 6 * GB, at: T + 20 }));
+        assert!(told(&s).is_empty(), "tidied: told no more");
+        assert!(std::panic::catch_unwind(|| Saves::default().measured(ComputerDisk { total: GB, free: 2 * GB, at: T })).is_err(), "more free than its size");
+        let mut stored = serde_json::to_value(&s).unwrap();
+        stored.as_object_mut().unwrap().remove("disk");
+        assert!(serde_json::from_value::<Saves>(stored).unwrap().disk().is_none());
+    }
+
+    /// Goal: a disk read from `df -P -B1 /` as GNU's (the Hermes image) and
+    /// BusyBox's (the stub) print it; anything else is no read. Valid,
+    /// invalid (no header, no line, not numbers, free past its size, size 0).
+    #[test]
+    fn a_disk_is_read_from_df() {
+        let gnu = "Filesystem          1-blocks          Used    Available Capacity Mounted on\noverlay        1998232485888 1450459369472 536433389568      74% /\n";
+        let busybox = "Filesystem           1-blocks       Used Available Capacity Mounted on\noverlay              1998232485888 1450465140736 536427945984  73% /\n";
+        assert_eq!(disk_of_df(gnu, T), Some(ComputerDisk { total: 1_998_232_485_888, free: 536_433_389_568, at: T }));
+        assert_eq!(disk_of_df(busybox, T).map(|d| d.free), Some(536_427_945_984));
+        for bad in ["", "overlay 10 5 5 50% /", "Filesystem 1-blocks Used Available Capacity Mounted on", "Filesystem x\noverlay ten 5 five 50% /", "Filesystem x\noverlay 10 0 11 0% /", "Filesystem x\noverlay 0 0 0 0% /"] {
+            assert_eq!(disk_of_df(bad, T), None, "{bad:?}");
+        }
     }
 
     /// Goal (P3, decision 19): a snapshot is of the image its start ran, so
@@ -4804,6 +4923,7 @@ mod tests {
                             reached[10] += 1;
                         }
                         ComputerNotice::SetAside { aside } => assert!(!aside.is_empty() && aside.len() <= ASIDE_MAX, "set aside is told of what is (seed {seed0}): {n:?}"),
+                        ComputerNotice::DiskFilling { total, free } => assert!(disk_filling(*total, *free), "a disk is told filling only past its share (seed {seed0}): {n:?}"),
                     }
                 }
                 // its owner puts an update off, now and then

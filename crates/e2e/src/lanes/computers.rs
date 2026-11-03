@@ -365,6 +365,39 @@ fn aside_checks(s: &mut Suite, api: &Api, c: &Crashing, say: &dyn Fn(u32, &str) 
     Ok(7)
 }
 
+/// The disk checks (docs/computers.md, "What its owner is told"), each
+/// skipped off the stub and the fakes.
+const DISK_CHECKS: [&str; 2] = [
+    "its disk is read as it comes up: its size and what is free",
+    "and read again after a save, a newer read",
+];
+
+/// Its disk, read (`df`) after a start came up and after each save, as the
+/// `saves` lever shows it; each read judged by what made it (a start come
+/// up, a save taken), never a fixed wait. When a read finds it filling is
+/// `disk_filling`'s, proved by the core's and the shell's tests: a test
+/// fleet's computers share their host's disk. Starts and ends awake.
+fn disk_checks(s: &mut Suite, api: &Api, c: &Crashing) -> Result<()> {
+    let path = |rest: &str| format!("/api/computers/{}{rest}", c.id);
+    let view = || api.signed(c.owner, "GET", &path(""), None).map(|r| r.body).unwrap_or(Value::Null);
+    let disk = || lever(api, c.id, "saves").map(|r| r.body["disk"].clone()).unwrap_or(Value::Null);
+    let number = |save: &Value| save["number"].as_u64().unwrap_or(0);
+    let (v, d) = (view(), disk());
+    let (total, free) = (d["total"].as_u64().unwrap_or(0), d["free"].as_u64().unwrap_or(u64::MAX));
+    s.ok(DISK_CHECKS[0], v["phase"] == "awake" && total > 0 && free <= total && d["at"].as_i64() >= v["restored"]["at"].as_i64(), json!({ "disk": d, "restored": v["restored"] }));
+    let before = number(&newest_save(api, c.id));
+    let slept = api.signed(c.owner, "POST", &path("/sleep"), Some(&json!({})))?;
+    let saved = newest_save(api, c.id);
+    let after = disk();
+    let woke = api.signed(c.owner, "POST", &path("/wake"), Some(&json!({})))?;
+    s.ok(
+        DISK_CHECKS[1],
+        slept.status == 200 && number(&saved) > before && after["at"].as_i64() > d["at"].as_i64() && after["at"].as_i64() >= saved["atMs"].as_i64() && after["total"].as_u64() == Some(total) && woke.body["phase"] == "awake",
+        json!({ "before": d, "after": after, "saved": saved["atMs"] }),
+    );
+    Ok(())
+}
+
 /// The bound checks (r4, r6: a sick container after a wake, and a sleep
 /// that never ended; #362: a start from a snapshot that came up dead), each
 /// skipped off the stub and the fakes.
@@ -2117,8 +2150,9 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         replies_so_far += crash_checks(s, api, &crashing, &|n, text| say(n, text))?;
         replies_so_far += recovery_checks(s, api, &crashing, &stranger, &|n, text| say(n, text))?;
         replies_so_far += aside_checks(s, api, &crashing, &|n, text| say(n, text))?;
+        disk_checks(s, api, &crashing)?;
     } else {
-        for label in SAVE_CHECKS.iter().chain(BOUND_CHECKS.iter()).chain(CRASH_CHECKS.iter()).chain(RECOVERY_CHECKS.iter()).chain(ASIDE_CHECKS.iter()) {
+        for label in SAVE_CHECKS.iter().chain(BOUND_CHECKS.iter()).chain(CRASH_CHECKS.iter()).chain(RECOVERY_CHECKS.iter()).chain(ASIDE_CHECKS.iter()).chain(DISK_CHECKS.iter()) {
             s.skip(label, "it needs the stub's scripted runtime, and the fakes to hold a model call and count runs");
         }
     }
