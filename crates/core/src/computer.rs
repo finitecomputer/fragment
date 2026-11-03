@@ -1948,6 +1948,30 @@ impl Aside {
     pub fn records(&self) -> Vec<Value> {
         self.folders.iter().map(|a| a.record.clone()).collect()
     }
+
+    /// The folder set aside as `record`, if one is.
+    pub fn get(&self, record: &str) -> Option<&AsideFolder> {
+        self.folders.iter().find(|a| a.record["id"] == record)
+    }
+
+    /// The folder set aside as `record` leaves: its owner dropped it, or it
+    /// came back into `/data` (`back_dir`). Answered for the DO to let its
+    /// record go (`Saves::let_go`, which deletes its archive), in the same
+    /// step it writes this. None when none is aside by that id: again, none.
+    pub fn release(&mut self, record: &str) -> Option<AsideFolder> {
+        let at = self.folders.iter().position(|a| a.record["id"] == record)?;
+        Some(self.folders.remove(at))
+    }
+}
+
+/// Where a folder set aside comes back when its owner asks: a folder of its
+/// own beside the live work, named for what it was (`work`, or the
+/// computer's own `files`), the day it was saved and its save's number, so
+/// nothing the computer did since is replaced and two never meet.
+pub fn back_dir(folder: &AsideFolder) -> String {
+    let (y, m, d) = crate::cron::civil(folder.saved_at_ms.div_euclid(1000).div_euclid(86_400));
+    let what = if folder.record["dir"] == "/data" { "files" } else { "work" };
+    format!("/data/work/restored-{what}-{y:04}-{m:02}-{d:02}-{}", folder.save)
 }
 
 /// One folder set aside (`Aside`).
@@ -2815,6 +2839,31 @@ mod tests {
         assert_eq!(s.current().map(|c| c.records.len()), Some(2), "and stays in its save");
         // stored before any was set aside: none
         assert!(serde_json::from_str::<Aside>("{}").unwrap().folders().is_empty());
+    }
+
+    /// Goal: a folder set aside leaves when its owner drops it or it comes
+    /// back, and its record is answered to be let go of (its archive
+    /// deleted) once; it comes back beside the live work, in a folder named
+    /// for what it was, its save's day and number, so two never meet and
+    /// nothing live is replaced. Valid, replay (released again: none),
+    /// invalid (an id never aside). Method: the folders as the DO keeps them.
+    #[test]
+    fn a_folder_aside_comes_back_beside_the_work_or_is_dropped() {
+        let two = |id: &str| vec![json!({ "id": id, "dir": "/data", "size": 10 }), json!({ "id": format!("{id}w"), "dir": "/data/work", "size": 20 })];
+        let (mut s, mut a) = (Saves::default(), Aside::default());
+        let nov3 = 1_793_716_000_000; // 2026-11-03, UTC
+        s.saved(1, two("b1"), nov3, true);
+        s.saved(2, two("b2"), nov3 + 60_000, true);
+        assert!(a.set_aside(&mut s, "b1w", nov3 + 1) && a.set_aside(&mut s, "b2", nov3 + 2));
+        assert_eq!(back_dir(a.get("b1w").unwrap()), "/data/work/restored-work-2026-11-03-1");
+        assert_eq!(back_dir(a.get("b2").unwrap()), "/data/work/restored-files-2026-11-03-2", "its own files, another save: another folder");
+        let gone = a.release("b1w").expect("it was aside");
+        assert_eq!(gone.record["id"], "b1w");
+        assert!(a.release("b1w").is_none() && a.get("b1w").is_none(), "released once");
+        assert!(a.release("nope").is_none());
+        assert_eq!(a.folders().len(), 1);
+        let lost = s.let_go(vec![gone.record]);
+        assert!(lost.is_empty() && s.forgetting().iter().any(|r| r["id"] == "b1w"), "its archive is deleted as any let go of");
     }
 
     /// Goal (P3, decision 19): a snapshot is of the image its start ran, so

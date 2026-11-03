@@ -32,3 +32,13 @@ test("each folder set aside is told, oldest first; small ones in MB, an unknown 
       `Your folder from ${day} (2.5 GB) didn't fit, so your computer started without it. It's kept safe.`,
   );
 });
+
+test("its two ways out: one folder's buttons say it, several name their folders", async () => {
+  const { asideActionWords, asideDropAsk } = await import("../shell/computer.js");
+  const work = { record: "r1", dir: "/data/work", bytes: 5_887_397_516, save: 594, savedAt: at, at };
+  const files = { record: "r2", dir: "/data", bytes: 420_000_000, save: 590, savedAt: at, at };
+  assert.deepEqual(asideActionWords(work, false), ["Get it back", "Delete it"]);
+  assert.deepEqual(asideActionWords(work, true), [`Get back the work folder from ${day}`, `Delete the work folder from ${day}`]);
+  assert.deepEqual(asideActionWords(files, true), [`Get back the computer's own files from ${day}`, `Delete the computer's own files from ${day}`]);
+  assert.equal(asideDropAsk(work), `Delete your work folder from ${day} (5.9 GB)? It can't be brought back after.`);
+});

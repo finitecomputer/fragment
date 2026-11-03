@@ -1890,6 +1890,8 @@ docs/computers.md's; these routes are its owner's. A view is
 | `POST /api/computers/{id}/wake` | its owner | → the view once awake; 503 `wont_wake` when it would not start |
 | `POST /api/computers/{id}/sleep` | its owner | → the view once asleep, or awake with its `why` when its save failed; within the sum of its steps' bounds (`SLEEP_STEPS_MS`), at most 11 minutes |
 | `POST /api/computers/{id}/restart` | its owner | `{generation?}` → the view once started again, fresh from the image and its newest good save. `generation` names the start the owner saw: one already restarted is not restarted again. At zero credit 402, a guest 403 |
+| `POST /api/computers/{id}/aside/{record}/back` | its owner | → `{back, view}`: the folder set aside as `record` (its `set_aside` notice names it) restored beside the live work at `back` (`/data/work/restored-<work\|files>-<YYYY-MM-DD>-<save>`), woken first if it sleeps; then aside no more, its archive deleted. One that does not fit yet, whose archive will never restore, or while another comes back, 409, still aside; none aside by that id 404 |
+| `DELETE /api/computers/{id}/aside/{record}` | its owner | → the view: the folder set aside as `record` dropped, its archive deleted. None aside by that id 404 |
 | `POST /api/computers/{id}/notices/seen` | its owner | `{life}` → the view, that `went_back` notice told no more; a `life` past the newest, or 0, 400 |
 | `POST /api/computers/{id}/notices/later` | its owner | `{version}` → the view, that update put off; not its next start's, or not 12 hex, 400 |
 | `PUT /api/computers/{id}/image` | its owner | `{image}` → the view: its next start's image; one the deployment lacks 400 |

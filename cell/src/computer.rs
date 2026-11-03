@@ -50,7 +50,7 @@ use std::collections::BTreeMap;
 
 use fragment_core::catalog::{self, Kind};
 use fragment_core::computer::{
-    alive, Aside, does_simplex, image_running, notices, valid_version, version_running, Action, Alive, Event, Images, Lifecycle, Phase, Plan as Restore, Rules, Save, SaveNote, Saves, Saving, Socket, Step, Wake, ALIVE_MS, ASIDE_MAX, HOLD_DEADLINE_MS, HOLD_WAIT_MS, SAVE_DEADLINE_MS,
+    alive, back_dir, Aside, does_simplex, image_running, notices, valid_version, version_running, Action, Alive, Event, Images, Lifecycle, Phase, Plan as Restore, Rules, Save, SaveNote, Saves, Saving, Socket, Step, Wake, ALIVE_MS, ASIDE_MAX, HOLD_DEADLINE_MS, HOLD_WAIT_MS, SAVE_DEADLINE_MS,
     SLEEP_DEADLINE_MS, START_DEADLINE_MS,
 };
 use fragment_core::ledger::{Meter, MeterRow, Month, Spend};
@@ -384,6 +384,8 @@ pub struct ComputerCell {
     /// end is that start's own failure, which the start reports itself
     /// (`exit_of`), never a crash as well.
     failing: std::cell::Cell<Option<u64>>,
+    /// A folder set aside is coming back now (`bring_back`): one at a time.
+    bringing: std::cell::Cell<bool>,
     /// Its XFTP relays open now (`fragment_core::relay::Leases`). In memory
     /// only: a restart forgets them, and they lapse on their own bounds.
     relays: RefCell<fragment_core::relay::Leases>,
@@ -411,6 +413,7 @@ impl DurableObject for ComputerCell {
             wiped: std::cell::Cell::new(wiped),
             heard_ms: std::cell::Cell::new(None),
             failing: std::cell::Cell::new(None),
+            bringing: std::cell::Cell::new(false),
             relays: RefCell::default(),
             schema,
         }
@@ -693,6 +696,14 @@ struct TestLever {
     /// `full-restore`'s: the folder its next restore finds no room for.
     #[serde(default)]
     dir: Option<String>,
+}
+
+/// A folder set aside, named by its record's id (`computer/aside-back`,
+/// `computer/aside-drop`).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AsideAsk {
+    record: String,
 }
 
 #[derive(Deserialize)]
@@ -1313,6 +1324,69 @@ impl ComputerCell {
             let waited = self.heard_from(started_ms, bound).await?;
             console_log!("{}", json!({ "computer": id, "alive": generation, "heardInMs": waited }));
         }
+        Ok(())
+    }
+
+    /// Its owner gets back the folder set aside as `record`: awake (woken as
+    /// its owner's wake, if it sleeps), it is restored beside the live work
+    /// (`back_dir`), so nothing live is replaced; then it leaves what is
+    /// aside and its archive is deleted, its files in `/data` now, which its
+    /// next save keeps. Answers where it came back. One that does not fit
+    /// yet (the floor stopped it, writing nothing) or whose archive will
+    /// never restore stays aside, and says so (409); none aside by that id
+    /// is 404. One at a time.
+    async fn bring_back(&self, record: &str) -> CellResult<String> {
+        let folder = self.aside()?.get(record).cloned().ok_or_else(|| CellError::new(ErrorCode::NotFound, format!("no folder is set aside as {record}")))?;
+        if self.bringing.replace(true) {
+            return Err(CellError::new(ErrorCode::Conflict, "a folder set aside is coming back already: wait for it"));
+        }
+        let done = self.try_bring_back(record, &folder).await;
+        self.bringing.set(false);
+        done
+    }
+
+    async fn try_bring_back(&self, record: &str, folder: &fragment_core::computer::AsideFolder) -> CellResult<String> {
+        if !matches!(self.lifecycle()?.phase, Phase::Awake { .. }) {
+            self.wake(Wake::Owner).await?;
+        }
+        let life = self.lifecycle()?;
+        let Phase::Awake { generation, .. } = life.phase else {
+            return Err(CellError::new(ErrorCode::Conflict, "it is not awake to take it: try again once it is"));
+        };
+        let g = JsValue::from_f64(generation as f64);
+        let back = back_dir(folder);
+        let id = self.meta(MetaKey::Id)?;
+        self.mark(&g, &format!("mkdir -p {}", SAVED_DIRS[1]), MARK_EXEC_MS).await?;
+        let t0 = js::now_ms();
+        let answer = js::from_js(&self.call("restore", &[g, js::to_js(&folder.record), JsValue::from_f64(RESTORE_MS as f64), back.as_str().into()]).await?).map_err(CellError::host)?;
+        if let Some(why) = answer["full"].as_str().or(answer["unusable"].as_str()) {
+            console_log!("{}", json!({ "computer": id, "aside": record, "back": "refused", "why": why }));
+            let said = if answer["full"].is_string() { "it does not fit yet: free some room on the computer, and try again" } else { "its archive will never restore: it can only be dropped" };
+            return Err(CellError::new(ErrorCode::Conflict, format!("{said} ({why})")));
+        }
+        // in /data now: it leaves what is aside, its archive let go of, in one step
+        let (mut saves, mut aside) = (self.saves()?, self.aside()?);
+        let lost = aside.release(record).map(|f| saves.let_go(vec![f.record])).unwrap_or_default();
+        self.set_meta(MetaKey::Aside, &serde_json::to_string(&aside).map_err(|e| CellError::host(e.to_string()))?)?;
+        self.set_meta(MetaKey::Saves, &serde_json::to_string(&saves).map_err(|e| CellError::host(e.to_string()))?)?;
+        console_log!("{}", json!({ "computer": id, "aside": record, "back": back, "save": folder.save, "bytes": folder.record["size"], "ms": js::now_ms() - t0 }));
+        self.forget(lost).await;
+        self.tell_owner().await;
+        Ok(back)
+    }
+
+    /// Its owner drops the folder set aside as `record`: it leaves, and its
+    /// archive is deleted, as a save pushed out is (`Saves::let_go`), in the
+    /// same step. None aside by that id: 404.
+    async fn drop_aside(&self, record: &str) -> CellResult<()> {
+        let (mut saves, mut aside) = (self.saves()?, self.aside()?);
+        let folder = aside.release(record).ok_or_else(|| CellError::new(ErrorCode::NotFound, format!("no folder is set aside as {record}")))?;
+        let lost = saves.let_go(vec![folder.record.clone()]);
+        self.set_meta(MetaKey::Aside, &serde_json::to_string(&aside).map_err(|e| CellError::host(e.to_string()))?)?;
+        self.set_meta(MetaKey::Saves, &serde_json::to_string(&saves).map_err(|e| CellError::host(e.to_string()))?)?;
+        console_log!("{}", json!({ "computer": self.meta(MetaKey::Id)?, "aside": record, "dropped": folder.save, "bytes": folder.record["size"] }));
+        self.forget(lost).await;
+        self.tell_owner().await;
         Ok(())
     }
 
@@ -2334,6 +2408,18 @@ impl ComputerCell {
                 self.drive(Event::Sleep).await?;
                 json_response(&self.view()?)
             }
+            "computer/aside-back" => {
+                let b: AsideAsk = body_json(&mut req).await?;
+                self.must(MetaKey::Id)?;
+                let back = self.bring_back(&b.record).await?;
+                json_response(&json!({ "back": back, "view": self.view()? }))
+            }
+            "computer/aside-drop" => {
+                let b: AsideAsk = body_json(&mut req).await?;
+                self.must(MetaKey::Id)?;
+                self.drop_aside(&b.record).await?;
+                json_response(&self.view()?)
+            }
             "computer/restart" => {
                 let b: RestartAsk = body_json(&mut req).await?;
                 self.must(MetaKey::Id)?;
@@ -2954,6 +3040,15 @@ pub(crate) async fn route(env: &Env, who: &str, kind: IdentityKind, method: Meth
         (Method::Post, [id, "sleep"]) => {
             owned(env, who, id).await?;
             json_response(&view_of(ask(env, id, "computer/sleep", &json!({})).await?)?)
+        }
+        (Method::Post, [id, "aside", record, "back"]) => {
+            owned(env, who, id).await?;
+            let answer = ask(env, id, "computer/aside-back", &json!({ "record": record })).await?;
+            json_response(&json!({ "back": answer["back"], "view": view_of(answer["view"].clone())? }))
+        }
+        (Method::Delete, [id, "aside", record]) => {
+            owned(env, who, id).await?;
+            json_response(&view_of(ask(env, id, "computer/aside-drop", &json!({ "record": record })).await?)?)
         }
         (Method::Post, [id, "restart"]) => {
             owned(env, who, id).await?;

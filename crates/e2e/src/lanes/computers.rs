@@ -365,6 +365,70 @@ fn aside_checks(s: &mut Suite, api: &Api, c: &Crashing, say: &dyn Fn(u32, &str) 
     Ok(7)
 }
 
+/// The checks of a folder set aside, got back or dropped (docs/computers.md,
+/// "Saves and what a wake restores"), each skipped off the stub and the fakes.
+const ASIDE_OUT_CHECKS: [&str; 2] = [
+    "its owner gets a folder set aside back: beside the live work, its files there, aside no more, its archive deleted",
+    "a folder set aside again is dropped by its owner alone: told no more, its archive deleted, and dropped twice is not found",
+];
+
+/// The folder `aside_checks` set aside comes back (`POST …/aside/{record}/back`)
+/// beside the live work, where the agent reads it; then another is set aside
+/// and dropped (`DELETE …/aside/{record}`), a stranger refused. Each sleep
+/// waits for the last turn to end and its guest to let go (no fixed wait).
+/// Starts and ends awake. Answers how many replies of its agent it added.
+fn aside_out_checks(s: &mut Suite, api: &Api, c: &Crashing, stranger: &crate::Keys, say: &dyn Fn(u32, &str) -> Result<crate::api::Reply>) -> Result<usize> {
+    let path = |rest: &str| format!("/api/computers/{}{rest}", c.id);
+    let view = || api.signed(c.owner, "GET", &path(""), None).map(|r| r.body).unwrap_or(Value::Null);
+    let reply_of = |turn: &str| agent_replies(&records(api, c.owner, c.chat, "chat"), c.identity).into_iter().find(|r| r["body"]["turn"] == turn);
+    let said = |s: &Suite, n: u32, text: &str| -> Result<(String, String)> {
+        let r = say(n, text)?;
+        let turn = turn_of(c.agent, c.chat, "chat", r.body["record"]["seq"].as_i64().unwrap_or(0));
+        s.eventually(c.wake, || reply_of(&turn).is_some());
+        Ok((reply_of(&turn).and_then(|x| x["body"]["text"].as_str().map(str::to_string)).unwrap_or_default(), turn))
+    };
+    let settled = |s: &Suite, turn: &str| {
+        s.eventually(c.wake, || {
+            work_of(&records(api, c.owner, c.chat, "work"), turn).iter().any(|r| r["body"]["kind"] == "turn.end") && lever(api, c.id, "saves").is_ok_and(|r| r.body["keepalives"] == 0)
+        })
+    };
+    let deleted = |id: &Value| !lever(api, c.id, "saves").is_ok_and(|r| r.body["forgetting"].as_array().is_some_and(|l| l.iter().any(|x| x["id"] == *id)));
+    // back: the folder aside_checks set aside, its file read where it came back
+    let aside = notice(&view(), "set_aside")["aside"][0].clone();
+    let record = aside["record"].as_str().unwrap_or("").to_string();
+    let back = api.signed(c.owner, "POST", &path(&format!("/aside/{record}/back")), Some(&json!({})))?;
+    let at = back.body["back"].as_str().unwrap_or("").trim_start_matches("/data/").to_string();
+    let (read, _) = said(s, 507, &format!("read {at}/aside.txt"))?;
+    let again = api.signed(c.owner, "POST", &path(&format!("/aside/{record}/back")), Some(&json!({})))?;
+    s.ok(
+        ASIDE_OUT_CHECKS[0],
+        back.status == 200
+            && at.starts_with("work/restored-work-")
+            && notice(&back.body["view"], "set_aside").is_null()
+            && read == format!("read {at}/aside.txt: set aside")
+            && deleted(&aside["record"])
+            && again.status == 404,
+        json!({ "back": back.body["back"], "read": read, "again": again.status }),
+    );
+    // another set aside, then dropped
+    let (_, turn) = said(s, 508, "write work/dropped.txt to drop")?;
+    let quiet = settled(s, &turn);
+    let full = lever_with(api, c.id, json!({ "op": "full-restore", "dir": "/data/work" }))?;
+    api.signed(c.owner, "POST", &path("/sleep"), Some(&json!({})))?;
+    let woke = api.signed(c.owner, "POST", &path("/wake"), Some(&json!({})))?;
+    let aside = notice(&woke.body, "set_aside")["aside"][0].clone();
+    let record = aside["record"].as_str().unwrap_or("").to_string();
+    let theirs = api.signed(stranger, "DELETE", &path(&format!("/aside/{record}")), None)?;
+    let dropped = api.signed(c.owner, "DELETE", &path(&format!("/aside/{record}")), None)?;
+    let twice = api.signed(c.owner, "DELETE", &path(&format!("/aside/{record}")), None)?;
+    s.ok(
+        ASIDE_OUT_CHECKS[1],
+        quiet && full.status == 200 && !record.is_empty() && theirs.status == 404 && dropped.status == 200 && notice(&dropped.body, "set_aside").is_null() && deleted(&aside["record"]) && twice.status == 404,
+        json!({ "aside": aside, "theirs": theirs.status, "dropped": dropped.body["notices"], "twice": twice.status }),
+    );
+    Ok(2)
+}
+
 /// The bound checks (r4, r6: a sick container after a wake, and a sleep
 /// that never ended; #362: a start from a snapshot that came up dead), each
 /// skipped off the stub and the fakes.
@@ -2117,8 +2181,9 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         replies_so_far += crash_checks(s, api, &crashing, &|n, text| say(n, text))?;
         replies_so_far += recovery_checks(s, api, &crashing, &stranger, &|n, text| say(n, text))?;
         replies_so_far += aside_checks(s, api, &crashing, &|n, text| say(n, text))?;
+        replies_so_far += aside_out_checks(s, api, &crashing, &stranger, &|n, text| say(n, text))?;
     } else {
-        for label in SAVE_CHECKS.iter().chain(BOUND_CHECKS.iter()).chain(CRASH_CHECKS.iter()).chain(RECOVERY_CHECKS.iter()).chain(ASIDE_CHECKS.iter()) {
+        for label in SAVE_CHECKS.iter().chain(BOUND_CHECKS.iter()).chain(CRASH_CHECKS.iter()).chain(RECOVERY_CHECKS.iter()).chain(ASIDE_CHECKS.iter()).chain(ASIDE_OUT_CHECKS.iter()) {
             s.skip(label, "it needs the stub's scripted runtime, and the fakes to hold a model call and count runs");
         }
     }
