@@ -1934,7 +1934,7 @@ impl Aside {
             return false;
         }
         let Some((record, save, saved_at_ms)) = saves.take(id) else { return false };
-        self.folders.push(AsideFolder { record, save, saved_at_ms, at_ms: now_ms });
+        self.folders.push(AsideFolder { record, save, saved_at_ms, at_ms: now_ms, back: None });
         assert!(self.folders.len() <= ASIDE_MAX, "at most ASIDE_MAX aside");
         true
     }
@@ -1954,24 +1954,79 @@ impl Aside {
         self.folders.iter().find(|a| a.record["id"] == record)
     }
 
-    /// The folder set aside as `record` leaves: its owner dropped it, or it
-    /// came back into `/data` (`back_dir`). Answered for the DO to let its
-    /// record go (`Saves::let_go`, which deletes its archive), in the same
-    /// step it writes this. None when none is aside by that id: again, none.
+    /// The folder set aside as `record` leaves: its owner dropped it.
+    /// Answered for the DO to let its record go (`Saves::let_go`, which
+    /// deletes its archive), in the same step it writes this. None when
+    /// none is aside by that id: again, none.
     pub fn release(&mut self, record: &str) -> Option<AsideFolder> {
         let at = self.folders.iter().position(|a| a.record["id"] == record)?;
         Some(self.folders.remove(at))
     }
+
+    /// Where the folder set aside as `record` comes back in life
+    /// `generation`: the folder reserved already in that life (a retry
+    /// goes where the first try went), or else `fresh` (one the DO found
+    /// nothing at), now reserved. None when none is aside by that id.
+    pub fn reserve(&mut self, record: &str, generation: u64, fresh: &str) -> Option<String> {
+        let folder = self.folders.iter_mut().find(|a| a.record["id"] == record)?;
+        match &folder.back {
+            Some(b) if b.generation == generation => Some(b.dir.clone()),
+            _ => {
+                folder.back = Some(Back { dir: fresh.to_string(), generation, done_ms: None });
+                Some(fresh.to_string())
+            }
+        }
+    }
+
+    /// The reservation of `record` in life `generation` is let go of
+    /// (another's folder was there): its next try reserves a fresh one.
+    pub fn unreserve(&mut self, record: &str, generation: u64) {
+        if let Some(f) = self.folders.iter_mut().find(|a| a.record["id"] == record && a.back.as_ref().is_some_and(|b| b.generation == generation)) {
+            f.back = None;
+        }
+    }
+
+    /// The folder set aside as `record` is back, in life `generation`, at
+    /// `now_ms`. Answers whether it was on its way there (reserved in that
+    /// life); again, the same.
+    pub fn came_back(&mut self, record: &str, generation: u64, now_ms: i64) -> bool {
+        let Some(b) = self.folders.iter_mut().find(|a| a.record["id"] == record).and_then(|a| a.back.as_mut()).filter(|b| b.generation == generation) else { return false };
+        b.done_ms.get_or_insert(now_ms);
+        true
+    }
+
+    /// A save of life `generation` begun at `started_ms` worked: each
+    /// folder back in that life before then is in it, and leaves what is
+    /// aside, answered for the DO to let its record go (its archive
+    /// deleted) in the same step it writes this.
+    pub fn saved(&mut self, generation: u64, started_ms: i64) -> Vec<AsideFolder> {
+        let kept_in = |a: &AsideFolder| a.back.as_ref().is_some_and(|b| b.generation == generation && b.done_ms.is_some_and(|d| d <= started_ms));
+        let (gone, kept): (Vec<AsideFolder>, Vec<AsideFolder>) = std::mem::take(&mut self.folders).into_iter().partition(kept_in);
+        self.folders = kept;
+        gone
+    }
+
+    /// Whether `folder` is back in the life that runs (`running`), waiting
+    /// for a save to keep it: its owner is told of it no more.
+    fn back_in(folder: &AsideFolder, running: Option<u64>) -> bool {
+        folder.back.as_ref().is_some_and(|b| b.done_ms.is_some() && Some(b.generation) == running)
+    }
 }
 
-/// Where a folder set aside comes back when its owner asks: a folder of its
+/// Names a folder set aside may come back as, at most.
+pub const BACK_DIRS_MAX: usize = 8;
+
+/// The folders a folder set aside may come back as, in order: one of its
 /// own beside the live work, named for what it was (`work`, or the
-/// computer's own `files`), the day it was saved and its save's number, so
-/// nothing the computer did since is replaced and two never meet.
-pub fn back_dir(folder: &AsideFolder) -> String {
+/// computer's own `files`), the day it was saved and its save's number,
+/// then that name `-2` to `-BACK_DIRS_MAX`. The DO takes the first that
+/// nothing is at: a folder already there (a person's own) is never
+/// replaced.
+pub fn back_dirs(folder: &AsideFolder) -> Vec<String> {
     let (y, m, d) = crate::cron::civil(folder.saved_at_ms.div_euclid(1000).div_euclid(86_400));
     let what = if folder.record["dir"] == "/data" { "files" } else { "work" };
-    format!("/data/work/restored-{what}-{y:04}-{m:02}-{d:02}-{}", folder.save)
+    let base = format!("/data/work/restored-{what}-{y:04}-{m:02}-{d:02}-{}", folder.save);
+    std::iter::once(base.clone()).chain((2..=BACK_DIRS_MAX).map(|n| format!("{base}-{n}"))).collect()
 }
 
 /// One folder set aside (`Aside`).
@@ -1985,6 +2040,24 @@ pub struct AsideFolder {
     pub saved_at_ms: i64,
     /// When it was set aside.
     pub at_ms: i64,
+    /// On its way back, when its owner asked (`Aside::reserve`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub back: Option<Back>,
+}
+
+/// A folder set aside on its way back: the folder it comes back as (fresh
+/// when reserved: nothing was there), in which life, and once it is there
+/// (`done_ms`). It stays aside, its archive kept, until a save of that same
+/// life begun after it came back worked (`Aside::saved`): a crash or a
+/// failed save before then loses nothing, and its next life is told of it
+/// again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Back {
+    pub dir: String,
+    pub generation: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub done_ms: Option<i64>,
 }
 
 impl AsideFolder {
@@ -2203,8 +2276,9 @@ pub fn notices(life: &Lifecycle, saves: &Saves, aside: &Aside, images: &Images, 
             out.push(ComputerNotice::Update { version: latest });
         }
     }
-    if !aside.folders.is_empty() {
-        out.push(ComputerNotice::SetAside { aside: aside.folders.iter().map(AsideFolder::view).collect() });
+    let told: Vec<ComputerAside> = aside.folders.iter().filter(|a| !Aside::back_in(a, life.running())).map(AsideFolder::view).collect();
+    if !told.is_empty() {
+        out.push(ComputerNotice::SetAside { aside: told });
     }
     assert!(out.len() <= 5, "one notice of each kind at most");
     out
@@ -2841,29 +2915,70 @@ mod tests {
         assert!(serde_json::from_str::<Aside>("{}").unwrap().folders().is_empty());
     }
 
-    /// Goal: a folder set aside leaves when its owner drops it or it comes
-    /// back, and its record is answered to be let go of (its archive
-    /// deleted) once; it comes back beside the live work, in a folder named
-    /// for what it was, its save's day and number, so two never meet and
-    /// nothing live is replaced. Valid, replay (released again: none),
-    /// invalid (an id never aside). Method: the folders as the DO keeps them.
+    /// Goal (Codex on #1016: a folder coming back could replace one there,
+    /// and its archive went before any save held it): a folder set aside
+    /// comes back to a folder reserved fresh, the same one on a retry in
+    /// the same life; it stays aside, its archive kept, until a save of
+    /// that life begun after it came back worked, and a crash (another
+    /// life) or a failed save before then loses nothing and tells its owner
+    /// of it again. Dropped, it leaves at once. Valid, replay (a retry,
+    /// came back twice, released once), invalid (an id never aside, a save
+    /// of another life or begun before it came back). Method: the folders
+    /// as the DO keeps them, and what its owner is told.
     #[test]
-    fn a_folder_aside_comes_back_beside_the_work_or_is_dropped() {
+    fn a_folder_aside_comes_back_kept_until_a_save_holds_it() {
         let two = |id: &str| vec![json!({ "id": id, "dir": "/data", "size": 10 }), json!({ "id": format!("{id}w"), "dir": "/data/work", "size": 20 })];
         let (mut s, mut a) = (Saves::default(), Aside::default());
         let nov3 = 1_793_716_000_000; // 2026-11-03, UTC
         s.saved(1, two("b1"), nov3, true);
         s.saved(2, two("b2"), nov3 + 60_000, true);
         assert!(a.set_aside(&mut s, "b1w", nov3 + 1) && a.set_aside(&mut s, "b2", nov3 + 2));
-        assert_eq!(back_dir(a.get("b1w").unwrap()), "/data/work/restored-work-2026-11-03-1");
-        assert_eq!(back_dir(a.get("b2").unwrap()), "/data/work/restored-files-2026-11-03-2", "its own files, another save: another folder");
-        let gone = a.release("b1w").expect("it was aside");
-        assert_eq!(gone.record["id"], "b1w");
-        assert!(a.release("b1w").is_none() && a.get("b1w").is_none(), "released once");
-        assert!(a.release("nope").is_none());
-        assert_eq!(a.folders().len(), 1);
-        let lost = s.let_go(vec![gone.record]);
-        assert!(lost.is_empty() && s.forgetting().iter().any(|r| r["id"] == "b1w"), "its archive is deleted as any let go of");
+        let dirs = back_dirs(a.get("b1w").unwrap());
+        assert_eq!(dirs.len(), BACK_DIRS_MAX);
+        assert_eq!(dirs[..2], ["/data/work/restored-work-2026-11-03-1", "/data/work/restored-work-2026-11-03-1-2"]);
+        assert_eq!(back_dirs(a.get("b2").unwrap())[0], "/data/work/restored-files-2026-11-03-2", "its own files, another save: another folder");
+        let told = |a: &Aside, running: u64| {
+            let mut l = Lifecycle::new();
+            l.apply(Event::Wake { why: Wake::Owner }, T);
+            for g in 1..=running {
+                l.apply(Event::Ready { generation: g }, T + g as i64);
+                if g < running {
+                    l.apply(Event::Exited { generation: g }, T + g as i64 + 1);
+                }
+            }
+            assert_eq!(l.running(), Some(running));
+            match notices(&l, &Saves::default(), a, &Images::default(), &Rules::default()).as_slice() {
+                [ComputerNotice::SetAside { aside }] => aside.iter().map(|x| x.record.clone()).collect::<Vec<_>>(),
+                _ => vec![],
+            }
+        };
+        // reserved in life 5; a retry in it goes to the same folder, whatever is fresh then
+        assert_eq!(a.reserve("b1w", 5, &dirs[1]), Some(dirs[1].clone()), "the base was taken: the next");
+        assert_eq!(a.reserve("b1w", 5, &dirs[2]), Some(dirs[1].clone()), "a retry: where the first try went");
+        assert_eq!(a.reserve("nope", 5, &dirs[0]), None);
+        assert!(!a.came_back("b1w", 4, nov3 + 10) && !a.came_back("nope", 5, nov3 + 10), "another life's, or none aside");
+        assert!(a.came_back("b1w", 5, nov3 + 100) && a.came_back("b1w", 5, nov3 + 200), "again, the same");
+        assert_eq!(a.get("b1w").unwrap().back.as_ref().and_then(|b| b.done_ms), Some(nov3 + 100), "the first time kept");
+        assert_eq!(told(&a, 5), ["b2"], "back in this life: told no more");
+        // a save begun before it came back, or of another life, holds it not
+        assert!(a.saved(5, nov3 + 99).is_empty() && a.saved(4, nov3 + 500).is_empty());
+        // a crash before any save: another life, and its owner is told of it again, kept
+        assert_eq!(told(&a, 6), ["b1w", "b2"]);
+        assert_eq!(a.reserve("b1w", 6, &dirs[0]), Some(dirs[0].clone()), "another life reserves afresh");
+        assert!(a.get("b1w").unwrap().back.as_ref().is_some_and(|b| b.done_ms.is_none()));
+        // a failed save keeps it too (nothing calls saved); one that worked, begun after, releases it once
+        assert!(a.came_back("b1w", 6, nov3 + 1_000));
+        let gone = a.saved(6, nov3 + 1_000);
+        assert_eq!(gone.iter().map(|f| f.record["id"].clone()).collect::<Vec<_>>(), [json!("b1w")]);
+        assert!(a.saved(6, nov3 + 2_000).is_empty() && a.get("b1w").is_none(), "released once");
+        let lost = s.let_go(gone.into_iter().map(|f| f.record).collect());
+        assert!(lost.is_empty() && s.forgetting().iter().any(|r| r["id"] == "b1w"), "then its archive is deleted");
+        // another life's reservation let go of (a folder was there): the next try reserves fresh
+        assert_eq!(a.reserve("b2", 6, &back_dirs(a.get("b2").unwrap())[0]), Some("/data/work/restored-files-2026-11-03-2".into()));
+        a.unreserve("b2", 6);
+        assert!(a.get("b2").unwrap().back.is_none());
+        // dropped: at once
+        assert!(a.release("b2").is_some() && a.release("b2").is_none() && a.folders().is_empty());
     }
 
     /// Goal (P3, decision 19): a snapshot is of the image its start ran, so

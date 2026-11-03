@@ -367,16 +367,23 @@ fn aside_checks(s: &mut Suite, api: &Api, c: &Crashing, say: &dyn Fn(u32, &str) 
 
 /// The checks of a folder set aside, got back or dropped (docs/computers.md,
 /// "Saves and what a wake restores"), each skipped off the stub and the fakes.
-const ASIDE_OUT_CHECKS: [&str; 2] = [
-    "its owner gets a folder set aside back: beside the live work, its files there, aside no more, its archive deleted",
+const ASIDE_OUT_CHECKS: [&str; 5] = [
+    "its owner gets a folder set aside back into a folder nothing was at: a person's own folder at its name is never replaced",
+    "an answer lost after it came back: a retry finds it there and takes it, never restoring over the edits made since",
+    "it is kept aside, its archive with it, until a save holds it: a crash before one tells its owner of it again, and it comes back again",
+    "once a save of its life holds it, it is aside no more and its archive deleted",
     "a folder set aside again is dropped by its owner alone: told no more, its archive deleted, and dropped twice is not found",
 ];
 
 /// The folder `aside_checks` set aside comes back (`POST …/aside/{record}/back`)
-/// beside the live work, where the agent reads it; then another is set aside
-/// and dropped (`DELETE …/aside/{record}`), a stranger refused. Each sleep
-/// waits for the last turn to end and its guest to let go (no fixed wait).
-/// Starts and ends awake. Answers how many replies of its agent it added.
+/// beside the live work: past a person's own folder at its first name, an
+/// answer lost (the lever's `lose-back-ack`) and retried, a crash before any
+/// save (the lever's `kill`, its saves failing meanwhile: `fail-saves`),
+/// and a save that holds it at last; then another is set aside and dropped
+/// (`DELETE …/aside/{record}`), a stranger refused. No fixed wait: each
+/// sleep waits for the last turn to end and its guest to let go, and the
+/// crash's restart for the computer awake again. Starts and ends awake.
+/// Answers how many replies of its agent it added.
 fn aside_out_checks(s: &mut Suite, api: &Api, c: &Crashing, stranger: &crate::Keys, say: &dyn Fn(u32, &str) -> Result<crate::api::Reply>) -> Result<usize> {
     let path = |rest: &str| format!("/api/computers/{}{rest}", c.id);
     let view = || api.signed(c.owner, "GET", &path(""), None).map(|r| r.body).unwrap_or(Value::Null);
@@ -392,41 +399,87 @@ fn aside_out_checks(s: &mut Suite, api: &Api, c: &Crashing, stranger: &crate::Ke
             work_of(&records(api, c.owner, c.chat, "work"), turn).iter().any(|r| r["body"]["kind"] == "turn.end") && lever(api, c.id, "saves").is_ok_and(|r| r.body["keepalives"] == 0)
         })
     };
-    let deleted = |id: &Value| !lever(api, c.id, "saves").is_ok_and(|r| r.body["forgetting"].as_array().is_some_and(|l| l.iter().any(|x| x["id"] == *id)));
-    // back: the folder aside_checks set aside, its file read where it came back
-    let aside = notice(&view(), "set_aside")["aside"][0].clone();
-    let record = aside["record"].as_str().unwrap_or("").to_string();
-    let back = api.signed(c.owner, "POST", &path(&format!("/aside/{record}/back")), Some(&json!({})))?;
-    let at = back.body["back"].as_str().unwrap_or("").trim_start_matches("/data/").to_string();
-    let (read, _) = said(s, 507, &format!("read {at}/aside.txt"))?;
-    let again = api.signed(c.owner, "POST", &path(&format!("/aside/{record}/back")), Some(&json!({})))?;
+    let aside_of = |record: &str| lever(api, c.id, "saves").ok().and_then(|r| r.body["aside"].as_array().and_then(|l| l.iter().find(|a| a["record"]["id"] == record).cloned())).unwrap_or(Value::Null);
+    let forgotten = |record: &str| lever(api, c.id, "saves").is_ok_and(|r| !r.body["forgetting"].as_array().is_some_and(|l| l.iter().any(|x| x["id"] == record)));
+    let told = |v: &Value, record: &str| notice(v, "set_aside")["aside"].as_array().is_some_and(|l| l.iter().any(|a| a["record"] == record));
+    let back = |record: &str| api.signed(c.owner, "POST", &path(&format!("/aside/{record}/back")), Some(&json!({})));
+    let generation = || view()["generation"].as_u64().unwrap_or(0);
+    // the folder aside_checks set aside, and the names it may come back as
+    let first = notice(&view(), "set_aside")["aside"][0].clone();
+    let record = first["record"].as_str().unwrap_or("").to_string();
+    let folder = fragment_core::computer::AsideFolder {
+        record: json!({ "id": record, "dir": first["dir"] }),
+        save: first["save"].as_u64().unwrap_or(0),
+        saved_at_ms: first["savedAt"].as_i64().unwrap_or(0),
+        at_ms: first["at"].as_i64().unwrap_or(0),
+        back: None,
+    };
+    let names: Vec<String> = fragment_core::computer::back_dirs(&folder).iter().map(|d| d.trim_start_matches("/data/").to_string()).collect();
+    // a person's own folder at its first name; its saves fail meanwhile, so none holds what comes back
+    let (mine, _) = said(s, 520, &format!("write {}/mine.txt mine", names[0]))?;
+    let failing = lever_with(api, c.id, json!({ "op": "fail-saves", "times": 20 }))?;
+    // the answer lost: it came back, and said it failed
+    let lost = lever(api, c.id, "lose-back-ack")?;
+    let first_try = back(&record)?;
+    let reserved = aside_of(&record)["back"]["dir"].as_str().unwrap_or("").trim_start_matches("/data/").to_string();
+    let (edited, _) = said(s, 521, &format!("write {reserved}/edit.txt edited since"))?;
+    let retry = back(&record)?;
+    let reads = [
+        said(s, 522, &format!("read {reserved}/edit.txt"))?.0,
+        said(s, 523, &format!("read {reserved}/aside.txt"))?.0,
+        said(s, 524, &format!("read {}/mine.txt", names[0]))?.0,
+    ];
     s.ok(
         ASIDE_OUT_CHECKS[0],
-        back.status == 200
-            && at.starts_with("work/restored-work-")
-            && notice(&back.body["view"], "set_aside").is_null()
-            && read == format!("read {at}/aside.txt: set aside")
-            && deleted(&aside["record"])
-            && again.status == 404,
-        json!({ "back": back.body["back"], "read": read, "again": again.status }),
+        mine.starts_with("wrote ") && failing.status == 200 && reserved == names[1] && retry.status == 200 && retry.body["back"] == format!("/data/{}", names[1]).as_str() && reads[1] == format!("read {reserved}/aside.txt: set aside") && reads[2] == format!("read {}/mine.txt: mine", names[0]) && !told(&retry.body["view"], &record),
+        json!({ "names": names, "reserved": reserved, "retry": retry.body["back"], "reads": reads }),
+    );
+    s.ok(
+        ASIDE_OUT_CHECKS[1],
+        lost.status == 200 && first_try.status >= 500 && edited.starts_with("wrote ") && reads[0] == format!("read {reserved}/edit.txt: edited since"),
+        json!({ "first": first_try.status, "reads": reads }),
+    );
+    // a crash before any save held it: its next life is told of it again, and it comes back again
+    let before = generation();
+    let killed = lever(api, c.id, "kill")?;
+    let restarted = s.eventually(c.wake, || view()["phase"] == "awake" && generation() > before);
+    let again_told = told(&view(), &record) && aside_of(&record)["record"]["id"] == record.as_str();
+    lever_with(api, c.id, json!({ "op": "fail-saves", "times": 0 }))?;
+    let again = back(&record)?;
+    let at = again.body["back"].as_str().unwrap_or("").trim_start_matches("/data/").to_string();
+    let (read, turn) = said(s, 525, &format!("read {at}/aside.txt"))?;
+    s.ok(
+        ASIDE_OUT_CHECKS[2],
+        killed.status == 200 && restarted && again_told && again.status == 200 && !at.is_empty() && read == format!("read {at}/aside.txt: set aside") && aside_of(&record)["back"]["doneMs"].is_i64(),
+        json!({ "restarted": restarted, "told": again_told, "back": again.body["back"], "read": read }),
+    );
+    // a save of its life holds it: aside no more, its archive deleted
+    let quiet = settled(s, &turn);
+    let slept = api.signed(c.owner, "POST", &path("/sleep"), Some(&json!({})))?;
+    let gone = aside_of(&record).is_null() && forgotten(&record);
+    let woke = api.signed(c.owner, "POST", &path("/wake"), Some(&json!({})))?;
+    let (kept, _) = said(s, 526, &format!("read {at}/aside.txt"))?;
+    s.ok(
+        ASIDE_OUT_CHECKS[3],
+        quiet && slept.status == 200 && gone && woke.body["phase"] == "awake" && !told(&woke.body, &record) && kept == format!("read {at}/aside.txt: set aside"),
+        json!({ "aside": aside_of(&record), "read": kept }),
     );
     // another set aside, then dropped
-    let (_, turn) = said(s, 508, "write work/dropped.txt to drop")?;
+    let (_, turn) = said(s, 527, "write work/dropped.txt to drop")?;
     let quiet = settled(s, &turn);
     let full = lever_with(api, c.id, json!({ "op": "full-restore", "dir": "/data/work" }))?;
     api.signed(c.owner, "POST", &path("/sleep"), Some(&json!({})))?;
     let woke = api.signed(c.owner, "POST", &path("/wake"), Some(&json!({})))?;
-    let aside = notice(&woke.body, "set_aside")["aside"][0].clone();
-    let record = aside["record"].as_str().unwrap_or("").to_string();
-    let theirs = api.signed(stranger, "DELETE", &path(&format!("/aside/{record}")), None)?;
-    let dropped = api.signed(c.owner, "DELETE", &path(&format!("/aside/{record}")), None)?;
-    let twice = api.signed(c.owner, "DELETE", &path(&format!("/aside/{record}")), None)?;
+    let other = notice(&woke.body, "set_aside")["aside"][0]["record"].as_str().unwrap_or("").to_string();
+    let theirs = api.signed(stranger, "DELETE", &path(&format!("/aside/{other}")), None)?;
+    let dropped = api.signed(c.owner, "DELETE", &path(&format!("/aside/{other}")), None)?;
+    let twice = api.signed(c.owner, "DELETE", &path(&format!("/aside/{other}")), None)?;
     s.ok(
-        ASIDE_OUT_CHECKS[1],
-        quiet && full.status == 200 && !record.is_empty() && theirs.status == 404 && dropped.status == 200 && notice(&dropped.body, "set_aside").is_null() && deleted(&aside["record"]) && twice.status == 404,
-        json!({ "aside": aside, "theirs": theirs.status, "dropped": dropped.body["notices"], "twice": twice.status }),
+        ASIDE_OUT_CHECKS[4],
+        quiet && full.status == 200 && !other.is_empty() && theirs.status == 404 && dropped.status == 200 && notice(&dropped.body, "set_aside").is_null() && forgotten(&other) && twice.status == 404,
+        json!({ "other": other, "theirs": theirs.status, "dropped": dropped.body["notices"], "twice": twice.status }),
     );
-    Ok(2)
+    Ok(8)
 }
 
 /// The bound checks (r4, r6: a sick container after a wake, and a sleep

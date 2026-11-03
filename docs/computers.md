@@ -377,9 +377,13 @@ from a snapshot.
   saved, and told to its owner (`set_aside`) until they get it back or
   drop it. At most `ASIDE_MAX` (4) are aside; a start that would set aside
   one more fails as any start does. A wipe deletes them with the rest.
-  Its owner gets one back beside the live work, in a folder of its own
-  (`back_dir`: `/data/work/restored-work-<day>-<save>`, so nothing live is
-  replaced), once it fits; or drops it. Either way its archive is deleted.
+  Its owner gets one back beside the live work, into a folder nothing was
+  at (`back_dirs`: `/data/work/restored-work-<day>-<save>`, else `-2`…),
+  staged and marked as that folder's first and moved into place only
+  where nothing is, so no folder is ever replaced; it stays aside, its
+  archive kept, until a save of that life begun after it came back worked
+  (a crash or a failed save before then loses nothing). Or they drop it,
+  its archive deleted at once.
   They are kept beside its saves, never in them (`Aside`): a release from
   before them reads its saves and writes them back whole, so a rollback to
   one erases none (no save of its holds one to let go of).

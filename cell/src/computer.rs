@@ -50,7 +50,7 @@ use std::collections::BTreeMap;
 
 use fragment_core::catalog::{self, Kind};
 use fragment_core::computer::{
-    alive, back_dir, Aside, does_simplex, image_running, notices, valid_version, version_running, Action, Alive, Event, Images, Lifecycle, Phase, Plan as Restore, Rules, Save, SaveNote, Saves, Saving, Socket, Step, Wake, ALIVE_MS, ASIDE_MAX, HOLD_DEADLINE_MS, HOLD_WAIT_MS, SAVE_DEADLINE_MS,
+    alive, back_dirs, Aside, does_simplex, image_running, notices, valid_version, version_running, Action, Alive, Event, Images, Lifecycle, Phase, Plan as Restore, Rules, Save, SaveNote, Saves, Saving, Socket, Step, Wake, ALIVE_MS, ASIDE_MAX, HOLD_DEADLINE_MS, HOLD_WAIT_MS, SAVE_DEADLINE_MS,
     SLEEP_DEADLINE_MS, START_DEADLINE_MS,
 };
 use fragment_core::ledger::{Meter, MeterRow, Month, Spend};
@@ -151,6 +151,10 @@ const UNHELD_EXEC_MS: i64 = 5_000;
 const CHECK: &str = "test ! -x /usr/local/bin/computer-check || exec /usr/local/bin/computer-check";
 const CHECK_EXEC_MS: i64 = 120_000;
 const CHECK_UNUSABLE: i64 = 3;
+/// The file a folder set aside that came back carries, naming its record:
+/// a try that finds its folder there already, so marked, is that folder's
+/// own (its answer was lost), never another's.
+const BACK_MARK: &str = ".fragment-back";
 /// What a save saves (docs/computers.md, "Data and the restore gate"):
 /// `/data/work`, what the guest's tools
 /// write, and the rest of `/data`, the guest's own state, each a record of
@@ -271,6 +275,9 @@ enum MetaKey {
     /// The test lever's full disk (`full-restore`): the folder whose next
     /// restore answers as the disk's floor stopped it, taken by that restore.
     FullRestore,
+    /// The test lever's lost answer to a folder coming back
+    /// (`lose-back-ack`): its next one is there, and says it failed.
+    LoseBackAck,
     /// The folders set aside (`fragment_core::computer::Aside`), kept beside
     /// its saves and never in them: a release from before them writes its
     /// saves back whole, and never this.
@@ -309,6 +316,7 @@ impl MetaKey {
             MetaKey::AliveCheck => "alive_check",
             MetaKey::FullRestore => "full_restore",
             MetaKey::Aside => "aside",
+            MetaKey::LoseBackAck => "lose_back_ack",
             MetaKey::WorkosUser => "workos_user",
             MetaKey::Images => "images",
             MetaKey::Simplex => "simplex",
@@ -1328,13 +1336,17 @@ impl ComputerCell {
     }
 
     /// Its owner gets back the folder set aside as `record`: awake (woken as
-    /// its owner's wake, if it sleeps), it is restored beside the live work
-    /// (`back_dir`), so nothing live is replaced; then it leaves what is
-    /// aside and its archive is deleted, its files in `/data` now, which its
-    /// next save keeps. Answers where it came back. One that does not fit
-    /// yet (the floor stopped it, writing nothing) or whose archive will
-    /// never restore stays aside, and says so (409); none aside by that id
-    /// is 404. One at a time.
+    /// its owner's wake, if it sleeps), it is restored beside the live work,
+    /// into a folder nothing was at (`back_dirs`, reserved: a retry goes
+    /// where its first try went), staged and marked first and moved into
+    /// place only where nothing is, so no folder is ever replaced: a retry
+    /// that finds its own marked folder there takes it as back (its answer
+    /// was lost). It stays aside, its archive kept, until a save of this
+    /// life begun after it came back worked (`save`, `Aside::saved`): a
+    /// crash or a failed save before then loses nothing. Answers where it
+    /// came back. One that does not fit yet, whose archive will never
+    /// restore, or whose folder another took, stays aside, and says so
+    /// (409); none aside by that id is 404. One at a time.
     async fn bring_back(&self, record: &str) -> CellResult<String> {
         let folder = self.aside()?.get(record).cloned().ok_or_else(|| CellError::new(ErrorCode::NotFound, format!("no folder is set aside as {record}")))?;
         if self.bringing.replace(true) {
@@ -1346,6 +1358,10 @@ impl ComputerCell {
     }
 
     async fn try_bring_back(&self, record: &str, folder: &fragment_core::computer::AsideFolder) -> CellResult<String> {
+        // a record's id names a folder in the container: its own letters alone
+        if record.is_empty() || !record.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-') {
+            return Err(CellError::invalid(format!("{record:?} is no record's id")));
+        }
         if !matches!(self.lifecycle()?.phase, Phase::Awake { .. }) {
             self.wake(Wake::Owner).await?;
         }
@@ -1354,25 +1370,102 @@ impl ComputerCell {
             return Err(CellError::new(ErrorCode::Conflict, "it is not awake to take it: try again once it is"));
         };
         let g = JsValue::from_f64(generation as f64);
-        let back = back_dir(folder);
         let id = self.meta(MetaKey::Id)?;
-        self.mark(&g, &format!("mkdir -p {}", SAVED_DIRS[1]), MARK_EXEC_MS).await?;
-        let t0 = js::now_ms();
-        let answer = js::from_js(&self.call("restore", &[g, js::to_js(&folder.record), JsValue::from_f64(RESTORE_MS as f64), back.as_str().into()]).await?).map_err(CellError::host)?;
-        if let Some(why) = answer["full"].as_str().or(answer["unusable"].as_str()) {
-            console_log!("{}", json!({ "computer": id, "aside": record, "back": "refused", "why": why }));
-            let said = if answer["full"].is_string() { "it does not fit yet: free some room on the computer, and try again" } else { "its archive will never restore: it can only be dropped" };
-            return Err(CellError::new(ErrorCode::Conflict, format!("{said} ({why})")));
+        // back in this life already: where it is
+        if let Some(b) = folder.back.as_ref().filter(|b| b.generation == generation && b.done_ms.is_some()) {
+            return Ok(b.dir.clone());
         }
-        // in /data now: it leaves what is aside, its archive let go of, in one step
-        let (mut saves, mut aside) = (self.saves()?, self.aside()?);
-        let lost = aside.release(record).map(|f| saves.let_go(vec![f.record])).unwrap_or_default();
+        // its folder: the one reserved in this life (a retry goes where its
+        // first try went), or the first of its names nothing is at, reserved
+        let dir = match folder.back.as_ref().filter(|b| b.generation == generation) {
+            Some(b) => b.dir.clone(),
+            None => {
+                let fresh = self.first_free(&g, &back_dirs(folder)).await?;
+                let mut aside = self.aside()?;
+                aside.reserve(record, generation, &fresh);
+                self.set_meta(MetaKey::Aside, &serde_json::to_string(&aside).map_err(|e| CellError::host(e.to_string()))?)?;
+                fresh
+            }
+        };
+        let marker = format!("{dir}/{BACK_MARK}");
+        let t0 = js::now_ms();
+        if self.mark(&g, &format!("test -e '{dir}'"), MARK_EXEC_MS).await.is_ok() {
+            // something is there: this folder's own (a try whose answer was
+            // lost: never restored over), or another's, never replaced
+            if self.mark(&g, &format!("grep -qx '{record}' '{marker}'"), MARK_EXEC_MS).await.is_err() {
+                let mut aside = self.aside()?;
+                aside.unreserve(record, generation);
+                self.set_meta(MetaKey::Aside, &serde_json::to_string(&aside).map_err(|e| CellError::host(e.to_string()))?)?;
+                console_log!("{}", json!({ "computer": id, "aside": record, "back": "refused", "why": format!("a folder is at {dir} already") }));
+                return Err(CellError::new(ErrorCode::Conflict, format!("a folder is at {dir} already, and is never replaced: try again for another")));
+            }
+        } else {
+            // restored beside it first, marked as this folder's, then into
+            // place only where nothing is (`mv -n -T` moves nothing onto one)
+            let stage = format!("{}/.restoring-{record}", SAVED_DIRS[1]);
+            self.mark(&g, &format!("mkdir -p {}", SAVED_DIRS[1]), MARK_EXEC_MS).await?;
+            let answer = js::from_js(&self.call("restore", &[g.clone(), js::to_js(&folder.record), JsValue::from_f64(RESTORE_MS as f64), stage.as_str().into()]).await?).map_err(CellError::host)?;
+            if let Some(why) = answer["full"].as_str().or(answer["unusable"].as_str()) {
+                console_log!("{}", json!({ "computer": id, "aside": record, "back": "refused", "why": why }));
+                let said = if answer["full"].is_string() { "it does not fit yet: free some room on the computer, and try again" } else { "its archive will never restore: it can only be dropped" };
+                return Err(CellError::new(ErrorCode::Conflict, format!("{said} ({why})")));
+            }
+            let placed = self.mark(&g, &format!("printf '%s\\n' '{record}' > '{stage}/{BACK_MARK}' && mv -n -T '{stage}' '{dir}' && grep -qx '{record}' '{marker}'"), MARK_EXEC_MS).await;
+            if let Err(e) = placed {
+                return Err(CellError::new(ErrorCode::Conflict, format!("it did not move into {dir} (something is there now, never replaced): try again ({})", e.message)));
+            }
+            if self.meta(MetaKey::LoseBackAck)?.is_some() {
+                // the lever's lost answer: it is there, and nothing was told
+                self.delete_meta(MetaKey::LoseBackAck)?;
+                return Err(CellError::host("the test lever lost its answer"));
+            }
+        }
+        // back: aside still, its archive kept, until a save of this life holds it
+        let mut aside = self.aside()?;
+        aside.came_back(record, generation, js::now_ms());
         self.set_meta(MetaKey::Aside, &serde_json::to_string(&aside).map_err(|e| CellError::host(e.to_string()))?)?;
-        self.set_meta(MetaKey::Saves, &serde_json::to_string(&saves).map_err(|e| CellError::host(e.to_string()))?)?;
-        console_log!("{}", json!({ "computer": id, "aside": record, "back": back, "save": folder.save, "bytes": folder.record["size"], "ms": js::now_ms() - t0 }));
-        self.forget(lost).await;
+        console_log!("{}", json!({ "computer": id, "aside": record, "back": dir, "save": folder.save, "bytes": folder.record["size"], "ms": js::now_ms() - t0 }));
         self.tell_owner().await;
-        Ok(back)
+        Ok(dir)
+    }
+
+    /// The first of `dirs` nothing is at in start `g`'s container: a folder
+    /// set aside comes back there. None free: refused (409), as every name
+    /// of its is taken.
+    async fn first_free(&self, g: &JsValue, dirs: &[String]) -> CellResult<String> {
+        let list = dirs.iter().map(|d| format!("'{d}'")).collect::<Vec<_>>().join(" ");
+        let argv = js::to_js(&json!(["sh", "-c", format!("for d in {list}; do [ -e \"$d\" ] || {{ echo \"$d\"; exit 0; }}; done; exit 3")]));
+        let out = js::from_js(&self.call("exec", &[g.clone(), argv, JsValue::from_f64(MARK_EXEC_MS as f64)]).await?).map_err(CellError::host)?;
+        let found = out["output"].as_str().unwrap_or("").trim().to_string();
+        match out["exitCode"].as_i64() {
+            Some(0) if dirs.contains(&found) => Ok(found),
+            _ => Err(CellError::new(ErrorCode::Conflict, format!("a folder is at each name it comes back as ({} …): move one, and try again", dirs.first().map(String::as_str).unwrap_or("")))),
+        }
+    }
+
+    /// A save of start `generation` begun at `started_ms` worked: each
+    /// folder set aside back in that life before it began is in it, and
+    /// leaves what is aside, its record let go of (its archive deleted), in
+    /// one step with the saves. Best effort: one that fails stays aside, to
+    /// go with the next save.
+    async fn release_saved_aside(&self, generation: u64, started_ms: i64) {
+        let done = (|| -> CellResult<Vec<Value>> {
+            let (mut saves, mut aside) = (self.saves()?, self.aside()?);
+            let gone = aside.saved(generation, started_ms);
+            if gone.is_empty() {
+                return Ok(vec![]);
+            }
+            let ids: Vec<Value> = gone.iter().map(|f| f.record["id"].clone()).collect();
+            let lost = saves.let_go(gone.into_iter().map(|f| f.record).collect());
+            self.set_meta(MetaKey::Aside, &serde_json::to_string(&aside).map_err(|e| CellError::host(e.to_string()))?)?;
+            self.set_meta(MetaKey::Saves, &serde_json::to_string(&saves).map_err(|e| CellError::host(e.to_string()))?)?;
+            console_log!("{}", json!({ "computer": self.meta(MetaKey::Id)?, "aside": ids, "kept": "in a save", "generation": generation }));
+            Ok(lost)
+        })();
+        match done {
+            Ok(lost) => self.forget(lost).await,
+            Err(e) => console_error!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "aside": "unreleased", "error": e.message })),
+        }
     }
 
     /// Its owner drops the folder set aside as `record`: it leaves, and its
@@ -1590,6 +1683,9 @@ impl ComputerCell {
         let bytes: u64 = records.iter().filter_map(|r| r["size"].as_u64()).sum();
         match self.keep_save(generation, records, held).await {
             Ok(save) => {
+                // a folder set aside that came back in this life before the save
+                // began is in it now: it leaves what is aside, its archive deleted
+                self.release_saved_aside(generation, t0).await;
                 // one line per save (lesson 14): which, how big, how long
                 console_log!("{}", json!({ "computer": id, "saved": save.number, "id": save.id, "generation": generation, "held": held, "leftOut": left_out, "bytes": bytes, "ms": js::now_ms() - t0 }));
                 Event::Saved { generation, seq }
@@ -2248,6 +2344,12 @@ impl ComputerCell {
                 console_log!("{}", json!({ "computer": id, "lever": "alive-check", "ms": ms, "freeze": freeze }));
                 Ok(json!({ "computer": id, "aliveCheck": { "ms": ms, "freeze": freeze } }))
             }
+            "lose-back-ack" => {
+                // its next folder coming back is there, and answers as lost
+                self.set_meta(MetaKey::LoseBackAck, "1")?;
+                console_log!("{}", json!({ "computer": id, "lever": "lose-back-ack" }));
+                Ok(json!({ "computer": id, "loseBackAck": true }))
+            }
             "full-restore" => {
                 // its next restore of `dir` finds no room, as a full disk's would
                 let dir = b.dir.as_deref().filter(|d| SAVED_DIRS.contains(d)).ok_or_else(|| CellError::invalid(format!("full-restore names its dir, one of {SAVED_DIRS:?}")))?;
@@ -2322,7 +2424,7 @@ impl ComputerCell {
                 v["hangBackups"] = json!(self.meta(MetaKey::HangBackups)?.and_then(|n| n.parse::<i64>().ok()).unwrap_or(0));
                 Ok(v)
             }
-            op => Err(CellError::invalid(format!("no computer lever {op:?}: kill, saves, fail-saves, hang-backups, alive-check, full-restore or always-on"))),
+            op => Err(CellError::invalid(format!("no computer lever {op:?}: kill, saves, fail-saves, hang-backups, alive-check, full-restore, lose-back-ack or always-on"))),
         }
     }
 
