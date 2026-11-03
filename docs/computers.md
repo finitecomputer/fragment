@@ -392,8 +392,15 @@ from a snapshot.
 Every step the DO takes in a container ends within a bound, and one past
 it fails (the Sandbox SDK times out nothing): the consts beside
 `SLEEP_STEPS_MS` in cell/src/computer.rs, each within the lifecycle's
-deadline for its phase, checked as the cell compiles. So an owner's sleep
-answers within 11 minutes.
+deadline for its phase, checked as the cell compiles. A save's steps run
+in the Durable Object alarm whose events asked for them, which Cloudflare
+ends at 15 minutes: a sleep's hold, save and stop fit one alarm, and its
+backups get what the rest leaves (`BACKUPS_MS`, 11 minutes 10 seconds).
+That is the most any save can have, so it is fixed, not one that follows
+a save's progress. Saves over 1 GB moved 9 to 156 MB/s on production
+(2026-10-27 to 11-03), so a full disk's save (about 10.8 GB) fits all but
+the slowest 6% of tries, each tried again. So an owner's sleep answers
+within 14 minutes.
 
 ### The fragment API
 

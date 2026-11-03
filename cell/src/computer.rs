@@ -177,13 +177,27 @@ const SIGSTOP: f64 = 19.0;
 /// A marker's exec answers within this, or it failed: a sleep goes on
 /// without its hold, a start fails.
 const MARK_EXEC_MS: i64 = 30_000;
+/// A Durable Object's alarm runs at most this long (Cloudflare's limits:
+/// "Alarm handler invocations have a maximum wall time of 15 minutes"),
+/// and a save's steps run inside the alarm whose events asked for them
+/// (`drive_events`): an idle sleep's hold, save and stop, an awake save's
+/// hold, save and unhold, all in one.
+const ALARM_WALL_MS: i64 = 15 * 60_000;
+/// What an alarm's other events take beside those steps (its adopt, a
+/// meter's flush, its owner told), each a call of about a second.
+const ALARM_OTHER_MS: i64 = 60_000;
 /// A save's backups, its records one after the other, answer within this
 /// together, or the save fails (entry.mjs's `Overdue`), as one that says so
-/// does: spike S3 moved 52 MB in 3.3 s, so a few GiB fit, and the rest of
-/// the save still reports before the lifecycle's `SAVE_DEADLINE_MS`. The
-/// Sandbox SDK "never times out anything" (r4, r6: a sick container's
-/// backup never returned, so its sleep never ended).
-const BACKUPS_MS: i64 = 8 * 60_000;
+/// does: the Sandbox SDK "never times out anything" (r4, r6: a sick
+/// container's backup never returned, so its sleep never ended). It is
+/// what an alarm leaves after a sleep's other steps, the most any save can
+/// have. A 20 GB disk holds about 17 GB of a person's (a fresh computer
+/// uses 2.4 GB), 10.8 GB saved at the 1.6 to 1 the largest save showed;
+/// 577 saves over 1 GB on production moved 9 to 156 MB a second
+/// (2026-10-27 to 11-03), so eight minutes would cut 18% of such a save's
+/// tries and this cuts 6%, each tried again a minute later. A save bigger
+/// or slower than an alarm allows needs saves that are not whole copies.
+const BACKUPS_MS: i64 = ALARM_WALL_MS - ALARM_OTHER_MS - HOLD_STEPS_MS - MARK_EXEC_MS - FORGET_PASS_MS - STOP_STEPS_MS;
 /// A start's restores, its save's records together, answer within this, or
 /// the start failed (tried again, on the same save): what the start's own
 /// deadline leaves after the waits around them (the container taking an
@@ -231,7 +245,10 @@ const _: () = assert!(SAVE_STEPS_MS < SAVE_DEADLINE_MS, "a save reports before i
 const _: () = assert!(STOP_STEPS_MS < SLEEP_DEADLINE_MS, "a stop reports before its deadline");
 const _: () = assert!(EXEC_READY_MS + RESTORE_MS + CHECK_EXEC_MS + MARK_EXEC_MS <= START_DEADLINE_MS && ALIVE_MS < START_DEADLINE_MS, "a start's waits fit its deadline");
 const _: () = assert!(RESTORE_MS >= 10 * 60_000, "a restore of a full disk's save (5.9 GB took longer than 165 s) is given ten minutes at least");
-const _: () = assert!(SLEEP_STEPS_MS <= 11 * 60_000, "docs/api.md: a sleep answers within 11 minutes");
+// an awake save's unhold (`MARK_EXEC_MS`) is within a stop's bound
+const _: () = assert!(SLEEP_STEPS_MS + ALARM_OTHER_MS <= ALARM_WALL_MS, "a sleep's steps, and an alarm's other events, fit the one alarm they run in");
+const _: () = assert!(BACKUPS_MS >= 11 * 60_000, "a full disk's save (10.8 GB at 16.1 MB/s) is given eleven minutes at least");
+const _: () = assert!(SLEEP_STEPS_MS <= 14 * 60_000, "docs/api.md: a sleep answers within 14 minutes");
 /// The largest request body the egress signs and hands on (it is hashed
 /// for NIP-98 first, so it is read whole).
 const EGRESS_BODY_MAX_BYTES: usize = 32 * 1024 * 1024;

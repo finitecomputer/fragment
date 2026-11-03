@@ -1888,7 +1888,7 @@ docs/computers.md's; these routes are its owner's. A view is
 | `GET /api/computers` | a person | → `{computers: [ComputerView], support}`, `support` `FRAGMENT_SUPPORT_URL` or `null` |
 | `GET /api/computers/{id}` | its owner (anyone else 404) | → `ComputerView`. Their pages are told when it changes (`watch`'s `changed`) |
 | `POST /api/computers/{id}/wake` | its owner | → the view once awake; 503 `wont_wake` when it would not start |
-| `POST /api/computers/{id}/sleep` | its owner | → the view once asleep, or awake with its `why` when its save failed; within the sum of its steps' bounds (`SLEEP_STEPS_MS`), at most 11 minutes |
+| `POST /api/computers/{id}/sleep` | its owner | → the view once asleep, or awake with its `why` when its save failed; within the sum of its steps' bounds (`SLEEP_STEPS_MS`), at most 14 minutes |
 | `POST /api/computers/{id}/restart` | its owner | `{generation?}` → the view once started again, fresh from the image and its newest good save. `generation` names the start the owner saw: one already restarted is not restarted again. At zero credit 402, a guest 403 |
 | `POST /api/computers/{id}/notices/seen` | its owner | `{life}` → the view, that `went_back` notice told no more; a `life` past the newest, or 0, 400 |
 | `POST /api/computers/{id}/notices/later` | its owner | `{version}` → the view, that update put off; not its next start's, or not 12 hex, 400 |

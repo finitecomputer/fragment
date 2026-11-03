@@ -141,11 +141,12 @@ pub const HOLD_WAIT_MS: i64 = 20_000;
 /// A hold (the touch, the wait, the answer) reports within this, or it is
 /// asked again.
 pub const HOLD_DEADLINE_MS: i64 = 90_000;
-/// A save reports within this, or it failed, as one that says so did
-/// (spike S3: 52 MB in 3.3 s, so a few GiB fit). The cell's own bounds on
-/// a save's steps end it sooner (cell/src/computer.rs, `SAVE_STEPS_MS`):
-/// this catches a report its isolate lost.
-pub const SAVE_DEADLINE_MS: i64 = 10 * 60_000;
+/// A save reports within this, or it failed, as one that says so did. The
+/// cell's own bounds on a save's steps end it sooner (cell/src/computer.rs,
+/// `SAVE_STEPS_MS`: 12 minutes 10 seconds, its backups what a Durable
+/// Object's alarm leaves them, so a full disk's save fits): this catches a
+/// report its isolate lost.
+pub const SAVE_DEADLINE_MS: i64 = 13 * 60_000;
 /// Saves of `/data` kept: a wake restores the newest that restores, and
 /// falls back to the one before it (docs/computers.md, "Saves and what a
 /// wake restores"). Beside these, the save its running life came up from
@@ -3354,7 +3355,7 @@ mod tests {
         keep(&s, &mut metered);
         assert_eq!(s.actions, vec![Action::Unhold { generation: g }], "failed: kept, held no more, and nothing metered since its try began (its alarm metered to it)");
         assert_eq!(l.phase, Phase::Awake { generation: g, since_ms: first }, "the same container, awake");
-        assert!(matches!(&s.note, SaveNote::Says(why) if why.contains("could not save") && why.contains(&format!("save {hung} did not report within 10 minutes"))), "{:?}", s.note);
+        assert!(matches!(&s.note, SaveNote::Says(why) if why.contains("could not save") && why.contains(&format!("save {hung} did not report within {} minutes", SAVE_DEADLINE_MS / 60_000))), "{:?}", s.note);
         let (tried, bound) = (T + IDLE_MS, first + rules.unsaved_max_ms);
         assert_eq!(l.unmetered, Some((tried, bound)), "free from its try's start, the hung save's minutes included, to the bound after its failure");
         let u = l.unsaved(&rules).expect("a failure is counted");
@@ -3459,7 +3460,7 @@ mod tests {
         };
         let slept = T + 60_000;
 
-        // a hung first save: free from its try's start, ten minutes before
+        // a hung first save: free from its try's start, its deadline before
         // it failed; the bound and its stop time from the failure
         let (mut l, _, _) = sleeping(slept);
         let failed = slept + 500 + SAVE_DEADLINE_MS;
