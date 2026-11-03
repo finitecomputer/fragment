@@ -106,7 +106,7 @@ pub const WONT_WAKE_RETRY_MS: i64 = 30 * 60_000;
 /// save restores it whole first, 5.7 GB in 147 s on the production fleet
 /// (2026-11-02). Three minutes cut a restore of 5.9 GB at 165 s, every
 /// try, so that computer never started again (2026-11-03): a restore is
-/// given nine and a half minutes (the cell's `RESTORE_MS`, which also
+/// given nine minutes and more (the cell's `RESTORE_MS`, which also
 /// leaves an alarm's other events room: a start made by an alarm fits it).
 pub const START_DEADLINE_MS: i64 = 15 * 60_000;
 /// A sleep's stop (snapshot, signal, five seconds of exit, destroy)
