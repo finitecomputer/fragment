@@ -442,7 +442,11 @@ fn aside_out_checks(s: &mut Suite, api: &Api, c: &Crashing, stranger: &crate::Ke
     // a crash before any save held it: its next life is told of it again, and it comes back again
     let before = generation();
     let killed = lever(api, c.id, "kill")?;
-    let restarted = s.eventually(c.wake, || view()["phase"] == "awake" && generation() > before);
+    // one read of its view: its phase and its start the same moment's
+    let restarted = s.eventually(c.wake, || {
+        let v = view();
+        v["phase"] == "awake" && v["generation"].as_u64().unwrap_or(0) > before
+    });
     let again_told = told(&view(), &record) && aside_of(&record)["record"]["id"] == record.as_str();
     lever_with(api, c.id, json!({ "op": "fail-saves", "times": 0 }))?;
     let again = back(&record)?;
