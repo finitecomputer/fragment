@@ -552,6 +552,16 @@ iframe[data-blocked] { display: none; }
 .settings-section > .quiet { align-self: flex-end; margin: 12px 2px; }
 .settings-section input:not([type="file"]):not([type="checkbox"]), .settings-section select { min-height: 34px; padding: 5px 12px; border: 1px solid var(--border-strong); border-radius: 999px; background: var(--bg-card); color: var(--text-primary); font: inherit; font-size: 13px; }
 .settings-section input[type="checkbox"] { accent-color: var(--accent-blue); }
+/* a setting's on and off: a checkbox drawn as a switch (billing.js, Sleep), its row the label */
+label.settings-line { cursor: pointer; }
+.settings-section input.settings-switch { position: relative; flex: none; width: 40px; height: 24px; margin: 0; appearance: none; -webkit-appearance: none; border-radius: 999px; background: var(--border-strong); cursor: pointer; transition: background .15s; }
+.settings-section input.settings-switch::before { content: ""; position: absolute; top: 3px; left: 3px; width: 18px; height: 18px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,.3); transition: transform .15s; }
+.settings-section input.settings-switch:checked { background: var(--accent-blue); }
+.settings-section input.settings-switch:checked::before { transform: translateX(16px); }
+.settings-section input.settings-switch:focus-visible { outline: 2px solid var(--accent-blue); outline-offset: 2px; }
+.settings-section input.settings-switch:disabled { opacity: .55; cursor: default; }
+@media (prefers-reduced-motion: reduce) { .settings-section input.settings-switch, .settings-section input.settings-switch::before { transition: none; } }
+@media (forced-colors: active) { .settings-section input.settings-switch { border: 1px solid CanvasText; } .settings-section input.settings-switch::before { background: CanvasText; } }
 /* Your data's rows, drawn again as its export changes, are the section's own */
 .settings-export { display: contents; }
 .settings-export > p { margin: 0; padding: 12px 2px; }

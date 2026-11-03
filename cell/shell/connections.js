@@ -620,7 +620,7 @@ export function createSimplex({ api, el, section, actionLine, named, seg, comput
       // checkbox) is told how to take it back; anyone else, what keeps it on
       const seat = getSeat();
       const chose = seat?.good && seat.kind === "seat_always_on" && seat.sleeps;
-      s.append(el("p", "muted", chose ? 'SimpleX needs your computer to stay on. Untick "Let my computer sleep when nothing is open" in Billing.' : "SimpleX works while your computer stays on, which the always-on plan does."));
+      s.append(el("p", "muted", chose ? 'SimpleX needs your computer to stay on. Turn off "Let my computer sleep when nothing is open" in Billing.' : "SimpleX works while your computer stays on, which the always-on plan does."));
       return;
     }
     for (const a of agents) {

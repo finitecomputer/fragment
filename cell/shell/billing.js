@@ -375,8 +375,12 @@ export async function billingSections(helpers, ledger, mine, back) {
       if (offer) billing.append(seat.admin ? actionLine("Renewal", button("Pay again", () => goCheckout({}), (e) => plainly(e, CHECKOUT, CHECKOUT_FAILED))) : el("p", "muted", "Ask your org's admin to pay for it again."));
     }
     if (seat.good && seat.kind === "seat_always_on") {
-      const sleeps = el("input");
+      // a switch: a checkbox drawn as one (shell.css `.settings-switch`), so
+      // it is still a checkbox to forms, tests and assistive tech, which
+      // reads it as a switch
+      const sleeps = el("input", "settings-switch");
       sleeps.type = "checkbox";
+      sleeps.setAttribute("role", "switch");
       sleeps.checked = seat.sleeps;
       sleeps.onchange = async () => {
         try {
@@ -388,8 +392,14 @@ export async function billingSections(helpers, ledger, mine, back) {
           note(billing, plainly(e, { no_seat: "You don't hold a seat any more. Open Settings again to see where it went." }, "That wasn't changed. Try again in a moment."));
         }
       };
-      const label = el("label", "settings-line");
-      label.append(sleeps, " Let my computer sleep when nothing is open");
+      // the row its label above its sentence, the switch on the right; the
+      // whole row is the label, so a press anywhere on it flips the switch
+      const label = el("label", "settings-line settings-line-with-action");
+      const info = el("div", "settings-info");
+      info.append(el("span", "settings-key", "Sleep"), el("span", "settings-value", "Let my computer sleep when nothing is open"));
+      const control = el("div", "settings-control");
+      control.append(sleeps);
+      label.append(info, control);
       billing.append(label);
     }
   } else if (mine.guest) {

@@ -1402,7 +1402,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     let set_up = "!!document.querySelector('#settings-simplex:not([hidden]) button.row')";
     let ready = b.until(&page, &format!("!!({box_}) && {set_up}"), std::time::Duration::from_secs(30));
     b.eval(&page, &format!("({box_}).click(), true"))?;
-    let told = b.until(&page, "(() => { const t = document.getElementById('settings-simplex')?.innerText ?? ''; return t.includes('Untick') && t.includes('Let my computer sleep'); })()", std::time::Duration::from_secs(30));
+    let told = b.until(&page, "(() => { const t = document.getElementById('settings-simplex')?.innerText ?? ''; return t.includes('Turn off') && t.includes('Let my computer sleep'); })()", std::time::Duration::from_secs(30));
     b.eval(&page, &format!("({box_}).click(), true"))?;
     let back = b.until(&page, set_up, std::time::Duration::from_secs(30));
     s.ok(
