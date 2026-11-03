@@ -790,8 +790,10 @@ for Testing fails.
 
 - **One release for Python and Node**, pinned in
   `images/hermes/playwright-requirements.txt`: Python's in the image's own
-  packages (above), Node's global (`require('playwright')` through the
-  login shell's `NODE_PATH`), and the `playwright` CLI. A plain
+  packages (above), its driver on the image's Node
+  (`PLAYWRIGHT_NODEJS_PATH`; the wheel's own is dropped), Node's global
+  (`require('playwright')` through the login shell's `NODE_PATH`), and the
+  `playwright` CLI. A plain
   `chromium.launch()` runs `/opt/fragment/bin/chromium`, the desktop's:
   the image puts it in `PLAYWRIGHT_BROWSERS_PATH` under the names that
   release looks for, marked installed, so `sudo playwright install

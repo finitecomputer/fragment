@@ -245,12 +245,16 @@ RUN uv="$(/opt/hermes/.venv/bin/python -c 'from pm._uv import _toolchain; print(
 # `playwright==<release>`, in /opt/hermes, so upstream's uv config holds
 # it to releases two weeks old, as npm's min-release-age does Node's). Node's is global (/usr/local, as `sudo npm
 # install -g` puts one), required through NODE_PATH, and its CLI is
-# `playwright`. The build fails unless both are the same release.
+# `playwright`. The build fails unless both are the same release. Python's
+# wheel bundles a Node of its own for its driver (121 MB, as a second
+# Chromium would be): it goes, and the driver runs on the image's Node,
+# which PLAYWRIGHT_NODEJS_PATH names (the final stage), the override
+# Playwright's Python driver reads.
 COPY images/hermes/playwright-requirements.txt /tmp/playwright-requirements.txt
 RUN uv="$(/opt/hermes/.venv/bin/python -c 'from pm._uv import _toolchain; print(_toolchain(realize=False)[0])')" \
  && UV_CACHE_DIR=/tmp/uv-cache "$uv" pip install --quiet --python /usr/local/bin/python3 --target /opt/fragment/python --require-hashes --no-build -r /tmp/playwright-requirements.txt \
  && PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm install --global --prefix /usr/local --cache /tmp/npm-cache --no-fund --no-audit "playwright@$(sed -n 's/^playwright==\([0-9.]*\).*/\1/p' /tmp/playwright-requirements.txt)" \
- && rm -rf /tmp/uv-cache /tmp/npm-cache /tmp/playwright-requirements.txt \
+ && rm -rf /tmp/uv-cache /tmp/npm-cache /tmp/playwright-requirements.txt /opt/fragment/python/playwright/driver/node \
  && /usr/local/bin/python3 -m compileall -q --invalidation-mode unchecked-hash /opt/fragment/python > /dev/null \
  && test "$(PYTHONPATH=/opt/fragment/python /usr/local/bin/python3 -c 'from importlib.metadata import version; print(version("playwright"))')" = "$(/usr/local/bin/playwright --version | sed 's/^Version //')"
 
@@ -486,7 +490,8 @@ RUN /opt/fragment/bin/hermes-boot build-info \
 # and `channel="chromium"` (the browser's) both run it. INSTALLATION_COMPLETE
 # is Playwright's own mark of an installed browser: `sudo playwright install
 # chromium` finds both and downloads no Chromium. The build fails unless
-# both runtimes print a page with it.
+# both runtimes print a page with it, Python's on the image's Node.
+ENV PLAYWRIGHT_NODEJS_PATH=/usr/local/bin/node
 RUN <<'EOF'
 set -eu
 # the check leaves nothing behind: no compile cache, no headless profile
