@@ -314,7 +314,7 @@ body.reordering iframe { pointer-events: none; }
 .rename-agent h2 { margin: 0 0 8px; font-size: 21px; }
 .rename-agent p { color: var(--text-secondary); font-size: 14px; }
 .rename-agent label { display: block; margin: 24px 0 8px; font-size: 13px; }
-.rename-agent input { width: 100%; box-sizing: border-box; padding: 12px; border: 1px solid var(--border-strong); border-radius: 9px; font: inherit; color: inherit; background: var(--bg-window); }
+.rename-agent input { width: 100%; box-sizing: border-box; padding: 12px; border: 1px solid var(--border-strong); border-radius: 10px; font: inherit; color: inherit; background: var(--bg-window); }
 .rename-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 24px; }
 /* a dialog's buttons: pills that keep their size and colours in every state
    (disabled while it saves or arms: fragment-title.js holds its width) */
@@ -563,7 +563,8 @@ iframe[data-blocked] { display: none; }
 .settings-section .quiet:hover { background: var(--bg-hover); }
 .settings-section .quiet:disabled { opacity: .55; cursor: default; }
 .settings-section > .quiet { align-self: flex-end; margin: 12px 2px; }
-.settings-section input:not([type="file"]):not([type="checkbox"]), .settings-section select { min-height: 34px; padding: 5px 12px; border: 1px solid var(--border-strong); border-radius: 999px; background: var(--bg-card); color: var(--text-primary); font: inherit; font-size: 13px; }
+/* the shell's form: fields (inputs, selects, text areas) are rounded rectangles, 10px, on the card's white; buttons are pills */
+.settings-section input:not([type="file"]):not([type="checkbox"]), .settings-section select { min-height: 36px; padding: 5px 12px; border: 1px solid var(--border-strong); border-radius: 10px; background: var(--bg-card); color: var(--text-primary); font: inherit; font-size: 13px; }
 .settings-section input[type="checkbox"] { accent-color: var(--accent-blue); }
 /* a setting's on and off: a checkbox drawn as a switch (billing.js, Sleep), its row the label */
 label.settings-line { cursor: pointer; }
@@ -583,7 +584,7 @@ label.settings-line { cursor: pointer; }
 .settings-section p a { color: var(--text-primary); text-underline-offset: 3px; }
 .settings-section pre.command { width: 100%; margin: 0; padding: 14px 16px; border: 1px solid var(--border); border-radius: 10px; background: var(--chat-code); font: 500 12.5px/1.65 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text-primary); }
 /* settings' Build with Claude Code or Codex: the prompt to copy (16px: no zoom as it takes focus), the install folded */
-.settings-section textarea.build-prompt { width: 100%; min-height: 80px; padding: 12px 14px; border: 1px solid var(--border-strong); border-radius: 12px; background: var(--bg-card); color: var(--text-primary); font: inherit; font-size: 16px; line-height: 1.5; resize: vertical; }
+.settings-section textarea.build-prompt { width: 100%; min-height: 80px; padding: 12px 14px; border: 1px solid var(--border-strong); border-radius: 10px; background: var(--bg-card); color: var(--text-primary); font: inherit; font-size: 16px; line-height: 1.5; resize: vertical; }
 .settings-section textarea.build-prompt:focus-visible { outline: 2px solid var(--accent-blue); outline-offset: 1px; }
 .settings-install { width: 100%; padding: 4px 2px 8px; }
 .settings-install summary { width: max-content; padding: 6px 0; color: var(--text-secondary); font-size: 13.5px; cursor: pointer; }
@@ -636,9 +637,9 @@ label.settings-line { cursor: pointer; }
 .provider .use + .use::before { content: "·"; margin-right: 8px; color: var(--text-tertiary); }
 .provider-accounts { display: flex; flex-direction: column; gap: 8px; padding-left: 12px; border-left: 2px solid var(--border-strong); }
 .provider-account-row { display: flex; flex-direction: column; gap: 4px; }
-.provider-account-pick { height: 26px; max-width: 220px; padding: 0 6px; border: 1px solid var(--border-strong); border-radius: 8px; background: none; color: var(--text-primary); font: inherit; font-size: 12.5px; }
+.provider-account-pick { height: 26px; max-width: 220px; padding: 0 6px; border: 1px solid var(--border-strong); border-radius: 10px; background: var(--bg-card); color: var(--text-primary); font: inherit; font-size: 12.5px; }
 .provider-key { display: flex; gap: 8px; flex-wrap: wrap; }
-.provider-key input { height: 30px; min-width: 0; width: 220px; max-width: 100%; padding: 0 10px; border: 1px solid var(--border-strong); border-radius: 8px; background: none; color: var(--text-primary); font: inherit; font-size: 13px; }
+.provider-key input { height: 30px; min-width: 0; width: 220px; max-width: 100%; padding: 0 10px; border: 1px solid var(--border-strong); border-radius: 10px; background: var(--bg-card); color: var(--text-primary); font: inherit; font-size: 13px; }
 /* settings' agents: a platform route, or independent BYO Fast/Deep picks */
 .agent-setting { width: 100%; display: flex; flex-direction: column; gap: 14px; padding: 14px 2px; border-bottom: 1px solid var(--border-strong); }
 .agent-setting:last-child { border-bottom: 0; }
@@ -671,8 +672,7 @@ label.settings-line { cursor: pointer; }
 .agent-model-label { position: relative; display: flex; flex-direction: column; align-items: stretch; gap: 6px; width: 100%; font-size: 13px; }
 /* the chevron sits in the pick under the label: its middle, 18px above the bottom */
 .agent-model-label::after { content: ""; position: absolute; top: calc(100% - 18px); right: 15px; width: 7px; height: 7px; border-right: 1.5px solid var(--text-secondary); border-bottom: 1.5px solid var(--text-secondary); transform: translateY(-70%) rotate(45deg); pointer-events: none; }
-.settings-section select.agent-model { width: 100%; height: 36px; min-width: 0; padding: 0 34px 0 15px; appearance: none; -webkit-appearance: none; border: 1px solid var(--border-strong); border-radius: 999px; background: var(--bg-active); color: var(--text-primary); font-size: 13px; font-weight: 600; text-overflow: ellipsis; cursor: pointer; }
-.settings-section select.agent-model:hover { background: var(--bg-hover); }
+.settings-section select.agent-model { width: 100%; height: 36px; min-width: 0; padding: 0 34px 0 12px; appearance: none; -webkit-appearance: none; border: 1px solid var(--border-strong); border-radius: 10px; background: var(--bg-card); color: var(--text-primary); font-size: 13px; font-weight: 400; text-overflow: ellipsis; cursor: pointer; }
 .settings-section select.agent-model:disabled { opacity: .55; cursor: default; }
 /* Settings' Agents: an agent's role, and another agent to add (agent-settings.js) */
 .agent-role-label::after { content: none; }
@@ -715,8 +715,8 @@ label.settings-line { cursor: pointer; }
 .app-title-edit:hover, .app-title-edit:focus-visible { opacity: 1; color: var(--text-primary); }
 .app-title-edit svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.8; }
 .app-name-form { display: flex; flex-wrap: wrap; gap: 6px; width: 100%; }
-.app-name-input { min-width: 80px; flex: 1; width: 80px; padding: 6px 8px; border: 1px solid var(--border-strong); border-radius: 6px; background: var(--bg-window); color: inherit; font: inherit; }
-.app-name-form button { border: 0; padding: 5px 8px; border-radius: 6px; background: var(--bg-active); font-size: 12px; }
+.app-name-input { min-width: 80px; flex: 1; width: 80px; padding: 6px 8px; border: 1px solid var(--border-strong); border-radius: 10px; background: var(--bg-window); color: inherit; font: inherit; }
+.app-name-form button { border: 0; padding: 5px 12px; border-radius: 999px; background: var(--bg-active); font-size: 12px; }
 .app-row-url { display: inline-flex; align-items: center; gap: 5px; color: var(--text-secondary); font-size: 12px; min-width: 0; text-decoration: none; }
 .app-row-url span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .app-row-url svg { flex: none; width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 1.8; }
@@ -735,17 +735,17 @@ label.settings-line { cursor: pointer; }
 .icon-editor .icon-current .app-picture, .icon-editor .icon-current .app-icon { width: 56px; height: 56px; }
 .icon-editor .icon-make { flex-wrap: wrap; }
 .icon-editor .icon-make input { width: 100%; }
-.icon-editor .icon-make button, .icon-editor .icon-actions button { padding: 7px 10px; font-size: 12px; border-radius: 6px; }
+.icon-editor .icon-make button, .icon-editor .icon-actions button { padding: 7px 14px; font-size: 12px; border-radius: 999px; }
 .icon-editor .icon-actions { justify-content: flex-start; margin-top: 12px; }
 .icon-editor .icon-actions button:first-child { margin-right: 0; }
 .app-preview-image { display: block; width: 100%; aspect-ratio: 1.6; margin-bottom: 12px; border: 1px solid var(--border); border-radius: 6px; object-fit: cover; object-position: top; }
-.app-preview-editor .quiet { padding: 7px 10px; border-radius: 6px; background: var(--bg-active); font-size: 12px; }
+.app-preview-editor .quiet { padding: 7px 14px; border-radius: 999px; background: var(--bg-active); font-size: 12px; }
 .app-sharing-frame { display: block; border: 0; width: 100%; min-height: 240px; background: transparent; }
 .app-address-form { display: flex; gap: 10px; flex-wrap: wrap; }
 .app-address-field { display: flex; align-items: center; min-width: 0; flex: 1; gap: 0; border: 1px solid var(--border-strong); border-radius: 7px; background: var(--bg-card); overflow: hidden; }
 .app-address-field input { flex: 1; width: 100px; min-width: 50px; padding: 9px 10px; border: 0; background: transparent; color: var(--text-primary); font: inherit; font-size: 13px; }
 .app-address-field span { padding-right: 10px; color: var(--text-secondary); font-size: 12px; overflow-wrap: anywhere; }
-.app-address-form .quiet { padding: 8px 12px; border-radius: 7px; font-size: 12px; background: var(--bg-active); }
+.app-address-form .quiet { padding: 8px 14px; border-radius: 999px; font-size: 12px; background: var(--bg-active); }
 .app-address-note, .app-address-said { margin: 10px 0 0; font-size: 12px; }
 .app-address-kept { color: var(--text-primary); font-size: 14px; }
 .app-row-progress { padding-left: 54px; }
@@ -1031,8 +1031,8 @@ label.settings-line { cursor: pointer; }
 .icon-current { display: grid; place-items: center; height: 88px; margin-bottom: 14px; border-radius: 12px; background: var(--bg-window); }
 .icon-current .app-picture, .icon-current .app-icon { width: 64px; height: 64px; border-radius: 14px; }
 .icon-make { display: flex; gap: 8px; }
-.icon-make input { flex: 1; min-width: 0; padding: 10px 12px; border: 1px solid var(--border-strong); border-radius: 9px; font: inherit; color: inherit; background: var(--bg-window); }
-.icon-make button, .icon-actions button { padding: 10px 14px; border: 1px solid var(--border-strong); border-radius: 9px; background: var(--bg-window); color: inherit; font: inherit; }
+.icon-make input { flex: 1; min-width: 0; padding: 10px 12px; border: 1px solid var(--border-strong); border-radius: 10px; font: inherit; color: inherit; background: var(--bg-window); }
+.icon-make button, .icon-actions button { padding: 10px 16px; border: 1px solid var(--border-strong); border-radius: 999px; background: var(--bg-window); color: inherit; font: inherit; }
 .icon-make button[type=submit] { background: var(--text-primary); color: var(--bg-window); border-color: transparent; }
 .icon-make button:disabled, .icon-pick:disabled, .icon-actions button:disabled { opacity: .55; }
 .icon-said { margin: 12px 0 0; color: var(--text-secondary); font-size: 14px; }
