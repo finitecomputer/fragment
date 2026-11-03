@@ -89,9 +89,12 @@ pub const PREWAKE_MS: i64 = 60_000;
 /// Starts that fail in a row before the computer stops trying.
 pub const STARTS_FAILED_MAX: u32 = 3;
 /// A start that has not reported ready by then has failed: a new image's
-/// first pull at a location takes 24–40 s (spike S3b), a Hermes boot on a
-/// fresh disk up to 82 s.
-pub const START_DEADLINE_MS: i64 = 3 * 60_000;
+/// first pull at a location takes 24–40 s (spike S3b), and a start from a
+/// save restores it whole first, 5.7 GB in 147 s on the production fleet
+/// (2026-11-02). Three minutes cut a restore of 5.9 GB at 165 s, every
+/// try, so that computer never started again (2026-11-03): a restore is
+/// given ten minutes and more (the cell's `RESTORE_MS`).
+pub const START_DEADLINE_MS: i64 = 15 * 60_000;
 /// A sleep's stop (snapshot, signal, five seconds of exit, destroy)
 /// finishes within this, or it is asked again.
 pub const SLEEP_DEADLINE_MS: i64 = 60_000;

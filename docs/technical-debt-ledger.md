@@ -5,6 +5,17 @@ Each entry says what the shortcut is, where and why, its risk, and the
 condition that deletes it. An entry without a delete condition is
 unfinished design, not debt.
 
+## A computer's disk is 20 GB, priced as 12
+
+- **Shortcut:** every computer starts with Containers' most disk, 20 GB
+  (`price::DISK_MB`), since a computer whose `/data` filled the 12 GB its
+  price assumed could never be restored again (2026-11-03). The price book
+  still counts 12 GB (`price::DEFAULT_INSTANCES`): the 8 GB more,
+  $0.002016 an awake hour, is the platform's.
+- **Risk:** about 3% of a computer's awake price goes uncharged.
+- **Delete when:** Paul reprices the default instance with its 20 GB (a
+  new `DEFAULT_INSTANCES` row and `DEFAULT_BOOK_VERSION`).
+
 ## A fragment with reach is shared with no one else
 
 - **Shortcut:** Paul, 2026-11-01 (FIN-352): "as an extra safety right now
