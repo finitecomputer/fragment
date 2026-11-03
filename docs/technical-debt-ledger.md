@@ -452,6 +452,21 @@ unfinished design, not debt.
 - **Delete when:** the release's build rebuilds a change to one of its
   files in seconds, and dev builds the release's again.
 
+## The cell's Wasm budget raised to 6.6 MB
+
+- **Shortcut:** `CELL_WASM_MAX_BYTES` (xtask/src/build.rs) went from
+  6.5 MB to 6.6 MB (Paul, 2026-11-03) so the fixes that let every
+  computer restart could land: a folder that will not fit set aside, its
+  owner getting it back or dropping it, it in their export, and the
+  disk read and told as it fills (about 66 KB together, on a cell that
+  had reached 6.454 MB).
+- **Risk:** slower isolate starts and less memory for every object, and
+  an easier next raise.
+- **Delete when:** the cell is back under 6.5 MB and the budget is set
+  back to 6.5 MB. Candidates: the export's archive builder in a Worker of
+  its own (the launch entry's), and the Computer DO's routes, whose big
+  async functions grow with each await point a feature adds.
+
 ## The cell's Wasm budget was raised for launch
 
 - **Shortcut:** `CELL_WASM_MAX_BYTES` (xtask/src/build.rs) went from
