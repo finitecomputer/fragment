@@ -65,6 +65,12 @@ an image may rely on this:
   stopped before it was ready) is tried again after a growing pause. It
   is one strike however its failure is heard: a start that fails
   destroys its container, and that container's end is not a crash too.
+- **A start's deadline is fixed** (`START_DEADLINE_MS`, its restore's
+  share `RESTORE_MS`), never one that follows a restore's progress: a
+  restore moves about 40 MB/s (5.7 GB to ready in 147 s on production,
+  2026-11-02), so its ten and a half minutes hold about 25 GB, more than
+  a computer's 20 GB disk. Any restore that fits the disk fits the
+  deadline; one that does not fit is set aside, not waited for.
 - **Won't wake**: after `STARTS_FAILED_MAX` failed starts in a row it
   starts no container until its owner asks.
 - **Trying again**: "won't wake" is never for good, since what failed may
