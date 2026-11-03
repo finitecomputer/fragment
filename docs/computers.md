@@ -63,6 +63,12 @@ an image may rely on this:
   again however long its turn ran, and its next life ends what was cut.
 - **Won't wake**: after `STARTS_FAILED_MAX` failed starts in a row it
   starts no container until its owner asks.
+- **Trying again**: "won't wake" is never for good, since what failed may
+  pass (a storage error, a disk a release made room on). A wake that is
+  not its owner's (a record, a page's presence, a join, a port tab)
+  `WONT_WAKE_RETRY_MS` (30 minutes) after it gave up tries one start, and
+  a failure gives up again at once: at most one paid start that often,
+  and only while something wants it.
 
 ## Durability
 

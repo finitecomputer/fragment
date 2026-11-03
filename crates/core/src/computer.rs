@@ -34,6 +34,9 @@
 //!   computer "won't wake" until its owner asks (lesson 4): no more
 //!   container starts are paid for. A start whose save would not restore
 //!   starts again at once from the save before it, no strike against it.
+//! - **Trying again.** "Won't wake" is never for good: a wake not its
+//!   owner's, `WONT_WAKE_RETRY_MS` after it gave up, tries one start, its
+//!   last strike.
 //! - **Restarting.** Its owner's restart (`Event::Restart`) is the way back
 //!   to working: a sleep that saves if it can and stops whether or not it
 //!   did, then a start at once (asleep, or won't wake: a start). It names
@@ -88,6 +91,14 @@ pub const IDLE_MS: i64 = 20 * 60_000;
 pub const PREWAKE_MS: i64 = 60_000;
 /// Starts that fail in a row before the computer stops trying.
 pub const STARTS_FAILED_MAX: u32 = 3;
+/// How long a computer that won't wake waits before a wake that is not its
+/// owner's (a record, a page's presence, a join, a port tab) tries one
+/// start again: "won't wake" is never for good, since what failed may have
+/// passed (a storage error, a disk a release made room on), yet a computer
+/// that still fails costs at most one start this often, and only while
+/// something wants it (2026-11-03: one storage error left a computer
+/// refusing every wake for four days).
+pub const WONT_WAKE_RETRY_MS: i64 = 30 * 60_000;
 /// A start that has not reported ready by then has failed: a new image's
 /// first pull at a location takes 24–40 s (spike S3b), a Hermes boot on a
 /// fresh disk up to 82 s.
@@ -156,6 +167,7 @@ const _: () = assert!(HOLD_WAIT_MS < HOLD_DEADLINE_MS, "a hold's wait fits its d
 const _: () = assert!(SAVES_KEPT >= 2, "a save to fall back to");
 const _: () = assert!(UNSAVED_NOTICE_FAILURES >= 1, "told after a failure, never before");
 const _: () = assert!(ALIVE_MS < START_DEADLINE_MS, "a start's wait for its guest fits its deadline");
+const _: () = assert!(WONT_WAKE_RETRY_MS > START_DEADLINE_MS, "a computer that won't wake tries one start at a time");
 
 /// The deployment's rules for its computers' lifecycles.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -420,6 +432,11 @@ pub struct Lifecycle {
     /// Starts that failed in a row, and when the next try is due.
     failures: u32,
     retry_at_ms: Option<i64>,
+    /// When it last gave up (`Phase::Failed`): a wake not its owner's tries
+    /// one start again `WONT_WAKE_RETRY_MS` after it. 0 in a lifecycle
+    /// stored before it was kept: past that, so its next wake tries.
+    #[serde(default)]
+    failed_ms: i64,
     always_on: bool,
     /// Awake time is metered up to here (while awake).
     metered_to_ms: i64,
@@ -517,6 +534,7 @@ impl Lifecycle {
             wake_after_sleep: false,
             failures: 0,
             retry_at_ms: None,
+            failed_ms: 0,
             always_on: false,
             metered_to_ms: 0,
             ready: false,
@@ -968,6 +986,7 @@ impl Lifecycle {
     pub fn apply_with(&mut self, event: Event, now_ms: i64, rules: &Rules) -> Step {
         assert!(rules.unsaved_max_ms >= 0, "a bound is a span of time");
         let mut step = Step::default();
+        let was_failed = matches!(self.phase, Phase::Failed { .. });
         match (self.phase.clone(), event) {
             (phase, Event::Wake { why }) => {
                 // a message for its agents, or a fragment to follow: work
@@ -975,8 +994,16 @@ impl Lifecycle {
                     self.worked(now_ms);
                 }
                 match phase {
-                    Phase::Failed { why: failed } if why != Wake::Owner => {
+                    Phase::Failed { why: failed } if why != Wake::Owner && now_ms < self.failed_ms + WONT_WAKE_RETRY_MS => {
                         step.refused = Some(format!("it won't wake: {failed} (its owner can try again)"));
+                    }
+                    Phase::Failed { .. } if why != Wake::Owner => {
+                        // its pause passed and something wants it: one try,
+                        // its last strike (failing, it gives up again at once)
+                        self.failures = STARTS_FAILED_MAX - 1;
+                        self.restore_fallbacks = 0;
+                        self.hold(now_ms + why.hold_ms());
+                        self.start(now_ms, &mut step);
                     }
                     Phase::Failed { .. } | Phase::Asleep => {
                         self.failures = 0;
@@ -1256,6 +1283,10 @@ impl Lifecycle {
                 }
             }
             (Phase::Failed { .. }, Event::Alarm) => {}
+        }
+        // it gave up, however: its pause before a wake tries again runs from here
+        if !was_failed && matches!(self.phase, Phase::Failed { .. }) {
+            self.failed_ms = now_ms;
         }
         step.alarm_ms = self.next_alarm();
         self.assert_valid();
@@ -2147,7 +2178,7 @@ mod tests {
         let s = l.apply(Event::Wake { why: Wake::Joined }, T + 60_000);
         assert!(s.actions.is_empty(), "awake, a join only holds it: {s:?}");
         assert_eq!(l.held_until_ms(), T + 60_000 + IDLE_MS);
-        let mut failed = Lifecycle { phase: Phase::Failed { why: "pull failed".into() }, ..Lifecycle::new() };
+        let mut failed = Lifecycle { phase: Phase::Failed { why: "pull failed".into() }, failed_ms: T - 1_000, ..Lifecycle::new() };
         let s = failed.apply(Event::Wake { why: Wake::Joined }, T);
         assert!(s.actions.is_empty() && s.refused.is_some(), "{s:?}");
     }
@@ -2192,6 +2223,60 @@ mod tests {
         assert!(s.actions.is_empty() && s.refused.is_some(), "a record does not wake it: {s:?}");
         let s = l.apply(Event::Wake { why: Wake::Owner }, at + 3_000);
         assert_eq!(s.actions, vec![Action::Start { generation: 4 }]);
+    }
+
+    /// Goal (2026-11-03, a computer refused every wake for four days after
+    /// one storage error): "won't wake" is never for good. A wake not its
+    /// owner's, `WONT_WAKE_RETRY_MS` after it gave up, tries one start, its
+    /// last strike: failing, it gives up again at once, its pause anew;
+    /// coming up, it is a computer like any. Sooner, such a wake is refused;
+    /// its owner's never is. Valid, invalid (too soon), replay (a second
+    /// wake as it starts), and a lifecycle stored before `failed_ms` (its
+    /// next wake tries). Method: the lifecycle's steps, as the DO hears them.
+    #[test]
+    fn a_computer_that_wont_wake_tries_again_after_its_pause() {
+        let mut l = Lifecycle::new();
+        let s = l.apply(Event::Wake { why: Wake::Record }, T);
+        let (mut at, mut next) = (T, s.actions.first().cloned());
+        let mut gave_up = 0;
+        while let Some(Action::Start { generation }) = next {
+            at += 1_000;
+            let s = l.apply(Event::StartFailed { generation, why: "storage error".into() }, at);
+            gave_up = at;
+            next = s.alarm_ms.and_then(|retry| {
+                at = retry;
+                l.apply(Event::Alarm, at).actions.first().cloned()
+            });
+        }
+        assert!(matches!(&l.phase, Phase::Failed { why } if why == "storage error") && l.generation() == STARTS_FAILED_MAX as u64, "{l:?}");
+        // too soon: refused, as before
+        let s = l.apply(Event::Wake { why: Wake::Presence }, gave_up + WONT_WAKE_RETRY_MS - 1);
+        assert!(s.actions.is_empty() && s.refused.is_some(), "{s:?}");
+        // its pause passed: one try, its last strike
+        let s = l.apply(Event::Wake { why: Wake::Record }, gave_up + WONT_WAKE_RETRY_MS);
+        let g = STARTS_FAILED_MAX as u64 + 1;
+        assert_eq!((s.actions, s.refused, l.failures), (vec![Action::Start { generation: g }], None, STARTS_FAILED_MAX - 1));
+        // another wake as it starts holds it, and starts nothing more
+        assert!(l.apply(Event::Wake { why: Wake::Presence }, gave_up + WONT_WAKE_RETRY_MS + 1).actions.is_empty());
+        // it fails again: it gives up at once, and its pause runs anew
+        let again = gave_up + WONT_WAKE_RETRY_MS + 5_000;
+        let s = l.apply(Event::StartFailed { generation: g, why: "storage error".into() }, again);
+        assert!(matches!(l.phase, Phase::Failed { .. }) && s.alarm_ms.is_none(), "{s:?}");
+        assert!(l.apply(Event::Wake { why: Wake::Joined }, again + WONT_WAKE_RETRY_MS - 1).refused.is_some());
+        // its owner's wake never waits
+        let mut owned = l.clone();
+        assert_eq!(owned.apply(Event::Wake { why: Wake::Owner }, again + 1).actions, vec![Action::Start { generation: g + 1 }]);
+        assert_eq!(owned.failures, 0, "its owner's wake starts the count again");
+        // past it, a tab tries, and it comes up: a computer like any
+        let s = l.apply(Event::Wake { why: Wake::Tab }, again + WONT_WAKE_RETRY_MS);
+        assert_eq!(s.actions, vec![Action::Start { generation: g + 1 }]);
+        l.apply(Event::Ready { generation: g + 1 }, again + WONT_WAKE_RETRY_MS + 2_000);
+        assert!(matches!(l.phase, Phase::Awake { .. }) && l.failures == 0, "{l:?}");
+        // a lifecycle stored before it kept when it gave up tries at its next wake
+        let mut stored = serde_json::to_value(Lifecycle { phase: Phase::Failed { why: "old".into() }, failed_ms: T, ..Lifecycle::new() }).unwrap();
+        assert!(stored.as_object_mut().unwrap().remove("failed_ms").is_some());
+        let mut old: Lifecycle = serde_json::from_value(stored).unwrap();
+        assert_eq!(old.apply(Event::Wake { why: Wake::Presence }, T).actions, vec![Action::Start { generation: 1 }]);
     }
 
     /// Goal: a container that stops on its own is started again while it
