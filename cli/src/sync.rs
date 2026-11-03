@@ -535,7 +535,7 @@ pub fn sync_once(client: &Client, name: &str, dir: &Path, opts: &SyncOptions) ->
     let storage = CodeStorage::connect(client, name)?;
     let report = pass_over(client, &storage, name, dir, opts, read_local(dir, name)?)?;
     if report.landed {
-        refresh_pins(client, name);
+        refresh_pins(client, name, MAIN);
     }
     Ok(report)
 }
@@ -743,12 +743,14 @@ pub fn pass_over(client: &Client, storage: &CodeStorage, name: &str, dir: &Path,
     Ok(report)
 }
 
-/// Tells the cell its fragment's git moved. Our commits and ref moves are
+/// Tells the cell its fragment's `moved` ref moved. Our commits and ref moves are
 /// EXTERNAL pushes from the cell's perspective: without this nudge its
 /// pins wait out the 5-minute poll backstop before app reads and serving
 /// see them. Best-effort: the poll covers a missed nudge.
-pub fn refresh_pins(client: &Client, name: &str) {
-    if let Err(e) = client.post_json(&format!("/api/f/{name}/refresh"), &serde_json::json!({})) {
+pub fn refresh_pins(client: &Client, name: &str, moved: &str) {
+    // the cell reads again only the ref we moved (a cell before that reads both)
+    let asked = fragment_proto::Refresh { moved: Some(moved.to_string()) };
+    if let Err(e) = client.post_json(&format!("/api/f/{name}/refresh"), &asked) {
         eprintln!("warning: cell pin refresh failed ({e:#}); the poll backstop will catch up");
     }
 }
