@@ -6,9 +6,19 @@ export const PHASE = { asleep: "Asleep", starting: "Starting", awake: "Awake", s
 // oldest first, with the day it was saved and its saved size.
 export const ASIDE_TITLE = "A folder didn't fit on your computer";
 const ASIDE_FOLDER = { "/data/work": ["work folder", "it", "It's"], "/data": ["computer's own files", "them", "They're"] };
+const size = (b) => (b >= 1e9 ? `${(b / 1e9).toFixed(1)} GB` : `${Math.max(1, Math.round(b / 1e6))} MB`);
+const day = (ms) => new Date(ms).toLocaleDateString([], { month: "short", day: "numeric" });
+// Its two ways out: back beside the live work (nothing there is replaced),
+// or deleted. With several aside, each button names its folder.
+export function asideActionWords(a, several) {
+  const [folder] = ASIDE_FOLDER[a.dir] ?? ["folder"];
+  return several ? [`Get back the ${folder} from ${day(a.savedAt)}`, `Delete the ${folder} from ${day(a.savedAt)}`] : ["Get it back", "Delete it"];
+}
+export function asideDropAsk(a) {
+  const [folder] = ASIDE_FOLDER[a.dir] ?? ["folder"];
+  return `Delete your ${folder} from ${day(a.savedAt)} (${size(a.bytes)})? It can't be brought back after.`;
+}
 export function setAsideSaid(aside) {
-  const size = (b) => (b >= 1e9 ? `${(b / 1e9).toFixed(1)} GB` : `${Math.max(1, Math.round(b / 1e6))} MB`);
-  const day = (ms) => new Date(ms).toLocaleDateString([], { month: "short", day: "numeric" });
   return aside
     .map((a) => {
       const [folder, it, kept] = ASIDE_FOLDER[a.dir] ?? ["folder", "it", "It's"];
@@ -133,6 +143,20 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
       actions.append(later);
     } else if (n.kind === "set_aside") {
       say(ASIDE_TITLE, setAsideSaid(n.aside));
+      for (const a of n.aside) {
+        const [backWords, dropWords] = asideActionWords(a, n.aside.length > 1);
+        const back = el("button", "primary", backWords);
+        back.type = "button";
+        back.dataset.action = "aside-back";
+        back.dataset.record = a.record;
+        back.onclick = () => asideBack(a, back);
+        const drop = el("button", null, dropWords);
+        drop.type = "button";
+        drop.dataset.action = "aside-drop";
+        drop.dataset.record = a.record;
+        drop.onclick = () => asideDrop(a, drop);
+        actions.append(back, drop);
+      }
     } else if (n.kind === "deploying") {
       copy.append(el("strong", null, "Updating — back in a moment"));
     } else if (n.kind === "refresh") {
@@ -194,6 +218,36 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
     button.disabled = true;
     try {
       computerIs(await api("POST", `/api/computers/${seg(c.computer)}/notices/seen`, { life }));
+    } catch {
+      computerIs(await api("GET", `/api/computers/${seg(c.computer)}`).catch(() => null));
+    }
+  }
+  // A folder set aside, back beside the live work (it wakes the computer
+  // if it sleeps; a big one takes minutes), or deleted once they confirm.
+  // What did not work says why under its button.
+  async function asideBack(a, button) {
+    const c = computer();
+    if (!c) return;
+    const label = button.textContent;
+    button.disabled = true;
+    button.textContent = "Getting it back…";
+    try {
+      const r = await api("POST", `/api/computers/${seg(c.computer)}/aside/${seg(a.record)}/back`, {});
+      computerIs(r.view);
+    } catch (e) {
+      button.disabled = false;
+      button.textContent = label;
+      const said = button.parentElement.querySelector(".form-error") ?? el("p", "form-error");
+      said.textContent = e.message;
+      button.parentElement.append(said);
+    }
+  }
+  async function asideDrop(a, button) {
+    const c = computer();
+    if (!c || !confirm(asideDropAsk(a))) return;
+    button.disabled = true;
+    try {
+      computerIs(await api("DELETE", `/api/computers/${seg(c.computer)}/aside/${seg(a.record)}`));
     } catch {
       computerIs(await api("GET", `/api/computers/${seg(c.computer)}`).catch(() => null));
     }

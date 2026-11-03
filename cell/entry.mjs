@@ -428,10 +428,13 @@ class ContainerHost {
   // and BACKUP_INTEGRITY); `{full}` when it does not fit on this disk (the
   // shim stops at its floor, ENOSPC, and removes what it wrote). The Rust
   // side tells both from a failure that may pass (it throws).
-  async restore(generation, record, ms) {
+  // `dir`, when named, is where it goes instead of its own directory (a
+  // folder set aside, coming back beside the live one).
+  async restore(generation, record, ms, dir) {
     if (generation !== this.#generation) throw new Error(`start ${generation} is not the running one`);
     try {
-      await bounded(`the restore of ${record.dir}`, ms, (signal) => this.#backups.restore(record, { signal }));
+      const options = dir ? { dir } : {};
+      await bounded(`the restore of ${dir || record.dir}`, ms, (signal) => this.#backups.restore(record, { ...options, signal }));
       return null;
     } catch (e) {
       if (SandboxBackupError.is(e) && (e.code === "BACKUP_NOT_FOUND" || e.code === "BACKUP_INTEGRITY")) {
