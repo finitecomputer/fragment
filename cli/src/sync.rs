@@ -19,7 +19,7 @@ use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::Mutex;
+use std::sync::{Condvar, Mutex};
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -302,8 +302,54 @@ fn partial_path(path: &Path) -> PathBuf {
 /// one at a time a 400-file pull took 17 s; 16 at once is about a second,
 /// and still a handful of connections for one person's sync. A blob's
 /// bytes, up to `BLOB_MAX_BYTES` each, keep a bound of their own
-/// (`pull_file`'s gate).
+/// (`BLOB_TRANSFERS_AT_ONCE`).
 const READS_AT_ONCE: usize = 16;
+
+/// Blobs (files of 1 MiB or more, up to `BLOB_MAX_BYTES` each) a pass moves
+/// at once, up or down. A blob's PUT took about 450 ms before its bytes and
+/// 150 ms a MB after, its HEAD about 120 ms (preview, 2026-11-02): four at
+/// a time overlap those waits, and hold at most four in memory (1 GiB at
+/// the largest). A push reads its files this many at a time too, each a
+/// blob's upload when it is one.
+const BLOB_TRANSFERS_AT_ONCE: usize = 4;
+
+/// At most `max` holders at once: a counting gate (std has none). A
+/// holder's `Pass` lets it go when dropped.
+struct Gate {
+    max: usize,
+    held: Mutex<usize>,
+    freed: Condvar,
+}
+
+struct Pass<'a>(&'a Gate);
+
+impl Gate {
+    fn new(max: usize) -> Gate {
+        assert!(max >= 1, "a gate lets one through at least");
+        Gate { max, held: Mutex::new(0), freed: Condvar::new() }
+    }
+
+    /// Waits for a place, and holds it until the pass is dropped.
+    fn enter(&self) -> Pass<'_> {
+        let held = self.held.lock().unwrap_or_else(|e| e.into_inner());
+        let mut held = self.freed.wait_while(held, |n| *n >= self.max).unwrap_or_else(|e| e.into_inner());
+        *held += 1;
+        Pass(self)
+    }
+
+    /// How many hold a place now.
+    #[cfg(test)]
+    fn held(&self) -> usize {
+        *self.held.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+impl Drop for Pass<'_> {
+    fn drop(&mut self) {
+        *self.0.held.lock().unwrap_or_else(|e| e.into_inner()) -= 1;
+        self.0.freed.notify_one();
+    }
+}
 
 /// `f` over `items`, at most `at_once` at a time on scoped threads: each
 /// item's answer in order, or `None` for one never started because one
@@ -673,10 +719,25 @@ pub fn pass_over(client: &Client, storage: &CodeStorage, name: &str, dir: &Path,
                 break; // nothing to commit (clean, or a replay absorbed)
             }
             let mut changes: Vec<Change> = Vec::with_capacity(plan.upserts.len() + plan.deletes.len());
-            for p in &plan.upserts {
+            // read BLOB_TRANSFERS_AT_ONCE at a time: a file is its bytes, a
+            // blob its pointer once uploaded (a HEAD, and the PUT the store
+            // lacks). Nothing is committed if one fails.
+            let stored = at_once(&plan.upserts, BLOB_TRANSFERS_AT_ONCE, |p| {
                 let bytes = fs::read(p.under(dir)).map_err(|e| SyncError::Io(format!("read {p}: {e}")))?;
-                let bytes = blobs.store(bytes).map_err(|e| SyncError::blob(p.as_str(), e))?;
-                changes.push(Change::Upsert { path: p.clone(), bytes });
+                blobs.store(bytes).map_err(|e| SyncError::blob(p.as_str(), e))
+            });
+            let mut failure = None;
+            for (p, got) in plan.upserts.iter().zip(stored) {
+                match got {
+                    Some(Ok(bytes)) => changes.push(Change::Upsert { path: p.clone(), bytes }),
+                    Some(Err(e)) => {
+                        failure.get_or_insert(e);
+                    }
+                    None => {}
+                }
+            }
+            if let Some(e) = failure {
+                return Err(e);
             }
             for p in &plan.deletes {
                 changes.push(Change::Delete { path: p.clone() });
@@ -765,7 +826,7 @@ pub fn pass_over(client: &Client, storage: &CodeStorage, name: &str, dir: &Path,
         // pull never reads as a complete one: the next pass adopts what
         // was written by content and fetches the rest)
         fetches.sort_by(|a, b| a.path.cmp(&b.path));
-        let blob_gate = Mutex::new(());
+        let blob_gate = Gate::new(BLOB_TRANSFERS_AT_ONCE);
         let fetched = at_once(&fetches, READS_AT_ONCE, |rf| pull_file(storage, &blobs, &blob_gate, dir, listing.rev(), rf));
         let mut failure = None;
         for (rf, got) in fetches.iter().zip(fetched) {
@@ -1043,8 +1104,8 @@ fn through_link(path: &RepoPath) -> String {
 /// Fetches one file at `rev` (the listing's commit) into the folder: its
 /// journal row, or `None` when a folder on its way is a symlink. Files are
 /// fetched READS_AT_ONCE at a time; a blob's bytes (up to `BLOB_MAX_BYTES`)
-/// one at a time through `blob_gate`, as before files were fetched at once.
-fn pull_file(storage: &CodeStorage, blobs: &crate::blobs::Blobs<'_>, blob_gate: &Mutex<()>, dir: &Path, rev: &str, entry: &TreeEntry) -> Result<Option<FileState>, SyncError> {
+/// BLOB_TRANSFERS_AT_ONCE at a time, through `blob_gate`.
+fn pull_file(storage: &CodeStorage, blobs: &crate::blobs::Blobs<'_>, blob_gate: &Gate, dir: &Path, rev: &str, entry: &TreeEntry) -> Result<Option<FileState>, SyncError> {
     let (path, commit) = (&entry.path, entry.last_commit_sha.as_str());
     // the one join of a listing's path onto the folder, checked before
     // anything is fetched for it
@@ -1065,16 +1126,16 @@ fn pull_file(storage: &CodeStorage, blobs: &crate::blobs::Blobs<'_>, blob_gate: 
 
 /// A file's bytes from what git holds (`resolve`), their hash, and what
 /// `write` made of them. A pointer's bytes (a blob, up to
-/// `BLOB_MAX_BYTES`) are fetched and written under `gate`, held until they
-/// are written and dropped: however many files a pull fetches at once, one
-/// blob is in memory at a time. A plain file takes no gate.
+/// `BLOB_MAX_BYTES`) are fetched and written with a place at `gate`, held
+/// until they are written and dropped: however many files a pull fetches at
+/// once, the gate's few blobs are in memory. A plain file takes no place.
 fn land<T>(
-    gate: &Mutex<()>,
+    gate: &Gate,
     git: Vec<u8>,
     resolve: impl FnOnce(Vec<u8>) -> Result<Vec<u8>, SyncError>,
     write: impl FnOnce(&[u8]) -> Result<T, SyncError>,
 ) -> Result<(String, T), SyncError> {
-    let _one = fragment_core::blob::parse(&git).is_some().then(|| gate.lock().unwrap_or_else(|e| e.into_inner()));
+    let _place = fragment_core::blob::parse(&git).is_some().then(|| gate.enter());
     let bytes = resolve(git)?;
     let sha = sha256_hex(&bytes);
     let wrote = write(&bytes)?;
@@ -1558,21 +1619,70 @@ mod tests {
         assert!(at_once(&[] as &[u8], 4, |_| Ok::<_, ()>(())).is_empty());
     }
 
-    /// Goal: a blob's bytes are one in memory at a time however many files
-    /// a pull fetches at once: its gate is held until they are written and
-    /// dropped. Method: land a pointer's bytes and a plain file's, trying
-    /// the gate from inside the write. Before, the gate was let go once the
-    /// bytes arrived, while they were hashed, written and fsync'd.
+    /// Goal: a blob's bytes keep their place at the gate until they are
+    /// written and dropped, however many files a pull fetches at once.
+    /// Method: land a pointer's bytes and a plain file's, reading the
+    /// gate from inside the write. (With the place let go once the bytes
+    /// arrived, as a317d948 did, the write sees none: checked.)
     #[test]
     fn a_blobs_gate_is_held_until_its_bytes_are_written() {
-        let gate = Mutex::new(());
+        let gate = Gate::new(BLOB_TRANSFERS_AT_ONCE);
         let pointer = fragment_core::blob::pointer(&"a".repeat(64), 2 * 1024 * 1024).into_bytes();
-        let (sha, (len, held)) = land(&gate, pointer, |_| Ok(vec![7u8; 16]), |bytes| Ok((bytes.len(), gate.try_lock().is_err()))).unwrap();
-        assert_eq!((len, held), (16, true), "the gate is held through a blob's write");
+        let (sha, (len, held)) = land(&gate, pointer, |_| Ok(vec![7u8; 16]), |bytes| Ok((bytes.len(), gate.held()))).unwrap();
+        assert_eq!((len, held), (16, 1), "a place is held through a blob's write");
         assert_eq!(sha, sha256_hex(&[7u8; 16]), "the hash is the blob's bytes'");
-        assert!(gate.try_lock().is_ok(), "and let go after");
-        let (_, held) = land(&gate, b"plain".to_vec(), Ok, |_| Ok(gate.try_lock().is_err())).unwrap();
-        assert!(!held, "a plain file takes no gate");
+        assert_eq!(gate.held(), 0, "and let go after");
+        let (_, held) = land(&gate, b"plain".to_vec(), Ok, |_| Ok(gate.held())).unwrap();
+        assert_eq!(held, 0, "a plain file takes no place");
+    }
+
+    /// Goal: the gate lets `max` through together and never more. Method:
+    /// each of twice that many waits (bounded) until `max` hold a place,
+    /// which a gate letting fewer through never reaches.
+    #[test]
+    fn a_gate_lets_that_many_through_together() {
+        let gate = Gate::new(BLOB_TRANSFERS_AT_ONCE);
+        let peak = Mutex::new(0usize);
+        std::thread::scope(|scope| {
+            for _ in 0..BLOB_TRANSFERS_AT_ONCE * 2 {
+                scope.spawn(|| {
+                    let _place = gate.enter();
+                    let now = gate.held();
+                    let mut p = peak.lock().unwrap();
+                    *p = (*p).max(now);
+                    drop(p);
+                    let t0 = std::time::Instant::now();
+                    while *peak.lock().unwrap() < BLOB_TRANSFERS_AT_ONCE {
+                        assert!(t0.elapsed() < std::time::Duration::from_secs(10), "{BLOB_TRANSFERS_AT_ONCE} never held places at once");
+                        std::thread::yield_now();
+                    }
+                });
+            }
+        });
+        assert_eq!(*peak.lock().unwrap(), BLOB_TRANSFERS_AT_ONCE);
+        assert_eq!(gate.held(), 0);
+    }
+
+    /// Goal: a push whose blob is not stored commits nothing, and says
+    /// which file. Method: a folder of notes and one file of 1 MiB, whose
+    /// upload fails (the fake host answers no blob threshold), the notes
+    /// read at once beside it.
+    #[test]
+    fn a_push_whose_blob_is_not_stored_commits_nothing() {
+        let mock = crate::mockcs::start();
+        mock.seed_repo("t--k3x9", &[("seed.md", b"s")]);
+        let c = client_for(&mock);
+        let dir = tmpdir("push-blob-fails");
+        for i in 0..12 {
+            fs::write(dir.join(format!("n-{i:02}.md")), format!("note {i}")).unwrap();
+        }
+        fs::write(dir.join("big.bin"), vec![7u8; fragment_core::blob::BLOB_MIN_BYTES + 17]).unwrap();
+        let before = mock.commit_pack_count();
+        let failed = sync_once(&c, "t--k3x9", &dir, &opts(Mode::Mirror)).unwrap_err();
+        assert!(failed.to_string().contains("big.bin"), "{failed}");
+        assert_eq!(mock.commit_pack_count(), before, "nothing committed");
+        assert!(!state_path(&dir).exists(), "and no journal");
+        fs::remove_dir_all(&dir).ok();
     }
 
     /// Goal: files written at once never share a partial file. Before,
