@@ -4810,3 +4810,142 @@ async fn a_step_says_how_its_call_ended() {
     tokio::time::sleep(Duration::from_secs(1)).await;
     check("sleep 3", &steps(&turn), "failed", "Exit code: 130");
 }
+
+/// Builds wheels of a package each (`<name>`, its `OK` being `<name>-ok`)
+/// in `/tmp/wheels`, with the image's Python: an install's input that
+/// needs no index.
+const TEST_WHEELS: &str = r#"import base64, hashlib, os, sys, zipfile
+os.makedirs('/tmp/wheels', exist_ok=True)
+for name in sys.argv[1:]:
+    info = f'{name}-1.0.dist-info'
+    files = {f'{name}/__init__.py': f'OK = "{name}-ok"\n', f'{info}/METADATA': f'Metadata-Version: 2.1\nName: {name}\nVersion: 1.0\n', f'{info}/WHEEL': 'Wheel-Version: 1.0\nGenerator: fragment-test\nRoot-Is-Purelib: true\nTag: py3-none-any\n'}
+    digest = lambda text: base64.urlsafe_b64encode(hashlib.sha256(text.encode()).digest()).rstrip(b'=').decode()
+    files[f'{info}/RECORD'] = ''.join(f'{p},sha256={digest(t)},{len(t.encode())}\n' for p, t in files.items()) + f'{info}/RECORD,,\n'
+    with zipfile.ZipFile(f'/tmp/wheels/{name}-1.0-py3-none-any.whl', 'w') as z:
+        for p, t in files.items():
+            z.writestr(p, t)
+"#;
+
+/// The boot's `python.env` events so far, in order.
+fn python_envs(c: &Container) -> Vec<serde_json::Value> {
+    c.logs().lines().filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok()).filter(|e| e["event"] == "python.env" || e["event"] == "python.failed").collect()
+}
+
+/// Waits (bounded) until the boot has said `n` things of its Python
+/// environment; the last.
+async fn python_env_said(c: &Container, n: usize) -> serde_json::Value {
+    let t = Instant::now();
+    loop {
+        let said = python_envs(c);
+        if said.len() >= n {
+            return said[n - 1].clone();
+        }
+        assert!(t.elapsed() < Duration::from_secs(60), "the boot said nothing of its Python environment: {said:?}");
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+/// Goal (Paul's prod agent, 2026-11-02: no `pip`, `uv` only inside Hermes'
+/// tool store, the image's Python read-only): an agent's terminal has `uv`
+/// and the computer's Python environment, so `pip install` and `uv pip
+/// install` work, and what they install is kept across a restart and a
+/// sleep (a save restored into a fresh container, as every wake and image
+/// update starts) (docs/computers.md, "Python in our Hermes image").
+/// Valid: both installs import in the terminal, beside the image's own
+/// document libraries, by `python` and `python3`. Restart and wake: they
+/// still import, the boot keeping the environment, and so after an image
+/// update whose Python is the same minor release at another path (Codex on
+/// #989), the old path kept or gone, and one bound to that old path
+/// rebound to the stable name. Invalid: one made for another Python is set aside, its packages
+/// listed for `pip install -r`, and a new one with pip made. Replay: the
+/// start after keeps that one.
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn the_computers_python_keeps_what_its_agents_install() {
+    let (fake, model, chat, c) = hermes_running().await;
+    let made = python_env_said(&c, 1).await;
+    assert_eq!(made["event"], "python.env", "{made}");
+    assert_eq!(made["plan"], "Make", "a first start makes it: {made}");
+    // its Python by the name every image links it at, which uv keeps
+    let (link, cfg) = (c.exec_out(&["readlink", "/data/work/python/bin/python"]), c.exec_out(&["cat", "/data/work/python/pyvenv.cfg"]));
+    eprintln!("python env: bin/python -> {}pyvenv.cfg:\n{cfg}", link);
+    assert_eq!(link.trim(), "/usr/local/bin/python3");
+    assert!(cfg.lines().any(|l| l == "home = /usr/local/bin"), "{cfg}");
+    let wheels = c.exec_code(&["/command/s6-setuidgid", "hermes", "/usr/local/bin/python3", "-c", TEST_WHEELS, "by_pip", "by_uv"]);
+    assert_eq!(wheels.0, 0, "the test's wheels: {}", wheels.1);
+
+    // what each prints is computed, never in the command: a failing
+    // command's traceback quotes its source
+    let said = tool_said(&fake, &chat, &c, "run: cd /tmp && which python python3 pip uv && echo \"venv=$VIRTUAL_ENV\" && pip install --no-index /tmp/wheels/by_pip-1.0-py3-none-any.whl && uv pip install --offline /tmp/wheels/by_uv-1.0-py3-none-any.whl && python -c 'import by_pip, by_uv; print(by_pip.OK, by_uv.OK)' && python -c 'import reportlab, pypdf, pdfplumber, pypdfium2, pymupdf; print(\"pdf\", 6 * 7)' && python3 -c 'import docx, pptx, openpyxl; print(\"office\", 6 * 7)'").await;
+    for seen in ["/data/work/python/bin/python\\n", "/data/work/python/bin/python3\\n", "/data/work/python/bin/pip", "/usr/local/bin/uv", "venv=/data/work/python\\n", "by_pip-ok by_uv-ok", "pdf 42", "office 42"] {
+        assert!(said.contains(seen), "{seen:?} in what the terminal said: {said}");
+    }
+    let imported = "run: cd /tmp && python -c 'import by_pip, by_uv; print(by_pip.__file__, by_uv.OK)'";
+
+    // restart: the boot keeps it, and what was installed imports
+    c.restart();
+    assert_eq!(python_env_said(&c, 2).await["plan"], "Keep");
+    let said = tool_said(&fake, &chat, &c, imported).await;
+    assert!(said.contains("/data/work/python/lib/python3.14/site-packages/by_pip/__init__.py by_uv-ok"), "after a restart: {said}");
+
+    // a sleep: held, saved, stopped; a fresh container wakes from the save
+    let left_out = hold(&c).unwrap_or_else(|| panic!("no answer to the hold; {}", told(&fake, &chat, &c)));
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("python-env");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let save = dir.join("asleep.tar");
+    save_data(&c, &left_out, &save);
+    c.sigterm();
+    drop(c);
+    fake.until(30_000, "its sockets closed", |w| w.live_sockets() == 0).await;
+    let c = Container::run(&hermes_tag(), fake.addr.port(), model.addr.port(), &[("RESTORE_PENDING", "1")]);
+    let cp = Command::new(docker()).args(["cp", "-a", "-", &format!("{}:/data", c.id)]).stdin(std::fs::File::open(&save).unwrap()).output().expect("docker runs");
+    assert!(cp.status.success(), "the restore: {}", String::from_utf8_lossy(&cp.stderr));
+    let (code, checked) = c.exec_code(&["/usr/local/bin/computer-check"]);
+    assert_eq!(code, 0, "the save checks: {checked}");
+    assert!(c.exec(&["touch", "/run/computer/restored"]));
+    assert_eq!(python_env_said(&c, 1).await["plan"], "Keep", "a wake keeps it");
+    let said = tool_said(&fake, &chat, &c, imported).await;
+    assert!(said.contains("by_uv-ok"), "after a sleep: {said}");
+
+    // an image update whose Python is the same minor release at another
+    // path (upstream's store names each release by its own): the
+    // environment runs the Python the image links, and keeps what it holds
+    let linked = c.exec_out(&["readlink", "/usr/local/bin/python3"]);
+    let old = linked.trim().strip_suffix("/bin/python3").unwrap_or_else(|| panic!("the image links its Python: {linked:?}")).to_string();
+    let next = format!("{old}-next");
+    assert!(c.exec(&["cp", "-a", &old, &next]) && c.exec(&["ln", "-sfn", &format!("{next}/bin/python3"), "/usr/local/bin/python3"]));
+    c.restart();
+    assert_eq!(python_env_said(&c, 2).await["plan"], "Keep", "a Python of the same minor release at another path keeps it");
+    let said = tool_said(&fake, &chat, &c, "run: cd /tmp && python -c 'import sys, by_uv; print(\"base\", sys.base_prefix, by_uv.OK)'").await;
+    // the path's end: what the terminal says masks a run of digits in it
+    assert!(said.contains("-next by_uv-ok") && said.contains("base /opt/hermes/tools/python-"), "it runs the newly linked Python ({next}), its packages kept: {said}");
+
+    // one bound to the store's own path (as another uv may bind it), and
+    // that path gone, as an update of the same minor release leaves it:
+    // the start rebinds it to the stable name, and keeps it
+    let real = c.exec_out(&["readlink", "-f", &format!("{old}/bin/python3")]);
+    assert!(c.exec(&["sh", "-c", &format!("ln -sfn '{}' /data/work/python/bin/python && sed -i 's|^home = .*|home = {old}/bin|' /data/work/python/pyvenv.cfg", real.trim())]));
+    assert!(c.exec(&["mv", &old, &format!("{old}.gone")]));
+    c.restart();
+    assert_eq!(python_env_said(&c, 3).await["plan"], "Keep", "rebound, then kept");
+    assert!(c.logs().contains("\"event\":\"python.rebound\""), "it said it rebound");
+    assert_eq!(c.exec_out(&["readlink", "/data/work/python/bin/python"]).trim(), "/usr/local/bin/python3");
+    assert!(c.exec_out(&["cat", "/data/work/python/pyvenv.cfg"]).lines().any(|l| l == "home = /usr/local/bin"));
+    let ran = c.exec_out(&["/command/s6-setuidgid", "hermes", "/data/work/python/bin/python", "-c", "import sys, by_uv; print(sys.base_prefix, by_uv.OK)"]);
+    assert_eq!(ran.trim(), format!("{next} by_uv-ok"), "the old path gone, it runs the linked Python, packages kept");
+    assert!(c.exec(&["mv", &format!("{old}.gone"), &old]));
+
+    // one made for another Python: set aside, listed, and made again
+    assert!(c.exec(&["sed", "-i", "s/^version_info = .*/version_info = 3.13.5/", "/data/work/python/pyvenv.cfg"]));
+    assert!(c.exec(&["mv", "/data/work/python/lib/python3.14", "/data/work/python/lib/python3.13"]));
+    c.restart();
+    let remade = python_env_said(&c, 4).await;
+    assert_eq!((remade["plan"].as_str(), remade["set_aside"].as_str()), (Some("SetAside(Some(\"3.13\"))"), Some("/data/work/python.3.13")), "{remade}");
+    assert_eq!(c.exec_out(&["cat", "/data/work/python.3.13/requirements.txt"]), "by_pip==1.0\nby_uv==1.0\n");
+    let said = tool_said(&fake, &chat, &c, "run: cd /tmp && pip --version && python -c 'import by_pip' || echo by_pip-gone").await;
+    assert!(said.contains("/data/work/python/lib/python3.14/site-packages/pip") && said.contains("by_pip-gone"), "a new one, with pip and without the old packages: {said}");
+    c.restart();
+    assert_eq!(python_env_said(&c, 5).await["plan"], "Keep", "the start after keeps the new one");
+    assert_eq!(c.exec_out(&["ls", "/data/work"]).lines().filter(|l| l.starts_with("python")).collect::<Vec<_>>(), ["python", "python.3.13"], "set aside once");
+}

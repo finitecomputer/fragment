@@ -22,6 +22,7 @@ mod bots;
 mod desktop;
 mod held;
 mod hermes;
+mod python;
 mod skills;
 mod skill_references;
 mod sync;
@@ -1170,12 +1171,93 @@ for p in sys.argv[1:]:
     }
 }
 
+/// The computer's Python environment (`python.rs`), made or mended off the
+/// boot's path, which never waits for it (a first start's takes about a
+/// tenth of a second). Offline: uv makes it on the image's Python, and its
+/// pip comes from the wheel that Python bundles (ensurepip's); every start
+/// names the image's own packages in it (`python::IMAGE_PACKAGES`). As the
+/// hermes user, so what its agents install is theirs to change.
+fn python_env(ids: Option<(u32, u32)>) {
+    let t = Instant::now();
+    let dir = Path::new(python::DIR);
+    let as_hermes = |args: &[&str]| {
+        Command::new("/command/s6-setuidgid").arg("hermes").args(args).env("UV_NO_CACHE", "1").env("UV_NO_CONFIG", "1").current_dir("/").output()
+    };
+    let failed = |what: &str, why: String| ev!("python.failed", { "what": what, "error": why.chars().take(600).collect::<String>(), "ms": t.elapsed().as_millis() as u64 });
+    let ran = |what: &str, out: std::io::Result<std::process::Output>| match out {
+        Ok(o) if o.status.success() => Some(String::from_utf8_lossy(&o.stdout).into_owned()),
+        Ok(o) => {
+            failed(what, String::from_utf8_lossy(&o.stderr).into_owned());
+            None
+        }
+        Err(e) => {
+            failed(what, e.to_string());
+            None
+        }
+    };
+    // its Python's version, and where that Python keeps pip's wheel
+    let Some(said) = ran("the image's Python", as_hermes(&[python::PYTHON, "-c", "import ensurepip, os, sys; print('%d.%d' % sys.version_info[:2]); print(os.path.join(os.path.dirname(ensurepip.__file__), '_bundled'))"])) else { return };
+    let (Some(image), Some(wheels)) = (said.lines().next().and_then(python::minor), said.lines().nth(1).map(str::to_string)) else {
+        return failed("the image's Python", format!("said {said:?}"));
+    };
+    // on the stable name before it plans (a kept environment's Python is
+    // the one the image links, whatever made it)
+    match python::rebind(dir, &image) {
+        Ok(true) => {
+            for p in [dir.join("bin/python"), dir.join("pyvenv.cfg")] {
+                chown(&p, ids);
+            }
+            ev!("python.rebound", { "to": python::PYTHON });
+        }
+        Ok(false) => {}
+        Err(e) => return failed("rebind", e.to_string()),
+    }
+    let plan = python::plan(dir, &image);
+    let mut set_aside = None;
+    if let python::Plan::SetAside(made) = &plan {
+        let Some(to) = python::aside(dir, made.as_deref()) else { return failed("set aside", "no name left".into()) };
+        if let Err(e) = std::fs::rename(dir, &to) {
+            return failed("set aside", e.to_string());
+        }
+        // what it held, for `pip install -r` (its packages were built for another Python)
+        let list = to.join("requirements.txt");
+        if to.is_dir() && std::fs::write(&list, python::requirements(&to)).is_ok() {
+            chown(&list, ids);
+        }
+        set_aside = Some(to.display().to_string());
+    }
+    if matches!(plan, python::Plan::Make | python::Plan::SetAside(_)) {
+        if let Err(e) = std::fs::create_dir_all(dir) {
+            return failed("make", e.to_string());
+        }
+        chown(dir, ids);
+        if ran("make", as_hermes(&[python::UV, "venv", "--quiet", "--allow-existing", "--python", python::PYTHON, python::DIR])).is_none() {
+            return;
+        }
+    }
+    if plan != python::Plan::Keep && ran("pip", as_hermes(&[python::UV, "pip", "install", "--quiet", "--python", &format!("{}/bin/python", python::DIR), "--offline", "--no-index", "--find-links", &wheels, "pip"])).is_none() {
+        return;
+    }
+    // the image's own packages, named in it at every start
+    let pth = python::image_pth(dir, &image);
+    let line = format!("{}\n", python::IMAGE_PACKAGES);
+    if std::fs::read_to_string(&pth).ok().as_deref() != Some(line.as_str()) {
+        if let Err(e) = std::fs::write(&pth, &line) {
+            return failed("image packages", e.to_string());
+        }
+        chown(&pth, ids);
+    }
+    ev!("python.env", { "plan": format!("{plan:?}"), "python": image, "set_aside": set_aside, "ms": t.elapsed().as_millis() as u64 });
+}
+
 async fn boot_main() {
     let t0 = Instant::now();
     ev!("boot.main");
     trust_ca();
     let home = home();
     let ids = hermes_ids();
+    // the agents' Python environment, made or mended beside the start
+    tokio::task::spawn_blocking(move || python_env(ids));
     let api = Api::new(&env("FRAGMENT_API").unwrap_or_else(|| "http://api.fragment.internal".into())).unwrap_or_else(|e| fail(&e));
     let model = env("FRAGMENT_MODEL").unwrap_or_else(|| "http://model.fragment.internal".into());
 
