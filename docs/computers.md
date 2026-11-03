@@ -61,6 +61,10 @@ an image may rely on this:
 - **A crash** (the container stopped on its own) starts it again while
   something wants it; a guest that died holding its keepalive is started
   again however long its turn ran, and its next life ends what was cut.
+- **A failed start** (it failed, never reported ready, or its container
+  stopped before it was ready) is tried again after a growing pause. It
+  is one strike however its failure is heard: a start that fails
+  destroys its container, and that container's end is not a crash too.
 - **Won't wake**: after `STARTS_FAILED_MAX` failed starts in a row it
   starts no container until its owner asks.
 
