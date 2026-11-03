@@ -2201,7 +2201,7 @@ fn run(cli: Cli) -> Result<()> {
                 req = req.header(api::AGENT_HEADER, &mode.agent);
             }
             let resp = req.send()?;
-            let resp = api::Resp { status: resp.status().as_u16(), body: resp.bytes()?.to_vec() };
+            let resp = api::Resp { status: resp.status().as_u16(), body: api::owned(resp.bytes()?) };
             let v = c.call(resp)?;
             json_exit(j, &v);
             println!("{}", serde_json::to_string(&v)?);
