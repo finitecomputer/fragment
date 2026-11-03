@@ -358,7 +358,9 @@ from a snapshot.
 
 ### Saves and what a wake restores
 
-- A computer keeps its newest three saves (`SAVES_KEPT`), each taken
+- A computer keeps its newest three saves (`SAVES_KEPT`), and the one its
+  running life came up from until a start comes up from a newer one (a
+  save a start proved, the last a start falls back to), each taken
   under the hold; its view lists them (`saves`), newest first, each
   saying whether its guest answered (`held`).
 - **A wake restores the current save**, the newest not found unusable. A
