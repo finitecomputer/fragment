@@ -595,6 +595,28 @@ pub enum ComputerNotice {
     /// may put it off (`POST …/notices/later {version}`): told no more until
     /// a version other than that one is ready.
     Update { version: String },
+    /// A folder of a save did not fit on the disk a start restored it to,
+    /// so the computer started without it: each one set aside, kept out of
+    /// its saves (no newer save lets it go), oldest first.
+    SetAside { aside: Vec<ComputerAside> },
+}
+
+/// A folder of a save set aside (`ComputerNotice::SetAside`): it did not fit
+/// when a start restored it, and is kept as it was saved.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComputerAside {
+    /// Its record's id.
+    pub record: String,
+    /// The folder it is of (`/data`, or its work: `/data/work`).
+    pub dir: String,
+    /// Its saved size (its archive's bytes, compressed).
+    pub bytes: u64,
+    /// The save it was of, and when that save was taken (ms).
+    pub save: u64,
+    pub saved_at: i64,
+    /// When the start that could not fit it set it aside (ms).
+    pub at: i64,
 }
 
 /// `POST /api/computers/{id}/restart`: the start its owner restarts, as
@@ -723,7 +745,12 @@ mod tests {
         assert_eq!(serde_json::to_value(ComputerNotice::WontWake { why: "x".into() }).unwrap(), serde_json::json!({ "kind": "wont_wake", "why": "x" }));
         let update = ComputerNotice::Update { version: "0123456789ab".into() };
         assert_eq!(serde_json::to_value(&update).unwrap(), serde_json::json!({ "kind": "update", "version": "0123456789ab" }));
-        for n in [unsaved, back, update] {
+        let aside = ComputerNotice::SetAside { aside: vec![ComputerAside { record: "r1".into(), dir: "/data/work".into(), bytes: 5_887_397_516, save: 594, saved_at: 40, at: 50 }] };
+        assert_eq!(
+            serde_json::to_value(&aside).unwrap(),
+            serde_json::json!({ "kind": "set_aside", "aside": [{ "record": "r1", "dir": "/data/work", "bytes": 5_887_397_516u64, "save": 594, "savedAt": 40, "at": 50 }] })
+        );
+        for n in [unsaved, back, update, aside] {
             assert_eq!(serde_json::from_value::<ComputerNotice>(serde_json::to_value(&n).unwrap()).unwrap(), n);
         }
         // a view from before notices reads as none, at no start

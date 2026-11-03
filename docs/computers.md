@@ -355,6 +355,15 @@ from a snapshot.
   start whose save will never restore (its archive gone or altered)
   marks it unusable and starts again at once from the one before, with no
   strike against the computer.
+- **A folder that will not fit is set aside, never a computer that will
+  not start.** A restore stops when its disk's free space falls under the
+  Sandbox SDK's floor (ENOSPC, the lesser of 256 MiB and 5% of the disk),
+  having written nothing. The start then goes on without that folder (an
+  empty one in its place), its other folder restored, and the folder is
+  set aside: out of its save, so no newer save lets it go, kept as it was
+  saved, and told to its owner (`set_aside`) until they get it back or
+  drop it. At most `ASIDE_MAX` (4) are aside; a start that would set aside
+  one more fails as any start does. A wipe deletes them with the rest.
 - **The snapshot is only a cache** of one save on one image (`{id, image,
   save}`): a wake uses it only when `save` is the current save and
   `image` the pinned image's reference, and one that fails or comes up

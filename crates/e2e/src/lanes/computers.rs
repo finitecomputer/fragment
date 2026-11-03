@@ -261,6 +261,92 @@ fn save_checks(s: &mut Suite, api: &Api, c: &Crashing, say: &dyn Fn(u32, &str) -
     Ok(8)
 }
 
+/// The set-aside checks (docs/computers.md, "Saves and what a wake
+/// restores"), each skipped off the stub and the fakes.
+const ASIDE_CHECKS: [&str; 3] = [
+    "a folder whose restore finds no room is set aside: it starts without it, the rest restored, and its owner is told",
+    "the folder set aside is out of every save, kept as it was saved",
+    "newer saves let go of what they push out, never the folder set aside, which is still told",
+];
+
+/// A save whose work folder will not fit on the disk (the lever's
+/// `full-restore`: its restore answers as the disk's floor stops one, the
+/// shim having written nothing): the start goes on without it, its other
+/// folder restored, and the folder is set aside, told, and kept across
+/// three newer saves. Starts and ends awake. Answers how many replies of
+/// its agent it added.
+fn aside_checks(s: &mut Suite, api: &Api, c: &Crashing, say: &dyn Fn(u32, &str) -> Result<crate::api::Reply>) -> Result<usize> {
+    let path = |rest: &str| format!("/api/computers/{}{rest}", c.id);
+    let reply_of = |seq: i64| {
+        let turn = turn_of(c.agent, c.chat, "chat", seq);
+        agent_replies(&records(api, c.owner, c.chat, "chat"), c.identity).into_iter().find(|r| r["body"]["turn"] == turn.as_str())
+    };
+    let said = |s: &Suite, n: u32, text: &str| -> Result<String> {
+        let r = say(n, text)?;
+        let seq = r.body["record"]["seq"].as_i64().unwrap_or(0);
+        s.eventually(c.wake, || reply_of(seq).is_some());
+        Ok(reply_of(seq).and_then(|x| x["body"]["text"].as_str().map(str::to_string)).unwrap_or_default())
+    };
+    let records_of = |save: &Value| save["records"].as_array().map(|l| l.iter().map(|r| r["dir"].as_str().unwrap_or("").to_string()).collect::<Vec<_>>()).unwrap_or_default();
+    let wrote = [said(s, 70, "write work/aside.txt set aside")?, said(s, 71, "write notes/aside-kept.txt kept")?];
+    std::thread::sleep(QUEUE_DRAIN);
+    let slept = api.signed(c.owner, "POST", &path("/sleep"), Some(&json!({})))?;
+    let save = newest_save(api, c.id);
+    let work = save["records"].as_array().and_then(|l| l.iter().find(|r| r["dir"] == "/data/work")).cloned().unwrap_or(Value::Null);
+    let elsewhere = lever_with(api, c.id, json!({ "op": "full-restore", "dir": "/elsewhere" }))?;
+    let full = lever_with(api, c.id, json!({ "op": "full-restore", "dir": "/data/work" }))?;
+    let woke = api.signed(c.owner, "POST", &path("/wake"), Some(&json!({})))?;
+    let read = [said(s, 72, "read work/aside.txt")?, said(s, 73, "read notes/aside-kept.txt")?];
+    let told = notice(&woke.body, "set_aside");
+    s.ok(
+        ASIDE_CHECKS[0],
+        wrote.iter().all(|w| w.starts_with("wrote "))
+            && slept.body["phase"] == "asleep"
+            && work["id"].is_string()
+            && elsewhere.status == 400
+            && full.status == 200
+            && woke.body["phase"] == "awake"
+            && woke.body["restored"]["save"] == save["id"]
+            && read == ["read work/aside.txt: none", "read notes/aside-kept.txt: kept"]
+            && told["aside"].as_array().map(Vec::len) == Some(1)
+            && told["aside"][0]["record"] == work["id"]
+            && told["aside"][0]["dir"] == "/data/work"
+            && told["aside"][0]["bytes"] == work["size"]
+            && told["aside"][0]["save"] == save["number"],
+        format!("{wrote:?} / {read:?} / {elsewhere} / {}", woke.body),
+    );
+    let kept = lever(api, c.id, "saves")?.body;
+    let in_a_save = |kept: &Value| kept["saves"].as_array().is_some_and(|l| l.iter().any(|s| s["records"].as_array().is_some_and(|r| r.iter().any(|r| r["id"] == work["id"]))));
+    s.ok(
+        ASIDE_CHECKS[1],
+        kept["aside"][0]["record"] == work && kept["aside"][0]["save"] == save["number"] && !in_a_save(&kept) && records_of(&kept["saves"][0]) == ["/data"],
+        &kept,
+    );
+    // three newer saves, each a sleep and a wake: the save it was of is pushed out
+    let mut cycled = true;
+    for n in 74..77 {
+        cycled &= said(s, n, &format!("write work/new-{n}.txt newer"))?.starts_with("wrote ");
+        std::thread::sleep(QUEUE_DRAIN);
+        cycled &= api.signed(c.owner, "POST", &path("/sleep"), Some(&json!({})))?.body["phase"] == "asleep";
+        cycled &= api.signed(c.owner, "POST", &path("/wake"), Some(&json!({})))?.body["phase"] == "awake";
+    }
+    let kept = lever(api, c.id, "saves")?.body;
+    let numbers: Vec<u64> = kept["saves"].as_array().map(|l| l.iter().filter_map(|x| x["number"].as_u64()).collect()).unwrap_or_default();
+    let still = notice(&api.signed(c.owner, "GET", &path(""), None)?.body, "set_aside");
+    s.ok(
+        ASIDE_CHECKS[2],
+        cycled
+            && !numbers.contains(&save["number"].as_u64().unwrap_or(0))
+            && kept["aside"][0]["record"] == work
+            && !in_a_save(&kept)
+            && !kept["forgetting"].as_array().is_some_and(|l| l.iter().any(|r| r["id"] == work["id"]))
+            && records_of(&kept["saves"][0]) == ["/data", "/data/work"]
+            && still["aside"][0]["record"] == work["id"],
+        &kept,
+    );
+    Ok(7)
+}
+
 /// The bound checks (r4, r6: a sick container after a wake, and a sleep
 /// that never ended; #362: a start from a snapshot that came up dead), each
 /// skipped off the stub and the fakes.
@@ -2012,8 +2098,9 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         bound_checks(s, api, &crashing)?;
         replies_so_far += crash_checks(s, api, &crashing, &|n, text| say(n, text))?;
         replies_so_far += recovery_checks(s, api, &crashing, &stranger, &|n, text| say(n, text))?;
+        replies_so_far += aside_checks(s, api, &crashing, &|n, text| say(n, text))?;
     } else {
-        for label in SAVE_CHECKS.iter().chain(BOUND_CHECKS.iter()).chain(CRASH_CHECKS.iter()).chain(RECOVERY_CHECKS.iter()) {
+        for label in SAVE_CHECKS.iter().chain(BOUND_CHECKS.iter()).chain(CRASH_CHECKS.iter()).chain(RECOVERY_CHECKS.iter()).chain(ASIDE_CHECKS.iter()) {
             s.skip(label, "it needs the stub's scripted runtime, and the fakes to hold a model call and count runs");
         }
     }
