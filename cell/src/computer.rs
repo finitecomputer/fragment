@@ -185,9 +185,11 @@ const MARK_EXEC_MS: i64 = 30_000;
 /// backup never returned, so its sleep never ended).
 const BACKUPS_MS: i64 = 8 * 60_000;
 /// A start's restores, its save's records together, answer within this, or
-/// the start failed (tried again, on the same save): past the start's own
-/// deadline the lifecycle has failed it already.
-const RESTORE_MS: i64 = START_DEADLINE_MS;
+/// the start failed (tried again, on the same save): what the start's own
+/// deadline leaves after the waits around them (the container taking an
+/// exec, the image's check, the gate's mark), so a slow restore fails as
+/// itself, saying so, before the lifecycle fails the start unexplained.
+const RESTORE_MS: i64 = START_DEADLINE_MS - EXEC_READY_MS - CHECK_EXEC_MS - MARK_EXEC_MS;
 /// A pass of deletes of the records let go of (`forget`) ends within this:
 /// an R2 delete answers in well under a second, and what a pass leaves is
 /// the next save's, as a delete that failed is.
@@ -227,7 +229,8 @@ const SLEEP_STEPS_MS: i64 = HOLD_STEPS_MS + SAVE_STEPS_MS + STOP_STEPS_MS;
 const _: () = assert!(HOLD_STEPS_MS < HOLD_DEADLINE_MS, "a hold reports before its deadline");
 const _: () = assert!(SAVE_STEPS_MS < SAVE_DEADLINE_MS, "a save reports before its deadline, which then only catches a report its isolate lost");
 const _: () = assert!(STOP_STEPS_MS < SLEEP_DEADLINE_MS, "a stop reports before its deadline");
-const _: () = assert!(RESTORE_MS <= START_DEADLINE_MS && ALIVE_MS < START_DEADLINE_MS, "a start's waits fit its deadline");
+const _: () = assert!(EXEC_READY_MS + RESTORE_MS + CHECK_EXEC_MS + MARK_EXEC_MS <= START_DEADLINE_MS && ALIVE_MS < START_DEADLINE_MS, "a start's waits fit its deadline");
+const _: () = assert!(RESTORE_MS >= 10 * 60_000, "a restore of a full disk's save (5.9 GB took longer than 165 s) is given ten minutes at least");
 const _: () = assert!(SLEEP_STEPS_MS <= 11 * 60_000, "docs/api.md: a sleep answers within 11 minutes");
 /// The largest request body the egress signs and hands on (it is hashed
 /// for NIP-98 first, so it is read whole).
