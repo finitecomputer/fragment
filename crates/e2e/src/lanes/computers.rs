@@ -2439,6 +2439,10 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     api.signed(&owner, "POST", &format!("/api/computers/{id}/wake"), Some(&json!({})))?;
     s.crash()?;
     let api = s.start(false)?;
+    // from here its computer's sidecar drops any query it would send public
+    // DNS: a run must not need it (#1017, where public DNS did not answer
+    // after this crash and every save of the boot failed)
+    let dropping = s.drop_public_dns()?;
     let r = api.signed(&owner, "POST", &format!("/api/f/{chat_name}/channels/chat"), Some(&json!({ "id": "m40", "body": { "text": "after the crash" } })))?;
     s.ok("after a crash of the platform, a message to the chat", r.status == 200, &r);
     // its own turn's replies
@@ -2481,6 +2485,12 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("its owner lets it sleep: it is awake only while something is open", off, view(&api));
     let r = api.signed(&owner, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({})))?;
     s.ok("it sleeps at the end", r.body["phase"] == "asleep", &r);
+    let asked = s.public_dns_asked(&dropping)?;
+    s.ok(
+        "after the crash its computer asked public DNS nothing: the hosts the platform intercepts are answered at once, and its sleep's save went on with public DNS dropped",
+        !dropping.is_empty() && asked == 0 && r.body["phase"] == "asleep",
+        json!({ "sidecars": dropping.len(), "asked": asked }),
+    );
     made_while_its_seat_sync_fails(s, &api)?;
 
     // at zero credit agents stop, and no wake starts (decision 27): an

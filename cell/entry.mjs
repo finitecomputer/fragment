@@ -304,7 +304,10 @@ class ContainerHost {
   // any reason, is reported as `computer/exited` for this generation.
   start(generation, image, snapshot, env, instance) {
     this.#generation = generation;
-    const opts = { env, enableInternet: true };
+    // `FRAGMENT_COMPUTER_INTERNET=off` (the e2e's fleet): a run must not
+    // depend on public DNS, which local workerd's sidecar asks first for
+    // the intercepted hosts while the internet is on (devstack::Fleet)
+    const opts = { env, enableInternet: this.#env.FRAGMENT_COMPUTER_INTERNET !== "off" };
     if (instance) opts.instance = instance;
     if (snapshot) opts.containerSnapshot = { id: snapshot };
     else if (this.#c.images && this.#c.images[image]) opts.image = this.#c.images[image];

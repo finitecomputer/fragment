@@ -377,6 +377,17 @@ pub struct Fleet {
     /// `cargo xtask dev --real-agent`.
     pub images: Vec<(String, serde_json::Value)>,
     pub computer_snapshots: bool,
+    /// Whether computers reach the internet (`FRAGMENT_COMPUTER_INTERNET`,
+    /// `off` when not). Locally, workerd's networking sidecar answers a
+    /// container's DNS: with internet on, it asks public DNS first for
+    /// every name, the platform's intercepted hosts included
+    /// (`backups.sandbox.internal`, `api.fragment.internal`), and answers
+    /// them itself only once public DNS says there is no such name. Off,
+    /// it answers them at once, asking no one. The e2e's are off: its
+    /// computers reach only hosts the platform intercepts, and a run must not
+    /// depend on public DNS (#1017: every save of a boot failed when it did
+    /// not answer). `cargo xtask dev`'s are on, as a deployment's are.
+    pub computer_internet: bool,
     /// How long a computer whose sleep's save keeps failing stays awake
     /// before it sleeps unsaved (`FRAGMENT_COMPUTER_UNSAVED_MAX_MS`; `None`:
     /// the cell's thirty minutes). The e2e's is short, so its lane sees the
@@ -548,6 +559,9 @@ impl Fleet {
         }
         if !self.computer_snapshots {
             vars.push(("FRAGMENT_COMPUTER_SNAPSHOTS", "off"));
+        }
+        if !self.computer_internet {
+            vars.push(("FRAGMENT_COMPUTER_INTERNET", "off"));
         }
         let unsaved = self.computer_unsaved_max_ms.map(|ms| ms.to_string());
         if let Some(ms) = &unsaved {
