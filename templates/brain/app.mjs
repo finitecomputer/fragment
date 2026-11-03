@@ -242,14 +242,16 @@ export class App extends DurableObject {
   }
 
   // The paths that moved, each at a new generation; `full`, an editor's (or
-  // a trigger's), asks for every file to be read again.
+  // a trigger's), asks for every file to be read again. Marking indexes
+  // nothing: `changed` does, which a move of main starts, and a wake only
+  // when main moved or its last run did not succeed. Its answer says so.
   mark({ paths = [], full = false }, call) {
     const gen = this.#bump("gen");
     const mine = paths.filter(indexable);
     for (const p of mine) this.#dirty(p, gen);
     const may = editor(call.role);
     if (full && may) this.#set("full", "1");
-    return { marked: mine.length, full: full && may, gen };
+    return { marked: mine.length, full: full && may, gen, hint: "Marked, not indexed: call changed after mark (fragment call <this brain> changed --input '{}')" };
   }
 
   // One batch: up to `BATCH` marked files no other batch holds, claimed,

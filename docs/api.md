@@ -948,8 +948,10 @@ agent, or carrying code, keeps the last good code and says to fork it.
   input `{ref: "live", commit, code}`); `{"woke": true, "run": op}` (at
   most once per activation of the fragment's object, at the first request
   of it a person or an agent makes: signed, or a page's session; never an
-  alarm, the platform's own calls, or an anonymous visitor; its input
-  `{}`, its run's `via` `woke`).
+  alarm, the platform's own calls, or an anonymous visitor; and only when
+  there is something to catch up: `main` moved since the operation's last
+  triggered run started, or that run did not succeed, with none queued or
+  running; its input `{}`, its run's `via` `woke`).
 - `files` (optional, FIN-372): `{"page": true, "home": <path>, "status":
   <query>}`, each optional. `page`: the fragment's page (`/`) is the files
   view (`__files`), with its Open Graph tags. `home`: the content file it

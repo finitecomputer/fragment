@@ -733,6 +733,64 @@ fn installed_trigger(s: &mut Suite, api: &Api, long: Duration) -> Result<()> {
     Ok(())
 }
 
+/// A woke trigger (FIN-372): when someone comes back, its operation runs
+/// only if there is something to catch up: main moved since its last
+/// triggered run, or that run did not succeed. Nothing changed, a move its
+/// files trigger took, or the operation paused, a wake starts nothing; and
+/// a wake after one that ran starts none.
+fn woke_trigger(s: &mut Suite, api: &Api, long: Duration) -> Result<()> {
+    let owner = api.person()?;
+    let (name, c) = jobs_fragment(s, api, &owner, "woke", |m| {
+        m["triggers"] = json!([{ "woke": true, "run": "tick" }, { "files": "notes/**", "run": "tick" }])
+    })?;
+    let woke = || runs(api, &owner, &name, "&op=tick").into_iter().filter(|r| r["via"] == "woke").collect::<Vec<_>>();
+    let lever = |op: &str| api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": op })));
+    let refresh = || api.signed(&owner, "POST", &format!("/api/f/{name}/refresh"), Some(&json!({})));
+    // someone comes back (as if the object had just started, a request of
+    // the owner's) and a run comes: the nth woke run, ended. A request
+    // before may have been the wake: its run counts the same.
+    let woke_to = |s: &Suite, n: usize| -> bool {
+        let _ = lever("woke-reset");
+        let _ = api.status(&owner, &name);
+        s.eventually(long, || {
+            let w = woke();
+            w.len() == n && w.iter().all(|r| r["status"] != "queued" && r["status"] != "running")
+        })
+    };
+    // someone comes back and nothing is due: once the wake is decided (its
+    // chance spent: the lever says it had it), the woke runs are as they were
+    let quiet = |s: &Suite, n: usize| -> bool {
+        let _ = lever("woke-reset");
+        let _ = api.status(&owner, &name);
+        s.eventually(long, || lever("woke-reset").is_ok_and(|r| r.body["had"] == true)) && woke().len() == n
+    };
+
+    let first = woke_to(s, 1);
+    let own = api.status(&owner, &name)?.body["npub"].clone();
+    s.ok("the first wake runs its operation once, as the fragment", first && woke()[0]["status"] == "succeeded" && woke()[0]["principal"] == own, json!(woke()));
+    s.ok("a wake with nothing changed since starts nothing", quiet(s, 1), json!(woke()));
+
+    s.commit(&c, &[("other/moved.md", Some(b"main moved where no files trigger looks"))]);
+    refresh()?;
+    let moved = woke_to(s, 2);
+    s.ok("main moved with no run on it: a wake runs it once, and the next none", moved && quiet(s, 2), json!(woke()));
+
+    s.commit(&c, &[("notes/taken.md", Some(b"its files trigger runs it"))]);
+    refresh()?;
+    let taken = s.eventually(long, || runs(api, &owner, &name, "&op=tick").first().is_some_and(|r| r["via"] == "files" && r["status"] == "succeeded"));
+    s.ok("a move its files trigger ran for: a wake starts nothing", taken && quiet(s, 2), json!(runs(api, &owner, &name, "&op=tick")));
+
+    api.signed(&owner, "POST", &format!("/api/f/{name}/pause"), Some(&json!({ "op": "tick", "paused": true })))?;
+    s.commit(&c, &[("notes/paused.md", Some(b"moved while paused"))]);
+    refresh()?;
+    let blocked = s.eventually(long, || runs(api, &owner, &name, "&op=tick").first().is_some_and(|r| r["via"] == "files" && r["status"] == "blocked"));
+    s.ok("paused, a wake starts nothing (its run would only be blocked)", blocked && quiet(s, 2), json!(runs(api, &owner, &name, "&op=tick")));
+    api.signed(&owner, "POST", &format!("/api/f/{name}/pause"), Some(&json!({ "op": "tick", "paused": false })))?;
+    let caught = woke_to(s, 3) && woke()[0]["status"] == "succeeded";
+    s.ok("unpaused, the run that did not succeed is caught up by a wake, once", caught && quiet(s, 3), json!(woke()));
+    Ok(())
+}
+
 /// What a later release writes, this one reads and leaves alone: a
 /// trigger of a kind it does not know starts nothing and is listed nowhere
 /// (the cron beside it keeps its next time), and a run of a via it does not
@@ -1159,6 +1217,7 @@ pub fn triggers(s: &mut Suite, api: &Api, cron: Option<Result<Option<Cron>, Stri
     s.ok("the event log says the inbox was full", events(api, &owner, &full).iter().any(|e| e["kind"] == "inbox.rejected"), "no inbox.rejected");
 
     installed_trigger(s, api, long)?;
+    woke_trigger(s, api, long)?;
     future_rows(s, api)?;
     scheduled_records(s, api, long)?;
 

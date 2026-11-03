@@ -339,6 +339,10 @@ pub(crate) enum MetaKey {
     /// The live manifest's `files` (`FilesDecl`), as JSON text: its page as
     /// the files view, and that view's layer (FIN-372).
     FilesLive,
+    /// Per woke trigger's operation, the main commit its last triggered run
+    /// started at (JSON, op → commit or null): what a wake compares main's
+    /// head against before it starts anything (jobs.rs `woke_due`).
+    WokeCovered,
     /// The blessed template live runs and its release (`<name>@<release>`,
     /// blessed.rs in crates/templates), when it names one.
     Blessed,
@@ -479,6 +483,7 @@ impl MetaKey {
             MetaKey::ManifestMain => "manifest_main",
             MetaKey::MetaLive => "meta_live",
             MetaKey::FilesLive => "files_live",
+            MetaKey::WokeCovered => "woke_covered",
             MetaKey::Blessed => "blessed",
             MetaKey::Face => "face",
             MetaKey::Picture => "picture",
