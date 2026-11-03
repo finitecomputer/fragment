@@ -20,6 +20,9 @@ hmac = "0.12"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["client", "server", "http1"] }
 hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio", "server"] }
+# gitignore's own matching (ripgrep's), in tests alone: the patterns a hold's
+# answer names are read by the platform's save as gitignore reads them
+ignore = "0.4"
 k256 = { version = "=0.13.4", default-features = false, features = ["schnorr"] }
 # the SimpleX link page's QR code, drawn as SVG (bridge/src/simplex/http.rs):
 # the crate finite-mono's agentd draws its SimpleX QR with, its renderer alone

@@ -1482,7 +1482,11 @@ async fn held_nothing_under_data_changes() {
     }
     eprintln!("hermes: /data quiet {} ms after its first reply", quiet.elapsed().as_millis());
     let left_out = hold(&c).unwrap_or_else(|| panic!("no answer to the hold; the container said:\n{}", c.logs()));
-    assert!(left_out.iter().any(|l| l == "/hermes/profiles/juniper--k3x9/state.db") && left_out.iter().all(|l| l.starts_with("/hermes/") && l.contains(".db")), "it names exactly the databases it copied: {left_out:?}");
+    // the databases it copied, and the caches a save leaves out: folders,
+    // never a file of a person's (held.rs, `caches`)
+    let (databases, caches): (Vec<&String>, Vec<&String>) = left_out.iter().partition(|l| l.contains(".db"));
+    assert!(databases.iter().any(|l| *l == "/hermes/profiles/juniper--k3x9/state.db") && databases.iter().all(|l| l.starts_with("/hermes/")), "it names exactly the databases it copied: {left_out:?}");
+    assert!(caches.iter().any(|l| *l == "/hermes/.cache/pip/") && caches.iter().all(|l| l.ends_with('/')), "the rest it names are cache folders: {caches:?}");
     assert!(c.exec(&["test", "-f", "/data/held-copies/manifest.json"]), "its copies are made before it answers");
     let before = files(&c, &left_out);
     let held = Instant::now();
