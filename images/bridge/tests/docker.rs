@@ -5027,9 +5027,11 @@ async fn playwright_runs_the_system_chromium_and_the_small_tools_run() {
     // fetches nothing, and a browser `sudo` installs goes where the agent's
     // own launch looks (sudo keeps PLAYWRIGHT_BROWSERS_PATH): its dry run's
     // place is the one the agent's Playwright resolves
-    let said = tool_said(&fake, &chat, &c, "run: cd /tmp/pw && sudo playwright install chromium && echo \"sudo-chromium=$?\" && at=$(sudo playwright install --dry-run firefox | sed -n 's|^ *Install location: *\\(.*/firefox-[0-9]*\\)$|\\1|p') && mine=$(python -c 'from playwright.sync_api import sync_playwright; p = sync_playwright().start(); print(p.firefox.executable_path); p.stop()') && case \"$mine\" in \"$at\"/*) echo \"firefox-where-$((6 * 7))\" ;; *) echo \"sudo $at, the agent $mine\" ;; esac").await;
+    let said = tool_said(&fake, &chat, &c, "run: cd /tmp/pw && sudo playwright install chromium && echo \"sudo-chromium=$?\" && at=$(sudo playwright install --dry-run firefox | sed -n 's|^ *Install location: *\\(.*/firefox-[0-9]*\\)$|\\1|p') && [ -n \"$at\" ] && mine=$(python -c 'from playwright.sync_api import sync_playwright; p = sync_playwright().start(); print(p.firefox.executable_path); p.stop()') && case \"$mine\" in \"$at\"/*) echo \"firefox-where-$((6 * 7))\" ;; *) echo \"sudo $at, the agent $mine\" ;; esac").await;
     assert!(said.contains("sudo-chromium=0") && !said.contains("MiB") && !said.contains("downloaded to"), "sudo installs no Chromium, nor its FFmpeg: {said}");
     assert!(!said.contains("Removing unused browser"), "nor collects Hermes' tools: {said}");
+    // an install location was read (empty, `"$at"/*` is `/*`, which any
+    // absolute path matches: Codex on #991)
     assert!(said.contains("firefox-where-42"), "a browser sudo installs is where the agent looks: {said}");
     // `uninstall`, which collects regardless, is refused in Hermes' store
     let said = tool_said(&fake, &chat, &c, "run: cd /tmp/pw && { sudo playwright uninstall --all; echo \"uninstall=$?\"; } && { timeout 60 playwright uninstall; echo \"mine=$?\"; }").await;
