@@ -765,7 +765,9 @@ label.settings-line { cursor: pointer; }
 .agent-dialog .agent-fields { grid-template-columns: 1fr; gap: 16px; margin-top: 20px; }
 .agent-dialog .quiet { font: var(--type-control); min-height: 36px; padding: 0 15px; background: var(--bg-active); }
 .agent-dialog .quiet:hover { background: var(--bg-hover); }
-.agent-dialog label.quiet { cursor: pointer; }
+/* a picture's chooser is a label (its file input inside): a button like the
+   dialog's others, not `.rename-agent label`'s field label, beside its avatar */
+.agent-dialog label.quiet { display: inline-flex; align-items: center; justify-content: center; margin: 0; cursor: pointer; }
 .agent-picture-field::after { content: none; }
 .agent-picture-buttons { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .agent-picture-shown { display: inline-flex; margin-right: 4px; }
