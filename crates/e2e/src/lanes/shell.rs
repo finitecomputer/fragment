@@ -910,13 +910,16 @@ fn release_assets(s: &mut Suite, api: &Api, session: &str, agent: &str) -> Resul
             && r.header("x-content-type-options") == "nosniff",
         format!("{} {} bytes, {} {tag}", r.status, r.bytes.len(), r.header("content-type")),
     );
-    let again = api.call(Call { method: "GET", url: format!("{}/__shell/shell.js", api.base), extra: vec![("if-none-match", tag)], ..Call::default() })?;
+    let again = api.call(Call { method: "GET", url: format!("{}/__shell/shell.js", api.base), extra: vec![("if-none-match", tag.clone())], ..Call::default() })?;
+    // as a browser sends back the tag Cloudflare weakened as it compressed
+    // the answer, among others
+    let weak = api.call(Call { method: "GET", url: format!("{}/__shell/shell.js", api.base), extra: vec![("if-none-match", format!("\"s-other\", W/{tag}"))], ..Call::default() })?;
     let wallpaper = fragment_templates::shell("wallpaper.jpg").context("the release's wallpaper")?;
     let head = api.call(Call { method: "HEAD", url: format!("{}/__shell/wallpaper.jpg", api.base), ..Call::default() })?;
     s.ok(
-        "asked again it is 304, and a HEAD names a file's size and type alone",
-        again.status == 304 && again.bytes.is_empty() && head.status == 200 && head.header("content-length") == wallpaper.size.to_string() && head.header("content-type") == "image/jpeg" && head.bytes.is_empty(),
-        format!("{} / HEAD {} {} {}", again.status, head.status, head.header("content-length"), head.header("content-type")),
+        "asked again it is 304, its tag weakened (W/) too, and a HEAD names a file's size and type alone",
+        again.status == 304 && again.bytes.is_empty() && weak.status == 304 && weak.bytes.is_empty() && head.status == 200 && head.header("content-length") == wallpaper.size.to_string() && head.header("content-type") == "image/jpeg" && head.bytes.is_empty(),
+        format!("{} weak {} / HEAD {} {} {}", again.status, weak.status, head.status, head.header("content-length"), head.header("content-type")),
     );
     let index = fragment_templates::shell("index.html").context("the release's shell page")?;
     let page = api.unsigned("GET", "/", None)?;
