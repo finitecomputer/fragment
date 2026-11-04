@@ -368,14 +368,18 @@ fn updating_platform_frames(s: &mut Suite, api: &Api, chrome: &mut Browser, shel
 
 /// A browser that keeps no cookie from a frame's sign-in (Safari from
 /// 18.5 to 26.1 keeps none from a cross-site frame, partitioned or not):
-/// the shell's own window of the owner's app, its redemption's answer
+/// in a browser context of its own (no frame cookie from before), the
+/// shell's own window of the owner's app, its redemption's answer
 /// given to the frame without its `Set-Cookie`. Valid: the page it lands
 /// on refuses it as signed out and says so to the shell, which says this
 /// browser keeps a window's own sign-in from it, in the frame's place, and
 /// signs it in no more (no loop: no redemption after the one).
-fn dropped_cookie(s: &mut Suite, api: &Api, chrome: &mut Browser, own: &str) -> Result<()> {
+fn dropped_cookie(s: &mut Suite, api: &Api, chrome: &mut Browser, own: &str, session: &str) -> Result<()> {
     let wait = Duration::from_secs(20);
-    let shell = chrome.open(&format!("{}/", api.base))?;
+    // a browser of its own: no frame cookie of the owner's from before
+    let fresh = chrome.another_context()?;
+    chrome.set_cookie_in(&fresh, &format!("{}/", api.base), "fragment_session", session)?;
+    let shell = chrome.open_in(&fresh, &format!("{}/", api.base))?;
     // its own redemption's alone (the shell signs its chat's frame in beside it)
     chrome.hold_responses(&shell, &[&format!("{}*", api.site_url(own, "__signin"))])?;
     let icon = format!("document.querySelector({})", serde_json::to_string(&format!("#apps [data-key=\"app:{own}\"]"))?);
@@ -450,7 +454,7 @@ fn in_chrome(s: &mut Suite, api: &Api, n: &Names<'_>, (owner_id, owner_session):
         chrome.eval_in_frame(&shell, &host(n.own), &inner("nested")).unwrap_or_default(),
     );
 
-    dropped_cookie(s, api, &mut chrome, n.own)?;
+    dropped_cookie(s, api, &mut chrome, n.own, owner_session)?;
 
     // ---- a stranger's members-only fragment: a tab must ask first
     frame(&mut chrome, &shell, &mint(n.theirs))?;
