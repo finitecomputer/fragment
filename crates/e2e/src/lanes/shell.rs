@@ -5865,6 +5865,70 @@ fn new_chat_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Pers
     );
     let r = shell(api, me.session, "PUT", &format!("/api/fragments/{readers}/archived"), Some(&json!({ "archived": true })), &[])?;
     anyhow::ensure!(r.status == 200, "the Reader's new chat archived: {r}");
+    // A new chat lands in its place at once (Paul, 2026-11-04: a chat
+    // started from a second agent was listed under the first until it was
+    // up): the Reader's New chat, its create held, is a row under the
+    // Reader's hero at once, open and titled; let go, the chat made is in
+    // its place under the Reader. Refused, the row goes, the chat before
+    // is open again, and the platform's words are said; no row is left.
+    let section_of = |row: &str| {
+        format!(
+            "(() => {{ const rows = [...document.querySelectorAll('#chats > *')]; const i = rows.findIndex((r) => r.matches({})); \
+             return i < 0 ? null : rows.slice(0, i).reverse().find((r) => r.dataset.key?.startsWith('agent:'))?.dataset.key ?? null; }})()",
+            js(row)
+        )
+    };
+    let reader_key = format!("agent:{}", own_named(api, me.session, "reader")?);
+    let before_open = open_chat(b, page);
+    b.eval(page, &hold("POST", "/api/fragments$", Hold::Request))?;
+    let picked = new_chat(b, &reader_hero)?;
+    let making = b.until(page, "!!document.querySelector('#chats .chat-row.making.active') && document.getElementById('chat-title').textContent === 'New chat' && !!document.querySelector('#frames .making-standin') && [...document.querySelectorAll('#frames iframe')].every((f) => f.hidden)", wait);
+    let under = b.eval(page, &section_of(".chat-row.making"))?;
+    let _ = b.screenshot(page, &shots.join("desktop-new-chat-making.png"));
+    b.eval(page, "(window.__held.release(), true)")?;
+    let landed = b.until(page, "!document.querySelector('#chats .making') && !document.querySelector('#frames .making-standin') && document.getElementById('chat-title').textContent === 'New chat'", wait);
+    let made = open_chat(b, page);
+    let placed = b.eval(page, &section_of(&format!("[data-key={}]", js(&format!("chat:{made}")))))?;
+    b.eval(page, "(window.__held.restore(), true)")?;
+    s.ok(
+        "the Reader's New chat is under the Reader at once, open and titled, while it is made; made, the chat is in that place, under the Reader",
+        picked && making && under == json!(reader_key) && landed && made != before_open && placed == json!(reader_key),
+        json!({ "making": making, "under": under, "landed": landed, "made": made, "placed": placed }),
+    );
+    let r = shell(api, me.session, "PUT", &format!("/api/fragments/{made}/archived"), Some(&json!({ "archived": true })), &[])?;
+    anyhow::ensure!(r.status == 200, "that chat archived: {r}");
+    b.until(page, &format!("!document.querySelector({})", js(&format!("#chats [data-key=\"chat:{made}\"]"))), wait);
+    let open_before = open_chat(b, page);
+    let rows_before = b.eval(page, "document.querySelectorAll('#chats .chat-row').length")?;
+    b.eval(page, &hold("POST", "/api/fragments$", Hold::Request))?;
+    let picked = new_chat(b, &reader_hero)?;
+    let making = b.until(page, "!!document.querySelector('#chats .chat-row.making')", wait);
+    b.eval(page, "(window.__held.release('refuse'), true)")?;
+    let undone = b.until(page, &format!("!document.querySelector('#chats .making') && !document.querySelector('#frames .making-standin') && [...document.querySelectorAll('#frames iframe')].find((f) => !f.hidden)?.dataset.fragment === {}", js(&open_before)), wait);
+    let said = b.eval(page, "document.getElementById('notice')?.innerText ?? ''")?;
+    let rows_after = b.eval(page, "document.querySelectorAll('#chats .chat-row').length")?;
+    b.eval(page, "(window.__held.restore(), true)")?;
+    s.ok(
+        "refused, the row being made goes, the chat open before is open again, and the platform's words are said: no row left",
+        picked && making && undone && said.as_str().is_some_and(|t| t.contains("The chat was not made") && t.contains("refused for the test")) && rows_after == rows_before,
+        json!({ "undone": undone, "said": said, "rows": [rows_before, rows_after] }),
+    );
+    // a chat with none of their agents in it is under none of them (never the first's)
+    let alone = shell(api, me.session, "POST", "/api/fragments", Some(&json!({ "label": "no-agent-talk", "template": "chat", "title": "No agent yet" })), &[])?;
+    anyhow::ensure!(alone.status == 200, "a chat with no agent: {alone}");
+    let alone = alone.body["name"].as_str().unwrap_or("").to_string();
+    let row = format!("[data-key={}]", js(&format!("chat:{alone}")));
+    let listed = b.until(page, &format!("!!document.querySelector({})", js(&format!("#chats {row}"))), wait);
+    let placed = b.eval(page, &section_of(&row))?;
+    let heroes = b.eval(page, "[...document.querySelectorAll('#chats > [data-key^=\"agent:\"]')].map((h) => h.dataset.key)")?;
+    let last_hero_before = b.eval(page, &format!("(() => {{ const rows = [...document.querySelectorAll('#chats > *')]; const i = rows.findIndex((r) => r.matches({})); return rows.slice(i + 1).some((r) => r.dataset.key?.startsWith('agent:')); }})()", js(&row)))?;
+    s.ok(
+        "a chat with none of their agents in it is listed under none of them: after every agent's chats, not under the first",
+        listed && last_hero_before == false && heroes.as_array().and_then(|h| h.last()).is_some_and(|last| placed == *last || placed.is_null()) ,
+        json!({ "placed": placed, "heroes": heroes }),
+    );
+    let r = shell(api, me.session, "PUT", &format!("/api/fragments/{alone}/archived"), Some(&json!({ "archived": true })), &[])?;
+    anyhow::ensure!(r.status == 200, "the chat with no agent archived: {r}");
     let own = own_named(api, me.session, &own_chat)?;
     s.ok("the agent's own chat keeps its label, apart from the new ones", label_of(&own) == own_chat && label_of(&fresh) == format!("{own_chat}-2"), json!([own, fresh]));
     click_chat(b, page, reader_chat)?;

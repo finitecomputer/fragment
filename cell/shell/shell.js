@@ -80,7 +80,7 @@ const promptDeck = { hand: APP_PROMPTS.map((_, i) => i).slice(0, PROMPT_HAND), d
 // failed (what an earlier one said stays: a failure is not "none");
 // invites: those waiting on their emails, theirs to answer (`GET /api/invites`);
 // seat: theirs, as Settings last read it (`GET /api/seat`'s; none unread)
-const state = { me: null, guest: false, fragments: [], invites: [], computer: null, agents: new Map(), computerFailed: false, current: store.get(CURRENT, null), frames: new Map(), page: null, seat: null, desktopEmpty: false };
+const state = { me: null, guest: false, fragments: [], invites: [], computer: null, agents: new Map(), computerFailed: false, current: store.get(CURRENT, null), frames: new Map(), page: null, seat: null, desktopEmpty: false, making: null };
 
 // ---- the API, as this page calls it: the person's platform session ----
 class ApiError extends Error {
@@ -879,7 +879,7 @@ const { renderHeading, renderChats, loadInvites, primaryAgent, newChatAgent, ask
     agents: () => state.agents, allFragments: () => state.fragments, computer: () => state.computer, isGuest: () => state.guest, personId: () => state.me?.id,
     isThread: (f) => threads.isPair(f), waitingOn: (name) => threads.waitingOn(name), renderThreads: () => threads.render(),
     offers: (agent, what) => offers(agent, what) },
-  selection: { current: () => state.current, page: () => state.page, getFrame: (name) => state.frames.get(name) },
+  selection: { current: () => state.current, page: () => state.page, getFrame: (name) => state.frames.get(name), making: () => state.making },
   menus: { menu, menuEdge, menuOwner: () => menuFor, openMenu, closeMenu, shareItem, archiveItem, pinItem },
   navigation: { newChat, rename: (name) => rename(name), openChat, openApp, openScreen, leaveSidebar, seg },
   listLive, load, invites: () => state.invites, setInvites: (v) => { state.invites = v; },
@@ -1404,17 +1404,51 @@ async function stillBlank(name) {
   return !firstSaid(r.records);
 }
 let starting = false;
+// The one thing the shell shows before the platform has it (Paul,
+// 2026-11-04: "we don't need to lean on optimistic UI yet", this alone): a
+// chat its agent's New chat is making, at once under that agent, open in
+// the middle column (its empty room's stand-in, frame-standin.js) and
+// titled, until the create answers; then the chat made opens in its place.
+// One the platform refused goes, and what was open before comes back.
+function showMaking(identity) {
+  const before = state.current;
+  state.making = { agent: identity, title: UNTITLED };
+  state.page = null;
+  $("layout").classList.remove("settings-view");
+  $("settings-page").hidden = true;
+  leaveApps();
+  leaveHistory();
+  $("frames").hidden = false;
+  for (const frame of state.frames.values()) {
+    frame.hidden = true;
+    standins.sync(frame);
+  }
+  const room = el("div", "frame-standin making-standin");
+  room.setAttribute("aria-hidden", "true");
+  room.append(el("span", "standin-wait"), el("div", "standin-composer"));
+  $("frames").append(room);
+  renderHeading();
+  renderChats();
+  leaveSidebar();
+  return { before, room };
+}
+function endMaking(shown) {
+  state.making = null;
+  shown.room.remove();
+}
 // `open: false` makes it (or finds the blank one) without opening it: the
 // launcher opens it itself, as it posts its first message.
 async function newChat(identity, { quiet = false, open = true } = {}) {
   const agent = state.agents.get(identity);
   if (!agent || starting) return;
   starting = true;
+  let shown = null;
   try {
     let name = blank(identity)?.name;
     // one that cannot be asked is not taken: a new chat is made
     if (name && !(await stillBlank(name).catch(() => false))) name = null;
     if (!name) {
+      shown = open ? showMaking(identity) : null;
       // made with its agent in it, in one step: its row names its agent
       // from the start, and its computer is told it joined (`joined`)
       const chat = await api("POST", "/api/fragments", { label: chatLabel(agent.fragment), template: "chat", title: UNTITLED, agent: identity });
@@ -1422,10 +1456,23 @@ async function newChat(identity, { quiet = false, open = true } = {}) {
       name = chat.name;
     }
     if (!open) return name;
+    if (shown) endMaking(shown);
+    shown = null;
     openChat(name);
     leaveSidebar();
     return name;
   } catch (e) {
+    // refused, or its list not read: nothing of it is left shown, and
+    // what was open before is again (a chat made whose list read failed
+    // comes with the list's next read)
+    if (shown) {
+      endMaking(shown);
+      if (byName(shown.before)) openChat(shown.before, false);
+      else {
+        renderHeading();
+        renderChats();
+      }
+    }
     if (quiet) throw e;
     notice("The chat was not made", e.message);
   } finally {

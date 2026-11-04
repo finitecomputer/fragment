@@ -41,21 +41,23 @@ export function askedAgentOf({ open, own, agentsOf, mine, main }) {
 export function createChatList({ api, ui, data, selection, menus, navigation, listLive, load, invites, setInvites }) {
   const { $, el, patch, agentFace, notice } = ui;
   const { byName, own, chats, shown, titleOf, chatTitle, homeMark, isGroup, agentOfChat, agentsOf, agents, allFragments, computer, isGuest, personId, isThread, waitingOn, renderThreads, offers } = data;
-  const { current, page, getFrame } = selection;
+  const { current, page, getFrame, making } = selection;
   const { menu, menuEdge, menuOwner, openMenu, closeMenu, shareItem, archiveItem, pinItem } = menus;
   const { newChat, rename, openChat, openApp, openScreen, leaveSidebar, seg } = navigation;
   // ---- chats: one flat list, newest first, the open one in the middle column ----
   function renderHeading() {
-    const open = current() && byName(current()) && !page();
+    // a chat its New chat is making (shell.js `newChat`): its title, nothing to do with it yet
+    const m = making();
+    const open = !!m || (current() && byName(current()) && !page());
     // the session archive is read here, never a chat to add to or share
-    const archive = byName(current())?.kind === "sessions";
+    const archive = !m && byName(current())?.kind === "sessions";
     $("chat-heading").hidden = !open;
-    $("page-title").hidden = !page();
+    $("page-title").hidden = !page() || !!m;
     $("page-title").textContent = page() ?? "";
-    $("new-chat").hidden = !open || archive || isGuest() || !primaryAgent()?.identity;
-    $("chat-options").hidden = !open || archive;
+    $("new-chat").hidden = !!m || !open || archive || isGuest() || !primaryAgent()?.identity;
+    $("chat-options").hidden = !!m || !open || archive;
     if (!open) return;
-    const title = chatTitle(current());
+    const title = m ? m.title : chatTitle(current());
     $("chat-title").textContent = title;
     $("chat-title").title = title;
     const frame = getFrame(current());
@@ -175,7 +177,7 @@ export function createChatList({ api, ui, data, selection, menus, navigation, li
   // its agent. Its ⋯ (in the
   // time's place on hover, always on touch) renames or archives it.
   function chatRow(f, status, now) {
-    const active = f.name === current() && !page();
+    const active = f.name === current() && !page() && !making();
     const row = el("div", `row chat-row${active ? " active" : ""}`);
     row.dataset.key = `chat:${f.name}`;
     const open = el("button", "chat-open");
@@ -337,7 +339,10 @@ export function createChatList({ api, ui, data, selection, menus, navigation, li
     for (const f of shown(chats()).filter((x) => !isThread(x)).sort(newestChat)) {
       if (!own(f)) shared.push(f);
       else {
-        const lead = agentsOf(f.name).find((id) => ids.has(id)) ?? first;
+        // a chat with none of their agents in it (yet) is under none of
+        // them: never filed under the first while its agent joins (Paul,
+        // 2026-11-04); before their computer is read, all are the main agent's
+        const lead = agentsOf(f.name).find((id) => ids.has(id)) ?? (mine.length ? undefined : first);
         if (lead === undefined) loose.push(f);
         else sections.get(lead).chats.push(f);
       }
@@ -355,8 +360,24 @@ export function createChatList({ api, ui, data, selection, menus, navigation, li
       next = Math.min(next, until);
       return row;
     };
+    // the chat its agent's New chat is making, at once under it, open (shell.js `newChat`)
+    const makingRow = (key) => {
+      const m = making();
+      if (!m || m.agent !== key) return [];
+      const row = el("div", "row chat-row active making");
+      row.dataset.key = `making:${m.agent}`;
+      const open = el("button", "chat-open");
+      open.type = "button";
+      open.disabled = true;
+      open.setAttribute("aria-current", "page");
+      const line = el("span", "chat-line");
+      line.append(el("span", "label", m.title));
+      open.append(line, el("span", "chat-sub"));
+      row.append(open);
+      return [row];
+    };
     const rows = [];
-    for (const [key, { agent, chats: list }] of sections) rows.push(hero(agent), ...sectionRows(key, list, rowOf, busy));
+    for (const [key, { agent, chats: list }] of sections) rows.push(hero(agent), ...makingRow(key), ...sectionRows(key, list, rowOf, busy));
     rows.push(...sectionRows("own", loose, rowOf, busy));
     if (shared.length) {
       const head = el("div", "section-head", "Shared");
