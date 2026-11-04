@@ -5,7 +5,7 @@
 //! turn as each act (`log_admin`). The router checked who asks.
 
 use fragment_core::org::Status;
-use fragment_proto::org::{AdminHealth, AdminLog, AdminLogEntry, AdminOrg, AdminOrgs, AdminPeople, AdminPerson, AdminSeat, Failing, OrgRef, SeatKind};
+use fragment_proto::org::{AdminHealth, AdminLog, AdminLogEntry, AdminOrg, AdminOrgs, AdminPeople, AdminPerson, AdminSeat, Failing, GlancePerson, GlanceSignedIn, GlanceSignups, OrgRef, SeatKind};
 use serde::Serialize;
 
 use super::calls::Call;
@@ -60,6 +60,32 @@ pub(crate) struct Health {}
 impl Call for Health {
     const PATH: &'static str = "/admin/health";
     type Answer = AdminHealth;
+}
+
+/// `POST /admin/glance`: the operators' glance, as far as the registry
+/// answers it (signups, sign-ins, the newest people), at `now_ms`, the day
+/// starting at `day_start` (both checked by the router:
+/// `fragment_core::glance::day_start`), and whose each of `computers` is
+/// (at most `glance::TROUBLE_MAX`: those in trouble).
+#[derive(Serialize, Deserialize)]
+pub(crate) struct Glance {
+    pub now_ms: i64,
+    pub day_start: i64,
+    pub computers: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct Glanced {
+    pub signups: GlanceSignups,
+    pub signed_in: GlanceSignedIn,
+    pub new_people: Vec<GlancePerson>,
+    /// Each of the computers named that is a person's: (computer, person, their email).
+    pub owners: Vec<(String, String, Option<String>)>,
+}
+
+impl Call for Glance {
+    const PATH: &'static str = "/admin/glance";
+    type Answer = Glanced;
 }
 
 /// `POST /admin/log`: the entries before `before`, newest first.
@@ -272,6 +298,80 @@ impl RegistryCell {
         })
     }
 
+    fn glance(&self, b: Glance) -> CellResult<Glanced> {
+        use fragment_core::glance::{DAY_MS, NEW_PEOPLE_MAX, TROUBLE_MAX, WEEK_MS};
+        if b.computers.len() > TROUBLE_MAX {
+            return Err(CellError::invalid(format!("a glance names at most {TROUBLE_MAX} computers")));
+        }
+        #[derive(Deserialize)]
+        struct Counts {
+            hour: u64,
+            today: u64,
+            week: u64,
+            total: u64,
+            day_in: u64,
+            week_in: u64,
+        }
+        let at = |ms: i64| SqlStorageValue::Integer(ms);
+        let c = self
+            .row::<Counts>(
+                "SELECT (SELECT COUNT(*) FROM identities WHERE kind = 'person' AND created_at >= ?) AS hour,
+                        (SELECT COUNT(*) FROM identities WHERE kind = 'person' AND created_at >= ?) AS today,
+                        (SELECT COUNT(*) FROM identities WHERE kind = 'person' AND created_at >= ?) AS week,
+                        (SELECT COUNT(*) FROM identities WHERE kind = 'person') AS total,
+                        (SELECT COUNT(DISTINCT identity) FROM subjects WHERE signed_in_at >= ?) AS day_in,
+                        (SELECT COUNT(DISTINCT identity) FROM subjects WHERE signed_in_at >= ?) AS week_in",
+                vec![at(b.now_ms - 3_600_000), at(b.day_start), at(b.now_ms - WEEK_MS), at(b.now_ms - DAY_MS), at(b.now_ms - WEEK_MS)],
+            )?
+            .ok_or_else(|| CellError::host("COUNT answered no row"))?;
+        let newest = self.rows::<PersonRow>(&format!("{PERSON_SELECT} WHERE i.kind = 'person' ORDER BY i.created_at DESC, i.id LIMIT ?"), vec![SqlStorageValue::Integer(NEW_PEOPLE_MAX.into())])?;
+        assert!(newest.len() <= NEW_PEOPLE_MAX as usize, "the newest are bounded");
+        #[derive(Deserialize)]
+        struct FirstAgent {
+            owner: String,
+            at: i64,
+        }
+        let agents = self.rows::<FirstAgent>(
+            "SELECT owner, MIN(created_at) AS at FROM identities WHERE kind = 'agent' AND owner IN
+               (SELECT id FROM identities WHERE kind = 'person' ORDER BY created_at DESC, id LIMIT ?) GROUP BY owner",
+            vec![SqlStorageValue::Integer(NEW_PEOPLE_MAX.into())],
+        )?;
+        let mut new_people = Vec::with_capacity(newest.len());
+        for row in newest {
+            let p = row.wire()?;
+            let agent_at = agents.iter().find(|a| a.owner == p.npub).map(|a| a.at);
+            let computer = fragment_core::computer::default_computer_of(&p.npub);
+            new_people.push(GlancePerson { npub: p.npub, email: p.email, joined_at: p.joined_at, last_sign_in_at: p.last_sign_in_at, seat: p.seat, agent_at, computer, computer_up: None });
+        }
+        // whose: a person's computer's id is its owner's hash, so each
+        // person is hashed (a few thousand: microseconds each) when any
+        // computer is named
+        let mut owners = Vec::new();
+        if !b.computers.is_empty() {
+            #[derive(Deserialize)]
+            struct Id {
+                id: String,
+                email: Option<String>,
+            }
+            let people = self.rows::<Id>(
+                "SELECT i.id, (SELECT email FROM subjects WHERE identity = i.id ORDER BY signed_in_at DESC LIMIT 1) AS email FROM identities i WHERE i.kind = 'person'",
+                vec![],
+            )?;
+            for p in people {
+                let computer = fragment_core::computer::default_computer_of(&p.id);
+                if b.computers.contains(&computer) {
+                    owners.push((computer, p.id, p.email));
+                }
+            }
+        }
+        Ok(Glanced {
+            signups: GlanceSignups { hour: c.hour, today: c.today, week: c.week, total: c.total },
+            signed_in: GlanceSignedIn { day: c.day_in, week: c.week_in },
+            new_people,
+            owners,
+        })
+    }
+
     fn log_page(&self, b: Log) -> CellResult<AdminLog> {
         #[derive(Deserialize)]
         struct Row {
@@ -298,6 +398,7 @@ impl RegistryCell {
             Person::PATH => reply::<Person>(body(bytes).and_then(|b| self.person(b))),
             Orgs::PATH => reply::<Orgs>(body(bytes).and_then(|b| self.orgs_page(b))),
             Health::PATH => reply::<Health>(self.health()),
+            Glance::PATH => reply::<Glance>(body(bytes).and_then(|b| self.glance(b))),
             Log::PATH => reply::<Log>(body(bytes).and_then(|b| self.log_page(b))),
             Note::PATH => reply::<Note>(body::<Note>(bytes).and_then(|b| match (&b.request, fragment_core::ledger::org::Payer::parse(&b.target)) {
                 (Some(request), Some(fragment_core::ledger::org::Payer::Org(org))) => self.org_noted(&org, request, &b),

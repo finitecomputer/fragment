@@ -418,6 +418,9 @@ pub struct Bound {
     /// (`fragment_core::models::SLOTS`), and its key's secret's name (two
     /// slots may name one: Finite's tiers name the platform's OpenRouter key).
     pub model_keys: Vec<(String, String)>,
+    /// A read-only key to the account's Workers Observability, which the
+    /// operators' glance reads its logs with (none: the glance says so).
+    pub observability_read: Option<String>,
 }
 
 /// The model key's name in the store that deploy/example.jsonc's tiers
@@ -439,6 +442,7 @@ impl Bound {
             operator_keys: operator_keys.iter().map(|p| (p.to_string(), format!("fragment-{p}-api-key"))).collect(),
             connection_secrets: vec![],
             model_keys: model_slots.iter().map(|s| (s.to_string(), MODEL_KEY.to_string())).collect(),
+            observability_read: None,
         }
     }
 
@@ -461,6 +465,9 @@ impl Bound {
         }
         for (slot, name) in &self.model_keys {
             bound.push((bindings::model_key(slot), name.as_str()));
+        }
+        if let Some(name) = &self.observability_read {
+            bound.push((bindings::OBSERVABILITY_READ.to_string(), name.as_str()));
         }
         for (provider, name) in &self.operator_keys {
             bound.push((bindings::operator_key(provider), name.as_str()));

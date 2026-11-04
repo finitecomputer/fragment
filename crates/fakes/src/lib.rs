@@ -11,6 +11,7 @@
 pub mod codestorage;
 pub mod http;
 pub mod mail;
+pub mod observability;
 pub mod openrouter;
 pub mod push;
 pub mod search;

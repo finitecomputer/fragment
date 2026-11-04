@@ -79,6 +79,12 @@ struct Deployment {
     /// Seats sold through Stripe (docs/billing.md). Without it, seats are
     /// comped by operators only.
     stripe: Option<StripeDeploy>,
+    /// The name in the account's Secrets Store of a read-only key to its
+    /// Workers Observability (Workers Logs), which the operators' glance
+    /// reads (`GET /api/admin/glance`; docs/secrets.md). Without it, the
+    /// glance shows the registry's numbers and says the logs' are not
+    /// configured.
+    observability_read: Option<String>,
     /// Who may grant credit, set plans, and wipe a
     /// person (npubs, or identities). The hosted e2e's `wipe` signs with an
     /// operator key among them, its file named on its command line
@@ -381,6 +387,7 @@ fn bound_for(d: &Deployment, branch: Option<&str>) -> Result<devstack::store::Bo
         operator_keys,
         connection_secrets,
         model_keys,
+        observability_read: d.observability_read.clone(),
     })
 }
 
@@ -400,6 +407,9 @@ fn named_secrets(b: &devstack::store::Bound) -> Vec<(String, &str)> {
         if let Some(w) = webhook {
             named.push(("stripe.webhook_secret".into(), w.as_str()));
         }
+    }
+    if let Some(name) = &b.observability_read {
+        named.push(("observability_read".into(), name.as_str()));
     }
     // a secret two slots name is one line, naming both
     let first_model_key = named.len();
@@ -1335,6 +1345,10 @@ fn worker_config(d: &Deployment, n: &Names, store_id: &str, release: &Release, r
     if let Some(version) = d.price_book_version {
         v.insert("FRAGMENT_PRICE_BOOK_VERSION".into(), json!(version.to_string()));
     }
+    // the account whose logs the glance reads, with the key bound beside it
+    if d.observability_read.is_some() {
+        v.insert("FRAGMENT_ACCOUNT_ID".into(), json!(d.account_id));
+    }
     if let Some(c) = &d.connectors {
         v.insert("FRAGMENT_CONNECTORS".into(), json!(serde_json::to_string(c)?));
     }
@@ -1616,6 +1630,7 @@ mod tests {
             codestorage: CodeStorage { org: "o".into(), private_key: "fragment-codestorage-private-key".into(), api: None },
             workos: WorkOs { client_id: "fragment-workos-client-id".into(), api_key: "fragment-workos-api-key".into() },
             stripe: None,
+            observability_read: None,
             operators: vec![],
             ai_gateway: None,
             models: None,

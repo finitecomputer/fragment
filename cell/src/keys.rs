@@ -38,6 +38,11 @@ const CODESTORAGE_SCOPES: [&str; 4] = ["git:read", "git:write", "repo:write", "o
 /// read (its answers are a user, a token, or a link: a few KiB).
 const VENDOR_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const VENDOR_ANSWER_MAX_BYTES: usize = 64 * 1024;
+/// A glance's query to Workers Observability: its deadline (the queries run
+/// together, so the page waits about this at most), and its answer read
+/// whole (`glance::GROUPS_MAX` groups of a computer's id each: some 200 KB).
+const OBSERVABILITY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+const OBSERVABILITY_ANSWER_MAX_BYTES: usize = 1024 * 1024;
 
 thread_local! {
     /// What each binding read last (`secrets_store::Cache`: a minute at most).
@@ -189,6 +194,26 @@ impl WorkOs<'_> {
     pub fn issuer(&self) -> String {
         format!("workos:{}", self.client_id)
     }
+}
+
+/// One query of the operators' glance (`fragment_core::glance::Question`)
+/// to the account's Workers Observability, with its read-only key (bound
+/// as `OBSERVABILITY_READ`): Cloudflare's answer, whatever its status (an
+/// error is in it: `glance::uniq_of`), read whole within
+/// `OBSERVABILITY_TIMEOUT` and `OBSERVABILITY_ANSWER_MAX_BYTES`.
+pub async fn observability_query(env: &Env, o: &crate::config::ObservabilityConfig, body: &Value) -> CellResult<Value> {
+    let key = required(env, store::OBSERVABILITY_READ).await?;
+    let headers = Headers::new();
+    headers.set("content-type", "application/json")?;
+    headers.set("authorization", &format!("Bearer {key}"))?;
+    let mut init = RequestInit::new();
+    init.with_method(Method::Post).with_headers(headers).with_body(Some(body.to_string().into()));
+    let req = Request::new_with_init(&format!("{}/accounts/{}/workers/observability/telemetry/query", o.api, o.account_id), &init)?;
+    let a = crate::cs::fetch_all(req, OBSERVABILITY_TIMEOUT, OBSERVABILITY_ANSWER_MAX_BYTES).await.map_err(|e| CellError::new(ErrorCode::UpstreamFailed, format!("Workers Observability did not answer: {}", e.message)))?;
+    if a.cut {
+        return Err(CellError::new(ErrorCode::UpstreamFailed, format!("Workers Observability answered more than {OBSERVABILITY_ANSWER_MAX_BYTES} bytes")));
+    }
+    serde_json::from_slice(&a.body).map_err(|e| CellError::new(ErrorCode::UpstreamFailed, format!("Workers Observability answered {} with no JSON: {e}", a.status)))
 }
 
 /// The account's restricted Stripe key (bound as `STRIPE_KEY`).

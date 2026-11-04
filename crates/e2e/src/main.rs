@@ -216,6 +216,10 @@ const WORKOS_KEY: &str = "sk_test_fragment_e2e";
 pub const STRIPE_KEY: &str = "sk_test_fragment_e2e_stripe";
 pub const STRIPE_WEBHOOK: &str = "whsec_fragment_e2e";
 pub const STRIPE_PORTAL: &str = "bpc_fragment_e2e";
+/// The Workers Observability fake's account and its read-only key, which
+/// the operators' glance reads its logs with.
+pub const OBSERVABILITY_ACCOUNT: &str = "e2e0000000000000000000000000beef";
+pub const OBSERVABILITY_KEY: &str = "e2e-observability-read";
 /// Where the platform's mail says it comes from on the e2e's node.
 pub const MAIL_FROM: &str = "fragment <mail@fragment.localhost>";
 /// The branch a rehearsal of the hosted lane shapes the local node as.
@@ -406,6 +410,9 @@ pub struct Suite {
     pub mail: Fake<fragment_fakes::mail::Mailer>,
     /// Stripe: seats sold, faked; its events go to the node's webhook.
     pub stripe: Fake<fragment_fakes::stripe::Stripe>,
+    /// Workers Observability, faked: the operators' glance reads the log
+    /// lines a lane plants in it.
+    pub observability: Fake<fragment_fakes::observability::Observability>,
     org_key: String,
     host_secret: String,
     /// The node's test levers' secret (`FRAGMENT_TEST_SECRET`), made per run.
@@ -760,6 +767,7 @@ impl Suite {
                 portal: Some(STRIPE_PORTAL.into()),
                 tax: true,
             }),
+            observability: Some(devstack::ObservabilityVars { key: OBSERVABILITY_KEY.into(), account_id: OBSERVABILITY_ACCOUNT.into(), api_url: self.observability.node().url.clone() }),
             platform_url: match self.shape {
                 Shape::TwoSites => format!("http://{SUFFIX}:{}", self.port),
                 Shape::Plain | Shape::FinitePrivate | Shape::PrivateTier | Shape::SellsNothing | Shape::OneKeyMore | Shape::EmbeddingsRepinned => format!("http://127.0.0.1:{}", self.port),
@@ -1212,6 +1220,7 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
         push: Fake::of(hidden, "push service", fragment_fakes::push::PushService::start()?),
         mail: Fake::of(hidden, "mail", fragment_fakes::mail::Mailer::start(0, false)?),
         stripe: Fake::of(hidden, "Stripe", fragment_fakes::stripe::Stripe::start(0, STRIPE_KEY)?),
+        observability: Fake::of(hidden, "Workers Observability", fragment_fakes::observability::Observability::start(OBSERVABILITY_ACCOUNT, OBSERVABILITY_KEY)?),
         org_key,
         host_secret: devstack::random_hex(32),
         test_secret,
