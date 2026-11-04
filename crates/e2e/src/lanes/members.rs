@@ -579,6 +579,8 @@ pub fn reach(s: &mut Suite, api: &Api) -> Result<()> {
     let (_, agent_id) = api.own_agent(&owner)?;
     let r = api.signed(&owner, "PUT", &at(&name, &format!("members/{agent_id}")), Some(&json!({ "role": "editor" })))?;
     s.ok("its owner's own agent joins it", r.status == 200, &r);
+    let waited = crate::api::timing_parts(&r.header("server-timing"));
+    s.ok("and the answer says what it waited on (Server-Timing): the identity, the lists, its computer told", ["identity", "list", "joined"].iter().all(|p| waited.iter().any(|w| w == p)), r.header("server-timing"));
 
     // each way of sharing it further, refused, and the same again
     for (what, r) in [("its link", visibility(&name, "link")?), ("public", visibility(&name, "public")?), ("an invite", invite(&name, &bea)?), ("anyone else added", api.share(&name, &npub::encode(bea.pubkey_hex()), "viewer")?)] {

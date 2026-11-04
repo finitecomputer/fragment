@@ -527,8 +527,12 @@ impl FragmentCell {
             let why = access::refuse_set_role(actor.role, None, body.role).expect("only the owner manages members");
             return Err(refusal(false, why));
         }
+        // what it waited on, for its client (`Server-Timing`)
+        let mut laps = crate::js::Laps::start();
         let target = self.named(who).await?;
-        json_response(&self.put_member(&actor, &target, body, false).await?)
+        laps.lap("identity");
+        let member = self.put_member(&actor, &target, body, false, &mut laps).await?;
+        Ok(laps.stamp(json_response(&member)?)?)
     }
 
     /// A test hook (`ops::test_fragment`'s `member`): `who` made a member,
@@ -538,7 +542,7 @@ impl FragmentCell {
         let owner = self.must(MetaKey::Owner)?;
         let actor = Actor { role: Some(Role::Owner), by: owner, for_owner: None };
         let target = self.named(who).await?;
-        self.put_member(&actor, &target, SetRole { role }, true).await
+        self.put_member(&actor, &target, SetRole { role }, true, &mut crate::js::Laps::start()).await
     }
 
     /// `target` made a member at `body`'s role, or their role changed, by
@@ -547,7 +551,7 @@ impl FragmentCell {
     /// be able to add someone to something and then it just shows up for
     /// them"): anyone else joins by their own yes to an invite, but for a
     /// test's `lever`.
-    async fn put_member(&self, actor: &Actor, target: &Identity, body: SetRole, lever: bool) -> CellResult<Member> {
+    async fn put_member(&self, actor: &Actor, target: &Identity, body: SetRole, lever: bool, laps: &mut crate::js::Laps) -> CellResult<Member> {
         let current = self.member_role(&target.id)?;
         if let Some(why) = access::refuse_set_role(actor.role, current, body.role) {
             return Err(refusal(true, why));
@@ -619,7 +623,9 @@ impl FragmentCell {
         }
         // the agent's list holds this fragment before its computer is told
         self.flush_index().await;
+        laps.lap("list");
         self.flush_joined().await;
+        laps.lap("joined");
         Ok(member)
     }
 
