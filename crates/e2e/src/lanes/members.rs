@@ -279,6 +279,44 @@ pub fn members(s: &mut Suite, api: &Api) -> Result<()> {
         json!({ "first": first, "second": second }),
     );
 
+    // a chat made with its owner's own agent in it (its create's `agent`):
+    // one step, the agent an editor, named in its owner's first list row
+    // (the shell's New chat, which filed it under another agent while a
+    // second call added it)
+    let (_, mine) = api.own_agent(&owner)?;
+    let together = s.named(api, &owner, "members-together")?;
+    let r = api.create_with(&owner, json!({ "name": together, "template": "chat", "title": "Together", "agent": mine }))?;
+    s.owned(&r.body, &owner);
+    let row = row_of_named(api, &owner, &together)?;
+    let members = api.signed(&owner, "GET", &format!("/api/f/{together}/members"), None)?;
+    let joined = members.body["members"].as_array().is_some_and(|m| m.iter().any(|m| m["principal"] == mine.as_str() && m["role"] == "editor" && m["kind"] == "agent"));
+    let waited = crate::api::timing_parts(&r.header("server-timing"));
+    s.ok(
+        "a chat made with its owner's own agent: the agent an editor in the same step, named in its owner's list row as the create answers, its waits the agent's identity and its join",
+        r.status == 200 && row["agents"] == json!([mine]) && joined && ["identity", "agent"].iter().all(|p| waited.iter().any(|w| w == p)),
+        json!({ "create": r.status, "row": row, "members": members.body, "waited": r.header("server-timing") }),
+    );
+    let again = api.create_with(&owner, json!({ "name": together, "template": "chat", "agent": mine }))?;
+    let members = api.signed(&owner, "GET", &format!("/api/f/{together}/members"), None)?;
+    let once = members.body["members"].as_array().map(|m| m.iter().filter(|m| m["principal"] == mine.as_str()).count());
+    s.ok("made again, the same name is 409, its agent in it once", again.status == 409 && once == Some(1), json!({ "again": again.status, "members": members.body }));
+    // anyone else's agent, or a person: refused before anything is made
+    let stranger = api.person()?;
+    let (_, theirs) = api.own_agent(&stranger)?;
+    let unmade = s.named(api, &owner, "members-not-theirs")?;
+    let tried: Vec<u16> = [theirs.clone(), api.identity(&stranger)?]
+        .iter()
+        .map(|who| api.create_with(&owner, json!({ "name": unmade, "template": "chat", "agent": who })).map(|r| r.status))
+        .collect::<Result<_>>()?;
+    let status = api.status(&owner, &unmade)?.status;
+    let free = api.create_with(&owner, json!({ "name": unmade }))?;
+    s.owned(&free.body, &owner);
+    s.ok(
+        "someone else's agent, or a person, named at the making is refused (403) and nothing is made: the name stays free",
+        tried == [403, 403] && status == 404 && free.status == 200,
+        json!({ "tried": tried, "status": status, "free": free.status }),
+    );
+
     // who has access to what: the owner's view of all they own (GET /api/access)
     let mine = s.named(api, &owner, "members-alone")?;
     s.create(api, &owner, &mine)?;
@@ -783,4 +821,10 @@ pub fn secrets(s: &mut Suite, api: &Api) -> Result<()> {
     let after = api.signed(&owner, "GET", &format!("/api/f/{name}/events"), None)?;
     s.ok("and changes no secret (no secret.set event)", r.status != 200 && after.text.matches("secret.set").count() == set_count, &r);
     Ok(())
+}
+
+/// `name`'s row in `owner`'s list, as it reads now.
+fn row_of_named(api: &Api, owner: &Keys, name: &str) -> Result<serde_json::Value> {
+    let r = api.signed(owner, "GET", "/api/fragments", None)?;
+    Ok(r.body["fragments"].as_array().and_then(|a| a.iter().find(|f| f["name"] == name)).cloned().unwrap_or_default())
 }

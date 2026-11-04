@@ -969,6 +969,12 @@ pub struct CreateFragment {
     /// `limits::TITLE_MAX_CHARS`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// One of its maker's own agents (its identity), an editor from the
+    /// first moment: in the fragment's first list rows, and its computer
+    /// told it joined, as `PUT /api/f/{name}/members/{agent}` does after.
+    /// Anyone else's is refused, and nothing is made.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
 }
 
 /// The answer to a create.

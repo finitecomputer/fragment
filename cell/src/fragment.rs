@@ -1264,6 +1264,16 @@ impl FragmentCell {
         let mut laps = js::Laps::start();
         // the fragment's own key; its secret is kept sealed for this cell
         let made = async {
+            // its maker's own agent, if it names one: asked before anything
+            // is written, so one that is not theirs makes nothing
+            let agent = match &body.agent {
+                Some(who) => {
+                    let target = self.own_agent(who, &owner).await?;
+                    laps.lap("identity");
+                    Some(target)
+                }
+                None => None,
+            };
             // the one place a repo's name is derived: its owner's, so a
             // name another identity makes later never finds it
             let repo_name = fragment_core::codestorage::repo_name(&cs_cfg.repo_prefix, &body.name, &owner)
@@ -1272,9 +1282,9 @@ impl FragmentCell {
             laps.lap("repo");
             let (pubkey, sealed) = crate::keys::nostr_keypair(&self.env, &self.scope()).await?;
             laps.lap("key");
-            Ok::<_, CellError>((repo, pubkey, sealed))
+            Ok::<_, CellError>((agent, repo, pubkey, sealed))
         };
-        let (repo, fragment_pub, sealed) = match made.await {
+        let (agent, repo, fragment_pub, sealed) = match made.await {
             Ok(r) => r,
             Err(e) => {
                 self.del_meta(MetaKey::Name)?;
@@ -1334,6 +1344,13 @@ impl FragmentCell {
             laps.lap("manifest");
         }
         self.index_change(&owner, Some(Role::Owner))?;
+        // its agent, an editor in the same step: its owner's first list row
+        // names it (not a chat with no agent yet), and its computer is told
+        // it joined (that notice is the outbox's, tried again if it fails)
+        if let Some(target) = &agent {
+            self.join_own_agent(target).await?;
+            laps.lap("agent");
+        }
         self.event("create", &format!("fragment {} created by {owner} (repo {repo})", body.name), json!({ "repo": repo, "key": caller.key().map(npub::display) }));
         self.flush_index().await;
         laps.lap("list");

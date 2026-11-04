@@ -535,6 +535,26 @@ impl FragmentCell {
         Ok(laps.stamp(json_response(&member)?)?)
     }
 
+    /// `who`, one of `owner`'s own agents, or why not (403): what a create
+    /// that names its agent asks before it makes anything (fragment.rs
+    /// `create`), as `put_member` would refuse anyone else's.
+    pub(crate) async fn own_agent(&self, who: &str, owner: &str) -> CellResult<Identity> {
+        let target = self.named(who).await?;
+        if target.kind != IdentityKind::Agent || target.owner.as_deref() != Some(owner) {
+            return Err(CellError::new(ErrorCode::Forbidden, "a fragment's agent at its making is one of its maker's own: anyone else's joins with its owner, invited once it is made"));
+        }
+        Ok(target)
+    }
+
+    /// `target`, its owner's own agent (`own_agent`), made an editor as
+    /// the fragment is made: as its owner's `PUT members/{agent}` adds it
+    /// (its list rows, its computer told it joined), in the create's step.
+    pub(crate) async fn join_own_agent(&self, target: &Identity) -> CellResult<Member> {
+        let owner = self.must(MetaKey::Owner)?;
+        let actor = Actor { role: Some(Role::Owner), by: owner, for_owner: None };
+        self.put_member(&actor, target, SetRole { role: Role::Editor }, false, &mut crate::js::Laps::start()).await
+    }
+
     /// A test hook (`ops::test_fragment`'s `member`): `who` made a member,
     /// or their role changed, as its owner would, with no one's yes, so the
     /// e2e shares with people without mailing each an invite to accept.
