@@ -86,6 +86,9 @@ against the identity endpoint and returns the app to connection when authorizati
 has ended. Disconnect revokes this phone’s key through the existing key API and
 removes its local account data; it leaves other devices and browser sessions alone.
 A failed/offline revocation is shown as an error, not reported as a successful logout.
+The separate Remove from this iPhone action clears local credentials and drafts
+after confirmation, explicitly leaving server revocation for the website. This
+also lets a person leave an unreachable server without getting stuck.
 
 ## Apps and brains in web sheets
 

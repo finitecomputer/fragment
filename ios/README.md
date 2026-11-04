@@ -10,7 +10,9 @@ Launch without `--server`, enter your Finite platform’s HTTPS address, and tap
 Connect. Enter the phone’s approval code at that server’s `/cli` page and approve
 the Finite-iOS request. Sign-in remains the website’s WorkOS flow. The phone uses
 its own approved key in Keychain; never import the CLI’s private key. Settings →
-Account connection can revoke/disconnect this phone.
+Account connection can revoke/disconnect this phone. If its server is unreachable,
+Remove from this iPhone clears the saved connection locally and explains that the
+server key still needs revoking on the web.
 
 Signed API calls use the existing live service. Private apps/brains require the
 new `POST /api/f/{name}/session` endpoint deployed on that service. See

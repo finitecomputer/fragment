@@ -92,10 +92,21 @@ final class AccountConnection {
             if let api = client, let account {
                 let _: JSONValue = try await api.request("api/identities/me/keys/\(try account.signingKey.publicKey)", method: "DELETE")
             }
-            if let client { try ChatDraftStore.removeAccount(api: client) }
-            try DeviceKeychain.clear(); account = nil; code = nil
-            await WKWebsiteDataStore.default().removeData(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(), modifiedSince: .distantPast)
+            try await removeLocalAccount()
         } catch { self.error = error.localizedDescription }
+    }
+    func forget() async {
+        busy = true; error = nil; defer { busy = false }
+        do { try await removeLocalAccount() }
+        catch { self.error = error.localizedDescription }
+    }
+    private func removeLocalAccount() async throws {
+        if let account {
+            let client = try FragmentAPI(baseURL: account.origin, identity: account.signingKey, accountID: account.identity)
+            try ChatDraftStore.removeAccount(api: client)
+        }
+        try DeviceKeychain.clear(); account = nil; code = nil; cachedAPI = nil
+        await WKWebsiteDataStore.default().removeData(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(), modifiedSince: .distantPast)
     }
 }
 
@@ -104,6 +115,7 @@ struct AccountConnectionView: View {
     var close: () -> Void = {}
     @State private var server = "https://finite.chat"
     @State private var replaceKey = false
+    @State private var forgetConnection = false
     @Environment(\.openURL) private var openURL
     @Environment(\.scenePhase) private var scenePhase
     var body: some View {
@@ -145,6 +157,14 @@ struct AccountConnectionView: View {
                     }
                     #endif
                 }
+                if connection.account != nil {
+                    Section {
+                        Button("Remove from this iPhone", role: .destructive) { forgetConnection = true }
+                            .accessibilityIdentifier("forgetAccount")
+                    } footer: {
+                        Text("Use this if the server is unreachable. This removes the saved key and drafts from this iPhone; revoke its approved key from the website when you can.")
+                    }
+                }
                 if connection.busy { ProgressView() }
                 if let error = connection.error { Section { Text(error).foregroundStyle(.secondary) } }
             }
@@ -153,6 +173,9 @@ struct AccountConnectionView: View {
             .task { server = connection.account?.origin.absoluteString ?? initialServer }
             .task(id: "\(connection.code?.code ?? "")|\(scenePhase)") { if connection.code != nil && scenePhase == .active { await connection.poll() } }
             .onChange(of: connection.account?.approved) { _, approved in if approved == true { close() } }
+            .confirmationDialog("Remove this connection from this iPhone?", isPresented: $forgetConnection, titleVisibility: .visible) {
+                Button("Remove saved connection", role: .destructive) { Task { await connection.forget() } }
+            } message: { Text("The key may still be approved on the server. This removes only the key and saved drafts on this iPhone.") }
             .confirmationDialog("Create a new device key?", isPresented: $replaceKey, titleVisibility: .visible) {
                 Button("Create new key") { Task { await connection.begin(server, newKey: true) } }
             } message: { Text("Use this if the previous key was revoked. Other devices keep their own keys.") }
