@@ -241,8 +241,9 @@ pub fn admin_page(s: &mut Suite, api: &Api) -> Result<()> {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis() as i64;
     if !s.hosted() {
         let computer = fragment_core::computer::default_computer_of(&glancer_id);
-        s.observability.log(now - 30_000, json!({ "computer": computer, "phase": { "phase": "awake" } }));
-        s.observability.log(now - 20_000, json!({ "computer": computer, "phase": { "phase": "failed" } }));
+        let script = crate::OBSERVABILITY_SCRIPT;
+        s.observability.log(now - 30_000, json!({ "$workers.scriptName": script, "computer": computer, "phase": { "phase": "awake" } }));
+        s.observability.log(now - 20_000, json!({ "$workers.scriptName": script, "computer": computer, "phase": { "phase": "failed" } }));
     }
     let page = b.open(&format!("{}/admin", api.base))?;
     let tiles = b.until(&page, "document.querySelectorAll('#tiles .tile').length === 5 && /Updated/.test(document.getElementById('glance-at').textContent)", wait);
@@ -270,7 +271,7 @@ pub fn admin_page(s: &mut Suite, api: &Api) -> Result<()> {
             json!({ "page": shown, "glance": read.body["logs"] }),
         );
         // no cache: a computer awake since, and the glance read again
-        s.observability.log(now, json!({ "computer": "computer:000000000000000000000a11", "phase": { "phase": "awake" } }));
+        s.observability.log(now, json!({ "$workers.scriptName": crate::OBSERVABILITY_SCRIPT, "computer": "computer:000000000000000000000a11", "phase": { "phase": "awake" } }));
         b.click(&page, "#tabs button[data-tab=glance]")?;
         let again = b.until(&page, &format!("[...document.querySelectorAll('#tiles .tile')].find(t => t.querySelector('.label').textContent === 'Computers awake now')?.querySelector('.big').textContent === '{}'", awake + 1), wait);
         s.ok("read again, the glance asks afresh: a computer awake since counts", again, tile(&mut b)?);
