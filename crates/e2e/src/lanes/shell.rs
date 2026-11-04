@@ -5252,6 +5252,7 @@ fn add_skills_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session
         made && manifest.body["template"] == "skills" && window,
         json!({ "skills": now, "manifest": manifest.body, "window": window }),
     );
+    back_to_settings(b, page, wait);
     b.reload(page)?;
     b.until(page, "!!document.getElementById('settings-skills')", wait);
     let again = own_skills(api, session)?;
@@ -5286,7 +5287,7 @@ fn skills_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
     b.reload(page)?;
     let button = format!("document.querySelector({})", js(&format!("[data-skills-for=\"{agent}\"]")));
     let offered = b.until(page, &format!("!!{button} && !{button}.hidden"), wait);
-    b.eval(page, &format!("({button}.click(), true)"))?;
+    b.eval(page, &format!("({button}?.click(), true)"))?;
     let window = b.until(page, &format!("!!document.querySelector({})", js(&format!("#stack .pane[data-key=\"tree:{agent}\"] iframe"))), wait);
     let opened = s.eventually(wait, || b.eval_in_frame(page, &agent, "document.querySelector('#tree .row.active')?.dataset.path ?? null").ok() == Some(json!("skills/garden-notes/SKILL.md")));
     s.ok(
@@ -5294,7 +5295,16 @@ fn skills_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
         w.status == 200 && offered && window && opened,
         json!({ "write": w.status, "offered": offered, "window": window, "open": b.eval_in_frame(page, &agent, "({ hash: location.hash, active: document.querySelector('#tree .row.active')?.dataset.path ?? null })").unwrap_or(Value::Null) }),
     );
+    back_to_settings(b, page, wait);
     Ok(())
+}
+
+/// Back at settings, loaded, from the window one of its buttons opened (an
+/// app or files window leaves /settings for the desktop), as the person
+/// goes: the sidebar's Settings.
+fn back_to_settings(b: &mut Browser, page: &Page, wait: std::time::Duration) -> bool {
+    let _ = b.eval(page, "(document.getElementById('settings').click(), true)");
+    b.until(page, "location.pathname === '/settings' && !!document.getElementById('settings-skills')", wait)
 }
 
 /// The shell's person in its browser lane: their platform session, and
