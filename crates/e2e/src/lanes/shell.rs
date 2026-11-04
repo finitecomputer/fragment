@@ -4743,6 +4743,7 @@ fn models_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
     // and holds them `slow` ms.
     let connect = format!("{row} [data-action=sign-in]");
     b.eval(page, "(() => { const f = window.fetch.bind(window); window.authorizes = 0; window.slow = 0; window.fetch = (u, o) => { if (!String(u).endsWith('/authorize')) return f(u, o); window.authorizes++; return new Promise((r) => setTimeout(r, window.slow)).then(() => f(u, o)); }; window.realOpen = window.open; window.open = () => null; return true; })()")?;
+    sheet_of(b, page, &row)?;
     b.click(page, &connect)?;
     let blocked = b.until(page, &format!("document.querySelector('{row} .provider-said')?.textContent.includes('Allow pop-ups for this site')"), wait);
     let started = b.eval(page, "window.authorizes")?;
@@ -4757,6 +4758,7 @@ fn models_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
     b.eval(page, "(window.open = window.realOpen, window.slow = 6000, true)")?;
     let windows = b.pages()?.len();
     let keys_before = s.openrouter.keys().len();
+    sheet_of(b, page, &row)?;
     b.click(page, &connect)?;
     b.click(page, &connect)?;
     let opened = s.eventually(std::time::Duration::from_secs(3), || b.pages().is_ok_and(|l| l.len() > windows));
@@ -4867,6 +4869,7 @@ fn models_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
         own_shown && tier_shown && unused.is_null() && own_again,
         json!({ "page": b.eval_in_frame(page, &its_page, "document.getElementById('tier')?.textContent ?? null").ok(), "tier": cheap, "narrowed": unused }),
     );
+    close_sheets(b, page)?;
     b.click(page, "#settings")?;
     b.until(page, &format!("location.pathname === '/settings' && !!document.querySelector('[data-model-for={lead:?}]')"), wait);
     b.reload(page)?;
@@ -4933,6 +4936,7 @@ fn models_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
         saved.status == 200 && set && held && settled && seen == json!({ "path": "/", "settings": false, "chat": chat }) && gone == "not_set",
         json!({ "seen": seen, "state": gone }),
     );
+    close_sheets(b, page)?;
     b.click(page, "#settings")?;
     anyhow::ensure!(b.until(page, &format!("location.pathname === '/settings' && document.querySelector('{own}')?.dataset.state === 'not_set'"), wait), "settings again");
     Ok(())

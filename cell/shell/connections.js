@@ -189,6 +189,11 @@ export function createConnections({ api, el, section, named, seg, computer, getA
   // settings, and the sheet open in this visit is shown again (`openSheet`),
   // but after a Disconnect or Remove, whose notice is the page's.
   let openSheet = null;
+  // a sheet is Settings': leaving them (for a chat, Apps or History) closes it
+  const settingsPage = document.getElementById("settings-page");
+  new MutationObserver(() => {
+    if (settingsPage.hidden) for (const d of settingsPage.querySelectorAll("dialog.provider-sheet[open]")) d.close();
+  }).observe(settingsPage, { attributes: true, attributeFilter: ["hidden"] });
   // "2026-11" as people say it: November
   const monthName = (month) => {
     const [y, m] = (month ?? "").split("-").map(Number);
@@ -462,7 +467,10 @@ export function createConnections({ api, el, section, named, seg, computer, getA
           // have changed it since)
           const was = getAgents().get(a.identity) ?? a;
           const unchanged = (was.connections == null || was.connections.includes(p.provider)) === allowed;
-          await reopenSettings(refused && unchanged && visit === visitOf() ? ["That was not changed", refused.message] : null);
+          const failed = refused && unchanged && visit === visitOf();
+          // said over settings, the sheet closed so it is seen
+          if (failed) openSheet = null;
+          await reopenSettings(failed ? ["That was not changed", refused.message] : null);
         };
         line.append(face, use, flip);
         who.append(line);
