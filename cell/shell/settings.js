@@ -308,9 +308,7 @@ export function createSettings({ api, $, seg, account, navigation, notices, sect
       setPerson(await api("GET", "/api/identities/me"));
       reopenSettings();
     };
-    const id = line("Identity", person().id);
-    id.lastChild.classList.add("mono");
-    const account = section("Account", who, id);
+    const account = section("Account", who);
     // their sign-ins, when they linked several before linking went (off
     // until WorkOS offers an account picker: docs/api.md, Sign-in)
     if (emails.length > 1) account.append(line("Sign-ins", emails.join(", ")));
