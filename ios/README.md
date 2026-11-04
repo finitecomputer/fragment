@@ -132,10 +132,13 @@ beside a draft, a saved file past its bounds or unreadable);
 `MarkdownTests` a code fence arriving in parts. The stubs' answers are written
 by hand from docs/api.md.
 
-`FragmentUITests` drive what needs no server: Connect, and an unreachable
-server. They expect a simulator with no connected account
-(`xcrun simctl keychain booted reset`). Flows against a paired account on the
-dev stack are their own suite.
+`FragmentUITests` drive what needs no server: Connect, an unreachable server,
+and a server past loopback refused. Each launches with `--ui-test` (Debug only):
+a Keychain service and Application Support folder of its own, emptied as it
+starts, and loopback alone, so a simulator's own account is never read and no
+other server is ever asked (`Sources/LaunchScope.swift`;
+`--ui-test-saved-account <origin>` seeds one, to show it unused). Flows against
+a paired account on the dev stack are their own suite.
 
 The source of the generated project is `project.yml`. If changing project
 structure, use XcodeGen 2.42+ and commit its result:

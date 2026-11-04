@@ -61,6 +61,7 @@ struct FragmentAPI: Sendable {
     func authorized(_ original: URLRequest) throws -> URLRequest {
         guard let url = original.url, PlatformOrigin.same(baseURL, url), url.user == nil, url.password == nil,
               url.fragment == nil, original.httpBodyStream == nil else { throw APIError.server("The request does not belong to your Finite server.") }
+        guard LaunchScope.current.allows(url) else { throw LaunchScope.refused }
         var request = original
         request.setValue(try identity.authorization(method: request.httpMethod ?? "GET", url: url, body: request.httpBody ?? Data()), forHTTPHeaderField: "Authorization")
         request.setValue("Finite-iOS/0.3", forHTTPHeaderField: "User-Agent")

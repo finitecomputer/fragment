@@ -37,8 +37,10 @@
 		A8A038F320ECBCC025021D8B /* DeviceIdentityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 92F50038387E161FFC74D67A /* DeviceIdentityTests.swift */; };
 		B00F01210DFD198F6F1180C9 /* FragmentAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F7C65701872682E560E008F /* FragmentAPI.swift */; };
 		B0CC33D54ED91967CDED0F0D /* AppSharingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2FCEF88547BE59E217E5B219 /* AppSharingView.swift */; };
+		C26F2704F9C3B89DD4186C3B /* LaunchScopeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 01EF9BE87256547DD6FFAAE4 /* LaunchScopeTests.swift */; };
 		CC7761F962CB619DD2A5BB51 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 934BF3B3E3B9A45CF6843505 /* Assets.xcassets */; };
 		E4358E209B49F024F52BDCAE /* AppIcon.icon in Resources */ = {isa = PBXBuildFile; fileRef = 811C73B367475E8B5D4DB77F /* AppIcon.icon */; };
+		EBB66B878C4362F14779FB52 /* LaunchScope.swift in Sources */ = {isa = PBXBuildFile; fileRef = A95702BF0C241F4A98C5F812 /* LaunchScope.swift */; };
 		ED598966FDB4DD6D3F4486A1 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 98B6FB1CA5638E3B92C0E2CD /* SettingsView.swift */; };
 		F8EBB41899022F0D4E70C646 /* DraftTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D8B11860501F69BE73ECB3D0 /* DraftTests.swift */; };
 /* End PBXBuildFile section */
@@ -62,6 +64,7 @@
 
 /* Begin PBXFileReference section */
 		014FC5154C974ED4F457D381 /* FragmentWebSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FragmentWebSheet.swift; sourceTree = "<group>"; };
+		01EF9BE87256547DD6FFAAE4 /* LaunchScopeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LaunchScopeTests.swift; sourceTree = "<group>"; };
 		0A44398C694D0FA2138E5A64 /* AppSettingsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppSettingsTests.swift; sourceTree = "<group>"; };
 		1AFC16F9330AE76994AAFAFC /* AccountConnection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountConnection.swift; sourceTree = "<group>"; };
 		214C3D2F32BD4FA5AB5CDF41 /* MarkdownText.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownText.swift; sourceTree = "<group>"; };
@@ -83,6 +86,7 @@
 		934BF3B3E3B9A45CF6843505 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		98B6FB1CA5638E3B92C0E2CD /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		A419CCC396DDBF76202E0D42 /* AppSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppSettingsView.swift; sourceTree = "<group>"; };
+		A95702BF0C241F4A98C5F812 /* LaunchScope.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LaunchScope.swift; sourceTree = "<group>"; };
 		AB0814CDF8824F8A8657129D /* MarkdownTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownTests.swift; sourceTree = "<group>"; };
 		AD99E857900FD0F65CD6B108 /* ChatView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatView.swift; sourceTree = "<group>"; };
 		B84A48915AD6415232B1F460 /* AppAppearanceView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppAppearanceView.swift; sourceTree = "<group>"; };
@@ -160,6 +164,7 @@
 				EE5376FE0C2DCB1863EE49C7 /* FragmentApp.swift */,
 				014FC5154C974ED4F457D381 /* FragmentWebSheet.swift */,
 				D261EC9048255D1B31FED623 /* HomeView.swift */,
+				A95702BF0C241F4A98C5F812 /* LaunchScope.swift */,
 				214C3D2F32BD4FA5AB5CDF41 /* MarkdownText.swift */,
 				D48A78B0A3D4F8A90EEBD8DB /* Models.swift */,
 				98B6FB1CA5638E3B92C0E2CD /* SettingsView.swift */,
@@ -175,6 +180,7 @@
 				0A44398C694D0FA2138E5A64 /* AppSettingsTests.swift */,
 				92F50038387E161FFC74D67A /* DeviceIdentityTests.swift */,
 				D8B11860501F69BE73ECB3D0 /* DraftTests.swift */,
+				01EF9BE87256547DD6FFAAE4 /* LaunchScopeTests.swift */,
 				AB0814CDF8824F8A8657129D /* MarkdownTests.swift */,
 				3A2F75C83DE72E8D3B8797E1 /* SearchTests.swift */,
 				8C581195A0FDAC2EA88D081F /* ShellTests.swift */,
@@ -304,6 +310,7 @@
 				5938CA76ED5569461BA445AB /* AppSettingsTests.swift in Sources */,
 				A8A038F320ECBCC025021D8B /* DeviceIdentityTests.swift in Sources */,
 				F8EBB41899022F0D4E70C646 /* DraftTests.swift in Sources */,
+				C26F2704F9C3B89DD4186C3B /* LaunchScopeTests.swift in Sources */,
 				A0F935E5B3AB7E00AF2297A0 /* MarkdownTests.swift in Sources */,
 				7A8D5455AD2EABF343F2905B /* SearchTests.swift in Sources */,
 				4FEE2A2E44CD058FD4666F85 /* ShellTests.swift in Sources */,
@@ -341,6 +348,7 @@
 				9B04659A7CA2A9C6E5F0276A /* FragmentApp.swift in Sources */,
 				1FA3D11FABC00DC40F41A041 /* FragmentWebSheet.swift in Sources */,
 				73EE483533F3A6306B65148C /* HomeView.swift in Sources */,
+				EBB66B878C4362F14779FB52 /* LaunchScope.swift in Sources */,
 				2A5C821580EECE3D7D8C7F3D /* MarkdownText.swift in Sources */,
 				4024A3397E46CADB1EC9D344 /* Models.swift in Sources */,
 				ED598966FDB4DD6D3F4486A1 /* SettingsView.swift in Sources */,

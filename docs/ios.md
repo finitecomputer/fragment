@@ -167,7 +167,10 @@ original-id outbox recovery, and the existing transport and UI flows.
 
 For local commands, see `ios/README.md`. The app always opens on Connect until a
 key is approved. Debug accepts loopback and `.localhost` HTTP origins, and
-`--pair-server <origin>` fills in Connect for `cargo xtask dev`.
+`--pair-server <origin>` fills in Connect for `cargo xtask dev`. A UI test's
+launch (`--ui-test`, Debug only) keeps its account and drafts in a store of its
+own, emptied as it starts, and refuses any origin past loopback before a request
+(`LaunchScope`): a test never reads a person's account or reaches a deployment.
 
 Hosted use needs the server changes deployed for private app/brain web sheets;
 existing signed native API calls reuse the already deployed CLI authentication.

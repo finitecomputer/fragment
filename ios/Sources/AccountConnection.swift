@@ -16,10 +16,13 @@ final class AccountConnection {
         cachedAPI = client
         return client
     }
-    init() {
+    /// Where its account is kept, and what it may reach (`LaunchScope`).
+    private let scope: LaunchScope
+    init(scope: LaunchScope = .current) {
+        self.scope = scope
         do {
-            if let stored = try DeviceKeychain.read() {
-                guard try PlatformOrigin.parse(stored.origin.absoluteString) == stored.origin else { throw APIError.invalidResponse }
+            if let stored = try DeviceKeychain.read(service: scope.keychainService) {
+                guard try PlatformOrigin.parse(stored.origin.absoluteString, scope: scope) == stored.origin else { throw APIError.invalidResponse }
                 _ = try stored.signingKey
                 account = stored
             }
@@ -29,14 +32,14 @@ final class AccountConnection {
     func begin(_ raw: String, newKey: Bool = false) async {
         busy = true; error = nil; code = nil; defer { busy = false }
         do {
-            let origin = try PlatformOrigin.parse(raw)
+            let origin = try PlatformOrigin.parse(raw, scope: scope)
             if let existing = account, existing.origin != origin && existing.approved {
                 throw APIError.server("Disconnect this iPhone before pairing a different account.")
             }
             if newKey || account == nil || account?.origin != origin {
                 let key = try DeviceIdentity()
                 let next = DeviceAccount(origin: origin, secret: key.secret, approved: false)
-                try DeviceKeychain.save(next); account = next
+                try DeviceKeychain.save(next, service: scope.keychainService); account = next
             }
             guard let account else { throw APIError.invalidResponse }
             let api = try FragmentAPI(baseURL: origin, identity: account.signingKey)
@@ -66,7 +69,7 @@ final class AccountConnection {
                   try next.signingKey.publicKey == api.identity.publicKey else { throw CancellationError() }
             guard person["kind"].string == "person", let identity = person["id"].string else { throw APIError.invalidResponse }
             next.identity = identity; next.email = person["email"].string; next.approved = true
-            try DeviceKeychain.save(next); account = next; error = nil
+            try DeviceKeychain.save(next, service: scope.keychainService); account = next; error = nil
             return true
         } catch APIError.unauthorized { return false }
     }
@@ -81,7 +84,7 @@ final class AccountConnection {
     func expire() {
         guard var next = account, next.approved else { return }
         next.approved = false
-        do { try DeviceKeychain.save(next); account = next; error = "This iPhone’s authorization ended. Pair again to reconnect." }
+        do { try DeviceKeychain.save(next, service: scope.keychainService); account = next; error = "This iPhone’s authorization ended. Pair again to reconnect." }
         catch { self.error = error.localizedDescription; account = nil }
     }
     func disconnect() async {
@@ -104,7 +107,7 @@ final class AccountConnection {
             let client = try FragmentAPI(baseURL: account.origin, identity: account.signingKey, accountID: account.identity)
             try ChatDraftStore.removeAccount(api: client)
         }
-        try DeviceKeychain.clear(); account = nil; code = nil; cachedAPI = nil
+        try DeviceKeychain.clear(service: scope.keychainService); account = nil; code = nil; cachedAPI = nil
         await WKWebsiteDataStore.default().removeData(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(), modifiedSince: .distantPast)
     }
 }

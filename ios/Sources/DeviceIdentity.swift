@@ -46,13 +46,12 @@ struct DeviceAccount: Codable, Sendable {
 }
 
 enum DeviceKeychain {
-    private static let service = "build.finite.fragment.device"
-    private static func query(_ account: String) -> [String: Any] {
+    private static func query(_ account: String, _ service: String) -> [String: Any] {
         [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service,
          kSecAttrAccount as String: account, kSecAttrSynchronizable as String: false]
     }
-    static func read(account: String = "active-account-v1") throws -> DeviceAccount? {
-        var request = query(account)
+    static func read(account: String = "active-account-v1", service: String = LaunchScope.current.keychainService) throws -> DeviceAccount? {
+        var request = query(account, service)
         request[kSecReturnData as String] = true
         request[kSecMatchLimit as String] = kSecMatchLimitOne
         var result: CFTypeRef?
@@ -61,19 +60,19 @@ enum DeviceKeychain {
         guard status == errSecSuccess, let data = result as? Data else { throw APIError.keychain(status) }
         return try JSONDecoder().decode(DeviceAccount.self, from: data)
     }
-    static func save(_ account: DeviceAccount, account slot: String = "active-account-v1") throws {
+    static func save(_ account: DeviceAccount, account slot: String = "active-account-v1", service: String = LaunchScope.current.keychainService) throws {
         let data = try JSONEncoder().encode(account)
         let attributes: [String: Any] = [kSecValueData as String: data, kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly]
-        let status = SecItemUpdate(query(slot) as CFDictionary, attributes as CFDictionary)
+        let status = SecItemUpdate(query(slot, service) as CFDictionary, attributes as CFDictionary)
         if status == errSecItemNotFound {
-            var insert = query(slot)
+            var insert = query(slot, service)
             attributes.forEach { insert[$0.key] = $0.value }
             let added = SecItemAdd(insert as CFDictionary, nil)
             guard added == errSecSuccess else { throw APIError.keychain(added) }
         } else if status != errSecSuccess { throw APIError.keychain(status) }
     }
-    static func clear(account: String = "active-account-v1") throws {
-        let status = SecItemDelete(query(account) as CFDictionary)
+    static func clear(account: String = "active-account-v1", service: String = LaunchScope.current.keychainService) throws {
+        let status = SecItemDelete(query(account, service) as CFDictionary)
         guard status == errSecSuccess || status == errSecItemNotFound else { throw APIError.keychain(status) }
     }
 }
@@ -88,7 +87,7 @@ final class NoSignedRedirects: NSObject, URLSessionTaskDelegate {
 }
 
 enum PlatformOrigin {
-    static func parse(_ raw: String) throws -> URL {
+    static func parse(_ raw: String, scope: LaunchScope = .current) throws -> URL {
         guard let url = URL(string: raw.trimmingCharacters(in: .whitespacesAndNewlines)), url.host != nil,
               url.user == nil, url.password == nil, url.query == nil, url.fragment == nil,
               url.path.isEmpty || url.path == "/" else { throw APIError.server("Enter the platform’s HTTPS address, without a path.") }
@@ -98,6 +97,7 @@ enum PlatformOrigin {
         allowed = allowed || (url.scheme == "http" && (host == "localhost" || host == "127.0.0.1" || host == "::1" || host.hasSuffix(".localhost") || host.hasSuffix(".local")))
         #endif
         guard allowed else { throw APIError.server("Use HTTPS for your Finite account.") }
+        guard scope.allows(url) else { throw LaunchScope.refused }
         var parts = URLComponents(url: url, resolvingAgainstBaseURL: false)!
         parts.path = ""
         return parts.url!

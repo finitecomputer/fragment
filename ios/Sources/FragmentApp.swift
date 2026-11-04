@@ -2,6 +2,7 @@ import SwiftUI
 
 @main
 struct FragmentApp: App {
+    init() { LaunchScope.start() }
     var body: some Scene { WindowGroup { FragmentRoot() } }
 }
 

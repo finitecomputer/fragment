@@ -61,7 +61,7 @@ struct ChatDraftStore {
     private static func accountDirectory(api: FragmentAPI, root: URL? = nil) throws -> URL {
         let support = try root ?? FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
         let scope = Data(SHA256.hash(data: Data((api.baseURL.absoluteString + "|" + (api.accountID ?? api.identity.publicKey)).utf8))).hex
-        return support.appending(path: "Finite/Accounts/" + scope, directoryHint: .isDirectory)
+        return support.appending(path: LaunchScope.current.supportFolder + "/Accounts/" + scope, directoryHint: .isDirectory)
     }
     /// What this chat saved, within its bounds (`cut`: some of it was not),
     /// or nothing. A file that is no saved chat (another version, too big,
