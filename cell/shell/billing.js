@@ -451,7 +451,11 @@ export async function billingSections(helpers, ledger, mine, back) {
       const owed = balance < 0;
       const used = owed ? granted : Math.min(granted, Math.max(0, granted - (ledger.includedMicros ?? 0)));
       const bought = ledger.purchasedMicros ?? 0;
-      const said = `${usd(used)} of ${usd(granted)} used` + (bought > 0 ? ` · ${usd(bought)} of bought credit left` : "");
+      // the ledger's month is UTC (`YYYY-MM`): its included credit renews
+      // on the first of the next one
+      const [y, m] = String(ledger.month ?? "").split("-").map(Number);
+      const renews = y && m ? new Date(Date.UTC(y, m, 1)).toLocaleDateString(undefined, { month: "short", day: "numeric", timeZone: "UTC" }) : null;
+      const said = `${usd(used)} of ${usd(granted)} used (${Math.round((used / granted) * 100)}%)` + (renews ? ` · renews ${renews}` : "") + (bought > 0 ? ` · ${usd(bought)} of bought credit left` : "");
       // spans: the row is a <p> when it has no button
       const bar = el("span", owed ? "credit-bar owed" : "credit-bar");
       bar.setAttribute("role", "progressbar");
