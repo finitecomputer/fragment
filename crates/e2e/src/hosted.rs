@@ -324,6 +324,7 @@ fn suite(only: Option<Vec<String>>, except: Vec<String>, hosted: &Hosted, shared
         push: Fake::absent("push service"),
         mail: Fake::absent("mail"),
         stripe: Fake::absent("Stripe"),
+        observability: Fake::absent("Workers Observability"),
         org_key: String::new(),
         host_secret: String::new(),
         test_secret: String::new(),

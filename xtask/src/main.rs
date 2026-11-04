@@ -303,6 +303,8 @@ fn dev(args: &[String]) -> Result<()> {
             portal: None,
             tax: false,
         }),
+        // dev's glance reads no logs: it says they are not configured
+        observability: None,
         // the CLI's host: sign-in and approvals happen where it points
         platform_url: format!("http://127.0.0.1:{DEV_PORT}"),
         operators: Some(fragment_core::npub::encode(operator.pubkey_hex())),

@@ -46,6 +46,22 @@ pub struct StripeConfig {
     pub tax: bool,
 }
 
+/// The account's Workers Logs, which the operators' glance reads
+/// (`fragment_core::glance`): configured when its read-only key is bound
+/// (`secrets_store::OBSERVABILITY_READ`) and the account and this
+/// deployment's Worker are named.
+pub struct ObservabilityConfig {
+    /// `FRAGMENT_ACCOUNT_ID`, which a deploy that binds the key writes.
+    pub account_id: String,
+    /// `FRAGMENT_WORKER_NAME`, this deployment's Worker, which a deploy
+    /// that binds the key writes beside it: its lines alone are counted
+    /// (an account holds other deployments).
+    pub script: String,
+    /// `CLOUDFLARE_API_URL` (default https://api.cloudflare.com/client/v4;
+    /// dev and the e2e: the fake).
+    pub api: String,
+}
+
 pub struct Config {
     /// `FRAGMENT_CONNECTORS`: the connectors an owner may link, and their
     /// relay targets; absent, `connectors::Policy::default()` (docs/computers.md, "Connector policy").
@@ -110,6 +126,8 @@ pub struct Config {
     pub mail_url: Option<String>,
     workos: Option<WorkOsConfig>,
     stripe: Option<StripeConfig>,
+    /// The logs the glance reads; none: not configured.
+    pub observability: Option<ObservabilityConfig>,
     /// `FRAGMENT_PLATFORM_URL` (required): the platform's own origin, where
     /// sign-in and the platform session live (e.g. https://finite.chat).
     /// It is also the contact a push's VAPID token names (`sub`, RFC 8292):
@@ -338,6 +356,14 @@ impl Config {
             delivery_retry_max_s: pinned_retry_s.unwrap_or(3600),
             workos: crate::keys::bound(env, fragment_core::secrets_store::WORKOS_CLIENT).then(|| WorkOsConfig {
                 api: var(env, "WORKOS_API_URL").map(|u| u.trim_end_matches('/').to_string()).unwrap_or_else(|| "https://api.workos.com".into()),
+            }),
+            observability: var(env, "FRAGMENT_ACCOUNT_ID")
+                .filter(|a| !a.is_empty() && crate::keys::bound(env, fragment_core::secrets_store::OBSERVABILITY_READ))
+                .zip(var(env, "FRAGMENT_WORKER_NAME").filter(|w| fragment_core::glance::valid_script(w)))
+                .map(|(account_id, script)| ObservabilityConfig {
+                account_id,
+                script,
+                api: var(env, "CLOUDFLARE_API_URL").map(|u| u.trim_end_matches('/').to_string()).unwrap_or_else(|| "https://api.cloudflare.com/client/v4".into()),
             }),
             stripe: crate::keys::bound(env, fragment_core::secrets_store::STRIPE_KEY).then(|| StripeConfig {
                 api: var(env, "STRIPE_API_URL").map(|u| u.trim_end_matches('/').to_string()).unwrap_or_else(|| "https://api.stripe.com".into()),

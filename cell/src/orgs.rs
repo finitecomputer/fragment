@@ -276,6 +276,7 @@ pub(crate) async fn admin(mut req: Request, env: &Env, cfg: &Config, url: &Url, 
         (Method::Get, ["people", person, "reach"]) => json_answer(&crate::reach::census(env, person).await?),
         (Method::Put, ["people", person, "computer", "image"]) => json_answer(&pin(env, &by, person, &bytes).await?),
         (Method::Get, ["health"]) => json_answer(&ask_registry(env, &admin::Health {}).await?),
+        (Method::Get, ["glance"]) => json_answer(&crate::glance::glance(env, cfg, url).await?),
         (Method::Post, ["objects", class, "wake"]) => json_answer(&crate::routed::wake(env, class, body(&bytes)?).await?),
         (Method::Get, ["log"]) => {
             let before = param(url, "before").map(|b| b.parse::<u64>().map_err(|_| CellError::invalid("`before` is an entry's number"))).transpose()?;

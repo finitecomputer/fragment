@@ -372,6 +372,114 @@ pub struct AdminHealth {
     pub oldest_copy_at: Option<i64>,
 }
 
+/// The operators' glance (`GET /api/admin/glance`): who joined and signed
+/// in, from the registry, and what ran, from the deployment's Workers
+/// Logs, read as it is asked (no cache: the page asks again every minute).
+/// Never a person's own objects: no number here calls a computer, a
+/// fragment or a ledger.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminGlance {
+    /// When it was read (ms).
+    pub at: i64,
+    pub signups: GlanceSignups,
+    pub signed_in: GlanceSignedIn,
+    /// The newest people, newest first (`fragment_core::glance::NEW_PEOPLE_MAX`).
+    pub new_people: Vec<GlancePerson>,
+    pub logs: GlanceLogs,
+}
+
+/// People made in the last hour, since `dayStart` (the operator's
+/// midnight), in the last seven days, and ever.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GlanceSignups {
+    pub hour: u64,
+    pub today: u64,
+    pub week: u64,
+    pub total: u64,
+}
+
+/// People who signed in in the last day and the last seven: a sign-in,
+/// not use (a session lasts thirty days).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GlanceSignedIn {
+    pub day: u64,
+    pub week: u64,
+}
+
+/// A person who joined, as the glance lists them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GlancePerson {
+    pub npub: String,
+    pub email: Option<String>,
+    pub joined_at: i64,
+    pub last_sign_in_at: Option<i64>,
+    pub seat: Option<AdminSeat>,
+    /// When their first agent was made, if one was.
+    pub agent_at: Option<i64>,
+    /// Their computer's id.
+    pub computer: String,
+    /// Whether their computer was awake in the last seven days, as the
+    /// logs say; none when the logs were not read.
+    pub computer_up: Option<bool>,
+}
+
+/// What the deployment's Workers Logs say, or why there is nothing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "camelCase")]
+pub enum GlanceLogs {
+    /// No key to read them is bound (`observability_read` in the
+    /// deployment's config: docs/secrets.md).
+    NotConfigured,
+    /// The read failed: why, as Cloudflare or the platform said.
+    #[serde(rename_all = "camelCase")]
+    Failed { why: String },
+    #[serde(rename_all = "camelCase")]
+    Read {
+        /// Distinct computers whose lines say they are awake: in the last
+        /// ten minutes (an awake one logs at least every five), since
+        /// `dayStart`, in the last seven days.
+        computers_awake_now: u64,
+        computers_awake_today: u64,
+        computers_awake_week: u64,
+        /// Distinct fragments' Durable Objects that ran: in the last ten
+        /// minutes, and since `dayStart`.
+        fragments_awake_now: u64,
+        fragments_awake_today: u64,
+        /// Computers whose lines in the last day say they are in trouble,
+        /// the most lines first.
+        trouble: Vec<GlanceTrouble>,
+    },
+}
+
+/// A computer in trouble, as its lines in the last day say.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GlanceTrouble {
+    pub computer: String,
+    pub kind: TroubleKind,
+    /// Its lines that said so.
+    pub lines: u64,
+    /// Whose it is, and their email, when a person's computer.
+    pub npub: Option<String>,
+    pub email: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TroubleKind {
+    /// Its starts kept failing: it won't wake until its owner restarts it.
+    WontWake,
+    /// A save of it failed.
+    SavesFailing,
+    /// Its disk had less than `fragment_core::computer::DISK_TOLD_FREE_MAX`
+    /// free.
+    DiskFilling,
+}
+
 /// What an operator did (`GET /api/admin/log`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

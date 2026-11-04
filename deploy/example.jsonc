@@ -83,6 +83,12 @@
   //   "tax": true,
   //   "key_file": "~/.config/fragment/secrets/stripe-restricted-key"
   // },
+  // The operators' glance (`/admin`, `GET /api/admin/glance`): a key to
+  // this account's Workers Logs, read only (an account API token with
+  // Workers Observability Read and nothing else), by its name in the
+  // store. Leave it out and the glance shows the registry's numbers and
+  // says the logs' are not configured.
+  // "observability_read": "fragment-observability-read",
   // The AI Gateway the model route and image steps call through: one of
   // your own, named (never "default", which makes one that logs), with
   // Unified Billing, zero data retention on and its logs off. Without it,

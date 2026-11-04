@@ -352,6 +352,9 @@ pub struct Fleet {
     pub workos: Option<WorkOsVars>,
     /// Seats sold: Stripe (the fake in `crates/fakes`; docs/billing.md).
     pub stripe: Option<StripeVars>,
+    /// The account's Workers Logs, which the operators' glance reads (the
+    /// fake in `crates/fakes`; `None`: the glance says they are not configured).
+    pub observability: Option<ObservabilityVars>,
     /// The platform's origin (sign-in, the platform session;
     /// `FRAGMENT_PLATFORM_URL`, which every fleet names).
     pub platform_url: String,
@@ -417,6 +420,21 @@ pub struct StripeVars {
     pub tax: bool,
 }
 
+/// The account's Workers Observability as the cell reads it: its read-only
+/// key (bound as a deploy binds `observability_read`'s), the account
+/// (`FRAGMENT_ACCOUNT_ID`), this deployment's Worker (`FRAGMENT_WORKER_NAME`),
+/// and where its API is (`CLOUDFLARE_API_URL`).
+pub struct ObservabilityVars {
+    pub key: String,
+    pub account_id: String,
+    pub script: String,
+    pub api_url: String,
+}
+
+/// The store name devstack binds the glance's key under, as
+/// deploy/example.jsonc names it.
+pub const OBSERVABILITY_READ_NAME: &str = "fragment-observability-read";
+
 /// The key of a slot of the model route on an OpenAI-compatible API
 /// (`fragment_core::models::SLOTS`): its secret's name in the store, bound
 /// for the slot as a deploy binds the one its config names, and its value.
@@ -442,6 +460,7 @@ impl Fleet {
         let mut bound = store::Bound::conventional(self.workos.is_some(), self.stripe.is_some(), &providers, &[]);
         bound.model_keys = self.model_keys.iter().map(|k| (k.slot.clone(), k.name.clone())).collect();
         bound.connection_secrets = self.connection_secret_values.iter().map(|(p, _)| (p.clone(), format!("fragment-{p}-oauth-secret"))).collect();
+        bound.observability_read = self.observability.as_ref().map(|_| OBSERVABILITY_READ_NAME.to_string());
         bound
     }
 
@@ -475,6 +494,9 @@ impl Fleet {
         }
         for ((_, name), (_, value)) in bound.connection_secrets.iter().zip(&self.connection_secret_values) {
             values.push((name.as_str(), value.as_str()));
+        }
+        if let (Some(name), Some(o)) = (&bound.observability_read, &self.observability) {
+            values.push((name.as_str(), o.key.as_str()));
         }
         assert_eq!(values.len(), bound.secrets().len(), "every secret bound has its value, once");
         store::seed_local(tools, &state_dir(project), &values).map_err(|e| anyhow::anyhow!("seed the local Secrets Store: {e}"))?;
@@ -542,6 +564,11 @@ impl Fleet {
         }
         if let Some(o) = &self.operators {
             vars.push(("FRAGMENT_OPERATORS", o.as_str()));
+        }
+        if let Some(o) = &self.observability {
+            vars.push(("FRAGMENT_ACCOUNT_ID", o.account_id.as_str()));
+            vars.push(("FRAGMENT_WORKER_NAME", o.script.as_str()));
+            vars.push(("CLOUDFLARE_API_URL", o.api_url.as_str()));
         }
         let signins = self.signins_pending_max.map(|n| n.to_string());
         if let Some(n) = &signins {
