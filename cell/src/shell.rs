@@ -176,7 +176,8 @@ pub async fn asset(req: &Request, env: &Env, name: &str) -> CellResult<Option<Re
     let h = Headers::new();
     h.set("content-type", mime)?;
     h.set("x-content-type-options", "nosniff")?;
-    let pinned = req.url()?.query_pairs().any(|(k, v)| k == "v" && v == version(f));
+    // a built file's name is its bytes' hash (crates/templates/bundle.rs)
+    let pinned = fragment_templates::shell_built(name) || req.url()?.query_pairs().any(|(k, v)| k == "v" && v == version(f));
     Ok(Some(revalidated(req, env, f, h, if pinned { PINNED } else { "no-cache" }).await?))
 }
 

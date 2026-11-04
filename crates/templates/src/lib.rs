@@ -201,11 +201,36 @@ const SHELL_PUBLISHED: &[(&str, &str)] = &[
     ("wallpaper.jpg", "image/jpeg"),
 ];
 
-/// A file the shell publishes, by its name, and its content type.
+/// A file the shell publishes, by its name, and its content type: one it
+/// holds as written (`SHELL_PUBLISHED`), or one its page's build named by
+/// its hash (`shell_built`).
 #[cfg(feature = "platform")]
 pub fn shell_published(name: &str) -> Option<(&'static File, &'static str)> {
+    if shell_built(name) {
+        let content_type = match name.rsplit('.').next() {
+            Some("js") => "text/javascript; charset=utf-8",
+            Some("css") => "text/css; charset=utf-8",
+            Some("map") => "application/json",
+            _ => unreachable!("the shell's page builds scripts, maps and stylesheets"),
+        };
+        return Some((shell(name).expect("every file the shell's build made is indexed"), content_type));
+    }
     let (_, content_type) = SHELL_PUBLISHED.iter().find(|(n, _)| *n == name)?;
     Some((shell(name).expect("every file the shell publishes is indexed (a test)"), content_type))
+}
+
+/// Whether `name` is a file the shell's page's build named by its hash
+/// (bundle.rs): its bytes are its name's, so a browser keeps it for good
+/// (cell/src/shell.rs `asset`). Its page is built too, and served as a page.
+#[cfg(feature = "platform")]
+pub fn shell_built(name: &str) -> bool {
+    name != "index.html" && BUILT.iter().any(|&(at, path)| at == "shell" && path == name)
+}
+
+/// Whether `path` of `at` (`shell`, or a template) is a file a page's build
+/// made or named anew, not as the repo holds it.
+pub fn built(at: &str, path: &str) -> bool {
+    BUILT.iter().any(|&(a, p)| a == at && p == path)
 }
 
 #[cfg(feature = "platform")]
@@ -278,6 +303,15 @@ pub(crate) mod tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
     }
 
+    /// A built file's bytes: embedded, or, without `embed`, none to read
+    /// (the build's directory is its own): its index entry's own.
+    pub(crate) fn built_bytes(f: &File) -> Vec<u8> {
+        #[cfg(feature = "embed")]
+        return f.bytes.to_vec();
+        #[cfg(not(feature = "embed"))]
+        panic!("{}: a built file's bytes are embedded alone", f.path)
+    }
+
     /// A template's file's bytes, as the repo holds them.
     pub(crate) fn bytes_of(t: &Template, f: &File) -> Vec<u8> {
         std::fs::read(repo().join("templates").join(t.name).join(f.path)).unwrap_or_else(|e| panic!("templates/{}/{}: {e}", t.name, f.path))
@@ -302,7 +336,7 @@ pub(crate) mod tests {
         for t in ALL {
             let mut release = Sha256::new();
             for f in t.files {
-                let bytes = bytes_of(t, f);
+                let bytes = if built(t.name, f.path) { built_bytes(f) } else { bytes_of(t, f) };
                 check(&format!("templates/{}/{}", t.name, f.path), f, &bytes);
                 release.update(f.path.as_bytes());
                 release.update([0]);
@@ -316,7 +350,7 @@ pub(crate) mod tests {
             // the cell commits each at its path (publish.rs `stamped`)
             assert!(t.files.iter().all(|f| fragment_proto::RepoPath::parse(f.path).is_ok()), "{}'s files are at repo paths", t.name);
         }
-        for f in SHELL {
+        for f in SHELL.iter().filter(|f| !built("shell", f.path)) {
             check(&format!("cell/shell/{}", f.path), f, &std::fs::read(repo().join("cell/shell").join(f.path)).unwrap());
             assert_eq!(shell(f.path), Some(f));
         }
@@ -326,7 +360,9 @@ pub(crate) mod tests {
         check("crates/core/src/export_readme.md", &EXPORT_README, &std::fs::read(repo().join("crates/core/src/export_readme.md")).unwrap());
         assert!(shell("index.html").is_some() && shell("shell.js").is_some() && shell("nope.js").is_none());
         let count = |dir: &str| walkdir(&repo().join(dir));
-        assert_eq!(SHELL.len(), count("cell/shell"), "every file of the shell is indexed");
+        // its built files are named anew, its page in place of its own
+        let made = BUILT.iter().filter(|(at, p)| *at == "shell" && *p != "index.html").count();
+        assert_eq!(SHELL.len(), count("cell/shell") + made, "every file of the shell is indexed");
     }
 
     /// Goal: the agent docs name no host of their own: a deployment's
@@ -449,7 +485,7 @@ pub(crate) mod tests {
     fn the_chat_readme_names_its_pages_files() {
         let readme = flat("templates/chat/README.md");
         let chat = blessed::template("chat").expect("chat is blessed");
-        for f in chat.files.iter().filter_map(|f| f.path.strip_prefix("site/")) {
+        for f in chat.files.iter().filter(|f| !built("chat", f.path)).filter_map(|f| f.path.strip_prefix("site/")) {
             assert!(readme.contains(&format!("`{f}`")), "templates/chat/README.md does not name site/{f}");
         }
     }
