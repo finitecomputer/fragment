@@ -10,7 +10,7 @@ default agent. A fragment on it names it and holds nothing else:
 ## The contract
 
 - **Its files are the release's managed set.** Every file of this template
-  but its manifest, this README and `site/` is its *data*
+  but its manifest and this README is its *data*
   (crates/templates `blessed::is_data`). A fragment on the template lists
   and reads that data as its own files, from the platform's current
   release: `GET /api/f/{name}/files` (each such row `release: true`, its
@@ -107,6 +107,7 @@ the baseline again.
 
 ## Its page
 
-`site/` lists the skills by category and shows each one's `SKILL.md`,
-reading the fragment's own `__files` and `__file`, so it shows what its
-owner's agents have.
+The platform's files view (`fragment.json` `files.page`, as brains and
+notes have): its folders and each skill's `SKILL.md`, read from the
+fragment's own `__files` and `__file`, so it shows what its owner's agents
+have.
