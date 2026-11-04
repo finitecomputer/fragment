@@ -216,7 +216,7 @@ export function createConnections({ api, el, section, named, seg, computer, getA
       s.append(el("p", "muted", linked ? "This platform offers none yet." : "Your connections could not be read."));
       return s;
     }
-    s.append(el("p", "muted", "Your agents use these through their computer, which adds each credential on the way out. None is ever on the computer."));
+    s.append(el("p", "muted", "Your agents use these to act, but can't see the credentials."));
     const agents = computer()?.agents ?? [];
     const month = monthName(uses?.month);
     const groups = [

@@ -683,7 +683,12 @@ label.settings-line { cursor: pointer; }
 }
 /* settings' connections (Skyler's design, 2026-11-04): a card per provider,
    in two groups, each opening its sheet (connections.js connectionsSection) */
-.provider-group-head { display: flex; align-items: baseline; gap: 4px 10px; flex-wrap: wrap; width: 100%; margin: 14px 0 0; padding: 0 2px; }
+/* spaced by what belongs together (Paul, 2026-11-04): a group's heading and
+   its line hug (about 4 px), its header sits 12 px over its cards, its cards
+   12 px apart (the grid's gap), and a group 30 px under the one before, as the
+   first is under the intro (its 12 px padding, and this 14 px) */
+.provider-group-head { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; width: 100%; margin: 14px 0 12px; padding: 0 2px; }
+.provider-grid + .provider-group-head { margin-top: 28px; }
 .provider-group-head h3 { margin: 0; font: var(--type-body-strong); }
 .provider-group-head p { margin: 0; font: var(--type-body-sm); color: var(--text-tertiary); }
 .provider-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; width: 100%; }
