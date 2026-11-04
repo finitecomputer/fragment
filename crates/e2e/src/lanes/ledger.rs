@@ -290,7 +290,7 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
     let v = ledger(api, &owner);
     s.ok(
         "a new person is a seat here (FRAGMENT_DEFAULT_PLAN), with the month's included credit",
-        v["plan"] == "seat" && v["seat"] == "active" && m(&v, "includedGrantedMicros") == 50 * USD && m(&v, "balanceMicros") == 50 * USD && v["standing"]["standing"] == "ok",
+        v["plan"] == "seat" && v["seat"] == "active" && m(&v, "includedGrantedMicros") == 100 * USD && m(&v, "balanceMicros") == 100 * USD && v["standing"]["standing"] == "ok",
         &v,
     );
 
@@ -300,7 +300,7 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("only the deployment's operators grant credit", r.status == 403, &r);
     let r = command(&owner_id, "grant", grant.clone())?;
     let after = ledger(api, &owner);
-    s.ok("an operator's grant is purchased credit", r.status == 200 && m(&after, "purchasedMicros") == USD && m(&after, "balanceMicros") == 51 * USD, &after);
+    s.ok("an operator's grant is purchased credit", r.status == 200 && m(&after, "purchasedMicros") == USD && m(&after, "balanceMicros") == 101 * USD, &after);
     let r = command(&owner_id, "grant", grant.clone())?;
     s.ok("the same grant again changes nothing", r.status == 200 && ledger(api, &owner) == after, &r);
     let r = command(&owner_id, "grant", json!({ "id": "g1", "micros": 2 * USD, "by": op_id, "why": "the ledger lane" }))?;
@@ -314,7 +314,7 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
     let email = Api::email_of(&owner);
     let r = command(&email, "overdraft", json!({ "id": "o1", "micros": 2 * USD }))?;
     let again = command(&email, "overdraft", json!({ "id": "o1", "micros": 2 * USD }))?;
-    let bad = command(&email, "overdraft", json!({ "id": "o2", "micros": 2_000 * USD }))?;
+    let bad = command(&email, "overdraft", json!({ "id": "o2", "micros": 2_001 * USD }))?;
     s.ok("an operator names a person by email too; an overdraft past its limit is refused", r.status == 200 && again.status == 200 && bad.status == 400, json!([r.status, again.status, bad.status]));
     let r = command(&owner_id, "plan", json!({ "id": "p1", "plan": "emperor" }))?;
     s.ok("a plan that is none is refused", r.status == 400, &r);
@@ -552,7 +552,7 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
     let v = ledger(api, &owner);
     s.ok(
         "usage that happened is charged in full, past zero: the balance is below it",
-        run["status"] == "succeeded" && m(&v, "balanceMicros") < 0 && m(&v, "balanceMicros") > -2 * USD && v["standing"] == json!({ "standing": "agents_stopped", "why": "no_credit" }),
+        run["status"] == "succeeded" && m(&v, "balanceMicros") < 0 && m(&v, "balanceMicros") > -4 * USD && v["standing"] == json!({ "standing": "agents_stopped", "why": "no_credit" }),
         &v,
     );
     let calls = s.ai.calls().len();
@@ -611,7 +611,7 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
     let back = m(&ledger(api, &owner), "balanceMicros").unsigned_abs() as i64 + USD;
     command(&owner_id, "grant", json!({ "id": "g-back", "micros": back, "by": op_id, "why": "back above zero" }))?;
     let v = ledger(api, &owner);
-    let n = tokens_costing(GLM, 10, m(&v, "balanceMicros") + 3 * USD);
+    let n = tokens_costing(GLM, 10, m(&v, "balanceMicros") + 5 * USD);
     s.ai.set_usage(&[Used { prompt: 10, cached: 0, completion: n }]);
     // the gate heard the owner at zero: it asks afresh, now they have credit again
     forget_gate(api, &owner_id)?;
@@ -620,8 +620,8 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
     s.eventually(wait, || ledger(api, &owner)["standing"]["standing"] == "read_only");
     let v = ledger(api, &owner);
     s.ok(
-        "a charge past the $2 overdraft makes the person's fragments read-only",
-        run["status"] == "succeeded" && m(&v, "balanceMicros") <= -2 * USD && v["standing"] == json!({ "standing": "read_only", "why": "overdrawn" }),
+        "a charge past the $4 overdraft makes the person's fragments read-only",
+        run["status"] == "succeeded" && m(&v, "balanceMicros") <= -4 * USD && v["standing"] == json!({ "standing": "read_only", "why": "overdrawn" }),
         &v,
     );
     // the fragment trusts what it heard of its owner's standing for up to a minute
@@ -721,7 +721,7 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
     let ours = settle(api, &owner, &name, started(&r), &["succeeded", "held"], wait);
     s.ok("while its owner's goes on", ours["status"] == "succeeded" && ours["output"]["text"] == "echo: from its owner", &ours);
     let r = api.signed(&owner, "PUT", &format!("/api/f/{name}/cap"), Some(&json!({ "id": "c3", "micros": null })))?;
-    s.ok("a cap goes back to the default ($5)", r.status == 200 && r.body["capMicros"] == 5 * USD && r.body["default"] == true, &r);
+    s.ok("a cap goes back to the default ($10)", r.status == 200 && r.body["capMicros"] == 10 * USD && r.body["default"] == true, &r);
 
     // ---- the model route, called as an agent: metered from the final usage
     let hand = Keys::generate();
@@ -1367,7 +1367,7 @@ fn meters(s: &mut Suite, api: &Api, wait: Duration) -> Result<()> {
         acked && counted >= 6 && landed("req") && rows("req").iter().all(|e| e["entry"]["row"]["fragment"] == name.as_str()),
         json!({ "sent": sent, "ledger": rows("req") }),
     );
-    s.ok("its code version is one dynamic worker today, once however often it ran", rows("dw").len() == 1 && rows("dw")[0]["entry"]["charge"] == 3_000, json!(rows("dw")));
+    s.ok("its code version is one dynamic worker today, once however often it ran", rows("dw").len() == 1 && rows("dw")[0]["entry"]["charge"] == charge(&Usage::DynamicWorkers { count: 1 }), json!(rows("dw")));
     // its card's shot: the browser time it took, at the book's browser-hour price
     let shot = |e: &Value| -> bool {
         let usage: Option<Usage> = serde_json::from_value(e["entry"]["row"]["usage"].clone()).ok();

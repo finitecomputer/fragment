@@ -214,12 +214,21 @@ async fn pack_paid(env: &Env, session: &CheckoutSession) -> CellResult<bool> {
     };
     let grant = GrantCredit {
         id: format!("pack:{}", session.id),
-        micros: core_stripe::PACK_MICROS,
+        micros: core_stripe::PACK_CREDIT_MICROS,
         by: "stripe".into(),
-        why: format!("a ${} credit pack (Stripe Checkout {})", core_stripe::PACK_CENTS / 100, session.id),
+        why: format!("${} of credit for ${} (Stripe Checkout {})", core_stripe::PACK_CREDIT_MICROS / fragment_core::price::USD, core_stripe::PACK_CENTS / 100, session.id),
     };
-    crate::ledger::ask(env, person, &grant).await.map_err(|e| CellError::new(e.code, format!("{person}'s ledger: {}", e.message)))?;
-    Ok(true)
+    match crate::ledger::ask(env, person, &grant).await {
+        Ok(_) => Ok(true),
+        // its Checkout's id was granted already, as a pack was before book 9
+        // ($25, doubled by the ledger's switch since): a return or a webhook
+        // again, after the switch, finds it paid
+        Err(e) if e.code == ErrorCode::ConflictingBody => {
+            console_log!("{}", json!({ "event": "billing.pack-granted-before", "session": session.id }));
+            Ok(true)
+        }
+        Err(e) => Err(CellError::new(e.code, format!("{person}'s ledger: {}", e.message))),
+    }
 }
 
 /// The subscription `id`, fetched from Stripe, as the registry keeps it.

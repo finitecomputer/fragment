@@ -519,6 +519,23 @@ impl Store for SqlStore {
         }
     }
 
+    fn double_caps(&mut self, max: i64) {
+        self.exec("UPDATE caps SET micros = MIN(micros * 2, ?)", vec![SqlStorageValue::Integer(max)]);
+    }
+
+    fn switched(&self, version: u32) -> bool {
+        #[derive(Deserialize)]
+        struct Row {
+            #[allow(dead_code)]
+            at_ms: i64,
+        }
+        !self.rows::<Row>("SELECT at_ms FROM switches WHERE version = ?", vec![SqlStorageValue::Integer(version.into())]).is_empty()
+    }
+
+    fn put_switched(&mut self, version: u32, at_ms: i64) {
+        self.exec("INSERT INTO switches (version, at_ms) VALUES (?, ?) ON CONFLICT (version) DO NOTHING", vec![SqlStorageValue::Integer(version.into()), SqlStorageValue::Integer(at_ms)]);
+    }
+
     fn prune(&mut self, before_ms: i64, before_month: Month) -> u64 {
         let before = SqlStorageValue::Integer(before_ms);
         let forgotten = self.count(
@@ -536,8 +553,21 @@ impl Store for SqlStore {
 /// org's (`Ledger::bind_org`), or a new one: an org's, with no credit
 /// (`Ledger::new_org`), or a person's, a guest with no credit
 /// (`Ledger::new`), then the deployment's default plan for new people
-/// (decision 25: `FRAGMENT_DEFAULT_PLAN`).
+/// (decision 25: `FRAGMENT_DEFAULT_PLAN`). Then book 9's switch, once
+/// (`Ledger::switch_prices`): a head kept before it is switched, and a head
+/// made now is made at its prices (`core::prices_switched`).
 fn head(store: &mut SqlStore, cfg: &Config, now_ms: i64) -> CellResult<Ledger> {
+    let (mut ledger, made) = kept_or_made(store, cfg, now_ms)?;
+    if made {
+        core::prices_switched(store, now_ms);
+    } else if ledger.switch_prices(store, now_ms) {
+        console_log!("{}", json!({ "event": "ledger.prices-switched", "book": core::PRICES_DOUBLED, "org": ledger.is_org() }));
+    }
+    Ok(ledger)
+}
+
+/// The head as kept (`false`), or a new one (`true`).
+fn kept_or_made(store: &mut SqlStore, cfg: &Config, now_ms: i64) -> CellResult<(Ledger, bool)> {
     // an org's terms are never in its head (an older release's sweep
     // rewrites the head it reads): that it is an org's is its name, kept
     // as its first call named it, and its budget a row of its own
@@ -558,17 +588,17 @@ fn head(store: &mut SqlStore, cfg: &Config, now_ms: i64) -> CellResult<Ledger> {
             ledger.bind_org(terms);
         }
         ledger.assert_valid();
-        return Ok(ledger);
+        return Ok((ledger, false));
     }
     if org.is_some() {
-        return Ok(Ledger::new_org(now_ms));
+        return Ok((Ledger::new_org(now_ms), true));
     }
     let mut ledger = Ledger::new(now_ms);
     if cfg.default_plan != Plan::Guest {
         let set = SetPlan { id: DEFAULT_PLAN_ID.into(), plan: cfg.default_plan };
         ledger.set_plan(store, &set, now_ms).map_err(|why| CellError::host(format!("a new ledger refused its default plan: {}", why.message())))?;
     }
-    Ok(ledger)
+    Ok((ledger, true))
 }
 
 /// Writes the head back, and an org's budget in its own row, which no

@@ -308,8 +308,8 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     let steps = api.unsigned("POST", "/api/test/ledger", Some(&json!({ "identity": owner_id, "op": "entries", "prefix": format!("step:{paid}@") })))?;
     let settled = steps.body["entries"].as_array().is_some_and(|e| e.len() == 1 && super::ledger::charged(&e[0]).is_some());
     // the fragments' meters land when their batches do: requests and a few
-    // dynamic workers' days (3000 µ$ each) may have charged the owner since
-    let kept = r.body["balanceMicros"].as_i64().zip(balance.as_i64()).is_some_and(|(now, then)| now <= then && then - now < 50_000 && then < 51_000_000 && then > 50_000_000);
+    // dynamic workers' days (6000 µ$ each) may have charged the owner since
+    let kept = r.body["balanceMicros"].as_i64().zip(balance.as_i64()).is_some_and(|(now, then)| now <= then && then - now < 100_000 && then < 101_000_000 && then > 100_000_000);
     s.ok("after a restart the ledger is what it was: the step's charge, the balance less it", r.status == 200 && settled && kept, json!({ "ledger": r.body, "then": balance, "steps": steps.body }));
     let capped = r.body["fragments"].as_array().is_some_and(|f| f.iter().any(|f| f["fragment"] == paid.as_str() && f["capMicros"] == 7_000_000));
     let again = api.signed(&s.operator, "POST", &format!("/api/ledger/{owner_id}/grant"), Some(&grant))?;

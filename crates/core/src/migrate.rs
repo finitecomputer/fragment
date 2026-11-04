@@ -149,7 +149,12 @@ pub const PRINCIPAL: Class = Class {
     kept: &["wiped"],
 };
 
-pub const LEDGER: Class = Class { name: "Ledger", steps: &[step!("baseline", "ledger/0001_baseline.sql")], variants: &[], kept: &["wiped"] };
+pub const LEDGER: Class = Class {
+    name: "Ledger",
+    steps: &[step!("baseline", "ledger/0001_baseline.sql"), step!("price_switches", "ledger/0002_price_switches.sql")],
+    variants: &[],
+    kept: &["wiped"],
+};
 
 pub const COMPUTER: Class = Class { name: "Computer", steps: &[step!("baseline", "computer/0001_baseline.sql"), step!("agent_accounts", "computer/0002_agent_accounts.sql")], variants: &[], kept: &["wiped"] };
 

@@ -16,8 +16,8 @@ use crate::price::{KeyPrice, PriceBook, StorageClass, UsageFault, USD};
 const FLASH: &str = "@cf/zai-org/glm-5.3-flash";
 /// A month after T0: 2026-11-01T00:00:00Z.
 const NOVEMBER: i64 = T0 + 31 * DAY_MS;
-/// A Flash turn of $0.004 at list, charged $0.0063 (price.rs).
-const TURN: i64 = 6_300;
+/// A Flash turn of $0.004 at list, charged $0.0126 (price.rs).
+const TURN: i64 = 12_600;
 
 fn flash(input: u64, output: u64) -> Usage {
     Usage::Tokens { model: FLASH.into(), input, cached_input: 0, cache_write: 0, output }
@@ -27,14 +27,14 @@ fn turn() -> Usage {
     flash(26_000, 200)
 }
 
-/// The default book, plus a key that charges one micro-dollar a unit (2
-/// per 3 units, × 1.5): `spend` moves the balance by exact amounts.
+/// The default book, plus a key that charges one micro-dollar a unit (1
+/// per 3 units, × 3): `spend` moves the balance by exact amounts.
 /// The defaults' prices, at version 1 (the books these tests set are
 /// numbered from there), and a key.
 fn book() -> PriceBook {
     let mut book = PriceBook::defaults();
     book.version = 1;
-    book.keys.push(KeyPrice { key: "micro".into(), micros: 2, per: 3 });
+    book.keys.push(KeyPrice { key: "micro".into(), micros: 1, per: 3 });
     book
 }
 
@@ -190,8 +190,8 @@ fn the_standing_is_a_pure_function_of_plan_seat_balance_and_latch() {
     for (plan, seat, balance, read_only, standing) in cases {
         assert_eq!(standing_of(plan, seat, balance, read_only), standing, "{plan:?} {seat:?} {balance} {read_only}");
     }
-    assert_eq!(included(Plan::Seat, Active), 50 * USD);
-    assert_eq!(included(Plan::SeatAlwaysOn, Active), 100 * USD);
+    assert_eq!(included(Plan::Seat, Active), 100 * USD);
+    assert_eq!(included(Plan::SeatAlwaysOn, Active), 200 * USD, "the $200 seat shows $200 of credit (book 9)");
     for (p, s) in [(Plan::Guest, Active), (Plan::Seat, PastDue), (Plan::SeatAlwaysOn, Canceled)] {
         assert_eq!(included(p, s), 0, "{p:?} {s:?}");
     }
@@ -229,11 +229,11 @@ fn a_guest_makes_no_fragments_and_a_seat_does() {
     assert!(refused.message().starts_with("guests can't create fragments"), "{}", refused.message());
     w.ok(plan("plan:seat", Plan::Seat));
     assert_eq!(may(&w), Ok(()), "a seat makes fragments");
-    w.spend("b1", 50 * USD);
+    w.spend("b1", 100 * USD);
     assert_eq!((w.ledger.standing(T0), may(&w)), (Standing::AgentsStopped { why: Why::NoCredit }, Ok(())), "at zero too, as it writes");
     w.ok(seat("s1", SeatState::Canceled, 1));
     assert_eq!(may(&w), Ok(()), "a canceled seat too, on what is left");
-    w.spend("b2", 2 * USD);
+    w.spend("b2", 4 * USD);
     assert_eq!(may(&w), Err(Refused::ReadOnly { why: Why::Overdrawn }), "past the overdraft its fragments are read-only, a new one too");
     w.ok(plan("plan:guest", Plan::Guest));
     assert_eq!(may(&w), Err(Refused::GuestCreates), "made a guest again: the plan first");
@@ -251,7 +251,7 @@ fn a_grant_adds_purchased_credit_once() {
     let mut w = World::seat();
     w.replays(grant("g1", 10 * USD));
     let s = w.status();
-    assert_eq!((s.balance_micros, s.purchased_micros, s.included_micros), (60 * USD, 10 * USD, 50 * USD));
+    assert_eq!((s.balance_micros, s.purchased_micros, s.included_micros), (110 * USD, 10 * USD, 100 * USD));
     assert_eq!(w.ledger.totals().purchased, 10 * USD);
     w.refused(grant("g1", 11 * USD), Refused::ConflictingBody);
     w.refused(plan("g1", Plan::Guest), Refused::ConflictingBody);
@@ -305,14 +305,14 @@ fn a_seats_credit_is_spent_first_and_expires_with_its_month() {
     w.ok(grant("g1", 20 * USD));
     w.spend("b1", 3 * USD);
     let s = w.status();
-    assert_eq!((s.included_micros, s.purchased_micros), (47 * USD, 20 * USD), "included credit first");
+    assert_eq!((s.included_micros, s.purchased_micros), (97 * USD, 20 * USD), "included credit first");
     w.now = NOVEMBER;
     w.spend("b2", USD);
     let s = w.status();
-    assert_eq!((s.month.as_str(), s.included_micros, s.purchased_micros), ("2026-11", 49 * USD, 20 * USD));
-    assert_eq!(w.ledger.totals().expired, 47 * USD, "October's credit expired");
+    assert_eq!((s.month.as_str(), s.included_micros, s.purchased_micros), ("2026-11", 99 * USD, 20 * USD));
+    assert_eq!(w.ledger.totals().expired, 97 * USD, "October's credit expired");
     // a credit that runs out spends purchased credit next
-    w.spend("b3", 60 * USD);
+    w.spend("b3", 110 * USD);
     let s = w.status();
     assert_eq!((s.included_micros, s.purchased_micros, s.balance_micros), (0, 9 * USD, 9 * USD));
 }
@@ -323,16 +323,16 @@ fn a_plan_that_grows_mid_month_gets_the_difference_once() {
     w.spend("b1", 10 * USD);
     w.replays(plan("p2", Plan::SeatAlwaysOn));
     let s = w.status();
-    assert_eq!((s.included_granted_micros, s.included_micros), (100 * USD, 90 * USD), "the larger seat's credit, less what was spent");
+    assert_eq!((s.included_granted_micros, s.included_micros), (200 * USD, 190 * USD), "the larger seat's credit, less what was spent");
     // a plan that shrinks takes nothing back; growing again grants nothing new
     w.ok(plan("p3", Plan::Seat));
     w.ok(plan("p4", Plan::SeatAlwaysOn));
-    assert_eq!((w.status().included_granted_micros, w.status().included_micros), (100 * USD, 90 * USD));
-    assert_eq!(w.ledger.totals().included, 100 * USD);
+    assert_eq!((w.status().included_granted_micros, w.status().included_micros), (200 * USD, 190 * USD));
+    assert_eq!(w.ledger.totals().included, 200 * USD);
     w.refused(plan("p2", Plan::Guest), Refused::ConflictingBody);
     w.ok(plan("p5", Plan::Seat));
     w.now = NOVEMBER;
-    assert_eq!(w.status().included_micros, 50 * USD, "November's credit is the plan's then");
+    assert_eq!(w.status().included_micros, 100 * USD, "November's credit is the plan's then");
 }
 
 // Seats
@@ -341,13 +341,13 @@ fn a_plan_that_grows_mid_month_gets_the_difference_once() {
 fn a_seat_past_due_keeps_this_month_and_waits_for_the_next() {
     let mut w = World::seat();
     w.replays(seat("s1", SeatState::PastDue, 1));
-    assert_eq!((w.status().included_micros, w.ledger.standing(T0)), (50 * USD, Standing::Ok));
+    assert_eq!((w.status().included_micros, w.ledger.standing(T0)), (100 * USD, Standing::Ok));
     w.now = NOVEMBER;
     w.ok(seat("s0", SeatState::PastDue, 2));
     let s = w.status();
     assert_eq!((s.included_micros, s.standing), (0, Standing::AgentsStopped { why: Why::NoCredit }));
     w.ok(seat("s2", SeatState::Active, 3));
-    assert_eq!(w.status().included_micros, 50 * USD, "November's credit when the seat is active again");
+    assert_eq!(w.status().included_micros, 100 * USD, "November's credit when the seat is active again");
 }
 
 #[test]
@@ -361,7 +361,7 @@ fn a_canceled_seat_stops_agents_and_its_fragments_keep_writing() {
     }
     assert_eq!(w.ledger.gate(Spend::Write, T0), Ok(()));
     w.spend("b1", USD);
-    assert_eq!(w.balance(), 49 * USD, "its fragments' hosting is still metered");
+    assert_eq!(w.balance(), 99 * USD, "its fragments' hosting is still metered");
 }
 
 /// Pushes arrive out of order: a late `active` never undoes a `canceled`,
@@ -400,7 +400,7 @@ fn a_seat_change_older_than_the_last_is_refused_as_stale() {
 #[test]
 fn at_zero_agents_stop_and_fragments_write_until_the_overdraft() {
     let mut w = World::seat();
-    w.spend("b1", 50 * USD);
+    w.spend("b1", 100 * USD);
     let no_credit = Refused::AgentsStopped { why: Why::NoCredit };
     assert_eq!(w.ledger.standing(T0), Standing::AgentsStopped { why: Why::NoCredit });
     for spend in [Spend::AgentTurn, Spend::AiStep, Spend::Wake] {
@@ -409,17 +409,17 @@ fn at_zero_agents_stop_and_fragments_write_until_the_overdraft() {
     assert_eq!(w.ledger.gate(Spend::Write, T0), Ok(()));
     assert_eq!(w.status().available_micros, OVERDRAFT_DEFAULT, "what may still be charged before read-only: the overdraft's room");
     // meters always record: what happened is charged
-    w.spend("b2", 3 * USD / 2);
-    assert_eq!((w.balance(), w.ledger.standing(T0)), (-3 * USD / 2, Standing::AgentsStopped { why: Why::NoCredit }));
-    w.spend("b3", USD / 2);
+    w.spend("b2", 3 * USD);
+    assert_eq!((w.balance(), w.ledger.standing(T0)), (-3 * USD, Standing::AgentsStopped { why: Why::NoCredit }));
+    w.spend("b3", USD);
     let read_only = Refused::ReadOnly { why: Why::Overdrawn };
-    assert_eq!((w.balance(), w.ledger.standing(T0)), (-2 * USD, Standing::ReadOnly { why: Why::Overdrawn }), "read-only at the overdraft");
+    assert_eq!((w.balance(), w.ledger.standing(T0)), (-4 * USD, Standing::ReadOnly { why: Why::Overdrawn }), "read-only at the overdraft");
     assert_eq!(w.ledger.gate(Spend::Write, T0), Err(read_only));
     assert_eq!(w.ledger.gate(Spend::AgentTurn, T0), Err(read_only));
     assert_eq!(w.status().available_micros, 0, "read-only, nothing more");
-    w.spend("b4", USD);
+    w.spend("b4", 2 * USD);
     // a top-up that leaves the balance at or below zero keeps it read-only
-    w.ok(grant("g1", 3 * USD));
+    w.ok(grant("g1", 6 * USD));
     assert_eq!((w.balance(), w.ledger.standing(T0)), (0, Standing::ReadOnly { why: Why::Overdrawn }));
     w.ok(grant("g2", 1));
     assert_eq!((w.balance(), w.ledger.standing(T0)), (1, Standing::Ok), "writable and running above zero");
@@ -428,7 +428,7 @@ fn at_zero_agents_stop_and_fragments_write_until_the_overdraft() {
 #[test]
 fn an_operator_sets_the_overdraft_and_read_only_follows() {
     let mut w = World::seat();
-    w.spend("b1", 51 * USD);
+    w.spend("b1", 101 * USD);
     assert_eq!(w.ledger.standing(T0), Standing::AgentsStopped { why: Why::NoCredit });
     w.replays(overdraft("o1", 0));
     assert_eq!(w.ledger.standing(T0), Standing::ReadOnly { why: Why::Overdrawn }, "no overdraft: read-only below zero");
@@ -446,15 +446,15 @@ fn an_operator_sets_the_overdraft_and_read_only_follows() {
 #[test]
 fn a_debt_is_paid_once_from_the_next_months_credit() {
     let mut w = World::seat();
-    w.spend("b1", 51 * USD + USD / 2);
+    w.spend("b1", 101 * USD + USD / 2);
     assert_eq!((w.status().included_micros, w.status().purchased_micros), (0, -3 * USD / 2));
     w.now = NOVEMBER;
     let s = w.status();
-    assert_eq!((s.included_micros, s.purchased_micros, s.balance_micros), (48 * USD + USD / 2, 0, 48 * USD + USD / 2));
+    assert_eq!((s.included_micros, s.purchased_micros, s.balance_micros), (98 * USD + USD / 2, 0, 98 * USD + USD / 2));
     w.spend("b2", USD);
     w.now = T0 + 61 * DAY_MS;
     let s = w.status();
-    assert_eq!((s.month.as_str(), s.included_micros, s.purchased_micros), ("2026-12", 50 * USD, 0), "December owes nothing");
+    assert_eq!((s.month.as_str(), s.included_micros, s.purchased_micros), ("2026-12", 100 * USD, 0), "December owes nothing");
 }
 
 // Caps
@@ -581,7 +581,7 @@ fn a_key_the_configuration_adds_is_priced_at_the_next_call() {
     assert_eq!(w.book.price(&call), Err(PriceError::NoPrice), "the book configured before has no price for the key");
     w.ok(Op::Book(configured.clone()));
     // $35 per thousand calls, and the margin
-    let charge = 52_500;
+    let charge = 105_000;
     let charged = Outcome::Metered(Metered { charged: charge, rows_new: 1, rows_before: 0, refused: vec![] });
     assert_eq!(w.replays(charge_call.clone()), charged);
     let mut w = w.restarted();
@@ -603,11 +603,11 @@ fn a_key_the_configuration_adds_is_priced_at_the_next_call() {
 fn a_retried_step_after_a_storage_failure_never_pays_twice() {
     let mut w = World::seat();
     let step = "step:avatar-lab.paul@1/run/7/step/2";
-    assert_eq!(w.charged(step, flash(10_000, 1_000)), 3_150);
+    assert_eq!(w.charged(step, flash(10_000, 1_000)), 6_300);
     // storing the image failed; the job retries the step, which finds what it kept
     let again = w.ok(meter("frag:avatar-lab.paul@1:2", vec![row(step, flash(10_000, 1_000), None, T0)]));
     assert_eq!(again, Outcome::Metered(Metered { charged: 0, rows_new: 0, rows_before: 1, refused: vec![] }));
-    assert_eq!(w.ledger.totals().charged, 3_150, "one paid call, metered once");
+    assert_eq!(w.ledger.totals().charged, 6_300, "one paid call, metered once");
 }
 
 // Meters
@@ -625,12 +625,12 @@ fn a_batch_charges_each_row_once_whatever_batch_carries_it() {
         row("shot:1", Usage::Browser { ms: 3_000 }, Some("site.ann"), T0),
         row("img:1", Usage::Images { count: 1 }, Some("site.ann"), T0),
     ];
-    let charged = TURN + 17_325 + 96_336 + 300_000 + 675_000 + 3_000 + 113 + 750;
+    let charged = TURN + 34_650 + 192_672 + 600_000 + 1_350_000 + 6_000 + 225 + 1_500;
     let answer = w.replays(meter("b1", rows.clone()));
     assert_eq!(answer, Outcome::Metered(Metered { charged, rows_new: 8, rows_before: 0, refused: vec![] }));
-    assert_eq!(w.balance(), 50 * USD - charged);
+    assert_eq!(w.balance(), 100 * USD - charged);
     let spends: Vec<(String, i64)> = w.status().fragments.into_iter().map(|f| (f.fragment, f.spent_micros)).collect();
-    assert_eq!(spends, [("todo.ann".to_string(), 978_000), ("chat.ann".to_string(), TURN + 17_325), ("site.ann".to_string(), 863)]);
+    assert_eq!(spends, [("todo.ann".to_string(), 1_956_000), ("chat.ann".to_string(), TURN + 34_650), ("site.ann".to_string(), 1_725)]);
     // the same rows in another batch: charged before, not again
     let again = w.ok(meter("b2", rows.clone()));
     assert_eq!(again, Outcome::Metered(Metered { charged: 0, rows_new: 0, rows_before: 8, refused: vec![] }));
@@ -646,7 +646,7 @@ fn a_batch_retried_after_a_crash_between_meter_and_flush_is_applied_once() {
     let first = w.ok(batch.clone());
     let mut w = w.restarted();
     assert_eq!(w.ok(batch), first, "the retried batch answers as it did");
-    assert_eq!(w.ledger.totals().charged, 16_056, "ten minutes awake, charged once");
+    assert_eq!(w.ledger.totals().charged, 32_112, "ten minutes awake, charged once");
 }
 
 #[test]
@@ -705,13 +705,13 @@ fn every_refusal_of_a_row() {
             (11, Refused::ConflictingBody),
         ]
     );
-    assert_eq!((m.rows_new, m.rows_before, m.charged), (2, 1, 2), "row:8 once, its twin as before, and row:9");
+    assert_eq!((m.rows_new, m.rows_before, m.charged), (2, 1, 4), "row:8 once, its twin as before, and row:9");
     // once the book prices it, the refused row comes again
     let mut priced = book();
     priced.instances.push(price::InstancePrice { instance: "8vcpu".into(), hour: 3_600_000 });
     w.ok(Op::Book(priced));
     let again = w.ok(meter("b2", vec![row("row:6", Usage::Awake { instance: "8vcpu".into(), ms: 1 }, None, now)]));
-    assert_eq!(again, Outcome::Metered(Metered { charged: 2, rows_new: 1, rows_before: 0, refused: vec![] }));
+    assert_eq!(again, Outcome::Metered(Metered { charged: 3, rows_new: 1, rows_before: 0, refused: vec![] }));
 }
 
 /// Decision 25: a $200 seat's always-on computer is not metered for its
@@ -724,10 +724,10 @@ fn an_always_on_seats_awake_time_is_not_charged() {
     let answer = w.ok(meter("b1", vec![row("awake:1", hour(), None, T0)]));
     assert_eq!(answer, Outcome::Metered(Metered { charged: 0, rows_new: 1, rows_before: 0, refused: vec![] }));
     let Some(Entry::Row { priced, charge, .. }) = w.store.entry("awake:1") else { panic!("the row is kept") };
-    assert_eq!((priced.charge, charge), (96_336, 0));
+    assert_eq!((priced.charge, charge), (192_672, 0));
     w.ok(plan("p3", Plan::Seat));
     let answer = w.ok(meter("b2", vec![row("awake:2", hour(), None, T0)]));
-    assert_eq!(answer, Outcome::Metered(Metered { charged: 96_336, rows_new: 1, rows_before: 0, refused: vec![] }));
+    assert_eq!(answer, Outcome::Metered(Metered { charged: 192_672, rows_new: 1, rows_before: 0, refused: vec![] }));
 }
 
 // Sweeps
@@ -741,11 +741,11 @@ fn a_sweep_forgets_what_is_past_the_ledgers_memory() {
     assert_eq!(w.ledger.next_sweep_ms(w.now), w.now + SWEEP_EVERY_MS, "a sweep a day");
     w.now += 1;
     assert_eq!(w.ok(Op::Sweep), Outcome::Swept(Swept { forgotten: 2 }), "a reference and a batch");
-    assert_eq!(w.store.spent(Month::of(T0), "todo.ann"), 1, "October's spend is kept while part of October is remembered");
+    assert_eq!(w.store.spent(Month::of(T0), "todo.ann"), 2, "October's spend is kept while part of October is remembered");
     // a row from then, sent again, is refused as stale: it is never charged twice
     let Outcome::Metered(m) = w.ok(meter("b1", vec![row("row:1", Usage::Requests { count: 1 }, Some("todo.ann"), T0)])) else { panic!() };
     assert_eq!(m.refused, [RowRefused { index: 0, why: Refused::Stale }]);
-    assert_eq!(w.ledger.totals().charged, 1);
+    assert_eq!(w.ledger.totals().charged, 2);
     w.now = NOVEMBER + REF_KEEP_MS;
     w.ok(Op::Sweep);
     assert_eq!(w.store.spent(Month::of(T0), "todo.ann"), 0, "and forgotten once all of October is");
@@ -759,10 +759,10 @@ fn a_read_sees_its_own_month_and_changes_nothing() {
     w.spend("b1", 10 * USD);
     let ledger = w.ledger.clone();
     let s = w.ledger.status(&w.store, NOVEMBER, &w.book);
-    assert_eq!((s.month.as_str(), s.included_micros, s.balance_micros), ("2026-11", 50 * USD, 50 * USD));
+    assert_eq!((s.month.as_str(), s.included_micros, s.balance_micros), ("2026-11", 100 * USD, 100 * USD));
     assert_eq!(w.ledger.standing(NOVEMBER), Standing::Ok);
     assert_eq!(w.ledger, ledger, "a read rolls a copy, never the ledger");
-    assert_eq!(w.status().included_micros, 40 * USD);
+    assert_eq!(w.status().included_micros, 90 * USD);
 }
 
 // Restarts
@@ -815,7 +815,7 @@ fn every_mutation_answers_the_same_after_a_restart() {
 #[test]
 fn money_refusals_are_402_with_a_reason_people_can_read() {
     let capped = Refused::CapReached { cap: CAP_DEFAULT, spent: CAP_DEFAULT };
-    assert_eq!(capped.message(), "this fragment spent $5.00 of its $5.00 cap this month: only its owner spends in it until next month");
+    assert_eq!(capped.message(), "this fragment spent $10.00 of its $10.00 cap this month: only its owner spends in it until next month");
     for r in [Refused::AgentsStopped { why: Why::NoCredit }, Refused::ReadOnly { why: Why::Overdrawn }, capped] {
         assert_eq!(r.code(), ErrorCode::BudgetUsedUp, "{r:?}");
     }
@@ -883,13 +883,13 @@ fn a_head_kept_with_holds_loads_without_them_and_charges_nothing() {
     assert_eq!(loaded, w.ledger, "the holds are let go; nothing else moves");
     assert_eq!(serde_json::from_value::<Ledger>(old).unwrap(), loaded, "read again, the same");
     let s = loaded.status(&w.store, T0, &w.book);
-    assert_eq!((s.balance_micros, s.reserved_micros, s.available_micros), (47 * USD, 0, 47 * USD + OVERDRAFT_DEFAULT), "nothing held, nothing charged");
-    assert_eq!(loaded.fragment_open(&w.store, "todo.ann", T0), Ok(()), "a hold no more counts toward a cap: $3 of $5");
+    assert_eq!((s.balance_micros, s.reserved_micros, s.available_micros), (97 * USD, 0, 97 * USD + OVERDRAFT_DEFAULT), "nothing held, nothing charged");
+    assert_eq!(loaded.fragment_open(&w.store, "todo.ann", T0), Ok(()), "a hold no more counts toward a cap: $3 of $10");
     w.ledger = loaded;
     let mut w = w.restarted();
     w.now += 7 * 3_600_000;
     assert_eq!(w.ok(Op::Sweep), Outcome::Swept(Swept { forgotten: 0 }));
-    assert_eq!((w.balance(), w.ledger.totals().charged), (47 * USD, 3 * USD), "no sweep charges a hold that was");
+    assert_eq!((w.balance(), w.ledger.totals().charged), (97 * USD, 3 * USD), "no sweep charges a hold that was");
     let written = serde_json::to_value(&w.ledger).unwrap();
     assert!(written.get("holds").is_none(), "written back without them: {written}");
 }
@@ -907,7 +907,7 @@ fn a_head_kept_with_its_book_loads_and_charges_with_the_configured_one() {
     assert_eq!(loaded, w.ledger, "the book is let go; nothing else moves");
     w.ledger = loaded;
     let mut w = w.restarted();
-    assert_eq!(w.charged("aig:1", turn()), TURN, "priced with the configured book (a 50% margin), not the head's (100%)");
+    assert_eq!(w.charged("aig:1", turn()), TURN, "priced with the configured book (a 200% margin), not the head's (100%)");
     assert_eq!(w.status().price_book, 1, "and the status names the configured one");
 }
 
@@ -943,4 +943,121 @@ fn an_old_reservation_entry_reads_as_one_from_before() {
     w.now += 1;
     w.ok(Op::Sweep);
     assert_eq!(w.store.entry("aig:old"), None, "forgotten as any is");
+}
+
+/// A head as a release before book `PRICES_DOUBLED` wrote it, in its
+/// amounts (no `switched` total): `plan` and `seat`, this month's
+/// included credit `granted` with `left` of it, bought credit `bought`
+/// left (below zero, owed), at `overdraft`, its totals what moved it.
+fn head_before(plan: Plan, seat: SeatState, granted: i64, left: i64, bought: i64, overdraft: i64) -> Ledger {
+    let purchased = bought.max(0) + 10 * USD;
+    let charged = (granted - left) + (purchased - bought);
+    let balance = left + bought;
+    let head = serde_json::json!({ "money": {
+        "plan": plan, "seat": seat, "seat_seq": 1, "overdraft": overdraft, "month": Month::of(T0),
+        "included_granted": granted, "included_left": left, "purchased_left": bought,
+        "read_only": balance <= -overdraft,
+        "totals": { "purchased": purchased, "included": granted, "expired": 0, "charged": charged },
+    } });
+    let ledger: Ledger = serde_json::from_value(head).expect("a head from before reads");
+    ledger.assert_valid();
+    ledger
+}
+
+/// Goal (Paul, 2026-11-04: "go now and we just reset everyone's usage this
+/// month. $50 of credit for $25"): every charge doubled, a ledger's credit
+/// buys what it did. Valid: a $200 seat with $30 of its $100 used and $10
+/// bought left has $200 of included credit, none used, $20 bought, a $4
+/// overdraft, and its own caps doubled within `CAP_MAX`; what it gave is
+/// counted. Replay: a second switch changes nothing. Restart: the head and
+/// store written and read back switch no more. Then a turn costs twice
+/// what it did, and next month grants $200. Method: a head and store as a
+/// release before kept them.
+#[test]
+fn the_switch_doubles_what_credit_buys_once() {
+    let at = T0 + 10 * DAY_MS;
+    let mut l = head_before(Plan::SeatAlwaysOn, SeatState::Active, 100 * USD, 70 * USD, 10 * USD, 2 * USD);
+    let mut s = Memory::default();
+    s.set_cap("f1--0a1b", Some(5 * USD));
+    s.set_cap("f2--0a1b", Some(15_000 * USD));
+    assert!(l.switch_prices(&mut s, at), "switched now");
+    let status = l.status(&s, at, &book());
+    assert_eq!(
+        (status.included_granted_micros, status.included_micros, status.purchased_micros, status.balance_micros, status.overdraft_micros, status.standing),
+        (200 * USD, 200 * USD, 20 * USD, 220 * USD, 4 * USD, Standing::Ok)
+    );
+    assert_eq!(l.totals().switched, 30 * USD + 10 * USD, "the month's use given back, the bought credit's double");
+    assert_eq!((s.cap("f1--0a1b"), s.cap("f2--0a1b")), (Some(10 * USD), Some(CAP_MAX)), "own caps doubled, within the limit");
+    assert!(s.switched(PRICES_DOUBLED));
+    // replay
+    let (before, store_before) = (l.clone(), s.clone());
+    assert!(!l.switch_prices(&mut s, at + 1), "once");
+    assert_eq!((&l, &s), (&before, &store_before), "a replay changes nothing");
+    // restart
+    let mut l: Ledger = serde_json::from_str(&serde_json::to_string(&l).unwrap()).unwrap();
+    let mut s: Memory = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+    assert!(!l.switch_prices(&mut s, at + 2), "a restart switches no more");
+    assert_eq!(l, before);
+    // a turn charges twice what it did, from the included credit
+    let charged = l.meter(&mut s, &Meter { batch: "b1".into(), rows: vec![row("aig:1", turn(), None, at)] }, at, &PriceBook::defaults()).unwrap().charged;
+    assert_eq!(charged, TURN, "$0.0126, where it was $0.0063");
+    assert_eq!(l.status(&s, at, &book()).included_micros, 200 * USD - TURN);
+    // next month grants the new amount
+    assert_eq!(l.status(&s, NOVEMBER, &book()).included_micros, SEAT_ALWAYS_ON_INCLUDED);
+}
+
+/// Goal: the switch clears a debt and takes nothing back. A $50 seat past
+/// due this month, its $50 used and $3 owed (read-only at its $2
+/// overdraft), has $100 included and nothing owed, writable again (past
+/// due keeps this month's credit, as it always did); a guest's included
+/// credit stays none. Bound: an overdraft at the old limit is at the new
+/// one. Method: heads as a release before kept them.
+#[test]
+fn the_switch_clears_a_debt_and_takes_nothing_back() {
+    let mut l = head_before(Plan::Seat, SeatState::PastDue, 50 * USD, 0, -3 * USD, 2 * USD);
+    assert_eq!(l.standing(T0), Standing::ReadOnly { why: Why::Overdrawn });
+    let mut s = Memory::default();
+    assert!(l.switch_prices(&mut s, T0));
+    let status = l.status(&s, T0, &book());
+    assert_eq!((status.included_micros, status.purchased_micros, status.balance_micros, status.standing), (100 * USD, 0, 100 * USD, Standing::Ok));
+    assert_eq!(l.totals().switched, 50 * USD + 3 * USD, "its month's use given back, its debt cleared");
+    let mut guest = head_before(Plan::Guest, SeatState::Active, 0, 0, 0, 1_000 * USD);
+    let mut s = Memory::default();
+    assert!(guest.switch_prices(&mut s, T0));
+    let status = guest.status(&s, T0, &book());
+    assert_eq!((status.included_granted_micros, status.balance_micros, status.overdraft_micros), (0, 0, OVERDRAFT_MAX));
+}
+
+/// Goal: an org's credit and budget buy what they did: $25 of credit and a
+/// $10 budget are $50 and $20; its overdraft stays none and it has no
+/// included credit. Replay: once. Method: an org's ledger.
+#[test]
+fn an_orgs_switch_doubles_its_credit_and_budget() {
+    let mut l = Ledger::new_org(T0);
+    let mut s = Memory::default();
+    l.grant(&mut s, &GrantCredit { id: "pack:cs_1".into(), micros: 25 * USD, by: "stripe".into(), why: "a pack".into() }, T0).unwrap();
+    l.set_budget(&mut s, &fragment_proto::ledger::OrgBudget { id: "b1".into(), micros: 10 * USD }, T0).unwrap();
+    assert!(l.switch_prices(&mut s, T0));
+    let status = l.org_status("org-0123456789abcdef", &s, T0, &book()).unwrap();
+    assert_eq!((status.balance_micros, status.budget_micros), (50 * USD, 20 * USD));
+    assert_eq!((l.totals().included, l.totals().switched), (0, 25 * USD));
+    assert!(!l.switch_prices(&mut s, T0 + 1));
+    assert_eq!(l.org_status("org-0123456789abcdef", &s, T0, &book()).unwrap().budget_micros, 20 * USD);
+}
+
+/// Goal: a ledger made at these prices is never doubled: made, it is
+/// recorded as switched (`prices_switched`), and its first call's switch
+/// changes nothing. Invalid as a switch would be: its $200 doubled.
+/// Method: a new $200 seat.
+#[test]
+fn a_ledger_made_now_is_made_at_these_prices() {
+    let mut l = Ledger::new(T0);
+    let mut s = Memory::default();
+    l.set_plan(&mut s, &SetPlan { id: "p1".into(), plan: Plan::SeatAlwaysOn }, T0).unwrap();
+    l.grant(&mut s, &GrantCredit { id: "pack:cs_1".into(), micros: 50 * USD, by: "stripe".into(), why: "a pack".into() }, T0).unwrap();
+    prices_switched(&mut s, T0);
+    let before = l.clone();
+    assert!(!l.switch_prices(&mut s, T0 + 1));
+    assert_eq!(l, before);
+    assert_eq!(l.status(&s, T0, &book()).balance_micros, 250 * USD);
 }

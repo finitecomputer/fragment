@@ -77,17 +77,25 @@ pub fn for_sale(kind: SeatKind) -> Result<SeatKind, NotSold> {
 
 /// The credit pack (decision 55): one, $25, a one-time price by its
 /// lookup key, granted on a ledger by its Checkout's id and kept until
-/// spent.
+/// spent: $50 of credit since every charge doubled (book 9; Paul,
+/// 2026-11-04: "$50 of credit for $25"), so a pack buys the use it did.
 pub const PACK_LOOKUP_KEY: &str = "fragment_credit_pack";
 pub const PACK_CENTS: i64 = 2_500;
 pub const PACK_MICROS: i64 = PACK_CENTS * CENT_MICROS;
+pub const PACK_CREDIT_MICROS: i64 = 50 * crate::price::USD;
 
 /// What is sold, as a page shows it (`GET /api/seat`'s `offer`): the one
 /// seat, its price and the credit it includes each month (the ledger's,
-/// `ledger::included`), and a pack's price. Pages read these, never their
-/// own copies.
+/// `ledger::included`), and a pack's price and the credit it grants. Pages
+/// read these, never their own copies.
 pub fn offer() -> Offer {
-    Offer { kind: SeatKind::SOLD, seat_micros: SEAT_MICROS, included_micros: crate::ledger::included(SeatKind::SOLD.plan(), SeatState::Active), pack_micros: PACK_MICROS }
+    Offer {
+        kind: SeatKind::SOLD,
+        seat_micros: SEAT_MICROS,
+        included_micros: crate::ledger::included(SeatKind::SOLD.plan(), SeatState::Active),
+        pack_micros: PACK_MICROS,
+        pack_credit_micros: PACK_CREDIT_MICROS,
+    }
 }
 
 /// Whether metadata names this deployment: fragment's, and this one's.
@@ -532,7 +540,7 @@ mod tests {
         assert_eq!((SEAT_LOOKUP_KEY, SEAT_CENTS), ("fragment_seat_always_on_month", 20_000));
         // what a page shows is these, the always-on seat's included credit the ledger's
         let o = offer();
-        assert_eq!((o.kind, o.seat_micros, o.included_micros, o.pack_micros), (SeatKind::SeatAlwaysOn, 200_000_000, crate::ledger::SEAT_ALWAYS_ON_INCLUDED, 25_000_000));
+        assert_eq!((o.kind, o.seat_micros, o.included_micros, o.pack_micros, o.pack_credit_micros), (SeatKind::SeatAlwaysOn, 200_000_000, 200_000_000, 25_000_000, 50_000_000), "the $200 seat shows $200 of credit; a $25 pack grants $50");
         assert_eq!(EVENTS.len(), 4);
     }
 }

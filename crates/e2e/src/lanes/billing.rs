@@ -385,7 +385,7 @@ pub fn billing(s: &mut Suite, api: &Api) -> Result<()> {
     let last_admin = api.signed(&ann, "DELETE", &format!("/api/org/admins/{ann_row}"), None)?;
     s.ok("the last admin, who pays, stays (409: cancel its billing first)", last_admin.status == 409 && last_admin.message().contains("cancel its subscription"), &last_admin);
 
-    // ---- credit packs: $25, kept until spent, once by their Checkout
+    // ---- credit packs: $50 of credit for $25, kept until spent, once by their Checkout
     let purchased = |k: &Keys| ledger(api, k)["purchasedMicros"].as_i64().unwrap_or(-1);
     let before = purchased(&ann);
     let r = api.signed(&ann, "POST", "/api/billing/packs", Some(&json!({})))?;
@@ -398,10 +398,10 @@ pub fn billing(s: &mut Suite, api: &Api) -> Result<()> {
         format!("{:?}", asked.form),
     );
     s.stripe.complete(&pack1).map_err(anyhow::Error::msg)?;
-    let granted = s.eventually(PUSHED, || purchased(&ann) == before + 25_000_000);
+    let granted = s.eventually(PUSHED, || purchased(&ann) == before + 50_000_000);
     let back = api.signed(&ann, "POST", &format!("/api/billing/sessions/{pack1}"), Some(&json!({})))?;
     std::thread::sleep(Duration::from_secs(1));
-    s.ok("paid, $25 of credit is theirs, once (its return again adds nothing)", granted && back.status == 200 && purchased(&ann) == before + 25_000_000, ledger(api, &ann));
+    s.ok("paid, $50 of credit is theirs, once (its return again adds nothing)", granted && back.status == 200 && purchased(&ann) == before + 50_000_000, ledger(api, &ann));
     let fay = api.person()?;
     let r = api.signed(&ann, "POST", "/api/org/seats", Some(&json!({ "email": Api::email_of(&fay) })))?;
     let fay_row = r.body["seat"]["id"].as_str().unwrap_or("").to_string();
@@ -416,8 +416,8 @@ pub fn billing(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.signed(&ann, "POST", "/api/billing/packs", Some(&json!({ "member": fay_row })))?;
     let pack2 = r.body["session"].as_str().unwrap_or("").to_string();
     s.stripe.complete(&pack2).map_err(anyhow::Error::msg)?;
-    let theirs = s.eventually(PUSHED, || purchased(&fay) == fay_before + 25_000_000);
-    s.ok("an org's admin buys a pack for a member who holds a seat: the credit is the member's", r.status == 200 && theirs && purchased(&ann) == before + 25_000_000, ledger(api, &fay));
+    let theirs = s.eventually(PUSHED, || purchased(&fay) == fay_before + 50_000_000);
+    s.ok("an org's admin buys a pack for a member who holds a seat: the credit is the member's", r.status == 200 && theirs && purchased(&ann) == before + 50_000_000, ledger(api, &fay));
     let not_admin = api.signed(&fay, "POST", "/api/billing/packs", Some(&json!({ "member": fay_row })))?;
     let seatless = api.signed(&api.person()?, "POST", "/api/billing/packs", Some(&json!({})))?;
     s.ok("a member who is no admin buys none for others (403); someone with no seat buys none (400)", not_admin.status == 403 && seatless.status == 400, json!([not_admin.status, seatless.status]));
@@ -570,7 +570,7 @@ fn org_credit(s: &mut Suite, api: &Api) -> Result<()> {
         ("someone not in it reads none of it (403)", api.signed(&xan, "GET", &format!("{root}/ledger"), None)?, 403),
         ("an org that is not there takes no credit (404)", api.signed(&s.operator, "POST", "/api/ledger/org:org-0000000000000000/grant", Some(&json!({ "id": "x", "micros": 1, "by": op, "why": "" })))?, 404),
         ("its ledger takes no plan (403)", api.signed(&s.operator, "POST", &format!("/api/ledger/org:{org}/plan"), Some(&json!({ "id": "p", "plan": "seat" })))?, 403),
-        ("a budget past its limit (400)", api.signed(&s.operator, "POST", &format!("/api/ledger/org:{org}/budget"), Some(&json!({ "id": "huge", "micros": 100_000_000_001_i64 })))?, 400),
+        ("a budget past its limit (400)", api.signed(&s.operator, "POST", &format!("/api/ledger/org:{org}/budget"), Some(&json!({ "id": "huge", "micros": fragment_core::ledger::org::BUDGET_MAX + 1 })))?, 400),
         ("a payer no one on the fleet is (404)", api.signed(&s.operator, "POST", &format!("/api/admin/orgs/{org}/payer"), Some(&json!({ "id": "nobody", "person": "nobody@e2e.test" })))?, 404),
     ];
     let mut all = true;
@@ -1490,7 +1490,7 @@ pub fn billing_page(s: &mut Suite, api: &Api) -> Result<()> {
     default_closed?;
     // what is sold, as core has it: every price a page shows is these
     let offer = fragment_core::stripe::offer();
-    let (seat_price, included, pack) = (dollars(offer.seat_micros), dollars(offer.included_micros), dollars(offer.pack_micros));
+    let (seat_price, included, pack, pack_credit) = (dollars(offer.seat_micros), dollars(offer.included_micros), dollars(offer.pack_micros), dollars(offer.pack_credit_micros));
     default_plan_checkout(s, &mut b, api, true, 1280, &shots)?;
     default_plan_checkout(s, &mut b, api, true, 390, &shots)?;
 
@@ -1501,7 +1501,7 @@ pub fn billing_page(s: &mut Suite, api: &Api) -> Result<()> {
         "GET /api/seat says who is a guest (a guest's plan, no seat) and what is sold, at core's prices",
         mine["guest"] == true
             && mine["seat"].is_null()
-            && mine["offer"] == json!({ "kind": "seat_always_on", "seatMicros": offer.seat_micros, "includedMicros": offer.included_micros, "packMicros": offer.pack_micros }),
+            && mine["offer"] == json!({ "kind": "seat_always_on", "seatMicros": offer.seat_micros, "includedMicros": offer.included_micros, "packMicros": offer.pack_micros, "packCreditMicros": offer.pack_credit_micros }),
         &mine,
     );
     let session = api.sign_in(&Api::email_of(&gus))?;
@@ -1524,7 +1524,7 @@ pub fn billing_page(s: &mut Suite, api: &Api) -> Result<()> {
                     && t.contains("Always on")
                     && t.contains(&format!("{included} in monthly usage credit"))
                     && t.contains("Secure Stripe checkout")
-                    && t.contains(&format!("{pack} a pack"))
+                    && t.contains(&format!("{pack_credit} of credit for {pack}"))
                     && t.contains(&Api::email_of(&gus))
                     && t.contains("Sign out")
                     && !t.contains("Not now")
@@ -1700,7 +1700,7 @@ pub fn billing_page(s: &mut Suite, api: &Api) -> Result<()> {
     let unasked = b.eval(&page, "![...document.querySelectorAll('#settings-page button')].some((b) => b.textContent === 'Add seats for others')")?;
     s.ok("as its admin they add a seat by email: it waits, invited, and their org's seats now show unasked", added && unasked == true, text(&mut b, &page));
     let before = ledger(api, &gus)["purchasedMicros"].as_i64().unwrap_or(0);
-    let buy = format!("Buy {pack} of credit");
+    let buy = format!("Buy {pack_credit} of credit for {pack}");
     if !act(s, &mut b, &page, &format!("Billing's {buy}"), &click_text("#settings-page button", &buy))? {
         return Ok(());
     }
@@ -1710,8 +1710,8 @@ pub fn billing_page(s: &mut Suite, api: &Api) -> Result<()> {
     }
     let credited = view(&mut b, &page, "location.pathname === '/settings' && /Paid: the credit is yours/.test(document.getElementById('settings-page')?.innerText ?? '')", wait);
     s.ok(
-        &format!("they buy {pack} of credit on Stripe's page, and it is theirs as they land back in settings"),
-        at_stripe && credited && ledger(api, &gus)["purchasedMicros"].as_i64() == Some(before + offer.pack_micros),
+        &format!("they buy {pack_credit} of credit for {pack} on Stripe's page, and it is theirs as they land back in settings"),
+        at_stripe && credited && ledger(api, &gus)["purchasedMicros"].as_i64() == Some(before + offer.pack_credit_micros),
         ledger(api, &gus),
     );
     b.close(page)?;
@@ -1730,10 +1730,10 @@ pub fn billing_page(s: &mut Suite, api: &Api) -> Result<()> {
     let shown = seen["text"].as_str().unwrap_or("");
     let credit = credit_shown(shown);
     // (their computer's use may meter a few micro-dollars meanwhile: the
-    // pack's $25 is what must be there)
+    // pack's $50 is what must be there)
     s.ok(
-        &format!("a pack's return whose settling answers after settings were opened again: the settings shown say it was paid, and their credit has its {pack}"),
-        paid && purchased(api) == bought + offer.pack_micros && shown.contains("Paid: the credit is yours.") && credit.is_some_and(|c| c > before + offer.pack_micros - 1_000_000),
+        &format!("a pack's return whose settling answers after settings were opened again: the settings shown say it was paid, and their credit has its {pack_credit}"),
+        paid && purchased(api) == bought + offer.pack_credit_micros && shown.contains("Paid: the credit is yours.") && credit.is_some_and(|c| c > before + offer.pack_credit_micros - 1_000_000),
         json!({ "seen": seen, "before": before, "credit": credit }),
     );
     s.stripe.release_events(false);
@@ -1773,7 +1773,7 @@ pub fn billing_page(s: &mut Suite, api: &Api) -> Result<()> {
     let typed = |form: &str, email: &str| format!("(() => {{ const f = [...document.querySelectorAll('#settings-page form')].find((f) => f.textContent.includes({form:?})); f.querySelector('input[type=email]').value = {email:?}; f.requestSubmit(); return true; }})()");
     let steps = [
         ("the sleep switch", "{ status: 503 }", "([...document.querySelectorAll('#settings-page label')].find((l) => l.textContent.includes('Let my computer sleep')).querySelector('input').click(), true)".to_string(), "That wasn't changed. Try again in a moment.".to_string()),
-        ("Buy credit, Stripe refusing", "{ status: 400, reason: 'stripe_refused' }", click_text("#settings-page button", &format!("Buy {pack} of credit")), "Checkout didn't open. Try again in a moment.".to_string()),
+        ("Buy credit, Stripe refusing", "{ status: 400, reason: 'stripe_refused' }", click_text("#settings-page button", &format!("Buy {pack_credit} of credit for {pack}")), "Checkout didn't open. Try again in a moment.".to_string()),
         ("Payment and invoices", "{ status: 503 }", click_text("#settings-page button", "Payment and invoices"), "Payment and invoices didn't open. Try again in a moment.".to_string()),
         (
             "Remove seat, the org's last paid one",

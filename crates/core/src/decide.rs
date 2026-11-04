@@ -756,18 +756,18 @@ mod tests {
 
     /// Goal: the price book prices each model's input at its list price,
     /// output never, a whole context too. Method: the default book on 300
-    /// tokens and on each context, at its fee and margin (×1.05 ×1.5,
+    /// tokens and on each context, at its fee and margin (×1.05 ×3,
     /// rounded up).
     #[test]
     fn each_model_is_priced_by_its_input_alone() {
         let book = PriceBook::defaults();
         let charge = |m: Model, input: u64| book.price(&tokens(m, input)).unwrap().charge;
-        assert_eq!(charge(Model::ClefFlash, 300), 18, "ceil($0.038/M × 300 × 1.575 = 17.955 µ$)");
-        assert_eq!(charge(Model::Clef, 300), 114, "ceil($0.24/M × 300 × 1.575 = 113.4 µ$)");
-        assert_eq!(charge(Model::ClefOmni, 300), 71, "ceil($0.15/M × 300 × 1.575 = 70.875 µ$)");
+        assert_eq!(charge(Model::ClefFlash, 300), 36, "ceil($0.038/M × 300 × 3.15 = 35.91 µ$)");
+        assert_eq!(charge(Model::Clef, 300), 227, "ceil($0.24/M × 300 × 3.15 = 226.8 µ$)");
+        assert_eq!(charge(Model::ClefOmni, 300), 142, "ceil($0.15/M × 300 × 3.15 = 141.75 µ$)");
         let with_output = Usage::Tokens { model: Model::Clef.id().into(), input: 300, cached_input: 0, cache_write: 0, output: 1_000_000 };
-        assert_eq!(book.price(&with_output).unwrap().charge, 114, "output is free");
-        for (m, whole) in [(Model::ClefFlash, 1_471), (Model::Clef, 24_773), (Model::ClefOmni, 15_120)] {
+        assert_eq!(book.price(&with_output).unwrap().charge, 227, "output is free");
+        for (m, whole) in [(Model::ClefFlash, 2_942), (Model::Clef, 49_546), (Model::ClefOmni, 30_240)] {
             assert_eq!(charge(m, m.context_tokens()), whole, "{}'s whole context", m.name());
             let row = book.models.iter().find(|r| r.model == m.id()).expect("a row for each model");
             assert_eq!(row.price.input, m.input_price());

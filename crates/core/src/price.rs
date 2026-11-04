@@ -8,7 +8,7 @@
 //! `ceil(list × (1 + fee) × (1 + margin))`, computed exactly in 128 bits
 //! and rounded up once, never per part. The fee is AI Gateway's 5% on the
 //! credits that pay for AI through Unified Billing (spike S4), so it
-//! applies to tokens and neurons only; the margin is the operator's, 50%
+//! applies to tokens and neurons only; the margin is the operator's, 200%
 //! unless the book sets another. The book is data the operator sets (the
 //! deploy's configuration); each release prices its ledgers' batches with
 //! its own (crate::ledger, `meter`; decision 62).
@@ -22,8 +22,12 @@ use crate::decide::Model;
 pub const USD: i64 = 1_000_000;
 /// Basis points in a whole: 10,000 bp is 100%.
 pub const BP: u32 = 10_000;
-/// The operator's margin when the configuration names none (decision 24).
-pub const MARGIN_BP_DEFAULT: u32 = 5_000;
+/// The operator's margin when the configuration names none (decision 24):
+/// 200%, a charge three times its cost basis. It was 50% until book 9
+/// (Paul, 2026-11-04: "$50 of credit for $25"), which doubled every charge
+/// and every credit and limit with it (`ledger::PRICES_DOUBLED`), so the
+/// same credit buys the same use.
+pub const MARGIN_BP_DEFAULT: u32 = 20_000;
 /// AI Gateway's fee on the credits that pay for AI (spike S4): AI's cost
 /// basis is its list price × 1.05.
 pub const CREDITS_FEE_BP_DEFAULT: u32 = 500;
@@ -341,14 +345,15 @@ const fn clef(m: Model) -> (&'static str, TokenPrices) {
 /// The default book's version, informational since a ledger takes any book
 /// whose contents differ from its own (docs/ledger.md; #451). Before, a
 /// ledger took only a newer version, so each change to the defaults
-/// raised it, and each still does: 8 for HappyHorse's videos (2026-10-31),
-/// after 7 for OpenRouter's GLM-5.3 Flash (2026-10-15), after 6 for the Clef family (2026-10-14), 5
+/// raised it, and each still does: 9 for every charge doubled with every
+/// credit (2026-11-04: `MARGIN_BP_DEFAULT`, `ledger::PRICES_DOUBLED`), after
+/// 8 for HappyHorse's videos (2026-10-31), after 7 for OpenRouter's GLM-5.3 Flash (2026-10-15), after 6 for the Clef family (2026-10-14), 5
 /// for Finite Private's GLM-5.3 Flash (2026-10-14), 4 for Hermes' tool
 /// keys (2026-10-09) and 3 for
 /// DeepSeek V4 Flash, past the 2 that finite.place's preview configs
 /// already carried. A deployment's `price_book_version` raises it further (its
 /// operator keys' prices); the book is the higher of the two.
-pub const DEFAULT_BOOK_VERSION: u32 = 8;
+pub const DEFAULT_BOOK_VERSION: u32 = 9;
 /// Workers AI: $0.011 per thousand neurons (spike S4: neurons × $0.000011
 /// matched tokens × the catalog price on every call). Images are priced
 /// in neurons too (crate::media).
@@ -706,9 +711,9 @@ mod tests {
     fn the_defaults_are_a_valid_book() {
         let book = PriceBook::defaults();
         assert_eq!(book.validate(), Ok(()));
-        assert_eq!(book.version, 8);
+        assert_eq!(book.version, 9);
         assert_eq!(book.models.len(), 12);
-        assert_eq!((book.margin_bp, book.credits_fee_bp), (5_000, 500));
+        assert_eq!((book.margin_bp, book.credits_fee_bp), (20_000, 500));
     }
 
     /// Goal: Finite Private's GLM-5.3 Flash is priced as Workers AI's
@@ -720,18 +725,21 @@ mod tests {
         let p = |model: &str| book.models.iter().find(|m| m.model == model).unwrap().price;
         assert_eq!(p(PRIVATE), p(FLASH));
         let turn = |model: &str| book.price(&tokens(model, 26_000, 0, 0, 200)).unwrap();
-        assert_eq!(turn(PRIVATE), Priced { list: 4_000, cost: 4_200, charge: 6_300 });
+        assert_eq!(turn(PRIVATE), Priced { list: 4_000, cost: 4_200, charge: 12_600 });
         assert_eq!(turn(PRIVATE), turn(FLASH));
     }
 
     /// Goal: decision 24's formula on S3's simple turn. Method: a Flash
     /// turn that lists at exactly $0.004 (26,000 tokens in, 200 out)
-    /// charges $0.0063 = 0.004 × 1.05 × 1.5, with a cost basis of $0.0042.
+    /// charges $0.0126 = 0.004 × 1.05 × 3, with a cost basis of $0.0042:
+    /// twice the $0.0063 of the margin before book 9, as credit is twice.
     #[test]
-    fn a_four_tenths_of_a_cent_flash_turn_charges_0_0063() {
+    fn a_four_tenths_of_a_cent_flash_turn_charges_0_0126() {
         let p = PriceBook::defaults().price(&tokens(FLASH, 26_000, 0, 0, 200)).unwrap();
-        assert_eq!(p, Priced { list: 4_000, cost: 4_200, charge: 6_300 });
-        assert_eq!(dollars(p.charge), "$0.0063");
+        assert_eq!(p, Priced { list: 4_000, cost: 4_200, charge: 12_600 });
+        assert_eq!(dollars(p.charge), "$0.0126");
+        let before = PriceBook { margin_bp: 5_000, ..PriceBook::defaults() }.price(&tokens(FLASH, 26_000, 0, 0, 200)).unwrap();
+        assert_eq!(p.charge, 2 * before.charge, "every charge doubled");
     }
 
     /// Goal: our list price is the gateway's own `cost` (spike S4, B4).
@@ -791,40 +799,40 @@ mod tests {
 
     /// Goal: a row rounds once, from its exact sum, never part by part.
     /// Method: one Flash token in and one cached lists at 0.18 µ$ and
-    /// charges ceil(0.2835) = 1, where rounding each part would charge 2.
+    /// charges ceil(0.567) = 1, where rounding each part would charge 2.
     #[test]
     fn a_row_rounds_up_once() {
         let book = PriceBook::defaults();
         assert_eq!(book.price(&tokens(FLASH, 1, 1, 0, 0)).unwrap(), Priced { list: 1, cost: 1, charge: 1 });
         assert_eq!(book.price(&tokens(FLASH, 0, 0, 0, 0)).unwrap(), Priced { list: 0, cost: 0, charge: 0 }, "nothing costs nothing");
         // 0.45 µ$ a request: rounded up, never down to free
-        assert_eq!(book.price(&Usage::Requests { count: 1 }).unwrap(), Priced { list: 1, cost: 1, charge: 1 });
-        assert_eq!(book.price(&Usage::Requests { count: 1_000_000 }).unwrap(), Priced { list: 450_000, cost: 450_000, charge: 675_000 });
+        assert_eq!(book.price(&Usage::Requests { count: 1 }).unwrap(), Priced { list: 1, cost: 1, charge: 2 });
+        assert_eq!(book.price(&Usage::Requests { count: 1_000_000 }).unwrap(), Priced { list: 450_000, cost: 450_000, charge: 1_350_000 });
     }
 
     /// Goal: only AI carries the credits fee; every other meter is its
-    /// list price × 1.5. Method: one of each kind against the defaults.
+    /// list price × 3. Method: one of each kind against the defaults.
     #[test]
     fn every_meter_kind_at_its_default_price() {
         let book = PriceBook::defaults();
         let price = |u: Usage| book.price(&u).unwrap();
         let hour = Usage::Awake { instance: "2vcpu-6gib".into(), ms: 3_600_000 };
-        assert_eq!(price(hour), Priced { list: 64_224, cost: 64_224, charge: 96_336 });
+        assert_eq!(price(hour), Priced { list: 64_224, cost: 64_224, charge: 192_672 });
         let month = Usage::Awake { instance: "2vcpu-6gib".into(), ms: 30 * 24 * 3_600_000 };
         assert_eq!(dollars(price(month).list), "$46.24128", "an always-on month at list");
         let gb_month = |class| Usage::Storage { class, byte_hours: 1_000_000_000 * 720 };
-        assert_eq!(price(gb_month(StorageClass::Sqlite)), Priced { list: 200_000, cost: 200_000, charge: 300_000 });
-        assert_eq!(price(gb_month(StorageClass::R2)), Priced { list: 15_000, cost: 15_000, charge: 22_500 });
+        assert_eq!(price(gb_month(StorageClass::Sqlite)), Priced { list: 200_000, cost: 200_000, charge: 600_000 });
+        assert_eq!(price(gb_month(StorageClass::R2)), Priced { list: 15_000, cost: 15_000, charge: 45_000 });
         assert_eq!(price(gb_month(StorageClass::Git)).list, 15_000);
-        assert_eq!(price(Usage::DynamicWorkers { count: 1 }), Priced { list: 2_000, cost: 2_000, charge: 3_000 });
+        assert_eq!(price(Usage::DynamicWorkers { count: 1 }), Priced { list: 2_000, cost: 2_000, charge: 6_000 });
         // a three-second screenshot: 75 µ$ at list
-        assert_eq!(price(Usage::Browser { ms: 3_000 }), Priced { list: 75, cost: 75, charge: 113 });
-        assert_eq!(price(Usage::Images { count: 1 }), Priced { list: 500, cost: 500, charge: 750 });
-        // 1,000 neurons: $0.011 at list, × 1.05 × 1.5
-        assert_eq!(price(Usage::Neurons { milli: 1_000_000 }), Priced { list: 11_000, cost: 11_550, charge: 17_325 });
+        assert_eq!(price(Usage::Browser { ms: 3_000 }), Priced { list: 75, cost: 75, charge: 225 });
+        assert_eq!(price(Usage::Images { count: 1 }), Priced { list: 500, cost: 500, charge: 1_500 });
+        // 1,000 neurons: $0.011 at list, × 1.05 × 3
+        assert_eq!(price(Usage::Neurons { milli: 1_000_000 }), Priced { list: 11_000, cost: 11_550, charge: 34_650 });
         let mut keyed = book.clone();
         keyed.keys.push(KeyPrice { key: "search".into(), micros: 5_000_000, per: 1_000 });
-        assert_eq!(keyed.price(&Usage::Key { key: "search".into(), units: 1 }).unwrap(), Priced { list: 5_000, cost: 5_000, charge: 7_500 }, "no credits fee on an operator key");
+        assert_eq!(keyed.price(&Usage::Key { key: "search".into(), units: 1 }).unwrap(), Priced { list: 5_000, cost: 5_000, charge: 15_000 }, "no credits fee on an operator key");
     }
 
     /// Goal: each operator key Paul named (2026-10-04) has a list price
@@ -835,14 +843,14 @@ mod tests {
         book.keys = DEFAULT_KEYS.iter().map(|(key, micros, per)| KeyPrice { key: key.to_string(), micros: *micros, per: *per }).collect();
         assert_eq!(book.validate(), Ok(()));
         let call = |key: &str| book.price(&Usage::Key { key: key.into(), units: 1 }).unwrap();
-        assert_eq!(call("perplexity"), Priced { list: 5_000, cost: 5_000, charge: 7_500 }, "$5 per 1,000 searches");
-        assert_eq!(call("google-places"), Priced { list: 35_000, cost: 35_000, charge: 52_500 }, "$35 per 1,000 Enterprise text searches");
-        assert_eq!(call("xai"), Priced { list: 120_000, cost: 120_000, charge: 180_000 });
-        assert_eq!(call("elevenlabs"), Priced { list: 150_000, cost: 150_000, charge: 225_000 }, "a minute of music");
-        assert_eq!(call("firecrawl"), Priced { list: 10_000, cost: 10_000, charge: 15_000 }, "two Hobby PAYG credits");
-        assert_eq!(call("x"), Priced { list: 50_000, cost: 50_000, charge: 75_000 }, "ten post resources");
-        assert_eq!(call("fal"), Priced { list: 6_000, cost: 6_000, charge: 9_000 }, "one MP Klein 9B image");
-        assert_eq!(call("browser-use"), Priced { list: 1_667, cost: 1_667, charge: 2_500 }, "five browser minutes");
+        assert_eq!(call("perplexity"), Priced { list: 5_000, cost: 5_000, charge: 15_000 }, "$5 per 1,000 searches");
+        assert_eq!(call("google-places"), Priced { list: 35_000, cost: 35_000, charge: 105_000 }, "$35 per 1,000 Enterprise text searches");
+        assert_eq!(call("xai"), Priced { list: 120_000, cost: 120_000, charge: 360_000 });
+        assert_eq!(call("elevenlabs"), Priced { list: 150_000, cost: 150_000, charge: 450_000 }, "a minute of music");
+        assert_eq!(call("firecrawl"), Priced { list: 10_000, cost: 10_000, charge: 30_000 }, "two Hobby PAYG credits");
+        assert_eq!(call("x"), Priced { list: 50_000, cost: 50_000, charge: 150_000 }, "ten post resources");
+        assert_eq!(call("fal"), Priced { list: 6_000, cost: 6_000, charge: 18_000 }, "one MP Klein 9B image");
+        assert_eq!(call("browser-use"), Priced { list: 1_667, cost: 1_667, charge: 5_000 }, "five browser minutes");
         assert_eq!(default_key_price("perplexity"), Some((5_000_000, 1_000)));
         assert_eq!(default_key_price("nonesuch"), None);
     }

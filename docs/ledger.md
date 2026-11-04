@@ -11,7 +11,22 @@ routes are docs/api.md, Ledger; seats and Stripe are docs/billing.md.
 
 - **Integer micro-dollars, UTC months.** A row's charge is
   `ceil(list × (1 + fee) × (1 + margin))`, exact in 128 bits and rounded
-  up once per row.
+  up once per row. The margin is 200% (`MARGIN_BP_DEFAULT`), so a charge
+  is three times its cost basis.
+- **Book 9 doubled every charge and every credit** (decision 72;
+  `PRICES_DOUBLED`): the seats' included credit ($100 and $200 a month),
+  a pack's ($50 for $25), the default cap ($10) and overdraft ($4), and
+  every limit. Each ledger takes the switch once, at the first call of a
+  release that knows it (`Ledger::switch_prices`), recorded in its own
+  table (`switches`, Ledger schema step 2, which an older release
+  refuses, so none reads the new amounts as old ones). On its month:
+  included credit granted afresh at the new amount (or twice what was
+  granted, whichever is more), none of it used; bought credit left
+  doubled; a debt cleared; its overdraft, an org's budget and its
+  fragments' own caps doubled within their limits. What it gave is
+  `Totals::switched`. A ledger made since is made at these amounts. A
+  pack's grant that a Stripe retry sends again after the switch, at $50
+  under the id it had at $25, is taken as granted.
 - **Idempotent by id.** Every mutation (a grant, a plan, a seat, an
   overdraft, a cap, a budget, a meter batch) carries its own id. The same
   id again answers as the first did and changes nothing; the same id with
@@ -182,6 +197,7 @@ topped up waits up to a minute.
 - A fragment's write asks `write` of its owner (402 past the overdraft).
 
 A paid credit pack becomes `GrantCredit {id: "pack:<Checkout's id>", by:
-"stripe"}` on the ledger of the person its metadata names (decision 55);
+"stripe"}` of `PACK_CREDIT_MICROS` ($50) on the ledger of the person its
+metadata names (decisions 55 and 72);
 the registry pushes `SetPlan` and `SetSeat` (docs/billing.md, "What a
 seat does").

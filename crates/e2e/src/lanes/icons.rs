@@ -478,9 +478,9 @@ fn read_only(s: &mut Suite, api: &Api) -> Result<()> {
         entries(api, &owner_id, &prefix).iter().filter(|e| call_of(e) == "upload").count()
     };
     let fitted_once = s.eventually(WAIT, || uploads() == 1);
-    // past the overdraft: a making whose subject costs the balance and $3 more
+    // past the overdraft: a making whose subject costs the balance and $5 more
     let balance = ledger(api, &owner)["balanceMicros"].as_i64().unwrap_or_default();
-    s.ai.set_usage(&[Used { prompt: 10, cached: 0, completion: tokens_costing(icon::SUBJECT_MODEL, 10, balance + 3 * USD) }]);
+    s.ai.set_usage(&[Used { prompt: 10, cached: 0, completion: tokens_costing(icon::SUBJECT_MODEL, 10, balance + 5 * USD) }]);
     let r = make(api, &owner, &name, json!({ "hint": "a square" }))?;
     s.ai.clear_script();
     let over = s.eventually(WAIT, || {

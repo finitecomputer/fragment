@@ -159,10 +159,11 @@ computers) returns once this product works.
     payer's ledger, at Cloudflare's cost plus the operator's margin
     (`price::MARGIN_BP_DEFAULT`). No global object sits on a hot path.
 25. **Plans.** A guest is free, uses what is shared, has no agents and
-    creates nothing. `seat` ($100) includes $50 of credit a month and a
-    computer that sleeps; `seat_always_on` ($200) includes $100, an
-    always-on computer and SimpleX. Only the $200 seat and the $25 pack
-    are sold; `seat` stays for comps and a deployment's `default_plan`.
+    creates nothing. `seat` ($100) includes $100 of credit a month and a
+    computer that sleeps; `seat_always_on` ($200) includes $200, an
+    always-on computer and SimpleX (each doubled with every charge, 72).
+    Only the $200 seat and the $25 pack are sold; `seat` stays for comps
+    and a deployment's `default_plan`.
 26. **A fragment's costs bill its owner**, under a monthly cap per
     fragment (`ledger::CAP_DEFAULT`); past it, AI steps and agent turns
     stop for everyone but the owner.
@@ -281,8 +282,8 @@ computers) returns once this product works.
 53. **Standing is Stripe's status:** `trialing`, `active`, `past_due` are
     good; a lapse stops agents and deletes nothing, and paying restores.
 54. **Stripe automatic tax; prices before tax.**
-55. **One credit pack, $25, kept until spent.** Usage never goes to
-    Stripe.
+55. **One credit pack, $25, kept until spent:** $50 of credit since 72.
+    Usage never goes to Stripe.
 56. **Trials are our codes on Stripe's trial:** no card, one per person
     ever.
 57. **A $200 seat's computer stays awake** unless its owner lets it sleep.
@@ -365,6 +366,15 @@ appoints control who may use them.
     every grant is in the org's governance log and the fragment's events.
     They may grant themselves access, but administer no personal
     fragment, read no secret, and act as no one else.
+72. **Credit is doubled with every charge** (Paul, 2026-11-04: "go now
+    and we just reset everyone's usage this month. $50 of credit for
+    $25"). The margin is 200%, so every charge is twice what it was, and
+    every amount with it: the $200 seat's $200 of credit, the $25 pack's
+    $50, the default cap and overdraft, and every limit. Each ledger
+    takes the switch once (book 9): this month's included credit granted
+    afresh and none of it used, bought credit left doubled, a debt
+    cleared. Free use this month is fine ("it's fine if people get extra
+    usage for free this month while we're figuring it out").
 
 ### Carried from the ROADMAP
 

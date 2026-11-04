@@ -25,8 +25,9 @@ use super::*;
 
 /// An org's ledger is named `org:<id>`; a person's, by their identity.
 pub const ORG_LEDGER_PREFIX: &str = "org:";
-/// A monthly budget: more is a typo.
-pub const BUDGET_MAX: i64 = 100_000 * USD;
+/// A monthly budget: more is a typo (doubled with every charge at book 9:
+/// `PRICES_DOUBLED`).
+pub const BUDGET_MAX: i64 = 200_000 * USD;
 
 /// Why a budget's body is refused, whatever its ledger holds (the router
 /// asks first, as for a grant: `grant_invalid`).
@@ -79,6 +80,11 @@ impl OrgTerms {
 
     pub fn budget(&self) -> i64 {
         self.budget
+    }
+
+    /// Its budget doubled, within `BUDGET_MAX` (`Ledger::switch_prices`).
+    pub(super) fn doubled(self) -> OrgTerms {
+        OrgTerms { budget: self.budget.saturating_mul(2).min(BUDGET_MAX) }
     }
 
     /// `Ledger::may_spend` on an org's ledger, its gate passed: an AI step
@@ -350,17 +356,17 @@ mod tests {
         let (mut l, mut s) = (Ledger::new_org(T0), Memory::default());
         l.grant(&mut s, &GrantCredit { micros: 500 * USD, ..pack("cs_1") }, T0).unwrap();
         assert_eq!(l.may_spend(&s, Spend::AiStep, Some(APP), true, T0), Err(Refused::BudgetReached { budget: 0, spent: 0 }), "zero until set");
-        l.set_budget(&mut s, &budget("b1", 10 * USD), T0).unwrap();
+        l.set_budget(&mut s, &budget("b1", 20 * USD), T0).unwrap();
         assert_eq!(l.may_spend(&s, Spend::AiStep, Some(APP), true, T0), Ok(()));
         s.add_spent(Month::of(T0), APP, CAP_DEFAULT);
         assert_eq!(l.may_spend(&s, Spend::AiStep, Some(APP), true, T0), Err(Refused::CapReached { cap: CAP_DEFAULT, spent: CAP_DEFAULT }), "by_owner passes no org cap");
         assert_eq!(l.may_spend(&s, Spend::AiStep, Some("other--0a1b"), true, T0), Ok(()));
         for n in 0..3 {
-            s.add_spent(Month::of(T0), &format!("f{n}--0a1b"), 2 * USD);
+            s.add_spent(Month::of(T0), &format!("f{n}--0a1b"), 4 * USD);
         }
         assert_eq!(
             l.may_spend(&s, Spend::AiStep, Some("fresh--0a1b"), true, T0),
-            Err(Refused::BudgetReached { budget: 10 * USD, spent: 11 * USD }),
+            Err(Refused::BudgetReached { budget: 20 * USD, spent: 22 * USD }),
             "the budget is every fragment's spend, past the status's list"
         );
         assert_eq!(l.may_spend(&s, Spend::Write, Some("fresh--0a1b"), true, T0), Ok(()), "a budget stops AI steps, not writes");

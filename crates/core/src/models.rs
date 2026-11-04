@@ -2168,14 +2168,14 @@ mod tests {
             for (p, ceiling) in [(million(m, 0, 0, 0), 150_000), (million(0, m, 0, 0), 150_000), (million(0, 0, m, 0), 150_000), (million(0, 0, 0, m), 500_000)] {
                 let with_fee = ceiling * i64::from(BP + OPENROUTER_FEE_BP) / i64::from(BP);
                 assert!((with_fee..=with_fee + 1).contains(&p.cost), "{model} {p:?}: OpenRouter bills at most {with_fee} µ$ with its fee");
-                assert!(p.charge >= p.cost * 3 / 2, "{model} {p:?}: the margin on top");
+                assert!(p.charge >= (p.cost - 1) * 3, "{model} {p:?}: the margin on top (of a cost rounded up)");
             }
-            assert_eq!(million(m, 0, 0, 0), Priced { list: 150_715, cost: 158_251, charge: 237_377 }, "{model}");
-            assert_eq!(million(0, 0, 0, m), Priced { list: 502_381, cost: 527_501, charge: 791_251 }, "{model}");
-            assert_eq!(book.price(&tokens(model, 26_000, 0, 0, 200)).unwrap(), Priced { list: 4_020, cost: 4_221, charge: 6_331 }, "{model}: S3's turn");
+            assert_eq!(million(m, 0, 0, 0), Priced { list: 150_715, cost: 158_251, charge: 474_753 }, "{model}");
+            assert_eq!(million(0, 0, 0, m), Priced { list: 502_381, cost: 527_501, charge: 1_582_501 }, "{model}");
+            assert_eq!(book.price(&tokens(model, 26_000, 0, 0, 200)).unwrap(), Priced { list: 4_020, cost: 4_221, charge: 12_661 }, "{model}: S3's turn");
             // an agent's call, most of its prompt cached: dearer than on Workers AI, which prices a cached token at a fifth
             let call = |model: &str| book.price(&tokens(model, 5_000, 25_000, 0, 600)).unwrap().charge;
-            assert_eq!((call(model), call(GLM_FLASH)), (7_597, 2_835), "{model}");
+            assert_eq!((call(model), call(GLM_FLASH)), (15_193, 5_670), "{model}");
         }
         // after the switch, GLM's usage still queued is priced as it was: the code keeps its row
         assert_eq!(row(&deepseek, OPENROUTER_FLASH), kept);
@@ -2263,12 +2263,12 @@ mod tests {
         assert_eq!(book.models.len(), defaults.models.len() + 1);
         assert_eq!(book.validate(), Ok(()));
         let tokens = |input, cached_input, output| Usage::Tokens { model: "deepseek-v4-1-flash".into(), input, cached_input, cache_write: 0, output };
-        // the list, the book's 5% fee on it, then its 50% margin
-        assert_eq!(book.price(&tokens(1_000_000, 0, 0)).unwrap(), Priced { list: 650_000, cost: 682_500, charge: 1_023_750 });
-        assert_eq!(book.price(&tokens(0, 1_000_000, 0)).unwrap(), Priced { list: 130_000, cost: 136_500, charge: 204_750 });
-        assert_eq!(book.price(&tokens(0, 0, 1_000_000)).unwrap(), Priced { list: 1_450_000, cost: 1_522_500, charge: 2_283_750 });
+        // the list, the book's 5% fee on it, then its 200% margin
+        assert_eq!(book.price(&tokens(1_000_000, 0, 0)).unwrap(), Priced { list: 650_000, cost: 682_500, charge: 2_047_500 });
+        assert_eq!(book.price(&tokens(0, 1_000_000, 0)).unwrap(), Priced { list: 130_000, cost: 136_500, charge: 409_500 });
+        assert_eq!(book.price(&tokens(0, 0, 1_000_000)).unwrap(), Priced { list: 1_450_000, cost: 1_522_500, charge: 4_567_500 });
         // an agent's call, most of its prompt cached
-        assert_eq!(book.price(&tokens(5_000, 25_000, 600)).unwrap().charge, 11_608);
+        assert_eq!(book.price(&tokens(5_000, 25_000, 600)).unwrap().charge, 23_216);
         // its cached price left out: its input's, never cheaper than it could be
         let uncached = parse(json!({ "fallback": tinfoil(json!({ "input": 0.65, "output": 1.45 })) })).unwrap().priced(defaults.clone());
         assert_eq!(row(&uncached, "deepseek-v4-1-flash").map(|p| p.cached_input), Some(650_000));

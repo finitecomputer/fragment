@@ -165,6 +165,18 @@ impl Store for Audited {
         self.inner.set_cap(fragment, micros);
     }
 
+    fn double_caps(&mut self, max: i64) {
+        self.inner.double_caps(max);
+    }
+
+    fn switched(&self, version: u32) -> bool {
+        self.inner.switched(version)
+    }
+
+    fn put_switched(&mut self, version: u32, at_ms: i64) {
+        self.inner.put_switched(version, at_ms);
+    }
+
     fn prune(&mut self, before_ms: i64, before_month: Month) -> u64 {
         self.inner.prune(before_ms, before_month)
     }
