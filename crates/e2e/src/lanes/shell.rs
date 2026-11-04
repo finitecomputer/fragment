@@ -5273,10 +5273,11 @@ fn skills_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
     s.ok("the shell made the person's skills fragment at setup, beside their agent", true, &skills);
     let section = b.until(page, &format!("document.getElementById('settings-skills')?.dataset.fragment === {}", js(&skills)), wait);
     let rows = b.eval(page, "[...document.querySelectorAll('#settings-skills .settings-line, #settings-skills .settings-action-line, #settings-skills [data-skill], #settings-skills [data-category]')].map((e) => e.innerText.trim())")?;
+    let row = b.eval(page, "({ sub: document.querySelector('#settings-skills .settings-sub')?.innerText.trim() ?? '', icon: !!document.querySelector('#settings-skills [data-action=open-skills] svg') })")?;
     s.ok(
-        "settings' Skills is one row, Skills with Open, listing none of them",
-        section && rows.as_array().is_some_and(|l| l.len() == 1 && l[0].as_str().is_some_and(|t| t.starts_with("Skills") && t.ends_with("Open"))),
-        json!({ "rows": rows }),
+        "settings' Skills is one row, Skills with its line and Open (with its icon), listing none of them",
+        section && rows.as_array().is_some_and(|l| l.len() == 1 && l[0].as_str().is_some_and(|t| t.starts_with("Skills") && t.ends_with("Open"))) && row["sub"].as_str().is_some_and(|t| !t.is_empty()) && row["icon"] == true,
+        json!({ "rows": rows, "row": row }),
     );
     // an agent's own skill, in its fragment: its item's Skills opens its files there
     let own = "---\nname: garden-notes\ndescription: What this garden needs.\n---\n";

@@ -498,27 +498,38 @@ export function createSettings({ api, $, seg, account, navigation, notices, sect
     await load();
     return made.name;
   }
-  // Skills: one row, its Open the person's skills fragment, made first
-  // from the blessed template when they have none
+  // Skills: one row as Computer's are (its label, a short line under it,
+  // Open with an icon). Open is the person's skills fragment, made first
+  // from the blessed template when they have none. The line says nothing
+  // of which agents get them: only our Hermes image installs the set
+  // (docs/computers.md, "Skills and the CLI")
   async function skillsSection() {
     const s = section("Skills");
     s.id = "settings-skills";
     const mine = skillsFragmentOf();
     if (mine) s.dataset.fragment = mine.name;
-    const open = el("button", "quiet", "Open");
+    const words = el("span", null, "Open");
+    const open = el("button", "quiet with-icon");
     open.type = "button";
     open.dataset.action = "open-skills";
+    open.append(icon("folder"), words);
     open.onclick = async () => {
       open.disabled = true;
       try {
         openApp(await skillsFragment());
       } catch (e) {
-        open.textContent = e.message;
+        words.textContent = e.message;
       } finally {
         open.disabled = false;
       }
     };
-    s.append(actionLine("Skills", open));
+    const row = el("div", "settings-line settings-line-with-action");
+    const info = el("div", "settings-info");
+    info.append(el("span", "settings-key", "Skills"), el("span", "settings-value settings-sub", "What your agents know how to do, kept in one place."));
+    const control = el("div", "settings-control");
+    control.append(open);
+    row.append(info, control);
+    s.append(row);
     return s;
   }
   return { openSettings, reopenSettings, skillsFragment, visit: () => visits };
