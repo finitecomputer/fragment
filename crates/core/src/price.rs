@@ -594,6 +594,16 @@ impl PriceBook {
         }
     }
 
+    /// What an operator key's calls are charged under this book, as the
+    /// ledger charges them: `(micros, per)`, micro-dollars for `per` calls
+    /// (its price's own count), its list price with the margin, rounded up.
+    /// None for a key the book prices not, or a charge it refuses.
+    pub fn key_charge(&self, key: &str) -> Option<(i64, u64)> {
+        let k = self.keys.iter().find(|k| k.key == key)?;
+        let priced = self.price(&Usage::Key { key: k.key.clone(), units: k.per }).ok()?;
+        Some((priced.charge, k.per))
+    }
+
     /// What `usage` costs and is charged under this book.
     pub fn price(&self, usage: &Usage) -> Result<Priced, PriceError> {
         usage.validate().map_err(PriceError::Invalid)?;
@@ -825,6 +835,9 @@ mod tests {
         let mut keyed = book.clone();
         keyed.keys.push(KeyPrice { key: "search".into(), micros: 5_000_000, per: 1_000 });
         assert_eq!(keyed.price(&Usage::Key { key: "search".into(), units: 1 }).unwrap(), Priced { list: 5_000, cost: 5_000, charge: 7_500 }, "no credits fee on an operator key");
+        // what settings shows a person: its calls' charge, for its price's count
+        assert_eq!(keyed.key_charge("search"), Some((7_500_000, 1_000)));
+        assert_eq!(keyed.key_charge("nonesuch"), None, "a key the book prices not");
     }
 
     /// Goal: each operator key Paul named (2026-10-04) has a list price

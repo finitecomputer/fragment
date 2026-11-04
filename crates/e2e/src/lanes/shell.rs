@@ -3810,7 +3810,16 @@ fn connections_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sessio
     // and reading their connections tells their computer
     s.workos.connect(email, crate::SWAP_CONNECTION, true);
     s.workos.label(email, crate::SWAP_CONNECTION, "their-google@gmail.test");
-    shell(api, session, "GET", "/api/connections", None, &[])?;
+    let listed = shell(api, session, "GET", "/api/connections", None, &[])?;
+    // what settings shows of an operator key's price: what a call is charged
+    // ($0.005 at list, and the margin), never the list price
+    let perplexity = listed.body["providers"].as_array().and_then(|l| l.iter().find(|p| p["provider"] == "perplexity")).cloned().unwrap_or_default();
+    let google = listed.body["providers"].as_array().and_then(|l| l.iter().find(|p| p["provider"] == crate::SWAP_CONNECTION)).cloned().unwrap_or_default();
+    s.ok(
+        "an operator key's row says what its calls are charged ($0.0075 a call: its list price and the margin); a connection's says none",
+        perplexity["charged"]["micros"].as_i64().zip(perplexity["charged"]["per"].as_i64()).is_some_and(|(m, per)| per >= 1 && m == 7_500 * per) && google.get("charged").is_none(),
+        json!({ "perplexity": perplexity, "google": google }),
+    );
     let replies = || {
         shell(api, session, "GET", &format!("/api/f/{chat}/channels/chat"), None, &[])
             .ok()

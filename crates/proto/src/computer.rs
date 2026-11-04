@@ -258,6 +258,12 @@ pub struct ProviderView {
     /// beside `accounts`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accounts_max: Option<u8>,
+    /// What the person is charged for an operator key's calls, as the
+    /// ledger charges them (micro-dollars per `per` calls: its price in the
+    /// answering release's price book, with the book's margin, rounded up),
+    /// which settings shows, never `price`. None for another kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub charged: Option<ProviderPrice>,
 }
 
 /// One of a person's accounts at a connection that takes several: its

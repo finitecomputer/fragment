@@ -259,6 +259,8 @@ pub(crate) async fn route(req: &Request, env: &Env, url: &Url, signed: &Signed, 
                             .collect()
                     }),
                     accounts_max: p.several().then(|| p.accounts_max()),
+                    // as the ledger charges its calls (none for another kind)
+                    charged: cfg.book.key_charge(&p.name).map(|(micros, per)| ProviderPrice { micros, per }),
                 })
                 .collect();
             json_response(&Providers { providers })
@@ -669,3 +671,4 @@ async fn finish(req: &Request, env: &Env, cfg: &Config, url: &Url, provider: &st
     crate::computer::ask(env, signed.computer(), "computer/own-key", &json!({ "provider": provider, "key": key })).await?;
     Ok(Ok(()))
 }
+
