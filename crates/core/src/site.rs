@@ -258,6 +258,36 @@ pub fn return_path(raw: Option<&str>) -> String {
     }
 }
 
+/// The query pair a frame's sign-in lands with on its page (the cell's
+/// `__signin?token=`, redeemed in a frame): that page's own request is
+/// where the router checks the browser kept the frame's cookie, as a hop
+/// of its own (`__signin?check=frame`) once did before it.
+pub const FRAME_LANDING: (&str, &str) = ("__signin", "frame");
+
+/// `url` with `FRAME_LANDING` added to its query, after what it holds.
+pub fn frame_landing(mut url: Url) -> Url {
+    url.query_pairs_mut().append_pair(FRAME_LANDING.0, FRAME_LANDING.1);
+    url
+}
+
+/// Whether `url`'s query holds `FRAME_LANDING`.
+pub fn is_frame_landing(url: &Url) -> bool {
+    url.query_pairs().any(|(k, v)| k == FRAME_LANDING.0 && v == FRAME_LANDING.1)
+}
+
+/// `url`'s query without `FRAME_LANDING`, as its page was asked for
+/// before its sign-in marked it; `None` when nothing else is left.
+pub fn unmarked_query(url: &Url) -> Option<String> {
+    let mut out = url::form_urlencoded::Serializer::new(String::new());
+    let mut any = false;
+    // bounded by the query's length: one turn per pair
+    for (k, v) in url.query_pairs().filter(|(k, v)| !(k == FRAME_LANDING.0 && v == FRAME_LANDING.1)) {
+        out.append_pair(&k, &v);
+        any = true;
+    }
+    any.then(|| out.finish())
+}
+
 /// Where a browser returns to on `base` (an origin, or a fragment's base
 /// under one, ending in `/`), from the `return=` it brought: `return_path`
 /// joined under `base`, and `base` itself should the join name another
@@ -394,6 +424,23 @@ mod tests {
     }
 
     use super::*;
+
+    /// Goal: a frame's sign-in lands on its page with the mark the router
+    /// checks there, whatever the page's own query. Method: a bare path, one
+    /// with a query, and pages without it.
+    #[test]
+    fn a_frame_landing_is_marked_after_its_own_query() {
+        let base = Url::parse("https://maple-chat--k3x9--preview.finite.build/").unwrap();
+        let bare = frame_landing(return_url(&base, Some("/")));
+        assert_eq!(bare.as_str(), "https://maple-chat--k3x9--preview.finite.build/?__signin=frame");
+        let setup = frame_landing(return_url(&base, Some("/?setup=1")));
+        assert_eq!(setup.as_str(), "https://maple-chat--k3x9--preview.finite.build/?setup=1&__signin=frame");
+        assert!(is_frame_landing(&bare) && is_frame_landing(&setup));
+        assert_eq!((unmarked_query(&bare), unmarked_query(&setup).as_deref()), (None, Some("setup=1")));
+        for not in ["https://a--k3x9.x/", "https://a--k3x9.x/?__signin=check", "https://a--k3x9.x/?signin=frame"] {
+            assert!(!is_frame_landing(&Url::parse(not).unwrap()), "{not}");
+        }
+    }
 
     #[test]
     fn lookup_and_types() {

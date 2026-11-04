@@ -812,6 +812,21 @@ fn blocked(cfg: &Config, url: &Url, name: &str, back: &str) -> CellResult<Respon
     Ok(Response::ok(html(&format!("{} is signed out here", share::label(name)), &body))?.with_headers(h))
 }
 
+/// A frame's sign-in landed on its page (`site::FRAME_LANDING`) without
+/// the frame's cookie: the browser kept none in a frame, so the page says
+/// so, and opens in a tab instead (as `check=frame` answered). `None`
+/// for any other request.
+pub(crate) fn landed_without_cookie(req: &Request, url: &Url, cfg: &Config, name: &str, rest: &str, fetched: Fetched) -> CellResult<Option<Response>> {
+    if !fetched.framed || !site::is_frame_landing(url) || (fetched.frame && frame_token(req, url)?.is_some()) {
+        return Ok(None);
+    }
+    let page = match site::unmarked_query(url) {
+        Some(q) => format!("/{rest}?{q}"),
+        None => format!("/{rest}"),
+    };
+    blocked(cfg, url, name, &site::return_path(Some(&page))).map(Some)
+}
+
 /// Whether a refusal says who may do something (401, 403): what a page
 /// answers a browser's navigation with (`refused`).
 pub(crate) fn is_refusal(code: ErrorCode) -> bool {
@@ -883,9 +898,10 @@ pub fn is_fragment_route(rest: &str) -> bool {
 /// request's Fetch Metadata allows (`fetched`, the router's):
 ///
 /// - `__signin?token=` redeems in a frame only a frame redemption, into
-///   the frame cookie, then looks whether the browser kept it
-///   (`check=frame`); anywhere else, only a top-level one, into the site
-///   cookie;
+///   the frame cookie, and goes on to its page marked
+///   (`site::FRAME_LANDING`), whose request looks whether the browser
+///   kept it (`landed_without_cookie`; `check=frame`, its hop before, still
+///   answers); anywhere else, only a top-level one, into the site cookie;
 /// - `__signin` without one starts at the platform from a navigation of
 ///   a page only: in a frame it answers `blocked`, and from an image, a
 ///   script, or a fetch it is refused;
@@ -900,7 +916,14 @@ pub async fn fragment(req: &Request, env: &Env, cfg: &Config, url: &Url, name: &
             if let Some(redeem) = query(url, "token") {
                 let redeemed = ask_registry(env, &calls::Redeem { redeem, fragment: name.to_string(), framed: fetched.framed }).await?;
                 return match fetched.framed {
-                    true => redirect(&format!("{base}__signin?check=frame&return={}", enc(&redeemed.return_to)), &[frame_cookie(FRAME_COOKIE, &redeemed.token, "/", ttl_s, secure(url))]),
+                    // straight to its page, marked: that page's own request
+                    // checks the browser kept the frame's cookie (lib.rs
+                    // `site`), as `check=frame`, a hop of its own, once did
+                    true => {
+                        let base = Url::parse(&base).map_err(|e| CellError::host(format!("{base}: {e}")))?;
+                        let landing = site::frame_landing(site::return_url(&base, Some(&redeemed.return_to)));
+                        redirect(landing.as_str(), &[frame_cookie(FRAME_COOKIE, &redeemed.token, "/", ttl_s, secure(url))])
+                    }
                     false => redirect(&back_to(&base, Some(&redeemed.return_to))?, &[set_cookie(SITE_COOKIE, &redeemed.token, "/", ttl_s, secure(url))]),
                 };
             }

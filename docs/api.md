@@ -503,9 +503,11 @@ partitioned cookie (`fragment_core::frames`):
   "signed-out"}` to the platform's origin alone.
 - The fragment redeems it only in a frame's navigation, as
   `fragment_frame` (`HttpOnly; Secure; SameSite=None; Partitioned`,
-  `__Host-` over https), then checks it was kept
-  (`__signin?check=frame&return=`): without it, a page that posts
-  `{fragment: "signin-blocked", name, why: "cookies"}` to its parent.
+  `__Host-` over https), and `302` to the page it was asked for, its query
+  marked `__signin=frame`. That page's request checks the cookie was
+  kept: without it, a page that posts `{fragment: "signin-blocked", name,
+  why: "cookies"}` to its parent. (`__signin?check=frame&return=`, the
+  check's hop before, still answers so.)
 - `fragment_frame` counts only in frames and on the fragment's own page.
 
 ### Asking first

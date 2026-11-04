@@ -150,10 +150,10 @@ fn over_http(s: &mut Suite, api: &Api, owner_session: &str, n: &Names<'_>) -> Re
     let redeemed = as_browser(api, "GET", to.clone(), "iframe", "cross-site", "")?;
     let line = cookie_line(&redeemed, "fragment_frame");
     s.ok(
-        "another fragment refuses it (401) and leaves it unspent; its own fragment's frame redeems it into a partitioned frame cookie, then checks the browser kept it",
+        "another fragment refuses it (401) and leaves it unspent; its own fragment's frame redeems it into a partitioned frame cookie, and goes straight on to its page, marked for the check that the browser kept it",
         elsewhere.status == 401
             && redeemed.status == 302
-            && redeemed.header("location").starts_with(&api.site_url(n.own, "__signin?check=frame&return="))
+            && redeemed.header("location") == api.site_url(n.own, "?__signin=frame")
             && ["HttpOnly", "Secure", "SameSite=None", "Partitioned"].iter().all(|a| line.contains(a))
             && cookie_line(&redeemed, "fragment_site").is_empty(),
         format!("{elsewhere} / {redeemed} {line:?}"),
@@ -163,6 +163,24 @@ fn over_http(s: &mut Suite, api: &Api, owner_session: &str, n: &Names<'_>) -> Re
 
     // ---- the frame's cookie
     let value = line.split(';').next().unwrap_or("").to_string();
+    // its page, where the sign-in lands, checks the browser kept it: kept,
+    // the page; none (a browser that keeps no cookie in a frame), the note
+    // that says so (as `check=frame`, its hop before, still answers)
+    let landing = api.site_url(n.own, "?__signin=frame");
+    let landed = as_browser(api, "GET", landing.clone(), "iframe", "cross-site", &value)?;
+    let dropped = as_browser(api, "GET", landing, "iframe", "cross-site", "")?;
+    let checked = as_browser(api, "GET", api.site_url(n.own, "__signin?check=frame&return=/"), "iframe", "cross-site", &value)?;
+    s.ok(
+        "where it lands, the page shows with its cookie, and without one says the browser kept none (why: cookies), a tab to open; the old check's hop still goes on",
+        landed.status == 200
+            && landed.text.contains("inside own")
+            && dropped.status == 200
+            && dropped.text.contains("why: \"cookies\"")
+            && !dropped.text.contains("inside own")
+            && checked.status == 302
+            && checked.header("location") == api.site_url(n.own, ""),
+        format!("{landed} / {dropped} / {checked}"),
+    );
     let framed = as_browser(api, "GET", api.site_url(n.own, ""), "iframe", "cross-site", &value)?;
     let top = as_browser(api, "GET", api.site_url(n.own, ""), "document", "cross-site", &value)?;
     let fetched = as_browser(api, "GET", api.site_url(n.own, ""), "empty", "same-site", &value)?;
