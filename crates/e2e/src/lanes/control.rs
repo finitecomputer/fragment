@@ -167,6 +167,13 @@ pub fn create(s: &mut Suite, api: &Api) -> Result<()> {
     let c = &r.body;
     let name = c["name"].as_str().unwrap_or("").to_string();
     s.ok("a signed create succeeds", r.status == 200, &r);
+    // what it waited on, in its answer (docs/api.md): the router's parts, then its object's
+    let waited = crate::api::timing_parts(&r.header("server-timing"));
+    s.ok(
+        "its answer says what it waited on (Server-Timing): the ledger and its object, then the object's repo, key, list, seed and alarm",
+        ["ledger", "object", "repo", "key", "list", "seed", "alarm"].iter().all(|p| waited.iter().any(|w| w == p)),
+        r.header("server-timing"),
+    );
     s.ok("a label is made a name: the label, and a random suffix", fragment_proto::split_fragment_name(&name).is_some_and(|(l, _)| l == label), &r);
     s.ok("create names the owner by identity", c["owner"] == owner_id.as_str(), &r);
     s.ok("create returns the fragment's own npub", c["npub"].as_str().is_some_and(|n| n.starts_with("npub1")), &r);

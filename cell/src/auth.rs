@@ -914,8 +914,11 @@ pub async fn fragment(req: &Request, env: &Env, cfg: &Config, url: &Url, name: &
     match (rest, req.method()) {
         ("__signin", Method::Get) => {
             if let Some(redeem) = query(url, "token") {
+                // what it waited on, for its client (`Server-Timing`)
+                let mut laps = crate::js::Laps::start();
                 let redeemed = ask_registry(env, &calls::Redeem { redeem, fragment: name.to_string(), framed: fetched.framed }).await?;
-                return match fetched.framed {
+                laps.lap("redeem");
+                let to = match fetched.framed {
                     // straight to its page, marked: that page's own request
                     // checks the browser kept the frame's cookie (lib.rs
                     // `site`), as `check=frame`, a hop of its own, once did
@@ -926,6 +929,7 @@ pub async fn fragment(req: &Request, env: &Env, cfg: &Config, url: &Url, name: &
                     }
                     false => redirect(&back_to(&base, Some(&redeemed.return_to))?, &[set_cookie(SITE_COOKIE, &redeemed.token, "/", ttl_s, secure(url))]),
                 };
+                return Ok(laps.stamp(to?)?);
             }
             if fetched.framed {
                 let kept = query(url, "check").as_deref() == Some("frame") && fetched.frame && frame_token(req, url)?.is_some();
