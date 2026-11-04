@@ -134,7 +134,8 @@ export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, 
     };
     const renameIt = el("button", "app-title-edit agent-rename");
     renameIt.type = "button";
-    renameIt.setAttribute("aria-label", `Rename ${titleOf(a.fragment)}`);
+    // (its name as it is now: renamed elsewhere, it follows)
+    named(renameIt, a.fragment, (t) => `Rename ${t}`, "aria-label");
     renameIt.append(icon("rename"));
     renameIt.dataset.renameAgent = a.fragment;
     renameIt.onclick = () => rename(a.fragment);

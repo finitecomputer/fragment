@@ -2153,7 +2153,8 @@ fn account_shows(seen: &Value, email: &str) -> bool {
 /// account (nor its words), past its edges.
 const NO_SEAT_FITS: &str = "(() => { const d = document.documentElement; const p = document.getElementById('settings-page'); \
     const parts = [...document.querySelectorAll('.no-seat, .no-seat *, form[action^=\"/auth/switch\"], form[action^=\"/auth/switch\"] *, .settings-who, .settings-who *')].filter((e) => e.getClientRects().length); \
-    const out = parts.filter((e) => { const r = e.getBoundingClientRect(); return r.left < -1 || r.right > innerWidth + 1 || e.scrollWidth > e.clientWidth + 1; }).map((e) => `${e.tagName} ${e.className} ${e.textContent.slice(0, 40)}`); \
+    const unseen = (r) => r.width <= 1 && r.height <= 1; \
+    const out = parts.filter((e) => { const r = e.getBoundingClientRect(); return !unseen(r) && (r.left < -1 || r.right > innerWidth + 1 || e.scrollWidth > e.clientWidth + 1); }).map((e) => `${e.tagName} ${e.className} ${e.textContent.slice(0, 40)}`); \
     const page = p && !p.hidden ? [p.scrollWidth, p.clientWidth] : null; \
     return { ok: parts.length > 0 && out.length === 0 && d.scrollWidth <= innerWidth && (!page || page[0] <= page[1]), parts: parts.length, out, wide: d.scrollWidth, width: innerWidth, page }; })()";
 
@@ -4511,6 +4512,9 @@ fn reasoning_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session:
     b.reload(page)?;
     let restored = b.until(page, &format!("{fast}.dataset.read==='1' && {fast}.value==='high' && {deep}.value==='max'"), wait);
     s.ok("both mode efforts survive a reload", restored, agent_json());
+    // the picks are the agent's Edit dialog's: open, as a person opens it
+    b.eval(page, &format!("(document.querySelector('[data-edit-agent={lead:?}]').click(), true)"))?;
+    anyhow::ensure!(b.until(page, "!!document.getElementById('edit-agent')?.open", wait), "{lead}'s Edit opened");
     b.eval(page, &format!("({deep}.scrollIntoView({{block:'center'}}),true)"))?;
     let _ = b.screenshot(page, &shots.join("desktop-agent-model-modes.png"));
     for (width, theme) in [(375, "dark"), (375, "light"), (320, "light")] {
@@ -4521,6 +4525,7 @@ fn reasoning_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session:
         s.ok(&format!("BYO model and effort controls fit a {width}px {theme} phone"), fits == true, &fits);
         let _ = b.screenshot(page, &shots.join(format!("phone-agent-model-modes-{width}-{theme}.png")));
     }
+    b.eval(page, "(document.getElementById('edit-agent')?.close(), true)")?;
     b.viewport(page, 1280, 800, false)?;
     b.color_scheme(page, "dark")?;
     // A missing file is safe only for an explicit model choice, which
@@ -4687,7 +4692,10 @@ fn home_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person, 
     s.ok("a home whose first read fails (a 503) is read again when Settings open, and the pick shows it", refused && reopened, first);
     // its read refused with Settings open: said under the pick, which waits; Try again reads it
     let p = b.open_with_script(&format!("{}/settings", api.base), &refusing)?;
-    let said = b.until(&p, &format!("{unread_of}?.checkVisibility() === true && {pick_of}.disabled && {pick_of}.options.length === 0"), wait);
+    // the pick is its Edit dialog's: opened, as a person opens it
+    b.until(&p, &format!("!!document.querySelector('[data-edit-agent={agent:?}]')"), wait);
+    b.eval(&p, &format!("(document.querySelector('[data-edit-agent={agent:?}]').click(), true)"))?;
+    let said = b.until(&p, &format!("!!document.getElementById('edit-agent')?.open && {unread_of}?.checkVisibility() === true && {pick_of}.disabled && {pick_of}.options.length === 0"), wait);
     let line = b.eval(&p, &format!("{unread_of}?.innerText ?? null"))?;
     b.eval(&p, &format!("({unread_of}?.scrollIntoView({{ block: 'center' }}), true)"))?;
     let _ = b.screenshot(&p, &shots.join("desktop-agent-home-unread.png"));
