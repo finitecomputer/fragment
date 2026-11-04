@@ -570,7 +570,7 @@ fn org_credit(s: &mut Suite, api: &Api) -> Result<()> {
         ("someone not in it reads none of it (403)", api.signed(&xan, "GET", &format!("{root}/ledger"), None)?, 403),
         ("an org that is not there takes no credit (404)", api.signed(&s.operator, "POST", "/api/ledger/org:org-0000000000000000/grant", Some(&json!({ "id": "x", "micros": 1, "by": op, "why": "" })))?, 404),
         ("its ledger takes no plan (403)", api.signed(&s.operator, "POST", &format!("/api/ledger/org:{org}/plan"), Some(&json!({ "id": "p", "plan": "seat" })))?, 403),
-        ("a budget past its limit (400)", api.signed(&s.operator, "POST", &format!("/api/ledger/org:{org}/budget"), Some(&json!({ "id": "huge", "micros": 100_000_000_001_i64 })))?, 400),
+        ("a budget past its limit (400)", api.signed(&s.operator, "POST", &format!("/api/ledger/org:{org}/budget"), Some(&json!({ "id": "huge", "micros": fragment_core::ledger::org::BUDGET_MAX + 1 })))?, 400),
         ("a payer no one on the fleet is (404)", api.signed(&s.operator, "POST", &format!("/api/admin/orgs/{org}/payer"), Some(&json!({ "id": "nobody", "person": "nobody@e2e.test" })))?, 404),
     ];
     let mut all = true;

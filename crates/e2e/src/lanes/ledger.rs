@@ -1367,7 +1367,7 @@ fn meters(s: &mut Suite, api: &Api, wait: Duration) -> Result<()> {
         acked && counted >= 6 && landed("req") && rows("req").iter().all(|e| e["entry"]["row"]["fragment"] == name.as_str()),
         json!({ "sent": sent, "ledger": rows("req") }),
     );
-    s.ok("its code version is one dynamic worker today, once however often it ran", rows("dw").len() == 1 && rows("dw")[0]["entry"]["charge"] == 3_000, json!(rows("dw")));
+    s.ok("its code version is one dynamic worker today, once however often it ran", rows("dw").len() == 1 && rows("dw")[0]["entry"]["charge"] == charge(&Usage::DynamicWorkers { count: 1 }), json!(rows("dw")));
     // its card's shot: the browser time it took, at the book's browser-hour price
     let shot = |e: &Value| -> bool {
         let usage: Option<Usage> = serde_json::from_value(e["entry"]["row"]["usage"].clone()).ok();
