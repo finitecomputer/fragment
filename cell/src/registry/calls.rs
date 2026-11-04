@@ -901,11 +901,17 @@ pub(crate) enum Consent {
 }
 
 /// `POST /redeem/mint`: a single-use redemption of a platform session for
-/// one fragment's origin, when `consent` allows it.
+/// one fragment's origin, when `consent` allows it. It is minted from a
+/// browser's platform session (`token`), or a person's approved key
+/// (`key`, whose signature the router checked: `POST /api/f/{name}/session`,
+/// top-level only): one of them.
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Mint {
-    pub token: String,
+    #[serde(default)]
+    pub token: Option<String>,
+    #[serde(default)]
+    pub key: Option<String>,
     pub fragment: String,
     pub return_to: String,
     pub consent: Consent,
