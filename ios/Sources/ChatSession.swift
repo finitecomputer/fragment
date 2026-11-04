@@ -67,7 +67,8 @@ final class ChatSession {
         guard let index = pending.firstIndex(where: { $0.id == post.id }), pending[index].refused != nil else { return }
         guard composer.isEmpty && attachments.isEmpty else { error = "Send or clear your draft first, then edit this message."; return }
         let refused = pending.remove(at: index)
-        composer = refused.text; attachments = refused.attachments
+        // its own words, files and addressees: the draft's were kept until now
+        composer = refused.text; attachments = refused.attachments; recipients = refused.recipients
         replyTo = timeline.records.first { $0.channel == "chat" && $0.seq == refused.replyTo }
         error = nil
     }
@@ -118,7 +119,9 @@ final class ChatSession {
                                 try await subscribe(socket, channel: channel, after: frame.next)
                             } else if channel == "chat" {
                                 caughtUp = true
-                                if timeline.records.filter({ $0.channel == "chat" }).count < 50 { hasEarlier = false }
+                                if timeline.records.filter({ $0.channel == "chat" }).count < Self.chatLast { hasEarlier = false }
+                            } else if channel == "work" {
+                                await readTurnsBack()
                             }
                         }
                     }
@@ -147,12 +150,34 @@ final class ChatSession {
         }
     }
 
+    /// The backlog a chat first reads: its last messages, and a page of
+    /// `work` (`CHANNEL_PAGE`), which holds a long turn's steps (up to 200
+    /// calls and 200 steps) and, mostly, its start (`readTurnsBack`).
+    static let chatLast = 50
+    static let workPage = 1_000
+    /// Pages of earlier `work` read back for turns begun before the backlog,
+    /// as the web's chat page reads (templates/chat `earlierWork`).
+    static let turnPagesMax = 10
+
     private func subscribe(_ socket: LiveSocket, channel: String, after: Int64?) async throws {
         var body: [String: JSONValue] = ["type": .string("subscribe"), "channel": .string(channel)]
         if let after { body["after"] = .number(Double(after)) }
-        else { body["last"] = .number(50) }
+        else { body["last"] = .number(Double(channel == "work" ? Self.workPage : Self.chatLast)) }
         let data = try JSONEncoder().encode(JSONValue.object(body))
         try await socket.send(.string(String(decoding: data, as: UTF8.self)))
+    }
+
+    /// Earlier `work`, read until each turn the backlog shows work of has its
+    /// start or its end, so one begun before it still shows running (and
+    /// Stop). Bounded by `turnPagesMax`; a failure leaves it for the next
+    /// visit. What it reads only says which turns run: none is shown.
+    private func readTurnsBack() async {
+        for _ in 0..<Self.turnPagesMax {
+            guard !timeline.unresolvedTurns.isEmpty, let oldest = timeline.oldestWork, oldest > 1 else { return }
+            guard let page = try? await api.history(fragment.name, channel: "work", before: oldest, limit: Self.workPage) else { return }
+            for record in page { timeline.learn(record) }
+            if page.count < Self.workPage { return }
+        }
     }
 
     func send() async {
@@ -190,7 +215,7 @@ final class ChatSession {
             timeline.insert(record, advancingCursor: false)
             pending.removeAll { $0.id == post.id }
             error = nil
-        } catch APIError.refused(let message) {
+        } catch APIError.refused(let message), APIError.absent(let message) {
             // Refused, not lost: sending it again gets the same answer, so
             // it is never retried. Its words go back to an empty composer;
             // beside a draft, it waits to be edited (`reopen`), as a draft

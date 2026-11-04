@@ -135,3 +135,53 @@ enum AppIconImage {
         return png as Data
     }
 }
+
+/// One export, as its person sees it (`ExportView`, docs/api.md, Export).
+struct ExportView: Decodable, Sendable {
+    struct Progress: Decodable, Sendable { let done: Int; let total: Int }
+    struct Problem: Decodable, Sendable { let message: String }
+    let id: String
+    let state: String
+    var progress: Progress?
+    var size: Int64?
+    var error: Problem?
+    /// While it is ready: a path on the platform's origin, for its person alone.
+    var download: String?
+    var said: String {
+        switch state {
+        case "building": progress.map { "Building (\($0.done) of \($0.total))" } ?? "Building"
+        case "ready": size.map { "Ready, " + ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) } ?? "Ready"
+        case "failed": "Failed" + (error.map { ": " + $0.message } ?? "")
+        case "expired": "Expired"
+        default: state.capitalized
+        }
+    }
+}
+
+extension FragmentAPI {
+    func export() async throws -> ExportView? {
+        struct Status: Decodable { let export: ExportView? }
+        let status: Status = try await request("api/export")
+        return status.export
+    }
+
+    func startExport() async throws -> ExportView { try await request("api/export", method: "POST", body: .object([:])) }
+
+    /// A ready export's archive, downloaded with this iPhone's signature to a
+    /// file of its own (`Caches/Exports`), streamed to disk: its path must be
+    /// the platform's own export download.
+    func download(_ export: ExportView) async throws -> URL {
+        guard export.state == "ready", let path = export.download, let url = URL(string: path, relativeTo: baseURL)?.absoluteURL,
+              PlatformOrigin.same(url, baseURL), url.path == "/api/export/\(export.id)/download" else { throw APIError.invalidResponse }
+        let (temporary, response) = try await session.download(for: authorized(URLRequest(url: url)))
+        guard let http = response as? HTTPURLResponse else { throw APIError.invalidResponse }
+        if http.statusCode == 401 { authorizationFailed(); throw APIError.unauthorized }
+        guard http.statusCode == 200 else { throw APIError.answer(Data(), status: http.statusCode) }
+        let folder = try FileManager.default.url(for: .cachesDirectory, in: .userDomainMask, appropriateFor: nil, create: true).appending(path: "Exports", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let file = folder.appending(path: "fragment-export-\(export.id).tar")
+        if FileManager.default.fileExists(atPath: file.path) { try FileManager.default.removeItem(at: file) }
+        try FileManager.default.moveItem(at: temporary, to: file)
+        return file
+    }
+}

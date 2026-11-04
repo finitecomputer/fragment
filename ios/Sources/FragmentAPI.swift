@@ -3,14 +3,15 @@ import Foundation
 enum APIError: LocalizedError {
     /// `refused`: the server answered 4xx (but a timeout or a rate limit), a
     /// final answer: the same request again gets it again.
-    case invalidResponse, limitExceeded, server(String), refused(String), unauthorized, keychain(Int32)
+    /// `absent`: a 404, which `answer` says apart only to `optional` readers.
+    case invalidResponse, limitExceeded, server(String), refused(String), absent(String), unauthorized, keychain(Int32)
     var errorDescription: String? {
         switch self {
         case .unauthorized: "This iPhone is not authorized. Connect your account again."
         case .keychain(let status): "The iPhone key could not be accessed (Keychain \(status))."
         case .invalidResponse: "Finite sent an unreadable response."
         case .limitExceeded: "This response is larger than the app can display."
-        case .server(let message), .refused(let message): message
+        case .server(let message), .refused(let message), .absent(let message): message
         }
     }
     /// A non-2xx answer as an error, with the server's own message.
@@ -95,9 +96,19 @@ struct FragmentAPI: Sendable {
         }
         let (data, response) = try await self.data(for: request)
         guard let http = response as? HTTPURLResponse else { throw APIError.invalidResponse }
-        guard (200..<300).contains(http.statusCode) else { throw APIError.answer(data, status: http.statusCode) }
+        guard (200..<300).contains(http.statusCode) else {
+            let refusal = APIError.answer(data, status: http.statusCode)
+            if http.statusCode == 404, case .refused(let message) = refusal { throw APIError.absent(message) }
+            throw refusal
+        }
         guard data.count <= 4_194_304 else { throw APIError.limitExceeded }
         return try JSONDecoder().decode(T.self, from: data)
+    }
+
+    /// A read of what may be absent: `nil` for a 404, and else as `request`.
+    func optional<T: Decodable>(_ type: T.Type, _ path: String, query: [URLQueryItem] = []) async throws -> T? {
+        do { return try await request(path, query: query) as T }
+        catch APIError.absent { return nil }
     }
 
     func fragments() async throws -> [FragmentSummary] {
@@ -164,10 +175,12 @@ struct FragmentAPI: Sendable {
         return result.record
     }
 
-    func history(_ fragment: String, before: Int64) async throws -> [ChannelRecord] {
+    /// A page of a channel's records just below `before` (at most
+    /// `CHANNEL_PAGE`, 1000, and a MiB: docs/api.md).
+    func history(_ fragment: String, channel: String = "chat", before: Int64, limit: Int = 50) async throws -> [ChannelRecord] {
         struct Page: Decodable { let records: [ChannelRecord] }
-        var components = URLComponents(url: url("api/f/\(fragment)/channels/chat"), resolvingAgainstBaseURL: false)!
-        components.queryItems = [URLQueryItem(name: "before", value: String(before)), URLQueryItem(name: "limit", value: "50")]
+        var components = URLComponents(url: url("api/f/\(fragment)/channels/\(channel)"), resolvingAgainstBaseURL: false)!
+        components.queryItems = [URLQueryItem(name: "before", value: String(before)), URLQueryItem(name: "limit", value: String(limit))]
         let (data, response) = try await self.data(for: URLRequest(url: components.url!))
         guard let http = response as? HTTPURLResponse else { throw APIError.invalidResponse }
         guard http.statusCode == 200 else { throw APIError.answer(data, status: http.statusCode) }

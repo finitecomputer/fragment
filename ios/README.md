@@ -123,9 +123,11 @@ sees a WebSocket). They cover what a phone meets: an acknowledgement lost after
 the post committed (retried with the same id and body), a refusal (final: the
 post leaves the outbox and its words return to the composer), a rate limit
 (kept to retry), a dropped stream (resubscribed from its cursor, nothing twice),
-Stop, earlier pages that never move the live cursor, an ended authorization,
-and the requests behind lists, joins, renames, archiving, attachments, search,
-sharing and icons. `TimelineTests` cover ordering, cursors, drafts and turns;
+Stop, a long turn whose start is past the backlog (read back, so Stop shows),
+earlier pages that never move the live cursor, an ended authorization, a web
+sheet that never reopens a spent redemption, an archive with no chats index or
+a failing read, an export built then downloaded signed, and the requests behind
+lists, joins, renames, archiving, attachments, search, sharing and icons. `TimelineTests` cover ordering, cursors, drafts and turns;
 `DeviceIdentityTests` NIP-98 binding, origins and Keychain; `DraftTests` the
 saved draft and outbox across restarts (a paste past a message, a refused send
 beside a draft, a saved file past its bounds or unreadable);

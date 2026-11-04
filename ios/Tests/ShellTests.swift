@@ -44,6 +44,95 @@ struct ShellTests {
         #expect(stub.seen.first { $0.path == "/api/f/archive--s1/file" }?.query == ["path": "index/chat.json"])
     }
 
+    /// The archive's index is optional: one of other kinds alone (cron,
+    /// subagents) has none, and one that fails to read stops nothing.
+    @Test func anArchiveWithoutChatsOrFailingNeverStopsAgents() async throws {
+        let failing = Stub { seen, before in
+            guard seen.route == "GET /api/f/archive--s1/file" else { return Self.platform(seen, before) }
+            // the first read finds no chats index; the next fails for a while
+            return before.contains { $0.route == seen.route } ? (503, #"{"error":"unavailable","message":"Try again."}"#) : (404, #"{"error":"not_found","message":"no file index/chat.json at main"}"#)
+        }
+        let api = try failing.api()
+        let library = Library()
+        await library.load(api)
+        #expect(library.error == nil && library.imported.isEmpty)
+        #expect(library.agent(for: "npub1juniper")?.name == "juniper--a2")
+        await library.load(api)
+        #expect(library.error == nil && library.imported.isEmpty)
+        #expect(library.agents(in: try #require(library.chats.first)).map(\.name) == ["moss--a1", "juniper--a2"])
+
+        // an index read once is kept through a failed read
+        let flaky = Stub { seen, before in
+            seen.route == "GET /api/f/archive--s1/file" && before.contains { $0.route == seen.route } ? (503, #"{"message":"Try again."}"#) : Self.platform(seen, before)
+        }
+        let kept = Library()
+        let flakyAPI = try flaky.api()
+        await kept.load(flakyAPI)
+        await kept.load(flakyAPI)
+        #expect(kept.imported.map(\.key) == ["imported-chat"] && kept.error == nil)
+    }
+
+    @Test func anExportIsBuiltThenDownloadedSignedToAFile() async throws {
+        let id = "0123456789abcdef"
+        let stub = Stub { seen, before in
+            switch seen.route {
+            case "POST /api/export": (200, #"{"id":"\#(id)","state":"building","startedAt":1,"progress":{"done":0,"total":3,"bytes":0}}"#)
+            case "GET /api/export":
+                before.contains { $0.route == "GET /api/export" }
+                    ? (200, #"{"export":{"id":"\#(id)","state":"ready","startedAt":1,"progress":{"done":3,"total":3,"bytes":11},"size":11,"readyAt":2,"expiresAt":3,"download":"/api/export/\#(id)/download"}}"#)
+                    : (200, #"{"export":null}"#)
+            case "GET /api/export/\(id)/download": (200, "tar-archive")
+            default: (404, "{}")
+            }
+        }
+        let api = try stub.api()
+        #expect(try await api.export() == nil)
+        let building = try await api.startExport()
+        #expect(building.state == "building" && building.said == "Building (0 of 3)" && building.download == nil)
+        await #expect(throws: APIError.self) { _ = try await api.download(building) }
+        let ready = try #require(try await api.export())
+        #expect(ready.state == "ready" && ready.download == "/api/export/\(id)/download")
+        let file = try await api.download(ready)
+        defer { try? FileManager.default.removeItem(at: file) }
+        #expect(try String(contentsOf: file, encoding: .utf8) == "tar-archive" && file.lastPathComponent == "fragment-export-\(id).tar")
+        let asked = try #require(stub.seen.last)
+        #expect(asked.route == "GET /api/export/\(id)/download" && asked.authorization?.hasPrefix("Nostr ") == true)
+        // a download path that is not this export's is never asked
+        var elsewhere = ready
+        elsewhere.download = "https://elsewhere.example/api/export/\(id)/download"
+        await #expect(throws: APIError.self) { _ = try await api.download(elsewhere) }
+    }
+
+    @Test func aComputerSaysItsPhase() throws {
+        let listed = try JSONDecoder().decode(JSONValue.self, from: Data(#"{"computers":[{"computer":"c1","owner":"npub1me","image":"stub","phase":"wont_wake","generation":3,"agents":[]}],"support":null}"#.utf8))
+        #expect(ComputerPhase.said(listed["computers"].array.first?["phase"].string) == "Won’t wake")
+        #expect(ComputerPhase.said("awake") == "Awake" && ComputerPhase.said(nil) == "—")
+    }
+
+    /// A web sheet's spent redemption is never opened again: each load
+    /// drops it before asking for a new one, and a failed ask leaves none.
+    @Test func aWebSheetRetryNeverReusesASpentRedemption() async throws {
+        let stub = Stub { seen, before in
+            switch seen.route {
+            case "GET /api/f/reading--p1/status": return (200, #"{"npub":"npub1app","urls":{"canonical":"http://reading--p1.fragment.localhost:8790/"}}"#)
+            case "POST /api/f/reading--p1/session":
+                let n = before.filter { $0.route == seen.route }.count
+                if n == 1 { return (503, #"{"message":"Try again shortly."}"#) }
+                return (200, #"{"consentRequired":false,"url":"http://reading--p1.fragment.localhost:8790/__signin?token=t\#(n)"}"#)
+            default: return (404, "{}")
+            }
+        }
+        let model = WebSheetModel(fragment: FragmentSummary(name: "reading--p1", kind: "app"), api: try stub.api())
+        await model.load()
+        #expect(model.url?.query == "token=t0" && model.error == nil)
+        // its page failed after the redemption was spent; Try again
+        model.error = "The app could not be opened (HTTP 502)."
+        await model.load()
+        #expect(model.url == nil && model.error == "Try again shortly.")
+        await model.load()
+        #expect(model.url?.query == "token=t2" && model.error == nil)
+    }
+
     @Test func anAgentJoinsAChatAsAnEditorByItsNpub() async throws {
         let stub = Stub { seen, before in
             seen.route == "PUT /api/f/talk--c9/members/npub1moss" ? (200, #"{"principal":"npub1moss","role":"editor"}"#) : Self.platform(seen, before)

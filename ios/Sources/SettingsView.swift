@@ -104,7 +104,7 @@ private struct SettingsDetail: View {
         case .computer:
             if let computer = computer {
                 Section("Your computer") {
-                    LabeledContent("State", value: computer["state"].string?.capitalized ?? "—")
+                    LabeledContent("State", value: ComputerPhase.said(computer["phase"].string))
                     LabeledContent("Version", value: computer["version"].string ?? "—")
                     Button("Restart computer", systemImage: "arrow.clockwise") { confirmRestart = true }
                 }
@@ -140,12 +140,7 @@ private struct SettingsDetail: View {
                 Button("Copy prompt", systemImage: "doc.on.doc") { UIPasteboard.general.string = prompt }
             }
         case .data:
-            Section("Export") {
-                Text("Download your fragments, messages, app data, and your computer’s newest save.")
-                LabeledContent("Status", value: value["export"]["state"].string ?? "No export yet")
-                Button("Export everything", systemImage: "square.and.arrow.down") { Task { await export() } }.disabled(loading)
-                if let raw = value["export"]["url"].string, let url = URL(string: raw), ["http", "https"].contains(url.scheme) { ShareLink(item: url) { Text("Share export") } }
-            }
+            ExportSection(api: api)
         case .device:
             Section("Notifications") {
                 LabeledContent("Reply notifications", value: notificationStatus)
@@ -165,7 +160,6 @@ private struct SettingsDetail: View {
         case .billing: path = "api/seat"
         case .computer: path = "api/computers"
         case .connections: path = "api/connections"
-        case .data: path = "api/export"
         default: return
         }
         do { value = try await api.request(path) } catch { self.error = error.localizedDescription }
@@ -175,13 +169,58 @@ private struct SettingsDetail: View {
         do { value = try await api.request("api/computers/\(id)/restart", method: "POST", body: .object(["generation": computer["generation"]])) }
         catch { self.error = error.localizedDescription }
     }
-    private func export() async {
-        loading = true; defer { loading = false }
-        do { let result: JSONValue = try await api.request("api/export", method: "POST", body: .object([:])); value = .object(["export": result]) }
-        catch { self.error = error.localizedDescription }
-    }
     private func notifications() async {
         do { let granted = try await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]); notificationStatus = granted ? "Allowed" : "Disabled in iOS Settings" }
         catch { self.error = error.localizedDescription }
+    }
+}
+
+/// The person's export (docs/api.md, Export): made on the platform, then
+/// downloaded with this iPhone's own signature into a file of its own, and
+/// shared from there. Its download is a path on the platform, never a link
+/// anyone else could open.
+private struct ExportSection: View {
+    let api: FragmentAPI
+    @State private var export: ExportView?
+    @State private var file: URL?
+    @State private var busy = false
+    @State private var error: String?
+    var body: some View {
+        Section("Export") {
+            Text("Download your fragments, messages, app data, and your computer’s newest save.")
+            LabeledContent("Status", value: export?.said ?? "No export yet")
+            if let export, export.state == "ready", export.download != nil {
+                if let file { ShareLink(item: file) { Label("Share export", systemImage: "square.and.arrow.up") } }
+                else { Button("Download export", systemImage: "arrow.down.circle") { Task { await download(export) } }.disabled(busy).accessibilityIdentifier("downloadExport") }
+            } else {
+                Button("Export everything", systemImage: "square.and.arrow.down") { Task { await start() } }
+                    .disabled(busy || export?.state == "building").accessibilityIdentifier("startExport")
+            }
+            if busy { ProgressView() }
+            if let error { Text(error).font(.footnote).foregroundStyle(.secondary) }
+        }
+        .task { await refresh() }
+        .refreshable { await refresh() }
+    }
+    private func run(_ step: () async throws -> Void) async {
+        busy = true; error = nil; defer { busy = false }
+        do { try await step() } catch { self.error = error.localizedDescription }
+    }
+    private func refresh() async { await run { export = try await api.export() } }
+    private func start() async { await run { export = try await api.startExport(); file = nil } }
+    private func download(_ export: ExportView) async { await run { file = try await api.download(export) } }
+}
+
+/// A computer's `phase` (`ComputerView`, docs/api.md), as Settings says it.
+enum ComputerPhase {
+    static func said(_ phase: String?) -> String {
+        switch phase {
+        case "asleep": "Asleep"
+        case "starting": "Starting"
+        case "awake": "Awake"
+        case "sleeping": "Going to sleep"
+        case "wont_wake": "Won’t wake"
+        default: "—"
+        }
     }
 }

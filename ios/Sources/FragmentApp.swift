@@ -49,18 +49,30 @@ final class Library {
             for index in fragments.indices {
                 if let picture = fragments[index].picture { fragments[index].picture = URL(string: picture, relativeTo: api.baseURL)?.absoluteString }
             }
-            if let archive = fragments.first(where: { $0.kind == "sessions" && $0.role == "owner" }) {
-                struct Index: Decodable { let sessions: [ImportedSession] }
-                let index: Index = try await api.request("api/f/\(archive.name)/file", query: [URLQueryItem(name: "path", value: "index/chat.json")])
-                guard loadID == requestID, !Task.isCancelled else { return }
-                imported = Array(index.sessions.prefix(2_000))
-            } else { imported = [] }
             for agent in agents.prefix(32) where identities[agent.name] == nil {
                 let status: FragmentStatus = try await api.request("api/f/\(agent.name)/status")
                 identities[agent.name] = status.npub
             }
             if loadID == requestID { error = nil }
         } catch { if loadID == requestID && !Task.isCancelled { self.error = error.localizedDescription } }
+        await loadImported(api, requestID)
+    }
+    /// The person's imported chats: their session archive's `index/chat.json`
+    /// (templates/sessions/README.md), apart from the rest of the list. An
+    /// archive of other kinds alone (cron, subagents) has no such index:
+    /// none, as the web's History reads it. A read that fails keeps what was
+    /// read before, and nothing else waits on it.
+    private func loadImported(_ api: FragmentAPI, _ requestID: UUID) async {
+        struct Index: Decodable { let sessions: [ImportedSession] }
+        guard let archive = fragments.first(where: { $0.kind == "sessions" && $0.role == "owner" }) else {
+            if loadID == requestID { imported = [] }
+            return
+        }
+        let index: Index?
+        do { index = try await api.optional(Index.self, "api/f/\(archive.name)/file", query: [URLQueryItem(name: "path", value: "index/chat.json")]) }
+        catch { return }
+        guard loadID == requestID, !Task.isCancelled else { return }
+        imported = Array((index?.sessions ?? []).prefix(2_000))
     }
     func watch(_ api: FragmentAPI) async {
         var attempt = 0

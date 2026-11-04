@@ -82,7 +82,9 @@ struct TransportTests {
         first.push(hello)
         try await waitUntil("its subscriptions") { first.sent.count == 2 }
         #expect(first.sent.map { $0["channel"].string } == ["chat", "work"])
-        #expect(first.sent.allSatisfy { $0["type"].string == "subscribe" && $0["last"] == .number(50) && $0["after"] == .null })
+        // the chat's last messages, and a page of work (a long turn's steps, and its start)
+        #expect(first.sent.allSatisfy { $0["type"].string == "subscribe" && $0["after"] == .null })
+        #expect(first.sent.map { $0["last"] } == [.number(50), .number(1000)])
         for seq: Int64 in [1, 2] { first.push(frame("chat", seq, body: #"{"text":"m\#(seq)"}"#)) }
         first.push(#"{"type":"subscribed","channel":"chat","next":2,"more":false}"#)
         first.push(#"{"type":"subscribed","channel":"work","next":0,"more":false}"#)
@@ -123,6 +125,45 @@ struct TransportTests {
         await session.stop()
         let stop = try #require(stub.seen.first { $0.route == route })
         #expect(stop.json == .object(["id": .string("stop:t4"), "body": .object(["kind": .string("stop"), "turn": .string("t4")])]))
+    }
+
+    /// A turn begun before the backlog (a start, then more steps than one
+    /// page holds) still runs, and Stop stops it, opening the chat and
+    /// opening it again: its start is read back from earlier work.
+    @Test func aBusyTurnKeepsItsStopPastTheBacklog() async throws {
+        let route = posts
+        // work 1 to 1100: turn t9's start, then its steps; the backlog is the last 1000
+        let work: @Sendable (Int64) -> String = { seq in record("work", seq, body: seq == 1 ? #"{"kind":"turn.start","turn":"t9"}"# : #"{"kind":"turn.step","turn":"t9","text":"step \#(seq)"}"#) }
+        let stub = Stub { seen, _ in
+            switch seen.route {
+            case "GET /api/f/chat--abc123/channels/work":
+                let before = Int64(seen.query["before"] ?? "") ?? 0, limit = Int64(seen.query["limit"] ?? "") ?? 0
+                let page = (max(1, before - limit)..<before).map(work).joined(separator: ",")
+                return (200, #"{"channel":"work","records":[\#(page)],"next":null}"#)
+            case route: return posted(seen, seq: 2, replayed: false)
+            default: return (404, "{}")
+            }
+        }
+        let api = try stub.api()
+        defer { try? ChatDraftStore.removeAccount(api: api) }
+        for visit in 0..<2 {
+            let session = ChatSession(fragment: chat, api: api)
+            let run = Task { await session.run() }
+            try await waitUntil("a socket") { stub.sockets.count == visit + 1 }
+            let socket = stub.sockets[visit]
+            socket.push(hello)
+            try await waitUntil("its subscriptions") { socket.sent.count == 2 }
+            #expect(socket.sent[1]["channel"].string == "work" && socket.sent[1]["last"] == .number(1000))
+            for seq: Int64 in 101...1100 { socket.push(#"{"type":"record",\#(work(seq).dropFirst())"#) }
+            socket.push(#"{"type":"subscribed","channel":"work","next":1100,"more":false}"#)
+            socket.push(#"{"type":"subscribed","channel":"chat","next":0,"more":false}"#)
+            try await waitUntil("the turn running") { session.timeline.activeTurns == ["t9"] }
+            #expect(stub.seen.contains { $0.route == "GET /api/f/chat--abc123/channels/work" && $0.query == ["before": "101", "limit": "1000"] })
+            await session.stop()
+            #expect(stub.seen.last { $0.route == route }?.json["id"].string == "stop:t9")
+            run.cancel()
+            await run.value
+        }
     }
 
     @Test func earlierMessagesAreAPageBeforeTheOldestAndNeverMoveTheCursor() async throws {

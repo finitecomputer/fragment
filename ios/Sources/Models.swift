@@ -109,14 +109,56 @@ struct ReplyDraft: Identifiable, Equatable {
     var id: String { turn }
 }
 
+/// A turn as its `work` records say it (docs/chat-records.md): begun by the
+/// agent whose `turn.start` began it, and over at its `turn.end`.
+struct TurnState: Equatable, Sendable {
+    var startedBy: String?
+    var startedAt: Int64 = 0
+    var ended = false
+}
+
 struct Timeline {
     private(set) var records: [ChannelRecord] = []
     private(set) var drafts: [String: ReplyDraft] = [:]
     private(set) var cursors: [String: Int64] = [:]
+    /// Each turn seen, kept apart from the record window, which a long
+    /// turn's steps outgrow: whether a turn runs (and Stop shows) never
+    /// depends on how much of it is on screen.
+    private(set) var turns: [String: TurnState] = [:]
+    /// The oldest `work` record seen, where reading earlier work goes on from.
+    private(set) var oldestWork: Int64?
     // Bound the in-memory window independently of the server's retention.
     static let maximumRecords = 2_000
+    static let maximumTurns = 512
+
+    /// What a `work` record says of its turn, wherever it falls: in the
+    /// window, or read back only for this (`ChatSession`'s earlier work).
+    mutating func learn(_ record: ChannelRecord) {
+        guard record.channel == "work" else { return }
+        oldestWork = min(oldestWork ?? record.seq, record.seq)
+        guard let turn = record.turn else { return }
+        var state = turns[turn] ?? TurnState()
+        switch record.body["kind"].string {
+        case "turn.start" where state.startedBy == nil:
+            state.startedBy = record.principal; state.startedAt = record.at
+        // its later records count only from the agent that began it
+        case "turn.end" where state.startedBy == nil || state.startedBy == record.principal:
+            state.ended = true
+        default: break
+        }
+        turns[turn] = state
+        if turns.count > Self.maximumTurns {
+            let gone = turns.filter { $0.value.ended }.map(\.key) + turns.filter { $0.value.startedBy == nil }.map(\.key)
+            for key in gone.prefix(turns.count - Self.maximumTurns) where key != turn { turns.removeValue(forKey: key) }
+        }
+    }
+
+    /// The turns the window shows work of, neither begun nor ended in it:
+    /// earlier work to read back.
+    var unresolvedTurns: [String] { turns.filter { $0.value.startedBy == nil && !$0.value.ended }.map(\.key).sorted() }
 
     mutating func insert(_ record: ChannelRecord, advancingCursor: Bool = true) {
+        learn(record)
         if advancingCursor { cursors[record.channel] = max(cursors[record.channel] ?? 0, record.seq) }
         if !records.contains(where: { $0.id == record.id }) {
             records.append(record)
@@ -160,17 +202,9 @@ struct Timeline {
 
     mutating func disconnected() { drafts.removeAll() }
 
+    /// The turns running: begun and not ended, the earliest first.
     var activeTurns: [String] {
-        var active: [String] = []
-        for record in records where record.channel == "work" {
-            guard let turn = record.turn else { continue }
-            switch record.body["kind"].string {
-            case "turn.start": if !active.contains(turn) { active.append(turn) }
-            case "turn.end": active.removeAll { $0 == turn }
-            default: break
-            }
-        }
-        return active
+        turns.filter { $0.value.startedBy != nil && !$0.value.ended }.sorted { ($0.value.startedAt, $0.key) < ($1.value.startedAt, $1.key) }.map(\.key)
     }
 }
 

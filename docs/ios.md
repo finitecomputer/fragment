@@ -148,7 +148,14 @@ refusal. Its own bounds are its storage's (above) and what it sends over a
 phone's network: an attachment of at most 25 MiB, and an icon fitted inside
 256×256 on the phone, as the server would fit it.
 
-JSON text subscriptions match the Worker’s live protocol. Connected accounts follow the signed list watcher, discard
+JSON text subscriptions match the Worker’s live protocol. A chat reads its last
+50 messages and a page of `work` (1000, `CHANNEL_PAGE`); which turns run is kept
+apart from the shown records, and a turn begun before that page has its start
+read back from earlier work (at most ten pages, as the web's chat page reads), so
+Stop shows for a long turn however it was opened. An archive's chats index is
+optional: an archive of other kinds alone has none, and a failed read never
+stops the list or its agents. An export downloads with the phone's signature to
+a file of its own, and is shared from there. Connected accounts follow the signed list watcher, discard
 stale list reloads, and mark visible, caught-up chats read. HTTP/WebSocket
 interruption recovery, independent cursors, Stop and history remain unchanged. Push delivery, approval-card controls, imported-chat continuation, and
 full Markdown tables are not implemented. Notification permission alone does not

@@ -1,49 +1,23 @@
 import SwiftUI
 import WebKit
 
-struct FragmentWebSheet: View {
-    @Environment(\.dismiss) private var dismiss
+/// What a web sheet shows: a fragment's one-use `__signin` URL, asked of
+/// `POST /api/f/{name}/session` (docs/ios.md), or why not. A redemption is
+/// spent once its page loads: each load drops the last before asking for a
+/// new one, so no web view ever opens a spent one.
+@MainActor @Observable
+final class WebSheetModel {
     let fragment: FragmentSummary
     let api: FragmentAPI
-    @State private var url: URL?
-    @State private var error: String?
-    @State private var loading = true
-    @State private var needsConsent = false
-    @State private var consentEmail: String?
+    private(set) var url: URL?
+    var error: String?
+    var loading = true
+    private(set) var needsConsent = false
+    private(set) var consentEmail: String?
+    init(fragment: FragmentSummary, api: FragmentAPI) { self.fragment = fragment; self.api = api }
 
-    var body: some View {
-        NavigationStack {
-            Group {
-                if needsConsent {
-                    ContentUnavailableView {
-                        Label("Open \(fragment.displayTitle)?", systemImage: "person.crop.circle.badge.checkmark")
-                    } description: {
-                        Text("Continue as \(consentEmail ?? "your account")? This app will be able to recognize you.")
-                    } actions: {
-                        Button("Continue") { Task { await load(consent: true) } }
-                        Button("Cancel", role: .cancel) { dismiss() }
-                    }
-                } else if let error {
-                    ContentUnavailableView {
-                        Label("Couldn’t open this app", systemImage: "wifi.exclamationmark")
-                    } description: { Text(error) } actions: {
-                        Button("Try again") { Task { await load() } }
-                    }
-                } else if let url {
-                    WebContent(url: url, loading: $loading, error: $error)
-                        .overlay { if loading { ProgressView() } }
-                } else { ProgressView() }
-            }
-            .navigationTitle(fragment.displayTitle).navigationBarTitleDisplayMode(.inline)
-            .task { await load() }
-        }
-        .presentationDetents([.large])
-        .presentationDragIndicator(.visible)
-        .accessibilityAction(.escape) { dismiss() }
-    }
-
-    private func load(consent: Bool = false) async {
-        error = nil; needsConsent = false
+    func load(consent: Bool = false) async {
+        url = nil; error = nil; needsConsent = false
         loading = true
         do {
             struct Status: Decodable { struct URLs: Decodable { let canonical: URL }; let urls: URLs }
@@ -68,6 +42,50 @@ struct FragmentWebSheet: View {
                   redemption.path.hasSuffix("/__signin") else { throw APIError.invalidResponse }
             url = redemption
         } catch { self.error = error.localizedDescription }
+    }
+}
+
+struct FragmentWebSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    let fragment: FragmentSummary
+    @State private var model: WebSheetModel
+    init(fragment: FragmentSummary, api: FragmentAPI) {
+        self.fragment = fragment
+        _model = State(initialValue: WebSheetModel(fragment: fragment, api: api))
+    }
+
+    var body: some View {
+        @Bindable var model = model
+        NavigationStack {
+            Group {
+                if model.needsConsent {
+                    ContentUnavailableView {
+                        Label("Open \(fragment.displayTitle)?", systemImage: "person.crop.circle.badge.checkmark")
+                    } description: {
+                        Text("Continue as \(model.consentEmail ?? "your account")? This app will be able to recognize you.")
+                    } actions: {
+                        Button("Continue") { Task { await model.load(consent: true) } }
+                        Button("Cancel", role: .cancel) { dismiss() }
+                    }
+                } else if let error = model.error {
+                    ContentUnavailableView {
+                        Label("Couldn’t open this app", systemImage: "wifi.exclamationmark")
+                    } description: { Text(error) } actions: {
+                        Button("Try again") { Task { await model.load() } }
+                    }
+                } else if let url = model.url {
+                    // a new redemption is a new web view: one never reloads a spent one
+                    WebContent(url: url, loading: $model.loading, error: $model.error)
+                        .id(url)
+                        .overlay { if model.loading { ProgressView() } }
+                } else { ProgressView() }
+            }
+            .navigationTitle(fragment.displayTitle).navigationBarTitleDisplayMode(.inline)
+            .task { await model.load() }
+        }
+        .presentationDetents([.large])
+        .presentationDragIndicator(.visible)
+        .accessibilityAction(.escape) { dismiss() }
     }
 }
 

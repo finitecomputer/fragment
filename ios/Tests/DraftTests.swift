@@ -28,15 +28,21 @@ struct DraftTests {
         let route = posts
         let stub = Stub { seen, before in
             guard seen.route == route else { return (404, "{}") }
-            // lost the first time, refused the second
-            return before.contains { $0.route == route } ? (409, #"{"error":"conflicting_body","message":"Not that one."}"#) : (503, #"{"message":"Try again."}"#)
+            // lost the first time, refused the second, taken after
+            switch before.filter({ $0.route == route }).count {
+            case 0: return (503, #"{"message":"Try again."}"#)
+            case 1: return (409, #"{"error":"conflicting_body","message":"Not that one."}"#)
+            default: return (200, #"{"record":\#(record("chat", 5, principal: "npub1me", body: "{}")),"replayed":false}"#)
+            }
         }
         let api = try stub.api()
         defer { try? ChatDraftStore.removeAccount(api: api) }
         let session = ChatSession(fragment: chat, api: api)
+        session.recipients = ["npub1first"]
         session.edit("First words")
         await session.send()
         let sent = try #require(session.pending.first)
+        session.recipients = ["npub1draft"]
         session.edit("A draft of more words")
         await session.retry(sent)
         // the draft stays as it was; the refused send waits, never retried
@@ -45,16 +51,20 @@ struct DraftTests {
         session.flushDraft()
 
         let reopened = ChatSession(fragment: chat, api: api)
-        #expect(reopened.error == nil && reopened.composer == "A draft of more words")
+        #expect(reopened.error == nil && reopened.composer == "A draft of more words" && reopened.recipients == ["npub1draft"])
         let refused = try #require(reopened.pending.first)
         #expect(refused.refused == "Not that one." && refused.text == "First words")
         await reopened.retry(refused)
         #expect(stub.seen.filter { $0.route == route }.count == 2, "a refused send is never sent again")
         reopened.reopen(refused)
         #expect(reopened.pending.count == 1 && reopened.composer == "A draft of more words", "a draft is never joined past a message's size")
+        #expect(reopened.recipients == ["npub1draft"], "the draft's addressees stay until the refused message is edited")
         reopened.edit("")
         reopened.reopen(refused)
-        #expect(reopened.pending.isEmpty && reopened.composer == "First words")
+        #expect(reopened.pending.isEmpty && reopened.composer == "First words" && reopened.recipients == ["npub1first"])
+        await reopened.send()
+        let last = try #require(stub.seen.last { $0.route == route })
+        #expect(last.json["body"]["text"].string == "First words" && last.json["body"]["to"] == .array([.string("npub1first")]))
     }
 
     @Test func aSavedDraftPastItsBoundsOrUnreadableNeverStopsTheChat() async throws {
