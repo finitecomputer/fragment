@@ -159,7 +159,7 @@ const DEV_CONNECTION: &str = "sample";
 /// `DEV_CONNECTION`, so settings' Connections shows each kind locally.
 /// Their hosts are `.test` names: a call to one goes nowhere.
 const DEV_OPERATOR_KEYS: [(&str, i64, &str); 2] = [("web-search", 5_000, "dev-web-search-key"), ("page-reader", 10_000, "dev-page-reader-key")];
-const DEV_OWN_KEY: &str = "sample-key";
+const DEV_OWN_KEY: &str = "mailbox";
 
 /// A command as errors show it: the program and its arguments only
 /// (`{cmd:?}` would print the environment set on it, where a deploy may
@@ -394,7 +394,7 @@ fn dev_providers(oauth: Option<serde_json::Value>) -> String {
     for ((name, micros, _), note) in DEV_OPERATOR_KEYS.iter().zip(notes) {
         rows.push(serde_json::json!({ "name": name, "kind": "operator", "hosts": [format!("{name}.test")], "placements": bearer, "env": [env(name)], "price": { "micros": micros, "per": 1 }, "note": note }));
     }
-    rows.push(serde_json::json!({ "name": DEV_OWN_KEY, "kind": "own", "hosts": ["sample-key.test"], "placements": bearer, "env": [env(DEV_OWN_KEY)], "note": "Your own key for a stand-in on the dev stack: nothing real is called." }));
+    rows.push(serde_json::json!({ "name": DEV_OWN_KEY, "kind": "own", "hosts": [format!("{DEV_OWN_KEY}.test")], "placements": bearer, "env": [env(DEV_OWN_KEY)], "note": "Your own key for a stand-in mail service on the dev stack: nothing real is called." }));
     serde_json::Value::Array(rows).to_string()
 }
 
