@@ -67,12 +67,14 @@ pub(super) const SWAP_CHECKS: &[&str] = &[
 ];
 
 /// What one call of each key is charged: its list price (fragment_core::
-/// price DEFAULT_KEYS) and the 50% margin.
+/// price DEFAULT_KEYS) and the default book's margin, as the book prices a
+/// row.
 fn charge_of(key: &str) -> i64 {
-    let (micros, per) = fragment_core::price::default_key_price(key).expect("each operator key has a list price");
-    // ceil(micros / per × 1.5), as the price book rounds a row
-    let (n, d) = (micros * 3, 2 * per as i64);
-    (n + d - 1) / d
+    use fragment_core::price::{default_key_price, KeyPrice, PriceBook, Usage};
+    let (micros, per) = default_key_price(key).expect("each operator key has a list price");
+    let mut book = PriceBook::defaults();
+    book.keys.push(KeyPrice { key: key.into(), micros, per });
+    book.price(&Usage::Key { key: key.into(), units: 1 }).expect("a key's call is priced").charge
 }
 
 /// The placeholder the platform gives `agent` on computer `id` for

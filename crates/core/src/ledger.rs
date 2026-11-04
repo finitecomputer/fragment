@@ -74,25 +74,32 @@ const HOUR_MS: i64 = 3_600_000;
 const DAY_MS: i64 = 24 * HOUR_MS;
 
 /// A seat's included credit each month, and the always-on seat's
-/// (decision 25).
-pub const SEAT_INCLUDED: i64 = 50 * USD;
-pub const SEAT_ALWAYS_ON_INCLUDED: i64 = 100 * USD;
+/// (decision 25), doubled with every charge at book 9 (`PRICES_DOUBLED`):
+/// the $200 seat's $200 buys what its $100 did.
+pub const SEAT_INCLUDED: i64 = 100 * USD;
+pub const SEAT_ALWAYS_ON_INCLUDED: i64 = 200 * USD;
 /// How far below zero a person's fragments keep taking writes, until an
 /// operator sets another (decision 27).
-pub const OVERDRAFT_DEFAULT: i64 = 2 * USD;
+pub const OVERDRAFT_DEFAULT: i64 = 4 * USD;
 /// A fragment's monthly cap until its owner sets one (decision 26).
-pub const CAP_DEFAULT: i64 = 5 * USD;
+pub const CAP_DEFAULT: i64 = 10 * USD;
+/// The price book whose charges doubled (`price::MARGIN_BP_DEFAULT` 50% to
+/// 200%; Paul, 2026-11-04: "go now and we just reset everyone's usage this
+/// month. $50 of credit for $25"), with every amount above and every limit
+/// below. A ledger takes it once (`Ledger::switch_prices`), as the first
+/// call of a release that knows it reads its head.
+pub const PRICES_DOUBLED: u32 = 9;
 
 /// Rows in one batch: a batch is one request and one transaction, and
 /// 1,000 rows of about 300 bytes stay far under the request body limit.
 pub const BATCH_ROWS_MAX: usize = 1_000;
 /// One grant: a purchase or an operator's gift; more is a typo.
-pub const GRANT_MAX: i64 = 10_000 * USD;
+pub const GRANT_MAX: i64 = 20_000 * USD;
 /// A fragment's cap: more is no cap at all, and a typo.
-pub const CAP_MAX: i64 = 10_000 * USD;
+pub const CAP_MAX: i64 = 20_000 * USD;
 /// An overdraft an operator may set: someone trusted with more debt than
 /// this is someone to invoice.
-pub const OVERDRAFT_MAX: i64 = 1_000 * USD;
+pub const OVERDRAFT_MAX: i64 = 2_000 * USD;
 /// An id (a reference, a batch, a command, who granted) or a name (a
 /// fragment, an agent, a computer): printable ASCII, at most this long.
 /// Sources prefix their references (`aig:<log id>`, `step:<fragment>@…`)
@@ -115,6 +122,7 @@ pub const STATUS_FRAGMENTS: usize = 50;
 
 const _: () = assert!(SEAT_INCLUDED <= SEAT_ALWAYS_ON_INCLUDED, "the larger seat includes more");
 const _: () = assert!(OVERDRAFT_DEFAULT <= OVERDRAFT_MAX && CAP_DEFAULT <= CAP_MAX, "the defaults are within their limits");
+const _: () = assert!(PRICES_DOUBLED <= price::DEFAULT_BOOK_VERSION, "the switch is a book this release prices with, or an older one");
 
 /// A UTC month, counted from January 1970 (month 0).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -506,6 +514,12 @@ pub trait Store {
     fn month_spent(&self, month: Month) -> i64;
     fn cap(&self, fragment: &str) -> Option<i64>;
     fn set_cap(&mut self, fragment: &str, micros: Option<i64>);
+    /// Every fragment's own cap doubled, within `max` (`Ledger::switch_prices`).
+    fn double_caps(&mut self, max: i64);
+    /// Whether the ledger took the switch to book `version`, and the record
+    /// that it did (`Ledger::switch_prices`), never forgotten.
+    fn switched(&self, version: u32) -> bool;
+    fn put_switched(&mut self, version: u32, at_ms: i64);
     /// Forgets the entries and batches from before `before_ms` and the
     /// months of spend before `before_month`; answers how many entries and
     /// batches it forgot.
@@ -520,6 +534,8 @@ pub struct Memory {
     commands: BTreeMap<String, CommandRecord>,
     spent: BTreeMap<Month, BTreeMap<String, i64>>,
     caps: BTreeMap<String, i64>,
+    #[serde(default)]
+    switched: BTreeMap<u32, i64>,
 }
 
 impl Store for Memory {
@@ -577,6 +593,20 @@ impl Store for Memory {
         };
     }
 
+    fn double_caps(&mut self, max: i64) {
+        for cap in self.caps.values_mut() {
+            *cap = cap.saturating_mul(2).min(max);
+        }
+    }
+
+    fn switched(&self, version: u32) -> bool {
+        self.switched.contains_key(&version)
+    }
+
+    fn put_switched(&mut self, version: u32, at_ms: i64) {
+        self.switched.entry(version).or_insert(at_ms);
+    }
+
     fn prune(&mut self, before_ms: i64, before_month: Month) -> u64 {
         let (entries, batches) = (self.entries.len(), self.batches.len());
         self.entries.retain(|_, e| e.at_ms() >= before_ms);
@@ -584,6 +614,13 @@ impl Store for Memory {
         self.spent.retain(|m, _| *m >= before_month);
         ((entries - self.entries.len()) + (batches - self.batches.len())) as u64
     }
+}
+
+/// Records a ledger made now as made at book `PRICES_DOUBLED`'s prices, so
+/// its first call does not double what it was made with
+/// (`Ledger::switch_prices`).
+pub fn prices_switched(store: &mut impl Store, now_ms: i64) {
+    store.put_switched(PRICES_DOUBLED, now_ms);
 }
 
 /// What a seat includes each month: nothing unless it is active (a seat
@@ -612,13 +649,18 @@ pub fn standing_of(plan: Plan, seat: SeatState, balance: i64, read_only: bool) -
 }
 
 /// Everything that ever moved the balance: the balance is always
-/// `purchased + included - expired - charged`.
+/// `purchased + included + switched - expired - charged`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Totals {
     pub purchased: i64,
     pub included: i64,
     pub expired: i64,
     pub charged: i64,
+    /// What the switch to book `PRICES_DOUBLED` gave (`Ledger::switch_prices`):
+    /// a month's included use given back, bought credit doubled, a debt
+    /// cleared. None in a head from before it.
+    #[serde(default)]
+    pub switched: i64,
 }
 
 /// The balance's parts and what decides them. Small and `Copy`: a read
@@ -713,7 +755,7 @@ impl Money {
         assert!(!self.read_only || balance <= 0, "read-only ends above zero");
         assert!(self.read_only || balance > -self.overdraft, "the overdraft makes fragments read-only");
         let t = self.totals;
-        assert_eq!(balance, t.purchased + t.included - t.expired - t.charged, "the balance is what moved it");
+        assert_eq!(balance, t.purchased + t.included + t.switched - t.expired - t.charged, "the balance is what moved it");
     }
 }
 
@@ -1107,6 +1149,50 @@ impl Ledger {
         self.charge(store, charge, row.fragment.as_deref(), Month::of(row.at_ms));
         store.put_entry(&row.reference, Entry::Row { row: row.clone(), priced, charge, book: book.version });
         Ok(Some(charge))
+    }
+
+    /// The switch to book `PRICES_DOUBLED`, every charge doubled with every
+    /// credit (Paul, 2026-11-04: "go now and we just reset everyone's usage
+    /// this month. $50 of credit for $25"; "it's fine if people get extra
+    /// usage for free this month"): once per ledger, recorded in its store
+    /// (`Store::switched`), so a replay, a restart or a later release takes
+    /// it no more. The cell runs it on every head it reads, before the call,
+    /// which then rolls the month as any does; a head it makes is made at
+    /// these prices (`prices_switched`). On the head's own month, its
+    /// amounts as an older release kept them:
+    /// - its included credit is granted afresh, the new amount for its plan
+    ///   and seat or twice what was granted this month, whichever is more (a
+    ///   seat that lapsed or shrank keeps what it had), none of it used;
+    /// - bought credit left is doubled, so it buys what it did, and a debt
+    ///   is cleared;
+    /// - its overdraft, an org's budget and its fragments' own caps are
+    ///   doubled, within their limits; a default is the new one already.
+    ///
+    /// What it gives is counted in `Totals::switched`. Answers whether it
+    /// switched now.
+    pub fn switch_prices(&mut self, store: &mut impl Store, now_ms: i64) -> bool {
+        if store.switched(PRICES_DOUBLED) {
+            return false;
+        }
+        let m = &mut self.money;
+        let granted = included(m.plan, m.seat).max(m.included_granted.saturating_mul(2)).min(SEAT_ALWAYS_ON_INCLUDED);
+        assert!(granted >= m.included_granted, "a switch takes no included credit back");
+        m.totals.included += granted - m.included_granted;
+        // this month's included use, given back
+        m.totals.switched += m.included_granted - m.included_left;
+        (m.included_granted, m.included_left) = (granted, granted);
+        // bought credit doubled, or a debt cleared
+        m.totals.switched += m.purchased_left.abs();
+        m.purchased_left = m.purchased_left.max(0).saturating_mul(2);
+        m.overdraft = m.overdraft.saturating_mul(2).min(OVERDRAFT_MAX);
+        m.latch();
+        if let Some(terms) = self.org {
+            self.org = Some(terms.doubled());
+        }
+        store.double_caps(CAP_MAX);
+        store.put_switched(PRICES_DOUBLED, now_ms);
+        self.assert_valid();
+        true
     }
 
     /// Forgets what is past `REF_KEEP_MS`. The Durable Object's alarm runs

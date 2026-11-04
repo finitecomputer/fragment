@@ -266,16 +266,19 @@ mod tests {
         let lock = lock(&[&FRAGMENT, &LEDGER]).expect("the lock");
         let edited_sql: &'static str = Box::leak(LEDGER.steps[0].sql.replace("caps (fragment TEXT PRIMARY KEY, micros INTEGER NOT NULL)", "caps (fragment TEXT PRIMARY KEY, micros INTEGER NOT NULL, note TEXT)").into_boxed_str());
         assert_ne!(edited_sql, LEDGER.steps[0].sql, "the plant took");
-        let edited_steps: &'static [Step] = Box::leak(vec![Step { name: "baseline", sql: edited_sql }].into_boxed_slice());
+        // step 1 edited, the steps after it as declared
+        let edited_steps: &'static [Step] = Box::leak(std::iter::once(Step { name: "baseline", sql: edited_sql }).chain(LEDGER.steps[1..].iter().copied()).collect::<Vec<_>>().into_boxed_slice());
         let edited = Class { steps: edited_steps, ..LEDGER };
         let found = drift(&lock, &[&FRAGMENT, &edited]);
         assert!(matches!(&found[..], [Drift::Changed(m)] if m.starts_with("Ledger step 1 (baseline) is not as the lock froze it") && m.contains("0001_baseline.sql")), "{found:?}");
 
-        let grown: &'static [Step] = Box::leak(vec![Step { name: "baseline", sql: LEDGER.steps[0].sql }, Step { name: "caps_note", sql: "ALTER TABLE caps ADD COLUMN note TEXT;\n" }].into_boxed_slice());
+        // a step after the declared ones
+        let grown: &'static [Step] = Box::leak(LEDGER.steps.iter().copied().chain([Step { name: "caps_note", sql: "ALTER TABLE caps ADD COLUMN note TEXT;\n" }]).collect::<Vec<_>>().into_boxed_slice());
         let grown = Class { steps: grown, ..LEDGER };
-        let longer = super::lock(&[&FRAGMENT, &grown]).expect("the lock of two steps");
+        let longer = super::lock(&[&FRAGMENT, &grown]).expect("the lock of a step more");
         let found = drift(&longer, &[&FRAGMENT, &LEDGER]);
-        assert!(matches!(&found[..], [Drift::Removed(m)] if m.starts_with("the lock names Ledger step 2 (caps_note)")), "{found:?}");
+        let named = format!("the lock names Ledger step {} (caps_note)", LEDGER.steps.len() + 1);
+        assert!(matches!(&found[..], [Drift::Removed(m)] if m.starts_with(&named)), "{found:?}");
 
         let found = drift(&lock, &[&FRAGMENT, &grown]);
         assert!(matches!(&found[..], [Drift::Unlocked(m)] if m.contains("cargo xtask schema-lock")), "{found:?}");

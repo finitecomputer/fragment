@@ -1428,7 +1428,7 @@ and seat, pushed to their ledger and computer.
 
 | method & path | who | body → answer |
 | --- | --- | --- |
-| `GET /api/seat` | a person | → `SeatStatus {seat: SeatView? {id, org: {id, name}, kind, comped, good, sleeps, admin}, org?, admin, pays, offered: [OfferedSeat {id, org, kind?, admin, comped, from?, email}], guest, offer?: {kind, seatMicros, includedMicros, packMicros}}`: `guest` whether they are one (`fragment_core::org::guest`); `offer`, what is sold (`fragment_core::stripe::offer`), null where nothing is (no Stripe) |
+| `GET /api/seat` | a person | → `SeatStatus {seat: SeatView? {id, org: {id, name}, kind, comped, good, sleeps, admin}, org?, admin, pays, offered: [OfferedSeat {id, org, kind?, admin, comped, from?, email}], guest, offer?: {kind, seatMicros, includedMicros, packMicros, packCreditMicros}}`: `guest` whether they are one (`fragment_core::org::guest`); `offer`, what is sold (`fragment_core::stripe::offer`), null where nothing is (no Stripe); `packMicros` a pack's price and `packCreditMicros` the credit it grants |
 | `PUT /api/seat` | a seat's holder | `{sleeps}` → `MySeat`: whether their always-on computer may sleep; no seat 400 |
 | `POST /api/seat/offers/{id}/accept` | whom the offer names (anyone else 404) | `{}` or none → `MySeat`, the offer theirs. From another org, a move: 409 for that org's last admin while others are in it, or its payer while its subscription lives; alone there, it ends. An admin's offer of an org that pays for nothing is 400. Again: the same answer |
 | `POST /api/seat/offers/{id}/decline` | the same | `{}` or none → `MySeat`; answered already 404 |

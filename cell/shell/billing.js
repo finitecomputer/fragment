@@ -244,7 +244,7 @@ export function seatOffer(helpers, mine, trial, top) {
   b.dataset.plan = offer.kind;
   const toTrial = el("button", "text", "Start a trial");
   toTrial.type = "button";
-  seat.append(ticket, b, toTrial, el("p", "fine", `Monthly, before tax. With a seat, more credit is ${price(offer.packMicros)} a pack, kept until spent.`));
+  seat.append(ticket, b, toTrial, el("p", "fine", `Monthly, before tax. With a seat, more credit is ${price(offer.packCreditMicros)} of credit for ${price(offer.packMicros)}, kept until spent.`));
   // a trial code, a step of its own
   const form = el("form", "trial-code");
   const code = el("input");
@@ -424,7 +424,7 @@ export async function billingSections(helpers, ledger, mine, back) {
   if (ledger && !mine.guest) {
     const topUp =
       offer && seat?.good
-        ? button(`Buy ${price(offer.packMicros)} of credit`, async () => location.assign((await h.api("POST", "/api/billing/packs", {})).url), (e) =>
+        ? button(`Buy ${price(offer.packCreditMicros)} of credit for ${price(offer.packMicros)}`, async () => location.assign((await h.api("POST", "/api/billing/packs", {})).url), (e) =>
             plainly(e, { no_seat: "Credit is for a seat's holder, and you don't hold one now. Open Settings again to see why." }, CHECKOUT_FAILED),
           )
         : null;

@@ -1471,8 +1471,8 @@ mod tests {
     fn a_shot_is_priced_by_the_browser_hour() {
         let book = PriceBook::defaults();
         let price = |ms| book.price(&Usage::Browser { ms }).unwrap();
-        assert_eq!(price(billed_ms(2_000, true)), Priced { list: 50, cost: 50, charge: 75 }, "2 s at $0.09 an hour: 50 µ$, 75 with the margin");
-        assert_eq!(price(3_600_000), Priced { list: 90_000, cost: 90_000, charge: 135_000 }, "an hour lists at exactly $0.09");
+        assert_eq!(price(billed_ms(2_000, true)), Priced { list: 50, cost: 50, charge: 150 }, "2 s at $0.09 an hour: 50 µ$, 150 with the margin");
+        assert_eq!(price(3_600_000), Priced { list: 90_000, cost: 90_000, charge: 270_000 }, "an hour lists at exactly $0.09");
         assert_eq!(billed_ms(2_000, false), 12_000);
         assert_eq!(price(billed_ms(2_000, false)).list, 300, "12 s");
         assert_eq!(billed_ms(u64::MAX, false), u64::MAX, "saturates");

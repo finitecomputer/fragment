@@ -132,7 +132,8 @@ pub struct SeatStatus {
 
 /// What is sold (decision 25; `fragment_core::stripe::offer`), in
 /// micro-dollars: the one seat's kind, its monthly price and the credit it
-/// includes each month, and a credit pack's price.
+/// includes each month, and a credit pack's price and the credit it grants
+/// (`packCreditMicros`, added 2026-11-04: twice its price since book 9).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Offer {
@@ -140,6 +141,8 @@ pub struct Offer {
     pub seat_micros: i64,
     pub included_micros: i64,
     pub pack_micros: i64,
+    #[serde(default)]
+    pub pack_credit_micros: i64,
 }
 
 /// `PUT /api/seat`: a `seat_always_on` holder lets their computer sleep, or not.

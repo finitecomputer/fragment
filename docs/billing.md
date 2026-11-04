@@ -8,8 +8,8 @@ Operators); credit and plans are docs/ledger.md. The rules in code:
 `cell/src/registry/` (`orgs.rs`, `offers.rs`, `seats.rs`, `billing.rs`,
 `content.rs`, `trials.rs`, `admin.rs`).
 
-**What is sold**: one seat, `seat_always_on`, and the $25 credit pack
-(decisions 25 and 55). Checkout, an admin's offers and trial codes refuse
+**What is sold**: one seat, `seat_always_on`, and the credit pack, $50 of
+credit for $25 (decisions 25, 55 and 72). Checkout, an admin's offers and trial codes refuse
 a `seat` (400, "not sold"); that plan stays for operators' comps and a
 deployment's `default_plan`. A deployment whose config has no `stripe`
 sells nothing: seats are comped only, `GET /api/seat`'s `offer` is null,
